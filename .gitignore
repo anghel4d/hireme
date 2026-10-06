@@ -1,0 +1,46 @@
+# Whitelist gitignore: everything is ignored unless named below.
+# To track something new, name it here.
+# https://rgbcu.be/blog/gitignore/
+*
+!.gitignore
+!/README.md
+!/.formatter.exs
+!/mix.exs
+!/mix.lock
+
+!/config/
+!/config/*.exs
+
+!/lib/
+!/lib/**/
+!/lib/**/*.ex
+
+!/test/
+!/test/**/
+!/test/**/*.exs
+
+!/assets/
+!/assets/css/
+!/assets/css/*.css
+!/assets/js/
+!/assets/js/*.js
+!/assets/vendor/
+!/assets/vendor/*.js
+!/assets/tsconfig.json
+
+!/priv/
+!/priv/repo/
+!/priv/repo/seeds.exs
+!/priv/repo/migrations/
+!/priv/repo/migrations/.formatter.exs
+!/priv/repo/migrations/*.exs
+!/priv/static/
+!/priv/static/favicon.ico
+!/priv/static/robots.txt
+!/priv/static/images/
+!/priv/static/images/*.svg
+
+# The last word. A secret is never committed, whitelist or not.
+/.env
+/.env.*
+!/.env.example
