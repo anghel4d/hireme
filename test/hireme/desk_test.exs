@@ -3,6 +3,8 @@ defmodule Hireme.DeskTest do
 
   alias Hireme.Corpus
   alias Hireme.Desk
+  alias Hireme.Desk.Batch
+  alias Hireme.Repo
 
   test "glance numbers follow the mask, and the root text stays put" do
     profile =
@@ -39,7 +41,7 @@ defmodule Hireme.DeskTest do
         profile_id: profile.id,
         company: "Lumen Field",
         role: "Runtime engineer",
-        stage: "screen",
+        stage: "fire_ready",
         listing: "columnar ECS and a theatre program",
         theme: %{"targets" => ["ecs", "theatre"], "density" => "tight", "accent" => "signal"},
         overlays: [
@@ -57,8 +59,8 @@ defmodule Hireme.DeskTest do
     assert job.keyword_total == 2
     assert job.mask_altered == 1
     assert job.mask_hidden == 1
-    assert job.current_stage == "screen"
-    assert job.pips == "DDDDAPPP"
+    assert job.current_stage == "fire_ready"
+    assert job.pips == "DDDDDAPPPP"
 
     focus = Desk.focus(14_413)
     assert focus.cv.label == "CV14413"
@@ -77,5 +79,36 @@ defmodule Hireme.DeskTest do
              root.cv.sections |> Enum.flat_map(& &1.lines),
              &(&1.body =~ "structure-of-arrays")
            )
+  end
+
+  test "a submit stays locked until that batch is named open fire" do
+    profile =
+      Corpus.create_profile!(%{
+        slug: "matei",
+        name: "Matei Anghel",
+        headline: "Systems",
+        summary: "Anoptic is the depth."
+      })
+
+    {:ok, batch} =
+      %Batch{}
+      |> Batch.changeset(%{code: "Batch-001", ordinal: 1, status: :fire_ready, fire: :hold})
+      |> Repo.insert()
+
+    job =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Keel Systems",
+        role: "Runtime engineer",
+        stage: "fire_ready",
+        batch_id: batch.id,
+        canonical_url: "https://jobs.example.test/keel"
+      })
+
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, "submitted")
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, "open_fire")
+    assert {:ok, _} = Desk.name_open_fire("Batch-001")
+    assert {:ok, moved} = Desk.set_stage(job.id, "submitted")
+    assert moved.current_stage == "submitted"
   end
 end

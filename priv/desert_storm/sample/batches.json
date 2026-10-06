@@ -1,0 +1,104 @@
+{
+  "batches": [
+    {
+      "code": "Batch-001",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-002",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-003",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-004",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-005",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-006",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-007",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-008",
+      "status": "fire_ready",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-009",
+      "status": "draft_prep",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    },
+    {
+      "code": "Batch-010",
+      "status": "draft_prep",
+      "fire": "hold",
+      "kind": "day_pack",
+      "target_size": 55,
+      "queued_on": "2026-10-06",
+      "squad": "red",
+      "note": "Sample batch row. Apps arrive with the day pack."
+    }
+  ]
+}

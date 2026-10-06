@@ -1,0 +1,19 @@
+{
+  "claims": [
+    {
+      "squad": "red",
+      "slice": "batch-001",
+      "note": "Day pack. Matei owns the fire decision."
+    },
+    {
+      "squad": "red",
+      "slice": "universe-gaps-batch1",
+      "note": "Freshness slice."
+    },
+    {
+      "squad": "red",
+      "slice": "leftover-pursue",
+      "note": "Pursue pack after the Medium wave."
+    }
+  ]
+}

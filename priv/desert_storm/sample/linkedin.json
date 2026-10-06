@@ -1,0 +1,32 @@
+{
+  "apps": [
+    {
+      "company": "Harbor Agents",
+      "role": "Agentic systems",
+      "location": "Remote \u00b7 EU",
+      "fit": "agentic",
+      "source": "linkedin",
+      "url": "https://jobs.example.test/linkedin/harbor-agents",
+      "freshness": "open",
+      "gate": "pursue",
+      "stage": "discovered",
+      "heat": 4,
+      "listing": "Open role. No Easy Apply without a confirm.",
+      "squad": "red"
+    },
+    {
+      "company": "Cedar Rust",
+      "role": "Rust engineer",
+      "location": "Remote \u00b7 Canada",
+      "fit": "rust",
+      "source": "linkedin",
+      "url": "https://jobs.example.test/linkedin/cedar-rust",
+      "freshness": "open",
+      "gate": "maybe",
+      "stage": "discovered",
+      "heat": 3,
+      "listing": "Open role. No Easy Apply without a confirm.",
+      "squad": "red"
+    }
+  ]
+}

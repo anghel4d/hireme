@@ -1,8 +1,10 @@
 defmodule HiremeWeb.BoardLive do
   use HiremeWeb, :live_view
 
+  alias Hireme.Campaign
   alias Hireme.Corpus
   alias Hireme.Desk
+  alias Hireme.Narrative
   alias Hireme.GridNav
   alias Hireme.Pipeline
 
@@ -13,9 +15,12 @@ defmodule HiremeWeb.BoardLive do
     {:ok,
      socket
      |> assign(:page_title, "Desk")
-     |> assign(:filters, %{q: "", stage: "all", profile: "all", status: "open"})
+     |> assign(:filters, %{q: "", stage: "all", profile: "all", status: "open", batch: "all"})
      |> assign(:cards, [])
      |> assign(:profiles, [])
+     |> assign(:batches, [])
+     |> assign(:scoreboard, Campaign.scoreboard())
+     |> assign(:hold_error, nil)
      |> assign(:app_id, nil)
      |> assign(:index, nil)
      |> assign(:focus, nil)
@@ -25,7 +30,6 @@ defmodule HiremeWeb.BoardLive do
      |> assign(:compact, false)
      |> assign(:editing_id, nil)
      |> assign(:alter_error, nil)
-     |> assign(:showcase_id, nil)
      |> assign(:loaded, false)
      |> assign(:grid, %{cols: 3, scroll: 0, viewport: 640, rem: 16.0})}
   end
@@ -44,11 +48,17 @@ defmodule HiremeWeb.BoardLive do
       <.topbar
         filters={@filters}
         profiles={@profiles}
+        batches={@batches}
         count={length(@cards)}
-        showcase_id={@showcase_id}
       />
+      <.scoreboard board={@scoreboard} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
-        <.battleplan focus={@focus} editing_id={@editing_id} alter_error={@alter_error} />
+        <.battleplan
+          focus={@focus}
+          editing_id={@editing_id}
+          alter_error={@alter_error}
+          hold_error={@hold_error}
+        />
       </div>
       <div :if={@lens == :root && @root} class="root-wrap">
         <.root_view root={@root} />
@@ -60,7 +70,13 @@ defmodule HiremeWeb.BoardLive do
           </div>
           <p :if={@cards == []} class="empty">Nothing matches this filter.</p>
         </div>
-        <.focus_panel :if={@focus} focus={@focus} in_filter={@in_filter} sheet={@sheet} />
+        <.focus_panel
+          :if={@focus}
+          focus={@focus}
+          in_filter={@in_filter}
+          sheet={@sheet}
+          hold_error={@hold_error}
+        />
         <div :if={!@focus} id="focus" class="focus">
           <p class="empty">The desk is empty.</p>
         </div>
@@ -127,7 +143,8 @@ defmodule HiremeWeb.BoardLive do
            q: params["q"] || "",
            stage: params["stage"] || "all",
            profile: params["profile"] || "all",
-           status: params["status"] || "open"
+           status: params["status"] || "open",
+           batch: params["batch"] || "all"
          })
      )}
   end
@@ -158,8 +175,25 @@ defmodule HiremeWeb.BoardLive do
 
   def handle_event("set_stage", %{"key" => key}, socket) do
     case Desk.set_stage(socket.assigns.app_id, key) do
-      {:ok, _} -> {:noreply, refresh_open(socket)}
-      _ -> {:noreply, socket}
+      {:ok, _} ->
+        {:noreply, socket |> assign(:hold_error, nil) |> refresh_open()}
+
+      {:error, :fire_hold} ->
+        {:noreply,
+         assign(socket, :hold_error, "FIRE HOLD. Name open fire on this batch before a submit.")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("name_open_fire", %{"batch" => code}, socket) do
+    case Desk.name_open_fire(code) do
+      {:ok, _} ->
+        {:noreply, socket |> assign(:hold_error, nil) |> refresh_open()}
+
+      _ ->
+        {:noreply, socket}
     end
   end
 
@@ -233,6 +267,17 @@ defmodule HiremeWeb.BoardLive do
     {:noreply, refresh_open(socket)}
   end
 
+  def handle_event("save_narrative", %{"body" => body}, socket) do
+    case narrative_of(socket) do
+      nil ->
+        {:noreply, socket}
+
+      row ->
+        Narrative.update!(row, body)
+        {:noreply, refresh_open(socket)}
+    end
+  end
+
   def handle_event("save_note", %{"key" => key, "note" => note}, socket) do
     {:ok, _} = Desk.set_note(socket.assigns.app_id, key, note)
     {:noreply, assign(socket, :focus, Desk.focus(socket.assigns.app_id))}
@@ -260,18 +305,12 @@ defmodule HiremeWeb.BoardLive do
   defp reload(socket, filters) do
     cards = Desk.list_cards(filters)
 
-    showcase =
-      cond do
-        socket.assigns.showcase_id -> socket.assigns.showcase_id
-        Desk.exists?(14_413) -> 14_413
-        true -> nil
-      end
-
     socket
     |> assign(:filters, filters)
     |> assign(:cards, cards)
     |> assign(:profiles, Corpus.list_profiles())
-    |> assign(:showcase_id, showcase)
+    |> assign(:batches, Desk.list_batches())
+    |> assign(:scoreboard, Campaign.scoreboard())
     |> assign(:loaded, true)
   end
 
@@ -315,6 +354,8 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:cards, cards)
     |> assign(:index, index_of(cards, app_id))
     |> assign(:focus, Desk.focus(app_id))
+    |> assign(:batches, Desk.list_batches())
+    |> assign(:scoreboard, Campaign.scoreboard())
     |> maybe_reload_root()
   end
 
@@ -437,7 +478,10 @@ defmodule HiremeWeb.BoardLive do
 
   defp desk_path(socket, overrides) do
     filters =
-      Map.merge(socket.assigns.filters, Map.take(overrides, [:q, :stage, :profile, :status]))
+      Map.merge(
+        socket.assigns.filters,
+        Map.take(overrides, [:q, :stage, :profile, :status, :batch])
+      )
 
     lens = Map.get(overrides, :lens, socket.assigns.lens)
     app = Map.get(overrides, :app, socket.assigns.app_id)
@@ -448,6 +492,7 @@ defmodule HiremeWeb.BoardLive do
       |> put_query("stage", filters.stage, "all")
       |> put_query("profile", filters.profile, "all")
       |> put_query("status", filters.status, "open")
+      |> put_query("batch", filters.batch, "all")
       |> put_query("lens", lens_param(lens), nil)
       |> put_query("app", app, nil)
 
@@ -475,6 +520,11 @@ defmodule HiremeWeb.BoardLive do
         if(params["status"] in ~w(open paused hired closed all),
           do: params["status"],
           else: "open"
+        ),
+      batch:
+        if(is_binary(params["batch"]) and params["batch"] != "",
+          do: params["batch"],
+          else: "all"
         )
     }
   end
@@ -547,6 +597,14 @@ defmodule HiremeWeb.BoardLive do
 
   defp clear_editor_if_moved(socket, _previous, _current) do
     assign(socket, editing_id: nil, alter_error: nil)
+  end
+
+  defp narrative_of(socket) do
+    cond do
+      match?(%{narrative: %{}}, socket.assigns[:focus]) -> socket.assigns.focus.narrative
+      match?(%{narrative: %{}}, socket.assigns[:root]) -> socket.assigns.root.narrative
+      true -> nil
+    end
   end
 
   defp blank(nil), do: nil

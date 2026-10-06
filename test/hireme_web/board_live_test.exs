@@ -4,7 +4,10 @@ defmodule HiremeWeb.BoardLiveTest do
   import Phoenix.LiveViewTest
 
   alias Hireme.Corpus
+  alias Hireme.Corpus.Narrative, as: NarrativeRow
   alias Hireme.Desk
+  alias Hireme.Narrative
+  alias Hireme.Repo
   alias Hireme.Seed
 
   test "cards take focus, and the battleplan shows the masked CV", %{conn: conn} do
@@ -42,7 +45,7 @@ defmodule HiremeWeb.BoardLiveTest do
         company: "Alpha",
         role: "Runtime",
         heat: 5,
-        stage: "recon"
+        stage: "discovered"
       })
 
     glass =
@@ -51,7 +54,7 @@ defmodule HiremeWeb.BoardLiveTest do
         company: "Glass Orchard",
         role: "Scientist",
         heat: 4,
-        stage: "recon"
+        stage: "discovered"
       })
 
     {:ok, view, _html} = live(conn, "/")
@@ -71,6 +74,46 @@ defmodule HiremeWeb.BoardLiveTest do
     assert has_element?(view, "#card-#{glass.id}")
   end
 
+  test "the narrative is on the battleplan and stays out of the CV", %{conn: conn} do
+    user = Narrative.create_user!(%{name: "Matei Anghel", email: "matei@example.test"})
+
+    row =
+      Narrative.write!(user, "Frontier labs by the end of 2030. Hard filter on mid-curve shops.")
+
+    profile =
+      Corpus.create_profile!(%{
+        slug: "matei-live",
+        name: "Matei Anghel",
+        headline: "Systems",
+        summary: "Anoptic is the depth.",
+        user_id: user.id
+      })
+
+    Desk.create_job!(%{
+      profile_id: profile.id,
+      company: "Keel Systems",
+      role: "Runtime engineer",
+      stage: "fire_ready",
+      heat: 5
+    })
+
+    {:ok, view, _html} = live(conn, "/")
+    assert has_element?(view, "#narrative", "Frontier labs by the end of 2030")
+
+    render_keydown(view, "key", %{"key" => "Enter"})
+    refute view |> element("#cv") |> render() =~ "mid-curve shops"
+    assert view |> element("#narrative") |> render() =~ "mid-curve shops"
+
+    view
+    |> form("#narrative-form", %{body: "Edited vector for the labs."})
+    |> render_submit()
+
+    assert view |> element("#narrative") |> render() =~ "Edited vector for the labs."
+    saved = Repo.get!(NarrativeRow, row.id)
+    assert saved.version == 2
+    assert saved.body == "Edited vector for the labs."
+  end
+
   test "l moves to the next card on the row", %{conn: conn} do
     profile = profile()
 
@@ -80,7 +123,7 @@ defmodule HiremeWeb.BoardLiveTest do
         company: "Alpha",
         role: "Runtime",
         heat: 5,
-        stage: "recon"
+        stage: "discovered"
       })
 
     bravo =
@@ -89,7 +132,7 @@ defmodule HiremeWeb.BoardLiveTest do
         company: "Bravo",
         role: "Tools",
         heat: 2,
-        stage: "recon"
+        stage: "discovered"
       })
 
     {:ok, view, _html} = live(conn, "/")
@@ -160,7 +203,7 @@ defmodule HiremeWeb.BoardLiveTest do
         profile_id: profile.id,
         company: "Lumen Field",
         role: "Runtime engineer",
-        stage: "screen",
+        stage: "fire_ready",
         heat: 5,
         theme: %{"targets" => ["ecs", "theatre"]},
         overlays: [

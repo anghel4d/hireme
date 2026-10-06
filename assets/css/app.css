@@ -205,8 +205,46 @@ kbd {
 .next { -webkit-line-clamp: 2; margin-top: auto; color: var(--muted); }
 
 .pips { display: flex; gap: 3px; align-items: center; }
+.scoreboard {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  overflow-x: auto;
+  padding: 0.35rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--browse);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pill {
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 0.05rem 0.45rem;
+  letter-spacing: 0.04em;
+}
+.pill.is-hold { color: var(--due); border-color: color-mix(in oklab, var(--due) 45%, var(--line)); }
+.pill.is-open { color: var(--ok); border-color: color-mix(in oklab, var(--ok) 45%, var(--line)); }
+.hold-error { color: var(--due); }
+.narrative {
+  margin: 0.4rem 0 0.8rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.narrative textarea {
+  width: 100%;
+  min-height: 8rem;
+  margin: 0.35rem 0;
+  resize: vertical;
+}
+.variety { color: var(--faint); }
+
 .pip {
-  width: 0.72rem;
+  width: 0.55rem;
   height: 0.28rem;
   border-radius: 1px;
   background: var(--line);

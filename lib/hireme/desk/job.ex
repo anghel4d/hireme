@@ -23,8 +23,19 @@ defmodule Hireme.Desk.Job do
     field :mask_hidden, :integer, default: 0
     field :mask_altered, :integer, default: 0
     field :mask_emphasized, :integer, default: 0
+    field :canonical_url, :string, default: ""
+
+    field :freshness, Ecto.Enum,
+      values: [:unknown, :open, :thin, :closed, :blocked],
+      default: :unknown
+
+    field :gate, Ecto.Enum, values: [:unset, :pursue, :maybe, :skip], default: :unset
+    field :fit, :string, default: ""
+    field :squad, :string, default: ""
 
     belongs_to :profile, Hireme.Corpus.Profile
+    belongs_to :employer, Hireme.Desk.Employer
+    belongs_to :batch, Hireme.Desk.Batch
 
     timestamps(type: :utc_datetime)
   end
@@ -52,11 +63,21 @@ defmodule Hireme.Desk.Job do
       :keyword_total,
       :mask_hidden,
       :mask_altered,
-      :mask_emphasized
+      :mask_emphasized,
+      :canonical_url,
+      :freshness,
+      :gate,
+      :fit,
+      :squad,
+      :employer_id,
+      :batch_id
     ])
     |> validate_required([:profile_id, :company, :role, :heat, :status, :current_stage, :pips])
     |> validate_number(:heat, greater_than_or_equal_to: 1, less_than_or_equal_to: 5)
     |> validate_inclusion(:current_stage, Hireme.Pipeline.keys())
     |> foreign_key_constraint(:profile_id)
+    |> foreign_key_constraint(:batch_id)
+    |> foreign_key_constraint(:employer_id)
+    |> unique_constraint(:canonical_url)
   end
 end

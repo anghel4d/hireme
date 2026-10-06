@@ -8,8 +8,8 @@ defmodule HiremeWeb.DeskComponents do
 
   attr :filters, :map, required: true
   attr :profiles, :list, required: true
+  attr :batches, :list, required: true
   attr :count, :integer, required: true
-  attr :showcase_id, :integer, default: nil
 
   def topbar(assigns) do
     ~H"""
@@ -22,8 +22,8 @@ defmodule HiremeWeb.DeskComponents do
           battleplan · <kbd>esc</kbd>
           back · <kbd>/</kbd>
           search
-          <.link :if={@showcase_id} patch={~p"/?app=#{@showcase_id}"} class="showcase">
-            JobApp{@showcase_id}
+          <.link :if={batch?(@batches, "Batch-001")} patch={~p"/?batch=Batch-001"} class="showcase">
+            Batch-001
           </.link>
         </p>
       </div>
@@ -58,6 +58,13 @@ defmodule HiremeWeb.DeskComponents do
             {profile.name}
           </option>
         </select>
+        <select name="batch" aria-label="Batch">
+          <option value="all" selected={@filters.batch == "all"}>All batches</option>
+          <option value="leftover" selected={@filters.batch == "leftover"}>Leftover</option>
+          <option :for={batch <- @batches} value={batch.code} selected={@filters.batch == batch.code}>
+            {batch.code}
+          </option>
+        </select>
         <select name="status" aria-label="Status">
           <option
             :for={status <- ~w(open paused hired closed all)}
@@ -71,6 +78,27 @@ defmodule HiremeWeb.DeskComponents do
       </form>
       <button type="button" id="root-cv" class="ghost" phx-click="root">Root CV</button>
     </header>
+    """
+  end
+
+  attr :board, :map, required: true
+
+  def scoreboard(assigns) do
+    ~H"""
+    <div id="scoreboard" class="scoreboard">
+      <span class={["pill", @board.fire == :hold && "is-hold", @board.fire == :open_fire && "is-open"]}>
+        {if @board.fire == :hold, do: "FIRE HOLD", else: "OPEN FIRE"}
+      </span>
+      <span>leftover {@board.leftover_unique}{snapshot_date(@board.leftover_noted_on)}</span>
+      <span>batches {@board.batches_today}/{@board.batches_target}</span>
+      <span>queued {@board.apps_today}/{@board.apps_target}</span>
+      <span>submitted today {@board.submitted_today}</span>
+      <span>cumulative {@board.cumulative}</span>
+      <span>pace {@board.submitted_today}/{@board.apps_target}</span>
+      <span :for={row <- @board.varieties} class="variety">
+        {row.code} {row.label}
+      </span>
+    </div>
     """
   end
 
@@ -90,8 +118,8 @@ defmodule HiremeWeb.DeskComponents do
       title={"#{@card.company} — #{@card.role}"}
     >
       <div class="card-kicker">
-        <span class="code">{@card.code}</span>
-        <span class="stage-name">{@card.stage_label}</span>
+        <span class="code">{card_code(@card)}</span>
+        <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
       <p class="role">{@card.role}</p>
@@ -118,6 +146,7 @@ defmodule HiremeWeb.DeskComponents do
   attr :focus, :map, required: true
   attr :in_filter, :boolean, required: true
   attr :sheet, :boolean, required: true
+  attr :hold_error, :string, default: nil
 
   def focus_panel(assigns) do
     ~H"""
@@ -131,8 +160,10 @@ defmodule HiremeWeb.DeskComponents do
         <h2>{@focus.job.company}</h2>
         <p class="sub">{@focus.job.role}</p>
         <p class="sub">{@focus.job.location}</p>
+        <p class="sub">{fire_line(@focus.job)}</p>
       </header>
       <p :if={!@in_filter} class="banner">This application is outside the current filter.</p>
+      <p :if={@hold_error} id="hold-error" class="banner hold-error">{@hold_error}</p>
       <div>
         <div class="meta">
           <span class="pips">
@@ -192,6 +223,7 @@ defmodule HiremeWeb.DeskComponents do
       <ul :if={@focus.kv != []} class="kv">
         <li :for={pair <- @focus.kv}><strong>{pair.key}</strong> {pair.value}</li>
       </ul>
+      <.narrative narrative={@focus.narrative} />
     </aside>
     """
   end
@@ -199,6 +231,7 @@ defmodule HiremeWeb.DeskComponents do
   attr :focus, :map, required: true
   attr :editing_id, :any, default: nil
   attr :alter_error, :any, default: nil
+  attr :hold_error, :string, default: nil
 
   def battleplan(assigns) do
     assigns = assign(assigns, :active, active_stage(assigns.focus.stages))
@@ -213,6 +246,7 @@ defmodule HiremeWeb.DeskComponents do
           </p>
           <h2>{@focus.job.company}</h2>
           <p class="sub">{@focus.job.role}</p>
+          <p class="sub">{fire_line(@focus.job)}</p>
         </div>
         <p class="count">
           {@focus.coverage.hit}/{@focus.coverage.total} keywords · root {@focus.root_coverage.hit}/{@focus.root_coverage.total}
@@ -220,6 +254,18 @@ defmodule HiremeWeb.DeskComponents do
       </div>
       <div class="bp-body">
         <div class="campaign">
+          <.narrative narrative={@focus.narrative} />
+          <p :if={@hold_error} id="hold-error" class="banner hold-error">{@hold_error}</p>
+          <button
+            :if={@focus.job.batch && @focus.job.batch.fire == :hold}
+            type="button"
+            id="name-open-fire"
+            class="ghost"
+            phx-click="name_open_fire"
+            phx-value-batch={@focus.job.batch.code}
+          >
+            Name open fire
+          </button>
           <button
             :for={stage <- @focus.stages}
             type="button"
@@ -266,9 +312,26 @@ defmodule HiremeWeb.DeskComponents do
         </div>
       </div>
       <div class="paper-scroll">
+        <.narrative narrative={@root.narrative} />
         <.paper cv={@root.cv} editable={false} editing_id={nil} alter_error={nil} />
       </div>
     </div>
+    """
+  end
+
+  attr :narrative, :any, default: nil
+
+  def narrative(assigns) do
+    ~H"""
+    <section :if={@narrative} id="narrative" class="narrative">
+      <form id="narrative-form" phx-submit="save_narrative">
+        <label class="section-label" for="narrative-body">
+          Narrative · private · v{@narrative.version}
+        </label>
+        <textarea id="narrative-body" name="body" rows="8">{@narrative.body}</textarea>
+        <button type="submit" class="ghost">Save narrative</button>
+      </form>
+    </section>
     """
   end
 
@@ -405,6 +468,26 @@ defmodule HiremeWeb.DeskComponents do
       </form>
     </div>
     """
+  end
+
+  defp batch?(batches, code), do: Enum.any?(batches, &(&1.code == code))
+
+  defp snapshot_date(nil), do: ""
+  defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"
+
+  defp card_code(%{batch_code: code}) when is_binary(code) and code != "", do: code
+  defp card_code(card), do: card.code
+
+  defp hold_mark(%{batch_fire: :hold}), do: " · HOLD"
+  defp hold_mark(_), do: ""
+
+  defp fire_line(%{batch: %{code: code, fire: :hold}}), do: "#{code} · FIRE HOLD"
+  defp fire_line(%{batch: %{code: code, fire: :open_fire}}), do: "#{code} · OPEN FIRE"
+
+  defp fire_line(job) do
+    gate = job.gate || :unset
+    freshness = job.freshness || :unknown
+    "#{gate} · #{freshness}"
   end
 
   defp next_line(%{next_action: action, next_due: due}) do

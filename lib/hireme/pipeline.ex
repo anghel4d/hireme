@@ -1,37 +1,44 @@
 defmodule Hireme.Pipeline do
   @moduledoc """
-  The battleplan. Eight stages, one of them active.
+  DESERT STORM battleplan. One stage is active.
 
-  Earlier stages are done, later stages are pending. `:skipped` and
-  `:blocked` stay where a person put them, unless that stage is the one
-  being activated.
+  Freshness (open/thin/closed/blocked) and the gate (pursue/maybe/skip)
+  are fields on the application, not extra rungs. The stage `freshness`
+  means a verdict has been recorded. The stage `gated` means the gate
+  was chosen. That split is a non-binding hunch: the suggested tokens
+  `freshness_open` and `gated/pursue` stay queryable without a
+  fifteen-rung rail.
+
+  `open_fire` and `submitted` are refused while the batch is on FIRE HOLD.
+  Naming open fire is a human act. This desk does not submit.
   """
 
   @stages [
-    %{key: "recon", label: "Recon", hint: "Listing captured"},
-    %{key: "fit", label: "Fit", hint: "Profile and gaps"},
-    %{key: "tailor", label: "Tailor", hint: "CV variant and masks"},
-    %{key: "submit", label: "Submit", hint: "Application sent"},
-    %{key: "screen", label: "Screen", hint: "Recruiter or ATS"},
-    %{key: "loop", label: "Loop", hint: "Interviews"},
-    %{key: "offer", label: "Offer", hint: "Negotiation"},
-    %{key: "close", label: "Close", hint: "Decision"}
+    %{key: "discovered", label: "Discovered", hint: "Listing captured"},
+    %{key: "freshness", label: "Freshness", hint: "Open, thin, closed, or blocked"},
+    %{key: "gated", label: "Gated", hint: "Pursue, maybe, or skip"},
+    %{key: "in_batch", label: "In batch", hint: "Named batch"},
+    %{key: "draft_ready", label: "Draft ready", hint: "Tailored CV drafted"},
+    %{key: "fire_ready", label: "Fire ready", hint: "Packed. Submit stays locked."},
+    %{key: "open_fire", label: "Open fire", hint: "Batch named. Submit is allowed."},
+    %{key: "submitted", label: "Submitted", hint: "Sent by hand. This desk does not submit."},
+    %{key: "reply", label: "Reply", hint: "Reply or interview"},
+    %{key: "closed", label: "Closed", hint: "Done"}
   ]
 
   @rank Map.new(Enum.with_index(@stages), fn {stage, index} -> {stage.key, index} end)
 
+  @fire_locked ~w(open_fire submitted)
+
   def stages, do: @stages
   def keys, do: Enum.map(@stages, & &1.key)
+  def fire_locked?(key), do: key in @fire_locked
 
   def label(key), do: stage_field(key, :label)
   def hint(key), do: stage_field(key, :hint)
   def rank(key), do: Map.get(@rank, key, 99)
-
   def key?(key), do: is_map_key(@rank, key)
 
-  @doc """
-  A fresh campaign with `active` as the current stage.
-  """
   def initial(active) when is_binary(active) do
     idx = rank(active)
 
@@ -47,9 +54,6 @@ defmodule Hireme.Pipeline do
     end)
   end
 
-  @doc """
-  Move the active stage to `key`. Returns the stages with updated `:state`.
-  """
   def move_to(stages, key) when is_binary(key) do
     idx = rank(key)
 

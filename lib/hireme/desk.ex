@@ -11,6 +11,7 @@ defmodule Hireme.Desk do
   import Ecto.Query
   alias Hireme.Corpus
   alias Hireme.Cv
+  alias Hireme.Desk.Batch
   alias Hireme.Desk.Event
   alias Hireme.Desk.Job
   alias Hireme.Desk.Overlay
@@ -18,6 +19,7 @@ defmodule Hireme.Desk do
   alias Hireme.Desk.Variant
   alias Hireme.Keywords
   alias Hireme.Kv
+  alias Hireme.Narrative
   alias Hireme.Mask
   alias Hireme.Pipeline
   alias Hireme.Repo
@@ -31,7 +33,7 @@ defmodule Hireme.Desk do
     |> card_query()
     |> Repo.all()
     |> Enum.map(&to_card/1)
-    |> Enum.sort_by(&{Pipeline.rank(&1.stage), -&1.heat, -&1.id})
+    |> Enum.sort_by(&{&1.batch_ordinal || 999, Pipeline.rank(&1.stage), -&1.heat, &1.company})
   end
 
   def focus(nil), do: nil
@@ -42,7 +44,7 @@ defmodule Hireme.Desk do
         nil
 
       job ->
-        job = Repo.preload(job, :profile)
+        job = Repo.preload(job, [:profile, :batch])
         variant = Repo.get_by!(Variant, job_app_id: job.id)
         items = Corpus.list_items(job.profile_id)
         overlays = overlays(job.id)
@@ -58,7 +60,8 @@ defmodule Hireme.Desk do
     %{
       profile: profile,
       cv: Cv.compose(profile, Mask.apply(items, []), variant, person: person_name()),
-      kv: Kv.list("global")
+      kv: Kv.list("global"),
+      narrative: Narrative.for_profile(profile)
     }
   end
 
@@ -84,7 +87,7 @@ defmodule Hireme.Desk do
 
   def create_job(attrs) do
     Repo.transaction(fn ->
-      stage = Map.get(attrs, :stage, "recon")
+      stage = Map.get(attrs, :stage, "discovered")
       true = Pipeline.key?(stage)
       rows = Pipeline.initial(stage)
 
@@ -104,7 +107,14 @@ defmodule Hireme.Desk do
           source: Map.get(attrs, :source, ""),
           stage_on: Map.get(attrs, :stage_on, Date.utc_today()),
           current_stage: stage,
-          pips: Pipeline.encode(rows)
+          pips: Pipeline.encode(rows),
+          canonical_url: Map.get(attrs, :canonical_url, ""),
+          freshness: Map.get(attrs, :freshness, :unknown),
+          gate: Map.get(attrs, :gate, :unset),
+          fit: Map.get(attrs, :fit, ""),
+          squad: Map.get(attrs, :squad, ""),
+          employer_id: Map.get(attrs, :employer_id),
+          batch_id: Map.get(attrs, :batch_id)
         })
         |> maybe_force_id(attrs)
         |> Repo.insert!()
@@ -148,49 +158,89 @@ defmodule Hireme.Desk do
   end
 
   def set_stage(job_id, key) do
-    if Pipeline.key?(key) do
-      Repo.transaction(fn ->
-        current_rows = stages(job_id)
-        previous = Pipeline.current(current_rows)
-        moved = Pipeline.move_to(current_rows, key)
+    cond do
+      not Pipeline.key?(key) ->
+        {:error, :stage}
 
-        Enum.zip(current_rows, moved)
-        |> Enum.each(fn {old, new} ->
-          if old.state != new.state do
-            old
-            |> Ecto.Changeset.change(%{state: new.state})
-            |> Repo.update!()
-          end
-        end)
+      Pipeline.fire_locked?(key) and not batch_open?(job_id) ->
+        {:error, :fire_hold}
 
-        active = Pipeline.current(moved)
+      true ->
+        write_stage(job_id, key)
+    end
+  end
 
-        changes = %{
-          current_stage: active.key,
-          pips: Pipeline.encode(moved)
-        }
+  def name_open_fire(code) when is_binary(code) do
+    case Repo.get_by(Batch, code: code) do
+      nil ->
+        {:error, :batch}
 
-        changes =
-          if previous && previous.key == active.key do
-            changes
-          else
-            Map.put(changes, :stage_on, Date.utc_today())
-          end
+      batch ->
+        batch
+        |> Batch.changeset(%{fire: :open_fire, status: :open_fire})
+        |> Repo.update()
+    end
+  end
 
-        job =
-          Job
-          |> Repo.get!(job_id)
-          |> Ecto.Changeset.change(changes)
+  def list_batches do
+    Repo.all(from b in Batch, order_by: b.ordinal)
+  end
+
+  def batch_exists?(code), do: Repo.exists?(from b in Batch, where: b.code == ^code)
+
+  defp write_stage(job_id, key) do
+    Repo.transaction(fn ->
+      current_rows = stages(job_id)
+      previous = Pipeline.current(current_rows)
+      moved = Pipeline.move_to(current_rows, key)
+
+      Enum.zip(current_rows, moved)
+      |> Enum.each(fn {old, new} ->
+        if old.state != new.state do
+          old
+          |> Ecto.Changeset.change(%{state: new.state})
           |> Repo.update!()
+        end
+      end)
 
-        if previous && previous.key != active.key do
-          record!(job.id, "stage", "Stage → #{Pipeline.label(active.key)}")
+      active = Pipeline.current(moved)
+
+      changes = %{
+        current_stage: active.key,
+        pips: Pipeline.encode(moved)
+      }
+
+      changes =
+        if previous && previous.key == active.key do
+          changes
+        else
+          Map.put(changes, :stage_on, Date.utc_today())
         end
 
-        job
-      end)
-    else
-      {:error, :stage}
+      job =
+        Job
+        |> Repo.get!(job_id)
+        |> Ecto.Changeset.change(changes)
+        |> Repo.update!()
+
+      if previous && previous.key != active.key do
+        record!(job.id, "stage", "Stage → #{Pipeline.label(active.key)}")
+      end
+
+      job
+    end)
+  end
+
+  defp batch_open?(job_id) do
+    case Repo.get(Job, job_id) do
+      %{batch_id: id} when is_integer(id) ->
+        case Repo.get(Batch, id) do
+          %{fire: :open_fire} -> true
+          _ -> false
+        end
+
+      _ ->
+        false
     end
   end
 
@@ -246,7 +296,13 @@ defmodule Hireme.Desk do
       mask_emphasized: row.mask_emphasized,
       next_action: row.next_action,
       next_due: row.next_due,
-      age: age(row.stage_on)
+      age: age(row.stage_on),
+      batch_code: row.batch_code,
+      batch_fire: row.batch_fire,
+      batch_ordinal: row.batch_ordinal,
+      freshness: row.freshness,
+      gate: row.gate,
+      fit: row.fit
     }
   end
 
@@ -262,6 +318,7 @@ defmodule Hireme.Desk do
       stages: stages,
       events: events,
       cv: Cv.compose(job.profile, resolved, variant, person: person_name()),
+      narrative: Narrative.for_profile(job.profile),
       coverage: Keywords.coverage(targets, resolved),
       root_coverage: Keywords.coverage(targets, canonical),
       kv: Kv.list("app:#{job.id}"),
@@ -273,11 +330,13 @@ defmodule Hireme.Desk do
     Job
     |> join(:inner, [j], p in Corpus.Profile, on: p.id == j.profile_id)
     |> join(:inner, [j], v in Variant, on: v.job_app_id == j.id)
+    |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
     |> apply_status(filters.status)
     |> apply_stage(filters.stage)
     |> apply_profile(filters.profile)
+    |> apply_batch(filters.batch)
     |> apply_q(filters.q)
-    |> select([j, p, v], %{
+    |> select([j, p, v, b], %{
       id: j.id,
       company: j.company,
       role: j.role,
@@ -296,8 +355,21 @@ defmodule Hireme.Desk do
       mask_emphasized: j.mask_emphasized,
       profile_name: p.name,
       profile_slug: p.slug,
-      cv_label: v.label
+      cv_label: v.label,
+      batch_code: b.code,
+      batch_fire: b.fire,
+      batch_ordinal: b.ordinal,
+      freshness: j.freshness,
+      gate: j.gate,
+      fit: j.fit
     })
+  end
+
+  defp apply_batch(query, batch) when batch in [nil, "", "all"], do: query
+  defp apply_batch(query, "leftover"), do: where(query, [j], is_nil(j.batch_id))
+
+  defp apply_batch(query, code) when is_binary(code) do
+    where(query, [_j, _p, _v, b], b.code == ^code)
   end
 
   defp apply_status(query, "all"), do: query
