@@ -1,6 +1,6 @@
 # hireme
 
-An agentic tool with a theoretical 7476% effectiveness at getting a qualified candidate hired.
+An agentic tool with a theoretical 6767% effectiveness at getting a qualified candidate hired.
 
 The desk tracks DESERT STORM (Matei Anghel / Red cabal) the way [Broadside Observer](https://github.com/anghel4d/broadside-observer) tracks a paper: a card at a glance, a focus pane, and a fullscreen battleplan.
 
