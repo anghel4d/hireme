@@ -49,10 +49,10 @@ defmodule Hireme.LetterboxTest do
   test "the desk refuses a write while an agent holds the lease" do
     %{job: job, letterbox_id: letterbox_id} = open_job("Held Co")
     assert {:ok, handle} = Letterbox.lease(letterbox_id, self())
-    assert {:error, :leased} = Desk.set_stage(job.id, "freshness")
+    assert {:error, :leased} = Desk.set_stage(job.id, :freshness)
     assert Letterbox.release(handle) == :ok
-    assert {:ok, moved} = Desk.set_stage(job.id, "freshness")
-    assert moved.current_stage == "freshness"
+    assert {:ok, moved} = Desk.set_stage(job.id, :freshness)
+    assert moved.current_stage == :freshness
   end
 
   defp open_job(company) do

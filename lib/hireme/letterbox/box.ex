@@ -5,6 +5,7 @@ defmodule Hireme.Letterbox.Box do
 
   alias Hireme.CvPair
   alias Hireme.Desk
+  alias Hireme.Desk.Signal
   alias Hireme.Letterbox.Handle
   alias Hireme.Letterbox.Id
   alias Hireme.Letterbox.LineageGate
@@ -63,36 +64,45 @@ defmodule Hireme.Letterbox.Box do
   end
 
   def handle_call({:release, token}, {caller, _tag}, %{token: token, producer: caller} = state) do
-    {:stop, :normal, :ok, state}
+    let_go(state)
+    {:stop, :normal, :ok, %{state | token: nil, producer: nil}}
   end
 
   def handle_call({:release, _token}, _from, state) do
     {:reply, {:error, :lease}, state}
   end
 
-  def handle_call(:leased?, _from, state) do
-    {:reply, not is_nil(state.token), state}
-  end
-
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{monitor: monitor} = state) do
     {:stop, :normal, state}
   end
 
-  def handle_info({:desk_event, event}, %{producer: producer, pair: pair} = state)
+  def handle_info({:desk_event, %Signal{} = signal}, %{producer: producer, pair: pair} = state)
       when is_pid(producer) do
-    if relevant?(event, pair), do: send(producer, {:desk_event, event})
+    if Signal.about?(signal, CvPair.job_id(pair)), do: send(producer, {:desk_event, signal})
     {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  def terminate(_reason, %{pair: pair, id: id}) do
-    if pair do
-      try do
-        LineageGate.release(CvPair.lineage_id(pair), id)
-      catch
-        :exit, _ -> :ok
-      end
+  def terminate(_reason, state) do
+    let_go(state)
+    :ok
+  end
+
+  # The lease is gone the moment the producer hears `:ok`, so the
+  # registry keys are dropped here, before the process exits, instead of
+  # waiting on the registry to see the DOWN.
+  defp let_go(%{pair: nil}), do: :ok
+
+  defp let_go(%{pair: pair, id: id, producer: producer}) do
+    if is_pid(producer), do: Registry.unregister(Hireme.Letterbox.Registry, {:producer, producer})
+    Registry.unregister(Hireme.Letterbox.Registry, {:job, CvPair.job_id(pair)})
+    Registry.unregister(Hireme.Letterbox.Registry, {:leased, id})
+
+    try do
+      LineageGate.release(CvPair.lineage_id(pair), id)
+    catch
+      :exit, _ -> :ok
     end
 
     :ok
@@ -104,9 +114,6 @@ defmodule Hireme.Letterbox.Box do
       record -> CvPair.bind(record.job_app_id)
     end
   end
-
-  defp relevant?(%{"job_id" => job_id}, pair), do: job_id == CvPair.job_id(pair)
-  defp relevant?(_event, _pair), do: false
 
   defp take_lease(producer, letterbox_id) do
     case register_producer(producer, letterbox_id) do
@@ -131,7 +138,7 @@ defmodule Hireme.Letterbox.Box do
          :ok <- register_leased(letterbox_id) do
       token = make_ref()
       monitor = Process.monitor(producer)
-      Phoenix.PubSub.subscribe(Hireme.PubSub, "desk")
+      Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic())
 
       handle = %Handle{
         id: Id.new(letterbox_id),

@@ -11,11 +11,17 @@ defmodule Hireme.Seed do
   alias Hireme.Desk
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Job
+  alias Hireme.Desk.Overlay
   alias Hireme.Desk.Variant
   alias Hireme.Import
   alias Hireme.Kv
   alias Hireme.Narrative
   alias Hireme.Repo
+  alias Hireme.Theme
+
+  @type outcome :: :empty | :already_seeded | :ok
+
+  @spec run() :: outcome()
 
   def run do
     dir = seed_dir()
@@ -39,6 +45,7 @@ defmodule Hireme.Seed do
     end
   end
 
+  @spec flood(non_neg_integer()) :: non_neg_integer()
   def flood(0), do: 0
 
   def flood(n) when is_integer(n) and n > 0 do
@@ -54,7 +61,7 @@ defmodule Hireme.Seed do
         company: "Flood #{rem(i, 40)}",
         role: "Engineer",
         location: "Remote",
-        stage: "discovered",
+        stage: :discovered,
         heat: rem(i, 5) + 1,
         fit: "systems",
         gate: :pursue,
@@ -109,7 +116,7 @@ defmodule Hireme.Seed do
     |> Variant.changeset(%{
       profile_id: profile.id,
       label: "Root",
-      theme: doc["theme"] || %{"accent" => "ink", "density" => "cv"},
+      theme: doc["theme"] |> Theme.parse() |> Theme.to_map(),
       note: ""
     })
     |> Repo.insert!()
@@ -173,17 +180,25 @@ defmodule Hireme.Seed do
     job = Repo.one!(from j in Job, where: j.batch_id == ^batch.id, order_by: j.id, limit: 1)
     item = Corpus.get_item_by_key!(doc["item_key"])
 
-    Desk.put_overlay(job.id, item.id, %{
-      mode: String.to_existing_atom(doc["mode"]),
-      body: doc["body"],
-      reason: doc["reason"]
-    })
+    case Overlay.parse_mode(doc["mode"]) do
+      {:ok, mode} ->
+        {:ok, _} =
+          Desk.put_overlay(job.id, item.id, %{
+            mode: mode,
+            body: doc["body"],
+            reason: doc["reason"]
+          })
+
+      :error ->
+        raise ArgumentError, "seed/overlay.json: unknown mode #{inspect(doc["mode"])}"
+    end
 
     if is_map(doc["theme"]) do
       variant = Repo.get_by!(Variant, job_app_id: job.id)
+      merged = Map.merge(variant.theme || %{}, doc["theme"]) |> Theme.parse() |> Theme.to_map()
 
       variant
-      |> Variant.changeset(%{theme: Map.merge(variant.theme || %{}, doc["theme"])})
+      |> Variant.changeset(%{theme: merged})
       |> Repo.update!()
     end
 

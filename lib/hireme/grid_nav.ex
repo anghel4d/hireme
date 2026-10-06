@@ -15,11 +15,10 @@ defmodule Hireme.GridNav do
   @gap_rem 0.5
   @inset_rem 0.5
 
-  def width_rem, do: @width_rem
-  def height_rem, do: @height_rem
-  def gap_rem, do: @gap_rem
-  def inset_rem, do: @inset_rem
+  @type dir :: :h | :j | :k | :l
+  @type metrics :: %{width: float(), height: float(), gap: float(), inset: float()}
 
+  @spec metrics(number()) :: metrics()
   def metrics(rem) when is_number(rem) and rem > 0 do
     %{
       width: @width_rem * rem,
@@ -29,19 +28,17 @@ defmodule Hireme.GridNav do
     }
   end
 
-  def dir_from_key(key) do
-    case key do
-      key when key in ["h", "ArrowLeft"] -> "h"
-      key when key in ["j", "ArrowDown"] -> "j"
-      key when key in ["k", "ArrowUp"] -> "k"
-      key when key in ["l", "ArrowRight"] -> "l"
-      _ -> nil
-    end
-  end
+  @spec dir_from_key(term()) :: dir() | nil
+  def dir_from_key(key) when key in ["h", "ArrowLeft"], do: :h
+  def dir_from_key(key) when key in ["j", "ArrowDown"], do: :j
+  def dir_from_key(key) when key in ["k", "ArrowUp"], do: :k
+  def dir_from_key(key) when key in ["l", "ArrowRight"], do: :l
+  def dir_from_key(_), do: nil
 
+  @spec move(integer(), number(), integer(), dir()) :: non_neg_integer()
   def move(_index, _cols, count, _dir) when count <= 0, do: 0
 
-  def move(index, cols, count, dir) do
+  def move(index, cols, count, dir) when dir in [:h, :j, :k, :l] do
     columns = max(trunc(cols), 1)
     i = clamp(index, 0, count - 1)
     row = div(i, columns)
@@ -49,11 +46,10 @@ defmodule Hireme.GridNav do
 
     {next_row, next_col} =
       case dir do
-        "h" -> {row, col - 1}
-        "l" -> {row, col + 1}
-        "k" -> {row - 1, col}
-        "j" -> {row + 1, col}
-        _ -> {row, col}
+        :h -> {row, col - 1}
+        :l -> {row, col + 1}
+        :k -> {row - 1, col}
+        :j -> {row + 1, col}
       end
 
     cond do

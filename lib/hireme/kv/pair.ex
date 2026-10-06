@@ -2,6 +2,8 @@ defmodule Hireme.Kv.Pair do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "kv_pairs" do
     field :namespace, :string
     field :key, :string

@@ -2,6 +2,8 @@ defmodule Hireme.Desk.Variant do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "cv_variants" do
     field :label, :string
     field :theme, :map, default: %{}
