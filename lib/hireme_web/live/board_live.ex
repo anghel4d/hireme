@@ -241,14 +241,17 @@ defmodule HiremeWeb.BoardLive do
         {:noreply, assign(socket, :alter_error, "A variant line needs text.")}
 
       trimmed ->
-        {:ok, _} =
-          Desk.put_overlay(socket.assigns.app_id, parse_id(item_id), %{
-            mode: :altered,
-            body: trimmed,
-            reason: blank(params["reason"])
-          })
+        case Desk.put_overlay(socket.assigns.app_id, parse_id(item_id), %{
+               mode: :altered,
+               body: trimmed,
+               reason: blank(params["reason"])
+             }) do
+          {:ok, _} ->
+            {:noreply, socket |> assign(editing_id: nil, alter_error: nil) |> refresh_open()}
 
-        {:noreply, socket |> assign(editing_id: nil, alter_error: nil) |> refresh_open()}
+          _ ->
+            {:noreply, assign(socket, :alter_error, "This CV is leased to an agent.")}
+        end
     end
   end
 
@@ -263,8 +266,10 @@ defmodule HiremeWeb.BoardLive do
         _ -> nil
       end
 
-    {:ok, _} = Desk.set_next(socket.assigns.app_id, String.trim(params["next_action"] || ""), due)
-    {:noreply, refresh_open(socket)}
+    case Desk.set_next(socket.assigns.app_id, String.trim(params["next_action"] || ""), due) do
+      {:ok, _} -> {:noreply, refresh_open(socket)}
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event("save_narrative", %{"body" => body}, socket) do
@@ -279,8 +284,10 @@ defmodule HiremeWeb.BoardLive do
   end
 
   def handle_event("save_note", %{"key" => key, "note" => note}, socket) do
-    {:ok, _} = Desk.set_note(socket.assigns.app_id, key, note)
-    {:noreply, assign(socket, :focus, Desk.focus(socket.assigns.app_id))}
+    case Desk.set_note(socket.assigns.app_id, key, note) do
+      {:ok, _} -> {:noreply, assign(socket, :focus, Desk.focus(socket.assigns.app_id))}
+      _ -> {:noreply, socket}
+    end
   end
 
   defp apply_params(socket, params) do

@@ -60,6 +60,22 @@ Freshness (`open`, `thin`, `closed`, `blocked`) and the gate (`pursue`, `maybe`,
 
 The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch.
 
+## CV pairs
+
+One application has one CV variant. One employer has one CV lineage. `Hireme.CvPair.bind/1` loads that pair with a join that requires the lineage to belong to the application's employer. `JobId`, `VariantId`, `EmployerId`, and `LineageId` are different structs. Writes take the pair and load it again; the two structs must be equal.
+
+For 90 days after a generation opens, the lineage can be rewritten. After that, edits wait. `open_cv_generation` starts the next quarter and accepts new lines only. A database trigger aborts a variant or a line that points at another employer's lineage.
+
+## Agent socket
+
+Letterboxes are single-producer, single-consumer. Each application has one letterbox. An agent leases that id and the lease opens a full-duplex websocket. The connection process is the only producer. The letterbox process is the only consumer. The handle closes over that application's CV pair. Commands do not carry an application id.
+
+`/mcp/websocket` lists letterboxes and batches. It cannot write.
+
+`/mcp/letterbox/<id>/websocket` is the lease. A second connection to that id is refused. A second connection to another application on the same employer CV is refused while the lease is held. One connection cannot hold two leases.
+
+Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists the tools. `tools/call` runs one. The server pushes `{"method": "notifications/desk", "params": {...}}` for this application only. A job id or variant id from a different application is rejected. Naming open fire stays on the desk. The socket does not submit an application.
+
 ## Layout
 
 | Path | Role |
@@ -70,5 +86,9 @@ The scoreboard reads leftover URL counts from the latest snapshot, then counts b
 | `lib/hireme/variety.ex` | Mix flags for a batch |
 | `lib/hireme/narrative.ex` | Private narrative |
 | `lib/hireme/mask.ex` | Per-application CV overlay |
+| `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
+| `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
+| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
 | `lib/hireme_web/live/board_live.ex` | The desk |
+| `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |

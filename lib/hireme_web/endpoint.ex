@@ -15,6 +15,10 @@ defmodule HiremeWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  socket "/mcp", HiremeWeb.McpDirectorySocket, websocket: true, longpoll: false
+
+  socket "/mcp/letterbox/:letterbox_id", HiremeWeb.McpSocket, websocket: true, longpoll: false
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),

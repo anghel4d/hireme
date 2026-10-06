@@ -11,6 +11,9 @@ defmodule Hireme.Desk do
   import Ecto.Query
   alias Hireme.Corpus
   alias Hireme.Cv
+  alias Hireme.Cv.Lineage
+  alias Hireme.CvPair
+  alias Hireme.Letterbox
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Event
   alias Hireme.Desk.Job
@@ -46,6 +49,7 @@ defmodule Hireme.Desk do
       job ->
         job = Repo.preload(job, [:profile, :batch])
         variant = Repo.get_by!(Variant, job_app_id: job.id)
+        variant = %{variant | theme: lineage_theme(variant)}
         items = Corpus.list_items(job.profile_id)
         overlays = overlays(job.id)
         build_focus(job, variant, items, overlays, stages(job.id), recent_events(job.id))
@@ -90,6 +94,16 @@ defmodule Hireme.Desk do
       stage = Map.get(attrs, :stage, "discovered")
       true = Pipeline.key?(stage)
       rows = Pipeline.initial(stage)
+      employer = CvPair.ensure_employer(Map.get(attrs, :employer_id), attrs.company)
+      {lineage_state, lineage} = CvPair.ensure_lineage(employer.id)
+      theme = Map.get(attrs, :theme, %{})
+
+      lineage =
+        if lineage_state == :new and theme != %{} do
+          lineage |> Lineage.changeset(%{theme: theme}) |> Repo.update!()
+        else
+          lineage
+        end
 
       job =
         %Job{}
@@ -113,7 +127,7 @@ defmodule Hireme.Desk do
           gate: Map.get(attrs, :gate, :unset),
           fit: Map.get(attrs, :fit, ""),
           squad: Map.get(attrs, :squad, ""),
-          employer_id: Map.get(attrs, :employer_id),
+          employer_id: employer.id,
           batch_id: Map.get(attrs, :batch_id)
         })
         |> maybe_force_id(attrs)
@@ -123,8 +137,9 @@ defmodule Hireme.Desk do
       |> Variant.changeset(%{
         job_app_id: job.id,
         profile_id: attrs.profile_id,
+        lineage_id: lineage.id,
         label: Map.get(attrs, :label, "CV#{job.id}"),
-        theme: Map.get(attrs, :theme, %{}),
+        theme: theme,
         note: Map.get(attrs, :note, "")
       })
       |> Repo.insert!()
@@ -136,19 +151,25 @@ defmodule Hireme.Desk do
       end)
 
       Enum.each(Map.get(attrs, :overlays, []), fn overlay ->
-        %Overlay{}
-        |> Overlay.changeset(Map.put(overlay, :job_app_id, job.id))
-        |> Repo.insert!()
+        case CvPair.tailor(CvPair.bind!(job.id), overlay.item_id, Map.drop(overlay, [:item_id])) do
+          {:ok, _} -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
       end)
 
+      Letterbox.open!(job.id)
       record!(job.id, "open", "Opened at #{Pipeline.label(stage)}")
-      refresh_glance!(job.id)
+      refresh_lineage!(lineage.id)
+      job = Repo.get!(Job, job.id)
+      publish("application_opened", %{"job_id" => job.id, "lineage_id" => lineage.id})
+      job
     end)
   end
 
   def refresh_glance!(job_id) do
     job = Repo.get!(Job, job_id)
     variant = Repo.get_by!(Variant, job_app_id: job.id)
+    variant = %{variant | theme: lineage_theme(variant)}
     items = Corpus.list_items(job.profile_id)
     stats = glance(items, overlays(job_id), variant, job.listing)
 
@@ -158,15 +179,17 @@ defmodule Hireme.Desk do
   end
 
   def set_stage(job_id, key) do
-    cond do
-      not Pipeline.key?(key) ->
-        {:error, :stage}
+    with :ok <- Letterbox.permit_job(job_id) do
+      cond do
+        not Pipeline.key?(key) ->
+          {:error, :stage}
 
-      Pipeline.fire_locked?(key) and not batch_open?(job_id) ->
-        {:error, :fire_hold}
+        Pipeline.fire_locked?(key) and not batch_open?(job_id) ->
+          {:error, :fire_hold}
 
-      true ->
-        write_stage(job_id, key)
+        true ->
+          write_stage(job_id, key)
+      end
     end
   end
 
@@ -176,9 +199,14 @@ defmodule Hireme.Desk do
         {:error, :batch}
 
       batch ->
-        batch
-        |> Batch.changeset(%{fire: :open_fire, status: :open_fire})
-        |> Repo.update()
+        case batch |> Batch.changeset(%{fire: :open_fire, status: :open_fire}) |> Repo.update() do
+          {:ok, updated} ->
+            publish("open_fire", %{"batch" => updated.code})
+            {:ok, updated}
+
+          other ->
+            other
+        end
     end
   end
 
@@ -227,6 +255,7 @@ defmodule Hireme.Desk do
         record!(job.id, "stage", "Stage → #{Pipeline.label(active.key)}")
       end
 
+      publish("stage", %{"job_id" => job.id, "stage" => active.key})
       job
     end)
   end
@@ -245,32 +274,46 @@ defmodule Hireme.Desk do
   end
 
   def set_next(job_id, action, due) do
-    Job
-    |> Repo.get!(job_id)
-    |> Job.changeset(%{next_action: action, next_due: due})
-    |> Repo.update()
+    with :ok <- Letterbox.permit_job(job_id) do
+      Job
+      |> Repo.get!(job_id)
+      |> Job.changeset(%{next_action: action, next_due: due})
+      |> Repo.update()
+    end
   end
 
   def set_note(job_id, key, note) do
-    Stage
-    |> Repo.get_by!(job_app_id: job_id, key: key)
-    |> Stage.changeset(%{note: note})
-    |> Repo.update()
+    with :ok <- Letterbox.permit_job(job_id) do
+      Stage
+      |> Repo.get_by!(job_app_id: job_id, key: key)
+      |> Stage.changeset(%{note: note})
+      |> Repo.update()
+    end
+  end
+
+  def perform(%CvPair{} = pair, command) do
+    with :ok <- Letterbox.permit_job(CvPair.job_id(pair)) do
+      perform_held(pair, command)
+    end
   end
 
   def put_overlay(job_id, item_id, :inherit) do
-    Repo.delete_all(from o in Overlay, where: o.job_app_id == ^job_id and o.item_id == ^item_id)
-    {:ok, refresh_glance!(job_id)}
+    with :ok <- Letterbox.permit_job(job_id),
+         {:ok, pair} <- CvPair.bind(job_id),
+         {:ok, _} <- CvPair.drop_line(pair, item_id) do
+      refresh_lineage!(CvPair.lineage_id(pair))
+      publish("cv", %{"job_id" => job_id, "lineage_id" => CvPair.lineage_id(pair)})
+      {:ok, Repo.get!(Job, job_id)}
+    end
   end
 
   def put_overlay(job_id, item_id, attrs) when is_map(attrs) do
-    overlay =
-      Repo.get_by(Overlay, job_app_id: job_id, item_id: item_id) ||
-        %Overlay{job_app_id: job_id, item_id: item_id}
-
-    case overlay |> Overlay.changeset(attrs) |> Repo.insert_or_update() do
-      {:ok, _} -> {:ok, refresh_glance!(job_id)}
-      other -> other
+    with :ok <- Letterbox.permit_job(job_id),
+         {:ok, pair} <- CvPair.bind(job_id),
+         {:ok, _} <- CvPair.tailor(pair, item_id, attrs) do
+      refresh_lineage!(CvPair.lineage_id(pair))
+      publish("cv", %{"job_id" => job_id, "lineage_id" => CvPair.lineage_id(pair)})
+      {:ok, Repo.get!(Job, job_id)}
     end
   end
 
@@ -414,8 +457,71 @@ defmodule Hireme.Desk do
     Repo.all(from s in Stage, where: s.job_app_id == ^job_id, order_by: s.position)
   end
 
+  defp perform_held(pair, :get) do
+    case focus(CvPair.job_id(pair)) do
+      nil -> {:error, :not_found}
+      focus -> {:ok, focus}
+    end
+  end
+
+  defp perform_held(pair, {:set_stage, stage}) when is_binary(stage) do
+    set_stage(CvPair.job_id(pair), stage)
+  end
+
+  defp perform_held(pair, {:set_next, action}) when is_binary(action) do
+    set_next(CvPair.job_id(pair), action, nil)
+  end
+
+  defp perform_held(pair, {:tailor, item_id, attrs}) when is_integer(item_id) and is_map(attrs) do
+    with {:ok, _} <- CvPair.tailor(pair, item_id, attrs) do
+      refresh_lineage!(CvPair.lineage_id(pair))
+
+      publish("cv", %{
+        "job_id" => CvPair.job_id(pair),
+        "lineage_id" => CvPair.lineage_id(pair)
+      })
+
+      {:ok, %{"job_id" => CvPair.job_id(pair), "variant_id" => CvPair.variant_id(pair)}}
+    end
+  end
+
+  defp perform_held(pair, :open_generation) do
+    CvPair.open_generation(CvPair.employer_id(pair))
+  end
+
+  defp perform_held(%CvPair{}, _command), do: {:error, :command}
+
   defp overlays(job_id) do
-    Repo.all(from o in Overlay, where: o.job_app_id == ^job_id)
+    case CvPair.bind(job_id) do
+      {:ok, pair} ->
+        Repo.all(from o in Overlay, where: o.lineage_id == ^CvPair.lineage_id(pair))
+
+      _ ->
+        Repo.all(from o in Overlay, where: o.job_app_id == ^job_id)
+    end
+  end
+
+  defp lineage_theme(%{lineage_id: nil, theme: theme}), do: theme || %{}
+
+  defp lineage_theme(%{lineage_id: id, theme: theme}) do
+    case Repo.get(Lineage, id) do
+      %{theme: lineage_theme} when lineage_theme not in [nil, %{}] -> lineage_theme
+      _ -> theme || %{}
+    end
+  end
+
+  defp refresh_lineage!(lineage_id) do
+    from(v in Variant, where: v.lineage_id == ^lineage_id, select: v.job_app_id)
+    |> Repo.all()
+    |> Enum.each(&refresh_glance!/1)
+  end
+
+  defp publish(type, fields) do
+    Phoenix.PubSub.broadcast(
+      Hireme.PubSub,
+      "desk",
+      {:desk_event, Map.put(fields, "type", type)}
+    )
   end
 
   defp recent_events(job_id) do
