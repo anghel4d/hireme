@@ -69,7 +69,7 @@ defmodule Hireme.Seed do
   end
 
   def seed_dir do
-    Path.expand("../seed", :code.priv_dir(:hireme))
+    Path.expand("seed", File.cwd!())
   end
 
   defp load_profile!(path, dir) do
