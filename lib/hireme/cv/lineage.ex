@@ -6,6 +6,8 @@ defmodule Hireme.Cv.Lineage do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "cv_lineages" do
     field :generation, :integer, default: 1
     field :opened_on, :date

@@ -2,6 +2,8 @@ defmodule Hireme.Desk.Employer do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "employers" do
     field :name, :string
 

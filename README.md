@@ -60,6 +60,12 @@ Freshness (`open`, `thin`, `closed`, `blocked`) and the gate (`pursue`, `maybe`,
 
 The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch.
 
+## Types
+
+Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Job.parse_status/1`, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
+
+Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Variety`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Opening`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
+
 ## CV pairs
 
 One application has one CV variant. One employer has one CV lineage. `Hireme.CvPair.bind/1` loads that pair with a join that requires the lineage to belong to the application's employer. `JobId`, `VariantId`, `EmployerId`, and `LineageId` are different structs. Writes take the pair and load it again; the two structs must be equal.
@@ -80,12 +86,15 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 
 | Path | Role |
 | --- | --- |
-| `lib/hireme/pipeline.ex` | Battleplan and the hold lock |
+| `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
+| `lib/hireme/theme.ex` | One CV's lead, accent, density, targets |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note |
 | `lib/hireme/campaign.ex` | Scoreboard |
 | `lib/hireme/variety.ex` | Mix flags for a batch |
 | `lib/hireme/narrative.ex` | Private narrative |
-| `lib/hireme/mask.ex` | Per-application CV overlay |
+| `lib/hireme/mask.ex` | Per-application CV overlay, `Mask.Line` |
+| `lib/hireme/desk/opening.ex` | Parsed input for opening one application |
+| `lib/hireme/desk/signal.ex` | Typed desk change broadcast on the `desk` topic |
 | `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
 | `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
 | `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle |

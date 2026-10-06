@@ -2,10 +2,10 @@ defmodule Hireme.Desk.Overlay do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @modes [:hidden, :altered, :emphasized]
+  alias Hireme.Mask
 
   schema "overlays" do
-    field :mode, Ecto.Enum, values: @modes
+    field :mode, Ecto.Enum, values: Mask.modes()
     field :title, :string
     field :body, :string
     field :reason, :string
@@ -18,7 +18,21 @@ defmodule Hireme.Desk.Overlay do
     timestamps(type: :utc_datetime)
   end
 
-  def modes, do: @modes
+  @doc """
+  One overlay mode from the wire. `inherit` is the absence of an overlay
+  and is parsed by the caller that drops a line.
+  """
+  @spec parse_mode(term()) :: {:ok, :hidden | :altered | :emphasized} | :error
+  def parse_mode(mode) when mode in [:hidden, :altered, :emphasized], do: {:ok, mode}
+
+  def parse_mode(name) when is_binary(name) do
+    case Enum.find(Mask.modes(), &(Atom.to_string(&1) == name)) do
+      nil -> :error
+      mode -> {:ok, mode}
+    end
+  end
+
+  def parse_mode(_), do: :error
 
   def changeset(overlay, attrs) do
     overlay

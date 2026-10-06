@@ -77,8 +77,9 @@ defmodule HiremeWeb.McpSocket do
     {:reply, :ok, {:text, Jason.encode!(response)}, state}
   end
 
-  def handle_info({:desk_event, event}, state) do
-    {:push, {:text, Jason.encode!(%{method: "notifications/desk", params: event})}, state}
+  def handle_info({:desk_event, %Hireme.Desk.Signal{} = signal}, state) do
+    frame = %{method: "notifications/desk", params: Hireme.Desk.Signal.to_json(signal)}
+    {:push, {:text, Jason.encode!(frame)}, state}
   end
 
   def handle_info(_message, state), do: {:ok, state}

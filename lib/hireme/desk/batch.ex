@@ -2,6 +2,8 @@ defmodule Hireme.Desk.Batch do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "batches" do
     field :code, :string
     field :ordinal, :integer

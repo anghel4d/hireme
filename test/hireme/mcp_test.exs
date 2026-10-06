@@ -3,6 +3,7 @@ defmodule Hireme.McpTest do
 
   alias Hireme.Corpus
   alias Hireme.Desk
+  alias Hireme.Desk.Signal
   alias Hireme.Letterbox
   alias Hireme.Mcp
   alias HiremeWeb.McpDirectorySocket
@@ -38,6 +39,33 @@ defmodule Hireme.McpTest do
       })
 
     assert ok.result["job_id"] == job.id
+
+    moved =
+      Mcp.handle(handle, %{
+        "id" => 4,
+        "method" => "tools/call",
+        "params" => %{"name" => "set_stage", "arguments" => %{"stage" => "gated"}}
+      })
+
+    assert moved.result == %{"job_id" => job.id, "stage" => "gated"}
+
+    bad =
+      Mcp.handle(handle, %{
+        "id" => 5,
+        "method" => "tools/call",
+        "params" => %{"name" => "set_stage", "arguments" => %{"stage" => "sent"}}
+      })
+
+    assert bad.error.message == "bad argument stage"
+
+    not_int =
+      Mcp.handle(handle, %{
+        "id" => 6,
+        "method" => "tools/call",
+        "params" => %{"name" => "tailor_line", "arguments" => %{"item_id" => "x"}}
+      })
+
+    assert not_int.error.message == "bad argument item_id"
     assert Letterbox.release(handle) == :ok
   end
 
@@ -80,20 +108,20 @@ defmodule Hireme.McpTest do
 
     Phoenix.PubSub.broadcast(
       Hireme.PubSub,
-      "desk",
-      {:desk_event, %{"type" => "stage", "job_id" => job.id}}
+      Desk.topic(),
+      {:desk_event, Signal.stage(job.id, :gated)}
     )
 
-    assert_receive {:desk_event, event}
-    {:push, {:text, note}, state} = McpSocket.handle_info({:desk_event, event}, state)
+    assert_receive {:desk_event, %Signal{} = signal}
+    {:push, {:text, note}, state} = McpSocket.handle_info({:desk_event, signal}, state)
     decoded = Jason.decode!(note)
     assert decoded["method"] == "notifications/desk"
-    assert decoded["params"]["job_id"] == job.id
+    assert decoded["params"] == %{"type" => "stage", "job_id" => job.id, "stage" => "gated"}
 
     Phoenix.PubSub.broadcast(
       Hireme.PubSub,
-      "desk",
-      {:desk_event, %{"type" => "stage", "job_id" => -1}}
+      Desk.topic(),
+      {:desk_event, Signal.stage(-1, :gated)}
     )
 
     refute_receive {:desk_event, _}, 50

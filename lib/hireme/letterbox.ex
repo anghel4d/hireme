@@ -92,12 +92,8 @@ defmodule Hireme.Letterbox do
   alias Hireme.Letterbox.Token
   alias Hireme.Repo
 
-  @type command ::
-          :get
-          | :open_generation
-          | {:set_stage, binary()}
-          | {:set_next, binary()}
-          | {:tailor, pos_integer(), map()}
+  @type command :: Hireme.Desk.command()
+  @type reply :: Hireme.Desk.reply()
 
   @spec open!(pos_integer()) :: Record.t()
   def open!(job_id) when is_integer(job_id) do
@@ -138,23 +134,23 @@ defmodule Hireme.Letterbox do
     :exit, _ -> :ok
   end
 
-  @spec command(Handle.t(), :get) :: term()
+  @doc """
+  Run one command on the application this handle closes over. The
+  reply is `Hireme.Desk.perform/2`'s, or `{:error, :lease}` when the
+  caller is not the producer or the token is not this lease's.
+  """
+  @spec command(Handle.t(), command()) :: reply() | {:error, :lease}
   def command(%Handle{} = handle, :get), do: call(handle, :get)
-
-  @spec command(Handle.t(), :open_generation) :: term()
   def command(%Handle{} = handle, :open_generation), do: call(handle, :open_generation)
 
-  @spec command(Handle.t(), {:set_stage, binary()}) :: term()
-  def command(%Handle{} = handle, {:set_stage, stage}) when is_binary(stage) do
+  def command(%Handle{} = handle, {:set_stage, stage}) when is_atom(stage) do
     call(handle, {:set_stage, stage})
   end
 
-  @spec command(Handle.t(), {:set_next, binary()}) :: term()
   def command(%Handle{} = handle, {:set_next, action}) when is_binary(action) do
     call(handle, {:set_next, action})
   end
 
-  @spec command(Handle.t(), {:tailor, pos_integer(), map()}) :: term()
   def command(%Handle{} = handle, {:tailor, item_id, attrs})
       when is_integer(item_id) and is_map(attrs) do
     call(handle, {:tailor, item_id, attrs})
@@ -177,7 +173,17 @@ defmodule Hireme.Letterbox do
     end
   end
 
-  @spec list() :: [map()]
+  @type entry :: %{
+          id: pos_integer(),
+          job_id: pos_integer(),
+          company: String.t(),
+          role: String.t(),
+          stage: Hireme.Pipeline.stage(),
+          batch: String.t() | nil,
+          leased: boolean()
+        }
+
+  @spec list() :: [entry()]
   def list do
     Record
     |> join(:inner, [r], j in Job, on: j.id == r.job_app_id)
