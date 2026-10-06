@@ -14,10 +14,12 @@
 !/lib/
 !/lib/**/
 !/lib/**/*.ex
+!/lib/**/*.heex
 
 !/test/
 !/test/**/
 !/test/**/*.exs
+!/test/**/*.ex
 
 !/assets/
 !/assets/css/
