@@ -50,7 +50,7 @@ Session tokens, key secrets, and recovery codes are stored only as hashes. TOTP 
 
 ## Policy numbers
 
-Lifetimes and caps are in `Hireme.Security`. Each rate limit is written at the one call that applies it, through `Hireme.Security.limit/3`.
+All in `Hireme.Security`, lifetimes, caps, and every rate limit by name with its window and cap; a call site names the policy it applies, never a number.
 
 | Policy | Value |
 | --- | --- |
@@ -72,6 +72,7 @@ Lifetimes and caps are in `Hireme.Security`. Each rate limit is written at the o
 - An account is only as safe as the mailbox and the GitHub or X accounts that sign in to it. A mailed link proves control of a mailbox and nothing more; enrol a second factor.
 - A sign-in link opened by someone other than the person who asked signs that browser into the asker's account. The page names the address before the button spends it, but a person who does not read it can be signed in to someone else's desk (login CSRF). Adding a way in is never affected.
 - Notices go by mail to the addresses on the account. An account whose only ways in are GitHub or X has no address to mail, so its notices are on the audit trail only. Mail is sent on the request path, so a slow relay slows the request that asked.
+- The trail records a sign-in link request by a hash of the address and its domain, not the address, since the asker may be a stranger; the mail itself is the only place the address goes.
 - The rate limiter is per node, in memory. A multi-node deployment needs a shared backend before the limits hold across nodes.
 - GitHub and X are trusted for the user id their own API returns over TLS; their account security is outside this desk. Development also offers a one-click sign-in to the local desk, compiled only into the development environment.
 

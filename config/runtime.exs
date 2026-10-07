@@ -72,13 +72,29 @@ if config_env() == :prod do
 
   config :swoosh, local: false
 
+  smtp_port = String.to_integer(System.get_env("SMTP_PORT") || "587")
+
+  # The relay's certificate is verified against the system roots, with
+  # its hostname; gen_smtp's defaults verify nothing.
+  smtp_tls = [
+    verify: :verify_peer,
+    cacerts: :public_key.cacerts_get(),
+    server_name_indication: to_charlist(smtp_host),
+    customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)],
+    versions: [:"tlsv1.3", :"tlsv1.2"]
+  ]
+
+  # 465 is implicit TLS from the first byte; anything else is STARTTLS, required.
   config :hireme, Hireme.Mailer,
     adapter: Swoosh.Adapters.SMTP,
     relay: smtp_host,
-    port: String.to_integer(System.get_env("SMTP_PORT") || "587"),
+    port: smtp_port,
     username: System.get_env("SMTP_USERNAME"),
     password: System.get_env("SMTP_PASSWORD"),
-    tls: :always,
+    ssl: smtp_port == 465,
+    sockopts: smtp_tls,
+    tls: if(smtp_port == 465, do: :never, else: :always),
+    tls_options: smtp_tls,
     auth: :always
 
   config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")

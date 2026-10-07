@@ -175,8 +175,8 @@ defmodule Hireme.Accounts do
           :ok | {:error, :invalid | :rate_limited | :mail}
   def request_link(email, url_for, meta \\ %{}) when is_function(url_for, 1) do
     with {:ok, email} <- normalize_email(email),
-         :ok <- Security.limit("link:#{email}", :timer.minutes(10), 5),
-         :ok <- Security.limit("link:ip:#{Map.get(meta, :ip, "")}", :timer.minutes(10), 20) do
+         :ok <- Security.limit(:link_address, email),
+         :ok <- Security.limit(:link_peer, Map.get(meta, :ip, "")) do
       token = Security.token(32)
       now = now()
 
@@ -190,7 +190,7 @@ defmodule Hireme.Accounts do
       })
       |> Repo.insert!()
 
-      Audit.record(:link_requested, %{email: email}, meta)
+      Audit.record(:link_requested, trace(email), meta)
 
       case Mailer.sign_in_link(email, url_for.(Base.url_encode64(token, padding: false))) do
         :ok -> :ok
@@ -220,15 +220,26 @@ defmodule Hireme.Accounts do
   def redeem_link(token, meta \\ %{}) do
     now = now()
 
-    with :ok <- Security.limit("redeem:ip:#{Map.get(meta, :ip, "")}", :timer.minutes(10), 20),
+    with :ok <- Security.limit(:redeem_peer, Map.get(meta, :ip, "")),
          %MagicLink{} = link <- live_link(token, now),
          {1, _} <- burn(link, now) do
-      Audit.record(:link_redeemed, %{email: link.email}, meta)
+      Audit.record(:link_redeemed, trace(link.email), meta)
       {:ok, link.email}
     else
       {:error, :rate_limited} -> {:error, :rate_limited}
       _ -> {:error, :invalid}
     end
+  end
+
+  # An address on the trail before anyone owns it is a stranger's: keep a
+  # handle to correlate by and the domain to read, not the address.
+  defp trace(email) do
+    [_, domain] = String.split(email, "@", parts: 2)
+
+    %{
+      email_hash: email |> Security.hash() |> Base.encode16(case: :lower) |> binary_part(0, 16),
+      domain: domain
+    }
   end
 
   defp live_link(token, now) when is_binary(token) do
@@ -323,24 +334,28 @@ defmodule Hireme.Accounts do
   """
   @spec unlink(pos_integer(), meta()) :: :ok | {:error, :last | :not_found}
   def unlink(id, meta \\ %{}) when is_integer(id) do
-    case {Repo.get(Identity, id), identities()} do
-      {nil, _} ->
-        {:error, :not_found}
+    account_id = Repo.account_id!()
 
-      {_, [_]} ->
-        {:error, :last}
+    with %Identity{} = identity <- Repo.get(Identity, id) || {:error, :not_found},
+         {1, _} <- delete_unless_last(identity, account_id) do
+      about = %{provider: identity.provider, display: identity.display}
+      Audit.record(:identity_unlinked, about, meta)
+      notify(account_id, :identity_unlinked, about)
+      # The removed address hears it too; the remaining ones already did.
+      if identity.provider == :email,
+        do: Mailer.notice(identity.subject, :identity_unlinked, about)
 
-      {%Identity{} = identity, _} ->
-        Repo.delete!(identity)
-        about = %{provider: identity.provider, display: identity.display}
-        Audit.record(:identity_unlinked, about, meta)
-        notify(identity.account_id, :identity_unlinked, about)
-        # The removed address hears it too; the remaining ones already did.
-        if identity.provider == :email,
-          do: Mailer.notice(identity.subject, :identity_unlinked, about)
-
-        :ok
+      :ok
+    else
+      {0, _} -> {:error, :last}
+      {:error, :not_found} -> {:error, :not_found}
     end
+  end
+
+  # One statement, so two unlinks racing for the last two ways in cannot both win.
+  defp delete_unless_last(%Identity{id: id}, account_id) do
+    another = from(o in Identity, where: o.account_id == ^account_id and o.id != ^id)
+    Repo.delete_all(from(i in Identity, where: i.id == ^id and exists(another)))
   end
 
   @doc """
