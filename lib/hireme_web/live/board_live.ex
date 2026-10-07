@@ -21,11 +21,10 @@ defmodule HiremeWeb.BoardLive do
      socket
      |> assign(:page_title, "Desk")
      |> assign(:filters, %Filters{})
-     |> assign(:cards, [])
+     |> put_cards([])
      |> assign(:profiles, [])
      |> assign(:batches, [])
      |> assign(:scoreboard, Campaign.scoreboard())
-     |> assign(:ev_chart, Hireme.LifeEv.chart([]))
      |> assign(:heat_chart, Hireme.Heat.chart())
      |> assign(:gym, Gym.progress())
      |> assign(:net, Net.progress())
@@ -60,10 +59,9 @@ defmodule HiremeWeb.BoardLive do
         filters={@filters}
         profiles={@profiles}
         batches={@batches}
-        count={length(@cards)}
+        count={@count}
       />
       <.scoreboard board={@scoreboard} gym={@gym} net={@net} />
-      <.ev_chart chart={@ev_chart} filters={@filters} />
       <.heat_chart chart={@heat_chart} filters={@filters} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
         <.battleplan
@@ -399,11 +397,10 @@ defmodule HiremeWeb.BoardLive do
 
     socket
     |> assign(:filters, filters)
-    |> assign(:cards, cards)
+    |> put_cards(cards)
     |> assign(:profiles, Corpus.list_profiles())
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
-    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> assign(:heat_chart, Hireme.Heat.chart())
     |> assign(:gym, Gym.progress())
     |> assign(:net, Net.progress())
@@ -449,12 +446,11 @@ defmodule HiremeWeb.BoardLive do
     app_id = socket.assigns.app_id
 
     socket
-    |> assign(:cards, cards)
+    |> put_cards(cards)
     |> assign(:index, index_of(cards, app_id))
     |> assign(:focus, Desk.focus(app_id))
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
-    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> assign(:heat_chart, Hireme.Heat.chart())
     |> refresh_lanes()
     |> maybe_reload_root()
@@ -523,7 +519,7 @@ defmodule HiremeWeb.BoardLive do
 
   defp move(socket, dir) do
     cards = socket.assigns.cards
-    count = length(cards)
+    count = socket.assigns.count
 
     if count == 0 do
       {:noreply, socket}
@@ -549,38 +545,47 @@ defmodule HiremeWeb.BoardLive do
     end
   end
 
+  # One slice of the card list per render. The active card is added when
+  # it sits outside the painted rows so it keeps its focus ring.
   defp decorate(assigns) do
     grid = assigns.grid
     metrics = GridNav.metrics(grid.rem)
-    count = length(assigns.cards)
+    count = assigns.count
     {start_idx, last_idx} = GridNav.slice(count, grid.cols, grid.scroll, grid.viewport, metrics)
 
-    indices =
-      cond do
-        start_idx < 0 -> []
-        true -> Enum.to_list(start_idx..last_idx)
-      end
-
-    indices =
-      case assigns.index do
-        i when is_integer(i) and i >= 0 and i < count ->
-          if i in indices, do: indices, else: [i | indices]
-
-        _ ->
-          indices
+    window =
+      if start_idx < 0 do
+        []
+      else
+        assigns.cards
+        |> Enum.slice(start_idx..last_idx)
+        |> Enum.with_index(start_idx)
+        |> Enum.map(fn {card, i} -> place(card, i, grid.cols, metrics) end)
       end
 
     window =
-      Enum.map(indices, fn i ->
-        {x, y} = GridNav.origin(i, grid.cols, metrics)
-        %Placed{card: Enum.at(assigns.cards, i), x: round_px(x), y: round_px(y)}
-      end)
+      case assigns.index do
+        i when is_integer(i) and (i < start_idx or i > last_idx) ->
+          [place(Enum.at(assigns.cards, i), i, grid.cols, metrics) | window]
+
+        _ ->
+          window
+      end
 
     assign(assigns,
       window: window,
       plane_h: round_px(GridNav.content_height(count, grid.cols, metrics)),
       in_filter: is_integer(assigns.index)
     )
+  end
+
+  defp place(card, i, cols, metrics) do
+    {x, y} = GridNav.origin(i, cols, metrics)
+    %Placed{card: card, x: round_px(x), y: round_px(y)}
+  end
+
+  defp put_cards(socket, cards) do
+    socket |> assign(:cards, cards) |> assign(:count, length(cards))
   end
 
   defp desk_path(socket, overrides) do

@@ -21,6 +21,7 @@ defmodule Hireme.Desk.Job do
     field :stage_on, :date
     field :current_stage, Ecto.Enum, values: Hireme.Pipeline.keys()
     field :pips, :string, default: Hireme.Pipeline.encode(Hireme.Pipeline.initial(:discovered))
+    field :stage_notes, :map, default: %{}
     field :keyword_hits, :integer, default: 0
     field :keyword_total, :integer, default: 0
     field :mask_hidden, :integer, default: 0
@@ -79,6 +80,7 @@ defmodule Hireme.Desk.Job do
       :stage_on,
       :current_stage,
       :pips,
+      :stage_notes,
       :keyword_hits,
       :keyword_total,
       :mask_hidden,

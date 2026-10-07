@@ -81,27 +81,24 @@ defmodule HiremeWeb.DeskComponents do
             {status}
           </option>
         </select>
-        <select name="band" aria-label="Life-EV band">
+        <select name="band" aria-label="score_100 band">
           <option value="all" selected={@filters.band == :all}>All bands</option>
-          <option
-            :for={band <- LifeEv.bands()}
-            value={LifeEv.name(band.key)}
-            selected={@filters.band == band.key}
-          >
-            {band.label} · {band.min}–{band.max}
+          <option :for={row <- LifeEv.bands()} value={row.key} selected={@filters.band == row.key}>
+            {row.label} {row.min}–{row.max}
           </option>
         </select>
-        <label class="min-score">
-          min
-          <input
-            type="number"
-            name="min_score"
-            min="0"
-            max="100"
-            value={@filters.min_score}
-            aria-label="Minimum score_100"
-          />
-        </label>
+        <input
+          id="min_score"
+          type="number"
+          name="min_score"
+          min="0"
+          max="100"
+          value={if @filters.min_score > 0, do: @filters.min_score}
+          placeholder="min score_100"
+          aria-label="Minimum score_100"
+          phx-debounce="300"
+          class="min-score"
+        />
         <select name="heat" aria-label="Heat">
           <option value="all" selected={@filters.heat == :all}>All heat</option>
           <option
@@ -146,61 +143,42 @@ defmodule HiremeWeb.DeskComponents do
       <span :for={row <- @board.varieties} class="variety">
         {row.code} {row.label}
       </span>
+      <.ev_chart chart={@board.chart} />
     </div>
     """
   end
 
   attr :chart, Hireme.LifeEv.Chart, required: true
-  attr :filters, Filters, required: true
 
+  @doc """
+  The `score_100` chart: one bar per band, each a link to that band's
+  filter, with the count and mean beside it. Heights are relative to the
+  largest band.
+  """
   def ev_chart(assigns) do
-    peak = assigns.chart.bins |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
+    peak = assigns.chart.bands |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
     assigns = assign(assigns, :peak, peak)
 
     ~H"""
-    <div id="ev-chart" class="ev-chart">
-      <div class="ev-meta">
-        <span class="pill">score_100</span>
-        <span>n {@chart.n}</span>
-        <span :if={@chart.mean}>mean {@chart.mean}</span>
-        <span :if={@chart.max}>max {@chart.max}</span>
-        <span :if={@chart.min}>min {@chart.min}</span>
-      </div>
-      <div class="ev-bands" aria-label="Life-EV band breakdown">
-        <button
-          :for={row <- @chart.bands}
-          type="button"
-          id={"band-#{row.key}"}
-          class={["ev-band", @filters.band == row.key && "is-on"]}
-          phx-click="filter"
-          phx-value-q={@filters.q}
-          phx-value-stage={Filters.stage_value(@filters)}
-          phx-value-profile={Filters.profile_value(@filters)}
-          phx-value-status={Filters.status_value(@filters)}
-          phx-value-batch={Filters.batch_value(@filters)}
-          phx-value-band={LifeEv.name(row.key)}
-          phx-value-min_score={Filters.min_score_value(@filters)}
-          phx-value-heat={Filters.heat_value(@filters)}
-          title={"#{row.label} #{row.min}–#{row.max}"}
-        >
-          <span class="ev-band-label">{row.label}</span>
-          <span class="ev-band-bar" style={"width: #{band_pct(row.share)}%"}></span>
-          <span class="ev-band-n">{row.count}</span>
-        </button>
-      </div>
-      <div class="ev-hist" aria-label="score_100 histogram">
-        <div
-          :for={bin <- @chart.bins}
-          class="ev-bin"
-          title={"#{bin.lo}–#{bin.hi}: #{bin.count}"}
-        >
-          <span class="ev-bin-bar" style={"height: #{bin_pct(bin.count, @peak)}%"}></span>
-          <span class="ev-bin-lo">{bin.lo}</span>
-        </div>
-      </div>
-    </div>
+    <span id="ev-chart" class="bands" aria-label="Applications by score_100 band">
+      <span class="ev-meta">
+        score_100 · n {@chart.n}<span :if={@chart.mean}> · mean {@chart.mean}</span>
+      </span>
+      <.link
+        :for={row <- @chart.bands}
+        patch={~p"/?band=#{row.key}"}
+        class={["band", "band-#{row.key}"]}
+        title={"#{row.label} #{row.min}–#{row.max} · #{row.count}"}
+      >
+        <i style={"height: #{bar_height(row.count, @peak)}%"}></i>
+        <b>{row.count}</b>
+      </.link>
+    </span>
     """
   end
+
+  defp bar_height(0, _peak), do: 4
+  defp bar_height(n, peak), do: max(round(n / max(peak, 1) * 100), 8)
 
   attr :chart, Heat.Chart, required: true
   attr :filters, Filters, required: true
@@ -215,53 +193,35 @@ defmodule HiremeWeb.DeskComponents do
       </div>
       <div class="heat-cols">
         <div class="ev-bands" aria-label="Company heat">
-          <button
+          <.link
             :for={row <- Enum.take(@chart.companies, 8)}
-            type="button"
+            patch={~p"/?#{Filters.to_query(Filters.merge(@filters, %{q: row.label}))}"}
             id={"heat-co-#{row.key}"}
             class={[
               "ev-band",
               @filters.q != "" and
                 String.contains?(String.downcase(row.label), String.downcase(@filters.q)) && "is-on"
             ]}
-            phx-click="filter"
-            phx-value-q={row.label}
-            phx-value-stage={Filters.stage_value(@filters)}
-            phx-value-profile={Filters.profile_value(@filters)}
-            phx-value-status={Filters.status_value(@filters)}
-            phx-value-batch={Filters.batch_value(@filters)}
-            phx-value-band={Filters.band_value(@filters)}
-            phx-value-min_score={Filters.min_score_value(@filters)}
-            phx-value-heat={Filters.heat_value(@filters)}
             title={"#{row.label} #{row.load}/#{row.cap} cooldown #{row.cooldown_days || 0}d"}
           >
             <span class="ev-band-label">{row.label}</span>
             <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
             <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
-          </button>
+          </.link>
           <p :if={@chart.companies == []} class="sub">No queued company heat.</p>
         </div>
         <div class="ev-bands" aria-label="ATS heat">
-          <button
+          <.link
             :for={row <- Enum.take(@chart.vendors, 8)}
-            type="button"
+            patch={~p"/?#{Filters.to_query(Filters.merge(@filters, %{q: row.label}))}"}
             id={"heat-ats-#{row.key}"}
             class="ev-band"
-            phx-click="filter"
-            phx-value-q={row.label}
-            phx-value-stage={Filters.stage_value(@filters)}
-            phx-value-profile={Filters.profile_value(@filters)}
-            phx-value-status={Filters.status_value(@filters)}
-            phx-value-batch={Filters.batch_value(@filters)}
-            phx-value-band={Filters.band_value(@filters)}
-            phx-value-min_score={Filters.min_score_value(@filters)}
-            phx-value-heat={Filters.heat_value(@filters)}
             title={"#{row.label} #{row.load}/#{row.cap}"}
           >
             <span class="ev-band-label">{row.label}</span>
             <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
             <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
-          </button>
+          </.link>
           <p :if={@chart.vendors == []} class="sub">No ATS heat.</p>
         </div>
       </div>
@@ -287,10 +247,8 @@ defmodule HiremeWeb.DeskComponents do
       title={"#{@card.company} — #{@card.role}"}
     >
       <div class="card-kicker">
-        <span class="code">{card_code(@card)}</span>
-        <span class="ev-score" title={"Life-EV #{LifeEv.label(@card.band)}"}>
-          {@card.score_100}
-        </span>
+        <span class="code">{@card.batch_code || Hireme.Desk.code(@card.id)}</span>
+        <.score score={@card.score_100} />
         <span
           class={[
             "heat-load",
@@ -301,12 +259,12 @@ defmodule HiremeWeb.DeskComponents do
         >
           {Float.round(@card.load, 1)}/{Float.round(@card.cap, 1)}
         </span>
-        <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
+        <span class="stage-name">{Pipeline.label(@card.stage)}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
       <p class="role">{@card.role}</p>
       <div class="meta">
-        <span class="pips" aria-label={"Battleplan #{@card.stage_label}"}>
+        <span class="pips" aria-label={"Battleplan #{Pipeline.label(@card.stage)}"}>
           <i :for={pip <- String.graphemes(@card.pips)} class={"pip pip-#{pip}"}></i>
         </span>
         <span class="heat" aria-label={"Heat #{@card.heat} of 5"}>
@@ -319,9 +277,19 @@ defmodule HiremeWeb.DeskComponents do
       </p>
       <p class="next">
         <span>{next_line(@card)}</span>
-        <span :if={age_label(@card.age)}>{age_label(@card.age)}</span>
+        <span :if={@card.stage_on}>{age_label(@card.stage_on)}</span>
       </p>
     </button>
+    """
+  end
+
+  attr :score, :integer, required: true
+
+  def score(assigns) do
+    ~H"""
+    <span class={["score", "band-#{LifeEv.band(@score)}"]} aria-label={"score_100 #{@score}"}>
+      {@score}
+    </span>
     """
   end
 
@@ -336,15 +304,13 @@ defmodule HiremeWeb.DeskComponents do
       <header>
         <p class="kicker">
           <span>{Hireme.Desk.code(@focus.job.id)}</span>
+          <.score score={@focus.job.score_100} />
           <span>{@focus.variant.label}</span>
           <span>{@focus.profile.name}</span>
         </p>
         <h2>{@focus.job.company}</h2>
         <p class="sub">{@focus.job.role}</p>
         <p class="sub">{@focus.job.location}</p>
-        <p class="sub">
-          score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
-        </p>
         <p class="sub">{fire_line(@focus.job)}</p>
         <p class="sub" id="heat-line">{heat_line(@focus.job)}</p>
       </header>
@@ -450,13 +416,11 @@ defmodule HiremeWeb.DeskComponents do
         <button type="button" id="back-to-desk" class="ghost" phx-click="back">Back</button>
         <div class="grow">
           <p class="kicker">
-            {Hireme.Desk.code(@focus.job.id)} · {@focus.variant.label} · {@focus.profile.name}
+            {Hireme.Desk.code(@focus.job.id)} · <.score score={@focus.job.score_100} />
+            {@focus.variant.label} · {@focus.profile.name}
           </p>
           <h2>{@focus.job.company}</h2>
           <p class="sub">{@focus.job.role}</p>
-          <p class="sub">
-            score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
-          </p>
           <p class="sub">{fire_line(@focus.job)}</p>
         </div>
         <p class="count">
@@ -507,26 +471,6 @@ defmodule HiremeWeb.DeskComponents do
           <.paper cv={@focus.cv} editable editing_id={@editing_id} alter_error={@alter_error} />
           <p :if={@focus.job.listing != ""} class="sub">{String.trim(@focus.job.listing)}</p>
         </div>
-      </div>
-    </div>
-    """
-  end
-
-  attr :root, Hireme.Desk.Root, required: true
-
-  def root_view(assigns) do
-    ~H"""
-    <div class="root-wrap">
-      <div class="bp-bar">
-        <button type="button" id="back-to-desk" class="ghost" phx-click="back">Back</button>
-        <div class="grow">
-          <p class="kicker">Root · {@root.profile.name}</p>
-          <h2>{@root.cv.headline}</h2>
-        </div>
-      </div>
-      <div class="paper-scroll">
-        <.narrative narrative={@root.narrative} />
-        <.paper cv={@root.cv} editable={false} editing_id={nil} alter_error={nil} />
       </div>
     </div>
     """
@@ -609,7 +553,9 @@ defmodule HiremeWeb.DeskComponents do
                 )}
               </span>
               <strong>{rep.problem.title}</strong>
-              <span class="sub">{Gym.label(rep.problem.topic)} · {Gym.label(rep.problem.difficulty)}</span>
+              <span class="sub">
+                {Gym.label(rep.problem.topic)} · {Gym.label(rep.problem.difficulty)}
+              </span>
             </li>
           </ul>
         </div>
@@ -682,6 +628,26 @@ defmodule HiremeWeb.DeskComponents do
             <span :if={entry.body != ""} class="sub">{excerpt(entry.body)}</span>
           </li>
         </ul>
+      </div>
+    </div>
+    """
+  end
+
+  attr :root, Hireme.Desk.Root, required: true
+
+  def root_view(assigns) do
+    ~H"""
+    <div class="root-wrap">
+      <div class="bp-bar">
+        <button type="button" id="back-to-desk" class="ghost" phx-click="back">Back</button>
+        <div class="grow">
+          <p class="kicker">Root · {@root.profile.name}</p>
+          <h2>{@root.cv.headline}</h2>
+        </div>
+      </div>
+      <div class="paper-scroll">
+        <.narrative narrative={@root.narrative} />
+        <.paper cv={@root.cv} editable={false} editing_id={nil} alter_error={nil} />
       </div>
     </div>
     """
@@ -840,18 +806,20 @@ defmodule HiremeWeb.DeskComponents do
 
   defp batch?(batches, code), do: Enum.any?(batches, &(&1.code == code))
 
-  defp band_pct(share) when is_float(share) or is_integer(share) do
-    round(share * 100)
-  end
+  defp band_pct(share) when is_float(share) or is_integer(share), do: round(share * 100)
 
   defp bin_pct(_count, 0), do: 0
   defp bin_pct(count, peak), do: round(count / peak * 100)
 
+  defp heat_line(job) do
+    verdict = Heat.can_apply(job)
+    eta = if verdict.cooldown_days, do: " · cooldown #{verdict.cooldown_days}d", else: ""
+
+    "heat #{verdict.decision} · #{Float.round(verdict.company_load, 1)}/#{Float.round(verdict.company_cap, 1)} #{verdict.size} · #{Hireme.Heat.Ats.name(verdict.ats_vendor)}#{eta}"
+  end
+
   defp snapshot_date(nil), do: ""
   defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"
-
-  defp card_code(%{batch_code: code}) when is_binary(code) and code != "", do: code
-  defp card_code(card), do: card.code
 
   defp hold_mark(%{batch_fire: :hold}), do: " · HOLD"
   defp hold_mark(_), do: ""
@@ -865,13 +833,6 @@ defmodule HiremeWeb.DeskComponents do
     "#{gate} · #{freshness}"
   end
 
-  defp heat_line(job) do
-    verdict = Heat.can_apply(job)
-    eta = if verdict.cooldown_days, do: " · cooldown #{verdict.cooldown_days}d", else: ""
-
-    "heat #{verdict.decision} · #{Float.round(verdict.company_load, 1)}/#{Float.round(verdict.company_cap, 1)} #{verdict.size} · #{Hireme.Heat.Ats.name(verdict.ats_vendor)}#{eta}"
-  end
-
   defp next_line(%{next_action: action, next_due: due}) do
     action = if action in [nil, ""], do: "No next action", else: action
 
@@ -881,10 +842,12 @@ defmodule HiremeWeb.DeskComponents do
     end
   end
 
-  defp age_label(nil), do: nil
-  defp age_label(0), do: "today"
-  defp age_label(1), do: "1d"
-  defp age_label(n) when is_integer(n), do: "#{n}d"
+  defp age_label(%Date{} = date) do
+    case Date.diff(Date.utc_today(), date) do
+      0 -> "today"
+      n -> "#{n}d"
+    end
+  end
 
   defp due_label(nil), do: nil
 

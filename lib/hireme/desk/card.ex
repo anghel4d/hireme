@@ -1,20 +1,20 @@
 defmodule Hireme.Desk.Card do
   @moduledoc """
   What the board shows for one application. No listing text, no document.
+  The query selects straight into this struct. Company load, cap, and
+  heat state are painted after fetch — they are not columns.
   """
 
   alias Hireme.Pipeline
 
   @enforce_keys [
     :id,
-    :code,
     :company,
     :role,
     :location,
     :heat,
     :status,
     :stage,
-    :stage_label,
     :pips,
     :cv_label,
     :profile_name,
@@ -26,33 +26,38 @@ defmodule Hireme.Desk.Card do
     :mask_emphasized,
     :next_action,
     :next_due,
-    :age,
+    :stage_on,
     :batch_code,
     :batch_fire,
     :batch_ordinal,
     :freshness,
     :gate,
     :fit,
-    :score_100,
-    :band,
-    :load,
-    :cap,
-    :heat_state,
-    :ats_vendor,
-    :cooldown_days
+    :score_100
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++
+              [
+                listing_url: "",
+                canonical_url: "",
+                department: "",
+                squad: "",
+                heat_override: false,
+                heat_override_reason: "",
+                load: 0.0,
+                cap: 1.0,
+                heat_state: :cool,
+                ats_vendor: :unknown,
+                cooldown_days: nil
+              ]
 
   @type t :: %__MODULE__{
           id: pos_integer(),
-          code: String.t(),
           company: String.t(),
           role: String.t(),
           location: String.t(),
           heat: 1..5,
           status: atom(),
           stage: Pipeline.stage(),
-          stage_label: String.t(),
           pips: String.t(),
           cv_label: String.t(),
           profile_name: String.t(),
@@ -64,7 +69,7 @@ defmodule Hireme.Desk.Card do
           mask_emphasized: non_neg_integer(),
           next_action: String.t(),
           next_due: Date.t() | nil,
-          age: non_neg_integer() | nil,
+          stage_on: Date.t() | nil,
           batch_code: String.t() | nil,
           batch_fire: :hold | :open_fire | nil,
           batch_ordinal: non_neg_integer() | nil,
@@ -72,7 +77,12 @@ defmodule Hireme.Desk.Card do
           gate: atom(),
           fit: String.t(),
           score_100: Hireme.LifeEv.score(),
-          band: Hireme.LifeEv.band(),
+          listing_url: String.t(),
+          canonical_url: String.t(),
+          department: String.t(),
+          squad: String.t(),
+          heat_override: boolean(),
+          heat_override_reason: String.t(),
           load: float(),
           cap: float(),
           heat_state: :cool | :warm | :hot | :blocked,
@@ -81,7 +91,8 @@ defmodule Hireme.Desk.Card do
         }
 
   @doc """
-  Board order: Life-EV first, then cooler company load, then batch, rung, interest heat, company.
+  Board order: highest `score_100` first, then cooler company load, then
+  batch, then rung, then interest heat, then company.
   """
   @spec order(t()) ::
           {integer(), integer(), non_neg_integer(), non_neg_integer(), integer(), String.t()}
@@ -94,10 +105,7 @@ defmodule Hireme.Desk.Card do
 end
 
 defmodule Hireme.Desk.Placed do
-  @moduledoc """
-  A card at a pixel origin inside the painted window.
-  """
-
+  @moduledoc false
   @enforce_keys [:card, :x, :y]
   defstruct [:card, :x, :y]
 

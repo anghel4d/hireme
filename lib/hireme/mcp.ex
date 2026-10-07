@@ -44,6 +44,24 @@ defmodule Hireme.Mcp.Args do
     end
   end
 
+  @spec score(map(), String.t()) :: {:ok, Hireme.LifeEv.score()} | {:error, problem()}
+  def score(args, name) do
+    case int(args, name) do
+      {:ok, n} when n in 0..100 -> {:ok, n}
+      _ -> {:error, {:argument, name}}
+    end
+  end
+
+  @spec optional_score(map(), String.t(), Hireme.LifeEv.score()) ::
+          {:ok, Hireme.LifeEv.score()} | {:error, problem()}
+  def optional_score(args, name, default) do
+    case optional_int(args, name) do
+      {:ok, nil} -> {:ok, default}
+      {:ok, n} when n in 0..100 -> {:ok, n}
+      _ -> {:error, {:argument, name}}
+    end
+  end
+
   @spec stage(map(), String.t()) :: {:ok, Pipeline.stage()} | {:error, problem()}
   def stage(args, name) do
     case Pipeline.parse(Map.get(args, name)) do
@@ -64,15 +82,12 @@ defmodule Hireme.Mcp do
   @moduledoc """
   Tool calls for a connected agent.
 
-  The directory socket at `/mcp/websocket` lists, searches, and
-  recommends applications. Ranking on that socket uses `score_100`
-  (Life-EV, 0–100) as the primary signal. The same socket logs gym
-  reps and networking entries (not CRM, not job submits). A letterbox
-  socket at `/mcp/letterbox/:letterbox_id/websocket` is the full-duplex
-  lease. Its handle reads and writes one application. The command
-  carried to the consumer has no application id. A job id, a variant
-  id, or a letterbox id in the arguments is checked against the handle
-  and otherwise ignored. Neither socket submits an application.
+  The directory socket at `/mcp/websocket` only lists letterboxes.
+  A letterbox socket at `/mcp/letterbox/:letterbox_id/websocket` is the
+  full-duplex lease. Its handle reads and writes one application. The
+  command carried to the consumer has no application id. A job id, a
+  variant id, or a letterbox id in the arguments is checked against the
+  handle and otherwise ignored.
   """
 
   alias Hireme.CvPair
@@ -82,6 +97,7 @@ defmodule Hireme.Mcp do
   alias Hireme.Heat
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
+  alias Hireme.LifeEv
   alias Hireme.Mcp.Args
   alias Hireme.Net
   alias Hireme.Pipeline
@@ -124,48 +140,54 @@ defmodule Hireme.Mcp do
 
   def handle(%Handle{}, _), do: %{error: %{code: -32600, message: "invalid request"}}
 
-  defp directory_call("list_letterboxes", _args), do: {:ok, %{"letterboxes" => letterbox_rows()}}
+  defp directory_call("list_letterboxes", args) do
+    with {:ok, min} <- Args.optional_score(args, "min_score", 0) do
+      rows =
+        Letterbox.list()
+        |> Enum.filter(&(&1.score_100 >= min))
+        |> Enum.sort_by(&(-&1.score_100))
+        |> Enum.map(&letterbox_row/1)
+
+      {:ok, %{"letterboxes" => rows}}
+    end
+  end
+
   defp directory_call("list_batches", _args), do: {:ok, %{"batches" => batch_rows()}}
 
+  # Cards come back in board order: score_100 high to low, then batch.
   defp directory_call("list_applications", args) do
     {:ok, %{"applications" => application_rows(list_filters(args))}}
   end
 
+  # The keepers an agent would draft first. This ranks; it does not submit.
   defp directory_call("recommend_applications", args) do
-    min_score =
-      case Args.optional_int(args, "min_score") do
-        {:ok, nil} -> 90
-        {:ok, n} -> n
-        {:error, _} -> 90
-      end
+    with {:ok, min} <- Args.optional_score(args, "min_score", 90),
+         {:ok, limit} <- Args.optional_int(args, "limit") do
+      limit = if is_integer(limit) and limit > 0, do: min(limit, 100), else: 25
+      filters = Filters.merge(list_filters(args), %{min_score: min, status: :open})
 
-    limit =
-      case Args.optional_int(args, "limit") do
-        {:ok, nil} -> 25
-        {:ok, n} when n > 0 -> min(n, 100)
-        _ -> 25
-      end
+      fire =
+        if Enum.any?(Desk.list_batches(), &(&1.fire == :open_fire)), do: "open_fire", else: "hold"
 
-    filters = Filters.merge(list_filters(args), %{min_score: min_score, status: :open})
+      apps =
+        filters
+        |> application_rows()
+        |> Enum.reject(&(&1["heat_state"] == "blocked"))
+        |> Enum.take(limit)
 
-    apps =
-      filters
-      |> application_rows()
-      |> Enum.reject(&(&1["heat_state"] == "blocked"))
-      |> Enum.take(limit)
-
-    {:ok,
-     %{
-       "applications" => apps,
-       "min_score" => min_score,
-       "fire" => "hold",
-       "note" =>
-         "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
-     }}
+      {:ok,
+       %{
+         "applications" => apps,
+         "min_score" => min,
+         "fire" => fire,
+         "note" =>
+           "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
+       }}
+    end
   end
 
   defp directory_call("score_distribution", args) do
-    chart = Hireme.LifeEv.chart(Desk.list_cards(list_filters(args)))
+    chart = LifeEv.chart(Desk.list_cards(list_filters(args)))
 
     {:ok,
      %{
@@ -176,7 +198,7 @@ defmodule Hireme.Mcp do
        "bands" =>
          Enum.map(chart.bands, fn row ->
            %{
-             "band" => Hireme.LifeEv.name(row.key),
+             "band" => LifeEv.name(row.key),
              "label" => row.label,
              "min" => row.min,
              "max" => row.max,
@@ -273,11 +295,43 @@ defmodule Hireme.Mcp do
   end
 
   defp directory_call(name, _args)
-       when name in ~w(get_application set_stage set_next_action tailor_line open_cv_generation) do
+       when name in ~w(get_application set_stage set_next_action set_score tailor_line open_cv_generation) do
     {:error, :unleased}
   end
 
   defp directory_call(_name, _args), do: {:error, :unknown_tool}
+
+  defp list_filters(args) do
+    Filters.from_params(%{
+      "q" => Args.optional_string(args, "q"),
+      "stage" => Args.optional_string(args, "stage"),
+      "status" => Args.optional_string(args, "status") || "all",
+      "batch" => Args.optional_string(args, "batch"),
+      "min_score" => Args.optional_string(args, "min_score") || Map.get(args, "min_score"),
+      "band" => Args.optional_string(args, "band"),
+      "heat" => Args.optional_string(args, "heat")
+    })
+  end
+
+  defp application_rows(filters) do
+    Enum.map(Desk.list_cards(filters), fn card ->
+      %{
+        "job_id" => card.id,
+        "company" => card.company,
+        "role" => card.role,
+        "stage" => Pipeline.name(card.stage),
+        "batch" => card.batch_code,
+        "cv_label" => card.cv_label,
+        "score_100" => card.score_100,
+        "band" => LifeEv.name(LifeEv.band(card.score_100)),
+        "load" => card.load,
+        "cap" => card.cap,
+        "heat_state" => Heat.state_name(card.heat_state),
+        "ats" => Hireme.Heat.Ats.name(card.ats_vendor),
+        "cooldown_days" => card.cooldown_days
+      }
+    end)
+  end
 
   @spec call(Handle.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def call(%Handle{} = handle, "get_application", args) do
@@ -303,6 +357,19 @@ defmodule Hireme.Mcp do
     end
   end
 
+  def call(%Handle{} = handle, "set_score", args) do
+    with :ok <- same_target(handle, args),
+         {:ok, score} <- Args.score(args, "score"),
+         {:ok, job} <- Letterbox.command(handle, {:set_score, score}) do
+      {:ok,
+       %{
+         "job_id" => job.id,
+         "score_100" => job.score_100,
+         "band" => LifeEv.name(LifeEv.band(job.score_100))
+       }}
+    end
+  end
+
   def call(%Handle{} = handle, "tailor_line", args) do
     with :ok <- same_target(handle, args),
          {:ok, item_id} <- Args.int(args, "item_id"),
@@ -320,62 +387,30 @@ defmodule Hireme.Mcp do
 
   def call(%Handle{}, _name, _args), do: {:error, :unknown_tool}
 
+  @bands Enum.map(LifeEv.keys(), &LifeEv.name/1)
+
   defp directory_tools do
     [
       tool(
         "list_letterboxes",
-        "List letterbox ids ranked by score_100 (Life-EV, 0–100, higher first). Lease one to open a duplex socket. FIRE HOLD — listing does not submit.",
-        %{}
+        "List letterbox ids, highest score_100 first. Lease one to open a duplex socket",
+        %{"min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}}
       ),
       tool("list_batches", "List batches on the desk", %{}),
       tool(
         "list_applications",
-        "Search applications ranked by score_100 (Life-EV, 0–100) as the primary signal, then cooler company heat, then batch. Filters: q, stage, status, batch, band, min_score, heat (cool|warm|hot|blocked). FIRE HOLD — does not submit.",
-        %{
-          "q" => %{"type" => "string"},
-          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-          "status" => %{"type" => "string"},
-          "batch" => %{"type" => "string"},
-          "band" => %{
-            "type" => "string",
-            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
-          },
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
-        }
+        "List applications ranked by score_100, then cooler company heat. Filters include heat (cool|warm|hot|blocked). FIRE HOLD — does not submit",
+        filter_schema()
       ),
       tool(
         "recommend_applications",
-        "Recommend high Life-EV keepers. Primary ranking signal is score_100, then cooler heat. Omits heat-blocked roles. Default min_score 90. FIRE HOLD — never submits.",
-        %{
-          "q" => %{"type" => "string"},
-          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-          "status" => %{"type" => "string"},
-          "batch" => %{"type" => "string"},
-          "band" => %{
-            "type" => "string",
-            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
-          },
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-          "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 100},
-          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
-        }
+        "The top applications by score_100 (default floor 90) to draft first. Omits heat-blocked roles. Ranks only; does not submit",
+        Map.put(filter_schema(), "limit", %{"type" => "integer", "minimum" => 1, "maximum" => 100})
       ),
       tool(
         "score_distribution",
-        "Histogram and band breakdown of score_100 (Life-EV) for the current filter. Primary ranking signal for list/recommend. FIRE HOLD — read only.",
-        %{
-          "q" => %{"type" => "string"},
-          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-          "status" => %{"type" => "string"},
-          "batch" => %{"type" => "string"},
-          "band" => %{
-            "type" => "string",
-            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
-          },
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
-        }
+        "score_100 band counts and ten-point bins for the filtered desk",
+        filter_schema()
       ),
       tool(
         "heat_status",
@@ -453,6 +488,18 @@ defmodule Hireme.Mcp do
     ]
   end
 
+  defp filter_schema do
+    %{
+      "q" => %{"type" => "string"},
+      "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+      "status" => %{"type" => "string"},
+      "batch" => %{"type" => "string"},
+      "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+      "band" => %{"type" => "string", "enum" => @bands},
+      "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
+    }
+  end
+
   defp leased_tools do
     [
       tool("get_application", "Read the application closed over by this lease", %{}),
@@ -461,6 +508,9 @@ defmodule Hireme.Mcp do
       }),
       tool("set_next_action", "Set the next action on this application", %{
         "next_action" => %{"type" => "string"}
+      }),
+      tool("set_score", "Set this application's score_100", %{
+        "score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
       }),
       tool("tailor_line", "Add or revise a line on the CV closed over by this lease", %{
         "item_id" => %{"type" => "integer"},
@@ -476,21 +526,19 @@ defmodule Hireme.Mcp do
     ]
   end
 
-  defp letterbox_rows do
-    Enum.map(Letterbox.list(), fn row ->
-      %{
-        "letterbox_id" => row.id,
-        "job_id" => row.job_id,
-        "company" => row.company,
-        "role" => row.role,
-        "stage" => Pipeline.name(row.stage),
-        "batch" => row.batch,
-        "score_100" => row.score_100,
-        "band" => Hireme.LifeEv.name(row.band),
-        "leased" => row.leased,
-        "socket" => "/mcp/letterbox/#{row.id}/websocket"
-      }
-    end)
+  defp letterbox_row(row) do
+    %{
+      "letterbox_id" => row.id,
+      "job_id" => row.job_id,
+      "company" => row.company,
+      "role" => row.role,
+      "stage" => Pipeline.name(row.stage),
+      "batch" => row.batch,
+      "score_100" => row.score_100,
+      "band" => LifeEv.name(LifeEv.band(row.score_100)),
+      "leased" => row.leased,
+      "socket" => "/mcp/letterbox/#{row.id}/websocket"
+    }
   end
 
   defp batch_rows do
@@ -508,7 +556,7 @@ defmodule Hireme.Mcp do
     pair = handle.pair
 
     %{
-      "letterbox_id" => Letterbox.id(handle),
+      "letterbox_id" => handle.id,
       "job_id" => CvPair.job_id(pair),
       "variant_id" => CvPair.variant_id(pair),
       "employer_id" => CvPair.employer_id(pair),
@@ -517,7 +565,7 @@ defmodule Hireme.Mcp do
       "role" => focus.job.role,
       "stage" => Pipeline.name(focus.job.current_stage),
       "score_100" => focus.job.score_100,
-      "band" => Hireme.LifeEv.name(Hireme.LifeEv.band(focus.job.score_100)),
+      "band" => LifeEv.name(LifeEv.band(focus.job.score_100)),
       "cv_label" => focus.variant.label,
       "lines" =>
         Enum.map(focus.masks, fn line ->
@@ -543,7 +591,7 @@ defmodule Hireme.Mcp do
          {:ok, lineage_id} <- Args.optional_int(args, "lineage_id") do
       cond do
         mismatch?(job_id, CvPair.job_id(pair)) -> {:error, :letterbox_mismatch}
-        mismatch?(letterbox_id, Letterbox.id(handle)) -> {:error, :letterbox_mismatch}
+        mismatch?(letterbox_id, handle.id) -> {:error, :letterbox_mismatch}
         mismatch?(variant_id, CvPair.variant_id(pair)) -> {:error, :cv_mismatch}
         mismatch?(lineage_id, CvPair.lineage_id(pair)) -> {:error, :cv_mismatch}
         true -> :ok
@@ -553,44 +601,6 @@ defmodule Hireme.Mcp do
 
   defp mismatch?(nil, _expected), do: false
   defp mismatch?(value, expected), do: value != expected
-
-  defp list_filters(args) do
-    min =
-      case Args.optional_int(args, "min_score") do
-        {:ok, n} -> n
-        _ -> nil
-      end
-
-    Filters.from_params(%{
-      "q" => Args.optional_string(args, "q"),
-      "stage" => Args.optional_string(args, "stage"),
-      "status" => Args.optional_string(args, "status") || "all",
-      "batch" => Args.optional_string(args, "batch"),
-      "band" => Args.optional_string(args, "band"),
-      "min_score" => if(min, do: Integer.to_string(min), else: nil),
-      "heat" => Args.optional_string(args, "heat")
-    })
-  end
-
-  defp application_rows(%Filters{} = filters) do
-    Enum.map(Desk.list_cards(filters), fn card ->
-      %{
-        "job_id" => card.id,
-        "company" => card.company,
-        "role" => card.role,
-        "stage" => Pipeline.name(card.stage),
-        "batch" => card.batch_code,
-        "cv_label" => card.cv_label,
-        "score_100" => card.score_100,
-        "band" => Hireme.LifeEv.name(card.band),
-        "load" => card.load,
-        "cap" => card.cap,
-        "heat_state" => Heat.state_name(card.heat_state),
-        "ats" => Hireme.Heat.Ats.name(card.ats_vendor),
-        "cooldown_days" => card.cooldown_days
-      }
-    end)
-  end
 
   defp apply_id(args) do
     case Args.optional_int(args, "job_id") do
