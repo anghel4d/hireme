@@ -594,3 +594,28 @@ kbd {
   .lane-body { grid-template-columns: 1fr; }
   .heat-col { grid-template-columns: repeat(2, minmax(7rem, 1fr)); }
 }
+
+
+/* The account: keys, sessions, and the sign-in page. */
+.settings-body { padding: 0.8rem 1rem 2rem; display: flex; flex-direction: column; gap: 1.2rem; max-width: 70rem; }
+.settings-section { display: flex; flex-direction: column; gap: 0.6rem; }
+.section-head { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between; }
+.lane-form.inline { flex-direction: row; margin: 0; padding: 0.35rem 0.5rem; }
+.lane-form.inline input, .lane-form.inline select { width: auto; }
+form.inline { display: inline-flex; gap: 0.3rem; align-items: center; }
+.keys { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.keys th { text-align: left; font-weight: 500; color: var(--faint); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--line); }
+.keys td { padding: 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.keys td .sub { display: block; }
+.keys tr.is-revoked td { color: var(--faint); }
+.keys .actions { white-space: nowrap; text-align: right; }
+.text-btn.danger:hover { color: var(--due); }
+.secret-panel { padding: 0.8rem; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel); display: flex; flex-direction: column; gap: 0.4rem; }
+.secret-panel input { flex: 1; font-family: ui-monospace, "SFMono-Regular", menlo, monospace; }
+code { font-family: ui-monospace, "SFMono-Regular", menlo, monospace; font-size: 0.9em; }
+body.sign-in { display: grid; place-items: center; overflow: auto; }
+.sign-in-card { width: min(26rem, 92vw); padding: 1.6rem; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); display: flex; flex-direction: column; gap: 0.8rem; }
+.sign-in-card h1 { margin: 0; font-size: 1.1rem; letter-spacing: 0.08em; }
+.sign-in-card .method { display: flex; flex-direction: column; gap: 0.4rem; text-align: center; text-decoration: none; }
+.sign-in-card input[type="email"] { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.45rem 0.6rem; }
+.sign-in-card .or { text-align: center; color: var(--faint); margin: 0; }

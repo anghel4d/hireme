@@ -6,13 +6,17 @@ config :hireme, Hireme.Repo,
   stacktrace: true,
   show_sensitive_data_on_connection_error: true
 
+secret_key_base = "E+PE0bouCpNnm701s8LTvHah4Z9kfYWc6EKZ0O6GkKJ+6GhgKMv3TCh7aewMzzCC"
+config :hireme, :secret_key_base, secret_key_base
+
 # Loopback only; `ip: {0, 0, 0, 0}` opens the desk to the network.
 config :hireme, HiremeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}],
-  check_origin: false,
+  url: [host: "localhost", port: 4000],
+  check_origin: ["//localhost", "//127.0.0.1"],
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "E+PE0bouCpNnm701s8LTvHah4Z9kfYWc6EKZ0O6GkKJ+6GhgKMv3TCh7aewMzzCC",
+  secret_key_base: secret_key_base,
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:hireme, ~w(--sourcemap=inline --watch)]}
   ]

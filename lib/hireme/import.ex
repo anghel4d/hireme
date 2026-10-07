@@ -440,6 +440,7 @@ defmodule Hireme.Seed do
 
   @spec run() :: outcome()
   def run do
+    Hireme.Accounts.use_default!()
     dir = seed_dir()
     profile_path = Path.join(dir, "profile.json")
 
@@ -466,6 +467,7 @@ defmodule Hireme.Seed do
   def flood(0), do: 0
 
   def flood(n) when is_integer(n) and n > 0 do
+    Hireme.Accounts.use_default!()
     profile = hd(Corpus.list_profiles())
     start = max(Repo.aggregate(Job, :max, :id) || 0, 19_999) + 1
 

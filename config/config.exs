@@ -27,4 +27,7 @@ config :logger, :default_formatter,
 
 config :phoenix, :json_library, Jason
 
+# WebAuthn relying party: the origin the browser reports. Set per environment.
+config :wax_, rp_id: :auto, user_verification: "required"
+
 import_config "#{config_env()}.exs"

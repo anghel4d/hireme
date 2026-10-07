@@ -20,6 +20,7 @@ defmodule Mix.Tasks.Hireme.Import do
   @impl Mix.Task
   def run([path]) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
 
     case Hireme.Import.import_path(path) do
       {:ok, %{kind: kind, count: count}} -> Mix.shell().info("Imported #{kind}: #{count}")
@@ -46,6 +47,7 @@ defmodule Mix.Tasks.Hireme.Flood do
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
 
     n =
       case args do
@@ -75,6 +77,7 @@ defmodule Mix.Tasks.Hireme.Score do
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
     cards = Hireme.Desk.list_cards(%Hireme.Desk.Filters{status: :all})
     Mix.shell().info(Hireme.LifeEv.ascii(Hireme.LifeEv.chart(cards)))
   end
@@ -89,6 +92,7 @@ defmodule Mix.Tasks.Hireme.Heat do
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
     Mix.shell().info(Hireme.Heat.ascii(Hireme.Heat.chart()))
   end
 end
@@ -102,6 +106,7 @@ defmodule Mix.Tasks.Hireme.Gym do
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
     Mix.shell().info(Hireme.Gym.ascii(Hireme.Gym.progress()))
   end
 end
@@ -115,6 +120,7 @@ defmodule Mix.Tasks.Hireme.Net do
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("app.start")
+    Hireme.Accounts.use_default!()
     Mix.shell().info(Hireme.Net.ascii(Hireme.Net.progress()))
   end
 end

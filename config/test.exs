@@ -6,9 +6,12 @@ config :hireme, Hireme.Repo,
   pool_size: 5,
   pool: Ecto.Adapters.SQL.Sandbox
 
+secret_key_base = "XPx6qxoX/XRLHmiBlX6yrohT6bBZTJZai2UgJToxXZi4n0/9/jDw2FClsguZET3W"
+config :hireme, :secret_key_base, secret_key_base
+
 config :hireme, HiremeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "XPx6qxoX/XRLHmiBlX6yrohT6bBZTJZai2UgJToxXZi4n0/9/jDw2FClsguZET3W",
+  secret_key_base: secret_key_base,
   server: false
 
 config :logger, level: :warning

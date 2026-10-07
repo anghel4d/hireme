@@ -83,7 +83,7 @@ defmodule Hireme.Kv do
     |> Pair.changeset(%{namespace: namespace, key: key, value: value})
     |> Repo.insert!(
       on_conflict: [set: [value: value, updated_at: now]],
-      conflict_target: [:namespace, :key]
+      conflict_target: [:account_id, :namespace, :key]
     )
   end
 

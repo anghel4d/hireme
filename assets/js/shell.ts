@@ -2,14 +2,14 @@
 // the board's identity; the resident columns are what it is drawn from.
 
 import * as api from "./api.ts"
-import { openFeed, type Focus, type Lanes, type Root, type Scoreboard, type Signal } from "./api.ts"
+import { csrf, openFeed, type Focus, type Lanes, type Root, type Scoreboard, type Settings, type Signal } from "./api.ts"
 import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, morph, raw, type Raw } from "./html.ts"
 import { Store } from "./store.ts"
 import * as views from "./views.ts"
 
-type Lens = "board" | "battleplan" | "root" | "gym" | "net"
+type Lens = "board" | "battleplan" | "root" | "gym" | "net" | "settings"
 
 interface Model {
   filters: Filters
@@ -22,6 +22,10 @@ interface Model {
   scoreboard: Scoreboard | null
   lanes: Lanes | null
   laneError: string | null
+  settings: Settings | null
+  reveal: views.Reveal | null
+  renaming: number | null
+  settingsError: string | null
   editing: number | null
   alterError: string | null
   holdError: string | null
@@ -43,6 +47,8 @@ type Msg =
   | { t: "scoreboard"; scoreboard: Scoreboard }
   | { t: "lanes"; lanes: Lanes; error?: string | null }
   | { t: "lane-error"; error: string }
+  | { t: "settings"; settings: Settings | null; reveal?: views.Reveal | null; error?: string | null }
+  | { t: "rename"; id: number | null }
   | { t: "sheet"; open: boolean }
 
 export class Shell {
@@ -70,6 +76,10 @@ export class Shell {
       scoreboard: null,
       lanes: null,
       laneError: null,
+      settings: null,
+      reveal: null,
+      renaming: null,
+      settingsError: null,
       editing: null,
       alterError: null,
       holdError: null,
@@ -131,6 +141,7 @@ export class Shell {
         if (msg.lens === "battleplan" && m.appId === null) break
         m.lens = msg.lens
         if (msg.lens === "root") void this.loadRoot()
+        if (msg.lens === "settings") void this.loadSettings()
         break
       case "escape":
         if (m.lens !== "board") m.lens = "board"
@@ -167,6 +178,15 @@ export class Shell {
         break
       case "lane-error":
         m.laneError = msg.error
+        break
+      case "settings":
+        m.settings = msg.settings
+        if (msg.reveal !== undefined) m.reveal = msg.reveal
+        m.settingsError = msg.error ?? null
+        m.renaming = null
+        break
+      case "rename":
+        m.renaming = msg.id
         break
       case "sheet":
         m.sheet = msg.open
@@ -251,6 +271,22 @@ export class Shell {
     }
   }
 
+  private async loadSettings(): Promise<void> {
+    try {
+      this.dispatch({ t: "settings", settings: await api.fetchSettings() })
+    } catch {
+      this.dispatch({ t: "settings", settings: null, error: "The account could not be read." })
+    }
+  }
+
+  private async settingsWrite(outcome: Promise<api.Outcome<api.SettingsReply>>, reveal?: views.Reveal | null): Promise<void> {
+    const r = await outcome
+    if (r.ok) {
+      const made = r.value.secret && r.value.created ? { name: r.value.created.name, secret: r.value.secret } : reveal
+      this.dispatch({ t: "settings", settings: r.value, reveal: made })
+    } else this.dispatch({ t: "settings", settings: this.model.settings, error: r.error })
+  }
+
   private async laneWrite(outcome: Promise<api.Outcome<Lanes & { ok: true }>>): Promise<void> {
     const r = await outcome
     if (r.ok) this.dispatch({ t: "lanes", lanes: r.value })
@@ -315,6 +351,9 @@ export class Shell {
       workspace.hidden = true
     } else if (m.lens === "net" && m.lanes) {
       morph(lens, h`<div class="lane-wrap">${views.netView(m.lanes, m.laneError)}</div>`)
+      workspace.hidden = true
+    } else if (m.lens === "settings") {
+      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf())}</div>`)
       workspace.hidden = true
     } else {
       morph(lens, raw(""))
@@ -522,6 +561,29 @@ export class Shell {
       }
       case "edit": this.dispatch({ t: "edit", item: parseId(el.dataset["item"] ?? null) }); return
       case "cancel-edit": this.dispatch({ t: "edit", item: null }); return
+      case "copy": {
+        const text = el.dataset["copy"]
+        if (text) void navigator.clipboard.writeText(text)
+        return
+      }
+      case "dismiss-secret": this.dispatch({ t: "settings", settings: m.settings, reveal: null }); return
+      case "rename": this.dispatch({ t: "rename", id: parseId(el.dataset["id"] ?? null) }); return
+      case "cancel-rename": this.dispatch({ t: "rename", id: null }); return
+      case "revoke-key": {
+        const id = parseId(el.dataset["id"] ?? null)
+        if (id !== null && confirm(`Revoke the key "${el.dataset["name"] ?? ""}"? Agents using it stop at once.`)) await this.settingsWrite(api.revokeKey(id))
+        return
+      }
+      case "revoke-session": {
+        const id = parseId(el.dataset["id"] ?? null)
+        if (id === null) return
+        const r = await api.revokeSession(id)
+        if (r.ok && r.value.signed_out) location.assign("/sign-in")
+        else if (r.ok) this.dispatch({ t: "settings", settings: r.value })
+        else this.dispatch({ t: "settings", settings: m.settings, error: r.error })
+        return
+      }
+      case "revoke-others": await this.settingsWrite(api.revokeOtherSessions()); return
       default: return
     }
   }
@@ -558,6 +620,17 @@ export class Shell {
         await this.write(api.heatOverride(m.appId, String(data.get("reason") ?? "")))
         return
       }
+      case "create-key": {
+        const days = String(data.get("expires_in_days") ?? "")
+        await this.settingsWrite(api.createKey(String(data.get("name") ?? "").trim(), days === "" ? null : Number(days)))
+        form.reset()
+        return
+      }
+      case "rename-key": {
+        const id = parseId(form.dataset["id"] ?? null)
+        if (id !== null) await this.settingsWrite(api.renameKey(id, String(data.get("name") ?? "").trim()), m.reveal)
+        return
+      }
       case "gym-target": await this.laneWrite(api.gymTarget(String(data.get("target") ?? ""))); return
       case "gym-log": await this.laneWrite(api.gymLog(fields(data))); form.reset(); return
       case "net-lane": await this.laneWrite(api.netLane(String(data.get("url") ?? ""))); return
@@ -578,7 +651,7 @@ function strip(msg: { t: "grid"; cols?: number; scroll?: number; viewport?: numb
 }
 
 function lensOf(v: string | null): Lens {
-  return v === "battleplan" || v === "root" || v === "gym" || v === "net" ? v : "board"
+  return v === "battleplan" || v === "root" || v === "gym" || v === "net" || v === "settings" ? v : "board"
 }
 
 function fields(data: FormData): Record<string, string> {
@@ -601,6 +674,7 @@ function titleOf(m: Model): string {
   if (m.lens === "root") return "Root CV · Hireme"
   if (m.lens === "gym") return "Gym · Hireme"
   if (m.lens === "net") return "Net · Hireme"
+  if (m.lens === "settings") return "Account · Hireme"
   if (m.focus) return `${m.focus.job.company} · ${m.focus.job.code} · Hireme`
   return "Desk · Hireme"
 }

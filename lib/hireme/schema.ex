@@ -1,6 +1,192 @@
 # Every row the desk stores, in the order the migration creates them.
 # SQLite is the last place a card is a row; everything above reads
-# structs, columns, or packets built from these.
+# structs, columns, or packets built from these. The account comes
+# first; every row the desk owns names it through `tenant/1`.
+
+defmodule Hireme.Accounts.Account do
+  @moduledoc "Who signs in. The desk, its keys, its factors, and its sessions hang off this row."
+  use Hireme.Schema
+
+  @statuses [:active, :suspended]
+
+  schema "accounts" do
+    field :name, :string, default: ""
+    field :status, Ecto.Enum, values: @statuses, default: :active
+    timestamps()
+  end
+
+  def changeset(account, attrs) do
+    account
+    |> cast(attrs, [:name, :status])
+    |> validate_length(:name, max: 200)
+  end
+end
+
+defmodule Hireme.Accounts.Session do
+  @moduledoc "One signed-in browser. The cookie carries a token; only its hash is here."
+  use Hireme.Schema
+
+  schema "sessions" do
+    field :token_hash, :binary, redact: true
+    field :authenticated_at, :utc_datetime
+    field :mfa_at, :utc_datetime
+    field :last_seen_at, :utc_datetime
+    field :expires_at, :utc_datetime
+    field :revoked_at, :utc_datetime
+    field :ip, :string, default: ""
+    field :user_agent, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(session, attrs) do
+    session
+    |> cast(attrs, [
+      :account_id,
+      :token_hash,
+      :authenticated_at,
+      :mfa_at,
+      :last_seen_at,
+      :expires_at,
+      :revoked_at,
+      :ip,
+      :user_agent
+    ])
+    |> validate_required([
+      :account_id,
+      :token_hash,
+      :authenticated_at,
+      :last_seen_at,
+      :expires_at
+    ])
+    |> unique_constraint(:token_hash)
+    |> foreign_key_constraint(:account_id)
+  end
+end
+
+defmodule Hireme.ApiKeys.Key do
+  @moduledoc "An agent's key: shown once, stored hashed, scoped to one account."
+  use Hireme.Schema
+
+  schema "api_keys" do
+    field :key_id, :string
+    field :name, :string
+    field :secret_hash, :binary, redact: true
+    field :prefix, :string
+    field :scope, :string, default: "mcp"
+    field :last_used_at, :utc_datetime
+    field :expires_at, :utc_datetime
+    field :revoked_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(key, attrs) do
+    key
+    |> cast(attrs, [:account_id, :key_id, :name, :secret_hash, :prefix, :scope, :expires_at])
+    |> validate_required([:account_id, :key_id, :name, :secret_hash, :prefix, :scope])
+    |> validate_length(:name, min: 1, max: 100)
+    |> unique_constraint(:key_id)
+    |> foreign_key_constraint(:account_id)
+  end
+end
+
+defmodule Hireme.Mfa.Method do
+  @moduledoc "A second factor: an authenticator app or a WebAuthn credential."
+  use Hireme.Schema
+
+  schema "mfa_methods" do
+    field :kind, Ecto.Enum, values: [:totp, :webauthn]
+    field :name, :string, default: ""
+    field :totp_secret, :binary, redact: true
+    field :totp_last_used, :integer, default: 0
+    field :credential_id, :binary
+    field :public_key, :binary
+    field :sign_count, :integer, default: 0
+    field :aaguid, :binary
+    field :transports, :string, default: ""
+    field :backup_eligible, :boolean, default: false
+    field :backed_up, :boolean, default: false
+    field :verified_at, :utc_datetime
+    field :last_used_at, :utc_datetime
+    field :consecutive_failures, :integer, default: 0
+    field :disabled_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(method, attrs) do
+    method
+    |> cast(attrs, __schema__(:fields) -- [:id, :inserted_at, :updated_at])
+    |> validate_required([:account_id, :kind])
+    |> validate_length(:name, max: 100)
+    |> unique_constraint(:credential_id)
+    |> foreign_key_constraint(:account_id)
+  end
+end
+
+defmodule Hireme.Mfa.Challenge do
+  @moduledoc "A ceremony in flight: a pending TOTP seed or a WebAuthn challenge, for one session."
+  use Hireme.Schema
+
+  schema "mfa_challenges" do
+    field :kind, Ecto.Enum, values: [:totp_enroll, :webauthn_register, :webauthn_assert]
+    field :payload, :binary, redact: true
+    field :expires_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+    belongs_to :session, Hireme.Accounts.Session
+    timestamps()
+  end
+
+  def changeset(challenge, attrs) do
+    challenge
+    |> cast(attrs, [:account_id, :session_id, :kind, :payload, :expires_at])
+    |> validate_required([:account_id, :session_id, :kind, :payload, :expires_at])
+    |> foreign_key_constraint(:account_id)
+    |> foreign_key_constraint(:session_id)
+  end
+end
+
+defmodule Hireme.Mfa.RecoveryCode do
+  @moduledoc "A look-up secret: salted hash, one use."
+  use Hireme.Schema
+
+  schema "recovery_codes" do
+    field :salt, :binary, redact: true
+    field :code_hash, :binary, redact: true
+    field :used_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(code, attrs) do
+    code
+    |> cast(attrs, [:account_id, :salt, :code_hash, :used_at])
+    |> validate_required([:account_id, :salt, :code_hash])
+    |> foreign_key_constraint(:account_id)
+  end
+end
+
+defmodule Hireme.Audit.Event do
+  @moduledoc "One security event. `account_id` is nil before anyone has signed in."
+  use Hireme.Schema
+
+  schema "audit_events" do
+    field :kind, :string
+    field :ip, :string, default: ""
+    field :user_agent, :string, default: ""
+    field :meta, :map, default: %{}
+    field :inserted_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+  end
+
+  def changeset(event, attrs) do
+    event
+    |> cast(attrs, [:account_id, :kind, :ip, :user_agent, :meta, :inserted_at])
+    |> validate_required([:kind, :inserted_at])
+    |> foreign_key_constraint(:account_id)
+  end
+end
 
 defmodule Hireme.Corpus.User do
   @moduledoc "The candidate. A profile is a positioning; the narrative hangs off the person."
@@ -9,6 +195,7 @@ defmodule Hireme.Corpus.User do
   schema "users" do
     field :name, :string
     field :email, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -17,6 +204,7 @@ defmodule Hireme.Corpus.User do
     |> cast(attrs, [:name, :email])
     |> validate_required([:name])
     |> unique_constraint(:email)
+    |> tenant()
   end
 end
 
@@ -32,6 +220,7 @@ defmodule Hireme.Corpus.Narrative do
     field :version, :integer, default: 1
     field :private, :boolean, default: true
     belongs_to :user, Hireme.Corpus.User
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -42,6 +231,7 @@ defmodule Hireme.Corpus.Narrative do
     |> validate_number(:version, greater_than: 0)
     |> unique_constraint(:user_id)
     |> foreign_key_constraint(:user_id)
+    |> tenant()
   end
 end
 
@@ -54,6 +244,7 @@ defmodule Hireme.Corpus.Profile do
     field :headline, :string
     field :summary, :string
     belongs_to :user, Hireme.Corpus.User
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -63,6 +254,7 @@ defmodule Hireme.Corpus.Profile do
     |> validate_required([:slug, :name, :headline, :summary])
     |> unique_constraint(:slug)
     |> foreign_key_constraint(:user_id)
+    |> tenant()
   end
 end
 
@@ -79,6 +271,7 @@ defmodule Hireme.Corpus.Item do
     field :position, :integer, default: 0
     field :keywords, {:array, :string}, default: []
     belongs_to :profile, Hireme.Corpus.Profile
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -87,6 +280,7 @@ defmodule Hireme.Corpus.Item do
     |> cast(attrs, [:profile_id, :kind, :key, :title, :body, :org, :span, :position, :keywords])
     |> validate_required([:kind, :key, :title, :position])
     |> unique_constraint(:key)
+    |> tenant()
   end
 end
 
@@ -97,6 +291,7 @@ defmodule Hireme.Kv.Pair do
     field :namespace, :string
     field :key, :string
     field :value, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -105,6 +300,7 @@ defmodule Hireme.Kv.Pair do
     |> cast(attrs, [:namespace, :key, :value])
     |> validate_required([:namespace, :key])
     |> unique_constraint([:namespace, :key])
+    |> tenant()
   end
 end
 
@@ -120,6 +316,7 @@ defmodule Hireme.Desk.Employer do
 
     field :note, :string, default: ""
     field :score_100, :integer, default: 50
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -129,6 +326,7 @@ defmodule Hireme.Desk.Employer do
     |> validate_required([:name])
     |> validate_number(:score_100, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
     |> unique_constraint(:name)
+    |> tenant()
   end
 end
 
@@ -153,14 +351,16 @@ defmodule Hireme.Desk.Batch do
     field :squad, :string, default: ""
     field :variety, :map, default: %{}
     field :note, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
   def changeset(batch, attrs) do
     batch
-    |> cast(attrs, __schema__(:fields) -- [:id, :inserted_at, :updated_at])
+    |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :inserted_at, :updated_at])
     |> validate_required([:code, :ordinal])
     |> unique_constraint(:code)
+    |> tenant()
   end
 end
 
@@ -174,6 +374,7 @@ defmodule Hireme.Desk.FreshnessVerdict do
     field :noted_on, :date
     field :source, :string, default: ""
     belongs_to :employer, Hireme.Desk.Employer
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -182,6 +383,7 @@ defmodule Hireme.Desk.FreshnessVerdict do
     |> cast(attrs, [:employer_id, :wave, :verdict, :eng_urls, :noted_on, :source])
     |> validate_required([:wave, :verdict])
     |> unique_constraint([:wave, :verdict])
+    |> tenant()
   end
 end
 
@@ -192,6 +394,7 @@ defmodule Hireme.Desk.Claim do
     field :squad, :string
     field :slice, :string
     field :note, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -200,6 +403,7 @@ defmodule Hireme.Desk.Claim do
     |> cast(attrs, [:squad, :slice, :note])
     |> validate_required([:squad, :slice])
     |> unique_constraint([:squad, :slice])
+    |> tenant()
   end
 end
 
@@ -214,14 +418,16 @@ defmodule Hireme.Desk.Snapshot do
     field :daily_batches, :integer, default: 8
     field :daily_apps, :integer, default: 440
     field :note, :string, default: ""
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
   def changeset(snapshot, attrs) do
     snapshot
-    |> cast(attrs, __schema__(:fields) -- [:id, :inserted_at, :updated_at])
+    |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :inserted_at, :updated_at])
     |> validate_required([:noted_on])
     |> unique_constraint(:noted_on)
+    |> tenant()
   end
 end
 
@@ -268,6 +474,7 @@ defmodule Hireme.Desk.Job do
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :employer, Hireme.Desk.Employer
     belongs_to :batch, Hireme.Desk.Batch
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -279,7 +486,7 @@ defmodule Hireme.Desk.Job do
 
   def changeset(job, attrs) do
     job
-    |> cast(attrs, __schema__(:fields) -- [:id, :inserted_at, :updated_at])
+    |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :inserted_at, :updated_at])
     |> validate_required([:profile_id, :company, :role, :heat, :status, :current_stage, :pips])
     |> validate_number(:heat, greater_than_or_equal_to: 1, less_than_or_equal_to: 5)
     |> validate_number(:score_100, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
@@ -288,6 +495,7 @@ defmodule Hireme.Desk.Job do
     |> foreign_key_constraint(:batch_id)
     |> foreign_key_constraint(:employer_id)
     |> unique_constraint(:canonical_url)
+    |> tenant()
   end
 end
 
@@ -298,6 +506,7 @@ defmodule Hireme.Desk.Event do
     field :kind, :string
     field :body, :string, default: ""
     belongs_to :job_app, Hireme.Desk.Job
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -306,6 +515,7 @@ defmodule Hireme.Desk.Event do
     |> cast(attrs, [:job_app_id, :kind, :body])
     |> validate_required([:job_app_id, :kind, :body])
     |> foreign_key_constraint(:job_app_id)
+    |> tenant()
   end
 end
 
@@ -315,6 +525,7 @@ defmodule Hireme.Letterbox.Record do
 
   schema "letterboxes" do
     belongs_to :job_app, Hireme.Desk.Job
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -324,6 +535,7 @@ defmodule Hireme.Letterbox.Record do
     |> validate_required([:job_app_id])
     |> unique_constraint(:job_app_id)
     |> foreign_key_constraint(:job_app_id)
+    |> tenant()
   end
 end
 
@@ -337,6 +549,7 @@ defmodule Hireme.Cv.Lineage do
     field :rewrites_allowed, :boolean, default: true
     field :theme, :map, default: %{}
     belongs_to :employer, Hireme.Desk.Employer
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -346,6 +559,7 @@ defmodule Hireme.Cv.Lineage do
     |> validate_required([:employer_id, :generation, :opened_on])
     |> unique_constraint(:employer_id)
     |> foreign_key_constraint(:employer_id)
+    |> tenant()
   end
 end
 
@@ -359,6 +573,7 @@ defmodule Hireme.Desk.Variant do
     belongs_to :job_app, Hireme.Desk.Job
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :lineage, Hireme.Cv.Lineage
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -369,6 +584,7 @@ defmodule Hireme.Desk.Variant do
     |> unique_constraint(:job_app_id)
     |> foreign_key_constraint(:job_app_id)
     |> foreign_key_constraint(:profile_id)
+    |> tenant()
   end
 end
 
@@ -385,6 +601,7 @@ defmodule Hireme.Desk.Overlay do
     belongs_to :job_app, Hireme.Desk.Job
     belongs_to :item, Hireme.Corpus.Item
     belongs_to :lineage, Hireme.Cv.Lineage
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -409,6 +626,7 @@ defmodule Hireme.Desk.Overlay do
     |> unique_constraint([:lineage_id, :item_id])
     |> foreign_key_constraint(:job_app_id)
     |> foreign_key_constraint(:item_id)
+    |> tenant()
   end
 end
 
@@ -427,6 +645,7 @@ defmodule Hireme.Gym.Problem do
     field :difficulty, Ecto.Enum, values: [:easy, :medium, :hard, :unknown], default: :unknown
     field :url, :string, default: ""
     has_many :reps, Hireme.Gym.Rep
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -435,6 +654,7 @@ defmodule Hireme.Gym.Problem do
     |> cast(attrs, [:platform, :slug, :title, :topic, :difficulty, :url])
     |> validate_required([:platform, :slug, :title])
     |> unique_constraint([:platform, :slug])
+    |> tenant()
   end
 end
 
@@ -447,6 +667,7 @@ defmodule Hireme.Gym.Rep do
     field :outcome, Ecto.Enum, values: [:solved, :attempt, :skip], default: :solved
     field :note, :string, default: ""
     belongs_to :problem, Hireme.Gym.Problem
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -456,6 +677,7 @@ defmodule Hireme.Gym.Rep do
     |> validate_required([:problem_id, :done_on, :outcome])
     |> validate_number(:minutes, greater_than_or_equal_to: 0)
     |> foreign_key_constraint(:problem_id)
+    |> tenant()
   end
 end
 
@@ -469,6 +691,7 @@ defmodule Hireme.Net.Entry do
     field :url, :string, default: ""
     field :body, :string, default: ""
     field :shipped_on, :date
+    belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
 
@@ -476,5 +699,6 @@ defmodule Hireme.Net.Entry do
     entry
     |> cast(attrs, [:kind, :channel, :title, :url, :body, :shipped_on])
     |> validate_required([:kind, :channel, :title])
+    |> tenant()
   end
 end
