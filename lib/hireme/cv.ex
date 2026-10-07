@@ -1,3 +1,48 @@
+defmodule Hireme.Cv.Section do
+  @moduledoc false
+  @enforce_keys [:kind, :label, :lines]
+  defstruct [:kind, :label, :lines]
+
+  @type t :: %__MODULE__{kind: atom(), label: String.t(), lines: [Hireme.Mask.Line.t()]}
+end
+
+defmodule Hireme.Cv.Document do
+  @moduledoc """
+  The CV a reader sees: masthead, sections, and the masked tray.
+  """
+
+  alias Hireme.Theme
+
+  @enforce_keys [:label, :headline, :summary, :accent, :density, :facts, :sections, :hidden]
+  defstruct [
+    :label,
+    :person,
+    :headline,
+    :summary,
+    :summary_canonical,
+    :summary_reason,
+    :accent,
+    :density,
+    :facts,
+    :sections,
+    :hidden
+  ]
+
+  @type t :: %__MODULE__{
+          label: String.t(),
+          person: String.t() | nil,
+          headline: String.t() | nil,
+          summary: String.t() | nil,
+          summary_canonical: String.t() | nil,
+          summary_reason: String.t() | nil,
+          accent: Theme.accent(),
+          density: Theme.density(),
+          facts: [Hireme.Mask.Line.t()],
+          sections: [Hireme.Cv.Section.t()],
+          hidden: [Hireme.Mask.Line.t()]
+        }
+end
+
 defmodule Hireme.Cv do
   @moduledoc """
   Folds resolved lines into the document a reader sees.
@@ -7,6 +52,11 @@ defmodule Hireme.Cv do
   the battleplan can put them back.
   """
 
+  alias Hireme.Cv.Document
+  alias Hireme.Cv.Section
+  alias Hireme.Mask.Line
+  alias Hireme.Theme
+
   @sections [
     {:experience, "Experience"},
     {:project, "Projects"},
@@ -15,23 +65,23 @@ defmodule Hireme.Cv do
     {:timeline, "Timeline"}
   ]
 
-  def compose(profile, resolved, variant, opts \\ []) do
-    theme = theme_of(variant)
-    lead = string_key(theme, "lead")
-    summary = if lead == "", do: profile.summary, else: lead
+  @type opts :: [label: String.t(), person: String.t() | nil]
 
-    shown = Enum.filter(resolved, & &1.shown)
-    hidden = Enum.filter(resolved, &(not &1.shown))
+  @spec compose(%{headline: term(), summary: term()}, [Line.t()], Theme.t(), opts()) ::
+          Document.t()
+  def compose(profile, resolved, %Theme{} = theme, opts \\ []) do
+    summary = theme.lead || profile.summary
+    {shown, hidden} = Enum.split_with(resolved, & &1.shown)
 
-    %{
-      label: variant_label(variant),
+    %Document{
+      label: Keyword.get(opts, :label, "CV"),
       person: Keyword.get(opts, :person),
       headline: profile.headline,
       summary: summary,
       summary_canonical: if(summary == profile.summary, do: nil, else: profile.summary),
-      summary_reason: blank_nil(string_key(theme, "lead_reason")),
-      accent: theme_choice(theme, "accent", "ink"),
-      density: theme_choice(theme, "density", "cv"),
+      summary_reason: theme.lead_reason,
+      accent: theme.accent,
+      density: theme.density,
       facts: Enum.filter(shown, &(&1.kind == :fact)),
       sections: sections(shown),
       hidden: hidden
@@ -40,36 +90,10 @@ defmodule Hireme.Cv do
 
   defp sections(shown) do
     Enum.flat_map(@sections, fn {kind, label} ->
-      lines = Enum.filter(shown, &(&1.kind == kind))
-
-      if lines == [] do
-        []
-      else
-        [%{kind: kind, label: label, lines: lines}]
+      case Enum.filter(shown, &(&1.kind == kind)) do
+        [] -> []
+        lines -> [%Section{kind: kind, label: label, lines: lines}]
       end
     end)
   end
-
-  defp theme_of(%{theme: theme}) when is_map(theme), do: theme
-  defp theme_of(_), do: %{}
-
-  defp variant_label(%{label: label}) when is_binary(label) and label != "", do: label
-  defp variant_label(_), do: "CV"
-
-  defp theme_choice(theme, key, default) do
-    case string_key(theme, key) do
-      "" -> default
-      value -> value
-    end
-  end
-
-  defp string_key(theme, key) do
-    case Map.get(theme, key) || Map.get(theme, String.to_atom(key)) do
-      value when is_binary(value) -> String.trim(value)
-      _ -> ""
-    end
-  end
-
-  defp blank_nil(""), do: nil
-  defp blank_nil(value), do: value
 end

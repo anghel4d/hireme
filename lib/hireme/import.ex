@@ -1,3 +1,22 @@
+defmodule Hireme.Import.Report do
+  @moduledoc """
+  What one import did. `kind` is the shape that was recognised.
+  """
+
+  @enforce_keys [:kind, :count]
+  defstruct [:kind, :count, :source, :wave, :nested]
+
+  @type kind :: :snapshot | :claims | :batches | :apps | :freshness
+
+  @type t :: %__MODULE__{
+          kind: kind(),
+          count: non_neg_integer(),
+          source: String.t() | nil,
+          wave: String.t() | nil,
+          nested: t() | nil
+        }
+end
+
 defmodule Hireme.Import do
   @moduledoc """
   Idempotent ingest for application packs.
@@ -13,6 +32,9 @@ defmodule Hireme.Import do
   * scoreboard snapshot — `{noted_on, leftover_unique, ...}`
   * claims — `{"claims": [{"squad", "slice", "note"}]}`
 
+  Stage names in a pack are parsed once by `Hireme.Pipeline.parse/1`.
+  An unknown stage is an error for that pack, not a silent default.
+
   Passwords are never read or stored.
   """
 
@@ -25,15 +47,21 @@ defmodule Hireme.Import do
   alias Hireme.Desk.FreshnessVerdict
   alias Hireme.Desk.Job
   alias Hireme.Desk.Snapshot
+  alias Hireme.Import.Report
+  alias Hireme.Pipeline
   alias Hireme.Repo
   alias Hireme.Variety
 
+  @type result :: {:ok, Report.t()} | {:error, :unrecognized}
+
+  @spec import_path(Path.t(), keyword()) :: result()
   def import_path(path, opts \\ []) do
     profile = Keyword.get(opts, :profile) || default_profile!()
     body = File.read!(path)
     import_body(body, Path.basename(path), profile)
   end
 
+  @spec import_body(String.t(), String.t(), Profile.t()) :: result()
   def import_body(body, filename, %Profile{} = profile) do
     trimmed = String.trim(body)
 
@@ -86,7 +114,7 @@ defmodule Hireme.Import do
     })
     |> Repo.insert_or_update!()
 
-    {:ok, %{kind: :snapshot, count: 1}}
+    {:ok, %Report{kind: :snapshot, count: 1}}
   end
 
   defp import_json(%{"claims" => claims}, _profile, _filename) when is_list(claims) do
@@ -102,19 +130,19 @@ defmodule Hireme.Import do
       |> Repo.insert_or_update!()
     end)
 
-    {:ok, %{kind: :claims, count: length(claims)}}
+    {:ok, %Report{kind: :claims, count: length(claims)}}
   end
 
   defp import_json(%{"batches" => batches}, _profile, _filename) when is_list(batches) do
     Enum.each(batches, &upsert_batch/1)
-    {:ok, %{kind: :batches, count: length(batches)}}
+    {:ok, %Report{kind: :batches, count: length(batches)}}
   end
 
   defp import_json(%{"apps" => apps} = doc, profile, filename) when is_list(apps) do
     batch = if doc["batch"], do: upsert_batch(doc), else: nil
     count = Enum.reduce(apps, 0, fn app, n -> upsert_app(profile, app, batch, doc) + n end)
     if batch, do: refresh_variety(batch)
-    {:ok, %{kind: :apps, count: count, source: filename}}
+    {:ok, %Report{kind: :apps, count: count, source: filename}}
   end
 
   defp import_json(apps, profile, filename) when is_list(apps) do
@@ -170,8 +198,8 @@ defmodule Hireme.Import do
         end)
       end)
 
-    result = import_json(%{"apps" => apps}, profile, filename)
-    {:ok, %{kind: :freshness, count: length(apps), wave: wave, nested: result}}
+    {:ok, nested} = import_json(%{"apps" => apps}, profile, filename)
+    {:ok, %Report{kind: :freshness, count: length(apps), wave: wave, nested: nested}}
   end
 
   defp upsert_batch(doc) do
@@ -198,12 +226,12 @@ defmodule Hireme.Import do
     url = canonical_url(app["url"] || app["URL"] || "")
     if url == "", do: raise(ArgumentError, "application is missing a URL")
 
-    stage = app["stage"] || defaults["stage"] || "discovered"
+    stage = Pipeline.parse!(app["stage"] || defaults["stage"] || :discovered)
     fire = (batch && batch.fire) || :hold
 
     stage =
-      if stage in ["submitted", "open_fire"] and fire != :open_fire do
-        "fire_ready"
+      if Pipeline.fire_locked?(stage) and fire != :open_fire do
+        :fire_ready
       else
         stage
       end
@@ -263,8 +291,10 @@ defmodule Hireme.Import do
           select: %{company: j.company, role: j.role, location: j.location, fit: j.fit}
       )
 
+    variety = apps |> Variety.summarize(batch.target_size) |> Variety.to_map()
+
     batch
-    |> Batch.changeset(%{variety: Variety.summarize(apps, batch.target_size)})
+    |> Batch.changeset(%{variety: variety})
     |> Repo.update!()
   end
 
