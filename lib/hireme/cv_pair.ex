@@ -78,6 +78,7 @@ defmodule Hireme.CvPair do
   alias Hireme.Desk.Employer
   alias Hireme.Desk.Overlay
   alias Hireme.Desk.Variant
+  alias Hireme.LifeEv
   alias Hireme.Repo
 
   @enforce_keys [:job_id, :variant_id, :employer_id, :lineage_id]
@@ -114,7 +115,7 @@ defmodule Hireme.CvPair do
     case Repo.get_by(Employer, name: company) do
       nil ->
         %Employer{}
-        |> Employer.changeset(%{name: company})
+        |> Employer.changeset(%{name: company, score_100: LifeEv.score(company)})
         |> Repo.insert!()
 
       employer ->

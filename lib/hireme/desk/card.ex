@@ -32,7 +32,9 @@ defmodule Hireme.Desk.Card do
     :batch_ordinal,
     :freshness,
     :gate,
-    :fit
+    :fit,
+    :score_100,
+    :band
   ]
   defstruct @enforce_keys
 
@@ -63,15 +65,19 @@ defmodule Hireme.Desk.Card do
           batch_ordinal: non_neg_integer() | nil,
           freshness: atom(),
           gate: atom(),
-          fit: String.t()
+          fit: String.t(),
+          score_100: Hireme.LifeEv.score(),
+          band: Hireme.LifeEv.band()
         }
 
   @doc """
-  Board order: batch first, then rung, then heat, then company.
+  Board order: Life-EV first, then batch, then rung, then heat, then company.
   """
-  @spec order(t()) :: {non_neg_integer(), non_neg_integer(), integer(), String.t()}
+  @spec order(t()) ::
+          {integer(), non_neg_integer(), non_neg_integer(), integer(), String.t()}
   def order(%__MODULE__{} = card) do
-    {card.batch_ordinal || 999, Pipeline.rank(card.stage), -card.heat, card.company}
+    {-card.score_100, card.batch_ordinal || 999, Pipeline.rank(card.stage), -card.heat,
+     card.company}
   end
 end
 

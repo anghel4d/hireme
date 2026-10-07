@@ -25,4 +25,7 @@ Frontmatter: company, title, remote, geo, stacks[], score, hard_pass:false, batc
 ## Matei EV thesis
 Prefer frontier labs / real systems seats / agentic / Rust–C++. Horizon: Anthropic, DeepMind, SpaceXAI, Neuralink, Starfish peers, neoclouds, inference infra, European big-tech systems. Canadian + remote-OK. Maximize life EV ≠ maximize apply count.
 
+## score_100 (standing order)
+Every job/employer gets `score_100` (0–100). Anchors and descending rungs: `alchemy/score-ladder.md`. The hireme desk and MCP directory rank on this number.
+
 Full Dwemer write-up lives with Red chat history 2026-10-07; this file is the operator card.

@@ -64,12 +64,14 @@ defmodule Hireme.Mcp do
   @moduledoc """
   Tool calls for a connected agent.
 
-  The directory socket at `/mcp/websocket` only lists letterboxes.
-  A letterbox socket at `/mcp/letterbox/:letterbox_id/websocket` is the
-  full-duplex lease. Its handle reads and writes one application. The
-  command carried to the consumer has no application id. A job id, a
-  variant id, or a letterbox id in the arguments is checked against the
-  handle and otherwise ignored.
+  The directory socket at `/mcp/websocket` lists, searches, and
+  recommends applications. Ranking on that socket uses `score_100`
+  (Life-EV, 0–100) as the primary signal. A letterbox socket at
+  `/mcp/letterbox/:letterbox_id/websocket` is the full-duplex lease.
+  Its handle reads and writes one application. The command carried to
+  the consumer has no application id. A job id, a variant id, or a
+  letterbox id in the arguments is checked against the handle and
+  otherwise ignored. Neither socket submits an application.
   """
 
   alias Hireme.CvPair
@@ -122,27 +124,57 @@ defmodule Hireme.Mcp do
   defp directory_call("list_batches", _args), do: {:ok, %{"batches" => batch_rows()}}
 
   defp directory_call("list_applications", args) do
-    filters =
-      Filters.from_params(%{
-        "q" => Args.optional_string(args, "q"),
-        "stage" => Args.optional_string(args, "stage"),
-        "status" => Args.optional_string(args, "status") || "all",
-        "batch" => Args.optional_string(args, "batch")
-      })
+    {:ok, %{"applications" => application_rows(list_filters(args))}}
+  end
 
-    cards =
-      Enum.map(Desk.list_cards(filters), fn card ->
-        %{
-          "job_id" => card.id,
-          "company" => card.company,
-          "role" => card.role,
-          "stage" => Pipeline.name(card.stage),
-          "batch" => card.batch_code,
-          "cv_label" => card.cv_label
-        }
-      end)
+  defp directory_call("recommend_applications", args) do
+    min_score =
+      case Args.optional_int(args, "min_score") do
+        {:ok, nil} -> 90
+        {:ok, n} -> n
+        {:error, _} -> 90
+      end
 
-    {:ok, %{"applications" => cards}}
+    limit =
+      case Args.optional_int(args, "limit") do
+        {:ok, nil} -> 25
+        {:ok, n} when n > 0 -> min(n, 100)
+        _ -> 25
+      end
+
+    filters = Filters.merge(list_filters(args), %{min_score: min_score, status: :open})
+
+    {:ok,
+     %{
+       "applications" => Enum.take(application_rows(filters), limit),
+       "min_score" => min_score,
+       "fire" => "hold",
+       "note" => "FIRE HOLD. Ranked by score_100. This tool does not submit."
+     }}
+  end
+
+  defp directory_call("score_distribution", args) do
+    chart = Hireme.LifeEv.chart(Desk.list_cards(list_filters(args)))
+
+    {:ok,
+     %{
+       "n" => chart.n,
+       "mean" => chart.mean,
+       "max" => chart.max,
+       "min" => chart.min,
+       "bands" =>
+         Enum.map(chart.bands, fn row ->
+           %{
+             "band" => Hireme.LifeEv.name(row.key),
+             "label" => row.label,
+             "min" => row.min,
+             "max" => row.max,
+             "count" => row.count,
+             "share" => row.share
+           }
+         end),
+       "bins" => Enum.map(chart.bins, &%{"lo" => &1.lo, "hi" => &1.hi, "count" => &1.count})
+     }}
   end
 
   defp directory_call(name, _args)
@@ -195,14 +227,58 @@ defmodule Hireme.Mcp do
 
   defp directory_tools do
     [
-      tool("list_letterboxes", "List letterbox ids. Lease one to open a duplex socket", %{}),
+      tool(
+        "list_letterboxes",
+        "List letterbox ids ranked by score_100 (Life-EV, 0–100, higher first). Lease one to open a duplex socket. FIRE HOLD — listing does not submit.",
+        %{}
+      ),
       tool("list_batches", "List batches on the desk", %{}),
-      tool("list_applications", "List applications, optionally filtered", %{
-        "q" => %{"type" => "string"},
-        "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-        "status" => %{"type" => "string"},
-        "batch" => %{"type" => "string"}
-      })
+      tool(
+        "list_applications",
+        "Search applications ranked by score_100 (Life-EV, 0–100) as the primary signal, then batch, battleplan, heat. Higher score first. Filters: q, stage, status, batch, band, min_score. FIRE HOLD — does not submit.",
+        %{
+          "q" => %{"type" => "string"},
+          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+          "status" => %{"type" => "string"},
+          "batch" => %{"type" => "string"},
+          "band" => %{
+            "type" => "string",
+            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
+          },
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
+        }
+      ),
+      tool(
+        "recommend_applications",
+        "Recommend high Life-EV keepers. Primary ranking signal is score_100. Default min_score 90 (frontier/labs). FIRE HOLD — never submits.",
+        %{
+          "q" => %{"type" => "string"},
+          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+          "status" => %{"type" => "string"},
+          "batch" => %{"type" => "string"},
+          "band" => %{
+            "type" => "string",
+            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
+          },
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+          "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 100}
+        }
+      ),
+      tool(
+        "score_distribution",
+        "Histogram and band breakdown of score_100 (Life-EV) for the current filter. Primary ranking signal for list/recommend. FIRE HOLD — read only.",
+        %{
+          "q" => %{"type" => "string"},
+          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+          "status" => %{"type" => "string"},
+          "batch" => %{"type" => "string"},
+          "band" => %{
+            "type" => "string",
+            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
+          },
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
+        }
+      )
     ]
   end
 
@@ -238,6 +314,8 @@ defmodule Hireme.Mcp do
         "role" => row.role,
         "stage" => Pipeline.name(row.stage),
         "batch" => row.batch,
+        "score_100" => row.score_100,
+        "band" => Hireme.LifeEv.name(row.band),
         "leased" => row.leased,
         "socket" => "/mcp/letterbox/#{row.id}/websocket"
       }
@@ -267,6 +345,8 @@ defmodule Hireme.Mcp do
       "company" => focus.job.company,
       "role" => focus.job.role,
       "stage" => Pipeline.name(focus.job.current_stage),
+      "score_100" => focus.job.score_100,
+      "band" => Hireme.LifeEv.name(Hireme.LifeEv.band(focus.job.score_100)),
       "cv_label" => focus.variant.label,
       "lines" =>
         Enum.map(focus.masks, fn line ->
@@ -302,6 +382,38 @@ defmodule Hireme.Mcp do
 
   defp mismatch?(nil, _expected), do: false
   defp mismatch?(value, expected), do: value != expected
+
+  defp list_filters(args) do
+    min =
+      case Args.optional_int(args, "min_score") do
+        {:ok, n} -> n
+        _ -> nil
+      end
+
+    Filters.from_params(%{
+      "q" => Args.optional_string(args, "q"),
+      "stage" => Args.optional_string(args, "stage"),
+      "status" => Args.optional_string(args, "status") || "all",
+      "batch" => Args.optional_string(args, "batch"),
+      "band" => Args.optional_string(args, "band"),
+      "min_score" => if(min, do: Integer.to_string(min), else: nil)
+    })
+  end
+
+  defp application_rows(%Filters{} = filters) do
+    Enum.map(Desk.list_cards(filters), fn card ->
+      %{
+        "job_id" => card.id,
+        "company" => card.company,
+        "role" => card.role,
+        "stage" => Pipeline.name(card.stage),
+        "batch" => card.batch_code,
+        "cv_label" => card.cv_label,
+        "score_100" => card.score_100,
+        "band" => Hireme.LifeEv.name(card.band)
+      }
+    end)
+  end
 
   defp tool(name, description, schema) do
     %{

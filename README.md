@@ -60,6 +60,10 @@ Freshness (`open`, `thin`, `closed`, `blocked`) and the gate (`pursue`, `maybe`,
 
 The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch.
 
+## Life-EV (`score_100`)
+
+Every job and employer gets `score_100` (0–100). Standing order from the hunt: OpenAI / Anthropic / SpaceX / Neuralink = 100; Starfish / Valve / GDM / Meta / tier-2 labs = 90; other big tech >$200k = 85; then descending. Ladder: [`alchemy/score-ladder.md`](alchemy/score-ladder.md). The board default-sorts higher first and filters by band / min score. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100`. FIRE HOLD — scoring does not submit.
+
 ## Types
 
 Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Job.parse_status/1`, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
@@ -97,9 +101,11 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | `lib/hireme/desk/signal.ex` | Typed desk change broadcast on the `desk` topic |
 | `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
 | `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
-| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle |
+| `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
+| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100` |
 | `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
 | `lib/hireme_web/live/board_live.ex` | The desk |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
+| `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
 | `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |

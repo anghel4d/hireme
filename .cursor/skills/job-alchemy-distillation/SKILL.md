@@ -34,7 +34,10 @@ Fields: company, title, remote, geo, stacks[], score, hard_pass:false, batch_id,
 ## Matei EV
 Systems / agentic / Rust–C++; frontier labs and real systems seats; Canadian remote-OK. Thesis targets: Anthropic, DeepMind, SpaceXAI, Neuralink, Starfish peers, neoclouds, inference infra. Maximize life EV ≠ maximize apply count.
 
-## Outputs
-Append keepers under `/workspace/broadside-tech/red/alchemy/keepers/` (one markdown card per role, or CSV ledger + cards). Log funnel in `alchemy/funnel-log.md`. FIRE HOLD — never submit.
+## score_100
+Standing order: every job/employer is scored 0–100. Ladder: `alchemy/score-ladder.md`. Hireme lists, filters, MCP `list_applications` / `recommend_applications` / `score_distribution` rank on `score_100`. FIRE HOLD — never submit.
 
-Operator card: `/workspace/broadside-tech/red/alchemy/distillation-method.md`
+## Outputs
+Append keepers under `alchemy/keepers/` (one markdown card per role, or CSV ledger + cards). Log funnel in `alchemy/funnel-log.md`. FIRE HOLD — never submit.
+
+Operator card: `alchemy/distillation-method.md`
