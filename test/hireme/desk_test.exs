@@ -59,7 +59,7 @@ defmodule Hireme.DeskTest do
     assert job.keyword_total == 2
     assert job.mask_altered == 1
     assert job.mask_hidden == 1
-    assert job.current_stage == "fire_ready"
+    assert job.current_stage == :fire_ready
     assert job.pips == "DDDDDAPPPP"
 
     focus = Desk.focus(14_413)
@@ -105,10 +105,10 @@ defmodule Hireme.DeskTest do
         canonical_url: "https://jobs.example.test/keel"
       })
 
-    assert {:error, :fire_hold} = Desk.set_stage(job.id, "submitted")
-    assert {:error, :fire_hold} = Desk.set_stage(job.id, "open_fire")
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, :submitted)
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, :open_fire)
     assert {:ok, _} = Desk.name_open_fire("Batch-001")
-    assert {:ok, moved} = Desk.set_stage(job.id, "submitted")
-    assert moved.current_stage == "submitted"
+    assert {:ok, moved} = Desk.set_stage(job.id, :submitted)
+    assert moved.current_stage == :submitted
   end
 end

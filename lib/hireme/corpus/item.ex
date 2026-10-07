@@ -4,6 +4,8 @@ defmodule Hireme.Corpus.Item do
 
   @kinds [:experience, :project, :education, :skill, :timeline, :fact]
 
+  @type t :: %__MODULE__{}
+
   schema "items" do
     field :kind, Ecto.Enum, values: @kinds
     field :key, :string
