@@ -54,6 +54,34 @@ defmodule Hireme.NetTest do
     assert Net.progress(@today).shipped_week == 0
   end
 
+  test "mixed-key forms keep wire precedence for kind, text, and dates" do
+    assert {:ok, entry} =
+             Net.log(
+               %{
+                 :kind => :draft,
+                 "kind" => "post",
+                 :title => nil,
+                 "title" => "Wire title",
+                 :shipped_on => nil,
+                 "shipped_on" => "2020-01-01",
+                 :body => "atom body",
+                 "body" => nil,
+                 :url => "atom URL",
+                 "url" => ""
+               },
+               @today
+             )
+
+    assert {entry.kind, entry.channel, entry.shipped_on} == {:post, :x, ~D[2020-01-01]}
+    assert {entry.title, entry.body, entry.url} == {"Wire title", "atom body", ""}
+
+    assert Net.log(
+             %{"kind" => "post", "title" => "Bad date", "shipped_on" => " 2020-01-01 "},
+             @today
+           ) ==
+             {:error, {:argument, "shipped_on"}}
+  end
+
   test "ascii says not CRM" do
     text = Net.ascii(Net.progress(@today))
     assert text =~ "NET"
