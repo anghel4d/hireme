@@ -53,5 +53,22 @@ defmodule Hireme.Fixtures do
     )
   end
 
+  @doc "One `tools/call` frame on the directory socket, or on a leased handle."
+  def tool_call(name, args \\ %{}) do
+    Hireme.Mcp.directory(frame(name, args))
+  end
+
+  def tool_call(handle, name, args) do
+    Hireme.Mcp.handle(handle, frame(name, args))
+  end
+
+  defp frame(name, args) do
+    %{
+      "id" => uniq(),
+      "method" => "tools/call",
+      "params" => %{"name" => name, "arguments" => args}
+    }
+  end
+
   def uniq, do: System.unique_integer([:positive])
 end

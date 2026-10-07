@@ -17,54 +17,24 @@ defmodule Hireme.McpTest do
     assert Enum.any?(listed.result.tools, &(&1["name"] == "tailor_line"))
 
     mismatch =
-      Mcp.handle(handle, %{
-        "id" => 2,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "tailor_line",
-          "arguments" => %{"variant_id" => -1, "item_id" => item.id, "mode" => "emphasized"}
-        }
+      tool_call(handle, "tailor_line", %{
+        "variant_id" => -1,
+        "item_id" => item.id,
+        "mode" => "emphasized"
       })
 
     assert mismatch.error.message == "cv_mismatch"
 
-    ok =
-      Mcp.handle(handle, %{
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "tailor_line",
-          "arguments" => %{"item_id" => item.id, "mode" => "emphasized"}
-        }
-      })
-
+    ok = tool_call(handle, "tailor_line", %{"item_id" => item.id, "mode" => "emphasized"})
     assert ok.result["job_id"] == job.id
 
-    moved =
-      Mcp.handle(handle, %{
-        "id" => 4,
-        "method" => "tools/call",
-        "params" => %{"name" => "set_stage", "arguments" => %{"stage" => "gated"}}
-      })
-
+    moved = tool_call(handle, "set_stage", %{"stage" => "gated"})
     assert moved.result == %{"job_id" => job.id, "stage" => "gated"}
 
-    bad =
-      Mcp.handle(handle, %{
-        "id" => 5,
-        "method" => "tools/call",
-        "params" => %{"name" => "set_stage", "arguments" => %{"stage" => "sent"}}
-      })
-
+    bad = tool_call(handle, "set_stage", %{"stage" => "sent"})
     assert bad.error.message == "bad argument stage"
 
-    not_int =
-      Mcp.handle(handle, %{
-        "id" => 6,
-        "method" => "tools/call",
-        "params" => %{"name" => "tailor_line", "arguments" => %{"item_id" => "x"}}
-      })
-
+    not_int = tool_call(handle, "tailor_line", %{"item_id" => "x"})
     assert not_int.error.message == "bad argument item_id"
     assert Letterbox.release(handle) == :ok
   end
@@ -99,7 +69,6 @@ defmodule Hireme.McpTest do
 
   test "directory list and recommend rank by score_100" do
     profile = profile()
-
     job(profile, %{company: "Acme Staffing"})
     high = job(profile, %{company: "OpenAI", role: "Research engineer"})
 
@@ -109,35 +78,16 @@ defmodule Hireme.McpTest do
     assert list_tool["description"] =~ "score_100"
     assert rec_tool["description"] =~ "score_100"
 
-    ranked =
-      Mcp.directory(%{
-        "id" => 2,
-        "method" => "tools/call",
-        "params" => %{"name" => "list_applications", "arguments" => %{"status" => "all"}}
-      })
-
-    apps = ranked.result["applications"]
+    apps = tool_call("list_applications", %{"status" => "all"}).result["applications"]
     assert hd(apps)["company"] == "OpenAI"
     assert hd(apps)["score_100"] == 100
 
-    rec =
-      Mcp.directory(%{
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{"name" => "recommend_applications", "arguments" => %{}}
-      })
-
+    rec = tool_call("recommend_applications")
     assert rec.result["fire"] == "hold"
     assert Enum.any?(rec.result["applications"], &(&1["job_id"] == high.id))
     refute Enum.any?(rec.result["applications"], &(&1["score_100"] < 90))
 
-    dist =
-      Mcp.directory(%{
-        "id" => 4,
-        "method" => "tools/call",
-        "params" => %{"name" => "score_distribution", "arguments" => %{"status" => "all"}}
-      })
-
+    dist = tool_call("score_distribution", %{"status" => "all"})
     assert dist.result["n"] >= 2
     assert Enum.any?(dist.result["bands"], &(&1["band"] == "frontier" and &1["count"] >= 1))
   end
@@ -163,12 +113,7 @@ defmodule Hireme.McpTest do
     assert decoded["method"] == "notifications/desk"
     assert decoded["params"] == %{"type" => "stage", "job_id" => job.id, "stage" => "gated"}
 
-    Phoenix.PubSub.broadcast(
-      Hireme.PubSub,
-      Desk.topic(),
-      {:desk_event, Signal.stage(-1, :gated)}
-    )
-
+    Phoenix.PubSub.broadcast(Hireme.PubSub, Desk.topic(), {:desk_event, Signal.stage(-1, :gated)})
     refute_receive {:desk_event, _}, 50
     assert McpSocket.terminate(:normal, state) == :ok
   end
@@ -176,12 +121,7 @@ defmodule Hireme.McpTest do
   test "a second connection cannot lease the same letterbox" do
     %{letterbox_id: letterbox_id} = opened()
     {:ok, _state} = McpSocket.init(%{id: letterbox_id})
-
-    task =
-      Task.async(fn ->
-        McpSocket.init(%{id: letterbox_id})
-      end)
-
+    task = Task.async(fn -> McpSocket.init(%{id: letterbox_id}) end)
     assert {:stop, :busy, %{}} = Task.await(task)
   end
 
@@ -198,72 +138,30 @@ defmodule Hireme.McpTest do
     assert gym_tool["description"] =~ "does not submit"
 
     logged =
-      Mcp.directory(%{
-        "id" => 2,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "gym_log",
-          "arguments" => %{
-            "platform" => "leetcode",
-            "title" => "Number of Islands",
-            "topic" => "graphs",
-            "outcome" => "solved"
-          }
-        }
+      tool_call("gym_log", %{
+        "platform" => "leetcode",
+        "title" => "Number of Islands",
+        "topic" => "graphs",
+        "outcome" => "solved"
       })
 
     assert logged.result["title"] == "Number of Islands"
     assert logged.result["progress"]["solved_today"] == 1
     assert logged.result["progress"]["note"] =~ "not Life-EV"
+    assert tool_call("gym_status").result["streak"] >= 1
 
-    status =
-      Mcp.directory(%{"id" => 3, "method" => "tools/call", "params" => %{"name" => "gym_status"}})
-
-    assert status.result["streak"] >= 1
-
-    lane =
-      Mcp.directory(%{
-        "id" => 4,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "net_set_lane",
-          "arguments" => %{"url" => "https://observer.example.test/lane"}
-        }
-      })
-
+    lane = tool_call("net_set_lane", %{"url" => "https://observer.example.test/lane"})
     assert lane.result["lane"] == "https://observer.example.test/lane"
 
-    post =
-      Mcp.directory(%{
-        "id" => 5,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "net_log",
-          "arguments" => %{"kind" => "observer", "title" => "Evening pass"}
-        }
-      })
-
+    post = tool_call("net_log", %{"kind" => "observer", "title" => "Evening pass"})
     assert post.result["kind"] == "observer"
     assert post.result["progress"]["observer_runs"] == 1
     assert post.result["progress"]["note"] =~ "Not CRM"
 
-    bad =
-      Mcp.directory(%{
-        "id" => 6,
-        "method" => "tools/call",
-        "params" => %{"name" => "gym_log", "arguments" => %{"platform" => "leetcode"}}
-      })
-
+    bad = tool_call("gym_log", %{"platform" => "leetcode"})
     assert bad.error.message == "bad argument title"
 
-    ranked =
-      Mcp.directory(%{
-        "id" => 7,
-        "method" => "tools/call",
-        "params" => %{"name" => "list_applications", "arguments" => %{"status" => "all"}}
-      })
-
-    assert is_list(ranked.result["applications"])
+    assert is_list(tool_call("list_applications", %{"status" => "all"}).result["applications"])
   end
 
   test "directory heat_status and can_apply gate the queue without submitting" do
@@ -272,27 +170,13 @@ defmodule Hireme.McpTest do
     assert "heat_status" in names
     assert "can_apply" in names
 
-    profile = profile()
+    job = job(profile(), %{company: "Obscure Shop"})
 
-    job = job(profile, %{company: "Obscure Shop"})
-
-    status =
-      Mcp.directory(%{
-        "id" => 2,
-        "method" => "tools/call",
-        "params" => %{"name" => "heat_status"}
-      })
-
+    status = tool_call("heat_status")
     assert status.result["note"] =~ "does not submit"
     assert is_list(status.result["companies"])
 
-    allowed =
-      Mcp.directory(%{
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{"name" => "can_apply", "arguments" => %{"role_id" => job.id}}
-      })
-
+    allowed = tool_call("can_apply", %{"role_id" => job.id})
     assert allowed.result["decision"] in ["allow", "defer"]
     assert allowed.result["fire"] == "hold"
   end
