@@ -55,6 +55,24 @@ defmodule Hireme.HeatTest do
            }
 
     assert Ats.parse("https://jobs.example.test/plain") == %{vendor: :unknown, tenant: nil}
+
+    for {url, vendor, tenant} <- [
+          {"https://acme.greenhouse.net/jobs", :greenhouse, "acme"},
+          {"https://greenhouse.net/acme", :unknown, nil},
+          {"https://lever.co/jobs", :lever, nil},
+          {"https://acme.workable.com/careers", :workable, "acme"},
+          {"https://acme.taleo.net/jobs", :taleo, "acme"},
+          {"https://acme.successfactors.eu/jobs", :successfactors, "acme"},
+          {"https://successfactors.com/acme", :unknown, nil},
+          {"https://acme.bamboohr.com/jobs", :bamboohr, "acme"},
+          {"https://rippling.com/acme", :unknown, nil},
+          {"https://ats.rippling.com/ACME/jobs", :rippling, "acme"},
+          {"https://acme.eightfold.ai/jobs", :eightfold, "acme"},
+          {"https://gem.com/jobs/ACME", :gem, "acme"},
+          {"https://jobs.lever.co.evil.test/acme", :unknown, nil}
+        ] do
+      assert Ats.parse(url) == %{vendor: vendor, tenant: tenant}, url
+    end
   end
 
   test "same department and cloned titles cost extra; spread does not" do
@@ -149,6 +167,10 @@ defmodule Hireme.HeatTest do
     assert {:ok, _} = Heat.set_override(second.id, "Matei said this one")
     assert {:ok, moved} = Desk.set_stage(second.id, :fire_ready)
     assert moved.current_stage == :fire_ready
+
+    snapshot = Heat.snapshot()
+    assert Heat.decorate(moved, snapshot) == Heat.decorate(moved, Map.delete(snapshot, :ats))
+    assert Heat.chart().companies |> Enum.any?(&(&1.n == 2))
   end
 
   test "govern_batch unassigns the lower-score role and leaves it leftover" do
@@ -201,6 +223,77 @@ defmodule Hireme.HeatTest do
     assert verdict.decision == :defer
     assert verdict.reason == :company_cap
     assert is_nil(verdict.cooldown_days) or verdict.cooldown_days >= 0
+  end
+
+  test "cached mix agrees with sequential verdicts, including overrides and dated peers" do
+    cfg = %{Heat.config() | ats_batch_cap: 3, ats_vendor_cap: 4.0, ats_tenant_cap: 2.0}
+
+    jobs =
+      for id <- 1..40 do
+        company = Enum.at(["Google", "OpenAI", "SmallCo", "GOOGLE"], rem(id, 4))
+        host = Enum.at(["jobs.lever.co", "boards.greenhouse.io", "jobs.example.test"], rem(id, 3))
+
+        probe(
+          company,
+          "Engineer",
+          rem(id * 13, 101),
+          id,
+          "https://#{host}/tenant#{rem(id, 5)}/#{id}"
+        )
+        |> Map.merge(%{
+          stage_on: Date.add(@today, -id),
+          heat_override: rem(id, 7) == 0,
+          heat_override_reason: "referral"
+        })
+      end
+
+    opts = [existing: Enum.take(jobs, 6), today: @today, config: cfg]
+
+    expected =
+      jobs
+      |> Enum.sort_by(&{-&1.score_100, Org.company_key(&1.company), &1.id})
+      |> Enum.reduce(%{kept: [], deferred: []}, fn job, acc ->
+        verdict = Heat.can_apply(job, Keyword.put(opts, :batch_kept, acc.kept))
+
+        if verdict.decision == :allow,
+          do: %{acc | kept: acc.kept ++ [job]},
+          else: %{acc | deferred: acc.deferred ++ [{job, verdict}]}
+      end)
+
+    assert expected.kept != [] and expected.deferred != []
+    assert Heat.mix(Enum.reverse(jobs), opts) == expected
+  end
+
+  test "self IDs are excluded from loads, but still count against the batch vendor cap" do
+    job = probe("Google", "Engineer", 90, 1, "https://jobs.lever.co/google/1")
+    opts = [existing: [job], batch_kept: [job], today: @today]
+    verdict = Heat.can_apply(job, opts)
+    assert {verdict.company_load, verdict.vendor_load, verdict.tenant_load} == {0.0, 0.0, 0.0}
+    assert verdict.reason == :ok
+
+    assert Heat.can_apply(job, Keyword.put(opts, :config, %{Heat.config() | ats_batch_cap: 1})).reason ==
+             :ats_batch_cap
+
+    anonymous = %{job | id: nil}
+    assert Heat.can_apply(anonymous, existing: [anonymous], today: @today).company_load == 1.0
+    unknown = %{job | listing_url: "https://jobs.example.test/1"}
+
+    assert Heat.can_apply(
+             unknown,
+             Keyword.put(opts, :config, %{Heat.config() | ats_batch_cap: 0})
+           ).reason == :ok
+  end
+
+  test "empty heat charts and the closed heat-state parser keep their wire forms" do
+    assert Heat.ascii(%Hireme.Heat.Chart{companies: [], vendors: []}) ==
+             "HEAT companies\n(none)\nHEAT ATS\n(none)\nFIRE HOLD. Governor gates the queue. It does not submit."
+
+    for state <- [:all, :cool, :warm, :hot, :blocked] do
+      assert Heat.parse_state(state) == {:ok, state}
+      assert Heat.parse_state(Atom.to_string(state)) == {:ok, state}
+    end
+
+    for invalid <- [nil, "", "COOL", :unknown, 1], do: assert(Heat.parse_state(invalid) == :error)
   end
 
   defp probe(company, role, score, id, url \\ nil) do
