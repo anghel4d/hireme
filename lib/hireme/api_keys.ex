@@ -98,7 +98,7 @@ defmodule Hireme.ApiKeys do
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
-    with :ok <- Security.limit("api_key:#{peer}", :timer.minutes(1), 20),
+    with :ok <- Security.limit(:api_key_peer, peer),
          {:ok, key_id, secret} <- parse(presented),
          %Key{} = key <- Repo.get_by(Key, [key_id: key_id], skip_account: true),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),

@@ -359,7 +359,7 @@ defmodule Hireme.Mfa do
   end
 
   defp throttle(%Session{account_id: id}) do
-    Security.limit("mfa:#{id}", :timer.minutes(15), 10)
+    Security.limit(:mfa_account, id)
   end
 
   # Every factor that could have matched took a failure; at the limit it is disabled.

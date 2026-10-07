@@ -51,13 +51,22 @@ defmodule Hireme.Security do
   @spec api_keys_per_account() :: pos_integer()
   def api_keys_per_account, do: 100
 
-  @doc """
-  Count `key` once in a window of `scale_ms`; refuse past `max`.
-  ASVS 6.3.1 / 6.6.3: brute force on any factor is throttled here.
-  """
-  @spec limit(String.t(), pos_integer(), pos_integer()) :: :ok | {:error, :rate_limited}
-  def limit(key, scale_ms, max) do
-    case Hireme.RateLimit.hit(key, scale_ms, max) do
+  # Every throttle in the desk, by name: the window and how many fit in it.
+  # ASVS 6.3.1 / 6.6.3: brute force on any factor is refused here.
+  @limits %{
+    link_address: {:timer.minutes(10), 5},
+    link_peer: {:timer.minutes(10), 20},
+    redeem_peer: {:timer.minutes(10), 20},
+    mfa_account: {:timer.minutes(15), 10},
+    api_key_peer: {:timer.minutes(1), 20}
+  }
+
+  @doc "Count one attempt under the named policy for `key`; refuse past its cap."
+  @spec limit(atom(), String.t() | pos_integer()) :: :ok | {:error, :rate_limited}
+  def limit(name, key) when is_map_key(@limits, name) do
+    {scale_ms, max} = Map.fetch!(@limits, name)
+
+    case Hireme.RateLimit.hit("#{name}:#{key}", scale_ms, max) do
       {:allow, _} -> :ok
       {:deny, _} -> {:error, :rate_limited}
     end
