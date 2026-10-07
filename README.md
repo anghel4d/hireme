@@ -6,9 +6,11 @@ A local desk for a large set of job applications. Each application is a card. Fo
 
 SQLite holds the corpus, a per-application mask over that corpus, batches, a scoreboard snapshot, and a private narrative. The narrative is one text blob per user, with a version and `updated_at`. It is not the root CV and it is not a mask. Application export omits it while it is private, which is the default.
 
+The BEAM owns the data and the rules. The browser owns the board: the desk arrives as one columnar packet, lives in a hand-written WebAssembly column store, and every keystroke on the grid is a selection over resident columns. Nothing round-trips to draw a card.
+
 ## Run
 
-Elixir 1.17+ and Erlang/OTP 27+.
+Elixir 1.17+ and Erlang/OTP 27+. `wat2wasm` (wabt) to rebuild the kernel; the built `priv/static/wasm/desk.wasm` is committed, so a clone runs without it.
 
 ```bash
 mix setup
@@ -66,6 +68,14 @@ Every job and employer gets `score_100` (0–100). A pack may set it (`score_100
 
 The board orders by `score_100` first, then batch, rung, and heat. The top bar filters by band or a minimum score. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100` and take `min_score` and `band`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
 
+## Board
+
+`GET /api/pack` is the whole desk as one `HDP1` packet: `"HDP1"`, a u32 header length, a JSON directory, then the body. The directory names every column with its kind (`u32` or `str`) and byte offset, and carries the lookup tables the integer columns index into: stages, statuses, freshness, gates, bands, batches, profiles. Rows are already in board order (`score_100` first, then batch, rung, heat, company). A `str` column is `n + 1` offsets followed by UTF-8 bytes; one of them is a lowercase search haystack per card.
+
+`assets/wasm/desk.wat` is the column store: a bump allocator, `select` (score floor, band range, stage, status, batch, profile, and a byte-level substring scan of the haystack) that writes passing row indices in packet order, and `find`. It is 656 bytes of WebAssembly and knows nothing about jobs.
+
+`assets/js/` is the shell: `packet.ts` reads the directory, `store.ts` copies the body into kernel memory and views columns as typed arrays with strings decoded on demand, `filters.ts` is the filter ADT parsed from and written to the address, `grid.ts` is the row-major `hjkl` rule and the painted window, `html.ts` is an escaping template tag and a `morph` that changes only what differs, `views.ts` are pure functions from model to HTML, `shell.ts` is the model, the update, and the draw. Focus, battleplan, and root come from `/api/focus/:id` and `/api/root/:id`; writes are `POST /api/...` and answer with the new focus or a status code that says why not (`409 fire_hold`, `423 leased`). `/feed/websocket` pushes every desk signal so an open board refreshes when an agent writes.
+
 ## Types
 
 Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Job.parse_status/1`, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
@@ -106,7 +116,11 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100` |
 | `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
-| `lib/hireme_web/live/board_live.ex` | The desk |
+| `lib/hireme/desk/packet.ex` | The desk as one HDP1 columnar packet |
+| `lib/hireme_web/controllers/desk_controller.ex` | Packet, focus, root, scoreboard, and writes over HTTP |
+| `lib/hireme_web/feed_socket.ex` | Push feed of desk signals to the shell |
+| `assets/wasm/desk.wat` | The column store |
+| `assets/js/shell.ts` | Model, update, draw |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
 | `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
 | `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |

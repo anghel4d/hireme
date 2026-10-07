@@ -13,7 +13,6 @@ defmodule HiremeWeb.ConnCase do
 
       import Plug.Conn
       import Phoenix.ConnTest
-      import Phoenix.LiveViewTest
       import HiremeWeb.ConnCase
     end
   end

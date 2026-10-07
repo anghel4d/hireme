@@ -10,7 +10,6 @@ defmodule Hireme.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
   end
@@ -46,8 +45,6 @@ defmodule Hireme.MixProject do
       {:ecto_sqlite3, ">= 0.0.0"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
-      {:phoenix_live_view, "~> 1.2.0"},
-      {:lazy_html, ">= 0.1.0", only: :test},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
@@ -68,8 +65,13 @@ defmodule Hireme.MixProject do
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
       "assets.setup": ["esbuild.install --if-missing"],
-      "assets.build": ["compile", "esbuild hireme"],
+      "assets.build": [
+        "compile",
+        "cmd --cd assets wat2wasm wasm/desk.wat -o ../priv/static/wasm/desk.wasm",
+        "esbuild hireme"
+      ],
       "assets.deploy": [
+        "cmd --cd assets wat2wasm wasm/desk.wat -o ../priv/static/wasm/desk.wasm",
         "esbuild hireme --minify",
         "phx.digest"
       ],

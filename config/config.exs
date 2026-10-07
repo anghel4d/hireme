@@ -19,20 +19,14 @@ config :hireme, HiremeWeb.Endpoint,
     formats: [html: HiremeWeb.ErrorHTML, json: HiremeWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: Hireme.PubSub,
-  live_view: [signing_salt: "RsJrh09q"]
-
-# Configure LiveView
-config :phoenix_live_view,
-  # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
-  root_tag_attribute: "phx-r"
+  pubsub_server: Hireme.PubSub
 
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
   hireme: [
     args:
-      ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
+      ~w(js/app.ts --bundle --format=esm --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/*),
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
