@@ -96,6 +96,7 @@ defmodule HiremeWeb.Auth do
       "camera=(), microphone=(), geolocation=(), payment=()"
     )
     |> put_resp_header("cross-origin-opener-policy", "same-origin")
+    |> put_resp_header("x-frame-options", "DENY")
   end
 
   @doc """

@@ -180,9 +180,7 @@ defmodule Hireme.Mfa do
   def confirm_webauthn(%Session{} = session, params, meta \\ %{}) do
     with {:ok, challenge} <- take_challenge(session, :webauthn_register),
          {:ok, attrs} <- WebAuthn.register(challenge, params),
-         nil <-
-           Repo.get_by(Method, [credential_id: attrs.credential_id], skip_account: true) ||
-             {:error, :duplicate} do
+         :ok <- unused_credential(attrs.credential_id) do
       first? = not enrolled?()
 
       method =
@@ -406,9 +404,21 @@ defmodule Hireme.Mfa do
     })
   end
 
+  # A credential id is global: the same authenticator must not enrol on two accounts.
+  defp unused_credential(credential_id) do
+    case Repo.get_by(Method, [credential_id: credential_id], skip_account: true) do
+      nil -> :ok
+      %Method{} -> {:error, :duplicate}
+    end
+  end
+
   defp insert_method!(%Session{account_id: account_id}, attrs) do
+    name = attrs |> Map.get(:name, "") |> to_string() |> String.slice(0, 100)
+
     %Method{}
-    |> Method.changeset(Map.merge(attrs, %{account_id: account_id, verified_at: now()}))
+    |> Method.changeset(
+      Map.merge(attrs, %{name: name, account_id: account_id, verified_at: now()})
+    )
     |> Repo.insert!()
   end
 
