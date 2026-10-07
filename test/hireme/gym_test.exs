@@ -102,6 +102,54 @@ defmodule Hireme.GymTest do
     assert second.problem.difficulty == :medium
   end
 
+  test "minutes remain strict nonnegative integers, not rounded or trimmed" do
+    for {value, expected} <- [
+          {7, 7},
+          {"7", 7},
+          {"+7", 7},
+          {2.6, 0},
+          {" 7 ", 0},
+          {-1, 0},
+          {"-1", 0},
+          {"7x", 0},
+          {nil, 0}
+        ] do
+      assert {:ok, rep} = Gym.log(%{"title" => "Strict minutes", "minutes" => value}, @today)
+      assert rep.minutes == expected
+    end
+  end
+
+  test "lane forms prefer truthy string keys before atom keys" do
+    assert {:ok, rep} =
+             Gym.log(
+               %{
+                 :title => nil,
+                 "title" => "Mixed keys",
+                 :platform => :other,
+                 "platform" => "leetcode",
+                 :minutes => 25,
+                 "minutes" => false,
+                 :done_on => @today,
+                 "done_on" => "2020-01-01",
+                 :note => "atom note",
+                 "note" => ""
+               },
+               @today
+             )
+
+    assert rep.problem.title == "Mixed keys"
+    assert rep.problem.platform == :leetcode
+    assert {rep.minutes, rep.done_on, rep.note} == {25, ~D[2020-01-01], ""}
+  end
+
+  test "implicit empty slugs are refused; explicit empty normalized slugs reach the changeset" do
+    assert Gym.log(%{"title" => "!!!"}, @today) == {:error, {:argument, "slug"}}
+
+    assert_raise Ecto.InvalidChangesetError, fn ->
+      Gym.log(%{"title" => "Explicit slug", "slug" => "!!!"}, @today)
+    end
+  end
+
   test "ascii names conditioning and not Life-EV" do
     text = Gym.ascii(Gym.progress(@today))
     assert text =~ "GYM"

@@ -3,13 +3,39 @@ defmodule Hireme.Lanes do
   # Form readers the gym and the net share. Every reader answers
   # `{:ok, value}` or `{:error, {:argument, name}}`; nothing raises.
 
-  alias Hireme.Attrs
   alias Hireme.Closed
+
+  # Lane forms historically prefer a truthy string key, then its atom key.
+  # Attrs uses atom-key presence instead; do not interchange these readers.
+  defp get(attrs, name), do: Map.get(attrs, Atom.to_string(name)) || Map.get(attrs, name)
+
+  def string(attrs, name) do
+    case get(attrs, name) do
+      s when is_binary(s) -> String.trim(s)
+      _ -> ""
+    end
+  end
+
+  def nonnegative(attrs, name) do
+    case get(attrs, name) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 -> n
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
+  end
 
   # A member of `set` named by the form, `default` when the field is
   # blank, refused otherwise. A nil default makes the field required.
   def closed(attrs, name, set, default) do
-    case Attrs.get(attrs, name) do
+    case get(attrs, name) do
       blank when blank in [nil, ""] ->
         if default, do: {:ok, default}, else: argument(name)
 
@@ -23,7 +49,7 @@ defmodule Hireme.Lanes do
 
   # A date from the form, `default` when blank, refused when unreadable.
   def day(attrs, name, default) do
-    case Attrs.get(attrs, name) do
+    case get(attrs, name) do
       blank when blank in [nil, ""] ->
         {:ok, default}
 
@@ -42,7 +68,7 @@ defmodule Hireme.Lanes do
   end
 
   def required(attrs, name) do
-    case Attrs.string(attrs, name) do
+    case string(attrs, name) do
       "" -> argument(name)
       text -> {:ok, text}
     end
@@ -87,7 +113,6 @@ defmodule Hireme.Gym do
   """
 
   import Ecto.Query
-  alias Hireme.Attrs
   alias Hireme.Closed
   alias Hireme.Gym.Problem
   alias Hireme.Gym.Progress
@@ -166,15 +191,15 @@ defmodule Hireme.Gym do
          {:ok, slug} <- slug(attrs, title) do
       Repo.transaction(fn ->
         problem =
-          upsert_problem!(platform, slug, title, topic, difficulty, Attrs.string(attrs, :url))
+          upsert_problem!(platform, slug, title, topic, difficulty, Lanes.string(attrs, :url))
 
         %Rep{}
         |> Rep.changeset(%{
           problem_id: problem.id,
           done_on: done_on,
-          minutes: max(Attrs.int(attrs, :minutes, 0), 0),
+          minutes: Lanes.nonnegative(attrs, :minutes),
           outcome: outcome,
-          note: Attrs.string(attrs, :note)
+          note: Lanes.string(attrs, :note)
         })
         |> Repo.insert!()
         |> Repo.preload(:problem)
@@ -237,16 +262,9 @@ defmodule Hireme.Gym do
   defp parse_target(_), do: {:error, :target}
 
   defp slug(attrs, title) do
-    source =
-      case Attrs.string(attrs, :slug) do
-        "" -> title
-        given -> given
-      end
-
-    case Text.slug(source) do
-      "" -> {:error, {:argument, "slug"}}
-      slug -> {:ok, slug}
-    end
+    given = Lanes.string(attrs, :slug)
+    slug = Text.slug(if(given == "", do: title, else: given))
+    if given == "" and slug == "", do: {:error, {:argument, "slug"}}, else: {:ok, slug}
   end
 
   defp upsert_problem!(platform, slug, title, topic, difficulty, url) do
@@ -341,7 +359,6 @@ defmodule Hireme.Net do
   """
 
   import Ecto.Query
-  alias Hireme.Attrs
   alias Hireme.Closed
   alias Hireme.Kv
   alias Hireme.Lanes
@@ -401,8 +418,8 @@ defmodule Hireme.Net do
         kind: kind,
         channel: channel,
         title: title,
-        url: Attrs.string(attrs, :url),
-        body: Attrs.string(attrs, :body),
+        url: Lanes.string(attrs, :url),
+        body: Lanes.string(attrs, :body),
         shipped_on: shipped_on
       })
       |> Repo.insert()
