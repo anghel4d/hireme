@@ -124,12 +124,13 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 
 | Path | Role |
 | --- | --- |
-| `lib/hireme/types.ex` | `Schema`, `Closed`, `Attrs`, `Text`: the one way a loose value is read |
+| `lib/hireme/types.ex` | `Schema`, `Closed`, `Attrs`, `Form`, `Text`: the one way a loose value is read |
 | `lib/hireme/schema.ex` | Every row the desk stores |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
 | `lib/hireme/cv.ex` | Corpus, narrative, kv, `Theme`, `Mask`, `Keywords`, the composed `Cv.Document`, `CvPair` and the quarterly cooldown |
 | `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
-| `lib/hireme/lanes.ex` | `Gym` (problems, reps, streak, daily target) and `Net` (Observer runs, posts, drafts). Not CRM |
+| `lib/hireme/gym.ex` | Conditioning grind: problems, reps, streak, daily target |
+| `lib/hireme/net.ex` | Broadside Observer runs, posts, artifacts, drafts. Not CRM |
 | `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` |
 | `lib/hireme/campaign.ex` | Scoreboard and batch variety |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
