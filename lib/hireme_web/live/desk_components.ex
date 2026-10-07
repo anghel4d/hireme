@@ -5,9 +5,12 @@ defmodule HiremeWeb.DeskComponents do
   use HiremeWeb, :html
 
   alias Hireme.Desk.Job
+  alias Hireme.Gym
+  alias Hireme.Heat
   alias Hireme.Keywords.Coverage
-  alias Hireme.Pipeline
   alias Hireme.LifeEv
+  alias Hireme.Net
+  alias Hireme.Pipeline
   alias Hireme.Desk.Filters
 
   attr :filters, Filters, required: true
@@ -96,14 +99,28 @@ defmodule HiremeWeb.DeskComponents do
           phx-debounce="300"
           class="min-score"
         />
+        <select name="heat" aria-label="Heat">
+          <option value="all" selected={@filters.heat == :all}>All heat</option>
+          <option
+            :for={state <- [:cool, :warm, :hot, :blocked]}
+            value={Heat.state_name(state)}
+            selected={@filters.heat == state}
+          >
+            {Heat.state_name(state)}
+          </option>
+        </select>
         <span class="count">{@count} showing</span>
       </form>
+      <button type="button" id="open-gym" class="ghost" phx-click="gym">Gym</button>
+      <button type="button" id="open-net" class="ghost" phx-click="net">Net</button>
       <button type="button" id="root-cv" class="ghost" phx-click="root">Root CV</button>
     </header>
     """
   end
 
   attr :board, Hireme.Campaign.Scoreboard, required: true
+  attr :gym, Gym.Progress, required: true
+  attr :net, Net.Progress, required: true
 
   def scoreboard(assigns) do
     ~H"""
@@ -117,6 +134,12 @@ defmodule HiremeWeb.DeskComponents do
       <span>submitted today {@board.submitted_today}</span>
       <span>cumulative {@board.cumulative}</span>
       <span>pace {@board.submitted_today}/{@board.apps_target}</span>
+      <button type="button" id="score-gym" class="lane-pill" phx-click="gym">
+        gym {@gym.solved_today}/{@gym.target} · {@gym.streak}d · pace {@gym.score}
+      </button>
+      <button type="button" id="score-net" class="lane-pill" phx-click="net">
+        net {@net.shipped_week} shipped · {@net.drafts} drafts · obs {@net.observer_runs}
+      </button>
       <span :for={row <- @board.varieties} class="variety">
         {row.code} {row.label}
       </span>
@@ -157,6 +180,55 @@ defmodule HiremeWeb.DeskComponents do
   defp bar_height(0, _peak), do: 4
   defp bar_height(n, peak), do: max(round(n / max(peak, 1) * 100), 8)
 
+  attr :chart, Heat.Chart, required: true
+  attr :filters, Filters, required: true
+
+  def heat_chart(assigns) do
+    ~H"""
+    <div id="heat-chart" class="heat-chart">
+      <div class="ev-meta">
+        <span class="pill">HEAT</span>
+        <span>{length(@chart.companies)} companies</span>
+        <span>{length(@chart.vendors)} ATS</span>
+      </div>
+      <div class="heat-cols">
+        <div class="ev-bands" aria-label="Company heat">
+          <.link
+            :for={row <- Enum.take(@chart.companies, 8)}
+            patch={~p"/?#{Filters.to_query(Filters.merge(@filters, %{q: row.label}))}"}
+            id={"heat-co-#{row.key}"}
+            class={[
+              "ev-band",
+              @filters.q != "" and
+                String.contains?(String.downcase(row.label), String.downcase(@filters.q)) && "is-on"
+            ]}
+            title={"#{row.label} #{row.load}/#{row.cap} cooldown #{row.cooldown_days || 0}d"}
+          >
+            <span class="ev-band-label">{row.label}</span>
+            <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
+            <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
+          </.link>
+          <p :if={@chart.companies == []} class="sub">No queued company heat.</p>
+        </div>
+        <div class="ev-bands" aria-label="ATS heat">
+          <.link
+            :for={row <- Enum.take(@chart.vendors, 8)}
+            patch={~p"/?#{Filters.to_query(Filters.merge(@filters, %{q: row.label}))}"}
+            id={"heat-ats-#{row.key}"}
+            class="ev-band"
+            title={"#{row.label} #{row.load}/#{row.cap}"}
+          >
+            <span class="ev-band-label">{row.label}</span>
+            <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
+            <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
+          </.link>
+          <p :if={@chart.vendors == []} class="sub">No ATS heat.</p>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   attr :card, Hireme.Desk.Card, required: true
   attr :x, :integer, required: true
   attr :y, :integer, required: true
@@ -177,6 +249,16 @@ defmodule HiremeWeb.DeskComponents do
       <div class="card-kicker">
         <span class="code">{@card.batch_code || Hireme.Desk.code(@card.id)}</span>
         <.score score={@card.score_100} />
+        <span
+          class={[
+            "heat-load",
+            @card.heat_state == :blocked && "is-blocked",
+            @card.heat_state == :hot && "is-hot"
+          ]}
+          title={"company heat #{@card.load}/#{@card.cap}"}
+        >
+          {Float.round(@card.load, 1)}/{Float.round(@card.cap, 1)}
+        </span>
         <span class="stage-name">{Pipeline.label(@card.stage)}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
@@ -230,9 +312,30 @@ defmodule HiremeWeb.DeskComponents do
         <p class="sub">{@focus.job.role}</p>
         <p class="sub">{@focus.job.location}</p>
         <p class="sub">{fire_line(@focus.job)}</p>
+        <p class="sub" id="heat-line">{heat_line(@focus.job)}</p>
       </header>
       <p :if={!@in_filter} class="banner">This application is outside the current filter.</p>
       <p :if={@hold_error} id="hold-error" class="banner hold-error">{@hold_error}</p>
+      <form
+        :if={!@focus.job.heat_override}
+        id="heat-override"
+        class="field"
+        phx-submit="heat_override"
+      >
+        <label for="heat-reason">HEAT override reason</label>
+        <div class="row">
+          <input
+            id="heat-reason"
+            type="text"
+            name="reason"
+            placeholder="Why this role may exceed cap"
+          />
+          <button type="submit" class="ghost">Override</button>
+        </div>
+      </form>
+      <p :if={@focus.job.heat_override} class="sub">
+        HEAT override · {@focus.job.heat_override_reason}
+      </p>
       <div>
         <div class="meta">
           <span class="pips">
@@ -368,6 +471,163 @@ defmodule HiremeWeb.DeskComponents do
           <.paper cv={@focus.cv} editable editing_id={@editing_id} alter_error={@alter_error} />
           <p :if={@focus.job.listing != ""} class="sub">{String.trim(@focus.job.listing)}</p>
         </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :gym, Gym.Progress, required: true
+  attr :error, :any, default: nil
+
+  def gym_view(assigns) do
+    peak = assigns.gym.topics |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
+    assigns = assign(assigns, :peak, peak)
+
+    ~H"""
+    <div id="gym" class="lane-page">
+      <div class="bp-bar">
+        <button type="button" id="back-from-gym" class="ghost" phx-click="back">Back</button>
+        <div class="grow">
+          <p class="kicker">Gym · jumping jacks for the fight</p>
+          <h2>Conditioning, not the job</h2>
+          <p class="sub">
+            LeetCode, Codeforces, systems drills. Daily {@gym.solved_today}/{@gym.target} · streak {@gym.streak}d · week {@gym.solved_week} · pace {@gym.score}
+          </p>
+        </div>
+      </div>
+      <p :if={@error} id="gym-error" class="banner hold-error">{@error}</p>
+      <div class="lane-body">
+        <div class="lane-forms">
+          <form id="gym-target" class="lane-form" phx-submit="gym_target">
+            <label class="section-label" for="gym-target-n">Daily solved target</label>
+            <input id="gym-target-n" type="number" name="target" min="1" max="30" value={@gym.target} />
+            <button type="submit" class="ghost">Set target</button>
+          </form>
+          <form id="gym-log" class="lane-form" phx-submit="gym_log">
+            <label class="section-label">Log a rep</label>
+            <select name="platform" aria-label="Platform">
+              <option :for={platform <- Gym.platforms()} value={Gym.name(platform)}>
+                {Gym.label(platform)}
+              </option>
+            </select>
+            <input type="text" name="title" placeholder="Two Sum" required aria-label="Problem title" />
+            <input type="text" name="slug" placeholder="two-sum" aria-label="Slug" />
+            <select name="topic" aria-label="Topic">
+              <option :for={topic <- Gym.topics()} value={Gym.name(topic)}>{Gym.label(topic)}</option>
+            </select>
+            <select name="difficulty" aria-label="Difficulty">
+              <option :for={diff <- Gym.difficulties()} value={Gym.name(diff)}>
+                {Gym.label(diff)}
+              </option>
+            </select>
+            <select name="outcome" aria-label="Outcome">
+              <option :for={outcome <- Gym.outcomes()} value={Gym.name(outcome)}>
+                {Gym.label(outcome)}
+              </option>
+            </select>
+            <input type="number" name="minutes" min="0" placeholder="min" aria-label="Minutes" />
+            <input
+              type="url"
+              name="url"
+              placeholder="https://leetcode.com/problems/…"
+              aria-label="URL"
+            />
+            <input type="text" name="note" placeholder="Note" aria-label="Note" />
+            <button type="submit" class="primary">Log rep</button>
+          </form>
+        </div>
+        <div class="lane-side">
+          <div class="ev-bands" aria-label="Topic counts">
+            <div :for={row <- @gym.topics} class="ev-band">
+              <span class="ev-band-label">{row.label}</span>
+              <span class="ev-band-bar" style={"width: #{bin_pct(row.count, @peak)}%"}></span>
+              <span class="ev-band-n">{row.count}</span>
+            </div>
+          </div>
+          <ul id="gym-recent" class="lane-list">
+            <li :if={@gym.recent == []} class="empty">No reps yet. Log the first jump.</li>
+            <li :for={rep <- @gym.recent} id={"rep-#{rep.id}"}>
+              <span class="lane-meta">
+                {Date.to_iso8601(rep.done_on)} · {Gym.label(rep.problem.platform)} · {Gym.label(
+                  rep.outcome
+                )}
+              </span>
+              <strong>{rep.problem.title}</strong>
+              <span class="sub">
+                {Gym.label(rep.problem.topic)} · {Gym.label(rep.problem.difficulty)}
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :net, Net.Progress, required: true
+  attr :error, :any, default: nil
+
+  def net_view(assigns) do
+    ~H"""
+    <div id="net" class="lane-page">
+      <div class="bp-bar">
+        <button type="button" id="back-from-net" class="ghost" phx-click="back">Back</button>
+        <div class="grow">
+          <p class="kicker">Net · not CRM</p>
+          <h2>Broadside Observer + ship the work</h2>
+          <p class="sub">
+            Posts, artifacts, outreach drafts. No contacts, no sequences. Shipped {@net.shipped_week}/7d · drafts {@net.drafts} · observer {@net.observer_runs}
+          </p>
+        </div>
+      </div>
+      <p :if={@error} id="net-error" class="banner hold-error">{@error}</p>
+      <div class="lane-body">
+        <div class="lane-forms">
+          <form id="net-lane" class="lane-form" phx-submit="net_lane">
+            <label class="section-label" for="broadside-lane">Broadside research lane</label>
+            <input
+              id="broadside-lane"
+              type="url"
+              name="url"
+              value={@net.lane}
+              placeholder="Observer URL"
+              aria-label="Broadside Observer URL"
+            />
+            <button type="submit" class="ghost">Set lane</button>
+          </form>
+          <p :if={@net.lane != ""} class="sub">
+            <.link href={@net.lane} target="_blank" rel="noreferrer">Open Observer</.link>
+          </p>
+          <form id="net-log" class="lane-form" phx-submit="net_log">
+            <label class="section-label">Log an entry</label>
+            <select name="kind" aria-label="Kind">
+              <option :for={kind <- Net.kinds()} value={Net.name(kind)}>{Net.label(kind)}</option>
+            </select>
+            <select name="channel" aria-label="Channel">
+              <option :for={channel <- Net.channels()} value={Net.name(channel)}>
+                {Net.label(channel)}
+              </option>
+            </select>
+            <input type="text" name="title" placeholder="Title" required aria-label="Title" />
+            <input type="url" name="url" placeholder="https://…" aria-label="URL" />
+            <textarea name="body" rows="4" placeholder="Draft body or note" aria-label="Body"></textarea>
+            <button type="submit" class="primary">Log entry</button>
+          </form>
+        </div>
+        <ul id="net-recent" class="lane-list">
+          <li :if={@net.recent == []} class="empty">
+            Nothing shipped. Run Observer or draft a post.
+          </li>
+          <li :for={entry <- @net.recent} id={"net-#{entry.id}"}>
+            <span class="lane-meta">
+              {Net.label(entry.kind)} · {Net.label(entry.channel)}
+              <span :if={entry.shipped_on}> · {Date.to_iso8601(entry.shipped_on)}</span>
+            </span>
+            <strong>{entry.title}</strong>
+            <span :if={entry.url != ""} class="sub">{entry.url}</span>
+            <span :if={entry.body != ""} class="sub">{excerpt(entry.body)}</span>
+          </li>
+        </ul>
       </div>
     </div>
     """
@@ -545,6 +805,18 @@ defmodule HiremeWeb.DeskComponents do
   end
 
   defp batch?(batches, code), do: Enum.any?(batches, &(&1.code == code))
+
+  defp band_pct(share) when is_float(share) or is_integer(share), do: round(share * 100)
+
+  defp bin_pct(_count, 0), do: 0
+  defp bin_pct(count, peak), do: round(count / peak * 100)
+
+  defp heat_line(job) do
+    verdict = Heat.can_apply(job)
+    eta = if verdict.cooldown_days, do: " · cooldown #{verdict.cooldown_days}d", else: ""
+
+    "heat #{verdict.decision} · #{Float.round(verdict.company_load, 1)}/#{Float.round(verdict.company_cap, 1)} #{verdict.size} · #{Hireme.Heat.Ats.name(verdict.ats_vendor)}#{eta}"
+  end
 
   defp snapshot_date(nil), do: ""
   defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"

@@ -189,6 +189,7 @@ defmodule HiremeWeb.BoardLiveTest do
     {:ok, view, html} = live(conn, "/")
     assert html =~ "score_100"
     assert has_element?(view, "#ev-chart")
+    assert has_element?(view, "#heat-chart")
     assert has_element?(view, "#card-#{high.id}.is-active")
     assert html =~ "100"
 
@@ -226,6 +227,48 @@ defmodule HiremeWeb.BoardLiveTest do
     assert painted > 0
     assert painted < 40
     assert has_element?(view, "#grid")
+  end
+
+  test "gym and net lenses sit on the scoreboard next to the hunt", %{conn: conn} do
+    profile()
+    {:ok, view, html} = live(conn, "/")
+
+    assert html =~ "FIRE HOLD"
+    assert has_element?(view, "#score-gym", "gym")
+    assert has_element?(view, "#score-net", "net")
+
+    render_click(view, "gym", %{})
+    assert has_element?(view, "#gym")
+    assert render(view) =~ "Conditioning, not the job"
+
+    render_submit(view, "gym_log", %{
+      "platform" => "leetcode",
+      "title" => "Two Sum",
+      "topic" => "arrays",
+      "difficulty" => "easy",
+      "outcome" => "solved"
+    })
+
+    assert has_element?(view, "#gym-recent", "Two Sum")
+    assert has_element?(view, "#score-gym", "1/3")
+
+    render_click(view, "net", %{})
+    assert has_element?(view, "#net")
+    assert render(view) =~ "not CRM"
+
+    render_submit(view, "net_lane", %{"url" => "https://observer.example.test/lane"})
+    assert has_element?(view, "#broadside-lane")
+
+    render_submit(view, "net_log", %{
+      "kind" => "post",
+      "channel" => "x",
+      "title" => "Shipped gym",
+      "url" => "https://x.com/example/status/1",
+      "body" => ""
+    })
+
+    assert has_element?(view, "#net-recent", "Shipped gym")
+    assert has_element?(view, "#score-net", "1 shipped")
   end
 
   defp profile do

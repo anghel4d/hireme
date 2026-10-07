@@ -93,10 +93,13 @@ defmodule Hireme.Mcp do
   alias Hireme.CvPair
   alias Hireme.Desk
   alias Hireme.Desk.Filters
+  alias Hireme.Gym
+  alias Hireme.Heat
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
-  alias Hireme.Mcp.Args
   alias Hireme.LifeEv
+  alias Hireme.Mcp.Args
+  alias Hireme.Net
   alias Hireme.Pipeline
 
   @type frame :: map()
@@ -166,12 +169,19 @@ defmodule Hireme.Mcp do
       fire =
         if Enum.any?(Desk.list_batches(), &(&1.fire == :open_fire)), do: "open_fire", else: "hold"
 
+      apps =
+        filters
+        |> application_rows()
+        |> Enum.reject(&(&1["heat_state"] == "blocked"))
+        |> Enum.take(limit)
+
       {:ok,
        %{
-         "applications" => filters |> application_rows() |> Enum.take(limit),
+         "applications" => apps,
          "min_score" => min,
          "fire" => fire,
-         "note" => "Ranked by score_100. This tool does not submit."
+         "note" =>
+           "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
        }}
     end
   end
@@ -200,6 +210,90 @@ defmodule Hireme.Mcp do
      }}
   end
 
+  defp directory_call("heat_status", args) do
+    chart = Heat.chart()
+    company = Args.optional_string(args, "company")
+    ats = Args.optional_string(args, "ats")
+
+    {:ok,
+     %{
+       "companies" =>
+         chart.companies
+         |> maybe_filter_key(company)
+         |> Enum.map(&heat_row_view/1),
+       "vendors" =>
+         chart.vendors
+         |> maybe_filter_key(ats)
+         |> Enum.map(&heat_row_view/1),
+       "note" => "FIRE HOLD. Heat gates the queue. It does not submit."
+     }}
+  end
+
+  defp directory_call("can_apply", args) do
+    with {:ok, job_id} <- apply_id(args) do
+      verdict = Heat.can_apply(job_id)
+
+      {:ok,
+       %{
+         "job_id" => job_id,
+         "decision" => Atom.to_string(verdict.decision),
+         "reason" => Atom.to_string(verdict.reason),
+         "company" => verdict.company,
+         "company_load" => verdict.company_load,
+         "company_cap" => verdict.company_cap,
+         "company_increment" => verdict.company_increment,
+         "size" => Hireme.Heat.Org.name(verdict.size),
+         "ats_vendor" => Hireme.Heat.Ats.name(verdict.ats_vendor),
+         "ats_tenant" => verdict.ats_tenant,
+         "vendor_load" => verdict.vendor_load,
+         "vendor_cap" => verdict.vendor_cap,
+         "tenant_load" => verdict.tenant_load,
+         "tenant_cap" => verdict.tenant_cap,
+         "cooldown_days" => verdict.cooldown_days,
+         "note" => verdict.note,
+         "fire" => "hold"
+       }}
+    end
+  end
+
+  defp directory_call("gym_status", _args), do: {:ok, gym_progress_view(Gym.progress())}
+
+  defp directory_call("gym_log", args) do
+    case Gym.log(args) do
+      {:ok, rep} ->
+        {:ok, Map.put(gym_rep_view(rep), "progress", gym_progress_view(Gym.progress()))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp directory_call("gym_set_target", args) do
+    with {:ok, n} <- Args.int(args, "target"),
+         {:ok, n} <- Gym.set_target(n) do
+      {:ok, gym_progress_view(Gym.progress()) |> Map.put("target", n)}
+    end
+  end
+
+  defp directory_call("net_status", _args), do: {:ok, net_progress_view(Net.progress())}
+
+  defp directory_call("net_log", args) do
+    case Net.log(args) do
+      {:ok, entry} ->
+        {:ok, Map.put(net_entry_view(entry), "progress", net_progress_view(Net.progress()))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp directory_call("net_set_lane", args) do
+    with {:ok, url} <- Args.string(args, "url"),
+         {:ok, _lane} <- Net.set_lane(url) do
+      {:ok, net_progress_view(Net.progress())}
+    end
+  end
+
   defp directory_call(name, _args)
        when name in ~w(get_application set_stage set_next_action set_score tailor_line open_cv_generation) do
     {:error, :unleased}
@@ -214,7 +308,8 @@ defmodule Hireme.Mcp do
       "status" => Args.optional_string(args, "status") || "all",
       "batch" => Args.optional_string(args, "batch"),
       "min_score" => Args.optional_string(args, "min_score") || Map.get(args, "min_score"),
-      "band" => Args.optional_string(args, "band")
+      "band" => Args.optional_string(args, "band"),
+      "heat" => Args.optional_string(args, "heat")
     })
   end
 
@@ -228,7 +323,12 @@ defmodule Hireme.Mcp do
         "batch" => card.batch_code,
         "cv_label" => card.cv_label,
         "score_100" => card.score_100,
-        "band" => LifeEv.name(LifeEv.band(card.score_100))
+        "band" => LifeEv.name(LifeEv.band(card.score_100)),
+        "load" => card.load,
+        "cap" => card.cap,
+        "heat_state" => Heat.state_name(card.heat_state),
+        "ats" => Hireme.Heat.Ats.name(card.ats_vendor),
+        "cooldown_days" => card.cooldown_days
       }
     end)
   end
@@ -299,18 +399,91 @@ defmodule Hireme.Mcp do
       tool("list_batches", "List batches on the desk", %{}),
       tool(
         "list_applications",
-        "List applications ranked by score_100, highest first",
+        "List applications ranked by score_100, then cooler company heat. Filters include heat (cool|warm|hot|blocked). FIRE HOLD — does not submit",
         filter_schema()
       ),
       tool(
         "recommend_applications",
-        "The top applications by score_100 (default floor 90) to draft first. Ranks only; does not submit",
+        "The top applications by score_100 (default floor 90) to draft first. Omits heat-blocked roles. Ranks only; does not submit",
         Map.put(filter_schema(), "limit", %{"type" => "integer", "minimum" => 1, "maximum" => 100})
       ),
       tool(
         "score_distribution",
         "score_100 band counts and ten-point bins for the filtered desk",
         filter_schema()
+      ),
+      tool(
+        "heat_status",
+        "Company and ATS heat vs cap, with cooldown ETA. Optional company or ats filter. Structural governor — does not submit. FIRE HOLD.",
+        %{
+          "company" => %{"type" => "string"},
+          "ats" => %{
+            "type" => "string",
+            "description" => "ATS vendor name (greenhouse, workday, …)"
+          }
+        }
+      ),
+      tool(
+        "can_apply",
+        "Would queueing this application (job_id / role_id) exceed company or ATS heat? Returns allow or defer with reason and cooldown. FIRE HOLD — does not submit.",
+        %{
+          "job_id" => %{"type" => "integer"},
+          "role_id" => %{"type" => "integer"}
+        }
+      ),
+      tool(
+        "gym_status",
+        "Gym conditioning progress: daily target, streak, weekly pace score (not Life-EV score_100), topic counts. Jumping jacks for the fight. FIRE HOLD — does not submit jobs.",
+        %{}
+      ),
+      tool(
+        "gym_log",
+        "Log a LeetCode / Codeforces / systems rep. Upserts the problem by platform+slug. Conditioning, not the job. FIRE HOLD — does not submit jobs.",
+        %{
+          "platform" => %{"type" => "string", "enum" => Enum.map(Gym.platforms(), &Gym.name/1)},
+          "title" => %{"type" => "string"},
+          "slug" => %{"type" => "string"},
+          "topic" => %{"type" => "string", "enum" => Enum.map(Gym.topics(), &Gym.name/1)},
+          "difficulty" => %{
+            "type" => "string",
+            "enum" => Enum.map(Gym.difficulties(), &Gym.name/1)
+          },
+          "url" => %{"type" => "string"},
+          "outcome" => %{"type" => "string", "enum" => Enum.map(Gym.outcomes(), &Gym.name/1)},
+          "minutes" => %{"type" => "integer", "minimum" => 0},
+          "note" => %{"type" => "string"},
+          "done_on" => %{"type" => "string", "description" => "ISO date. Defaults to today."}
+        }
+      ),
+      tool(
+        "gym_set_target",
+        "Set the gym daily solved-rep target (1–30). Conditioning pace, not Life-EV. FIRE HOLD.",
+        %{"target" => %{"type" => "integer", "minimum" => 1, "maximum" => 30}}
+      ),
+      tool(
+        "net_status",
+        "Networking lane: Broadside Observer URL, shipped posts/artifacts this week, open drafts, observer runs. Not CRM. FIRE HOLD — does not submit jobs.",
+        %{}
+      ),
+      tool(
+        "net_log",
+        "Log a Broadside Observer run, shipped artifact, X/social post, or outreach draft. Not a CRM. No contacts, no sequences. FIRE HOLD — does not submit jobs.",
+        %{
+          "kind" => %{"type" => "string", "enum" => Enum.map(Net.kinds(), &Net.name/1)},
+          "channel" => %{"type" => "string", "enum" => Enum.map(Net.channels(), &Net.name/1)},
+          "title" => %{"type" => "string"},
+          "url" => %{"type" => "string"},
+          "body" => %{"type" => "string"},
+          "shipped_on" => %{
+            "type" => "string",
+            "description" => "ISO date. Defaults to today except drafts."
+          }
+        }
+      ),
+      tool(
+        "net_set_lane",
+        "Set the Broadside Observer research lane URL. Not CRM. FIRE HOLD.",
+        %{"url" => %{"type" => "string"}}
       )
     ]
   end
@@ -322,7 +495,8 @@ defmodule Hireme.Mcp do
       "status" => %{"type" => "string"},
       "batch" => %{"type" => "string"},
       "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-      "band" => %{"type" => "string", "enum" => @bands}
+      "band" => %{"type" => "string", "enum" => @bands},
+      "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
     }
   end
 
@@ -427,6 +601,104 @@ defmodule Hireme.Mcp do
 
   defp mismatch?(nil, _expected), do: false
   defp mismatch?(value, expected), do: value != expected
+
+  defp apply_id(args) do
+    case Args.optional_int(args, "job_id") do
+      {:ok, n} when is_integer(n) ->
+        {:ok, n}
+
+      _ ->
+        case Args.optional_int(args, "role_id") do
+          {:ok, n} when is_integer(n) -> {:ok, n}
+          _ -> {:error, {:argument, "job_id"}}
+        end
+    end
+  end
+
+  defp maybe_filter_key(rows, nil), do: rows
+  defp maybe_filter_key(rows, ""), do: rows
+
+  defp maybe_filter_key(rows, needle) do
+    n = String.downcase(needle)
+
+    Enum.filter(
+      rows,
+      &(String.contains?(String.downcase(&1.key), n) or
+          String.contains?(String.downcase(&1.label), n))
+    )
+  end
+
+  defp heat_row_view(row) do
+    %{
+      "key" => row.key,
+      "label" => row.label,
+      "load" => row.load,
+      "cap" => row.cap,
+      "ratio" => row.ratio,
+      "n" => row.n,
+      "cooldown_days" => row.cooldown_days,
+      "size" => row.size && Atom.to_string(row.size)
+    }
+  end
+
+  defp gym_progress_view(%Gym.Progress{} = progress) do
+    %{
+      "today" => Date.to_iso8601(progress.today),
+      "target" => progress.target,
+      "streak" => progress.streak,
+      "solved_today" => progress.solved_today,
+      "solved_week" => progress.solved_week,
+      "score" => progress.score,
+      "note" =>
+        "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
+      "topics" =>
+        Enum.map(progress.topics, fn row ->
+          %{"topic" => Gym.name(row.key), "label" => row.label, "count" => row.count}
+        end),
+      "recent" => Enum.map(progress.recent, &gym_rep_view/1)
+    }
+  end
+
+  defp gym_rep_view(%Gym.Rep{} = rep) do
+    problem = rep.problem
+
+    %{
+      "id" => rep.id,
+      "done_on" => Date.to_iso8601(rep.done_on),
+      "outcome" => Gym.name(rep.outcome),
+      "minutes" => rep.minutes,
+      "note" => rep.note,
+      "platform" => Gym.name(problem.platform),
+      "slug" => problem.slug,
+      "title" => problem.title,
+      "topic" => Gym.name(problem.topic),
+      "difficulty" => Gym.name(problem.difficulty),
+      "url" => problem.url
+    }
+  end
+
+  defp net_progress_view(%Net.Progress{} = progress) do
+    %{
+      "lane" => progress.lane,
+      "shipped_week" => progress.shipped_week,
+      "drafts" => progress.drafts,
+      "observer_runs" => progress.observer_runs,
+      "note" => "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit.",
+      "recent" => Enum.map(progress.recent, &net_entry_view/1)
+    }
+  end
+
+  defp net_entry_view(%Net.Entry{} = entry) do
+    %{
+      "id" => entry.id,
+      "kind" => Net.name(entry.kind),
+      "channel" => Net.name(entry.channel),
+      "title" => entry.title,
+      "url" => entry.url,
+      "body" => entry.body,
+      "shipped_on" => entry.shipped_on && Date.to_iso8601(entry.shipped_on)
+    }
+  end
 
   defp tool(name, description, schema) do
     %{
