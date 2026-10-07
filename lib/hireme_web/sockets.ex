@@ -1,6 +1,9 @@
 defmodule HiremeWeb.Sockets do
   @moduledoc false
-  # What the three transports share: one JSON object per text frame.
+  # What the three transports share: one JSON object per text frame, and
+  # the question every agent socket asks at upgrade: whose key is this?
+
+  alias Hireme.ApiKeys
 
   def reply(text, state, respond) do
     response =
@@ -13,27 +16,73 @@ defmodule HiremeWeb.Sockets do
   end
 
   def push(payload, state), do: {:push, {:text, Jason.encode!(payload)}, state}
+
+  @doc """
+  The account an agent's upgrade authenticates for, from the
+  `x-api-key` header or the bearer subprotocol, or `:error`. An upgrade
+  without a live key is refused before any socket state exists.
+  """
+  @spec agent(map()) :: {:ok, %{account_id: pos_integer(), key_id: String.t()}} | :error
+  def agent(%{connect_info: info}) when is_map(info) do
+    token = Map.get(info, :auth_token) || header(Map.get(info, :x_headers, []), "x-api-key")
+
+    peer =
+      case Map.get(info, :peer_data) do
+        %{address: address} -> address |> :inet.ntoa() |> to_string()
+        _ -> ""
+      end
+
+    case ApiKeys.authenticate(token, peer) do
+      {:ok, key} -> {:ok, %{account_id: key.account_id, key_id: key.key_id}}
+      :error -> :error
+    end
+  end
+
+  def agent(_info), do: :error
+
+  defp header(headers, name) when is_list(headers) do
+    Enum.find_value(headers, fn
+      {^name, value} -> value
+      _ -> nil
+    end)
+  end
+
+  defp header(_, _), do: nil
 end
 
 defmodule HiremeWeb.FeedSocket do
   @moduledoc """
   Push-only feed of desk signals for the browser shell.
 
-  Connect at `/feed/websocket`. Every `Hireme.Desk.Signal` arrives as
-  one JSON text frame. Frames from the client are ignored; writes go
-  over HTTP.
+  Connect at `/feed/websocket` with the session cookie; a connection
+  without a live session is refused. Every `Hireme.Desk.Signal` on the
+  account's topic arrives as one JSON text frame. Frames from the client
+  are ignored; writes go over HTTP.
   """
 
   @behaviour Phoenix.Socket.Transport
 
+  alias Hireme.Accounts
+  alias Hireme.Desk
   alias Hireme.Desk.Signal
+  alias Hireme.Repo
+  alias HiremeWeb.Auth
   alias HiremeWeb.Sockets
 
   def child_spec(_opts), do: :ignore
-  def connect(_info), do: {:ok, %{}}
 
-  def init(state) do
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Desk.topic())
+  def connect(%{connect_info: %{session: %{} = session}}) do
+    case Accounts.session(session[Auth.session_key()]) do
+      {_session, account} -> {:ok, %{account_id: account.id}}
+      nil -> :error
+    end
+  end
+
+  def connect(_info), do: :error
+
+  def init(%{account_id: account_id} = state) do
+    Repo.put_account(account_id)
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
     {:ok, state}
   end
 
@@ -48,18 +97,25 @@ end
 
 defmodule HiremeWeb.McpDirectorySocket do
   @moduledoc """
-  Read-only directory of letterboxes.
+  Read-only directory of one account's letterboxes.
 
-  Connect at `/mcp/websocket`. This socket cannot lease and cannot write.
+  Connect at `/mcp/websocket` with an API key. This socket cannot lease
+  and cannot write, and it lists nothing outside the key's account.
   """
 
   @behaviour Phoenix.Socket.Transport
 
+  alias Hireme.Repo
   alias HiremeWeb.Sockets
 
   def child_spec(_opts), do: :ignore
-  def connect(_info), do: {:ok, %{}}
-  def init(state), do: {:ok, state}
+  def connect(info), do: Sockets.agent(info)
+
+  def init(%{account_id: account_id} = state) do
+    Repo.put_account(account_id)
+    {:ok, state}
+  end
+
   def handle_in({text, _opts}, state), do: Sockets.reply(text, state, &HiremeWeb.Mcp.directory/1)
   def handle_info(_message, state), do: {:ok, state}
   def terminate(_reason, _state), do: :ok
@@ -69,9 +125,11 @@ defmodule HiremeWeb.McpSocket do
   @moduledoc """
   Full-duplex websocket for one leased letterbox.
 
-  Connect at `/mcp/letterbox/:letterbox_id/websocket`. The connection
-  process is the single producer. The letterbox process is the single
-  consumer. A second connection for that id is refused.
+  Connect at `/mcp/letterbox/:letterbox_id/websocket` with an API key
+  for the account that owns the letterbox; any other key sees no such
+  letterbox. The connection process is the single producer. The
+  letterbox process is the single consumer. A second connection for
+  that id is refused.
   """
 
   @behaviour Phoenix.Socket.Transport
@@ -79,29 +137,33 @@ defmodule HiremeWeb.McpSocket do
   alias Hireme.Desk.Signal
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
+  alias Hireme.Repo
   alias HiremeWeb.Sockets
 
   def child_spec(_opts), do: :ignore
 
-  def connect(%{params: %{"letterbox_id" => raw}}) do
-    case Integer.parse(to_string(raw)) do
-      {id, ""} when id > 0 ->
-        cond do
-          not Letterbox.exists?(id) -> :error
-          Letterbox.leased?(id) -> {:error, :busy}
-          true -> {:ok, %{id: id}}
-        end
+  def connect(%{params: %{"letterbox_id" => raw}} = info) do
+    with {:ok, agent} <- Sockets.agent(info),
+         {id, ""} when id > 0 <- Integer.parse(to_string(raw)) do
+      Repo.put_account(agent.account_id)
 
-      _ ->
-        :error
+      cond do
+        not Letterbox.exists?(id) -> :error
+        Letterbox.leased?(id) -> {:error, :busy}
+        true -> {:ok, Map.put(agent, :id, id)}
+      end
+    else
+      _ -> :error
     end
   end
 
   def connect(_info), do: :error
 
-  def init(%{id: id}) do
+  def init(%{id: id, account_id: account_id} = state) do
+    Repo.put_account(account_id)
+
     case Letterbox.lease(id, self()) do
-      {:ok, %Handle{} = handle} -> {:ok, %{handle: handle}}
+      {:ok, %Handle{} = handle} -> {:ok, Map.put(state, :handle, handle)}
       {:error, reason} -> {:stop, reason, %{}}
     end
   end

@@ -285,7 +285,10 @@ defmodule Hireme.Desk do
 
   Writes return `{:ok, value}` or `{:error, reason}` with `reason` a
   member of `t:refusal/0` or a changeset. Every change is broadcast as a
-  `Hireme.Desk.Signal`.
+  `Hireme.Desk.Signal` on the account's topic.
+
+  Every function here runs as the account on the process; the repo
+  scopes each read to it and `tenant/1` stamps each row.
   """
 
   import Ecto.Query
@@ -317,8 +320,6 @@ defmodule Hireme.Desk do
   alias Hireme.Repo
   alias Hireme.Theme
 
-  @topic "desk"
-
   @type refusal ::
           :fire_hold
           | :leased
@@ -348,8 +349,9 @@ defmodule Hireme.Desk do
           | {:ok, CvPair.t()}
           | {:error, refusal() | Ecto.Changeset.t()}
 
-  @spec topic() :: String.t()
-  def topic, do: @topic
+  @doc "The PubSub topic one account's signals go out on."
+  @spec topic(pos_integer()) :: String.t()
+  def topic(account_id \\ Repo.account_id!()), do: "desk:#{account_id}"
 
   @spec code(pos_integer()) :: String.t()
   def code(id), do: "JobApp#{id}"
@@ -833,7 +835,7 @@ defmodule Hireme.Desk do
   end
 
   defp publish(%Signal{} = signal) do
-    Phoenix.PubSub.broadcast(Hireme.PubSub, @topic, {:desk_event, signal})
+    Phoenix.PubSub.broadcast(Hireme.PubSub, topic(), {:desk_event, signal})
   end
 
   defp person_name do

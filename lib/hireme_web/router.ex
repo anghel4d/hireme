@@ -2,24 +2,65 @@ defmodule HiremeWeb.Router do
   use Phoenix.Router, helpers: false
   import Plug.Conn
   import Phoenix.Controller
+  import HiremeWeb.Auth, only: [fetch_account: 2, require_account: 2, security_headers: 2]
 
   pipeline :browser do
     plug :accepts, ["html"]
+    plug :fetch_session
+    plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug :security_headers
+    plug :fetch_account
   end
 
+  # JSON for the signed-in shell: the same cookie, the same CSRF token
+  # (sent as a header), and no account means 401.
   pipeline :api do
     plug :accepts, ["json"]
+    plug :fetch_session
+    plug :protect_from_forgery
+    plug :fetch_account
+    plug :require_account
+  end
+
+  pipeline :signed_in do
+    plug :require_account
   end
 
   scope "/", HiremeWeb do
     pipe_through :browser
 
+    get "/sign-in", AuthController, :sign_in
+    post "/sign-out", AuthController, :sign_out
+  end
+
+  scope "/", HiremeWeb do
+    pipe_through [:browser, :signed_in]
+
     get "/", DeskController, :index
+  end
+
+  # Development only: sign into the local desk with one click. Not
+  # compiled into any other environment.
+  if Application.compile_env(:hireme, :dev_routes) do
+    scope "/dev", HiremeWeb do
+      pipe_through :browser
+
+      post "/sign-in", AuthController, :dev_sign_in
+    end
   end
 
   scope "/api", HiremeWeb do
     pipe_through :api
+
+    scope "/account" do
+      get "/", AccountController, :index
+      post "/keys", AccountController, :create_key
+      patch "/keys/:id", AccountController, :rename_key
+      delete "/keys/:id", AccountController, :revoke_key
+      delete "/sessions/:id", AccountController, :revoke_session
+      post "/sessions/revoke_others", AccountController, :revoke_other_sessions
+    end
 
     get "/pack", DeskController, :pack
     get "/scoreboard", DeskController, :scoreboard
@@ -78,6 +119,7 @@ defmodule HiremeWeb.DeskController do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Desk · Hireme</title>
+        <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
         <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
         <script defer type="module" src="#{~p"/assets/js/app.js"}"></script>
       </head>

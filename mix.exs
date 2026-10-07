@@ -49,6 +49,10 @@ defmodule Hireme.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
+      {:nimble_totp, "~> 1.0"},
+      {:wax_, "~> 0.7.0"},
+      {:hammer, "~> 7.5"},
+      {:eqrcode, "~> 0.2.1"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

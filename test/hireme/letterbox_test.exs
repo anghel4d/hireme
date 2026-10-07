@@ -15,17 +15,33 @@ defmodule Hireme.LetterboxTest do
   end
 
   test "another producer cannot lease the same letterbox or the same employer CV" do
+    account_id = Repo.account_id!()
     first = open_job("North Co")
     sibling = open_job("North Co")
     assert {:ok, handle} = Letterbox.lease(first.letterbox_id, self())
 
-    busy = Task.async(fn -> Letterbox.lease(first.letterbox_id, self()) end)
+    busy =
+      Task.async(fn ->
+        Repo.put_account(account_id)
+        Letterbox.lease(first.letterbox_id, self())
+      end)
+
     assert {:error, :busy} = Task.await(busy)
 
-    lineage = Task.async(fn -> Letterbox.lease(sibling.letterbox_id, self()) end)
+    lineage =
+      Task.async(fn ->
+        Repo.put_account(account_id)
+        Letterbox.lease(sibling.letterbox_id, self())
+      end)
+
     assert {:error, :lineage_busy} = Task.await(lineage)
 
-    task = Task.async(fn -> Letterbox.command(handle, :get) end)
+    task =
+      Task.async(fn ->
+        Repo.put_account(account_id)
+        Letterbox.command(handle, :get)
+      end)
+
     assert {:error, :lease} = Task.await(task)
 
     forged = %{handle | token: make_ref()}

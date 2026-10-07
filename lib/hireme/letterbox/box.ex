@@ -20,21 +20,25 @@ defmodule Hireme.Letterbox.Box do
 
   @registry Hireme.Letterbox.Registry
 
-  def child_spec(letterbox_id) do
+  def child_spec({letterbox_id, account_id}) do
     %{
       id: {__MODULE__, letterbox_id},
-      start: {__MODULE__, :start_link, [letterbox_id]},
+      start: {__MODULE__, :start_link, [{letterbox_id, account_id}]},
       restart: :temporary
     }
   end
 
-  def start_link(letterbox_id) do
-    GenServer.start_link(__MODULE__, letterbox_id,
+  def start_link({letterbox_id, account_id}) do
+    GenServer.start_link(__MODULE__, {letterbox_id, account_id},
       name: {:via, Registry, {@registry, {:box, letterbox_id}}}
     )
   end
 
-  def init(letterbox_id), do: {:ok, %{id: letterbox_id, pair: nil, token: nil, producer: nil}}
+  # The box reads and writes as the account that leased it.
+  def init({letterbox_id, account_id}) do
+    Repo.put_account(account_id)
+    {:ok, %{id: letterbox_id, pair: nil, token: nil, producer: nil}}
+  end
 
   def handle_call({:lease, producer}, _from, %{token: nil, id: id} = state)
       when is_pid(producer) do

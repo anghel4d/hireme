@@ -1,6 +1,6 @@
 // Pure views: model in, HTML out. Nothing here touches the DOM.
 
-import type { Doc, Focus, HeatRow, Lanes, Line, Option, Root, Scoreboard } from "./api.ts"
+import type { Doc, Focus, HeatRow, Key, Lanes, Line, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { type Filters, value } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
 import type { Store, Tables } from "./store.ts"
@@ -55,6 +55,7 @@ export function topbar(f: Filters, t: Tables, count: number): Raw {
       <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
       <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym">Gym</button>
       <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net">Net</button>
+      <button type="button" id="open-settings" class="ghost" data-action="lens" data-lens="settings">Account</button>
     </header>`
 }
 
@@ -495,4 +496,112 @@ function labelOf(options: Option[], key: string): string {
 
 function tenth(x: number): number {
   return Number(x.toFixed(1))
+}
+
+// ---- the account: API keys and sessions ----
+
+export interface Reveal { name: string; secret: string }
+
+export function settingsView(s: Settings | null, reveal: Reveal | null, renaming: number | null, error: string | null, csrf: string): Raw {
+  return h`
+    <div id="settings" class="lane">
+      <div class="bp-bar">
+        <button type="button" id="back-from-settings" class="ghost" data-action="back">Back</button>
+        <div class="grow">
+          <p class="kicker">Account${s ? ` · ${s.account.name}` : ""}</p>
+          <h2>API keys for agents, and the browsers signed in. A key reads one account and nothing else.</h2>
+        </div>
+        <form method="post" action="/sign-out" class="inline">
+          <input type="hidden" name="_csrf_token" value="${csrf}" />
+          <button type="submit" class="ghost">Sign out</button>
+        </form>
+      </div>
+      <div class="settings-body">
+        ${when(error, () => h`<p class="banner hold-error">${error}</p>`)}
+        ${when(reveal, () => h`
+          <section id="reveal" class="secret-panel">
+            <p class="section-label">Key created · ${reveal?.name}</p>
+            <p class="sub">Copy it now. It is shown once and cannot be recovered; a lost key is revoked and replaced.</p>
+            <div class="row">
+              <input id="secret" type="text" readonly value="${reveal?.secret}" aria-label="API key" />
+              <button type="button" class="primary" data-action="copy" data-copy="${reveal?.secret}">Copy</button>
+              <button type="button" class="ghost" data-action="dismiss-secret">Done</button>
+            </div>
+            <p class="sub">Agents present it as the <code>x-api-key</code> header on <code>/mcp/websocket</code> and <code>/mcp/letterbox/&lt;id&gt;/websocket</code>.</p>
+          </section>`)}
+        <section class="settings-section">
+          <div class="section-head">
+            <p class="section-label">API keys</p>
+            <form id="create-key" class="lane-form inline" data-form="create-key">
+              <input type="text" name="name" placeholder="Name, e.g. agenix-pylon-wsl" required maxlength="100" aria-label="Key name" />
+              <select name="expires_in_days" aria-label="Expiration">
+                <option value="">Never expires</option>
+                <option value="30">30 days</option>
+                <option value="90">90 days</option>
+                <option value="365">1 year</option>
+              </select>
+              <button type="submit" class="primary">Create API key</button>
+            </form>
+          </div>
+          ${s ? keysTable(s.keys, renaming) : h`<p class="sub">Loading…</p>`}
+        </section>
+        <section class="settings-section">
+          <div class="section-head">
+            <p class="section-label">Sessions</p>
+            <button type="button" class="ghost" data-action="revoke-others">Sign out other sessions</button>
+          </div>
+          ${s ? sessionsTable(s.sessions) : raw("")}
+        </section>
+      </div>
+    </div>`
+}
+
+function keysTable(keys: Key[], renaming: number | null): Raw {
+  if (keys.length === 0) return h`<p class="sub">No keys yet. An agent needs one to open the socket.</p>`
+  return h`
+    <table class="keys">
+      <thead><tr><th>Name</th><th>Secret key</th><th>Created</th><th>Last used</th><th>Expiration</th><th></th></tr></thead>
+      <tbody>
+        ${keys.map((k) => h`
+          <tr id="key-${k.id}" class="${k.live ? "" : "is-revoked"}">
+            <td>
+              ${renaming === k.id
+                ? h`<form class="inline" data-form="rename-key" data-id="${k.id}"><input type="text" name="name" value="${k.name}" maxlength="100" aria-label="New name" autofocus /><button type="submit" class="ghost">Save</button><button type="button" class="text-btn" data-action="cancel-rename">Cancel</button></form>`
+                : h`<strong>${k.name}</strong>`}
+              <span class="sub">ID: ${k.key_id} <button type="button" class="text-btn" data-action="copy" data-copy="${k.key_id}" title="Copy id">⧉</button></span>
+            </td>
+            <td><code>${k.display}</code></td>
+            <td>${stamp(k.created_at)}</td>
+            <td>${k.last_used_at ? stamp(k.last_used_at) : "Never"}</td>
+            <td>${k.revoked_at ? `Revoked ${stamp(k.revoked_at)}` : k.expires_at ? stamp(k.expires_at) : "Never"}</td>
+            <td class="actions">
+              ${when(k.live && renaming !== k.id, () => h`<button type="button" class="text-btn" data-action="rename" data-id="${k.id}">Rename</button>`)}
+              ${when(k.live, () => h`<button type="button" class="text-btn danger" data-action="revoke-key" data-id="${k.id}" data-name="${k.name}">Revoke</button>`)}
+            </td>
+          </tr>`)}
+      </tbody>
+    </table>`
+}
+
+function sessionsTable(sessions: Session[]): Raw {
+  return h`
+    <table class="keys">
+      <thead><tr><th>Browser</th><th>Address</th><th>Signed in</th><th>Last seen</th><th>Second factor</th><th></th></tr></thead>
+      <tbody>
+        ${sessions.map((x) => h`
+          <tr id="session-${x.id}">
+            <td>${x.user_agent === "" ? "Unknown" : x.user_agent.slice(0, 60)}${x.current ? h`<span class="pill is-open"> this one</span>` : ""}</td>
+            <td>${x.ip}</td>
+            <td>${stamp(x.authenticated_at)}</td>
+            <td>${stamp(x.last_seen_at)}</td>
+            <td>${x.mfa_at ? stamp(x.mfa_at) : "—"}</td>
+            <td class="actions"><button type="button" class="text-btn danger" data-action="revoke-session" data-id="${x.id}">${x.current ? "Sign out" : "Revoke"}</button></td>
+          </tr>`)}
+      </tbody>
+    </table>`
+}
+
+function stamp(iso: string): string {
+  const d = new Date(iso)
+  return `${d.toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" })} ${d.toLocaleTimeString("en", { hour: "numeric", minute: "2-digit" })}`
 }

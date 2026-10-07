@@ -46,6 +46,37 @@ defmodule HiremeWeb.JSON do
     }
   end
 
+  @doc "A key as the settings page lists it. The secret is never here; `display` is its visible prefix."
+  @spec key(Hireme.ApiKeys.Key.t()) :: map()
+  def key(%Hireme.ApiKeys.Key{} = k) do
+    %{
+      id: k.id,
+      key_id: "key_" <> k.key_id,
+      name: k.name,
+      display: Hireme.ApiKeys.display(k),
+      scope: k.scope,
+      created_at: k.inserted_at,
+      last_used_at: k.last_used_at,
+      expires_at: k.expires_at,
+      revoked_at: k.revoked_at,
+      live: Hireme.ApiKeys.live?(k)
+    }
+  end
+
+  @spec session(Hireme.Accounts.Session.t(), pos_integer()) :: map()
+  def session(%Hireme.Accounts.Session{} = s, current_id) do
+    %{
+      id: s.id,
+      current: s.id == current_id,
+      authenticated_at: s.authenticated_at,
+      last_seen_at: s.last_seen_at,
+      expires_at: s.expires_at,
+      mfa_at: s.mfa_at,
+      ip: s.ip,
+      user_agent: s.user_agent
+    }
+  end
+
   @spec root(Root.t()) :: map()
   def root(%Root{} = r) do
     %{

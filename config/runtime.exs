@@ -44,6 +44,7 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
+  config :hireme, :secret_key_base, secret_key_base
   config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   # IPv6 on every interface; `{0, 0, 0, 0, 0, 0, 0, 1}` is local only.

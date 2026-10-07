@@ -134,7 +134,7 @@ defmodule Hireme.Letterbox do
 
   defp start_box(id) do
     if exists?(id) do
-      case DynamicSupervisor.start_child(__MODULE__.Supervisor, {Box, id}) do
+      case DynamicSupervisor.start_child(__MODULE__.Supervisor, {Box, {id, Repo.account_id!()}}) do
         {:ok, pid} -> {:ok, pid}
         {:error, {:already_started, _pid}} -> {:error, :busy}
         {:error, reason} -> {:error, reason}

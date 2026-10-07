@@ -4,21 +4,138 @@ defmodule Hireme.Repo.Migrations.Desk do
   @moduledoc """
   The whole desk in one migration. Rows are the durable truth and this
   is the last place they are rows; everything above reads columns.
+
+  The account comes first: its sessions, its API keys, its second
+  factors, and its audit trail. Every row the desk owns names its
+  account, so one account's rows are invisible to another's queries
+  by construction (`Hireme.Repo` adds the predicate to every read).
   """
 
   @mismatch "cv lineage employer mismatch"
 
   def up do
+    # The account: who signs in. Sign-in identities and magic links are
+    # the next migration's; everything here only needs the account row.
+    create table(:accounts) do
+      add :name, :string, null: false, default: ""
+      add :status, :string, null: false, default: "active"
+      timestamps(type: :utc_datetime)
+    end
+
+    # One row per signed-in browser. The cookie holds a random token;
+    # only its hash is stored. Lifetimes follow NIST SP 800-63B-4 AAL2.
+    create table(:sessions) do
+      add :account_id, references(:accounts, on_delete: :delete_all), null: false
+      add :token_hash, :binary, null: false
+      add :authenticated_at, :utc_datetime, null: false
+      add :mfa_at, :utc_datetime
+      add :last_seen_at, :utc_datetime, null: false
+      add :expires_at, :utc_datetime, null: false
+      add :revoked_at, :utc_datetime
+      add :ip, :string, null: false, default: ""
+      add :user_agent, :string, null: false, default: ""
+      timestamps(type: :utc_datetime)
+    end
+
+    create unique_index(:sessions, [:token_hash])
+    create index(:sessions, [:account_id, :revoked_at])
+
+    # An agent's key: shown once, stored hashed, scoped to one account.
+    create table(:api_keys) do
+      add :account_id, references(:accounts, on_delete: :delete_all), null: false
+      add :key_id, :string, null: false
+      add :name, :string, null: false
+      add :secret_hash, :binary, null: false
+      add :prefix, :string, null: false
+      add :scope, :string, null: false, default: "mcp"
+      add :last_used_at, :utc_datetime
+      add :expires_at, :utc_datetime
+      add :revoked_at, :utc_datetime
+      timestamps(type: :utc_datetime)
+    end
+
+    create unique_index(:api_keys, [:key_id])
+    create index(:api_keys, [:account_id])
+
+    # Second factors: an authenticator app (TOTP) or a WebAuthn
+    # credential (passkey, security key). TOTP secrets are encrypted.
+    create table(:mfa_methods) do
+      add :account_id, references(:accounts, on_delete: :delete_all), null: false
+      add :kind, :string, null: false
+      add :name, :string, null: false, default: ""
+      add :totp_secret, :binary
+      add :totp_last_used, :integer, null: false, default: 0
+      add :credential_id, :binary
+      add :public_key, :binary
+      add :sign_count, :integer, null: false, default: 0
+      add :aaguid, :binary
+      add :transports, :string, null: false, default: ""
+      add :backup_eligible, :boolean, null: false, default: false
+      add :backed_up, :boolean, null: false, default: false
+      add :verified_at, :utc_datetime
+      add :last_used_at, :utc_datetime
+      add :consecutive_failures, :integer, null: false, default: 0
+      add :disabled_at, :utc_datetime
+      timestamps(type: :utc_datetime)
+    end
+
+    create unique_index(:mfa_methods, [:credential_id],
+             where: "credential_id IS NOT NULL",
+             name: :mfa_methods_credential_id_index
+           )
+
+    create index(:mfa_methods, [:account_id, :kind])
+
+    # A ceremony in flight: a pending TOTP secret or a WebAuthn challenge.
+    create table(:mfa_challenges) do
+      add :account_id, references(:accounts, on_delete: :delete_all), null: false
+      add :session_id, references(:sessions, on_delete: :delete_all), null: false
+      add :kind, :string, null: false
+      add :payload, :binary, null: false
+      add :expires_at, :utc_datetime, null: false
+      timestamps(type: :utc_datetime)
+    end
+
+    create index(:mfa_challenges, [:session_id])
+
+    # Look-up secrets for recovery: salted hashes, each used once.
+    create table(:recovery_codes) do
+      add :account_id, references(:accounts, on_delete: :delete_all), null: false
+      add :salt, :binary, null: false
+      add :code_hash, :binary, null: false
+      add :used_at, :utc_datetime
+      timestamps(type: :utc_datetime)
+    end
+
+    create index(:recovery_codes, [:account_id])
+
+    # Security events, append only. account_id is nil before sign-in.
+    create table(:audit_events) do
+      add :account_id, references(:accounts, on_delete: :delete_all)
+      add :kind, :string, null: false
+      add :ip, :string, null: false, default: ""
+      add :user_agent, :string, null: false, default: ""
+      add :meta, :text, null: false, default: "{}"
+      add :inserted_at, :utc_datetime, null: false
+    end
+
+    create index(:audit_events, [:account_id, :inserted_at])
+
     # Corpus: the person, their profiles, the lines a CV is built from.
     create table(:users) do
+      account()
       add :name, :string, null: false
       add :email, :string, null: false, default: ""
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:users, [:email], where: "email != ''", name: :users_email_index)
+    create unique_index(:users, [:account_id, :email],
+             where: "email != ''",
+             name: :users_email_index
+           )
 
     create table(:narratives) do
+      account()
       add :user_id, references(:users, on_delete: :delete_all), null: false
       add :body, :text, null: false, default: ""
       add :version, :integer, null: false, default: 1
@@ -29,6 +146,7 @@ defmodule Hireme.Repo.Migrations.Desk do
     create unique_index(:narratives, [:user_id])
 
     create table(:profiles) do
+      account()
       add :user_id, references(:users, on_delete: :nilify_all)
       add :slug, :string, null: false
       add :name, :string, null: false
@@ -37,9 +155,10 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:profiles, [:slug])
+    create unique_index(:profiles, [:account_id, :slug], name: :profiles_slug_index)
 
     create table(:items) do
+      account()
       add :profile_id, references(:profiles, on_delete: :nilify_all)
       add :kind, :string, null: false
       add :key, :string, null: false
@@ -52,20 +171,24 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:items, [:key])
+    create unique_index(:items, [:account_id, :key], name: :items_key_index)
     create index(:items, [:profile_id, :kind])
 
     create table(:kv_pairs) do
+      account()
       add :namespace, :string, null: false
       add :key, :string, null: false
       add :value, :text, null: false, default: ""
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:kv_pairs, [:namespace, :key])
+    create unique_index(:kv_pairs, [:account_id, :namespace, :key],
+             name: :kv_pairs_namespace_key_index
+           )
 
     # Campaign: employers, batches, the scoreboard reading, claims.
     create table(:employers) do
+      account()
       add :name, :string, null: false
       add :freshness, :string, null: false, default: "unknown"
       add :note, :text, null: false, default: ""
@@ -73,10 +196,11 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:employers, [:name])
+    create unique_index(:employers, [:account_id, :name], name: :employers_name_index)
     create index(:employers, [:score_100])
 
     create table(:batches) do
+      account()
       add :code, :string, null: false
       add :ordinal, :integer, null: false
       add :kind, :string, null: false, default: "day_pack"
@@ -90,10 +214,11 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:batches, [:code])
+    create unique_index(:batches, [:account_id, :code], name: :batches_code_index)
     create index(:batches, [:queued_on, :status])
 
     create table(:freshness_verdicts) do
+      account()
       add :employer_id, references(:employers, on_delete: :nilify_all)
       add :wave, :string, null: false
       add :verdict, :string, null: false
@@ -103,18 +228,22 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:freshness_verdicts, [:wave, :verdict])
+    create unique_index(:freshness_verdicts, [:account_id, :wave, :verdict],
+             name: :freshness_verdicts_wave_verdict_index
+           )
 
     create table(:claims) do
+      account()
       add :squad, :string, null: false
       add :slice, :string, null: false
       add :note, :text, null: false, default: ""
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:claims, [:squad, :slice])
+    create unique_index(:claims, [:account_id, :squad, :slice], name: :claims_squad_slice_index)
 
     create table(:scoreboard_snapshots) do
+      account()
       add :noted_on, :date, null: false
       add :leftover_unique, :integer, null: false, default: 0
       add :target_total, :integer, null: false, default: 10_000
@@ -125,10 +254,13 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:scoreboard_snapshots, [:noted_on])
+    create unique_index(:scoreboard_snapshots, [:account_id, :noted_on],
+             name: :scoreboard_snapshots_noted_on_index
+           )
 
     # Applications. The rail is the pip string; notes ride beside it.
     create table(:job_apps) do
+      account()
       add :profile_id, references(:profiles, on_delete: :nilify_all), null: false
       add :employer_id, references(:employers, on_delete: :nilify_all)
       add :batch_id, references(:batches, on_delete: :nilify_all)
@@ -171,12 +303,13 @@ defmodule Hireme.Repo.Migrations.Desk do
     create index(:job_apps, [:gate])
     create index(:job_apps, [:score_100])
 
-    create unique_index(:job_apps, [:canonical_url],
+    create unique_index(:job_apps, [:account_id, :canonical_url],
              where: "canonical_url != ''",
              name: :job_apps_canonical_url_index
            )
 
     create table(:events) do
+      account()
       add :job_app_id, references(:job_apps, on_delete: :delete_all), null: false
       add :kind, :string, null: false
       add :body, :text, null: false, default: ""
@@ -186,6 +319,7 @@ defmodule Hireme.Repo.Migrations.Desk do
     create index(:events, [:job_app_id, :inserted_at])
 
     create table(:letterboxes) do
+      account()
       add :job_app_id, references(:job_apps, on_delete: :delete_all), null: false
       timestamps(type: :utc_datetime)
     end
@@ -194,6 +328,7 @@ defmodule Hireme.Repo.Migrations.Desk do
 
     # CV: one lineage per employer, one variant per application, lines on the lineage.
     create table(:cv_lineages) do
+      account()
       add :employer_id, references(:employers, on_delete: :delete_all), null: false
       add :generation, :integer, null: false, default: 1
       add :opened_on, :date, null: false
@@ -205,6 +340,7 @@ defmodule Hireme.Repo.Migrations.Desk do
     create unique_index(:cv_lineages, [:employer_id])
 
     create table(:cv_variants) do
+      account()
       add :job_app_id, references(:job_apps, on_delete: :delete_all)
       add :profile_id, references(:profiles, on_delete: :delete_all), null: false
       add :lineage_id, references(:cv_lineages, on_delete: :nilify_all)
@@ -222,6 +358,7 @@ defmodule Hireme.Repo.Migrations.Desk do
            )
 
     create table(:overlays) do
+      account()
       add :job_app_id, references(:job_apps, on_delete: :delete_all), null: false
       add :item_id, references(:items, on_delete: :delete_all), null: false
       add :lineage_id, references(:cv_lineages, on_delete: :nilify_all)
@@ -238,6 +375,7 @@ defmodule Hireme.Repo.Migrations.Desk do
 
     # Lanes beside the desk.
     create table(:gym_problems) do
+      account()
       add :platform, :string, null: false
       add :slug, :string, null: false
       add :title, :string, null: false, default: ""
@@ -247,9 +385,12 @@ defmodule Hireme.Repo.Migrations.Desk do
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:gym_problems, [:platform, :slug])
+    create unique_index(:gym_problems, [:account_id, :platform, :slug],
+             name: :gym_problems_platform_slug_index
+           )
 
     create table(:gym_reps) do
+      account()
       add :problem_id, references(:gym_problems, on_delete: :delete_all), null: false
       add :done_on, :date, null: false
       add :minutes, :integer, null: false, default: 0
@@ -261,6 +402,7 @@ defmodule Hireme.Repo.Migrations.Desk do
     create index(:gym_reps, [:problem_id, :done_on])
 
     create table(:net_entries) do
+      account()
       add :kind, :string, null: false
       add :channel, :string, null: false, default: "other"
       add :title, :string, null: false, default: ""
@@ -307,8 +449,14 @@ defmodule Hireme.Repo.Migrations.Desk do
 
     for table <-
           ~w(net_entries gym_reps gym_problems overlays cv_variants cv_lineages letterboxes events job_apps
-                    scoreboard_snapshots claims freshness_verdicts batches employers kv_pairs items profiles narratives users)a do
+                    scoreboard_snapshots claims freshness_verdicts batches employers kv_pairs items profiles narratives users
+                    audit_events recovery_codes mfa_challenges mfa_methods api_keys sessions accounts)a do
       drop table(table)
     end
+  end
+
+  # Every row the desk owns names its account.
+  defp account do
+    add :account_id, references(:accounts, on_delete: :delete_all), null: false
   end
 end

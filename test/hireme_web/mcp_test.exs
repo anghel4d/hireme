@@ -41,7 +41,7 @@ defmodule HiremeWeb.McpTest do
 
   test "the directory socket lists letterboxes and refuses writes" do
     %{letterbox_id: letterbox_id} = opened()
-    {:ok, state} = McpDirectorySocket.init(%{})
+    {:ok, state} = McpDirectorySocket.init(%{account_id: Repo.account_id!()})
 
     {:reply, :ok, {:text, listed}, state} =
       McpDirectorySocket.handle_in({~s({"id": 1, "method": "tools/list"}), []}, state)
@@ -94,7 +94,7 @@ defmodule HiremeWeb.McpTest do
 
   test "the letterbox socket answers a call and pushes only its own notification" do
     %{job: job, letterbox_id: letterbox_id} = opened()
-    {:ok, state} = McpSocket.init(%{id: letterbox_id})
+    {:ok, state} = McpSocket.init(%{id: letterbox_id, account_id: Repo.account_id!()})
 
     {:reply, :ok, {:text, payload}, state} =
       McpSocket.handle_in({~s({"id": 7, "method": "tools/list"}), []}, state)
@@ -119,9 +119,16 @@ defmodule HiremeWeb.McpTest do
   end
 
   test "a second connection cannot lease the same letterbox" do
+    account_id = Repo.account_id!()
     %{letterbox_id: letterbox_id} = opened()
-    {:ok, _state} = McpSocket.init(%{id: letterbox_id})
-    task = Task.async(fn -> McpSocket.init(%{id: letterbox_id}) end)
+    {:ok, _state} = McpSocket.init(%{id: letterbox_id, account_id: Repo.account_id!()})
+
+    task =
+      Task.async(fn ->
+        Repo.put_account(account_id)
+        McpSocket.init(%{id: letterbox_id, account_id: Repo.account_id!()})
+      end)
+
     assert {:stop, :busy, %{}} = Task.await(task)
   end
 

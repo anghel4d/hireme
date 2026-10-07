@@ -1,16 +1,37 @@
 defmodule Hireme.Schema do
   @moduledoc """
   What every row module shares: Ecto schema and changeset imports, UTC
-  timestamps, and a `t()`.
+  timestamps, a `t()`, and `tenant/1`, which stamps a row the desk owns
+  with the account on the process and refuses a row with none.
   """
+
+  import Ecto.Changeset
 
   defmacro __using__(_opts) do
     quote do
       use Ecto.Schema
       import Ecto.Changeset
+      import Hireme.Schema, only: [tenant: 1]
       @timestamps_opts [type: :utc_datetime]
       @type t :: %__MODULE__{}
     end
+  end
+
+  @doc """
+  The account that owns this row. A new row takes the account on the
+  process (`Hireme.Repo.put_account/1`); a row that already has one keeps
+  it. A row with no account at all does not get written.
+  """
+  @spec tenant(Ecto.Changeset.t()) :: Ecto.Changeset.t()
+  def tenant(changeset) do
+    changeset
+    |> then(fn cs ->
+      if get_field(cs, :account_id),
+        do: cs,
+        else: put_change(cs, :account_id, Hireme.Repo.account_id())
+    end)
+    |> validate_required([:account_id])
+    |> foreign_key_constraint(:account_id)
   end
 end
 
