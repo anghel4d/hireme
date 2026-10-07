@@ -22,29 +22,6 @@ defmodule Hireme.Letterbox.Handle do
         }
 end
 
-defmodule Hireme.Letterbox.Record do
-  @moduledoc false
-
-  use Ecto.Schema
-  import Ecto.Changeset
-
-  @type t :: %__MODULE__{}
-
-  schema "letterboxes" do
-    belongs_to :job_app, Hireme.Desk.Job
-
-    timestamps(type: :utc_datetime)
-  end
-
-  def changeset(record, attrs) do
-    record
-    |> cast(attrs, [:job_app_id])
-    |> validate_required([:job_app_id])
-    |> unique_constraint(:job_app_id)
-    |> foreign_key_constraint(:job_app_id)
-  end
-end
-
 defmodule Hireme.Letterbox do
   @moduledoc """
   One letterbox, one application, one producer, one consumer.

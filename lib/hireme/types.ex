@@ -18,7 +18,8 @@ defmodule Hireme.Closed do
   @moduledoc """
   A closed set of atoms and the one way a name from the wire becomes a
   member. `parse/2` accepts the atom itself or its name and refuses
-  everything else; `names/1` is the inverse for schemas and option lists.
+  everything else; `get/3` is the same read with a fallback; `names/1`
+  is the inverse for schemas and option lists.
   """
 
   @spec parse([atom()], term()) :: {:ok, atom()} | :error
@@ -36,6 +37,15 @@ defmodule Hireme.Closed do
   @spec parse([atom()], term(), atom()) :: {:ok, atom()} | :error
   def parse(set, value, default) when value in [nil, ""], do: parse(set, default)
   def parse(set, value, _default), do: parse(set, value)
+
+  @doc "The member `value` names, or `default` when it names none."
+  @spec get([atom()], term(), atom()) :: atom()
+  def get(set, value, default) do
+    case parse(set, value) do
+      {:ok, atom} -> atom
+      :error -> default
+    end
+  end
 
   @spec names([atom()]) :: [String.t()]
   def names(set), do: Enum.map(set, &Atom.to_string/1)
@@ -93,10 +103,44 @@ defmodule Hireme.Attrs do
         default
     end
   end
+end
 
-  @spec blank?(term()) :: boolean()
-  def blank?(nil), do: true
-  def blank?(""), do: true
-  def blank?(s) when is_binary(s), do: String.trim(s) == ""
-  def blank?(_), do: false
+defmodule Hireme.Text do
+  @moduledoc """
+  Names as comparable words: lowercased, punctuation folded to spaces.
+  An anchor matches a whole name, its compacted form, or a whole word
+  inside it, so "Google DeepMind" is named by `deepmind` and not by `go`.
+  """
+
+  @spec normalize(term()) :: String.t()
+  def normalize(name) do
+    name
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, " ")
+    |> String.trim()
+  end
+
+  @spec named?(term(), [String.t()]) :: boolean()
+  def named?(name, anchors) do
+    n = normalize(name)
+    compact = String.replace(n, " ", "")
+
+    Enum.any?(anchors, fn anchor ->
+      n == anchor or compact == String.replace(anchor, " ", "") or
+        String.contains?(" #{n} ", " #{anchor} ")
+    end)
+  end
+
+  @spec phrase?(term(), [String.t()]) :: boolean()
+  def phrase?(name, phrases) do
+    n = normalize(name)
+    Enum.any?(phrases, &String.contains?(n, &1))
+  end
+
+  @doc "A lowercase, hyphenated key for a title."
+  @spec slug(String.t()) :: String.t()
+  def slug(text) do
+    text |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-") |> String.trim("-")
+  end
 end
