@@ -200,21 +200,24 @@ defmodule Hireme.Heat do
         {-score_of(job), Org.company_key(company_of(job)), id_of(job) || 0}
       end)
 
+    ats = ats_index(existing ++ ordered)
+
     Enum.reduce(ordered, %{kept: [], deferred: []}, fn job, acc ->
-      verdict = evaluate(job, existing, acc.kept, today, cfg)
+      verdict = evaluate(job, existing, acc.kept, today, cfg, ats)
 
       if verdict.decision == :allow do
         %{acc | kept: acc.kept ++ [job]}
       else
-        %{acc | deferred: acc.deferred ++ [{job, verdict}]}
+        %{acc | deferred: [{job, verdict} | acc.deferred]}
       end
     end)
+    |> Map.update!(:deferred, &Enum.reverse/1)
   end
 
   @spec mix_batch(Batch.t(), keyword()) :: %{kept: [Job.t()], deferred: [{Job.t(), Verdict.t()}]}
   def mix_batch(%Batch{} = batch, opts \\ []) do
     today = Keyword.get(opts, :today, Date.utc_today())
-    members = Repo.all(from j in Job, where: j.batch_id == ^batch.id)
+    members = Repo.all(from(j in Job, where: j.batch_id == ^batch.id))
     member_ids = MapSet.new(members, & &1.id)
 
     existing =
@@ -269,33 +272,22 @@ defmodule Hireme.Heat do
     companies =
       snap.companies
       |> Enum.map(fn {key, row} ->
-        %{
-          key: key,
-          label: row.label,
-          load: row.load,
-          cap: row.cap,
-          ratio: ratio(row.load, row.cap),
-          n: row.n,
-          cooldown_days: cooldown(row.load, cfg.application_load, row.cap, cfg.company_half_life),
-          size: row.size
-        }
+        chart_row(key, row.label, row, row.cap, row.size, cfg.company_half_life, cfg)
       end)
       |> Enum.sort_by(&{-&1.ratio, &1.label})
 
     vendors =
       snap.vendors
       |> Enum.map(fn {vendor, row} ->
-        %{
-          key: Ats.name(vendor),
-          label: Ats.name(vendor),
-          load: row.load,
-          cap: cfg.ats_vendor_cap,
-          ratio: ratio(row.load, cfg.ats_vendor_cap),
-          n: row.n,
-          cooldown_days:
-            cooldown(row.load, cfg.application_load, cfg.ats_vendor_cap, cfg.ats_vendor_half_life),
-          size: nil
-        }
+        chart_row(
+          Ats.name(vendor),
+          Ats.name(vendor),
+          row,
+          cfg.ats_vendor_cap,
+          nil,
+          cfg.ats_vendor_half_life,
+          cfg
+        )
       end)
       |> Enum.reject(&(&1.key == "unknown"))
       |> Enum.sort_by(&{-&1.ratio, &1.label})
@@ -305,28 +297,11 @@ defmodule Hireme.Heat do
 
   @spec ascii(Chart.t()) :: String.t()
   def ascii(%Chart{} = chart) do
-    companies =
-      chart.companies
-      |> Enum.take(12)
-      |> Enum.map_join("\n", fn row ->
-        "#{String.pad_trailing(row.label, 22)} #{fmt(row.load)}/#{fmt(row.cap)}  n=#{row.n}"
-      end)
-
-    vendors =
-      chart.vendors
-      |> Enum.take(8)
-      |> Enum.map_join("\n", fn row ->
-        "#{String.pad_trailing(row.label, 22)} #{fmt(row.load)}/#{fmt(row.cap)}  n=#{row.n}"
-      end)
-
-    companies = if companies == "", do: "(none)", else: companies
-    vendors = if vendors == "", do: "(none)", else: vendors
-
     """
     HEAT companies
-    #{companies}
+    #{ascii_rows(chart.companies, 12)}
     HEAT ATS
-    #{vendors}
+    #{ascii_rows(chart.vendors, 8)}
     FIRE HOLD. Governor gates the queue. It does not submit.
     """
     |> String.trim()
@@ -353,7 +328,7 @@ defmodule Hireme.Heat do
     }
 
     existing = Map.get(snapshot, :jobs, [])
-    verdict = evaluate(job, existing, [], today, cfg)
+    verdict = evaluate(job, existing, [], today, cfg, Map.get(snapshot, :ats))
     ratio = ratio(verdict.company_load, verdict.company_cap)
 
     state =
@@ -377,64 +352,77 @@ defmodule Hireme.Heat do
     do: Atom.to_string(state)
 
   @spec parse_state(term()) :: {:ok, atom()} | :error
-  def parse_state(:all), do: {:ok, :all}
-  def parse_state("all"), do: {:ok, :all}
+  def parse_state(state), do: Hireme.Closed.parse([:all, :cool, :warm, :hot, :blocked], state)
 
-  def parse_state(state) when state in [:cool, :warm, :hot, :blocked], do: {:ok, state}
-
-  def parse_state(name) when is_binary(name) do
-    case name do
-      "cool" -> {:ok, :cool}
-      "warm" -> {:ok, :warm}
-      "hot" -> {:ok, :hot}
-      "blocked" -> {:ok, :blocked}
-      _ -> :error
-    end
+  defp chart_row(key, label, row, cap, size, half_life, cfg) do
+    %{
+      key: key,
+      label: label,
+      load: row.load,
+      cap: cap,
+      size: size,
+      n: row.n,
+      ratio: ratio(row.load, cap),
+      cooldown_days: cooldown(row.load, cfg.application_load, cap, half_life)
+    }
   end
 
-  def parse_state(_), do: :error
+  defp ascii_rows([], _limit), do: "(none)"
 
-  defp evaluate(job, existing, batch_kept, today, %Config{} = cfg) do
-    if override?(job) do
-      base = verdict_math(job, existing, batch_kept, today, cfg)
-      %{base | decision: :allow, reason: :override, note: "override · #{reason_of(job)}"}
-    else
-      verdict_math(job, existing, batch_kept, today, cfg)
-    end
+  defp ascii_rows(rows, limit) do
+    rows
+    |> Enum.take(limit)
+    |> Enum.map_join("\n", fn row ->
+      "#{String.pad_trailing(row.label, 22)} #{fmt(row.load)}/#{fmt(row.cap)}  n=#{row.n}"
+    end)
   end
 
-  defp verdict_math(job, existing, batch_kept, today, cfg) do
+  # Parse each distinct URL once per mix/snapshot, not once per candidate/peer.
+  defp ats_index(jobs) do
+    jobs |> Enum.map(&url_of/1) |> Enum.uniq() |> Map.new(&{&1, Ats.parse(&1)})
+  end
+
+  defp evaluate(job, existing, batch_kept, today, %Config{} = cfg, ats_index \\ nil) do
+    peers = existing ++ batch_kept
+    ats_index = ats_index || ats_index(peers)
+    base = verdict_math(job, peers, batch_kept, today, cfg, ats_index)
+
+    if override?(job),
+      do: %{base | decision: :allow, reason: :override, note: "override · #{reason_of(job)}"},
+      else: base
+  end
+
+  defp verdict_math(job, peers, batch_kept, today, cfg, ats_index) do
     ats = Ats.parse(url_of(job))
     size = Org.size(company_of(job))
     company_cap = cap(size, cfg)
     key = Org.company_key(company_of(job))
-    peers = Enum.filter(existing ++ batch_kept, &(Org.company_key(company_of(&1)) == key))
     others = Enum.reject(peers, &same_id?(&1, job))
+    company_peers = Enum.filter(others, &(Org.company_key(company_of(&1)) == key))
 
-    company_load = company_load(others, today, cfg)
-    increment = increment(job, others, cfg)
+    company_load = load(company_peers, today, cfg.company_half_life, cfg)
+    increment = increment(job, company_peers, cfg)
     projected = round4(company_load + increment)
 
     vendor_peers =
-      Enum.filter(existing ++ batch_kept, fn other ->
-        Ats.parse(url_of(other)).vendor == ats.vendor and ats.vendor != :unknown
-      end)
-      |> Enum.reject(&same_id?(&1, job))
+      Enum.filter(
+        others,
+        &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
+      )
 
     tenant_peers =
-      if ats.tenant do
-        Enum.filter(vendor_peers, &(Ats.parse(url_of(&1)).tenant == ats.tenant))
-      else
-        []
-      end
+      Enum.filter(
+        vendor_peers,
+        &(ats.tenant != nil and ats_index[url_of(&1)].tenant == ats.tenant)
+      )
 
-    vendor_load = ats_load(vendor_peers, today, cfg.ats_vendor_half_life, cfg)
-    tenant_load = ats_load(tenant_peers, today, cfg.ats_tenant_half_life, cfg)
+    vendor_load = load(vendor_peers, today, cfg.ats_vendor_half_life, cfg)
+    tenant_load = load(tenant_peers, today, cfg.ats_tenant_half_life, cfg)
 
     batch_vendor_n =
       Enum.count(
         batch_kept,
-        &(Ats.parse(url_of(&1)).vendor == ats.vendor and ats.vendor != :unknown)
+        &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
       )
 
     {decision, reason, note} =
@@ -518,17 +506,11 @@ defmodule Hireme.Heat do
     round4(base + extra)
   end
 
-  defp company_load(jobs, today, cfg) do
+  defp load(jobs, today, half_life, cfg) do
     jobs
-    |> Enum.map(fn job -> decay(cfg.application_load, age(job, today), cfg.company_half_life) end)
-    |> Enum.sum()
-    |> round4()
-  end
-
-  defp ats_load(jobs, today, half_life, cfg) do
-    jobs
-    |> Enum.map(fn job -> decay(cfg.application_load, age(job, today), half_life) end)
-    |> Enum.sum()
+    |> Enum.reduce(0, fn job, sum ->
+      sum + decay(cfg.application_load, age(job, today), half_life)
+    end)
     |> round4()
   end
 
@@ -556,6 +538,8 @@ defmodule Hireme.Heat do
   end
 
   defp build_snapshot(jobs, today, cfg) do
+    ats = ats_index(jobs)
+
     companies =
       jobs
       |> Enum.group_by(&Org.company_key(company_of(&1)))
@@ -567,7 +551,7 @@ defmodule Hireme.Heat do
          %{
            label: label,
            size: size,
-           load: company_load(group, today, cfg),
+           load: load(group, today, cfg.company_half_life, cfg),
            cap: cap(size, cfg),
            n: length(group)
          }}
@@ -575,24 +559,17 @@ defmodule Hireme.Heat do
 
     vendors =
       jobs
-      |> Enum.map(&{&1, Ats.parse(url_of(&1))})
-      |> Enum.reject(fn {_job, ats} -> ats.vendor == :unknown end)
-      |> Enum.group_by(fn {_job, ats} -> ats.vendor end)
+      |> Enum.reject(&(ats[url_of(&1)].vendor == :unknown))
+      |> Enum.group_by(&ats[url_of(&1)].vendor)
       |> Map.new(fn {vendor, group} ->
-        members = Enum.map(group, &elem(&1, 0))
-
-        {vendor,
-         %{
-           load: ats_load(members, today, cfg.ats_vendor_half_life, cfg),
-           n: length(members)
-         }}
+        {vendor, %{load: load(group, today, cfg.ats_vendor_half_life, cfg), n: length(group)}}
       end)
 
-    %{jobs: jobs, companies: companies, vendors: vendors}
+    %{jobs: jobs, companies: companies, vendors: vendors, ats: ats}
   end
 
   defp hot_jobs do
-    Repo.all(from j in Job, where: j.current_stage in ^@hot_stages)
+    Repo.all(from(j in Job, where: j.current_stage in ^@hot_stages))
   end
 
   defp age(job, today) do
