@@ -1,5 +1,13 @@
 defmodule Hireme.Letterbox.Box do
-  @moduledoc false
+  @moduledoc """
+  The consumer side of one lease.
+
+  The process lives exactly as long as the lease. Every exclusion is a
+  unique key in `Hireme.Letterbox.Registry` owned by this process: the
+  producer, the application, the employer's lineage, and the box itself.
+  When the lease fails, is released, or the producer dies, the process
+  stops and the registry drops every key with it.
+  """
 
   use GenServer
 
@@ -7,11 +15,10 @@ defmodule Hireme.Letterbox.Box do
   alias Hireme.Desk
   alias Hireme.Desk.Signal
   alias Hireme.Letterbox.Handle
-  alias Hireme.Letterbox.Id
-  alias Hireme.Letterbox.LineageGate
   alias Hireme.Letterbox.Record
-  alias Hireme.Letterbox.Token
   alias Hireme.Repo
+
+  @registry Hireme.Letterbox.Registry
 
   def child_spec(letterbox_id) do
     %{
@@ -22,90 +29,72 @@ defmodule Hireme.Letterbox.Box do
   end
 
   def start_link(letterbox_id) do
-    GenServer.start_link(__MODULE__, letterbox_id, name: via(letterbox_id))
+    GenServer.start_link(__MODULE__, letterbox_id,
+      name: {:via, Registry, {@registry, {:box, letterbox_id}}}
+    )
   end
 
-  def init(letterbox_id) do
-    {:ok,
-     %{
-       id: letterbox_id,
-       pair: nil,
-       token: nil,
-       producer: nil,
-       monitor: nil
-     }}
-  end
+  def init(letterbox_id), do: {:ok, %{id: letterbox_id, pair: nil, token: nil, producer: nil}}
 
-  def handle_call({:lease, producer}, _from, %{token: nil} = state) when is_pid(producer) do
-    case take_lease(producer, state.id) do
-      {:ok, handle, pair, monitor} ->
-        {:reply, {:ok, handle},
-         %{state | pair: pair, token: handle.token.ref, producer: producer, monitor: monitor}}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+  def handle_call({:lease, producer}, _from, %{token: nil, id: id} = state)
+      when is_pid(producer) do
+    with :ok <- claim({:producer, producer}, :one_lease),
+         {:ok, pair} <- load_pair(id),
+         :ok <- claim({:job, CvPair.job_id(pair)}, :busy),
+         :ok <- claim({:lineage, CvPair.lineage_id(pair)}, :lineage_busy) do
+      Process.monitor(producer)
+      Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic())
+      token = make_ref()
+      handle = %Handle{id: id, token: token, pid: self(), pair: pair}
+      {:reply, {:ok, handle}, %{state | pair: pair, token: token, producer: producer}}
+    else
+      {:error, reason} -> {:stop, :normal, {:error, reason}, state}
     end
   end
 
-  def handle_call({:lease, _producer}, _from, state) do
-    {:reply, {:error, :busy}, state}
-  end
+  def handle_call({:lease, _producer}, _from, state), do: {:reply, {:error, :busy}, state}
 
   def handle_call(
         {:cmd, token, command},
-        {caller, _tag},
+        {caller, _},
         %{token: token, producer: caller, pair: pair} = state
       ) do
     {:reply, Desk.perform(pair, command), state}
   end
 
-  def handle_call({:cmd, _token, _command}, _from, state) do
-    {:reply, {:error, :lease}, state}
+  def handle_call({:cmd, _token, _command}, _from, state), do: {:reply, {:error, :lease}, state}
+
+  # The registry clears keys on exit asynchronously; the caller must see
+  # the lease gone the moment it hears `:ok`.
+  def handle_call(
+        {:release, token},
+        {caller, _},
+        %{token: token, producer: caller, pair: pair} = state
+      ) do
+    Registry.unregister(@registry, {:producer, caller})
+    Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
+    Registry.unregister(@registry, {:lineage, CvPair.lineage_id(pair)})
+    {:stop, :normal, :ok, state}
   end
 
-  def handle_call({:release, token}, {caller, _tag}, %{token: token, producer: caller} = state) do
-    let_go(state)
-    {:stop, :normal, :ok, %{state | token: nil, producer: nil}}
-  end
+  def handle_call({:release, _token}, _from, state), do: {:reply, {:error, :lease}, state}
 
-  def handle_call({:release, _token}, _from, state) do
-    {:reply, {:error, :lease}, state}
-  end
-
-  def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{monitor: monitor} = state) do
+  def handle_info({:DOWN, _ref, :process, producer, _reason}, %{producer: producer} = state) do
     {:stop, :normal, state}
   end
 
-  def handle_info({:desk_event, %Signal{} = signal}, %{producer: producer, pair: pair} = state)
-      when is_pid(producer) do
+  def handle_info({:desk_event, %Signal{} = signal}, %{producer: producer, pair: pair} = state) do
     if Signal.about?(signal, CvPair.job_id(pair)), do: send(producer, {:desk_event, signal})
     {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  def terminate(_reason, state) do
-    let_go(state)
-    :ok
-  end
-
-  # The lease is gone the moment the producer hears `:ok`, so the
-  # registry keys are dropped here, before the process exits, instead of
-  # waiting on the registry to see the DOWN.
-  defp let_go(%{pair: nil}), do: :ok
-
-  defp let_go(%{pair: pair, id: id, producer: producer}) do
-    if is_pid(producer), do: Registry.unregister(Hireme.Letterbox.Registry, {:producer, producer})
-    Registry.unregister(Hireme.Letterbox.Registry, {:job, CvPair.job_id(pair)})
-    Registry.unregister(Hireme.Letterbox.Registry, {:leased, id})
-
-    try do
-      LineageGate.release(CvPair.lineage_id(pair), id)
-    catch
-      :exit, _ -> :ok
+  defp claim(key, refusal) do
+    case Registry.register(@registry, key, true) do
+      {:ok, _} -> :ok
+      {:error, {:already_registered, _}} -> {:error, refusal}
     end
-
-    :ok
   end
 
   defp load_pair(letterbox_id) do
@@ -113,73 +102,5 @@ defmodule Hireme.Letterbox.Box do
       nil -> {:error, :letterbox}
       record -> CvPair.bind(record.job_app_id)
     end
-  end
-
-  defp take_lease(producer, letterbox_id) do
-    case register_producer(producer, letterbox_id) do
-      {:error, reason} ->
-        {:error, reason}
-
-      :ok ->
-        case load_pair(letterbox_id) do
-          {:error, reason} ->
-            Registry.unregister(Hireme.Letterbox.Registry, {:producer, producer})
-            {:error, reason}
-
-          {:ok, pair} ->
-            hold(producer, letterbox_id, pair)
-        end
-    end
-  end
-
-  defp hold(producer, letterbox_id, pair) do
-    with :ok <- register_job(pair),
-         :ok <- LineageGate.acquire(CvPair.lineage_id(pair), letterbox_id, self()),
-         :ok <- register_leased(letterbox_id) do
-      token = make_ref()
-      monitor = Process.monitor(producer)
-      Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic())
-
-      handle = %Handle{
-        id: Id.new(letterbox_id),
-        token: %Token{ref: token},
-        pid: self(),
-        pair: pair
-      }
-
-      {:ok, handle, pair, monitor}
-    else
-      {:error, reason} ->
-        Registry.unregister(Hireme.Letterbox.Registry, {:producer, producer})
-        Registry.unregister(Hireme.Letterbox.Registry, {:job, CvPair.job_id(pair)})
-        Registry.unregister(Hireme.Letterbox.Registry, {:leased, letterbox_id})
-        LineageGate.release(CvPair.lineage_id(pair), letterbox_id)
-        {:error, reason}
-    end
-  end
-
-  defp register_producer(producer, letterbox_id) do
-    case Registry.register(Hireme.Letterbox.Registry, {:producer, producer}, letterbox_id) do
-      {:ok, _} -> :ok
-      {:error, {:already_registered, _}} -> {:error, :one_lease}
-    end
-  end
-
-  defp register_job(pair) do
-    case Registry.register(Hireme.Letterbox.Registry, {:job, CvPair.job_id(pair)}, true) do
-      {:ok, _} -> :ok
-      {:error, {:already_registered, _}} -> {:error, :busy}
-    end
-  end
-
-  defp register_leased(letterbox_id) do
-    case Registry.register(Hireme.Letterbox.Registry, {:leased, letterbox_id}, true) do
-      {:ok, _} -> :ok
-      {:error, {:already_registered, _}} -> {:error, :busy}
-    end
-  end
-
-  defp via(letterbox_id) do
-    {:via, Registry, {Hireme.Letterbox.Registry, {:box, letterbox_id}}}
   end
 end

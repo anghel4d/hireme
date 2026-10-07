@@ -98,6 +98,7 @@ kbd {
 }
 
 .filters input[type="search"],
+.filters input[type="number"],
 .filters select,
 .field input,
 .field textarea,
@@ -111,6 +112,7 @@ kbd {
 }
 
 .filters input[type="search"] { min-width: 12rem; flex: 1; }
+.filters .min-score { width: 4.5rem; font-variant-numeric: tabular-nums; }
 .filters input:focus,
 .filters select:focus,
 .field input:focus,
@@ -294,40 +296,60 @@ kbd {
   .lane-body { grid-template-columns: 1fr; }
 }
 
-.min-score {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--faint);
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.min-score input {
-  width: 3.4rem;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.32rem 0.4rem;
-}
-
-.ev-chart {
-  flex: 0 0 auto;
-  padding: 0.4rem 1rem 0.55rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.ev-meta {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  color: var(--muted);
-  font-size: 0.75rem;
+/* Score: one number per card, one bar per band on the scoreboard. */
+.score {
+  display: inline-block;
+  min-width: 2ch;
+  padding: 0 0.3rem;
+  border-radius: 4px;
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ink);
+  background: color-mix(in oklab, var(--band, var(--faint)) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--band, var(--faint)) 55%, transparent);
 }
+.band-frontier { --band: var(--ok); }
+.band-labs { --band: var(--accent); }
+.band-big_tech { --band: color-mix(in oklab, var(--accent) 70%, var(--faint)); }
+.band-systems { --band: color-mix(in oklab, var(--accent) 40%, var(--faint)); }
+.band-craft { --band: var(--faint); }
+.band-mid { --band: color-mix(in oklab, var(--faint) 60%, var(--line)); }
+.band-thin { --band: color-mix(in oklab, var(--due) 50%, var(--faint)); }
+.band-kill { --band: var(--due); }
+.ev-meta { align-self: center; margin-right: 0.35rem; color: var(--faint); }
+
+.bands {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 1.4rem;
+  margin-left: auto;
+}
+.bands .band {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  width: 1.5rem;
+  height: 100%;
+  text-decoration: none;
+  color: var(--faint);
+}
+.bands .band i {
+  display: block;
+  width: 100%;
+  background: color-mix(in oklab, var(--band, var(--faint)) 65%, transparent);
+  border-radius: 2px 2px 0 0;
+}
+.bands .band b {
+  position: absolute;
+  inset: auto 0 100% 0;
+  font-size: 0.6rem;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1;
+}
+.bands .band:hover i { background: var(--band, var(--faint)); }
+
 .ev-bands {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
@@ -342,7 +364,8 @@ kbd {
   border: 1px solid transparent;
   border-radius: 6px;
   padding: 0.12rem 0.25rem;
-  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
   text-align: left;
 }
 .ev-band:hover { background: var(--hover); }
@@ -356,35 +379,6 @@ kbd {
   min-width: 0;
 }
 .ev-band-n { color: var(--faint); font-size: 0.7rem; font-variant-numeric: tabular-nums; text-align: right; }
-.ev-hist {
-  display: flex;
-  align-items: flex-end;
-  gap: 0.2rem;
-  height: 3.2rem;
-}
-.ev-bin {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 0.1rem;
-}
-.ev-bin-bar {
-  width: 100%;
-  max-width: 1.1rem;
-  background: color-mix(in oklab, var(--accent) 75%, var(--line));
-  border-radius: 2px 2px 0 0;
-  min-height: 1px;
-}
-.ev-bin-lo { color: var(--faint); font-size: 0.62rem; font-variant-numeric: tabular-nums; }
-.ev-score {
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
-  font-weight: 650;
-}
 .heat-load {
   font-variant-numeric: tabular-nums;
   color: var(--muted);

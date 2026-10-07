@@ -8,7 +8,6 @@ defmodule Hireme.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      HiremeWeb.Telemetry,
       Hireme.Repo,
       {Ecto.Migrator,
        repos: Application.fetch_env!(:hireme, :ecto_repos), skip: skip_migrations?()},

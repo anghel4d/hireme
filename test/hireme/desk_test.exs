@@ -81,6 +81,41 @@ defmodule Hireme.DeskTest do
            )
   end
 
+  test "an opening casts wire strings once and refuses an unknown stage" do
+    profile =
+      Corpus.create_profile!(%{
+        slug: "cast",
+        name: "Sample Candidate",
+        headline: "Engineer",
+        summary: "A sample profile."
+      })
+
+    assert {:ok, job} =
+             Desk.create_job(%{
+               profile_id: profile.id,
+               company: "Cast Co",
+               role: "Engineer",
+               stage: "gated",
+               freshness: "open",
+               gate: :pursue
+             })
+
+    assert job.current_stage == :gated
+    assert job.freshness == :open
+    assert job.pips == "DDAPPPPPPP"
+
+    assert {:error, %Ecto.Changeset{}} =
+             Desk.create_job(%{
+               profile_id: profile.id,
+               company: "Cast Co",
+               role: "x",
+               stage: "sent"
+             })
+
+    assert {:ok, noted} = Desk.set_note(job.id, :gated, "Pursue: strong fit")
+    assert Enum.find(Desk.rail(noted), &(&1.key == :gated)).note == "Pursue: strong fit"
+  end
+
   test "a submit stays locked until that batch is named open fire" do
     profile =
       Corpus.create_profile!(%{

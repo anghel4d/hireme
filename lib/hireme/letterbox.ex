@@ -1,44 +1,24 @@
-defmodule Hireme.Letterbox.Id do
-  @moduledoc false
-  @enforce_keys [:value]
-  defstruct [:value]
-
-  @type t :: %__MODULE__{value: pos_integer()}
-
-  @spec new(pos_integer()) :: t()
-  def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
-end
-
-defmodule Hireme.Letterbox.Token do
-  @moduledoc false
-  @enforce_keys [:ref]
-  defstruct [:ref]
-
-  @type t :: %__MODULE__{ref: reference()}
-end
-
 defmodule Hireme.Letterbox.Handle do
   @moduledoc """
   The agent's lease on one letterbox.
 
-  `lease/2` is the constructor. The process that receives the handle is
-  the only producer. The letterbox process is the only consumer. `pair`
-  is the CV for the one application this letterbox owns. A command has
-  no application id, so the handle cannot be aimed at a different one.
+  `Hireme.Letterbox.lease/2` is the constructor. The process that
+  receives the handle is the only producer. The letterbox process is the
+  only consumer. `pair` is the CV for the one application this letterbox
+  owns. A command has no application id, so the handle cannot be aimed
+  at a different one. `token` is a reference made inside the consumer;
+  the consumer accepts a command only from the producer pid with that
+  token.
   """
-
-  alias Hireme.CvPair
-  alias Hireme.Letterbox.Id
-  alias Hireme.Letterbox.Token
 
   @enforce_keys [:id, :token, :pid, :pair]
   defstruct [:id, :token, :pid, :pair]
 
   @type t :: %__MODULE__{
-          id: Id.t(),
-          token: Token.t(),
+          id: pos_integer(),
+          token: reference(),
           pid: pid(),
-          pair: CvPair.t()
+          pair: Hireme.CvPair.t()
         }
 end
 
@@ -47,6 +27,8 @@ defmodule Hireme.Letterbox.Record do
 
   use Ecto.Schema
   import Ecto.Changeset
+
+  @type t :: %__MODULE__{}
 
   schema "letterboxes" do
     belongs_to :job_app, Hireme.Desk.Job
@@ -75,11 +57,7 @@ defmodule Hireme.Letterbox do
 
   A second connection cannot lease that letterbox. A second connection
   cannot lease another application that shares the employer's CV
-  lineage. One producer process cannot hold two leases. The consumer
-  accepts a command only from the producer pid, and only with the
-  `reference()` token created inside the consumer. Those are different
-  structs from a job id or a variant id, so they do not type-check in
-  each other's place.
+  lineage. One producer process cannot hold two leases.
   """
 
   import Ecto.Query
@@ -87,48 +65,46 @@ defmodule Hireme.Letterbox do
   alias Hireme.Desk.Job
   alias Hireme.Letterbox.Box
   alias Hireme.Letterbox.Handle
-  alias Hireme.Letterbox.Id
   alias Hireme.Letterbox.Record
-  alias Hireme.Letterbox.Token
   alias Hireme.Repo
+
+  @registry __MODULE__.Registry
 
   @type command :: Hireme.Desk.command()
   @type reply :: Hireme.Desk.reply()
 
+  @type entry :: %{
+          id: pos_integer(),
+          job_id: pos_integer(),
+          company: String.t(),
+          role: String.t(),
+          stage: Hireme.Pipeline.stage(),
+          batch: String.t() | nil,
+          score_100: Hireme.LifeEv.score(),
+          leased: boolean()
+        }
+
   @spec open!(pos_integer()) :: Record.t()
   def open!(job_id) when is_integer(job_id) do
-    %Record{}
-    |> Record.changeset(%{job_app_id: job_id})
-    |> Repo.insert!()
+    %Record{} |> Record.changeset(%{job_app_id: job_id}) |> Repo.insert!()
   end
 
   @spec exists?(pos_integer()) :: boolean()
-  def exists?(id) when is_integer(id) do
-    Repo.exists?(from r in Record, where: r.id == ^id)
-  end
+  def exists?(id) when is_integer(id), do: Repo.exists?(from r in Record, where: r.id == ^id)
 
   @spec for_job(pos_integer()) :: Record.t() | nil
-  def for_job(job_id) when is_integer(job_id) do
-    Repo.get_by(Record, job_app_id: job_id)
-  end
+  def for_job(job_id) when is_integer(job_id), do: Repo.get_by(Record, job_app_id: job_id)
 
-  @spec lease(Id.t() | pos_integer(), pid()) ::
-          {:ok, Handle.t()} | {:error, atom()}
-  def lease(%Id{value: id}, producer) when is_pid(producer), do: lease(id, producer)
-
+  @spec lease(pos_integer(), pid()) :: {:ok, Handle.t()} | {:error, atom()}
   def lease(id, producer) when is_integer(id) and id > 0 and is_pid(producer) do
-    with {:ok, _record} <- fetch(id),
-         {:ok, pid} <- ensure_box(id),
-         :ok <- allow_sandbox(producer, pid),
-         {:ok, %Handle{}} = ok <- GenServer.call(pid, {:lease, producer}) do
-      ok
+    with {:ok, pid} <- start_box(id) do
+      allow_sandbox(producer, pid)
+      GenServer.call(pid, {:lease, producer})
     end
   end
 
-  def lease(_, _), do: {:error, :letterbox}
-
-  @spec release(Handle.t()) :: :ok | {:error, atom()}
-  def release(%Handle{pid: pid, token: %Token{ref: token}}) do
+  @spec release(Handle.t()) :: :ok | {:error, :lease}
+  def release(%Handle{pid: pid, token: token}) do
     GenServer.call(pid, {:release, token})
   catch
     :exit, _ -> :ok
@@ -140,57 +116,33 @@ defmodule Hireme.Letterbox do
   caller is not the producer or the token is not this lease's.
   """
   @spec command(Handle.t(), command()) :: reply() | {:error, :lease}
-  def command(%Handle{} = handle, :get), do: call(handle, :get)
-  def command(%Handle{} = handle, :open_generation), do: call(handle, :open_generation)
-
-  def command(%Handle{} = handle, {:set_stage, stage}) when is_atom(stage) do
-    call(handle, {:set_stage, stage})
+  def command(%Handle{pid: pid, token: token}, command)
+      when command in [:get, :open_generation] or
+             (is_tuple(command) and
+                elem(command, 0) in [:set_stage, :set_next, :set_score, :tailor]) do
+    GenServer.call(pid, {:cmd, token, command})
   end
 
-  def command(%Handle{} = handle, {:set_next, action}) when is_binary(action) do
-    call(handle, {:set_next, action})
-  end
-
-  def command(%Handle{} = handle, {:tailor, item_id, attrs})
-      when is_integer(item_id) and is_map(attrs) do
-    call(handle, {:tailor, item_id, attrs})
-  end
-
-  @spec id(Handle.t()) :: pos_integer()
-  def id(%Handle{id: %Id{value: value}}), do: value
-
+  @doc """
+  A box exists only while a lease is held or being taken.
+  """
   @spec leased?(pos_integer()) :: boolean()
-  def leased?(id) when is_integer(id) do
-    Registry.lookup(__MODULE__.Registry, {:leased, id}) != []
-  end
+  def leased?(id) when is_integer(id), do: Registry.lookup(@registry, {:box, id}) != []
 
   @spec permit_job(pos_integer()) :: :ok | {:error, :leased}
   def permit_job(job_id) when is_integer(job_id) do
-    case Registry.lookup(__MODULE__.Registry, {:job, job_id}) do
-      [{pid, _}] when pid == self() -> :ok
-      [{_pid, _}] -> {:error, :leased}
-      [] -> :ok
+    case Registry.lookup(@registry, {:job, job_id}) do
+      [{pid, _}] when pid != self() -> {:error, :leased}
+      _ -> :ok
     end
   end
-
-  @type entry :: %{
-          id: pos_integer(),
-          job_id: pos_integer(),
-          company: String.t(),
-          role: String.t(),
-          stage: Hireme.Pipeline.stage(),
-          batch: String.t() | nil,
-          leased: boolean(),
-          score_100: Hireme.LifeEv.score(),
-          band: Hireme.LifeEv.band()
-        }
 
   @spec list() :: [entry()]
   def list do
     Record
     |> join(:inner, [r], j in Job, on: j.id == r.job_app_id)
     |> join(:left, [r, j], b in Batch, on: b.id == j.batch_id)
-    |> order_by([r, j], desc: j.score_100, asc: r.id)
+    |> order_by([r], r.id)
     |> select([r, j, b], %{
       id: r.id,
       job_id: j.id,
@@ -201,45 +153,24 @@ defmodule Hireme.Letterbox do
       score_100: j.score_100
     })
     |> Repo.all()
-    |> Enum.map(fn row ->
-      row
-      |> Map.put(:leased, leased?(row.id))
-      |> Map.put(:band, Hireme.LifeEv.band(row.score_100))
-    end)
+    |> Enum.map(&Map.put(&1, :leased, leased?(&1.id)))
   end
 
-  defp fetch(id) do
-    case Repo.get(Record, id) do
-      nil -> {:error, :letterbox}
-      record -> {:ok, record}
+  defp start_box(id) do
+    if exists?(id) do
+      case DynamicSupervisor.start_child(__MODULE__.Supervisor, {Box, id}) do
+        {:ok, pid} -> {:ok, pid}
+        {:error, {:already_started, _pid}} -> {:error, :busy}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :letterbox}
     end
-  end
-
-  defp ensure_box(id) do
-    case Registry.lookup(__MODULE__.Registry, {:box, id}) do
-      [{pid, _}] ->
-        {:ok, pid}
-
-      [] ->
-        case DynamicSupervisor.start_child(__MODULE__.Supervisor, {Box, id}) do
-          {:ok, pid} -> {:ok, pid}
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          {:error, reason} -> {:error, reason}
-        end
-    end
-  end
-
-  defp call(%Handle{pid: pid, token: %Token{ref: token}}, command) do
-    GenServer.call(pid, {:cmd, token, command})
   end
 
   defp allow_sandbox(parent, child) do
-    repo = Hireme.Repo
-
-    if repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
-      Ecto.Adapters.SQL.Sandbox.allow(repo, parent, child)
+    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
+      Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, child)
     end
-
-    :ok
   end
 end

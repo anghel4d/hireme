@@ -1,0 +1,135 @@
+defmodule Hireme.ScoreTest do
+  use Hireme.DataCase, async: false
+
+  alias Hireme.Campaign
+  alias Hireme.Corpus
+  alias Hireme.Desk
+  alias Hireme.Desk.Filters
+  alias Hireme.Import
+  alias Hireme.Letterbox
+  alias Hireme.Mcp
+
+  test "a pack's score_100 lands on the card, orders the board, and filters by floor and band" do
+    profile = profile()
+
+    pack = """
+    {"batch":"Batch-009","status":"draft_prep","fire":"hold","apps":[
+      {"company":"Middling Co","role":"Engineer","url":"https://jobs.example.test/mid","score_100":70,"stage":"gated"},
+      {"company":"Titan Labs","role":"Engineer","url":"https://jobs.example.test/titan","score_100":100,"stage":"discovered"},
+      {"company":"High Co","role":"Engineer","url":"https://jobs.example.test/high","score":92,"stage":"gated"},
+      {"company":"Plain Co","role":"Engineer","url":"https://jobs.example.test/plain","stage":"gated"}
+    ]}
+    """
+
+    assert {:ok, %{count: 4}} = Import.import_body(pack, "batch-009.json", profile)
+
+    all = Desk.list_cards(%Filters{status: :all})
+    assert Enum.map(all, & &1.company) |> Enum.take(3) == ["Titan Labs", "High Co", "Middling Co"]
+
+    assert Desk.list_cards(%Filters{status: :all, min_score: 90}) |> Enum.map(& &1.score_100) == [
+             100,
+             92
+           ]
+
+    assert Desk.list_cards(%Filters{status: :all, band: :systems}) |> Enum.map(& &1.company) == [
+             "Middling Co"
+           ]
+
+    chart = Campaign.scoreboard().chart
+    assert chart.n == 4
+    assert Enum.find(chart.bands, &(&1.key == :frontier)).count == 1
+
+    filters = Filters.from_params(%{"min_score" => "85", "band" => "weird"})
+    assert filters.min_score == 85
+    assert filters.band == :all
+    assert Filters.to_query(filters) == %{"min_score" => "85"}
+
+    # A re-import without a score keeps the one on the card.
+    again =
+      ~s({"apps":[{"company":"Titan Labs","role":"Engineer","url":"https://jobs.example.test/titan"}]})
+
+    assert {:ok, _} = Import.import_body(again, "again.json", profile)
+    assert [%{score_100: 100}] = Desk.list_cards(%Filters{status: :all, band: :frontier})
+  end
+
+  test "the directory ranks by score_100 and a lease can set its own" do
+    profile = profile()
+
+    low =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Low Co",
+        role: "Engineer",
+        score_100: 40,
+        canonical_url: "https://jobs.example.test/low"
+      })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "High Co",
+        role: "Engineer",
+        score_100: "95",
+        canonical_url: "https://jobs.example.test/high"
+      })
+
+    listed =
+      Mcp.directory(%{
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "list_applications", "arguments" => %{"status" => "all"}}
+      })
+
+    assert Enum.map(listed.result["applications"], & &1["job_id"]) == [high.id, low.id]
+    assert hd(listed.result["applications"])["band"] == "labs"
+
+    boxes =
+      Mcp.directory(%{
+        "id" => 2,
+        "method" => "tools/call",
+        "params" => %{"name" => "list_letterboxes", "arguments" => %{"min_score" => 50}}
+      })
+
+    assert Enum.map(boxes.result["letterboxes"], & &1["job_id"]) == [high.id]
+
+    rec =
+      Mcp.directory(%{
+        "id" => 3,
+        "method" => "tools/call",
+        "params" => %{"name" => "recommend_applications", "arguments" => %{"limit" => 1}}
+      })
+
+    assert rec.result["fire"] == "hold"
+    assert Enum.map(rec.result["applications"], & &1["job_id"]) == [high.id]
+
+    {:ok, handle} = Letterbox.lease(Letterbox.for_job(low.id).id, self())
+
+    set =
+      Mcp.handle(handle, %{
+        "id" => 4,
+        "method" => "tools/call",
+        "params" => %{"name" => "set_score", "arguments" => %{"score" => 88}}
+      })
+
+    assert set.result == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
+
+    bad =
+      Mcp.handle(handle, %{
+        "id" => 5,
+        "method" => "tools/call",
+        "params" => %{"name" => "set_score", "arguments" => %{"score" => 101}}
+      })
+
+    assert bad.error.message == "bad argument score"
+    assert Letterbox.release(handle) == :ok
+  end
+
+  defp profile do
+    Corpus.create_profile!(%{
+      slug: "scored-#{System.unique_integer([:positive])}",
+      name: "Sample Candidate",
+      headline: "Engineer",
+      summary: "A sample profile."
+    })
+  end
+end

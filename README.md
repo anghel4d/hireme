@@ -62,7 +62,9 @@ The scoreboard reads leftover URL counts from the latest snapshot, then counts b
 
 ## Life-EV (`score_100`)
 
-Every job and employer gets `score_100` (0–100). Standing order from the hunt: OpenAI / Anthropic / SpaceX / Neuralink = 100; Starfish / Valve / GDM / Meta / tier-2 labs = 90; other big tech >$200k = 85; then descending. Ladder: [`alchemy/score-ladder.md`](alchemy/score-ladder.md). The board default-sorts higher first, then cooler company heat, and filters by band / min score / heat state. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100`. FIRE HOLD — scoring does not submit.
+Every job and employer gets `score_100` (0–100). A pack may set it (`score_100` or `score`, or a `Score` column in a pursue table); otherwise `Hireme.LifeEv.score/1` assigns it from company, role, fit, location, and comp along the ladder in [`alchemy/score-ladder.md`](alchemy/score-ladder.md). Eight closed bands: `frontier` 100, `labs` 90–99, `big_tech` 85–89, `systems` 70–84, `craft` 55–69, `mid` 40–54, `thin` 20–39, `kill` 0–19. A re-import without a score leaves the card's score alone.
+
+The board orders by `score_100` first, then cooler company heat, then batch, rung, and interest heat. The top bar filters by band, a minimum score, or heat state. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100` and take `min_score`, `band`, and `heat`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
 
 ## HEAT governor
 
@@ -88,7 +90,7 @@ Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadsid
 
 Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Job.parse_status/1`, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
 
-Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Variety`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Opening`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
+Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Variety`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
 
 ## CV pairs
 
@@ -117,7 +119,6 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | `lib/hireme/variety.ex` | Mix flags for a batch |
 | `lib/hireme/narrative.ex` | Private narrative |
 | `lib/hireme/mask.ex` | Per-application CV overlay, `Mask.Line` |
-| `lib/hireme/desk/opening.ex` | Parsed input for opening one application |
 | `lib/hireme/desk/signal.ex` | Typed desk change broadcast on the `desk` topic |
 | `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
 | `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |

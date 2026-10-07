@@ -15,7 +15,8 @@ defmodule Hireme.Campaign.Scoreboard do
     :cumulative,
     :target_total,
     :target_on,
-    :varieties
+    :varieties,
+    :chart
   ]
   defstruct @enforce_keys
 
@@ -39,7 +40,8 @@ defmodule Hireme.Campaign.Scoreboard do
           cumulative: non_neg_integer(),
           target_total: pos_integer(),
           target_on: Date.t(),
-          varieties: [variety_row()]
+          varieties: [variety_row()],
+          chart: Hireme.LifeEv.Chart.t()
         }
 end
 
@@ -83,7 +85,8 @@ defmodule Hireme.Campaign do
       cumulative: submitted(nil),
       target_total: (snap && snap.target_total) || 10_000,
       target_on: (snap && snap.target_on) || ~D[2026-10-31],
-      varieties: Enum.map(batches, &variety_row/1)
+      varieties: Enum.map(batches, &variety_row/1),
+      chart: Hireme.Desk.score_chart()
     }
   end
 

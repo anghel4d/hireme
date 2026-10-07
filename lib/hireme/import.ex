@@ -27,7 +27,8 @@ defmodule Hireme.Import do
   Accepted shapes:
 
   * batch pack — `{batch, status, fire, apps: [...]}`, or a markdown table
-  * leftover pursue table — `Company | Role | Location | Fit | Source | URL`
+  * leftover pursue table — `Company | Role | Location | Fit | Source | URL`, optional `Score`
+  * any application row may carry `score_100` (or `score`), an integer 0–100
   * freshness note — OPEN/THIN/CLOSED/BLOCKED counts and URL lists
   * scoreboard snapshot — `{noted_on, leftover_unique, ...}`
   * claims — `{"claims": [{"squad", "slice", "note"}]}`
@@ -48,7 +49,6 @@ defmodule Hireme.Import do
   alias Hireme.Desk.Job
   alias Hireme.Desk.Snapshot
   alias Hireme.Import.Report
-  alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Repo
   alias Hireme.Variety
@@ -244,17 +244,6 @@ defmodule Hireme.Import do
 
     employer = upsert_employer(app["company"] || app["Company"], app["freshness"])
 
-    score_100 =
-      LifeEv.score(%{
-        company: app["company"] || app["Company"] || "",
-        role: app["role"] || app["Role"] || "Engineer",
-        fit: app["fit"] || app["Fit"] || "",
-        location: app["location"] || app["Location"] || "",
-        comp: app["comp"] || app["Comp"],
-        score_100: app["score_100"],
-        score: app["score"]
-      })
-
     attrs = %{
       company: app["company"] || app["Company"],
       role: app["role"] || app["Role"] || "Engineer",
@@ -269,7 +258,7 @@ defmodule Hireme.Import do
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
       department: app["department"] || app["Department"] || "",
-      score_100: score_100,
+      score_100: app["score_100"] || app["score"] || app["Score"],
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,
       stage: stage,
@@ -284,6 +273,8 @@ defmodule Hireme.Import do
         1
 
       job ->
+        attrs = Map.put(attrs, :score_100, score!(attrs.score_100, job.score_100))
+
         job
         |> Job.changeset(Map.delete(attrs, :stage))
         |> Repo.update!()
@@ -296,6 +287,19 @@ defmodule Hireme.Import do
         end
 
         1
+    end
+  end
+
+  # A pack without a score leaves the one already on the card alone.
+  defp score!(nil, current), do: current
+
+  defp score!(value, _current) when is_integer(value), do: Hireme.LifeEv.clamp(value)
+  defp score!(value, _current) when is_float(value), do: Hireme.LifeEv.clamp(round(value))
+
+  defp score!(value, _current) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {n, ""} -> Hireme.LifeEv.clamp(n)
+      _ -> raise ArgumentError, "bad score #{inspect(value)}"
     end
   end
 
@@ -322,14 +326,9 @@ defmodule Hireme.Import do
 
   defp upsert_employer(name, freshness) do
     existing = Repo.get_by(Employer, name: name) || %Employer{}
-    score_100 = LifeEv.score(name)
 
     existing
-    |> Employer.changeset(%{
-      name: name,
-      freshness: freshness || "unknown",
-      score_100: score_100
-    })
+    |> Employer.changeset(%{name: name, freshness: freshness || "unknown"})
     |> Repo.insert_or_update!()
   end
 
