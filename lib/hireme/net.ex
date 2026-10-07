@@ -29,8 +29,8 @@ defmodule Hireme.Net do
 
   import Ecto.Query
   alias Hireme.Closed
-  alias Hireme.Kv
   alias Hireme.Form
+  alias Hireme.Kv
   alias Hireme.Net.Entry
   alias Hireme.Net.Progress
   alias Hireme.Repo

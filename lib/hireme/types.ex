@@ -83,7 +83,7 @@ defmodule Hireme.Attrs do
         round(f)
 
       s when is_binary(s) ->
-        with({n, ""} <- Integer.parse(String.trim(s)), do: n, else: (_ -> default))
+        parse_int(String.trim(s), default)
 
       _ ->
         default
@@ -97,10 +97,24 @@ defmodule Hireme.Attrs do
         d
 
       s when is_binary(s) ->
-        with({:ok, d} <- Date.from_iso8601(String.trim(s)), do: d, else: (_ -> default))
+        parse_date(String.trim(s), default)
 
       _ ->
         default
+    end
+  end
+
+  defp parse_int(text, default) do
+    case Integer.parse(text) do
+      {n, ""} -> n
+      _ -> default
+    end
+  end
+
+  defp parse_date(text, default) do
+    case Date.from_iso8601(text) do
+      {:ok, d} -> d
+      _ -> default
     end
   end
 end

@@ -35,11 +35,11 @@ defmodule Hireme.Gym do
 
   import Ecto.Query
   alias Hireme.Closed
+  alias Hireme.Form
   alias Hireme.Gym.Problem
   alias Hireme.Gym.Progress
   alias Hireme.Gym.Rep
   alias Hireme.Kv
-  alias Hireme.Form
   alias Hireme.Repo
   alias Hireme.Text
 
