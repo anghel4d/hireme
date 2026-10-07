@@ -284,6 +284,45 @@ defmodule Hireme.McpTest do
     assert is_list(ranked.result["applications"])
   end
 
+  test "directory heat_status and can_apply gate the queue without submitting" do
+    listed = Mcp.directory(%{"id" => 1, "method" => "tools/list"})
+    names = Enum.map(listed.result.tools, & &1["name"])
+    assert "heat_status" in names
+    assert "can_apply" in names
+
+    profile =
+      Corpus.create_profile!(%{
+        slug: "heat-mcp-#{System.unique_integer([:positive])}",
+        name: "Sample Candidate",
+        headline: "Engineer",
+        summary: "A sample profile."
+      })
+
+    job =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Obscure Shop",
+        role: "Engineer",
+        canonical_url: "https://jobs.example.test/heat-mcp-#{System.unique_integer([:positive])}"
+      })
+
+    status =
+      Mcp.directory(%{"id" => 2, "method" => "tools/call", "params" => %{"name" => "heat_status"}})
+
+    assert status.result["note"] =~ "does not submit"
+    assert is_list(status.result["companies"])
+
+    allowed =
+      Mcp.directory(%{
+        "id" => 3,
+        "method" => "tools/call",
+        "params" => %{"name" => "can_apply", "arguments" => %{"role_id" => job.id}}
+      })
+
+    assert allowed.result["decision"] in ["allow", "defer"]
+    assert allowed.result["fire"] == "hold"
+  end
+
   defp opened do
     profile =
       Corpus.create_profile!(%{

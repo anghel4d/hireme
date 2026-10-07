@@ -167,6 +167,7 @@ defmodule HiremeWeb.BoardLiveTest do
     {:ok, view, html} = live(conn, "/")
     assert html =~ "score_100"
     assert has_element?(view, "#ev-chart")
+    assert has_element?(view, "#heat-chart")
     assert has_element?(view, "#card-#{high.id}.is-active")
     assert html =~ "100"
 

@@ -79,6 +79,7 @@ defmodule Hireme.Mcp do
   alias Hireme.Desk
   alias Hireme.Desk.Filters
   alias Hireme.Gym
+  alias Hireme.Heat
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
   alias Hireme.Mcp.Args
@@ -147,12 +148,19 @@ defmodule Hireme.Mcp do
 
     filters = Filters.merge(list_filters(args), %{min_score: min_score, status: :open})
 
+    apps =
+      filters
+      |> application_rows()
+      |> Enum.reject(&(&1["heat_state"] == "blocked"))
+      |> Enum.take(limit)
+
     {:ok,
      %{
-       "applications" => Enum.take(application_rows(filters), limit),
+       "applications" => apps,
        "min_score" => min_score,
        "fire" => "hold",
-       "note" => "FIRE HOLD. Ranked by score_100. This tool does not submit."
+       "note" =>
+         "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
      }}
   end
 
@@ -178,6 +186,52 @@ defmodule Hireme.Mcp do
          end),
        "bins" => Enum.map(chart.bins, &%{"lo" => &1.lo, "hi" => &1.hi, "count" => &1.count})
      }}
+  end
+
+  defp directory_call("heat_status", args) do
+    chart = Heat.chart()
+    company = Args.optional_string(args, "company")
+    ats = Args.optional_string(args, "ats")
+
+    {:ok,
+     %{
+       "companies" =>
+         chart.companies
+         |> maybe_filter_key(company)
+         |> Enum.map(&heat_row_view/1),
+       "vendors" =>
+         chart.vendors
+         |> maybe_filter_key(ats)
+         |> Enum.map(&heat_row_view/1),
+       "note" => "FIRE HOLD. Heat gates the queue. It does not submit."
+     }}
+  end
+
+  defp directory_call("can_apply", args) do
+    with {:ok, job_id} <- apply_id(args) do
+      verdict = Heat.can_apply(job_id)
+
+      {:ok,
+       %{
+         "job_id" => job_id,
+         "decision" => Atom.to_string(verdict.decision),
+         "reason" => Atom.to_string(verdict.reason),
+         "company" => verdict.company,
+         "company_load" => verdict.company_load,
+         "company_cap" => verdict.company_cap,
+         "company_increment" => verdict.company_increment,
+         "size" => Hireme.Heat.Org.name(verdict.size),
+         "ats_vendor" => Hireme.Heat.Ats.name(verdict.ats_vendor),
+         "ats_tenant" => verdict.ats_tenant,
+         "vendor_load" => verdict.vendor_load,
+         "vendor_cap" => verdict.vendor_cap,
+         "tenant_load" => verdict.tenant_load,
+         "tenant_cap" => verdict.tenant_cap,
+         "cooldown_days" => verdict.cooldown_days,
+         "note" => verdict.note,
+         "fire" => "hold"
+       }}
+    end
   end
 
   defp directory_call("gym_status", _args), do: {:ok, gym_progress_view(Gym.progress())}
@@ -276,22 +330,7 @@ defmodule Hireme.Mcp do
       tool("list_batches", "List batches on the desk", %{}),
       tool(
         "list_applications",
-        "Search applications ranked by score_100 (Life-EV, 0–100) as the primary signal, then batch, battleplan, heat. Higher score first. Filters: q, stage, status, batch, band, min_score. FIRE HOLD — does not submit.",
-        %{
-          "q" => %{"type" => "string"},
-          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-          "status" => %{"type" => "string"},
-          "batch" => %{"type" => "string"},
-          "band" => %{
-            "type" => "string",
-            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
-          },
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
-        }
-      ),
-      tool(
-        "recommend_applications",
-        "Recommend high Life-EV keepers. Primary ranking signal is score_100. Default min_score 90 (frontier/labs). FIRE HOLD — never submits.",
+        "Search applications ranked by score_100 (Life-EV, 0–100) as the primary signal, then cooler company heat, then batch. Filters: q, stage, status, batch, band, min_score, heat (cool|warm|hot|blocked). FIRE HOLD — does not submit.",
         %{
           "q" => %{"type" => "string"},
           "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
@@ -302,7 +341,24 @@ defmodule Hireme.Mcp do
             "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
           },
           "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-          "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 100}
+          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
+        }
+      ),
+      tool(
+        "recommend_applications",
+        "Recommend high Life-EV keepers. Primary ranking signal is score_100, then cooler heat. Omits heat-blocked roles. Default min_score 90. FIRE HOLD — never submits.",
+        %{
+          "q" => %{"type" => "string"},
+          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+          "status" => %{"type" => "string"},
+          "batch" => %{"type" => "string"},
+          "band" => %{
+            "type" => "string",
+            "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
+          },
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+          "limit" => %{"type" => "integer", "minimum" => 1, "maximum" => 100},
+          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
         }
       ),
       tool(
@@ -317,7 +373,27 @@ defmodule Hireme.Mcp do
             "type" => "string",
             "enum" => ["all" | Enum.map(Hireme.LifeEv.keys(), &Hireme.LifeEv.name/1)]
           },
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+          "heat" => %{"type" => "string", "enum" => ~w(all cool warm hot blocked)}
+        }
+      ),
+      tool(
+        "heat_status",
+        "Company and ATS heat vs cap, with cooldown ETA. Optional company or ats filter. Structural governor — does not submit. FIRE HOLD.",
+        %{
+          "company" => %{"type" => "string"},
+          "ats" => %{
+            "type" => "string",
+            "description" => "ATS vendor name (greenhouse, workday, …)"
+          }
+        }
+      ),
+      tool(
+        "can_apply",
+        "Would queueing this application (job_id / role_id) exceed company or ATS heat? Returns allow or defer with reason and cooldown. FIRE HOLD — does not submit.",
+        %{
+          "job_id" => %{"type" => "integer"},
+          "role_id" => %{"type" => "integer"}
         }
       ),
       tool(
@@ -491,7 +567,8 @@ defmodule Hireme.Mcp do
       "status" => Args.optional_string(args, "status") || "all",
       "batch" => Args.optional_string(args, "batch"),
       "band" => Args.optional_string(args, "band"),
-      "min_score" => if(min, do: Integer.to_string(min), else: nil)
+      "min_score" => if(min, do: Integer.to_string(min), else: nil),
+      "heat" => Args.optional_string(args, "heat")
     })
   end
 
@@ -505,9 +582,53 @@ defmodule Hireme.Mcp do
         "batch" => card.batch_code,
         "cv_label" => card.cv_label,
         "score_100" => card.score_100,
-        "band" => Hireme.LifeEv.name(card.band)
+        "band" => Hireme.LifeEv.name(card.band),
+        "load" => card.load,
+        "cap" => card.cap,
+        "heat_state" => Heat.state_name(card.heat_state),
+        "ats" => Hireme.Heat.Ats.name(card.ats_vendor),
+        "cooldown_days" => card.cooldown_days
       }
     end)
+  end
+
+  defp apply_id(args) do
+    case Args.optional_int(args, "job_id") do
+      {:ok, n} when is_integer(n) ->
+        {:ok, n}
+
+      _ ->
+        case Args.optional_int(args, "role_id") do
+          {:ok, n} when is_integer(n) -> {:ok, n}
+          _ -> {:error, {:argument, "job_id"}}
+        end
+    end
+  end
+
+  defp maybe_filter_key(rows, nil), do: rows
+  defp maybe_filter_key(rows, ""), do: rows
+
+  defp maybe_filter_key(rows, needle) do
+    n = String.downcase(needle)
+
+    Enum.filter(
+      rows,
+      &(String.contains?(String.downcase(&1.key), n) or
+          String.contains?(String.downcase(&1.label), n))
+    )
+  end
+
+  defp heat_row_view(row) do
+    %{
+      "key" => row.key,
+      "label" => row.label,
+      "load" => row.load,
+      "cap" => row.cap,
+      "ratio" => row.ratio,
+      "n" => row.n,
+      "cooldown_days" => row.cooldown_days,
+      "size" => row.size && Atom.to_string(row.size)
+    }
   end
 
   defp gym_progress_view(%Gym.Progress{} = progress) do

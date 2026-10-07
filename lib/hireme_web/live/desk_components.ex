@@ -6,6 +6,7 @@ defmodule HiremeWeb.DeskComponents do
 
   alias Hireme.Desk.Job
   alias Hireme.Gym
+  alias Hireme.Heat
   alias Hireme.Keywords.Coverage
   alias Hireme.LifeEv
   alias Hireme.Net
@@ -101,6 +102,16 @@ defmodule HiremeWeb.DeskComponents do
             aria-label="Minimum score_100"
           />
         </label>
+        <select name="heat" aria-label="Heat">
+          <option value="all" selected={@filters.heat == :all}>All heat</option>
+          <option
+            :for={state <- [:cool, :warm, :hot, :blocked]}
+            value={Heat.state_name(state)}
+            selected={@filters.heat == state}
+          >
+            {Heat.state_name(state)}
+          </option>
+        </select>
         <span class="count">{@count} showing</span>
       </form>
       <button type="button" id="open-gym" class="ghost" phx-click="gym">Gym</button>
@@ -169,6 +180,7 @@ defmodule HiremeWeb.DeskComponents do
           phx-value-batch={Filters.batch_value(@filters)}
           phx-value-band={LifeEv.name(row.key)}
           phx-value-min_score={Filters.min_score_value(@filters)}
+          phx-value-heat={Filters.heat_value(@filters)}
           title={"#{row.label} #{row.min}–#{row.max}"}
         >
           <span class="ev-band-label">{row.label}</span>
@@ -184,6 +196,73 @@ defmodule HiremeWeb.DeskComponents do
         >
           <span class="ev-bin-bar" style={"height: #{bin_pct(bin.count, @peak)}%"}></span>
           <span class="ev-bin-lo">{bin.lo}</span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :chart, Heat.Chart, required: true
+  attr :filters, Filters, required: true
+
+  def heat_chart(assigns) do
+    ~H"""
+    <div id="heat-chart" class="heat-chart">
+      <div class="ev-meta">
+        <span class="pill">HEAT</span>
+        <span>{length(@chart.companies)} companies</span>
+        <span>{length(@chart.vendors)} ATS</span>
+      </div>
+      <div class="heat-cols">
+        <div class="ev-bands" aria-label="Company heat">
+          <button
+            :for={row <- Enum.take(@chart.companies, 8)}
+            type="button"
+            id={"heat-co-#{row.key}"}
+            class={[
+              "ev-band",
+              @filters.q != "" and
+                String.contains?(String.downcase(row.label), String.downcase(@filters.q)) && "is-on"
+            ]}
+            phx-click="filter"
+            phx-value-q={row.label}
+            phx-value-stage={Filters.stage_value(@filters)}
+            phx-value-profile={Filters.profile_value(@filters)}
+            phx-value-status={Filters.status_value(@filters)}
+            phx-value-batch={Filters.batch_value(@filters)}
+            phx-value-band={Filters.band_value(@filters)}
+            phx-value-min_score={Filters.min_score_value(@filters)}
+            phx-value-heat={Filters.heat_value(@filters)}
+            title={"#{row.label} #{row.load}/#{row.cap} cooldown #{row.cooldown_days || 0}d"}
+          >
+            <span class="ev-band-label">{row.label}</span>
+            <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
+            <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
+          </button>
+          <p :if={@chart.companies == []} class="sub">No queued company heat.</p>
+        </div>
+        <div class="ev-bands" aria-label="ATS heat">
+          <button
+            :for={row <- Enum.take(@chart.vendors, 8)}
+            type="button"
+            id={"heat-ats-#{row.key}"}
+            class="ev-band"
+            phx-click="filter"
+            phx-value-q={row.label}
+            phx-value-stage={Filters.stage_value(@filters)}
+            phx-value-profile={Filters.profile_value(@filters)}
+            phx-value-status={Filters.status_value(@filters)}
+            phx-value-batch={Filters.batch_value(@filters)}
+            phx-value-band={Filters.band_value(@filters)}
+            phx-value-min_score={Filters.min_score_value(@filters)}
+            phx-value-heat={Filters.heat_value(@filters)}
+            title={"#{row.label} #{row.load}/#{row.cap}"}
+          >
+            <span class="ev-band-label">{row.label}</span>
+            <span class="ev-band-bar" style={"width: #{band_pct(row.ratio)}%"}></span>
+            <span class="ev-band-n">{Float.round(row.load, 1)}/{Float.round(row.cap, 1)}</span>
+          </button>
+          <p :if={@chart.vendors == []} class="sub">No ATS heat.</p>
         </div>
       </div>
     </div>
@@ -211,6 +290,16 @@ defmodule HiremeWeb.DeskComponents do
         <span class="code">{card_code(@card)}</span>
         <span class="ev-score" title={"Life-EV #{LifeEv.label(@card.band)}"}>
           {@card.score_100}
+        </span>
+        <span
+          class={[
+            "heat-load",
+            @card.heat_state == :blocked && "is-blocked",
+            @card.heat_state == :hot && "is-hot"
+          ]}
+          title={"company heat #{@card.load}/#{@card.cap}"}
+        >
+          {Float.round(@card.load, 1)}/{Float.round(@card.cap, 1)}
         </span>
         <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
       </div>
@@ -257,9 +346,30 @@ defmodule HiremeWeb.DeskComponents do
           score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
         </p>
         <p class="sub">{fire_line(@focus.job)}</p>
+        <p class="sub" id="heat-line">{heat_line(@focus.job)}</p>
       </header>
       <p :if={!@in_filter} class="banner">This application is outside the current filter.</p>
       <p :if={@hold_error} id="hold-error" class="banner hold-error">{@hold_error}</p>
+      <form
+        :if={!@focus.job.heat_override}
+        id="heat-override"
+        class="field"
+        phx-submit="heat_override"
+      >
+        <label for="heat-reason">HEAT override reason</label>
+        <div class="row">
+          <input
+            id="heat-reason"
+            type="text"
+            name="reason"
+            placeholder="Why this role may exceed cap"
+          />
+          <button type="submit" class="ghost">Override</button>
+        </div>
+      </form>
+      <p :if={@focus.job.heat_override} class="sub">
+        HEAT override · {@focus.job.heat_override_reason}
+      </p>
       <div>
         <div class="meta">
           <span class="pips">
@@ -753,6 +863,13 @@ defmodule HiremeWeb.DeskComponents do
     gate = job.gate || :unset
     freshness = job.freshness || :unknown
     "#{gate} · #{freshness}"
+  end
+
+  defp heat_line(job) do
+    verdict = Heat.can_apply(job)
+    eta = if verdict.cooldown_days, do: " · cooldown #{verdict.cooldown_days}d", else: ""
+
+    "heat #{verdict.decision} · #{Float.round(verdict.company_load, 1)}/#{Float.round(verdict.company_cap, 1)} #{verdict.size} · #{Hireme.Heat.Ats.name(verdict.ats_vendor)}#{eta}"
   end
 
   defp next_line(%{next_action: action, next_due: due}) do
