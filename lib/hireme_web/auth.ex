@@ -21,11 +21,13 @@ defmodule HiremeWeb.Auth do
   @session_key "hireme_session"
 
   # Scripts and styles are this origin's; cards carry inline positions.
-  # Fetch and websocket stay on this origin. Nothing frames the desk.
+  # The column store is a WebAssembly module, so script-src allows that
+  # compile (`wasm-unsafe-eval`) and not `eval`. Fetch and websocket stay
+  # on this origin. Nothing frames the desk.
   @csp Enum.join(
          [
            "default-src 'self'",
-           "script-src 'self'",
+           "script-src 'self' 'wasm-unsafe-eval'",
            "style-src 'self' 'unsafe-inline'",
            "img-src 'self' data:",
            "connect-src 'self'",
@@ -96,6 +98,7 @@ defmodule HiremeWeb.Auth do
       "camera=(), microphone=(), geolocation=(), payment=()"
     )
     |> put_resp_header("cross-origin-opener-policy", "same-origin")
+    |> put_resp_header("x-frame-options", "DENY")
   end
 
   @doc """

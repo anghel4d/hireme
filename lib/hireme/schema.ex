@@ -12,6 +12,9 @@ defmodule Hireme.Accounts.Account do
   schema "accounts" do
     field :name, :string, default: ""
     field :status, Ecto.Enum, values: @statuses, default: :active
+    # Live API keys, moved in the same statement as create and revoke so two
+    # mints cannot both pass the cap.
+    field :live_key_count, :integer, default: 0
     timestamps()
   end
 

@@ -45,34 +45,59 @@ defmodule Hireme.ApiKeys do
   def create(name, expires_in_days \\ nil, meta \\ %{}) do
     name = String.trim(to_string(name))
     account_id = Repo.account_id!()
-    live = Repo.aggregate(from(k in Key, where: is_nil(k.revoked_at)), :count)
 
-    cond do
-      name == "" ->
-        {:error, :name}
+    if name == "" do
+      {:error, :name}
+    else
+      key_id = Security.base62(12)
+      secret = Security.base62(43)
+      body = @prefix <> key_id <> "_" <> secret
 
-      live >= Security.api_keys_per_account() ->
-        {:error, :limit}
+      attrs = %{
+        account_id: account_id,
+        key_id: key_id,
+        name: name,
+        secret_hash: Security.hash(secret),
+        prefix: String.slice(secret, 0, 4),
+        expires_at: expires_in_days && DateTime.add(now(), expires_in_days * 86_400, :second)
+      }
 
-      true ->
-        key_id = Security.base62(12)
-        secret = Security.base62(43)
-        body = @prefix <> key_id <> "_" <> secret
-
-        attrs = %{
-          account_id: account_id,
-          key_id: key_id,
-          name: name,
-          secret_hash: Security.hash(secret),
-          prefix: String.slice(secret, 0, 4),
-          expires_at: expires_in_days && DateTime.add(now(), expires_in_days * 86_400, :second)
-        }
-
-        with {:ok, key} <- %Key{} |> Key.changeset(attrs) |> Repo.insert() do
+      case mint(account_id, attrs) do
+        {:ok, key} ->
           Audit.record(:api_key_created, %{key_id: key_id, name: name}, meta)
           Accounts.notify(account_id, :api_key_created, %{name: name, key_id: key_id})
           {:ok, %{key: key, secret: body <> Security.checksum(body)}}
-        end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # The cap and the insert commit together. The account row is the lock:
+  # the update matches only while the account is under the cap, so a second
+  # mint that races this one sees the incremented count.
+  defp mint(account_id, attrs) do
+    Repo.transaction(fn ->
+      {claimed, _} =
+        Repo.update_all(
+          from(a in Accounts.Account,
+            where: a.id == ^account_id and a.live_key_count < ^Security.api_keys_per_account()
+          ),
+          [inc: [live_key_count: 1]],
+          skip_account: true
+        )
+
+      if claimed == 0, do: Repo.rollback(:limit)
+
+      case %Key{} |> Key.changeset(attrs) |> Repo.insert() do
+        {:ok, key} -> key
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+    |> case do
+      {:ok, key} -> {:ok, key}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -84,10 +109,39 @@ defmodule Hireme.ApiKeys do
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment and stays listed."
   @spec revoke(Key.t(), map()) :: Key.t()
   def revoke(%Key{revoked_at: nil} = key, meta \\ %{}) do
-    revoked = key |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
+    {:ok, revoked} =
+      Repo.transaction(fn ->
+        updated = key |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
+
+        Repo.update_all(
+          from(a in Accounts.Account, where: a.id == ^key.account_id and a.live_key_count > 0),
+          [inc: [live_key_count: -1]],
+          skip_account: true
+        )
+
+        updated
+      end)
+
     Audit.record(:api_key_revoked, %{key_id: key.key_id, name: key.name}, meta)
     Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name, key_id: key.key_id})
+    Phoenix.PubSub.broadcast(Hireme.PubSub, topic(key.key_id), :api_key_dead)
     revoked
+  end
+
+  @doc "The topic a socket watches so a revoke closes it."
+  @spec topic(String.t()) :: String.t()
+  def topic(key_id), do: "api_key:#{key_id}"
+
+  @doc "The key is still the one `account_id` may use: live, and the account is active."
+  @spec usable?(String.t(), pos_integer()) :: boolean()
+  def usable?(key_id, account_id) when is_binary(key_id) do
+    case Repo.get_by(Key, [key_id: key_id], skip_account: true) do
+      %Key{account_id: ^account_id} = key ->
+        live?(key) and Accounts.active?(Accounts.get(account_id))
+
+      _ ->
+        false
+    end
   end
 
   @doc """
