@@ -259,7 +259,7 @@ defmodule Hireme.Mcp do
     pair = handle.pair
 
     %{
-      "letterbox_id" => Letterbox.id(handle),
+      "letterbox_id" => handle.id,
       "job_id" => CvPair.job_id(pair),
       "variant_id" => CvPair.variant_id(pair),
       "employer_id" => CvPair.employer_id(pair),
@@ -292,7 +292,7 @@ defmodule Hireme.Mcp do
          {:ok, lineage_id} <- Args.optional_int(args, "lineage_id") do
       cond do
         mismatch?(job_id, CvPair.job_id(pair)) -> {:error, :letterbox_mismatch}
-        mismatch?(letterbox_id, Letterbox.id(handle)) -> {:error, :letterbox_mismatch}
+        mismatch?(letterbox_id, handle.id) -> {:error, :letterbox_mismatch}
         mismatch?(variant_id, CvPair.variant_id(pair)) -> {:error, :cv_mismatch}
         mismatch?(lineage_id, CvPair.lineage_id(pair)) -> {:error, :cv_mismatch}
         true -> :ok
