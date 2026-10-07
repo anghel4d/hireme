@@ -4,6 +4,7 @@
 *
 !.gitignore
 !/README.md
+!/LICENSE
 !/.formatter.exs
 !/mix.exs
 !/mix.lock
