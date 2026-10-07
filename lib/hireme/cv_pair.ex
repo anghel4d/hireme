@@ -1,45 +1,16 @@
-defmodule Hireme.CvPair.JobId do
-  @moduledoc false
-  @enforce_keys [:value]
-  defstruct [:value]
+# Four ids, four structs. The same shape, so one definition; the names
+# are what keep a job id out of a variant id's slot.
+for name <- [JobId, VariantId, EmployerId, LineageId] do
+  defmodule Module.concat(Hireme.CvPair, name) do
+    @moduledoc false
+    @enforce_keys [:value]
+    defstruct [:value]
 
-  @type t :: %__MODULE__{value: pos_integer()}
+    @type t :: %__MODULE__{value: pos_integer()}
 
-  @spec new(pos_integer()) :: t()
-  def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
-end
-
-defmodule Hireme.CvPair.VariantId do
-  @moduledoc false
-  @enforce_keys [:value]
-  defstruct [:value]
-
-  @type t :: %__MODULE__{value: pos_integer()}
-
-  @spec new(pos_integer()) :: t()
-  def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
-end
-
-defmodule Hireme.CvPair.EmployerId do
-  @moduledoc false
-  @enforce_keys [:value]
-  defstruct [:value]
-
-  @type t :: %__MODULE__{value: pos_integer()}
-
-  @spec new(pos_integer()) :: t()
-  def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
-end
-
-defmodule Hireme.CvPair.LineageId do
-  @moduledoc false
-  @enforce_keys [:value]
-  defstruct [:value]
-
-  @type t :: %__MODULE__{value: pos_integer()}
-
-  @spec new(pos_integer()) :: t()
-  def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
+    @spec new(pos_integer()) :: t()
+    def new(value) when is_integer(value) and value > 0, do: %__MODULE__{value: value}
+  end
 end
 
 defmodule Hireme.CvPair do
@@ -148,81 +119,55 @@ defmodule Hireme.CvPair do
   @doc """
   Load the only CV pair for this application.
   """
-  @spec bind(JobId.t() | pos_integer()) :: {:ok, t()} | {:error, :unbound | :job_id}
-  def bind(%JobId{value: job_id}), do: load(job_id)
-  def bind(job_id) when is_integer(job_id) and job_id > 0, do: bind(JobId.new(job_id))
-  def bind(_), do: {:error, :job_id}
+  @spec bind(pos_integer()) :: {:ok, t()} | {:error, :unbound}
+  def bind(job_id) when is_integer(job_id), do: load(job_id)
 
-  @spec bind!(JobId.t() | pos_integer()) :: t()
-  def bind!(job) do
-    {:ok, pair} = bind(job)
+  @spec bind!(pos_integer()) :: t()
+  def bind!(job_id) do
+    {:ok, pair} = bind(job_id)
     pair
   end
 
   @spec tailor(t(), pos_integer(), map(), Date.t()) ::
           {:ok, t()} | {:error, atom() | Ecto.Changeset.t()}
-  def tailor(pair, item_id, attrs, today \\ Date.utc_today())
-
-  def tailor(%__MODULE__{} = claimed, item_id, attrs, today) when is_integer(item_id) do
+  def tailor(%__MODULE__{} = claimed, item_id, attrs, today \\ Date.utc_today())
+      when is_integer(item_id) do
     with {:ok, pair} <- verified(claimed),
          {:ok, lineage} <- editable(pair, today) do
       write_line(pair, lineage, item_id, attrs, today)
     end
   end
 
-  def tailor(_, _, _, _), do: {:error, :cv_mismatch}
-
   @spec drop_line(t(), pos_integer(), Date.t()) :: {:ok, t()} | {:error, atom()}
-  def drop_line(pair, item_id, today \\ Date.utc_today())
-
-  def drop_line(%__MODULE__{} = claimed, item_id, today) when is_integer(item_id) do
+  def drop_line(%__MODULE__{} = claimed, item_id, today \\ Date.utc_today())
+      when is_integer(item_id) do
     with {:ok, pair} <- verified(claimed),
-         {:ok, lineage} <- editable(pair, today) do
-      if lineage.rewrites_allowed do
-        Repo.delete_all(
-          from o in Overlay,
-            where: o.lineage_id == ^lineage_id(pair) and o.item_id == ^item_id
-        )
-
-        {:ok, pair}
-      else
-        {:error, :not_additive}
-      end
+         {:ok, %Lineage{rewrites_allowed: true}} <- editable(pair, today) do
+      Repo.delete_all(from o in Overlay, where: o.lineage_id == ^lineage_id(pair) and o.item_id == ^item_id)
+      {:ok, pair}
+    else
+      {:ok, %Lineage{}} -> {:error, :not_additive}
+      error -> error
     end
   end
 
-  def drop_line(_, _, _), do: {:error, :cv_mismatch}
-
-  @spec open_generation(EmployerId.t() | pos_integer(), Date.t()) ::
+  @spec open_generation(pos_integer(), Date.t()) ::
           {:ok, Lineage.t()} | {:error, atom() | Ecto.Changeset.t()}
-  def open_generation(employer, today \\ Date.utc_today())
-
-  def open_generation(%EmployerId{value: employer_id}, today) do
-    lineage = Repo.get_by(Lineage, employer_id: employer_id)
-
-    cond do
-      is_nil(lineage) ->
+  def open_generation(employer_id, today \\ Date.utc_today()) when is_integer(employer_id) do
+    case Repo.get_by(Lineage, employer_id: employer_id) do
+      nil ->
         {:error, :lineage}
 
-      Date.diff(today, lineage.opened_on) < @cooldown_days ->
-        {:error, :cooldown}
-
-      true ->
-        lineage
-        |> Lineage.changeset(%{
-          generation: lineage.generation + 1,
-          opened_on: today,
-          rewrites_allowed: false
-        })
-        |> Repo.update()
+      %Lineage{} = lineage ->
+        if Date.diff(today, lineage.opened_on) < @cooldown_days do
+          {:error, :cooldown}
+        else
+          lineage
+          |> Lineage.changeset(%{generation: lineage.generation + 1, opened_on: today, rewrites_allowed: false})
+          |> Repo.update()
+        end
     end
   end
-
-  def open_generation(employer_id, today) when is_integer(employer_id) and employer_id > 0 do
-    open_generation(EmployerId.new(employer_id), today)
-  end
-
-  def open_generation(_, _), do: {:error, :lineage}
 
   @spec phase(Lineage.t(), Date.t()) :: :ready | :tailor | :additive
   def phase(%Lineage{} = lineage, today \\ Date.utc_today()) do
@@ -263,14 +208,7 @@ defmodule Hireme.CvPair do
     end
   end
 
-  defp verified(
-         %__MODULE__{
-           job_id: %JobId{value: job_id},
-           variant_id: %VariantId{},
-           employer_id: %EmployerId{},
-           lineage_id: %LineageId{}
-         } = claimed
-       ) do
+  defp verified(%__MODULE__{job_id: %JobId{value: job_id}} = claimed) do
     case load(job_id) do
       {:ok, ^claimed} -> {:ok, claimed}
       {:ok, _other} -> {:error, :cv_mismatch}
@@ -289,37 +227,28 @@ defmodule Hireme.CvPair do
     end
   end
 
-  defp write_line(pair, lineage, item_id, attrs, today) do
-    existing = Repo.get_by(Overlay, lineage_id: lineage_id(pair), item_id: item_id)
+  defp write_line(pair, lineage, item_id, attrs, _today) do
+    result =
+      case Repo.get_by(Overlay, lineage_id: lineage_id(pair), item_id: item_id) do
+        %Overlay{} when not lineage.rewrites_allowed ->
+          {:error, :not_additive}
 
-    cond do
-      existing && not lineage.rewrites_allowed ->
-        {:error, :not_additive}
+        %Overlay{} = existing ->
+          existing |> Overlay.changeset(attrs) |> Repo.update()
 
-      existing ->
-        case existing |> Overlay.changeset(attrs) |> Repo.update() do
-          {:ok, _} -> {:ok, pair}
-          other -> other
-        end
+        nil ->
+          %Overlay{}
+          |> Overlay.changeset(
+            Map.merge(attrs, %{
+              job_app_id: job_id(pair),
+              lineage_id: lineage_id(pair),
+              item_id: item_id,
+              generation: lineage.generation
+            })
+          )
+          |> Repo.insert()
+      end
 
-      phase(lineage, today) == :ready ->
-        {:error, :cooldown}
-
-      true ->
-        %Overlay{job_app_id: job_id(pair), lineage_id: lineage_id(pair), item_id: item_id}
-        |> Overlay.changeset(
-          Map.merge(attrs, %{
-            job_app_id: job_id(pair),
-            lineage_id: lineage_id(pair),
-            item_id: item_id,
-            generation: lineage.generation
-          })
-        )
-        |> Repo.insert()
-        |> case do
-          {:ok, _} -> {:ok, pair}
-          other -> other
-        end
-    end
+    with {:ok, _overlay} <- result, do: {:ok, pair}
   end
 end

@@ -5,7 +5,6 @@ defmodule Hireme.LetterboxTest do
   alias Hireme.Desk
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
-  alias Hireme.Letterbox.Token
 
   test "one producer cannot hold two leases" do
     first = open_job("North Co")
@@ -41,7 +40,7 @@ defmodule Hireme.LetterboxTest do
 
     assert {:error, :lease} = Task.await(task)
 
-    forged = %{handle | token: %Token{ref: make_ref()}}
+    forged = %{handle | token: make_ref()}
     assert {:error, :lease} = Letterbox.command(forged, :get)
     assert Letterbox.release(handle) == :ok
   end
