@@ -9,6 +9,7 @@ defmodule Hireme.Desk.Opening do
   """
 
   alias Hireme.Desk.Overlay
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Theme
 
@@ -39,6 +40,7 @@ defmodule Hireme.Desk.Opening do
     gate: :unset,
     fit: "",
     squad: "",
+    score_100: 50,
     label: nil,
     note: "",
     theme: %Theme{},
@@ -75,6 +77,7 @@ defmodule Hireme.Desk.Opening do
           gate: :unset | :pursue | :maybe | :skip,
           fit: String.t(),
           squad: String.t(),
+          score_100: LifeEv.score(),
           label: String.t() | nil,
           note: String.t(),
           theme: Theme.t(),
@@ -124,6 +127,7 @@ defmodule Hireme.Desk.Opening do
          gate: gate,
          fit: Map.get(attrs, :fit) || "",
          squad: Map.get(attrs, :squad) || "",
+         score_100: life_ev(attrs),
          label: Map.get(attrs, :label),
          note: Map.get(attrs, :note) || "",
          theme: Theme.parse(Map.get(attrs, :theme)),
@@ -201,4 +205,16 @@ defmodule Hireme.Desk.Opening do
   end
 
   defp overlay(other), do: {:error, {:overlay, other}}
+
+  defp life_ev(attrs) do
+    LifeEv.score(%{
+      company: Map.get(attrs, :company) || "",
+      role: Map.get(attrs, :role) || "",
+      fit: Map.get(attrs, :fit) || "",
+      location: Map.get(attrs, :location) || "",
+      comp: Map.get(attrs, :comp),
+      score_100: Map.get(attrs, :score_100),
+      score: Map.get(attrs, :score)
+    })
+  end
 end

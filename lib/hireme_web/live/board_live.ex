@@ -23,6 +23,7 @@ defmodule HiremeWeb.BoardLive do
      |> assign(:profiles, [])
      |> assign(:batches, [])
      |> assign(:scoreboard, Campaign.scoreboard())
+     |> assign(:ev_chart, Hireme.LifeEv.chart([]))
      |> assign(:hold_error, nil)
      |> assign(:app_id, nil)
      |> assign(:index, nil)
@@ -55,6 +56,7 @@ defmodule HiremeWeb.BoardLive do
         count={length(@cards)}
       />
       <.scoreboard board={@scoreboard} />
+      <.ev_chart chart={@ev_chart} filters={@filters} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
         <.battleplan
           focus={@focus}
@@ -318,6 +320,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:profiles, Corpus.list_profiles())
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
+    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> assign(:loaded, true)
   end
 
@@ -363,6 +366,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:focus, Desk.focus(app_id))
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
+    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> maybe_reload_root()
   end
 

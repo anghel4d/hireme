@@ -243,6 +243,98 @@ kbd {
 }
 .variety { color: var(--faint); }
 
+.min-score {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--faint);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.min-score input {
+  width: 3.4rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.32rem 0.4rem;
+}
+
+.ev-chart {
+  flex: 0 0 auto;
+  padding: 0.4rem 1rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.ev-meta {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.ev-bands {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.25rem 0.5rem;
+}
+.ev-band {
+  display: grid;
+  grid-template-columns: 5.4rem 1fr 1.6rem;
+  align-items: center;
+  gap: 0.3rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.12rem 0.25rem;
+  cursor: pointer;
+  text-align: left;
+}
+.ev-band:hover { background: var(--hover); }
+.ev-band.is-on { border-color: var(--accent); background: var(--active); }
+.ev-band-label { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.03em; }
+.ev-band-bar {
+  display: block;
+  height: 0.32rem;
+  background: var(--accent);
+  border-radius: 99px;
+  min-width: 0;
+}
+.ev-band-n { color: var(--faint); font-size: 0.7rem; font-variant-numeric: tabular-nums; text-align: right; }
+.ev-hist {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.2rem;
+  height: 3.2rem;
+}
+.ev-bin {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.1rem;
+}
+.ev-bin-bar {
+  width: 100%;
+  max-width: 1.1rem;
+  background: color-mix(in oklab, var(--accent) 75%, var(--line));
+  border-radius: 2px 2px 0 0;
+  min-height: 1px;
+}
+.ev-bin-lo { color: var(--faint); font-size: 0.62rem; font-variant-numeric: tabular-nums; }
+.ev-score {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  font-weight: 650;
+}
+
 .pip {
   width: 0.55rem;
   height: 0.28rem;

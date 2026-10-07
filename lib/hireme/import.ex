@@ -48,6 +48,7 @@ defmodule Hireme.Import do
   alias Hireme.Desk.Job
   alias Hireme.Desk.Snapshot
   alias Hireme.Import.Report
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Repo
   alias Hireme.Variety
@@ -238,6 +239,17 @@ defmodule Hireme.Import do
 
     employer = upsert_employer(app["company"] || app["Company"], app["freshness"])
 
+    score_100 =
+      LifeEv.score(%{
+        company: app["company"] || app["Company"] || "",
+        role: app["role"] || app["Role"] || "Engineer",
+        fit: app["fit"] || app["Fit"] || "",
+        location: app["location"] || app["Location"] || "",
+        comp: app["comp"] || app["Comp"],
+        score_100: app["score_100"],
+        score: app["score"]
+      })
+
     attrs = %{
       company: app["company"] || app["Company"],
       role: app["role"] || app["Role"] || "Engineer",
@@ -251,6 +263,7 @@ defmodule Hireme.Import do
       freshness: app["freshness"] || "unknown",
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
+      score_100: score_100,
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,
       stage: stage,
@@ -303,9 +316,14 @@ defmodule Hireme.Import do
 
   defp upsert_employer(name, freshness) do
     existing = Repo.get_by(Employer, name: name) || %Employer{}
+    score_100 = LifeEv.score(name)
 
     existing
-    |> Employer.changeset(%{name: name, freshness: freshness || "unknown"})
+    |> Employer.changeset(%{
+      name: name,
+      freshness: freshness || "unknown",
+      score_100: score_100
+    })
     |> Repo.insert_or_update!()
   end
 

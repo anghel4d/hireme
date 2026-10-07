@@ -97,6 +97,69 @@ defmodule Hireme.McpTest do
     assert Jason.decode!(refused)["error"]["message"] == "unleased"
   end
 
+  test "directory list and recommend rank by score_100" do
+    profile =
+      Corpus.create_profile!(%{
+        slug: "mcp-ev-#{System.unique_integer([:positive])}",
+        name: "Sample Candidate",
+        headline: "Engineer",
+        summary: "A sample profile."
+      })
+
+    Desk.create_job!(%{
+      profile_id: profile.id,
+      company: "Acme Staffing",
+      role: "Engineer",
+      canonical_url: "https://jobs.example.test/staff-#{System.unique_integer([:positive])}"
+    })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "OpenAI",
+        role: "Research engineer",
+        canonical_url: "https://jobs.example.test/oai-#{System.unique_integer([:positive])}"
+      })
+
+    listed = Mcp.directory(%{"id" => 1, "method" => "tools/list"})
+    list_tool = Enum.find(listed.result.tools, &(&1["name"] == "list_applications"))
+    rec_tool = Enum.find(listed.result.tools, &(&1["name"] == "recommend_applications"))
+    assert list_tool["description"] =~ "score_100"
+    assert rec_tool["description"] =~ "score_100"
+
+    ranked =
+      Mcp.directory(%{
+        "id" => 2,
+        "method" => "tools/call",
+        "params" => %{"name" => "list_applications", "arguments" => %{"status" => "all"}}
+      })
+
+    apps = ranked.result["applications"]
+    assert hd(apps)["company"] == "OpenAI"
+    assert hd(apps)["score_100"] == 100
+
+    rec =
+      Mcp.directory(%{
+        "id" => 3,
+        "method" => "tools/call",
+        "params" => %{"name" => "recommend_applications", "arguments" => %{}}
+      })
+
+    assert rec.result["fire"] == "hold"
+    assert Enum.any?(rec.result["applications"], &(&1["job_id"] == high.id))
+    refute Enum.any?(rec.result["applications"], &(&1["score_100"] < 90))
+
+    dist =
+      Mcp.directory(%{
+        "id" => 4,
+        "method" => "tools/call",
+        "params" => %{"name" => "score_distribution", "arguments" => %{"status" => "all"}}
+      })
+
+    assert dist.result["n"] >= 2
+    assert Enum.any?(dist.result["bands"], &(&1["band"] == "frontier" and &1["count"] >= 1))
+  end
+
   test "the letterbox socket answers a call and pushes only its own notification" do
     %{job: job, letterbox_id: letterbox_id} = opened()
     {:ok, state} = McpSocket.init(%{id: letterbox_id})

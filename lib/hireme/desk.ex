@@ -31,6 +31,7 @@ defmodule Hireme.Desk do
   alias Hireme.Keywords
   alias Hireme.Kv
   alias Hireme.Letterbox
+  alias Hireme.LifeEv
   alias Hireme.Mask
   alias Hireme.Narrative
   alias Hireme.Pipeline
@@ -189,6 +190,7 @@ defmodule Hireme.Desk do
         gate: opening.gate,
         fit: opening.fit,
         squad: opening.squad,
+        score_100: opening.score_100,
         employer_id: employer.id,
         batch_id: opening.batch_id
       })
@@ -431,7 +433,9 @@ defmodule Hireme.Desk do
       batch_ordinal: row.batch_ordinal,
       freshness: row.freshness,
       gate: row.gate,
-      fit: row.fit
+      fit: row.fit,
+      score_100: row.score_100,
+      band: LifeEv.band(row.score_100)
     }
   end
 
@@ -466,6 +470,8 @@ defmodule Hireme.Desk do
     |> apply_profile(filters.profile)
     |> apply_batch(filters.batch)
     |> apply_q(filters.q)
+    |> apply_band(filters.band)
+    |> apply_min_score(filters.min_score)
     |> select([j, p, v, b], %{
       id: j.id,
       company: j.company,
@@ -491,7 +497,8 @@ defmodule Hireme.Desk do
       batch_ordinal: b.ordinal,
       freshness: j.freshness,
       gate: j.gate,
-      fit: j.fit
+      fit: j.fit,
+      score_100: j.score_100
     })
   end
 
@@ -532,6 +539,19 @@ defmodule Hireme.Desk do
         like(fragment("lower('cv' || ?)", j.id), ^like) or
         like(fragment("cast(? as text)", j.id), ^like)
     )
+  end
+
+  defp apply_band(query, :all), do: query
+
+  defp apply_band(query, band) when is_atom(band) do
+    row = Enum.find(LifeEv.bands(), &(&1.key == band))
+    where(query, [j], j.score_100 >= ^row.min and j.score_100 <= ^row.max)
+  end
+
+  defp apply_min_score(query, 0), do: query
+
+  defp apply_min_score(query, n) when is_integer(n) and n > 0 do
+    where(query, [j], j.score_100 >= ^n)
   end
 
   defp rail(job_id) do

@@ -6,6 +6,7 @@ defmodule HiremeWeb.DeskComponents do
 
   alias Hireme.Desk.Job
   alias Hireme.Keywords.Coverage
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Desk.Filters
 
@@ -77,6 +78,27 @@ defmodule HiremeWeb.DeskComponents do
             {status}
           </option>
         </select>
+        <select name="band" aria-label="Life-EV band">
+          <option value="all" selected={@filters.band == :all}>All bands</option>
+          <option
+            :for={band <- LifeEv.bands()}
+            value={LifeEv.name(band.key)}
+            selected={@filters.band == band.key}
+          >
+            {band.label} · {band.min}–{band.max}
+          </option>
+        </select>
+        <label class="min-score">
+          min
+          <input
+            type="number"
+            name="min_score"
+            min="0"
+            max="100"
+            value={@filters.min_score}
+            aria-label="Minimum score_100"
+          />
+        </label>
         <span class="count">{@count} showing</span>
       </form>
       <button type="button" id="root-cv" class="ghost" phx-click="root">Root CV</button>
@@ -105,6 +127,57 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
+  attr :chart, Hireme.LifeEv.Chart, required: true
+  attr :filters, Filters, required: true
+
+  def ev_chart(assigns) do
+    peak = assigns.chart.bins |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
+    assigns = assign(assigns, :peak, peak)
+
+    ~H"""
+    <div id="ev-chart" class="ev-chart">
+      <div class="ev-meta">
+        <span class="pill">score_100</span>
+        <span>n {@chart.n}</span>
+        <span :if={@chart.mean}>mean {@chart.mean}</span>
+        <span :if={@chart.max}>max {@chart.max}</span>
+        <span :if={@chart.min}>min {@chart.min}</span>
+      </div>
+      <div class="ev-bands" aria-label="Life-EV band breakdown">
+        <button
+          :for={row <- @chart.bands}
+          type="button"
+          id={"band-#{row.key}"}
+          class={["ev-band", @filters.band == row.key && "is-on"]}
+          phx-click="filter"
+          phx-value-q={@filters.q}
+          phx-value-stage={Filters.stage_value(@filters)}
+          phx-value-profile={Filters.profile_value(@filters)}
+          phx-value-status={Filters.status_value(@filters)}
+          phx-value-batch={Filters.batch_value(@filters)}
+          phx-value-band={LifeEv.name(row.key)}
+          phx-value-min_score={Filters.min_score_value(@filters)}
+          title={"#{row.label} #{row.min}–#{row.max}"}
+        >
+          <span class="ev-band-label">{row.label}</span>
+          <span class="ev-band-bar" style={"width: #{band_pct(row.share)}%"}></span>
+          <span class="ev-band-n">{row.count}</span>
+        </button>
+      </div>
+      <div class="ev-hist" aria-label="score_100 histogram">
+        <div
+          :for={bin <- @chart.bins}
+          class="ev-bin"
+          title={"#{bin.lo}–#{bin.hi}: #{bin.count}"}
+        >
+          <span class="ev-bin-bar" style={"height: #{bin_pct(bin.count, @peak)}%"}></span>
+          <span class="ev-bin-lo">{bin.lo}</span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
   attr :card, Hireme.Desk.Card, required: true
   attr :x, :integer, required: true
   attr :y, :integer, required: true
@@ -124,6 +197,9 @@ defmodule HiremeWeb.DeskComponents do
     >
       <div class="card-kicker">
         <span class="code">{card_code(@card)}</span>
+        <span class="ev-score" title={"Life-EV #{LifeEv.label(@card.band)}"}>
+          {@card.score_100}
+        </span>
         <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
@@ -165,6 +241,9 @@ defmodule HiremeWeb.DeskComponents do
         <h2>{@focus.job.company}</h2>
         <p class="sub">{@focus.job.role}</p>
         <p class="sub">{@focus.job.location}</p>
+        <p class="sub">
+          score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
+        </p>
         <p class="sub">{fire_line(@focus.job)}</p>
       </header>
       <p :if={!@in_filter} class="banner">This application is outside the current filter.</p>
@@ -253,6 +332,9 @@ defmodule HiremeWeb.DeskComponents do
           </p>
           <h2>{@focus.job.company}</h2>
           <p class="sub">{@focus.job.role}</p>
+          <p class="sub">
+            score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
+          </p>
           <p class="sub">{fire_line(@focus.job)}</p>
         </div>
         <p class="count">
@@ -480,6 +562,13 @@ defmodule HiremeWeb.DeskComponents do
   end
 
   defp batch?(batches, code), do: Enum.any?(batches, &(&1.code == code))
+
+  defp band_pct(share) when is_float(share) or is_integer(share) do
+    round(share * 100)
+  end
+
+  defp bin_pct(_count, 0), do: 0
+  defp bin_pct(count, peak), do: round(count / peak * 100)
 
   defp snapshot_date(nil), do: ""
   defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"

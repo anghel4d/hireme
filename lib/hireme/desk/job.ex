@@ -35,6 +35,7 @@ defmodule Hireme.Desk.Job do
     field :gate, Ecto.Enum, values: [:unset, :pursue, :maybe, :skip], default: :unset
     field :fit, :string, default: ""
     field :squad, :string, default: ""
+    field :score_100, :integer, default: 50
 
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :employer, Hireme.Desk.Employer
@@ -85,11 +86,13 @@ defmodule Hireme.Desk.Job do
       :gate,
       :fit,
       :squad,
+      :score_100,
       :employer_id,
       :batch_id
     ])
     |> validate_required([:profile_id, :company, :role, :heat, :status, :current_stage, :pips])
     |> validate_number(:heat, greater_than_or_equal_to: 1, less_than_or_equal_to: 5)
+    |> validate_number(:score_100, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
     |> validate_length(:pips, is: length(Hireme.Pipeline.keys()))
     |> foreign_key_constraint(:profile_id)
     |> foreign_key_constraint(:batch_id)

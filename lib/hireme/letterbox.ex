@@ -180,7 +180,9 @@ defmodule Hireme.Letterbox do
           role: String.t(),
           stage: Hireme.Pipeline.stage(),
           batch: String.t() | nil,
-          leased: boolean()
+          leased: boolean(),
+          score_100: Hireme.LifeEv.score(),
+          band: Hireme.LifeEv.band()
         }
 
   @spec list() :: [entry()]
@@ -188,17 +190,22 @@ defmodule Hireme.Letterbox do
     Record
     |> join(:inner, [r], j in Job, on: j.id == r.job_app_id)
     |> join(:left, [r, j], b in Batch, on: b.id == j.batch_id)
-    |> order_by([r], r.id)
+    |> order_by([r, j], desc: j.score_100, asc: r.id)
     |> select([r, j, b], %{
       id: r.id,
       job_id: j.id,
       company: j.company,
       role: j.role,
       stage: j.current_stage,
-      batch: b.code
+      batch: b.code,
+      score_100: j.score_100
     })
     |> Repo.all()
-    |> Enum.map(&Map.put(&1, :leased, leased?(&1.id)))
+    |> Enum.map(fn row ->
+      row
+      |> Map.put(:leased, leased?(row.id))
+      |> Map.put(:band, Hireme.LifeEv.band(row.score_100))
+    end)
   end
 
   defp fetch(id) do

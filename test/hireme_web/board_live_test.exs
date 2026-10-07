@@ -141,6 +141,49 @@ defmodule HiremeWeb.BoardLiveTest do
     assert has_element?(view, "#card-#{bravo.id}.is-active")
   end
 
+  test "the desk shows score_100, ranks higher first, and filters by band", %{conn: conn} do
+    profile = profile()
+
+    low =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Acme Staffing",
+        role: "Engineer",
+        heat: 5,
+        stage: "discovered",
+        canonical_url: "https://jobs.example.test/staff"
+      })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "OpenAI",
+        role: "Research engineer",
+        heat: 1,
+        stage: "discovered",
+        canonical_url: "https://jobs.example.test/oai"
+      })
+
+    {:ok, view, html} = live(conn, "/")
+    assert html =~ "score_100"
+    assert has_element?(view, "#ev-chart")
+    assert has_element?(view, "#card-#{high.id}.is-active")
+    assert html =~ "100"
+
+    render_change(view, "filter", %{
+      "q" => "",
+      "stage" => "all",
+      "profile" => "all",
+      "status" => "open",
+      "batch" => "all",
+      "band" => "frontier",
+      "min_score" => "0"
+    })
+
+    assert has_element?(view, "#card-#{high.id}")
+    refute has_element?(view, "#card-#{low.id}")
+  end
+
   test "the grid paints a window when the desk is large", %{conn: conn} do
     profile()
 

@@ -8,6 +8,7 @@ defmodule Hireme.Desk.Filters do
   """
 
   alias Hireme.Desk.Job
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
 
   @type t :: %__MODULE__{
@@ -15,10 +16,18 @@ defmodule Hireme.Desk.Filters do
           stage: Pipeline.stage() | :all,
           profile: String.t() | :all,
           status: Job.status() | :all,
-          batch: String.t() | :leftover | :all
+          batch: String.t() | :leftover | :all,
+          band: LifeEv.band() | :all,
+          min_score: 0..100
         }
 
-  defstruct q: "", stage: :all, profile: :all, status: :open, batch: :all
+  defstruct q: "",
+            stage: :all,
+            profile: :all,
+            status: :open,
+            batch: :all,
+            band: :all,
+            min_score: 0
 
   @spec from_params(map()) :: t()
   def from_params(params) when is_map(params) do
@@ -27,13 +36,18 @@ defmodule Hireme.Desk.Filters do
       stage: stage(params["stage"]),
       profile: slug(params["profile"]),
       status: status(params["status"]),
-      batch: batch(params["batch"])
+      batch: batch(params["batch"]),
+      band: band(params["band"]),
+      min_score: min_score(params["min_score"])
     }
   end
 
   @spec merge(t(), map()) :: t()
   def merge(%__MODULE__{} = filters, overrides) when is_map(overrides) do
-    struct!(filters, Map.take(overrides, [:q, :stage, :profile, :status, :batch]))
+    struct!(
+      filters,
+      Map.take(overrides, [:q, :stage, :profile, :status, :batch, :band, :min_score])
+    )
   end
 
   @spec to_query(t()) :: map()
@@ -44,6 +58,8 @@ defmodule Hireme.Desk.Filters do
     |> put("profile", filters.profile, :all)
     |> put("status", filters.status, :open)
     |> put("batch", filters.batch, :all)
+    |> put("band", filters.band, :all)
+    |> put("min_score", filters.min_score, 0)
   end
 
   @spec stage_value(t()) :: String.t()
@@ -61,6 +77,13 @@ defmodule Hireme.Desk.Filters do
   def batch_value(%__MODULE__{batch: :all}), do: "all"
   def batch_value(%__MODULE__{batch: :leftover}), do: "leftover"
   def batch_value(%__MODULE__{batch: code}), do: code
+
+  @spec band_value(t()) :: String.t()
+  def band_value(%__MODULE__{band: :all}), do: "all"
+  def band_value(%__MODULE__{band: band}), do: LifeEv.name(band)
+
+  @spec min_score_value(t()) :: String.t()
+  def min_score_value(%__MODULE__{min_score: n}), do: Integer.to_string(n)
 
   defp stage(value) do
     case Pipeline.parse(value) do
@@ -84,6 +107,24 @@ defmodule Hireme.Desk.Filters do
   defp batch("leftover"), do: :leftover
   defp batch(value) when is_binary(value) and value not in ["", "all"], do: value
   defp batch(_), do: :all
+
+  defp band(value) do
+    case LifeEv.parse_band(value) do
+      {:ok, band} -> band
+      :error -> :all
+    end
+  end
+
+  defp min_score(n) when is_integer(n), do: LifeEv.clamp(n)
+
+  defp min_score(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, _} -> LifeEv.clamp(n)
+      :error -> 0
+    end
+  end
+
+  defp min_score(_), do: 0
 
   defp put(query, _key, value, value), do: query
   defp put(query, key, value, _default), do: Map.put(query, key, to_string(value))
