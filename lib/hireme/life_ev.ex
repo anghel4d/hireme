@@ -37,6 +37,7 @@ defmodule Hireme.LifeEv do
   """
 
   alias Hireme.LifeEv.Chart
+  alias Hireme.Text
 
   @type score :: 0..100
   @type band :: :frontier | :labs | :big_tech | :systems | :craft | :mid | :thin | :kill
@@ -66,7 +67,6 @@ defmodule Hireme.LifeEv do
 
   @keys Enum.map(@bands, & &1.key)
   @by_key Map.new(@bands, &{&1.key, &1})
-  @by_name Map.new(@keys, &{Atom.to_string(&1), &1})
 
   @frontier ~w(openai anthropic spacex neuralink xai spacexai)
   @labs ~w(starfish valve gdm deepmind meta fair ssi mira)
@@ -86,18 +86,7 @@ defmodule Hireme.LifeEv do
   def label(band) when band in @keys, do: @by_key[band].label
 
   @spec parse_band(term()) :: {:ok, band() | :all} | :error
-  def parse_band(:all), do: {:ok, :all}
-  def parse_band("all"), do: {:ok, :all}
-  def parse_band(band) when band in @keys, do: {:ok, band}
-
-  def parse_band(name) when is_binary(name) do
-    case Map.get(@by_name, name) do
-      nil -> :error
-      band -> {:ok, band}
-    end
-  end
-
-  def parse_band(_), do: :error
+  def parse_band(band), do: Hireme.Closed.parse([:all | @keys], band)
 
   @spec band(score()) :: band()
   def band(score) when is_integer(score) and score >= 0 and score <= 100 do
@@ -124,11 +113,10 @@ defmodule Hireme.LifeEv do
         high_comp? = high_comp?(Map.get(input, :comp) || Map.get(input, "comp"))
 
         cond do
-          hard_kill?(blob, location) -> kill_score(blob)
-          named?(company, @frontier) -> 100
-          named?(company, @labs) or phrase?(company, @labs_phrases) -> 90
-          named?(company, @big_tech) and high_comp? -> 85
-          named?(company, @big_tech) -> 80
+          kill = kill_score(blob, location) -> kill
+          Text.named?(company, @frontier) -> 100
+          Text.named?(company, @labs) or Text.phrase?(company, @labs_phrases) -> 90
+          Text.named?(company, @big_tech) -> if(high_comp?, do: 85, else: 80)
           true -> heuristic(company, role, fit, location, high_comp?)
         end
     end
@@ -136,24 +124,22 @@ defmodule Hireme.LifeEv do
 
   @spec chart([score() | %{optional(:score_100) => score()}]) :: Chart.t()
   def chart(rows) when is_list(rows) do
-    scores =
-      Enum.map(rows, fn
-        n when is_integer(n) -> clamp(n)
-        %{score_100: n} when is_integer(n) -> clamp(n)
-        %{"score_100" => n} when is_integer(n) -> clamp(n)
-        _ -> 0
-      end)
+    # The input can be large; every subsequent pass is bounded by 101 scores.
+    frequencies = Enum.frequencies_by(rows, &chart_score/1)
+    scores = Map.keys(frequencies)
 
-    n = length(scores)
-    total = Enum.sum(scores)
+    {n, total} =
+      Enum.reduce(frequencies, {0, 0}, fn {score, count}, {n, total} ->
+        {n + count, total + score * count}
+      end)
 
     %Chart{
       n: n,
       mean: if(n == 0, do: nil, else: Float.round(total / n, 1)),
       max: Enum.max(scores, fn -> nil end),
       min: Enum.min(scores, fn -> nil end),
-      bands: band_rows(scores, n),
-      bins: bin_rows(scores)
+      bands: band_rows(frequencies, n),
+      bins: bin_rows(frequencies)
     }
   end
 
@@ -177,25 +163,29 @@ defmodule Hireme.LifeEv do
     "n=#{chart.n} mean=#{mean} max=#{chart.max || "—"} min=#{chart.min || "—"}\n#{bands}\n#{bins}"
   end
 
-  defp band_rows(scores, n) do
-    counts = Enum.frequencies_by(scores, &band/1)
+  defp chart_score(n) when is_integer(n), do: clamp(n)
+  defp chart_score(%{score_100: n}) when is_integer(n), do: clamp(n)
+  defp chart_score(%{"score_100" => n}) when is_integer(n), do: clamp(n)
+  defp chart_score(_), do: 0
+
+  defp group_counts(frequencies, key) do
+    Enum.reduce(frequencies, %{}, fn {score, count}, acc ->
+      Map.update(acc, key.(score), count, &(&1 + count))
+    end)
+  end
+
+  defp band_rows(frequencies, n) do
+    counts = group_counts(frequencies, &band/1)
 
     Enum.map(@bands, fn row ->
       count = Map.get(counts, row.key, 0)
 
-      %{
-        key: row.key,
-        label: row.label,
-        min: row.min,
-        max: row.max,
-        count: count,
-        share: if(n == 0, do: 0.0, else: Float.round(count / n, 3))
-      }
+      Map.merge(row, %{count: count, share: if(n == 0, do: 0.0, else: Float.round(count / n, 3))})
     end)
   end
 
-  defp bin_rows(scores) do
-    grouped = Enum.frequencies_by(scores, &bin_lo/1)
+  defp bin_rows(frequencies) do
+    grouped = group_counts(frequencies, &bin_lo/1)
 
     Enum.map(0..9, fn i ->
       lo = i * 10
@@ -236,18 +226,14 @@ defmodule Hireme.LifeEv do
     clamp(min(score, 84))
   end
 
-  defp kill_score(blob) do
+  defp kill_score(blob, location) do
     cond do
       staffing?(blob) -> 8
       intern?(blob) -> 12
       theater?(blob) -> 10
-      true -> 15
+      dressed_as_eng?(blob) or onsite_lock?(location) -> 15
+      true -> nil
     end
-  end
-
-  defp hard_kill?(blob, location) do
-    staffing?(blob) or intern?(blob) or theater?(blob) or dressed_as_eng?(blob) or
-      onsite_lock?(location)
   end
 
   defp staffing?(blob), do: blob =~ ~r/\b(staffing|body\s*shop|recruit)/i
@@ -303,32 +289,6 @@ defmodule Hireme.LifeEv do
   end
 
   defp high_comp?(_), do: false
-
-  defp named?(name, anchors) do
-    n = normalize(name)
-    compact = String.replace(n, " ", "")
-
-    Enum.any?(anchors, fn anchor ->
-      padded = " #{n} "
-      padded_anchor = " #{anchor} "
-
-      n == anchor or compact == String.replace(anchor, " ", "") or
-        String.contains?(padded, padded_anchor)
-    end)
-  end
-
-  defp phrase?(name, phrases) do
-    n = normalize(name)
-    Enum.any?(phrases, &String.contains?(n, &1))
-  end
-
-  defp normalize(name) do
-    name
-    |> to_string()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9]+/, " ")
-    |> String.trim()
-  end
 
   defp string(input, key) do
     case Map.get(input, key) || Map.get(input, Atom.to_string(key)) do

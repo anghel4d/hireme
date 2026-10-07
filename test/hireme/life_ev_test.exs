@@ -38,6 +38,9 @@ defmodule Hireme.LifeEvTest do
   test "an explicit score_100 wins, clamped" do
     assert LifeEv.score(%{company: "OpenAI", score_100: 12}) == 12
     assert LifeEv.score(%{score: "140"}) == 100
+    assert LifeEv.score(%{:company => nil, "company" => "OpenAI"}) == 100
+    assert LifeEv.score(%{:score_100 => nil, "score_100" => "12 trailing"}) == 12
+    assert LifeEv.score(%{company: "Staffing", score_100: 100}) == 100
   end
 
   test "chart counts bands and histogram bins" do
@@ -50,6 +53,38 @@ defmodule Hireme.LifeEvTest do
     assert by_key.mid == 2
     assert by_key.kill == 1
     assert Enum.sum(Enum.map(chart.bins, & &1.count)) == 6
+  end
+
+  test "chart covers every closed boundary and preserves empty and malformed input semantics" do
+    empty = LifeEv.chart([])
+    assert {empty.n, empty.mean, empty.min, empty.max} == {0, nil, nil, nil}
+    assert Enum.all?(empty.bands, &(&1.count == 0 and &1.share == 0.0))
+    assert Enum.all?(empty.bins, &(&1.count == 0))
+
+    chart = LifeEv.chart(Enum.to_list(0..100))
+    assert {chart.n, chart.mean, chart.min, chart.max} == {101, 50.0, 0, 100}
+
+    for row <- chart.bands do
+      assert row.count == row.max - row.min + 1
+      assert row.share == Float.round(row.count / 101, 3)
+    end
+
+    assert Enum.map(chart.bins, & &1.count) == List.duplicate(10, 9) ++ [11]
+
+    mixed =
+      LifeEv.chart([
+        -1,
+        101,
+        %{score_100: 5},
+        %{"score_100" => 95},
+        %{:score_100 => nil, "score_100" => 90},
+        nil,
+        "80",
+        %{}
+      ])
+
+    assert {mixed.n, mixed.mean, mixed.min, mixed.max} == {8, 36.3, 0, 100}
+    assert LifeEv.ascii(mixed) =~ "n=8 mean=36.3 max=100 min=0"
   end
 
   test "parse_band is closed at the edge" do

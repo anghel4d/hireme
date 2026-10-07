@@ -6,8 +6,9 @@ defmodule Hireme.Heat.Org do
   across departments; a small shop gets one, maybe two after decay.
   """
 
+  import Hireme.Text, only: [normalize: 1, named?: 2]
+
   @sizes [:mega, :large, :mid, :small]
-  @size_names Map.new(@sizes, &{Atom.to_string(&1), &1})
 
   @mega ~w(google alphabet amazon aws meta facebook nvidia microsoft)
   @large ~w(
@@ -36,25 +37,14 @@ defmodule Hireme.Heat.Org do
   def name(key) when is_atom(key), do: Atom.to_string(key)
 
   @spec parse_size(term()) :: {:ok, size()} | :error
-  def parse_size(size) when size in @sizes, do: {:ok, size}
-
-  def parse_size(name) when is_binary(name) do
-    case Map.fetch(@size_names, name) do
-      {:ok, size} -> {:ok, size}
-      :error -> :error
-    end
-  end
-
-  def parse_size(_), do: :error
+  def parse_size(size), do: Hireme.Closed.parse(@sizes, size)
 
   @spec size(term()) :: size()
   def size(company) when is_binary(company) do
-    n = normalize(company)
-
     cond do
-      named?(n, @mega) -> :mega
-      named?(n, @large) -> :large
-      n =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
+      named?(company, @mega) -> :mega
+      named?(company, @large) -> :large
+      normalize(company) =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
       true -> :small
     end
   end
@@ -143,23 +133,6 @@ defmodule Hireme.Heat.Org do
       n =~ ~r/\b(software engineer|swe|engineer|developer)/ -> :software_engineer
       true -> :other
     end
-  end
-
-  defp named?(n, anchors) do
-    compact = String.replace(n, " ", "")
-
-    Enum.any?(anchors, fn anchor ->
-      n == anchor or compact == String.replace(anchor, " ", "") or
-        String.contains?(" #{n} ", " #{anchor} ")
-    end)
-  end
-
-  defp normalize(name) do
-    name
-    |> to_string()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9]+/, " ")
-    |> String.trim()
   end
 
   defp field(job, key) do
