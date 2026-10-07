@@ -27,6 +27,8 @@ An account is the standalone thing a desk belongs to. Every row the desk stores 
 
 A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSite=Lax) carrying a random token whose hash is a row, so sessions can be listed and revoked from the Account page. Sessions end after 24 hours or an hour idle (NIST SP 800-63B-4, AAL2). Writes carry the page's CSRF token.
 
+An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor is added or removed, or other sessions are ended. `SECURITY.md` says which standards each piece answers.
+
 An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it on `/mcp/websocket` and `/mcp/letterbox/<id>/websocket` as the `x-api-key` header, or as the `base64url.bearer.phx.<base64 key>` websocket subprotocol. A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at the upgrade with no detail, and a peer that keeps failing is throttled.
 
 The migration was rewritten for accounts; an existing local database needs `mix ecto.reset`.
@@ -139,6 +141,8 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme/api_keys.ex` | Named, hashed, revocable keys an agent presents; one key, one account |
 | `lib/hireme/security.ex` | The policy numbers and the primitives: tokens, hashes, base62, sealing, throttling |
 | `lib/hireme/audit.ex` | The append-only security trail |
+| `lib/hireme/mfa/mfa.ex` | Second factors: apps, passkeys and keys, recovery codes, step-up |
+| `lib/hireme/mfa/webauthn.ex` | The WebAuthn ceremonies behind `Hireme.Mfa` |
 | `lib/hireme/schema.ex` | Every row the desk stores |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
 | `lib/hireme/cv.ex` | Corpus, narrative, kv, `Theme`, `Mask`, `Keywords`, the composed `Cv.Document`, `CvPair` and the quarterly cooldown |
@@ -155,6 +159,7 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme_web/router.ex` | Routes and the one controller: packet, focus, root, scoreboard, lanes, writes |
 | `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, the sign-in page |
 | `lib/hireme_web/account.ex` | The Account page's JSON: keys and sessions |
+| `lib/hireme_web/mfa.ex` | The factor page and the second-factor half of the Account page |
 | `lib/hireme_web/packet.ex` | The desk as one HDP1 columnar packet |
 | `lib/hireme_web/json.ex` | Wire shapes for the shell and the MCP tools, and refusals |
 | `lib/hireme_web/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
