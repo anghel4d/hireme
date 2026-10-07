@@ -1,23 +1,96 @@
-defmodule Hireme.Cv.Lineage do
-  @moduledoc "The one CV for an employer. Applications do not carry a free-floating variant."
-  use Hireme.Schema
+defmodule Hireme.Corpus do
+  @moduledoc """
+  The root record: profiles and the items a CV is built from. Items with
+  no profile are shared; a profile's CV is its own items plus those.
+  """
 
-  schema "cv_lineages" do
-    field :generation, :integer, default: 1
-    field :opened_on, :date
-    field :rewrites_allowed, :boolean, default: true
-    field :theme, :map, default: %{}
-    belongs_to :employer, Hireme.Desk.Employer
-    timestamps()
+  import Ecto.Query
+  alias Hireme.Corpus.Item
+  alias Hireme.Corpus.Profile
+  alias Hireme.Repo
+
+  def list_profiles, do: Repo.all(from p in Profile, order_by: p.id)
+  def get_profile!(id), do: Repo.get!(Profile, id)
+  def create_profile!(attrs), do: %Profile{} |> Profile.changeset(attrs) |> Repo.insert!()
+  def create_item!(attrs), do: %Item{} |> Item.changeset(attrs) |> Repo.insert!()
+  def get_item_by_key!(key), do: Repo.get_by!(Item, key: key)
+
+  def list_items(profile_id) do
+    Repo.all(
+      from i in Item,
+        where: is_nil(i.profile_id) or i.profile_id == ^profile_id,
+        order_by: [asc: i.position, asc: i.id]
+    )
+  end
+end
+
+defmodule Hireme.Narrative do
+  @moduledoc """
+  Read and revise a user's private narrative: one row per user, each
+  save bumps `version`. It stays off application export while private.
+  """
+
+  alias Hireme.Corpus.Narrative, as: Row
+  alias Hireme.Corpus.User
+  alias Hireme.Repo
+
+  def create_user!(attrs), do: %User{} |> User.changeset(attrs) |> Repo.insert!()
+
+  def get_by_user(user_id) when is_integer(user_id), do: Repo.get_by(Row, user_id: user_id)
+  def get_by_user(_), do: nil
+
+  def for_profile(%{user_id: user_id}), do: get_by_user(user_id)
+  def for_profile(_), do: nil
+
+  def write!(%User{id: user_id}, body) when is_binary(body) do
+    case get_by_user(user_id) do
+      nil ->
+        %Row{}
+        |> Row.changeset(%{user_id: user_id, body: body, version: 1, private: true})
+        |> Repo.insert!()
+
+      row ->
+        update!(row, body)
+    end
   end
 
-  def changeset(lineage, attrs) do
-    lineage
-    |> cast(attrs, [:employer_id, :generation, :opened_on, :rewrites_allowed, :theme])
-    |> validate_required([:employer_id, :generation, :opened_on])
-    |> unique_constraint(:employer_id)
-    |> foreign_key_constraint(:employer_id)
+  def update!(%Row{} = row, body) when is_binary(body) do
+    row |> Row.changeset(%{body: body, version: row.version + 1}) |> Repo.update!()
   end
+
+  def delete(%Row{} = row), do: Repo.delete(row)
+
+  @doc "Text that may ride along with an application. Private narratives contribute nothing."
+  def for_application(%Row{private: false, body: body}), do: body
+  def for_application(_), do: nil
+end
+
+defmodule Hireme.Kv do
+  @moduledoc """
+  Namespaced key-value pairs. `global` is the person, `profile:<id>` a
+  positioning, `app:<id>` process metadata for one application. Nothing
+  here is a CV line.
+  """
+
+  import Ecto.Query
+  alias Hireme.Kv.Pair
+  alias Hireme.Repo
+
+  def put(namespace, key, value) when is_binary(namespace) and is_binary(key) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    %Pair{}
+    |> Pair.changeset(%{namespace: namespace, key: key, value: value})
+    |> Repo.insert!(
+      on_conflict: [set: [value: value, updated_at: now]],
+      conflict_target: [:namespace, :key]
+    )
+  end
+
+  def list(namespace),
+    do: Repo.all(from p in Pair, where: p.namespace == ^namespace, order_by: p.key)
+
+  def get(namespace, key), do: Repo.get_by(Pair, namespace: namespace, key: key)
 end
 
 defmodule Hireme.Theme do

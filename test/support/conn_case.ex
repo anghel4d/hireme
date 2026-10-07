@@ -9,8 +9,6 @@ defmodule HiremeWeb.ConnCase do
     quote do
       @endpoint HiremeWeb.Endpoint
 
-      use HiremeWeb, :verified_routes
-
       import Plug.Conn
       import Phoenix.ConnTest
       import HiremeWeb.ConnCase

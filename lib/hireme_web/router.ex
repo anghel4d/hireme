@@ -1,5 +1,7 @@
 defmodule HiremeWeb.Router do
-  use HiremeWeb, :router
+  use Phoenix.Router, helpers: false
+  import Plug.Conn
+  import Phoenix.Controller
 
   pipeline :browser do
     plug :accepts, ["html"]
