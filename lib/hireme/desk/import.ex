@@ -1,7 +1,5 @@
 defmodule Hireme.Import.Report do
-  @moduledoc """
-  What one import did. `kind` is the shape that was recognised.
-  """
+  @moduledoc "What one import did. `kind` is the shape that was recognised."
 
   @enforce_keys [:kind, :count]
   defstruct [:kind, :count, :source, :wave, :nested]
@@ -49,17 +47,19 @@ defmodule Hireme.Import do
   alias Hireme.Desk.Job
   alias Hireme.Desk.Snapshot
   alias Hireme.Import.Report
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Repo
   alias Hireme.Variety
 
   @type result :: {:ok, Report.t()} | {:error, :unrecognized}
 
+  @verdicts ~w(open thin closed blocked)a
+
   @spec import_path(Path.t(), keyword()) :: result()
   def import_path(path, opts \\ []) do
     profile = Keyword.get(opts, :profile) || default_profile!()
-    body = File.read!(path)
-    import_body(body, Path.basename(path), profile)
+    import_body(File.read!(path), Path.basename(path), profile)
   end
 
   @spec import_body(String.t(), String.t(), Profile.t()) :: result()
@@ -74,19 +74,19 @@ defmodule Hireme.Import do
     end
   end
 
+  @doc "Lowercased scheme and host, no query, no trailing slash: the idempotency key."
   def canonical_url(url) when is_binary(url) do
     url = url |> String.trim() |> String.trim_trailing("/")
 
     case URI.parse(url) do
       %URI{scheme: scheme, host: host} = uri when is_binary(scheme) and is_binary(host) ->
         path = uri.path |> to_string() |> String.trim_trailing("/")
-        path = if(path in ["", "/"], do: nil, else: path)
 
         URI.to_string(%URI{
           scheme: String.downcase(scheme),
           host: String.downcase(host),
           port: uri.port,
-          path: path
+          path: if(path in ["", "/"], do: nil, else: path)
         })
 
       _ ->
@@ -99,11 +99,7 @@ defmodule Hireme.Import do
   defp import_json(%{"leftover_unique" => _} = doc, _profile, _filename) do
     noted = date!(doc["noted_on"])
 
-    snap =
-      Repo.get_by(Snapshot, noted_on: noted) ||
-        %Snapshot{}
-
-    snap
+    (Repo.get_by(Snapshot, noted_on: noted) || %Snapshot{})
     |> Snapshot.changeset(%{
       noted_on: noted,
       leftover_unique: doc["leftover_unique"],
@@ -120,9 +116,7 @@ defmodule Hireme.Import do
 
   defp import_json(%{"claims" => claims}, _profile, _filename) when is_list(claims) do
     Enum.each(claims, fn claim ->
-      existing = Repo.get_by(Claim, squad: claim["squad"], slice: claim["slice"]) || %Claim{}
-
-      existing
+      (Repo.get_by(Claim, squad: claim["squad"], slice: claim["slice"]) || %Claim{})
       |> Claim.changeset(%{
         squad: claim["squad"],
         slice: claim["slice"],
@@ -159,24 +153,24 @@ defmodule Hireme.Import do
 
   defp import_table(text, profile, filename) do
     {header, rows} = split_table(text)
-
-    apps =
-      Enum.map(rows, fn cells ->
-        Map.new(Enum.zip(header, cells), fn {key, value} -> {normalize_header(key), value} end)
-      end)
-
+    header = Enum.map(header, &(&1 |> String.downcase() |> String.trim()))
+    apps = Enum.map(rows, &Map.new(Enum.zip(header, &1)))
     import_json(%{"apps" => apps, "stage" => "gated", "gate" => "pursue"}, profile, filename)
   end
 
   defp import_freshness(text, profile, filename) do
     wave = freshness_wave(text, filename)
-    {counts, lists} = freshness_sections(text)
+    lines = text |> String.split("\n") |> Enum.map(&String.trim/1)
+    lists = url_lists(lines)
+
+    # A stated count wins; a listed verdict without one is counted.
+    counts =
+      (counts_from_lines(lines) ++
+         Enum.map(lists, fn {verdict, urls} -> {verdict, length(urls)} end))
+      |> Enum.uniq_by(&elem(&1, 0))
 
     Enum.each(counts, fn {verdict, n} ->
-      existing =
-        Repo.get_by(FreshnessVerdict, wave: wave, verdict: verdict) || %FreshnessVerdict{}
-
-      existing
+      (Repo.get_by(FreshnessVerdict, wave: wave, verdict: verdict) || %FreshnessVerdict{})
       |> FreshnessVerdict.changeset(%{
         wave: wave,
         verdict: verdict,
@@ -188,21 +182,19 @@ defmodule Hireme.Import do
     end)
 
     apps =
-      Enum.flat_map(lists, fn {verdict, urls} ->
-        Enum.map(urls, fn url ->
-          %{
-            "company" => host_company(url),
-            "role" => "Engineer",
-            "location" => "Remote",
-            "fit" => "systems",
-            "source" => "universe-gaps",
-            "url" => url,
-            "freshness" => Atom.to_string(verdict),
-            "gate" => "pursue",
-            "stage" => "freshness"
-          }
-        end)
-      end)
+      for {verdict, urls} <- lists, url <- urls do
+        %{
+          "company" => host_company(url),
+          "role" => "Engineer",
+          "location" => "Remote",
+          "fit" => "systems",
+          "source" => "universe-gaps",
+          "url" => url,
+          "freshness" => Atom.to_string(verdict),
+          "gate" => "pursue",
+          "stage" => "freshness"
+        }
+      end
 
     {:ok, nested} = import_json(%{"apps" => apps}, profile, filename)
     {:ok, %Report{kind: :freshness, count: length(apps), wave: wave, nested: nested}}
@@ -228,37 +220,33 @@ defmodule Hireme.Import do
     |> Repo.insert_or_update!()
   end
 
+  # A row's keys are read case-insensitively: a pursue table says
+  # `Company` and `URL`, a pack says `company` and `url`.
   defp upsert_app(profile, app, batch, defaults) do
-    url = canonical_url(app["url"] || app["URL"] || "")
+    app = Map.new(app, fn {key, value} -> {String.downcase(key), value} end)
+    url = canonical_url(app["url"] || "")
     if url == "", do: raise(ArgumentError, "application is missing a URL")
 
     stage = Pipeline.parse!(app["stage"] || defaults["stage"] || :discovered)
     fire = (batch && batch.fire) || :hold
-
-    stage =
-      if Pipeline.fire_locked?(stage) and fire != :open_fire do
-        :fire_ready
-      else
-        stage
-      end
-
-    employer = upsert_employer(app["company"] || app["Company"], app["freshness"])
+    stage = if Pipeline.fire_locked?(stage) and fire != :open_fire, do: :fire_ready, else: stage
+    employer = upsert_employer(app["company"], app["freshness"])
 
     attrs = %{
-      company: app["company"] || app["Company"],
-      role: app["role"] || app["Role"] || "Engineer",
-      location: app["location"] || app["Location"] || "",
-      fit: app["fit"] || app["Fit"] || "",
-      source: app["source"] || app["Source"] || "",
-      listing_url: app["url"] || app["URL"] || "",
+      company: app["company"],
+      role: app["role"] || "Engineer",
+      location: app["location"] || "",
+      fit: app["fit"] || "",
+      source: app["source"] || "",
+      listing_url: app["url"] || "",
       canonical_url: url,
       listing: app["listing"] || "",
       heat: app["heat"] || 3,
       freshness: app["freshness"] || "unknown",
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
-      department: app["department"] || app["Department"] || "",
-      score_100: app["score_100"] || app["score"] || app["Score"],
+      department: app["department"] || "",
+      score_100: app["score_100"] || app["score"],
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,
       stage: stage,
@@ -267,17 +255,12 @@ defmodule Hireme.Import do
 
     case Repo.get_by(Job, canonical_url: url) do
       nil ->
-        {:ok, _job} =
-          Desk.create_job(Map.put(attrs, :profile_id, profile.id))
-
-        1
+        {:ok, _job} = Desk.create_job(Map.put(attrs, :profile_id, profile.id))
 
       job ->
+        # A pack without a score leaves the one already on the card alone.
         attrs = Map.put(attrs, :score_100, score!(attrs.score_100, job.score_100))
-
-        job
-        |> Job.changeset(Map.delete(attrs, :stage))
-        |> Repo.update!()
+        job |> Job.changeset(Map.delete(attrs, :stage)) |> Repo.update!()
 
         if job.current_stage != stage do
           case Desk.set_stage(job.id, stage) do
@@ -285,20 +268,18 @@ defmodule Hireme.Import do
             {:error, :fire_hold} -> :held
           end
         end
-
-        1
     end
+
+    1
   end
 
-  # A pack without a score leaves the one already on the card alone.
   defp score!(nil, current), do: current
-
-  defp score!(value, _current) when is_integer(value), do: Hireme.LifeEv.clamp(value)
-  defp score!(value, _current) when is_float(value), do: Hireme.LifeEv.clamp(round(value))
+  defp score!(value, _current) when is_integer(value), do: LifeEv.clamp(value)
+  defp score!(value, _current) when is_float(value), do: LifeEv.clamp(round(value))
 
   defp score!(value, _current) when is_binary(value) do
     case Integer.parse(String.trim(value)) do
-      {n, ""} -> Hireme.LifeEv.clamp(n)
+      {n, ""} -> LifeEv.clamp(n)
       _ -> raise ArgumentError, "bad score #{inspect(value)}"
     end
   end
@@ -315,22 +296,16 @@ defmodule Hireme.Import do
       )
 
     variety = apps |> Variety.summarize(batch.target_size) |> Variety.to_map()
-
-    batch
-    |> Batch.changeset(%{variety: variety})
-    |> Repo.update!()
+    batch |> Batch.changeset(%{variety: variety}) |> Repo.update!()
   end
 
-  defp upsert_employer(nil, _freshness), do: nil
-  defp upsert_employer("", _freshness), do: nil
-
-  defp upsert_employer(name, freshness) do
-    existing = Repo.get_by(Employer, name: name) || %Employer{}
-
-    existing
+  defp upsert_employer(name, freshness) when is_binary(name) and name != "" do
+    (Repo.get_by(Employer, name: name) || %Employer{})
     |> Employer.changeset(%{name: name, freshness: freshness || "unknown"})
     |> Repo.insert_or_update!()
   end
+
+  defp upsert_employer(_name, _freshness), do: nil
 
   defp default_profile! do
     Repo.one(from p in Profile, order_by: p.id, limit: 1) ||
@@ -361,12 +336,9 @@ defmodule Hireme.Import do
       |> Enum.map(&String.trim/1)
       |> Enum.filter(&String.starts_with?(&1, "|"))
       |> Enum.map(fn line ->
-        line
-        |> String.trim("|")
-        |> String.split("|")
-        |> Enum.map(&String.trim/1)
+        line |> String.trim("|") |> String.split("|") |> Enum.map(&String.trim/1)
       end)
-      |> Enum.reject(fn cells -> Enum.all?(cells, &separator?/1) end)
+      |> Enum.reject(fn cells -> Enum.all?(cells, &(&1 =~ ~r/^:?-+:?$/)) end)
 
     case rows do
       [header | data] -> {header, data}
@@ -374,33 +346,11 @@ defmodule Hireme.Import do
     end
   end
 
-  defp separator?(cell), do: cell =~ ~r/^:?-+:?$/
-
-  defp normalize_header(header) do
-    header
-    |> String.downcase()
-    |> String.trim()
-  end
-
   defp freshness_wave(text, filename) do
-    cond do
-      Regex.match?(~r/universe-gaps[^\n]*/i, text) ->
-        text
-        |> then(fn body -> Regex.run(~r/universe-gaps[^\s#]*/i, body) end)
-        |> hd()
-        |> String.downcase()
-
-      true ->
-        filename |> Path.basename() |> String.replace(~r/\.md$/, "")
+    case Regex.run(~r/universe-gaps[^\s#]*/i, text) do
+      [wave | _] -> String.downcase(wave)
+      nil -> filename |> Path.basename() |> String.replace(~r/\.md$/, "")
     end
-  end
-
-  defp freshness_sections(text) do
-    lines = text |> String.split("\n") |> Enum.map(&String.trim/1)
-    counts = counts_from_lines(lines)
-    lists = url_lists(lines)
-    counts = fill_counts(counts, lists)
-    {counts, lists}
   end
 
   defp counts_from_lines(lines) do
@@ -412,20 +362,15 @@ defmodule Hireme.Import do
     end)
   end
 
-  defp url_lists(lines), do: url_lists_plain(lines)
-
-  defp url_lists_plain(lines) do
+  defp url_lists(lines) do
     {lists, verdict, urls} =
       Enum.reduce(lines, {%{}, nil, []}, fn line, {lists, verdict, urls} ->
         cond do
-          Regex.match?(~r/^##\s+(OPEN|THIN|CLOSED|BLOCKED)\s*$/i, line) ->
-            lists = store_urls(lists, verdict, urls)
-            name = Regex.run(~r/(OPEN|THIN|CLOSED|BLOCKED)/i, line) |> Enum.at(1)
-            {lists, verdict!(name), []}
+          match = Regex.run(~r/^##\s+(OPEN|THIN|CLOSED|BLOCKED)\s*$/i, line) ->
+            {store_urls(lists, verdict, urls), verdict!(Enum.at(match, 1)), []}
 
           String.match?(line, ~r/^[-*]\s+https?:\/\//) ->
-            url = String.replace(line, ~r/^[-*]\s*/, "")
-            {lists, verdict, [String.trim(url) | urls]}
+            {lists, verdict, [String.trim(String.replace(line, ~r/^[-*]\s*/, "")) | urls]}
 
           true ->
             {lists, verdict, urls}
@@ -440,19 +385,11 @@ defmodule Hireme.Import do
   defp store_urls(lists, _verdict, []), do: lists
   defp store_urls(lists, verdict, urls), do: Map.update(lists, verdict, urls, &(urls ++ &1))
 
-  defp fill_counts(counts, lists) do
-    from_lists =
-      Enum.map(lists, fn {verdict, urls} -> {verdict, length(urls)} end)
-
-    (counts ++ from_lists)
-    |> Enum.uniq_by(&elem(&1, 0))
-  end
-
-  defp verdict!(name), do: name |> String.downcase() |> String.to_existing_atom()
+  defp verdict!(name), do: Hireme.Closed.get(@verdicts, String.downcase(name), :open)
 
   defp host_company(url) do
     case URI.parse(url) do
-      %URI{host: host} when is_binary(host) -> host |> String.replace(~r/^www\./, "")
+      %URI{host: host} when is_binary(host) -> String.replace(host, ~r/^www\./, "")
       _ -> "Unknown"
     end
   end
@@ -465,7 +402,6 @@ defmodule Hireme.Import do
   end
 
   defp date!(nil), do: nil
-
   defp date!(%Date{} = date), do: date
 
   defp date!(value) when is_binary(value) do
@@ -475,7 +411,182 @@ defmodule Hireme.Import do
     end
   end
 
-  defp blank_date(nil), do: nil
   defp blank_date(""), do: nil
   defp blank_date(value), do: date!(value)
+end
+
+defmodule Hireme.Seed do
+  @moduledoc """
+  Load a local `seed/` directory into the desk.
+
+  `seed/` is not tracked. If it is missing, the desk stays empty.
+  """
+
+  import Ecto.Query
+  alias Hireme.Corpus
+  alias Hireme.Corpus.Profile
+  alias Hireme.Desk
+  alias Hireme.Desk.Batch
+  alias Hireme.Desk.Job
+  alias Hireme.Desk.Overlay
+  alias Hireme.Desk.Variant
+  alias Hireme.Import
+  alias Hireme.Kv
+  alias Hireme.Narrative
+  alias Hireme.Repo
+  alias Hireme.Theme
+
+  @type outcome :: :empty | :already_seeded | :ok
+
+  @spec run() :: outcome()
+  def run do
+    dir = seed_dir()
+    profile_path = Path.join(dir, "profile.json")
+
+    cond do
+      not File.regular?(profile_path) ->
+        IO.puts("No #{profile_path}. The desk starts empty. See README.")
+        :empty
+
+      Repo.exists?(Profile) ->
+        IO.puts("Desk already seeded. mix ecto.reset to start over.")
+        :already_seeded
+
+      true ->
+        profile = load_profile!(profile_path, dir)
+        import_manifest(dir, profile)
+        maybe_overlay(dir)
+        IO.puts("Seeded the desk from #{dir}.")
+        :ok
+    end
+  end
+
+  @doc "Add `n` generated applications above the showcase ids."
+  @spec flood(non_neg_integer()) :: non_neg_integer()
+  def flood(0), do: 0
+
+  def flood(n) when is_integer(n) and n > 0 do
+    profile = hd(Corpus.list_profiles())
+    start = max(Repo.aggregate(Job, :max, :id) || 0, 19_999) + 1
+
+    for i <- 0..(n - 1), id = start + i do
+      Desk.create_job!(%{
+        id: id,
+        profile_id: profile.id,
+        company: "Flood #{rem(i, 40)}",
+        role: "Engineer",
+        location: "Remote",
+        stage: :discovered,
+        heat: rem(i, 5) + 1,
+        fit: "systems",
+        gate: :pursue,
+        freshness: :open,
+        canonical_url: "https://jobs.example.test/flood/#{id}",
+        listing_url: "https://jobs.example.test/flood/#{id}",
+        source: "flood"
+      })
+    end
+
+    n
+  end
+
+  def seed_dir, do: Path.expand("seed", File.cwd!())
+
+  defp load_profile!(path, dir) do
+    doc = path |> File.read!() |> Jason.decode!()
+    user = Narrative.create_user!(%{name: doc["name"], email: doc["email"] || ""})
+    narrative_path = Path.join(dir, doc["narrative"] || "narrative.md")
+
+    if File.regular?(narrative_path) do
+      Narrative.write!(user, narrative_path |> File.read!() |> String.trim())
+    end
+
+    profile =
+      Corpus.create_profile!(%{
+        slug: doc["slug"] || "candidate",
+        name: doc["name"],
+        headline: doc["headline"] || "",
+        summary: doc["summary"] || "",
+        user_id: user.id
+      })
+
+    items_path = Path.join(dir, "items.json")
+
+    if File.regular?(items_path) do
+      items_path |> File.read!() |> Jason.decode!() |> Enum.each(&insert_item!(&1, profile.id))
+    end
+
+    %Variant{}
+    |> Variant.changeset(%{
+      profile_id: profile.id,
+      label: "Root",
+      theme: doc["theme"] |> Theme.parse() |> Theme.to_map(),
+      note: ""
+    })
+    |> Repo.insert!()
+
+    Enum.each(doc["kv"] || %{}, fn {key, value} -> Kv.put("global", key, to_string(value)) end)
+    profile
+  end
+
+  defp insert_item!(row, profile_id) do
+    Corpus.create_item!(%{
+      profile_id: if(row["profile"] == "shared", do: nil, else: profile_id),
+      kind: row["kind"],
+      key: row["key"],
+      title: row["title"],
+      body: row["body"] || "",
+      org: row["org"] || "",
+      span: row["span"] || "",
+      position: row["position"] || 0,
+      keywords: row["keywords"] || []
+    })
+  end
+
+  defp import_manifest(dir, profile) do
+    manifest = Path.join(dir, "manifest.json")
+    files = if File.regular?(manifest), do: manifest |> File.read!() |> Jason.decode!(), else: []
+
+    Enum.each(files, fn file ->
+      path = Path.join(dir, file)
+
+      if File.regular?(path) do
+        {:ok, _} = Import.import_path(path, profile: profile)
+      else
+        IO.puts("seed manifest skipped missing #{file}")
+      end
+    end)
+  end
+
+  defp maybe_overlay(dir) do
+    path = Path.join(dir, "overlay.json")
+    if File.regular?(path), do: apply_overlay!(path |> File.read!() |> Jason.decode!())
+  end
+
+  defp apply_overlay!(doc) do
+    batch = Repo.get_by!(Batch, code: doc["batch"])
+    job = Repo.one!(from j in Job, where: j.batch_id == ^batch.id, order_by: j.id, limit: 1)
+    item = Corpus.get_item_by_key!(doc["item_key"])
+
+    case Overlay.parse_mode(doc["mode"]) do
+      {:ok, mode} ->
+        {:ok, _} =
+          Desk.put_overlay(job.id, item.id, %{
+            mode: mode,
+            body: doc["body"],
+            reason: doc["reason"]
+          })
+
+      :error ->
+        raise ArgumentError, "seed/overlay.json: unknown mode #{inspect(doc["mode"])}"
+    end
+
+    if is_map(doc["theme"]) do
+      variant = Repo.get_by!(Variant, job_app_id: job.id)
+      merged = Map.merge(variant.theme || %{}, doc["theme"]) |> Theme.parse() |> Theme.to_map()
+      variant |> Variant.changeset(%{theme: merged}) |> Repo.update!()
+    end
+
+    Desk.refresh_glance!(job.id)
+  end
 end

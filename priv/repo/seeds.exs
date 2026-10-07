@@ -1,1 +1,1 @@
-Hireme.Seed.run()
+Hireme.Desk.seed()

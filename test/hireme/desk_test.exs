@@ -1,44 +1,24 @@
 defmodule Hireme.DeskTest do
   use Hireme.DataCase, async: false
+  import Hireme.Fixtures
 
-  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Batch
+  alias Hireme.Desk.Filters
   alias Hireme.Repo
 
   test "glance numbers follow the mask, and the root text stays put" do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "systems",
-        name: "Systems",
-        headline: "Runtime",
-        summary: "Plain data and explicit schedules."
-      })
+    profile = profile()
 
     experience =
-      Corpus.create_item!(%{
-        profile_id: profile.id,
-        kind: :experience,
-        key: "exp.tick",
-        title: "Engineer",
-        body: "An entity store laid out as structure-of-arrays.",
-        position: 1
-      })
+      item(profile, %{title: "Engineer", body: "An entity store laid out as structure-of-arrays."})
 
     education =
-      Corpus.create_item!(%{
-        profile_id: profile.id,
-        kind: :education,
-        key: "edu.general",
-        title: "DEC",
-        body: "Theatre elective.",
-        position: 2
-      })
+      item(profile, %{kind: :education, title: "DEC", body: "Theatre elective.", position: 2})
 
     job =
-      Desk.create_job!(%{
+      job(profile, %{
         id: 14_413,
-        profile_id: profile.id,
         company: "Lumen Field",
         role: "Runtime engineer",
         stage: "fire_ready",
@@ -72,23 +52,14 @@ defmodule Hireme.DeskTest do
     refute Enum.any?(focus.cv.sections |> Enum.flat_map(& &1.lines), &(&1.body =~ "Theatre"))
 
     root = Desk.root(profile.id)
+    lines = Enum.flat_map(root.cv.sections, & &1.lines)
     assert root.cv.label == "Root"
-    assert Enum.any?(root.cv.sections |> Enum.flat_map(& &1.lines), &(&1.body =~ "Theatre"))
-
-    assert Enum.any?(
-             root.cv.sections |> Enum.flat_map(& &1.lines),
-             &(&1.body =~ "structure-of-arrays")
-           )
+    assert Enum.any?(lines, &(&1.body =~ "Theatre"))
+    assert Enum.any?(lines, &(&1.body =~ "structure-of-arrays"))
   end
 
   test "an opening casts wire strings once and refuses an unknown stage" do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "cast",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
+    profile = profile()
 
     assert {:ok, job} =
              Desk.create_job(%{
@@ -117,28 +88,12 @@ defmodule Hireme.DeskTest do
   end
 
   test "a submit stays locked until that batch is named open fire" do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "candidate",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
-
     {:ok, batch} =
       %Batch{}
       |> Batch.changeset(%{code: "Batch-001", ordinal: 1, status: :fire_ready, fire: :hold})
       |> Repo.insert()
 
-    job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Keel Systems",
-        role: "Runtime engineer",
-        stage: "fire_ready",
-        batch_id: batch.id,
-        canonical_url: "https://jobs.example.test/keel"
-      })
+    job = job(profile(), %{company: "Keel Systems", stage: "fire_ready", batch_id: batch.id})
 
     assert {:error, :fire_hold} = Desk.set_stage(job.id, :submitted)
     assert {:error, :fire_hold} = Desk.set_stage(job.id, :open_fire)
@@ -148,40 +103,19 @@ defmodule Hireme.DeskTest do
   end
 
   test "cards sort by score_100 and filter by band" do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "ev",
-        name: "EV",
-        headline: "Runtime",
-        summary: "A sample profile."
-      })
-
-    low =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Thin Shop",
-        role: "CRUD intern",
-        canonical_url: "https://jobs.example.test/thin"
-      })
-
-    high =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Anthropic",
-        role: "Systems engineer",
-        canonical_url: "https://jobs.example.test/anth"
-      })
+    profile = profile()
+    low = job(profile, %{company: "Thin Shop", role: "CRUD intern"})
+    high = job(profile, %{company: "Anthropic", role: "Systems engineer"})
 
     assert high.score_100 == 100
     assert low.score_100 < 20
 
-    all = Desk.list_cards(%Hireme.Desk.Filters{status: :all})
-    assert hd(all).id == high.id
+    assert hd(Desk.list_cards(%Filters{status: :all})).id == high.id
 
-    frontier = Desk.list_cards(%Hireme.Desk.Filters{status: :all, band: :frontier})
-    assert Enum.map(frontier, & &1.id) == [high.id]
+    assert Enum.map(Desk.list_cards(%Filters{status: :all, band: :frontier}), & &1.id) == [
+             high.id
+           ]
 
-    keepers = Desk.list_cards(%Hireme.Desk.Filters{status: :all, min_score: 90})
-    assert Enum.map(keepers, & &1.id) == [high.id]
+    assert Enum.map(Desk.list_cards(%Filters{status: :all, min_score: 90}), & &1.id) == [high.id]
   end
 end
