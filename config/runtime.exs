@@ -30,10 +30,10 @@ if config_env() == :dev do
       web_console_logger: true,
       patterns: [
         # Static assets, except user uploads
-        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$"E,
+        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
         # Router, Controllers, LiveViews and LiveComponents
-        ~r"lib/hireme_web/router\.ex$"E,
-        ~r"lib/hireme_web/(controllers|live|components)/.*\.(ex|heex)$"E
+        ~r"lib/hireme_web/router\.ex$",
+        ~r"lib/hireme_web/(controllers|live|components)/.*\.(ex|heex)$"
       ]
     ]
 end

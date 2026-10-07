@@ -25,6 +25,7 @@ defmodule Hireme.ImportTest do
     assert job.gate == :pursue
     assert job.fit == "systems"
     assert job.current_stage == :gated
+    assert job.score_100 >= 70
   end
 
   test "the scoreboard snapshot is a reading, and a day pack stays on HOLD" do

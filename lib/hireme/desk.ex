@@ -38,8 +38,8 @@ defmodule Hireme.Desk do
   alias Hireme.Narrative
   alias Hireme.Pipeline
   alias Hireme.Pipeline.Rung
+  alias Hireme.LifeEv
   alias Hireme.Repo
-  alias Hireme.Score
   alias Hireme.Theme
 
   @topic "desk"
@@ -55,14 +55,13 @@ defmodule Hireme.Desk do
           | :not_additive
           | :lineage
           | :command
-          | {:score, term()}
 
   @type command ::
           :get
           | :open_generation
           | {:set_stage, Pipeline.stage()}
           | {:set_next, String.t()}
-          | {:set_score, Score.t() | nil}
+          | {:set_score, LifeEv.score()}
           | {:tailor, pos_integer(), map()}
 
   @type reply ::
@@ -168,7 +167,7 @@ defmodule Hireme.Desk do
         attrs
         |> Map.drop([:id, :stage, :theme, :overlays, :label, :note])
         |> Map.put(:current_stage, Map.get(attrs, :stage, :discovered))
-        |> Map.put(:score, score_or_rollback(Map.get(attrs, :score)))
+        |> Map.put(:score_100, LifeEv.score(attrs))
       )
 
     draft =
@@ -226,18 +225,11 @@ defmodule Hireme.Desk do
     Repo.get!(Job, job.id)
   end
 
-  defp score_or_rollback(value) do
-    case Score.parse(value) do
-      {:ok, score} -> score
-      :error -> Repo.rollback({:score, value})
-    end
-  end
-
-  @spec set_score(pos_integer(), Score.t() | nil) ::
+  @spec set_score(pos_integer(), LifeEv.score()) ::
           {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_score(job_id, score) when is_nil(score) or score in 0..100 do
+  def set_score(job_id, score) when score in 0..100 do
     with :ok <- Letterbox.permit_job(job_id) do
-      Job |> Repo.get!(job_id) |> Job.changeset(%{score: score}) |> Repo.update()
+      Job |> Repo.get!(job_id) |> Job.changeset(%{score_100: score}) |> Repo.update()
     end
   end
 
@@ -371,7 +363,7 @@ defmodule Hireme.Desk do
     set_next(CvPair.job_id(pair), action, nil)
   end
 
-  defp perform_held(pair, {:set_score, score}) when is_nil(score) or score in 0..100 do
+  defp perform_held(pair, {:set_score, score}) when score in 0..100 do
     set_score(CvPair.job_id(pair), score)
   end
 
@@ -411,7 +403,7 @@ defmodule Hireme.Desk do
     |> filter(:batch, f.batch)
     |> filter(:q, f.q)
     |> filter(:band, f.band)
-    |> filter(:min, if(f.band == :all, do: f.min, else: nil))
+    |> filter(:min_score, f.min_score)
     |> select([j, p, v, b], %Card{
       id: j.id,
       company: j.company,
@@ -438,21 +430,18 @@ defmodule Hireme.Desk do
       freshness: j.freshness,
       gate: j.gate,
       fit: j.fit,
-      score: j.score
+      score_100: j.score_100
     })
   end
 
   defp filter(query, _field, :all), do: query
   defp filter(query, :q, ""), do: query
-  defp filter(query, :min, nil), do: query
-  defp filter(query, :min, min), do: where(query, [j], j.score >= ^min)
-  defp filter(query, :band, :unscored), do: where(query, [j], is_nil(j.score))
-  defp filter(query, :band, :titan), do: where(query, [j], j.score == 100)
+  defp filter(query, :min_score, 0), do: query
+  defp filter(query, :min_score, min), do: where(query, [j], j.score_100 >= ^min)
 
   defp filter(query, :band, band) do
-    low = Score.floor(band)
-    high = Score.floor(above(band))
-    where(query, [j], j.score >= ^low and j.score < ^high)
+    %{min: low, max: high} = Enum.find(LifeEv.bands(), &(&1.key == band))
+    where(query, [j], j.score_100 >= ^low and j.score_100 <= ^high)
   end
 
   defp filter(query, :batch, :leftover), do: where(query, [j], is_nil(j.batch_id))
@@ -479,23 +468,18 @@ defmodule Hireme.Desk do
     )
   end
 
-  defp above(:high), do: :titan
-  defp above(:strong), do: :high
-  defp above(:middle), do: :strong
-  defp above(:low), do: :middle
-
   @doc """
-  How many applications sit in each score band, for the whole desk or
-  for one batch.
+  The `score_100` chart for the whole desk or for one batch: band counts
+  and ten-point bins.
   """
-  @spec score_bands(String.t() | :all) :: [{Score.band(), non_neg_integer()}]
-  def score_bands(batch \\ :all) do
+  @spec score_chart(String.t() | :leftover | :all) :: LifeEv.Chart.t()
+  def score_chart(batch \\ :all) do
     Job
     |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
     |> filter(:batch, batch)
-    |> select([j], j.score)
+    |> select([j], j.score_100)
     |> Repo.all()
-    |> Score.histogram()
+    |> LifeEv.chart()
   end
 
   defp variant_of(job_id) do

@@ -44,11 +44,21 @@ defmodule Hireme.Mcp.Args do
     end
   end
 
-  @spec optional_score(map(), String.t()) :: {:ok, Hireme.Score.t() | nil} | {:error, problem()}
-  def optional_score(args, name) do
-    case Hireme.Score.parse(Map.get(args, name)) do
-      {:ok, score} -> {:ok, score}
-      :error -> {:error, {:argument, name}}
+  @spec score(map(), String.t()) :: {:ok, Hireme.LifeEv.score()} | {:error, problem()}
+  def score(args, name) do
+    case int(args, name) do
+      {:ok, n} when n in 0..100 -> {:ok, n}
+      _ -> {:error, {:argument, name}}
+    end
+  end
+
+  @spec optional_score(map(), String.t(), Hireme.LifeEv.score()) ::
+          {:ok, Hireme.LifeEv.score()} | {:error, problem()}
+  def optional_score(args, name, default) do
+    case optional_int(args, name) do
+      {:ok, nil} -> {:ok, default}
+      {:ok, n} when n in 0..100 -> {:ok, n}
+      _ -> {:error, {:argument, name}}
     end
   end
 
@@ -86,8 +96,8 @@ defmodule Hireme.Mcp do
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
   alias Hireme.Mcp.Args
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
-  alias Hireme.Score
 
   @type frame :: map()
 
@@ -128,11 +138,11 @@ defmodule Hireme.Mcp do
   def handle(%Handle{}, _), do: %{error: %{code: -32600, message: "invalid request"}}
 
   defp directory_call("list_letterboxes", args) do
-    with {:ok, min} <- Args.optional_score(args, "min_score") do
+    with {:ok, min} <- Args.optional_score(args, "min_score", 0) do
       rows =
         Letterbox.list()
-        |> Enum.filter(&(is_nil(min) or (&1.score || -1) >= min))
-        |> Enum.sort_by(&Score.rank(&1.score))
+        |> Enum.filter(&(&1.score_100 >= min))
+        |> Enum.sort_by(&(-&1.score_100))
         |> Enum.map(&letterbox_row/1)
 
       {:ok, %{"letterboxes" => rows}}
@@ -141,44 +151,53 @@ defmodule Hireme.Mcp do
 
   defp directory_call("list_batches", _args), do: {:ok, %{"batches" => batch_rows()}}
 
-  defp directory_call("score_bands", args) do
-    batch = Args.optional_string(args, "batch") || :all
-
-    bands =
-      Enum.map(Desk.score_bands(batch), fn {band, n} ->
-        %{"band" => Atom.to_string(band), "floor" => Score.floor(band), "count" => n}
-      end)
-
-    {:ok, %{"bands" => bands}}
+  # Cards come back in board order: score_100 high to low, then batch.
+  defp directory_call("list_applications", args) do
+    {:ok, %{"applications" => application_rows(list_filters(args))}}
   end
 
-  # Cards come back in board order: batch, then score high to low.
-  defp directory_call("list_applications", args) do
-    filters =
-      Filters.from_params(%{
-        "q" => Args.optional_string(args, "q"),
-        "stage" => Args.optional_string(args, "stage"),
-        "status" => Args.optional_string(args, "status") || "all",
-        "batch" => Args.optional_string(args, "batch"),
-        "min" => Args.optional_string(args, "min_score"),
-        "band" => Args.optional_string(args, "band")
-      })
+  # The keepers an agent would draft first. This ranks; it does not submit.
+  defp directory_call("recommend_applications", args) do
+    with {:ok, min} <- Args.optional_score(args, "min_score", 90),
+         {:ok, limit} <- Args.optional_int(args, "limit") do
+      limit = if is_integer(limit) and limit > 0, do: min(limit, 100), else: 25
+      filters = Filters.merge(list_filters(args), %{min_score: min, status: :open})
 
-    cards =
-      Enum.map(Desk.list_cards(filters), fn card ->
-        %{
-          "job_id" => card.id,
-          "company" => card.company,
-          "role" => card.role,
-          "stage" => Pipeline.name(card.stage),
-          "batch" => card.batch_code,
-          "cv_label" => card.cv_label,
-          "score" => card.score,
-          "band" => Atom.to_string(Score.band(card.score))
-        }
-      end)
+      fire =
+        if Enum.any?(Desk.list_batches(), &(&1.fire == :open_fire)), do: "open_fire", else: "hold"
 
-    {:ok, %{"applications" => cards}}
+      {:ok,
+       %{
+         "applications" => filters |> application_rows() |> Enum.take(limit),
+         "min_score" => min,
+         "fire" => fire,
+         "note" => "Ranked by score_100. This tool does not submit."
+       }}
+    end
+  end
+
+  defp directory_call("score_distribution", args) do
+    chart = LifeEv.chart(Desk.list_cards(list_filters(args)))
+
+    {:ok,
+     %{
+       "n" => chart.n,
+       "mean" => chart.mean,
+       "max" => chart.max,
+       "min" => chart.min,
+       "bands" =>
+         Enum.map(chart.bands, fn row ->
+           %{
+             "band" => LifeEv.name(row.key),
+             "label" => row.label,
+             "min" => row.min,
+             "max" => row.max,
+             "count" => row.count,
+             "share" => row.share
+           }
+         end),
+       "bins" => Enum.map(chart.bins, &%{"lo" => &1.lo, "hi" => &1.hi, "count" => &1.count})
+     }}
   end
 
   defp directory_call(name, _args)
@@ -187,6 +206,32 @@ defmodule Hireme.Mcp do
   end
 
   defp directory_call(_name, _args), do: {:error, :unknown_tool}
+
+  defp list_filters(args) do
+    Filters.from_params(%{
+      "q" => Args.optional_string(args, "q"),
+      "stage" => Args.optional_string(args, "stage"),
+      "status" => Args.optional_string(args, "status") || "all",
+      "batch" => Args.optional_string(args, "batch"),
+      "min_score" => Args.optional_string(args, "min_score") || Map.get(args, "min_score"),
+      "band" => Args.optional_string(args, "band")
+    })
+  end
+
+  defp application_rows(filters) do
+    Enum.map(Desk.list_cards(filters), fn card ->
+      %{
+        "job_id" => card.id,
+        "company" => card.company,
+        "role" => card.role,
+        "stage" => Pipeline.name(card.stage),
+        "batch" => card.batch_code,
+        "cv_label" => card.cv_label,
+        "score_100" => card.score_100,
+        "band" => LifeEv.name(LifeEv.band(card.score_100))
+      }
+    end)
+  end
 
   @spec call(Handle.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def call(%Handle{} = handle, "get_application", args) do
@@ -214,13 +259,13 @@ defmodule Hireme.Mcp do
 
   def call(%Handle{} = handle, "set_score", args) do
     with :ok <- same_target(handle, args),
-         {:ok, score} <- Args.optional_score(args, "score"),
+         {:ok, score} <- Args.score(args, "score"),
          {:ok, job} <- Letterbox.command(handle, {:set_score, score}) do
       {:ok,
        %{
          "job_id" => job.id,
-         "score" => job.score,
-         "band" => Atom.to_string(Score.band(job.score))
+         "score_100" => job.score_100,
+         "band" => LifeEv.name(LifeEv.band(job.score_100))
        }}
     end
   end
@@ -242,32 +287,43 @@ defmodule Hireme.Mcp do
 
   def call(%Handle{}, _name, _args), do: {:error, :unknown_tool}
 
-  @bands Enum.map(Score.bands(), &Atom.to_string/1)
+  @bands Enum.map(LifeEv.keys(), &LifeEv.name/1)
 
   defp directory_tools do
     [
       tool(
         "list_letterboxes",
-        "List letterbox ids, highest score first. Lease one to open a duplex socket",
+        "List letterbox ids, highest score_100 first. Lease one to open a duplex socket",
         %{"min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}}
       ),
       tool("list_batches", "List batches on the desk", %{}),
-      tool("score_bands", "Count applications in each score band, for the desk or one batch", %{
-        "batch" => %{"type" => "string"}
-      }),
       tool(
         "list_applications",
-        "List applications in board order: batch, then score high to low",
-        %{
-          "q" => %{"type" => "string"},
-          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-          "status" => %{"type" => "string"},
-          "batch" => %{"type" => "string"},
-          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
-          "band" => %{"type" => "string", "enum" => @bands}
-        }
+        "List applications ranked by score_100, highest first",
+        filter_schema()
+      ),
+      tool(
+        "recommend_applications",
+        "The top applications by score_100 (default floor 90) to draft first. Ranks only; does not submit",
+        Map.put(filter_schema(), "limit", %{"type" => "integer", "minimum" => 1, "maximum" => 100})
+      ),
+      tool(
+        "score_distribution",
+        "score_100 band counts and ten-point bins for the filtered desk",
+        filter_schema()
       )
     ]
+  end
+
+  defp filter_schema do
+    %{
+      "q" => %{"type" => "string"},
+      "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+      "status" => %{"type" => "string"},
+      "batch" => %{"type" => "string"},
+      "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+      "band" => %{"type" => "string", "enum" => @bands}
+    }
   end
 
   defp leased_tools do
@@ -279,7 +335,7 @@ defmodule Hireme.Mcp do
       tool("set_next_action", "Set the next action on this application", %{
         "next_action" => %{"type" => "string"}
       }),
-      tool("set_score", "Set this application's score out of 100, or clear it", %{
+      tool("set_score", "Set this application's score_100", %{
         "score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
       }),
       tool("tailor_line", "Add or revise a line on the CV closed over by this lease", %{
@@ -304,8 +360,8 @@ defmodule Hireme.Mcp do
       "role" => row.role,
       "stage" => Pipeline.name(row.stage),
       "batch" => row.batch,
-      "score" => row.score,
-      "band" => Atom.to_string(Score.band(row.score)),
+      "score_100" => row.score_100,
+      "band" => LifeEv.name(LifeEv.band(row.score_100)),
       "leased" => row.leased,
       "socket" => "/mcp/letterbox/#{row.id}/websocket"
     }
@@ -334,8 +390,8 @@ defmodule Hireme.Mcp do
       "company" => focus.job.company,
       "role" => focus.job.role,
       "stage" => Pipeline.name(focus.job.current_stage),
-      "score" => focus.job.score,
-      "band" => Atom.to_string(Score.band(focus.job.score)),
+      "score_100" => focus.job.score_100,
+      "band" => LifeEv.name(LifeEv.band(focus.job.score_100)),
       "cv_label" => focus.variant.label,
       "lines" =>
         Enum.map(focus.masks, fn line ->

@@ -252,7 +252,7 @@ defmodule Hireme.Import do
       freshness: app["freshness"] || "unknown",
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
-      score: app["score_100"] || app["score"] || app["Score"],
+      score_100: app["score_100"] || app["score"] || app["Score"],
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,
       stage: stage,
@@ -267,7 +267,7 @@ defmodule Hireme.Import do
         1
 
       job ->
-        attrs = Map.put(attrs, :score, score!(attrs.score, job.score))
+        attrs = Map.put(attrs, :score_100, score!(attrs.score_100, job.score_100))
 
         job
         |> Job.changeset(Map.delete(attrs, :stage))
@@ -287,10 +287,13 @@ defmodule Hireme.Import do
   # A pack without a score leaves the one already on the card alone.
   defp score!(nil, current), do: current
 
-  defp score!(value, _current) do
-    case Hireme.Score.parse(value) do
-      {:ok, score} -> score
-      :error -> raise ArgumentError, "bad score #{inspect(value)}"
+  defp score!(value, _current) when is_integer(value), do: Hireme.LifeEv.clamp(value)
+  defp score!(value, _current) when is_float(value), do: Hireme.LifeEv.clamp(round(value))
+
+  defp score!(value, _current) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {n, ""} -> Hireme.LifeEv.clamp(n)
+      _ -> raise ArgumentError, "bad score #{inspect(value)}"
     end
   end
 

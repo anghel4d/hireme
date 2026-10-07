@@ -6,13 +6,13 @@ defmodule Hireme.Desk.Filters do
   back to the default. `to_query/1` is the inverse and leaves defaults
   out so the URL stays short.
 
-  `min` is the lowest score shown. `band` picks one band of the score
-  scale instead; it wins over `min` when both are given.
+  `min_score` is the lowest `score_100` shown. `band` picks one band of
+  the Life-EV ladder; both apply when both are given.
   """
 
   alias Hireme.Desk.Job
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
-  alias Hireme.Score
 
   @type t :: %__MODULE__{
           q: String.t(),
@@ -20,13 +20,19 @@ defmodule Hireme.Desk.Filters do
           profile: String.t() | :all,
           status: Job.status() | :all,
           batch: String.t() | :leftover | :all,
-          min: Score.t() | nil,
-          band: Score.band() | :all
+          min_score: LifeEv.score(),
+          band: LifeEv.band() | :all
         }
 
-  defstruct q: "", stage: :all, profile: :all, status: :open, batch: :all, min: nil, band: :all
+  defstruct q: "",
+            stage: :all,
+            profile: :all,
+            status: :open,
+            batch: :all,
+            min_score: 0,
+            band: :all
 
-  @keys [:q, :stage, :profile, :status, :batch, :min, :band]
+  @keys [:q, :stage, :profile, :status, :batch, :min_score, :band]
 
   @spec from_params(map()) :: t()
   def from_params(params) when is_map(params) do
@@ -36,7 +42,7 @@ defmodule Hireme.Desk.Filters do
       profile: slug(params["profile"]),
       status: status(params["status"]),
       batch: batch(params["batch"]),
-      min: min(params["min"]),
+      min_score: min_score(params["min_score"]),
       band: band(params["band"])
     }
   end
@@ -54,7 +60,7 @@ defmodule Hireme.Desk.Filters do
     |> put("profile", filters.profile, :all)
     |> put("status", filters.status, :open)
     |> put("batch", filters.batch, :all)
-    |> put("min", filters.min, nil)
+    |> put("min_score", filters.min_score, 0)
     |> put("band", filters.band, :all)
   end
 
@@ -81,15 +87,19 @@ defmodule Hireme.Desk.Filters do
   defp batch(value) when is_binary(value) and value not in ["", "all"], do: value
   defp batch(_), do: :all
 
-  defp min(value) do
-    case Score.parse(value) do
-      {:ok, score} -> score
-      :error -> nil
+  defp min_score(n) when is_integer(n), do: LifeEv.clamp(n)
+
+  defp min_score(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> LifeEv.clamp(n)
+      _ -> 0
     end
   end
 
+  defp min_score(_), do: 0
+
   defp band(value) do
-    case Score.parse_band(value) do
+    case LifeEv.parse_band(value) do
       {:ok, band} -> band
       :error -> :all
     end

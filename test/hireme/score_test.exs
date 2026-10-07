@@ -8,31 +8,8 @@ defmodule Hireme.ScoreTest do
   alias Hireme.Import
   alias Hireme.Letterbox
   alias Hireme.Mcp
-  alias Hireme.Score
 
-  test "bands are closed, ordered, and inverse to their floors" do
-    assert Score.band(100) == :titan
-    assert Score.band(99) == :high
-    assert Score.band(85) == :strong
-    assert Score.band(84) == :middle
-    assert Score.band(0) == :low
-    assert Score.band(nil) == :unscored
-
-    for band <- Score.bands(), floor = Score.floor(band) do
-      assert Score.band(floor) == band
-    end
-
-    assert {:ok, 67} = Score.parse("67")
-    assert {:ok, 67} = Score.parse(66.6)
-    assert {:ok, nil} = Score.parse("")
-    assert :error = Score.parse(101)
-    assert :error = Score.parse("high")
-
-    assert Score.histogram([100, 92, nil, 70]) ==
-             [titan: 1, high: 1, strong: 0, middle: 1, low: 0, unscored: 1]
-  end
-
-  test "the board sorts a batch by score, filters by floor and band, and counts bands" do
+  test "a pack's score_100 lands on the card, orders the board, and filters by floor and band" do
     profile = profile()
 
     pack = """
@@ -40,42 +17,42 @@ defmodule Hireme.ScoreTest do
       {"company":"Middling Co","role":"Engineer","url":"https://jobs.example.test/mid","score_100":70,"stage":"gated"},
       {"company":"Titan Labs","role":"Engineer","url":"https://jobs.example.test/titan","score_100":100,"stage":"discovered"},
       {"company":"High Co","role":"Engineer","url":"https://jobs.example.test/high","score":92,"stage":"gated"},
-      {"company":"Unscored Co","role":"Engineer","url":"https://jobs.example.test/none","stage":"gated"}
+      {"company":"Plain Co","role":"Engineer","url":"https://jobs.example.test/plain","stage":"gated"}
     ]}
     """
 
     assert {:ok, %{count: 4}} = Import.import_body(pack, "batch-009.json", profile)
 
     all = Desk.list_cards(%Filters{status: :all})
-    assert Enum.map(all, & &1.company) == ["Titan Labs", "High Co", "Middling Co", "Unscored Co"]
+    assert Enum.map(all, & &1.company) |> Enum.take(3) == ["Titan Labs", "High Co", "Middling Co"]
 
-    assert Desk.list_cards(%Filters{status: :all, min: 90}) |> Enum.map(& &1.score) == [100, 92]
+    assert Desk.list_cards(%Filters{status: :all, min_score: 90}) |> Enum.map(& &1.score_100) == [
+             100,
+             92
+           ]
 
-    assert Desk.list_cards(%Filters{status: :all, band: :middle}) |> Enum.map(& &1.company) == [
+    assert Desk.list_cards(%Filters{status: :all, band: :systems}) |> Enum.map(& &1.company) == [
              "Middling Co"
            ]
 
-    assert Desk.list_cards(%Filters{status: :all, band: :unscored}) |> Enum.map(& &1.company) == [
-             "Unscored Co"
-           ]
+    chart = Campaign.scoreboard().chart
+    assert chart.n == 4
+    assert Enum.find(chart.bands, &(&1.key == :frontier)).count == 1
 
-    assert Campaign.scoreboard().bands ==
-             [titan: 1, high: 1, strong: 0, middle: 1, low: 0, unscored: 1]
-
-    filters = Filters.from_params(%{"min" => "85", "band" => "weird"})
-    assert filters.min == 85
+    filters = Filters.from_params(%{"min_score" => "85", "band" => "weird"})
+    assert filters.min_score == 85
     assert filters.band == :all
-    assert Filters.to_query(filters) == %{"min" => "85"}
+    assert Filters.to_query(filters) == %{"min_score" => "85"}
 
     # A re-import without a score keeps the one on the card.
     again =
       ~s({"apps":[{"company":"Titan Labs","role":"Engineer","url":"https://jobs.example.test/titan"}]})
 
     assert {:ok, _} = Import.import_body(again, "again.json", profile)
-    assert [%{score: 100}] = Desk.list_cards(%Filters{status: :all, band: :titan})
+    assert [%{score_100: 100}] = Desk.list_cards(%Filters{status: :all, band: :frontier})
   end
 
-  test "the directory ranks by score and a lease can set its own" do
+  test "the directory ranks by score_100 and a lease can set its own" do
     profile = profile()
 
     low =
@@ -83,7 +60,7 @@ defmodule Hireme.ScoreTest do
         profile_id: profile.id,
         company: "Low Co",
         role: "Engineer",
-        score: 40,
+        score_100: 40,
         canonical_url: "https://jobs.example.test/low"
       })
 
@@ -92,12 +69,9 @@ defmodule Hireme.ScoreTest do
         profile_id: profile.id,
         company: "High Co",
         role: "Engineer",
-        score: "95",
+        score_100: "95",
         canonical_url: "https://jobs.example.test/high"
       })
-
-    assert {:error, {:score, 140}} =
-             Desk.create_job(%{profile_id: profile.id, company: "Bad", role: "x", score: 140})
 
     listed =
       Mcp.directory(%{
@@ -107,7 +81,7 @@ defmodule Hireme.ScoreTest do
       })
 
     assert Enum.map(listed.result["applications"], & &1["job_id"]) == [high.id, low.id]
-    assert hd(listed.result["applications"])["band"] == "high"
+    assert hd(listed.result["applications"])["band"] == "labs"
 
     boxes =
       Mcp.directory(%{
@@ -118,14 +92,15 @@ defmodule Hireme.ScoreTest do
 
     assert Enum.map(boxes.result["letterboxes"], & &1["job_id"]) == [high.id]
 
-    bands =
+    rec =
       Mcp.directory(%{
         "id" => 3,
         "method" => "tools/call",
-        "params" => %{"name" => "score_bands"}
+        "params" => %{"name" => "recommend_applications", "arguments" => %{"limit" => 1}}
       })
 
-    assert Enum.find(bands.result["bands"], &(&1["band"] == "high"))["count"] == 1
+    assert rec.result["fire"] == "hold"
+    assert Enum.map(rec.result["applications"], & &1["job_id"]) == [high.id]
 
     {:ok, handle} = Letterbox.lease(Letterbox.for_job(low.id).id, self())
 
@@ -136,7 +111,7 @@ defmodule Hireme.ScoreTest do
         "params" => %{"name" => "set_score", "arguments" => %{"score" => 88}}
       })
 
-    assert set.result == %{"job_id" => low.id, "score" => 88, "band" => "strong"}
+    assert set.result == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
 
     bad =
       Mcp.handle(handle, %{

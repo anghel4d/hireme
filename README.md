@@ -52,10 +52,6 @@ Shapes:
 
 A row marked `submitted` or `open_fire` is stored as `fire_ready` while that batch is on hold.
 
-## Score
-
-An application may carry a score out of 100 (`score_100` or `score` in a pack, a `Score` column in a pursue table). `Hireme.Score` reads it in six closed bands: `titan` is 100, `high` 90–99, `strong` 85–89, `middle` 65–84, `low` below 65, `unscored` when absent. Within a batch the board orders by score, highest first and unscored last, before rung and heat. The top bar filters by a minimum score or one band, the scoreboard draws one bar per band and each bar is that band's filter, and every card shows its number. The agent socket lists applications and letterboxes in the same order, accepts `min_score` and `band`, answers `score_bands`, and a lease can `set_score` on its own application. A re-import without a score leaves the card's score alone.
-
 ## Battleplan
 
 Discovered, freshness, gated, in batch, draft ready, fire ready, open fire, submitted, reply, closed.
@@ -63,6 +59,12 @@ Discovered, freshness, gated, in batch, draft ready, fire ready, open fire, subm
 Freshness (`open`, `thin`, `closed`, `blocked`) and the gate (`pursue`, `maybe`, `skip`) are fields on the card. One stage is active. `open_fire` and `submitted` are refused while the batch fire is hold. Naming open fire records that decision. It does not send an application.
 
 The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch.
+
+## Life-EV (`score_100`)
+
+Every job and employer gets `score_100` (0–100). A pack may set it (`score_100` or `score`, or a `Score` column in a pursue table); otherwise `Hireme.LifeEv.score/1` assigns it from company, role, fit, location, and comp along the ladder in [`alchemy/score-ladder.md`](alchemy/score-ladder.md). Eight closed bands: `frontier` 100, `labs` 90–99, `big_tech` 85–89, `systems` 70–84, `craft` 55–69, `mid` 40–54, `thin` 20–39, `kill` 0–19. A re-import without a score leaves the card's score alone.
+
+The board orders by `score_100` first, then batch, rung, and heat. The top bar filters by band or a minimum score. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100` and take `min_score` and `band`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
 
 ## Types
 
@@ -92,17 +94,23 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | --- | --- |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
 | `lib/hireme/theme.ex` | One CV's lead, accent, density, targets |
-| `lib/hireme/score.ex` | Score out of 100 and its bands |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note |
 | `lib/hireme/campaign.ex` | Scoreboard |
 | `lib/hireme/variety.ex` | Mix flags for a batch |
 | `lib/hireme/narrative.ex` | Private narrative |
 | `lib/hireme/mask.ex` | Per-application CV overlay, `Mask.Line` |
-| `lib/hireme/desk/opening.ex` | Parsed input for opening one application |
 | `lib/hireme/desk/signal.ex` | Typed desk change broadcast on the `desk` topic |
 | `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
 | `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
-| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle |
+| `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
+| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100` |
+| `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
 | `lib/hireme_web/live/board_live.ex` | The desk |
-| `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
+| `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
+| `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
+| `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |
+
+## License
+
+Copyright (c) 2026 Matei Anghel. All rights reserved. See [LICENSE](LICENSE).

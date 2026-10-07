@@ -49,6 +49,7 @@ defmodule Hireme.CvPair do
   alias Hireme.Desk.Employer
   alias Hireme.Desk.Overlay
   alias Hireme.Desk.Variant
+  alias Hireme.LifeEv
   alias Hireme.Repo
 
   @enforce_keys [:job_id, :variant_id, :employer_id, :lineage_id]
@@ -85,7 +86,7 @@ defmodule Hireme.CvPair do
     case Repo.get_by(Employer, name: company) do
       nil ->
         %Employer{}
-        |> Employer.changeset(%{name: company})
+        |> Employer.changeset(%{name: company, score_100: LifeEv.score(company)})
         |> Repo.insert!()
 
       employer ->
@@ -143,7 +144,10 @@ defmodule Hireme.CvPair do
       when is_integer(item_id) do
     with {:ok, pair} <- verified(claimed),
          {:ok, %Lineage{rewrites_allowed: true}} <- editable(pair, today) do
-      Repo.delete_all(from o in Overlay, where: o.lineage_id == ^lineage_id(pair) and o.item_id == ^item_id)
+      Repo.delete_all(
+        from o in Overlay, where: o.lineage_id == ^lineage_id(pair) and o.item_id == ^item_id
+      )
+
       {:ok, pair}
     else
       {:ok, %Lineage{}} -> {:error, :not_additive}
@@ -163,7 +167,11 @@ defmodule Hireme.CvPair do
           {:error, :cooldown}
         else
           lineage
-          |> Lineage.changeset(%{generation: lineage.generation + 1, opened_on: today, rewrites_allowed: false})
+          |> Lineage.changeset(%{
+            generation: lineage.generation + 1,
+            opened_on: today,
+            rewrites_allowed: false
+          })
           |> Repo.update()
         end
     end
