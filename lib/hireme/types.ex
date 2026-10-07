@@ -105,6 +105,86 @@ defmodule Hireme.Attrs do
   end
 end
 
+defmodule Hireme.Form do
+  @moduledoc """
+  Reading a form once, refusing what it cannot read. Every reader
+  answers `{:ok, value}` or `{:error, {:argument, name}}`; nothing
+  raises. Unlike `Hireme.Attrs`, a form prefers a truthy string key
+  over its atom key, so the two readers are not interchangeable.
+  """
+
+  alias Hireme.Closed
+
+  defp get(attrs, name), do: Map.get(attrs, Atom.to_string(name)) || Map.get(attrs, name)
+
+  def string(attrs, name) do
+    case get(attrs, name) do
+      s when is_binary(s) -> String.trim(s)
+      _ -> ""
+    end
+  end
+
+  def nonnegative(attrs, name) do
+    case get(attrs, name) do
+      n when is_integer(n) and n >= 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n >= 0 -> n
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
+  end
+
+  # A member of `set` named by the form, `default` when the field is
+  # blank, refused otherwise. A nil default makes the field required.
+  def closed(attrs, name, set, default) do
+    case get(attrs, name) do
+      blank when blank in [nil, ""] ->
+        if default, do: {:ok, default}, else: argument(name)
+
+      value ->
+        case Closed.parse(set, value) do
+          {:ok, atom} -> {:ok, atom}
+          :error -> argument(name)
+        end
+    end
+  end
+
+  # A date from the form, `default` when blank, refused when unreadable.
+  def day(attrs, name, default) do
+    case get(attrs, name) do
+      blank when blank in [nil, ""] ->
+        {:ok, default}
+
+      %Date{} = date ->
+        {:ok, date}
+
+      s when is_binary(s) ->
+        case Date.from_iso8601(s) do
+          {:ok, date} -> {:ok, date}
+          _ -> argument(name)
+        end
+
+      _ ->
+        argument(name)
+    end
+  end
+
+  def required(attrs, name) do
+    case string(attrs, name) do
+      "" -> argument(name)
+      text -> {:ok, text}
+    end
+  end
+
+  defp argument(name), do: {:error, {:argument, Atom.to_string(name)}}
+end
+
 defmodule Hireme.Text do
   @moduledoc """
   Names as comparable words: lowercased, punctuation folded to spaces.
