@@ -80,6 +80,7 @@ defmodule Hireme.Letterbox do
           role: String.t(),
           stage: Hireme.Pipeline.stage(),
           batch: String.t() | nil,
+          score: Hireme.Score.t() | nil,
           leased: boolean()
         }
 
@@ -116,7 +117,8 @@ defmodule Hireme.Letterbox do
   """
   @spec command(Handle.t(), command()) :: reply() | {:error, :lease}
   def command(%Handle{pid: pid, token: token}, command)
-      when is_atom(command) or is_tuple(command) do
+      when command in [:get, :open_generation] or
+             (is_tuple(command) and elem(command, 0) in [:set_stage, :set_next, :set_score, :tailor]) do
     GenServer.call(pid, {:cmd, token, command})
   end
 
@@ -146,7 +148,8 @@ defmodule Hireme.Letterbox do
       company: j.company,
       role: j.role,
       stage: j.current_stage,
-      batch: b.code
+      batch: b.code,
+      score: j.score
     })
     |> Repo.all()
     |> Enum.map(&Map.put(&1, :leased, leased?(&1.id)))

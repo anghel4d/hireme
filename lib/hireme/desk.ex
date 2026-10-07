@@ -39,6 +39,7 @@ defmodule Hireme.Desk do
   alias Hireme.Pipeline
   alias Hireme.Pipeline.Rung
   alias Hireme.Repo
+  alias Hireme.Score
   alias Hireme.Theme
 
   @topic "desk"
@@ -54,12 +55,14 @@ defmodule Hireme.Desk do
           | :not_additive
           | :lineage
           | :command
+          | {:score, term()}
 
   @type command ::
           :get
           | :open_generation
           | {:set_stage, Pipeline.stage()}
           | {:set_next, String.t()}
+          | {:set_score, Score.t() | nil}
           | {:tailor, pos_integer(), map()}
 
   @type reply ::
@@ -165,6 +168,7 @@ defmodule Hireme.Desk do
         attrs
         |> Map.drop([:id, :stage, :theme, :overlays, :label, :note])
         |> Map.put(:current_stage, Map.get(attrs, :stage, :discovered))
+        |> Map.put(:score, score_or_rollback(Map.get(attrs, :score)))
       )
 
     draft =
@@ -220,6 +224,21 @@ defmodule Hireme.Desk do
 
     publish(Signal.application_opened(job.id, lineage.id))
     Repo.get!(Job, job.id)
+  end
+
+  defp score_or_rollback(value) do
+    case Score.parse(value) do
+      {:ok, score} -> score
+      :error -> Repo.rollback({:score, value})
+    end
+  end
+
+  @spec set_score(pos_integer(), Score.t() | nil) ::
+          {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
+  def set_score(job_id, score) when is_nil(score) or score in 0..100 do
+    with :ok <- Letterbox.permit_job(job_id) do
+      Job |> Repo.get!(job_id) |> Job.changeset(%{score: score}) |> Repo.update()
+    end
   end
 
   @spec refresh_glance!(pos_integer()) :: :ok
@@ -352,6 +371,10 @@ defmodule Hireme.Desk do
     set_next(CvPair.job_id(pair), action, nil)
   end
 
+  defp perform_held(pair, {:set_score, score}) when is_nil(score) or score in 0..100 do
+    set_score(CvPair.job_id(pair), score)
+  end
+
   defp perform_held(pair, {:tailor, item_id, attrs}) when is_integer(item_id) and is_map(attrs) do
     with {:ok, _} <- CvPair.tailor(pair, item_id, attrs),
          {:ok, _job} <- after_cv_change(pair) do
@@ -387,6 +410,8 @@ defmodule Hireme.Desk do
     |> filter(:profile, f.profile)
     |> filter(:batch, f.batch)
     |> filter(:q, f.q)
+    |> filter(:band, f.band)
+    |> filter(:min, if(f.band == :all, do: f.min, else: nil))
     |> select([j, p, v, b], %Card{
       id: j.id,
       company: j.company,
@@ -412,12 +437,24 @@ defmodule Hireme.Desk do
       batch_ordinal: b.ordinal,
       freshness: j.freshness,
       gate: j.gate,
-      fit: j.fit
+      fit: j.fit,
+      score: j.score
     })
   end
 
   defp filter(query, _field, :all), do: query
   defp filter(query, :q, ""), do: query
+  defp filter(query, :min, nil), do: query
+  defp filter(query, :min, min), do: where(query, [j], j.score >= ^min)
+  defp filter(query, :band, :unscored), do: where(query, [j], is_nil(j.score))
+  defp filter(query, :band, :titan), do: where(query, [j], j.score == 100)
+
+  defp filter(query, :band, band) do
+    low = Score.floor(band)
+    high = Score.floor(above(band))
+    where(query, [j], j.score >= ^low and j.score < ^high)
+  end
+
   defp filter(query, :batch, :leftover), do: where(query, [j], is_nil(j.batch_id))
   defp filter(query, :batch, code), do: where(query, [_j, _p, _v, b], b.code == ^code)
   defp filter(query, :status, status), do: where(query, [j], j.status == ^status)
@@ -440,6 +477,25 @@ defmodule Hireme.Desk do
         like(fragment("lower('cv' || ?)", j.id), ^like) or
         like(fragment("cast(? as text)", j.id), ^like)
     )
+  end
+
+  defp above(:high), do: :titan
+  defp above(:strong), do: :high
+  defp above(:middle), do: :strong
+  defp above(:low), do: :middle
+
+  @doc """
+  How many applications sit in each score band, for the whole desk or
+  for one batch.
+  """
+  @spec score_bands(String.t() | :all) :: [{Score.band(), non_neg_integer()}]
+  def score_bands(batch \\ :all) do
+    Job
+    |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
+    |> filter(:batch, batch)
+    |> select([j], j.score)
+    |> Repo.all()
+    |> Score.histogram()
   end
 
   defp variant_of(job_id) do
