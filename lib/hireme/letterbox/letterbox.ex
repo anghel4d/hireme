@@ -38,13 +38,13 @@ defmodule Hireme.Letterbox do
   """
 
   import Ecto.Query
+  alias Ecto.Adapters.SQL.Sandbox
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Job
   alias Hireme.Letterbox.Box
   alias Hireme.Letterbox.Handle
   alias Hireme.Letterbox.Record
   alias Hireme.Repo
-  alias Ecto.Adapters.SQL.Sandbox
 
   @registry __MODULE__.Registry
 
