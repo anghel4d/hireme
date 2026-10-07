@@ -9,6 +9,8 @@ defmodule Hireme.Corpus.Narrative do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "narratives" do
     field :body, :string, default: ""
     field :version, :integer, default: 1

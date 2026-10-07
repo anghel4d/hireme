@@ -15,10 +15,12 @@
 !/lib/
 !/lib/**/
 !/lib/**/*.ex
+!/lib/**/*.heex
 
 !/test/
 !/test/**/
 !/test/**/*.exs
+!/test/**/*.ex
 
 !/assets/
 !/assets/css/
@@ -40,6 +42,14 @@
 !/priv/static/robots.txt
 !/priv/static/images/
 !/priv/static/images/*.svg
+
+!/alchemy/
+!/alchemy/*.md
+
+!/.cursor/
+!/.cursor/skills/
+!/.cursor/skills/job-alchemy-distillation/
+!/.cursor/skills/job-alchemy-distillation/SKILL.md
 
 # The last word. A secret is never committed, whitelist or not.
 /.env

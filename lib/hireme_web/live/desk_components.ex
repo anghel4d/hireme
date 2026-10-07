@@ -4,9 +4,13 @@ defmodule HiremeWeb.DeskComponents do
   """
   use HiremeWeb, :html
 
+  alias Hireme.Desk.Job
+  alias Hireme.Keywords.Coverage
+  alias Hireme.LifeEv
   alias Hireme.Pipeline
+  alias Hireme.Desk.Filters
 
-  attr :filters, :map, required: true
+  attr :filters, Filters, required: true
   attr :profiles, :list, required: true
   attr :batches, :list, required: true
   attr :count, :integer, required: true
@@ -39,17 +43,17 @@ defmodule HiremeWeb.DeskComponents do
           aria-label="Search the desk"
         />
         <select name="stage" aria-label="Stage">
-          <option value="all" selected={@filters.stage == "all"}>All stages</option>
+          <option value="all" selected={@filters.stage == :all}>All stages</option>
           <option
             :for={stage <- Pipeline.stages()}
-            value={stage.key}
+            value={Pipeline.name(stage.key)}
             selected={@filters.stage == stage.key}
           >
             {stage.label}
           </option>
         </select>
         <select name="profile" aria-label="Profile">
-          <option value="all" selected={@filters.profile == "all"}>All profiles</option>
+          <option value="all" selected={@filters.profile == :all}>All profiles</option>
           <option
             :for={profile <- @profiles}
             value={profile.slug}
@@ -59,21 +63,42 @@ defmodule HiremeWeb.DeskComponents do
           </option>
         </select>
         <select name="batch" aria-label="Batch">
-          <option value="all" selected={@filters.batch == "all"}>All batches</option>
-          <option value="leftover" selected={@filters.batch == "leftover"}>Leftover</option>
+          <option value="all" selected={@filters.batch == :all}>All batches</option>
+          <option value="leftover" selected={@filters.batch == :leftover}>Leftover</option>
           <option :for={batch <- @batches} value={batch.code} selected={@filters.batch == batch.code}>
             {batch.code}
           </option>
         </select>
         <select name="status" aria-label="Status">
           <option
-            :for={status <- ~w(open paused hired closed all)}
+            :for={status <- Job.statuses() ++ [:all]}
             value={status}
             selected={@filters.status == status}
           >
             {status}
           </option>
         </select>
+        <select name="band" aria-label="Life-EV band">
+          <option value="all" selected={@filters.band == :all}>All bands</option>
+          <option
+            :for={band <- LifeEv.bands()}
+            value={LifeEv.name(band.key)}
+            selected={@filters.band == band.key}
+          >
+            {band.label} · {band.min}–{band.max}
+          </option>
+        </select>
+        <label class="min-score">
+          min
+          <input
+            type="number"
+            name="min_score"
+            min="0"
+            max="100"
+            value={@filters.min_score}
+            aria-label="Minimum score_100"
+          />
+        </label>
         <span class="count">{@count} showing</span>
       </form>
       <button type="button" id="root-cv" class="ghost" phx-click="root">Root CV</button>
@@ -81,7 +106,7 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :board, :map, required: true
+  attr :board, Hireme.Campaign.Scoreboard, required: true
 
   def scoreboard(assigns) do
     ~H"""
@@ -102,7 +127,60 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :card, :map, required: true
+  attr :chart, Hireme.LifeEv.Chart, required: true
+  attr :filters, Filters, required: true
+
+  def ev_chart(assigns) do
+    peak = assigns.chart.bins |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
+    assigns = assign(assigns, :peak, peak)
+
+    ~H"""
+    <div id="ev-chart" class="ev-chart">
+      <div class="ev-meta">
+        <span class="pill">score_100</span>
+        <span>n {@chart.n}</span>
+        <span :if={@chart.mean}>mean {@chart.mean}</span>
+        <span :if={@chart.max}>max {@chart.max}</span>
+        <span :if={@chart.min}>min {@chart.min}</span>
+      </div>
+      <div class="ev-bands" aria-label="Life-EV band breakdown">
+        <button
+          :for={row <- @chart.bands}
+          type="button"
+          id={"band-#{row.key}"}
+          class={["ev-band", @filters.band == row.key && "is-on"]}
+          phx-click="filter"
+          phx-value-q={@filters.q}
+          phx-value-stage={Filters.stage_value(@filters)}
+          phx-value-profile={Filters.profile_value(@filters)}
+          phx-value-status={Filters.status_value(@filters)}
+          phx-value-batch={Filters.batch_value(@filters)}
+          phx-value-band={LifeEv.name(row.key)}
+          phx-value-min_score={Filters.min_score_value(@filters)}
+          title={"#{row.label} #{row.min}–#{row.max}"}
+        >
+          <span class="ev-band-label">{row.label}</span>
+          <span class="ev-band-bar" style={"width: #{band_pct(row.share)}%"}></span>
+          <span class="ev-band-n">{row.count}</span>
+        </button>
+      </div>
+      <div class="ev-hist" aria-label="score_100 histogram">
+        <div
+          :for={bin <- @chart.bins}
+          class="ev-bin"
+          title={"#{bin.lo}–#{bin.hi}: #{bin.count}"}
+        >
+          <span class="ev-bin-bar" style={"height: #{bin_pct(bin.count, @peak)}%"}></span>
+          <span class="ev-bin-lo">{bin.lo}</span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  attr :card, Hireme.Desk.Card, required: true
+  attr :x, :integer, required: true
+  attr :y, :integer, required: true
   attr :active, :boolean, required: true
 
   def card(assigns) do
@@ -111,7 +189,7 @@ defmodule HiremeWeb.DeskComponents do
       type="button"
       id={"card-#{@card.id}"}
       class={["card", @active && "is-active"]}
-      style={"left: #{@card.x}px; top: #{@card.y}px"}
+      style={"left: #{@x}px; top: #{@y}px"}
       phx-click="select"
       phx-value-id={@card.id}
       aria-current={@active && "true"}
@@ -119,6 +197,9 @@ defmodule HiremeWeb.DeskComponents do
     >
       <div class="card-kicker">
         <span class="code">{card_code(@card)}</span>
+        <span class="ev-score" title={"Life-EV #{LifeEv.label(@card.band)}"}>
+          {@card.score_100}
+        </span>
         <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
@@ -143,7 +224,7 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :focus, :map, required: true
+  attr :focus, Hireme.Desk.Focus, required: true
   attr :in_filter, :boolean, required: true
   attr :sheet, :boolean, required: true
   attr :hold_error, :string, default: nil
@@ -160,6 +241,9 @@ defmodule HiremeWeb.DeskComponents do
         <h2>{@focus.job.company}</h2>
         <p class="sub">{@focus.job.role}</p>
         <p class="sub">{@focus.job.location}</p>
+        <p class="sub">
+          score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
+        </p>
         <p class="sub">{fire_line(@focus.job)}</p>
       </header>
       <p :if={!@in_filter} class="banner">This application is outside the current filter.</p>
@@ -197,10 +281,12 @@ defmodule HiremeWeb.DeskComponents do
       </form>
       <div>
         <p class="section-label">
-          Keywords {@focus.coverage.hit}/{@focus.coverage.total} · root {@focus.root_coverage.hit}/{@focus.root_coverage.total}
+          Keywords {Coverage.hit(@focus.coverage)}/{Coverage.total(@focus.coverage)} · root {Coverage.hit(
+            @focus.root_coverage
+          )}/{Coverage.total(@focus.root_coverage)}
         </p>
         <div class="meter" aria-hidden="true">
-          <span style={"width: #{pct(@focus.coverage)}%"}></span>
+          <span style={"width: #{Coverage.percent(@focus.coverage)}%"}></span>
         </div>
         <ul class="chips">
           <li :for={word <- @focus.coverage.hits} class="hit">{word}</li>
@@ -228,13 +314,13 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :focus, :map, required: true
+  attr :focus, Hireme.Desk.Focus, required: true
   attr :editing_id, :any, default: nil
   attr :alter_error, :any, default: nil
   attr :hold_error, :string, default: nil
 
   def battleplan(assigns) do
-    assigns = assign(assigns, :active, active_stage(assigns.focus.stages))
+    assigns = assign(assigns, :active, Pipeline.current(assigns.focus.rail))
 
     ~H"""
     <div id="battleplan" class="battleplan">
@@ -246,10 +332,15 @@ defmodule HiremeWeb.DeskComponents do
           </p>
           <h2>{@focus.job.company}</h2>
           <p class="sub">{@focus.job.role}</p>
+          <p class="sub">
+            score_100 {@focus.job.score_100} · {LifeEv.label(LifeEv.band(@focus.job.score_100))}
+          </p>
           <p class="sub">{fire_line(@focus.job)}</p>
         </div>
         <p class="count">
-          {@focus.coverage.hit}/{@focus.coverage.total} keywords · root {@focus.root_coverage.hit}/{@focus.root_coverage.total}
+          {Coverage.hit(@focus.coverage)}/{Coverage.total(@focus.coverage)} keywords · root {Coverage.hit(
+            @focus.root_coverage
+          )}/{Coverage.total(@focus.root_coverage)}
         </p>
       </div>
       <div class="bp-body">
@@ -267,23 +358,23 @@ defmodule HiremeWeb.DeskComponents do
             Name open fire
           </button>
           <button
-            :for={stage <- @focus.stages}
+            :for={rung <- @focus.rail}
             type="button"
-            id={"stage-#{stage.key}"}
-            class={["stage", stage.state == :active && "is-active"]}
+            id={"stage-#{Pipeline.name(rung.key)}"}
+            class={["stage", rung.state == :active && "is-active"]}
             phx-click="set_stage"
-            phx-value-key={stage.key}
+            phx-value-key={Pipeline.name(rung.key)}
           >
             <span class="meta">
-              <span class={"pip pip-#{Pipeline.char(stage)}"}></span>
-              <span class="label">{Pipeline.label(stage.key)}</span>
+              <span class={"pip pip-#{Pipeline.char(rung)}"}></span>
+              <span class="label">{Pipeline.label(rung.key)}</span>
             </span>
-            <span class="hint">{Pipeline.hint(stage.key)}</span>
-            <span :if={stage.note != ""} class="note-preview">{stage.note}</span>
+            <span class="hint">{Pipeline.hint(rung.key)}</span>
+            <span :if={rung.note != ""} class="note-preview">{rung.note}</span>
           </button>
           <form :if={@active} id="note-form" class="note" phx-change="save_note">
             <label for="stage-note">Note · {Pipeline.label(@active.key)}</label>
-            <input type="hidden" name="key" value={@active.key} />
+            <input type="hidden" name="key" value={Pipeline.name(@active.key)} />
             <textarea id="stage-note" name="note" phx-debounce="500">{@active.note}</textarea>
           </form>
           <ul class="events">
@@ -299,7 +390,7 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :root, :map, required: true
+  attr :root, Hireme.Desk.Root, required: true
 
   def root_view(assigns) do
     ~H"""
@@ -335,7 +426,7 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :cv, :map, required: true
+  attr :cv, Hireme.Cv.Document, required: true
   attr :editable, :boolean, required: true
   attr :editing_id, :any, default: nil
   attr :alter_error, :any, default: nil
@@ -385,7 +476,7 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :line, :map, required: true
+  attr :line, Hireme.Mask.Line, required: true
   attr :editable, :boolean, required: true
   attr :editing_id, :any, default: nil
   attr :alter_error, :any, default: nil
@@ -472,6 +563,13 @@ defmodule HiremeWeb.DeskComponents do
 
   defp batch?(batches, code), do: Enum.any?(batches, &(&1.code == code))
 
+  defp band_pct(share) when is_float(share) or is_integer(share) do
+    round(share * 100)
+  end
+
+  defp bin_pct(_count, 0), do: 0
+  defp bin_pct(count, peak), do: round(count / peak * 100)
+
   defp snapshot_date(nil), do: ""
   defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"
 
@@ -515,15 +613,10 @@ defmodule HiremeWeb.DeskComponents do
   defp overdue?(nil), do: false
   defp overdue?(%Date{} = date), do: Date.compare(date, Date.utc_today()) == :lt
 
-  defp pct(%{total: 0}), do: 0
-  defp pct(%{hit: hit, total: total}), do: round(hit / total * 100)
-
   defp excerpt(nil), do: ""
 
   defp excerpt(text) do
     text = String.trim(text)
     if String.length(text) > 360, do: String.slice(text, 0, 360) <> "…", else: text
   end
-
-  defp active_stage(stages), do: Enum.find(stages, &(&1.state == :active))
 end

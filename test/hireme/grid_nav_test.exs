@@ -4,18 +4,18 @@ defmodule Hireme.GridNavTest do
   alias Hireme.GridNav
 
   test "hjkl matches observer: j keeps the column, edges clamp" do
-    assert GridNav.move(5, 2, 24, "j") == 7
-    assert GridNav.move(5, 12, 24, "j") == 17
-    assert GridNav.move(5, 3, 24, "j") == 8
-    assert GridNav.move(0, 4, 10, "h") == 0
-    assert GridNav.move(3, 4, 10, "l") == 3
-    assert GridNav.move(1, 4, 10, "k") == 1
-    assert GridNav.move(8, 4, 10, "j") == 8
+    assert GridNav.move(5, 2, 24, :j) == 7
+    assert GridNav.move(5, 12, 24, :j) == 17
+    assert GridNav.move(5, 3, 24, :j) == 8
+    assert GridNav.move(0, 4, 10, :h) == 0
+    assert GridNav.move(3, 4, 10, :l) == 3
+    assert GridNav.move(1, 4, 10, :k) == 1
+    assert GridNav.move(8, 4, 10, :j) == 8
   end
 
   test "arrows share the vim directions" do
-    assert GridNav.dir_from_key("ArrowDown") == "j"
-    assert GridNav.dir_from_key("l") == "l"
+    assert GridNav.dir_from_key("ArrowDown") == :j
+    assert GridNav.dir_from_key("l") == :l
     assert GridNav.dir_from_key("Enter") == nil
   end
 

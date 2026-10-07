@@ -4,9 +4,12 @@ defmodule HiremeWeb.BoardLive do
   alias Hireme.Campaign
   alias Hireme.Corpus
   alias Hireme.Desk
-  alias Hireme.Narrative
+  alias Hireme.Desk.Overlay
+  alias Hireme.Desk.Placed
   alias Hireme.GridNav
+  alias Hireme.Narrative
   alias Hireme.Pipeline
+  alias Hireme.Desk.Filters
 
   import HiremeWeb.DeskComponents
 
@@ -15,11 +18,12 @@ defmodule HiremeWeb.BoardLive do
     {:ok,
      socket
      |> assign(:page_title, "Desk")
-     |> assign(:filters, %{q: "", stage: "all", profile: "all", status: "open", batch: "all"})
+     |> assign(:filters, %Filters{})
      |> assign(:cards, [])
      |> assign(:profiles, [])
      |> assign(:batches, [])
      |> assign(:scoreboard, Campaign.scoreboard())
+     |> assign(:ev_chart, Hireme.LifeEv.chart([]))
      |> assign(:hold_error, nil)
      |> assign(:app_id, nil)
      |> assign(:index, nil)
@@ -52,6 +56,7 @@ defmodule HiremeWeb.BoardLive do
         count={length(@cards)}
       />
       <.scoreboard board={@scoreboard} />
+      <.ev_chart chart={@ev_chart} filters={@filters} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
         <.battleplan
           focus={@focus}
@@ -66,7 +71,13 @@ defmodule HiremeWeb.BoardLive do
       <div :if={@lens == :board} class="workspace">
         <div id="grid" class="grid-scroll" phx-hook="Grid" data-scroll={@grid.scroll}>
           <div class="grid-plane" style={"height: #{@plane_h}px"}>
-            <.card :for={card <- @window} card={card} active={card.id == @app_id} />
+            <.card
+              :for={placed <- @window}
+              card={placed.card}
+              x={placed.x}
+              y={placed.y}
+              active={placed.card.id == @app_id}
+            />
           </div>
           <p :if={@cards == []} class="empty">Nothing matches this filter.</p>
         </div>
@@ -111,7 +122,7 @@ defmodule HiremeWeb.BoardLive do
       key in ["Enter", "f"] and socket.assigns.lens == :board ->
         open_battleplan(socket)
 
-      socket.assigns.lens == :board && is_binary(GridNav.dir_from_key(key)) ->
+      socket.assigns.lens == :board and GridNav.dir_from_key(key) != nil ->
         move(socket, GridNav.dir_from_key(key))
 
       true ->
@@ -136,17 +147,8 @@ defmodule HiremeWeb.BoardLive do
   end
 
   def handle_event("filter", params, socket) do
-    {:noreply,
-     push_patch(socket,
-       to:
-         desk_path(socket, %{
-           q: params["q"] || "",
-           stage: params["stage"] || "all",
-           profile: params["profile"] || "all",
-           status: params["status"] || "open",
-           batch: params["batch"] || "all"
-         })
-     )}
+    filters = Filters.from_params(params)
+    {:noreply, push_patch(socket, to: desk_path(socket, Map.from_struct(filters)))}
   end
 
   def handle_event("grid", params, socket) do
@@ -174,13 +176,16 @@ defmodule HiremeWeb.BoardLive do
   end
 
   def handle_event("set_stage", %{"key" => key}, socket) do
-    case Desk.set_stage(socket.assigns.app_id, key) do
-      {:ok, _} ->
-        {:noreply, socket |> assign(:hold_error, nil) |> refresh_open()}
-
+    with {:ok, stage} <- Pipeline.parse(key),
+         {:ok, _} <- Desk.set_stage(socket.assigns.app_id, stage) do
+      {:noreply, socket |> assign(:hold_error, nil) |> refresh_open()}
+    else
       {:error, :fire_hold} ->
         {:noreply,
          assign(socket, :hold_error, "FIRE HOLD. Name open fire on this batch before a submit.")}
+
+      {:error, :leased} ->
+        {:noreply, assign(socket, :hold_error, "This application is leased to an agent.")}
 
       _ ->
         {:noreply, socket}
@@ -201,24 +206,9 @@ defmodule HiremeWeb.BoardLive do
     item_id = parse_id(item_id)
 
     result =
-      case mode do
-        "inherit" ->
-          Desk.put_overlay(socket.assigns.app_id, item_id, :inherit)
-
-        "hidden" ->
-          Desk.put_overlay(socket.assigns.app_id, item_id, %{
-            mode: :hidden,
-            reason: "Hidden from this CV"
-          })
-
-        "emphasized" ->
-          Desk.put_overlay(socket.assigns.app_id, item_id, %{
-            mode: :emphasized,
-            reason: "Emphasized for this CV"
-          })
-
-        _ ->
-          :ignore
+      case mask_change(mode) do
+        {:ok, change} -> Desk.put_overlay(socket.assigns.app_id, item_id, change)
+        :error -> :ignore
       end
 
     case result do
@@ -241,14 +231,17 @@ defmodule HiremeWeb.BoardLive do
         {:noreply, assign(socket, :alter_error, "A variant line needs text.")}
 
       trimmed ->
-        {:ok, _} =
-          Desk.put_overlay(socket.assigns.app_id, parse_id(item_id), %{
-            mode: :altered,
-            body: trimmed,
-            reason: blank(params["reason"])
-          })
+        case Desk.put_overlay(socket.assigns.app_id, parse_id(item_id), %{
+               mode: :altered,
+               body: trimmed,
+               reason: blank(params["reason"])
+             }) do
+          {:ok, _} ->
+            {:noreply, socket |> assign(editing_id: nil, alter_error: nil) |> refresh_open()}
 
-        {:noreply, socket |> assign(editing_id: nil, alter_error: nil) |> refresh_open()}
+          _ ->
+            {:noreply, assign(socket, :alter_error, "This CV is leased to an agent.")}
+        end
     end
   end
 
@@ -263,8 +256,10 @@ defmodule HiremeWeb.BoardLive do
         _ -> nil
       end
 
-    {:ok, _} = Desk.set_next(socket.assigns.app_id, String.trim(params["next_action"] || ""), due)
-    {:noreply, refresh_open(socket)}
+    case Desk.set_next(socket.assigns.app_id, String.trim(params["next_action"] || ""), due) do
+      {:ok, _} -> {:noreply, refresh_open(socket)}
+      _ -> {:noreply, socket}
+    end
   end
 
   def handle_event("save_narrative", %{"body" => body}, socket) do
@@ -279,12 +274,26 @@ defmodule HiremeWeb.BoardLive do
   end
 
   def handle_event("save_note", %{"key" => key, "note" => note}, socket) do
-    {:ok, _} = Desk.set_note(socket.assigns.app_id, key, note)
-    {:noreply, assign(socket, :focus, Desk.focus(socket.assigns.app_id))}
+    with {:ok, stage} <- Pipeline.parse(key),
+         {:ok, _} <- Desk.set_note(socket.assigns.app_id, stage, note) do
+      {:noreply, assign(socket, :focus, Desk.focus(socket.assigns.app_id))}
+    else
+      _ -> {:noreply, socket}
+    end
+  end
+
+  defp mask_change("inherit"), do: {:ok, :inherit}
+
+  defp mask_change(mode) do
+    case Overlay.parse_mode(mode) do
+      {:ok, :hidden} -> {:ok, %{mode: :hidden, reason: "Hidden from this CV"}}
+      {:ok, :emphasized} -> {:ok, %{mode: :emphasized, reason: "Emphasized for this CV"}}
+      _ -> :error
+    end
   end
 
   defp apply_params(socket, params) do
-    filters = parse_filters(params)
+    filters = Filters.from_params(params)
 
     socket =
       if socket.assigns.loaded and filters == socket.assigns.filters do
@@ -311,6 +320,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:profiles, Corpus.list_profiles())
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
+    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> assign(:loaded, true)
   end
 
@@ -356,6 +366,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:focus, Desk.focus(app_id))
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
+    |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
     |> maybe_reload_root()
   end
 
@@ -466,7 +477,7 @@ defmodule HiremeWeb.BoardLive do
     window =
       Enum.map(indices, fn i ->
         {x, y} = GridNav.origin(i, grid.cols, metrics)
-        Map.merge(Enum.at(assigns.cards, i), %{x: round_px(x), y: round_px(y)})
+        %Placed{card: Enum.at(assigns.cards, i), x: round_px(x), y: round_px(y)}
       end)
 
     assign(assigns,
@@ -477,57 +488,25 @@ defmodule HiremeWeb.BoardLive do
   end
 
   defp desk_path(socket, overrides) do
-    filters =
-      Map.merge(
-        socket.assigns.filters,
-        Map.take(overrides, [:q, :stage, :profile, :status, :batch])
-      )
-
+    filters = Filters.merge(socket.assigns.filters, overrides)
     lens = Map.get(overrides, :lens, socket.assigns.lens)
     app = Map.get(overrides, :app, socket.assigns.app_id)
 
     query =
-      %{}
-      |> put_query("q", filters.q, "")
-      |> put_query("stage", filters.stage, "all")
-      |> put_query("profile", filters.profile, "all")
-      |> put_query("status", filters.status, "open")
-      |> put_query("batch", filters.batch, "all")
-      |> put_query("lens", lens_param(lens), nil)
-      |> put_query("app", app, nil)
+      filters
+      |> Filters.to_query()
+      |> put_query("lens", lens_param(lens))
+      |> put_query("app", app)
 
     ~p"/?#{query}"
   end
 
-  defp put_query(query, _key, value, value), do: query
-  defp put_query(query, _key, nil, _default), do: query
-  defp put_query(query, key, value, _default), do: Map.put(query, key, to_string(value))
+  defp put_query(query, _key, nil), do: query
+  defp put_query(query, key, value), do: Map.put(query, key, to_string(value))
 
   defp lens_param(:battleplan), do: "battleplan"
   defp lens_param(:root), do: "root"
   defp lens_param(_), do: nil
-
-  defp parse_filters(params) do
-    %{
-      q: params["q"] || "",
-      stage: if(Pipeline.key?(params["stage"]), do: params["stage"], else: "all"),
-      profile:
-        if(is_binary(params["profile"]) and params["profile"] not in ["", "all"],
-          do: params["profile"],
-          else: "all"
-        ),
-      status:
-        if(params["status"] in ~w(open paused hired closed all),
-          do: params["status"],
-          else: "open"
-        ),
-      batch:
-        if(is_binary(params["batch"]) and params["batch"] != "",
-          do: params["batch"],
-          else: "all"
-        )
-    }
-  end
 
   defp parse_lens("battleplan"), do: :battleplan
   defp parse_lens("root"), do: :root
@@ -574,7 +553,7 @@ defmodule HiremeWeb.BoardLive do
 
     chosen =
       case socket.assigns.filters.profile do
-        "all" ->
+        :all ->
           case socket.assigns.focus do
             %{profile: %{id: id}} -> id
             _ -> nil

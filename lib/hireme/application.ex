@@ -14,6 +14,8 @@ defmodule Hireme.Application do
        repos: Application.fetch_env!(:hireme, :ecto_repos), skip: skip_migrations?()},
       {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Hireme.PubSub},
+      {Registry, keys: :unique, name: Hireme.Letterbox.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Hireme.Letterbox.Supervisor},
       # Start a worker by calling: Hireme.Worker.start_link(arg)
       # {Hireme.Worker, arg},
       # Start to serve requests, typically the last entry
