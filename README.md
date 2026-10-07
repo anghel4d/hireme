@@ -52,6 +52,10 @@ Shapes:
 
 A row marked `submitted` or `open_fire` is stored as `fire_ready` while that batch is on hold.
 
+## Score
+
+An application may carry a score out of 100 (`score_100` or `score` in a pack, a `Score` column in a pursue table). `Hireme.Score` reads it in six closed bands: `titan` is 100, `high` 90–99, `strong` 85–89, `middle` 65–84, `low` below 65, `unscored` when absent. Within a batch the board orders by score, highest first and unscored last, before rung and heat. The top bar filters by a minimum score or one band, the scoreboard draws one bar per band and each bar is that band's filter, and every card shows its number. The agent socket lists applications and letterboxes in the same order, accepts `min_score` and `band`, answers `score_bands`, and a lease can `set_score` on its own application. A re-import without a score leaves the card's score alone.
+
 ## Battleplan
 
 Discovered, freshness, gated, in batch, draft ready, fire ready, open fire, submitted, reply, closed.
@@ -88,6 +92,7 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | --- | --- |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
 | `lib/hireme/theme.ex` | One CV's lead, accent, density, targets |
+| `lib/hireme/score.ex` | Score out of 100 and its bands |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note |
 | `lib/hireme/campaign.ex` | Scoreboard |
 | `lib/hireme/variety.ex` | Mix flags for a batch |

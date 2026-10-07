@@ -7,6 +7,7 @@ defmodule HiremeWeb.DeskComponents do
   alias Hireme.Desk.Job
   alias Hireme.Keywords.Coverage
   alias Hireme.Pipeline
+  alias Hireme.Score
   alias Hireme.Desk.Filters
 
   attr :filters, Filters, required: true
@@ -77,6 +78,24 @@ defmodule HiremeWeb.DeskComponents do
             {status}
           </option>
         </select>
+        <select name="band" aria-label="Score band">
+          <option value="all" selected={@filters.band == :all}>All scores</option>
+          <option :for={band <- Score.bands()} value={band} selected={@filters.band == band}>
+            {band_label(band)}
+          </option>
+        </select>
+        <input
+          id="min"
+          type="number"
+          name="min"
+          min="0"
+          max="100"
+          value={@filters.min}
+          placeholder="min"
+          aria-label="Minimum score"
+          phx-debounce="300"
+          class="min-score"
+        />
         <span class="count">{@count} showing</span>
       </form>
       <button type="button" id="root-cv" class="ghost" phx-click="root">Root CV</button>
@@ -101,9 +120,45 @@ defmodule HiremeWeb.DeskComponents do
       <span :for={row <- @board.varieties} class="variety">
         {row.code} {row.label}
       </span>
+      <.bands bands={@board.bands} />
     </div>
     """
   end
+
+  attr :bands, :list, required: true
+
+  @doc """
+  One bar per score band, widths proportional to the largest band. Each
+  bar is a link to that band's filter.
+  """
+  def bands(assigns) do
+    assigns =
+      assign(assigns, :peak, assigns.bands |> Enum.map(&elem(&1, 1)) |> Enum.max(fn -> 1 end))
+
+    ~H"""
+    <span id="bands" class="bands" aria-label="Applications by score band">
+      <.link
+        :for={{band, n} <- @bands}
+        patch={~p"/?band=#{band}"}
+        class={["band", "band-#{band}"]}
+        title={"#{band_label(band)} · #{n}"}
+      >
+        <i style={"height: #{bar_height(n, @peak)}%"}></i>
+        <b>{n}</b>
+      </.link>
+    </span>
+    """
+  end
+
+  defp bar_height(0, _peak), do: 4
+  defp bar_height(n, peak), do: max(round(n / max(peak, 1) * 100), 8)
+
+  defp band_label(:titan), do: "100"
+  defp band_label(:high), do: "90–99"
+  defp band_label(:strong), do: "85–89"
+  defp band_label(:middle), do: "65–84"
+  defp band_label(:low), do: "< 65"
+  defp band_label(:unscored), do: "unscored"
 
   attr :card, Hireme.Desk.Card, required: true
   attr :x, :integer, required: true
@@ -124,6 +179,7 @@ defmodule HiremeWeb.DeskComponents do
     >
       <div class="card-kicker">
         <span class="code">{@card.batch_code || Hireme.Desk.code(@card.id)}</span>
+        <.score score={@card.score} />
         <span class="stage-name">{Pipeline.label(@card.stage)}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
@@ -148,6 +204,20 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
+  attr :score, :any, required: true
+
+  def score(assigns) do
+    ~H"""
+    <span
+      :if={@score}
+      class={["score", "band-#{Score.band(@score)}"]}
+      aria-label={"Score #{@score} of 100"}
+    >
+      {@score}
+    </span>
+    """
+  end
+
   attr :focus, Hireme.Desk.Focus, required: true
   attr :in_filter, :boolean, required: true
   attr :sheet, :boolean, required: true
@@ -159,6 +229,7 @@ defmodule HiremeWeb.DeskComponents do
       <header>
         <p class="kicker">
           <span>{Hireme.Desk.code(@focus.job.id)}</span>
+          <.score score={@focus.job.score} />
           <span>{@focus.variant.label}</span>
           <span>{@focus.profile.name}</span>
         </p>
@@ -249,7 +320,8 @@ defmodule HiremeWeb.DeskComponents do
         <button type="button" id="back-to-desk" class="ghost" phx-click="back">Back</button>
         <div class="grow">
           <p class="kicker">
-            {Hireme.Desk.code(@focus.job.id)} · {@focus.variant.label} · {@focus.profile.name}
+            {Hireme.Desk.code(@focus.job.id)} · <.score score={@focus.job.score} />
+            {@focus.variant.label} · {@focus.profile.name}
           </p>
           <h2>{@focus.job.company}</h2>
           <p class="sub">{@focus.job.role}</p>

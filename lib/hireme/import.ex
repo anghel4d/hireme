@@ -27,7 +27,8 @@ defmodule Hireme.Import do
   Accepted shapes:
 
   * batch pack — `{batch, status, fire, apps: [...]}`, or a markdown table
-  * leftover pursue table — `Company | Role | Location | Fit | Source | URL`
+  * leftover pursue table — `Company | Role | Location | Fit | Source | URL`, optional `Score`
+  * any application row may carry `score_100` (or `score`), an integer 0–100
   * freshness note — OPEN/THIN/CLOSED/BLOCKED counts and URL lists
   * scoreboard snapshot — `{noted_on, leftover_unique, ...}`
   * claims — `{"claims": [{"squad", "slice", "note"}]}`
@@ -251,6 +252,7 @@ defmodule Hireme.Import do
       freshness: app["freshness"] || "unknown",
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
+      score: app["score_100"] || app["score"] || app["Score"],
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,
       stage: stage,
@@ -265,6 +267,8 @@ defmodule Hireme.Import do
         1
 
       job ->
+        attrs = Map.put(attrs, :score, score!(attrs.score, job.score))
+
         job
         |> Job.changeset(Map.delete(attrs, :stage))
         |> Repo.update!()
@@ -277,6 +281,16 @@ defmodule Hireme.Import do
         end
 
         1
+    end
+  end
+
+  # A pack without a score leaves the one already on the card alone.
+  defp score!(nil, current), do: current
+
+  defp score!(value, _current) do
+    case Hireme.Score.parse(value) do
+      {:ok, score} -> score
+      :error -> raise ArgumentError, "bad score #{inspect(value)}"
     end
   end
 

@@ -113,6 +113,27 @@ defmodule HiremeWeb.BoardLiveTest do
     assert saved.body == "Edited private note."
   end
 
+  test "the score strip and the min filter narrow the board", %{conn: conn} do
+    profile = profile()
+
+    high =
+      Desk.create_job!(%{profile_id: profile.id, company: "High", role: "Runtime", score: 95})
+
+    low = Desk.create_job!(%{profile_id: profile.id, company: "Low", role: "Tools", score: 40})
+
+    {:ok, view, html} = live(conn, "/")
+    assert html =~ ~s(class="score band-high")
+    assert has_element?(view, "#bands a.band-high b", "1")
+
+    render_change(view, "filter", %{"min" => "90", "status" => "open"})
+    assert has_element?(view, "#card-#{high.id}")
+    refute has_element?(view, "#card-#{low.id}")
+
+    view |> element("#bands a.band-low") |> render_click()
+    assert has_element?(view, "#card-#{low.id}")
+    refute has_element?(view, "#card-#{high.id}")
+  end
+
   test "l moves to the next card on the row", %{conn: conn} do
     profile = profile()
 

@@ -44,6 +44,14 @@ defmodule Hireme.Mcp.Args do
     end
   end
 
+  @spec optional_score(map(), String.t()) :: {:ok, Hireme.Score.t() | nil} | {:error, problem()}
+  def optional_score(args, name) do
+    case Hireme.Score.parse(Map.get(args, name)) do
+      {:ok, score} -> {:ok, score}
+      :error -> {:error, {:argument, name}}
+    end
+  end
+
   @spec stage(map(), String.t()) :: {:ok, Pipeline.stage()} | {:error, problem()}
   def stage(args, name) do
     case Pipeline.parse(Map.get(args, name)) do
@@ -79,6 +87,7 @@ defmodule Hireme.Mcp do
   alias Hireme.Letterbox.Handle
   alias Hireme.Mcp.Args
   alias Hireme.Pipeline
+  alias Hireme.Score
 
   @type frame :: map()
 
@@ -118,16 +127,41 @@ defmodule Hireme.Mcp do
 
   def handle(%Handle{}, _), do: %{error: %{code: -32600, message: "invalid request"}}
 
-  defp directory_call("list_letterboxes", _args), do: {:ok, %{"letterboxes" => letterbox_rows()}}
+  defp directory_call("list_letterboxes", args) do
+    with {:ok, min} <- Args.optional_score(args, "min_score") do
+      rows =
+        Letterbox.list()
+        |> Enum.filter(&(is_nil(min) or (&1.score || -1) >= min))
+        |> Enum.sort_by(&Score.rank(&1.score))
+        |> Enum.map(&letterbox_row/1)
+
+      {:ok, %{"letterboxes" => rows}}
+    end
+  end
+
   defp directory_call("list_batches", _args), do: {:ok, %{"batches" => batch_rows()}}
 
+  defp directory_call("score_bands", args) do
+    batch = Args.optional_string(args, "batch") || :all
+
+    bands =
+      Enum.map(Desk.score_bands(batch), fn {band, n} ->
+        %{"band" => Atom.to_string(band), "floor" => Score.floor(band), "count" => n}
+      end)
+
+    {:ok, %{"bands" => bands}}
+  end
+
+  # Cards come back in board order: batch, then score high to low.
   defp directory_call("list_applications", args) do
     filters =
       Filters.from_params(%{
         "q" => Args.optional_string(args, "q"),
         "stage" => Args.optional_string(args, "stage"),
         "status" => Args.optional_string(args, "status") || "all",
-        "batch" => Args.optional_string(args, "batch")
+        "batch" => Args.optional_string(args, "batch"),
+        "min" => Args.optional_string(args, "min_score"),
+        "band" => Args.optional_string(args, "band")
       })
 
     cards =
@@ -138,7 +172,9 @@ defmodule Hireme.Mcp do
           "role" => card.role,
           "stage" => Pipeline.name(card.stage),
           "batch" => card.batch_code,
-          "cv_label" => card.cv_label
+          "cv_label" => card.cv_label,
+          "score" => card.score,
+          "band" => Atom.to_string(Score.band(card.score))
         }
       end)
 
@@ -146,7 +182,7 @@ defmodule Hireme.Mcp do
   end
 
   defp directory_call(name, _args)
-       when name in ~w(get_application set_stage set_next_action tailor_line open_cv_generation) do
+       when name in ~w(get_application set_stage set_next_action set_score tailor_line open_cv_generation) do
     {:error, :unleased}
   end
 
@@ -176,6 +212,19 @@ defmodule Hireme.Mcp do
     end
   end
 
+  def call(%Handle{} = handle, "set_score", args) do
+    with :ok <- same_target(handle, args),
+         {:ok, score} <- Args.optional_score(args, "score"),
+         {:ok, job} <- Letterbox.command(handle, {:set_score, score}) do
+      {:ok,
+       %{
+         "job_id" => job.id,
+         "score" => job.score,
+         "band" => Atom.to_string(Score.band(job.score))
+       }}
+    end
+  end
+
   def call(%Handle{} = handle, "tailor_line", args) do
     with :ok <- same_target(handle, args),
          {:ok, item_id} <- Args.int(args, "item_id"),
@@ -193,16 +242,31 @@ defmodule Hireme.Mcp do
 
   def call(%Handle{}, _name, _args), do: {:error, :unknown_tool}
 
+  @bands Enum.map(Score.bands(), &Atom.to_string/1)
+
   defp directory_tools do
     [
-      tool("list_letterboxes", "List letterbox ids. Lease one to open a duplex socket", %{}),
+      tool(
+        "list_letterboxes",
+        "List letterbox ids, highest score first. Lease one to open a duplex socket",
+        %{"min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}}
+      ),
       tool("list_batches", "List batches on the desk", %{}),
-      tool("list_applications", "List applications, optionally filtered", %{
-        "q" => %{"type" => "string"},
-        "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
-        "status" => %{"type" => "string"},
+      tool("score_bands", "Count applications in each score band, for the desk or one batch", %{
         "batch" => %{"type" => "string"}
-      })
+      }),
+      tool(
+        "list_applications",
+        "List applications in board order: batch, then score high to low",
+        %{
+          "q" => %{"type" => "string"},
+          "stage" => %{"type" => "string", "enum" => Enum.map(Pipeline.keys(), &Pipeline.name/1)},
+          "status" => %{"type" => "string"},
+          "batch" => %{"type" => "string"},
+          "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100},
+          "band" => %{"type" => "string", "enum" => @bands}
+        }
+      )
     ]
   end
 
@@ -214,6 +278,9 @@ defmodule Hireme.Mcp do
       }),
       tool("set_next_action", "Set the next action on this application", %{
         "next_action" => %{"type" => "string"}
+      }),
+      tool("set_score", "Set this application's score out of 100, or clear it", %{
+        "score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
       }),
       tool("tailor_line", "Add or revise a line on the CV closed over by this lease", %{
         "item_id" => %{"type" => "integer"},
@@ -229,19 +296,19 @@ defmodule Hireme.Mcp do
     ]
   end
 
-  defp letterbox_rows do
-    Enum.map(Letterbox.list(), fn row ->
-      %{
-        "letterbox_id" => row.id,
-        "job_id" => row.job_id,
-        "company" => row.company,
-        "role" => row.role,
-        "stage" => Pipeline.name(row.stage),
-        "batch" => row.batch,
-        "leased" => row.leased,
-        "socket" => "/mcp/letterbox/#{row.id}/websocket"
-      }
-    end)
+  defp letterbox_row(row) do
+    %{
+      "letterbox_id" => row.id,
+      "job_id" => row.job_id,
+      "company" => row.company,
+      "role" => row.role,
+      "stage" => Pipeline.name(row.stage),
+      "batch" => row.batch,
+      "score" => row.score,
+      "band" => Atom.to_string(Score.band(row.score)),
+      "leased" => row.leased,
+      "socket" => "/mcp/letterbox/#{row.id}/websocket"
+    }
   end
 
   defp batch_rows do
@@ -267,6 +334,8 @@ defmodule Hireme.Mcp do
       "company" => focus.job.company,
       "role" => focus.job.role,
       "stage" => Pipeline.name(focus.job.current_stage),
+      "score" => focus.job.score,
+      "band" => Atom.to_string(Score.band(focus.job.score)),
       "cv_label" => focus.variant.label,
       "lines" =>
         Enum.map(focus.masks, fn line ->
