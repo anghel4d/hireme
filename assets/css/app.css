@@ -257,12 +257,15 @@ kbd {
   background: color-mix(in oklab, var(--band, var(--faint)) 22%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--band, var(--faint)) 55%, transparent);
 }
-.band-titan { --band: var(--ok); }
-.band-high { --band: var(--accent); }
-.band-strong { --band: color-mix(in oklab, var(--accent) 60%, var(--faint)); }
-.band-middle { --band: var(--faint); }
-.band-low { --band: var(--due); }
-.band-unscored { --band: var(--line); }
+.band-frontier { --band: var(--ok); }
+.band-labs { --band: var(--accent); }
+.band-big_tech { --band: color-mix(in oklab, var(--accent) 70%, var(--faint)); }
+.band-systems { --band: color-mix(in oklab, var(--accent) 40%, var(--faint)); }
+.band-craft { --band: var(--faint); }
+.band-mid { --band: color-mix(in oklab, var(--faint) 60%, var(--line)); }
+.band-thin { --band: color-mix(in oklab, var(--due) 50%, var(--faint)); }
+.band-kill { --band: var(--due); }
+.ev-meta { align-self: center; margin-right: 0.35rem; color: var(--faint); }
 
 .bands {
   display: inline-flex;

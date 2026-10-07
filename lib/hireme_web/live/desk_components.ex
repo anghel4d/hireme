@@ -7,7 +7,7 @@ defmodule HiremeWeb.DeskComponents do
   alias Hireme.Desk.Job
   alias Hireme.Keywords.Coverage
   alias Hireme.Pipeline
-  alias Hireme.Score
+  alias Hireme.LifeEv
   alias Hireme.Desk.Filters
 
   attr :filters, Filters, required: true
@@ -78,21 +78,21 @@ defmodule HiremeWeb.DeskComponents do
             {status}
           </option>
         </select>
-        <select name="band" aria-label="Score band">
-          <option value="all" selected={@filters.band == :all}>All scores</option>
-          <option :for={band <- Score.bands()} value={band} selected={@filters.band == band}>
-            {band_label(band)}
+        <select name="band" aria-label="score_100 band">
+          <option value="all" selected={@filters.band == :all}>All bands</option>
+          <option :for={row <- LifeEv.bands()} value={row.key} selected={@filters.band == row.key}>
+            {row.label} {row.min}–{row.max}
           </option>
         </select>
         <input
-          id="min"
+          id="min_score"
           type="number"
-          name="min"
+          name="min_score"
           min="0"
           max="100"
-          value={@filters.min}
-          placeholder="min"
-          aria-label="Minimum score"
+          value={if @filters.min_score > 0, do: @filters.min_score}
+          placeholder="min score_100"
+          aria-label="Minimum score_100"
           phx-debounce="300"
           class="min-score"
         />
@@ -120,31 +120,35 @@ defmodule HiremeWeb.DeskComponents do
       <span :for={row <- @board.varieties} class="variety">
         {row.code} {row.label}
       </span>
-      <.bands bands={@board.bands} />
+      <.ev_chart chart={@board.chart} />
     </div>
     """
   end
 
-  attr :bands, :list, required: true
+  attr :chart, Hireme.LifeEv.Chart, required: true
 
   @doc """
-  One bar per score band, widths proportional to the largest band. Each
-  bar is a link to that band's filter.
+  The `score_100` chart: one bar per band, each a link to that band's
+  filter, with the count and mean beside it. Heights are relative to the
+  largest band.
   """
-  def bands(assigns) do
-    assigns =
-      assign(assigns, :peak, assigns.bands |> Enum.map(&elem(&1, 1)) |> Enum.max(fn -> 1 end))
+  def ev_chart(assigns) do
+    peak = assigns.chart.bands |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
+    assigns = assign(assigns, :peak, peak)
 
     ~H"""
-    <span id="bands" class="bands" aria-label="Applications by score band">
+    <span id="ev-chart" class="bands" aria-label="Applications by score_100 band">
+      <span class="ev-meta">
+        score_100 · n {@chart.n}<span :if={@chart.mean}> · mean {@chart.mean}</span>
+      </span>
       <.link
-        :for={{band, n} <- @bands}
-        patch={~p"/?band=#{band}"}
-        class={["band", "band-#{band}"]}
-        title={"#{band_label(band)} · #{n}"}
+        :for={row <- @chart.bands}
+        patch={~p"/?band=#{row.key}"}
+        class={["band", "band-#{row.key}"]}
+        title={"#{row.label} #{row.min}–#{row.max} · #{row.count}"}
       >
-        <i style={"height: #{bar_height(n, @peak)}%"}></i>
-        <b>{n}</b>
+        <i style={"height: #{bar_height(row.count, @peak)}%"}></i>
+        <b>{row.count}</b>
       </.link>
     </span>
     """
@@ -152,13 +156,6 @@ defmodule HiremeWeb.DeskComponents do
 
   defp bar_height(0, _peak), do: 4
   defp bar_height(n, peak), do: max(round(n / max(peak, 1) * 100), 8)
-
-  defp band_label(:titan), do: "100"
-  defp band_label(:high), do: "90–99"
-  defp band_label(:strong), do: "85–89"
-  defp band_label(:middle), do: "65–84"
-  defp band_label(:low), do: "< 65"
-  defp band_label(:unscored), do: "unscored"
 
   attr :card, Hireme.Desk.Card, required: true
   attr :x, :integer, required: true
@@ -179,7 +176,7 @@ defmodule HiremeWeb.DeskComponents do
     >
       <div class="card-kicker">
         <span class="code">{@card.batch_code || Hireme.Desk.code(@card.id)}</span>
-        <.score score={@card.score} />
+        <.score score={@card.score_100} />
         <span class="stage-name">{Pipeline.label(@card.stage)}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
@@ -204,15 +201,11 @@ defmodule HiremeWeb.DeskComponents do
     """
   end
 
-  attr :score, :any, required: true
+  attr :score, :integer, required: true
 
   def score(assigns) do
     ~H"""
-    <span
-      :if={@score}
-      class={["score", "band-#{Score.band(@score)}"]}
-      aria-label={"Score #{@score} of 100"}
-    >
+    <span class={["score", "band-#{LifeEv.band(@score)}"]} aria-label={"score_100 #{@score}"}>
       {@score}
     </span>
     """
@@ -229,7 +222,7 @@ defmodule HiremeWeb.DeskComponents do
       <header>
         <p class="kicker">
           <span>{Hireme.Desk.code(@focus.job.id)}</span>
-          <.score score={@focus.job.score} />
+          <.score score={@focus.job.score_100} />
           <span>{@focus.variant.label}</span>
           <span>{@focus.profile.name}</span>
         </p>
@@ -320,7 +313,7 @@ defmodule HiremeWeb.DeskComponents do
         <button type="button" id="back-to-desk" class="ghost" phx-click="back">Back</button>
         <div class="grow">
           <p class="kicker">
-            {Hireme.Desk.code(@focus.job.id)} · <.score score={@focus.job.score} />
+            {Hireme.Desk.code(@focus.job.id)} · <.score score={@focus.job.score_100} />
             {@focus.variant.label} · {@focus.profile.name}
           </p>
           <h2>{@focus.job.company}</h2>

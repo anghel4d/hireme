@@ -117,19 +117,20 @@ defmodule HiremeWeb.BoardLiveTest do
     profile = profile()
 
     high =
-      Desk.create_job!(%{profile_id: profile.id, company: "High", role: "Runtime", score: 95})
+      Desk.create_job!(%{profile_id: profile.id, company: "High", role: "Runtime", score_100: 95})
 
-    low = Desk.create_job!(%{profile_id: profile.id, company: "Low", role: "Tools", score: 40})
+    low =
+      Desk.create_job!(%{profile_id: profile.id, company: "Low", role: "Tools", score_100: 40})
 
     {:ok, view, html} = live(conn, "/")
-    assert html =~ ~s(class="score band-high")
-    assert has_element?(view, "#bands a.band-high b", "1")
+    assert html =~ ~s(class="score band-labs")
+    assert has_element?(view, "#ev-chart a.band-labs b", "1")
 
-    render_change(view, "filter", %{"min" => "90", "status" => "open"})
+    render_change(view, "filter", %{"min_score" => "90", "status" => "open"})
     assert has_element?(view, "#card-#{high.id}")
     refute has_element?(view, "#card-#{low.id}")
 
-    view |> element("#bands a.band-low") |> render_click()
+    view |> element("#ev-chart a.band-mid") |> render_click()
     assert has_element?(view, "#card-#{low.id}")
     refute has_element?(view, "#card-#{high.id}")
   end
@@ -160,6 +161,49 @@ defmodule HiremeWeb.BoardLiveTest do
 
     render_keydown(view, "key", %{"key" => "l"})
     assert has_element?(view, "#card-#{bravo.id}.is-active")
+  end
+
+  test "the desk shows score_100, ranks higher first, and filters by band", %{conn: conn} do
+    profile = profile()
+
+    low =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Acme Staffing",
+        role: "Engineer",
+        heat: 5,
+        stage: "discovered",
+        canonical_url: "https://jobs.example.test/staff"
+      })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "OpenAI",
+        role: "Research engineer",
+        heat: 1,
+        stage: "discovered",
+        canonical_url: "https://jobs.example.test/oai"
+      })
+
+    {:ok, view, html} = live(conn, "/")
+    assert html =~ "score_100"
+    assert has_element?(view, "#ev-chart")
+    assert has_element?(view, "#card-#{high.id}.is-active")
+    assert html =~ "100"
+
+    render_change(view, "filter", %{
+      "q" => "",
+      "stage" => "all",
+      "profile" => "all",
+      "status" => "open",
+      "batch" => "all",
+      "band" => "frontier",
+      "min_score" => "0"
+    })
+
+    assert has_element?(view, "#card-#{high.id}")
+    refute has_element?(view, "#card-#{low.id}")
   end
 
   test "the grid paints a window when the desk is large", %{conn: conn} do

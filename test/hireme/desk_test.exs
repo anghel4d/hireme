@@ -146,4 +146,42 @@ defmodule Hireme.DeskTest do
     assert {:ok, moved} = Desk.set_stage(job.id, :submitted)
     assert moved.current_stage == :submitted
   end
+
+  test "cards sort by score_100 and filter by band" do
+    profile =
+      Corpus.create_profile!(%{
+        slug: "ev",
+        name: "EV",
+        headline: "Runtime",
+        summary: "A sample profile."
+      })
+
+    low =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Thin Shop",
+        role: "CRUD intern",
+        canonical_url: "https://jobs.example.test/thin"
+      })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Anthropic",
+        role: "Systems engineer",
+        canonical_url: "https://jobs.example.test/anth"
+      })
+
+    assert high.score_100 == 100
+    assert low.score_100 < 20
+
+    all = Desk.list_cards(%Hireme.Desk.Filters{status: :all})
+    assert hd(all).id == high.id
+
+    frontier = Desk.list_cards(%Hireme.Desk.Filters{status: :all, band: :frontier})
+    assert Enum.map(frontier, & &1.id) == [high.id]
+
+    keepers = Desk.list_cards(%Hireme.Desk.Filters{status: :all, min_score: 90})
+    assert Enum.map(keepers, & &1.id) == [high.id]
+  end
 end
