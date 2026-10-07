@@ -72,3 +72,7 @@ The scoreboard reads leftover URL counts from the latest snapshot, then counts b
 | `lib/hireme/mask.ex` | Per-application CV overlay |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
 | `lib/hireme_web/live/board_live.ex` | The desk |
+
+## License
+
+Copyright (c) 2026 Matei Anghel. All rights reserved. See [LICENSE](LICENSE).
