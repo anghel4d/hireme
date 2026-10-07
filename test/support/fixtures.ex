@@ -53,14 +53,16 @@ defmodule Hireme.Fixtures do
     )
   end
 
-  @doc "One `tools/call` frame on the directory socket, or on a leased handle."
+  @doc "One `tools/call` frame on the directory socket, or on a leased handle, read as the JSON the socket sends."
   def tool_call(name, args \\ %{}) do
-    Hireme.Mcp.directory(frame(name, args))
+    wire(HiremeWeb.Mcp.directory(frame(name, args)))
   end
 
   def tool_call(handle, name, args) do
-    Hireme.Mcp.handle(handle, frame(name, args))
+    wire(HiremeWeb.Mcp.handle(handle, frame(name, args)))
   end
+
+  defp wire(reply), do: reply |> Jason.encode!() |> Jason.decode!()
 
   defp frame(name, args) do
     %{

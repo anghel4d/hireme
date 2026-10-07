@@ -62,27 +62,27 @@ defmodule Hireme.ScoreTest do
 
     listed = tool_call("list_applications", %{"status" => "all"})
 
-    assert Enum.map(listed.result["applications"], & &1["job_id"]) == [high.id, low.id]
-    assert hd(listed.result["applications"])["band"] == "labs"
+    assert Enum.map(listed["result"]["applications"], & &1["job_id"]) == [high.id, low.id]
+    assert hd(listed["result"]["applications"])["band"] == "labs"
 
     boxes = tool_call("list_letterboxes", %{"min_score" => 50})
 
-    assert Enum.map(boxes.result["letterboxes"], & &1["job_id"]) == [high.id]
+    assert Enum.map(boxes["result"]["letterboxes"], & &1["job_id"]) == [high.id]
 
     rec = tool_call("recommend_applications", %{"limit" => 1})
 
-    assert rec.result["fire"] == "hold"
-    assert Enum.map(rec.result["applications"], & &1["job_id"]) == [high.id]
+    assert rec["result"]["fire"] == "hold"
+    assert Enum.map(rec["result"]["applications"], & &1["job_id"]) == [high.id]
 
     {:ok, handle} = Letterbox.lease(Letterbox.for_job(low.id).id, self())
 
     set = tool_call(handle, "set_score", %{"score" => 88})
 
-    assert set.result == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
+    assert set["result"] == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
 
     bad = tool_call(handle, "set_score", %{"score" => 101})
 
-    assert bad.error.message == "bad argument score"
+    assert bad["error"]["message"] == "bad argument score"
     assert Letterbox.release(handle) == :ok
   end
 end

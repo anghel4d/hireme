@@ -1,11 +1,11 @@
-defmodule Hireme.McpTest do
+defmodule HiremeWeb.McpTest do
   use Hireme.DataCase, async: false
   import Hireme.Fixtures
 
   alias Hireme.Desk
   alias Hireme.Desk.Signal
   alias Hireme.Letterbox
-  alias Hireme.Mcp
+  alias HiremeWeb.Mcp
   alias HiremeWeb.McpDirectorySocket
   alias HiremeWeb.McpSocket
 
@@ -23,19 +23,19 @@ defmodule Hireme.McpTest do
         "mode" => "emphasized"
       })
 
-    assert mismatch.error.message == "cv_mismatch"
+    assert mismatch["error"]["message"] == "cv_mismatch"
 
     ok = tool_call(handle, "tailor_line", %{"item_id" => item.id, "mode" => "emphasized"})
-    assert ok.result["job_id"] == job.id
+    assert ok["result"]["job_id"] == job.id
 
     moved = tool_call(handle, "set_stage", %{"stage" => "gated"})
-    assert moved.result == %{"job_id" => job.id, "stage" => "gated"}
+    assert moved["result"] == %{"job_id" => job.id, "stage" => "gated"}
 
     bad = tool_call(handle, "set_stage", %{"stage" => "sent"})
-    assert bad.error.message == "bad argument stage"
+    assert bad["error"]["message"] == "bad argument stage"
 
     not_int = tool_call(handle, "tailor_line", %{"item_id" => "x"})
-    assert not_int.error.message == "bad argument item_id"
+    assert not_int["error"]["message"] == "bad argument item_id"
     assert Letterbox.release(handle) == :ok
   end
 
@@ -78,18 +78,18 @@ defmodule Hireme.McpTest do
     assert list_tool["description"] =~ "score_100"
     assert rec_tool["description"] =~ "score_100"
 
-    apps = tool_call("list_applications", %{"status" => "all"}).result["applications"]
+    apps = tool_call("list_applications", %{"status" => "all"})["result"]["applications"]
     assert hd(apps)["company"] == "OpenAI"
     assert hd(apps)["score_100"] == 100
 
     rec = tool_call("recommend_applications")
-    assert rec.result["fire"] == "hold"
-    assert Enum.any?(rec.result["applications"], &(&1["job_id"] == high.id))
-    refute Enum.any?(rec.result["applications"], &(&1["score_100"] < 90))
+    assert rec["result"]["fire"] == "hold"
+    assert Enum.any?(rec["result"]["applications"], &(&1["job_id"] == high.id))
+    refute Enum.any?(rec["result"]["applications"], &(&1["score_100"] < 90))
 
     dist = tool_call("score_distribution", %{"status" => "all"})
-    assert dist.result["n"] >= 2
-    assert Enum.any?(dist.result["bands"], &(&1["band"] == "frontier" and &1["count"] >= 1))
+    assert dist["result"]["n"] >= 2
+    assert Enum.any?(dist["result"]["bands"], &(&1["key"] == "frontier" and &1["count"] >= 1))
   end
 
   test "the letterbox socket answers a call and pushes only its own notification" do
@@ -145,23 +145,23 @@ defmodule Hireme.McpTest do
         "outcome" => "solved"
       })
 
-    assert logged.result["title"] == "Number of Islands"
-    assert logged.result["progress"]["solved_today"] == 1
-    assert logged.result["progress"]["note"] =~ "not Life-EV"
-    assert tool_call("gym_status").result["streak"] >= 1
+    assert logged["result"]["title"] == "Number of Islands"
+    assert logged["result"]["progress"]["solved_today"] == 1
+    assert logged["result"]["progress"]["note"] =~ "not Life-EV"
+    assert tool_call("gym_status")["result"]["streak"] >= 1
 
     lane = tool_call("net_set_lane", %{"url" => "https://observer.example.test/lane"})
-    assert lane.result["lane"] == "https://observer.example.test/lane"
+    assert lane["result"]["lane"] == "https://observer.example.test/lane"
 
     post = tool_call("net_log", %{"kind" => "observer", "title" => "Evening pass"})
-    assert post.result["kind"] == "observer"
-    assert post.result["progress"]["observer_runs"] == 1
-    assert post.result["progress"]["note"] =~ "Not CRM"
+    assert post["result"]["kind"] == "observer"
+    assert post["result"]["progress"]["observer_runs"] == 1
+    assert post["result"]["progress"]["note"] =~ "Not CRM"
 
     bad = tool_call("gym_log", %{"platform" => "leetcode"})
-    assert bad.error.message == "bad argument title"
+    assert bad["error"]["message"] == "bad argument title"
 
-    assert is_list(tool_call("list_applications", %{"status" => "all"}).result["applications"])
+    assert is_list(tool_call("list_applications", %{"status" => "all"})["result"]["applications"])
   end
 
   test "directory heat_status and can_apply gate the queue without submitting" do
@@ -173,12 +173,12 @@ defmodule Hireme.McpTest do
     job = job(profile(), %{company: "Obscure Shop"})
 
     status = tool_call("heat_status")
-    assert status.result["note"] =~ "does not submit"
-    assert is_list(status.result["companies"])
+    assert status["result"]["note"] =~ "does not submit"
+    assert is_list(status["result"]["companies"])
 
     allowed = tool_call("can_apply", %{"role_id" => job.id})
-    assert allowed.result["decision"] in ["allow", "defer"]
-    assert allowed.result["fire"] == "hold"
+    assert allowed["result"]["decision"] in ["allow", "defer"]
+    assert allowed["result"]["fire"] == "hold"
   end
 
   defp opened do

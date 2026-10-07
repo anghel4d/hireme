@@ -145,7 +145,7 @@ defmodule HiremeWeb.DeskControllerTest do
       |> json_response(200)
 
     assert logged["gym"]["solved_today"] == 1
-    assert [%{"title" => "Two Sum", "platform" => "LeetCode"}] = logged["gym"]["recent"]
+    assert [%{"title" => "Two Sum", "platform" => "leetcode"}] = logged["gym"]["recent"]
 
     assert %{"error" => "Need a title."} =
              conn |> post("/api/gym/log", %{platform: "leetcode"}) |> json_response(400)
