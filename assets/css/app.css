@@ -68,7 +68,7 @@ kbd {
 }
 
 /* The shell's slots take no layout of their own; their children lay out as the desk's. */
-#topbar, #scoreboard-slot, #lens, #focus-slot, #empty { display: contents; }
+#topbar, #scoreboard-slot, #heat-slot, #lens, #focus-slot, #empty { display: contents; }
 .workspace[hidden] { display: none; }
 
 .topbar {
@@ -248,6 +248,57 @@ kbd {
   resize: vertical;
 }
 .variety { color: var(--faint); }
+.lane-pill {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 0.05rem 0.55rem;
+  color: var(--ink);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lane-pill:hover { background: var(--hover); }
+.lane-wrap { flex: 1; min-height: 0; overflow: auto; }
+.lane-page { padding: 0 0 2rem; }
+.lane-body {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) 1fr;
+  gap: 1.2rem;
+  padding: 1rem;
+}
+.lane-forms { display: flex; flex-direction: column; gap: 1rem; }
+.lane-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.lane-form input, .lane-form select, .lane-form textarea {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+.lane-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
+.lane-list li {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.lane-meta { color: var(--faint); font-size: 0.72rem; letter-spacing: 0.03em; text-transform: uppercase; }
+@media (max-width: 720px) {
+  .lane-body { grid-template-columns: 1fr; }
+}
 
 /* Score: one number per card, one bar per band on the scoreboard. */
 .score {
@@ -302,6 +353,60 @@ kbd {
   line-height: 1;
 }
 .bands .band:hover i { background: var(--band, var(--faint)); }
+
+.ev-bands {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.25rem 0.5rem;
+}
+.ev-band {
+  display: grid;
+  grid-template-columns: 5.4rem 1fr 1.6rem;
+  align-items: center;
+  gap: 0.3rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.12rem 0.25rem;
+  text-decoration: none;
+  color: inherit;
+  text-align: left;
+}
+.ev-band:hover { background: var(--hover); }
+.ev-band.is-on { border-color: var(--accent); background: var(--active); }
+.ev-band-label { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.03em; }
+.ev-band-bar {
+  display: block;
+  height: 0.32rem;
+  background: var(--accent);
+  border-radius: 99px;
+  min-width: 0;
+}
+.ev-band-n { color: var(--faint); font-size: 0.7rem; font-variant-numeric: tabular-nums; text-align: right; }
+.heat-load {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.heat-load.is-hot { color: var(--due); }
+.heat-load.is-blocked { color: var(--due); font-weight: 650; }
+.heat-chart {
+  flex: 0 0 auto;
+  padding: 0.35rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--browse);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.heat-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+}
+@media (max-width: 720px) {
+  .heat-cols { grid-template-columns: 1fr; }
+}
 
 .pip {
   width: 0.55rem;
@@ -496,4 +601,69 @@ kbd {
   }
   .bp-body { grid-template-columns: 1fr; }
   .campaign { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40dvh; }
+}
+
+/* Lanes: gym, net, and the company heat strip. */
+.lane-pill {
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 0.05rem 0.45rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.lane-pill:hover { color: var(--ink); }
+.heat-chart {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.3rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--browse);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.heat-chart .ev-meta { display: flex; flex-direction: column; gap: 0.15rem; margin: 0; }
+.heat-cols { display: flex; gap: 1rem; flex: 1; min-width: 0; overflow-x: auto; }
+.heat-col { display: grid; grid-template-columns: repeat(4, minmax(7rem, 1fr)); gap: 0.15rem 0.6rem; }
+.ev-band {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0 0.4rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  color: var(--muted);
+  text-decoration: none;
+  overflow: hidden;
+}
+.ev-band.is-on { background: color-mix(in oklab, var(--accent) 14%, transparent); color: var(--ink); }
+.ev-band-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-band-bar { grid-column: 1 / -1; height: 3px; background: color-mix(in oklab, var(--accent) 60%, transparent); border-radius: 2px; }
+.ev-band-n { white-space: nowrap; }
+.heat-load { font-size: 0.68rem; color: var(--faint); }
+.heat-load.is-hot { color: var(--due); }
+.heat-load.is-blocked { color: var(--due); font-weight: 600; }
+.lane-wrap { flex: 1; min-height: 0; overflow: auto; }
+.lane { display: flex; flex-direction: column; min-height: 100%; }
+.lane-body { display: grid; grid-template-columns: minmax(18rem, 30rem) 1fr; gap: 1rem; padding: 0.8rem 1rem; }
+.lane-form { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.8rem; align-items: center; }
+.lane-form input, .lane-form select, .lane-form textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.32rem 0.5rem;
+  font: inherit;
+}
+.lane-form textarea { width: 100%; }
+.lane-recent li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 0.1rem; }
+.ev-bands { display: grid; gap: 0.2rem; }
+@media (max-width: 980px) {
+  .lane-body { grid-template-columns: 1fr; }
+  .heat-col { grid-template-columns: repeat(2, minmax(7rem, 1fr)); }
 }

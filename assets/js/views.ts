@@ -3,6 +3,7 @@
 import type { Doc, Focus, Line, Root, Scoreboard } from "./api.ts"
 import { type Filters, value } from "./filters.ts"
 import { h, join, raw, when, type Raw } from "./html.ts"
+import { heatLine } from "./lanes.ts"
 import type { Tables } from "./packet.ts"
 import type { Store } from "./store.ts"
 
@@ -49,9 +50,15 @@ export function topbar(f: Filters, t: Tables, count: number): Raw {
           ${t.bands.map((b) => h`<option value="${b.key}" ${sel(value(f.band) === b.key)}>${b.label} ${b.min}–${b.max}</option>`)}
         </select>
         <input id="min_score" type="number" name="min_score" min="0" max="100" value="${f.minScore > 0 ? f.minScore : ""}" placeholder="min score_100" aria-label="Minimum score_100" class="min-score" />
+        <select name="heat" aria-label="Company heat">
+          <option value="all" ${sel(f.heat.kind === "all")}>All heat</option>
+          ${t.heat_states.map((s) => h`<option value="${s}" ${sel(value(f.heat) === s)}>${s}</option>`)}
+        </select>
         <span class="count">${count} showing</span>
       </form>
       <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
+      <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym">Gym</button>
+      <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net">Net</button>
     </header>`
 }
 
@@ -59,12 +66,13 @@ function sel(on: boolean): Raw {
   return raw(on ? "selected" : "")
 }
 
-export function scoreboard(s: Scoreboard | null): Raw {
+export function scoreboard(s: Scoreboard | null, pills: Raw): Raw {
   if (!s) return h`<div id="scoreboard" class="scoreboard"></div>`
   const peak = Math.max(1, ...s.chart.bands.map((b) => b.count))
   return h`
     <div id="scoreboard" class="scoreboard">
       <span class="pill ${s.fire === "hold" ? "is-hold" : "is-open"}">${s.fire === "hold" ? "FIRE HOLD" : "OPEN FIRE"}</span>
+      ${pills}
       <span>leftover ${s.leftover_unique}${s.leftover_noted_on ? ` · ${s.leftover_noted_on}` : ""}</span>
       <span>batches ${s.batches_today}/${s.batches_target}</span>
       <span>queued ${s.apps_today}/${s.apps_target}</span>
@@ -93,6 +101,8 @@ export function card(store: Store, row: number, x: number, y: number, active: bo
   const company = store.str("company").at(row)
   const role = store.str("role").at(row)
   const pips = store.str("pips").at(row)
+  const heatState = t.heat_states[store.column("heat_state")[row] ?? 0] ?? "cool"
+  const loadPct = store.column("load_pct")[row] ?? 0
   const next = store.str("next_action").at(row)
   const due = days(store.column("next_due")[row] ?? NONE)
   const age = days(store.column("stage_on")[row] ?? NONE)
@@ -103,6 +113,7 @@ export function card(store: Store, row: number, x: number, y: number, active: bo
       <div class="card-kicker">
         <span class="code">${batch ? batch.code : `JobApp${id}`}</span>
         <span class="score band-${bandOf(score, t)}" aria-label="score_100 ${score}">${score}</span>
+        <span class="heat-load ${heatState === "blocked" ? "is-blocked" : heatState === "hot" ? "is-hot" : ""}" title="company heat ${loadPct}% of cap">${heatState}</span>
         <span class="stage-name">${stage?.label ?? ""}${batch?.fire === "hold" ? " · HOLD" : ""}</span>
       </div>
       <h2>${company}</h2>
@@ -135,6 +146,7 @@ export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdErro
         <p class="sub">${j.role}</p>
         <p class="sub">${j.location}</p>
         <p class="sub">${fireLine(j)}</p>
+        ${heatLine(f)}
       </header>
       ${when(!inFilter, () => h`<p class="banner">This application is outside the current filter.</p>`)}
       ${when(holdError, () => h`<p id="hold-error" class="banner hold-error">${holdError}</p>`)}
@@ -185,6 +197,7 @@ export function battleplan(f: Focus, editing: number | null, alterError: string 
           <h2>${j.company}</h2>
           <p class="sub">${j.role}</p>
           <p class="sub">${fireLine(j)}</p>
+          ${heatLine(f)}
         </div>
         <p class="count">${f.coverage.hits.length}/${f.coverage.hits.length + f.coverage.misses.length} keywords · root ${f.root_coverage.hits.length}/${f.root_coverage.hits.length + f.root_coverage.misses.length}</p>
       </div>

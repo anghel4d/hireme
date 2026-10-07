@@ -31,7 +31,25 @@ defmodule HiremeWeb.DeskJSON do
       coverage: coverage(f.coverage),
       root_coverage: coverage(f.root_coverage),
       kv: Enum.map(f.kv, &%{key: &1.key, value: &1.value}),
-      masks: Enum.map(f.masks, &line/1)
+      masks: Enum.map(f.masks, &line/1),
+      heat: heat(f.job)
+    }
+  end
+
+  defp heat(%Job{} = job) do
+    v = Hireme.Heat.can_apply(job)
+
+    %{
+      decision: v.decision,
+      reason: v.reason,
+      company_load: Float.round(v.company_load * 1.0, 1),
+      company_cap: Float.round(v.company_cap * 1.0, 1),
+      size: v.size,
+      ats_vendor: Hireme.Heat.Ats.name(v.ats_vendor),
+      cooldown_days: v.cooldown_days,
+      note: v.note,
+      override: job.heat_override,
+      override_reason: job.heat_override_reason
     }
   end
 

@@ -30,5 +30,12 @@ defmodule HiremeWeb.Router do
     post "/jobs/:id/overlay", DeskController, :put_overlay
     post "/batches/:code/open_fire", DeskController, :name_open_fire
     post "/narratives/:id", DeskController, :save_narrative
+
+    get "/lanes", LaneController, :index
+    post "/gym/log", LaneController, :gym_log
+    post "/gym/target", LaneController, :gym_target
+    post "/net/log", LaneController, :net_log
+    post "/net/lane", LaneController, :net_lane
+    post "/jobs/:id/heat_override", LaneController, :heat_override
   end
 end

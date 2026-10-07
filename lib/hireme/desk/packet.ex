@@ -28,7 +28,8 @@ defmodule Hireme.Desk.Packet do
   @epoch ~D[1970-01-01]
   @none 0xFFFFFFFF
 
-  @u32_columns ~w(id score heat stage status freshness gate batch profile hits total hidden altered emphasized stage_on next_due)a
+  @heat_states [:cool, :warm, :hot, :blocked]
+  @u32_columns ~w(id score heat stage status freshness gate batch profile hits total hidden altered emphasized stage_on next_due heat_state load_pct cooldown)a
   @str_columns ~w(company role location next_action cv_label fit pips search)a
 
   @spec magic() :: String.t()
@@ -64,7 +65,8 @@ defmodule Hireme.Desk.Packet do
             "status" => Atom.to_string(&1.status)
           }
         ),
-      "profiles" => Enum.map(profiles, &%{"id" => &1.id, "slug" => &1.slug, "name" => &1.name})
+      "profiles" => Enum.map(profiles, &%{"id" => &1.id, "slug" => &1.slug, "name" => &1.name}),
+      "heat_states" => Enum.map(@heat_states, &Atom.to_string/1)
     }
 
     index = %{
@@ -132,6 +134,13 @@ defmodule Hireme.Desk.Packet do
   defp u32(:emphasized, %Card{mask_emphasized: v}, _), do: v
   defp u32(:stage_on, %Card{stage_on: d}, _), do: days(d)
   defp u32(:next_due, %Card{next_due: d}, _), do: days(d)
+
+  defp u32(:heat_state, %Card{heat_state: s}, _),
+    do: Enum.find_index(@heat_states, &(&1 == s)) || 0
+
+  defp u32(:load_pct, %Card{load: load, cap: cap}, _), do: round(load / max(cap, 0.01) * 100)
+  defp u32(:cooldown, %Card{cooldown_days: nil}, _), do: @none
+  defp u32(:cooldown, %Card{cooldown_days: d}, _), do: d
 
   defp str(:company, c), do: c.company
   defp str(:role, c), do: c.role

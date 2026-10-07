@@ -9,7 +9,7 @@
 ;; Column table (u32 pointers, written by the shell at `cols`):
 ;;   0 score   1 heat   2 stage   3 status   4 freshness   5 gate
 ;;   6 batch (0 = none, else ordinal+1)   7 profile
-;;   8 search offsets (n+1 u32)   9 search bytes
+;;   8 search offsets (n+1 u32)   9 search bytes   10 heat state
 ;;
 ;; Filter conventions: -1 means "all". `batch` -2 means "no batch".
 (module
@@ -76,6 +76,7 @@
     (param $n i32) (param $cols i32)
     (param $min i32) (param $lo i32) (param $hi i32)
     (param $stage i32) (param $status i32) (param $batch i32) (param $profile i32)
+    (param $heat i32)
     (param $q i32) (param $qlen i32)
     (param $out i32)
     (result i32)
@@ -84,7 +85,8 @@
     (local $score i32)
     (local $b i32)
     (local $c_score i32) (local $c_stage i32) (local $c_status i32) (local $c_batch i32) (local $c_profile i32)
-    (local $c_offs i32) (local $c_bytes i32)
+    (local $c_offs i32) (local $c_bytes i32) (local $c_heat i32)
+    (local.set $c_heat (call $col (local.get $cols) (i32.const 10)))
     (local.set $c_score (call $col (local.get $cols) (i32.const 0)))
     (local.set $c_stage (call $col (local.get $cols) (i32.const 2)))
     (local.set $c_status (call $col (local.get $cols) (i32.const 3)))
@@ -106,6 +108,8 @@
             (then (br_if $skip (i32.ne (call $at (local.get $c_status) (local.get $i)) (local.get $status)))))
           (if (i32.ne (local.get $profile) (i32.const -1))
             (then (br_if $skip (i32.ne (call $at (local.get $c_profile) (local.get $i)) (local.get $profile)))))
+          (if (i32.ne (local.get $heat) (i32.const -1))
+            (then (br_if $skip (i32.ne (call $at (local.get $c_heat) (local.get $i)) (local.get $heat)))))
           (local.set $b (call $at (local.get $c_batch) (local.get $i)))
           (if (i32.eq (local.get $batch) (i32.const -2))
             (then (br_if $skip (i32.ne (local.get $b) (i32.const 0))))

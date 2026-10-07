@@ -2,16 +2,17 @@
 // the board's identity; the resident columns are what it is drawn from.
 
 import * as api from "./api.ts"
-import type { Focus, Root, Scoreboard } from "./api.ts"
+import type { Focus, Lanes, Root, Scoreboard } from "./api.ts"
 import { openFeed, type Signal } from "./feed.ts"
 import { fromParams, lower, toParams, type Filters } from "./filters.ts"
 import * as grid from "./grid.ts"
+import * as lanes from "./lanes.ts"
 import { h, morph, raw, type Raw } from "./html.ts"
 import { assertNever } from "./never.ts"
 import { Store } from "./store.ts"
 import * as views from "./views.ts"
 
-type Lens = "board" | "battleplan" | "root"
+type Lens = "board" | "battleplan" | "root" | "gym" | "net"
 
 interface Model {
   filters: Filters
@@ -22,6 +23,8 @@ interface Model {
   focus: Focus | null
   root: Root | null
   scoreboard: Scoreboard | null
+  lanes: Lanes | null
+  laneError: string | null
   editing: number | null
   alterError: string | null
   holdError: string | null
@@ -41,6 +44,8 @@ type Msg =
   | { t: "focus"; focus: Focus | null }
   | { t: "root"; root: Root | null }
   | { t: "scoreboard"; scoreboard: Scoreboard }
+  | { t: "lanes"; lanes: Lanes; error?: string | null }
+  | { t: "lane-error"; error: string }
   | { t: "sheet"; open: boolean }
 
 export class Shell {
@@ -66,6 +71,8 @@ export class Shell {
       focus: null,
       root: null,
       scoreboard: null,
+      lanes: null,
+      laneError: null,
       editing: null,
       alterError: null,
       holdError: null,
@@ -75,6 +82,7 @@ export class Shell {
     this.root.innerHTML = `
       <div id="topbar"></div>
       <div id="scoreboard-slot"></div>
+      <div id="heat-slot"></div>
       <div id="lens"></div>
       <div id="workspace" class="workspace">
         <div id="grid" class="grid-scroll"><div id="plane" class="grid-plane"></div><div id="empty"></div></div>
@@ -86,6 +94,7 @@ export class Shell {
     void this.loadFocus()
     void this.loadRoot()
     void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
+    void this.loadLanes()
     openFeed((s) => this.onSignal(s))
     this.draw()
   }
@@ -154,6 +163,13 @@ export class Shell {
         break
       case "scoreboard":
         m.scoreboard = msg.scoreboard
+        break
+      case "lanes":
+        m.lanes = msg.lanes
+        m.laneError = msg.error ?? null
+        break
+      case "lane-error":
+        m.laneError = msg.error
         break
       case "sheet":
         m.sheet = msg.open
@@ -226,7 +242,22 @@ export class Shell {
     this.store = await this.reloadStore()
     this.select()
     void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
+    void this.loadLanes()
     this.queueDraw()
+  }
+
+  private async loadLanes(): Promise<void> {
+    try {
+      this.dispatch({ t: "lanes", lanes: await api.fetchLanes() })
+    } catch {
+      // the lanes are optional chrome; the board stands without them
+    }
+  }
+
+  private async laneWrite(outcome: Promise<api.Outcome<Lanes & { ok: true }>>): Promise<void> {
+    const r = await outcome
+    if (r.ok) this.dispatch({ t: "lanes", lanes: r.value })
+    else this.dispatch({ t: "lane-error", error: r.error })
   }
 
   private onSignal(s: Signal): void {
@@ -245,6 +276,7 @@ export class Shell {
     }
     const message =
       r.error === "fire_hold" ? "FIRE HOLD. Name open fire on this batch before a submit."
+      : r.error === "heat" ? "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
       : r.error === "leased" ? "This application is leased to an agent."
       : r.error === "cooldown" ? "This CV is in its quarterly cooldown."
       : r.error === "not_additive" ? "This generation accepts new lines only."
@@ -268,7 +300,8 @@ export class Shell {
     const m = this.model
     const t = this.store.tables
     this.set("#topbar", views.topbar(m.filters, t, m.count))
-    this.set("#scoreboard-slot", views.scoreboard(m.scoreboard))
+    this.set("#scoreboard-slot", views.scoreboard(m.scoreboard, lanes.lanePills(m.lanes)))
+    this.set("#heat-slot", lanes.heatChart(m.lanes, m.filters))
 
     const lens = this.root.querySelector<HTMLElement>("#lens")
     const workspace = this.root.querySelector<HTMLElement>("#workspace")
@@ -279,6 +312,12 @@ export class Shell {
       workspace.hidden = true
     } else if (m.lens === "root" && m.root) {
       morph(lens, h`<div class="root-wrap">${views.rootView(m.root)}</div>`)
+      workspace.hidden = true
+    } else if (m.lens === "gym" && m.lanes) {
+      morph(lens, h`<div class="lane-wrap">${lanes.gymView(m.lanes, m.laneError)}</div>`)
+      workspace.hidden = true
+    } else if (m.lens === "net" && m.lanes) {
+      morph(lens, h`<div class="lane-wrap">${lanes.netView(m.lanes, m.laneError)}</div>`)
       workspace.hidden = true
     } else {
       morph(lens, raw(""))
@@ -459,6 +498,7 @@ export class Shell {
       case "battleplan": this.dispatch({ t: "lens", lens: "battleplan" }); return
       case "back": this.dispatch({ t: "escape" }); return
       case "root": this.dispatch({ t: "lens", lens: "root" }); return
+      case "lens": this.dispatch({ t: "lens", lens: lensOf(el.dataset["lens"] ?? null) }); return
       case "stage": {
         const stage = el.dataset["stage"]
         if (m.appId !== null && stage) await this.write(api.setStage(m.appId, stage))
@@ -516,6 +556,15 @@ export class Shell {
         }
         return
       }
+      case "heat-override": {
+        if (m.appId === null) return
+        await this.write(api.heatOverride(m.appId, String(data.get("reason") ?? "")))
+        return
+      }
+      case "gym-target": await this.laneWrite(api.gymTarget(String(data.get("target") ?? ""))); return
+      case "gym-log": await this.laneWrite(api.gymLog(fields(data))); form.reset(); return
+      case "net-lane": await this.laneWrite(api.netLane(String(data.get("url") ?? ""))); return
+      case "net-log": await this.laneWrite(api.netLog(fields(data))); form.reset(); return
       default:
         return
     }
@@ -532,7 +581,13 @@ function strip(msg: { t: "grid"; cols?: number; scroll?: number; viewport?: numb
 }
 
 function lensOf(v: string | null): Lens {
-  return v === "battleplan" || v === "root" ? v : "board"
+  return v === "battleplan" || v === "root" || v === "gym" || v === "net" ? v : "board"
+}
+
+function fields(data: FormData): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of data.entries()) out[k] = String(v)
+  return out
 }
 
 function parseId(v: string | null): number | null {
@@ -547,6 +602,8 @@ function remPx(): number {
 
 function titleOf(m: Model): string {
   if (m.lens === "root") return "Root CV · Hireme"
+  if (m.lens === "gym") return "Gym · Hireme"
+  if (m.lens === "net") return "Net · Hireme"
   if (m.focus) return `${m.focus.job.company} · ${m.focus.job.code} · Hireme`
   return "Desk · Hireme"
 }
