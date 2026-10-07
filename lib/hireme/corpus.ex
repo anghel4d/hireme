@@ -17,8 +17,6 @@ defmodule Hireme.Corpus do
 
   def get_profile!(id), do: Repo.get!(Profile, id)
 
-  def get_profile_by_slug!(slug), do: Repo.get_by!(Profile, slug: slug)
-
   def create_profile!(attrs) do
     %Profile{}
     |> Profile.changeset(attrs)
@@ -38,8 +36,6 @@ defmodule Hireme.Corpus do
         order_by: [asc: i.position, asc: i.id]
     )
   end
-
-  def get_item!(id), do: Repo.get!(Item, id)
 
   def get_item_by_key!(key), do: Repo.get_by!(Item, key: key)
 end

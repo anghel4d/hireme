@@ -2,6 +2,8 @@ defmodule Hireme.Corpus.Profile do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "profiles" do
     field :slug, :string
     field :name, :string

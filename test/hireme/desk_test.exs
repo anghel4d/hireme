@@ -59,7 +59,7 @@ defmodule Hireme.DeskTest do
     assert job.keyword_total == 2
     assert job.mask_altered == 1
     assert job.mask_hidden == 1
-    assert job.current_stage == "fire_ready"
+    assert job.current_stage == :fire_ready
     assert job.pips == "DDDDDAPPPP"
 
     focus = Desk.focus(14_413)
@@ -105,10 +105,48 @@ defmodule Hireme.DeskTest do
         canonical_url: "https://jobs.example.test/keel"
       })
 
-    assert {:error, :fire_hold} = Desk.set_stage(job.id, "submitted")
-    assert {:error, :fire_hold} = Desk.set_stage(job.id, "open_fire")
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, :submitted)
+    assert {:error, :fire_hold} = Desk.set_stage(job.id, :open_fire)
     assert {:ok, _} = Desk.name_open_fire("Batch-001")
-    assert {:ok, moved} = Desk.set_stage(job.id, "submitted")
-    assert moved.current_stage == "submitted"
+    assert {:ok, moved} = Desk.set_stage(job.id, :submitted)
+    assert moved.current_stage == :submitted
+  end
+
+  test "cards sort by score_100 and filter by band" do
+    profile =
+      Corpus.create_profile!(%{
+        slug: "ev",
+        name: "EV",
+        headline: "Runtime",
+        summary: "A sample profile."
+      })
+
+    low =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Thin Shop",
+        role: "CRUD intern",
+        canonical_url: "https://jobs.example.test/thin"
+      })
+
+    high =
+      Desk.create_job!(%{
+        profile_id: profile.id,
+        company: "Anthropic",
+        role: "Systems engineer",
+        canonical_url: "https://jobs.example.test/anth"
+      })
+
+    assert high.score_100 == 100
+    assert low.score_100 < 20
+
+    all = Desk.list_cards(%Hireme.Desk.Filters{status: :all})
+    assert hd(all).id == high.id
+
+    frontier = Desk.list_cards(%Hireme.Desk.Filters{status: :all, band: :frontier})
+    assert Enum.map(frontier, & &1.id) == [high.id]
+
+    keepers = Desk.list_cards(%Hireme.Desk.Filters{status: :all, min_score: 90})
+    assert Enum.map(keepers, & &1.id) == [high.id]
   end
 end

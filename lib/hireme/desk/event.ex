@@ -2,6 +2,8 @@ defmodule Hireme.Desk.Event do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   schema "events" do
     field :kind, :string
     field :body, :string, default: ""

@@ -24,7 +24,8 @@ defmodule Hireme.ImportTest do
     assert job.company == "Keel Systems"
     assert job.gate == :pursue
     assert job.fit == "systems"
-    assert job.current_stage == "gated"
+    assert job.current_stage == :gated
+    assert job.score_100 >= 70
   end
 
   test "the scoreboard snapshot is a reading, and a day pack stays on HOLD" do
@@ -45,7 +46,7 @@ defmodule Hireme.ImportTest do
     assert {:ok, %{count: 2}} = Import.import_body(pack, "batch-001.json", profile)
 
     held = Repo.get_by!(Job, canonical_url: "https://jobs.example.test/redcedar/2")
-    assert held.current_stage == "fire_ready"
+    assert held.current_stage == :fire_ready
 
     board = Campaign.scoreboard(~D[2026-10-06])
     assert board.leftover_unique == 2337
