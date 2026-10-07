@@ -120,7 +120,7 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 
 ## Layout
 
-Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `letterbox/` (`letterbox.ex`; the consumer process behind it), and `lib/hireme_web/` (`endpoint.ex`; router, packet, JSON, and sockets behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
+Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `letterbox/` (`letterbox.ex`; the consumer process behind it), and `lib/hireme_web/` (`endpoint.ex`; router, packet, JSON, MCP, and sockets behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
 
 | Path | Role |
 | --- | --- |
@@ -137,11 +137,11 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
 | `lib/hireme/letterbox/letterbox.ex` | SPSC lease, one application per handle |
-| `lib/hireme/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes and the one controller: packet, focus, root, scoreboard, lanes, writes |
 | `lib/hireme_web/packet.ex` | The desk as one HDP1 columnar packet |
-| `lib/hireme_web/json.ex` | Wire shapes and refusals |
+| `lib/hireme_web/json.ex` | Wire shapes for the shell and the MCP tools, and refusals |
+| `lib/hireme_web/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
 | `lib/hireme_web/sockets.ex` | Push feed, directory socket, letterbox socket |
 | `assets/wasm/desk.wat` | The column store |
 | `assets/js/shell.ts` | Model, update, draw |

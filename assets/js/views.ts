@@ -353,10 +353,10 @@ export function heatChart(l: Lanes | null, f: Filters): Raw {
   const row = (prefix: string, r: HeatRow, cooldown: boolean) => h`
     <a href="/?q=${encodeURIComponent(r.label)}" data-link id="${prefix}-${r.key}"
        class="ev-band ${q !== "" && r.label.toLowerCase().includes(q) ? "is-on" : ""}"
-       title="${r.label} ${r.load}/${r.cap}${cooldown ? ` cooldown ${r.cooldown_days ?? 0}d` : ""}">
+       title="${r.label} ${tenth(r.load)}/${tenth(r.cap)}${cooldown ? ` cooldown ${r.cooldown_days ?? 0}d` : ""}">
       <span class="ev-band-label">${r.label}</span>
       <span class="ev-band-bar" style="width: ${Math.round(Math.min(r.ratio, 1) * 100)}%"></span>
-      <span class="ev-band-n">${r.load}/${r.cap}</span>
+      <span class="ev-band-n">${tenth(r.load)}/${tenth(r.cap)}</span>
     </a>`
   return h`
     <div id="heat-chart" class="heat-chart">
@@ -378,7 +378,7 @@ export function heatLine(f: Focus): Raw {
   const v = f.heat
   const eta = v.cooldown_days ? ` · cooldown ${v.cooldown_days}d` : ""
   return h`
-    <p class="sub" id="heat-line">heat ${v.decision} · ${v.company_load}/${v.company_cap} ${v.size ?? ""} · ${v.ats_vendor}${eta}</p>
+    <p class="sub" id="heat-line">heat ${v.decision} · ${tenth(v.company_load)}/${tenth(v.company_cap)} ${v.size ?? ""} · ${v.ats_vendor}${eta}</p>
     ${when(!v.override, () => h`
       <form id="heat-override" class="field" data-form="heat-override">
         <label for="heat-reason">HEAT override reason</label>
@@ -431,9 +431,9 @@ export function gymView(l: Lanes, error: string | null): Raw {
           ${when(g.recent.length === 0, () => h`<li class="empty">No reps yet. Log the first jump.</li>`)}
           ${g.recent.map((r) => h`
             <li id="rep-${r.id}">
-              <span class="sub">${r.done_on} · ${r.platform} · ${r.outcome}${r.minutes ? ` · ${r.minutes} min` : ""}</span>
+              <span class="sub">${r.done_on} · ${labelOf(g.platforms, r.platform)} · ${r.outcome}${r.minutes ? ` · ${r.minutes} min` : ""}</span>
               <strong>${r.title}</strong>
-              <span class="sub">${r.topic} · ${r.difficulty}</span>
+              <span class="sub">${labelOf(g.topics_all, r.topic)} · ${labelOf(g.difficulties, r.difficulty)}</span>
               ${when(r.note !== "", () => h`<span class="sub">${r.note}</span>`)}
             </li>`)}
         </ul>
@@ -474,7 +474,7 @@ export function netView(l: Lanes, error: string | null): Raw {
           ${when(n.recent.length === 0, () => h`<li class="empty">Nothing shipped yet.</li>`)}
           ${n.recent.map((e) => h`
             <li id="net-${e.id}">
-              <span class="sub">${e.kind} · ${e.channel}${e.shipped_on ? ` · ${e.shipped_on}` : ""}</span>
+              <span class="sub">${labelOf(n.kinds, e.kind)} · ${labelOf(n.channels, e.channel)}${e.shipped_on ? ` · ${e.shipped_on}` : ""}</span>
               <strong>${e.title}</strong>
               ${when(e.url !== "", () => h`<span class="sub">${e.url}</span>`)}
               ${when(e.body !== "", () => h`<span class="sub">${e.body.length > 360 ? `${e.body.slice(0, 360)}…` : e.body}</span>`)}
@@ -486,4 +486,13 @@ export function netView(l: Lanes, error: string | null): Raw {
 
 function select(name: string, label: string, options: Option[]): Raw {
   return h`<select name="${name}" aria-label="${label}">${options.map((o) => h`<option value="${o.key}">${o.label}</option>`)}</select>`
+}
+
+// Lane rows carry keys; each label arrives once, in the form's options.
+function labelOf(options: Option[], key: string): string {
+  return options.find((o) => o.key === key)?.label ?? key
+}
+
+function tenth(x: number): number {
+  return Number(x.toFixed(1))
 }

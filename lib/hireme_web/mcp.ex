@@ -1,4 +1,4 @@
-defmodule Hireme.Mcp.Args do
+defmodule HiremeWeb.Mcp.Args do
   @moduledoc """
   Tool arguments off the wire, read once.
 
@@ -78,7 +78,7 @@ defmodule Hireme.Mcp.Args do
   end
 end
 
-defmodule Hireme.Mcp do
+defmodule HiremeWeb.Mcp do
   @moduledoc """
   Tool calls for a connected agent.
 
@@ -99,9 +99,10 @@ defmodule Hireme.Mcp do
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
   alias Hireme.LifeEv
-  alias Hireme.Mcp.Args
   alias Hireme.Net
   alias Hireme.Pipeline
+  alias HiremeWeb.JSON
+  alias HiremeWeb.Mcp.Args
 
   @type frame :: map()
 
@@ -109,6 +110,8 @@ defmodule Hireme.Mcp do
   @string %{"type" => "string"}
   @integer %{"type" => "integer"}
   @hold "FIRE HOLD — does not submit."
+  @gym_note "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit."
+  @net_note "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit."
 
   @spec directory(frame()) :: map()
   def directory(frame), do: dispatch(frame, directory_tools(), &directory_call/2)
@@ -176,29 +179,8 @@ defmodule Hireme.Mcp do
     end
   end
 
-  defp directory_call("score_distribution", args) do
-    chart = LifeEv.chart(Desk.list_cards(list_filters(args)))
-
-    {:ok,
-     %{
-       "n" => chart.n,
-       "mean" => chart.mean,
-       "max" => chart.max,
-       "min" => chart.min,
-       "bands" =>
-         Enum.map(chart.bands, fn row ->
-           %{
-             "band" => LifeEv.name(row.key),
-             "label" => row.label,
-             "min" => row.min,
-             "max" => row.max,
-             "count" => row.count,
-             "share" => row.share
-           }
-         end),
-       "bins" => Enum.map(chart.bins, &%{"lo" => &1.lo, "hi" => &1.hi, "count" => &1.count})
-     }}
-  end
+  defp directory_call("score_distribution", args),
+    do: {:ok, JSON.chart(LifeEv.chart(Desk.list_cards(list_filters(args))))}
 
   defp directory_call("heat_status", args) do
     chart = Heat.chart()
@@ -213,59 +195,32 @@ defmodule Hireme.Mcp do
 
   defp directory_call("can_apply", args) do
     with {:ok, job_id} <- apply_id(args) do
-      verdict = Heat.can_apply(job_id)
-
-      {:ok,
-       %{
-         "job_id" => job_id,
-         "decision" => Atom.to_string(verdict.decision),
-         "reason" => Atom.to_string(verdict.reason),
-         "company" => verdict.company,
-         "company_load" => verdict.company_load,
-         "company_cap" => verdict.company_cap,
-         "company_increment" => verdict.company_increment,
-         "size" => Atom.to_string(verdict.size),
-         "ats_vendor" => Atom.to_string(verdict.ats_vendor),
-         "ats_tenant" => verdict.ats_tenant,
-         "vendor_load" => verdict.vendor_load,
-         "vendor_cap" => verdict.vendor_cap,
-         "tenant_load" => verdict.tenant_load,
-         "tenant_cap" => verdict.tenant_cap,
-         "cooldown_days" => verdict.cooldown_days,
-         "note" => verdict.note,
-         "fire" => "hold"
-       }}
+      {:ok, Map.merge(JSON.verdict(Heat.can_apply(job_id)), %{job_id: job_id, fire: "hold"})}
     end
   end
 
-  defp directory_call("gym_status", _args), do: {:ok, gym_progress_view(Gym.progress())}
+  defp directory_call("gym_status", _args), do: {:ok, gym()}
 
   defp directory_call("gym_log", args) do
-    with {:ok, rep} <- Gym.log(args) do
-      {:ok, Map.put(gym_rep_view(rep), "progress", gym_progress_view(Gym.progress()))}
-    end
+    with {:ok, rep} <- Gym.log(args), do: {:ok, Map.put(JSON.rep(rep), :progress, gym())}
   end
 
   defp directory_call("gym_set_target", args) do
     with {:ok, n} <- Args.int(args, "target"),
-         {:ok, n} <- Gym.set_target(n) do
-      {:ok, Map.put(gym_progress_view(Gym.progress()), "target", n)}
-    end
+         {:ok, _n} <- Gym.set_target(n),
+         do: {:ok, gym()}
   end
 
-  defp directory_call("net_status", _args), do: {:ok, net_progress_view(Net.progress())}
+  defp directory_call("net_status", _args), do: {:ok, net()}
 
   defp directory_call("net_log", args) do
-    with {:ok, entry} <- Net.log(args) do
-      {:ok, Map.put(net_entry_view(entry), "progress", net_progress_view(Net.progress()))}
-    end
+    with {:ok, entry} <- Net.log(args), do: {:ok, Map.put(JSON.entry(entry), :progress, net())}
   end
 
   defp directory_call("net_set_lane", args) do
     with {:ok, url} <- Args.string(args, "url"),
-         {:ok, _lane} <- Net.set_lane(url) do
-      {:ok, net_progress_view(Net.progress())}
-    end
+         {:ok, _lane} <- Net.set_lane(url),
+         do: {:ok, net()}
   end
 
   defp directory_call(name, _args)
@@ -580,7 +535,7 @@ defmodule Hireme.Mcp do
     end
   end
 
-  defp heat_rows(rows, needle) when needle in [nil, ""], do: Enum.map(rows, &heat_row_view/1)
+  defp heat_rows(rows, needle) when needle in [nil, ""], do: Enum.map(rows, &JSON.heat_row/1)
 
   defp heat_rows(rows, needle) do
     n = String.downcase(needle)
@@ -590,78 +545,12 @@ defmodule Hireme.Mcp do
       &(String.contains?(String.downcase(&1.key), n) or
           String.contains?(String.downcase(&1.label), n))
     )
-    |> Enum.map(&heat_row_view/1)
+    |> Enum.map(&JSON.heat_row/1)
   end
 
-  defp heat_row_view(row) do
-    %{
-      "key" => row.key,
-      "label" => row.label,
-      "load" => row.load,
-      "cap" => row.cap,
-      "ratio" => row.ratio,
-      "n" => row.n,
-      "cooldown_days" => row.cooldown_days,
-      "size" => row.size && Atom.to_string(row.size)
-    }
-  end
+  defp gym, do: Map.put(JSON.gym(Gym.progress()), :note, @gym_note)
 
-  defp gym_progress_view(%Gym.Progress{} = progress) do
-    %{
-      "today" => Date.to_iso8601(progress.today),
-      "target" => progress.target,
-      "streak" => progress.streak,
-      "solved_today" => progress.solved_today,
-      "solved_week" => progress.solved_week,
-      "score" => progress.score,
-      "note" =>
-        "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
-      "topics" =>
-        Enum.map(progress.topics, fn row ->
-          %{"topic" => Atom.to_string(row.key), "label" => row.label, "count" => row.count}
-        end),
-      "recent" => Enum.map(progress.recent, &gym_rep_view/1)
-    }
-  end
-
-  defp gym_rep_view(%Gym.Rep{problem: problem} = rep) do
-    %{
-      "id" => rep.id,
-      "done_on" => Date.to_iso8601(rep.done_on),
-      "outcome" => Atom.to_string(rep.outcome),
-      "minutes" => rep.minutes,
-      "note" => rep.note,
-      "platform" => Atom.to_string(problem.platform),
-      "slug" => problem.slug,
-      "title" => problem.title,
-      "topic" => Atom.to_string(problem.topic),
-      "difficulty" => Atom.to_string(problem.difficulty),
-      "url" => problem.url
-    }
-  end
-
-  defp net_progress_view(%Net.Progress{} = progress) do
-    %{
-      "lane" => progress.lane,
-      "shipped_week" => progress.shipped_week,
-      "drafts" => progress.drafts,
-      "observer_runs" => progress.observer_runs,
-      "note" => "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit.",
-      "recent" => Enum.map(progress.recent, &net_entry_view/1)
-    }
-  end
-
-  defp net_entry_view(%Net.Entry{} = entry) do
-    %{
-      "id" => entry.id,
-      "kind" => Atom.to_string(entry.kind),
-      "channel" => Atom.to_string(entry.channel),
-      "title" => entry.title,
-      "url" => entry.url,
-      "body" => entry.body,
-      "shipped_on" => entry.shipped_on && Date.to_iso8601(entry.shipped_on)
-    }
-  end
+  defp net, do: Map.put(JSON.net(Net.progress()), :note, @net_note)
 
   defp error_message(%Ecto.Changeset{}), do: "invalid"
   defp error_message({:argument, name}), do: "bad argument #{name}"

@@ -60,7 +60,7 @@ defmodule HiremeWeb.McpDirectorySocket do
   def child_spec(_opts), do: :ignore
   def connect(_info), do: {:ok, %{}}
   def init(state), do: {:ok, state}
-  def handle_in({text, _opts}, state), do: Sockets.reply(text, state, &Hireme.Mcp.directory/1)
+  def handle_in({text, _opts}, state), do: Sockets.reply(text, state, &HiremeWeb.Mcp.directory/1)
   def handle_info(_message, state), do: {:ok, state}
   def terminate(_reason, _state), do: :ok
 end
@@ -107,7 +107,7 @@ defmodule HiremeWeb.McpSocket do
   end
 
   def handle_in({text, _opts}, %{handle: %Handle{} = handle} = state),
-    do: Sockets.reply(text, state, &Hireme.Mcp.handle(handle, &1))
+    do: Sockets.reply(text, state, &HiremeWeb.Mcp.handle(handle, &1))
 
   def handle_info({:desk_event, %Signal{} = signal}, state),
     do: Sockets.push(%{method: "notifications/desk", params: Signal.to_json(signal)}, state)

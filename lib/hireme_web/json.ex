@@ -1,8 +1,11 @@
 defmodule HiremeWeb.JSON do
   @moduledoc """
-  The wire shape of everything the desk answers over HTTP: a focus, a
-  root, a scoreboard, the lanes, and a refusal. Every field is named
-  here on purpose; nothing is serialised by reflection.
+  The wire shape of everything the desk answers, to the shell over HTTP
+  and to an agent's MCP tool calls: a focus, a root, a scoreboard and its
+  chart, the lanes and their rows, a heat verdict, and a refusal. Every
+  field is named here on purpose; nothing is serialised by reflection.
+  Rows carry keys, which is what a tool call takes back; labels travel
+  once, as the options in `lanes/0`.
   """
 
   import Plug.Conn, only: [put_status: 2]
@@ -105,77 +108,82 @@ defmodule HiremeWeb.JSON do
           s.varieties,
           &%{code: &1.code, fire: &1.fire, status: &1.status, label: &1.label}
         ),
-      chart: %{
-        n: s.chart.n,
-        mean: s.chart.mean,
-        max: s.chart.max,
-        min: s.chart.min,
-        bands: Enum.map(s.chart.bands, &Map.take(&1, [:key, :label, :min, :max, :count])),
-        bins: s.chart.bins
-      }
+      chart: chart(s.chart)
     }
+  end
+
+  @spec chart(LifeEv.Chart.t()) :: map()
+  def chart(%LifeEv.Chart{} = c) do
+    c
+    |> Map.take([:n, :mean, :max, :min])
+    |> Map.merge(%{
+      bands: Enum.map(c.bands, &Map.take(&1, [:key, :label, :min, :max, :count, :share])),
+      bins: Enum.map(c.bins, &Map.take(&1, [:lo, :hi, :count]))
+    })
   end
 
   @doc "The lanes beside the desk, read as one document: gym, net, and company heat."
   @spec lanes() :: map()
   def lanes do
-    gym = Gym.progress()
-    net = Net.progress()
     chart = Heat.chart()
 
     %{
-      gym: %{
-        target: gym.target,
-        streak: gym.streak,
-        solved_today: gym.solved_today,
-        solved_week: gym.solved_week,
-        score: gym.score,
-        topics: Enum.map(gym.topics, &Map.take(&1, [:key, :label, :count])),
-        recent:
-          Enum.map(gym.recent, fn rep ->
-            %{
-              id: rep.id,
-              done_on: rep.done_on,
-              outcome: rep.outcome,
-              minutes: rep.minutes,
-              note: rep.note,
-              title: rep.problem.title,
-              url: rep.problem.url,
-              platform: Gym.label(rep.problem.platform),
-              topic: Gym.label(rep.problem.topic),
-              difficulty: Gym.label(rep.problem.difficulty)
-            }
-          end),
-        platforms: options(Gym.platforms(), &Gym.label/1),
-        topics_all: options(Gym.topics(), &Gym.label/1),
-        difficulties: options(Gym.difficulties(), &Gym.label/1),
-        outcomes: options(Gym.outcomes(), &Gym.label/1)
-      },
-      net: %{
-        lane: net.lane,
-        shipped_week: net.shipped_week,
-        drafts: net.drafts,
-        observer_runs: net.observer_runs,
-        recent:
-          Enum.map(net.recent, fn e ->
-            %{
-              id: e.id,
-              kind: Net.label(e.kind),
-              channel: Net.label(e.channel),
-              title: e.title,
-              url: e.url,
-              body: e.body,
-              shipped_on: e.shipped_on
-            }
-          end),
-        kinds: options(Net.kinds(), &Net.label/1),
-        channels: options(Net.channels(), &Net.label/1)
-      },
+      gym:
+        Map.merge(gym(Gym.progress()), %{
+          platforms: options(Gym.platforms(), &Gym.label/1),
+          topics_all: options(Gym.topics(), &Gym.label/1),
+          difficulties: options(Gym.difficulties(), &Gym.label/1),
+          outcomes: options(Gym.outcomes(), &Gym.label/1)
+        }),
+      net:
+        Map.merge(net(Net.progress()), %{
+          kinds: options(Net.kinds(), &Net.label/1),
+          channels: options(Net.channels(), &Net.label/1)
+        }),
       heat: %{
         companies: Enum.map(chart.companies, &heat_row/1),
         vendors: Enum.map(chart.vendors, &heat_row/1)
       }
     }
+  end
+
+  @spec gym(Gym.Progress.t()) :: map()
+  def gym(%Gym.Progress{} = g) do
+    g
+    |> Map.take([:today, :target, :streak, :solved_today, :solved_week, :score])
+    |> Map.merge(%{
+      topics: Enum.map(g.topics, &Map.take(&1, [:key, :label, :count])),
+      recent: Enum.map(g.recent, &rep/1)
+    })
+  end
+
+  @spec rep(Gym.Rep.t()) :: map()
+  def rep(%Gym.Rep{problem: problem} = rep) do
+    rep
+    |> Map.take([:id, :done_on, :outcome, :minutes, :note])
+    |> Map.merge(Map.take(problem, [:platform, :slug, :title, :topic, :difficulty, :url]))
+  end
+
+  @spec net(Net.Progress.t()) :: map()
+  def net(%Net.Progress{} = n) do
+    n
+    |> Map.take([:lane, :shipped_week, :drafts, :observer_runs])
+    |> Map.put(:recent, Enum.map(n.recent, &entry/1))
+  end
+
+  @spec entry(Net.Entry.t()) :: map()
+  def entry(%Net.Entry{} = e),
+    do: Map.take(e, [:id, :kind, :channel, :title, :url, :body, :shipped_on])
+
+  @spec heat_row(Heat.Chart.row()) :: map()
+  def heat_row(row),
+    do: Map.take(row, [:key, :label, :load, :cap, :ratio, :n, :cooldown_days, :size])
+
+  @spec verdict(Heat.Verdict.t()) :: map()
+  def verdict(%Heat.Verdict{} = v) do
+    Map.take(v, ~w(decision reason company company_load company_cap company_increment size
+                   ats_vendor ats_tenant vendor_load vendor_cap tenant_load tenant_cap
+                   cooldown_days note)a)
   end
 
   @doc """
@@ -200,26 +208,10 @@ defmodule HiremeWeb.JSON do
   end
 
   defp heat(%Job{} = job) do
-    v = Heat.can_apply(job)
-
-    %{
-      decision: v.decision,
-      reason: v.reason,
-      company_load: Float.round(v.company_load * 1.0, 1),
-      company_cap: Float.round(v.company_cap * 1.0, 1),
-      size: v.size,
-      ats_vendor: Atom.to_string(v.ats_vendor),
-      cooldown_days: v.cooldown_days,
-      note: v.note,
-      override: job.heat_override,
-      override_reason: job.heat_override_reason
-    }
-  end
-
-  defp heat_row(row) do
-    row
-    |> Map.take([:key, :label, :ratio, :n, :cooldown_days])
-    |> Map.merge(%{load: Float.round(row.load * 1.0, 1), cap: Float.round(row.cap * 1.0, 1)})
+    job
+    |> Heat.can_apply()
+    |> verdict()
+    |> Map.merge(%{override: job.heat_override, override_reason: job.heat_override_reason})
   end
 
   defp options(keys, label), do: Enum.map(keys, &%{key: Atom.to_string(&1), label: label.(&1)})
