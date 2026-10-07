@@ -109,13 +109,17 @@ kbd {
 .alter textarea,
 .alter input,
 .note textarea {
-  width: 100%;
-  min-height: 4.5rem;
-  resize: vertical;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 0.32rem 0.5rem;
+}
+
+.field textarea,
+.note textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
 }
 
 .filters input[type="search"] { min-width: 12rem; flex: 1; }
