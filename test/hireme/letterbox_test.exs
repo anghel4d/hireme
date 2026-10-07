@@ -1,7 +1,7 @@
 defmodule Hireme.LetterboxTest do
   use Hireme.DataCase, async: false
+  import Hireme.Fixtures
 
-  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
@@ -19,25 +19,13 @@ defmodule Hireme.LetterboxTest do
     sibling = open_job("North Co")
     assert {:ok, handle} = Letterbox.lease(first.letterbox_id, self())
 
-    busy =
-      Task.async(fn ->
-        Letterbox.lease(first.letterbox_id, self())
-      end)
-
+    busy = Task.async(fn -> Letterbox.lease(first.letterbox_id, self()) end)
     assert {:error, :busy} = Task.await(busy)
 
-    lineage =
-      Task.async(fn ->
-        Letterbox.lease(sibling.letterbox_id, self())
-      end)
-
+    lineage = Task.async(fn -> Letterbox.lease(sibling.letterbox_id, self()) end)
     assert {:error, :lineage_busy} = Task.await(lineage)
 
-    task =
-      Task.async(fn ->
-        Letterbox.command(handle, :get)
-      end)
-
+    task = Task.async(fn -> Letterbox.command(handle, :get) end)
     assert {:error, :lease} = Task.await(task)
 
     forged = %{handle | token: make_ref()}
@@ -55,23 +43,7 @@ defmodule Hireme.LetterboxTest do
   end
 
   defp open_job(company) do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "candidate-#{System.unique_integer([:positive])}",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
-
-    job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: company,
-        role: "Engineer",
-        stage: "discovered",
-        canonical_url: "https://jobs.example.test/#{System.unique_integer([:positive])}"
-      })
-
+    job = job(profile(), %{company: company})
     %{job: job, letterbox_id: Letterbox.for_job(job.id).id}
   end
 end

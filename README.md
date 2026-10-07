@@ -120,29 +120,27 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 
 ## Layout
 
+Under `lib/hireme`, a subdirectory's namesake file is its only interface: `desk/desk.ex`, `heat/heat.ex`, `mcp/mcp.ex`. The other files in that directory are reached through it and nowhere else. Every Ecto row lives in one file, in migration order.
+
 | Path | Role |
 | --- | --- |
+| `lib/hireme/types.ex` | `Schema`, `Closed`, `Attrs`, `Text`: the one way a loose value is read |
+| `lib/hireme/schema.ex` | Every row the desk stores |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
-| `lib/hireme/theme.ex` | One CV's lead, accent, density, targets |
-| `lib/hireme/import.ex` | JSON, markdown table, freshness note |
-| `lib/hireme/campaign.ex` | Scoreboard |
-| `lib/hireme/variety.ex` | Mix flags for a batch |
-| `lib/hireme/narrative.ex` | Private narrative |
-| `lib/hireme/mask.ex` | Per-application CV overlay, `Mask.Line` |
-| `lib/hireme/desk/signal.ex` | Typed desk change broadcast on the `desk` topic |
-| `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
-| `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
+| `lib/hireme/cv.ex` | Corpus, narrative, kv, `Theme`, `Mask`, `Keywords`, the composed `Cv.Document`, `CvPair` and the quarterly cooldown |
 | `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
-| `lib/hireme/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
-| `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
-| `lib/hireme/gym.ex` | Conditioning grind: problems, reps, streak, daily target |
-| `lib/hireme/net.ex` | Broadside Observer + posts/artifacts/drafts. Not CRM |
-| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
-| `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
-| `lib/hireme/desk.ex` | Cards, stages, naming open fire |
+| `lib/hireme/lanes.ex` | `Gym` (problems, reps, streak, daily target) and `Net` (Observer runs, posts, drafts). Not CRM |
+| `lib/hireme/desk/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters`; the packet, scoreboard, import, and seed behind it |
 | `lib/hireme/desk/packet.ex` | The desk as one HDP1 columnar packet |
-| `lib/hireme_web/controllers/desk_controller.ex` | Packet, focus, root, scoreboard, and writes over HTTP |
-| `lib/hireme_web/feed_socket.ex` | Push feed of desk signals to the shell |
+| `lib/hireme/desk/campaign.ex` | Scoreboard and batch variety |
+| `lib/hireme/desk/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
+| `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply`; `ats.ex` and `org.ex` behind it |
+| `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
+| `lib/hireme/mcp/mcp.ex` | `Letterbox` (SPSC lease, one application per handle) and `Mcp` tool calls; `box.ex` is the consumer process |
+| `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
+| `lib/hireme_web/router.ex` | Routes and the one controller: packet, focus, root, scoreboard, lanes, writes |
+| `lib/hireme_web/json.ex` | Wire shapes and refusals |
+| `lib/hireme_web/sockets.ex` | Push feed, directory socket, letterbox socket |
 | `assets/wasm/desk.wat` | The column store |
 | `assets/js/shell.ts` | Model, update, draw |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |

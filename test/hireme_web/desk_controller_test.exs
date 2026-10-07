@@ -1,10 +1,9 @@
 defmodule HiremeWeb.DeskControllerTest do
   use HiremeWeb.ConnCase, async: false
+  import Hireme.Fixtures
 
-  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Batch
-  alias Hireme.Desk.Packet
   alias Hireme.Repo
 
   test "the packet is HDP1 with a directory, and its columns are the board", %{conn: conn} do
@@ -21,6 +20,7 @@ defmodule HiremeWeb.DeskControllerTest do
     assert directory["n"] == 1
     assert Enum.map(directory["tables"]["stages"], & &1["key"]) |> hd() == "discovered"
     assert Enum.any?(directory["tables"]["bands"], &(&1["key"] == "frontier"))
+    assert directory["tables"]["heat_states"] == ["cool", "warm", "hot", "blocked"]
 
     col = fn name -> Enum.find(directory["columns"], &(&1["name"] == name)) end
     assert <<id::little-32>> = binary_part(body, col.("id")["at"], 4)
@@ -29,6 +29,7 @@ defmodule HiremeWeb.DeskControllerTest do
     assert score == job.score_100
     assert <<stage::little-32>> = binary_part(body, col.("stage")["at"], 4)
     assert stage == 5
+    assert col.("heat_state")
 
     company = col.("company")
 
@@ -36,8 +37,7 @@ defmodule HiremeWeb.DeskControllerTest do
       binary_part(body, company["at"], company["size"])
 
     assert binary_part(text, first, last - first) == "Lumen Field"
-
-    assert IO.iodata_to_binary(Packet.build()) == response(conn, 200)
+    assert IO.iodata_to_binary(Desk.packet()) == response(conn, 200)
   end
 
   test "focus is the opened application and writes come back as the new focus", %{conn: conn} do
@@ -49,6 +49,8 @@ defmodule HiremeWeb.DeskControllerTest do
     assert length(focus["rail"]) == 10
     assert Enum.any?(focus["cv"]["hidden"], &(&1["body"] == "Theatre elective."))
     assert focus["coverage"]["hits"] == ["ecs"]
+    assert focus["heat"]["decision"] in ["allow", "defer"]
+    assert focus["heat"]["override"] == false
 
     assert %{"error" => "not found"} = conn |> get("/api/focus/999999") |> json_response(404)
 
@@ -73,25 +75,28 @@ defmodule HiremeWeb.DeskControllerTest do
 
     assert %{"error" => "bad argument stage"} =
              conn |> post("/api/jobs/#{job.id}/stage", %{stage: "sent"}) |> json_response(400)
+
+    assert %{"error" => "HEAT override needs a written reason."} =
+             conn
+             |> post("/api/jobs/#{job.id}/heat_override", %{reason: "  "})
+             |> json_response(400)
+
+    overridden =
+      conn
+      |> post("/api/jobs/#{job.id}/heat_override", %{reason: "Named by hand."})
+      |> json_response(200)
+
+    assert overridden["focus"]["heat"]["override"] == true
+    assert overridden["focus"]["heat"]["override_reason"] == "Named by hand."
   end
 
   test "a submit is refused with 409 until the batch is named open fire", %{conn: conn} do
-    profile = profile()
-
     {:ok, batch} =
       %Batch{}
       |> Batch.changeset(%{code: "Batch-001", ordinal: 1, status: :fire_ready, fire: :hold})
       |> Repo.insert()
 
-    job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Keel Systems",
-        role: "Runtime engineer",
-        stage: "fire_ready",
-        batch_id: batch.id,
-        canonical_url: "https://jobs.example.test/keel"
-      })
+    job = job(profile(), %{company: "Keel Systems", stage: "fire_ready", batch_id: batch.id})
 
     assert %{"error" => "fire_hold"} =
              conn
@@ -110,7 +115,7 @@ defmodule HiremeWeb.DeskControllerTest do
   end
 
   test "the page hosts the shell and the root view reads a profile", %{conn: conn} do
-    profile = profile()
+    profile = profile(%{slug: "systems"})
     html = conn |> get("/") |> html_response(200)
     assert html =~ ~s(<div id="desk" class="desk"></div>)
     assert html =~ "/assets/js/app.js"
@@ -120,43 +125,72 @@ defmodule HiremeWeb.DeskControllerTest do
     assert root["profile"]["slug"] == "systems"
   end
 
-  defp profile do
-    Corpus.create_profile!(%{
-      slug: "systems",
-      name: "Systems",
-      headline: "Runtime",
-      summary: "Plain data."
-    })
+  test "lanes read as one document and each write answers with the refreshed lanes", %{conn: conn} do
+    lanes = conn |> get("/api/lanes") |> json_response(200)
+    assert lanes["gym"]["solved_today"] == 0
+    assert is_list(lanes["gym"]["platforms"])
+    assert lanes["net"]["recent"] == []
+    assert Map.has_key?(lanes["heat"], "companies")
+
+    logged =
+      conn
+      |> post("/api/gym/log", %{
+        platform: "leetcode",
+        title: "Two Sum",
+        slug: "two-sum",
+        topic: "arrays",
+        difficulty: "easy",
+        outcome: "solved",
+        minutes: "12"
+      })
+      |> json_response(200)
+
+    assert logged["gym"]["solved_today"] == 1
+    assert [%{"title" => "Two Sum", "platform" => "LeetCode"}] = logged["gym"]["recent"]
+
+    assert %{"error" => "Need a title."} =
+             conn |> post("/api/gym/log", %{platform: "leetcode"}) |> json_response(400)
+
+    assert %{"error" => "Daily target is 1–30."} =
+             conn |> post("/api/gym/target", %{target: "99"}) |> json_response(400)
+
+    assert %{"gym" => %{"target" => 5}} =
+             conn |> post("/api/gym/target", %{target: "5"}) |> json_response(200)
+
+    shipped =
+      conn
+      |> post("/api/net/log", %{
+        kind: "post",
+        channel: "x",
+        title: "On columns",
+        url: "https://example.test/p"
+      })
+      |> json_response(200)
+
+    assert shipped["net"]["shipped_week"] == 1
+
+    assert %{"net" => %{"lane" => "https://observer.example.test/"}} =
+             conn
+             |> post("/api/net/lane", %{url: "https://observer.example.test/"})
+             |> json_response(200)
   end
 
   defp sample_job do
-    profile = profile()
+    profile = profile(%{slug: "systems"})
 
     experience =
-      Corpus.create_item!(%{
-        profile_id: profile.id,
-        kind: :experience,
-        key: "exp.tick",
+      item(profile, %{
         title: "Engineer",
         body: "An entity store laid out as structure-of-arrays.",
         org: "Northwind",
-        span: "2023 — 2026",
-        position: 1
+        span: "2023 — 2026"
       })
 
     education =
-      Corpus.create_item!(%{
-        profile_id: profile.id,
-        kind: :education,
-        key: "edu.general",
-        title: "DEC",
-        body: "Theatre elective.",
-        position: 2
-      })
+      item(profile, %{kind: :education, title: "DEC", body: "Theatre elective.", position: 2})
 
     job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
+      job(profile, %{
         company: "Lumen Field",
         role: "Runtime engineer",
         stage: "fire_ready",

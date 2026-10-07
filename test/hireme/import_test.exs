@@ -1,8 +1,8 @@
 defmodule Hireme.ImportTest do
   use Hireme.DataCase, async: false
+  import Hireme.Fixtures
 
   alias Hireme.Campaign
-  alias Hireme.Corpus
   alias Hireme.Desk.Job
   alias Hireme.Import
   alias Hireme.Repo
@@ -55,14 +55,5 @@ defmodule Hireme.ImportTest do
     assert board.apps_today == 2
     assert board.submitted_today == 0
     assert board.apps_target == 440
-  end
-
-  defp profile do
-    Corpus.create_profile!(%{
-      slug: "candidate",
-      name: "Sample Candidate",
-      headline: "Engineer",
-      summary: "A sample profile."
-    })
   end
 end

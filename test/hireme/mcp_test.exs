@@ -1,7 +1,7 @@
 defmodule Hireme.McpTest do
   use Hireme.DataCase, async: false
+  import Hireme.Fixtures
 
-  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Signal
   alias Hireme.Letterbox
@@ -98,28 +98,10 @@ defmodule Hireme.McpTest do
   end
 
   test "directory list and recommend rank by score_100" do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "mcp-ev-#{System.unique_integer([:positive])}",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
+    profile = profile()
 
-    Desk.create_job!(%{
-      profile_id: profile.id,
-      company: "Acme Staffing",
-      role: "Engineer",
-      canonical_url: "https://jobs.example.test/staff-#{System.unique_integer([:positive])}"
-    })
-
-    high =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "OpenAI",
-        role: "Research engineer",
-        canonical_url: "https://jobs.example.test/oai-#{System.unique_integer([:positive])}"
-      })
+    job(profile, %{company: "Acme Staffing"})
+    high = job(profile, %{company: "OpenAI", role: "Research engineer"})
 
     listed = Mcp.directory(%{"id" => 1, "method" => "tools/list"})
     list_tool = Enum.find(listed.result.tools, &(&1["name"] == "list_applications"))
@@ -290,21 +272,9 @@ defmodule Hireme.McpTest do
     assert "heat_status" in names
     assert "can_apply" in names
 
-    profile =
-      Corpus.create_profile!(%{
-        slug: "heat-mcp-#{System.unique_integer([:positive])}",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
+    profile = profile()
 
-    job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Obscure Shop",
-        role: "Engineer",
-        canonical_url: "https://jobs.example.test/heat-mcp-#{System.unique_integer([:positive])}"
-      })
+    job = job(profile, %{company: "Obscure Shop"})
 
     status =
       Mcp.directory(%{
@@ -328,33 +298,8 @@ defmodule Hireme.McpTest do
   end
 
   defp opened do
-    profile =
-      Corpus.create_profile!(%{
-        slug: "candidate-#{System.unique_integer([:positive])}",
-        name: "Sample Candidate",
-        headline: "Engineer",
-        summary: "A sample profile."
-      })
-
-    item =
-      Corpus.create_item!(%{
-        profile_id: profile.id,
-        kind: :experience,
-        key: "exp.mcp.#{System.unique_integer([:positive])}",
-        title: "Line",
-        body: "Root",
-        position: 1
-      })
-
-    job =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Batch Co #{System.unique_integer([:positive])}",
-        role: "Engineer",
-        stage: "discovered",
-        canonical_url: "https://jobs.example.test/#{System.unique_integer([:positive])}"
-      })
-
-    %{job: job, item: item, letterbox_id: Letterbox.for_job(job.id).id}
+    profile = profile()
+    job = job(profile, %{company: "Batch Co #{uniq()}"})
+    %{job: job, item: item(profile), letterbox_id: Letterbox.for_job(job.id).id}
   end
 end

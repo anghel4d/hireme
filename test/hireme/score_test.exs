@@ -1,8 +1,8 @@
 defmodule Hireme.ScoreTest do
   use Hireme.DataCase, async: false
+  import Hireme.Fixtures
 
   alias Hireme.Campaign
-  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Filters
   alias Hireme.Import
@@ -36,6 +36,9 @@ defmodule Hireme.ScoreTest do
            ]
 
     chart = Campaign.scoreboard().chart
+    assert Desk.score_chart("Batch-009") == chart
+    assert Desk.score_chart("Batch-missing").n == 0
+    assert Desk.score_chart(:leftover).n == 0
     assert chart.n == 4
     assert Enum.find(chart.bands, &(&1.key == :frontier)).count == 1
 
@@ -55,23 +58,8 @@ defmodule Hireme.ScoreTest do
   test "the directory ranks by score_100 and a lease can set its own" do
     profile = profile()
 
-    low =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Low Co",
-        role: "Engineer",
-        score_100: 40,
-        canonical_url: "https://jobs.example.test/low"
-      })
-
-    high =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "High Co",
-        role: "Engineer",
-        score_100: "95",
-        canonical_url: "https://jobs.example.test/high"
-      })
+    low = job(profile, %{company: "Low Co", score_100: 40})
+    high = job(profile, %{company: "High Co", score_100: "95"})
 
     listed =
       Mcp.directory(%{
@@ -122,14 +110,5 @@ defmodule Hireme.ScoreTest do
 
     assert bad.error.message == "bad argument score"
     assert Letterbox.release(handle) == :ok
-  end
-
-  defp profile do
-    Corpus.create_profile!(%{
-      slug: "scored-#{System.unique_integer([:positive])}",
-      name: "Sample Candidate",
-      headline: "Engineer",
-      summary: "A sample profile."
-    })
   end
 end
