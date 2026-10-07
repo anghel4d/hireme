@@ -6,6 +6,7 @@
 !/README.md
 !/LICENSE
 !/.formatter.exs
+!/.credo.exs
 !/mix.exs
 !/mix.lock
 

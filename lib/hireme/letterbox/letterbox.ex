@@ -44,6 +44,7 @@ defmodule Hireme.Letterbox do
   alias Hireme.Letterbox.Handle
   alias Hireme.Letterbox.Record
   alias Hireme.Repo
+  alias Ecto.Adapters.SQL.Sandbox
 
   @registry __MODULE__.Registry
 
@@ -144,8 +145,8 @@ defmodule Hireme.Letterbox do
   end
 
   defp allow_sandbox(parent, child) do
-    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
-      Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, child)
+    if Repo.config()[:pool] == Sandbox do
+      Sandbox.allow(Repo, parent, child)
     end
   end
 end
