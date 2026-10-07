@@ -114,9 +114,7 @@ defmodule Hireme.LifeEv do
 
         cond do
           kill = kill_score(blob, location) -> kill
-          Text.named?(company, @frontier) -> 100
-          Text.named?(company, @labs) or Text.phrase?(company, @labs_phrases) -> 90
-          Text.named?(company, @big_tech) -> if(high_comp?, do: 85, else: 80)
+          anchor = named_score(company, high_comp?) -> anchor
           true -> heuristic(company, role, fit, location, high_comp?)
         end
     end
@@ -210,6 +208,17 @@ defmodule Hireme.LifeEv do
     case Integer.parse(String.trim(s)) do
       {n, _} -> {:ok, clamp(n)}
       :error -> :none
+    end
+  end
+
+  defp named_score(company, high_comp?) do
+    name = Text.normalize(company)
+
+    cond do
+      Text.named_normalized?(name, @frontier) -> 100
+      Text.named_normalized?(name, @labs) or Text.phrase_normalized?(name, @labs_phrases) -> 90
+      Text.named_normalized?(name, @big_tech) -> if(high_comp?, do: 85, else: 80)
+      true -> nil
     end
   end
 
