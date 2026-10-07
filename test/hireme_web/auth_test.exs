@@ -146,7 +146,10 @@ defmodule HiremeWeb.AuthTest do
       |> DateTime.truncate(:second)
 
     for s <- Hireme.Accounts.list_sessions(account.id),
-        do: s |> Ecto.Changeset.change(mfa_at: stale) |> Hireme.Repo.update!(skip_account: true)
+        do:
+          s
+          |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
+          |> Hireme.Repo.update!(skip_account: true)
 
     assert %{"error" => "step_up"} =
              fresh |> post("/api/account/keys", %{name: "stale"}) |> json_response(403)

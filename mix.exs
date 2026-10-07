@@ -53,6 +53,10 @@ defmodule Hireme.MixProject do
       {:wax_, "~> 0.7.0"},
       {:hammer, "~> 7.5"},
       {:eqrcode, "~> 0.2.1"},
+      {:swoosh, "~> 1.17"},
+      {:gen_smtp, "~> 1.2"},
+      {:assent, "~> 0.3"},
+      {:req, "~> 0.5"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

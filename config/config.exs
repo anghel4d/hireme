@@ -27,7 +27,15 @@ config :logger, :default_formatter,
 
 config :phoenix, :json_library, Jason
 
+# Sign-in tokens, factor codes, OAuth state, and addresses never reach the log.
+config :phoenix, :filter_parameters, ["password", "secret", "token", "code", "state", "email"]
+
 # WebAuthn relying party: the origin the browser reports. Set per environment.
 config :wax_, rp_id: :auto, user_verification: "required"
+
+# Mail: a local mailbox in development; SMTP in production (runtime.exs).
+config :hireme, Hireme.Mailer, adapter: Swoosh.Adapters.Local
+config :hireme, :mail_from, {"Hireme", "hireme@localhost"}
+config :swoosh, :api_client, false
 
 import_config "#{config_env()}.exs"

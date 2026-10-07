@@ -22,6 +22,21 @@ if config_env() == :dev do
     ]
 end
 
+# Sign-in providers. A provider with no client id is not offered.
+config :hireme, :oauth,
+  github: [
+    client_id: System.get_env("GITHUB_CLIENT_ID"),
+    client_secret: System.get_env("GITHUB_CLIENT_SECRET")
+  ],
+  x: [
+    client_id: System.get_env("X_CLIENT_ID"),
+    client_secret: System.get_env("X_CLIENT_SECRET")
+  ]
+
+if from = System.get_env("MAIL_FROM") do
+  config :hireme, :mail_from, {"Hireme", from}
+end
+
 if config_env() == :prod do
   database_path =
     System.get_env("DATABASE_PATH") ||
@@ -46,6 +61,26 @@ if config_env() == :prod do
 
   config :hireme, :secret_key_base, secret_key_base
   config :wax_, origin: "https://#{host}"
+
+  # Passwordless sign-in is mail; production has no mailbox to fall back to.
+  smtp_host =
+    System.get_env("SMTP_HOST") ||
+      raise """
+      environment variable SMTP_HOST is missing.
+      Sign-in links and account notices go out over SMTP.
+      """
+
+  config :swoosh, local: false
+
+  config :hireme, Hireme.Mailer,
+    adapter: Swoosh.Adapters.SMTP,
+    relay: smtp_host,
+    port: String.to_integer(System.get_env("SMTP_PORT") || "587"),
+    username: System.get_env("SMTP_USERNAME"),
+    password: System.get_env("SMTP_PASSWORD"),
+    tls: :always,
+    auth: :always
+
   config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   # IPv6 on every interface; `{0, 0, 0, 0, 0, 0, 0, 1}` is local only.

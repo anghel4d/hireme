@@ -18,12 +18,21 @@ defmodule Hireme.Accounts do
 
   import Ecto.Query
   alias Hireme.Accounts.Account
+  alias Hireme.Accounts.Identity
+  alias Hireme.Accounts.MagicLink
   alias Hireme.Accounts.Session
   alias Hireme.Audit
+  alias Hireme.Mailer
   alias Hireme.Repo
   alias Hireme.Security
 
   @type meta :: %{optional(:ip) => String.t(), optional(:user_agent) => String.t()}
+
+  @typedoc "What a provider vouched for: its id for the person (the address, for mail) and a name to show."
+  @type claim :: %{subject: String.t(), display: String.t()}
+
+  @providers Identity.providers()
+  @address ~r/\A[^\s@]+@[^\s@]+\.[^\s@]+\z/
 
   @spec create!(map()) :: Account.t()
   def create!(attrs \\ %{}), do: %Account{} |> Account.changeset(attrs) |> Repo.insert!()
@@ -153,18 +162,267 @@ defmodule Hireme.Accounts do
     n
   end
 
+  ## Sign-in methods
+
+  @doc """
+  Mail a one-time sign-in link to `email`. `url_for` turns the token into
+  the URL the mail carries, so the path stays with the router. A
+  well-formed address gets `:ok` whether or not it has an account; the
+  answer never says which. Five per address and twenty per peer in ten
+  minutes.
+  """
+  @spec request_link(String.t(), (String.t() -> String.t()), meta()) ::
+          :ok | {:error, :invalid | :rate_limited | :mail}
+  def request_link(email, url_for, meta \\ %{}) when is_function(url_for, 1) do
+    with {:ok, email} <- normalize_email(email),
+         :ok <- Security.limit("link:#{email}", :timer.minutes(10), 5),
+         :ok <- Security.limit("link:ip:#{Map.get(meta, :ip, "")}", :timer.minutes(10), 20) do
+      token = Security.token(32)
+      now = now()
+
+      %MagicLink{}
+      |> MagicLink.changeset(%{
+        email: email,
+        token_hash: Security.hash(token),
+        expires_at: DateTime.add(now, Security.magic_link_ttl(), :second),
+        ip: Map.get(meta, :ip, ""),
+        user_agent: String.slice(Map.get(meta, :user_agent, ""), 0, 200)
+      })
+      |> Repo.insert!()
+
+      Audit.record(:link_requested, %{email: email}, meta)
+
+      case Mailer.sign_in_link(email, url_for.(Base.url_encode64(token, padding: false))) do
+        :ok -> :ok
+        {:error, _} -> {:error, :mail}
+      end
+    end
+  end
+
+  @doc """
+  The address a live link would prove, without spending it. Mail scanners
+  open every link they see; only `redeem_link/2`, behind a deliberate
+  request, spends one.
+  """
+  @spec peek_link(String.t()) :: {:ok, String.t()} | {:error, :invalid}
+  def peek_link(token) do
+    case live_link(token, now()) do
+      %MagicLink{email: email} -> {:ok, email}
+      nil -> {:error, :invalid}
+    end
+  end
+
+  @doc """
+  Burn a link and prove its address; nothing else. What a proven address
+  means is `sign_in_with/3` for a visitor or `link/3` for an account.
+  """
+  @spec redeem_link(String.t(), meta()) :: {:ok, String.t()} | {:error, :invalid | :rate_limited}
+  def redeem_link(token, meta \\ %{}) do
+    now = now()
+
+    with :ok <- Security.limit("redeem:ip:#{Map.get(meta, :ip, "")}", :timer.minutes(10), 20),
+         %MagicLink{} = link <- live_link(token, now),
+         {1, _} <- burn(link, now) do
+      Audit.record(:link_redeemed, %{email: link.email}, meta)
+      {:ok, link.email}
+    else
+      {:error, :rate_limited} -> {:error, :rate_limited}
+      _ -> {:error, :invalid}
+    end
+  end
+
+  defp live_link(token, now) when is_binary(token) do
+    with {:ok, raw} <- Base.url_decode64(token, padding: false),
+         %MagicLink{used_at: nil} = link <-
+           Repo.get_by(MagicLink, [token_hash: Security.hash(raw)], skip_account: true),
+         true <- DateTime.compare(now, link.expires_at) == :lt do
+      link
+    else
+      _ -> nil
+    end
+  end
+
+  defp live_link(_, _), do: nil
+
+  # Single use under concurrency: the row is taken only if still unused.
+  defp burn(%MagicLink{id: id}, now) do
+    Repo.update_all(
+      from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
+      [set: [used_at: now]],
+      skip_account: true
+    )
+  end
+
+  @doc """
+  Sign in as the account a proven identity belongs to, creating the
+  account and the identity when they are new. On success the account is
+  the one on this process, and the token is the cookie's.
+  """
+  @spec sign_in_with(Identity.provider(), claim(), meta()) ::
+          {:ok, String.t(), Session.t()} | {:error, :suspended}
+  def sign_in_with(provider, %{subject: subject} = claim, meta \\ %{})
+      when provider in @providers do
+    identity = find_identity(provider, subject) || first_identity(provider, claim, meta)
+    account = get(identity.account_id)
+
+    if active?(account) do
+      Repo.put_account(account.id)
+      touch_identity(identity, claim)
+
+      Audit.record(
+        :signed_in,
+        %{provider: provider, identity_id: identity.id},
+        Map.put(meta, :account_id, account.id)
+      )
+
+      {token, session} = start_session(account, meta)
+      {:ok, token, session}
+    else
+      {:error, :suspended}
+    end
+  end
+
+  @doc "The ways into the account on this process, oldest first."
+  @spec identities() :: [Identity.t()]
+  def identities, do: Repo.all(from(i in Identity, order_by: i.id))
+
+  @doc """
+  Bind a proven identity to the account on this process. Binding one it
+  already has is a no-op; one bound to another account is `:taken`. The
+  account is told through its mail (NIST SP 800-63B-4 Sec. 4.1.2).
+  """
+  @spec link(Identity.provider(), claim(), meta()) :: {:ok, Identity.t()} | {:error, :taken}
+  def link(provider, %{subject: subject} = claim, meta \\ %{}) when provider in @providers do
+    account_id = Repo.account_id!()
+
+    case find_identity(provider, subject) do
+      %Identity{account_id: ^account_id} = identity ->
+        {:ok, touch_identity(identity, claim)}
+
+      %Identity{} ->
+        {:error, :taken}
+
+      nil ->
+        case insert_identity(account_id, provider, claim) do
+          {:ok, identity} ->
+            about = %{provider: provider, display: identity.display, identity_id: identity.id}
+            Audit.record(:identity_linked, about, meta)
+            notify(account_id, :identity_linked, about)
+            {:ok, identity}
+
+          {:error, _} ->
+            {:error, :taken}
+        end
+    end
+  end
+
+  @doc """
+  Remove a way into the account on this process. The last one stays:
+  an account with no way in is lost. The caller has already asked for a
+  fresh second factor (`Hireme.Mfa.fresh?/1`).
+  """
+  @spec unlink(pos_integer(), meta()) :: :ok | {:error, :last | :not_found}
+  def unlink(id, meta \\ %{}) when is_integer(id) do
+    case {Repo.get(Identity, id), identities()} do
+      {nil, _} ->
+        {:error, :not_found}
+
+      {_, [_]} ->
+        {:error, :last}
+
+      {%Identity{} = identity, _} ->
+        Repo.delete!(identity)
+        about = %{provider: identity.provider, display: identity.display}
+        Audit.record(:identity_unlinked, about, meta)
+        notify(identity.account_id, :identity_unlinked, about)
+        # The removed address hears it too; the remaining ones already did.
+        if identity.provider == :email,
+          do: Mailer.notice(identity.subject, :identity_unlinked, about)
+
+        :ok
+    end
+  end
+
   @doc """
   Tell the account something happened to it, through a channel other
-  than the one that did it (NIST SP 800-63B-4 Sec. 4.1.2; ASVS 6.3.7).
-  The sign-in methods beside this module deliver it; until one does, the
-  event is on the audit trail and in the log.
+  than the one that did it (NIST SP 800-63B-4 Sec. 4.1.2; ASVS 6.3.7):
+  every address linked to it gets a notice, and the trail records it.
   """
   @spec notify(pos_integer(), atom(), map()) :: :ok
   def notify(account_id, kind, meta \\ %{}) when is_integer(account_id) and is_atom(kind) do
     Audit.record(:notified, Map.put(meta, :about, kind), %{account_id: account_id})
-    require Logger
-    Logger.info("account #{account_id}: #{kind} #{inspect(meta)}")
+
+    for %Identity{subject: email} <-
+          Repo.all(
+            from(i in Identity, where: i.account_id == ^account_id and i.provider == :email),
+            skip_account: true
+          ),
+        do: Mailer.notice(email, kind, meta)
+
     :ok
+  end
+
+  @doc "The one spelling of an address the desk stores and compares: trimmed, lowercased, shaped like one."
+  @spec normalize_email(term()) :: {:ok, String.t()} | {:error, :invalid}
+  def normalize_email(email) when is_binary(email) do
+    email = email |> String.trim() |> String.downcase()
+
+    if byte_size(email) <= 254 and Regex.match?(@address, email),
+      do: {:ok, email},
+      else: {:error, :invalid}
+  end
+
+  def normalize_email(_), do: {:error, :invalid}
+
+  defp find_identity(provider, subject) do
+    Repo.get_by(Identity, [provider: provider, subject: subject], skip_account: true)
+  end
+
+  # A visitor nobody knows: an account named after them, with this one way in.
+  # Two first sign-ins racing on one subject leave one identity; the loser finds it.
+  defp first_identity(provider, claim, meta) do
+    Repo.transaction(fn ->
+      account = create!(%{name: claim.display})
+
+      case insert_identity(account.id, provider, claim) do
+        {:ok, identity} ->
+          Audit.record(
+            :account_created,
+            %{provider: provider},
+            Map.put(meta, :account_id, account.id)
+          )
+
+          identity
+
+        {:error, _} ->
+          Repo.rollback(:taken)
+      end
+    end)
+    |> case do
+      {:ok, identity} -> identity
+      {:error, :taken} -> find_identity(provider, claim.subject)
+    end
+  end
+
+  defp insert_identity(account_id, provider, claim) do
+    %Identity{}
+    |> Identity.changeset(%{
+      account_id: account_id,
+      provider: provider,
+      subject: claim.subject,
+      display: Map.get(claim, :display, ""),
+      verified_at: now()
+    })
+    |> Repo.insert()
+  end
+
+  defp touch_identity(%Identity{} = identity, claim) do
+    identity
+    |> Identity.changeset(%{
+      display: Map.get(claim, :display, identity.display),
+      verified_at: now()
+    })
+    |> Repo.update!()
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
