@@ -2,13 +2,10 @@
 // the board's identity; the resident columns are what it is drawn from.
 
 import * as api from "./api.ts"
-import type { Focus, Lanes, Root, Scoreboard } from "./api.ts"
-import { openFeed, type Signal } from "./feed.ts"
-import { fromParams, lower, toParams, type Filters } from "./filters.ts"
-import * as grid from "./grid.ts"
-import * as lanes from "./lanes.ts"
+import { openFeed, type Focus, type Lanes, type Root, type Scoreboard, type Signal } from "./api.ts"
+import * as grid from "./board.ts"
+import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, morph, raw, type Raw } from "./html.ts"
-import { assertNever } from "./never.ts"
 import { Store } from "./store.ts"
 import * as views from "./views.ts"
 
@@ -300,8 +297,8 @@ export class Shell {
     const m = this.model
     const t = this.store.tables
     this.set("#topbar", views.topbar(m.filters, t, m.count))
-    this.set("#scoreboard-slot", views.scoreboard(m.scoreboard, lanes.lanePills(m.lanes)))
-    this.set("#heat-slot", lanes.heatChart(m.lanes, m.filters))
+    this.set("#scoreboard-slot", views.scoreboard(m.scoreboard, views.lanePills(m.lanes)))
+    this.set("#heat-slot", views.heatChart(m.lanes, m.filters))
 
     const lens = this.root.querySelector<HTMLElement>("#lens")
     const workspace = this.root.querySelector<HTMLElement>("#workspace")
@@ -314,10 +311,10 @@ export class Shell {
       morph(lens, h`<div class="root-wrap">${views.rootView(m.root)}</div>`)
       workspace.hidden = true
     } else if (m.lens === "gym" && m.lanes) {
-      morph(lens, h`<div class="lane-wrap">${lanes.gymView(m.lanes, m.laneError)}</div>`)
+      morph(lens, h`<div class="lane-wrap">${views.gymView(m.lanes, m.laneError)}</div>`)
       workspace.hidden = true
     } else if (m.lens === "net" && m.lanes) {
-      morph(lens, h`<div class="lane-wrap">${lanes.netView(m.lanes, m.laneError)}</div>`)
+      morph(lens, h`<div class="lane-wrap">${views.netView(m.lanes, m.laneError)}</div>`)
       workspace.hidden = true
     } else {
       morph(lens, raw(""))
@@ -606,4 +603,8 @@ function titleOf(m: Model): string {
   if (m.lens === "net") return "Net · Hireme"
   if (m.focus) return `${m.focus.job.company} · ${m.focus.job.code} · Hireme`
   return "Desk · Hireme"
+}
+
+function assertNever(x: never): never {
+  throw new Error(`unreachable: ${JSON.stringify(x)}`)
 }
