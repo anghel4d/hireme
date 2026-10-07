@@ -8,12 +8,12 @@ defmodule HiremeWeb.JSON do
   import Plug.Conn, only: [put_status: 2]
   import Phoenix.Controller, only: [json: 2]
 
+  alias Hireme.Campaign.Scoreboard
   alias Hireme.Cv.Document
   alias Hireme.Desk
   alias Hireme.Desk.Focus
   alias Hireme.Desk.Job
   alias Hireme.Desk.Root
-  alias Hireme.Desk.Scoreboard
   alias Hireme.Gym
   alias Hireme.Heat
   alias Hireme.Keywords.Coverage

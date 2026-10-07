@@ -58,6 +58,7 @@ defmodule HiremeWeb.DeskController do
 
   import Plug.Conn
 
+  alias Hireme.Campaign
   alias Hireme.Desk
   alias Hireme.Desk.Overlay
   alias Hireme.Gym
@@ -67,6 +68,7 @@ defmodule HiremeWeb.DeskController do
   alias Hireme.Pipeline
   alias Hireme.Repo
   alias HiremeWeb.JSON
+  alias HiremeWeb.Packet
 
   def index(conn, _params) do
     page = """
@@ -92,10 +94,10 @@ defmodule HiremeWeb.DeskController do
     conn
     |> put_resp_content_type("application/vnd.hireme.desk-packet", nil)
     |> put_resp_header("cache-control", "no-store")
-    |> send_resp(200, Desk.packet())
+    |> send_resp(200, Packet.build())
   end
 
-  def scoreboard(conn, _params), do: json(conn, JSON.scoreboard(Desk.scoreboard()))
+  def scoreboard(conn, _params), do: json(conn, JSON.scoreboard(Campaign.scoreboard()))
 
   def lanes(conn, _params), do: json(conn, JSON.lanes())
 
