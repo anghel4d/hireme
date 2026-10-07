@@ -6,7 +6,7 @@ defmodule Hireme.Heat.Org do
   across departments; a small shop gets one, maybe two after decay.
   """
 
-  import Hireme.Text, only: [normalize: 1, named?: 2]
+  import Hireme.Text, only: [normalize: 1, named_normalized?: 2]
 
   @sizes [:mega, :large, :mid, :small]
 
@@ -41,10 +41,12 @@ defmodule Hireme.Heat.Org do
 
   @spec size(term()) :: size()
   def size(company) when is_binary(company) do
+    name = normalize(company)
+
     cond do
-      named?(company, @mega) -> :mega
-      named?(company, @large) -> :large
-      normalize(company) =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
+      named_normalized?(name, @mega) -> :mega
+      named_normalized?(name, @large) -> :large
+      name =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
       true -> :small
     end
   end

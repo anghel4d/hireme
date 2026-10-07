@@ -121,22 +121,19 @@ defmodule Hireme.Text do
     |> String.trim()
   end
 
-  @spec named?(term(), [String.t()]) :: boolean()
-  def named?(name, anchors) do
-    n = normalize(name)
-    compact = String.replace(n, " ", "")
+  @doc "Match anchors against an already normalized name; normalize once before testing groups."
+  @spec named_normalized?(String.t(), [String.t()]) :: boolean()
+  def named_normalized?(name, anchors) do
+    compact = String.replace(name, " ", "")
+    padded = " #{name} "
 
     Enum.any?(anchors, fn anchor ->
-      n == anchor or compact == String.replace(anchor, " ", "") or
-        String.contains?(" #{n} ", " #{anchor} ")
+      compact == String.replace(anchor, " ", "") or String.contains?(padded, " #{anchor} ")
     end)
   end
 
-  @spec phrase?(term(), [String.t()]) :: boolean()
-  def phrase?(name, phrases) do
-    n = normalize(name)
-    Enum.any?(phrases, &String.contains?(n, &1))
-  end
+  @spec phrase_normalized?(String.t(), [String.t()]) :: boolean()
+  def phrase_normalized?(name, phrases), do: Enum.any?(phrases, &String.contains?(name, &1))
 
   @doc "A lowercase, hyphenated key for a title."
   @spec slug(String.t()) :: String.t()
