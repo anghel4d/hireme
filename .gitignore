@@ -50,6 +50,9 @@
 !/alchemy/
 !/alchemy/*.md
 
+!/docs/
+!/docs/*.md
+
 !/.cursor/
 !/.cursor/skills/
 !/.cursor/skills/job-alchemy-distillation/
