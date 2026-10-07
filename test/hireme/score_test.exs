@@ -7,7 +7,6 @@ defmodule Hireme.ScoreTest do
   alias Hireme.Desk.Filters
   alias Hireme.Import
   alias Hireme.Letterbox
-  alias Hireme.Mcp
 
   test "a pack's score_100 lands on the card, orders the board, and filters by floor and band" do
     profile = profile()
@@ -61,52 +60,27 @@ defmodule Hireme.ScoreTest do
     low = job(profile, %{company: "Low Co", score_100: 40})
     high = job(profile, %{company: "High Co", score_100: "95"})
 
-    listed =
-      Mcp.directory(%{
-        "id" => 1,
-        "method" => "tools/call",
-        "params" => %{"name" => "list_applications", "arguments" => %{"status" => "all"}}
-      })
+    listed = tool_call("list_applications", %{"status" => "all"})
 
     assert Enum.map(listed.result["applications"], & &1["job_id"]) == [high.id, low.id]
     assert hd(listed.result["applications"])["band"] == "labs"
 
-    boxes =
-      Mcp.directory(%{
-        "id" => 2,
-        "method" => "tools/call",
-        "params" => %{"name" => "list_letterboxes", "arguments" => %{"min_score" => 50}}
-      })
+    boxes = tool_call("list_letterboxes", %{"min_score" => 50})
 
     assert Enum.map(boxes.result["letterboxes"], & &1["job_id"]) == [high.id]
 
-    rec =
-      Mcp.directory(%{
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{"name" => "recommend_applications", "arguments" => %{"limit" => 1}}
-      })
+    rec = tool_call("recommend_applications", %{"limit" => 1})
 
     assert rec.result["fire"] == "hold"
     assert Enum.map(rec.result["applications"], & &1["job_id"]) == [high.id]
 
     {:ok, handle} = Letterbox.lease(Letterbox.for_job(low.id).id, self())
 
-    set =
-      Mcp.handle(handle, %{
-        "id" => 4,
-        "method" => "tools/call",
-        "params" => %{"name" => "set_score", "arguments" => %{"score" => 88}}
-      })
+    set = tool_call(handle, "set_score", %{"score" => 88})
 
     assert set.result == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
 
-    bad =
-      Mcp.handle(handle, %{
-        "id" => 5,
-        "method" => "tools/call",
-        "params" => %{"name" => "set_score", "arguments" => %{"score" => 101}}
-      })
+    bad = tool_call(handle, "set_score", %{"score" => 101})
 
     assert bad.error.message == "bad argument score"
     assert Letterbox.release(handle) == :ok

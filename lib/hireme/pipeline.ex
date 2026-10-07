@@ -66,7 +66,6 @@ defmodule Hireme.Pipeline do
   @keys Enum.map(@stages, & &1.key)
   @rank Map.new(Enum.with_index(@keys))
   @by_key Map.new(@stages, &{&1.key, &1})
-  @by_name Map.new(@keys, &{Atom.to_string(&1), &1})
 
   @pips [:done, :active, :pending, :skipped, :blocked]
   @pip_chars %{done: "D", active: "A", pending: "P", skipped: "S", blocked: "B"}
@@ -90,9 +89,7 @@ defmodule Hireme.Pipeline do
   One stage from the wire. Accepts the atom itself or its name.
   """
   @spec parse(term()) :: {:ok, stage()} | :error
-  def parse(key) when key in @keys, do: {:ok, key}
-  def parse(name) when is_binary(name), do: Map.fetch(@by_name, name)
-  def parse(_), do: :error
+  def parse(value), do: Hireme.Closed.parse(@keys, value)
 
   @spec parse!(term()) :: stage()
   def parse!(value) do
