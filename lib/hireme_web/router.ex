@@ -56,7 +56,12 @@ defmodule HiremeWeb.Router do
   scope "/", HiremeWeb do
     pipe_through :browser
 
-    get "/sign-in", AuthController, :sign_in
+    get "/sign-in", SignInController, :index
+    post "/sign-in/email", SignInController, :request_email
+    get "/sign-in/email", SignInController, :confirm_email
+    post "/sign-in/email/confirm", SignInController, :redeem_email
+    get "/auth/:provider", SignInController, :authorize
+    get "/auth/:provider/callback", SignInController, :callback
     post "/sign-out", AuthController, :sign_out
   end
 
@@ -89,6 +94,11 @@ defmodule HiremeWeb.Router do
 
       post "/sign-in", AuthController, :dev_sign_in
     end
+
+    # The local mail adapter's inbox, where a development sign-in link lands.
+    scope "/dev" do
+      forward "/mailbox", Plug.Swoosh.MailboxPreview
+    end
   end
 
   scope "/api", HiremeWeb do
@@ -116,6 +126,8 @@ defmodule HiremeWeb.Router do
         post "/mfa/webauthn/confirm", MfaController, :confirm_webauthn
         delete "/mfa/:id", MfaController, :remove
         post "/mfa/recovery", MfaController, :recovery
+        post "/identities", AccountController, :link
+        delete "/identities/:id", AccountController, :unlink
       end
     end
 

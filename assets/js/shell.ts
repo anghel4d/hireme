@@ -27,6 +27,7 @@ interface Model {
   reveal: views.Reveal | null
   renaming: number | null
   settingsError: string | null
+  settingsNotice: string | null
   enrolling: views.Enrolling
   stepUp: views.StepUp | null
   editing: number | null
@@ -50,7 +51,7 @@ type Msg =
   | { t: "scoreboard"; scoreboard: Scoreboard }
   | { t: "lanes"; lanes: Lanes; error?: string | null }
   | { t: "lane-error"; error: string }
-  | { t: "settings"; settings: Settings | null; reveal?: views.Reveal | null; error?: string | null }
+  | { t: "settings"; settings: Settings | null; reveal?: views.Reveal | null; error?: string | null; notice?: string | null }
   | { t: "rename"; id: number | null }
   | { t: "enrolling"; enrolling: views.Enrolling }
   | { t: "step-up"; prompt: views.StepUp | null }
@@ -85,6 +86,7 @@ export class Shell {
       reveal: null,
       renaming: null,
       settingsError: null,
+      settingsNotice: LINKED.get(params.get("linked") ?? "") ?? null,
       enrolling: null,
       stepUp: null,
       editing: null,
@@ -109,6 +111,7 @@ export class Shell {
     void this.loadRoot()
     void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
     void this.loadLanes()
+    if (this.model.lens === "settings") void this.loadSettings(LINK_ERRORS.get(params.get("link_error") ?? "") ?? null)
     openFeed((s) => this.onSignal(s))
     this.draw()
   }
@@ -190,6 +193,7 @@ export class Shell {
         m.settings = msg.settings
         if (msg.reveal !== undefined) m.reveal = msg.reveal
         m.settingsError = msg.error ?? null
+        if (msg.notice !== undefined) m.settingsNotice = msg.notice
         m.renaming = null
         break
       case "rename":
@@ -284,9 +288,9 @@ export class Shell {
     }
   }
 
-  private async loadSettings(): Promise<void> {
+  private async loadSettings(error: string | null = null): Promise<void> {
     try {
-      this.dispatch({ t: "settings", settings: await api.fetchSettings() })
+      this.dispatch({ t: "settings", settings: await api.fetchSettings(), error })
     } catch {
       this.dispatch({ t: "settings", settings: null, error: "The account could not be read." })
     }
@@ -297,8 +301,8 @@ export class Shell {
     if (r === null) return
     if (r.ok) {
       const made = r.value.secret && r.value.created ? { name: r.value.created.name, secret: r.value.secret } : reveal
-      this.dispatch({ t: "settings", settings: r.value, reveal: made })
-    } else this.dispatch({ t: "settings", settings: this.model.settings, error: r.error })
+      this.dispatch({ t: "settings", settings: r.value, reveal: made, notice: null })
+    } else this.dispatch({ t: "settings", settings: this.model.settings, error: r.error, notice: null })
   }
 
   // A sensitive write refused with step_up waits for a factor, then runs again; null if the person cancels.
@@ -313,8 +317,9 @@ export class Shell {
   private pendingStepUp: ((proven: boolean) => void) | null = null
 
   private stepUp(): Promise<boolean> {
-    const passkeys = this.model.settings?.security.methods.some((x) => x.kind === "webauthn") ?? false
-    this.dispatch({ t: "step-up", prompt: { passkeys, error: null } })
+    const methods = this.model.settings?.security.methods ?? []
+    const passkeys = methods.some((x) => x.kind === "webauthn")
+    this.dispatch({ t: "step-up", prompt: { passkeys, factors: methods.length > 0, error: null } })
     return new Promise((resolve) => { this.pendingStepUp = resolve })
   }
 
@@ -324,8 +329,8 @@ export class Shell {
       this.pendingStepUp?.(proven)
       this.pendingStepUp = null
     } else {
-      const passkeys = this.model.stepUp?.passkeys ?? false
-      this.dispatch({ t: "step-up", prompt: { passkeys, error } })
+      const prompt = this.model.stepUp ?? { passkeys: false, factors: true, error: null }
+      this.dispatch({ t: "step-up", prompt: { ...prompt, error } })
     }
   }
 
@@ -409,7 +414,7 @@ export class Shell {
       morph(lens, h`<div class="lane-wrap">${views.netView(m.lanes, m.laneError)}</div>`)
       workspace.hidden = true
     } else if (m.lens === "settings") {
-      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp)}</div>`)
+      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`)
       workspace.hidden = true
     } else {
       morph(lens, raw(""))
@@ -684,6 +689,26 @@ export class Shell {
         return
       }
       case "revoke-others": await this.settingsWrite(() => api.revokeOtherSessions()); return
+      case "link-provider": {
+        const provider = el.dataset["provider"]
+        if (!provider) return
+        const r = await this.stepped(() => api.linkProvider(provider))
+        if (r === null) return
+        if (r.ok) location.assign(r.value.url)
+        else this.dispatch({ t: "settings", settings: m.settings, error: r.error })
+        return
+      }
+      case "unlink-identity": {
+        const id = parseId(el.dataset["id"] ?? null)
+        if (id === null || !confirm(`Remove ${el.dataset["name"] ?? "this way in"}? It stops signing you in at once.`)) return
+        const r = await this.stepped(() => api.unlinkIdentity(id))
+        if (r === null) return
+        if (!r.ok) { this.dispatch({ t: "settings", settings: m.settings, error: r.error }); return }
+        this.dispatch({ t: "settings", settings: r.value, notice: "Removed. It no longer signs you in." })
+        // ASVS 7.4.3: after removing a way in, offer to end the sessions that may have come through it.
+        if (r.value.sessions.length > 1 && confirm("Sign out every other browser too? Any of them may have signed in that way.")) await this.settingsWrite(() => api.revokeOtherSessions())
+        return
+      }
       default: return
     }
   }
@@ -739,6 +764,15 @@ export class Shell {
         await this.securityWrite(() => api.confirmTotp(code, name))
         return
       }
+      case "link-email": {
+        const email = String(data.get("email") ?? "").trim()
+        const r = await this.stepped(() => api.linkEmail(email))
+        if (r === null) return
+        if (!r.ok) { this.dispatch({ t: "settings", settings: m.settings, error: r.error }); return }
+        this.dispatch({ t: "settings", settings: r.value, notice: `A link is on its way to ${r.value.sent_to ?? email}. Open it in this browser to add the address.` })
+        form.reset()
+        return
+      }
       case "step-up-code": {
         const code = String(data.get("code") ?? "").trim()
         const r = code.replace(/[^0-9]/g, "").length === 6 ? await api.stepUpTotp(code) : await api.stepUpRecovery(code)
@@ -763,6 +797,19 @@ function strip(msg: { t: "grid"; cols?: number; scroll?: number; viewport?: numb
   if (msg.rem !== undefined) out.rem = msg.rem
   return out
 }
+
+// What the Account page says after a provider or a mailed link sends the browser back.
+const LINKED = new Map([
+  ["email", "That address now signs you in."],
+  ["github", "GitHub now signs you in."],
+  ["x", "X now signs you in."],
+])
+
+const LINK_ERRORS = new Map([
+  ["taken", "That sign-in already belongs to another Hireme account, so it was not added."],
+  ["denied", "Linking was cancelled."],
+  ["failed", "Linking did not finish. Try again."],
+])
 
 function lensOf(v: string | null): Lens {
   return v === "battleplan" || v === "root" || v === "gym" || v === "net" || v === "settings" ? v : "board"

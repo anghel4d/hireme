@@ -77,6 +77,11 @@ defmodule HiremeWeb.JSON do
     }
   end
 
+  @doc "One way into the account. A provider's user id stays on the server; the handle shows."
+  @spec identity(Hireme.Accounts.Identity.t()) :: map()
+  def identity(%Hireme.Accounts.Identity{} = i),
+    do: %{id: i.id, provider: i.provider, display: i.display, created_at: i.verified_at}
+
   @doc "The account's factors, how many recovery codes remain, and whether this session is fresh."
   @spec security([Hireme.Mfa.Method.t()], non_neg_integer(), boolean()) :: map()
   def security(methods, recovery_codes_left, fresh) do

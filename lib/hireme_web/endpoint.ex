@@ -71,7 +71,12 @@ defmodule HiremeWeb.Endpoint do
 
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
-  plug Plug.Parsers, parsers: [:json], pass: ["*/*"], json_decoder: Phoenix.json_library()
+  # Pages post forms (urlencoded, carrying `_csrf_token`); the shell posts JSON.
+  plug Plug.Parsers,
+    parsers: [:urlencoded, :json],
+    pass: ["*/*"],
+    json_decoder: Phoenix.json_library()
+
   plug Plug.Head
   plug Plug.Session, @session_options
   plug HiremeWeb.Router

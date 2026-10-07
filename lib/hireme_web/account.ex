@@ -1,8 +1,9 @@
 defmodule HiremeWeb.AccountController do
   @moduledoc """
-  The signed-in account over JSON: its API keys and its sessions. Every
-  action runs as that account; a key or session id from another account
-  is simply not found.
+  The signed-in account over JSON: its API keys, its sessions, and its
+  ways in. Every action runs as that account; a key, session, or
+  identity id from another account is simply not found. Adding or
+  removing a way in sits behind a fresh second factor (`:step_up`).
   """
 
   use Phoenix.Controller, formats: [:json]
@@ -12,6 +13,7 @@ defmodule HiremeWeb.AccountController do
   alias Hireme.ApiKeys
   alias HiremeWeb.Auth
   alias HiremeWeb.JSON
+  alias HiremeWeb.SignIn
 
   @expiries [nil, 30, 90, 365]
 
@@ -85,6 +87,53 @@ defmodule HiremeWeb.AccountController do
     end
   end
 
+  @doc """
+  Add a way in. An address gets a mailed link that adds it only when
+  opened in this browser; GitHub or X answer with the URL to send the
+  browser to, and their callback adds the account the person returns as.
+  """
+  def link(conn, %{"provider" => "email"} = params) do
+    with {:ok, address} <- Accounts.normalize_email(params["email"]),
+         :ok <- Accounts.request_link(address, &SignIn.link_url/1, Auth.meta(conn)) do
+      reply = Map.merge(settings(conn), %{ok: true, sent_to: address})
+      conn |> SignIn.expect_email(address, conn.assigns.account.id) |> json(reply)
+    else
+      {:error, :invalid} ->
+        JSON.refuse(conn, {:argument, "email"})
+
+      {:error, :rate_limited} ->
+        JSON.refuse(conn, {429, "Too many links were asked for. Wait a few minutes."})
+
+      {:error, :mail} ->
+        JSON.refuse(conn, {503, "The link could not be sent just now."})
+    end
+  end
+
+  def link(conn, %{"provider" => name}) do
+    with {:ok, provider} <- SignIn.parse(name),
+         {:ok, conn, url} <- SignIn.begin(conn, provider, :link) do
+      json(conn, %{ok: true, url: url})
+    else
+      :error -> JSON.refuse(conn, {:argument, "provider"})
+      {:error, _} -> JSON.refuse(conn, {502, "That provider could not be reached."})
+    end
+  end
+
+  def link(conn, _params), do: JSON.refuse(conn, {:argument, "provider"})
+
+  def unlink(conn, %{"id" => id}) do
+    with {n, ""} <- Integer.parse(to_string(id)),
+         :ok <- Accounts.unlink(n, Auth.meta(conn)) do
+      json(conn, Map.put(settings(conn), :ok, true))
+    else
+      {:error, :last} ->
+        JSON.refuse(conn, {409, "This is the only way into the account. Add another first."})
+
+      _ ->
+        JSON.refuse(conn, :not_found)
+    end
+  end
+
   def revoke_other_sessions(conn, _params) do
     Accounts.revoke_other_sessions(conn.assigns.session)
     json(conn, Map.put(settings(conn), :ok, true))
@@ -98,7 +147,9 @@ defmodule HiremeWeb.AccountController do
       keys: Enum.map(ApiKeys.list(), &JSON.key/1),
       sessions:
         Enum.map(Accounts.list_sessions(account.id), &JSON.session(&1, conn.assigns.session.id)),
-      security: HiremeWeb.MfaController.security(conn)
+      security: HiremeWeb.MfaController.security(conn),
+      identities: Enum.map(Accounts.identities(), &JSON.identity/1),
+      sign_in_methods: [:email | SignIn.providers()]
     }
   end
 
