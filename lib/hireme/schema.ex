@@ -64,6 +64,60 @@ defmodule Hireme.Accounts.Session do
   end
 end
 
+defmodule Hireme.Accounts.Identity do
+  @moduledoc "One way into an account: a verified address, a GitHub user, or an X user."
+  use Hireme.Schema
+
+  @providers [:email, :github, :x]
+  @type provider :: :email | :github | :x
+
+  schema "identities" do
+    field :provider, Ecto.Enum, values: @providers
+    field :subject, :string
+    field :display, :string, default: ""
+    field :verified_at, :utc_datetime
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def providers, do: @providers
+
+  def changeset(identity, attrs) do
+    identity
+    |> cast(attrs, [:account_id, :provider, :subject, :display, :verified_at])
+    |> validate_required([:account_id, :provider, :subject, :verified_at])
+    |> validate_length(:subject, max: 320)
+    |> validate_length(:display, max: 200)
+    |> unique_constraint([:provider, :subject])
+    |> foreign_key_constraint(:account_id)
+  end
+end
+
+defmodule Hireme.Accounts.MagicLink do
+  @moduledoc """
+  A one-time proof of an address, mailed as a link. Only the token's hash
+  is here, and no account: the address may not have one yet.
+  """
+  use Hireme.Schema
+
+  schema "magic_links" do
+    field :email, :string
+    field :token_hash, :binary, redact: true
+    field :expires_at, :utc_datetime
+    field :used_at, :utc_datetime
+    field :ip, :string, default: ""
+    field :user_agent, :string, default: ""
+    timestamps(updated_at: false)
+  end
+
+  def changeset(link, attrs) do
+    link
+    |> cast(attrs, [:email, :token_hash, :expires_at, :used_at, :ip, :user_agent])
+    |> validate_required([:email, :token_hash, :expires_at])
+    |> unique_constraint(:token_hash)
+  end
+end
+
 defmodule Hireme.ApiKeys.Key do
   @moduledoc "An agent's key: shown once, stored hashed, scoped to one account."
   use Hireme.Schema

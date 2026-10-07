@@ -76,7 +76,11 @@ defmodule Hireme.MfaTest do
       |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
       |> DateTime.truncate(:second)
 
-    aged = session |> Ecto.Changeset.change(mfa_at: stale) |> Repo.update!(skip_account: true)
+    aged =
+      session
+      |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
+      |> Repo.update!(skip_account: true)
+
     refute Mfa.fresh?(aged)
   end
 
@@ -149,6 +153,13 @@ defmodule Hireme.MfaTest do
       |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
       |> DateTime.truncate(:second)
 
-    session |> Ecto.Changeset.change(mfa_at: stale) |> Repo.update!(skip_account: true)
+    session
+    |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
+    |> Repo.update!(skip_account: true)
+  end
+
+  test "an account with no factor is fresh only just after signing in", %{session: session} do
+    assert Mfa.fresh?(session)
+    refute Mfa.fresh?(aged(session))
   end
 end

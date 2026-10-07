@@ -71,19 +71,15 @@ defmodule Hireme.Mfa do
   def required?(%Session{}), do: false
 
   @doc """
-  A session that proved a second factor within the step-up window, or
-  that belongs to an account with nothing to prove with.
+  A session fit for a sensitive change (ASVS 7.5.1): it proved a second
+  factor within the step-up window, or, for an account with nothing to
+  prove with, it signed in within that window. Such an account steps up
+  by signing in again.
   """
   @spec fresh?(Session.t()) :: boolean()
   def fresh?(%Session{} = session) do
-    case methods() do
-      [] ->
-        true
-
-      _ ->
-        session.mfa_at != nil and
-          DateTime.diff(DateTime.utc_now(), session.mfa_at) < Security.step_up_window()
-    end
+    proof = if enrolled?(), do: session.mfa_at, else: session.authenticated_at
+    proof != nil and DateTime.diff(DateTime.utc_now(), proof) < Security.step_up_window()
   end
 
   @spec recovery_codes_left() :: non_neg_integer()
