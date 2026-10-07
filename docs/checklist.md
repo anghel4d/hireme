@@ -114,7 +114,7 @@ or reused after revocation.
   means the body is simply not parsed; the controller must then
   refuse, not raise).
 - HTML responses carry exactly the CSP in `HiremeWeb.Auth`
-  (`script-src 'self'`, `frame-ancestors 'none'`, `base-uri 'none'`,
+  (`script-src 'self' 'wasm-unsafe-eval'`, `frame-ancestors 'none'`, `base-uri 'none'`,
   `object-src 'none'`, `form-action 'self'`), `permissions-policy`,
   `cross-origin-opener-policy: same-origin`, and Phoenix's
   `x-content-type-options`, `x-frame-options`, `referrer-policy`.
