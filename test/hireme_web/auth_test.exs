@@ -100,4 +100,83 @@ defmodule HiremeWeb.AuthTest do
     assert :error = HiremeWeb.McpSocket.connect(info.(foreign))
     refute other.id == account_id
   end
+
+  test "an enrolled account's new session is pending until a factor is presented, and sensitive writes need a fresh one",
+       %{conn: conn, account: account, session: session} do
+    secret32 =
+      conn |> post("/api/account/mfa/totp", %{}) |> json_response(200) |> Map.fetch!("secret")
+
+    secret = Base.decode32!(secret32, padding: false)
+
+    enrolled =
+      conn
+      |> post("/api/account/mfa/totp/confirm", %{
+        code: NimbleTOTP.verification_code(secret),
+        name: "Phone"
+      })
+      |> json_response(200)
+
+    assert [%{"kind" => "totp", "name" => "Phone"}] = enrolled["methods"]
+    assert length(enrolled["recovery_codes"]) == 10
+
+    # A fresh browser signs in and owes the factor.
+    {token, _} = Hireme.Accounts.start_session(account)
+    fresh = anonymous() |> Plug.Test.init_test_session(%{HiremeWeb.Auth.session_key() => token})
+    assert redirected_to(get(fresh, "/")) == "/sign-in/factor"
+    assert %{"error" => "second_factor"} = fresh |> get("/api/pack") |> json_response(401)
+    assert redirected_to(get(fresh, "/sign-in")) == "/sign-in/factor"
+    page = fresh |> get("/sign-in/factor") |> html_response(200)
+    assert page =~ "authenticator app" and page =~ "/assets/js/factor.js"
+
+    assert redirected_to(post(fresh, "/sign-in/factor/totp", %{code: "000000"})) =~
+             "/sign-in/factor?error="
+
+    later = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 30)
+    assert redirected_to(post(fresh, "/sign-in/factor/totp", %{code: later})) == "/"
+    assert fresh |> get("/api/pack") |> response(200)
+    assert redirected_to(get(fresh, "/sign-in/factor")) == "/"
+
+    # Minting a key is a sensitive write: fresh after the proof, refused once it ages.
+    assert %{"secret" => _} =
+             fresh |> post("/api/account/keys", %{name: "fresh"}) |> json_response(200)
+
+    stale =
+      DateTime.utc_now()
+      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
+      |> DateTime.truncate(:second)
+
+    for s <- Hireme.Accounts.list_sessions(account.id),
+        do: s |> Ecto.Changeset.change(mfa_at: stale) |> Hireme.Repo.update!(skip_account: true)
+
+    assert %{"error" => "step_up"} =
+             fresh |> post("/api/account/keys", %{name: "stale"}) |> json_response(403)
+
+    assert %{"error" => _} =
+             fresh |> post("/api/account/step-up/totp", %{code: "000000"}) |> json_response(401)
+
+    # Two steps ahead is outside the grace; a recovery code steps up instead.
+    assert %{"error" => _} =
+             fresh
+             |> post("/api/account/step-up/totp", %{
+               code: NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 60)
+             })
+             |> json_response(401)
+
+    assert %{"ok" => true, "fresh" => true} =
+             fresh
+             |> post("/api/account/step-up/recovery", %{code: hd(enrolled["recovery_codes"])})
+             |> json_response(200)
+
+    assert %{"secret" => _} =
+             fresh |> post("/api/account/keys", %{name: "stepped"}) |> json_response(200)
+
+    assert %{"security" => %{"recovery_codes_left" => 9, "fresh" => true}} =
+             fresh |> get("/api/account") |> json_response(200)
+
+    assert %{"recovery_codes" => codes} =
+             fresh |> post("/api/account/mfa/recovery", %{}) |> json_response(200)
+
+    assert length(codes) == 10
+    _ = session
+  end
 end

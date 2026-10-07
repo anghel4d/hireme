@@ -25,6 +25,7 @@ defmodule Hireme.DataCase do
 
   def setup_sandbox(tags) do
     pid = Sandbox.start_owner!(Hireme.Repo, shared: not tags[:async])
+    :ets.delete_all_objects(Hireme.RateLimit)
     on_exit(fn -> Sandbox.stop_owner(pid) end)
   end
 

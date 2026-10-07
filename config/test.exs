@@ -8,6 +8,7 @@ config :hireme, Hireme.Repo,
 
 secret_key_base = "XPx6qxoX/XRLHmiBlX6yrohT6bBZTJZai2UgJToxXZi4n0/9/jDw2FClsguZET3W"
 config :hireme, :secret_key_base, secret_key_base
+config :wax_, origin: "http://www.example.com"
 
 config :hireme, HiremeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],

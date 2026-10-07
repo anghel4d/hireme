@@ -77,6 +77,27 @@ defmodule HiremeWeb.JSON do
     }
   end
 
+  @doc "The account's factors, how many recovery codes remain, and whether this session is fresh."
+  @spec security([Hireme.Mfa.Method.t()], non_neg_integer(), boolean()) :: map()
+  def security(methods, recovery_codes_left, fresh) do
+    %{
+      methods:
+        Enum.map(methods, fn m ->
+          %{
+            id: m.id,
+            kind: m.kind,
+            name: m.name,
+            created_at: m.verified_at,
+            last_used_at: m.last_used_at,
+            backed_up: m.backed_up,
+            transports: String.split(m.transports, ",", trim: true)
+          }
+        end),
+      recovery_codes_left: recovery_codes_left,
+      fresh: fresh
+    }
+  end
+
   @spec root(Root.t()) :: map()
   def root(%Root{} = r) do
     %{

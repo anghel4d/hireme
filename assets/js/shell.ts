@@ -6,6 +6,7 @@ import { csrf, openFeed, type Focus, type Lanes, type Root, type Scoreboard, typ
 import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, morph, raw, type Raw } from "./html.ts"
+import * as webauthn from "./webauthn.ts"
 import { Store } from "./store.ts"
 import * as views from "./views.ts"
 
@@ -26,6 +27,8 @@ interface Model {
   reveal: views.Reveal | null
   renaming: number | null
   settingsError: string | null
+  enrolling: views.Enrolling
+  stepUp: views.StepUp | null
   editing: number | null
   alterError: string | null
   holdError: string | null
@@ -49,6 +52,8 @@ type Msg =
   | { t: "lane-error"; error: string }
   | { t: "settings"; settings: Settings | null; reveal?: views.Reveal | null; error?: string | null }
   | { t: "rename"; id: number | null }
+  | { t: "enrolling"; enrolling: views.Enrolling }
+  | { t: "step-up"; prompt: views.StepUp | null }
   | { t: "sheet"; open: boolean }
 
 export class Shell {
@@ -80,6 +85,8 @@ export class Shell {
       reveal: null,
       renaming: null,
       settingsError: null,
+      enrolling: null,
+      stepUp: null,
       editing: null,
       alterError: null,
       holdError: null,
@@ -188,6 +195,12 @@ export class Shell {
       case "rename":
         m.renaming = msg.id
         break
+      case "enrolling":
+        m.enrolling = msg.enrolling
+        break
+      case "step-up":
+        m.stepUp = msg.prompt
+        break
       case "sheet":
         m.sheet = msg.open
         break
@@ -279,12 +292,55 @@ export class Shell {
     }
   }
 
-  private async settingsWrite(outcome: Promise<api.Outcome<api.SettingsReply>>, reveal?: views.Reveal | null): Promise<void> {
-    const r = await outcome
+  private async settingsWrite(run: () => Promise<api.Outcome<api.SettingsReply>>, reveal?: views.Reveal | null): Promise<void> {
+    const r = await this.stepped(run)
+    if (r === null) return
     if (r.ok) {
       const made = r.value.secret && r.value.created ? { name: r.value.created.name, secret: r.value.secret } : reveal
       this.dispatch({ t: "settings", settings: r.value, reveal: made })
     } else this.dispatch({ t: "settings", settings: this.model.settings, error: r.error })
+  }
+
+  // A sensitive write refused with step_up waits for a factor, then runs again; null if the person cancels.
+  private async stepped<T>(run: () => Promise<api.Outcome<T>>): Promise<api.Outcome<T> | null> {
+    const first = await run()
+    if (first.ok || first.error !== "step_up") return first
+    const proven = await this.stepUp()
+    if (!proven) return null
+    return run()
+  }
+
+  private pendingStepUp: ((proven: boolean) => void) | null = null
+
+  private stepUp(): Promise<boolean> {
+    const passkeys = this.model.settings?.security.methods.some((x) => x.kind === "webauthn") ?? false
+    this.dispatch({ t: "step-up", prompt: { passkeys, error: null } })
+    return new Promise((resolve) => { this.pendingStepUp = resolve })
+  }
+
+  private settleStepUp(proven: boolean, error: string | null = null): void {
+    if (proven || error === null) {
+      this.dispatch({ t: "step-up", prompt: null })
+      this.pendingStepUp?.(proven)
+      this.pendingStepUp = null
+    } else {
+      const passkeys = this.model.stepUp?.passkeys ?? false
+      this.dispatch({ t: "step-up", prompt: { passkeys, error } })
+    }
+  }
+
+  private async securityWrite(run: () => Promise<api.Outcome<api.SecurityReply>>): Promise<api.SecurityReply | null> {
+    const r = await this.stepped(run)
+    if (r === null) return null
+    if (!r.ok) {
+      this.dispatch({ t: "settings", settings: this.model.settings, error: r.error })
+      return null
+    }
+    const settings = this.model.settings ? { ...this.model.settings, security: r.value } : null
+    this.dispatch({ t: "settings", settings, reveal: this.model.reveal })
+    if (r.value.recovery_codes && r.value.recovery_codes.length > 0) this.dispatch({ t: "enrolling", enrolling: { kind: "codes", codes: r.value.recovery_codes } })
+    else this.dispatch({ t: "enrolling", enrolling: null })
+    return r.value
   }
 
   private async laneWrite(outcome: Promise<api.Outcome<Lanes & { ok: true }>>): Promise<void> {
@@ -353,7 +409,7 @@ export class Shell {
       morph(lens, h`<div class="lane-wrap">${views.netView(m.lanes, m.laneError)}</div>`)
       workspace.hidden = true
     } else if (m.lens === "settings") {
-      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf())}</div>`)
+      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp)}</div>`)
       workspace.hidden = true
     } else {
       morph(lens, raw(""))
@@ -571,9 +627,53 @@ export class Shell {
       case "cancel-rename": this.dispatch({ t: "rename", id: null }); return
       case "revoke-key": {
         const id = parseId(el.dataset["id"] ?? null)
-        if (id !== null && confirm(`Revoke the key "${el.dataset["name"] ?? ""}"? Agents using it stop at once.`)) await this.settingsWrite(api.revokeKey(id))
+        if (id !== null && confirm(`Revoke the key "${el.dataset["name"] ?? ""}"? Agents using it stop at once.`)) await this.settingsWrite(() => api.revokeKey(id))
         return
       }
+      case "enroll-totp": {
+        const r = await this.stepped(() => api.beginTotp())
+        if (r === null) return
+        if (r.ok) this.dispatch({ t: "enrolling", enrolling: { kind: "totp", svg: r.value.svg, secret: r.value.secret } })
+        else this.dispatch({ t: "settings", settings: m.settings, error: r.error })
+        return
+      }
+      case "enroll-webauthn": {
+        if (!webauthn.supported()) { this.dispatch({ t: "settings", settings: m.settings, error: "This browser has no passkey support." }); return }
+        const options = await this.stepped(() => api.beginWebauthn())
+        if (options === null) return
+        if (!options.ok) { this.dispatch({ t: "settings", settings: m.settings, error: options.error }); return }
+        try {
+          const credential = await webauthn.create(options.value as never)
+          const name = prompt("Name this passkey or key", "") ?? ""
+          await this.securityWrite(() => api.confirmWebauthn(credential, name))
+        } catch (cause) {
+          this.dispatch({ t: "settings", settings: m.settings, error: cause instanceof Error ? cause.message : String(cause) })
+        }
+        return
+      }
+      case "cancel-enroll": this.dispatch({ t: "enrolling", enrolling: null }); return
+      case "new-codes": {
+        if (confirm("Replace your recovery codes? The old ones stop working.")) await this.securityWrite(() => api.newRecoveryCodes())
+        return
+      }
+      case "remove-method": {
+        const id = parseId(el.dataset["id"] ?? null)
+        if (id !== null && confirm(`Remove "${el.dataset["name"] || "this factor"}"?`)) await this.securityWrite(() => api.removeMethod(id))
+        return
+      }
+      case "step-up-webauthn": {
+        try {
+          const options = await api.stepUpWebauthn()
+          if (!options.ok) { this.settleStepUp(false, options.error); return }
+          const assertion = await webauthn.get(options.value as never)
+          const r = await api.stepUpWebauthnConfirm(assertion)
+          this.settleStepUp(r.ok, r.ok ? null : r.error)
+        } catch (cause) {
+          this.settleStepUp(false, cause instanceof Error ? cause.message : String(cause))
+        }
+        return
+      }
+      case "cancel-step-up": this.settleStepUp(false); return
       case "revoke-session": {
         const id = parseId(el.dataset["id"] ?? null)
         if (id === null) return
@@ -583,7 +683,7 @@ export class Shell {
         else this.dispatch({ t: "settings", settings: m.settings, error: r.error })
         return
       }
-      case "revoke-others": await this.settingsWrite(api.revokeOtherSessions()); return
+      case "revoke-others": await this.settingsWrite(() => api.revokeOtherSessions()); return
       default: return
     }
   }
@@ -622,13 +722,27 @@ export class Shell {
       }
       case "create-key": {
         const days = String(data.get("expires_in_days") ?? "")
-        await this.settingsWrite(api.createKey(String(data.get("name") ?? "").trim(), days === "" ? null : Number(days)))
+        const name = String(data.get("name") ?? "").trim()
+        await this.settingsWrite(() => api.createKey(name, days === "" ? null : Number(days)))
         form.reset()
         return
       }
       case "rename-key": {
         const id = parseId(form.dataset["id"] ?? null)
-        if (id !== null) await this.settingsWrite(api.renameKey(id, String(data.get("name") ?? "").trim()), m.reveal)
+        const name = String(data.get("name") ?? "").trim()
+        if (id !== null) await this.settingsWrite(() => api.renameKey(id, name), m.reveal)
+        return
+      }
+      case "confirm-totp": {
+        const code = String(data.get("code") ?? "")
+        const name = String(data.get("name") ?? "").trim() || "Authenticator app"
+        await this.securityWrite(() => api.confirmTotp(code, name))
+        return
+      }
+      case "step-up-code": {
+        const code = String(data.get("code") ?? "").trim()
+        const r = code.replace(/[^0-9]/g, "").length === 6 ? await api.stepUpTotp(code) : await api.stepUpRecovery(code)
+        this.settleStepUp(r.ok, r.ok ? null : r.error)
         return
       }
       case "gym-target": await this.laneWrite(api.gymTarget(String(data.get("target") ?? ""))); return
