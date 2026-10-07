@@ -166,6 +166,8 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme_web/sockets.ex` | Push feed, directory socket, letterbox socket |
 | `assets/wasm/desk.wat` | The column store |
 | `assets/js/shell.ts` | Model, update, draw |
+| `assets/js/webauthn.ts` | The browser's half of a passkey ceremony, base64url in and out |
+| `assets/js/factor.ts` | The factor page's passkey button |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
 | `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
 | `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |
