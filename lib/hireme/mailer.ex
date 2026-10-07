@@ -52,7 +52,7 @@ defmodule Hireme.Mailer do
       new()
       |> to(to)
       |> from({name, address})
-      |> subject(subject)
+      |> subject(header_safe(subject))
       |> text_body(body)
 
     case deliver(email) do
@@ -60,8 +60,36 @@ defmodule Hireme.Mailer do
         :ok
 
       {:error, reason} ->
-        Logger.error("mail to #{to} failed: #{inspect(reason)}")
+        Logger.error("outbound mail failed: #{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  # One subject header. Control characters would fold in a second header;
+  # anything outside ASCII is an encoded-word so the bytes stay one field.
+  defp header_safe(text) do
+    text = text |> to_string() |> String.replace(~r/[\r\n\t]/, " ")
+    if String.match?(text, ~r/[^\x20-\x7e]/), do: encoded_words(text), else: text
+  end
+
+  defp encoded_words(text) do
+    text
+    |> utf8_chunks(45)
+    |> Enum.map_join(" ", &"=?utf-8?B?#{Base.encode64(&1)}?=")
+  end
+
+  defp utf8_chunks(text, max) do
+    {chunks, last} =
+      text
+      |> String.graphemes()
+      |> Enum.reduce({[], <<>>}, fn grapheme, {chunks, buf} ->
+        if buf != "" and byte_size(buf <> grapheme) > max do
+          {[buf | chunks], grapheme}
+        else
+          {chunks, buf <> grapheme}
+        end
+      end)
+
+    Enum.reverse(if last == "", do: chunks, else: [last | chunks])
   end
 end
