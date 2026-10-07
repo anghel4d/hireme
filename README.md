@@ -109,3 +109,7 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
 | `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
 | `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |
+
+## License
+
+Copyright (c) 2026 Matei Anghel. All rights reserved. See [LICENSE](LICENSE).
