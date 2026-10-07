@@ -66,20 +66,23 @@ defmodule Hireme.Mcp do
 
   The directory socket at `/mcp/websocket` lists, searches, and
   recommends applications. Ranking on that socket uses `score_100`
-  (Life-EV, 0–100) as the primary signal. A letterbox socket at
-  `/mcp/letterbox/:letterbox_id/websocket` is the full-duplex lease.
-  Its handle reads and writes one application. The command carried to
-  the consumer has no application id. A job id, a variant id, or a
-  letterbox id in the arguments is checked against the handle and
-  otherwise ignored. Neither socket submits an application.
+  (Life-EV, 0–100) as the primary signal. The same socket logs gym
+  reps and networking entries (not CRM, not job submits). A letterbox
+  socket at `/mcp/letterbox/:letterbox_id/websocket` is the full-duplex
+  lease. Its handle reads and writes one application. The command
+  carried to the consumer has no application id. A job id, a variant
+  id, or a letterbox id in the arguments is checked against the handle
+  and otherwise ignored. Neither socket submits an application.
   """
 
   alias Hireme.CvPair
   alias Hireme.Desk
   alias Hireme.Desk.Filters
+  alias Hireme.Gym
   alias Hireme.Letterbox
   alias Hireme.Letterbox.Handle
   alias Hireme.Mcp.Args
+  alias Hireme.Net
   alias Hireme.Pipeline
 
   @type frame :: map()
@@ -175,6 +178,44 @@ defmodule Hireme.Mcp do
          end),
        "bins" => Enum.map(chart.bins, &%{"lo" => &1.lo, "hi" => &1.hi, "count" => &1.count})
      }}
+  end
+
+  defp directory_call("gym_status", _args), do: {:ok, gym_progress_view(Gym.progress())}
+
+  defp directory_call("gym_log", args) do
+    case Gym.log(args) do
+      {:ok, rep} ->
+        {:ok, Map.put(gym_rep_view(rep), "progress", gym_progress_view(Gym.progress()))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp directory_call("gym_set_target", args) do
+    with {:ok, n} <- Args.int(args, "target"),
+         {:ok, n} <- Gym.set_target(n) do
+      {:ok, gym_progress_view(Gym.progress()) |> Map.put("target", n)}
+    end
+  end
+
+  defp directory_call("net_status", _args), do: {:ok, net_progress_view(Net.progress())}
+
+  defp directory_call("net_log", args) do
+    case Net.log(args) do
+      {:ok, entry} ->
+        {:ok, Map.put(net_entry_view(entry), "progress", net_progress_view(Net.progress()))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp directory_call("net_set_lane", args) do
+    with {:ok, url} <- Args.string(args, "url"),
+         {:ok, _lane} <- Net.set_lane(url) do
+      {:ok, net_progress_view(Net.progress())}
+    end
   end
 
   defp directory_call(name, _args)
@@ -278,6 +319,60 @@ defmodule Hireme.Mcp do
           },
           "min_score" => %{"type" => "integer", "minimum" => 0, "maximum" => 100}
         }
+      ),
+      tool(
+        "gym_status",
+        "Gym conditioning progress: daily target, streak, weekly pace score (not Life-EV score_100), topic counts. Jumping jacks for the fight. FIRE HOLD — does not submit jobs.",
+        %{}
+      ),
+      tool(
+        "gym_log",
+        "Log a LeetCode / Codeforces / systems rep. Upserts the problem by platform+slug. Conditioning, not the job. FIRE HOLD — does not submit jobs.",
+        %{
+          "platform" => %{"type" => "string", "enum" => Enum.map(Gym.platforms(), &Gym.name/1)},
+          "title" => %{"type" => "string"},
+          "slug" => %{"type" => "string"},
+          "topic" => %{"type" => "string", "enum" => Enum.map(Gym.topics(), &Gym.name/1)},
+          "difficulty" => %{
+            "type" => "string",
+            "enum" => Enum.map(Gym.difficulties(), &Gym.name/1)
+          },
+          "url" => %{"type" => "string"},
+          "outcome" => %{"type" => "string", "enum" => Enum.map(Gym.outcomes(), &Gym.name/1)},
+          "minutes" => %{"type" => "integer", "minimum" => 0},
+          "note" => %{"type" => "string"},
+          "done_on" => %{"type" => "string", "description" => "ISO date. Defaults to today."}
+        }
+      ),
+      tool(
+        "gym_set_target",
+        "Set the gym daily solved-rep target (1–30). Conditioning pace, not Life-EV. FIRE HOLD.",
+        %{"target" => %{"type" => "integer", "minimum" => 1, "maximum" => 30}}
+      ),
+      tool(
+        "net_status",
+        "Networking lane: Broadside Observer URL, shipped posts/artifacts this week, open drafts, observer runs. Not CRM. FIRE HOLD — does not submit jobs.",
+        %{}
+      ),
+      tool(
+        "net_log",
+        "Log a Broadside Observer run, shipped artifact, X/social post, or outreach draft. Not a CRM. No contacts, no sequences. FIRE HOLD — does not submit jobs.",
+        %{
+          "kind" => %{"type" => "string", "enum" => Enum.map(Net.kinds(), &Net.name/1)},
+          "channel" => %{"type" => "string", "enum" => Enum.map(Net.channels(), &Net.name/1)},
+          "title" => %{"type" => "string"},
+          "url" => %{"type" => "string"},
+          "body" => %{"type" => "string"},
+          "shipped_on" => %{
+            "type" => "string",
+            "description" => "ISO date. Defaults to today except drafts."
+          }
+        }
+      ),
+      tool(
+        "net_set_lane",
+        "Set the Broadside Observer research lane URL. Not CRM. FIRE HOLD.",
+        %{"url" => %{"type" => "string"}}
       )
     ]
   end
@@ -413,6 +508,65 @@ defmodule Hireme.Mcp do
         "band" => Hireme.LifeEv.name(card.band)
       }
     end)
+  end
+
+  defp gym_progress_view(%Gym.Progress{} = progress) do
+    %{
+      "today" => Date.to_iso8601(progress.today),
+      "target" => progress.target,
+      "streak" => progress.streak,
+      "solved_today" => progress.solved_today,
+      "solved_week" => progress.solved_week,
+      "score" => progress.score,
+      "note" =>
+        "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
+      "topics" =>
+        Enum.map(progress.topics, fn row ->
+          %{"topic" => Gym.name(row.key), "label" => row.label, "count" => row.count}
+        end),
+      "recent" => Enum.map(progress.recent, &gym_rep_view/1)
+    }
+  end
+
+  defp gym_rep_view(%Gym.Rep{} = rep) do
+    problem = rep.problem
+
+    %{
+      "id" => rep.id,
+      "done_on" => Date.to_iso8601(rep.done_on),
+      "outcome" => Gym.name(rep.outcome),
+      "minutes" => rep.minutes,
+      "note" => rep.note,
+      "platform" => Gym.name(problem.platform),
+      "slug" => problem.slug,
+      "title" => problem.title,
+      "topic" => Gym.name(problem.topic),
+      "difficulty" => Gym.name(problem.difficulty),
+      "url" => problem.url
+    }
+  end
+
+  defp net_progress_view(%Net.Progress{} = progress) do
+    %{
+      "lane" => progress.lane,
+      "shipped_week" => progress.shipped_week,
+      "drafts" => progress.drafts,
+      "observer_runs" => progress.observer_runs,
+      "note" => "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit.",
+      "recent" => Enum.map(progress.recent, &net_entry_view/1)
+    }
+  end
+
+  defp net_entry_view(%Net.Entry{} = entry) do
+    %{
+      "id" => entry.id,
+      "kind" => Net.name(entry.kind),
+      "channel" => Net.name(entry.channel),
+      "title" => entry.title,
+      "url" => entry.url,
+      "body" => entry.body,
+      "shipped_on" => entry.shipped_on && Date.to_iso8601(entry.shipped_on)
+    }
   end
 
   defp tool(name, description, schema) do

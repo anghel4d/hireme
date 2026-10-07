@@ -7,7 +7,9 @@ defmodule HiremeWeb.BoardLive do
   alias Hireme.Desk.Overlay
   alias Hireme.Desk.Placed
   alias Hireme.GridNav
+  alias Hireme.Gym
   alias Hireme.Narrative
+  alias Hireme.Net
   alias Hireme.Pipeline
   alias Hireme.Desk.Filters
 
@@ -24,6 +26,10 @@ defmodule HiremeWeb.BoardLive do
      |> assign(:batches, [])
      |> assign(:scoreboard, Campaign.scoreboard())
      |> assign(:ev_chart, Hireme.LifeEv.chart([]))
+     |> assign(:gym, Gym.progress())
+     |> assign(:net, Net.progress())
+     |> assign(:gym_error, nil)
+     |> assign(:net_error, nil)
      |> assign(:hold_error, nil)
      |> assign(:app_id, nil)
      |> assign(:index, nil)
@@ -55,7 +61,7 @@ defmodule HiremeWeb.BoardLive do
         batches={@batches}
         count={length(@cards)}
       />
-      <.scoreboard board={@scoreboard} />
+      <.scoreboard board={@scoreboard} gym={@gym} net={@net} />
       <.ev_chart chart={@ev_chart} filters={@filters} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
         <.battleplan
@@ -67,6 +73,12 @@ defmodule HiremeWeb.BoardLive do
       </div>
       <div :if={@lens == :root && @root} class="root-wrap">
         <.root_view root={@root} />
+      </div>
+      <div :if={@lens == :gym} class="lane-wrap">
+        <.gym_view gym={@gym} error={@gym_error} />
+      </div>
+      <div :if={@lens == :net} class="lane-wrap">
+        <.net_view net={@net} error={@net_error} />
       </div>
       <div :if={@lens == :board} class="workspace">
         <div id="grid" class="grid-scroll" phx-hook="Grid" data-scroll={@grid.scroll}>
@@ -144,6 +156,54 @@ defmodule HiremeWeb.BoardLive do
 
   def handle_event("root", _params, socket) do
     {:noreply, push_patch(socket, to: desk_path(socket, %{lens: :root}))}
+  end
+
+  def handle_event("gym", _params, socket) do
+    {:noreply, push_patch(socket, to: desk_path(socket, %{lens: :gym}))}
+  end
+
+  def handle_event("net", _params, socket) do
+    {:noreply, push_patch(socket, to: desk_path(socket, %{lens: :net}))}
+  end
+
+  def handle_event("gym_log", params, socket) do
+    case Gym.log(params) do
+      {:ok, _rep} ->
+        {:noreply, socket |> assign(:gym_error, nil) |> refresh_lanes()}
+
+      {:error, {:argument, name}} ->
+        {:noreply, assign(socket, :gym_error, "Need a #{name}.")}
+
+      {:error, _} ->
+        {:noreply, assign(socket, :gym_error, "Could not log that rep.")}
+    end
+  end
+
+  def handle_event("gym_target", %{"target" => target}, socket) do
+    case Gym.set_target(target) do
+      {:ok, _} -> {:noreply, socket |> assign(:gym_error, nil) |> refresh_lanes()}
+      {:error, _} -> {:noreply, assign(socket, :gym_error, "Daily target is 1–30.")}
+    end
+  end
+
+  def handle_event("net_log", params, socket) do
+    case Net.log(params) do
+      {:ok, _entry} ->
+        {:noreply, socket |> assign(:net_error, nil) |> refresh_lanes()}
+
+      {:error, {:argument, name}} ->
+        {:noreply, assign(socket, :net_error, "Need a #{name}.")}
+
+      {:error, _} ->
+        {:noreply, assign(socket, :net_error, "Could not log that entry.")}
+    end
+  end
+
+  def handle_event("net_lane", %{"url" => url}, socket) do
+    case Net.set_lane(url) do
+      {:ok, _} -> {:noreply, socket |> assign(:net_error, nil) |> refresh_lanes()}
+      {:error, _} -> {:noreply, assign(socket, :net_error, "Lane URL did not save.")}
+    end
   end
 
   def handle_event("filter", params, socket) do
@@ -321,6 +381,8 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
     |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
+    |> assign(:gym, Gym.progress())
+    |> assign(:net, Net.progress())
     |> assign(:loaded, true)
   end
 
@@ -349,6 +411,8 @@ defmodule HiremeWeb.BoardLive do
     title =
       case {socket.assigns.lens, socket.assigns.focus} do
         {:root, _} -> "Root CV"
+        {:gym, _} -> "Gym"
+        {:net, _} -> "Net"
         {_, %{job: job}} -> "#{job.company} · #{Desk.code(job.id)}"
         _ -> "Desk"
       end
@@ -367,7 +431,14 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
     |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
+    |> refresh_lanes()
     |> maybe_reload_root()
+  end
+
+  defp refresh_lanes(socket) do
+    socket
+    |> assign(:gym, Gym.progress())
+    |> assign(:net, Net.progress())
   end
 
   defp maybe_reload_root(%{assigns: %{lens: :root}} = socket) do
@@ -506,10 +577,14 @@ defmodule HiremeWeb.BoardLive do
 
   defp lens_param(:battleplan), do: "battleplan"
   defp lens_param(:root), do: "root"
+  defp lens_param(:gym), do: "gym"
+  defp lens_param(:net), do: "net"
   defp lens_param(_), do: nil
 
   defp parse_lens("battleplan"), do: :battleplan
   defp parse_lens("root"), do: :root
+  defp parse_lens("gym"), do: :gym
+  defp parse_lens("net"), do: :net
   defp parse_lens(_), do: :board
 
   defp parse_id(id) when is_integer(id), do: id

@@ -58,11 +58,23 @@ Discovered, freshness, gated, in batch, draft ready, fire ready, open fire, subm
 
 Freshness (`open`, `thin`, `closed`, `blocked`) and the gate (`pursue`, `maybe`, `skip`) are fields on the card. One stage is active. `open_fire` and `submitted` are refused while the batch fire is hold. Naming open fire records that decision. It does not send an application.
 
-The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch.
+The scoreboard reads leftover URL counts from the latest snapshot, then counts batches and applications queued today, submits today, the cumulative submit count, and pace against the snapshot's daily target. Variety flags are computed per batch. Gym (daily reps / streak / weekly pace) and Net (shipped / drafts / Observer runs) sit on the same strip.
 
 ## Life-EV (`score_100`)
 
 Every job and employer gets `score_100` (0–100). Standing order from the hunt: OpenAI / Anthropic / SpaceX / Neuralink = 100; Starfish / Valve / GDM / Meta / tier-2 labs = 90; other big tech >$200k = 85; then descending. Ladder: [`alchemy/score-ladder.md`](alchemy/score-ladder.md). The board default-sorts higher first and filters by band / min score. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100`. FIRE HOLD — scoring does not submit.
+
+## Gym
+
+Jumping jacks / lifting for the fight: LeetCode, Codeforces, systems drills. Necessary conditioning, not the job. `Hireme.Gym` tracks problems (platform, topic, difficulty) and reps (solved / attempt / skip). Daily target lives in kv (`gym` / `daily_target`, default 3). Streak is consecutive days with a solved rep. Weekly pace (`score` 0–100) is solved-this-week against `target × 7`. It is **not** Life-EV `score_100`.
+
+The desk scoreboard shows `gym today/target · streak · pace`. The Gym lens (`?lens=gym`) logs a rep and sets the target. Directory MCP: `gym_status`, `gym_log`, `gym_set_target`. CLI: `mix hireme.gym`.
+
+## Networking
+
+Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadside Observer, ship the artifact, post the work (X and similar), keep outreach drafts here until they ship.
+
+`Hireme.Net` entries are a closed set: `observer`, `artifact`, `post`, `draft`. Channels: `broadside`, `x`, `other`. The Observer research URL lives in kv (`net` / `broadside_lane`). The scoreboard shows shipped-this-week, open drafts, and observer runs. The Net lens (`?lens=net`) sets the lane and logs an entry. Directory MCP: `net_status`, `net_log`, `net_set_lane`. CLI: `mix hireme.net`. FIRE HOLD — networking does not submit jobs.
 
 ## Types
 
@@ -80,7 +92,7 @@ For 90 days after a generation opens, the lineage can be rewritten. After that, 
 
 Letterboxes are single-producer, single-consumer. Each application has one letterbox. An agent leases that id and the lease opens a full-duplex websocket. The connection process is the only producer. The letterbox process is the only consumer. The handle closes over that application's CV pair. Commands do not carry an application id.
 
-`/mcp/websocket` lists letterboxes and batches. It cannot write.
+`/mcp/websocket` lists letterboxes and batches, ranks applications on `score_100`, and logs gym reps plus networking entries. It cannot write an application.
 
 `/mcp/letterbox/<id>/websocket` is the lease. A second connection to that id is refused. A second connection to another application on the same employer CV is refused while the lease is held. One connection cannot hold two leases.
 
@@ -102,7 +114,9 @@ Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists th
 | `lib/hireme/cv_pair.ex` | The typed CV pair and the quarterly cooldown |
 | `lib/hireme/letterbox.ex` | SPSC lease, one application per handle |
 | `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
-| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100` |
+| `lib/hireme/gym.ex` | Conditioning grind: problems, reps, streak, daily target |
+| `lib/hireme/net.ex` | Broadside Observer + posts/artifacts/drafts. Not CRM |
+| `lib/hireme/mcp.ex` | Tool calls on a directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
 | `lib/hireme_web/mcp_socket.ex` | Directory socket and letterbox socket |
 | `lib/hireme/desk.ex` | Cards, stages, naming open fire |
 | `lib/hireme_web/live/board_live.ex` | The desk |
