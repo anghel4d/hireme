@@ -34,7 +34,12 @@ defmodule Hireme.Desk.Card do
     :gate,
     :fit,
     :score_100,
-    :band
+    :band,
+    :load,
+    :cap,
+    :heat_state,
+    :ats_vendor,
+    :cooldown_days
   ]
   defstruct @enforce_keys
 
@@ -67,16 +72,23 @@ defmodule Hireme.Desk.Card do
           gate: atom(),
           fit: String.t(),
           score_100: Hireme.LifeEv.score(),
-          band: Hireme.LifeEv.band()
+          band: Hireme.LifeEv.band(),
+          load: float(),
+          cap: float(),
+          heat_state: :cool | :warm | :hot | :blocked,
+          ats_vendor: atom(),
+          cooldown_days: non_neg_integer() | nil
         }
 
   @doc """
-  Board order: Life-EV first, then batch, then rung, then heat, then company.
+  Board order: Life-EV first, then cooler company load, then batch, rung, interest heat, company.
   """
   @spec order(t()) ::
-          {integer(), non_neg_integer(), non_neg_integer(), integer(), String.t()}
+          {integer(), integer(), non_neg_integer(), non_neg_integer(), integer(), String.t()}
   def order(%__MODULE__{} = card) do
-    {-card.score_100, card.batch_ordinal || 999, Pipeline.rank(card.stage), -card.heat,
+    ratio = if card.cap <= 0, do: 100, else: round(card.load / card.cap * 100)
+
+    {-card.score_100, ratio, card.batch_ordinal || 999, Pipeline.rank(card.stage), -card.heat,
      card.company}
   end
 end

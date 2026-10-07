@@ -26,6 +26,7 @@ defmodule HiremeWeb.BoardLive do
      |> assign(:batches, [])
      |> assign(:scoreboard, Campaign.scoreboard())
      |> assign(:ev_chart, Hireme.LifeEv.chart([]))
+     |> assign(:heat_chart, Hireme.Heat.chart())
      |> assign(:gym, Gym.progress())
      |> assign(:net, Net.progress())
      |> assign(:gym_error, nil)
@@ -63,6 +64,7 @@ defmodule HiremeWeb.BoardLive do
       />
       <.scoreboard board={@scoreboard} gym={@gym} net={@net} />
       <.ev_chart chart={@ev_chart} filters={@filters} />
+      <.heat_chart chart={@heat_chart} filters={@filters} />
       <div :if={@lens == :battleplan && @focus} class="battleplan-wrap">
         <.battleplan
           focus={@focus}
@@ -199,6 +201,19 @@ defmodule HiremeWeb.BoardLive do
     end
   end
 
+  def handle_event("heat_override", %{"reason" => reason}, socket) do
+    case Hireme.Heat.set_override(socket.assigns.app_id, reason) do
+      {:ok, _} ->
+        {:noreply, socket |> assign(:hold_error, nil) |> refresh_open()}
+
+      {:error, :reason} ->
+        {:noreply, assign(socket, :hold_error, "HEAT override needs a written reason.")}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("net_lane", %{"url" => url}, socket) do
     case Net.set_lane(url) do
       {:ok, _} -> {:noreply, socket |> assign(:net_error, nil) |> refresh_lanes()}
@@ -243,6 +258,14 @@ defmodule HiremeWeb.BoardLive do
       {:error, :fire_hold} ->
         {:noreply,
          assign(socket, :hold_error, "FIRE HOLD. Name open fire on this batch before a submit.")}
+
+      {:error, :heat} ->
+        {:noreply,
+         assign(
+           socket,
+           :hold_error,
+           "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
+         )}
 
       {:error, :leased} ->
         {:noreply, assign(socket, :hold_error, "This application is leased to an agent.")}
@@ -381,6 +404,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
     |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
+    |> assign(:heat_chart, Hireme.Heat.chart())
     |> assign(:gym, Gym.progress())
     |> assign(:net, Net.progress())
     |> assign(:loaded, true)
@@ -431,6 +455,7 @@ defmodule HiremeWeb.BoardLive do
     |> assign(:batches, Desk.list_batches())
     |> assign(:scoreboard, Campaign.scoreboard())
     |> assign(:ev_chart, Hireme.LifeEv.chart(cards))
+    |> assign(:heat_chart, Hireme.Heat.chart())
     |> refresh_lanes()
     |> maybe_reload_root()
   end

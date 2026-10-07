@@ -385,6 +385,30 @@ kbd {
   color: var(--accent);
   font-weight: 650;
 }
+.heat-load {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.heat-load.is-hot { color: var(--due); }
+.heat-load.is-blocked { color: var(--due); font-weight: 650; }
+.heat-chart {
+  flex: 0 0 auto;
+  padding: 0.35rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--browse);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.heat-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+}
+@media (max-width: 720px) {
+  .heat-cols { grid-template-columns: 1fr; }
+}
 
 .pip {
   width: 0.55rem;

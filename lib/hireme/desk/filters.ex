@@ -8,6 +8,7 @@ defmodule Hireme.Desk.Filters do
   """
 
   alias Hireme.Desk.Job
+  alias Hireme.Heat
   alias Hireme.LifeEv
   alias Hireme.Pipeline
 
@@ -18,7 +19,8 @@ defmodule Hireme.Desk.Filters do
           status: Job.status() | :all,
           batch: String.t() | :leftover | :all,
           band: LifeEv.band() | :all,
-          min_score: 0..100
+          min_score: 0..100,
+          heat: :all | :cool | :warm | :hot | :blocked
         }
 
   defstruct q: "",
@@ -27,7 +29,8 @@ defmodule Hireme.Desk.Filters do
             status: :open,
             batch: :all,
             band: :all,
-            min_score: 0
+            min_score: 0,
+            heat: :all
 
   @spec from_params(map()) :: t()
   def from_params(params) when is_map(params) do
@@ -38,7 +41,8 @@ defmodule Hireme.Desk.Filters do
       status: status(params["status"]),
       batch: batch(params["batch"]),
       band: band(params["band"]),
-      min_score: min_score(params["min_score"])
+      min_score: min_score(params["min_score"]),
+      heat: heat(params["heat"])
     }
   end
 
@@ -46,7 +50,7 @@ defmodule Hireme.Desk.Filters do
   def merge(%__MODULE__{} = filters, overrides) when is_map(overrides) do
     struct!(
       filters,
-      Map.take(overrides, [:q, :stage, :profile, :status, :batch, :band, :min_score])
+      Map.take(overrides, [:q, :stage, :profile, :status, :batch, :band, :min_score, :heat])
     )
   end
 
@@ -60,6 +64,7 @@ defmodule Hireme.Desk.Filters do
     |> put("batch", filters.batch, :all)
     |> put("band", filters.band, :all)
     |> put("min_score", filters.min_score, 0)
+    |> put("heat", filters.heat, :all)
   end
 
   @spec stage_value(t()) :: String.t()
@@ -84,6 +89,9 @@ defmodule Hireme.Desk.Filters do
 
   @spec min_score_value(t()) :: String.t()
   def min_score_value(%__MODULE__{min_score: n}), do: Integer.to_string(n)
+
+  @spec heat_value(t()) :: String.t()
+  def heat_value(%__MODULE__{heat: heat}), do: Heat.state_name(heat)
 
   defp stage(value) do
     case Pipeline.parse(value) do
@@ -125,6 +133,13 @@ defmodule Hireme.Desk.Filters do
   end
 
   defp min_score(_), do: 0
+
+  defp heat(value) do
+    case Heat.parse_state(value) do
+      {:ok, state} -> state
+      :error -> :all
+    end
+  end
 
   defp put(query, _key, value, value), do: query
   defp put(query, key, value, _default), do: Map.put(query, key, to_string(value))
