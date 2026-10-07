@@ -7,10 +7,13 @@ defmodule Hireme.Desk.Filters do
   out so the URL stays short.
 
   `min_score` is the lowest `score_100` shown. `band` picks one band of
-  the Life-EV ladder; both apply when both are given.
+  the Life-EV ladder; both apply when both are given. `heat` is company
+  load after the governor paints the card (`cool` / `warm` / `hot` /
+  `blocked`); it is not a SQL column.
   """
 
   alias Hireme.Desk.Job
+  alias Hireme.Heat
   alias Hireme.LifeEv
   alias Hireme.Pipeline
 
@@ -21,7 +24,8 @@ defmodule Hireme.Desk.Filters do
           status: Job.status() | :all,
           batch: String.t() | :leftover | :all,
           min_score: LifeEv.score(),
-          band: LifeEv.band() | :all
+          band: LifeEv.band() | :all,
+          heat: :all | :cool | :warm | :hot | :blocked
         }
 
   defstruct q: "",
@@ -30,9 +34,10 @@ defmodule Hireme.Desk.Filters do
             status: :open,
             batch: :all,
             min_score: 0,
-            band: :all
+            band: :all,
+            heat: :all
 
-  @keys [:q, :stage, :profile, :status, :batch, :min_score, :band]
+  @keys [:q, :stage, :profile, :status, :batch, :min_score, :band, :heat]
 
   @spec from_params(map()) :: t()
   def from_params(params) when is_map(params) do
@@ -43,7 +48,8 @@ defmodule Hireme.Desk.Filters do
       status: status(params["status"]),
       batch: batch(params["batch"]),
       min_score: min_score(params["min_score"]),
-      band: band(params["band"])
+      band: band(params["band"]),
+      heat: heat(params["heat"])
     }
   end
 
@@ -62,6 +68,7 @@ defmodule Hireme.Desk.Filters do
     |> put("batch", filters.batch, :all)
     |> put("min_score", filters.min_score, 0)
     |> put("band", filters.band, :all)
+    |> put("heat", filters.heat, :all)
   end
 
   defp stage(value) do
@@ -101,6 +108,13 @@ defmodule Hireme.Desk.Filters do
   defp band(value) do
     case LifeEv.parse_band(value) do
       {:ok, band} -> band
+      :error -> :all
+    end
+  end
+
+  defp heat(value) do
+    case Heat.parse_state(value) do
+      {:ok, state} -> state
       :error -> :all
     end
   end

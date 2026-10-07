@@ -142,7 +142,12 @@ defmodule Hireme.Import do
   defp import_json(%{"apps" => apps} = doc, profile, filename) when is_list(apps) do
     batch = if doc["batch"], do: upsert_batch(doc), else: nil
     count = Enum.reduce(apps, 0, fn app, n -> upsert_app(profile, app, batch, doc) + n end)
-    if batch, do: refresh_variety(batch)
+
+    if batch do
+      Desk.govern_batch(batch)
+      refresh_variety(Repo.get!(Batch, batch.id))
+    end
+
     {:ok, %Report{kind: :apps, count: count, source: filename}}
   end
 
@@ -252,6 +257,7 @@ defmodule Hireme.Import do
       freshness: app["freshness"] || "unknown",
       gate: app["gate"] || defaults["gate"] || "unset",
       squad: app["squad"] || (batch && batch.squad) || "",
+      department: app["department"] || app["Department"] || "",
       score_100: app["score_100"] || app["score"] || app["Score"],
       employer_id: employer && employer.id,
       batch_id: batch && batch.id,

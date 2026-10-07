@@ -36,7 +36,10 @@ defmodule Hireme.Desk.Job do
     field :gate, Ecto.Enum, values: [:unset, :pursue, :maybe, :skip], default: :unset
     field :fit, :string, default: ""
     field :squad, :string, default: ""
+    field :department, :string, default: ""
     field :score_100, :integer, default: 50
+    field :heat_override, :boolean, default: false
+    field :heat_override_reason, :string, default: ""
 
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :employer, Hireme.Desk.Employer
@@ -88,7 +91,10 @@ defmodule Hireme.Desk.Job do
       :gate,
       :fit,
       :squad,
+      :department,
       :score_100,
+      :heat_override,
+      :heat_override_reason,
       :employer_id,
       :batch_id
     ])

@@ -21,6 +21,8 @@ defmodule Hireme.Desk do
   alias Hireme.Cv
   alias Hireme.Cv.Lineage
   alias Hireme.CvPair
+  alias Hireme.Heat
+  alias Hireme.Heat.Verdict
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Card
   alias Hireme.Desk.Event
@@ -55,6 +57,8 @@ defmodule Hireme.Desk do
           | :not_additive
           | :lineage
           | :command
+          | :heat
+          | :reason
 
   @type command ::
           :get
@@ -79,9 +83,13 @@ defmodule Hireme.Desk do
 
   @spec list_cards(Filters.t()) :: [Card.t()]
   def list_cards(%Filters{} = filters) do
+    snap = Heat.snapshot()
+
     filters
     |> card_query()
     |> Repo.all()
+    |> Enum.map(&paint_card(&1, snap))
+    |> Enum.filter(&heat_match?(&1, filters.heat))
     |> Enum.sort_by(&Card.order/1)
   end
 
@@ -241,7 +249,8 @@ defmodule Hireme.Desk do
   @spec set_stage(pos_integer(), Pipeline.stage()) :: {:ok, Job.t()} | {:error, refusal()}
   def set_stage(job_id, stage) do
     with :ok <- Letterbox.permit_job(job_id),
-         :ok <- fire_permits(job_id, stage) do
+         :ok <- fire_permits(job_id, stage),
+         :ok <- heat_permits(job_id, stage) do
       Repo.transaction(fn -> write_stage(Repo.get!(Job, job_id), stage) end)
     end
   end
@@ -250,6 +259,62 @@ defmodule Hireme.Desk do
     if Pipeline.fire_locked?(stage) and not batch_open?(job_id),
       do: {:error, :fire_hold},
       else: :ok
+  end
+
+  defp heat_permits(job_id, stage) do
+    job = Repo.get!(Job, job_id)
+
+    if Heat.entering?(job.current_stage, stage) do
+      case Heat.can_apply(job) do
+        %Verdict{decision: :allow} -> :ok
+        %Verdict{} -> {:error, :heat}
+      end
+    else
+      :ok
+    end
+  end
+
+  @spec govern_batch(Batch.t() | String.t()) :: %{
+          kept: [Job.t()],
+          deferred: [{Job.t(), Verdict.t()}]
+        }
+  def govern_batch(%Batch{} = batch) do
+    result = Heat.mix_batch(batch)
+
+    Enum.each(result.deferred, fn {job, verdict} ->
+      apply_heat_defer(job, verdict)
+    end)
+
+    result
+  end
+
+  def govern_batch(code) when is_binary(code) do
+    case Repo.get_by(Batch, code: code) do
+      nil -> %{kept: [], deferred: []}
+      batch -> govern_batch(batch)
+    end
+  end
+
+  defp apply_heat_defer(%Job{} = job, %Verdict{} = verdict) do
+    note =
+      "HEAT DEFER · #{verdict.note}" <>
+        if(is_integer(verdict.cooldown_days) and verdict.cooldown_days > 0,
+          do: " · #{verdict.cooldown_days}d",
+          else: ""
+        )
+
+    job =
+      job
+      |> Job.changeset(%{batch_id: nil, next_action: note})
+      |> Repo.update!()
+
+    if job.current_stage in [:fire_ready, :open_fire] do
+      write_stage(job, :gated)
+    end
+
+    %Event{}
+    |> Event.changeset(%{job_app_id: job.id, kind: "heat", body: note})
+    |> Repo.insert!()
   end
 
   defp write_stage(%Job{} = job, stage) do
@@ -430,9 +495,32 @@ defmodule Hireme.Desk do
       freshness: j.freshness,
       gate: j.gate,
       fit: j.fit,
-      score_100: j.score_100
+      score_100: j.score_100,
+      listing_url: j.listing_url,
+      canonical_url: j.canonical_url,
+      department: j.department,
+      squad: j.squad,
+      heat_override: j.heat_override,
+      heat_override_reason: j.heat_override_reason
     })
   end
+
+  defp paint_card(%Card{} = card, snapshot) do
+    painted = Heat.decorate(card, snapshot)
+
+    %{
+      card
+      | load: painted.load,
+        cap: painted.cap,
+        heat_state: painted.heat_state,
+        ats_vendor: painted.ats_vendor,
+        cooldown_days: painted.cooldown_days
+    }
+  end
+
+  defp heat_match?(_card, :all), do: true
+  defp heat_match?(%Card{heat_state: state}, state), do: true
+  defp heat_match?(_, _), do: false
 
   defp filter(query, _field, :all), do: query
   defp filter(query, :q, ""), do: query
