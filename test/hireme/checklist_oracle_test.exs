@@ -878,7 +878,7 @@ defmodule Hireme.ChecklistOracleTest do
   defp csp?(conn) do
     [policy] = get_resp_header(conn, "content-security-policy")
 
-    policy =~ "script-src 'self'" and policy =~ "frame-ancestors 'none'" and
+    policy =~ "script-src 'self' 'wasm-unsafe-eval'" and policy =~ "frame-ancestors 'none'" and
       policy =~ "base-uri 'none'" and
       policy =~ "object-src 'none'" and policy =~ "form-action 'self'"
   end

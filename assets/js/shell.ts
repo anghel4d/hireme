@@ -514,8 +514,14 @@ export class Shell {
 
     root.addEventListener("submit", (e) => {
       const form = e.target as HTMLFormElement
-      e.preventDefault()
-      void this.onSubmit(form)
+      // Shell forms carry data-form. A posted form with an action, such as
+      // sign-out, must actually navigate; the filter form has no action.
+      if (form.dataset["form"]) {
+        e.preventDefault()
+        void this.onSubmit(form)
+      } else if (!form.getAttribute("action")) {
+        e.preventDefault()
+      }
     })
 
     const gridEl = root.querySelector<HTMLElement>("#grid")
