@@ -1,6 +1,6 @@
 // Pure views: model in, HTML out. Nothing here touches the DOM.
 
-import type { Doc, Focus, HeatRow, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
+import type { Doc, Focus, HeatRow, Identity, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { type Filters, value } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
 import type { Store, Tables } from "./store.ts"
@@ -505,17 +505,17 @@ export interface Reveal { name: string; secret: string }
 /** What the security section is doing: nothing, enrolling an app, or holding fresh recovery codes. */
 export type Enrolling = { kind: "totp"; svg: string; secret: string } | { kind: "codes"; codes: string[] } | null
 
-/** The step-up prompt: a pending sensitive action waiting for a factor. */
-export interface StepUp { passkeys: boolean; error: string | null }
+/** The step-up prompt: a pending sensitive action waiting for a factor, or, with none enrolled, a fresh sign-in. */
+export interface StepUp { passkeys: boolean; factors: boolean; error: string | null }
 
-export function settingsView(s: Settings | null, reveal: Reveal | null, renaming: number | null, error: string | null, csrf: string, enrolling: Enrolling = null, stepUp: StepUp | null = null): Raw {
+export function settingsView(s: Settings | null, reveal: Reveal | null, renaming: number | null, error: string | null, csrf: string, enrolling: Enrolling = null, stepUp: StepUp | null = null, notice: string | null = null): Raw {
   return h`
     <div id="settings" class="lane">
       <div class="bp-bar">
         <button type="button" id="back-from-settings" class="ghost" data-action="back">Back</button>
         <div class="grow">
           <p class="kicker">Account${s ? ` · ${s.account.name}` : ""}</p>
-          <h2>API keys for agents, and the browsers signed in. A key reads one account and nothing else.</h2>
+          <h2>Ways in, API keys for agents, and the browsers signed in. A key reads one account and nothing else.</h2>
         </div>
         <form method="post" action="/sign-out" class="inline">
           <input type="hidden" name="_csrf_token" value="${csrf}" />
@@ -524,6 +524,7 @@ export function settingsView(s: Settings | null, reveal: Reveal | null, renaming
       </div>
       <div class="settings-body">
         ${when(error, () => h`<p class="banner hold-error">${error}</p>`)}
+        ${when(notice, () => h`<p class="banner" role="status">${notice}</p>`)}
         ${when(reveal, () => h`
           <section id="reveal" class="secret-panel">
             <p class="section-label">Key created · ${reveal?.name}</p>
@@ -551,7 +552,21 @@ export function settingsView(s: Settings | null, reveal: Reveal | null, renaming
           </div>
           ${s ? keysTable(s.keys, renaming) : h`<p class="sub">Loading…</p>`}
         </section>
-        ${when(stepUp, () => stepUpPrompt(stepUp as StepUp))}
+        ${when(stepUp, () => stepUpPrompt(stepUp as StepUp, csrf))}
+        <section class="settings-section">
+          <div class="section-head">
+            <p class="section-label">Sign-in methods</p>
+            <div class="row">
+              ${(s?.sign_in_methods ?? []).filter((p) => p !== "email").map((p) => h`<button type="button" class="ghost" data-action="link-provider" data-provider="${p}">Link ${methodName(p)}</button>`)}
+            </div>
+          </div>
+          <p class="sub">Each of these signs you in. Adding or removing one asks you to confirm it is you, and the last one stays.</p>
+          <form id="link-email" class="lane-form inline" data-form="link-email">
+            <input type="email" name="email" placeholder="Another address, e.g. you@work.example" required maxlength="254" autocomplete="email" aria-label="Email address" />
+            <button type="submit" class="ghost">Add email</button>
+          </form>
+          ${s ? identitiesTable(s.identities) : raw("")}
+        </section>
         <section class="settings-section">
           <div class="section-head">
             <p class="section-label">Second factor</p>
@@ -664,7 +679,42 @@ function methodsTable(methods: Method[], codesLeft: number): Raw {
     <p class="sub">${codesLeft} recovery code${codesLeft === 1 ? "" : "s"} left.</p>`
 }
 
-function stepUpPrompt(p: StepUp): Raw {
+function identitiesTable(ids: Identity[]): Raw {
+  if (ids.length === 0) return h`<p class="sub">No way in is linked yet. Add one so you can sign in again.</p>`
+  return h`
+    <table class="keys">
+      <thead><tr><th>Method</th><th>Signs in as</th><th>Added</th><th></th></tr></thead>
+      <tbody>
+        ${ids.map((i) => h`
+          <tr id="identity-${i.id}">
+            <td><strong>${methodName(i.provider)}</strong></td>
+            <td>${i.display}</td>
+            <td>${stamp(i.created_at)}</td>
+            <td class="actions">${ids.length === 1
+              ? h`<span class="sub">The only way in</span>`
+              : h`<button type="button" class="text-btn danger" data-action="unlink-identity" data-id="${i.id}" data-name="${methodName(i.provider)} ${i.display}">Remove</button>`}</td>
+          </tr>`)}
+      </tbody>
+    </table>`
+}
+
+function methodName(p: Identity["provider"]): string {
+  return p === "github" ? "GitHub" : p === "x" ? "X" : "Email"
+}
+
+function stepUpPrompt(p: StepUp, csrf: string): Raw {
+  if (!p.factors) return h`
+    <section id="step-up" class="secret-panel">
+      <p class="section-label">Confirm it is you</p>
+      <p class="sub">This change needs a sign-in from the last five minutes, and this account has no second factor to show instead. Sign out, sign in again, then repeat it.</p>
+      <div class="row">
+        <form method="post" action="/sign-out" class="inline">
+          <input type="hidden" name="_csrf_token" value="${csrf}" />
+          <button type="submit" class="primary">Sign out to sign in again</button>
+        </form>
+        <button type="button" class="ghost" data-action="cancel-step-up">Cancel</button>
+      </div>
+    </section>`
   return h`
     <section id="step-up" class="secret-panel">
       <p class="section-label">Confirm it is you</p>

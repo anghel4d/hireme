@@ -252,15 +252,21 @@ export interface Method {
 
 export interface Security { methods: Method[]; recovery_codes_left: number; fresh: boolean }
 
+/** One way into the account. A provider's user id stays on the server; `display` is the handle or address. */
+export interface Identity { id: number; provider: "email" | "github" | "x"; display: string; created_at: string }
+
 export interface Settings {
   account: { id: number; name: string }
   keys: Key[]
   sessions: Session[]
   security: Security
+  identities: Identity[]
+  /** The ways in this desk offers; GitHub and X only when configured. */
+  sign_in_methods: Identity["provider"][]
 }
 
-/** After a create, `secret` is the whole key, shown exactly once. */
-export type SettingsReply = Settings & { ok: true; created?: Key; secret?: string }
+/** After a create, `secret` is the whole key, shown exactly once; after asking to add an address, `sent_to` is it. */
+export type SettingsReply = Settings & { ok: true; created?: Key; secret?: string; sent_to?: string }
 
 export const fetchSettings = () => get<Settings>("/api/account")
 export const createKey = (name: string, expires_in_days: number | null) =>
@@ -269,6 +275,11 @@ export const renameKey = (id: number, name: string) => send<SettingsReply>("PATC
 export const revokeKey = (id: number) => send<SettingsReply>("DELETE", `/api/account/keys/${id}`, {})
 export const revokeSession = (id: number) => send<SettingsReply & { signed_out?: boolean }>("DELETE", `/api/account/sessions/${id}`, {})
 export const revokeOtherSessions = () => post<SettingsReply>("/api/account/sessions/revoke_others", {})
+
+// Ways in. An address is added by a mailed link opened in this browser; GitHub and X answer with the URL to go to.
+export const linkEmail = (email: string) => post<SettingsReply>("/api/account/identities", { provider: "email", email })
+export const linkProvider = (provider: string) => post<{ ok: true; url: string }>("/api/account/identities", { provider })
+export const unlinkIdentity = (id: number) => send<SettingsReply>("DELETE", `/api/account/identities/${id}`, {})
 
 // Second factors. A reply may carry `recovery_codes`, shown exactly once.
 export type SecurityReply = Security & { ok: true; recovery_codes?: string[] }

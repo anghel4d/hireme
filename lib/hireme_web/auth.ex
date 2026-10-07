@@ -98,11 +98,17 @@ defmodule HiremeWeb.Auth do
     |> put_resp_header("cross-origin-opener-policy", "same-origin")
   end
 
-  @doc "Open a session for `account` and put its token in a renewed cookie (ASVS 7.2.4)."
-  @spec sign_in(Plug.Conn.t(), Account.t()) :: Plug.Conn.t()
+  @doc """
+  Put a session's token in a renewed cookie (ASVS 7.2.4): the token
+  `Hireme.Accounts.sign_in_with/3` returns, or a new session for `account`.
+  """
+  @spec sign_in(Plug.Conn.t(), String.t() | Account.t()) :: Plug.Conn.t()
   def sign_in(conn, %Account{} = account) do
     {token, _session} = Accounts.start_session(account, meta(conn))
+    sign_in(conn, token)
+  end
 
+  def sign_in(conn, token) when is_binary(token) do
     conn
     |> configure_session(renew: true)
     |> put_session(@session_key, token)
@@ -127,68 +133,15 @@ end
 
 defmodule HiremeWeb.AuthController do
   @moduledoc """
-  The sign-in page and sign-out. Sign-in itself is passwordless: an
-  email link, GitHub, or X, each a route beside this one that ends in
-  `HiremeWeb.Auth.sign_in/2`. In development only, a button signs into
-  the local desk's account so the desk can be used before any of those
+  Sign-out. The sign-in page and its methods are
+  `HiremeWeb.SignInController`. In development only, a button there signs
+  into the local desk's account so the desk can be used before any method
   is configured; that route is not compiled into other environments.
   """
 
   use Phoenix.Controller, formats: [:html]
-  import Plug.Conn
   alias Hireme.Accounts
   alias HiremeWeb.Auth
-
-  def sign_in(%{assigns: %{account: %{}, pending: true}} = conn, _params),
-    do: redirect(conn, to: "/sign-in/factor")
-
-  def sign_in(%{assigns: %{account: %{}}} = conn, _params), do: redirect(conn, to: "/")
-
-  def sign_in(conn, _params) do
-    csrf = Plug.CSRFProtection.get_csrf_token()
-
-    dev =
-      if Application.get_env(:hireme, :dev_routes) do
-        """
-        <form method="post" action="/dev/sign-in" class="method">
-          <input type="hidden" name="_csrf_token" value="#{csrf}" />
-          <button type="submit" class="primary">Sign in to the local desk (development)</button>
-        </form>
-        """
-      else
-        ""
-      end
-
-    page = """
-    <!DOCTYPE html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Sign in · Hireme</title>
-        <link rel="stylesheet" href="/assets/js/app.css" />
-      </head>
-      <body class="sign-in">
-        <main class="sign-in-card">
-          <h1>HIREME</h1>
-          <p class="lede">No passwords. Sign in with a link to your email, with GitHub, or with X.</p>
-          <form method="post" action="/sign-in/email" class="method">
-            <input type="hidden" name="_csrf_token" value="#{csrf}" />
-            <label for="email">Email</label>
-            <input id="email" type="email" name="email" autocomplete="email" required placeholder="you@example.com" />
-            <button type="submit" class="primary">Send a sign-in link</button>
-          </form>
-          <p class="or">or</p>
-          <a class="ghost method" href="/auth/github">Continue with GitHub</a>
-          <a class="ghost method" href="/auth/x">Continue with X</a>
-          #{dev}
-        </main>
-      </body>
-    </html>
-    """
-
-    conn |> put_resp_content_type("text/html") |> send_resp(200, page)
-  end
 
   def sign_out(conn, _params), do: conn |> Auth.sign_out() |> redirect(to: "/sign-in")
 

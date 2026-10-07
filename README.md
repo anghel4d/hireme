@@ -23,11 +23,13 @@ Open http://localhost:4000.
 
 ## Accounts
 
-An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and letterboxes do not exist for another. Sign-in is passwordless: a link to your email, GitHub, or X, any of which can be linked to one account. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.
+An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and letterboxes do not exist for another. Sign-in is passwordless, with three ways in: a link mailed to an address, GitHub, and X. The first sign-in by any of them makes an account. The Account page adds more (another address, a GitHub user, an X user) and removes any but the last. A mailed link works once, for ten minutes; it opens a page that names the address, and only that page's button spends it, so a mail scanner that follows links spends nothing. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.
+
+GitHub and X are offered once their client id and secret are set: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for a GitHub OAuth app, `X_CLIENT_ID` and `X_CLIENT_SECRET` for an X app with OAuth 2.0 as a confidential client. Register `https://<host>/auth/github/callback` and `https://<host>/auth/x/callback` exactly. Mail goes out over SMTP in production (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `MAIL_FROM`); in development it lands in the mailbox at `/dev/mailbox`.
 
 A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSite=Lax) carrying a random token whose hash is a row, so sessions can be listed and revoked from the Account page. Sessions end after 24 hours or an hour idle (NIST SP 800-63B-4, AAL2). Writes carry the page's CSRF token.
 
-An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor is added or removed, or other sessions are ended. `SECURITY.md` says which standards each piece answers.
+An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor or a way in is added or removed, or other sessions are ended. An account with no factor confirms those by having signed in within the last five minutes. `SECURITY.md` says which standards each piece answers.
 
 An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it on `/mcp/websocket` and `/mcp/letterbox/<id>/websocket` as the `x-api-key` header, or as the `base64url.bearer.phx.<base64 key>` websocket subprotocol. A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at the upgrade with no detail, and a peer that keeps failing is throttled.
 
@@ -137,7 +139,8 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | Path | Role |
 | --- | --- |
 | `lib/hireme/types.ex` | `Schema`, `Closed`, `Attrs`, `Form`, `Text`: the one way a loose value is read |
-| `lib/hireme/accounts.ex` | The account and its sessions; sign-in methods end here |
+| `lib/hireme/accounts.ex` | The account, its sessions, and its ways in: identities, mailed links, notices |
+| `lib/hireme/mailer.ex` | Sign-in links and account notices by mail, plain text |
 | `lib/hireme/api_keys.ex` | Named, hashed, revocable keys an agent presents; one key, one account |
 | `lib/hireme/security.ex` | The policy numbers and the primitives: tokens, hashes, base62, sealing, throttling |
 | `lib/hireme/audit.ex` | The append-only security trail |
@@ -157,8 +160,9 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme/letterbox/letterbox.ex` | SPSC lease, one application per handle |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes and the one controller: packet, focus, root, scoreboard, lanes, writes |
-| `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, the sign-in page |
-| `lib/hireme_web/account.ex` | The Account page's JSON: keys and sessions |
+| `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, sign-out |
+| `lib/hireme_web/sign_in.ex` | The sign-in pages: mailed links, GitHub and X over OAuth 2.0 with PKCE, adding a way in |
+| `lib/hireme_web/account.ex` | The Account page's JSON: keys, sessions, and ways in |
 | `lib/hireme_web/mfa.ex` | The factor page and the second-factor half of the Account page |
 | `lib/hireme_web/packet.ex` | The desk as one HDP1 columnar packet |
 | `lib/hireme_web/json.ex` | Wire shapes for the shell and the MCP tools, and refusals |
