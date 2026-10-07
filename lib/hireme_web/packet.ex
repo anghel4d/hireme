@@ -1,4 +1,4 @@
-defmodule Hireme.Desk.Packet do
+defmodule HiremeWeb.Packet do
   @moduledoc """
   The desk as one columnar packet.
 
@@ -17,6 +17,7 @@ defmodule Hireme.Desk.Packet do
   consumer that knows the directory knows the packet.
   """
 
+  alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Card
   alias Hireme.Desk.Filters
@@ -39,7 +40,7 @@ defmodule Hireme.Desk.Packet do
   def build do
     cards = Desk.list_cards(%Filters{status: :all})
     batches = Desk.list_batches()
-    profiles = Hireme.Corpus.list_profiles()
+    profiles = Corpus.list_profiles()
 
     tables = %{
       "stages" =>

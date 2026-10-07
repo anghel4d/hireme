@@ -2,7 +2,6 @@ defmodule HiremeWeb.DeskControllerTest do
   use HiremeWeb.ConnCase, async: false
   import Hireme.Fixtures
 
-  alias Hireme.Desk
   alias Hireme.Desk.Batch
   alias Hireme.Repo
 
@@ -37,7 +36,7 @@ defmodule HiremeWeb.DeskControllerTest do
       binary_part(body, company["at"], company["size"])
 
     assert binary_part(text, first, last - first) == "Lumen Field"
-    assert IO.iodata_to_binary(Desk.packet()) == response(conn, 200)
+    assert IO.iodata_to_binary(HiremeWeb.Packet.build()) == response(conn, 200)
   end
 
   test "focus is the opened application and writes come back as the new focus", %{conn: conn} do

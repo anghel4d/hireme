@@ -103,6 +103,51 @@ defmodule Hireme.Variety do
   end
 end
 
+defmodule Hireme.Campaign.Scoreboard do
+  @moduledoc "One reading of the desk for one day."
+
+  @enforce_keys [
+    :fire,
+    :leftover_unique,
+    :leftover_noted_on,
+    :batches_today,
+    :batches_target,
+    :apps_today,
+    :apps_target,
+    :submitted_today,
+    :cumulative,
+    :target_total,
+    :target_on,
+    :varieties,
+    :chart
+  ]
+  defstruct @enforce_keys
+
+  @type variety_row :: %{
+          code: String.t(),
+          fire: :hold | :open_fire,
+          status: atom(),
+          variety: Hireme.Variety.t(),
+          label: String.t()
+        }
+
+  @type t :: %__MODULE__{
+          fire: :hold | :open_fire,
+          leftover_unique: non_neg_integer(),
+          leftover_noted_on: Date.t() | nil,
+          batches_today: non_neg_integer(),
+          batches_target: pos_integer(),
+          apps_today: non_neg_integer(),
+          apps_target: pos_integer(),
+          submitted_today: non_neg_integer(),
+          cumulative: non_neg_integer(),
+          target_total: pos_integer(),
+          target_on: Date.t(),
+          varieties: [variety_row()],
+          chart: Hireme.LifeEv.Chart.t()
+        }
+end
+
 defmodule Hireme.Campaign do
   @moduledoc """
   Scoreboard for the desk.
@@ -115,7 +160,7 @@ defmodule Hireme.Campaign do
   """
 
   import Ecto.Query
-  alias Hireme.Desk.Scoreboard
+  alias Hireme.Campaign.Scoreboard
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Job
   alias Hireme.Desk.Snapshot

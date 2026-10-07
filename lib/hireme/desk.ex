@@ -126,51 +126,6 @@ defmodule Hireme.Desk.Root do
         }
 end
 
-defmodule Hireme.Desk.Scoreboard do
-  @moduledoc "One reading of the desk for one day."
-
-  @enforce_keys [
-    :fire,
-    :leftover_unique,
-    :leftover_noted_on,
-    :batches_today,
-    :batches_target,
-    :apps_today,
-    :apps_target,
-    :submitted_today,
-    :cumulative,
-    :target_total,
-    :target_on,
-    :varieties,
-    :chart
-  ]
-  defstruct @enforce_keys
-
-  @type variety_row :: %{
-          code: String.t(),
-          fire: :hold | :open_fire,
-          status: atom(),
-          variety: Hireme.Variety.t(),
-          label: String.t()
-        }
-
-  @type t :: %__MODULE__{
-          fire: :hold | :open_fire,
-          leftover_unique: non_neg_integer(),
-          leftover_noted_on: Date.t() | nil,
-          batches_today: non_neg_integer(),
-          batches_target: pos_integer(),
-          apps_today: non_neg_integer(),
-          apps_target: pos_integer(),
-          submitted_today: non_neg_integer(),
-          cumulative: non_neg_integer(),
-          target_total: pos_integer(),
-          target_on: Date.t(),
-          varieties: [variety_row()],
-          chart: Hireme.LifeEv.Chart.t()
-        }
-end
-
 defmodule Hireme.Desk.Signal do
   @moduledoc """
   One change on the desk, broadcast on the `"desk"` topic as
@@ -331,9 +286,6 @@ defmodule Hireme.Desk do
   Writes return `{:ok, value}` or `{:error, reason}` with `reason` a
   member of `t:refusal/0` or a changeset. Every change is broadcast as a
   `Hireme.Desk.Signal`.
-
-  The packet, the scoreboard, the importer, and the seed live behind
-  this module; nothing outside `lib/hireme/desk` reaches past it.
   """
 
   import Ecto.Query
@@ -401,15 +353,6 @@ defmodule Hireme.Desk do
 
   @spec code(pos_integer()) :: String.t()
   def code(id), do: "JobApp#{id}"
-
-  # The desk's other faces, reached through this module.
-  defdelegate packet(), to: Hireme.Desk.Packet, as: :build
-  defdelegate scoreboard(today), to: Hireme.Campaign
-  def scoreboard, do: Hireme.Campaign.scoreboard()
-  defdelegate import_path(path, opts), to: Hireme.Import
-  def import_path(path), do: Hireme.Import.import_path(path)
-  defdelegate seed(), to: Hireme.Seed, as: :run
-  defdelegate flood(n), to: Hireme.Seed
 
   @spec list_cards(Filters.t()) :: [Card.t()]
   def list_cards(%Filters{} = filters) do

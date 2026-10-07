@@ -21,7 +21,7 @@ defmodule Mix.Tasks.Hireme.Import do
   def run([path]) do
     Mix.Task.run("app.start")
 
-    case Hireme.Desk.import_path(path) do
+    case Hireme.Import.import_path(path) do
       {:ok, %{kind: kind, count: count}} -> Mix.shell().info("Imported #{kind}: #{count}")
       {:error, reason} -> Mix.raise("import failed: #{inspect(reason)}")
     end
@@ -62,7 +62,7 @@ defmodule Mix.Tasks.Hireme.Flood do
           Mix.raise("usage: mix hireme.flood [N]")
       end
 
-    Mix.shell().info("Inserted #{Hireme.Desk.flood(n)} applications.")
+    Mix.shell().info("Inserted #{Hireme.Seed.flood(n)} applications.")
   end
 end
 
