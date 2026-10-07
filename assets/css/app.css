@@ -67,6 +67,10 @@ kbd {
   overflow: hidden;
 }
 
+/* The shell's slots take no layout of their own; their children lay out as the desk's. */
+#topbar, #scoreboard-slot, #lens, #focus-slot, #empty { display: contents; }
+.workspace[hidden] { display: none; }
+
 .topbar {
   flex: 0 0 auto;
   display: flex;

@@ -1,0 +1,327 @@
+// Pure views: model in, HTML out. Nothing here touches the DOM.
+
+import type { Doc, Focus, Line, Root, Scoreboard } from "./api.ts"
+import { type Filters, value } from "./filters.ts"
+import { h, join, raw, when, type Raw } from "./html.ts"
+import type { Tables } from "./packet.ts"
+import type { Store } from "./store.ts"
+
+const EPOCH_MS = Date.UTC(1970, 0, 1)
+const NONE = 0xffffffff
+
+export interface Placed { row: number; x: number; y: number }
+
+export function bandOf(score: number, t: Tables): string {
+  return t.bands.find((b) => score >= b.min && score <= b.max)?.key ?? "mid"
+}
+
+export function topbar(f: Filters, t: Tables, count: number): Raw {
+  const showcase = t.batches.some((b) => b.code === "Batch-001")
+  return h`
+    <header class="topbar">
+      <div class="brand">
+        <h1>HIREME</h1>
+        <p class="lede">
+          <kbd>hjkl</kbd> cards · <kbd>enter</kbd> battleplan · <kbd>esc</kbd> back · <kbd>/</kbd> search
+          ${when(showcase, () => h`<a href="/?batch=Batch-001" class="showcase" data-link>Batch-001</a>`)}
+        </p>
+      </div>
+      <form id="filters" class="filters">
+        <input id="q" type="search" name="q" value="${f.q}" placeholder="Company, role, JobApp, CV" autocomplete="off" aria-label="Search the desk" />
+        <select name="stage" aria-label="Stage">
+          <option value="all" ${sel(f.stage.kind === "all")}>All stages</option>
+          ${t.stages.map((s) => h`<option value="${s.key}" ${sel(value(f.stage) === s.key)}>${s.label}</option>`)}
+        </select>
+        <select name="profile" aria-label="Profile">
+          <option value="all" ${sel(f.profile.kind === "all")}>All profiles</option>
+          ${t.profiles.map((p) => h`<option value="${p.slug}" ${sel(value(f.profile) === p.slug)}>${p.name}</option>`)}
+        </select>
+        <select name="batch" aria-label="Batch">
+          <option value="all" ${sel(f.batch.kind === "all")}>All batches</option>
+          <option value="leftover" ${sel(f.batch.kind === "leftover")}>Leftover</option>
+          ${t.batches.map((b) => h`<option value="${b.code}" ${sel(value(f.batch) === b.code)}>${b.code}</option>`)}
+        </select>
+        <select name="status" aria-label="Status">
+          ${[...t.statuses, "all"].map((s) => h`<option value="${s}" ${sel(value(f.status) === s)}>${s}</option>`)}
+        </select>
+        <select name="band" aria-label="score_100 band">
+          <option value="all" ${sel(f.band.kind === "all")}>All bands</option>
+          ${t.bands.map((b) => h`<option value="${b.key}" ${sel(value(f.band) === b.key)}>${b.label} ${b.min}–${b.max}</option>`)}
+        </select>
+        <input id="min_score" type="number" name="min_score" min="0" max="100" value="${f.minScore > 0 ? f.minScore : ""}" placeholder="min score_100" aria-label="Minimum score_100" class="min-score" />
+        <span class="count">${count} showing</span>
+      </form>
+      <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
+    </header>`
+}
+
+function sel(on: boolean): Raw {
+  return raw(on ? "selected" : "")
+}
+
+export function scoreboard(s: Scoreboard | null): Raw {
+  if (!s) return h`<div id="scoreboard" class="scoreboard"></div>`
+  const peak = Math.max(1, ...s.chart.bands.map((b) => b.count))
+  return h`
+    <div id="scoreboard" class="scoreboard">
+      <span class="pill ${s.fire === "hold" ? "is-hold" : "is-open"}">${s.fire === "hold" ? "FIRE HOLD" : "OPEN FIRE"}</span>
+      <span>leftover ${s.leftover_unique}${s.leftover_noted_on ? ` · ${s.leftover_noted_on}` : ""}</span>
+      <span>batches ${s.batches_today}/${s.batches_target}</span>
+      <span>queued ${s.apps_today}/${s.apps_target}</span>
+      <span>submitted today ${s.submitted_today}</span>
+      <span>cumulative ${s.cumulative}</span>
+      <span>pace ${s.submitted_today}/${s.apps_target}</span>
+      ${s.varieties.map((v) => h`<span class="variety">${v.code} ${v.label}</span>`)}
+      <span id="ev-chart" class="bands" aria-label="Applications by score_100 band">
+        <span class="ev-meta">score_100 · n ${s.chart.n}${s.chart.mean !== null ? ` · mean ${s.chart.mean}` : ""}</span>
+        ${s.chart.bands.map((b) => h`
+          <a href="/?band=${b.key}" data-link class="band band-${b.key}" title="${b.label} ${b.min}–${b.max} · ${b.count}">
+            <i style="height: ${b.count === 0 ? 4 : Math.max(Math.round((b.count / peak) * 100), 8)}%"></i><b>${b.count}</b>
+          </a>`)}
+      </span>
+    </div>`
+}
+
+export function card(store: Store, row: number, x: number, y: number, active: boolean): Raw {
+  const t = store.tables
+  const id = store.column("id")[row] ?? 0
+  const score = store.column("score")[row] ?? 0
+  const heat = store.column("heat")[row] ?? 0
+  const stage = t.stages[store.column("stage")[row] ?? 0]
+  const batchIx = store.column("batch")[row] ?? 0
+  const batch = batchIx > 0 ? t.batches.find((b) => b.ordinal + 1 === batchIx) : undefined
+  const company = store.str("company").at(row)
+  const role = store.str("role").at(row)
+  const pips = store.str("pips").at(row)
+  const next = store.str("next_action").at(row)
+  const due = days(store.column("next_due")[row] ?? NONE)
+  const age = days(store.column("stage_on")[row] ?? NONE)
+  const profile = t.profiles[store.column("profile")[row] ?? 0]
+  return h`
+    <button type="button" id="card-${id}" class="card ${active ? "is-active" : ""}" style="left: ${x}px; top: ${y}px"
+      data-action="select" data-id="${id}" aria-current="${active ? "true" : "false"}" title="${company} — ${role}">
+      <div class="card-kicker">
+        <span class="code">${batch ? batch.code : `JobApp${id}`}</span>
+        <span class="score band-${bandOf(score, t)}" aria-label="score_100 ${score}">${score}</span>
+        <span class="stage-name">${stage?.label ?? ""}${batch?.fire === "hold" ? " · HOLD" : ""}</span>
+      </div>
+      <h2>${company}</h2>
+      <p class="role">${role}</p>
+      <div class="meta">
+        <span class="pips" aria-label="Battleplan ${stage?.label ?? ""}">${[...pips].map((p) => h`<i class="pip pip-${p}"></i>`)}</span>
+        <span class="heat" aria-label="Heat ${heat} of 5">${[1, 2, 3, 4, 5].map((n) => h`<span class="${n <= heat ? "on" : ""}"></span>`)}</span>
+      </div>
+      <p class="glance">
+        <span>${store.str("cv_label").at(row)} · ${profile?.name ?? ""}</span>
+        <span>${store.column("hits")[row] ?? 0}/${store.column("total")[row] ?? 0}</span>
+      </p>
+      <p class="next">
+        <span>${next === "" ? "No next action" : next}${due ? ` · ${shortDate(due)}` : ""}</span>
+        ${when(age, () => h`<span>${ageLabel(age as Date)}</span>`)}
+      </p>
+    </button>`
+}
+
+export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdError: string | null): Raw {
+  const j = f.job
+  const pct = f.coverage.hits.length + f.coverage.misses.length === 0
+    ? 0
+    : Math.round((f.coverage.hits.length / (f.coverage.hits.length + f.coverage.misses.length)) * 100)
+  return h`
+    <aside id="focus" class="focus ${sheet ? "is-sheet" : ""}">
+      <header>
+        <p class="kicker"><span>${j.code}</span> ${scorePill(j.score_100, j.band)} <span>${f.variant.label}</span> <span>${f.profile.name}</span></p>
+        <h2>${j.company}</h2>
+        <p class="sub">${j.role}</p>
+        <p class="sub">${j.location}</p>
+        <p class="sub">${fireLine(j)}</p>
+      </header>
+      ${when(!inFilter, () => h`<p class="banner">This application is outside the current filter.</p>`)}
+      ${when(holdError, () => h`<p id="hold-error" class="banner hold-error">${holdError}</p>`)}
+      <div>
+        <div class="meta">
+          <span class="pips">${[...j.pips].map((p) => h`<i class="pip pip-${p}"></i>`)}</span>
+          <span class="stage-name">${j.stage_label}</span>
+        </div>
+        <p class="sub">${j.stage_hint}</p>
+      </div>
+      <button type="button" id="open-battleplan" class="primary" data-action="battleplan">Open battleplan</button>
+      <form id="next-form" class="field" data-form="next">
+        <label for="next_action">Next</label>
+        <div class="row">
+          <input id="next_action" type="text" name="next_action" value="${j.next_action}" />
+          <input type="date" name="next_due" value="${j.next_due ?? ""}" aria-label="Due" class="${overdue(j.next_due) ? "is-due" : ""}" />
+        </div>
+      </form>
+      <div>
+        <p class="section-label">Keywords ${f.coverage.hits.length}/${f.coverage.hits.length + f.coverage.misses.length} · root ${f.root_coverage.hits.length}/${f.root_coverage.hits.length + f.root_coverage.misses.length}</p>
+        <div class="meter" aria-hidden="true"><span style="width: ${pct}%"></span></div>
+        <ul class="chips">
+          ${f.coverage.hits.map((w) => h`<li class="hit">${w}</li>`)}
+          ${f.coverage.misses.map((w) => h`<li class="miss">${w}</li>`)}
+        </ul>
+      </div>
+      <div>
+        <p class="section-label">Mask · ${j.mask_hidden} hidden · ${j.mask_altered} altered · ${j.mask_emphasized} emphasized</p>
+        <ul class="mask-list">
+          ${f.masks.slice(0, 4).map((m) => h`<li><span class="mode mode-${m.mode}">${m.mode}</span> ${m.title}${m.reason ? h`<span class="reason"> — ${m.reason}</span>` : ""}</li>`)}
+        </ul>
+      </div>
+      ${when(excerpt(j.listing) !== "", () => h`<p class="sub">${excerpt(j.listing)}</p>`)}
+      ${when(f.kv.length, () => h`<ul class="kv">${f.kv.map((p) => h`<li><strong>${p.key}</strong> ${p.value}</li>`)}</ul>`)}
+      ${narrative(f.narrative)}
+    </aside>`
+}
+
+export function battleplan(f: Focus, editing: number | null, alterError: string | null, holdError: string | null): Raw {
+  const j = f.job
+  const active = f.rail.find((r) => r.state === "active") ?? f.rail.find((r) => r.state === "pending")
+  return h`
+    <div id="battleplan" class="battleplan">
+      <div class="bp-bar">
+        <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
+        <div class="grow">
+          <p class="kicker">${j.code} · ${scorePill(j.score_100, j.band)} ${f.variant.label} · ${f.profile.name}</p>
+          <h2>${j.company}</h2>
+          <p class="sub">${j.role}</p>
+          <p class="sub">${fireLine(j)}</p>
+        </div>
+        <p class="count">${f.coverage.hits.length}/${f.coverage.hits.length + f.coverage.misses.length} keywords · root ${f.root_coverage.hits.length}/${f.root_coverage.hits.length + f.root_coverage.misses.length}</p>
+      </div>
+      <div class="bp-body">
+        <div class="campaign">
+          ${narrative(f.narrative)}
+          ${when(holdError, () => h`<p id="hold-error" class="banner hold-error">${holdError}</p>`)}
+          ${when(j.batch && j.batch.fire === "hold", () => h`
+            <button type="button" id="name-open-fire" class="ghost" data-action="open-fire" data-batch="${j.batch?.code}">Name open fire</button>`)}
+          ${f.rail.map((r) => h`
+            <button type="button" id="stage-${r.key}" class="stage ${r.state === "active" ? "is-active" : ""}" data-action="stage" data-stage="${r.key}">
+              <span class="meta"><span class="pip pip-${pipChar(r.state)}"></span><span class="label">${r.label}</span></span>
+              <span class="hint">${r.hint}</span>
+              ${when(r.note !== "", () => h`<span class="note-preview">${r.note}</span>`)}
+            </button>`)}
+          ${when(active, () => h`
+            <form id="note-form" class="note" data-form="note" data-stage="${active?.key}">
+              <label for="stage-note">Note · ${active?.label}</label>
+              <textarea id="stage-note" name="note">${active?.note}</textarea>
+            </form>`)}
+          <ul class="events">${f.events.map((e) => h`<li>${e.body}</li>`)}</ul>
+        </div>
+        <div class="paper-scroll">
+          ${paper(f.cv, true, editing, alterError)}
+          ${when(j.listing !== "", () => h`<p class="sub">${j.listing.trim()}</p>`)}
+        </div>
+      </div>
+    </div>`
+}
+
+export function rootView(r: Root): Raw {
+  return h`
+    <div class="root-wrap">
+      <div class="bp-bar">
+        <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
+        <div class="grow"><p class="kicker">Root · ${r.profile.name}</p><h2>${r.cv.headline}</h2></div>
+      </div>
+      <div class="paper-scroll">
+        ${narrative(r.narrative)}
+        ${paper(r.cv, false, null, null)}
+      </div>
+    </div>`
+}
+
+function narrative(n: Focus["narrative"]): Raw {
+  if (!n) return raw("")
+  return h`
+    <section id="narrative" class="narrative">
+      <form id="narrative-form" data-form="narrative" data-narrative="${n.id}">
+        <label class="section-label" for="narrative-body">Narrative · private · v${n.version}</label>
+        <textarea id="narrative-body" name="body" rows="8">${n.body}</textarea>
+        <button type="submit" class="ghost">Save narrative</button>
+      </form>
+    </section>`
+}
+
+function paper(cv: Doc, editable: boolean, editing: number | null, alterError: string | null): Raw {
+  return h`
+    <article id="cv" class="paper" data-accent="${cv.accent}" data-density="${cv.density}">
+      <header>
+        <p class="kicker">${cv.label}</p>
+        ${when(cv.person, () => h`<h2>${cv.person}</h2>`)}
+        <p class="headline">${cv.headline}</p>
+        <p class="summary">${cv.summary}</p>
+        ${when(cv.summary_canonical, () => h`<p class="canonical">Root: ${cv.summary_canonical}${cv.summary_reason ? h`<span> — ${cv.summary_reason}</span>` : ""}</p>`)}
+        <div class="facts">${cv.facts.map((f) => h`<span>${f.title}: ${f.body}</span>`)}</div>
+      </header>
+      ${cv.sections.map((s) => h`<section><h3>${s.label}</h3>${s.lines.map((l) => cvLine(l, editable, editing, alterError))}</section>`)}
+      ${when(cv.hidden.length, () => h`<section class="masked"><h3>Masked out</h3>${cv.hidden.map((l) => cvLine(l, editable, editing, alterError))}</section>`)}
+    </article>`
+}
+
+function cvLine(l: Line, editable: boolean, editing: number | null, alterError: string | null): Raw {
+  const isEditing = editable && editing === l.id
+  return h`
+    <div id="line-${l.id}" class="line is-${l.mode}">
+      <h4>${when(l.org !== "", () => h`<span class="org">${l.org} · </span>`)}${l.title}${when(l.span !== "", () => h`<span class="org"> · ${l.span}</span>`)}</h4>
+      ${when(!isEditing, () => h`<p>${l.body}</p>`)}
+      ${when(l.mode === "altered" && l.canonical_body !== l.body, () => h`<p class="canonical">Root: ${l.canonical_body}</p>`)}
+      ${when(l.reason, () => h`<p class="reason">${l.reason}</p>`)}
+      ${when(editable && !isEditing, () => h`
+        <div class="line-actions">
+          ${when(l.shown, () => h`<button type="button" id="mask-hide-${l.id}" class="text-btn" data-action="mask" data-item="${l.id}" data-mode="hidden">Hide</button>`)}
+          ${when(l.shown && l.mode !== "emphasized", () => h`<button type="button" id="mask-emphasize-${l.id}" class="text-btn" data-action="mask" data-item="${l.id}" data-mode="emphasized">Emphasize</button>`)}
+          ${when(l.shown, () => h`<button type="button" id="mask-alter-${l.id}" class="text-btn" data-action="edit" data-item="${l.id}">Alter</button>`)}
+          ${when(l.mode !== "canonical", () => h`<button type="button" id="mask-restore-${l.id}" class="text-btn" data-action="mask" data-item="${l.id}" data-mode="inherit">Restore</button>`)}
+        </div>`)}
+      ${when(isEditing, () => h`
+        <form id="alter-${l.id}" class="alter" data-form="alter" data-item="${l.id}">
+          <textarea name="body" aria-label="Variant line">${l.body}</textarea>
+          <input type="text" name="reason" value="${l.reason ?? ""}" placeholder="Why this line changed" />
+          ${when(alterError, () => h`<p class="alter-error">${alterError}</p>`)}
+          <button type="submit" class="primary">Save line</button>
+          <button type="button" class="ghost" data-action="cancel-edit">Cancel</button>
+        </form>`)}
+    </div>`
+}
+
+function scorePill(score: number, band: string): Raw {
+  return h`<span class="score band-${band}" aria-label="score_100 ${score}">${score}</span>`
+}
+
+function fireLine(j: Focus["job"]): string {
+  if (j.batch) return `${j.batch.code} · ${j.batch.fire === "hold" ? "FIRE HOLD" : "OPEN FIRE"}`
+  return `${j.gate} · ${j.freshness}`
+}
+
+function pipChar(state: string): string {
+  return { done: "D", active: "A", pending: "P", skipped: "S", blocked: "B" }[state] ?? "?"
+}
+
+function days(d: number): Date | null {
+  return d === NONE ? null : new Date(EPOCH_MS + d * 86_400_000)
+}
+
+function shortDate(d: Date): string {
+  return `${d.toLocaleString("en", { month: "short", timeZone: "UTC" })} ${d.getUTCDate()}`
+}
+
+function ageLabel(d: Date): string {
+  const today = Math.floor(Date.now() / 86_400_000)
+  const n = today - Math.floor(d.getTime() / 86_400_000)
+  return n === 0 ? "today" : `${n}d`
+}
+
+function overdue(iso: string | null): boolean {
+  return iso !== null && iso < new Date().toISOString().slice(0, 10)
+}
+
+function excerpt(text: string): string {
+  const t = (text ?? "").trim()
+  return t.length > 360 ? `${t.slice(0, 360)}…` : t
+}
+
+export function emptyBoard(): Raw {
+  return h`<p class="empty">Nothing matches this filter.</p>`
+}
+
+export const emptyFocus = (): Raw => h`<div id="focus" class="focus"><p class="empty">The desk is empty.</p></div>`
+export const nothing = (): Raw => join([])
