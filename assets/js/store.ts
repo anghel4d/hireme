@@ -1,8 +1,65 @@
-// The resident column store: the packet body copied into WebAssembly
-// memory, typed-array views over its columns, and the selection the
-// kernel writes. Strings are decoded on demand and remembered.
+// The resident column store. HDP1 is "HDP1" | u32 header_len | header
+// JSON | body (4-byte aligned): the header is the directory, the body is
+// the columns. The body is copied into WebAssembly memory, columns are
+// typed-array views over it, and the kernel writes the selection.
+// Strings are decoded on demand and remembered.
 
-import { column, type Packet, type Tables } from "./packet.ts"
+export type ColumnKind = "u32" | "str"
+
+export interface ColumnEntry {
+  name: string
+  kind: ColumnKind
+  at: number
+  size: number
+}
+
+export interface Stage { key: string; label: string; hint: string }
+export interface Band { key: string; label: string; min: number; max: number }
+export interface Batch { code: string; ordinal: number; fire: "hold" | "open_fire"; status: string }
+export interface Profile { id: number; slug: string; name: string }
+
+export interface Tables {
+  stages: Stage[]
+  statuses: string[]
+  freshness: string[]
+  gates: string[]
+  bands: Band[]
+  batches: Batch[]
+  profiles: Profile[]
+  heat_states: string[]
+}
+
+export interface Header {
+  v: 1
+  n: number
+  columns: ColumnEntry[]
+  tables: Tables
+}
+
+export interface Packet {
+  header: Header
+  body: Uint8Array
+}
+
+const MAGIC = 0x31504448 // "HDP1" little-endian
+
+export function parsePacket(buffer: ArrayBuffer): Packet {
+  const view = new DataView(buffer)
+  if (buffer.byteLength < 8 || view.getUint32(0, true) !== MAGIC) {
+    throw new Error("not an HDP1 packet")
+  }
+  const headerLen = view.getUint32(4, true)
+  const headerBytes = new Uint8Array(buffer, 8, headerLen)
+  const header = JSON.parse(new TextDecoder().decode(headerBytes)) as Header
+  const bodyAt = 8 + headerLen + ((4 - (headerLen % 4)) % 4)
+  return { header, body: new Uint8Array(buffer, bodyAt) }
+}
+
+export function column(header: Header, name: string): ColumnEntry {
+  const entry = header.columns.find((c) => c.name === name)
+  if (!entry) throw new Error(`packet has no column ${name}`)
+  return entry
+}
 
 interface Kernel {
   mem: WebAssembly.Memory
@@ -129,11 +186,6 @@ export class Store {
   /** Position of a job id within the selection, or -1. */
   find(id: number): number {
     return this.k.find(this.out, this.count, this.u32("id"), id)
-  }
-
-  /** Row index of a job id in the whole packet, or -1. */
-  rowOf(id: number): number {
-    return this.column("id").indexOf(id)
   }
 }
 

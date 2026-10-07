@@ -33,10 +33,6 @@ function part(v: unknown): string {
   return esc(v)
 }
 
-export function join(parts: Raw[]): Raw {
-  return new Raw(parts.map((p) => p.html).join(""))
-}
-
 const EMPTY = new Raw("")
 export function when(cond: unknown, then: () => Raw): Raw {
   return cond ? then() : EMPTY

@@ -9,8 +9,15 @@
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
-    "lib": ["es2022", "dom", "dom.iterable"],
-    "noEmit": true
+    "lib": [
+      "es2022",
+      "dom",
+      "dom.iterable"
+    ],
+    "noEmit": true,
+    "noUncheckedSideEffectImports": false
   },
-  "include": ["js/**/*.ts"]
+  "include": [
+    "js/**/*.ts"
+  ]
 }
