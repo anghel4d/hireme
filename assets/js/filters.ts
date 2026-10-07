@@ -15,6 +15,7 @@ export interface Filters {
   status: Pick<string>
   batch: Pick<string> | { kind: "leftover" }
   band: Pick<string>
+  heat: Pick<string>
   minScore: number
 }
 
@@ -26,6 +27,7 @@ export function fromParams(p: URLSearchParams, t: Tables): Filters {
     status: p.get("status") === "all" ? ALL : one(p.get("status"), t.statuses, "open"),
     batch: p.get("batch") === "leftover" ? { kind: "leftover" } : pick(p.get("batch"), t.batches.map((b) => b.code)),
     band: pick(p.get("band"), t.bands.map((b) => b.key)),
+    heat: pick(p.get("heat"), t.heat_states),
     minScore: clamp(Number.parseInt(p.get("min_score") ?? "0", 10)),
   }
 }
@@ -39,6 +41,7 @@ export function toParams(f: Filters, p = new URLSearchParams()): URLSearchParams
   else p.delete("status")
   if (f.batch.kind === "leftover") p.set("batch", "leftover"); else put(p, "batch", f.batch)
   put(p, "band", f.band)
+  put(p, "heat", f.heat)
   if (f.minScore > 0) p.set("min_score", String(f.minScore)); else p.delete("min_score")
   return p
 }
@@ -54,6 +57,7 @@ export function lower(f: Filters, t: Tables): Selection {
     status: index(f.status, t.statuses),
     batch: f.batch.kind === "leftover" ? -2 : batchIndex(f.batch, t),
     profile: index(f.profile, t.profiles.map((x) => x.slug)),
+    heat: index(f.heat, t.heat_states),
     q: f.q,
   }
 }

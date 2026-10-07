@@ -156,6 +156,7 @@ defmodule HiremeWeb.DeskController do
       case reason do
         :not_found -> {404, "not found"}
         :fire_hold -> {409, "fire_hold"}
+        :heat -> {409, "heat"}
         :leased -> {423, "leased"}
         :cooldown -> {409, "cooldown"}
         :not_additive -> {409, "not_additive"}

@@ -11,7 +11,7 @@ interface Kernel {
   select(
     n: number, cols: number,
     min: number, lo: number, hi: number,
-    stage: number, status: number, batch: number, profile: number,
+    stage: number, status: number, batch: number, profile: number, heat: number,
     q: number, qlen: number,
     out: number,
   ): number
@@ -26,6 +26,7 @@ export interface Selection {
   readonly status: number
   readonly batch: number
   readonly profile: number
+  readonly heat: number
   readonly q: string
 }
 
@@ -85,7 +86,7 @@ export class Store {
     const table = [
       this.u32("score"), this.u32("heat"), this.u32("stage"), this.u32("status"),
       this.u32("freshness"), this.u32("gate"), this.u32("batch"), this.u32("profile"),
-      searchOffsets, searchOffsets + 4 * (this.n + 1),
+      searchOffsets, searchOffsets + 4 * (this.n + 1), this.u32("heat_state"),
     ]
     this.cols = k.alloc(table.length * 4)
     new Uint32Array(k.mem.buffer, this.cols, table.length).set(table)
@@ -114,7 +115,7 @@ export class Store {
     const q = new TextEncoder().encode(s.q.toLowerCase().trim()).slice(0, this.scratchSize)
     new Uint8Array(this.k.mem.buffer, this.scratch, q.byteLength).set(q)
     this.count = this.k.select(
-      this.n, this.cols, s.min, s.lo, s.hi, s.stage, s.status, s.batch, s.profile,
+      this.n, this.cols, s.min, s.lo, s.hi, s.stage, s.status, s.batch, s.profile, s.heat,
       this.scratch, q.byteLength, this.out,
     )
     return this.count

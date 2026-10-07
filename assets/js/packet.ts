@@ -23,6 +23,7 @@ export interface Tables {
   bands: Band[]
   batches: Batch[]
   profiles: Profile[]
+  heat_states: string[]
 }
 
 export interface Header {
