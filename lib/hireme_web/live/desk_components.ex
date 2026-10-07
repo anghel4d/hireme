@@ -123,13 +123,13 @@ defmodule HiremeWeb.DeskComponents do
       title={"#{@card.company} — #{@card.role}"}
     >
       <div class="card-kicker">
-        <span class="code">{card_code(@card)}</span>
-        <span class="stage-name">{@card.stage_label}{hold_mark(@card)}</span>
+        <span class="code">{@card.batch_code || Hireme.Desk.code(@card.id)}</span>
+        <span class="stage-name">{Pipeline.label(@card.stage)}{hold_mark(@card)}</span>
       </div>
       <h2>{@card.company}</h2>
       <p class="role">{@card.role}</p>
       <div class="meta">
-        <span class="pips" aria-label={"Battleplan #{@card.stage_label}"}>
+        <span class="pips" aria-label={"Battleplan #{Pipeline.label(@card.stage)}"}>
           <i :for={pip <- String.graphemes(@card.pips)} class={"pip pip-#{pip}"}></i>
         </span>
         <span class="heat" aria-label={"Heat #{@card.heat} of 5"}>
@@ -142,7 +142,7 @@ defmodule HiremeWeb.DeskComponents do
       </p>
       <p class="next">
         <span>{next_line(@card)}</span>
-        <span :if={age_label(@card.age)}>{age_label(@card.age)}</span>
+        <span :if={@card.stage_on}>{age_label(@card.stage_on)}</span>
       </p>
     </button>
     """
@@ -484,9 +484,6 @@ defmodule HiremeWeb.DeskComponents do
   defp snapshot_date(nil), do: ""
   defp snapshot_date(%Date{} = date), do: " · #{Date.to_iso8601(date)}"
 
-  defp card_code(%{batch_code: code}) when is_binary(code) and code != "", do: code
-  defp card_code(card), do: card.code
-
   defp hold_mark(%{batch_fire: :hold}), do: " · HOLD"
   defp hold_mark(_), do: ""
 
@@ -508,10 +505,12 @@ defmodule HiremeWeb.DeskComponents do
     end
   end
 
-  defp age_label(nil), do: nil
-  defp age_label(0), do: "today"
-  defp age_label(1), do: "1d"
-  defp age_label(n) when is_integer(n), do: "#{n}d"
+  defp age_label(%Date{} = date) do
+    case Date.diff(Date.utc_today(), date) do
+      0 -> "today"
+      n -> "#{n}d"
+    end
+  end
 
   defp due_label(nil), do: nil
 

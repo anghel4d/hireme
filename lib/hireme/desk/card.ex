@@ -1,20 +1,19 @@
 defmodule Hireme.Desk.Card do
   @moduledoc """
   What the board shows for one application. No listing text, no document.
+  The query selects straight into this struct.
   """
 
   alias Hireme.Pipeline
 
   @enforce_keys [
     :id,
-    :code,
     :company,
     :role,
     :location,
     :heat,
     :status,
     :stage,
-    :stage_label,
     :pips,
     :cv_label,
     :profile_name,
@@ -26,7 +25,7 @@ defmodule Hireme.Desk.Card do
     :mask_emphasized,
     :next_action,
     :next_due,
-    :age,
+    :stage_on,
     :batch_code,
     :batch_fire,
     :batch_ordinal,
@@ -38,14 +37,12 @@ defmodule Hireme.Desk.Card do
 
   @type t :: %__MODULE__{
           id: pos_integer(),
-          code: String.t(),
           company: String.t(),
           role: String.t(),
           location: String.t(),
           heat: 1..5,
           status: atom(),
           stage: Pipeline.stage(),
-          stage_label: String.t(),
           pips: String.t(),
           cv_label: String.t(),
           profile_name: String.t(),
@@ -57,7 +54,7 @@ defmodule Hireme.Desk.Card do
           mask_emphasized: non_neg_integer(),
           next_action: String.t(),
           next_due: Date.t() | nil,
-          age: non_neg_integer() | nil,
+          stage_on: Date.t() | nil,
           batch_code: String.t() | nil,
           batch_fire: :hold | :open_fire | nil,
           batch_ordinal: non_neg_integer() | nil,
@@ -76,10 +73,7 @@ defmodule Hireme.Desk.Card do
 end
 
 defmodule Hireme.Desk.Placed do
-  @moduledoc """
-  A card at a pixel origin inside the painted window.
-  """
-
+  @moduledoc false
   @enforce_keys [:card, :x, :y]
   defstruct [:card, :x, :y]
 
