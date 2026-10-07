@@ -97,7 +97,8 @@ defmodule HiremeWeb.AccountController do
       account: %{id: account.id, name: account.name},
       keys: Enum.map(ApiKeys.list(), &JSON.key/1),
       sessions:
-        Enum.map(Accounts.list_sessions(account.id), &JSON.session(&1, conn.assigns.session.id))
+        Enum.map(Accounts.list_sessions(account.id), &JSON.session(&1, conn.assigns.session.id)),
+      security: HiremeWeb.MfaController.security(conn)
     }
   end
 

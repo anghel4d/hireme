@@ -8,6 +8,7 @@ config :hireme, Hireme.Repo,
 
 secret_key_base = "E+PE0bouCpNnm701s8LTvHah4Z9kfYWc6EKZ0O6GkKJ+6GhgKMv3TCh7aewMzzCC"
 config :hireme, :secret_key_base, secret_key_base
+config :wax_, origin: "http://localhost:4000"
 
 # Loopback only; `ip: {0, 0, 0, 0}` opens the desk to the network.
 config :hireme, HiremeWeb.Endpoint,

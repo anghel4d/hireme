@@ -2,7 +2,15 @@ defmodule HiremeWeb.Router do
   use Phoenix.Router, helpers: false
   import Plug.Conn
   import Phoenix.Controller
-  import HiremeWeb.Auth, only: [fetch_account: 2, require_account: 2, security_headers: 2]
+
+  import HiremeWeb.Auth,
+    only: [
+      fetch_account: 2,
+      require_account: 2,
+      require_pending: 2,
+      require_step_up: 2,
+      security_headers: 2
+    ]
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -27,6 +35,24 @@ defmodule HiremeWeb.Router do
     plug :require_account
   end
 
+  # A session that owes its second factor may reach only the factor page.
+  pipeline :factor do
+    plug :require_pending
+  end
+
+  pipeline :factor_json do
+    plug :accepts, ["json"]
+    plug :fetch_session
+    plug :protect_from_forgery
+    plug :fetch_account
+    plug :require_pending
+  end
+
+  # A sensitive change needs a second factor presented within the window.
+  pipeline :step_up do
+    plug :require_step_up
+  end
+
   scope "/", HiremeWeb do
     pipe_through :browser
 
@@ -38,6 +64,21 @@ defmodule HiremeWeb.Router do
     pipe_through [:browser, :signed_in]
 
     get "/", DeskController, :index
+  end
+
+  scope "/sign-in/factor", HiremeWeb do
+    pipe_through [:browser, :factor]
+
+    get "/", MfaController, :factor
+    post "/totp", MfaController, :factor_totp
+    post "/recovery", MfaController, :factor_recovery
+  end
+
+  scope "/sign-in/factor", HiremeWeb do
+    pipe_through :factor_json
+
+    post "/webauthn", MfaController, :factor_webauthn
+    post "/webauthn/confirm", MfaController, :factor_webauthn_confirm
   end
 
   # Development only: sign into the local desk with one click. Not
@@ -55,11 +96,27 @@ defmodule HiremeWeb.Router do
 
     scope "/account" do
       get "/", AccountController, :index
-      post "/keys", AccountController, :create_key
       patch "/keys/:id", AccountController, :rename_key
-      delete "/keys/:id", AccountController, :revoke_key
       delete "/sessions/:id", AccountController, :revoke_session
-      post "/sessions/revoke_others", AccountController, :revoke_other_sessions
+      get "/security", MfaController, :summary
+      post "/step-up/totp", MfaController, :step_up_totp
+      post "/step-up/recovery", MfaController, :step_up_recovery
+      post "/step-up/webauthn", MfaController, :step_up_webauthn
+      post "/step-up/webauthn/confirm", MfaController, :step_up_webauthn_confirm
+
+      scope "/" do
+        pipe_through :step_up
+
+        post "/keys", AccountController, :create_key
+        delete "/keys/:id", AccountController, :revoke_key
+        post "/sessions/revoke_others", AccountController, :revoke_other_sessions
+        post "/mfa/totp", MfaController, :begin_totp
+        post "/mfa/totp/confirm", MfaController, :confirm_totp
+        post "/mfa/webauthn", MfaController, :begin_webauthn
+        post "/mfa/webauthn/confirm", MfaController, :confirm_webauthn
+        delete "/mfa/:id", MfaController, :remove
+        post "/mfa/recovery", MfaController, :recovery
+      end
     end
 
     get "/pack", DeskController, :pack

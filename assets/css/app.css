@@ -619,3 +619,10 @@ body.sign-in { display: grid; place-items: center; overflow: auto; }
 .sign-in-card .method { display: flex; flex-direction: column; gap: 0.4rem; text-align: center; text-decoration: none; }
 .sign-in-card input[type="email"] { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.45rem 0.6rem; }
 .sign-in-card .or { text-align: center; color: var(--faint); margin: 0; }
+.enroll { display: grid; grid-template-columns: 12rem 1fr; gap: 1rem; align-items: start; }
+.enroll .qr { background: #fff; padding: 0.5rem; border-radius: 6px; }
+.enroll .qr svg { width: 100%; height: auto; display: block; }
+.codes { margin: 0; font-family: ui-monospace, "SFMono-Regular", menlo, monospace; font-size: 0.9rem; line-height: 1.6; }
+.sign-in-card details summary { cursor: pointer; color: var(--muted); }
+.sign-in-card input { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 0.45rem 0.6rem; }
+@media (max-width: 720px) { .enroll { grid-template-columns: 1fr; } }

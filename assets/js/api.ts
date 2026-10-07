@@ -240,10 +240,23 @@ export interface Session {
   user_agent: string
 }
 
+export interface Method {
+  id: number
+  kind: "totp" | "webauthn"
+  name: string
+  created_at: string
+  last_used_at: string | null
+  backed_up: boolean
+  transports: string[]
+}
+
+export interface Security { methods: Method[]; recovery_codes_left: number; fresh: boolean }
+
 export interface Settings {
   account: { id: number; name: string }
   keys: Key[]
   sessions: Session[]
+  security: Security
 }
 
 /** After a create, `secret` is the whole key, shown exactly once. */
@@ -256,6 +269,22 @@ export const renameKey = (id: number, name: string) => send<SettingsReply>("PATC
 export const revokeKey = (id: number) => send<SettingsReply>("DELETE", `/api/account/keys/${id}`, {})
 export const revokeSession = (id: number) => send<SettingsReply & { signed_out?: boolean }>("DELETE", `/api/account/sessions/${id}`, {})
 export const revokeOtherSessions = () => post<SettingsReply>("/api/account/sessions/revoke_others", {})
+
+// Second factors. A reply may carry `recovery_codes`, shown exactly once.
+export type SecurityReply = Security & { ok: true; recovery_codes?: string[] }
+export interface TotpStart { uri: string; secret: string; svg: string }
+export const beginTotp = () => post<TotpStart>("/api/account/mfa/totp", {})
+export const confirmTotp = (code: string, name: string) => post<SecurityReply>("/api/account/mfa/totp/confirm", { code, name })
+export const beginWebauthn = () => post<Record<string, unknown>>("/api/account/mfa/webauthn", {})
+export const confirmWebauthn = (credential: Record<string, unknown>, name: string) =>
+  post<SecurityReply>("/api/account/mfa/webauthn/confirm", { ...credential, name })
+export const removeMethod = (id: number) => send<SecurityReply>("DELETE", `/api/account/mfa/${id}`, {})
+export const newRecoveryCodes = () => post<SecurityReply>("/api/account/mfa/recovery", {})
+export const stepUpTotp = (code: string) => post<{ ok: true }>("/api/account/step-up/totp", { code })
+export const stepUpRecovery = (code: string) => post<{ ok: true }>("/api/account/step-up/recovery", { code })
+export const stepUpWebauthn = () => post<Record<string, unknown>>("/api/account/step-up/webauthn", {})
+export const stepUpWebauthnConfirm = (assertion: Record<string, unknown>) =>
+  post<{ ok: true }>("/api/account/step-up/webauthn/confirm", assertion)
 
 // Desk signals from the server, one JSON frame each. Reconnects with
 // backoff; nothing is sent upstream.

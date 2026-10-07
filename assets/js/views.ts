@@ -1,6 +1,6 @@
 // Pure views: model in, HTML out. Nothing here touches the DOM.
 
-import type { Doc, Focus, HeatRow, Key, Lanes, Line, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
+import type { Doc, Focus, HeatRow, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { type Filters, value } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
 import type { Store, Tables } from "./store.ts"
@@ -502,7 +502,13 @@ function tenth(x: number): number {
 
 export interface Reveal { name: string; secret: string }
 
-export function settingsView(s: Settings | null, reveal: Reveal | null, renaming: number | null, error: string | null, csrf: string): Raw {
+/** What the security section is doing: nothing, enrolling an app, or holding fresh recovery codes. */
+export type Enrolling = { kind: "totp"; svg: string; secret: string } | { kind: "codes"; codes: string[] } | null
+
+/** The step-up prompt: a pending sensitive action waiting for a factor. */
+export interface StepUp { passkeys: boolean; error: string | null }
+
+export function settingsView(s: Settings | null, reveal: Reveal | null, renaming: number | null, error: string | null, csrf: string, enrolling: Enrolling = null, stepUp: StepUp | null = null): Raw {
   return h`
     <div id="settings" class="lane">
       <div class="bp-bar">
@@ -544,6 +550,40 @@ export function settingsView(s: Settings | null, reveal: Reveal | null, renaming
             </form>
           </div>
           ${s ? keysTable(s.keys, renaming) : h`<p class="sub">Loading…</p>`}
+        </section>
+        ${when(stepUp, () => stepUpPrompt(stepUp as StepUp))}
+        <section class="settings-section">
+          <div class="section-head">
+            <p class="section-label">Second factor</p>
+            <div class="row">
+              <button type="button" class="ghost" data-action="enroll-totp">Add authenticator app</button>
+              <button type="button" class="ghost" data-action="enroll-webauthn">Add passkey or security key</button>
+              ${when(s && s.security.methods.length > 0, () => h`<button type="button" class="ghost" data-action="new-codes">New recovery codes</button>`)}
+            </div>
+          </div>
+          <p class="sub">An authenticator app, a passkey in your Apple or Google keychain, or a hardware key such as a YubiKey. Never SMS, never email. With a factor enrolled, signing in and every sensitive change here ask for it.</p>
+          ${enrolling?.kind === "totp" ? h`
+            <div class="enroll">
+              <div class="qr">${raw(enrolling.svg)}</div>
+              <form id="confirm-totp" class="lane-form" data-form="confirm-totp">
+                <p class="sub">Scan with your app, or enter the secret <code>${enrolling.secret}</code>, then type the code it shows.</p>
+                <input type="text" name="name" placeholder="Name, e.g. Phone" maxlength="100" aria-label="Authenticator name" />
+                <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" required aria-label="Code" />
+                <button type="submit" class="primary">Confirm</button>
+                <button type="button" class="ghost" data-action="cancel-enroll">Cancel</button>
+              </form>
+            </div>` : ""}
+          ${enrolling?.kind === "codes" ? h`
+            <section class="secret-panel">
+              <p class="section-label">Recovery codes</p>
+              <p class="sub">Each works once, when your other factors are out of reach. Keep them somewhere safe; they are shown once.</p>
+              <pre class="codes">${enrolling.codes.join("\n")}</pre>
+              <div class="row">
+                <button type="button" class="primary" data-action="copy" data-copy="${enrolling.codes.join("\n")}">Copy</button>
+                <button type="button" class="ghost" data-action="cancel-enroll">Done</button>
+              </div>
+            </section>` : ""}
+          ${s ? methodsTable(s.security.methods, s.security.recovery_codes_left) : raw("")}
         </section>
         <section class="settings-section">
           <div class="section-head">
@@ -604,4 +644,39 @@ function sessionsTable(sessions: Session[]): Raw {
 function stamp(iso: string): string {
   const d = new Date(iso)
   return `${d.toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" })} ${d.toLocaleTimeString("en", { hour: "numeric", minute: "2-digit" })}`
+}
+
+function methodsTable(methods: Method[], codesLeft: number): Raw {
+  if (methods.length === 0) return h`<p class="sub">No second factor yet.</p>`
+  return h`
+    <table class="keys">
+      <thead><tr><th>Factor</th><th>Added</th><th>Last used</th><th></th></tr></thead>
+      <tbody>
+        ${methods.map((m) => h`
+          <tr id="method-${m.id}">
+            <td><strong>${m.name === "" ? (m.kind === "totp" ? "Authenticator app" : "Passkey") : m.name}</strong><span class="sub">${m.kind === "totp" ? "authenticator app" : m.backed_up ? "passkey, synced" : "security key"}</span></td>
+            <td>${stamp(m.created_at)}</td>
+            <td>${m.last_used_at ? stamp(m.last_used_at) : "Never"}</td>
+            <td class="actions"><button type="button" class="text-btn danger" data-action="remove-method" data-id="${m.id}" data-name="${m.name}">Remove</button></td>
+          </tr>`)}
+      </tbody>
+    </table>
+    <p class="sub">${codesLeft} recovery code${codesLeft === 1 ? "" : "s"} left.</p>`
+}
+
+function stepUpPrompt(p: StepUp): Raw {
+  return h`
+    <section id="step-up" class="secret-panel">
+      <p class="section-label">Confirm it is you</p>
+      <p class="sub">This change needs your second factor.</p>
+      ${when(p.error, () => h`<p class="banner hold-error">${p.error}</p>`)}
+      <div class="row">
+        ${when(p.passkeys, () => h`<button type="button" class="primary" data-action="step-up-webauthn">Use a passkey or security key</button>`)}
+        <form id="step-up-code" class="lane-form inline" data-form="step-up-code">
+          <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="App code or recovery code" required aria-label="Code" />
+          <button type="submit" class="primary">Confirm</button>
+        </form>
+        <button type="button" class="ghost" data-action="cancel-step-up">Cancel</button>
+      </div>
+    </section>`
 }

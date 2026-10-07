@@ -45,25 +45,47 @@ defmodule HiremeWeb.Auth do
     case Accounts.session(get_session(conn, @session_key)) do
       {session, account} ->
         Repo.put_account(account.id)
-        conn |> assign(:account, account) |> assign(:session, session)
+
+        conn
+        |> assign(:account, account)
+        |> assign(:session, session)
+        |> assign(:pending, Hireme.Mfa.required?(session))
 
       nil ->
         Repo.put_account(nil)
-        conn |> assign(:account, nil) |> assign(:session, nil)
+        conn |> assign(:account, nil) |> assign(:session, nil) |> assign(:pending, false)
     end
   end
 
+  @doc "A live session that has presented its second factor, if the account has one."
   def require_account(conn, _opts) do
     cond do
-      conn.assigns[:account] ->
-        conn
-
-      get_format(conn) == "json" ->
-        conn |> put_status(401) |> json(%{error: "unauthenticated"}) |> halt()
-
-      true ->
-        conn |> redirect(to: "/sign-in") |> halt()
+      conn.assigns[:account] && not conn.assigns.pending -> conn
+      conn.assigns[:account] -> refuse(conn, 401, "second_factor", "/sign-in/factor")
+      true -> refuse(conn, 401, "unauthenticated", "/sign-in")
     end
+  end
+
+  @doc "A live session that still owes a second factor; anyone else is sent where they belong."
+  def require_pending(conn, _opts) do
+    cond do
+      conn.assigns[:account] && conn.assigns.pending -> conn
+      conn.assigns[:account] -> refuse(conn, 409, "signed_in", "/")
+      true -> refuse(conn, 401, "unauthenticated", "/sign-in")
+    end
+  end
+
+  @doc "A second factor presented within the step-up window (ASVS 7.5.1); JSON only."
+  def require_step_up(conn, _opts) do
+    if Hireme.Mfa.fresh?(conn.assigns.session),
+      do: conn,
+      else: conn |> put_status(403) |> json(%{error: "step_up"}) |> halt()
+  end
+
+  defp refuse(conn, status, error, to) do
+    if get_format(conn) == "json",
+      do: conn |> put_status(status) |> json(%{error: error}) |> halt(),
+      else: conn |> redirect(to: to) |> halt()
   end
 
   def security_headers(conn, _opts) do
@@ -116,6 +138,9 @@ defmodule HiremeWeb.AuthController do
   import Plug.Conn
   alias Hireme.Accounts
   alias HiremeWeb.Auth
+
+  def sign_in(%{assigns: %{account: %{}, pending: true}} = conn, _params),
+    do: redirect(conn, to: "/sign-in/factor")
 
   def sign_in(%{assigns: %{account: %{}}} = conn, _params), do: redirect(conn, to: "/")
 
