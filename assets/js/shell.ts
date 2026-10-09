@@ -111,7 +111,7 @@ export class Shell {
       <div id="notice-slot"></div>
       <div id="scoreboard-slot"></div>
       <div id="heat-slot"></div>
-      <div class="stage">
+      <div class="desk-stage">
         <div id="workspace" class="workspace">
           <div id="grid" class="grid-scroll"><div id="plane" class="grid-plane"></div><div id="empty"></div></div>
           <div id="focus-slot"></div>
@@ -419,9 +419,8 @@ export class Shell {
       if (workspace.dataset["covered"]) delete workspace.dataset["covered"]
       this.drawBoard(focus, mark)
     } else {
-      morph(lens, this.lensView(focus, mark, lanes))
-      const paper = m.lens === "battleplan" && focus ? lens.querySelector("#bp-paper") : null
-      if (paper && focus) morph(paper, views.battleplanPaper(focus, m.editing, m.alterError))
+      morph(lens, this.lensView(focus, lanes))
+      if (m.lens === "battleplan" && focus) this.drawBattleplanSlots(lens, focus, mark)
       if (!workspace.dataset["covered"]) workspace.dataset["covered"] = "1"
     }
     // Assigning the title rewrites the <title> node even when it is the same.
@@ -429,12 +428,12 @@ export class Shell {
     if (document.title !== title) document.title = title
   }
 
-  private lensView(focus: Focus | null, mark: views.Mark, lanes: api.Lanes | null): Raw {
+  private lensView(focus: Focus | null, lanes: api.Lanes | null): Raw {
     const m = this.model
     switch (m.lens) {
       case "battleplan":
         return focus
-          ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.refusal, mark)}</div>`
+          ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.refusal)}</div>`
           : views.connecting()
       case "root": {
         const root = this.rootProfile()
@@ -451,6 +450,33 @@ export class Shell {
         return raw("")
     }
   }
+
+  // The battleplan frame leaves its slots alone; each is morphed here and
+  // skipped outright when its HTML is what it last drew.
+  // The pending mark is a class set here, not part of the frame's HTML, so
+  // a write's mark alone never re-walks the frame.
+  private drawBattleplanSlots(lens: HTMLElement, focus: Focus, mark: views.Mark): void {
+    const m = this.model
+    const parts = views.battleplanSlots(focus)
+    const slot = (id: string, html: Raw) => {
+      const el = lens.querySelector(id)
+      if (el) morph(el, html)
+    }
+    slot("#bp-bar", parts.bar)
+    slot("#bp-narrative", parts.narrative)
+    slot("#bp-events", parts.events)
+    slot("#bp-paper", views.battleplanPaper(focus, m.editing, m.alterError))
+    const rail = lens.querySelector("#bp-rail")
+    if (rail) {
+      let keyed = this.rails.get(rail)
+      if (!keyed) this.rails.set(rail, (keyed = new Keyed(rail)))
+      keyed.set(parts.rail)
+    }
+    lens.querySelector("#battleplan")?.classList.toggle("is-pending", mark === "pending")
+  }
+
+  // One keyed rail per battleplan element; a reopened battleplan is a new element.
+  private readonly rails = new WeakMap<Element, Keyed>()
 
   // The root CV shown: the filtered profile's, else the selected application's, else the first.
   private rootProfile(): number | null {

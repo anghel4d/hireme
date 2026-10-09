@@ -74,7 +74,7 @@ kbd {
  * (content-visibility), skips style, layout and paint, and leaves the
  * focus order, so coming back costs a paint rather than a relayout.
  */
-.stage { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.desk-stage { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
 #lens > * { position: absolute; inset: 0; z-index: 5; background: var(--bg); }
 .workspace[data-covered] { content-visibility: hidden; }
 
@@ -592,6 +592,8 @@ kbd {
   overflow: auto;
 }
 .campaign { border-right: 1px solid var(--line); padding: 0.4rem; background: var(--browse); }
+/* The battleplan's slots are drawn apart but lay out as the campaign's own children. */
+.campaign > [data-slot] { display: contents; }
 
 .stage {
   width: 100%;
