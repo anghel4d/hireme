@@ -14,6 +14,10 @@
 //! text the old packet carried is derived here too, lowercased once per
 //! change rather than sent.
 
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use wire::schema::{col, op, refusal, table};
 use wire::{NONE, Op, U32};
 
@@ -43,13 +47,19 @@ struct Pending {
     predicted: Vec<(u16, u32, u16, Val)>,
 }
 
-#[derive(Default)]
 pub struct Desk {
     pub store: Store,
     overlay: Vec<(u16, Column)>,
     pending: Vec<Pending>,
     order: Vec<u32>,
-    order_dirty: bool,
+    /// What each card row sorted by (see `basis_of`), and the arena epoch
+    /// its string references belong to.
+    basis: Vec<Basis>,
+    basis_epoch: u32,
+    /// The order needs a full sort.
+    order_full: bool,
+    /// Card rows a prediction moved since the last sort.
+    moved: Vec<u32>,
     /// Per card row: the string refs it was derived from, and the text.
     search: Vec<([u32; 13], Vec<u8>)>,
     search_epoch: u32,
@@ -59,17 +69,30 @@ pub struct Desk {
     pub counters: [u32; COUNTERS],
     pub events: Vec<[u32; 4]>,
     /// (job, item) → mode column, as pending overlay ops left it.
-    modes: std::collections::HashMap<(u32, u32), Option<u16>>,
+    modes: BTreeMap<(u32, u32), Option<u16>>,
     pub event_msgs: Vec<Vec<u8>>,
 }
 
 impl Desk {
-    pub fn new() -> Desk {
+    pub const fn new() -> Desk {
         Desk {
-            today: NONE,
-            order_dirty: true,
+            store: Store::new(),
+            overlay: Vec::new(),
+            pending: Vec::new(),
+            order: Vec::new(),
+            basis: Vec::new(),
+            basis_epoch: 0,
+            order_full: true,
+            moved: Vec::new(),
+            search: Vec::new(),
+            search_epoch: 0,
             search_dirty: true,
-            ..Default::default()
+            sel: Vec::new(),
+            today: NONE,
+            counters: [0; COUNTERS],
+            events: Vec::new(),
+            modes: BTreeMap::new(),
+            event_msgs: Vec::new(),
         }
     }
 
@@ -172,16 +195,21 @@ impl Desk {
         // changes), so a number moving resorts without re-deriving it.
         self.search_dirty |= matches!(v, Val::S(_));
         rec.push((t, key, c, v));
-        self.order_dirty = true;
+        match t {
+            table::CARDS => self.moved.push(row as u32),
+            table::BATCHES if c == col::batches::ORDINAL => self.order_full = true,
+            table::STAGES => self.order_full = true,
+            _ => {}
+        }
     }
 
     /// Drops the overlay and replays every pending op over base.
     fn rebuild_view(&mut self) {
         self.overlay.clear();
         self.modes.clear();
-        self.order_dirty = true;
+        self.order_full = true;
         self.search_dirty = true;
-        let pending = std::mem::take(&mut self.pending);
+        let pending = core::mem::take(&mut self.pending);
         for p in &pending {
             if let Ok(o) = Op::parse(&p.bytes) {
                 let mut sink = Vec::new();
@@ -366,7 +394,7 @@ impl Desk {
                 let m = lines
                     .col(col::lines::MODE)
                     .map_or([0, 0], |c| c.str_ref(lr));
-                let m = std::str::from_utf8(self.store.arena.get(m)).unwrap_or("");
+                let m = core::str::from_utf8(self.store.arena.get(m)).unwrap_or("");
                 return mode_col(m);
             }
         }
@@ -546,23 +574,8 @@ impl Desk {
 
     // ---- order, search, select ------------------------------------------
 
-    fn sort(&mut self) {
-        if !self.order_dirty {
-            return;
-        }
-        self.order_dirty = false;
-        let c = table::CARDS;
-        let n = self.rows(c);
-        let ordinal = |id: u32| -> u64 {
-            if id == 0 {
-                return 999;
-            }
-            self.row_of(table::BATCHES, id)
-                .map_or(999, |r| {
-                    self.vu32(table::BATCHES, col::batches::ORDINAL, r) as u64
-                })
-                .min(0xffff)
-        };
+    /// Stage ix → rank.
+    fn ranks(&self) -> Vec<u64> {
         let st = table::STAGES;
         let mut rank = vec![0xffu64; 64];
         for r in 0..self.rows(st) {
@@ -571,34 +584,140 @@ impl Desk {
                 rank[ix] = (self.vu32(st, col::stages::RANK, r) as u64).min(0xff);
             }
         }
-        let (score, load, batch, stage, heat) = (
-            self.w32(c, col::cards::SCORE),
-            self.w32(c, col::cards::LOAD_PCT),
-            self.w32(c, col::cards::BATCH),
-            self.w32(c, col::cards::STAGE),
-            self.w32(c, col::cards::HEAT),
+        rank
+    }
+
+    /// What a card row sorts by: everything of Card.order but the company,
+    /// packed so a smaller number sorts first; the company's string
+    /// reference; the id.
+    fn basis_of(&self, rank: &[u64], i: usize) -> Basis {
+        let c = table::CARDS;
+        let at = |col: u16| self.vu32(c, col, i) as u64;
+        let key = pack(
+            at(col::cards::SCORE),
+            at(col::cards::LOAD_PCT),
+            self.ordinal(at(col::cards::BATCH) as u32),
+            rank.get(at(col::cards::STAGE) as usize)
+                .copied()
+                .unwrap_or(0xff),
+            at(col::cards::HEAT),
         );
-        let at = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0) as u64;
-        let mut keys: Vec<(u64, u32)> = (0..n)
-            .map(|i| {
-                let k = (255 - at(score, i).min(255)) << 56
-                    | at(load, i).min(0xff_ffff) << 32
-                    | ordinal(at(batch, i) as u32) << 16
-                    | rank.get(at(stage, i) as usize).copied().unwrap_or(0xff) << 8
-                    | (255 - at(heat, i).min(255));
-                (k, i as u32)
-            })
-            .collect();
+        let company = self
+            .strs(c, col::cards::COMPANY)
+            .get(i)
+            .copied()
+            .unwrap_or([0, 0]);
+        (key, company, at(col::cards::ID) as u32)
+    }
+
+    /// `basis_of` for every row, reading each column once.
+    fn basis_all(&self, rank: &[u64]) -> Vec<Basis> {
+        let c = table::CARDS;
+        let cols = [
+            col::cards::SCORE,
+            col::cards::LOAD_PCT,
+            col::cards::BATCH,
+            col::cards::STAGE,
+            col::cards::HEAT,
+            col::cards::ID,
+        ]
+        .map(|k| self.w32(c, k));
         let company = self.strs(c, col::cards::COMPANY);
-        let ids = self.w32(c, col::cards::ID);
+        let at = |k: usize, i: usize| cols[k].get(i).copied().unwrap_or(0) as u64;
+        (0..self.rows(c))
+            .map(|i| {
+                let key = pack(
+                    at(0, i),
+                    at(1, i),
+                    self.ordinal(at(2, i) as u32),
+                    rank.get(at(3, i) as usize).copied().unwrap_or(0xff),
+                    at(4, i),
+                );
+                (
+                    key,
+                    company.get(i).copied().unwrap_or([0, 0]),
+                    at(5, i) as u32,
+                )
+            })
+            .collect()
+    }
+
+    fn ordinal(&self, batch: u32) -> u64 {
+        if batch == 0 {
+            return 999;
+        }
+        self.row_of(table::BATCHES, batch).map_or(999, |r| {
+            (self.vu32(table::BATCHES, col::batches::ORDINAL, r) as u64).min(0xffff)
+        })
+    }
+
+    /// Card.order over two card rows, given `basis` is current.
+    fn order_by(&self) -> impl Fn(u32, u32) -> core::cmp::Ordering + '_ {
         let arena = &self.store.arena;
-        let name = |i: u32| arena.get(company.get(i as usize).copied().unwrap_or([0, 0]));
-        keys.sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| name(a.1).cmp(name(b.1)))
-                .then_with(|| ids.get(a.1 as usize).cmp(&ids.get(b.1 as usize)))
-        });
-        self.order = keys.into_iter().map(|(_, i)| i).collect();
+        let basis = &self.basis;
+        move |a, b| {
+            let (x, y) = (&basis[a as usize], &basis[b as usize]);
+            x.0.cmp(&y.0)
+                .then_with(|| arena.get(x.1).cmp(arena.get(y.1)))
+                .then_with(|| x.2.cmp(&y.2))
+        }
+    }
+
+    /// Brings the board order up to date. Rows whose basis moved are taken
+    /// out and put back by binary search, so a prediction or a small PATCH
+    /// resorts in microseconds; a new arena epoch, a changed row count or
+    /// a large change sorts in full.
+    fn sort(&mut self) {
+        let rank = self.ranks();
+        let n = self.rows(table::CARDS);
+        let mut moved = core::mem::take(&mut self.moved);
+        if self.order_full {
+            self.order_full = false;
+            moved.clear();
+            let basis = self.basis_all(&rank);
+            let epoch = self.store.arena.epoch;
+            let reuse = self.order.len() == n && self.basis.len() == n && self.basis_epoch == epoch;
+            if reuse {
+                moved.extend(
+                    (0..n)
+                        .filter(|&i| basis[i] != self.basis[i])
+                        .map(|i| i as u32),
+                );
+            }
+            self.basis = basis;
+            self.basis_epoch = epoch;
+            if !reuse || moved.len() > n / 8 {
+                let mut order: Vec<u32> = (0..n as u32).collect();
+                {
+                    let by = self.order_by();
+                    order.sort_unstable_by(|&a, &b| by(a, b));
+                }
+                self.order = order;
+                moved.clear();
+                self.moved = moved;
+                return;
+            }
+        } else {
+            moved.sort_unstable();
+            moved.dedup();
+            for &r in &moved {
+                self.basis[r as usize] = self.basis_of(&rank, r as usize);
+            }
+        }
+        // Everything still in the order kept its basis, so it is sorted;
+        // the moved rows go back in one at a time.
+        let mut order = core::mem::take(&mut self.order);
+        order.retain(|r| moved.binary_search(r).is_err());
+        {
+            let by = self.order_by();
+            for &r in &moved {
+                let at = order.partition_point(|&x| by(x, r).is_lt());
+                order.insert(at, r);
+            }
+        }
+        self.order = order;
+        moved.clear();
+        self.moved = moved;
     }
 
     /// Re-derives the lowercased search text of rows whose inputs moved.
@@ -617,7 +736,7 @@ impl Desk {
             self.search.clear();
             self.search_epoch = epoch;
         }
-        let mut search = std::mem::take(&mut self.search);
+        let mut search = core::mem::take(&mut self.search);
         search.resize_with(n, || ([u32::MAX; 13], Vec::new()));
         const FIELDS: [u16; 5] = [
             col::cards::COMPANY,
@@ -626,18 +745,23 @@ impl Desk {
             col::cards::NEXT_ACTION,
             col::cards::CV_LABEL,
         ];
+        let cols = FIELDS.map(|f| self.strs(c, f));
+        let (profiles, names) = (
+            self.w32(c, col::cards::PROFILE),
+            self.strs(table::PROFILES, col::profiles::NAME),
+        );
+        let ids = self.w32(c, col::cards::ID);
+        let profile_table = self.store.table(table::PROFILES);
         for (r, (key, text)) in search.iter_mut().enumerate() {
-            let pid = self.vu32(c, col::cards::PROFILE, r);
-            let pname = self.row_of(table::PROFILES, pid).map_or([0, 0], |pr| {
-                self.strs(table::PROFILES, col::profiles::NAME)
-                    .get(pr)
-                    .copied()
-                    .unwrap_or([0, 0])
-            });
-            let id = self.vu32(c, col::cards::ID, r);
+            let pid = profiles.get(r).copied().unwrap_or(0);
+            let pname = profile_table
+                .and_then(|t| t.row_of(pid))
+                .and_then(|pr| names.get(pr).copied())
+                .unwrap_or([0, 0]);
+            let id = ids.get(r).copied().unwrap_or(0);
             let mut k = [0u32; 13];
-            for (i, f) in FIELDS.iter().enumerate() {
-                let sr = self.strs(c, *f).get(r).copied().unwrap_or([0, 0]);
+            for (i, col) in cols.iter().enumerate() {
+                let sr = col.get(r).copied().unwrap_or([0, 0]);
                 k[2 * i..2 * i + 2].copy_from_slice(&sr);
             }
             k[10..12].copy_from_slice(&pname);
@@ -658,8 +782,10 @@ impl Desk {
                     text.push(b'\n');
                 }
             }
-            use std::io::Write;
-            let _ = write!(text, "\njobapp{id}\ncv{id}\n{id}");
+            for (prefix, digits) in [(&b"\njobapp"[..], id), (b"\ncv", id), (b"\n", id)] {
+                text.extend_from_slice(prefix);
+                decimal(text, digits);
+            }
         }
         self.search = search;
     }
@@ -686,7 +812,7 @@ impl Desk {
         if !query.is_empty() {
             self.derive_search();
         }
-        let mut sel = std::mem::take(&mut self.sel);
+        let mut sel = core::mem::take(&mut self.sel);
         sel.clear();
         let c = table::CARDS;
         let (score, st, stat, bat, prof, hs) = (
@@ -747,6 +873,30 @@ fn mode_col(mode: &str) -> Option<Option<u16>> {
     }
 }
 
+type Basis = (u64, [u32; 2], u32);
+
+fn pack(score: u64, load: u64, ordinal: u64, rank: u64, heat: u64) -> u64 {
+    (255 - score.min(255)) << 56
+        | load.min(0xff_ffff) << 32
+        | ordinal.min(0xffff) << 16
+        | rank.min(0xff) << 8
+        | (255 - heat.min(255))
+}
+
+fn decimal(out: &mut Vec<u8>, mut n: u32) {
+    let mut buf = [0u8; 10];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
 fn trim(q: &[u8]) -> &[u8] {
     let s = q
         .iter()
@@ -766,7 +916,7 @@ pub fn lower_into(out: &mut Vec<u8>, s: &[u8]) {
         out.extend(s.iter().map(u8::to_ascii_lowercase));
         return;
     }
-    let s = std::str::from_utf8(s).unwrap_or("");
+    let s = core::str::from_utf8(s).unwrap_or("");
     let mut buf = [0u8; 4];
     for ch in s.chars().flat_map(char::to_lowercase) {
         out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());

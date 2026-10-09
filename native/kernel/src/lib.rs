@@ -25,10 +25,15 @@
 //! `ingest_commit(len)` → a [`changed`] bitmask. ACK and NACK frames settle
 //! the pending layer inside ingest; what settled is in `events_*`.
 
+#![no_std]
+
+extern crate alloc;
+
 mod desk;
 mod store;
 
-use std::cell::RefCell;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 use desk::Desk;
 use store::focus_table;
@@ -55,18 +60,27 @@ struct Kernel {
     focus: Option<u32>,
 }
 
-thread_local! {
-    static K: RefCell<Kernel> = RefCell::new(Kernel {
-        desk: Desk::new(),
-        ingest: Vec::new(),
-        scratch: Vec::new(),
-        snapshot: Vec::new(),
-        focus: None,
-    });
-}
+/// The one kernel. WebAssembly here is single-threaded and no export
+/// calls back into JavaScript, so exports never overlap and each takes the
+/// state for the length of its own call only.
+struct Global(UnsafeCell<Kernel>);
+
+// SAFETY: wasm32-unknown-unknown without the atomics feature has one
+// thread; nothing else can observe the cell.
+unsafe impl Sync for Global {}
+
+static K: Global = Global(UnsafeCell::new(Kernel {
+    desk: Desk::new(),
+    ingest: Vec::new(),
+    scratch: Vec::new(),
+    snapshot: Vec::new(),
+    focus: None,
+}));
 
 fn with<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
-    K.with(|k| f(&mut k.borrow_mut()))
+    // SAFETY: see `Global`; `with` is never re-entered, since no export
+    // calls another.
+    f(unsafe { &mut *K.0.get() })
 }
 
 fn reserve(v: &mut Vec<u8>, len: u32) -> u32 {
@@ -116,7 +130,7 @@ pub extern "C" fn scratch(len: u32) -> u32 {
 }
 
 fn scratch_str(k: &Kernel, len: u32) -> &str {
-    std::str::from_utf8(k.scratch.get(..len as usize).unwrap_or(&[])).unwrap_or("")
+    core::str::from_utf8(k.scratch.get(..len as usize).unwrap_or(&[])).unwrap_or("")
 }
 
 /// Table id for the name in scratch, or -1.
@@ -141,7 +155,7 @@ pub extern "C" fn ingest_reserve(len: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ingest_commit(len: u32) -> u32 {
     with(|k| {
-        let buf = std::mem::take(&mut k.ingest);
+        let buf = core::mem::take(&mut k.ingest);
         let bits = k.desk.ingest(&buf[..(len as usize).min(buf.len())]);
         k.ingest = buf;
         bits
@@ -334,7 +348,7 @@ pub extern "C" fn counter(i: u32) -> u32 {
 pub extern "C" fn snapshot() -> u32 {
     with(|k| {
         let mut w = wire::Writer::new();
-        w.buf = std::mem::take(&mut k.snapshot);
+        w.buf = core::mem::take(&mut k.snapshot);
         w.buf.clear();
         k.desk.store.snapshot(&mut w);
         k.snapshot = w.buf;
@@ -345,4 +359,129 @@ pub extern "C" fn snapshot() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn snapshot_ptr() -> u32 {
     with(|k| k.snapshot.as_ptr() as u32)
+}
+
+// ---- the runtime --------------------------------------------------------
+//
+// Without std the module carries no formatting, no panic machinery and no
+// general-purpose malloc: a panic is a trap, and memory comes from a
+// size-class allocator below. That is most of the binary's former size.
+
+#[cfg(target_arch = "wasm32")]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    core::arch::wasm32::unreachable()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static HEAP: heap::Heap = heap::Heap::new();
+
+/// Power-of-two size classes from 16 bytes up, each with a free list,
+/// carved from a bump pointer that grows linear memory a page run at a
+/// time. A freed block goes back to its class; a realloc within the same
+/// class returns the same block. Vectors double, so their blocks are
+/// already powers of two and lose nothing to the rounding.
+#[cfg(target_arch = "wasm32")]
+mod heap {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::arch::wasm32;
+    use core::cell::UnsafeCell;
+    use core::ptr;
+
+    const CLASSES: usize = 32;
+    const PAGE: usize = 65536;
+
+    struct State {
+        free: [usize; CLASSES],
+        top: usize,
+        end: usize,
+    }
+
+    pub struct Heap(UnsafeCell<State>);
+
+    // SAFETY: one thread, as for the kernel state.
+    unsafe impl Sync for Heap {}
+
+    impl Heap {
+        pub const fn new() -> Heap {
+            Heap(UnsafeCell::new(State {
+                free: [0; CLASSES],
+                top: 0,
+                end: 0,
+            }))
+        }
+    }
+
+    unsafe extern "C" {
+        static __heap_base: u8;
+    }
+
+    fn class(l: &Layout) -> Option<usize> {
+        if l.align() > 16 {
+            return None;
+        }
+        let size = l.size().max(16).checked_next_power_of_two()?;
+        let c = size.trailing_zeros() as usize;
+        (c < CLASSES).then_some(c)
+    }
+
+    unsafe impl GlobalAlloc for Heap {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            let Some(c) = class(&l) else {
+                return ptr::null_mut();
+            };
+            // SAFETY: single-threaded; see the impl Sync above.
+            let s = unsafe { &mut *self.0.get() };
+            let head = s.free[c];
+            if head != 0 {
+                // SAFETY: a free block holds the address of the next one.
+                s.free[c] = unsafe { *(head as *const usize) };
+                return head as *mut u8;
+            }
+            if s.top == 0 {
+                let base = ptr::addr_of!(__heap_base) as usize;
+                s.top = (base + 15) & !15;
+                s.end = wasm32::memory_size(0) * PAGE;
+            }
+            let size = 1usize << c;
+            let want = s.top + size;
+            if want > s.end {
+                let pages = (want - s.end).div_ceil(PAGE);
+                if wasm32::memory_grow(0, pages) == usize::MAX {
+                    return ptr::null_mut();
+                }
+                s.end += pages * PAGE;
+            }
+            let p = s.top;
+            s.top = want;
+            p as *mut u8
+        }
+
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            let Some(c) = class(&l) else { return };
+            // SAFETY: single-threaded; the block is at least 16 bytes and
+            // 16-aligned, so it can hold the free-list link.
+            let s = unsafe { &mut *self.0.get() };
+            unsafe { *(p as *mut usize) = s.free[c] };
+            s.free[c] = p as usize;
+        }
+
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            // SAFETY: same alignment, and `new` is nonzero by contract.
+            let nl = unsafe { Layout::from_size_align_unchecked(new, l.align()) };
+            if class(&l).is_some() && class(&l) == class(&nl) {
+                return p;
+            }
+            // SAFETY: the GlobalAlloc contract, as the default realloc.
+            unsafe {
+                let q = self.alloc(nl);
+                if !q.is_null() {
+                    ptr::copy_nonoverlapping(p, q, l.size().min(new));
+                    self.dealloc(p, l);
+                }
+                q
+            }
+        }
+    }
 }

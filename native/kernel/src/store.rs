@@ -11,7 +11,9 @@
 //! becomes garbage, and `Store::compact` rewrites every live reference
 //! once garbage outweighs what is live.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use wire::schema::{self, col, table};
 use wire::{F64, NONE, STR, U32, U64, Writer};
@@ -163,7 +165,7 @@ pub struct Table {
     pub n: usize,
     pub cols: Vec<Column>,
     /// Key (first column) → row, for keyed tables.
-    pub index: HashMap<u32, u32>,
+    pub index: IdMap,
 }
 
 impl Table {
@@ -172,7 +174,7 @@ impl Table {
             id,
             n: 0,
             cols: Vec::new(),
-            index: HashMap::new(),
+            index: IdMap::default(),
         }
     }
 
@@ -188,7 +190,7 @@ impl Table {
 
     #[inline]
     pub fn row_of(&self, key: u32) -> Option<usize> {
-        self.index.get(&key).map(|&r| r as usize)
+        self.index.get(key).map(|r| r as usize)
     }
 
     /// Replaces the whole table with a wire table.
@@ -222,8 +224,8 @@ impl Table {
         let mut rows = Vec::with_capacity(t.nrows as usize);
         for r in 0..t.nrows as usize {
             let k = keys.u32(r);
-            let row = match self.index.get(&k) {
-                Some(&row) => row as usize,
+            let row = match self.index.get(k) {
+                Some(row) => row as usize,
                 None => {
                     if self.col(1).is_none() {
                         self.cols.insert(0, Column::blank(self.id, 1, U32, self.n));
@@ -262,7 +264,7 @@ impl Table {
     pub fn delete(&mut self, keys: impl Iterator<Item = u32>) -> usize {
         let mut gone = 0;
         for k in keys {
-            let Some(row) = self.index.remove(&k) else {
+            let Some(row) = self.index.remove(k) else {
                 continue;
             };
             let row = row as usize;
@@ -287,11 +289,11 @@ impl Table {
             ..
         }) = self.col(1)
         {
-            self.index = keys
-                .iter()
-                .enumerate()
-                .map(|(r, &k)| (k, r as u32))
-                .collect();
+            let mut index = IdMap::default();
+            for (r, &k) in keys.iter().enumerate() {
+                index.insert(k, r as u32);
+            }
+            self.index = index;
         }
     }
 
@@ -335,15 +337,27 @@ pub struct Focus {
 }
 
 /// Everything resident: desk tables, focuses by job, and the arena.
-#[derive(Default)]
 pub struct Store {
     pub arena: Arena,
     pub tables: Vec<Table>,
-    pub focus: HashMap<u32, Focus>,
+    pub focus: BTreeMap<u32, Focus>,
     pub rev: u64,
 }
 
 impl Store {
+    pub const fn new() -> Store {
+        Store {
+            arena: Arena {
+                bytes: Vec::new(),
+                live_floor: 0,
+                epoch: 0,
+            },
+            tables: Vec::new(),
+            focus: BTreeMap::new(),
+            rev: 0,
+        }
+    }
+
     pub fn table(&self, id: u16) -> Option<&Table> {
         self.tables.iter().find(|t| t.id == id)
     }
@@ -413,8 +427,8 @@ impl Store {
     }
 
     /// Line ixs some focus or root still points at.
-    fn referenced_lines(&self) -> std::collections::HashSet<u32> {
-        let mut keep = std::collections::HashSet::new();
+    fn referenced_lines(&self) -> Vec<u32> {
+        let mut keep = Vec::new();
         let mut refs = |t: &Table, c: u16| {
             if let Some(col) = t.col(c) {
                 keep.extend((0..t.n).map(|r| col.u32(r)));
@@ -428,6 +442,8 @@ impl Store {
         if let Some(t) = self.table(table::ROOT_LINES) {
             refs(t, col::root_lines::LINE);
         }
+        keep.sort_unstable();
+        keep.dedup();
         keep
     }
 
@@ -439,7 +455,7 @@ impl Store {
         if !force && len < 2 * self.arena.live_floor + (256 << 10) {
             return;
         }
-        let old = std::mem::take(&mut self.arena.bytes);
+        let old = core::mem::take(&mut self.arena.bytes);
         let mut new = Vec::with_capacity(self.arena.live_floor + (64 << 10));
         let mut move_ref = |r: &mut [u32; 2]| {
             if r[1] == 0 {
@@ -482,7 +498,7 @@ impl Store {
             let keep = self.referenced_lines();
             let key = lines.col(col::lines::IX);
             let rows: Vec<usize> = (0..lines.n)
-                .filter(|&r| key.is_some_and(|k| keep.contains(&k.u32(r))))
+                .filter(|&r| key.is_some_and(|k| keep.binary_search(&k.u32(r)).is_ok()))
                 .collect();
             w.begin(schema::frame::LINES, 0, self.rev);
             lines.encode_rows(w, &self.arena, Some(&rows));
@@ -497,6 +513,120 @@ impl Store {
                 t.encode(w, &self.arena);
             }
             w.end();
+        }
+    }
+}
+
+/// u32 key → u32 row, open addressing with linear probing and
+/// backward-shift deletion. Keys are ids and line ixs, so a multiplicative
+/// hash spreads them; the table stays at most half full.
+#[derive(Default)]
+pub struct IdMap {
+    slots: Vec<(u32, u32)>,
+    len: usize,
+    /// The one key the empty marker cannot hold.
+    max: Option<u32>,
+}
+
+const EMPTY: u32 = u32::MAX;
+
+impl IdMap {
+    #[inline]
+    fn slot(&self, k: u32) -> usize {
+        let bits = self.slots.len().trailing_zeros();
+        (k.wrapping_mul(0x9E37_79B1) >> (32 - bits)) as usize
+    }
+
+    pub fn get(&self, k: u32) -> Option<u32> {
+        if k == EMPTY {
+            return self.max;
+        }
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot(k);
+        loop {
+            match self.slots[i] {
+                (EMPTY, _) => return None,
+                (key, v) if key == k => return Some(v),
+                _ => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    pub fn insert(&mut self, k: u32, v: u32) {
+        if k == EMPTY {
+            self.max = Some(v);
+            return;
+        }
+        if (self.len + 1) * 2 > self.slots.len() {
+            self.grow();
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot(k);
+        loop {
+            match self.slots[i] {
+                (EMPTY, _) => {
+                    self.slots[i] = (k, v);
+                    self.len += 1;
+                    return;
+                }
+                (key, _) if key == k => {
+                    self.slots[i].1 = v;
+                    return;
+                }
+                _ => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    pub fn remove(&mut self, k: u32) -> Option<u32> {
+        if k == EMPTY {
+            return self.max.take();
+        }
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot(k);
+        let v = loop {
+            match self.slots[i] {
+                (EMPTY, _) => return None,
+                (key, v) if key == k => break v,
+                _ => i = (i + 1) & mask,
+            }
+        };
+        // Shift later members of the run back so no probe stops early.
+        let mut hole = i;
+        let mut j = (i + 1) & mask;
+        while self.slots[j].0 != EMPTY {
+            let home = self.slot(self.slots[j].0);
+            if (j.wrapping_sub(home) & mask) >= (j.wrapping_sub(hole) & mask) {
+                self.slots[hole] = self.slots[j];
+                hole = j;
+            }
+            j = (j + 1) & mask;
+        }
+        self.slots[hole] = (EMPTY, 0);
+        self.len -= 1;
+        Some(v)
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.len = 0;
+        self.max = None;
+    }
+
+    fn grow(&mut self) {
+        let cap = (self.slots.len() * 2).max(16);
+        let old = core::mem::replace(&mut self.slots, vec![(EMPTY, 0); cap]);
+        self.len = 0;
+        for (k, v) in old {
+            if k != EMPTY {
+                self.insert(k, v);
+            }
         }
     }
 }

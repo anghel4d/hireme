@@ -400,7 +400,8 @@ async function property(seed) {
     const roll = r.f()
     const ids = [...M.base.keys()]
     if (roll < 0.35 && ids.length) {
-      // The client predicts an op.
+      // The client predicts an op, or a quick burst of them.
+      for (let burst = r.f() < 0.3 ? 2 + r.int(3) : 1; burst > 0; burst--) {
       const kind = r.pick(["stage", "stage", "next", "score", "open_fire", "note", "overlay", "overlay", "narrative"])
       const target = kind === "narrative" ? r.pick([1, 2, 3]) : r.f() < 0.95 ? r.pick(ids) : 999
       const fields = {
@@ -415,6 +416,7 @@ async function property(seed) {
       const o = { id: opId++, kind, target, fields }
       log.push(`push ${JSON.stringify(o)}`)
       assert.equal(K.push(opBody(o.id, kind, target, fields)), M.push(o), `seed ${seed} step ${step}: refusal for ${JSON.stringify(o)}\n${log.join("\n")}`)
+      }
     } else if (roll < 0.55 && M.pending.length) {
       // The server settles the oldest op: PATCH then ACK, or a NACK.
       const o = M.pending.shift()
