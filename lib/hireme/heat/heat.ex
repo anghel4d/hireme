@@ -386,6 +386,18 @@ defmodule Hireme.Heat do
     |> String.trim()
   end
 
+  @doc "Decorate a board while classifying each hot peer only once."
+  @spec decorate_all([map()], map(), Config.t(), Date.t()) :: [map()]
+  def decorate_all(cards, snapshot, cfg \\ config(), today \\ Date.utc_today()) do
+    traits =
+      Map.new(snapshot.jobs, fn job ->
+        {id_of(job), {Org.department(job), Org.family(job)}}
+      end)
+
+    snapshot = Map.put(snapshot, :traits, traits)
+    Enum.map(cards, &decorate(&1, snapshot, cfg, today))
+  end
+
   @spec decorate(map(), map(), Config.t(), Date.t()) :: map()
   def decorate(card, snapshot, cfg \\ config(), today \\ Date.utc_today())
 
@@ -499,7 +511,7 @@ defmodule Hireme.Heat do
       end
 
     company_load = load(company_peers, today, cfg.company_half_life, cfg)
-    increment = increment(job, company_peers, cfg)
+    increment = increment(job, company_peers, cfg, snapshot && Map.get(snapshot, :traits))
     projected = round4(company_load + increment)
 
     vendor_peers =
@@ -598,13 +610,15 @@ defmodule Hireme.Heat do
     }
   end
 
-  defp increment(job, others, cfg) do
+  defp increment(_job, [], cfg, _traits), do: round4(cfg.application_load)
+
+  defp increment(job, others, cfg, traits) do
     base = cfg.application_load
     dept = Org.department(job)
     family = Org.family(job)
 
-    same_dept? = Enum.any?(others, &(Org.department(&1) == dept))
-    same_fam? = Enum.any?(others, &(Org.family(&1) == family))
+    same_dept? = Enum.any?(others, &(peer_department(&1, traits) == dept))
+    same_fam? = Enum.any?(others, &(peer_family(&1, traits) == family))
 
     extra =
       if(same_dept?, do: cfg.same_department_penalty, else: 0.0) +
@@ -612,6 +626,11 @@ defmodule Hireme.Heat do
 
     round4(base + extra)
   end
+
+  defp peer_department(job, nil), do: Org.department(job)
+  defp peer_department(job, traits), do: elem(Map.fetch!(traits, id_of(job)), 0)
+  defp peer_family(job, nil), do: Org.family(job)
+  defp peer_family(job, traits), do: elem(Map.fetch!(traits, id_of(job)), 1)
 
   defp load(jobs, today, half_life, cfg) do
     jobs

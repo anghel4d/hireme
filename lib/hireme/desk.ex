@@ -358,12 +358,15 @@ defmodule Hireme.Desk do
 
   @spec list_cards(Filters.t()) :: [Card.t()]
   def list_cards(%Filters{} = filters) do
-    snap = Heat.snapshot()
+    cfg = Heat.config()
+    today = Date.utc_today()
+    snap = Heat.snapshot(today, cfg)
 
     filters
     |> card_query()
     |> Repo.all()
-    |> Enum.map(&Heat.decorate(struct!(Card, &1), snap))
+    |> Enum.map(&struct!(Card, &1))
+    |> Heat.decorate_all(snap, cfg, today)
     |> Enum.filter(&(filters.heat == :all or &1.heat_state == filters.heat))
     |> Enum.sort_by(&Card.order/1)
   end

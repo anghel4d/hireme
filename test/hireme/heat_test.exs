@@ -323,17 +323,24 @@ defmodule Hireme.HeatTest do
 
     cfg = %{Heat.config() | ats_vendor_cap: 2.0}
     snapshot = Heat.snapshot(@today, cfg)
-    decorated = Heat.decorate(first, snapshot, cfg, @today)
+    [decorated, unknown] = Heat.decorate_all([first, unknown], snapshot, cfg, @today)
     assert decorated.load == 0.5
     assert decorated.cap == 4.0
     assert decorated.ats_vendor == :lever
     assert decorated.heat_state == :blocked
     assert decorated.cooldown_days == 4
 
-    unknown = Heat.decorate(unknown, snapshot, cfg, @today)
     assert unknown.load == 0.0
     assert unknown.ats_vendor == :unknown
     assert unknown.heat_state == :cool
+
+    # A card may have newer role fields than the hot-peer snapshot. Its own
+    # cached traits must not replace the candidate's current classification.
+    changed_role = %{first | role: "Security Engineer", department: "Security"}
+    cfg = %{cfg | mega_cap: 2.0, ats_vendor_cap: 40.0}
+    [same_role, different_role] = Heat.decorate_all([first, changed_role], snapshot, cfg, @today)
+    assert same_role.heat_state == :blocked
+    assert different_role.heat_state == :cool
   end
 
   defp probe(company, role, score, id, url \\ nil) do
