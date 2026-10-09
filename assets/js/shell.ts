@@ -272,7 +272,10 @@ export class Shell {
     }
   }
 
+  // The scoreboard and lanes do not wait on the packet.
   private async refreshBoard(reads: Reads): Promise<void> {
+    if (reads.scoreboard) void this.once("scoreboard", async () => this.dispatch({ t: "scoreboard", scoreboard: await api.fetchScoreboard() }))
+    if (reads.lanes) void this.once("lanes", () => this.loadLanes())
     if (reads.pack) {
       await this.once("pack", async () => {
         this.store = await this.reloadStore()
@@ -280,8 +283,6 @@ export class Shell {
         this.queueDraw()
       })
     }
-    if (reads.scoreboard) void this.once("scoreboard", async () => this.dispatch({ t: "scoreboard", scoreboard: await api.fetchScoreboard() }))
-    if (reads.lanes) void this.once("lanes", () => this.loadLanes())
   }
 
   // One read of each kind in flight. Asking for it meanwhile runs it once
