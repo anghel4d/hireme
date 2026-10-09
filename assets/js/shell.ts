@@ -389,7 +389,7 @@ export class Shell {
   // that job meanwhile. A write answers with the focus as committed and then
   // refreshes the board; the signals held meanwhile fold into that one
   // refresh. A held signal may be another tab's, newer than the answer, so
-  // it still reloads the focus and the root CV as it would have.
+  // it still reloads the focus as it would have.
   private readonly writing = new Map<number, { n: number; reads: Reads; held: Signal[] }>()
 
   private onSignal(s: Signal): void {
@@ -400,7 +400,12 @@ export class Shell {
     }
     void this.refreshBoard(READS[s.type])
     if (s.job_id !== undefined && s.job_id === this.model.appId) void this.loadFocus()
-    if (s.type === "cv" || s.type === "open_fire") void this.loadRoot()
+    if (s.type === "cv") this.rootChanged()
+  }
+
+  // The root CV holds no batch state, and its lens reads it again on opening.
+  private rootChanged(): void {
+    if (this.model.lens === "root") void this.loadRoot()
   }
 
   private answered(id: number, reads: Reads): void {
@@ -411,7 +416,7 @@ export class Shell {
     this.writing.delete(id)
     void this.refreshBoard(w.held.reduce((all, s) => union(all, READS[s.type]), w.reads))
     if (w.held.length > 0 && id === this.model.appId) void this.loadFocus()
-    if (w.held.some((s) => s.type === "cv" || s.type === "open_fire")) void this.loadRoot()
+    if (w.held.some((s) => s.type === "cv")) this.rootChanged()
   }
 
   private async write(id: number, change: Change, outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
