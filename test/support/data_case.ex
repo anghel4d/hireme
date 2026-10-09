@@ -33,6 +33,8 @@ defmodule Hireme.DataCase do
   def open_account(name \\ "Test desk") do
     account = Hireme.Accounts.create!(%{name: name})
     Hireme.Repo.put_account(account.id)
+    # The sandbox hands this id out again; its sequencer goes with the test.
+    on_exit(fn -> Hireme.Ops.stop(account.id) end)
     account
   end
 end

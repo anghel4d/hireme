@@ -312,8 +312,14 @@ defmodule Hireme.Heat do
       String.trim(reason_of(job)) != ""
   end
 
+  @doc "Let one application past the governor, with a written reason. Runs through `Hireme.Ops`."
   @spec set_override(pos_integer(), String.t()) :: {:ok, Job.t()} | {:error, :reason | :not_found}
-  def set_override(job_id, reason) when is_binary(reason) do
+  def set_override(job_id, reason), do: Hireme.Ops.exec({:heat_override, job_id, reason})
+
+  @doc false
+  # The write itself, on the account's `Hireme.Ops` process.
+  @spec write_override(pos_integer(), term()) :: {:ok, Job.t()} | {:error, :reason | :not_found}
+  def write_override(job_id, reason) when is_binary(reason) do
     case String.trim(reason) do
       "" ->
         {:error, :reason}
@@ -342,7 +348,7 @@ defmodule Hireme.Heat do
     end
   end
 
-  def set_override(_, _), do: {:error, :reason}
+  def write_override(_, _), do: {:error, :reason}
 
   @spec chart(Date.t(), Config.t()) :: Chart.t()
   def chart(today \\ Date.utc_today(), cfg \\ config()) do
@@ -447,6 +453,24 @@ defmodule Hireme.Heat do
     |> Map.put(:heat_state, state)
     |> Map.put(:ats_vendor, verdict.ats_vendor)
     |> Map.put(:cooldown_days, verdict.cooldown_days)
+  end
+
+  @doc """
+  The cards whose painted heat reads `job` as a peer: those at the same
+  company (department and role-family penalties are scoped to it) and
+  those on the same ATS vendor (vendor and tenant loads). `cards` are
+  decorated, so their vendor is already parsed; `job` is any card or row.
+  The job's own card is among them when it is in `cards`.
+  """
+  @spec kin([map()], map()) :: [pos_integer()]
+  def kin(cards, job) do
+    key = Org.company_key(company_of(job))
+    vendor = Ats.parse(url_of(job)).vendor
+
+    for card <- cards,
+        (Map.get(card, :ats_vendor) == vendor and vendor != :unknown) or
+          Org.company_key(company_of(card)) == key,
+        do: id_of(card)
   end
 
   @spec state_name(atom()) :: String.t()

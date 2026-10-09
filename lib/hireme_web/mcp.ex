@@ -210,24 +210,26 @@ defmodule HiremeWeb.Mcp do
   defp directory_call("gym_status", _args), do: {:ok, gym()}
 
   defp directory_call("gym_log", args) do
-    with {:ok, rep} <- Gym.log(args), do: {:ok, Map.put(JSON.rep(rep), :progress, gym())}
+    with {:ok, rep} <- Hireme.Ops.exec({:gym_log, args}),
+         do: {:ok, Map.put(JSON.rep(rep), :progress, gym())}
   end
 
   defp directory_call("gym_set_target", args) do
     with {:ok, n} <- Args.int(args, "target"),
-         {:ok, _n} <- Gym.set_target(n),
+         {:ok, _n} <- Hireme.Ops.exec({:gym_target, n}),
          do: {:ok, gym()}
   end
 
   defp directory_call("net_status", _args), do: {:ok, net()}
 
   defp directory_call("net_log", args) do
-    with {:ok, entry} <- Net.log(args), do: {:ok, Map.put(JSON.entry(entry), :progress, net())}
+    with {:ok, entry} <- Hireme.Ops.exec({:net_log, args}),
+         do: {:ok, Map.put(JSON.entry(entry), :progress, net())}
   end
 
   defp directory_call("net_set_lane", args) do
     with {:ok, url} <- Args.string(args, "url"),
-         {:ok, _lane} <- Net.set_lane(url),
+         {:ok, _lane} <- Hireme.Ops.exec({:net_lane, url}),
          do: {:ok, net()}
   end
 
