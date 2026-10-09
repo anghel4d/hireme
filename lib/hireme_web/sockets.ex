@@ -483,10 +483,5 @@ defmodule HiremeWeb.LetterboxStream do
 
   defp pad(len), do: rem(8 - rem(len, 8), 8)
 
-  # The session's schema hash, so every frame on the wire carries one.
-  defp schema_hash do
-    if function_exported?(HiremeWeb.Packet, :schema_hash, 0),
-      do: apply(HiremeWeb.Packet, :schema_hash, []),
-      else: 0
-  end
+  defp schema_hash, do: HiremeWeb.Packet.schema_hash()
 end
