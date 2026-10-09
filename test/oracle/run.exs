@@ -68,8 +68,10 @@ account_id =
   end
 
 Hireme.Repo.put_account(account_id)
-ops = Hireme.Oracle.ops(seed || 0, Keyword.get(opts, :ops, 0))
-lines = Hireme.Oracle.dump(today, seed: seed, ops: ops)
+n_ops = Keyword.get(opts, :ops, 0)
+before = if n_ops > 0, do: Hireme.Oracle.tables("table_before"), else: []
+ops = Hireme.Oracle.ops(seed || 0, n_ops)
+lines = Hireme.Oracle.dump(today, seed: seed, before: before, ops: ops)
 path = Path.join(out, name <> ".jsonl")
 File.write!(path, Enum.map(lines, &[Hireme.Oracle.encode(&1), ?\n]))
 IO.puts("#{path}: #{length(lines)} lines")

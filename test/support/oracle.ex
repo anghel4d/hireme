@@ -50,7 +50,6 @@ defmodule Hireme.Oracle do
   def dump(today, opts \\ []) do
     cfg = Heat.config()
     heat = today |> Heat.snapshot(cfg) |> Heat.prepare(cfg, today)
-    tables = Ops.read_tables()
     jobs = Repo.all(from j in Job, order_by: j.id)
     ids = Enum.map(jobs, & &1.id)
     cards = Desk.cards(:all, heat, today) |> Enum.sort_by(&Card.order/1)
@@ -65,9 +64,8 @@ defmodule Hireme.Oracle do
     }
 
     [meta] ++
-      Enum.map(Enum.sort(tables), fn {name, rows} ->
-        %{kind: "table", table: name, rows: Enum.sort_by(rows, & &1.id)}
-      end) ++
+      Keyword.get(opts, :before, []) ++
+      tables("table") ++
       Keyword.get(opts, :ops, []) ++
       Enum.map(cards, &Map.merge(%{kind: "card", band: LifeEv.band(&1.score_100)}, plain(&1))) ++
       [%{kind: "order", ids: Enum.map(cards, & &1.id)}] ++
@@ -94,6 +92,19 @@ defmodule Hireme.Oracle do
           value: %{gym: JSON.gym(Gym.progress(today)), net: JSON.net(Net.progress(today))}
         }
       ]
+  end
+
+  @doc """
+  The raw tables as `kind` lines, rows in id order: `"table"` for the
+  dumped state, `"table_before"` for the state an op sequence starts from.
+  """
+  @spec tables(String.t()) :: [map()]
+  def tables(kind) do
+    Ops.read_tables()
+    |> Enum.sort()
+    |> Enum.map(fn {name, rows} ->
+      %{kind: kind, table: name, rows: Enum.sort_by(rows, & &1.id)}
+    end)
   end
 
   defp rev_query do
