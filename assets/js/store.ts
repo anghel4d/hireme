@@ -135,8 +135,8 @@ export interface WireKernel {
   ingest_commit(len: number): number
   rows(table: number): number
   col_ptr(table: number, col: number): number
-  str_ptr(table: number, col: number, row: number): number
-  str_len(table: number, col: number, row: number): number
+  arena_ptr(): number
+  epoch(): number
   row_of(table: number, key: number): number
   select(min: number, lo: number, hi: number, stage: number, status: number, batch: number, profile: number, heat: number, qlen: number): number
   selection_ptr(): number
@@ -190,6 +190,10 @@ const stamp = (secs: number) => new Date(secs * 1000).toISOString().replace(".00
 export class Kernel {
   private readonly ids = new Map<string, number>()
   private readonly kept = new Map<number, unknown[]>()
+  /** Strings by their arena offset: an interned value is decoded once, until a compaction moves the arena. */
+  private readonly decoded = new Map<number, string>()
+  private epoch = -1
+  private words = new Uint32Array(0)
   private count = 0
   private trapped = false
   /** The exports, guarded: a trap marks the instance dead, and a dead one answers as an empty desk. */
@@ -231,6 +235,7 @@ export class Kernel {
     this.trapped = false
     this.ids.clear()
     this.kept.clear()
+    this.decoded.clear()
     this.count = 0
   }
 
@@ -263,9 +268,18 @@ export class Kernel {
     return id
   }
 
+  /** Row `row` of a string column: its (offset, len) in the column, its text from the cache or the arena. */
   str(t: number, c: number, row: number): string {
-    const len = this.k.str_len(t, c, row)
-    return len === 0 ? "" : DECODER.decode(new Uint8Array(this.mem, this.k.str_ptr(t, c, row), len))
+    const p = c < 0 ? 0 : this.k.col_ptr(t, c)
+    if (p === 0) return ""
+    if (this.words.buffer !== this.mem) this.words = new Uint32Array(this.mem)
+    const at = (p >>> 2) + 2 * row
+    const off = this.words[at] ?? 0
+    const len = this.words[at + 1] ?? 0
+    if (len === 0) return ""
+    let s = this.decoded.get(off)
+    if (s === undefined) this.decoded.set(off, (s = DECODER.decode(new Uint8Array(this.mem, this.k.arena_ptr() + off, len))))
+    return s
   }
 
   /** A u32 column of a table, in row order; empty when the table has no such column. */
@@ -289,6 +303,11 @@ export class Kernel {
     // The derived views follow the rows lazily: derive now, so the rows
     // that moved with them are listed too, and read fresh.
     this.k.derive()
+    const epoch = this.k.epoch()
+    if (epoch !== this.epoch) {
+      this.epoch = epoch
+      this.decoded.clear()
+    }
     const n = this.k.touched_len()
     const pairs = new Uint32Array(this.mem, this.k.touched_ptr(), n * 2)
     const jobTable = this.table("job_apps")
@@ -430,26 +449,13 @@ interface RawBatch { id: number; code: string; ordinal: number; fire: number; st
 
 // ---- the board: the kernel's derived cards ----
 
-class CardStrings implements StrColumn {
-  private readonly cache = new Map<number, string>()
-  constructor(private readonly k: Kernel, private readonly t: number, private readonly c: number) {}
-  at(row: number): string {
-    let s = this.cache.get(row)
-    if (s === undefined) {
-      s = this.c < 0 ? "" : this.k.str(this.t, this.c, row)
-      this.cache.set(row, s)
-    }
-    return s
-  }
-}
-
 /**
  * The cards the kernel derives, read in place. Two columns keep the
  * shell's encoding: the kernel's `batch` and `profile` are ids, the
  * board's are batch ordinal + 1 and profile index.
  */
 class Board {
-  private strs = new Map<string, CardStrings>()
+  private readonly strs = new Map<string, StrColumn>()
   private readonly remapped = new Map<string, Uint32Array>()
   private tableDoc: Tables | null = null
 
@@ -464,10 +470,7 @@ class Board {
     // re-reads its filters from the address whenever they change.
     const lookups = ["stages", "statuses", "freshness", "gates", "heat_states", "bands", "batches", "profiles"].some(t)
     if (lookups) this.tableDoc = null
-    if (lookups || t("cards")) {
-      this.strs = new Map()
-      this.remapped.clear()
-    }
+    if (lookups || t("cards")) this.remapped.clear()
   }
 
   get n(): number { return this.k.k.rows(this.t) }
@@ -508,8 +511,8 @@ class Board {
   str(name: string): StrColumn {
     let s = this.strs.get(name)
     if (!s) {
-      s = new CardStrings(this.k, this.t, this.k.col(this.t, name))
-      this.strs.set(name, s)
+      const [k, t, c] = [this.k, this.t, this.k.col(this.t, name)]
+      this.strs.set(name, (s = { at: (row) => k.str(t, c, row) }))
     }
     return s
   }
