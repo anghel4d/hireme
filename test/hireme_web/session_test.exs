@@ -392,6 +392,17 @@ defmodule HiremeWeb.SessionTest do
 
     {:ok, a} = Session.event({:data, 0, IO.iodata_to_binary(Packet.frame(:bye, 1, <<0::16>>))}, a)
     refute Map.has_key?(a.letters, {:lane, 1})
+
+    # No more lanes than the gate allows streams.
+    full = %{a | letters: Map.new(1..64, &{{:lane, &1 + 100}, self()})}
+
+    {:ok, ^full} =
+      Session.event(
+        {:data, 0, IO.iodata_to_binary(Packet.frame(:lease, 999, <<1::little-64>>))},
+        full
+      )
+
+    assert [{:bye, 0, 999, <<4::little-16, "busy", _pad::binary>>}] = all_out()
   end
 
   test "an agent that never says HELLO is closed", %{account: _account} do
