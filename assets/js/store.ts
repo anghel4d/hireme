@@ -2,22 +2,21 @@
 // server last said, the pending layer is this tab's ops not yet folded
 // into it. Every read is synchronous; nothing here returns a Promise.
 //
-// The base board is a column store in WebAssembly memory. A pending op
-// that touches a column gives that column a copy-on-write shadow; the
-// kernel's selection reads the shadow, so a predicted stage moves the
-// card between filters in the same frame. Dropping an op (a refusal)
-// recomputes the shadows from the base, so rollback is free.
+// The cards live in the kernel (WebAssembly): every frame is copied into
+// it once, and it holds the pending layer, predicting each op's row
+// effects so the selection sees a predicted stage in the same frame. An
+// ACK settles the op (its PATCH came first); a NACK drops it, and the
+// view is the base again, so rollback is free. The documents beside the
+// cards (lookups, scoreboard, lanes, lines, roots, focuses) decode here
+// from the same frames, and pending ops are laid over them on read.
 //
-// What carries ops and brings the base is a Link: today's HTTP routes,
-// then the wire. The desk does not know which.
+// What carries ops up is a Link; the wire is the only one.
 
 import type { Doc, Focus, Lanes, Line, Root, Scoreboard } from "./api.ts"
 import { FLAG, HEADER, KIND, NONE, opFrame, tables, type Bytes, type Host, type Table } from "./wire.ts"
 
-// ---- the packet ----
+// ---- the lookups the card columns index into ----
 
-export type ColumnKind = "u32" | "str"
-export interface ColumnEntry { name: string; kind: ColumnKind; at: number; size: number }
 export interface Stage { key: string; label: string; hint: string }
 export interface Band { key: string; label: string; min: number; max: number }
 export interface Batch { code: string; ordinal: number; fire: "hold" | "open_fire"; status: string }
@@ -32,21 +31,6 @@ export interface Tables {
   batches: Batch[]
   profiles: Profile[]
   heat_states: string[]
-}
-
-export interface Header { v: 1; n: number; columns: ColumnEntry[]; tables: Tables }
-export interface Packet { header: Header; body: Uint8Array }
-
-// HDP1 is "HDP1" | u32 header_len | header JSON | body (4-byte aligned).
-const MAGIC = 0x31504448
-
-export function parsePacket(buffer: ArrayBuffer): Packet {
-  const view = new DataView(buffer)
-  if (buffer.byteLength < 8 || view.getUint32(0, true) !== MAGIC) throw new Error("not an HDP1 packet")
-  const headerLen = view.getUint32(4, true)
-  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 8, headerLen))) as Header
-  const bodyAt = 8 + headerLen + ((4 - (headerLen % 4)) % 4)
-  return { header, body: new Uint8Array(buffer, bodyAt) }
 }
 
 // ---- the interface the shell draws from ----
@@ -127,244 +111,17 @@ export interface Desk {
   subscribe(fn: (c: Change) => void): () => void
 }
 
-/** What carries ops up and brings the base down. */
+/** What carries ops up and asks for documents ahead of need. */
 export interface Link {
-  send(p: { readonly opId: bigint; readonly op: Op; readonly frame: Bytes }): void
-  /** A read found these documents missing. Called on every such read: the link dedupes. */
-  want(focus: readonly number[], root: readonly number[]): void
+  send(p: Pending): void
+  /** A read found these focuses missing. Called on every such read: the link dedupes. */
+  want(focus: readonly number[]): void
   /** The visible cards, the selected one first: the link brings their focuses ahead of need. */
   hint(ids: readonly number[]): void
 }
 
-// ---- the board: the base columns in WebAssembly memory ----
-
-export interface Kernel {
-  mem: WebAssembly.Memory
-  reset(): void
-  alloc(size: number): number
-  select(
-    n: number, cols: number,
-    min: number, lo: number, hi: number,
-    stage: number, status: number, batch: number, profile: number, heat: number,
-    q: number, qlen: number,
-    out: number,
-  ): number
-  find(out: number, count: number, ids: number, id: number): number
-}
-
-export async function loadKernel(url: string): Promise<Kernel> {
-  const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
-  return instance.exports as unknown as Kernel
-}
-
-// The kernel's column table, by slot.
-const SLOTS = ["score", "heat", "stage", "status", "freshness", "gate", "batch", "profile"] as const
-const SEARCH = 8
-const HEAT_STATE = 10
-
-class Strings implements StrColumn {
-  private readonly cache = new Map<number, string>()
-  constructor(
-    private readonly mem: WebAssembly.Memory,
-    private readonly offsets: number,
-    private readonly bytes: number,
-    private readonly n: number,
-    readonly over: Map<number, string> = new Map(),
-  ) {}
-
-  at(row: number): string {
-    const o = this.over.get(row)
-    if (o !== undefined) return o
-    const hit = this.cache.get(row)
-    if (hit !== undefined) return hit
-    const offs = new Uint32Array(this.mem.buffer, this.offsets, this.n + 1)
-    const start = offs[row] ?? 0
-    const end = offs[row + 1] ?? start
-    const text = DECODER.decode(new Uint8Array(this.mem.buffer, this.bytes + start, end - start))
-    this.cache.set(row, text)
-    return text
-  }
-}
-
 const DECODER = new TextDecoder()
 const ENCODER = new TextEncoder()
-
-export class Board implements Base {
-  readonly n: number
-  readonly tables: Tables
-  private readonly base = new Map<string, number>()
-  private readonly live = new Map<string, number>()
-  private readonly shadows = new Map<string, number>()
-  private readonly strs = new Map<string, Strings>()
-  private readonly rows = new Map<number, number>()
-  private readonly cols: number
-  private readonly out: number
-  private readonly scratch: number
-  private count = 0
-
-  constructor(private readonly k: Kernel, packet: Packet) {
-    this.n = packet.header.n
-    this.tables = packet.header.tables
-    k.reset()
-    const at = k.alloc(packet.body.byteLength)
-    new Uint8Array(k.mem.buffer, at, packet.body.byteLength).set(packet.body)
-    for (const c of packet.header.columns) {
-      if (c.kind === "u32") this.base.set(c.name, at + c.at)
-      else this.strs.set(c.name, new Strings(k.mem, at + c.at, at + c.at + 4 * (this.n + 1), this.n))
-    }
-    const search = packet.header.columns.find((c) => c.name === "search")
-    if (!search) throw new Error("packet has no search column")
-    this.cols = k.alloc(11 * 4)
-    const table = new Uint32Array(k.mem.buffer, this.cols, 11)
-    table[SEARCH] = at + search.at
-    table[SEARCH + 1] = at + search.at + 4 * (this.n + 1)
-    this.out = k.alloc(Math.max(this.n, 1) * 4)
-    this.scratch = k.alloc(256)
-    for (const name of this.base.keys()) this.live.set(name, this.ptr(name))
-    this.relink()
-    const ids = this.column("id")
-    for (let r = 0; r < this.n; r++) this.rows.set(ids[r] ?? 0, r)
-  }
-
-  private ptr(name: string): number {
-    const p = this.base.get(name)
-    if (p === undefined) throw new Error(`no u32 column ${name}`)
-    return p
-  }
-
-  private relink(): void {
-    const table = new Uint32Array(this.k.mem.buffer, this.cols, 11)
-    SLOTS.forEach((name, i) => { table[i] = this.live.get(name) ?? 0 })
-    table[HEAT_STATE] = this.live.get("heat_state") ?? 0
-  }
-
-  has(name: string): boolean { return this.base.has(name) }
-
-  column(name: string): Uint32Array {
-    const p = this.live.get(name)
-    if (p === undefined) throw new Error(`no u32 column ${name}`)
-    return new Uint32Array(this.k.mem.buffer, p, this.n)
-  }
-
-  baseColumn(name: string): Uint32Array {
-    return new Uint32Array(this.k.mem.buffer, this.ptr(name), this.n)
-  }
-
-  str(name: string): Strings {
-    const c = this.strs.get(name)
-    if (!c) throw new Error(`no str column ${name}`)
-    return c
-  }
-
-  rowOf(id: number): number { return this.rows.get(id) ?? -1 }
-
-  /**
-   * Point the named columns at writable copies of their base, and every
-   * other column back at the base. The copies live in kernel memory, so
-   * the selection reads them. Returns the copies for the caller to edit.
-   */
-  shade(names: ReadonlySet<string>, strNames: ReadonlySet<string>): Map<string, Uint32Array> {
-    const out = new Map<string, Uint32Array>()
-    for (const name of this.base.keys()) {
-      if (!names.has(name)) {
-        this.live.set(name, this.ptr(name))
-        continue
-      }
-      let p = this.shadows.get(name)
-      if (p === undefined) {
-        p = this.k.alloc(Math.max(this.n, 1) * 4)
-        this.shadows.set(name, p)
-      }
-      const copy = new Uint32Array(this.k.mem.buffer, p, this.n)
-      copy.set(this.baseColumn(name))
-      this.live.set(name, p)
-      out.set(name, copy)
-    }
-    for (const [name, s] of this.strs) if (!strNames.has(name)) s.over.clear()
-    this.relink()
-    return out
-  }
-
-  select(s: Selection): number {
-    const q = ENCODER.encode(s.q.toLowerCase().trim()).slice(0, 256)
-    new Uint8Array(this.k.mem.buffer, this.scratch, q.byteLength).set(q)
-    this.count = this.k.select(
-      this.n, this.cols, s.min, s.lo, s.hi, s.stage, s.status, s.batch, s.profile, s.heat,
-      this.scratch, q.byteLength, this.out,
-    )
-    return this.count
-  }
-
-  selection(): Uint32Array { return new Uint32Array(this.k.mem.buffer, this.out, this.count) }
-
-  find(id: number): number { return this.k.find(this.out, this.count, this.ptr("id"), id) }
-
-  push(): Refusal | null { return null }
-
-  /** Copy-on-write shadows of the columns pending ops touch, with their effects written in. */
-  predict(pending: readonly Pending[], focus: (id: number) => Focus | undefined): void {
-    const u32 = new Set<string>()
-    const strs = new Set<string>()
-    for (const p of pending) {
-      if (p.job === null || this.rowOf(p.job) < 0) continue
-      switch (p.op.kind) {
-        case "stage": u32.add("stage"); u32.add("stage_on"); strs.add("pips"); break
-        case "next": u32.add("next_due"); strs.add("next_action"); break
-        case "score": u32.add("score"); break
-        case "overlay": u32.add("hidden"); u32.add("altered"); u32.add("emphasized"); break
-        default: break
-      }
-    }
-    const cols = this.shade(u32, strs)
-    const pips = this.str("pips").over
-    const next = this.str("next_action").over
-    pips.clear()
-    next.clear()
-    const stages = this.tables.stages
-    for (const p of pending) {
-      const row = p.job === null ? -1 : this.rowOf(p.job)
-      if (row < 0) continue
-      const op = p.op
-      switch (op.kind) {
-        case "stage": {
-          const ix = stages.findIndex((s) => s.key === op.stage)
-          const stage = cols.get("stage")
-          if (ix < 0 || !stage) break
-          if (stage[row] !== ix) {
-            stage[row] = ix
-            const on = cols.get("stage_on")
-            if (on) on[row] = today()
-          }
-          pips.set(row, moveTo(this.str("pips").at(row), stages, op.stage))
-          break
-        }
-        case "next": {
-          next.set(row, op.next_action)
-          const due = cols.get("next_due")
-          if (due) due[row] = epochDay(op.next_due)
-          break
-        }
-        case "score": {
-          const sc = cols.get("score")
-          if (sc) sc[row] = Math.max(0, Math.min(100, Math.round(op.score)))
-          break
-        }
-        case "overlay": {
-          const f = focus(op.job)
-          const line = f && findLine(f, op.item)
-          if (!line) break
-          const from = line.mode === "canonical" ? null : line.mode
-          const to = op.mode === "inherit" ? null : op.mode
-          if (from === to) break
-          if (from) { const c = cols.get(from); if (c) c[row] = Math.max(0, (c[row] ?? 0) - 1) }
-          if (to) { const c = cols.get(to); if (c) c[row] = (c[row] ?? 0) + 1 }
-          break
-        }
-        default: break
-      }
-    }
-  }
-}
 
 // ---- the wire board: the kernel's resident cards ----
 //
@@ -428,7 +185,7 @@ class KernelStrings implements StrColumn {
   clear(): void { this.cache.clear() }
 }
 
-export class KernelBoard implements Base {
+export class KernelBoard {
   private readonly strs = new Map<string, KernelStrings>()
   private readonly remapped = new Map<string, Uint32Array>()
   private count = 0
@@ -515,8 +272,6 @@ export class KernelBoard implements Base {
     return null
   }
 
-  predict(): void {}
-
   /** Predictions settled exact, mispredicted, refused by the server, refused locally. */
   counters(): { settled: number; mispredicted: number; nacked: number; refused: number } {
     return { settled: this.k.counter(1), mispredicted: this.k.counter(2), nacked: this.k.counter(3), refused: this.k.counter(4) }
@@ -530,13 +285,9 @@ export async function loadWireKernel(url: string): Promise<WireKernel> {
 
 // ---- prediction ----
 
-const FIRE_LOCKED = new Set(["open_fire", "submitted"])
-const HOT = new Set(["fire_ready", "open_fire", "submitted", "reply", "closed"])
-const QUEUE = new Set(["fire_ready", "open_fire", "submitted"])
 const STATE: Record<string, string> = { D: "done", A: "active", P: "pending", S: "skipped", B: "blocked" }
 const today = () => Math.floor(Date.now() / 86_400_000)
 const isoDay = (day: number) => new Date(day * 86_400_000).toISOString().slice(0, 10)
-const epochDay = (iso: string) => (iso === "" ? NONE : Math.floor(Date.parse(`${iso}T00:00:00Z`) / 86_400_000))
 
 /** Pipeline.move_to over a pip string: the target is active, skipped and blocked stay, the rest fall in order. */
 function moveTo(pips: string, stages: readonly Stage[], key: string): string {
@@ -578,34 +329,17 @@ export function encodeOp(hash: number, opId: bigint, op: Op): Bytes {
   return opFrame(hash, opId, OP_KIND[op.kind], target, fields)
 }
 
-export interface Pending { opId: bigint; op: Op; job: number | null; frame: Bytes; state: "pending" | "settling" }
-
-/** The base board the desk reads, and how a pending op lands on it. */
-export interface Base {
-  readonly n: number
-  readonly tables: Tables
-  select(s: Selection): number
-  selection(): Uint32Array
-  find(id: number): number
-  column(name: string): Uint32Array
-  str(name: string): StrColumn
-  rowOf(id: number): number
-  /** Hand a new op to the base; a refusal means it was not applied. */
-  push(p: Pending): Refusal | null
-  /** Lay every pending op's row effects over the base. */
-  predict(pending: readonly Pending[], focus: (id: number) => Focus | undefined): void
-}
+export interface Pending { opId: bigint; op: Op; job: number | null; frame: Bytes }
 
 // ---- the desk ----
 
 export class LocalDesk implements Desk, Host {
-  private board: Base | null = null
+  private readonly board: KernelBoard
+  private readonly docs = new Resident()
   private link: Link | null = null
   private pending: Pending[] = []
+  // Decoded focuses, and the views with pending ops laid over them.
   private readonly focuses = new Map<number, Focus>()
-  private readonly roots = new Map<number, Root>()
-  private score: Scoreboard | null = null
-  private lane: Lanes | null = null
   private readonly views = new Map<number, Focus>()
   private laneView: Lanes | null = null
   private tableView: Tables | null = null
@@ -613,41 +347,31 @@ export class LocalDesk implements Desk, Host {
   readonly clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1
   private counter = 0
   private statusNow: Status = "connecting"
-  // The wire's side: the kernel's board, the documents beside it, and the
-  // snapshot that rebuilds them on the next load.
-  private kernel: KernelBoard | null = null
-  private docs: Resident | null = null
   readonly hash: number
   readonly snapshot: Snapshot | null
   // Jobs whose FOCUS came from the server, so a slower replay leaves them alone.
   private readonly live = new Set<number>()
   private replaying = false
 
-  /** Ops predicted, refused locally, and refused by the server; read by the bench. */
+  /** Ops sent and refused before sending; the kernel's counters hold the rest. Read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
 
-  constructor(wire?: { kernel: WireKernel; scope: string }) {
-    this.hash = wire?.kernel.schema_hash() ?? 0
-    if (wire) {
-      this.docs = new Resident()
-      this.kernel = new KernelBoard(wire.kernel, this.docs)
-      this.board = this.kernel
-    }
-    const kernel = this.kernel
-    this.snapshot = kernel && wire && wire.scope !== ""
-      ? new Snapshot(wire.scope, this.hash, () => (kernel.n > 0 ? { rev: kernel.rev, bytes: kernel.snapshot() } : null))
-      : null
+  constructor(kernel: WireKernel, scope: string) {
+    this.hash = kernel.schema_hash()
+    const board = new KernelBoard(kernel, this.docs)
+    this.board = board
+    this.snapshot = scope === "" ? null : new Snapshot(scope, this.hash, () => (board.n > 0 ? { rev: board.rev, bytes: board.snapshot() } : null))
   }
 
   attach(link: Link): void { this.link = link }
 
   // -- reads --
 
-  get n(): number { return this.board?.n ?? 0 }
+  get n(): number { return this.board.n }
 
   get tables(): Tables {
     if (this.tableView) return this.tableView
-    const base = this.board?.tables ?? EMPTY_TABLES
+    const base = this.board.tables
     const fired = new Set<string>()
     for (const p of this.pending) if (p.op.kind === "open_fire") fired.add(p.op.batch)
     this.tableView = fired.size === 0 ? base : {
@@ -657,19 +381,18 @@ export class LocalDesk implements Desk, Host {
     return this.tableView
   }
 
-  select(s: Selection): number { return this.board?.select(s) ?? 0 }
-  selection(): Uint32Array { return this.board?.selection() ?? EMPTY_U32 }
-  find(id: number): number { return this.board?.find(id) ?? -1 }
-  column(name: string): Uint32Array { return this.board?.column(name) ?? EMPTY_U32 }
-  str(name: string): StrColumn { return this.board?.str(name) ?? EMPTY_STR }
-  rowOf(id: number): number { return this.board?.rowOf(id) ?? -1 }
+  select(s: Selection): number { return this.board.select(s) }
+  selection(): Uint32Array { return this.board.selection() }
+  find(id: number): number { return this.board.find(id) }
+  column(name: string): Uint32Array { return this.board.column(name) }
+  str(name: string): StrColumn { return this.board.str(name) }
+  rowOf(id: number): number { return this.board.rowOf(id) }
   get status(): Status { return this.statusNow }
-  hasFocus(id: number): boolean { return this.focuses.has(id) || (this.docs?.hasFocus(id) ?? false) }
 
-  /** The focus as the server last sent it, decoded from its frame on the wire. */
+  /** The focus as the server last sent it, over the card's current row. */
   private baseFocus(id: number): Focus | undefined {
     const hit = this.focuses.get(id)
-    if (hit || !this.docs) return hit
+    if (hit) return hit
     const row = this.rowOf(id)
     if (row < 0) return undefined
     const f = this.docs.focus(id, (c) => this.column(c)[row] ?? 0, (c) => this.str(c).at(row))
@@ -682,7 +405,7 @@ export class LocalDesk implements Desk, Host {
     if (hit) return hit
     const base = this.baseFocus(id)
     if (!base) {
-      this.link?.want([id], [])
+      this.link?.want([id])
       return null
     }
     let f = base
@@ -692,11 +415,8 @@ export class LocalDesk implements Desk, Host {
   }
 
   root(profileId: number): Root | null {
-    const base = this.docs?.roots.get(profileId) ?? this.roots.get(profileId)
-    if (!base) {
-      this.link?.want([], [profileId])
-      return null
-    }
+    const base = this.docs.roots.get(profileId)
+    if (!base) return null
     let r = base
     for (const p of this.pending) {
       if (p.op.kind === "narrative" && r.narrative?.id === p.op.narrative) r = { ...r, narrative: { ...r.narrative, body: p.op.body } }
@@ -704,25 +424,20 @@ export class LocalDesk implements Desk, Host {
     return r
   }
 
-  scoreboard(): Scoreboard | null { return this.docs?.scoreboard ?? this.score }
+  scoreboard(): Scoreboard | null { return this.docs.scoreboard }
 
   lanes(): Lanes | null {
-    const base = this.docs?.lanes ?? this.lane
+    const base = this.docs.lanes
     if (this.laneView || !base) return this.laneView
     let l = base
-    for (const p of this.pending) if (p.state === "pending") l = applyLanes(l, p.op)
+    for (const p of this.pending) l = applyLanes(l, p.op)
     this.laneView = l
     return l
   }
 
+  /** An op on the wire for this job: its PATCH and ACK are a round trip away. */
   mark(jobId: number): Mark {
-    let mark: Mark = null
-    for (const p of this.pending) {
-      if (p.job !== jobId) continue
-      if (p.state === "pending") return "pending"
-      mark = "settling"
-    }
-    return mark
+    return this.pending.some((p) => p.job === jobId) ? "pending" : null
   }
 
   hint(ids: readonly number[]): void {
@@ -739,8 +454,8 @@ export class LocalDesk implements Desk, Host {
   run(op: Op): Run {
     const opId = (BigInt(this.clientId) << 32n) | BigInt(this.counter + 1)
     const job = jobOf(op)
-    const p: Pending = { opId, op, job, frame: encodeOp(this.hash, opId, op), state: "pending" }
-    const refusal = this.kernel ? this.kernel.push(p) : this.refuse(op)
+    const p: Pending = { opId, op, job, frame: encodeOp(this.hash, opId, op) }
+    const refusal = this.board.push(p)
     if (refusal !== null) {
       this.counters.refusedLocally++
       return { ok: false, refusal }
@@ -748,115 +463,43 @@ export class LocalDesk implements Desk, Host {
     this.counter++
     this.pending.push(p)
     this.counters.predicted++
-    this.recompute()
+    this.settle()
     this.emit(touched(op, job))
     this.link?.send(p)
     return { ok: true, opId, jobId: job }
   }
 
-  private refuse(op: Op): Refusal | null {
-    if (op.kind !== "stage") return null
-    const row = this.rowOf(op.job)
-    if (row < 0) return null
-    const t = this.tables
-    const current = t.stages[this.column("stage")[row] ?? 0]?.key ?? ""
-    if (FIRE_LOCKED.has(op.stage)) {
-      const ix = this.column("batch")[row] ?? 0
-      const batch = ix > 0 ? t.batches.find((b) => b.ordinal + 1 === ix) : undefined
-      if (batch?.fire !== "open_fire") return "fire_hold"
-    }
-    if (!HOT.has(current) && QUEUE.has(op.stage)) {
-      const heat = t.heat_states[this.column("heat_state")[row] ?? 0]
-      const overridden = this.focuses.get(op.job)?.heat.override === true || this.pending.some((p) => p.job === op.job && p.op.kind === "heat_override")
-      if (heat === "blocked" && !overridden) return "heat"
-    }
-    return null
-  }
-
-  // -- the HTTP link reports --
-
-  setStatus(s: Status): void {
-    if (s === this.statusNow) return
-    this.statusNow = s
-    this.emit({ status: true })
-  }
-
-  /** A new base board. Settled ops are in it; ops still pending are applied over it. */
-  rebase(board: Base): void {
-    this.board = board
-    this.pending = this.pending.filter((p) => p.state === "pending")
-    this.recompute()
-    this.emit({ rows: true, focus: [...this.focuses.keys()] })
-  }
-
-  putFocus(f: Focus): void {
-    this.focuses.set(f.job.id, f)
-    this.views.delete(f.job.id)
-    this.emit({ focus: [f.job.id] })
-  }
-
-  /** A focus is stale: ask again if anyone still reads it. */
-  staleFocus(id: number): void {
-    this.views.delete(id)
-    if (this.focuses.has(id)) this.link?.want([id], [])
-  }
-
-  putRoot(r: Root): void {
-    this.roots.set(r.profile.id, r)
-    this.emit({ root: true })
-  }
-
-  staleRoots(): void {
-    const ids = [...this.roots.keys()]
-    if (ids.length > 0) this.link?.want([], ids)
-  }
-
-  putScoreboard(s: Scoreboard): void {
-    this.score = s
-    this.emit({ scoreboard: true })
-  }
-
-  putLanes(l: Lanes): void {
-    this.lane = l
-    this.laneView = null
-    this.emit({ lanes: true })
-  }
-
-  /**
-   * The server accepted an op. On the wire its PATCH and FOCUS came first,
-   * so the base already holds it and the op leaves the pending layer; over
-   * HTTP its row effects hold until the next packet.
-   */
-  acked(opId: bigint): void {
+  /** The server took an op. Its PATCH came first on the same stream, so the base holds it now. */
+  private acked(opId: bigint): void {
     const p = this.pending.find((x) => x.opId === opId)
     if (!p) return
-    if (this.kernel) this.pending = this.pending.filter((x) => x !== p)
-    else p.state = "settling"
-    this.views.clear()
-    this.laneView = null
-    this.tableView = null
+    this.pending = this.pending.filter((x) => x !== p)
+    this.settle()
     this.emit({ ...touched(p.op, p.job), acked: opId })
   }
 
-  nacked(opId: bigint, refusal: Refusal, message = ""): void {
+  /** The server refused an op; the kernel has dropped it, so the view is the base again. */
+  private nacked(opId: bigint, refusal: Refusal, message: string): void {
     const p = this.pending.find((x) => x.opId === opId)
     if (!p) return
     this.pending = this.pending.filter((x) => x !== p)
     this.counters.nacked++
-    this.recompute()
+    this.settle()
     this.emit({ ...touched(p.op, p.job), refused: { opId, jobId: p.job, op: p.op, refusal, message } })
   }
 
-  // -- the wire reports (Host) --
+  // -- the wire (Host) --
 
-  rev(): bigint { return this.kernel?.rev ?? 0n }
+  rev(): bigint { return this.board.rev }
 
   unacked(): readonly Bytes[] {
-    return this.pending.filter((p) => p.state === "pending").map((p) => p.frame)
+    return this.pending.map((p) => p.frame)
   }
 
   connection(s: "connecting" | "webtransport" | "websocket" | "offline"): void {
-    this.setStatus(s)
+    if (s === this.statusNow) return
+    this.statusNow = s
+    this.emit({ status: true })
   }
 
   bye(): void {
@@ -867,8 +510,9 @@ export class LocalDesk implements Desk, Host {
    * Paint from saved frames. The board and its documents go in at once,
    * so the first draw has every card; the focuses follow in slices between
    * frames, and one the server has sent meanwhile is newer, so it stays.
+   * Ops that were never acknowledged are predicted again and resent.
    */
-  restore(bytes: Bytes): void {
+  restore(bytes: Bytes, ops: readonly { opId: bigint; op: Op }[]): void {
     const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const focus: Bytes[] = []
     this.replaying = true
@@ -885,6 +529,11 @@ export class LocalDesk implements Desk, Host {
     } finally {
       this.replaying = false
     }
+    for (const { opId, op } of ops) {
+      const p: Pending = { opId, op, job: jobOf(op), frame: encodeOp(this.hash, opId, op) }
+      if (this.board.push(p) === null) this.pending.push(p)
+    }
+    if (ops.length > 0) this.settle()
     const slice = () => {
       const end = performance.now() + 4
       this.replaying = true
@@ -902,38 +551,32 @@ export class LocalDesk implements Desk, Host {
   }
 
   frame(f: Bytes, kind: number, flags: number): void {
-    const kernel = this.kernel
-    const docs = this.docs
-    if (!kernel || !docs) return
     if (kind === KIND.FOCUS && !this.replaying) this.live.add(focusJob(f))
-    const bits = kernel.ingest(f)
+    const bits = this.board.ingest(f)
     const c: Change = bits & (INGEST.cards | INGEST.tables | INGEST.settled | INGEST.dropped | INGEST.tick) ? { rows: true } : {}
     switch (kind) {
       case KIND.BOOT:
       case KIND.PATCH:
       case KIND.LINES:
       case KIND.FOCUS: {
-        Object.assign(c, merge(c, docs.ingest(f, kind)))
+        Object.assign(c, merge(c, this.docs.ingest(f, kind)))
         if (kind === KIND.BOOT || kind === KIND.PATCH) {
+          // Card fields feed every decoded focus: decode them again when read.
           this.focuses.clear()
           c.focus = [...(c.focus ?? []), ...this.views.keys()]
         } else {
           for (const id of c.focus ?? []) this.focuses.delete(id)
         }
-        this.snapshot?.touch()
+        if (!this.replaying) this.snapshot?.touch()
         break
       }
-      case KIND.ACK: {
-        const v = new DataView(f.buffer, f.byteOffset, f.byteLength)
-        this.acked(v.getBigUint64(HEADER, true))
+      case KIND.ACK:
+        this.acked(new DataView(f.buffer, f.byteOffset, f.byteLength).getBigUint64(HEADER, true))
         break
-      }
       case KIND.NACK: {
         const v = new DataView(f.buffer, f.byteOffset, f.byteLength)
-        const opId = v.getBigUint64(HEADER, true)
-        const code = v.getUint8(HEADER + 8)
         const len = v.getUint16(HEADER + 10, true)
-        this.nacked(opId, refusalName(code), DECODER.decode(f.subarray(HEADER + 12, HEADER + 12 + len)))
+        this.nacked(v.getBigUint64(HEADER, true), refusalName(v.getUint8(HEADER + 8)), DECODER.decode(f.subarray(HEADER + 12, HEADER + 12 + len)))
         break
       }
       case KIND.TICK:
@@ -957,11 +600,12 @@ export class LocalDesk implements Desk, Host {
 
   // -- the view --
 
-  private recompute(): void {
+  /** The pending set changed: drop the views laid over it, and keep the queue for a reload. */
+  private settle(): void {
     this.views.clear()
     this.laneView = null
     this.tableView = null
-    this.board?.predict(this.pending, (id) => this.focuses.get(id))
+    this.snapshot?.queue(this.pending)
   }
 
   private emit(c: Change): void {
@@ -1029,17 +673,26 @@ export class Snapshot {
     void idb((store) => store.put({ rev: snap.rev, hash: this.hash, blob: new Blob([snap.bytes]) }, this.scope), "readwrite").catch(() => {})
   }
 
+  /** The ops not yet acknowledged, kept beside the frames so a reload predicts and resends them. */
+  queue(pending: readonly Pending[]): void {
+    const ops = pending.map(({ opId, op }) => ({ opId, op }))
+    void idb((store) => store.put(ops, `${this.scope}:ops`), "readwrite").catch(() => {})
+  }
+
   clear(): void {
     this.dirty = false
     void idb((store) => store.delete(this.scope), "readwrite").catch(() => {})
+    void idb((store) => store.delete(`${this.scope}:ops`), "readwrite").catch(() => {})
   }
 
-  /** The saved frames for this account, if they were written under this schema. */
-  async load(early?: Promise<unknown>): Promise<{ rev: bigint; bytes: Bytes } | null> {
-    const rec = (await (early ?? idb((store) => store.get(this.scope), "readonly")).catch(() => undefined)) as
-      { rev?: bigint; hash?: number; blob?: Blob } | undefined
+  /** The saved frames and op queue for this account, if they were written under this schema. */
+  async load(early?: Promise<unknown>): Promise<{ rev: bigint; bytes: Bytes; ops: { opId: bigint; op: Op }[] } | null> {
+    const [rec, ops] = (await Promise.all([
+      (early ?? idb((store) => store.get(this.scope), "readonly")).catch(() => undefined),
+      idb((store) => store.get(`${this.scope}:ops`), "readonly").catch(() => undefined),
+    ])) as [{ rev?: bigint; hash?: number; blob?: Blob } | undefined, { opId: bigint; op: Op }[] | undefined]
     if (!rec?.blob || rec.hash !== this.hash || typeof rec.rev !== "bigint") return null
-    return { rev: rec.rev, bytes: new Uint8Array(await rec.blob.arrayBuffer()) }
+    return { rev: rec.rev, bytes: new Uint8Array(await rec.blob.arrayBuffer()), ops: Array.isArray(ops) ? ops : [] }
   }
 }
 
@@ -1061,14 +714,6 @@ function idb(run: (store: IDBObjectStore) => IDBRequest, mode: IDBTransactionMod
 }
 
 // ---- predicted documents ----
-
-function allLines(f: Focus): Line[] {
-  return [...f.cv.facts, ...f.cv.sections.flatMap((s) => s.lines), ...f.cv.hidden]
-}
-
-function findLine(f: Focus, id: number): Line | undefined {
-  return allLines(f).find((l) => l.id === id)
-}
 
 function applyFocus(f: Focus, op: Op, t: Tables): Focus {
   switch (op.kind) {
@@ -1520,6 +1165,3 @@ const FOCUS_DOC: Spec = {
   heat_override: [34, "u32"], heat_override_reason: [35, "str"],
 }
 
-const EMPTY_U32 = new Uint32Array(0)
-const EMPTY_STR: StrColumn = { at: () => "" }
-const EMPTY_TABLES: Tables = { stages: [], statuses: [], freshness: [], gates: [], bands: [], batches: [], profiles: [], heat_states: [] }

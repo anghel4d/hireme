@@ -2,12 +2,11 @@
 // wire, the early script in <head> has already started the handshake and
 // the snapshot read; the snapshot paints the board before the network
 // answers, and HELLO names its rev so the server sends only what moved.
-// A page served without the wire metas runs on the HTTP routes.
 
 import "../css/app.css"
-import { csrf, httpLink } from "./api.ts"
+import { csrf } from "./api.ts"
 import { Shell } from "./shell.ts"
-import { loadKernel, loadWireKernel, LocalDesk, type Link } from "./store.ts"
+import { loadWireKernel, LocalDesk, type Link } from "./store.ts"
 import { hint, Wire } from "./wire.ts"
 
 const root = document.getElementById("desk")
@@ -16,26 +15,19 @@ if (!(root instanceof HTMLElement)) throw new Error("Missing #desk")
 const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content ?? ""
 
 try {
-  if (document.querySelector('meta[name="wire-scope"]')) {
-    const kernel = await loadWireKernel("/wasm/kernel.wasm")
-    const desk = new LocalDesk({ kernel, scope: meta("wire-scope") })
-    const early = window.__hw
-    const snap = await desk.snapshot?.load(early?.snap)
-    if (snap) {
-      desk.restore(snap.bytes)
-      performance.mark("desk:snapshot")
-    }
-    const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
-    desk.attach(wireLink(wire, desk.hash))
-    new Shell(root, desk)
-    wire.run()
-    Object.assign(window, { __desk: desk, __wire: wire })
-  } else {
-    const desk = new LocalDesk()
-    const kernel = await loadKernel("/wasm/desk.wasm")
-    desk.attach(httpLink(desk, kernel))
-    new Shell(root, desk)
+  const kernel = await loadWireKernel("/wasm/kernel.wasm")
+  const desk = new LocalDesk(kernel, meta("wire-scope"))
+  const early = window.__hw
+  const snap = await desk.snapshot?.load(early?.snap)
+  if (snap) {
+    desk.restore(snap.bytes, snap.ops)
+    performance.mark("desk:snapshot")
   }
+  const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
+  desk.attach(wireLink(wire, desk.hash))
+  new Shell(root, desk)
+  wire.run()
+  Object.assign(window, { __desk: desk, __wire: wire })
 } catch (cause) {
   root.textContent = cause instanceof Error ? cause.message : String(cause)
   console.error(cause)
