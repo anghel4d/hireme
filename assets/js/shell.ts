@@ -274,12 +274,41 @@ export class Shell {
 
   private async refreshBoard(reads: Reads): Promise<void> {
     if (reads.pack) {
-      this.store = await this.reloadStore()
-      this.select()
-      this.queueDraw()
+      await this.once("pack", async () => {
+        this.store = await this.reloadStore()
+        this.select()
+        this.queueDraw()
+      })
     }
-    if (reads.scoreboard) void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
-    if (reads.lanes) void this.loadLanes()
+    if (reads.scoreboard) void this.once("scoreboard", async () => this.dispatch({ t: "scoreboard", scoreboard: await api.fetchScoreboard() }))
+    if (reads.lanes) void this.once("lanes", () => this.loadLanes())
+  }
+
+  // One read of each kind in flight. Asking for it meanwhile runs it once
+  // more after it lands, so the last change is always read and a burst of
+  // changes costs at most two reads.
+  private readonly flights = new Map<string, { again: boolean }>()
+
+  private async once(kind: string, read: () => Promise<void>): Promise<void> {
+    const pending = this.flights.get(kind)
+    if (pending) {
+      pending.again = true
+      return
+    }
+    const flight = { again: false }
+    this.flights.set(kind, flight)
+    try {
+      do {
+        flight.again = false
+        try {
+          await read()
+        } catch (cause) {
+          if (!flight.again) throw cause
+        }
+      } while (flight.again)
+    } finally {
+      this.flights.delete(kind)
+    }
   }
 
   private async loadLanes(): Promise<void> {
