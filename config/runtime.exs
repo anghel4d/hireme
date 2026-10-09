@@ -69,8 +69,6 @@ if config_env() == :prod do
     account_id: System.fetch_env!("CLOUDFLARE_ACCOUNT_ID"),
     api_token: System.fetch_env!("CLOUDFLARE_EMAIL_TOKEN")
 
-  config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
-
   # The WebTransport gate (native/gate) reaches this node through a Unix
   # socket; the page learns the gate's public URL from GATE_URL. Both are
   # host configuration, never committed. Without them the desk runs over
