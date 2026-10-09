@@ -179,10 +179,30 @@ defmodule HiremeWeb.Packet do
   defp u32(true), do: 1
   defp u32(false), do: 0
   defp u32(%Date{} = d), do: Date.diff(d, @epoch)
+
+  # A raw row's dates are SQLite's ISO text, read at fixed offsets.
+  defp u32(<<y::binary-4, ?-, m::binary-2, ?-, d::binary-2>>), do: day(y, m, d)
+
+  defp u32(
+         <<y::binary-4, ?-, m::binary-2, ?-, d::binary-2, _t, hh::binary-2, ?:, mm::binary-2, ?:,
+           ss::binary-2, _::binary>>
+       ),
+       do:
+         day(y, m, d) * 86_400 + String.to_integer(hh) * 3600 + String.to_integer(mm) * 60 +
+           String.to_integer(ss)
+
   defp u32(%DateTime{} = t), do: DateTime.to_unix(t)
   defp u32(%NaiveDateTime{} = t), do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
   defp u32(n) when is_integer(n) and n >= 0 and n < @none, do: n
   defp u32(n) when is_float(n), do: round(n)
+
+  defp day(y, m, d) do
+    :calendar.date_to_gregorian_days(
+      String.to_integer(y),
+      String.to_integer(m),
+      String.to_integer(d)
+    ) - 719_528
+  end
 
   defp text(nil), do: ""
   defp text(s) when is_binary(s), do: s
@@ -264,10 +284,12 @@ defmodule HiremeWeb.Packet do
   defp carried?(row, :theme_targets), do: Map.has_key?(row, :theme)
   defp carried?(row, col), do: Map.has_key?(row, col)
 
-  defp raw_value(row, :theme_targets, _),
-    do: unit_list(get_in(row, [:theme, "targets"]) || get_in(row, [:theme, :targets]))
+  defp raw_value(row, :theme_targets, _) do
+    theme = json(Map.get(row, :theme))
+    unit_list(get_in(theme, ["targets"]) || get_in(theme, [:targets]))
+  end
 
-  defp raw_value(row, :keywords, _), do: unit_list(Map.get(row, :keywords))
+  defp raw_value(row, :keywords, _), do: unit_list(json(Map.get(row, :keywords)))
 
   # A batch's fire is 0/1 on the wire (shared with the derived batches table).
   defp raw_value(row, :fire, :u32), do: Map.get(row, :fire) in [:open_fire, "open_fire", true, 1]
@@ -278,6 +300,12 @@ defmodule HiremeWeb.Packet do
       value -> value
     end
   end
+
+  # A raw row holds maps and lists as the JSON text SQLite stores.
+  defp json("{}"), do: %{}
+  defp json("[]"), do: []
+  defp json(text) when is_binary(text), do: Jason.decode!(text)
+  defp json(value), do: value
 
   defp unit_list(list) when is_list(list), do: Enum.map_join(list, <<0x1F>>, &text/1)
   defp unit_list(_), do: ""

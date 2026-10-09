@@ -652,10 +652,26 @@ defmodule Hireme.Ops do
     Map.put(tables, :leases, leases(Map.get(tables, :job_apps) |> Enum.map(& &1.id)))
   end
 
-  defp read(schema, cols, nil), do: Repo.all(from(r in schema, select: map(r, ^cols)))
+  # Rows as SQLite holds them: text, integers, JSON text, ISO dates. They
+  # go to the wire as they are (`HiremeWeb.Packet.raw/2`), so a boot is
+  # one pass from the database to the frame with nothing decoded between.
+  defp read(schema, cols, filter) do
+    {where, params} =
+      case filter do
+        nil ->
+          {"", []}
 
-  defp read(schema, cols, {field, values}),
-    do: Repo.all(from(r in schema, where: field(r, ^field) in ^values, select: map(r, ^cols)))
+        {field, values} ->
+          {" AND #{field} IN (#{Enum.map_join(values, ",", fn _ -> "?" end)})", values}
+      end
+
+    sql =
+      "SELECT #{Enum.join(cols, ",")} FROM #{schema.__schema__(:source)} WHERE account_id = ?" <>
+        where
+
+    %{rows: rows} = Repo.query!(sql, [Repo.account_id!() | params], skip_account: true)
+    Enum.map(rows, &Map.new(Enum.zip(cols, &1)))
+  end
 
   defp leases(job_ids) do
     held = Hireme.Letterbox.leased_jobs()
@@ -725,11 +741,6 @@ defmodule Hireme.Ops do
         {_, _, _, _} = fetched -> fetched
       end
     end
-  end
-
-  defp row(table, struct) do
-    {_schema, cols} = Keyword.fetch!(@tables, table)
-    Map.take(struct, cols)
   end
 
   defp fetch_group(:leases, :all, _values, raw), do: leases(Map.keys(raw.job_apps))
@@ -809,12 +820,11 @@ defmodule Hireme.Ops do
       {kind, id, _} when kind in [:stage, :heat_override] ->
         job_groups(id)
 
-      # The write answered with the job as committed: no re-read.
       {:score, id, _} ->
-        [{:job_apps, :id, [id], [row(:job_apps, value)]}]
+        [{:job_apps, :id, [id]}]
 
       {kind, id, _, _} when kind in [:next, :note] ->
-        [{:job_apps, :id, [id], [row(:job_apps, value)]}]
+        [{:job_apps, :id, [id]}]
 
       {:generation, id} ->
         [{:cv_lineages, :id, [lineage_of(id)]}]

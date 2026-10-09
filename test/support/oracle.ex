@@ -75,9 +75,37 @@ defmodule Hireme.Oracle do
     Ops.read_tables()
     |> Enum.sort()
     |> Enum.map(fn {name, rows} ->
-      %{kind: kind, table: name, rows: Enum.sort_by(rows, & &1.id)}
+      %{
+        kind: kind,
+        table: name,
+        rows: rows |> Enum.sort_by(& &1.id) |> Enum.map(&typed(name, &1))
+      }
     end)
   end
+
+  # The sequencer ships rows as SQLite holds them; the oracle writes them
+  # typed (a date its day number, a map decoded), as it always has.
+  @schemas Map.new(
+             [Job, Corpus.Profile, Corpus.Item, Variant, Lineage, Overlay, Batch, Event, Kv.Pair] ++
+               [Corpus.Narrative, Snapshot, Gym.Problem, Gym.Rep, Net.Entry],
+             &{String.to_atom(&1.__schema__(:source)), &1}
+           )
+
+  defp typed(table, row) do
+    case Map.fetch(@schemas, table) do
+      {:ok, schema} ->
+        Map.new(row, fn {col, value} ->
+          type = schema.__schema__(:type, col)
+          {:ok, loaded} = Ecto.Type.adapter_load(Repo.__adapter__(), type, value)
+          {col, loaded}
+        end)
+
+      :error ->
+        row
+    end
+  end
+
+  defp typed_rows(rows), do: Map.new(rows, fn {t, list} -> {t, Enum.map(list, &typed(t, &1))} end)
 
   defp rev_query do
     from a in Hireme.Accounts.Account, where: a.id == ^Repo.account_id!(), select: a.desk_rev
@@ -462,7 +490,7 @@ defmodule Hireme.Oracle do
         end
 
       flush()
-      %{kind: "op", op: op, result: result, rows: delta.rows, gone: delta.gone}
+      %{kind: "op", op: op, result: result, rows: typed_rows(delta.rows), gone: delta.gone}
     end
   end
 
