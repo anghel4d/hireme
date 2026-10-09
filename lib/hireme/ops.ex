@@ -169,6 +169,22 @@ defmodule Hireme.Ops do
     end
   end
 
+  @doc """
+  Start the account's sequencer and build its card table now, without
+  waiting, so the session that follows a page load attaches warm.
+  """
+  @spec prewarm(pos_integer()) :: :ok
+  def prewarm(account_id) when is_integer(account_id) do
+    GenServer.cast(server(account_id), :prewarm)
+  end
+
+  @doc """
+  The account's prepared heat snapshot as of its latest revision, for
+  judging many applications at once (`Hireme.Desk.focuses/2`).
+  """
+  @spec heat(pos_integer()) :: map()
+  def heat(account_id) when is_integer(account_id), do: call(account_id, :heat)
+
   @doc "Repaint these cards (a lease taken or released) and send what changed."
   @spec touch(pos_integer(), [pos_integer()]) :: :ok
   def touch(account_id, job_ids) when is_integer(account_id) and is_list(job_ids) do
@@ -275,6 +291,13 @@ defmodule Hireme.Ops do
     end)
   end
 
+  def handle_call(:heat, _from, state) do
+    guard(state, fn ->
+      state = warm(state)
+      {state.heat, state}
+    end)
+  end
+
   def handle_call({:exec, command, holder}, _from, state) do
     guard(state, fn ->
       case commit(warm(state), command, holder, nil) do
@@ -311,6 +334,8 @@ defmodule Hireme.Ops do
   end
 
   @impl true
+  def handle_cast(:prewarm, state), do: {:noreply, warm(state)}
+
   def handle_cast({:touch, ids}, state) do
     {:noreply, state |> warm() |> settle(ids)}
   end
@@ -459,7 +484,7 @@ defmodule Hireme.Ops do
   # the difference as its own revision.
   defp warm(%{cards: nil} = state) do
     today = Date.utc_today()
-    heat = heat(today)
+    heat = fresh_heat(today)
     cards = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
     %{state | rev: db_rev(state), day: today, heat: heat, cards: cards}
   end
@@ -491,7 +516,7 @@ defmodule Hireme.Ops do
 
   defp repaint_all(state) do
     today = Date.utc_today()
-    heat = heat(today)
+    heat = fresh_heat(today)
     fresh = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
     rows = for {id, card} <- fresh, Map.get(state.cards, id) != card, do: card
     {%{state | day: today, heat: heat, cards: fresh}, rows, true}
@@ -551,7 +576,7 @@ defmodule Hireme.Ops do
       else: nil
   end
 
-  defp heat(today) do
+  defp fresh_heat(today) do
     cfg = Heat.config()
     today |> Heat.snapshot(cfg) |> Heat.prepare(cfg, today)
   end

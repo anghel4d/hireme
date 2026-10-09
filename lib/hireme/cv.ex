@@ -382,7 +382,7 @@ defmodule Hireme.Keywords do
   def extract(text) when is_binary(text) do
     text
     |> String.downcase()
-    |> String.split(~r/[^a-z0-9+#.]+/u, trim: true)
+    |> then(&words(&1, &1, 0, 0, []))
     |> Enum.reject(&(String.length(&1) < 4 or &1 in @stop))
     |> Enum.frequencies()
     |> Enum.sort_by(fn {word, count} -> {-count, word} end)
@@ -390,12 +390,33 @@ defmodule Hireme.Keywords do
     |> Enum.take(10)
   end
 
-  @spec coverage([String.t()], [Line.t()]) :: Coverage.t()
-  def coverage(targets, resolved) when is_list(targets) do
-    text = visible_text(resolved)
+  # Runs of a-z 0-9 + # . split on every other byte, as the listing's
+  # words: `at` is the scan position, `from` where the current run began.
+  # A byte scan, not a regex: on OTP 28 a `~r` compiles on every call.
+  defp words(text, <<c, rest::binary>>, from, at, acc)
+       when c in ?a..?z or c in ?0..?9 or c in [?+, ?#, ?.],
+       do: words(text, rest, from, at + 1, acc)
+
+  defp words(text, <<_, rest::binary>>, from, at, acc),
+    do: words(text, rest, at + 1, at + 1, run(text, from, at, acc))
+
+  defp words(text, <<>>, from, at, acc), do: Enum.reverse(run(text, from, at, acc))
+
+  defp run(_text, from, from, acc), do: acc
+  defp run(text, from, at, acc), do: [binary_part(text, from, at - from) | acc]
+
+  @doc """
+  Which targets the shown lines name. `resolved` may be the lines, or
+  their `visible_text/1` when it is reused across many applications.
+  """
+  @spec coverage([String.t()], [Line.t()] | String.t()) :: Coverage.t()
+  def coverage(targets, text) when is_list(targets) and is_binary(text) do
     {hits, misses} = Enum.split_with(targets, fn term -> hit?(text, term) end)
     %Coverage{hits: hits, misses: misses}
   end
+
+  def coverage(targets, resolved) when is_list(targets),
+    do: coverage(targets, visible_text(resolved))
 
   @spec visible_text([Line.t()]) :: String.t()
   def visible_text(resolved) do
