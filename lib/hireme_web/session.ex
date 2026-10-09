@@ -42,6 +42,7 @@ defmodule HiremeWeb.Session do
   @ticket_age 60
   @recheck_ms 60_000
   @hello_deadline_ms 5_000
+  @max_leases 64
   # The first server-opened uni stream (QUIC ids 4n+3) carries an early BOOT.
   @early_stream 3
 
@@ -376,6 +377,14 @@ defmodule HiremeWeb.Session do
   # BYE on a lane releases that lease.
   defp frame({:bye, _, lane, _}, %{role: :agent} = s) when lane > 0,
     do: event({:fin, {:lane, lane}}, s)
+
+  # As many lanes as the gate allows streams: a key cannot open more.
+  defp frame({kind, _, lane, _}, %{role: :agent, letters: letters} = s)
+       when lane > 0 and kind in [:lease, :op, :rpc] and map_size(letters) >= @max_leases and
+              not is_map_key(letters, {:lane, lane}) do
+    control(s, Packet.frame(:bye, lane, sized("busy")))
+    {:ok, s}
+  end
 
   defp frame({kind, flags, lane, body}, %{role: :agent} = s)
        when lane > 0 and kind in [:lease, :op, :rpc] do
