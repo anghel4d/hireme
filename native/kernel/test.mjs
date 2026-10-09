@@ -32,8 +32,7 @@ const FRESHNESS = ["unknown", "open", "thin", "closed", "blocked"]
 const GATES = ["unset", "pursue", "maybe", "skip"]
 const COMPANIES = ["Acme", "acme", "Globex", "Ölund", "Initech", "Zeta", "Ab", ""]
 const JOB_COLS = ["id", "profile_id", "batch_id", "company", "role", "location", "heat", "status", "next_action", "next_due",
-  "stage_on", "current_stage", "pips", "freshness", "gate", "fit", "score_100", "keyword_hits", "keyword_total",
-  "mask_hidden", "mask_altered", "mask_emphasized", "listing_url", "canonical_url", "department", "squad",
+  "stage_on", "current_stage", "pips", "freshness", "gate", "fit", "score_100", "listing_url", "canonical_url", "department", "squad",
   "heat_override", "heat_override_reason"]
 
 function rng(seed) {
@@ -53,7 +52,6 @@ function randomJob(r, id, profiles, batches) {
     stage_on: r.f() < 0.2 ? null : 20000 + r.int(50), current_stage: stage,
     pips: r.f() < 0.8 ? rail("", STAGES.indexOf(stage)).join("") : r.pick(["", "XX", "DDDDDAPPPP"]),
     freshness: r.pick(FRESHNESS), gate: r.pick(GATES), fit: r.pick(["", "fit"]), score_100: r.pick([0, 50, 50, 73, 100, r.int(101)]),
-    keyword_hits: r.int(5), keyword_total: r.int(9), mask_hidden: r.int(3), mask_altered: r.int(3), mask_emphasized: r.int(3),
     listing_url: "", canonical_url: "", department: "", squad: "", heat_override: 0, heat_override_reason: "",
   }
 }
@@ -145,7 +143,8 @@ class Model {
     return {
       id: j.id, score: j.score_100, heat: j.heat, stage: STAGES.indexOf(j.current_stage), status: STATUSES.indexOf(j.status),
       freshness: FRESHNESS.indexOf(j.freshness), gate: GATES.indexOf(j.gate), batch: j.batch_id ?? 0, profile: j.profile_id,
-      hits: j.keyword_hits, total: j.keyword_total, hidden: j.mask_hidden, altered: j.mask_altered, emphasized: j.mask_emphasized,
+      // No items, overlays or listing here: a CV with nothing to count.
+      hits: 0, total: 0, hidden: 0, altered: 0, emphasized: 0,
       stage_on: j.stage_on ?? NONE, next_due: j.next_due ?? NONE, leased: st.leases.has(j.id) ? 1 : 0,
       company: j.company, role: j.role, location: j.location, next_action: j.next_action, cv_label: this.variants.get(j.id),
       fit: j.fit, pips: j.pips,

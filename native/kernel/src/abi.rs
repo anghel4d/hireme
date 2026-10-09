@@ -226,15 +226,15 @@ pub extern "C" fn derive() -> u32 {
 /// Keywords coverage for a CV: scratch holds the visible text (`text_len`
 /// bytes) followed by the theme's targets joined by U+001F (`targets_len`
 /// bytes; 0 means Keywords.extract of the job's listing). Fills the
-/// `coverage` table and returns the hit count; `store` 1 shows the hits on
-/// the job's card while ops are pending.
+/// `coverage` table and returns the hit count. (Cards count their own
+/// hits; this is for a focus and its root.)
 #[unsafe(no_mangle)]
-pub extern "C" fn coverage(job: u32, text_len: u32, targets_len: u32, store: u32) -> u32 {
+pub extern "C" fn coverage(job: u32, text_len: u32, targets_len: u32) -> u32 {
     with(|k| {
         let s = core::mem::take(&mut k.scratch);
         let t = (text_len as usize).min(s.len());
         let g = (t + targets_len as usize).min(s.len());
-        let n = k.desk.coverage(job, &s[..t], &s[t..g], store == 1);
+        let n = k.desk.coverage(job, &s[..t], &s[t..g]);
         k.scratch = s;
         n
     })

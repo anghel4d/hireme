@@ -14,8 +14,6 @@
 //! text the old packet carried is derived here too, lowercased once per
 //! change rather than sent.
 
-use alloc::collections::BTreeMap;
-
 use alloc::vec::Vec;
 
 use wire::schema::{col, refusal, table};
@@ -60,9 +58,6 @@ pub struct Desk {
     /// The raw tables or their pending view moved since the last derive.
     pub(crate) raw_dirty: bool,
     pub(crate) derived: crate::derive::Derived,
-    /// Keyword hits and total TypeScript computed for a job's recomposed
-    /// CV while an op on its lineage is pending.
-    pub(crate) glance: BTreeMap<u32, [u32; 2]>,
     pub(crate) pending: Vec<Pending>,
     order: Vec<u32>,
     /// What each card row sorted by (see `basis_of`), and the arena epoch
@@ -94,7 +89,6 @@ impl Desk {
             provisional: 0,
             raw_dirty: true,
             derived: crate::derive::Derived::new(),
-            glance: BTreeMap::new(),
             pending: Vec::new(),
             order: Vec::new(),
             basis: Vec::new(),
@@ -346,6 +340,12 @@ impl Desk {
 
     /// Removes a row from `t` in the view.
     pub(crate) fn delete_row(&mut self, t: u16, key: u32) {
+        if t == table::OVERLAYS {
+            if let Some(r) = self.row_of(t, key) {
+                let lineage = self.vu32(t, col::overlays::LINEAGE_ID, r);
+                self.derived.mark_lineage(lineage);
+            }
+        }
         let vt = self.vtable_mut(t);
         vt.delete(core::iter::once(key));
         self.touched.push([t as u32, key]);
@@ -396,9 +396,6 @@ impl Desk {
         self.raw_dirty = true;
         self.overlay.clear();
         self.vtables.clear();
-        if self.pending.is_empty() {
-            self.glance.clear();
-        }
         self.order_full = true;
         self.search_dirty = true;
         let pending = core::mem::take(&mut self.pending);
@@ -595,9 +592,9 @@ impl Desk {
         if base_moved || pending_moved {
             self.rebuild_view();
         }
-        if self.raw_dirty && self.derive() {
-            bits |= CARDS | TABLES;
-        }
+        // Compact before deriving: a compaction moves every string, which
+        // voids what the derive caches by string reference, so a derive
+        // after it would start over.
         if base_moved {
             let overlay = self
                 .overlay
@@ -609,6 +606,9 @@ impl Desk {
             if self.store.arena.live_floor != before {
                 self.counters[COMPACTIONS] += 1;
             }
+        }
+        if self.raw_dirty && self.derive() {
+            bits |= CARDS | TABLES;
         }
         bits
     }

@@ -14,7 +14,8 @@
 # columns it names (a changed row is its id plus the columns that moved), and `gone` deletes. A
 # HELLO whose snapshot_rev is current gets an empty PATCH with END, which keeps everything. TICK
 # carries `clock`. OP body: u64 op_id | u8 kind | u8 nfields | u16 0 | u32 target |
-# (u16 len, utf8) * nfields, fields in the order the `op` line names them.
+# (u16 len, utf8) * nfields, fields in the order the `op` line names them; a field marked `?`
+# may be left off the end.
 
 frame HELLO 1
 frame BOOT 3
@@ -163,11 +164,6 @@ col job_apps department 24 str
 col job_apps score_100 25 u32
 col job_apps heat_override 26 u32
 col job_apps heat_override_reason 27 str
-col job_apps keyword_hits 28 u32
-col job_apps keyword_total 29 u32
-col job_apps mask_hidden 30 u32
-col job_apps mask_altered 31 u32
-col job_apps mask_emphasized 32 u32
 col job_apps inserted_at 33 time
 col job_apps updated_at 34 time
 
@@ -415,7 +411,7 @@ op stage 1 job stage
 op next 2 job next_action next_due
 op note 3 job stage note
 op score 4 job score
-op overlay 5 job item_id mode body reason
+op overlay 5 job item_id mode body reason title?
 op heat_override 6 job reason
 op open_fire 7 none code
 op narrative 8 narrative body
@@ -423,6 +419,7 @@ op gym_log 9 none pairs
 op gym_target 10 none target
 op net_log 11 none pairs
 op net_lane 12 none url
+op generation 13 job
 
 refusal fire_hold 1
 refusal heat 2
@@ -434,3 +431,5 @@ refusal not_found 7
 refusal batch 8
 refusal invalid 9
 refusal internal 10
+refusal busy 11
+refusal lineage_busy 12

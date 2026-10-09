@@ -18,7 +18,6 @@ use wire::{NONE, Op};
 
 use crate::desk::{Desk, Val};
 use crate::heat;
-use crate::keywords;
 
 /// Refusal names the schema has no code for travel as `internal`.
 const INTERNAL: u8 = refusal::INTERNAL;
@@ -206,6 +205,42 @@ impl Desk {
                 );
             }
             op::OVERLAY => self.overlay_raw(o, check, rec)?,
+            op::GENERATION => {
+                // Desk.execute({:generation, job}): the lease, CvPair.bind,
+                // then CvPair.open_generation of the job's employer lineage.
+                if check && leased(self) {
+                    return Err(refusal::LEASED);
+                }
+                let (lineage, lr) = self.bound_lineage(job)?;
+                let lt = table::CV_LINEAGES;
+                let opened = self.vu32(lt, col::cv_lineages::OPENED_ON, lr);
+                if self.today != NONE && opened != NONE && (self.today as i64 - opened as i64) < 90
+                {
+                    return Err(refusal::COOLDOWN);
+                }
+                let generation = self.vu32(lt, col::cv_lineages::GENERATION, lr);
+                self.set(
+                    lt,
+                    lineage,
+                    col::cv_lineages::GENERATION,
+                    Val::U(generation.wrapping_add(1)),
+                    rec,
+                );
+                self.set(
+                    lt,
+                    lineage,
+                    col::cv_lineages::OPENED_ON,
+                    Val::U(self.today),
+                    rec,
+                );
+                self.set(
+                    lt,
+                    lineage,
+                    col::cv_lineages::REWRITES_ALLOWED,
+                    Val::U(0),
+                    rec,
+                );
+            }
             // Gym and net appends carry rows the server numbers; they come
             // with the PATCH. What Gym and Net refuse is refused here.
             op::GYM_TARGET => {
@@ -434,6 +469,22 @@ impl Desk {
                 .is_some_and(|r| self.vu32(table::BATCHES, col::batches::FIRE, r) == 1)
     }
 
+    /// CvPair.bind: the job's variant, on a lineage of the job's employer.
+    /// The lineage id and its row; `:unbound` (internal) when there is none.
+    fn bound_lineage(&self, job: u32) -> Result<(u32, usize), u8> {
+        let jr = self.row_of(table::JOB_APPS, job).ok_or(INTERNAL)?;
+        let employer = self.vu32(table::JOB_APPS, col::job_apps::EMPLOYER_ID, jr);
+        let (vt, lt) = (table::CV_VARIANTS, table::CV_LINEAGES);
+        (0..self.rows(vt))
+            .filter(|&r| self.vu32(vt, col::cv_variants::JOB_APP_ID, r) == job)
+            .map(|r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r))
+            .find_map(|l| {
+                let lr = self.row_of(lt, l)?;
+                (self.vu32(lt, col::cv_lineages::EMPLOYER_ID, lr) == employer).then_some((l, lr))
+            })
+            .ok_or(INTERNAL)
+    }
+
     /// Desk.execute({:overlay, ...}): CvPair.bind, then tailor or drop_line.
     fn overlay_raw(
         &mut self,
@@ -446,6 +497,10 @@ impl Desk {
             .filter(|n| *n > 0 && *n < u32::MAX as i64)
             .ok_or(refusal::ARGUMENT)? as u32;
         let mode = o.field(1);
+        // An altered line may retitle it (the optional 5th field); the
+        // write sets its title, none when blank. Other modes leave it.
+        let title: Option<Vec<u8>> =
+            (mode == "altered").then(|| heat::trim(o.field(4)).as_bytes().to_vec());
         let (mode, body, reason): (&str, Option<String>, Option<String>) = match mode {
             "inherit" => ("inherit", None, None),
             "altered" | "hidden" | "emphasized" => {
@@ -485,20 +540,8 @@ impl Desk {
         if check && self.row_of(table::LEASES, job).is_some() {
             return Err(refusal::LEASED);
         }
-        // CvPair.bind: the job's variant, on a lineage of the job's employer.
-        let jr = self.row_of(table::JOB_APPS, job).ok_or(INTERNAL)?;
-        let employer = self.vu32(table::JOB_APPS, col::job_apps::EMPLOYER_ID, jr);
-        let vt = table::CV_VARIANTS;
+        let (lineage, lr) = self.bound_lineage(job)?;
         let lt = table::CV_LINEAGES;
-        let lineage = (0..self.rows(vt))
-            .filter(|&r| self.vu32(vt, col::cv_variants::JOB_APP_ID, r) == job)
-            .map(|r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r))
-            .find(|&l| {
-                self.row_of(lt, l)
-                    .is_some_and(|lr| self.vu32(lt, col::cv_lineages::EMPLOYER_ID, lr) == employer)
-            })
-            .ok_or(INTERNAL)?; // :unbound
-        let lr = self.row_of(lt, lineage).ok_or(INTERNAL)?;
         if mode != "inherit" && self.row_of(table::ITEMS, item).is_none() {
             return Err(refusal::NOT_FOUND);
         }
@@ -522,7 +565,6 @@ impl Desk {
             for id in existing {
                 self.delete_row(ot, id);
             }
-            self.refresh_lineage(lineage, rec);
             return Ok(());
         }
         let reason_b = reason.map(String::into_bytes).unwrap_or_default();
@@ -538,6 +580,9 @@ impl Desk {
                 );
                 if let Some(b) = body {
                     self.set(ot, id, col::overlays::BODY, Val::S(b.into_bytes()), rec);
+                }
+                if let Some(t) = title {
+                    self.set(ot, id, col::overlays::TITLE, Val::S(t), rec);
                 }
                 self.set(ot, id, col::overlays::REASON, Val::S(reason_b), rec);
             }
@@ -557,136 +602,13 @@ impl Desk {
                             Val::S(body.map(String::into_bytes).unwrap_or_default()),
                         ),
                         (col::overlays::REASON, Val::S(reason_b)),
+                        (col::overlays::TITLE, Val::S(title.unwrap_or_default())),
                         (col::overlays::GENERATION, Val::U(generation)),
                     ],
                 );
             }
         }
-        self.refresh_lineage(lineage, rec);
         Ok(())
-    }
-}
-
-impl Desk {
-    /// Desk's refresh_lineage!/1 after an overlay write: every job with a
-    /// variant on the lineage gets the mask counts of the lineage's
-    /// overlays and the keyword coverage of the CV its profile now shows.
-    fn refresh_lineage(&mut self, lineage: u32, rec: &mut Vec<(u16, u32, u16, Val)>) {
-        let ot = table::OVERLAYS;
-        let it = table::ITEMS;
-        let vt = table::CV_VARIANTS;
-        let lt = table::CV_LINEAGES;
-        let jt = table::JOB_APPS;
-        // The lineage's overlays by item: mode, title, body.
-        let mut counts = [0u32; 3];
-        let mut by_item: Vec<(u32, u8, String, String)> = Vec::new();
-        for r in 0..self.rows(ot) {
-            if self.vu32(ot, col::overlays::LINEAGE_ID, r) != lineage {
-                continue;
-            }
-            let m = match self.vstr(ot, col::overlays::MODE, r) {
-                b"hidden" => 0,
-                b"altered" => 1,
-                b"emphasized" => 2,
-                _ => continue,
-            };
-            counts[m as usize] += 1;
-            let text = |c| String::from(core::str::from_utf8(self.vstr(ot, c, r)).unwrap_or(""));
-            by_item.push((
-                self.vu32(ot, col::overlays::ITEM_ID, r),
-                m,
-                text(col::overlays::TITLE),
-                text(col::overlays::BODY),
-            ));
-        }
-        let lin_row = self.row_of(lt, lineage);
-        let lin_theme = lin_row.map_or(&b""[..], |r| self.vstr(lt, col::cv_lineages::THEME, r));
-        let lineage_targets = if lin_theme.is_empty() || lin_theme == b"{}" {
-            None
-        } else {
-            let t = lin_row.map_or(&b""[..], |r| {
-                self.vstr(lt, col::cv_lineages::THEME_TARGETS, r)
-            });
-            Some(keywords::theme_targets(
-                core::str::from_utf8(t).unwrap_or(""),
-            ))
-        };
-        let variants: Vec<usize> = (0..self.rows(vt))
-            .filter(|&r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r) == lineage)
-            .collect();
-        let mut writes: Vec<(u32, [u32; 5])> = Vec::new();
-        for v in variants {
-            let job = self.vu32(vt, col::cv_variants::JOB_APP_ID, v);
-            let profile = self.vu32(vt, col::cv_variants::PROFILE_ID, v);
-            let Some(jr) = self.row_of(jt, job) else {
-                continue;
-            };
-            // The text a reader sees: every shown line's title and body.
-            let mut text = String::new();
-            let mut first = true;
-            for r in 0..self.rows(it) {
-                let p = self.vu32(it, col::items::PROFILE_ID, r);
-                if !(p == NONE || p == 0 || p == profile) {
-                    continue;
-                }
-                let id = self.vu32(it, col::items::ID, r);
-                let ov = by_item.iter().find(|o| o.0 == id);
-                if ov.is_some_and(|o| o.1 == 0) {
-                    continue;
-                }
-                let raw = |c| core::str::from_utf8(self.vstr(it, c, r)).unwrap_or("");
-                let (mut title, mut body) = (raw(col::items::TITLE), raw(col::items::BODY));
-                if let Some(o) = ov.filter(|o| o.1 == 1) {
-                    if !o.2.is_empty() {
-                        title = &o.2;
-                    }
-                    if !o.3.is_empty() {
-                        body = &o.3;
-                    }
-                }
-                if !first {
-                    text.push('\n');
-                }
-                first = false;
-                text.push_str(title);
-                text.push('\n');
-                text.push_str(body);
-            }
-            let text = heat::downcase(&text);
-            let targets = match &lineage_targets {
-                Some(t) => t.clone(),
-                None => keywords::theme_targets(
-                    core::str::from_utf8(self.vstr(vt, col::cv_variants::THEME_TARGETS, v))
-                        .unwrap_or(""),
-                ),
-            };
-            let targets = if targets.is_empty() {
-                keywords::extract(
-                    core::str::from_utf8(self.vstr(jt, col::job_apps::LISTING, jr)).unwrap_or(""),
-                )
-            } else {
-                targets
-            };
-            let hits = targets.iter().filter(|t| keywords::hit(&text, t)).count() as u32;
-            writes.push((
-                job,
-                [hits, targets.len() as u32, counts[0], counts[1], counts[2]],
-            ));
-        }
-        for (job, w) in writes {
-            for (c, v) in [
-                col::job_apps::KEYWORD_HITS,
-                col::job_apps::KEYWORD_TOTAL,
-                col::job_apps::MASK_HIDDEN,
-                col::job_apps::MASK_ALTERED,
-                col::job_apps::MASK_EMPHASIZED,
-            ]
-            .into_iter()
-            .zip(w)
-            {
-                self.set(jt, job, c, Val::U(v), rec);
-            }
-        }
     }
 }
 
