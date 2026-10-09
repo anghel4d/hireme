@@ -160,6 +160,11 @@ defmodule HiremeWeb.SessionTest do
     info = %{connect_info: %{session: %{HiremeWeb.Auth.session_key() => token}}}
     assert {:ok, %{account_id: id, session_id: sid}} = HiremeWeb.WireSocket.connect(info)
     assert {id, sid} == {account.id, session.id}
+    # Asking for raw tables at upgrade pushes the BOOT before any HELLO.
+    raw = Map.put(info, :params, %{"raw" => "1", "rev" => "0", "cid" => "4"})
+    {:ok, meta} = HiremeWeb.WireSocket.connect(raw)
+    assert {:ok, %{client_id: 4}} = HiremeWeb.WireSocket.init(meta)
+    assert_received {Session, :early_boot, 0}
     # No cookie: an agent, admitted only as far as its API-key HELLO.
     assert {:ok, %{origin: "", path: "/wt"}} =
              HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
