@@ -13,7 +13,7 @@ import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, Keyed, morph, raw, type Raw } from "./html.ts"
 import * as webauthn from "./webauthn.ts"
-import type { Change, Desk, Op, Refusal, Tables } from "./store.ts"
+import type { Change, Desk, Mark, Op, Refusal, Tables } from "./store.ts"
 import * as views from "./views.ts"
 
 type Lens = "board" | "battleplan" | "root" | "gym" | "net" | "settings"
@@ -288,25 +288,10 @@ export class Shell {
   }
 
   private describe(op: Op): string {
-    const company = (job: number) => {
-      const row = this.desk.rowOf(job)
-      return row < 0 ? `JobApp${job}` : this.desk.str("company").at(row)
-    }
-    switch (op.kind) {
-      case "stage": return `the stage change on ${company(op.job)}`
-      case "next": return `the next action on ${company(op.job)}`
-      case "note": return `the note on ${company(op.job)}`
-      case "overlay": return `the CV line change on ${company(op.job)}`
-      case "heat_override": return `the HEAT override on ${company(op.job)}`
-      case "score": return `the score on ${company(op.job)}`
-      case "open_fire": return `open fire on ${op.batch}`
-      case "narrative": return "the narrative"
-      case "gym_log": return "the gym rep"
-      case "gym_target": return "the gym target"
-      case "net_log": return "the net entry"
-      case "net_lane": return "the observer lane"
-      default: return "a change"
-    }
+    const job = "job" in op && op.job !== null ? op.job : null
+    const row = job === null ? -1 : this.desk.rowOf(job)
+    const on = job === null ? "" : ` on ${row < 0 ? `JobApp${job}` : this.desk.str("company").at(row)}`
+    return op.kind === "open_fire" ? `open fire on ${op.batch}` : `the ${WHAT[op.kind]}${on}`
   }
 
   private select(): void {
@@ -461,16 +446,16 @@ export class Shell {
       case "battleplan":
         return focus
           ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.refusal)}</div>`
-          : views.connecting()
+          : raw("")
       case "root": {
         const root = this.rootProfile()
         const r = root === null ? null : this.desk.root(root)
-        return r ? h`<div class="root-wrap">${views.rootView(r)}</div>` : views.connecting()
+        return r ? h`<div class="root-wrap">${views.rootView(r)}</div>` : raw("")
       }
       case "gym":
-        return lanes ? h`<div class="lane-wrap">${views.gymView(lanes, m.laneError)}</div>` : views.connecting()
+        return lanes ? h`<div class="lane-wrap">${views.gymView(lanes, m.laneError)}</div>` : raw("")
       case "net":
-        return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : views.connecting()
+        return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : raw("")
       case "settings":
         return h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`
       case "board":
@@ -482,7 +467,7 @@ export class Shell {
   // skipped outright when its HTML is what it last drew.
   // The pending mark is a class set here, not part of the frame's HTML, so
   // a write's mark alone never re-walks the frame.
-  private drawBattleplanSlots(lens: HTMLElement, focus: Focus, mark: views.Mark): void {
+  private drawBattleplanSlots(lens: HTMLElement, focus: Focus, mark: Mark): void {
     const m = this.model
     const parts = views.battleplanSlots(focus)
     const slot = (id: string, html: Raw) => {
@@ -492,7 +477,7 @@ export class Shell {
     slot("#bp-bar", parts.bar)
     slot("#bp-narrative", parts.narrative)
     this.list(lens.querySelector("#bp-events"), parts.events)
-    slot("#bp-paper", views.battleplanPaper(focus, m.editing, m.alterError, m.line))
+    this.list(lens.querySelector("#bp-paper"), views.paperBlocks(focus.cv, true, m.editing, m.alterError, m.line))
     this.list(lens.querySelector("#bp-rail"), parts.rail)
     lens.querySelector("#battleplan")?.classList.toggle("is-pending", mark === "pending")
   }
@@ -518,7 +503,7 @@ export class Shell {
     return (ix === undefined ? undefined : profiles[ix])?.id ?? profiles[0]?.id ?? null
   }
 
-  private drawBoard(focus: Focus | null, mark: views.Mark): void {
+  private drawBoard(focus: Focus | null, mark: Mark): void {
     const m = this.model
     const d = this.desk
     const metrics = grid.metrics(m.grid.rem)
@@ -539,7 +524,7 @@ export class Shell {
     const height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
     if (this.plane && this.plane.style.height !== height) this.plane.style.height = height
     this.cards?.set(parts)
-    this.set("#empty", m.count === 0 ? (d.n === 0 ? views.connecting() : views.emptyBoard()) : raw(""))
+    this.set("#empty", m.count === 0 && d.n > 0 ? views.emptyBoard() : raw(""))
     this.set("#focus-slot", focus ? views.focusPanel(focus, m.index >= 0, m.sheet, m.refusal, mark) : views.emptyFocus())
   }
 
@@ -932,6 +917,12 @@ function refusalText(r: Refusal): string {
     case "invalid": return "The server did not accept that value."
     default: return r
   }
+}
+
+// What a rolled-back write is called in its notice.
+const WHAT: Record<Op["kind"], string> = {
+  stage: "stage change", next: "next action", note: "note", overlay: "CV line change", heat_override: "HEAT override", score: "score",
+  open_fire: "open fire", narrative: "narrative", gym_log: "gym rep", gym_target: "gym target", net_log: "net entry", net_lane: "observer lane",
 }
 
 function isLaneOp(op: Op): boolean {

@@ -285,7 +285,7 @@ const scenarios = {
     const { page, close } = await fresh()
     const open = [], back = []
     for (let i = 0; i < Math.min(N, 60); i++) {
-      open.push(await act(page, key("Enter"), `!!document.querySelector("#battleplan #bp-paper .paper")`))
+      open.push(await act(page, key("Enter"), `!!document.querySelector("#battleplan #bp-paper .line")`))
       back.push(await act(page, key("Escape"), `!document.getElementById("workspace").dataset.covered && !!document.querySelector("#plane .card.is-active")`))
       await page.evaluate((f) => new Function(f)(), key(i % 2 ? "l" : "h"))
       await page.waitForTimeout(30)
