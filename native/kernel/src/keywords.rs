@@ -16,47 +16,66 @@ const STOP: &[&str] = &[
     "our", "for", "the", "and",
 ];
 
+/// A byte as a word byte of the downcased text (a-z 0-9 + # .), A-Z
+/// folded down; 0 for every byte that ends a word.
+const WORD: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut c = 0;
+    while c < 128 {
+        let l = (c as u8).to_ascii_lowercase();
+        if l.is_ascii_lowercase() || l.is_ascii_digit() || l == b'+' || l == b'#' || l == b'.' {
+            t[c] = l;
+        }
+        c += 1;
+    }
+    t
+};
+
 /// Keywords.extract/1: the ten most frequent words of four or more
 /// characters that are not stop words, by count then bytes. Words are
-/// runs of a-z 0-9 + # . in the downcased text.
+/// runs of a-z 0-9 + # . in the downcased text. One pass maps the bytes
+/// through `WORD`, a second counts each word in an open-addressing table;
+/// stop words are dropped from the counted words, not checked per
+/// occurrence.
 pub fn extract(listing: &str) -> Vec<String> {
-    // Downcase only what can become a word byte: ASCII, and the two
-    // characters whose lowercase holds an ASCII letter (U+0130 is "i̇",
-    // U+212A KELVIN SIGN is "k"). Every other character lowercases to
-    // bytes at or above 0x80, which only ever end a word.
     let src = listing.as_bytes();
     let mut text: Vec<u8> = Vec::with_capacity(src.len());
-    let mut i = 0;
-    while i < src.len() {
-        let c = src[i];
-        if c < 0x80 {
-            text.push(c.to_ascii_lowercase());
-            i += 1;
-        } else if src[i..].starts_with("\u{130}".as_bytes()) {
-            text.extend_from_slice("i\u{307}".as_bytes());
-            i += 2;
-        } else if src[i..].starts_with("\u{212A}".as_bytes()) {
-            text.push(b'k');
-            i += 3;
-        } else {
-            text.push(0x80);
-            i += 1;
+    if src.is_ascii() {
+        text.extend(src.iter().map(|&c| WORD[c as usize]));
+    } else {
+        // Only two characters lowercase to bytes that hold a word byte:
+        // U+0130 is "i" and a combining dot, U+212A KELVIN SIGN is "k".
+        // Every other non-ASCII byte ends a word.
+        let mut i = 0;
+        while i < src.len() {
+            let (c, n) = match src[i] {
+                c if c < 0x80 => (WORD[c as usize], 1),
+                _ if src[i..].starts_with("\u{130}".as_bytes()) => (b'i', 2),
+                _ if src[i..].starts_with("\u{212A}".as_bytes()) => (b'k', 3),
+                _ => (0, 1),
+            };
+            text.push(c);
+            if n == 2 {
+                text.push(0); // the combining dot ends the word
+            }
+            i += n;
         }
     }
-    let word =
-        |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'#' | b'.');
-    // Count with a small open-addressing table keyed by the word's bytes.
-    let mut slots: Vec<(u32, u32, u32)> = vec![(0, 0, 0); 64]; // (from, to, count); count 0 = empty
-    let mut used = 0usize;
-    let mut add = |slots: &mut Vec<(u32, u32, u32)>, from: usize, to: usize| {
-        let w = &text[from..to];
-        if w.len() < 4 || (w.len() <= 7 && STOP.iter().any(|s| s.as_bytes() == w)) {
-            return;
+    // (start, len, count); count 0 is an empty slot. Kept under half full.
+    let mut slots = vec![(0u32, 0u32, 0u32); 256];
+    let mut used = 0;
+    let mut at = 0;
+    for w in text.split(|&c| c == 0) {
+        let start = at;
+        at += w.len() + 1;
+        if w.len() < 4 {
+            continue;
         }
-        if (used + 1) * 2 > slots.len() {
-            let old = core::mem::replace(slots, vec![(0, 0, 0); slots.len() * 2]);
+        if used * 2 >= slots.len() {
+            let old = core::mem::replace(&mut slots, vec![(0, 0, 0); used * 4]);
             for e in old.into_iter().filter(|e| e.2 > 0) {
-                let mut k = fnv(&text[e.0 as usize..e.1 as usize]) & (slots.len() - 1);
+                let w = &text[e.0 as usize..(e.0 + e.1) as usize];
+                let mut k = fnv(w) & (slots.len() - 1);
                 while slots[k].2 > 0 {
                     k = (k + 1) & (slots.len() - 1);
                 }
@@ -66,31 +85,24 @@ pub fn extract(listing: &str) -> Vec<String> {
         let mask = slots.len() - 1;
         let mut k = fnv(w) & mask;
         loop {
-            let e = slots[k];
+            let e = &mut slots[k];
             if e.2 == 0 {
-                slots[k] = (from as u32, to as u32, 1);
+                *e = (start as u32, w.len() as u32, 1);
                 used += 1;
-                return;
+                break;
             }
-            if &text[e.0 as usize..e.1 as usize] == w {
-                slots[k].2 += 1;
-                return;
+            if e.1 as usize == w.len() && &text[e.0 as usize..e.0 as usize + w.len()] == w {
+                e.2 += 1;
+                break;
             }
             k = (k + 1) & mask;
         }
-    };
-    let mut from = 0;
-    for i in 0..text.len() {
-        if !word(text[i]) {
-            add(&mut slots, from, i);
-            from = i + 1;
-        }
     }
-    add(&mut slots, from, text.len());
     let mut counts: Vec<(&[u8], u32)> = slots
         .iter()
         .filter(|e| e.2 > 0)
-        .map(|e| (&text[e.0 as usize..e.1 as usize], e.2))
+        .map(|e| (&text[e.0 as usize..(e.0 + e.1) as usize], e.2))
+        .filter(|(w, _)| w.len() > 7 || !STOP.iter().any(|s| s.as_bytes() == *w))
         .collect();
     counts.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     counts

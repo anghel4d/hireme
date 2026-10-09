@@ -154,7 +154,6 @@ export interface WireKernel {
   touched_ptr(): number
   derive(): number
   warm(): void
-  glances(budget: number): number
   counter(k: number): number
   set_today(day: number): void
   snapshot(): number
@@ -928,7 +927,6 @@ export class LocalDesk implements Desk, Host {
   readonly hash: number
   readonly snapshot: Snapshot | null
   private replaying = false
-  private draining = false
 
   /** Ops sent and refused before sending; the kernel's counters hold the rest. Read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
@@ -985,7 +983,6 @@ export class LocalDesk implements Desk, Host {
     this.kernel.forget(null)
     this.board.changed(null)
     this.emit({ ...this.docs.changed(null, "all"), rows: true })
-    this.drain()
     this.onReset?.()
   }
 
@@ -1108,28 +1105,6 @@ export class LocalDesk implements Desk, Host {
       if (flags & FLAG.END && performance.getEntriesByName("desk:ready").length === 0) performance.mark("desk:ready")
     }
     if (c.rows || c.focus || c.lanes || c.root || c.scoreboard || c.account) this.emit(c)
-    this.drain()
-  }
-
-  /**
-   * Listings the kernel has not read for keywords yet (a BOOT's, or a
-   * PATCH's): read them a slice at a time while the page is idle, visible
-   * cards first, so their hits fill in without delaying an input.
-   */
-  private drain(): void {
-    if (this.draining || this.kernel.k.glances(0) === 0) return
-    this.draining = true
-    const step = () => {
-      let left = 0
-      try {
-        left = this.kernel.k.glances(50)
-        this.emit({ ...this.settle(), rows: true })
-      } finally {
-        if (left > 0) idle(step, 200)
-        else this.draining = false
-      }
-    }
-    idle(step, 200)
   }
 
   /** An ACK or NACK for an op of ours. The kernel has already settled or dropped it. */
