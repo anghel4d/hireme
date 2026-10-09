@@ -58,6 +58,9 @@ latency, and reports achieved requests/second separately from quantiles.
 overrides the concurrency list. These are local workload measurements, not
 production Internet latency or an open-loop capacity/SLO guarantee.
 
+The [performance audit](docs/performance.md) records baseline/final latency
+quantiles, achieved throughput, correctness checks, raw evidence and limitations.
+
 ## Production deployment
 
 The production artifact is an OTP release with `bin/hireme`. The Nix package in
