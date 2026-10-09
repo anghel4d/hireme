@@ -42,7 +42,7 @@ defmodule Hireme.Oracle do
   @doc """
   The tables of the account on this process, the ops run over them, and
   what the server still decides from them on `today`: each job's heat
-  verdict (a stage write's refusal) and each batch's mix (its deferrals).
+  verdict (a stage write's refusal).
   """
   @spec dump(Date.t(), keyword()) :: [map()]
   def dump(today, opts \\ []) do
@@ -62,8 +62,7 @@ defmodule Hireme.Oracle do
       Keyword.get(opts, :ops, []) ++
       Enum.map(jobs, fn job ->
         Map.merge(%{kind: "verdict", id: job.id}, plain(Heat.can_apply(job, today: today)))
-      end) ++
-      Enum.map(Desk.list_batches(), &mix_batch(&1, today))
+      end)
   end
 
   @doc """
@@ -109,17 +108,6 @@ defmodule Hireme.Oracle do
 
   defp rev_query do
     from a in Hireme.Accounts.Account, where: a.id == ^Repo.account_id!(), select: a.desk_rev
-  end
-
-  defp mix_batch(%Batch{} = batch, today) do
-    result = Heat.mix_batch(batch, today: today)
-
-    %{
-      kind: "mix_batch",
-      code: batch.code,
-      kept: Enum.map(result.kept, & &1.id),
-      deferred: Enum.map(result.deferred, fn {job, v} -> Map.put(plain(v), "id", job.id) end)
-    }
   end
 
   @doc "One line as JSON text, values made plain."
