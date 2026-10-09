@@ -76,7 +76,7 @@ export class Shell {
   private tables: Tables
   private noticeSeq = 0
   private readonly plane: HTMLElement
-  private readonly cards: Keyed
+  private readonly cards: views.Cards
 
   constructor(root: HTMLElement, desk: Desk) {
     this.root = root
@@ -117,7 +117,7 @@ export class Shell {
         <div id="lens"></div>
       </div>`
     this.plane = this.root.querySelector<HTMLElement>("#plane") as HTMLElement
-    this.cards = new Keyed(this.plane)
+    this.cards = new views.Cards(this.plane)
     this.bind()
     this.select()
     if (this.model.appId === null) this.model.appId = this.idAt(0)
@@ -482,7 +482,7 @@ export class Shell {
   private list(el: Element | null, items: [number, Raw][]): void {
     if (!el) return
     let keyed = this.lists.get(el)
-    if (!keyed) this.lists.set(el, (keyed = new Keyed(el, true)))
+    if (!keyed) this.lists.set(el, (keyed = new Keyed(el)))
     keyed.set(items)
   }
 
@@ -505,13 +505,13 @@ export class Shell {
     const [start, last] = grid.slice(m.count, m.grid.cols, m.grid.scroll, m.grid.viewport, metrics)
     const sel = d.selection()
     const ids = d.column("id")
-    const parts: [number, Raw][] = []
+    const parts: [number, string[]][] = []
     const place = (pos: number) => {
       const row = sel[pos]
       if (row === undefined) return
       const id = ids[row] ?? 0
       const [x, y] = grid.origin(pos, m.grid.cols, metrics)
-      parts.push([id, views.card(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id))])
+      parts.push([id, views.cardValues(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id))])
     }
     if (m.index >= 0 && (m.index < start || m.index > last)) place(m.index)
     if (start >= 0) for (let p = start; p <= last; p++) place(p)

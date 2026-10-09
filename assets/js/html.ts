@@ -52,22 +52,16 @@ export function morph(target: Element, html: Raw): void {
 }
 
 /**
- * A keyed set of sibling elements, each one patched alone and only when its
- * own HTML changed. A board of cards where one card changes then costs one
- * card's parse and patch, not a walk of every card.
+ * An ordered, keyed list of sibling elements, each one patched alone and
+ * only when its own HTML changed: a list that gains a row costs that row.
  */
 export class Keyed {
   private readonly els = new Map<number, { el: Element; html: string }>()
   private readonly tpl = document.createElement("template")
 
-  /** `ordered`: the children follow the items' order (a list); otherwise they place themselves (cards). */
-  constructor(private readonly parent: Element, private readonly ordered = false) {}
+  constructor(private readonly parent: Element) {}
 
-  /**
-   * Make the children exactly `items` (key, single-root HTML). Everything that changed is parsed in
-   * one pass. (Reusing a departed card's element for an arriving one was
-   * measured: patching every node of it costs more than inserting fresh.)
-   */
+  /** Make the children exactly `items` (key, single-root HTML), in order. Everything that changed is parsed in one pass. */
   set(items: readonly [number, Raw][]): void {
     const live = new Set<number>()
     const changed: [number, string][] = []
@@ -94,7 +88,6 @@ export class Keyed {
       })
     }
     for (const el of gone) el.remove()
-    if (!this.ordered) return
     let next = this.parent.firstElementChild
     for (const [key] of items) {
       const el = this.els.get(key)?.el

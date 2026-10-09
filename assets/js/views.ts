@@ -108,47 +108,92 @@ export function scoreboard(s: Scoreboard | null): Raw {
     </div>`
 }
 
-export function card(store: Rows, row: number, x: number, y: number, active: boolean, mark: Mark): Raw {
+/** A card's every visible value, in the order CARD_WRITERS applies them. */
+export function cardValues(store: Rows, row: number, x: number, y: number, active: boolean, mark: Mark): string[] {
   const t = store.tables
   const id = store.column("id")[row] ?? 0
   const score = store.column("score")[row] ?? 0
-  const heat = store.column("heat")[row] ?? 0
-  const stage = t.stages[store.column("stage")[row] ?? 0]
+  const heat = Math.min(store.column("heat")[row] ?? 0, 5)
+  const stage = t.stages[store.column("stage")[row] ?? 0]?.label ?? ""
   const batchIx = store.column("batch")[row] ?? 0
   const batch = batchIx > 0 ? t.batches.find((b) => b.ordinal + 1 === batchIx) : undefined
   const company = store.str("company").at(row)
   const role = store.str("role").at(row)
-  const pips = store.str("pips").at(row)
   const heatState = t.heat_states[store.column("heat_state")[row] ?? 0] ?? "cool"
-  const loadPct = store.column("load_pct")[row] ?? 0
   const next = store.str("next_action").at(row)
   const due = days(store.column("next_due")[row] ?? NONE)
   const age = days(store.column("stage_on")[row] ?? NONE)
-  const profile = t.profiles[store.column("profile")[row] ?? 0]
-  return h`
-    <button type="button" id="card-${id}" class="card ${active ? "is-active" : ""} ${mark ? `is-${mark}` : ""}" style="left: ${x}px; top: ${y}px"
-      data-action="select" data-id="${id}" aria-current="${active ? "true" : "false"}" aria-busy="${mark === "pending" ? "true" : "false"}" title="${company} — ${role}">
-      <div class="card-kicker">
-        <span class="code">${batch ? batch.code : `JobApp${id}`}</span>
-        <span class="score band-${bandOf(score, t)}" aria-label="score_100 ${score}">${score}</span>
-        <span class="heat-load ${heatState === "blocked" ? "is-blocked" : heatState === "hot" ? "is-hot" : ""}" title="company heat ${loadPct}% of cap">${heatState}</span>
-        <span class="stage-name">${stage?.label ?? ""}${batch?.fire === "hold" ? " · HOLD" : ""}</span>
-      </div>
-      <h2>${company}</h2>
-      <p class="role">${role}</p>
-      <div class="meta">
-        <span class="pips" aria-label="Battleplan ${stage?.label ?? ""}">${[...pips].map((p) => h`<i class="pip pip-${p}"></i>`)}</span>
-        <span class="heat" aria-label="Heat ${heat} of 5">${[1, 2, 3, 4, 5].map((n) => h`<span class="${n <= heat ? "on" : ""}"></span>`)}</span>
-      </div>
-      <p class="glance">
-        <span>${store.str("cv_label").at(row)} · ${profile?.name ?? ""}</span>
-        <span>${store.column("hits")[row] ?? 0}/${store.column("total")[row] ?? 0}</span>
-      </p>
-      <p class="next">
-        <span>${next === "" ? "No next action" : next}${due ? ` · ${shortDate(due)}` : ""}</span>
-        ${when(age, () => h`<span>${ageLabel(age as Date)}</span>`)}
-      </p>
-    </button>`
+  return [
+    `card${active ? " is-active" : ""}${mark ? ` is-${mark}` : ""}`, `left: ${x}px; top: ${y}px`,
+    active ? "true" : "false", mark === "pending" ? "true" : "false", `${company} — ${role}`,
+    batch ? batch.code : `JobApp${id}`, String(score), `score band-${bandOf(score, t)}`, `score_100 ${score}`,
+    heatState, `heat-load ${heatState === "blocked" ? "is-blocked" : heatState === "hot" ? "is-hot" : ""}`, `company heat ${store.column("load_pct")[row] ?? 0}% of cap`,
+    `${stage}${batch?.fire === "hold" ? " · HOLD" : ""}`, company, role,
+    pipsHTML(store.str("pips").at(row)), `Battleplan ${stage}`, HEAT_DOTS[heat] ?? "", `Heat ${heat} of 5`,
+    `${store.str("cv_label").at(row)} · ${t.profiles[store.column("profile")[row] ?? 0]?.name ?? ""}`, `${store.column("hits")[row] ?? 0}/${store.column("total")[row] ?? 0}`,
+    `${next === "" ? "No next action" : next}${due ? ` · ${shortDate(due)}` : ""}`, age ? ageLabel(age) : "",
+  ]
+}
+
+// Interned markup: five heat dots per level, and one pip per state letter.
+const HEAT_DOTS = [0, 1, 2, 3, 4, 5].map((n) => [1, 2, 3, 4, 5].map((i) => `<span class="${i <= n ? "on" : ""}"></span>`).join(""))
+const PIPS = new Map<string, string>()
+function pipsHTML(pips: string): string {
+  let out = PIPS.get(pips)
+  if (out === undefined) PIPS.set(pips, (out = [...pips].filter((p) => /^\w$/.test(p)).map((p) => `<i class="pip pip-${p}"></i>`).join("")))
+  return out
+}
+
+// The card skeleton, cloned per card, and where each value goes in it.
+const CARD = document.createElement("template")
+CARD.innerHTML = `<button type="button" class="card" data-action="select"><div class="card-kicker"><span class="code"></span><span></span><span></span><span class="stage-name"></span></div><h2></h2><p class="role"></p><div class="meta"><span class="pips"></span><span class="heat"></span></div><p class="glance"><span></span><span></span></p><p class="next"><span></span><span></span></p></button>`.replaceAll("><", "> <")
+type Writer = (el: HTMLElement, parts: Element[], v: string) => void
+const text = (i: number): Writer => (_, p, v) => { (p[i] as Element).textContent = v }
+const attr = (i: number, name: string): Writer => (el, p, v) => (i < 0 ? el : (p[i] as Element)).setAttribute(name, v)
+const html = (i: number): Writer => (_, p, v) => { (p[i] as Element).innerHTML = v }
+const CARD_WRITERS: Writer[] = [
+  attr(-1, "class"), attr(-1, "style"), attr(-1, "aria-current"), attr(-1, "aria-busy"), attr(-1, "title"),
+  text(0), text(1), attr(1, "class"), attr(1, "aria-label"), text(2), attr(2, "class"), attr(2, "title"), text(3), text(4), text(5),
+  html(6), attr(6, "aria-label"), html(7), attr(7, "aria-label"), text(8), text(9), text(10), text(11),
+]
+
+/**
+ * The board's cards as live nodes, one per placed job. A new card is a
+ * clone of the skeleton; a redraw writes only the values that changed, so
+ * a selection touches two class names and nothing is parsed or walked.
+ */
+export class Cards {
+  private readonly els = new Map<number, { el: HTMLElement; parts: Element[]; vals: string[] }>()
+
+  constructor(private readonly plane: Element) {}
+
+  set(items: readonly [number, string[]][]): void {
+    const live = new Set<number>()
+    for (const [id, vals] of items) {
+      live.add(id)
+      let card = this.els.get(id)
+      if (!card) {
+        const el = CARD.content.firstElementChild?.cloneNode(true) as HTMLElement
+        el.id = `card-${id}`
+        el.dataset["id"] = String(id)
+        const [kicker, h2, role, meta, glance, next] = Array.from(el.children)
+        const parts = [...(kicker?.children ?? []), h2, role, ...(meta?.children ?? []), ...(glance?.children ?? []), ...(next?.children ?? [])] as Element[]
+        card = { el, parts, vals: [] }
+        this.els.set(id, card)
+        this.plane.append(el)
+      }
+      for (let i = 0; i < vals.length; i++) {
+        const v = vals[i] as string
+        if (card.vals[i] !== v) CARD_WRITERS[i]?.(card.el, card.parts, v)
+      }
+      card.vals = vals
+    }
+    for (const [id, { el }] of this.els) {
+      if (live.has(id)) continue
+      el.remove()
+      this.els.delete(id)
+    }
+  }
 }
 
 export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdError: string | null, mark: Mark): Raw {
