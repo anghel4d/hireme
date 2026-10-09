@@ -121,6 +121,42 @@ defmodule Hireme.OutboxTest do
     assert [%Notice{address: "bad@example.com", attempts: 1}] = pending()
   end
 
+  test "a field no notice reads is dropped, not made an atom; an unknown kind fails without one",
+       %{
+         account: account
+       } do
+    provider(mode: :ok)
+    stranger = "zz_field_#{System.unique_integer([:positive])}"
+    kind = "zz_kind_#{System.unique_integer([:positive])}"
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    row = fn kind, meta ->
+      %{
+        account_id: account.id,
+        address: "a@example.com",
+        kind: kind,
+        meta: meta,
+        next_at: now,
+        inserted_at: now
+      }
+    end
+
+    Repo.insert_all(Notice, [
+      row.("api_key_created", %{"name" => "ci", stranger => 1}),
+      row.(kind, %{"name" => "ci"})
+    ])
+
+    assert Outbox.drain() == 1
+
+    assert_received {:delivering, "a@example.com", ~s(Hireme: an API key named "ci" was created),
+                     _}
+
+    assert [%Notice{kind: ^kind, attempts: 1, last_error: error}] = pending()
+    assert error =~ "atom"
+    assert_raise ArgumentError, fn -> String.to_existing_atom(stranger) end
+    assert_raise ArgumentError, fn -> String.to_existing_atom(kind) end
+  end
+
   test "notices pending at a restart are sent when the outbox starts" do
     addresses(["a@example.com"])
     provider(mode: :ok)

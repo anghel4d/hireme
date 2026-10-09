@@ -156,6 +156,10 @@ defmodule Hireme.Mailer.Outbox do
   @doc "Send every notice due at `now`, in the calling process. Returns how many were sent."
   @spec drain(DateTime.t()) :: non_neg_integer()
   def drain(now \\ now()) do
+    # Each notice's kind and fields are atoms of Hireme.Mailer's texts. In a
+    # release modules load on first use, so load it before matching rows.
+    Code.ensure_loaded(Mailer)
+
     due =
       Repo.all(
         from(n in Notice,
@@ -230,8 +234,22 @@ defmodule Hireme.Mailer.Outbox do
     if result == :ok, do: :sent, else: :failed
   end
 
-  # JSON gave the keys back as strings; only atoms the notice texts already use come back.
-  defp fields(meta), do: Map.new(meta, fn {k, v} -> {String.to_existing_atom(k), v} end)
+  # JSON gave the keys back as strings. A key no notice text reads may not
+  # exist as an atom; it is dropped, never created.
+  defp fields(meta) do
+    Enum.reduce(meta, %{}, fn {key, value}, fields ->
+      case existing_atom(key) do
+        nil -> fields
+        atom -> Map.put(fields, atom, value)
+      end
+    end)
+  end
+
+  defp existing_atom(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
 
   defp error(%{__exception__: true} = e), do: clip(Exception.message(e))
   defp error(reason), do: clip(inspect(reason))
