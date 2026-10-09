@@ -26,8 +26,8 @@ defmodule Hireme.Letterbox do
   @moduledoc """
   One letterbox, one application, one producer, one consumer.
 
-  An MCP connection leases a letterbox id. That lease is a `Handle.t()`
-  and it is what opens the full-duplex socket. The handle closes over
+  An agent's stream or socket leases a letterbox id. That lease is a
+  `Handle.t()`, held by the one process that produces for it. The handle closes over
   the CV pair for that application. Commands are literals (`:get`,
   `{:set_stage, stage}`, `{:tailor, item_id, attrs}`) with no target id.
   The consumer applies them to the pair in its state.

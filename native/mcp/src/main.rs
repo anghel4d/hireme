@@ -114,10 +114,13 @@ async fn main() {
 
     // Connect while the agent is still initializing: the session, the
     // directory and the lease tool list are ready before the first call.
-    // A failure here is reported by that call instead.
+    // A failure goes to stderr, where an MCP host logs its servers, and is
+    // reported again by the first call.
     let warm = hub.clone();
     tokio::spawn(async move {
-        let _ = warm.leased_tools().await;
+        if let Err(e) = warm.leased_tools().await {
+            eprintln!("hireme-mcp: {e}");
+        }
     });
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();

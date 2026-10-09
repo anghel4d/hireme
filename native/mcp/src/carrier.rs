@@ -104,7 +104,10 @@ impl Carrier {
     }
 
     /// Connects the way the config allows. In auto mode WebTransport is
-    /// tried first and WebSocket is the fallback.
+    /// tried first and WebSocket is the fallback when QUIC cannot get
+    /// through. A server that answered and refused (a bad key, or a wire
+    /// schema this build does not speak) is not retried another way: the
+    /// refusal, with what to do about it, is the answer.
     pub async fn connect(
         cfg: &Config,
         control: ControlSink,
@@ -117,7 +120,13 @@ impl Carrier {
                     .await;
             match tried {
                 Ok(Ok(c)) => return Ok(c),
-                Ok(Err(e)) if cfg.mode == Mode::Wt || cfg.ws_url.is_none() => return Err(e),
+                Ok(Err(e))
+                    if cfg.mode == Mode::Wt
+                        || cfg.ws_url.is_none()
+                        || e.starts_with("hello refused") =>
+                {
+                    return Err(e);
+                }
                 Err(_) if cfg.mode == Mode::Wt || cfg.ws_url.is_none() => {
                     return Err("webtransport: no answer in 5 s (UDP blocked?)".into());
                 }
@@ -315,12 +324,15 @@ async fn refused(conn: &Connection, bye: Option<String>) -> String {
             Err(_) => "control stream closed".into(),
         },
     };
-    let hint = if reason == "hello" {
-        ": the server may run a different wire schema; rebuild hireme-mcp from the same commit"
-    } else if reason == "key" {
-        ": the API key was refused (revoked, expired, or rate limited)"
-    } else {
-        ""
+    let hint = match reason.as_str() {
+        "schema" | "hello" => format!(
+            ": this hireme-mcp speaks wire schema {:04x}, and the server runs another. \
+             Rebuild it from the server's commit: \
+             cargo build --release --manifest-path native/mcp/Cargo.toml",
+            wire::schema::HASH
+        ),
+        "key" => ": the API key was refused (revoked, expired, or rate limited)".into(),
+        _ => String::new(),
     };
     format!("hello refused ({reason}){hint}")
 }
