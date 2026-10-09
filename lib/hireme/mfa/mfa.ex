@@ -62,8 +62,14 @@ defmodule Hireme.Mfa do
     )
   end
 
+  @doc "Whether the account has a live factor, without loading its secret or credential."
   @spec enrolled?() :: boolean()
-  def enrolled?, do: methods() != []
+  def enrolled? do
+    Repo.exists?(
+      from m in Method,
+        where: not is_nil(m.verified_at) and is_nil(m.disabled_at)
+    )
+  end
 
   @doc "A session that must still present a second factor before it is signed in."
   @spec required?(Session.t()) :: boolean()
