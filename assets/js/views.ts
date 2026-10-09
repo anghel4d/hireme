@@ -443,7 +443,7 @@ export function heatChart(l: Lanes | null, f: Filters): Raw {
     </div>`
 }
 
-export function heatLine(f: Focus): Raw {
+function heatLine(f: Focus): Raw {
   const v = f.heat
   const eta = v.cooldown_days ? ` · cooldown ${v.cooldown_days}d` : ""
   return h`
