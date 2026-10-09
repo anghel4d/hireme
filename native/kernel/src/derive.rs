@@ -301,6 +301,7 @@ struct Row<const U: usize, const S: usize, const F: usize> {
     f: [f64; F],
 }
 
+#[inline(never)]
 fn build<const U: usize, const S: usize, const F: usize>(
     id: u16,
     (cu, cs, cf): (&[u16; U], &[u16; S], &[u16; F]),
@@ -334,6 +335,7 @@ fn build<const U: usize, const S: usize, const F: usize>(
 }
 
 /// Writes a row over row `at` of `t`. Returns whether anything moved.
+#[inline(never)]
 fn patch<const U: usize, const S: usize, const F: usize>(
     t: &mut Table,
     at: usize,
@@ -512,6 +514,7 @@ impl Desk {
     }
 
     /// The card a job row shows, with its verdict painted on.
+#[inline(never)]
     fn card_row(
         &self,
         d: &Derived,
@@ -576,6 +579,7 @@ impl Desk {
     /// hidden, altered and emphasized overlays on its lineage, as Desk's
     /// glance refresh counted them (Mask.apply, Theme lineage over variant,
     /// Keywords targets and coverage).
+#[inline(never)]
     fn glance(
         &self,
         d: &mut Derived,
@@ -680,6 +684,7 @@ impl Desk {
         d.variant_of.contains_key(&id) && d.profiles.binary_search(&p).is_ok()
     }
 
+#[inline(never)]
     fn rebuild_joins(&self, d: &mut Derived) {
         let vt = table::CV_VARIANTS;
         use col::cv_variants as cv;
@@ -1035,6 +1040,7 @@ impl Desk {
         true
     }
 
+#[inline(never)]
     fn chart_table(
         &mut self,
         d: &mut Derived,
@@ -1113,6 +1119,7 @@ impl Desk {
     }
 
     /// Campaign.scoreboard/1 and LifeEv.chart over every job's score_100.
+#[inline(never)]
     fn score_tables(&mut self, d: &mut Derived, today: u32) -> Vec<Table> {
         let jt = table::JOB_APPS;
         let n = self.rows(jt);
@@ -1434,6 +1441,7 @@ impl Desk {
     }
 }
 
+#[inline(never)]
 fn cell_eq(a: &Column, ra: usize, b: &Column, rb: usize, arena: &Arena) -> bool {
     match (&a.data, &b.data) {
         (Data::W32(x), Data::W32(y)) => x.get(ra) == y.get(rb),
@@ -1450,6 +1458,7 @@ fn cell_eq(a: &Column, ra: usize, b: &Column, rb: usize, arena: &Arena) -> bool 
 }
 
 /// Keys (first column) of rows that are new, gone, or different.
+#[inline(never)]
 fn changed_rows(old: Option<&Table>, new: &Table, arena: &Arena) -> Vec<u32> {
     let key = |t: &Table, r: usize| t.col(1).map_or(0, |c| c.u32(r));
     let Some(old) = old else {
@@ -1483,6 +1492,7 @@ fn changed_rows(old: Option<&Table>, new: &Table, arena: &Arena) -> Vec<u32> {
     out
 }
 
+#[inline(never)]
 fn same_table(a: &Table, b: &Table, arena: &Arena) -> bool {
     a.n == b.n
         && a.cols.len() == b.cols.len()
