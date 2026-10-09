@@ -28,6 +28,7 @@ defmodule HiremeBench.Server do
     items = Corpus.list_items(profile_id)
     resolved = Hireme.Mask.apply(items, [])
     profile = Corpus.get_profile!(profile_id)
+    batch = hd(Desk.list_batches())
     count = System.get_env("BENCH_N", "1000") |> String.to_integer()
     revision = System.fetch_env!("BENCH_REV")
     only = System.get_env("BENCH_ONLY", "")
@@ -50,6 +51,7 @@ defmodule HiremeBench.Server do
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
       {"Domain/Heat", "chart", fn -> Heat.chart() end},
       {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},
+      {"Domain/Heat", "mix_batch_100", fn -> Heat.mix_batch(batch) end},
       {"Domain/Org", "size", fn -> Heat.Org.size("Company 42") end},
       {"Domain/Org", "department", fn -> Heat.Org.department(%{department: "Engineering 2"}) end},
       {"Domain/Org", "family", fn -> Heat.Org.family(%{role: "Senior Systems Engineer"}) end},

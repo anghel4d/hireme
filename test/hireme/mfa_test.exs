@@ -3,6 +3,7 @@ defmodule Hireme.MfaTest do
 
   alias Hireme.Accounts
   alias Hireme.Mfa
+  alias Hireme.Mfa.Method
   alias Hireme.Repo
 
   @code_shape ~r/\A[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}\z/
@@ -165,8 +166,8 @@ defmodule Hireme.MfaTest do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     method =
-      %Hireme.Mfa.Method{}
-      |> Hireme.Mfa.Method.changeset(%{account_id: account.id, kind: :totp})
+      %Method{}
+      |> Method.changeset(%{account_id: account.id, kind: :totp})
       |> Repo.insert!()
 
     refute Mfa.enrolled?()

@@ -4,6 +4,7 @@ defmodule Hireme.DeskTest do
 
   alias Hireme.Desk
   alias Hireme.Desk.Batch
+  alias Hireme.Desk.Event
   alias Hireme.Desk.Filters
   alias Hireme.Repo
 
@@ -185,8 +186,8 @@ defmodule Hireme.DeskTest do
 
     events =
       for i <- 1..15 do
-        %Hireme.Desk.Event{}
-        |> Hireme.Desk.Event.changeset(%{job_app_id: job.id, kind: "note", body: "Event #{i}"})
+        %Event{}
+        |> Event.changeset(%{job_app_id: job.id, kind: "note", body: "Event #{i}"})
         |> Repo.insert!()
       end
 
