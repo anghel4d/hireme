@@ -524,10 +524,16 @@ class Board {
   private get t(): number { return this.k.table("cards") }
 
   /** Cards, lookups or pending ops changed. */
-  changed(): void {
-    this.strs = new Map()
-    this.remapped.clear()
-    this.tableDoc = null
+  changed(tables: ReadonlyMap<number, unknown> | null): void {
+    const t = (name: string) => tables === null || tables.has(this.k.table(name))
+    // The lookups keep their identity unless a lookup moved: the shell
+    // re-reads its filters from the address whenever they change.
+    const lookups = ["stages", "statuses", "freshness", "gates", "heat_states", "bands", "batches", "profiles"].some(t)
+    if (lookups) this.tableDoc = null
+    if (lookups || t("cards")) {
+      this.strs = new Map()
+      this.remapped.clear()
+    }
   }
 
   get n(): number { return this.k.k.rows(this.t) }
@@ -941,7 +947,7 @@ export class LocalDesk implements Desk, Host {
   private settle(): Change {
     const { tables, jobs } = this.kernel.touched()
     this.kernel.forget(tables)
-    this.board.changed()
+    this.board.changed(tables)
     this.snapshot?.queue(this.pending)
     return this.docs.changed(tables, jobs)
   }
@@ -1040,6 +1046,7 @@ export class LocalDesk implements Desk, Host {
 const FORMAT = 2
 
 export class Snapshot {
+  private ops: { opId: bigint; op: Op }[] | null = null
   private timer = 0
   private dirty = false
   private first = 0
@@ -1074,9 +1081,16 @@ export class Snapshot {
   }
 
   /** The ops not yet acknowledged, kept beside the frames so a reload predicts and resends them. */
+  /** Keep the unacknowledged ops; written after the input's task, never inside it. */
   queue(pending: readonly Pending[]): void {
-    const ops = pending.map(({ opId, op }) => ({ opId, op }))
-    void idb((store) => store.put(ops, `${this.scope}:ops`), "readwrite").catch(() => {})
+    const first = this.ops === null
+    this.ops = pending.map(({ opId, op }) => ({ opId, op }))
+    if (!first) return
+    setTimeout(() => {
+      const ops = this.ops
+      this.ops = null
+      void idb((store) => store.put(ops, `${this.scope}:ops`), "readwrite").catch(() => {})
+    }, 0)
   }
 
   clear(): void {
