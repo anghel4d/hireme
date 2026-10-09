@@ -135,11 +135,11 @@ defmodule HiremeWeb.DeskController do
 
   def index(conn, _params) do
     %{account: account, session: session} = conn.assigns
-    # The board travels in the page, so the first card waits on no socket;
-    # the kernel, bundle and stylesheet are asked for ahead of it.
-    {rev, board} = HiremeWeb.Session.board(account.id, session.id)
 
-    page = """
+    # The head leaves first, so the kernel, bundle and stylesheet are
+    # being fetched while the board is read; then the board, which the
+    # page carries so the first card waits on no socket.
+    head = """
     <!DOCTYPE html>
     <html lang="en">
       <head>
@@ -155,18 +155,26 @@ defmodule HiremeWeb.DeskController do
         <meta name="wire-gate-hashes" content="#{HiremeWeb.Auth.wire_hashes()}" />
         <meta name="wire-scope" content="#{HiremeWeb.Session.scope(account.id)}" />
         <meta name="wire-schema" content="#{HiremeWeb.Packet.schema_hash()}" />
-        <meta name="wire-board" content="#{rev}:#{Base.encode64(board)}" />
-        #{HiremeWeb.Auth.early_script()}
-        <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
-        <script defer type="module" src="#{~p"/assets/js/app.js"}"></script>
-      </head>
-      <body>
-        <div id="desk" class="desk"></div>
-      </body>
-    </html>
     """
 
-    conn |> put_resp_content_type("text/html") |> send_resp(200, page)
+    conn = conn |> put_resp_content_type("text/html") |> send_chunked(200)
+    {:ok, conn} = chunk(conn, head)
+    {rev, board} = HiremeWeb.Session.board(account.id, session.id)
+
+    {:ok, conn} =
+      chunk(conn, """
+          <meta name="wire-board" content="#{rev}:#{Base.encode64(board)}" />
+          #{HiremeWeb.Auth.early_script()}
+          <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
+          <script defer type="module" src="#{~p"/assets/js/app.js"}"></script>
+        </head>
+        <body>
+          <div id="desk" class="desk"></div>
+        </body>
+      </html>
+      """)
+
+    conn
   end
 
   # A fresh single-use ticket for a reconnect after the last one was spent.
