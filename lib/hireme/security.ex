@@ -19,7 +19,7 @@ defmodule Hireme.Security do
   must be read back (a TOTP seed).
   """
 
-  @base62 ~c"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+  @base62 "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
   # NIST SP 800-63B-4 Sec. 3.1.2 (AAL2): the overall reauthentication timeout
   # SHOULD be no more than 24 hours; the inactivity timeout SHOULD be no more
@@ -86,24 +86,26 @@ defmodule Hireme.Security do
 
   def equal?(_, _), do: false
 
-  @doc "`n` base62 characters from the CSPRNG, rejection-sampled so no character is favoured."
+  @doc """
+  `n` base62 characters from batched CSPRNG bytes. Rejecting bytes 248–255
+  leaves exactly four equally likely byte values for every character.
+  """
   @spec base62(pos_integer()) :: String.t()
   def base62(n) when is_integer(n) and n > 0 do
-    n
-    |> Stream.iterate(& &1)
-    |> Enum.reduce_while({[], 0}, fn _, {acc, count} ->
-      <<byte>> = :crypto.strong_rand_bytes(1)
-
-      cond do
-        count == n -> {:halt, {acc, count}}
-        byte >= 248 -> {:cont, {acc, count}}
-        true -> {:cont, {[Enum.at(@base62, rem(byte, 62)) | acc], count + 1}}
-      end
-    end)
-    |> elem(0)
-    |> Enum.reverse()
-    |> List.to_string()
+    base62(<<>>, n, <<>>)
   end
+
+  defp base62(_, 0, acc), do: acc
+
+  defp base62(<<>>, remaining, acc) do
+    base62(:crypto.strong_rand_bytes(remaining + div(remaining, 31) + 1), remaining, acc)
+  end
+
+  defp base62(<<byte, rest::binary>>, remaining, acc) when byte < 248 do
+    base62(rest, remaining - 1, <<acc::binary, :binary.at(@base62, rem(byte, 62))>>)
+  end
+
+  defp base62(<<_, rest::binary>>, remaining, acc), do: base62(rest, remaining, acc)
 
   @doc "A CRC32 of `text` as six base62 characters: a shape check before any lookup."
   @spec checksum(String.t()) :: String.t()
@@ -112,7 +114,7 @@ defmodule Hireme.Security do
   end
 
   defp digits(0, acc), do: acc
-  defp digits(n, acc), do: digits(div(n, 62), [Enum.at(@base62, rem(n, 62)) | acc])
+  defp digits(n, acc), do: digits(div(n, 62), [:binary.at(@base62, rem(n, 62)) | acc])
 
   @doc "Encrypt a term for storage; the key derives from the application secret."
   @spec seal(term(), String.t()) :: binary()
