@@ -507,6 +507,13 @@ impl Desk {
         let mut bits = 0;
         let mut base_moved = false;
         let mut pending_moved = false;
+        let plain;
+        let buf = if wire::frames(buf).flatten().any(|f| f.header.flags & wire::DEFLATE != 0) {
+            plain = inflate(buf);
+            &plain[..]
+        } else {
+            buf
+        };
         for f in wire::frames(buf) {
             let Ok(f) = f else {
                 self.counters[BAD_FRAMES] += 1;
@@ -967,4 +974,53 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// `buf` with every DEFLATE frame inflated in place: its body is u32 raw
+/// length | u32 deflated length | raw deflate, and it becomes a plain
+/// frame of the same kind and rev. One that does not inflate to its stated
+/// length stays as it came, for ingest to count as bad; bytes past a frame
+/// that does not parse are kept as they are.
+fn inflate(buf: &[u8]) -> Vec<u8> {
+    use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
+    let raw_len = |b: &[u8]| b.get(..4).map_or(0, |x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize);
+    // A stated length past 64 MiB is not inflated (nor allocated for).
+    let packed = |f: &wire::Frame| f.header.flags & wire::DEFLATE != 0 && f.body.len() >= 8 && raw_len(f.body) <= 1 << 26;
+    let size = wire::frames(buf).flatten().map(|f| match packed(&f) {
+        false => f.header.len as usize,
+        true => wire::HEADER + wire::pad8(raw_len(f.body)),
+    });
+    let mut out = Vec::with_capacity(size.sum::<usize>() + buf.len());
+    let mut at = 0;
+    for f in wire::frames(buf) {
+        let Ok(f) = f else { break };
+        let len = f.header.len as usize;
+        let b = f.body;
+        let start = out.len();
+        if packed(&f) {
+            let raw = raw_len(b);
+            let packed = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+            let h = wire::Header {
+                len: (wire::HEADER + wire::pad8(raw)) as u32,
+                flags: f.header.flags & !wire::DEFLATE,
+                ..f.header
+            };
+            out.extend_from_slice(&h.bytes());
+            out.resize(start + h.len as usize, 0);
+            let mut state = alloc::boxed::Box::new(DecompressorOxide::new());
+            let src = b.get(8..8 + packed).unwrap_or(&[]);
+            let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
+            let dst = &mut out[start + wire::HEADER..start + wire::HEADER + raw];
+            let (_, _, n) = decompress(&mut state, src, dst, 0, flags);
+            if n != raw {
+                out.truncate(start);
+                out.extend_from_slice(&buf[at..at + len]);
+            }
+        } else {
+            out.extend_from_slice(&buf[at..at + len]);
+        }
+        at += len;
+    }
+    out.extend_from_slice(&buf[at..]);
+    out
 }

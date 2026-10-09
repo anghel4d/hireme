@@ -203,6 +203,20 @@ async function fixtures() {
   }
   assert.equal(K.k.counter(6), 0)
   assert.ok(K.k.rows(S.table.job_apps) > 0, "the fixture desk has job rows")
+  // The deflated BOOT inflates inside ingest to the plain one's desk; a
+  // corrupted one is refused or absorbed, never a trap.
+  const Z = await kernel()
+  const plain = await kernel()
+  plain.ingest(read("boot.bin"))
+  assert.equal(Z.ingest(read("boot.deflate.bin")) & (1 << 30), 0, "boot.deflate.bin rejected")
+  for (const t of ["job_apps", "cards", "verdicts"]) assert.deepEqual(Z.rows(t), plain.rows(t), `deflated ${t}`)
+  const zr = rng(7), packed = read("boot.deflate.bin")
+  for (let i = 0; i < 300; i++) {
+    const bad = packed.slice(0, zr.int(packed.length + 1))
+    if (bad.length) bad[zr.int(bad.length)] = zr.int(256)
+    Z.ingest(bad)
+    Z.select(all, "a")
+  }
   console.log(`fixtures: ${K.k.rows(S.table.job_apps)} job rows, ${K.k.rows(S.table.cards)} cards after boot+patch`)
 }
 

@@ -11,6 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 wire = { path = "../wire" }
+# Raw deflate, for frames the server compressed (the core decoder: no std, no alloc).
+miniz_oxide = { version = "0.8", default-features = false }
 
 [profile.release]
 opt-level = "s"
