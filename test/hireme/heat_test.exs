@@ -24,6 +24,11 @@ defmodule Hireme.HeatTest do
     assert Org.size("NVIDIA") == :mega
     assert Org.size("OpenAI") == :large
     assert Org.size("Obscure Shop LLC") == :small
+    assert Org.size("Go Ogle") == :mega
+    assert Org.size("Deep Mind") == :large
+    assert Org.size("Meta Deepmind") == :mega
+    assert Org.size("megagoogle") == :small
+    assert Org.size("A Small Lab") == :mid
     assert Heat.cap("Google", cfg) == cfg.mega_cap
     assert Heat.cap("OpenAI", cfg) == cfg.large_cap
     assert Heat.cap("Obscure Shop LLC", cfg) == cfg.small_cap
