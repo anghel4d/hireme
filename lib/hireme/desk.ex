@@ -369,6 +369,7 @@ defmodule Hireme.Desk do
           | {:govern, Batch.t()}
           | {:glance, pos_integer()}
           | {:perform, CvPair.t(), command()}
+          | {:generation, pos_integer()}
 
   @type reply ::
           {:ok, Focus.t()}
@@ -733,6 +734,12 @@ defmodule Hireme.Desk do
          {:ok, _} <- write_line(pair, item_id, change) do
       after_cv_change(pair)
     end
+  end
+
+  def execute({:generation, job_id}) do
+    with :ok <- permit(job_id),
+         {:ok, pair} <- CvPair.bind(job_id),
+         do: CvPair.open_generation(CvPair.employer_id(pair))
   end
 
   def execute({:perform, %CvPair{} = pair, command}) do

@@ -53,7 +53,7 @@ defmodule Hireme.Ops do
   @ledger_ttl 24 * 3600
   @sweep_ms 3_600_000
 
-  @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane)a
+  @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
 
   # The raw tables a client derives every view from: name, row module,
   # and the columns shipped, in schema order. `leases` is not stored: it
@@ -157,11 +157,12 @@ defmodule Hireme.Ops do
 
     * `:stage` `[stage]` · `:next` `[next_action, next_due_iso_or_empty]`
     * `:note` `[stage, note]` · `:score` `[0..100]`
-    * `:overlay` `[item_id, hidden|emphasized|altered|inherit, body, reason]`
+    * `:overlay` `[item_id, hidden|emphasized|altered|inherit, body, reason, title?]`
     * `:heat_override` `[reason]` · `:open_fire` `[batch_code]` (target 0)
     * `:narrative` `[body]` (target is the narrative id)
     * `:gym_log` and `:net_log` `[key, value, key, value, …]` (target 0)
     * `:gym_target` `[n]` · `:net_lane` `[url]`
+    * `:generation` `[]`: open the job's employer CV's next generation
 
   The target is the job id unless noted.
   """
@@ -820,6 +821,9 @@ defmodule Hireme.Ops do
       {:glance, id} ->
         job_groups(id)
 
+      {:generation, id} ->
+        [{:cv_lineages, :id, [lineage_of(id)]}]
+
       {:overlay, id, _, _} ->
         lineage_groups(id)
 
@@ -918,9 +922,12 @@ defmodule Hireme.Ops do
     end
   end
 
-  defp parse(%{kind: :overlay, target: id, fields: [item_id, mode, body, reason]}) do
+  defp parse(%{kind: :overlay, fields: [_, _, _, _]} = op),
+    do: parse(%{op | fields: op.fields ++ [""]})
+
+  defp parse(%{kind: :overlay, target: id, fields: [item_id, mode, body, reason, title]}) do
     with {:ok, item_id} <- int(item_id, "item_id"),
-         {:ok, change} <- overlay_change(mode, body, reason) do
+         {:ok, change} <- overlay_change(mode, body, reason, title) do
       {:ok, {:overlay, id, item_id, change}}
     end
   end
@@ -942,6 +949,7 @@ defmodule Hireme.Ops do
   end
 
   defp parse(%{kind: :net_lane, fields: [url]}), do: {:ok, {:net_lane, url}}
+  defp parse(%{kind: :generation, target: id, fields: []}), do: {:ok, {:generation, id}}
   defp parse(%{kind: kind}) when kind in @kinds, do: {:error, {:argument, "fields"}}
   defp parse(_op), do: {:error, :kind}
 
@@ -965,14 +973,14 @@ defmodule Hireme.Ops do
 
   defp pairs(_fields), do: {:error, {:argument, "fields"}}
 
-  defp overlay_change("inherit", _body, _reason), do: {:ok, :inherit}
+  defp overlay_change("inherit", _body, _reason, _title), do: {:ok, :inherit}
 
-  defp overlay_change(mode, body, reason) do
+  defp overlay_change(mode, body, reason, title) do
     case Overlay.parse_mode(mode) do
       {:ok, :altered} ->
         case String.trim(body) do
           "" -> {:error, {:argument, "body"}}
-          body -> {:ok, %{mode: :altered, body: body, reason: blank(reason)}}
+          body -> {:ok, %{mode: :altered, body: body, reason: blank(reason), title: blank(title)}}
         end
 
       {:ok, :hidden} ->
