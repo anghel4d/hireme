@@ -87,7 +87,7 @@ function frame(kind, rev, tables = [], body = null) {
 
 function opBody(id, kind, target, fields) {
   const w = new W()
-  w.u64(id), w.u8(S.op[kind]), w.u32(target)
+  w.u64(id), w.u8(S.op[kind]), w.u8(fields.length), w.u16(0), w.u32(target)
   for (const f of fields) {
     const e = te.encode(f)
     w.u16(e.length), w.raw(e)

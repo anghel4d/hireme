@@ -58,6 +58,8 @@ pub struct Desk {
     pub today: u32,
     pub counters: [u32; COUNTERS],
     pub events: Vec<[u32; 4]>,
+    /// (job, item) → mode column, as pending overlay ops left it.
+    modes: std::collections::HashMap<(u32, u32), Option<u16>>,
     pub event_msgs: Vec<Vec<u8>>,
 }
 
@@ -169,6 +171,7 @@ impl Desk {
     /// Drops the overlay and replays every pending op over base.
     fn rebuild_view(&mut self) {
         self.overlay.clear();
+        self.modes.clear();
         self.order_dirty = true;
         self.search_dirty = true;
         let pending = std::mem::take(&mut self.pending);
@@ -312,6 +315,7 @@ impl Desk {
         let Some(from) = self.item_mode(job, item) else {
             return Ok(());
         };
+        self.modes.insert((job, item), to);
         if from == to {
             return Ok(());
         }
@@ -325,9 +329,13 @@ impl Desk {
         Ok(())
     }
 
-    /// The mode column an item currently counts toward in a resident
-    /// focus: Some(None) for inherit, None when it cannot be known.
+    /// The mode column an item currently counts toward: as an earlier
+    /// pending overlay left it, else as the resident focus shows it.
+    /// Some(None) is inherit; None means it cannot be known.
     fn item_mode(&self, job: u32, item: u32) -> Option<Option<u16>> {
+        if let Some(&m) = self.modes.get(&(job, item)) {
+            return Some(m);
+        }
         let f = self.store.focus.get(&job)?;
         let fl = f.tables.iter().find(|t| t.id == table::FOCUS_LINES)?;
         let lines = self.store.table(table::LINES)?;
