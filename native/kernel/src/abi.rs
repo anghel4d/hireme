@@ -170,6 +170,20 @@ pub extern "C" fn col_type(t: u32, c: u32) -> u32 {
     with(|k| k.col(t as u16, c as u16).map_or(0, |c| c.ty as u32))
 }
 
+/// A str column's cells (col_ptr) are (offset, len) u32 pairs into the
+/// arena at `arena_ptr`. Equal values of a sym column share one pair, so
+/// a reader can decode each offset once; `epoch` changes when a compaction
+/// moves every string and those offsets stop meaning what they meant.
+#[unsafe(no_mangle)]
+pub extern "C" fn arena_ptr() -> u32 {
+    with(|k| k.desk.store.arena.bytes.as_ptr() as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn epoch() -> u32 {
+    with(|k| k.desk.store.arena.epoch)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn str_ptr(t: u32, c: u32, row: u32) -> u32 {
     with(|k| {
