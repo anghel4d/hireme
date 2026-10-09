@@ -14,7 +14,8 @@ defmodule Hireme.ApiKeys do
   `authenticate/2` answers `{:ok, key}` or `:error` and nothing in
   between: a wrong id, a wrong secret, a revoked or expired key, and a
   suspended account all look the same to the caller. Failures from one
-  address are throttled.
+  address are throttled. Each validity check reads the key and account
+  together, so revocation and suspension are observed without caching.
   """
 
   import Ecto.Query
@@ -135,9 +136,9 @@ defmodule Hireme.ApiKeys do
   @doc "The key is still the one `account_id` may use: live, and the account is active."
   @spec usable?(String.t(), pos_integer()) :: boolean()
   def usable?(key_id, account_id) when is_binary(key_id) do
-    case Repo.get_by(Key, [key_id: key_id], skip_account: true) do
-      %Key{account_id: ^account_id} = key ->
-        live?(key) and Accounts.active?(Accounts.get(account_id))
+    case key_with_account(key_id) do
+      {%Key{account_id: ^account_id} = key, account} ->
+        live?(key) and Accounts.active?(account)
 
       _ ->
         false
@@ -154,10 +155,10 @@ defmodule Hireme.ApiKeys do
   def authenticate(presented, peer) when is_binary(presented) do
     with :ok <- Security.limit(:api_key_peer, peer),
          {:ok, key_id, secret} <- parse(presented),
-         %Key{} = key <- Repo.get_by(Key, [key_id: key_id], skip_account: true),
+         {%Key{} = key, account} <- key_with_account(key_id),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
          true <- live?(key),
-         true <- Accounts.active?(Accounts.get(key.account_id)) do
+         true <- Accounts.active?(account) do
       {:ok, used(key)}
     else
       _ -> :error
@@ -173,6 +174,18 @@ defmodule Hireme.ApiKeys do
   @spec live?(Key.t()) :: boolean()
   def live?(%Key{revoked_at: revoked, expires_at: expires}) do
     is_nil(revoked) and (is_nil(expires) or DateTime.compare(now(), expires) == :lt)
+  end
+
+  defp key_with_account(key_id) do
+    Repo.one(
+      from(k in Key,
+        join: a in Accounts.Account,
+        on: a.id == k.account_id,
+        where: k.key_id == ^key_id,
+        select: {k, a}
+      ),
+      skip_account: true
+    )
   end
 
   defp parse(presented) do

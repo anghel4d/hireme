@@ -18,6 +18,11 @@ defmodule Hireme.ApiKeysTest do
     assert found.id == key.id
     assert [%{id: id}] = ApiKeys.list()
     assert id == key.id
+
+    Repo.with_account(nil, fn ->
+      assert {:ok, %{id: ^id}} = ApiKeys.authenticate(secret, "no-account")
+      assert Repo.account_id() == nil
+    end)
   end
 
   test "anything but the exact live secret of an active account is refused alike" do
@@ -29,6 +34,11 @@ defmodule Hireme.ApiKeysTest do
     assert :error = ApiKeys.authenticate("hm_" <> String.duplicate("x", 62), "a")
     assert :error = ApiKeys.authenticate(nil, "a")
     assert :error = ApiKeys.authenticate("", "a")
+
+    # A valid checksum does not make a different secret authentic.
+    first = if String.at(secret, 16) == "0", do: "1", else: "0"
+    body = String.slice(secret, 0, 16) <> first <> String.slice(secret, 17, 42)
+    assert :error = ApiKeys.authenticate(body <> Hireme.Security.checksum(body), "a")
 
     revoked = ApiKeys.revoke(key)
     refute ApiKeys.live?(revoked)
@@ -61,6 +71,30 @@ defmodule Hireme.ApiKeysTest do
     assert ApiKeys.get(key.id) == nil
     assert {:ok, found} = ApiKeys.authenticate(secret, "a")
     refute found.account_id == other.id
+  end
+
+  test "socket gates recheck ownership, expiry, revocation, and suspension", %{account: account} do
+    {:ok, %{key: key}} = ApiKeys.create("socket")
+    other = Hireme.DataCase.open_account("Other desk")
+    assert ApiKeys.usable?(key.key_id, account.id)
+    refute ApiKeys.usable?(key.key_id, other.id)
+    refute ApiKeys.usable?("unknown", account.id)
+    Repo.put_account(account.id)
+
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    expired = key |> Ecto.Changeset.change(expires_at: now) |> Repo.update!()
+    refute ApiKeys.usable?(key.key_id, account.id)
+    expired |> Ecto.Changeset.change(expires_at: nil) |> Repo.update!()
+    assert ApiKeys.usable?(key.key_id, account.id)
+
+    suspended =
+      account |> Ecto.Changeset.change(status: :suspended) |> Repo.update!(skip_account: true)
+
+    refute ApiKeys.usable?(key.key_id, account.id)
+    suspended |> Ecto.Changeset.change(status: :active) |> Repo.update!(skip_account: true)
+    assert ApiKeys.usable?(key.key_id, account.id)
+    ApiKeys.revoke(key)
+    refute ApiKeys.usable?(key.key_id, account.id)
   end
 
   test "a peer that keeps failing is throttled, valid key or not" do
