@@ -10,13 +10,13 @@
 //!     N round trips on the control stream (needs an echoing Session, as in
 //!     the localhost loop).
 //! probe bulk URL [--hash HEX] [--bytes B] [--rounds R]
-//!     Ask the echoing Session for B bytes on a low-priority uni stream and
-//!     time the last byte, while pinging the control stream every 5 ms to see
-//!     whether bulk delays control.
+//!     Ask the echoing Session for B bytes on the control stream, where the
+//!     real Session sends its BOOT, and time the last byte. The first round
+//!     starts from the initial congestion window; later rounds reuse it.
 //! ```
 //!
 //! The echoing Session's control protocol: `E` + 8 bytes is echoed back;
-//! `B` + u32 LE asks for that many bytes on a new server uni stream.
+//! `B` + u32 LE asks for that many bytes back on the same stream.
 
 use std::time::{Duration, Instant};
 use std::net::SocketAddr;
@@ -171,55 +171,24 @@ async fn echo(a: &Args) {
 async fn bulk(a: &Args) {
     let (conn, mut send, mut recv, _) = open(a).await;
     let mut times = Vec::new();
-    let mut pings: Vec<Duration> = Vec::new();
+    let mut buf = vec![0u8; a.bytes];
     for _ in 0..a.rounds {
         let mut req = vec![b'B'];
         req.extend_from_slice(&(a.bytes as u32).to_le_bytes());
         let t = Instant::now();
         send.write_all(&req).await.unwrap();
-        let reader = {
-            let conn = conn.clone();
-            let want = a.bytes;
-            tokio::spawn(async move {
-                let mut uni = conn.accept_uni().await.unwrap();
-                let mut buf = vec![0u8; 1 << 16];
-                let mut got = 0;
-                while let Some(n) = uni.read(&mut buf).await.unwrap() {
-                    got += n;
-                }
-                assert_eq!(got, want);
-            })
-        };
-        // Control pings while the bulk stream is in flight.
-        let mut i = 0u64;
-        while !reader.is_finished() {
-            let mut m = [0u8; 9];
-            m[0] = b'E';
-            m[1..].copy_from_slice(&i.to_le_bytes());
-            let p = Instant::now();
-            send.write_all(&m).await.unwrap();
-            let mut got = [0u8; 9];
-            recv.read_exact(&mut got).await.unwrap();
-            pings.push(p.elapsed());
-            i += 1;
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        reader.await.unwrap();
+        recv.read_exact(&mut buf).await.unwrap();
         times.push(t.elapsed());
     }
     let mbit = a.bytes as f64 * 8.0 / pct(&mut times.clone(), 50).as_secs_f64() / 1e6;
     println!(
-        "{{\"mode\":\"bulk\",\"bytes\":{},\"rounds\":{},\"bulk_ms\":{{\"p50\":{},\"min\":{},\"max\":{}}},\"mbit_s\":{:.1},\"ping_during_ms\":{{\"n\":{},\"p50\":{},\"p90\":{},\"max\":{}}},\"quic_rtt_ms\":{}}}",
+        "{{\"mode\":\"bulk\",\"bytes\":{},\"rounds\":{},\"bulk_ms\":{{\"p50\":{},\"min\":{},\"max\":{}}},\"mbit_s\":{:.1},\"quic_rtt_ms\":{}}}",
         a.bytes,
         a.rounds,
         ms(pct(&mut times, 50)),
         ms(pct(&mut times, 0)),
         ms(pct(&mut times, 100)),
         mbit,
-        pings.len(),
-        ms(pct(&mut pings, 50)),
-        ms(pct(&mut pings, 90)),
-        ms(pct(&mut pings, 100)),
         ms(conn.rtt())
     );
 }

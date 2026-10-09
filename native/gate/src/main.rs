@@ -20,7 +20,11 @@
 //!   within 2 s after that, or the connection closes (a Session that
 //!   authenticated at OPEN may send READY before ACCEPT);
 //! - until READY, one client bidi stream, a 64 KiB connection receive
-//!   window, and no datagrams or uni streams forwarded.
+//!   window, and no datagrams forwarded.
+//!
+//! Traffic is what the Session uses: client bidi streams (the control
+//! stream and letterbox leases) and client datagrams. The gate opens no
+//! streams of its own and accepts no uni streams.
 //!
 //! The certificate is reloaded on SIGHUP and whenever the PEM files
 //! change on disk, so an ACME renewal needs no restart.
@@ -38,7 +42,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use wtransport::endpoint::{IncomingSession, SessionRequest};
-use wtransport::quinn::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
+use wtransport::quinn::congestion::CubicConfig;
 use wtransport::quinn::{TransportConfig, VarInt as QVarInt};
 use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
 
@@ -52,9 +56,6 @@ const DATA: u8 = 0x11;
 const FIN: u8 = 0x12;
 const RESET: u8 = 0x13;
 const STOP: u8 = 0x14;
-const OPEN_UNI: u8 = 0x15;
-const OPEN_BI: u8 = 0x16;
-const PRIORITY: u8 = 0x17;
 const DGRAM: u8 = 0x20;
 const CLOSE: u8 = 0x30;
 
@@ -67,16 +68,17 @@ const DEADLINE: Duration = Duration::from_secs(2);
 /// QUIC-level stream counts. HTTP/3 itself takes one bidi (the CONNECT
 /// request) and three uni streams (control and the two QPACK streams).
 const BIDI_BEFORE: u32 = 2;
-const UNI_BEFORE: u32 = 3;
 const BIDI_AFTER: u32 = 1 + 64;
-const UNI_AFTER: u32 = 3 + 4;
+const UNI: u32 = 3;
+/// Handshakes in flight above which every unvalidated address gets a Retry.
+const RETRY_ABOVE: usize = 32;
 const WINDOW_BEFORE: u32 = 64 << 10;
 const WINDOW_AFTER: u32 = 16 << 20;
 const STREAM_WINDOW: u32 = 4 << 20;
 /// Congestion window before the first loss or ACK, in bytes (GATE_INITIAL_WINDOW
 /// overrides it). quinn's default is ten packets, 14,720 bytes, so a cold BOOT
 /// spends its first round trips in slow start. Chromium, 47 ms RTT, 1 MiB on
-/// the bulk stream (a deflated BOOT of ~1,000 real jobs): 372 ms at the
+/// one stream (a deflated BOOT of ~1,000 real jobs): 372 ms at the
 /// default, 232 ms at 128 KiB, 191 ms at 256 KiB; behind a 20 Mbit/s link
 /// with a 100-packet queue 256 KiB was no worse than any smaller window
 /// (496 ms against 612 ms), because quinn paces the window over the measured
@@ -97,9 +99,6 @@ struct Settings {
     origins: Vec<String>,
     path: String,
     per_ip: usize,
-    retry_above: usize,
-    /// Congestion controller and its initial window in bytes; see transport().
-    cc: String,
     initial_window: u64,
 }
 
@@ -131,8 +130,6 @@ impl Settings {
                 .collect(),
             path: var("GATE_PATH").unwrap_or_else(|| "/wt".into()),
             per_ip: num("GATE_PER_IP", 16)?,
-            retry_above: num("GATE_RETRY_ABOVE", 32)?,
-            cc: var("GATE_CC").unwrap_or_else(|| "cubic".into()),
             initial_window: num("GATE_INITIAL_WINDOW", INITIAL_WINDOW)? as u64,
         })
     }
@@ -201,27 +198,14 @@ impl Gate {
 
 fn transport(s: &Settings) -> TransportConfig {
     let mut t = TransportConfig::default();
-    match s.cc.as_str() {
-        "bbr" => {
-            let mut c = BbrConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-        "newreno" => {
-            let mut c = NewRenoConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-        _ => {
-            let mut c = CubicConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-    };
+    // Cubic, quinn's default: BBR measured slower in Chromium on every path tried.
+    let mut cubic = CubicConfig::default();
+    cubic.initial_window(s.initial_window);
+    t.congestion_controller_factory(Arc::new(cubic));
     // The connection window is the pre-auth cap and rises at READY; a stream
     // window cannot change later, so it is sized for the session's life.
     t.max_concurrent_bidi_streams(QVarInt::from_u32(BIDI_BEFORE))
-        .max_concurrent_uni_streams(QVarInt::from_u32(UNI_BEFORE))
+        .max_concurrent_uni_streams(QVarInt::from_u32(UNI))
         .receive_window(QVarInt::from_u32(WINDOW_BEFORE))
         .stream_receive_window(QVarInt::from_u32(STREAM_WINDOW))
         .max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()))
@@ -314,7 +298,7 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
     c.incoming.fetch_add(1, Relaxed);
     let ip = incoming.remote_address().ip();
     let validated = incoming.remote_address_validated();
-    if !validated && (gate.handshakes.load(Relaxed) >= gate.settings.retry_above || gate.at_cap(ip)) {
+    if !validated && (gate.handshakes.load(Relaxed) >= RETRY_ABOVE || gate.at_cap(ip)) {
         c.retried.fetch_add(1, Relaxed);
         incoming.retry();
         return;
@@ -430,15 +414,6 @@ enum Cmd {
     Data(Vec<u8>),
     Fin,
     Reset(u32),
-    Priority(i32),
-}
-
-/// What the session loop keeps per stream: the queue to its writer and
-/// the switch that stops its reader.
-#[derive(Default)]
-struct Ends {
-    send: Option<mpsc::UnboundedSender<Cmd>>,
-    stop: Option<tokio::sync::oneshot::Sender<u32>>,
 }
 
 struct Shared {
@@ -541,8 +516,9 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
 /// The session loop. It returns the close code and reason when the gate
 /// or the BEAM ends the session, or `None` when the peer did.
 async fn run(conn: &Connection, sh: &Arc<Shared>, mut down: mpsc::Receiver<Vec<u8>>) -> Option<(u32, Vec<u8>)> {
-    let mut streams: HashMap<u32, Ends> = HashMap::new();
-    let (mut next_bi, mut next_uni) = (0u32, 2u32);
+    // Each client stream's queue to its writer, by session-relative id.
+    let mut streams: HashMap<u32, mpsc::UnboundedSender<Cmd>> = HashMap::new();
+    let mut next_bi = 0u32;
     let deadline = sleep(DEADLINE);
     tokio::pin!(deadline);
     let c = &sh.gate.counters;
@@ -570,16 +546,8 @@ async fn run(conn: &Connection, sh: &Arc<Shared>, mut down: mpsc::Receiver<Vec<u
                     drop((send, recv));
                     continue;
                 }
-                let ends = streams.entry(id).or_default();
-                ends.send = Some(writer(sh.clone(), id, send));
-                ends.stop = Some(reader(sh.clone(), id, recv));
-                let _ = sh.up.send(id_message(STREAM, id, &[]));
-            }
-            s = conn.accept_uni(), if ready => {
-                let Ok(recv) = s else { return None };
-                let id = next_uni;
-                next_uni += 4;
-                streams.entry(id).or_default().stop = Some(reader(sh.clone(), id, recv));
+                streams.insert(id, writer(sh.clone(), id, send));
+                tokio::spawn(read_loop(sh.clone(), id, recv));
                 let _ = sh.up.send(id_message(STREAM, id, &[]));
             }
             d = conn.receive_datagram(), if ready => {
@@ -600,16 +568,15 @@ fn lift(conn: &Connection, sh: &Shared) {
     if !sh.ready.swap(true, Relaxed) {
         let q = conn.quic_connection();
         q.set_max_concurrent_bi_streams(QVarInt::from_u32(BIDI_AFTER));
-        q.set_max_concurrent_uni_streams(QVarInt::from_u32(UNI_AFTER));
         q.set_receive_window(QVarInt::from_u32(WINDOW_AFTER));
         sh.gate.counters.ready.fetch_add(1, Relaxed);
     }
 }
 
 /// Applies one message from the BEAM.
-fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, Ends>, m: &[u8]) -> Result<Option<(u32, Vec<u8>)>, ()> {
-    let to = |streams: &mut HashMap<u32, Ends>, id: u32, cmd: Cmd| {
-        if let Some(tx) = streams.get(&id).and_then(|e| e.send.as_ref()) {
+fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, mpsc::UnboundedSender<Cmd>>, m: &[u8]) -> Result<Option<(u32, Vec<u8>)>, ()> {
+    let to = |streams: &mut HashMap<u32, mpsc::UnboundedSender<Cmd>>, id: u32, cmd: Cmd| {
+        if let Some(tx) = streams.get(&id) {
             let _ = tx.send(cmd);
         }
     };
@@ -625,48 +592,6 @@ fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, Ends>, m
         RESET => {
             let id = u32_at(m, 1).ok_or(())?;
             to(streams, id, Cmd::Reset(u32_at(m, 5).ok_or(())?));
-        }
-        PRIORITY => {
-            let id = u32_at(m, 1).ok_or(())?;
-            to(streams, id, Cmd::Priority(u32_at(m, 5).ok_or(())? as i32));
-        }
-        STOP => {
-            let id = u32_at(m, 1).ok_or(())?;
-            let code = u32_at(m, 5).ok_or(())?;
-            if let Some(stop) = streams.get_mut(&id).and_then(|e| e.stop.take()) {
-                let _ = stop.send(code);
-            }
-        }
-        op @ (OPEN_UNI | OPEN_BI) => {
-            let id = u32_at(m, 1).ok_or(())?;
-            let priority = u32_at(m, 5).ok_or(())? as i32;
-            if id % 4 != if op == OPEN_UNI { 3 } else { 1 } || streams.contains_key(&id) {
-                return Err(());
-            }
-            let (tx, rx) = mpsc::unbounded_channel();
-            let _ = tx.send(Cmd::Priority(priority));
-            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-            streams.insert(id, Ends { send: Some(tx), stop: (op == OPEN_BI).then_some(stop_tx) });
-            let (conn, sh) = (conn.clone(), sh.clone());
-            tokio::spawn(async move {
-                if op == OPEN_UNI {
-                    match conn.open_uni().await {
-                        Ok(opening) => match opening.await {
-                            Ok(send) => return drain(sh, id, send, rx).await,
-                            Err(_) => {}
-                        },
-                        Err(_) => {}
-                    }
-                } else if let Ok(Ok((send, recv))) = async { Ok::<_, ()>(conn.open_bi().await.map_err(|_| ())?.await) }.await {
-                    tokio::spawn(read_loop(sh.clone(), id, recv, stop_rx));
-                    return drain(sh, id, send, rx).await;
-                }
-                let _ = sh.up.send(id_message(STOP, id, &0u32.to_be_bytes()));
-            });
-        }
-        DGRAM => {
-            sh.gate.counters.bytes_out.fetch_add(m.len() as u64 - 1, Relaxed);
-            let _ = conn.send_datagram(&m[1..]);
         }
         CLOSE => {
             let code = u32_at(m, 1).ok_or(())?;
@@ -713,29 +638,15 @@ async fn drain(sh: Arc<Shared>, id: u32, mut send: SendStream, mut rx: mpsc::Unb
                 let _ = send.reset(VarInt::from_u32(code));
                 return;
             }
-            Some(Cmd::Priority(p)) => send.set_priority(p),
         }
     }
 }
 
-fn reader(sh: Arc<Shared>, id: u32, recv: RecvStream) -> tokio::sync::oneshot::Sender<u32> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(read_loop(sh, id, recv, rx));
-    tx
-}
-
-/// Forwards one stream's bytes to the BEAM until FIN, reset, or STOP.
-async fn read_loop(sh: Arc<Shared>, id: u32, mut recv: RecvStream, mut stop: tokio::sync::oneshot::Receiver<u32>) {
+/// Forwards one stream's bytes to the BEAM until FIN or reset.
+async fn read_loop(sh: Arc<Shared>, id: u32, mut recv: RecvStream) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
-        let r = tokio::select! {
-            r = recv.read(&mut buf) => r,
-            code = &mut stop => {
-                if let Ok(code) = code { recv.stop(VarInt::from_u32(code)); }
-                return;
-            }
-        };
-        match r {
+        match recv.read(&mut buf).await {
             Ok(Some(n)) => {
                 sh.gate.counters.bytes_in.fetch_add(n as u64, Relaxed);
                 let _ = sh.up.send(id_message(DATA, id, &buf[..n]));

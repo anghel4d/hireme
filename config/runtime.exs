@@ -15,9 +15,8 @@ if config_env() == :dev do
     live_reload: [
       web_console_logger: true,
       patterns: [
-        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
-        ~r"lib/hireme_web/router\.ex$",
-        ~r"lib/hireme_web/(controllers|live|components)/.*\.(ex|heex)$"
+        ~r"priv/static/.*\.(js|css|wasm|png|svg)$",
+        ~r"lib/hireme_web/.*\.ex$"
       ]
     ]
 end
