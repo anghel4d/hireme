@@ -179,17 +179,26 @@ type Spec = Record<string, readonly [string, Kind]>
 type Cell = number | string | boolean | null | string[]
 
 const NAN_SAFE = (x: number) => (Number.isNaN(x) ? 0 : x)
-const isoDay = (day: number) => new Date(day * 86_400_000).toISOString().slice(0, 10)
+const days = new Map<number, string>()
+const isoDay = (day: number) => {
+  let s = days.get(day)
+  if (s === undefined) {
+    s = new Date(day * 86_400_000).toISOString().slice(0, 10)
+    days.set(day, s)
+  }
+  return s
+}
 const stamp = (secs: number) => new Date(secs * 1000).toISOString().replace(".000Z", "Z")
 
 /**
  * The kernel through its exports. Tables and columns are found by the
  * names schema.txt gives them, once; rows are read in place and decoded
- * into plain objects, kept per table until an ingest or a push touches it.
+ * into plain objects. A table read whole is kept by id and patched row by
+ * row as ingests and pushes touch it, so a change costs the rows it moved.
  */
 export class Kernel {
   private readonly ids = new Map<string, number>()
-  private readonly cache = new Map<number, unknown[]>()
+  private readonly kept = new Map<number, { spec: Spec; byId: Map<number, unknown> | null; list: unknown[] | null }>()
   private readonly keyed = new Map<number, Map<number, unknown>>()
   private count = 0
 
@@ -242,54 +251,72 @@ export class Kernel {
   }
 
   /**
-   * What the last ingest or push touched: the tables, and the job rows
-   * among them ("all" when the whole table moved). Null tables: everything
-   * (a BOOT).
+   * What the last ingest or push touched: each table with the keys of the
+   * rows it moved (null: the whole table), and the job rows among them.
+   * Null: everything (a BOOT).
    */
-  touched(): { tables: Set<number> | null; jobs: number[] | "all" } {
+  touched(): { tables: Map<number, Set<number> | null> | null; jobs: number[] | "all" } {
     const n = this.k.touched_len()
     const pairs = new Uint32Array(this.mem, this.k.touched_ptr(), n * 2)
     const jobTable = this.table("job_apps")
-    const tables = new Set<number>()
-    let jobs: number[] | "all" = []
+    const tables = new Map<number, Set<number> | null>()
     for (let i = 0; i < n; i++) {
       const t = pairs[2 * i] ?? NONE
       const key = pairs[2 * i + 1] ?? NONE
       if (t === NONE) return { tables: null, jobs: "all" }
-      tables.add(t)
-      if (t === jobTable && jobs !== "all") {
-        if (key === NONE) jobs = "all"
-        else jobs.push(key)
-      }
+      const keys = tables.get(t)
+      if (key === NONE) tables.set(t, null)
+      else if (keys) keys.add(key)
+      else if (keys === undefined) tables.set(t, new Set([key]))
     }
     // The derived views follow the rows lazily; derive them now, so what
     // this change moved is known and read fresh.
-    if (this.k.derive() === 1) for (const name of DERIVED) tables.add(this.table(name))
-    return { tables, jobs }
+    if (this.k.derive() === 1) for (const name of DERIVED) tables.set(this.table(name), null)
+    const jobs = tables.get(jobTable)
+    return { tables, jobs: jobs === null ? "all" : [...(jobs ?? [])] }
   }
 
-  /** Drop decoded rows of these tables (null: all). */
-  forget(tables: ReadonlySet<number> | null): void {
+  /** Bring decoded rows up to date with what moved (null: everything). */
+  forget(tables: ReadonlyMap<number, ReadonlySet<number> | null> | null): void {
     if (tables === null) {
-      this.cache.clear()
+      this.kept.clear()
       this.keyed.clear()
       return
     }
-    for (const t of tables) {
-      this.cache.delete(t)
-      this.keyed.delete(t)
+    for (const [t, keys] of tables) {
+      const one = this.keyed.get(t)
+      if (one) {
+        if (keys === null) this.keyed.delete(t)
+        else for (const key of keys) one.delete(key)
+      }
+      const kept = this.kept.get(t)
+      if (!kept) continue
+      if (keys === null || kept.byId === null) {
+        this.kept.delete(t)
+        continue
+      }
+      for (const key of keys) {
+        const row = this.k.row_of(t, key)
+        if (row < 0) kept.byId.delete(key)
+        else kept.byId.set(key, this.read(t, kept.spec, row, row + 1)[0])
+      }
+      kept.list = null
     }
   }
 
-  /** Every row of a named table, decoded once until touched. */
+  /** Every row of a named table, decoded once and kept current. */
   all<T>(name: string, spec: Spec): T[] {
     const t = this.table(name)
     if (t < 0) return []
-    const hit = this.cache.get(t)
-    if (hit) return hit as T[]
-    const rows = this.read<T>(t, spec)
-    this.cache.set(t, rows)
-    return rows
+    let kept = this.kept.get(t)
+    if (!kept) {
+      const rows = this.read<{ id?: number }>(t, spec)
+      const keyed = "id" in spec && rows.every((r) => typeof r.id === "number")
+      kept = { spec, byId: keyed ? new Map(rows.map((r) => [r.id as number, r])) : null, list: rows }
+      this.kept.set(t, kept)
+    }
+    kept.list ??= [...(kept.byId?.values() ?? [])]
+    return kept.list as T[]
   }
 
   /**
@@ -377,7 +404,6 @@ export class Kernel {
     const hit = this.u32(r, this.col(r, "hit"))
     const out: Coverage = { hits: [], misses: [] }
     for (let i = 0; i < hit.length; i++) (hit[i] === 1 ? out.hits : out.misses).push(this.str(r, words, i))
-    this.forget(new Set([this.table("cards")]))
     return out
   }
 
@@ -574,6 +600,10 @@ class Documents {
   private readonly focuses = new Map<number, Focus>()
   private readonly roots = new Map<number, Root>()
   private laneDoc: Lanes | null = null
+  private gymNet: Lanes | null = null
+  // Bumped when verdicts are re-derived; a kept focus remembers which it was composed with.
+  private verdicts = 0
+  private readonly focusVerdicts = new Map<number, number>()
   private scoreDoc: Scoreboard | null | undefined
   private acctDoc: Settings | null | undefined
   private readonly resolved = new Map<string, Resolved>()
@@ -582,13 +612,13 @@ class Documents {
   constructor(private readonly k: Kernel, private readonly board: Board) {}
 
   /** Rows of these tables changed (null: any); `jobs` are the job rows among them. */
-  changed(tables: ReadonlySet<number> | null, jobs: readonly number[] | "all"): Change {
+  changed(tables: ReadonlyMap<number, unknown> | null, jobs: readonly number[] | "all"): Change {
     const k = this.k
     const t = (name: string) => tables === null || tables.has(k.table(name))
     const c: Change = {}
     if (t("items") || t("overlays") || t("profiles")) this.resolved.clear()
     const wide = ["items", "overlays", "profiles", "cv_variants", "cv_lineages", "narratives", "kv_pairs", "batches", "events", "stages", "bands"].some(t)
-    if (wide || t("verdicts")) {
+    if (wide) {
       this.focuses.clear()
       c.focus = "all"
     } else if (t("job_apps")) {
@@ -596,11 +626,22 @@ class Documents {
       else for (const id of jobs) this.focuses.delete(id)
       c.focus = jobs
     }
+    // Verdicts are re-derived whole on every move; a kept focus takes its
+    // new verdict when next read, without composing again.
+    if (t("verdicts")) {
+      this.verdicts++
+      c.focus = "all"
+    }
     if (["profiles", "items", "cv_variants", "kv_pairs", "narratives"].some(t)) {
       this.roots.clear()
       c.root = true
     }
-    if (["kv_pairs", "gym_problems", "gym_reps", "net_entries", "clock", "heat_rows"].some(t)) {
+    if (["kv_pairs", "gym_problems", "gym_reps", "net_entries", "clock"].some(t)) {
+      this.gymNet = null
+      this.laneDoc = null
+      c.lanes = true
+    }
+    if (t("heat_rows")) {
       this.laneDoc = null
       c.lanes = true
     }
@@ -662,7 +703,15 @@ class Documents {
 
   focus(id: number): Focus | null {
     const hit = this.focuses.get(id)
-    if (hit) return hit
+    if (hit) {
+      if (this.focusVerdicts.get(id) === this.verdicts) return hit
+      this.focusVerdicts.set(id, this.verdicts)
+      const heat = { ...verdictOf(this.k.one<Verdict>("verdicts", SPEC.verdicts, id)), override: hit.heat.override, override_reason: hit.heat.override_reason }
+      if (JSON.stringify(heat) === JSON.stringify(hit.heat)) return hit
+      const f = { ...hit, heat }
+      this.focuses.set(id, f)
+      return f
+    }
     const k = this.k
     const job = k.one<RawJob>("job_apps", SPEC.job_apps, id)
     const variant = this.variantOf(id)
@@ -692,6 +741,7 @@ class Documents {
       (targets, text) => k.coverage(id, text, targets, false),
     )
     this.focuses.set(id, f)
+    this.focusVerdicts.set(id, this.verdicts)
     return f
   }
 
@@ -705,17 +755,19 @@ class Documents {
     return r
   }
 
+  /** The gym and net halves change with their rows; the heat half with every stage move. */
   lanes(): Lanes | null {
     if (this.laneDoc) return this.laneDoc
     const k = this.k
     if (k.k.rows(k.table("clock")) === 0) return null
     const rows = k.all<HeatRow & { group: number }>("heat_rows", SPEC.heat_rows)
     const heat = (group: number) => rows.filter((r) => r.group === group).map(({ group: _, ...r }) => r)
-    this.laneDoc = lanes(
+    this.gymNet ??= lanes(
       this.today(), this.kv(),
       k.all<ProblemRow>("gym_problems", SPEC.gym_problems), k.all<RepRow>("gym_reps", SPEC.gym_reps), k.all<NetRow>("net_entries", SPEC.net_entries),
-      { companies: heat(0), vendors: heat(1) },
+      { companies: [], vendors: [] },
     )
+    this.laneDoc = { ...this.gymNet, heat: { companies: heat(0), vendors: heat(1) } }
     return this.laneDoc
   }
 
