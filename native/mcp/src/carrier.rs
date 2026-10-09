@@ -198,13 +198,22 @@ async fn wt(cfg: &Config) -> Result<Pipe, String> {
         _ => None,
     };
     let builder = ClientConfig::builder().with_bind_default();
-    let config = match pinned {
+    let builder = match pinned {
         Some(hex) => {
             let digest = sha256_hex(&hex).ok_or("certificate hash: want 64 hex digits")?;
-            builder.with_server_certificate_hashes([digest]).build()
+            builder.with_server_certificate_hashes([digest])
         }
-        None => builder.with_native_certs().build(),
+        None => builder.with_native_certs(),
     };
+    // UDP has no FIN: a client that dies is noticed only when it goes
+    // quiet. A short idle timeout (the lower of the two peers' applies),
+    // kept alive while healthy, gives a dead agent's block back in
+    // seconds instead of the default half minute.
+    let config = builder
+        .keep_alive_interval(Some(Duration::from_millis(500)))
+        .max_idle_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "idle timeout")?
+        .build();
     let endpoint = Endpoint::client(config).map_err(|e| format!("webtransport endpoint: {e}"))?;
     let conn = endpoint
         .connect(&url)

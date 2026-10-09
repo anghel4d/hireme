@@ -4,15 +4,13 @@
 //! holds one session (WebTransport, or the `/wire` WebSocket where UDP is
 //! blocked), receives the account's raw tables and every delta, and keeps
 //! them resident in the desk kernel (`native/kernel`), the same code the
-//! browser runs as WebAssembly. Every read tool is answered here from
-//! that copy: the ranked board, heat, the score chart, gym and net
-//! progress, one application's composed CV. Writes go up as the binary
-//! ops the browser sends, and Elixir decides them: desk-wide ops on the
-//! session itself, an application's ops on the lane of its lease. A lease
-//! is held by one process on the server, for one application, until it
-//! is released or the session ends; hold as many as there are parallel
-//! tasks. Desk changes to leased applications arrive as log
-//! notifications and are kept for `letterbox_events`.
+//! browser runs as WebAssembly. Every read is answered here from that
+//! copy. The agent holds one lease: a contiguous block of applications
+//! (entries 1..n, in the order they were added), taken with `lease` and
+//! given back with `release` or when the session ends. Writes to those
+//! applications go up as the binary ops the browser sends, and Elixir
+//! decides them. Every tool called with `{}` prints its call shape, and
+//! every refusal reads like a rustc diagnostic (`diag.rs`).
 //!
 //! Configuration is read from the environment: `HIREME_API_KEY`
 //! (required); `HIREME_WT_URL` (e.g. `https://host/wt`); `HIREME_WS_URL`
@@ -20,7 +18,12 @@
 //! | `ws`; and, for a development gate's self-signed certificate,
 //! `HIREME_WT_CERT_SHA256` or `HIREME_WT_CERT_SHA256_FILE`.
 
+// A diagnostic is a tool's whole error answer, built once per refusal: its size
+// is not on any hot path.
+#![allow(clippy::result_large_err)]
+
 mod carrier;
+mod diag;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use carrier::{Config, Link};
+use diag::Diag;
 use kernel::Desk;
 use kernel::schema::{self, col, frame, op, table};
 use serde_json::{Map, Value, json};
@@ -36,13 +40,28 @@ use tokio::sync::{mpsc, oneshot};
 
 const EVENTS_KEPT: usize = 256;
 const PROTOCOL: &str = "2025-06-18";
-/// A lease answer is keyed by its lane, apart from the op ids.
-const LANE_KEY: u64 = 1 << 63;
+/// RPC replies are keyed apart from op ids.
+const RPC_KEY: u64 = 1 << 63;
+/// A block's size when the agent names none.
+const BLOCK: u32 = 16;
 
 enum Answer {
     Ack,
-    Nack(String),
+    Nack(u8, String),
+    Rpc(Value),
 }
+
+/// The agent's lease: entries `from..=to`, and the jobs they are.
+#[derive(Clone)]
+struct Block {
+    from: u32,
+    to: u32,
+    jobs: Vec<u32>,
+}
+
+/// A tool's answer: a value and any warnings, or one diagnostic.
+type Reply = Result<(Value, Vec<Diag>), Diag>;
+type Outcome = Result<Value, String>;
 
 struct Hub {
     cfg: Config,
@@ -54,12 +73,10 @@ struct Hub {
     /// re-derive.
     unread: Mutex<Vec<u8>>,
     waits: Mutex<HashMap<u64, oneshot::Sender<Answer>>>,
-    /// Leased job id → its lane.
-    leases: Mutex<HashMap<u32, u64>>,
+    block: Mutex<Option<Block>>,
     events: Mutex<HashMap<u32, VecDeque<Value>>>,
     /// Op ids are the account's ledger keys: this run's random high half, then a count.
     next_op: AtomicU64,
-    next_lane: AtomicU64,
     frames: AtomicU64,
     delivered: AtomicU64,
 }
@@ -94,10 +111,9 @@ async fn main() {
         desk: Mutex::new(Desk::new()),
         unread: Mutex::new(Vec::new()),
         waits: Mutex::new(HashMap::new()),
-        leases: Mutex::new(HashMap::new()),
+        block: Mutex::new(None),
         events: Mutex::new(HashMap::new()),
         next_op: AtomicU64::new(run_id() << 32 | 1),
-        next_lane: AtomicU64::new(1),
         frames: AtomicU64::new(0),
         delivered: AtomicU64::new(0),
     });
@@ -131,8 +147,6 @@ async fn main() {
     }
 }
 
-type Outcome = Result<Value, String>;
-
 impl Hub {
     // ---- MCP ----------------------------------------------------------------
 
@@ -164,71 +178,98 @@ impl Hub {
             Value::Object(m) => Value::Object(m.clone()),
             _ => json!({}),
         };
-        let outcome = match self.link().await {
-            Err(e) => Err(e),
+        let reply = match self.link().await {
+            Err(e) => Err(Diag::error("session", "hireme could not be reached").note(e)),
             Ok(_) => self.tool(name, &a).await,
         };
-        match outcome {
-            Ok(v) => {
-                json!({"content": [{"type": "text", "text": v.to_string()}], "structuredContent": v})
+        match reply {
+            // Help and usage are text to read; everything else is data.
+            Ok((Value::String(text), _)) => json!({"content": [{"type": "text", "text": text}]}),
+            Ok((v, warnings)) => {
+                let shown: Vec<String> = warnings.iter().map(Diag::render).collect();
+                let text =
+                    shown.iter().map(|w| format!("{w}\n\n")).collect::<String>() + &v.to_string();
+                let mut v = v;
+                if !shown.is_empty() {
+                    v["warnings"] = json!(shown);
+                }
+                json!({"content": [{"type": "text", "text": text}], "structuredContent": v})
             }
-            Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+            Err(d) => json!({"content": [{"type": "text", "text": d.render()}], "isError": true}),
         }
     }
 
-    async fn tool(self: &Arc<Self>, name: &str, a: &Value) -> Outcome {
-        let job = || job_arg(a);
-        match name {
-            // Reads, from the resident desk.
-            "list_letterboxes" => self.with_desk(|d| letterboxes(d, a)),
-            "list_batches" => {
-                self.with_desk(|d| Ok(json!({"batches": all_rows(d, table::BATCHES)})))
-            }
-            "list_applications" => self.with_desk(|d| applications(d, a, "all", None)),
-            "recommend_applications" => self.with_desk(|d| recommend(d, a)),
-            "score_distribution" => self.with_desk(|d| distribution(d, a)),
-            "heat_status" => self.with_desk(|d| heat(d, a)),
-            "can_apply" => self.with_desk(|d| verdict(d, job()?)),
-            "gym_status" => self.with_desk(|d| lanes(d, "gym")),
-            "net_status" => self.with_desk(|d| lanes(d, "net")),
-            "get_application" => {
-                let job = job()?;
-                self.held(job)?;
+    /// Every tool, matched on its name and whether it was called blank:
+    /// a blank call is the base case and prints the tool's call shape.
+    async fn tool(self: &Arc<Self>, name: &str, a: &Value) -> Reply {
+        let blank = a.as_object().is_none_or(Map::is_empty);
+        match (name, blank) {
+            ("hireme", true) => Ok((json!(self.overview()), vec![])),
+            ("hireme", false) => explained(a),
+            ("lease", true) => Ok((json!(self.usage_with_next("lease")), vec![])),
+            ("lease", false) => self.lease(a).await,
+            ("release", _) => self.release().await,
+            ("block", _) => self.block_rows(),
+            ("letterbox_events", _) => Ok((self.drain_events(a), vec![])),
+            (_, true) if needs_arguments(name) => Ok((json!(usage(name)), vec![])),
+            ("application", false) => {
+                let (job, _) = self.target(name, a)?;
                 self.with_desk(|d| json_text(&d.focus_json(job)))
+                    .map(|v| (v, vec![]))
+                    .map_err(|e| Diag::error("internal", e))
             }
-            // Leases.
-            "lease_letterbox" => self.lease(job()?).await,
-            "release_letterbox" => self.release(job()?),
-            "list_leases" => Ok(self.list_leases()),
-            "letterbox_events" => Ok(self.drain_events(a)),
-            // Desk-wide writes, on the session.
-            "gym_log" => self.write(0, op::GYM_LOG, 0, pairs(a)).await,
-            "gym_set_target" => {
-                self.write(0, op::GYM_TARGET, 0, vec![text(&a["target"])])
+            ("set_stage", false) => {
+                self.stage(a)?;
+                self.write_job(name, a, op::STAGE, vec![text(&a["stage"])])
                     .await
             }
-            "net_log" => self.write(0, op::NET_LOG, 0, pairs(a)).await,
-            "net_set_lane" => self.write(0, op::NET_LANE, 0, vec![text(&a["url"])]).await,
-            // An application's writes, on its lease.
-            "set_stage" => {
-                self.lease_write(job()?, op::STAGE, vec![text(&a["stage"])])
-                    .await
-            }
-            "set_next_action" => {
+            ("set_next_action", false) => {
                 let fields = vec![text(&a["next_action"]), text(&a["next_due"])];
-                self.lease_write(job()?, op::NEXT, fields).await
+                self.write_job(name, a, op::NEXT, fields).await
             }
-            "set_score" => {
-                self.lease_write(job()?, op::SCORE, vec![text(&a["score"])])
+            ("set_score", false) => {
+                self.write_job(name, a, op::SCORE, vec![text(&a["score"])])
                     .await
             }
-            "tailor_line" => {
+            ("tailor_line", false) => {
                 let fields = ["item_id", "mode", "body", "reason", "title"].map(|k| text(&a[k]));
-                self.lease_write(job()?, op::OVERLAY, fields.to_vec()).await
+                self.write_job(name, a, op::OVERLAY, fields.to_vec()).await
             }
-            "open_cv_generation" => self.lease_write(job()?, op::GENERATION, vec![]).await,
-            _ => Err(format!("unknown tool {name}")),
+            ("open_cv_generation", false) => self.write_job(name, a, op::GENERATION, vec![]).await,
+            ("can_apply", false) => {
+                let (job, _) = self.target(name, a)?;
+                self.read(|d| verdict(d, job))
+            }
+            ("list_applications", _) => self.read(|d| applications(d, a, "all", None)),
+            ("recommend_applications", _) => self.read(|d| recommend(d, a)),
+            ("score_distribution", _) => self.read(|d| distribution(d, a)),
+            ("heat_status", _) => self.read(|d| heat(d, a)),
+            ("list_batches", _) => {
+                self.read(|d| Ok(json!({"batches": all_rows(d, table::BATCHES)})))
+            }
+            ("gym_status", _) => self.read(|d| lanes(d, "gym")),
+            ("net_status", _) => self.read(|d| lanes(d, "net")),
+            ("gym_log", false) => self.write_desk(name, a, op::GYM_LOG, pairs(a)).await,
+            ("gym_set_target", false) => {
+                self.write_desk(name, a, op::GYM_TARGET, vec![text(&a["target"])])
+                    .await
+            }
+            ("net_log", false) => self.write_desk(name, a, op::NET_LOG, pairs(a)).await,
+            ("net_set_lane", false) => {
+                self.write_desk(name, a, op::NET_LANE, vec![text(&a["url"])])
+                    .await
+            }
+            (name, _) => Err(
+                Diag::error("argument", format!("there is no tool `{name}`"))
+                    .help("hireme {} lists every tool and how to start"),
+            ),
         }
+    }
+
+    fn read(&self, f: impl FnOnce(&mut Desk) -> Outcome) -> Reply {
+        self.with_desk(f)
+            .map(|v| (v, vec![]))
+            .map_err(|e| Diag::error("internal", e))
     }
 
     fn with_desk<T>(&self, f: impl FnOnce(&mut Desk) -> T) -> T {
@@ -238,6 +279,337 @@ impl Hub {
             desk.ingest(&unread);
         }
         f(&mut desk)
+    }
+
+    // ---- help ---------------------------------------------------------------
+
+    /// The blank call's answer: what hireme is, where this agent stands, and how to work.
+    fn overview(&self) -> String {
+        let n = self.with_desk(|d| entries(d).len());
+        let carrier = self
+            .link
+            .try_lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|l| l.name))
+            .unwrap_or("connecting");
+        let mine = match self.block.lock().unwrap().clone() {
+            Some(b) => format!(
+                "entries {}..{} ({} applications)",
+                b.from,
+                b.to,
+                b.jobs.len()
+            ),
+            None => "none yet".into(),
+        };
+        let next = self.next_lease();
+        format!(
+            "hireme: a job-search desk for agents. FIRE HOLD: nothing here submits an application.
+
+This agent has one session ({carrier}) and holds at most one lease: a block of applications.
+Desk: {n} applications, numbered as entries 1..{n} in the order they were added.
+Your block: {mine}.
+
+How to work:
+  1. {next}
+       take the first free block of {BLOCK}; or name one: lease {{\"from\":1,\"to\":16}}
+  2. block {{}}
+       your block: entry, job_id, company, role, stage, score, next action
+  3. application {{\"entry\":E}}
+       one application: its fields, rail, events and composed CV (item ids for tailor_line)
+  4. set_stage, set_next_action, set_score, tailor_line, open_cv_generation {{\"entry\":E, ...}}
+       change applications in your block; answered when the server has written them
+  5. release {{}}
+       give the block back, then lease the next one
+
+Reading the whole desk needs no lease: list_applications, recommend_applications,
+score_distribution, heat_status, can_apply, list_batches, gym_status, net_status,
+letterbox_events (changes to your block, also sent as log notifications).
+Desk-wide writes need none either: gym_log, gym_set_target, net_log, net_set_lane.
+
+Any tool called with {{}} prints its call shape. A refusal reads like a rustc
+diagnostic: error[code], the call with the bad argument marked, note: why, and
+help: the corrected call to copy. hireme {{\"explain\":\"<code>\"}} prints a code's long form.
+
+NEXT: {next}"
+        )
+    }
+
+    fn usage_with_next(&self, tool: &str) -> String {
+        format!("{}\n\nNEXT: {}", usage(tool), self.next_lease())
+    }
+
+    /// The lease call to make now, for a free block of the default size.
+    fn next_lease(&self) -> String {
+        let free = self.with_desk(|d| free_block(d, BLOCK));
+        match free {
+            Some((f, t)) => {
+                format!("lease {{\"count\":{BLOCK}}}   (entries {f}..{t} are free now)")
+            }
+            None => format!(
+                "lease {{\"count\":{BLOCK}}}   (no {BLOCK} consecutive entries are free now; ask for fewer)"
+            ),
+        }
+    }
+
+    // ---- the lease ----------------------------------------------------------
+
+    async fn lease(self: &Arc<Self>, a: &Value) -> Reply {
+        let want = match (a.get("count"), a.get("from"), a.get("to")) {
+            (Some(c), None, None) => int(c).map(|c| json!({"count": c})).ok_or("count"),
+            (None, Some(f), t) => match (int(f), t.map(int)) {
+                (Some(f), None) => Ok(json!({"from": f, "to": f + i64::from(BLOCK) - 1})),
+                (Some(f), Some(Some(t))) => Ok(json!({"from": f, "to": t})),
+                (None, _) => Err("from"),
+                (_, Some(None)) => Err("to"),
+            },
+            (Some(_), _, _) => Err("count"),
+            (None, None, _) => Err("from"),
+        }
+        .map_err(|field| {
+            Diag::error(
+                "argument",
+                "lease takes a count, or a range from..to of entries",
+            )
+            .call("lease", a)
+            .at(field, "expected a whole number here")
+            .help(usage("lease"))
+        })?;
+        let reply = self.acquire(want, 3).await?;
+        match (
+            reply.get("result"),
+            reply["error"]["data"].get("code").and_then(Value::as_str),
+        ) {
+            (Some(r), _) => {
+                let block = Block {
+                    from: r["from"].as_u64().unwrap_or(0) as u32,
+                    to: r["to"].as_u64().unwrap_or(0) as u32,
+                    jobs: r["jobs"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_u64)
+                        .map(|j| j as u32)
+                        .collect(),
+                };
+                let warnings = r["warnings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|w| lease_warning(a, w, &block))
+                    .chain(size_advice(a, &block))
+                    .collect();
+                *self.block.lock().unwrap() = Some(block.clone());
+                Ok((self.with_desk(|d| block_view(d, &block)), warnings))
+            }
+            (None, Some(code)) => Err(lease_refused(
+                a,
+                code,
+                &reply["error"]["data"],
+                &self.next_lease(),
+            )),
+            (None, None) => {
+                Err(Diag::error("internal", "the lease answer was empty").call("lease", a))
+            }
+        }
+    }
+
+    /// A count names no entries, so losing a race for a free run to another
+    /// agent asking at the same moment is not the caller's mistake: ask again
+    /// a few times before refusing. A range named outright is refused at once.
+    async fn acquire(self: &Arc<Self>, want: Value, tries: u32) -> Result<Value, Diag> {
+        let reply = self.rpc("lease/acquire", want.clone()).await?;
+        let raced = reply["error"]["data"]["code"] == "busy" && want.get("count").is_some();
+        match (raced, tries) {
+            (true, 2..) => Box::pin(self.acquire(want, tries - 1)).await,
+            _ => Ok(reply),
+        }
+    }
+
+    async fn release(self: &Arc<Self>) -> Reply {
+        let held = self.block.lock().unwrap().take();
+        self.rpc("lease/release", json!({})).await?;
+        let released = held.map(|b| json!({"from": b.from, "to": b.to}));
+        Ok((
+            json!({"released": released, "next": self.next_lease()}),
+            vec![],
+        ))
+    }
+
+    fn block_rows(&self) -> Reply {
+        let block = self.block.lock().unwrap().clone().ok_or_else(|| {
+            Diag::error("leased", "this agent holds no block yet")
+                .note("an agent writes only the applications its block holds")
+                .help(format!("take one:\n{}", self.next_lease()))
+        })?;
+        Ok((self.with_desk(|d| block_view(d, &block)), vec![]))
+    }
+
+    /// The job a call names, by `job_id` or `entry`, and its entry.
+    fn target(&self, tool: &str, a: &Value) -> Result<(u32, u32), Diag> {
+        let ids = self.with_desk(entries);
+        let found = match (
+            a.get("job_id").or(a.get("role_id")).and_then(int),
+            a.get("entry").and_then(int),
+        ) {
+            (Some(job), _) => ids
+                .iter()
+                .position(|&j| i64::from(j) == job)
+                .map(|i| (job as u32, i as u32 + 1)),
+            (None, Some(e)) if e >= 1 => ids.get(e as usize - 1).map(|&j| (j, e as u32)),
+            _ => None,
+        };
+        let field = if a.get("job_id").is_some() {
+            "job_id"
+        } else {
+            "entry"
+        };
+        found.ok_or_else(|| {
+            Diag::error(
+                "not_found",
+                format!("no application on this desk matches that {field}"),
+            )
+            .call(tool, a)
+            .at(
+                field,
+                format!(
+                    "expected a job id from block {{}}, or an entry in 1..{}",
+                    ids.len()
+                ),
+            )
+            .help(format!(
+                "{}\n{tool} {{\"entry\":E, ...}}",
+                usage(tool).lines().next().unwrap_or("")
+            ))
+        })
+    }
+
+    /// One write to an application: it must be in this agent's block.
+    async fn write_job(
+        self: &Arc<Self>,
+        tool: &str,
+        a: &Value,
+        kind: u8,
+        fields: Vec<String>,
+    ) -> Reply {
+        let (job, entry) = self.target(tool, a)?;
+        let block = self.block.lock().unwrap().clone();
+        match &block {
+            Some(b) if b.jobs.contains(&job) => {}
+            Some(b) => {
+                return Err(Diag::error("leased", format!("entry {entry} is not in your block {}..{}", b.from, b.to))
+                    .call(tool, a)
+                    .at(if a.get("job_id").is_some() { "job_id" } else { "entry" }, format!("job {job}, outside your block"))
+                    .note(self.describe(job))
+                    .help(format!(
+                        "work inside your block (block {{}} lists it), or move to this one:\nrelease {{}}\nlease {{\"from\":{entry},\"to\":{}}}",
+                        entry + BLOCK - 1
+                    )));
+            }
+            None => {
+                return Err(Diag::error("leased", "this agent holds no block yet")
+                    .call(tool, a)
+                    .note(self.describe(job))
+                    .help(format!("take the block that starts at this entry:\nlease {{\"from\":{entry},\"to\":{}}}", entry + BLOCK - 1)));
+            }
+        }
+        match self.write(kind, job, fields).await {
+            Ok(()) => Ok((json!({"ok": true, "job_id": job, "entry": entry}), vec![])),
+            Err((code, msg)) => Err(self.refused(tool, a, job, code, &msg)),
+        }
+    }
+
+    async fn write_desk(
+        self: &Arc<Self>,
+        tool: &str,
+        a: &Value,
+        kind: u8,
+        fields: Vec<String>,
+    ) -> Reply {
+        match self.write(kind, 0, fields).await {
+            Ok(()) => Ok((json!({"ok": true}), vec![])),
+            Err((code, msg)) => Err(self.refused(tool, a, 0, code, &msg)),
+        }
+    }
+
+    /// The server refused a write: a diagnostic per refusal code.
+    fn refused(&self, tool: &str, a: &Value, job: u32, code: u8, msg: &str) -> Diag {
+        let name = schema::REFUSALS
+            .iter()
+            .find(|r| r.0 == code)
+            .map_or("internal", |r| r.1);
+        let base = Diag::error(code_str(name), format!("{tool} was refused: {msg}")).call(tool, a);
+        match name {
+            "argument" => {
+                let field = msg.trim_start_matches("Need a ").trim_end_matches('.').to_string();
+                base.at(&field, "not a value this tool accepts").help(usage(tool))
+            }
+            "heat" => base
+                .note(self.with_desk(|d| verdict(d, job)).map_or(String::new(), |v| {
+                    format!(
+                        "{}: company load {} of cap {}, cooldown {} days",
+                        v["company"], v["company_load"], v["company_cap"], v["cooldown_days"]
+                    )
+                }))
+                .help(format!("check before queueing, or pick a cooler one:\ncan_apply {{\"job_id\":{job}}}\nrecommend_applications {{}}")),
+            "cooldown" | "not_additive" => base
+                .note("CV generations are rewritable for 90 days, then additive only")
+                .help(format!("open an additive generation, then add lines:\nopen_cv_generation {{\"job_id\":{job}}}")),
+            "lineage_busy" => base
+                .note(format!("{}; another agent's block wrote this employer's CV first", self.describe(job)))
+                .help("stages, scores and next actions still work here; tailor another employer's CV in your block (block {})"),
+            "leased" => base
+                .note(self.describe(job))
+                .help("block {} lists what this agent may write"),
+            "not_found" if tool == "tailor_line" => {
+                Diag::error("not_found", format!("item {} is not a line of this application's CV", a["item_id"]))
+                    .call(tool, a)
+                    .at("item_id", "no such line")
+                    .help(format!(
+                        "item ids are the CV's lines: application {{\"job_id\":{job}}} shows cv.sections[].lines[].id"
+                    ))
+            }
+            "fire_hold" => base.note("the batch is on hold; nothing here submits an application"),
+            _ => base,
+        }
+    }
+
+    /// A stage the desk knows, or a diagnostic naming the ones it does.
+    fn stage(&self, a: &Value) -> Result<(), Diag> {
+        let want = a["stage"].as_str().unwrap_or("");
+        let known: Vec<String> = self.with_desk(|d| {
+            (0..d.rows(table::STAGES))
+                .map(|r| d.str_at(table::STAGES, 2, r).to_string())
+                .collect()
+        });
+        match known.iter().min_by_key(|k| distance(k, want)) {
+            Some(k) if k == want => Ok(()),
+            closest => {
+                let mut fixed = a.clone();
+                fixed["stage"] = json!(closest.cloned().unwrap_or_default());
+                Err(Diag::error("argument", format!("`{want}` is not a stage"))
+                    .call("set_stage", a)
+                    .at("stage", "unknown stage")
+                    .note(format!("stages, in battleplan order: {}", known.join(", ")))
+                    .help(format!(
+                        "the closest is `{}`:\nset_stage {fixed}",
+                        fixed["stage"].as_str().unwrap_or("")
+                    )))
+            }
+        }
+    }
+
+    /// One line naming an application, for notes.
+    fn describe(&self, job: u32) -> String {
+        self.with_desk(|d| {
+            d.row_of(table::CARDS, job)
+                .map_or(format!("job {job}"), |r| {
+                    format!(
+                        "job {job} is {} — {}",
+                        d.str_at(table::CARDS, col::cards::COMPANY, r),
+                        d.str_at(table::CARDS, col::cards::ROLE, r)
+                    )
+                })
+        })
     }
 
     // ---- the session --------------------------------------------------------
@@ -273,7 +645,6 @@ impl Hub {
     /// One frame from the server, in order.
     fn frame(&self, f: wire::Frame<'_>) {
         self.frames.fetch_add(1, Ordering::Relaxed);
-        let lane = f.header.rev;
         match f.header.kind {
             frame::BOOT | frame::PATCH | frame::TICK => {
                 if f.header.kind == frame::PATCH {
@@ -286,26 +657,21 @@ impl Hub {
             }
             frame::ACK => {
                 if let Ok(op_id) = wire::ack(f.body) {
-                    self.answer(
-                        if op_id == 0 { LANE_KEY | lane } else { op_id },
-                        Answer::Ack,
-                    );
+                    self.answer(op_id, Answer::Ack);
                 }
             }
             frame::NACK => {
-                if let Ok((op_id, _code, msg)) = wire::nack(f.body) {
-                    let key = if op_id == 0 { LANE_KEY | lane } else { op_id };
-                    self.answer(key, Answer::Nack(msg.to_string()));
+                if let Ok((op_id, code, msg)) = wire::nack(f.body) {
+                    self.answer(op_id, Answer::Nack(code, msg.to_string()));
                 }
             }
-            // A lane's BYE: the server ended that lease (revoked, released).
-            frame::BYE => {
-                let mut leases = self.leases.lock().unwrap();
-                if let Some((&job, _)) = leases.iter().find(|(_, l)| **l == lane) {
-                    leases.remove(&job);
-                    drop(leases);
-                    self.answer(LANE_KEY | lane, Answer::Nack(carrier::bye_reason(f.body)));
-                    self.notify(job, json!({"type": "lease_lost", "job_id": job}));
+            frame::RPC => {
+                let reply = f.body.get(0..4).and_then(|n| {
+                    let n = u32::from_le_bytes(n.try_into().ok()?) as usize;
+                    serde_json::from_slice::<Value>(f.body.get(8..8 + n)?).ok()
+                });
+                if let Some(id) = reply.as_ref().and_then(|r| r["id"].as_u64()) {
+                    self.answer(RPC_KEY | id, Answer::Rpc(reply.unwrap_or_default()));
                 }
             }
             _ => {}
@@ -318,34 +684,33 @@ impl Hub {
         }
     }
 
-    /// Send one frame and wait for its ACK or NACK.
-    async fn ask(self: &Arc<Self>, key: u64, bytes: Vec<u8>) -> Result<(), String> {
+    /// Send one frame and wait for what answers it.
+    async fn ask(self: &Arc<Self>, key: u64, bytes: Vec<u8>) -> Result<Answer, Diag> {
         let (tx, rx) = oneshot::channel();
         self.waits.lock().unwrap().insert(key, tx);
-        self.link().await?.send(bytes)?;
+        let lost = |why: String| Diag::error("session", "the session answered nothing").note(why);
+        self.link().await.map_err(lost)?.send(bytes).map_err(lost)?;
         match tokio::time::timeout(Duration::from_secs(10), rx).await {
-            Ok(Ok(Answer::Ack)) => Ok(()),
-            Ok(Ok(Answer::Nack(why))) => Err(why),
-            Ok(Err(_)) => Err("session closed".into()),
+            Ok(Ok(answer)) => Ok(answer),
+            Ok(Err(_)) => Err(lost("the session closed; the next call reconnects".into())),
             Err(_) => {
                 self.waits.lock().unwrap().remove(&key);
-                Err("no answer in 10 s".into())
+                Err(lost("no answer in 10 s".into()))
             }
         }
     }
 
-    /// One op, on `lane` (0: the session). The answer comes after its
-    /// delta, so the desk already shows what it wrote.
+    /// One op on the session. Its answer comes after its delta, so the
+    /// desk shows what it wrote once that delta is read.
     async fn write(
         self: &Arc<Self>,
-        lane: u64,
         kind: u8,
         target: u32,
         fields: Vec<String>,
-    ) -> Outcome {
+    ) -> Result<(), (u8, String)> {
         let op_id = self.next_op.fetch_add(1, Ordering::Relaxed);
         let mut w = wire::Writer::new();
-        w.begin(frame::OP, 0, lane);
+        w.begin(frame::OP, 0, 0);
         w.op(
             op_id,
             kind,
@@ -353,84 +718,53 @@ impl Hub {
             &fields.iter().map(String::as_str).collect::<Vec<_>>(),
         );
         w.end();
-        self.ask(op_id, w.buf).await?;
-        Ok(json!({"ok": true, "job_id": target}))
-    }
-
-    async fn lease_write(self: &Arc<Self>, job: u32, kind: u8, fields: Vec<String>) -> Outcome {
-        let lane = self.held(job)?;
-        self.write(lane, kind, job, fields).await
-    }
-
-    fn held(&self, job: u32) -> Result<u64, String> {
-        self.leases
-            .lock()
-            .unwrap()
-            .get(&job)
-            .copied()
-            .ok_or(format!(
-                "job {job} is not leased here: call lease_letterbox first"
-            ))
-    }
-
-    async fn lease(self: &Arc<Self>, job: u32) -> Outcome {
-        if self.held(job).is_err() {
-            let lane = self.next_lane.fetch_add(1, Ordering::Relaxed);
-            let lease = carrier::frame(frame::LEASE, lane, &u64::from(job).to_le_bytes());
-            self.ask(LANE_KEY | lane, lease)
-                .await
-                .map_err(|why| format!("job {job}: {why}"))?;
-            self.leases.lock().unwrap().insert(job, lane);
+        match self.ask(op_id, w.buf).await {
+            Ok(Answer::Ack) => Ok(()),
+            Ok(Answer::Nack(code, msg)) => Err((code, msg)),
+            Ok(Answer::Rpc(_)) => Err((10, "an unexpected answer".into())),
+            Err(d) => Err((10, d.render())),
         }
-        Ok(self.with_desk(|d| application(d, job)))
     }
 
-    fn release(&self, job: u32) -> Outcome {
-        let lane = self.held(job)?;
-        self.leases.lock().unwrap().remove(&job);
-        if let Some(link) = self.link.try_lock().ok().and_then(|l| l.clone()) {
-            let mut body = 7u16.to_le_bytes().to_vec();
-            body.extend_from_slice(b"release");
-            let _ = link.send(carrier::frame(frame::BYE, lane, &body));
+    /// One lease RPC: `{id, method, params}` up, `{id, result | error}` down.
+    async fn rpc(self: &Arc<Self>, method: &str, params: Value) -> Result<Value, Diag> {
+        let id = self.next_op.fetch_add(1, Ordering::Relaxed) & !RPC_KEY;
+        let json = serde_json::to_vec(&json!({"id": id, "method": method, "params": params}))
+            .unwrap_or_default();
+        let mut body = (json.len() as u32).to_le_bytes().to_vec();
+        body.extend_from_slice(&[0; 4]);
+        body.extend_from_slice(&json);
+        match self
+            .ask(RPC_KEY | id, carrier::frame(frame::RPC, 0, &body))
+            .await?
+        {
+            Answer::Rpc(v) => Ok(v),
+            _ => Err(Diag::error(
+                "internal",
+                format!("{method} answered with an op's reply"),
+            )),
         }
-        Ok(json!({"job_id": job, "released": true}))
     }
 
     fn session_lost(&self) {
-        let lost: Vec<u32> = self
-            .leases
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(job, _)| job)
-            .collect();
+        let lost = self.block.lock().unwrap().take();
         self.waits.lock().unwrap().clear();
-        for job in lost {
+        for job in lost.map(|b| b.jobs).unwrap_or_default() {
             self.notify(job, json!({"type": "lease_lost", "job_id": job}));
         }
     }
 
-    fn list_leases(&self) -> Value {
-        let carrier = self
-            .link
-            .try_lock()
-            .ok()
-            .and_then(|l| l.as_ref().map(|l| l.name));
-        let jobs: Vec<u32> = self.leases.lock().unwrap().keys().copied().collect();
-        json!({
-            "carrier": carrier,
-            "schema": format!("{:04x}", schema::HASH),
-            "leases": self.with_desk(|d| jobs.iter().map(|&j| application(d, j)).collect::<Vec<_>>()),
-            "frames": self.frames.load(Ordering::Relaxed),
-            "notifications": self.delivered.load(Ordering::Relaxed),
-        })
-    }
+    // ---- desk changes to the block --------------------------------------------
 
-    // ---- desk changes to leased applications --------------------------------
-
-    /// A PATCH's application rows and deletions, for the jobs leased here.
+    /// A PATCH's application rows and deletions, for the jobs in the block.
     fn notify_rows(&self, f: &wire::Frame<'_>) {
-        let held: Vec<u32> = self.leases.lock().unwrap().keys().copied().collect();
+        let held: Vec<u32> = self
+            .block
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| b.jobs.clone())
+            .unwrap_or_default();
         if held.is_empty() {
             return;
         }
@@ -465,7 +799,7 @@ impl Hub {
         }
     }
 
-    /// A desk event for one lease: a log notification, and kept for polling.
+    /// A desk event for the block: a log notification, and kept for polling.
     fn notify(&self, job: u32, event: Value) {
         self.delivered.fetch_add(1, Ordering::Relaxed);
         let mut events = self.events.lock().unwrap();
@@ -492,6 +826,250 @@ impl Hub {
             drained.extend(events.get_mut(&j).into_iter().flat_map(|q| q.drain(..)));
         }
         json!({"events": drained})
+    }
+}
+
+/// `hireme {"explain":"<code>"}`: a code's long form.
+fn explained(a: &Value) -> Reply {
+    let code = a["explain"].as_str().unwrap_or("");
+    diag::explain(code)
+        .map(|t| (json!(t), vec![]))
+        .ok_or_else(|| {
+            Diag::error("argument", format!("no diagnostic code `{code}`"))
+                .call("hireme", a)
+                .at("explain", "not a code hireme-mcp uses")
+                .help("codes appear in brackets: error[busy] → hireme {\"explain\":\"busy\"}")
+        })
+}
+
+fn lease_refused(a: &Value, code: &str, data: &Value, next: &str) -> Diag {
+    let n = data["n"].as_u64().unwrap_or(0);
+    let field = if a.get("count").is_some() {
+        "count"
+    } else {
+        "from"
+    };
+    match code {
+        "busy" => {
+            let held: Vec<u64> = data["held"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect();
+            let help = match data["free"]
+                .as_array()
+                .map(|f| (f[0].as_u64(), f[1].as_u64()))
+            {
+                Some((Some(f), Some(t))) => format!(
+                    "entries {f}..{t} are free, the same size:\nlease {{\"from\":{f},\"to\":{t}}}"
+                ),
+                _ => "ask by size, and the desk finds a free run:\nlease {\"count\":8}".into(),
+            };
+            let label = match held.as_slice() {
+                [] => "no free run of that size".to_string(),
+                [one] => format!("entry {one} is held by another agent"),
+                many => format!("entries {} are held by other agents", runs(many)),
+            };
+            Diag::error("busy", "the block overlaps another agent's")
+                .call("lease", a)
+                .at(field, label)
+                .note("a block is all or nothing: nothing was leased")
+                .help(help)
+        }
+        "empty" => Diag::error(
+            "empty",
+            format!("that range names no application: entries run 1..{n}"),
+        )
+        .call("lease", a)
+        .at(field, format!("outside 1..{n}"))
+        .help(format!(
+            "lease a range inside 1..{n}, or by size:\n{}",
+            next
+        )),
+        "held" => {
+            let (f, t) = (
+                data["from"].as_u64().unwrap_or(0),
+                data["to"].as_u64().unwrap_or(0),
+            );
+            Diag::error("held", format!("this agent already holds entries {f}..{t}"))
+                .call("lease", a)
+                .note("one session holds one block")
+                .help("give it back first, then lease again:\nrelease {}")
+        }
+        other => {
+            Diag::error("internal", format!("the lease was refused: {other}")).call("lease", a)
+        }
+    }
+}
+
+/// Held entries as runs: 3, 10..16.
+fn runs(entries: &[u64]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut start = 0;
+    for i in 1..=entries.len() {
+        if i == entries.len() || entries[i] != entries[i - 1] + 1 {
+            out.push(match i - start {
+                1 => entries[start].to_string(),
+                _ => format!("{}..{}", entries[start], entries[i - 1]),
+            });
+            start = i;
+        }
+    }
+    out.join(", ")
+}
+
+/// A block whose size is not a power of two works, but reads oddly.
+fn size_advice(a: &Value, b: &Block) -> Option<Diag> {
+    let size = b.to + 1 - b.from;
+    match size.is_power_of_two() {
+        true => None,
+        false => {
+            let (down, up) = (1 << (31 - size.leading_zeros()), size.next_power_of_two());
+            let field = if a.get("count").is_some() {
+                "count"
+            } else {
+                "to"
+            };
+            Some(
+                Diag::warning(
+                    "size",
+                    format!("a block of {size} entries; prefer a power of two"),
+                )
+                .call("lease", a)
+                .at(field, format!("{size} entries"))
+                .note("the lease is granted as asked; blocks of 8, 16 or 32 tile the desk evenly")
+                .help(format!(
+                    "next time, {down} or {up}:\nlease {{\"from\":{},\"to\":{}}}",
+                    b.from,
+                    b.from + up - 1
+                )),
+            )
+        }
+    }
+}
+
+/// A server warning about a lease, as a diagnostic.
+fn lease_warning(a: &Value, w: &Value, b: &Block) -> Diag {
+    let n = w["n"].as_u64().unwrap_or(0);
+    match w["code"].as_str().unwrap_or("") {
+        "truncated" => Diag::warning(
+            "truncated",
+            format!(
+                "entries {}..{} truncated to {}..{}",
+                w["asked"][0], w["asked"][1], b.from, b.to
+            ),
+        )
+        .call("lease", a)
+        .at("to", format!("the desk has {n} applications"))
+        .note("the lease covers the part of the range that exists"),
+        "count_capped" => Diag::warning(
+            "count_capped",
+            format!("asked for {} entries; the desk has {n}", w["asked"]),
+        )
+        .call("lease", a)
+        .at("count", format!("capped to {n}")),
+        other => Diag::warning("internal", format!("the lease carried a warning `{other}`")),
+    }
+}
+
+/// The diagnostic code for a wire refusal name (they are the same words).
+fn code_str(name: &str) -> &'static str {
+    match name {
+        "fire_hold" => "fire_hold",
+        "heat" => "heat",
+        "leased" => "leased",
+        "cooldown" => "cooldown",
+        "not_additive" => "not_additive",
+        "argument" => "argument",
+        "not_found" => "not_found",
+        "batch" => "batch",
+        "invalid" => "invalid",
+        "busy" => "busy",
+        "lineage_busy" => "lineage_busy",
+        _ => "internal",
+    }
+}
+
+/// The account's applications as entries: job ids in the order they were added.
+fn entries(d: &mut Desk) -> Vec<u32> {
+    let t = table::JOB_APPS;
+    let mut ids: Vec<u32> = (0..d.rows(t))
+        .map(|r| d.u32_at(t, col::job_apps::ID, r))
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The first run of `count` entries no lease holds, as the server would pick it.
+fn free_block(d: &mut Desk, count: u32) -> Option<(u32, u32)> {
+    let held: std::collections::HashSet<u32> = (0..d.rows(table::LEASES))
+        .map(|r| d.u32_at(table::LEASES, 1, r))
+        .collect();
+    let ids = entries(d);
+    let mut run = 0;
+    for (i, id) in ids.iter().enumerate() {
+        run = if held.contains(id) { 0 } else { run + 1 };
+        if run == count {
+            return Some((i as u32 + 2 - count, i as u32 + 1));
+        }
+    }
+    None
+}
+
+/// A block as the agent works through it: one line per application.
+fn block_view(d: &mut Desk, b: &Block) -> Value {
+    d.derive();
+    let keep = [
+        "job_id",
+        "company",
+        "role",
+        "stage",
+        "score_100",
+        "band",
+        "next_action",
+        "next_due",
+        "heat_state",
+        "batch",
+    ];
+    let rows: Vec<Value> = b
+        .jobs
+        .iter()
+        .zip(b.from..)
+        .map(|(&job, entry)| {
+            let card = application(d, job);
+            let mut line: Map<String, Value> = keep
+                .iter()
+                .map(|k| ((*k).to_string(), card[*k].clone()))
+                .collect();
+            line.insert("entry".into(), json!(entry));
+            Value::Object(line)
+        })
+        .collect();
+    json!({"from": b.from, "to": b.to, "applications": rows})
+}
+
+/// Edit distance, for "did you mean" helps.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+fn int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
     }
 }
 
@@ -743,16 +1321,6 @@ fn json_text(s: &str) -> Outcome {
     serde_json::from_str(s).map_err(|e| format!("view: {e}"))
 }
 
-fn letterboxes(d: &mut Desk, a: &Value) -> Outcome {
-    let rows = applications(
-        d,
-        &json!({"min_score": a["min_score"], "limit": a["limit"]}),
-        "all",
-        Some(1000),
-    )?;
-    Ok(json!({"letterboxes": rows["applications"]}))
-}
-
 // ---- arguments ----------------------------------------------------------------
 
 /// 32 bits that differ between runs, so this run's op ids are its own.
@@ -835,169 +1403,197 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
         "capabilities": {"tools": {"listChanged": false}, "logging": {}},
         "serverInfo": {"name": "hireme-mcp", "version": env!("CARGO_PKG_VERSION")},
-        "instructions": "hireme desk. The read tools rank and report on the whole desk. To change \
-            one application, lease_letterbox(job_id) and pass that job_id to its write tools. Hold \
-            as many leases as you have parallel tasks; release_letterbox when done. Changes to \
-            leased applications arrive as log notifications and through letterbox_events. \
-            FIRE HOLD: nothing here submits an application."
+        "instructions": "hireme is a job-search desk. Start with hireme {}: it says where this agent \
+            stands and what to call next. This agent holds one lease, a block of consecutive \
+            applications (lease {\"count\":16}), works through it (block {}, application, set_*, \
+            tailor_line), and releases it (release {}). Any tool called with {} prints its call \
+            shape; refusals read like rustc diagnostics, and hireme {\"explain\":\"<code>\"} gives the \
+            long form. FIRE HOLD: nothing here submits an application."
     })
+}
+
+/// Each tool's call shape: its description, and what a blank call prints.
+fn usage(tool: &str) -> &'static str {
+    match tool {
+        "hireme" => "Where this agent stands and how to work; the base case of every question.
+
+Call shape: hireme {}  |  hireme {\"explain\":\"<code>\"}
+- {}: the desk's size, this agent's block, the workflow, and NEXT: the call to make.
+- explain: the long form of a diagnostic code, e.g. hireme {\"explain\":\"busy\"}.",
+        "lease" => "Take this agent's one lease: a block of consecutive entries (applications, numbered 1..n in the order they were added).
+
+Call shape: lease {\"count\":16}  |  lease {\"from\":1,\"to\":16}  |  lease {\"from\":17}
+- count: the first free run of that many entries.
+- from..to: exactly those entries; a range past the desk is clamped, with a warning. from alone takes 16.
+Response branching (do not guess):
+- granted: {from, to, applications:[{entry, job_id, company, role, stage, score_100, ...}]}, warnings first if clamped.
+- error[busy]: part of the range is in another agent's block; nothing was leased; help: names a free block.
+- error[held]: this agent already holds a block; release {} first.
+- error[empty]: the range is outside 1..n.",
+        "release" => "Give this agent's block back.
+
+Call shape: release {}
+Response: {released:{from,to} | null, next:\"lease ...\"}: the block is free for any agent at once.",
+        "block" => "This agent's block, one line per application.
+
+Call shape: block {}
+Response: {from, to, applications:[{entry, job_id, company, role, stage, score_100, next_action, heat_state, ...}]}.
+error[leased] if this agent holds no block: help: names the lease call to make.",
+        "application" => "One application in full: its fields, rail, events, heat, coverage and composed CV.
+
+Call shape: application {\"entry\":E}  |  application {\"job_id\":J}
+The CV's lines are cv.sections[].lines[]: each has id (the item_id tailor_line takes), mode, title, body.",
+        "set_stage" => "Move an application in your block along the battleplan.
+
+Call shape: set_stage {\"entry\":E,\"stage\":\"<stage>\"}  (or job_id instead of entry)
+Response: {ok, job_id, entry} once written. error[leased] outside your block; error[argument] for an unknown stage; error[fire_hold] for submission stages.",
+        "set_next_action" => "Set an application's next action, and optionally its due date.
+
+Call shape: set_next_action {\"entry\":E,\"next_action\":\"<text>\",\"next_due\":\"YYYY-MM-DD\"}
+Response: {ok, job_id, entry}.",
+        "set_score" => "Set an application's score_100 (0..100).
+
+Call shape: set_score {\"entry\":E,\"score\":90}
+Response: {ok, job_id, entry}. error[argument] outside 0..100.",
+        "tailor_line" => "Hide, emphasize, alter or restore one line of an application's CV.
+
+Call shape: tailor_line {\"entry\":E,\"item_id\":I,\"mode\":\"hidden|emphasized|altered|inherit\",\"title\":\"...\",\"body\":\"...\",\"reason\":\"...\"}
+item_id comes from application {\"entry\":E}: cv.sections[].lines[].id. title/body only for altered.
+An employer's applications share one CV: the first agent to tailor it holds it (error[lineage_busy] for others).",
+        "open_cv_generation" => "After the 90-day window, open an additive CV generation for an application's employer.
+
+Call shape: open_cv_generation {\"entry\":E}
+error[cooldown] inside the window.",
+        "can_apply" => "Would queueing this application exceed its company or ATS heat? allow or defer, with the reason and cooldown.
+
+Call shape: can_apply {\"entry\":E}  |  can_apply {\"job_id\":J}",
+        "list_applications" => "The board, ranked by score_100 then cooler heat, filtered like the desk's top bar.
+
+Call shape: list_applications {\"q\":\"...\",\"stage\":\"...\",\"status\":\"open\",\"batch\":\"B-1\",\"min_score\":80,\"band\":\"...\",\"heat\":\"cool\",\"limit\":100}  (all optional)",
+        "recommend_applications" => "The open applications to draft first: score_100 ≥ 90 by default, heat-blocked ones left out.
+
+Call shape: recommend_applications {}  |  {\"min_score\":80,\"limit\":25}",
+        "score_distribution" => "score_100 band counts and ten-point bins over the filtered board.
+
+Call shape: score_distribution {}  (list_applications' filters apply)",
+        "heat_status" => "Company and ATS heat against cap, with cooldowns.
+
+Call shape: heat_status {}  |  {\"company\":\"acme\"}  |  {\"ats\":\"greenhouse\"}",
+        "list_batches" => "The batches on the desk.
+
+Call shape: list_batches {}",
+        "gym_status" => "Gym conditioning: daily target, streak, weekly pace (not score_100), topics.
+
+Call shape: gym_status {}",
+        "net_status" => "Networking lane: Broadside Observer URL, shipped work this week, drafts, observer runs. Not a CRM.
+
+Call shape: net_status {}",
+        "gym_log" => "Log a LeetCode / Codeforces / systems rep.
+
+Call shape: gym_log {\"title\":\"...\",\"slug\":\"...\",\"platform\":\"leetcode\",\"topic\":\"dp\",\"difficulty\":\"medium\",\"outcome\":\"solved\",\"minutes\":20,\"url\":\"...\",\"note\":\"...\",\"done_on\":\"YYYY-MM-DD\"}",
+        "gym_set_target" => "Set the gym's daily solved-rep target (1..30).
+
+Call shape: gym_set_target {\"target\":3}",
+        "net_log" => "Log an observer run, shipped artifact, post or draft. Not a CRM.
+
+Call shape: net_log {\"kind\":\"artifact\",\"channel\":\"broadside\",\"title\":\"...\",\"url\":\"...\",\"body\":\"...\",\"shipped_on\":\"YYYY-MM-DD\"}",
+        "net_set_lane" => "Set the Broadside Observer research lane URL.
+
+Call shape: net_set_lane {\"url\":\"https://...\"}",
+        "letterbox_events" => "Drain the changes to your block's applications (also sent as log notifications).
+
+Call shape: letterbox_events {}  |  {\"job_id\":J}",
+        _ => "No such tool: hireme {} lists them.",
+    }
+}
+
+/// Tools whose blank call has nothing to act on, so it prints their call shape.
+fn needs_arguments(tool: &str) -> bool {
+    matches!(
+        tool,
+        "application"
+            | "set_stage"
+            | "set_next_action"
+            | "set_score"
+            | "tailor_line"
+            | "open_cv_generation"
+            | "can_apply"
+            | "gym_log"
+            | "gym_set_target"
+            | "net_log"
+            | "net_set_lane"
+    )
 }
 
 fn tools(d: &mut Desk) -> Vec<Value> {
     let keys = |t: u16| -> Value { (0..d.rows(t)).map(|r| json!(d.str_at(t, 2, r))).collect() };
     let en = |t: u16| json!({"type": "string", "enum": keys(t)});
-    let score = json!({"type": "integer", "minimum": 0, "maximum": 100});
+    let int = json!({"type": "integer"});
     let s = json!({"type": "string"});
-    let job = json!({"type": "integer", "description": "The application's job id"});
+    let score = json!({"type": "integer", "minimum": 0, "maximum": 100});
+    let target = json!({"entry": {"type": "integer", "description": "An entry in your block (1..n)"},
+                        "job_id": {"type": "integer", "description": "Or the application's job id"}});
     let filters = json!({"q": s, "stage": en(table::STAGES), "status": s, "batch": s,
-        "min_score": score, "band": en(table::BANDS), "heat": en(table::HEAT_STATES),
-        "limit": {"type": "integer", "minimum": 1}});
-    let tool = |name: &str, description: &str, props: Value, required: &[&str]| {
-        json!({"name": name, "description": description,
-               "inputSchema": {"type": "object", "properties": props, "required": required}})
-    };
-    let with_job = |extra: Value| {
-        let mut p = extra;
-        p["job_id"] = job.clone();
+        "min_score": score, "band": en(table::BANDS), "heat": en(table::HEAT_STATES), "limit": int});
+    let with = |extra: Value| {
+        let mut p = target.clone();
+        p.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
         p
     };
-    vec![
-        tool(
-            "list_letterboxes",
-            "Applications an agent can lease, highest score_100 first, with whether each is leased",
-            json!({"min_score": score, "limit": {"type": "integer"}}),
-            &[],
+    let schemas: [(&str, Value); 23] = [
+        (
+            "hireme",
+            json!({"explain": {"type": "string", "description": "A diagnostic code, e.g. busy"}}),
         ),
-        tool("list_batches", "The batches on the desk", json!({}), &[]),
-        tool(
-            "list_applications",
-            "Applications ranked by score_100, then cooler company heat, filtered like the desk's top bar. FIRE HOLD — does not submit",
-            filters.clone(),
-            &[],
-        ),
-        tool(
-            "recommend_applications",
-            "The open applications to draft first (score_100 floor 90 by default), heat-blocked ones left out. Ranks only; does not submit",
-            filters.clone(),
-            &[],
-        ),
-        tool(
-            "score_distribution",
-            "score_100 band counts and ten-point bins over the filtered desk",
-            filters,
-            &[],
-        ),
-        tool(
-            "heat_status",
-            "Company and ATS heat against cap, with cooldowns, optionally filtered by company or ats. FIRE HOLD",
-            json!({"company": s, "ats": s}),
-            &[],
-        ),
-        tool(
-            "can_apply",
-            "Would queueing this application exceed company or ATS heat? allow or defer, with reason and cooldown. FIRE HOLD",
-            json!({"job_id": job}),
-            &["job_id"],
-        ),
-        tool(
-            "gym_status",
-            "Gym conditioning: daily target, streak, weekly pace (not Life-EV score_100), topic counts",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "gym_log",
-            "Log a LeetCode / Codeforces / systems rep (platform, title, slug, topic, difficulty, url, outcome, minutes, note, done_on)",
-            json!({"title": s, "slug": s, "platform": s, "topic": s, "difficulty": s, "url": s, "outcome": s, "minutes": {"type": "integer"}, "note": s, "done_on": s}),
-            &[],
-        ),
-        tool(
-            "gym_set_target",
-            "Set the gym daily solved-rep target (1–30)",
-            json!({"target": {"type": "integer", "minimum": 1, "maximum": 30}}),
-            &["target"],
-        ),
-        tool(
-            "net_status",
-            "Networking lane: Broadside Observer URL, shipped work this week, open drafts, observer runs. Not CRM",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "net_log",
-            "Log an observer run, shipped artifact, post, or draft (kind, channel, title, url, body, shipped_on). Not CRM",
-            json!({"kind": s, "channel": s, "title": s, "url": s, "body": s, "shipped_on": s}),
-            &[],
-        ),
-        tool(
-            "net_set_lane",
-            "Set the Broadside Observer research lane URL",
-            json!({"url": s}),
-            &["url"],
-        ),
-        tool(
-            "lease_letterbox",
-            "Lease one application so this agent can change it. Hold several to work in parallel",
-            json!({"job_id": job}),
-            &["job_id"],
-        ),
-        tool(
-            "release_letterbox",
-            "Release a lease",
-            json!({"job_id": job}),
-            &["job_id"],
-        ),
-        tool(
-            "list_leases",
-            "The leases this agent holds, the carrier, and the wire schema",
-            json!({}),
-            &[],
-        ),
-        tool(
-            "letterbox_events",
-            "Drain desk changes to leased applications (all, or one job_id)",
-            json!({"job_id": job}),
-            &[],
-        ),
-        tool(
-            "get_application",
-            "A leased application with its composed CV: lines, modes, theme and rail",
-            json!({"job_id": job}),
-            &["job_id"],
-        ),
-        tool(
-            "set_stage",
-            "Move a leased application along the battleplan",
-            with_job(json!({"stage": en(table::STAGES)})),
-            &["job_id", "stage"],
-        ),
-        tool(
+        ("lease", json!({"count": int, "from": int, "to": int})),
+        ("release", json!({})),
+        ("block", json!({})),
+        ("application", target.clone()),
+        ("set_stage", with(json!({"stage": en(table::STAGES)}))),
+        (
             "set_next_action",
-            "Set a leased application's next action and optional due date (ISO)",
-            with_job(json!({"next_action": s, "next_due": s})),
-            &["job_id", "next_action"],
+            with(json!({"next_action": s, "next_due": s})),
         ),
-        tool(
-            "set_score",
-            "Set a leased application's score_100",
-            with_job(json!({"score": score})),
-            &["job_id", "score"],
-        ),
-        tool(
+        ("set_score", with(json!({"score": score}))),
+        (
             "tailor_line",
-            "Hide, emphasize, alter (title/body) or inherit a line on a leased application's CV",
-            with_job(
-                json!({"item_id": {"type": "integer"}, "mode": {"type": "string", "enum": ["hidden", "emphasized", "altered", "inherit"]}, "title": s, "body": s, "reason": s}),
+            with(
+                json!({"item_id": int, "mode": {"type": "string", "enum": ["hidden", "emphasized", "altered", "inherit"]}, "title": s, "body": s, "reason": s}),
             ),
-            &["job_id", "item_id", "mode"],
         ),
-        tool(
-            "open_cv_generation",
-            "After the cooldown, open an additive CV generation for a leased application's employer",
-            with_job(json!({})),
-            &["job_id"],
+        ("open_cv_generation", target.clone()),
+        ("can_apply", target.clone()),
+        ("list_applications", filters.clone()),
+        ("recommend_applications", filters.clone()),
+        ("score_distribution", filters),
+        ("heat_status", json!({"company": s, "ats": s})),
+        ("list_batches", json!({})),
+        ("gym_status", json!({})),
+        ("net_status", json!({})),
+        (
+            "gym_log",
+            json!({"title": s, "slug": s, "platform": s, "topic": s, "difficulty": s, "outcome": s, "minutes": int, "url": s, "note": s, "done_on": s}),
         ),
-    ]
+        (
+            "gym_set_target",
+            json!({"target": {"type": "integer", "minimum": 1, "maximum": 30}}),
+        ),
+        (
+            "net_log",
+            json!({"kind": s, "channel": s, "title": s, "url": s, "body": s, "shipped_on": s}),
+        ),
+        ("net_set_lane", json!({"url": s})),
+        ("letterbox_events", json!({"job_id": int})),
+    ];
+    schemas
+        .into_iter()
+        .map(|(name, props)| {
+            json!({"name": name, "description": usage(name),
+                   "inputSchema": {"type": "object", "properties": props}})
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1022,5 +1618,114 @@ mod tests {
             ["minutes", "20", "title", "x"]
         );
         assert_eq!(text(&Value::Null), "");
+    }
+
+    // Golden outputs: what an agent reads for each lease refusal and warning.
+    #[test]
+    fn lease_refusals_read_like_rustc() {
+        let next = "lease {\"count\":16}   (entries 33..48 are free now)";
+        let busy = lease_refused(
+            &json!({"from": 10, "to": 25}),
+            "busy",
+            &json!({"code": "busy", "held": [10, 11, 12, 13, 14, 15, 16], "free": [17, 32], "n": 1000}),
+            next,
+        );
+        assert_eq!(
+            busy.render(),
+            "error[busy]: the block overlaps another agent's
+  |
+  | lease {\"from\":10,\"to\":25}
+  |               ^^ entries 10..16 are held by other agents
+  |
+  = note: a block is all or nothing: nothing was leased
+  = help: entries 17..32 are free, the same size:
+          lease {\"from\":17,\"to\":32}
+  = explain: hireme {\"explain\":\"busy\"}"
+        );
+
+        let empty = lease_refused(
+            &json!({"from": 2000, "to": 2015}),
+            "empty",
+            &json!({"code": "empty", "asked": [2000, 2015], "n": 1000}),
+            next,
+        );
+        assert_eq!(
+            empty.render(),
+            "error[empty]: that range names no application: entries run 1..1000
+  |
+  | lease {\"from\":2000,\"to\":2015}
+  |               ^^^^ outside 1..1000
+  |
+  = help: lease a range inside 1..1000, or by size:
+          lease {\"count\":16}   (entries 33..48 are free now)
+  = explain: hireme {\"explain\":\"empty\"}"
+        );
+
+        let held = lease_refused(
+            &json!({"count": 16}),
+            "held",
+            &json!({"code": "held", "from": 1, "to": 16}),
+            next,
+        );
+        assert!(
+            held.render()
+                .starts_with("error[held]: this agent already holds entries 1..16")
+        );
+    }
+
+    #[test]
+    fn lease_warnings_ride_with_the_grant() {
+        let block = Block {
+            from: 990,
+            to: 1000,
+            jobs: vec![],
+        };
+        let a = json!({"from": 990, "to": 1010});
+        let truncated = lease_warning(
+            &a,
+            &json!({"code": "truncated", "asked": [990, 1010], "n": 1000}),
+            &block,
+        );
+        assert_eq!(
+            truncated.render(),
+            "warning[truncated]: entries 990..1010 truncated to 990..1000
+  |
+  | lease {\"from\":990,\"to\":1010}
+  |                        ^^^^ the desk has 1000 applications
+  |
+  = note: the lease covers the part of the range that exists
+  = explain: hireme {\"explain\":\"truncated\"}"
+        );
+        let size = size_advice(&a, &block).expect("11 is not a power of two");
+        assert_eq!(
+            size.render(),
+            "warning[size]: a block of 11 entries; prefer a power of two
+  |
+  | lease {\"from\":990,\"to\":1010}
+  |                        ^^^^ 11 entries
+  |
+  = note: the lease is granted as asked; blocks of 8, 16 or 32 tile the desk evenly
+  = help: next time, 8 or 16:
+          lease {\"from\":990,\"to\":1005}
+  = explain: hireme {\"explain\":\"size\"}"
+        );
+        assert!(
+            size_advice(
+                &json!({"count": 16}),
+                &Block {
+                    from: 1,
+                    to: 16,
+                    jobs: vec![]
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn helpers_behind_the_suggestions() {
+        assert_eq!(runs(&[3, 10, 11, 12, 20]), "3, 10..12, 20");
+        assert_eq!(distance("gatd", "gated"), 1);
+        assert_eq!(distance("", "abc"), 3);
     }
 }
