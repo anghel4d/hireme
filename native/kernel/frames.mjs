@@ -153,14 +153,6 @@ export async function kernel(wasm) {
       const row = k.row_of(S.table.cards, id)
       return row < 0 ? null : K.row("cards", row, only)
     },
-    events() {
-      const n = k.events_len()
-      const r = new Uint32Array(mem(), k.events_ptr(), n * 4)
-      return Array.from({ length: n }, (_, i) => ({
-        id: r[i * 4] + r[i * 4 + 1] * 2 ** 32, code: r[i * 4 + 2], mis: r[i * 4 + 3],
-        msg: td.decode(new Uint8Array(mem(), k.event_msg_ptr(i), k.event_msg_len(i))),
-      }))
-    },
     snapshot() { const n = k.snapshot(); return new Uint8Array(mem(), k.snapshot_ptr(), n).slice() },
   }
   return K
