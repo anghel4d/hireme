@@ -130,8 +130,9 @@ export interface Desk {
 /** What carries ops up and brings the base down. */
 export interface Link {
   send(opId: bigint, op: Op): void
-  /** The desk wants these documents resident, most wanted first. */
+  /** A read found these documents missing. Called on every such read: the link dedupes. */
   want(focus: readonly number[], root: readonly number[]): void
+  /** The visible cards, the selected one first: the link brings their focuses ahead of need. */
   hint(ids: readonly number[]): void
 }
 
@@ -341,7 +342,6 @@ export class LocalDesk implements Desk {
   private laneView: Lanes | null = null
   private tableView: Tables | null = null
   private readonly listeners = new Set<(c: Change) => void>()
-  private readonly asked = new Set<number>()
   private readonly client = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1
   private counter = 0
   private statusNow: Status = "connecting"
@@ -374,16 +374,14 @@ export class LocalDesk implements Desk {
   str(name: string): StrColumn { return this.board?.str(name) ?? EMPTY_STR }
   rowOf(id: number): number { return this.board?.rowOf(id) ?? -1 }
   get status(): Status { return this.statusNow }
+  hasFocus(id: number): boolean { return this.focuses.has(id) }
 
   focus(id: number): Focus | null {
     const hit = this.views.get(id)
     if (hit) return hit
     const base = this.focuses.get(id)
     if (!base) {
-      if (!this.asked.has(id)) {
-        this.asked.add(id)
-        this.link?.want([id], [])
-      }
+      this.link?.want([id], [])
       return null
     }
     let f = base
@@ -395,10 +393,7 @@ export class LocalDesk implements Desk {
   root(profileId: number): Root | null {
     const base = this.roots.get(profileId)
     if (!base) {
-      if (!this.asked.has(-profileId)) {
-        this.asked.add(-profileId)
-        this.link?.want([], [profileId])
-      }
+      this.link?.want([], [profileId])
       return null
     }
     let r = base
@@ -430,9 +425,6 @@ export class LocalDesk implements Desk {
 
   hint(ids: readonly number[]): void {
     this.link?.hint(ids)
-    const missing = ids.filter((id) => !this.focuses.has(id) && !this.asked.has(id))
-    for (const id of missing) this.asked.add(id)
-    if (missing.length > 0) this.link?.want(missing, [])
   }
 
   subscribe(fn: (c: Change) => void): () => void {
@@ -501,7 +493,6 @@ export class LocalDesk implements Desk {
 
   putFocus(f: Focus): void {
     this.focuses.set(f.job.id, f)
-    this.asked.delete(f.job.id)
     this.views.delete(f.job.id)
     this.emit({ focus: [f.job.id] })
   }
@@ -514,7 +505,6 @@ export class LocalDesk implements Desk {
 
   putRoot(r: Root): void {
     this.roots.set(r.profile.id, r)
-    this.asked.delete(-r.profile.id)
     this.emit({ root: true })
   }
 

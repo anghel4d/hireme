@@ -381,7 +381,28 @@ export function httpLink(desk: LocalDesk, kernel: Kernel): Link {
   const pack = () => once("pack", async () => desk.rebase(new Board(kernel, await fetchPacket())))
   const scoreboard = () => once("scoreboard", async () => desk.putScoreboard(await fetchScoreboard()))
   const lanes = () => once("lanes", async () => desk.putLanes(await fetchLanes()))
-  const focus = (id: number) => once(`focus:${id}`, async () => desk.putFocus(await fetchFocus(id)))
+  // Focus reads: what a draw needs goes at once; the visible set drains
+  // behind it, at most six in flight. A failed read waits before another.
+  const inFlight = new Set<number>()
+  const failed = new Map<number, number>()
+  let visible: readonly number[] = []
+  const focus = (id: number) => {
+    if (inFlight.has(id) || (failed.get(id) ?? 0) > performance.now()) return
+    inFlight.add(id)
+    fetchFocus(id).then(
+      (f) => { failed.delete(id); desk.putFocus(f) },
+      () => { failed.set(id, performance.now() + 5000) },
+    ).finally(() => {
+      inFlight.delete(id)
+      prefetch()
+    })
+  }
+  const prefetch = () => {
+    for (const id of visible) {
+      if (inFlight.size >= 6) return
+      if (!desk.hasFocus(id)) focus(id)
+    }
+  }
   const root = (id: number) => once(`root:${id}`, async () => desk.putRoot(await fetchRoot(id)))
 
   const drain = async () => {
@@ -431,9 +452,12 @@ export function httpLink(desk: LocalDesk, kernel: Kernel): Link {
       void drain()
     },
     want(focuses, roots) {
-      for (const id of focuses.slice(0, 6)) void focus(id)
+      for (const id of focuses) focus(id)
       for (const id of roots) void root(id)
     },
-    hint() {},
+    hint(ids) {
+      visible = ids
+      prefetch()
+    },
   }
 }
