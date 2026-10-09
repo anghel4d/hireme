@@ -400,7 +400,9 @@ export class Shell {
       return
     }
     void this.refreshBoard(READS[s.type])
-    if (s.job_id !== undefined && s.job_id === this.model.appId) void this.loadFocus()
+    // A batch's signal names no job; the focus shows its batch's fire.
+    const shown = s.job_id !== undefined ? s.job_id === this.model.appId : s.batch !== undefined && s.batch === this.model.focus?.job.batch?.code
+    if (shown) void this.loadFocus()
     if (s.type === "cv") this.rootChanged()
   }
 
