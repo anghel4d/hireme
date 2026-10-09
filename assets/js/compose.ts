@@ -7,7 +7,7 @@
 //
 // Shapes out are api.ts's, which is HiremeWeb.JSON's.
 
-import type { Coverage, Doc, Focus, HeatVerdict, Identity, Lanes, Line, Method, Mode, Root, Rung, Settings } from "./api.ts"
+import type { Coverage, Doc, Focus, HeatVerdict, Identity, Lanes, Line, Method, Mode, Root, Rung, Settings, ThemeMap } from "./api.ts"
 
 // ---- raw rows, as the client holds them ----
 
@@ -89,6 +89,16 @@ export function parseTheme(raw: Json): Theme {
   const words = (v: unknown) =>
     Array.isArray(v) ? v.map((w) => (w === null || w === undefined ? "" : trim(String(w)))).filter((w) => w !== "") : []
   return { lead: text(map["lead"]), lead_reason: text(map["lead_reason"]), accent: choice(map["accent"], ACCENTS, "ink"), density: choice(map["density"], DENSITIES, "cv"), targets: words(map["targets"]) }
+}
+
+/** Theme.to_map: the stored form, leaving out what is unset. */
+export function themeMap(t: Theme): ThemeMap {
+  return {
+    ...(t.lead === null ? {} : { lead: t.lead }),
+    ...(t.lead_reason === null ? {} : { lead_reason: t.lead_reason }),
+    accent: t.accent, density: t.density,
+    ...(t.targets.length === 0 ? {} : { targets: t.targets }),
+  }
 }
 
 /** An empty stored theme (nil or {}) leaves the variant's in place. */
@@ -230,8 +240,9 @@ export function focus(r: FocusRows, resolved: Resolved, cover: Cover): Focus {
     },
     profile: { id: r.profile.id, slug: r.profile.slug, name: r.profile.name, headline: r.profile.headline, summary: r.profile.summary },
     variant: { id: r.variant.id, label: r.variant.label },
+    theme: themeMap(theme),
     rail: rail(r.stages, j.pips, j.stage, j.stage_notes),
-    events: [...r.events].sort((a, b) => b.id - a.id).slice(0, 12).map((e) => ({ id: e.id, kind: e.kind, body: e.body })),
+    events: [...r.events].sort((a, b) => b.id - a.id).slice(0, 12).map((e) => ({ id: e.id, kind: e.kind, body: e.body, at: e.inserted_at })),
     cv: compose(r.profile, resolved.lines, theme, r.variant.label, r.person),
     narrative: r.narrative ? { id: r.narrative.id, body: r.narrative.body, version: r.narrative.version } : null,
     coverage: cover(targets, resolved.text),
@@ -319,12 +330,12 @@ export function lanes(today: string, kv: readonly KvRow[], problems: readonly Pr
     .slice(0, 40)
     .map((r) => {
       const p = problem.get(r.problem_id)
-      return { id: r.id, done_on: r.done_on ?? "", outcome: r.outcome, minutes: r.minutes, note: r.note, title: p?.title ?? "", url: p?.url ?? "", platform: p?.platform ?? "", topic: p?.topic ?? "", difficulty: p?.difficulty ?? "" }
+      return { id: r.id, done_on: r.done_on ?? "", outcome: r.outcome, minutes: r.minutes, note: r.note, slug: p?.slug ?? "", title: p?.title ?? "", url: p?.url ?? "", platform: p?.platform ?? "", topic: p?.topic ?? "", difficulty: p?.difficulty ?? "" }
     })
   const lane = trim(kv.find((p) => p.namespace === "net" && p.key === "broadside_lane")?.value ?? "")
   return {
     gym: {
-      target, streak,
+      today, target, streak,
       solved_today: solved.filter((r) => r.done_on === today).length,
       solved_week: solvedWeek,
       score: Math.min(100, Math.round((solvedWeek / (target * 7)) * 100)),
