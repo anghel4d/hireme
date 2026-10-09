@@ -49,6 +49,18 @@ defmodule Hireme.AccountsTest do
     assert Accounts.session(token) == nil
   end
 
+  test "session authentication finds its owner before an account is selected", %{account: account} do
+    {token, session} = Accounts.start_session(account)
+    Repo.put_account(nil)
+    assert {%{id: id}, %{id: account_id}} = Accounts.session(token)
+    assert id == session.id and account_id == account.id
+    assert Repo.account_id() == nil
+
+    other = Hireme.DataCase.open_account("Other desk")
+    assert {%{id: ^id}, %{id: ^account_id}} = Accounts.session(token)
+    assert Repo.account_id() == other.id
+  end
+
   describe "sign-in links" do
     defp link_url(token), do: "https://desk.test/sign-in/email?token=" <> token
 
