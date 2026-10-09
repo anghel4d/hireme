@@ -10,8 +10,9 @@
 # native/kernel and the wire schema they read) are copied to one fixed
 # directory and built there, because Cargo hashes a path package's absolute
 # location into its symbols and so into the function layout, which
-# --remap-path-prefix (strings only) cannot undo. No dependencies outside
-# the repo, LTO with one codegen unit, symbols stripped.
+# --remap-path-prefix (strings only) cannot undo. One registry crate
+# (miniz_oxide, pinned by Cargo.lock), LTO with one codegen unit, symbols
+# stripped.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

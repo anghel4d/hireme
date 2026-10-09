@@ -546,37 +546,26 @@ pub fn size(company: &str) -> Size {
 }
 
 /// In a normalized text (words of a-z0-9 split by single spaces), is any
-/// phrase present starting at a word start (`\bphrase`)?
-fn starts(n: &str, phrases: &[&str]) -> bool {
-    phrases.iter().any(|p| {
-        let mut from = 0;
-        while let Some(i) = n[from..].find(p) {
-            let at = from + i;
-            if at == 0 || n.as_bytes()[at - 1] == b' ' {
-                return true;
-            }
-            from = at + 1;
-        }
-        false
+/// phrase present starting at a word start (`\bphrase`)? With `whole`,
+/// it must also end at a word end (`\b(phrase)\b`). One pass over the
+/// word starts.
+fn at_word(n: &str, phrases: &[&str], whole: bool) -> bool {
+    let b = n.as_bytes();
+    let starts = core::iter::once(0).chain(b.iter().enumerate().filter(|x| *x.1 == b' ').map(|x| x.0 + 1));
+    starts.into_iter().any(|at| {
+        phrases.iter().any(|p| {
+            let end = at + p.len();
+            b[at..].starts_with(p.as_bytes()) && (!whole || end == b.len() || b[end] == b' ')
+        })
     })
 }
 
-/// `\b(phrase)\b`: the phrase as whole words.
+fn starts(n: &str, phrases: &[&str]) -> bool {
+    at_word(n, phrases, false)
+}
+
 fn words(n: &str, phrases: &[&str]) -> bool {
-    phrases.iter().any(|p| {
-        let mut from = 0;
-        while let Some(i) = n[from..].find(p) {
-            let at = from + i;
-            let end = at + p.len();
-            let left = at == 0 || n.as_bytes()[at - 1] == b' ';
-            let right = end == n.len() || n.as_bytes()[end] == b' ';
-            if left && right {
-                return true;
-            }
-            from = at + 1;
-        }
-        false
-    })
+    at_word(n, phrases, true)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
