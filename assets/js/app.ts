@@ -1,16 +1,17 @@
 import "../css/app.css"
-import { fetchPacket } from "./api.ts"
+import { httpLink } from "./api.ts"
 import { Shell } from "./shell.ts"
-import { loadKernel, Store } from "./store.ts"
+import { loadKernel, LocalDesk } from "./store.ts"
 
 const root = document.getElementById("desk")
 if (!(root instanceof HTMLElement)) throw new Error("Missing #desk")
 
 try {
-  // The kernel and the first packet are independent requests.
-  const [kernel, packet] = await Promise.all([loadKernel("/wasm/desk.wasm"), fetchPacket()])
-  const loadStore = async () => new Store(kernel, await fetchPacket())
-  new Shell(root, new Store(kernel, packet), loadStore)
+  // The desk exists at once and fills as the link brings it.
+  const desk = new LocalDesk()
+  const kernel = await loadKernel("/wasm/desk.wasm")
+  desk.attach(httpLink(desk, kernel))
+  new Shell(root, desk)
 } catch (cause) {
   root.textContent = cause instanceof Error ? cause.message : String(cause)
   console.error(cause)

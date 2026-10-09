@@ -1,7 +1,7 @@
 // Reads of what is opened and the human's writes. Every refusal is a
 // typed outcome, not a thrown string.
 
-import { parsePacket, type Packet } from "./store.ts"
+import { Board, parsePacket, type Kernel, type LocalDesk, type Link, type Op, type Packet } from "./store.ts"
 
 export type Mode = "canonical" | "hidden" | "altered" | "emphasized"
 
@@ -308,7 +308,7 @@ export interface Signal {
   batch?: string
 }
 
-export function openFeed(onSignal: (s: Signal) => void): void {
+export function openFeed(onSignal: (s: Signal) => void, onState: (open: boolean) => void = () => {}): void {
   let delay = 500
   const connect = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws"
@@ -320,11 +320,120 @@ export function openFeed(onSignal: (s: Signal) => void): void {
         // a frame that is not a signal is dropped
       }
     }
-    ws.onopen = () => { delay = 500 }
+    ws.onopen = () => {
+      delay = 500
+      onState(true)
+    }
     ws.onclose = () => {
+      onState(false)
       setTimeout(connect, delay)
       delay = Math.min(delay * 2, 10_000)
     }
   }
   connect()
+}
+
+// The desk's link over today's routes: each op is its POST, sent one at a
+// time in order, as the control stream will carry them; the answer acks
+// it, and the base board catches up by reloading the packet. Signals from
+// other tabs and agents reload what they name. The wire replaces this.
+
+function postOp(op: Op): Promise<Outcome<object>> {
+  switch (op.kind) {
+    case "stage": return setStage(op.job, op.stage)
+    case "next": return setNext(op.job, op.next_action, op.next_due)
+    case "note": return setNote(op.job, op.stage, op.note)
+    case "score": return post(`/api/jobs/${op.job}/score`, { score: op.score })
+    case "overlay": return putOverlay(op.job, op.item, op.mode, op.body, op.reason)
+    case "heat_override": return heatOverride(op.job, op.reason)
+    case "open_fire": return nameOpenFire(op.batch)
+    case "narrative": return saveNarrative(op.narrative, op.body)
+    case "gym_log": return gymLog(op.fields)
+    case "gym_target": return gymTarget(op.target)
+    case "net_log": return netLog(op.fields)
+    case "net_lane": return netLane(op.url)
+  }
+}
+
+export function httpLink(desk: LocalDesk, kernel: Kernel): Link {
+  const queue: { opId: bigint; op: Op }[] = []
+  let sending = false
+  const flights = new Map<string, { again: boolean }>()
+
+  // One read of each kind in flight; asking meanwhile runs it once more.
+  const once = async (kind: string, read: () => Promise<void>) => {
+    const f = flights.get(kind)
+    if (f) {
+      f.again = true
+      return
+    }
+    const flight = { again: false }
+    flights.set(kind, flight)
+    try {
+      do {
+        flight.again = false
+        await read().catch(() => {})
+      } while (flight.again)
+    } finally {
+      flights.delete(kind)
+    }
+  }
+  const pack = () => once("pack", async () => desk.rebase(new Board(kernel, await fetchPacket())))
+  const scoreboard = () => once("scoreboard", async () => desk.putScoreboard(await fetchScoreboard()))
+  const lanes = () => once("lanes", async () => desk.putLanes(await fetchLanes()))
+  const focus = (id: number) => once(`focus:${id}`, async () => desk.putFocus(await fetchFocus(id)))
+  const root = (id: number) => once(`root:${id}`, async () => desk.putRoot(await fetchRoot(id)))
+
+  const drain = async () => {
+    if (sending) return
+    sending = true
+    try {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const { opId, op } = next
+        let r: Outcome<object>
+        try {
+          r = await postOp(op)
+        } catch {
+          r = { ok: false, status: 0, error: "offline" }
+        }
+        if (!r.ok) {
+          desk.nacked(opId, r.error)
+          continue
+        }
+        const v = r.value as Record<string, unknown>
+        if (v["focus"]) desk.putFocus(v["focus"] as Focus)
+        if (v["gym"] && v["net"]) desk.putLanes(v as unknown as Lanes)
+        desk.acked(opId)
+        if (op.kind === "narrative") desk.staleRoots()
+        void pack()
+        if (op.kind === "stage" || op.kind === "open_fire" || op.kind === "score") void scoreboard()
+        if (op.kind === "stage" || op.kind === "heat_override") void lanes()
+      }
+    } finally {
+      sending = false
+    }
+  }
+
+  openFeed((s) => {
+    void pack()
+    if (s.type !== "cv") void scoreboard()
+    if (s.type === "stage" || s.type === "application_opened") void lanes()
+    if (s.job_id !== undefined) desk.staleFocus(s.job_id)
+    if (s.type === "cv") desk.staleRoots()
+  }, (open) => desk.setStatus(open ? "websocket" : "offline"))
+  void pack()
+  void scoreboard()
+  void lanes()
+
+  return {
+    send(opId, op) {
+      queue.push({ opId, op })
+      void drain()
+    },
+    want(focuses, roots) {
+      for (const id of focuses.slice(0, 6)) void focus(id)
+      for (const id of roots) void root(id)
+    },
+    hint() {},
+  }
 }
