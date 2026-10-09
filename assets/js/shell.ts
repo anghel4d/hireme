@@ -74,8 +74,6 @@ export class Shell {
   private readonly compactQuery = matchMedia("(max-width: 980px)")
   private drawQueued = false
   private tables: Tables
-  // The ids last hinted to the desk, joined; a hint goes out only when they change.
-  private hinted = ""
   private noticeSeq = 0
   private readonly plane: HTMLElement
   private readonly cards: Keyed
@@ -498,24 +496,15 @@ export class Shell {
     const sel = d.selection()
     const ids = d.column("id")
     const parts: [number, Raw][] = []
-    // The selected card first: the server streams focuses in this order.
-    const shown: number[] = m.appId === null ? [] : [m.appId]
     const place = (pos: number) => {
       const row = sel[pos]
       if (row === undefined) return
       const id = ids[row] ?? 0
       const [x, y] = grid.origin(pos, m.grid.cols, metrics)
       parts.push([id, views.card(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id))])
-      if (id !== m.appId) shown.push(id)
     }
     if (m.index >= 0 && (m.index < start || m.index > last)) place(m.index)
     if (start >= 0) for (let p = start; p <= last; p++) place(p)
-
-    const hint = shown.join(",")
-    if (hint !== this.hinted) {
-      this.hinted = hint
-      d.hint(shown)
-    }
 
     const height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
     if (this.plane.style.height !== height) this.plane.style.height = height
