@@ -83,7 +83,8 @@ async function one(file) {
   // Ops, in order: the kernel's prediction (refusal or raw rows) against
   // what Ops.run answered and wrote, then the server's rows and its ACK.
   const CODES = { fire_hold: 1, heat: 2, leased: 3, cooldown: 4, not_additive: 5, argument: 6, not_found: 7, batch: 8, invalid: 9 }
-  const UNPREDICTED = new Set(["events", "gym_reps", "net_entries", "kv_pairs", "gym_problems"])
+  // Events carry the server's clock and ids; they come with the PATCH.
+  const UNPREDICTED = new Set(["events"])
   const SKIP_COLS = new Set(["inserted_at", "updated_at"])
   let rev = 1
   for (const line of lines.filter((l) => l.kind === "op")) {
@@ -100,16 +101,28 @@ async function one(file) {
     for (const [table, rows] of Object.entries(line.rows)) {
       if (UNPREDICTED.has(table) || !S.table[table]) continue
       for (const row of rows) {
-        const r = K.k.row_of(S.table[table], row.id)
+        const [, cols] = rawTable(table, [row])
+        let r = K.k.row_of(S.table[table], row.id)
         if (r < 0) {
-          // A predicted insert carries a provisional id; find it by its
-          // natural key (overlays: lineage and item).
-          continue
+          // A predicted insert carries a provisional id until this PATCH:
+          // find the provisional row with the same values.
+          const n = K.k.rows(S.table[table])
+          const same = (got) => Object.entries(cols).every(([c, [v]]) => {
+            // A provisional id stands for the row the same PATCH numbers.
+            if (c === "id" || SKIP_COLS.has(c) || !(c in got) || (c.endsWith("_id") && got[c] >= 0x80000000)) return true
+            const def = S.col[table][c]
+            const norm = v === null ? (wireType(def.kind) === 2 ? "" : wireType(def.kind) === 4 ? NaN : NONE) : v
+            return Object.is(got[c], norm)
+          })
+          r = Array.from({ length: n }, (_, i) => i).find((i) => K.row(table, i).id >= 0x80000000 && same(K.row(table, i))) ?? -1
+          if (r < 0) {
+            check(`ops.rows.${table}.insert`, what, "no matching predicted row", JSON.stringify(row))
+            continue
+          }
         }
         const got = K.row(table, r)
-        const [, cols] = rawTable(table, [row])
         for (const [c, [v]] of Object.entries(cols)) {
-          if (SKIP_COLS.has(c) || !(c in got)) continue
+          if (SKIP_COLS.has(c) || !(c in got) || ((c === "id" || c.endsWith("_id")) && got[c] >= 0x80000000)) continue
           const def = S.col[table][c]
           const norm = v === null ? (wireType(def.kind) === 2 ? "" : wireType(def.kind) === 4 ? NaN : NONE) : v
           check(`ops.rows.${table}.${c}`, what, got[c], norm)
