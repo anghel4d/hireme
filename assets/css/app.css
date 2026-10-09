@@ -571,6 +571,8 @@ kbd {
   flex-direction: column;
   background: var(--bg);
 }
+/* The battleplan fills its wrap, so its body's columns scroll on their own. */
+.battleplan { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .bp-bar {
   flex: 0 0 auto;
   display: flex;
@@ -664,7 +666,10 @@ kbd {
     z-index: 4;
     border-left: 0;
   }
-  .bp-body { grid-template-columns: 1fr; }
+  /* On a narrow screen a lens takes the whole desk: the bars above the board leave it too little height. */
+  .desk { position: relative; }
+  .desk-stage { position: static; }
+  .bp-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .campaign { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40dvh; }
   .lane-body { grid-template-columns: 1fr; }
   .heat-col { grid-template-columns: repeat(2, minmax(7rem, 1fr)); }
