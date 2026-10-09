@@ -1,12 +1,12 @@
 // Inlined in <head>, after the wire meta tags, before the bundle. It
 // starts what the desk needs first, so it overlaps the bundle download:
-// the connection's handshake, the read of the last snapshot from
-// IndexedDB, and HELLO, which names that snapshot's rev. The gate wants
-// HELLO within 2 s of CONNECT, and a bundle on a slow link may not be
-// running by then. The bundle adopts all of it from `window.__hw`;
-// frames that arrive before it does wait in the stream, or, on the
-// socket, in a queue. This file imports nothing: its built text is
-// hashed into the CSP.
+// the read of the last snapshot's rev from IndexedDB, then the connection.
+// On WebTransport the CONNECT names that rev, so the server pushes the
+// BOOT (or the resume) on a stream of its own the moment it accepts, and
+// this script starts draining it at once; it also opens control (bidi 0)
+// with a HELLO. On the socket it sends HELLO when it opens. The bundle
+// adopts all of it from `window.__hw`: what arrived before it did waits in
+// a queue. This file imports nothing: its built text is hashed into the CSP.
 
 {
   const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content ?? ""
@@ -17,12 +17,12 @@
   // A dev gate's self-signed certificate is pinned by its hash.
   const hashes = meta("wire-gate-hashes").split(" ").filter((h) => h !== "")
     .map((h) => ({ algorithm: "sha-256", value: new Uint8Array((h.match(/../g) ?? []).map((b) => Number.parseInt(b, 16))) }))
+  type Uni = { chunks: Uint8Array[]; done: boolean; wake: (() => void) | null }
   const hw: {
-    wt?: WebTransport
     ws?: WebSocket
     snap?: Promise<unknown>
     clientId: number
-    hello?: Promise<{ rev: bigint; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
+    hello?: Promise<{ rev: bigint; wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
     queue: ArrayBuffer[]
   } = { clientId: crypto.getRandomValues(new Uint32Array(1))[0] ?? 1, queue: [] }
 
@@ -44,12 +44,15 @@
   })
   hw.snap = snap
 
-  // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables), in a 16-byte header.
-  // A snapshot written under another schema is no snapshot.
-  const hello = async () => {
+  // The snapshot's rev; a snapshot of another schema or format (store.ts's FORMAT) is no snapshot.
+  const revOf = async () => {
     const rec = await snap
-    // A snapshot of another schema or format (store.ts's FORMAT) is no snapshot.
-    const rev = rec && rec.format === 2 && rec.hash === schema && typeof rec.rev === "bigint" ? rec.rev : 0n
+    return rec && rec.format === 2 && rec.hash === schema && typeof rec.rev === "bigint" ? rec.rev : 0n
+  }
+
+  // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables), in a 16-byte header.
+  const hello = async () => {
+    const rev = await revOf()
     const f = new Uint8Array(40)
     const v = new DataView(f.buffer)
     v.setUint32(0, 40, true)
@@ -61,26 +64,33 @@
     return { rev, f }
   }
 
-  if (gate !== "" && ticket !== "" && "WebTransport" in window) {
-    try {
-      const wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}`, hashes.length > 0 ? { serverCertificateHashes: hashes } : {})
+  if (gate !== "" && ticket !== "" && "WebTransport" in window && Number.isFinite(schema)) {
+    hw.hello = (async () => {
+      const rev = await revOf()
+      const wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}&rev=${rev}&raw=1&cid=${hw.clientId}`,
+        hashes.length > 0 ? { serverCertificateHashes: hashes } : {})
       wt.closed.catch(() => {})
-      hw.wt = wt
-      if (Number.isFinite(schema)) {
-        hw.hello = (async () => {
-          await wt.ready
-          const stream = await wt.createBidirectionalStream()
-          const writer = stream.writable.getWriter()
-          const { rev, f } = await hello()
-          await writer.write(f)
-          return { rev, writer, readable: stream.readable }
-        })().catch(() => null)
-      }
-    } catch {
-      delete hw.wt
-    }
-  }
-  if (!hw.wt) {
+      // The BOOT stream: every chunk queued for the bundle as it comes.
+      const uni: Uni = { chunks: [], done: false, wake: null }
+      const end = () => { uni.done = true; uni.wake?.() }
+      void (async () => {
+        const { value: stream } = await wt.incomingUnidirectionalStreams.getReader().read()
+        if (!stream) return end()
+        const reader = stream.getReader()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) return end()
+          uni.chunks.push(value)
+          uni.wake?.()
+        }
+      })().catch(end)
+      await wt.ready
+      const stream = await wt.createBidirectionalStream()
+      const writer = stream.writable.getWriter()
+      await writer.write((await hello()).f)
+      return { rev, wt, uni, writer, readable: stream.readable }
+    })().catch(() => null)
+  } else {
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(meta("csrf-token"))}`)
     ws.binaryType = "arraybuffer"
     ws.onmessage = (e) => { hw.queue.push(e.data as ArrayBuffer) }

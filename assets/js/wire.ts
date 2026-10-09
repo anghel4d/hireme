@@ -6,9 +6,12 @@
 //
 //     u32 len (whole frame) | u8 kind | u8 flags | u16 schema_hash | u64 rev
 //
-// On WebTransport everything rides bidi stream 0, in order: HELLO, OPs and
-// RPC requests up; BOOT, PATCH, ACK, NACK, RPC replies and TICK down, so a
-// PATCH always lands before the ACK it settles. PING goes up as a datagram,
+// On WebTransport the CONNECT names the snapshot's rev, and the server
+// pushes the BOOT (or the resume PATCHes) and a TICKET on a uni stream of
+// its own the moment it accepts. Everything else rides bidi stream 0, in
+// order: HELLO, OPs and RPC requests up; PATCH, ACK, NACK, RPC replies and
+// TICK down, so a PATCH always lands before the ACK it settles; control
+// frames wait until the BOOT stream ends. PING goes up as a datagram,
 // where a loss costs nothing. Stream bytes are read BYOB into one staging
 // buffer, and a complete frame is handed to the sink as a view of it: the
 // sink's copy into the kernel is the only copy. A deflated frame (the BOOT)
@@ -271,15 +274,35 @@ export interface Conn {
   readonly closed: Promise<string>
 }
 
+/** The server's BOOT stream as it arrives: chunks not yet framed, and whether it has ended. */
+export interface Uni { chunks: Bytes[]; done: boolean; wake: (() => void) | null }
+
+/** Drain a session's first incoming uni stream into a queue. */
+function drain(wt: WebTransport): Uni {
+  const uni: Uni = { chunks: [], done: false, wake: null }
+  const end = () => { uni.done = true; uni.wake?.() }
+  void (async () => {
+    const { value: stream } = await wt.incomingUnidirectionalStreams.getReader().read()
+    if (!stream) return end()
+    const reader = stream.getReader()
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return end()
+      uni.chunks.push(value as Bytes)
+      uni.wake?.()
+    }
+  })().catch(end)
+  return uni
+}
+
 /** What the page's early script started before the bundle arrived. */
 export interface Early {
-  wt?: WebTransport
   ws?: WebSocket
   snap?: Promise<unknown>
-  /** The client id the early HELLO carried; the desk's ops use it too. */
+  /** The client id the early connection carried; the desk's ops use it too. */
   clientId?: number
-  /** The early HELLO, once written: the rev it named, and on WebTransport the control stream it opened. */
-  hello?: Promise<{ rev: bigint; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Bytes> } | null>
+  /** The early connection, once open: the rev it named, and on WebTransport the session, its BOOT stream and control. */
+  hello?: Promise<{ rev: bigint; wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Bytes> } | null>
   /** Socket messages that arrived before the bundle took over. */
   queue?: ArrayBuffer[]
 }
@@ -291,8 +314,13 @@ declare global {
   interface Window { __hw?: Early }
 }
 
-/** A WebTransport session as a Conn: HELLO goes first on a new control stream, unless one was adopted. */
-export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes | Adopted): Promise<Conn> {
+/**
+ * A WebTransport session as a Conn: HELLO goes first on a new control
+ * stream, unless one was adopted. The BOOT stream is framed as it comes,
+ * and control frames are held until it ends, so nothing on control lands
+ * before the desk it changes.
+ */
+export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes | Adopted, boot: Uni = drain(wt)): Promise<Conn> {
   await wt.ready
   let failed = (_: string) => {}
   const closed = new Promise<string>((resolve) => {
@@ -309,7 +337,27 @@ export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes |
   } else {
     ;({ writer, readable } = first)
   }
-  void pump(readable, new Framer(sink, failed)).then(() => failed("control ended"), (e: unknown) => failed(String(e)))
+  const held: [Bytes, number, number, bigint][] = []
+  let booted = false
+  const release = () => {
+    if (booted) return
+    booted = true
+    for (const [f, kind, flags, rev] of held) sink.frame(f, kind, flags, rev)
+    held.length = 0
+  }
+  const control: Sink = { frame: (f, kind, flags, rev) => (booted ? sink.frame(f, kind, flags, rev) : void held.push([f.slice(), kind, flags, rev])) }
+  void pump(readable, new Framer(control, failed)).then(() => failed("control ended"), (e: unknown) => failed(String(e)))
+  const framer = new Framer(sink, failed)
+  void (async () => {
+    for (;;) {
+      for (let c = boot.chunks.shift(); c; c = boot.chunks.shift()) framer.push(c)
+      if (boot.done) break
+      await new Promise<void>((r) => { boot.wake = r })
+    }
+    release()
+  })()
+  // A server that pushes no BOOT stream would hold control for good.
+  setTimeout(release, CONNECT_MS)
   const dwriter = wt.datagrams.writable.getWriter()
 
   return {
@@ -365,8 +413,9 @@ export function socketUrl(csrf: string): string {
   return `${proto}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(csrf)}`
 }
 
-export function gateUrl(gate: string, ticket: string): string {
-  return `${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}`
+/** The CONNECT URL: the ticket, and the rev and client id the server pushes the BOOT for. */
+export function gateUrl(gate: string, ticket: string, rev: bigint, cid: number): string {
+  return `${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}&rev=${rev}&raw=1&cid=${cid}`
 }
 
 // ---- the session ----
@@ -550,15 +599,17 @@ export class Wire {
     const first = hello(this.host.hash, this.host.rev(), this.host.clientId)
     const early = this.early
     this.early = undefined
-    // The early script's HELLO stands only if it named the rev the desk restored.
+    // The early connection stands only if it named the rev the desk restored.
     const said = early?.hello ? await within(early.hello, CONNECT_MS).catch(() => null) : undefined
     const adopt = said !== undefined && said !== null && said.rev === this.host.rev()
-    if (early?.wt) {
-      const own = adopt && said.writer && said.readable ? { writer: said.writer, readable: said.readable } : null
-      const c = said === null || (said && !own) ? null : await within(openTransport(early.wt, this.sink, own ?? first), CONNECT_MS).catch(() => null)
+    if (said?.wt) {
+      const c = adopt && said.writer && said.readable && said.uni
+        ? await within(openTransport(said.wt, this.sink, { writer: said.writer, readable: said.readable }, said.uni), CONNECT_MS).catch(() => null)
+        : null
       if (c) return this.settled(c)
-      early.wt.close()
-      if (said === null) this.gateDownUntil = performance.now() + 60_000
+      said.wt.close()
+    } else if (said === null && !early?.ws) {
+      this.gateDownUntil = performance.now() + 60_000
     }
     if (early?.ws) {
       const c = said === null || (said && !adopt) ? null : await within(openSocket(early.ws, this.sink, said ? null : first, early.queue), CONNECT_MS).catch(() => null)
@@ -571,7 +622,7 @@ export class Wire {
         const ticket = this.ticket
         this.ticket = ""
         try {
-          const wt = new WebTransport(gateUrl(this.gate, ticket), this.options)
+          const wt = new WebTransport(gateUrl(this.gate, ticket, this.host.rev(), this.host.clientId), this.options)
           wt.closed.catch(() => {})
           const c = await within(openTransport(wt, this.sink, first), CONNECT_MS).catch((e: unknown) => {
             wt.close()
