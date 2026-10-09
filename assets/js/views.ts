@@ -201,45 +201,66 @@ export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdErro
     </aside>`
 }
 
-export function battleplan(f: Focus, holdError: string | null, mark: Mark): Raw {
+export function battleplan(f: Focus, holdError: string | null): Raw {
   const j = f.job
-  const active = f.rail.find((r) => r.state === "active") ?? f.rail.find((r) => r.state === "pending")
   return h`
-    <div id="battleplan" class="battleplan ${mark ? `is-${mark}` : ""}">
-      <div class="bp-bar">
-        <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
-        <div class="grow">
-          <p class="kicker">${j.code} · ${scorePill(j.score_100, j.band)} ${f.variant.label} · ${f.profile.name}</p>
-          <h2>${j.company}</h2>
-          <p class="sub">${j.role}</p>
-          <p class="sub">${fireLine(j)}</p>
-          ${heatLine(f)}
-        </div>
-        <p class="count">${f.coverage.hits.length}/${f.coverage.hits.length + f.coverage.misses.length} keywords · root ${f.root_coverage.hits.length}/${f.root_coverage.hits.length + f.root_coverage.misses.length}</p>
-      </div>
+    <div id="battleplan" class="battleplan">
+      <div id="bp-bar" class="bp-bar" data-slot></div>
       <div class="bp-body">
         <div class="campaign">
-          ${narrative(f.narrative)}
+          <div id="bp-narrative" data-slot></div>
           ${when(holdError, () => h`<p id="hold-error" class="banner hold-error">${holdError}</p>`)}
           ${when(j.batch && j.batch.fire === "hold", () => h`
             <button type="button" id="name-open-fire" class="ghost" data-action="open-fire" data-batch="${j.batch?.code}">Name open fire</button>`)}
-          ${f.rail.map((r) => h`
-            <button type="button" id="stage-${r.key}" class="stage ${r.state === "active" ? "is-active" : ""}" data-action="stage" data-stage="${r.key}">
-              <span class="meta"><span class="pip pip-${pipChar(r.state)}"></span><span class="label">${r.label}</span></span>
-              <span class="hint">${r.hint}</span>
-              ${when(r.note !== "", () => h`<span class="note-preview">${r.note}</span>`)}
-            </button>`)}
-          ${when(active, () => h`
-            <form id="note-form" class="note" data-form="note" data-stage="${active?.key}">
-              <label for="stage-note">Note · ${active?.label}</label>
-              <textarea id="stage-note" name="note">${active?.note}</textarea>
-            </form>`)}
-          <ul class="events">${f.events.map((e) => h`<li>${e.body}</li>`)}</ul>
+          <div id="bp-rail" data-slot></div>
+          <div id="bp-events" data-slot></div>
         </div>
         <div id="bp-paper" class="paper-scroll" data-slot></div>
       </div>
     </div>`
 }
+
+/**
+ * The battleplan's parts that change on their own, each drawn into its own
+ * slot of the frame: a stage write redraws the two rungs that changed, the
+ * note and the bar's heat line, not the narrative, the events or the CV,
+ * and nothing is parsed
+ * or walked unless its own HTML changed. The rail is keyed by rung, the
+ * note last.
+ */
+export function battleplanSlots(f: Focus): { bar: Raw; narrative: Raw; rail: [number, Raw][]; events: Raw } {
+  const j = f.job
+  const bar = h`
+    <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
+    <div class="grow">
+      <p class="kicker">${j.code} · ${scorePill(j.score_100, j.band)} ${f.variant.label} · ${f.profile.name}</p>
+      <h2>${j.company}</h2>
+      <p class="sub">${j.role}</p>
+      <p class="sub">${fireLine(j)}</p>
+      ${heatLine(f)}
+    </div>
+    <p class="count">${f.coverage.hits.length}/${f.coverage.hits.length + f.coverage.misses.length} keywords · root ${f.root_coverage.hits.length}/${f.root_coverage.hits.length + f.root_coverage.misses.length}</p>`
+  const active = f.rail.find((r) => r.state === "active") ?? f.rail.find((r) => r.state === "pending")
+  const rail: [number, Raw][] = f.rail.map((r, i) => [i, h`
+    <button type="button" id="stage-${r.key}" class="stage ${r.state === "active" ? "is-active" : ""}" data-action="stage" data-stage="${r.key}">
+      <span class="meta"><span class="pip pip-${pipChar(r.state)}"></span><span class="label">${r.label}</span></span>
+      <span class="hint">${r.hint}</span>
+      ${when(r.note !== "", () => h`<span class="note-preview">${r.note}</span>`)}
+    </button>`])
+  if (active) rail.push([NOTE_KEY, h`
+    <form id="note-form" class="note" data-form="note" data-stage="${active.key}">
+      <label for="stage-note">Note · ${active.label}</label>
+      <textarea id="stage-note" name="note">${active.note}</textarea>
+    </form>`])
+  return {
+    bar,
+    narrative: narrative(f.narrative),
+    rail,
+    events: h`<ul class="events">${f.events.map((e) => h`<li>${e.body}</li>`)}</ul>`,
+  }
+}
+
+const NOTE_KEY = 1 << 20
 
 /**
  * The battleplan's CV and listing, drawn into its own slot: a stage, note
