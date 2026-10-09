@@ -665,7 +665,7 @@ impl Desk {
     }
 
     /// Rows that pass every filter, in board order, into `sel`. Filter
-    /// values as the old desk.wat: -1 is "all", batch -2 is "no batch";
+    /// values: -1 is "all", batch -2 is "no batch";
     /// batch and profile are db ids, stage/status/heat are table ixs.
     #[allow(clippy::too_many_arguments)]
     pub fn select(

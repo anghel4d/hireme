@@ -76,12 +76,10 @@ defmodule Hireme.MixProject do
       "assets.setup": ["esbuild.install --if-missing"],
       "assets.build": [
         "compile",
-        "cmd --cd assets wat2wasm wasm/desk.wat -o ../priv/static/wasm/desk.wasm",
         "esbuild hireme",
         "esbuild early"
       ],
       "assets.deploy": [
-        "cmd --cd assets wat2wasm wasm/desk.wat -o ../priv/static/wasm/desk.wasm",
         "esbuild hireme --minify",
         "esbuild early",
         "phx.digest"
