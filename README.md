@@ -30,6 +30,29 @@ Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
 socket authentication returns an expiry alongside the account and key IDs, and
 URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
 
+### Performance testbed
+
+`bench/testbed.exs` starts a production release against synthetic data confined to
+`BENCH_DIR`, with a test mail adapter and local authenticated session. Never point
+these harnesses at a production database. Keep its `testbed.json` private: it holds
+synthetic session credentials.
+
+`bench/server.exs` measures domain reads and packet/JSON construction;
+`bench/actions.exs` and `bench/security_actions.exs` measure real committed writes
+with preparation and cleanup outside the timer. `bench/security.exs` isolates hot
+authentication primitives. Each emits JSONL with raw millisecond samples and
+nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
+Known-ATS scaling uses `bench/ats_fixture.exs` on a disposable canonical fixture
+copy under `/tmp/hireme-perf-ats-`, with `BENCH_HOT_JOBS` selecting the hot cohort.
+
+With the local testbed running, `BENCH_DIR=... BENCH_REV=... BENCH_OUTPUT=... node
+bench/http.mjs` measures authenticated HTTP at closed-loop concurrency 1, 4, and
+16. It validates successful responses, includes full response-body transfer in
+latency, and reports achieved requests/second separately from quantiles.
+`BENCH_N` defaults to 1,000 and `BENCH_PACKET_N` to 200; `BENCH_CONCURRENCY`
+overrides the concurrency list. These are local workload measurements, not
+production Internet latency or an open-loop capacity/SLO guarantee.
+
 ## Production deployment
 
 The production artifact is an OTP release with `bin/hireme`. The Nix package in
@@ -102,7 +125,7 @@ A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSit
 
 An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor or a way in is added or removed, or other sessions are ended. An account with no factor confirms those by having signed in within the last five minutes. `SECURITY.md` says which standards each piece answers.
 
-An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it on `/mcp/websocket` and `/mcp/letterbox/<id>/websocket` as the `x-api-key` header, or as the `base64url.bearer.phx.<base64 key>` websocket subprotocol. A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at the upgrade with no detail, and a peer that keeps failing is throttled.
+An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it on `/mcp/websocket` and `/mcp/letterbox/<id>/websocket` as the `x-api-key` header, or as the `base64url.bearer.phx.<base64 key>` websocket subprotocol. A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at the upgrade with no detail. Upgrade attempts are throttled per peer, including successful attempts; reuse established sockets for tool calls.
 
 The migration was rewritten for accounts; an existing local database needs `mix ecto.reset`.
 
