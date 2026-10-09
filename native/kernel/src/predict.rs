@@ -152,7 +152,13 @@ impl Desk {
             // Gym and net appends carry rows the server numbers; they come
             // with the PATCH. What Gym and Net refuse is refused here.
             op::GYM_TARGET => {
-                integer(o.field(0)).filter(|n| (1..=30).contains(n)).ok_or(INTERNAL)?; // :target
+                let n = integer(o.field(0)).filter(|n| (1..=30).contains(n)).ok_or(INTERNAL)?; // :target
+                let mut v = String::new();
+                push_int(&mut v, n);
+                self.kv_put("gym", "daily_target", v.as_bytes(), rec);
+            }
+            op::NET_LANE => {
+                self.kv_put("net", "broadside_lane", heat::trim(o.field(0)).as_bytes(), rec);
             }
             op::GYM_LOG => {
                 let f = form(o);
@@ -166,17 +172,129 @@ impl Desk {
                 if given.is_empty() && slug_empty(title) {
                     return Err(refusal::ARGUMENT);
                 }
+                let or = |name: &str, default: &'static str| match get(&f, name) {
+                    None | Some("") => default.as_bytes().to_vec(),
+                    Some(v) => v.as_bytes().to_vec(),
+                };
+                let platform = or("platform", "leetcode");
+                let slug = slug(if given.is_empty() { title } else { given });
+                let topic = or("topic", "other");
+                let difficulty = or("difficulty", "unknown");
+                let url = heat::trim(get(&f, "url").unwrap_or("")).as_bytes().to_vec();
+                let gp = table::GYM_PROBLEMS;
+                let found = (0..self.rows(gp)).find(|&r| {
+                    self.vstr(gp, col::gym_problems::PLATFORM, r) == platform.as_slice()
+                        && self.vstr(gp, col::gym_problems::SLUG, r) == slug.as_bytes()
+                });
+                let problem = match found {
+                    Some(r) => {
+                        let id = self.vu32(gp, col::gym_problems::ID, r);
+                        self.set(gp, id, col::gym_problems::TITLE, Val::S(title.as_bytes().to_vec()), rec);
+                        self.set(gp, id, col::gym_problems::TOPIC, Val::S(topic), rec);
+                        self.set(gp, id, col::gym_problems::DIFFICULTY, Val::S(difficulty), rec);
+                        if !url.is_empty() {
+                            self.set(gp, id, col::gym_problems::URL, Val::S(url), rec);
+                        }
+                        id
+                    }
+                    None => {
+                        let id = self.provisional_id();
+                        self.insert_row(
+                            gp,
+                            &[
+                                (col::gym_problems::ID, Val::U(id)),
+                                (col::gym_problems::PLATFORM, Val::S(platform)),
+                                (col::gym_problems::SLUG, Val::S(slug.into_bytes())),
+                                (col::gym_problems::TITLE, Val::S(title.as_bytes().to_vec())),
+                                (col::gym_problems::TOPIC, Val::S(topic)),
+                                (col::gym_problems::DIFFICULTY, Val::S(difficulty)),
+                                (col::gym_problems::URL, Val::S(url)),
+                            ],
+                        );
+                        id
+                    }
+                };
+                let done_on = get(&f, "done_on").and_then(iso_day).unwrap_or(self.today);
+                let minutes = get(&f, "minutes").and_then(integer).filter(|n| *n >= 0).unwrap_or(0) as u32;
+                let id = self.provisional_id();
+                self.insert_row(
+                    table::GYM_REPS,
+                    &[
+                        (col::gym_reps::ID, Val::U(id)),
+                        (col::gym_reps::PROBLEM_ID, Val::U(problem)),
+                        (col::gym_reps::DONE_ON, Val::U(done_on)),
+                        (col::gym_reps::MINUTES, Val::U(minutes)),
+                        (col::gym_reps::OUTCOME, Val::S(or("outcome", "solved"))),
+                        (col::gym_reps::NOTE, Val::S(heat::trim(get(&f, "note").unwrap_or("")).as_bytes().to_vec())),
+                    ],
+                );
             }
             op::NET_LOG => {
                 let f = form(o);
                 closed(&f, "kind", &["observer", "artifact", "post", "draft"], false)?;
                 closed(&f, "channel", &["broadside", "x", "other"], true)?;
-                required(&f, "title")?;
+                let title = required(&f, "title")?;
                 day(&f, "shipped_on")?;
+                let kind = get(&f, "kind").unwrap_or("");
+                let channel = match get(&f, "channel") {
+                    None | Some("") => match kind {
+                        "observer" => "broadside",
+                        "post" => "x",
+                        _ => "other",
+                    },
+                    Some(c) => c,
+                };
+                let shipped_on = match get(&f, "shipped_on") {
+                    None | Some("") => {
+                        if kind == "draft" { NONE } else { self.today }
+                    }
+                    Some(d) => iso_day(d).unwrap_or(NONE),
+                };
+                let text = |name: &str| heat::trim(get(&f, name).unwrap_or("")).as_bytes().to_vec();
+                let id = self.provisional_id();
+                self.insert_row(
+                    table::NET_ENTRIES,
+                    &[
+                        (col::net_entries::ID, Val::U(id)),
+                        (col::net_entries::KIND, Val::S(kind.as_bytes().to_vec())),
+                        (col::net_entries::CHANNEL, Val::S(channel.as_bytes().to_vec())),
+                        (col::net_entries::TITLE, Val::S(title.as_bytes().to_vec())),
+                        (col::net_entries::URL, Val::S(text("url"))),
+                        (col::net_entries::BODY, Val::S(text("body"))),
+                        (col::net_entries::SHIPPED_ON, Val::U(shipped_on)),
+                    ],
+                );
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Kv.put/3: the pair's value, inserting the pair when it is new.
+    fn kv_put(&mut self, namespace: &str, key: &str, value: &[u8], rec: &mut Vec<(u16, u32, u16, Val)>) {
+        let kt = table::KV_PAIRS;
+        let found = (0..self.rows(kt)).find(|&r| {
+            self.vstr(kt, col::kv_pairs::NAMESPACE, r) == namespace.as_bytes()
+                && self.vstr(kt, col::kv_pairs::KEY, r) == key.as_bytes()
+        });
+        match found {
+            Some(r) => {
+                let id = self.vu32(kt, col::kv_pairs::ID, r);
+                self.set(kt, id, col::kv_pairs::VALUE, Val::S(value.to_vec()), rec);
+            }
+            None => {
+                let id = self.provisional_id();
+                self.insert_row(
+                    kt,
+                    &[
+                        (col::kv_pairs::ID, Val::U(id)),
+                        (col::kv_pairs::NAMESPACE, Val::S(namespace.as_bytes().to_vec())),
+                        (col::kv_pairs::KEY, Val::S(key.as_bytes().to_vec())),
+                        (col::kv_pairs::VALUE, Val::S(value.to_vec())),
+                    ],
+                );
+            }
+        }
     }
 
     /// Desk's write/2 guard: the lease, then the row.
@@ -574,6 +692,42 @@ fn day(f: &[(&str, &str)], name: &str) -> Result<(), u8> {
 fn required<'a>(f: &[(&str, &'a str)], name: &str) -> Result<&'a str, u8> {
     let v = heat::trim(get(f, name).unwrap_or(""));
     if v.is_empty() { Err(refusal::ARGUMENT) } else { Ok(v) }
+}
+
+/// Text.slug/1: downcased, runs outside a-z0-9 as one "-", trimmed of "-".
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in heat::downcase(text).bytes() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            if gap && !out.is_empty() {
+                out.push('-');
+            }
+            gap = false;
+            out.push(c as char);
+        } else {
+            gap = true;
+        }
+    }
+    out
+}
+
+fn push_int(out: &mut String, n: i64) {
+    if n < 0 {
+        out.push('-');
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    let mut n = n.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.push_str(core::str::from_utf8(&buf[i..]).unwrap_or("0"));
 }
 
 /// Would Text.slug/1 make nothing of `title`: no a-z0-9 after downcasing.
