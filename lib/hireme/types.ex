@@ -229,12 +229,17 @@ defmodule Hireme.Text do
 
   @spec normalize(term()) :: String.t()
   def normalize(name) do
-    name
-    |> to_string()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9]+/, " ")
-    |> String.trim()
+    name |> to_string() |> String.downcase() |> fold(<<>>, false) |> String.trim()
   end
+
+  # Every run of bytes outside a-z0-9 becomes one space. A byte scan, not
+  # a regex: on OTP 28 a `~r` is compiled again on every call, and heat
+  # normalizes every company and role it paints.
+  defp fold(<<c, rest::binary>>, acc, gap?) when c in ?a..?z or c in ?0..?9,
+    do: fold(rest, if(gap?, do: <<acc::binary, ?\s, c>>, else: <<acc::binary, c>>), false)
+
+  defp fold(<<_, rest::binary>>, acc, _gap?), do: fold(rest, acc, true)
+  defp fold(<<>>, acc, _gap?), do: acc
 
   @doc "Match anchors against an already normalized name; normalize once before testing groups."
   @spec named_normalized?(String.t(), [String.t()]) :: boolean()

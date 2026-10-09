@@ -459,7 +459,7 @@ defmodule Hireme.Ops do
   # the difference as its own revision.
   defp warm(%{cards: nil} = state) do
     today = Date.utc_today()
-    heat = Heat.snapshot(today, Heat.config())
+    heat = heat(today)
     cards = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
     %{state | rev: db_rev(state), day: today, heat: heat, cards: cards}
   end
@@ -491,7 +491,7 @@ defmodule Hireme.Ops do
 
   defp repaint_all(state) do
     today = Date.utc_today()
-    heat = Heat.snapshot(today, Heat.config())
+    heat = heat(today)
     fresh = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
     rows = for {id, card} <- fresh, Map.get(state.cards, id) != card, do: card
     {%{state | day: today, heat: heat, cards: fresh}, rows, true}
@@ -510,17 +510,28 @@ defmodule Hireme.Ops do
       if moved == [] do
         {state, first, false}
       else
-        heat = Heat.snapshot(state.day, Heat.config())
+        # The table with the fresh rows is the database as committed, so
+        # the snapshot and the kin's rows come from memory.
+        table = Enum.reduce(first, state.cards, &Map.put(&2, &1.id, &1))
+        cfg = Heat.config()
+
+        heat =
+          table
+          |> Map.values()
+          |> Heat.snapshot_of(state.day, cfg)
+          |> Heat.prepare(cfg, state.day, state.heat)
+
         old = Enum.map(moved, &Map.get(state.cards, &1.id)) |> Enum.reject(&is_nil/1)
-        table = Map.values(state.cards)
+        peers = Map.values(state.cards)
 
         kin =
           (moved ++ old)
-          |> Enum.flat_map(&Heat.kin(table, &1))
+          |> Enum.flat_map(&Heat.kin(peers, &1))
           |> Enum.concat(ids)
           |> Enum.uniq()
+          |> Enum.map(&Map.fetch!(table, &1))
 
-        {%{state | heat: heat}, Desk.cards(kin, heat, state.day), true}
+        {%{state | heat: heat}, Heat.decorate_all(kin, heat, cfg, state.day), true}
       end
 
     rows = Enum.filter(painted, &(Map.get(state.cards, &1.id) != &1))
@@ -538,6 +549,11 @@ defmodule Hireme.Ops do
         {card.company, card.role, card.listing_url, card.canonical_url, card.department,
          card.squad, card.fit, card.stage_on},
       else: nil
+  end
+
+  defp heat(today) do
+    cfg = Heat.config()
+    today |> Heat.snapshot(cfg) |> Heat.prepare(cfg, today)
   end
 
   defp schedule_tick do

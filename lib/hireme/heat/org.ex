@@ -52,7 +52,7 @@ defmodule Hireme.Heat.Org do
     cond do
       Enum.any?(names, &MapSet.member?(@mega_names, &1)) -> :mega
       Enum.any?(names, &MapSet.member?(@large_names, &1)) -> :large
-      name =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
+      name =~ re(:mid) -> :mid
       true -> :small
     end
   end
@@ -96,22 +96,22 @@ defmodule Hireme.Heat.Org do
 
   defp infer_department(n) do
     cond do
-      n =~ ~r/\b(research|scientist|machine learning|\bml\b|applied sci)/ ->
+      n =~ re(:research) ->
         :research
 
-      n =~ ~r/\b(sre|site reliability|infra|infrastructure|platform|runtime|kernel|systems)/ ->
+      n =~ re(:infra) ->
         :infra
 
-      n =~ ~r/\b(security|privacy)/ ->
+      n =~ re(:security) ->
         :security
 
-      n =~ ~r/\b(data engineer|analytics|data platform)/ ->
+      n =~ re(:data) ->
         :data
 
-      n =~ ~r/\b(frontend|front end|ios|android|mobile|product engineer)/ ->
+      n =~ re(:product) ->
         :product
 
-      n =~ ~r/\b(engineer|developer|swe)/ ->
+      n =~ re(:eng) ->
         :eng
 
       true ->
@@ -124,20 +124,54 @@ defmodule Hireme.Heat.Org do
       role
       |> normalize()
       |> String.replace(
-        ~r/\b(staff|senior|sr|principal|distinguished|fellow|junior|jr|intern|iii|ii|\bi\b|l[3-8])\b/,
+        re(:seniority),
         " "
       )
-      |> String.replace(~r/\s+/, " ")
+      |> String.replace(re(:spaces), " ")
       |> String.trim()
 
     cond do
-      n =~ ~r/\bresearch scientist|applied scientist/ -> :research_scientist
-      n =~ ~r/\bresearch engineer/ -> :research_engineer
-      n =~ ~r/\b(site reliability|sre)\b/ -> :sre
-      n =~ ~r/\bdata engineer/ -> :data_engineer
-      n =~ ~r/\bsecurity engineer/ -> :security_engineer
-      n =~ ~r/\b(software engineer|swe|engineer|developer)/ -> :software_engineer
+      n =~ re(:research_scientist) -> :research_scientist
+      n =~ re(:research_engineer) -> :research_engineer
+      n =~ re(:sre) -> :sre
+      n =~ re(:data_engineer) -> :data_engineer
+      n =~ re(:security_engineer) -> :security_engineer
+      n =~ re(:software_engineer) -> :software_engineer
       true -> :other
+    end
+  end
+
+  # OTP 28 cannot keep a compiled regex in a module literal, so a `~r`
+  # here is compiled again on every call (about 20 µs each, and a card
+  # paints with several). Each pattern is compiled once per VM instead.
+  @patterns %{
+    mid: ~S"\b(systems|runtime|infra|labs?)\b",
+    research: ~S"\b(research|scientist|machine learning|\bml\b|applied sci)",
+    infra: ~S"\b(sre|site reliability|infra|infrastructure|platform|runtime|kernel|systems)",
+    security: ~S"\b(security|privacy)",
+    data: ~S"\b(data engineer|analytics|data platform)",
+    product: ~S"\b(frontend|front end|ios|android|mobile|product engineer)",
+    eng: ~S"\b(engineer|developer|swe)",
+    seniority:
+      ~S"\b(staff|senior|sr|principal|distinguished|fellow|junior|jr|intern|iii|ii|\bi\b|l[3-8])\b",
+    spaces: ~S"\s+",
+    research_scientist: ~S"\bresearch scientist|applied scientist",
+    research_engineer: ~S"\bresearch engineer",
+    sre: ~S"\b(site reliability|sre)\b",
+    data_engineer: ~S"\bdata engineer",
+    security_engineer: ~S"\bsecurity engineer",
+    software_engineer: ~S"\b(software engineer|swe|engineer|developer)"
+  }
+
+  defp re(key) do
+    case :persistent_term.get({__MODULE__, key}, nil) do
+      nil ->
+        regex = Regex.compile!(Map.fetch!(@patterns, key))
+        :persistent_term.put({__MODULE__, key}, regex)
+        regex
+
+      regex ->
+        regex
     end
   end
 

@@ -191,6 +191,21 @@ defmodule Hireme.Heat do
   alias Hireme.Repo
 
   @hot_stages [:fire_ready, :open_fire, :submitted, :reply, :closed]
+  # What the snapshot keeps of each hot job, besides its stage.
+  @peer_fields [
+    :id,
+    :company,
+    :role,
+    :listing_url,
+    :canonical_url,
+    :department,
+    :squad,
+    :fit,
+    :stage_on,
+    :score_100,
+    :heat_override,
+    :heat_override_reason
+  ]
   @queue_stages [:fire_ready, :open_fire, :submitted]
 
   @spec config() :: Config.t()
@@ -228,6 +243,23 @@ defmodule Hireme.Heat do
   def snapshot(today \\ Date.utc_today(), cfg \\ config()) do
     jobs = hot_jobs()
     build_snapshot(jobs, today, cfg)
+  end
+
+  @doc """
+  The same snapshot built from rows already in hand (board cards or job
+  rows) instead of the database: the hot ones, in id order, as peers.
+  """
+  @spec snapshot_of([map()], Date.t(), Config.t()) :: map()
+  def snapshot_of(jobs, today \\ Date.utc_today(), cfg \\ config()) do
+    jobs
+    |> Enum.filter(&hot_stage?(Map.get(&1, :current_stage) || Map.get(&1, :stage)))
+    |> Enum.sort_by(&id_of/1)
+    |> Enum.map(fn job ->
+      job
+      |> Map.take(@peer_fields)
+      |> Map.put(:current_stage, Map.get(job, :current_stage) || Map.get(job, :stage))
+    end)
+    |> build_snapshot(today, cfg)
   end
 
   @spec can_apply(pos_integer() | Job.t() | map(), keyword()) :: Verdict.t()
@@ -392,27 +424,48 @@ defmodule Hireme.Heat do
     |> String.trim()
   end
 
-  @doc "Decorate a board with request-local peer classifications and ATS load totals."
+  @doc """
+  Decorate a board against a snapshot. The peer classifications and ATS
+  load totals are derived once per snapshot and day (`prepare/3`), so a
+  caller that keeps a prepared snapshot pays only for the cards it paints.
+  """
   @spec decorate_all([map()], map(), Config.t(), Date.t()) :: [map()]
   def decorate_all(cards, snapshot, cfg \\ config(), today \\ Date.utc_today())
 
   def decorate_all([], _snapshot, _cfg, _today), do: []
 
   def decorate_all(cards, snapshot, cfg, today) do
+    snapshot = prepare(snapshot, cfg, today)
+    Enum.map(cards, &decorate(&1, snapshot, cfg, today))
+  end
+
+  @doc """
+  A snapshot with its peer traits and ATS loads for `today` derived, for
+  repeated painting. A `previous` prepared snapshot lends the traits of
+  every peer that has not changed.
+  """
+  @spec prepare(map(), Config.t(), Date.t(), map() | nil) :: map()
+  def prepare(snapshot, cfg, today, previous \\ nil)
+  def prepare(%{prepared: {today, cfg}} = snapshot, cfg, today, _previous), do: snapshot
+
+  def prepare(snapshot, cfg, today, previous) do
+    known = (previous && Map.get(previous, :traits)) || %{}
+
     traits =
       Map.new(snapshot.jobs, fn job ->
-        {id_of(job), {Org.department(job), Org.family(job), job}}
+        case Map.get(known, id_of(job)) do
+          {_, _, ^job} = same -> {id_of(job), same}
+          _ -> {id_of(job), {Org.department(job), Org.family(job), job}}
+        end
       end)
 
     ats = Map.get(snapshot, :ats) || ats_index(snapshot.jobs)
 
-    snapshot =
-      snapshot
-      |> Map.put(:traits, traits)
-      |> Map.put(:ats, ats)
-      |> Map.put(:ats_loads, index_ats_loads(snapshot.jobs, ats, today, cfg))
-
-    Enum.map(cards, &decorate(&1, snapshot, cfg, today))
+    snapshot
+    |> Map.put(:traits, traits)
+    |> Map.put(:ats, ats)
+    |> Map.put(:ats_loads, index_ats_loads(snapshot.jobs, ats, today, cfg))
+    |> Map.put(:prepared, {today, cfg})
   end
 
   @spec decorate(map(), map(), Config.t(), Date.t()) :: map()
@@ -809,22 +862,8 @@ defmodule Hireme.Heat do
     Repo.all(
       from j in Job,
         where: j.current_stage in ^@hot_stages,
-        select:
-          map(j, [
-            :id,
-            :company,
-            :role,
-            :listing_url,
-            :canonical_url,
-            :department,
-            :squad,
-            :fit,
-            :current_stage,
-            :stage_on,
-            :score_100,
-            :heat_override,
-            :heat_override_reason
-          ])
+        order_by: j.id,
+        select: map(j, ^[:current_stage | @peer_fields])
     )
   end
 
