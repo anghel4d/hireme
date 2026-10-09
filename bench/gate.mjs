@@ -1,6 +1,6 @@
 // Timing of the WebTransport gate: cold connects, and with a local echoing
 // Session (bench/gate_echo.exs, run under native/gate/netem.sh) the control
-// round trip and a bulk stream.
+// round trip and a bulk transfer on it.
 //
 //   node bench/gate.mjs --url https://GATE_HOST/wt [--n 10] [--origin https://APP_HOST]
 //     [--hash-file FILE --bytes N] [--out FILE.jsonl] [--rev LABEL]
@@ -20,7 +20,8 @@
 //   pays before its first byte, and nothing is allocated.
 // - --hash-file (local only): the self-signed certificate's hash file. The
 //   echoing Session is then expected, and both clients also time the first
-//   control echo and a bulk stream of --bytes.
+//   control echo and --bytes sent back on the control stream, the way the
+//   Session sends a BOOT.
 //
 // The production gate's host is never committed; pass it on the command line.
 
@@ -71,7 +72,7 @@ emit({ client: "probe", connect_ms: shake.connect_ms, rtt_ms: shake.rtt_ms })
 if (hash) {
   const echo = runProbe("echo", "--n", "50")
   const bulk = runProbe("bulk", "--bytes", String(bytes), "--rounds", "3")
-  emit({ client: "probe", echo_ms: echo.rtt_ms, bytes, bulk_ms: bulk.bulk_ms, ping_during_bulk_ms: bulk.ping_during_ms })
+  emit({ client: "probe", echo_ms: echo.rtt_ms, bytes, bulk_ms: bulk.bulk_ms })
 }
 
 if (args.origin) {
@@ -118,8 +119,7 @@ if (args.origin) {
           new DataView(req.buffer).setUint32(1, bytes, true)
           const tb = performance.now()
           await w.write(req)
-          const uni = (await wt.incomingUnidirectionalStreams.getReader().read()).value.getReader()
-          while (!(await uni.read()).done);
+          for (let got = 0; got < bytes; ) got += (await r.read()).value.length
           const bulk = performance.now() - tb
           wt.close()
           return { ready, echo, bulk, outcome: "accepted" }

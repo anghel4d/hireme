@@ -8,10 +8,15 @@
 #   native/gate/netem.sh RTT_MS [RATE|none] [bench/gate.mjs flags...]
 #   native/gate/netem.sh 47 none --n 5 --bytes 1048576 --origin http://localhost:4000
 #
-# Environment: GATE_* knobs pass through to the gate (GATE_INITIAL_WINDOW,
-# GATE_CC), GATE_BIN picks another gate build, LIMIT is netem's queue in
-# packets, MIX is the mix to run the BEAM with, BULK_PRIO the bulk priority.
-# Needs unshare(1) with unprivileged user namespaces, tc and the netem qdisc.
+# Before the first run: `cargo build --release --manifest-path native/gate/Cargo.toml
+# --bin hireme-gate --example probe` and `MIX_ENV=test mix compile`.
+#
+# Environment: GATE_INITIAL_WINDOW passes through to the gate, GATE_BIN
+# picks another gate build (the release's, to include the half-RTT patch),
+# LIMIT is netem's queue in packets, MIX the mix to run the BEAM with.
+# NODE_PATH (holding playwright-core) and CHROME as for bench/browser.mjs
+# when --origin asks for Chromium. Needs unshare(1) with unprivileged user
+# namespaces, tc and the netem qdisc.
 set -euo pipefail
 [ "${IN_NS:-}" = 1 ] || exec unshare -rn env IN_NS=1 bash "$0" "$@"
 here=$(cd "$(dirname "$0")" && pwd)

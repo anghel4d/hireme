@@ -80,7 +80,7 @@ defmodule HiremeWeb.GateTest do
 
     events =
       for _ <- 1..300 do
-        id = Enum.random([0, 4, 8, 2, 6]) + 4 * :rand.uniform(50)
+        id = 4 * (:rand.uniform(50) - 1)
         bytes = :crypto.strong_rand_bytes(:rand.uniform(200) - 1)
         code = :rand.uniform(0xFFFFFFFF) - 1
 
@@ -113,11 +113,6 @@ defmodule HiremeWeb.GateTest do
          :ok = Gate.send(c, 0, ["PA", "TCH"])
          :ok = Gate.fin(c, 0)
          :ok = Gate.reset(c, 4, 7)
-         :ok = Gate.stop(c, 8, 9)
-         :ok = Gate.open_uni(c, 3, -1)
-         :ok = Gate.open_bi(c, 5, 2)
-         :ok = Gate.priority(c, 3, -5)
-         :ok = Gate.datagram(c, "ping")
          :ok = Gate.close(c, 42, "done")
        end}
     )
@@ -127,11 +122,6 @@ defmodule HiremeWeb.GateTest do
       <<0x11, 0::32, "PATCH">>,
       <<0x12, 0::32>>,
       <<0x13, 4::32, 7::32>>,
-      <<0x14, 8::32, 9::32>>,
-      <<0x15, 3::32, -1::signed-32>>,
-      <<0x16, 5::32, 2::signed-32>>,
-      <<0x17, 3::32, -5::signed-32>>,
-      <<0x20, "ping">>,
       <<0x30, 42::32, "done">>
     ]
 

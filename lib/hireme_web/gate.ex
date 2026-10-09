@@ -15,9 +15,10 @@ defmodule HiremeWeb.Gate do
 
   Each message is framed `{packet,4}` (a u32 big-endian length) and laid
   out as `u8 op | body`. All integers are big-endian. Stream ids are
-  session-relative and follow QUIC's parity: client bidi `4n` (the first,
-  id 0, is the control stream), server bidi `4n+1`, client uni `4n+2`,
-  server uni `4n+3`. The Session picks the ids of the streams it opens.
+  session-relative: client bidi streams are `4n` in the order they open
+  (the first, id 0, is the control stream; letterbox leases follow), as in
+  QUIC. The gate opens no streams of its own and accepts no uni streams;
+  datagrams travel only from the client (PING).
 
   Gate to BEAM:
 
@@ -29,7 +30,7 @@ defmodule HiremeWeb.Gate do
   | `0x12` | FIN | `u32 id` |
   | `0x13` | RESET | `u32 id` · `u32 code`: the peer reset its sending side |
   | `0x14` | STOP | `u32 id` · `u32 code`: the peer stopped reading ours |
-  | `0x20` | DGRAM | bytes |
+  | `0x20` | DGRAM | bytes, one client datagram |
   | `0x30` | CLOSED | `u32 code` · reason; the socket closes next |
 
   BEAM to gate:
@@ -39,11 +40,7 @@ defmodule HiremeWeb.Gate do
   | `0x02` | ACCEPT | answer the CONNECT with 200 |
   | `0x03` | REFUSE | `u16 status` (403, 404 or 429) |
   | `0x04` | READY | HELLO verified; lift the pre-auth caps |
-  | `0x11` `0x12` `0x13` `0x14` | DATA FIN RESET STOP | as above, for our side |
-  | `0x15` | OPEN_UNI | `u32 id` · `i32 priority` |
-  | `0x16` | OPEN_BI | `u32 id` · `i32 priority` |
-  | `0x17` | PRIORITY | `u32 id` · `i32 priority` |
-  | `0x20` | DGRAM | bytes |
+  | `0x11` `0x12` `0x13` | DATA FIN RESET | as above, for our side |
   | `0x30` | CLOSE | `u32 code` · reason |
 
   The gate enforces the posture of an order gateway before anything
@@ -56,8 +53,7 @@ defmodule HiremeWeb.Gate do
   the ACCEPT: the caps then lift as the session opens, and no HELLO
   deadline applies while the page loads its bundle. Until READY the peer gets
   one client bidi stream and a 64 KiB receive window, and no datagrams
-  or uni streams are forwarded. A higher priority is sent first, so bulk
-  streams go below the control stream's 0.
+  are forwarded.
 
   ## Carrier
 
@@ -67,8 +63,6 @@ defmodule HiremeWeb.Gate do
   """
 
   use Supervisor
-
-  require Logger
 
   @enforce_keys [:socket]
   defstruct [:socket]
@@ -93,9 +87,6 @@ defmodule HiremeWeb.Gate do
   @fin 0x12
   @reset 0x13
   @stop 0x14
-  @open_uni 0x15
-  @open_bi 0x16
-  @priority 0x17
   @dgram 0x20
   @close 0x30
 
@@ -130,40 +121,20 @@ defmodule HiremeWeb.Gate do
   @spec reset(t(), id(), non_neg_integer()) :: :ok | {:error, term()}
   def reset(%__MODULE__{socket: s}, id, code), do: :gen_tcp.send(s, <<@reset, id::32, code::32>>)
 
-  @spec stop(t(), id(), non_neg_integer()) :: :ok | {:error, term()}
-  def stop(%__MODULE__{socket: s}, id, code), do: :gen_tcp.send(s, <<@stop, id::32, code::32>>)
-
-  @doc "Open a server uni stream; `id` must be `4n+3` and unused."
-  @spec open_uni(t(), id(), integer()) :: :ok | {:error, term()}
-  def open_uni(%__MODULE__{socket: s}, id, priority) when rem(id, 4) == 3,
-    do: :gen_tcp.send(s, <<@open_uni, id::32, priority::signed-32>>)
-
-  @doc "Open a server bidi stream; `id` must be `4n+1` and unused."
-  @spec open_bi(t(), id(), integer()) :: :ok | {:error, term()}
-  def open_bi(%__MODULE__{socket: s}, id, priority) when rem(id, 4) == 1,
-    do: :gen_tcp.send(s, <<@open_bi, id::32, priority::signed-32>>)
-
-  @spec priority(t(), id(), integer()) :: :ok | {:error, term()}
-  def priority(%__MODULE__{socket: s}, id, priority),
-    do: :gen_tcp.send(s, <<@priority, id::32, priority::signed-32>>)
-
-  @spec datagram(t(), iodata()) :: :ok | {:error, term()}
-  def datagram(%__MODULE__{socket: s}, iodata), do: :gen_tcp.send(s, [<<@dgram>> | iodata])
-
   @spec close(t(), non_neg_integer(), binary()) :: :ok | {:error, term()}
   def close(%__MODULE__{socket: s}, code, reason),
     do: :gen_tcp.send(s, [<<@close, code::32>> | reason])
 
-  @doc "Decode one bridge message from the gate."
+  # One bridge message from the gate.
   @spec decode(binary()) :: event() | :error
-  def decode(<<@stream, id::32>>), do: {:stream, id}
-  def decode(<<@data, id::32, bytes::binary>>), do: {:data, id, bytes}
-  def decode(<<@fin, id::32>>), do: {:fin, id}
-  def decode(<<@reset, id::32, code::32>>), do: {:reset, id, code}
-  def decode(<<@stop, id::32, code::32>>), do: {:stop, id, code}
-  def decode(<<@dgram, bytes::binary>>), do: {:dgram, bytes}
-  def decode(<<@close, code::32, reason::binary>>), do: {:closed, code, reason}
-  def decode(_), do: :error
+  defp decode(<<@stream, id::32>>), do: {:stream, id}
+  defp decode(<<@data, id::32, bytes::binary>>), do: {:data, id, bytes}
+  defp decode(<<@fin, id::32>>), do: {:fin, id}
+  defp decode(<<@reset, id::32, code::32>>), do: {:reset, id, code}
+  defp decode(<<@stop, id::32, code::32>>), do: {:stop, id, code}
+  defp decode(<<@dgram, bytes::binary>>), do: {:dgram, bytes}
+  defp decode(<<@close, code::32, reason::binary>>), do: {:closed, code, reason}
+  defp decode(_), do: :error
 
   # ------------------------------------------------------- client config
 
