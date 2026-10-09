@@ -15,6 +15,7 @@ defmodule HiremeWeb.SessionTest do
     @moduledoc false
     def send({__MODULE__, pid}, id, io), do: Kernel.send(pid, {:out, id, IO.iodata_to_binary(io)})
     def fin(_c, _id), do: :ok
+    def open_uni({__MODULE__, pid}, id), do: Kernel.send(pid, {:uni, id})
     def reset({__MODULE__, pid}, id, code), do: Kernel.send(pid, {:reset, id, code})
     def ready({__MODULE__, pid}), do: Kernel.send(pid, :ready)
     def close({__MODULE__, pid}, code, reason), do: Kernel.send(pid, {:close, code, reason})
@@ -407,5 +408,40 @@ defmodule HiremeWeb.SessionTest do
     after
       200 -> s
     end
+  end
+
+  test "a ticketed raw browser gets its BOOT on a server stream right after accept",
+       %{account: account} do
+    job(profile())
+    {_token, session} = Hireme.Accounts.start_session(account)
+    t = Session.ticket(account.id, session.id)
+    path = "/wt?" <> URI.encode_query(%{t: t, raw: 1, rev: 0, cid: 9})
+    origin = HiremeWeb.Endpoint.url()
+    {:ok, s} = Session.init({Carrier, self()}, %{ip: "", origin: origin, path: path})
+    assert s.client_id == 9
+
+    assert_received {Session, :early_boot, 0} = early
+    {:ok, s} = Session.info(early, s)
+    assert_received {:uni, 3}
+
+    frames =
+      for {:out, 3, bin} <-
+            Stream.repeatedly(fn ->
+              receive do
+                m -> m
+              after
+                50 -> :done
+              end
+            end)
+            |> Enum.take_while(&(&1 != :done)),
+          {:ok, f, ""} = Packet.split(bin),
+          frame <- f,
+          do: frame
+
+    assert [{:boot, _, rev, _} | _] = frames
+    assert {:ticket, _, ^rev, _} = List.last(frames)
+
+    # The browser's HELLO afterwards only opens control.
+    assert {:ok, %{early: true}} = Session.event({:data, 0, raw_hello()}, s)
   end
 end
