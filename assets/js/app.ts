@@ -8,7 +8,7 @@ import "../css/app.css"
 import { csrf, httpLink } from "./api.ts"
 import { Shell } from "./shell.ts"
 import { loadKernel, loadWireKernel, LocalDesk, type Link } from "./store.ts"
-import { Framer, hint, Wire } from "./wire.ts"
+import { hint, Wire } from "./wire.ts"
 
 const root = document.getElementById("desk")
 if (!(root instanceof HTMLElement)) throw new Error("Missing #desk")
@@ -21,7 +21,10 @@ try {
     const desk = new LocalDesk({ kernel, scope: meta("wire-scope") })
     const early = window.__hw
     const snap = await desk.snapshot?.load(early?.snap)
-    if (snap) new Framer(desk, () => desk.snapshot?.clear()).push(snap.bytes)
+    if (snap) {
+      desk.restore(snap.bytes)
+      performance.mark("desk:snapshot")
+    }
     const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
     desk.attach(wireLink(wire, desk.hash))
     new Shell(root, desk)
