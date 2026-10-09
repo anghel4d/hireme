@@ -4,6 +4,10 @@ import Config
 
 config :hireme, ecto_repos: [Hireme.Repo]
 
+# Hireme.Ops checkpoints the WAL every second without blocking a writer,
+# so no commit pays SQLite's own checkpoint.
+config :hireme, Hireme.Repo, wal_auto_check_point: 0
+
 config :hireme, HiremeWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

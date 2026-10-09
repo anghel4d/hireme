@@ -4,6 +4,7 @@ import Config
 config :hireme, Hireme.Repo,
   database: Path.expand("../hireme_test.db", __DIR__),
   pool_size: 5,
+  wal_auto_check_point: 1000,
   pool: Ecto.Adapters.SQL.Sandbox
 
 secret_key_base = "XPx6qxoX/XRLHmiBlX6yrohT6bBZTJZai2UgJToxXZi4n0/9/jDw2FClsguZET3W"
