@@ -60,6 +60,44 @@ defmodule Hireme.Ops do
 
   @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane)a
 
+  # The raw tables a client derives every view from: name, row module,
+  # and the columns shipped, in schema order. `leases` is not stored: it
+  # is the jobs an agent holds right now, one row (`id`, the job's) each.
+  @tables [
+    job_apps:
+      {Hireme.Desk.Job,
+       ~w(id profile_id employer_id batch_id company role location listing_url canonical_url
+          listing heat status next_action next_due source stage_on current_stage pips
+          stage_notes freshness gate fit squad department score_100 heat_override
+          heat_override_reason keyword_hits keyword_total mask_hidden mask_altered
+          mask_emphasized)a},
+    profiles: {Hireme.Corpus.Profile, ~w(id user_id slug name headline summary)a},
+    items:
+      {Hireme.Corpus.Item, ~w(id profile_id kind key title body org span position keywords)a},
+    cv_variants: {Hireme.Desk.Variant, ~w(id job_app_id profile_id lineage_id label theme note)a},
+    cv_lineages:
+      {Hireme.Cv.Lineage, ~w(id employer_id generation opened_on rewrites_allowed theme)a},
+    overlays:
+      {Hireme.Desk.Overlay,
+       ~w(id job_app_id item_id lineage_id mode title body reason generation)a},
+    batches:
+      {Hireme.Desk.Batch,
+       ~w(id code ordinal kind status fire target_size queued_on squad variety note)a},
+    events: {Hireme.Desk.Event, ~w(id job_app_id kind body inserted_at)a},
+    kv_pairs: {Hireme.Kv.Pair, ~w(id namespace key value)a},
+    narratives: {Hireme.Corpus.Narrative, ~w(id user_id body version private)a},
+    scoreboard_snapshots:
+      {Hireme.Desk.Snapshot,
+       ~w(id noted_on leftover_unique target_total target_on daily_batches daily_apps note)a},
+    gym_problems: {Hireme.Gym.Problem, ~w(id platform slug title topic difficulty url)a},
+    gym_reps: {Hireme.Gym.Rep, ~w(id problem_id done_on minutes outcome note)a},
+    net_entries: {Hireme.Net.Entry, ~w(id kind channel title url body shipped_on)a}
+  ]
+  @table_names Keyword.keys(@tables) ++ [:leases]
+
+  # Recent raw deltas kept for a session that resumes behind: bytes per account.
+  @ring_bytes 4 * 1024 * 1024
+
   @typedoc "One client op, as the wire decodes it. `op_id` is the client's u64."
   @type op :: %{
           op_id: non_neg_integer(),
@@ -153,6 +191,22 @@ defmodule Hireme.Ops do
   def attach(account_id) when is_integer(account_id) do
     :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
     call(account_id, :attach)
+  end
+
+  @doc """
+  Subscribe the caller to the account's deltas and answer from where it
+  stands. A session that holds the account at `since` and is still within
+  the ring of recent deltas gets `{:replay, [{rev, delta}]}`: apply them in
+  order. Otherwise, or with `since` nil, `{:boot, %{tables: %{table => [row]}}}`:
+  every raw table (`columns/0`) at `rev`. Either way a later delta whose
+  rev is at or below `rev` is already included.
+  """
+  @spec attach(pos_integer(), non_neg_integer() | nil) ::
+          {:ok, non_neg_integer(),
+           {:replay, [{non_neg_integer(), map()}]} | {:boot, %{tables: map()}}}
+  def attach(account_id, since) when is_integer(account_id) do
+    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
+    call(account_id, {:attach, since})
   end
 
   @doc """
@@ -272,7 +326,17 @@ defmodule Hireme.Ops do
     Process.send_after(self(), :sweep, 0)
     schedule_tick()
 
-    {:ok, %{account: account_id, rev: nil, day: nil, heat: nil, cards: nil}}
+    {:ok,
+     %{
+       account: account_id,
+       rev: nil,
+       day: nil,
+       heat: nil,
+       cards: nil,
+       raw: nil,
+       ring: :queue.new(),
+       ring_bytes: 0
+     }}
   end
 
   @impl true
@@ -288,6 +352,23 @@ defmodule Hireme.Ops do
       }
 
       {{:ok, state.rev, snapshot}, state}
+    end)
+  end
+
+  def handle_call({:attach, since}, _from, state) do
+    guard(state, fn ->
+      state = warm(state)
+
+      reply =
+        case replay(state, since) do
+          {:ok, deltas} ->
+            {:replay, deltas}
+
+          :boot ->
+            {:boot, %{tables: Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)}}
+        end
+
+      {{:ok, state.rev, reply}, state}
     end)
   end
 
@@ -415,7 +496,7 @@ defmodule Hireme.Ops do
 
     case result do
       {:ok, {value, rev}} ->
-        state = publish(state, rev, reach(command, value), held)
+        state = publish(state, rev, reach(command, value), held, groups(command, value))
         {{:ok, value, rev}, state}
 
       {:error, reason} ->
@@ -436,11 +517,15 @@ defmodule Hireme.Ops do
     rev
   end
 
-  defp publish(state, rev, reach, held) do
+  defp publish(state, rev, reach, held, groups) do
+    gap? = Process.delete({__MODULE__, :gap})
+
     {state, rows, lanes?} =
-      if Process.delete({__MODULE__, :gap}),
+      if gap?,
         do: repaint_all(state),
         else: repaint(state, reach.rows)
+
+    {state, raw} = if gap?, do: rediff(state, :all), else: rediff(state, groups)
 
     delta = %{
       cards: rows,
@@ -453,10 +538,12 @@ defmodule Hireme.Ops do
       narrative: reach.narrative
     }
 
-    broadcast(state, {:ops_delta, rev, delta})
+    send_delta(state, rev, Map.merge(delta, raw))
     Enum.each(held, &broadcast(state, &1))
-    %{state | rev: rev}
+    %{state | rev: rev} |> remember(rev, raw)
   end
+
+  defp send_delta(state, rev, delta), do: broadcast(state, {:ops_delta, rev, delta})
 
   defp broadcast(state, message),
     do: Phoenix.PubSub.broadcast(Hireme.PubSub, Desk.topic(state.account), message)
@@ -464,21 +551,24 @@ defmodule Hireme.Ops do
   # Lease changes and the like: repaint, and spend a revision only on a change.
   defp settle(state, ids) do
     {next, rows, lanes?} = repaint(state, ids)
+    {next, raw} = rediff(next, [{:leases, :id, ids}])
 
-    if rows == [] do
+    if rows == [] and raw == %{rows: %{}, gone: %{}} do
       next
     else
       rev = Repo.transaction(fn -> bump!(state) end) |> elem(1)
 
-      {next, rows, lanes?} =
-        if Process.delete({__MODULE__, :gap}), do: repaint_all(state), else: {next, rows, lanes?}
+      {next, rows, lanes?, raw} =
+        if Process.delete({__MODULE__, :gap}) do
+          {next, rows, lanes?} = repaint_all(state)
+          {next, raw} = rediff(%{next | raw: state.raw}, :all)
+          {next, rows, lanes?, raw}
+        else
+          {next, rows, lanes?, raw}
+        end
 
-      broadcast(
-        next,
-        {:ops_delta, rev, %{empty_delta() | cards: rows, lanes: lanes?}}
-      )
-
-      %{next | rev: rev}
+      send_delta(next, rev, Map.merge(%{empty_delta() | cards: rows, lanes: lanes?}, raw))
+      %{next | rev: rev} |> remember(rev, raw)
     end
   end
 
@@ -507,22 +597,37 @@ defmodule Hireme.Ops do
     today = Date.utc_today()
     heat = fresh_heat(today)
     cards = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
-    %{state | rev: db_rev(state), day: today, heat: heat, cards: cards}
+    raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
+
+    %{
+      state
+      | rev: db_rev(state),
+        day: today,
+        heat: heat,
+        cards: cards,
+        raw: raw,
+        ring: :queue.new(),
+        ring_bytes: 0
+    }
   end
 
   defp warm(state, look?) do
     cond do
       state.day != Date.utc_today() or state.rev == nil or (look? and state.rev != db_rev(state)) ->
         {next, rows, _lanes?} = repaint_all(state)
+        {next, raw} = rediff(next, :all)
         rev = Repo.transaction(fn -> bump!(%{state | rev: db_rev(state)}) end) |> elem(1)
         Process.delete({__MODULE__, :gap})
 
-        broadcast(
+        send_delta(
           next,
-          {:ops_delta, rev, %{empty_delta() | cards: rows, lanes: true, scoreboard: true}}
+          rev,
+          Map.merge(%{empty_delta() | cards: rows, lanes: true, scoreboard: true}, raw)
         )
 
-        %{next | rev: rev}
+        # Revisions made elsewhere are not in the ring: a session behind
+        # this one boots.
+        %{next | rev: rev, ring: :queue.new(), ring_bytes: 0} |> remember(rev, raw, true)
 
       true ->
         state
@@ -606,6 +711,204 @@ defmodule Hireme.Ops do
     now = DateTime.utc_now()
     midnight = DateTime.new!(Date.add(DateTime.to_date(now), 1), ~T[00:00:01], "Etc/UTC")
     Process.send_after(self(), :tick, DateTime.diff(midnight, now, :millisecond))
+  end
+
+  # -- the raw tables ---------------------------------------------------------
+
+  @doc """
+  Every raw table a client view reads, for the account on this process,
+  as `%{table => [row]}` with rows as plain maps of the shipped columns.
+  The sequencer ships the same rows in `attach/2` and its deltas.
+  """
+  @spec read_tables() :: %{atom() => [map()]}
+  def read_tables do
+    tables = Map.new(@tables, fn {name, {schema, cols}} -> {name, read(schema, cols, nil)} end)
+    Map.put(tables, :leases, leases(Map.get(tables, :job_apps) |> Enum.map(& &1.id)))
+  end
+
+  @doc "The shipped tables and their columns, in wire order. `leases` has one column, `id`."
+  @spec columns() :: [{atom(), [atom()]}]
+  def columns, do: Enum.map(@tables, fn {name, {_, cols}} -> {name, cols} end) ++ [leases: [:id]]
+
+  defp read(schema, cols, nil), do: Repo.all(from(r in schema, select: map(r, ^cols)))
+
+  defp read(schema, cols, {field, values}),
+    do: Repo.all(from(r in schema, where: field(r, ^field) in ^values, select: map(r, ^cols)))
+
+  defp leases(job_ids) do
+    held = Hireme.Letterbox.leased_jobs()
+    for id <- job_ids, MapSet.member?(held, id), do: %{id: id}
+  end
+
+  # Re-read the row groups a write reached and keep what differs from the
+  # table: `{:rows, %{table => [row]}, :gone, %{table => [id]}}`. A group
+  # is every row of a table whose `field` is one of `values`, so a row
+  # that left it (an overlay dropped) is found gone. `:all` re-reads all.
+  defp rediff(%{raw: nil} = state, _groups), do: {state, %{rows: %{}, gone: %{}}}
+
+  defp rediff(state, :all) do
+    groups = Enum.map(@table_names, &{&1, :all, nil})
+    rediff(state, groups)
+  end
+
+  defp rediff(state, groups) do
+    {raw, rows, gone} =
+      Enum.reduce(groups, {state.raw, %{}, %{}}, fn {table, field, values}, {raw, rows, gone} ->
+        old = Map.fetch!(raw, table)
+        fresh = fetch_group(table, field, values, raw)
+        fresh_ids = MapSet.new(fresh, & &1.id)
+
+        changed = for row <- fresh, Map.get(old, row.id) != row, do: row
+
+        left =
+          for {id, row} <- old,
+              not MapSet.member?(fresh_ids, id),
+              field == :all or Map.fetch!(row, field) in values,
+              do: id
+
+        table_rows = Enum.reduce(changed, Map.drop(old, left), &Map.put(&2, &1.id, &1))
+
+        {Map.put(raw, table, table_rows), merge(rows, table, changed), merge(gone, table, left)}
+      end)
+
+    {%{state | raw: raw}, %{rows: rows, gone: gone}}
+  end
+
+  defp fetch_group(:leases, :all, _values, raw), do: leases(Map.keys(raw.job_apps))
+
+  defp fetch_group(:leases, :id, ids, raw),
+    do: leases(Enum.filter(ids, &Map.has_key?(raw.job_apps, &1)))
+
+  defp fetch_group(table, :all, _values, _raw) do
+    {schema, cols} = Keyword.fetch!(@tables, table)
+    read(schema, cols, nil)
+  end
+
+  defp fetch_group(table, field, values, _raw) do
+    {schema, cols} = Keyword.fetch!(@tables, table)
+    read(schema, cols, {field, values})
+  end
+
+  defp merge(acc, _table, []), do: acc
+
+  defp merge(acc, table, list),
+    do:
+      Map.update(
+        acc,
+        table,
+        list,
+        &Enum.uniq_by(&1 ++ list, fn
+          %{id: id} -> id
+          id -> id
+        end)
+      )
+
+  # The ring: each revision's raw delta, newest last, within @ring_bytes.
+  # `from` is the revision it applies to.
+  defp remember(state, rev, raw, fresh? \\ false) do
+    from = if fresh?, do: rev, else: rev - 1
+    bytes = :erlang.external_size(raw)
+    ring = :queue.in({from, rev, raw, bytes}, state.ring)
+    trim(%{state | ring: ring, ring_bytes: state.ring_bytes + bytes})
+  end
+
+  defp trim(%{ring_bytes: bytes} = state) when bytes <= @ring_bytes, do: state
+
+  defp trim(state) do
+    {{:value, {_, _, _, bytes}}, ring} = :queue.out(state.ring)
+    trim(%{state | ring: ring, ring_bytes: state.ring_bytes - bytes})
+  end
+
+  # The deltas after `since`, if the ring still reaches back to it.
+  defp replay(_state, nil), do: :boot
+  defp replay(%{rev: rev}, rev), do: {:ok, []}
+
+  defp replay(state, since) do
+    entries = :queue.to_list(state.ring)
+
+    case Enum.drop_while(entries, fn {from, _, _, _} -> from != since end) do
+      [] -> :boot
+      tail -> {:ok, Enum.map(tail, fn {_, rev, raw, _} -> {rev, raw} end)}
+    end
+  end
+
+  # The row groups a committed write can have touched.
+  defp groups(command, value) do
+    case command do
+      {:create, _} ->
+        lineage = lineage_of(value.id)
+
+        [
+          {:job_apps, :id, Desk.lineage_jobs(value.id)},
+          {:cv_variants, :lineage_id, [lineage]},
+          {:cv_variants, :job_app_id, [value.id]},
+          {:cv_lineages, :id, [lineage]},
+          {:overlays, :lineage_id, [lineage]},
+          {:events, :job_app_id, [value.id]},
+          {:leases, :id, [value.id]}
+        ]
+
+      {kind, id, _} when kind in [:stage, :score, :heat_override] ->
+        job_groups(id)
+
+      {kind, id, _, _} when kind in [:next, :note] ->
+        job_groups(id)
+
+      {:glance, id} ->
+        job_groups(id)
+
+      {:overlay, id, _, _} ->
+        lineage_groups(id)
+
+      {:open_fire, code} ->
+        [{:batches, :code, [code]}]
+
+      {:govern, _} ->
+        :all
+
+      {:perform, pair, command} ->
+        job_id = Hireme.CvPair.job_id(pair)
+
+        case command do
+          {:set_stage, stage} -> groups({:stage, job_id, stage}, value)
+          {:set_score, score} -> groups({:score, job_id, score}, value)
+          {:set_next, action} -> groups({:next, job_id, action, nil}, value)
+          {:tailor, item_id, attrs} -> groups({:overlay, job_id, item_id, attrs}, value)
+          :open_generation -> [{:cv_lineages, :id, [lineage_of(job_id)]}]
+          _ -> []
+        end
+
+      {:narrative, id, _} ->
+        [{:narratives, :id, [id]}]
+
+      {:gym_log, _} ->
+        [{:gym_reps, :id, [value.id]}, {:gym_problems, :id, [value.problem_id]}]
+
+      {:gym_target, _} ->
+        [{:kv_pairs, :namespace, ["gym"]}]
+
+      {:net_log, _} ->
+        [{:net_entries, :id, [value.id]}]
+
+      {:net_lane, _} ->
+        [{:kv_pairs, :namespace, ["net"]}]
+    end
+  end
+
+  defp job_groups(id), do: [{:job_apps, :id, [id]}, {:events, :job_app_id, [id]}]
+
+  defp lineage_groups(job_id) do
+    lineage = lineage_of(job_id)
+
+    [
+      {:job_apps, :id, Desk.lineage_jobs(job_id)},
+      {:overlays, :lineage_id, [lineage]},
+      {:cv_lineages, :id, [lineage]}
+    ]
+  end
+
+  defp lineage_of(job_id) do
+    Repo.one(from v in Hireme.Desk.Variant, where: v.job_app_id == ^job_id, select: v.lineage_id)
   end
 
   # -- what a write reaches ---------------------------------------------------
