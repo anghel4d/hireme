@@ -278,8 +278,7 @@ defmodule Hireme.Oracle do
             fire: fire,
             target_size: pick([5, 55]),
             queued_on: pick([today, Date.add(today, -1), nil]),
-            squad: pick(["", "infra"]),
-            variety: pick([%{}, %{"apps" => 3, "companies" => 2, "flags" => ["short", "bogus"]}])
+            squad: pick(["", "infra"])
           })
         )
       end

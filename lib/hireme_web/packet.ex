@@ -235,8 +235,8 @@ defmodule HiremeWeb.Packet do
   A raw table block from database rows (structs or maps keyed by the
   schema's column names). Missing fields travel as none; enums as their
   name; maps as JSON text; lists the kernel reads as text joined with
-  U+001F; `theme_targets` and `variety_*` are lifted out of their maps so
-  the kernel needs no JSON reader.
+  U+001F; `theme_targets` is lifted out of its map so the kernel needs no
+  JSON reader.
   """
   @spec raw(atom(), [map()]) :: iodata()
   def raw(name, rows) do
@@ -262,38 +262,10 @@ defmodule HiremeWeb.Packet do
   end
 
   defp carried?(row, :theme_targets), do: Map.has_key?(row, :theme)
-  defp carried?(row, :variety_flags), do: Map.has_key?(row, :variety)
-
-  defp carried?(row, col)
-       when col in [
-              :variety_apps,
-              :variety_companies,
-              :variety_roles,
-              :variety_locations,
-              :variety_fits
-            ],
-       do: Map.has_key?(row, :variety)
-
   defp carried?(row, col), do: Map.has_key?(row, col)
 
   defp raw_value(row, :theme_targets, _),
     do: unit_list(get_in(row, [:theme, "targets"]) || get_in(row, [:theme, :targets]))
-
-  defp raw_value(row, :variety_flags, _), do: unit_list(variety(row, "flags"))
-
-  defp raw_value(row, col, :u32)
-       when col in [
-              :variety_apps,
-              :variety_companies,
-              :variety_roles,
-              :variety_locations,
-              :variety_fits
-            ] do
-    case variety(row, col |> Atom.to_string() |> String.replace_prefix("variety_", "")) do
-      n when is_integer(n) and n >= 0 -> n
-      _ -> nil
-    end
-  end
 
   defp raw_value(row, :keywords, _), do: unit_list(Map.get(row, :keywords))
 
@@ -305,15 +277,6 @@ defmodule HiremeWeb.Packet do
       %{} = map when type == :str and not is_struct(map) -> Jason.encode!(map)
       value -> value
     end
-  end
-
-  defp variety(row, key) do
-    case Map.get(row, :variety) do
-      %{} = v -> Map.get(v, key) || Map.get(v, String.to_existing_atom(key))
-      _ -> nil
-    end
-  rescue
-    ArgumentError -> nil
   end
 
   defp unit_list(list) when is_list(list), do: Enum.map_join(list, <<0x1F>>, &text/1)

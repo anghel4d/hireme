@@ -206,7 +206,7 @@ The server stays the authority. `Hireme.Ops` runs every write for an account in 
 
 Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
 
-Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Variety`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
+Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`) the module has a `to_map`/`parse` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
 
 ## CV pairs
 
@@ -253,7 +253,6 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/net.ex` | Broadside Observer runs, posts, artifacts, drafts. Not CRM |
 | `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` (the domain the sequencer and agents call) |
 | `lib/hireme/ops.ex` | One sequencer per account: op ledger, every write, raw-row deltas, the resume ring, the heat snapshot |
-| `lib/hireme/campaign.ex` | Batch variety summaries, stored on import |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
