@@ -24,15 +24,11 @@ defmodule HiremeWeb.LetterboxStreamTest do
 
   defp lease_frame(id), do: frame(0x20, <<id::64-little>>)
 
-  defp call_frame(id, name, args \\ %{}) do
-    json =
-      Jason.encode!(%{
-        jsonrpc: "2.0",
-        id: id,
-        method: "tools/call",
-        params: %{name: name, arguments: args}
-      })
+  defp call_frame(id, name, args \\ %{}),
+    do: rpc_frame(%{id: id, method: "tools/call", params: %{name: name, arguments: args}})
 
+  defp rpc_frame(message) do
+    json = Jason.encode!(Map.put(message, :jsonrpc, "2.0"))
     frame(0x21, <<byte_size(json)::32-little, 0::32>> <> json)
   end
 
@@ -159,11 +155,14 @@ defmodule HiremeWeb.LetterboxStreamTest do
 
     feed(
       dir,
-      lease_frame(0) <> call_frame(1, "list_letterboxes") <> call_frame(2, "set_stage"),
+      lease_frame(0) <>
+        call_frame(1, "list_letterboxes") <>
+        call_frame(2, "set_stage") <> rpc_frame(%{id: 3, method: "letterbox/tools"}),
       3
     )
 
-    [hello, listed, refused] = messages(dir, 3)
+    [hello, listed, refused, tools] = messages(dir, 4)
+    assert "set_stage" in Enum.map(tools["result"]["tools"], & &1["name"])
     assert hello["params"]["directory"] == true
     assert Enum.any?(listed["result"]["letterboxes"], &(&1["letterbox_id"] == id))
     assert refused["error"]["message"] == "unleased"

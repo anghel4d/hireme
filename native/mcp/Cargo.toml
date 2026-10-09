@@ -1,0 +1,23 @@
+[package]
+name = "hireme-mcp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Stdio MCP server for agents: one WebTransport session to hireme, one stream per letterbox lease"
+
+[[bin]]
+name = "hireme-mcp"
+path = "src/main.rs"
+
+[dependencies]
+wire = { path = "../wire" }
+wtransport = "0.7.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
