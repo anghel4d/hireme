@@ -82,10 +82,12 @@ defmodule HiremeWeb.Mcp do
   @moduledoc """
   Tool calls for a connected agent.
 
-  The directory socket at `/mcp/websocket` lists, ranks, and reports;
-  it cannot write an application. A letterbox socket at
-  `/mcp/letterbox/:letterbox_id/websocket` is the full-duplex lease. Its
-  handle reads and writes one application. The command carried to the
+  The directory (`directory/1`) lists, ranks, and reports; it cannot
+  write an application. A lease (`handle/2`) reads and writes one
+  application through its handle. Both carriers reach these the same
+  way: a stream of an agent's wire session (`HiremeWeb.LetterboxStream`)
+  or the fallback websockets at `/mcp/websocket` and
+  `/mcp/letterbox/:letterbox_id/websocket`. The command carried to the
   consumer has no application id. A job id, a variant id, or a
   letterbox id in the arguments is checked against the handle and
   otherwise ignored.

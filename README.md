@@ -224,15 +224,26 @@ One application has one CV variant. One employer has one CV lineage. `Hireme.CvP
 
 For 90 days after a generation opens, the lineage can be rewritten. After that, edits wait. `open_cv_generation` starts the next quarter and accepts new lines only. A database trigger aborts a variant or a line that points at another employer's lineage.
 
-## Agent socket
+## Agents
 
-Letterboxes are single-producer, single-consumer. Each application has one letterbox. An agent leases that id and the lease opens a full-duplex websocket. The connection process is the only producer. The letterbox process is the only consumer. The handle closes over that application's CV pair. Commands do not carry an application id.
+Letterboxes are single-producer, single-consumer. Each application has one letterbox. An agent leases that id. The lease's process is the only producer and the letterbox process the only consumer; the handle closes over that application's CV pair, and commands do not carry an application id. A second lease of that id is refused, and so is a lease of another application on the same employer CV while the first is held.
 
-`/mcp/websocket` lists letterboxes and batches, ranks applications on `score_100`, reports heat (`heat_status`, `can_apply`), and logs gym reps plus networking entries. It cannot write an application.
+The directory lists letterboxes and batches, ranks applications on `score_100`, reports heat (`heat_status`, `can_apply`), and logs gym reps plus networking entries. It cannot write an application. A lease reads and writes its one application. Tool calls are MCP JSON-RPC; a job id or variant id from a different application is rejected, naming open fire stays on the desk, and nothing submits an application.
 
-`/mcp/letterbox/<id>/websocket` is the lease. A second connection to that id is refused. A second connection to another application on the same employer CV is refused while the lease is held. One connection cannot hold two leases.
+**`hireme-mcp`** (`native/mcp`) is the stdio MCP server an agent such as Claude Code runs locally. It holds one WebTransport session to the gate, authenticated once with the API key in its HELLO, and gives every lease its own stream, so an agent can hold as many leases as it has parallel tasks and closing a stream releases its lease. The account's desk changes arrive once per session as raw rows; `hireme-mcp` turns the rows of leased applications into log notifications and keeps them for `letterbox_events`. Where UDP is blocked it falls back to the websockets below.
 
-Each text frame is one JSON object. `{"id": 1, "method": "tools/list"}` lists the tools. `tools/call` runs one. The server pushes `{"method": "notifications/desk", "params": {...}}` for this application only. A job id or variant id from a different application is rejected. Naming open fire stays on the desk. The socket does not submit an application.
+```
+cargo build --release --manifest-path native/mcp/Cargo.toml
+claude mcp add hireme \
+  -e HIREME_API_KEY=hm_... \
+  -e HIREME_WT_URL=https://<gate host>/wt \
+  -e HIREME_WS_URL=wss://<host> \
+  -- /path/to/native/mcp/target/release/hireme-mcp
+```
+
+`HIREME_TRANSPORT` picks `auto` (the default), `wt` or `ws`; a development gate's self-signed certificate is pinned with `HIREME_WT_CERT_SHA256_FILE=_build/gate.hash`. **Rebuild `hireme-mcp` whenever you pull a change to `priv/wire/schema.txt`.** A build from another schema is refused at HELLO and says so: `hello refused (schema): this hireme-mcp speaks wire schema …; rebuild it from the server's commit`.
+
+The websockets remain for agents that cannot reach the gate: `/mcp/websocket` is the directory and `/mcp/letterbox/<id>/websocket` one lease, each a separate key authentication. Each text frame is one JSON object; the server pushes `{"method": "notifications/desk", "params": {...}}` for the leased application only. `bench/letterbox.mjs` times both carriers through `hireme-mcp`.
 
 ## Layout
 
