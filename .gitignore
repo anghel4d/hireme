@@ -71,6 +71,7 @@
 !/native/*/tests/*.rs
 !/native/*/examples/
 !/native/*/examples/*.rs
+!/native/*/*.patch
 
 !/alchemy/
 !/alchemy/*.md
