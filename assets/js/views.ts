@@ -1,7 +1,7 @@
 // Pure views: model in, HTML out. Nothing here touches the DOM.
 
 import type { Doc, Focus, HeatRow, Identity, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
-import { type Filters, value } from "./board.ts"
+import type { Filters } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
 import type { Mark, Status, Tables } from "./store.ts"
 
@@ -29,7 +29,12 @@ const LINK: Record<Status, [string, string]> = {
   offline: ["is-offline", "offline · changes queued"],
 }
 
-export function topbar(f: Filters, t: Tables, count: number, status: Status): Raw {
+/**
+ * The filter controls' values and the count change on every keystroke or
+ * pick, so they are not in this HTML: the shell writes them into the
+ * controls, and this HTML changes only with the tables or the link.
+ */
+export function topbar(t: Tables, status: Status): Raw {
   const [linkClass, linkLabel] = LINK[status]
   const showcase = t.batches.some((b) => b.code === "Batch-001")
   return h`
@@ -42,33 +47,33 @@ export function topbar(f: Filters, t: Tables, count: number, status: Status): Ra
         </p>
       </div>
       <form id="filters" class="filters">
-        <input id="q" type="search" name="q" value="${f.q}" placeholder="Company, role, JobApp, CV" autocomplete="off" aria-label="Search the desk" />
+        <input id="q" type="search" name="q" placeholder="Company, role, JobApp, CV" autocomplete="off" aria-label="Search the desk" />
         <select name="stage" aria-label="Stage">
-          <option value="all" ${sel(f.stage.kind === "all")}>All stages</option>
-          ${t.stages.map((s) => h`<option value="${s.key}" ${sel(value(f.stage) === s.key)}>${s.label}</option>`)}
+          <option value="all">All stages</option>
+          ${t.stages.map((s) => h`<option value="${s.key}">${s.label}</option>`)}
         </select>
         <select name="profile" aria-label="Profile">
-          <option value="all" ${sel(f.profile.kind === "all")}>All profiles</option>
-          ${t.profiles.map((p) => h`<option value="${p.slug}" ${sel(value(f.profile) === p.slug)}>${p.name}</option>`)}
+          <option value="all">All profiles</option>
+          ${t.profiles.map((p) => h`<option value="${p.slug}">${p.name}</option>`)}
         </select>
         <select name="batch" aria-label="Batch">
-          <option value="all" ${sel(f.batch.kind === "all")}>All batches</option>
-          <option value="leftover" ${sel(f.batch.kind === "leftover")}>Leftover</option>
-          ${t.batches.map((b) => h`<option value="${b.code}" ${sel(value(f.batch) === b.code)}>${b.code}</option>`)}
+          <option value="all">All batches</option>
+          <option value="leftover">Leftover</option>
+          ${t.batches.map((b) => h`<option value="${b.code}">${b.code}</option>`)}
         </select>
         <select name="status" aria-label="Status">
-          ${[...t.statuses, "all"].map((s) => h`<option value="${s}" ${sel(value(f.status) === s)}>${s}</option>`)}
+          ${[...t.statuses, "all"].map((s) => h`<option value="${s}">${s}</option>`)}
         </select>
         <select name="band" aria-label="score_100 band">
-          <option value="all" ${sel(f.band.kind === "all")}>All bands</option>
-          ${t.bands.map((b) => h`<option value="${b.key}" ${sel(value(f.band) === b.key)}>${b.label} ${b.min}–${b.max}</option>`)}
+          <option value="all">All bands</option>
+          ${t.bands.map((b) => h`<option value="${b.key}">${b.label} ${b.min}–${b.max}</option>`)}
         </select>
-        <input id="min_score" type="number" name="min_score" min="0" max="100" value="${f.minScore > 0 ? f.minScore : ""}" placeholder="min score_100" aria-label="Minimum score_100" class="min-score" />
+        <input id="min_score" type="number" name="min_score" min="0" max="100" placeholder="min score_100" aria-label="Minimum score_100" class="min-score" />
         <select name="heat" aria-label="Company heat">
-          <option value="all" ${sel(f.heat.kind === "all")}>All heat</option>
-          ${t.heat_states.map((s) => h`<option value="${s}" ${sel(value(f.heat) === s)}>${s}</option>`)}
+          <option value="all">All heat</option>
+          ${t.heat_states.map((s) => h`<option value="${s}">${s}</option>`)}
         </select>
-        <span class="count">${count} showing</span>
+        <span id="count" class="count" data-slot></span>
       </form>
       <span id="link" class="link ${linkClass}" role="status" title="Connection to the desk">${linkLabel}</span>
       <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
@@ -78,17 +83,14 @@ export function topbar(f: Filters, t: Tables, count: number, status: Status): Ra
     </header>`
 }
 
-function sel(on: boolean): Raw {
-  return raw(on ? "selected" : "")
-}
-
-export function scoreboard(s: Scoreboard | null, pills: Raw): Raw {
+/** The lane pills sit in their own slot: a gym or net write redraws them, not the scoreboard. */
+export function scoreboard(s: Scoreboard | null): Raw {
   if (!s) return h`<div id="scoreboard" class="scoreboard"></div>`
   const peak = Math.max(1, ...s.chart.bands.map((b) => b.count))
   return h`
     <div id="scoreboard" class="scoreboard">
       <span class="pill ${s.fire === "hold" ? "is-hold" : "is-open"}">${s.fire === "hold" ? "FIRE HOLD" : "OPEN FIRE"}</span>
-      ${pills}
+      <span id="lane-pills" data-slot></span>
       <span>leftover ${s.leftover_unique}${s.leftover_noted_on ? ` · ${s.leftover_noted_on}` : ""}</span>
       <span>batches ${s.batches_today}/${s.batches_target}</span>
       <span>queued ${s.apps_today}/${s.apps_target}</span>
@@ -496,18 +498,38 @@ export function gymView(l: Lanes, error: string | null): Raw {
               <div class="ev-band"><span class="ev-band-label">${t.label}</span><span class="ev-band-bar" style="width: ${Math.round((t.count / peak) * 100)}%"></span><span class="ev-band-n">${t.count}</span></div>`)}
           </div>
         </div>
-        <ul class="events lane-recent">
-          ${when(g.recent.length === 0, () => h`<li class="empty">No reps yet. Log the first jump.</li>`)}
-          ${g.recent.map((r) => h`
-            <li id="rep-${r.id}">
-              <span class="sub">${r.done_on} · ${labelOf(g.platforms, r.platform)} · ${r.outcome}${r.minutes ? ` · ${r.minutes} min` : ""}</span>
-              <strong>${r.title}</strong>
-              <span class="sub">${labelOf(g.topics_all, r.topic)} · ${labelOf(g.difficulties, r.difficulty)}</span>
-              ${when(r.note !== "", () => h`<span class="sub">${r.note}</span>`)}
-            </li>`)}
-        </ul>
+        <ul id="lane-recent" class="events lane-recent" data-slot></ul>
       </div>
     </div>`
+}
+
+/**
+ * A lane's recent rows, keyed for the lens's list slot: a logged rep or
+ * entry adds one row and leaves the others untouched. An unsaved row has no
+ * id yet and keys by its place.
+ */
+export function laneRecent(l: Lanes, lens: "gym" | "net"): [number, Raw][] {
+  const key = (id: number, i: number) => (id > 0 ? id : -1 - i)
+  if (lens === "gym") {
+    const g = l.gym
+    if (g.recent.length === 0) return [[0, h`<li class="empty">No reps yet. Log the first jump.</li>`]]
+    return g.recent.map((r, i) => [key(r.id, i), h`
+      <li id="rep-${r.id}">
+        <span class="sub">${r.done_on} · ${labelOf(g.platforms, r.platform)} · ${r.outcome}${r.minutes ? ` · ${r.minutes} min` : ""}</span>
+        <strong>${r.title}</strong>
+        <span class="sub">${labelOf(g.topics_all, r.topic)} · ${labelOf(g.difficulties, r.difficulty)}</span>
+        ${when(r.note !== "", () => h`<span class="sub">${r.note}</span>`)}
+      </li>`])
+  }
+  const n = l.net
+  if (n.recent.length === 0) return [[0, h`<li class="empty">Nothing shipped yet.</li>`]]
+  return n.recent.map((e, i) => [key(e.id, i), h`
+    <li id="net-${e.id}">
+      <span class="sub">${labelOf(n.kinds, e.kind)} · ${labelOf(n.channels, e.channel)}${e.shipped_on ? ` · ${e.shipped_on}` : ""}</span>
+      <strong>${e.title}</strong>
+      ${when(e.url !== "", () => h`<span class="sub">${e.url}</span>`)}
+      ${when(e.body !== "", () => h`<span class="sub">${e.body.length > 360 ? `${e.body.slice(0, 360)}…` : e.body}</span>`)}
+    </li>`])
 }
 
 export function netView(l: Lanes, error: string | null): Raw {
@@ -539,16 +561,7 @@ export function netView(l: Lanes, error: string | null): Raw {
             <button type="submit" class="primary">Log entry</button>
           </form>
         </div>
-        <ul class="events lane-recent">
-          ${when(n.recent.length === 0, () => h`<li class="empty">Nothing shipped yet.</li>`)}
-          ${n.recent.map((e) => h`
-            <li id="net-${e.id}">
-              <span class="sub">${labelOf(n.kinds, e.kind)} · ${labelOf(n.channels, e.channel)}${e.shipped_on ? ` · ${e.shipped_on}` : ""}</span>
-              <strong>${e.title}</strong>
-              ${when(e.url !== "", () => h`<span class="sub">${e.url}</span>`)}
-              ${when(e.body !== "", () => h`<span class="sub">${e.body.length > 360 ? `${e.body.slice(0, 360)}…` : e.body}</span>`)}
-            </li>`)}
-        </ul>
+        <ul id="lane-recent" class="events lane-recent" data-slot></ul>
       </div>
     </div>`
 }
@@ -602,7 +615,7 @@ export function settingsView(s: Settings | null, reveal: Reveal | null, renaming
               <button type="button" class="primary" data-action="copy" data-copy="${reveal?.secret}">Copy</button>
               <button type="button" class="ghost" data-action="dismiss-secret">Done</button>
             </div>
-            <p class="sub">Agents present it as the <code>x-api-key</code> header on <code>/mcp/websocket</code> and <code>/mcp/letterbox/&lt;id&gt;/websocket</code>.</p>
+            <p class="sub">Agents use it with <code>hireme-mcp</code> (native/mcp), which presents it once in its session's HELLO; see the README's Agents section.</p>
           </section>`)}
         <section class="settings-section">
           <div class="section-head">
