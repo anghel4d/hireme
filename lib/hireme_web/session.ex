@@ -41,6 +41,7 @@ defmodule HiremeWeb.Session do
   @raw_opt 0x01
   @ticket_age 60
   @recheck_ms 60_000
+  @hello_deadline_ms 5_000
 
   defstruct [
     :carrier,
@@ -127,11 +128,17 @@ defmodule HiremeWeb.Session do
 
         cond do
           not String.starts_with?(URI.parse(path).path || "", "/wt") -> {:refuse, 404}
-          origin == "" and not Map.has_key?(query, "t") -> {:ok, s}
+          origin == "" and not Map.has_key?(query, "t") -> {:ok, pending(s)}
           not allowed_origin?(origin) -> {:refuse, 403}
           true -> by_ticket(s, query["t"])
         end
     end
+  end
+
+  # An agent proves itself with its HELLO; one that never does is closed.
+  defp pending(s) do
+    Process.send_after(self(), {__MODULE__, :hello_deadline}, @hello_deadline_ms)
+    s
   end
 
   # A ticketed browser is authenticated before ACCEPT, so the gate lifts
@@ -215,6 +222,23 @@ defmodule HiremeWeb.Session do
   # the lease writes its stream directly instead of queueing behind a
   # PATCH in this process; the WebSocket carrier buffers per callback, so
   # there it goes through the session.
+  defp ensure_lane(%{letters: letters} = s, lane) when is_map_key(letters, {:lane, lane}), do: s
+
+  defp ensure_lane(s, lane) do
+    me = self()
+    id = {:lane, lane}
+    send_fun = fn io -> send(me, {__MODULE__, :letter, id, io}) end
+    close_fun = fn reason -> send(me, {__MODULE__, :letter_closed, id, reason}) end
+    {:ok, pid} = LetterboxStream.open(s.agent, send_fun, close_fun)
+    %{s | letters: Map.put(s.letters, id, pid)}
+  end
+
+  # A lane's replies carry the lane in the header's rev.
+  defp stamp(io, lane) do
+    {:ok, frames, _} = Packet.split(IO.iodata_to_binary(io))
+    for {kind, flags, _rev, body} <- frames, do: Packet.frame(kind, lane, body, flags: flags)
+  end
+
   defp letter_sender(%{mod: HiremeWeb.Gate, carrier: carrier}, id, _me),
     do: fn io -> HiremeWeb.Gate.send(carrier, id, io) end
 
@@ -243,9 +267,19 @@ defmodule HiremeWeb.Session do
 
   def info({:ops_delta, _, _}, s), do: {:ok, s}
 
+  def info({__MODULE__, :letter, {:lane, lane}, io}, s) do
+    control(s, stamp(io, lane))
+    {:ok, s}
+  end
+
   def info({__MODULE__, :letter, id, io}, s) do
     s.mod.send(s.carrier, id, io)
     {:ok, s}
+  end
+
+  def info({__MODULE__, :letter_closed, {:lane, lane} = id, reason}, s) do
+    control(s, Packet.frame(:bye, lane, sized(to_string(reason))))
+    {:ok, %{s | letters: Map.delete(s.letters, id)}}
   end
 
   def info({__MODULE__, :letter_closed, id, _reason}, s) do
@@ -258,6 +292,8 @@ defmodule HiremeWeb.Session do
     schedule_tick()
     {:ok, s}
   end
+
+  def info({__MODULE__, :hello_deadline}, %{hello: false} = s), do: bye(s, "hello")
 
   def info({__MODULE__, :recheck}, %{role: :browser} = s) do
     if live?(s.account_id, s.session_id) do
@@ -301,6 +337,25 @@ defmodule HiremeWeb.Session do
 
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
+
+  # Where an agent has no streams (the WebSocket), a lease rides control
+  # as a lane: its frames carry the lane (≥ 1) in the header's rev, go to
+  # that lane's lease process, and its replies come back stamped with it.
+  # BYE on a lane releases that lease.
+  defp frame({:bye, _, lane, _}, %{role: :agent} = s) when lane > 0,
+    do: event({:fin, {:lane, lane}}, s)
+
+  defp frame({kind, flags, lane, body}, %{role: :agent} = s)
+       when lane > 0 and kind in [:lease, :op, :rpc] do
+    s = ensure_lane(s, lane)
+
+    LetterboxStream.data(
+      s.letters[{:lane, lane}],
+      IO.iodata_to_binary(Packet.frame(kind, lane, body, flags: flags))
+    )
+
+    {:ok, s}
+  end
 
   defp frame({:op, _, _, body}, %{role: role} = s) when role in [:browser, :agent],
     do: op(s, body)
@@ -574,7 +629,7 @@ defmodule HiremeWeb.WireSocket do
 
   def child_spec(_opts), do: :ignore
 
-  def connect(%{connect_info: %{session: %{} = cookie}}) do
+  def connect(%{connect_info: %{session: %{} = cookie}} = info) do
     case Accounts.session(cookie[Auth.session_key()]) do
       {session, account} ->
         Hireme.Repo.put_account(account.id)
@@ -584,11 +639,19 @@ defmodule HiremeWeb.WireSocket do
           else: {:ok, %{account_id: account.id, session_id: session.id}}
 
       nil ->
-        :error
+        agent(info_peer(info))
     end
   end
 
-  def connect(_info), do: :error
+  def connect(info), do: agent(info_peer(info))
+
+  # No browser session: an agent, which must send its API-key HELLO first.
+  defp agent(ip), do: {:ok, %{ip: ip, origin: "", path: "/wt"}}
+
+  defp info_peer(%{connect_info: %{peer_data: %{address: address}}}),
+    do: address |> :inet.ntoa() |> to_string()
+
+  defp info_peer(_), do: ""
 
   def init(meta) do
     {:ok, s} = Session.init({__MODULE__, self()}, meta)
