@@ -30,6 +30,7 @@
 !/bench/*.ts
 !/bench/results/
 !/bench/results/*.jsonl
+!/bench/results/*.jsonl.gz
 
 !/assets/
 !/assets/css/
