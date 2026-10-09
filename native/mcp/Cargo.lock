@@ -355,7 +355,6 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "kernel",
- "miniz_oxide",
  "rustls",
  "serde_json",
  "tokio",
@@ -520,6 +519,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "miniz_oxide",
  "wire",
 ]
 
