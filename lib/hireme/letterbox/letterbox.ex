@@ -105,12 +105,28 @@ defmodule Hireme.Letterbox do
   @spec leased?(pos_integer()) :: boolean()
   def leased?(id) when is_integer(id), do: Registry.lookup(@registry, {:box, id}) != []
 
-  @spec permit_job(pos_integer()) :: :ok | {:error, :leased}
-  def permit_job(job_id) when is_integer(job_id) do
+  @doc """
+  A write to `job_id` is allowed unless a lease other than `holder`'s
+  holds it. `holder` is the box whose command is being run, when a write
+  is carried out by another process on its behalf.
+  """
+  @spec permit_job(pos_integer(), pid()) :: :ok | {:error, :leased}
+  def permit_job(job_id, holder \\ self()) when is_integer(job_id) and is_pid(holder) do
     case Registry.lookup(@registry, {:job, job_id}) do
-      [{pid, _}] when pid != self() -> {:error, :leased}
+      [{pid, _}] when pid != holder -> {:error, :leased}
       _ -> :ok
     end
+  end
+
+  @doc """
+  Every job a lease holds right now. Job ids are unique across
+  accounts, so the caller filters its own cards by membership.
+  """
+  @spec leased_jobs() :: MapSet.t(pos_integer())
+  def leased_jobs do
+    @registry
+    |> Registry.select([{{{:job, :"$1"}, :_, :_}, [], [:"$1"]}])
+    |> MapSet.new()
   end
 
   @spec list() :: [entry()]
