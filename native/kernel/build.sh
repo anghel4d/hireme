@@ -53,7 +53,7 @@ sysroot="$("$rustc" --print sysroot)"
 # Later remaps win, so the most specific prefix goes last.
 RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=$sysroot=/rust --remap-path-prefix=$base/src/native=/hireme/native -C target-cpu=mvp -C target-feature=+bulk-memory,+mutable-globals,+sign-ext,+nontrapping-fptoint" \
   CARGO_TARGET_DIR="$target" \
-  "$cargo" build --quiet --release --locked --target wasm32-unknown-unknown \
+  "$cargo" rustc --quiet --release --locked --lib --crate-type cdylib --target wasm32-unknown-unknown \
   --manifest-path "$base/src/native/kernel/Cargo.toml"
 
 built="$target/wasm32-unknown-unknown/release/kernel.wasm"
