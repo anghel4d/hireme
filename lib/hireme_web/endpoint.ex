@@ -1,6 +1,7 @@
 defmodule HiremeWeb do
   @moduledoc """
-  The web layer: one endpoint, one router, a push feed, two agent
+  The web layer: one endpoint, one router, the desk session (WebTransport or its
+  WebSocket fallback), two agent
   sockets, and the page the shell draws on. Reads are JSON or one
   columnar packet; every write answers with the new focus or a status
   code that says why not. A browser is an account's session; an agent
