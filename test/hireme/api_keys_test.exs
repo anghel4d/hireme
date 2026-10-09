@@ -97,6 +97,16 @@ defmodule Hireme.ApiKeysTest do
     refute ApiKeys.usable?(key.key_id, account.id)
   end
 
+  test "base62 key material keeps its exact length and alphabet across batch refills" do
+    for length <- [1, 12, 43, 4096] do
+      value = Hireme.Security.base62(length)
+      assert byte_size(value) == length
+      assert value =~ ~r/\A[0-9A-Za-z]+\z/
+    end
+
+    assert Hireme.Security.checksum("") == "000000"
+  end
+
   test "a peer that keeps failing is throttled, valid key or not" do
     {:ok, %{secret: secret}} = ApiKeys.create("throttled")
     peer = "198.51.100.#{System.unique_integer([:positive])}"
