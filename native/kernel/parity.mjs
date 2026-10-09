@@ -53,6 +53,21 @@ function rawTable(name, rows) {
   return [name, cols]
 }
 
+// A delta row carries only the columns that moved (plus id): encode just
+// those, one block per row, so the upsert leaves the rest alone.
+const SOURCE = { theme_targets: "theme", variety_flags: "variety", variety_apps: "variety", variety_companies: "variety",
+  variety_roles: "variety", variety_locations: "variety", variety_fits: "variety" }
+function deltaTables(name, rows) {
+  return rows.map((row) => {
+    const cols = {}
+    for (const [c, def] of Object.entries(S.col[name])) {
+      if (!(c in row) && !((SOURCE[c] ?? "") in row)) continue
+      cols[c] = [rawValue(row, c, def.kind)]
+    }
+    return [name, cols]
+  })
+}
+
 const diffs = new Map()
 function check(kind, what, got, want) {
   const same = typeof want === "number" && typeof got === "number"
@@ -101,7 +116,7 @@ async function one(file) {
     for (const [table, rows] of Object.entries(line.rows)) {
       if (UNPREDICTED.has(table) || !S.table[table]) continue
       for (const row of rows) {
-        const [, cols] = rawTable(table, [row])
+        const [, cols] = deltaTables(table, [row])[0]
         let r = K.k.row_of(S.table[table], row.id)
         if (r < 0) {
           // A predicted insert carries a provisional id until this PATCH:
@@ -129,7 +144,7 @@ async function one(file) {
         }
       }
     }
-    const tablesOut = Object.entries(line.rows).filter(([t]) => S.table[t]).map(([t, rows]) => rawTable(t, rows))
+    const tablesOut = Object.entries(line.rows).filter(([t]) => S.table[t]).flatMap(([t, rows]) => deltaTables(t, rows))
     const gone = Object.entries(line.gone ?? {}).flatMap(([t, ids]) => ids.map((id) => [S.table[t], id]))
     if (gone.length) tablesOut.push(["gone", { table: gone.map((g) => g[0]), id: gone.map((g) => g[1]) }])
     K.ingest(concat(frame("PATCH", ++rev, tablesOut), ack(o.op_id)))

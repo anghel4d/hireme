@@ -12,8 +12,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 // ---- configuration (Hireme.Heat.Config.defaults/0) ------------------------
 
@@ -597,34 +597,6 @@ pub enum Family {
     DataEngineer,
     SecurityEngineer,
     Other,
-}
-
-impl Dept {
-    pub fn name(self) -> &'static str {
-        match self {
-            Dept::Infra => "infra",
-            Dept::Research => "research",
-            Dept::Security => "security",
-            Dept::Data => "data",
-            Dept::Product => "product",
-            Dept::Eng => "eng",
-            Dept::Other => "other",
-        }
-    }
-}
-
-impl Family {
-    pub fn name(self) -> &'static str {
-        match self {
-            Family::SoftwareEngineer => "software_engineer",
-            Family::ResearchEngineer => "research_engineer",
-            Family::ResearchScientist => "research_scientist",
-            Family::Sre => "sre",
-            Family::DataEngineer => "data_engineer",
-            Family::SecurityEngineer => "security_engineer",
-            Family::Other => "other",
-        }
-    }
 }
 
 fn infer_department(n: &str) -> Dept {
@@ -1532,31 +1504,62 @@ pub fn mix(jobs: &[Job], tr: &[Traits], members: &[usize], today: u32) -> Vec<(u
 /// Heat.can_apply/2: job `i` against every hot job, read afresh (no
 /// prepared snapshot), as `Desk`'s stage write asks it.
 pub fn can_apply(jobs: &[Job], tr: &[Traits], i: usize, today: u32) -> Verdict {
-    let mut existing: Vec<usize> = (0..jobs.len()).filter(|&p| hot_stage(jobs[p].stage)).collect();
+    let mut existing: Vec<usize> = (0..jobs.len())
+        .filter(|&p| hot_stage(jobs[p].stage))
+        .collect();
     existing.sort_unstable_by_key(|&p| jobs[p].id);
     evaluate(jobs, tr, &existing, &[], i, today)
 }
 
 /// Heat's private evaluate/7 without a snapshot: the peers are `existing`
 /// then `kept`, less the job itself.
-fn evaluate(jobs: &[Job], tr: &[Traits], existing: &[usize], kept: &[usize], i: usize, today: u32) -> Verdict {
+fn evaluate(
+    jobs: &[Job],
+    tr: &[Traits],
+    existing: &[usize],
+    kept: &[usize],
+    i: usize,
+    today: u32,
+) -> Verdict {
     let job = &jobs[i];
     let t = &tr[i];
-    let others: Vec<usize> = existing.iter().chain(kept.iter()).copied().filter(|&p| jobs[p].id != job.id).collect();
-    let company: Vec<usize> = others.iter().copied().filter(|&p| tr[p].key == t.key).collect();
-    let company_load = sum_decay(company.iter().map(|&p| jobs[p].age(today)), COMPANY_HALF_LIFE);
+    let others: Vec<usize> = existing
+        .iter()
+        .chain(kept.iter())
+        .copied()
+        .filter(|&p| jobs[p].id != job.id)
+        .collect();
+    let company: Vec<usize> = others
+        .iter()
+        .copied()
+        .filter(|&p| tr[p].key == t.key)
+        .collect();
+    let company_load = sum_decay(
+        company.iter().map(|&p| jobs[p].age(today)),
+        COMPANY_HALF_LIFE,
+    );
     let inc = increment(t, company.iter().map(|&p| &tr[p]));
     let (vendor_load, tenant_load) = if t.ats.vendor == UNKNOWN {
         (0.0, 0.0)
     } else {
-        let vp: Vec<usize> = others.iter().copied().filter(|&p| tr[p].ats.vendor == t.ats.vendor).collect();
-        let tp = vp.iter().copied().filter(|&p| t.ats.tenant.is_some() && tr[p].ats.tenant == t.ats.tenant);
+        let vp: Vec<usize> = others
+            .iter()
+            .copied()
+            .filter(|&p| tr[p].ats.vendor == t.ats.vendor)
+            .collect();
+        let tp = vp
+            .iter()
+            .copied()
+            .filter(|&p| t.ats.tenant.is_some() && tr[p].ats.tenant == t.ats.tenant);
         (
             sum_decay(vp.iter().map(|&p| jobs[p].age(today)), ATS_VENDOR_HALF_LIFE),
             sum_decay(tp.map(|p| jobs[p].age(today)), ATS_TENANT_HALF_LIFE),
         )
     };
-    let batch_n = kept.iter().filter(|&&k| t.ats.vendor != UNKNOWN && tr[k].ats.vendor == t.ats.vendor).count() as u32;
+    let batch_n = kept
+        .iter()
+        .filter(|&&k| t.ats.vendor != UNKNOWN && tr[k].ats.vendor == t.ats.vendor)
+        .count() as u32;
     finish(job, t, company_load, inc, vendor_load, tenant_load, batch_n)
 }
 
@@ -1612,20 +1615,6 @@ pub fn move_to(rail: &[u8; 10], to: u8) -> [u8; 10] {
     }
     r
 }
-
-/// Pipeline labels, for the "Stage → Label" event a move records.
-pub const STAGE_LABELS: [&str; 10] = [
-    "Discovered",
-    "Freshness",
-    "Gated",
-    "In batch",
-    "Draft ready",
-    "Fire ready",
-    "Open fire",
-    "Submitted",
-    "Reply",
-    "Closed",
-];
 
 #[cfg(test)]
 mod tests {

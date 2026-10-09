@@ -11,7 +11,6 @@
 //! becomes garbage, and `Store::compact` rewrites every live reference
 //! once garbage outweighs what is live.
 
-use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -176,7 +175,6 @@ pub fn keyed(id: u16) -> bool {
         table::CARDS
             | table::BATCHES
             | table::PROFILES
-            | table::LINES
             | table::NARRATIVES
             | table::ITEMS
             | table::KV_PAIRS
@@ -192,9 +190,20 @@ pub fn keyed(id: u16) -> bool {
     )
 }
 
-/// Tables that belong to one job's focus rather than to the desk.
-pub fn focus_table(id: u16) -> bool {
-    schema::table_name(id).is_some_and(|n| n.starts_with("focus"))
+/// Tables the kernel derives itself; a frame that carries one is ignored.
+pub fn derived(id: u16) -> bool {
+    matches!(
+        id,
+        table::CARDS
+            | table::VERDICTS
+            | table::MIX
+            | table::COVERAGE
+            | table::HEAT_ROWS
+            | table::SCORE
+            | table::VARIETIES
+            | table::CHART_BANDS
+            | table::CHART_BINS
+    )
 }
 
 #[derive(Clone)]
@@ -368,20 +377,13 @@ impl Table {
     }
 }
 
-/// One job's focus: the focus* tables of its latest FOCUS frame.
-pub struct Focus {
-    pub rev: u64,
-    pub tables: Vec<Table>,
-}
-
-/// Everything resident: desk tables, focuses by job, and the arena.
+/// Everything resident: the raw tables, the derived ones, and the arena.
 pub struct Store {
     /// (table, key) of every row a frame wrote or deleted since the
     /// owner last drained it; key NONE is "the whole table".
     pub touched: Vec<[u32; 2]>,
     pub arena: Arena,
     pub tables: Vec<Table>,
-    pub focus: BTreeMap<u32, Focus>,
     pub rev: u64,
 }
 
@@ -395,7 +397,6 @@ impl Store {
                 epoch: 0,
             },
             tables: Vec::new(),
-            focus: BTreeMap::new(),
             rev: 0,
         }
     }
@@ -412,19 +413,9 @@ impl Store {
         self.tables.iter().find(|t| t.id == id)
     }
 
-    /// Takes in one table block of a BOOT, PATCH or LINES frame.
+    /// Takes in one table block of a BOOT or PATCH frame.
     pub fn take(&mut self, t: &wire::Table) {
         let arena = &mut self.arena;
-        if t.id == table::CARDS_GONE {
-            if let Some(ids) = t.col(col::cards_gone::ID) {
-                let cards = self.tables.iter_mut().find(|x| x.id == table::CARDS);
-                if let Some(cards) = cards {
-                    cards.delete((0..ids.nrows as usize).map(|r| ids.u32(r)));
-                    self.touched.extend((0..ids.nrows as usize).map(|r| [table::CARDS as u32, ids.u32(r)]));
-                }
-            }
-            return;
-        }
         if t.id == table::GONE {
             // Raw-row deletions: (table id, row id).
             if let (Some(ts), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) {
@@ -438,10 +429,10 @@ impl Store {
             }
             return;
         }
-        if focus_table(t.id) {
+        let id = t.id;
+        if derived(id) {
             return;
         }
-        let id = t.id;
         let tbl = match self.tables.iter().position(|x| x.id == id) {
             Some(i) => &mut self.tables[i],
             None => {
@@ -451,7 +442,8 @@ impl Store {
         };
         if keyed(id) && tbl.upsert(t, arena) {
             if let Some(keys) = t.col(1) {
-                self.touched.extend((0..t.nrows as usize).map(|r| [id as u32, keys.u32(r)]));
+                self.touched
+                    .extend((0..t.nrows as usize).map(|r| [id as u32, keys.u32(r)]));
             }
         } else {
             tbl.replace(t, arena);
@@ -459,62 +451,10 @@ impl Store {
         }
     }
 
-    /// Stores one FOCUS frame as its job's focus.
-    pub fn take_focus(&mut self, rev: u64, f: &wire::Frame) -> Option<u32> {
-        let mut tables = Vec::new();
-        let mut job = None;
-        for t in f.tables().flatten() {
-            if !focus_table(t.id) {
-                continue;
-            }
-            let mut tbl = Table::new(t.id);
-            tbl.replace(&t, &mut self.arena);
-            if t.id == table::FOCUS {
-                job = tbl.col(col::focus::JOB).map(|c| c.u32(0));
-            }
-            tables.push(tbl);
-        }
-        let job = job?;
-        self.focus.insert(job, Focus { rev, tables });
-        Some(job)
-    }
-
-    /// Clears what a BOOT with content replaces: every desk table. Lines
-    /// keep their content-derived ix across sessions, so they and the
-    /// focuses that point at them stay. The session that sent a line
-    /// counts on it staying, so lines are only ever left out of a snapshot,
-    /// which a new session (that resends what it uses) restores from.
+    /// Clears what a BOOT with content replaces: every table.
     pub fn clear_desk(&mut self) {
-        self.tables.retain(|t| t.id == table::LINES);
+        self.tables.clear();
         self.touched.push([NONE, NONE]);
-    }
-
-    /// After a BOOT: drops the focuses of jobs that are gone.
-    pub fn drop_gone_focuses(&mut self) {
-        let cards = self.tables.iter().find(|t| t.id == table::CARDS);
-        self.focus
-            .retain(|job, _| cards.is_some_and(|c| c.row_of(*job).is_some()));
-    }
-
-    /// Line ixs some focus or root still points at.
-    fn referenced_lines(&self) -> Vec<u32> {
-        let mut keep = Vec::new();
-        let mut refs = |t: &Table, c: u16| {
-            if let Some(col) = t.col(c) {
-                keep.extend((0..t.n).map(|r| col.u32(r)));
-            }
-        };
-        for f in self.focus.values() {
-            for t in f.tables.iter().filter(|t| t.id == table::FOCUS_LINES) {
-                refs(t, col::focus_lines::LINE);
-            }
-        }
-        if let Some(t) = self.table(table::ROOT_LINES) {
-            refs(t, col::root_lines::LINE);
-        }
-        keep.sort_unstable();
-        keep.dedup();
-        keep
     }
 
     /// Rewrites the arena with only the strings something still points at,
@@ -539,11 +479,6 @@ impl Store {
         for t in &mut self.tables {
             t.str_refs().for_each(&mut move_ref);
         }
-        for f in self.focus.values_mut() {
-            for t in &mut f.tables {
-                t.str_refs().for_each(&mut move_ref);
-            }
-        }
         for c in extra {
             if let Data::Str(v) = &mut c.data {
                 v.iter_mut().for_each(&mut move_ref);
@@ -554,36 +489,14 @@ impl Store {
         self.arena.epoch += 1;
     }
 
-    /// The resident state as frames: one BOOT (every desk table but
-    /// lines), one LINES (only lines a focus or root points at), one FOCUS
-    /// per job. Ingesting the result into an
-    /// empty kernel restores it.
+    /// The raw tables as one BOOT frame; ingesting it into an empty kernel
+    /// restores them (and the views derive again).
     pub fn snapshot(&self, w: &mut Writer) {
         w.begin(schema::frame::BOOT, wire::END, self.rev);
-        for t in self.tables.iter().filter(|t| t.id != table::LINES) {
+        for t in self.tables.iter().filter(|t| !derived(t.id)) {
             t.encode(w, &self.arena);
         }
         w.end();
-        if let Some(lines) = self.table(table::LINES) {
-            let keep = self.referenced_lines();
-            let key = lines.col(col::lines::IX);
-            let rows: Vec<usize> = (0..lines.n)
-                .filter(|&r| key.is_some_and(|k| keep.binary_search(&k.u32(r)).is_ok()))
-                .collect();
-            w.begin(schema::frame::LINES, 0, self.rev);
-            lines.encode_rows(w, &self.arena, Some(&rows));
-            w.end();
-        }
-        let mut jobs: Vec<_> = self.focus.keys().copied().collect();
-        jobs.sort_unstable();
-        for job in jobs {
-            let f = &self.focus[&job];
-            w.begin(schema::frame::FOCUS, 0, f.rev);
-            for t in &f.tables {
-                t.encode(w, &self.arena);
-            }
-            w.end();
-        }
     }
 }
 

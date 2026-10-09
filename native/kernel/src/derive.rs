@@ -204,7 +204,10 @@ impl Desk {
         let tr = (0..n)
             .map(|i| {
                 let mut k = [0u32; 14];
-                for (j, c) in [company, role, listing, canonical, department, squad, fit].iter().enumerate() {
+                for (j, c) in [company, role, listing, canonical, department, squad, fit]
+                    .iter()
+                    .enumerate()
+                {
                     k[2 * j..2 * j + 2].copy_from_slice(&at(c, i));
                 }
                 let id = jobs[i].id;
@@ -253,7 +256,7 @@ impl Desk {
         let jt = table::JOB_APPS;
         let n = self.rows(jt);
         let arena = &self.store.arena;
-        let s = |c: u16| self.strs(jt, c);
+
         let u = |c: u16| self.w32(jt, c);
         let at = |v: &[[u32; 2]], i: usize| v.get(i).copied().unwrap_or([0, 0]);
         let w = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0);
@@ -903,8 +906,16 @@ impl Desk {
         cards.reindex();
         let mut verdict_t = vb.t;
         verdict_t.reindex();
+        // Report only what moved: card and verdict rows by job id, the
+        // small tables whole.
         for t in [cards, verdict_t, hb.t, bands.t, bins.t, sb.t, vr.t] {
-            self.touched.push([t.id as u32, NONE]);
+            let old = self.store.table(t.id);
+            if t.id == table::CARDS || t.id == table::VERDICTS {
+                let keys = changed_rows(old, &t, &self.store.arena);
+                self.touched.extend(keys.into_iter().map(|k| [t.id as u32, k]));
+            } else if !old.is_some_and(|o| same_table(o, &t, &self.store.arena)) {
+                self.touched.push([t.id as u32, NONE]);
+            }
             self.store.put_table(t);
         }
         self.derived = d;
@@ -970,12 +981,17 @@ impl Desk {
         let targets = core::str::from_utf8(targets).unwrap_or("");
         let words = if targets.is_empty() {
             let jt = table::JOB_APPS;
-            let listing = self.row_of(jt, job).map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
+            let listing = self
+                .row_of(jt, job)
+                .map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
             keywords::extract(core::str::from_utf8(listing).unwrap_or(""))
         } else {
             keywords::theme_targets(targets)
         };
-        let hits: Vec<u32> = words.iter().map(|w| keywords::hit(&text, w) as u32).collect();
+        let hits: Vec<u32> = words
+            .iter()
+            .map(|w| keywords::hit(&text, w) as u32)
+            .collect();
         let n = hits.iter().sum();
         self.put_words(&words, hits);
         if store {
@@ -989,7 +1005,9 @@ impl Desk {
     /// (every hit 0). Returns the word count.
     pub fn extract(&mut self, job: u32) -> u32 {
         let jt = table::JOB_APPS;
-        let listing = self.row_of(jt, job).map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
+        let listing = self
+            .row_of(jt, job)
+            .map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
         let words = keywords::extract(core::str::from_utf8(listing).unwrap_or(""));
         let n = words.len() as u32;
         let zeros = vec![0; words.len()];
@@ -999,7 +1017,10 @@ impl Desk {
 
     fn put_words(&mut self, words: &[String], hits: Vec<u32>) {
         let mut b = Build::new(table::COVERAGE, words.len());
-        let refs = words.iter().map(|w| self.store.arena.put(w.as_bytes())).collect();
+        let refs = words
+            .iter()
+            .map(|w| self.store.arena.put(w.as_bytes()))
+            .collect();
         b.str(col::coverage::WORD, refs);
         b.u32(col::coverage::HIT, hits);
         self.store.put_table(b.t);
@@ -1013,8 +1034,9 @@ impl Desk {
         let jt = table::JOB_APPS;
         let out: Vec<(u32, bool, heat::Reason, String)> = {
             let (jobs, tr) = self.heat_rows(&mut d);
-            let mut members: Vec<usize> =
-                (0..jobs.len()).filter(|&i| self.vu32(jt, col::job_apps::BATCH_ID, i) == batch).collect();
+            let mut members: Vec<usize> = (0..jobs.len())
+                .filter(|&i| self.vu32(jt, col::job_apps::BATCH_ID, i) == batch)
+                .collect();
             // The database returns a batch's rows in id order.
             members.sort_unstable_by_key(|&i| jobs[i].id);
             heat::mix(&jobs, &tr, &members, today)
@@ -1029,11 +1051,52 @@ impl Desk {
         b.u32(col::mix::JOB, out.iter().map(|o| o.0).collect());
         b.u32(col::mix::KEPT, out.iter().map(|o| o.1 as u32).collect());
         let arena = &mut self.store.arena;
-        let reasons = out.iter().map(|o| arena.put(o.2.name().as_bytes())).collect();
+        let reasons = out
+            .iter()
+            .map(|o| arena.put(o.2.name().as_bytes()))
+            .collect();
         b.str(col::mix::REASON, reasons);
         let notes = out.iter().map(|o| arena.put(o.3.as_bytes())).collect();
         b.str(col::mix::NOTE, notes);
         self.store.put_table(b.t);
         n as u32
     }
+}
+
+fn cell_eq(a: &Column, ra: usize, b: &Column, rb: usize, arena: &Arena) -> bool {
+    match (&a.data, &b.data) {
+        (Data::W32(x), Data::W32(y)) => x.get(ra) == y.get(rb),
+        (Data::W64(x), Data::W64(y)) => x.get(ra) == y.get(rb),
+        (Data::Str(x), Data::Str(y)) => {
+            let (p, q) = (x.get(ra).copied().unwrap_or([0, 0]), y.get(rb).copied().unwrap_or([0, 0]));
+            p == q || arena.get(p) == arena.get(q)
+        }
+        _ => false,
+    }
+}
+
+fn row_eq(a: &Table, ra: usize, b: &Table, rb: usize, arena: &Arena) -> bool {
+    a.cols.len() == b.cols.len()
+        && a.cols.iter().all(|c| b.col(c.id).is_some_and(|d| cell_eq(c, ra, d, rb, arena)))
+}
+
+/// Keys (first column) of rows that are new, gone, or different.
+fn changed_rows(old: Option<&Table>, new: &Table, arena: &Arena) -> Vec<u32> {
+    let key = |t: &Table, r: usize| t.col(1).map_or(0, |c| c.u32(r));
+    let Some(old) = old else {
+        return (0..new.n).map(|r| key(new, r)).collect();
+    };
+    let mut out: Vec<u32> = (0..new.n)
+        .filter(|&r| match old.row_of(key(new, r)) {
+            Some(o) => !row_eq(old, o, new, r, arena),
+            None => true,
+        })
+        .map(|r| key(new, r))
+        .collect();
+    out.extend((0..old.n).map(|r| key(old, r)).filter(|&k| new.row_of(k).is_none()));
+    out
+}
+
+fn same_table(a: &Table, b: &Table, arena: &Arena) -> bool {
+    a.n == b.n && (0..a.n).all(|r| row_eq(a, r, b, r, arena))
 }
