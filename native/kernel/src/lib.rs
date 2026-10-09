@@ -32,6 +32,7 @@ extern crate alloc;
 mod derive;
 mod desk;
 mod heat;
+mod predict;
 mod store;
 
 use alloc::vec::Vec;
