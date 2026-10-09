@@ -30,11 +30,73 @@ Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
 socket authentication returns an expiry alongside the account and key IDs, and
 URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
 
+## Production deployment
+
+The production artifact is an OTP release with `bin/hireme`. The Nix package in
+`nixos-server/packages/hireme.nix` uses the infrastructure flake's pinned
+`beamPackages.mixRelease` and `fetchMixDeps`, with `mix.lock`-locked production
+dependencies. Call it with `source` and `revision`; `mixDepsHash` is pinned in the package.
+The proprietary application requires `config.allowUnfree = true` when importing
+nixpkgs. When the lock changes, build the package's `mixFodDeps` with
+`mixDepsHash = pkgs.lib.fakeHash`, then supply the reported actual hash and rebuild.
+The fake hash is only a hash-discovery input, never a deployment value.
+
+The package builds SQLite's native extension against Nix's SQLite, rebuilds the
+WASM kernel with `wat2wasm`, bundles/minifies assets with Nix's esbuild, and runs
+Phoenix's asset digester. Its source filter excludes local databases, seed data,
+secrets, dependency/build caches, and generated assets. Production compilation
+does not enable the development sign-in or mailbox routes. Copy the complete
+Nix closure, not just `bin/hireme`, to the target.
+
+For the deployment at `https://hireme.anghel4d.com`, install the release profile at
+`/nix/var/nix/profiles/hireme` on **fsn1-2 (49.12.102.5) only**, not fsn1-1.
+Run it as the unprivileged `hireme` account, with persistent state in
+`/var/lib/hireme`. Systemd reads secrets from the root-owned, mode `0600` file
+`/var/lib/hireme-secrets/environment`; do not put that file or its values in Git
+or the Nix store.
+
+Both migration and server processes need the production runtime environment:
+
+| Variable | Requirement |
+| --- | --- |
+| `DATABASE_PATH` | `/var/lib/hireme/hireme.db`; its parent directory must be writable by `hireme` |
+| `SECRET_KEY_BASE` | A persistent random secret, generated with `mix phx.gen.secret` |
+| `RELEASE_COOKIE` | A separate persistent random release cookie; the package removes the build-time cookie |
+| `RELEASE_TMP` | A writable directory, such as `/var/lib/hireme/tmp`, created for `hireme` |
+| `PHX_SERVER` | `true` to start the HTTP listener |
+| `PHX_HOST` | `hireme.anghel4d.com`, also used for the HTTPS WebAuthn origin |
+| `PHX_IP`, `PORT` | `127.0.0.1`, `4000` (the defaults); only the reverse proxy should reach this listener |
+| `MIX_ENV` | `prod` for deployment tooling; the release itself is compiled for production |
+| `CLOUDFLARE_ACCOUNT_ID` | The account with Cloudflare Email Sending enabled |
+| `CLOUDFLARE_EMAIL_TOKEN` | A dedicated API token with only Email Sending Write for that account |
+| `MAIL_FROM` | A sender address on an onboarded sending domain |
+
+Mail uses Cloudflare's HTTPS API because Hetzner blocks outbound SMTP port 465.
+Req verifies TLS certificates; keep the host's CA trust store available. Serve traffic through an HTTPS
+reverse proxy with WebSocket support and `X-Forwarded-Proto: https`; production
+HTTPS redirects, HSTS, and secure session cookies remain enabled. Optional OAuth
+credentials and callback URLs are described below under Accounts.
+
+After stopping the previous server and backing up the persistent SQLite database
+(including any live WAL state), run these commands with the service account and
+the same runtime environment supplied by systemd:
+
+```sh
+/nix/var/nix/profiles/hireme/bin/hireme eval 'Hireme.Release.migrate()'
+/nix/var/nix/profiles/hireme/bin/hireme start
+```
+
+`Hireme.Release.migrate/0` loads the application configuration and uses
+`Ecto.Migrator.with_repo/2` to apply all pending migrations, without starting the
+web server or seeding user data. An error aborts deployment. Migrations are an
+explicit pre-start operation, not a side effect of normal application startup.
+Do not run `mix setup`, `mix ecto.setup`, or `mix ecto.reset` against production.
+
 ## Accounts
 
 An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and letterboxes do not exist for another. Sign-in is passwordless, with three ways in: a link mailed to an address, GitHub, and X. The first sign-in by any of them makes an account. The Account page adds more (another address, a GitHub user, an X user) and removes any but the last. A mailed link works once, for ten minutes; it opens a page that names the address, and only that page's button spends it, so a mail scanner that follows links spends nothing. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.
 
-GitHub and X are offered once their client id and secret are set: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for a GitHub OAuth app, `X_CLIENT_ID` and `X_CLIENT_SECRET` for an X app with OAuth 2.0 as a confidential client. Register `https://<host>/auth/github/callback` and `https://<host>/auth/x/callback` exactly. Mail goes out over SMTP in production (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `MAIL_FROM`); in development it lands in the mailbox at `/dev/mailbox`.
+GitHub and X are offered once their client id and secret are set: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for a GitHub OAuth app, `X_CLIENT_ID` and `X_CLIENT_SECRET` for an X app with OAuth 2.0 as a confidential client. Register `https://<host>/auth/github/callback` and `https://<host>/auth/x/callback` exactly. Production mail uses Cloudflare Email Sending over HTTPS (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_TOKEN`, `MAIL_FROM`); development mail lands at `/dev/mailbox`. Queued delivery counts as accepted; permanent bounces and missing recipients are delivery errors. Requests are not automatically retried, avoiding duplicate sign-in messages.
 
 A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSite=Lax) carrying a random token whose hash is a row, so sessions can be listed and revoked from the Account page. Sessions end after 24 hours or an hour idle (NIST SP 800-63B-4, AAL2). Writes carry the page's CSRF token.
 

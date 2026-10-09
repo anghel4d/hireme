@@ -68,10 +68,6 @@ defmodule Hireme.Application do
   def start(_type, _args) do
     children = [
       Hireme.Repo,
-      # Outside a release the migrations run from `mix ecto.migrate`.
-      {Ecto.Migrator,
-       repos: Application.fetch_env!(:hireme, :ecto_repos),
-       skip: System.get_env("RELEASE_NAME") == nil},
       {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Hireme.PubSub},
       Hireme.RateLimit,

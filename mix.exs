@@ -9,6 +9,7 @@ defmodule Hireme.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
+      releases: [hireme: []],
       deps: deps(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -54,7 +55,6 @@ defmodule Hireme.MixProject do
       {:hammer, "~> 7.5"},
       {:eqrcode, "~> 0.2.1"},
       {:swoosh, "~> 1.17"},
-      {:gen_smtp, "~> 1.2"},
       {:assent, "~> 0.3"},
       {:req, "~> 0.5"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}

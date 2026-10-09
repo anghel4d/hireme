@@ -62,51 +62,24 @@ if config_env() == :prod do
   config :hireme, :secret_key_base, secret_key_base
   config :wax_, origin: "https://#{host}"
 
-  # Passwordless sign-in is mail; production has no mailbox to fall back to.
-  smtp_host =
-    System.get_env("SMTP_HOST") ||
-      raise """
-      environment variable SMTP_HOST is missing.
-      Sign-in links and account notices go out over SMTP.
-      """
-
+  # HTTPS avoids Hetzner's outbound SMTP port restrictions.
   config :swoosh, local: false
 
-  smtp_port = String.to_integer(System.get_env("SMTP_PORT") || "587")
-
-  # The relay's certificate is verified against the system roots, with
-  # its hostname; gen_smtp's defaults verify nothing. gen_smtp also
-  # defaults to depth 0, which refuses any chain with an intermediate CA,
-  # so every real relay; depth is set as Swoosh documents it.
-  smtp_tls = [
-    verify: :verify_peer,
-    cacerts: :public_key.cacerts_get(),
-    server_name_indication: to_charlist(smtp_host),
-    customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)],
-    depth: 99,
-    versions: [:"tlsv1.3", :"tlsv1.2"]
-  ]
-
-  # 465 is implicit TLS from the first byte, so the socket takes the TLS
-  # options; anything else opens a plain TCP socket, which refuses TLS
-  # options, and upgrades it by STARTTLS, required.
   config :hireme, Hireme.Mailer,
-    adapter: Swoosh.Adapters.SMTP,
-    relay: smtp_host,
-    port: smtp_port,
-    username: System.get_env("SMTP_USERNAME"),
-    password: System.get_env("SMTP_PASSWORD"),
-    ssl: smtp_port == 465,
-    sockopts: if(smtp_port == 465, do: smtp_tls, else: []),
-    tls: if(smtp_port == 465, do: :never, else: :always),
-    tls_options: smtp_tls,
-    auth: :always
+    adapter: Hireme.CloudflareMail,
+    account_id: System.fetch_env!("CLOUDFLARE_ACCOUNT_ID"),
+    api_token: System.fetch_env!("CLOUDFLARE_EMAIL_TOKEN")
 
   config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
-  # IPv6 on every interface; `{0, 0, 0, 0, 0, 0, 0, 1}` is local only.
+  # The public HTTPS endpoint is served by the reverse proxy, not this socket.
+  {:ok, listen_ip} =
+    System.get_env("PHX_IP", "127.0.0.1")
+    |> String.to_charlist()
+    |> :inet.parse_address()
+
   config :hireme, HiremeWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}],
+    http: [ip: listen_ip],
     secret_key_base: secret_key_base
 end
