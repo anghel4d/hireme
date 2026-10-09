@@ -72,11 +72,10 @@ defmodule Hireme.ChecklistOracleTest do
     {token, _} = Accounts.start_session(account)
     conn = anonymous() |> init_test_session(%{HiremeWeb.Auth.session_key() => token})
 
-    assert %{"error" => "not found"} =
-             conn |> delete("/api/account/keys/#{their_key.id}") |> json_response(404)
+    assert %{"error" => "not found"} = account(conn, "revoke_key", %{id: their_key.id}, 404)
 
     assert %{"error" => "not found"} =
-             conn |> delete("/api/account/sessions/#{their_session.id}") |> json_response(404)
+             account(conn, "revoke_session", %{id: their_session.id}, 404)
 
     op = %{
       op_id: System.unique_integer([:positive]),
@@ -203,9 +202,7 @@ defmodule Hireme.ChecklistOracleTest do
     post(anonymous(), "/sign-in/email", %{email: "held@example.com"})
     token = mailed("held@example.com")
     signed = post(anonymous(), "/sign-in/email/confirm", token: token)
-    account_id = (recycle(signed) |> get("/api/account") |> json_response(200))["account"]["id"]
-
-    account = Repo.get!(Accounts.Account, account_id, skip_account: true)
+    {_session, account} = whoami(recycle(signed))
     Repo.update!(Ecto.Changeset.change(account, status: :suspended), skip_account: true)
 
     assert {:error, :suspended} =
@@ -251,8 +248,7 @@ defmodule Hireme.ChecklistOracleTest do
 
     for broken <- [flip(live), String.slice(cookie_pair(live), 0, 24), cookie_pair(cookie), ""] do
       conn =
-        Plug.Test.conn(:get, "/api/account")
-        |> put_req_header("accept", "application/json")
+        Plug.Test.conn(:get, "/")
         |> put_req_header("cookie", broken)
 
       response = call(conn)
@@ -283,7 +279,7 @@ defmodule Hireme.ChecklistOracleTest do
     raw =
       Plug.Test.conn(
         :post,
-        "/api/account/keys?_csrf_token=#{URI.encode_www_form(token_a)}",
+        "/api/wire/ticket?_csrf_token=#{URI.encode_www_form(token_a)}",
         "{}"
       )
       |> put_req_header("content-type", "application/json")
@@ -594,7 +590,7 @@ defmodule Hireme.ChecklistOracleTest do
     assert {:ok, _} = Mfa.verify_recovery(session, hd(fresh))
   end
 
-  test "every step-up route refuses a stale session before it writes", %{
+  test "every step-up command refuses a stale session before it writes", %{
     conn: conn,
     account: account,
     session: session
@@ -602,12 +598,12 @@ defmodule Hireme.ChecklistOracleTest do
     %{secret: secret32} = Mfa.begin_totp(session, "me")
     secret = Base.decode32!(secret32, padding: false)
 
-    conn
-    |> post("/api/account/mfa/totp/confirm", %{
-      code: NimbleTOTP.verification_code(secret),
-      name: "Phone"
-    })
-    |> json_response(200)
+    account(
+      conn,
+      "confirm_totp",
+      %{code: NimbleTOTP.verification_code(secret), name: "Phone"},
+      200
+    )
 
     {:ok, %{key: key}} = ApiKeys.create("keep")
     {:ok, identity} = Accounts.link(:github, %{subject: "sub-1", display: "octo"})
@@ -625,38 +621,24 @@ defmodule Hireme.ChecklistOracleTest do
       |> Repo.update!(skip_account: true)
     end
 
-    assert %{"error" => "step_up"} =
-             conn |> post("/api/account/keys", %{name: "nope"}) |> json_response(403)
+    for {method, params} <- [
+          {"create_key", %{name: "nope"}},
+          {"revoke_key", %{id: key.id}},
+          {"revoke_other_sessions", %{}},
+          {"begin_totp", %{}},
+          {"confirm_totp", %{code: "000000"}},
+          {"begin_webauthn", %{}},
+          {"confirm_webauthn", %{}},
+          {"remove_factor", %{id: 1}},
+          {"recovery_codes", %{}},
+          {"unlink", %{id: identity.id}}
+        ] do
+      assert %{"error" => "step_up"} = account(conn, method, params, 403)
+    end
 
-    assert %{"error" => "step_up"} =
-             conn |> delete("/api/account/keys/#{key.id}") |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn |> post("/api/account/sessions/revoke_others") |> json_response(403)
-
-    assert %{"error" => "step_up"} = conn |> post("/api/account/mfa/totp") |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn
-             |> post("/api/account/mfa/totp/confirm", %{code: "000000"})
-             |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn |> post("/api/account/mfa/webauthn") |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn |> post("/api/account/mfa/webauthn/confirm", %{}) |> json_response(403)
-
-    assert %{"error" => "step_up"} = conn |> delete("/api/account/mfa/1") |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn |> post("/api/account/mfa/recovery") |> json_response(403)
-
+    # Linking a new way in stays HTTP, behind the same rule.
     assert %{"error" => "step_up"} =
              conn |> post("/api/account/identities", %{provider: "github"}) |> json_response(403)
-
-    assert %{"error" => "step_up"} =
-             conn |> delete("/api/account/identities/#{identity.id}") |> json_response(403)
 
     assert Repo.aggregate(ApiKeys.Key, :count) == keys_before
     assert Repo.aggregate(Method, :count) == methods_before
@@ -664,7 +646,7 @@ defmodule Hireme.ChecklistOracleTest do
     assert Accounts.identities() |> Enum.map(& &1.id) |> Enum.member?(identity.id)
   end
 
-  test "a pending session cannot mark itself fresh through the step-up routes", %{
+  test "a pending session cannot mark itself fresh through the step-up commands", %{
     account: account,
     session: session
   } do
@@ -676,8 +658,7 @@ defmodule Hireme.ChecklistOracleTest do
     conn = anonymous() |> init_test_session(%{HiremeWeb.Auth.session_key() => token})
     code = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 30)
 
-    assert %{"error" => "second_factor"} =
-             conn |> post("/api/account/step-up/totp", %{code: code}) |> json_response(401)
+    assert %{"error" => "second_factor"} = account(conn, "step_up_totp", %{code: code}, 401)
 
     assert Repo.reload!(pending).mfa_at == nil
   end
@@ -733,8 +714,7 @@ defmodule Hireme.ChecklistOracleTest do
     job = job(profile(), %{company: "Socket Co"})
     box = Hireme.Letterbox.for_job(job.id).id
 
-    %{"secret" => secret} =
-      conn |> post("/api/account/keys", %{name: "socket"}) |> json_response(200)
+    %{"secret" => secret} = account(conn, "create_key", %{name: "socket"}, 200)
 
     info = %{
       params: %{"letterbox_id" => to_string(box)},
@@ -756,11 +736,11 @@ defmodule Hireme.ChecklistOracleTest do
              HiremeWeb.McpSocket.handle_in({~s({"id":1,"method":"tools/list"}), []}, state)
   end
 
-  test "settings JSON after create does not repeat the secret", %{conn: conn} do
-    created = conn |> post("/api/account/keys", %{name: "once"}) |> json_response(200)
+  test "the account tables after create do not repeat the secret", %{conn: conn} do
+    created = account(conn, "create_key", %{name: "once"}, 200)
     secret = created["secret"]
-    listed = conn |> get("/api/account") |> json_response(200)
-    encoded = Jason.encode!(listed)
+    {session, account} = whoami(conn)
+    encoded = IO.iodata_to_binary(HiremeWeb.Account.tables(account.id, session.id))
     refute encoded =~ secret
     refute encoded =~ ~r/hm_[0-9A-Za-z]{12}_[0-9A-Za-z]{43}/
   end

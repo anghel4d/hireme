@@ -3,10 +3,10 @@ defmodule HiremeWeb.AuthTest do
 
   alias Hireme.ApiKeys
 
-  test "without a session the page redirects and the API answers 401" do
+  test "without a session the page redirects and the account answers 401" do
     conn = anonymous()
     assert redirected_to(get(conn, "/")) == "/sign-in"
-    assert %{"error" => "unauthenticated"} = conn |> get("/api/account") |> json_response(401)
+    assert %{"error" => "unauthenticated"} = account(conn, "rename_key", %{id: 1, name: "x"}, 401)
     assert conn |> get("/sign-in") |> html_response(200) =~ "Send a sign-in link"
     refute conn |> get("/sign-in") |> html_response(200) =~ "/dev/sign-in"
   end
@@ -26,17 +26,12 @@ defmodule HiremeWeb.AuthTest do
   end
 
   test "the account page mints, lists, renames, and revokes keys", %{conn: conn} do
-    settings = conn |> get("/api/account") |> json_response(200)
-    assert settings["keys"] == []
-    assert [%{"current" => true}] = settings["sessions"]
+    assert ApiKeys.list() == []
 
-    created =
-      conn
-      |> post("/api/account/keys", %{name: "agenix-pylon-wsl", expires_in_days: 90})
-      |> json_response(200)
+    created = account(conn, "create_key", %{name: "agenix-pylon-wsl", expires_in_days: 90}, 200)
 
     assert created["secret"] =~ ~r/\Ahm_/
-    [key] = created["keys"]
+    key = created["created"]
     assert key["name"] == "agenix-pylon-wsl"
     assert key["key_id"] == "key_" <> String.slice(created["secret"], 3, 12)
     assert key["display"] == "hm_" <> String.slice(created["secret"], 16, 4) <> "…"
@@ -44,26 +39,20 @@ defmodule HiremeWeb.AuthTest do
     assert key["live"]
     assert {:ok, _} = ApiKeys.authenticate(created["secret"], "t")
 
-    assert %{"error" => "bad argument name"} =
-             conn |> post("/api/account/keys", %{name: ""}) |> json_response(400)
+    assert %{"error" => "bad argument name"} = account(conn, "create_key", %{name: ""}, 400)
 
     assert %{"error" => "bad argument expires_in_days"} =
-             conn
-             |> post("/api/account/keys", %{name: "x", expires_in_days: 7})
-             |> json_response(400)
+             account(conn, "create_key", %{name: "x", expires_in_days: 7}, 400)
 
-    renamed =
-      conn |> patch("/api/account/keys/#{key["id"]}", %{name: "renamed"}) |> json_response(200)
+    account(conn, "rename_key", %{id: key["id"], name: "renamed"}, 200)
+    assert [%{name: "renamed"}] = ApiKeys.list()
 
-    assert [%{"name" => "renamed"}] = renamed["keys"]
-
-    revoked = conn |> delete("/api/account/keys/#{key["id"]}") |> json_response(200)
-    assert [%{"live" => false, "revoked_at" => at}] = revoked["keys"]
-    assert at
+    account(conn, "revoke_key", %{id: key["id"]}, 200)
+    assert [%{revoked_at: at} = revoked] = ApiKeys.list()
+    assert at && not ApiKeys.live?(revoked)
     assert :error = ApiKeys.authenticate(created["secret"], "t")
 
-    assert %{"error" => "not found"} =
-             conn |> delete("/api/account/keys/999999") |> json_response(404)
+    assert %{"error" => "not found"} = account(conn, "revoke_key", %{id: 999_999}, 404)
   end
 
   test "an agent socket needs a live key for the account that owns the letterbox", %{conn: conn} do
@@ -71,8 +60,7 @@ defmodule HiremeWeb.AuthTest do
     job = job(profile(), %{company: "Keyed Co"})
     box = Hireme.Letterbox.for_job(job.id).id
 
-    %{"secret" => secret} =
-      conn |> post("/api/account/keys", %{name: "socket"}) |> json_response(200)
+    %{"secret" => secret} = account(conn, "create_key", %{name: "socket"}, 200)
 
     info = fn key ->
       %{
@@ -103,27 +91,25 @@ defmodule HiremeWeb.AuthTest do
 
   test "an enrolled account's new session is pending until a factor is presented, and sensitive writes need a fresh one",
        %{conn: conn, account: account, session: session} do
-    secret32 =
-      conn |> post("/api/account/mfa/totp", %{}) |> json_response(200) |> Map.fetch!("secret")
-
+    secret32 = account(conn, "begin_totp", %{}, 200) |> Map.fetch!("secret")
     secret = Base.decode32!(secret32, padding: false)
 
     enrolled =
-      conn
-      |> post("/api/account/mfa/totp/confirm", %{
-        code: NimbleTOTP.verification_code(secret),
-        name: "Phone"
-      })
-      |> json_response(200)
+      account(
+        conn,
+        "confirm_totp",
+        %{code: NimbleTOTP.verification_code(secret), name: "Phone"},
+        200
+      )
 
-    assert [%{"kind" => "totp", "name" => "Phone"}] = enrolled["methods"]
+    assert [%{kind: :totp, name: "Phone"}] = Hireme.Mfa.methods()
     assert length(enrolled["recovery_codes"]) == 10
 
     # A fresh browser signs in and owes the factor.
     {token, _} = Hireme.Accounts.start_session(account)
     fresh = anonymous() |> Plug.Test.init_test_session(%{HiremeWeb.Auth.session_key() => token})
     assert redirected_to(get(fresh, "/")) == "/sign-in/factor"
-    assert %{"error" => "second_factor"} = fresh |> get("/api/account") |> json_response(401)
+    assert %{"error" => "second_factor"} = account(fresh, "rename_key", %{id: 1, name: "x"}, 401)
     assert redirected_to(get(fresh, "/sign-in")) == "/sign-in/factor"
     page = fresh |> get("/sign-in/factor") |> html_response(200)
     assert page =~ "authenticator app" and page =~ "/assets/js/factor.js"
@@ -133,12 +119,10 @@ defmodule HiremeWeb.AuthTest do
 
     later = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 30)
     assert redirected_to(post(fresh, "/sign-in/factor/totp", %{code: later})) == "/"
-    assert fresh |> get("/api/account") |> response(200)
     assert redirected_to(get(fresh, "/sign-in/factor")) == "/"
 
     # Minting a key is a sensitive write: fresh after the proof, refused once it ages.
-    assert %{"secret" => _} =
-             fresh |> post("/api/account/keys", %{name: "fresh"}) |> json_response(200)
+    assert %{"secret" => _} = account(fresh, "create_key", %{name: "fresh"}, 200)
 
     stale =
       DateTime.utc_now()
@@ -151,33 +135,20 @@ defmodule HiremeWeb.AuthTest do
           |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
           |> Hireme.Repo.update!(skip_account: true)
 
-    assert %{"error" => "step_up"} =
-             fresh |> post("/api/account/keys", %{name: "stale"}) |> json_response(403)
-
-    assert %{"error" => _} =
-             fresh |> post("/api/account/step-up/totp", %{code: "000000"}) |> json_response(401)
+    assert %{"error" => "step_up"} = account(fresh, "create_key", %{name: "stale"}, 403)
+    assert %{"error" => _} = account(fresh, "step_up_totp", %{code: "000000"}, 401)
 
     # Two steps ahead is outside the grace; a recovery code steps up instead.
-    assert %{"error" => _} =
-             fresh
-             |> post("/api/account/step-up/totp", %{
-               code: NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 60)
-             })
-             |> json_response(401)
+    ahead = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 60)
+    assert %{"error" => _} = account(fresh, "step_up_totp", %{code: ahead}, 401)
 
     assert %{"ok" => true, "fresh" => true} =
-             fresh
-             |> post("/api/account/step-up/recovery", %{code: hd(enrolled["recovery_codes"])})
-             |> json_response(200)
+             account(fresh, "step_up_recovery", %{code: hd(enrolled["recovery_codes"])}, 200)
 
-    assert %{"secret" => _} =
-             fresh |> post("/api/account/keys", %{name: "stepped"}) |> json_response(200)
+    assert %{"secret" => _} = account(fresh, "create_key", %{name: "stepped"}, 200)
+    assert Hireme.Mfa.recovery_codes_left() == 9
 
-    assert %{"security" => %{"recovery_codes_left" => 9, "fresh" => true}} =
-             fresh |> get("/api/account") |> json_response(200)
-
-    assert %{"recovery_codes" => codes} =
-             fresh |> post("/api/account/mfa/recovery", %{}) |> json_response(200)
+    assert %{"recovery_codes" => codes} = account(fresh, "recovery_codes", %{}, 200)
 
     assert length(codes) == 10
     _ = session

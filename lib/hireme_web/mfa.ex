@@ -1,8 +1,10 @@
 defmodule HiremeWeb.MfaController do
   @moduledoc """
-  Second factors over HTTP. Two faces: the factor page a pending
-  session lands on after signing in, and the Account page's JSON for
-  enrolling, proving (step-up), and removing factors.
+  The factor page a pending session lands on after signing in, where it
+  proves a second factor before it may reach the desk. A session that
+  owes its factor has no wire session yet, so this stays HTTP. Enrolling,
+  stepping up and removing factors are account commands over the wire
+  (`HiremeWeb.Account`).
   """
 
   use Phoenix.Controller, formats: [:html, :json]
@@ -87,100 +89,9 @@ defmodule HiremeWeb.MfaController do
   defp proved(conn, {:error, reason}),
     do: redirect(conn, to: "/sign-in/factor?error=#{URI.encode_www_form(message(reason))}")
 
-  ## The Account page: the factors, their enrolment, and step-up.
-
-  def summary(conn, _params), do: json(conn, security(conn))
-
-  def begin_totp(conn, _params) do
-    json(conn, Mfa.begin_totp(conn.assigns.session, label(conn)))
-  end
-
-  def confirm_totp(conn, params) do
-    case Mfa.confirm_totp(
-           conn.assigns.session,
-           params["code"],
-           to_string(params["name"] || "Authenticator app"),
-           Auth.meta(conn)
-         ) do
-      {:ok, _method, codes} ->
-        json(conn, security(conn) |> Map.merge(%{ok: true, recovery_codes: codes}))
-
-      {:error, :code} ->
-        JSON.refuse(conn, {400, "That code did not match. Enter the one showing now."})
-
-      {:error, :challenge} ->
-        JSON.refuse(conn, {409, "Start again: the enrolment expired."})
-    end
-  end
-
-  def begin_webauthn(conn, _params),
-    do: json(conn, Mfa.begin_webauthn(conn.assigns.session, label(conn)))
-
-  def confirm_webauthn(conn, params) do
-    case Mfa.confirm_webauthn(conn.assigns.session, params, Auth.meta(conn)) do
-      {:ok, _method, codes} ->
-        json(conn, security(conn) |> Map.merge(%{ok: true, recovery_codes: codes}))
-
-      {:error, :duplicate} ->
-        JSON.refuse(conn, {409, "That credential is already registered."})
-
-      {:error, reason} ->
-        JSON.refuse(conn, {400, message(reason)})
-    end
-  end
-
-  def remove(conn, %{"id" => id}) do
-    with {n, ""} <- Integer.parse(to_string(id)),
-         %{} = method <- Enum.find(Mfa.methods(), &(&1.id == n)),
-         :ok <- Mfa.remove(conn.assigns.session, method, Auth.meta(conn)) do
-      json(conn, Map.put(security(conn), :ok, true))
-    else
-      {:error, :step_up} -> JSON.refuse(conn, {403, "step_up"})
-      _ -> JSON.refuse(conn, :not_found)
-    end
-  end
-
-  def recovery(conn, _params) do
-    if Mfa.enrolled?() do
-      json(
-        conn,
-        security(conn)
-        |> Map.merge(%{ok: true, recovery_codes: Mfa.recovery_codes!(Auth.meta(conn))})
-      )
-    else
-      JSON.refuse(conn, {409, "Recovery codes go with a second factor; add one first."})
-    end
-  end
-
-  def step_up_totp(conn, params),
-    do: stepped(conn, Mfa.verify_totp(conn.assigns.session, params["code"], Auth.meta(conn)))
-
-  def step_up_recovery(conn, params),
-    do: stepped(conn, Mfa.verify_recovery(conn.assigns.session, params["code"], Auth.meta(conn)))
-
-  def step_up_webauthn(conn, _params), do: json(conn, Mfa.begin_assertion(conn.assigns.session))
-
-  def step_up_webauthn_confirm(conn, params),
-    do: stepped(conn, Mfa.verify_assertion(conn.assigns.session, params, Auth.meta(conn)))
-
-  defp stepped(conn, {:ok, _session}), do: json(conn, %{ok: true, fresh: true})
-  defp stepped(conn, {:error, reason}), do: JSON.refuse(conn, {401, message(reason)})
-
-  @doc "The security half of the Account page."
-  def security(conn),
-    do: JSON.security(Mfa.methods(), Mfa.recovery_codes_left(), Mfa.fresh?(conn.assigns.session))
-
-  defp label(conn) do
-    case conn.assigns.account.name do
-      "" -> "account #{conn.assigns.account.id}"
-      name -> name
-    end
-  end
-
   defp message(:code), do: "That code did not match."
   defp message(:rate_limited), do: "Too many attempts. Wait a few minutes."
   defp message(:challenge), do: "Start again: the challenge expired."
   defp message(:assertion), do: "That passkey was not accepted."
   defp message(:clone), do: "That credential's counter went backwards; it has been disabled."
-  defp message(:attestation), do: "That registration was not accepted."
 end

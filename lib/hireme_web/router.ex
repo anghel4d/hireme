@@ -104,31 +104,13 @@ defmodule HiremeWeb.Router do
   scope "/api", HiremeWeb do
     pipe_through :api
 
+    # The account page rides the wire session (`HiremeWeb.Account`). Only
+    # adding a way in stays here: it keeps its OAuth trip or the expected
+    # address in the cookie.
     scope "/account" do
-      get "/", AccountController, :index
-      patch "/keys/:id", AccountController, :rename_key
-      delete "/sessions/:id", AccountController, :revoke_session
-      get "/security", MfaController, :summary
-      post "/step-up/totp", MfaController, :step_up_totp
-      post "/step-up/recovery", MfaController, :step_up_recovery
-      post "/step-up/webauthn", MfaController, :step_up_webauthn
-      post "/step-up/webauthn/confirm", MfaController, :step_up_webauthn_confirm
+      pipe_through :step_up
 
-      scope "/" do
-        pipe_through :step_up
-
-        post "/keys", AccountController, :create_key
-        delete "/keys/:id", AccountController, :revoke_key
-        post "/sessions/revoke_others", AccountController, :revoke_other_sessions
-        post "/mfa/totp", MfaController, :begin_totp
-        post "/mfa/totp/confirm", MfaController, :confirm_totp
-        post "/mfa/webauthn", MfaController, :begin_webauthn
-        post "/mfa/webauthn/confirm", MfaController, :confirm_webauthn
-        delete "/mfa/:id", MfaController, :remove
-        post "/mfa/recovery", MfaController, :recovery
-        post "/identities", AccountController, :link
-        delete "/identities/:id", AccountController, :unlink
-      end
+      post "/identities", AccountController, :link
     end
 
     post "/wire/ticket", DeskController, :wire_ticket

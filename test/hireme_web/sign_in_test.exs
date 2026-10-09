@@ -69,8 +69,10 @@ defmodule HiremeWeb.SignInTest do
 
     signed = post(anonymous(), "/sign-in/email/confirm", token: token)
     assert redirected_to(signed) == "/"
-    first = recycle(signed) |> get("/api/account") |> json_response(200)
-    assert [%{"provider" => "email", "display" => "new@example.com"}] = first["identities"]
+    {_, first} = whoami(recycle(signed))
+
+    assert [%{"provider" => "email", "display" => "new@example.com"}] =
+             identities(recycle(signed))
 
     assert html_response(post(anonymous(), "/sign-in/email/confirm", token: token), 410) =~
              "expired or was already used"
@@ -78,8 +80,7 @@ defmodule HiremeWeb.SignInTest do
     post(anonymous(), "/sign-in/email", %{email: "new@example.com"})
     again = post(anonymous(), "/sign-in/email/confirm", token: mailed("new@example.com"))
 
-    assert (recycle(again) |> get("/api/account") |> json_response(200))["account"] ==
-             first["account"]
+    assert elem(whoami(recycle(again)), 1).id == first.id
 
     assert anonymous() |> post("/sign-in/email", %{email: "not an address"}) |> html_response(422) =~
              "Enter a whole email address"
@@ -91,7 +92,7 @@ defmodule HiremeWeb.SignInTest do
 
     assert html_response(get(victim, "/sign-in/email", token: token), 409) =~ "sign out first"
     assert html_response(post(victim, "/sign-in/email/confirm", token: token), 409)
-    assert (victim |> get("/api/account") |> json_response(200))["identities"] == []
+    assert identities(victim) == []
 
     # Refused, not spent: the address's owner can still use it.
     assert redirected_to(post(anonymous(), "/sign-in/email/confirm", token: token)) == "/"
@@ -103,7 +104,7 @@ defmodule HiremeWeb.SignInTest do
     asked =
       post(conn, "/api/account/identities", %{provider: "email", email: "Second@Example.com"})
 
-    assert json_response(asked, 200)["sent_to"] == "second@example.com"
+    assert json_response(asked, 200) == %{"ok" => true, "sent_to" => "second@example.com"}
     token = mailed("second@example.com")
 
     # The same account in another browser did not ask, so it may not add it.
@@ -118,7 +119,7 @@ defmodule HiremeWeb.SignInTest do
     assert redirected_to(added) == "/?lens=settings&linked=email"
 
     assert [%{"provider" => "email", "display" => "second@example.com"}] =
-             (recycle(added) |> get("/api/account") |> json_response(200))["identities"]
+             identities(recycle(added))
   end
 
   test "GitHub and X sign a visitor in through a state-checked round trip with PKCE" do
@@ -133,7 +134,7 @@ defmodule HiremeWeb.SignInTest do
     assert pkce?(form["code_verifier"], query["code_challenge"])
 
     assert [%{"provider" => "github", "display" => "octocat"}] =
-             (recycle(signed) |> get("/api/account") |> json_response(200))["identities"]
+             identities(recycle(signed))
 
     {x, query} = start(anonymous(), "/auth/x")
     assert query["scope"] == "users.read tweet.read"
@@ -143,8 +144,7 @@ defmodule HiremeWeb.SignInTest do
     assert headers["authorization"] == "Basic " <> Base.encode64("x-id:x-secret")
     assert pkce?(form["code_verifier"], query["code_challenge"])
 
-    assert [%{"display" => "@jack"}] =
-             (recycle(signed) |> get("/api/account") |> json_response(200))["identities"]
+    assert [%{"display" => "@jack"}] = identities(recycle(signed))
   end
 
   test "a callback without this browser's state is refused, and the trip is spent" do
@@ -181,7 +181,7 @@ defmodule HiremeWeb.SignInTest do
     assert redirected_to(taken) == "/?lens=settings&link_error=taken"
 
     assert [%{"provider" => "github", "display" => "octocat"}] =
-             (conn |> get("/api/account") |> json_response(200))["identities"]
+             identities(conn)
 
     stale!(account)
 
@@ -198,28 +198,24 @@ defmodule HiremeWeb.SignInTest do
     {:ok, foreign} =
       Repo.with_account(other.id, fn -> Accounts.link(:x, %{subject: "3", display: "@three"}) end)
 
-    assert conn |> delete("/api/account/identities/#{foreign.id}") |> json_response(404)
+    assert account(conn, "unlink", %{id: foreign.id}, 404)
 
-    left = conn |> delete("/api/account/identities/#{gh.id}") |> json_response(200)
-    assert [%{"provider" => "x"} = last] = left["identities"]
+    account(conn, "unlink", %{id: gh.id}, 200)
+    assert [%{"provider" => "x"} = last] = identities(conn)
 
     assert %{"error" => "This is the only way into the account." <> _} =
-             conn |> delete("/api/account/identities/#{last["id"]}") |> json_response(409)
+             account(conn, "unlink", %{id: last["id"]}, 409)
 
     stale!(account)
 
-    assert %{"error" => "step_up"} =
-             conn |> delete("/api/account/identities/#{last["id"]}") |> json_response(403)
+    assert %{"error" => "step_up"} = account(conn, "unlink", %{id: last["id"]}, 403)
   end
 
   test "a link is a first factor only: an enrolled account still owes its second", %{conn: conn} do
     {:ok, _} = Accounts.link(:email, %{subject: "me@example.com", display: "me@example.com"})
-    %{"secret" => secret32} = conn |> post("/api/account/mfa/totp", %{}) |> json_response(200)
+    %{"secret" => secret32} = account(conn, "begin_totp", %{}, 200)
     code = NimbleTOTP.verification_code(Base.decode32!(secret32, padding: false))
-
-    conn
-    |> post("/api/account/mfa/totp/confirm", %{code: code, name: "Phone"})
-    |> json_response(200)
+    account(conn, "confirm_totp", %{code: code, name: "Phone"}, 200)
 
     post(anonymous(), "/sign-in/email", %{email: "me@example.com"})
     signed = post(anonymous(), "/sign-in/email/confirm", token: mailed("me@example.com"))
@@ -277,6 +273,14 @@ defmodule HiremeWeb.SignInTest do
 
     {recycle(asked),
      url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")}
+  end
+
+  # The ways into the account a conn is signed into, as the Account page lists them.
+  defp identities(conn) do
+    {_session, _account} = whoami(conn)
+
+    for i <- Accounts.identities(),
+        do: %{"id" => i.id, "provider" => to_string(i.provider), "display" => i.display}
   end
 
   defp pkce?(verifier, challenge),
