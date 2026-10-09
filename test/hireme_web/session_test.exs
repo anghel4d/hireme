@@ -53,11 +53,12 @@ defmodule HiremeWeb.SessionTest do
     end
   end
 
-  # Feed every delta waiting in this process's mailbox to the session.
+  # Feed every delta (and a boot's deferred rest) waiting in this
+  # process's mailbox to the session.
   defp drain(s) do
     receive do
-      {:ops_delta, _, _} = delta ->
-        {:ok, s} = Session.info(delta, s)
+      message when elem(message, 0) == :ops_delta or message == {Session, :rest} ->
+        {:ok, s} = Session.info(message, s)
         drain(s)
     after
       50 -> s
@@ -75,6 +76,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(p)
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
+    s = drain(s)
     _ = all_out()
 
     {:ok, _s} = Session.event({:data, 0, op(42, 1, job.id, ["no_such_stage"])}, s)
@@ -93,6 +95,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(p)
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
+    s = drain(s)
     _ = all_out()
 
     {:ok, s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
@@ -119,6 +122,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile())
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
+    s = drain(s)
     [{:boot, _, _, _} | _] = all_out()
     {:ok, s} = Session.event({:data, 0, op(44, 2, job.id, ["Call", ""])}, s)
     s = drain(s)
@@ -175,6 +179,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile())
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
+    s = drain(s)
     _ = all_out()
 
     {:ok, s} = Session.event({:data, 0, op(51, 5, job.id, ["99999999", "hidden", "", ""])}, s)
@@ -237,6 +242,7 @@ defmodule HiremeWeb.SessionTest do
 
     s = open(account)
     {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    s = drain(s)
     [{:boot, 0x02, rev, body}, {:patch, 0, rev2, listings} | _] = Enum.map(all_out(), &inflate/1)
     # The listings follow the board in their own frame, at the same rev.
     assert rev2 == rev
@@ -263,6 +269,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile())
     s = open(account)
     {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    s = drain(s)
     [{:boot, _, rev0, _} | _] = all_out()
     {:ok, s} = Session.event({:data, 0, op(62, 2, job.id, ["One", ""])}, s)
     {:ok, s} = Session.event({:data, 0, op(63, 2, job.id, ["Two", ""])}, s)
@@ -286,6 +293,7 @@ defmodule HiremeWeb.SessionTest do
     {:ok, %{key: key}} = Hireme.ApiKeys.create("bench")
     s = open(account)
     {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    s = drain(s)
     _ = all_out()
 
     req =
@@ -331,6 +339,7 @@ defmodule HiremeWeb.SessionTest do
       )
 
     {:ok, a} = Session.event({:data, 0, hello}, a)
+    a = drain(a)
     assert [{:boot, 0x03, _, _} = boot | _] = all_out()
     {:boot, 0x02, _, body} = inflate(boot)
     ids = table_ids(body)
@@ -491,6 +500,7 @@ defmodule HiremeWeb.SessionTest do
     assert_received {Session, :early_boot, 0} = early
     {:ok, s} = Session.info(early, s)
     assert_received {:uni, 3}
+    s = drain(s)
 
     frames =
       for {:out, 3, bin} <-

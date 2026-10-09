@@ -68,7 +68,8 @@ defmodule HiremeWeb.Session do
     leases: %{},
     raw: false,
     early: false,
-    acct_dirty: false
+    acct_dirty: false,
+    rest: nil
   ]
 
   # ---- Tickets: how a browser reaches the gate ----
@@ -263,10 +264,11 @@ defmodule HiremeWeb.Session do
   def info({__MODULE__, :early_boot, snapshot}, %{hello: false} = s) do
     id = @early_stream
     s.mod.open_uni(s.carrier, id)
-    s = start(s, snapshot, &s.mod.send(s.carrier, id, &1))
-    s.mod.fin(s.carrier, id)
+    s = start(s, snapshot, &s.mod.send(s.carrier, id, &1), fn -> s.mod.fin(s.carrier, id) end)
     {:ok, %{s | early: true}}
   end
+
+  def info({__MODULE__, :rest}, s), do: {:ok, flush_rest(s)}
 
   def info({__MODULE__, :recheck}, %{role: :browser} = s) do
     if live?(s.account_id, s.session_id) do
@@ -371,8 +373,7 @@ defmodule HiremeWeb.Session do
         # same deltas, and it derives its own views from them.
         {:ok, rev, {:boot, %{tables: tables}}} = Ops.attach(agent.account_id, nil)
         s = %{s | rev: rev, hello: true, raw: true}
-        boot(&control(s, &1), rev, tables, [])
-        {:ok, s}
+        {:ok, boot(s, &control(s, &1), rev, tables, [], fn -> :ok end)}
 
       :error ->
         bye(s, "key")
@@ -391,24 +392,30 @@ defmodule HiremeWeb.Session do
   defp hello(s, _agent?, _cred, _snapshot, _client), do: bye(s, "hello")
 
   # Attach to the account's guild and send the BOOT (or the revisions a
-  # known snapshot misses), then a ticket for the next reconnect.
-  defp start(s, snapshot, write) do
+  # known snapshot misses), then a ticket for the next reconnect, last.
+  defp start(s, snapshot, write, done \\ fn -> :ok end) do
     Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
     {:ok, rev, snap} = Ops.attach(s.account_id, if(snapshot == 0, do: nil, else: snapshot))
     s = %{s | rev: rev, hello: true}
+    ticket = Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id)))
+
+    finish = fn ->
+      write.(ticket)
+      done.()
+    end
+
+    schedule_tick()
 
     case snap do
       {:boot, %{tables: tables}} ->
-        boot(write, rev, tables, account_tables(s))
+        boot(s, write, rev, tables, account_tables(s), finish)
 
       {:replay, deltas} ->
         for {r, delta} <- deltas, do: write.(Packet.frame(:patch, r, raw_delta(delta)))
         write.(Packet.frame(:patch, rev, [clock(), account_tables(s)], flags: @end_flag))
+        finish.()
+        s
     end
-
-    write.(Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id))))
-    schedule_tick()
-    s
   end
 
   # ---- Raw tables (round two): rows as the database holds them ----
@@ -420,13 +427,26 @@ defmodule HiremeWeb.Session do
   @board ~w(job_apps profiles batches cv_variants leases scoreboard_snapshots)a
 
   # The board first: what the cards are drawn from, without the job
-  # listings. The rest (CV items, events, gym and net, the listings)
-  # follows at the same rev, so the first paint waits for neither.
-  defp boot(write, rev, tables, account) do
+  # listings. The rest (CV items, events, gym and net, the listings) is
+  # encoded only after the board has left, in a callback of its own so a
+  # WebSocket sends the board as its own message; any later delta waits
+  # for it, and `done` (a stream's FIN) follows it.
+  defp boot(s, write, rev, tables, account, done) do
     {board, rest} = split_boot(tables)
     body = [Packet.static_lookups(), raw_boot(board), account]
     write.(Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
-    if rest != [], do: write.(Packet.frame(:patch, rev, rest, deflate: true))
+    send(self(), {__MODULE__, :rest})
+    %{s | rest: {write, done, rev, rest}}
+  end
+
+  defp flush_rest(%{rest: nil} = s), do: s
+
+  defp flush_rest(%{rest: {write, done, rev, {tables, listings}}} = s) do
+    body = for {t, rows} <- tables, rows != [], do: Packet.raw(t, rows)
+    body = if listings == [], do: body, else: [body, Packet.raw(:job_apps, listings)]
+    if body != [], do: write.(Packet.frame(:patch, rev, body, deflate: true))
+    done.()
+    %{s | rest: nil}
   end
 
   defp split_boot(tables) do
@@ -442,10 +462,7 @@ defmodule HiremeWeb.Session do
     listings =
       for j <- jobs, Map.get(j, :listing) not in [nil, ""], do: %{id: j.id, listing: j.listing}
 
-    rest =
-      for {t, rows} <- Map.drop(tables, @board), rows != [], do: Packet.raw(t, rows)
-
-    {board, if(listings == [], do: rest, else: [rest, Packet.raw(:job_apps, listings)])}
+    {board, {Map.drop(tables, @board), listings}}
   end
 
   defp raw_boot(tables) do
@@ -494,6 +511,7 @@ defmodule HiremeWeb.Session do
 
   # Raw rows out before the ACKs they settle, as with derived cards.
   defp raw_patch(s, rev, delta) do
+    s = flush_rest(s)
     # The PATCH and the ACKs it settles leave as one write.
     {due, held} = Enum.split_with(s.acks, fn {r, _, _} -> r <= rev end)
     acks = for {_r, op_id, stamp} <- Enum.reverse(due), do: Packet.ack(op_id, stamp)
