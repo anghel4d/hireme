@@ -300,7 +300,7 @@ defmodule Hireme.Ops do
 
   def handle_call({:exec, command, holder}, _from, state) do
     guard(state, fn ->
-      case commit(warm(state), command, holder, nil) do
+      case commit(warm(state, false), command, holder, nil) do
         {{:ok, value, _rev}, state} -> {{:ok, value}, state}
         {{:error, reason}, state} -> {{:error, reason}, state}
       end
@@ -309,7 +309,7 @@ defmodule Hireme.Ops do
 
   def handle_call({:run, op, holder}, _from, state) do
     guard(state, fn ->
-      state = warm(state)
+      state = warm(state, false)
       op_id = signed(op.op_id)
 
       case Repo.one(from e in Entry, where: e.op_id == ^op_id) do
@@ -481,17 +481,20 @@ defmodule Hireme.Ops do
 
   # The table is built on first use and kept warm. A new UTC day, or a
   # revision this process did not make, repaints every card and sends
-  # the difference as its own revision.
-  defp warm(%{cards: nil} = state) do
+  # the difference as its own revision. A write skips the read of the
+  # revision (`look?` false): its own bump finds any gap.
+  defp warm(state, look? \\ true)
+
+  defp warm(%{cards: nil} = state, _look?) do
     today = Date.utc_today()
     heat = fresh_heat(today)
     cards = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
     %{state | rev: db_rev(state), day: today, heat: heat, cards: cards}
   end
 
-  defp warm(state) do
+  defp warm(state, look?) do
     cond do
-      state.day != Date.utc_today() or state.rev == nil or state.rev != db_rev(state) ->
+      state.day != Date.utc_today() or state.rev == nil or (look? and state.rev != db_rev(state)) ->
         {next, rows, _lanes?} = repaint_all(state)
         rev = Repo.transaction(fn -> bump!(%{state | rev: db_rev(state)}) end) |> elem(1)
         Process.delete({__MODULE__, :gap})

@@ -168,4 +168,32 @@ defmodule Hireme.OpsTest do
     assert {:error, {:argument, "score"}} = Ops.run(account.id, refused)
     assert {:error, {:argument, "score"}} = Ops.run(account.id, %{refused | fields: ["5"]})
   end
+
+  # Another VM (a release task, an import) writes the same database and
+  # moves the revision; the next delta must still bring a tab level.
+  test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
+    %{jobs: [first, second | _]} = desk(99)
+    {:ok, boot_rev, %{cards: cards}} = Ops.attach(account.id)
+
+    Repo.update_all(from(j in Desk.Job, where: j.id == ^first.id),
+      set: [next_action: "elsewhere"]
+    )
+
+    Repo.update_all(
+      from(a in Hireme.Accounts.Account, where: a.id == ^account.id),
+      [inc: [desk_rev: 1]],
+      skip_account: true
+    )
+
+    assert {:ok, rev} =
+             Ops.run(account.id, %{op_id: 7, kind: :score, target: second.id, fields: ["9"]})
+
+    deltas = drain([])
+    assert rev > boot_rev + 1 and List.last(deltas) |> elem(0) == rev
+
+    view =
+      Enum.reduce(deltas, Map.new(cards, &{&1.id, &1}), fn {_, d}, v -> apply_delta(v, d) end)
+
+    assert view == fresh()
+  end
 end
