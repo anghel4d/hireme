@@ -187,16 +187,14 @@ async fn wt_connect(
     // The dictionary BOOT, flagged END, is the session's "ready". BYE is a refusal.
     let mut buf = Vec::with_capacity(64 * 1024);
     loop {
-        let n = read_some(&mut recv, &mut buf)
-            .await
-            .map_err(|e| format!("control: {e}"))?;
-        if n == 0 {
-            return Err("hello refused: control stream closed".into());
+        if !matches!(read_some(&mut recv, &mut buf).await, Ok(n) if n > 0) {
+            return Err(refused(&conn, None).await);
         }
         let mut ready = false;
+        let mut bye = None;
         let used = each_frame(&buf, |f| {
             if f.header.kind == frame::BYE {
-                ready = false;
+                bye = Some(bye_reason(f.body));
                 return false;
             }
             control(f);
@@ -208,7 +206,7 @@ async fn wt_connect(
         .map_err(|e| format!("control frame: {e:?}"))?;
         buf.drain(..used.0);
         if used.1 {
-            return Err("hello refused (BYE)".into());
+            return Err(refused(&conn, bye).await);
         }
         if ready {
             break;
@@ -302,6 +300,37 @@ async fn wt_lane(conn: &Connection, letterbox_id: u64) -> Result<(Up, Down), Str
     });
 
     Ok((up_tx, down_rx))
+}
+
+/// Why the session refused the HELLO: the BYE's reason when it arrived,
+/// else the connection's close reason, which races the BYE.
+async fn refused(conn: &Connection, bye: Option<String>) -> String {
+    let reason = match bye {
+        Some(r) => r,
+        None => match tokio::time::timeout(Duration::from_millis(500), conn.closed()).await {
+            Ok(wtransport::error::ConnectionError::ApplicationClosed(c)) => {
+                String::from_utf8_lossy(c.reason()).into_owned()
+            }
+            Ok(e) => e.to_string(),
+            Err(_) => "control stream closed".into(),
+        },
+    };
+    let hint = if reason == "hello" {
+        ": the server may run a different wire schema; rebuild hireme-mcp from the same commit"
+    } else if reason == "key" {
+        ": the API key was refused (revoked, expired, or rate limited)"
+    } else {
+        ""
+    };
+    format!("hello refused ({reason}){hint}")
+}
+
+/// A BYE body: `u16 len | utf8 reason`.
+fn bye_reason(body: &[u8]) -> String {
+    let n = body
+        .get(0..2)
+        .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    String::from_utf8_lossy(body.get(2..2 + n).unwrap_or_default()).into_owned()
 }
 
 /// A certificate hash as the gate writes it: 64 hex digits, colons allowed.
