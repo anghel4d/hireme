@@ -68,7 +68,7 @@ kbd {
 }
 
 /* The shell's slots take no layout of their own; their children lay out as the desk's. */
-#topbar, #scoreboard-slot, #heat-slot, #lens, #focus-slot, #empty { display: contents; }
+#topbar, #notice-slot, #scoreboard-slot, #heat-slot, #lens, #focus-slot, #empty { display: contents; }
 .workspace[hidden] { display: none; }
 
 .topbar {
@@ -240,6 +240,70 @@ kbd {
 }
 .pill.is-hold { color: var(--due); border-color: color-mix(in oklab, var(--due) 45%, var(--line)); }
 .pill.is-open { color: var(--ok); border-color: color-mix(in oklab, var(--ok) 45%, var(--line)); }
+
+/* The link to the desk: live, still connecting, or offline with writes queued. */
+.link {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.link::before {
+  content: "";
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.05rem;
+}
+.link.is-live { color: var(--ok); }
+.link.is-offline { color: var(--due); }
+
+/*
+ * A write drawn before the server answered. Pending: sent, unanswered.
+ * Settling: accepted, its derived fields (pips, band, heat) still due.
+ * Only a pseudo-element's opacity moves, so the marks cost no layout.
+ */
+.card.is-pending::after, .card.is-settling::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.card.is-pending::after { animation: pending 0.9s ease-in-out infinite alternate; }
+.card.is-settling::after { opacity: 0.35; }
+.focus.is-pending, .battleplan.is-pending { box-shadow: inset 0 2px 0 var(--accent); }
+@keyframes pending { from { opacity: 0.25; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .card.is-pending::after { animation: none; opacity: 0.8; }
+}
+
+/* A write the server refused after it was drawn; it is already rolled back. */
+.notices {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.35rem 1rem;
+  background: var(--miss-bg);
+  border-bottom: 1px solid color-mix(in oklab, var(--due) 35%, var(--line));
+}
+.notice {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--due);
+  font-size: 0.8rem;
+}
+
+/* A focus or lens whose state is still streaming in. */
+.streaming { margin: 0; color: var(--faint); font-size: 0.8rem; }
+.focus.is-streaming .pips, .focus.is-streaming .score { opacity: 0.7; }
 .hold-error { color: var(--due); }
 .narrative {
   margin: 0.4rem 0 0.8rem;
