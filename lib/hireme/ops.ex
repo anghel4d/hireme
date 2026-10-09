@@ -45,6 +45,7 @@ defmodule Hireme.Ops do
   alias Hireme.Repo
 
   @registry __MODULE__.Registry
+  @heat __MODULE__.Heat
   @supervisor __MODULE__.Supervisor
   @inside {__MODULE__, :inside}
   @holder {__MODULE__, :holder}
@@ -121,6 +122,12 @@ defmodule Hireme.Ops do
   def child_spec(_opts) do
     children = [
       {Registry, keys: :unique, name: @registry},
+      # Each account's prepared heat snapshot and its generation, read
+      # without a call into the sequencer.
+      Supervisor.child_spec(
+        {Agent, fn -> :ets.new(@heat, [:named_table, :public, read_concurrency: true]) end},
+        id: @heat
+      ),
       {DynamicSupervisor, strategy: :one_for_one, name: @supervisor}
     ]
 
@@ -254,12 +261,61 @@ defmodule Hireme.Ops do
   end
 
   @doc """
-  The account's prepared heat snapshot as of its latest revision and
-  today, for judging many applications at once (`Hireme.Desk.focuses/2`).
-  Built from the sequencer's job rows when a write has moved them.
+  The account's prepared heat snapshot for today, for judging many
+  applications at once (`Hireme.Desk.focuses/2`). Read here, in the
+  caller, so an agent's read never waits behind the account's writes.
+
+  The sequencer bumps the account's heat generation after any commit
+  that moves a hot job's standing; a snapshot is kept under the
+  generation read before it was built, so one built across a write is
+  never served after it. A miss reads the hot jobs, lending the
+  previous snapshot's traits to the next.
   """
   @spec heat(pos_integer()) :: map()
-  def heat(account_id) when is_integer(account_id), do: call(account_id, :heat)
+  def heat(account_id) when is_integer(account_id) do
+    today = Date.utc_today()
+    generation = heat_generation(account_id)
+
+    case :ets.lookup(@heat, account_id) do
+      [{_, ^generation, ^today, heat}] ->
+        heat
+
+      found ->
+        previous = with [{_, _, _, heat}] <- found, do: heat
+        cfg = Heat.config()
+
+        previous = if previous == [], do: nil, else: previous
+
+        heat =
+          Repo.with_account(account_id, fn -> Heat.snapshot(today, cfg, previous) end)
+          |> Heat.prepare(cfg, today, previous)
+
+        :ets.insert(@heat, {account_id, generation, today, heat})
+        heat
+    end
+  end
+
+  defp heat_generation(account_id) do
+    case :ets.lookup(@heat, {:generation, account_id}) do
+      [{_, n}] -> n
+      [] -> 0
+    end
+  end
+
+  # What a peer contributes to the heat snapshot (`Heat.snapshot/2`).
+  @heat_fields ~w(current_stage stage_on company role listing_url canonical_url department
+                  squad fit score_100 heat_override heat_override_reason)a
+
+  defp moved_heat(account_id, rows, gone) do
+    moved? =
+      Map.has_key?(gone, :job_apps) or
+        Enum.any?(Map.get(rows, :job_apps, []), fn row ->
+          Enum.any?(@heat_fields, &Map.has_key?(row, &1))
+        end)
+
+    if moved?,
+      do: :ets.update_counter(@heat, {:generation, account_id}, 1, {{:generation, account_id}, 0})
+  end
 
   @doc "Re-read the lease rows of these jobs (a lease taken or released) and send what changed."
   @spec touch(pos_integer(), [pos_integer()]) :: :ok
@@ -281,6 +337,8 @@ defmodule Hireme.Ops do
       GenServer.stop(pid, :normal)
     end
 
+    :ets.delete(@heat, account_id)
+    :ets.delete(@heat, {:generation, account_id})
     :ok
   catch
     :exit, _gone -> :ok
@@ -346,8 +404,7 @@ defmodule Hireme.Ops do
     Repo.put_account(account_id)
     Process.send_after(self(), :sweep, 0)
 
-    {:ok,
-     %{account: account_id, rev: nil, raw: nil, heat: nil, ring: :queue.new(), ring_bytes: 0}}
+    {:ok, %{account: account_id, rev: nil, raw: nil, ring: :queue.new(), ring_bytes: 0}}
   end
 
   @impl true
@@ -389,13 +446,6 @@ defmodule Hireme.Ops do
       state = settle(warm(state), :all)
       tables = Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)
       {{:ok, state.rev, {:boot, %{tables: tables}}}, state}
-    end)
-  end
-
-  def handle_call(:heat, _from, state) do
-    guard(state, fn ->
-      state = state |> warm() |> heated()
-      {elem(state.heat, 1), state}
     end)
   end
 
@@ -592,7 +642,7 @@ defmodule Hireme.Ops do
 
   defp warm(%{raw: nil} = state, _look?) do
     raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
-    %{state | rev: db_rev(state), raw: raw, heat: nil, ring: :queue.new(), ring_bytes: 0}
+    %{state | rev: db_rev(state), raw: raw, ring: :queue.new(), ring_bytes: 0}
   end
 
   defp warm(state, look?) do
@@ -611,24 +661,6 @@ defmodule Hireme.Ops do
     Repo.one!(from(a in Account, where: a.id == ^state.account, select: a.desk_rev),
       skip_account: true
     )
-  end
-
-  # The heat snapshot, from the job rows in hand, prepared for today.
-  defp heated(%{heat: {day, _}} = state) do
-    if day == Date.utc_today(), do: state, else: heated(%{state | heat: nil})
-  end
-
-  defp heated(state) do
-    today = Date.utc_today()
-    cfg = Heat.config()
-
-    heat =
-      state.raw.job_apps
-      |> Map.values()
-      |> Heat.snapshot_of(today, cfg)
-      |> Heat.prepare(cfg, today)
-
-    %{state | heat: {today, heat}}
   end
 
   # -- the raw tables ---------------------------------------------------------
@@ -691,11 +723,9 @@ defmodule Hireme.Ops do
         {Map.put(raw, table, table_rows), merge(rows, table, sent), merge(gone, table, left)}
       end)
 
-    # Any job row moved may move the heat snapshot; it is rebuilt on ask.
-    heat =
-      if Map.has_key?(rows, :job_apps) or Map.has_key?(gone, :job_apps), do: nil, else: state.heat
-
-    {%{state | raw: raw, heat: heat}, %{rows: rows, gone: gone}}
+    # Committed by now: a hot job that moved retires the kept snapshot.
+    moved_heat(state.account, rows, gone)
+    {%{state | raw: raw}, %{rows: rows, gone: gone}}
   end
 
   # A new row goes in full; a changed one as its id and the columns that
