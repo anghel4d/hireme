@@ -117,20 +117,6 @@ defmodule Hireme.Desk.Focus do
         }
 end
 
-defmodule Hireme.Desk.Root do
-  @moduledoc "A profile's root CV: every line as written, no mask."
-
-  @enforce_keys [:profile, :cv, :kv, :narrative]
-  defstruct @enforce_keys
-
-  @type t :: %__MODULE__{
-          profile: Hireme.Corpus.Profile.t(),
-          cv: Hireme.Cv.Document.t(),
-          kv: [Hireme.Kv.Pair.t()],
-          narrative: Hireme.Corpus.Narrative.t() | nil
-        }
-end
-
 defmodule Hireme.Desk.Signal do
   @moduledoc """
   One change on the desk, broadcast on the `"desk"` topic as
@@ -312,7 +298,6 @@ defmodule Hireme.Desk do
   alias Hireme.Desk.Focus
   alias Hireme.Desk.Job
   alias Hireme.Desk.Overlay
-  alias Hireme.Desk.Root
   alias Hireme.Desk.Signal
   alias Hireme.Desk.Variant
   alias Hireme.Heat
@@ -388,18 +373,6 @@ defmodule Hireme.Desk do
     |> paint(Heat.snapshot(today, cfg), cfg, today)
     |> Enum.filter(&(filters.heat == :all or &1.heat_state == filters.heat))
     |> Enum.sort_by(&Card.order/1)
-  end
-
-  @doc """
-  Every card, or the cards with these ids, painted against a heat
-  snapshot the caller keeps (`Hireme.Ops` keeps one per account). Not in
-  board order.
-  """
-  @spec cards([pos_integer()] | :all, map(), Date.t()) :: [Card.t()]
-  def cards(ids, snapshot, today) do
-    query = card_query(%Filters{status: :all})
-    query = if ids == :all, do: query, else: where(query, [j], j.id in ^ids)
-    paint(query, snapshot, Heat.config(), today)
   end
 
   defp paint(query, snapshot, cfg, today) do
@@ -559,27 +532,6 @@ defmodule Hireme.Desk do
       :error ->
         raise Ecto.NoResultsError, queryable: from(v in Variant, where: v.job_app_id == ^job_id)
     end
-  end
-
-  @spec root(pos_integer()) :: Root.t()
-  def root(profile_id) do
-    profile = Corpus.get_profile!(profile_id)
-    items = Corpus.list_items(profile_id)
-
-    variant =
-      Repo.one(from v in Variant, where: v.profile_id == ^profile_id and is_nil(v.job_app_id)) ||
-        %Variant{label: "Root", theme: %{}, profile_id: profile_id}
-
-    %Root{
-      profile: profile,
-      cv:
-        Cv.compose(profile, Mask.apply(items, []), Theme.parse(variant.theme),
-          label: variant.label,
-          person: person_name()
-        ),
-      kv: Kv.list("global"),
-      narrative: Narrative.for_profile(profile)
-    }
   end
 
   @doc """

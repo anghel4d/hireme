@@ -2,7 +2,6 @@ defmodule Hireme.ScoreTest do
   use Hireme.DataCase, async: false
   import Hireme.Fixtures
 
-  alias Hireme.Campaign
   alias Hireme.Desk
   alias Hireme.Desk.Filters
   alias Hireme.Import
@@ -34,8 +33,7 @@ defmodule Hireme.ScoreTest do
              "Middling Co"
            ]
 
-    chart = Campaign.scoreboard().chart
-    assert Desk.score_chart("Batch-009") == chart
+    chart = Desk.score_chart("Batch-009")
     assert Desk.score_chart("Batch-missing").n == 0
     assert Desk.score_chart(:leftover).n == 0
     assert chart.n == 4

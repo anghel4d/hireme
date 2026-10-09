@@ -1,6 +1,6 @@
 # Production-release benchmark. State must be a synthetic testbed under BENCH_DIR.
 defmodule HiremeBench.Server do
-  alias Hireme.{Accounts, ApiKeys, Campaign, Corpus, Desk, Gym, Heat, Kv, Mfa, Net, Repo}
+  alias Hireme.{Accounts, ApiKeys, Corpus, Desk, Gym, Heat, Kv, Mfa, Net, Repo}
 
   def run do
     dir = Path.expand(System.fetch_env!("BENCH_DIR"))
@@ -45,7 +45,6 @@ defmodule HiremeBench.Server do
     operations = [
       {"Domain/Desk", "list_cards", fn -> Desk.list_cards(%Desk.Filters{status: :all}) end},
       {"Domain/Desk", "focus", fn -> Desk.focus(job_id) end},
-      {"Domain/Desk", "root", fn -> Desk.root(profile_id) end},
       {"Domain/Desk", "score_chart", fn -> Desk.score_chart() end},
       {"Domain/Desk", "score_distribution", score_distribution},
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
@@ -57,7 +56,6 @@ defmodule HiremeBench.Server do
       {"Domain/Org", "family", fn -> Heat.Org.family(%{role: "Senior Systems Engineer"}) end},
       {"Domain/ATS", "parse",
        fn -> Heat.Ats.parse("https://boards.greenhouse.io/acme/jobs/42") end},
-      {"Domain/Campaign", "scoreboard", fn -> Campaign.scoreboard() end},
       {"Domain/Gym", "progress", fn -> Gym.progress() end},
       {"Domain/Gym", "recent", fn -> Gym.recent() end},
       {"Domain/Net", "progress", fn -> Net.progress() end},
@@ -83,10 +81,7 @@ defmodule HiremeBench.Server do
 
          HiremeWeb.Packet.frame(:boot, 0, body, deflate: true)
          |> IO.iodata_to_binary()
-       end},
-      {"Transport/JSON", "focus",
-       fn -> Desk.focus(job_id) |> HiremeWeb.JSON.focus() |> Jason.encode!() end},
-      {"Transport/JSON", "lanes", fn -> HiremeWeb.JSON.lanes() |> Jason.encode!() end}
+       end}
     ]
 
     for {page, interaction, operation} <- operations,

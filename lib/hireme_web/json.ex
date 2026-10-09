@@ -1,51 +1,19 @@
 defmodule HiremeWeb.JSON do
   @moduledoc """
-  The JSON shape of what an MCP agent's tool calls answer (a focus, a
-  root, a score chart, the lanes and their rows, a heat verdict), of the
-  account page's keys and ways in, and of an HTTP refusal. The browser
-  derives these views itself from raw rows; the oracle
-  (`test/support/oracle.ex`) dumps these shapes as the reference its
-  ports must equal. Every field is named here on purpose; nothing is
-  serialised by reflection.
+  The JSON shape of what an MCP agent's tool calls answer (a score
+  chart, the heat chart's rows, gym and net progress, a heat verdict),
+  of the account page's keys and ways in, and of an HTTP refusal. The
+  browser derives its views itself from raw rows. Every field is named
+  here on purpose; nothing is serialised by reflection.
   """
 
   import Plug.Conn, only: [put_status: 2]
   import Phoenix.Controller, only: [json: 2]
 
-  alias Hireme.Campaign.Scoreboard
-  alias Hireme.Cv.Document
-  alias Hireme.Desk
-  alias Hireme.Desk.Focus
-  alias Hireme.Desk.Job
-  alias Hireme.Desk.Root
   alias Hireme.Gym
   alias Hireme.Heat
-  alias Hireme.Keywords.Coverage
   alias Hireme.LifeEv
-  alias Hireme.Mask.Line
   alias Hireme.Net
-  alias Hireme.Pipeline
-  alias Hireme.Pipeline.Rung
-  alias Hireme.Theme
-
-  @spec focus(Focus.t()) :: map()
-  def focus(%Focus{} = f) do
-    %{
-      job: job(f.job),
-      profile: profile(f.profile),
-      variant: %{id: f.variant.id, label: f.variant.label},
-      theme: Theme.to_map(f.theme),
-      rail: Enum.map(f.rail, &rung/1),
-      events: Enum.map(f.events, &%{id: &1.id, kind: &1.kind, body: &1.body, at: &1.inserted_at}),
-      cv: document(f.cv),
-      narrative: narrative(f.narrative),
-      coverage: coverage(f.coverage),
-      root_coverage: coverage(f.root_coverage),
-      kv: Enum.map(f.kv, &%{key: &1.key, value: &1.value}),
-      masks: Enum.map(f.masks, &line/1),
-      heat: heat(f)
-    }
-  end
 
   @doc "A key as the settings page lists it. The secret is never here; `display` is its visible prefix."
   @spec key(Hireme.ApiKeys.Key.t()) :: map()
@@ -69,66 +37,6 @@ defmodule HiremeWeb.JSON do
   def identity(%Hireme.Accounts.Identity{} = i),
     do: %{id: i.id, provider: i.provider, display: i.display, created_at: i.verified_at}
 
-  @spec root(Root.t()) :: map()
-  def root(%Root{} = r) do
-    %{
-      profile: profile(r.profile),
-      cv: document(r.cv),
-      kv: Enum.map(r.kv, &%{key: &1.key, value: &1.value}),
-      narrative: narrative(r.narrative)
-    }
-  end
-
-  defp job(%Job{} = j) do
-    %{
-      id: j.id,
-      code: Desk.code(j.id),
-      company: j.company,
-      role: j.role,
-      location: j.location,
-      listing: j.listing,
-      listing_url: j.listing_url,
-      heat: j.heat,
-      status: j.status,
-      stage: Pipeline.name(j.current_stage),
-      stage_label: Pipeline.label(j.current_stage),
-      stage_hint: Pipeline.hint(j.current_stage),
-      pips: j.pips,
-      score_100: j.score_100,
-      band: LifeEv.name(LifeEv.band(j.score_100)),
-      next_action: j.next_action,
-      next_due: j.next_due,
-      stage_on: j.stage_on,
-      freshness: j.freshness,
-      gate: j.gate,
-      fit: j.fit,
-      batch: batch(Map.get(j, :batch))
-    }
-  end
-
-  @spec scoreboard(Scoreboard.t()) :: map()
-  def scoreboard(%Scoreboard{} = s) do
-    %{
-      fire: s.fire,
-      leftover_unique: s.leftover_unique,
-      leftover_noted_on: s.leftover_noted_on,
-      batches_today: s.batches_today,
-      batches_target: s.batches_target,
-      apps_today: s.apps_today,
-      apps_target: s.apps_target,
-      submitted_today: s.submitted_today,
-      cumulative: s.cumulative,
-      target_total: s.target_total,
-      target_on: s.target_on,
-      varieties:
-        Enum.map(
-          s.varieties,
-          &%{code: &1.code, fire: &1.fire, status: &1.status, label: &1.label}
-        ),
-      chart: chart(s.chart)
-    }
-  end
-
   @spec chart(LifeEv.Chart.t()) :: map()
   def chart(%LifeEv.Chart{} = c) do
     c
@@ -137,31 +45,6 @@ defmodule HiremeWeb.JSON do
       bands: Enum.map(c.bands, &Map.take(&1, [:key, :label, :min, :max, :count, :share])),
       bins: Enum.map(c.bins, &Map.take(&1, [:lo, :hi, :count]))
     })
-  end
-
-  @doc "The lanes beside the desk, read as one document: gym, net, and company heat."
-  @spec lanes() :: map()
-  def lanes do
-    chart = Heat.chart()
-
-    %{
-      gym:
-        Map.merge(gym(Gym.progress()), %{
-          platforms: options(Gym.platforms(), &Gym.label/1),
-          topics_all: options(Gym.topics(), &Gym.label/1),
-          difficulties: options(Gym.difficulties(), &Gym.label/1),
-          outcomes: options(Gym.outcomes(), &Gym.label/1)
-        }),
-      net:
-        Map.merge(net(Net.progress()), %{
-          kinds: options(Net.kinds(), &Net.label/1),
-          channels: options(Net.channels(), &Net.label/1)
-        }),
-      heat: %{
-        companies: Enum.map(chart.companies, &heat_row/1),
-        vendors: Enum.map(chart.vendors, &heat_row/1)
-      }
-    }
   end
 
   @spec gym(Gym.Progress.t()) :: map()
@@ -222,70 +105,5 @@ defmodule HiremeWeb.JSON do
       end
 
     conn |> put_status(status) |> json(%{error: message})
-  end
-
-  defp heat(%Focus{verdict: %Heat.Verdict{} = v, job: job}) do
-    v
-    |> verdict()
-    |> Map.merge(%{override: job.heat_override, override_reason: job.heat_override_reason})
-  end
-
-  defp options(keys, label), do: Enum.map(keys, &%{key: Atom.to_string(&1), label: label.(&1)})
-
-  defp batch(%{code: code, fire: fire}), do: %{code: code, fire: fire}
-  defp batch(_), do: nil
-
-  defp profile(p),
-    do: %{id: p.id, slug: p.slug, name: p.name, headline: p.headline, summary: p.summary}
-
-  defp narrative(nil), do: nil
-  defp narrative(n), do: %{id: n.id, body: n.body, version: n.version}
-
-  defp rung(%Rung{} = r) do
-    %{
-      key: Pipeline.name(r.key),
-      label: Pipeline.label(r.key),
-      hint: Pipeline.hint(r.key),
-      state: r.state,
-      note: r.note
-    }
-  end
-
-  defp coverage(%Coverage{} = c), do: %{hits: c.hits, misses: c.misses}
-
-  defp document(%Document{} = d) do
-    %{
-      label: d.label,
-      person: d.person,
-      headline: d.headline,
-      summary: d.summary,
-      summary_canonical: d.summary_canonical,
-      summary_reason: d.summary_reason,
-      accent: d.accent,
-      density: d.density,
-      facts: Enum.map(d.facts, &line/1),
-      sections:
-        Enum.map(
-          d.sections,
-          fn s -> %{kind: s.kind, label: s.label, lines: Enum.map(s.lines, &line/1)} end
-        ),
-      hidden: Enum.map(d.hidden, &line/1)
-    }
-  end
-
-  defp line(%Line{} = l) do
-    Map.take(l, [
-      :id,
-      :kind,
-      :title,
-      :body,
-      :org,
-      :span,
-      :shown,
-      :mode,
-      :reason,
-      :canonical_title,
-      :canonical_body
-    ])
   end
 end
