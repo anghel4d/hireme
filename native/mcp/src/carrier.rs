@@ -2,7 +2,7 @@
 //!
 //! **WebTransport** (the default): one QUIC session to the gate. Bidi
 //! stream 0 is the control stream. It carries the agent HELLO (flag
-//! AGENT, the API key as credential), then the dictionary BOOT that
+//! AGENT, the API key as credential), then the BOOT (flagged END) that
 //! means "ready", then the account's columnar PATCH fan-out. Each
 //! letterbox lease is one more bidi stream: a LEASE frame first, then
 //! RPC frames both ways. Closing the stream releases the lease. One key
@@ -184,7 +184,7 @@ async fn wt_connect(
         .await
         .map_err(|e| format!("hello: {e}"))?;
 
-    // The dictionary BOOT, flagged END, is the session's "ready". BYE is a refusal.
+    // The BOOT flagged END is the session's "ready". BYE is a refusal.
     let mut buf = Vec::with_capacity(64 * 1024);
     loop {
         if !matches!(read_some(&mut recv, &mut buf).await, Ok(n) if n > 0) {
