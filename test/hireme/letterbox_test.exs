@@ -5,7 +5,7 @@ defmodule Hireme.LetterboxTest do
   alias Hireme.Desk
   alias Hireme.Letterbox
 
-  # Claim in another process of the same account, as another lease would.
+  # Another agent's session: a process of the same account.
   defp elsewhere(fun) do
     account_id = Repo.account_id!()
 
@@ -16,53 +16,108 @@ defmodule Hireme.LetterboxTest do
     |> Task.await()
   end
 
-  test "a lease keeps its job and its employer's lineage from every other lease" do
-    first = job(profile(), %{company: "North Co"})
-    sibling = job(profile(), %{company: "North Co"})
-    other = job(profile(), %{company: "South Co"})
+  defp jobs(n) do
+    profile = profile()
+    for i <- 1..n, do: job(profile, %{company: "Co #{i}"})
+  end
 
-    assert {:ok, pair} = Letterbox.claim(first.id)
-    assert {:error, :busy} = elsewhere(fn -> Letterbox.claim(first.id) end)
-    assert {:error, :lineage_busy} = elsewhere(fn -> Letterbox.claim(sibling.id) end)
-    assert {:ok, _} = elsewhere(fn -> Letterbox.claim(other.id) end)
-    assert MapSet.member?(Letterbox.leased_jobs(), first.id)
+  test "blocks are contiguous, exclusive and all or nothing" do
+    jobs = jobs(10)
+    ids = Enum.map(jobs, & &1.id)
 
-    # A lineage refusal leaves nothing behind.
-    refute MapSet.member?(Letterbox.leased_jobs(), sibling.id)
+    assert {:ok, %{from: 1, to: 4, jobs: first}, []} = Letterbox.acquire({:count, 4})
+    assert first == Enum.take(ids, 4)
 
-    assert Letterbox.release(pair) == :ok
-    refute MapSet.member?(Letterbox.leased_jobs(), first.id)
-    assert {:ok, _} = elsewhere(fn -> Letterbox.claim(sibling.id) end)
+    # The next agent asking for a size gets the next free run.
+    assert {{:ok, %{from: 5, to: 8}, []}, other} = hold_lease({:count, 4})
+
+    # A range over held entries is refused whole, naming them and a free block.
+    assert {:error, %{code: :busy, held: [3, 4], free: {9, 10}, n: 10}} =
+             elsewhere(fn -> Letterbox.acquire({:range, 3, 4}) end)
+
+    refute MapSet.member?(Letterbox.leased_jobs(), Enum.at(ids, 8))
+    let_go(other)
+  end
+
+  test "agents racing for the same free run never both win it" do
+    jobs(16)
+    account_id = Repo.account_id!()
+    parent = self()
+
+    racers =
+      for _ <- 1..8 do
+        Task.async(fn ->
+          Repo.put_account(account_id)
+          receive do: (:go -> send(parent, {self(), Letterbox.acquire({:count, 4})}))
+          receive do: (:done -> :ok)
+        end)
+      end
+
+    Enum.each(racers, &send(&1.pid, :go))
+    answers = for %{pid: pid} <- racers, do: receive(do: ({^pid, answer} -> {pid, answer}))
+    wins = for {pid, {:ok, block, _}} <- answers, do: {pid, block.jobs}
+    claimed = Enum.flat_map(wins, &elem(&1, 1))
+
+    assert wins != []
+    assert length(claimed) == length(Enum.uniq(claimed))
+
+    for {pid, jobs} <- wins,
+        job <- jobs,
+        do: assert([{^pid, _}] = Registry.lookup(Hireme.Letterbox.Registry, {:job, job}))
+
+    for {_pid, answer} <- answers,
+        do: assert(match?({:ok, _, _}, answer) or match?({:error, %{code: :busy}}, answer))
+
+    Enum.each(racers, &send(&1.pid, :done))
+    Enum.each(racers, &Task.await/1)
+  end
+
+  test "a range past the desk is clamped with a warning; one wholly outside is empty" do
+    jobs(5)
+
+    assert {:ok, %{from: 1, to: 5}, [%{code: :count_capped, asked: 99, n: 5}]} =
+             elsewhere(fn -> Letterbox.acquire({:count, 99}) end)
+
+    assert {:ok, %{from: 4, to: 5}, [%{code: :truncated, asked: {4, 40}, n: 5}]} =
+             Letterbox.acquire({:range, 40, 4})
+
+    assert {:error, %{code: :empty, asked: {6, 9}, n: 5}} =
+             elsewhere(fn -> Letterbox.acquire({:range, 6, 9}) end)
+  end
+
+  test "a block's writes: its own applications only, and one agent per employer CV" do
+    profile = profile()
+    a = job(profile, %{company: "Shared Co"})
+    b = job(profile, %{company: "Other Co"})
+    c = job(profile, %{company: "Shared Co"})
+
+    {:ok, mine, []} = Letterbox.acquire({:range, 1, 2})
+    assert Letterbox.permit(mine, %{kind: :next, target: a.id}) == :ok
+    assert Letterbox.permit(mine, %{kind: :gym_target, target: 0}) == :ok
+    assert {:error, {:leased, _}} = Letterbox.permit(mine, %{kind: :score, target: c.id})
+    assert {:error, {:leased, _}} = Letterbox.permit(nil, %{kind: :stage, target: a.id})
+
+    # A CV write claims the employer's lineage for this block…
+    assert Letterbox.permit(mine, %{kind: :overlay, target: a.id}) == :ok
+
+    # …so another agent's CV write for the same employer waits for it.
+    assert {:error, :lineage_busy} =
+             elsewhere(fn ->
+               {:ok, theirs, []} = Letterbox.acquire({:range, 3, 3})
+               Letterbox.permit(theirs, %{kind: :overlay, target: c.id})
+             end)
+
+    assert Letterbox.release(mine) == :ok
+    refute MapSet.member?(Letterbox.leased_jobs(), a.id)
+    assert Letterbox.permit(nil, %{kind: :narrative, target: b.id}) == :ok
   end
 
   test "the desk refuses a write while another process holds the lease" do
     job = job(profile(), %{company: "Held Co"})
-    me = self()
-    account_id = Repo.account_id!()
-
-    holder =
-      spawn_link(fn ->
-        Repo.put_account(account_id)
-        {:ok, pair} = Letterbox.claim(job.id)
-        send(me, :held)
-
-        receive do
-          :release -> send(me, Letterbox.release(pair))
-        end
-      end)
-
-    assert_receive :held
+    {{:ok, _block, _}, holder} = hold_lease(job.id)
     assert {:error, :leased} = Desk.set_stage(job.id, :freshness)
-    send(holder, :release)
-    assert_receive :ok
+    let_go(holder)
     assert {:ok, moved} = Desk.set_stage(job.id, :freshness)
     assert moved.current_stage == :freshness
-  end
-
-  test "another account's job cannot be leased" do
-    job = job(profile(), %{company: "Theirs"})
-    open_account("Other desk")
-    assert {:error, :not_found} = Letterbox.claim(job.id)
-    assert {:error, :not_found} = Letterbox.claim(2_000_000_000)
   end
 end

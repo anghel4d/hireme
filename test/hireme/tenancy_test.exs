@@ -14,7 +14,7 @@ defmodule Hireme.TenancyTest do
     Hireme.DataCase.open_account("Other desk")
     assert Repo.all(Job) == []
     assert Repo.get(Job, job.id) == nil
-    assert {:error, :not_found} = Letterbox.claim(job.id)
+    assert {:error, %{code: :empty, n: 0}} = Letterbox.acquire({:count, 16})
   end
 
   test "a read with no account on the process is refused, and so is a write" do

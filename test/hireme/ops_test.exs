@@ -128,7 +128,7 @@ defmodule Hireme.OpsTest do
     case Map.pop(producers, job.id) do
       {nil, _} ->
         case Hireme.Fixtures.hold_lease(job.id) do
-          {{:ok, _pair}, producer} ->
+          {{:ok, _block, _}, producer} ->
             Process.put(:producers, Map.put(producers, job.id, producer))
             {:lease, true}
 

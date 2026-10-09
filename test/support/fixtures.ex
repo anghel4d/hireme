@@ -56,23 +56,26 @@ defmodule Hireme.Fixtures do
   def uniq, do: System.unique_integer([:positive])
 
   @doc """
-  Hold `job_id`'s lease in a process of its own, as an agent's lane
-  would: `{claim_result, pid}`. `let_go/1` releases it as a closing
-  lane does.
+  Hold a lease (a job's block of one, or any `Letterbox.acquire/1` want) in a process of its own, as an
+  agent's session would: `{acquire_result, pid}`. `let_go/1` releases it as a closing
+  session does.
   """
-  def hold_lease(job_id) do
+  def hold_lease(job_id) when is_integer(job_id),
+    do: hold_lease({:range, entry(job_id), entry(job_id)})
+
+  def hold_lease(want) do
     account_id = Hireme.Repo.account_id!()
     me = self()
 
     pid =
       spawn(fn ->
         Hireme.Repo.put_account(account_id)
-        claim = Hireme.Letterbox.claim(job_id)
+        claim = Hireme.Letterbox.acquire(want)
         send(me, {:held, self(), claim})
 
         receive do
           {:let_go, from} ->
-            with {:ok, pair} <- claim, do: Hireme.Letterbox.release(pair)
+            with {:ok, block, _} <- claim, do: Hireme.Letterbox.release(block)
             send(from, {:gone, self()})
         end
       end)
@@ -80,6 +83,12 @@ defmodule Hireme.Fixtures do
     receive do
       {:held, ^pid, result} -> {result, pid}
     end
+  end
+
+  @doc "A job's entry: its place among the account's applications, 1-based, by id."
+  def entry(job_id) do
+    import Ecto.Query
+    Hireme.Repo.aggregate(from(j in Hireme.Desk.Job, where: j.id <= ^job_id), :count)
   end
 
   @doc "End a lease `hold_lease/1` took."

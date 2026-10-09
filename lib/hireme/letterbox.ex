@@ -1,27 +1,52 @@
 defmodule Hireme.Letterbox do
   @moduledoc """
-  Leases: which process may write one application, and its CV lineage.
+  Leases: which agent may write which applications.
 
-  An agent leases an application by its job id. The lease is held by the
-  process that claims it: the agent's own wire session
-  (`HiremeWeb.Session`), one process per agent, holding each lease on a
-  lane of its own. While it holds the lease,
-  every write to that job from anyone else is refused `:leased`
-  (`permit_job/2`), and so is a lease of another application on the same
-  employer's lineage. A claim is two unique keys in
-  `Hireme.Letterbox.Registry`, owned by the claiming process; `release/1`
-  drops them at once, and the registry drops them when the process
-  exits. The browser sees a job's `leased` column change either way.
+  An agent holds one lease, on one block: a contiguous run of the
+  account's applications, numbered 1..n in the order they were added (by
+  id), so a block keeps its entries as new applications arrive. The
+  lease is held by the agent's own wire session (`HiremeWeb.Session`),
+  one process per agent. An agent asks for a range (`{:range, from, to}`,
+  clamped to 1..n with a warning) or for the first free block of a size
+  (`{:count, n}`). A block is all or nothing: one that overlaps another
+  agent's is refused, naming the entries held and the nearest free block
+  of the same size.
+
+  While an agent holds a block, every write to its applications from
+  anyone else is refused `:leased` (`permit_job/2`), and the agent may
+  write only those. A CV is shared by an employer's applications, so the
+  agent's first CV write for an employer also claims that employer's
+  lineage; another agent's CV write there is refused `:lineage_busy`.
+  Every claim is a unique key in `Hireme.Letterbox.Registry`, owned by
+  the session; `release/1` drops them at once, and the registry drops
+  them when the session exits. The browser sees a job's `leased` column
+  change either way.
   """
+
+  import Ecto.Query
 
   alias Hireme.ApiKeys
   alias Hireme.CvPair
+  alias Hireme.Desk.Job
   alias Hireme.Ops
   alias Hireme.Repo
 
   @registry __MODULE__.Registry
-  # The ops a lease may run: the job's own, never the desk's.
-  @lease_kinds [:stage, :next, :note, :score, :overlay, :heat_override, :generation]
+
+  @type block :: %{from: pos_integer(), to: pos_integer(), jobs: [pos_integer()], held: map()}
+  @type want :: {:range, integer(), integer()} | {:count, integer()}
+  @typedoc "What an agent asked for and what it got instead; every field is data, not prose."
+  @type warning ::
+          %{code: :truncated, asked: {integer(), integer()}, n: non_neg_integer()}
+          | %{code: :count_capped, asked: integer(), n: non_neg_integer()}
+  @type refusal ::
+          %{code: :empty, asked: {integer(), integer()} | nil, n: non_neg_integer()}
+          | %{
+              code: :busy,
+              held: [pos_integer()],
+              free: {pos_integer(), pos_integer()} | nil,
+              n: non_neg_integer()
+            }
 
   @doc """
   The agent a presented API key names, counted once against the peer's
@@ -39,34 +64,51 @@ defmodule Hireme.Letterbox do
     end
   end
 
-  @doc "Whether `op` is one a lease on `pair` may run: its job's own kinds, on its job."
-  @spec lease_op?(map(), CvPair.t()) :: boolean()
-  def lease_op?(%{kind: kind, target: target}, pair),
-    do: kind in @lease_kinds and target == CvPair.job_id(pair)
-
   @doc """
-  Lease `job_id`, in the account on the process, for the calling
-  process. Refused `:not_found` for a job the account cannot see,
-  `:busy` when another lease holds it, `:lineage_busy` when another
-  lease holds its employer's lineage.
+  Lease a block for the calling process, in the account on it. The
+  answer carries the block and any warnings (a range clamped to what
+  exists); a refusal carries what is held and the nearest free block.
   """
-  @spec claim(pos_integer()) :: {:ok, CvPair.t()} | {:error, :not_found | :busy | :lineage_busy}
-  def claim(job_id) when is_integer(job_id) do
-    with {:ok, pair} <- bind(job_id),
-         :ok <- register({:job, CvPair.job_id(pair)}, :busy),
-         :ok <- lineage(pair) do
-      Ops.touch(Repo.account_id!(), [job_id])
-      {:ok, pair}
+  @spec acquire(want()) :: {:ok, block(), [warning()]} | {:error, refusal()}
+  def acquire(want) do
+    entries = Repo.all(from j in Job, order_by: j.id, select: j.id)
+
+    with {:ok, from, to, warnings} <- window(want, entries),
+         jobs = Enum.slice(entries, from - 1, to - from + 1),
+         :ok <- claim(jobs, from, entries) do
+      Ops.touch(Repo.account_id!(), jobs)
+      {:ok, %{from: from, to: to, jobs: jobs, held: Map.new(jobs, &{&1, true})}, warnings}
     end
   end
 
-  @doc "Give a lease back now, so the next claim sees it free."
-  @spec release(CvPair.t()) :: :ok
-  def release(pair) do
-    Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
-    Registry.unregister(@registry, {:lineage, CvPair.lineage_id(pair)})
-    Ops.touch(Repo.account_id!(), [CvPair.job_id(pair)])
+  @doc "Give a block back now, with the lineages its CV writes claimed."
+  @spec release(block() | nil) :: :ok
+  def release(nil), do: :ok
+
+  def release(%{jobs: jobs}) do
+    for key <- Registry.keys(@registry, self()), do: Registry.unregister(@registry, key)
+    Ops.touch(Repo.account_id!(), jobs)
   end
+
+  @doc """
+  Whether a lease on `block` may run `op`. An application's own ops need
+  the application in the block, and a CV op the employer's lineage too;
+  the desk's own ops (gym, net, narrative, open fire) need no lease.
+  """
+  @spec permit(block() | nil, map()) :: :ok | {:error, term()}
+  def permit(%{held: held}, %{kind: kind, target: job})
+      when kind in [:overlay, :generation] and is_map_key(held, job),
+      do: lineage(job)
+
+  def permit(%{held: held}, %{kind: kind, target: job})
+      when kind in [:stage, :next, :note, :score, :heat_override] and is_map_key(held, job),
+      do: :ok
+
+  def permit(_block, %{kind: kind})
+      when kind in [:stage, :next, :note, :score, :heat_override, :overlay, :generation],
+      do: {:error, {:leased, "That application is not in this agent's block: lease it first."}}
+
+  def permit(_block, _op), do: :ok
 
   @doc """
   A write to `job_id` is allowed unless a lease other than `holder`'s
@@ -91,24 +133,87 @@ defmodule Hireme.Letterbox do
     |> MapSet.new()
   end
 
-  defp bind(job_id) do
-    case CvPair.bind(job_id) do
-      {:ok, pair} -> {:ok, pair}
-      {:error, _} -> {:error, :not_found}
+  # ---- Blocks ----
+
+  defp window(want, []), do: {:error, %{code: :empty, asked: asked(want), n: 0}}
+
+  defp window({:range, from, to}, entries) when from > to, do: window({:range, to, from}, entries)
+
+  defp window({:range, from, to}, entries) do
+    n = length(entries)
+
+    case {max(from, 1), min(to, n)} do
+      {f, t} when f > t -> {:error, %{code: :empty, asked: {from, to}, n: n}}
+      {^from, ^to} -> {:ok, from, to, []}
+      {f, t} -> {:ok, f, t, [%{code: :truncated, asked: {from, to}, n: n}]}
     end
   end
 
-  defp lineage(pair) do
-    with {:error, reason} <- register({:lineage, CvPair.lineage_id(pair)}, :lineage_busy) do
-      Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
-      {:error, reason}
+  defp window({:count, count}, entries) when count < 1, do: window({:count, 1}, entries)
+
+  defp window({:count, count}, entries) when count > length(entries) do
+    with {:ok, from, to, []} <- free(entries, length(entries)),
+         do: {:ok, from, to, [%{code: :count_capped, asked: count, n: length(entries)}]}
+  end
+
+  defp window({:count, count}, entries), do: free(entries, count)
+
+  defp asked({:range, from, to}), do: {from, to}
+  defp asked(_count), do: nil
+
+  # The first run of `count` entries no lease holds.
+  defp free(entries, count) do
+    held = leased_jobs()
+
+    entries
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({nil, 0}, fn {id, i}, {start, run} ->
+      case {MapSet.member?(held, id), run + 1} do
+        {true, _} -> {:cont, {nil, 0}}
+        {false, ^count} -> {:halt, {start || i, count}}
+        {false, run} -> {:cont, {start || i, run}}
+      end
+    end)
+    |> case do
+      {from, ^count} -> {:ok, from, from + count - 1, []}
+      _ -> {:error, %{code: :busy, held: [], free: nil, n: length(entries)}}
     end
   end
 
-  defp register(key, refusal) do
-    case Registry.register(@registry, key, true) do
-      {:ok, _} -> :ok
-      {:error, {:already_registered, _}} -> {:error, refusal}
+  # All or nothing: a key already held by another lease refuses the block.
+  # Registering is the check, so two agents racing for one free run cannot
+  # both win it: the loser gives back what it took and is told who holds
+  # the rest.
+  defp claim(jobs, from, entries) do
+    taken = Enum.map(jobs, &Registry.register(@registry, {:job, &1}, true))
+
+    case for({{:error, _}, i} <- Enum.with_index(taken, from), do: i) do
+      [] ->
+        :ok
+
+      held ->
+        for {{:ok, _}, id} <- Enum.zip(taken, jobs),
+            do: Registry.unregister(@registry, {:job, id})
+
+        free =
+          case free(entries, length(jobs)) do
+            {:ok, f, t, _} -> {f, t}
+            {:error, _} -> nil
+          end
+
+        {:error, %{code: :busy, held: held, free: free, n: length(entries)}}
+    end
+  end
+
+  # A CV write claims the employer's lineage for this lease, once.
+  defp lineage(job_id) do
+    with {:ok, pair} <- CvPair.bind(job_id),
+         {:error, {:already_registered, pid}} when pid != self() <-
+           Registry.register(@registry, {:lineage, CvPair.lineage_id(pair)}, true) do
+      {:error, :lineage_busy}
+    else
+      {:error, :unbound} -> {:error, :not_found}
+      _ -> :ok
     end
   end
 end

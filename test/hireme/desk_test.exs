@@ -43,7 +43,7 @@ defmodule Hireme.DeskTest do
         ]
       })
 
-    {{:ok, _pair}, lease} = hold_lease(first.id)
+    {{:ok, _block, _}, lease} = hold_lease(first.id)
 
     try do
       added =
