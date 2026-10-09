@@ -63,12 +63,12 @@ defmodule HiremeWeb.AuthTest do
     %{"secret" => secret} = account(conn, "create_key", %{name: "agent"}, 200)
     account_id = Hireme.Repo.account_id!()
 
-    assert {:ok, %{account_id: ^account_id}} = HiremeWeb.LetterboxStream.agent_key(secret, "t")
-    assert :error = HiremeWeb.LetterboxStream.agent_key("hm_nope", "t")
+    assert {:ok, %{account_id: ^account_id}} = Hireme.Letterbox.agent_key(secret, "t")
+    assert :error = Hireme.Letterbox.agent_key("hm_nope", "t")
 
     Hireme.DataCase.open_account("Other desk")
     {:ok, %{secret: foreign}} = ApiKeys.create("foreign")
-    assert {:ok, %{account_id: other}} = HiremeWeb.LetterboxStream.agent_key(foreign, "t")
+    assert {:ok, %{account_id: other}} = Hireme.Letterbox.agent_key(foreign, "t")
     refute other == account_id
     assert {:error, :not_found} = Hireme.Letterbox.claim(job.id)
   end

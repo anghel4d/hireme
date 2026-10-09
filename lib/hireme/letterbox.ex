@@ -3,8 +3,9 @@ defmodule Hireme.Letterbox do
   Leases: which process may write one application, and its CV lineage.
 
   An agent leases an application by its job id. The lease is held by the
-  process that claims it, one process per lease: an agent's lane on its
-  wire session (`HiremeWeb.LetterboxStream`). While it holds the lease,
+  process that claims it: the agent's own wire session
+  (`HiremeWeb.Session`), one process per agent, holding each lease on a
+  lane of its own. While it holds the lease,
   every write to that job from anyone else is refused `:leased`
   (`permit_job/2`), and so is a lease of another application on the same
   employer's lineage. A claim is two unique keys in
@@ -13,11 +14,35 @@ defmodule Hireme.Letterbox do
   exits. The browser sees a job's `leased` column change either way.
   """
 
+  alias Hireme.ApiKeys
   alias Hireme.CvPair
   alias Hireme.Ops
   alias Hireme.Repo
 
   @registry __MODULE__.Registry
+  # The ops a lease may run: the job's own, never the desk's.
+  @lease_kinds [:stage, :next, :note, :score, :overlay, :heat_override, :generation]
+
+  @doc """
+  The agent a presented API key names, counted once against the peer's
+  key limiter. An agent's session calls this once, for its HELLO.
+  """
+  @spec agent_key(term(), String.t()) ::
+          {:ok, %{account_id: pos_integer(), key_id: String.t(), expires_at: term()}} | :error
+  def agent_key(token, peer) when is_binary(peer) do
+    case ApiKeys.authenticate(token, peer) do
+      {:ok, key} ->
+        {:ok, %{account_id: key.account_id, key_id: key.key_id, expires_at: key.expires_at}}
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc "Whether `op` is one a lease on `pair` may run: its job's own kinds, on its job."
+  @spec lease_op?(map(), CvPair.t()) :: boolean()
+  def lease_op?(%{kind: kind, target: target}, pair),
+    do: kind in @lease_kinds and target == CvPair.job_id(pair)
 
   @doc """
   Lease `job_id`, in the account on the process, for the calling

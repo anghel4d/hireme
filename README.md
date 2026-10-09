@@ -218,7 +218,7 @@ For 90 days after a generation opens, the lineage can be rewritten. After that, 
 
 An agent is a client of the desk exactly as a browser is. **`hireme-mcp`** (`native/mcp`) is the stdio MCP server an agent such as Claude Code runs locally: it opens one session (WebTransport through the gate, or the `/wire` WebSocket where UDP is blocked), authenticates once with the API key in its HELLO, and receives the account's raw tables and every delta, which it keeps resident in the desk kernel (`native/kernel`, linked natively; the browser runs the same code as WebAssembly). Every read tool is answered from that copy: the ranked board, heat and `can_apply`, the score chart, gym and net progress, one application's composed CV. Writes go up as the ops the browser sends, and Elixir decides them.
 
-An application is changed under a lease, taken by job id. The lease is one small server process, its only holder: while it lives, every other write to that job is refused, and so is a lease of another application on the same employer's CV lineage. An agent holds as many leases as it has parallel tasks, each on its own lane of the session; closing the lane, the session ending, or the key being revoked releases it. Changes to leased applications arrive as log notifications and are kept for `letterbox_events`. Naming open fire stays on the desk, and nothing submits an application.
+An application is changed under a lease, taken by job id. The lease is held by the agent's own session, its one process on the server: while it lives, every other write to that job is refused, and so is a lease of another application on the same employer's CV lineage. An agent holds as many leases as it has parallel tasks, each on its own lane of the session; closing the lane, the session ending, or the key being revoked releases it. Changes to leased applications arrive as log notifications and are kept for `letterbox_events`. Naming open fire stays on the desk, and nothing submits an application.
 
 ```
 cargo build --release --manifest-path native/mcp/Cargo.toml
@@ -233,7 +233,7 @@ claude mcp add hireme \
 
 ## Layout
 
-Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `mfa/` (`mfa.ex`; WebAuthn behind it), and `lib/hireme_web/` (`endpoint.ex`; router, session, packet, gate bridge, JSON, account and the lease process behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
+Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `mfa/` (`mfa.ex`; WebAuthn behind it), and `lib/hireme_web/` (`endpoint.ex`; router, session, packet, gate bridge, JSON and account behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
 
 | Path | Role |
 | --- | --- |
@@ -260,7 +260,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/letterbox.ex` | Leases: one holder process per application, and its employer's lineage |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes; the desk page (ticket, gate, scope and schema metas) and the reconnect ticket |
-| `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, letterbox streams; the `/wire` WebSocket carrier |
+| `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, an agent's leases as lanes; the `/wire` WebSocket carrier |
 | `lib/hireme_web/gate.ex` | The BEAM end of the gate's Unix socket; hosts the Session in the connection process |
 | `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, sign-out |
 | `lib/hireme_web/sign_in.ex` | The sign-in pages: mailed links, GitHub and X over OAuth 2.0 with PKCE, adding a way in |
@@ -268,7 +268,6 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/mfa.ex` | The sign-in factor page |
 | `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
 | `lib/hireme_web/json.ex` | JSON shapes for the MCP tools and the oracle, and refusals |
-| `lib/hireme_web/letterbox_stream.ex` | One agent lease: the holder process on a lane of the agent's session |
 | `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
 | `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
 | `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, a lane per lease |
