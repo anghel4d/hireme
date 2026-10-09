@@ -200,4 +200,13 @@ defmodule HiremeWeb.SessionTest do
     cache.dirty(account.id, [job.id], 7)
     assert cache.focus(account.id, job.id, 7).job.company == "Moved"
   end
+
+  test "the websocket carrier admits a live cookie session", %{account: account} do
+    {token, session} = Hireme.Accounts.start_session(account)
+    Hireme.Repo.put_account(nil)
+    info = %{connect_info: %{session: %{HiremeWeb.Auth.session_key() => token}}}
+    assert {:ok, %{account_id: id, session_id: sid}} = HiremeWeb.WireSocket.connect(info)
+    assert {id, sid} == {account.id, session.id}
+    assert :error = HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
+  end
 end

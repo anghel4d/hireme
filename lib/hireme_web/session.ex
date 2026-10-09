@@ -637,6 +637,8 @@ defmodule HiremeWeb.WireSocket do
   def connect(%{connect_info: %{session: %{} = cookie}}) do
     case Accounts.session(cookie[Auth.session_key()]) do
       {session, account} ->
+        Hireme.Repo.put_account(account.id)
+
         if Hireme.Mfa.required?(session),
           do: :error,
           else: {:ok, %{account_id: account.id, session_id: session.id}}
