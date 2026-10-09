@@ -409,6 +409,16 @@ impl Store {
         }
     }
 
+    pub fn table_mut(&mut self, id: u16) -> &mut Table {
+        match self.tables.iter().position(|x| x.id == id) {
+            Some(i) => &mut self.tables[i],
+            None => {
+                self.tables.push(Table::new(id));
+                self.tables.last_mut().unwrap()
+            }
+        }
+    }
+
     pub fn table(&self, id: u16) -> Option<&Table> {
         self.tables.iter().find(|t| t.id == id)
     }

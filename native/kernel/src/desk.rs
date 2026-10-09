@@ -234,6 +234,7 @@ impl Desk {
             self.raw_dirty = true;
         }
         self.touched.push([t as u32, key]);
+        self.derived.mark(t, key, Some(c));
         rec.push((t, key, c, v));
         match t {
             table::CARDS => self.moved.push(row as u32),
@@ -309,6 +310,11 @@ impl Desk {
         let key = vt.col(1).map_or(0, |c| c.u32(row));
         vt.index.insert(key, row as u32);
         self.touched.push([t as u32, key]);
+        if t == table::JOB_APPS {
+            self.derived.mark_all();
+        } else {
+            self.derived.mark(t, key, None);
+        }
         self.raw_dirty = true;
     }
 
@@ -317,6 +323,11 @@ impl Desk {
         let vt = self.vtable_mut(t);
         vt.delete(core::iter::once(key));
         self.touched.push([t as u32, key]);
+        if t == table::JOB_APPS {
+            self.derived.mark_all();
+        } else {
+            self.derived.mark(t, key, None);
+        }
         self.raw_dirty = true;
     }
 
@@ -334,6 +345,7 @@ impl Desk {
             if let Some(c) = t.col(col::clock::TODAY) {
                 if c.u32(0) != NONE && c.u32(0) != self.today {
                     self.today = c.u32(0);
+                    self.derived.mark_all();
                     self.raw_dirty = true;
                 }
             }
@@ -342,6 +354,12 @@ impl Desk {
 
     /// The derived cards were replaced: order and search re-check every
     /// row (and reuse what did not move).
+    /// One card row's values moved: resort and re-search just that row.
+    pub(crate) fn card_moved(&mut self, row: u32) {
+        self.moved.push(row);
+        self.search_dirty = true;
+    }
+
     pub(crate) fn mark_cards_derived(&mut self) {
         self.order_full = true;
         self.search_dirty = true;
@@ -430,6 +448,9 @@ impl Desk {
         let p = self.pending.remove(i);
         self.touched
             .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
+        for (t, key, c, _) in &p.predicted {
+            self.derived.mark(*t, *key, Some(*c));
+        }
         let exact = p.predicted.iter().all(|(t, key, c, v)| {
             let Some(tbl) = self.store.table(*t) else {
                 return false;
@@ -451,6 +472,9 @@ impl Desk {
         for p in self.pending.iter().filter(|p| p.id == id) {
             self.touched
                 .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
+            for (t, key, c, _) in &p.predicted {
+                self.derived.mark(*t, *key, Some(*c));
+            }
         }
         self.pending.retain(|p| p.id != id);
         self.counters[NACKED] += 1;
@@ -538,6 +562,9 @@ impl Desk {
             }
         }
         let drained = core::mem::take(&mut self.store.touched);
+        for &[t, k] in &drained {
+            self.derived.mark(t as u16, k, None);
+        }
         self.touched.extend(drained);
         if base_moved || pending_moved {
             self.rebuild_view();

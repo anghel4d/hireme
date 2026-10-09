@@ -1136,7 +1136,7 @@ fn sum_decay(members: impl Iterator<Item = i64>, half_life: f64) -> f64 {
 }
 
 impl Snapshot {
-    pub fn build(jobs: &[Job], tr: &[Traits], today: u32) -> Snapshot {
+    pub fn build(jobs: &[Job], tr: &[&Traits], today: u32) -> Snapshot {
         let mut hot: Vec<usize> = (0..jobs.len())
             .filter(|&i| hot_stage(jobs[i].stage))
             .collect();
@@ -1225,7 +1225,7 @@ impl Snapshot {
     }
 
     /// Heat.verdict/4 (what can_apply answers), for job `i` of `jobs`.
-    pub fn verdict(&self, jobs: &[Job], tr: &[Traits], i: usize, today: u32) -> Verdict {
+    pub fn verdict(&self, jobs: &[Job], tr: &[&Traits], i: usize, today: u32) -> Verdict {
         let job = &jobs[i];
         let t = &tr[i];
         let own_hot = self.is_hot[i];
@@ -1475,7 +1475,7 @@ fn finish(
 /// Heat.mix_batch/2 over the batch's members (in the order the database
 /// returns them, by id) against the hot jobs that are not members. Returns
 /// each member in mix order with its verdict.
-pub fn mix(jobs: &[Job], tr: &[Traits], members: &[usize], today: u32) -> Vec<(usize, Verdict)> {
+pub fn mix(jobs: &[Job], tr: &[&Traits], members: &[usize], today: u32) -> Vec<(usize, Verdict)> {
     let mut existing: Vec<usize> = (0..jobs.len())
         .filter(|&i| hot_stage(jobs[i].stage) && !members.iter().any(|&m| jobs[m].id == jobs[i].id))
         .collect();
@@ -1503,7 +1503,7 @@ pub fn mix(jobs: &[Job], tr: &[Traits], members: &[usize], today: u32) -> Vec<(u
 
 /// Heat.can_apply/2: job `i` against every hot job, read afresh (no
 /// prepared snapshot), as `Desk`'s stage write asks it.
-pub fn can_apply(jobs: &[Job], tr: &[Traits], i: usize, today: u32) -> Verdict {
+pub fn can_apply(jobs: &[Job], tr: &[&Traits], i: usize, today: u32) -> Verdict {
     let mut existing: Vec<usize> = (0..jobs.len())
         .filter(|&p| hot_stage(jobs[p].stage))
         .collect();
@@ -1515,7 +1515,7 @@ pub fn can_apply(jobs: &[Job], tr: &[Traits], i: usize, today: u32) -> Verdict {
 /// then `kept`, less the job itself.
 fn evaluate(
     jobs: &[Job],
-    tr: &[Traits],
+    tr: &[&Traits],
     existing: &[usize],
     kept: &[usize],
     i: usize,
@@ -1538,7 +1538,7 @@ fn evaluate(
         company.iter().map(|&p| jobs[p].age(today)),
         COMPANY_HALF_LIFE,
     );
-    let inc = increment(t, company.iter().map(|&p| &tr[p]));
+    let inc = increment(t, company.iter().map(|&p| tr[p]));
     let (vendor_load, tenant_load) = if t.ats.vendor == UNKNOWN {
         (0.0, 0.0)
     } else {
