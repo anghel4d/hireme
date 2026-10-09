@@ -252,6 +252,14 @@ pub extern "C" fn mix(batch: u32) -> u32 {
     with(|k| k.desk.mix(batch))
 }
 
+/// Extracts up to `budget` waiting listings into their cards' keyword
+/// counts (touched reports the cards); answers how many still wait. Call
+/// it off the input path until it answers 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn glances(budget: u32) -> u32 {
+    with(|k| k.desk.glances(budget as usize) as u32)
+}
+
 /// The selection: card rows (u32), in board order.
 #[unsafe(no_mangle)]
 pub extern "C" fn selection_ptr() -> u32 {

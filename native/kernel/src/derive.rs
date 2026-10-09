@@ -21,6 +21,12 @@
 //! those loads. Anything that moves the joins (profiles, variants, leases,
 //! batches, the day, rows added or removed) derives everything again.
 //!
+//! A card's keyword hits need its listing's Keywords.extract, the one
+//! costly read of a derive (a cold account's listings arrive together).
+//! In the browser that is left out of the derive: the card shows 0 of 0
+//! until `glances` extracts the waiting listings in slices off the input
+//! path. Natively the derive extracts them in place.
+//!
 //! String columns point at the raw rows' own bytes where the value is a raw
 //! field, and reuse the previous derive's bytes where a derived string did
 //! not change, so a re-derive allocates almost nothing in the arena and
@@ -67,6 +73,10 @@ pub struct Derived {
     corpus_gen: u32,
     corpus: Option<(u32, Corpus)>,
     glances: BTreeMap<u32, ([u32; 6], [u32; 5])>,
+    /// Leave listings unextracted in a derive (the browser), and the jobs
+    /// waiting for theirs.
+    defer: bool,
+    waiting: Vec<u32>,
     profiles: Vec<u32>,
     leased: Vec<u32>,
     /// Since the last derive: everything, or these jobs.
@@ -92,6 +102,8 @@ impl Derived {
             corpus_gen: 0,
             corpus: None,
             glances: BTreeMap::new(),
+            defer: cfg!(target_arch = "wasm32"),
+            waiting: Vec::new(),
             profiles: Vec::new(),
             leased: Vec::new(),
             all: true,
@@ -610,6 +622,10 @@ impl Desk {
         } else {
             // Extracted words are already lowercase.
             let fresh = !matches!(d.extracted.get(&id), Some((l, _)) if *l == listing);
+            if fresh && d.defer {
+                d.waiting.push(id);
+                return [0, 0, counts[0], counts[1], counts[2]];
+            }
             if fresh {
                 d.extracted
                     .insert(id, (listing, keywords::extract(arena.text(listing))));
@@ -1596,6 +1612,47 @@ fn ensure_text(arena: &Arena, c: &mut Corpus, profile: u32, lineage: u32) -> (u3
 }
 
 impl Desk {
+    /// Extracts the listings of up to `budget` cards still showing 0 of 0
+    /// for want of one, those earliest in the selection first, and patches
+    /// their cards (reported in `touched`). Answers how many still wait.
+    pub fn glances(&mut self, budget: usize) -> usize {
+        self.touched.clear();
+        let mut d = core::mem::replace(&mut self.derived, Derived::new());
+        d.check_epoch(&self.store.arena);
+        d.waiting.sort_unstable();
+        d.waiting.dedup();
+        let cards = self.w32(table::CARDS, col::cards::ID);
+        let mut now: Vec<u32> = self
+            .sel
+            .iter()
+            .filter_map(|&r| cards.get(r as usize).copied())
+            .filter(|id| d.waiting.binary_search(id).is_ok())
+            .take(budget)
+            .collect();
+        let rest: Vec<u32> = (d.waiting.iter().copied())
+            .filter(|id| !now.contains(id))
+            .take(budget - now.len())
+            .collect();
+        now.extend(rest);
+        let jt = table::JOB_APPS;
+        d.waiting.retain(|id| !now.contains(id));
+        for id in now {
+            if let Some(r) = self.row_of(jt, id) {
+                let listing = self.strs(jt, col::job_apps::LISTING).get(r).copied().unwrap_or([0, 0]);
+                d.extracted
+                    .insert(id, (listing, keywords::extract(self.store.arena.text(listing))));
+                d.card.push(id);
+            }
+        }
+        self.derived = d;
+        self.raw_dirty = true;
+        self.derive();
+        let w = &mut self.derived.waiting;
+        w.sort_unstable();
+        w.dedup();
+        w.len()
+    }
+
     /// The downcased visible text of `profile`'s CV on `lineage`, through
     /// the pending view, memoized until an item or overlay moves (for a
     /// focus's coverage; the cards count theirs in `derive`).
