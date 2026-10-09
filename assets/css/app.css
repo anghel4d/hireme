@@ -208,6 +208,9 @@ kbd {
 .kicker { margin: 0; letter-spacing: 0.04em; text-transform: uppercase; }
 .code, .stage-name { color: var(--muted); }
 .stage-name { letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.72rem; }
+/* One line of kicker per card, whatever the code or stage: a long stage ends in an ellipsis. */
+.card-kicker > * { white-space: nowrap; }
+.card-kicker .stage-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .card h2, .focus h2, .bp-bar h2 {
   margin: 0;
