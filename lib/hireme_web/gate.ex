@@ -17,8 +17,9 @@ defmodule HiremeWeb.Gate do
   out as `u8 op | body`. All integers are big-endian. Stream ids are
   session-relative: client bidi streams are `4n` in the order they open
   (the first, id 0, is the control stream; letterbox leases follow), as in
-  QUIC. The gate opens no streams of its own and accepts no uni streams;
-  datagrams travel only from the client (PING).
+  QUIC. Server uni streams are `4n+3`, opened by the Session for bulk (the
+  BOOT) and always yielding to the client's streams. The gate accepts no
+  uni streams; datagrams travel only from the client (PING).
 
   Gate to BEAM:
 
@@ -41,6 +42,7 @@ defmodule HiremeWeb.Gate do
   | `0x03` | REFUSE | `u16 status` (403, 404 or 429) |
   | `0x04` | READY | HELLO verified; lift the pre-auth caps |
   | `0x11` `0x12` `0x13` | DATA FIN RESET | as above, for our side |
+  | `0x15` | OPEN_UNI | `u32 id`: a server uni stream, `4n+3` |
   | `0x30` | CLOSE | `u32 code` · reason |
 
   The gate enforces the posture of an order gateway before anything
@@ -49,9 +51,10 @@ defmodule HiremeWeb.Gate do
   native agent, so its Session must insist on an API-key HELLO. ACCEPT
   or REFUSE is due within 2 s of OPEN, and READY within 2 s of the
   accept, or the gate closes the connection. A Session that authenticated
-  at OPEN (a browser's ticket) may call `ready/1` inside `init`, before
-  the ACCEPT: the caps then lift as the session opens, and no HELLO
-  deadline applies while the page loads its bundle. Until READY the peer gets
+  at OPEN (a browser's ticket) may write inside `init`, before the ACCEPT:
+  `ready/1` lifts the caps as the session opens, and `open_uni/2` plus
+  `send/3` put a BOOT on the wire in the same flight as the 200. The gate
+  holds such messages until the session exists. Until READY the peer gets
   one client bidi stream and a 64 KiB receive window, and no datagrams
   are forwarded.
 
@@ -87,6 +90,7 @@ defmodule HiremeWeb.Gate do
   @fin 0x12
   @reset 0x13
   @stop 0x14
+  @open_uni 0x15
   @dgram 0x20
   @close 0x30
 
@@ -120,6 +124,11 @@ defmodule HiremeWeb.Gate do
 
   @spec reset(t(), id(), non_neg_integer()) :: :ok | {:error, term()}
   def reset(%__MODULE__{socket: s}, id, code), do: :gen_tcp.send(s, <<@reset, id::32, code::32>>)
+
+  @doc "Open a server uni stream for bulk; `id` is `4n+3` and unused."
+  @spec open_uni(t(), id()) :: :ok | {:error, term()}
+  def open_uni(%__MODULE__{socket: s}, id) when rem(id, 4) == 3,
+    do: :gen_tcp.send(s, <<@open_uni, id::32>>)
 
   @spec close(t(), non_neg_integer(), binary()) :: :ok | {:error, term()}
   def close(%__MODULE__{socket: s}, code, reason),

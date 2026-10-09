@@ -12,7 +12,21 @@ defmodule HiremeWeb.GateTest do
     def init(carrier, meta) do
       test = Application.fetch_env!(:hireme, :gate_test_pid)
       send(test, {:init, meta})
-      if meta.path == "/wt/refuse", do: {:refuse, 403}, else: {:ok, {test, carrier}}
+
+      case meta.path do
+        "/wt/refuse" ->
+          {:refuse, 403}
+
+        "/wt/boot" ->
+          :ok = Gate.ready(carrier)
+          :ok = Gate.open_uni(carrier, 3)
+          :ok = Gate.send(carrier, 3, "BOOT")
+          :ok = Gate.fin(carrier, 3)
+          {:ok, {test, carrier}}
+
+        _ ->
+          {:ok, {test, carrier}}
+      end
     end
 
     def event(event, {test, _} = state) do
@@ -70,6 +84,13 @@ defmodule HiremeWeb.GateTest do
     s = dial(path, "http://localhost:4000", "/wt/refuse")
     assert {:ok, <<0x03, 403::16>>} = :gen_tcp.recv(s, 0, 1000)
     assert {:error, :closed} = :gen_tcp.recv(s, 0, 1000)
+  end
+
+  test "writes made in init reach the gate ahead of the ACCEPT, in order", %{path: path} do
+    s = dial(path, "http://localhost:4000", "/wt/boot")
+
+    for bytes <- [<<0x04>>, <<0x15, 3::32>>, <<0x11, 3::32, "BOOT">>, <<0x12, 3::32>>, <<0x02>>],
+        do: assert({:ok, ^bytes} = :gen_tcp.recv(s, 0, 1000))
   end
 
   test "gate messages arrive as events in order (seeded)", %{path: path} do

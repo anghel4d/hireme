@@ -3,7 +3,7 @@
 // round trip and a bulk transfer on it.
 //
 //   node bench/gate.mjs --url https://GATE_HOST/wt [--n 10] [--origin https://APP_HOST]
-//     [--hash-file FILE --bytes N] [--out FILE.jsonl] [--rev LABEL]
+//     [--hash-file FILE --bytes N --boot N] [--out FILE.jsonl] [--rev LABEL]
 //
 // Every sample is a fresh connection (no session resumption, no address
 // token), so every sample is a cold start.
@@ -20,8 +20,10 @@
 //   pays before its first byte, and nothing is allocated.
 // - --hash-file (local only): the self-signed certificate's hash file. The
 //   echoing Session is then expected, and both clients also time the first
-//   control echo and --bytes sent back on the control stream, the way the
-//   Session sends a BOOT.
+//   control echo and --bytes sent back on the control stream. With --boot N
+//   the Session pushes N bytes on a server uni stream as it accepts, the way
+//   a ticketed browser's BOOT arrives, and both clients time its first and
+//   last byte from the start of the connect.
 //
 // The production gate's host is never committed; pass it on the command line.
 
@@ -73,6 +75,10 @@ if (hash) {
   const echo = runProbe("echo", "--n", "50")
   const bulk = runProbe("bulk", "--bytes", String(bytes), "--rounds", "3")
   emit({ client: "probe", echo_ms: echo.rtt_ms, bytes, bulk_ms: bulk.bulk_ms })
+  if (args.boot) {
+    const b = JSON.parse(execFileSync(probe, ["boot", `${args.url}?boot=${args.boot}`, "--hash", hash, "--n", String(n)], { encoding: "utf8" }))
+    emit({ client: "probe", boot_bytes: Number(args.boot), ready_ms: b.ready_ms, first_byte_ms: b.first_byte_ms, last_byte_ms: b.last_byte_ms })
+  }
 }
 
 if (args.origin) {
@@ -90,18 +96,30 @@ if (args.origin) {
     await page.goto(`${args.origin}/`)
     runs.push(
       await page.evaluate(
-        async ({ url, hash, bytes }) => {
+        async ({ url, hash, bytes, boot }) => {
           const opts = hash
             ? { serverCertificateHashes: [{ algorithm: "sha-256", value: new Uint8Array(hash.match(/../g).map((h) => parseInt(h, 16))) }] }
             : {}
           const t0 = performance.now()
-          const wt = new WebTransport(url, opts)
+          const wt = new WebTransport(boot ? `${url}?boot=${boot}` : url, opts)
+          const pushed = boot
+            ? wt.incomingUnidirectionalStreams.getReader().read().then(async ({ value }) => {
+                const r = value.getReader()
+                let first = 0
+                for (;;) {
+                  const x = await r.read()
+                  if (x.done) return { first, last: performance.now() - t0 }
+                  first ||= performance.now() - t0
+                }
+              })
+            : null
           try {
             await wt.ready
           } catch (e) {
             return { ready: performance.now() - t0, outcome: String(e) }
           }
           const ready = performance.now() - t0
+          const b = pushed ? await pushed : {}
           if (!hash) {
             wt.close()
             return { ready, outcome: "accepted" }
@@ -122,14 +140,23 @@ if (args.origin) {
           for (let got = 0; got < bytes; ) got += (await r.read()).value.length
           const bulk = performance.now() - tb
           wt.close()
-          return { ready, echo, bulk, outcome: "accepted" }
+          return { ready, echo, bulk, boot_first: b.first, boot_last: b.last, outcome: "accepted" }
         },
-        { url: args.url, hash, bytes },
+        { url: args.url, hash, bytes, boot: args.boot ? Number(args.boot) : 0 },
       ),
     )
     await ctx.close()
   }
   await browser.close()
   const pick = (k) => (runs[0][k] === undefined ? undefined : quantiles(runs.map((r) => r[k])))
-  emit({ client: "chromium", ready_ms: pick("ready"), echo_ms: pick("echo"), bytes: hash ? bytes : undefined, bulk_ms: pick("bulk"), outcome: runs.at(-1).outcome })
+  emit({
+    client: "chromium",
+    ready_ms: pick("ready"),
+    echo_ms: pick("echo"),
+    bytes: hash ? bytes : undefined,
+    bulk_ms: pick("bulk"),
+    boot_first_byte_ms: pick("boot_first"),
+    boot_last_byte_ms: pick("boot_last"),
+    outcome: runs.at(-1).outcome,
+  })
 }
