@@ -3,6 +3,7 @@ defmodule Hireme.ImportTest do
   import Hireme.Fixtures
 
   alias Hireme.Campaign
+  alias Hireme.Desk.Employer
   alias Hireme.Desk.Job
   alias Hireme.Import
   alias Hireme.Repo
@@ -26,6 +27,49 @@ defmodule Hireme.ImportTest do
     assert job.fit == "systems"
     assert job.current_stage == :gated
     assert job.score_100 >= 70
+  end
+
+  test "canonical import lookups isolate matching employer names and URLs by account" do
+    first_profile = profile()
+    first_account = Repo.account_id!()
+    body = ~s({"apps":[{"company":"Same name","url":"https://jobs.example.test/same"}]})
+    assert {:ok, %{count: 1}} = Import.import_body(body, "same.json", first_profile)
+    first_job = Repo.one!(Job)
+
+    Hireme.DataCase.open_account("Other import")
+    second_profile = profile()
+
+    for _ <- 1..2 do
+      assert {:ok, %{count: 1}} = Import.import_body(body, "same.json", second_profile)
+    end
+
+    second_job = Repo.one!(Job)
+    assert second_job.id != first_job.id
+    assert second_job.employer_id != first_job.employer_id
+    assert second_job.account_id == Repo.account_id!()
+    assert Repo.with_account(first_account, fn -> Repo.one!(Job) end) == first_job
+  end
+
+  test "a later blank URL does not match an unkeyed job or roll back earlier applications" do
+    profile = profile()
+    unkeyed = job(profile, %{company: "Unkeyed", canonical_url: ""})
+
+    body = """
+    {"apps":[
+      {"company":"Committed first","url":"https://jobs.example.test/committed"},
+      {"company":"Rejected second","url":"   "}
+    ]}
+    """
+
+    assert_raise ArgumentError, "application is missing a URL", fn ->
+      Import.import_body(body, "partial.json", profile)
+    end
+
+    assert Repo.get_by!(Job, canonical_url: "https://jobs.example.test/committed")
+    assert Repo.get_by!(Employer, name: "Committed first")
+    assert Repo.get!(Job, unkeyed.id).company == "Unkeyed"
+    assert Repo.aggregate(Job, :count) == 2
+    refute Repo.get_by(Employer, name: "Rejected second")
   end
 
   test "the scoreboard snapshot is a reading, and a day pack stays on HOLD" do
