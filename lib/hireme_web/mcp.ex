@@ -180,7 +180,7 @@ defmodule HiremeWeb.Mcp do
   end
 
   defp directory_call("score_distribution", args),
-    do: {:ok, JSON.chart(LifeEv.chart(Desk.list_cards(list_filters(args))))}
+    do: {:ok, JSON.chart(Desk.score_chart(list_filters(args)))}
 
   defp directory_call("heat_status", args) do
     chart = Heat.chart()
