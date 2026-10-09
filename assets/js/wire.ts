@@ -555,7 +555,11 @@ export class Wire {
         }
       }
     }
-    return this.settled(await within(openSocket(new WebSocket(socketUrl(this.csrf)), this.sink, first), CONNECT_MS))
+    const ws = new WebSocket(socketUrl(this.csrf))
+    return this.settled(await within(openSocket(ws, this.sink, first), CONNECT_MS).catch((e: unknown) => {
+      ws.close()
+      throw e
+    }))
   }
 
   // A connection that lives a while resets the backoff.
