@@ -109,9 +109,8 @@ defmodule HiremeWeb.Packet do
   def frame(kind, rev, body, opts \\ []) do
     {flags, body} =
       if opts[:deflate] do
-        raw = IO.iodata_to_binary(body)
-        packed = :zlib.zip(raw)
-        {0x01, [<<byte_size(raw)::little-32, byte_size(packed)::little-32>>, packed]}
+        packed = deflate(body)
+        {0x01, [<<IO.iodata_length(body)::little-32, byte_size(packed)::little-32>>, packed]}
       else
         {0, body}
       end
@@ -400,6 +399,16 @@ defmodule HiremeWeb.Packet do
   end
 
   defp split(buffer, acc), do: {:ok, Enum.reverse(acc), buffer}
+
+  # Level 1: on the boot's tables it costs a third of the default's time
+  # for 1-10% more bytes, and the boot waits on it.
+  defp deflate(body) do
+    z = :zlib.open()
+    :ok = :zlib.deflateInit(z, 1, :deflated, -15, 8, :default)
+    packed = IO.iodata_to_binary(:zlib.deflate(z, body, :finish))
+    :zlib.close(z)
+    packed
+  end
 
   defp pad8(len) do
     case rem(len, 8) do
