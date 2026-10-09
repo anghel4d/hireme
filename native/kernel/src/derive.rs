@@ -77,6 +77,9 @@ pub struct Derived {
     /// waiting for theirs.
     defer: bool,
     waiting: Vec<u32>,
+    /// (batch id, Variety label) per batch, kept until a job's batch,
+    /// company, location or fit moves.
+    varieties: Option<Vec<(u32, String)>>,
     profiles: Vec<u32>,
     leased: Vec<u32>,
     /// Since the last derive: everything, or these jobs.
@@ -104,6 +107,7 @@ impl Derived {
             glances: BTreeMap::new(),
             defer: cfg!(target_arch = "wasm32"),
             waiting: Vec::new(),
+            varieties: None,
             profiles: Vec::new(),
             leased: Vec::new(),
             all: true,
@@ -136,6 +140,12 @@ impl Derived {
 
     /// Notes that row `key` of table `t` moved (column `c`, when known).
     pub fn mark(&mut self, t: u16, key: u32, c: Option<u16>) {
+        use col::job_apps as j;
+        if t == table::JOB_APPS
+            && c.is_none_or(|c| matches!(c, j::BATCH_ID | j::COMPANY | j::LOCATION | j::FIT))
+        {
+            self.varieties = None;
+        }
         match t {
             table::JOB_APPS => match c {
                 Some(c) if !heat_column(c) => self.card.push(key),
@@ -211,13 +221,6 @@ const STATUSES: [&str; 4] = ["open", "paused", "hired", "closed"];
 const FRESHNESS: [&str; 5] = ["unknown", "open", "thin", "closed", "blocked"];
 const GATES: [&str; 4] = ["unset", "pursue", "maybe", "skip"];
 const SENT: [u8; 2] = [7, 8]; // submitted, reply
-const FLAGS: [&str; 5] = [
-    "unfilled",
-    "short",
-    "few_companies",
-    "few_locations",
-    "few_fits",
-];
 
 /// LifeEv bands: key, label, min, max.
 const BANDS: [(&str, &str, u32, u32); 8] = [
@@ -780,6 +783,7 @@ impl Desk {
             d.corpus_gen = d.corpus_gen.wrapping_add(1);
         }
         if all {
+            d.varieties = None;
             self.rebuild_joins(&mut d);
         } else if !d.lineages_dirty.is_empty() || !d.profiles_dirty.is_empty() {
             let reach: Vec<u32> = d
@@ -1172,10 +1176,67 @@ impl Desk {
             sv(col::scoreboard_snapshots::TARGET_TOTAL, 10_000),
             sv(col::scoreboard_snapshots::TARGET_ON, NONE),
         ];
+        // Variety.summarize/2 of each batch's jobs, as Variety.label/1 reads it.
+        let ids: Vec<u32> = batches.iter().map(|&r| self.vu32(bt, col::batches::ID, r)).collect();
+        let cached = d
+            .varieties
+            .take()
+            .filter(|v| v.len() == ids.len() && v.iter().zip(&ids).all(|(x, id)| x.0 == *id));
+        let mut members: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        if cached.is_none() {
+            for i in 0..n {
+                members.entry(w(batch_id, i)).or_default().push(i);
+            }
+        }
+        let label = |batch: u32, target: u32| -> String {
+            let m = members.get(&batch).map_or(&[][..], |m| m.as_slice());
+            if m.is_empty() {
+                return String::from("unfilled");
+            }
+            // Fewer than `floor` distinct non-empty values in column `c`.
+            let narrow = |c: u16, floor: usize| {
+                let v = self.strs(jt, c);
+                let mut seen: Vec<&[u8]> = Vec::new();
+                for &i in m {
+                    let s = arena.get(v.get(i).copied().unwrap_or([0, 0]));
+                    if !s.is_empty() && !seen.contains(&s) {
+                        seen.push(s);
+                    }
+                }
+                seen.len() < floor
+            };
+            let target = if target == NONE { 55 } else { target };
+            let mut flags: Vec<&str> = Vec::new();
+            if m.len() < target as usize {
+                flags.push("short");
+            }
+            if m.len() >= 20 {
+                use col::job_apps as j;
+                for (flag, c, floor) in [
+                    ("few_companies", j::COMPANY, 8),
+                    ("few_locations", j::LOCATION, 3),
+                    ("few_fits", j::FIT, 3),
+                ] {
+                    if narrow(c, floor) {
+                        flags.push(flag);
+                    }
+                }
+            }
+            if flags.is_empty() {
+                String::from("varied")
+            } else {
+                flags.join(", ")
+            }
+        };
+        let labels: Vec<(u32, String)> = cached.unwrap_or_else(|| {
+            (batches.iter().zip(&ids))
+                .map(|(&r, &id)| (id, label(id, self.vu32(bt, col::batches::TARGET_SIZE, r))))
+                .collect()
+        });
         let variety: Vec<([u32; 2], bool, [u32; 2], String)> = batches
             .iter()
-            .map(|&r| {
-                let flags = self.vstr(bt, col::batches::VARIETY_FLAGS, r);
+            .zip(&labels)
+            .map(|(&r, (_, label))| {
                 (
                     self.strs(bt, col::batches::CODE)
                         .get(r)
@@ -1186,13 +1247,11 @@ impl Desk {
                         .get(r)
                         .copied()
                         .unwrap_or([0, 0]),
-                    variety_label(
-                        self.vu32(bt, col::batches::VARIETY_APPS, r),
-                        core::str::from_utf8(flags).unwrap_or(""),
-                    ),
+                    label.clone(),
                 )
             })
             .collect();
+        d.varieties = Some(labels);
         let prev_labels: Vec<[u32; 2]> = self
             .store
             .table(table::VARIETIES)
@@ -1368,22 +1427,6 @@ impl Desk {
         ];
         out.push(vr);
         out
-    }
-}
-
-/// Variety.label/1 over the counts and flags the batch row carries.
-fn variety_label(apps: u32, flags: &str) -> String {
-    if apps == 0 || apps == NONE {
-        return String::from("unfilled");
-    }
-    let known: Vec<&str> = flags
-        .split('\u{1f}')
-        .filter(|f| FLAGS.contains(f))
-        .collect();
-    if known.is_empty() {
-        String::from("varied")
-    } else {
-        known.join(", ")
     }
 }
 
