@@ -165,6 +165,23 @@ defmodule HiremeWeb.GateTest do
     assert_receive {:terminate, :normal}
   end
 
+  @tag capture_log: true
+  test "a second node leaves a live socket alone, and a dead one is taken over", %{path: path} do
+    assert :ignore = Gate.start_link(socket: path, session: Echo)
+    s = dial(path)
+    assert {:ok, <<0x02>>} = :gen_tcp.recv(s, 0, 1000)
+
+    stale = Path.join(System.tmp_dir!(), "gate-stale-#{System.unique_integer([:positive])}.sock")
+    {:ok, l} = :gen_tcp.listen(0, [:binary, ifaddr: {:local, stale}])
+    :gen_tcp.close(l)
+    assert File.exists?(stale)
+    stop_supervised!(Gate)
+    start_supervised!({Gate, socket: stale, session: Echo})
+    s = dial(stale)
+    assert {:ok, <<0x02>>} = :gen_tcp.recv(s, 0, 1000)
+    File.rm(stale)
+  end
+
   test "a connection that never sends OPEN is dropped", %{path: path} do
     {:ok, s} = :gen_tcp.connect({:local, path}, 0, [:binary, packet: 4, active: false])
     assert {:error, :closed} = :gen_tcp.recv(s, 0, 3000)
