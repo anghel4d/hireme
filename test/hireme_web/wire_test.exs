@@ -97,7 +97,7 @@ defmodule HiremeWeb.WireTest do
     {:ok, rev, {:boot, %{tables: tables}}} = Hireme.Ops.attach(Hireme.Repo.account_id!(), nil)
     body = [Packet.static_lookups(), for({k, rows} <- tables, do: Packet.raw(k, rows))]
 
-    {bin, [{:boot, 0x02, ^rev, decoded}]} = one!(Packet.frame(:boot, rev, body, flags: 0x02))
+    {_bin, [{:boot, 0x02, ^rev, decoded}]} = one!(Packet.frame(:boot, rev, body, flags: 0x02))
     t = tables(decoded)
     rows = named(t, :job_apps)
     assert Enum.sort(Enum.map(rows, & &1.id)) == Enum.sort(Enum.map(jobs, & &1.id))
