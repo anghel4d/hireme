@@ -106,6 +106,19 @@ defmodule Hireme.MfaTest do
     refute Mfa.required?(s)
   end
 
+  test "reissuing recovery codes replaces unused codes without reviving spent ones", %{
+    session: session
+  } do
+    [spent, unused | _] = Mfa.recovery_codes!()
+    assert {:ok, _} = Mfa.verify_recovery(session, spent)
+    [replacement | _] = Mfa.recovery_codes!()
+    assert Mfa.recovery_codes_left() == 10
+    assert {:error, :code} = Mfa.verify_recovery(session, spent)
+    assert {:error, :code} = Mfa.verify_recovery(session, unused)
+    assert {:ok, _} = Mfa.verify_recovery(session, replacement)
+    assert Mfa.recovery_codes_left() == 9
+  end
+
   test "a passkey registration starts with the browser's options and refuses a forged response",
        %{session: session} do
     options = Mfa.begin_webauthn(session, "me")

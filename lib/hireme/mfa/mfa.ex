@@ -247,23 +247,28 @@ defmodule Hireme.Mfa do
 
   ## Recovery codes
 
-  @doc "Replace the account's recovery codes. The list is the only copy."
+  @doc "Replace recovery codes with one batch insert. The returned list is the only plaintext copy."
   @spec recovery_codes!(map()) :: [String.t()]
   def recovery_codes!(meta \\ %{}) do
     Repo.delete_all(from c in RecoveryCode, where: is_nil(c.used_at))
     codes = for _ <- 1..@recovery_count, do: random_code()
+    account_id = Repo.account_id!()
+    timestamp = now()
 
-    for code <- codes do
-      salt = Security.token(16)
+    rows =
+      for code <- codes do
+        salt = Security.token(16)
 
-      %RecoveryCode{}
-      |> RecoveryCode.changeset(%{
-        account_id: Repo.account_id!(),
-        salt: salt,
-        code_hash: Security.hash(salt <> code)
-      })
-      |> Repo.insert!()
-    end
+        %{
+          account_id: account_id,
+          salt: salt,
+          code_hash: Security.hash(salt <> code),
+          inserted_at: timestamp,
+          updated_at: timestamp
+        }
+      end
+
+    {@recovery_count, _} = Repo.insert_all(RecoveryCode, rows)
 
     Audit.record(:recovery_codes_issued, %{count: @recovery_count}, meta)
     Enum.map(codes, &format_code/1)
