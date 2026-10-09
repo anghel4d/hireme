@@ -460,18 +460,23 @@ pub fn tick(body: &[u8]) -> Result<u32, Error> {
     }
 }
 
-/// An OP body: `u64 op_id | u8 kind | u32 target | (u16 len, utf8)*`.
+/// An OP body: `u64 op_id | u8 kind | u8 nfields | u16 0 | u32 target |
+/// (u16 len, utf8) * nfields | zero pad`. The count is explicit because
+/// frame padding would otherwise read as empty fields.
 #[derive(Clone, Copy, Debug)]
 pub struct Op<'a> {
     pub id: u64,
     pub kind: u8,
+    pub nfields: u8,
     pub target: u32,
     fields: &'a [u8],
 }
 
 impl<'a> Op<'a> {
-    pub const FIXED: usize = 13;
+    pub const FIXED: usize = 16;
 
+    /// Reads an op whose kind the schema names, carrying exactly the
+    /// schema's number of fields, each whole and UTF-8.
     pub fn parse(body: &'a [u8]) -> Result<Op<'a>, Error> {
         if body.len() < Self::FIXED {
             return Err(Error::Body);
@@ -479,27 +484,26 @@ impl<'a> Op<'a> {
         let op = Op {
             id: u64_at(body, 0),
             kind: body[8],
-            target: u32_at(body, 9),
-            fields: &body[13..],
+            nfields: body[9],
+            target: u32_at(body, 12),
+            fields: &body[Self::FIXED..],
         };
         let want = schema::op_def(op.kind).ok_or(Error::Body)?.fields.len();
-        let mut n = 0;
+        if op.nfields as usize != want {
+            return Err(Error::Body);
+        }
         for f in op.fields() {
             f?;
-            n += 1;
-            if n == want {
-                break;
-            }
         }
-        if n != want { Err(Error::Body) } else { Ok(op) }
+        Ok(op)
     }
 
-    /// The strings after the target, in schema order. Trailing zero
-    /// padding is ignored.
+    /// The strings after the target, in schema order.
     pub fn fields(&self) -> OpFields<'a> {
         OpFields {
             b: self.fields,
             at: 0,
+            left: self.nfields,
         }
     }
 
@@ -512,20 +516,29 @@ impl<'a> Op<'a> {
 pub struct OpFields<'a> {
     b: &'a [u8],
     at: usize,
+    left: u8,
 }
 
 impl<'a> Iterator for OpFields<'a> {
     type Item = Result<&'a str, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.at + 2 > self.b.len() {
+        if self.left == 0 {
             return None;
         }
-        let len = u16_at(self.b, self.at) as usize;
-        let s = self.b.get(self.at + 2..self.at + 2 + len);
-        self.at += 2 + len;
+        self.left -= 1;
+        let s = (self.at + 2 <= self.b.len())
+            .then(|| u16_at(self.b, self.at) as usize)
+            .and_then(|len| {
+                let s = self.b.get(self.at + 2..self.at + 2 + len);
+                self.at += 2 + len;
+                s
+            });
         Some(match s {
-            None => Err(Error::Body),
+            None => {
+                self.left = 0;
+                Err(Error::Body)
+            }
             Some(s) => core::str::from_utf8(s).map_err(|_| Error::Str),
         })
     }
@@ -634,6 +647,8 @@ impl Writer {
     pub fn op(&mut self, id: u64, kind: u8, target: u32, fields: &[&str]) {
         self.raw(&id.to_le_bytes());
         self.buf.push(kind);
+        self.buf.push(fields.len() as u8);
+        self.raw(&[0, 0]);
         self.raw(&target.to_le_bytes());
         for f in fields {
             self.raw(&(f.len() as u16).to_le_bytes());
@@ -728,6 +743,10 @@ mod tests {
         assert_eq!(op.field(0), "call back");
         assert_eq!(op.field(1), "2026-10-10");
         assert!(Op::parse(&w.buf[..w.buf.len() - 1]).is_err());
+        // Padding after the last field is not another field.
+        let mut padded = w.buf.clone();
+        padded.extend_from_slice(&[0; 7]);
+        assert_eq!(Op::parse(&padded).unwrap().fields().count(), 2);
     }
 
     #[test]
