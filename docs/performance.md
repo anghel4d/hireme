@@ -31,11 +31,14 @@ The original testbed's test mail adapter omitted provider latency. Security noti
 - The outbox was empty immediately after migration. No production security notices or synthetic credentials were created for this smoke check, so it does not establish live mail-delivery latency or authenticated account-operation timings. Whole-request journal durations must not be represented as isolated provider latency.
 
 
-## Realtime rework — 2026-10-09 (unreleased)
+## Realtime rework — 2026-10-09
 
 The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssembly kernel (`native/kernel`) and draws every interaction from it; a write is predicted in the same frame and settled by the server. Everything travels as columnar frames (`priv/wire/schema.txt`) over one session per tab: WebTransport through the gate sidecar (`native/gate`), or a WebSocket at `/wire` where UDP is blocked. `Hireme.Ops` serializes every write per account (op ledger, revisions, post-commit deltas of only the changed rows), and agents hold many letterbox leases as streams of one session (`native/mcp`).
 
 **All numbers in this section are local**: a scratch copy of the canonical 1,000-job fixture, loopback, Chromium 154, the same 5950X/WSL2 host. They are not production Internet latency and were not taken with the corrected harness above; the release has not been deployed.
+
+**Deployed to fsn1-2 at 2026-10-09 15:03 UTC** as release `a9c4816`, with the WebTransport gate enabled; the WebSocket fallback stays. Pre-switch online backup `hireme-20261009T150255.db` passed `pragma integrity_check`. After the switch: `hireme`, `hireme-gate` and nginx active, no failed units; the gate's wildcard certificate was issued by Let's Encrypt through DNS-01; UDP 443 is bound on the gate's own address only and TCP 443 there is closed; the served `kernel.wasm` matches the release byte for byte; the CSP allows the gate origin; `/api/pack` answers 404. From the operator's workstation, the QUIC handshake to the gate takes 27.5 ms (one round trip) against 42–74 ms for a TCP connect to Cloudflare's edge and 113–145 ms for a full request through Cloudflare to the origin. No synthetic production credentials were created, so a signed-in desk session over the gate had not been exercised when this was written.
+
 
 | What | Before (HTTP) | After (wire) | Source |
 |---|---|---|---|
