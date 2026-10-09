@@ -37,6 +37,7 @@ defmodule HiremeBench.Server do
       {"Domain/Desk", "list_cards", fn -> Desk.list_cards(%Desk.Filters{status: :all}) end},
       {"Domain/Desk", "focus", fn -> Desk.focus(job_id) end},
       {"Domain/Desk", "root", fn -> Desk.root(profile_id) end},
+      {"Domain/Desk", "score_chart", fn -> Desk.score_chart() end},
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
       {"Domain/Heat", "chart", fn -> Heat.chart() end},
       {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},

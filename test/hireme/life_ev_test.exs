@@ -87,6 +87,14 @@ defmodule Hireme.LifeEvTest do
     assert LifeEv.ascii(mixed) =~ "n=8 mean=36.3 max=100 min=0"
   end
 
+  test "grouped charts merge scores that clamp into the same bucket" do
+    chart = LifeEv.chart_frequencies([{-1, 2}, {0, 3}, {100, 1}, {150, 2}, {nil, 1}])
+    assert %Chart{n: 9, min: 0, max: 100, mean: 33.3} = chart
+    assert Enum.find(chart.bands, &(&1.key == :kill)).count == 6
+    assert Enum.find(chart.bands, &(&1.key == :frontier)).count == 3
+    assert LifeEv.chart_frequencies([]) == LifeEv.chart([])
+  end
+
   test "parse_band is closed at the edge" do
     assert LifeEv.parse_band("labs") == {:ok, :labs}
     assert LifeEv.parse_band("all") == {:ok, :all}

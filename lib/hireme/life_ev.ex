@@ -121,8 +121,20 @@ defmodule Hireme.LifeEv do
   """
   @spec chart([term()]) :: Chart.t()
   def chart(rows) when is_list(rows) do
-    # The input can be large; every subsequent pass is bounded by 101 scores.
-    frequencies = Enum.frequencies_by(rows, &chart_score/1)
+    rows |> Enum.frequencies_by(&chart_score/1) |> from_frequencies()
+  end
+
+  @doc "Count grouped score observations without expanding them back into individual rows."
+  @spec chart_frequencies([{term(), pos_integer()}]) :: Chart.t()
+  def chart_frequencies(rows) do
+    rows
+    |> Enum.reduce(%{}, fn {score, count}, frequencies ->
+      Map.update(frequencies, chart_score(score), count, &(&1 + count))
+    end)
+    |> from_frequencies()
+  end
+
+  defp from_frequencies(frequencies) do
     scores = Map.keys(frequencies)
 
     {n, total} =

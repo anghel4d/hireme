@@ -740,16 +740,17 @@ defmodule Hireme.Desk do
 
   @doc """
   The `score_100` chart for the whole desk or for one batch: band counts
-  and ten-point bins.
+  and ten-point bins. Aggregate scores in SQL so at most 101 rows cross the Repo.
   """
   @spec score_chart(String.t() | :leftover | :all) :: LifeEv.Chart.t()
   def score_chart(batch \\ :all) do
     Job
     |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
     |> filter(:batch, batch)
-    |> select([j], j.score_100)
+    |> group_by([j], j.score_100)
+    |> select([j], {j.score_100, count()})
     |> Repo.all()
-    |> LifeEv.chart()
+    |> LifeEv.chart_frequencies()
   end
 
   defp card_query(%Filters{} = f) do
