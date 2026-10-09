@@ -23,6 +23,9 @@ pub struct Arena {
     pub bytes: Vec<u8>,
     /// Bytes that were live after the last compaction (or ever, if none).
     pub live_floor: usize,
+    /// Bumped whenever existing references stop meaning what they meant
+    /// (a clear or a compaction); within an epoch the arena only appends.
+    pub epoch: u32,
 }
 
 impl Arena {
@@ -387,6 +390,7 @@ impl Store {
         self.focus.clear();
         self.arena.bytes.clear();
         self.arena.live_floor = 0;
+        self.arena.epoch += 1;
     }
 
     /// Rewrites the arena with only the strings something still points at,
@@ -423,6 +427,7 @@ impl Store {
         }
         self.arena.live_floor = new.len();
         self.arena.bytes = new;
+        self.arena.epoch += 1;
     }
 
     /// The resident state as frames: one BOOT (every desk table but
