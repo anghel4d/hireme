@@ -65,6 +65,7 @@
 !/native/*/Cargo.lock
 !/native/*/build.rs
 !/native/*/*.sh
+!/native/*/*.mjs
 !/native/*/src/
 !/native/*/src/**/
 !/native/*/src/**/*.rs
