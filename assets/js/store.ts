@@ -336,9 +336,6 @@ export class Kernel {
         if (row < 0) kept.byId.delete(key)
         else kept.byId.set(key, this.read(t, kept.spec, row, row + 1)[0])
       }
-      // A settled prediction can take a new key without naming its
-      // provisional one: a count that disagrees reads the table again.
-      if (kept.byId.size !== this.k.rows(t)) this.kept.delete(t)
       kept.list = null
     }
   }
