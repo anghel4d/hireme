@@ -58,19 +58,12 @@ export function frame(kind: number, hash: number, bodyLen: number, fill: (v: Dat
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 
-/** HELLO's option word: bit 0 asks for raw tables, from which the client derives every view. */
-export const RAW = 0x01
-
-/** HELLO: u16 cred_len | cred | pad8 | u64 snapshot_rev | u32 client_id | u32 options. */
-export function hello(hash: number, snapshotRev: bigint, clientId: number, options = RAW, cred = ""): Bytes {
-  const c = ENCODER.encode(cred)
-  const at = pad8(2 + c.byteLength)
-  return frame(KIND.HELLO, hash, at + 16, (v, o) => {
-    v.setUint16(o, c.byteLength, true)
-    new Uint8Array(v.buffer, o + 2, c.byteLength).set(c)
-    v.setBigUint64(o + at, snapshotRev, true)
-    v.setUint32(o + at + 8, clientId, true)
-    v.setUint32(o + at + 12, options, true)
+/** HELLO: u16 cred_len (0: the session is the credential) | pad8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables). */
+export function hello(hash: number, snapshotRev: bigint, clientId: number): Bytes {
+  return frame(KIND.HELLO, hash, 24, (v, o) => {
+    v.setBigUint64(o + 8, snapshotRev, true)
+    v.setUint32(o + 16, clientId, true)
+    v.setUint32(o + 20, 1, true)
   })
 }
 
