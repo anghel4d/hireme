@@ -82,93 +82,73 @@ defmodule HiremeWeb.WireTest do
     {p, jobs}
   end
 
-  test "a boot frame decodes back to its cards and lookups" do
-    {_p, jobs} = desk()
-    cards = Hireme.Desk.list_cards(%Hireme.Desk.Filters{status: :all})
-    batches = Hireme.Desk.list_batches()
-    profiles = Hireme.Corpus.list_profiles()
+  # A table's rows by column name, through the schema's column ids.
+  defp named(t, table) do
+    ids = Packet.columns(table)
 
-    body = [
-      Packet.lookups(batches, profiles),
-      Packet.table(:cards, Packet.card_rows(cards, batches, profiles)),
-      Packet.score_tables(HiremeWeb.JSON.scoreboard(Hireme.Campaign.scoreboard())),
-      Packet.lane_tables(HiremeWeb.JSON.lanes())
-    ]
+    Enum.map(t[Packet.table_id(table)] || [], fn row ->
+      Map.new(ids, fn {name, cid} -> {name, row[cid]} end)
+    end)
+  end
 
-    {bin, [{:boot, 0x02, 7, decoded}]} = one!(Packet.frame(:boot, 7, body, flags: 0x02))
+  test "a raw boot decodes back to the account's rows, enums, dates, lists and JSON" do
+    {p, [a | _] = jobs} = desk()
+    {:ok, rev, {:boot, %{tables: tables}}} = Hireme.Ops.attach(Hireme.Repo.account_id!(), nil)
+    body = [Packet.static_lookups(), for({k, rows} <- tables, do: Packet.raw(k, rows))]
+
+    {bin, [{:boot, 0x02, ^rev, decoded}]} = one!(Packet.frame(:boot, rev, body, flags: 0x02))
     t = tables(decoded)
-    assert Enum.sort(Enum.map(t[1], & &1[1])) == Enum.sort(Enum.map(jobs, & &1.id))
-    assert Enum.map(t[5], & &1[2]) == Enum.map(Hireme.Pipeline.keys(), &Atom.to_string/1)
-    assert [_score] = t[11]
+    rows = named(t, :job_apps)
+    assert Enum.sort(Enum.map(rows, & &1.id)) == Enum.sort(Enum.map(jobs, & &1.id))
+    row = Enum.find(rows, &(&1.id == a.id))
+    assert row.current_stage == "discovered"
+    assert row.profile_id == p.id
+    assert row.company == "Acme"
 
-    zbin = IO.iodata_to_binary(Packet.frame(:boot, 7, body, deflate: true, flags: 0x02))
-    assert {:ok, [{:boot, 0x03, 7, _} = packed], ""} = Packet.split(zbin)
-    assert plain(packed) == {:boot, 0x02, 7, decoded}
+    assert row.stage_on == Date.diff(Date.utc_today(), ~D[1970-01-01]) or
+             row.stage_on == 0xFFFFFFFF
+
+    assert [item | _] = named(t, :items)
+    assert is_binary(item.keywords)
+
+    assert Enum.map(named(t, :stages), & &1.key) ==
+             Enum.map(Hireme.Pipeline.keys(), &Atom.to_string/1)
+
+    zbin = IO.iodata_to_binary(Packet.frame(:boot, rev, body, deflate: true, flags: 0x02))
+    assert {:ok, [{:boot, 0x03, ^rev, _} = packed], ""} = Packet.split(zbin)
+    assert plain(packed) == {:boot, 0x02, rev, decoded}
 
     golden("boot.bin", bin)
     golden("boot.deflate.bin", zbin)
   end
 
-  test "a patch carries changed cards, gone ids and partial columns" do
+  test "a raw patch carries partial rows, U+001F lists and deletions" do
     {_p, [a, b | _]} = desk()
-    cards = Hireme.Desk.list_cards(%Hireme.Desk.Filters{status: :all})
-
-    rows =
-      Packet.card_rows(
-        Enum.filter(cards, &(&1.id == a.id)),
-        Hireme.Desk.list_batches(),
-        Hireme.Corpus.list_profiles()
-      )
 
     body = [
-      Packet.table(:cards, rows),
-      Packet.table(:cards, Enum.map(rows, &%{&1 | next_action: "Call back"}), [:id, :next_action]),
-      Packet.table(:cards_gone, [%{id: b.id}])
+      Packet.raw(:job_apps, [%{id: a.id, next_action: "Call back"}]),
+      Packet.raw(:cv_variants, [
+        %{id: 7, theme: %{"targets" => ["elixir", "rust"], "accent" => "ink"}}
+      ]),
+      Packet.raw(:batches, [
+        %{id: 3, code: "B-1", fire: :open_fire, variety: %{"apps" => 4, "flags" => ["mixed"]}}
+      ]),
+      Packet.table(:gone, [%{table: Packet.table_id(:job_apps), id: b.id}])
     ]
 
     {bin, [{:patch, 0, 8, decoded}]} = one!(Packet.frame(:patch, 8, body))
     t = tables(decoded)
-    assert [%{1 => id}, %{1 => id, 24 => "Call back"}] = t[1]
+    assert [%{id: id, next_action: "Call back", listing: ""}] = named(t, :job_apps)
     assert id == a.id
-    assert t[2] == [%{1 => b.id}]
+
+    assert [%{theme_targets: "elixir" <> <<0x1F>> <> "rust", theme: theme}] =
+             named(t, :cv_variants)
+
+    assert Jason.decode!(theme)["accent"] == "ink"
+    assert [%{fire: 1, variety_apps: 4, variety_flags: "mixed"}] = named(t, :batches)
+    assert [%{table: 47, id: gone}] = named(t, :gone)
+    assert gone == b.id
     golden("patch.bin", bin)
-  end
-
-  test "focus frames intern lines once per session and resend on demand" do
-    {_p, [a, b | _]} = desk()
-    focus = fn id -> HiremeWeb.JSON.focus(Hireme.Desk.focus(id)) end
-
-    {first, intern} = Packet.focus_frames(focus.(a.id), 9, %{})
-    {_, [{:lines, 0, 9, lines}, {:focus, 0, 9, fa}]} = one!(first)
-    assert map_size(intern) == 2 * length(tables(lines)[24])
-
-    {second, ^intern} = Packet.focus_frames(focus.(b.id), 9, intern)
-    {bin, [{:focus, 0, 9, fb}]} = one!(second)
-    assert hd(tables(fb)[30])[1] == b.id
-    refs = Enum.map(tables(fa)[35], & &1[3])
-    assert Enum.all?(refs, &Map.has_key?(intern, {:ix, &1}))
-
-    {again, ^intern} = Packet.focus_frames(focus.(b.id), 9, intern, true)
-    assert {_, [{:lines, 0, 9, _}, {:focus, 0, 9, _}]} = one!(again)
-
-    golden(
-      "lines.bin",
-      IO.iodata_to_binary(
-        Packet.frame(
-          :lines,
-          9,
-          Packet.table(
-            :lines,
-            for(
-              {l, ix} when is_map(l) <- intern,
-              do: l |> Map.put(:ix, ix) |> Map.put(:item, l.id)
-            )
-          )
-        )
-      )
-    )
-
-    golden("focus.bin", bin)
   end
 
   test "split refuses torn lengths and other schemas, and keeps partial frames" do
