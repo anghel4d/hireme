@@ -163,7 +163,7 @@ async fn wt_connect(
     let builder = ClientConfig::builder().with_bind_default();
     let config = match pinned {
         Some(hex) => {
-            let digest: Sha256Digest = hex.parse().map_err(|_| "bad certificate hash")?;
+            let digest = sha256_hex(&hex).ok_or("certificate hash: want 64 hex digits")?;
             builder.with_server_certificate_hashes([digest]).build()
         }
         None => builder.with_native_certs().build(),
@@ -302,6 +302,19 @@ async fn wt_lane(conn: &Connection, letterbox_id: u64) -> Result<(Up, Down), Str
     });
 
     Ok((up_tx, down_rx))
+}
+
+/// A certificate hash as the gate writes it: 64 hex digits, colons allowed.
+fn sha256_hex(s: &str) -> Option<Sha256Digest> {
+    let digits: Vec<u8> = s.bytes().filter(|&b| b != b':').collect();
+    if digits.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in digits.chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(Sha256Digest::new(out))
 }
 
 /// The agent HELLO: `u16 cred_len | cred | pad8 | u64 snapshot_rev | u32 client_id | u32 0`.

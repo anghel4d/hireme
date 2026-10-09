@@ -112,6 +112,14 @@ async fn main() {
         counters: Counters::default(),
     });
 
+    // Connect while the agent is still initializing: the session, the
+    // directory and the lease tool list are ready before the first call.
+    // A failure here is reported by that call instead.
+    let warm = hub.clone();
+    tokio::spawn(async move {
+        let _ = warm.leased_tools().await;
+    });
+
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
