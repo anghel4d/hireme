@@ -6,24 +6,19 @@
 //!     N fresh connections: time to QUIC + CONNECT accepted, and quinn's
 //!     smoothed RTT after a second of keep-alives. No credentials: against
 //!     production the session is a pending agent that the BEAM drops after 2 s.
-//! probe echo URL [--hash HEX] [--n N]
-//!     N round trips on the control stream (needs an echoing Session, as in
-//!     the localhost loop).
 //! probe boot URL?boot=B [--hash HEX] [--n N]
-//!     N cold sessions whose BOOT (B bytes) the echoing Session pushes on a
+//!     N cold sessions whose BOOT (B bytes) the echoing Session
+//!     (bench/gate_echo.exs) pushes on a
 //!     server uni stream as it accepts: time to `ready`, to the first and to
 //!     the last BOOT byte, all from the start of the connect.
 //! ```
-//!
-//! The echoing Session (bench/gate_echo.exs) echoes `E` + 8 bytes on the
-//! control stream.
 
 use std::time::{Duration, Instant};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use wtransport::config::{DnsLookupFuture, DnsResolver};
 use wtransport::tls::Sha256Digest;
-use wtransport::{ClientConfig, Connection, Endpoint};
+use wtransport::{ClientConfig, Endpoint};
 
 struct Args {
     mode: String,
@@ -34,7 +29,7 @@ struct Args {
 
 fn args() -> Args {
     let mut it = std::env::args().skip(1);
-    let mode = it.next().expect("mode: handshake | echo | boot");
+    let mode = it.next().expect("mode: handshake | boot");
     let url = it.next().expect("URL");
     let mut a = Args { mode, url, hash: None, n: 20 };
     while let Some(flag) = it.next() {
@@ -95,7 +90,6 @@ async fn main() {
     let a = args();
     match a.mode.as_str() {
         "handshake" => handshake(&a).await,
-        "echo" => echo(&a).await,
         "boot" => boot(&a).await,
         m => panic!("unknown mode {m}"),
     }
@@ -124,43 +118,6 @@ async fn handshake(a: &Args) {
         ms(pct(&mut connect, 0)),
         ms(pct(&mut rtt, 50)),
         ms(pct(&mut rtt, 0))
-    );
-}
-
-async fn open(a: &Args) -> (Connection, wtransport::SendStream, wtransport::RecvStream, Duration) {
-    let ep = endpoint(&a.hash, resolve(&a.url).await);
-    let t = Instant::now();
-    let conn = ep.connect(&a.url).await.expect("connect");
-    let (mut send, mut recv) = conn.open_bi().await.unwrap().await.unwrap();
-    let mut m = [0u8; 9];
-    m[0] = b'E';
-    send.write_all(&m).await.unwrap();
-    recv.read_exact(&mut m).await.unwrap();
-    (conn, send, recv, t.elapsed())
-}
-
-async fn echo(a: &Args) {
-    let (conn, mut send, mut recv, first) = open(a).await;
-    let mut samples = Vec::with_capacity(a.n);
-    for i in 0..a.n {
-        let mut m = [0u8; 9];
-        m[0] = b'E';
-        m[1..].copy_from_slice(&(i as u64).to_le_bytes());
-        let t = Instant::now();
-        send.write_all(&m).await.unwrap();
-        let mut got = [0u8; 9];
-        recv.read_exact(&mut got).await.unwrap();
-        samples.push(t.elapsed());
-        assert_eq!(got, m);
-    }
-    println!(
-        "{{\"mode\":\"echo\",\"n\":{},\"first_ms\":{},\"rtt_ms\":{{\"p50\":{},\"p90\":{},\"p99\":{}}},\"quic_rtt_ms\":{}}}",
-        a.n,
-        ms(first),
-        ms(pct(&mut samples, 50)),
-        ms(pct(&mut samples, 90)),
-        ms(pct(&mut samples, 99)),
-        ms(conn.rtt())
     );
 }
 
