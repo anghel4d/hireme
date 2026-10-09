@@ -324,6 +324,40 @@ defmodule Hireme.OpsTest do
     refute hot?.()
   end
 
+  # The ops an agent's lease sends cover what its tools did.
+  test "a generation opens on a lineage past its quarter, and an altered line keeps its title",
+       %{account: account} do
+    p = profile()
+    line = item(p)
+    job = job(p, %{company: "Quarter Co"})
+
+    run = fn kind, fields ->
+      op = %{
+        op_id: System.unique_integer([:positive]),
+        kind: kind,
+        target: job.id,
+        fields: fields
+      }
+
+      Ops.run(account.id, op)
+    end
+
+    assert {:ok, _} = run.(:overlay, ["#{line.id}", "altered", "Rewritten", "", "New title"])
+
+    assert %{title: "New title", body: "Rewritten"} =
+             Repo.get_by!(Hireme.Desk.Overlay, item_id: line.id)
+
+    assert {:error, :cooldown} = run.(:generation, [])
+    pair = Hireme.CvPair.bind!(job.id)
+    lineage = Repo.get!(Hireme.Cv.Lineage, Hireme.CvPair.lineage_id(pair))
+    past = Date.add(Date.utc_today(), -(Hireme.CvPair.cooldown_days() + 1))
+    lineage |> Ecto.Changeset.change(opened_on: past) |> Repo.update!()
+
+    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account.id))
+    assert {:ok, rev} = run.(:generation, [])
+    assert_received {:ops_delta, ^rev, %{rows: %{cv_lineages: [%{generation: 2}]}}}
+  end
+
   # Another VM (a release task, an import) writes the same database and
   # moves the revision; the next delta must still bring a tab level.
   test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
