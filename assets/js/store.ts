@@ -117,16 +117,13 @@ export interface Desk {
   /** Apply locally in this tick and send. A predicted refusal applies nothing. */
   run(op: Op): Run
   mark(jobId: number): Mark
-  /** Visible card ids, the selected one first. */
-  hint(ids: readonly number[]): void
   readonly status: Status
   subscribe(fn: (c: Change) => void): () => void
 }
 
-/** What carries ops up and the viewport out. */
+/** What carries ops up. */
 export interface Link {
   send(p: Pending): void
-  hint(ids: readonly number[]): void
 }
 
 const DECODER = new TextDecoder()
@@ -165,7 +162,7 @@ export interface WireKernel {
 }
 
 /** What an ingest changed, as the kernel answers it. */
-export const INGEST = { cards: 1, tables: 2, lines: 4, focus: 8, settled: 16, dropped: 32, tick: 64, error: 1 << 30 } as const
+export const INGEST = { cards: 1, tables: 2, settled: 16, dropped: 32, tick: 64, error: 1 << 30 } as const
 
 /** Refusal codes from schema.txt. */
 const REFUSAL = ["", "fire_hold", "heat", "leased", "cooldown", "not_additive", "argument", "not_found", "batch", "invalid", "internal"]
@@ -198,8 +195,46 @@ export class Kernel {
   private readonly kept = new Map<number, { spec: Spec; byId: Map<number, unknown> | null; list: unknown[] | null }>()
   private readonly keyed = new Map<number, Map<number, unknown>>()
   private count = 0
+  private live: WireKernel
+  private trapped = false
+  private readonly calls = new Map<PropertyKey, unknown>()
+  /** The exports, guarded: a trap marks the instance dead, and a dead one answers as an empty desk. */
+  readonly k: WireKernel
 
-  constructor(readonly k: WireKernel) {}
+  constructor(source: WireKernel, private readonly onTrap: (cause: unknown) => void) {
+    this.live = source
+    this.k = new Proxy({} as WireKernel, { get: (_, name) => (name === "memory" ? this.live.memory : this.guarded(name)) })
+  }
+
+  private guarded(name: PropertyKey): unknown {
+    let f = this.calls.get(name)
+    if (!f) {
+      const empty = name === "row_of" || name === "find" || name === "table_id" || name === "col_id" ? -1 : 0
+      f = (...args: number[]) => {
+        if (this.trapped) return empty
+        try {
+          return (this.live[name as keyof WireKernel] as (...a: number[]) => number)(...args)
+        } catch (cause) {
+          if (!(cause instanceof WebAssembly.RuntimeError)) throw cause
+          this.trapped = true
+          this.onTrap(cause)
+          return empty
+        }
+      }
+      this.calls.set(name, f)
+    }
+    return f
+  }
+
+  /** A fresh instance in place of a trapped one: nothing decoded from the old one is kept. */
+  swap(fresh: WireKernel): void {
+    this.live = fresh
+    this.trapped = false
+    this.ids.clear()
+    this.kept.clear()
+    this.keyed.clear()
+    this.count = 0
+  }
 
   get mem(): ArrayBuffer { return this.k.memory.buffer }
   get rev(): bigint { return (BigInt(this.k.rev_hi() >>> 0) << 32n) | BigInt(this.k.rev_lo() >>> 0) }
@@ -385,17 +420,16 @@ export class Kernel {
 
   /**
    * Keyword coverage of a visible text against targets (null: the job's
-   * listing words). `store` writes the card's glance. The result table
-   * lists the targets in order with their hits.
+   * listing words), read back from the kernel's result table in target order.
    */
-  coverage(job: number, text: string, targets: readonly string[] | null, store: boolean): Coverage {
+  coverage(job: number, text: string, targets: readonly string[] | null): Coverage {
     const t = ENCODER.encode(text)
     const g = ENCODER.encode(targets === null ? "" : targets.join("\x1f"))
     const both = new Uint8Array(t.byteLength + g.byteLength)
     both.set(t)
     both.set(g, t.byteLength)
     this.put((n) => this.k.scratch(n), both)
-    this.k.coverage(job, t.byteLength, g.byteLength, store ? 1 : 0)
+    this.k.coverage(job, t.byteLength, g.byteLength, 0)
     const r = this.table("coverage")
     const words = this.col(r, "word")
     const hit = this.u32(r, this.col(r, "hit"))
@@ -416,9 +450,12 @@ export class Kernel {
   }
 }
 
-export async function loadWireKernel(url: string): Promise<WireKernel> {
-  const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
-  return instance.exports as unknown as WireKernel
+/** The kernel module, compiled once, and its first instance; a trap re-instantiates the module. */
+export interface KernelModule { module: WebAssembly.Module; instance: WireKernel }
+
+export async function loadWireKernel(url: string): Promise<KernelModule> {
+  const { module, instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
+  return { module, instance: instance.exports as unknown as WireKernel }
 }
 
 // ---- what rows are read as ----
@@ -742,7 +779,7 @@ class Documents {
         stages: this.board.tables.stages, bands: this.board.tables.bands,
       },
       this.resolve(profile.id, variant.lineage_id),
-      (targets, text) => k.coverage(id, text, targets, false),
+      (targets, text) => k.coverage(id, text, targets),
     )
     this.focuses.set(id, f)
     this.focusVerdicts.set(id, this.verdicts)
@@ -872,10 +909,11 @@ export class LocalDesk implements Desk, Host {
   /** Ops sent and refused before sending; the kernel's counters hold the rest. Read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
 
-  constructor(kernel: WireKernel, scope: string, clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1) {
+  constructor(private readonly source: KernelModule, scope: string, clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1) {
     this.clientId = clientId
+    const kernel = source.instance
     this.hash = kernel.schema_hash()
-    this.kernel = new Kernel(kernel)
+    this.kernel = new Kernel(kernel, (cause) => void this.recover(cause))
     this.board = new Board(this.kernel)
     this.docs = new Documents(this.kernel, this.board)
     kernel.set_today(Math.floor(Date.now() / 86_400_000))
@@ -884,6 +922,47 @@ export class LocalDesk implements Desk, Host {
   }
 
   attach(link: Link): void { this.link = link }
+
+  /** Called once a trapped kernel is replaced, so the link can ask the server for what the new one lacks. */
+  onReset: (() => void) | null = null
+  private recoveries: number[] = []
+
+  /**
+   * The kernel trapped. Until a fresh instance is up the desk reads as
+   * empty; then it is rebuilt from the IndexedDB snapshot (or nothing),
+   * the ops still pending are predicted again, and the link reconnects so
+   * HELLO names the rev it now holds and the server replays the rest.
+   * Three traps within a minute load the page again instead.
+   */
+  private async recover(cause: unknown): Promise<void> {
+    console.error("kernel trapped", cause)
+    const now = performance.now()
+    this.recoveries = this.recoveries.filter((t) => now - t < 60_000)
+    this.recoveries.push(now)
+    if (this.recoveries.length > 3) {
+      location.reload()
+      return
+    }
+    this.emit({ rows: true, focus: "all", lanes: true, root: true, scoreboard: true, account: true })
+    const fresh = (await WebAssembly.instantiate(this.source.module, {})) as unknown as WebAssembly.Instance
+    this.kernel.swap(fresh.exports as unknown as WireKernel)
+    this.kernel.k.set_today(Math.floor(Date.now() / 86_400_000))
+    const snap = await this.snapshot?.load()
+    if (snap) {
+      this.replaying = true
+      try {
+        this.kernel.ingest(snap.bytes)
+      } finally {
+        this.replaying = false
+      }
+    }
+    for (const p of this.pending) this.kernel.push(p.frame)
+    this.kernel.touched()
+    this.kernel.forget(null)
+    this.board.changed(null)
+    this.emit({ ...this.docs.changed(null, "all"), rows: true })
+    this.onReset?.()
+  }
 
   /** In-memory counters for the bench: ops sent and refused here, and the kernel's settled, mispredicted and refused. */
   stats(): Record<string, number> {
@@ -912,10 +991,6 @@ export class LocalDesk implements Desk, Host {
   /** An op on the wire for this job: its PATCH and ACK are a round trip away. */
   mark(jobId: number): Mark {
     return this.pending.some((p) => p.job === jobId) ? "pending" : null
-  }
-
-  hint(ids: readonly number[]): void {
-    this.link?.hint(ids)
   }
 
   subscribe(fn: (c: Change) => void): () => void {
