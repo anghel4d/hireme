@@ -54,6 +54,33 @@ defmodule Hireme.NetTest do
     assert Net.progress(@today).shipped_week == 0
   end
 
+  test "weekly shipping includes future dates but excludes old and undated entries" do
+    empty = Net.progress(@today)
+    assert {empty.shipped_week, empty.drafts, empty.observer_runs} == {0, 0, 0}
+
+    for {kind, day} <- [
+          {"post", Date.add(@today, -7)},
+          {"post", Date.add(@today, -6)},
+          {"artifact", Date.add(@today, 1)},
+          {"artifact", nil},
+          {"draft", Date.add(@today, -20)},
+          {"observer", Date.add(@today, -20)}
+        ] do
+      assert {:ok, _} =
+               Net.log(%{"kind" => kind, "title" => "Window #{kind}", "shipped_on" => day}, day)
+    end
+
+    progress = Net.progress(@today)
+    assert {progress.shipped_week, progress.drafts, progress.observer_runs} == {2, 1, 1}
+
+    assert Enum.map(progress.recent, & &1.id) ==
+             Enum.sort(Enum.map(progress.recent, & &1.id), :desc)
+
+    Hireme.DataCase.open_account("Other net")
+    other = Net.progress(@today)
+    assert {other.shipped_week, other.drafts, other.observer_runs, other.recent} == {0, 0, 0, []}
+  end
+
   test "mixed-key forms keep wire precedence for kind, text, and dates" do
     assert {:ok, entry} =
              Net.log(
