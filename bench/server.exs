@@ -33,11 +33,20 @@ defmodule HiremeBench.Server do
     only = System.get_env("BENCH_ONLY", "")
     output = System.fetch_env!("BENCH_OUTPUT")
 
+    # The baseline release predates the filtered score query.
+    score_distribution =
+      if function_exported?(Code.ensure_loaded!(Hireme.LifeEv), :chart_frequencies, 1) do
+        fn -> Desk.score_chart(%Desk.Filters{status: :all}) end
+      else
+        fn -> Desk.list_cards(%Desk.Filters{status: :all}) |> Hireme.LifeEv.chart() end
+      end
+
     operations = [
       {"Domain/Desk", "list_cards", fn -> Desk.list_cards(%Desk.Filters{status: :all}) end},
       {"Domain/Desk", "focus", fn -> Desk.focus(job_id) end},
       {"Domain/Desk", "root", fn -> Desk.root(profile_id) end},
       {"Domain/Desk", "score_chart", fn -> Desk.score_chart() end},
+      {"Domain/Desk", "score_distribution", score_distribution},
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
       {"Domain/Heat", "chart", fn -> Heat.chart() end},
       {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},
