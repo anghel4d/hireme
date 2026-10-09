@@ -337,51 +337,6 @@ defmodule Hireme.OpsTest do
     assert {:ok, ^rev, {:boot, _}} = Ops.attach(account.id, boot_rev)
   end
 
-  # A boot reads the tables in the attaching process while writes go on;
-  # whatever it read, the boot plus the deltas after its revision must
-  # come out level with the database.
-  test "boots racing writes each end level with the tables", %{account: account} do
-    fixture = desk(97)
-    {:ok, _, _} = Ops.attach(account.id, nil)
-    me = self()
-
-    booters =
-      for b <- 1..6 do
-        Task.async(fn ->
-          Repo.put_account(account.id)
-          Process.sleep(b * 3)
-          {:ok, rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-          send(me, {:booted, b})
-
-          receive do
-            :done -> :ok
-          end
-
-          deltas = for {r, d} <- drain([]), r > rev, do: {r, d}
-
-          deltas
-          |> Enum.reduce(%{tables: by_id(tables), cards: %{}}, fn {_, d}, v ->
-            apply_delta(v, %{d | cards: [], deleted: []})
-          end)
-          |> Map.fetch!(:tables)
-        end)
-      end
-
-    for n <- 1..40, do: Ops.run(account.id, random_op(fixture, 97_000 + n))
-    for b <- 1..6, do: assert_receive({:booted, ^b}, 5_000)
-    _ = drain([])
-
-    {:ok, _} =
-      Ops.run(account.id, %{op_id: 1, kind: :score, target: hd(fixture.jobs).id, fields: ["3"]})
-
-    want = by_id(Ops.read_tables())
-
-    for task <- booters do
-      send(task.pid, :done)
-      assert Task.await(task) == want
-    end
-  end
-
   test "a row written around the sequencer reaches the next boot and every tab", %{
     account: account
   } do

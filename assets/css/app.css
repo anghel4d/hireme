@@ -69,14 +69,7 @@ kbd {
 
 /* The shell's slots take no layout of their own; their children lay out as the desk's. */
 #topbar, #notice-slot, #scoreboard-slot, #heat-slot, #lens, #focus-slot, #empty { display: contents; }
-/*
- * A lens lies over the board. The covered board keeps its rendering state
- * (content-visibility), skips style, layout and paint, and leaves the
- * focus order, so coming back costs a paint rather than a relayout.
- */
-.stage { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
-#lens > * { position: absolute; inset: 0; z-index: 5; background: var(--bg); }
-.workspace[data-covered] { content-visibility: hidden; }
+.workspace[hidden] { display: none; }
 
 .topbar {
   flex: 0 0 auto;

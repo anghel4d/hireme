@@ -52,7 +52,7 @@ impl Lane {
     }
 }
 
-/// Batch codes by id, from the batches table.
+/// Names for the enum columns, from the dictionary tables.
 #[derive(Default)]
 struct Dict {
     names: HashMap<(u16, u32), String>,
@@ -421,7 +421,7 @@ impl Hub {
 
     // -- desk deltas ---------------------------------------------------------
 
-    /// One control-stream frame: batch codes, then raw application rows.
+    /// One control-stream frame: dictionaries, then columnar PATCHes.
     fn control(&self, f: wire::Frame<'_>) {
         self.counters.frames.fetch_add(1, Ordering::Relaxed);
         if f.header.kind != schema::frame::BOOT && f.header.kind != schema::frame::PATCH {
@@ -436,17 +436,36 @@ impl Hub {
             .collect();
         for t in f.tables().flatten() {
             match t.id {
-                table::JOB_APPS => self.rows(&t, &jobs),
-                table::GONE => self.gone(&t, &jobs),
-                table::BATCHES => self.learn(&t),
-                _ => {}
+                table::CARDS => self.cards(&t, &jobs),
+                table::CARDS_GONE => {
+                    if let Some(c) = t.col(col::cards_gone::ID) {
+                        for i in 0..t.nrows as usize {
+                            if let Some(&lb) = jobs.get(&(c.u32(i) as u64)) {
+                                self.notify(lb, json!({"type": "gone", "job_id": c.u32(i)}));
+                            }
+                        }
+                    }
+                }
+                _ => self.learn(&t),
             }
         }
     }
 
-    /// Batch codes, so a row can name its batch rather than its id.
     fn learn(&self, t: &wire::Table<'_>) {
-        let (Some(k), Some(n)) = (t.col(col::batches::ID), t.col(col::batches::CODE)) else {
+        let (key_col, name_col) = match t.id {
+            table::STAGES
+            | table::STATUSES
+            | table::FRESHNESS
+            | table::GATES
+            | table::HEAT_STATES
+            | table::BANDS => ("ix", "key"),
+            table::BATCHES => ("id", "code"),
+            _ => return,
+        };
+        let (Some(k), Some(n)) = (
+            schema::col_id(t.id, key_col).and_then(|c| t.col(c)),
+            schema::col_id(t.id, name_col).and_then(|c| t.col(c)),
+        ) else {
             return;
         };
         let mut dict = self.dict.lock().unwrap();
@@ -455,10 +474,9 @@ impl Hub {
         }
     }
 
-    /// Upserted `job_apps` rows for leased jobs, as named JSON: only the
-    /// columns the delta carries, so a row is what changed.
-    fn rows(&self, t: &wire::Table<'_>, jobs: &HashMap<u64, u64>) {
-        let Some(ids) = t.col(col::job_apps::ID) else {
+    /// Upserted card rows for leased jobs, as named JSON.
+    fn cards(&self, t: &wire::Table<'_>, jobs: &HashMap<u64, u64>) {
+        let Some(ids) = t.col(col::cards::ID) else {
             return;
         };
         self.counters
@@ -471,43 +489,20 @@ impl Hub {
         let dict = self.dict.lock().unwrap();
         let mut rows = Vec::new();
         for i in 0..t.nrows as usize {
-            let Some(&lb) = jobs.get(&(ids.u32(i) as u64)) else {
-                continue;
-            };
+            let job = ids.u32(i) as u64;
+            let Some(&lb) = jobs.get(&job) else { continue };
             let mut row = Map::new();
             for c in &cols {
                 let Some(def) = schema::col_def(t.id, c.id) else {
                     continue;
                 };
-                if let Some((name, value)) = cell(c, i, def, &dict) {
-                    row.insert(name, value);
-                }
+                row.insert(def.name.to_string(), cell(c, i, def, &dict));
             }
             rows.push((lb, row));
         }
         drop(dict);
         for (lb, row) in rows {
-            self.notify(
-                lb,
-                json!({"type": "row", "letterbox_id": lb, "application": row}),
-            );
-        }
-    }
-
-    /// Deleted rows: `gone` names (table, id); only applications matter here.
-    fn gone(&self, t: &wire::Table<'_>, jobs: &HashMap<u64, u64>) {
-        let (Some(tables), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) else {
-            return;
-        };
-        for i in 0..t.nrows as usize {
-            if tables.u32(i) == table::JOB_APPS as u32
-                && let Some(&lb) = jobs.get(&(ids.u32(i) as u64))
-            {
-                self.notify(
-                    lb,
-                    json!({"type": "gone", "letterbox_id": lb, "job_id": ids.u32(i)}),
-                );
-            }
+            self.notify(lb, json!({"type": "row", "letterbox_id": lb, "card": row}));
         }
     }
 
@@ -530,33 +525,41 @@ impl Hub {
     }
 }
 
-/// One cell as the agent reads it: the batch by its code, days as dates,
-/// JSON text as JSON, none as null. The listing's full text is left out:
-/// it is long, and `get_application` serves it.
-fn cell(c: &wire::Col<'_>, i: usize, def: &schema::ColDef, dict: &Dict) -> Option<(String, Value)> {
-    let value = match (def.name, c.ty) {
-        ("listing", _) => return None,
-        ("batch_id", wire::U32) => match dict.names.get(&(table::BATCHES, c.u32(i))) {
-            Some(code) => return Some(("batch".into(), json!(code))),
-            None => json!(c.u32(i)),
-        },
-        ("stage_notes", wire::STR) => {
-            serde_json::from_str(c.str(i)).unwrap_or_else(|_| json!(c.str(i)))
-        }
-        (_, wire::STR) => json!(c.str(i)),
-        (_, wire::U32) => match c.u32(i) {
-            wire::NONE => Value::Null,
-            v if def.kind == "day" => json!(iso_day(v as i64)),
-            v => json!(v),
-        },
-        (_, wire::U64) => json!(c.u64(i)),
-        (_, wire::F64) => match c.f64(i) {
-            v if v.is_nan() => Value::Null,
-            v => json!(v),
-        },
-        _ => return None,
+/// The enum columns name their dictionary; everything else is a value.
+fn cell(c: &wire::Col<'_>, i: usize, def: &schema::ColDef, dict: &Dict) -> Value {
+    let dict_table = match def.name {
+        "stage" => Some(table::STAGES),
+        "status" => Some(table::STATUSES),
+        "freshness" => Some(table::FRESHNESS),
+        "gate" => Some(table::GATES),
+        "heat_state" => Some(table::HEAT_STATES),
+        "batch" => Some(table::BATCHES),
+        _ => None,
     };
-    Some((def.name.to_string(), value))
+    match c.ty {
+        wire::STR => json!(c.str(i)),
+        wire::U32 => {
+            let v = c.u32(i);
+            if v == wire::NONE {
+                return Value::Null;
+            }
+            if let Some(names) = dict_table
+                && let Some(n) = dict.names.get(&(names, v))
+            {
+                return json!(n);
+            }
+            match def.kind {
+                "day" => json!(iso_day(v as i64)),
+                _ => json!(v),
+            }
+        }
+        wire::U64 => json!(c.u64(i)),
+        wire::F64 => {
+            let v = c.f64(i);
+            if v.is_nan() { Value::Null } else { json!(v) }
+        }
+        _ => Value::Null,
+    }
 }
 
 /// Days since 1970-01-01 as `YYYY-MM-DD` (Howard Hinnant's civil_from_days).
@@ -654,39 +657,35 @@ mod tests {
     }
 
     #[test]
-    fn application_cells_are_named() {
+    fn card_cells_are_named_through_the_dictionaries() {
         let mut w = wire::Writer::new();
         w.begin(schema::frame::PATCH, 0, 7);
-        w.table(table::JOB_APPS, 2);
-        w.col_u32(col::job_apps::ID, [5u32, 6].into_iter());
-        w.col_u32(col::job_apps::BATCH_ID, [9u32, 4].into_iter());
-        w.col_u32(col::job_apps::NEXT_DUE, [20_735u32, wire::NONE].into_iter());
-        let stages: [&[u8]; 2] = [b"gated", b"discovered"];
-        w.col_str(col::job_apps::CURRENT_STAGE, stages.into_iter());
-        let notes: [&[u8]; 2] = [br#"{"gated":"ok"}"#, b"not json"];
-        w.col_str(col::job_apps::STAGE_NOTES, notes.into_iter());
-        let listing: [&[u8]; 2] = [b"long text", b"more"];
-        w.col_str(col::job_apps::LISTING, listing.into_iter());
+        w.table(table::CARDS, 2);
+        w.col_u32(col::cards::ID, [5u32, 6].into_iter());
+        w.col_u32(col::cards::STAGE, [2u32, wire::NONE].into_iter());
+        w.col_u32(col::cards::NEXT_DUE, [20_735u32, wire::NONE].into_iter());
+        let actions: [&[u8]; 2] = [b"call back", b""];
+        w.col_str(col::cards::NEXT_ACTION, actions.into_iter());
         w.end();
         let f = wire::Frame::parse(&w.buf).unwrap();
         let t = f.tables().next().unwrap().unwrap();
         let mut dict = Dict::default();
-        dict.names.insert((table::BATCHES, 9), "B-9".into());
+        dict.names.insert((table::STAGES, 2), "gated".into());
         let row = |i| {
             t.cols()
-                .filter_map(|c| cell(&c, i, schema::col_def(t.id, c.id).unwrap(), &dict))
+                .map(|c| {
+                    let def = schema::col_def(t.id, c.id).unwrap();
+                    (def.name, cell(&c, i, def, &dict))
+                })
                 .collect::<HashMap<_, _>>()
         };
         let r0 = row(0);
         assert_eq!(r0["id"], json!(5));
-        assert_eq!(r0["batch"], json!("B-9"));
-        assert_eq!(r0["current_stage"], json!("gated"));
+        assert_eq!(r0["stage"], json!("gated"));
         assert_eq!(r0["next_due"], json!("2026-10-09"));
-        assert_eq!(r0["stage_notes"], json!({"gated": "ok"}));
-        assert!(!r0.contains_key("listing"));
+        assert_eq!(r0["next_action"], json!("call back"));
         let r1 = row(1);
-        assert_eq!(r1["batch_id"], json!(4));
+        assert_eq!(r1["stage"], Value::Null);
         assert_eq!(r1["next_due"], Value::Null);
-        assert_eq!(r1["stage_notes"], json!("not json"));
     }
 }
