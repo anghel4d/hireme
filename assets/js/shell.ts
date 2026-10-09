@@ -498,7 +498,9 @@ export class Shell {
       workspace.hidden = false
       this.drawBoard()
     }
-    document.title = titleOf(m)
+    // Assigning the title rewrites the <title> node even when it is the same.
+    const title = titleOf(m)
+    if (document.title !== title) document.title = title
   }
 
   private drawBoard(): void {
