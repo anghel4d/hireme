@@ -462,6 +462,13 @@ impl Store {
         if !force && len < 2 * self.arena.live_floor + (256 << 10) {
             return;
         }
+        // Grown by what is still live (a frame of new rows) is not garbage:
+        // moving every string then would only void what caches them.
+        let live: usize = self.tables.iter_mut().flat_map(|t| t.str_refs()).map(|r| r[1] as usize).sum();
+        if !force && 2 * live > len {
+            self.arena.live_floor = live;
+            return;
+        }
         let old = core::mem::take(&mut self.arena.bytes);
         let mut new = Vec::with_capacity(self.arena.live_floor + (64 << 10));
         let mut move_ref = |r: &mut [u32; 2]| {

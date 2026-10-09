@@ -57,6 +57,7 @@ pub struct Derived {
     lineage_targets: BTreeMap<u32, Option<[u32; 2]>>,
     /// Per job id: the listing it was extracted from, and its targets.
     extracted: BTreeMap<u32, ([u32; 2], Vec<String>)>,
+    words: keywords::Scratch,
     /// Lineages whose overlays, and profiles whose items, moved.
     lineages_dirty: Vec<u32>,
     profiles_dirty: Vec<u32>,
@@ -88,6 +89,7 @@ impl Derived {
             variant_of: BTreeMap::new(),
             lineage_targets: BTreeMap::new(),
             extracted: BTreeMap::new(),
+            words: keywords::Scratch::new(),
             lineages_dirty: Vec::new(),
             profiles_dirty: Vec::new(),
             overlay_keys: Vec::new(),
@@ -614,8 +616,8 @@ impl Desk {
             // Extracted words are already lowercase.
             let fresh = !matches!(d.extracted.get(&id), Some((l, _)) if *l == listing);
             if fresh {
-                d.extracted
-                    .insert(id, (listing, keywords::extract(arena.text(listing))));
+                let words = d.words.extract(arena.text(listing));
+                d.extracted.insert(id, (listing, words));
             }
             let words = &d.extracted[&id].1;
             (words.iter().filter(|t| text.hit(t)).count(), words.len())
