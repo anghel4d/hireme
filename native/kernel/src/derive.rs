@@ -895,7 +895,12 @@ impl Desk {
         }
         let bt = table::BATCHES;
         let mut batches: Vec<usize> = (0..self.rows(bt)).collect();
-        batches.sort_by_key(|&r| self.vu32(bt, col::batches::ORDINAL, r));
+        // By ordinal, ties in row order (as the database returns them).
+        crate::store::sort_usize(&mut batches, &|a, b| {
+            self.vu32(bt, col::batches::ORDINAL, a)
+                .cmp(&self.vu32(bt, col::batches::ORDINAL, b))
+                .then(a.cmp(&b))
+        });
         let queued: Vec<u32> = batches
             .iter()
             .filter(|&&r| {
@@ -1233,7 +1238,7 @@ impl Desk {
                 .filter(|&i| self.vu32(jt, col::job_apps::BATCH_ID, i) == batch)
                 .collect();
             // The database returns a batch's rows in id order.
-            members.sort_unstable_by_key(|&i| jobs[i].id);
+            crate::store::sort_usize(&mut members, &|a, b| jobs[a].id.cmp(&jobs[b].id));
             heat::mix(&jobs, &tr, &members, today)
                 .into_iter()
                 .map(|(i, v)| (jobs[i].id, v.allow, v.reason, v.note))

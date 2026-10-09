@@ -623,3 +623,16 @@ impl IdMap {
         }
     }
 }
+
+/// Sorts indexes by a comparator through one instantiation of the sort,
+/// so each call site does not carry its own copy of it.
+#[inline(never)]
+pub fn sort_usize(v: &mut [usize], cmp: &dyn Fn(usize, usize) -> core::cmp::Ordering) {
+    v.sort_unstable_by(|a, b| cmp(*a, *b));
+}
+
+/// The same for u32 rows.
+#[inline(never)]
+pub fn sort_u32(v: &mut [u32], cmp: &dyn Fn(u32, u32) -> core::cmp::Ordering) {
+    v.sort_unstable_by(|a, b| cmp(*a, *b));
+}

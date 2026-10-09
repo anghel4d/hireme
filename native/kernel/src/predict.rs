@@ -699,7 +699,7 @@ fn put_note(json: &str, stage: &str, note: &str) -> Option<String> {
         Some(p) => p.1 = String::from(note),
         None => pairs.push((String::from(stage), String::from(note))),
     }
-    pairs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    pairs.sort_unstable_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let mut out = String::from("{");
     for (i, (k, v)) in pairs.iter().enumerate() {
         if i > 0 {
