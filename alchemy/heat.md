@@ -51,3 +51,6 @@ single-job verdict. Unrelated companies are not scanned for every card. Snapshot
 queries load only heat inputs, not listing or CV bodies.
 Employer-size classification checks normalized words and the compact company
 name against fixed anchor sets, preserving whole-word matching and tier priority.
+Board decoration classifies hot peers once per read and reuses those role traits
+for overlap penalties. Candidate roles are always classified from the current
+card; chart-only reads do not pay for this overlap index.
