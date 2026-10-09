@@ -32,6 +32,9 @@ defmodule Hireme.Accounts do
   @type claim :: %{subject: String.t(), display: String.t()}
 
   @providers Identity.providers()
+  @mail Hireme.Accounts.Mail
+  # A sign-in link's send: tries, and the wait before each retry.
+  @link_backoff [2_000, 8_000]
   @address ~r/\A[^\s@]+@[^\s@]+\.[^\s@]+\z/
 
   @spec create!(map()) :: Account.t()
@@ -178,9 +181,14 @@ defmodule Hireme.Accounts do
   well-formed address gets `:ok` whether or not it has an account; the
   answer never says which. Five per address and twenty per peer in ten
   minutes.
+
+  The answer does not wait on the mail provider: the send runs in a
+  supervised task (`Hireme.Accounts.Mail`) with two retries, and the link
+  lives only in that task's memory. It is never written down, so a
+  restart mid-send loses it and the person asks again.
   """
   @spec request_link(String.t(), (String.t() -> String.t()), meta()) ::
-          :ok | {:error, :invalid | :rate_limited | :mail}
+          :ok | {:error, :invalid | :rate_limited}
   def request_link(email, url_for, meta \\ %{}) when is_function(url_for, 1) do
     with {:ok, email} <- normalize_email(email),
          :ok <- Security.limit(:link_address, email),
@@ -200,10 +208,28 @@ defmodule Hireme.Accounts do
 
       Audit.record(:link_requested, trace(email), meta)
 
-      case Mailer.sign_in_link(email, url_for.(Base.url_encode64(token, padding: false))) do
-        :ok -> :ok
-        {:error, _} -> {:error, :mail}
-      end
+      url = url_for.(Base.url_encode64(token, padding: false))
+
+      {:ok, _} =
+        Task.Supervisor.start_child(@mail, fn -> send_link(email, url, @link_backoff) end)
+
+      :ok
+    end
+  end
+
+  # The mailer logs each failure; a link still unsent after the last try
+  # is dropped with the task.
+  defp send_link(email, url, backoff) do
+    case {Mailer.sign_in_link(email, url), backoff} do
+      {:ok, _} ->
+        :ok
+
+      {{:error, _}, [wait | rest]} ->
+        Process.sleep(wait)
+        send_link(email, url, rest)
+
+      {{:error, _}, []} ->
+        :error
     end
   end
 

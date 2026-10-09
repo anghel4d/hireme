@@ -250,12 +250,12 @@ defmodule HiremeWeb.SignInTest do
 
   # The token in the link the last mail to `address` carried.
   defp mailed(address) do
-    assert_received {:email,
-                     %Swoosh.Email{
-                       to: [{_, ^address}],
-                       subject: "Your Hireme sign-in link",
-                       text_body: body
-                     }}
+    assert_receive {:email,
+                    %Swoosh.Email{
+                      to: [{_, ^address}],
+                      subject: "Your Hireme sign-in link",
+                      text_body: body
+                    }}
 
     [_, token] = Regex.run(~r{/sign-in/email\?token=([A-Za-z0-9_-]+)}, body)
     token

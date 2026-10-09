@@ -103,9 +103,6 @@ defmodule HiremeWeb.AccountController do
 
       {:error, :rate_limited} ->
         JSON.refuse(conn, {429, "Too many links were asked for. Wait a few minutes."})
-
-      {:error, :mail} ->
-        JSON.refuse(conn, {503, "The link could not be sent just now."})
     end
   end
 
