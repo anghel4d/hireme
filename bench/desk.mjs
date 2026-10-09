@@ -56,6 +56,8 @@ const repo = resolve(new URL("..", import.meta.url).pathname)
 // ---- the testbed ----
 
 async function startTestbed() {
+  // Without the early script the page inlines nothing and the desk connects only once app.js lands.
+  if (!args.release && !existsSync(join(repo, "priv/static/assets/js/early.js"))) throw new Error("priv/static/assets/js/early.js is missing: run `mix esbuild early` first")
   const fixture = args.fixture ?? "/tmp/hireme-perf-canonical"
   const dir = mkdtempSync(join(tmpdir(), "hireme-desk-bench-"))
   for (const f of ["hireme.db", "hireme.db-wal", "hireme.db-shm"]) {
