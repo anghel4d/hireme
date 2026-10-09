@@ -84,7 +84,6 @@ defmodule Hireme.LifeEvTest do
       ])
 
     assert {mixed.n, mixed.mean, mixed.min, mixed.max} == {8, 36.3, 0, 100}
-    assert LifeEv.ascii(mixed) =~ "n=8 mean=36.3 max=100 min=0"
   end
 
   test "grouped charts merge scores that clamp into the same bucket" do

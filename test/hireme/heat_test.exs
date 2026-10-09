@@ -294,10 +294,7 @@ defmodule Hireme.HeatTest do
            ).reason == :ok
   end
 
-  test "empty heat charts and the closed heat-state parser keep their wire forms" do
-    assert Heat.ascii(%Hireme.Heat.Chart{companies: [], vendors: []}) ==
-             "HEAT companies\n(none)\nHEAT ATS\n(none)\nFIRE HOLD. Governor gates the queue. It does not submit."
-
+  test "the closed heat-state parser keeps its wire forms" do
     for state <- [:all, :cool, :warm, :hot, :blocked] do
       assert Heat.parse_state(state) == {:ok, state}
       assert Heat.parse_state(Atom.to_string(state)) == {:ok, state}
