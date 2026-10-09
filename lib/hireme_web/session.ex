@@ -593,10 +593,6 @@ defmodule HiremeWeb.WireSocket do
   def send(_c, _id, io), do: Process.put(__MODULE__, [Process.get(__MODULE__, []) | [io]])
   def fin(_c, _id), do: :ok
   def reset(_c, _id, _code), do: :ok
-  def open_uni(_c, _id, _priority), do: :ok
-  def open_bi(_c, _id, _priority), do: :ok
-  def priority(_c, _id, _priority), do: :ok
-  def datagram(c, io), do: send(c, 0, io)
   def ready(_c), do: :ok
   def close(_c, _code, _reason), do: Process.put({__MODULE__, :close}, true)
 
