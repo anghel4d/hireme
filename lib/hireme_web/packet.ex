@@ -511,15 +511,26 @@ defmodule HiremeWeb.Packet do
   end
 
   @doc """
-  Interning of CV lines for one session: a line map gets an `ix` the first
-  time it is seen, and `lines/2` answers the table rows not yet sent.
+  Interning of CV lines for one session. A line's `ix` comes from its
+  content (`:erlang.phash2/2`, stable across nodes and releases), so a
+  browser that restores yesterday's snapshot still finds the same line at
+  the same ix; a collision within a session probes on. Answers the ix,
+  the interning, and whether this session has not sent the line yet.
   """
   @spec intern(map(), map()) :: {non_neg_integer(), map(), boolean()}
   def intern(intern, line) do
     case intern do
       %{^line => ix} -> {ix, intern, false}
-      _ -> {map_size(intern), Map.put(intern, line, map_size(intern)), true}
+      _ -> probe(intern, line, 0)
     end
+  end
+
+  defp probe(intern, line, attempt) do
+    ix = :erlang.phash2({attempt, line}, 0xFFFFFFFF)
+
+    if Map.has_key?(intern, {:ix, ix}),
+      do: probe(intern, line, attempt + 1),
+      else: {ix, intern |> Map.put(line, ix) |> Map.put({:ix, ix}, line), true}
   end
 
   defp line_row(line, ix), do: Map.put(line, :ix, ix) |> Map.put(:item, line.id)

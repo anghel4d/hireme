@@ -47,6 +47,11 @@ defmodule HiremeWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: false
 
+  # The desk session where UDP is blocked: the WebTransport frames, binary.
+  socket "/wire", HiremeWeb.WireSocket,
+    websocket: [connect_info: [session: @session_options], max_frame_size: 1_048_576],
+    longpoll: false
+
   socket "/mcp", HiremeWeb.McpDirectorySocket,
     websocket: [connect_info: [:x_headers, :peer_data], auth_token: true],
     longpoll: false
