@@ -42,6 +42,8 @@ defmodule HiremeWeb.Session do
   @ticket_age 60
   @recheck_ms 60_000
   @hello_deadline_ms 5_000
+  # The first server-opened uni stream (QUIC ids 4n+3) carries an early BOOT.
+  @early_stream 3
 
   defstruct [
     :carrier,
@@ -58,6 +60,7 @@ defmodule HiremeWeb.Session do
     acks: [],
     letters: %{},
     raw: false,
+    early: false,
     acct_dirty: false
   ]
 
@@ -130,7 +133,7 @@ defmodule HiremeWeb.Session do
           not String.starts_with?(URI.parse(path).path || "", "/wt") -> {:refuse, 404}
           origin == "" and not Map.has_key?(query, "t") -> {:ok, pending(s)}
           not allowed_origin?(origin) -> {:refuse, 403}
-          true -> by_ticket(s, query["t"])
+          true -> by_ticket(s, query)
         end
     end
   end
@@ -143,14 +146,33 @@ defmodule HiremeWeb.Session do
 
   # A ticketed browser is authenticated before ACCEPT, so the gate lifts
   # its pre-HELLO caps and deadline at once.
-  defp by_ticket(s, ticket) do
-    case redeem(ticket) do
+  defp by_ticket(s, query) do
+    case redeem(query["t"]) do
       {:ok, account_id, session_id} ->
         s.mod.ready(s.carrier)
-        {:ok, browser(s, account_id, session_id)}
+        {:ok, s |> browser(account_id, session_id) |> early(query)}
 
       :error ->
         {:refuse, 403}
+    end
+  end
+
+  # A browser that names its snapshot and asks for raw tables in the
+  # CONNECT query gets its BOOT pushed on a stream of the server's own the
+  # moment it is accepted, a round trip before it could send HELLO; its
+  # HELLO then only opens control.
+  defp early(s, %{"raw" => "1"} = query) do
+    snapshot = int_param(query["rev"])
+    send(self(), {__MODULE__, :early_boot, snapshot})
+    %{s | raw: true, client_id: int_param(query["cid"])}
+  end
+
+  defp early(s, _query), do: s
+
+  defp int_param(value) do
+    case Integer.parse(value || "") do
+      {n, ""} when n >= 0 -> n
+      _ -> 0
     end
   end
 
@@ -295,6 +317,14 @@ defmodule HiremeWeb.Session do
 
   def info({__MODULE__, :hello_deadline}, %{hello: false} = s), do: bye(s, "hello")
 
+  def info({__MODULE__, :early_boot, snapshot}, %{hello: false} = s) do
+    id = @early_stream
+    s.mod.open_uni(s.carrier, id)
+    s = start(s, snapshot, &s.mod.send(s.carrier, id, &1))
+    s.mod.fin(s.carrier, id)
+    {:ok, %{s | early: true}}
+  end
+
   def info({__MODULE__, :recheck}, %{role: :browser} = s) do
     if live?(s.account_id, s.session_id) do
       Process.send_after(self(), {__MODULE__, :recheck}, @recheck_ms)
@@ -335,6 +365,8 @@ defmodule HiremeWeb.Session do
     end
   end
 
+  # After an early BOOT the browser's HELLO only opens control.
+  defp frame({:hello, _, _, _}, %{early: true} = s), do: {:ok, s}
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
@@ -388,7 +420,7 @@ defmodule HiremeWeb.Session do
         # same deltas, and it derives its own views from them.
         {:ok, rev, {:boot, %{tables: tables}}} = Ops.attach(agent.account_id, nil)
         s = %{s | rev: rev, hello: true, raw: true}
-        boot(s, rev, tables, [])
+        boot(&control(s, &1), rev, tables, [])
         {:ok, s}
 
       :error ->
@@ -398,22 +430,7 @@ defmodule HiremeWeb.Session do
 
   defp hello(%{role: :browser, raw: true} = s, false, _cred, snapshot, client) do
     s.mod.ready(s.carrier)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
-    {:ok, rev, snap} = Ops.attach(s.account_id, if(snapshot == 0, do: nil, else: snapshot))
-    s = %{s | rev: rev, hello: true, client_id: client}
-
-    case snap do
-      {:boot, %{tables: tables}} ->
-        boot(s, rev, tables, account_tables(s))
-
-      {:replay, deltas} ->
-        for {r, delta} <- deltas, do: control(s, Packet.frame(:patch, r, raw_delta(delta)))
-        control(s, Packet.frame(:patch, rev, [clock(), account_tables(s)], flags: @end_flag))
-    end
-
-    control(s, Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id))))
-    schedule_tick()
-    {:ok, s}
+    {:ok, start(%{s | client_id: client}, snapshot, &control(s, &1))}
   end
 
   # A browser that does not ask for raw tables runs a bundle from before
@@ -421,6 +438,27 @@ defmodule HiremeWeb.Session do
   defp hello(%{role: :browser} = s, false, _cred, _snapshot, _client), do: bye(s, "schema")
 
   defp hello(s, _agent?, _cred, _snapshot, _client), do: bye(s, "hello")
+
+  # Attach to the account's guild and send the BOOT (or the revisions a
+  # known snapshot misses), then a ticket for the next reconnect.
+  defp start(s, snapshot, write) do
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+    {:ok, rev, snap} = Ops.attach(s.account_id, if(snapshot == 0, do: nil, else: snapshot))
+    s = %{s | rev: rev, hello: true}
+
+    case snap do
+      {:boot, %{tables: tables}} ->
+        boot(write, rev, tables, account_tables(s))
+
+      {:replay, deltas} ->
+        for {r, delta} <- deltas, do: write.(Packet.frame(:patch, r, raw_delta(delta)))
+        write.(Packet.frame(:patch, rev, [clock(), account_tables(s)], flags: @end_flag))
+    end
+
+    write.(Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id))))
+    schedule_tick()
+    s
+  end
 
   # ---- Raw tables (round two): rows as the database holds them ----
 
@@ -433,11 +471,11 @@ defmodule HiremeWeb.Session do
   # The board first: what the cards are drawn from, without the job
   # listings. The rest (CV items, events, gym and net, the listings)
   # follows at the same rev, so the first paint waits for neither.
-  defp boot(s, rev, tables, account) do
+  defp boot(write, rev, tables, account) do
     {board, rest} = split_boot(tables)
     body = [Packet.static_lookups(), raw_boot(board), account]
-    control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
-    if rest != [], do: control(s, Packet.frame(:patch, rev, rest, deflate: true))
+    write.(Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
+    if rest != [], do: write.(Packet.frame(:patch, rev, rest, deflate: true))
   end
 
   defp split_boot(tables) do
