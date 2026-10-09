@@ -123,6 +123,20 @@ defmodule HiremeBench.Testbed do
       end
 
     count = System.get_env("BENCH_JOBS", "1000") |> String.to_integer()
+    # BENCH_VARIETY=1: every listing its own text of 150-400 made-up words,
+    # forty locations, mixed stages and statuses, so string columns carry
+    # the entropy real desks do. The default stays the canonical fixture.
+    varied? = System.get_env("BENCH_VARIETY") == "1"
+    :rand.seed(:exsss, {7, 11, 13})
+
+    syllables =
+      ~w(ka to ri mu sen ve lo da pi nor ex ar ti con sys lab ru st ze qu ion ent al ing)
+
+    word = fn -> Enum.map_join(1..Enum.random(1..3), "", fn _ -> Enum.random(syllables) end) end
+    locations = for _ <- 1..40, do: String.capitalize(word.())
+
+    stages =
+      ~w(discovered freshness gated in_batch draft_ready fire_ready submitted reply closed)a
 
     for i <- 1..count do
       profile = Enum.at(profiles, rem(i, 3))
@@ -133,16 +147,28 @@ defmodule HiremeBench.Testbed do
         company: "Company #{rem(i, 100)}",
         role: "Systems Engineer #{i}",
         canonical_url: "https://jobs.example.test/#{i}",
-        location: "Remote",
-        department: "Engineering #{rem(i, 5)}",
+        location: if(varied?, do: Enum.random(locations), else: "Remote"),
+        department: if(varied?, do: String.capitalize(word.()), else: "Engineering #{rem(i, 5)}"),
+        fit: if(varied?, do: word.(), else: ""),
+        status:
+          if(varied?, do: Enum.random([:open, :open, :open, :paused, :closed]), else: :open),
         score_100: rem(i, 101),
-        stage: if(i <= 100, do: :submitted, else: :discovered),
+        stage:
+          cond do
+            varied? -> Enum.random(stages)
+            i <= 100 -> :submitted
+            true -> :discovered
+          end,
         stage_on: Date.add(Date.utc_today(), -rem(i, 70)),
         listing:
-          String.duplicate(
-            "Elixir Rust TypeScript distributed systems latency SQLite WebAssembly ",
-            20
-          )
+          if varied? do
+            Enum.map_join(1..Enum.random(150..400), " ", fn _ -> word.() end)
+          else
+            String.duplicate(
+              "Elixir Rust TypeScript distributed systems latency SQLite WebAssembly ",
+              20
+            )
+          end
       })
     end
 

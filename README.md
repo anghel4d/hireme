@@ -42,6 +42,8 @@ synthetic session credentials.
 with preparation and cleanup outside the timer. `bench/security.exs` isolates hot
 authentication primitives. Each emits JSONL with raw millisecond samples and
 nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
+`BENCH_VARIETY=1` seeds a testbed whose string columns carry real entropy (every
+listing its own text, forty locations, mixed stages and statuses) beside the canonical one.
 Known-ATS scaling uses `bench/ats_fixture.exs` on a disposable canonical fixture
 copy under `/tmp/hireme-perf-ats-`, with `BENCH_HOT_JOBS` selecting the hot cohort.
 For browser WebAuthn, the testbed sets Wax's origin to `http://localhost:$PORT`;
