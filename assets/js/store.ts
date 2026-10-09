@@ -1031,6 +1031,14 @@ export class LocalDesk implements Desk, Host {
 // next load paints before the network answers. Replaying them through the same sink restores the desk, and
 // HELLO then names their rev so the server sends only what changed.
 
+/**
+ * The snapshot's own format. Bumped when a saved snapshot must not be
+ * trusted any more: 2 drops those written while the server's partial rows
+ * could blank a job's columns, so a desk that lost a row on a write gets
+ * it back on its next load instead of resuming from the loss.
+ */
+const FORMAT = 2
+
 export class Snapshot {
   private timer = 0
   private dirty = false
@@ -1062,7 +1070,7 @@ export class Snapshot {
     const snap = this.take()
     if (!snap) return
     this.dirty = false
-    void idb((store) => store.put({ rev: snap.rev, hash: this.hash, blob: new Blob([snap.bytes]) }, this.scope), "readwrite").catch(() => {})
+    void idb((store) => store.put({ format: FORMAT, rev: snap.rev, hash: this.hash, blob: new Blob([snap.bytes]) }, this.scope), "readwrite").catch(() => {})
   }
 
   /** The ops not yet acknowledged, kept beside the frames so a reload predicts and resends them. */
@@ -1082,8 +1090,8 @@ export class Snapshot {
     const [rec, ops] = (await Promise.all([
       (early ?? idb((store) => store.get(this.scope), "readonly")).catch(() => undefined),
       idb((store) => store.get(`${this.scope}:ops`), "readonly").catch(() => undefined),
-    ])) as [{ rev?: bigint; hash?: number; blob?: Blob } | undefined, { opId: bigint; op: Op }[] | undefined]
-    if (!rec?.blob || rec.hash !== this.hash || typeof rec.rev !== "bigint") return null
+    ])) as [{ format?: number; rev?: bigint; hash?: number; blob?: Blob } | undefined, { opId: bigint; op: Op }[] | undefined]
+    if (!rec?.blob || rec.format !== FORMAT || rec.hash !== this.hash || typeof rec.rev !== "bigint") return null
     return { rev: rec.rev, bytes: new Uint8Array(await rec.blob.arrayBuffer()), ops: Array.isArray(ops) ? ops : [] }
   }
 }
