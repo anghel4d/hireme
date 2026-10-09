@@ -69,6 +69,8 @@ defmodule HiremeWeb.Gate do
 
   use Supervisor
 
+  require Logger
+
   @enforce_keys [:socket]
   defstruct [:socket]
 
@@ -180,12 +182,36 @@ defmodule HiremeWeb.Gate do
   # ------------------------------------------------------------ listener
 
   @doc """
-  Listens on `opts[:socket]` when it is set, and does nothing otherwise.
-  `opts[:session]` names the Session module (`HiremeWeb.Session` unless
-  a test swaps it).
+  Listens on `opts[:socket]` when it is set and no live node holds that
+  socket already, and does nothing otherwise. `opts[:session]` names the
+  Session module (`HiremeWeb.Session` unless a test swaps it).
+
+  A second VM of the same configuration (`mix run` of a bench script beside
+  `mix phx.server`) used to delete the server's socket and listen in its
+  place; when it exited, every CONNECT the gate forwarded met a dead socket
+  and was refused (Chromium: ERR_METHOD_NOT_SUPPORTED) until a restart.
   """
   def start_link(opts) do
-    if opts[:socket], do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__), else: :ignore
+    path = opts[:socket] && to_string(opts[:socket])
+
+    cond do
+      is_nil(path) ->
+        :ignore
+
+      held?(path) ->
+        Logger.warning("gate socket #{path} is held by another node; not listening")
+        :ignore
+
+      true ->
+        Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
+    end
+  end
+
+  defp held?(path) do
+    case :gen_tcp.connect({:local, path}, 0, [:binary], 200) do
+      {:ok, probe} -> :gen_tcp.close(probe) == :ok
+      {:error, _} -> false
+    end
   end
 
   @impl Supervisor
