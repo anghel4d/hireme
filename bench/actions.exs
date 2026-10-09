@@ -69,12 +69,54 @@ defmodule HiremeBench.Actions do
       fn _ -> Desk.create_job(attrs(profile, "new employer", "new")) end,
       fn result, _ ->
         added = ok(result)
-        true = Repo.get!(Job, added.id).company == @prefix <> "new employer"
+        true = added == Repo.get!(Job, added.id)
+        true = added.company == @prefix <> "new employer"
         true = Letterbox.for_job(added.id).job_app_id == added.id
         true = CvPair.job_id(CvPair.bind!(added.id)) == added.id
       end,
       fn _, _ -> cleanup_jobs(@prefix <> "new employer") end
     )
+
+    ok(
+      Desk.put_overlay(job.id, item.id, %{mode: :altered, body: "Elixir systems shared wording"})
+    )
+
+    shared_before = Repo.get!(Job, job.id)
+
+    measure(
+      "Desk",
+      "job_add_existing_employer_shared_overlay",
+      n,
+      no_prepare,
+      fn _ ->
+        Desk.create_job(
+          Map.merge(attrs(profile, "shared", "third"), %{
+            theme: %{targets: ["missing"]},
+            stage_notes: %{discovered: "Ready for review"}
+          })
+        )
+      end,
+      fn result, _ ->
+        added = ok(result)
+        true = added == Repo.get!(Job, added.id)
+
+        true =
+          {added.keyword_hits, added.keyword_total, added.mask_hidden, added.mask_altered,
+           added.mask_emphasized} == {2, 2, 0, 1, 0}
+
+        pair = CvPair.bind!(added.id)
+        true = CvPair.lineage_id(pair) == lineage_id and CvPair.job_id(pair) == added.id
+        focus = Desk.focus(added.id)
+        true = focus.cv.sections == Desk.focus(job.id).cv.sections
+        true = focus.coverage.hits == ["elixir", "systems"] and focus.coverage.misses == []
+        true = Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
+        true = Repo.get!(Job, job.id) == shared_before
+        true = Letterbox.for_job(added.id).job_app_id == added.id
+      end,
+      fn result, _ -> Repo.delete!(ok(result)) end
+    )
+
+    ok(Desk.put_overlay(job.id, item.id, :inherit))
 
     for {name, reset, operation, expected} <- [
           {"score_change", %{score_100: 40}, fn -> Desk.set_score(job.id, 81) end,

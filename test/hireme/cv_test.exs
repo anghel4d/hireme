@@ -85,4 +85,39 @@ defmodule Hireme.CvTest do
     refute Enum.any?(focus.masks, &(&1.body == "Replaced"))
     assert Enum.any?(focus.masks, &(&1.id == added.id and &1.mode == :emphasized))
   end
+
+  test "creation keeps inherited masks through cooldown and rejects non-additive opening overlays" do
+    profile = profile()
+    kept = item(profile, %{body: "Canonical"})
+
+    first =
+      job(profile, %{
+        company: "Creation cooldown",
+        theme: %{targets: ["original"]},
+        overlays: [%{item_id: kept.id, mode: :altered, body: "Original"}]
+      })
+
+    pair = CvPair.bind!(first.id)
+    lineage = Repo.get!(Lineage, CvPair.lineage_id(pair))
+    past = Date.add(Date.utc_today(), -(CvPair.cooldown_days() + 1))
+    lineage |> Ecto.Changeset.change(opened_on: past) |> Repo.update!()
+
+    attrs = %{profile_id: profile.id, company: first.company, role: "Retry"}
+    assert {:ok, bare} = Desk.create_job(attrs)
+    assert bare == Repo.get!(Hireme.Desk.Job, bare.id)
+    assert {bare.keyword_hits, bare.keyword_total, bare.mask_altered} == {1, 1, 1}
+    assert CvPair.lineage_id(CvPair.bind!(bare.id)) == lineage.id
+
+    changed = Map.put(attrs, :overlays, [%{item_id: kept.id, mode: :hidden}])
+    count = Repo.aggregate(Hireme.Desk.Job, :count)
+    assert {:error, :cooldown} = Desk.create_job(changed)
+    assert Repo.aggregate(Hireme.Desk.Job, :count) == count
+    assert {:ok, _} = CvPair.open_generation(first.employer_id)
+    assert {:error, :not_additive} = Desk.create_job(changed)
+    assert Repo.aggregate(Hireme.Desk.Job, :count) == count
+    assert {:ok, additive} = Desk.create_job(attrs)
+    assert additive == Repo.get!(Hireme.Desk.Job, additive.id)
+    assert additive.mask_altered == 1
+    assert Enum.any?(Desk.focus(additive.id).masks, &(&1.body == "Original"))
+  end
 end
