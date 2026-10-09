@@ -10,7 +10,7 @@ The BEAM owns the data and the rules. The browser owns the board: the desk arriv
 
 ## Run
 
-Elixir 1.17+ and Erlang/OTP 27+. `wat2wasm` (wabt) to rebuild the kernel; the built `priv/static/wasm/desk.wasm` is committed, so a clone runs without it.
+Elixir 1.17+ and Erlang/OTP 27+. Rust 1.96.1 with the `wasm32-unknown-unknown` target to rebuild the kernel (`native/kernel/build.sh`); the built `priv/static/wasm/kernel.wasm` is committed, so a clone runs without it, and `native/kernel/build.sh --check` proves a rebuild reproduces it byte for byte.
 
 ```bash
 mix setup
@@ -72,8 +72,8 @@ nixpkgs. When the lock changes, build the package's `mixFodDeps` with
 `mixDepsHash = pkgs.lib.fakeHash`, then supply the reported actual hash and rebuild.
 The fake hash is only a hash-discovery input, never a deployment value.
 
-The package builds SQLite's native extension against Nix's SQLite, rebuilds the
-WASM kernel with `wat2wasm`, bundles/minifies assets with Nix's esbuild, and runs
+The package builds SQLite's native extension against Nix's SQLite, uses the committed
+WASM kernel, bundles/minifies assets with Nix's esbuild, and runs
 Phoenix's asset digester. Its source filter excludes local databases, seed data,
 secrets, dependency/build caches, and generated assets. Production compilation
 does not enable the development sign-in or mailbox routes. Copy the complete
@@ -208,7 +208,7 @@ Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadsid
 
 `GET /api/pack` is the whole desk as one `HDP1` packet: `"HDP1"`, a u32 header length, a JSON directory, then the body. The directory names every column with its kind (`u32` or `str`) and byte offset, and carries the lookup tables the integer columns index into: stages, statuses, freshness, gates, bands, batches, profiles. Rows are already in board order (`score_100` first, then batch, rung, heat, company). A `str` column is `n + 1` offsets followed by UTF-8 bytes; one of them is a lowercase search haystack per card.
 
-`assets/wasm/desk.wat` is the column store: a bump allocator, `select` (score floor, band range, stage, status, batch, profile, and a byte-level substring scan of the haystack) that writes passing row indices in packet order, and `find`. It is 656 bytes of WebAssembly and knows nothing about jobs.
+`native/kernel` (Rust, built to `priv/static/wasm/kernel.wasm`) is the resident desk: every table a wire frame carries, upserted or replaced as BOOT, PATCH, LINES and FOCUS frames arrive, strings in one compacting arena, read by TypeScript straight out of WebAssembly memory. The view is base ⊕ pending: each op the client sends is predicted locally (stage, next action, score, open fire, overlay mask counts, narrative) along with the refusals the client can see (lease, fire hold, heat), settled exactly by the ACK that follows its PATCH and dropped by a NACK, with misprediction counters in memory. The kernel sorts the board by `Card.order/1` itself, derives the lowercase search text, and runs `select` and `find` with the board's filters. A snapshot export is the same frames, so restoring from IndexedDB is an ingest. `native/wire` is the `no_std` frame codec the kernel, the gate and `hireme-mcp` share; both it and the Elixir encoder read `priv/wire/schema.txt`. `node native/kernel/test.mjs` checks the kernel against an independent model over seeded random op sequences.
 
 `assets/js/` is the shell: `store.ts` reads the packet directory, copies the body into kernel memory, and views columns as typed arrays with strings decoded on demand; `board.ts` is the filter ADT parsed from and written to the address and the row-major `hjkl` rule with the painted window; `html.ts` is an escaping template tag and a `morph` that changes only what differs and skips a slot whose HTML has not changed; `views.ts` are pure functions from model to HTML, lanes included; `api.ts` is every read and write over HTTP plus the signal feed; `shell.ts` is the model, the update, and the draw. Focus, battleplan, and root come from `/api/focus/:id` and `/api/root/:id`; writes are `POST /api/...` and answer with the new focus or a status code that says why not (`409 fire_hold`, `423 leased`). `/feed/websocket` pushes every desk signal so an open board refreshes when an agent writes. Each change re-reads only what it can alter (cards, scoreboard, lanes), one read of each kind is in flight at a time, and the signals for a job with a write in flight fold into that write's single refresh.
 
@@ -270,7 +270,8 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme_web/json.ex` | Wire shapes for the shell and the MCP tools, and refusals |
 | `lib/hireme_web/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
 | `lib/hireme_web/sockets.ex` | Push feed, directory socket, letterbox socket |
-| `assets/wasm/desk.wat` | The column store |
+| `native/kernel/` | The desk kernel (WebAssembly): resident tables, predictions, board order, select |
+| `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
 | `assets/js/shell.ts` | Model, update, draw |
 | `assets/js/webauthn.ts` | The browser's half of a passkey ceremony, base64url in and out |
 | `assets/js/factor.ts` | The factor page's passkey button |

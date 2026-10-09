@@ -38,8 +38,6 @@
 !/assets/css/*.css
 !/assets/js/
 !/assets/js/*.ts
-!/assets/wasm/
-!/assets/wasm/*.wat
 !/assets/tsconfig.json
 
 !/priv/

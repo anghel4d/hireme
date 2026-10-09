@@ -3,7 +3,7 @@
 //   node native/kernel/test.mjs [path/to/kernel.wasm] [seed]
 //
 // An independent model in this file (frames encoded from schema.txt, the
-// board order of Hireme.Desk.Card.order/1, the old desk.wat filters and
+// board order of Hireme.Desk.Card.order/1, the board filters and
 // search, the refusal rules) is driven through seeded random sequences of
 // boots, patches, deletes, ops, ACKs and NACKs; after every step the
 // kernel's view and selection must equal the model's. The golden frames
