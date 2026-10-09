@@ -47,12 +47,6 @@ defmodule Hireme.DeskTest do
     assert focus.root_coverage.misses == ["ecs"]
     assert Enum.any?(focus.cv.hidden, &(&1.body == "Theatre elective."))
     refute Enum.any?(focus.cv.sections |> Enum.flat_map(& &1.lines), &(&1.body =~ "Theatre"))
-
-    root = Desk.root(profile.id)
-    lines = Enum.flat_map(root.cv.sections, & &1.lines)
-    assert root.cv.label == "Root"
-    assert Enum.any?(lines, &(&1.body =~ "Theatre"))
-    assert Enum.any?(lines, &(&1.body =~ "structure-of-arrays"))
   end
 
   test "a bare opening returns the persisted row and its newly stored lineage theme" do

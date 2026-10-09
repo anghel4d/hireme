@@ -2,9 +2,10 @@ defmodule Hireme.ImportTest do
   use Hireme.DataCase, async: false
   import Hireme.Fixtures
 
-  alias Hireme.Campaign
+  alias Hireme.Desk.Batch
   alias Hireme.Desk.Employer
   alias Hireme.Desk.Job
+  alias Hireme.Desk.Snapshot
   alias Hireme.Import
   alias Hireme.Repo
 
@@ -72,7 +73,7 @@ defmodule Hireme.ImportTest do
     refute Repo.get_by(Employer, name: "Rejected second")
   end
 
-  test "the scoreboard snapshot is a reading, and a day pack stays on HOLD" do
+  test "a snapshot and a day pack import as rows, and the pack stays on HOLD" do
     profile = profile()
 
     snapshot =
@@ -92,40 +93,12 @@ defmodule Hireme.ImportTest do
     held = Repo.get_by!(Job, canonical_url: "https://jobs.example.test/redcedar/2")
     assert held.current_stage == :fire_ready
 
-    board = Campaign.scoreboard(~D[2026-10-06])
-    assert board.leftover_unique == 2337
-    assert board.fire == :hold
-    assert board.batches_today == 1
-    assert board.apps_today == 2
-    assert board.submitted_today == 0
-    assert board.apps_target == 440
-  end
+    snapshot = Repo.one!(Snapshot)
+    assert {snapshot.noted_on, snapshot.leftover_unique} == {~D[2026-10-06], 2337}
+    assert {snapshot.daily_batches, snapshot.daily_apps} == {8, 440}
 
-  test "scoreboard submission counts retain exact dates and empty queued batches" do
-    today = ~D[2026-10-07]
-    empty = Campaign.scoreboard(today)
-    assert {empty.apps_today, empty.submitted_today, empty.cumulative} == {0, 0, 0}
-
-    profile = profile()
-
-    for {company, stage, date} <- [
-          {"Sent today", :submitted, today},
-          {"Reply tomorrow", :reply, Date.add(today, 1)},
-          {"Sent undated", :submitted, nil},
-          {"Closed today", :closed, today}
-        ] do
-      job(profile, %{company: company})
-      |> Ecto.Changeset.change(current_stage: stage, stage_on: date)
-      |> Repo.update!()
-    end
-
-    board = Campaign.scoreboard(today)
-    assert {board.apps_today, board.submitted_today, board.cumulative} == {0, 1, 3}
-    assert board.chart == Hireme.Desk.score_chart()
-
-    Hireme.DataCase.open_account("Other campaign")
-    other = Campaign.scoreboard(today)
-    assert {other.apps_today, other.submitted_today, other.cumulative} == {0, 0, 0}
-    assert other.chart.n == 0
+    batch = Repo.get_by!(Batch, code: "Batch-001")
+    assert {batch.status, batch.fire, batch.queued_on} == {:fire_ready, :hold, ~D[2026-10-06]}
+    assert Enum.count(Repo.all(Job), &(&1.batch_id == batch.id)) == 2
   end
 end

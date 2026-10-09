@@ -257,7 +257,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/net.ex` | Broadside Observer runs, posts, artifacts, drafts. Not CRM |
 | `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` (the domain the sequencer and agents call) |
 | `lib/hireme/ops.ex` | One sequencer per account: op ledger, every write, raw-row deltas, the resume ring, the heat snapshot |
-| `lib/hireme/campaign.ex` | Scoreboard and batch variety |
+| `lib/hireme/campaign.ex` | Batch variety summaries, stored on import |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
