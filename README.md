@@ -6,7 +6,7 @@ A local desk for a large set of job applications. Each application is a card. Fo
 
 SQLite holds the corpus, a per-application mask over that corpus, batches, a scoreboard snapshot, and a private narrative. The narrative is one text blob per user, with a version and `updated_at`. It is not the root CV and it is not a mask. Application export omits it while it is private, which is the default.
 
-The BEAM owns the data and the rules. The browser owns the board: the desk arrives as one columnar packet, lives in a hand-written WebAssembly column store, and every keystroke on the grid is a selection over resident columns. Nothing round-trips to draw a card.
+The BEAM owns the data and the rules. The browser owns every view: it holds the account's raw rows in a Rust WebAssembly kernel, derives the cards, heat, scoreboard, focus and lanes from them itself, and predicts each write before the server answers. Nothing round-trips to draw anything; the server sends rows and settles writes.
 
 ## Run
 
@@ -206,15 +206,15 @@ Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadsid
 
 ## Board
 
-`GET /api/pack` is the whole desk as one `HDP1` packet: `"HDP1"`, a u32 header length, a JSON directory, then the body. The directory names every column with its kind (`u32` or `str`) and byte offset, and carries the lookup tables the integer columns index into: stages, statuses, freshness, gates, bands, batches, profiles. Rows are already in board order (`score_100` first, then batch, rung, heat, company). A `str` column is `n + 1` offsets followed by UTF-8 bytes; one of them is a lowercase search haystack per card.
+The desk travels as columnar frames over one session per tab (`priv/wire/schema.txt` is the one definition: Elixir encodes, `native/wire` decodes, the hash rides in every frame header). The browser connects to the WebTransport gate (`native/gate`, its own address, UDP 443) with a single-use ticket from the page, or to the `/wire` WebSocket where UDP is blocked; the early script in `<head>` sends HELLO before the bundle loads. HELLO carries the revision of the browser's saved copy: the session answers with every raw table of the account (BOOT, deflated), or only the revisions since that copy (PATCH frames from the sequencer's ring), then a fresh ticket for the next reconnect.
 
-`native/kernel` (Rust, built to `priv/static/wasm/kernel.wasm`) is the resident desk: every table a wire frame carries, upserted or replaced as BOOT, PATCH, LINES and FOCUS frames arrive, strings in one compacting arena, read by TypeScript straight out of WebAssembly memory. The view is base ⊕ pending: each op the client sends is predicted locally (stage, next action, score, open fire, overlay mask counts, narrative) along with the refusals the client can see (lease, fire hold, heat), settled exactly by the ACK that follows its PATCH and dropped by a NACK, with misprediction counters in memory. The kernel sorts the board by `Card.order/1` itself, derives the lowercase search text, and runs `select` and `find` with the board's filters. A snapshot export is the same frames, so restoring from IndexedDB is an ingest. `native/wire` is the `no_std` frame codec the kernel, the gate and `hireme-mcp` share; both it and the Elixir encoder read `priv/wire/schema.txt`. `node native/kernel/test.mjs` checks the kernel against an independent model over seeded random op sequences.
+`native/kernel` (Rust, built reproducibly to `priv/static/wasm/kernel.wasm`) holds those raw tables and derives the rest: the cards with their heat load, cooldown and verdicts, the board order and search, the heat chart, the scoreboard and its chart, keyword coverage and batch mixes, re-deriving only the jobs a change reaches and their heat kin. A write is an OP: the kernel predicts its rows and its refusals (lease, fire hold, heat) in the same tick, keeps it as pending over the base rows, and settles it when the PATCH and ACK arrive, or drops it on a NACK, so a refusal rolls back by itself. `assets/js/compose.ts` builds the focus, root CV, lanes and account documents from the rows (Mask, Theme, Cv.compose, the rail); `store.ts` keeps them until a row they read changes, saves the tables to IndexedDB when the page is idle, and restores the kernel from that copy if it ever traps. `shell.ts`, `views.ts`, `board.ts` and `html.ts` draw from the desk synchronously in the input's frame, morphing only what changed.
 
-`assets/js/` is the shell: `store.ts` reads the packet directory, copies the body into kernel memory, and views columns as typed arrays with strings decoded on demand; `board.ts` is the filter ADT parsed from and written to the address and the row-major `hjkl` rule with the painted window; `html.ts` is an escaping template tag and a `morph` that changes only what differs and skips a slot whose HTML has not changed; `views.ts` are pure functions from model to HTML, lanes included; `api.ts` is every read and write over HTTP plus the signal feed; `shell.ts` is the model, the update, and the draw. Focus, battleplan, and root come from `/api/focus/:id` and `/api/root/:id`; writes are `POST /api/...` and answer with the new focus or a status code that says why not (`409 fire_hold`, `423 leased`). `/feed/websocket` pushes every desk signal so an open board refreshes when an agent writes. Each change re-reads only what it can alter (cards, scoreboard, lanes), one read of each kind is in flight at a time, and the signals for a job with a write in flight fold into that write's single refresh.
+The server stays the authority. `Hireme.Ops` runs every write for an account in one sequencer (op ledger, validation, commit, a delta of the columns that changed) and keeps the ring that serves resumes; Elixir keeps its own copy of the view logic for refusals and for agents. `test/support/oracle.ex` dumps every view Elixir derives, and `native/kernel/parity.mjs` and `bench/compose.ts` require the browser's ports to equal it exactly.
 
 ## Types
 
-Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Job.parse_status/1`, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
+Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
 
 Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Variety`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
 
@@ -247,7 +247,7 @@ The websockets remain for agents that cannot reach the gate: `/mcp/websocket` is
 
 ## Layout
 
-Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `letterbox/` (`letterbox.ex`; the consumer process behind it), and `lib/hireme_web/` (`endpoint.ex`; router, packet, JSON, MCP, and sockets behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
+Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `letterbox/` (`letterbox.ex`; the consumer process behind it), `mfa/` (`mfa.ex`; WebAuthn behind it), and `lib/hireme_web/` (`endpoint.ex`; router, session, packet, gate bridge, JSON, MCP, and sockets behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
 
 | Path | Role |
 | --- | --- |
@@ -265,25 +265,35 @@ Three directories have internals behind one door: `heat/` (`heat.ex`; the ATS an
 | `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
 | `lib/hireme/gym.ex` | Conditioning grind: problems, reps, streak, daily target |
 | `lib/hireme/net.ex` | Broadside Observer runs, posts, artifacts, drafts. Not CRM |
-| `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` |
+| `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` (the domain the sequencer and agents call) |
+| `lib/hireme/ops.ex` | One sequencer per account: op ledger, every write, raw-row deltas, the resume ring, the heat snapshot |
 | `lib/hireme/campaign.ex` | Scoreboard and batch variety |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
 | `lib/hireme/letterbox/letterbox.ex` | SPSC lease, one application per handle |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
-| `lib/hireme_web/router.ex` | Routes and the one controller: packet, focus, root, scoreboard, lanes, writes |
+| `lib/hireme_web/router.ex` | Routes; the desk page (ticket, gate, scope and schema metas) and the reconnect ticket |
+| `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, letterbox streams; the `/wire` WebSocket carrier |
+| `lib/hireme_web/gate.ex` | The BEAM end of the gate's Unix socket; hosts the Session in the connection process |
 | `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, sign-out |
 | `lib/hireme_web/sign_in.ex` | The sign-in pages: mailed links, GitHub and X over OAuth 2.0 with PKCE, adding a way in |
-| `lib/hireme_web/account.ex` | The Account page's JSON: keys, sessions, and ways in |
-| `lib/hireme_web/mfa.ex` | The factor page and the second-factor half of the Account page |
-| `lib/hireme_web/packet.ex` | The desk as one HDP1 columnar packet |
-| `lib/hireme_web/json.ex` | Wire shapes for the shell and the MCP tools, and refusals |
+| `lib/hireme_web/account.ex` | The Account page over the session: its tables and commands, step-up and enrolment ceremonies |
+| `lib/hireme_web/mfa.ex` | The sign-in factor page |
+| `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
+| `lib/hireme_web/json.ex` | JSON shapes for the MCP tools and the oracle, and refusals |
 | `lib/hireme_web/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
-| `lib/hireme_web/sockets.ex` | Push feed, directory socket, letterbox socket |
-| `native/kernel/` | The desk kernel (WebAssembly): resident tables, predictions, board order, select |
+| `lib/hireme_web/sockets.ex` | Agent sockets (directory, letterbox) and the letterbox stream behind a session |
+| `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
+| `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
+| `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, a stream per lease |
+| `priv/wire/schema.txt` | The wire: frames, tables, columns, ops, refusals; its hash is in every frame |
 | `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
 | `assets/js/shell.ts` | Model, update, draw |
+| `assets/js/store.ts` | The desk: kernel facade, documents, op queue, IndexedDB snapshot, trap recovery |
+| `assets/js/compose.ts` | Focus, root, lanes and account documents composed from raw rows |
+| `assets/js/wire.ts` | WebTransport and WebSocket carriers, framing, HELLO/OP/PING |
+| `assets/js/early.ts` | The inline `<head>` script that connects and sends HELLO before the bundle |
 | `assets/js/webauthn.ts` | The browser's half of a passkey ceremony, base64url in and out |
 | `assets/js/factor.ts` | The factor page's passkey button |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
