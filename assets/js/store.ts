@@ -195,25 +195,29 @@ export class Kernel {
   private readonly kept = new Map<number, { spec: Spec; byId: Map<number, unknown> | null; list: unknown[] | null }>()
   private readonly keyed = new Map<number, Map<number, unknown>>()
   private count = 0
-  private live: WireKernel
   private trapped = false
-  private readonly calls = new Map<PropertyKey, unknown>()
   /** The exports, guarded: a trap marks the instance dead, and a dead one answers as an empty desk. */
-  readonly k: WireKernel
+  k: WireKernel
 
   constructor(source: WireKernel, private readonly onTrap: (cause: unknown) => void) {
-    this.live = source
-    this.k = new Proxy({} as WireKernel, { get: (_, name) => (name === "memory" ? this.live.memory : this.guarded(name)) })
+    this.k = this.guard(source)
   }
 
-  private guarded(name: PropertyKey): unknown {
-    let f = this.calls.get(name)
-    if (!f) {
+  /**
+   * A plain object of the instance's exports, each wrapped once in a try:
+   * no proxy and no lookup on the hot path, where the string and column
+   * reads call into the kernel per cell.
+   */
+  private guard(live: WireKernel): WireKernel {
+    const out: Record<string, unknown> = { memory: live.memory }
+    for (const [name, value] of Object.entries(live as unknown as Record<string, unknown>)) {
+      if (typeof value !== "function") continue
+      const fn = value as (a?: number, b?: number, c?: number, d?: number, e?: number, f?: number, g?: number, h?: number, i?: number, j?: number) => number
       const empty = name === "row_of" || name === "find" || name === "table_id" || name === "col_id" ? -1 : 0
-      f = (...args: number[]) => {
+      out[name] = (a?: number, b?: number, c?: number, d?: number, e?: number, f?: number, g?: number, h?: number, i?: number, j?: number) => {
         if (this.trapped) return empty
         try {
-          return (this.live[name as keyof WireKernel] as (...a: number[]) => number)(...args)
+          return fn(a, b, c, d, e, f, g, h, i, j)
         } catch (cause) {
           if (!(cause instanceof WebAssembly.RuntimeError)) throw cause
           this.trapped = true
@@ -221,14 +225,13 @@ export class Kernel {
           return empty
         }
       }
-      this.calls.set(name, f)
     }
-    return f
+    return out as unknown as WireKernel
   }
 
   /** A fresh instance in place of a trapped one: nothing decoded from the old one is kept. */
   swap(fresh: WireKernel): void {
-    this.live = fresh
+    this.k = this.guard(fresh)
     this.trapped = false
     this.ids.clear()
     this.kept.clear()
