@@ -1,13 +1,19 @@
 // The shell: one model, pure views, a draw that morphs. The address is
-// the board's identity; the resident columns are what it is drawn from.
+// the board's identity; the desk's resident state is what it is drawn
+// from. Nothing on the board waits on the network: a selection draws its
+// focus in the frame of the input, a write is applied by the desk and
+// drawn in that same frame, and the server's answer only settles it or,
+// on a refusal, rolls it back with a notice. Only the account screens
+// (keys, sessions, ways in, second factors) still talk HTTP, because each
+// of those writes must be confirmed before it is shown.
 
 import * as api from "./api.ts"
-import { csrf, openFeed, type Focus, type Lanes, type Root, type Scoreboard, type Settings, type Signal } from "./api.ts"
+import { csrf, type Focus, type Settings } from "./api.ts"
 import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, morph, raw, type Raw } from "./html.ts"
 import * as webauthn from "./webauthn.ts"
-import { Store } from "./store.ts"
+import type { Change, Desk, Op, Refusal, Tables } from "./store.ts"
 import * as views from "./views.ts"
 
 type Lens = "board" | "battleplan" | "root" | "gym" | "net" | "settings"
@@ -18,10 +24,6 @@ interface Model {
   appId: number | null
   index: number
   count: number
-  focus: Focus | null
-  root: Root | null
-  scoreboard: Scoreboard | null
-  lanes: Lanes | null
   laneError: string | null
   settings: Settings | null
   reveal: views.Reveal | null
@@ -32,7 +34,9 @@ interface Model {
   stepUp: views.StepUp | null
   editing: number | null
   alterError: string | null
-  holdError: string | null
+  /** Why the selected application's last write was refused, predicted or by the server. */
+  refusal: string | null
+  notices: views.Notice[]
   sheet: boolean
   grid: { cols: number; scroll: number; viewport: number; rem: number }
 }
@@ -44,43 +48,44 @@ type Msg =
   | { t: "lens"; lens: Lens }
   | { t: "escape" }
   | { t: "edit"; item: number | null; error?: string | null }
-  | { t: "hold"; error: string | null }
   | { t: "grid"; cols?: number; scroll?: number; viewport?: number; rem?: number }
-  | { t: "focus"; focus: Focus | null }
-  | { t: "root"; root: Root | null }
-  | { t: "scoreboard"; scoreboard: Scoreboard }
-  | { t: "lanes"; lanes: Lanes; error?: string | null }
-  | { t: "lane-error"; error: string }
+  | { t: "desk"; change: Change }
+  | { t: "ran"; op: Op; refusal: Refusal | null }
+  | { t: "dismiss"; id: number }
   | { t: "settings"; settings: Settings | null; reveal?: views.Reveal | null; error?: string | null; notice?: string | null }
   | { t: "rename"; id: number | null }
   | { t: "enrolling"; enrolling: views.Enrolling }
   | { t: "step-up"; prompt: views.StepUp | null }
   | { t: "sheet"; open: boolean }
 
+/** How long a rollback notice stays up unless dismissed. */
+const NOTICE_MS = 8000
+
+/** Keystrokes in a free-text field coalesce into one write after this pause. */
+const TYPING_MS = 300
+
 export class Shell {
   private model: Model
-  private store: Store
+  private readonly desk: Desk
   private root: HTMLElement
   private readonly compactQuery = matchMedia("(max-width: 980px)")
   private drawQueued = false
-  private focusToken = 0
+  private tables: Tables
+  // The ids last hinted to the desk, joined; a hint goes out only when they change.
+  private hinted = ""
+  private noticeSeq = 0
 
-  constructor(root: HTMLElement, store: Store, loadStore: () => Promise<Store>) {
+  constructor(root: HTMLElement, desk: Desk) {
     this.root = root
-    this.store = store
-    this.reloadStore = loadStore
+    this.desk = desk
+    this.tables = desk.tables
     const params = new URLSearchParams(location.search)
-    const filters = fromParams(params, store.tables)
     this.model = {
-      filters,
+      filters: fromParams(params, desk.tables),
       lens: lensOf(params.get("lens")),
       appId: parseId(params.get("app")),
       index: -1,
       count: 0,
-      focus: null,
-      root: null,
-      scoreboard: null,
-      lanes: null,
       laneError: null,
       settings: null,
       reveal: null,
@@ -91,12 +96,14 @@ export class Shell {
       stepUp: null,
       editing: null,
       alterError: null,
-      holdError: null,
+      refusal: null,
+      notices: [],
       sheet: false,
       grid: { cols: 3, scroll: 0, viewport: 640, rem: remPx() },
     }
     this.root.innerHTML = `
       <div id="topbar"></div>
+      <div id="notice-slot"></div>
       <div id="scoreboard-slot"></div>
       <div id="heat-slot"></div>
       <div id="lens"></div>
@@ -107,16 +114,10 @@ export class Shell {
     this.bind()
     this.select()
     if (this.model.appId === null) this.model.appId = this.idAt(0)
-    void this.loadFocus()
-    void this.loadRoot()
-    void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
-    void this.loadLanes()
     if (this.model.lens === "settings") void this.loadSettings(LINK_ERRORS.get(params.get("link_error") ?? "") ?? null)
-    openFeed((s) => this.onSignal(s))
+    desk.subscribe((change) => this.dispatch({ t: "desk", change }))
     this.draw()
   }
-
-  private readonly reloadStore: () => Promise<Store>
 
   // ---- update ----
 
@@ -133,9 +134,8 @@ export class Shell {
           m.appId = msg.id
           m.editing = null
           m.alterError = null
-          m.holdError = null
-          m.index = this.store.find(msg.id)
-          void this.loadFocus()
+          m.refusal = null
+          m.index = this.desk.find(msg.id)
         }
         m.sheet = true
         this.reveal()
@@ -150,7 +150,6 @@ export class Shell {
       case "lens":
         if (msg.lens === "battleplan" && m.appId === null) break
         m.lens = msg.lens
-        if (msg.lens === "root") void this.loadRoot()
         if (msg.lens === "settings") void this.loadSettings()
         break
       case "escape":
@@ -162,9 +161,6 @@ export class Shell {
         m.editing = msg.item
         m.alterError = msg.error ?? null
         break
-      case "hold":
-        m.holdError = msg.error
-        break
       case "grid": {
         const g = { ...m.grid, ...strip(msg) }
         const colsChanged = g.cols !== m.grid.cols
@@ -172,22 +168,19 @@ export class Shell {
         if (colsChanged) this.reveal()
         break
       }
-      case "focus":
-        m.focus = msg.focus
-        if (msg.focus === null && m.lens === "battleplan") m.lens = "board"
+      case "desk":
+        this.onDesk(msg.change)
         break
-      case "root":
-        m.root = msg.root
+      case "ran": {
+        // A refusal predicted here was never applied; an accepted write is
+        // already in the desk's view and needs nothing from the shell.
+        const text = msg.refusal === null ? null : refusalText(msg.refusal)
+        if (isLaneOp(msg.op)) m.laneError = text
+        else m.refusal = text
         break
-      case "scoreboard":
-        m.scoreboard = msg.scoreboard
-        break
-      case "lanes":
-        m.lanes = msg.lanes
-        m.laneError = msg.error ?? null
-        break
-      case "lane-error":
-        m.laneError = msg.error
+      }
+      case "dismiss":
+        m.notices = m.notices.filter((n) => n.id !== msg.id)
         break
       case "settings":
         m.settings = msg.settings
@@ -215,17 +208,71 @@ export class Shell {
     this.queueDraw()
   }
 
+  // The desk changed under the board: its rows (a PATCH, a BOOT, or a
+  // write applied or rolled back), a focus, the lanes, the link, or the
+  // server refused a write already drawn.
+  private onDesk(c: Change): void {
+    const m = this.model
+    if (this.desk.tables !== this.tables) {
+      // New tables (the first BOOT, a new batch) can name values the
+      // address asked for that the old tables did not know.
+      this.tables = this.desk.tables
+      m.filters = fromParams(new URLSearchParams(location.search), this.tables)
+      this.select()
+    } else if (c.rows) {
+      this.select()
+    }
+    if (m.appId === null && m.count > 0) m.appId = this.idAt(0)
+    const r = c.refused
+    if (r) {
+      const text = refusalText(r.refusal)
+      const id = ++this.noticeSeq
+      m.notices = [...m.notices.slice(-2), { id, text: `Rolled back ${this.describe(r.op)}. ${text}` }]
+      window.setTimeout(() => this.dispatch({ t: "dismiss", id }), NOTICE_MS)
+      if (isLaneOp(r.op)) m.laneError = text
+      else if (r.jobId !== null && r.jobId === m.appId) m.refusal = text
+    }
+  }
+
+  /** Apply a write: the desk predicts it locally or refuses it at once. */
+  private run(op: Op): boolean {
+    const r = this.desk.run(op)
+    this.dispatch({ t: "ran", op, refusal: r.ok ? null : r.refusal })
+    return r.ok
+  }
+
+  private describe(op: Op): string {
+    const company = (job: number) => {
+      const row = this.desk.rowOf(job)
+      return row < 0 ? `JobApp${job}` : this.desk.str("company").at(row)
+    }
+    switch (op.kind) {
+      case "stage": return `the stage change on ${company(op.job)}`
+      case "next": return `the next action on ${company(op.job)}`
+      case "note": return `the note on ${company(op.job)}`
+      case "overlay": return `the CV line change on ${company(op.job)}`
+      case "heat_override": return `the HEAT override on ${company(op.job)}`
+      case "score": return `the score on ${company(op.job)}`
+      case "open_fire": return `open fire on ${op.batch}`
+      case "narrative": return "the narrative"
+      case "gym_log": return "the gym rep"
+      case "gym_target": return "the gym target"
+      case "net_log": return "the net entry"
+      case "net_lane": return "the observer lane"
+      default: return "a change"
+    }
+  }
+
   private select(): void {
     const m = this.model
-    m.count = this.store.select(lower(m.filters, this.store.tables))
-    m.index = m.appId === null ? -1 : this.store.find(m.appId)
+    m.count = this.desk.select(lower(m.filters, this.desk.tables))
+    m.index = m.appId === null ? -1 : this.desk.find(m.appId)
   }
 
   private idAt(pos: number): number | null {
-    const sel = this.store.selection()
-    const row = sel[pos]
+    const row = this.desk.selection()[pos]
     if (row === undefined) return null
-    return this.store.column("id")[row] ?? null
+    return this.desk.column("id")[row] ?? null
   }
 
   private reveal(): void {
@@ -240,85 +287,7 @@ export class Shell {
     }
   }
 
-  // ---- effects ----
-
-  private async loadFocus(): Promise<void> {
-    const id = this.model.appId
-    const token = ++this.focusToken
-    if (id === null) {
-      this.dispatch({ t: "focus", focus: null })
-      return
-    }
-    try {
-      const focus = await api.fetchFocus(id)
-      if (token === this.focusToken) this.dispatch({ t: "focus", focus })
-    } catch {
-      if (token === this.focusToken) this.dispatch({ t: "focus", focus: null })
-    }
-  }
-
-  private async loadRoot(): Promise<void> {
-    const m = this.model
-    const slug = m.filters.profile.kind === "one" ? m.filters.profile.value : null
-    const profile =
-      this.store.tables.profiles.find((p) => p.slug === slug) ??
-      (m.focus ? this.store.tables.profiles.find((p) => p.id === m.focus?.profile.id) : undefined) ??
-      this.store.tables.profiles[0]
-    if (!profile) return
-    try {
-      this.dispatch({ t: "root", root: await api.fetchRoot(profile.id) })
-    } catch {
-      this.dispatch({ t: "root", root: null })
-    }
-  }
-
-  // The scoreboard and lanes do not wait on the packet.
-  private async refreshBoard(reads: Reads): Promise<void> {
-    if (reads.scoreboard) void this.once("scoreboard", async () => this.dispatch({ t: "scoreboard", scoreboard: await api.fetchScoreboard() }))
-    if (reads.lanes) void this.once("lanes", () => this.loadLanes())
-    if (reads.pack) {
-      await this.once("pack", async () => {
-        this.store = await this.reloadStore()
-        this.select()
-        this.queueDraw()
-      })
-    }
-  }
-
-  // One read of each kind in flight. Asking for it meanwhile runs it once
-  // more after it lands, so the last change is always read and a burst of
-  // changes costs at most two reads.
-  private readonly flights = new Map<string, { again: boolean }>()
-
-  private async once(kind: string, read: () => Promise<void>): Promise<void> {
-    const pending = this.flights.get(kind)
-    if (pending) {
-      pending.again = true
-      return
-    }
-    const flight = { again: false }
-    this.flights.set(kind, flight)
-    try {
-      do {
-        flight.again = false
-        try {
-          await read()
-        } catch (cause) {
-          if (!flight.again) throw cause
-        }
-      } while (flight.again)
-    } finally {
-      this.flights.delete(kind)
-    }
-  }
-
-  private async loadLanes(): Promise<void> {
-    try {
-      this.dispatch({ t: "lanes", lanes: await api.fetchLanes() })
-    } catch {
-      // the lanes are optional chrome; the board stands without them
-    }
-  }
+  // ---- the account: confirmed HTTP writes ----
 
   private async loadSettings(error: string | null = null): Promise<void> {
     try {
@@ -380,82 +349,6 @@ export class Shell {
     return r.value
   }
 
-  private async laneWrite(outcome: Promise<api.Outcome<Lanes & { ok: true }>>): Promise<void> {
-    const r = await outcome
-    if (r.ok) this.dispatch({ t: "lanes", lanes: r.value })
-    else this.dispatch({ t: "lane-error", error: r.error })
-  }
-
-  // Writes in flight from this tab, by job, with the signals that arrived for
-  // that job meanwhile. A write answers with the focus as committed and then
-  // refreshes the board; the signals held meanwhile fold into that one
-  // refresh. A held signal may be another tab's, newer than the answer, so
-  // it still reloads the focus as it would have.
-  private readonly writing = new Map<number, { n: number; reads: Reads; held: Signal[] }>()
-
-  private onSignal(s: Signal): void {
-    const w = s.job_id === undefined ? undefined : this.writing.get(s.job_id)
-    if (w) {
-      w.held.push(s)
-      return
-    }
-    void this.refreshBoard(READS[s.type])
-    // A batch's signal names no job; the focus shows its batch's fire.
-    const shown = s.job_id !== undefined ? s.job_id === this.model.appId : s.batch !== undefined && s.batch === this.model.focus?.job.batch?.code
-    if (shown) void this.loadFocus()
-    if (s.type === "cv") this.rootChanged()
-  }
-
-  // The root CV holds no batch state, and its lens reads it again on opening.
-  private rootChanged(): void {
-    if (this.model.lens === "root") void this.loadRoot()
-  }
-
-  private answered(id: number, reads: Reads): void {
-    const w = this.writing.get(id)
-    if (!w) return
-    w.reads = union(w.reads, reads)
-    if (--w.n > 0) return
-    this.writing.delete(id)
-    void this.refreshBoard(w.held.reduce((all, s) => union(all, READS[s.type]), w.reads))
-    if (w.held.length > 0 && id === this.model.appId) void this.loadFocus()
-    if (w.held.some((s) => s.type === "cv")) this.rootChanged()
-  }
-
-  private async write(id: number, change: Change, outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
-    const w = this.writing.get(id) ?? { n: 0, reads: NONE, held: [] }
-    w.n++
-    this.writing.set(id, w)
-    let r: api.Outcome<{ ok: true; focus: Focus }>
-    try {
-      r = await outcome
-    } catch (cause) {
-      this.answered(id, NONE)
-      throw cause
-    }
-    if (r.ok) {
-      this.dispatch({ t: "hold", error: null })
-      // The answer is the focus as committed: it supersedes reads of that
-      // focus still in flight, and is not drawn over a card selected since.
-      if (r.value.focus.job.id === this.model.appId) {
-        this.focusToken++
-        this.dispatch({ t: "focus", focus: r.value.focus })
-      }
-      this.answered(id, READS[change])
-      return true
-    }
-    this.answered(id, NONE)
-    const message =
-      r.error === "fire_hold" ? "FIRE HOLD. Name open fire on this batch before a submit."
-      : r.error === "heat" ? "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
-      : r.error === "leased" ? "This application is leased to an agent."
-      : r.error === "cooldown" ? "This CV is in its quarterly cooldown."
-      : r.error === "not_additive" ? "This generation accepts new lines only."
-      : r.error
-    this.dispatch({ t: "hold", error: message })
-    return false
-  }
-
   // ---- draw ----
 
   private queueDraw(): void {
@@ -469,65 +362,107 @@ export class Shell {
 
   private draw(): void {
     const m = this.model
-    const t = this.store.tables
-    this.set("#topbar", views.topbar(m.filters, t, m.count))
-    this.set("#scoreboard-slot", views.scoreboard(m.scoreboard, views.lanePills(m.lanes)))
-    this.set("#heat-slot", views.heatChart(m.lanes, m.filters))
+    const d = this.desk
+    const t = d.tables
+    const lanes = d.lanes()
+    const focus = m.appId === null ? null : d.focus(m.appId)
+    const mark = m.appId === null ? null : d.mark(m.appId)
+    this.set("#topbar", views.topbar(m.filters, t, m.count, d.status))
+    this.set("#notice-slot", views.notices(m.notices))
+    this.set("#scoreboard-slot", views.scoreboard(d.scoreboard(), views.lanePills(lanes)))
+    this.set("#heat-slot", views.heatChart(lanes, m.filters))
 
     const lens = this.root.querySelector<HTMLElement>("#lens")
     const workspace = this.root.querySelector<HTMLElement>("#workspace")
     if (!lens || !workspace) return
 
-    if (m.lens === "battleplan" && m.focus) {
-      morph(lens, h`<div class="battleplan-wrap">${views.battleplan(m.focus, m.editing, m.alterError, m.holdError)}</div>`)
-      workspace.hidden = true
-    } else if (m.lens === "root" && m.root) {
-      morph(lens, h`<div class="root-wrap">${views.rootView(m.root)}</div>`)
-      workspace.hidden = true
-    } else if (m.lens === "gym" && m.lanes) {
-      morph(lens, h`<div class="lane-wrap">${views.gymView(m.lanes, m.laneError)}</div>`)
-      workspace.hidden = true
-    } else if (m.lens === "net" && m.lanes) {
-      morph(lens, h`<div class="lane-wrap">${views.netView(m.lanes, m.laneError)}</div>`)
-      workspace.hidden = true
-    } else if (m.lens === "settings") {
-      morph(lens, h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`)
-      workspace.hidden = true
-    } else {
+    if (m.lens === "board") {
       morph(lens, raw(""))
       workspace.hidden = false
-      this.drawBoard()
+      this.drawBoard(focus, mark)
+    } else {
+      morph(lens, this.lensView(focus, mark, lanes))
+      workspace.hidden = true
     }
     // Assigning the title rewrites the <title> node even when it is the same.
-    const title = titleOf(m)
+    const title = titleOf(m, focus)
     if (document.title !== title) document.title = title
   }
 
-  private drawBoard(): void {
+  private lensView(focus: Focus | null, mark: views.Mark, lanes: api.Lanes | null): Raw {
     const m = this.model
+    switch (m.lens) {
+      case "battleplan":
+        return focus
+          ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.editing, m.alterError, m.refusal, mark)}</div>`
+          : views.waiting("battleplan", "Streaming the battleplan…")
+      case "root": {
+        const root = this.rootProfile()
+        const r = root === null ? null : this.desk.root(root)
+        return r ? h`<div class="root-wrap">${views.rootView(r)}</div>` : views.waiting("root", "Streaming the root CV…")
+      }
+      case "gym":
+        return lanes ? h`<div class="lane-wrap">${views.gymView(lanes, m.laneError)}</div>` : views.waiting("gym", "Streaming the gym…")
+      case "net":
+        return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : views.waiting("net", "Streaming the net lane…")
+      case "settings":
+        return h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`
+      case "board":
+        return raw("")
+    }
+  }
+
+  // The root CV shown: the filtered profile's, else the selected application's, else the first.
+  private rootProfile(): number | null {
+    const m = this.model
+    const profiles = this.desk.tables.profiles
+    const slug = m.filters.profile.kind === "one" ? m.filters.profile.value : null
+    const bySlug = profiles.find((p) => p.slug === slug)
+    if (bySlug) return bySlug.id
+    const row = m.appId === null ? -1 : this.desk.rowOf(m.appId)
+    const ix = row < 0 ? undefined : this.desk.column("profile")[row]
+    return (ix === undefined ? undefined : profiles[ix])?.id ?? profiles[0]?.id ?? null
+  }
+
+  private drawBoard(focus: Focus | null, mark: views.Mark): void {
+    const m = this.model
+    const d = this.desk
     const metrics = grid.metrics(m.grid.rem)
     const [start, last] = grid.slice(m.count, m.grid.cols, m.grid.scroll, m.grid.viewport, metrics)
-    const sel = this.store.selection()
-    const ids = this.store.column("id")
+    const sel = d.selection()
+    const ids = d.column("id")
     const parts: Raw[] = []
+    // The selected card first: the server streams focuses in this order.
+    const shown: number[] = m.appId === null ? [] : [m.appId]
     const place = (pos: number) => {
       const row = sel[pos]
       if (row === undefined) return
+      const id = ids[row] ?? 0
       const [x, y] = grid.origin(pos, m.grid.cols, metrics)
-      parts.push(views.card(this.store, row, Math.round(x), Math.round(y), ids[row] === m.appId))
+      parts.push(views.card(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id)))
+      if (id !== m.appId) shown.push(id)
     }
     if (m.index >= 0 && (m.index < start || m.index > last)) place(m.index)
     if (start >= 0) for (let p = start; p <= last; p++) place(p)
+
+    const hint = shown.join(",")
+    if (hint !== this.hinted) {
+      this.hinted = hint
+      d.hint(shown)
+    }
 
     const plane = this.root.querySelector<HTMLElement>("#plane")
     if (plane) {
       plane.style.height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
       morph(plane, h`${parts}`)
     }
-    this.set("#empty", m.count === 0 ? views.emptyBoard() : raw(""))
+    this.set("#empty", m.count === 0 ? (d.status === "connecting" ? views.waiting("boot", "Connecting to the desk…") : views.emptyBoard()) : raw(""))
+    const row = m.appId === null ? -1 : d.rowOf(m.appId)
     this.set(
       "#focus-slot",
-      m.focus ? views.focusPanel(m.focus, m.index >= 0, m.sheet, m.holdError) : views.emptyFocus(),
+      focus ? views.focusPanel(focus, m.index >= 0, m.sheet, m.refusal, mark)
+      : row >= 0 ? views.focusSkeleton(d, row, m.sheet)
+      : views.emptyFocus(),
     )
   }
 
@@ -537,6 +472,9 @@ export class Shell {
   }
 
   private syncAddress(): void {
+    // Until the first BOOT names its tables the filters are defaults; the
+    // address keeps what was asked for until it can be read.
+    if (this.desk.tables.stages.length === 0) return
     const m = this.model
     const p = toParams(m.filters)
     if (m.lens !== "board") p.set("lens", m.lens)
@@ -559,7 +497,7 @@ export class Shell {
       if (el.hasAttribute("data-link")) {
         e.preventDefault()
         const u = new URL((el as HTMLAnchorElement).href)
-        this.dispatch({ t: "filters", filters: fromParams(u.searchParams, this.store.tables) })
+        this.dispatch({ t: "filters", filters: fromParams(u.searchParams, this.desk.tables) })
         this.dispatch({ t: "lens", lens: "board" })
         return
       }
@@ -574,19 +512,26 @@ export class Shell {
         const data = new FormData(form)
         const p = new URLSearchParams()
         for (const [k, v] of data.entries()) p.set(k, String(v))
-        this.dispatch({ t: "filters", filters: fromParams(p, this.store.tables) })
-      } else if (form.dataset["form"] === "next") {
-        this.debounce("next", 400, () => {
+        this.dispatch({ t: "filters", filters: fromParams(p, this.desk.tables) })
+        return
+      }
+      // Typed text is already on screen; the write coalesces keystrokes and
+      // goes to the application the text was typed into, even if another
+      // is selected before it fires. A picked date writes at once.
+      const job = this.model.appId
+      if (job === null) return
+      if (form.dataset["form"] === "next") {
+        const write = () => {
           const data = new FormData(form)
-          if (this.model.appId === null) return
-          void this.write(this.model.appId, "next", api.setNext(this.model.appId, String(data.get("next_action") ?? "").trim(), String(data.get("next_due") ?? "")))
-        })
+          this.run({ kind: "next", job, next_action: String(data.get("next_action") ?? "").trim(), next_due: String(data.get("next_due") ?? "") })
+        }
+        if (target instanceof HTMLInputElement && target.type === "date") this.flush(`next-${job}`, write)
+        else this.debounce(`next-${job}`, TYPING_MS, write)
       } else if (form.dataset["form"] === "note") {
-        this.debounce("note", 500, () => {
-          const data = new FormData(form)
-          const stage = form.dataset["stage"]
-          if (this.model.appId === null || !stage) return
-          void this.write(this.model.appId, "note", api.setNote(this.model.appId, stage, String(data.get("note") ?? "")))
+        const stage = form.dataset["stage"]
+        if (!stage) return
+        this.debounce(`note-${job}`, TYPING_MS, () => {
+          this.run({ kind: "note", job, stage, note: String(new FormData(form).get("note") ?? "") })
         })
       }
     })
@@ -621,7 +566,7 @@ export class Shell {
 
     window.addEventListener("popstate", () => {
       const p = new URLSearchParams(location.search)
-      this.dispatch({ t: "filters", filters: fromParams(p, this.store.tables) })
+      this.dispatch({ t: "filters", filters: fromParams(p, this.desk.tables) })
       const id = parseId(p.get("app"))
       if (id !== null) this.dispatch({ t: "select", id })
       this.dispatch({ t: "lens", lens: lensOf(p.get("lens")) })
@@ -632,7 +577,15 @@ export class Shell {
   private debounce(key: string, ms: number, fn: () => void): void {
     const prev = this.timers.get(key)
     if (prev) clearTimeout(prev)
-    this.timers.set(key, window.setTimeout(fn, ms))
+    this.timers.set(key, window.setTimeout(() => { this.timers.delete(key); fn() }, ms))
+  }
+
+  /** Run now, dropping the same write still waiting on its debounce. */
+  private flush(key: string, fn: () => void): void {
+    const prev = this.timers.get(key)
+    if (prev) clearTimeout(prev)
+    this.timers.delete(key)
+    fn()
   }
 
   private onKey(e: KeyboardEvent): void {
@@ -683,26 +636,23 @@ export class Shell {
       case "lens": this.dispatch({ t: "lens", lens: lensOf(el.dataset["lens"] ?? null) }); return
       case "stage": {
         const stage = el.dataset["stage"]
-        if (m.appId !== null && stage) await this.write(m.appId, "stage", api.setStage(m.appId, stage))
+        if (m.appId !== null && stage) this.run({ kind: "stage", job: m.appId, stage })
         return
       }
       case "open-fire": {
-        const code = el.dataset["batch"]
-        if (!code) return
-        const r = await api.nameOpenFire(code)
-        if (r.ok) {
-          this.dispatch({ t: "hold", error: null })
-          void this.loadFocus()
-          void this.refreshBoard(READS.open_fire)
-        }
+        const batch = el.dataset["batch"]
+        if (batch) this.run({ kind: "open_fire", batch })
         return
       }
       case "mask": {
         const item = parseId(el.dataset["item"] ?? null)
-        const mode = el.dataset["mode"]
-        if (m.appId !== null && item !== null && mode) {
-          if (await this.write(m.appId, "cv", api.putOverlay(m.appId, item, mode))) this.dispatch({ t: "edit", item: null })
-        }
+        const mode = maskMode(el.dataset["mode"])
+        if (m.appId !== null && item !== null && mode && this.run({ kind: "overlay", job: m.appId, item, mode })) this.dispatch({ t: "edit", item: null })
+        return
+      }
+      case "dismiss-notice": {
+        const id = parseId(el.dataset["id"] ?? null)
+        if (id !== null) this.dispatch({ t: "dismiss", id })
         return
       }
       case "edit": this.dispatch({ t: "edit", item: parseId(el.dataset["item"] ?? null) }); return
@@ -810,24 +760,20 @@ export class Shell {
           return
         }
         if (m.appId !== null && item !== null) {
-          const ok = await this.write(m.appId, "cv", api.putOverlay(m.appId, item, "altered", body, String(data.get("reason") ?? "")))
-          this.dispatch({ t: "edit", item: ok ? null : item, error: ok ? null : this.model.holdError })
+          const ok = this.run({ kind: "overlay", job: m.appId, item, mode: "altered", body, reason: String(data.get("reason") ?? "") })
+          this.dispatch({ t: "edit", item: ok ? null : item, error: ok ? null : this.model.refusal })
         }
         return
       }
       case "narrative": {
-        const id = parseId(form.dataset["narrative"] ?? null)
-        if (id === null) return
-        const r = await api.saveNarrative(id, String(data.get("body") ?? ""))
-        if (r.ok) {
-          void this.loadFocus()
-          void this.loadRoot()
-        }
+        const narrative = parseId(form.dataset["narrative"] ?? null)
+        if (narrative === null) return
+        const job = m.lens === "root" ? null : m.appId
+        this.run({ kind: "narrative", job, narrative, body: String(data.get("body") ?? "") })
         return
       }
       case "heat-override": {
-        if (m.appId === null) return
-        await this.write(m.appId, "heat", api.heatOverride(m.appId, String(data.get("reason") ?? "")))
+        if (m.appId !== null) this.run({ kind: "heat_override", job: m.appId, reason: String(data.get("reason") ?? "") })
         return
       }
       case "create-key": {
@@ -864,10 +810,10 @@ export class Shell {
         this.settleStepUp(r.ok, r.ok ? null : r.error)
         return
       }
-      case "gym-target": await this.laneWrite(api.gymTarget(String(data.get("target") ?? ""))); return
-      case "gym-log": await this.laneWrite(api.gymLog(fields(data))); form.reset(); return
-      case "net-lane": await this.laneWrite(api.netLane(String(data.get("url") ?? ""))); return
-      case "net-log": await this.laneWrite(api.netLog(fields(data))); form.reset(); return
+      case "gym-target": this.run({ kind: "gym_target", target: String(data.get("target") ?? "") }); return
+      case "gym-log": if (this.run({ kind: "gym_log", fields: fields(data) })) form.reset(); return
+      case "net-lane": this.run({ kind: "net_lane", url: String(data.get("url") ?? "") }); return
+      case "net-log": if (this.run({ kind: "net_log", fields: fields(data) })) form.reset(); return
       default:
         return
     }
@@ -883,24 +829,25 @@ function strip(msg: { t: "grid"; cols?: number; scroll?: number; viewport?: numb
   return out
 }
 
-// What each change can alter on the desk beyond its job's focus: the cards
-// (the packet), the scoreboard (stages, scores, batches), and the lanes
-// (company heat, gym, net). A note is read only on its battleplan.
-interface Reads { pack: boolean; scoreboard: boolean; lanes: boolean }
-const NONE: Reads = { pack: false, scoreboard: false, lanes: false }
-const READS = {
-  application_opened: { pack: true, scoreboard: true, lanes: true },
-  stage: { pack: true, scoreboard: true, lanes: true },
-  cv: { pack: true, scoreboard: false, lanes: false },
-  open_fire: { pack: true, scoreboard: true, lanes: false },
-  next: { pack: true, scoreboard: false, lanes: false },
-  heat: { pack: true, scoreboard: false, lanes: true },
-  note: NONE,
-} satisfies Record<string, Reads>
-type Change = keyof typeof READS
+/** What a refusal tells the person. The desk predicts most of these before anything is sent. */
+function refusalText(r: Refusal): string {
+  switch (r) {
+    case "fire_hold": return "FIRE HOLD. Name open fire on this batch before a submit."
+    case "heat": return "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
+    case "leased": return "This application is leased to an agent."
+    case "cooldown": return "This CV is in its quarterly cooldown."
+    case "not_additive": return "This generation accepts new lines only."
+    case "invalid": return "The server did not accept that value."
+    default: return r
+  }
+}
 
-function union(a: Reads, b: Reads): Reads {
-  return { pack: a.pack || b.pack, scoreboard: a.scoreboard || b.scoreboard, lanes: a.lanes || b.lanes }
+function isLaneOp(op: Op): boolean {
+  return op.kind === "gym_log" || op.kind === "gym_target" || op.kind === "net_log" || op.kind === "net_lane"
+}
+
+function maskMode(v: string | undefined): "hidden" | "emphasized" | "altered" | "inherit" | null {
+  return v === "hidden" || v === "emphasized" || v === "altered" || v === "inherit" ? v : null
 }
 
 // What the Account page says after a provider or a mailed link sends the browser back.
@@ -936,12 +883,12 @@ function remPx(): number {
   return Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
 }
 
-function titleOf(m: Model): string {
+function titleOf(m: Model, focus: Focus | null): string {
   if (m.lens === "root") return "Root CV · Hireme"
   if (m.lens === "gym") return "Gym · Hireme"
   if (m.lens === "net") return "Net · Hireme"
   if (m.lens === "settings") return "Account · Hireme"
-  if (m.focus) return `${m.focus.job.company} · ${m.focus.job.code} · Hireme`
+  if (focus) return `${focus.job.company} · ${focus.job.code} · Hireme`
   return "Desk · Hireme"
 }
 

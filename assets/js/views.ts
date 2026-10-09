@@ -3,7 +3,17 @@
 import type { Doc, Focus, HeatRow, Identity, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { type Filters, value } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
-import type { Store, Tables } from "./store.ts"
+import type { Status, Tables } from "./store.ts"
+
+/** The resident rows a card is drawn from: the desk's view columns. */
+export interface Rows {
+  readonly tables: Tables
+  column(name: string): Uint32Array
+  str(name: string): { at(row: number): string }
+}
+
+/** A write's state on its card: sent and unanswered, or answered with derived fields still due. */
+export type Mark = "pending" | "settling" | null
 
 const EPOCH_MS = Date.UTC(1970, 0, 1)
 const NONE = 0xffffffff
@@ -12,7 +22,15 @@ function bandOf(score: number, t: Tables): string {
   return t.bands.find((b) => score >= b.min && score <= b.max)?.key ?? "mid"
 }
 
-export function topbar(f: Filters, t: Tables, count: number): Raw {
+const LINK: Record<Status, [string, string]> = {
+  connecting: ["is-connecting", "connecting"],
+  webtransport: ["is-live", "live"],
+  websocket: ["is-live", "live · ws"],
+  offline: ["is-offline", "offline · changes queued"],
+}
+
+export function topbar(f: Filters, t: Tables, count: number, status: Status): Raw {
+  const [linkClass, linkLabel] = LINK[status]
   const showcase = t.batches.some((b) => b.code === "Batch-001")
   return h`
     <header class="topbar">
@@ -52,6 +70,7 @@ export function topbar(f: Filters, t: Tables, count: number): Raw {
         </select>
         <span class="count">${count} showing</span>
       </form>
+      <span id="link" class="link ${linkClass}" role="status" title="Connection to the desk">${linkLabel}</span>
       <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
       <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym">Gym</button>
       <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net">Net</button>
@@ -87,7 +106,7 @@ export function scoreboard(s: Scoreboard | null, pills: Raw): Raw {
     </div>`
 }
 
-export function card(store: Store, row: number, x: number, y: number, active: boolean): Raw {
+export function card(store: Rows, row: number, x: number, y: number, active: boolean, mark: Mark): Raw {
   const t = store.tables
   const id = store.column("id")[row] ?? 0
   const score = store.column("score")[row] ?? 0
@@ -105,8 +124,8 @@ export function card(store: Store, row: number, x: number, y: number, active: bo
   const age = days(store.column("stage_on")[row] ?? NONE)
   const profile = t.profiles[store.column("profile")[row] ?? 0]
   return h`
-    <button type="button" id="card-${id}" class="card ${active ? "is-active" : ""}" style="left: ${x}px; top: ${y}px"
-      data-action="select" data-id="${id}" aria-current="${active ? "true" : "false"}" title="${company} — ${role}">
+    <button type="button" id="card-${id}" class="card ${active ? "is-active" : ""} ${mark ? `is-${mark}` : ""}" style="left: ${x}px; top: ${y}px"
+      data-action="select" data-id="${id}" aria-current="${active ? "true" : "false"}" aria-busy="${mark === "pending" ? "true" : "false"}" title="${company} — ${role}">
       <div class="card-kicker">
         <span class="code">${batch ? batch.code : `JobApp${id}`}</span>
         <span class="score band-${bandOf(score, t)}" aria-label="score_100 ${score}">${score}</span>
@@ -130,13 +149,13 @@ export function card(store: Store, row: number, x: number, y: number, active: bo
     </button>`
 }
 
-export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdError: string | null): Raw {
+export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdError: string | null, mark: Mark): Raw {
   const j = f.job
   const pct = f.coverage.hits.length + f.coverage.misses.length === 0
     ? 0
     : Math.round((f.coverage.hits.length / (f.coverage.hits.length + f.coverage.misses.length)) * 100)
   return h`
-    <aside id="focus" class="focus ${sheet ? "is-sheet" : ""}">
+    <aside id="focus" class="focus ${sheet ? "is-sheet" : ""} ${mark ? `is-${mark}` : ""}">
       <header>
         <p class="kicker"><span>${j.code}</span> ${scorePill(j.score_100, j.band)} <span>${f.variant.label}</span> <span>${f.profile.name}</span></p>
         <h2>${j.company}</h2>
@@ -182,11 +201,11 @@ export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdErro
     </aside>`
 }
 
-export function battleplan(f: Focus, editing: number | null, alterError: string | null, holdError: string | null): Raw {
+export function battleplan(f: Focus, editing: number | null, alterError: string | null, holdError: string | null, mark: Mark): Raw {
   const j = f.job
   const active = f.rail.find((r) => r.state === "active") ?? f.rail.find((r) => r.state === "pending")
   return h`
-    <div id="battleplan" class="battleplan">
+    <div id="battleplan" class="battleplan ${mark ? `is-${mark}` : ""}">
       <div class="bp-bar">
         <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
         <div class="grow">
@@ -327,6 +346,62 @@ function overdue(iso: string | null): boolean {
 function excerpt(text: string): string {
   const t = (text ?? "").trim()
   return t.length > 360 ? `${t.slice(0, 360)}…` : t
+}
+
+/**
+ * The focus drawn from the card's own columns while its full focus is
+ * still streaming: the same frame as the selection, never a blank panel.
+ */
+export function focusSkeleton(store: Rows, row: number, sheet: boolean): Raw {
+  const t = store.tables
+  const id = store.column("id")[row] ?? 0
+  const score = store.column("score")[row] ?? 0
+  const stage = t.stages[store.column("stage")[row] ?? 0]
+  const next = store.str("next_action").at(row)
+  const due = days(store.column("next_due")[row] ?? NONE)
+  return h`
+    <aside id="focus" class="focus is-streaming ${sheet ? "is-sheet" : ""}" aria-busy="true">
+      <header>
+        <p class="kicker"><span>JobApp${id}</span> ${scorePill(score, bandOf(score, t))} <span>${store.str("cv_label").at(row)}</span></p>
+        <h2>${store.str("company").at(row)}</h2>
+        <p class="sub">${store.str("role").at(row)}</p>
+      </header>
+      <div>
+        <div class="meta">
+          <span class="pips">${[...store.str("pips").at(row)].map((p) => h`<i class="pip pip-${p}"></i>`)}</span>
+          <span class="stage-name">${stage?.label ?? ""}</span>
+        </div>
+        <p class="sub">${stage?.hint ?? ""}</p>
+      </div>
+      <p class="sub">${next === "" ? "No next action" : next}${due ? ` · ${shortDate(due)}` : ""}</p>
+      <p class="streaming">Streaming the rest of this application…</p>
+    </aside>`
+}
+
+/** A lens whose state has not arrived yet. */
+export function waiting(id: string, label: string): Raw {
+  return h`
+    <div id="${id}" class="lane">
+      <div class="bp-bar">
+        <button type="button" id="back-${id}" class="ghost" data-action="back">Back</button>
+        <div class="grow"><p class="streaming">${label}</p></div>
+      </div>
+    </div>`
+}
+
+export interface Notice { id: number; text: string }
+
+/** Writes the server refused after they were drawn, each already rolled back. */
+export function notices(list: readonly Notice[]): Raw {
+  if (list.length === 0) return raw("")
+  return h`
+    <div id="notices" class="notices" role="alert">
+      ${list.map((n) => h`
+        <p id="notice-${n.id}" class="notice">
+          <span>${n.text}</span>
+          <button type="button" class="text-btn" data-action="dismiss-notice" data-id="${n.id}" aria-label="Dismiss">×</button>
+        </p>`)}
+    </div>`
 }
 
 export function emptyBoard(): Raw {
