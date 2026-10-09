@@ -677,11 +677,23 @@ defmodule Hireme.Desk do
   defp permit(job_id), do: Letterbox.permit_job(job_id, Ops.holder())
 
   # One row, one changeset, only while no agent holds the lease.
+  # A set of plain columns is one statement that answers with the row.
+  defp write(job_id, attrs) when is_map(attrs) do
+    with :ok <- permit(job_id) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      changes = [{:updated_at, now} | Map.to_list(attrs)]
+
+      case Repo.update_all(from(j in Job, where: j.id == ^job_id, select: j), set: changes) do
+        {1, [job]} -> {:ok, job}
+        {0, []} -> {:error, :not_found}
+      end
+    end
+  end
+
   defp write(job_id, attrs) do
     with :ok <- permit(job_id) do
       job = Repo.get!(Job, job_id)
-      attrs = if is_function(attrs, 1), do: attrs.(job), else: attrs
-      job |> Job.changeset(attrs) |> Repo.update()
+      job |> Job.changeset(attrs.(job)) |> Repo.update()
     end
   end
 

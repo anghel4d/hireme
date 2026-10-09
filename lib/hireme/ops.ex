@@ -52,6 +52,7 @@ defmodule Hireme.Ops do
   @held {__MODULE__, :held}
   @ledger_ttl 24 * 3600
   @sweep_ms 3_600_000
+  @checkpoint_ms 1_000
 
   @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
 
@@ -130,11 +131,30 @@ defmodule Hireme.Ops do
       {DynamicSupervisor, strategy: :one_for_one, name: @supervisor}
     ]
 
+    # With SQLite's own checkpoint off, the WAL is folded into the
+    # database here, beside the writes, never inside one's commit.
+    repo = Application.get_env(:hireme, Repo)
+
+    children =
+      if repo[:wal_auto_check_point] == 0 and repo[:pool] != Ecto.Adapters.SQL.Sandbox,
+        do: children ++ [Supervisor.child_spec({Task, &checkpoints/0}, id: :checkpoints)],
+        else: children
+
     %{
       id: __MODULE__,
       type: :supervisor,
       start: {Supervisor, :start_link, [children, [strategy: :one_for_all]]}
     }
+  end
+
+  @doc false
+  # Every second, copy what the WAL holds into the database. PASSIVE never
+  # waits on a writer and never makes one wait; the fsync it costs is
+  # paid here, not by the write whose commit crossed SQLite's threshold.
+  def checkpoints do
+    Process.sleep(@checkpoint_ms)
+    Repo.query!("PRAGMA wal_checkpoint(PASSIVE)", [], skip_account: true)
+    checkpoints()
   end
 
   @doc false
@@ -553,7 +573,9 @@ defmodule Hireme.Ops do
             {:ok, value} ->
               rev = bump!(state)
               if ledger, do: insert_entry!(ledger, rev, nil)
-              {value, rev}
+              # Read what the write reached on the connection it holds:
+              # the rows as they will commit, without a second checkout.
+              {value, rev, prefetch(groups(command, value), state.raw)}
 
             {:error, reason} ->
               Repo.rollback(reason)
@@ -571,8 +593,8 @@ defmodule Hireme.Ops do
     held = (Process.delete(@held) || []) |> Enum.reverse()
 
     case result do
-      {:ok, {value, rev}} ->
-        state = publish(state, rev, groups(command, value))
+      {:ok, {value, rev, fetched}} ->
+        state = publish(state, rev, fetched)
         Enum.each(held, &broadcast(state, &1))
         {{:ok, value, rev}, state}
 
@@ -723,9 +745,17 @@ defmodule Hireme.Ops do
 
   defp rediff(state, groups) do
     {raw, rows, gone} =
-      Enum.reduce(groups, {state.raw, %{}, %{}}, fn {table, field, values}, {raw, rows, gone} ->
+      Enum.reduce(groups, {state.raw, %{}, %{}}, fn group, {raw, rows, gone} ->
+        {table, field, values, fresh} =
+          case group do
+            {table, field, values} ->
+              {table, field, values, fetch_group(table, field, values, raw)}
+
+            {_, _, _, _} = fetched ->
+              fetched
+          end
+
         old = Map.fetch!(raw, table)
-        fresh = fetch_group(table, field, values, raw)
         fresh_ids = MapSet.new(fresh, & &1.id)
 
         changed = for row <- fresh, Map.get(old, row.id) != row, do: row
@@ -753,6 +783,23 @@ defmodule Hireme.Ops do
 
   defp columns_moved(old, row) do
     for {k, v} <- row, k == :id or Map.get(old, k) != v, into: %{}, do: {k, v}
+  end
+
+  defp prefetch(:all, _raw), do: :all
+  defp prefetch(_groups, nil), do: []
+
+  defp prefetch(groups, raw) do
+    for group <- groups do
+      case group do
+        {table, field, values} -> {table, field, values, fetch_group(table, field, values, raw)}
+        {_, _, _, _} = fetched -> fetched
+      end
+    end
+  end
+
+  defp row(table, struct) do
+    {_schema, cols} = Keyword.fetch!(@tables, table)
+    Map.take(struct, cols)
   end
 
   defp fetch_group(_table, :all, {:given, rows}, _raw), do: rows
@@ -833,11 +880,12 @@ defmodule Hireme.Ops do
       {kind, id, _} when kind in [:stage, :heat_override] ->
         job_groups(id)
 
+      # The write answered with the job as committed: no re-read.
       {:score, id, _} ->
-        [{:job_apps, :id, [id]}]
+        [{:job_apps, :id, [id], [row(:job_apps, value)]}]
 
       {kind, id, _, _} when kind in [:next, :note] ->
-        [{:job_apps, :id, [id]}]
+        [{:job_apps, :id, [id], [row(:job_apps, value)]}]
 
       {:generation, id} ->
         [{:cv_lineages, :id, [lineage_of(id)]}]
