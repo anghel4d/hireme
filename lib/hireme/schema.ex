@@ -759,3 +759,24 @@ defmodule Hireme.Net.Entry do
     |> tenant()
   end
 end
+
+defmodule Hireme.Mailer.Notice do
+  @moduledoc """
+  One security notice for one address, queued by the request that caused
+  it and sent by `Hireme.Mailer.Outbox`. `meta` holds only the notice's
+  display fields (names, kinds, counts), never a secret.
+  """
+  use Hireme.Schema
+
+  schema "mail_outbox" do
+    field :address, :string
+    field :kind, :string
+    field :meta, :map, default: %{}
+    field :attempts, :integer, default: 0
+    field :next_at, :utc_datetime
+    field :sent_at, :utc_datetime
+    field :last_error, :string
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps(updated_at: false)
+  end
+end

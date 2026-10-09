@@ -142,6 +142,8 @@ defmodule Hireme.AccountsTest do
 
       assert {:ok, gh} = Accounts.link(:github, %{subject: "9", display: "me"})
 
+      Hireme.Mailer.Outbox.drain()
+
       assert_received {:email,
                        %Swoosh.Email{
                          to: [{_, "me@example.com"}],
@@ -160,6 +162,8 @@ defmodule Hireme.AccountsTest do
       Repo.put_account(mine.id)
       assert :ok = Accounts.unlink(gh.id)
 
+      Hireme.Mailer.Outbox.drain()
+
       assert_received {:email,
                        %Swoosh.Email{
                          to: [{_, "me@example.com"}],
@@ -175,6 +179,7 @@ defmodule Hireme.AccountsTest do
       {:ok, _} = Accounts.link(:email, %{subject: "a@example.com", display: "a"})
       {:ok, _} = Accounts.link(:email, %{subject: "b@example.com", display: "b"})
       assert :ok = Accounts.notify(Repo.account_id!(), :api_key_created, %{name: "ci"})
+      Hireme.Mailer.Outbox.drain()
 
       for addr <- ["a@example.com", "b@example.com"] do
         subject = ~s(Hireme: an API key named "ci" was created)

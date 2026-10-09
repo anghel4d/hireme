@@ -66,15 +66,19 @@ defmodule Hireme.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      Hireme.Repo,
-      {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: Hireme.PubSub},
-      Hireme.RateLimit,
-      {Registry, keys: :unique, name: Hireme.Letterbox.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Hireme.Letterbox.Supervisor},
-      HiremeWeb.Endpoint
-    ]
+    # Tests drain the mail outbox themselves (config/test.exs).
+    outbox =
+      if Application.get_env(:hireme, :mail_outbox, true), do: [Hireme.Mailer.Outbox], else: []
+
+    children =
+      [
+        Hireme.Repo,
+        {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
+        {Phoenix.PubSub, name: Hireme.PubSub},
+        Hireme.RateLimit,
+        {Registry, keys: :unique, name: Hireme.Letterbox.Registry},
+        {DynamicSupervisor, strategy: :one_for_one, name: Hireme.Letterbox.Supervisor}
+      ] ++ outbox ++ [HiremeWeb.Endpoint]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Hireme.Supervisor)
   end
