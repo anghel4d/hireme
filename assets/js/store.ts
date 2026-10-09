@@ -1069,7 +1069,10 @@ export class Snapshot {
     this.timer = 0
     const now = performance.now()
     if (now - this.last < 1000 && now - this.first < 5000) this.timer = window.setTimeout(() => this.due(), 1000 - (now - this.last))
-    else this.save()
+    // Exporting ~2 MB of rows and handing them to IndexedDB is a few ms of
+    // main thread: do it when the page is idle, never between an input and
+    // its frame.
+    else idle(() => this.save(), 2000)
   }
 
   private save(): void {
@@ -1086,11 +1089,11 @@ export class Snapshot {
     const first = this.ops === null
     this.ops = pending.map(({ opId, op }) => ({ opId, op }))
     if (!first) return
-    setTimeout(() => {
+    idle(() => {
       const ops = this.ops
       this.ops = null
       void idb((store) => store.put(ops, `${this.scope}:ops`), "readwrite").catch(() => {})
-    }, 0)
+    }, 250)
   }
 
   clear(): void {
@@ -1108,6 +1111,12 @@ export class Snapshot {
     if (!rec?.blob || rec.format !== FORMAT || rec.hash !== this.hash || typeof rec.rev !== "bigint") return null
     return { rev: rec.rev, bytes: new Uint8Array(await rec.blob.arrayBuffer()), ops: Array.isArray(ops) ? ops : [] }
   }
+}
+
+/** Run when the main thread is idle, and within `timeout` ms at the latest. */
+function idle(fn: () => void, timeout: number): void {
+  if (typeof requestIdleCallback === "function") requestIdleCallback(() => fn(), { timeout })
+  else setTimeout(fn, 50)
 }
 
 function idb(run: (store: IDBObjectStore) => IDBRequest, mode: IDBTransactionMode): Promise<unknown> {
