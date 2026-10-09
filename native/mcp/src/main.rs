@@ -194,7 +194,7 @@ impl Hub {
             "get_application" => {
                 let job = job()?;
                 self.held(job)?;
-                self.with_desk(|d| interim::focus(d, job))
+                self.with_desk(|d| json_text(&d.focus_json(job)))
             }
             // Leases.
             "lease_letterbox" => self.lease(job()?).await,
@@ -728,7 +728,8 @@ fn verdict(d: &mut Desk, job: u32) -> Outcome {
 }
 
 fn lanes(d: &mut Desk, which: &str) -> Outcome {
-    let mut lane = interim::lane(d, which);
+    let all = json_text(&d.lanes_json())?;
+    let mut lane = all[which].clone();
     lane["note"] = json!(match which {
         "gym" =>
             "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
@@ -737,89 +738,9 @@ fn lanes(d: &mut Desk, which: &str) -> Outcome {
     Ok(lane)
 }
 
-/// INTERIM, until link's `Desk::focus_json` and `Desk::lanes_json` land in
-/// the kernel: then `get_application` and the lanes return those, and
-/// this module is deleted. Minimal on purpose: the lines a lease edits,
-/// and the counts a lane shows.
-mod interim {
-    use super::{Desk, Outcome, Value, application, col, json, table};
-
-    fn rows_where(d: &Desk, t: u16, c: u16, v: u32) -> Vec<usize> {
-        (0..d.rows(t)).filter(|&r| d.u32_at(t, c, r) == v).collect()
-    }
-
-    pub fn focus(d: &mut Desk, job: u32) -> Outcome {
-        let mut view = application(d, job);
-        let (v, o, i) = (table::CV_VARIANTS, table::OVERLAYS, table::ITEMS);
-        let r = *rows_where(d, v, col::cv_variants::JOB_APP_ID, job)
-            .first()
-            .ok_or("no CV for this job")?;
-        let (profile, lineage) = (
-            d.u32_at(v, col::cv_variants::PROFILE_ID, r),
-            d.u32_at(v, col::cv_variants::LINEAGE_ID, r),
-        );
-        let overlays = rows_where(d, o, col::overlays::LINEAGE_ID, lineage);
-        let mut items = rows_where(d, i, col::items::PROFILE_ID, profile);
-        items.sort_by_key(|&r| d.u32_at(i, col::items::POSITION, r));
-        let lines: Vec<Value> = items
-            .into_iter()
-            .map(|r| {
-                let id = d.u32_at(i, col::items::ID, r);
-                let over = overlays
-                    .iter()
-                    .copied()
-                    .find(|&x| d.u32_at(o, col::overlays::ITEM_ID, x) == id);
-                let (mode, title) = over.map_or(("inherit", ""), |x| {
-                    (
-                        d.str_at(o, col::overlays::MODE, x),
-                        d.str_at(o, col::overlays::TITLE, x),
-                    )
-                });
-                let title = if title.is_empty() {
-                    d.str_at(i, col::items::TITLE, r)
-                } else {
-                    title
-                };
-                json!({"item_id": id, "mode": mode, "title": title})
-            })
-            .collect();
-        view["variant_id"] = json!(d.u32_at(v, col::cv_variants::ID, r));
-        view["lineage_id"] = json!(lineage);
-        view["cv_label"] = json!(d.str_at(v, col::cv_variants::LABEL, r));
-        view["lines"] = json!(lines);
-        Ok(view)
-    }
-
-    fn kv<'a>(d: &'a Desk, ns: &str, key: &str) -> &'a str {
-        let t = table::KV_PAIRS;
-        (0..d.rows(t))
-            .find(|&r| {
-                d.str_at(t, col::kv_pairs::NAMESPACE, r) == ns
-                    && d.str_at(t, col::kv_pairs::KEY, r) == key
-            })
-            .map_or("", |r| d.str_at(t, col::kv_pairs::VALUE, r))
-    }
-
-    pub fn lane(d: &mut Desk, which: &str) -> Value {
-        let today = d.today;
-        let recent = |t: u16, c: u16| {
-            (0..d.rows(t))
-                .filter(|&r| d.u32_at(t, c, r) + 7 > today && d.u32_at(t, c, r) <= today)
-                .count()
-        };
-        match which {
-            "gym" => json!({
-                "target": kv(d, "gym", "daily_target"),
-                "reps_this_week": recent(table::GYM_REPS, col::gym_reps::DONE_ON),
-                "problems": d.rows(table::GYM_PROBLEMS),
-            }),
-            _ => json!({
-                "lane": kv(d, "net", "broadside_lane"),
-                "shipped_this_week": recent(table::NET_ENTRIES, col::net_entries::SHIPPED_ON),
-                "entries": d.rows(table::NET_ENTRIES),
-            }),
-        }
-    }
+/// One of the kernel's composed views, the browser's own JSON.
+fn json_text(s: &str) -> Outcome {
+    serde_json::from_str(s).map_err(|e| format!("view: {e}"))
 }
 
 fn letterboxes(d: &mut Desk, a: &Value) -> Outcome {
