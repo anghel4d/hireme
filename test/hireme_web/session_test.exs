@@ -144,19 +144,37 @@ defmodule HiremeWeb.SessionTest do
     refute_receive {:ops_delta, _, _}, 100
   end
 
-  test "a snapshot at the current rev boots empty; garbage says bye", %{account: account} do
+  test "a snapshot at the current rev resumes with an empty PATCH; garbage says bye", %{
+    account: account
+  } do
+    job = job(profile())
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
-    [{:boot, _, rev, _}] = frames(0)
+    [{:boot, _, _, _}] = frames(0)
     [{:ticket, _, _, _}] = frames(0)
+    {:ok, s} = Session.event({:data, 0, op(44, 2, job.id, ["Call", ""])}, s)
+    s = drain(s)
+    rev = s.rev
+    assert rev > 0
 
+    _ = all_out()
     s2 = open(account)
     {:ok, _} = Session.event({:data, 0, hello(rev)}, s2)
-    assert [{:boot, 0x02, ^rev, <<>>}] = frames(0)
-    assert [{:ticket, _, _, _}] = frames(0)
+    assert [{:patch, 0x02, ^rev, <<>>}, {:ticket, 0, ^rev, _}] = all_out()
 
     assert {:stop, :normal, _} = Session.event({:data, 0, <<12::little-32, 0::96>>}, s)
-    assert [{:bye, 0, _, _}] = frames(0)
+    assert [{:bye, 0, _, _}] = all_out()
+  end
+
+  # Every frame written so far, in order.
+  defp all_out do
+    receive do
+      {:out, 0, bin} ->
+        {:ok, frames, ""} = Packet.split(bin)
+        frames ++ all_out()
+    after
+      50 -> []
+    end
   end
 
   test "tickets are single use and name a live session", %{account: account} do
@@ -166,5 +184,20 @@ defmodule HiremeWeb.SessionTest do
     assert {account_id, session_id} == {account.id, session.id}
     assert :error = Session.redeem(t)
     assert :error = Session.redeem("garbage")
+  end
+
+  test "the focus cache serves until a delta marks the job dirty", %{account: account} do
+    start_supervised!(HiremeWeb.Session.Cache)
+    p = profile()
+    job = job(p, %{company: "Cached"})
+    cache = HiremeWeb.Session.Cache
+
+    first = cache.focus(account.id, job.id, 5)
+    assert first.job.company == "Cached"
+    Hireme.Repo.update_all(Hireme.Desk.Job, set: [company: "Moved"])
+    assert cache.focus(account.id, job.id, 6).job.company == "Cached"
+
+    cache.dirty(account.id, [job.id], 7)
+    assert cache.focus(account.id, job.id, 7).job.company == "Moved"
   end
 end

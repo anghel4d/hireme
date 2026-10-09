@@ -12,7 +12,10 @@
 # 2 str ((nrows+1) u32 offsets from 0, then UTF-8; none = empty), 3 u64, 4 f64 (none = NaN).
 # PATCH writes only the columns present; cards upsert by id; cards_gone deletes; the small tables
 # (score, lanes, kv, roots...) are replaced whole when present. FOCUS carries one job (header rev =
-# its focus rev) as the focus* tables; LINES upserts lines by ix.
+# its focus rev) as the focus* tables; LINES upserts lines by ix (content-derived, stable across
+# sessions). BOOT replaces the desk tables; a HELLO whose snapshot_rev is current gets an empty
+# PATCH with END instead, which keeps everything. OP body: u64 op_id | u8 kind | u8 nfields |
+# u16 0 | u32 target | (u16 len, utf8) * nfields, fields in the order the `op` line names them.
 
 frame HELLO 1
 frame BOOT 3
