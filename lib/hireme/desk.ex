@@ -458,6 +458,8 @@ defmodule Hireme.Desk do
   Open one application. `attrs` is cast through the `Job` changeset, so
   stage, status, freshness, and gate may arrive as atoms or their names.
   `theme` is parsed once. `overlays` are tailored onto the employer's CV.
+  A bare opening reuses its inserted rows to compute the glance, but still
+  resolves the employer's shared overlays and effective lineage theme.
   """
   @spec create_job(map()) :: {:ok, Job.t()} | {:error, refusal() | Ecto.Changeset.t()}
   def create_job(attrs) when is_map(attrs) do
@@ -491,48 +493,62 @@ defmodule Hireme.Desk do
     {lineage_state, lineage} = CvPair.ensure_lineage(employer.id)
     theme = Theme.parse(Map.get(attrs, :theme))
 
-    if lineage_state == :new and not Theme.empty?(theme) do
-      lineage |> Lineage.changeset(%{theme: Theme.to_map(theme)}) |> Repo.update!()
-    end
+    lineage =
+      if lineage_state == :new and not Theme.empty?(theme) do
+        lineage |> Lineage.changeset(%{theme: Theme.to_map(theme)}) |> Repo.update!()
+      else
+        lineage
+      end
 
+    # Round-trip JSON note keys in the insert, without a later job reload.
     job =
       changeset
       |> put_change(:pips, Pipeline.encode(rail))
       |> put_change(:employer_id, employer.id)
       |> put_change(:stage_on, draft.stage_on || Date.utc_today())
       |> force_id(Map.get(attrs, :id))
+      |> Repo.insert!(returning: [:stage_notes])
+
+    variant =
+      %Variant{}
+      |> Variant.changeset(%{
+        job_app_id: job.id,
+        profile_id: job.profile_id,
+        lineage_id: lineage.id,
+        label: Map.get(attrs, :label) || "CV#{job.id}",
+        theme: Theme.to_map(theme),
+        note: Map.get(attrs, :note) || ""
+      })
       |> Repo.insert!()
 
-    %Variant{}
-    |> Variant.changeset(%{
-      job_app_id: job.id,
-      profile_id: job.profile_id,
-      lineage_id: lineage.id,
-      label: Map.get(attrs, :label) || "CV#{job.id}",
-      theme: Theme.to_map(theme),
-      note: Map.get(attrs, :note) || ""
-    })
-    |> Repo.insert!()
-
-    pair = CvPair.bind!(job.id)
     overlays = Map.get(attrs, :overlays, [])
 
-    Enum.each(overlays, fn overlay ->
-      case CvPair.tailor(pair, overlay.item_id, Map.delete(overlay, :item_id)) do
-        {:ok, _} -> :ok
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
+    if overlays != [] do
+      pair = CvPair.bind!(job.id)
+
+      Enum.each(overlays, fn overlay ->
+        case CvPair.tailor(pair, overlay.item_id, Map.delete(overlay, :item_id)) do
+          {:ok, _} -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+    end
 
     Letterbox.open!(job.id)
     record!(job.id, "open", "Opened at #{Pipeline.label(draft.current_stage)}")
 
     # A new line on the shared CV moves every sibling's glance; a bare
     # opening moves only its own.
-    if overlays == [], do: refresh_glance!(job.id), else: refresh_lineage!(lineage.id)
+    job =
+      if overlays == [] do
+        refresh_opened!(%Variant{variant | lineage: lineage, job_app: job})
+      else
+        refresh_lineage!(lineage.id)
+        Repo.get!(Job, job.id)
+      end
 
     publish(Signal.application_opened(job.id, lineage.id))
-    Repo.get!(Job, job.id)
+    job
   end
 
   @spec set_score(pos_integer(), LifeEv.score()) ::
@@ -842,6 +858,26 @@ defmodule Hireme.Desk do
 
   defp theme_of(%Variant{theme: theme}), do: Theme.parse(theme)
 
+  defp refresh_opened!(%Variant{job_app: job} = variant) do
+    overlays = overlays(variant)
+    resolved = Mask.apply(Corpus.list_items(variant.profile_id), overlays)
+    changes = glance_changes(variant, resolved, Mask.counts(overlays))
+    Repo.update_all(from(j in Job, where: j.id == ^job.id), set: changes)
+    struct(job, changes)
+  end
+
+  defp glance_changes(%Variant{job_app: job} = variant, resolved, counts) do
+    coverage = Keywords.coverage(Keywords.targets(theme_of(variant), job.listing), resolved)
+
+    [
+      keyword_hits: Keywords.Coverage.hit(coverage),
+      keyword_total: Keywords.Coverage.total(coverage),
+      mask_hidden: counts.hidden,
+      mask_altered: counts.altered,
+      mask_emphasized: counts.emphasized
+    ]
+  end
+
   # Every variant on a lineage shares the overlays, so they are read once
   # and each card's numbers are written with one update.
   defp refresh_lineage!(lineage_id) do
@@ -862,16 +898,10 @@ defmodule Hireme.Desk do
       resolved = Mask.apply(Corpus.list_items(profile_id), overlays)
 
       Enum.each(group, fn %Variant{job_app: %Job{} = job} = variant ->
-        coverage = Keywords.coverage(Keywords.targets(theme_of(variant), job.listing), resolved)
+        changes = glance_changes(variant, resolved, counts)
 
         Repo.update_all(from(j in Job, where: j.id == ^job.id),
-          set: [
-            keyword_hits: Keywords.Coverage.hit(coverage),
-            keyword_total: Keywords.Coverage.total(coverage),
-            mask_hidden: counts.hidden,
-            mask_altered: counts.altered,
-            mask_emphasized: counts.emphasized
-          ]
+          set: changes
         )
       end)
     end)

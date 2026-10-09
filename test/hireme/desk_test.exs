@@ -58,6 +58,104 @@ defmodule Hireme.DeskTest do
     assert Enum.any?(lines, &(&1.body =~ "structure-of-arrays"))
   end
 
+  test "a bare opening returns the persisted glance using its newly stored lineage theme" do
+    profile = profile()
+    item(profile, %{body: "Elixir systems"})
+
+    added =
+      job(profile, %{
+        company: "New themed employer",
+        listing: "databases",
+        theme: %{targets: ["elixir", "databases"]},
+        stage_notes: %{discovered: "Ready for review"}
+      })
+
+    assert added == Repo.get!(Hireme.Desk.Job, added.id)
+    assert {added.keyword_hits, added.keyword_total} == {1, 2}
+    assert {added.mask_hidden, added.mask_altered, added.mask_emphasized} == {0, 0, 0}
+    assert Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
+    focus = Desk.focus(added.id)
+    assert focus.coverage.hits == ["elixir"]
+    assert focus.coverage.misses == ["databases"]
+    assert focus.variant.lineage.theme == focus.variant.theme
+    assert Hireme.CvPair.job_id(Hireme.CvPair.bind!(added.id)) == added.id
+    assert Hireme.Letterbox.for_job(added.id).job_app_id == added.id
+  end
+
+  test "a bare opening inherits shared masks and lineage targets without rewriting a leased sibling" do
+    profile = profile()
+    altered = item(profile, %{body: "Original wording"})
+    hidden = item(profile, %{body: "Theatre"})
+    emphasized = item(profile, %{body: "Systems"})
+
+    first =
+      job(profile, %{
+        company: "Inherited employer",
+        theme: %{targets: ["elixir", "theatre", "systems"]},
+        overlays: [
+          %{item_id: altered.id, mode: :altered, body: "Elixir"},
+          %{item_id: hidden.id, mode: :hidden},
+          %{item_id: emphasized.id, mode: :emphasized}
+        ]
+      })
+
+    {:ok, lease} = Hireme.Letterbox.lease(Hireme.Letterbox.for_job(first.id).id, self())
+
+    try do
+      added =
+        job(profile, %{
+          company: "Inherited employer",
+          listing: "unmatched",
+          theme: %{targets: ["unmatched"]}
+        })
+
+      assert added == Repo.get!(Hireme.Desk.Job, added.id)
+      assert {added.keyword_hits, added.keyword_total} == {2, 3}
+      assert {added.mask_hidden, added.mask_altered, added.mask_emphasized} == {1, 1, 1}
+      assert Repo.get!(Hireme.Desk.Job, first.id) == first
+      focus = Desk.focus(added.id)
+      original = Desk.focus(first.id)
+      assert focus.coverage.hits == ["elixir", "systems"]
+      assert focus.coverage.misses == ["theatre"]
+      assert focus.cv.sections == original.cv.sections
+      assert focus.cv.hidden == original.cv.hidden
+      pair = Hireme.CvPair.bind!(added.id)
+      original_pair = Hireme.CvPair.bind!(first.id)
+      assert Hireme.CvPair.lineage_id(pair) == Hireme.CvPair.lineage_id(original_pair)
+      assert Hireme.CvPair.variant_id(pair) != Hireme.CvPair.variant_id(original_pair)
+      assert {:error, :leased} = Desk.put_overlay(first.id, altered.id, %{mode: :hidden})
+    after
+      :ok = Hireme.Letterbox.release(lease)
+    end
+  end
+
+  test "bare openings remain tenant scoped even for the same employer name" do
+    profile = profile()
+    own_item = item(profile, %{body: "Elixir"})
+
+    own =
+      job(profile, %{
+        company: "Tenant employer",
+        overlays: [%{item_id: own_item.id, mode: :hidden}]
+      })
+
+    other = Hireme.Accounts.create!(%{name: "Creation tenant"})
+
+    foreign =
+      Repo.with_account(other.id, fn ->
+        other_profile = profile()
+        item(other_profile, %{body: "Elixir"})
+        added = job(other_profile, %{company: "Tenant employer", theme: %{targets: ["elixir"]}})
+        assert added == Repo.get!(Hireme.Desk.Job, added.id)
+        assert {added.keyword_hits, added.keyword_total, added.mask_hidden} == {1, 1, 0}
+        added
+      end)
+
+    refute own.employer_id == foreign.employer_id
+    assert Repo.get!(Hireme.Desk.Job, own.id).mask_hidden == 1
+    assert Repo.get(Hireme.Desk.Job, foreign.id) == nil
+  end
+
   test "focus keeps optional batches and the variant's original job association" do
     profile = profile()
 
