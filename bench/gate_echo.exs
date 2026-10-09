@@ -6,12 +6,21 @@
 #
 # Control stream: "E" + 8 bytes is echoed back; "B" + u32 LE asks for that
 # many bytes back on the same stream, sent in one write as the real Session
-# sends a BOOT.
+# sends a BOOT. A CONNECT path with `?boot=N` gets N bytes on server uni
+# stream 3 from inside init, ahead of the ACCEPT, as a ticketed browser's
+# BOOT goes out.
 defmodule HiremeBench.GateEcho do
   alias HiremeWeb.Gate
 
-  def init(c, _meta) do
+  def init(c, meta) do
     Gate.ready(c)
+
+    with %{"boot" => n} <- URI.decode_query(URI.parse(meta.path).query || "") do
+      Gate.open_uni(c, 3)
+      Gate.send(c, 3, :binary.copy(<<7>>, String.to_integer(n)))
+      Gate.fin(c, 3)
+    end
+
     {:ok, %{c: c, buf: <<>>}}
   end
 

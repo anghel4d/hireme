@@ -18,13 +18,14 @@
 //!   agent and is forwarded as "", so the BEAM then insists on an API key);
 //! - the BEAM must ACCEPT within 2 s and declare READY (HELLO verified)
 //!   within 2 s after that, or the connection closes (a Session that
-//!   authenticated at OPEN may send READY before ACCEPT);
+//!   authenticated at OPEN may write ahead of its ACCEPT);
 //! - until READY, one client bidi stream, a 64 KiB connection receive
 //!   window, and no datagrams forwarded.
 //!
 //! Traffic is what the Session uses: client bidi streams (the control
-//! stream and letterbox leases) and client datagrams. The gate opens no
-//! streams of its own and accepts no uni streams.
+//! stream and letterbox leases), client datagrams, and server uni streams
+//! the BEAM opens for bulk (the BOOT, sent as the session is accepted), which
+//! always yield to the client's streams. The gate accepts no uni streams.
 //!
 //! The certificate is reloaded on SIGHUP and whenever the PEM files
 //! change on disk, so an ACME renewal needs no restart.
@@ -56,6 +57,7 @@ const DATA: u8 = 0x11;
 const FIN: u8 = 0x12;
 const RESET: u8 = 0x13;
 const STOP: u8 = 0x14;
+const OPEN_UNI: u8 = 0x15;
 const DGRAM: u8 = 0x20;
 const CLOSE: u8 = 0x30;
 
@@ -70,6 +72,8 @@ const DEADLINE: Duration = Duration::from_secs(2);
 const BIDI_BEFORE: u32 = 2;
 const BIDI_AFTER: u32 = 1 + 64;
 const UNI: u32 = 3;
+/// A server uni stream carries bulk; client streams (control) go first.
+const BULK_PRIORITY: i32 = -1;
 /// Handshakes in flight above which every unvalidated address gets a Retry.
 const RETRY_ABOVE: usize = 32;
 const WINDOW_BEFORE: u32 = 64 << 10;
@@ -456,20 +460,22 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     }
     let _ = up.send(message(OPEN, &head, &[]));
 
-    // A Session that authenticated at OPEN (a browser's ticket) may send
-    // READY ahead of ACCEPT; the caps then lift as soon as the session exists.
+    // A Session that authenticated at OPEN (a browser's ticket) may write
+    // ahead of its ACCEPT: READY, a bulk stream and the BOOT on it. Those
+    // messages wait here and are applied the moment the session exists, so
+    // the BOOT leaves in the same flight as the 200.
     let answer = timeout(DEADLINE, async {
-        let mut early = false;
+        let mut early = Vec::new();
         loop {
             match read_message(&mut down).await {
-                Some(m) if m[0] == READY => early = true,
+                Some(m) if m[0] != ACCEPT && m[0] != REFUSE => early.push(m),
                 other => return (other, early),
             }
         }
     });
-    let (answer, early_ready) = match answer.await {
+    let (answer, early) = match answer.await {
         Ok((m, early)) => (Ok(m), early),
-        Err(e) => (Err(e), false),
+        Err(e) => (Err(e), Vec::new()),
     };
     match answer {
         Ok(Some(m)) if m[0] == ACCEPT => {}
@@ -491,9 +497,6 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     let Ok(conn) = request.accept().await else { return };
     c.accepted.fetch_add(1, Relaxed);
     let shared = Arc::new(Shared { up, queued: AtomicUsize::new(0), ready: false.into(), gate: gate.clone() });
-    if early_ready {
-        lift(&conn, &shared);
-    }
     // A select! over a partial read would lose bytes, so the BEAM's half
     // is read by its own task and arrives here as whole messages.
     let (beam_tx, beam_rx) = mpsc::channel(64);
@@ -504,7 +507,7 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
             }
         }
     });
-    let code = run(&conn, &shared, beam_rx).await;
+    let code = run(&conn, &shared, early, beam_rx).await;
     pump.abort();
     if let Some((code, reason)) = code {
         conn.close(VarInt::from_u32(code), &reason);
@@ -515,9 +518,16 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
 
 /// The session loop. It returns the close code and reason when the gate
 /// or the BEAM ends the session, or `None` when the peer did.
-async fn run(conn: &Connection, sh: &Arc<Shared>, mut down: mpsc::Receiver<Vec<u8>>) -> Option<(u32, Vec<u8>)> {
-    // Each client stream's queue to its writer, by session-relative id.
+async fn run(conn: &Connection, sh: &Arc<Shared>, early: Vec<Vec<u8>>, mut down: mpsc::Receiver<Vec<u8>>) -> Option<(u32, Vec<u8>)> {
+    // Each stream's queue to its writer, by session-relative id.
     let mut streams: HashMap<u32, mpsc::UnboundedSender<Cmd>> = HashMap::new();
+    for m in &early {
+        match beam(conn, sh, &mut streams, m) {
+            Ok(None) => {}
+            Ok(Some(close)) => return Some(close),
+            Err(()) => return Some((CODE_PROTOCOL, b"bridge protocol".to_vec())),
+        }
+    }
     let mut next_bi = 0u32;
     let deadline = sleep(DEADLINE);
     tokio::pin!(deadline);
@@ -592,6 +602,21 @@ fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, mpsc::Un
         RESET => {
             let id = u32_at(m, 1).ok_or(())?;
             to(streams, id, Cmd::Reset(u32_at(m, 5).ok_or(())?));
+        }
+        OPEN_UNI => {
+            let id = u32_at(m, 1).ok_or(())?;
+            if id % 4 != 3 || streams.contains_key(&id) {
+                return Err(());
+            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            streams.insert(id, tx);
+            let (conn, sh) = (conn.clone(), sh.clone());
+            tokio::spawn(async move {
+                if let Ok(Ok(send)) = async { Ok::<_, ()>(conn.open_uni().await.map_err(|_| ())?.await) }.await {
+                    send.set_priority(BULK_PRIORITY);
+                    drain(sh, id, send, rx).await;
+                }
+            });
         }
         CLOSE => {
             let code = u32_at(m, 1).ok_or(())?;

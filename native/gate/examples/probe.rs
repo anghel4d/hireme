@@ -13,6 +13,10 @@
 //!     Ask the echoing Session for B bytes on the control stream, where the
 //!     real Session sends its BOOT, and time the last byte. The first round
 //!     starts from the initial congestion window; later rounds reuse it.
+//! probe boot URL?boot=B [--hash HEX] [--n N]
+//!     N cold sessions whose BOOT (B bytes) the echoing Session pushes on a
+//!     server uni stream as it accepts: time to `ready`, to the first and to
+//!     the last BOOT byte, all from the start of the connect.
 //! ```
 //!
 //! The echoing Session's control protocol: `E` + 8 bytes is echoed back;
@@ -101,6 +105,7 @@ async fn main() {
         "handshake" => handshake(&a).await,
         "echo" => echo(&a).await,
         "bulk" => bulk(&a).await,
+        "boot" => boot(&a).await,
         m => panic!("unknown mode {m}"),
     }
 }
@@ -190,5 +195,33 @@ async fn bulk(a: &Args) {
         ms(pct(&mut times, 100)),
         mbit,
         ms(conn.rtt())
+    );
+}
+
+async fn boot(a: &Args) {
+    let addr = resolve(&a.url).await;
+    let (mut ready, mut first, mut last) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..a.n {
+        let ep = endpoint(&a.hash, addr);
+        let t = Instant::now();
+        let conn = ep.connect(&a.url).await.expect("connect");
+        ready.push(t.elapsed());
+        let mut uni = conn.accept_uni().await.unwrap();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut got = uni.read(&mut buf).await.unwrap().unwrap_or(0);
+        first.push(t.elapsed());
+        while let Some(n) = uni.read(&mut buf).await.unwrap() {
+            got += n;
+        }
+        last.push(t.elapsed());
+        assert!(got > 0);
+        conn.close(0u32.into(), b"");
+    }
+    println!(
+        "{{\"mode\":\"boot\",\"n\":{},\"ready_ms\":{},\"first_byte_ms\":{},\"last_byte_ms\":{}}}",
+        a.n,
+        ms(pct(&mut ready, 50)),
+        ms(pct(&mut first, 50)),
+        ms(pct(&mut last, 50))
     );
 }
