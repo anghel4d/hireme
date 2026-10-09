@@ -49,6 +49,10 @@ struct Hub {
     out: mpsc::UnboundedSender<Value>,
     link: tokio::sync::Mutex<Option<Arc<Link>>>,
     desk: Mutex<Desk>,
+    /// Frames received but not yet ingested: the desk takes them in one
+    /// batch when a read needs it, so a write's answer never waits on a
+    /// re-derive.
+    unread: Mutex<Vec<u8>>,
     waits: Mutex<HashMap<u64, oneshot::Sender<Answer>>>,
     /// Leased job id → its lane.
     leases: Mutex<HashMap<u32, u64>>,
@@ -88,6 +92,7 @@ async fn main() {
         out,
         link: tokio::sync::Mutex::new(None),
         desk: Mutex::new(Desk::new()),
+        unread: Mutex::new(Vec::new()),
         waits: Mutex::new(HashMap::new()),
         leases: Mutex::new(HashMap::new()),
         events: Mutex::new(HashMap::new()),
@@ -227,7 +232,12 @@ impl Hub {
     }
 
     fn with_desk<T>(&self, f: impl FnOnce(&mut Desk) -> T) -> T {
-        f(&mut self.desk.lock().unwrap())
+        let mut desk = self.desk.lock().unwrap();
+        let unread = std::mem::take(&mut *self.unread.lock().unwrap());
+        if !unread.is_empty() {
+            desk.ingest(&unread);
+        }
+        f(&mut desk)
     }
 
     // ---- the session --------------------------------------------------------
@@ -238,6 +248,7 @@ impl Hub {
             return Ok(l.clone());
         }
         *self.desk.lock().unwrap() = Desk::new();
+        self.unread.lock().unwrap().clear();
         let hub = Arc::downgrade(self);
         let closed = Arc::downgrade(self);
         let link = carrier::connect(
@@ -277,9 +288,9 @@ impl Hub {
                 if f.header.kind == frame::PATCH {
                     self.notify_rows(&f);
                 }
-                let mut bytes = f.header.bytes().to_vec();
-                bytes.extend_from_slice(f.body);
-                self.desk.lock().unwrap().ingest(&bytes);
+                let mut unread = self.unread.lock().unwrap();
+                unread.extend_from_slice(&f.header.bytes());
+                unread.extend_from_slice(f.body);
             }
             frame::ACK => {
                 if let Ok(op_id) = wire::ack(f.body) {
@@ -351,10 +362,7 @@ impl Hub {
         );
         w.end();
         self.ask(op_id, w.buf).await?;
-        Ok(match target {
-            0 => json!({"ok": true}),
-            job => self.with_desk(|d| application(d, job)),
-        })
+        Ok(json!({"ok": true, "job_id": target}))
     }
 
     async fn lease_write(self: &Arc<Self>, job: u32, kind: u8, fields: Vec<String>) -> Outcome {
