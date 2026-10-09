@@ -556,8 +556,12 @@ impl Desk {
         use col::gym_problems as p;
         use col::gym_reps as r;
         let target = core::str::from_utf8(self.kv_get(b"gym", b"daily_target")).ok().and_then(|v| v.parse::<u32>().ok()).filter(|n| (1..=30).contains(n)).unwrap_or(3);
-        let done = |x: usize| self.vu32(rt, r::DONE_ON, x);
-        let solved: Vec<usize> = (0..self.rows(rt)).filter(|&x| self.vstr(rt, r::OUTCOME, x) == b"solved").collect();
+        // Columns read per rep are resolved once.
+        let (done_on, rep_id, problem_id) = (self.w32(rt, r::DONE_ON), self.w32(rt, r::ID), self.w32(rt, r::PROBLEM_ID));
+        let done = |x: usize| done_on.get(x).copied().unwrap_or(0);
+        let arena = &self.store.arena;
+        let (outcome, topic) = (self.strs(rt, r::OUTCOME), self.strs(pt, p::TOPIC));
+        let solved: Vec<usize> = (0..outcome.len()).filter(|&x| arena.get(outcome[x]) == b"solved").collect();
         let solved_week = solved.iter().filter(|&&x| done(x) != NONE && done(x) >= week).count() as u32;
         let mut days: Vec<u32> = solved.iter().map(|&x| done(x)).collect();
         sort_u32(&mut days, &|a, b| a.cmp(&b));
@@ -568,7 +572,7 @@ impl Desk {
             streak += 1;
             day = day.wrapping_sub(1);
         }
-        let problem = |x: usize| self.row_of(pt, self.vu32(rt, r::PROBLEM_ID, x));
+        let problem = |x: usize| self.row_of(pt, problem_id.get(x).copied().unwrap_or(0));
         j.raw("{\"gym\":{");
         // Elixir's round/1 of solved_week / (target * 7) * 100, capped at 100.
         let score = ((solved_week * 200 + target * 7) / (target * 14)).min(100);
@@ -577,23 +581,30 @@ impl Desk {
             j.key(k);
             j.u(n as u64);
         }
+        // Solved reps per topic, in one pass.
+        let mut topics = [0u64; GYM_TOPICS.len()];
+        for &x in &solved {
+            let topic = problem(x).and_then(|pr| topic.get(pr)).map_or(&b""[..], |&t| arena.get(t));
+            if let Some(i) = GYM_TOPICS.iter().position(|t| t.as_bytes() == topic) {
+                topics[i] += 1;
+            }
+        }
         j.key("topics");
         j.raw("[");
-        for key in GYM_TOPICS {
+        for (key, n) in GYM_TOPICS.iter().zip(topics) {
             j.item();
             option(&mut j, key);
             j.0.pop();
             j.key("count");
-            j.u(solved.iter().filter(|&&x| problem(x).is_some_and(|pr| self.vstr(pt, p::TOPIC, pr) == key.as_bytes())).count() as u64);
+            j.u(n);
             j.raw("}");
         }
         j.raw("]");
         j.key("recent");
         j.raw("[");
-        let mut reps: Vec<usize> = (0..self.rows(rt)).collect();
         // Newest first; a missing day (none) is the largest value, as nil is the largest term.
-        sort_usize(&mut reps, &|x, y| done(y).cmp(&done(x)).then(self.vu32(rt, r::ID, y).cmp(&self.vu32(rt, r::ID, x))));
-        for x in reps.into_iter().take(40) {
+        let reps = newest((0..self.rows(rt)).collect(), 40, &|x, y| done(y).cmp(&done(x)).then(rep_id[y].cmp(&rep_id[x])));
+        for x in reps {
             self.rows_json(&mut j, rt, core::iter::once(x), &["id", "done_on", "outcome", "minutes", "note"]);
             j.0.pop();
             let pr = problem(x);
@@ -612,23 +623,29 @@ impl Desk {
         // Net.progress/1.
         let nt = table::NET_ENTRIES;
         use col::net_entries as n;
-        let kind = |x: usize| self.vstr(nt, n::KIND, x);
-        let shipped = |x: usize| self.vu32(nt, n::SHIPPED_ON, x);
+        let kinds = self.strs(nt, n::KIND);
+        let kind = |x: usize| kinds.get(x).map_or(&b""[..], |&k| arena.get(k));
+        let (shipped_on, net_id) = (self.w32(nt, n::SHIPPED_ON), self.w32(nt, n::ID));
+        let shipped = |x: usize| shipped_on.get(x).copied().unwrap_or(0);
         j.raw("},\"net\":{\"lane\":");
         j.str(heat::trim(core::str::from_utf8(self.kv_get(b"net", b"broadside_lane")).unwrap_or("")).as_bytes());
-        let count = |f: &dyn Fn(usize) -> bool| (0..self.rows(nt)).filter(|&x| f(x)).count() as u64;
-        for (k, c) in [
-            ("shipped_week", count(&|x| matches!(kind(x), b"artifact" | b"post") && shipped(x) != NONE && shipped(x) >= week)),
-            ("drafts", count(&|x| kind(x) == b"draft")),
-            ("observer_runs", count(&|x| kind(x) == b"observer")),
-        ] {
+        let mut counts = [0u64; 3];
+        for x in 0..self.rows(nt) {
+            match kind(x) {
+                b"artifact" | b"post" if shipped(x) != NONE && shipped(x) >= week => counts[0] += 1,
+                b"draft" => counts[1] += 1,
+                b"observer" => counts[2] += 1,
+                _ => {}
+            }
+        }
+        for (k, c) in [("shipped_week", counts[0]), ("drafts", counts[1]), ("observer_runs", counts[2])] {
             j.key(k);
             j.u(c);
         }
         j.key("recent");
         j.raw("[");
-        let entries = self.rows_where(nt, u16::MAX, 0, n::ID, true);
-        self.rows_json(&mut j, nt, entries.into_iter().take(40), &["id", "kind", "channel", "title", "url", "body", "shipped_on"]);
+        let entries = newest((0..net_id.len()).collect(), 40, &|x, y| net_id[y].cmp(&net_id[x]));
+        self.rows_json(&mut j, nt, entries.into_iter(), &["id", "kind", "channel", "title", "url", "body", "shipped_on"]);
         j.raw("]");
         options(&mut j, "kinds", NET_KINDS);
         options(&mut j, "channels", NET_CHANNELS);
@@ -646,6 +663,16 @@ impl Desk {
         j.raw("}}");
         String::from_utf8(j.0).unwrap_or_else(|_| String::from("null"))
     }
+}
+
+/// The first `n` of `rows` in `cmp` order, in one selection pass and a sort of those `n`.
+fn newest(mut rows: Vec<usize>, n: usize, cmp: &dyn Fn(usize, usize) -> core::cmp::Ordering) -> Vec<usize> {
+    if rows.len() > n {
+        rows.select_nth_unstable_by(n, |a, b| cmp(*a, *b));
+        rows.truncate(n);
+    }
+    sort_usize(&mut rows, cmp);
+    rows
 }
 
 const GYM_PLATFORMS: &[&str] = &["leetcode", "codeforces", "other"];
