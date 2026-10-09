@@ -252,6 +252,14 @@ pub extern "C" fn mix(batch: u32) -> u32 {
     with(|k| k.desk.mix(batch))
 }
 
+/// Runs the kernel over a small made-up board and forgets it, so the
+/// first BOOT does not pay the browser's lazy compile. Call it once after
+/// instantiating, before any frame.
+#[unsafe(no_mangle)]
+pub extern "C" fn warm() {
+    with(|k| k.desk.warm())
+}
+
 /// Extracts up to `budget` waiting listings into their cards' keyword
 /// counts (touched reports the cards); answers how many still wait. Call
 /// it off the input path until it answers 0; a budget of 0 only asks.

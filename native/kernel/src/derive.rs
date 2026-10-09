@@ -37,7 +37,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use wire::schema::{col, table};
+use wire::schema::{col, op, table};
 use wire::{F64, NONE, STR, U32};
 
 use crate::desk::Desk;
@@ -1655,6 +1655,59 @@ fn ensure_text(arena: &Arena, c: &mut Corpus, profile: u32, lineage: u32) -> (u3
 }
 
 impl Desk {
+    /// Derives and selects a small made-up board, then forgets it. A
+    /// browser compiles each wasm function on its first call, in its
+    /// slowest tier, so a page that calls this while it waits for its
+    /// BOOT pays for that compile there and not in the first frame.
+    /// Does nothing once a desk is held.
+    pub fn warm(&mut self) {
+        if self.store.table(table::JOB_APPS).is_some() {
+            return;
+        }
+        let n = 256u32;
+        let words: [&[u8]; 6] = [
+            b"Acme",
+            b"https://boards.greenhouse.io/acme/jobs/1",
+            b"Berlin",
+            b"https://jobs.lever.co/globex/2",
+            b"Initech",
+            b"SRE",
+        ];
+        let text = |m: u32| (0..n).map(move |i| words[(i * m / 3) as usize % words.len()]);
+        let ids = || 1..n + 1;
+        use col::{cv_variants as v, job_apps as j};
+        let mut w = wire::Writer::new();
+        w.begin(wire::schema::frame::BOOT, wire::END, 1);
+        w.table(table::PROFILES, 1);
+        w.col_u32(col::profiles::ID, [1].into_iter());
+        w.table(table::CV_VARIANTS, n);
+        w.col_u32(v::ID, ids());
+        w.col_u32(v::JOB_APP_ID, ids());
+        w.col_u32(v::PROFILE_ID, ids().map(|_| 1));
+        w.col_str(v::LABEL, text(1));
+        w.table(table::JOB_APPS, n);
+        w.col_u32(j::ID, ids());
+        w.col_u32(j::PROFILE_ID, ids().map(|_| 1));
+        w.col_u32(j::BATCH_ID, ids().map(|i| i % 3));
+        w.col_u32(j::SCORE_100, ids().map(|i| i % 101));
+        w.col_u32(j::STAGE_ON, ids().map(|i| 20_000 + i % 40));
+        w.col_str(j::COMPANY, text(1));
+        w.col_str(j::ROLE, text(2));
+        w.col_str(j::LOCATION, text(5));
+        w.col_str(j::LISTING_URL, text(7));
+        w.col_str(j::CURRENT_STAGE, ids().map(|i| heat::STAGES[i as usize % 10].as_bytes()));
+        w.end();
+        self.today = 20_040;
+        self.ingest(&w.buf);
+        for (i, q) in [&b""[..], b"acme", b"sre"].into_iter().enumerate() {
+            let mut op = wire::Writer::new();
+            op.op(i as u64 + 1, [op::STAGE, op::HEAT_OVERRIDE, op::SCORE][i], 7, &[["reply", "x", "9"][i]]);
+            self.push(&op.buf);
+            self.select(-1, -1000, 1000, -1, -1, -1, -1, -1, q);
+        }
+        *self = Desk::new();
+    }
+
     /// Extracts the listings of up to `budget` cards still showing 0 of 0
     /// for want of one, those earliest in the selection first, and patches
     /// their cards (reported in `touched`). Answers how many still wait.
