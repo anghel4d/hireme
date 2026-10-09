@@ -242,4 +242,107 @@ defmodule HiremeWeb.SessionTest do
     assert Enum.any?(out, &match?({:nack, _, _, <<52::little-64, ^nack::8, _::binary>>}, &1))
     assert Enum.any?(out, &match?({:ack, _, _, <<53::little-64>>}, &1))
   end
+
+  # ---- Raw mode (round two): the client derives every view ----
+
+  defp raw_hello(snapshot \\ 0) do
+    IO.iodata_to_binary(
+      Packet.frame(
+        :hello,
+        0,
+        <<0::little-16, 0::48, snapshot::little-64, 7::little-32, 1::little-32>>
+      )
+    )
+  end
+
+  defp inflate({kind, flags, rev, body}) when Bitwise.band(flags, 1) == 1 do
+    <<_raw::little-32, z_len::little-32, rest::binary>> = body
+    <<z::binary-size(^z_len), _::binary>> = rest
+    {kind, Bitwise.band(flags, 0xFE), rev, :zlib.unzip(z)}
+  end
+
+  defp inflate(frame), do: frame
+
+  defp table_ids(body), do: table_ids(body, [])
+  defp table_ids(<<>>, acc), do: Enum.reverse(acc)
+
+  defp table_ids(<<id::little-16, ncols::little-16, _n::little-32, rest::binary>>, acc) do
+    rest =
+      Enum.reduce(1..ncols//1, rest, fn _, <<_::16, _::8, _::8, size::little-32, rest::binary>> ->
+        skip = size + rem(8 - rem(size, 8), 8)
+        <<_::binary-size(^skip), rest::binary>> = rest
+        rest
+      end)
+
+    table_ids(rest, [id | acc])
+  end
+
+  test "a raw hello boots raw tables, account tables and the clock, and no focus stream",
+       %{account: account} do
+    job = job(profile())
+    s = open(account)
+    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    [{:boot, 0x02, rev, body}] = all_out() |> Enum.take(1) |> Enum.map(&inflate/1)
+    ids = table_ids(body)
+    for t <- [:job_apps, :profiles, :clock, :acct, :stages], do: assert(Packet.table_id(t) in ids)
+    refute Packet.table_id(:cards) in ids
+    refute_received {:uni, _, _}
+
+    {:ok, s} = Session.event({:data, 0, op(61, 2, job.id, ["Call", ""])}, s)
+    _s = drain(s)
+    out = all_out()
+    [{:patch, 0, prev, pbody} | _] = Enum.filter(out, &match?({:patch, _, _, _}, &1))
+    assert prev > rev
+    assert Packet.table_id(:job_apps) in table_ids(pbody)
+
+    assert Enum.find_index(out, &match?({:patch, _, _, _}, &1)) <
+             Enum.find_index(out, &match?({:ack, _, _, <<61::little-64>>}, &1))
+  end
+
+  test "a raw resume replays only the revisions since the snapshot", %{account: account} do
+    job = job(profile())
+    s = open(account)
+    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    [{:boot, _, rev0, _} | _] = all_out()
+    {:ok, s} = Session.event({:data, 0, op(62, 2, job.id, ["One", ""])}, s)
+    {:ok, s} = Session.event({:data, 0, op(63, 2, job.id, ["Two", ""])}, s)
+    s = drain(s)
+    _ = all_out()
+
+    s2 = open(account)
+    {:ok, _} = Session.event({:data, 0, raw_hello(rev0)}, s2)
+    out = all_out()
+    patches = for {:patch, _, r, _} <- out, do: r
+    assert List.last(patches) == s.rev
+    assert length(patches) == 3
+
+    assert [{:patch, 0x02, _, _} | _] =
+             Enum.reverse(Enum.filter(out, &match?({:patch, _, _, _}, &1)))
+
+    refute Enum.any?(out, &match?({:boot, _, _, _}, &1))
+  end
+
+  test "account commands ride the session as RPC, tables before the reply", %{account: account} do
+    {:ok, %{key: key}} = Hireme.ApiKeys.create("bench")
+    s = open(account)
+    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    _ = all_out()
+
+    req =
+      Jason.encode!(%{
+        id: 9,
+        method: "account/rename_key",
+        params: %{id: key.id, name: "renamed"}
+      })
+
+    {:ok, _s} =
+      Session.event({:data, 0, IO.iodata_to_binary(HiremeWeb.LetterboxStream.rpc(req))}, s)
+
+    out = all_out()
+    pi = Enum.find_index(out, &match?({:patch, _, _, _}, &1))
+    ri = Enum.find_index(out, &match?({:rpc, _, _, _}, &1))
+    assert pi < ri
+    {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>} = Enum.at(out, ri)
+    assert %{"id" => 9, "result" => _} = Jason.decode!(json)
+  end
 end
