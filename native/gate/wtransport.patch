@@ -1,0 +1,61 @@
+Two changes to wtransport 0.7.2's server accept, applied by the release build
+to the vendored crate; development runs unpatched.
+
+1. Accept at 0.5-RTT. A quinn server connection may send as soon as its
+   handshake flight is out, but wtransport waited for the whole handshake
+   before its driver sent the HTTP/3 SETTINGS, and Chromium sends the
+   CONNECT only once SETTINGS arrive: a cold session cost three round trips.
+   With SETTINGS at 0.5-RTT it costs two (Chromium at a 47 ms RTT: `ready`
+   145 ms -> 97 ms). The connection is taken only once the whole ClientHello
+   is in: taken earlier, with the client's stream limits still unknown, the
+   driver's control-stream open waited on a credit that woke nobody, and
+   Chromium never got SETTINGS (seen behind a 20 Mbit/s link, where the
+   ClientHello's two Initial packets arrive apart).
+2. Close an abandoned connection. The driver's worker holds its own clone
+   of the connection, so when the gate gave up on a handshake (its deadline)
+   the connection stayed open, kept alive by keep-alives, and the browser
+   waited for an answer that never came. The connection now closes unless
+   a session request comes out of the future.
+
+--- a/src/endpoint.rs
++++ b/src/endpoint.rs
+@@ -613,8 +613,37 @@
+ 
+     fn new(quic_incoming: quinn::Incoming) -> Self {
+         Self(Box::pin(async move {
+-            let quic_connection = quic_incoming.await?;
+-            Self::accept(quic_connection).await
++            // Server side, into_0rtt always succeeds: the connection is usable
++            // for 0.5-RTT data, so SETTINGS leave with the server's handshake
++            // flight instead of a round trip later.
++            // Only once the whole ClientHello is in: before that the
++            // client's transport parameters (its stream limits) are unknown,
++            // the driver's open of its control stream waits on a credit whose
++            // arrival wakes nobody, and SETTINGS never leave. A ClientHello
++            // split across two Initial packets that arrive apart did that.
++            let mut connecting = quic_incoming.accept()?;
++            let _ = connecting.handshake_data().await;
++            let quic_connection = match connecting.into_0rtt() {
++                Ok((connection, _)) => connection,
++                Err(connecting) => connecting.await?,
++            };
++            // The driver's worker holds a clone of the connection, so a
++            // caller that gives up on this future (a handshake deadline)
++            // would leave the connection open, kept alive by keep-alives,
++            // with the client waiting for an answer forever. Close it
++            // unless a session request comes out.
++            struct CloseOnDrop(quinn::Connection, bool);
++            impl Drop for CloseOnDrop {
++                fn drop(&mut self) {
++                    if !self.1 {
++                        self.0.close(0u32.into(), b"abandoned");
++                    }
++                }
++            }
++            let mut guard = CloseOnDrop(quic_connection.clone(), false);
++            let request = Self::accept(quic_connection).await;
++            guard.1 = request.is_ok();
++            request
+         }))
+     }
+ 
