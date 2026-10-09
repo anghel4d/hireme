@@ -1,0 +1,27 @@
+Accept a WebTransport connection at 0.5-RTT (wtransport 0.7.2).
+
+A quinn server connection may send as soon as its handshake flight is out,
+but wtransport waits for the whole handshake before its driver sends the
+HTTP/3 SETTINGS, and Chromium sends the CONNECT only once SETTINGS arrive:
+a cold session cost three round trips. With SETTINGS at 0.5-RTT it costs
+two (Chromium at a 47 ms RTT: `ready` 145 ms -> 97 ms). The release build
+applies this to the vendored crate; development runs unpatched, where the
+round trip is zero anyway.
+
+--- a/src/endpoint.rs
++++ b/src/endpoint.rs
+@@ -613,7 +613,13 @@
+
+     fn new(quic_incoming: quinn::Incoming) -> Self {
+         Self(Box::pin(async move {
+-            let quic_connection = quic_incoming.await?;
++            // Server side, into_0rtt always succeeds: the connection is usable
++            // for 0.5-RTT data, so SETTINGS leave with the server's handshake
++            // flight instead of a round trip later.
++            let quic_connection = match quic_incoming.accept()?.into_0rtt() {
++                Ok((connection, _)) => connection,
++                Err(connecting) => connecting.await?,
++            };
+             Self::accept(quic_connection).await
+         }))
+     }
