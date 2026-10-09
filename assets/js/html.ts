@@ -51,6 +51,43 @@ export function morph(target: Element, html: Raw): void {
   patchChildren(target, tpl.content)
 }
 
+/**
+ * A keyed set of sibling elements, each one patched alone and only when its
+ * own HTML changed. A board of cards where one card changes then costs one
+ * card's parse and patch, not a walk of every card.
+ */
+export class Keyed {
+  private readonly els = new Map<number, { el: Element; html: string }>()
+  private readonly tpl = document.createElement("template")
+
+  constructor(private readonly parent: Element) {}
+
+  /** Make the children exactly `items` (key, single-root HTML). Order is not kept: the items place themselves. */
+  set(items: readonly [number, Raw][]): void {
+    const live = new Set<number>()
+    for (const [key, html] of items) {
+      live.add(key)
+      const have = this.els.get(key)
+      if (have && have.html === html.html) continue
+      this.tpl.innerHTML = html.html
+      const fresh = this.tpl.content.firstElementChild
+      if (!fresh) continue
+      if (have) {
+        patchNode(have.el, fresh)
+        have.html = html.html
+      } else {
+        this.parent.append(fresh)
+        this.els.set(key, { el: fresh, html: html.html })
+      }
+    }
+    for (const [key, { el }] of this.els) {
+      if (live.has(key)) continue
+      el.remove()
+      this.els.delete(key)
+    }
+  }
+}
+
 function patchChildren(target: Node, from: Node): void {
   const want = Array.from(from.childNodes)
   const have = Array.from(target.childNodes)
