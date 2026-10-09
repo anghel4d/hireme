@@ -354,4 +354,41 @@ defmodule HiremeWeb.SessionTest do
     {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>} = Enum.at(out, ri)
     assert %{"id" => 9, "result" => _} = Jason.decode!(json)
   end
+
+  test "an agent hello boots the dictionaries and batches, then hears raw rows", %{
+    account: account
+  } do
+    Hireme.Repo.insert!(%Hireme.Desk.Batch{code: "B-agent", ordinal: 1, account_id: account.id})
+    job = job(profile())
+    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("session")
+
+    {:ok, a} =
+      Session.init({Carrier, self()}, %{ip: "198.51.100.9", origin: "", path: "/wt"})
+
+    hello =
+      IO.iodata_to_binary(
+        Packet.frame(
+          :hello,
+          0,
+          [
+            <<byte_size(secret)::little-16, secret::binary>>,
+            :binary.copy(<<0>>, rem(8 - rem(2 + byte_size(secret), 8), 8)),
+            <<0::little-64, 3::little-32, 0::little-32>>
+          ],
+          flags: 0x80
+        )
+      )
+
+    {:ok, a} = Session.event({:data, 0, hello}, a)
+    assert [{:boot, 0x02, _, body}] = all_out()
+    ids = table_ids(body)
+    assert Packet.table_id(:batches) in ids
+    refute Packet.table_id(:job_apps) in ids
+
+    op = %{op_id: 70, kind: :next, target: job.id, fields: ["Agent sees", ""]}
+    assert {:ok, _} = Hireme.Ops.run(account.id, op)
+    _a = drain(a)
+    assert [{:patch, 0, _, pbody}] = all_out()
+    assert Packet.table_id(:job_apps) in table_ids(pbody)
+  end
 end
