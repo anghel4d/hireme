@@ -51,7 +51,10 @@ defmodule HiremeWeb.Gate do
   a path prefix and an `Origin` allow-list. An absent Origin means a
   native agent, so its Session must insist on an API-key HELLO. ACCEPT
   or REFUSE is due within 2 s of OPEN, and READY within 2 s of the
-  accept, or the gate closes the connection. Until READY the peer gets
+  accept, or the gate closes the connection. A Session that authenticated
+  at OPEN (a browser's ticket) may call `ready/1` inside `init`, before
+  the ACCEPT: the caps then lift as the session opens, and no HELLO
+  deadline applies while the page loads its bundle. Until READY the peer gets
   one client bidi stream and a 64 KiB receive window, and no datagrams
   or uni streams are forwarded. A higher priority is sent first, so bulk
   streams go below the control stream's 0.
