@@ -241,7 +241,7 @@ defmodule Hireme.OpsTest do
     assert_received {:ops_delta, ^rev, %{rows: %{gym_reps: [_]}}}
     assert {:ok, ^rev} = Ops.run(account.id, op)
     refute_received {:ops_delta, _, _}
-    assert Repo.aggregate(Hireme.Gym.Rep, :count) == 1
+    assert Repo.aggregate(Gym.Rep, :count) == 1
 
     refused = %{op | op_id: 2, kind: :score, target: 1, fields: ["101"]}
     assert {:error, {:argument, "score"}} = Ops.run(account.id, refused)
