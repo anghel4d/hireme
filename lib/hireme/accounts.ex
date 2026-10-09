@@ -351,7 +351,7 @@ defmodule Hireme.Accounts do
       notify(account_id, :identity_unlinked, about)
       # The removed address hears it too; the remaining ones already did.
       if identity.provider == :email,
-        do: Mailer.notice(identity.subject, :identity_unlinked, about)
+        do: Mailer.Outbox.enqueue(account_id, [identity.subject], :identity_unlinked, about)
 
       :ok
     else
@@ -375,13 +375,17 @@ defmodule Hireme.Accounts do
   def notify(account_id, kind, meta \\ %{}) when is_integer(account_id) and is_atom(kind) do
     Audit.record(:notified, Map.put(meta, :about, kind), %{account_id: account_id})
 
-    for %Identity{subject: email} <-
-          Repo.all(
-            from(i in Identity, where: i.account_id == ^account_id and i.provider == :email),
-            skip_account: true
-          ),
-        do: Mailer.notice(email, kind, meta)
+    addresses =
+      Repo.all(
+        from(i in Identity,
+          where: i.account_id == ^account_id and i.provider == :email,
+          select: i.subject
+        ),
+        skip_account: true
+      )
 
+    # Queued, not sent: the request does not wait on the mail provider.
+    Mailer.Outbox.enqueue(account_id, addresses, kind, meta)
     :ok
   end
 

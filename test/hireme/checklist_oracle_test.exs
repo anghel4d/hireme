@@ -511,6 +511,7 @@ defmodule Hireme.ChecklistOracleTest do
              Repo.all(from(m in Method, where: m.account_id == ^account.id))
 
     assert at
+    Hireme.Mailer.Outbox.drain()
 
     subjects =
       Stream.repeatedly(fn ->

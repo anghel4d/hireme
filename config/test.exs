@@ -21,3 +21,6 @@ config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 
 config :phoenix, sort_verified_routes_query_params: true
+
+# Tests drain the mail outbox themselves; no worker sends behind their back.
+config :hireme, :mail_outbox, false

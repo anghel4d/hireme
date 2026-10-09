@@ -93,3 +93,150 @@ defmodule Hireme.Mailer do
     Enum.reverse(if last == "", do: chunks, else: [last | chunks])
   end
 end
+
+defmodule Hireme.Mailer.Outbox do
+  @moduledoc """
+  Security notices outside the request that caused them: durable queued
+  intent with bounded retries, not guaranteed delivery.
+
+  `enqueue/4` is one insert in the caller's process and a wakeup that does
+  not wait. The worker sends due notices one at a time, waits longer after
+  each failure, and gives a notice up after the last delay with its error
+  kept. Notices still pending at a restart are sent after it. A notice
+  whose change committed but whose insert failed is logged and lost; the
+  change it reports stands.
+  """
+
+  use GenServer
+  require Logger
+  import Ecto.Query
+  alias Hireme.Mailer
+  alias Hireme.Mailer.Notice
+  alias Hireme.Repo
+
+  # Seconds to wait after each failure; after the last one the notice is given up.
+  @backoff [30, 120, 480, 1_800, 7_200, 21_600, 43_200, 86_400]
+  @tick :timer.seconds(60)
+  @batch 50
+
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @doc "Queue one notice per address for `account_id` and wake the worker."
+  @spec enqueue(pos_integer(), [String.t()], atom(), map()) :: :ok | {:error, :not_queued}
+  def enqueue(_account_id, [], _kind, _meta), do: :ok
+
+  def enqueue(account_id, addresses, kind, meta) when is_atom(kind) and is_map(meta) do
+    now = now()
+
+    rows =
+      for address <- addresses,
+          do: %{
+            account_id: account_id,
+            address: address,
+            kind: Atom.to_string(kind),
+            meta: meta,
+            next_at: now,
+            inserted_at: now
+          }
+
+    try do
+      Repo.insert_all(Notice, rows)
+      if pid = GenServer.whereis(__MODULE__), do: send(pid, :drain)
+      :ok
+    rescue
+      e ->
+        Logger.error(
+          "security notice #{kind} for account #{account_id} was not queued: #{error(e)}"
+        )
+
+        {:error, :not_queued}
+    end
+  end
+
+  @doc "Send every notice due at `now`, in the calling process. Returns how many were sent."
+  @spec drain(DateTime.t()) :: non_neg_integer()
+  def drain(now \\ now()) do
+    due =
+      Repo.all(
+        from(n in Notice,
+          where: is_nil(n.sent_at) and n.next_at <= ^now and n.attempts < ^length(@backoff),
+          order_by: n.id,
+          limit: @batch
+        ),
+        skip_account: true
+      )
+
+    sent = Enum.count(due, &(deliver(&1) == :sent))
+    if length(due) == @batch, do: sent + drain(now), else: sent
+  end
+
+  @impl true
+  def init(:ok) do
+    send(self(), :drain)
+    {:ok, nil}
+  end
+
+  @impl true
+  def handle_info(:drain, timer) do
+    flush()
+
+    # A drain that fails tries again at the next tick; it must not restart
+    # this process often enough to take the application down with it.
+    try do
+      drain()
+    rescue
+      e -> Logger.error("mail outbox drain failed: #{error(e)}")
+    end
+
+    if timer, do: Process.cancel_timer(timer)
+    {:noreply, Process.send_after(self(), :drain, @tick)}
+  end
+
+  @impl true
+  def handle_call(:ping, _from, timer), do: {:reply, :pong, timer}
+
+  defp flush do
+    receive do
+      :drain -> flush()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp deliver(%Notice{} = notice) do
+    result =
+      try do
+        Mailer.notice(notice.address, String.to_existing_atom(notice.kind), fields(notice.meta))
+      rescue
+        e -> {:error, e}
+      end
+
+    changes =
+      case result do
+        :ok ->
+          [sent_at: now()]
+
+        {:error, reason} ->
+          [
+            next_at: DateTime.add(now(), Enum.at(@backoff, notice.attempts), :second),
+            last_error: error(reason)
+          ]
+      end
+
+    notice
+    |> Ecto.Changeset.change([{:attempts, notice.attempts + 1} | changes])
+    |> Repo.update!()
+
+    if result == :ok, do: :sent, else: :failed
+  end
+
+  # JSON gave the keys back as strings; only atoms the notice texts already use come back.
+  defp fields(meta), do: Map.new(meta, fn {k, v} -> {String.to_existing_atom(k), v} end)
+
+  defp error(%{__exception__: true} = e), do: clip(Exception.message(e))
+  defp error(reason), do: clip(inspect(reason))
+
+  defp clip(text), do: text |> String.replace(~r/[^\x20-\x7e]/, "?") |> String.slice(0, 200)
+
+  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
+end
