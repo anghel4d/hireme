@@ -169,6 +169,67 @@ defmodule Hireme.OpsTest do
     assert {:error, {:argument, "score"}} = Ops.run(account.id, %{refused | fields: ["5"]})
   end
 
+  # The target is the client's: an id that is another account's, or no
+  # one's, is refused like any other op, and the sequencer carries on.
+  test "every kind refuses a target the account cannot see", %{account: account} do
+    mine = job(profile(), %{company: "Mine"})
+    [mine_item | _] = for _ <- 1..1, do: item(Desk.focus(mine.id).profile)
+    other = Hireme.Accounts.create!(%{name: "Other"})
+
+    {theirs, their_item, their_narrative} =
+      Repo.with_account(other.id, fn ->
+        p = profile()
+        user = Hireme.Narrative.create_user!(%{name: "Them"})
+        narrative = Hireme.Narrative.write!(user, "private")
+
+        %Batch{}
+        |> Batch.changeset(%{code: "Theirs", ordinal: 1, status: :fire_ready, fire: :hold})
+        |> Repo.insert!()
+
+        {job(p, %{company: "Theirs"}), item(p), narrative}
+      end)
+
+    on_exit(fn -> Ops.stop(other.id) end)
+    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account.id))
+
+    ops =
+      for target <- [theirs.id, 999_999_999],
+          {kind, fields} <- [
+            stage: ["gated"],
+            next: ["x", ""],
+            note: ["gated", "x"],
+            score: ["5"],
+            overlay: ["#{mine_item.id}", "hidden", "", ""],
+            heat_override: ["because"]
+          ],
+          do: {kind, target, fields}
+
+    ops =
+      ops ++
+        [
+          {:overlay, mine.id, ["#{their_item.id}", "hidden", "", ""]},
+          {:overlay, mine.id, ["999999999", "emphasized", "", ""]},
+          {:open_fire, 0, ["Theirs"]},
+          {:narrative, their_narrative.id, ["mine now"]},
+          {:narrative, 999_999_999, ["nobody's"]}
+        ]
+
+    for {{kind, target, fields}, n} <- Enum.with_index(ops, 100) do
+      op = %{op_id: n, kind: kind, target: target, fields: fields}
+      result = Ops.run(account.id, op)
+
+      assert match?({:error, reason} when is_atom(reason) and reason != :internal, result),
+             "#{inspect(op)} -> #{inspect(result)}"
+
+      refute_received {:ops_delta, _, _}, inspect(op)
+    end
+
+    assert {:ok, _} =
+             Ops.run(account.id, %{op_id: 1, kind: :score, target: mine.id, fields: ["7"]})
+
+    assert Repo.with_account(other.id, fn -> Repo.get!(Desk.Job, theirs.id).score_100 end) != 5
+  end
+
   # Another VM (a release task, an import) writes the same database and
   # moves the revision; the next delta must still bring a tab level.
   test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
