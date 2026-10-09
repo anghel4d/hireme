@@ -487,6 +487,26 @@ defmodule HiremeWeb.SessionTest do
     assert {:stop, :normal, _} = Session.info({Session, :hello_deadline}, a)
   end
 
+  test "a page carries the board, and its connection then gets only the rest",
+       %{account: account} do
+    job(profile(), %{listing: "Rust and Elixir."})
+    {token, session} = Hireme.Accounts.start_session(account)
+    {rev, board} = Session.board(account.id, session.id)
+    assert {:ok, [{:boot, 0x03, ^rev, _}], ""} = Packet.split(board)
+
+    info = %{connect_info: %{session: %{HiremeWeb.Auth.session_key() => token}}}
+    params = %{"raw" => "1", "rev" => "0", "cid" => "5", "board" => "#{rev}"}
+    {:ok, meta} = HiremeWeb.WireSocket.connect(Map.put(info, :params, params))
+    {:ok, s} = Session.init({Carrier, self()}, meta)
+    assert_received {Session, :early_boot, 0} = early
+    {:ok, s} = Session.info(early, s)
+    _ = drain(s)
+    # The early BOOT stream (3) holds no BOOT, only the rest and the ticket.
+    out = for {:out, 3, bin} <- Process.info(self(), :messages) |> elem(1), do: bin
+    {:ok, frames, ""} = Packet.split(IO.iodata_to_binary(out))
+    assert [:patch, :ticket] = for({kind, _, _, _} <- frames, do: kind)
+  end
+
   test "a ticketed raw browser gets its BOOT on a server stream right after accept",
        %{account: account} do
     job(profile())

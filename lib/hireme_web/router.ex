@@ -135,8 +135,8 @@ defmodule HiremeWeb.DeskController do
 
   def index(conn, _params) do
     %{account: account, session: session} = conn.assigns
-    # The sequencer builds its card table while the page and bundle load.
-    Hireme.Ops.prewarm(account.id)
+    # The board travels in the page, so the first card waits on no socket.
+    {rev, board} = HiremeWeb.Session.board(account.id, session.id)
 
     page = """
     <!DOCTYPE html>
@@ -151,6 +151,7 @@ defmodule HiremeWeb.DeskController do
         <meta name="wire-gate-hashes" content="#{HiremeWeb.Auth.wire_hashes()}" />
         <meta name="wire-scope" content="#{HiremeWeb.Session.scope(account.id)}" />
         <meta name="wire-schema" content="#{HiremeWeb.Packet.schema_hash()}" />
+        <meta name="wire-board" content="#{rev}:#{Base.encode64(board)}" />
         <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
         #{HiremeWeb.Auth.early_script()}
         <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
