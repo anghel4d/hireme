@@ -122,7 +122,7 @@ export class Shell {
     this.select()
     if (this.model.appId === null) this.model.appId = this.idAt(0)
     if (this.model.lens === "settings") void this.loadSettings(LINK_ERRORS.get(params.get("link_error") ?? "") ?? null)
-    desk.subscribe((change) => this.dispatch({ t: "desk", change }))
+    desk.subscribe((change) => { if (!this.unseen(change)) this.dispatch({ t: "desk", change }) })
     this.draw()
   }
 
@@ -242,6 +242,18 @@ export class Shell {
       if (isLaneOp(r.op)) m.laneError = text
       else if (r.jobId !== null && r.jobId === m.appId) m.refusal = text
     }
+  }
+
+  /**
+   * A change nothing on screen draws from: focuses streaming in for cards
+   * other than the selected one. Those land by the hundred after a BOOT
+   * and each would otherwise cost a draw that changes nothing.
+   */
+  private unseen(c: Change): boolean {
+    if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused) return false
+    if (this.desk.tables !== this.tables) return false
+    const id = this.model.appId
+    return id === null || !(c.focus ?? []).includes(id)
   }
 
   /** Apply a write: the desk predicts it locally or refuses it at once. */
