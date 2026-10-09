@@ -165,9 +165,9 @@ export const INGEST = { cards: 1, tables: 2, settled: 16, dropped: 32, tick: 64,
 const REFUSAL = ["", "fire_hold", "heat", "leased", "cooldown", "not_additive", "argument", "not_found", "batch", "invalid", "internal"]
 export const refusalName = (code: number): Refusal => REFUSAL[code] ?? "internal"
 
-type Kind = "u32" | "u32?" | "f64" | "str" | "str?" | "day" | "time" | "secs?" | "bool" | "lines"
+type Kind = "u32" | "f64" | "str" | "day" | "time" | "secs?" | "bool"
 type Spec = Record<string, readonly [string, Kind]>
-type Cell = number | string | boolean | null | string[]
+type Cell = number | string | boolean | null
 
 const NAN_SAFE = (x: number) => (Number.isNaN(x) ? 0 : x)
 const days = new Map<number, string>()
@@ -184,12 +184,12 @@ const stamp = (secs: number) => new Date(secs * 1000).toISOString().replace(".00
 /**
  * The kernel through its exports. Tables and columns are found by the
  * names schema.txt gives them, once; rows are read in place and decoded
- * into plain objects. A table read whole is kept by id and patched row by
- * row as ingests and pushes touch it, so a change costs the rows it moved.
+ * into plain objects. A table read whole (the lookups, the scoreboard,
+ * the account: small ones) is kept until an ingest or push touches it.
  */
 export class Kernel {
   private readonly ids = new Map<string, number>()
-  private readonly kept = new Map<number, { spec: Spec; byId: Map<number, unknown> | null; list: unknown[] | null }>()
+  private readonly kept = new Map<number, unknown[]>()
   private count = 0
   private trapped = false
   /** The exports, guarded: a trap marks the instance dead, and a dead one answers as an empty desk. */
@@ -306,71 +306,46 @@ export class Kernel {
     return { tables, jobs: jobs === null ? "all" : [...(jobs ?? [])] }
   }
 
-  /** Bring decoded rows up to date with what moved (null: everything). */
-  forget(tables: ReadonlyMap<number, ReadonlySet<number> | null> | null): void {
-    if (tables === null) {
-      this.kept.clear()
-      return
-    }
-    for (const [t, keys] of tables) {
-      const kept = this.kept.get(t)
-      if (!kept) continue
-      if (keys === null || kept.byId === null) {
-        this.kept.delete(t)
-        continue
-      }
-      for (const key of keys) {
-        const row = this.k.row_of(t, key)
-        if (row < 0) kept.byId.delete(key)
-        else kept.byId.set(key, this.read(t, kept.spec, row, row + 1)[0])
-      }
-      kept.list = null
-    }
+  /** Drop the decoded rows of what moved (null: everything). */
+  forget(tables: ReadonlyMap<number, unknown> | null): void {
+    if (tables === null) this.kept.clear()
+    else for (const t of tables.keys()) this.kept.delete(t)
   }
 
-  /** Every row of a named table, decoded once and kept current. */
+  /** Every row of a named table, decoded once and kept until it moves. */
   all<T>(name: string, spec: Spec): T[] {
     const t = this.table(name)
     if (t < 0) return []
-    let kept = this.kept.get(t)
-    if (!kept) {
-      const rows = this.read<{ id?: number }>(t, spec)
-      const keyed = "id" in spec && rows.every((r) => typeof r.id === "number")
-      kept = { spec, byId: keyed ? new Map(rows.map((r) => [r.id as number, r])) : null, list: rows }
-      this.kept.set(t, kept)
-    }
-    kept.list ??= [...(kept.byId?.values() ?? [])]
-    return kept.list as T[]
+    let rows = this.kept.get(t)
+    if (!rows) this.kept.set(t, (rows = this.read(t, spec)))
+    return rows as T[]
   }
 
-  private read<T>(t: number, spec: Spec, from = 0, to = this.k.rows(t)): T[] {
+  private read<T>(t: number, spec: Spec): T[] {
     const n = this.k.rows(t)
-    const out: Record<string, Cell>[] = []
-    for (let i = from; i < to; i++) out.push({})
+    const out: Record<string, Cell>[] = Array.from({ length: n }, () => ({}))
     for (const [field, [name, kind]] of Object.entries(spec)) {
       const c = this.col(t, name)
-      if (kind === "str" || kind === "str?" || kind === "lines") {
-        for (let i = from; i < to; i++) {
-          const s = c < 0 ? "" : this.str(t, c, i)
-          ;(out[i - from] as Record<string, Cell>)[field] = kind === "lines" ? s.split("\n").filter((x) => x !== "") : kind === "str?" && s === "" ? null : s
-        }
+      if (kind === "str") {
+        for (let i = 0; i < n; i++) (out[i] as Record<string, Cell>)[field] = c < 0 ? "" : this.str(t, c, i)
         continue
       }
       if (kind === "f64") {
         const p = c < 0 ? 0 : this.k.col_ptr(t, c)
         const col = p === 0 ? null : new Float64Array(this.mem, p, n)
-        for (let i = from; i < to; i++) (out[i - from] as Record<string, Cell>)[field] = NAN_SAFE(col?.[i] ?? 0)
+        for (let i = 0; i < n; i++) (out[i] as Record<string, Cell>)[field] = NAN_SAFE(col?.[i] ?? 0)
         continue
       }
       const col = this.u32(t, c)
-      for (let i = from; i < to; i++) {
+      for (let i = 0; i < n; i++) {
         const v = col[i] ?? NONE
-        ;(out[i - from] as Record<string, Cell>)[field] =
+        ;(out[i] as Record<string, Cell>)[field] =
           kind === "u32" ? (v === NONE ? 0 : v)
-          : kind === "u32?" || kind === "secs?" ? (v === NONE ? null : v)
           : kind === "bool" ? v === 1
-          : kind === "day" ? (v === NONE ? null : isoDay(v))
-          : v === NONE ? null : stamp(v)
+          : v === NONE ? null
+          : kind === "secs?" ? v
+          : kind === "day" ? isoDay(v)
+          : stamp(v)
       }
     }
     return out as T[]
