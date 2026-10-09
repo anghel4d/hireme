@@ -1,6 +1,6 @@
 defmodule HiremeWeb.Sockets do
   @moduledoc false
-  # What the three transports share: one JSON object per text frame, and
+  # What the agent sockets share: one JSON object per text frame, and
   # the question every agent socket asks at upgrade: whose key is this?
 
   alias Hireme.ApiKeys
@@ -98,51 +98,6 @@ defmodule HiremeWeb.Sockets do
   end
 
   defp header(_, _), do: nil
-end
-
-defmodule HiremeWeb.FeedSocket do
-  @moduledoc """
-  Push-only feed of desk signals for the browser shell.
-
-  Connect at `/feed/websocket` with the session cookie; a connection
-  without a live session is refused. Every `Hireme.Desk.Signal` on the
-  account's topic arrives as one JSON text frame. Frames from the client
-  are ignored; writes go over HTTP.
-  """
-
-  @behaviour Phoenix.Socket.Transport
-
-  alias Hireme.Accounts
-  alias Hireme.Desk
-  alias Hireme.Desk.Signal
-  alias Hireme.Repo
-  alias HiremeWeb.Auth
-  alias HiremeWeb.Sockets
-
-  def child_spec(_opts), do: :ignore
-
-  def connect(%{connect_info: %{session: %{} = session}}) do
-    case Accounts.session(session[Auth.session_key()]) do
-      {_session, account} -> {:ok, %{account_id: account.id}}
-      nil -> :error
-    end
-  end
-
-  def connect(_info), do: :error
-
-  def init(%{account_id: account_id} = state) do
-    Repo.put_account(account_id)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
-    {:ok, state}
-  end
-
-  def handle_in(_frame, state), do: {:ok, state}
-
-  def handle_info({:desk_event, %Signal{} = signal}, state),
-    do: Sockets.push(Signal.to_json(signal), state)
-
-  def handle_info(_message, state), do: {:ok, state}
-  def terminate(_reason, _state), do: :ok
 end
 
 defmodule HiremeWeb.McpDirectorySocket do

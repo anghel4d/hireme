@@ -40,18 +40,15 @@ defmodule HiremeWeb.Endpoint do
     max_age: 24 * 60 * 60
   ]
 
-  # The browser's feed authenticates with the same cookie; an agent's
-  # socket authenticates with an API key in the `x-api-key` header or the
-  # `base64url.bearer.phx.<base64 key>` websocket subprotocol.
-  socket "/feed", HiremeWeb.FeedSocket,
-    websocket: [connect_info: [session: @session_options]],
-    longpoll: false
-
   # The desk session where UDP is blocked: the WebTransport frames, binary.
   socket "/wire", HiremeWeb.WireSocket,
     websocket: [connect_info: [session: @session_options], max_frame_size: 1_048_576],
     longpoll: false
 
+  # An agent's socket authenticates with an API key in the `x-api-key`
+  # header or the `base64url.bearer.phx.<base64 key>` subprotocol. These
+  # per-lease sockets are the fallback for agents that cannot reach the
+  # gate; over WebTransport one session carries every lease.
   socket "/mcp", HiremeWeb.McpDirectorySocket,
     websocket: [connect_info: [:x_headers, :peer_data], auth_token: true],
     longpoll: false
