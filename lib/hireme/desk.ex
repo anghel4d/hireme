@@ -739,21 +739,34 @@ defmodule Hireme.Desk do
   end
 
   @doc """
-  The `score_100` chart for the whole desk or for one batch: band counts
-  and ten-point bins. Aggregate scores in SQL so at most 101 rows cross the Repo.
+  The `score_100` chart for a board filter, the whole desk, or one batch.
+  Aggregate scores in SQL without preparing cards. A heat filter still needs
+  governor decoration, so that case uses the exact filtered board.
   """
-  @spec score_chart(String.t() | :leftover | :all) :: LifeEv.Chart.t()
-  def score_chart(batch \\ :all) do
+  @spec score_chart(Filters.t() | String.t() | :leftover | :all) :: LifeEv.Chart.t()
+  def score_chart(batch \\ :all)
+
+  def score_chart(%Filters{heat: :all} = filters),
+    do: filters |> card_filter_query() |> score_query()
+
+  def score_chart(%Filters{} = filters), do: filters |> list_cards() |> LifeEv.chart()
+
+  def score_chart(batch) do
     Job
     |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
     |> filter(:batch, batch)
+    |> score_query()
+  end
+
+  defp score_query(query) do
+    query
     |> group_by([j], j.score_100)
     |> select([j], {j.score_100, count()})
     |> Repo.all()
     |> LifeEv.chart_frequencies()
   end
 
-  defp card_query(%Filters{} = f) do
+  defp card_filter_query(%Filters{} = f) do
     Job
     |> join(:inner, [j], p in Corpus.Profile, on: p.id == j.profile_id)
     |> join(:inner, [j], v in Variant, on: v.job_app_id == j.id)
@@ -765,6 +778,11 @@ defmodule Hireme.Desk do
     |> filter(:q, f.q)
     |> filter(:band, f.band)
     |> filter(:min_score, f.min_score)
+  end
+
+  defp card_query(%Filters{} = f) do
+    f
+    |> card_filter_query()
     |> select([j], map(j, ^Card.job_fields()))
     |> select_merge([j, p, v, b], %{
       stage: j.current_stage,

@@ -41,6 +41,21 @@ defmodule Hireme.ScoreTest do
     assert chart.n == 4
     assert Enum.find(chart.bands, &(&1.key == :frontier)).count == 1
 
+    assert %{n: 2, min: 92, max: 100, mean: 96.0} =
+             Desk.score_chart(%Filters{status: :all, min_score: 90})
+
+    assert %{n: 1, min: 70, max: 70} =
+             Desk.score_chart(%Filters{status: :all, band: :systems, batch: "Batch-009"})
+
+    assert %{n: 1, min: 92} = Desk.score_chart(%Filters{status: :all, q: "High"})
+    assert Desk.score_chart(%Filters{status: :all, heat: :cool}).n == 4
+    assert Desk.score_chart(%Filters{status: :all, heat: :blocked}).n == 0
+    other = Hireme.Accounts.create!(%{name: "Other score account"})
+
+    assert Hireme.Repo.with_account(other.id, fn ->
+             Desk.score_chart(%Filters{status: :all}).n
+           end) == 0
+
     filters = Filters.from_params(%{"min_score" => "85", "band" => "weird"})
     assert filters.min_score == 85
     assert filters.band == :all

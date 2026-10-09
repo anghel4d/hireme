@@ -78,8 +78,8 @@ defmodule Mix.Tasks.Hireme.Score do
   def run(_args) do
     Mix.Task.run("app.start")
     Hireme.Accounts.use_default!()
-    cards = Hireme.Desk.list_cards(%Hireme.Desk.Filters{status: :all})
-    Mix.shell().info(Hireme.LifeEv.ascii(Hireme.LifeEv.chart(cards)))
+    chart = Hireme.Desk.score_chart(%Hireme.Desk.Filters{status: :all})
+    Mix.shell().info(Hireme.LifeEv.ascii(chart))
   end
 end
 
