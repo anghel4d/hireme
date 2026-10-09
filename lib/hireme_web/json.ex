@@ -63,45 +63,10 @@ defmodule HiremeWeb.JSON do
     }
   end
 
-  @spec session(Hireme.Accounts.Session.t(), pos_integer()) :: map()
-  def session(%Hireme.Accounts.Session{} = s, current_id) do
-    %{
-      id: s.id,
-      current: s.id == current_id,
-      authenticated_at: s.authenticated_at,
-      last_seen_at: s.last_seen_at,
-      expires_at: s.expires_at,
-      mfa_at: s.mfa_at,
-      ip: s.ip,
-      user_agent: s.user_agent
-    }
-  end
-
   @doc "One way into the account. A provider's user id stays on the server; the handle shows."
   @spec identity(Hireme.Accounts.Identity.t()) :: map()
   def identity(%Hireme.Accounts.Identity{} = i),
     do: %{id: i.id, provider: i.provider, display: i.display, created_at: i.verified_at}
-
-  @doc "The account's factors, how many recovery codes remain, and whether this session is fresh."
-  @spec security([Hireme.Mfa.Method.t()], non_neg_integer(), boolean()) :: map()
-  def security(methods, recovery_codes_left, fresh) do
-    %{
-      methods:
-        Enum.map(methods, fn m ->
-          %{
-            id: m.id,
-            kind: m.kind,
-            name: m.name,
-            created_at: m.verified_at,
-            last_used_at: m.last_used_at,
-            backed_up: m.backed_up,
-            transports: String.split(m.transports, ",", trim: true)
-          }
-        end),
-      recovery_codes_left: recovery_codes_left,
-      fresh: fresh
-    }
-  end
 
   @spec root(Root.t()) :: map()
   def root(%Root{} = r) do
