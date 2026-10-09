@@ -79,13 +79,14 @@ export function ping(hash: number, t: bigint): Bytes {
   return frame(KIND.PING, hash, 8, (v, o) => v.setBigUint64(o, t, true))
 }
 
-/** OP body: u64 op_id | u8 kind | 3 pad | u32 target | (u16 len, utf8)*. */
+/** OP body: u64 op_id | u8 kind | u8 nfields | u16 0 | u32 target | (u16 len, utf8) × nfields; the frame pads it with zeros. */
 export function opFrame(hash: number, opId: bigint, kind: number, target: number, fields: readonly string[]): Bytes {
   const bytes = fields.map((f) => ENCODER.encode(f))
   const len = 16 + bytes.reduce((n, b) => n + 2 + b.byteLength, 0)
   return frame(KIND.OP, hash, len, (v, o) => {
     v.setBigUint64(o, opId, true)
     v.setUint8(o + 8, kind)
+    v.setUint8(o + 9, bytes.length)
     v.setUint32(o + 12, target, true)
     let at = o + 16
     for (const b of bytes) {
@@ -370,7 +371,9 @@ export interface Host extends Sink {
   rev(): bigint
   /** Op frames sent but not acknowledged, oldest first, to resend after a reconnect. */
   unacked(): readonly Bytes[]
-  status(s: "connecting" | Carrier | "offline"): void
+  connection(s: "connecting" | Carrier | "offline"): void
+  /** The server ended this session for good: sign-out, revocation. */
+  bye(): void
 }
 
 const CONNECT_MS = 3000
@@ -398,9 +401,14 @@ export class Wire {
   skew = 0
   readonly stats = { connects: 0, resent: 0, frames: 0, bytes: 0 }
 
-  constructor(private readonly host: Host, private readonly csrf: string, meta: { gate: string; ticket: string }, early?: Early) {
+  private readonly options: WebTransportOptions
+
+  constructor(private readonly host: Host, private readonly csrf: string, meta: { gate: string; ticket: string; hashes: string }, early?: Early) {
     this.gate = meta.gate
     this.ticket = meta.ticket
+    const hashes = meta.hashes.split(" ").filter((h) => h !== "")
+      .map((h) => ({ algorithm: "sha-256", value: new Uint8Array((h.match(/../g) ?? []).map((b) => Number.parseInt(b, 16))) }))
+    this.options = hashes.length > 0 ? { serverCertificateHashes: hashes } : {}
     this.early = early
   }
 
@@ -446,6 +454,7 @@ export class Wire {
           this.ticket = text(f, HEADER)[0]
           return
         case KIND.BYE:
+          this.host.bye()
           this.conn?.close()
           location.assign("/sign-in")
           return
@@ -457,17 +466,17 @@ export class Wire {
 
   private async loop(): Promise<void> {
     for (;;) {
-      this.host.status("connecting")
+      this.host.connection("connecting")
       const conn = await this.connect().catch(() => null)
       if (!conn) {
-        this.host.status("offline")
+        this.host.connection("offline")
         await sleep(this.backoff)
         this.backoff = Math.min(this.backoff * 2, 10_000)
         continue
       }
       this.conn = conn
       this.stats.connects++
-      this.host.status(conn.carrier)
+      this.host.connection(conn.carrier)
       for (const f of this.host.unacked()) {
         conn.control(f)
         this.stats.resent++
@@ -475,7 +484,7 @@ export class Wire {
       this.ping()
       await conn.closed
       this.conn = null
-      this.host.status("offline")
+      this.host.connection("offline")
       await sleep(this.backoff)
       this.backoff = Math.min(this.backoff * 2, 10_000)
     }
@@ -502,7 +511,7 @@ export class Wire {
         const ticket = this.ticket
         this.ticket = ""
         try {
-          const wt = new WebTransport(gateUrl(this.gate, ticket))
+          const wt = new WebTransport(gateUrl(this.gate, ticket), this.options)
           wt.closed.catch(() => {})
           const c = await within(openTransport(wt, this.sink, first), CONNECT_MS).catch((e: unknown) => {
             wt.close()
