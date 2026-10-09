@@ -47,6 +47,7 @@ Desk heatmap under the Life-EV chart. Filters: cool / warm / hot / blocked. MCP:
 Board snapshots group hot jobs by normalized company and ATS vendor once per
 read. Decorating a card inspects only its matching groups, still excluding the
 card itself and applying the same decay, tenant caps, and override rules as a
-single-job verdict. Unrelated companies are not scanned for every card.
+single-job verdict. Unrelated companies are not scanned for every card. Snapshot
+queries load only heat inputs, not listing or CV bodies.
 Employer-size classification checks normalized words and the compact company
 name against fixed anchor sets, preserving whole-word matching and tier priority.
