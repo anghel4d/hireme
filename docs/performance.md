@@ -24,6 +24,146 @@ This is a local production-release audit, not a claim about measured live Intern
 - HTTP rows include authenticated request handling and full response-body transfer over loopback, at closed-loop concurrency 1, 4 and 16. Achieved throughput is reported separately below. This is not an open-loop capacity limit or an Internet SLO.
 - MCP rows use authenticated WebSockets and actual directory/leased tool calls. Lease acquisition has only 15 samples; the existing 20/minute peer handshake policy is not disabled. Persistent-socket tool throughput must not be confused with unlimited reconnection throughput.
 
+## Browser interaction latency
+
+Authoritative comparison: **base2 vs final2**, the same corrected harness, the same 20-scenario order, and a fresh canonical database copy per release. Earlier browser runs are superseded, not mixed into these tables. There are 39 paired interactions: **8,317 / 8,315 successful samples**, from **8,320 attempts per release**.
+
+Playwright-core 1.63.0 drove Chromium 154.0.8037.97 headless at 1440×1000 with real input, signed-in synthetic sessions, and frame-throttling suppression flags. The timer starts at the input event and ends at the later of the last content paint and the first frame after the last associated request completes. A scenario-specific quiet window (20–250 ms) establishes completion but is not itself added to the measurement. This matters when a completed read changes nothing visible: the earlier probe could finish too early after the unchanged-title optimization, so **both releases were remeasured**.
+
+- Autosave “from POST” rows exclude debounce; “from input” rows include it. Do not use the faster POST-only row as a claim about complete input-to-save latency.
+- Feed rows start when the watching tab receives its first desk signal, not when the other tab begins its write.
+- “Emulated 80 ms RTT” adds 80 ms to Chromium HTTP requests; cached resources and WebSocket frames are not delayed. It measures startup dependencies under that emulation, not the production network.
+- WebAuthn is a **CDP virtual authenticator** (CTAP2, internal, resident key, user verification). The step-up row covers options, `navigator.credentials.get`, and confirmation, with n=10 because the factor throttle remains active. It is not physical-key or human response time.
+- Account and passkey scenarios receive fresh legitimately minted sessions before execution. Refusals are never counted as successful timings.
+
+### account
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| open account | 200 / 200 | 25.800 | 21.300 | 18.200 | 19.600 | 21.300 | 55.800 | 56.300 |
+| create api key | 100 / 100 | 39.800 | 38.500 | 21.800 | 21.800 | 38.500 | 57.500 | 58.700 |
+| rename api key | 100 / 100 | 38.200 | 36.300 | 20.700 | 20.700 | 36.300 | 51.900 | 52.100 |
+| revoke api key | 100 / 100 | 39.700 | 40.500 | 18.400 | 18.400 | 40.500 | 56.400 | 56.500 |
+| enroll passkey (virtual authenticator) | 30 / 30 | 68.500 | 65.800 | 63.800 | 63.800 | 65.800 | 71.800 | 71.800 |
+| step-up passkey ceremony (virtual authenticator) | 10 / 10 | 9.800 | 8.300 | 7.700 | 7.700 | 8.300 | 13.300 | 13.300 |
+
+### battleplan
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| open (enter) | 300 / 300 | 13.100 | 7.800 | 6.800 | 6.800 | 7.800 | 9.800 | 17.000 |
+| back (esc) | 300 / 300 | 21.700 | 19.900 | 17.800 | 17.900 | 19.900 | 22.900 | 30.900 |
+| set stage | 300 / 300 | 482.900 | 133.800 | 127.400 | 128.500 | 133.800 | 141.800 | 147.700 |
+| mask hide | 150 / 150 | 491.200 | 131.400 | 123.800 | 124.400 | 131.400 | 458.000 | 490.900 |
+| mask restore | 150 / 150 | 492.500 | 131.500 | 124.100 | 124.400 | 131.500 | 460.300 | 501.400 |
+| mask emphasize | 150 / 150 | 492.000 | 131.400 | 125.600 | 125.600 | 131.400 | 158.500 | 455.100 |
+| alter open | 150 / 150 | 22.300 | 20.700 | 19.100 | 19.500 | 20.700 | 22.000 | 22.500 |
+| alter save | 150 / 150 | 489.000 | 130.400 | 122.900 | 123.300 | 130.400 | 139.200 | 140.300 |
+| note autosave | 150 / 150 | 432.800 | 12.800 | 12.000 | 12.000 | 12.800 | 15.000 | 16.300 |
+| note autosave (from input, incl. 500 ms debounce) | 100 / 100 | 932.800 | 516.000 | 514.800 | 514.800 | 516.000 | 520.100 | 520.300 |
+
+### desk
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| page load | 150 / 150 | 536.500 | 214.200 | 199.300 | 199.300 | 214.200 | 374.600 | 512.700 |
+| page load (emulated 80 ms RTT) | 50 / 50 | 730.900 | 322.100 | 308.300 | 308.300 | 322.100 | 339.200 | 339.200 |
+| search keystroke | 1000 / 1000 | 12.200 | 3.900 | 3.400 | 3.500 | 3.900 | 18.500 | 20.100 |
+| search clear | 140 / 140 | 20.800 | 19.700 | 6.200 | 6.200 | 19.700 | 23.400 | 26.300 |
+| hjkl move | 1000 / 1000 | 25.900 | 16.800 | 15.100 | 15.800 | 16.800 | 21.200 | 25.400 |
+| click card | 500 / 500 | 28.300 | 15.200 | 13.100 | 13.200 | 15.200 | 22.700 | 30.400 |
+| scroll 400px | 500 / 495 | 18.000 | 17.000 | 9.700 | 9.700 | 17.000 | 20.000 | 20.700 |
+| filter band | 300 / 300 | 16.800 | 16.600 | 6.700 | 6.800 | 16.600 | 20.000 | 21.600 |
+| filter heat | 300 / 300 | 15.300 | 14.600 | 2.800 | 2.800 | 14.600 | 18.800 | 19.900 |
+| next action autosave | 150 / 150 | 452.900 | 113.700 | 108.600 | 108.900 | 113.700 | 174.700 | 444.400 |
+| next action autosave (from input, incl. 400 ms debounce) | 100 / 100 | 854.500 | 513.500 | 508.300 | 508.300 | 513.500 | 533.800 | 544.500 |
+| heat override | 60 / 60 | 444.300 | 131.100 | 110.300 | 110.300 | 131.100 | 138.000 | 138.000 |
+| back to board | 200 / 200 | 22.900 | 17.800 | 16.600 | 17.000 | 17.800 | 21.300 | 22.300 |
+
+### feed
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| other tab: stage | 100 / 100 | 472.400 | 121.800 | 108.800 | 108.800 | 121.800 | 133.700 | 142.500 |
+| other tab: mask | 98 / 100 | 491.100 | 108.100 | 98.600 | 98.600 | 108.100 | 118.800 | 611.600 |
+| other tab: 5 stages | 29 / 30 | 2186.800 | 242.500 | 232.400 | 232.400 | 242.500 | 254.700 | 254.700 |
+
+### gym
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| open gym | 200 / 200 | 27.900 | 22.800 | 15.200 | 17.300 | 22.800 | 24.000 | 27.300 |
+| log rep | 150 / 150 | 24.300 | 38.900 | 19.500 | 20.800 | 38.900 | 40.700 | 41.200 |
+| set target | 150 / 150 | 22.200 | 37.100 | 19.200 | 19.300 | 37.100 | 39.100 | 39.500 |
+
+### net
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| open net | 200 / 200 | 26.500 | 21.800 | 15.700 | 17.900 | 21.800 | 23.200 | 27.500 |
+| log entry | 150 / 150 | 39.300 | 26.700 | 19.900 | 19.900 | 26.700 | 29.700 | 31.400 |
+| set lane | 150 / 150 | 50.500 | 33.200 | 20.400 | 31.500 | 33.200 | 34.000 | 34.200 |
+
+### root
+
+| Interaction / cohort | n before / after | beforems | afterms | current p0.1 | p1 | p50 | p99 | p99.9 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| open root cv | 200 / 200 | 25.200 | 21.000 | 16.700 | 18.800 | 21.000 | 56.400 | 57.100 |
+
+### Browser attempts and request fanout
+
+Counts are **before / after**. `failed` means a timeout; `no-op` means the input caused no observed change within two seconds; `refused` means a 4xx/5xx response. All remain visible even though they are excluded from successful latency quantiles. Baseline's two other-tab mask failures and one five-stage-burst failure were writer clicks on re-rendering nodes that produced no signal. The final scroll row contains five no-ops. Neither release had a refused sample.
+
+| Page / interaction | Attempts | Refused | Failed | No-op | Requests per successful operation |
+|---|---:|---:|---:|---:|---:|
+| desk / page load | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 6.00 / 6.00 |
+| desk / page load (emulated 80 ms RTT) | 50 / 50 | 0 / 0 | 0 / 0 | 0 / 0 | 6.00 / 6.00 |
+| desk / search keystroke | 1000 / 1000 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| desk / search clear | 140 / 140 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| desk / hjkl move | 1000 / 1000 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| desk / click card | 500 / 500 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| desk / scroll 400px | 500 / 500 | 0 / 0 | 0 / 0 | 0 / 5 | 0.00 / 0.00 |
+| desk / filter band | 300 / 300 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| desk / filter heat | 300 / 300 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| battleplan / open (enter) | 300 / 300 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| battleplan / back (esc) | 300 / 300 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| battleplan / set stage | 300 / 300 | 0 / 0 | 0 / 0 | 0 / 0 | 7.99 / 4.99 |
+| battleplan / mask hide | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 8.97 / 2.99 |
+| battleplan / mask restore | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 9.00 / 2.99 |
+| battleplan / mask emphasize | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 8.90 / 2.99 |
+| battleplan / alter open | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| battleplan / alter save | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 9.00 / 2.99 |
+| battleplan / note autosave | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 1.00 |
+| desk / next action autosave | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 2.00 |
+| battleplan / note autosave (from input, incl. 500 ms debounce) | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 1.00 |
+| desk / next action autosave (from input, incl. 400 ms debounce) | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 2.00 |
+| desk / heat override | 60 / 60 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 3.00 |
+| root / open root cv | 200 / 200 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| desk / back to board | 200 / 200 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| gym / open gym | 200 / 200 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| net / open net | 200 / 200 | 0 / 0 | 0 / 0 | 0 / 0 | 0.00 / 0.00 |
+| gym / log rep | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| gym / set target | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| net / log entry | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| net / set lane | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| feed / other tab: stage | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 4.00 / 4.00 |
+| feed / other tab: mask | 100 / 100 | 0 / 0 | 2 / 0 | 0 / 0 | 4.90 / 2.00 |
+| feed / other tab: 5 stages | 30 / 30 | 0 / 0 | 1 / 0 | 0 / 0 | 19.33 / 16.03 |
+| account / open account | 200 / 200 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| account / create api key | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| account / rename api key | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| account / revoke api key | 100 / 100 | 0 / 0 | 0 / 0 | 0 / 0 | 1.00 / 1.00 |
+| account / enroll passkey (virtual authenticator) | 30 / 30 | 0 / 0 | 0 / 0 | 0 / 0 | 2.00 / 2.00 |
+| account / step-up passkey ceremony (virtual authenticator) | 10 / 10 | 0 / 0 | 0 / 0 | 0 / 0 | 2.00 / 2.00 |
+
+### Flagged browser comparisons
+
+- **Gym / Net frame pacing:** the primary table retains final Gym medians around 38.9/37.1 ms and baseline Net medians around 39.3/50.5 ms. These runs showed a roughly 16.7 ms frame step. Separate fresh-bed repeats showed the step can affect either release: one baseline repeat shifted all four interactions, while another baseline and both final repeats did not. This supports an environmental frame-pacing explanation; it is not a reason to silently subtract time or replace the primary observations. Unshifted diagnostic medians were Gym log 24.1→22.5, Gym target 22.2→20.6, Net log 23.5→21.7 and Net lane 33.2→33.2 ms. POST completion was approximately 15–16 ms in both releases. Raw diagnostic repeats are retained separately.
+- **Five-stage burst:** five unwaited writer clicks make the exact result timing-sensitive. Observed medians across runs were approximately 1,743/2,187 ms before and 166/243 ms after. The direction is consistent; a precise universal percentage is not established.
+- **Passkey enrollment:** account history matters. Fresh-bed enrollment was about 40 ms, versus 66–69 ms after 100 API-key cycles in either release. Only the main pair, in the same scenario position and state, is used here (68.5→65.8 ms).
+
+Browser evidence: [`browser-before.jsonl.gz`](../bench/results/browser-before.jsonl.gz), [`browser-after.jsonl.gz`](../bench/results/browser-after.jsonl.gz), and separate [`browser-variance.jsonl.gz`](../bench/results/browser-variance.jsonl.gz). Rows retain samples, attempts, refusal/failure/no-op counts, per-operation request fanout and request traces for the first five samples. The committed portable harnesses are [`browser.mjs`](../bench/browser.mjs), [`mcp.mjs`](../bench/mcp.mjs), and [`mint.exs`](../bench/mint.exs); their headers document invocation and required environment. Credential minting is confined to a testbed directory and the mint VM cannot start an HTTP listener.
+
 ## Server, domain, security and MCP latency
 
 All 128 paired rows are included, including unchanged paths and regressions.
