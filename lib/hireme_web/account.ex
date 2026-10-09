@@ -54,6 +54,11 @@ defmodule HiremeWeb.Account do
           | {:error, pos_integer(), String.t()}
           | {:signed_out, map()}
 
+  @doc "A command's reply as the session sends it: an RPC frame, `u32 json_len | u32 0 | json`."
+  @spec rpc_frame(iodata()) :: iodata()
+  def rpc_frame(json),
+    do: Packet.frame(:rpc, 0, [<<IO.iodata_length(json)::little-32, 0::32>>, json])
+
   # ---- Data ----
 
   @doc "The account's five tables, as `session_id` sees them."

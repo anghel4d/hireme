@@ -53,24 +53,41 @@ defmodule Hireme.Fixtures do
     )
   end
 
-  @doc "One `tools/call` frame on the directory socket, or on a leased handle, read as the JSON the socket sends."
-  def tool_call(name, args \\ %{}) do
-    wire(HiremeWeb.Mcp.directory(frame(name, args)))
-  end
-
-  def tool_call(handle, name, args) do
-    wire(HiremeWeb.Mcp.handle(handle, frame(name, args)))
-  end
-
-  defp wire(reply), do: reply |> Jason.encode!() |> Jason.decode!()
-
-  defp frame(name, args) do
-    %{
-      "id" => uniq(),
-      "method" => "tools/call",
-      "params" => %{"name" => name, "arguments" => args}
-    }
-  end
-
   def uniq, do: System.unique_integer([:positive])
+
+  @doc """
+  Hold `job_id`'s lease in a process of its own, as an agent's lane
+  would: `{claim_result, pid}`. `let_go/1` releases it as a closing
+  lane does.
+  """
+  def hold_lease(job_id) do
+    account_id = Hireme.Repo.account_id!()
+    me = self()
+
+    pid =
+      spawn(fn ->
+        Hireme.Repo.put_account(account_id)
+        claim = Hireme.Letterbox.claim(job_id)
+        send(me, {:held, self(), claim})
+
+        receive do
+          {:let_go, from} ->
+            with {:ok, pair} <- claim, do: Hireme.Letterbox.release(pair)
+            send(from, {:gone, self()})
+        end
+      end)
+
+    receive do
+      {:held, ^pid, result} -> {result, pid}
+    end
+  end
+
+  @doc "End a lease `hold_lease/1` took."
+  def let_go(pid) do
+    send(pid, {:let_go, self()})
+
+    receive do
+      {:gone, ^pid} -> :ok
+    end
+  end
 end

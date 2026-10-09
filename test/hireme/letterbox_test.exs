@@ -4,62 +4,65 @@ defmodule Hireme.LetterboxTest do
 
   alias Hireme.Desk
   alias Hireme.Letterbox
-  alias Hireme.Letterbox.Handle
 
-  test "one producer cannot hold two leases" do
-    first = open_job("North Co")
-    second = open_job("South Co")
-
-    assert {:ok, %Handle{}} = Letterbox.lease(first.letterbox_id, self())
-    assert {:error, :one_lease} = Letterbox.lease(second.letterbox_id, self())
-  end
-
-  test "another producer cannot lease the same letterbox or the same employer CV" do
+  # Claim in another process of the same account, as another lease would.
+  defp elsewhere(fun) do
     account_id = Repo.account_id!()
-    first = open_job("North Co")
-    sibling = open_job("North Co")
-    assert {:ok, handle} = Letterbox.lease(first.letterbox_id, self())
 
-    busy =
-      Task.async(fn ->
-        Repo.put_account(account_id)
-        Letterbox.lease(first.letterbox_id, self())
-      end)
-
-    assert {:error, :busy} = Task.await(busy)
-
-    lineage =
-      Task.async(fn ->
-        Repo.put_account(account_id)
-        Letterbox.lease(sibling.letterbox_id, self())
-      end)
-
-    assert {:error, :lineage_busy} = Task.await(lineage)
-
-    task =
-      Task.async(fn ->
-        Repo.put_account(account_id)
-        Letterbox.command(handle, :get)
-      end)
-
-    assert {:error, :lease} = Task.await(task)
-
-    forged = %{handle | token: make_ref()}
-    assert {:error, :lease} = Letterbox.command(forged, :get)
-    assert Letterbox.release(handle) == :ok
+    Task.async(fn ->
+      Repo.put_account(account_id)
+      fun.()
+    end)
+    |> Task.await()
   end
 
-  test "the desk refuses a write while an agent holds the lease" do
-    %{job: job, letterbox_id: letterbox_id} = open_job("Held Co")
-    assert {:ok, handle} = Letterbox.lease(letterbox_id, self())
+  test "a lease keeps its job and its employer's lineage from every other lease" do
+    first = job(profile(), %{company: "North Co"})
+    sibling = job(profile(), %{company: "North Co"})
+    other = job(profile(), %{company: "South Co"})
+
+    assert {:ok, pair} = Letterbox.claim(first.id)
+    assert {:error, :busy} = elsewhere(fn -> Letterbox.claim(first.id) end)
+    assert {:error, :lineage_busy} = elsewhere(fn -> Letterbox.claim(sibling.id) end)
+    assert {:ok, _} = elsewhere(fn -> Letterbox.claim(other.id) end)
+    assert MapSet.member?(Letterbox.leased_jobs(), first.id)
+
+    # A lineage refusal leaves nothing behind.
+    refute MapSet.member?(Letterbox.leased_jobs(), sibling.id)
+
+    assert Letterbox.release(pair) == :ok
+    refute MapSet.member?(Letterbox.leased_jobs(), first.id)
+    assert {:ok, _} = elsewhere(fn -> Letterbox.claim(sibling.id) end)
+  end
+
+  test "the desk refuses a write while another process holds the lease" do
+    job = job(profile(), %{company: "Held Co"})
+    me = self()
+    account_id = Repo.account_id!()
+
+    holder =
+      spawn_link(fn ->
+        Repo.put_account(account_id)
+        {:ok, pair} = Letterbox.claim(job.id)
+        send(me, :held)
+
+        receive do
+          :release -> send(me, Letterbox.release(pair))
+        end
+      end)
+
+    assert_receive :held
     assert {:error, :leased} = Desk.set_stage(job.id, :freshness)
-    assert Letterbox.release(handle) == :ok
+    send(holder, :release)
+    assert_receive :ok
     assert {:ok, moved} = Desk.set_stage(job.id, :freshness)
     assert moved.current_stage == :freshness
   end
 
-  defp open_job(company) do
-    job = job(profile(), %{company: company})
-    %{job: job, letterbox_id: Letterbox.for_job(job.id).id}
+  test "another account's job cannot be leased" do
+    job = job(profile(), %{company: "Theirs"})
+    open_account("Other desk")
+    assert {:error, :not_found} = Letterbox.claim(job.id)
+    assert {:error, :not_found} = Letterbox.claim(2_000_000_000)
   end
 end

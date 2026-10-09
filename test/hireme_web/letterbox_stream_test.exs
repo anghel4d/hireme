@@ -3,43 +3,47 @@ defmodule HiremeWeb.LetterboxStreamTest do
   import Hireme.Fixtures
 
   alias Hireme.ApiKeys
+  alias Hireme.Desk.Job
   alias Hireme.Letterbox
   alias HiremeWeb.LetterboxStream
-  alias HiremeWeb.Sockets
+  alias HiremeWeb.Packet
 
-  # The session a stream belongs to is this test process: it hears every
-  # byte the stream writes and every close.
-  defp open(agent) do
+  # The session a lane belongs to is this test process: it hears every
+  # byte the lane writes and every close.
+  defp open(agent, opts \\ []) do
     me = self()
 
     {:ok, pid} =
       LetterboxStream.open(
         agent,
         fn bytes -> send(me, {:out, self(), IO.iodata_to_binary(bytes)}) end,
-        fn reason -> send(me, {:closed, self(), reason}) end
+        fn reason -> send(me, {:closed, self(), reason}) end,
+        opts
       )
 
     pid
   end
 
-  defp lease_frame(id), do: frame(0x20, <<id::64-little>>)
+  defp lease(job_id), do: IO.iodata_to_binary(Packet.frame(:lease, 0, <<job_id::little-64>>))
 
-  defp call_frame(id, name, args \\ %{}),
-    do: rpc_frame(%{id: id, method: "tools/call", params: %{name: name, arguments: args}})
+  # An op as the wire carries it; kinds are the schema's numbers. Op ids
+  # are the account's ledger keys, so each test run takes fresh ones.
+  defp op(n, kind, target, fields) do
+    op_id = Process.get(:op_base, 0) + n
+    n = %{stage: 1, next: 2, score: 4, open_fire: 7}[kind]
+    body = for f <- fields, into: <<>>, do: <<byte_size(f)::little-16, f::binary>>
 
-  defp rpc_frame(message) do
-    json = Jason.encode!(Map.put(message, :jsonrpc, "2.0"))
-    frame(0x21, <<byte_size(json)::32-little, 0::32>> <> json)
-  end
-
-  defp frame(kind, body) do
-    len = 16 + byte_size(body) + rem(8 - rem(16 + byte_size(body), 8), 8)
-    pad = len - 16 - byte_size(body)
-    <<len::32-little, kind, 0, 0::16, 0::64>> <> body <> :binary.copy(<<0>>, pad)
+    IO.iodata_to_binary(
+      Packet.frame(
+        :op,
+        0,
+        <<op_id::little-64, n, length(fields), 0::16, target::little-32, body::binary>>
+      )
+    )
   end
 
   # Feed bytes cut at seeded random points: framing must not depend on
-  # how the transport chunks the stream.
+  # how the carrier chunks the lane.
   defp feed(pid, bytes, seed) do
     :rand.seed(:exsss, {seed, seed, seed})
     chunks(bytes) |> Enum.each(&LetterboxStream.data(pid, &1))
@@ -53,33 +57,35 @@ defmodule HiremeWeb.LetterboxStreamTest do
     [head | chunks(rest)]
   end
 
-  # The next `n` JSON-RPC messages the stream wrote, decoded.
-  defp messages(pid, n), do: messages(pid, n, <<>>, [])
+  # The next `n` answers the lane wrote: {:ack, op_id, rev} or {:nack, op_id, message}.
+  defp answers(pid, n), do: answers(pid, n, <<>>, [])
 
-  defp messages(_pid, 0, <<>>, acc), do: Enum.reverse(acc)
+  defp answers(_pid, 0, <<>>, acc), do: Enum.reverse(acc)
 
-  defp messages(pid, n, <<len::32-little, 0x21, _::binary>> = buf, acc)
-       when byte_size(buf) >= len do
-    <<frame::binary-size(len), rest::binary>> = buf
-    assert rem(len, 8) == 0
-    <<_header::binary-16, size::32-little, 0::32, json::binary-size(size), pad::binary>> = frame
-    assert pad == :binary.copy(<<0>>, byte_size(pad))
-    messages(pid, n - 1, rest, [Jason.decode!(json) | acc])
-  end
+  defp answers(pid, n, buf, acc) do
+    case Packet.split(buf) do
+      {:ok, [_ | _] = frames, rest} ->
+        got =
+          Enum.map(frames, fn
+            {:ack, _, rev, <<op_id::little-64, _::binary>>} ->
+              {:ack, op_id, rev}
 
-  defp messages(pid, n, buf, acc) do
-    assert_receive {:out, ^pid, bytes}, 2000
-    messages(pid, n, buf <> bytes, acc)
-  end
+            {:nack, _, _,
+             <<op_id::little-64, _code, 0, len::little-16, msg::binary-size(len), _::binary>>} ->
+              {:nack, op_id, msg}
+          end)
 
-  defp opened(company) do
-    job = job(profile(), %{company: "#{company} #{uniq()}"})
-    %{job: job, letterbox_id: Letterbox.for_job(job.id).id}
+        answers(pid, n - length(got), rest, Enum.reverse(got, acc))
+
+      _ ->
+        assert_receive {:out, ^pid, bytes}, 2000
+        answers(pid, n, buf <> bytes, acc)
+    end
   end
 
   defp agent do
     {:ok, %{secret: secret}} = ApiKeys.create("streams")
-    {:ok, agent} = Sockets.agent_key(secret, "198.51.100.7")
+    {:ok, agent} = LetterboxStream.agent_key(secret, "198.51.100.7")
     agent
   end
 
@@ -88,124 +94,101 @@ defmodule HiremeWeb.LetterboxStreamTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2000
   end
 
-  test "one key carries parallel leases, and closing a stream releases only its own" do
+  test "one key holds parallel leases; each writes only its own job, and closing one releases it" do
     agent = agent()
-    a = opened("Alpha")
-    b = opened("Beta")
+    Process.put(:op_base, uniq() * 1000)
+    a = job(profile(), %{company: "Alpha #{uniq()}"})
+    b = job(profile(), %{company: "Beta #{uniq()}"})
 
     for seed <- 1..3 do
-      sa = open(agent)
-      sb = open(agent)
+      la = open(agent)
+      lb = open(agent, lane: 7)
 
-      feed(sa, lease_frame(a.letterbox_id) <> call_frame(1, "get_application"), seed)
+      Process.put(:op_base, uniq() * 1000)
+      feed(la, lease(a.id) <> op(1, :next, a.id, ["call #{seed}", ""]), seed)
+      feed(lb, lease(b.id) <> op(2, :score, b.id, ["#{40 + seed}"]), seed + 100)
 
-      feed(
-        sb,
-        lease_frame(b.letterbox_id) <>
-          call_frame(1, "set_next_action", %{"next_action" => "call #{seed}"}),
-        seed + 100
-      )
+      base = Process.get(:op_base)
+      assert [{:ack, 0, 0}, {:ack, op_a, rev}] = answers(la, 2)
+      assert op_a == base + 1 and rev > 0
+      # A lane on the session's own channel answers with its number.
+      assert [{:ack, 0, 7}, {:ack, _, 7}] = answers(lb, 2)
 
-      [lease_a, reply_a] = messages(sa, 2)
-      [lease_b, reply_b] = messages(sb, 2)
+      assert Repo.get!(Job, a.id).next_action == "call #{seed}"
+      assert Repo.get!(Job, b.id).score_100 == 40 + seed
 
-      assert lease_a["method"] == "notifications/lease"
-      assert lease_a["params"]["job_id"] == a.job.id
-      assert lease_b["params"]["job_id"] == b.job.id
-      assert reply_a["id"] == 1 and reply_a["result"]["job_id"] == a.job.id
-      assert reply_b["result"] == %{"job_id" => b.job.id, "next_action" => "call #{seed}"}
+      # A lease writes its own job and nothing else, and no desk-wide ops.
+      feed(la, op(3, :score, b.id, ["1"]) <> op(4, :open_fire, 0, ["B-1"]), seed)
+      assert [{:nack, refused_a, _}, {:nack, refused_b, _}] = answers(la, 2)
+      assert {refused_a, refused_b} == {base + 3, base + 4}
+      assert Repo.get!(Job, b.id).score_100 == 40 + seed
 
-      # A lease's tools are bound to it: aiming at another job is refused.
-      feed(sa, call_frame(2, "set_score", %{"job_id" => b.job.id, "score" => 1}), seed)
-      [refused] = messages(sa, 1)
-      assert refused["error"]["message"] == "letterbox_mismatch"
-
-      assert MapSet.subset?(MapSet.new([a.job.id, b.job.id]), Letterbox.leased_jobs())
-
-      LetterboxStream.fin(sa)
-      gone(sa)
-      refute Letterbox.leased?(a.letterbox_id)
-      refute MapSet.member?(Letterbox.leased_jobs(), a.job.id)
-      assert Letterbox.leased?(b.letterbox_id)
-
-      LetterboxStream.fin(sb)
-      gone(sb)
+      assert MapSet.subset?(MapSet.new([a.id, b.id]), Letterbox.leased_jobs())
+      LetterboxStream.fin(la)
+      gone(la)
+      refute MapSet.member?(Letterbox.leased_jobs(), a.id)
+      assert MapSet.member?(Letterbox.leased_jobs(), b.id)
+      LetterboxStream.fin(lb)
+      gone(lb)
     end
   end
 
-  test "a held letterbox is refused on a second stream, which then closes" do
+  test "a held job, or one on a held lineage, is refused and the lane closes" do
     agent = agent()
-    %{letterbox_id: id} = opened("Gamma")
+    job = job(profile(), %{company: "Gamma"})
+    sibling = job(profile(), %{company: "Gamma"})
     first = open(agent)
-    feed(first, lease_frame(id), 1)
-    [_] = messages(first, 1)
+    feed(first, lease(job.id), 1)
+    assert [{:ack, 0, 0}] = answers(first, 1)
 
-    second = open(agent)
-    feed(second, lease_frame(id), 2)
-    [refused] = messages(second, 1)
-    assert refused["params"] == %{"letterbox_id" => id, "error" => "busy"}
-    assert_receive {:closed, ^second, :busy}
-    gone(second)
-    assert Letterbox.leased?(id)
+    for {target, reason} <- [{job.id, :busy}, {sibling.id, :lineage_busy}] do
+      second = open(agent)
+      feed(second, lease(target), 2)
+      assert [{:nack, 0, _}] = answers(second, 1)
+      assert_receive {:closed, ^second, ^reason}
+      gone(second)
+    end
+
+    assert MapSet.member?(Letterbox.leased_jobs(), job.id)
   end
 
-  test "id 0 opens the read-only directory" do
-    %{letterbox_id: id} = opened("Delta")
-    dir = open(agent())
-
-    feed(
-      dir,
-      lease_frame(0) <>
-        call_frame(1, "list_letterboxes") <>
-        call_frame(2, "set_stage") <> rpc_frame(%{id: 3, method: "letterbox/tools"}),
-      3
-    )
-
-    [hello, listed, refused, tools] = messages(dir, 4)
-    assert "set_stage" in Enum.map(tools["result"]["tools"], & &1["name"])
-    assert hello["params"]["directory"] == true
-    assert Enum.any?(listed["result"]["letterboxes"], &(&1["letterbox_id"] == id))
-    assert refused["error"]["message"] == "unleased"
-  end
-
-  test "an RPC before the lease, an unknown or another account's letterbox, all close the stream" do
+  test "an op before the lease, an unknown job, or another account's job closes the lane" do
     agent = agent()
+    theirs = job(profile(), %{company: "Foreign"})
 
     early = open(agent)
-    feed(early, call_frame(1, "get_application"), 1)
+    feed(early, op(1, :stage, theirs.id, ["gated"]), 1)
     assert_receive {:closed, ^early, :protocol}
 
     missing = open(agent)
-    feed(missing, lease_frame(2_000_000_000), 1)
-    [refused] = messages(missing, 1)
-    assert refused["params"]["error"] == "letterbox"
-    assert_receive {:closed, ^missing, :letterbox}
+    feed(missing, lease(2_000_000_000), 1)
+    assert [{:nack, 0, _}] = answers(missing, 1)
+    assert_receive {:closed, ^missing, :not_found}
 
-    %{letterbox_id: foreign} = opened("Foreign")
     other = open_account("Other desk")
     stranger = open(%{agent | account_id: other.id, key_id: nil})
-    feed(stranger, lease_frame(foreign), 1)
-    [hidden] = messages(stranger, 1)
-    assert hidden["params"]["error"] == "letterbox"
+    feed(stranger, lease(theirs.id), 1)
+    assert [{:nack, 0, _}] = answers(stranger, 1)
+    assert_receive {:closed, ^stranger, :not_found}
   end
 
-  test "revoking the key closes its streams and frees their leases" do
+  test "revoking the key closes its lanes and frees their leases" do
     {:ok, %{key: key, secret: secret}} = ApiKeys.create("revoked")
-    {:ok, agent} = Sockets.agent_key(secret, "198.51.100.8")
-    %{letterbox_id: id} = opened("Epsilon")
-    stream = open(agent)
-    feed(stream, lease_frame(id), 1)
-    [_] = messages(stream, 1)
+    {:ok, agent} = LetterboxStream.agent_key(secret, "198.51.100.8")
+    job = job(profile(), %{company: "Epsilon"})
+    lane = open(agent)
+    feed(lane, lease(job.id), 1)
+    assert [{:ack, 0, 0}] = answers(lane, 1)
 
     ApiKeys.revoke(key)
-    assert_receive {:closed, ^stream, :revoked}, 2000
-    gone(stream)
-    refute Letterbox.leased?(id)
+    assert_receive {:closed, ^lane, :revoked}, 2000
+    gone(lane)
+    refute MapSet.member?(Letterbox.leased_jobs(), job.id)
   end
 
-  test "the session's death ends its streams and their leases" do
+  test "the session's death ends its lanes and their leases" do
     account_id = Repo.account_id!()
-    %{letterbox_id: id} = opened("Zeta")
+    job = job(profile(), %{company: "Zeta"})
     me = self()
 
     session =
@@ -215,16 +198,16 @@ defmodule HiremeWeb.LetterboxStreamTest do
         {:ok, pid} =
           LetterboxStream.open(%{account_id: account_id}, &send(me, {:bytes, &1}), fn _ -> :ok end)
 
-        LetterboxStream.data(pid, lease_frame(id))
-        send(me, {:stream, pid})
+        LetterboxStream.data(pid, lease(job.id))
+        send(me, {:lane, pid})
         receive do: (:stop -> :ok)
       end)
 
-    assert_receive {:stream, stream}
+    assert_receive {:lane, lane}
     assert_receive {:bytes, _}, 2000
-    assert Letterbox.leased?(id)
+    assert MapSet.member?(Letterbox.leased_jobs(), job.id)
     send(session, :stop)
-    gone(stream)
-    refute Letterbox.leased?(id)
+    gone(lane)
+    refute MapSet.member?(Letterbox.leased_jobs(), job.id)
   end
 end

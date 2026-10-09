@@ -47,18 +47,6 @@ defmodule HiremeWeb.Endpoint do
     websocket: [connect_info: [:peer_data, session: @session_options], max_frame_size: 1_048_576],
     longpoll: false
 
-  # An agent's socket authenticates with an API key in the `x-api-key`
-  # header or the `base64url.bearer.phx.<base64 key>` subprotocol. These
-  # per-lease sockets are the fallback for agents that cannot reach the
-  # gate; over WebTransport one session carries every lease.
-  socket "/mcp", HiremeWeb.McpDirectorySocket,
-    websocket: [connect_info: [:x_headers, :peer_data], auth_token: true],
-    longpoll: false
-
-  socket "/mcp/letterbox/:letterbox_id", HiremeWeb.McpSocket,
-    websocket: [connect_info: [:x_headers, :peer_data], auth_token: true],
-    longpoll: false
-
   plug Plug.Static,
     at: "/",
     from: :hireme,

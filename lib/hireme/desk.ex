@@ -609,7 +609,6 @@ defmodule Hireme.Desk do
       end)
     end
 
-    Letterbox.open!(job.id)
     record!(job.id, "open", "Opened at #{Pipeline.label(draft.current_stage)}")
 
     publish(Signal.application_opened(job.id, lineage.id))

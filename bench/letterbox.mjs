@@ -82,10 +82,10 @@ async function run(carrier) {
   if (!listed.m.result) throw new Error(JSON.stringify(listed.m.error))
   emit(carrier, "start: initialize + tools/list", [performance.now() - t0])
 
-  // A tool the server does not know: one round trip through every hop, no work.
+  // A tool hireme-mcp does not know: the stdio round trip alone, no network.
   const noop = []
   for (let i = 0; i < N(500); i++) noop.push((await a.rpc("tools/call", { name: "no_such_tool", arguments: {} })).ms)
-  emit(carrier, "round trip (unknown tool)", noop)
+  emit(carrier, "stdio round trip (unknown tool)", noop)
 
   // One lease per employer: a shared CV lineage refuses a second.
   const boxes = (await a.tool("list_letterboxes")).v.letterboxes.filter((b) => !b.leased)
@@ -102,13 +102,13 @@ async function run(carrier) {
   const leaseMs = []
   for (let round = 0; round < rounds; round++) {
     const t = performance.now()
-    await Promise.all(picks.map((b) => a.tool("lease_letterbox", { letterbox_id: b.letterbox_id })))
+    await Promise.all(picks.map((b) => a.tool("lease_letterbox", { job_id: b.job_id })))
     leaseMs.push(performance.now() - t)
-    for (const b of picks) await a.tool("release_letterbox", { letterbox_id: b.letterbox_id })
+    for (const b of picks) await a.tool("release_letterbox", { job_id: b.job_id })
     await new Promise((r) => setTimeout(r, 50))
   }
   emit(carrier, `lease x${picks.length} in parallel`, leaseMs)
-  await Promise.all(picks.map((b) => a.tool("lease_letterbox", { letterbox_id: b.letterbox_id })))
+  await Promise.all(picks.map((b) => a.tool("lease_letterbox", { job_id: b.job_id })))
 
   for (const k of [1, picks.length]) {
     const reads = []
@@ -116,8 +116,8 @@ async function run(carrier) {
     const t = performance.now()
     await Promise.all(picks.slice(0, k).map(async (b) => {
       for (let i = 0; i < N(60); i++) {
-        reads.push((await a.tool("get_application", { letterbox_id: b.letterbox_id })).ms)
-        writes.push((await a.tool("set_next_action", { letterbox_id: b.letterbox_id, next_action: `bench ${i}` })).ms)
+        reads.push((await a.tool("get_application", { job_id: b.job_id })).ms)
+        writes.push((await a.tool("set_next_action", { job_id: b.job_id, next_action: `bench ${i}` })).ms)
       }
     }))
     const wall = performance.now() - t
@@ -125,7 +125,7 @@ async function run(carrier) {
     emit(carrier, `set_next_action, ${k} lease(s)`, writes, { calls_per_s: Math.round(((reads.length + writes.length) / wall) * 1000) })
   }
   const state = (await a.tool("list_leases")).v
-  console.log(`  ${carrier}: carrier=${state.carrier} frames=${state.frames} rows_decoded=${state.rows_decoded} notifications=${a.notes()}`)
+  console.log(`  ${carrier}: carrier=${state.carrier} frames=${state.frames} notifications=${a.notes()}`)
   a.close()
 }
 

@@ -1,80 +1,63 @@
 //! hireme-mcp: a stdio MCP server for agents such as Claude Code.
 //!
-//! It holds one session to hireme (WebTransport, falling back to
-//! WebSocket) and gives each letterbox lease its own stream, so an agent
-//! can hold any number of leases at once. Tool calls on different leases
-//! run in parallel; calls on one lease keep their order. The account's
-//! columnar desk deltas arrive once per session and are decoded here
-//! into `notifications/message` for the leased applications. They are
-//! also kept for `letterbox_events`, for clients that do not surface
-//! notifications.
+//! An agent is a client of hireme exactly as a browser is. hireme-mcp
+//! holds one session (WebTransport, or the `/wire` WebSocket where UDP is
+//! blocked), receives the account's raw tables and every delta, and keeps
+//! them resident in the desk kernel (`native/kernel`), the same code the
+//! browser runs as WebAssembly. Every read tool is answered here from
+//! that copy: the ranked board, heat, the score chart, gym and net
+//! progress, one application's composed CV. Writes go up as the binary
+//! ops the browser sends, and Elixir decides them: desk-wide ops on the
+//! session itself, an application's ops on the lane of its lease. A lease
+//! is held by one process on the server, for one application, until it
+//! is released or the session ends; hold as many as there are parallel
+//! tasks. Desk changes to leased applications arrive as log
+//! notifications and are kept for `letterbox_events`.
 //!
-//! Configuration is read from the environment:
-//! `HIREME_API_KEY` (required); `HIREME_WT_URL` (e.g. `https://host/wt`);
-//! `HIREME_WS_URL` (e.g. `wss://host`, used as the fallback);
-//! `HIREME_TRANSPORT` = `auto` | `wt` | `ws`; and, for a dev gate's
-//! self-signed certificate, `HIREME_WT_CERT_SHA256` or
-//! `HIREME_WT_CERT_SHA256_FILE`.
+//! Configuration is read from the environment: `HIREME_API_KEY`
+//! (required); `HIREME_WT_URL` (e.g. `https://host/wt`); `HIREME_WS_URL`
+//! (e.g. `wss://host`, the fallback); `HIREME_TRANSPORT` = `auto` | `wt`
+//! | `ws`; and, for a development gate's self-signed certificate,
+//! `HIREME_WT_CERT_SHA256` or `HIREME_WT_CERT_SHA256_FILE`.
 
 mod carrier;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use carrier::{Carrier, Config, Down, Up};
+use carrier::{Config, Link};
+use kernel::Desk;
+use kernel::schema::{self, col, frame, op, table};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
-use wire::schema::{self, col, table};
 
-/// Desk events kept per lease for `letterbox_events`.
 const EVENTS_KEPT: usize = 256;
 const PROTOCOL: &str = "2025-06-18";
+/// A lease answer is keyed by its lane, apart from the op ids.
+const LANE_KEY: u64 = 1 << 63;
 
-type Reply = oneshot::Sender<Value>;
-
-/// One open lane: the directory (id 0) or one lease.
-struct Lane {
-    info: Value,
-    calls: mpsc::UnboundedSender<(Value, Reply)>,
-}
-
-impl Lane {
-    /// One JSON-RPC request on this lane, answered in order.
-    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        let (tx, rx) = oneshot::channel();
-        let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        self.calls
-            .send((msg, tx))
-            .map_err(|_| "lease closed".to_string())?;
-        rx.await.map_err(|_| "lease closed".to_string())
-    }
-}
-
-/// Batch codes by id, from the batches table.
-#[derive(Default)]
-struct Dict {
-    names: HashMap<(u16, u32), String>,
-}
-
-#[derive(Default)]
-struct Counters {
-    frames: AtomicU64,
-    rows: AtomicU64,
-    delivered: AtomicU64,
+enum Answer {
+    Ack,
+    Nack(String),
 }
 
 struct Hub {
     cfg: Config,
     out: mpsc::UnboundedSender<Value>,
-    carrier: tokio::sync::Mutex<Option<Arc<Carrier>>>,
-    directory: tokio::sync::Mutex<Option<Arc<Lane>>>,
-    leases: Mutex<HashMap<u64, Arc<Lane>>>,
-    events: Mutex<HashMap<u64, VecDeque<Value>>>,
-    dict: Mutex<Dict>,
-    leased_tools: tokio::sync::OnceCell<Vec<Value>>,
-    counters: Counters,
+    link: tokio::sync::Mutex<Option<Arc<Link>>>,
+    desk: Mutex<Desk>,
+    waits: Mutex<HashMap<u64, oneshot::Sender<Answer>>>,
+    /// Leased job id → its lane.
+    leases: Mutex<HashMap<u32, u64>>,
+    events: Mutex<HashMap<u32, VecDeque<Value>>>,
+    /// Op ids are the account's ledger keys: this run's random high half, then a count.
+    next_op: AtomicU64,
+    next_lane: AtomicU64,
+    frames: AtomicU64,
+    delivered: AtomicU64,
 }
 
 #[tokio::main]
@@ -103,22 +86,23 @@ async fn main() {
     let hub = Arc::new(Hub {
         cfg,
         out,
-        carrier: tokio::sync::Mutex::new(None),
-        directory: tokio::sync::Mutex::new(None),
+        link: tokio::sync::Mutex::new(None),
+        desk: Mutex::new(Desk::new()),
+        waits: Mutex::new(HashMap::new()),
         leases: Mutex::new(HashMap::new()),
         events: Mutex::new(HashMap::new()),
-        dict: Mutex::new(Dict::default()),
-        leased_tools: tokio::sync::OnceCell::new(),
-        counters: Counters::default(),
+        next_op: AtomicU64::new(run_id() << 32 | 1),
+        next_lane: AtomicU64::new(1),
+        frames: AtomicU64::new(0),
+        delivered: AtomicU64::new(0),
     });
 
-    // Connect while the agent is still initializing: the session, the
-    // directory and the lease tool list are ready before the first call.
-    // A failure goes to stderr, where an MCP host logs its servers, and is
-    // reported again by the first call.
+    // Connect while the agent is still initializing, so the desk is
+    // resident before the first call. A failure goes to stderr, where an
+    // MCP host logs its servers, and is reported again by that call.
     let warm = hub.clone();
     tokio::spawn(async move {
-        if let Err(e) = warm.leased_tools().await {
+        if let Err(e) = warm.link().await {
             eprintln!("hireme-mcp: {e}");
         }
     });
@@ -129,37 +113,39 @@ async fn main() {
             continue;
         }
         let hub = hub.clone();
-        // Every request runs on its own task: leases answer in parallel.
         tokio::spawn(async move {
-            match serde_json::from_str::<Value>(&line) {
-                Ok(msg) => {
-                    if let Some(reply) = hub.request(msg).await {
-                        let _ = hub.out.send(reply);
-                    }
-                }
-                Err(_) => {
-                    let _ = hub.out.send(json!({"jsonrpc": "2.0", "id": null,
-                        "error": {"code": -32700, "message": "parse error"}}));
-                }
+            let reply = match serde_json::from_str::<Value>(&line) {
+                Ok(msg) => hub.request(msg).await,
+                Err(_) => Some(json!({"jsonrpc": "2.0", "id": null,
+                    "error": {"code": -32700, "message": "parse error"}})),
+            };
+            if let Some(reply) = reply {
+                let _ = hub.out.send(reply);
             }
         });
     }
 }
 
+type Outcome = Result<Value, String>;
+
 impl Hub {
+    // ---- MCP ----------------------------------------------------------------
+
     /// One message from the agent; `None` for notifications.
     async fn request(self: &Arc<Self>, msg: Value) -> Option<Value> {
         let id = msg.get("id").cloned()?;
-        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
-        let answer = match method {
-            "initialize" => Ok(self.initialize(&params)),
+        let result = match msg["method"].as_str().unwrap_or("") {
+            "initialize" => Ok(initialize(&params)),
             "ping" | "logging/setLevel" => Ok(json!({})),
-            "tools/list" => self.tools().await.map(|tools| json!({"tools": tools})),
+            "tools/list" => match self.link().await {
+                Ok(_) => Ok(json!({"tools": self.with_desk(tools)})),
+                Err(e) => Err((-32000, e)),
+            },
             "tools/call" => Ok(self.call_tool(&params).await),
             _ => Err((-32601, "unknown method".to_string())),
         };
-        Some(match answer {
+        Some(match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err((code, message)) => {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
@@ -167,208 +153,98 @@ impl Hub {
         })
     }
 
-    fn initialize(&self, params: &Value) -> Value {
-        let version = params["protocolVersion"].as_str().unwrap_or(PROTOCOL);
-        json!({
-            "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": false}, "logging": {}},
-            "serverInfo": {"name": "hireme-mcp", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "hireme desk. Directory tools read and rank the whole desk. \
-                To work on one application, lease_letterbox(letterbox_id) and pass that \
-                letterbox_id to the per-application tools. Hold as many leases as you have \
-                parallel tasks; release_letterbox when done. Desk changes to leased \
-                applications arrive as log notifications and through letterbox_events. \
-                FIRE HOLD: nothing here submits an application."
-        })
-    }
-
-    // -- tools ---------------------------------------------------------------
-
-    async fn tools(self: &Arc<Self>) -> Result<Vec<Value>, (i64, String)> {
-        let dir = self.directory().await.map_err(|e| (-32000, e))?;
-        let listed = dir
-            .call("tools/list", json!({}))
-            .await
-            .map_err(|e| (-32000, e))?;
-        let mut tools: Vec<Value> = listed["result"]["tools"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        tools.extend(local_tools());
-        tools.extend(
-            self.leased_tools()
-                .await
-                .map_err(|e| (-32000, e))?
-                .iter()
-                .cloned(),
-        );
-        Ok(tools)
-    }
-
-    /// The per-lease tools, each with a required `letterbox_id`.
-    async fn leased_tools(self: &Arc<Self>) -> Result<&Vec<Value>, String> {
-        self.leased_tools
-            .get_or_try_init(|| async {
-                let dir = self.directory().await?;
-                let r = dir.call("letterbox/tools", json!({})).await?;
-                let tools = r["result"]["tools"].as_array().cloned().unwrap_or_default();
-                Ok(tools
-                    .into_iter()
-                    .map(|mut t| {
-                        let schema = &mut t["inputSchema"];
-                        schema["properties"]["letterbox_id"] = json!({"type": "integer",
-                            "description": "A letterbox this agent leased with lease_letterbox"});
-                        let mut req = schema["required"].as_array().cloned().unwrap_or_default();
-                        req.push(json!("letterbox_id"));
-                        schema["required"] = Value::Array(req);
-                        t
-                    })
-                    .collect())
-            })
-            .await
-    }
-
     async fn call_tool(self: &Arc<Self>, params: &Value) -> Value {
         let name = params["name"].as_str().unwrap_or("");
-        let args = match &params["arguments"] {
+        let a = match &params["arguments"] {
             Value::Object(m) => Value::Object(m.clone()),
             _ => json!({}),
         };
-        let result = match name {
-            "lease_letterbox" => self.lease(&args).await,
-            "release_letterbox" => self.release(&args),
-            "list_leases" => Ok(self.list_leases().await),
-            "letterbox_events" => Ok(self.drain_events(&args)),
-            _ => self.forward(name, args).await,
+        let outcome = match self.link().await {
+            Err(e) => Err(e),
+            Ok(_) => self.tool(name, &a).await,
         };
-        match result {
-            Ok(v) => json!({
-                "content": [{"type": "text", "text": v.to_string()}],
-                "structuredContent": v,
-            }),
+        match outcome {
+            Ok(v) => {
+                json!({"content": [{"type": "text", "text": v.to_string()}], "structuredContent": v})
+            }
             Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
         }
     }
 
-    async fn forward(self: &Arc<Self>, name: &str, args: Value) -> Result<Value, String> {
-        let leased = self.leased_tools().await?.iter().any(|t| t["name"] == name);
-        let lane = if leased {
-            let id = args["letterbox_id"]
-                .as_u64()
-                .ok_or("letterbox_id is required")?;
-            self.leases
-                .lock()
-                .unwrap()
-                .get(&id)
-                .cloned()
-                .ok_or(format!(
-                    "letterbox {id} is not leased here: call lease_letterbox first"
-                ))?
-        } else {
-            self.directory().await?
-        };
-        let reply = lane
-            .call("tools/call", json!({"name": name, "arguments": args}))
-            .await?;
-        match (reply.get("result"), reply.get("error")) {
-            (Some(r), _) => Ok(r.clone()),
-            (_, Some(e)) => Err(e["message"].as_str().unwrap_or("error").to_string()),
-            _ => Err("empty reply".into()),
+    async fn tool(self: &Arc<Self>, name: &str, a: &Value) -> Outcome {
+        let job = || job_arg(a);
+        match name {
+            // Reads, from the resident desk.
+            "list_letterboxes" => self.with_desk(|d| letterboxes(d, a)),
+            "list_batches" => {
+                self.with_desk(|d| Ok(json!({"batches": all_rows(d, table::BATCHES)})))
+            }
+            "list_applications" => self.with_desk(|d| applications(d, a, "all", None)),
+            "recommend_applications" => self.with_desk(|d| recommend(d, a)),
+            "score_distribution" => self.with_desk(|d| distribution(d, a)),
+            "heat_status" => self.with_desk(|d| heat(d, a)),
+            "can_apply" => self.with_desk(|d| verdict(d, job()?)),
+            "gym_status" => self.with_desk(|d| lanes(d, "gym")),
+            "net_status" => self.with_desk(|d| lanes(d, "net")),
+            "get_application" => {
+                let job = job()?;
+                self.held(job)?;
+                self.with_desk(|d| interim::focus(d, job))
+            }
+            // Leases.
+            "lease_letterbox" => self.lease(job()?).await,
+            "release_letterbox" => self.release(job()?),
+            "list_leases" => Ok(self.list_leases()),
+            "letterbox_events" => Ok(self.drain_events(a)),
+            // Desk-wide writes, on the session.
+            "gym_log" => self.write(0, op::GYM_LOG, 0, pairs(a)).await,
+            "gym_set_target" => {
+                self.write(0, op::GYM_TARGET, 0, vec![text(&a["target"])])
+                    .await
+            }
+            "net_log" => self.write(0, op::NET_LOG, 0, pairs(a)).await,
+            "net_set_lane" => self.write(0, op::NET_LANE, 0, vec![text(&a["url"])]).await,
+            // An application's writes, on its lease.
+            "set_stage" => {
+                self.lease_write(job()?, op::STAGE, vec![text(&a["stage"])])
+                    .await
+            }
+            "set_next_action" => {
+                let fields = vec![text(&a["next_action"]), text(&a["next_due"])];
+                self.lease_write(job()?, op::NEXT, fields).await
+            }
+            "set_score" => {
+                self.lease_write(job()?, op::SCORE, vec![text(&a["score"])])
+                    .await
+            }
+            "tailor_line" => {
+                let fields = ["item_id", "mode", "body", "reason", "title"].map(|k| text(&a[k]));
+                self.lease_write(job()?, op::OVERLAY, fields.to_vec()).await
+            }
+            "open_cv_generation" => self.lease_write(job()?, op::GENERATION, vec![]).await,
+            _ => Err(format!("unknown tool {name}")),
         }
     }
 
-    async fn lease(self: &Arc<Self>, args: &Value) -> Result<Value, String> {
-        let id = args["letterbox_id"]
-            .as_u64()
-            .filter(|&i| i > 0)
-            .ok_or("letterbox_id is required")?;
-        if let Some(lane) = self.leases.lock().unwrap().get(&id) {
-            return Ok(lane.info.clone());
+    fn with_desk<T>(&self, f: impl FnOnce(&mut Desk) -> T) -> T {
+        f(&mut self.desk.lock().unwrap())
+    }
+
+    // ---- the session --------------------------------------------------------
+
+    async fn link(self: &Arc<Self>) -> Result<Arc<Link>, String> {
+        let mut slot = self.link.lock().await;
+        if let Some(l) = slot.as_ref().filter(|l| l.alive()) {
+            return Ok(l.clone());
         }
-        let lane = self.open(id).await?;
-        let mut leases = self.leases.lock().unwrap();
-        // Two racing leases of one id: the server granted only one stream.
-        let lane = leases.entry(id).or_insert(lane).clone();
-        Ok(lane.info.clone())
-    }
-
-    fn release(&self, args: &Value) -> Result<Value, String> {
-        let id = args["letterbox_id"]
-            .as_u64()
-            .ok_or("letterbox_id is required")?;
-        // Dropping the lane closes its stream, which is the release.
-        match self.leases.lock().unwrap().remove(&id) {
-            Some(_) => Ok(json!({"letterbox_id": id, "released": true})),
-            None => Err(format!("letterbox {id} is not leased here")),
-        }
-    }
-
-    async fn list_leases(&self) -> Value {
-        let carrier = self
-            .carrier
-            .lock()
-            .await
-            .as_ref()
-            .map(|c| c.name())
-            .unwrap_or("none");
-        let leases: Vec<Value> = self
-            .leases
-            .lock()
-            .unwrap()
-            .values()
-            .map(|l| l.info.clone())
-            .collect();
-        json!({
-            "carrier": carrier,
-            "leases": leases,
-            "frames": self.counters.frames.load(Ordering::Relaxed),
-            "rows_decoded": self.counters.rows.load(Ordering::Relaxed),
-            "rows_delivered": self.counters.delivered.load(Ordering::Relaxed),
-        })
-    }
-
-    fn drain_events(&self, args: &Value) -> Value {
-        let mut events = self.events.lock().unwrap();
-        let ids: Vec<u64> = match args["letterbox_id"].as_u64() {
-            Some(id) => vec![id],
-            None => events.keys().copied().collect(),
-        };
-        let drained: Vec<Value> = ids
-            .iter()
-            .flat_map(|id| {
-                events
-                    .get_mut(id)
-                    .map(|q| q.drain(..).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            })
-            .collect();
-        json!({"events": drained})
-    }
-
-    // -- lanes ---------------------------------------------------------------
-
-    async fn directory(self: &Arc<Self>) -> Result<Arc<Lane>, String> {
-        let mut dir = self.directory.lock().await;
-        if let Some(lane) = dir.as_ref().filter(|l| !l.calls.is_closed()) {
-            return Ok(lane.clone());
-        }
-        let lane = self.open(0).await?;
-        *dir = Some(lane.clone());
-        Ok(lane)
-    }
-
-    async fn carrier(self: &Arc<Self>) -> Result<Arc<Carrier>, String> {
-        let mut slot = self.carrier.lock().await;
-        if let Some(c) = slot.as_ref().filter(|c| c.alive()) {
-            return Ok(c.clone());
-        }
+        *self.desk.lock().unwrap() = Desk::new();
         let hub = Arc::downgrade(self);
         let closed = Arc::downgrade(self);
-        let c = Carrier::connect(
+        let link = carrier::connect(
             &self.cfg,
-            Box::new(move |f| {
+            Arc::new(move |f| {
                 if let Some(hub) = hub.upgrade() {
-                    hub.control(f)
+                    hub.frame(f)
                 }
             }),
             move || {
@@ -378,188 +254,654 @@ impl Hub {
             },
         )
         .await?;
-        let c = Arc::new(c);
-        *slot = Some(c.clone());
-        Ok(c)
+        let link = Arc::new(link);
+        *slot = Some(link.clone());
+        Ok(link)
     }
 
-    /// Opens a lane and waits for the server's answer to the lease.
-    async fn open(self: &Arc<Self>, letterbox_id: u64) -> Result<Arc<Lane>, String> {
-        let carrier = self.carrier().await?;
-        let (up, mut down) = carrier.open(letterbox_id).await?;
-        let first = down
-            .recv()
-            .await
-            .ok_or("stream closed before the lease answer")?;
-        let info = first["params"].clone();
-        if let Some(e) = info.get("error") {
-            return Err(format!(
-                "letterbox {letterbox_id}: {}",
-                e.as_str().unwrap_or("refused")
-            ));
+    /// One frame from the server, in order.
+    fn frame(&self, f: wire::Frame<'_>) {
+        // A big BOOT or PATCH travels deflated: `u32 raw_len | u32 deflate_len | raw deflate`.
+        if f.header.flags & wire::DEFLATE != 0 {
+            if let Some(bytes) = inflate(&f)
+                && let Ok(plain) = wire::Frame::parse(&bytes)
+            {
+                self.frame(plain);
+            }
+            return;
         }
-        let (calls, calls_rx) = mpsc::unbounded_channel();
-        tokio::spawn(run_lane(
-            Arc::downgrade(self),
-            letterbox_id,
-            up,
-            down,
-            calls_rx,
-        ));
-        Ok(Arc::new(Lane { info, calls }))
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        let lane = f.header.rev;
+        match f.header.kind {
+            frame::BOOT | frame::PATCH | frame::TICK => {
+                if f.header.kind == frame::PATCH {
+                    self.notify_rows(&f);
+                }
+                let mut bytes = f.header.bytes().to_vec();
+                bytes.extend_from_slice(f.body);
+                self.desk.lock().unwrap().ingest(&bytes);
+            }
+            frame::ACK => {
+                if let Ok(op_id) = wire::ack(f.body) {
+                    self.answer(
+                        if op_id == 0 { LANE_KEY | lane } else { op_id },
+                        Answer::Ack,
+                    );
+                }
+            }
+            frame::NACK => {
+                if let Ok((op_id, _code, msg)) = wire::nack(f.body) {
+                    let key = if op_id == 0 { LANE_KEY | lane } else { op_id };
+                    self.answer(key, Answer::Nack(msg.to_string()));
+                }
+            }
+            // A lane's BYE: the server ended that lease (revoked, released).
+            frame::BYE => {
+                let mut leases = self.leases.lock().unwrap();
+                if let Some((&job, _)) = leases.iter().find(|(_, l)| **l == lane) {
+                    leases.remove(&job);
+                    drop(leases);
+                    self.answer(LANE_KEY | lane, Answer::Nack(carrier::bye_reason(f.body)));
+                    self.notify(job, json!({"type": "lease_lost", "job_id": job}));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn answer(&self, key: u64, answer: Answer) {
+        if let Some(tx) = self.waits.lock().unwrap().remove(&key) {
+            let _ = tx.send(answer);
+        }
+    }
+
+    /// Send one frame and wait for its ACK or NACK.
+    async fn ask(self: &Arc<Self>, key: u64, bytes: Vec<u8>) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.waits.lock().unwrap().insert(key, tx);
+        self.link().await?.send(bytes)?;
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(Answer::Ack)) => Ok(()),
+            Ok(Ok(Answer::Nack(why))) => Err(why),
+            Ok(Err(_)) => Err("session closed".into()),
+            Err(_) => {
+                self.waits.lock().unwrap().remove(&key);
+                Err("no answer in 10 s".into())
+            }
+        }
+    }
+
+    /// One op, on `lane` (0: the session). The answer comes after its
+    /// delta, so the desk already shows what it wrote.
+    async fn write(
+        self: &Arc<Self>,
+        lane: u64,
+        kind: u8,
+        target: u32,
+        fields: Vec<String>,
+    ) -> Outcome {
+        let op_id = self.next_op.fetch_add(1, Ordering::Relaxed);
+        let mut w = wire::Writer::new();
+        w.begin(frame::OP, 0, lane);
+        w.op(
+            op_id,
+            kind,
+            target,
+            &fields.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        w.end();
+        self.ask(op_id, w.buf).await?;
+        Ok(match target {
+            0 => json!({"ok": true}),
+            job => self.with_desk(|d| application(d, job)),
+        })
+    }
+
+    async fn lease_write(self: &Arc<Self>, job: u32, kind: u8, fields: Vec<String>) -> Outcome {
+        let lane = self.held(job)?;
+        self.write(lane, kind, job, fields).await
+    }
+
+    fn held(&self, job: u32) -> Result<u64, String> {
+        self.leases
+            .lock()
+            .unwrap()
+            .get(&job)
+            .copied()
+            .ok_or(format!(
+                "job {job} is not leased here: call lease_letterbox first"
+            ))
+    }
+
+    async fn lease(self: &Arc<Self>, job: u32) -> Outcome {
+        if self.held(job).is_err() {
+            let lane = self.next_lane.fetch_add(1, Ordering::Relaxed);
+            let lease = carrier::frame(frame::LEASE, lane, &u64::from(job).to_le_bytes());
+            self.ask(LANE_KEY | lane, lease)
+                .await
+                .map_err(|why| format!("job {job}: {why}"))?;
+            self.leases.lock().unwrap().insert(job, lane);
+        }
+        Ok(self.with_desk(|d| application(d, job)))
+    }
+
+    fn release(&self, job: u32) -> Outcome {
+        let lane = self.held(job)?;
+        self.leases.lock().unwrap().remove(&job);
+        if let Some(link) = self.link.try_lock().ok().and_then(|l| l.clone()) {
+            let mut body = 7u16.to_le_bytes().to_vec();
+            body.extend_from_slice(b"release");
+            let _ = link.send(carrier::frame(frame::BYE, lane, &body));
+        }
+        Ok(json!({"job_id": job, "released": true}))
     }
 
     fn session_lost(&self) {
-        let lost: Vec<u64> = self
+        let lost: Vec<u32> = self
             .leases
             .lock()
             .unwrap()
             .drain()
-            .map(|(id, _)| id)
+            .map(|(job, _)| job)
             .collect();
-        for id in lost {
-            self.notify(id, json!({"type": "lease_lost", "letterbox_id": id}));
+        self.waits.lock().unwrap().clear();
+        for job in lost {
+            self.notify(job, json!({"type": "lease_lost", "job_id": job}));
         }
     }
 
-    // -- desk deltas ---------------------------------------------------------
+    fn list_leases(&self) -> Value {
+        let carrier = self
+            .link
+            .try_lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|l| l.name));
+        let jobs: Vec<u32> = self.leases.lock().unwrap().keys().copied().collect();
+        json!({
+            "carrier": carrier,
+            "schema": format!("{:04x}", schema::HASH),
+            "leases": self.with_desk(|d| jobs.iter().map(|&j| application(d, j)).collect::<Vec<_>>()),
+            "frames": self.frames.load(Ordering::Relaxed),
+            "notifications": self.delivered.load(Ordering::Relaxed),
+        })
+    }
 
-    /// One control-stream frame: batch codes, then raw application rows.
-    fn control(&self, f: wire::Frame<'_>) {
-        self.counters.frames.fetch_add(1, Ordering::Relaxed);
-        if f.header.kind != schema::frame::BOOT && f.header.kind != schema::frame::PATCH {
+    // ---- desk changes to leased applications --------------------------------
+
+    /// A PATCH's application rows and deletions, for the jobs leased here.
+    fn notify_rows(&self, f: &wire::Frame<'_>) {
+        let held: Vec<u32> = self.leases.lock().unwrap().keys().copied().collect();
+        if held.is_empty() {
             return;
         }
-        let jobs: HashMap<u64, u64> = self
-            .leases
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(id, l)| Some((l.info["job_id"].as_u64()?, *id)))
-            .collect();
         for t in f.tables().flatten() {
-            match t.id {
-                table::JOB_APPS => self.rows(&t, &jobs),
-                table::GONE => self.gone(&t, &jobs),
-                table::BATCHES => self.learn(&t),
-                _ => {}
-            }
-        }
-    }
-
-    /// Batch codes, so a row can name its batch rather than its id.
-    fn learn(&self, t: &wire::Table<'_>) {
-        let (Some(k), Some(n)) = (t.col(col::batches::ID), t.col(col::batches::CODE)) else {
-            return;
-        };
-        let mut dict = self.dict.lock().unwrap();
-        for i in 0..t.nrows as usize {
-            dict.names.insert((t.id, k.u32(i)), n.str(i).to_string());
-        }
-    }
-
-    /// Upserted `job_apps` rows for leased jobs, as named JSON: only the
-    /// columns the delta carries, so a row is what changed.
-    fn rows(&self, t: &wire::Table<'_>, jobs: &HashMap<u64, u64>) {
-        let Some(ids) = t.col(col::job_apps::ID) else {
-            return;
-        };
-        self.counters
-            .rows
-            .fetch_add(t.nrows as u64, Ordering::Relaxed);
-        if jobs.is_empty() {
-            return;
-        }
-        let cols: Vec<_> = t.cols().collect();
-        let dict = self.dict.lock().unwrap();
-        let mut rows = Vec::new();
-        for i in 0..t.nrows as usize {
-            let Some(&lb) = jobs.get(&(ids.u32(i) as u64)) else {
-                continue;
-            };
-            let mut row = Map::new();
-            for c in &cols {
-                let Some(def) = schema::col_def(t.id, c.id) else {
-                    continue;
-                };
-                if let Some((name, value)) = cell(c, i, def, &dict) {
-                    row.insert(name, value);
+            if t.id == table::JOB_APPS
+                && let Some(ids) = t.col(col::job_apps::ID)
+            {
+                for i in (0..t.nrows as usize).filter(|&i| held.contains(&ids.u32(i))) {
+                    let mut row = Map::new();
+                    for c in t.cols() {
+                        if let Some(def) = schema::col_def(t.id, c.id)
+                            && def.name != "listing"
+                        {
+                            row.insert(def.name.into(), cell(&c, i, def.kind));
+                        }
+                    }
+                    // A row that is only its id moved nothing an agent reads.
+                    if row.len() > 1 {
+                        self.notify(ids.u32(i), json!({"type": "row", "application": row}));
+                    }
                 }
             }
-            rows.push((lb, row));
-        }
-        drop(dict);
-        for (lb, row) in rows {
-            self.notify(
-                lb,
-                json!({"type": "row", "letterbox_id": lb, "application": row}),
-            );
-        }
-    }
-
-    /// Deleted rows: `gone` names (table, id); only applications matter here.
-    fn gone(&self, t: &wire::Table<'_>, jobs: &HashMap<u64, u64>) {
-        let (Some(tables), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) else {
-            return;
-        };
-        for i in 0..t.nrows as usize {
-            if tables.u32(i) == table::JOB_APPS as u32
-                && let Some(&lb) = jobs.get(&(ids.u32(i) as u64))
+            if t.id == table::GONE
+                && let (Some(tables), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID))
             {
-                self.notify(
-                    lb,
-                    json!({"type": "gone", "letterbox_id": lb, "job_id": ids.u32(i)}),
-                );
+                for i in 0..t.nrows as usize {
+                    if tables.u32(i) == u32::from(table::JOB_APPS) && held.contains(&ids.u32(i)) {
+                        self.notify(ids.u32(i), json!({"type": "gone", "job_id": ids.u32(i)}));
+                    }
+                }
             }
         }
     }
 
     /// A desk event for one lease: a log notification, and kept for polling.
-    fn notify(&self, letterbox_id: u64, event: Value) {
-        self.counters.delivered.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut events = self.events.lock().unwrap();
-            let q = events.entry(letterbox_id).or_default();
-            if q.len() == EVENTS_KEPT {
-                q.pop_front();
-            }
-            q.push_back(event.clone());
+    fn notify(&self, job: u32, event: Value) {
+        self.delivered.fetch_add(1, Ordering::Relaxed);
+        let mut events = self.events.lock().unwrap();
+        let q = events.entry(job).or_default();
+        if q.len() == EVENTS_KEPT {
+            q.pop_front();
         }
+        q.push_back(event.clone());
         let _ = self.out.send(json!({
             "jsonrpc": "2.0",
             "method": "notifications/message",
-            "params": {"level": "info", "logger": format!("hireme/letterbox/{letterbox_id}"), "data": event},
+            "params": {"level": "info", "logger": format!("hireme/job/{job}"), "data": event},
         }));
+    }
+
+    fn drain_events(&self, a: &Value) -> Value {
+        let mut events = self.events.lock().unwrap();
+        let jobs: Vec<u32> = match job_arg(a) {
+            Ok(job) => vec![job],
+            Err(_) => events.keys().copied().collect(),
+        };
+        let mut drained = Vec::new();
+        for j in jobs {
+            drained.extend(events.get_mut(&j).into_iter().flat_map(|q| q.drain(..)));
+        }
+        json!({"events": drained})
     }
 }
 
-/// One cell as the agent reads it: the batch by its code, days as dates,
-/// JSON text as JSON, none as null. The listing's full text is left out:
-/// it is long, and `get_application` serves it.
-fn cell(c: &wire::Col<'_>, i: usize, def: &schema::ColDef, dict: &Dict) -> Option<(String, Value)> {
-    let value = match (def.name, c.ty) {
-        ("listing", _) => return None,
-        ("batch_id", wire::U32) => match dict.names.get(&(table::BATCHES, c.u32(i))) {
-            Some(code) => return Some(("batch".into(), json!(code))),
-            None => json!(c.u32(i)),
-        },
-        ("stage_notes", wire::STR) => {
-            serde_json::from_str(c.str(i)).unwrap_or_else(|_| json!(c.str(i)))
-        }
-        (_, wire::STR) => json!(c.str(i)),
-        (_, wire::U32) => match c.u32(i) {
-            wire::NONE => Value::Null,
-            v if def.kind == "day" => json!(iso_day(v as i64)),
-            v => json!(v),
-        },
-        (_, wire::U64) => json!(c.u64(i)),
-        (_, wire::F64) => match c.f64(i) {
-            v if v.is_nan() => Value::Null,
-            v => json!(v),
-        },
-        _ => return None,
+// ---- reading the desk ---------------------------------------------------------
+
+/// One row of any table, every column named as the schema names it.
+fn row(d: &Desk, t: u16, r: usize) -> Map<String, Value> {
+    let mut m = Map::new();
+    for def in schema::COLS.iter().filter(|c| c.table == t) {
+        let v = match def.kind {
+            "str" => json!(d.str_at(t, def.col, r)),
+            "f64" => json!(d.f64_at(t, def.col, r))
+                .as_f64()
+                .map_or(Value::Null, |x| json!(x)),
+            kind => match d.u32_at(t, def.col, r) {
+                wire::NONE => Value::Null,
+                v if kind == "day" => json!(iso_day(i64::from(v))),
+                v => json!(v),
+            },
+        };
+        m.insert(def.name.into(), v);
+    }
+    m
+}
+
+fn all_rows(d: &Desk, t: u16) -> Vec<Value> {
+    (0..d.rows(t))
+        .map(|r| Value::Object(row(d, t, r)))
+        .collect()
+}
+
+/// The key a lookup table gives index `ix` (stages, statuses, heat_states...).
+fn key_of(d: &Desk, t: u16, ix: u32) -> Value {
+    d.row_of(t, ix)
+        .map_or(Value::Null, |r| json!(d.str_at(t, 2, r)))
+}
+
+/// The index of a key in a lookup table, or -1 for none or "all".
+fn ix_of(d: &Desk, t: u16, key: &Value) -> i32 {
+    let Some(key) = key.as_str().filter(|k| !k.is_empty() && *k != "all") else {
+        return -1;
     };
-    Some((def.name.to_string(), value))
+    (0..d.rows(t))
+        .find(|&r| d.str_at(t, 2, r) == key)
+        .map_or(-2, |r| d.u32_at(t, 1, r) as i32)
+}
+
+fn band(d: &Desk, score: u32) -> Value {
+    let t = table::BANDS;
+    (0..d.rows(t))
+        .find(|&r| (d.u32_at(t, 4, r)..=d.u32_at(t, 5, r)).contains(&score))
+        .map_or(Value::Null, |r| json!(d.str_at(t, 2, r)))
+}
+
+/// One card as an agent reads it: names for the enum columns.
+fn card(d: &Desk, r: usize) -> Value {
+    let mut m = row(d, table::CARDS, r);
+    let c = table::CARDS;
+    for (name, lookup) in [
+        ("stage", table::STAGES),
+        ("status", table::STATUSES),
+        ("freshness", table::FRESHNESS),
+        ("gate", table::GATES),
+        ("heat_state", table::HEAT_STATES),
+    ] {
+        let ix = m[name].as_u64().unwrap_or(u64::from(wire::NONE)) as u32;
+        m.insert(name.into(), key_of(d, lookup, ix));
+    }
+    let batch = d.u32_at(c, col::cards::BATCH, r);
+    m.insert(
+        "batch".into(),
+        d.row_of(table::BATCHES, batch).map_or(Value::Null, |b| {
+            json!(d.str_at(table::BATCHES, col::batches::CODE, b))
+        }),
+    );
+    m.insert("band".into(), band(d, d.u32_at(c, col::cards::SCORE, r)));
+    let score = m.remove("score").unwrap_or(Value::Null);
+    m.insert("score_100".into(), score);
+    let job = m.remove("id").unwrap_or(Value::Null);
+    m.insert("job_id".into(), job);
+    for skip in [
+        "pips",
+        "fit",
+        "hits",
+        "total",
+        "hidden",
+        "altered",
+        "emphasized",
+        "profile",
+    ] {
+        m.remove(skip);
+    }
+    Value::Object(m)
+}
+
+fn application(d: &mut Desk, job: u32) -> Value {
+    d.derive();
+    d.row_of(table::CARDS, job)
+        .map_or(json!({"job_id": job}), |r| card(d, r))
+}
+
+/// The board in order, filtered as the desk's top bar filters it.
+fn select(d: &mut Desk, a: &Value, status: &str) -> Vec<usize> {
+    let (lo, hi) = match ix_of(d, table::BANDS, &a["band"]) {
+        -1 => (0, i32::MAX),
+        ix => d.row_of(table::BANDS, ix as u32).map_or((1, 0), |r| {
+            (
+                d.u32_at(table::BANDS, 4, r) as i32,
+                d.u32_at(table::BANDS, 5, r) as i32,
+            )
+        }),
+    };
+    let status = match &a["status"] {
+        Value::String(s) if !s.is_empty() => json!(s),
+        _ => json!(status),
+    };
+    let batch = match a["batch"].as_str().filter(|b| !b.is_empty()) {
+        None => -1,
+        Some(code) => (0..d.rows(table::BATCHES))
+            .find(|&r| d.str_at(table::BATCHES, col::batches::CODE, r) == code)
+            .map_or(i32::MAX, |r| {
+                d.u32_at(table::BATCHES, col::batches::ID, r) as i32
+            }),
+    };
+    let min = a["min_score"].as_i64().map_or(-1, |m| m as i32);
+    let (stage, status, heat) = (
+        ix_of(d, table::STAGES, &a["stage"]),
+        ix_of(d, table::STATUSES, &status),
+        ix_of(d, table::HEAT_STATES, &a["heat"]),
+    );
+    let q = a["q"].as_str().unwrap_or("").as_bytes().to_vec();
+    d.select(min, lo, hi, stage, status, batch, -1, heat, &q);
+    d.selection().iter().map(|&r| r as usize).collect()
+}
+
+fn applications(d: &mut Desk, a: &Value, status: &str, limit: Option<usize>) -> Outcome {
+    let limit = a["limit"]
+        .as_u64()
+        .map_or(limit.unwrap_or(100), |l| l.clamp(1, 1000) as usize);
+    let rows: Vec<Value> = select(d, a, status)
+        .into_iter()
+        .take(limit)
+        .map(|r| card(d, r))
+        .collect();
+    Ok(json!({"applications": rows}))
+}
+
+fn recommend(d: &mut Desk, a: &Value) -> Outcome {
+    let mut a = a.clone();
+    if a["min_score"].is_null() {
+        a["min_score"] = json!(90);
+    }
+    let limit = a["limit"].as_u64().map_or(25, |l| l.clamp(1, 100) as usize);
+    let apps: Vec<Value> = select(d, &a, "open")
+        .into_iter()
+        .map(|r| card(d, r))
+        .filter(|c| c["heat_state"] != "blocked")
+        .take(limit)
+        .collect();
+    let open_fire =
+        (0..d.rows(table::BATCHES)).any(|r| d.u32_at(table::BATCHES, col::batches::FIRE, r) == 1);
+    Ok(json!({
+        "applications": apps,
+        "min_score": a["min_score"],
+        "fire": if open_fire { "open_fire" } else { "hold" },
+        "note": "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
+    }))
+}
+
+/// Band counts and ten-point bins over the filtered board.
+fn distribution(d: &mut Desk, a: &Value) -> Outcome {
+    let scores: Vec<u32> = select(d, a, "all")
+        .into_iter()
+        .map(|r| d.u32_at(table::CARDS, col::cards::SCORE, r))
+        .collect();
+    let bands: Vec<Value> = (0..d.rows(table::BANDS))
+        .map(|r| {
+            let (lo, hi) = (d.u32_at(table::BANDS, 4, r), d.u32_at(table::BANDS, 5, r));
+            let n = scores.iter().filter(|s| (lo..=hi).contains(s)).count();
+            json!({"key": d.str_at(table::BANDS, 2, r), "label": d.str_at(table::BANDS, 3, r),
+                   "min": lo, "max": hi, "count": n})
+        })
+        .collect();
+    let bins: Vec<Value> = (0..10)
+        .map(|b| {
+            let (lo, hi) = (b * 10, if b == 9 { 100 } else { b * 10 + 9 });
+            json!({"lo": lo, "hi": hi, "count": scores.iter().filter(|s| (lo..=hi).contains(*s)).count()})
+        })
+        .collect();
+    let n = scores.len();
+    let mean = if n == 0 {
+        0.0
+    } else {
+        f64::from(scores.iter().sum::<u32>()) / n as f64
+    };
+    Ok(json!({"n": n, "mean": mean, "bands": bands, "bins": bins}))
+}
+
+fn heat(d: &mut Desk, a: &Value) -> Outcome {
+    d.derive();
+    let t = table::HEAT_ROWS;
+    let pick = |group: u32, needle: &Value| -> Vec<Value> {
+        let needle = needle.as_str().unwrap_or("").to_lowercase();
+        (0..d.rows(t))
+            .filter(|&r| d.u32_at(t, col::heat_rows::GROUP, r) == group)
+            .filter(|&r| {
+                needle.is_empty()
+                    || d.str_at(t, col::heat_rows::KEY, r)
+                        .to_lowercase()
+                        .contains(&needle)
+                    || d.str_at(t, col::heat_rows::LABEL, r)
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .map(|r| Value::Object(row(d, t, r)))
+            .collect()
+    };
+    Ok(json!({
+        "companies": pick(0, &a["company"]),
+        "vendors": pick(1, &a["ats"]),
+        "note": "FIRE HOLD. Heat gates the queue. It does not submit."
+    }))
+}
+
+fn verdict(d: &mut Desk, job: u32) -> Outcome {
+    d.derive();
+    let r = d
+        .row_of(table::VERDICTS, job)
+        .ok_or(format!("job {job}: not found"))?;
+    let mut v = row(d, table::VERDICTS, r);
+    v.insert("job_id".into(), json!(job));
+    v.insert("fire".into(), json!("hold"));
+    Ok(Value::Object(v))
+}
+
+fn lanes(d: &mut Desk, which: &str) -> Outcome {
+    let mut lane = interim::lane(d, which);
+    lane["note"] = json!(match which {
+        "gym" =>
+            "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
+        _ => "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit.",
+    });
+    Ok(lane)
+}
+
+/// INTERIM, until link's `Desk::focus_json` and `Desk::lanes_json` land in
+/// the kernel: then `get_application` and the lanes return those, and
+/// this module is deleted. Minimal on purpose: the lines a lease edits,
+/// and the counts a lane shows.
+mod interim {
+    use super::{Desk, Outcome, Value, application, col, json, table};
+
+    fn rows_where(d: &Desk, t: u16, c: u16, v: u32) -> Vec<usize> {
+        (0..d.rows(t)).filter(|&r| d.u32_at(t, c, r) == v).collect()
+    }
+
+    pub fn focus(d: &mut Desk, job: u32) -> Outcome {
+        let mut view = application(d, job);
+        let (v, o, i) = (table::CV_VARIANTS, table::OVERLAYS, table::ITEMS);
+        let r = *rows_where(d, v, col::cv_variants::JOB_APP_ID, job)
+            .first()
+            .ok_or("no CV for this job")?;
+        let (profile, lineage) = (
+            d.u32_at(v, col::cv_variants::PROFILE_ID, r),
+            d.u32_at(v, col::cv_variants::LINEAGE_ID, r),
+        );
+        let overlays = rows_where(d, o, col::overlays::LINEAGE_ID, lineage);
+        let mut items = rows_where(d, i, col::items::PROFILE_ID, profile);
+        items.sort_by_key(|&r| d.u32_at(i, col::items::POSITION, r));
+        let lines: Vec<Value> = items
+            .into_iter()
+            .map(|r| {
+                let id = d.u32_at(i, col::items::ID, r);
+                let over = overlays
+                    .iter()
+                    .copied()
+                    .find(|&x| d.u32_at(o, col::overlays::ITEM_ID, x) == id);
+                let (mode, title) = over.map_or(("inherit", ""), |x| {
+                    (
+                        d.str_at(o, col::overlays::MODE, x),
+                        d.str_at(o, col::overlays::TITLE, x),
+                    )
+                });
+                let title = if title.is_empty() {
+                    d.str_at(i, col::items::TITLE, r)
+                } else {
+                    title
+                };
+                json!({"item_id": id, "mode": mode, "title": title})
+            })
+            .collect();
+        view["variant_id"] = json!(d.u32_at(v, col::cv_variants::ID, r));
+        view["lineage_id"] = json!(lineage);
+        view["cv_label"] = json!(d.str_at(v, col::cv_variants::LABEL, r));
+        view["lines"] = json!(lines);
+        Ok(view)
+    }
+
+    fn kv<'a>(d: &'a Desk, ns: &str, key: &str) -> &'a str {
+        let t = table::KV_PAIRS;
+        (0..d.rows(t))
+            .find(|&r| {
+                d.str_at(t, col::kv_pairs::NAMESPACE, r) == ns
+                    && d.str_at(t, col::kv_pairs::KEY, r) == key
+            })
+            .map_or("", |r| d.str_at(t, col::kv_pairs::VALUE, r))
+    }
+
+    pub fn lane(d: &mut Desk, which: &str) -> Value {
+        let today = d.today;
+        let recent = |t: u16, c: u16| {
+            (0..d.rows(t))
+                .filter(|&r| d.u32_at(t, c, r) + 7 > today && d.u32_at(t, c, r) <= today)
+                .count()
+        };
+        match which {
+            "gym" => json!({
+                "target": kv(d, "gym", "daily_target"),
+                "reps_this_week": recent(table::GYM_REPS, col::gym_reps::DONE_ON),
+                "problems": d.rows(table::GYM_PROBLEMS),
+            }),
+            _ => json!({
+                "lane": kv(d, "net", "broadside_lane"),
+                "shipped_this_week": recent(table::NET_ENTRIES, col::net_entries::SHIPPED_ON),
+                "entries": d.rows(table::NET_ENTRIES),
+            }),
+        }
+    }
+}
+
+fn letterboxes(d: &mut Desk, a: &Value) -> Outcome {
+    let rows = applications(
+        d,
+        &json!({"min_score": a["min_score"], "limit": a["limit"]}),
+        "all",
+        Some(1000),
+    )?;
+    Ok(json!({"letterboxes": rows["applications"]}))
+}
+
+/// A deflated frame as the plain frame it stands for.
+fn inflate(f: &wire::Frame<'_>) -> Option<Vec<u8>> {
+    let n = u32::from_le_bytes(f.body.get(4..8)?.try_into().ok()?) as usize;
+    let raw = miniz_oxide::inflate::decompress_to_vec(f.body.get(8..8 + n)?).ok()?;
+    let mut w = wire::Writer::new();
+    w.begin(f.header.kind, f.header.flags & !wire::DEFLATE, f.header.rev);
+    w.raw(&raw);
+    w.end();
+    Some(w.buf)
+}
+
+// ---- arguments ----------------------------------------------------------------
+
+/// 32 bits that differ between runs, so this run's op ids are its own.
+fn run_id() -> u64 {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    (t ^ (u64::from(std::process::id()) << 16)) & 0xFFFF_FFFF
+}
+
+/// `job_id`, or as the distillation packs call it, `role_id`.
+fn job_arg(a: &Value) -> Result<u32, String> {
+    ["job_id", "role_id"]
+        .iter()
+        .find_map(|k| match &a[*k] {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .map(|n| n as u32)
+        .ok_or("job_id is required".into())
+}
+
+fn text(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A gym or net entry's fields as the op carries them: key, value, ...
+fn pairs(a: &Value) -> Vec<String> {
+    a.as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(k, v)| [k.clone(), text(v)])
+        .collect()
+}
+
+/// A cell of a raw row as a notification carries it.
+fn cell(c: &wire::Col<'_>, i: usize, kind: &str) -> Value {
+    match c.ty {
+        wire::STR if kind == "str" => {
+            let s = c.str(i);
+            serde_json::from_str::<Value>(s)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!(s))
+        }
+        wire::U32 => match c.u32(i) {
+            wire::NONE => Value::Null,
+            v if kind == "day" => json!(iso_day(i64::from(v))),
+            v => json!(v),
+        },
+        wire::U64 => json!(c.u64(i)),
+        wire::F64 => json!(c.f64(i)).as_f64().map_or(Value::Null, |x| json!(x)),
+        _ => Value::Null,
+    }
 }
 
 /// Days since 1970-01-01 as `YYYY-MM-DD` (Howard Hinnant's civil_from_days).
@@ -576,71 +918,175 @@ fn iso_day(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Pumps one lane: numbers requests, matches replies, routes notifications.
-async fn run_lane(
-    hub: std::sync::Weak<Hub>,
-    letterbox_id: u64,
-    up: Up,
-    mut down: Down,
-    mut calls: mpsc::UnboundedReceiver<(Value, Reply)>,
-) {
-    let mut pending: HashMap<u64, Reply> = HashMap::new();
-    let mut next = 1u64;
-    loop {
-        tokio::select! {
-            call = calls.recv() => match call {
-                Some((mut msg, reply)) => {
-                    msg["id"] = json!(next);
-                    pending.insert(next, reply);
-                    next += 1;
-                    if up.send(msg).is_err() { break; }
-                }
-                // The lane was released: dropping `up` closes the stream.
-                None => break,
-            },
-            msg = down.recv() => match msg {
-                Some(v) => match v.get("id").and_then(Value::as_u64) {
-                    Some(id) => {
-                        if let Some(reply) = pending.remove(&id) { let _ = reply.send(v); }
-                    }
-                    None => if let (Some(hub), Some("notifications/desk")) =
-                        (hub.upgrade(), v["method"].as_str()) {
-                        let mut event = v["params"].clone();
-                        event["letterbox_id"] = json!(letterbox_id);
-                        hub.notify(letterbox_id, event);
-                    },
-                },
-                None => break,
-            },
-        }
-    }
-    // The server ended the stream (revoked, session gone): forget the lease.
-    if let Some(hub) = hub.upgrade()
-        && letterbox_id != 0
-        && hub.leases.lock().unwrap().remove(&letterbox_id).is_some()
-    {
-        hub.notify(
-            letterbox_id,
-            json!({"type": "lease_lost", "letterbox_id": letterbox_id}),
-        );
-    }
+// ---- the tools ------------------------------------------------------------------
+
+fn initialize(params: &Value) -> Value {
+    json!({
+        "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
+        "capabilities": {"tools": {"listChanged": false}, "logging": {}},
+        "serverInfo": {"name": "hireme-mcp", "version": env!("CARGO_PKG_VERSION")},
+        "instructions": "hireme desk. The read tools rank and report on the whole desk. To change \
+            one application, lease_letterbox(job_id) and pass that job_id to its write tools. Hold \
+            as many leases as you have parallel tasks; release_letterbox when done. Changes to \
+            leased applications arrive as log notifications and through letterbox_events. \
+            FIRE HOLD: nothing here submits an application."
+    })
 }
 
-fn local_tools() -> Vec<Value> {
-    let id = json!({"type": "integer"});
+fn tools(d: &mut Desk) -> Vec<Value> {
+    let keys = |t: u16| -> Value { (0..d.rows(t)).map(|r| json!(d.str_at(t, 2, r))).collect() };
+    let en = |t: u16| json!({"type": "string", "enum": keys(t)});
+    let score = json!({"type": "integer", "minimum": 0, "maximum": 100});
+    let s = json!({"type": "string"});
+    let job = json!({"type": "integer", "description": "The application's job id"});
+    let filters = json!({"q": s, "stage": en(table::STAGES), "status": s, "batch": s,
+        "min_score": score, "band": en(table::BANDS), "heat": en(table::HEAT_STATES),
+        "limit": {"type": "integer", "minimum": 1}});
+    let tool = |name: &str, description: &str, props: Value, required: &[&str]| {
+        json!({"name": name, "description": description,
+               "inputSchema": {"type": "object", "properties": props, "required": required}})
+    };
+    let with_job = |extra: Value| {
+        let mut p = extra;
+        p["job_id"] = job.clone();
+        p
+    };
     vec![
-        json!({"name": "lease_letterbox",
-               "description": "Lease one letterbox (one application) on its own stream. Hold several to work on applications in parallel.",
-               "inputSchema": {"type": "object", "properties": {"letterbox_id": id}, "required": ["letterbox_id"]}}),
-        json!({"name": "release_letterbox",
-               "description": "Release a lease by closing its stream.",
-               "inputSchema": {"type": "object", "properties": {"letterbox_id": id}, "required": ["letterbox_id"]}}),
-        json!({"name": "list_leases",
-               "description": "The leases this agent holds, the carrier in use, and delta counters.",
-               "inputSchema": {"type": "object", "properties": {}}}),
-        json!({"name": "letterbox_events",
-               "description": "Drain desk changes for leased applications (all leases, or one letterbox_id).",
-               "inputSchema": {"type": "object", "properties": {"letterbox_id": id}}}),
+        tool(
+            "list_letterboxes",
+            "Applications an agent can lease, highest score_100 first, with whether each is leased",
+            json!({"min_score": score, "limit": {"type": "integer"}}),
+            &[],
+        ),
+        tool("list_batches", "The batches on the desk", json!({}), &[]),
+        tool(
+            "list_applications",
+            "Applications ranked by score_100, then cooler company heat, filtered like the desk's top bar. FIRE HOLD — does not submit",
+            filters.clone(),
+            &[],
+        ),
+        tool(
+            "recommend_applications",
+            "The open applications to draft first (score_100 floor 90 by default), heat-blocked ones left out. Ranks only; does not submit",
+            filters.clone(),
+            &[],
+        ),
+        tool(
+            "score_distribution",
+            "score_100 band counts and ten-point bins over the filtered desk",
+            filters,
+            &[],
+        ),
+        tool(
+            "heat_status",
+            "Company and ATS heat against cap, with cooldowns, optionally filtered by company or ats. FIRE HOLD",
+            json!({"company": s, "ats": s}),
+            &[],
+        ),
+        tool(
+            "can_apply",
+            "Would queueing this application exceed company or ATS heat? allow or defer, with reason and cooldown. FIRE HOLD",
+            json!({"job_id": job}),
+            &["job_id"],
+        ),
+        tool(
+            "gym_status",
+            "Gym conditioning: daily target, streak, weekly pace (not Life-EV score_100), topic counts",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "gym_log",
+            "Log a LeetCode / Codeforces / systems rep (platform, title, slug, topic, difficulty, url, outcome, minutes, note, done_on)",
+            json!({"title": s, "slug": s, "platform": s, "topic": s, "difficulty": s, "url": s, "outcome": s, "minutes": {"type": "integer"}, "note": s, "done_on": s}),
+            &[],
+        ),
+        tool(
+            "gym_set_target",
+            "Set the gym daily solved-rep target (1–30)",
+            json!({"target": {"type": "integer", "minimum": 1, "maximum": 30}}),
+            &["target"],
+        ),
+        tool(
+            "net_status",
+            "Networking lane: Broadside Observer URL, shipped work this week, open drafts, observer runs. Not CRM",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "net_log",
+            "Log an observer run, shipped artifact, post, or draft (kind, channel, title, url, body, shipped_on). Not CRM",
+            json!({"kind": s, "channel": s, "title": s, "url": s, "body": s, "shipped_on": s}),
+            &[],
+        ),
+        tool(
+            "net_set_lane",
+            "Set the Broadside Observer research lane URL",
+            json!({"url": s}),
+            &["url"],
+        ),
+        tool(
+            "lease_letterbox",
+            "Lease one application so this agent can change it. Hold several to work in parallel",
+            json!({"job_id": job}),
+            &["job_id"],
+        ),
+        tool(
+            "release_letterbox",
+            "Release a lease",
+            json!({"job_id": job}),
+            &["job_id"],
+        ),
+        tool(
+            "list_leases",
+            "The leases this agent holds, the carrier, and the wire schema",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "letterbox_events",
+            "Drain desk changes to leased applications (all, or one job_id)",
+            json!({"job_id": job}),
+            &[],
+        ),
+        tool(
+            "get_application",
+            "A leased application with its composed CV: lines, modes, theme and rail",
+            json!({"job_id": job}),
+            &["job_id"],
+        ),
+        tool(
+            "set_stage",
+            "Move a leased application along the battleplan",
+            with_job(json!({"stage": en(table::STAGES)})),
+            &["job_id", "stage"],
+        ),
+        tool(
+            "set_next_action",
+            "Set a leased application's next action and optional due date (ISO)",
+            with_job(json!({"next_action": s, "next_due": s})),
+            &["job_id", "next_action"],
+        ),
+        tool(
+            "set_score",
+            "Set a leased application's score_100",
+            with_job(json!({"score": score})),
+            &["job_id", "score"],
+        ),
+        tool(
+            "tailor_line",
+            "Hide, emphasize, alter (title/body) or inherit a line on a leased application's CV",
+            with_job(
+                json!({"item_id": {"type": "integer"}, "mode": {"type": "string", "enum": ["hidden", "emphasized", "altered", "inherit"]}, "title": s, "body": s, "reason": s}),
+            ),
+            &["job_id", "item_id", "mode"],
+        ),
+        tool(
+            "open_cv_generation",
+            "After the cooldown, open an additive CV generation for a leased application's employer",
+            with_job(json!({})),
+            &["job_id"],
+        ),
     ]
 }
 
@@ -657,39 +1103,14 @@ mod tests {
     }
 
     #[test]
-    fn application_cells_are_named() {
-        let mut w = wire::Writer::new();
-        w.begin(schema::frame::PATCH, 0, 7);
-        w.table(table::JOB_APPS, 2);
-        w.col_u32(col::job_apps::ID, [5u32, 6].into_iter());
-        w.col_u32(col::job_apps::BATCH_ID, [9u32, 4].into_iter());
-        w.col_u32(col::job_apps::NEXT_DUE, [20_735u32, wire::NONE].into_iter());
-        let stages: [&[u8]; 2] = [b"gated", b"discovered"];
-        w.col_str(col::job_apps::CURRENT_STAGE, stages.into_iter());
-        let notes: [&[u8]; 2] = [br#"{"gated":"ok"}"#, b"not json"];
-        w.col_str(col::job_apps::STAGE_NOTES, notes.into_iter());
-        let listing: [&[u8]; 2] = [b"long text", b"more"];
-        w.col_str(col::job_apps::LISTING, listing.into_iter());
-        w.end();
-        let f = wire::Frame::parse(&w.buf).unwrap();
-        let t = f.tables().next().unwrap().unwrap();
-        let mut dict = Dict::default();
-        dict.names.insert((table::BATCHES, 9), "B-9".into());
-        let row = |i| {
-            t.cols()
-                .filter_map(|c| cell(&c, i, schema::col_def(t.id, c.id).unwrap(), &dict))
-                .collect::<HashMap<_, _>>()
-        };
-        let r0 = row(0);
-        assert_eq!(r0["id"], json!(5));
-        assert_eq!(r0["batch"], json!("B-9"));
-        assert_eq!(r0["current_stage"], json!("gated"));
-        assert_eq!(r0["next_due"], json!("2026-10-09"));
-        assert_eq!(r0["stage_notes"], json!({"gated": "ok"}));
-        assert!(!r0.contains_key("listing"));
-        let r1 = row(1);
-        assert_eq!(r1["batch_id"], json!(4));
-        assert_eq!(r1["next_due"], Value::Null);
-        assert_eq!(r1["stage_notes"], json!("not json"));
+    fn arguments_read_as_the_server_did() {
+        assert_eq!(job_arg(&json!({"job_id": 7})), Ok(7));
+        assert_eq!(job_arg(&json!({"role_id": "8"})), Ok(8));
+        assert!(job_arg(&json!({})).is_err());
+        assert_eq!(
+            pairs(&json!({"title": "x", "minutes": 20})),
+            ["minutes", "20", "title", "x"]
+        );
+        assert_eq!(text(&Value::Null), "");
     }
 }

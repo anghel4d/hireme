@@ -55,38 +55,22 @@ defmodule HiremeWeb.AuthTest do
     assert %{"error" => "not found"} = account(conn, "revoke_key", %{id: 999_999}, 404)
   end
 
-  test "an agent socket needs a live key for the account that owns the letterbox", %{conn: conn} do
+  test "a key minted on the account page signs an agent in for that account only", %{
+    conn: conn
+  } do
     import Hireme.Fixtures
     job = job(profile(), %{company: "Keyed Co"})
-    box = Hireme.Letterbox.for_job(job.id).id
+    %{"secret" => secret} = account(conn, "create_key", %{name: "agent"}, 200)
+    account_id = Hireme.Repo.account_id!()
 
-    %{"secret" => secret} = account(conn, "create_key", %{name: "socket"}, 200)
+    assert {:ok, %{account_id: ^account_id}} = HiremeWeb.LetterboxStream.agent_key(secret, "t")
+    assert :error = HiremeWeb.LetterboxStream.agent_key("hm_nope", "t")
 
-    info = fn key ->
-      %{
-        params: %{"letterbox_id" => to_string(box)},
-        connect_info: %{x_headers: [{"x-api-key", key}], peer_data: %{address: {127, 0, 0, 1}}}
-      }
-    end
-
-    assert {:ok, %{id: ^box, account_id: account_id}} = HiremeWeb.McpSocket.connect(info.(secret))
-    assert account_id == Hireme.Repo.account_id!()
-    assert :error = HiremeWeb.McpSocket.connect(info.("hm_nope"))
-
-    assert :error =
-             HiremeWeb.McpDirectorySocket.connect(%{
-               connect_info: %{x_headers: [], peer_data: %{address: {127, 0, 0, 1}}}
-             })
-
-    assert {:ok, %{account_id: ^account_id}} =
-             HiremeWeb.McpDirectorySocket.connect(%{
-               connect_info: %{auth_token: secret, peer_data: %{address: {127, 0, 0, 1}}}
-             })
-
-    other = Hireme.DataCase.open_account("Other desk")
+    Hireme.DataCase.open_account("Other desk")
     {:ok, %{secret: foreign}} = ApiKeys.create("foreign")
-    assert :error = HiremeWeb.McpSocket.connect(info.(foreign))
-    refute other.id == account_id
+    assert {:ok, %{account_id: other}} = HiremeWeb.LetterboxStream.agent_key(foreign, "t")
+    refute other == account_id
+    assert {:error, :not_found} = Hireme.Letterbox.claim(job.id)
   end
 
   test "an enrolled account's new session is pending until a factor is presented, and sensitive writes need a fresh one",

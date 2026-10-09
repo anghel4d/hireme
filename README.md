@@ -123,7 +123,7 @@ A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSit
 
 An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor or a way in is added or removed, or other sessions are ended. An account with no factor confirms those by having signed in within the last five minutes. `SECURITY.md` says which standards each piece answers.
 
-An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it on `/mcp/websocket` and `/mcp/letterbox/<id>/websocket` as the `x-api-key` header, or as the `base64url.bearer.phx.<base64 key>` websocket subprotocol. A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at the upgrade with no detail. Upgrade attempts are throttled per peer, including successful attempts; reuse established sockets for tool calls.
+An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it once, in its session's HELLO (see Agents). A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at HELLO with no detail. Key authentications are throttled per peer, including successful ones; one session carries every lease.
 
 The migration was rewritten for accounts; an existing local database needs `mix ecto.reset`.
 
@@ -172,7 +172,7 @@ The scoreboard reads leftover URL counts from the latest snapshot, then counts b
 
 Every job and employer gets `score_100` (0–100). A pack may set it (`score_100` or `score`, or a `Score` column in a pursue table); otherwise `Hireme.LifeEv.score/1` assigns it from company, role, fit, location, and comp along the ladder in [`alchemy/score-ladder.md`](alchemy/score-ladder.md). Eight closed bands: `frontier` 100, `labs` 90–99, `big_tech` 85–89, `systems` 70–84, `craft` 55–69, `mid` 40–54, `thin` 20–39, `kill` 0–19. A re-import without a score leaves the card's score alone.
 
-The board orders by `score_100` first, then cooler company heat, then batch, rung, and interest heat. The top bar filters by band, a minimum score, or heat state. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Directory MCP tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank on `score_100` and take `min_score`, `band`, and `heat`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
+The board orders by `score_100` first, then cooler company heat, then batch, rung, and interest heat. The top bar filters by band, a minimum score, or heat state. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Agents' tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank the same board on `score_100` and take `min_score`, `band`, and `heat`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
 
 ## HEAT governor
 
@@ -216,11 +216,9 @@ For 90 days after a generation opens, the lineage can be rewritten. After that, 
 
 ## Agents
 
-Letterboxes are single-producer, single-consumer. Each application has one letterbox. An agent leases that id. The lease's process is the only producer and the letterbox process the only consumer; the handle closes over that application's CV pair, and commands do not carry an application id. A second lease of that id is refused, and so is a lease of another application on the same employer CV while the first is held.
+An agent is a client of the desk exactly as a browser is. **`hireme-mcp`** (`native/mcp`) is the stdio MCP server an agent such as Claude Code runs locally: it opens one session (WebTransport through the gate, or the `/wire` WebSocket where UDP is blocked), authenticates once with the API key in its HELLO, and receives the account's raw tables and every delta, which it keeps resident in the desk kernel (`native/kernel`, linked natively; the browser runs the same code as WebAssembly). Every read tool is answered from that copy: the ranked board, heat and `can_apply`, the score chart, gym and net progress, one application's composed CV. Writes go up as the ops the browser sends, and Elixir decides them.
 
-The directory lists letterboxes and batches, ranks applications on `score_100`, reports heat (`heat_status`, `can_apply`), and logs gym reps plus networking entries. It cannot write an application. A lease reads and writes its one application. Tool calls are MCP JSON-RPC; a job id or variant id from a different application is rejected, naming open fire stays on the desk, and nothing submits an application.
-
-**`hireme-mcp`** (`native/mcp`) is the stdio MCP server an agent such as Claude Code runs locally. It holds one WebTransport session to the gate, authenticated once with the API key in its HELLO, and gives every lease its own stream, so an agent can hold as many leases as it has parallel tasks and closing a stream releases its lease. The account's desk changes arrive once per session as raw rows; `hireme-mcp` turns the rows of leased applications into log notifications and keeps them for `letterbox_events`. Where UDP is blocked it falls back to the websockets below.
+An application is changed under a lease, taken by job id. The lease is one small server process, its only holder: while it lives, every other write to that job is refused, and so is a lease of another application on the same employer's CV lineage. An agent holds as many leases as it has parallel tasks, each on its own lane of the session; closing the lane, the session ending, or the key being revoked releases it. Changes to leased applications arrive as log notifications and are kept for `letterbox_events`. Naming open fire stays on the desk, and nothing submits an application.
 
 ```
 cargo build --release --manifest-path native/mcp/Cargo.toml
@@ -231,13 +229,11 @@ claude mcp add hireme \
   -- /path/to/native/mcp/target/release/hireme-mcp
 ```
 
-`HIREME_TRANSPORT` picks `auto` (the default), `wt` or `ws`; a development gate's self-signed certificate is pinned with `HIREME_WT_CERT_SHA256_FILE=_build/gate.hash`. **Rebuild `hireme-mcp` whenever you pull a change to `priv/wire/schema.txt`.** A build from another schema is refused at HELLO and says so: `hello refused (schema): this hireme-mcp speaks wire schema …; rebuild it from the server's commit`.
-
-The websockets remain for agents that cannot reach the gate: `/mcp/websocket` is the directory and `/mcp/letterbox/<id>/websocket` one lease, each a separate key authentication. Each text frame is one JSON object; the server pushes `{"method": "notifications/desk", "params": {...}}` for the leased application only. `bench/letterbox.mjs` times both carriers through `hireme-mcp`.
+`HIREME_TRANSPORT` picks `auto` (the default), `wt` or `ws`; a development gate's self-signed certificate is pinned with `HIREME_WT_CERT_SHA256_FILE=_build/gate.hash`. **Rebuild `hireme-mcp` whenever you pull a change to `priv/wire/schema.txt`.** A build from another schema is refused at HELLO and says so: `hello refused (schema): this hireme-mcp speaks wire schema …; rebuild it from the server's commit`. `bench/letterbox.mjs` times both carriers through `hireme-mcp`.
 
 ## Layout
 
-Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `letterbox/` (`letterbox.ex`; the consumer process behind it), `mfa/` (`mfa.ex`; WebAuthn behind it), and `lib/hireme_web/` (`endpoint.ex`; router, session, packet, gate bridge, JSON, MCP, and sockets behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
+Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org recognisers behind it), `mfa/` (`mfa.ex`; WebAuthn behind it), and `lib/hireme_web/` (`endpoint.ex`; router, session, packet, gate bridge, JSON, account and the lease process behind it). Everything else is one file per concern, and every row the desk stores is in `schema.ex` in migration order.
 
 | Path | Role |
 | --- | --- |
@@ -261,7 +257,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
-| `lib/hireme/letterbox/letterbox.ex` | SPSC lease, one application per handle |
+| `lib/hireme/letterbox.ex` | Leases: one holder process per application, and its employer's lineage |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes; the desk page (ticket, gate, scope and schema metas) and the reconnect ticket |
 | `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, letterbox streams; the `/wire` WebSocket carrier |
@@ -272,11 +268,10 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/mfa.ex` | The sign-in factor page |
 | `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
 | `lib/hireme_web/json.ex` | JSON shapes for the MCP tools and the oracle, and refusals |
-| `lib/hireme_web/mcp.ex` | Tool calls on the directory socket or a leased handle; directory ranks on `score_100`; gym/net log on the directory |
-| `lib/hireme_web/sockets.ex` | Agent sockets (directory, letterbox) and the letterbox stream behind a session |
+| `lib/hireme_web/letterbox_stream.ex` | One agent lease: the holder process on a lane of the agent's session |
 | `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
 | `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
-| `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, a stream per lease |
+| `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, a lane per lease |
 | `priv/wire/schema.txt` | The wire: frames, tables, columns, ops, refusals; its hash is in every frame |
 | `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
 | `assets/js/shell.ts` | Model, update, draw |

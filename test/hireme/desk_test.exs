@@ -68,7 +68,6 @@ defmodule Hireme.DeskTest do
     assert focus.coverage.misses == ["databases"]
     assert focus.variant.lineage.theme == focus.variant.theme
     assert Hireme.CvPair.job_id(Hireme.CvPair.bind!(added.id)) == added.id
-    assert Hireme.Letterbox.for_job(added.id).job_app_id == added.id
   end
 
   test "a bare opening inherits shared masks and lineage targets without rewriting a leased sibling" do
@@ -88,7 +87,7 @@ defmodule Hireme.DeskTest do
         ]
       })
 
-    {:ok, lease} = Hireme.Letterbox.lease(Hireme.Letterbox.for_job(first.id).id, self())
+    {{:ok, _pair}, lease} = hold_lease(first.id)
 
     try do
       added =
@@ -112,7 +111,7 @@ defmodule Hireme.DeskTest do
       assert Hireme.CvPair.variant_id(pair) != Hireme.CvPair.variant_id(original_pair)
       assert {:error, :leased} = Desk.put_overlay(first.id, altered.id, %{mode: :hidden})
     after
-      :ok = Hireme.Letterbox.release(lease)
+      let_go(lease)
     end
   end
 
