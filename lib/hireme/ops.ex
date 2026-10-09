@@ -12,7 +12,7 @@ defmodule Hireme.Ops do
 
       {:ops_delta, rev, %{rows: %{table => [row]}, gone: %{table => [id]}}}
 
-  then the held `{:desk_event, Signal}` messages, then the reply. Local
+  then the held after-commit messages, then the reply. Local
   PubSub sends from this process and Erlang keeps the order of messages
   between two processes, so a caller always has the delta for its rev in
   its mailbox before the reply lands.
@@ -233,7 +233,7 @@ defmodule Hireme.Ops do
 
   @doc """
   The account's prepared heat snapshot for today, for judging many
-  applications at once (`Hireme.Desk.focuses/2`). Read here, in the
+  applications at once. Read here, in the
   caller, so an agent's read never waits behind the account's writes.
 
   The sequencer bumps the account's heat generation after any commit

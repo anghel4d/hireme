@@ -118,7 +118,7 @@ defmodule Hireme.ChecklistOracleTest do
         receive do
           :stop ->
             receive do
-              {:desk_event, _} -> send(parent, :leaked)
+              {:ops_delta, _, _} -> send(parent, :leaked)
             after
               0 -> send(parent, :quiet)
             end
@@ -138,8 +138,8 @@ defmodule Hireme.ChecklistOracleTest do
 
     Task.await(task)
     assert_receive :wrote
-    assert_receive {:desk_event, %{job_id: id}}, 500
-    assert id == job.id
+    assert_receive {:ops_delta, _, %{rows: %{job_apps: rows}}}, 500
+    assert Enum.any?(rows, &(&1.id == job.id))
     send(listener, :stop)
     assert_receive :quiet
     refute_receive :leaked

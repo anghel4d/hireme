@@ -200,13 +200,17 @@ The desk travels as columnar frames over one session per tab (`priv/wire/schema.
 
 `native/kernel` (Rust, built reproducibly to `priv/static/wasm/kernel.wasm`) holds those raw tables and derives the rest: the cards with their heat load, cooldown and verdicts, the board order and search, the heat chart, the scoreboard and its chart, keyword coverage and batch mixes, re-deriving only the jobs a change reaches and their heat kin. A write is an OP: the kernel predicts its rows and its refusals (lease, fire hold, heat) in the same tick, keeps it as pending over the base rows, and settles it when the PATCH and ACK arrive, or drops it on a NACK, so a refusal rolls back by itself. `assets/js/compose.ts` builds the focus, root CV, lanes and account documents from the rows (Mask, Theme, Cv.compose, the rail); `store.ts` keeps them until a row they read changes, saves the tables to IndexedDB when the page is idle, and restores the kernel from that copy if it ever traps. `shell.ts`, `views.ts`, `board.ts` and `html.ts` draw from the desk synchronously in the input's frame, morphing only what changed.
 
-The server stays the authority. `Hireme.Ops` runs every write for an account in one sequencer (op ledger, validation, commit, a delta of the columns that changed) and keeps the ring that serves resumes; Elixir keeps its own copy of the view logic for refusals and for agents. `test/support/oracle.ex` dumps every view Elixir derives, and `native/kernel/parity.mjs` and `bench/compose.ts` require the browser's ports to equal it exactly.
+The server stays the authority. `Hireme.Ops` runs every write for an account in one sequencer (op ledger, validation, commit, a delta of the columns that changed) and keeps the ring that serves resumes; Elixir keeps no view logic: `test/support/oracle.ex` dumps what the server decides (raw deltas and refusals, `can_apply`, the batch mix), and `native/kernel/parity.mjs` requires the kernel's ports to equal it exactly.
 
 ## Types
 
-Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes, `Hireme.Desk.Filters.from_params/1` for the URL. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
+Every closed set is a set of atoms with a `parse/1` at the edge: `Hireme.Pipeline` for stages and pips, `Hireme.Desk.Overlay.parse_mode/1` for mask modes. A string from the wire, a pack, or a form becomes one of those atoms once or is refused there. Past the edge nothing is compared to a string.
 
+<<<<<<< HEAD
 Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Mask.Line`, `Keywords.Coverage`, `Cv.Document`, `Theme`, `Campaign.Scoreboard`, `Desk.Card`, `Desk.Focus`, `Desk.Signal`, `CvPair`, `Letterbox.Handle`, `Heat.Config`, `Heat.Verdict`, `Heat.Chart`. Where a struct is stored as JSON (`Theme`) the module has a `to_map`/`parse` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
+=======
+Values that cross a module boundary are structs with enforced keys: `Pipeline.Rung`, `Theme`, `Variety`, `CvPair`, `Heat.Config`, `Heat.Verdict`. Where a struct is stored as JSON (`Theme`, `Variety`) the module has a `to_map`/`from_map` pair, and where a rail is stored as a pip string `Pipeline.encode/1` and `Pipeline.decode/1` are inverse. Tests check those round trips.
+>>>>>>> 32bccbf (refactor: drop the server's views, Desk.perform and Signal; agents are wire clients)
 
 ## CV pairs
 
@@ -247,11 +251,11 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/mfa/webauthn.ex` | The WebAuthn ceremonies behind `Hireme.Mfa` |
 | `lib/hireme/schema.ex` | Every row the desk stores |
 | `lib/hireme/pipeline.ex` | Stage and pip atoms, `Rung`, encode/decode, the hold lock |
-| `lib/hireme/cv.ex` | Corpus, narrative, kv, `Theme`, `Mask`, `Keywords`, the composed `Cv.Document`, `CvPair` and the quarterly cooldown |
-| `lib/hireme/life_ev.ex` | `score_100` ladder, bands, histogram |
-| `lib/hireme/gym.ex` | Conditioning grind: problems, reps, streak, daily target |
+| `lib/hireme/cv.ex` | Corpus, narrative, kv, `Theme`, `CvPair` and the quarterly cooldown |
+| `lib/hireme/life_ev.ex` | `score_100` ladder and bands |
+| `lib/hireme/gym.ex` | Conditioning grind: problems, reps, daily target |
 | `lib/hireme/net.ex` | Broadside Observer runs, posts, artifacts, drafts. Not CRM |
-| `lib/hireme/desk.ex` | Cards, focus, stages, naming open fire, `Signal`, `Filters` (the domain the sequencer and agents call) |
+| `lib/hireme/desk.ex` | Opening, stage moves and their heat permits, naming open fire, overlays and CV generations (the domain the sequencer calls) |
 | `lib/hireme/ops.ex` | One sequencer per account: op ledger, every write, raw-row deltas, the resume ring, the heat snapshot |
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
@@ -266,7 +270,12 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/account.ex` | The Account page over the session: its tables and commands, step-up and enrolment ceremonies |
 | `lib/hireme_web/mfa.ex` | The sign-in factor page |
 | `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
+<<<<<<< HEAD
 | `lib/hireme_web/json.ex` | JSON shapes for the MCP tools and the oracle, and refusals |
+=======
+| `lib/hireme_web/json.ex` | JSON shapes for the account page, and refusals |
+| `lib/hireme_web/letterbox_stream.ex` | One agent lease: the holder process on a lane of the agent's session |
+>>>>>>> 32bccbf (refactor: drop the server's views, Desk.perform and Signal; agents are wire clients)
 | `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
 | `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
 | `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, a lane per lease |

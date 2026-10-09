@@ -14,70 +14,12 @@ defmodule Hireme.GymTest do
     assert Gym.parse_topic("crm") == :error
   end
 
-  test "a solved rep counts toward today, streak, topics, and weekly pace" do
-    assert {:ok, _} =
-             Gym.log(
-               %{
-                 "platform" => "leetcode",
-                 "title" => "Two Sum",
-                 "topic" => "arrays",
-                 "difficulty" => "easy",
-                 "outcome" => "solved"
-               },
-               @today
-             )
-
-    assert {:ok, _} =
-             Gym.log(
-               %{
-                 "platform" => "codeforces",
-                 "title" => "Shortest Path",
-                 "topic" => "graphs",
-                 "difficulty" => "medium"
-               },
-               @today
-             )
-
-    assert {:ok, _} =
-             Gym.log(
-               %{
-                 "title" => "Warmup skip",
-                 "topic" => "arrays",
-                 "outcome" => "skip"
-               },
-               @today
-             )
-
-    progress = Gym.progress(@today)
-    assert progress.solved_today == 2
-    assert progress.target == 3
-    assert progress.streak == 1
-    assert progress.solved_week == 2
-    assert progress.score == round(2 / 21 * 100)
-
-    arrays = Enum.find(progress.topics, &(&1.key == :arrays))
-    graphs = Enum.find(progress.topics, &(&1.key == :graphs))
-    assert arrays.count == 1
-    assert graphs.count == 1
-  end
-
-  test "streak is consecutive solved days, GitHub-style" do
-    log_solved("Day three", ~D[2026-10-05])
-    log_solved("Day two", ~D[2026-10-06])
-    progress = Gym.progress(@today)
-    assert progress.streak == 2
-    assert progress.solved_today == 0
-
-    log_solved("Day one", @today)
-    assert Gym.progress(@today).streak == 3
-  end
-
   test "daily target is stored in kv and capped" do
     assert {:ok, 5} = Gym.set_target("5")
-    assert Gym.target() == 5
+    assert Hireme.Kv.get("gym", "daily_target").value == "5"
     assert {:error, :target} = Gym.set_target(0)
     assert {:error, :target} = Gym.set_target(99)
-    assert Gym.target() == 5
+    assert Hireme.Kv.get("gym", "daily_target").value == "5"
   end
 
   test "the same platform+slug updates the problem instead of duplicating" do
@@ -100,34 +42,6 @@ defmodule Hireme.GymTest do
 
     assert first.problem_id == second.problem_id
     assert second.problem.difficulty == :medium
-  end
-
-  test "progress counts repeated solves and preserves lifetime and open-ended week windows" do
-    assert Gym.progress(@today).solved_week == 0
-
-    for day <- [Date.add(@today, -7), Date.add(@today, -6), @today, @today, Date.add(@today, 1)] do
-      assert {:ok, rep} =
-               Gym.log(%{"title" => "Repeated graph", "topic" => "graphs"}, day)
-
-      assert rep.problem.id == rep.problem_id
-      assert rep.problem.topic == :graphs
-    end
-
-    assert {:ok, _} =
-             Gym.log(%{"title" => "Attempt", "outcome" => "attempt"}, @today)
-
-    progress = Gym.progress(@today)
-    assert progress.solved_today == 2
-    assert progress.solved_week == 4
-    assert progress.streak == 1
-    assert Enum.find(progress.topics, &(&1.key == :graphs)).count == 5
-    assert Enum.find(progress.topics, &(&1.key == :arrays)).count == 0
-    assert hd(progress.recent).done_on == Date.add(@today, 1)
-
-    Hireme.DataCase.open_account("Other gym")
-    other = Gym.progress(@today)
-    assert {other.solved_today, other.solved_week, other.streak, other.recent} == {0, 0, 0, []}
-    assert Enum.all?(other.topics, &(&1.count == 0))
   end
 
   test "minutes remain strict nonnegative integers, not rounded or trimmed" do
@@ -176,9 +90,5 @@ defmodule Hireme.GymTest do
     assert_raise Ecto.InvalidChangesetError, fn ->
       Gym.log(%{"title" => "Explicit slug", "slug" => "!!!"}, @today)
     end
-  end
-
-  defp log_solved(title, day) do
-    {:ok, _} = Gym.log(%{"title" => title, "topic" => "systems"}, day)
   end
 end

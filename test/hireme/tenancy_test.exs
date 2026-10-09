@@ -2,20 +2,17 @@ defmodule Hireme.TenancyTest do
   use Hireme.DataCase, async: false
   import Hireme.Fixtures
 
-  alias Hireme.Desk
-  alias Hireme.Desk.Filters
   alias Hireme.Desk.Job
   alias Hireme.Letterbox
   alias Hireme.Repo
 
   test "one account's rows do not exist for another" do
     job = job(profile(), %{company: "Mine Co"})
-    assert [%{id: id}] = Desk.list_cards(%Filters{status: :all})
+    assert [%{id: id}] = Repo.all(Job)
     assert id == job.id
 
     Hireme.DataCase.open_account("Other desk")
-    assert Desk.list_cards(%Filters{status: :all}) == []
-    assert Desk.focus(job.id) == nil
+    assert Repo.all(Job) == []
     assert Repo.get(Job, job.id) == nil
     assert {:error, :not_found} = Letterbox.claim(job.id)
   end

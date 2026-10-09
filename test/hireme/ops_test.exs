@@ -241,7 +241,7 @@ defmodule Hireme.OpsTest do
     assert_received {:ops_delta, ^rev, %{rows: %{gym_reps: [_]}}}
     assert {:ok, ^rev} = Ops.run(account.id, op)
     refute_received {:ops_delta, _, _}
-    assert length(Gym.recent()) == 1
+    assert Repo.aggregate(Hireme.Gym.Rep, :count) == 1
 
     refused = %{op | op_id: 2, kind: :score, target: 1, fields: ["101"]}
     assert {:error, {:argument, "score"}} = Ops.run(account.id, refused)
@@ -252,7 +252,7 @@ defmodule Hireme.OpsTest do
   # one's, is refused like any other op, and the sequencer carries on.
   test "every kind refuses a target the account cannot see", %{account: account} do
     mine = job(profile(), %{company: "Mine"})
-    [mine_item | _] = for _ <- 1..1, do: item(Desk.focus(mine.id).profile)
+    mine_item = item(Repo.get!(Hireme.Corpus.Profile, mine.profile_id))
     other = Hireme.Accounts.create!(%{name: "Other"})
 
     {theirs, their_item, their_narrative} =

@@ -1,275 +1,11 @@
-defmodule Hireme.Desk.Card do
-  @moduledoc """
-  What the board shows for one application: the job's own columns minus
-  the listing text, the names it is joined to, and the heat painted on
-  after the fetch. The query selects the job fields by name and merges
-  the joins; `order/1` is the board order.
-  """
-
-  alias Hireme.Pipeline
-
-  @job_fields ~w(id company role location heat status next_action next_due stage_on pips
-                 freshness gate fit score_100 listing_url canonical_url department squad
-                 heat_override heat_override_reason)a
-  @joined ~w(stage profile_name profile_slug cv_label batch_code batch_fire batch_ordinal)a
-
-  @enforce_keys @job_fields ++ @joined
-  defstruct @enforce_keys ++
-              [
-                load: 0.0,
-                cap: 1.0,
-                heat_state: :cool,
-                ats_vendor: :unknown,
-                cooldown_days: nil,
-                leased: false
-              ]
-
-  @type t :: %__MODULE__{
-          id: pos_integer(),
-          company: String.t(),
-          role: String.t(),
-          location: String.t(),
-          heat: 1..5,
-          status: Hireme.Desk.Job.status(),
-          next_action: String.t(),
-          next_due: Date.t() | nil,
-          stage_on: Date.t() | nil,
-          pips: String.t(),
-          freshness: atom(),
-          gate: atom(),
-          fit: String.t(),
-          score_100: Hireme.LifeEv.score(),
-          listing_url: String.t(),
-          canonical_url: String.t(),
-          department: String.t(),
-          squad: String.t(),
-          heat_override: boolean(),
-          heat_override_reason: String.t(),
-          stage: Pipeline.stage(),
-          profile_name: String.t(),
-          profile_slug: String.t(),
-          cv_label: String.t(),
-          batch_code: String.t() | nil,
-          batch_fire: :hold | :open_fire | nil,
-          batch_ordinal: non_neg_integer() | nil,
-          load: float(),
-          cap: float(),
-          heat_state: :cool | :warm | :hot | :blocked,
-          ats_vendor: atom(),
-          cooldown_days: non_neg_integer() | nil,
-          leased: boolean()
-        }
-
-  @doc false
-  def job_fields, do: @job_fields
-
-  @doc """
-  Board order: highest `score_100` first, then cooler company load, then
-  batch, then rung, then interest heat, then company.
-  """
-  @spec order(t()) :: tuple()
-  def order(%__MODULE__{} = card) do
-    ratio = if card.cap <= 0, do: 100, else: round(card.load / card.cap * 100)
-
-    {-card.score_100, ratio, card.batch_ordinal || 999, Pipeline.rank(card.stage), -card.heat,
-     card.company}
-  end
-end
-
-defmodule Hireme.Desk.Focus do
-  @moduledoc """
-  One application opened: its row, its rail, its document, the
-  coverage of the listing's words against that document and the root,
-  and the heat governor's verdict on it.
-  """
-
-  @enforce_keys [
-    :job,
-    :profile,
-    :variant,
-    :theme,
-    :rail,
-    :events,
-    :cv,
-    :narrative,
-    :coverage,
-    :root_coverage,
-    :kv,
-    :masks,
-    :verdict
-  ]
-  defstruct @enforce_keys
-
-  @type t :: %__MODULE__{
-          job: Hireme.Desk.Job.t(),
-          profile: Hireme.Corpus.Profile.t(),
-          variant: Hireme.Desk.Variant.t(),
-          theme: Hireme.Theme.t(),
-          rail: Hireme.Pipeline.rail(),
-          events: [Hireme.Desk.Event.t()],
-          cv: Hireme.Cv.Document.t(),
-          narrative: Hireme.Corpus.Narrative.t() | nil,
-          coverage: Hireme.Keywords.Coverage.t(),
-          root_coverage: Hireme.Keywords.Coverage.t(),
-          kv: [Hireme.Kv.Pair.t()],
-          masks: [Hireme.Mask.Line.t()],
-          verdict: Hireme.Heat.Verdict.t()
-        }
-end
-
-defmodule Hireme.Desk.Signal do
-  @moduledoc """
-  One change on the desk, broadcast on the `"desk"` topic as
-  `{:desk_event, %Signal{}}`.
-
-  `kind` is the closed set of things that can change. `job_id` is set for
-  every change to one application and nil for a batch-level change, so a
-  letterbox can match its own application with one field.
-  """
-
-  @type kind :: :application_opened | :stage | :cv | :open_fire
-
-  @enforce_keys [:kind]
-  defstruct [:kind, :job_id, :lineage_id, :stage, :batch]
-
-  @type t :: %__MODULE__{
-          kind: kind(),
-          job_id: pos_integer() | nil,
-          lineage_id: pos_integer() | nil,
-          stage: Hireme.Pipeline.stage() | nil,
-          batch: String.t() | nil
-        }
-
-  @spec application_opened(pos_integer(), pos_integer()) :: t()
-  def application_opened(job_id, lineage_id),
-    do: %__MODULE__{kind: :application_opened, job_id: job_id, lineage_id: lineage_id}
-
-  @spec stage(pos_integer(), Hireme.Pipeline.stage()) :: t()
-  def stage(job_id, stage), do: %__MODULE__{kind: :stage, job_id: job_id, stage: stage}
-
-  @spec cv(pos_integer(), pos_integer()) :: t()
-  def cv(job_id, lineage_id), do: %__MODULE__{kind: :cv, job_id: job_id, lineage_id: lineage_id}
-
-  @spec open_fire(String.t()) :: t()
-  def open_fire(batch), do: %__MODULE__{kind: :open_fire, batch: batch}
-
-  @spec about?(t(), pos_integer()) :: boolean()
-  def about?(%__MODULE__{job_id: job_id}, job_id) when is_integer(job_id), do: true
-  def about?(%__MODULE__{}, _job_id), do: false
-
-  @doc "The wire shape. Nil fields are left out."
-  @spec to_json(t()) :: map()
-  def to_json(%__MODULE__{} = signal) do
-    %{"type" => Atom.to_string(signal.kind)}
-    |> put("job_id", signal.job_id)
-    |> put("lineage_id", signal.lineage_id)
-    |> put("stage", signal.stage && Atom.to_string(signal.stage))
-    |> put("batch", signal.batch)
-  end
-
-  defp put(map, _key, nil), do: map
-  defp put(map, key, value), do: Map.put(map, key, value)
-end
-
-defmodule Hireme.Desk.Filters do
-  @moduledoc """
-  The board's filter, parsed once from the URL and written back to it.
-
-  `from_params/1` never fails: an unknown stage, status, or band falls
-  back to the default. `to_query/1` is the inverse and leaves defaults
-  out so the URL stays short.
-
-  `min_score` is the lowest `score_100` shown. `band` picks one band of
-  the Life-EV ladder; both apply when both are given. `heat` is company
-  load after the governor paints the card (`cool` / `warm` / `hot` /
-  `blocked`); it is not a SQL column.
-  """
-
-  alias Hireme.Closed
-  alias Hireme.Desk.Job
-  alias Hireme.Heat
-  alias Hireme.LifeEv
-  alias Hireme.Pipeline
-
-  @type t :: %__MODULE__{
-          q: String.t(),
-          stage: Pipeline.stage() | :all,
-          profile: String.t() | :all,
-          status: Job.status() | :all,
-          batch: String.t() | :leftover | :all,
-          min_score: LifeEv.score(),
-          band: LifeEv.band() | :all,
-          heat: :all | :cool | :warm | :hot | :blocked
-        }
-
-  defstruct q: "",
-            stage: :all,
-            profile: :all,
-            status: :open,
-            batch: :all,
-            min_score: 0,
-            band: :all,
-            heat: :all
-
-  @keys [:q, :stage, :profile, :status, :batch, :min_score, :band, :heat]
-
-  @spec from_params(map()) :: t()
-  def from_params(params) when is_map(params) do
-    %__MODULE__{
-      q: params["q"] || "",
-      stage: params["stage"] |> Pipeline.parse() |> or_all(),
-      profile: name(params["profile"]),
-      status: Closed.get([:all | Job.statuses()], params["status"], :open),
-      batch: if(params["batch"] == "leftover", do: :leftover, else: name(params["batch"])),
-      min_score: min_score(params["min_score"]),
-      band: params["band"] |> LifeEv.parse_band() |> or_all(),
-      heat: params["heat"] |> Heat.parse_state() |> or_all()
-    }
-  end
-
-  @spec merge(t(), map()) :: t()
-  def merge(%__MODULE__{} = filters, overrides) when is_map(overrides) do
-    struct!(filters, Map.take(overrides, @keys))
-  end
-
-  @spec to_query(t()) :: map()
-  def to_query(%__MODULE__{} = filters) do
-    defaults = %__MODULE__{}
-
-    Map.new(
-      for key <- @keys,
-          value = Map.fetch!(filters, key),
-          value != Map.fetch!(defaults, key),
-          do: {Atom.to_string(key), to_string(value)}
-    )
-  end
-
-  defp or_all({:ok, value}), do: value
-  defp or_all(:error), do: :all
-
-  defp name(value) when is_binary(value) and value not in ["", "all"], do: value
-  defp name(_), do: :all
-
-  defp min_score(n) when is_integer(n), do: LifeEv.clamp(n)
-
-  defp min_score(s) when is_binary(s) do
-    case Integer.parse(s) do
-      {n, ""} -> LifeEv.clamp(n)
-      _ -> 0
-    end
-  end
-
-  defp min_score(_), do: 0
-end
-
 defmodule Hireme.Desk do
   @moduledoc """
   Applications on the desk.
 
-  The board reads a slim projection (`Card`, no listing text). Opening a
-  card builds a `Focus`: the mask resolved against the root items and the
-  document composed from it. Glance numbers on the card are written back
-  so the grid never resolves thousands of documents.
+  Every view of an application is derived by the client from the raw
+  rows; what lives here is what the server decides: opening, stage
+  moves and their heat permits, naming open fire, overlays and CV
+  generations, with the refusals each can answer.
 
   The rail is the pip string on the row. `Pipeline.decode/1` gives the
   rungs back and `stage_notes` carries the one thing the pips cannot.
@@ -277,9 +13,8 @@ defmodule Hireme.Desk do
   Writes return `{:ok, value}` or `{:error, reason}` with `reason` a
   member of `t:refusal/0` or a changeset. Every public write runs on the
   account's `Hireme.Ops` sequencer, which calls `execute/1` inside one
-  transaction and, after commit, broadcasts the change as a
-  `Hireme.Desk.Signal` and as an `{:ops_delta, rev, delta}` on the
-  account's topic.
+  transaction and, after commit, broadcasts the change as an
+  `{:ops_delta, rev, delta}` on the account's topic.
 
   Every function here runs as the account on the process; the repo
   scopes each read to it and `tenant/1` stamps each row.
@@ -287,27 +22,16 @@ defmodule Hireme.Desk do
 
   import Ecto.Query
   import Ecto.Changeset, only: [apply_action: 2, put_change: 3]
-  alias Hireme.Corpus
-  alias Hireme.Cv
   alias Hireme.Cv.Lineage
   alias Hireme.CvPair
   alias Hireme.Desk.Batch
-  alias Hireme.Desk.Card
   alias Hireme.Desk.Event
-  alias Hireme.Desk.Filters
-  alias Hireme.Desk.Focus
   alias Hireme.Desk.Job
-  alias Hireme.Desk.Overlay
-  alias Hireme.Desk.Signal
   alias Hireme.Desk.Variant
   alias Hireme.Heat
   alias Hireme.Heat.Verdict
-  alias Hireme.Keywords
-  alias Hireme.Kv
   alias Hireme.Letterbox
   alias Hireme.LifeEv
-  alias Hireme.Mask
-  alias Hireme.Narrative
   alias Hireme.Ops
   alias Hireme.Pipeline
   alias Hireme.Pipeline.Rung
@@ -328,14 +52,6 @@ defmodule Hireme.Desk do
           | :heat
           | :reason
 
-  @type command ::
-          :get
-          | :open_generation
-          | {:set_stage, Pipeline.stage()}
-          | {:set_next, String.t()}
-          | {:set_score, LifeEv.score()}
-          | {:tailor, pos_integer(), map()}
-
   @typedoc "A desk write as `Hireme.Ops` sequences it; see `execute/1`."
   @type write ::
           {:create, map()}
@@ -346,43 +62,11 @@ defmodule Hireme.Desk do
           | {:overlay, pos_integer(), pos_integer(), :inherit | map()}
           | {:open_fire, String.t()}
           | {:govern, Batch.t()}
-          | {:perform, CvPair.t(), command()}
           | {:generation, pos_integer()}
 
-  @type reply ::
-          {:ok, Focus.t()}
-          | {:ok, Job.t()}
-          | {:ok, Lineage.t()}
-          | {:ok, CvPair.t()}
-          | {:error, refusal() | Ecto.Changeset.t()}
-
-  @doc "The PubSub topic one account's signals go out on."
+  @doc "The PubSub topic one account's deltas go out on."
   @spec topic(pos_integer()) :: String.t()
   def topic(account_id \\ Repo.account_id!()), do: "desk:#{account_id}"
-
-  @spec code(pos_integer()) :: String.t()
-  def code(id), do: "JobApp#{id}"
-
-  @spec list_cards(Filters.t()) :: [Card.t()]
-  def list_cards(%Filters{} = filters) do
-    cfg = Heat.config()
-    today = Date.utc_today()
-
-    filters
-    |> card_query()
-    |> paint(Heat.snapshot(today, cfg), cfg, today)
-    |> Enum.filter(&(filters.heat == :all or &1.heat_state == filters.heat))
-    |> Enum.sort_by(&Card.order/1)
-  end
-
-  defp paint(query, snapshot, cfg, today) do
-    leased = Letterbox.leased_jobs()
-
-    query
-    |> Repo.all()
-    |> Enum.map(&struct!(Card, Map.put(&1, :leased, MapSet.member?(leased, &1.id))))
-    |> Heat.decorate_all(snapshot, cfg, today)
-  end
 
   @doc "The applications that share `job_id`'s CV lineage, itself included."
   @spec lineage_jobs(pos_integer()) :: [pos_integer()]
@@ -402,137 +86,6 @@ defmodule Hireme.Desk do
 
   @spec list_batches() :: [Batch.t()]
   def list_batches, do: Repo.all(from b in Batch, order_by: b.ordinal)
-
-  @spec focus(pos_integer() | nil) :: Focus.t() | nil
-  @doc "Open one application: `focuses/2` of one."
-  def focus(nil), do: nil
-
-  def focus(job_id) do
-    case focuses([job_id]) do
-      [focus] -> focus
-      [] -> nil
-    end
-  end
-
-  @doc """
-  Open many applications at once, in no particular order; an unknown id
-  is left out. Each kind of row is read once for all of them (the jobs
-  with their profile and batch, the variants with their lineage, the
-  lineages' overlays, the events, the process notes), each profile's
-  lines once, and every heat verdict is judged against one prepared
-  snapshot: `heat`, such as `Hireme.Ops.heat/1`'s. Without one each is
-  judged by `Hireme.Heat.can_apply/1`, which is cheaper than preparing a
-  snapshot for a handful.
-  """
-  @spec focuses([pos_integer()], map() | nil, Date.t()) :: [Focus.t()]
-  def focuses(ids, heat \\ nil, today \\ Date.utc_today())
-  def focuses([], _heat, _today), do: []
-
-  def focuses(ids, heat, today) do
-    rows =
-      Repo.all(
-        from j in Job,
-          where: j.id in ^ids,
-          left_join: p in assoc(j, :profile),
-          left_join: b in assoc(j, :batch),
-          select: {j, p, b}
-      )
-
-    job_ids = Enum.map(rows, fn {job, _, _} -> job.id end)
-
-    variants =
-      from(v in Variant,
-        where: v.job_app_id in ^job_ids,
-        left_join: l in assoc(v, :lineage),
-        preload: [lineage: l]
-      )
-      |> Repo.all()
-      |> Map.new(&{&1.job_app_id, &1})
-
-    lineage_ids = variants |> Map.values() |> Enum.map(& &1.lineage_id) |> Enum.uniq()
-
-    overlays =
-      Repo.all(from o in Overlay, where: o.lineage_id in ^lineage_ids)
-      |> Enum.group_by(& &1.lineage_id)
-
-    events =
-      Repo.all(from e in Event, where: e.job_app_id in ^job_ids, order_by: [desc: e.id])
-      |> Enum.group_by(& &1.job_app_id)
-
-    notes =
-      Repo.all(
-        from p in Kv.Pair,
-          where: p.namespace in ^Enum.map(job_ids, &"app:#{&1}"),
-          order_by: p.key
-      )
-      |> Enum.group_by(& &1.namespace)
-
-    lines =
-      rows
-      |> Enum.map(fn {_, profile, _} -> profile end)
-      |> Enum.uniq_by(& &1.id)
-      |> Map.new(fn profile ->
-        items = Corpus.list_items(profile.id)
-        root = items |> Mask.apply([]) |> Keywords.visible_text()
-        {profile.id, {items, root, Narrative.for_profile(profile)}}
-      end)
-
-    # Applications on one lineage share their overlays, so their lines.
-    resolved =
-      rows
-      |> Enum.map(fn {job, _, _} -> {job.profile_id, variant!(variants, job.id).lineage_id} end)
-      |> Enum.uniq()
-      |> Map.new(fn {profile_id, lineage_id} = key ->
-        {items, _, _} = Map.fetch!(lines, profile_id)
-        lines = Mask.apply(items, Map.get(overlays, lineage_id, []))
-        {key, {lines, Keywords.visible_text(lines)}}
-      end)
-
-    person = person_name()
-    cfg = Heat.config()
-    heat = heat && Heat.prepare(heat, cfg, today)
-
-    for {job, profile, batch} <- rows do
-      variant = %{variant!(variants, job.id) | job_app: job}
-      job = %{job | profile: profile, batch: batch}
-      {_items, root, narrative} = Map.fetch!(lines, profile.id)
-      {shown, text} = Map.fetch!(resolved, {profile.id, variant.lineage_id})
-      theme = theme_of(variant)
-      targets = Keywords.targets(theme, job.listing)
-
-      %Focus{
-        job: job,
-        profile: profile,
-        variant: variant,
-        theme: theme,
-        rail: rail(job),
-        events: events |> Map.get(job.id, []) |> Enum.take(12),
-        cv: Cv.compose(profile, shown, theme, label: variant.label, person: person),
-        narrative: narrative,
-        coverage: Keywords.coverage(targets, text),
-        root_coverage: Keywords.coverage(targets, root),
-        kv: Map.get(notes, "app:#{job.id}", []),
-        masks: Enum.filter(shown, &(&1.mode != :canonical)),
-        verdict:
-          if(heat,
-            do: Heat.verdict(job, heat, cfg, today),
-            else: Heat.can_apply(job, today: today)
-          )
-      }
-    end
-  end
-
-  # Every application has its variant; one without is a broken row, not
-  # an absent one.
-  defp variant!(variants, job_id) do
-    case Map.fetch(variants, job_id) do
-      {:ok, variant} ->
-        variant
-
-      :error ->
-        raise Ecto.NoResultsError, queryable: from(v in Variant, where: v.job_app_id == ^job_id)
-    end
-  end
 
   @doc """
   Open one application. `attrs` is cast through the `Job` changeset, so
@@ -611,7 +164,6 @@ defmodule Hireme.Desk do
 
     record!(job.id, "open", "Opened at #{Pipeline.label(draft.current_stage)}")
 
-    publish(Signal.application_opened(job.id, lineage.id))
     job
   end
 
@@ -668,10 +220,6 @@ defmodule Hireme.Desk do
     with :ok <- permit(job_id),
          {:ok, pair} <- CvPair.bind(job_id),
          do: CvPair.open_generation(CvPair.employer_id(pair))
-  end
-
-  def execute({:perform, %CvPair{} = pair, command}) do
-    with :ok <- permit(CvPair.job_id(pair)), do: perform_held(pair, command)
   end
 
   defp permit(job_id), do: Letterbox.permit_job(job_id, Ops.holder())
@@ -765,7 +313,6 @@ defmodule Hireme.Desk do
     job = job |> Ecto.Changeset.change(changes) |> Repo.update!()
 
     if changed?, do: record!(job.id, "stage", "Stage → #{Pipeline.label(active.key)}")
-    publish(Signal.stage(job.id, active.key))
     job
   end
 
@@ -789,22 +336,10 @@ defmodule Hireme.Desk do
       batch ->
         with {:ok, updated} <-
                batch |> Batch.changeset(%{fire: :open_fire, status: :open_fire}) |> Repo.update() do
-          publish(Signal.open_fire(updated.code))
           {:ok, updated}
         end
     end
   end
-
-  @doc """
-  Run one letterbox command against the application its pair names.
-  The pair, not an id in the command, decides which application changes.
-  """
-  @spec perform(CvPair.t(), command()) :: reply()
-  def perform(%CvPair{} = pair, :get) do
-    with :ok <- Letterbox.permit_job(CvPair.job_id(pair)), do: perform_held(pair, :get)
-  end
-
-  def perform(%CvPair{} = pair, command), do: Ops.exec({:perform, pair, command})
 
   @spec put_overlay(pos_integer(), pos_integer(), :inherit | map()) ::
           {:ok, Job.t()} | {:error, refusal() | Ecto.Changeset.t()}
@@ -815,41 +350,7 @@ defmodule Hireme.Desk do
   defp write_line(pair, item_id, attrs) when is_map(attrs),
     do: CvPair.tailor(pair, item_id, attrs)
 
-  defp after_cv_change(pair) do
-    publish(Signal.cv(CvPair.job_id(pair), CvPair.lineage_id(pair)))
-    {:ok, Repo.get!(Job, CvPair.job_id(pair))}
-  end
-
-  # An agent's read judges heat against the account's kept snapshot
-  # rather than re-reading every hot job.
-  defp perform_held(pair, :get) do
-    case focuses([CvPair.job_id(pair)], Ops.heat(Repo.account_id!())) do
-      [focus] -> {:ok, focus}
-      [] -> {:error, :not_found}
-    end
-  end
-
-  defp perform_held(pair, {:set_stage, stage}) when is_atom(stage) do
-    set_stage(CvPair.job_id(pair), stage)
-  end
-
-  defp perform_held(pair, {:set_next, action}) when is_binary(action) do
-    set_next(CvPair.job_id(pair), action, nil)
-  end
-
-  defp perform_held(pair, {:set_score, score}) when score in 0..100 do
-    set_score(CvPair.job_id(pair), score)
-  end
-
-  defp perform_held(pair, {:tailor, item_id, attrs}) when is_integer(item_id) and is_map(attrs) do
-    with {:ok, _} <- CvPair.tailor(pair, item_id, attrs),
-         {:ok, _job} <- after_cv_change(pair) do
-      {:ok, pair}
-    end
-  end
-
-  defp perform_held(pair, :open_generation), do: CvPair.open_generation(CvPair.employer_id(pair))
-  defp perform_held(%CvPair{}, _command), do: {:error, :command}
+  defp after_cv_change(pair), do: {:ok, Repo.get!(Job, CvPair.job_id(pair))}
 
   @spec rail(Job.t()) :: Pipeline.rail()
   def rail(%Job{} = job) do
@@ -864,112 +365,6 @@ defmodule Hireme.Desk do
     Enum.map(rungs, fn %Rung{} = rung ->
       %Rung{rung | note: Map.get(notes, Pipeline.name(rung.key), "")}
     end)
-  end
-
-  @doc """
-  The `score_100` chart for a board filter, the whole desk, or one batch.
-  Aggregate scores in SQL without preparing cards. A heat filter still needs
-  governor decoration, so that case uses the exact filtered board.
-  """
-  @spec score_chart(Filters.t() | String.t() | :leftover | :all) :: LifeEv.Chart.t()
-  def score_chart(batch \\ :all)
-
-  def score_chart(%Filters{heat: :all} = filters),
-    do: filters |> card_filter_query() |> score_query()
-
-  def score_chart(%Filters{} = filters), do: filters |> list_cards() |> LifeEv.chart()
-
-  def score_chart(batch) do
-    Job
-    |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
-    |> filter(:batch, batch)
-    |> score_query()
-  end
-
-  defp score_query(query) do
-    query
-    |> group_by([j], j.score_100)
-    |> select([j], {j.score_100, count()})
-    |> Repo.all()
-    |> LifeEv.chart_frequencies()
-  end
-
-  defp card_filter_query(%Filters{} = f) do
-    Job
-    |> join(:inner, [j], p in Corpus.Profile, on: p.id == j.profile_id)
-    |> join(:inner, [j], v in Variant, on: v.job_app_id == j.id)
-    |> join(:left, [j], b in Batch, on: b.id == j.batch_id)
-    |> filter(:status, f.status)
-    |> filter(:stage, f.stage)
-    |> filter(:profile, f.profile)
-    |> filter(:batch, f.batch)
-    |> filter(:q, f.q)
-    |> filter(:band, f.band)
-    |> filter(:min_score, f.min_score)
-  end
-
-  defp card_query(%Filters{} = f) do
-    f
-    |> card_filter_query()
-    |> select([j], map(j, ^Card.job_fields()))
-    |> select_merge([j, p, v, b], %{
-      stage: j.current_stage,
-      profile_name: p.name,
-      profile_slug: p.slug,
-      cv_label: v.label,
-      batch_code: b.code,
-      batch_fire: b.fire,
-      batch_ordinal: b.ordinal
-    })
-  end
-
-  defp filter(query, _field, :all), do: query
-  defp filter(query, :q, ""), do: query
-  defp filter(query, :min_score, 0), do: query
-  defp filter(query, :min_score, min), do: where(query, [j], j.score_100 >= ^min)
-
-  defp filter(query, :band, band) do
-    %{min: low, max: high} = Enum.find(LifeEv.bands(), &(&1.key == band))
-    where(query, [j], j.score_100 >= ^low and j.score_100 <= ^high)
-  end
-
-  defp filter(query, :batch, :leftover), do: where(query, [j], is_nil(j.batch_id))
-  defp filter(query, :batch, code), do: where(query, [..., b], b.code == ^code)
-  defp filter(query, :status, status), do: where(query, [j], j.status == ^status)
-  defp filter(query, :stage, stage), do: where(query, [j], j.current_stage == ^stage)
-  defp filter(query, :profile, slug), do: where(query, [_j, p], p.slug == ^slug)
-
-  defp filter(query, :q, q) do
-    like = "%#{String.downcase(String.trim(q))}%"
-
-    where(
-      query,
-      [j, p, v],
-      like(fragment("lower(?)", j.company), ^like) or
-        like(fragment("lower(?)", j.role), ^like) or
-        like(fragment("lower(?)", j.location), ^like) or
-        like(fragment("lower(?)", j.next_action), ^like) or
-        like(fragment("lower(?)", p.name), ^like) or
-        like(fragment("lower(?)", v.label), ^like) or
-        like(fragment("lower('jobapp' || ?)", j.id), ^like) or
-        like(fragment("lower('cv' || ?)", j.id), ^like) or
-        like(fragment("cast(? as text)", j.id), ^like)
-    )
-  end
-
-  defp theme_of(%Variant{lineage: %Lineage{theme: theme}}) when theme not in [nil, %{}],
-    do: Theme.parse(theme)
-
-  defp theme_of(%Variant{theme: theme}), do: Theme.parse(theme)
-
-  # Held by the sequencer and sent after commit; a rolled-back write sends nothing.
-  defp publish(%Signal{} = signal), do: Ops.after_commit({:desk_event, signal})
-
-  defp person_name do
-    case Kv.get("global", "candidate") do
-      nil -> nil
-      pair -> pair.value
-    end
   end
 
   defp record!(job_id, kind, body) do
