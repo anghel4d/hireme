@@ -24,6 +24,13 @@
 !/test/**/*.exs
 !/test/**/*.ex
 
+!/bench/
+!/bench/*.exs
+!/bench/*.mjs
+!/bench/*.ts
+!/bench/results/
+!/bench/results/*.jsonl
+
 !/assets/
 !/assets/css/
 !/assets/css/*.css
