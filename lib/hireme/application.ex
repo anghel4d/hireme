@@ -83,6 +83,8 @@ defmodule Hireme.Application do
       ] ++
         outbox ++
         [
+          # Focuses, scoreboard and lanes encoded once for every desk session.
+          HiremeWeb.Session.Cache,
           # The WebTransport gate's Unix socket; nothing starts without config.
           {HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])},
           HiremeWeb.Endpoint
