@@ -74,14 +74,14 @@ defmodule HiremeBench.Server do
       {"Domain/Mfa", "methods", fn -> Mfa.methods() end},
       {"Domain/Mfa", "fresh", fn -> Mfa.fresh?(session) end},
       {"Domain/Kv", "list", fn -> Kv.list("global") end},
-      {"Transport/Packet", "cards",
+      # What a boot costs the attaching process: every raw table read in
+      # one transaction, encoded as the deflated BOOT frame.
+      {"Transport/Packet", "boot",
        fn ->
-         cards = Desk.list_cards(%Desk.Filters{status: :all})
+         {:ok, tables} = Repo.transaction(fn -> Hireme.Ops.read_tables() end)
+         body = for {table, rows} <- tables, do: HiremeWeb.Packet.raw(table, rows)
 
-         rows =
-           HiremeWeb.Packet.card_rows(cards, Desk.list_batches(), Hireme.Corpus.list_profiles())
-
-         HiremeWeb.Packet.frame(:boot, 0, HiremeWeb.Packet.table(:cards, rows))
+         HiremeWeb.Packet.frame(:boot, 0, body, deflate: true)
          |> IO.iodata_to_binary()
        end},
       {"Transport/JSON", "focus",

@@ -28,6 +28,7 @@ defmodule Hireme.OutboxTest.Provider do
 end
 
 defmodule Hireme.OutboxTest do
+  import ExUnit.CaptureLog
   use Hireme.DataCase, async: false
 
   alias Hireme.Accounts
@@ -67,7 +68,8 @@ defmodule Hireme.OutboxTest do
     provider(mode: :fail)
     queue()
 
-    assert Outbox.drain() == 0
+    # The mailer logs a refused send; that log is part of the contract.
+    assert capture_log(fn -> assert Outbox.drain() == 0 end) =~ "provider_down"
     assert_received {:delivering, "a@example.com", _, _}
     assert [%Notice{attempts: 1, last_error: ":provider_down"} = notice] = pending()
     assert DateTime.diff(notice.next_at, DateTime.utc_now()) in 28..30
@@ -115,7 +117,7 @@ defmodule Hireme.OutboxTest do
     provider(modes: %{"bad@example.com" => :fail})
 
     :ok = Accounts.notify(account.id, :api_key_revoked, %{name: "ci"})
-    assert Outbox.drain() == 1
+    assert capture_log(fn -> assert Outbox.drain() == 1 end) =~ "provider_down"
     assert_received {:delivering, "bad@example.com", _, _}
     assert_received {:delivering, "good@example.com", _, _}
     assert [%Notice{address: "bad@example.com", attempts: 1}] = pending()

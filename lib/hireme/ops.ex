@@ -17,7 +17,7 @@ defmodule Hireme.Ops do
   between two processes, so a caller always has the delta for its rev in
   its mailbox before the reply lands.
 
-  The sequencer keeps the account's raw tables (`columns/0`). A row in
+  The sequencer keeps the account's raw tables (`@tables`). A row in
   `rows` is new (every column) or changed (`id` and only the columns
   whose value moved); `gone` names rows removed. Every view is derived
   from these tables by the client; Elixir keeps its own derivations
@@ -170,7 +170,7 @@ defmodule Hireme.Ops do
   stands. A session that holds the account at `since` and is still within
   the ring of recent deltas gets `{:replay, [{rev, delta}]}`: apply them in
   order. Otherwise, or with `since` nil, `{:boot, %{tables: %{table => [row]}}}`:
-  every raw table (`columns/0`) at `rev`. Either way a later delta whose
+  every raw table at `rev`. Either way a later delta whose
   rev is at or below `rev` is already included.
   """
   @spec attach(pos_integer(), non_neg_integer() | nil) ::
@@ -275,12 +275,15 @@ defmodule Hireme.Ops do
   @doc "Stop the account's sequencer, if one runs. Its table is rebuilt on next use."
   @spec stop(pos_integer()) :: :ok
   def stop(account_id) do
-    case Registry.lookup(@registry, account_id) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(@supervisor, pid)
-      [] -> :ok
+    # A stop, not a kill: a call or cast already in hand finishes its
+    # query first, so no connection is dropped mid-statement.
+    with [{pid, _}] <- Registry.lookup(@registry, account_id) do
+      GenServer.stop(pid, :normal)
     end
 
     :ok
+  catch
+    :exit, _gone -> :ok
   end
 
   @doc "The process a write runs for, for lease checks; the caller itself outside the sequencer."
@@ -299,10 +302,6 @@ defmodule Hireme.Ops do
 
     :ok
   end
-
-  @doc "The op kinds `run/2` accepts, in wire order (kind 1 is the head)."
-  @spec kinds() :: [atom()]
-  def kinds, do: @kinds
 
   defp call(account_id, message) do
     case GenServer.call(server(account_id), message, :infinity) do
@@ -644,10 +643,6 @@ defmodule Hireme.Ops do
     tables = Map.new(@tables, fn {name, {schema, cols}} -> {name, read(schema, cols, nil)} end)
     Map.put(tables, :leases, leases(Map.get(tables, :job_apps) |> Enum.map(& &1.id)))
   end
-
-  @doc "The shipped tables and their columns, in wire order. `leases` has one column, `id`."
-  @spec columns() :: [{atom(), [atom()]}]
-  def columns, do: Enum.map(@tables, fn {name, {_, cols}} -> {name, cols} end) ++ [leases: [:id]]
 
   defp read(schema, cols, nil), do: Repo.all(from(r in schema, select: map(r, ^cols)))
 

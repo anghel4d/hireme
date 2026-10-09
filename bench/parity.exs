@@ -1,7 +1,7 @@
 # Fingerprint public payloads from baseline/final releases on identical fixture copies.
 # Compare digests, not private Ecto preload/query representation.
-alias Hireme.{Campaign, Corpus, Desk, Heat, Repo}
-alias HiremeWeb.{JSON, Packet}
+alias Hireme.{Campaign, Corpus, Desk, Heat, Ops, Repo}
+alias HiremeWeb.JSON
 
 dir = Path.expand(System.fetch_env!("BENCH_DIR"))
 database = Application.fetch_env!(:hireme, Repo) |> Keyword.fetch!(:database) |> Path.expand()
@@ -23,20 +23,9 @@ batch = hd(Desk.list_batches())
 mix = Heat.mix_batch(batch)
 
 payloads = %{
-  cards_frame:
-    Packet.frame(
-      :boot,
-      0,
-      Packet.table(
-        :cards,
-        Packet.card_rows(
-          Desk.list_cards(%Desk.Filters{status: :all}),
-          Desk.list_batches(),
-          Corpus.list_profiles()
-        )
-      )
-    )
-    |> IO.iodata_to_binary(),
+  # The rows a boot ships, in id order: what every client view derives from.
+  tables: Map.new(Ops.read_tables(), fn {t, rows} -> {t, Enum.sort_by(rows, & &1.id)} end),
+  cards: Desk.list_cards(%Desk.Filters{status: :all}),
   focuses: Enum.map(focus_ids, &(&1 |> Desk.focus() |> JSON.focus())),
   roots: Enum.map(Corpus.list_profiles(), &(&1.id |> Desk.root() |> JSON.root())),
   scoreboard: Campaign.scoreboard() |> JSON.scoreboard(),
