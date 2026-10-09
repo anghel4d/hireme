@@ -3,7 +3,10 @@
 import type { Doc, Focus, HeatRow, Identity, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { type Filters, value } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
-import type { Status, Tables } from "./store.ts"
+import type { Mark, Status, Tables } from "./store.ts"
+
+/** A write's state on its card: the desk's mark (pending: sent, not yet answered). */
+export type { Mark }
 
 /** The resident rows a card is drawn from: the desk's view columns. */
 export interface Rows {
@@ -11,9 +14,6 @@ export interface Rows {
   column(name: string): Uint32Array
   str(name: string): { at(row: number): string }
 }
-
-/** A write's state on its card: sent and unanswered, or answered with derived fields still due. */
-export type Mark = "pending" | "settling" | null
 
 const EPOCH_MS = Date.UTC(1970, 0, 1)
 const NONE = 0xffffffff
