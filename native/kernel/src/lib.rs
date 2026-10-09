@@ -1,11 +1,12 @@
 //! hireme's desk kernel, compiled to `priv/static/wasm/kernel.wasm`.
 //!
-//! The browser keeps the whole desk resident in this module's memory:
-//! every table the server sends, each opened job's focus, the interned
-//! CV lines, and the ops in flight. Frames go in through one buffer;
-//! TypeScript reads columns straight out of memory by pointer. This file
-//! is the export ABI and nothing else; `store` holds the tables and
-//! `desk` the view, predictions, order and selection.
+//! The browser keeps the whole desk resident in this module's memory: the
+//! account's raw tables, the views derived from them, and the ops in
+//! flight. Frames go in through one buffer; TypeScript reads columns
+//! straight out of memory by pointer. This file is the export ABI and
+//! nothing else: `store` holds the tables, `desk` the pending view, order
+//! and selection, `predict` the ops, `derive` the views, `heat` and
+//! `keywords` the Elixir ports they run.
 //!
 //! ABI conventions. Every argument and result is an i32/u32. Pointers are
 //! byte offsets into the exported `memory`; a pointer stays valid until
@@ -18,8 +19,9 @@
 //!   column `(offset, len)` u32 pairs into `arena_ptr()`; `col_type(t, c)`
 //!   (0 when absent); `str_ptr(t, c, row)` / `str_len(t, c, row)` (0 for
 //!   an absent or empty value, so a draw needs no branch); `row_of(t, key)`.
-//! - Cards and batches read through the view (base ⊕ pending). The focus*
-//!   tables read from the job chosen by `focus_open(job)`.
+//! - Raw tables read through the pending view (base ⊕ pending ops); the
+//!   derived tables (cards, verdicts, heat_rows, score...) are re-derived
+//!   from that view by `derive()`, which ingest and select also run.
 //!
 //! Ingest: `ingest_reserve(len)` → ptr, copy whole frames there, then
 //! `ingest_commit(len)` → a [`changed`] bitmask. ACK and NACK frames settle
@@ -42,12 +44,11 @@ use core::cell::UnsafeCell;
 use desk::Desk;
 use wire::schema;
 
-/// Bits `ingest_commit` returns.
+/// Bits `ingest_commit` returns. (4 and 8 named LINES and FOCUS, which the
+/// wire no longer carries; the other values stay where readers know them.)
 pub mod changed {
     pub const CARDS: u32 = 1;
     pub const TABLES: u32 = 2;
-    pub const LINES: u32 = 4;
-    pub const FOCUS: u32 = 8;
     pub const SETTLED_BIT: u32 = 16;
     pub const ROLLED_BACK: u32 = 32;
     pub const TICK: u32 = 64;
@@ -91,8 +92,7 @@ fn reserve(v: &mut Vec<u8>, len: u32) -> u32 {
 }
 
 impl Kernel {
-    /// The column a reader sees: the view for desk tables, the open
-    /// focus for focus tables.
+    /// The column a reader sees: the pending view.
     fn col(&self, t: u16, c: u16) -> Option<&store::Column> {
         self.desk.view_col(t, c)
     }
@@ -207,8 +207,8 @@ pub extern "C" fn str_len(t: u32, c: u32, row: u32) -> u32 {
     with(|k| k.str_ref(t as u16, c as u16, row)[1])
 }
 
-/// Row of `key` in a desk table, or -1: by id for cards, batches and
-/// profiles, by ix for lines, by the first column for any other table.
+/// Row of `key` in a table, or -1: by id for the keyed tables, by the
+/// first column for any other.
 #[unsafe(no_mangle)]
 pub extern "C" fn row_of(t: u32, key: u32) -> i32 {
     with(|k| k.desk.row_of(t as u16, key).map_or(-1, |r| r as i32))
@@ -366,9 +366,9 @@ pub extern "C" fn counter(i: u32) -> u32 {
 
 // ---- snapshot ---------------------------------------------------------
 
-/// Encodes the resident base (not the pending view) as frames: BOOT,
-/// LINES, one FOCUS per job. Returns the length; `snapshot_ptr` the bytes.
-/// Ingesting them into a fresh kernel restores this one.
+/// Encodes the resident raw tables (base, not the pending view) as one
+/// BOOT frame. Returns the length; `snapshot_ptr` the bytes. Ingesting it
+/// into a fresh kernel restores this one, views derived again.
 #[unsafe(no_mangle)]
 pub extern "C" fn snapshot() -> u32 {
     with(|k| {

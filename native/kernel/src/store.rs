@@ -5,7 +5,7 @@
 //! The kernel's view layer and the ABI read these columns in place, so a
 //! pointer handed to TypeScript is the column itself.
 //!
-//! Keyed tables (cards, batches, profiles, lines) upsert by their first
+//! Keyed tables (the raw rows and the derived cards) upsert by their first
 //! column; every other table is replaced whole when a frame carries it.
 //! The arena only grows between compactions: a string that is replaced
 //! becomes garbage, and `Store::compact` rewrites every live reference
@@ -345,25 +345,12 @@ impl Table {
     }
 
     pub fn encode(&self, w: &mut Writer, arena: &Arena) {
-        self.encode_rows(w, arena, None)
-    }
-
-    /// Encodes the rows `only` names (all rows when None), in row order.
-    pub fn encode_rows(&self, w: &mut Writer, arena: &Arena, only: Option<&[usize]>) {
-        let all: Vec<usize>;
-        let rows = match only {
-            Some(r) => r,
-            None => {
-                all = (0..self.n).collect();
-                &all
-            }
-        };
-        w.table(self.id, rows.len() as u32);
+        w.table(self.id, self.n as u32);
         for c in &self.cols {
             match &c.data {
-                Data::W32(v) => w.col_u32(c.id, rows.iter().map(|&r| v[r])),
-                Data::W64(v) => w.col_u64(c.id, c.ty, rows.iter().map(|&r| v[r])),
-                Data::Str(v) => w.col_str(c.id, rows.iter().map(|&r| arena.get(v[r]))),
+                Data::W32(v) => w.col_u32(c.id, v.iter().copied()),
+                Data::W64(v) => w.col_u64(c.id, c.ty, v.iter().copied()),
+                Data::Str(v) => w.col_str(c.id, v.iter().map(|&r| arena.get(r))),
             }
         }
     }

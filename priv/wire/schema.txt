@@ -10,23 +10,19 @@
 # col := u16 col_id | u8 type | u8 0 | u32 byte_len | data | zero pad to 8 (8-aligned from frame start).
 # Wire types: 1 u32 (day = days since 1970-01-01, time = unix seconds; none = 0xFFFFFFFF),
 # 2 str ((nrows+1) u32 offsets from 0, then UTF-8; none = empty), 3 u64, 4 f64 (none = NaN).
-# PATCH writes only the columns present; cards upsert by id; cards_gone deletes; the small tables
-# (score, lanes, kv, roots...) are replaced whole when present. FOCUS carries one job (header rev =
-# its focus rev) as the focus* tables; LINES upserts lines by ix (content-derived, stable across
-# sessions). BOOT replaces the desk tables; a HELLO whose snapshot_rev is current gets an empty
-# PATCH with END instead, which keeps everything. OP body: u64 op_id | u8 kind | u8 nfields |
-# u16 0 | u32 target | (u16 len, utf8) * nfields, fields in the order the `op` line names them.
+# BOOT carries every raw table and replaces them; PATCH carries changed rows, each block only the
+# columns it names (a changed row is its id plus the columns that moved), and `gone` deletes. A
+# HELLO whose snapshot_rev is current gets an empty PATCH with END, which keeps everything. TICK
+# carries `clock`. OP body: u64 op_id | u8 kind | u8 nfields | u16 0 | u32 target |
+# (u16 len, utf8) * nfields, fields in the order the `op` line names them.
 
 frame HELLO 1
 frame BOOT 3
 frame PATCH 4
-frame FOCUS 5
-frame LINES 6
 frame OP 8
 frame ACK 9
 frame NACK 10
 frame TICK 11
-frame HINT 12
 frame PING 13
 frame PONG 14
 frame TICKET 15
@@ -34,68 +30,8 @@ frame BYE 16
 frame LEASE 32
 frame RPC 33
 
-table cards 1
-col cards id 1 u32
-col cards score 2 u32
-col cards heat 3 u32
-col cards stage 4 u32
-col cards status 5 u32
-col cards freshness 6 u32
-col cards gate 7 u32
-col cards batch 8 u32
-col cards profile 9 u32
-col cards hits 10 u32
-col cards total 11 u32
-col cards hidden 12 u32
-col cards altered 13 u32
-col cards emphasized 14 u32
-col cards stage_on 15 day
-col cards next_due 16 day
-col cards heat_state 17 u32
-col cards load_pct 18 u32
-col cards cooldown 19 u32
-col cards leased 20 u32
-col cards company 21 str
-col cards role 22 str
-col cards location 23 str
-col cards next_action 24 str
-col cards cv_label 25 str
-col cards fit 26 str
-col cards pips 27 str
-col cards load 28 f64
-col cards cap 29 f64
-col cards ats_vendor 30 str
-col cards ratio 31 f64
-
-table cards_gone 2
-col cards_gone id 1 u32
-
-table batches 3
-col batches id 1 u32
-col batches code 2 str
-col batches ordinal 3 u32
-col batches fire 4 u32
-col batches status 5 str
-col batches kind 6 str
-col batches target_size 7 u32
-col batches queued_on 8 day
-col batches squad 9 str
-col batches variety 10 str
-col batches note 11 str
-col batches variety_apps 12 u32
-col batches variety_companies 13 u32
-col batches variety_roles 14 u32
-col batches variety_locations 15 u32
-col batches variety_fits 16 u32
-col batches variety_flags 17 str
-
-table profiles 4
-col profiles id 1 u32
-col profiles slug 2 str
-col profiles name 3 str
-col profiles headline 4 str
-col profiles summary 5 str
-col profiles user_id 6 u32
+# Closed lists the views name (stages in Pipeline order, statuses, freshness, gates, heat states,
+# LifeEv bands), sent in every BOOT for their labels and hints.
 
 table stages 5
 col stages ix 1 u32
@@ -130,199 +66,46 @@ col bands label 3 str
 col bands min 4 u32
 col bands max 5 u32
 
-table score 11
-col score fire 1 u32
-col score leftover_unique 2 u32
-col score leftover_noted_on 3 day
-col score batches_today 4 u32
-col score batches_target 5 u32
-col score apps_today 6 u32
-col score apps_target 7 u32
-col score submitted_today 8 u32
-col score cumulative 9 u32
-col score target_total 10 u32
-col score target_on 11 day
-col score chart_n 12 u32
-col score chart_mean 13 f64
-col score chart_max 14 f64
-col score chart_min 15 f64
+# Raw tables: the account's rows as the database holds them, named and typed as the Ecto schema
+# names them, keyed by id (upserted); `gone` deletes (table id, row id); `leases` is the letterbox
+# registry's live state, replaced whole; `clock` is the server's UTC day and time, which every
+# client derivation of 'today' must use. JSON-valued fields (theme, stage_notes, variety) travel as
+# JSON text; the lists the kernel reads (keywords, theme_targets, variety_flags) travel joined with
+# U+001F, and variety's counts as their own columns, so the kernel needs no JSON.
 
-table varieties 12
-col varieties code 1 str
-col varieties fire 2 str
-col varieties status 3 str
-col varieties label 4 str
+table batches 3
+col batches id 1 u32
+col batches code 2 str
+col batches ordinal 3 u32
+col batches fire 4 u32
+col batches status 5 str
+col batches kind 6 str
+col batches target_size 7 u32
+col batches queued_on 8 day
+col batches squad 9 str
+col batches variety 10 str
+col batches note 11 str
+col batches variety_apps 12 u32
+col batches variety_companies 13 u32
+col batches variety_roles 14 u32
+col batches variety_locations 15 u32
+col batches variety_fits 16 u32
+col batches variety_flags 17 str
 
-table chart_bands 13
-col chart_bands key 1 str
-col chart_bands label 2 str
-col chart_bands min 3 u32
-col chart_bands max 4 u32
-col chart_bands count 5 u32
-col chart_bands share 6 f64
-
-table chart_bins 14
-col chart_bins lo 1 u32
-col chart_bins hi 2 u32
-col chart_bins count 3 u32
-
-table gym 15
-col gym today 1 day
-col gym target 2 u32
-col gym streak 3 u32
-col gym solved_today 4 u32
-col gym solved_week 5 u32
-col gym score 6 u32
-
-table gym_topics 16
-col gym_topics key 1 str
-col gym_topics label 2 str
-col gym_topics count 3 u32
-
-table options 18
-col options group 1 str
-col options key 2 str
-col options label 3 str
-
-table net 19
-col net lane 1 str
-col net shipped_week 2 u32
-col net drafts 3 u32
-col net observer_runs 4 u32
-
-table heat_rows 21
-col heat_rows group 1 u32
-col heat_rows key 2 str
-col heat_rows label 3 str
-col heat_rows load 4 f64
-col heat_rows cap 5 f64
-col heat_rows ratio 6 f64
-col heat_rows n 7 u32
-col heat_rows cooldown_days 8 u32
-col heat_rows size 9 str
+table profiles 4
+col profiles id 1 u32
+col profiles slug 2 str
+col profiles name 3 str
+col profiles headline 4 str
+col profiles summary 5 str
+col profiles user_id 6 u32
 
 table narratives 22
 col narratives id 1 u32
-col narratives profile 2 u32
 col narratives body 3 str
 col narratives version 4 u32
 col narratives user_id 5 u32
 col narratives private 6 u32
-
-table kv 23
-col kv scope 1 u32
-col kv key 2 str
-col kv value 3 str
-
-table lines 24
-col lines ix 1 u32
-col lines item 2 u32
-col lines kind 3 str
-col lines title 4 str
-col lines body 5 str
-col lines org 6 str
-col lines span 7 str
-col lines shown 8 u32
-col lines mode 9 str
-col lines reason 10 str
-col lines canonical_title 11 str
-col lines canonical_body 12 str
-
-table roots 25
-col roots profile 1 u32
-col roots variant_label 2 str
-col roots cv_label 3 str
-col roots cv_person 4 str
-col roots cv_headline 5 str
-col roots cv_summary 6 str
-col roots cv_summary_canonical 7 str
-col roots cv_summary_reason 8 str
-col roots cv_accent 9 str
-col roots cv_density 10 str
-
-table root_sections 26
-col root_sections profile 1 u32
-col root_sections kind 2 str
-col root_sections label 3 str
-
-table root_lines 27
-col root_lines profile 1 u32
-col root_lines slot 2 u32
-col root_lines section 3 u32
-col root_lines line 4 u32
-
-table focus 30
-col focus job 1 u32
-col focus listing 2 str
-col focus listing_url 3 str
-col focus variant_id 4 u32
-col focus variant_label 5 str
-col focus theme_lead 6 str
-col focus theme_lead_reason 7 str
-col focus theme_accent 8 str
-col focus theme_density 9 str
-col focus theme_targets 10 str
-col focus cv_label 11 str
-col focus cv_person 12 str
-col focus cv_headline 13 str
-col focus cv_summary 14 str
-col focus cv_summary_canonical 15 str
-col focus cv_summary_reason 16 str
-col focus cv_accent 17 str
-col focus cv_density 18 str
-col focus heat_decision 19 str
-col focus heat_reason 20 str
-col focus heat_company 21 str
-col focus heat_company_load 22 f64
-col focus heat_company_cap 23 f64
-col focus heat_company_increment 24 f64
-col focus heat_size 25 str
-col focus heat_ats_vendor 26 str
-col focus heat_ats_tenant 27 str
-col focus heat_vendor_load 28 f64
-col focus heat_vendor_cap 29 f64
-col focus heat_tenant_load 30 f64
-col focus heat_tenant_cap 31 f64
-col focus heat_cooldown_days 32 u32
-col focus heat_note 33 str
-col focus heat_override 34 u32
-col focus heat_override_reason 35 str
-
-table focus_rungs 31
-col focus_rungs key 1 str
-col focus_rungs state 2 str
-col focus_rungs note 3 str
-
-table focus_events 32
-col focus_events id 1 u32
-col focus_events kind 2 str
-col focus_events body 3 str
-col focus_events at 4 time
-
-table focus_cover 33
-col focus_cover root 1 u32
-col focus_cover hit 2 u32
-col focus_cover word 3 str
-
-table focus_sections 34
-col focus_sections kind 1 str
-col focus_sections label 2 str
-
-table focus_lines 35
-col focus_lines slot 1 u32
-col focus_lines section 2 u32
-col focus_lines line 3 u32
-
-table focus_kv 36
-col focus_kv key 1 str
-col focus_kv value 2 str
-
-# Raw tables (round two): the account's rows as the database holds them, named and typed as the
-# Ecto schema names them, keyed by id (upserted); `gone` deletes (table id, row id); `leases` is the
-# letterbox registry's live state, replaced whole; `clock` is the server's UTC day and time, which
-# every client derivation of 'today' must use. JSON-valued fields (theme, stage_notes, variety)
-# travel as JSON text; the lists the kernel reads (keywords, theme_targets, variety_flags) travel
-# joined with U+001F, and variety's counts as their own columns, so the kernel needs no JSON.
 
 table items 41
 col items id 1 u32
@@ -453,6 +236,7 @@ col net_entries title 4 str
 col net_entries url 5 str
 col net_entries body 6 str
 col net_entries shipped_on 7 day
+
 table gone 56
 col gone table 1 u32
 col gone id 2 u32
@@ -509,11 +293,46 @@ col acct_factors last_used_at 5 time
 col acct_factors backed_up 6 u32
 col acct_factors transports 7 str
 
-# Local only: tables the kernel derives in the browser from the raw tables. They never travel
-# on the wire; they are named here so TypeScript reads them through the same table ABI.
-# verdicts: Heat.verdict per job (what can_apply answers), keyed by job id; has_tenant tells an
-# empty tenant from none. mix: Heat.mix_batch per batch, members in mix order. coverage: the
-# last Keywords coverage call, targets in order.
+# Local only: tables the kernel derives in the browser from the raw tables. They never travel on
+# the wire; they are named here so TypeScript reads them through the same table ABI. cards:
+# Desk.list_cards painted by Heat.decorate_all. verdicts: Heat.verdict per job (what can_apply
+# answers), keyed by job id; has_tenant tells an empty tenant from none. mix: Heat.mix_batch for
+# one batch, members in mix order. coverage: the last Keywords coverage call, targets in order.
+# heat_rows: Heat.chart, companies (group 0) then vendors (1). score, varieties, chart_bands,
+# chart_bins: Campaign.scoreboard and LifeEv.chart.
+
+table cards 1
+col cards id 1 u32
+col cards score 2 u32
+col cards heat 3 u32
+col cards stage 4 u32
+col cards status 5 u32
+col cards freshness 6 u32
+col cards gate 7 u32
+col cards batch 8 u32
+col cards profile 9 u32
+col cards hits 10 u32
+col cards total 11 u32
+col cards hidden 12 u32
+col cards altered 13 u32
+col cards emphasized 14 u32
+col cards stage_on 15 day
+col cards next_due 16 day
+col cards heat_state 17 u32
+col cards load_pct 18 u32
+col cards cooldown 19 u32
+col cards leased 20 u32
+col cards company 21 str
+col cards role 22 str
+col cards location 23 str
+col cards next_action 24 str
+col cards cv_label 25 str
+col cards fit 26 str
+col cards pips 27 str
+col cards load 28 f64
+col cards cap 29 f64
+col cards ats_vendor 30 str
+col cards ratio 31 f64
 
 table verdicts 70
 col verdicts id 1 u32
@@ -544,6 +363,53 @@ col mix note 5 str
 table coverage 72
 col coverage word 1 str
 col coverage hit 2 u32
+
+table heat_rows 21
+col heat_rows group 1 u32
+col heat_rows key 2 str
+col heat_rows label 3 str
+col heat_rows load 4 f64
+col heat_rows cap 5 f64
+col heat_rows ratio 6 f64
+col heat_rows n 7 u32
+col heat_rows cooldown_days 8 u32
+col heat_rows size 9 str
+
+table score 11
+col score fire 1 u32
+col score leftover_unique 2 u32
+col score leftover_noted_on 3 day
+col score batches_today 4 u32
+col score batches_target 5 u32
+col score apps_today 6 u32
+col score apps_target 7 u32
+col score submitted_today 8 u32
+col score cumulative 9 u32
+col score target_total 10 u32
+col score target_on 11 day
+col score chart_n 12 u32
+col score chart_mean 13 f64
+col score chart_max 14 f64
+col score chart_min 15 f64
+
+table varieties 12
+col varieties code 1 str
+col varieties fire 2 str
+col varieties status 3 str
+col varieties label 4 str
+
+table chart_bands 13
+col chart_bands key 1 str
+col chart_bands label 2 str
+col chart_bands min 3 u32
+col chart_bands max 4 u32
+col chart_bands count 5 u32
+col chart_bands share 6 f64
+
+table chart_bins 14
+col chart_bins lo 1 u32
+col chart_bins hi 2 u32
+col chart_bins count 3 u32
 
 op stage 1 job stage
 op next 2 job next_action next_due
