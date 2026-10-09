@@ -272,12 +272,14 @@ export class Shell {
     }
   }
 
-  private async refreshBoard(): Promise<void> {
-    this.store = await this.reloadStore()
-    this.select()
-    void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
-    void this.loadLanes()
-    this.queueDraw()
+  private async refreshBoard(reads: Reads): Promise<void> {
+    if (reads.pack) {
+      this.store = await this.reloadStore()
+      this.select()
+      this.queueDraw()
+    }
+    if (reads.scoreboard) void api.fetchScoreboard().then((s) => this.dispatch({ t: "scoreboard", scoreboard: s }))
+    if (reads.lanes) void this.loadLanes()
   }
 
   private async loadLanes(): Promise<void> {
@@ -359,7 +361,7 @@ export class Shell {
   // refreshes the board; the signals held meanwhile fold into that one
   // refresh. A held signal may be another tab's, newer than the answer, so
   // it still reloads the focus and the root CV as it would have.
-  private readonly writing = new Map<number, { n: number; refresh: boolean; held: Signal[] }>()
+  private readonly writing = new Map<number, { n: number; reads: Reads; held: Signal[] }>()
 
   private onSignal(s: Signal): void {
     const w = s.job_id === undefined ? undefined : this.writing.get(s.job_id)
@@ -367,40 +369,40 @@ export class Shell {
       w.held.push(s)
       return
     }
-    void this.refreshBoard()
+    void this.refreshBoard(READS[s.type])
     if (s.job_id !== undefined && s.job_id === this.model.appId) void this.loadFocus()
     if (s.type === "cv" || s.type === "open_fire") void this.loadRoot()
   }
 
-  private answered(id: number, refresh: boolean): void {
+  private answered(id: number, reads: Reads): void {
     const w = this.writing.get(id)
     if (!w) return
-    w.refresh ||= refresh
+    w.reads = union(w.reads, reads)
     if (--w.n > 0) return
     this.writing.delete(id)
-    if (w.refresh || w.held.length > 0) void this.refreshBoard()
+    void this.refreshBoard(w.held.reduce((all, s) => union(all, READS[s.type]), w.reads))
     if (w.held.length > 0 && id === this.model.appId) void this.loadFocus()
     if (w.held.some((s) => s.type === "cv" || s.type === "open_fire")) void this.loadRoot()
   }
 
-  private async write(id: number, outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
-    const w = this.writing.get(id) ?? { n: 0, refresh: false, held: [] }
+  private async write(id: number, change: Change, outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
+    const w = this.writing.get(id) ?? { n: 0, reads: NONE, held: [] }
     w.n++
     this.writing.set(id, w)
     let r: api.Outcome<{ ok: true; focus: Focus }>
     try {
       r = await outcome
     } catch (cause) {
-      this.answered(id, false)
+      this.answered(id, NONE)
       throw cause
     }
     if (r.ok) {
       this.dispatch({ t: "hold", error: null })
       this.dispatch({ t: "focus", focus: r.value.focus })
-      this.answered(id, true)
+      this.answered(id, READS[change])
       return true
     }
-    this.answered(id, false)
+    this.answered(id, NONE)
     const message =
       r.error === "fire_hold" ? "FIRE HOLD. Name open fire on this batch before a submit."
       : r.error === "heat" ? "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
@@ -533,14 +535,14 @@ export class Shell {
         this.debounce("next", 400, () => {
           const data = new FormData(form)
           if (this.model.appId === null) return
-          void this.write(this.model.appId, api.setNext(this.model.appId, String(data.get("next_action") ?? "").trim(), String(data.get("next_due") ?? "")))
+          void this.write(this.model.appId, "next", api.setNext(this.model.appId, String(data.get("next_action") ?? "").trim(), String(data.get("next_due") ?? "")))
         })
       } else if (form.dataset["form"] === "note") {
         this.debounce("note", 500, () => {
           const data = new FormData(form)
           const stage = form.dataset["stage"]
           if (this.model.appId === null || !stage) return
-          void this.write(this.model.appId, api.setNote(this.model.appId, stage, String(data.get("note") ?? "")))
+          void this.write(this.model.appId, "note", api.setNote(this.model.appId, stage, String(data.get("note") ?? "")))
         })
       }
     })
@@ -637,7 +639,7 @@ export class Shell {
       case "lens": this.dispatch({ t: "lens", lens: lensOf(el.dataset["lens"] ?? null) }); return
       case "stage": {
         const stage = el.dataset["stage"]
-        if (m.appId !== null && stage) await this.write(m.appId, api.setStage(m.appId, stage))
+        if (m.appId !== null && stage) await this.write(m.appId, "stage", api.setStage(m.appId, stage))
         return
       }
       case "open-fire": {
@@ -647,7 +649,7 @@ export class Shell {
         if (r.ok) {
           this.dispatch({ t: "hold", error: null })
           void this.loadFocus()
-          void this.refreshBoard()
+          void this.refreshBoard(READS.open_fire)
         }
         return
       }
@@ -655,7 +657,7 @@ export class Shell {
         const item = parseId(el.dataset["item"] ?? null)
         const mode = el.dataset["mode"]
         if (m.appId !== null && item !== null && mode) {
-          if (await this.write(m.appId, api.putOverlay(m.appId, item, mode))) this.dispatch({ t: "edit", item: null })
+          if (await this.write(m.appId, "cv", api.putOverlay(m.appId, item, mode))) this.dispatch({ t: "edit", item: null })
         }
         return
       }
@@ -764,7 +766,7 @@ export class Shell {
           return
         }
         if (m.appId !== null && item !== null) {
-          const ok = await this.write(m.appId, api.putOverlay(m.appId, item, "altered", body, String(data.get("reason") ?? "")))
+          const ok = await this.write(m.appId, "cv", api.putOverlay(m.appId, item, "altered", body, String(data.get("reason") ?? "")))
           this.dispatch({ t: "edit", item: ok ? null : item, error: ok ? null : this.model.holdError })
         }
         return
@@ -781,7 +783,7 @@ export class Shell {
       }
       case "heat-override": {
         if (m.appId === null) return
-        await this.write(m.appId, api.heatOverride(m.appId, String(data.get("reason") ?? "")))
+        await this.write(m.appId, "heat", api.heatOverride(m.appId, String(data.get("reason") ?? "")))
         return
       }
       case "create-key": {
@@ -835,6 +837,26 @@ function strip(msg: { t: "grid"; cols?: number; scroll?: number; viewport?: numb
   if (msg.viewport !== undefined) out.viewport = msg.viewport
   if (msg.rem !== undefined) out.rem = msg.rem
   return out
+}
+
+// What each change can alter on the desk beyond its job's focus: the cards
+// (the packet), the scoreboard (stages, scores, batches), and the lanes
+// (company heat, gym, net). A note is read only on its battleplan.
+interface Reads { pack: boolean; scoreboard: boolean; lanes: boolean }
+const NONE: Reads = { pack: false, scoreboard: false, lanes: false }
+const READS = {
+  application_opened: { pack: true, scoreboard: true, lanes: true },
+  stage: { pack: true, scoreboard: true, lanes: true },
+  cv: { pack: true, scoreboard: false, lanes: false },
+  open_fire: { pack: true, scoreboard: true, lanes: false },
+  next: { pack: true, scoreboard: false, lanes: false },
+  heat: { pack: true, scoreboard: false, lanes: true },
+  note: NONE,
+} satisfies Record<string, Reads>
+type Change = keyof typeof READS
+
+function union(a: Reads, b: Reads): Reads {
+  return { pack: a.pack || b.pack, scoreboard: a.scoreboard || b.scoreboard, lanes: a.lanes || b.lanes }
 }
 
 // What the Account page says after a provider or a mailed link sends the browser back.
