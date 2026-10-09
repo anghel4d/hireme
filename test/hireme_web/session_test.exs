@@ -159,7 +159,9 @@ defmodule HiremeWeb.SessionTest do
     info = %{connect_info: %{session: %{HiremeWeb.Auth.session_key() => token}}}
     assert {:ok, %{account_id: id, session_id: sid}} = HiremeWeb.WireSocket.connect(info)
     assert {id, sid} == {account.id, session.id}
-    assert :error = HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
+    # No cookie: an agent, admitted only as far as its API-key HELLO.
+    assert {:ok, %{origin: "", path: "/wt"}} =
+             HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
   end
 
   test "an op on a line or job that is not there is refused, and the next op still answers",
@@ -353,5 +355,57 @@ defmodule HiremeWeb.SessionTest do
 
     assert {:stop, :normal, _} = Session.event({:data, 0, old}, s)
     assert [{:bye, 0, _, <<6::little-16, "schema">>}] = all_out()
+  end
+
+  test "on a carrier without streams an agent's lease rides control as a lane",
+       %{account: account} do
+    job = job(profile())
+    letterbox = Hireme.Letterbox.for_job(job.id)
+    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("lanes")
+    {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.10", origin: "", path: "/wt"})
+
+    hello =
+      IO.iodata_to_binary(
+        Packet.frame(
+          :hello,
+          0,
+          [
+            <<byte_size(secret)::little-16, secret::binary>>,
+            :binary.copy(<<0>>, rem(8 - rem(2 + byte_size(secret), 8), 8)),
+            <<0::little-64, 3::little-32, 0::little-32>>
+          ],
+          flags: 0x80
+        )
+      )
+
+    {:ok, a} = Session.event({:data, 0, hello}, a)
+    _ = all_out()
+
+    lease = IO.iodata_to_binary(Packet.frame(:lease, 1, <<letterbox.id::little-64>>))
+    {:ok, a} = Session.event({:data, 0, lease}, a)
+    assert Map.has_key?(a.letters, {:lane, 1})
+
+    a = settle_letters(a)
+    out = all_out()
+    assert out != [] and Enum.all?(out, &match?({_, _, 1, _}, &1))
+
+    {:ok, a} = Session.event({:data, 0, IO.iodata_to_binary(Packet.frame(:bye, 1, <<0::16>>))}, a)
+    refute Map.has_key?(a.letters, {:lane, 1})
+  end
+
+  test "an agent that never says HELLO is closed", %{account: _account} do
+    {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.11", origin: "", path: "/wt"})
+    assert {:stop, :normal, _} = Session.info({Session, :hello_deadline}, a)
+  end
+
+  # Feed the lease processes' replies back through the session, as its host would.
+  defp settle_letters(s) do
+    receive do
+      {Session, :letter, _, _} = m ->
+        {:ok, s} = Session.info(m, s)
+        settle_letters(s)
+    after
+      200 -> s
+    end
   end
 end
