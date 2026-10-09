@@ -74,8 +74,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(p)
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
-    _ = frames(0)
-    _ = frames(0)
+    _ = all_out()
 
     {:ok, _s} = Session.event({:data, 0, op(42, 1, job.id, ["no_such_stage"])}, s)
 
@@ -93,8 +92,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(p)
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
-    _ = frames(0)
-    _ = frames(0)
+    _ = all_out()
 
     {:ok, s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
     s = drain(s)
@@ -120,8 +118,7 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile())
     s = open(account)
     {:ok, s} = Session.event({:data, 0, hello()}, s)
-    [{:boot, _, _, _}] = frames(0)
-    [{:ticket, _, _, _}] = frames(0)
+    [{:boot, _, _, _} | _] = all_out()
     {:ok, s} = Session.event({:data, 0, op(44, 2, job.id, ["Call", ""])}, s)
     s = drain(s)
     rev = s.rev
@@ -228,11 +225,15 @@ defmodule HiremeWeb.SessionTest do
       account_id: account.id
     })
 
-    job = job(profile())
+    job = job(profile(), %{listing: "Elixir, Rust and WebAssembly."})
 
     s = open(account)
     {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
-    [{:boot, 0x02, rev, body}] = all_out() |> Enum.take(1) |> Enum.map(&inflate/1)
+    [{:boot, 0x02, rev, body}, {:patch, 0, rev2, listings} | _] = Enum.map(all_out(), &inflate/1)
+    # The listings follow the board in their own frame, at the same rev.
+    assert rev2 == rev
+    refute body =~ "Elixir, Rust and WebAssembly."
+    assert listings =~ "Elixir, Rust and WebAssembly."
     ids = table_ids(body)
     for t <- [:job_apps, :profiles, :clock, :acct, :stages], do: assert(Packet.table_id(t) in ids)
     refute Packet.table_id(:cards) in ids
