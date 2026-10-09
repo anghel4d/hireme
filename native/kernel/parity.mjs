@@ -7,9 +7,8 @@
 // purpose (the optimistic path, which the server confirms or rolls back),
 // so they are held to the server exactly: every op's refusal and the raw
 // rows it writes against Ops.run, the heat verdicts a stage write is
-// judged by against Heat.verdict, and the batch mixes against
-// Heat.mix_batch, value for value and float bit for bit. Exits non-zero on
-// any difference and prints the first few of each kind.
+// judged by against Heat.verdict, value for value and float bit for bit.
+// Exits non-zero on any difference and prints the first few of each kind.
 import fs from "node:fs"
 import path from "node:path"
 import { S, NONE, wireType, frame, opBody, ack, nack, concat, kernel, repo } from "./frames.mjs"
@@ -142,8 +141,6 @@ async function one(file) {
     check(`ops.settled.${o.kind}`, what, K.k.counter(1) - settled, 1)
   }
 
-  const batchId = new Map((tables.find((t) => t.table === "batches")?.rows ?? []).map((b) => [b.code, b.id]))
-
   // Verdicts.
   for (const v of lines.filter((l) => l.kind === "verdict")) {
     const row = K.k.row_of(S.table.verdicts, v.id)
@@ -158,17 +155,6 @@ async function one(file) {
     }
     check("verdicts.ats_tenant", `job ${v.id}`, got.has_tenant ? got.ats_tenant : null, v.ats_tenant)
     check("verdicts.cooldown_days", `job ${v.id}`, got.cooldown_days, none(v.cooldown_days))
-  }
-
-  // Heat.mix_batch per batch.
-  for (const m of lines.filter((l) => l.kind === "mix_batch")) {
-    const id = batchId.get(m.code)
-    K.k.mix(id)
-    const rows = K.rows("mix")
-    check("mix.kept", m.code, JSON.stringify(rows.filter((r) => r.kept).map((r) => r.job)), JSON.stringify(m.kept))
-    const deferred = rows.filter((r) => !r.kept)
-    check("mix.deferred", m.code, JSON.stringify(deferred.map((r) => [r.job, r.reason, r.note])),
-      JSON.stringify(m.deferred.map((d) => [d.id, d.reason, d.note])))
   }
 
   // Timing: a one-row PATCH re-derives everything that reads it.

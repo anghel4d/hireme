@@ -429,6 +429,14 @@ impl<'a> Col<'a> {
         &self.data[base + s..base + e]
     }
 
+    /// The byte just past row `i` of a str column, if the column goes on:
+    /// with the row's first byte, what says whether it splits a character.
+    #[inline]
+    pub fn after(&self, i: usize) -> Option<u8> {
+        let base = (self.nrows as usize + 1) * 4;
+        self.data.get(base + u32_at(self.data, i * 4 + 4) as usize).copied()
+    }
+
     /// A sym column's number of distinct values.
     #[inline]
     pub fn nsyms(&self) -> usize {
