@@ -296,12 +296,25 @@ impl Table {
     }
 
     pub fn encode(&self, w: &mut Writer, arena: &Arena) {
-        w.table(self.id, self.n as u32);
+        self.encode_rows(w, arena, None)
+    }
+
+    /// Encodes the rows `only` names (all rows when None), in row order.
+    pub fn encode_rows(&self, w: &mut Writer, arena: &Arena, only: Option<&[usize]>) {
+        let all: Vec<usize>;
+        let rows = match only {
+            Some(r) => r,
+            None => {
+                all = (0..self.n).collect();
+                &all
+            }
+        };
+        w.table(self.id, rows.len() as u32);
         for c in &self.cols {
             match &c.data {
-                Data::W32(v) => w.col_u32(c.id, v.iter().copied()),
-                Data::W64(v) => w.col_u64(c.id, c.ty, v.iter().copied()),
-                Data::Str(v) => w.col_str(c.id, v.iter().map(|&r| arena.get(r))),
+                Data::W32(v) => w.col_u32(c.id, rows.iter().map(|&r| v[r])),
+                Data::W64(v) => w.col_u64(c.id, c.ty, rows.iter().map(|&r| v[r])),
+                Data::Str(v) => w.col_str(c.id, rows.iter().map(|&r| arena.get(v[r]))),
             }
         }
     }
@@ -383,14 +396,39 @@ impl Store {
         Some(job)
     }
 
-    /// Clears everything a BOOT replaces: the desk, the lines (their
-    /// indices are session-scoped) and the focuses that point into them.
-    pub fn clear(&mut self) {
-        self.tables.clear();
-        self.focus.clear();
-        self.arena.bytes.clear();
-        self.arena.live_floor = 0;
-        self.arena.epoch += 1;
+    /// Clears what a BOOT with content replaces: every desk table. Lines
+    /// keep their content-derived ix across sessions, so they and the
+    /// focuses that point at them stay. The session that sent a line
+    /// counts on it staying, so lines are only ever left out of a snapshot,
+    /// which a new session (that resends what it uses) restores from.
+    pub fn clear_desk(&mut self) {
+        self.tables.retain(|t| t.id == table::LINES);
+    }
+
+    /// After a BOOT: drops the focuses of jobs that are gone.
+    pub fn drop_gone_focuses(&mut self) {
+        let cards = self.tables.iter().find(|t| t.id == table::CARDS);
+        self.focus
+            .retain(|job, _| cards.is_some_and(|c| c.row_of(*job).is_some()));
+    }
+
+    /// Line ixs some focus or root still points at.
+    fn referenced_lines(&self) -> std::collections::HashSet<u32> {
+        let mut keep = std::collections::HashSet::new();
+        let mut refs = |t: &Table, c: u16| {
+            if let Some(col) = t.col(c) {
+                keep.extend((0..t.n).map(|r| col.u32(r)));
+            }
+        };
+        for f in self.focus.values() {
+            for t in f.tables.iter().filter(|t| t.id == table::FOCUS_LINES) {
+                refs(t, col::focus_lines::LINE);
+            }
+        }
+        if let Some(t) = self.table(table::ROOT_LINES) {
+            refs(t, col::root_lines::LINE);
+        }
+        keep
     }
 
     /// Rewrites the arena with only the strings something still points at,
@@ -431,7 +469,8 @@ impl Store {
     }
 
     /// The resident state as frames: one BOOT (every desk table but
-    /// lines), one LINES, one FOCUS per job. Ingesting the result into an
+    /// lines), one LINES (only lines a focus or root points at), one FOCUS
+    /// per job. Ingesting the result into an
     /// empty kernel restores it.
     pub fn snapshot(&self, w: &mut Writer) {
         w.begin(schema::frame::BOOT, wire::END, self.rev);
@@ -440,8 +479,13 @@ impl Store {
         }
         w.end();
         if let Some(lines) = self.table(table::LINES) {
+            let keep = self.referenced_lines();
+            let key = lines.col(col::lines::IX);
+            let rows: Vec<usize> = (0..lines.n)
+                .filter(|&r| key.is_some_and(|k| keep.contains(&k.u32(r))))
+                .collect();
             w.begin(schema::frame::LINES, 0, self.rev);
-            lines.encode(w, &self.arena);
+            lines.encode_rows(w, &self.arena, Some(&rows));
             w.end();
         }
         let mut jobs: Vec<_> = self.focus.keys().copied().collect();

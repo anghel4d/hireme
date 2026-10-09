@@ -166,7 +166,8 @@ const U32_COLS = Object.keys(S.col.cards).filter((c) => wireType(S.col.cards[c].
 const STR_COLS = Object.keys(S.col.cards).filter((c) => wireType(S.col.cards[c].kind) === 2)
 
 function rng(seed) {
-  let s = seed >>> 0 || 1
+  // Scramble the seed so small seeds do not start xorshift near zero.
+  let s = Math.imul((seed ^ 0x9e3779b9) >>> 0, 0x85ebca6b) >>> 0 || 1
   const next = () => ((s ^= s << 13), (s ^= s >>> 17), (s ^= s << 5), (s >>> 0) / 2 ** 32)
   return { f: next, int: (n) => Math.floor(next() * n), pick: (a) => a[Math.floor(next() * a.length)] }
 }
@@ -200,6 +201,20 @@ function randomCard(r, id, profiles, batches) {
   return c
 }
 
+// Overlays: each job's focus lists items 1-4, each line interned by
+// (item, mode); an overlay moves the card's mask counts by one.
+const MODES = ["inherit", "hidden", "altered", "emphasized"]
+const ITEMS = [1, 2, 3, 4]
+const lineIx = (item, m) => 1000 + item * 4 + m
+const linesFrame = (rev) => {
+  const all = ITEMS.flatMap((item) => MODES.map((_, m) => [item, m]))
+  return frame("LINES", rev, [["lines", { ix: all.map(([i, m]) => lineIx(i, m)), item: all.map(([i]) => i), mode: all.map(([, m]) => MODES[m]) }]])
+}
+const focusFrame = (rev, job, modes) => frame("FOCUS", rev, [
+  ["focus", { job: [job] }],
+  ["focus_lines", { slot: ITEMS.map((_, i) => i), section: ITEMS.map(() => 0), line: ITEMS.map((i) => lineIx(i, modes.get(i))) }],
+])
+
 const dayOf = (s) => (s === "" ? NONE : Math.round(Date.parse(s + "T00:00:00Z") / 86400000))
 const dateOf = (d) => new Date(d * 86400000).toISOString().slice(0, 10)
 
@@ -210,6 +225,7 @@ class Model {
     this.profiles = profiles
     this.pending = []
     this.today = today
+    this.focus = new Map()
   }
 
   // Applies an op to (cards, batches); returns a refusal or 0.
@@ -240,6 +256,19 @@ class Model {
       if (!b) return S.refusal.batch
       b.fire = 1, b.status = "open_fire"
       writes.push(["batches", b.id, { fire: 1, status: "open_fire" }])
+    } else if (o.kind === "overlay") {
+      const modes = st.focus.get(o.target)
+      const item = +o.fields[0]
+      const to = MODES.indexOf(o.fields[1])
+      if (!modes || !modes.has(item)) return 0
+      const from = modes.get(item)
+      modes.set(item, to)
+      if (from !== to) {
+        const vals = {}
+        if (from) vals[MODES[from]] = card[MODES[from]] = Math.max(0, card[MODES[from]] - 1)
+        if (to) vals[MODES[to]] = card[MODES[to]] += 1
+        writes.push(["cards", o.target, vals])
+      }
     }
     return 0
   }
@@ -249,6 +278,7 @@ class Model {
       cards: new Map([...this.base].map(([k, v]) => [k, { ...v }])),
       batches: new Map([...this.batches].map(([k, v]) => [k, { ...v }])),
       today: this.today,
+      focus: new Map([...this.focus].map(([k, v]) => [k, new Map(v)])),
     }
     if (withPending) for (const o of this.pending) Model.apply(st, o, false)
     return st
@@ -316,7 +346,12 @@ async function property(seed) {
   let nextId = 1
   const cards = Array.from({ length: r.int(40) }, () => randomCard(r, nextId++, profiles, batches))
   const M = new Model(cards, profiles, batches, today)
-  K.ingest(frame("BOOT", 1, [...lookups(profiles, batches), cardsTable(cards)]))
+  for (const c of cards) if (r.f() < 0.6) M.focus.set(c.id, new Map(ITEMS.map((i) => [i, r.int(4)])))
+  K.ingest(new Uint8Array([
+    ...frame("BOOT", 1, [...lookups(profiles, batches), cardsTable(cards)]),
+    ...linesFrame(1),
+    ...[...M.focus].flatMap(([job, modes]) => [...focusFrame(1, job, modes)]),
+  ]))
   let opId = 1
   let rev = 1
   const log = []
@@ -346,7 +381,7 @@ async function property(seed) {
     const ids = [...M.base.keys()]
     if (roll < 0.35 && ids.length) {
       // The client predicts an op.
-      const kind = r.pick(["stage", "stage", "next", "score", "open_fire", "note"])
+      const kind = r.pick(["stage", "stage", "next", "score", "open_fire", "note", "overlay", "overlay"])
       const target = r.f() < 0.95 ? r.pick(ids) : 999
       const fields = {
         stage: () => [r.pick(STAGES)],
@@ -354,6 +389,7 @@ async function property(seed) {
         score: () => [String(r.int(101))],
         open_fire: () => [r.pick(["B1", "B2", "B9"])],
         note: () => [r.pick(STAGES), "n"],
+        overlay: () => [String(r.pick([...ITEMS, 9])), r.pick(MODES), "body", "why"],
       }[kind]()
       const o = { id: opId++, kind, target, fields }
       log.push(`push ${JSON.stringify(o)}`)
@@ -376,11 +412,13 @@ async function property(seed) {
           const row = (t === "cards" ? st.cards : st.batches).get(key)
           return row && Object.entries(vals).some(([k, v]) => row[k] !== v)
         })
-        M.base = st.cards, M.batches = st.batches
+        M.base = st.cards, M.batches = st.batches, M.focus = st.focus
         const changed = c ? [cardsTable([c])] : []
         const b = [...st.batches.values()]
+        // A write to a job with an open focus brings its fresh FOCUS.
+        const focus = o.kind === "overlay" && st.focus.has(o.target) ? [...focusFrame(++rev, o.target, st.focus.get(o.target))] : []
         log.push(`ack ${o.id} differ=${differ}`)
-        K.ingest(new Uint8Array([...frame("PATCH", ++rev, [...changed, lookups(profiles, b)[3]]), ...ack(o.id)]))
+        K.ingest(new Uint8Array([...frame("PATCH", ++rev, [...changed, lookups(profiles, b)[3]]), ...focus, ...ack(o.id)]))
         assert.deepEqual(K.events().map((e) => [e.id, e.code, e.mis]), [[o.id, 0, +differ]])
       }
     } else if (roll < 0.8) {
@@ -402,10 +440,16 @@ async function property(seed) {
       if (gone.length) tables.push(["cards_gone", { id: gone }])
       K.ingest(frame("PATCH", ++rev, tables))
     } else if (roll < 0.83) {
-      // A fresh boot replaces everything the server knows; pending stays.
+      // A fresh boot replaces the desk; pending stays, and so do the
+      // lines and the focuses of jobs still on it.
       const cs = [...M.base.values()]
+      for (const job of M.focus.keys()) if (!M.base.has(job)) M.focus.delete(job)
       log.push("boot")
       K.ingest(frame("BOOT", ++rev, [...lookups(profiles, [...M.batches.values()]), cardsTable(cs)]))
+    } else if (roll < 0.85) {
+      // An empty BOOT: "what you have is current". Nothing changes.
+      log.push("empty boot")
+      K.ingest(frame("BOOT", ++rev, []))
     }
     check(step)
   }
@@ -422,6 +466,13 @@ async function property(seed) {
   for (const c of base.cards.values()) assert.deepEqual(R.card(c.id), c, `seed ${seed}: restored card ${c.id}`)
   assert.deepEqual(R.select(all, ""), M.select(base, all, ""))
   assert.deepEqual(R.snapshot(), snap)
+  for (const [job, modes] of M.focus) {
+    if (!base.cards.has(job)) continue
+    assert.equal(R.k.focus_open(job), 1, `seed ${seed}: restored focus ${job}`)
+    const lines = new Uint32Array(R.k.memory.buffer, R.k.col_ptr(S.table.focus_lines, S.col.focus_lines.line.id), R.k.rows(S.table.focus_lines))
+    assert.deepEqual([...lines], ITEMS.map((i) => lineIx(i, modes.get(i))))
+    for (const ix of lines) assert.ok(R.k.row_of(S.table.lines, ix) >= 0, `seed ${seed}: restored line ${ix}`)
+  }
 
   // Corrupted frames are refused or absorbed, never a trap.
   const good = frame("PATCH", 99, [cardsTable([randomCard(r, 1, profiles, batches)])])

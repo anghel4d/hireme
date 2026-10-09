@@ -453,9 +453,14 @@ impl Desk {
             let kind = f.header.kind;
             let tables_ok = f.tables().all(|t| t.is_ok());
             match kind {
+                // A BOOT with no tables says "what you restored is current".
+                frame::BOOT if f.tables().next().is_none() => {
+                    self.store.rev = self.store.rev.max(f.header.rev);
+                }
                 frame::BOOT | frame::PATCH | frame::LINES if tables_ok => {
-                    if kind == frame::BOOT {
-                        self.store.clear();
+                    let boot = kind == frame::BOOT;
+                    if boot {
+                        self.store.clear_desk();
                         bits |= CARDS | TABLES | LINES | FOCUS;
                     }
                     for t in f.tables().flatten() {
@@ -465,6 +470,9 @@ impl Desk {
                             _ => TABLES,
                         };
                         self.store.take(&t);
+                    }
+                    if boot {
+                        self.store.drop_gone_focuses();
                     }
                     self.store.rev = self.store.rev.max(f.header.rev);
                     base_moved = true;
