@@ -11,7 +11,8 @@
 // What carries ops and brings the base is a Link: today's HTTP routes,
 // then the wire. The desk does not know which.
 
-import type { Focus, Lanes, Line, Root, Scoreboard } from "./api.ts"
+import type { Doc, Focus, Lanes, Line, Root, Scoreboard } from "./api.ts"
+import { KIND, NONE, tables, type Bytes, type Table } from "./wire.ts"
 
 // ---- the packet ----
 
@@ -159,7 +160,6 @@ export async function loadKernel(url: string): Promise<Kernel> {
 const SLOTS = ["score", "heat", "stage", "status", "freshness", "gate", "batch", "profile"] as const
 const SEARCH = 8
 const HEAT_STATE = 10
-const NONE = 0xffffffff
 
 class Strings implements StrColumn {
   private readonly cache = new Map<number, string>()
@@ -304,7 +304,6 @@ export class Board {
 const FIRE_LOCKED = new Set(["open_fire", "submitted"])
 const HOT = new Set(["fire_ready", "open_fire", "submitted", "reply", "closed"])
 const QUEUE = new Set(["fire_ready", "open_fire", "submitted"])
-const PIP: Record<string, string> = { done: "D", active: "A", pending: "P", skipped: "S", blocked: "B" }
 const STATE: Record<string, string> = { D: "done", A: "active", P: "pending", S: "skipped", B: "blocked" }
 const today = () => Math.floor(Date.now() / 86_400_000)
 const isoDay = (day: number) => new Date(day * 86_400_000).toISOString().slice(0, 10)
@@ -730,7 +729,373 @@ function applyLanes(l: Lanes, op: Op): Lanes {
   }
 }
 
+// ---- the resident documents, from wire tables ----
+//
+// Table frames carry everything beside the cards: the lookups the card
+// columns index into, the scoreboard, the lanes, the interned CV lines,
+// root CVs, and one FOCUS frame per job. The small tables are replaced
+// whole when a frame carries them; lines upsert by ix; a FOCUS frame is
+// kept and decoded when its job is read.
+
+const T = {
+  batches: 3, profiles: 4, stages: 5, statuses: 6, freshness: 7, gates: 8, heat_states: 9, bands: 10,
+  score: 11, varieties: 12, chart_bands: 13, chart_bins: 14,
+  gym: 15, gym_topics: 16, gym_reps: 17, options: 18, net: 19, net_entries: 20, heat_rows: 21,
+  narratives: 22, kv: 23, lines: 24, roots: 25, root_sections: 26, root_lines: 27,
+  focus: 30, focus_rungs: 31, focus_events: 32, focus_cover: 33, focus_sections: 34, focus_lines: 35, focus_kv: 36,
+} as const
+
+type Spec = Record<string, readonly [number, "u32" | "str" | "f64"]>
+type Row = Record<string, number | string>
+
+const day = (d: number | string | undefined): string | null => (typeof d !== "number" || d === NONE ? null : isoDay(d))
+const opt = (s: number | string | undefined): string | null => (typeof s !== "string" || s === "" ? null : s)
+const num = (x: number | string | undefined): number => (typeof x !== "number" || Number.isNaN(x) ? 0 : x)
+const s = (x: number | string | undefined): string => (typeof x === "string" ? x : "")
+const u = (x: number | string | undefined): number => (typeof x === "number" ? x : 0)
+
+/** Rows of a table as objects, one decode per column. */
+function rows(t: Table | undefined, spec: Spec): Row[] {
+  if (!t) return []
+  const cols = Object.entries(spec).map(([k, [id, type]]) => [k, type === "str" ? t.strs(id) : type === "f64" ? t.f64(id) : t.u32(id)] as const)
+  const out: Row[] = []
+  for (let i = 0; i < t.n; i++) {
+    const r: Row = {}
+    for (const [k, col] of cols) r[k] = col[i] ?? 0
+    out.push(r)
+  }
+  return out
+}
+
+export interface ProfileFull { id: number; slug: string; name: string; headline: string; summary: string }
+interface Ref { slot: number; section: number; line: number }
+
+export class Resident {
+  stages: Stage[] = []
+  stageFlags: { fireLocked: boolean; hot: boolean; queue: boolean }[] = []
+  statuses: string[] = []
+  freshness: string[] = []
+  gates: string[] = []
+  heatStates: string[] = []
+  bands: Band[] = []
+  batches: (Batch & { id: number })[] = []
+  profiles: ProfileFull[] = []
+  scoreboard: Scoreboard | null = null
+  lanes: Lanes | null = null
+  readonly lines = new Map<number, Line>()
+  readonly narratives = new Map<number, { id: number; body: string; version: number }>()
+  readonly roots = new Map<number, Root>()
+  private readonly score = new Map<number, Table>()
+  private readonly lane = new Map<number, Table>()
+  private kv: { scope: number; key: string; value: string }[] = []
+  private rootTables = new Map<number, Table>()
+  private readonly focusDocs = new Map<number, Map<number, Table>>()
+  private tablesView: Tables | null = null
+
+  get tables(): Tables {
+    this.tablesView ??= {
+      stages: this.stages, statuses: this.statuses, freshness: this.freshness, gates: this.gates,
+      bands: this.bands, batches: this.batches, profiles: this.profiles, heat_states: this.heatStates,
+    }
+    return this.tablesView
+  }
+
+  hasFocus(id: number): boolean { return this.focusDocs.has(id) }
+
+  /** Take what a table frame carries, beside the cards. Answers what changed. */
+  ingest(frame: Bytes, kind: number): Change {
+    if (kind === KIND.FOCUS) {
+      const ts = tables(frame.slice())
+      const job = ts.get(T.focus)?.u32(1)[0]
+      if (job === undefined) return {}
+      this.focusDocs.set(job, ts)
+      return { focus: [job] }
+    }
+    let ts = tables(frame)
+    const has = (...ids: number[]) => ids.some((id) => ts.has(id))
+    if (!has(T.batches, T.profiles, T.stages, T.statuses, T.freshness, T.gates, T.heat_states, T.bands, T.score, T.varieties,
+      T.chart_bands, T.chart_bins, T.gym, T.gym_topics, T.gym_reps, T.options, T.net, T.net_entries, T.heat_rows,
+      T.narratives, T.kv, T.lines, T.roots, T.root_sections, T.root_lines)) return {}
+    // Some of these tables are kept: read them from a copy the frame's reuse cannot touch.
+    ts = tables(frame.slice())
+    const c: Change = {}
+    if (has(T.stages, T.statuses, T.freshness, T.gates, T.heat_states, T.bands, T.batches, T.profiles)) {
+      this.lookups(ts)
+      c.rows = true
+    }
+    if (has(T.score, T.varieties, T.chart_bands, T.chart_bins)) {
+      for (const id of [T.score, T.varieties, T.chart_bands, T.chart_bins]) { const t = ts.get(id); if (t) this.score.set(id, t) }
+      this.scoreboard = this.buildScore()
+      c.scoreboard = true
+    }
+    if (has(T.gym, T.gym_topics, T.gym_reps, T.options, T.net, T.net_entries, T.heat_rows)) {
+      for (const id of [T.gym, T.gym_topics, T.gym_reps, T.options, T.net, T.net_entries, T.heat_rows]) { const t = ts.get(id); if (t) this.lane.set(id, t) }
+      this.lanes = this.buildLanes()
+      c.lanes = true
+    }
+    if (has(T.lines)) {
+      for (const r of rows(ts.get(T.lines), LINE)) this.lines.set(u(r["ix"]), line(r))
+      c.focus = [...this.focusDocs.keys()]
+      c.root = true
+    }
+    if (has(T.narratives)) {
+      this.narratives.clear()
+      for (const r of rows(ts.get(T.narratives), { id: [1, "u32"], profile: [2, "u32"], body: [3, "str"], version: [4, "u32"] })) {
+        this.narratives.set(u(r["profile"]), { id: u(r["id"]), body: s(r["body"]), version: u(r["version"]) })
+      }
+      c.focus = [...this.focusDocs.keys()]
+      c.root = true
+    }
+    if (has(T.kv)) {
+      this.kv = rows(ts.get(T.kv), { scope: [1, "u32"], key: [2, "str"], value: [3, "str"] }).map((r) => ({ scope: u(r["scope"]), key: s(r["key"]), value: s(r["value"]) }))
+      c.root = true
+    }
+    if (has(T.roots, T.root_sections, T.root_lines)) {
+      for (const id of [T.roots, T.root_sections, T.root_lines]) { const t = ts.get(id); if (t) this.rootTables.set(id, t) }
+      c.root = true
+    }
+    if (c.root) this.buildRoots()
+    return c
+  }
+
+  private lookups(ts: Map<number, Table>): void {
+    const keyed = (id: number, was: string[]) => {
+      const t = ts.get(id)
+      if (!t) return was
+      const out: string[] = []
+      const ix = t.u32(1)
+      const keys = t.strs(2)
+      for (let i = 0; i < t.n; i++) out[ix[i] ?? i] = keys[i] ?? ""
+      return out
+    }
+    const byIx = (a: Row, b: Row) => u(a["ix"]) - u(b["ix"])
+    const stages = ts.get(T.stages)
+    if (stages) {
+      const r = rows(stages, { ix: [1, "u32"], key: [2, "str"], label: [3, "str"], hint: [4, "str"], fire_locked: [6, "u32"], hot: [7, "u32"], queue: [8, "u32"] }).sort(byIx)
+      this.stages = r.map((x) => ({ key: s(x["key"]), label: s(x["label"]), hint: s(x["hint"]) }))
+      this.stageFlags = r.map((x) => ({ fireLocked: x["fire_locked"] === 1, hot: x["hot"] === 1, queue: x["queue"] === 1 }))
+    }
+    this.statuses = keyed(T.statuses, this.statuses)
+    this.freshness = keyed(T.freshness, this.freshness)
+    this.gates = keyed(T.gates, this.gates)
+    this.heatStates = keyed(T.heat_states, this.heatStates)
+    const bands = ts.get(T.bands)
+    if (bands) {
+      this.bands = rows(bands, { ix: [1, "u32"], key: [2, "str"], label: [3, "str"], min: [4, "u32"], max: [5, "u32"] }).sort(byIx)
+        .map((b) => ({ key: s(b["key"]), label: s(b["label"]), min: u(b["min"]), max: u(b["max"]) }))
+    }
+    const batches = ts.get(T.batches)
+    if (batches) {
+      this.batches = rows(batches, { id: [1, "u32"], code: [2, "str"], ordinal: [3, "u32"], fire: [4, "u32"], status: [5, "str"] }).map((b) => ({
+        id: u(b["id"]), code: s(b["code"]), ordinal: u(b["ordinal"]), fire: b["fire"] === 1 ? "open_fire" as const : "hold" as const, status: s(b["status"]),
+      }))
+    }
+    const profiles = ts.get(T.profiles)
+    if (profiles) {
+      this.profiles = rows(profiles, { id: [1, "u32"], slug: [2, "str"], name: [3, "str"], headline: [4, "str"], summary: [5, "str"] })
+        .map((p) => ({ id: u(p["id"]), slug: s(p["slug"]), name: s(p["name"]), headline: s(p["headline"]), summary: s(p["summary"]) }))
+    }
+    this.tablesView = null
+  }
+
+  private buildScore(): Scoreboard | null {
+    const r = rows(this.score.get(T.score), {
+      fire: [1, "u32"], leftover_unique: [2, "u32"], leftover_noted_on: [3, "u32"], batches_today: [4, "u32"], batches_target: [5, "u32"],
+      apps_today: [6, "u32"], apps_target: [7, "u32"], submitted_today: [8, "u32"], cumulative: [9, "u32"], chart_n: [12, "u32"], chart_mean: [13, "f64"],
+    })[0]
+    if (!r) return null
+    const mean = r["chart_mean"]
+    return {
+      fire: r["fire"] === 1 ? "open_fire" : "hold",
+      leftover_unique: u(r["leftover_unique"]),
+      leftover_noted_on: day(r["leftover_noted_on"]),
+      batches_today: u(r["batches_today"]),
+      batches_target: u(r["batches_target"]),
+      apps_today: u(r["apps_today"]),
+      apps_target: u(r["apps_target"]),
+      submitted_today: u(r["submitted_today"]),
+      cumulative: u(r["cumulative"]),
+      varieties: rows(this.score.get(T.varieties), { code: [1, "str"], fire: [2, "str"], status: [3, "str"], label: [4, "str"] })
+        .map((v) => ({ code: s(v["code"]), fire: s(v["fire"]), status: s(v["status"]), label: s(v["label"]) })),
+      chart: {
+        n: u(r["chart_n"]),
+        mean: typeof mean === "number" && !Number.isNaN(mean) ? mean : null,
+        bands: rows(this.score.get(T.chart_bands), { key: [1, "str"], label: [2, "str"], min: [3, "u32"], max: [4, "u32"], count: [5, "u32"] })
+          .map((b) => ({ key: s(b["key"]), label: s(b["label"]), min: u(b["min"]), max: u(b["max"]), count: u(b["count"]) })),
+        bins: rows(this.score.get(T.chart_bins), { lo: [1, "u32"], hi: [2, "u32"], count: [3, "u32"] })
+          .map((b) => ({ lo: u(b["lo"]), hi: u(b["hi"]), count: u(b["count"]) })),
+      },
+    }
+  }
+
+  private buildLanes(): Lanes | null {
+    const g = rows(this.lane.get(T.gym), { target: [2, "u32"], streak: [3, "u32"], solved_today: [4, "u32"], solved_week: [5, "u32"], score: [6, "u32"] })[0]
+    const n = rows(this.lane.get(T.net), { lane: [1, "str"], shipped_week: [2, "u32"], drafts: [3, "u32"], observer_runs: [4, "u32"] })[0]
+    if (!g || !n) return null
+    const options = rows(this.lane.get(T.options), { group: [1, "str"], key: [2, "str"], label: [3, "str"] })
+    const group = (name: string) => options.filter((o) => o["group"] === name).map((o) => ({ key: s(o["key"]), label: s(o["label"]) }))
+    const heat = rows(this.lane.get(T.heat_rows), {
+      group: [1, "u32"], key: [2, "str"], label: [3, "str"], load: [4, "f64"], cap: [5, "f64"], ratio: [6, "f64"], n: [7, "u32"], cooldown_days: [8, "u32"],
+    }).map((r) => ({
+      group: u(r["group"]), key: s(r["key"]), label: s(r["label"]), load: num(r["load"]), cap: num(r["cap"]), ratio: num(r["ratio"]),
+      n: u(r["n"]), cooldown_days: r["cooldown_days"] === NONE ? null : u(r["cooldown_days"]),
+    }))
+    const row = ({ group: _, ...rest }: (typeof heat)[number]) => rest
+    return {
+      gym: {
+        target: u(g["target"]), streak: u(g["streak"]), solved_today: u(g["solved_today"]), solved_week: u(g["solved_week"]), score: u(g["score"]),
+        topics: rows(this.lane.get(T.gym_topics), { key: [1, "str"], label: [2, "str"], count: [3, "u32"] })
+          .map((t) => ({ key: s(t["key"]), label: s(t["label"]), count: u(t["count"]) })),
+        recent: rows(this.lane.get(T.gym_reps), {
+          id: [1, "u32"], done_on: [2, "u32"], outcome: [3, "str"], minutes: [4, "u32"], note: [5, "str"], platform: [6, "str"],
+          title: [8, "str"], topic: [9, "str"], difficulty: [10, "str"], url: [11, "str"],
+        }).map((r) => ({
+          id: u(r["id"]), done_on: day(r["done_on"]) ?? "", outcome: s(r["outcome"]), minutes: u(r["minutes"]), note: s(r["note"]),
+          title: s(r["title"]), url: s(r["url"]), platform: s(r["platform"]), topic: s(r["topic"]), difficulty: s(r["difficulty"]),
+        })),
+        platforms: group("platform"), topics_all: group("topic"), difficulties: group("difficulty"), outcomes: group("outcome"),
+      },
+      net: {
+        lane: s(n["lane"]), shipped_week: u(n["shipped_week"]), drafts: u(n["drafts"]), observer_runs: u(n["observer_runs"]),
+        recent: rows(this.lane.get(T.net_entries), { id: [1, "u32"], kind: [2, "str"], channel: [3, "str"], title: [4, "str"], url: [5, "str"], body: [6, "str"], shipped_on: [7, "u32"] })
+          .map((r) => ({ id: u(r["id"]), kind: s(r["kind"]), channel: s(r["channel"]), title: s(r["title"]), url: s(r["url"]), body: s(r["body"]), shipped_on: day(r["shipped_on"]) })),
+        kinds: group("net_kind"), channels: group("net_channel"),
+      },
+      heat: { companies: heat.filter((h) => h.group === 0).map(row), vendors: heat.filter((h) => h.group === 1).map(row) },
+    }
+  }
+
+  private profile(id: number): ProfileFull {
+    return this.profiles.find((p) => p.id === id) ?? { id, slug: "", name: "", headline: "", summary: "" }
+  }
+
+  private buildRoots(): void {
+    const sections = rows(this.rootTables.get(T.root_sections), { profile: [1, "u32"], kind: [2, "str"], label: [3, "str"] })
+    const refs = rows(this.rootTables.get(T.root_lines), { profile: [1, "u32"], slot: [2, "u32"], section: [3, "u32"], line: [4, "u32"] })
+    this.roots.clear()
+    for (const r of rows(this.rootTables.get(T.roots), ROOT_DOC)) {
+      const profile = u(r["profile"])
+      this.roots.set(profile, {
+        profile: this.profile(profile),
+        cv: this.doc(
+          r,
+          sections.filter((x) => x["profile"] === profile).map((x) => ({ kind: s(x["kind"]), label: s(x["label"]) })),
+          refs.filter((x) => x["profile"] === profile).map((x) => ({ slot: u(x["slot"]), section: u(x["section"]), line: u(x["line"]) })),
+        ),
+        kv: this.kv.filter((k) => k.scope === profile).map(({ key, value }) => ({ key, value })),
+        narrative: this.narratives.get(profile) ?? null,
+      })
+    }
+  }
+
+  /** A CV document from its fields, sections and line references (slot 0 facts, 1 sections, 2 hidden). */
+  private doc(r: Row, sections: { kind: string; label: string }[], refs: Ref[]): Doc {
+    const at = (slot: number, section = -1) =>
+      refs.filter((x) => x.slot === slot && (section < 0 || x.section === section)).map((x) => this.lines.get(x.line)).filter((l): l is Line => l !== undefined)
+    return {
+      label: s(r["cv_label"]),
+      person: opt(r["cv_person"]),
+      headline: opt(r["cv_headline"]),
+      summary: opt(r["cv_summary"]),
+      summary_canonical: opt(r["cv_summary_canonical"]),
+      summary_reason: opt(r["cv_summary_reason"]),
+      accent: s(r["cv_accent"]),
+      density: s(r["cv_density"]),
+      facts: at(0),
+      sections: sections.map((x, i) => ({ kind: x.kind, label: x.label, lines: at(1, i) })),
+      hidden: at(2),
+    }
+  }
+
+  /** One job's focus over its card row, or null until its FOCUS frame has arrived. */
+  focus(id: number, card: (col: string) => number, str: (col: string) => string): Focus | null {
+    const ts = this.focusDocs.get(id)
+    const f = rows(ts?.get(T.focus), FOCUS_DOC)[0]
+    if (!ts || !f) return null
+    const stage = this.stages[card("stage")]
+    const score = card("score")
+    const batch = this.batches.find((b) => b.id === card("batch"))
+    const profile = this.profile(card("profile"))
+    const refs = rows(ts.get(T.focus_lines), { slot: [1, "u32"], section: [2, "u32"], line: [3, "u32"] })
+      .map((x) => ({ slot: u(x["slot"]), section: u(x["section"]), line: u(x["line"]) }))
+    const cover = rows(ts.get(T.focus_cover), { root: [1, "u32"], hit: [2, "u32"], word: [3, "str"] })
+    const coverage = (root: number) => ({
+      hits: cover.filter((c) => c["root"] === root && c["hit"] === 1).map((c) => s(c["word"])),
+      misses: cover.filter((c) => c["root"] === root && c["hit"] === 0).map((c) => s(c["word"])),
+    })
+    const cooldown = f["heat_cooldown_days"]
+    return {
+      job: {
+        id, code: `JobApp${id}`,
+        company: str("company"), role: str("role"), location: str("location"),
+        listing: s(f["listing"]), listing_url: s(f["listing_url"]),
+        heat: card("heat"), status: this.statuses[card("status")] ?? "",
+        stage: stage?.key ?? "", stage_label: stage?.label ?? "", stage_hint: stage?.hint ?? "",
+        pips: str("pips"), score_100: score,
+        band: this.bands.find((b) => score >= b.min && score <= b.max)?.key ?? "",
+        next_action: str("next_action"), next_due: day(card("next_due")), stage_on: day(card("stage_on")),
+        freshness: this.freshness[card("freshness")] ?? "", gate: this.gates[card("gate")] ?? "", fit: str("fit"),
+        keyword_hits: card("hits"), keyword_total: card("total"),
+        mask_hidden: card("hidden"), mask_altered: card("altered"), mask_emphasized: card("emphasized"),
+        batch: batch ? { code: batch.code, fire: batch.fire } : null,
+      },
+      profile,
+      variant: { id: u(f["variant_id"]), label: s(f["variant_label"]) },
+      rail: rows(ts.get(T.focus_rungs), { key: [1, "str"], state: [2, "str"], note: [3, "str"] }).map((r) => {
+        const st = this.stages.find((x) => x.key === r["key"])
+        return { key: s(r["key"]), label: st?.label ?? "", hint: st?.hint ?? "", state: s(r["state"]), note: s(r["note"]) }
+      }),
+      events: rows(ts.get(T.focus_events), { id: [1, "u32"], kind: [2, "str"], body: [3, "str"] }).map((e) => ({ id: u(e["id"]), kind: s(e["kind"]), body: s(e["body"]) })),
+      cv: this.doc(f, rows(ts.get(T.focus_sections), { kind: [1, "str"], label: [2, "str"] }).map((x) => ({ kind: s(x["kind"]), label: s(x["label"]) })), refs),
+      narrative: this.narratives.get(profile.id) ?? null,
+      coverage: coverage(0),
+      root_coverage: coverage(1),
+      kv: rows(ts.get(T.focus_kv), { key: [1, "str"], value: [2, "str"] }).map((k) => ({ key: s(k["key"]), value: s(k["value"]) })),
+      masks: refs.filter((x) => x.slot === 3).map((x) => this.lines.get(x.line)).filter((l): l is Line => l !== undefined),
+      heat: {
+        decision: f["heat_decision"] === "defer" ? "defer" : "allow",
+        reason: s(f["heat_reason"]),
+        company_load: num(f["heat_company_load"]),
+        company_cap: num(f["heat_company_cap"]),
+        size: opt(f["heat_size"]),
+        ats_vendor: s(f["heat_ats_vendor"]),
+        cooldown_days: cooldown === NONE ? null : u(cooldown),
+        note: s(f["heat_note"]),
+        override: f["heat_override"] === 1,
+        override_reason: s(f["heat_override_reason"]),
+      },
+    }
+  }
+}
+
+const LINE: Spec = {
+  ix: [1, "u32"], item: [2, "u32"], kind: [3, "str"], title: [4, "str"], body: [5, "str"], org: [6, "str"], span: [7, "str"],
+  shown: [8, "u32"], mode: [9, "str"], reason: [10, "str"], canonical_title: [11, "str"], canonical_body: [12, "str"],
+}
+
+function line(r: Row): Line {
+  const mode = s(r["mode"])
+  return {
+    id: u(r["item"]), kind: s(r["kind"]), title: s(r["title"]), body: s(r["body"]), org: s(r["org"]), span: s(r["span"]),
+    shown: r["shown"] === 1, mode: (mode === "" ? "canonical" : mode) as Line["mode"], reason: opt(r["reason"]),
+    canonical_title: s(r["canonical_title"]), canonical_body: s(r["canonical_body"]),
+  }
+}
+
+const ROOT_DOC: Spec = {
+  profile: [1, "u32"], cv_label: [3, "str"], cv_person: [4, "str"], cv_headline: [5, "str"], cv_summary: [6, "str"],
+  cv_summary_canonical: [7, "str"], cv_summary_reason: [8, "str"], cv_accent: [9, "str"], cv_density: [10, "str"],
+}
+
+const FOCUS_DOC: Spec = {
+  job: [1, "u32"], listing: [2, "str"], listing_url: [3, "str"], variant_id: [4, "u32"], variant_label: [5, "str"],
+  cv_label: [11, "str"], cv_person: [12, "str"], cv_headline: [13, "str"], cv_summary: [14, "str"], cv_summary_canonical: [15, "str"],
+  cv_summary_reason: [16, "str"], cv_accent: [17, "str"], cv_density: [18, "str"],
+  heat_decision: [19, "str"], heat_reason: [20, "str"], heat_company_load: [22, "f64"], heat_company_cap: [23, "f64"],
+  heat_size: [25, "str"], heat_ats_vendor: [26, "str"], heat_cooldown_days: [32, "u32"], heat_note: [33, "str"],
+  heat_override: [34, "u32"], heat_override_reason: [35, "str"],
+}
+
 const EMPTY_U32 = new Uint32Array(0)
 const EMPTY_STR: StrColumn = { at: () => "" }
 const EMPTY_TABLES: Tables = { stages: [], statuses: [], freshness: [], gates: [], bands: [], batches: [], profiles: [], heat_states: [] }
-export { PIP }
