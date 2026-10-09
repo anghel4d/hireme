@@ -155,6 +155,7 @@ export interface WireKernel {
   coverage(job: number, textLen: number, targetsLen: number, store: number): number
   touched_len(): number
   touched_ptr(): number
+  derive(): number
   counter(k: number): number
   set_today(day: number): void
   snapshot(): number
@@ -165,6 +166,9 @@ export interface WireKernel {
 
 /** What an ingest changed, as the kernel answers it. */
 export const INGEST = { cards: 1, tables: 2, lines: 4, focus: 8, settled: 16, dropped: 32, tick: 64, error: 1 << 30 } as const
+
+/** The tables the kernel derives from the raw rows. */
+const DERIVED = ["cards", "verdicts", "heat_rows", "score", "varieties", "chart_bands", "chart_bins"]
 
 /** Refusal codes from schema.txt. */
 const REFUSAL = ["", "fire_hold", "heat", "leased", "cooldown", "not_additive", "argument", "not_found", "batch", "invalid", "internal"]
@@ -237,25 +241,31 @@ export class Kernel {
     return this.k.ingest_commit(this.put((n) => this.k.ingest_reserve(n), frames))
   }
 
-  /** The tables the last ingest or push touched; null when it says every table (or cannot say yet). */
-  touched(): Set<number> | null {
-    if (typeof this.k.touched_len !== "function") return null
+  /**
+   * What the last ingest or push touched: the tables, and the job rows
+   * among them ("all" when the whole table moved). Null tables: everything
+   * (a BOOT).
+   */
+  touched(): { tables: Set<number> | null; jobs: number[] | "all" } {
     const n = this.k.touched_len()
     const pairs = new Uint32Array(this.mem, this.k.touched_ptr(), n * 2)
-    const out = new Set<number>()
-    for (let i = 0; i < n; i++) out.add(pairs[2 * i] ?? 0)
-    return out
-  }
-
-  /** The job rows the last ingest or push touched. */
-  touchedJobs(): number[] {
-    if (typeof this.k.touched_len !== "function") return []
-    const jobs = this.table("job_apps")
-    const n = this.k.touched_len()
-    const pairs = new Uint32Array(this.mem, this.k.touched_ptr(), n * 2)
-    const out: number[] = []
-    for (let i = 0; i < n; i++) if (pairs[2 * i] === jobs) out.push(pairs[2 * i + 1] ?? 0)
-    return out
+    const jobTable = this.table("job_apps")
+    const tables = new Set<number>()
+    let jobs: number[] | "all" = []
+    for (let i = 0; i < n; i++) {
+      const t = pairs[2 * i] ?? NONE
+      const key = pairs[2 * i + 1] ?? NONE
+      if (t === NONE) return { tables: null, jobs: "all" }
+      tables.add(t)
+      if (t === jobTable && jobs !== "all") {
+        if (key === NONE) jobs = "all"
+        else jobs.push(key)
+      }
+    }
+    // The derived views follow the rows lazily; derive them now, so what
+    // this change moved is known and read fresh.
+    if (this.k.derive() === 1) for (const name of DERIVED) tables.add(this.table(name))
+    return { tables, jobs }
   }
 
   /** Drop decoded rows of these tables (null: all). */
@@ -355,7 +365,6 @@ export class Kernel {
    * lists the targets in order with their hits.
    */
   coverage(job: number, text: string, targets: readonly string[] | null, store: boolean): Coverage {
-    if (typeof this.k.coverage !== "function") return keywords(targets ?? extract(this.listing(job)), text)
     const t = ENCODER.encode(text)
     const g = ENCODER.encode(targets === null ? "" : targets.join("\x1f"))
     const both = new Uint8Array(t.byteLength + g.byteLength)
@@ -372,12 +381,6 @@ export class Kernel {
     return out
   }
 
-  private listing(job: number): string {
-    const t = this.table("job_apps")
-    const row = this.k.row_of(t, job)
-    return row < 0 ? "" : this.str(t, this.col(t, "listing"), row)
-  }
-
   /** The kernel's base as frames that restore it. */
   snapshot(): Bytes {
     const len = this.k.snapshot()
@@ -388,37 +391,6 @@ export class Kernel {
   counters(): { settled: number; mispredicted: number; nacked: number; refused: number } {
     return { settled: this.k.counter(1), mispredicted: this.k.counter(2), nacked: this.k.counter(3), refused: this.k.counter(4) }
   }
-}
-
-// Keywords, until the kernel's coverage export lands: Hireme.Keywords.extract
-// and coverage/2 over the visible text, byte for byte as the reference.
-
-const STOP = new Set(`about after also and any are because been being both from have here into just more most only onto our over
-  role such team that the their them then there these they this those very what when where which will with work would your you for`.split(/\s+/))
-
-function extract(listing: string): string[] {
-  const counts = new Map<string, number>()
-  for (const w of listing.toLowerCase().split(/[^a-z0-9+#.]+/)) {
-    if (w.length < 4 || STOP.has(w)) continue
-    counts.set(w, (counts.get(w) ?? 0) + 1)
-  }
-  return [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, 10).map((e) => e[0])
-}
-
-function keywords(targets: readonly string[], text: string): Coverage {
-  const lower = text.toLowerCase()
-  const word = (c: number) => (c >= 97 && c <= 122) || (c >= 48 && c <= 57)
-  const hit = (term: string) => {
-    if (term === "") return /(^|[^a-z0-9])([^a-z0-9]|$)/u.test(lower)
-    const t = term.toLowerCase()
-    for (let at = lower.indexOf(t); at >= 0; at = lower.indexOf(t, at + 1)) {
-      if ((at === 0 || !word(lower.charCodeAt(at - 1))) && (at + t.length === lower.length || !word(lower.charCodeAt(at + t.length)))) return true
-    }
-    return false
-  }
-  const out: Coverage = { hits: [], misses: [] }
-  for (const t of targets) (hit(t) ? out.hits : out.misses).push(t)
-  return out
 }
 
 export async function loadWireKernel(url: string): Promise<WireKernel> {
@@ -610,7 +582,7 @@ class Documents {
   constructor(private readonly k: Kernel, private readonly board: Board) {}
 
   /** Rows of these tables changed (null: any); `jobs` are the job rows among them. */
-  changed(tables: ReadonlySet<number> | null, jobs: readonly number[]): Change {
+  changed(tables: ReadonlySet<number> | null, jobs: readonly number[] | "all"): Change {
     const k = this.k
     const t = (name: string) => tables === null || tables.has(k.table(name))
     const c: Change = {}
@@ -619,8 +591,9 @@ class Documents {
     if (wide || t("verdicts")) {
       this.focuses.clear()
       c.focus = "all"
-    } else if (t("job_apps") || t("cards")) {
-      for (const id of jobs) this.focuses.delete(id)
+    } else if (t("job_apps")) {
+      if (jobs === "all") this.focuses.clear()
+      else for (const id of jobs) this.focuses.delete(id)
       c.focus = jobs
     }
     if (["profiles", "items", "cv_variants", "kv_pairs", "narratives"].some(t)) {
@@ -916,12 +889,11 @@ export class LocalDesk implements Desk, Host {
 
   /** The kernel's rows changed (an ingest or a push): forget what read them, and say what changed. */
   private settle(): Change {
-    const touched = this.kernel.touched()
-    const jobs = this.kernel.touchedJobs()
-    this.kernel.forget(touched)
+    const { tables, jobs } = this.kernel.touched()
+    this.kernel.forget(tables)
     this.board.changed()
     this.snapshot?.queue(this.pending)
-    return this.docs.changed(touched, jobs)
+    return this.docs.changed(tables, jobs)
   }
 
   // -- the wire (Host) --

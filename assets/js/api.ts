@@ -283,7 +283,10 @@ export const revokeOtherSessions = () => command<SettingsReply>("revoke_other_se
 
 // Ways in. An address is added by a mailed link opened in this browser; GitHub and X answer with the URL to go to.
 // Both keep their trip in the cookie, so they stay HTTP.
-export const linkEmail = (email: string) => post<SettingsReply>("/api/account/identities", { provider: "email", email })
+export async function linkEmail(email: string): Promise<Outcome<SettingsReply>> {
+  const r = await post<Record<string, unknown>>("/api/account/identities", { provider: "email", email })
+  return r.ok ? { ok: true, value: settingsReply<SettingsReply>(link?.settings() ?? null, r.value) } : r
+}
 export const linkProvider = (provider: string) => post<{ ok: true; url: string }>("/api/account/identities", { provider })
 export const unlinkIdentity = (id: number) => command<SettingsReply>("unlink", { id }, settingsReply)
 
