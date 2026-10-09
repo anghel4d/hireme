@@ -4,19 +4,32 @@
 
 Baseline: `8104696`. Measured final application: `5531fef`.
 Final immutable release: `/nix/store/hwi5r2gmijj68lmya1ndk5lhcn9s4wch-hireme-0.1.0-5531fef`.
-Later benchmark, test-lint and documentation commits do not change application behavior.
+The tables below compare those two releases. The subsequent outbox release changes notification behavior and is documented separately below; its controlled-provider measurements are not mixed into the original tables.
 
 The dominant costs were repeated application work, not evidence of an intrinsically slow Elixir runtime: per-card heat/ATS calculations, loading rich cards for a score histogram, redundant reads after writes, and unnecessary DOM replacement. The packet format and WASM path were exercised end to end; packet construction now makes one binary per column, and startup fetches the kernel and packet concurrently. Public packet bytes remained identical in the parity workloads.
 
 The latency tables are local production-release measurements, not measured live Internet latency. **Release `5531fef` was deployed to `hireme.anghel4d.com` on Hetzner fsn1-2 (`49.12.102.5`) at 2026-10-09 10:10:21 UTC**, after the operator opened the hardware-backed SSH master. The previous release was `8104696`; no alternative identity or hardware-policy bypass was used. **fsn1-1 / heijo.org was not touched.**
 
-Deployment evidence:
+Initial performance-release deployment evidence:
 
 - Online, WAL-aware backup: `/var/lib/hireme/backups/hireme-20261009T100927.db`, owned by `hireme`, mode `0600`; SQLite integrity check returned `ok` before the release switch.
-- `/nix/var/nix/profiles/hireme` points to the exact final immutable release above. `hireme.service` and nginx are active; Hireme remained at PID 2342 with zero restarts during verification.
+- At that deployment, `/nix/var/nix/profiles/hireme` pointed to the exact measured release above. `hireme.service` and nginx were active; Hireme remained at PID 2342 with zero restarts during verification.
 - The service's pre-start migration applied `20261009000000`; `gym_reps_account_id_done_on_index` exists on `(account_id, done_on)`. The live database integrity check returned `ok`, and the application listener remains restricted to `127.0.0.1:4000`.
 - Public HTTPS checks: `/sign-in` returned 200; unauthenticated `/api/pack` returned 401; the final JavaScript bundle and WASM kernel returned 200 and their SHA-256 digests matched the local measured release byte-for-byte.
 - Chromium rendered the live sign-in page and its email form. No synthetic production credentials were created. Signed-in production interactions and external mail delivery were not exercised during this rollout; their local testbed evidence must not be confused with a live authenticated smoke test.
+
+### Security-notice outbox rollout
+
+**Current production release: `94ac794`, deployed to fsn1-2 at 2026-10-09 12:23:10 UTC.** Immutable closure: `/nix/store/x6mla64irz9sfmc7zff145afhlridw8p-hireme-0.1.0-94ac794`. This supersedes `5531fef`.
+
+The original testbed's test mail adapter omitted provider latency. Security notices previously waited for the provider inside account-change requests. The new outbox persists notice intent before returning and delivers through one supervised worker with bounded retries. It does not guarantee delivery: the post-change/pre-enqueue gap remains, exhausted rows retain their error, and a crash after provider acceptance can cause a duplicate. Sign-in-link mail remains synchronous; this does not claim to accelerate mail-free TOTP verification or Account GET.
+
+- Pre-switch online backup `/var/lib/hireme/backups/hireme-20261009T122227.db` passed integrity checking; mode `0600`, owned by `hireme`.
+- The release profile was switched from `5531fef`; service pre-start migration applied `20261009010000` and created `mail_outbox`. The live database integrity check returned `ok`.
+- Hireme and nginx were active; Hireme started as PID 2893 with zero restarts during verification. A read-only RPC against the running application confirmed `Hireme.Mailer.Outbox` was alive.
+- Public HTTPS sign-in returned 200 and unauthenticated `/api/pack` returned 401. The served JavaScript and WASM matched this release byte-for-byte.
+- The outbox was empty immediately after migration. No production security notices or synthetic credentials were created for this smoke check, so it does not establish live mail-delivery latency or authenticated account-operation timings. Whole-request journal durations must not be represented as isolated provider latency.
+
 
 ## How to read the measurements
 
