@@ -433,18 +433,6 @@ defmodule Hireme.Desk do
     end
   end
 
-  @doc "The applications in one batch."
-  @spec batch_jobs(String.t()) :: [pos_integer()]
-  def batch_jobs(code) do
-    Repo.all(
-      from j in Job,
-        join: b in Batch,
-        on: b.id == j.batch_id,
-        where: b.code == ^code,
-        select: j.id
-    )
-  end
-
   @spec list_batches() :: [Batch.t()]
   def list_batches, do: Repo.all(from b in Batch, order_by: b.ordinal)
 

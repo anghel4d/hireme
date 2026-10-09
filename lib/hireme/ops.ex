@@ -7,31 +7,27 @@ defmodule Hireme.Ops do
   account's changes have one total order. A write is one transaction:
   the ledger entry when the write is a client op, the domain write
   (`Hireme.Desk.execute/1` and the lane writes), and the account's
-  revision bump. After commit the sequencer works out what changed and
-  broadcasts it on `Hireme.Desk.topic/1`:
+  revision bump. After commit the sequencer re-reads the rows the write
+  reached and broadcasts what changed on `Hireme.Desk.topic/1`:
 
-      {:ops_delta, rev, %{cards: [Card.t()], deleted: [id], focus: [job_id],
-                          roots: [profile_id], scoreboard: bool, lanes: bool,
-                          batches: bool, narrative: bool}}
+      {:ops_delta, rev, %{rows: %{table => [row]}, gone: %{table => [id]}}}
 
   then the held `{:desk_event, Signal}` messages, then the reply. Local
   PubSub sends from this process and Erlang keeps the order of messages
   between two processes, so a caller always has the delta for its rev in
   its mailbox before the reply lands.
 
-  `cards` holds only the rows whose value changed. The sequencer keeps
-  the account's painted card table and its heat snapshot; a write
-  recomputes the rows it reaches (the job; its CV lineage for a CV
-  change; the batch for open fire) and, when a job's standing in the
-  heat snapshot moved, rebuilds the snapshot and repaints every card at
-  the same company or on the same ATS vendor, before and after. A day
-  rollover repaints all cards (heat decays by date) as its own revision.
+  The sequencer keeps the account's raw tables (`columns/0`). A row in
+  `rows` is new (every column) or changed (`id` and only the columns
+  whose value moved); `gone` names rows removed. Every view is derived
+  from these tables by the client; Elixir keeps its own derivations
+  (`Hireme.Desk`, `Hireme.Heat`) for write authority and for agents.
 
   Client ops (`run/2`) are fixed-shape: a kind and a target id with string
   fields in a fixed order per kind. Their outcome is kept 24 hours under
   the client's op id, so a resend gets the first answer and never writes
   twice. A revision bump that is not the one this process expected (a
-  write from another VM, such as a release task) repaints everything.
+  write from another VM, such as a release task) re-reads every table.
   """
 
   use GenServer
@@ -39,9 +35,7 @@ defmodule Hireme.Ops do
   require Logger
 
   alias Hireme.Accounts.Account
-  alias Hireme.Corpus
   alias Hireme.Desk
-  alias Hireme.Desk.Card
   alias Hireme.Desk.Overlay
   alias Hireme.Gym
   alias Hireme.Heat
@@ -108,16 +102,8 @@ defmodule Hireme.Ops do
 
   @type refusal :: atom() | {:argument, String.t()}
 
-  @type delta :: %{
-          cards: [Card.t()],
-          deleted: [pos_integer()],
-          focus: [pos_integer()],
-          roots: [pos_integer()],
-          scoreboard: boolean(),
-          lanes: boolean(),
-          batches: boolean(),
-          narrative: boolean()
-        }
+  @typedoc "Rows changed (new in full, else `id` and the changed columns) and ids removed, per table."
+  @type delta :: %{rows: %{atom() => [map()]}, gone: %{atom() => [pos_integer()]}}
 
   @typedoc "A write as the sequencer runs it: a desk write, or a lane write."
   @type command ::
@@ -180,20 +166,6 @@ defmodule Hireme.Ops do
   end
 
   @doc """
-  Subscribe the caller to the account's deltas and return a consistent
-  snapshot: the revision, every card in board order, the batches, and
-  the profiles. A delta whose rev is at or below the snapshot's is
-  already in it.
-  """
-  @spec attach(pos_integer()) ::
-          {:ok, non_neg_integer(),
-           %{cards: [Card.t()], batches: [Hireme.Desk.Batch.t()], profiles: [Corpus.Profile.t()]}}
-  def attach(account_id) when is_integer(account_id) do
-    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
-    call(account_id, :attach)
-  end
-
-  @doc """
   Subscribe the caller to the account's deltas and answer from where it
   stands. A session that holds the account at `since` and is still within
   the ring of recent deltas gets `{:replay, [{rev, delta}]}`: apply them in
@@ -248,7 +220,11 @@ defmodule Hireme.Ops do
           Enum.reduce(gone, acc, fn {t, ids}, acc -> Map.update!(acc, t, &Map.drop(&1, ids)) end)
 
         Enum.reduce(rows, acc, fn {t, list}, acc ->
-          Map.update!(acc, t, fn table -> Enum.reduce(list, table, &Map.put(&2, &1.id, &1)) end)
+          Map.update!(acc, t, fn table ->
+            Enum.reduce(list, table, fn row, t ->
+              Map.update(t, row.id, row, &Map.merge(&1, row))
+            end)
+          end)
         end)
     end)
     |> Map.new(fn {t, rows} -> {t, Map.values(rows)} end)
@@ -269,7 +245,7 @@ defmodule Hireme.Ops do
   end
 
   @doc """
-  Start the account's sequencer and build its card table now, without
+  Start the account's sequencer and load its tables now, without
   waiting, so the session that follows a page load attaches warm.
   """
   @spec prewarm(pos_integer()) :: :ok
@@ -278,17 +254,18 @@ defmodule Hireme.Ops do
   end
 
   @doc """
-  The account's prepared heat snapshot as of its latest revision, for
-  judging many applications at once (`Hireme.Desk.focuses/2`).
+  The account's prepared heat snapshot as of its latest revision and
+  today, for judging many applications at once (`Hireme.Desk.focuses/2`).
+  Built from the sequencer's job rows when a write has moved them.
   """
   @spec heat(pos_integer()) :: map()
   def heat(account_id) when is_integer(account_id), do: call(account_id, :heat)
 
-  @doc "Repaint these cards (a lease taken or released) and send what changed."
+  @doc "Re-read the lease rows of these jobs (a lease taken or released) and send what changed."
   @spec touch(pos_integer(), [pos_integer()]) :: :ok
   def touch(account_id, job_ids) when is_integer(account_id) and is_list(job_ids) do
-    # With no sequencer running there is no table to repaint; the next
-    # one paints from the database.
+    # With no sequencer running there is no table to bring level; the
+    # next one reads the database.
     case Registry.lookup(@registry, account_id) do
       [{pid, _}] -> GenServer.cast(pid, {:touch, job_ids})
       [] -> :ok
@@ -369,37 +346,12 @@ defmodule Hireme.Ops do
     Process.put(@inside, true)
     Repo.put_account(account_id)
     Process.send_after(self(), :sweep, 0)
-    schedule_tick()
 
     {:ok,
-     %{
-       account: account_id,
-       rev: nil,
-       day: nil,
-       heat: nil,
-       cards: nil,
-       raw: nil,
-       ring: :queue.new(),
-       ring_bytes: 0
-     }}
+     %{account: account_id, rev: nil, raw: nil, heat: nil, ring: :queue.new(), ring_bytes: 0}}
   end
 
   @impl true
-  def handle_call(:attach, _from, state) do
-    guard(state, fn ->
-      state = warm(state)
-      cards = state.cards |> Map.values() |> Enum.sort_by(&Card.order/1)
-
-      snapshot = %{
-        cards: cards,
-        batches: Desk.list_batches(),
-        profiles: Corpus.list_profiles()
-      }
-
-      {{:ok, state.rev, snapshot}, state}
-    end)
-  end
-
   def handle_call({:attach, since}, _from, state) do
     guard(state, fn ->
       state = warm(state)
@@ -417,7 +369,7 @@ defmodule Hireme.Ops do
 
       cond do
         read_rev == state.rev ->
-          state = reconcile(state, {:given, tables})
+          state = settle(state, {:given, tables})
           {{:ok, state.rev, :as_read}, state}
 
         read_rev < state.rev ->
@@ -435,7 +387,7 @@ defmodule Hireme.Ops do
   # The fallback when reads keep losing the race: read in here.
   def handle_call(:boot_inside, _from, state) do
     guard(state, fn ->
-      state = reconcile(warm(state), :all)
+      state = settle(warm(state), :all)
       tables = Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)
       {{:ok, state.rev, {:boot, %{tables: tables}}}, state}
     end)
@@ -443,8 +395,8 @@ defmodule Hireme.Ops do
 
   def handle_call(:heat, _from, state) do
     guard(state, fn ->
-      state = warm(state)
-      {state.heat, state}
+      state = state |> warm() |> heated()
+      {elem(state.heat, 1), state}
     end)
   end
 
@@ -487,15 +439,10 @@ defmodule Hireme.Ops do
   def handle_cast(:prewarm, state), do: {:noreply, warm(state)}
 
   def handle_cast({:touch, ids}, state) do
-    {:noreply, state |> warm() |> settle(ids)}
+    {:noreply, state |> warm() |> settle([{:leases, :id, ids}])}
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    schedule_tick()
-    {:noreply, if(state.cards, do: warm(state), else: state)}
-  end
-
   def handle_info(:sweep, state) do
     cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
     Repo.delete_all(from e in Entry, where: e.inserted_at < ^cutoff)
@@ -512,8 +459,8 @@ defmodule Hireme.Ops do
   # re-raised in its own process; a client op is answered `:internal`,
   # since its target and fields are the client's and a frame must never
   # take down the session that carried it. Either way the sequencer
-  # lives on, and because a raise after commit leaves the table suspect,
-  # the next write repaints everything.
+  # lives on, and because a raise after commit leaves the tables
+  # suspect, the next call re-reads them all.
   defp guard(state, mode \\ :domain, fun) do
     {reply, state} = fun.()
     {:reply, reply, state}
@@ -565,7 +512,8 @@ defmodule Hireme.Ops do
 
     case result do
       {:ok, {value, rev}} ->
-        state = publish(state, rev, reach(command, value), held, groups(command, value))
+        state = publish(state, rev, groups(command, value))
+        Enum.each(held, &broadcast(state, &1))
         {{:ok, value, rev}, state}
 
       {:error, reason} ->
@@ -573,7 +521,7 @@ defmodule Hireme.Ops do
     end
   end
 
-  # A write from another VM moved the counter: this table is behind it.
+  # A write from another VM moved the counter: these tables are behind it.
   defp bump!(state) do
     {1, [rev]} =
       Repo.update_all(
@@ -586,144 +534,77 @@ defmodule Hireme.Ops do
     rev
   end
 
-  defp publish(state, rev, reach, held, groups) do
+  # Send revision `rev`'s delta: the groups the write reached, or every
+  # table after a gap (revisions made elsewhere are not in the ring, so a
+  # session behind the gap boots).
+  defp publish(state, rev, groups) do
     gap? = Process.delete({__MODULE__, :gap})
+    {state, delta} = rediff(state, if(gap?, do: :all, else: groups))
+    broadcast(state, {:ops_delta, rev, delta})
+    state = %{state | rev: rev}
 
-    {state, rows, lanes?} =
-      if gap?,
-        do: repaint_all(state),
-        else: repaint(state, reach.rows)
-
-    {state, raw} = if gap?, do: rediff(state, :all), else: rediff(state, groups)
-
-    delta = %{
-      cards: rows,
-      deleted: [],
-      focus: if(reach.rows == :all, do: Enum.map(rows, & &1.id), else: reach.focus),
-      roots: reach.roots,
-      scoreboard: reach.scoreboard,
-      lanes: reach.lanes or lanes?,
-      batches: reach.batches,
-      narrative: reach.narrative
-    }
-
-    send_delta(state, rev, Map.merge(delta, raw))
-    Enum.each(held, &broadcast(state, &1))
-    %{state | rev: rev} |> remember(rev, raw)
+    if gap?,
+      do: remember(%{state | ring: :queue.new(), ring_bytes: 0}, rev, delta, true),
+      else: remember(state, rev, delta)
   end
 
-  defp send_delta(state, rev, delta), do: broadcast(state, {:ops_delta, rev, delta})
-
-  defp broadcast(state, message),
-    do: Phoenix.PubSub.broadcast(Hireme.PubSub, Desk.topic(state.account), message)
-
-  # Lease changes and the like: repaint, and spend a revision only on a change.
-  defp settle(state, ids) do
-    {next, rows, lanes?} = repaint(state, ids)
-    {next, raw} = rediff(next, [{:leases, :id, ids}])
-
-    if rows == [] and raw == %{rows: %{}, gone: %{}} do
-      next
-    else
-      rev = Repo.transaction(fn -> bump!(state) end) |> elem(1)
-
-      {next, rows, lanes?, raw} =
-        if Process.delete({__MODULE__, :gap}) do
-          {next, rows, lanes?} = repaint_all(state)
-          {next, raw} = rediff(%{next | raw: state.raw}, :all)
-          {next, rows, lanes?, raw}
-        else
-          {next, rows, lanes?, raw}
-        end
-
-      send_delta(next, rev, Map.merge(%{empty_delta() | cards: rows, lanes: lanes?}, raw))
-      %{next | rev: rev} |> remember(rev, raw)
-    end
-  end
-
-  defp reconcile(state, source) do
+  # A change found outside a write (a lease, a row written around the
+  # sequencer): a revision only when something differs.
+  defp settle(state, source) do
     case rediff(state, source) do
       {next, %{rows: rows, gone: gone}} when rows == %{} and gone == %{} ->
         next
 
-      {next, raw} ->
+      {next, delta} ->
         rev = Repo.transaction(fn -> bump!(state) end) |> elem(1)
-        gap? = Process.delete({__MODULE__, :gap})
-        {next, cards, _lanes?} = repaint_all(next)
 
-        send_delta(
-          next,
-          rev,
-          Map.merge(%{empty_delta() | cards: cards, lanes: true, scoreboard: true}, raw)
-        )
-
-        next = %{next | rev: rev}
-
-        if gap?,
-          do: remember(%{next | ring: :queue.new(), ring_bytes: 0}, rev, raw, true),
-          else: remember(next, rev, raw)
+        if Process.delete({__MODULE__, :gap}) do
+          {next, rest} = rediff(next, :all)
+          delta = join(delta, rest)
+          broadcast(next, {:ops_delta, rev, delta})
+          remember(%{next | rev: rev, ring: :queue.new(), ring_bytes: 0}, rev, delta, true)
+        else
+          broadcast(next, {:ops_delta, rev, delta})
+          remember(%{next | rev: rev}, rev, delta)
+        end
     end
   end
 
-  defp empty_delta do
-    %{
-      cards: [],
-      deleted: [],
-      focus: [],
-      roots: [],
-      scoreboard: false,
-      lanes: false,
-      batches: false,
-      narrative: false
-    }
+  # Two deltas as one: a row in both goes once, its columns merged.
+  defp join(a, b) do
+    rows =
+      Map.merge(a.rows, b.rows, fn _t, x, y ->
+        (x ++ y)
+        |> Enum.group_by(& &1.id)
+        |> Enum.map(fn {_id, parts} -> Enum.reduce(parts, &Map.merge(&2, &1)) end)
+      end)
+
+    %{rows: rows, gone: Map.merge(a.gone, b.gone, fn _t, x, y -> Enum.uniq(x ++ y) end)}
   end
 
-  # -- the card table ---------------------------------------------------------
+  defp broadcast(state, message),
+    do: Phoenix.PubSub.broadcast(Hireme.PubSub, Desk.topic(state.account), message)
 
-  # The table is built on first use and kept warm. A new UTC day, or a
-  # revision this process did not make, repaints every card and sends
-  # the difference as its own revision. A write skips the read of the
-  # revision (`look?` false): its own bump finds any gap.
+  # The tables are read on first use and kept. A revision this process
+  # did not make re-reads them all and sends the difference as its own
+  # revision. A write skips the read of the revision (`look?` false): its
+  # own bump finds any gap.
   defp warm(state, look? \\ true)
 
-  defp warm(%{cards: nil} = state, _look?) do
-    today = Date.utc_today()
-    heat = fresh_heat(today)
-    cards = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
+  defp warm(%{raw: nil} = state, _look?) do
     raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
-
-    %{
-      state
-      | rev: db_rev(state),
-        day: today,
-        heat: heat,
-        cards: cards,
-        raw: raw,
-        ring: :queue.new(),
-        ring_bytes: 0
-    }
+    %{state | rev: db_rev(state), raw: raw, heat: nil, ring: :queue.new(), ring_bytes: 0}
   end
 
   defp warm(state, look?) do
-    cond do
-      state.day != Date.utc_today() or state.rev == nil or (look? and state.rev != db_rev(state)) ->
-        {next, rows, _lanes?} = repaint_all(state)
-        {next, raw} = rediff(next, :all)
-        rev = Repo.transaction(fn -> bump!(%{state | rev: db_rev(state)}) end) |> elem(1)
-        Process.delete({__MODULE__, :gap})
-
-        send_delta(
-          next,
-          rev,
-          Map.merge(%{empty_delta() | cards: rows, lanes: true, scoreboard: true}, raw)
-        )
-
-        # Revisions made elsewhere are not in the ring: a session behind
-        # this one boots.
-        %{next | rev: rev, ring: :queue.new(), ring_bytes: 0} |> remember(rev, raw, true)
-
-      true ->
-        state
+    if state.rev == nil or (look? and state.rev != db_rev(state)) do
+      {next, delta} = rediff(state, :all)
+      rev = Repo.transaction(fn -> bump!(%{state | rev: db_rev(state)}) end) |> elem(1)
+      Process.delete({__MODULE__, :gap})
+      broadcast(next, {:ops_delta, rev, delta})
+      %{next | rev: rev, ring: :queue.new(), ring_bytes: 0} |> remember(rev, delta, true)
+    else
+      state
     end
   end
 
@@ -733,77 +614,22 @@ defmodule Hireme.Ops do
     )
   end
 
-  defp repaint_all(state) do
+  # The heat snapshot, from the job rows in hand, prepared for today.
+  defp heated(%{heat: {day, _}} = state) do
+    if day == Date.utc_today(), do: state, else: heated(%{state | heat: nil})
+  end
+
+  defp heated(state) do
     today = Date.utc_today()
-    heat = fresh_heat(today)
-    fresh = Desk.cards(:all, heat, today) |> Map.new(&{&1.id, &1})
-    rows = for {id, card} <- fresh, Map.get(state.cards, id) != card, do: card
-    {%{state | day: today, heat: heat, cards: fresh}, rows, true}
-  end
-
-  # Repaint `ids` against the snapshot; if any of them moved in the heat
-  # snapshot, rebuild it and repaint their company and ATS kin too.
-  defp repaint(state, :all), do: repaint_all(state)
-  defp repaint(state, []), do: {state, [], false}
-
-  defp repaint(state, ids) do
-    first = Desk.cards(ids, state.heat, state.day)
-    moved = Enum.filter(first, &(heat_key(&1) != heat_key(Map.get(state.cards, &1.id))))
-
-    {state, painted, lanes?} =
-      if moved == [] do
-        {state, first, false}
-      else
-        # The table with the fresh rows is the database as committed, so
-        # the snapshot and the kin's rows come from memory.
-        table = Enum.reduce(first, state.cards, &Map.put(&2, &1.id, &1))
-        cfg = Heat.config()
-
-        heat =
-          table
-          |> Map.values()
-          |> Heat.snapshot_of(state.day, cfg)
-          |> Heat.prepare(cfg, state.day, state.heat)
-
-        old = Enum.map(moved, &Map.get(state.cards, &1.id)) |> Enum.reject(&is_nil/1)
-        peers = Map.values(state.cards)
-
-        kin =
-          (moved ++ old)
-          |> Enum.flat_map(&Heat.kin(peers, &1))
-          |> Enum.concat(ids)
-          |> Enum.uniq()
-          |> Enum.map(&Map.fetch!(table, &1))
-
-        {%{state | heat: heat}, Heat.decorate_all(kin, heat, cfg, state.day), true}
-      end
-
-    rows = Enum.filter(painted, &(Map.get(state.cards, &1.id) != &1))
-    cards = Enum.reduce(rows, state.cards, &Map.put(&2, &1.id, &1))
-    {%{state | cards: cards}, rows, lanes?}
-  end
-
-  # What a card contributes to the heat snapshot as a peer; nil when it
-  # is not in it.
-  defp heat_key(nil), do: nil
-
-  defp heat_key(%Card{} = card) do
-    if Heat.hot_stage?(card.stage),
-      do:
-        {card.company, card.role, card.listing_url, card.canonical_url, card.department,
-         card.squad, card.fit, card.stage_on},
-      else: nil
-  end
-
-  defp fresh_heat(today) do
     cfg = Heat.config()
-    today |> Heat.snapshot(cfg) |> Heat.prepare(cfg, today)
-  end
 
-  defp schedule_tick do
-    now = DateTime.utc_now()
-    midnight = DateTime.new!(Date.add(DateTime.to_date(now), 1), ~T[00:00:01], "Etc/UTC")
-    Process.send_after(self(), :tick, DateTime.diff(midnight, now, :millisecond))
+    heat =
+      state.raw.job_apps
+      |> Map.values()
+      |> Heat.snapshot_of(today, cfg)
+      |> Heat.prepare(cfg, today)
+
+    %{state | heat: {today, heat}}
   end
 
   # -- the raw tables ---------------------------------------------------------
@@ -857,6 +683,7 @@ defmodule Hireme.Ops do
         fresh_ids = MapSet.new(fresh, & &1.id)
 
         changed = for row <- fresh, Map.get(old, row.id) != row, do: row
+        sent = Enum.map(changed, &columns_moved(Map.get(old, &1.id), &1))
 
         left =
           for {id, row} <- old,
@@ -866,10 +693,22 @@ defmodule Hireme.Ops do
 
         table_rows = Enum.reduce(changed, Map.drop(old, left), &Map.put(&2, &1.id, &1))
 
-        {Map.put(raw, table, table_rows), merge(rows, table, changed), merge(gone, table, left)}
+        {Map.put(raw, table, table_rows), merge(rows, table, sent), merge(gone, table, left)}
       end)
 
-    {%{state | raw: raw}, %{rows: rows, gone: gone}}
+    # Any job row moved may move the heat snapshot; it is rebuilt on ask.
+    heat =
+      if Map.has_key?(rows, :job_apps) or Map.has_key?(gone, :job_apps), do: nil, else: state.heat
+
+    {%{state | raw: raw, heat: heat}, %{rows: rows, gone: gone}}
+  end
+
+  # A new row goes in full; a changed one as its id and the columns that
+  # moved, so a next action does not resend a listing.
+  defp columns_moved(nil, row), do: row
+
+  defp columns_moved(old, row) do
+    for {k, v} <- row, k == :id or Map.get(old, k) != v, into: %{}, do: {k, v}
   end
 
   defp fetch_group(_table, :all, {:given, rows}, _raw), do: rows
@@ -1008,67 +847,6 @@ defmodule Hireme.Ops do
 
   defp lineage_of(job_id) do
     Repo.one(from v in Hireme.Desk.Variant, where: v.job_app_id == ^job_id, select: v.lineage_id)
-  end
-
-  # -- what a write reaches ---------------------------------------------------
-
-  defp reach(command, value) do
-    base = %{
-      rows: [],
-      focus: [],
-      roots: [],
-      scoreboard: false,
-      lanes: false,
-      batches: false,
-      narrative: false
-    }
-
-    case command do
-      {:create, _} ->
-        ids = Desk.lineage_jobs(value.id)
-        %{base | rows: ids, focus: ids, scoreboard: true, batches: true}
-
-      {kind, id, _} when kind in [:stage, :score] ->
-        %{base | rows: [id], focus: [id], scoreboard: true}
-
-      {:heat_override, id, _} ->
-        %{base | rows: [id], focus: [id]}
-
-      {kind, id, _, _} when kind in [:next, :note] ->
-        %{base | rows: [id], focus: [id]}
-
-      {:overlay, id, _, _} ->
-        ids = Desk.lineage_jobs(id)
-        %{base | rows: ids, focus: ids}
-
-      {:glance, id} ->
-        %{base | rows: [id], focus: [id]}
-
-      {:open_fire, code} ->
-        ids = Desk.batch_jobs(code)
-        %{base | rows: ids, focus: ids, scoreboard: true, batches: true}
-
-      {:govern, _} ->
-        %{base | rows: :all, scoreboard: true, batches: true, lanes: true}
-
-      {:perform, pair, command} ->
-        job_id = Hireme.CvPair.job_id(pair)
-
-        case command do
-          {:set_stage, stage} -> reach({:stage, job_id, stage}, value)
-          {:set_score, score} -> reach({:score, job_id, score}, value)
-          {:set_next, action} -> reach({:next, job_id, action, nil}, value)
-          {:tailor, item_id, attrs} -> reach({:overlay, job_id, item_id, attrs}, value)
-          :open_generation -> %{base | focus: Desk.lineage_jobs(job_id)}
-          _ -> base
-        end
-
-      {:narrative, _, _} ->
-        %{base | narrative: true, roots: Enum.map(Corpus.list_profiles(), & &1.id)}
-
-      {kind, _} when kind in [:gym_log, :gym_target, :net_log, :net_lane] ->
-        %{base | lanes: true}
-    end
   end
 
   # -- the commands -----------------------------------------------------------

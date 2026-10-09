@@ -5,7 +5,6 @@ defmodule Hireme.OpsTest do
 
   alias Hireme.Desk
   alias Hireme.Desk.Batch
-  alias Hireme.Desk.Filters
   alias Hireme.Gym
   alias Hireme.Ops
   alias Hireme.Pipeline
@@ -86,27 +85,26 @@ defmodule Hireme.OpsTest do
     %{op_id: op_id, kind: kind, target: target, fields: fields}
   end
 
-  # A tab's view: the raw tables, by id, and the cards it paints; every
-  # delta upserts its rows and drops what it names gone.
-  defp apply_delta(%{tables: tables, cards: cards}, delta) do
+  # A tab's view: the raw tables, by id. Every delta merges its rows
+  # (a changed row carries only its moved columns) and drops what it
+  # names gone.
+  defp apply_delta(tables, delta) do
     tables =
       Enum.reduce(delta.gone, tables, fn {t, ids}, acc ->
         Map.update!(acc, t, &Map.drop(&1, ids))
       end)
 
-    tables =
-      Enum.reduce(delta.rows, tables, fn {t, rows}, acc ->
-        Map.update!(acc, t, fn table -> Enum.reduce(rows, table, &Map.put(&2, &1.id, &1)) end)
+    Enum.reduce(delta.rows, tables, fn {t, rows}, acc ->
+      Map.update!(acc, t, fn table ->
+        Enum.reduce(rows, table, fn row, table ->
+          Map.update(table, row.id, row, &Map.merge(&1, row))
+        end)
       end)
-
-    cards = Enum.reduce(delta.cards, Map.drop(cards, delta.deleted), &Map.put(&2, &1.id, &1))
-    %{tables: tables, cards: cards}
+    end)
   end
 
   defp by_id(tables), do: Map.new(tables, fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
-
-  defp fresh, do: Desk.list_cards(%Filters{status: :all}) |> Map.new(&{&1.id, &1})
-  defp fresh_view, do: %{tables: by_id(Ops.read_tables()), cards: fresh()}
+  defp fresh_view, do: by_id(Ops.read_tables())
 
   defp drain(acc) do
     receive do
@@ -153,16 +151,16 @@ defmodule Hireme.OpsTest do
   end
 
   defp diverged(view, want) do
-    for {t, rows} <- want.tables, {id, row} <- rows, view.tables[t][id] != row, do: {t, id}
+    for {t, rows} <- want, {id, row} <- rows, view[t][id] != row, do: {t, id}
   end
 
   for seed <- 1..6 do
-    test "boot plus every delta equals the tables and the board (seed #{seed})",
+    test "boot plus every delta equals the tables (seed #{seed})",
          %{account: account} do
       seed = unquote(seed)
       fixture = desk(seed)
       {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-      boot = %{tables: by_id(tables), cards: fresh()}
+      boot = by_id(tables)
       assert boot == fresh_view()
 
       {view, rev, log} =
@@ -208,8 +206,7 @@ defmodule Hireme.OpsTest do
       want = fresh_view()
 
       assert view == want,
-             "seed #{seed}: #{inspect(diverged(view, want))} and cards " <>
-               "#{inspect(for {id, c} <- want.cards, view.cards[id] != c, do: id)} diverged " <>
+             "seed #{seed}: #{inspect(diverged(view, want))} diverged " <>
                "after #{inspect(Enum.reverse(log), limit: :infinity)}"
 
       assert rev > boot_rev
@@ -220,10 +217,10 @@ defmodule Hireme.OpsTest do
 
       resumed =
         Enum.reduce(deltas, boot, fn {_, d}, v ->
-          apply_delta(v, Map.merge(d, %{cards: [], deleted: []}))
+          apply_delta(v, d)
         end)
 
-      assert resumed.tables == want.tables
+      assert resumed == want
     end
   end
 
@@ -238,7 +235,7 @@ defmodule Hireme.OpsTest do
     :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account.id))
 
     assert {:ok, rev} = Ops.run(account.id, op)
-    assert_received {:ops_delta, ^rev, %{lanes: true}}
+    assert_received {:ops_delta, ^rev, %{rows: %{gym_reps: [_]}}}
     assert {:ok, ^rev} = Ops.run(account.id, op)
     refute_received {:ops_delta, _, _}
     assert length(Gym.recent()) == 1
@@ -314,7 +311,7 @@ defmodule Hireme.OpsTest do
   test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
     %{jobs: [first, second | _]} = desk(99)
     {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-    boot = %{tables: by_id(tables), cards: fresh()}
+    boot = by_id(tables)
 
     Repo.update_all(from(j in Desk.Job, where: j.id == ^first.id),
       set: [next_action: "elsewhere"]
@@ -360,10 +357,9 @@ defmodule Hireme.OpsTest do
           deltas = for {r, d} <- drain([]), r > rev, do: {r, d}
 
           deltas
-          |> Enum.reduce(%{tables: by_id(tables), cards: %{}}, fn {_, d}, v ->
-            apply_delta(v, %{d | cards: [], deleted: []})
+          |> Enum.reduce(by_id(tables), fn {_, d}, v ->
+            apply_delta(v, d)
           end)
-          |> Map.fetch!(:tables)
         end)
       end
 
@@ -387,7 +383,7 @@ defmodule Hireme.OpsTest do
   } do
     desk(98)
     {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-    boot = %{tables: by_id(tables), cards: fresh()}
+    boot = by_id(tables)
 
     {:ok, batch} =
       %Batch{}
