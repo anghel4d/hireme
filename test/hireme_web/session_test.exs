@@ -16,10 +16,6 @@ defmodule HiremeWeb.SessionTest do
     def send({__MODULE__, pid}, id, io), do: Kernel.send(pid, {:out, id, IO.iodata_to_binary(io)})
     def fin(_c, _id), do: :ok
     def reset({__MODULE__, pid}, id, code), do: Kernel.send(pid, {:reset, id, code})
-    def open_uni({__MODULE__, pid}, id, prio), do: Kernel.send(pid, {:uni, id, prio})
-    def open_bi(_c, _id, _prio), do: :ok
-    def priority(_c, _id, _prio), do: :ok
-    def datagram(c, io), do: __MODULE__.send(c, :dgram, io)
     def ready({__MODULE__, pid}), do: Kernel.send(pid, :ready)
     def close({__MODULE__, pid}, code, reason), do: Kernel.send(pid, {:close, code, reason})
   end
@@ -222,7 +218,7 @@ defmodule HiremeWeb.SessionTest do
     table_ids(rest, [id | acc])
   end
 
-  test "a raw hello boots raw tables, account tables and the clock, and no focus stream",
+  test "a raw hello boots raw tables, account tables and the clock",
        %{account: account} do
     # A batch written before the sequencer starts is in its first read.
     Hireme.Repo.insert!(%Hireme.Desk.Batch{
@@ -240,7 +236,6 @@ defmodule HiremeWeb.SessionTest do
     ids = table_ids(body)
     for t <- [:job_apps, :profiles, :clock, :acct, :stages], do: assert(Packet.table_id(t) in ids)
     refute Packet.table_id(:cards) in ids
-    refute_received {:uni, _, _}
 
     {:ok, s} = Session.event({:data, 0, op(61, 2, job.id, ["Call", ""])}, s)
     _s = drain(s)
