@@ -254,7 +254,7 @@ pub extern "C" fn mix(batch: u32) -> u32 {
 
 /// Extracts up to `budget` waiting listings into their cards' keyword
 /// counts (touched reports the cards); answers how many still wait. Call
-/// it off the input path until it answers 0.
+/// it off the input path until it answers 0; a budget of 0 only asks.
 #[unsafe(no_mangle)]
 pub extern "C" fn glances(budget: u32) -> u32 {
     with(|k| k.desk.glances(budget as usize) as u32)

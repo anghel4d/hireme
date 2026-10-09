@@ -1616,6 +1616,13 @@ impl Desk {
     /// for want of one, those earliest in the selection first, and patches
     /// their cards (reported in `touched`). Answers how many still wait.
     pub fn glances(&mut self, budget: usize) -> usize {
+        if budget == 0 {
+            // Only asks: touched and the views stay as they are.
+            let w = &mut self.derived.waiting;
+            w.sort_unstable();
+            w.dedup();
+            return w.len();
+        }
         self.touched.clear();
         let mut d = core::mem::replace(&mut self.derived, Derived::new());
         d.check_epoch(&self.store.arena);
