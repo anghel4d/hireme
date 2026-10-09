@@ -111,10 +111,12 @@ export class Shell {
       <div id="notice-slot"></div>
       <div id="scoreboard-slot"></div>
       <div id="heat-slot"></div>
-      <div id="lens"></div>
-      <div id="workspace" class="workspace">
-        <div id="grid" class="grid-scroll"><div id="plane" class="grid-plane"></div><div id="empty"></div></div>
-        <div id="focus-slot"></div>
+      <div class="stage">
+        <div id="workspace" class="workspace">
+          <div id="grid" class="grid-scroll"><div id="plane" class="grid-plane"></div><div id="empty"></div></div>
+          <div id="focus-slot"></div>
+        </div>
+        <div id="lens"></div>
       </div>`
     this.plane = this.root.querySelector<HTMLElement>("#plane") as HTMLElement
     this.cards = new Keyed(this.plane)
@@ -398,15 +400,18 @@ export class Shell {
     const workspace = this.root.querySelector<HTMLElement>("#workspace")
     if (!lens || !workspace) return
 
+    // A lens covers the board rather than replacing it: the board keeps its
+    // layout underneath, so coming back costs a paint, not a relayout of
+    // every card. Covered, it renders nothing and takes no focus.
     if (m.lens === "board") {
       morph(lens, raw(""))
-      workspace.hidden = false
+      if (workspace.dataset["covered"]) delete workspace.dataset["covered"]
       this.drawBoard(focus, mark)
     } else {
       morph(lens, this.lensView(focus, mark, lanes))
       const paper = m.lens === "battleplan" && focus ? lens.querySelector("#bp-paper") : null
       if (paper && focus) morph(paper, views.battleplanPaper(focus, m.editing, m.alterError))
-      workspace.hidden = true
+      if (!workspace.dataset["covered"]) workspace.dataset["covered"] = "1"
     }
     // Assigning the title rewrites the <title> node even when it is the same.
     const title = titleOf(m, focus)
@@ -585,6 +590,9 @@ export class Shell {
     if (gridEl) {
       gridEl.addEventListener("scroll", () => this.dispatch({ t: "grid", scroll: Math.round(gridEl.scrollTop) }), { passive: true })
       const measure = () => {
+        // A hidden board (another lens is open) measures 0×0. Keeping the
+        // last real geometry lets the board come back whole in one frame.
+        if (gridEl.clientWidth === 0) return
         const rem = remPx()
         this.dispatch({
           t: "grid",
