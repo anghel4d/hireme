@@ -468,6 +468,16 @@ defmodule Hireme.Heat do
     |> Map.put(:prepared, {today, cfg})
   end
 
+  @doc """
+  The governor's verdict on one job against a prepared snapshot: what
+  `can_apply/2` answers, without reading the hot jobs again.
+  """
+  @spec verdict(map(), map(), Config.t(), Date.t()) :: Verdict.t()
+  def verdict(job, snapshot, cfg \\ config(), today \\ Date.utc_today()) do
+    snapshot = prepare(snapshot, cfg, today)
+    evaluate(job, snapshot.jobs, [], today, cfg, snapshot.ats, snapshot)
+  end
+
   @spec decorate(map(), map(), Config.t(), Date.t()) :: map()
   def decorate(card, snapshot, cfg \\ config(), today \\ Date.utc_today())
 

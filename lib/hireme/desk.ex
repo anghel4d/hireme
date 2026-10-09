@@ -84,8 +84,9 @@ end
 
 defmodule Hireme.Desk.Focus do
   @moduledoc """
-  One application opened: its row, its rail, its document, and the
-  coverage of the listing's words against that document and the root.
+  One application opened: its row, its rail, its document, the
+  coverage of the listing's words against that document and the root,
+  and the heat governor's verdict on it.
   """
 
   @enforce_keys [
@@ -100,7 +101,8 @@ defmodule Hireme.Desk.Focus do
     :coverage,
     :root_coverage,
     :kv,
-    :masks
+    :masks,
+    :verdict
   ]
   defstruct @enforce_keys
 
@@ -116,7 +118,8 @@ defmodule Hireme.Desk.Focus do
           coverage: Hireme.Keywords.Coverage.t(),
           root_coverage: Hireme.Keywords.Coverage.t(),
           kv: [Hireme.Kv.Pair.t()],
-          masks: [Hireme.Mask.Line.t()]
+          masks: [Hireme.Mask.Line.t()],
+          verdict: Hireme.Heat.Verdict.t()
         }
 end
 
@@ -446,61 +449,130 @@ defmodule Hireme.Desk do
   def list_batches, do: Repo.all(from b in Batch, order_by: b.ordinal)
 
   @spec focus(pos_integer() | nil) :: Focus.t() | nil
-  @doc """
-  Resolve one application with its profile, optional batch, and lineage.
-  Join the single-row associations and reuse the fetched job on the variant;
-  write paths retain their own preloads.
-  """
+  @doc "Open one application: `focuses/2` of one."
   def focus(nil), do: nil
 
   def focus(job_id) do
-    query =
-      from j in Job,
-        where: j.id == ^job_id,
-        left_join: p in assoc(j, :profile),
-        left_join: b in assoc(j, :batch),
-        select: {j, p, b}
+    case focuses([job_id]) do
+      [focus] -> focus
+      [] -> nil
+    end
+  end
 
-    case Repo.one(query) do
-      nil ->
-        nil
+  @doc """
+  Open many applications at once, in no particular order; an unknown id
+  is left out. Each kind of row is read once for all of them (the jobs
+  with their profile and batch, the variants with their lineage, the
+  lineages' overlays, the events, the process notes), each profile's
+  lines once, and every heat verdict is judged against one prepared
+  snapshot: `heat`, such as `Hireme.Ops.heat/1`'s. Without one each is
+  judged by `Hireme.Heat.can_apply/1`, which is cheaper than preparing a
+  snapshot for a handful.
+  """
+  @spec focuses([pos_integer()], map() | nil) :: [Focus.t()]
+  def focuses(ids, heat \\ nil)
+  def focuses([], _heat), do: []
 
-      {job, profile, batch} ->
-        variant =
-          Repo.one!(
-            from v in Variant,
-              where: v.job_app_id == ^job.id,
-              left_join: l in assoc(v, :lineage),
-              preload: [lineage: l]
-          )
+  def focuses(ids, heat) do
+    rows =
+      Repo.all(
+        from j in Job,
+          where: j.id in ^ids,
+          left_join: p in assoc(j, :profile),
+          left_join: b in assoc(j, :batch),
+          select: {j, p, b}
+      )
 
-        variant = %{variant | job_app: job}
-        job = %{job | profile: profile, batch: batch}
+    job_ids = Enum.map(rows, fn {job, _, _} -> job.id end)
 
-        theme = theme_of(variant)
-        items = Corpus.list_items(job.profile_id)
-        resolved = Mask.apply(items, overlays(variant))
-        canonical = Mask.apply(items, [])
-        targets = Keywords.targets(theme, job.listing)
+    variants =
+      from(v in Variant,
+        where: v.job_app_id in ^job_ids,
+        left_join: l in assoc(v, :lineage),
+        preload: [lineage: l]
+      )
+      |> Repo.all()
+      |> Map.new(&{&1.job_app_id, &1})
 
-        %Focus{
-          job: job,
-          profile: job.profile,
-          variant: variant,
-          theme: theme,
-          rail: rail(job),
-          events:
-            Repo.all(
-              from e in Event, where: e.job_app_id == ^job.id, order_by: [desc: e.id], limit: 12
-            ),
-          cv:
-            Cv.compose(job.profile, resolved, theme, label: variant.label, person: person_name()),
-          narrative: Narrative.for_profile(job.profile),
-          coverage: Keywords.coverage(targets, resolved),
-          root_coverage: Keywords.coverage(targets, canonical),
-          kv: Kv.list("app:#{job.id}"),
-          masks: Enum.filter(resolved, &(&1.mode != :canonical))
-        }
+    lineage_ids = variants |> Map.values() |> Enum.map(& &1.lineage_id) |> Enum.uniq()
+
+    overlays =
+      Repo.all(from o in Overlay, where: o.lineage_id in ^lineage_ids)
+      |> Enum.group_by(& &1.lineage_id)
+
+    events =
+      Repo.all(from e in Event, where: e.job_app_id in ^job_ids, order_by: [desc: e.id])
+      |> Enum.group_by(& &1.job_app_id)
+
+    notes =
+      Repo.all(
+        from p in Kv.Pair,
+          where: p.namespace in ^Enum.map(job_ids, &"app:#{&1}"),
+          order_by: p.key
+      )
+      |> Enum.group_by(& &1.namespace)
+
+    lines =
+      rows
+      |> Enum.map(fn {_, profile, _} -> profile end)
+      |> Enum.uniq_by(& &1.id)
+      |> Map.new(fn profile ->
+        items = Corpus.list_items(profile.id)
+        root = items |> Mask.apply([]) |> Keywords.visible_text()
+        {profile.id, {items, root, Narrative.for_profile(profile)}}
+      end)
+
+    # Applications on one lineage share their overlays, so their lines.
+    resolved =
+      rows
+      |> Enum.map(fn {job, _, _} -> {job.profile_id, variant!(variants, job.id).lineage_id} end)
+      |> Enum.uniq()
+      |> Map.new(fn {profile_id, lineage_id} = key ->
+        {items, _, _} = Map.fetch!(lines, profile_id)
+        lines = Mask.apply(items, Map.get(overlays, lineage_id, []))
+        {key, {lines, Keywords.visible_text(lines)}}
+      end)
+
+    person = person_name()
+    today = Date.utc_today()
+    cfg = Heat.config()
+    heat = heat && Heat.prepare(heat, cfg, today)
+
+    for {job, profile, batch} <- rows do
+      variant = %{variant!(variants, job.id) | job_app: job}
+      job = %{job | profile: profile, batch: batch}
+      {_items, root, narrative} = Map.fetch!(lines, profile.id)
+      {shown, text} = Map.fetch!(resolved, {profile.id, variant.lineage_id})
+      theme = theme_of(variant)
+      targets = Keywords.targets(theme, job.listing)
+
+      %Focus{
+        job: job,
+        profile: profile,
+        variant: variant,
+        theme: theme,
+        rail: rail(job),
+        events: events |> Map.get(job.id, []) |> Enum.take(12),
+        cv: Cv.compose(profile, shown, theme, label: variant.label, person: person),
+        narrative: narrative,
+        coverage: Keywords.coverage(targets, text),
+        root_coverage: Keywords.coverage(targets, root),
+        kv: Map.get(notes, "app:#{job.id}", []),
+        masks: Enum.filter(shown, &(&1.mode != :canonical)),
+        verdict: if(heat, do: Heat.verdict(job, heat, cfg, today), else: Heat.can_apply(job))
+      }
+    end
+  end
+
+  # Every application has its variant; one without is a broken row, not
+  # an absent one.
+  defp variant!(variants, job_id) do
+    case Map.fetch(variants, job_id) do
+      {:ok, variant} ->
+        variant
+
+      :error ->
+        raise Ecto.NoResultsError, queryable: from(v in Variant, where: v.job_app_id == ^job_id)
     end
   end
 
