@@ -376,6 +376,9 @@ pub struct Focus {
 
 /// Everything resident: desk tables, focuses by job, and the arena.
 pub struct Store {
+    /// (table, key) of every row a frame wrote or deleted since the
+    /// owner last drained it; key NONE is "the whole table".
+    pub touched: Vec<[u32; 2]>,
     pub arena: Arena,
     pub tables: Vec<Table>,
     pub focus: BTreeMap<u32, Focus>,
@@ -385,6 +388,7 @@ pub struct Store {
 impl Store {
     pub const fn new() -> Store {
         Store {
+            touched: Vec::new(),
             arena: Arena {
                 bytes: Vec::new(),
                 live_floor: 0,
@@ -416,6 +420,7 @@ impl Store {
                 let cards = self.tables.iter_mut().find(|x| x.id == table::CARDS);
                 if let Some(cards) = cards {
                     cards.delete((0..ids.nrows as usize).map(|r| ids.u32(r)));
+                    self.touched.extend((0..ids.nrows as usize).map(|r| [table::CARDS as u32, ids.u32(r)]));
                 }
             }
             return;
@@ -428,6 +433,7 @@ impl Store {
                     if let Some(x) = self.tables.iter_mut().find(|x| x.id == tid) {
                         x.delete(core::iter::once(ids.u32(r)));
                     }
+                    self.touched.push([tid as u32, ids.u32(r)]);
                 }
             }
             return;
@@ -443,8 +449,13 @@ impl Store {
                 self.tables.last_mut().unwrap()
             }
         };
-        if !(keyed(id) && tbl.upsert(t, arena)) {
+        if keyed(id) && tbl.upsert(t, arena) {
+            if let Some(keys) = t.col(1) {
+                self.touched.extend((0..t.nrows as usize).map(|r| [id as u32, keys.u32(r)]));
+            }
+        } else {
             tbl.replace(t, arena);
+            self.touched.push([id as u32, NONE]);
         }
     }
 
@@ -475,6 +486,7 @@ impl Store {
     /// which a new session (that resends what it uses) restores from.
     pub fn clear_desk(&mut self) {
         self.tables.retain(|t| t.id == table::LINES);
+        self.touched.push([NONE, NONE]);
     }
 
     /// After a BOOT: drops the focuses of jobs that are gone.
