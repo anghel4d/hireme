@@ -86,13 +86,27 @@ defmodule Hireme.OpsTest do
     %{op_id: op_id, kind: kind, target: target, fields: fields}
   end
 
-  # The client's view: upsert every delta's rows onto the boot, by id.
-  defp apply_delta(view, %{cards: cards, deleted: deleted}) do
-    view = Map.drop(view, deleted)
-    Enum.reduce(cards, view, &Map.put(&2, &1.id, &1))
+  # A tab's view: the raw tables, by id, and the cards it paints; every
+  # delta upserts its rows and drops what it names gone.
+  defp apply_delta(%{tables: tables, cards: cards}, delta) do
+    tables =
+      Enum.reduce(delta.gone, tables, fn {t, ids}, acc ->
+        Map.update!(acc, t, &Map.drop(&1, ids))
+      end)
+
+    tables =
+      Enum.reduce(delta.rows, tables, fn {t, rows}, acc ->
+        Map.update!(acc, t, fn table -> Enum.reduce(rows, table, &Map.put(&2, &1.id, &1)) end)
+      end)
+
+    cards = Enum.reduce(delta.cards, Map.drop(cards, delta.deleted), &Map.put(&2, &1.id, &1))
+    %{tables: tables, cards: cards}
   end
 
+  defp by_id(tables), do: Map.new(tables, fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
+
   defp fresh, do: Desk.list_cards(%Filters{status: :all}) |> Map.new(&{&1.id, &1})
+  defp fresh_view, do: %{tables: by_id(Ops.read_tables()), cards: fresh()}
 
   defp drain(acc) do
     receive do
@@ -102,15 +116,21 @@ defmodule Hireme.OpsTest do
     end
   end
 
+  defp diverged(view, want) do
+    for {t, rows} <- want.tables, {id, row} <- rows, view.tables[t][id] != row, do: {t, id}
+  end
+
   for seed <- 1..6 do
-    test "boot plus every delta equals a fresh board (seed #{seed})", %{account: account} do
+    test "boot plus every delta equals the tables and the board (seed #{seed})",
+         %{account: account} do
       seed = unquote(seed)
       fixture = desk(seed)
-      {:ok, boot_rev, %{cards: cards}} = Ops.attach(account.id)
-      assert Map.new(cards, &{&1.id, &1}) == fresh()
+      {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
+      boot = %{tables: by_id(tables), cards: fresh()}
+      assert boot == fresh_view()
 
       {view, rev, log} =
-        Enum.reduce(1..60, {Map.new(cards, &{&1.id, &1}), boot_rev, []}, fn n, {view, rev, log} ->
+        Enum.reduce(1..60, {boot, boot_rev, []}, fn n, {view, rev, log} ->
           op = random_op(fixture, seed * 1000 + n)
           log = [op | log]
 
@@ -138,13 +158,25 @@ defmodule Hireme.OpsTest do
           {Enum.reduce(deltas, view, fn {_, d}, v -> apply_delta(v, d) end), rev, log}
         end)
 
-      board = fresh()
-      stale = for {id, card} <- board, view[id] != card, do: id
+      want = fresh_view()
 
-      assert view == board,
-             "seed #{seed}: cards #{inspect(stale)} diverged after #{inspect(Enum.reverse(log), limit: :infinity)}"
+      assert view == want,
+             "seed #{seed}: #{inspect(diverged(view, want))} and cards " <>
+               "#{inspect(for {id, c} <- want.cards, view.cards[id] != c, do: id)} diverged " <>
+               "after #{inspect(Enum.reverse(log), limit: :infinity)}"
 
       assert rev > boot_rev
+
+      # A session that stood at the boot resumes from the ring alone.
+      {:ok, ^rev, {:replay, deltas}} = Ops.attach(account.id, boot_rev)
+      assert Enum.map(deltas, &elem(&1, 0)) == Enum.to_list((boot_rev + 1)..rev//1)
+
+      resumed =
+        Enum.reduce(deltas, boot, fn {_, d}, v ->
+          apply_delta(v, Map.merge(d, %{cards: [], deleted: []}))
+        end)
+
+      assert resumed.tables == want.tables
     end
   end
 
@@ -234,7 +266,8 @@ defmodule Hireme.OpsTest do
   # moves the revision; the next delta must still bring a tab level.
   test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
     %{jobs: [first, second | _]} = desk(99)
-    {:ok, boot_rev, %{cards: cards}} = Ops.attach(account.id)
+    {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
+    boot = %{tables: by_id(tables), cards: fresh()}
 
     Repo.update_all(from(j in Desk.Job, where: j.id == ^first.id),
       set: [next_action: "elsewhere"]
@@ -251,10 +284,9 @@ defmodule Hireme.OpsTest do
 
     deltas = drain([])
     assert rev > boot_rev + 1 and List.last(deltas) |> elem(0) == rev
+    assert Enum.reduce(deltas, boot, fn {_, d}, v -> apply_delta(v, d) end) == fresh_view()
 
-    view =
-      Enum.reduce(deltas, Map.new(cards, &{&1.id, &1}), fn {_, d}, v -> apply_delta(v, d) end)
-
-    assert view == fresh()
+    # The revision made elsewhere is not in the ring: a session behind it boots.
+    assert {:ok, ^rev, {:boot, _}} = Ops.attach(account.id, boot_rev)
   end
 end
