@@ -403,7 +403,8 @@ export function emptyBoard(): Raw {
   return h`<p class="empty">Nothing matches this filter.</p>`
 }
 
-export const emptyFocus = (): Raw => h`<div id="focus" class="focus"><p class="empty">The desk is empty.</p></div>`
+// No focus yet (its rows arrive after the board) or no card: the panel stands empty.
+export const emptyFocus = (): Raw => h`<div id="focus" class="focus"></div>`
 
 // ---- lanes: gym, networking, and company heat ----
 
