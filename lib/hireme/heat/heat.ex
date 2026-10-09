@@ -82,15 +82,6 @@ defmodule Hireme.Heat.Verdict do
   One governor decision. `decision` is `:allow` or `:defer`.
   """
 
-  @reasons [
-    :ok,
-    :override,
-    :company_cap,
-    :ats_vendor_cap,
-    :ats_tenant_cap,
-    :ats_batch_cap
-  ]
-
   @enforce_keys [
     :decision,
     :reason,
@@ -135,9 +126,6 @@ defmodule Hireme.Heat.Verdict do
           cooldown_days: non_neg_integer() | nil,
           note: String.t()
         }
-
-  @spec reasons() :: [reason()]
-  def reasons, do: @reasons
 end
 
 defmodule Hireme.Heat.Chart do
@@ -338,8 +326,7 @@ defmodule Hireme.Heat do
     mix(members, Keyword.merge(opts, existing: existing, today: today))
   end
 
-  @spec override?(map() | struct()) :: boolean()
-  def override?(job) do
+  defp override?(job) do
     truthy?(Map.get(job, :heat_override) || Map.get(job, "heat_override")) and
       String.trim(reason_of(job)) != ""
   end
@@ -517,10 +504,6 @@ defmodule Hireme.Heat do
     |> Map.put(:ats_vendor, verdict.ats_vendor)
     |> Map.put(:cooldown_days, verdict.cooldown_days)
   end
-
-  @spec state_name(atom()) :: String.t()
-  def state_name(state) when state in [:cool, :warm, :hot, :blocked, :all],
-    do: Atom.to_string(state)
 
   @spec parse_state(term()) :: {:ok, atom()} | :error
   def parse_state(state), do: Hireme.Closed.parse([:all, :cool, :warm, :hot, :blocked], state)

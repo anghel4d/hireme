@@ -79,9 +79,6 @@ defmodule Hireme.Pipeline do
   @spec keys() :: [stage()]
   def keys, do: @keys
 
-  @spec pips() :: [pip()]
-  def pips, do: @pips
-
   @spec fire_locked?(stage()) :: boolean()
   def fire_locked?(key) when key in @keys, do: key in @fire_locked
 
@@ -184,6 +181,6 @@ defmodule Hireme.Pipeline do
   end
 
   @spec char(Rung.t() | pip()) :: String.t()
-  def char(%Rung{state: state}), do: char(state)
-  def char(pip) when pip in @pips, do: Map.fetch!(@pip_chars, pip)
+  defp char(%Rung{state: state}), do: char(state)
+  defp char(pip) when pip in @pips, do: Map.fetch!(@pip_chars, pip)
 end

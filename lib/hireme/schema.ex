@@ -540,9 +540,6 @@ defmodule Hireme.Desk.Job do
   @spec statuses() :: [status()]
   def statuses, do: @statuses
 
-  @spec parse_status(term()) :: {:ok, status()} | :error
-  def parse_status(value), do: Hireme.Closed.parse(@statuses, value)
-
   def changeset(job, attrs) do
     job
     |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :inserted_at, :updated_at])

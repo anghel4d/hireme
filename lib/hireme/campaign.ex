@@ -36,9 +36,6 @@ defmodule Hireme.Variety do
           required(:fit) => String.t() | nil
         }
 
-  @spec flags() :: [flag()]
-  def flags, do: @flags
-
   @spec summarize([app()], pos_integer()) :: t()
   def summarize(apps, target \\ 55) when is_list(apps) do
     n = length(apps)

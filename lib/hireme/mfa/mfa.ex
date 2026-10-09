@@ -299,10 +299,6 @@ defmodule Hireme.Mfa do
 
   ## Changing the set
 
-  @spec rename(Method.t(), String.t()) :: {:ok, Method.t()} | {:error, Ecto.Changeset.t()}
-  def rename(%Method{} = method, name),
-    do: method |> Method.changeset(%{name: name}) |> Repo.update()
-
   @doc """
   Remove a factor. The session must be fresh. Removing the last factor
   also discards the recovery codes: there is nothing left to recover to.
