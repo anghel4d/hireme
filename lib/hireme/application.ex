@@ -78,7 +78,13 @@ defmodule Hireme.Application do
         Hireme.RateLimit,
         {Registry, keys: :unique, name: Hireme.Letterbox.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Hireme.Letterbox.Supervisor}
-      ] ++ outbox ++ [HiremeWeb.Endpoint]
+      ] ++
+        outbox ++
+        [
+          # The WebTransport gate's Unix socket; nothing starts without config.
+          {HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])},
+          HiremeWeb.Endpoint
+        ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Hireme.Supervisor)
   end

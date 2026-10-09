@@ -1,0 +1,19 @@
+[package]
+name = "hireme-gate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "WebTransport front door for hireme: terminates QUIC and moves stream bytes to and from the BEAM over a Unix socket"
+
+[[bin]]
+name = "hireme-gate"
+path = "src/main.rs"
+
+[dependencies]
+wtransport = { version = "0.7.2", features = ["quinn"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

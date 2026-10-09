@@ -72,6 +72,16 @@ if config_env() == :prod do
 
   config :hireme, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # The WebTransport gate (native/gate) reaches this node through a Unix
+  # socket; the page learns the gate's public URL from GATE_URL. Both are
+  # host configuration, never committed. Without them the desk runs over
+  # the WebSocket fallback alone.
+  if gate_socket = System.get_env("GATE_SOCKET") do
+    config :hireme, HiremeWeb.Gate,
+      socket: gate_socket,
+      url: System.fetch_env!("GATE_URL")
+  end
+
   # The public HTTPS endpoint is served by the reverse proxy, not this socket.
   {:ok, listen_ip} =
     System.get_env("PHX_IP", "127.0.0.1")
