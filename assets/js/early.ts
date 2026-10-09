@@ -44,7 +44,7 @@
   })
   hw.snap = snap
 
-  // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 0, in a 16-byte header.
+  // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables), in a 16-byte header.
   // A snapshot written under another schema is no snapshot.
   const hello = async () => {
     const rec = await snap
@@ -56,6 +56,7 @@
     v.setUint16(6, schema, true)
     v.setBigUint64(24, rev, true)
     v.setUint32(32, hw.clientId, true)
+    v.setUint32(36, 1, true)
     return { rev, f }
   }
 

@@ -175,13 +175,6 @@ function gone(res: Response): void {
   if (res.status === 401) location.assign("/sign-in")
 }
 
-async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: { accept: "application/json" } })
-  gone(res)
-  if (!res.ok) throw new Error(`${url}: ${res.status}`)
-  return (await res.json()) as T
-}
-
 async function send<T>(method: "POST" | "PATCH" | "DELETE", url: string, body: unknown): Promise<Outcome<T>> {
   const res = await fetch(url, {
     method,
@@ -250,31 +243,61 @@ export interface Settings {
 /** After a create, `secret` is the whole key, shown exactly once; after asking to add an address, `sent_to` is it. */
 export type SettingsReply = Settings & { ok: true; created?: Key; secret?: string; sent_to?: string }
 
-export const fetchSettings = () => get<Settings>("/api/account")
+// The account's commands ride the wire session; its data arrives as
+// tables the desk reads (`desk.account()`), and a write's tables come
+// before its reply, so a reply is that document plus what the command
+// returned. What sets the cookie stays HTTP: linking a new way in.
+
+/** What the account commands need from the wire: a command, and the document as the desk holds it. */
+export interface AccountLink {
+  call(method: string, params?: Record<string, unknown>): Promise<{ result: Record<string, unknown> } | { error: { code: number; message: string } }>
+  settings(): Settings | null
+  /** The document once the first tables arrive. */
+  ready(): Promise<Settings>
+}
+
+let link: AccountLink | null = null
+
+export function useAccountLink(l: AccountLink): void {
+  link = l
+}
+
+async function command<T>(method: string, params: Record<string, unknown>, shape: (s: Settings | null, result: Record<string, unknown>) => T): Promise<Outcome<T>> {
+  if (!link) return { ok: false, status: 0, error: "offline" }
+  const r = await link.call(`account/${method}`, params)
+  if ("error" in r) return { ok: false, status: r.error.code, error: r.error.message }
+  return { ok: true, value: shape(link.settings(), r.result) }
+}
+
+const settingsReply = <T,>(s: Settings | null, result: Record<string, unknown>) => ({ ...s, ...result, ok: true }) as T
+const securityReply = <T,>(s: Settings | null, result: Record<string, unknown>) => ({ ...s?.security, ...result, ok: true }) as T
+const bare = <T,>(_s: Settings | null, result: Record<string, unknown>) => result as T
+
+export const fetchSettings = (): Promise<Settings> => (link ? link.ready() : Promise.reject(new Error("offline")))
 export const createKey = (name: string, expires_in_days: number | null) =>
-  post<SettingsReply>("/api/account/keys", { name, expires_in_days })
-export const renameKey = (id: number, name: string) => send<SettingsReply>("PATCH", `/api/account/keys/${id}`, { name })
-export const revokeKey = (id: number) => send<SettingsReply>("DELETE", `/api/account/keys/${id}`, {})
-export const revokeSession = (id: number) => send<SettingsReply & { signed_out?: boolean }>("DELETE", `/api/account/sessions/${id}`, {})
-export const revokeOtherSessions = () => post<SettingsReply>("/api/account/sessions/revoke_others", {})
+  command<SettingsReply>("create_key", { name, expires_in_days }, settingsReply)
+export const renameKey = (id: number, name: string) => command<SettingsReply>("rename_key", { id, name }, settingsReply)
+export const revokeKey = (id: number) => command<SettingsReply>("revoke_key", { id }, settingsReply)
+export const revokeSession = (id: number) => command<SettingsReply & { signed_out?: boolean }>("revoke_session", { id }, settingsReply)
+export const revokeOtherSessions = () => command<SettingsReply>("revoke_other_sessions", {}, settingsReply)
 
 // Ways in. An address is added by a mailed link opened in this browser; GitHub and X answer with the URL to go to.
+// Both keep their trip in the cookie, so they stay HTTP.
 export const linkEmail = (email: string) => post<SettingsReply>("/api/account/identities", { provider: "email", email })
 export const linkProvider = (provider: string) => post<{ ok: true; url: string }>("/api/account/identities", { provider })
-export const unlinkIdentity = (id: number) => send<SettingsReply>("DELETE", `/api/account/identities/${id}`, {})
+export const unlinkIdentity = (id: number) => command<SettingsReply>("unlink", { id }, settingsReply)
 
 // Second factors. A reply may carry `recovery_codes`, shown exactly once.
 export type SecurityReply = Security & { ok: true; recovery_codes?: string[] }
 export interface TotpStart { uri: string; secret: string; svg: string }
-export const beginTotp = () => post<TotpStart>("/api/account/mfa/totp", {})
-export const confirmTotp = (code: string, name: string) => post<SecurityReply>("/api/account/mfa/totp/confirm", { code, name })
-export const beginWebauthn = () => post<Record<string, unknown>>("/api/account/mfa/webauthn", {})
+export const beginTotp = () => command<TotpStart>("begin_totp", {}, bare)
+export const confirmTotp = (code: string, name: string) => command<SecurityReply>("confirm_totp", { code, name }, securityReply)
+export const beginWebauthn = () => command<Record<string, unknown>>("begin_webauthn", {}, bare)
 export const confirmWebauthn = (credential: Record<string, unknown>, name: string) =>
-  post<SecurityReply>("/api/account/mfa/webauthn/confirm", { ...credential, name })
-export const removeMethod = (id: number) => send<SecurityReply>("DELETE", `/api/account/mfa/${id}`, {})
-export const newRecoveryCodes = () => post<SecurityReply>("/api/account/mfa/recovery", {})
-export const stepUpTotp = (code: string) => post<{ ok: true }>("/api/account/step-up/totp", { code })
-export const stepUpRecovery = (code: string) => post<{ ok: true }>("/api/account/step-up/recovery", { code })
-export const stepUpWebauthn = () => post<Record<string, unknown>>("/api/account/step-up/webauthn", {})
-export const stepUpWebauthnConfirm = (assertion: Record<string, unknown>) =>
-  post<{ ok: true }>("/api/account/step-up/webauthn/confirm", assertion)
+  command<SecurityReply>("confirm_webauthn", { ...credential, name }, securityReply)
+export const removeMethod = (id: number) => command<SecurityReply>("remove_factor", { id }, securityReply)
+export const newRecoveryCodes = () => command<SecurityReply>("recovery_codes", {}, securityReply)
+export const stepUpTotp = (code: string) => command<{ ok: true }>("step_up_totp", { code }, bare)
+export const stepUpRecovery = (code: string) => command<{ ok: true }>("step_up_recovery", { code }, bare)
+export const stepUpWebauthn = () => command<Record<string, unknown>>("step_up_webauthn", {}, bare)
+export const stepUpWebauthnConfirm = (assertion: Record<string, unknown>) => command<{ ok: true }>("step_up_webauthn_confirm", assertion, bare)

@@ -15,7 +15,7 @@
 
 export const KIND = {
   HELLO: 1, BOOT: 3, PATCH: 4, FOCUS: 5, LINES: 6, OP: 8, ACK: 9, NACK: 10,
-  TICK: 11, HINT: 12, PING: 13, PONG: 14, TICKET: 15, BYE: 16,
+  TICK: 11, HINT: 12, PING: 13, PONG: 14, TICKET: 15, BYE: 16, RPC: 33,
 } as const
 
 export const FLAG = { DEFLATE: 0x01, END: 0x02 } as const
@@ -54,8 +54,11 @@ export function frame(kind: number, hash: number, bodyLen: number, fill: (v: Dat
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 
-/** HELLO: u16 cred_len | cred | pad8 | u64 snapshot_rev | u32 client_id | u32 reserved. */
-export function hello(hash: number, snapshotRev: bigint, clientId: number, cred = ""): Bytes {
+/** HELLO's option word: bit 0 asks for raw tables, from which the client derives every view. */
+export const RAW = 0x01
+
+/** HELLO: u16 cred_len | cred | pad8 | u64 snapshot_rev | u32 client_id | u32 options. */
+export function hello(hash: number, snapshotRev: bigint, clientId: number, options = RAW, cred = ""): Bytes {
   const c = ENCODER.encode(cred)
   const at = pad8(2 + c.byteLength)
   return frame(KIND.HELLO, hash, at + 16, (v, o) => {
@@ -63,6 +66,7 @@ export function hello(hash: number, snapshotRev: bigint, clientId: number, cred 
     new Uint8Array(v.buffer, o + 2, c.byteLength).set(c)
     v.setBigUint64(o + at, snapshotRev, true)
     v.setUint32(o + at + 8, clientId, true)
+    v.setUint32(o + at + 12, options, true)
   })
 }
 
@@ -73,6 +77,18 @@ export function hint(hash: number, ids: readonly number[]): Bytes {
     ids.forEach((id, i) => v.setUint32(o + 4 + 4 * i, id, true))
   })
 }
+
+/** RPC: u32 json_len | u32 0 | JSON, a request `{id, method, params}` or its reply. */
+export function rpc(hash: number, message: unknown): Bytes {
+  const json = ENCODER.encode(JSON.stringify(message))
+  return frame(KIND.RPC, hash, 8 + json.byteLength, (v, o) => {
+    v.setUint32(o, json.byteLength, true)
+    new Uint8Array(v.buffer, o + 8, json.byteLength).set(json)
+  })
+}
+
+/** A command's answer: its result, or the status and message an HTTP route would have sent. */
+export type Reply = { result: Record<string, unknown> } | { error: { code: number; message: string } }
 
 /** PING: u64 t (ms since page start, as micros). */
 export function ping(hash: number, t: bigint): Bytes {
@@ -419,6 +435,8 @@ export class Wire {
   /** Server clock minus ours at the last PONG, in ms. */
   skew = 0
   readonly stats = { connects: 0, resent: 0, frames: 0, bytes: 0 }
+  private calls = new Map<number, (r: Reply) => void>()
+  private callId = 0
 
   private readonly options: WebTransportOptions
 
@@ -446,6 +464,27 @@ export class Wire {
     return true
   }
 
+  /**
+   * One command on the control stream, answered on it. A write's tables
+   * arrive before its reply. Without a connection, or if it drops first,
+   * the answer is status 0: nothing is resent, since a command may not be
+   * safe twice.
+   */
+  call(method: string, params: Record<string, unknown> = {}): Promise<Reply> {
+    if (!this.conn) return Promise.resolve({ error: { code: 0, message: "offline" } })
+    const id = ++this.callId
+    return new Promise((resolve) => {
+      this.calls.set(id, resolve)
+      this.conn?.control(rpc(this.host.hash, { id, method, params }))
+    })
+  }
+
+  private dropCalls(): void {
+    const calls = this.calls
+    this.calls = new Map()
+    for (const resolve of calls.values()) resolve({ error: { code: 0, message: "offline" } })
+  }
+
   datagram(f: Bytes): void {
     this.conn?.datagram(f)
   }
@@ -467,6 +506,20 @@ export class Wire {
           const now = performance.now() - this.start
           this.rtt = now - sent
           this.skew = Number(v.getBigUint64(HEADER + 8, true)) - (performance.timeOrigin + now - this.rtt / 2)
+          return
+        }
+        case KIND.RPC: {
+          const len = v.getUint32(HEADER, true)
+          try {
+            const m = JSON.parse(DECODER.decode(f.subarray(HEADER + 8, HEADER + 8 + len))) as { id?: number } & Reply
+            const resolve = m.id === undefined ? undefined : this.calls.get(m.id)
+            if (resolve && m.id !== undefined) {
+              this.calls.delete(m.id)
+              resolve("error" in m && m.error ? { error: m.error } : { result: ("result" in m && m.result) || {} })
+            }
+          } catch {
+            // not a reply this page is waiting on
+          }
           return
         }
         case KIND.TICKET:
@@ -511,6 +564,7 @@ export class Wire {
       }
       this.ping()
       await conn.closed
+      this.dropCalls()
       this.conn = null
       this.host.connection("offline")
       await sleep(this.backoff)
@@ -605,70 +659,5 @@ function within<T>(p: Promise<T>, ms: number): Promise<T> {
   })
 }
 
-// ---- table sections ----
-//
-// BOOT, PATCH, FOCUS and LINES bodies are a run of table sections:
-//   u16 table_id | u16 ncols | u32 nrows | col*ncols
-//   col := u16 col_id | u8 type | u8 0 | u32 byte_len | data | pad to 8
-// Types: 1 u32, 2 str ((n+1) u32 offsets, then UTF-8), 3 u64, 4 f64.
-// A section is read in place; strings decode when asked.
-
+/** The wire's none: an absent u32, day or time. */
 export const NONE = 0xffffffff
-const U32 = 1
-const STR = 2
-const F64 = 4
-
-export class Table {
-  readonly cols = new Map<number, { type: number; at: number; len: number }>()
-  constructor(readonly id: number, readonly n: number, private readonly bytes: Bytes) {}
-
-  has(col: number): boolean { return this.cols.has(col) }
-
-  u32(col: number): Uint32Array {
-    const c = this.cols.get(col)
-    if (!c || c.type !== U32) return new Uint32Array(this.n).fill(NONE)
-    return new Uint32Array(this.bytes.buffer, this.bytes.byteOffset + c.at, this.n)
-  }
-
-  f64(col: number): Float64Array {
-    const c = this.cols.get(col)
-    if (!c || c.type !== F64) return new Float64Array(this.n).fill(Number.NaN)
-    return new Float64Array(this.bytes.buffer, this.bytes.byteOffset + c.at, this.n)
-  }
-
-  /** Every string of a column, decoded. */
-  strs(col: number): string[] {
-    const c = this.cols.get(col)
-    if (!c || c.type !== STR) return new Array<string>(this.n).fill("")
-    const offs = new Uint32Array(this.bytes.buffer, this.bytes.byteOffset + c.at, this.n + 1)
-    const base = c.at + 4 * (this.n + 1)
-    const out = new Array<string>(this.n)
-    for (let i = 0; i < this.n; i++) out[i] = DECODER.decode(this.bytes.subarray(base + (offs[i] ?? 0), base + (offs[i + 1] ?? 0)))
-    return out
-  }
-}
-
-/** The sections of a table frame, by table id. They read the frame in place. */
-export function tables(frame: Bytes): Map<number, Table> {
-  const v = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const out = new Map<number, Table>()
-  const end = v.getUint32(0, true)
-  let at = HEADER
-  while (at + 8 <= end) {
-    const id = v.getUint16(at, true)
-    const ncols = v.getUint16(at + 2, true)
-    const n = v.getUint32(at + 4, true)
-    if (id === 0) break
-    at += 8
-    const t = new Table(id, n, frame)
-    for (let i = 0; i < ncols; i++) {
-      const col = v.getUint16(at, true)
-      const type = v.getUint8(at + 2)
-      const len = v.getUint32(at + 4, true)
-      t.cols.set(col, { type, at: at + 8, len })
-      at = pad8(at + 8 + len)
-    }
-    out.set(id, t)
-  }
-  return out
-}
