@@ -62,29 +62,38 @@ export class Keyed {
 
   constructor(private readonly parent: Element) {}
 
-  /** Make the children exactly `items` (key, single-root HTML). Order is not kept: the items place themselves. */
+  /**
+   * Make the children exactly `items` (key, single-root HTML). Order is not
+   * kept: the items place themselves. Everything that changed is parsed in
+   * one pass. (Reusing a departed card's element for an arriving one was
+   * measured: patching every node of it costs more than inserting fresh.)
+   */
   set(items: readonly [number, Raw][]): void {
     const live = new Set<number>()
+    const changed: [number, string][] = []
     for (const [key, html] of items) {
       live.add(key)
-      const have = this.els.get(key)
-      if (have && have.html === html.html) continue
-      this.tpl.innerHTML = html.html
-      const fresh = this.tpl.content.firstElementChild
-      if (!fresh) continue
-      if (have) {
-        patchNode(have.el, fresh)
-        have.html = html.html
-      } else {
-        this.parent.append(fresh)
-        this.els.set(key, { el: fresh, html: html.html })
-      }
+      if (this.els.get(key)?.html !== html.html) changed.push([key, html.html])
     }
+    const gone: Element[] = []
     for (const [key, { el }] of this.els) {
       if (live.has(key)) continue
-      el.remove()
+      gone.push(el)
       this.els.delete(key)
     }
+    if (changed.length > 0) {
+      this.tpl.innerHTML = changed.map(([, html]) => html).join("")
+      const fresh = Array.from(this.tpl.content.children)
+      changed.forEach(([key, html], i) => {
+        const want = fresh[i]
+        if (!want) return
+        const have = this.els.get(key)?.el
+        if (have) patchNode(have, want)
+        else this.parent.append(want)
+        this.els.set(key, { el: have ?? want, html })
+      })
+    }
+    for (const el of gone) el.remove()
   }
 }
 
