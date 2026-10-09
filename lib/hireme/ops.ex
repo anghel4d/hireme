@@ -405,7 +405,8 @@ defmodule Hireme.Ops do
     Repo.put_account(account_id)
     Process.send_after(self(), :sweep, 0)
 
-    {:ok, %{account: account_id, rev: nil, raw: nil, ring: :queue.new(), ring_bytes: 0}}
+    {:ok,
+     %{account: account_id, rev: nil, raw: nil, ledger: nil, ring: :queue.new(), ring_bytes: 0}}
   end
 
   @impl true
@@ -464,23 +465,28 @@ defmodule Hireme.Ops do
       state = warm(state, false)
       op_id = signed(op.op_id)
 
-      case Repo.one(from e in Entry, where: e.op_id == ^op_id) do
-        %Entry{refusal: nil, rev: rev} ->
-          {{:ok, rev}, state}
+      # The day's answers are kept here too, so a new op costs no lookup.
+      case Map.fetch(state.ledger, op_id) do
+        {:ok, {reply, _at}} ->
+          {reply, state}
 
-        %Entry{refusal: refusal} ->
-          {{:error, refusal(refusal)}, state}
-
-        nil ->
+        :error ->
           ledger = {op_id, Atom.to_string(op.kind)}
 
-          with {:ok, command} <- parse(op),
-               {{:ok, _value, rev}, state} <- commit(state, command, holder, ledger) do
-            {{:ok, rev}, state}
-          else
-            {{:error, reason}, state} -> {{:error, record_refusal(ledger, reason, state)}, state}
-            {:error, reason} -> {{:error, record_refusal(ledger, reason, state)}, state}
-          end
+          {reply, state} =
+            with {:ok, command} <- parse(op),
+                 {{:ok, _value, rev}, state} <- commit(state, command, holder, ledger) do
+              {{:ok, rev}, state}
+            else
+              {{:error, reason}, state} ->
+                {{:error, record_refusal(ledger, reason, state)}, state}
+
+              {:error, reason} ->
+                {{:error, record_refusal(ledger, reason, state)}, state}
+            end
+
+          now = System.system_time(:second)
+          {reply, %{state | ledger: Map.put(state.ledger, op_id, {reply, now})}}
       end
     end)
   end
@@ -497,7 +503,12 @@ defmodule Hireme.Ops do
     cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
     Repo.delete_all(from e in Entry, where: e.inserted_at < ^cutoff)
     Process.send_after(self(), :sweep, @sweep_ms)
-    {:noreply, state}
+    since = DateTime.to_unix(cutoff)
+
+    ledger =
+      state.ledger && Map.filter(state.ledger, fn {_op_id, {_reply, at}} -> at >= since end)
+
+    {:noreply, %{state | ledger: ledger}}
   end
 
   def handle_info({:owner_down, _ref, :process, _pid, _reason}, state),
@@ -643,7 +654,15 @@ defmodule Hireme.Ops do
 
   defp warm(%{raw: nil} = state, _look?) do
     raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
-    %{state | rev: db_rev(state), raw: raw, ring: :queue.new(), ring_bytes: 0}
+
+    %{
+      state
+      | rev: db_rev(state),
+        raw: raw,
+        ledger: read_ledger(),
+        ring: :queue.new(),
+        ring_bytes: 0
+    }
   end
 
   defp warm(state, look?) do
@@ -812,11 +831,14 @@ defmodule Hireme.Ops do
           {:leases, :id, [value.id]}
         ]
 
-      {kind, id, _} when kind in [:stage, :score, :heat_override] ->
+      {kind, id, _} when kind in [:stage, :heat_override] ->
         job_groups(id)
 
+      {:score, id, _} ->
+        [{:job_apps, :id, [id]}]
+
       {kind, id, _, _} when kind in [:next, :note] ->
-        job_groups(id)
+        [{:job_apps, :id, [id]}]
 
       {:glance, id} ->
         job_groups(id)
@@ -1002,6 +1024,20 @@ defmodule Hireme.Ops do
   end
 
   # -- the ledger -------------------------------------------------------------
+
+  defp read_ledger do
+    cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
+
+    Repo.all(
+      from e in Entry,
+        where: e.inserted_at >= ^cutoff,
+        select: {e.op_id, e.rev, e.refusal, e.inserted_at}
+    )
+    |> Map.new(fn {op_id, rev, refusal, at} ->
+      reply = if refusal, do: {:error, refusal(refusal)}, else: {:ok, rev}
+      {op_id, {reply, DateTime.to_unix(at)}}
+    end)
+  end
 
   defp insert_entry!({op_id, kind}, rev, refusal) do
     %Entry{}
