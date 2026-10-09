@@ -153,6 +153,32 @@ impl Desk {
         self.store.arena.get(r)
     }
 
+    /// Row `row` of a u32 column, through the pending view (0 if absent).
+    pub fn u32_at(&self, t: u16, c: u16, row: usize) -> u32 {
+        self.vu32(t, c, row)
+    }
+
+    /// Row `row` of an f64 column (NaN if absent).
+    pub fn f64_at(&self, t: u16, c: u16, row: usize) -> f64 {
+        match self.vcol(t, c) {
+            Some(Column {
+                data: Data::W64(v), ..
+            }) => v.get(row).map_or(f64::NAN, |b| f64::from_bits(*b)),
+            _ => f64::NAN,
+        }
+    }
+
+    /// Row `row` of a str column ("" if absent).
+    pub fn str_at(&self, t: u16, c: u16, row: usize) -> &str {
+        let r = self.strs(t, c).get(row).copied().unwrap_or([0, 0]);
+        self.store.arena.text(r)
+    }
+
+    /// The last `select`: card rows in board order.
+    pub fn selection(&self) -> &[u32] {
+        &self.sel
+    }
+
     pub fn rows(&self, t: u16) -> usize {
         self.vtable(t).map_or(0, |x| x.n)
     }
@@ -807,9 +833,14 @@ impl Desk {
         self.search = search;
     }
 
-    /// Rows that pass every filter, in board order, into `sel`. Filter
-    /// values: -1 is "all", batch -2 is "no batch";
-    /// batch and profile are db ids, stage/status/heat are table ixs.
+    /// Card rows that pass every filter, in board order, into `sel`
+    /// (returns the count; `selection()` the rows). Each filter is -1 for
+    /// "all". `min` is a score floor and `lo..=hi` a score range (a LifeEv
+    /// band's min and max); `stage`, `status` and `heat` are indexes into
+    /// the stages, statuses and heat_states lists; `batch` and `profile` are
+    /// row ids, batch -2 meaning "no batch"; `q` is a search, trimmed and
+    /// lowercased here, matched against company, role, location, next
+    /// action, profile name, CV label and the JobApp/cv/id forms.
     #[allow(clippy::too_many_arguments)]
     pub fn select(
         &mut self,

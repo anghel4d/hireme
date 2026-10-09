@@ -6,7 +6,7 @@ publish = false
 description = "hireme's desk kernel: resident columnar tables, predictions, board order and select, as WebAssembly"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["rlib"]
 path = "src/lib.rs"
 
 [dependencies]
