@@ -60,11 +60,11 @@ export class Keyed {
   private readonly els = new Map<number, { el: Element; html: string }>()
   private readonly tpl = document.createElement("template")
 
-  constructor(private readonly parent: Element) {}
+  /** `ordered`: the children follow the items' order (a list); otherwise they place themselves (cards). */
+  constructor(private readonly parent: Element, private readonly ordered = false) {}
 
   /**
-   * Make the children exactly `items` (key, single-root HTML). Order is not
-   * kept: the items place themselves. Everything that changed is parsed in
+   * Make the children exactly `items` (key, single-root HTML). Everything that changed is parsed in
    * one pass. (Reusing a departed card's element for an arriving one was
    * measured: patching every node of it costs more than inserting fresh.)
    */
@@ -94,8 +94,19 @@ export class Keyed {
       })
     }
     for (const el of gone) el.remove()
+    if (!this.ordered) return
+    let next = this.parent.firstElementChild
+    for (const [key] of items) {
+      const el = this.els.get(key)?.el
+      if (!el) continue
+      if (el !== next) this.parent.insertBefore(el, next)
+      next = el.nextElementSibling
+    }
   }
 }
+
+// The HTML each element with an id was last patched to.
+const same = new WeakMap<ChildNode, string>()
 
 function patchChildren(target: Node, from: Node): void {
   const want = Array.from(from.childNodes)
@@ -112,13 +123,17 @@ function patchChildren(target: Node, from: Node): void {
       match = cursor
     }
 
+    // An innermost element with an id, last patched to this very HTML, is
+    // left alone, subtree and all; new nodes move over from the template.
+    const html = w instanceof Element && w.id && !w.querySelector("[id]") ? w.outerHTML : null
     if (match) {
       if (match !== cursor) target.insertBefore(match, cursor)
-      patchNode(match, w)
+      if (html === null || same.get(match) !== html) patchNode(match, w)
+      if (html !== null) same.set(match, html)
       cursor = match.nextSibling
     } else {
-      const fresh = w.cloneNode(true)
-      target.insertBefore(fresh, cursor)
+      target.insertBefore(w, cursor)
+      if (html !== null) same.set(w, html)
     }
   }
   while (cursor) {

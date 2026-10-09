@@ -400,9 +400,17 @@ export class Shell {
     const lanes = d.lanes()
     const focus = m.appId === null ? null : d.focus(m.appId)
     const mark = m.appId === null ? null : d.mark(m.appId)
-    this.set("#topbar", views.topbar(m.filters, t, m.count, d.status))
+    this.set("#topbar", views.topbar(t, d.status))
+    this.set("#count", h`${m.count} showing`)
+    // The controls hold the filters' values; a control in use keeps what is in it.
+    const form = this.root.querySelector<HTMLFormElement>("#filters")
+    for (const [name, v] of form ? grid.fields(m.filters) : []) {
+      const el = form?.elements.namedItem(name)
+      if ((el instanceof HTMLInputElement || el instanceof HTMLSelectElement) && el !== document.activeElement && el.value !== v) el.value = v
+    }
     this.set("#notice-slot", views.notices(m.notices))
-    this.set("#scoreboard-slot", views.scoreboard(d.scoreboard(), views.lanePills(lanes)))
+    this.set("#scoreboard-slot", views.scoreboard(d.scoreboard()))
+    this.set("#lane-pills", views.lanePills(lanes))
     this.set("#heat-slot", views.heatChart(lanes, m.filters))
 
     const lens = this.root.querySelector<HTMLElement>("#lens")
@@ -419,6 +427,7 @@ export class Shell {
     } else {
       morph(lens, this.lensView(focus, lanes))
       if (m.lens === "battleplan" && focus) this.drawBattleplanSlots(lens, focus, mark)
+      if ((m.lens === "gym" || m.lens === "net") && lanes) this.list(lens.querySelector("#lane-recent"), views.laneRecent(lanes, m.lens))
       if (!workspace.dataset["covered"]) workspace.dataset["covered"] = "1"
     }
     // Assigning the title rewrites the <title> node even when it is the same.
@@ -464,17 +473,18 @@ export class Shell {
     slot("#bp-narrative", parts.narrative)
     slot("#bp-events", parts.events)
     slot("#bp-paper", views.battleplanPaper(focus, m.editing, m.alterError))
-    const rail = lens.querySelector("#bp-rail")
-    if (rail) {
-      let keyed = this.rails.get(rail)
-      if (!keyed) this.rails.set(rail, (keyed = new Keyed(rail)))
-      keyed.set(parts.rail)
-    }
+    this.list(lens.querySelector("#bp-rail"), parts.rail)
     lens.querySelector("#battleplan")?.classList.toggle("is-pending", mark === "pending")
   }
 
-  // One keyed rail per battleplan element; a reopened battleplan is a new element.
-  private readonly rails = new WeakMap<Element, Keyed>()
+  // An ordered keyed list per slot element; a reopened lens has new elements.
+  private readonly lists = new WeakMap<Element, Keyed>()
+  private list(el: Element | null, items: [number, Raw][]): void {
+    if (!el) return
+    let keyed = this.lists.get(el)
+    if (!keyed) this.lists.set(el, (keyed = new Keyed(el, true)))
+    keyed.set(items)
+  }
 
   // The root CV shown: the filtered profile's, else the selected application's, else the first.
   private rootProfile(): number | null {
