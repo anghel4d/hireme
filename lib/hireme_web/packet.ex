@@ -10,7 +10,6 @@ defmodule HiremeWeb.Packet do
   frame's first byte, so a reader views it in place.
   """
 
-  alias Hireme.Desk.Card
   alias Hireme.Desk.Job
   alias Hireme.LifeEv
   alias Hireme.Pipeline
@@ -18,8 +17,6 @@ defmodule HiremeWeb.Packet do
   @epoch ~D[1970-01-01]
   @none 0xFFFFFFFF
   @heat_states [:cool, :warm, :hot, :blocked]
-
-  defp index_of(list), do: list |> Enum.with_index() |> Map.new()
 
   # ---- The wire: frames of columnar tables, as priv/wire/schema.txt says ----
   #
@@ -85,6 +82,11 @@ defmodule HiremeWeb.Packet do
   @doc "The 16-bit schema hash every frame header carries."
   @spec schema_hash() :: non_neg_integer()
   def schema_hash, do: @schema_hash
+
+  @doc "A table's columns as `{name, wire id}`, in schema order."
+  @spec columns(atom()) :: [{atom(), non_neg_integer()}]
+  def columns(name),
+    do: @tables |> Map.fetch!(name) |> elem(1) |> Enum.map(fn {c, cid, _} -> {c, cid} end)
 
   @doc "A table's wire id."
   @spec table_id(atom()) :: non_neg_integer()
@@ -193,66 +195,6 @@ defmodule HiremeWeb.Packet do
 
   # ---- What the desk sends ----
 
-  @doc "Card rows, keyed for the `cards` table."
-  @spec card_rows([Card.t()], [map()], [map()]) :: [map()]
-  def card_rows(cards, batches, profiles) do
-    batch_ids = Map.new(batches, &{&1.code, &1.id})
-    profile_ids = Map.new(profiles, &{&1.slug, &1.id})
-    stages = index_of(Pipeline.keys())
-    statuses = index_of(Job.statuses())
-    freshness = index_of(~w(unknown open thin closed blocked)a)
-    gates = index_of(~w(unset pursue maybe skip)a)
-    heat_states = index_of(@heat_states)
-
-    Enum.map(cards, fn c ->
-      %{
-        id: c.id,
-        score: c.score_100,
-        heat: c.heat,
-        stage: Map.fetch!(stages, c.stage),
-        status: Map.fetch!(statuses, c.status),
-        freshness: Map.get(freshness, c.freshness, 0),
-        gate: Map.get(gates, c.gate, 0),
-        batch: Map.get(batch_ids, c.batch_code, 0),
-        profile: Map.get(profile_ids, c.profile_slug, 0),
-        hits: c.keyword_hits,
-        total: c.keyword_total,
-        hidden: c.mask_hidden,
-        altered: c.mask_altered,
-        emphasized: c.mask_emphasized,
-        stage_on: c.stage_on,
-        next_due: c.next_due,
-        heat_state: Map.get(heat_states, c.heat_state, 0),
-        load_pct: if(c.cap <= 0, do: 100, else: round(c.load / c.cap * 100)),
-        cooldown: c.cooldown_days,
-        leased: Map.get(c, :leased, false),
-        company: c.company,
-        role: c.role,
-        location: c.location,
-        next_action: c.next_action,
-        cv_label: c.cv_label,
-        fit: c.fit,
-        pips: c.pips
-      }
-    end)
-  end
-
-  @doc "The lookup tables the card columns index into, plus batches and profiles."
-  @spec lookups([map()], [map()]) :: iodata()
-  def lookups(batches, profiles) do
-    [
-      static_lookups(),
-      batch_table(batches),
-      table(
-        :profiles,
-        Enum.map(
-          profiles,
-          &%{id: &1.id, slug: &1.slug, name: &1.name, headline: &1.headline, summary: &1.summary}
-        )
-      )
-    ]
-  end
-
   @doc "The closed lists the card columns and views name: stages, statuses, freshness, gates, heat states, bands."
   @spec static_lookups() :: iodata()
   def static_lookups do
@@ -287,239 +229,6 @@ defmodule HiremeWeb.Packet do
         end)
       )
     ]
-  end
-
-  @spec batch_table([map()]) :: iodata()
-  def batch_table(batches) do
-    table(
-      :batches,
-      Enum.map(batches, fn b ->
-        %{
-          id: b.id,
-          code: b.code,
-          ordinal: b.ordinal,
-          fire: b.fire == :open_fire,
-          status: b.status
-        }
-      end)
-    )
-  end
-
-  @doc "The scoreboard (`HiremeWeb.JSON.scoreboard/1` shape) as its four tables."
-  @spec score_tables(map()) :: iodata()
-  def score_tables(s) do
-    chart = s.chart
-
-    [
-      table(:score, [
-        Map.merge(
-          Map.take(s, ~w(leftover_unique leftover_noted_on batches_today batches_target apps_today
-          apps_target submitted_today cumulative target_total target_on)a),
-          %{
-            fire: s.fire == :open_fire,
-            chart_n: chart.n,
-            chart_mean: chart.mean,
-            chart_max: Map.get(chart, :max),
-            chart_min: Map.get(chart, :min)
-          }
-        )
-      ]),
-      table(:varieties, s.varieties),
-      table(
-        :chart_bands,
-        Enum.map(chart.bands, &Map.update(&1, :key, nil, fn k -> LifeEv.name(k) end))
-      ),
-      table(:chart_bins, chart.bins)
-    ]
-  end
-
-  @doc "The lanes (`HiremeWeb.JSON.lanes/0` shape) as their tables."
-  @spec lane_tables(map()) :: iodata()
-  def lane_tables(%{gym: gym, net: net, heat: heat}) do
-    options =
-      for {group, list} <- [
-            platform: gym.platforms,
-            topic: gym.topics_all,
-            difficulty: gym.difficulties,
-            outcome: gym.outcomes,
-            net_kind: net.kinds,
-            net_channel: net.channels
-          ],
-          o <- list,
-          do: Map.put(o, :group, group)
-
-    [
-      table(:gym, [Map.take(gym, ~w(today target streak solved_today solved_week score)a)]),
-      table(:gym_topics, gym.topics),
-      table(:gym_reps, gym.recent),
-      table(:options, options),
-      table(:net, [Map.take(net, ~w(lane shipped_week drafts observer_runs)a)]),
-      table(:net_entries, net.recent),
-      table(
-        :heat_rows,
-        Enum.map(heat.companies, &Map.put(&1, :group, 0)) ++
-          Enum.map(heat.vendors, &Map.put(&1, :group, 1))
-      )
-    ]
-  end
-
-  @doc """
-  Interning of CV lines for one session. A line's `ix` comes from its
-  content (`:erlang.phash2/2`, stable across nodes and releases), so a
-  browser that restores yesterday's snapshot still finds the same line at
-  the same ix; a collision within a session probes on. Answers the ix,
-  the interning, and whether this session has not sent the line yet.
-  """
-  @spec intern(map(), map()) :: {non_neg_integer(), map(), boolean()}
-  def intern(intern, line) do
-    case intern do
-      %{^line => ix} -> {ix, intern, false}
-      _ -> probe(intern, line, 0)
-    end
-  end
-
-  defp probe(intern, line, attempt) do
-    ix = :erlang.phash2({attempt, line}, 0xFFFFFFFF)
-
-    if Map.has_key?(intern, {:ix, ix}),
-      do: probe(intern, line, attempt + 1),
-      else: {ix, intern |> Map.put(line, ix) |> Map.put({:ix, ix}, line), true}
-  end
-
-  defp line_row(line, ix), do: Map.put(line, :ix, ix) |> Map.put(:item, line.id)
-
-  defp doc_lines(doc, intern) do
-    slots =
-      Enum.map(doc.facts, &{0, 0, &1}) ++
-        Enum.flat_map(Enum.with_index(doc.sections), fn {s, i} ->
-          Enum.map(s.lines, &{1, i, &1})
-        end) ++
-        Enum.map(doc.hidden, &{2, 0, &1})
-
-    Enum.map_reduce(slots, {intern, []}, fn {slot, section, line}, {intern, fresh} ->
-      {ix, intern, new?} = intern(intern, line)
-      fresh = if new?, do: [line_row(line, ix) | fresh], else: fresh
-      {%{slot: slot, section: section, line: ix}, {intern, fresh}}
-    end)
-  end
-
-  defp cv_fields(doc) do
-    %{
-      cv_label: doc.label,
-      cv_person: doc.person,
-      cv_headline: doc.headline,
-      cv_summary: doc.summary,
-      cv_summary_canonical: doc.summary_canonical,
-      cv_summary_reason: doc.summary_reason,
-      cv_accent: doc.accent,
-      cv_density: doc.density
-    }
-  end
-
-  @doc """
-  One job's focus (`HiremeWeb.JSON.focus/1` shape) at `rev`: a LINES frame
-  for lines this session has not been sent (unless `resend` names them all)
-  and the FOCUS frame. Returns the frames and the session's interning.
-  """
-  @spec focus_frames(map(), non_neg_integer(), map(), boolean()) :: {iodata(), map()}
-  def focus_frames(f, rev, intern, resend \\ false) do
-    {refs, {intern, fresh}} = doc_lines(f.cv, intern)
-
-    {mask_refs, {intern, fresh}} =
-      Enum.map_reduce(f.masks, {intern, fresh}, fn line, {intern, fresh} ->
-        {ix, intern, new?} = intern(intern, line)
-
-        {%{slot: 3, section: 0, line: ix},
-         {intern, if(new?, do: [line_row(line, ix) | fresh], else: fresh)}}
-      end)
-
-    fresh =
-      if resend,
-        do:
-          Enum.map(
-            f.cv.facts ++ Enum.flat_map(f.cv.sections, & &1.lines) ++ f.cv.hidden ++ f.masks,
-            &line_row(&1, Map.fetch!(intern, &1))
-          )
-          |> Enum.uniq_by(& &1.ix),
-        else: Enum.reverse(fresh)
-
-    theme = f.theme
-    heat = f.heat
-
-    row =
-      Map.merge(cv_fields(f.cv), %{
-        job: f.job.id,
-        listing: f.job.listing,
-        listing_url: f.job.listing_url,
-        variant_id: f.variant.id,
-        variant_label: f.variant.label,
-        theme_lead: theme["lead"],
-        theme_lead_reason: theme["lead_reason"],
-        theme_accent: theme["accent"],
-        theme_density: theme["density"],
-        theme_targets: theme["targets"],
-        heat_decision: heat[:decision],
-        heat_reason: heat[:reason],
-        heat_company: heat[:company],
-        heat_company_load: heat[:company_load],
-        heat_company_cap: heat[:company_cap],
-        heat_company_increment: heat[:company_increment],
-        heat_size: heat[:size],
-        heat_ats_vendor: heat[:ats_vendor],
-        heat_ats_tenant: heat[:ats_tenant],
-        heat_vendor_load: heat[:vendor_load],
-        heat_vendor_cap: heat[:vendor_cap],
-        heat_tenant_load: heat[:tenant_load],
-        heat_tenant_cap: heat[:tenant_cap],
-        heat_cooldown_days: heat[:cooldown_days],
-        heat_note: heat[:note],
-        heat_override: heat[:override],
-        heat_override_reason: heat[:override_reason]
-      })
-
-    cover =
-      for {root, c} <- [{0, f.coverage}, {1, f.root_coverage}],
-          {hit, words} <- [{1, c.hits}, {0, c.misses}],
-          w <- words,
-          do: %{root: root, hit: hit, word: w}
-
-    focus =
-      packed(:focus, rev, [
-        table(:focus, [row]),
-        table(:focus_rungs, f.rail),
-        table(:focus_events, f.events),
-        table(:focus_cover, cover),
-        table(:focus_sections, Enum.map(f.cv.sections, &Map.take(&1, [:kind, :label]))),
-        table(:focus_lines, refs ++ mask_refs),
-        table(:focus_kv, f.kv)
-      ])
-
-    lines = if fresh == [], do: [], else: packed(:lines, rev, table(:lines, fresh))
-    {[lines, focus], intern}
-  end
-
-  # A focus is mostly its listing and one-row columns: deflated it is a
-  # third of the bytes, for about 50 µs, so anything over 1 KiB travels so.
-  defp packed(kind, rev, body),
-    do: frame(kind, rev, body, deflate: IO.iodata_length(body) > 1024)
-
-  @doc """
-  One profile's root CV (`HiremeWeb.JSON.root/1` shape) as rows of the
-  `roots`, `root_sections`, `root_lines` and `lines` tables.
-  """
-  @spec root_rows(non_neg_integer(), map(), map()) :: {map(), map()}
-  def root_rows(profile_id, r, intern) do
-    {refs, {intern, fresh}} = doc_lines(r.cv, intern)
-
-    rows = %{
-      roots: [Map.merge(cv_fields(r.cv), %{profile: profile_id, variant_label: r.cv.label})],
-      root_sections:
-        Enum.map(r.cv.sections, &%{profile: profile_id, kind: &1.kind, label: &1.label}),
-      root_lines: Enum.map(refs, &Map.put(&1, :profile, profile_id)),
-      lines: Enum.reverse(fresh)
-    }
-
-    {rows, intern}
   end
 
   # ---- Raw tables: the account's rows as the database holds them ----

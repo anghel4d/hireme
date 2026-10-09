@@ -11,12 +11,6 @@ defmodule HiremeWeb.SessionTest do
   alias HiremeWeb.Packet
   alias HiremeWeb.Session
 
-  # Rolled-back rows reuse ids across tests; the node-wide cache must not.
-  setup do
-    :ets.delete_all_objects(HiremeWeb.Session.Cache)
-    :ok
-  end
-
   defmodule Carrier do
     @moduledoc false
     def send({__MODULE__, pid}, id, io), do: Kernel.send(pid, {:out, id, IO.iodata_to_binary(io)})
@@ -32,7 +26,11 @@ defmodule HiremeWeb.SessionTest do
 
   defp hello(snapshot \\ 0) do
     IO.iodata_to_binary(
-      Packet.frame(:hello, 0, <<0::little-16, 0::48, snapshot::little-64, 7::little-32, 0::32>>)
+      Packet.frame(
+        :hello,
+        0,
+        <<0::little-16, 0::48, snapshot::little-64, 7::little-32, 1::little-32>>
+      )
     )
   end
 
@@ -73,45 +71,6 @@ defmodule HiremeWeb.SessionTest do
     {_token, session} = Hireme.Accounts.start_session(account)
     {:ok, s} = Session.init({Carrier, self()}, %{account_id: account.id, session_id: session.id})
     s
-  end
-
-  test "hello boots the desk, then a write answers PATCH before its ACK", %{account: account} do
-    p = profile()
-    item(p)
-    job = job(p, %{company: "Acme"})
-    s = open(account)
-
-    {:ok, s} = Session.event({:stream, 0}, s)
-    {:ok, s} = Session.event({:data, 0, hello()}, s)
-    assert_received :ready
-    assert [{:boot, flags, rev, _}] = frames(0)
-    assert Bitwise.band(flags, 0x03) == 0x03
-    assert [{:ticket, 0, ^rev, _}] = frames(0)
-    assert_receive {:uni, 3, -1}
-
-    stage = Packet.op_kind(1)
-    assert stage == :stage
-    {:ok, s} = Session.event({:data, 0, op(41, 1, job.id, ["gated"])}, s)
-    s = drain(s)
-
-    out = frames(0)
-    kinds = Enum.map(out, &elem(&1, 0))
-    assert [:patch | _] = kinds
-    [{:patch, 0, patch_rev, _} | _] = out
-    assert patch_rev > rev
-
-    acks = if :ack in kinds, do: out, else: frames(0)
-    assert Enum.any?(acks, &match?({:ack, 0, ^patch_rev, <<41::little-64>>}, &1))
-    assert s.rev == patch_rev
-
-    # The scoreboard follows from its own reader, as a PATCH of its tables.
-    assert_receive {Session, :chrome, :score, _, _} = chrome, 1_000
-    {:ok, _s} = Session.info(chrome, s)
-
-    assert [{:patch, 0, _, body}] =
-             all_out() |> Enum.filter(&match?({:patch, _, _, _}, &1)) |> Enum.take(-1)
-
-    assert <<11::little-16, _::binary>> = body
   end
 
   test "a refused op answers NACK with its code and keeps nothing", %{account: account} do
@@ -159,7 +118,7 @@ defmodule HiremeWeb.SessionTest do
     refute_receive {:ops_delta, _, _}, 100
   end
 
-  test "a snapshot at the current rev resumes with an empty PATCH; garbage says bye", %{
+  test "a snapshot at the current rev resumes with one PATCH; garbage says bye", %{
     account: account
   } do
     job = job(profile())
@@ -175,7 +134,7 @@ defmodule HiremeWeb.SessionTest do
     _ = all_out()
     s2 = open(account)
     {:ok, _} = Session.event({:data, 0, hello(rev)}, s2)
-    assert [{:patch, 0x02, ^rev, <<>>}, {:ticket, 0, ^rev, _}] = all_out()
+    assert [{:patch, 0x02, ^rev, _clock_and_account}, {:ticket, 0, ^rev, _}] = all_out()
 
     assert {:stop, :normal, _} = Session.event({:data, 0, <<12::little-32, 0::96>>}, s)
     assert [{:bye, 0, _, _}] = all_out()
@@ -199,20 +158,6 @@ defmodule HiremeWeb.SessionTest do
     assert {account_id, session_id} == {account.id, session.id}
     assert :error = Session.redeem(t)
     assert :error = Session.redeem("garbage")
-  end
-
-  test "the focus cache serves until a delta marks the job dirty", %{account: account} do
-    p = profile()
-    job = job(p, %{company: "Cached"})
-    cache = HiremeWeb.Session.Cache
-
-    first = cache.focus(account.id, job.id, 5)
-    assert first.job.company == "Cached"
-    Hireme.Repo.update_all(Hireme.Desk.Job, set: [company: "Moved"])
-    assert cache.focus(account.id, job.id, 6).job.company == "Cached"
-
-    cache.dirty(account.id, [job.id], 7)
-    assert cache.focus(account.id, job.id, 7).job.company == "Moved"
   end
 
   test "the websocket carrier admits a live cookie session", %{account: account} do
@@ -390,5 +335,18 @@ defmodule HiremeWeb.SessionTest do
     _a = drain(a)
     assert [{:patch, 0, _, pbody}] = all_out()
     assert Packet.table_id(:job_apps) in table_ids(pbody)
+  end
+
+  test "a browser that does not ask for raw tables is told its bundle is stale",
+       %{account: account} do
+    s = open(account)
+
+    old =
+      IO.iodata_to_binary(
+        Packet.frame(:hello, 0, <<0::little-16, 0::48, 0::64, 7::little-32, 0::32>>)
+      )
+
+    assert {:stop, :normal, _} = Session.event({:data, 0, old}, s)
+    assert [{:bye, 0, _, <<6::little-16, "schema">>}] = all_out()
   end
 end
