@@ -42,17 +42,12 @@ defmodule Hireme.LifeEv do
   @type score :: 0..100
   @type band :: :frontier | :labs | :big_tech | :systems | :craft | :mid | :thin | :kill
 
-  @type input ::
-          String.t()
-          | %{
-              optional(:company) => String.t(),
-              optional(:role) => String.t(),
-              optional(:fit) => String.t(),
-              optional(:location) => String.t(),
-              optional(:comp) => String.t() | integer(),
-              optional(:score_100) => integer(),
-              optional(:score) => integer()
-            }
+  @typedoc """
+  A company name or raw fields with atom or string keys. Text scores are
+  parsed, integers are clamped, and missing or malformed fields use defaults.
+  Unrelated fields are ignored.
+  """
+  @type input :: String.t() | map()
 
   @bands [
     %{key: :frontier, min: 100, max: 100, label: "Frontier"},
@@ -120,7 +115,11 @@ defmodule Hireme.LifeEv do
     end
   end
 
-  @spec chart([score() | %{optional(:score_100) => score()}]) :: Chart.t()
+  @doc """
+  Count raw scores or rows with an atom or string `score_100` key.
+  Integers are clamped to 0..100; unrecognized rows contribute a zero.
+  """
+  @spec chart([term()]) :: Chart.t()
   def chart(rows) when is_list(rows) do
     # The input can be large; every subsequent pass is bounded by 101 scores.
     frequencies = Enum.frequencies_by(rows, &chart_score/1)
