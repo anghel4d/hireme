@@ -31,6 +31,30 @@ The original testbed's test mail adapter omitted provider latency. Security noti
 - The outbox was empty immediately after migration. No production security notices or synthetic credentials were created for this smoke check, so it does not establish live mail-delivery latency or authenticated account-operation timings. Whole-request journal durations must not be represented as isolated provider latency.
 
 
+## Realtime rework — 2026-10-09 (unreleased)
+
+The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssembly kernel (`native/kernel`) and draws every interaction from it; a write is predicted in the same frame and settled by the server. Everything travels as columnar frames (`priv/wire/schema.txt`) over one session per tab: WebTransport through the gate sidecar (`native/gate`), or a WebSocket at `/wire` where UDP is blocked. `Hireme.Ops` serializes every write per account (op ledger, revisions, post-commit deltas of only the changed rows), and agents hold many letterbox leases as streams of one session (`native/mcp`).
+
+**All numbers in this section are local**: a scratch copy of the canonical 1,000-job fixture, loopback, Chromium 154, the same 5950X/WSL2 host. They are not production Internet latency and were not taken with the corrected harness above; the release has not been deployed.
+
+| What | Before (HTTP) | After (wire) | Source |
+|---|---|---|---|
+| hjkl to full focus painted | p50 60.6 / p99 75.5 ms at 47 ms emulated RTT; 1 fetch per move | p50 4.1 / p99 5.3 ms; same frame; 0 requests | shell lane, input timeStamp → paint |
+| Stage click drawn | p50 59.5 / p99 84.1 ms at 47 ms RTT | p50 3.1 ms; same frame | shell lane |
+| Write ACK after prediction | (the write was the wait) | 8.8–14.7 ms over WT, 13–15 ms over WS, dev server | link lane |
+| Ops.run, write without heat | — | p50 0.7–0.9 ms | ops lane |
+| Ops.run, stage move flipping heat | — | p50 5.5 ms (~210 changed rows) | ops lane |
+| Cold load to 1,000 rows | 3–4 sequential requests | ~400 ms (WS) / ~470 ms (WT, includes browser start) | link lane |
+| Reload | same as cold | snapshot painted at ~120 ms, live at ~130–150 ms; resume = 3 frames, 184 B | link lane |
+| Board bytes | 249 KB raw / 36 KB gzip (HDP1) | 178 KB raw / 24 KB deflated BOOT | wire encoder |
+| Whole-desk focus stream | 29 KB JSON per focus on demand | 0.9 MB deflated for all 1,000, 0.62 s of server reads cold; cached across sessions | lead |
+| Kernel | `desk.wat` select | BOOT ingest 251 µs, select 26 µs, op push 2 µs, one-row PATCH + select 41 µs (node); 83 KB / 33 KB gzipped | kernel lane |
+| Gate hop | — | stream round trip p50 0.32 ms (QUIC alone 0.21 ms) | gate lane |
+| Agents: 3 leases | 3 sockets, 3 key authentications | WT 2–3 ms vs WS 9 ms; RPC p50 0.82 ms WT / 0.66 ms WS | letterbox lane |
+| Sign-in link request | waited on the mail provider | answers before the provider; supervised send with retries, link never stored | ops lane |
+
+Correctness evidence: a seeded property test (boot ⊕ deltas = fresh `list_cards`, consecutive revisions, no delta on refusal, fails if heat kin is disabled); kernel predictions checked against an independent model over 300 seeds; every op kind refused for foreign and missing targets without stalling the session; golden frames shared by the Elixir, Rust and TypeScript readers; `mix test` fails if `kernel.wasm` was built against another schema.
+
 ## How to read the measurements
 
 - All latency columns are **milliseconds**. `beforems` and `afterms` are medians. The repeated current `p50` is deliberate: it matches the requested report columns.
