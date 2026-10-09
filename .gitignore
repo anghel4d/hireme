@@ -54,6 +54,21 @@
 !/priv/static/images/*.svg
 !/priv/static/wasm/
 !/priv/static/wasm/*.wasm
+!/priv/wire/
+!/priv/wire/schema.txt
+
+# Rust crates: each is standalone with its own lock; build output stays out.
+!/native/
+!/native/*/
+!/native/*/Cargo.toml
+!/native/*/Cargo.lock
+!/native/*/build.rs
+!/native/*/*.sh
+!/native/*/src/
+!/native/*/src/**/
+!/native/*/src/**/*.rs
+!/native/*/tests/
+!/native/*/tests/*.rs
 
 !/alchemy/
 !/alchemy/*.md

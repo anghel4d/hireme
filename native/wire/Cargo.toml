@@ -1,0 +1,12 @@
+[package]
+name = "wire"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "hireme's frame codec: the columnar wire format shared by the kernel, the gate and hireme-mcp"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

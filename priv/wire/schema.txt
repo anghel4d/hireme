@@ -1,0 +1,342 @@
+# The hireme wire schema. One source for Elixir (HiremeWeb.Packet, @external_resource),
+# Rust (native/wire build.rs) and, through the kernel, TypeScript. schema_hash = FNV-1a-32 over
+# this file's bytes, xor-folded to 16 bits (hi ^ lo); every frame header carries it.
+#
+# Frame: u32 len (whole frame incl. the 16-byte header, multiple of 8) | u8 kind | u8 flags |
+# u16 schema_hash | u64 rev | body. Flags: 0x01 DEFLATE (body = u32 raw_len | u32 deflate_len |
+# raw-deflate bytes | pad; inflated it is the plain body), 0x02 END (last frame of a burst),
+# 0x80 AGENT (HELLO only: the credential is an API key).
+# Table body: a sequence of  u16 table_id | u16 ncols | u32 nrows | col*ncols ;
+# col := u16 col_id | u8 type | u8 0 | u32 byte_len | data | zero pad to 8 (8-aligned from frame start).
+# Wire types: 1 u32 (day = days since 1970-01-01, time = unix seconds; none = 0xFFFFFFFF),
+# 2 str ((nrows+1) u32 offsets from 0, then UTF-8; none = empty), 3 u64, 4 f64 (none = NaN).
+# PATCH writes only the columns present; cards upsert by id; cards_gone deletes; the small tables
+# (score, lanes, kv, roots...) are replaced whole when present. FOCUS carries one job (header rev =
+# its focus rev) as the focus* tables; LINES upserts lines by ix.
+
+frame HELLO 1
+frame BOOT 3
+frame PATCH 4
+frame FOCUS 5
+frame LINES 6
+frame OP 8
+frame ACK 9
+frame NACK 10
+frame TICK 11
+frame HINT 12
+frame PING 13
+frame PONG 14
+frame TICKET 15
+frame BYE 16
+frame LEASE 32
+frame RPC 33
+
+table cards 1
+col cards id 1 u32
+col cards score 2 u32
+col cards heat 3 u32
+col cards stage 4 u32
+col cards status 5 u32
+col cards freshness 6 u32
+col cards gate 7 u32
+col cards batch 8 u32
+col cards profile 9 u32
+col cards hits 10 u32
+col cards total 11 u32
+col cards hidden 12 u32
+col cards altered 13 u32
+col cards emphasized 14 u32
+col cards stage_on 15 day
+col cards next_due 16 day
+col cards heat_state 17 u32
+col cards load_pct 18 u32
+col cards cooldown 19 u32
+col cards leased 20 u32
+col cards company 21 str
+col cards role 22 str
+col cards location 23 str
+col cards next_action 24 str
+col cards cv_label 25 str
+col cards fit 26 str
+col cards pips 27 str
+
+table cards_gone 2
+col cards_gone id 1 u32
+
+table batches 3
+col batches id 1 u32
+col batches code 2 str
+col batches ordinal 3 u32
+col batches fire 4 u32
+col batches status 5 str
+
+table profiles 4
+col profiles id 1 u32
+col profiles slug 2 str
+col profiles name 3 str
+col profiles headline 4 str
+col profiles summary 5 str
+
+table stages 5
+col stages ix 1 u32
+col stages key 2 str
+col stages label 3 str
+col stages hint 4 str
+col stages rank 5 u32
+col stages fire_locked 6 u32
+col stages hot 7 u32
+col stages queue 8 u32
+
+table statuses 6
+col statuses ix 1 u32
+col statuses key 2 str
+
+table freshness 7
+col freshness ix 1 u32
+col freshness key 2 str
+
+table gates 8
+col gates ix 1 u32
+col gates key 2 str
+
+table heat_states 9
+col heat_states ix 1 u32
+col heat_states key 2 str
+
+table bands 10
+col bands ix 1 u32
+col bands key 2 str
+col bands label 3 str
+col bands min 4 u32
+col bands max 5 u32
+
+table score 11
+col score fire 1 u32
+col score leftover_unique 2 u32
+col score leftover_noted_on 3 day
+col score batches_today 4 u32
+col score batches_target 5 u32
+col score apps_today 6 u32
+col score apps_target 7 u32
+col score submitted_today 8 u32
+col score cumulative 9 u32
+col score target_total 10 u32
+col score target_on 11 day
+col score chart_n 12 u32
+col score chart_mean 13 f64
+col score chart_max 14 f64
+col score chart_min 15 f64
+
+table varieties 12
+col varieties code 1 str
+col varieties fire 2 str
+col varieties status 3 str
+col varieties label 4 str
+
+table chart_bands 13
+col chart_bands key 1 str
+col chart_bands label 2 str
+col chart_bands min 3 u32
+col chart_bands max 4 u32
+col chart_bands count 5 u32
+col chart_bands share 6 f64
+
+table chart_bins 14
+col chart_bins lo 1 u32
+col chart_bins hi 2 u32
+col chart_bins count 3 u32
+
+table gym 15
+col gym today 1 day
+col gym target 2 u32
+col gym streak 3 u32
+col gym solved_today 4 u32
+col gym solved_week 5 u32
+col gym score 6 u32
+
+table gym_topics 16
+col gym_topics key 1 str
+col gym_topics label 2 str
+col gym_topics count 3 u32
+
+table gym_reps 17
+col gym_reps id 1 u32
+col gym_reps done_on 2 day
+col gym_reps outcome 3 str
+col gym_reps minutes 4 u32
+col gym_reps note 5 str
+col gym_reps platform 6 str
+col gym_reps slug 7 str
+col gym_reps title 8 str
+col gym_reps topic 9 str
+col gym_reps difficulty 10 str
+col gym_reps url 11 str
+
+table options 18
+col options group 1 str
+col options key 2 str
+col options label 3 str
+
+table net 19
+col net lane 1 str
+col net shipped_week 2 u32
+col net drafts 3 u32
+col net observer_runs 4 u32
+
+table net_entries 20
+col net_entries id 1 u32
+col net_entries kind 2 str
+col net_entries channel 3 str
+col net_entries title 4 str
+col net_entries url 5 str
+col net_entries body 6 str
+col net_entries shipped_on 7 day
+
+table heat_rows 21
+col heat_rows group 1 u32
+col heat_rows key 2 str
+col heat_rows label 3 str
+col heat_rows load 4 f64
+col heat_rows cap 5 f64
+col heat_rows ratio 6 f64
+col heat_rows n 7 u32
+col heat_rows cooldown_days 8 u32
+col heat_rows size 9 str
+
+table narratives 22
+col narratives id 1 u32
+col narratives profile 2 u32
+col narratives body 3 str
+col narratives version 4 u32
+
+table kv 23
+col kv scope 1 u32
+col kv key 2 str
+col kv value 3 str
+
+table lines 24
+col lines ix 1 u32
+col lines item 2 u32
+col lines kind 3 str
+col lines title 4 str
+col lines body 5 str
+col lines org 6 str
+col lines span 7 str
+col lines shown 8 u32
+col lines mode 9 str
+col lines reason 10 str
+col lines canonical_title 11 str
+col lines canonical_body 12 str
+
+table roots 25
+col roots profile 1 u32
+col roots variant_label 2 str
+col roots cv_label 3 str
+col roots cv_person 4 str
+col roots cv_headline 5 str
+col roots cv_summary 6 str
+col roots cv_summary_canonical 7 str
+col roots cv_summary_reason 8 str
+col roots cv_accent 9 str
+col roots cv_density 10 str
+
+table root_sections 26
+col root_sections profile 1 u32
+col root_sections kind 2 str
+col root_sections label 3 str
+
+table root_lines 27
+col root_lines profile 1 u32
+col root_lines slot 2 u32
+col root_lines section 3 u32
+col root_lines line 4 u32
+
+table focus 30
+col focus job 1 u32
+col focus listing 2 str
+col focus listing_url 3 str
+col focus variant_id 4 u32
+col focus variant_label 5 str
+col focus theme_lead 6 str
+col focus theme_lead_reason 7 str
+col focus theme_accent 8 str
+col focus theme_density 9 str
+col focus theme_targets 10 str
+col focus cv_label 11 str
+col focus cv_person 12 str
+col focus cv_headline 13 str
+col focus cv_summary 14 str
+col focus cv_summary_canonical 15 str
+col focus cv_summary_reason 16 str
+col focus cv_accent 17 str
+col focus cv_density 18 str
+col focus heat_decision 19 str
+col focus heat_reason 20 str
+col focus heat_company 21 str
+col focus heat_company_load 22 f64
+col focus heat_company_cap 23 f64
+col focus heat_company_increment 24 f64
+col focus heat_size 25 str
+col focus heat_ats_vendor 26 str
+col focus heat_ats_tenant 27 str
+col focus heat_vendor_load 28 f64
+col focus heat_vendor_cap 29 f64
+col focus heat_tenant_load 30 f64
+col focus heat_tenant_cap 31 f64
+col focus heat_cooldown_days 32 u32
+col focus heat_note 33 str
+col focus heat_override 34 u32
+col focus heat_override_reason 35 str
+
+table focus_rungs 31
+col focus_rungs key 1 str
+col focus_rungs state 2 str
+col focus_rungs note 3 str
+
+table focus_events 32
+col focus_events id 1 u32
+col focus_events kind 2 str
+col focus_events body 3 str
+col focus_events at 4 time
+
+table focus_cover 33
+col focus_cover root 1 u32
+col focus_cover hit 2 u32
+col focus_cover word 3 str
+
+table focus_sections 34
+col focus_sections kind 1 str
+col focus_sections label 2 str
+
+table focus_lines 35
+col focus_lines slot 1 u32
+col focus_lines section 2 u32
+col focus_lines line 3 u32
+
+table focus_kv 36
+col focus_kv key 1 str
+col focus_kv value 2 str
+
+op stage 1 job stage
+op next 2 job next_action next_due
+op note 3 job stage note
+op score 4 job score
+op overlay 5 job item_id mode body reason
+op heat_override 6 job reason
+op open_fire 7 none code
+op narrative 8 narrative body
+op gym_log 9 none pairs
+op gym_target 10 none target
+op net_log 11 none pairs
+op net_lane 12 none url
+
+refusal fire_hold 1
+refusal heat 2
+refusal leased 3
+refusal cooldown 4
+refusal not_additive 5
+refusal argument 6
+refusal not_found 7
+refusal batch 8
+refusal invalid 9
+refusal internal 10
