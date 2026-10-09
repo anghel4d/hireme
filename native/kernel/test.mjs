@@ -273,7 +273,8 @@ async function property(seed) {
       // The server settles the oldest op: raw rows then ACK, or a NACK.
       const o = M.pending.shift()
       const st = M.state(false)
-      const code = Model.apply(st, o, true)
+      const serverWrites = []
+      const code = Model.apply(st, o, true, serverWrites)
       if (code || r.f() < 0.15) {
         log.push(`nack ${o.id}`)
         K.ingest(nack(o.id, code || S.refusal.cooldown, "no"))
@@ -288,7 +289,10 @@ async function property(seed) {
         })
         M.jobs = st.jobs, M.batches = st.batches
         const tables = []
-        if (j) tables.push(rowsTable("job_apps", [j], JOB_COLS))
+        // The server sends a changed row as id plus the columns that moved
+        // (a stage move: current_stage, pips, stage_on), or sometimes whole.
+        const moved = ["id", ...new Set(serverWrites.filter(([t]) => t === "job_apps").flatMap(([, , vals]) => Object.keys(vals)))]
+        if (j) tables.push(rowsTable("job_apps", [j], r.f() < 0.6 && moved.length > 1 ? moved : JOB_COLS))
         if (o.kind === "open_fire") tables.push(rowsTable("batches", [...st.batches.values()]))
         log.push(`ack ${o.id} differ=${differ}`)
         K.ingest(concat(frame("PATCH", ++rev, tables), ack(o.id)))
