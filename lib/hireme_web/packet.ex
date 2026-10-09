@@ -175,6 +175,33 @@ defmodule HiremeWeb.Packet do
     {2, [offsets, strings]}
   end
 
+  # A column of few distinct strings: each distinct value once, in order of
+  # first appearance, then one u32 per row naming it. The dictionary is
+  # built in the same pass that writes the ids.
+  #   u32 nuniq | u32 offsets[nuniq + 1] | bytes | pad to 4 | u32 ids[nrows]
+  defp encode(:sym, rows, get) do
+    {ids, dict, n} =
+      Enum.reduce(rows, {[], %{}, 0}, fn r, {ids, dict, n} ->
+        s = text(get.(r))
+
+        case dict do
+          %{^s => i} -> {[<<i::little-32>> | ids], dict, n}
+          _ -> {[<<n::little-32>> | ids], Map.put(dict, s, n), n + 1}
+        end
+      end)
+
+    syms = dict |> Enum.sort_by(&elem(&1, 1)) |> Enum.map(&elem(&1, 0))
+
+    {offsets, size} =
+      Enum.reduce(syms, {<<0::little-32>>, 0}, fn s, {offsets, at} ->
+        at = at + byte_size(s)
+        {<<offsets::binary, at::little-32>>, at}
+      end)
+
+    pad = :binary.copy(<<0>>, rem(4 - rem(size, 4), 4))
+    {5, [<<n::little-32>>, offsets, syms, pad, Enum.reverse(ids)]}
+  end
+
   defp u32(nil), do: @none
   defp u32(true), do: 1
   defp u32(false), do: 0
@@ -296,7 +323,7 @@ defmodule HiremeWeb.Packet do
 
   defp raw_value(row, col, type) do
     case Map.get(row, col) do
-      %{} = map when type == :str and not is_struct(map) -> Jason.encode!(map)
+      %{} = map when type in [:str, :sym] and not is_struct(map) -> Jason.encode!(map)
       value -> value
     end
   end
