@@ -17,7 +17,7 @@
 use wire::schema::{col, op, refusal, table};
 use wire::{NONE, Op, U32};
 
-use crate::store::{Column, Data, Store};
+use crate::store::{self, Column, Data, Store};
 
 /// Counter slots readable through the ABI.
 pub const PREDICTED: usize = 0;
@@ -115,8 +115,15 @@ impl Desk {
         self.store.table(t).map_or(0, |x| x.n)
     }
 
-    fn row_of(&self, t: u16, key: u32) -> Option<usize> {
-        self.store.table(t).and_then(|x| x.row_of(key))
+    /// Row by key: the index of a keyed table, else a scan of the first
+    /// column (narratives and other small whole-replaced tables).
+    pub fn row_of(&self, t: u16, key: u32) -> Option<usize> {
+        let x = self.store.table(t)?;
+        if store::keyed(t) {
+            return x.row_of(key);
+        }
+        let c = x.col(1)?;
+        (0..x.n).find(|&r| c.u32(r) == key)
     }
 
     /// Row of the small, ix-keyed lookup table `t` whose `key` column
@@ -244,8 +251,10 @@ impl Desk {
                 }
             }
             op::NEXT => {
-                let due = parse_day(o.field(1)).ok_or(refusal::ARGUMENT)?;
-                let action = o.field(0).as_bytes().to_vec();
+                // As the server: the action is trimmed, a due date that is
+                // not an ISO date means none.
+                let due = parse_day(o.field(1)).unwrap_or(NONE);
+                let action = o.field(0).trim().as_bytes().to_vec();
                 self.set(
                     table::CARDS,
                     job,
@@ -278,6 +287,14 @@ impl Desk {
                 );
             }
             op::OVERLAY => self.predict_overlay(o, job, rec)?,
+            op::NARRATIVE => {
+                let n = table::NARRATIVES;
+                if self.row_of(n, o.target).is_none() {
+                    return Err(refusal::NOT_FOUND);
+                }
+                let body = o.field(0).as_bytes().to_vec();
+                self.set(n, o.target, col::narratives::BODY, Val::S(body), rec);
+            }
             // Notes, heat overrides, narratives and the lanes change
             // nothing on the board; their effects settle from the server.
             _ => {}
@@ -312,6 +329,9 @@ impl Desk {
     ) -> Result<(), u8> {
         let item: u32 = o.field(0).parse().map_err(|_| refusal::ARGUMENT)?;
         let to = mode_col(o.field(1)).ok_or(refusal::ARGUMENT)?;
+        if item == 0 || (o.field(1) == "altered" && o.field(2).trim().is_empty()) {
+            return Err(refusal::ARGUMENT);
+        }
         let Some(from) = self.item_mode(job, item) else {
             return Ok(());
         };

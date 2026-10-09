@@ -475,8 +475,8 @@ pub struct Op<'a> {
 impl<'a> Op<'a> {
     pub const FIXED: usize = 16;
 
-    /// Reads an op whose kind the schema names, carrying exactly the
-    /// schema's number of fields, each whole and UTF-8.
+    /// Reads an op whose kind the schema names, carrying the schema's
+    /// number of fields (an even number for `pairs`), each whole and UTF-8.
     pub fn parse(body: &'a [u8]) -> Result<Op<'a>, Error> {
         if body.len() < Self::FIXED {
             return Err(Error::Body);
@@ -488,8 +488,14 @@ impl<'a> Op<'a> {
             target: u32_at(body, 12),
             fields: &body[Self::FIXED..],
         };
-        let want = schema::op_def(op.kind).ok_or(Error::Body)?.fields.len();
-        if op.nfields as usize != want {
+        let def = schema::op_def(op.kind).ok_or(Error::Body)?;
+        // A schema field named `pairs` stands for any even number of
+        // key, value strings (gym and net log entries).
+        let fits = match def.fields {
+            ["pairs"] => op.nfields % 2 == 0,
+            f => op.nfields as usize == f.len(),
+        };
+        if !fits {
             return Err(Error::Body);
         }
         for f in op.fields() {
@@ -747,6 +753,17 @@ mod tests {
         let mut padded = w.buf.clone();
         padded.extend_from_slice(&[0; 7]);
         assert_eq!(Op::parse(&padded).unwrap().fields().count(), 2);
+        let mut w = Writer::new();
+        w.op(
+            1,
+            schema::op::GYM_LOG,
+            0,
+            &["minutes", "30", "topic", "graphs"],
+        );
+        assert_eq!(Op::parse(&w.buf).unwrap().field(3), "graphs");
+        let mut w = Writer::new();
+        w.op(1, schema::op::GYM_LOG, 0, &["minutes"]);
+        assert!(Op::parse(&w.buf).is_err());
     }
 
     #[test]

@@ -125,6 +125,9 @@ async function kernel() {
       const ids = new Uint32Array(mem(), k.col_ptr(S.table.cards, S.col.cards.id.id), k.rows(1))
       return Array.from(rows, (r) => ids[r])
     },
+    str(t, c, row) {
+      return td.decode(new Uint8Array(mem(), k.str_ptr(t, c, row), k.str_len(t, c, row)))
+    },
     card(id) {
       const t = S.table.cards
       const row = k.row_of(t, id)
@@ -226,6 +229,12 @@ class Model {
     this.pending = []
     this.today = today
     this.focus = new Map()
+    this.narratives = new Map([1, 2].map((id) => [id, { id, profile: 7, body: `story ${id}`, version: 1 }]))
+  }
+
+  narrativesTable(st = this) {
+    const ns = [...st.narratives.values()]
+    return ["narratives", { id: ns.map((n) => n.id), profile: ns.map((n) => n.profile), body: ns.map((n) => n.body), version: ns.map((n) => n.version) }]
   }
 
   // Applies an op to (cards, batches); returns a refusal or 0.
@@ -246,7 +255,8 @@ class Model {
         writes.push(["cards", o.target, { stage: to, stage_on: st.today }])
       }
     } else if (o.kind === "next") {
-      card.next_action = o.fields[0], card.next_due = dayOf(o.fields[1])
+      const due = /^\d{4}-\d\d-\d\d$/.test(o.fields[1]) ? dayOf(o.fields[1]) : NONE
+      card.next_action = o.fields[0].trim(), card.next_due = due
       writes.push(["cards", o.target, { next_action: card.next_action, next_due: card.next_due }])
     } else if (o.kind === "score") {
       card.score = +o.fields[0]
@@ -256,10 +266,16 @@ class Model {
       if (!b) return S.refusal.batch
       b.fire = 1, b.status = "open_fire"
       writes.push(["batches", b.id, { fire: 1, status: "open_fire" }])
+    } else if (o.kind === "narrative") {
+      const n = st.narratives.get(o.target)
+      if (!n) return S.refusal.not_found
+      n.body = o.fields[0]
+      writes.push(["narratives", n.id, { body: n.body }])
     } else if (o.kind === "overlay") {
       const modes = st.focus.get(o.target)
       const item = +o.fields[0]
       const to = MODES.indexOf(o.fields[1])
+      if (item === 0 || (o.fields[1] === "altered" && !o.fields[2].trim())) return S.refusal.argument
       if (!modes || !modes.has(item)) return 0
       const from = modes.get(item)
       modes.set(item, to)
@@ -279,6 +295,7 @@ class Model {
       batches: new Map([...this.batches].map(([k, v]) => [k, { ...v }])),
       today: this.today,
       focus: new Map([...this.focus].map(([k, v]) => [k, new Map(v)])),
+      narratives: new Map([...this.narratives].map(([k, v]) => [k, { ...v }])),
     }
     if (withPending) for (const o of this.pending) Model.apply(st, o, false)
     return st
@@ -348,7 +365,7 @@ async function property(seed) {
   const M = new Model(cards, profiles, batches, today)
   for (const c of cards) if (r.f() < 0.6) M.focus.set(c.id, new Map(ITEMS.map((i) => [i, r.int(4)])))
   K.ingest(new Uint8Array([
-    ...frame("BOOT", 1, [...lookups(profiles, batches), cardsTable(cards)]),
+    ...frame("BOOT", 1, [...lookups(profiles, batches), M.narrativesTable(), cardsTable(cards)]),
     ...linesFrame(1),
     ...[...M.focus].flatMap(([job, modes]) => [...focusFrame(1, job, modes)]),
   ]))
@@ -362,6 +379,9 @@ async function property(seed) {
       assert.deepEqual(K.card(c.id), c, `seed ${seed} step ${step}: card ${c.id} view\n${log.join("\n")}`)
     }
     assert.equal(K.k.rows(1), view.cards.size)
+    for (const n of view.narratives.values()) {
+      assert.equal(K.str(S.table.narratives, S.col.narratives.body.id, K.k.row_of(S.table.narratives, n.id)), n.body, `seed ${seed} step ${step}: narrative ${n.id}`)
+    }
     const f = {
       ...all,
       ...(r.f() < 0.3 ? { min: r.int(101) } : {}),
@@ -381,15 +401,16 @@ async function property(seed) {
     const ids = [...M.base.keys()]
     if (roll < 0.35 && ids.length) {
       // The client predicts an op.
-      const kind = r.pick(["stage", "stage", "next", "score", "open_fire", "note", "overlay", "overlay"])
-      const target = r.f() < 0.95 ? r.pick(ids) : 999
+      const kind = r.pick(["stage", "stage", "next", "score", "open_fire", "note", "overlay", "overlay", "narrative"])
+      const target = kind === "narrative" ? r.pick([1, 2, 3]) : r.f() < 0.95 ? r.pick(ids) : 999
       const fields = {
         stage: () => [r.pick(STAGES)],
-        next: () => [r.pick(["call", "Ünïcode", ""]), r.f() < 0.5 ? "" : dateOf(20000 + r.int(80))],
+        next: () => [r.pick(["call", " Ünïcode ", ""]), r.f() < 0.5 ? r.pick(["", "soon"]) : dateOf(20000 + r.int(80))],
         score: () => [String(r.int(101))],
         open_fire: () => [r.pick(["B1", "B2", "B9"])],
         note: () => [r.pick(STAGES), "n"],
-        overlay: () => [String(r.pick([...ITEMS, 9])), r.pick(MODES), "body", "why"],
+        overlay: () => [String(r.pick([...ITEMS, 9, 0])), r.pick(MODES), r.pick(["body", " "]), "why"],
+        narrative: () => [r.pick(["new story", ""])],
       }[kind]()
       const o = { id: opId++, kind, target, fields }
       log.push(`push ${JSON.stringify(o)}`)
@@ -409,16 +430,16 @@ async function property(seed) {
         if (o.kind === "score" && r.f() < 0.3) c.score = (c.score + 1) % 101
         // Mispredicted: the server's row differs from what the op said.
         const differ = o.writes.some(([t, key, vals]) => {
-          const row = (t === "cards" ? st.cards : st.batches).get(key)
+          const row = st[t].get(key)
           return row && Object.entries(vals).some(([k, v]) => row[k] !== v)
         })
-        M.base = st.cards, M.batches = st.batches, M.focus = st.focus
+        M.base = st.cards, M.batches = st.batches, M.focus = st.focus, M.narratives = st.narratives
         const changed = c ? [cardsTable([c])] : []
         const b = [...st.batches.values()]
         // A write to a job with an open focus brings its fresh FOCUS.
         const focus = o.kind === "overlay" && st.focus.has(o.target) ? [...focusFrame(++rev, o.target, st.focus.get(o.target))] : []
         log.push(`ack ${o.id} differ=${differ}`)
-        K.ingest(new Uint8Array([...frame("PATCH", ++rev, [...changed, lookups(profiles, b)[3]]), ...focus, ...ack(o.id)]))
+        K.ingest(new Uint8Array([...frame("PATCH", ++rev, [...changed, lookups(profiles, b)[3], M.narrativesTable()]), ...focus, ...ack(o.id)]))
         assert.deepEqual(K.events().map((e) => [e.id, e.code, e.mis]), [[o.id, 0, +differ]])
       }
     } else if (roll < 0.8) {
@@ -445,7 +466,7 @@ async function property(seed) {
       const cs = [...M.base.values()]
       for (const job of M.focus.keys()) if (!M.base.has(job)) M.focus.delete(job)
       log.push("boot")
-      K.ingest(frame("BOOT", ++rev, [...lookups(profiles, [...M.batches.values()]), cardsTable(cs)]))
+      K.ingest(frame("BOOT", ++rev, [...lookups(profiles, [...M.batches.values()]), M.narrativesTable(), cardsTable(cs)]))
     } else if (roll < 0.85) {
       // An empty BOOT: "what you have is current". Nothing changes.
       log.push("empty boot")

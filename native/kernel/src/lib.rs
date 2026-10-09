@@ -203,16 +203,11 @@ pub extern "C" fn str_len(t: u32, c: u32, row: u32) -> u32 {
     with(|k| k.str_ref(t as u16, c as u16, row)[1])
 }
 
-/// Row of `key` in a keyed table (cards, batches, profiles, lines), or -1.
+/// Row of `key` in a desk table, or -1: by id for cards, batches and
+/// profiles, by ix for lines, by the first column for any other table.
 #[unsafe(no_mangle)]
 pub extern "C" fn row_of(t: u32, key: u32) -> i32 {
-    with(|k| {
-        k.desk
-            .store
-            .table(t as u16)
-            .and_then(|x| x.row_of(key))
-            .map_or(-1, |r| r as i32)
-    })
+    with(|k| k.desk.row_of(t as u16, key).map_or(-1, |r| r as i32))
 }
 
 /// Chooses the job whose focus the focus* tables read. Returns 1 when that
