@@ -67,9 +67,6 @@ defmodule Hireme.Closed do
       :error -> default
     end
   end
-
-  @spec names([atom()]) :: [String.t()]
-  def names(set), do: Enum.map(set, &Atom.to_string/1)
 end
 
 defmodule Hireme.Attrs do
@@ -83,59 +80,6 @@ defmodule Hireme.Attrs do
     case Map.fetch(map, key) do
       {:ok, v} -> v
       :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
-
-  @spec string(map(), atom(), String.t()) :: String.t()
-  def string(map, key, default \\ "") do
-    case get(map, key) do
-      s when is_binary(s) -> String.trim(s)
-      _ -> default
-    end
-  end
-
-  @spec int(map(), atom(), integer() | nil) :: integer() | nil
-  def int(map, key, default \\ nil) do
-    case get(map, key) do
-      n when is_integer(n) ->
-        n
-
-      f when is_float(f) ->
-        round(f)
-
-      s when is_binary(s) ->
-        parse_int(String.trim(s), default)
-
-      _ ->
-        default
-    end
-  end
-
-  @spec date(map(), atom(), Date.t() | nil) :: Date.t() | nil
-  def date(map, key, default \\ nil) do
-    case get(map, key) do
-      %Date{} = d ->
-        d
-
-      s when is_binary(s) ->
-        parse_date(String.trim(s), default)
-
-      _ ->
-        default
-    end
-  end
-
-  defp parse_int(text, default) do
-    case Integer.parse(text) do
-      {n, ""} -> n
-      _ -> default
-    end
-  end
-
-  defp parse_date(text, default) do
-    case Date.from_iso8601(text) do
-      {:ok, d} -> d
-      _ -> default
     end
   end
 end

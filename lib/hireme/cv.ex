@@ -119,12 +119,6 @@ defmodule Hireme.Theme do
           targets: [String.t()]
         }
 
-  @spec accents() :: [accent()]
-  def accents, do: @accents
-
-  @spec densities() :: [density()]
-  def densities, do: @densities
-
   @spec parse(map() | nil) :: t()
   def parse(nil), do: %__MODULE__{}
   def parse(%__MODULE__{} = theme), do: theme
@@ -274,13 +268,13 @@ defmodule Hireme.Mask do
   end
 
   @spec resolve(struct() | map(), overlay() | nil) :: Line.t()
-  def resolve(item, nil), do: line(item, :canonical, item.title, item.body, nil)
+  defp resolve(item, nil), do: line(item, :canonical, item.title, item.body, nil)
 
-  def resolve(item, %{mode: :hidden} = overlay) do
+  defp resolve(item, %{mode: :hidden} = overlay) do
     line(item, :hidden, item.title, item.body, reason(overlay))
   end
 
-  def resolve(item, %{mode: :altered} = overlay) do
+  defp resolve(item, %{mode: :altered} = overlay) do
     line(
       item,
       :altered,
@@ -290,7 +284,7 @@ defmodule Hireme.Mask do
     )
   end
 
-  def resolve(item, %{mode: :emphasized} = overlay) do
+  defp resolve(item, %{mode: :emphasized} = overlay) do
     line(item, :emphasized, item.title, item.body, reason(overlay))
   end
 
@@ -747,7 +741,7 @@ defmodule Hireme.CvPair do
   end
 
   @spec phase(Lineage.t(), Date.t()) :: :ready | :tailor | :additive
-  def phase(%Lineage{} = lineage, today \\ Date.utc_today()) do
+  defp phase(%Lineage{} = lineage, today) do
     cond do
       Date.diff(today, lineage.opened_on) >= @cooldown_days -> :ready
       lineage.rewrites_allowed -> :tailor

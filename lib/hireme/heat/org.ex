@@ -9,8 +9,6 @@ defmodule Hireme.Heat.Org do
 
   import Hireme.Text, only: [normalize: 1]
 
-  @sizes [:mega, :large, :mid, :small]
-
   @mega ~w(google alphabet amazon aws meta facebook nvidia microsoft)
   @large ~w(
     apple netflix uber stripe databricks snowflake tesla adobe salesforce oracle
@@ -32,15 +30,6 @@ defmodule Hireme.Heat.Org do
           | :other
 
   @type department :: :infra | :research | :security | :data | :product | :eng | :other
-
-  @spec sizes() :: [size()]
-  def sizes, do: @sizes
-
-  @spec name(atom()) :: String.t()
-  def name(key) when is_atom(key), do: Atom.to_string(key)
-
-  @spec parse_size(term()) :: {:ok, size()} | :error
-  def parse_size(size), do: Hireme.Closed.parse(@sizes, size)
 
   @spec size(term()) :: size()
   def size(company) when is_binary(company) do

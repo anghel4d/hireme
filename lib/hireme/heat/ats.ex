@@ -45,14 +45,8 @@ defmodule Hireme.Heat.Ats do
 
   @type t :: %{vendor: vendor(), tenant: String.t() | nil}
 
-  @spec vendors() :: [vendor()]
-  def vendors, do: @vendors
-
   @spec name(vendor()) :: String.t()
   def name(vendor) when vendor in @vendors, do: Atom.to_string(vendor)
-
-  @spec parse_vendor(term()) :: {:ok, vendor()} | :error
-  def parse_vendor(vendor), do: Hireme.Closed.parse(@vendors, vendor)
 
   @spec parse(term()) :: t()
   def parse(url) when is_binary(url) and url != "" do

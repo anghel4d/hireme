@@ -61,7 +61,6 @@ defmodule Hireme.LifeEv do
   ]
 
   @keys Enum.map(@bands, & &1.key)
-  @by_key Map.new(@bands, &{&1.key, &1})
 
   @frontier ~w(openai anthropic spacex neuralink xai spacexai)
   @labs ~w(starfish valve gdm deepmind meta fair ssi mira)
@@ -76,9 +75,6 @@ defmodule Hireme.LifeEv do
 
   @spec name(band()) :: String.t()
   def name(band) when band in @keys, do: Atom.to_string(band)
-
-  @spec label(band()) :: String.t()
-  def label(band) when band in @keys, do: @by_key[band].label
 
   @spec parse_band(term()) :: {:ok, band() | :all} | :error
   def parse_band(band), do: Hireme.Closed.parse([:all | @keys], band)

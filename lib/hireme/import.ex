@@ -76,8 +76,8 @@ defmodule Hireme.Import do
     end
   end
 
-  @doc "Lowercased scheme and host, no query, no trailing slash: the idempotency key."
-  def canonical_url(url) when is_binary(url) do
+  # Lowercased scheme and host, no query, no trailing slash: the idempotency key.
+  defp canonical_url(url) when is_binary(url) do
     url = url |> String.trim() |> String.trim_trailing("/")
 
     case URI.parse(url) do
@@ -99,7 +99,7 @@ defmodule Hireme.Import do
     end
   end
 
-  def canonical_url(_), do: ""
+  defp canonical_url(_), do: ""
 
   defp import_json(%{"leftover_unique" => _} = doc, _profile, _filename) do
     noted = date!(doc["noted_on"])
