@@ -15,6 +15,8 @@ defmodule HiremeBench.Testbed do
     File.mkdir_p!(dir)
     Logger.configure(level: :warning)
     Application.put_env(:hireme, Hireme.Mailer, adapter: Swoosh.Adapters.Test)
+    # Browser WebAuthn uses the loopback testbed origin, never the production origin.
+    Application.put_env(:wax_, :origin, "http://localhost:#{System.fetch_env!("PORT")}")
     endpoint = Application.fetch_env!(:hireme, HiremeWeb.Endpoint)
 
     Application.put_env(
