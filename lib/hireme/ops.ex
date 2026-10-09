@@ -206,55 +206,7 @@ defmodule Hireme.Ops do
   def attach(account_id, since) when is_integer(account_id) do
     :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
 
-    case call(account_id, {:attach, since}) do
-      {:ok, _rev, {:replay, _}} = replay -> replay
-      :boot -> boot(account_id, 3)
-    end
-  end
-
-  # A boot reads every table here, in the attaching process, so writes
-  # on the account never wait behind it: one read transaction, stamped
-  # with the revision it saw. The sequencer then only compares. At the
-  # same revision, what differs is a row written around it, sent to
-  # everyone as a revision of its own; behind it, the ring's deltas
-  # since the read bring the tables level.
-  defp boot(account_id, tries) do
-    {:ok, {read_rev, tables}} =
-      Repo.with_account(account_id, fn ->
-        Repo.transaction(fn ->
-          rev =
-            Repo.one!(from(a in Account, where: a.id == ^account_id, select: a.desk_rev),
-              skip_account: true
-            )
-
-          {rev, read_tables()}
-        end)
-      end)
-
-    case call(account_id, {:boot, read_rev, tables}) do
-      {:ok, rev, :as_read} -> {:ok, rev, {:boot, %{tables: tables}}}
-      {:ok, rev, {:after, deltas}} -> {:ok, rev, {:boot, %{tables: patch(tables, deltas)}}}
-      :retry when tries > 1 -> boot(account_id, tries - 1)
-      :retry -> call(account_id, :boot_inside)
-    end
-  end
-
-  defp patch(tables, deltas) do
-    deltas
-    |> Enum.reduce(Map.new(tables, fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end), fn
-      {_rev, %{rows: rows, gone: gone}}, acc ->
-        acc =
-          Enum.reduce(gone, acc, fn {t, ids}, acc -> Map.update!(acc, t, &Map.drop(&1, ids)) end)
-
-        Enum.reduce(rows, acc, fn {t, list}, acc ->
-          Map.update!(acc, t, fn table ->
-            Enum.reduce(list, table, fn row, t ->
-              Map.update(t, row.id, row, &Map.merge(&1, row))
-            end)
-          end)
-        end)
-    end)
-    |> Map.new(fn {t, rows} -> {t, Map.values(rows)} end)
+    call(account_id, {:attach, since})
   end
 
   @doc """
@@ -264,10 +216,10 @@ defmodule Hireme.Ops do
   """
   @spec exec(command()) :: {:ok, term()} | {:error, term()}
   def exec(command) do
-    if Process.get(@inside) do
-      apply_command(command)
-    else
-      call(Repo.account_id!(), {:exec, command, self()})
+    case {Process.get(@inside), Repo.account_id()} do
+      # With no account the write refuses itself (`Hireme.Schema.tenant/1`).
+      {inside, account} when inside == true or account == nil -> apply_command(command)
+      {_, account} -> call(account, {:exec, command, self()})
     end
   end
 
@@ -429,44 +381,22 @@ defmodule Hireme.Ops do
   end
 
   @impl true
+  # The tables are level at the sequencer's revision, so a boot is a copy
+  # of them: every desk write runs here, and one made in another VM moves
+  # the revision `warm/1` reads first. A listing is a shared binary, so
+  # the copy is the row maps, not their text.
   def handle_call({:attach, since}, _from, state) do
     guard(state, fn ->
       state = warm(state)
 
       case replay(state, since) do
-        {:ok, deltas} -> {{:ok, state.rev, {:replay, deltas}}, state}
-        :boot -> {:boot, state}
+        {:ok, deltas} ->
+          {{:ok, state.rev, {:replay, deltas}}, state}
+
+        :boot ->
+          tables = Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)
+          {{:ok, state.rev, {:boot, %{tables: tables}}}, state}
       end
-    end)
-  end
-
-  def handle_call({:boot, read_rev, tables}, _from, state) do
-    guard(state, fn ->
-      state = warm(state)
-
-      cond do
-        read_rev == state.rev ->
-          state = settle(state, {:given, tables})
-          {{:ok, state.rev, :as_read}, state}
-
-        read_rev < state.rev ->
-          case replay(state, read_rev) do
-            {:ok, deltas} -> {{:ok, state.rev, {:after, deltas}}, state}
-            :boot -> {:retry, state}
-          end
-
-        true ->
-          {:retry, state}
-      end
-    end)
-  end
-
-  # The fallback when reads keep losing the race: read in here.
-  def handle_call(:boot_inside, _from, state) do
-    guard(state, fn ->
-      state = settle(warm(state), :all)
-      tables = Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)
-      {{:ok, state.rev, {:boot, %{tables: tables}}}, state}
     end)
   end
 
@@ -738,11 +668,6 @@ defmodule Hireme.Ops do
     rediff(state, groups)
   end
 
-  defp rediff(state, {:given, tables}) do
-    groups = Enum.map(@table_names, &{&1, :all, {:given, Map.fetch!(tables, &1)}})
-    rediff(state, groups)
-  end
-
   defp rediff(state, groups) do
     {raw, rows, gone} =
       Enum.reduce(groups, {state.raw, %{}, %{}}, fn group, {raw, rows, gone} ->
@@ -802,7 +727,6 @@ defmodule Hireme.Ops do
     Map.take(struct, cols)
   end
 
-  defp fetch_group(_table, :all, {:given, rows}, _raw), do: rows
   defp fetch_group(:leases, :all, _values, raw), do: leases(Map.keys(raw.job_apps))
 
   defp fetch_group(:leases, :id, ids, raw),
@@ -899,6 +823,12 @@ defmodule Hireme.Ops do
       {:govern, _} ->
         :all
 
+      {:bulk, _} ->
+        :all
+
+      {:insert, table, _} ->
+        [{table, :id, [inserted_id(value)]}]
+
       {:perform, pair, command} ->
         job_id = Hireme.CvPair.job_id(pair)
 
@@ -928,6 +858,9 @@ defmodule Hireme.Ops do
     end
   end
 
+  defp inserted_id({_result, %{id: id}}), do: id
+  defp inserted_id(%{id: id}), do: id
+
   defp job_groups(id), do: [{:job_apps, :id, [id]}, {:events, :job_app_id, [id]}]
 
   defp lineage_groups(job_id) do
@@ -947,6 +880,8 @@ defmodule Hireme.Ops do
   # -- the commands -----------------------------------------------------------
 
   defp apply_command({:heat_override, job_id, reason}), do: Heat.write_override(job_id, reason)
+  defp apply_command({:bulk, fun}), do: {:ok, fun.()}
+  defp apply_command({:insert, _table, fun}), do: {:ok, fun.()}
 
   defp apply_command({:narrative, id, body}) do
     case Repo.get(Hireme.Corpus.Narrative, id) do

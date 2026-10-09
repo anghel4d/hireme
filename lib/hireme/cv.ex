@@ -11,8 +11,20 @@ defmodule Hireme.Corpus do
 
   def list_profiles, do: Repo.all(from p in Profile, order_by: p.id)
   def get_profile!(id), do: Repo.get!(Profile, id)
-  def create_profile!(attrs), do: %Profile{} |> Profile.changeset(attrs) |> Repo.insert!()
-  def create_item!(attrs), do: %Item{} |> Item.changeset(attrs) |> Repo.insert!()
+
+  def create_profile!(attrs),
+    do: insert!(:profiles, fn -> %Profile{} |> Profile.changeset(attrs) |> Repo.insert!() end)
+
+  def create_item!(attrs),
+    do: insert!(:items, fn -> %Item{} |> Item.changeset(attrs) |> Repo.insert!() end)
+
+  # Every desk write runs in the account's sequencer, so the tables it
+  # keeps (and boots tabs from) never miss a row.
+  defp insert!(table, write) do
+    {:ok, row} = Hireme.Ops.exec({:insert, table, write})
+    row
+  end
+
   def get_item_by_key!(key), do: Repo.get_by!(Item, key: key)
 
   def list_items(profile_id) do
@@ -43,22 +55,33 @@ defmodule Hireme.Narrative do
   def for_profile(_), do: nil
 
   def write!(%User{id: user_id}, body) when is_binary(body) do
-    case get_by_user(user_id) do
-      nil ->
-        %Row{}
-        |> Row.changeset(%{user_id: user_id, body: body, version: 1, private: true})
-        |> Repo.insert!()
+    {:ok, row} =
+      Hireme.Ops.exec(
+        {:insert, :narratives,
+         fn ->
+           case get_by_user(user_id) do
+             nil ->
+               %Row{}
+               |> Row.changeset(%{user_id: user_id, body: body, version: 1, private: true})
+               |> Repo.insert!()
 
-      row ->
-        update!(row, body)
-    end
+             row ->
+               update!(row, body)
+           end
+         end}
+      )
+
+    row
+  end
+
+  def delete(%Row{} = row) do
+    {:ok, result} = Hireme.Ops.exec({:insert, :narratives, fn -> {Repo.delete(row), row} end})
+    elem(result, 0)
   end
 
   def update!(%Row{} = row, body) when is_binary(body) do
     row |> Row.changeset(%{body: body, version: row.version + 1}) |> Repo.update!()
   end
-
-  def delete(%Row{} = row), do: Repo.delete(row)
 
   @doc "Text that may ride along with an application. Private narratives contribute nothing."
   def for_application(%Row{private: false, body: body}), do: body
@@ -79,12 +102,21 @@ defmodule Hireme.Kv do
   def put(namespace, key, value) when is_binary(namespace) and is_binary(key) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
-    %Pair{}
-    |> Pair.changeset(%{namespace: namespace, key: key, value: value})
-    |> Repo.insert!(
-      on_conflict: [set: [value: value, updated_at: now]],
-      conflict_target: [:account_id, :namespace, :key]
-    )
+    {:ok, pair} =
+      Hireme.Ops.exec(
+        {:insert, :kv_pairs,
+         fn ->
+           %Pair{}
+           |> Pair.changeset(%{namespace: namespace, key: key, value: value})
+           |> Repo.insert!(
+             on_conflict: [set: [value: value, updated_at: now]],
+             conflict_target: [:account_id, :namespace, :key],
+             returning: true
+           )
+         end}
+      )
+
+    pair
   end
 
   def list(namespace),

@@ -66,6 +66,16 @@ defmodule Hireme.Import do
 
   @spec import_body(String.t(), String.t(), Profile.t()) :: result()
   def import_body(body, filename, %Profile{} = profile) do
+    # An import writes batches and snapshots around the sequencer; one
+    # revision after it re-reads every table, so tabs and boots see them.
+    try do
+      import_trimmed(body, filename, profile)
+    after
+      {:ok, :ok} = Hireme.Ops.exec({:bulk, fn -> :ok end})
+    end
+  end
+
+  defp import_trimmed(body, filename, profile) do
     trimmed = String.trim(body)
 
     cond do
@@ -463,9 +473,16 @@ defmodule Hireme.Seed do
         :already_seeded
 
       true ->
-        profile = load_profile!(profile_path, dir)
-        import_manifest(dir, profile)
-        maybe_overlay(dir)
+        {:ok, _} =
+          Hireme.Ops.exec(
+            {:bulk,
+             fn ->
+               profile = load_profile!(profile_path, dir)
+               import_manifest(dir, profile)
+               maybe_overlay(dir)
+             end}
+          )
+
         IO.puts("Seeded the desk from #{dir}.")
         :ok
     end
