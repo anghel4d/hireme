@@ -69,6 +69,11 @@ const MAX_QUEUED: usize = 32 << 20;
 /// Bytes the BEAM may queue for the control stream before the client opens it.
 const HELD_MAX: usize = 4 << 20;
 const DEADLINE: Duration = Duration::from_secs(2);
+/// QUIC handshake plus the CONNECT. A lossy path spends seconds in probe
+/// timeouts here (333 ms, doubling), and a browser that gets no answer waits
+/// for good, so this bound is generous; the release's patched wtransport
+/// closes a connection given up on (native/gate/wtransport.patch).
+const HANDSHAKE: Duration = Duration::from_secs(10);
 /// QUIC-level stream counts. HTTP/3 itself takes one bidi (the CONNECT
 /// request) and three uni streams (control and the two QPACK streams).
 const BIDI_BEFORE: u32 = 2;
@@ -82,14 +87,16 @@ const WINDOW_BEFORE: u32 = 64 << 10;
 const WINDOW_AFTER: u32 = 16 << 20;
 const STREAM_WINDOW: u32 = 4 << 20;
 /// Congestion window before the first loss or ACK, in bytes (GATE_INITIAL_WINDOW
-/// overrides it). quinn's default is ten packets, 14,720 bytes, so a cold BOOT
-/// spends its first round trips in slow start. Chromium, 47 ms RTT, 1 MiB on
-/// one stream (a deflated BOOT of ~1,000 real jobs): 372 ms at the
-/// default, 232 ms at 128 KiB, 191 ms at 256 KiB; behind a 20 Mbit/s link
-/// with a 100-packet queue 256 KiB was no worse than any smaller window
-/// (496 ms against 612 ms), because quinn paces the window over the measured
-/// RTT instead of sending it as one burst.
-const INITIAL_WINDOW: usize = 256 << 10;
+/// overrides it). quinn's default is ten packets, 14,720 bytes, which keeps a
+/// cold BOOT's rest frame in slow start for round trips. 1 MiB pushed at
+/// accept to Chromium, until its last byte:
+///   47 ms RTT, unconstrained: 372 ms at the default, 246 at 256 KiB, 174 at 1 MiB;
+///   30 ms, 300 Mbit/s: 160 at 256 KiB, 120 at 1 MiB;
+///   47 ms, 100 Mbit/s: 249 at 256 KiB, 206 at 1 MiB;
+///   47 ms, 20 Mbit/s, 100-packet queue: 550 at 256 KiB, 590 at 1 MiB.
+/// quinn paces the window over the measured RTT, so it does not leave as
+/// one burst; only a slow link with a shallow queue pays a little for it.
+const INITIAL_WINDOW: usize = 1 << 20;
 
 /// Close codes the gate itself uses (the BEAM picks its own).
 const CODE_DEADLINE: u32 = 0x4001;
@@ -323,7 +330,7 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
     gate.handshakes.fetch_add(1, Relaxed);
     let gate = gate.clone();
     tokio::spawn(async move {
-        let request = timeout(DEADLINE, incoming).await;
+        let request = timeout(HANDSHAKE, incoming).await;
         gate.handshakes.fetch_sub(1, Relaxed);
         if let Ok(Ok(request)) = request {
             session(gate, request, slot).await;
