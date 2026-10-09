@@ -189,6 +189,24 @@ async function one(file) {
     }
   }
 
+  // Keywords.extract per job.
+  for (const kw of lines.filter((l) => l.kind === "keywords")) {
+    const n = K.k.extract(kw.id)
+    const words = K.rows("coverage").map((r) => r.word)
+    check("keywords.extract", `job ${kw.id}`, JSON.stringify(words.slice(0, n)), JSON.stringify(kw.extract))
+  }
+
+  // Heat.mix_batch per batch.
+  for (const m of lines.filter((l) => l.kind === "mix_batch")) {
+    const id = batchId.get(m.code)
+    K.k.mix(id)
+    const rows = K.rows("mix")
+    check("mix.kept", m.code, JSON.stringify(rows.filter((r) => r.kept).map((r) => r.job)), JSON.stringify(m.kept))
+    const deferred = rows.filter((r) => !r.kept)
+    check("mix.deferred", m.code, JSON.stringify(deferred.map((r) => [r.job, r.reason, r.note])),
+      JSON.stringify(m.deferred.map((d) => [d.id, d.reason, d.note])))
+  }
+
   // The scoreboard and its chart.
   const sb = lines.find((l) => l.kind === "scoreboard")?.value
   if (sb) {

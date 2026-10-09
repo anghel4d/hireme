@@ -53,6 +53,9 @@ pub struct Desk {
     /// Whole-table copies for tables a pending op adds rows to or removes
     /// rows from (overlays); they take precedence over `overlay`.
     pub(crate) vtables: Vec<Table>,
+    /// (table, key) pairs the last ingest or push wrote, for readers that
+    /// memoize per row; [NONE, NONE] is "everything".
+    pub touched: Vec<[u32; 2]>,
     provisional: u32,
     /// The raw tables or their pending view moved since the last derive.
     pub(crate) raw_dirty: bool,
@@ -89,6 +92,7 @@ impl Desk {
             store: Store::new(),
             overlay: Vec::new(),
             vtables: Vec::new(),
+            touched: Vec::new(),
             provisional: 0,
             raw_dirty: true,
             derived: crate::derive::Derived::new(),
@@ -228,6 +232,7 @@ impl Desk {
         if t != table::CARDS {
             self.raw_dirty = true;
         }
+        self.touched.push([t as u32, key]);
         rec.push((t, key, c, v));
         match t {
             table::CARDS => self.moved.push(row as u32),
@@ -298,6 +303,7 @@ impl Desk {
         }
         let key = vt.col(1).map_or(0, |c| c.u32(row));
         vt.index.insert(key, row as u32);
+        self.touched.push([t as u32, key]);
         self.raw_dirty = true;
     }
 
@@ -305,6 +311,7 @@ impl Desk {
     pub(crate) fn delete_row(&mut self, t: u16, key: u32) {
         let vt = self.vtable_mut(t);
         vt.delete(core::iter::once(key));
+        self.touched.push([t as u32, key]);
         self.raw_dirty = true;
     }
 
@@ -543,6 +550,7 @@ impl Desk {
     /// Takes an op the client is about to send. Returns 0 and applies it to
     /// the view, or a refusal code and changes nothing.
     pub fn push(&mut self, bytes: &[u8]) -> u8 {
+        self.touched.clear();
         let Ok(o) = Op::parse(bytes) else {
             return refusal::ARGUMENT;
         };
@@ -584,6 +592,7 @@ impl Desk {
             return;
         };
         let p = self.pending.remove(i);
+        self.touched.extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
         let exact = p.predicted.iter().all(|(t, key, c, v)| {
             let Some(tbl) = self.store.table(*t) else {
                 return false;
@@ -602,6 +611,9 @@ impl Desk {
     }
 
     fn drop_op(&mut self, id: u64, code: u8, msg: &[u8]) {
+        for p in self.pending.iter().filter(|p| p.id == id) {
+            self.touched.extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
+        }
         self.pending.retain(|p| p.id != id);
         self.counters[NACKED] += 1;
         self.event(id, code.max(1) as u32, 0, msg);
@@ -621,6 +633,7 @@ impl Desk {
         use wire::schema::frame;
         self.events.clear();
         self.event_msgs.clear();
+        self.touched.clear();
         let mut bits = 0;
         let mut base_moved = false;
         let mut pending_moved = false;
@@ -698,6 +711,8 @@ impl Desk {
                 _ => bits |= OTHER,
             }
         }
+        let drained = core::mem::take(&mut self.store.touched);
+        self.touched.extend(drained);
         if base_moved || pending_moved {
             self.rebuild_view();
         }
