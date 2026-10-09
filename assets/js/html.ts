@@ -38,8 +38,14 @@ export function when(cond: unknown, then: () => Raw): Raw {
   return cond ? then() : EMPTY
 }
 
+// The HTML each target was last patched to. Only morph changes those
+// subtrees, so the same HTML again would patch nothing.
+const drawn = new WeakMap<Element, string>()
+
 /** Patch `target`'s children to match `html`, keeping nodes that already match. */
 export function morph(target: Element, html: Raw): void {
+  if (drawn.get(target) === html.html) return
+  drawn.set(target, html.html)
   const tpl = document.createElement("template")
   tpl.innerHTML = html.html
   patchChildren(target, tpl.content)
