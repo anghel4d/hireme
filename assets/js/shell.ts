@@ -11,7 +11,7 @@ import * as api from "./api.ts"
 import { csrf, type Focus, type Settings } from "./api.ts"
 import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
-import { h, morph, raw, type Raw } from "./html.ts"
+import { h, Keyed, morph, raw, type Raw } from "./html.ts"
 import * as webauthn from "./webauthn.ts"
 import type { Change, Desk, Op, Refusal, Tables } from "./store.ts"
 import * as views from "./views.ts"
@@ -64,6 +64,9 @@ const NOTICE_MS = 8000
 /** Keystrokes in a free-text field coalesce into one write after this pause. */
 const TYPING_MS = 300
 
+/** The address follows the model this long after the last change. */
+const ADDRESS_MS = 150
+
 export class Shell {
   private model: Model
   private readonly desk: Desk
@@ -74,6 +77,8 @@ export class Shell {
   // The ids last hinted to the desk, joined; a hint goes out only when they change.
   private hinted = ""
   private noticeSeq = 0
+  private readonly plane: HTMLElement
+  private readonly cards: Keyed
 
   constructor(root: HTMLElement, desk: Desk) {
     this.root = root
@@ -111,6 +116,8 @@ export class Shell {
         <div id="grid" class="grid-scroll"><div id="plane" class="grid-plane"></div><div id="empty"></div></div>
         <div id="focus-slot"></div>
       </div>`
+    this.plane = this.root.querySelector<HTMLElement>("#plane") as HTMLElement
+    this.cards = new Keyed(this.plane)
     this.bind()
     this.select()
     if (this.model.appId === null) this.model.appId = this.idAt(0)
@@ -216,6 +223,7 @@ export class Shell {
     if (this.desk.tables !== this.tables) {
       // New tables (the first BOOT, a new batch) can name values the
       // address asked for that the old tables did not know.
+      if (this.tables.stages.length > 0) this.writeAddress()
       this.tables = this.desk.tables
       m.filters = fromParams(new URLSearchParams(location.search), this.tables)
       this.select()
@@ -227,7 +235,9 @@ export class Shell {
     if (r) {
       const text = refusalText(r.refusal)
       const id = ++this.noticeSeq
-      m.notices = [...m.notices.slice(-2), { id, text: `Rolled back ${this.describe(r.op)}. ${text}` }]
+      // The same refusal again replaces its notice rather than stacking a copy.
+      const notice = `Rolled back ${this.describe(r.op)}. ${text}`
+      m.notices = [...m.notices.filter((n) => n.text !== notice).slice(-2), { id, text: notice }]
       window.setTimeout(() => this.dispatch({ t: "dismiss", id }), NOTICE_MS)
       if (isLaneOp(r.op)) m.laneError = text
       else if (r.jobId !== null && r.jobId === m.appId) m.refusal = text
@@ -431,7 +441,7 @@ export class Shell {
     const [start, last] = grid.slice(m.count, m.grid.cols, m.grid.scroll, m.grid.viewport, metrics)
     const sel = d.selection()
     const ids = d.column("id")
-    const parts: Raw[] = []
+    const parts: [number, Raw][] = []
     // The selected card first: the server streams focuses in this order.
     const shown: number[] = m.appId === null ? [] : [m.appId]
     const place = (pos: number) => {
@@ -439,7 +449,7 @@ export class Shell {
       if (row === undefined) return
       const id = ids[row] ?? 0
       const [x, y] = grid.origin(pos, m.grid.cols, metrics)
-      parts.push(views.card(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id)))
+      parts.push([id, views.card(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id))])
       if (id !== m.appId) shown.push(id)
     }
     if (m.index >= 0 && (m.index < start || m.index > last)) place(m.index)
@@ -451,11 +461,9 @@ export class Shell {
       d.hint(shown)
     }
 
-    const plane = this.root.querySelector<HTMLElement>("#plane")
-    if (plane) {
-      plane.style.height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
-      morph(plane, h`${parts}`)
-    }
+    const height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
+    if (this.plane.style.height !== height) this.plane.style.height = height
+    this.cards.set(parts)
     this.set("#empty", m.count === 0 ? (d.status === "connecting" ? views.waiting("boot", "Connecting to the desk…") : views.emptyBoard()) : raw(""))
     const row = m.appId === null ? -1 : d.rowOf(m.appId)
     this.set(
@@ -471,7 +479,18 @@ export class Shell {
     if (el) morph(el, html)
   }
 
+  // The address is not drawn: writing it (history.replaceState costs about
+  // 0.4 ms) waits until input pauses, off the frame that answers the input.
+  private addressTimer = 0
+
   private syncAddress(): void {
+    if (this.addressTimer) return
+    this.addressTimer = window.setTimeout(() => this.writeAddress(), ADDRESS_MS)
+  }
+
+  private writeAddress(): void {
+    clearTimeout(this.addressTimer)
+    this.addressTimer = 0
     // Until the first BOOT names its tables the filters are defaults; the
     // address keeps what was asked for until it can be read.
     if (this.desk.tables.stages.length === 0) return
