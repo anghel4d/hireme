@@ -6,7 +6,7 @@ defmodule Hireme.Heat.Org do
   across departments; a small shop gets one, maybe two after decay.
   """
 
-  import Hireme.Text, only: [normalize: 1, named_normalized?: 2]
+  import Hireme.Text, only: [normalize: 1]
 
   @sizes [:mega, :large, :mid, :small]
 
@@ -16,6 +16,8 @@ defmodule Hireme.Heat.Org do
     linkedin snap pinterest shopify openai anthropic spacex neuralink xai
     starfish valve gdm deepmind ssi mira
   )
+  @mega_names MapSet.new(@mega)
+  @large_names MapSet.new(@large)
 
   @type size :: :mega | :large | :mid | :small
 
@@ -42,10 +44,13 @@ defmodule Hireme.Heat.Org do
   @spec size(term()) :: size()
   def size(company) when is_binary(company) do
     name = normalize(company)
+    # All size anchors are single words. Check each word and the compact name
+    # once, rather than rebuilding a compact/padded anchor for every employer.
+    names = [String.replace(name, " ", "") | String.split(name, " ", trim: true)]
 
     cond do
-      named_normalized?(name, @mega) -> :mega
-      named_normalized?(name, @large) -> :large
+      Enum.any?(names, &MapSet.member?(@mega_names, &1)) -> :mega
+      Enum.any?(names, &MapSet.member?(@large_names, &1)) -> :large
       name =~ ~r/\b(systems|runtime|infra|labs?)\b/ -> :mid
       true -> :small
     end
