@@ -243,8 +243,38 @@ defmodule HiremeWeb.Packet do
   @spec raw(atom(), [map()]) :: iodata()
   def raw(name, rows) do
     {_id, cols} = Map.fetch!(@tables, name)
-    table(name, Enum.map(rows, &raw_row(&1, cols)))
+
+    # A struct is a whole row; a map may be partial (a delta carries `id`
+    # plus only the fields that changed), and a column it does not carry
+    # must not travel, or the reader would overwrite it with none. Rows
+    # with the same fields share one block.
+    rows
+    |> Enum.group_by(&present(&1, cols))
+    |> Enum.map(fn {present, group} ->
+      table(name, Enum.map(group, &raw_row(&1, cols)), present)
+    end)
   end
+
+  defp present(%_{}, cols), do: Enum.map(cols, &elem(&1, 0))
+
+  defp present(row, cols) do
+    for {col, _, _} <- cols, carried?(row, col), do: col
+  end
+
+  defp carried?(row, :theme_targets), do: Map.has_key?(row, :theme)
+  defp carried?(row, :variety_flags), do: Map.has_key?(row, :variety)
+
+  defp carried?(row, col)
+       when col in [
+              :variety_apps,
+              :variety_companies,
+              :variety_roles,
+              :variety_locations,
+              :variety_fits
+            ],
+       do: Map.has_key?(row, :variety)
+
+  defp carried?(row, col), do: Map.has_key?(row, col)
 
   defp raw_row(%_{} = row, cols), do: raw_row(Map.from_struct(row), cols)
 

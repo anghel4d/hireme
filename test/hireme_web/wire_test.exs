@@ -138,7 +138,8 @@ defmodule HiremeWeb.WireTest do
 
     {bin, [{:patch, 0, 8, decoded}]} = one!(Packet.frame(:patch, 8, body))
     t = tables(decoded)
-    assert [%{id: id, next_action: "Call back", listing: ""}] = named(t, :job_apps)
+    # A partial row carries only its columns; the rest stay as the reader has them.
+    assert [%{id: id, next_action: "Call back", listing: nil, company: nil}] = named(t, :job_apps)
     assert id == a.id
 
     assert [%{theme_targets: "elixir" <> <<0x1F>> <> "rust", theme: theme}] =
