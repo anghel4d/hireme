@@ -493,9 +493,10 @@ defmodule HiremeWeb.Session do
 
   # Raw rows out before the ACKs they settle, as with derived cards.
   defp raw_patch(s, rev, delta) do
-    control(s, Packet.frame(:patch, rev, raw_delta(delta)))
+    # The PATCH and the ACKs it settles leave as one write.
     {due, held} = Enum.split_with(s.acks, fn {r, _, _} -> r <= rev end)
-    Enum.each(Enum.reverse(due), fn {_r, op_id, stamp} -> ack(s, op_id, stamp) end)
+    acks = for {_r, op_id, stamp} <- Enum.reverse(due), do: Packet.ack(op_id, stamp)
+    control(s, [Packet.frame(:patch, rev, raw_delta(delta)) | acks])
     %{s | rev: rev, acks: held}
   end
 
