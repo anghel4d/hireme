@@ -34,6 +34,11 @@ defmodule Hireme.HeatTest do
     assert Heat.cap("Obscure Shop LLC", cfg) == cfg.small_cap
   end
 
+  test "department inference normalizes explicit fallbacks and inferred role text" do
+    assert Org.department(%{department: " Engineering / 2 "}) == :eng
+    assert Org.department(%{department: " ", role: "Senior SYSTEMS Engineer"}) == :infra
+  end
+
   test "ATS vendor and tenant come from the apply URL" do
     assert Ats.parse("https://boards.greenhouse.io/stripe/jobs/123") == %{
              vendor: :greenhouse,

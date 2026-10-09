@@ -4,6 +4,7 @@ defmodule Hireme.Heat.Org do
 
   Size is org breadth, not Life-EV. Mega employers can take a few roles
   across departments; a small shop gets one, maybe two after decay.
+  Department inputs are normalized once before exact lookup or fallback inference.
   """
 
   import Hireme.Text, only: [normalize: 1]
@@ -66,7 +67,7 @@ defmodule Hireme.Heat.Org do
       parse_department(explicit)
     else
       blob = "#{field(job, :role)} #{field(job, :squad)} #{field(job, :fit)}"
-      infer_department(blob)
+      infer_department(normalize(blob))
     end
   end
 
@@ -93,9 +94,7 @@ defmodule Hireme.Heat.Org do
     end
   end
 
-  defp infer_department(blob) do
-    n = normalize(blob)
-
+  defp infer_department(n) do
     cond do
       n =~ ~r/\b(research|scientist|machine learning|\bml\b|applied sci)/ ->
         :research
