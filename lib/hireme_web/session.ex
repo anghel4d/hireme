@@ -33,6 +33,8 @@ defmodule HiremeWeb.Session do
   @control 0
   @agent 0x80
   @end_flag 0x02
+  # HELLO's option word: bit 0 asks for raw tables (the client derives every view).
+  @raw_opt 0x01
   @ticket_age 60
   @recheck_ms 60_000
 
@@ -56,6 +58,8 @@ defmodule HiremeWeb.Session do
     profiles: [],
     letters: %{},
     chrome: %{},
+    raw: false,
+    acct_dirty: false,
     next_uni: 3
   ]
 
@@ -222,7 +226,26 @@ defmodule HiremeWeb.Session do
   @doc "Any other message the host received: deltas, the warmer's focuses, letters, timers."
   @spec info(term(), %__MODULE__{}) :: {:ok, %__MODULE__{}} | {:stop, term(), %__MODULE__{}}
   def info({:ops_delta, rev, _delta}, %{rev: seen} = s) when rev <= seen, do: {:ok, s}
+
+  def info({:ops_delta, rev, delta}, %{hello: true, raw: true} = s),
+    do: {:ok, raw_patch(s, rev, delta)}
+
   def info({:ops_delta, rev, delta}, %{hello: true} = s), do: {:ok, patch(s, rev, delta)}
+
+  # Account changes from elsewhere (a sign-in, a revoke, a factor) arrive in
+  # bursts; one re-push covers them all.
+  def info({Hireme.Audit, :changed}, %{acct_dirty: true} = s), do: {:ok, s}
+
+  def info({Hireme.Audit, :changed}, %{hello: true, raw: true} = s) do
+    send(self(), {__MODULE__, :acct_push})
+    {:ok, %{s | acct_dirty: true}}
+  end
+
+  def info({__MODULE__, :acct_push}, s) do
+    control(s, Packet.frame(:patch, s.rev, account_tables(s)))
+    {:ok, %{s | acct_dirty: false}}
+  end
+
   def info({:ops_delta, _, _}, s), do: {:ok, s}
 
   def info({__MODULE__, :chrome, kind, rev, io}, s), do: {:ok, chrome_out(s, kind, rev, io)}
@@ -238,6 +261,12 @@ defmodule HiremeWeb.Session do
   def info({__MODULE__, :letter_closed, id, _reason}, s) do
     s.mod.fin(s.carrier, id)
     {:ok, %{s | letters: Map.delete(s.letters, id)}}
+  end
+
+  def info({__MODULE__, :tick}, %{hello: true} = s) do
+    control(s, Packet.frame(:tick, s.rev, clock()))
+    schedule_tick()
+    {:ok, s}
   end
 
   def info({__MODULE__, :recheck}, %{role: :browser} = s) do
@@ -273,9 +302,10 @@ defmodule HiremeWeb.Session do
          <<cred::binary-size(^cred_len), _::binary>> <- rest,
          skip = align8(2 + cred_len) - 2 - cred_len,
          <<_::binary-size(^skip), _::binary-size(^cred_len), snapshot::little-64,
-           client::little-32,
+           client::little-32, opts::little-32,
            _::binary>> <-
            rest do
+      s = %{s | raw: Bitwise.band(opts, @raw_opt) != 0}
       hello(s, Bitwise.band(flags, @agent) != 0, cred, snapshot, client)
     else
       _ -> bye(s, "hello")
@@ -286,6 +316,12 @@ defmodule HiremeWeb.Session do
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
   defp frame({:op, _, _, body}, %{role: :browser} = s), do: op(s, body)
+
+  defp frame(
+         {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>},
+         %{role: :browser} = s
+       ),
+       do: rpc(s, json)
 
   defp frame({:hint, _, _, <<n::little-32, ids::binary-size(n)-unit(32), _::binary>>}, s) do
     if s.warmer, do: send(s.warmer, {:hint, for(<<id::little-32 <- ids>>, do: id)})
@@ -322,6 +358,27 @@ defmodule HiremeWeb.Session do
       :error ->
         bye(s, "key")
     end
+  end
+
+  defp hello(%{role: :browser, raw: true} = s, false, _cred, snapshot, client) do
+    s.mod.ready(s.carrier)
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+    {:ok, rev, snap} = Ops.attach(s.account_id, if(snapshot == 0, do: nil, else: snapshot))
+    s = %{s | rev: rev, hello: true, client_id: client}
+
+    case snap do
+      {:boot, %{tables: tables}} ->
+        body = [Packet.static_lookups(), raw_boot(tables), account_tables(s)]
+        control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
+
+      {:replay, deltas} ->
+        for {r, delta} <- deltas, do: control(s, Packet.frame(:patch, r, raw_delta(delta)))
+        control(s, Packet.frame(:patch, rev, [clock(), account_tables(s)], flags: @end_flag))
+    end
+
+    control(s, Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id))))
+    schedule_tick()
+    {:ok, s}
   end
 
   defp hello(%{role: :browser} = s, false, _cred, snapshot, client) do
@@ -397,6 +454,94 @@ defmodule HiremeWeb.Session do
       %{id: n.id, profile: p.id, body: n.body, version: n.version}
     end
   end
+
+  # ---- Raw tables (round two): rows as the database holds them ----
+
+  @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
+                 narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
+
+  # Every raw table the snapshot holds, then the server's clock.
+  defp raw_boot(tables) do
+    [
+      for(t <- @raw_tables, rows = Map.get(tables, t), rows != nil, do: Packet.raw(t, rows)),
+      clock()
+    ]
+  end
+
+  # One delta's raw rows (upserts by id) and deletions.
+  defp raw_delta(delta) do
+    rows = Map.get(delta, :rows, %{})
+    gone = Map.get(delta, :gone, %{})
+
+    [
+      for(
+        t <- @raw_tables,
+        list = Map.get(rows, t),
+        list not in [nil, []],
+        do: Packet.raw(t, list)
+      ),
+      case for({t, ids} <- gone, id <- ids, do: %{table: table_id(t), id: id}) do
+        [] -> []
+        gone_rows -> Packet.table(:gone, gone_rows)
+      end
+    ]
+  end
+
+  defp table_id(name), do: Packet.table_id(name)
+
+  defp clock do
+    Packet.table(:clock, [%{today: Date.utc_today(), now: DateTime.utc_now()}])
+  end
+
+  # The UTC day turns: every client derivation of "today" moves with it.
+  defp schedule_tick do
+    now = DateTime.utc_now()
+    midnight = DateTime.new!(Date.add(Date.utc_today(), 1), ~T[00:00:00], "Etc/UTC")
+
+    Process.send_after(
+      self(),
+      {__MODULE__, :tick},
+      DateTime.diff(midnight, now, :millisecond) + 50
+    )
+  end
+
+  # Raw rows out before the ACKs they settle, as with derived cards.
+  defp raw_patch(s, rev, delta) do
+    control(s, Packet.frame(:patch, rev, raw_delta(delta)))
+    {due, held} = Enum.split_with(s.acks, fn {r, _} -> r <= rev end)
+    Enum.each(Enum.reverse(due), fn {r, op_id} -> ack(s, op_id, r) end)
+    %{s | rev: rev, acks: held}
+  end
+
+  defp account_tables(s), do: HiremeWeb.Account.tables(s.account_id, s.session_id)
+
+  # An account command (`account/<name>`) as JSON-RPC: a change re-pushes
+  # the account's tables before the reply, so the reply lands on current
+  # tables; a session that signed itself out hears BYE after its answer.
+  defp rpc(s, json) do
+    with {:ok, %{"id" => id, "method" => method} = req} <- Jason.decode(json) do
+      ctx = %{account_id: s.account_id, session_id: s.session_id, ip: s.peer}
+
+      case HiremeWeb.Account.call(method, req["params"] || %{}, ctx) do
+        {:ok, result, changed} ->
+          if changed == :changed, do: control(s, Packet.frame(:patch, s.rev, account_tables(s)))
+          rpc_reply(s, %{id: id, result: result})
+          {:ok, s}
+
+        {:error, code, message} ->
+          rpc_reply(s, %{id: id, error: %{code: code, message: message}})
+          {:ok, s}
+
+        {:signed_out, result} ->
+          rpc_reply(s, %{id: id, result: result})
+          bye(s, "signed_out")
+      end
+    else
+      _ -> {:ok, s}
+    end
+  end
+
+  defp rpc_reply(s, reply), do: control(s, LetterboxStream.rpc(Jason.encode!(reply)))
 
   # ---- Ops ----
 

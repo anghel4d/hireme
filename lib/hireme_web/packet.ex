@@ -86,6 +86,10 @@ defmodule HiremeWeb.Packet do
   @spec schema_hash() :: non_neg_integer()
   def schema_hash, do: @schema_hash
 
+  @doc "A table's wire id."
+  @spec table_id(atom()) :: non_neg_integer()
+  def table_id(name), do: @tables |> Map.fetch!(name) |> elem(0)
+
   @doc "The op kind atom for a wire kind number, or `nil`."
   @spec op_kind(non_neg_integer()) :: atom() | nil
   def op_kind(n), do: Map.get(@op_kinds, n)
@@ -236,6 +240,22 @@ defmodule HiremeWeb.Packet do
   @doc "The lookup tables the card columns index into, plus batches and profiles."
   @spec lookups([map()], [map()]) :: iodata()
   def lookups(batches, profiles) do
+    [
+      static_lookups(),
+      batch_table(batches),
+      table(
+        :profiles,
+        Enum.map(
+          profiles,
+          &%{id: &1.id, slug: &1.slug, name: &1.name, headline: &1.headline, summary: &1.summary}
+        )
+      )
+    ]
+  end
+
+  @doc "The closed lists the card columns and views name: stages, statuses, freshness, gates, heat states, bands."
+  @spec static_lookups() :: iodata()
+  def static_lookups do
     keyed = fn list ->
       list |> Enum.with_index() |> Enum.map(fn {k, i} -> %{ix: i, key: k} end)
     end
@@ -265,14 +285,6 @@ defmodule HiremeWeb.Packet do
         Enum.with_index(LifeEv.bands(), fn b, i ->
           %{ix: i, key: LifeEv.name(b.key), label: b.label, min: b.min, max: b.max}
         end)
-      ),
-      batch_table(batches),
-      table(
-        :profiles,
-        Enum.map(
-          profiles,
-          &%{id: &1.id, slug: &1.slug, name: &1.name, headline: &1.headline, summary: &1.summary}
-        )
       )
     ]
   end
