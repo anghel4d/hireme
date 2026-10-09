@@ -570,26 +570,6 @@ defmodule Hireme.Desk.Event do
   end
 end
 
-defmodule Hireme.Letterbox.Record do
-  @moduledoc false
-  use Hireme.Schema
-
-  schema "letterboxes" do
-    belongs_to :job_app, Hireme.Desk.Job
-    belongs_to :account, Hireme.Accounts.Account
-    timestamps()
-  end
-
-  def changeset(record, attrs) do
-    record
-    |> cast(attrs, [:job_app_id])
-    |> validate_required([:job_app_id])
-    |> unique_constraint(:job_app_id)
-    |> foreign_key_constraint(:job_app_id)
-    |> tenant()
-  end
-end
-
 defmodule Hireme.Cv.Lineage do
   @moduledoc "The one CV for an employer. Applications do not carry a free-floating variant."
   use Hireme.Schema
