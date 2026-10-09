@@ -35,6 +35,7 @@ config :hireme, HiremeWeb.Endpoint,
   secret_key_base: secret_key_base,
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:hireme, ~w(--sourcemap=inline --watch)]},
+    early: {Esbuild, :install_and_run, [:early, ~w(--watch)]},
     # The WebTransport gate on UDP 4433 with a fresh self-signed
     # certificate; the page passes its hash as `serverCertificateHashes`.
     gate:

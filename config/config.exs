@@ -19,6 +19,12 @@ config :esbuild,
       ~w(js/app.ts js/factor.ts --bundle --format=esm --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/*),
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+  ],
+  # The early-connect script, inlined into <head> and hashed into the CSP.
+  early: [
+    args:
+      ~w(js/early.ts --bundle --format=iife --minify --target=es2022 --outdir=../priv/static/assets/js),
+    cd: Path.expand("../assets", __DIR__)
   ]
 
 config :logger, :default_formatter,
