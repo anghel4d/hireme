@@ -235,13 +235,6 @@ pub extern "C" fn derive() -> u32 {
     with(|k| k.desk.derive() as u32)
 }
 
-/// Runs the kernel over a made-up board and forgets it (see Desk::warm):
-/// for a Worker to call as the page starts, never the page itself.
-#[unsafe(no_mangle)]
-pub extern "C" fn warm() {
-    with(|k| k.desk.warm())
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn selection_ptr() -> u32 {
     with(|k| k.desk.sel.as_ptr() as u32)
