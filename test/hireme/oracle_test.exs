@@ -1,8 +1,8 @@
 defmodule Hireme.OracleTest do
   @moduledoc """
   The oracle's generator writes valid desks across seeds, and its dump
-  names every job in every per-job view, so a port compared against it
-  is compared on everything.
+  judges every job, so the kernel's predictions are compared on all of
+  them.
   """
   use Hireme.DataCase, async: false
 
@@ -22,10 +22,7 @@ defmodule Hireme.OracleTest do
       ids = jobs |> Enum.map(& &1["id"]) |> Enum.sort()
       assert ids != []
 
-      for kind <- ~w(card verdict keywords org focus),
-          do: assert(Enum.sort(Enum.map(by[kind], & &1["id"])) == ids, "#{kind}, seed #{seed}")
-
-      assert Enum.sort(hd(by["order"])["ids"]) == ids
+      assert Enum.sort(Enum.map(by["verdict"], & &1["id"])) == ids
       assert length(by["op"]) == 25
       assert Enum.any?(by["op"], &Map.has_key?(&1["result"], "ok"))
 

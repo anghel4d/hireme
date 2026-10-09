@@ -1,9 +1,10 @@
 defmodule Hireme.Oracle do
   @moduledoc """
-  The reference the client's ports are checked against: for one account
-  and one pinned day, the raw tables a session ships and every view
-  Elixir derives from them, as JSON lines. Kernel (Rust) and link
-  (TypeScript) feed the same tables to their ports and compare.
+  The reference the client's predictions are checked against: for one
+  account and one pinned day, the raw tables a session ships, the raw
+  delta and refusal of each op run over them, and the heat decisions the
+  server makes from them, as JSON lines. The kernel replays the ops from
+  the same tables and compares.
 
   Run it with `test/oracle/run.exs`. Values are plain JSON: a date is its
   day number since 1970-01-01, a datetime its unix second, an atom its
@@ -16,11 +17,9 @@ defmodule Hireme.Oracle do
 
   import Ecto.Query
 
-  alias Hireme.Campaign
   alias Hireme.Corpus
   alias Hireme.Desk
   alias Hireme.Desk.Batch
-  alias Hireme.Desk.Card
   alias Hireme.Desk.Employer
   alias Hireme.Desk.Event
   alias Hireme.Desk.Job
@@ -30,30 +29,24 @@ defmodule Hireme.Oracle do
   alias Hireme.Cv.Lineage
   alias Hireme.Gym
   alias Hireme.Heat
-  alias Hireme.Heat.Ats
-  alias Hireme.Heat.Org
-  alias Hireme.Keywords
   alias Hireme.Kv
-  alias Hireme.LifeEv
   alias Hireme.Net
   alias Hireme.Ops
   alias Hireme.Pipeline
   alias Hireme.Repo
-  alias HiremeWeb.JSON
 
   @epoch ~D[1970-01-01]
 
   # -- the dump ---------------------------------------------------------------
 
-  @doc "The tables and every derived view of the account on this process, on `today`."
+  @doc """
+  The tables of the account on this process, the ops run over them, and
+  what the server still decides from them on `today`: each job's heat
+  verdict (a stage write's refusal) and each batch's mix (its deferrals).
+  """
   @spec dump(Date.t(), keyword()) :: [map()]
   def dump(today, opts \\ []) do
-    cfg = Heat.config()
-    heat = today |> Heat.snapshot(cfg) |> Heat.prepare(cfg, today)
     jobs = Repo.all(from j in Job, order_by: j.id)
-    ids = Enum.map(jobs, & &1.id)
-    cards = Desk.cards(:all, heat, today) |> Enum.sort_by(&Card.order/1)
-    focuses = ids |> Desk.focuses(heat, today) |> Enum.sort_by(& &1.job.id)
 
     meta = %{
       kind: "meta",
@@ -67,31 +60,10 @@ defmodule Hireme.Oracle do
       Keyword.get(opts, :before, []) ++
       tables("table") ++
       Keyword.get(opts, :ops, []) ++
-      Enum.map(cards, &Map.merge(%{kind: "card", band: LifeEv.band(&1.score_100)}, plain(&1))) ++
-      [%{kind: "order", ids: Enum.map(cards, & &1.id)}] ++
       Enum.map(jobs, fn job ->
-        Map.merge(%{kind: "verdict", id: job.id}, plain(Heat.verdict(job, heat, cfg, today)))
+        Map.merge(%{kind: "verdict", id: job.id}, plain(Heat.can_apply(job, today: today)))
       end) ++
-      [%{kind: "heat_chart", value: Heat.chart(today, cfg)}] ++
-      Enum.map(Desk.list_batches(), &mix_batch(&1, today)) ++
-      [
-        %{kind: "score_chart", value: Desk.score_chart(:all)},
-        %{kind: "scoreboard", value: Campaign.scoreboard(today)}
-      ] ++
-      Enum.map(focuses, &keywords/1) ++
-      Enum.map(jobs, &org/1) ++
-      ats(jobs) ++
-      Enum.map(focuses, &%{kind: "focus", id: &1.job.id, value: JSON.focus(&1)}) ++
-      Enum.map(
-        Corpus.list_profiles(),
-        &%{kind: "root", id: &1.id, value: JSON.root(Desk.root(&1.id))}
-      ) ++
-      [
-        %{
-          kind: "lanes",
-          value: %{gym: JSON.gym(Gym.progress(today)), net: JSON.net(Net.progress(today))}
-        }
-      ]
+      Enum.map(Desk.list_batches(), &mix_batch(&1, today))
   end
 
   @doc """
@@ -120,38 +92,6 @@ defmodule Hireme.Oracle do
       kept: Enum.map(result.kept, & &1.id),
       deferred: Enum.map(result.deferred, fn {job, v} -> Map.put(plain(v), "id", job.id) end)
     }
-  end
-
-  defp keywords(%Desk.Focus{job: job} = f) do
-    %{
-      kind: "keywords",
-      id: job.id,
-      extract: Keywords.extract(job.listing || ""),
-      targets: Keywords.targets(f.theme, job.listing),
-      hits: f.coverage.hits,
-      misses: f.coverage.misses,
-      root_hits: f.root_coverage.hits,
-      root_misses: f.root_coverage.misses
-    }
-  end
-
-  defp org(%Job{} = job) do
-    %{
-      kind: "org",
-      id: job.id,
-      size: Org.size(job.company),
-      department: Org.department(job),
-      family: Org.family(job),
-      company_key: Org.company_key(job.company)
-    }
-  end
-
-  defp ats(jobs) do
-    jobs
-    |> Enum.flat_map(&[&1.listing_url, &1.canonical_url])
-    |> Enum.uniq()
-    |> Enum.sort()
-    |> Enum.map(&Map.merge(%{kind: "ats", url: &1}, Ats.parse(&1)))
   end
 
   @doc "One line as JSON text, values made plain."
