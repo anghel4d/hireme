@@ -415,6 +415,9 @@ defmodule Hireme.Ops do
       op_id = signed(op.op_id)
 
       # The day's answers are kept here too, so a new op costs no lookup.
+      # Read on the first op, not at boot: an attach never waits on it.
+      state = if state.ledger, do: state, else: %{state | ledger: read_ledger()}
+
       case Map.fetch(state.ledger, op_id) do
         {:ok, {reply, _at}} ->
           {reply, state}
@@ -604,13 +607,16 @@ defmodule Hireme.Ops do
   defp warm(state, look? \\ true)
 
   defp warm(%{raw: nil} = state, _look?) do
+    # The revision first: a write from another VM landing mid-read leaves
+    # it behind the database, so the next attach re-reads.
+    rev = db_rev(state)
     raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
 
     %{
       state
-      | rev: db_rev(state),
+      | rev: rev,
         raw: raw,
-        ledger: read_ledger(),
+        ledger: nil,
         ring: :queue.new(),
         ring_bytes: 0
     }
