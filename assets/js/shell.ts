@@ -392,6 +392,8 @@ export class Shell {
       this.drawBoard(focus, mark)
     } else {
       morph(lens, this.lensView(focus, mark, lanes))
+      const paper = m.lens === "battleplan" && focus ? lens.querySelector("#bp-paper") : null
+      if (paper && focus) morph(paper, views.battleplanPaper(focus, m.editing, m.alterError))
       workspace.hidden = true
     }
     // Assigning the title rewrites the <title> node even when it is the same.
@@ -404,7 +406,7 @@ export class Shell {
     switch (m.lens) {
       case "battleplan":
         return focus
-          ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.editing, m.alterError, m.refusal, mark)}</div>`
+          ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.refusal, mark)}</div>`
           : views.waiting("battleplan", "Streaming the battleplan…")
       case "root": {
         const root = this.rootProfile()

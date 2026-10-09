@@ -137,6 +137,9 @@ function patchNode(have: ChildNode, want: ChildNode): void {
     if (have.getAttribute(attr.name) !== attr.value) have.setAttribute(attr.name, attr.value)
   }
 
+  // A slot's children are drawn by their own morph.
+  if (have.hasAttribute("data-slot")) return
+
   // A field the person is typing in keeps its text.
   if (have instanceof HTMLInputElement && want instanceof HTMLInputElement) {
     if (document.activeElement !== have && have.value !== want.value) have.value = want.value
