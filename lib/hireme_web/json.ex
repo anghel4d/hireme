@@ -1,11 +1,12 @@
 defmodule HiremeWeb.JSON do
   @moduledoc """
-  The wire shape of everything the desk answers, to the shell over HTTP
-  and to an agent's MCP tool calls: a focus, a root, a scoreboard and its
-  chart, the lanes and their rows, a heat verdict, and a refusal. Every
-  field is named here on purpose; nothing is serialised by reflection.
-  Rows carry keys, which is what a tool call takes back; labels travel
-  once, as the options in `lanes/0`.
+  The JSON shape of what an MCP agent's tool calls answer (a focus, a
+  root, a score chart, the lanes and their rows, a heat verdict), of the
+  account page's keys and ways in, and of an HTTP refusal. The browser
+  derives these views itself from raw rows; the oracle
+  (`test/support/oracle.ex`) dumps these shapes as the reference its
+  ports must equal. Every field is named here on purpose; nothing is
+  serialised by reflection.
   """
 
   import Plug.Conn, only: [put_status: 2]
@@ -78,8 +79,7 @@ defmodule HiremeWeb.JSON do
     }
   end
 
-  @spec job(Job.t()) :: map()
-  def job(%Job{} = j) do
+  defp job(%Job{} = j) do
     %{
       id: j.id,
       code: Desk.code(j.id),
