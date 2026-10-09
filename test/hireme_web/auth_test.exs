@@ -70,7 +70,8 @@ defmodule HiremeWeb.AuthTest do
     {:ok, %{secret: foreign}} = ApiKeys.create("foreign")
     assert {:ok, %{account_id: other}} = Hireme.Letterbox.agent_key(foreign, "t")
     refute other == account_id
-    assert {:error, :not_found} = Hireme.Letterbox.claim(job.id)
+    assert {:error, %{code: :empty, n: 0}} = Hireme.Letterbox.acquire({:range, 1, 16})
+    _ = job
   end
 
   test "an enrolled account's new session is pending until a factor is presented, and sensitive writes need a fresh one",

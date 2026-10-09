@@ -363,17 +363,18 @@ defmodule HiremeBench.Actions do
       no_cleanup
     )
 
+    entry = Repo.aggregate(from(j in Job, where: j.id <= ^job.id), :count)
+
     measure(
       "Letterbox",
-      "claim",
+      "acquire_16",
       n,
       no_prepare,
-      fn _ -> Letterbox.claim(job.id) end,
-      fn result, _ ->
-        ok(result)
-        true = MapSet.member?(Letterbox.leased_jobs(), job.id)
+      fn _ -> Letterbox.acquire({:count, 16}) end,
+      fn {:ok, block, _}, _ ->
+        true = MapSet.member?(Letterbox.leased_jobs(), hd(block.jobs))
       end,
-      fn result, _ -> :ok = Letterbox.release(ok(result)) end
+      fn {:ok, block, _}, _ -> :ok = Letterbox.release(block) end
     )
 
     # A lease's write: the holder runs the op through the sequencer.
@@ -383,9 +384,10 @@ defmodule HiremeBench.Actions do
       n,
       fn _ ->
         reset_job(job.id, %{score_100: 40})
-        ok(Letterbox.claim(job.id))
+        {:ok, block, _} = Letterbox.acquire({:range, entry, entry})
+        block
       end,
-      fn _pair ->
+      fn _block ->
         op = %{
           op_id: System.unique_integer([:positive]),
           kind: :score,
@@ -397,14 +399,14 @@ defmodule HiremeBench.Actions do
         {:ok, Repo.get!(Job, job.id)}
       end,
       fn result, _ -> assert_job(result, job.id, %{score_100: 82}) end,
-      fn _, pair -> :ok = Letterbox.release(pair) end
+      fn _, block -> :ok = Letterbox.release(block) end
     )
 
     measure(
       "Letterbox",
       "release",
       n,
-      fn _ -> ok(Letterbox.claim(job.id)) end,
+      fn _ -> elem(Letterbox.acquire({:range, entry, entry}), 1) end,
       &Letterbox.release/1,
       fn result, _ ->
         :ok = result

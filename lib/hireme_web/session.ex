@@ -21,10 +21,10 @@ defmodule HiremeWeb.Session do
   bidi streams are reset.
 
   An agent's session is the agent's one process on the server, and it
-  holds the agent's leases itself (`Hireme.Letterbox`): a lease is a lane
-  of control, numbered by the frames' header `rev`. LEASE takes a job,
-  OPs on the lane write that job and nothing else, BYE gives it back;
-  the key being revoked or the session ending gives back every lease.
+  holds the agent's one lease itself (`Hireme.Letterbox`): a block of
+  applications, taken and given back by RPC (`lease/acquire`,
+  `lease/release`). The agent's ops on an application need it in the
+  block; the key being revoked or the session ending gives the block back.
 
   Order: `Hireme.Ops` serializes every write per account and broadcasts
   `{:ops_delta, rev, delta}` before it answers. A delta at or below the
@@ -48,7 +48,6 @@ defmodule HiremeWeb.Session do
   @ticket_age 60
   @recheck_ms 60_000
   @hello_deadline_ms 5_000
-  @max_leases 64
   # The first server-opened uni stream (QUIC ids 4n+3) carries an early BOOT.
   @early_stream 3
 
@@ -65,7 +64,7 @@ defmodule HiremeWeb.Session do
     client_id: 0,
     buffer: <<>>,
     acks: [],
-    leases: %{},
+    lease: nil,
     raw: false,
     early: false,
     acct_dirty: false,
@@ -294,11 +293,9 @@ defmodule HiremeWeb.Session do
 
   def info(_message, s), do: {:ok, s}
 
-  @doc "The session is ending: an agent's leases go back now, not when the registry notices."
+  @doc "The session is ending: an agent's block goes back now, not when the registry notices."
   @spec terminate(term(), %__MODULE__{}) :: :ok
-  def terminate(_reason, s) do
-    Enum.each(s.leases, fn {_lane, pair} -> Letterbox.release(pair) end)
-  end
+  def terminate(_reason, s), do: Letterbox.release(s.lease)
 
   # ---- Frames from the client ----
 
@@ -331,17 +328,6 @@ defmodule HiremeWeb.Session do
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
-  # An agent's leases are lanes of control (header rev ≥ 1).
-  defp frame({:lease, _, lane, <<job_id::little-64, _::binary>>}, %{role: :agent} = s)
-       when lane > 0,
-       do: lease(s, lane, job_id)
-
-  defp frame({:op, _, lane, body}, %{role: :agent} = s) when lane > 0,
-    do: lease_op(s, lane, body)
-
-  defp frame({:bye, _, lane, _}, %{role: :agent} = s) when lane > 0,
-    do: {:ok, release(s, lane)}
-
   defp frame({:op, _, _, body}, %{role: role} = s) when role in [:browser, :agent],
     do: op(s, body)
 
@@ -350,6 +336,12 @@ defmodule HiremeWeb.Session do
          %{role: :browser} = s
        ),
        do: rpc(s, json)
+
+  defp frame(
+         {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>},
+         %{role: :agent} = s
+       ),
+       do: lease_rpc(s, json)
 
   defp frame({:ping, _, _, <<t::little-64, _::binary>>}, s) do
     control(
@@ -540,8 +532,8 @@ defmodule HiremeWeb.Session do
   defp raw_patch(s, rev, delta) do
     s = flush_rest(s)
     # The PATCH and the ACKs it settles leave as one write.
-    {due, held} = Enum.split_with(s.acks, fn {r, _, _} -> r <= rev end)
-    acks = for {_r, op_id, stamp} <- Enum.reverse(due), do: Packet.ack(op_id, stamp)
+    {due, held} = Enum.split_with(s.acks, fn {r, _} -> r <= rev end)
+    acks = for {r, op_id} <- Enum.reverse(due), do: Packet.ack(op_id, r)
     control(s, [Packet.frame(:patch, rev, raw_delta(delta)) | acks])
     %{s | rev: rev, acks: held}
   end
@@ -581,13 +573,13 @@ defmodule HiremeWeb.Session do
   defp op(s, body) do
     case Packet.op(body) do
       {:ok, op} ->
-        case Ops.run(s.account_id, op) do
+        case run(s, op) do
           {:ok, rev} when rev <= s.rev ->
             ack(s, op.op_id, rev)
             {:ok, s}
 
           {:ok, rev} ->
-            {:ok, settle(%{s | acks: [{rev, op.op_id, rev} | s.acks]}, rev)}
+            {:ok, settle(%{s | acks: [{rev, op.op_id} | s.acks]}, rev)}
 
           {:error, reason} ->
             control(s, Packet.nack(op.op_id, reason, s.rev))
@@ -603,6 +595,14 @@ defmodule HiremeWeb.Session do
     end
   end
 
+  # An agent writes only what its block holds; a browser, whatever no
+  # lease holds (the sequencer's own check).
+  defp run(%{role: :agent} = s, op) do
+    with :ok <- Letterbox.permit(s.lease, op), do: Ops.run(s.account_id, op)
+  end
+
+  defp run(s, op), do: Ops.run(s.account_id, op)
+
   defp ack(s, op_id, rev), do: control(s, Packet.ack(op_id, rev))
 
   # The sequencer sends a write's delta before it answers, so the delta is
@@ -616,71 +616,58 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  # ---- Leases: an agent's lanes ----
+  # ---- An agent's block ----
 
-  # As many lanes as the gate allows streams: a key cannot hold more.
-  defp lease(%{leases: leases} = s, lane, _job_id)
-       when map_size(leases) >= @max_leases or is_map_key(leases, lane) do
-    control(s, Packet.frame(:bye, lane, sized("busy")))
-    {:ok, s}
-  end
+  # `lease/acquire` and `lease/release` as JSON-RPC, answered on control.
+  defp lease_rpc(s, json) do
+    case Jason.decode(json) do
+      {:ok, %{"id" => id, "method" => method} = req} ->
+        {s, reply} = lease(s, method, req["params"] || %{})
+        rpc_reply(s, Map.put(reply, :id, id))
+        {:ok, s}
 
-  defp lease(s, lane, job_id) do
-    case Letterbox.claim(job_id) do
-      {:ok, pair} ->
-        control(s, Packet.ack(0, lane))
-        {:ok, %{s | leases: Map.put(s.leases, lane, pair)}}
-
-      {:error, reason} ->
-        control(s, Packet.nack(0, reason, lane))
+      _ ->
         {:ok, s}
     end
   end
 
-  # A lane's op writes its own job, with the session as the lease's
-  # holder; its ACK waits for the delta, as a browser's does, and comes
-  # back on the lane.
-  defp lease_op(s, lane, body) do
-    pair = s.leases[lane]
+  # A refusal or a warning travels as the data it is (codes, entries,
+  # the free block); the agent words it.
+  defp lease(%{lease: nil} = s, "lease/acquire", params) do
+    case Letterbox.acquire(want(params)) do
+      {:ok, block, warnings} ->
+        result = %{from: block.from, to: block.to, jobs: block.jobs, warnings: warnings}
+        {%{s | lease: block}, %{result: plain(result)}}
 
-    case Packet.op(body) do
-      {:ok, op} when pair != nil ->
-        if Letterbox.lease_op?(op, pair) do
-          case Ops.run(s.account_id, op) do
-            {:ok, rev} when rev <= s.rev ->
-              ack(s, op.op_id, lane)
-              {:ok, s}
-
-            {:ok, rev} ->
-              {:ok, settle(%{s | acks: [{rev, op.op_id, lane} | s.acks]}, rev)}
-
-            {:error, reason} ->
-              control(s, Packet.nack(op.op_id, reason, lane))
-              {:ok, s}
-          end
-        else
-          control(s, Packet.nack(op.op_id, {:argument, "op for the leased job"}, lane))
-          {:ok, s}
-        end
-
-      {:ok, op} ->
-        control(s, Packet.nack(op.op_id, {:argument, "lease"}, lane))
-        {:ok, s}
-
-      {:error, op_id} ->
-        control(s, Packet.nack(op_id, {:argument, "op"}, lane))
-        {:ok, s}
-
-      :error ->
-        bye(s, "op")
+      {:error, refusal} ->
+        {s, %{error: %{code: 409, message: to_string(refusal.code), data: plain(refusal)}}}
     end
   end
 
-  defp release(s, lane) do
-    {pair, leases} = Map.pop(s.leases, lane)
-    if pair, do: Letterbox.release(pair)
-    %{s | leases: leases}
+  defp lease(%{lease: block} = s, "lease/acquire", _params) do
+    held = %{code: :held, from: block.from, to: block.to}
+    {s, %{error: %{code: 409, message: "held", data: held}}}
   end
+
+  defp lease(s, "lease/release", _params) do
+    Letterbox.release(s.lease)
+    {%{s | lease: nil}, %{result: %{released: true}}}
+  end
+
+  defp lease(s, _method, _params), do: {s, %{error: %{code: 404, message: "unknown method"}}}
+
+  defp plain(%{} = map), do: Map.new(map, fn {k, v} -> {k, plain(v)} end)
+  defp plain(list) when is_list(list), do: Enum.map(list, &plain/1)
+  defp plain(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> plain()
+  defp plain(value), do: value
+
+  defp want(%{"count" => count}) when is_integer(count), do: {:count, count}
+
+  defp want(%{"from" => from, "to" => to}) when is_integer(from) and is_integer(to),
+    do: {:range, from, to}
+
+  defp want(%{"from" => from}) when is_integer(from), do: {:range, from, from}
+  defp want(_params), do: {:count, 16}
 
   # ---- Writing ----
 

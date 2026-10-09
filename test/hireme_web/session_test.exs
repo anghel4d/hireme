@@ -353,10 +353,10 @@ defmodule HiremeWeb.SessionTest do
     assert [{:patch, 0, _, pbody}] = all_out()
     assert Packet.table_id(:job_apps) in table_ids(pbody)
 
-    # Its own writes go up as OPs on control and come back ACKed.
+    # Its writes go up as OPs on control; one outside a block is refused.
     {:ok, a} = Session.event({:data, 0, op(71, 2, job.id, ["Agent writes", ""])}, a)
     _a = drain(a)
-    assert Enum.any?(all_out(), &match?({:ack, _, _, <<71::little-64>>}, &1))
+    assert Enum.any?(all_out(), &match?({:nack, _, _, <<71::little-64, _::binary>>}, &1))
   end
 
   test "a browser that does not ask for raw tables is told its bundle is stale",
@@ -395,91 +395,81 @@ defmodule HiremeWeb.SessionTest do
     a
   end
 
-  defp on_lane(a, frame) do
+  defp send_in(a, frame) do
     {:ok, a} = Session.event({:data, 0, IO.iodata_to_binary(frame)}, a)
     drain(a)
   end
 
-  defp lease_frame(lane, job_id), do: Packet.frame(:lease, lane, <<job_id::little-64>>)
+  # One lease RPC, and its decoded reply.
+  defp call(a, id, method, params) do
+    a =
+      send_in(
+        a,
+        HiremeWeb.Account.rpc_frame(Jason.encode!(%{id: id, method: method, params: params}))
+      )
 
-  # An op on a lane: the op frame with the lane in its header's rev.
-  defp lane_op(lane, op_id, kind, target, fields) do
-    {:ok, [{:op, 0, 0, body}], ""} = Packet.split(op(op_id, kind, target, fields))
-    Packet.frame(:op, lane, body)
+    [reply] =
+      for {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>} <- all_out(),
+          do: Jason.decode!(json)
+
+    {a, reply}
   end
 
   defp leased?(job_id), do: MapSet.member?(Hireme.Letterbox.leased_jobs(), job_id)
-
-  # The answers among what went out (a lease taken or given back also
-  # repaints its job's `leased` row).
   defp answers, do: Enum.filter(all_out(), &(elem(&1, 0) in [:ack, :nack]))
 
-  test "an agent's session holds its leases as lanes, each writing only its own job", %{
-    account: account
-  } do
-    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("lanes")
-    a = job(profile(), %{company: "Alpha"})
-    b = job(profile(), %{company: "Beta"})
-    sibling = job(profile(), %{company: "Alpha"})
+  test "an agent leases a block by RPC and writes only what it holds", %{account: _account} do
+    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("blocks")
+    jobs = for i <- 1..6, do: job(profile(), %{company: "Co #{i}"})
+    [j1, _j2, j3, j4 | _] = jobs
+    {{:ok, _, _}, other} = hold_lease(j3.id)
     s = agent(secret, "198.51.100.10")
 
-    s = on_lane(s, lease_frame(1, a.id))
-    s = on_lane(s, lease_frame(2, b.id))
-    assert [{:ack, 0, 1, <<0::little-64>>}, {:ack, 0, 2, <<0::little-64>>}] = answers()
-    assert leased?(a.id) and leased?(b.id)
+    # A block over another agent's entry is refused whole, and says where to go.
+    {s, %{"error" => %{"data" => %{"code" => "busy", "held" => [3], "free" => [4, 6]}}}} =
+      call(s, 1, "lease/acquire", %{"from" => 2, "to" => 4})
 
-    # A write on lane 1 lands on its job, after its delta, answered on the lane.
-    s = on_lane(s, lane_op(1, 81, 2, a.id, ["From lane 1", ""]))
-    out = all_out()
-    assert List.last(out) == {:ack, 0, 1, <<81::little-64>>}
-    assert match?({:patch, _, _, _}, Enum.at(out, -2))
-    assert Repo.get!(Hireme.Desk.Job, a.id).next_action == "From lane 1"
+    {s, %{"result" => %{"from" => 1, "to" => 2, "jobs" => held, "warnings" => []}}} =
+      call(s, 2, "lease/acquire", %{"count" => 2})
 
-    # Lane 1 cannot write lane 2's job, nor run a desk-wide op.
-    s = on_lane(s, lane_op(1, 82, 4, b.id, ["1"]))
-    s = on_lane(s, lane_op(1, 83, 7, 0, ["B-1"]))
+    assert held == Enum.map(Enum.take(jobs, 2), & &1.id)
 
-    assert [
-             {:nack, 0, 1, <<82::little-64, _::binary>>},
-             {:nack, 0, 1, <<83::little-64, _::binary>>}
-           ] =
-             all_out()
+    # A write in the block lands, after its delta; one outside is refused `leased`.
+    s = send_in(s, op(81, 2, j1.id, ["From the block", ""]))
+    s = send_in(s, op(82, 4, j4.id, ["1"]))
 
-    # Another agent cannot take a held job, or one on a held lineage.
-    other = agent(secret, "198.51.100.12")
-    other = on_lane(other, lease_frame(1, a.id))
-    _other = on_lane(other, lease_frame(2, sibling.id))
-    assert [{:nack, 0, 1, _}, {:nack, 0, 2, _}] = answers()
+    assert [{:ack, 0, _, <<81::little-64>>}, {:nack, 0, _, <<82::little-64, 3, _::binary>>}] =
+             answers()
 
-    # BYE gives a lane back; the session's end gives back the rest.
-    s = on_lane(s, Packet.frame(:bye, 1, <<0::16>>))
-    refute leased?(a.id)
-    assert leased?(b.id)
+    assert Repo.get!(Hireme.Desk.Job, j1.id).next_action == "From the block"
+
+    # One block per agent: release it first.
+    {s, %{"error" => %{"data" => %{"code" => "held", "from" => 1, "to" => 2}}}} =
+      call(s, 3, "lease/acquire", %{"count" => 1})
+
+    {s, %{"result" => %{"released" => true}}} = call(s, 4, "lease/release", %{})
+    refute leased?(j1.id)
+
+    # A range past the desk is clamped, with a warning.
+    {s, %{"result" => %{"from" => 4, "to" => 6, "warnings" => [%{"code" => "truncated"}]}}} =
+      call(s, 5, "lease/acquire", %{"from" => 4, "to" => 60})
+
     Session.terminate(:normal, s)
-    refute leased?(b.id)
-    _ = account
+    refute leased?(j4.id)
+    let_go(other)
   end
 
-  test "a revoked key ends the session and frees every lease", %{account: _account} do
+  test "a revoked key, or the session ending, gives the block back", %{account: _account} do
     {:ok, %{key: key, secret: secret}} = Hireme.ApiKeys.create("revoked")
     job = job(profile(), %{company: "Revoked"})
-    s = agent(secret, "198.51.100.13")
-    s = on_lane(s, lease_frame(1, job.id))
-    _ = all_out()
+    {s, _} = call(agent(secret, "198.51.100.13"), 1, "lease/acquire", %{"count" => 1})
+    assert leased?(job.id)
 
     Hireme.ApiKeys.revoke(key)
     assert_receive :api_key_dead
     assert {:stop, :normal, s} = Session.info(:api_key_dead, s)
     Session.terminate(:normal, s)
     refute leased?(job.id)
-  end
-
-  test "an agent holds no more lanes than the gate allows streams", %{account: _account} do
-    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("cap")
-    s = agent(secret, "198.51.100.14")
-    full = %{s | leases: Map.new(1..64, &{&1 + 100, nil})}
-    {:ok, ^full} = Session.event({:data, 0, IO.iodata_to_binary(lease_frame(999, 1))}, full)
-    assert [{:bye, 0, 999, <<4::little-16, "busy", _pad::binary>>}] = all_out()
   end
 
   test "an agent that never says HELLO is closed", %{account: _account} do
