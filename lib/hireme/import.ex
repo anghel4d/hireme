@@ -21,6 +21,8 @@ defmodule Hireme.Import do
 
   The same canonical job URL updates the existing card. A second import
   does not mint a second application.
+  Nonempty URL lookups use the account-scoped partial unique index; rows
+  still commit individually, so a later invalid row leaves earlier imports intact.
 
   Accepted shapes:
 
@@ -256,7 +258,11 @@ defmodule Hireme.Import do
       next_action: app["next_action"] || hold_action(batch)
     }
 
-    case Repo.get_by(Job, canonical_url: url) do
+    # The URL is nonempty above; spell out the partial unique index's predicate
+    # so SQLite can seek by account and canonical URL instead of scanning its jobs.
+    existing = from j in Job, where: j.canonical_url == ^url and j.canonical_url != ""
+
+    case Repo.one(existing) do
       nil ->
         {:ok, _job} = Desk.create_job(Map.put(attrs, :profile_id, profile.id))
 
