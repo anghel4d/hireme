@@ -302,7 +302,8 @@ defmodule HiremeWeb.Session do
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
-  defp frame({:op, _, _, body}, %{role: :browser} = s), do: op(s, body)
+  defp frame({:op, _, _, body}, %{role: role} = s) when role in [:browser, :agent],
+    do: op(s, body)
 
   defp frame(
          {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>},
@@ -328,20 +329,11 @@ defmodule HiremeWeb.Session do
         s = %{s | role: :agent, agent: agent, account_id: agent.account_id, client_id: client}
         s.mod.ready(s.carrier)
 
-        # An agent reads raw rows too: its BOOT holds the dictionaries and
-        # the batches and profiles they name, and every delta is raw rows.
-        {:ok, rev, snap} = Ops.attach(agent.account_id, nil)
-        tables = agent_tables(snap)
+        # An agent is a client like the browser: the same raw BOOT, the
+        # same deltas, and it derives its own views from them.
+        {:ok, rev, {:boot, %{tables: tables}}} = Ops.attach(agent.account_id, nil)
         s = %{s | rev: rev, hello: true, raw: true}
-
-        body = [
-          Packet.static_lookups(),
-          Packet.raw(:batches, Map.get(tables, :batches, [])),
-          Packet.raw(:profiles, Map.get(tables, :profiles, [])),
-          clock()
-        ]
-
-        control(s, Packet.frame(:boot, rev, body, flags: @end_flag))
+        boot(s, rev, tables, [])
         {:ok, s}
 
       :error ->
@@ -356,14 +348,8 @@ defmodule HiremeWeb.Session do
     s = %{s | rev: rev, hello: true, client_id: client}
 
     case snap do
-      # The board first: what the cards are drawn from, without the job
-      # listings. The rest (CV items, events, gym and net, the listings)
-      # follows at the same rev, so the first paint waits for neither.
       {:boot, %{tables: tables}} ->
-        {board, rest} = split_boot(tables)
-        body = [Packet.static_lookups(), raw_boot(board), account_tables(s)]
-        control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
-        if rest != [], do: control(s, Packet.frame(:patch, rev, rest, deflate: true))
+        boot(s, rev, tables, account_tables(s))
 
       {:replay, deltas} ->
         for {r, delta} <- deltas, do: control(s, Packet.frame(:patch, r, raw_delta(delta)))
@@ -383,16 +369,21 @@ defmodule HiremeWeb.Session do
 
   # ---- Raw tables (round two): rows as the database holds them ----
 
-  # A replay (the agent asked for no snapshot, so this only follows a
-  # ring hit) carries no tables; a boot carries them all.
-  defp agent_tables({:boot, %{tables: tables}}), do: tables
-  defp agent_tables(_replay), do: %{}
-
   @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
                  narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
 
   # Every raw table the snapshot holds, then the server's clock.
   @board ~w(job_apps profiles batches cv_variants leases scoreboard_snapshots)a
+
+  # The board first: what the cards are drawn from, without the job
+  # listings. The rest (CV items, events, gym and net, the listings)
+  # follows at the same rev, so the first paint waits for neither.
+  defp boot(s, rev, tables, account) do
+    {board, rest} = split_boot(tables)
+    body = [Packet.static_lookups(), raw_boot(board), account]
+    control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
+    if rest != [], do: control(s, Packet.frame(:patch, rev, rest, deflate: true))
+  end
 
   defp split_boot(tables) do
     jobs =
