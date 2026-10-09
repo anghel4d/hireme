@@ -564,6 +564,9 @@ defmodule HiremeWeb.Packet do
 
   defp raw_value(row, :keywords, _), do: unit_list(Map.get(row, :keywords))
 
+  # A batch's fire is 0/1 on the wire (shared with the derived batches table).
+  defp raw_value(row, :fire, :u32), do: Map.get(row, :fire) in [:open_fire, "open_fire", true, 1]
+
   defp raw_value(row, col, type) do
     case Map.get(row, col) do
       %{} = map when type == :str and not is_struct(map) -> Jason.encode!(map)

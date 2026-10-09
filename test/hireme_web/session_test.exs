@@ -279,7 +279,16 @@ defmodule HiremeWeb.SessionTest do
 
   test "a raw hello boots raw tables, account tables and the clock, and no focus stream",
        %{account: account} do
+    # A batch written before the sequencer starts is in its first read.
+    Hireme.Repo.insert!(%Hireme.Desk.Batch{
+      code: "B-raw",
+      ordinal: 1,
+      fire: :hold,
+      account_id: account.id
+    })
+
     job = job(profile())
+
     s = open(account)
     {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
     [{:boot, 0x02, rev, body}] = all_out() |> Enum.take(1) |> Enum.map(&inflate/1)
