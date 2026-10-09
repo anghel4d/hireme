@@ -308,7 +308,7 @@ defmodule Hireme.Ops do
   end
 
   def handle_call({:run, op, holder}, _from, state) do
-    guard(state, fn ->
+    guard(state, :wire, fn ->
       state = warm(state, false)
       op_id = signed(op.op_id)
 
@@ -358,15 +358,27 @@ defmodule Hireme.Ops do
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  # A raise inside a write is the caller's, re-raised there; the write
-  # rolled back. A raise after commit leaves the table suspect, so the
-  # next write repaints everything.
-  defp guard(state, fun) do
+  # A raise inside a write rolled it back. A domain caller gets it
+  # re-raised in its own process; a client op is answered `:internal`,
+  # since its target and fields are the client's and a frame must never
+  # take down the session that carried it. Either way the sequencer
+  # lives on, and because a raise after commit leaves the table suspect,
+  # the next write repaints everything.
+  defp guard(state, mode \\ :domain, fun) do
     {reply, state} = fun.()
     {:reply, reply, state}
   rescue
     exception ->
-      {:reply, {:raise, exception, __STACKTRACE__}, %{state | rev: nil, cards: state.cards}}
+      state = %{state | rev: nil}
+
+      case mode do
+        :domain ->
+          {:reply, {:raise, exception, __STACKTRACE__}, state}
+
+        :wire ->
+          Logger.error(Exception.format(:error, exception, __STACKTRACE__))
+          {:reply, {:error, :internal}, state}
+      end
   end
 
   # -- one write --------------------------------------------------------------
@@ -375,25 +387,31 @@ defmodule Hireme.Ops do
     Process.put(@holder, holder)
     Process.put(@held, [])
 
+    # A row the account cannot see (another account's, or none) is a
+    # refusal, whichever lookup in the write found it missing.
     result =
-      Repo.transaction(fn ->
-        case apply_command(command) do
-          {:ok, value} ->
-            rev = bump!(state)
-            if ledger, do: insert_entry!(ledger, rev, nil)
-            {value, rev}
+      try do
+        Repo.transaction(fn ->
+          case apply_command(command) do
+            {:ok, value} ->
+              rev = bump!(state)
+              if ledger, do: insert_entry!(ledger, rev, nil)
+              {value, rev}
 
-          {:error, reason} ->
-            Repo.rollback(reason)
+            {:error, reason} ->
+              Repo.rollback(reason)
 
-          other ->
-            Repo.rollback({:shape, other})
-        end
-      end)
+            other ->
+              Repo.rollback({:shape, other})
+          end
+        end)
+      rescue
+        Ecto.NoResultsError -> {:error, :not_found}
+      after
+        Process.delete(@holder)
+      end
 
-    held = Process.get(@held, []) |> Enum.reverse()
-    Process.delete(@holder)
-    Process.delete(@held)
+    held = (Process.delete(@held) || []) |> Enum.reverse()
 
     case result do
       {:ok, {value, rev}} ->

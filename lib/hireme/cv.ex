@@ -694,9 +694,18 @@ defmodule Hireme.CvPair do
   def tailor(%__MODULE__{} = claimed, item_id, attrs, today \\ Date.utc_today())
       when is_integer(item_id) do
     with {:ok, pair} <- verified(claimed),
+         :ok <- line?(item_id),
          {:ok, lineage} <- editable(pair, today) do
       write_line(pair, lineage, item_id, attrs, today)
     end
+  end
+
+  # A line of this account's corpus. Another account's line, or none,
+  # would leave an overlay pointing outside the desk.
+  defp line?(item_id) do
+    if Repo.exists?(from i in Hireme.Corpus.Item, where: i.id == ^item_id),
+      do: :ok,
+      else: {:error, :not_found}
   end
 
   @spec drop_line(t(), pos_integer(), Date.t()) :: {:ok, t()} | {:error, atom()}
