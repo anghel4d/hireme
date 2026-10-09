@@ -66,13 +66,8 @@ export function lower(f: Filters, t: Tables): Selection {
   }
 }
 
-/** Each filter control's value, by the control's name. */
-export function fields(f: Filters): [string, string][] {
-  const value = (p: Pick<string> | { kind: "leftover" }) => (p.kind === "one" ? p.value : p.kind)
-  return [
-    ["q", f.q], ["stage", value(f.stage)], ["profile", value(f.profile)], ["batch", value(f.batch)], ["status", value(f.status)],
-    ["band", value(f.band)], ["min_score", f.minScore > 0 ? String(f.minScore) : ""], ["heat", value(f.heat)],
-  ]
+export function value(p: Pick<string> | { kind: "leftover" }): string {
+  return p.kind === "all" ? "all" : p.kind === "leftover" ? "leftover" : p.value
 }
 
 function pick(v: string | null, allowed: string[]): Pick<string> {

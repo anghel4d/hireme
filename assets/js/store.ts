@@ -460,12 +460,17 @@ export class Kernel {
 /** The kernel module, compiled once, and its first instance; a trap re-instantiates the module. */
 export interface KernelModule { module: WebAssembly.Module; instance: WireKernel }
 
-export async function loadWireKernel(url: string): Promise<KernelModule> {
-  const { module, instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
-  // Every function's first call compiles it: take that on a throwaway desk
-  // now, while the connection waits for the server, not on the BOOT.
-  ;(instance.exports as unknown as WireKernel).warm()
-  return { module, instance: instance.exports as unknown as WireKernel }
+/**
+ * The kernel, from the module the page started compiling, or fetched now.
+ * Every function's first call compiles it, so a throwaway desk takes those
+ * calls once `ready` settles (the HELLO is out, and the server is working):
+ * not before, where it would hold up the socket's open, and not on the BOOT.
+ */
+export async function loadWireKernel(url: string, early?: Promise<WebAssembly.Module>, ready?: Promise<unknown>): Promise<KernelModule> {
+  const module = (await early?.catch(() => undefined)) ?? (await WebAssembly.compileStreaming(fetch(url)))
+  const instance = (await WebAssembly.instantiate(module, {})).exports as unknown as WireKernel
+  void (ready ?? Promise.resolve()).then(() => instance.warm(), () => instance.warm())
+  return { module, instance }
 }
 
 // ---- what rows are read as ----
@@ -1067,8 +1072,13 @@ export class LocalDesk implements Desk, Host {
     this.snapshot?.clear()
   }
 
-  /** Paint from saved frames, then predict again and resend the ops never acknowledged. */
-  restore(bytes: Bytes, ops: readonly { opId: bigint; op: Op }[]): void {
+  /**
+   * Paint from saved frames, then predict again and resend the ops never
+   * acknowledged. Only before the network's desk has landed: the BOOT
+   * replaces a restored desk, never the other way round.
+   */
+  restore(bytes: Bytes, ops: readonly { opId: bigint; op: Op }[]): boolean {
+    if (this.kernel.rev !== 0n) return false
     this.replaying = true
     try {
       this.ingest(bytes, FLAG.END)
@@ -1077,9 +1087,13 @@ export class LocalDesk implements Desk, Host {
     }
     for (const { opId, op } of ops) {
       const p: Pending = { opId, op, job: jobOf(op), frame: encodeOp(this.hash, opId, op) }
-      if (this.kernel.push(p.frame) === 0) this.pending.push(p)
+      if (this.kernel.push(p.frame) === 0) {
+        this.pending.push(p)
+        this.link?.send(p)
+      }
     }
     if (ops.length > 0) this.emit({ ...this.settle(), rows: true })
+    return true
   }
 
   frame(f: Bytes, kind: number, flags: number): void {

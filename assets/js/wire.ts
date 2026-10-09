@@ -119,11 +119,16 @@ export function text(frame: Bytes, at: number): [string, number] {
 /**
  * Cuts a byte stream into frames. Bytes land in one staging buffer that
  * grows to the largest frame seen; a complete frame is passed as a view
- * of it.
+ * of it. After the first whole desk (an END frame: the board) the frames
+ * behind it wait for one paint, so the board paints from its own frame
+ * before the rest of the desk lands.
  */
 export class Framer {
   private buf = new ArrayBuffer(64 * 1024)
   private filled = 0
+  private held: Bytes[] | null = null
+  private painted = false
+  private flushed: Promise<void> = Promise.resolve()
 
   constructor(private readonly sink: Sink, private readonly broken: (why: string) => void) {}
 
@@ -188,8 +193,30 @@ export class Framer {
   }
 
   private emit(f: Bytes): void {
+    if (this.held) {
+      this.held.push(f.slice())
+      return
+    }
     const h = header(f)
     this.sink.frame(f, h.kind, h.flags, h.rev)
+    if (h.flags & FLAG.END && !this.painted) {
+      this.painted = true
+      this.held = []
+      // After the frame that paints the board; a hidden page paints nothing, so not past 100 ms.
+      this.flushed = new Promise<void>((r) => {
+        requestAnimationFrame(() => setTimeout(r, 0))
+        setTimeout(r, 100)
+      }).then(() => {
+        const held = this.held ?? []
+        this.held = null
+        for (const g of held) this.emit(g)
+      })
+    }
+  }
+
+  /** Once every frame cut so far has reached the sink. */
+  idle(): Promise<void> {
+    return this.flushed
   }
 }
 
@@ -252,10 +279,12 @@ function drain(wt: WebTransport): Uni {
 export interface Early {
   ws?: WebSocket
   snap?: Promise<unknown>
+  /** The kernel's module, compiling since the page's first script ran. */
+  kernel?: Promise<WebAssembly.Module>
   /** The client id the early connection carried; the desk's ops use it too. */
   clientId?: number
-  /** The early connection, once open: the rev it named, and on WebTransport the session, its BOOT stream and control. */
-  hello?: Promise<{ rev: bigint; wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Bytes> } | null>
+  /** The early connection, once open (it asked for the whole desk): on WebTransport the session, its BOOT stream and control. */
+  hello?: Promise<{ wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Bytes> } | null>
   /** Socket messages that arrived before the bundle took over. */
   queue?: ArrayBuffer[]
 }
@@ -307,6 +336,7 @@ export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes |
       if (boot.done) break
       await new Promise<void>((r) => { boot.wake = r })
     }
+    await framer.idle()
     release()
   })()
   // A server that pushes no BOOT stream would hold control for good.
@@ -361,9 +391,10 @@ export function openSocket(ws: WebSocket, sink: Sink, first: Bytes | null, queue
   })
 }
 
-export function socketUrl(csrf: string): string {
+/** The socket's URL: like the gate's CONNECT, it names the rev and client id the server pushes the BOOT for. */
+export function socketUrl(csrf: string, rev: bigint, cid: number): string {
   const proto = location.protocol === "https:" ? "wss" : "ws"
-  return `${proto}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(csrf)}`
+  return `${proto}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(csrf)}&rev=${rev}&raw=1&cid=${cid}`
 }
 
 /** The CONNECT URL: the ticket, and the rev and client id the server pushes the BOOT for. */
@@ -552,11 +583,11 @@ export class Wire {
     const first = hello(this.host.hash, this.host.rev(), this.host.clientId)
     const early = this.early
     this.early = undefined
-    // The early connection stands only if it named the rev the desk restored.
+    // The early connection asked for the whole desk, which replaces whatever
+    // the desk restored meanwhile.
     const said = early?.hello ? await within(early.hello, CONNECT_MS).catch(() => null) : undefined
-    const adopt = said !== undefined && said !== null && said.rev === this.host.rev()
     if (said?.wt) {
-      const c = adopt && said.writer && said.readable && said.uni
+      const c = said.writer && said.readable && said.uni
         ? await within(openTransport(said.wt, this.sink, { writer: said.writer, readable: said.readable }, said.uni), CONNECT_MS).catch(() => null)
         : null
       if (c) return this.settled(c)
@@ -565,7 +596,7 @@ export class Wire {
       this.gateDownUntil = performance.now() + 60_000
     }
     if (early?.ws) {
-      const c = said === null || (said && !adopt) ? null : await within(openSocket(early.ws, this.sink, said ? null : first, early.queue), CONNECT_MS).catch(() => null)
+      const c = said === null ? null : await within(openSocket(early.ws, this.sink, said ? null : first, early.queue), CONNECT_MS).catch(() => null)
       if (c) return this.settled(c)
       early.ws.close()
     }
@@ -587,7 +618,7 @@ export class Wire {
         }
       }
     }
-    const ws = new WebSocket(socketUrl(this.csrf))
+    const ws = new WebSocket(socketUrl(this.csrf, this.host.rev(), this.host.clientId))
     return this.settled(await within(openSocket(ws, this.sink, first), CONNECT_MS).catch((e: unknown) => {
       ws.close()
       throw e

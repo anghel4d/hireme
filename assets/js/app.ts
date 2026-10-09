@@ -17,14 +17,9 @@ if (!(root instanceof HTMLElement)) throw new Error("Missing #desk")
 const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content ?? ""
 
 try {
-  const kernel = await loadWireKernel("/wasm/kernel.wasm")
   const early = window.__hw
+  const kernel = await loadWireKernel("/wasm/kernel.wasm", early?.kernel, early?.hello)
   const desk = new LocalDesk(kernel, meta("wire-scope"), early?.clientId)
-  const snap = await desk.snapshot?.load(early?.snap)
-  if (snap) {
-    desk.restore(snap.bytes, snap.ops)
-    performance.mark("desk:snapshot")
-  }
   const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
   desk.attach({ send: (p) => void wire.control(p.frame) })
   desk.onReset = () => wire.reconnect()
@@ -45,6 +40,10 @@ try {
   })
   new Shell(root, desk)
   wire.run()
+  // The saved desk paints if it is back before the network's, which replaces it.
+  void desk.snapshot?.load(early?.snap).then((snap) => {
+    if (snap && desk.restore(snap.bytes, snap.ops)) performance.mark("desk:snapshot")
+  })
   Object.assign(window, { __desk: desk, __wire: wire })
 } catch (cause) {
   root.textContent = cause instanceof Error ? cause.message : String(cause)

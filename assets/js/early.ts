@@ -1,12 +1,14 @@
 // Inlined in <head>, after the wire meta tags, before the bundle. It
-// starts what the desk needs first, so it overlaps the bundle download:
-// the read of the last snapshot's rev from IndexedDB, then the connection.
-// On WebTransport the CONNECT names that rev, so the server pushes the
-// BOOT (or the resume) on a stream of its own the moment it accepts, and
-// this script starts draining it at once; it also opens control (bidi 0)
-// with a HELLO. On the socket it sends HELLO when it opens. The bundle
-// adopts all of it from `window.__hw`: what arrived before it did waits in
-// a queue. This file imports nothing: its built text is hashed into the CSP.
+// starts everything the desk needs at once, so none of it waits on the
+// bundle or on another: the connection, the kernel's compile, and the read
+// of the last snapshot from IndexedDB. The connection asks for the whole
+// desk, so it waits on nothing: the server pushes the BOOT the moment it
+// accepts (on WebTransport, on a stream of its own that this script drains
+// at once; on the socket, at the upgrade), and HELLO only opens control.
+// The snapshot paints the board if it comes back first, and the BOOT
+// replaces it. The bundle adopts all of it from `window.__hw`: what arrived
+// before it did waits in a queue. This file imports nothing: its built
+// text is hashed into the CSP.
 
 {
   const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content ?? ""
@@ -21,10 +23,13 @@
   const hw: {
     ws?: WebSocket
     snap?: Promise<unknown>
+    kernel?: Promise<WebAssembly.Module>
     clientId: number
-    hello?: Promise<{ rev: bigint; wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
+    hello?: Promise<{ wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
     queue: ArrayBuffer[]
   } = { clientId: crypto.getRandomValues(new Uint32Array(1))[0] ?? 1, queue: [] }
+  hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
+  hw.kernel.catch(() => {})
 
   // The snapshot record for this account, or undefined.
   const snap: Promise<{ format?: number; rev?: bigint; hash?: number } | undefined> = new Promise((resolve) => {
@@ -44,30 +49,24 @@
   })
   hw.snap = snap
 
-  // The snapshot's rev; a snapshot of another schema or format (store.ts's FORMAT) is no snapshot.
-  const revOf = async () => {
-    const rec = await snap
-    return rec && rec.format === 2 && rec.hash === schema && typeof rec.rev === "bigint" ? rec.rev : 0n
-  }
+  // The whole desk (rev 0), as raw tables, for this client id.
+  const ask = `rev=0&raw=1&cid=${hw.clientId}`
 
   // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables), in a 16-byte header.
-  const hello = async () => {
-    const rev = await revOf()
+  const hello = () => {
     const f = new Uint8Array(40)
     const v = new DataView(f.buffer)
     v.setUint32(0, 40, true)
     v.setUint8(4, 1)
     v.setUint16(6, schema, true)
-    v.setBigUint64(24, rev, true)
     v.setUint32(32, hw.clientId, true)
     v.setUint32(36, 1, true)
-    return { rev, f }
+    return f
   }
 
   if (gate !== "" && ticket !== "" && "WebTransport" in window && Number.isFinite(schema)) {
     hw.hello = (async () => {
-      const rev = await revOf()
-      const wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}&rev=${rev}&raw=1&cid=${hw.clientId}`,
+      const wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}&${ask}`,
         hashes.length > 0 ? { serverCertificateHashes: hashes } : {})
       wt.closed.catch(() => {})
       // The BOOT stream: every chunk queued for the bundle as it comes.
@@ -87,17 +86,20 @@
       await wt.ready
       const stream = await wt.createBidirectionalStream()
       const writer = stream.writable.getWriter()
-      await writer.write((await hello()).f)
-      return { rev, wt, uni, writer, readable: stream.readable }
+      await writer.write(hello())
+      return { wt, uni, writer, readable: stream.readable }
     })().catch(() => null)
   } else {
-    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(meta("csrf-token"))}`)
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(meta("csrf-token"))}&${ask}`)
     ws.binaryType = "arraybuffer"
     ws.onmessage = (e) => { hw.queue.push(e.data as ArrayBuffer) }
     hw.ws = ws
     if (Number.isFinite(schema)) {
       hw.hello = new Promise((resolve) => {
-        ws.onopen = () => void hello().then(({ rev, f }) => { ws.send(f); resolve({ rev }) }, () => resolve(null))
+        ws.onopen = () => {
+          ws.send(hello())
+          resolve({})
+        }
         ws.onerror = () => resolve(null)
       })
     }
