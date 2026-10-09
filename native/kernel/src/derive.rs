@@ -1430,6 +1430,94 @@ impl Desk {
     }
 }
 
+impl Desk {
+    /// Runs a small made-up board through everything a cold load runs
+    /// (a deflated BOOT with sym and str columns and listings, three op
+    /// predictions, selects with and without a query), then forgets it.
+    /// A browser compiles each wasm function on its first call; a page
+    /// calls this in a Worker as it starts, and since compiled code is
+    /// shared by module, its own first frames find it compiled. Does
+    /// nothing once a desk is held.
+    pub fn warm(&mut self) {
+        if self.store.table(table::JOB_APPS).is_some() {
+            return;
+        }
+        let n = 256u32;
+        let words: [&[u8]; 6] = [
+            b"Acme",
+            b"https://boards.greenhouse.io/acme/jobs/1",
+            b"Berlin",
+            b"https://jobs.lever.co/globex/2",
+            b"Initech",
+            b"Rust and Kubernetes engineer, platform team: compilers, kernels, databases.",
+        ];
+        let text = |m: u32| (0..n).map(move |i| words[(i * m / 3) as usize % words.len()]);
+        let ids = || 1..n + 1;
+        use col::{cv_variants as v, job_apps as j};
+        let stages: Vec<&[u8]> = heat::STAGES.iter().map(|s| s.as_bytes()).collect();
+        let mut w = wire::Writer::new();
+        w.begin(wire::schema::frame::BOOT, wire::END, 1);
+        w.table(table::PROFILES, 1);
+        w.col_u32(col::profiles::ID, [1].into_iter());
+        w.table(table::CV_VARIANTS, n);
+        w.col_u32(v::ID, ids());
+        w.col_u32(v::JOB_APP_ID, ids());
+        w.col_u32(v::PROFILE_ID, ids().map(|_| 1));
+        w.col_str(v::LABEL, text(1));
+        w.table(table::JOB_APPS, n);
+        w.col_u32(j::ID, ids());
+        w.col_u32(j::PROFILE_ID, ids().map(|_| 1));
+        w.col_u32(j::BATCH_ID, ids().map(|i| i % 3));
+        w.col_u32(j::SCORE_100, ids().map(|i| i % 101));
+        w.col_u32(j::STAGE_ON, ids().map(|i| 20_000 + i % 40));
+        w.col_sym(j::COMPANY, &words[..3], ids().map(|i| i % 3));
+        w.col_str(j::ROLE, text(2));
+        w.col_str(j::LISTING_URL, text(7));
+        w.col_str(j::LISTING, text(5));
+        w.col_sym(j::CURRENT_STAGE, &stages, ids().map(|i| i % 10));
+        w.end();
+        // The same frame deflated, as stored blocks: a deflate body the
+        // inflater reads without a compressor here to write it.
+        let body = &w.buf[wire::HEADER..];
+        let mut z = Vec::with_capacity(body.len() + body.len() / 65535 * 5 + 16);
+        let chunks = body.chunks(65535).count();
+        for (i, c) in body.chunks(65535).enumerate() {
+            let len = c.len() as u16;
+            z.push((i + 1 == chunks) as u8);
+            z.extend_from_slice(&len.to_le_bytes());
+            z.extend_from_slice(&(!len).to_le_bytes());
+            z.extend_from_slice(c);
+        }
+        let mut f = wire::Writer::new();
+        f.begin(wire::schema::frame::BOOT, wire::END | wire::DEFLATE, 1);
+        f.raw(&(body.len() as u32).to_le_bytes());
+        f.raw(&(z.len() as u32).to_le_bytes());
+        f.raw(&z);
+        f.end();
+        self.today = 20_040;
+        self.ingest(&f.buf);
+        for (i, q) in [&b""[..], b"acme", b"rust"].into_iter().enumerate() {
+            let mut o = wire::Writer::new();
+            let kind = [wire::schema::op::STAGE, wire::schema::op::HEAT_OVERRIDE, wire::schema::op::SCORE][i];
+            o.op(i as u64 + 1, kind, 7, &[["reply", "x", "9"][i]]);
+            self.push(&o.buf);
+            self.select(-1, -1000, 1000, -1, -1, -1, -1, -1, q);
+        }
+        debug_assert!(self.counters[crate::desk::BAD_FRAMES] == 0 && self.rows(table::CARDS) == n as usize);
+        *self = Desk::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn warm_runs_a_board_and_leaves_nothing() {
+        let mut d = crate::Desk::new();
+        d.warm();
+        assert_eq!(d.rows(wire::schema::table::JOB_APPS), 0);
+    }
+}
+
 fn cell_eq(a: &Column, ra: usize, b: &Column, rb: usize, arena: &Arena) -> bool {
     match (&a.data, &b.data) {
         (Data::W32(x), Data::W32(y)) => x.get(ra) == y.get(rb),
