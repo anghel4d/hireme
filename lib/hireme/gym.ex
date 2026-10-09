@@ -31,6 +31,7 @@ defmodule Hireme.Gym do
   platform, topic, difficulty, outcome. Daily target lives in kv
   (`gym` / `daily_target`). Streak counts consecutive days with a
   solved rep, GitHub-style (today, or yesterday if today is empty).
+  Logged reps reuse the problem loaded inside their write transaction.
   """
 
   import Ecto.Query
@@ -120,7 +121,7 @@ defmodule Hireme.Gym do
           note: Form.string(attrs, :note)
         })
         |> Repo.insert!()
-        |> Repo.preload(:problem)
+        |> Map.put(:problem, problem)
       end)
     end
   end

@@ -102,6 +102,34 @@ defmodule Hireme.GymTest do
     assert second.problem.difficulty == :medium
   end
 
+  test "progress counts repeated solves and preserves lifetime and open-ended week windows" do
+    assert Gym.progress(@today).solved_week == 0
+
+    for day <- [Date.add(@today, -7), Date.add(@today, -6), @today, @today, Date.add(@today, 1)] do
+      assert {:ok, rep} =
+               Gym.log(%{"title" => "Repeated graph", "topic" => "graphs"}, day)
+
+      assert rep.problem.id == rep.problem_id
+      assert rep.problem.topic == :graphs
+    end
+
+    assert {:ok, _} =
+             Gym.log(%{"title" => "Attempt", "outcome" => "attempt"}, @today)
+
+    progress = Gym.progress(@today)
+    assert progress.solved_today == 2
+    assert progress.solved_week == 4
+    assert progress.streak == 1
+    assert Enum.find(progress.topics, &(&1.key == :graphs)).count == 5
+    assert Enum.find(progress.topics, &(&1.key == :arrays)).count == 0
+    assert hd(progress.recent).done_on == Date.add(@today, 1)
+
+    Hireme.DataCase.open_account("Other gym")
+    other = Gym.progress(@today)
+    assert {other.solved_today, other.solved_week, other.streak, other.recent} == {0, 0, 0, []}
+    assert Enum.all?(other.topics, &(&1.count == 0))
+  end
+
   test "minutes remain strict nonnegative integers, not rounded or trimmed" do
     for {value, expected} <- [
           {7, 7},
