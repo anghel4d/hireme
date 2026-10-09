@@ -248,6 +248,8 @@ defmodule HiremeWeb.SessionTest do
     [{:patch, 0, prev, pbody} | _] = Enum.filter(out, &match?({:patch, _, _, _}, &1))
     assert prev > rev
     assert Packet.table_id(:job_apps) in table_ids(pbody)
+    # Only the columns the write changed travel, never the listing.
+    assert byte_size(pbody) < 600
 
     assert Enum.find_index(out, &match?({:patch, _, _, _}, &1)) <
              Enum.find_index(out, &match?({:ack, _, _, <<61::little-64>>}, &1))
