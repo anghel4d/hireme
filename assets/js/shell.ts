@@ -433,7 +433,12 @@ export class Shell {
     }
     if (r.ok) {
       this.dispatch({ t: "hold", error: null })
-      this.dispatch({ t: "focus", focus: r.value.focus })
+      // The answer is the focus as committed: it supersedes reads of that
+      // focus still in flight, and is not drawn over a card selected since.
+      if (r.value.focus.job.id === this.model.appId) {
+        this.focusToken++
+        this.dispatch({ t: "focus", focus: r.value.focus })
+      }
       this.answered(id, READS[change])
       return true
     }
