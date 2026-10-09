@@ -469,11 +469,11 @@ defmodule Hireme.Desk do
   judged by `Hireme.Heat.can_apply/1`, which is cheaper than preparing a
   snapshot for a handful.
   """
-  @spec focuses([pos_integer()], map() | nil) :: [Focus.t()]
-  def focuses(ids, heat \\ nil)
-  def focuses([], _heat), do: []
+  @spec focuses([pos_integer()], map() | nil, Date.t()) :: [Focus.t()]
+  def focuses(ids, heat \\ nil, today \\ Date.utc_today())
+  def focuses([], _heat, _today), do: []
 
-  def focuses(ids, heat) do
+  def focuses(ids, heat, today) do
     rows =
       Repo.all(
         from j in Job,
@@ -534,7 +534,6 @@ defmodule Hireme.Desk do
       end)
 
     person = person_name()
-    today = Date.utc_today()
     cfg = Heat.config()
     heat = heat && Heat.prepare(heat, cfg, today)
 
@@ -559,7 +558,11 @@ defmodule Hireme.Desk do
         root_coverage: Keywords.coverage(targets, root),
         kv: Map.get(notes, "app:#{job.id}", []),
         masks: Enum.filter(shown, &(&1.mode != :canonical)),
-        verdict: if(heat, do: Heat.verdict(job, heat, cfg, today), else: Heat.can_apply(job))
+        verdict:
+          if(heat,
+            do: Heat.verdict(job, heat, cfg, today),
+            else: Heat.can_apply(job, today: today)
+          )
       }
     end
   end
