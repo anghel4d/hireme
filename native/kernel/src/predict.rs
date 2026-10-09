@@ -18,6 +18,7 @@ use wire::{NONE, Op};
 
 use crate::desk::{Desk, Val};
 use crate::heat;
+use crate::keywords;
 
 /// Refusal names the schema has no code for travel as `internal`.
 const INTERNAL: u8 = refusal::INTERNAL;
@@ -253,6 +254,7 @@ impl Desk {
             for id in existing {
                 self.delete_row(ot, id);
             }
+            self.refresh_lineage(lineage, rec);
             return Ok(());
         }
         let reason_b = reason.map(String::into_bytes).unwrap_or_default();
@@ -283,7 +285,110 @@ impl Desk {
                 );
             }
         }
+        self.refresh_lineage(lineage, rec);
         Ok(())
+    }
+}
+
+impl Desk {
+    /// Desk's refresh_lineage!/1 after an overlay write: every job with a
+    /// variant on the lineage gets the mask counts of the lineage's
+    /// overlays and the keyword coverage of the CV its profile now shows.
+    fn refresh_lineage(&mut self, lineage: u32, rec: &mut Vec<(u16, u32, u16, Val)>) {
+        let ot = table::OVERLAYS;
+        let it = table::ITEMS;
+        let vt = table::CV_VARIANTS;
+        let lt = table::CV_LINEAGES;
+        let jt = table::JOB_APPS;
+        // The lineage's overlays by item: mode, title, body.
+        let mut counts = [0u32; 3];
+        let mut by_item: Vec<(u32, u8, String, String)> = Vec::new();
+        for r in 0..self.rows(ot) {
+            if self.vu32(ot, col::overlays::LINEAGE_ID, r) != lineage {
+                continue;
+            }
+            let m = match self.vstr(ot, col::overlays::MODE, r) {
+                b"hidden" => 0,
+                b"altered" => 1,
+                b"emphasized" => 2,
+                _ => continue,
+            };
+            counts[m as usize] += 1;
+            let text = |c| String::from(core::str::from_utf8(self.vstr(ot, c, r)).unwrap_or(""));
+            by_item.push((self.vu32(ot, col::overlays::ITEM_ID, r), m, text(col::overlays::TITLE), text(col::overlays::BODY)));
+        }
+        let lin_row = self.row_of(lt, lineage);
+        let lin_theme = lin_row.map_or(&b""[..], |r| self.vstr(lt, col::cv_lineages::THEME, r));
+        let lineage_targets = if lin_theme.is_empty() || lin_theme == b"{}" {
+            None
+        } else {
+            let t = lin_row.map_or(&b""[..], |r| self.vstr(lt, col::cv_lineages::THEME_TARGETS, r));
+            Some(keywords::theme_targets(core::str::from_utf8(t).unwrap_or("")))
+        };
+        let variants: Vec<usize> = (0..self.rows(vt)).filter(|&r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r) == lineage).collect();
+        let mut writes: Vec<(u32, [u32; 5])> = Vec::new();
+        for v in variants {
+            let job = self.vu32(vt, col::cv_variants::JOB_APP_ID, v);
+            let profile = self.vu32(vt, col::cv_variants::PROFILE_ID, v);
+            let Some(jr) = self.row_of(jt, job) else { continue };
+            // The text a reader sees: every shown line's title and body.
+            let mut text = String::new();
+            let mut first = true;
+            for r in 0..self.rows(it) {
+                let p = self.vu32(it, col::items::PROFILE_ID, r);
+                if !(p == NONE || p == 0 || p == profile) {
+                    continue;
+                }
+                let id = self.vu32(it, col::items::ID, r);
+                let ov = by_item.iter().find(|o| o.0 == id);
+                if ov.is_some_and(|o| o.1 == 0) {
+                    continue;
+                }
+                let raw = |c| core::str::from_utf8(self.vstr(it, c, r)).unwrap_or("");
+                let (mut title, mut body) = (raw(col::items::TITLE), raw(col::items::BODY));
+                if let Some(o) = ov.filter(|o| o.1 == 1) {
+                    if !o.2.is_empty() {
+                        title = &o.2;
+                    }
+                    if !o.3.is_empty() {
+                        body = &o.3;
+                    }
+                }
+                if !first {
+                    text.push('\n');
+                }
+                first = false;
+                text.push_str(title);
+                text.push('\n');
+                text.push_str(body);
+            }
+            let text = heat::downcase(&text);
+            let targets = match &lineage_targets {
+                Some(t) => t.clone(),
+                None => keywords::theme_targets(core::str::from_utf8(self.vstr(vt, col::cv_variants::THEME_TARGETS, v)).unwrap_or("")),
+            };
+            let targets = if targets.is_empty() {
+                keywords::extract(core::str::from_utf8(self.vstr(jt, col::job_apps::LISTING, jr)).unwrap_or(""))
+            } else {
+                targets
+            };
+            let hits = targets.iter().filter(|t| keywords::hit(&text, t)).count() as u32;
+            writes.push((job, [hits, targets.len() as u32, counts[0], counts[1], counts[2]]));
+        }
+        for (job, w) in writes {
+            for (c, v) in [
+                col::job_apps::KEYWORD_HITS,
+                col::job_apps::KEYWORD_TOTAL,
+                col::job_apps::MASK_HIDDEN,
+                col::job_apps::MASK_ALTERED,
+                col::job_apps::MASK_EMPHASIZED,
+            ]
+            .into_iter()
+            .zip(w)
+            {
+                self.set(jt, job, c, Val::U(v), rec);
+            }
+        }
     }
 }
 
