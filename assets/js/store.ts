@@ -366,6 +366,12 @@ export class LocalDesk implements Desk, Host {
 
   attach(link: Link): void { this.link = link }
 
+  /** In-memory counters for the bench: ops sent and refused here, and the kernel's settled, mispredicted and refused. */
+  stats(): Record<string, number> {
+    const k = this.board.counters()
+    return { ...this.counters, settled: k.settled, mispredicted: k.mispredicted, kernelNacked: k.nacked, kernelRefused: k.refused, pending: this.pending.length }
+  }
+
   // -- reads --
 
   get n(): number { return this.board.n }
