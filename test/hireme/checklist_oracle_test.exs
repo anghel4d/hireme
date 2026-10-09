@@ -336,7 +336,7 @@ defmodule Hireme.ChecklistOracleTest do
         %{ip: "203.0.113.5"}
       )
 
-    assert_received {:email, %Swoosh.Email{text_body: body}}
+    assert_receive {:email, %Swoosh.Email{text_body: body}}
     [_, token] = Regex.run(~r{token=([A-Za-z0-9_-]+)}, body)
     raw = Base.url_decode64!(token, padding: false)
     hashes = Repo.all(from(l in MagicLink, select: l.token_hash), skip_account: true)
@@ -812,7 +812,7 @@ defmodule Hireme.ChecklistOracleTest do
   end
 
   defp mailed(address) do
-    assert_received {:email, %Swoosh.Email{to: [{_, ^address}], text_body: body}}
+    assert_receive {:email, %Swoosh.Email{to: [{_, ^address}], text_body: body}}
     [_, token] = Regex.run(~r{/sign-in/email\?token=([A-Za-z0-9_-]+)}, body)
     token
   end

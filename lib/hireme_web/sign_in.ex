@@ -288,9 +288,6 @@ defmodule HiremeWeb.SignInController do
 
       {:error, :rate_limited} ->
         methods(conn, 429, "Too many links were asked for. Wait a few minutes, then try again.")
-
-      {:error, :mail} ->
-        methods(conn, 503, "The link could not be sent just now. Try again in a minute.")
     end
   end
 

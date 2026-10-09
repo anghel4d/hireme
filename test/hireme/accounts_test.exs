@@ -69,12 +69,12 @@ defmodule Hireme.AccountsTest do
         receive(
           do: ({:email, %Swoosh.Email{text_body: body}} ->
                  Regex.run(~r{token=([A-Za-z0-9_-]+)}, body) |> Enum.at(1)),
-          after: (0 -> nil)
+          after: (1_000 -> nil)
         )
 
     test "a link is mailed to the address as given, is peeked freely, and is spent once" do
       assert :ok = Accounts.request_link("  Someone@Example.COM ", &link_url/1, %{ip: "10.0.0.1"})
-      assert_received {:email, %Swoosh.Email{to: [{_, "someone@example.com"}], text_body: body}}
+      assert_receive {:email, %Swoosh.Email{to: [{_, "someone@example.com"}], text_body: body}}
 
       assert [_, token] =
                Regex.run(~r{https://desk.test/sign-in/email\?token=([A-Za-z0-9_-]+)}, body)
