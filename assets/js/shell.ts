@@ -354,20 +354,53 @@ export class Shell {
     else this.dispatch({ t: "lane-error", error: r.error })
   }
 
+  // Writes in flight from this tab, by job, with the signals that arrived for
+  // that job meanwhile. A write answers with the focus as committed and then
+  // refreshes the board; the signals held meanwhile fold into that one
+  // refresh. A held signal may be another tab's, newer than the answer, so
+  // it still reloads the focus and the root CV as it would have.
+  private readonly writing = new Map<number, { n: number; refresh: boolean; held: Signal[] }>()
+
   private onSignal(s: Signal): void {
+    const w = s.job_id === undefined ? undefined : this.writing.get(s.job_id)
+    if (w) {
+      w.held.push(s)
+      return
+    }
     void this.refreshBoard()
     if (s.job_id !== undefined && s.job_id === this.model.appId) void this.loadFocus()
     if (s.type === "cv" || s.type === "open_fire") void this.loadRoot()
   }
 
-  private async write(outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
-    const r = await outcome
+  private answered(id: number, refresh: boolean): void {
+    const w = this.writing.get(id)
+    if (!w) return
+    w.refresh ||= refresh
+    if (--w.n > 0) return
+    this.writing.delete(id)
+    if (w.refresh || w.held.length > 0) void this.refreshBoard()
+    if (w.held.length > 0 && id === this.model.appId) void this.loadFocus()
+    if (w.held.some((s) => s.type === "cv" || s.type === "open_fire")) void this.loadRoot()
+  }
+
+  private async write(id: number, outcome: Promise<api.Outcome<{ ok: true; focus: Focus }>>): Promise<boolean> {
+    const w = this.writing.get(id) ?? { n: 0, refresh: false, held: [] }
+    w.n++
+    this.writing.set(id, w)
+    let r: api.Outcome<{ ok: true; focus: Focus }>
+    try {
+      r = await outcome
+    } catch (cause) {
+      this.answered(id, false)
+      throw cause
+    }
     if (r.ok) {
       this.dispatch({ t: "hold", error: null })
       this.dispatch({ t: "focus", focus: r.value.focus })
-      void this.refreshBoard()
+      this.answered(id, true)
       return true
     }
+    this.answered(id, false)
     const message =
       r.error === "fire_hold" ? "FIRE HOLD. Name open fire on this batch before a submit."
       : r.error === "heat" ? "HEAT. This role would snap onto a company or ATS. Override needs a reason, or wait for cooldown."
@@ -500,14 +533,14 @@ export class Shell {
         this.debounce("next", 400, () => {
           const data = new FormData(form)
           if (this.model.appId === null) return
-          void this.write(api.setNext(this.model.appId, String(data.get("next_action") ?? "").trim(), String(data.get("next_due") ?? "")))
+          void this.write(this.model.appId, api.setNext(this.model.appId, String(data.get("next_action") ?? "").trim(), String(data.get("next_due") ?? "")))
         })
       } else if (form.dataset["form"] === "note") {
         this.debounce("note", 500, () => {
           const data = new FormData(form)
           const stage = form.dataset["stage"]
           if (this.model.appId === null || !stage) return
-          void this.write(api.setNote(this.model.appId, stage, String(data.get("note") ?? "")))
+          void this.write(this.model.appId, api.setNote(this.model.appId, stage, String(data.get("note") ?? "")))
         })
       }
     })
@@ -604,7 +637,7 @@ export class Shell {
       case "lens": this.dispatch({ t: "lens", lens: lensOf(el.dataset["lens"] ?? null) }); return
       case "stage": {
         const stage = el.dataset["stage"]
-        if (m.appId !== null && stage) await this.write(api.setStage(m.appId, stage))
+        if (m.appId !== null && stage) await this.write(m.appId, api.setStage(m.appId, stage))
         return
       }
       case "open-fire": {
@@ -622,7 +655,7 @@ export class Shell {
         const item = parseId(el.dataset["item"] ?? null)
         const mode = el.dataset["mode"]
         if (m.appId !== null && item !== null && mode) {
-          if (await this.write(api.putOverlay(m.appId, item, mode))) this.dispatch({ t: "edit", item: null })
+          if (await this.write(m.appId, api.putOverlay(m.appId, item, mode))) this.dispatch({ t: "edit", item: null })
         }
         return
       }
@@ -731,7 +764,7 @@ export class Shell {
           return
         }
         if (m.appId !== null && item !== null) {
-          const ok = await this.write(api.putOverlay(m.appId, item, "altered", body, String(data.get("reason") ?? "")))
+          const ok = await this.write(m.appId, api.putOverlay(m.appId, item, "altered", body, String(data.get("reason") ?? "")))
           this.dispatch({ t: "edit", item: ok ? null : item, error: ok ? null : this.model.holdError })
         }
         return
@@ -748,7 +781,7 @@ export class Shell {
       }
       case "heat-override": {
         if (m.appId === null) return
-        await this.write(api.heatOverride(m.appId, String(data.get("reason") ?? "")))
+        await this.write(m.appId, api.heatOverride(m.appId, String(data.get("reason") ?? "")))
         return
       }
       case "create-key": {
