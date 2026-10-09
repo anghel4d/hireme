@@ -25,9 +25,14 @@ defmodule Hireme.OpsTest do
     items = Map.new(profiles, fn p -> {p.id, for(n <- 1..3, do: item(p, %{position: n}))} end)
 
     {:ok, batch} =
-      %Batch{}
-      |> Batch.changeset(%{code: "B-#{seed}", ordinal: 1, status: :fire_ready, fire: :hold})
-      |> Repo.insert()
+      Ops.exec(
+        {:insert, :batches,
+         fn ->
+           %Batch{}
+           |> Batch.changeset(%{code: "B-#{seed}", ordinal: 1, status: :fire_ready, fire: :hold})
+           |> Repo.insert!()
+         end}
+      )
 
     jobs =
       for n <- 1..18 do
@@ -428,9 +433,9 @@ defmodule Hireme.OpsTest do
     end
   end
 
-  test "a row written around the sequencer reaches the next boot and every tab", %{
-    account: account
-  } do
+  # A boot is a copy of the sequencer's tables. A row only reaches them
+  # through the sequencer, or (from another VM) with the revision moved.
+  test "a row another VM writes reaches the next boot and every tab", %{account: account} do
     desk(98)
     {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
     boot = by_id(tables)
@@ -439,6 +444,12 @@ defmodule Hireme.OpsTest do
       %Batch{}
       |> Batch.changeset(%{code: "Around", ordinal: 9, status: :draft_prep, fire: :hold})
       |> Repo.insert()
+
+    Repo.update_all(
+      from(a in Hireme.Accounts.Account, where: a.id == ^account.id),
+      [inc: [desk_rev: 1]],
+      skip_account: true
+    )
 
     other =
       Task.async(fn ->
@@ -450,7 +461,7 @@ defmodule Hireme.OpsTest do
     assert Enum.any?(seen.batches, &(&1.id == batch.id))
 
     assert [{^rev, delta}] = drain([])
-    assert rev == boot_rev + 1
+    assert rev == boot_rev + 2
     assert apply_delta(boot, delta) == fresh_view()
   end
 end

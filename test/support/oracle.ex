@@ -210,6 +210,11 @@ defmodule Hireme.Oracle do
   @doc "Write a seeded random desk for the account on this process, around `today`."
   @spec generate(integer(), Date.t()) :: :ok
   def generate(seed, today) do
+    {:ok, :ok} = Ops.exec({:bulk, fn -> write_desk(seed, today) end})
+    :ok
+  end
+
+  defp write_desk(seed, today) do
     :rand.seed(:exsss, {seed, seed * 31 + 7, seed * 101 + 3})
     user = Hireme.Narrative.create_user!(%{name: "Seed #{seed}"})
     Hireme.Narrative.write!(user, pick(["A private narrative.", "Ünïcode — narrative."]))
