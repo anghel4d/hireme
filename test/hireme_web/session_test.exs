@@ -11,6 +11,12 @@ defmodule HiremeWeb.SessionTest do
   alias HiremeWeb.Packet
   alias HiremeWeb.Session
 
+  # Rolled-back rows reuse ids across tests; the node-wide cache must not.
+  setup do
+    :ets.delete_all_objects(HiremeWeb.Session.Cache)
+    :ok
+  end
+
   defmodule Carrier do
     @moduledoc false
     def send({__MODULE__, pid}, id, io), do: Kernel.send(pid, {:out, id, IO.iodata_to_binary(io)})
@@ -97,6 +103,15 @@ defmodule HiremeWeb.SessionTest do
     acks = if :ack in kinds, do: out, else: frames(0)
     assert Enum.any?(acks, &match?({:ack, 0, ^patch_rev, <<41::little-64>>}, &1))
     assert s.rev == patch_rev
+
+    # The scoreboard follows from its own reader, as a PATCH of its tables.
+    assert_receive {Session, :chrome, :score, _, _} = chrome, 1_000
+    {:ok, _s} = Session.info(chrome, s)
+
+    assert [{:patch, 0, _, body}] =
+             all_out() |> Enum.filter(&match?({:patch, _, _, _}, &1)) |> Enum.take(-1)
+
+    assert <<11::little-16, _::binary>> = body
   end
 
   test "a refused op answers NACK with its code and keeps nothing", %{account: account} do
@@ -187,7 +202,6 @@ defmodule HiremeWeb.SessionTest do
   end
 
   test "the focus cache serves until a delta marks the job dirty", %{account: account} do
-    start_supervised!(HiremeWeb.Session.Cache)
     p = profile()
     job = job(p, %{company: "Cached"})
     cache = HiremeWeb.Session.Cache

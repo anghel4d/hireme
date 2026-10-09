@@ -55,6 +55,7 @@ defmodule HiremeWeb.Session do
     batches: [],
     profiles: [],
     letters: %{},
+    chrome: %{},
     next_uni: 3
   ]
 
@@ -208,6 +209,8 @@ defmodule HiremeWeb.Session do
   def info({:ops_delta, rev, delta}, %{hello: true} = s), do: {:ok, patch(s, rev, delta)}
   def info({:ops_delta, _, _}, s), do: {:ok, s}
 
+  def info({__MODULE__, :chrome, kind, rev, io}, s), do: {:ok, chrome_out(s, kind, rev, io)}
+
   def info({__MODULE__, :focus, focus, rev, urgent}, s),
     do: {:ok, focus_out(s, focus, rev, urgent)}
 
@@ -318,41 +321,51 @@ defmodule HiremeWeb.Session do
         profiles: snap.profiles
     }
 
-    s =
+    # A current snapshot already holds every focus as of this rev, so the
+    # focus stream then carries only what later deltas touch.
+    {s, ids} =
       if snapshot != 0 and snapshot == rev do
         control(s, Packet.frame(:patch, rev, [], flags: @end_flag))
-        s
+        {s, []}
       else
-        boot(s, rev, snap)
+        {boot(s, rev, snap), Enum.map(snap.cards, & &1.id)}
       end
 
     control(s, Packet.frame(:ticket, rev, sized(ticket(s.account_id, s.session_id))))
-    {:ok, warm(s, Enum.map(snap.cards, & &1.id))}
+    {:ok, warm(s, ids)}
   end
 
   defp hello(s, _agent?, _cred, _snapshot, _client), do: bye(s, "hello")
 
-  defp boot(s, rev, snap) do
+  # Every profile's root CV: the roots tables are replaced whole, so a
+  # change to one root sends them all (a handful of profiles).
+  defp root_tables(profiles, intern) do
     {roots, intern} =
-      Enum.map_reduce(snap.profiles, s.intern, fn p, intern ->
+      Enum.map_reduce(profiles, intern, fn p, intern ->
         Packet.root_rows(p.id, JSON.root(Hireme.Desk.root(p.id)), intern)
       end)
 
     merged =
       Enum.reduce(roots, %{}, fn r, acc -> Map.merge(acc, r, fn _k, a, b -> a ++ b end) end)
 
-    narratives = narratives(snap.profiles)
+    tables =
+      for t <- [:lines, :roots, :root_sections, :root_lines],
+          t != :lines or Map.get(merged, :lines, []) != [],
+          do: Packet.table(t, Map.get(merged, t, []))
+
+    {tables, intern}
+  end
+
+  # The board first: cards, lookups and roots. The scoreboard and lanes
+  # (tens of ms of reads) follow as a PATCH from `chrome/3`.
+  defp boot(s, rev, snap) do
+    {roots, intern} = root_tables(snap.profiles, s.intern)
 
     body = [
       Packet.lookups(snap.batches, snap.profiles),
       Packet.table(:cards, Packet.card_rows(snap.cards, snap.batches, snap.profiles)),
-      Packet.score_tables(JSON.scoreboard(Hireme.Campaign.scoreboard())),
-      Packet.lane_tables(JSON.lanes()),
-      Packet.table(:lines, Map.get(merged, :lines, [])),
-      Packet.table(:roots, Map.get(merged, :roots, [])),
-      Packet.table(:root_sections, Map.get(merged, :root_sections, [])),
-      Packet.table(:root_lines, Map.get(merged, :root_lines, [])),
-      Packet.table(:narratives, narratives),
+      roots,
+      Packet.table(:narratives, narratives(snap.profiles)),
       Packet.table(
         :kv,
         Enum.map(Hireme.Kv.list("global"), &%{scope: 0, key: &1.key, value: &1.value})
@@ -360,7 +373,7 @@ defmodule HiremeWeb.Session do
     ]
 
     control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
-    %{s | intern: intern}
+    chrome(%{s | intern: intern}, rev, [:score, :lanes])
   end
 
   defp narratives(profiles) do
@@ -425,9 +438,18 @@ defmodule HiremeWeb.Session do
 
   # ---- Deltas out ----
 
+  # Cards, gone ids and batches go out before the ACKs they settle; the
+  # scoreboard and lanes are never predicted, so `chrome/3` reads them off
+  # this process and they follow when ready.
   defp patch(s, rev, delta) do
     batches = if delta[:batches], do: Hireme.Desk.list_batches(), else: s.batches
     s = %{s | batches: batches}
+    browser? = s.role == :browser
+
+    {roots, intern} =
+      if browser? and delta[:roots] not in [nil, []],
+        do: root_tables(s.profiles, s.intern),
+        else: {[], s.intern}
 
     body = [
       if(delta[:cards] not in [nil, []],
@@ -439,15 +461,11 @@ defmodule HiremeWeb.Session do
         else: []
       ),
       if(delta[:batches], do: Packet.batch_table(batches), else: []),
-      if(delta[:scoreboard],
-        do: Packet.score_tables(JSON.scoreboard(Hireme.Campaign.scoreboard())),
-        else: []
-      ),
-      if(delta[:lanes] && s.role == :browser, do: Packet.lane_tables(JSON.lanes()), else: []),
-      if(delta[:narrative] && s.role == :browser,
+      if(delta[:narrative] && browser?,
         do: Packet.table(:narratives, narratives(s.profiles)),
         else: []
-      )
+      ),
+      roots
     ]
 
     control(s, Packet.frame(:patch, rev, body))
@@ -459,7 +477,39 @@ defmodule HiremeWeb.Session do
       if s.warmer, do: send(s.warmer, {:urgent, delta.focus, rev})
     end
 
-    %{s | rev: rev, acks: held}
+    s = %{s | rev: rev, acks: held, intern: intern}
+    kinds = for {k, flag} <- [score: :scoreboard, lanes: :lanes], delta[flag], do: k
+    if browser? and kinds != [], do: chrome(s, rev, kinds), else: s
+  end
+
+  # The scoreboard and lanes as of `rev`, read by a linked process and
+  # shared across the account's sessions; a result older than one already
+  # sent is dropped, so the browser never steps back.
+  defp chrome(s, rev, kinds) do
+    me = self()
+    account = s.account_id
+
+    spawn_link(fn ->
+      Repo.put_account(account)
+
+      for kind <- kinds,
+          do:
+            send(
+              me,
+              {__MODULE__, :chrome, kind, rev, HiremeWeb.Session.Cache.chrome(account, kind, rev)}
+            )
+    end)
+
+    s
+  end
+
+  defp chrome_out(s, kind, rev, io) do
+    if rev >= Map.get(s.chrome, kind, 0) do
+      control(s, Packet.frame(:patch, max(rev, s.rev), io))
+      %{s | chrome: Map.put(s.chrome, kind, rev)}
+    else
+      s
+    end
   end
 
   # ---- The focus stream ----
@@ -600,6 +650,30 @@ defmodule HiremeWeb.Session.Cache do
         json
     end
   end
+
+  @doc """
+  The scoreboard or lanes tables as of `rev` or later, encoded once for
+  every session of the account.
+  """
+  @spec chrome(pos_integer(), :score | :lanes, non_neg_integer()) :: iodata()
+  def chrome(account_id, kind, rev) do
+    key = {:chrome, account_id, kind}
+
+    case table?() && :ets.lookup(@table, key) do
+      [{^key, at, io}] when at >= rev ->
+        io
+
+      _ ->
+        io = IO.iodata_to_binary(encode(kind))
+        if table?(), do: :ets.insert(@table, {key, rev, io})
+        io
+    end
+  end
+
+  defp encode(:score),
+    do: HiremeWeb.Packet.score_tables(HiremeWeb.JSON.scoreboard(Hireme.Campaign.scoreboard()))
+
+  defp encode(:lanes), do: HiremeWeb.Packet.lane_tables(HiremeWeb.JSON.lanes())
 
   @doc "Mark `job_ids` changed at `rev`."
   @spec dirty(pos_integer(), [pos_integer()], non_neg_integer()) :: :ok
