@@ -135,7 +135,7 @@ defmodule HiremeWeb.Packet do
     [
       <<id::little-16, length(cols)::little-16, n::little-32>>
       | Enum.map(cols, fn {col, cid, type} ->
-          column(cid, type, Enum.map(rows, &Map.fetch!(&1, col)))
+          column(cid, type, Enum.map(rows, &Map.get(&1, col)))
         end)
     ]
   end
