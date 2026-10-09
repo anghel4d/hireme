@@ -16,6 +16,24 @@ const STOP: &[&str] = &[
     "our", "for", "the", "and",
 ];
 
+/// The stop words' hashes, so a word is only compared with them on a match.
+const STOP_HASH: [u32; STOP.len()] = {
+    let mut h = [0u32; STOP.len()];
+    let mut i = 0;
+    while i < STOP.len() {
+        let b = STOP[i].as_bytes();
+        let mut x = 0x811c_9dc5u32;
+        let mut j = 0;
+        while j < b.len() {
+            x = (x ^ b[j] as u32).wrapping_mul(0x0100_0193);
+            j += 1;
+        }
+        h[i] = x;
+        i += 1;
+    }
+    h
+};
+
 /// A byte as a word byte of the downcased text (a-z 0-9 + # .), A-Z
 /// folded down; 0 for every byte that ends a word.
 const WORD: [u8; 256] = {
@@ -34,82 +52,129 @@ const WORD: [u8; 256] = {
 /// Keywords.extract/1: the ten most frequent words of four or more
 /// characters that are not stop words, by count then bytes. Words are
 /// runs of a-z 0-9 + # . in the downcased text. One pass maps the bytes
-/// through `WORD`, a second counts each word in an open-addressing table;
-/// stop words are dropped from the counted words, not checked per
-/// occurrence.
+/// through `WORD`, a second hashes and counts each word as it ends; stop
+/// words are dropped from the counted words, not checked per occurrence.
 pub fn extract(listing: &str) -> Vec<String> {
-    let src = listing.as_bytes();
-    let mut text: Vec<u8> = Vec::with_capacity(src.len());
-    if src.is_ascii() {
-        text.extend(src.iter().map(|&c| WORD[c as usize]));
-    } else {
-        // Only two characters lowercase to bytes that hold a word byte:
-        // U+0130 is "i" and a combining dot, U+212A KELVIN SIGN is "k".
-        // Every other non-ASCII byte ends a word.
-        let mut i = 0;
-        while i < src.len() {
-            let (c, n) = match src[i] {
-                c if c < 0x80 => (WORD[c as usize], 1),
-                _ if src[i..].starts_with("\u{130}".as_bytes()) => (b'i', 2),
-                _ if src[i..].starts_with("\u{212A}".as_bytes()) => (b'k', 3),
-                _ => (0, 1),
-            };
-            text.push(c);
-            if n == 2 {
-                text.push(0); // the combining dot ends the word
-            }
-            i += n;
+    Scratch::new().extract(listing)
+}
+
+/// What `extract` works in, kept between calls so a pass over many
+/// listings allocates and clears nothing per listing.
+pub struct Scratch {
+    /// The listing's bytes through `WORD`.
+    text: Vec<u8>,
+    /// Open addressing: slot → 1 + its word's index in `words`, 0 empty.
+    /// Kept all zero between calls.
+    slots: Vec<u32>,
+    /// Each distinct word of four or more bytes: hash, start, len, count,
+    /// and its slot.
+    words: Vec<[u32; 5]>,
+}
+
+impl Scratch {
+    pub const fn new() -> Scratch {
+        Scratch {
+            text: Vec::new(),
+            slots: Vec::new(),
+            words: Vec::new(),
         }
     }
-    // (start, len, count); count 0 is an empty slot. Kept under half full.
-    let mut slots = vec![(0u32, 0u32, 0u32); 256];
-    let mut used = 0;
-    let mut at = 0;
-    for w in text.split(|&c| c == 0) {
-        let start = at;
-        at += w.len() + 1;
-        if w.len() < 4 {
-            continue;
-        }
-        if used * 2 >= slots.len() {
-            let old = core::mem::replace(&mut slots, vec![(0, 0, 0); used * 4]);
-            for e in old.into_iter().filter(|e| e.2 > 0) {
-                let w = &text[e.0 as usize..(e.0 + e.1) as usize];
-                let mut k = fnv(w) & (slots.len() - 1);
-                while slots[k].2 > 0 {
-                    k = (k + 1) & (slots.len() - 1);
+
+    pub fn extract(&mut self, listing: &str) -> Vec<String> {
+        let src = listing.as_bytes();
+        let text = &mut self.text;
+        text.clear();
+        if src.is_ascii() {
+            text.extend(src.iter().map(|&c| WORD[c as usize]));
+        } else {
+            // Only two characters lowercase to bytes that hold a word byte:
+            // U+0130 is "i" and a combining dot, U+212A KELVIN SIGN is "k".
+            // Every other non-ASCII byte ends a word.
+            let mut i = 0;
+            while i < src.len() {
+                let (c, n) = match src[i] {
+                    c if c < 0x80 => (WORD[c as usize], 1),
+                    _ if src[i..].starts_with("\u{130}".as_bytes()) => (b'i', 2),
+                    _ if src[i..].starts_with("\u{212A}".as_bytes()) => (b'k', 3),
+                    _ => (0, 1),
+                };
+                text.push(c);
+                if n == 2 {
+                    text.push(0); // the combining dot ends the word
                 }
-                slots[k] = e;
+                i += n;
             }
         }
-        let mask = slots.len() - 1;
-        let mut k = fnv(w) & mask;
-        loop {
-            let e = &mut slots[k];
-            if e.2 == 0 {
-                *e = (start as u32, w.len() as u32, 1);
-                used += 1;
-                break;
-            }
-            if e.1 as usize == w.len() && &text[e.0 as usize..e.0 as usize + w.len()] == w {
-                e.2 += 1;
-                break;
-            }
-            k = (k + 1) & mask;
+        // A text of n bytes holds at most n / 5 words of four or more
+        // bytes, so a table of twice that never fills past half.
+        let need = (text.len() / 5 * 2 + 16).next_power_of_two();
+        if self.slots.len() < need {
+            self.slots.resize(need, 0);
         }
+        let mask = need - 1;
+        let (slots, words) = (&mut self.slots, &mut self.words);
+        words.clear();
+        let (mut h, mut start) = (0x811c_9dc5u32, 0);
+        for i in 0..=text.len() {
+            let c = text.get(i).copied().unwrap_or(0);
+            if c != 0 {
+                h = (h ^ c as u32).wrapping_mul(0x0100_0193);
+                continue;
+            }
+            let len = i - start;
+            if len >= 4 {
+                let mut k = h as usize & mask;
+                loop {
+                    let Some(e) = slots[k].checked_sub(1).map(|w| &mut words[w as usize]) else {
+                        slots[k] = words.len() as u32 + 1;
+                        words.push([h, start as u32, len as u32, 1, k as u32]);
+                        break;
+                    };
+                    if e[0] == h && e[2] as usize == len && text[e[1] as usize..][..len] == text[start..i] {
+                        e[3] += 1;
+                        break;
+                    }
+                    k = (k + 1) & mask;
+                }
+            }
+            (h, start) = (0x811c_9dc5, i + 1);
+        }
+        for e in words.iter() {
+            slots[e[4] as usize] = 0;
+        }
+        let word = |e: &[u32; 5]| &text[e[1] as usize..(e[1] + e[2]) as usize];
+        let stop = |e: &[u32; 5]| e[2] <= 7 && STOP_HASH.contains(&e[0]) && STOP.iter().any(|s| s.as_bytes() == word(e));
+        // The ten first by count then bytes: the tenth count bounds them,
+        // every word above it is in, and the words at it fill the rest by
+        // bytes.
+        let mut top = [0u32; 10];
+        for e in words.iter() {
+            if e[3] <= top[9] || stop(e) {
+                continue;
+            }
+            let at = top.iter().position(|&t| e[3] > t).unwrap_or(9);
+            top.copy_within(at..9, at + 1);
+            top[at] = e[3];
+        }
+        let floor = top[9];
+        let mut out: Vec<&[u32; 5]> = words.iter().filter(|e| e[3] > floor && !stop(e)).collect();
+        let mut tied: Vec<&[u8]> = Vec::new();
+        for e in words.iter().filter(|e| e[3] == floor && floor > 0) {
+            let w = word(e);
+            if (tied.len() + out.len() < 10 || tied.last().is_some_and(|l| w < *l)) && !stop(e) {
+                let at = tied.partition_point(|t| *t < w);
+                tied.insert(at, w);
+                tied.truncate(10 - out.len());
+            }
+        }
+        out.sort_unstable_by(|a, b| b[3].cmp(&a[3]).then_with(|| word(a).cmp(word(b))));
+        out.iter()
+            .map(|e| word(e))
+            .chain(tied)
+            .filter_map(|w| core::str::from_utf8(w).ok())
+            .map(String::from)
+            .collect()
     }
-    let mut counts: Vec<(&[u8], u32)> = slots
-        .iter()
-        .filter(|e| e.2 > 0)
-        .map(|e| (&text[e.0 as usize..(e.0 + e.1) as usize], e.2))
-        .filter(|(w, _)| w.len() > 7 || !STOP.iter().any(|s| s.as_bytes() == *w))
-        .collect();
-    counts.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    counts
-        .into_iter()
-        .take(10)
-        .filter_map(|(w, _)| core::str::from_utf8(w).ok().map(String::from))
-        .collect()
 }
 
 fn fnv(b: &[u8]) -> usize {
