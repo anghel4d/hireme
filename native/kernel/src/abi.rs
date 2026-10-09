@@ -244,15 +244,6 @@ pub extern "C" fn mix(batch: u32) -> u32 {
     with(|k| k.desk.mix(batch))
 }
 
-/// Runs the kernel over a small made-up board and forgets it, so the
-/// first BOOT does not pay the browser's lazy compile. Call it once after
-/// instantiating, before any frame.
-#[unsafe(no_mangle)]
-pub extern "C" fn warm() {
-    with(|k| k.desk.warm())
-}
-
-/// The selection: card rows (u32), in board order; `select` answers its length.
 #[unsafe(no_mangle)]
 pub extern "C" fn selection_ptr() -> u32 {
     with(|k| k.desk.sel.as_ptr() as u32)

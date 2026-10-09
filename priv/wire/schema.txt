@@ -9,7 +9,9 @@
 # Table body: a sequence of  u16 table_id | u16 ncols | u32 nrows | col*ncols ;
 # col := u16 col_id | u8 type | u8 0 | u32 byte_len | data | zero pad to 8 (8-aligned from frame start).
 # Wire types: 1 u32 (day = days since 1970-01-01, time = unix seconds; none = 0xFFFFFFFF),
-# 2 str ((nrows+1) u32 offsets from 0, then UTF-8; none = empty), 3 u64, 4 f64 (none = NaN).
+# 2 str ((nrows+1) u32 offsets from 0, then UTF-8; none = empty), 3 u64, 4 f64 (none = NaN),
+# 5 sym, for a `sym` column: a str column as its distinct values (u32 nuniq | (nuniq+1) u32 offsets
+# from 0 | UTF-8 | zero pad to 4) then a u32 per row naming one.
 # BOOT carries every raw table and replaces them; PATCH carries changed rows, each block only the
 # columns it names (a changed row is its id plus the columns that moved), and `gone` deletes. A
 # HELLO whose snapshot_rev is current gets an empty PATCH with END, which keeps everything. TICK
@@ -79,11 +81,11 @@ col batches id 1 u32
 col batches code 2 str
 col batches ordinal 3 u32
 col batches fire 4 u32
-col batches status 5 str
-col batches kind 6 str
+col batches status 5 sym
+col batches kind 6 sym
 col batches target_size 7 u32
 col batches queued_on 8 day
-col batches squad 9 str
+col batches squad 9 sym
 col batches note 11 str
 
 table profiles 4
@@ -104,7 +106,7 @@ col narratives private 6 u32
 table items 41
 col items id 1 u32
 col items profile_id 2 u32
-col items kind 3 str
+col items kind 3 sym
 col items key 4 str
 col items title 5 str
 col items body 6 str
@@ -115,7 +117,7 @@ col items keywords 10 str
 
 table kv_pairs 42
 col kv_pairs id 1 u32
-col kv_pairs namespace 2 str
+col kv_pairs namespace 2 sym
 col kv_pairs key 3 str
 col kv_pairs value 4 str
 
@@ -134,36 +136,36 @@ col job_apps id 1 u32
 col job_apps profile_id 2 u32
 col job_apps employer_id 3 u32
 col job_apps batch_id 4 u32
-col job_apps company 5 str
+col job_apps company 5 sym
 col job_apps role 6 str
-col job_apps location 7 str
+col job_apps location 7 sym
 col job_apps listing_url 8 str
 col job_apps canonical_url 9 str
 col job_apps listing 10 str
 col job_apps heat 11 u32
-col job_apps status 12 str
+col job_apps status 12 sym
 col job_apps next_action 13 str
 col job_apps next_due 14 day
-col job_apps source 15 str
+col job_apps source 15 sym
 col job_apps stage_on 16 day
-col job_apps current_stage 17 str
-col job_apps pips 18 str
+col job_apps current_stage 17 sym
+col job_apps pips 18 sym
 col job_apps stage_notes 19 str
-col job_apps freshness 20 str
-col job_apps gate 21 str
-col job_apps fit 22 str
-col job_apps squad 23 str
-col job_apps department 24 str
+col job_apps freshness 20 sym
+col job_apps gate 21 sym
+col job_apps fit 22 sym
+col job_apps squad 23 sym
+col job_apps department 24 sym
 col job_apps score_100 25 u32
 col job_apps heat_override 26 u32
-col job_apps heat_override_reason 27 str
+col job_apps heat_override_reason 27 sym
 col job_apps inserted_at 33 time
 col job_apps updated_at 34 time
 
 table events 48
 col events id 1 u32
 col events job_app_id 2 u32
-col events kind 3 str
+col events kind 3 sym
 col events body 4 str
 col events inserted_at 5 time
 
@@ -172,7 +174,7 @@ col overlays id 1 u32
 col overlays job_app_id 2 u32
 col overlays item_id 3 u32
 col overlays lineage_id 4 u32
-col overlays mode 5 str
+col overlays mode 5 sym
 col overlays title 6 str
 col overlays body 7 str
 col overlays reason 8 str
@@ -180,11 +182,11 @@ col overlays generation 9 u32
 
 table gym_problems 53
 col gym_problems id 1 u32
-col gym_problems platform 2 str
+col gym_problems platform 2 sym
 col gym_problems slug 3 str
 col gym_problems title 4 str
-col gym_problems topic 5 str
-col gym_problems difficulty 6 str
+col gym_problems topic 5 sym
+col gym_problems difficulty 6 sym
 col gym_problems url 7 str
 
 table leases 49
@@ -196,8 +198,8 @@ col cv_lineages employer_id 2 u32
 col cv_lineages generation 3 u32
 col cv_lineages opened_on 4 day
 col cv_lineages rewrites_allowed 5 u32
-col cv_lineages theme 6 str
-col cv_lineages theme_targets 7 str
+col cv_lineages theme 6 sym
+col cv_lineages theme_targets 7 sym
 
 table cv_variants 51
 col cv_variants id 1 u32
@@ -205,8 +207,8 @@ col cv_variants job_app_id 2 u32
 col cv_variants profile_id 3 u32
 col cv_variants lineage_id 4 u32
 col cv_variants label 5 str
-col cv_variants theme 6 str
-col cv_variants theme_targets 7 str
+col cv_variants theme 6 sym
+col cv_variants theme_targets 7 sym
 col cv_variants note 8 str
 
 table gym_reps 54
@@ -214,13 +216,13 @@ col gym_reps id 1 u32
 col gym_reps problem_id 2 u32
 col gym_reps done_on 3 day
 col gym_reps minutes 4 u32
-col gym_reps outcome 5 str
+col gym_reps outcome 5 sym
 col gym_reps note 6 str
 
 table net_entries 55
 col net_entries id 1 u32
-col net_entries kind 2 str
-col net_entries channel 3 str
+col net_entries kind 2 sym
+col net_entries channel 3 sym
 col net_entries title 4 str
 col net_entries url 5 str
 col net_entries body 6 str

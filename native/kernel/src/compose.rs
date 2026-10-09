@@ -237,7 +237,7 @@ impl Desk {
             for &(name, c, kind) in &cols {
                 j.key(name);
                 match kind {
-                    "str" => j.str(self.vstr(t, c, r)),
+                    "str" | "sym" => j.str(self.vstr(t, c, r)),
                     "day" => j.day(self.vu32(t, c, r)),
                     "time" => j.time(self.vu32(t, c, r)),
                     "f64" => j.f64(self.f64_at(t, c, r)),

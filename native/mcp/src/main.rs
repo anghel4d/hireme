@@ -502,7 +502,7 @@ fn row(d: &Desk, t: u16, r: usize) -> Map<String, Value> {
     let mut m = Map::new();
     for def in schema::COLS.iter().filter(|c| c.table == t) {
         let v = match def.kind {
-            "str" => json!(d.str_at(t, def.col, r)),
+            "str" | "sym" => json!(d.str_at(t, def.col, r)),
             "f64" => json!(d.f64_at(t, def.col, r))
                 .as_f64()
                 .map_or(Value::Null, |x| json!(x)),
@@ -796,7 +796,7 @@ fn pairs(a: &Value) -> Vec<String> {
 /// A cell of a raw row as a notification carries it.
 fn cell(c: &wire::Col<'_>, i: usize, kind: &str) -> Value {
     match c.ty {
-        wire::STR if kind == "str" => {
+        wire::STR | wire::SYM if kind == "str" || kind == "sym" => {
             let s = c.str(i);
             serde_json::from_str::<Value>(s)
                 .ok()

@@ -225,8 +225,6 @@ const totals = new Array(8).fill(0)
 async function property(seed) {
   const r = rng(seed)
   const K = await kernel()
-  // A warmed kernel must be indistinguishable from a fresh one.
-  if (seed % 2) K.k.warm()
   const today = 20100
   const profiles = [{ id: 7, slug: "platform", name: "Platform" }, { id: 9, slug: "data", name: "Data Ünit" }]
   const batches = [
