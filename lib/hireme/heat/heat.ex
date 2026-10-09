@@ -227,27 +227,15 @@ defmodule Hireme.Heat do
 
   def cap(company, %Config{} = cfg) when is_binary(company), do: cap(Org.size(company), cfg)
 
-  @spec snapshot(Date.t(), Config.t()) :: map()
-  def snapshot(today \\ Date.utc_today(), cfg \\ config()) do
-    jobs = hot_jobs()
-    build_snapshot(jobs, today, cfg)
-  end
-
   @doc """
-  The same snapshot built from rows already in hand (board cards or job
-  rows) instead of the database: the hot ones, in id order, as peers.
+  The hot jobs and their company and ATS loads. A `previous` snapshot
+  lends its URL parses and company sizes, which do not change with a
+  stage move, so a rebuild after one write costs the read and the sums.
   """
-  @spec snapshot_of([map()], Date.t(), Config.t()) :: map()
-  def snapshot_of(jobs, today \\ Date.utc_today(), cfg \\ config()) do
-    jobs
-    |> Enum.filter(&hot_stage?(Map.get(&1, :current_stage) || Map.get(&1, :stage)))
-    |> Enum.sort_by(&id_of/1)
-    |> Enum.map(fn job ->
-      job
-      |> Map.take(@peer_fields)
-      |> Map.put(:current_stage, Map.get(job, :current_stage) || Map.get(job, :stage))
-    end)
-    |> build_snapshot(today, cfg)
+  @spec snapshot(Date.t(), Config.t(), map() | nil) :: map()
+  def snapshot(today \\ Date.utc_today(), cfg \\ config(), previous \\ nil) do
+    jobs = hot_jobs()
+    build_snapshot(jobs, today, cfg, previous)
   end
 
   @spec can_apply(pos_integer() | Job.t() | map(), keyword()) :: Verdict.t()
@@ -800,15 +788,27 @@ defmodule Hireme.Heat do
     end
   end
 
-  defp build_snapshot(jobs, today, cfg) do
-    ats = ats_index(jobs)
+  defp build_snapshot(jobs, today, cfg, previous) do
+    known_ats = (previous && previous.ats) || %{}
+    known_companies = (previous && previous.companies) || %{}
+
+    ats =
+      jobs
+      |> Enum.map(&url_of/1)
+      |> Enum.uniq()
+      |> Map.new(&{&1, Map.get_lazy(known_ats, &1, fn -> Ats.parse(&1) end)})
 
     companies =
       jobs
       |> Enum.group_by(&Org.company_key(company_of(&1)))
       |> Map.new(fn {key, group} ->
         label = company_of(hd(group))
-        size = Org.size(label)
+
+        size =
+          case Map.get(known_companies, key) do
+            %{label: ^label, size: size} -> size
+            _ -> Org.size(label)
+          end
 
         {key,
          %{

@@ -100,10 +100,10 @@ defmodule Hireme.Heat.Ats do
 
   defp workday_tenant(host, path) do
     cond do
-      match = Regex.run(~r/\A([a-z0-9-]+)\.wd\d+\./, host) ->
+      match = Regex.run(re(:workday_wd), host) ->
         Enum.at(match, 1)
 
-      match = Regex.run(~r/\A([a-z0-9-]+)\.(?:myworkdayjobs|myworkday)\.com\z/, host) ->
+      match = Regex.run(re(:workday_host), host) ->
         Enum.at(match, 1)
 
       true ->
@@ -124,7 +124,7 @@ defmodule Hireme.Heat.Ats do
 
   defp sf_tenant(host) do
     host
-    |> String.replace(~r/\.(successfactors|sapsf)\.(com|eu)\z/, "")
+    |> String.replace(re(:successfactors), "")
     |> case do
       ^host -> nil
       tenant -> tenant
@@ -162,4 +162,25 @@ defmodule Hireme.Heat.Ats do
   end
 
   defp unknown, do: %{vendor: :unknown, tenant: nil}
+
+  # OTP 28 cannot keep a compiled regex in a module literal, so a `~r`
+  # here compiles again on every parse, and a heat snapshot parses every
+  # hot job's URL. Each pattern is compiled once per VM instead.
+  @patterns %{
+    workday_wd: ~S"\A([a-z0-9-]+)\.wd\d+\.",
+    workday_host: ~S"\A([a-z0-9-]+)\.(?:myworkdayjobs|myworkday)\.com\z",
+    successfactors: ~S"\.(successfactors|sapsf)\.(com|eu)\z"
+  }
+
+  defp re(key) do
+    case :persistent_term.get({__MODULE__, key}, nil) do
+      nil ->
+        regex = Regex.compile!(Map.fetch!(@patterns, key))
+        :persistent_term.put({__MODULE__, key}, regex)
+        regex
+
+      regex ->
+        regex
+    end
+  end
 end

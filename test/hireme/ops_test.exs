@@ -306,6 +306,24 @@ defmodule Hireme.OpsTest do
     assert Repo.with_account(other.id, fn -> Repo.get!(Desk.Job, theirs.id).score_100 end) != 5
   end
 
+  # An agent reads heat without a call into the sequencer, and still sees
+  # its own committed writes.
+  test "the heat an agent reads follows every committed move", %{account: account} do
+    job = job(profile(), %{company: "Keel", stage: "gated"})
+    hot? = fn -> Enum.any?(Ops.heat(account.id).jobs, &(&1.id == job.id)) end
+    refute hot?.()
+
+    assert {:ok, _} =
+             Ops.run(account.id, %{op_id: 1, kind: :stage, target: job.id, fields: ["reply"]})
+
+    assert hot?.()
+
+    assert {:ok, _} =
+             Ops.run(account.id, %{op_id: 2, kind: :stage, target: job.id, fields: ["gated"]})
+
+    refute hot?.()
+  end
+
   # Another VM (a release task, an import) writes the same database and
   # moves the revision; the next delta must still bring a tab level.
   test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
