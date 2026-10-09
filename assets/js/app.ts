@@ -9,7 +9,7 @@ import { csrf, useAccountLink } from "./api.ts"
 import type { Settings } from "./api.ts"
 import { Shell } from "./shell.ts"
 import { loadWireKernel, LocalDesk } from "./store.ts"
-import { Wire } from "./wire.ts"
+import { boardIn, header, Wire } from "./wire.ts"
 
 const root = document.getElementById("desk")
 if (!(root instanceof HTMLElement)) throw new Error("Missing #desk")
@@ -39,6 +39,12 @@ try {
     }),
   })
   new Shell(root, desk)
+  // The board came in the page: the first card waits on no socket.
+  if (early?.board) {
+    const h = header(early.board)
+    desk.frame(early.board, h.kind, h.flags)
+    boardIn()
+  }
   wire.run()
   // The saved desk paints if it is back before the network's, which replaces it.
   void desk.snapshot?.load(early?.snap).then((snap) => {

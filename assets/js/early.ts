@@ -23,13 +23,16 @@
   const hw: {
     ws?: WebSocket
     snap?: Promise<unknown>
+    board?: Uint8Array<ArrayBuffer>
     kernel?: Promise<WebAssembly.Module>
     clientId: number
     hello?: Promise<{ wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
     queue: ArrayBuffer[]
   } = { clientId: crypto.getRandomValues(new Uint32Array(1))[0] ?? 1, queue: [] }
-  // The whole desk (rev 0), as raw tables, for this client id.
-  const ask = `rev=0&raw=1&cid=${hw.clientId}`
+  // The page carries the board's BOOT frame ("rev:base64"); the connection
+  // names that rev and brings the rest. Without it, the whole desk (rev 0).
+  const [boardRev = "", board = ""] = meta("wire-board").split(":")
+  const ask = `rev=0&raw=1&cid=${hw.clientId}${board === "" ? "" : `&board=${boardRev}`}`
 
   // HELLO: u16 cred_len (0) | pad to 8 | u64 snapshot_rev | u32 client_id | u32 options (1: raw tables), in a 16-byte header.
   const hello = () => {
@@ -84,7 +87,16 @@
     }
   }
 
-  // The connection first, then the kernel's compile, then the snapshot.
+  // The connection first, then the board, the kernel's compile, and the snapshot.
+  if (board !== "") {
+    const from = (Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array<ArrayBuffer> }).fromBase64
+    if (from) hw.board = from(board)
+    else {
+      const s = atob(board)
+      hw.board = new Uint8Array(s.length)
+      for (let i = 0; i < s.length; i++) hw.board[i] = s.charCodeAt(i)
+    }
+  }
   hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
   hw.kernel.catch(() => {})
 
