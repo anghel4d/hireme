@@ -54,3 +54,7 @@ name against fixed anchor sets, preserving whole-word matching and tier priority
 Board decoration classifies hot peers once per read and reuses those role traits
 for overlap penalties. Candidate roles are always classified from the current
 card; chart-only reads do not pay for this overlap index.
+ATS vendor and tenant loads are accumulated once for a board, using that read's
+date and decay configuration. Self-exclusion subtracts only the original hot
+row's contribution to a matching vendor or tenant. Nothing is cached across
+requests, and chart-only reads do not build the board's ATS index.

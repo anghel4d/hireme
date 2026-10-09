@@ -346,6 +346,24 @@ defmodule Hireme.HeatTest do
     [same_role, different_role] = Heat.decorate_all([first, changed_role], snapshot, cfg, @today)
     assert same_role.heat_state == :blocked
     assert different_role.heat_state == :cool
+
+    changed_vendor = %{first | listing_url: "https://boards.greenhouse.io/google/moved"}
+    changed_tenant = %{first | listing_url: "https://jobs.lever.co/other/moved"}
+    cards = [first, changed_role, changed_vendor, changed_tenant, unknown, %{first | id: nil}]
+
+    fast_decay = %{
+      cfg
+      | application_load: 0.3333,
+        ats_vendor_half_life: 3,
+        ats_tenant_half_life: 7
+    }
+
+    for today <- [Date.add(@today, -7), @today, Date.add(@today, 11)],
+        config <- [cfg, fast_decay] do
+      expected = Enum.map(cards, &Heat.decorate(&1, snapshot, config, today))
+      assert Heat.decorate_all(cards, snapshot, config, today) == expected
+      assert Heat.decorate_all(cards, Map.delete(snapshot, :ats), config, today) == expected
+    end
   end
 
   defp probe(company, role, score, id, url \\ nil) do
