@@ -70,6 +70,8 @@
 !/native/*/src/**/*.rs
 !/native/*/tests/
 !/native/*/tests/*.rs
+!/native/*/examples/
+!/native/*/examples/*.rs
 
 !/alchemy/
 !/alchemy/*.md
