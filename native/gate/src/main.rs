@@ -254,7 +254,13 @@ fn cert_stamp(s: &Settings) -> Option<(SystemTime, SystemTime)> {
     Some((m(c)?, m(k)?))
 }
 
-#[tokio::main]
+// One thread. A frame crosses about eight tasks between the Unix socket and
+// the UDP socket (bridge reader, session loop, stream writer, quinn's
+// connection and endpoint drivers); on a work-stealing pool most of those
+// wakes land on another thread and cost a futex each. On one thread a reply
+// of two frames went from 0.64 ms p50 / 2.7 ms p99 to 0.37 / 0.61 on loopback,
+// and the gate's work is I/O, which one core carries for this site.
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let settings = match Settings::from_env() {
         Ok(s) => s,
