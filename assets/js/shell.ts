@@ -233,6 +233,9 @@ export class Shell {
       this.select()
     }
     if (m.appId === null && m.count > 0) m.appId = this.idAt(0)
+    // Keys, sessions, ways in or factors changed: this tab's write, another
+    // tab's, an agent's, or a sign-in elsewhere.
+    if (c.account) m.settings = this.desk.account() ?? m.settings
     const r = c.refused
     if (r) {
       const text = refusalText(r.refusal)
@@ -252,11 +255,11 @@ export class Shell {
    * and each would otherwise cost a draw that changes nothing.
    */
   private unseen(c: Change): boolean {
-    if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused) return false
+    if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused || c.account) return false
     if (this.desk.tables !== this.tables) return false
     const id = this.model.appId
     // "all": a write that touches a profile, lineage, items or narratives recomposes every focus.
-    const focus = c.focus as readonly number[] | "all" | undefined
+    const focus = c.focus
     return id === null || (focus !== "all" && !(focus ?? []).includes(id))
   }
 
@@ -315,7 +318,13 @@ export class Shell {
 
   // ---- the account: confirmed HTTP writes ----
 
+  // The account tables are resident once BOOT lands; before that, wait for them.
   private async loadSettings(error: string | null = null): Promise<void> {
+    const resident = this.desk.account()
+    if (resident) {
+      this.dispatch({ t: "settings", settings: resident, error })
+      return
+    }
     try {
       this.dispatch({ t: "settings", settings: await api.fetchSettings(), error })
     } catch {
