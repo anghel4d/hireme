@@ -21,6 +21,15 @@ Open http://localhost:4000.
 
 `mix ecto.reset` rebuilds the database and loads `seed/` when that directory is present.
 
+### Verify
+
+Run `mix format --check-formatted`, `mix compile --warnings-as-errors`,
+`mix credo --strict`, and `mix test`. ElixirLS with `mixEnv: "test"` and
+Dialyzer enabled checks success typings beyond compiler and Credo warnings.
+Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
+socket authentication returns an expiry alongside the account and key IDs, and
+URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
+
 ## Accounts
 
 An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and letterboxes do not exist for another. Sign-in is passwordless, with three ways in: a link mailed to an address, GitHub, and X. The first sign-in by any of them makes an account. The Account page adds more (another address, a GitHub user, an X user) and removes any but the last. A mailed link works once, for ten minutes; it opens a page that names the address, and only that page's button spends it, so a mail scanner that follows links spends nothing. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.

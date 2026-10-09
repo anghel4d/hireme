@@ -255,7 +255,7 @@ defmodule Hireme.LifeEv do
   end
 
   defp onsite_lock?(location) do
-    loc = String.downcase(location || "")
+    loc = String.downcase(location)
 
     loc != "" and loc =~ ~r/\bonsite|on-site|in[- ]office\b/ and
       loc =~ ~r/\bno remote|not remote|onsite only/ and
@@ -268,7 +268,7 @@ defmodule Hireme.LifeEv do
   defp mid_curve?(text), do: text =~ ~r/\b(crud|full[- ]stack|rails shop|wordpress)\b/i
 
   defp canada_remote?(location) do
-    loc = String.downcase(location || "")
+    loc = String.downcase(location)
     loc =~ ~r/\b(canada|canadian|montr[eé]al|toronto|vancouver|remote)\b/
   end
 

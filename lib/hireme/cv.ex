@@ -480,8 +480,7 @@ defmodule Hireme.Cv do
 
   @type opts :: [label: String.t(), person: String.t() | nil]
 
-  @spec compose(%{headline: term(), summary: term()}, [Line.t()], Theme.t(), opts()) ::
-          Document.t()
+  @spec compose(Hireme.Corpus.Profile.t(), [Line.t()], Theme.t(), opts()) :: Document.t()
   def compose(profile, resolved, %Theme{} = theme, opts \\ []) do
     summary = theme.lead || profile.summary
     {shown, hidden} = Enum.split_with(resolved, & &1.shown)
