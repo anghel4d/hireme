@@ -78,6 +78,7 @@ defmodule HiremeWeb.Packet do
   @op_kinds @schema.ops
   @refusals @schema.refusals
   @nan <<0, 0, 0, 0, 0, 0, 248, 127>>
+  @memo {__MODULE__, :memo}
 
   @doc "The 16-bit schema hash every frame header carries."
   @spec schema_hash() :: non_neg_integer()
@@ -135,7 +136,7 @@ defmodule HiremeWeb.Packet do
   def table(name, rows, only \\ nil) do
     {id, cols} = Map.fetch!(@tables, name)
     cols = if only, do: Enum.filter(cols, fn {c, _, _} -> c in only end), else: cols
-    block(id, cols, rows, fn row, col, _type -> Map.get(row, col) end)
+    block(id, cols, rows, fn col, _type -> &Map.get(&1, col) end)
   end
 
   # One pass per column straight off the rows: each value is read and
@@ -144,7 +145,7 @@ defmodule HiremeWeb.Packet do
     [
       <<id::little-16, length(cols)::little-16, length(rows)::little-32>>
       | Enum.map(cols, fn {col, cid, type} ->
-          {wire, data} = encode(type, rows, &value.(&1, col, type))
+          {wire, data} = encode(type, rows, value.(col, type))
           size = IO.iodata_length(data)
           [<<cid::little-16, wire::8, 0::8, size::little-32>>, data, pad8(size)]
         end)
@@ -214,22 +215,26 @@ defmodule HiremeWeb.Packet do
          <<y::binary-4, ?-, m::binary-2, ?-, d::binary-2, _t, hh::binary-2, ?:, mm::binary-2, ?:,
            ss::binary-2, _::binary>>
        ),
-       do:
-         day(y, m, d) * 86_400 + String.to_integer(hh) * 3600 + String.to_integer(mm) * 60 +
-           String.to_integer(ss)
+       do: day(y, m, d) * 86_400 + digits(hh) * 3600 + digits(mm) * 60 + digits(ss)
 
   defp u32(%DateTime{} = t), do: DateTime.to_unix(t)
   defp u32(%NaiveDateTime{} = t), do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
   defp u32(n) when is_integer(n) and n >= 0 and n < @none, do: n
   defp u32(n) when is_float(n), do: round(n)
 
+  # Days since 1970-01-01 from ISO digits, by arithmetic alone (Hinnant's
+  # days_from_civil): no integer parsing, no calendar call.
   defp day(y, m, d) do
-    :calendar.date_to_gregorian_days(
-      String.to_integer(y),
-      String.to_integer(m),
-      String.to_integer(d)
-    ) - 719_528
+    {y, m, d} = {digits(y), digits(m), digits(d)}
+    y = if m <= 2, do: y - 1, else: y
+    era = div(y, 400)
+    yoe = y - era * 400
+    doy = div(153 * (m + if(m > 2, do: -3, else: 9)) + 2, 5) + d - 1
+    era * 146_097 + yoe * 365 + div(yoe, 4) - div(yoe, 100) + doy - 719_468
   end
+
+  defp digits(<<a, b>>), do: (a - ?0) * 10 + b - ?0
+  defp digits(<<a, b, c, d>>), do: (a - ?0) * 1000 + (b - ?0) * 100 + (c - ?0) * 10 + d - ?0
 
   defp text(nil), do: ""
   defp text(s) when is_binary(s), do: s
@@ -300,8 +305,10 @@ defmodule HiremeWeb.Packet do
     end)
     |> Enum.group_by(&Map.keys/1)
     |> Enum.map(fn {_keys, [first | _] = group} ->
-      block(id, present(first, cols), group, &raw_value/3)
+      block(id, present(first, cols), group, &getter/2)
     end)
+  after
+    Process.delete(@memo)
   end
 
   defp present(row, cols) do
@@ -311,22 +318,45 @@ defmodule HiremeWeb.Packet do
   defp carried?(row, :theme_targets), do: Map.has_key?(row, :theme)
   defp carried?(row, col), do: Map.has_key?(row, col)
 
-  defp raw_value(row, :theme_targets, _) do
-    theme = json(Map.get(row, :theme))
-    unit_list(get_in(theme, ["targets"]) || get_in(theme, [:targets]))
-  end
+  # How a column's value is read off a raw row, chosen once per column.
+  defp getter(:theme_targets, _),
+    do: &memo(Map.get(&1, :theme), fn theme -> targets(json(theme)) end)
 
-  defp raw_value(row, :keywords, _), do: unit_list(json(Map.get(row, :keywords)))
+  defp getter(:keywords, _), do: &memo(Map.get(&1, :keywords), fn k -> unit_list(json(k)) end)
 
   # A batch's fire is 0/1 on the wire (shared with the derived batches table).
-  defp raw_value(row, :fire, :u32), do: Map.get(row, :fire) in [:open_fire, "open_fire", true, 1]
+  defp getter(:fire, :u32), do: &(Map.get(&1, :fire) in [:open_fire, "open_fire", true, 1])
 
-  defp raw_value(row, col, type) do
-    case Map.get(row, col) do
-      %{} = map when type in [:str, :sym] and not is_struct(map) -> Jason.encode!(map)
-      value -> value
+  defp getter(col, type) when type in [:str, :sym] do
+    fn row ->
+      case Map.get(row, col) do
+        %{} = map when not is_struct(map) -> Jason.encode!(map)
+        value -> value
+      end
     end
   end
+
+  defp getter(col, _type), do: &Map.get(&1, col)
+
+  defp targets(theme), do: unit_list(get_in(theme, ["targets"]) || get_in(theme, [:targets]))
+
+  # One decode per distinct JSON text in a `raw/2` pass: a column of a few
+  # themes repeated over a thousand rows decodes each once.
+  defp memo(text, f) when is_binary(text) do
+    memo = Process.get(@memo, %{})
+
+    case memo do
+      %{^text => v} ->
+        v
+
+      _ ->
+        v = f.(text)
+        Process.put(@memo, Map.put(memo, text, v))
+        v
+    end
+  end
+
+  defp memo(value, f), do: f.(value)
 
   # A raw row holds maps and lists as the JSON text SQLite stores.
   defp json("{}"), do: %{}
