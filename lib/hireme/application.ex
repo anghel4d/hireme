@@ -73,7 +73,6 @@ defmodule Hireme.Application do
     children =
       [
         Hireme.Repo,
-        {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Hireme.PubSub},
         Hireme.Ops,
         {Task.Supervisor, name: Hireme.Accounts.Mail},

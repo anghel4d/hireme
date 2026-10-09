@@ -48,7 +48,6 @@ defmodule Hireme.MixProject do
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:jason, "~> 1.2"},
-      {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:nimble_totp, "~> 1.0"},
       {:wax_, "~> 0.7.0"},
