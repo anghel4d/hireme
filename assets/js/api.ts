@@ -95,9 +95,9 @@ export interface Focus {
   job: Job
   profile: { id: number; slug: string; name: string; headline: string; summary: string }
   variant: { id: number; label: string }
-  theme?: ThemeMap
+  theme: ThemeMap
   rail: Rung[]
-  events: { id: number; kind: string; body: string; at?: string }[]
+  events: { id: number; kind: string; body: string; at: string }[]
   cv: Doc
   narrative: Narrative | null
   coverage: Coverage
@@ -112,14 +112,14 @@ export interface HeatRow { key: string; label: string; load: number; cap: number
 
 export interface Lanes {
   gym: {
-    today?: string
+    today: string
     target: number
     streak: number
     solved_today: number
     solved_week: number
     score: number
     topics: { key: string; label: string; count: number }[]
-    recent: { id: number; done_on: string; outcome: string; minutes: number; note: string; slug?: string; title: string; url: string; platform: string; topic: string; difficulty: string }[]
+    recent: { id: number; done_on: string; outcome: string; minutes: number; note: string; slug: string; title: string; url: string; platform: string; topic: string; difficulty: string }[]
     platforms: Option[]
     topics_all: Option[]
     difficulties: Option[]

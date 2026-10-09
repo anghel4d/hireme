@@ -26,7 +26,8 @@ try {
     performance.mark("desk:snapshot")
   }
   const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
-  desk.attach({ send: (p) => void wire.control(p.frame), hint: () => {} })
+  desk.attach({ send: (p) => void wire.control(p.frame) })
+  desk.onReset = () => wire.reconnect()
   useAccountLink({
     call: (method, params) => wire.call(method, params),
     settings: () => desk.account(),

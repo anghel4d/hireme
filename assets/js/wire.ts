@@ -6,16 +6,17 @@
 //
 //     u32 len (whole frame) | u8 kind | u8 flags | u16 schema_hash | u64 rev
 //
-// On WebTransport, bidi stream 0 is control (OP up; PATCH, FOCUS, ACK and
-// NACK down, in order), uni streams are bulk (BOOT, FOCUS, LINES at low
-// priority), and datagrams carry HINT and PING, where a loss costs
-// nothing. Stream bytes are read BYOB into one staging buffer, and a
-// complete frame is handed to the sink as a view of it: the sink's copy
-// into the kernel is the only copy. A deflated frame is inflated first.
+// On WebTransport everything rides bidi stream 0, in order: HELLO, OPs and
+// RPC requests up; BOOT, PATCH, ACK, NACK, RPC replies and TICK down, so a
+// PATCH always lands before the ACK it settles. PING goes up as a datagram,
+// where a loss costs nothing. Stream bytes are read BYOB into one staging
+// buffer, and a complete frame is handed to the sink as a view of it: the
+// sink's copy into the kernel is the only copy. A deflated frame (the BOOT)
+// is inflated first.
 
 export const KIND = {
-  HELLO: 1, BOOT: 3, PATCH: 4, FOCUS: 5, LINES: 6, OP: 8, ACK: 9, NACK: 10,
-  TICK: 11, HINT: 12, PING: 13, PONG: 14, TICKET: 15, BYE: 16, RPC: 33,
+  HELLO: 1, BOOT: 3, PATCH: 4, OP: 8, ACK: 9, NACK: 10,
+  TICK: 11, PING: 13, PONG: 14, TICKET: 15, BYE: 16, RPC: 33,
 } as const
 
 export const FLAG = { DEFLATE: 0x01, END: 0x02 } as const
@@ -67,14 +68,6 @@ export function hello(hash: number, snapshotRev: bigint, clientId: number, optio
     v.setBigUint64(o + at, snapshotRev, true)
     v.setUint32(o + at + 8, clientId, true)
     v.setUint32(o + at + 12, options, true)
-  })
-}
-
-/** HINT: u32 n | u32 ids[]. */
-export function hint(hash: number, ids: readonly number[]): Bytes {
-  return frame(KIND.HINT, hash, 4 + 4 * ids.length, (v, o) => {
-    v.setUint32(o, ids.length, true)
-    ids.forEach((id, i) => v.setUint32(o + 4 + 4 * i, id, true))
   })
 }
 
@@ -169,7 +162,7 @@ export class Framer {
     this.cut()
   }
 
-  /** Bytes from a carrier that hands whole messages (WebSocket, datagrams). */
+  /** Bytes from a carrier that hands whole messages (the WebSocket). */
   push(bytes: Bytes): void {
     if (this.filled === 0 && bytes.byteOffset % 8 === 0) {
       // The common case: whole frames, parsed in place, no staging copy.
@@ -269,7 +262,7 @@ export async function pump(stream: ReadableStream<Bytes>, framer: Framer): Promi
 
 // ---- carriers ----
 
-/** One connection, whichever carrier. Bulk and datagram traffic fall back to control on a WebSocket. */
+/** One connection, whichever carrier. A datagram rides the socket itself on a WebSocket. */
 export interface Conn {
   readonly carrier: Carrier
   control(f: Bytes): void
@@ -317,26 +310,6 @@ export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes |
     ;({ writer, readable } = first)
   }
   void pump(readable, new Framer(sink, failed)).then(() => failed("control ended"), (e: unknown) => failed(String(e)))
-
-  // Bulk streams, each its own framer: a frame never spans two streams.
-  void (async () => {
-    const streams = wt.incomingUnidirectionalStreams.getReader()
-    for (;;) {
-      const { done, value } = await streams.read()
-      if (done) return
-      void pump(value, new Framer(sink, failed)).catch(() => {})
-    }
-  })().catch(() => {})
-
-  const dgram = new Framer(sink, () => {})
-  void (async () => {
-    const reader = wt.datagrams.readable.getReader()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) return
-      dgram.push(value)
-    }
-  })().catch(() => {})
   const dwriter = wt.datagrams.writable.getWriter()
 
   return {
@@ -458,6 +431,11 @@ export class Wire {
     setInterval(() => this.ping(), PING_MS)
   }
 
+  /** Drop the connection and open another: its HELLO names the rev the desk holds now. */
+  reconnect(): void {
+    this.conn?.close()
+  }
+
   control(f: Bytes): boolean {
     if (!this.conn) return false
     this.conn.control(f)
@@ -483,10 +461,6 @@ export class Wire {
     const calls = this.calls
     this.calls = new Map()
     for (const resolve of calls.values()) resolve({ error: { code: 0, message: "offline" } })
-  }
-
-  datagram(f: Bytes): void {
-    this.conn?.datagram(f)
   }
 
   private ping(): void {
