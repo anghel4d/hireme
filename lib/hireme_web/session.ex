@@ -130,8 +130,8 @@ defmodule HiremeWeb.Session do
     s = %__MODULE__{carrier: carrier, mod: carrier_mod(carrier), peer: Map.get(meta, :ip, "")}
 
     case meta do
-      %{account_id: account_id, session_id: session_id} ->
-        {:ok, browser(s, account_id, session_id)}
+      %{account_id: account_id, session_id: session_id} = meta ->
+        {:ok, s |> browser(account_id, session_id) |> early(Map.get(meta, :query, %{}))}
 
       %{path: path, origin: origin} ->
         query = URI.decode_query(URI.parse(path).query || "")
@@ -165,9 +165,10 @@ defmodule HiremeWeb.Session do
   end
 
   # A browser that names its snapshot and asks for raw tables in the
-  # CONNECT query gets its BOOT pushed on a stream of the server's own the
-  # moment it is accepted, a round trip before it could send HELLO; its
-  # HELLO then only opens control.
+  # CONNECT (or WebSocket upgrade) query gets its BOOT pushed the moment it
+  # is accepted, on a stream of the server's own (one socket on a
+  # WebSocket), a round trip before it could send HELLO; its HELLO then
+  # only opens control.
   defp early(s, %{"raw" => "1"} = query) do
     snapshot = int_param(query["rev"])
     send(self(), {__MODULE__, :early_boot, snapshot})
@@ -666,7 +667,9 @@ defmodule HiremeWeb.WireSocket do
 
         if Hireme.Mfa.required?(session),
           do: :error,
-          else: {:ok, %{account_id: account.id, session_id: session.id}}
+          else:
+            {:ok,
+             %{account_id: account.id, session_id: session.id, query: Map.get(info, :params, %{})}}
 
       nil ->
         agent(info_peer(info))
@@ -701,6 +704,7 @@ defmodule HiremeWeb.WireSocket do
 
   # The carrier: frames written during a callback leave as one message.
   def send(_c, _id, io), do: Process.put(__MODULE__, [Process.get(__MODULE__, []) | [io]])
+  def open_uni(_c, _id), do: :ok
   def fin(_c, _id), do: :ok
   def reset(_c, _id, _code), do: :ok
   def ready(_c), do: :ok
