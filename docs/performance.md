@@ -114,7 +114,7 @@ Playwright-core 1.63.0 drove Chromium 154.0.8037.97 headless at 1440×1000 with 
 
 Counts are **before / after**. `failed` means a timeout; `no-op` means the input caused no observed change within two seconds; `refused` means a 4xx/5xx response. All remain visible even though they are excluded from successful latency quantiles. Baseline's two other-tab mask failures and one five-stage-burst failure were writer clicks on re-rendering nodes that produced no signal. The final scroll row contains five no-ops. Neither release had a refused sample.
 
-| Page / interaction | Attempts | Refused | Failed | No-op | Requests per successful operation |
+| Page / interaction | Attempts | Refused | Failed | No-op | Requests per attempt |
 |---|---:|---:|---:|---:|---:|
 | desk / page load | 150 / 150 | 0 / 0 | 0 / 0 | 0 / 0 | 6.00 / 6.00 |
 | desk / page load (emulated 80 ms RTT) | 50 / 50 | 0 / 0 | 0 / 0 | 0 / 0 | 6.00 / 6.00 |
