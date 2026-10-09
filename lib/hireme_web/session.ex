@@ -560,7 +560,7 @@ defmodule HiremeWeb.Session do
             {:ok, s}
 
           {:ok, rev} ->
-            {:ok, %{s | acks: [{rev, op.op_id, rev} | s.acks]}}
+            {:ok, settle(%{s | acks: [{rev, op.op_id, rev} | s.acks]}, rev)}
 
           {:error, reason} ->
             control(s, Packet.nack(op.op_id, reason, s.rev))
@@ -577,6 +577,17 @@ defmodule HiremeWeb.Session do
   end
 
   defp ack(s, op_id, rev), do: control(s, Packet.ack(op_id, rev))
+
+  # The sequencer sends a write's delta before it answers, so the delta is
+  # already in the mailbox: send it (and the ACK it settles) now, not after
+  # the rest of the frames that arrived in the same read.
+  defp settle(s, rev) do
+    receive do
+      {:ops_delta, r, delta} when r <= rev and r > s.rev -> settle(raw_patch(s, r, delta), rev)
+    after
+      0 -> s
+    end
+  end
 
   # ---- Leases: an agent's lanes ----
 
@@ -614,7 +625,7 @@ defmodule HiremeWeb.Session do
               {:ok, s}
 
             {:ok, rev} ->
-              {:ok, %{s | acks: [{rev, op.op_id, lane} | s.acks]}}
+              {:ok, settle(%{s | acks: [{rev, op.op_id, lane} | s.acks]}, rev)}
 
             {:error, reason} ->
               control(s, Packet.nack(op.op_id, reason, lane))
