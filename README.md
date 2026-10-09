@@ -268,7 +268,6 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/account.ex` | The Account page over the session: its tables and commands, step-up and enrolment ceremonies |
 | `lib/hireme_web/mfa.ex` | The sign-in factor page |
 | `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
-| `lib/hireme_web/json.ex` | JSON shapes for the account page, and refusals |
 | `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
 | `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
 | `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, a lane per lease |

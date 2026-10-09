@@ -40,7 +40,6 @@ defmodule HiremeWeb.Account do
   alias Hireme.Mfa
   alias Hireme.Repo
   alias Hireme.Security
-  alias HiremeWeb.JSON
   alias HiremeWeb.Packet
   alias HiremeWeb.SignIn
 
@@ -84,9 +83,9 @@ defmodule HiremeWeb.Account do
           sign_in_methods: Enum.map([:email | SignIn.providers()], &Atom.to_string/1)
         }
       ]),
-      Packet.table(:acct_keys, Enum.map(ApiKeys.list(), &JSON.key/1)),
+      Packet.table(:acct_keys, Enum.map(ApiKeys.list(), &key_row/1)),
       Packet.table(:acct_sessions, Enum.map(sessions, &session_row/1)),
-      Packet.table(:acct_identities, Enum.map(Accounts.identities(), &JSON.identity/1)),
+      Packet.table(:acct_identities, Enum.map(Accounts.identities(), &identity_row/1)),
       Packet.table(:acct_factors, Enum.map(methods, &factor_row/1))
     ]
   end
@@ -174,7 +173,7 @@ defmodule HiremeWeb.Account do
     with true <- days in @expiries or days in Enum.map(@expiries, &to_string/1),
          {:ok, %{key: key, secret: secret}} <-
            ApiKeys.create(params["name"], days && String.to_integer(to_string(days)), meta) do
-      done(%{created: JSON.key(key), secret: secret})
+      done(%{created: key_row(key), secret: secret})
     else
       false -> refuse({:argument, "expires_in_days"})
       {:error, :name} -> refuse({:argument, "name"})
@@ -334,6 +333,26 @@ defmodule HiremeWeb.Account do
   end
 
   defp int(_), do: nil
+
+  # A key as the settings page lists it. The secret is never here; `display` is its visible prefix.
+  defp key_row(%ApiKeys.Key{} = k) do
+    %{
+      id: k.id,
+      key_id: "key_" <> k.key_id,
+      name: k.name,
+      display: ApiKeys.display(k),
+      scope: k.scope,
+      created_at: k.inserted_at,
+      last_used_at: k.last_used_at,
+      expires_at: k.expires_at,
+      revoked_at: k.revoked_at,
+      live: ApiKeys.live?(k)
+    }
+  end
+
+  # One way into the account. A provider's user id stays on the server; the handle shows.
+  defp identity_row(%Accounts.Identity{} = i),
+    do: %{id: i.id, provider: i.provider, display: i.display, created_at: i.verified_at}
 end
 
 defmodule HiremeWeb.AccountController do
@@ -350,7 +369,6 @@ defmodule HiremeWeb.AccountController do
 
   alias Hireme.Accounts
   alias HiremeWeb.Auth
-  alias HiremeWeb.JSON
   alias HiremeWeb.SignIn
 
   def link(conn, %{"provider" => "email"} = params) do
@@ -361,10 +379,10 @@ defmodule HiremeWeb.AccountController do
       |> json(%{ok: true, sent_to: address})
     else
       {:error, :invalid} ->
-        JSON.refuse(conn, {:argument, "email"})
+        Auth.refuse(conn, {:argument, "email"})
 
       {:error, :rate_limited} ->
-        JSON.refuse(conn, {429, "Too many links were asked for. Wait a few minutes."})
+        Auth.refuse(conn, {429, "Too many links were asked for. Wait a few minutes."})
     end
   end
 
@@ -373,10 +391,10 @@ defmodule HiremeWeb.AccountController do
          {:ok, conn, url} <- SignIn.begin(conn, provider, :link) do
       json(conn, %{ok: true, url: url})
     else
-      :error -> JSON.refuse(conn, {:argument, "provider"})
-      {:error, _} -> JSON.refuse(conn, {502, "That provider could not be reached."})
+      :error -> Auth.refuse(conn, {:argument, "provider"})
+      {:error, _} -> Auth.refuse(conn, {502, "That provider could not be reached."})
     end
   end
 
-  def link(conn, _params), do: JSON.refuse(conn, {:argument, "provider"})
+  def link(conn, _params), do: Auth.refuse(conn, {:argument, "provider"})
 end

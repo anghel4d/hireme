@@ -12,7 +12,6 @@ defmodule HiremeWeb.MfaController do
 
   alias Hireme.Mfa
   alias HiremeWeb.Auth
-  alias HiremeWeb.JSON
 
   ## The factor page: a pending session proves a second factor.
 
@@ -80,7 +79,7 @@ defmodule HiremeWeb.MfaController do
   def factor_webauthn_confirm(conn, params) do
     case Mfa.verify_assertion(conn.assigns.session, params, Auth.meta(conn)) do
       {:ok, _} -> json(conn, %{ok: true})
-      {:error, reason} -> JSON.refuse(conn, {401, message(reason)})
+      {:error, reason} -> Auth.refuse(conn, {401, message(reason)})
     end
   end
 

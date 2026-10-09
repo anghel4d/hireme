@@ -198,6 +198,27 @@ defmodule HiremeWeb.Auth do
       user_agent: conn |> get_req_header("user-agent") |> List.first() |> to_string()
     }
   end
+
+  @doc """
+  Answer a refusal. A reason atom or changeset maps to the status and
+  message the shell expects; `{status, message}` says both outright.
+  """
+  @spec refuse(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def refuse(conn, reason) do
+    {status, message} =
+      case reason do
+        {status, message} when is_integer(status) -> {status, message}
+        :not_found -> {404, "not found"}
+        :batch -> {404, "batch"}
+        :leased -> {423, "leased"}
+        {:argument, name} -> {400, "bad argument #{name}"}
+        %Ecto.Changeset{} -> {422, "invalid"}
+        other when is_atom(other) -> {409, Atom.to_string(other)}
+        other -> {400, inspect(other)}
+      end
+
+    conn |> put_status(status) |> json(%{error: message})
+  end
 end
 
 defmodule HiremeWeb.AuthController do
