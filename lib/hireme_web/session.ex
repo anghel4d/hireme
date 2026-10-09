@@ -581,57 +581,32 @@ defmodule HiremeWeb.Session do
 
   # ---- Ops ----
 
-  defp op(s, <<op_id::little-64, kind::8, n::8, _::16, target::little-32, fields::binary>>) do
-    with name when not is_nil(name) <- Packet.op_kind(kind),
-         {:ok, fields} <- fields(fields, n, []) do
-      case Ops.run(s.account_id, %{op_id: op_id, kind: name, target: target, fields: fields}) do
-        {:ok, rev} when rev <= s.rev ->
-          ack(s, op_id, rev)
-          {:ok, s}
+  defp op(s, body) do
+    case Packet.op(body) do
+      {:ok, op} ->
+        case Ops.run(s.account_id, op) do
+          {:ok, rev} when rev <= s.rev ->
+            ack(s, op.op_id, rev)
+            {:ok, s}
 
-        {:ok, rev} ->
-          {:ok, %{s | acks: [{rev, op_id} | s.acks]}}
+          {:ok, rev} ->
+            {:ok, %{s | acks: [{rev, op.op_id} | s.acks]}}
 
-        {:error, reason} ->
-          nack(s, op_id, reason)
-          {:ok, s}
-      end
-    else
-      _ ->
-        nack(s, op_id, {:argument, "op"})
+          {:error, reason} ->
+            control(s, Packet.nack(op.op_id, reason, s.rev))
+            {:ok, s}
+        end
+
+      {:error, op_id} ->
+        control(s, Packet.nack(op_id, {:argument, "op"}, s.rev))
         {:ok, s}
+
+      :error ->
+        bye(s, "op")
     end
   end
 
-  defp op(s, _body), do: bye(s, "op")
-
-  defp fields(_rest, 0, acc), do: {:ok, Enum.reverse(acc)}
-
-  defp fields(<<len::little-16, field::binary-size(len), rest::binary>>, n, acc),
-    do: fields(rest, n - 1, [field | acc])
-
-  defp fields(_, _, _), do: :error
-
-  defp ack(s, op_id, rev), do: control(s, Packet.frame(:ack, rev, <<op_id::little-64>>))
-
-  defp nack(s, op_id, reason) do
-    {name, message} = refusal(reason)
-    msg = String.slice(message, 0, 400)
-
-    control(
-      s,
-      Packet.frame(:nack, s.rev, [
-        <<op_id::little-64, Packet.refusal_code(name)::8, 0::8, byte_size(msg)::little-16>>,
-        msg
-      ])
-    )
-  end
-
-  defp refusal({:argument, name}), do: {:argument, "Need a #{name}."}
-  defp refusal({name, message}) when is_atom(name) and is_binary(message), do: {name, message}
-  defp refusal(%Ecto.Changeset{}), do: {:invalid, "That did not save."}
-  defp refusal(name) when is_atom(name), do: {name, Atom.to_string(name)}
-  defp refusal(_), do: {:internal, "internal"}
+  defp ack(s, op_id, rev), do: control(s, Packet.ack(op_id, rev))
 
   # ---- Writing ----
 
