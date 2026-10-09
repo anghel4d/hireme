@@ -39,6 +39,8 @@ struct Kernel {
     ingest: Vec<u8>,
     scratch: Vec<u8>,
     snapshot: Vec<u8>,
+    /// The last composed document (focus, root or lanes JSON).
+    result: Vec<u8>,
 }
 
 /// The one kernel. WebAssembly here is single-threaded and no export
@@ -55,6 +57,7 @@ static K: Global = Global(UnsafeCell::new(Kernel {
     ingest: Vec::new(),
     scratch: Vec::new(),
     snapshot: Vec::new(),
+    result: Vec::new(),
 }));
 
 fn with<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
@@ -321,6 +324,38 @@ pub extern "C" fn snapshot() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn snapshot_ptr() -> u32 {
     with(|k| k.snapshot.as_ptr() as u32)
+}
+
+/// A job's focus as JSON at `result_ptr()` ("null" if it is unknown); its length.
+#[unsafe(no_mangle)]
+pub extern "C" fn focus_json(job: u32) -> u32 {
+    with(|k| {
+        k.result = k.desk.focus_json(job).into_bytes();
+        k.result.len() as u32
+    })
+}
+
+/// A profile's root CV as JSON at `result_ptr()` ("null" if it is unknown); its length.
+#[unsafe(no_mangle)]
+pub extern "C" fn root_json(profile: u32) -> u32 {
+    with(|k| {
+        k.result = k.desk.root_json(profile).into_bytes();
+        k.result.len() as u32
+    })
+}
+
+/// The lanes (gym, net, heat chart) as JSON at `result_ptr()`; their length.
+#[unsafe(no_mangle)]
+pub extern "C" fn lanes_json() -> u32 {
+    with(|k| {
+        k.result = k.desk.lanes_json().into_bytes();
+        k.result.len() as u32
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn result_ptr() -> u32 {
+    with(|k| k.result.as_ptr() as u32)
 }
 
 // ---- the runtime --------------------------------------------------------

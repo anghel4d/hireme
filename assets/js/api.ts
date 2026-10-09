@@ -16,7 +16,6 @@ export interface Line {
   shown: boolean
   mode: Mode
   reason: string | null
-  canonical_title: string
   canonical_body: string
 }
 
@@ -41,7 +40,6 @@ export interface Job {
   role: string
   location: string
   listing: string
-  listing_url: string
   heat: number
   status: string
   stage: string
@@ -70,32 +68,19 @@ export interface Coverage { hits: string[]; misses: string[] }
 
 export interface HeatVerdict {
   decision: "allow" | "defer"
-  reason: string
   company_load: number
   company_cap: number
   size: string | null
   ats_vendor: string
   cooldown_days: number | null
-  note: string
   override: boolean
   override_reason: string
-  company?: string
-  company_increment?: number
-  ats_tenant?: string | null
-  vendor_load?: number
-  vendor_cap?: number
-  tenant_load?: number
-  tenant_cap?: number
 }
-
-/** A theme as stored: what HiremeWeb.JSON writes for it. */
-export interface ThemeMap { lead?: string; lead_reason?: string; accent: string; density: string; targets?: string[] }
 
 export interface Focus {
   job: Job
   profile: { id: number; slug: string; name: string; headline: string; summary: string }
-  variant: { id: number; label: string }
-  theme: ThemeMap
+  variant: { id: number; label: string; lineage_id: number | null }
   rail: Rung[]
   events: { id: number; kind: string; body: string; at: string }[]
   cv: Doc
@@ -112,7 +97,6 @@ export interface HeatRow { key: string; label: string; load: number; cap: number
 
 export interface Lanes {
   gym: {
-    today: string
     target: number
     streak: number
     solved_today: number

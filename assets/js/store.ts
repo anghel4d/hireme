@@ -10,17 +10,11 @@
 // ACK retires the op (its PATCH came first); a NACK drops it, and the
 // view is the base again, so rollback is free.
 //
-// The documents a person opens (a focus, a root CV, the lanes, the
-// account page) are composed here from those raw rows by compose.ts,
-// when first read, and kept until a row they read changes.
+// The documents a person opens (a focus, a root CV, the lanes) are
+// composed by the kernel too, as JSON, when first read, and kept until a
+// row they read changes; the account page is read from its own tables.
 
-import type { Coverage, Focus, HeatRow, HeatVerdict, Lanes, Root, Scoreboard, Settings } from "./api.ts"
-import {
-  account, focus, lanes, person, profileItems, resolve, root,
-  type AcctFactorRow, type AcctIdentityRow, type AcctKeyRow, type AcctRow, type AcctSessionRow, type EventRow, type ItemRow,
-  type JobRow, type KvRow, type LineageRow, type NarrativeRow, type NetRow, type OverlayRow, type ProblemRow, type ProfileRow,
-  type RepRow, type Resolved, type VariantRow,
-} from "./compose.ts"
+import type { Focus, Identity, Key, Lanes, Method, Root, Scoreboard, Session, Settings } from "./api.ts"
 import { FLAG, HEADER, KIND, NONE, opFrame, type Bytes, type Host } from "./wire.ts"
 
 // ---- the lookups the card columns index into ----
@@ -149,7 +143,10 @@ export interface WireKernel {
   find(id: number): number
   pending_push(len: number): number
   pending_count(): number
-  coverage(job: number, textLen: number, targetsLen: number, store: number): number
+  focus_json(job: number): number
+  root_json(profile: number): number
+  lanes_json(): number
+  result_ptr(): number
   touched_len(): number
   touched_ptr(): number
   derive(): number
@@ -194,7 +191,6 @@ const stamp = (secs: number) => new Date(secs * 1000).toISOString().replace(".00
 export class Kernel {
   private readonly ids = new Map<string, number>()
   private readonly kept = new Map<number, { spec: Spec; byId: Map<number, unknown> | null; list: unknown[] | null }>()
-  private readonly keyed = new Map<number, Map<number, unknown>>()
   private count = 0
   private trapped = false
   /** The exports, guarded: a trap marks the instance dead, and a dead one answers as an empty desk. */
@@ -236,7 +232,6 @@ export class Kernel {
     this.trapped = false
     this.ids.clear()
     this.kept.clear()
-    this.keyed.clear()
     this.count = 0
   }
 
@@ -316,15 +311,9 @@ export class Kernel {
   forget(tables: ReadonlyMap<number, ReadonlySet<number> | null> | null): void {
     if (tables === null) {
       this.kept.clear()
-      this.keyed.clear()
       return
     }
     for (const [t, keys] of tables) {
-      const one = this.keyed.get(t)
-      if (one) {
-        if (keys === null) this.keyed.delete(t)
-        else for (const key of keys) one.delete(key)
-      }
       const kept = this.kept.get(t)
       if (!kept) continue
       if (keys === null || kept.byId === null) {
@@ -353,25 +342,6 @@ export class Kernel {
     }
     kept.list ??= [...(kept.byId?.values() ?? [])]
     return kept.list as T[]
-  }
-
-  /**
-   * One row by its key, decoded alone: a job's row carries its listing,
-   * and the whole table of them is megabytes of text no read needs at once.
-   */
-  one<T>(name: string, spec: Spec, key: number): T | undefined {
-    const t = this.table(name)
-    if (t < 0) return undefined
-    let m = this.keyed.get(t) as Map<number, T | undefined> | undefined
-    if (!m) {
-      m = new Map()
-      this.keyed.set(t, m as Map<number, unknown>)
-    }
-    if (m.has(key)) return m.get(key)
-    const row = this.k.row_of(t, key)
-    const r = row < 0 ? undefined : this.read<T>(t, spec, row, row + 1)[0]
-    m.set(key, r)
-    return r
   }
 
   private read<T>(t: number, spec: Spec, from = 0, to = this.k.rows(t)): T[] {
@@ -422,24 +392,9 @@ export class Kernel {
     return this.k.pending_push(this.put((n) => this.k.scratch(n), frame.subarray(HEADER)))
   }
 
-  /**
-   * Keyword coverage of a visible text against targets (null: the job's
-   * listing words), read back from the kernel's result table in target order.
-   */
-  coverage(job: number, text: string, targets: readonly string[] | null): Coverage {
-    const t = ENCODER.encode(text)
-    const g = ENCODER.encode(targets === null ? "" : targets.join("\x1f"))
-    const both = new Uint8Array(t.byteLength + g.byteLength)
-    both.set(t)
-    both.set(g, t.byteLength)
-    this.put((n) => this.k.scratch(n), both)
-    this.k.coverage(job, t.byteLength, g.byteLength, 0)
-    const r = this.table("coverage")
-    const words = this.col(r, "word")
-    const hit = this.u32(r, this.col(r, "hit"))
-    const out: Coverage = { hits: [], misses: [] }
-    for (let i = 0; i < hit.length; i++) (hit[i] === 1 ? out.hits : out.misses).push(this.str(r, words, i))
-    return out
+  /** A document the kernel composed (`len` bytes of JSON at result_ptr), or null when it knows no such thing. */
+  document<T>(len: number): T | null {
+    return len === 0 ? null : (JSON.parse(DECODER.decode(new Uint8Array(this.mem, this.k.result_ptr(), len))) as T)
   }
 
   /** The kernel's base as frames that restore it. */
@@ -473,31 +428,8 @@ export async function loadWireKernel(url: string, early?: Promise<WebAssembly.Mo
 // ---- what rows are read as ----
 
 const SPEC = {
-  profiles: { id: ["id", "u32"], slug: ["slug", "str"], name: ["name", "str"], headline: ["headline", "str"], summary: ["summary", "str"], user_id: ["user_id", "u32?"] },
-  items: {
-    id: ["id", "u32"], profile_id: ["profile_id", "u32?"], kind: ["kind", "str"], key: ["key", "str"], title: ["title", "str"],
-    body: ["body", "str"], org: ["org", "str"], span: ["span", "str"], position: ["position", "u32"],
-  },
-  kv_pairs: { id: ["id", "u32"], namespace: ["namespace", "str"], key: ["key", "str"], value: ["value", "str"] },
-  job_apps: {
-    id: ["id", "u32"], profile_id: ["profile_id", "u32"], batch_id: ["batch_id", "u32?"], company: ["company", "str"], role: ["role", "str"],
-    location: ["location", "str"], listing_url: ["listing_url", "str"], listing: ["listing", "str"], heat: ["heat", "u32"], status: ["status", "str"],
-    next_action: ["next_action", "str"], next_due: ["next_due", "day"], stage_on: ["stage_on", "day"], stage: ["current_stage", "str"],
-    pips: ["pips", "str"], stage_notes: ["stage_notes", "str"], freshness: ["freshness", "str"], gate: ["gate", "str"], fit: ["fit", "str"],
-    score_100: ["score_100", "u32"], heat_override: ["heat_override", "bool"], heat_override_reason: ["heat_override_reason", "str"],
-  },
-  events: { id: ["id", "u32"], job_app_id: ["job_app_id", "u32"], kind: ["kind", "str"], body: ["body", "str"], inserted_at: ["inserted_at", "time"] },
-  overlays: {
-    id: ["id", "u32"], item_id: ["item_id", "u32"], lineage_id: ["lineage_id", "u32"], mode: ["mode", "str"],
-    title: ["title", "str?"], body: ["body", "str?"], reason: ["reason", "str?"],
-  },
-  cv_lineages: { id: ["id", "u32"], theme: ["theme", "str"] },
-  cv_variants: { id: ["id", "u32"], job_app_id: ["job_app_id", "u32?"], profile_id: ["profile_id", "u32?"], lineage_id: ["lineage_id", "u32?"], label: ["label", "str"], theme: ["theme", "str"] },
+  profiles: { id: ["id", "u32"], slug: ["slug", "str"], name: ["name", "str"] },
   batches: { id: ["id", "u32"], code: ["code", "str"], ordinal: ["ordinal", "u32"], fire: ["fire", "u32"], status: ["status", "str"] },
-  narratives: { id: ["id", "u32"], user_id: ["user_id", "u32"], body: ["body", "str"], version: ["version", "u32"] },
-  gym_problems: { id: ["id", "u32"], platform: ["platform", "str"], slug: ["slug", "str"], title: ["title", "str"], topic: ["topic", "str"], difficulty: ["difficulty", "str"], url: ["url", "str"] },
-  gym_reps: { id: ["id", "u32"], problem_id: ["problem_id", "u32"], done_on: ["done_on", "day"], minutes: ["minutes", "u32"], outcome: ["outcome", "str"], note: ["note", "str"] },
-  net_entries: { id: ["id", "u32"], kind: ["kind", "str"], channel: ["channel", "str"], title: ["title", "str"], url: ["url", "str"], body: ["body", "str"], shipped_on: ["shipped_on", "day"] },
   clock: { today: ["today", "u32"], now: ["now", "u32"] },
   acct: { id: ["id", "u32"], name: ["name", "str"], me: ["me", "u32"], recovery_left: ["recovery_left", "u32"], fresh_until: ["fresh_until", "secs?"], sign_in_methods: ["sign_in_methods", "str"] },
   acct_keys: {
@@ -517,17 +449,6 @@ const SPEC = {
   stages: { ix: ["ix", "u32"], key: ["key", "str"], label: ["label", "str"], hint: ["hint", "str"] },
   keyed: { ix: ["ix", "u32"], key: ["key", "str"] },
   bands: { ix: ["ix", "u32"], key: ["key", "str"], label: ["label", "str"], min: ["min", "u32"], max: ["max", "u32"] },
-  verdicts: {
-    id: ["id", "u32"], decision: ["decision", "str"], reason: ["reason", "str"], company: ["company", "str"],
-    company_load: ["company_load", "f64"], company_cap: ["company_cap", "f64"], company_increment: ["company_increment", "f64"],
-    size: ["size", "str?"], ats_vendor: ["ats_vendor", "str"], ats_tenant: ["ats_tenant", "str"], has_tenant: ["has_tenant", "bool"],
-    vendor_load: ["vendor_load", "f64"], vendor_cap: ["vendor_cap", "f64"], tenant_load: ["tenant_load", "f64"], tenant_cap: ["tenant_cap", "f64"],
-    cooldown_days: ["cooldown_days", "u32?"], note: ["note", "str"],
-  },
-  heat_rows: {
-    group: ["group", "u32"], key: ["key", "str"], label: ["label", "str"], load: ["load", "f64"], cap: ["cap", "f64"], ratio: ["ratio", "f64"], n: ["n", "u32"],
-    cooldown_days: ["cooldown_days", "u32?"], size: ["size", "str?"],
-  },
   score: {
     fire: ["fire", "u32"], leftover_unique: ["leftover_unique", "u32"], leftover_noted_on: ["leftover_noted_on", "day"], batches_today: ["batches_today", "u32"],
     batches_target: ["batches_target", "u32"], apps_today: ["apps_today", "u32"], apps_target: ["apps_target", "u32"], submitted_today: ["submitted_today", "u32"],
@@ -538,10 +459,7 @@ const SPEC = {
   chart_bins: { lo: ["lo", "u32"], hi: ["hi", "u32"], count: ["count", "u32"] },
 } as const satisfies Record<string, Spec>
 
-type RawJob = Omit<JobRow, "batch" | Glance> & { batch_id: number | null }
-type Glance = "keyword_hits" | "keyword_total" | "mask_hidden" | "mask_altered" | "mask_emphasized"
 interface RawBatch { id: number; code: string; ordinal: number; fire: number; status: string }
-type Verdict = Omit<HeatVerdict, "override" | "override_reason" | "ats_tenant"> & { id: number; ats_tenant: string; has_tenant: boolean }
 
 // ---- the board: the kernel's derived cards ----
 
@@ -601,7 +519,7 @@ class Board {
       bands: byIx(k.all<Band & { ix: number }>("bands", SPEC.bands)).map(({ key, label, min, max }) => ({ key, label, min, max })),
       batches: [...k.all<RawBatch>("batches", SPEC.batches)].sort((a, b) => a.ordinal - b.ordinal)
         .map((b) => ({ id: b.id, code: b.code, ordinal: b.ordinal, fire: b.fire === 1 ? "open_fire" as const : "hold" as const, status: b.status })),
-      profiles: [...k.all<ProfileRow>("profiles", SPEC.profiles)].sort((a, b) => a.id - b.id).map(({ id, slug, name }) => ({ id, slug, name })),
+      profiles: [...k.all<Profile>("profiles", SPEC.profiles)].sort((a, b) => a.id - b.id).map(({ id, slug, name }) => ({ id, slug, name })),
     }
     return this.tableDoc
   }
@@ -642,71 +560,44 @@ class Board {
   find(id: number): number { return this.k.k.find(id) }
 }
 
-// ---- the documents, composed from raw rows ----
+// ---- the documents ----
 //
-// A lineage's resolved lines (the heavy part) are kept until items or
-// overlays change; a finished focus, root, lanes or account document
-// until a row it reads changes.
+// A focus, a root CV and the lanes are composed by the kernel (compose.rs,
+// shared with hireme-mcp) as JSON in HiremeWeb.JSON's shapes, and parsed
+// here once; each is kept until a row it reads changes. The scoreboard
+// reads the kernel's derived tables, the account page its own.
 
 class Documents {
   private readonly focuses = new Map<number, Focus>()
   private readonly roots = new Map<number, Root>()
   private laneDoc: Lanes | null = null
-  private gymNet: Lanes | null = null
-  // Bumped when verdicts are re-derived; a kept focus remembers which it was composed with.
-  private verdicts = 0
-  private readonly focusVerdicts = new Map<number, number>()
   private scoreDoc: Scoreboard | null | undefined
   private acctDoc: Settings | null | undefined
-  private readonly resolved = new Map<string, Resolved>()
-  private readonly groups = new WeakMap<object, Map<number, unknown[]>>()
 
-  constructor(private readonly k: Kernel, private readonly board: Board) {}
+  constructor(private readonly k: Kernel) {}
 
   /** Rows of these tables changed (null: any); `jobs` are the job rows among them. */
-  changed(tables: ReadonlyMap<number, unknown> | null, jobs: readonly number[] | "all"): Change {
+  changed(tables: ReadonlyMap<number, ReadonlySet<number> | null> | null, jobs: readonly number[] | "all"): Change {
     const k = this.k
     const t = (name: string) => tables === null || tables.has(k.table(name))
     const c: Change = {}
-    if (t("items") || t("overlays") || t("profiles")) this.resolved.clear()
     const wide = ["items", "overlays", "profiles", "cv_variants", "cv_lineages", "narratives", "kv_pairs", "batches", "events", "stages", "bands"].some(t)
-    if (wide) {
+    // A job's focus also reads its card's glance and its verdict, which a kin's move can change.
+    const keys = (name: string) => tables?.get(k.table(name))
+    const moved = [keys("cards"), keys("verdicts")]
+    if (wide || jobs === "all" || moved.some((m) => m === null)) {
       this.focuses.clear()
       c.focus = "all"
-    } else if (t("job_apps")) {
-      if (jobs === "all") this.focuses.clear()
-      else for (const id of jobs) this.focuses.delete(id)
-      c.focus = jobs
-    }
-    // Verdicts are re-derived whole on every move; a kept focus takes its
-    // new verdict when next read, without composing again.
-    if (t("verdicts")) {
-      this.verdicts++
-      const moved = tables?.get(k.table("verdicts"))
-      c.focus = moved instanceof Set && c.focus !== "all" ? [...new Set([...(c.focus ?? []), ...moved])] : "all"
-    }
-    // A focus shows its card's glance, which the kernel fills in after the
-    // card itself (the idle keyword read): a card that moved recomposes.
-    if (t("cards") && c.focus !== "all") {
-      const moved = tables?.get(k.table("cards"))
-      if (moved instanceof Set) {
-        for (const id of moved) this.focuses.delete(id)
-        c.focus = [...new Set([...(c.focus ?? []), ...moved])]
-      } else {
-        this.focuses.clear()
-        c.focus = "all"
-      }
+    } else {
+      const ids = new Set([...jobs, ...moved.flatMap((m) => [...(m ?? [])])])
+      for (const id of ids) this.focuses.delete(id)
+      if (ids.size > 0) c.focus = [...ids]
     }
     if (["profiles", "items", "cv_variants", "kv_pairs", "narratives"].some(t)) {
       this.roots.clear()
       c.root = true
     }
-    if (["kv_pairs", "gym_problems", "gym_reps", "net_entries", "clock"].some(t)) {
-      this.gymNet = null
-      this.laneDoc = null
-      c.lanes = true
-    }
-    if (t("heat_rows")) {
+    if (["kv_pairs", "gym_problems", "gym_reps", "net_entries", "clock", "heat_rows"].some(t)) {
       this.laneDoc = null
       c.lanes = true
     }
@@ -721,118 +612,28 @@ class Documents {
     return c
   }
 
-  private group<T>(rows: T[], key: (r: T) => number | null): Map<number, T[]> {
-    let m = this.groups.get(rows) as Map<number, T[]> | undefined
-    if (!m) {
-      m = new Map()
-      for (const r of rows) {
-        const id = key(r)
-        if (id === null) continue
-        const list = m.get(id)
-        if (list) list.push(r)
-        else m.set(id, [r])
-      }
-      this.groups.set(rows, m as Map<number, unknown[]>)
-    }
-    return m
-  }
-
-  today(): string {
-    const c = this.k.all<{ today: number }>("clock", SPEC.clock)[0]
-    return isoDay(c && c.today > 0 ? c.today : Math.floor(Date.now() / 86_400_000))
-  }
-
-  private kv(): KvRow[] { return this.k.all<KvRow>("kv_pairs", SPEC.kv_pairs) }
-  private items(): ItemRow[] { return this.k.all<ItemRow>("items", SPEC.items) }
-  private variants(): VariantRow[] { return this.k.all<VariantRow>("cv_variants", SPEC.cv_variants) }
-  private variantOf(job: number): VariantRow | undefined { return this.group(this.variants(), (v) => v.job_app_id).get(job)?.[0] }
-  private lineage(id: number | null): LineageRow | undefined {
-    return id === null ? undefined : this.k.one<LineageRow>("cv_lineages", SPEC.cv_lineages, id)
-  }
-
-  private narrative(profile: ProfileRow): NarrativeRow | undefined {
-    if (profile.user_id === null) return undefined
-    return this.k.all<NarrativeRow>("narratives", SPEC.narratives).find((n) => n.user_id === profile.user_id)
-  }
-
-  private resolve(profileId: number, lineageId: number | null): Resolved {
-    const key = `${profileId}:${lineageId ?? 0}`
-    let r = this.resolved.get(key)
-    if (!r) {
-      const overlays = this.group(this.k.all<OverlayRow>("overlays", SPEC.overlays), (o) => o.lineage_id)
-      r = resolve(profileItems(this.items(), profileId), lineageId === null ? [] : (overlays.get(lineageId) ?? []))
-      this.resolved.set(key, r)
-    }
-    return r
-  }
-
   focus(id: number): Focus | null {
-    const hit = this.focuses.get(id)
-    if (hit) {
-      if (this.focusVerdicts.get(id) === this.verdicts) return hit
-      this.focusVerdicts.set(id, this.verdicts)
-      const heat = { ...verdictOf(this.k.one<Verdict>("verdicts", SPEC.verdicts, id)), override: hit.heat.override, override_reason: hit.heat.override_reason }
-      if (JSON.stringify(heat) === JSON.stringify(hit.heat)) return hit
-      const f = { ...hit, heat }
-      this.focuses.set(id, f)
-      return f
+    let f = this.focuses.get(id)
+    if (!f) {
+      f = this.k.document<Focus>(this.k.k.focus_json(id)) ?? undefined
+      if (f) this.focuses.set(id, f)
     }
-    const k = this.k
-    const job = k.one<RawJob>("job_apps", SPEC.job_apps, id)
-    const variant = this.variantOf(id)
-    const profile = job && k.one<ProfileRow>("profiles", SPEC.profiles, job.profile_id)
-    if (!job || !variant || !profile) return null
-    const batch = job.batch_id === null ? undefined : k.one<RawBatch>("batches", SPEC.batches, job.batch_id)
-    const row = this.board.rowOf(id)
-    const glance = (col: string) => (row < 0 ? 0 : (this.board.column(col)[row] ?? 0))
-    const verdict = k.one<Verdict>("verdicts", SPEC.verdicts, id)
-    const kv = this.kv()
-    const f = focus(
-      {
-        job: {
-          ...job,
-          keyword_hits: glance("hits"), keyword_total: glance("total"),
-          mask_hidden: glance("hidden"), mask_altered: glance("altered"), mask_emphasized: glance("emphasized"),
-          batch: batch ? { code: batch.code, fire: batch.fire === 1 ? "open_fire" : "hold" } : null,
-        },
-        profile, variant, lineage: this.lineage(variant.lineage_id),
-        items: [], overlays: [],
-        events: this.group(k.all<EventRow>("events", SPEC.events), (e) => e.job_app_id).get(id) ?? [],
-        kv, narrative: this.narrative(profile), person: person(kv),
-        verdict: verdictOf(verdict),
-        stages: this.board.tables.stages, bands: this.board.tables.bands,
-      },
-      this.resolve(profile.id, variant.lineage_id),
-      (targets, text) => k.coverage(id, text, targets),
-    )
-    this.focuses.set(id, f)
-    this.focusVerdicts.set(id, this.verdicts)
-    return f
+    return f ?? null
   }
 
   root(profileId: number): Root | null {
-    const hit = this.roots.get(profileId)
-    if (hit) return hit
-    const profile = this.k.one<ProfileRow>("profiles", SPEC.profiles, profileId)
-    if (!profile) return null
-    const r = root(profile, this.items(), this.variants(), this.kv(), this.narrative(profile))
-    this.roots.set(profileId, r)
-    return r
+    let r = this.roots.get(profileId)
+    if (!r) {
+      r = this.k.document<Root>(this.k.k.root_json(profileId)) ?? undefined
+      if (r) this.roots.set(profileId, r)
+    }
+    return r ?? null
   }
 
-  /** The gym and net halves change with their rows; the heat half with every stage move. */
   lanes(): Lanes | null {
     if (this.laneDoc) return this.laneDoc
-    const k = this.k
-    if (k.k.rows(k.table("clock")) === 0) return null
-    const rows = k.all<HeatRow & { group: number }>("heat_rows", SPEC.heat_rows)
-    const heat = (group: number) => rows.filter((r) => r.group === group).map(({ group: _, ...r }) => r)
-    this.gymNet ??= lanes(
-      this.today(), this.kv(),
-      k.all<ProblemRow>("gym_problems", SPEC.gym_problems), k.all<RepRow>("gym_reps", SPEC.gym_reps), k.all<NetRow>("net_entries", SPEC.net_entries),
-      { companies: [], vendors: [] },
-    )
-    this.laneDoc = { ...this.gymNet, heat: { companies: heat(0), vendors: heat(1) } }
+    if (this.k.k.rows(this.k.table("clock")) === 0) return null
+    this.laneDoc = this.k.document<Lanes>(this.k.k.lanes_json())
     return this.laneDoc
   }
 
@@ -859,28 +660,32 @@ class Documents {
     return this.scoreDoc
   }
 
+  /** The Account page's document, as /api/account answered it; `clock.now` decides freshness. */
   account(): Settings | null {
     if (this.acctDoc !== undefined) return this.acctDoc
     const k = this.k
     const a = k.all<AcctRow>("acct", SPEC.acct)[0]
+    if (!a) return (this.acctDoc = null)
     const clock = k.all<{ now: number }>("clock", SPEC.clock)[0]
-    this.acctDoc = a
-      ? account(
-        a, k.all<AcctKeyRow>("acct_keys", SPEC.acct_keys), k.all<AcctSessionRow>("acct_sessions", SPEC.acct_sessions),
-        k.all<AcctIdentityRow>("acct_identities", SPEC.acct_identities), k.all<AcctFactorRow>("acct_factors", SPEC.acct_factors),
-        clock && clock.now > 0 ? clock.now : Math.floor(Date.now() / 1000),
-      )
-      : null
+    const now = clock && clock.now > 0 ? clock.now : Math.floor(Date.now() / 1000)
+    const lines = (s: string) => s.split("\n").filter((x) => x !== "")
+    this.acctDoc = {
+      account: { id: a.id, name: a.name },
+      keys: k.all<Key>("acct_keys", SPEC.acct_keys).map((x) => ({ ...x })),
+      sessions: k.all<Omit<Session, "current">>("acct_sessions", SPEC.acct_sessions).map((s) => ({ ...s, current: s.id === a.me })),
+      security: {
+        methods: k.all<Omit<Method, "transports"> & { transports: string }>("acct_factors", SPEC.acct_factors).map((f) => ({ ...f, transports: lines(f.transports) })),
+        recovery_codes_left: a.recovery_left,
+        fresh: a.fresh_until !== null && now < a.fresh_until,
+      },
+      identities: k.all<Identity>("acct_identities", SPEC.acct_identities).map((x) => ({ ...x })),
+      sign_in_methods: lines(a.sign_in_methods) as Identity["provider"][],
+    }
     return this.acctDoc
   }
 }
 
-/** A verdict as HiremeWeb.JSON writes it (the override comes from the job). */
-function verdictOf(v: Verdict | undefined): Omit<HeatVerdict, "override" | "override_reason"> {
-  if (!v) return { decision: "allow", reason: "", company_load: 0, company_cap: 0, size: null, ats_vendor: "", cooldown_days: null, note: "" }
-  const { id: _id, has_tenant, ats_tenant, ...rest } = v
-  return { ...rest, decision: v.decision === "defer" ? "defer" : "allow", ats_tenant: has_tenant ? ats_tenant : null }
-}
+interface AcctRow { id: number; name: string; me: number; recovery_left: number; fresh_until: number | null; sign_in_methods: string }
 
 // ---- ops ----
 
@@ -939,7 +744,7 @@ export class LocalDesk implements Desk, Host {
     this.hash = kernel.schema_hash()
     this.kernel = new Kernel(kernel, (cause) => void this.recover(cause))
     this.board = new Board(this.kernel)
-    this.docs = new Documents(this.kernel, this.board)
+    this.docs = new Documents(this.kernel)
     kernel.set_today(Math.floor(Date.now() / 86_400_000))
     const k = this.kernel
     this.snapshot = scope === "" ? null : new Snapshot(scope, this.hash, () => (this.board.n > 0 ? { rev: k.rev, bytes: k.snapshot() } : null))
