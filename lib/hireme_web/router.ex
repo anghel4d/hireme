@@ -135,7 +135,8 @@ defmodule HiremeWeb.DeskController do
 
   def index(conn, _params) do
     %{account: account, session: session} = conn.assigns
-    # The board travels in the page, so the first card waits on no socket.
+    # The board travels in the page, so the first card waits on no socket;
+    # the kernel, bundle and stylesheet are asked for ahead of it.
     {rev, board} = HiremeWeb.Session.board(account.id, session.id)
 
     page = """
@@ -145,6 +146,9 @@ defmodule HiremeWeb.DeskController do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Desk · Hireme</title>
+        <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
+        <link rel="modulepreload" href="#{~p"/assets/js/app.js"}" />
+        <link rel="preload" href="#{~p"/assets/js/app.css"}" as="style" />
         <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
         <meta name="wire-ticket" content="#{HiremeWeb.Session.ticket(account.id, session.id)}" />
         <meta name="wire-gate" content="#{HiremeWeb.Auth.wire_gate() || ""}" />
@@ -152,7 +156,6 @@ defmodule HiremeWeb.DeskController do
         <meta name="wire-scope" content="#{HiremeWeb.Session.scope(account.id)}" />
         <meta name="wire-schema" content="#{HiremeWeb.Packet.schema_hash()}" />
         <meta name="wire-board" content="#{rev}:#{Base.encode64(board)}" />
-        <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
         #{HiremeWeb.Auth.early_script()}
         <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
         <script defer type="module" src="#{~p"/assets/js/app.js"}"></script>
