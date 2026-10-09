@@ -25,6 +25,7 @@ extern crate alloc;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
+mod compose;
 mod derive;
 mod desk;
 mod heat;

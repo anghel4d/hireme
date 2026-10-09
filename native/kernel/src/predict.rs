@@ -697,7 +697,7 @@ fn parse_object(s: &str) -> Option<Vec<(String, String)>> {
     }
 }
 
-fn string(s: &str, i: &mut usize) -> Option<String> {
+pub(crate) fn string(s: &str, i: &mut usize) -> Option<String> {
     let b = s.as_bytes();
     if b.get(*i) != Some(&b'"') {
         return None;
