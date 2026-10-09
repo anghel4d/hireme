@@ -50,8 +50,9 @@ pub struct Desk {
     pending: Vec<Pending>,
     order: Vec<u32>,
     order_dirty: bool,
-    search: Vec<u8>,
-    search_at: Vec<u32>,
+    /// Per card row: the string refs it was derived from, and the text.
+    search: Vec<([u32; 13], Vec<u8>)>,
+    search_epoch: u32,
     search_dirty: bool,
     pub sel: Vec<u32>,
     pub today: u32,
@@ -564,6 +565,10 @@ impl Desk {
         self.order = keys.into_iter().map(|(_, i)| i).collect();
     }
 
+    /// Re-derives the lowercased search text of rows whose inputs moved.
+    /// Within one arena epoch the arena is append-only, so equal string
+    /// references mean equal strings and a row whose references are all
+    /// unchanged keeps its text; a new epoch (BOOT, compaction) derives all.
     fn derive_search(&mut self) {
         if !self.search_dirty {
             return;
@@ -571,40 +576,56 @@ impl Desk {
         self.search_dirty = false;
         let c = table::CARDS;
         let n = self.rows(c);
-        let mut out = std::mem::take(&mut self.search);
-        out.clear();
-        let mut at = std::mem::take(&mut self.search_at);
-        at.clear();
-        at.push(0);
-        let mut num = String::new();
-        for r in 0..n {
-            for f in [
-                col::cards::COMPANY,
-                col::cards::ROLE,
-                col::cards::LOCATION,
-                col::cards::NEXT_ACTION,
-            ] {
-                lower_into(&mut out, self.vstr(c, f, r));
-                out.push(b'\n');
-            }
-            let pid = self.vu32(c, col::cards::PROFILE, r);
-            if let Some(pr) = self.row_of(table::PROFILES, pid) {
-                lower_into(
-                    &mut out,
-                    self.vstr(table::PROFILES, col::profiles::NAME, pr),
-                );
-            }
-            out.push(b'\n');
-            lower_into(&mut out, self.vstr(c, col::cards::CV_LABEL, r));
-            let id = self.vu32(c, col::cards::ID, r);
-            num.clear();
-            use std::fmt::Write;
-            let _ = write!(num, "\njobapp{id}\ncv{id}\n{id}");
-            out.extend_from_slice(num.as_bytes());
-            at.push(out.len() as u32);
+        let epoch = self.store.arena.epoch;
+        if self.search_epoch != epoch {
+            self.search.clear();
+            self.search_epoch = epoch;
         }
-        self.search = out;
-        self.search_at = at;
+        let mut search = std::mem::take(&mut self.search);
+        search.resize_with(n, || ([u32::MAX; 13], Vec::new()));
+        const FIELDS: [u16; 5] = [
+            col::cards::COMPANY,
+            col::cards::ROLE,
+            col::cards::LOCATION,
+            col::cards::NEXT_ACTION,
+            col::cards::CV_LABEL,
+        ];
+        for (r, (key, text)) in search.iter_mut().enumerate() {
+            let pid = self.vu32(c, col::cards::PROFILE, r);
+            let pname = self.row_of(table::PROFILES, pid).map_or([0, 0], |pr| {
+                self.strs(table::PROFILES, col::profiles::NAME)
+                    .get(pr)
+                    .copied()
+                    .unwrap_or([0, 0])
+            });
+            let id = self.vu32(c, col::cards::ID, r);
+            let mut k = [0u32; 13];
+            for (i, f) in FIELDS.iter().enumerate() {
+                let sr = self.strs(c, *f).get(r).copied().unwrap_or([0, 0]);
+                k[2 * i..2 * i + 2].copy_from_slice(&sr);
+            }
+            k[10..12].copy_from_slice(&pname);
+            k[12] = id;
+            if *key == k {
+                continue;
+            }
+            *key = k;
+            text.clear();
+            let arena = &self.store.arena;
+            for (i, f) in FIELDS.iter().enumerate() {
+                if *f == col::cards::CV_LABEL {
+                    lower_into(text, arena.get(pname));
+                    text.push(b'\n');
+                }
+                lower_into(text, arena.get([k[2 * i], k[2 * i + 1]]));
+                if *f != col::cards::CV_LABEL {
+                    text.push(b'\n');
+                }
+            }
+            use std::io::Write;
+            let _ = write!(text, "\njobapp{id}\ncv{id}\n{id}");
+        }
+        self.search = search;
     }
 
     /// Rows that pass every filter, in board order, into `sel`. Filter
@@ -656,11 +677,8 @@ impl Desk {
             if (batch == -2 && b != 0) || (batch >= 0 && b != batch) {
                 continue;
             }
-            if !query.is_empty() {
-                let text = &self.search[self.search_at[i] as usize..self.search_at[i + 1] as usize];
-                if !contains(text, &query) {
-                    continue;
-                }
+            if !query.is_empty() && !contains(&self.search[i].1, &query) {
+                continue;
             }
             sel.push(r);
         }
