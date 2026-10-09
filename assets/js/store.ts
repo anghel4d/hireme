@@ -619,6 +619,9 @@ export class LocalDesk implements Desk, Host {
   private docs: Resident | null = null
   readonly hash: number
   readonly snapshot: Snapshot | null
+  // Jobs whose FOCUS came from the server, so a slower replay leaves them alone.
+  private readonly live = new Set<number>()
+  private replaying = false
 
   /** Ops predicted, refused locally, and refused by the server; read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
@@ -860,15 +863,49 @@ export class LocalDesk implements Desk, Host {
     this.snapshot?.clear()
   }
 
+  /**
+   * Paint from saved frames. The board and its documents go in at once,
+   * so the first draw has every card; the focuses follow in slices between
+   * frames, and one the server has sent meanwhile is newer, so it stays.
+   */
+  restore(bytes: Bytes): void {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const focus: Bytes[] = []
+    this.replaying = true
+    try {
+      for (let at = 0; at + HEADER <= bytes.byteLength;) {
+        const len = v.getUint32(at, true)
+        if (len < HEADER || at + len > bytes.byteLength) break
+        const f = bytes.subarray(at, at + len)
+        const kind = f[4] ?? 0
+        if (kind === KIND.FOCUS) focus.push(f)
+        else this.frame(f, kind, f[5] ?? 0)
+        at += len
+      }
+    } finally {
+      this.replaying = false
+    }
+    const slice = () => {
+      const end = performance.now() + 4
+      this.replaying = true
+      try {
+        while (focus.length > 0 && performance.now() < end) {
+          const f = focus.shift() as Bytes
+          if (!this.live.has(focusJob(f))) this.frame(f, KIND.FOCUS, 0)
+        }
+      } finally {
+        this.replaying = false
+      }
+      if (focus.length > 0) setTimeout(slice, 0)
+    }
+    slice()
+  }
+
   frame(f: Bytes, kind: number, flags: number): void {
     const kernel = this.kernel
     const docs = this.docs
     if (!kernel || !docs) return
-    // A BOOT with content replaces everything; an empty one says the snapshot is current.
-    if (kind === KIND.BOOT && f.byteLength > HEADER) {
-      docs.forgetLines()
-      this.focuses.clear()
-    }
+    if (kind === KIND.FOCUS && !this.replaying) this.live.add(focusJob(f))
     const bits = kernel.ingest(f)
     const c: Change = bits & (INGEST.cards | INGEST.tables | INGEST.settled | INGEST.dropped | INGEST.tick) ? { rows: true } : {}
     switch (kind) {
@@ -905,7 +942,11 @@ export class LocalDesk implements Desk, Host {
       default:
         break
     }
-    if (flags & FLAG.END) c.rows = true
+    if (flags & FLAG.END) {
+      c.rows = true
+      // The first burst a connection sends is complete: a mark the bench reads.
+      if (!this.replaying && performance.getEntriesByName("desk:ready").length === 0) performance.mark("desk:ready")
+    }
     if (c.rows || c.focus || c.lanes || c.root || c.scoreboard) {
       this.views.clear()
       this.laneView = null
@@ -928,6 +969,11 @@ export class LocalDesk implements Desk, Host {
   }
 }
 
+/** The job a FOCUS frame is about: the first row of its `focus` table. */
+function focusJob(f: Bytes): number {
+  return tables(f).get(30)?.u32(1)[0] ?? 0
+}
+
 function merge(a: Change, b: Change): Change {
   return { ...a, ...b, rows: a.rows || b.rows, focus: [...(a.focus ?? []), ...(b.focus ?? [])] }
 }
@@ -944,23 +990,35 @@ function touched(op: Op, job: number | null): Change {
 // ---- the snapshot ----
 //
 // The kernel's base as frames (BOOT, LINES, each job's FOCUS), written to
-// IndexedDB under the account's scope a second after the desk goes quiet
-// and when the page hides, so the next load paints before the network
-// answers. Replaying them through the same sink restores the desk, and
+// IndexedDB under the account's scope once the desk is quiet for a second
+// (or five seconds into a steady stream) and when the page hides, so the
+// next load paints before the network answers. Replaying them through the same sink restores the desk, and
 // HELLO then names their rev so the server sends only what changed.
 
 export class Snapshot {
   private timer = 0
   private dirty = false
+  private first = 0
+  private last = 0
 
   constructor(private readonly scope: string, private readonly hash: number, private readonly take: () => { rev: bigint; bytes: Bytes } | null) {
     addEventListener("pagehide", () => this.save())
   }
 
+  /** The base changed. Save once it has been quiet a second, or five seconds into a steady stream. */
   touch(): void {
+    const now = performance.now()
+    if (!this.dirty) this.first = now
     this.dirty = true
-    clearTimeout(this.timer)
-    this.timer = window.setTimeout(() => this.save(), 1000)
+    this.last = now
+    if (this.timer === 0) this.timer = window.setTimeout(() => this.due(), 1000)
+  }
+
+  private due(): void {
+    this.timer = 0
+    const now = performance.now()
+    if (now - this.last < 1000 && now - this.first < 5000) this.timer = window.setTimeout(() => this.due(), 1000 - (now - this.last))
+    else this.save()
   }
 
   private save(): void {
@@ -1167,12 +1225,6 @@ export class Resident {
   }
 
   hasFocus(id: number): boolean { return this.focusDocs.has(id) }
-
-  /** Line ixs belong to one session: a new one starts them over, and the focuses that name them go too. */
-  forgetLines(): void {
-    this.lines.clear()
-    this.focusDocs.clear()
-  }
 
   /** Take what a table frame carries, beside the cards. Answers what changed. */
   ingest(frame: Bytes, kind: number): Change {
