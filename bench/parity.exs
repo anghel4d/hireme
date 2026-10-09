@@ -23,7 +23,20 @@ batch = hd(Desk.list_batches())
 mix = Heat.mix_batch(batch)
 
 payloads = %{
-  packet_bytes: Packet.build() |> IO.iodata_to_binary(),
+  cards_frame:
+    Packet.frame(
+      :boot,
+      0,
+      Packet.table(
+        :cards,
+        Packet.card_rows(
+          Desk.list_cards(%Desk.Filters{status: :all}),
+          Desk.list_batches(),
+          Corpus.list_profiles()
+        )
+      )
+    )
+    |> IO.iodata_to_binary(),
   focuses: Enum.map(focus_ids, &(&1 |> Desk.focus() |> JSON.focus())),
   roots: Enum.map(Corpus.list_profiles(), &(&1.id |> Desk.root() |> JSON.root())),
   scoreboard: Campaign.scoreboard() |> JSON.scoreboard(),

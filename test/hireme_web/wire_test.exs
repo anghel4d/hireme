@@ -48,12 +48,31 @@ defmodule HiremeWeb.WireTest do
     |> Enum.map(fn [a, b] -> binary_part(bytes, a, b - a) end)
   end
 
+  # Whole frames, with any DEFLATE body inflated the way the browser does
+  # before ingest; the binary is re-framed plain, as the kernel sees it.
   defp one!(iodata) do
     bin = IO.iodata_to_binary(iodata)
     assert rem(byte_size(bin), 8) == 0
     assert {:ok, frames, ""} = Packet.split(bin)
-    {bin, frames}
+    frames = Enum.map(frames, &plain/1)
+
+    plain_bin =
+      frames
+      |> Enum.map(fn {k, f, r, b} -> Packet.frame(k, r, b, flags: f) end)
+      |> IO.iodata_to_binary()
+
+    {plain_bin, frames}
   end
+
+  defp plain({kind, flags, rev, body}) when Bitwise.band(flags, 1) == 1 do
+    <<raw_len::little-32, z_len::little-32, rest::binary>> = body
+    <<z::binary-size(^z_len), _pad::binary>> = rest
+    raw = :zlib.unzip(z)
+    assert byte_size(raw) == raw_len
+    {kind, Bitwise.band(flags, 0xFE), rev, raw}
+  end
+
+  defp plain(frame), do: frame
 
   defp desk do
     p = profile()
@@ -82,13 +101,9 @@ defmodule HiremeWeb.WireTest do
     assert Enum.map(t[5], & &1[2]) == Enum.map(Hireme.Pipeline.keys(), &Atom.to_string/1)
     assert [_score] = t[11]
 
-    {zbin, [{:boot, 0x03, 7, zbody}]} =
-      one!(Packet.frame(:boot, 7, body, deflate: true, flags: 0x02))
-
-    <<raw_len::little-32, z_len::little-32, rest::binary>> = zbody
-    <<z::binary-size(^z_len), _pad::binary>> = rest
-    assert byte_size(:zlib.unzip(z)) == raw_len
-    assert :zlib.unzip(z) == decoded
+    zbin = IO.iodata_to_binary(Packet.frame(:boot, 7, body, deflate: true, flags: 0x02))
+    assert {:ok, [{:boot, 0x03, 7, _} = packed], ""} = Packet.split(zbin)
+    assert plain(packed) == {:boot, 0x02, 7, decoded}
 
     golden("boot.bin", bin)
     golden("boot.deflate.bin", zbin)

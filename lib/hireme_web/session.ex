@@ -538,38 +538,44 @@ defmodule HiremeWeb.Session do
     {id, %{s | next_uni: id + 4}}
   end
 
+  @batch 32
+
   defp warmer(session, queue, urgent, rev) do
     receive do
       {:hint, ids} ->
         warmer(session, ids ++ (queue -- ids), urgent, rev)
 
       {:urgent, ids, at} ->
-        warmer(session, queue, urgent ++ Enum.map(ids, &{&1, at}), max(rev, at))
+        warmer(session, queue, urgent ++ ids, max(rev, at))
     after
       0 ->
         case {urgent, queue} do
-          {[{id, at} | more], _} ->
-            read_focus(session, id, at, true)
-            warmer(session, queue, more, rev)
+          {[_ | _], _} ->
+            {now, later} = Enum.split(Enum.uniq(urgent), @batch)
+            read_focus(session, now, rev, true)
+            warmer(session, queue, later, rev)
 
-          {[], [id | more]} ->
-            read_focus(session, id, rev, false)
-            warmer(session, more, [], rev)
+          {[], [_ | _]} ->
+            {now, later} = Enum.split(queue, @batch)
+            read_focus(session, now, rev, false)
+            warmer(session, later, [], rev)
 
           {[], []} ->
             receive do
-              {:urgent, ids, at} -> warmer(session, [], Enum.map(ids, &{&1, at}), max(rev, at))
+              {:urgent, ids, at} -> warmer(session, [], ids, max(rev, at))
               {:hint, _} -> warmer(session, [], [], rev)
             end
         end
     end
   end
 
-  defp read_focus(session, id, rev, urgent) do
-    case HiremeWeb.Session.Cache.focus(Hireme.Repo.account_id!(), id, rev) do
-      nil -> :ok
-      focus -> send(session, {__MODULE__, :focus, focus, rev, urgent})
-    end
+  defp read_focus(session, ids, rev, urgent) do
+    account = Hireme.Repo.account_id!()
+
+    for {_id, focus} <- HiremeWeb.Session.Cache.focuses(account, ids, rev),
+        do: send(session, {__MODULE__, :focus, focus, rev, urgent})
+
+    :ok
   end
 
   defp focus_out(s, focus, rev, urgent) do
@@ -625,29 +631,55 @@ defmodule HiremeWeb.Session.Cache do
     {:ok, nil}
   end
 
-  @doc "The focus of `job_id` as of `rev` or later, from the table or read and kept."
+  @doc """
+  The focuses of `job_ids` as of `rev` or later, as `{id, json}`: kept
+  ones from the table, the rest read in one batch against the
+  sequencer's heat snapshot and kept. Unknown ids are left out.
+  """
+  @spec focuses(pos_integer(), [pos_integer()], non_neg_integer()) :: [{pos_integer(), map()}]
+  def focuses(account_id, job_ids, rev) do
+    {kept, missing} =
+      Enum.reduce(job_ids, {[], []}, fn id, {kept, missing} ->
+        case kept(account_id, id) do
+          nil -> {kept, [id | missing]}
+          json -> {[{id, json} | kept], missing}
+        end
+      end)
+
+    read =
+      case missing do
+        [] ->
+          []
+
+        ids ->
+          for focus <- Hireme.Desk.focuses(Enum.reverse(ids), Hireme.Ops.heat(account_id)) do
+            json = HiremeWeb.JSON.focus(focus)
+            if table?(), do: :ets.insert(@table, {{account_id, focus.job.id}, rev, json})
+            {focus.job.id, json}
+          end
+      end
+
+    Enum.reverse(kept) ++ read
+  end
+
+  @doc "One focus, as `focuses/3` reads it, or nil."
   @spec focus(pos_integer(), pos_integer(), non_neg_integer()) :: map() | nil
   def focus(account_id, job_id, rev) do
-    key = {account_id, job_id}
-
-    with true <- table?(),
-         [{^key, at, focus}] <- :ets.lookup(@table, key),
-         true <- at >= dirty(account_id, job_id) do
-      focus
-    else
-      _ -> read(key, job_id, rev)
+    case focuses(account_id, [job_id], rev) do
+      [{_, json}] -> json
+      [] -> nil
     end
   end
 
-  defp read(key, job_id, rev) do
-    case Hireme.Desk.focus(job_id) do
-      nil ->
-        nil
+  defp kept(account_id, job_id) do
+    key = {account_id, job_id}
 
-      focus ->
-        json = HiremeWeb.JSON.focus(focus)
-        if table?(), do: :ets.insert(@table, {key, rev, json})
-        json
+    with true <- table?(),
+         [{^key, at, json}] <- :ets.lookup(@table, key),
+         true <- at >= dirty(account_id, job_id) do
+      json
+    else
+      _ -> nil
     end
   end
 

@@ -42,7 +42,7 @@ defmodule HiremeWeb.JSON do
       root_coverage: coverage(f.root_coverage),
       kv: Enum.map(f.kv, &%{key: &1.key, value: &1.value}),
       masks: Enum.map(f.masks, &line/1),
-      heat: heat(f.job)
+      heat: heat(f)
     }
   end
 
@@ -264,9 +264,8 @@ defmodule HiremeWeb.JSON do
     conn |> put_status(status) |> json(%{error: message})
   end
 
-  defp heat(%Job{} = job) do
-    job
-    |> Heat.can_apply()
+  defp heat(%Focus{verdict: %Heat.Verdict{} = v, job: job}) do
+    v
     |> verdict()
     |> Map.merge(%{override: job.heat_override, override_reason: job.heat_override_reason})
   end
