@@ -49,7 +49,14 @@ defmodule HiremeWeb.Sockets do
   `x-api-key` header or the bearer subprotocol, or `:error`. An upgrade
   without a live key is refused before any socket state exists.
   """
-  @spec agent(map()) :: {:ok, %{account_id: pos_integer(), key_id: String.t()}} | :error
+  @spec agent(map()) ::
+          {:ok,
+           %{
+             account_id: pos_integer(),
+             key_id: String.t(),
+             expires_at: DateTime.t() | nil
+           }}
+          | :error
   def agent(%{connect_info: info}) when is_map(info) do
     token = Map.get(info, :auth_token) || header(Map.get(info, :x_headers, []), "x-api-key")
 

@@ -183,5 +183,4 @@ defmodule HiremeWeb.MfaController do
   defp message(:assertion), do: "That passkey was not accepted."
   defp message(:clone), do: "That credential's counter went backwards; it has been disabled."
   defp message(:attestation), do: "That registration was not accepted."
-  defp message(other), do: to_string(other)
 end

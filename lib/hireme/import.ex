@@ -82,11 +82,14 @@ defmodule Hireme.Import do
       %URI{scheme: scheme, host: host} = uri when is_binary(scheme) and is_binary(host) ->
         path = uri.path |> to_string() |> String.trim_trailing("/")
 
-        URI.to_string(%URI{
-          scheme: String.downcase(scheme),
-          host: String.downcase(host),
-          port: uri.port,
-          path: if(path in ["", "/"], do: nil, else: path)
+        URI.to_string(%{
+          uri
+          | scheme: String.downcase(scheme),
+            host: String.downcase(host),
+            path: if(path in ["", "/"], do: nil, else: path),
+            userinfo: nil,
+            query: nil,
+            fragment: nil
         })
 
       _ ->
