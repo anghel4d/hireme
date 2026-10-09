@@ -345,14 +345,21 @@ defmodule HiremeWeb.Session do
         Repo.put_account(agent.account_id)
         s = %{s | role: :agent, agent: agent, account_id: agent.account_id, client_id: client}
         s.mod.ready(s.carrier)
-        {:ok, rev, snap} = Ops.attach(agent.account_id)
-        s = %{s | rev: rev, hello: true, batches: snap.batches, profiles: snap.profiles}
 
-        control(
-          s,
-          Packet.frame(:boot, rev, Packet.lookups(snap.batches, snap.profiles), flags: @end_flag)
-        )
+        # An agent reads raw rows too: its BOOT holds the dictionaries and
+        # the batches and profiles they name, and every delta is raw rows.
+        {:ok, rev, snap} = Ops.attach(agent.account_id, nil)
+        tables = agent_tables(snap)
+        s = %{s | rev: rev, hello: true, raw: true}
 
+        body = [
+          Packet.static_lookups(),
+          Packet.raw(:batches, Map.get(tables, :batches, [])),
+          Packet.raw(:profiles, Map.get(tables, :profiles, [])),
+          clock()
+        ]
+
+        control(s, Packet.frame(:boot, rev, body, flags: @end_flag))
         {:ok, s}
 
       :error ->
@@ -456,6 +463,11 @@ defmodule HiremeWeb.Session do
   end
 
   # ---- Raw tables (round two): rows as the database holds them ----
+
+  # A replay (the agent asked for no snapshot, so this only follows a
+  # ring hit) carries no tables; a boot carries them all.
+  defp agent_tables({:boot, %{tables: tables}}), do: tables
+  defp agent_tables(_replay), do: %{}
 
   @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
                  narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
