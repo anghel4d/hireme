@@ -16,23 +16,33 @@ const STOP: &[&str] = &[
     "our", "for", "the", "and",
 ];
 
-/// The stop words' hashes, so a word is only compared with them on a match.
-const STOP_HASH: [u32; STOP.len()] = {
-    let mut h = [0u32; STOP.len()];
+/// The stop words as a word's first chunk (each is under eight bytes),
+/// and a 64-bit filter over them so most words skip the list.
+const STOP_CHUNK: [u64; STOP.len()] = {
+    let mut h = [0u64; STOP.len()];
     let mut i = 0;
     while i < STOP.len() {
         let b = STOP[i].as_bytes();
-        let mut x = 0x811c_9dc5u32;
         let mut j = 0;
         while j < b.len() {
-            x = (x ^ b[j] as u32).wrapping_mul(0x0100_0193);
+            h[i] |= (b[j] as u64) << (8 * j);
             j += 1;
         }
-        h[i] = x;
         i += 1;
     }
     h
 };
+const STOP_BLOOM: u64 = {
+    let mut m = 0u64;
+    let mut i = 0;
+    while i < STOP.len() {
+        m |= 1 << (STOP_CHUNK[i] % 64);
+        i += 1;
+    }
+    m
+};
+
+const K: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// A byte as a word byte of the downcased text (a-z 0-9 + # .), A-Z
 /// folded down; 0 for every byte that ends a word.
@@ -66,9 +76,30 @@ pub struct Scratch {
     /// Open addressing: slot → 1 + its word's index in `words`, 0 empty.
     /// Kept all zero between calls.
     slots: Vec<u32>,
-    /// Each distinct word of four or more bytes: hash, start, len, count,
-    /// and its slot.
-    words: Vec<[u32; 5]>,
+    /// Each distinct word of four or more bytes.
+    words: Vec<Word>,
+}
+
+/// A distinct word: its first sixteen bytes as two little-endian chunks
+/// (zero past its end), which decide equality and order for any word of
+/// sixteen bytes or fewer without touching the text.
+struct Word {
+    c: [u64; 2],
+    start: u32,
+    len: u32,
+    count: u32,
+    slot: u32,
+}
+
+impl Word {
+    /// Byte order: the chunks as big-endian numbers, then the bytes.
+    fn cmp(&self, o: &Word, text: &[u8]) -> core::cmp::Ordering {
+        let key = |w: &Word| (w.c[0].swap_bytes(), w.c[1].swap_bytes());
+        key(self).cmp(&key(o)).then_with(|| {
+            let b = |w: &Word| &text[w.start as usize..(w.start + w.len) as usize];
+            if self.len > 16 || o.len > 16 { b(self).cmp(b(o)) } else { core::cmp::Ordering::Equal }
+        })
+    }
 }
 
 impl Scratch {
@@ -84,12 +115,30 @@ impl Scratch {
         let src = listing.as_bytes();
         let text = &mut self.text;
         text.clear();
-        if src.is_ascii() {
-            text.extend(src.iter().map(|&c| WORD[c as usize]));
+        // The text's length; zeros pad it to whole blocks and one more.
+        let end;
+        // KELVIN SIGN lowercases to one byte from three; any other listing
+        // maps byte for byte (U+0130 to "i" and a byte that ends the word).
+        let ascii = src.is_ascii();
+        // Where a byte pair or triple starts, by its first byte (rare, so
+        // found by that byte, not compared at every position).
+        let at = |lead: u8, rest: &'static [u8]| {
+            src.iter().enumerate().filter(move |&(i, &c)| c == lead && src[i + 1..].starts_with(rest)).map(|(i, _)| i)
+        };
+        if ascii || at(0xE2, &[0x84, 0xAA]).next().is_none() {
+            text.resize(src.len().next_multiple_of(16) + 16, 0);
+            for (o, c) in text.chunks_exact_mut(16).zip(src.chunks(16)) {
+                let mut b = [0u8; 16];
+                b[..c.len()].copy_from_slice(c);
+                o.copy_from_slice(&simd::words(b));
+            }
+            end = src.len();
+            if !ascii {
+                for i in at(0xC4, &[0xB0]) {
+                    text[i] = b'i';
+                }
+            }
         } else {
-            // Only two characters lowercase to bytes that hold a word byte:
-            // U+0130 is "i" and a combining dot, U+212A KELVIN SIGN is "k".
-            // Every other non-ASCII byte ends a word.
             let mut i = 0;
             while i < src.len() {
                 let (c, n) = match src[i] {
@@ -104,74 +153,81 @@ impl Scratch {
                 }
                 i += n;
             }
+            end = text.len();
+            text.resize(end.next_multiple_of(16) + 16, 0);
         }
+        // The words are the runs between zero bytes; the text ends in at
+        // least sixteen zeros, so a word's chunks read past it into them.
         // A text of n bytes holds at most n / 5 words of four or more
         // bytes, so a table of twice that never fills past half.
         let need = (text.len() / 5 * 2 + 16).next_power_of_two();
         if self.slots.len() < need {
             self.slots.resize(need, 0);
         }
-        let mask = need - 1;
+        let bits = need.trailing_zeros();
         let (slots, words) = (&mut self.slots, &mut self.words);
         words.clear();
-        let (mut h, mut start) = (0x811c_9dc5u32, 0);
-        for i in 0..=text.len() {
-            let c = text.get(i).copied().unwrap_or(0);
-            if c != 0 {
-                h = (h ^ c as u32).wrapping_mul(0x0100_0193);
-                continue;
-            }
-            let len = i - start;
-            if len >= 4 {
-                let mut k = h as usize & mask;
-                loop {
-                    let Some(e) = slots[k].checked_sub(1).map(|w| &mut words[w as usize]) else {
-                        slots[k] = words.len() as u32 + 1;
-                        words.push([h, start as u32, len as u32, 1, k as u32]);
-                        break;
-                    };
-                    if e[0] == h && e[2] as usize == len && text[e[1] as usize..][..len] == text[start..i] {
-                        e[3] += 1;
-                        break;
+        let load = |at: usize| u64::from_le_bytes(text[at..at + 8].try_into().unwrap_or([0; 8]));
+        let mut start = 0;
+        for block in (0..=end).step_by(16) {
+            let mut zeros = simd::zeros(text[block..block + 16].try_into().unwrap_or([0; 16]));
+            while zeros != 0 {
+                let at = block + zeros.trailing_zeros() as usize;
+                zeros &= zeros - 1;
+                let len = at - start;
+                if len >= 4 {
+                    let keep = |n: usize| if n >= 8 { u64::MAX } else { (1u64 << (8 * n)) - 1 };
+                    let c = [load(start) & keep(len), load(start + 8) & keep(len.saturating_sub(8))];
+                    let h = (c[0] ^ c[1].rotate_left(29) ^ len as u64).wrapping_mul(K);
+                    let mut k = (h >> (64 - bits)) as usize;
+                    loop {
+                        let Some(e) = slots[k].checked_sub(1).map(|w| &mut words[w as usize]) else {
+                            slots[k] = words.len() as u32 + 1;
+                            words.push(Word { c, start: start as u32, len: len as u32, count: 1, slot: k as u32 });
+                            break;
+                        };
+                        if e.c == c && e.len as usize == len && (len <= 16 || text[e.start as usize..][..len] == text[start..at]) {
+                            e.count += 1;
+                            break;
+                        }
+                        k = (k + 1) & (need - 1);
                     }
-                    k = (k + 1) & mask;
                 }
+                start = at + 1;
             }
-            (h, start) = (0x811c_9dc5, i + 1);
         }
         for e in words.iter() {
-            slots[e[4] as usize] = 0;
+            slots[e.slot as usize] = 0;
         }
-        let word = |e: &[u32; 5]| &text[e[1] as usize..(e[1] + e[2]) as usize];
-        let stop = |e: &[u32; 5]| e[2] <= 7 && STOP_HASH.contains(&e[0]) && STOP.iter().any(|s| s.as_bytes() == word(e));
+        // Stop words are seven bytes or fewer: their first chunk is the word.
+        let stop = |e: &Word| e.len <= 7 && STOP_BLOOM & (1 << (e.c[0] % 64)) != 0 && STOP_CHUNK.contains(&e.c[0]);
         // The ten first by count then bytes: the tenth count bounds them,
         // every word above it is in, and the words at it fill the rest by
         // bytes.
         let mut top = [0u32; 10];
         for e in words.iter() {
-            if e[3] <= top[9] || stop(e) {
+            if e.count <= top[9] || stop(e) {
                 continue;
             }
-            let at = top.iter().position(|&t| e[3] > t).unwrap_or(9);
+            let at = top.iter().position(|&t| e.count > t).unwrap_or(9);
             top.copy_within(at..9, at + 1);
-            top[at] = e[3];
+            top[at] = e.count;
         }
         let floor = top[9];
-        let mut out: Vec<&[u32; 5]> = words.iter().filter(|e| e[3] > floor && !stop(e)).collect();
-        let mut tied: Vec<&[u8]> = Vec::new();
-        for e in words.iter().filter(|e| e[3] == floor && floor > 0) {
-            let w = word(e);
-            if (tied.len() + out.len() < 10 || tied.last().is_some_and(|l| w < *l)) && !stop(e) {
-                let at = tied.partition_point(|t| *t < w);
-                tied.insert(at, w);
+        let mut out: Vec<&Word> = words.iter().filter(|e| e.count > floor && !stop(e)).collect();
+        let mut tied: Vec<&Word> = Vec::new();
+        for e in words.iter().filter(|e| e.count == floor && floor > 0) {
+            let room = tied.len() + out.len() < 10;
+            if (room || tied.last().is_some_and(|l| e.cmp(l, text).is_lt())) && !stop(e) {
+                let at = tied.partition_point(|t| t.cmp(e, text).is_lt());
+                tied.insert(at, e);
                 tied.truncate(10 - out.len());
             }
         }
-        out.sort_unstable_by(|a, b| b[3].cmp(&a[3]).then_with(|| word(a).cmp(word(b))));
+        out.sort_unstable_by(|a, b| b.count.cmp(&a.count).then_with(|| a.cmp(b, text)));
         out.iter()
-            .map(|e| word(e))
-            .chain(tied)
-            .filter_map(|w| core::str::from_utf8(w).ok())
+            .chain(&tied)
+            .filter_map(|e| core::str::from_utf8(&text[e.start as usize..(e.start + e.len) as usize]).ok())
             .map(String::from)
             .collect()
     }
@@ -297,3 +353,84 @@ pub fn theme_targets(joined: &str) -> Vec<String> {
         .map(String::from)
         .collect()
 }
+
+/// Sixteen bytes at a time: through `WORD`, and which are zero (simd128
+/// in wasm, SSE2 on x86_64).
+mod simd {
+    #[allow(unused_imports)]
+    use super::WORD;
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    pub fn words(b: [u8; 16]) -> [u8; 16] {
+        use core::arch::wasm32::*;
+        let c = u8x16(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        let within = |x: v128, lo: u8, n: u8| u8x16_lt(u8x16_sub(x, u8x16_splat(lo)), u8x16_splat(n));
+        let low = v128_or(c, v128_and(within(c, b'A', 26), u8x16_splat(0x20)));
+        let word = v128_or(
+            v128_or(within(low, b'a', 26), within(low, b'0', 10)),
+            v128_or(v128_or(u8x16_eq(low, u8x16_splat(b'+')), u8x16_eq(low, u8x16_splat(b'#'))), u8x16_eq(low, u8x16_splat(b'.'))),
+        );
+        let out = v128_and(low, word);
+        let mut o = [0u8; 16];
+        // SAFETY: o is 16 bytes.
+        unsafe { v128_store(o.as_mut_ptr() as *mut v128, out) };
+        o
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    pub fn zeros(b: [u8; 16]) -> u32 {
+        use core::arch::wasm32::*;
+        // SAFETY: b is 16 bytes.
+        let c = unsafe { v128_load(b.as_ptr() as *const v128) };
+        u8x16_bitmask(u8x16_eq(c, u8x16_splat(0))) as u32
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn words(b: [u8; 16]) -> [u8; 16] {
+        use core::arch::x86_64::*;
+        // SAFETY: SSE2 is part of x86_64; b and o are 16 bytes.
+        unsafe {
+            let c = _mm_loadu_si128(b.as_ptr() as *const __m128i);
+            let within = |x: __m128i, lo: u8, n: u8| {
+                let d = _mm_sub_epi8(x, _mm_set1_epi8(lo as i8));
+                _mm_cmpeq_epi8(_mm_min_epu8(d, _mm_set1_epi8(n as i8 - 1)), d)
+            };
+            let low = _mm_or_si128(c, _mm_and_si128(within(c, b'A', 26), _mm_set1_epi8(0x20)));
+            let is = |x: u8| _mm_cmpeq_epi8(low, _mm_set1_epi8(x as i8));
+            let word = _mm_or_si128(
+                _mm_or_si128(within(low, b'a', 26), within(low, b'0', 10)),
+                _mm_or_si128(_mm_or_si128(is(b'+'), is(b'#')), is(b'.')),
+            );
+            let mut o = [0u8; 16];
+            _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, _mm_and_si128(low, word));
+            o
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn zeros(b: [u8; 16]) -> u32 {
+        use core::arch::x86_64::*;
+        // SAFETY: SSE2 is part of x86_64; b is 16 bytes.
+        unsafe {
+            let c = _mm_loadu_si128(b.as_ptr() as *const __m128i);
+            _mm_movemask_epi8(_mm_cmpeq_epi8(c, _mm_setzero_si128())) as u32
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))))]
+    pub fn words(b: [u8; 16]) -> [u8; 16] {
+        b.map(|c| WORD[c as usize])
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))))]
+    pub fn zeros(b: [u8; 16]) -> u32 {
+        b.iter().enumerate().fold(0, |m, (i, &c)| m | (((c == 0) as u32) << i))
+    }
+}
+
+
+
+
+
+
+
