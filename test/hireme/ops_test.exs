@@ -122,21 +122,19 @@ defmodule Hireme.OpsTest do
 
     case Map.pop(producers, job.id) do
       {nil, _} ->
-        producer = spawn(fn -> Process.sleep(:infinity) end)
-
-        case Hireme.Letterbox.lease(Hireme.Letterbox.for_job(job.id).id, producer) do
-          {:ok, _handle} ->
+        case Hireme.Fixtures.hold_lease(job.id) do
+          {{:ok, _pair}, producer} ->
             Process.put(:producers, Map.put(producers, job.id, producer))
             {:lease, true}
 
-          {:error, _busy} ->
-            Process.exit(producer, :kill)
+          {{:error, _busy}, producer} ->
+            Hireme.Fixtures.let_go(producer)
             {:lease, false}
         end
 
       {producer, rest} ->
         Process.put(:producers, rest)
-        Process.exit(producer, :kill)
+        Hireme.Fixtures.let_go(producer)
         {:lease, true}
     end
   end

@@ -252,14 +252,8 @@ defmodule HiremeWeb.Session do
     id = {:lane, lane}
     send_fun = fn io -> send(me, {__MODULE__, :letter, id, io}) end
     close_fun = fn reason -> send(me, {__MODULE__, :letter_closed, id, reason}) end
-    {:ok, pid} = LetterboxStream.open(s.agent, send_fun, close_fun)
+    {:ok, pid} = LetterboxStream.open(s.agent, send_fun, close_fun, lane: lane)
     %{s | letters: Map.put(s.letters, id, pid)}
-  end
-
-  # A lane's replies carry the lane in the header's rev.
-  defp stamp(io, lane) do
-    {:ok, frames, _} = Packet.split(IO.iodata_to_binary(io))
-    for {kind, flags, _rev, body} <- frames, do: Packet.frame(kind, lane, body, flags: flags)
   end
 
   defp letter_sender(%{mod: HiremeWeb.Gate, carrier: carrier}, id, _me),
@@ -290,8 +284,9 @@ defmodule HiremeWeb.Session do
 
   def info({:ops_delta, _, _}, s), do: {:ok, s}
 
-  def info({__MODULE__, :letter, {:lane, lane}, io}, s) do
-    control(s, stamp(io, lane))
+  # A lane's replies already carry the lane in the header's rev.
+  def info({__MODULE__, :letter, {:lane, _lane}, io}, s) do
+    control(s, io)
     {:ok, s}
   end
 
@@ -419,7 +414,7 @@ defmodule HiremeWeb.Session do
   defp frame(_frame, s), do: {:ok, s}
 
   defp hello(%{role: :pending} = s, true, key, _snapshot, client) do
-    case HiremeWeb.Sockets.agent_key(key, s.peer) do
+    case LetterboxStream.agent_key(key, s.peer) do
       {:ok, agent} ->
         Repo.put_account(agent.account_id)
         s = %{s | role: :agent, agent: agent, account_id: agent.account_id, client_id: client}
@@ -586,7 +581,7 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  defp rpc_reply(s, reply), do: control(s, LetterboxStream.rpc(Jason.encode!(reply)))
+  defp rpc_reply(s, reply), do: control(s, HiremeWeb.Account.rpc_frame(Jason.encode!(reply)))
 
   # ---- Ops ----
 

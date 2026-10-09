@@ -291,7 +291,7 @@ defmodule HiremeWeb.SessionTest do
       })
 
     {:ok, _s} =
-      Session.event({:data, 0, IO.iodata_to_binary(HiremeWeb.LetterboxStream.rpc(req))}, s)
+      Session.event({:data, 0, IO.iodata_to_binary(HiremeWeb.Account.rpc_frame(req))}, s)
 
     out = all_out()
     pi = Enum.find_index(out, &match?({:patch, _, _, _}, &1))
@@ -361,7 +361,6 @@ defmodule HiremeWeb.SessionTest do
   test "on a carrier without streams an agent's lease rides control as a lane",
        %{account: account} do
     job = job(profile())
-    letterbox = Hireme.Letterbox.for_job(job.id)
     {:ok, %{secret: secret}} = Hireme.ApiKeys.create("lanes")
     {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.10", origin: "", path: "/wt"})
 
@@ -382,7 +381,7 @@ defmodule HiremeWeb.SessionTest do
     {:ok, a} = Session.event({:data, 0, hello}, a)
     _ = all_out()
 
-    lease = IO.iodata_to_binary(Packet.frame(:lease, 1, <<letterbox.id::little-64>>))
+    lease = IO.iodata_to_binary(Packet.frame(:lease, 1, <<job.id::little-64>>))
     {:ok, a} = Session.event({:data, 0, lease}, a)
     assert Map.has_key?(a.letters, {:lane, 1})
 

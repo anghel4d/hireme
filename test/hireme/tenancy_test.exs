@@ -10,7 +10,6 @@ defmodule Hireme.TenancyTest do
 
   test "one account's rows do not exist for another" do
     job = job(profile(), %{company: "Mine Co"})
-    box = Letterbox.for_job(job.id).id
     assert [%{id: id}] = Desk.list_cards(%Filters{status: :all})
     assert id == job.id
 
@@ -18,9 +17,7 @@ defmodule Hireme.TenancyTest do
     assert Desk.list_cards(%Filters{status: :all}) == []
     assert Desk.focus(job.id) == nil
     assert Repo.get(Job, job.id) == nil
-    refute Letterbox.exists?(box)
-    assert {:error, :letterbox} = Letterbox.lease(box, self())
-    assert Letterbox.list() == []
+    assert {:error, :not_found} = Letterbox.claim(job.id)
   end
 
   test "a read with no account on the process is refused, and so is a write" do

@@ -71,7 +71,6 @@ defmodule HiremeBench.Actions do
         added = ok(result)
         true = added == Repo.get!(Job, added.id)
         true = added.company == @prefix <> "new employer"
-        true = Letterbox.for_job(added.id).job_app_id == added.id
         true = CvPair.job_id(CvPair.bind!(added.id)) == added.id
       end,
       fn _, _ -> cleanup_jobs(@prefix <> "new employer") end
@@ -107,7 +106,6 @@ defmodule HiremeBench.Actions do
         true = focus.coverage.hits == ["elixir", "systems"] and focus.coverage.misses == []
         true = Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
         true = Repo.get!(Job, job.id) == shared_before
-        true = Letterbox.for_job(added.id).job_app_id == added.id
       end,
       fn result, _ -> Repo.delete!(ok(result)) end
     )
@@ -368,44 +366,46 @@ defmodule HiremeBench.Actions do
       no_cleanup
     )
 
-    box = Letterbox.for_job(job.id)
-
     measure(
       "Letterbox",
       "claim",
       n,
       no_prepare,
-      fn _ -> Letterbox.lease(box.id, self()) end,
+      fn _ -> Letterbox.claim(job.id) end,
       fn result, _ ->
-        handle = ok(result)
-        true = Process.alive?(handle.pid)
-        true = Letterbox.permit_job(job.id) == {:error, :leased}
+        ok(result)
+        true = MapSet.member?(Letterbox.leased_jobs(), job.id)
       end,
       fn result, _ -> :ok = Letterbox.release(ok(result)) end
     )
 
+    # A lease's write: the holder runs the op through the sequencer.
     measure(
       "Letterbox",
-      "command_score_commit",
+      "op_score_commit",
       n,
       fn _ ->
         reset_job(job.id, %{score_100: 40})
-        ok(Letterbox.lease(box.id, self()))
+        ok(Letterbox.claim(job.id))
       end,
-      fn handle -> Letterbox.command(handle, {:set_score, 82}) end,
+      fn _pair ->
+        op = %{op_id: System.unique_integer([:positive]), kind: :score, target: job.id, fields: ["82"]}
+        {:ok, _rev} = Hireme.Ops.run(Repo.account_id!(), op)
+        {:ok, Repo.get!(Job, job.id)}
+      end,
       fn result, _ -> assert_job(result, job.id, %{score_100: 82}) end,
-      fn _, handle -> :ok = Letterbox.release(handle) end
+      fn _, pair -> :ok = Letterbox.release(pair) end
     )
 
     measure(
       "Letterbox",
       "release",
       n,
-      fn _ -> ok(Letterbox.lease(box.id, self())) end,
+      fn _ -> ok(Letterbox.claim(job.id)) end,
       &Letterbox.release/1,
       fn result, _ ->
         :ok = result
-        :ok = Letterbox.permit_job(job.id)
+        false = MapSet.member?(Letterbox.leased_jobs(), job.id)
       end,
       no_cleanup
     )
@@ -448,7 +448,6 @@ defmodule HiremeBench.Actions do
 
           for row <- rows do
             true = CvPair.job_id(CvPair.bind!(row.id)) == row.id
-            true = Letterbox.for_job(row.id).job_app_id == row.id
           end
         end,
         fn _, _ -> if mode == :new, do: cleanup_import(import_prefix, code) end,

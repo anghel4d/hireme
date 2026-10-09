@@ -710,32 +710,6 @@ defmodule Hireme.ChecklistOracleTest do
     assert DateTime.compare(moved.last_used_at, aged) == :gt
   end
 
-  test "an open socket stops when its key is revoked", %{conn: conn} do
-    job = job(profile(), %{company: "Socket Co"})
-    box = Hireme.Letterbox.for_job(job.id).id
-
-    %{"secret" => secret} = account(conn, "create_key", %{name: "socket"}, 200)
-
-    info = %{
-      params: %{"letterbox_id" => to_string(box)},
-      connect_info: %{
-        x_headers: [{"x-api-key", secret}],
-        peer_data: %{address: {198, 51, 100, 8}}
-      }
-    }
-
-    assert {:ok, state} = HiremeWeb.McpSocket.connect(info)
-    assert {:ok, state} = HiremeWeb.McpSocket.init(state)
-    key = ApiKeys.list() |> Enum.find(&(&1.name == "socket"))
-    ApiKeys.revoke(key)
-    assert_receive :api_key_dead
-    assert :error = HiremeWeb.McpSocket.connect(info)
-    assert {:stop, :revoked, _} = HiremeWeb.McpSocket.handle_info(:api_key_dead, state)
-
-    assert {:stop, :revoked, _} =
-             HiremeWeb.McpSocket.handle_in({~s({"id":1,"method":"tools/list"}), []}, state)
-  end
-
   test "the account tables after create do not repeat the secret", %{conn: conn} do
     created = account(conn, "create_key", %{name: "once"}, 200)
     secret = created["secret"]

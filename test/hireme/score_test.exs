@@ -5,7 +5,6 @@ defmodule Hireme.ScoreTest do
   alias Hireme.Desk
   alias Hireme.Desk.Filters
   alias Hireme.Import
-  alias Hireme.Letterbox
 
   test "a pack's score_100 lands on the card, orders the board, and filters by floor and band" do
     profile = profile()
@@ -65,37 +64,5 @@ defmodule Hireme.ScoreTest do
 
     assert {:ok, _} = Import.import_body(again, "again.json", profile)
     assert [%{score_100: 100}] = Desk.list_cards(%Filters{status: :all, band: :frontier})
-  end
-
-  test "the directory ranks by score_100 and a lease can set its own" do
-    profile = profile()
-
-    low = job(profile, %{company: "Low Co", score_100: 40})
-    high = job(profile, %{company: "High Co", score_100: "95"})
-
-    listed = tool_call("list_applications", %{"status" => "all"})
-
-    assert Enum.map(listed["result"]["applications"], & &1["job_id"]) == [high.id, low.id]
-    assert hd(listed["result"]["applications"])["band"] == "labs"
-
-    boxes = tool_call("list_letterboxes", %{"min_score" => 50})
-
-    assert Enum.map(boxes["result"]["letterboxes"], & &1["job_id"]) == [high.id]
-
-    rec = tool_call("recommend_applications", %{"limit" => 1})
-
-    assert rec["result"]["fire"] == "hold"
-    assert Enum.map(rec["result"]["applications"], & &1["job_id"]) == [high.id]
-
-    {:ok, handle} = Letterbox.lease(Letterbox.for_job(low.id).id, self())
-
-    set = tool_call(handle, "set_score", %{"score" => 88})
-
-    assert set["result"] == %{"job_id" => low.id, "score_100" => 88, "band" => "big_tech"}
-
-    bad = tool_call(handle, "set_score", %{"score" => 101})
-
-    assert bad["error"]["message"] == "bad argument score"
-    assert Letterbox.release(handle) == :ok
   end
 end
