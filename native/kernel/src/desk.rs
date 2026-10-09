@@ -75,8 +75,6 @@ pub struct Desk {
     pub sel: Vec<u32>,
     pub today: u32,
     pub counters: [u32; COUNTERS],
-    pub events: Vec<[u32; 4]>,
-    pub event_msgs: Vec<Vec<u8>>,
 }
 
 impl Desk {
@@ -101,8 +99,6 @@ impl Desk {
             sel: Vec::new(),
             today: NONE,
             counters: [0; COUNTERS],
-            events: Vec::new(),
-            event_msgs: Vec::new(),
         }
     }
 
@@ -465,7 +461,6 @@ impl Desk {
     fn settle(&mut self, id: u64) {
         let Some(i) = self.pending.iter().position(|p| p.id == id) else {
             self.counters[UNKNOWN_ACK] += 1;
-            self.event(id, 0, 0, &[]);
             return;
         };
         let p = self.pending.remove(i);
@@ -488,10 +483,9 @@ impl Desk {
             }
         });
         self.counters[if exact { SETTLED } else { MISPREDICTED }] += 1;
-        self.event(id, 0, if exact { 0 } else { 1 }, &[]);
     }
 
-    fn drop_op(&mut self, id: u64, code: u8, msg: &[u8]) {
+    fn drop_op(&mut self, id: u64) {
         for p in self.pending.iter().filter(|p| p.id == id) {
             self.touched
                 .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
@@ -501,13 +495,6 @@ impl Desk {
         }
         self.pending.retain(|p| p.id != id);
         self.counters[NACKED] += 1;
-        self.event(id, code.max(1) as u32, 0, msg);
-    }
-
-    fn event(&mut self, id: u64, code: u32, flags: u32, msg: &[u8]) {
-        self.events
-            .push([id as u32, (id >> 32) as u32, code, flags]);
-        self.event_msgs.push(msg.to_vec());
     }
 
     // ---- ingest -----------------------------------------------------------
@@ -516,8 +503,6 @@ impl Desk {
     pub fn ingest(&mut self, buf: &[u8]) -> u32 {
         use crate::changed::*;
         use wire::schema::frame;
-        self.events.clear();
-        self.event_msgs.clear();
         self.touched.clear();
         let mut bits = 0;
         let mut base_moved = false;
@@ -562,8 +547,8 @@ impl Desk {
                     Err(_) => bits |= ERROR,
                 },
                 frame::NACK => match wire::nack(f.body) {
-                    Ok((id, code, msg)) => {
-                        self.drop_op(id, code, msg.as_bytes());
+                    Ok((id, _, _)) => {
+                        self.drop_op(id);
                         pending_moved = true;
                         bits |= ROLLED_BACK | CARDS;
                     }

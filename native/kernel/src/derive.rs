@@ -1456,20 +1456,6 @@ impl Desk {
         n
     }
 
-    /// Keywords.extract of the job's listing into the `coverage` table
-    /// (every hit 0). Returns the word count.
-    pub fn extract(&mut self, job: u32) -> u32 {
-        let jt = table::JOB_APPS;
-        let listing = self
-            .row_of(jt, job)
-            .map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
-        let words = keywords::extract(core::str::from_utf8(listing).unwrap_or(""));
-        let n = words.len() as u32;
-        let zeros = vec![0; words.len()];
-        self.put_words(&words, zeros);
-        n
-    }
-
     fn put_words(&mut self, words: &[String], hits: Vec<u32>) {
         let mut t = Table::new(table::COVERAGE);
         t.n = words.len();

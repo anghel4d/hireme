@@ -278,8 +278,9 @@ async function property(seed) {
       const code = Model.apply(st, o, true, serverWrites)
       if (code || r.f() < 0.15) {
         log.push(`nack ${o.id}`)
+        const nacked = K.k.counter(3)
         K.ingest(nack(o.id, code || S.refusal.cooldown, "no"))
-        assert.deepEqual(K.events().map((e) => [e.id, e.code, e.msg]), [[o.id, code || S.refusal.cooldown, "no"]])
+        assert.equal(K.k.counter(3), nacked + 1)
       } else {
         // Sometimes the server's result differs from the prediction.
         const j = st.jobs.get(o.target)
@@ -296,8 +297,9 @@ async function property(seed) {
         if (j) tables.push(rowsTable("job_apps", [j], r.f() < 0.6 && moved.length > 1 ? moved : JOB_COLS))
         if (o.kind === "open_fire") tables.push(rowsTable("batches", [...st.batches.values()]))
         log.push(`ack ${o.id} differ=${differ}`)
+        const [settled, mis] = [K.k.counter(1), K.k.counter(2)]
         K.ingest(concat(frame("PATCH", ++rev, tables), ack(o.id)))
-        assert.deepEqual(K.events().map((e) => [e.id, e.code, e.mis]), [[o.id, 0, +differ]])
+        assert.deepEqual([K.k.counter(1) - settled, K.k.counter(2) - mis], differ ? [0, 1] : [1, 0])
       }
     } else if (roll < 0.8) {
       // Another tab or agent wrote rows: a PATCH, maybe partial, maybe

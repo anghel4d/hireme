@@ -168,11 +168,6 @@ pub extern "C" fn col_type(t: u32, c: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn arena_ptr() -> u32 {
-    with(|k| k.desk.store.arena.bytes.as_ptr() as u32)
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn str_ptr(t: u32, c: u32, row: u32) -> u32 {
     with(|k| {
         let r = k.str_ref(t as u16, c as u16, row);
@@ -240,12 +235,6 @@ pub extern "C" fn coverage(job: u32, text_len: u32, targets_len: u32) -> u32 {
     })
 }
 
-/// Keywords.extract of the job's listing into the `coverage` table.
-#[unsafe(no_mangle)]
-pub extern "C" fn extract(job: u32) -> u32 {
-    with(|k| k.desk.extract(job))
-}
-
 /// Heat.mix_batch of one batch (read-only) into the `mix` table.
 #[unsafe(no_mangle)]
 pub extern "C" fn mix(batch: u32) -> u32 {
@@ -268,15 +257,10 @@ pub extern "C" fn glances(budget: u32) -> u32 {
     with(|k| k.desk.glances(budget as usize) as u32)
 }
 
-/// The selection: card rows (u32), in board order.
+/// The selection: card rows (u32), in board order; `select` answers its length.
 #[unsafe(no_mangle)]
 pub extern "C" fn selection_ptr() -> u32 {
     with(|k| k.desk.sel.as_ptr() as u32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn selection_len() -> u32 {
-    with(|k| k.desk.sel.len() as u32)
 }
 
 /// Position of a job id in the selection, or -1.
@@ -315,39 +299,6 @@ pub extern "C" fn touched_len() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn touched_ptr() -> u32 {
     with(|k| k.desk.touched.as_ptr() as u32)
-}
-
-/// Ops settled by the last ingest.
-#[unsafe(no_mangle)]
-pub extern "C" fn events_len() -> u32 {
-    with(|k| k.desk.events.len() as u32)
-}
-
-/// Settled ops as records of four u32: op id low, op id high, refusal
-/// (0 = accepted), flags (1 = the prediction differed from the server).
-#[unsafe(no_mangle)]
-pub extern "C" fn events_ptr() -> u32 {
-    with(|k| k.desk.events.as_ptr() as u32)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn event_msg_ptr(i: u32) -> u32 {
-    with(|k| {
-        k.desk
-            .event_msgs
-            .get(i as usize)
-            .map_or(0, |m| m.as_ptr() as u32)
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn event_msg_len(i: u32) -> u32 {
-    with(|k| {
-        k.desk
-            .event_msgs
-            .get(i as usize)
-            .map_or(0, |m| m.len() as u32)
-    })
 }
 
 /// In-memory counters: 0 predicted, 1 settled exactly, 2 mispredicted,

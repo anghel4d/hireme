@@ -137,9 +137,9 @@ async function one(file) {
     const tablesOut = Object.entries(line.rows).filter(([t]) => S.table[t]).flatMap(([t, rows]) => deltaTables(t, rows))
     const gone = Object.entries(line.gone ?? {}).flatMap(([t, ids]) => ids.map((id) => [S.table[t], id]))
     if (gone.length) tablesOut.push(["gone", { table: gone.map((g) => g[0]), id: gone.map((g) => g[1]) }])
+    const settled = K.k.counter(1)
     K.ingest(concat(frame("PATCH", ++rev, tablesOut), ack(o.op_id)))
-    const ev = K.events()
-    check(`ops.settled.${o.kind}`, what, JSON.stringify(ev.map((e) => [e.code, e.mis])), JSON.stringify([[0, 0]]))
+    check(`ops.settled.${o.kind}`, what, K.k.counter(1) - settled, 1)
   }
 
   const batchId = new Map((tables.find((t) => t.table === "batches")?.rows ?? []).map((b) => [b.code, b.id]))
