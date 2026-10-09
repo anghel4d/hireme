@@ -19,10 +19,10 @@
 //   the time until `ready` rejects is exactly the cold connection cost a desk
 //   pays before its first byte, and nothing is allocated.
 // - --hash-file (local only): the self-signed certificate's hash file. The
-//   echoing Session is then expected: both clients time the first control
-//   echo, and the first and last byte of a BOOT of --boot bytes (1 MiB by
-//   default) that the Session pushes on a server uni stream as it accepts,
-//   all from the start of the connect.
+//   echoing Session is then expected: both clients time the first and last
+//   byte of a BOOT of --boot bytes (1 MiB by default) that the Session pushes
+//   on a server uni stream as it accepts, from the start of the connect, and
+//   Chromium then times a control-stream echo.
 //
 // The production gate's host is never committed; pass it on the command line.
 
@@ -70,9 +70,8 @@ if (!existsSync(probe)) {
 const shake = runProbe("handshake", args.url, "--n", String(n))
 emit({ client: "probe", connect_ms: shake.connect_ms, rtt_ms: shake.rtt_ms })
 if (hash) {
-  const echo = runProbe("echo", args.url, "--n", "50")
   const pushed = runProbe("boot", `${args.url}?boot=${boot}`, "--n", String(n))
-  emit({ client: "probe", echo_ms: echo.rtt_ms, boot, ready_ms: pushed.ready_ms, boot_first_ms: pushed.first_byte_ms, boot_last_ms: pushed.last_byte_ms })
+  emit({ client: "probe", boot, ready_ms: pushed.ready_ms, boot_first_ms: pushed.first_byte_ms, boot_last_ms: pushed.last_byte_ms })
 }
 
 if (args.origin) {
