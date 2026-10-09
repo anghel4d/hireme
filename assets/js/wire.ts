@@ -15,7 +15,7 @@
 // where a loss costs nothing. Stream bytes are read BYOB into one staging
 // buffer, and a complete frame is handed to the sink as a view of it: the
 // sink's copy into the kernel is the only copy. A deflated frame (the BOOT)
-// is inflated first.
+// goes in as it came: the kernel inflates it as it ingests it.
 
 export const KIND = {
   HELLO: 1, BOOT: 3, PATCH: 4, OP: 8, ACK: 9, NACK: 10,
@@ -116,39 +116,14 @@ export function text(frame: Bytes, at: number): [string, number] {
   return [DECODER.decode(frame.subarray(at + 2, at + 2 + n)), at + 2 + n]
 }
 
-/** A raw-deflate body (u32 raw_len | u32 deflate_len | bytes) as a plain frame, flags cleared. */
-async function inflate(f: Bytes): Promise<Bytes> {
-  const v = new DataView(f.buffer, f.byteOffset, f.byteLength)
-  const raw = v.getUint32(HEADER, true)
-  const packed = v.getUint32(HEADER + 4, true)
-  const out = new Uint8Array(HEADER + pad8(raw))
-  out.set(f.subarray(0, HEADER))
-  const o = new DataView(out.buffer)
-  o.setUint32(0, out.byteLength, true)
-  o.setUint8(5, v.getUint8(5) & ~FLAG.DEFLATE)
-  const stream = new Blob([f.slice(HEADER + 8, HEADER + 8 + packed)]).stream().pipeThrough(new DecompressionStream("deflate-raw"))
-  const reader = stream.getReader()
-  let at = HEADER
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    out.set(value, at)
-    at += value.byteLength
-  }
-  return out
-}
-
 /**
  * Cuts a byte stream into frames. Bytes land in one staging buffer that
  * grows to the largest frame seen; a complete frame is passed as a view
- * of it. Deflated frames inflate off the hot path, and later frames wait
- * behind them so order holds.
+ * of it.
  */
 export class Framer {
   private buf = new ArrayBuffer(64 * 1024)
   private filled = 0
-  private chain: Promise<void> | null = null
-  private readonly held: Bytes[] = []
 
   constructor(private readonly sink: Sink, private readonly broken: (why: string) => void) {}
 
@@ -173,7 +148,7 @@ export class Framer {
       while (bytes.byteLength - at >= HEADER) {
         const len = new DataView(bytes.buffer, bytes.byteOffset + at, 4).getUint32(0, true)
         if (len < HEADER || len > bytes.byteLength - at) break
-        this.deliver(bytes.subarray(at, at + len))
+        this.emit(bytes.subarray(at, at + len))
         at += len
       }
       bytes = bytes.subarray(at)
@@ -203,35 +178,13 @@ export class Framer {
         if (at === 0 && len > this.buf.byteLength) this.grow(len)
         break
       }
-      this.deliver(new Uint8Array(this.buf, at, len))
+      this.emit(new Uint8Array(this.buf, at, len))
       at += len
     }
     if (at > 0) {
       new Uint8Array(this.buf).copyWithin(0, at, this.filled)
       this.filled -= at
     }
-  }
-
-  private deliver(f: Bytes): void {
-    const flags = f[5] ?? 0
-    if (this.chain === null && (flags & FLAG.DEFLATE) === 0) {
-      this.emit(f)
-      return
-    }
-    const own = f.slice()
-    this.held.push(own)
-    if (this.chain !== null) return
-    this.chain = (async () => {
-      while (this.held.length > 0) {
-        const next = this.held.shift() as Bytes
-        try {
-          this.emit((next[5] ?? 0) & FLAG.DEFLATE ? await inflate(next) : next)
-        } catch (cause) {
-          this.broken(`inflate: ${String(cause)}`)
-        }
-      }
-      this.chain = null
-    })()
   }
 
   private emit(f: Bytes): void {

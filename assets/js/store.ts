@@ -153,6 +153,7 @@ export interface WireKernel {
   touched_len(): number
   touched_ptr(): number
   derive(): number
+  warm(): void
   glances(budget: number): number
   counter(k: number): number
   set_today(day: number): void
@@ -462,6 +463,9 @@ export interface KernelModule { module: WebAssembly.Module; instance: WireKernel
 
 export async function loadWireKernel(url: string): Promise<KernelModule> {
   const { module, instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
+  // Every function's first call compiles it: take that on a throwaway desk
+  // now, while the connection waits for the server, not on the BOOT.
+  ;(instance.exports as unknown as WireKernel).warm()
   return { module, instance: instance.exports as unknown as WireKernel }
 }
 
