@@ -17,9 +17,14 @@ defmodule HiremeWeb.Session do
 
   Streams: client bidi 0 is control (HELLO, OPs and account RPC up;
   BOOT, PATCH, ACK, NACK and RPC replies down, in one order, so a PATCH
-  always lands before the ACK of the op that caused it). Every other
-  client bidi stream on an agent session is a letterbox lease
-  (`HiremeWeb.LetterboxStream`); on a browser session it is reset.
+  always lands before the ACK of the op that caused it). Other client
+  bidi streams are reset.
+
+  An agent's session is the agent's one process on the server, and it
+  holds the agent's leases itself (`Hireme.Letterbox`): a lease is a lane
+  of control, numbered by the frames' header `rev`. LEASE takes a job,
+  OPs on the lane write that job and nothing else, BYE gives it back;
+  the key being revoked or the session ending gives back every lease.
 
   Order: `Hireme.Ops` serializes every write per account and broadcasts
   `{:ops_delta, rev, delta}` before it answers. A delta at or below the
@@ -29,9 +34,10 @@ defmodule HiremeWeb.Session do
 
   require Logger
 
+  alias Hireme.ApiKeys
+  alias Hireme.Letterbox
   alias Hireme.Ops
   alias Hireme.Repo
-  alias HiremeWeb.LetterboxStream
   alias HiremeWeb.Packet
 
   @control 0
@@ -59,7 +65,7 @@ defmodule HiremeWeb.Session do
     client_id: 0,
     buffer: <<>>,
     acks: [],
-    letters: %{},
+    leases: %{},
     raw: false,
     early: false,
     acct_dirty: false
@@ -195,17 +201,6 @@ defmodule HiremeWeb.Session do
   @spec event(tuple(), %__MODULE__{}) :: {:ok, %__MODULE__{}} | {:stop, term(), %__MODULE__{}}
   def event({:stream, @control}, s), do: {:ok, s}
 
-  def event({:stream, id}, %{role: :agent} = s) do
-    me = self()
-    send_fun = letter_sender(s, id, me)
-    close_fun = fn reason -> send(me, {__MODULE__, :letter_closed, id, reason}) end
-
-    case LetterboxStream.open(s.agent, send_fun, close_fun) do
-      {:ok, pid} -> {:ok, %{s | letters: Map.put(s.letters, id, pid)}}
-      {:error, _} -> reset(s, id)
-    end
-  end
-
   def event({:stream, id}, s), do: reset(s, id)
 
   def event({:data, @control, bytes}, s) do
@@ -215,21 +210,14 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  def event({:data, id, bytes}, s) do
-    if pid = s.letters[id], do: LetterboxStream.data(pid, bytes)
-    {:ok, s}
-  end
+  def event({:data, _id, _bytes}, s), do: {:ok, s}
 
   def event({:fin, @control}, s), do: {:stop, :normal, s}
   def event({:reset, @control, _}, s), do: {:stop, :normal, s}
 
   def event({tag, id, _}, s) when tag in [:reset, :stop], do: event({:fin, id}, s)
 
-  def event({:fin, id}, s) do
-    {pid, letters} = Map.pop(s.letters, id)
-    if pid, do: LetterboxStream.fin(pid)
-    {:ok, %{s | letters: letters}}
-  end
+  def event({:fin, _id}, s), do: {:ok, s}
 
   def event({:dgram, bytes}, s) do
     case Packet.split(bytes) do
@@ -240,28 +228,7 @@ defmodule HiremeWeb.Session do
 
   def event({:closed, _code, _reason}, s), do: {:stop, :normal, s}
 
-  # A lease's replies do not order against the desk's frames, so on the
-  # gate (whose socket any process may write, one whole packet per send)
-  # the lease writes its stream directly instead of queueing behind a
-  # PATCH in this process; the WebSocket carrier buffers per callback, so
-  # there it goes through the session.
-  defp ensure_lane(%{letters: letters} = s, lane) when is_map_key(letters, {:lane, lane}), do: s
-
-  defp ensure_lane(s, lane) do
-    me = self()
-    id = {:lane, lane}
-    send_fun = fn io -> send(me, {__MODULE__, :letter, id, io}) end
-    close_fun = fn reason -> send(me, {__MODULE__, :letter_closed, id, reason}) end
-    {:ok, pid} = LetterboxStream.open(s.agent, send_fun, close_fun, lane: lane)
-    %{s | letters: Map.put(s.letters, id, pid)}
-  end
-
-  defp letter_sender(%{mod: HiremeWeb.Gate, carrier: carrier}, id, _me),
-    do: fn io -> HiremeWeb.Gate.send(carrier, id, io) end
-
-  defp letter_sender(_s, id, me), do: fn io -> send(me, {__MODULE__, :letter, id, io}) end
-
-  @doc "Any other message the host received: deltas, account changes, letters, timers."
+  @doc "Any other message the host received: deltas, account changes, key revocations, timers."
   @spec info(term(), %__MODULE__{}) :: {:ok, %__MODULE__{}} | {:stop, term(), %__MODULE__{}}
   def info({:ops_delta, rev, _delta}, %{rev: seen} = s) when rev <= seen, do: {:ok, s}
 
@@ -283,27 +250,6 @@ defmodule HiremeWeb.Session do
   end
 
   def info({:ops_delta, _, _}, s), do: {:ok, s}
-
-  # A lane's replies already carry the lane in the header's rev.
-  def info({__MODULE__, :letter, {:lane, _lane}, io}, s) do
-    control(s, io)
-    {:ok, s}
-  end
-
-  def info({__MODULE__, :letter, id, io}, s) do
-    s.mod.send(s.carrier, id, io)
-    {:ok, s}
-  end
-
-  def info({__MODULE__, :letter_closed, {:lane, lane} = id, reason}, s) do
-    control(s, Packet.frame(:bye, lane, sized(to_string(reason))))
-    {:ok, %{s | letters: Map.delete(s.letters, id)}}
-  end
-
-  def info({__MODULE__, :letter_closed, id, _reason}, s) do
-    s.mod.fin(s.carrier, id)
-    {:ok, %{s | letters: Map.delete(s.letters, id)}}
-  end
 
   def info({__MODULE__, :tick}, %{hello: true} = s) do
     control(s, Packet.frame(:tick, s.rev, clock()))
@@ -330,10 +276,24 @@ defmodule HiremeWeb.Session do
     end
   end
 
+  def info(:api_key_dead, %{role: :agent} = s), do: bye(s, "revoked")
+
+  def info({__MODULE__, :recheck}, %{role: :agent, agent: agent} = s) do
+    if ApiKeys.usable?(agent.key_id, agent.account_id) do
+      Process.send_after(self(), {__MODULE__, :recheck}, @recheck_ms)
+      {:ok, s}
+    else
+      bye(s, "expired")
+    end
+  end
+
   def info(_message, s), do: {:ok, s}
 
+  @doc "The session is ending: an agent's leases go back now, not when the registry notices."
   @spec terminate(term(), %__MODULE__{}) :: :ok
-  def terminate(_reason, _s), do: :ok
+  def terminate(_reason, s) do
+    Enum.each(s.leases, fn {_lane, pair} -> Letterbox.release(pair) end)
+  end
 
   # ---- Frames from the client ----
 
@@ -366,32 +326,16 @@ defmodule HiremeWeb.Session do
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
-  # Where an agent has no streams (the WebSocket), a lease rides control
-  # as a lane: its frames carry the lane (≥ 1) in the header's rev, go to
-  # that lane's lease process, and its replies come back stamped with it.
-  # BYE on a lane releases that lease.
+  # An agent's leases are lanes of control (header rev ≥ 1).
+  defp frame({:lease, _, lane, <<job_id::little-64, _::binary>>}, %{role: :agent} = s)
+       when lane > 0,
+       do: lease(s, lane, job_id)
+
+  defp frame({:op, _, lane, body}, %{role: :agent} = s) when lane > 0,
+    do: lease_op(s, lane, body)
+
   defp frame({:bye, _, lane, _}, %{role: :agent} = s) when lane > 0,
-    do: event({:fin, {:lane, lane}}, s)
-
-  # As many lanes as the gate allows streams: a key cannot open more.
-  defp frame({kind, _, lane, _}, %{role: :agent, letters: letters} = s)
-       when lane > 0 and kind in [:lease, :op, :rpc] and map_size(letters) >= @max_leases and
-              not is_map_key(letters, {:lane, lane}) do
-    control(s, Packet.frame(:bye, lane, sized("busy")))
-    {:ok, s}
-  end
-
-  defp frame({kind, flags, lane, body}, %{role: :agent} = s)
-       when lane > 0 and kind in [:lease, :op, :rpc] do
-    s = ensure_lane(s, lane)
-
-    LetterboxStream.data(
-      s.letters[{:lane, lane}],
-      IO.iodata_to_binary(Packet.frame(kind, lane, body, flags: flags))
-    )
-
-    {:ok, s}
-  end
+    do: {:ok, release(s, lane)}
 
   defp frame({:op, _, _, body}, %{role: role} = s) when role in [:browser, :agent],
     do: op(s, body)
@@ -414,9 +358,11 @@ defmodule HiremeWeb.Session do
   defp frame(_frame, s), do: {:ok, s}
 
   defp hello(%{role: :pending} = s, true, key, _snapshot, client) do
-    case LetterboxStream.agent_key(key, s.peer) do
+    case Letterbox.agent_key(key, s.peer) do
       {:ok, agent} ->
         Repo.put_account(agent.account_id)
+        Phoenix.PubSub.subscribe(Hireme.PubSub, ApiKeys.topic(agent.key_id))
+        Process.send_after(self(), {__MODULE__, :recheck}, @recheck_ms)
         s = %{s | role: :agent, agent: agent, account_id: agent.account_id, client_id: client}
         s.mod.ready(s.carrier)
 
@@ -548,8 +494,8 @@ defmodule HiremeWeb.Session do
   # Raw rows out before the ACKs they settle, as with derived cards.
   defp raw_patch(s, rev, delta) do
     control(s, Packet.frame(:patch, rev, raw_delta(delta)))
-    {due, held} = Enum.split_with(s.acks, fn {r, _} -> r <= rev end)
-    Enum.each(Enum.reverse(due), fn {r, op_id} -> ack(s, op_id, r) end)
+    {due, held} = Enum.split_with(s.acks, fn {r, _, _} -> r <= rev end)
+    Enum.each(Enum.reverse(due), fn {_r, op_id, stamp} -> ack(s, op_id, stamp) end)
     %{s | rev: rev, acks: held}
   end
 
@@ -594,7 +540,7 @@ defmodule HiremeWeb.Session do
             {:ok, s}
 
           {:ok, rev} ->
-            {:ok, %{s | acks: [{rev, op.op_id} | s.acks]}}
+            {:ok, %{s | acks: [{rev, op.op_id, rev} | s.acks]}}
 
           {:error, reason} ->
             control(s, Packet.nack(op.op_id, reason, s.rev))
@@ -611,6 +557,72 @@ defmodule HiremeWeb.Session do
   end
 
   defp ack(s, op_id, rev), do: control(s, Packet.ack(op_id, rev))
+
+  # ---- Leases: an agent's lanes ----
+
+  # As many lanes as the gate allows streams: a key cannot hold more.
+  defp lease(%{leases: leases} = s, lane, _job_id)
+       when map_size(leases) >= @max_leases or is_map_key(leases, lane) do
+    control(s, Packet.frame(:bye, lane, sized("busy")))
+    {:ok, s}
+  end
+
+  defp lease(s, lane, job_id) do
+    case Letterbox.claim(job_id) do
+      {:ok, pair} ->
+        control(s, Packet.ack(0, lane))
+        {:ok, %{s | leases: Map.put(s.leases, lane, pair)}}
+
+      {:error, reason} ->
+        control(s, Packet.nack(0, reason, lane))
+        {:ok, s}
+    end
+  end
+
+  # A lane's op writes its own job, with the session as the lease's
+  # holder; its ACK waits for the delta, as a browser's does, and comes
+  # back on the lane.
+  defp lease_op(s, lane, body) do
+    pair = s.leases[lane]
+
+    case Packet.op(body) do
+      {:ok, op} when pair != nil ->
+        if Letterbox.lease_op?(op, pair) do
+          case Ops.run(s.account_id, op) do
+            {:ok, rev} when rev <= s.rev ->
+              ack(s, op.op_id, lane)
+              {:ok, s}
+
+            {:ok, rev} ->
+              {:ok, %{s | acks: [{rev, op.op_id, lane} | s.acks]}}
+
+            {:error, reason} ->
+              control(s, Packet.nack(op.op_id, reason, lane))
+              {:ok, s}
+          end
+        else
+          control(s, Packet.nack(op.op_id, {:argument, "op for the leased job"}, lane))
+          {:ok, s}
+        end
+
+      {:ok, op} ->
+        control(s, Packet.nack(op.op_id, {:argument, "lease"}, lane))
+        {:ok, s}
+
+      {:error, op_id} ->
+        control(s, Packet.nack(op_id, {:argument, "op"}, lane))
+        {:ok, s}
+
+      :error ->
+        bye(s, "op")
+    end
+  end
+
+  defp release(s, lane) do
+    {pair, leases} = Map.pop(s.leases, lane)
+    if pair, do: Letterbox.release(pair)
+    %{s | leases: leases}
+  end
 
   # ---- Writing ----
 

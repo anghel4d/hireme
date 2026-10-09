@@ -358,11 +358,9 @@ defmodule HiremeWeb.SessionTest do
     assert [{:bye, 0, _, <<6::little-16, "schema">>}] = all_out()
   end
 
-  test "on a carrier without streams an agent's lease rides control as a lane",
-       %{account: account} do
-    job = job(profile())
-    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("lanes")
-    {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.10", origin: "", path: "/wt"})
+  # An agent's session, through its HELLO; its BOOT is drained.
+  defp agent(secret, ip) do
+    {:ok, a} = Session.init({Carrier, self()}, %{ip: ip, origin: "", path: "/wt"})
 
     hello =
       IO.iodata_to_binary(
@@ -380,44 +378,99 @@ defmodule HiremeWeb.SessionTest do
 
     {:ok, a} = Session.event({:data, 0, hello}, a)
     _ = all_out()
+    a
+  end
 
-    lease = IO.iodata_to_binary(Packet.frame(:lease, 1, <<job.id::little-64>>))
-    {:ok, a} = Session.event({:data, 0, lease}, a)
-    assert Map.has_key?(a.letters, {:lane, 1})
+  defp on_lane(a, frame) do
+    {:ok, a} = Session.event({:data, 0, IO.iodata_to_binary(frame)}, a)
+    drain(a)
+  end
 
-    a = settle_letters(a)
+  defp lease_frame(lane, job_id), do: Packet.frame(:lease, lane, <<job_id::little-64>>)
+
+  # An op on a lane: the op frame with the lane in its header's rev.
+  defp lane_op(lane, op_id, kind, target, fields) do
+    {:ok, [{:op, 0, 0, body}], ""} = Packet.split(op(op_id, kind, target, fields))
+    Packet.frame(:op, lane, body)
+  end
+
+  defp leased?(job_id), do: MapSet.member?(Hireme.Letterbox.leased_jobs(), job_id)
+
+  # The answers among what went out (a lease taken or given back also
+  # repaints its job's `leased` row).
+  defp answers, do: Enum.filter(all_out(), &(elem(&1, 0) in [:ack, :nack]))
+
+  test "an agent's session holds its leases as lanes, each writing only its own job", %{
+    account: account
+  } do
+    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("lanes")
+    a = job(profile(), %{company: "Alpha"})
+    b = job(profile(), %{company: "Beta"})
+    sibling = job(profile(), %{company: "Alpha"})
+    s = agent(secret, "198.51.100.10")
+
+    s = on_lane(s, lease_frame(1, a.id))
+    s = on_lane(s, lease_frame(2, b.id))
+    assert [{:ack, 0, 1, <<0::little-64>>}, {:ack, 0, 2, <<0::little-64>>}] = answers()
+    assert leased?(a.id) and leased?(b.id)
+
+    # A write on lane 1 lands on its job, after its delta, answered on the lane.
+    s = on_lane(s, lane_op(1, 81, 2, a.id, ["From lane 1", ""]))
     out = all_out()
-    assert out != [] and Enum.all?(out, &match?({_, _, 1, _}, &1))
+    assert List.last(out) == {:ack, 0, 1, <<81::little-64>>}
+    assert match?({:patch, _, _, _}, Enum.at(out, -2))
+    assert Repo.get!(Hireme.Desk.Job, a.id).next_action == "From lane 1"
 
-    {:ok, a} = Session.event({:data, 0, IO.iodata_to_binary(Packet.frame(:bye, 1, <<0::16>>))}, a)
-    refute Map.has_key?(a.letters, {:lane, 1})
+    # Lane 1 cannot write lane 2's job, nor run a desk-wide op.
+    s = on_lane(s, lane_op(1, 82, 4, b.id, ["1"]))
+    s = on_lane(s, lane_op(1, 83, 7, 0, ["B-1"]))
 
-    # No more lanes than the gate allows streams.
-    full = %{a | letters: Map.new(1..64, &{{:lane, &1 + 100}, self()})}
+    assert [
+             {:nack, 0, 1, <<82::little-64, _::binary>>},
+             {:nack, 0, 1, <<83::little-64, _::binary>>}
+           ] =
+             all_out()
 
-    {:ok, ^full} =
-      Session.event(
-        {:data, 0, IO.iodata_to_binary(Packet.frame(:lease, 999, <<1::little-64>>))},
-        full
-      )
+    # Another agent cannot take a held job, or one on a held lineage.
+    other = agent(secret, "198.51.100.12")
+    other = on_lane(other, lease_frame(1, a.id))
+    _other = on_lane(other, lease_frame(2, sibling.id))
+    assert [{:nack, 0, 1, _}, {:nack, 0, 2, _}] = answers()
 
+    # BYE gives a lane back; the session's end gives back the rest.
+    s = on_lane(s, Packet.frame(:bye, 1, <<0::16>>))
+    refute leased?(a.id)
+    assert leased?(b.id)
+    Session.terminate(:normal, s)
+    refute leased?(b.id)
+    _ = account
+  end
+
+  test "a revoked key ends the session and frees every lease", %{account: _account} do
+    {:ok, %{key: key, secret: secret}} = Hireme.ApiKeys.create("revoked")
+    job = job(profile(), %{company: "Revoked"})
+    s = agent(secret, "198.51.100.13")
+    s = on_lane(s, lease_frame(1, job.id))
+    _ = all_out()
+
+    Hireme.ApiKeys.revoke(key)
+    assert_receive :api_key_dead
+    assert {:stop, :normal, s} = Session.info(:api_key_dead, s)
+    Session.terminate(:normal, s)
+    refute leased?(job.id)
+  end
+
+  test "an agent holds no more lanes than the gate allows streams", %{account: _account} do
+    {:ok, %{secret: secret}} = Hireme.ApiKeys.create("cap")
+    s = agent(secret, "198.51.100.14")
+    full = %{s | leases: Map.new(1..64, &{&1 + 100, nil})}
+    {:ok, ^full} = Session.event({:data, 0, IO.iodata_to_binary(lease_frame(999, 1))}, full)
     assert [{:bye, 0, 999, <<4::little-16, "busy", _pad::binary>>}] = all_out()
   end
 
   test "an agent that never says HELLO is closed", %{account: _account} do
     {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.11", origin: "", path: "/wt"})
     assert {:stop, :normal, _} = Session.info({Session, :hello_deadline}, a)
-  end
-
-  # Feed the lease processes' replies back through the session, as its host would.
-  defp settle_letters(s) do
-    receive do
-      {Session, :letter, _, _} = m ->
-        {:ok, s} = Session.info(m, s)
-        settle_letters(s)
-    after
-      200 -> s
-    end
   end
 
   test "a ticketed raw browser gets its BOOT on a server stream right after accept",
