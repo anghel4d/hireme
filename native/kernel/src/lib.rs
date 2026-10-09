@@ -40,7 +40,6 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
 use desk::Desk;
-use store::focus_table;
 use wire::schema;
 
 /// Bits `ingest_commit` returns.
@@ -61,7 +60,6 @@ struct Kernel {
     ingest: Vec<u8>,
     scratch: Vec<u8>,
     snapshot: Vec<u8>,
-    focus: Option<u32>,
 }
 
 /// The one kernel. WebAssembly here is single-threaded and no export
@@ -78,7 +76,6 @@ static K: Global = Global(UnsafeCell::new(Kernel {
     ingest: Vec::new(),
     scratch: Vec::new(),
     snapshot: Vec::new(),
-    focus: None,
 }));
 
 fn with<R>(f: impl FnOnce(&mut Kernel) -> R) -> R {
@@ -97,22 +94,11 @@ impl Kernel {
     /// The column a reader sees: the view for desk tables, the open
     /// focus for focus tables.
     fn col(&self, t: u16, c: u16) -> Option<&store::Column> {
-        if focus_table(t) {
-            let f = self.desk.store.focus.get(&self.focus?)?;
-            f.tables.iter().find(|x| x.id == t)?.col(c)
-        } else {
-            self.desk.view_col(t, c)
-        }
+        self.desk.view_col(t, c)
     }
 
     fn rows(&self, t: u16) -> u32 {
-        if focus_table(t) {
-            let f = self.focus.and_then(|j| self.desk.store.focus.get(&j));
-            f.and_then(|f| f.tables.iter().find(|x| x.id == t))
-                .map_or(0, |x| x.n as u32)
-        } else {
-            self.desk.rows(t) as u32
-        }
+        self.desk.rows(t) as u32
     }
 
     fn str_ref(&self, t: u16, c: u16, row: u32) -> [u32; 2] {
@@ -226,22 +212,6 @@ pub extern "C" fn str_len(t: u32, c: u32, row: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn row_of(t: u32, key: u32) -> i32 {
     with(|k| k.desk.row_of(t as u16, key).map_or(-1, |r| r as i32))
-}
-
-/// Chooses the job whose focus the focus* tables read. Returns 1 when that
-/// job's focus is resident, 0 otherwise.
-#[unsafe(no_mangle)]
-pub extern "C" fn focus_open(job: u32) -> u32 {
-    with(|k| {
-        k.focus = Some(job);
-        k.desk.store.focus.contains_key(&job) as u32
-    })
-}
-
-/// The focus rev of a resident job (low word), or 0.
-#[unsafe(no_mangle)]
-pub extern "C" fn focus_rev(job: u32) -> u32 {
-    with(|k| k.desk.store.focus.get(&job).map_or(0, |f| f.rev as u32))
 }
 
 // ---- board ------------------------------------------------------------

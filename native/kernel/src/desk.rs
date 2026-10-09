@@ -15,10 +15,10 @@
 //! change rather than sent.
 
 use alloc::collections::BTreeMap;
-use alloc::vec;
+
 use alloc::vec::Vec;
 
-use wire::schema::{col, op, refusal, table};
+use wire::schema::{col, refusal, table};
 use wire::{NONE, Op, U32};
 
 use crate::store::{self, Column, Data, Store, Table};
@@ -81,8 +81,6 @@ pub struct Desk {
     pub today: u32,
     pub counters: [u32; COUNTERS],
     pub events: Vec<[u32; 4]>,
-    /// (job, item) → mode column, as pending overlay ops left it.
-    modes: BTreeMap<(u32, u32), Option<u16>>,
     pub event_msgs: Vec<Vec<u8>>,
 }
 
@@ -110,7 +108,6 @@ impl Desk {
             today: NONE,
             counters: [0; COUNTERS],
             events: Vec::new(),
-            modes: BTreeMap::new(),
             event_msgs: Vec::new(),
         }
     }
@@ -162,7 +159,10 @@ impl Desk {
 
     /// The table rows are read from: a pending whole-table copy, or base.
     fn vtable(&self, t: u16) -> Option<&Table> {
-        self.vtables.iter().find(|x| x.id == t).or_else(|| self.store.table(t))
+        self.vtables
+            .iter()
+            .find(|x| x.id == t)
+            .or_else(|| self.store.table(t))
     }
 
     /// Row by key: the index of a keyed table, else a scan of the first
@@ -174,12 +174,6 @@ impl Desk {
         }
         let c = x.col(1)?;
         (0..x.n).find(|&r| c.u32(r) == key)
-    }
-
-    /// Row of the small, ix-keyed lookup table `t` whose `key` column
-    /// equals `name`.
-    fn find_str(&self, t: u16, c: u16, name: &[u8]) -> Option<usize> {
-        (0..self.rows(t)).find(|&r| self.vstr(t, c, r) == name)
     }
 
     // ---- writing the view -------------------------------------------------
@@ -210,7 +204,14 @@ impl Desk {
             .map(|(_, oc)| oc)
     }
 
-    pub(crate) fn set(&mut self, t: u16, key: u32, c: u16, v: Val, rec: &mut Vec<(u16, u32, u16, Val)>) {
+    pub(crate) fn set(
+        &mut self,
+        t: u16,
+        key: u32,
+        c: u16,
+        v: Val,
+        rec: &mut Vec<(u16, u32, u16, Val)>,
+    ) {
         let Some(row) = self.row_of(t, key) else {
             return;
         };
@@ -248,7 +249,11 @@ impl Desk {
         if let Some(i) = self.vtables.iter().position(|x| x.id == t) {
             return &mut self.vtables[i];
         }
-        let mut copy = self.store.table(t).cloned().unwrap_or_else(|| Table::new(t));
+        let mut copy = self
+            .store
+            .table(t)
+            .cloned()
+            .unwrap_or_else(|| Table::new(t));
         let mut i = 0;
         while i < self.overlay.len() {
             if self.overlay[i].0 == t {
@@ -347,7 +352,9 @@ impl Desk {
         self.raw_dirty = true;
         self.overlay.clear();
         self.vtables.clear();
-        self.modes.clear();
+        if self.pending.is_empty() {
+            self.glance.clear();
+        }
         self.order_full = true;
         self.search_dirty = true;
         let pending = core::mem::take(&mut self.pending);
@@ -371,178 +378,7 @@ impl Desk {
         check: bool,
         rec: &mut Vec<(u16, u32, u16, Val)>,
     ) -> Result<(), u8> {
-        if self.store.table(table::JOB_APPS).is_some() {
-            return self.apply_raw(o, check, rec);
-        }
-        let target_job = wire::schema::op_def(o.kind)
-            .ok_or(refusal::ARGUMENT)?
-            .target
-            == "job";
-        let row = if target_job {
-            let row = self
-                .row_of(table::CARDS, o.target)
-                .ok_or(refusal::NOT_FOUND)?;
-            if check && self.vu32(table::CARDS, col::cards::LEASED, row) != 0 {
-                return Err(refusal::LEASED);
-            }
-            row
-        } else {
-            0
-        };
-        let job = o.target;
-        match o.kind {
-            op::STAGE => {
-                let to = self.find_str(table::STAGES, col::stages::KEY, o.field(0).as_bytes());
-                let to = to.ok_or(refusal::ARGUMENT)?;
-                let st = table::STAGES;
-                let to_ix = self.vu32(st, col::stages::IX, to);
-                let from_ix = self.vu32(table::CARDS, col::cards::STAGE, row);
-                let from =
-                    (0..self.rows(st)).find(|&r| self.vu32(st, col::stages::IX, r) == from_ix);
-                if check {
-                    if self.vu32(st, col::stages::FIRE_LOCKED, to) != 0 && !self.batch_open(row) {
-                        return Err(refusal::FIRE_HOLD);
-                    }
-                    let from_hot = from.is_some_and(|f| self.vu32(st, col::stages::HOT, f) != 0);
-                    let to_queue = self.vu32(st, col::stages::QUEUE, to) != 0;
-                    if !from_hot && to_queue && self.heat_blocked(row) {
-                        return Err(refusal::HEAT);
-                    }
-                }
-                if to_ix != from_ix {
-                    self.set(table::CARDS, job, col::cards::STAGE, Val::U(to_ix), rec);
-                    if self.today != NONE {
-                        self.set(
-                            table::CARDS,
-                            job,
-                            col::cards::STAGE_ON,
-                            Val::U(self.today),
-                            rec,
-                        );
-                    }
-                }
-            }
-            op::NEXT => {
-                // As the server: the action is trimmed, a due date that is
-                // not an ISO date means none.
-                let due = parse_day(o.field(1)).unwrap_or(NONE);
-                let action = o.field(0).trim().as_bytes().to_vec();
-                self.set(
-                    table::CARDS,
-                    job,
-                    col::cards::NEXT_ACTION,
-                    Val::S(action),
-                    rec,
-                );
-                self.set(table::CARDS, job, col::cards::NEXT_DUE, Val::U(due), rec);
-            }
-            op::SCORE => {
-                let s: u32 = o.field(0).parse().map_err(|_| refusal::ARGUMENT)?;
-                if s > 100 {
-                    return Err(refusal::ARGUMENT);
-                }
-                self.set(table::CARDS, job, col::cards::SCORE, Val::U(s), rec);
-            }
-            op::OPEN_FIRE => {
-                let b = table::BATCHES;
-                let r = self
-                    .find_str(b, col::batches::CODE, o.field(0).as_bytes())
-                    .ok_or(refusal::BATCH)?;
-                let id = self.vu32(b, col::batches::ID, r);
-                self.set(b, id, col::batches::FIRE, Val::U(1), rec);
-                self.set(
-                    b,
-                    id,
-                    col::batches::STATUS,
-                    Val::S(b"open_fire".to_vec()),
-                    rec,
-                );
-            }
-            op::OVERLAY => self.predict_overlay(o, job, rec)?,
-            op::NARRATIVE => {
-                let n = table::NARRATIVES;
-                if self.row_of(n, o.target).is_none() {
-                    return Err(refusal::NOT_FOUND);
-                }
-                let body = o.field(0).as_bytes().to_vec();
-                self.set(n, o.target, col::narratives::BODY, Val::S(body), rec);
-            }
-            // Notes, heat overrides, narratives and the lanes change
-            // nothing on the board; their effects settle from the server.
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn batch_open(&self, row: usize) -> bool {
-        let id = self.vu32(table::CARDS, col::cards::BATCH, row);
-        id != 0
-            && self
-                .row_of(table::BATCHES, id)
-                .is_some_and(|r| self.vu32(table::BATCHES, col::batches::FIRE, r) != 0)
-    }
-
-    fn heat_blocked(&self, row: usize) -> bool {
-        let ix = self.vu32(table::CARDS, col::cards::HEAT_STATE, row);
-        let h = table::HEAT_STATES;
-        (0..self.rows(h))
-            .find(|&r| self.vu32(h, col::heat_states::IX, r) == ix)
-            .is_some_and(|r| self.vstr(h, col::heat_states::KEY, r) == b"blocked")
-    }
-
-    /// An overlay changes one item's mode. When the job's focus is
-    /// resident the item's current mode is known, so the card's mask
-    /// counts move by one; otherwise they settle from the server.
-    fn predict_overlay(
-        &mut self,
-        o: &Op,
-        job: u32,
-        rec: &mut Vec<(u16, u32, u16, Val)>,
-    ) -> Result<(), u8> {
-        let item: u32 = o.field(0).parse().map_err(|_| refusal::ARGUMENT)?;
-        let to = mode_col(o.field(1)).ok_or(refusal::ARGUMENT)?;
-        if item == 0 || (o.field(1) == "altered" && o.field(2).trim().is_empty()) {
-            return Err(refusal::ARGUMENT);
-        }
-        let Some(from) = self.item_mode(job, item) else {
-            return Ok(());
-        };
-        self.modes.insert((job, item), to);
-        if from == to {
-            return Ok(());
-        }
-        let row = self.row_of(table::CARDS, job).ok_or(refusal::NOT_FOUND)?;
-        for (c, d) in [(from, -1i64), (to, 1)] {
-            if let Some(c) = c {
-                let v = (self.vu32(table::CARDS, c, row) as i64 + d).max(0) as u32;
-                self.set(table::CARDS, job, c, Val::U(v), rec);
-            }
-        }
-        Ok(())
-    }
-
-    /// The mode column an item currently counts toward: as an earlier
-    /// pending overlay left it, else as the resident focus shows it.
-    /// Some(None) is inherit; None means it cannot be known.
-    fn item_mode(&self, job: u32, item: u32) -> Option<Option<u16>> {
-        if let Some(&m) = self.modes.get(&(job, item)) {
-            return Some(m);
-        }
-        let f = self.store.focus.get(&job)?;
-        let fl = f.tables.iter().find(|t| t.id == table::FOCUS_LINES)?;
-        let lines = self.store.table(table::LINES)?;
-        let line_col = fl.col(col::focus_lines::LINE)?;
-        for r in 0..fl.n {
-            let lr = lines.row_of(line_col.u32(r))?;
-            if lines.col(col::lines::ITEM).map(|c| c.u32(lr)) == Some(item) {
-                let m = lines
-                    .col(col::lines::MODE)
-                    .map_or([0, 0], |c| c.str_ref(lr));
-                let m = core::str::from_utf8(self.store.arena.get(m)).unwrap_or("");
-                return mode_col(m);
-            }
-        }
-        None
+        self.apply_raw(o, check, rec)
     }
 
     // ---- the pending layer ------------------------------------------------
@@ -592,7 +428,8 @@ impl Desk {
             return;
         };
         let p = self.pending.remove(i);
-        self.touched.extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
+        self.touched
+            .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
         let exact = p.predicted.iter().all(|(t, key, c, v)| {
             let Some(tbl) = self.store.table(*t) else {
                 return false;
@@ -612,7 +449,8 @@ impl Desk {
 
     fn drop_op(&mut self, id: u64, code: u8, msg: &[u8]) {
         for p in self.pending.iter().filter(|p| p.id == id) {
-            self.touched.extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
+            self.touched
+                .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
         }
         self.pending.retain(|p| p.id != id);
         self.counters[NACKED] += 1;
@@ -655,30 +493,18 @@ impl Desk {
                 frame::BOOT if f.tables().next().is_none() => {
                     self.store.rev = self.store.rev.max(f.header.rev);
                 }
-                frame::BOOT | frame::PATCH | frame::LINES if tables_ok => {
-                    let boot = kind == frame::BOOT;
-                    if boot {
+                frame::BOOT | frame::PATCH if tables_ok => {
+                    if kind == frame::BOOT {
                         self.store.clear_desk();
-                        bits |= CARDS | TABLES | LINES | FOCUS;
+                        bits |= CARDS | TABLES;
                     }
                     for t in f.tables().flatten() {
-                        bits |= match t.id {
-                            table::CARDS | table::CARDS_GONE => CARDS,
-                            table::LINES => LINES,
-                            _ => TABLES,
-                        };
+                        bits |= TABLES;
                         self.take_clock(&t);
                         self.store.take(&t);
                     }
-                    if boot {
-                        self.store.drop_gone_focuses();
-                    }
                     self.store.rev = self.store.rev.max(f.header.rev);
                     base_moved = true;
-                }
-                frame::FOCUS if tables_ok => {
-                    self.store.take_focus(f.header.rev, &f);
-                    bits |= FOCUS;
                 }
                 frame::ACK => match wire::ack(f.body) {
                     Ok(id) => {
@@ -704,7 +530,7 @@ impl Desk {
                     self.raw_dirty = true;
                     bits |= TICK | CARDS;
                 }
-                frame::BOOT | frame::PATCH | frame::LINES | frame::FOCUS => {
+                frame::BOOT | frame::PATCH => {
                     self.counters[BAD_FRAMES] += 1;
                     bits |= ERROR;
                 }
@@ -1028,16 +854,6 @@ impl Desk {
     }
 }
 
-fn mode_col(mode: &str) -> Option<Option<u16>> {
-    match mode {
-        "inherit" | "" => Some(None),
-        "hidden" => Some(Some(col::cards::HIDDEN)),
-        "altered" => Some(Some(col::cards::ALTERED)),
-        "emphasized" => Some(Some(col::cards::EMPHASIZED)),
-        _ => None,
-    }
-}
-
 type Basis = (u64, [u32; 2], u32);
 
 fn pack(score: u64, load: u64, ordinal: u64, rank: u64, heat: u64) -> u64 {
@@ -1108,30 +924,4 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
         }
     }
     false
-}
-
-/// "YYYY-MM-DD" → days since 1970-01-01; "" → none.
-pub fn parse_day(s: &str) -> Option<u32> {
-    if s.is_empty() {
-        return Some(NONE);
-    }
-    let b = s.as_bytes();
-    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
-        return None;
-    }
-    let y: i64 = s[0..4].parse().ok()?;
-    let m: i64 = s[5..7].parse().ok()?;
-    let d: i64 = s[8..10].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    // Howard Hinnant's days_from_civil.
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    u32::try_from(days).ok()
 }

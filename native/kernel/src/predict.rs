@@ -55,7 +55,20 @@ pub fn iso_day(s: &str) -> Option<u32> {
     }
     let (y, m, d) = (integer(y)?, integer(m)?, integer(d)?);
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let dim = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     if !(1..=12).contains(&m) || d < 1 || d > dim[(m - 1) as usize] {
         return None;
     }
@@ -72,7 +85,12 @@ pub fn iso_day(s: &str) -> Option<u32> {
 impl Desk {
     /// The raw-row prediction of one op. With `check`, the refusals the
     /// server would answer, in its order; a refused op writes nothing.
-    pub(crate) fn apply_raw(&mut self, o: &Op, check: bool, rec: &mut Vec<(u16, u32, u16, Val)>) -> Result<(), u8> {
+    pub(crate) fn apply_raw(
+        &mut self,
+        o: &Op,
+        check: bool,
+        rec: &mut Vec<(u16, u32, u16, Val)>,
+    ) -> Result<(), u8> {
         let jt = table::JOB_APPS;
         let job = o.target;
         let leased = |d: &Desk| d.row_of(table::LEASES, job).is_some();
@@ -87,11 +105,15 @@ impl Desk {
                     return Err(refusal::FIRE_HOLD);
                 }
                 let row = row.ok_or(refusal::NOT_FOUND)?;
-                let from = heat::stage_ix(core::str::from_utf8(self.vstr(jt, col::job_apps::CURRENT_STAGE, row)).unwrap_or(""));
+                let from = heat::stage_ix(
+                    core::str::from_utf8(self.vstr(jt, col::job_apps::CURRENT_STAGE, row))
+                        .unwrap_or(""),
+                );
                 if check && heat::entering(from, to) && !self.can_apply(row) {
                     return Err(refusal::HEAT);
                 }
-                let pips = core::str::from_utf8(self.vstr(jt, col::job_apps::PIPS, row)).unwrap_or("");
+                let pips =
+                    core::str::from_utf8(self.vstr(jt, col::job_apps::PIPS, row)).unwrap_or("");
                 let before = heat::rail(pips, from);
                 let previous = heat::current(&before);
                 let moved = heat::move_to(&before, to);
@@ -114,13 +136,22 @@ impl Desk {
             op::NOTE => {
                 let stage = heat::stage_ix(o.field(0)).ok_or(refusal::ARGUMENT)?;
                 let row = self.write_job(check, job)?;
-                let notes = core::str::from_utf8(self.vstr(jt, col::job_apps::STAGE_NOTES, row)).unwrap_or("");
+                let notes = core::str::from_utf8(self.vstr(jt, col::job_apps::STAGE_NOTES, row))
+                    .unwrap_or("");
                 if let Some(json) = put_note(notes, heat::STAGES[stage as usize], o.field(1)) {
-                    self.set(jt, job, col::job_apps::STAGE_NOTES, Val::S(json.into_bytes()), rec);
+                    self.set(
+                        jt,
+                        job,
+                        col::job_apps::STAGE_NOTES,
+                        Val::S(json.into_bytes()),
+                        rec,
+                    );
                 }
             }
             op::SCORE => {
-                let s = integer(o.field(0)).filter(|n| (0..=100).contains(n)).ok_or(refusal::ARGUMENT)?;
+                let s = integer(o.field(0))
+                    .filter(|n| (0..=100).contains(n))
+                    .ok_or(refusal::ARGUMENT)?;
                 self.write_job(check, job)?;
                 self.set(jt, job, col::job_apps::SCORE_100, Val::U(s as u32), rec);
             }
@@ -131,40 +162,85 @@ impl Desk {
                 }
                 self.row_of(jt, job).ok_or(refusal::NOT_FOUND)?;
                 self.set(jt, job, col::job_apps::HEAT_OVERRIDE, Val::U(1), rec);
-                self.set(jt, job, col::job_apps::HEAT_OVERRIDE_REASON, Val::S(reason.as_bytes().to_vec()), rec);
+                self.set(
+                    jt,
+                    job,
+                    col::job_apps::HEAT_OVERRIDE_REASON,
+                    Val::S(reason.as_bytes().to_vec()),
+                    rec,
+                );
             }
             op::OPEN_FIRE => {
                 let b = table::BATCHES;
                 let code = o.field(0).as_bytes();
-                let r = (0..self.rows(b)).find(|&r| self.vstr(b, col::batches::CODE, r) == code).ok_or(refusal::BATCH)?;
+                let r = (0..self.rows(b))
+                    .find(|&r| self.vstr(b, col::batches::CODE, r) == code)
+                    .ok_or(refusal::BATCH)?;
                 let id = self.vu32(b, col::batches::ID, r);
                 self.set(b, id, col::batches::FIRE, Val::U(1), rec);
-                self.set(b, id, col::batches::STATUS, Val::S(b"open_fire".to_vec()), rec);
+                self.set(
+                    b,
+                    id,
+                    col::batches::STATUS,
+                    Val::S(b"open_fire".to_vec()),
+                    rec,
+                );
             }
             op::NARRATIVE => {
                 let n = table::NARRATIVES;
                 let r = self.row_of(n, job).ok_or(refusal::NOT_FOUND)?;
                 let version = self.vu32(n, col::narratives::VERSION, r);
-                self.set(n, job, col::narratives::BODY, Val::S(o.field(0).as_bytes().to_vec()), rec);
-                self.set(n, job, col::narratives::VERSION, Val::U(version.wrapping_add(1)), rec);
+                self.set(
+                    n,
+                    job,
+                    col::narratives::BODY,
+                    Val::S(o.field(0).as_bytes().to_vec()),
+                    rec,
+                );
+                self.set(
+                    n,
+                    job,
+                    col::narratives::VERSION,
+                    Val::U(version.wrapping_add(1)),
+                    rec,
+                );
             }
             op::OVERLAY => self.overlay_raw(o, check, rec)?,
             // Gym and net appends carry rows the server numbers; they come
             // with the PATCH. What Gym and Net refuse is refused here.
             op::GYM_TARGET => {
-                let n = integer(o.field(0)).filter(|n| (1..=30).contains(n)).ok_or(INTERNAL)?; // :target
+                let n = integer(o.field(0))
+                    .filter(|n| (1..=30).contains(n))
+                    .ok_or(INTERNAL)?; // :target
                 let mut v = String::new();
                 push_int(&mut v, n);
                 self.kv_put("gym", "daily_target", v.as_bytes(), rec);
             }
             op::NET_LANE => {
-                self.kv_put("net", "broadside_lane", heat::trim(o.field(0)).as_bytes(), rec);
+                self.kv_put(
+                    "net",
+                    "broadside_lane",
+                    heat::trim(o.field(0)).as_bytes(),
+                    rec,
+                );
             }
             op::GYM_LOG => {
                 let f = form(o);
                 closed(&f, "platform", &["leetcode", "codeforces", "other"], true)?;
-                closed(&f, "topic", &["arrays", "graphs", "strings", "dp", "trees", "systems", "other"], true)?;
-                closed(&f, "difficulty", &["easy", "medium", "hard", "unknown"], true)?;
+                closed(
+                    &f,
+                    "topic",
+                    &[
+                        "arrays", "graphs", "strings", "dp", "trees", "systems", "other",
+                    ],
+                    true,
+                )?;
+                closed(
+                    &f,
+                    "difficulty",
+                    &["easy", "medium", "hard", "unknown"],
+                    true,
+                )?;
                 closed(&f, "outcome", &["solved", "attempt", "skip"], true)?;
                 day(&f, "done_on")?;
                 let title = required(&f, "title")?;
@@ -189,9 +265,21 @@ impl Desk {
                 let problem = match found {
                     Some(r) => {
                         let id = self.vu32(gp, col::gym_problems::ID, r);
-                        self.set(gp, id, col::gym_problems::TITLE, Val::S(title.as_bytes().to_vec()), rec);
+                        self.set(
+                            gp,
+                            id,
+                            col::gym_problems::TITLE,
+                            Val::S(title.as_bytes().to_vec()),
+                            rec,
+                        );
                         self.set(gp, id, col::gym_problems::TOPIC, Val::S(topic), rec);
-                        self.set(gp, id, col::gym_problems::DIFFICULTY, Val::S(difficulty), rec);
+                        self.set(
+                            gp,
+                            id,
+                            col::gym_problems::DIFFICULTY,
+                            Val::S(difficulty),
+                            rec,
+                        );
                         if !url.is_empty() {
                             self.set(gp, id, col::gym_problems::URL, Val::S(url), rec);
                         }
@@ -215,7 +303,10 @@ impl Desk {
                     }
                 };
                 let done_on = get(&f, "done_on").and_then(iso_day).unwrap_or(self.today);
-                let minutes = get(&f, "minutes").and_then(integer).filter(|n| *n >= 0).unwrap_or(0) as u32;
+                let minutes = get(&f, "minutes")
+                    .and_then(integer)
+                    .filter(|n| *n >= 0)
+                    .unwrap_or(0) as u32;
                 let id = self.provisional_id();
                 self.insert_row(
                     table::GYM_REPS,
@@ -225,13 +316,25 @@ impl Desk {
                         (col::gym_reps::DONE_ON, Val::U(done_on)),
                         (col::gym_reps::MINUTES, Val::U(minutes)),
                         (col::gym_reps::OUTCOME, Val::S(or("outcome", "solved"))),
-                        (col::gym_reps::NOTE, Val::S(heat::trim(get(&f, "note").unwrap_or("")).as_bytes().to_vec())),
+                        (
+                            col::gym_reps::NOTE,
+                            Val::S(
+                                heat::trim(get(&f, "note").unwrap_or(""))
+                                    .as_bytes()
+                                    .to_vec(),
+                            ),
+                        ),
                     ],
                 );
             }
             op::NET_LOG => {
                 let f = form(o);
-                closed(&f, "kind", &["observer", "artifact", "post", "draft"], false)?;
+                closed(
+                    &f,
+                    "kind",
+                    &["observer", "artifact", "post", "draft"],
+                    false,
+                )?;
                 closed(&f, "channel", &["broadside", "x", "other"], true)?;
                 let title = required(&f, "title")?;
                 day(&f, "shipped_on")?;
@@ -246,7 +349,11 @@ impl Desk {
                 };
                 let shipped_on = match get(&f, "shipped_on") {
                     None | Some("") => {
-                        if kind == "draft" { NONE } else { self.today }
+                        if kind == "draft" {
+                            NONE
+                        } else {
+                            self.today
+                        }
                     }
                     Some(d) => iso_day(d).unwrap_or(NONE),
                 };
@@ -257,7 +364,10 @@ impl Desk {
                     &[
                         (col::net_entries::ID, Val::U(id)),
                         (col::net_entries::KIND, Val::S(kind.as_bytes().to_vec())),
-                        (col::net_entries::CHANNEL, Val::S(channel.as_bytes().to_vec())),
+                        (
+                            col::net_entries::CHANNEL,
+                            Val::S(channel.as_bytes().to_vec()),
+                        ),
                         (col::net_entries::TITLE, Val::S(title.as_bytes().to_vec())),
                         (col::net_entries::URL, Val::S(text("url"))),
                         (col::net_entries::BODY, Val::S(text("body"))),
@@ -271,7 +381,13 @@ impl Desk {
     }
 
     /// Kv.put/3: the pair's value, inserting the pair when it is new.
-    fn kv_put(&mut self, namespace: &str, key: &str, value: &[u8], rec: &mut Vec<(u16, u32, u16, Val)>) {
+    fn kv_put(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        rec: &mut Vec<(u16, u32, u16, Val)>,
+    ) {
         let kt = table::KV_PAIRS;
         let found = (0..self.rows(kt)).find(|&r| {
             self.vstr(kt, col::kv_pairs::NAMESPACE, r) == namespace.as_bytes()
@@ -288,7 +404,10 @@ impl Desk {
                     kt,
                     &[
                         (col::kv_pairs::ID, Val::U(id)),
-                        (col::kv_pairs::NAMESPACE, Val::S(namespace.as_bytes().to_vec())),
+                        (
+                            col::kv_pairs::NAMESPACE,
+                            Val::S(namespace.as_bytes().to_vec()),
+                        ),
                         (col::kv_pairs::KEY, Val::S(key.as_bytes().to_vec())),
                         (col::kv_pairs::VALUE, Val::S(value.to_vec())),
                     ],
@@ -310,28 +429,55 @@ impl Desk {
         let id = self.vu32(table::JOB_APPS, col::job_apps::BATCH_ID, row);
         id != 0
             && id != NONE
-            && self.row_of(table::BATCHES, id).is_some_and(|r| self.vu32(table::BATCHES, col::batches::FIRE, r) == 1)
+            && self
+                .row_of(table::BATCHES, id)
+                .is_some_and(|r| self.vu32(table::BATCHES, col::batches::FIRE, r) == 1)
     }
 
     /// Desk.execute({:overlay, ...}): CvPair.bind, then tailor or drop_line.
-    fn overlay_raw(&mut self, o: &Op, check: bool, rec: &mut Vec<(u16, u32, u16, Val)>) -> Result<(), u8> {
+    fn overlay_raw(
+        &mut self,
+        o: &Op,
+        check: bool,
+        rec: &mut Vec<(u16, u32, u16, Val)>,
+    ) -> Result<(), u8> {
         let job = o.target;
-        let item = integer(o.field(0)).filter(|n| *n > 0 && *n < u32::MAX as i64).ok_or(refusal::ARGUMENT)? as u32;
+        let item = integer(o.field(0))
+            .filter(|n| *n > 0 && *n < u32::MAX as i64)
+            .ok_or(refusal::ARGUMENT)? as u32;
         let mode = o.field(1);
         let (mode, body, reason): (&str, Option<String>, Option<String>) = match mode {
             "inherit" => ("inherit", None, None),
             "altered" | "hidden" | "emphasized" => {
                 let blank = |s: &str| {
                     let t = heat::trim(s);
-                    if t.is_empty() { None } else { Some(String::from(t)) }
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(String::from(t))
+                    }
                 };
                 match mode {
                     "altered" => {
                         let body = blank(o.field(2)).ok_or(refusal::ARGUMENT)?;
                         ("altered", Some(body), blank(o.field(3)))
                     }
-                    "hidden" => ("hidden", None, Some(blank(o.field(3)).unwrap_or_else(|| String::from("Hidden from this CV")))),
-                    _ => ("emphasized", None, Some(blank(o.field(3)).unwrap_or_else(|| String::from("Emphasized for this CV")))),
+                    "hidden" => (
+                        "hidden",
+                        None,
+                        Some(
+                            blank(o.field(3))
+                                .unwrap_or_else(|| String::from("Hidden from this CV")),
+                        ),
+                    ),
+                    _ => (
+                        "emphasized",
+                        None,
+                        Some(
+                            blank(o.field(3))
+                                .unwrap_or_else(|| String::from("Emphasized for this CV")),
+                        ),
+                    ),
                 }
             }
             _ => return Err(refusal::ARGUMENT),
@@ -347,7 +493,10 @@ impl Desk {
         let lineage = (0..self.rows(vt))
             .filter(|&r| self.vu32(vt, col::cv_variants::JOB_APP_ID, r) == job)
             .map(|r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r))
-            .find(|&l| self.row_of(lt, l).is_some_and(|lr| self.vu32(lt, col::cv_lineages::EMPLOYER_ID, lr) == employer))
+            .find(|&l| {
+                self.row_of(lt, l)
+                    .is_some_and(|lr| self.vu32(lt, col::cv_lineages::EMPLOYER_ID, lr) == employer)
+            })
             .ok_or(INTERNAL)?; // :unbound
         let lr = self.row_of(lt, lineage).ok_or(INTERNAL)?;
         if mode != "inherit" && self.row_of(table::ITEMS, item).is_none() {
@@ -361,7 +510,8 @@ impl Desk {
         let ot = table::OVERLAYS;
         let existing: Vec<u32> = (0..self.rows(ot))
             .filter(|&r| {
-                self.vu32(ot, col::overlays::LINEAGE_ID, r) == lineage && self.vu32(ot, col::overlays::ITEM_ID, r) == item
+                self.vu32(ot, col::overlays::LINEAGE_ID, r) == lineage
+                    && self.vu32(ot, col::overlays::ITEM_ID, r) == item
             })
             .map(|r| self.vu32(ot, col::overlays::ID, r))
             .collect();
@@ -379,7 +529,13 @@ impl Desk {
         match existing.first() {
             Some(_) if !rewrites => return Err(refusal::NOT_ADDITIVE),
             Some(&id) => {
-                self.set(ot, id, col::overlays::MODE, Val::S(mode.as_bytes().to_vec()), rec);
+                self.set(
+                    ot,
+                    id,
+                    col::overlays::MODE,
+                    Val::S(mode.as_bytes().to_vec()),
+                    rec,
+                );
                 if let Some(b) = body {
                     self.set(ot, id, col::overlays::BODY, Val::S(b.into_bytes()), rec);
                 }
@@ -396,7 +552,10 @@ impl Desk {
                         (col::overlays::ITEM_ID, Val::U(item)),
                         (col::overlays::LINEAGE_ID, Val::U(lineage)),
                         (col::overlays::MODE, Val::S(mode.as_bytes().to_vec())),
-                        (col::overlays::BODY, Val::S(body.map(String::into_bytes).unwrap_or_default())),
+                        (
+                            col::overlays::BODY,
+                            Val::S(body.map(String::into_bytes).unwrap_or_default()),
+                        ),
                         (col::overlays::REASON, Val::S(reason_b)),
                         (col::overlays::GENERATION, Val::U(generation)),
                     ],
@@ -433,22 +592,35 @@ impl Desk {
             };
             counts[m as usize] += 1;
             let text = |c| String::from(core::str::from_utf8(self.vstr(ot, c, r)).unwrap_or(""));
-            by_item.push((self.vu32(ot, col::overlays::ITEM_ID, r), m, text(col::overlays::TITLE), text(col::overlays::BODY)));
+            by_item.push((
+                self.vu32(ot, col::overlays::ITEM_ID, r),
+                m,
+                text(col::overlays::TITLE),
+                text(col::overlays::BODY),
+            ));
         }
         let lin_row = self.row_of(lt, lineage);
         let lin_theme = lin_row.map_or(&b""[..], |r| self.vstr(lt, col::cv_lineages::THEME, r));
         let lineage_targets = if lin_theme.is_empty() || lin_theme == b"{}" {
             None
         } else {
-            let t = lin_row.map_or(&b""[..], |r| self.vstr(lt, col::cv_lineages::THEME_TARGETS, r));
-            Some(keywords::theme_targets(core::str::from_utf8(t).unwrap_or("")))
+            let t = lin_row.map_or(&b""[..], |r| {
+                self.vstr(lt, col::cv_lineages::THEME_TARGETS, r)
+            });
+            Some(keywords::theme_targets(
+                core::str::from_utf8(t).unwrap_or(""),
+            ))
         };
-        let variants: Vec<usize> = (0..self.rows(vt)).filter(|&r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r) == lineage).collect();
+        let variants: Vec<usize> = (0..self.rows(vt))
+            .filter(|&r| self.vu32(vt, col::cv_variants::LINEAGE_ID, r) == lineage)
+            .collect();
         let mut writes: Vec<(u32, [u32; 5])> = Vec::new();
         for v in variants {
             let job = self.vu32(vt, col::cv_variants::JOB_APP_ID, v);
             let profile = self.vu32(vt, col::cv_variants::PROFILE_ID, v);
-            let Some(jr) = self.row_of(jt, job) else { continue };
+            let Some(jr) = self.row_of(jt, job) else {
+                continue;
+            };
             // The text a reader sees: every shown line's title and body.
             let mut text = String::new();
             let mut first = true;
@@ -483,15 +655,23 @@ impl Desk {
             let text = heat::downcase(&text);
             let targets = match &lineage_targets {
                 Some(t) => t.clone(),
-                None => keywords::theme_targets(core::str::from_utf8(self.vstr(vt, col::cv_variants::THEME_TARGETS, v)).unwrap_or("")),
+                None => keywords::theme_targets(
+                    core::str::from_utf8(self.vstr(vt, col::cv_variants::THEME_TARGETS, v))
+                        .unwrap_or(""),
+                ),
             };
             let targets = if targets.is_empty() {
-                keywords::extract(core::str::from_utf8(self.vstr(jt, col::job_apps::LISTING, jr)).unwrap_or(""))
+                keywords::extract(
+                    core::str::from_utf8(self.vstr(jt, col::job_apps::LISTING, jr)).unwrap_or(""),
+                )
             } else {
                 targets
             };
             let hits = targets.iter().filter(|t| keywords::hit(&text, t)).count() as u32;
-            writes.push((job, [hits, targets.len() as u32, counts[0], counts[1], counts[2]]));
+            writes.push((
+                job,
+                [hits, targets.len() as u32, counts[0], counts[1], counts[2]],
+            ));
         }
         for (job, w) in writes {
             for (c, v) in [
@@ -673,7 +853,11 @@ fn get<'a>(f: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
 fn closed(f: &[(&str, &str)], name: &str, set: &[&str], has_default: bool) -> Result<(), u8> {
     match get(f, name) {
         None | Some("") => {
-            if has_default { Ok(()) } else { Err(refusal::ARGUMENT) }
+            if has_default {
+                Ok(())
+            } else {
+                Err(refusal::ARGUMENT)
+            }
         }
         Some(v) if set.contains(&v) => Ok(()),
         Some(_) => Err(refusal::ARGUMENT),
@@ -691,7 +875,11 @@ fn day(f: &[(&str, &str)], name: &str) -> Result<(), u8> {
 /// Form.required/2: trimmed, not empty.
 fn required<'a>(f: &[(&str, &'a str)], name: &str) -> Result<&'a str, u8> {
     let v = heat::trim(get(f, name).unwrap_or(""));
-    if v.is_empty() { Err(refusal::ARGUMENT) } else { Ok(v) }
+    if v.is_empty() {
+        Err(refusal::ARGUMENT)
+    } else {
+        Ok(v)
+    }
 }
 
 /// Text.slug/1: downcased, runs outside a-z0-9 as one "-", trimmed of "-".
@@ -732,5 +920,7 @@ fn push_int(out: &mut String, n: i64) {
 
 /// Would Text.slug/1 make nothing of `title`: no a-z0-9 after downcasing.
 fn slug_empty(title: &str) -> bool {
-    !heat::downcase(title).bytes().any(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    !heat::downcase(title)
+        .bytes()
+        .any(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }

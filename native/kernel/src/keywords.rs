@@ -7,11 +7,11 @@ use alloc::vec::Vec;
 use crate::heat::downcase;
 
 const STOP: &[&str] = &[
-    "about", "after", "also", "and", "any", "are", "because", "been", "being", "both", "from", "have",
-    "here", "into", "just", "more", "most", "only", "onto", "our", "over", "role", "such", "team",
-    "that", "the", "their", "them", "then", "there", "these", "they", "this", "those", "very", "what",
-    "when", "where", "which", "will", "with", "work", "would", "your", "you", "our", "for", "the",
-    "and",
+    "about", "after", "also", "and", "any", "are", "because", "been", "being", "both", "from",
+    "have", "here", "into", "just", "more", "most", "only", "onto", "our", "over", "role", "such",
+    "team", "that", "the", "their", "them", "then", "there", "these", "they", "this", "those",
+    "very", "what", "when", "where", "which", "will", "with", "work", "would", "your", "you",
+    "our", "for", "the", "and",
 ];
 
 /// Keywords.extract/1: the ten most frequent words of four or more
@@ -20,7 +20,8 @@ const STOP: &[&str] = &[
 pub fn extract(listing: &str) -> Vec<String> {
     let text = downcase(listing);
     let b = text.as_bytes();
-    let word = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'#' | b'.');
+    let word =
+        |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'#' | b'.');
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut from = 0;
     for (i, &c) in b.iter().enumerate() {
@@ -34,7 +35,9 @@ pub fn extract(listing: &str) -> Vec<String> {
     for (from, to) in runs {
         // Runs are ASCII (so String.length is the byte length), but an
         // empty one may sit inside a multibyte character: read bytes.
-        let Ok(w) = core::str::from_utf8(&b[from..to]) else { continue };
+        let Ok(w) = core::str::from_utf8(&b[from..to]) else {
+            continue;
+        };
         if w.len() < 4 || STOP.contains(&w) {
             continue;
         }
@@ -43,8 +46,15 @@ pub fn extract(listing: &str) -> Vec<String> {
             None => counts.push((w, 1)),
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes())));
-    counts.into_iter().take(10).map(|(w, _)| String::from(w)).collect()
+    counts.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+    });
+    counts
+        .into_iter()
+        .take(10)
+        .map(|(w, _)| String::from(w))
+        .collect()
 }
 
 fn alnum(c: u8) -> bool {
@@ -87,5 +97,10 @@ pub fn theme_targets(joined: &str) -> Vec<String> {
     if joined.is_empty() {
         return Vec::new();
     }
-    joined.split('\u{1f}').map(str::trim).filter(|w| !w.is_empty()).map(String::from).collect()
+    joined
+        .split('\u{1f}')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect()
 }
