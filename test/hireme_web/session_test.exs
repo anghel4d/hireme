@@ -223,4 +223,23 @@ defmodule HiremeWeb.SessionTest do
     assert {id, sid} == {account.id, session.id}
     assert :error = HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
   end
+
+  test "an op on a line or job that is not there is refused, and the next op still answers",
+       %{account: account} do
+    job = job(profile())
+    s = open(account)
+    {:ok, s} = Session.event({:data, 0, hello()}, s)
+    _ = all_out()
+
+    {:ok, s} = Session.event({:data, 0, op(51, 5, job.id, ["99999999", "hidden", "", ""])}, s)
+    {:ok, s} = Session.event({:data, 0, op(52, 2, 99_999_999, ["x", ""])}, s)
+    {:ok, s} = Session.event({:data, 0, op(53, 4, job.id, ["70"])}, s)
+    _s = drain(s)
+
+    out = all_out()
+    nack = Packet.refusal_code(:not_found)
+    assert Enum.any?(out, &match?({:nack, _, _, <<51::little-64, ^nack::8, _::binary>>}, &1))
+    assert Enum.any?(out, &match?({:nack, _, _, <<52::little-64, ^nack::8, _::binary>>}, &1))
+    assert Enum.any?(out, &match?({:ack, _, _, <<53::little-64>>}, &1))
+  end
 end

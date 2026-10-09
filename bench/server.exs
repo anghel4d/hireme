@@ -74,7 +74,16 @@ defmodule HiremeBench.Server do
       {"Domain/Mfa", "methods", fn -> Mfa.methods() end},
       {"Domain/Mfa", "fresh", fn -> Mfa.fresh?(session) end},
       {"Domain/Kv", "list", fn -> Kv.list("global") end},
-      {"Transport/Packet", "build", fn -> HiremeWeb.Packet.build() |> IO.iodata_to_binary() end},
+      {"Transport/Packet", "cards",
+       fn ->
+         cards = Desk.list_cards(%Desk.Filters{status: :all})
+
+         rows =
+           HiremeWeb.Packet.card_rows(cards, Desk.list_batches(), Hireme.Corpus.list_profiles())
+
+         HiremeWeb.Packet.frame(:boot, 0, HiremeWeb.Packet.table(:cards, rows))
+         |> IO.iodata_to_binary()
+       end},
       {"Transport/JSON", "focus",
        fn -> Desk.focus(job_id) |> HiremeWeb.JSON.focus() |> Jason.encode!() end},
       {"Transport/JSON", "lanes", fn -> HiremeWeb.JSON.lanes() |> Jason.encode!() end}

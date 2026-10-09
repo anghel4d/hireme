@@ -6,7 +6,7 @@ defmodule HiremeWeb.AuthTest do
   test "without a session the page redirects and the API answers 401" do
     conn = anonymous()
     assert redirected_to(get(conn, "/")) == "/sign-in"
-    assert %{"error" => "unauthenticated"} = conn |> get("/api/pack") |> json_response(401)
+    assert %{"error" => "unauthenticated"} = conn |> get("/api/account") |> json_response(401)
     assert conn |> get("/sign-in") |> html_response(200) =~ "Send a sign-in link"
     refute conn |> get("/sign-in") |> html_response(200) =~ "/dev/sign-in"
   end
@@ -123,7 +123,7 @@ defmodule HiremeWeb.AuthTest do
     {token, _} = Hireme.Accounts.start_session(account)
     fresh = anonymous() |> Plug.Test.init_test_session(%{HiremeWeb.Auth.session_key() => token})
     assert redirected_to(get(fresh, "/")) == "/sign-in/factor"
-    assert %{"error" => "second_factor"} = fresh |> get("/api/pack") |> json_response(401)
+    assert %{"error" => "second_factor"} = fresh |> get("/api/account") |> json_response(401)
     assert redirected_to(get(fresh, "/sign-in")) == "/sign-in/factor"
     page = fresh |> get("/sign-in/factor") |> html_response(200)
     assert page =~ "authenticator app" and page =~ "/assets/js/factor.js"
@@ -133,7 +133,7 @@ defmodule HiremeWeb.AuthTest do
 
     later = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 30)
     assert redirected_to(post(fresh, "/sign-in/factor/totp", %{code: later})) == "/"
-    assert fresh |> get("/api/pack") |> response(200)
+    assert fresh |> get("/api/account") |> response(200)
     assert redirected_to(get(fresh, "/sign-in/factor")) == "/"
 
     # Minting a key is a sensitive write: fresh after the proof, refused once it ages.

@@ -78,7 +78,14 @@ defmodule Hireme.ChecklistOracleTest do
     assert %{"error" => "not found"} =
              conn |> delete("/api/account/sessions/#{their_session.id}") |> json_response(404)
 
-    assert conn |> get("/api/focus/#{job.id}") |> json_response(404)
+    op = %{
+      op_id: System.unique_integer([:positive]),
+      kind: :next,
+      target: job.id,
+      fields: ["x", ""]
+    }
+
+    assert {:error, :not_found} = Hireme.Ops.run(account.id, op)
   end
 
   test "a task that does not pin the account cannot read, and a write publishes only on this desk",
