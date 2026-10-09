@@ -58,6 +58,65 @@ defmodule Hireme.DeskTest do
     assert Enum.any?(lines, &(&1.body =~ "structure-of-arrays"))
   end
 
+  test "focus keeps optional batches and the variant's original job association" do
+    profile = profile()
+
+    batch =
+      %Batch{}
+      |> Batch.changeset(%{code: "Focus batch", ordinal: 1})
+      |> Repo.insert!()
+
+    for batch <- [nil, batch] do
+      job = job(profile, %{batch_id: batch && batch.id})
+      focus = Desk.focus(job.id)
+
+      assert focus.profile == profile
+      assert focus.job.profile == profile
+      assert focus.job.batch == batch
+      assert focus.variant.job_app == job
+      assert focus.variant.lineage.id == focus.variant.lineage_id
+    end
+  end
+
+  test "focus returns only the twelve newest events and keeps application KV ordered" do
+    job = job(profile())
+    Hireme.Kv.put("global", "candidate", "Global Candidate")
+    Hireme.Kv.put("app:#{job.id}", "zeta", "last")
+    Hireme.Kv.put("app:#{job.id}", "candidate", "Application Metadata")
+    Hireme.Kv.put("app:#{job.id}", "alpha", "first")
+
+    events =
+      for i <- 1..15 do
+        %Hireme.Desk.Event{}
+        |> Hireme.Desk.Event.changeset(%{job_app_id: job.id, kind: "note", body: "Event #{i}"})
+        |> Repo.insert!()
+      end
+
+    focus = Desk.focus(job.id)
+    assert focus.events == events |> Enum.reverse() |> Enum.take(12)
+    assert Enum.map(focus.kv, & &1.key) == ["alpha", "candidate", "zeta"]
+    assert focus.cv.person == "Global Candidate"
+  end
+
+  test "focus hides foreign and missing jobs but still refuses a missing variant" do
+    own_job = job(profile())
+    foreign_account = Hireme.Accounts.create!(%{name: "Other focus desk"})
+
+    foreign_job =
+      Repo.with_account(foreign_account.id, fn ->
+        job(profile(), %{company: "Foreign Co"})
+      end)
+
+    assert Desk.focus(nil) == nil
+    assert Desk.focus(-1) == nil
+    assert Desk.focus(foreign_job.id) == nil
+    assert Desk.focus(own_job.id).job.id == own_job.id
+    assert Repo.with_account(foreign_account.id, fn -> Desk.focus(own_job.id) end) == nil
+
+    Repo.delete_all(from v in Hireme.Desk.Variant, where: v.job_app_id == ^own_job.id)
+    assert_raise Ecto.NoResultsError, fn -> Desk.focus(own_job.id) end
+  end
+
   test "an opening casts wire strings once and refuses an unknown stage" do
     profile = profile()
 

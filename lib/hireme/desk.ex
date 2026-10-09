@@ -375,16 +375,37 @@ defmodule Hireme.Desk do
   def list_batches, do: Repo.all(from b in Batch, order_by: b.ordinal)
 
   @spec focus(pos_integer() | nil) :: Focus.t() | nil
+  @doc """
+  Resolve one application with its profile, optional batch, and lineage.
+  Join the single-row associations and reuse the fetched job on the variant;
+  write paths retain their own preloads.
+  """
   def focus(nil), do: nil
 
   def focus(job_id) do
-    case Repo.get(Job, job_id) do
+    query =
+      from j in Job,
+        where: j.id == ^job_id,
+        left_join: p in assoc(j, :profile),
+        left_join: b in assoc(j, :batch),
+        select: {j, p, b}
+
+    case Repo.one(query) do
       nil ->
         nil
 
-      job ->
-        job = Repo.preload(job, [:profile, :batch])
-        variant = variant_of(job.id)
+      {job, profile, batch} ->
+        variant =
+          Repo.one!(
+            from v in Variant,
+              where: v.job_app_id == ^job.id,
+              left_join: l in assoc(v, :lineage),
+              preload: [lineage: l]
+          )
+
+        variant = %{variant | job_app: job}
+        job = %{job | profile: profile, batch: batch}
+
         theme = theme_of(variant)
         items = Corpus.list_items(job.profile_id)
         resolved = Mask.apply(items, overlays(variant))
