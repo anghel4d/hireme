@@ -43,6 +43,9 @@ pub(crate) struct Pending {
     pub(crate) bytes: Vec<u8>,
     /// What the op said each field would become: (table, key, col, value).
     predicted: Vec<(u16, u32, u16, Val)>,
+    /// Every (table, key) the prediction moved, rows it added or removed
+    /// included: what settling or dropping it moves again.
+    moved: Vec<[u32; 2]>,
 }
 
 pub struct Desk {
@@ -438,6 +441,7 @@ impl Desk {
                     id: o.id,
                     bytes: bytes.to_vec(),
                     predicted: rec,
+                    moved: self.touched.clone(),
                 });
                 0
             }
@@ -464,11 +468,7 @@ impl Desk {
             return;
         };
         let p = self.pending.remove(i);
-        self.touched
-            .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
-        for (t, key, c, _) in &p.predicted {
-            self.derived.mark(*t, *key, Some(*c));
-        }
+        self.unmove(&p);
         let exact = p.predicted.iter().all(|(t, key, c, v)| {
             let Some(tbl) = self.store.table(*t) else {
                 return false;
@@ -485,15 +485,35 @@ impl Desk {
         self.counters[if exact { SETTLED } else { MISPREDICTED }] += 1;
     }
 
-    fn drop_op(&mut self, id: u64) {
-        for p in self.pending.iter().filter(|p| p.id == id) {
-            self.touched
-                .extend(p.predicted.iter().map(|(t, key, _, _)| [*t as u32, *key]));
-            for (t, key, c, _) in &p.predicted {
-                self.derived.mark(*t, *key, Some(*c));
+    /// What leaving an op's prediction moves: everything it moved, the
+    /// fields by column and the rows it added or removed whole.
+    fn unmove(&mut self, p: &Pending) {
+        self.touched.extend_from_slice(&p.moved);
+        for (t, key, c, _) in &p.predicted {
+            self.derived.mark(*t, *key, Some(*c));
+        }
+        // The view still holds the op's rows here: an overlay names its
+        // lineage while it can.
+        for &[t, key] in &p.moved {
+            let t = t as u16;
+            if p.predicted.iter().any(|x| x.0 == t && x.1 == key) {
+                continue;
+            }
+            match self.row_of(t, key) {
+                Some(r) if t == table::OVERLAYS => {
+                    let lineage = self.vu32(t, col::overlays::LINEAGE_ID, r);
+                    self.derived.mark_lineage(lineage);
+                }
+                _ => self.derived.mark(t, key, None),
             }
         }
-        self.pending.retain(|p| p.id != id);
+    }
+
+    fn drop_op(&mut self, id: u64) {
+        if let Some(i) = self.pending.iter().position(|p| p.id == id) {
+            let p = self.pending.remove(i);
+            self.unmove(&p);
+        }
         self.counters[NACKED] += 1;
     }
 
