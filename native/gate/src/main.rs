@@ -66,6 +66,8 @@ const MAX_MESSAGE: usize = 16 << 20;
 /// Bytes queued towards QUIC per session before the gate gives up on a
 /// peer that does not read.
 const MAX_QUEUED: usize = 32 << 20;
+/// Bytes the BEAM may queue for the control stream before the client opens it.
+const HELD_MAX: usize = 4 << 20;
 const DEADLINE: Duration = Duration::from_secs(2);
 /// QUIC-level stream counts. HTTP/3 itself takes one bidi (the CONNECT
 /// request) and three uni streams (control and the two QPACK streams).
@@ -519,9 +521,18 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
 /// The session loop. It returns the close code and reason when the gate
 /// or the BEAM ends the session, or `None` when the peer did.
 async fn run(conn: &Connection, sh: &Arc<Shared>, early: Vec<Vec<u8>>, mut down: mpsc::Receiver<Vec<u8>>) -> Option<(u32, Vec<u8>)> {
-    // Each stream's queue to its writer, by session-relative id.
+    // Each stream's queue to its writer, by session-relative id. The
+    // control stream's queue exists from the start: the Session may write
+    // to it (after an early BOOT) before the client has opened it, and
+    // those writes wait here, in order, up to HELD_MAX.
     let mut streams: HashMap<u32, mpsc::UnboundedSender<Cmd>> = HashMap::new();
+    let (control_tx, rx) = mpsc::unbounded_channel();
+    streams.insert(0, control_tx);
+    let mut control_rx = Some(rx);
+    let mut held = 0;
+    let control_bytes = |m: &[u8]| if m[0] == DATA && u32_at(m, 1) == Some(0) { m.len() } else { 0 };
     for m in &early {
+        held += control_bytes(m);
         match beam(conn, sh, &mut streams, m) {
             Ok(None) => {}
             Ok(Some(close)) => return Some(close),
@@ -538,6 +549,7 @@ async fn run(conn: &Connection, sh: &Arc<Shared>, early: Vec<Vec<u8>>, mut down:
             biased;
             m = down.recv() => {
                 let Some(m) = m else { return Some((CODE_BRIDGE, b"bridge closed".to_vec())) };
+                held += control_bytes(&m);
                 match beam(conn, sh, &mut streams, &m) {
                     Ok(None) => {}
                     Ok(Some(close)) => return Some(close),
@@ -556,7 +568,10 @@ async fn run(conn: &Connection, sh: &Arc<Shared>, early: Vec<Vec<u8>>, mut down:
                     drop((send, recv));
                     continue;
                 }
-                streams.insert(id, writer(sh.clone(), id, send));
+                match (id, control_rx.take()) {
+                    (0, Some(rx)) => drop(tokio::spawn(drain(sh.clone(), 0, send, rx))),
+                    _ => drop(streams.insert(id, writer(sh.clone(), id, send))),
+                }
                 tokio::spawn(read_loop(sh.clone(), id, recv));
                 let _ = sh.up.send(id_message(STREAM, id, &[]));
             }
@@ -566,7 +581,7 @@ async fn run(conn: &Connection, sh: &Arc<Shared>, early: Vec<Vec<u8>>, mut down:
                 let _ = sh.up.send(message(DGRAM, &[], &d.payload()));
             }
         }
-        if sh.queued.load(Relaxed) > MAX_QUEUED {
+        if sh.queued.load(Relaxed) > MAX_QUEUED || (control_rx.is_some() && held > HELD_MAX) {
             c.overflow.fetch_add(1, Relaxed);
             return Some((CODE_OVERFLOW, b"peer is not reading".to_vec()));
         }

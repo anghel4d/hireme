@@ -54,7 +54,9 @@ defmodule HiremeWeb.Gate do
   at OPEN (a browser's ticket) may write inside `init`, before the ACCEPT:
   `ready/1` lifts the caps as the session opens, and `open_uni/2` plus
   `send/3` put a BOOT on the wire in the same flight as the 200. The gate
-  holds such messages until the session exists. Until READY the peer gets
+  holds such messages until the session exists. Likewise, writes to the
+  control stream (id 0) wait in the gate, in order, until the client opens
+  it; more than 4 MiB of them closes the session. Until READY the peer gets
   one client bidi stream and a 64 KiB receive window, and no datagrams
   are forwarded.
 
