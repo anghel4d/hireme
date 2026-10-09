@@ -325,7 +325,7 @@ impl Desk {
             j.raw("]}");
         }
         j.raw("}");
-        String::from_utf8(j.0).unwrap_or_default()
+        String::from_utf8(j.0).unwrap_or_else(|_| String::from("null"))
     }
 
     /// The focus up to its coverage: (profile, lineage, keyword targets).
@@ -541,7 +541,7 @@ impl Desk {
         self.row_json(&mut j, pt, Some(pr), &["id", "slug", "name", "headline", "summary"]);
         self.cv_json(&mut j, pr, &self.resolve(profile, 0), &theme, vr.map_or(b"Root", |r| self.vstr(vt, v::LABEL, r)), b"global");
         j.raw("}");
-        String::from_utf8(j.0).unwrap_or_default()
+        String::from_utf8(j.0).unwrap_or_else(|_| String::from("null"))
     }
 
     /// HiremeWeb.JSON.lanes/0: gym and net progress for the server's day, and the heat chart.
@@ -644,7 +644,7 @@ impl Desk {
             j.raw("]");
         }
         j.raw("}}");
-        String::from_utf8(j.0).unwrap_or_default()
+        String::from_utf8(j.0).unwrap_or_else(|_| String::from("null"))
     }
 }
 
