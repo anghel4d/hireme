@@ -70,9 +70,9 @@ col bands max 5 u32
 # Raw tables: the account's rows as the database holds them, named and typed as the Ecto schema
 # names them, keyed by id (upserted); `gone` deletes (table id, row id); `leases` is the letterbox
 # registry's live state, replaced whole; `clock` is the server's UTC day and time, which every
-# client derivation of 'today' must use. JSON-valued fields (theme, stage_notes, variety) travel as
-# JSON text; the lists the kernel reads (keywords, theme_targets, variety_flags) travel joined with
-# U+001F, and variety's counts as their own columns, so the kernel needs no JSON.
+# client derivation of 'today' must use. JSON-valued fields (theme, stage_notes) travel as JSON
+# text; the lists the kernel reads (keywords, theme_targets) travel joined with U+001F, so the
+# kernel needs no JSON.
 
 table batches 3
 col batches id 1 u32
@@ -84,14 +84,7 @@ col batches kind 6 str
 col batches target_size 7 u32
 col batches queued_on 8 day
 col batches squad 9 str
-col batches variety 10 str
 col batches note 11 str
-col batches variety_apps 12 u32
-col batches variety_companies 13 u32
-col batches variety_roles 14 u32
-col batches variety_locations 15 u32
-col batches variety_fits 16 u32
-col batches variety_flags 17 str
 
 table profiles 4
 col profiles id 1 u32

@@ -129,7 +129,7 @@ defmodule HiremeWeb.WireTest do
         %{id: 7, theme: %{"targets" => ["elixir", "rust"], "accent" => "ink"}}
       ]),
       Packet.raw(:batches, [
-        %{id: 3, code: "B-1", fire: :open_fire, variety: %{"apps" => 4, "flags" => ["mixed"]}}
+        %{id: 3, code: "B-1", fire: :open_fire}
       ]),
       Packet.table(:gone, [%{table: Packet.table_id(:job_apps), id: b.id}])
     ]
@@ -144,7 +144,7 @@ defmodule HiremeWeb.WireTest do
              named(t, :cv_variants)
 
     assert Jason.decode!(theme)["accent"] == "ink"
-    assert [%{fire: 1, variety_apps: 4, variety_flags: "mixed"}] = named(t, :batches)
+    assert [%{fire: 1, code: "B-1"}] = named(t, :batches)
     assert [%{table: 47, id: gone}] = named(t, :gone)
     assert gone == b.id
   end

@@ -29,11 +29,6 @@ const none = (v) => (v === null || v === undefined ? NONE : v)
 function rawValue(row, col, kind) {
   const unit = (list) => (Array.isArray(list) ? list.map(String).join("\u001f") : "")
   if (col === "theme_targets") return unit(row.theme?.targets)
-  if (col === "variety_flags") return unit(row.variety?.flags)
-  if (col.startsWith("variety_") && kind === "u32") {
-    const v = row.variety?.[col.slice(8)]
-    return Number.isInteger(v) && v >= 0 ? v : null
-  }
   if (col === "keywords") return unit(row.keywords)
   if (col === "fire" && kind === "u32") return ["open_fire", true, 1].includes(row.fire) ? 1 : 0
   const v = row[col]
@@ -51,8 +46,7 @@ function rawTable(name, rows) {
 
 // A delta row carries only the columns that moved (plus id): encode just
 // those, one block per row, so the upsert leaves the rest alone.
-const SOURCE = { theme_targets: "theme", variety_flags: "variety", variety_apps: "variety", variety_companies: "variety",
-  variety_roles: "variety", variety_locations: "variety", variety_fits: "variety" }
+const SOURCE = { theme_targets: "theme" }
 function deltaTables(name, rows) {
   return rows.map((row) => {
     const cols = {}
