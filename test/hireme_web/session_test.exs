@@ -298,7 +298,7 @@ defmodule HiremeWeb.SessionTest do
     assert %{"id" => 9, "result" => _} = Jason.decode!(json)
   end
 
-  test "an agent hello boots the dictionaries and batches, then hears raw rows", %{
+  test "an agent hello boots raw tables like a browser, hears raw rows and sends ops", %{
     account: account
   } do
     Hireme.Repo.insert!(%Hireme.Desk.Batch{code: "B-agent", ordinal: 1, account_id: account.id})
@@ -323,16 +323,23 @@ defmodule HiremeWeb.SessionTest do
       )
 
     {:ok, a} = Session.event({:data, 0, hello}, a)
-    assert [{:boot, 0x02, _, body}] = all_out()
+    assert [{:boot, 0x03, _, _} = boot | _] = all_out()
+    {:boot, 0x02, _, body} = inflate(boot)
     ids = table_ids(body)
+    # An agent gets the browser's raw BOOT and derives its own views.
     assert Packet.table_id(:batches) in ids
-    refute Packet.table_id(:job_apps) in ids
+    assert Packet.table_id(:job_apps) in ids
 
     op = %{op_id: 70, kind: :next, target: job.id, fields: ["Agent sees", ""]}
     assert {:ok, _} = Hireme.Ops.run(account.id, op)
-    _a = drain(a)
+    a = drain(a)
     assert [{:patch, 0, _, pbody}] = all_out()
     assert Packet.table_id(:job_apps) in table_ids(pbody)
+
+    # Its own writes go up as OPs on control and come back ACKed.
+    {:ok, a} = Session.event({:data, 0, op(71, 2, job.id, ["Agent writes", ""])}, a)
+    _a = drain(a)
+    assert Enum.any?(all_out(), &match?({:ack, _, _, <<71::little-64>>}, &1))
   end
 
   test "a browser that does not ask for raw tables is told its bundle is stale",
