@@ -1,32 +1,3 @@
-defmodule Hireme.LifeEv.Chart do
-  @moduledoc """
-  Histogram and band counts for a list of score_100 values.
-  """
-
-  @enforce_keys [:n, :mean, :max, :min, :bands, :bins]
-  defstruct @enforce_keys
-
-  @type band_row :: %{
-          key: Hireme.LifeEv.band(),
-          label: String.t(),
-          min: 0..100,
-          max: 0..100,
-          count: non_neg_integer(),
-          share: float()
-        }
-
-  @type bin :: %{lo: 0..100, hi: 0..100, count: non_neg_integer()}
-
-  @type t :: %__MODULE__{
-          n: non_neg_integer(),
-          mean: float() | nil,
-          max: 0..100 | nil,
-          min: 0..100 | nil,
-          bands: [band_row()],
-          bins: [bin()]
-        }
-end
-
 defmodule Hireme.LifeEv do
   @moduledoc """
   Life-EV score_100. Closed bands, one parse at the edge.
@@ -36,7 +7,6 @@ defmodule Hireme.LifeEv do
   cannot be raised.
   """
 
-  alias Hireme.LifeEv.Chart
   alias Hireme.Text
 
   @type score :: 0..100
@@ -70,14 +40,8 @@ defmodule Hireme.LifeEv do
   @spec bands() :: [map()]
   def bands, do: @bands
 
-  @spec keys() :: [band()]
-  def keys, do: @keys
-
   @spec name(band()) :: String.t()
   def name(band) when band in @keys, do: Atom.to_string(band)
-
-  @spec parse_band(term()) :: {:ok, band() | :all} | :error
-  def parse_band(band), do: Hireme.Closed.parse([:all | @keys], band)
 
   @spec band(score()) :: band()
   def band(score) when is_integer(score) and score >= 0 and score <= 100 do
@@ -110,77 +74,6 @@ defmodule Hireme.LifeEv do
         end
     end
   end
-
-  @doc """
-  Count raw scores or rows with an atom or string `score_100` key.
-  Integers are clamped to 0..100; unrecognized rows contribute a zero.
-  """
-  @spec chart([term()]) :: Chart.t()
-  def chart(rows) when is_list(rows) do
-    rows |> Enum.frequencies_by(&chart_score/1) |> from_frequencies()
-  end
-
-  @doc "Count grouped score observations without expanding them back into individual rows."
-  @spec chart_frequencies([{term(), pos_integer()}]) :: Chart.t()
-  def chart_frequencies(rows) do
-    rows
-    |> Enum.reduce(%{}, fn {score, count}, frequencies ->
-      Map.update(frequencies, chart_score(score), count, &(&1 + count))
-    end)
-    |> from_frequencies()
-  end
-
-  defp from_frequencies(frequencies) do
-    scores = Map.keys(frequencies)
-
-    {n, total} =
-      Enum.reduce(frequencies, {0, 0}, fn {score, count}, {n, total} ->
-        {n + count, total + score * count}
-      end)
-
-    %Chart{
-      n: n,
-      mean: if(n == 0, do: nil, else: Float.round(total / n, 1)),
-      max: Enum.max(scores, fn -> nil end),
-      min: Enum.min(scores, fn -> nil end),
-      bands: band_rows(frequencies, n),
-      bins: bin_rows(frequencies)
-    }
-  end
-
-  defp chart_score(n) when is_integer(n), do: clamp(n)
-  defp chart_score(%{score_100: n}) when is_integer(n), do: clamp(n)
-  defp chart_score(%{"score_100" => n}) when is_integer(n), do: clamp(n)
-  defp chart_score(_), do: 0
-
-  defp group_counts(frequencies, key) do
-    Enum.reduce(frequencies, %{}, fn {score, count}, acc ->
-      Map.update(acc, key.(score), count, &(&1 + count))
-    end)
-  end
-
-  defp band_rows(frequencies, n) do
-    counts = group_counts(frequencies, &band/1)
-
-    Enum.map(@bands, fn row ->
-      count = Map.get(counts, row.key, 0)
-
-      Map.merge(row, %{count: count, share: if(n == 0, do: 0.0, else: Float.round(count / n, 3))})
-    end)
-  end
-
-  defp bin_rows(frequencies) do
-    grouped = group_counts(frequencies, &bin_lo/1)
-
-    Enum.map(0..9, fn i ->
-      lo = i * 10
-      hi = if i == 9, do: 100, else: lo + 9
-      %{lo: lo, hi: hi, count: Map.get(grouped, lo, 0)}
-    end)
-  end
-
-  defp bin_lo(100), do: 90
-  defp bin_lo(n), do: div(n, 10) * 10
 
   defp explicit(input) do
     case Map.get(input, :score_100) || Map.get(input, "score_100") || Map.get(input, :score) ||

@@ -2,10 +2,14 @@ defmodule Hireme.CvTest do
   use Hireme.DataCase, async: false
   import Hireme.Fixtures
 
+  import Ecto.Query, only: [from: 2]
+
   alias Hireme.Cv.Lineage
   alias Hireme.CvPair
   alias Hireme.CvPair.JobId
   alias Hireme.Desk
+  alias Hireme.Desk.Overlay
+  alias Hireme.Theme
   alias Hireme.Repo
 
   test "a CV pair cannot be aimed at another application" do
@@ -23,9 +27,7 @@ defmodule Hireme.CvTest do
     assert {:error, :cv_mismatch} =
              CvPair.tailor(forged, item.id, %{mode: :altered, body: "stolen"})
 
-    south = Desk.focus(second.id)
-    refute Enum.any?(south.masks, &(&1.body == "North only"))
-    refute Enum.any?(south.masks, &(&1.body == "stolen"))
+    refute Enum.any?(overlays_of(second), &(&1.body in ["North only", "stolen"]))
   end
 
   test "one employer has one lineage, so two applications share that CV" do
@@ -40,7 +42,7 @@ defmodule Hireme.CvTest do
     assert {:ok, _} =
              CvPair.tailor(CvPair.bind!(first.id), item.id, %{mode: :altered, body: "Shared"})
 
-    assert Enum.any?(Desk.focus(second.id).masks, &(&1.body == "Shared"))
+    assert Enum.any?(overlays_of(second), &(&1.body == "Shared"))
   end
 
   test "the database rejects a variant pointed at another employer's lineage" do
@@ -80,10 +82,10 @@ defmodule Hireme.CvTest do
 
     assert {:ok, _} = CvPair.tailor(CvPair.bind!(first.id), added.id, %{mode: :emphasized})
 
-    focus = Desk.focus(first.id)
-    assert Enum.any?(focus.masks, &(&1.body == "Original"))
-    refute Enum.any?(focus.masks, &(&1.body == "Replaced"))
-    assert Enum.any?(focus.masks, &(&1.id == added.id and &1.mode == :emphasized))
+    overlays = overlays_of(first)
+    assert Enum.any?(overlays, &(&1.body == "Original"))
+    refute Enum.any?(overlays, &(&1.body == "Replaced"))
+    assert Enum.any?(overlays, &(&1.item_id == added.id and &1.mode == :emphasized))
   end
 
   test "creation keeps inherited masks through cooldown and rejects non-additive opening overlays" do
@@ -116,6 +118,26 @@ defmodule Hireme.CvTest do
     assert Repo.aggregate(Hireme.Desk.Job, :count) == count
     assert {:ok, additive} = Desk.create_job(attrs)
     assert additive == Repo.get!(Hireme.Desk.Job, additive.id)
-    assert Enum.any?(Desk.focus(additive.id).masks, &(&1.body == "Original"))
+    assert Enum.any?(overlays_of(additive), &(&1.body == "Original"))
+  end
+
+  test "a theme parses once from loose keys and round-trips through storage" do
+    theme =
+      Theme.parse(%{"lead" => " Lead line ", "accent" => "signal", :targets => ["ecs", " "]})
+
+    assert theme.lead == "Lead line"
+    assert theme.accent == :signal
+    assert theme.density == :cv
+    assert theme.targets == ["ecs"]
+    assert Theme.parse(Theme.to_map(theme)) == theme
+
+    assert Theme.parse(%{"accent" => "neon", "density" => 3}) == %Theme{}
+    assert Theme.empty?(Theme.parse(nil))
+  end
+
+  # The overlays an application's CV shows: those on its lineage.
+  defp overlays_of(job) do
+    lineage = CvPair.lineage_id(CvPair.bind!(job.id))
+    Repo.all(from o in Overlay, where: o.lineage_id == ^lineage)
   end
 end

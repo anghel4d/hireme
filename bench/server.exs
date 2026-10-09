@@ -1,6 +1,6 @@
 # Production-release benchmark. State must be a synthetic testbed under BENCH_DIR.
 defmodule HiremeBench.Server do
-  alias Hireme.{Accounts, ApiKeys, Corpus, Desk, Gym, Heat, Kv, Mfa, Net, Repo}
+  alias Hireme.{Accounts, ApiKeys, Corpus, Desk, Heat, Kv, Mfa, Repo}
 
   def run do
     dir = Path.expand(System.fetch_env!("BENCH_DIR"))
@@ -25,30 +25,14 @@ defmodule HiremeBench.Server do
     {token, session} = Accounts.start_session(account)
     job_id = hd(metadata["job_ids"])
     profile_id = hd(metadata["profile_ids"])
-    items = Corpus.list_items(profile_id)
-    resolved = Hireme.Mask.apply(items, [])
-    profile = Corpus.get_profile!(profile_id)
     batch = hd(Desk.list_batches())
     count = System.get_env("BENCH_N", "1000") |> String.to_integer()
     revision = System.fetch_env!("BENCH_REV")
     only = System.get_env("BENCH_ONLY", "")
     output = System.fetch_env!("BENCH_OUTPUT")
 
-    # The baseline release predates the filtered score query.
-    score_distribution =
-      if function_exported?(Code.ensure_loaded!(Hireme.LifeEv), :chart_frequencies, 1) do
-        fn -> Desk.score_chart(%Desk.Filters{status: :all}) end
-      else
-        fn -> Desk.list_cards(%Desk.Filters{status: :all}) |> Hireme.LifeEv.chart() end
-      end
-
     operations = [
-      {"Domain/Desk", "list_cards", fn -> Desk.list_cards(%Desk.Filters{status: :all}) end},
-      {"Domain/Desk", "focus", fn -> Desk.focus(job_id) end},
-      {"Domain/Desk", "score_chart", fn -> Desk.score_chart() end},
-      {"Domain/Desk", "score_distribution", score_distribution},
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
-      {"Domain/Heat", "chart", fn -> Heat.chart() end},
       {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},
       {"Domain/Heat", "mix_batch_100", fn -> Heat.mix_batch(batch) end},
       {"Domain/Org", "size", fn -> Heat.Org.size("Company 42") end},
@@ -56,15 +40,7 @@ defmodule HiremeBench.Server do
       {"Domain/Org", "family", fn -> Heat.Org.family(%{role: "Senior Systems Engineer"}) end},
       {"Domain/ATS", "parse",
        fn -> Heat.Ats.parse("https://boards.greenhouse.io/acme/jobs/42") end},
-      {"Domain/Gym", "progress", fn -> Gym.progress() end},
-      {"Domain/Gym", "recent", fn -> Gym.recent() end},
-      {"Domain/Net", "progress", fn -> Net.progress() end},
-      {"Domain/Net", "recent", fn -> Net.recent() end},
       {"Domain/Corpus", "list_items", fn -> Corpus.list_items(profile_id) end},
-      {"Domain/CV", "compose",
-       fn -> Hireme.Cv.compose(profile, resolved, Hireme.Theme.parse(nil)) end},
-      {"Domain/Keywords", "coverage",
-       fn -> Hireme.Keywords.coverage(["elixir", "rust", "typescript", "sqlite"], resolved) end},
       {"Domain/Accounts", "session_authenticate", fn -> Accounts.session(token) end},
       {"Domain/Accounts", "list_sessions", fn -> Accounts.list_sessions(account.id) end},
       {"Domain/ApiKeys", "list", fn -> ApiKeys.list() end},

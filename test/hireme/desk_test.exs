@@ -4,50 +4,7 @@ defmodule Hireme.DeskTest do
 
   alias Hireme.Desk
   alias Hireme.Desk.Batch
-  alias Hireme.Desk.Event
-  alias Hireme.Desk.Filters
   alias Hireme.Repo
-
-  test "a focus follows the mask, and the root text stays put" do
-    profile = profile()
-
-    experience =
-      item(profile, %{title: "Engineer", body: "An entity store laid out as structure-of-arrays."})
-
-    education =
-      item(profile, %{kind: :education, title: "DEC", body: "Theatre elective.", position: 2})
-
-    job =
-      job(profile, %{
-        id: 14_413,
-        company: "Lumen Field",
-        role: "Runtime engineer",
-        stage: "fire_ready",
-        listing: "columnar ECS and a theatre program",
-        theme: %{"targets" => ["ecs", "theatre"], "density" => "tight", "accent" => "signal"},
-        overlays: [
-          %{
-            item_id: experience.id,
-            mode: :altered,
-            body: "A columnar ECS.",
-            reason: "their word"
-          },
-          %{item_id: education.id, mode: :hidden, reason: "noise"}
-        ]
-      })
-
-    assert job.current_stage == :fire_ready
-    assert job.pips == "DDDDDAPPPP"
-
-    focus = Desk.focus(14_413)
-    assert focus.cv.label == "CV14413"
-    assert focus.coverage.hits == ["ecs"]
-    assert focus.coverage.misses == ["theatre"]
-    assert focus.root_coverage.hits == ["theatre"]
-    assert focus.root_coverage.misses == ["ecs"]
-    assert Enum.any?(focus.cv.hidden, &(&1.body == "Theatre elective."))
-    refute Enum.any?(focus.cv.sections |> Enum.flat_map(& &1.lines), &(&1.body =~ "Theatre"))
-  end
 
   test "a bare opening returns the persisted row and its newly stored lineage theme" do
     profile = profile()
@@ -63,10 +20,9 @@ defmodule Hireme.DeskTest do
 
     assert added == Repo.get!(Hireme.Desk.Job, added.id)
     assert Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
-    focus = Desk.focus(added.id)
-    assert focus.coverage.hits == ["elixir"]
-    assert focus.coverage.misses == ["databases"]
-    assert focus.variant.lineage.theme == focus.variant.theme
+    variant = Repo.get_by!(Hireme.Desk.Variant, job_app_id: added.id)
+    assert Repo.get!(Hireme.Cv.Lineage, variant.lineage_id).theme == variant.theme
+    assert Hireme.Theme.parse(variant.theme).targets == ["elixir", "databases"]
     assert Hireme.CvPair.job_id(Hireme.CvPair.bind!(added.id)) == added.id
   end
 
@@ -99,12 +55,6 @@ defmodule Hireme.DeskTest do
 
       assert added == Repo.get!(Hireme.Desk.Job, added.id)
       assert Repo.get!(Hireme.Desk.Job, first.id) == first
-      focus = Desk.focus(added.id)
-      original = Desk.focus(first.id)
-      assert focus.coverage.hits == ["elixir", "systems"]
-      assert focus.coverage.misses == ["theatre"]
-      assert focus.cv.sections == original.cv.sections
-      assert focus.cv.hidden == original.cv.hidden
       pair = Hireme.CvPair.bind!(added.id)
       original_pair = Hireme.CvPair.bind!(first.id)
       assert Hireme.CvPair.lineage_id(pair) == Hireme.CvPair.lineage_id(original_pair)
@@ -140,65 +90,6 @@ defmodule Hireme.DeskTest do
     refute own.employer_id == foreign.employer_id
     assert overlays_on(own) == 1
     assert Repo.get(Hireme.Desk.Job, foreign.id) == nil
-  end
-
-  test "focus keeps optional batches and the variant's original job association" do
-    profile = profile()
-
-    batch =
-      %Batch{}
-      |> Batch.changeset(%{code: "Focus batch", ordinal: 1})
-      |> Repo.insert!()
-
-    for batch <- [nil, batch] do
-      job = job(profile, %{batch_id: batch && batch.id})
-      focus = Desk.focus(job.id)
-
-      assert focus.profile == profile
-      assert focus.job.profile == profile
-      assert focus.job.batch == batch
-      assert focus.variant.job_app == job
-      assert focus.variant.lineage.id == focus.variant.lineage_id
-    end
-  end
-
-  test "focus returns only the twelve newest events and keeps application KV ordered" do
-    job = job(profile())
-    Hireme.Kv.put("global", "candidate", "Global Candidate")
-    Hireme.Kv.put("app:#{job.id}", "zeta", "last")
-    Hireme.Kv.put("app:#{job.id}", "candidate", "Application Metadata")
-    Hireme.Kv.put("app:#{job.id}", "alpha", "first")
-
-    events =
-      for i <- 1..15 do
-        %Event{}
-        |> Event.changeset(%{job_app_id: job.id, kind: "note", body: "Event #{i}"})
-        |> Repo.insert!()
-      end
-
-    focus = Desk.focus(job.id)
-    assert focus.events == events |> Enum.reverse() |> Enum.take(12)
-    assert Enum.map(focus.kv, & &1.key) == ["alpha", "candidate", "zeta"]
-    assert focus.cv.person == "Global Candidate"
-  end
-
-  test "focus hides foreign and missing jobs but still refuses a missing variant" do
-    own_job = job(profile())
-    foreign_account = Hireme.Accounts.create!(%{name: "Other focus desk"})
-
-    foreign_job =
-      Repo.with_account(foreign_account.id, fn ->
-        job(profile(), %{company: "Foreign Co"})
-      end)
-
-    assert Desk.focus(nil) == nil
-    assert Desk.focus(-1) == nil
-    assert Desk.focus(foreign_job.id) == nil
-    assert Desk.focus(own_job.id).job.id == own_job.id
-    assert Repo.with_account(foreign_account.id, fn -> Desk.focus(own_job.id) end) == nil
-
-    Repo.delete_all(from v in Hireme.Desk.Variant, where: v.job_app_id == ^own_job.id)
-    assert_raise Ecto.NoResultsError, fn -> Desk.focus(own_job.id) end
   end
 
   test "an opening casts wire strings once and refuses an unknown stage" do
@@ -243,23 +134,6 @@ defmodule Hireme.DeskTest do
     assert {:ok, _} = Desk.name_open_fire("Batch-001")
     assert {:ok, moved} = Desk.set_stage(job.id, :submitted)
     assert moved.current_stage == :submitted
-  end
-
-  test "cards sort by score_100 and filter by band" do
-    profile = profile()
-    low = job(profile, %{company: "Thin Shop", role: "CRUD intern"})
-    high = job(profile, %{company: "Anthropic", role: "Systems engineer"})
-
-    assert high.score_100 == 100
-    assert low.score_100 < 20
-
-    assert hd(Desk.list_cards(%Filters{status: :all})).id == high.id
-
-    assert Enum.map(Desk.list_cards(%Filters{status: :all, band: :frontier}), & &1.id) == [
-             high.id
-           ]
-
-    assert Enum.map(Desk.list_cards(%Filters{status: :all, min_score: 90}), & &1.id) == [high.id]
   end
 
   defp overlays_on(job) do

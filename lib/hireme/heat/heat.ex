@@ -128,28 +128,6 @@ defmodule Hireme.Heat.Verdict do
         }
 end
 
-defmodule Hireme.Heat.Chart do
-  @moduledoc """
-  Heatmap rows for companies and ATS vendors.
-  """
-
-  @enforce_keys [:companies, :vendors]
-  defstruct @enforce_keys
-
-  @type row :: %{
-          key: String.t(),
-          label: String.t(),
-          load: float(),
-          cap: float(),
-          ratio: float(),
-          n: non_neg_integer(),
-          cooldown_days: non_neg_integer() | nil,
-          size: atom() | nil
-        }
-
-  @type t :: %__MODULE__{companies: [row()], vendors: [row()]}
-end
-
 defmodule Hireme.Heat do
   @moduledoc """
   Structural heat governor. The pipeline must not snap onto a company or ATS.
@@ -171,7 +149,6 @@ defmodule Hireme.Heat do
   alias Hireme.Desk.Event
   alias Hireme.Desk.Job
   alias Hireme.Heat.Ats
-  alias Hireme.Heat.Chart
   alias Hireme.Heat.Config
   alias Hireme.Heat.Org
   alias Hireme.Heat.Verdict
@@ -357,51 +334,6 @@ defmodule Hireme.Heat do
 
   def write_override(_, _), do: {:error, :reason}
 
-  @spec chart(Date.t(), Config.t()) :: Chart.t()
-  def chart(today \\ Date.utc_today(), cfg \\ config()) do
-    snap = snapshot(today, cfg)
-
-    companies =
-      snap.companies
-      |> Enum.map(fn {key, row} ->
-        chart_row(key, row.label, row, row.cap, row.size, cfg.company_half_life, cfg)
-      end)
-      |> Enum.sort_by(&{-&1.ratio, &1.label})
-
-    vendors =
-      snap.vendors
-      |> Enum.map(fn {vendor, row} ->
-        chart_row(
-          Ats.name(vendor),
-          Ats.name(vendor),
-          row,
-          cfg.ats_vendor_cap,
-          nil,
-          cfg.ats_vendor_half_life,
-          cfg
-        )
-      end)
-      |> Enum.reject(&(&1.key == "unknown"))
-      |> Enum.sort_by(&{-&1.ratio, &1.label})
-
-    %Chart{companies: companies, vendors: vendors}
-  end
-
-  @doc """
-  Decorate a board against a snapshot. The peer classifications and ATS
-  load totals are derived once per snapshot and day (`prepare/3`), so a
-  caller that keeps a prepared snapshot pays only for the cards it paints.
-  """
-  @spec decorate_all([map()], map(), Config.t(), Date.t()) :: [map()]
-  def decorate_all(cards, snapshot, cfg \\ config(), today \\ Date.utc_today())
-
-  def decorate_all([], _snapshot, _cfg, _today), do: []
-
-  def decorate_all(cards, snapshot, cfg, today) do
-    snapshot = prepare(snapshot, cfg, today)
-    Enum.map(cards, &decorate(&1, snapshot, cfg, today))
-  end
-
   @doc """
   A snapshot with its peer traits and ATS loads for `today` derived, for
   repeated painting. A `previous` prepared snapshot lends the traits of
@@ -431,71 +363,8 @@ defmodule Hireme.Heat do
     |> Map.put(:prepared, {today, cfg})
   end
 
-  @doc """
-  The governor's verdict on one job against a prepared snapshot: what
-  `can_apply/2` answers, without reading the hot jobs again.
-  """
-  @spec verdict(map(), map(), Config.t(), Date.t()) :: Verdict.t()
-  def verdict(job, snapshot, cfg \\ config(), today \\ Date.utc_today()) do
-    snapshot = prepare(snapshot, cfg, today)
-    evaluate(job, snapshot.jobs, [], today, cfg, snapshot.ats, snapshot)
-  end
-
-  @spec decorate(map(), map(), Config.t(), Date.t()) :: map()
-  def decorate(card, snapshot, cfg \\ config(), today \\ Date.utc_today())
-
-  def decorate(card, snapshot, cfg, today) do
-    job = %{
-      id: Map.get(card, :id),
-      company: Map.get(card, :company),
-      role: Map.get(card, :role),
-      listing_url: Map.get(card, :listing_url) || "",
-      canonical_url: Map.get(card, :canonical_url) || "",
-      department: Map.get(card, :department) || "",
-      squad: Map.get(card, :squad) || "",
-      fit: Map.get(card, :fit) || "",
-      current_stage: Map.get(card, :stage) || Map.get(card, :current_stage),
-      stage_on: Map.get(card, :stage_on),
-      score_100: Map.get(card, :score_100) || 0,
-      heat_override: Map.get(card, :heat_override) || false,
-      heat_override_reason: Map.get(card, :heat_override_reason) || ""
-    }
-
-    existing = Map.get(snapshot, :jobs, [])
-    verdict = evaluate(job, existing, [], today, cfg, Map.get(snapshot, :ats), snapshot)
-    ratio = ratio(verdict.company_load, verdict.company_cap)
-
-    state =
-      cond do
-        verdict.decision == :defer -> :blocked
-        ratio >= cfg.hot_ratio -> :hot
-        ratio >= cfg.cool_ratio -> :warm
-        true -> :cool
-      end
-
-    card
-    |> Map.put(:load, verdict.company_load)
-    |> Map.put(:cap, verdict.company_cap)
-    |> Map.put(:heat_state, state)
-    |> Map.put(:ats_vendor, verdict.ats_vendor)
-    |> Map.put(:cooldown_days, verdict.cooldown_days)
-  end
-
   @spec parse_state(term()) :: {:ok, atom()} | :error
   def parse_state(state), do: Hireme.Closed.parse([:all, :cool, :warm, :hot, :blocked], state)
-
-  defp chart_row(key, label, row, cap, size, half_life, cfg) do
-    %{
-      key: key,
-      label: label,
-      load: row.load,
-      cap: cap,
-      size: size,
-      n: row.n,
-      ratio: ratio(row.load, cap),
-      cooldown_days: cooldown(row.load, cfg.application_load, cap, half_life)
-    }
-  end
 
   # Parse each distinct URL once per mix/snapshot, not once per candidate/peer.
   defp ats_index(jobs) do
@@ -854,9 +723,6 @@ defmodule Hireme.Heat do
   defp truthy?(1), do: true
   defp truthy?("true"), do: true
   defp truthy?(_), do: false
-
-  defp ratio(_load, cap) when cap <= 0, do: 1.0
-  defp ratio(load, cap), do: round4(load / cap)
 
   defp round4(n) when is_integer(n), do: Float.round(n * 1.0, 4)
   defp round4(n) when is_float(n), do: Float.round(n, 4)

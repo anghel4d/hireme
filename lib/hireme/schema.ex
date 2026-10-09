@@ -620,10 +620,12 @@ end
 
 defmodule Hireme.Desk.Overlay do
   use Hireme.Schema
-  alias Hireme.Mask
+
+  @modes [:hidden, :altered, :emphasized]
+  @type mode :: :hidden | :altered | :emphasized
 
   schema "overlays" do
-    field :mode, Ecto.Enum, values: Mask.modes()
+    field :mode, Ecto.Enum, values: @modes
     field :title, :string
     field :body, :string
     field :reason, :string
@@ -636,8 +638,8 @@ defmodule Hireme.Desk.Overlay do
   end
 
   @doc "One overlay mode from the wire. `inherit` is the absence of an overlay and is the caller's word."
-  @spec parse_mode(term()) :: {:ok, Mask.applied()} | :error
-  def parse_mode(value), do: Hireme.Closed.parse(Mask.modes(), value)
+  @spec parse_mode(term()) :: {:ok, mode()} | :error
+  def parse_mode(value), do: Hireme.Closed.parse(@modes, value)
 
   def changeset(overlay, attrs) do
     overlay

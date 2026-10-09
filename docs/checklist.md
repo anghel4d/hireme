@@ -47,8 +47,8 @@ checksum in `ApiKeys.authenticate/2`.
 ## Tenancy
 
 Invariant: a row written under account A is unreachable under account
-B through every read path: `/api/*`, the feed, both MCP sockets, mix
-tasks, and direct `Repo` calls without `put_account`.
+B through every read path: the wire session (a browser's or an agent's),
+the account routes, mix tasks, and direct `Repo` calls without `put_account`.
 
 - `Hireme.Repo.prepare_query/3` adds `account_id = ?` to every query
   and raises `ArgumentError` with no account on the process. Enumerate
@@ -61,11 +61,11 @@ tasks, and direct `Repo` calls without `put_account`.
   every changeset in `lib/hireme/schema.ex` with `account_id` in the
   attrs map from another account; the cast must drop it (whole-field
   casts exclude `:account_id`).
-- Every `/api/*/:id` route with an id owned by B, called as A: 404,
-  never 403 (existence must not leak).
-- MCP: a letterbox id owned by B on `/mcp/letterbox/:id/websocket`
-  with A's key: refused at upgrade.
-- Feed: with both accounts subscribed, a write under A publishes only
+- Every op whose target is owned by B, sent as A: refused `not_found`,
+  the same answer as for an id no one owns (existence must not leak).
+- A LEASE of B's letterbox on a session authenticated with A's key:
+  refused.
+- Deltas: with both accounts subscribed, a write under A publishes only
   on `desk:<A>`; grep `Phoenix.PubSub.broadcast` for any topic that is
   not `Hireme.Desk.topic/1`.
 - Audit: `Hireme.Audit.recent/1` under B never returns A's events.
@@ -107,8 +107,9 @@ or reused after revocation.
   token: 403 (`Plug.CSRFProtection`). JSON takes `x-csrf-token`;
   forms take `_csrf_token`. Fuzz: token from another session, token
   with one byte changed, token in the wrong place.
-- `/feed/websocket` upgrade without `_csrf_token` in the query, or
-  with a stale one: refused.
+- `/wire/websocket` without `_csrf_token` in the query, or with a stale
+  one, gets no session: it is admitted only as far as an API-key HELLO
+  and closed without one.
 - `Plug.Parsers` has `:urlencoded` and `:json`; a multipart body or
   an unknown content type must not crash the request (`pass: ["*/*"]`
   means the body is simply not parsed; the controller must then
@@ -296,10 +297,10 @@ with 403 `{"error":"step_up"}` unless `Hireme.Mfa.fresh?/1`.
   then failing the retried request (revoke the key between) and
   assert no duplicate action.
 
-## API keys and MCP sockets
+## API keys and agent sessions
 
-Invariant: a key reaches one account; a wrong key is refused at the
-upgrade with no detail; the secret rests only as a hash.
+Invariant: a key reaches one account; a wrong key is refused at HELLO
+with no detail; the secret rests only as a hash.
 
 - Shape `hm_<12 base62>_<43 base62><6 base62 CRC32>`; fuzz the
   checksum (one char changed anywhere in the 55-char tail) and assert
@@ -308,13 +309,14 @@ upgrade with no detail; the secret rests only as a hash.
   a key of the right id with a wrong secret and one with a wrong id
   must take the same time within noise.
 - `expires_at` in the past, `revoked_at` set, account suspended: all
-  refused at the next upgrade. Known gap to confirm and file: a socket
-  that is already open is not torn down on revoke or expiry; it runs
-  until it closes.
-- Transport: `x-headers` and `auth_token` are both read; fuzz the
-  `Sec-WebSocket-Protocol` value with garbage after
-  `base64url.bearer.phx.`, with padding, with two tokens, with a valid
-  key in the header and an invalid one in the subprotocol.
+  refused at the next HELLO. Known gap to confirm and file: a session
+  that is already open is not torn down on revoke or expiry until it
+  closes (the browser session rechecks its own every minute; confirm
+  the agent session does the same for its key).
+- Transport: the key travels only in the agent's HELLO on its wire
+  session, through the gate or `/wire`, never in a header; fuzz a HELLO
+  with a malformed key, with two keys, and with a browser ticket in its
+  place.
 - Cap: 100 live keys per account; the 101st `create/3` is refused.
   Concurrency: 20 parallel creates at 99 must leave at most 100.
 - `last_used_at` is written at most once a minute per key.

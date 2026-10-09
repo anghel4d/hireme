@@ -101,9 +101,6 @@ defmodule HiremeBench.Actions do
 
         pair = CvPair.bind!(added.id)
         true = CvPair.lineage_id(pair) == lineage_id and CvPair.job_id(pair) == added.id
-        focus = Desk.focus(added.id)
-        true = focus.cv.sections == Desk.focus(job.id).cv.sections
-        true = focus.coverage.hits == ["elixir", "systems"] and focus.coverage.misses == []
         true = Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
         true = Repo.get!(Job, job.id) == shared_before
       end,

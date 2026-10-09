@@ -177,10 +177,6 @@ defmodule Hireme.HeatTest do
     assert {:ok, _} = Heat.set_override(second.id, "Matei said this one")
     assert {:ok, moved} = Desk.set_stage(second.id, :fire_ready)
     assert moved.current_stage == :fire_ready
-
-    snapshot = Heat.snapshot()
-    assert Heat.decorate(moved, snapshot) == Heat.decorate(moved, Map.delete(snapshot, :ats))
-    assert Heat.chart().companies |> Enum.any?(&(&1.n == 2))
   end
 
   test "govern_batch unassigns the lower-score role and leaves it leftover" do
@@ -301,66 +297,6 @@ defmodule Hireme.HeatTest do
     end
 
     for invalid <- [nil, "", "COOL", :unknown, 1], do: assert(Heat.parse_state(invalid) == :error)
-  end
-
-  test "board heat excludes the current job and keeps company and ATS groups separate" do
-    profile = profile()
-
-    [first, _older, _other, unknown] =
-      for {company, url, age} <- [
-            {"Google", "https://jobs.lever.co/google/first", 0},
-            {"Google", "https://jobs.lever.co/google/older", 35},
-            {"Other Company", "https://jobs.lever.co/other/role", 0},
-            {"Unknown ATS", "https://jobs.example.test/unknown", 0}
-          ] do
-        Desk.create_job!(%{
-          profile_id: profile.id,
-          company: company,
-          role: "Engineer",
-          stage: :submitted,
-          stage_on: Date.add(@today, -age),
-          canonical_url: url
-        })
-      end
-
-    cfg = %{Heat.config() | ats_vendor_cap: 2.0}
-    snapshot = Heat.snapshot(@today, cfg)
-    [decorated, unknown] = Heat.decorate_all([first, unknown], snapshot, cfg, @today)
-    assert decorated.load == 0.5
-    assert decorated.cap == 4.0
-    assert decorated.ats_vendor == :lever
-    assert decorated.heat_state == :blocked
-    assert decorated.cooldown_days == 4
-
-    assert unknown.load == 0.0
-    assert unknown.ats_vendor == :unknown
-    assert unknown.heat_state == :cool
-
-    # A card may have newer role fields than the hot-peer snapshot. Its own
-    # cached traits must not replace the candidate's current classification.
-    changed_role = %{first | role: "Security Engineer", department: "Security"}
-    cfg = %{cfg | mega_cap: 2.0, ats_vendor_cap: 40.0}
-    [same_role, different_role] = Heat.decorate_all([first, changed_role], snapshot, cfg, @today)
-    assert same_role.heat_state == :blocked
-    assert different_role.heat_state == :cool
-
-    changed_vendor = %{first | listing_url: "https://boards.greenhouse.io/google/moved"}
-    changed_tenant = %{first | listing_url: "https://jobs.lever.co/other/moved"}
-    cards = [first, changed_role, changed_vendor, changed_tenant, unknown, %{first | id: nil}]
-
-    fast_decay = %{
-      cfg
-      | application_load: 0.3333,
-        ats_vendor_half_life: 3,
-        ats_tenant_half_life: 7
-    }
-
-    for today <- [Date.add(@today, -7), @today, Date.add(@today, 11)],
-        config <- [cfg, fast_decay] do
-      expected = Enum.map(cards, &Heat.decorate(&1, snapshot, config, today))
-      assert Heat.decorate_all(cards, snapshot, config, today) == expected
-      assert Heat.decorate_all(cards, Map.delete(snapshot, :ats), config, today) == expected
-    end
   end
 
   defp probe(company, role, score, id, url \\ nil) do
