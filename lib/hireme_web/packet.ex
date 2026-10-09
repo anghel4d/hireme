@@ -98,7 +98,7 @@ defmodule HiremeWeb.Packet do
       Enum.reduce(@u32_columns ++ @str_columns, {[], [], 0}, fn name, {dir, chunks, at} ->
         {kind, chunk} =
           if name in @u32_columns do
-            {"u32", Enum.map(cards, &<<u32(name, &1, index)::little-32>>)}
+            {"u32", for(card <- cards, into: <<>>, do: <<u32(name, card, index)::little-32>>)}
           else
             {"str", str_column(Enum.map(cards, &str(name, &1)))}
           end
@@ -113,7 +113,9 @@ defmodule HiremeWeb.Packet do
 
   defp str_column(strings) do
     {offsets, total} =
-      Enum.map_reduce(strings, 0, fn s, acc -> {<<acc::little-32>>, acc + byte_size(s)} end)
+      Enum.reduce(strings, {<<>>, 0}, fn s, {offsets, at} ->
+        {<<offsets::binary, at::little-32>>, at + byte_size(s)}
+      end)
 
     [offsets, <<total::little-32>>, strings, pad(total)]
   end
