@@ -364,9 +364,22 @@ export function paperBlocks(cv: Doc, editable: boolean, editing: number | null, 
   return blocks
 }
 
+// A line's HTML by everything it is drawn from: a redraw that changes one
+// line builds that line alone. Cleared when it outgrows a few CVs.
+const LINES = new Map<string, Raw>()
+
 // A line's actions are drawn only on the line chosen by a click, not on every line.
 function cvLine(l: Line, editable: boolean, editing: number | null, alterError: string | null, chosen: number | null): Raw {
   const isEditing = editable && editing === l.id
+  const key = [l.id, l.mode, l.shown, l.org, l.title, l.span, l.body, l.canonical_body, l.reason, editable, isEditing, isEditing && alterError, chosen === l.id].join("\u0000")
+  let hit = LINES.get(key)
+  if (hit) return hit
+  if (LINES.size > 2000) LINES.clear()
+  LINES.set(key, (hit = cvLineHTML(l, editable, isEditing, alterError, chosen)))
+  return hit
+}
+
+function cvLineHTML(l: Line, editable: boolean, isEditing: boolean, alterError: string | null, chosen: number | null): Raw {
   return h`
     <div id="line-${l.id}" class="line is-${l.mode}" data-action="${editable ? "line" : ""}" data-item="${l.id}">
       <h4>${when(l.org !== "", () => h`<span class="org">${l.org} · </span>`)}${l.title}${when(l.span !== "", () => h`<span class="org"> · ${l.span}</span>`)}</h4>
