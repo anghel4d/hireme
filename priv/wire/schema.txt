@@ -72,6 +72,18 @@ col batches code 2 str
 col batches ordinal 3 u32
 col batches fire 4 u32
 col batches status 5 str
+col batches kind 6 str
+col batches target_size 7 u32
+col batches queued_on 8 day
+col batches squad 9 str
+col batches variety 10 str
+col batches note 11 str
+col batches variety_apps 12 u32
+col batches variety_companies 13 u32
+col batches variety_roles 14 u32
+col batches variety_locations 15 u32
+col batches variety_fits 16 u32
+col batches variety_flags 17 str
 
 table profiles 4
 col profiles id 1 u32
@@ -79,6 +91,7 @@ col profiles slug 2 str
 col profiles name 3 str
 col profiles headline 4 str
 col profiles summary 5 str
+col profiles user_id 6 u32
 
 table stages 5
 col stages ix 1 u32
@@ -162,19 +175,6 @@ col gym_topics key 1 str
 col gym_topics label 2 str
 col gym_topics count 3 u32
 
-table gym_reps 17
-col gym_reps id 1 u32
-col gym_reps done_on 2 day
-col gym_reps outcome 3 str
-col gym_reps minutes 4 u32
-col gym_reps note 5 str
-col gym_reps platform 6 str
-col gym_reps slug 7 str
-col gym_reps title 8 str
-col gym_reps topic 9 str
-col gym_reps difficulty 10 str
-col gym_reps url 11 str
-
 table options 18
 col options group 1 str
 col options key 2 str
@@ -185,15 +185,6 @@ col net lane 1 str
 col net shipped_week 2 u32
 col net drafts 3 u32
 col net observer_runs 4 u32
-
-table net_entries 20
-col net_entries id 1 u32
-col net_entries kind 2 str
-col net_entries channel 3 str
-col net_entries title 4 str
-col net_entries url 5 str
-col net_entries body 6 str
-col net_entries shipped_on 7 day
 
 table heat_rows 21
 col heat_rows group 1 u32
@@ -211,6 +202,8 @@ col narratives id 1 u32
 col narratives profile 2 u32
 col narratives body 3 str
 col narratives version 4 u32
+col narratives user_id 5 u32
+col narratives private 6 u32
 
 table kv 23
 col kv scope 1 u32
@@ -319,6 +312,198 @@ col focus_lines line 3 u32
 table focus_kv 36
 col focus_kv key 1 str
 col focus_kv value 2 str
+
+# Raw tables (round two): the account's rows as the database holds them, named and typed as the
+# Ecto schema names them, keyed by id (upserted); `gone` deletes (table id, row id); `leases` is the
+# letterbox registry's live state, replaced whole; `clock` is the server's UTC day and time, which
+# every client derivation of 'today' must use. JSON-valued fields (theme, stage_notes, variety)
+# travel as JSON text; the lists the kernel reads (keywords, theme_targets, variety_flags) travel
+# joined with U+001F, and variety's counts as their own columns, so the kernel needs no JSON.
+
+table items 41
+col items id 1 u32
+col items profile_id 2 u32
+col items kind 3 str
+col items key 4 str
+col items title 5 str
+col items body 6 str
+col items org 7 str
+col items span 8 str
+col items position 9 u32
+col items keywords 10 str
+
+table kv_pairs 42
+col kv_pairs id 1 u32
+col kv_pairs namespace 2 str
+col kv_pairs key 3 str
+col kv_pairs value 4 str
+
+table scoreboard_snapshots 46
+col scoreboard_snapshots id 1 u32
+col scoreboard_snapshots noted_on 2 day
+col scoreboard_snapshots leftover_unique 3 u32
+col scoreboard_snapshots target_total 4 u32
+col scoreboard_snapshots target_on 5 day
+col scoreboard_snapshots daily_batches 6 u32
+col scoreboard_snapshots daily_apps 7 u32
+col scoreboard_snapshots note 8 str
+
+table job_apps 47
+col job_apps id 1 u32
+col job_apps profile_id 2 u32
+col job_apps employer_id 3 u32
+col job_apps batch_id 4 u32
+col job_apps company 5 str
+col job_apps role 6 str
+col job_apps location 7 str
+col job_apps listing_url 8 str
+col job_apps canonical_url 9 str
+col job_apps listing 10 str
+col job_apps heat 11 u32
+col job_apps status 12 str
+col job_apps next_action 13 str
+col job_apps next_due 14 day
+col job_apps source 15 str
+col job_apps stage_on 16 day
+col job_apps current_stage 17 str
+col job_apps pips 18 str
+col job_apps stage_notes 19 str
+col job_apps freshness 20 str
+col job_apps gate 21 str
+col job_apps fit 22 str
+col job_apps squad 23 str
+col job_apps department 24 str
+col job_apps score_100 25 u32
+col job_apps heat_override 26 u32
+col job_apps heat_override_reason 27 str
+col job_apps keyword_hits 28 u32
+col job_apps keyword_total 29 u32
+col job_apps mask_hidden 30 u32
+col job_apps mask_altered 31 u32
+col job_apps mask_emphasized 32 u32
+col job_apps inserted_at 33 time
+col job_apps updated_at 34 time
+
+table events 48
+col events id 1 u32
+col events job_app_id 2 u32
+col events kind 3 str
+col events body 4 str
+col events inserted_at 5 time
+
+table overlays 52
+col overlays id 1 u32
+col overlays job_app_id 2 u32
+col overlays item_id 3 u32
+col overlays lineage_id 4 u32
+col overlays mode 5 str
+col overlays title 6 str
+col overlays body 7 str
+col overlays reason 8 str
+col overlays generation 9 u32
+
+table gym_problems 53
+col gym_problems id 1 u32
+col gym_problems platform 2 str
+col gym_problems slug 3 str
+col gym_problems title 4 str
+col gym_problems topic 5 str
+col gym_problems difficulty 6 str
+col gym_problems url 7 str
+
+table leases 49
+col leases id 1 u32
+
+table cv_lineages 50
+col cv_lineages id 1 u32
+col cv_lineages employer_id 2 u32
+col cv_lineages generation 3 u32
+col cv_lineages opened_on 4 day
+col cv_lineages rewrites_allowed 5 u32
+col cv_lineages theme 6 str
+col cv_lineages theme_targets 7 str
+
+table cv_variants 51
+col cv_variants id 1 u32
+col cv_variants job_app_id 2 u32
+col cv_variants profile_id 3 u32
+col cv_variants lineage_id 4 u32
+col cv_variants label 5 str
+col cv_variants theme 6 str
+col cv_variants theme_targets 7 str
+col cv_variants note 8 str
+
+table gym_reps 54
+col gym_reps id 1 u32
+col gym_reps problem_id 2 u32
+col gym_reps done_on 3 day
+col gym_reps minutes 4 u32
+col gym_reps outcome 5 str
+col gym_reps note 6 str
+
+table net_entries 55
+col net_entries id 1 u32
+col net_entries kind 2 str
+col net_entries channel 3 str
+col net_entries title 4 str
+col net_entries url 5 str
+col net_entries body 6 str
+col net_entries shipped_on 7 day
+table gone 56
+col gone table 1 u32
+col gone id 2 u32
+
+table clock 57
+col clock today 1 day
+col clock now 2 time
+
+# The account page (letterbox lane): one session's view of its account, replaced whole when present.
+
+table acct 60
+col acct id 1 u32
+col acct name 2 str
+col acct me 3 u32
+col acct recovery_left 4 u32
+col acct enrolled 5 u32
+col acct step_up_window 6 u32
+col acct fresh_until 7 time
+col acct sign_in_methods 8 str
+
+table acct_keys 61
+col acct_keys id 1 u32
+col acct_keys key_id 2 str
+col acct_keys name 3 str
+col acct_keys display 4 str
+col acct_keys scope 5 str
+col acct_keys created_at 6 time
+col acct_keys last_used_at 7 time
+col acct_keys expires_at 8 time
+col acct_keys revoked_at 9 time
+col acct_keys live 10 u32
+
+table acct_sessions 62
+col acct_sessions id 1 u32
+col acct_sessions authenticated_at 2 time
+col acct_sessions last_seen_at 3 time
+col acct_sessions expires_at 4 time
+col acct_sessions mfa_at 5 time
+col acct_sessions ip 6 str
+col acct_sessions user_agent 7 str
+
+table acct_identities 63
+col acct_identities id 1 u32
+col acct_identities provider 2 str
+col acct_identities display 3 str
+col acct_identities created_at 4 time
+
+table acct_factors 64
+col acct_factors id 1 u32
+col acct_factors kind 2 str
+col acct_factors name 3 str
+col acct_factors created_at 4 time
+col acct_factors last_used_at 5 time
+col acct_factors backed_up 6 u32
+col acct_factors transports 7 str
 
 op stage 1 job stage
 op next 2 job next_action next_due
