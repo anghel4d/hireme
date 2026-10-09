@@ -326,6 +326,53 @@ defmodule HiremeWeb.Packet do
   defp unit_list(_), do: ""
 
   @doc """
+  An OP frame's body read as an op: `{:ok, %{op_id, kind, target,
+  fields}}`, `{:error, op_id}` when the id is readable but the kind or
+  fields are not (answer it with a NACK), or `:error` when not even the
+  header is.
+  """
+  @spec op(binary()) :: {:ok, map()} | {:error, non_neg_integer()} | :error
+  def op(<<op_id::little-64, kind::8, n::8, _::16, target::little-32, fields::binary>>) do
+    with name when not is_nil(name) <- op_kind(kind),
+         {:ok, fields} <- fields(fields, n, []) do
+      {:ok, %{op_id: op_id, kind: name, target: target, fields: fields}}
+    else
+      _ -> {:error, op_id}
+    end
+  end
+
+  def op(_body), do: :error
+
+  defp fields(_rest, 0, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp fields(<<len::little-16, field::binary-size(len), rest::binary>>, n, acc),
+    do: fields(rest, n - 1, [field | acc])
+
+  defp fields(_, _, _), do: :error
+
+  @doc "The ACK of an op, at the rev that settles it."
+  @spec ack(non_neg_integer(), non_neg_integer()) :: iodata()
+  def ack(op_id, rev), do: frame(:ack, rev, <<op_id::little-64>>)
+
+  @doc "The NACK of an op: the refusal's code and a message a person can read."
+  @spec nack(non_neg_integer(), term(), non_neg_integer()) :: iodata()
+  def nack(op_id, reason, rev) do
+    {name, message} = refusal(reason)
+    msg = String.slice(message, 0, 400)
+
+    frame(:nack, rev, [
+      <<op_id::little-64, refusal_code(name)::8, 0::8, byte_size(msg)::little-16>>,
+      msg
+    ])
+  end
+
+  defp refusal({:argument, name}), do: {:argument, "Need a #{name}."}
+  defp refusal({name, message}) when is_atom(name) and is_binary(message), do: {name, message}
+  defp refusal(%Ecto.Changeset{}), do: {:invalid, "That did not save."}
+  defp refusal(name) when is_atom(name), do: {name, Atom.to_string(name)}
+  defp refusal(_), do: {:internal, "internal"}
+
+  @doc """
   Cut whole frames off the front of a stream buffer. Answers the frames as
   `{kind_atom | integer, flags, rev, body}` in order and the bytes left
   over, or `{:error, reason}` for a frame no reader should keep going past:
