@@ -510,13 +510,14 @@ export class Shell {
     const [start, last] = grid.slice(m.count, m.grid.cols, m.grid.scroll, m.grid.viewport, metrics)
     const sel = d.selection()
     const ids = d.column("id")
-    const parts: [number, string[]][] = []
+    const parts: [number, string, () => string[]][] = []
     const place = (pos: number) => {
       const row = sel[pos]
       if (row === undefined) return
       const id = ids[row] ?? 0
       const [x, y] = grid.origin(pos, m.grid.cols, metrics)
-      parts.push([id, views.cardValues(d, row, Math.round(x), Math.round(y), id === m.appId, d.mark(id))])
+      const [cx, cy, active, mark] = [Math.round(x), Math.round(y), id === m.appId, d.mark(id)]
+      parts.push([id, `${d.version(id)} ${cx} ${cy} ${active} ${mark}`, () => views.cardValues(d, row, cx, cy, active, mark)])
     }
     if (m.index >= 0 && (m.index < start || m.index > last)) place(m.index)
     if (start >= 0) for (let p = start; p <= last; p++) place(p)

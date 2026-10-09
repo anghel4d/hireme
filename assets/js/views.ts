@@ -150,34 +150,39 @@ const CARD_WRITERS: Writer[] = [
 
 /**
  * The board's cards as live nodes, one per placed job. A new card is a
- * clone of the skeleton; a redraw writes only the values that changed, so
- * a selection touches two class names and nothing is parsed or walked.
+ * clone of the skeleton; a redraw skips a card whose desk version, place,
+ * selection and mark are as before, and otherwise writes only the values
+ * that changed, so a selection touches two cards and nothing is parsed.
  */
 export class Cards {
-  private readonly els = new Map<number, { el: HTMLElement; parts: Element[]; vals: string[] }>()
+  private readonly els = new Map<number, { el: HTMLElement; parts: Element[]; vals: string[]; sig: string }>()
 
   constructor(private readonly plane: Element) {}
 
-  set(items: readonly [number, string[]][]): void {
+  /** Items are (job id, signature, values): a card whose signature is unchanged is not read at all. */
+  set(items: readonly [number, string, () => string[]][]): void {
     const live = new Set<number>()
-    for (const [id, vals] of items) {
+    for (const [id, sig, values] of items) {
       live.add(id)
       let card = this.els.get(id)
+      if (card?.sig === sig) continue
       if (!card) {
         const el = CARD.content.firstElementChild?.cloneNode(true) as HTMLElement
         el.id = `card-${id}`
         el.dataset["id"] = String(id)
         const [kicker, h2, role, meta, glance, next] = Array.from(el.children)
         const parts = [...(kicker?.children ?? []), h2, role, ...(meta?.children ?? []), ...(glance?.children ?? []), ...(next?.children ?? [])] as Element[]
-        card = { el, parts, vals: [] }
+        card = { el, parts, vals: [], sig }
         this.els.set(id, card)
         this.plane.append(el)
       }
+      const vals = values()
       for (let i = 0; i < vals.length; i++) {
         const v = vals[i] as string
         if (card.vals[i] !== v) CARD_WRITERS[i]?.(card.el, card.parts, v)
       }
       card.vals = vals
+      card.sig = sig
     }
     for (const [id, { el }] of this.els) {
       if (live.has(id)) continue
