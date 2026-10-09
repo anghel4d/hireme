@@ -125,13 +125,13 @@ defmodule HiremeWeb.WireTest do
 
     {first, intern} = Packet.focus_frames(focus.(a.id), 9, %{})
     {_, [{:lines, 0, 9, lines}, {:focus, 0, 9, fa}]} = one!(first)
-    assert map_size(intern) == length(tables(lines)[24])
+    assert map_size(intern) == 2 * length(tables(lines)[24])
 
     {second, ^intern} = Packet.focus_frames(focus.(b.id), 9, intern)
     {bin, [{:focus, 0, 9, fb}]} = one!(second)
     assert hd(tables(fb)[30])[1] == b.id
     refs = Enum.map(tables(fa)[35], & &1[3])
-    assert Enum.all?(refs, &(&1 in Map.values(intern)))
+    assert Enum.all?(refs, &Map.has_key?(intern, {:ix, &1}))
 
     {again, ^intern} = Packet.focus_frames(focus.(b.id), 9, intern, true)
     assert {_, [{:lines, 0, 9, _}, {:focus, 0, 9, _}]} = one!(again)
@@ -144,7 +144,10 @@ defmodule HiremeWeb.WireTest do
           9,
           Packet.table(
             :lines,
-            Enum.map(intern, fn {l, ix} -> l |> Map.put(:ix, ix) |> Map.put(:item, l.id) end)
+            for(
+              {l, ix} when is_map(l) <- intern,
+              do: l |> Map.put(:ix, ix) |> Map.put(:item, l.id)
+            )
           )
         )
       )

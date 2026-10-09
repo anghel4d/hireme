@@ -22,23 +22,89 @@ defmodule HiremeWeb.Auth do
 
   # Scripts and styles are this origin's; cards carry inline positions.
   # The column store is a WebAssembly module, so script-src allows that
-  # compile (`wasm-unsafe-eval`) and not `eval`. Fetch and websocket stay
-  # on this origin. Nothing frames the desk.
-  @csp Enum.join(
-         [
-           "default-src 'self'",
-           "script-src 'self' 'wasm-unsafe-eval'",
-           "style-src 'self' 'unsafe-inline'",
-           "img-src 'self' data:",
-           "connect-src 'self'",
-           "font-src 'self'",
-           "frame-ancestors 'none'",
-           "base-uri 'none'",
-           "object-src 'none'",
-           "form-action 'self'"
-         ],
-         "; "
-       )
+  # compile (`wasm-unsafe-eval`) and not `eval`; the one inline script is
+  # the desk's early connect, allowed by its hash. Fetch and websocket stay
+  # on this origin, plus the WebTransport gate when one is configured.
+  # Nothing frames the desk.
+  @csp_rest [
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "form-action 'self'"
+  ]
+
+  @doc "The WebTransport URL browsers connect to, or nil when no gate is configured."
+  @spec wire_gate() :: String.t() | nil
+  def wire_gate, do: get_in(HiremeWeb.Gate.client() || %{}, [:url])
+
+  @doc "Certificate hashes for a development gate's self-signed certificate, hex, space-separated."
+  @spec wire_hashes() :: String.t()
+  def wire_hashes, do: Enum.join(get_in(HiremeWeb.Gate.client() || %{}, [:hashes]) || [], " ")
+
+  @doc "The inline early-connect script, or nothing when the build has none."
+  @spec early_script() :: String.t()
+  def early_script do
+    case early() do
+      {js, _hash} -> "<script>#{js}</script>"
+      nil -> ""
+    end
+  end
+
+  defp early do
+    case :persistent_term.get({__MODULE__, :early}, :unread) do
+      :unread ->
+        path = Application.app_dir(:hireme, "priv/static/assets/js/early.js")
+
+        early =
+          case File.read(path) do
+            {:ok, js} -> {String.trim_trailing(js), nil}
+            _ -> nil
+          end
+
+        early = early && {elem(early, 0), Base.encode64(:crypto.hash(:sha256, elem(early, 0)))}
+        :persistent_term.put({__MODULE__, :early}, early)
+        early
+
+      early ->
+        early
+    end
+  end
+
+  defp csp do
+    case :persistent_term.get({__MODULE__, :csp}, nil) do
+      nil ->
+        script = [
+          "'self'",
+          "'wasm-unsafe-eval'" | (early() && ["'sha256-#{elem(early(), 1)}'"]) || []
+        ]
+
+        gate =
+          case wire_gate() && URI.parse(wire_gate()) do
+            %URI{scheme: "https", host: host, port: port} -> ["https://#{host}:#{port}"]
+            _ -> []
+          end
+
+        csp =
+          Enum.join(
+            [
+              "default-src 'self'",
+              "script-src " <> Enum.join(script, " "),
+              "connect-src " <> Enum.join(["'self'" | gate], " ")
+            ] ++
+              @csp_rest,
+            "; "
+          )
+
+        :persistent_term.put({__MODULE__, :csp}, csp)
+        csp
+
+      csp ->
+        csp
+    end
+  end
 
   @spec session_key() :: String.t()
   def session_key, do: @session_key
@@ -92,7 +158,7 @@ defmodule HiremeWeb.Auth do
 
   def security_headers(conn, _opts) do
     conn
-    |> put_resp_header("content-security-policy", @csp)
+    |> put_resp_header("content-security-policy", csp())
     |> put_resp_header(
       "permissions-policy",
       "camera=(), microphone=(), geolocation=(), payment=()"

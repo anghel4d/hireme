@@ -131,6 +131,7 @@ defmodule HiremeWeb.Router do
       end
     end
 
+    post "/wire/ticket", DeskController, :wire_ticket
     get "/pack", DeskController, :pack
     get "/scoreboard", DeskController, :scoreboard
     get "/focus/:id", DeskController, :focus
@@ -181,6 +182,8 @@ defmodule HiremeWeb.DeskController do
   alias HiremeWeb.Packet
 
   def index(conn, _params) do
+    %{account: account, session: session} = conn.assigns
+
     page = """
     <!DOCTYPE html>
     <html lang="en">
@@ -189,6 +192,12 @@ defmodule HiremeWeb.DeskController do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Desk · Hireme</title>
         <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
+        <meta name="wire-ticket" content="#{HiremeWeb.Session.ticket(account.id, session.id)}" />
+        <meta name="wire-gate" content="#{HiremeWeb.Auth.wire_gate() || ""}" />
+        <meta name="wire-gate-hashes" content="#{HiremeWeb.Auth.wire_hashes()}" />
+        <meta name="wire-scope" content="#{HiremeWeb.Session.scope(account.id)}" />
+        <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
+        #{HiremeWeb.Auth.early_script()}
         <link rel="stylesheet" href="#{~p"/assets/js/app.css"}" />
         <script defer type="module" src="#{~p"/assets/js/app.js"}"></script>
       </head>
@@ -206,6 +215,16 @@ defmodule HiremeWeb.DeskController do
     |> put_resp_content_type("application/vnd.hireme.desk-packet", nil)
     |> put_resp_header("cache-control", "no-store")
     |> send_resp(200, Packet.build())
+  end
+
+  # A fresh single-use ticket for a reconnect after the last one was spent.
+  def wire_ticket(conn, _params) do
+    %{account: account, session: session} = conn.assigns
+
+    json(conn, %{
+      ticket: HiremeWeb.Session.ticket(account.id, session.id),
+      gate: HiremeWeb.Auth.wire_gate()
+    })
   end
 
   def scoreboard(conn, _params), do: json(conn, JSON.scoreboard(Campaign.scoreboard()))
