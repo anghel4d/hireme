@@ -58,6 +58,29 @@ The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssemb
 
 Correctness evidence: a seeded property test (boot ⊕ deltas = fresh `list_cards`, consecutive revisions, no delta on refusal, fails if heat kin is disabled); kernel predictions checked against an independent model over 300 seeds; every op kind refused for foreign and missing targets without stalling the session; golden frames shared by the Elixir, Rust and TypeScript readers; `mix test` fails if `kernel.wasm` was built against another schema.
 
+## Round two: views derived in the browser — 2026-10-09 (main, not deployed)
+
+The browser now receives the account's raw rows instead of server-derived views, and the Rust kernel plus `assets/js/compose.ts` derive every view (cards, heat verdicts, heat chart, scoreboard, focus, root CV, lanes, account page); writes are predicted exactly, derived fields included. The server sends only the columns a write changed and replays missed revisions on reconnect. Measured locally on a copy of the canonical 1,000-job fixture with [`bench/desk.mjs`](../bench/desk.mjs) (Chromium 154, WebSocket, a fresh browser context per scenario, inputs fired in-page), p50 / p99 ms, every interaction drawn in the input's frame and 0 HTTP requests:
+
+| Interaction | Round one release | Round two |
+|---|---|---|
+| Cold load, first card | — | 240 / 364 (357 at 47 ms emulated RTT) |
+| hjkl to full focus | 4.5 | 4.6 / 6.2 |
+| Card click | — | 4.9 / 6.7 |
+| Search keystroke | 2.2 | 2.7 / 18.5 |
+| Battleplan open / Escape | 6.2 / 22–35 | 6.8 / 5.6 |
+| Stage write drawn, kin cards exact in that frame | 3.4 (derived fields settled later; kin exact 0/30) | 3.4 / 12.4 (kin exact 80/80) |
+| CV line hide / restore / alter save | — | 8.3 / 7.8 / 6.5 |
+| HEAT override | — | 15.0 (script 4.1) |
+| Band filter / heat filter | — | 15.6 / 3.9 |
+| Gym log / net log | not in frame (4/20) | 8.7 / 7.3 |
+| Lenses: gym, net, root, account | account 5.5 + 1 HTTP | 6.1, 5.0, 3.8, 3.9 |
+| Another tab's stage write, writer input to watcher paint | — | 23.4 / 38.3 |
+
+Server and kernel, same fixture: a `next` write runs through the sequencer in 0.77 ms with an 80-byte delta; a raw BOOT is 2.03 MB raw, ~90 KB deflated, read in ~32 ms outside the sequencer; a resume within the ring costs 66 µs; the kernel's push + derive + select is 0.08 ms (`next`) and 0.24 ms (stage move) in node, cold BOOT + derive 19 ms; `kernel.wasm` is 227 KB (88 KB gzipped). Agents (`bench/letterbox.mjs`, p50 WT / WS): three leases 2.9 / 11.8 ms, `set_next_action` 3.3 / 2.5 ms; `get_application` under concurrent writes 2.7 ms after heat reads left the sequencer (9.4 before).
+
+Not measured on the real network path yet: only the gate's handshake has been (`bench/gate.mjs`: QUIC RTT ~25–36 ms from the operator's workstation). The release builds byte-identically from any path (`nixos-server/scripts/hireme-repro.sh`), as does `kernel.wasm` (`native/kernel/build.sh --check`).
+
 ## How to read the measurements
 
 - All latency columns are **milliseconds**. `beforems` and `afterms` are medians. The repeated current `p50` is deliberate: it matches the requested report columns.
@@ -210,7 +233,7 @@ Counts are **before / after**. `failed` means a timeout; `no-op` means the input
 - **Five-stage burst:** five unwaited writer clicks make the exact result timing-sensitive. Observed medians across runs were approximately 1,743/2,187 ms before and 166/243 ms after. The direction is consistent; a precise universal percentage is not established.
 - **Passkey enrollment:** account history matters. Fresh-bed enrollment was about 40 ms, versus 66–69 ms after 100 API-key cycles in either release. Only the main pair, in the same scenario position and state, is used here (68.5→65.8 ms).
 
-Browser evidence: [`browser-before.jsonl.gz`](../bench/results/browser-before.jsonl.gz), [`browser-after.jsonl.gz`](../bench/results/browser-after.jsonl.gz), and separate [`browser-variance.jsonl.gz`](../bench/results/browser-variance.jsonl.gz). Rows retain samples, attempts, refusal/failure/no-op counts, per-operation request fanout and request traces for the first five samples. The committed portable harnesses are [`browser.mjs`](../bench/browser.mjs), [`mcp.mjs`](../bench/mcp.mjs), and [`mint.exs`](../bench/mint.exs); their headers document invocation and required environment. Credential minting is confined to a testbed directory and the mint VM cannot start an HTTP listener.
+Browser evidence: [`browser-before.jsonl.gz`](../bench/results/browser-before.jsonl.gz), [`browser-after.jsonl.gz`](../bench/results/browser-after.jsonl.gz), and separate [`browser-variance.jsonl.gz`](../bench/results/browser-variance.jsonl.gz). Rows retain samples, attempts, refusal/failure/no-op counts, per-operation request fanout and request traces for the first five samples. The committed portable harnesses were `browser.mjs` (replaced in round two by [`desk.mjs`](../bench/desk.mjs); in git history at `5e3574b`), [`mcp.mjs`](../bench/mcp.mjs), and [`mint.exs`](../bench/mint.exs); their headers document invocation and required environment. Credential minting is confined to a testbed directory and the mint VM cannot start an HTTP listener.
 
 ## Server, domain, security and MCP latency
 
