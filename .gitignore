@@ -23,6 +23,7 @@
 !/test/**/
 !/test/**/*.exs
 !/test/**/*.ex
+!/test/fixtures/wire/*.bin
 
 !/bench/
 !/bench/*.exs
