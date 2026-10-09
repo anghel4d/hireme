@@ -92,17 +92,25 @@ defmodule Hireme.Accounts do
   @doc """
   The live session a token names, with its account, or nil: unknown,
   revoked, past its overall lifetime, idle too long, or the account is
-  not active. A live session is touched at most once a minute.
+  not active. Session and account are read together, without caching
+  either one's validity. A live session is touched at most once a minute.
   """
   @spec session(String.t()) :: {Session.t(), Account.t()} | nil
   def session(token) when is_binary(token) do
     now = now()
 
     with {:ok, raw} <- Base.url_decode64(token, padding: false),
-         %Session{} = session <-
-           Repo.get_by(Session, [token_hash: Security.hash(raw)], skip_account: true),
+         {%Session{} = session, %Account{} = account} <-
+           Repo.one(
+             from(s in Session,
+               join: a in Account,
+               on: a.id == s.account_id,
+               where: s.token_hash == ^Security.hash(raw),
+               select: {s, a}
+             ),
+             skip_account: true
+           ),
          true <- live?(session, now),
-         %Account{} = account <- get(session.account_id),
          true <- active?(account) do
       {touch(session, now), account}
     else
