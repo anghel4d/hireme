@@ -356,9 +356,14 @@ defmodule HiremeWeb.Session do
     s = %{s | rev: rev, hello: true, client_id: client}
 
     case snap do
+      # The board first: what the cards are drawn from, without the job
+      # listings. The rest (CV items, events, gym and net, the listings)
+      # follows at the same rev, so the first paint waits for neither.
       {:boot, %{tables: tables}} ->
-        body = [Packet.static_lookups(), raw_boot(tables), account_tables(s)]
+        {board, rest} = split_boot(tables)
+        body = [Packet.static_lookups(), raw_boot(board), account_tables(s)]
         control(s, Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
+        if rest != [], do: control(s, Packet.frame(:patch, rev, rest, deflate: true))
 
       {:replay, deltas} ->
         for {r, delta} <- deltas, do: control(s, Packet.frame(:patch, r, raw_delta(delta)))
@@ -387,6 +392,27 @@ defmodule HiremeWeb.Session do
                  narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
 
   # Every raw table the snapshot holds, then the server's clock.
+  @board ~w(job_apps profiles batches cv_variants leases scoreboard_snapshots)a
+
+  defp split_boot(tables) do
+    jobs =
+      Enum.map(
+        Map.get(tables, :job_apps, []),
+        &if(is_struct(&1), do: Map.from_struct(&1), else: &1)
+      )
+
+    board =
+      tables |> Map.take(@board) |> Map.put(:job_apps, Enum.map(jobs, &Map.delete(&1, :listing)))
+
+    listings =
+      for j <- jobs, Map.get(j, :listing) not in [nil, ""], do: %{id: j.id, listing: j.listing}
+
+    rest =
+      for {t, rows} <- Map.drop(tables, @board), rows != [], do: Packet.raw(t, rows)
+
+    {board, if(listings == [], do: rest, else: [rest, Packet.raw(:job_apps, listings)])}
+  end
+
   defp raw_boot(tables) do
     [
       for(t <- @raw_tables, rows = Map.get(tables, t), rows != nil, do: Packet.raw(t, rows)),
