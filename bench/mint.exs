@@ -1,17 +1,39 @@
 # Credentials for the browser and MCP benchmarks, minted by a second VM on a
 # running testbed's database: MINT=session prints a fresh session cookie
 # (signed in now, so key writes are inside the step-up window), MINT=key
-# prints a new API key. Run with the testbed's environment:
+# prints a new API key. Run with the testbed's environment, BENCH_DIR
+# included; the database must lie inside BENCH_DIR next to testbed.json.
 #
 #   MINT=session bin/hireme eval 'Code.eval_file("bench/mint.exs")'
-Logger.configure(level: :error)
-Application.put_env(:hireme, Hireme.Mailer, adapter: Swoosh.Adapters.Test)
-{:ok, _} = Application.ensure_all_started(:hireme)
-account = Hireme.Accounts.use_default!()
+defmodule HiremeBench.Mint do
+  def run do
+    dir = Path.expand(System.fetch_env!("BENCH_DIR"))
 
-case System.get_env("MINT", "session") do
-  "session" ->
-    {token, _session} = Hireme.Accounts.start_session(account, %{user_agent: "isolated-performance-testbed"})
+    database =
+      Application.fetch_env!(:hireme, Hireme.Repo) |> Keyword.fetch!(:database) |> Path.expand()
+
+    unless String.starts_with?(database, dir <> "/"),
+      do: raise("database must be inside BENCH_DIR")
+
+    unless File.regular?(Path.join(dir, "testbed.json")),
+      do: raise("BENCH_DIR has no testbed.json")
+
+    Logger.configure(level: :error)
+    endpoint = Application.fetch_env!(:hireme, HiremeWeb.Endpoint)
+    Application.put_env(:hireme, HiremeWeb.Endpoint, Keyword.put(endpoint, :server, false))
+    Application.put_env(:hireme, Hireme.Mailer, adapter: Swoosh.Adapters.Test)
+    {:ok, _} = Application.ensure_all_started(:hireme)
+    account = Hireme.Accounts.use_default!()
+
+    case System.get_env("MINT", "session") do
+      "session" -> IO.puts(cookie(account))
+      "key" -> IO.puts(key(account))
+    end
+  end
+
+  defp cookie(account) do
+    {token, _session} =
+      Hireme.Accounts.start_session(account, %{user_agent: "isolated-performance-testbed"})
 
     opts =
       Plug.Session.init(
@@ -33,10 +55,14 @@ case System.get_env("MINT", "session") do
       |> HiremeWeb.Auth.sign_in(token)
       |> Plug.Conn.send_resp(200, "")
 
-    IO.puts(conn.resp_cookies["__Host-hireme"].value)
+    conn.resp_cookies["__Host-hireme"].value
+  end
 
-  "key" ->
+  defp key(account) do
     Hireme.Repo.put_account(account.id)
     {:ok, %{secret: secret}} = Hireme.ApiKeys.create("bench-mcp", nil, %{})
-    IO.puts(secret)
+    secret
+  end
 end
+
+HiremeBench.Mint.run()
