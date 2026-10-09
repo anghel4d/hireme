@@ -133,10 +133,16 @@ defmodule HiremeWeb.Session do
     end
   end
 
+  # A ticketed browser is authenticated before ACCEPT, so the gate lifts
+  # its pre-HELLO caps and deadline at once.
   defp by_ticket(s, ticket) do
     case redeem(ticket) do
-      {:ok, account_id, session_id} -> {:ok, browser(s, account_id, session_id)}
-      :error -> {:refuse, 403}
+      {:ok, account_id, session_id} ->
+        s.mod.ready(s.carrier)
+        {:ok, browser(s, account_id, session_id)}
+
+      :error ->
+        {:refuse, 403}
     end
   end
 
@@ -160,7 +166,7 @@ defmodule HiremeWeb.Session do
 
   def event({:stream, id}, %{role: :agent} = s) do
     me = self()
-    send_fun = fn io -> send(me, {__MODULE__, :letter, id, io}) end
+    send_fun = letter_sender(s, id, me)
     close_fun = fn reason -> send(me, {__MODULE__, :letter_closed, id, reason}) end
 
     case LetterboxStream.open(s.agent, send_fun, close_fun) do
@@ -202,6 +208,16 @@ defmodule HiremeWeb.Session do
   end
 
   def event({:closed, _code, _reason}, s), do: {:stop, :normal, s}
+
+  # A lease's replies do not order against the desk's frames, so on the
+  # gate (whose socket any process may write, one whole packet per send)
+  # the lease writes its stream directly instead of queueing behind a
+  # PATCH in this process; the WebSocket carrier buffers per callback, so
+  # there it goes through the session.
+  defp letter_sender(%{mod: HiremeWeb.Gate, carrier: carrier}, id, _me),
+    do: fn io -> HiremeWeb.Gate.send(carrier, id, io) end
+
+  defp letter_sender(_s, id, me), do: fn io -> send(me, {__MODULE__, :letter, id, io}) end
 
   @doc "Any other message the host received: deltas, the warmer's focuses, letters, timers."
   @spec info(term(), %__MODULE__{}) :: {:ok, %__MODULE__{}} | {:stop, term(), %__MODULE__{}}
