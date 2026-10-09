@@ -1,4 +1,4 @@
-# Write the derivation oracle (Hireme.Oracle) for one account as JSON lines.
+# Write the prediction oracle (Hireme.Oracle) for one account as JSON lines.
 #
 #   MIX_ENV=test mix run --no-start test/oracle/run.exs --out DIR --today 2026-10-09 \
 #     [--db PATH --account ID] [--seed N] [--ops K] [--name NAME]
