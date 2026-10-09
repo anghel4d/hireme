@@ -12,7 +12,7 @@
 // then the wire. The desk does not know which.
 
 import type { Doc, Focus, Lanes, Line, Root, Scoreboard } from "./api.ts"
-import { KIND, NONE, tables, type Bytes, type Table } from "./wire.ts"
+import { FLAG, HEADER, KIND, NONE, opFrame, tables, type Bytes, type Host, type Table } from "./wire.ts"
 
 // ---- the packet ----
 
@@ -129,7 +129,7 @@ export interface Desk {
 
 /** What carries ops up and brings the base down. */
 export interface Link {
-  send(opId: bigint, op: Op): void
+  send(p: { readonly opId: bigint; readonly op: Op; readonly frame: Bytes }): void
   /** A read found these documents missing. Called on every such read: the link dedupes. */
   want(focus: readonly number[], root: readonly number[]): void
   /** The visible cards, the selected one first: the link brings their focuses ahead of need. */
@@ -189,7 +189,7 @@ class Strings implements StrColumn {
 const DECODER = new TextDecoder()
 const ENCODER = new TextEncoder()
 
-export class Board {
+export class Board implements Base {
   readonly n: number
   readonly tables: Tables
   private readonly base = new Map<string, number>()
@@ -298,6 +298,234 @@ export class Board {
   selection(): Uint32Array { return new Uint32Array(this.k.mem.buffer, this.out, this.count) }
 
   find(id: number): number { return this.k.find(this.out, this.count, this.ptr("id"), id) }
+
+  push(): Refusal | null { return null }
+
+  /** Copy-on-write shadows of the columns pending ops touch, with their effects written in. */
+  predict(pending: readonly Pending[], focus: (id: number) => Focus | undefined): void {
+    const u32 = new Set<string>()
+    const strs = new Set<string>()
+    for (const p of pending) {
+      if (p.job === null || this.rowOf(p.job) < 0) continue
+      switch (p.op.kind) {
+        case "stage": u32.add("stage"); u32.add("stage_on"); strs.add("pips"); break
+        case "next": u32.add("next_due"); strs.add("next_action"); break
+        case "score": u32.add("score"); break
+        case "overlay": u32.add("hidden"); u32.add("altered"); u32.add("emphasized"); break
+        default: break
+      }
+    }
+    const cols = this.shade(u32, strs)
+    const pips = this.str("pips").over
+    const next = this.str("next_action").over
+    pips.clear()
+    next.clear()
+    const stages = this.tables.stages
+    for (const p of pending) {
+      const row = p.job === null ? -1 : this.rowOf(p.job)
+      if (row < 0) continue
+      const op = p.op
+      switch (op.kind) {
+        case "stage": {
+          const ix = stages.findIndex((s) => s.key === op.stage)
+          const stage = cols.get("stage")
+          if (ix < 0 || !stage) break
+          if (stage[row] !== ix) {
+            stage[row] = ix
+            const on = cols.get("stage_on")
+            if (on) on[row] = today()
+          }
+          pips.set(row, moveTo(this.str("pips").at(row), stages, op.stage))
+          break
+        }
+        case "next": {
+          next.set(row, op.next_action)
+          const due = cols.get("next_due")
+          if (due) due[row] = epochDay(op.next_due)
+          break
+        }
+        case "score": {
+          const sc = cols.get("score")
+          if (sc) sc[row] = Math.max(0, Math.min(100, Math.round(op.score)))
+          break
+        }
+        case "overlay": {
+          const f = focus(op.job)
+          const line = f && findLine(f, op.item)
+          if (!line) break
+          const from = line.mode === "canonical" ? null : line.mode
+          const to = op.mode === "inherit" ? null : op.mode
+          if (from === to) break
+          if (from) { const c = cols.get(from); if (c) c[row] = Math.max(0, (c[row] ?? 0) - 1) }
+          if (to) { const c = cols.get(to); if (c) c[row] = (c[row] ?? 0) + 1 }
+          break
+        }
+        default: break
+      }
+    }
+  }
+}
+
+// ---- the wire board: the kernel's resident cards ----
+//
+// The kernel ingests every frame: it upserts cards, holds the pending
+// layer and predicts each op's row effects itself, and settles or drops
+// an op when its ACK or NACK passes through. This facade reads its
+// columns in place and keeps the shell's encoding of two of them: the
+// wire's `batch` and `profile` are ids, the board's are batch ordinal + 1
+// and profile index, as the HDP1 packet had them.
+
+export interface WireKernel {
+  memory: WebAssembly.Memory
+  schema_hash(): number
+  scratch(len: number): number
+  ingest_reserve(len: number): number
+  ingest_commit(len: number): number
+  rows(table: number): number
+  col_ptr(table: number, col: number): number
+  str_ptr(table: number, col: number, row: number): number
+  str_len(table: number, col: number, row: number): number
+  row_of(table: number, key: number): number
+  select(min: number, lo: number, hi: number, stage: number, status: number, batch: number, profile: number, heat: number, qlen: number): number
+  selection_ptr(): number
+  find(id: number): number
+  pending_push(len: number): number
+  pending_count(): number
+  counter(k: number): number
+  set_today(day: number): void
+  snapshot(): number
+  snapshot_ptr(): number
+  rev_lo(): number
+  rev_hi(): number
+}
+
+/** What an ingest changed, as the kernel answers it. */
+export const INGEST = { cards: 1, tables: 2, lines: 4, focus: 8, settled: 16, dropped: 32, tick: 64, error: 1 << 30 } as const
+
+const CARDS = 1
+const CARD: Record<string, number> = {
+  id: 1, score: 2, heat: 3, stage: 4, status: 5, freshness: 6, gate: 7, batch: 8, profile: 9, hits: 10, total: 11,
+  hidden: 12, altered: 13, emphasized: 14, stage_on: 15, next_due: 16, heat_state: 17, load_pct: 18, cooldown: 19, leased: 20,
+  company: 21, role: 22, location: 23, next_action: 24, cv_label: 25, fit: 26, pips: 27,
+}
+
+/** Refusal codes from schema.txt. */
+const REFUSAL = ["", "fire_hold", "heat", "leased", "cooldown", "not_additive", "argument", "not_found", "batch", "invalid", "internal"]
+export const refusalName = (code: number): Refusal => REFUSAL[code] ?? "internal"
+
+class KernelStrings implements StrColumn {
+  private readonly cache = new Map<number, string>()
+  constructor(private readonly k: WireKernel, private readonly col: number) {}
+  at(row: number): string {
+    let s = this.cache.get(row)
+    if (s === undefined) {
+      const len = this.k.str_len(CARDS, this.col, row)
+      s = len === 0 ? "" : DECODER.decode(new Uint8Array(this.k.memory.buffer, this.k.str_ptr(CARDS, this.col, row), len))
+      this.cache.set(row, s)
+    }
+    return s
+  }
+  clear(): void { this.cache.clear() }
+}
+
+export class KernelBoard implements Base {
+  private readonly strs = new Map<string, KernelStrings>()
+  private readonly remapped = new Map<string, Uint32Array>()
+  private count = 0
+
+  constructor(readonly k: WireKernel, private readonly docs: Resident) {
+    k.set_today(today())
+  }
+
+  get n(): number { return this.k.rows(CARDS) }
+  get tables(): Tables { return this.docs.tables }
+  get rev(): bigint { return (BigInt(this.k.rev_hi() >>> 0) << 32n) | BigInt(this.k.rev_lo() >>> 0) }
+
+  /** Cards, lookups or the pending layer changed: cached strings and remapped columns are stale. */
+  changed(): void {
+    for (const s of this.strs.values()) s.clear()
+    this.remapped.clear()
+  }
+
+  private put(reserve: (len: number) => number, bytes: Uint8Array): void {
+    const at = reserve(bytes.byteLength) // may grow memory: view it after
+    new Uint8Array(this.k.memory.buffer, at, bytes.byteLength).set(bytes)
+  }
+
+  /** Copy whole frames into the kernel's ring and ingest them: the one copy on the way in. */
+  ingest(frames: Uint8Array): number {
+    this.put((n) => this.k.ingest_reserve(n), frames)
+    const bits = this.k.ingest_commit(frames.byteLength)
+    if (bits & (INGEST.cards | INGEST.tables | INGEST.settled | INGEST.dropped | INGEST.tick)) this.changed()
+    return bits
+  }
+
+  /** The kernel's base as frames that restore it: BOOT, LINES and each job's FOCUS. */
+  snapshot(): Bytes {
+    const len = this.k.snapshot()
+    return new Uint8Array(this.k.memory.buffer, this.k.snapshot_ptr(), len).slice()
+  }
+
+  column(name: string): Uint32Array {
+    const id = CARD[name]
+    const n = this.n
+    if (id === undefined || n === 0) return new Uint32Array(n)
+    const p = this.k.col_ptr(CARDS, id)
+    const raw = p === 0 ? new Uint32Array(n) : new Uint32Array(this.k.memory.buffer, p, n)
+    if (name !== "batch" && name !== "profile") return raw
+    let m = this.remapped.get(name)
+    if (!m || m.length !== n) {
+      const to = new Map<number, number>()
+      if (name === "batch") for (const b of this.docs.batches) to.set(b.id, b.ordinal + 1)
+      else this.docs.profiles.forEach((pr, i) => to.set(pr.id, i))
+      m = raw.map((v) => to.get(v) ?? (name === "batch" ? 0 : NONE))
+      this.remapped.set(name, m)
+    }
+    return m
+  }
+
+  str(name: string): StrColumn {
+    let s = this.strs.get(name)
+    if (!s) {
+      s = new KernelStrings(this.k, CARD[name] ?? 0)
+      this.strs.set(name, s)
+    }
+    return s
+  }
+
+  rowOf(id: number): number { return this.k.row_of(CARDS, id) }
+
+  select(s: Selection): number {
+    const batch = s.batch > 0 ? this.docs.batches.find((b) => b.ordinal + 1 === s.batch)?.id ?? NONE : s.batch
+    const profile = s.profile >= 0 ? this.docs.profiles[s.profile]?.id ?? NONE : s.profile
+    const q = ENCODER.encode(s.q).slice(0, 256)
+    this.put((n) => this.k.scratch(n), q)
+    this.count = this.k.select(s.min, s.lo, s.hi, s.stage, s.status, batch, profile, s.heat, q.byteLength)
+    return this.count
+  }
+
+  selection(): Uint32Array { return new Uint32Array(this.k.memory.buffer, this.k.selection_ptr(), this.count) }
+  find(id: number): number { return this.k.find(id) }
+
+  push(p: Pending): Refusal | null {
+    this.put((n) => this.k.scratch(n), p.frame.subarray(HEADER))
+    const code = this.k.pending_push(p.frame.byteLength - HEADER)
+    if (code !== 0) return refusalName(code)
+    this.changed()
+    return null
+  }
+
+  predict(): void {}
+
+  /** Predictions settled exact, mispredicted, refused by the server, refused locally. */
+  counters(): { settled: number; mispredicted: number; nacked: number; refused: number } {
+    return { settled: this.k.counter(1), mispredicted: this.k.counter(2), nacked: this.k.counter(3), refused: this.k.counter(4) }
+  }
+}
+
+export async function loadWireKernel(url: string): Promise<WireKernel> {
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {})
+  return instance.exports as unknown as WireKernel
 }
 
 // ---- prediction ----
@@ -326,12 +554,52 @@ function jobOf(op: Op): number | null {
   return "job" in op ? op.job : null
 }
 
-interface Pending { opId: bigint; op: Op; job: number | null; state: "pending" | "settling" }
+const OP_KIND: Record<Op["kind"], number> = {
+  stage: 1, next: 2, note: 3, score: 4, overlay: 5, heat_override: 6, open_fire: 7, narrative: 8,
+  gym_log: 9, gym_target: 10, net_log: 11, net_lane: 12,
+}
+
+const pairs = (fields: Record<string, string>) => Object.entries(fields).flat()
+
+/** An op as its OP frame: target and fields in the order schema.txt names. */
+export function encodeOp(hash: number, opId: bigint, op: Op): Bytes {
+  const [target, fields]: [number, string[]] =
+    op.kind === "stage" ? [op.job, [op.stage]]
+    : op.kind === "next" ? [op.job, [op.next_action, op.next_due]]
+    : op.kind === "note" ? [op.job, [op.stage, op.note]]
+    : op.kind === "score" ? [op.job, [String(op.score)]]
+    : op.kind === "overlay" ? [op.job, [String(op.item), op.mode, op.body ?? "", op.reason ?? ""]]
+    : op.kind === "heat_override" ? [op.job, [op.reason]]
+    : op.kind === "open_fire" ? [0, [op.batch]]
+    : op.kind === "narrative" ? [op.narrative, [op.body]]
+    : op.kind === "gym_target" ? [0, [op.target]]
+    : op.kind === "net_lane" ? [0, [op.url]]
+    : [0, pairs(op.fields)]
+  return opFrame(hash, opId, OP_KIND[op.kind], target, fields)
+}
+
+export interface Pending { opId: bigint; op: Op; job: number | null; frame: Bytes; state: "pending" | "settling" }
+
+/** The base board the desk reads, and how a pending op lands on it. */
+export interface Base {
+  readonly n: number
+  readonly tables: Tables
+  select(s: Selection): number
+  selection(): Uint32Array
+  find(id: number): number
+  column(name: string): Uint32Array
+  str(name: string): StrColumn
+  rowOf(id: number): number
+  /** Hand a new op to the base; a refusal means it was not applied. */
+  push(p: Pending): Refusal | null
+  /** Lay every pending op's row effects over the base. */
+  predict(pending: readonly Pending[], focus: (id: number) => Focus | undefined): void
+}
 
 // ---- the desk ----
 
-export class LocalDesk implements Desk {
-  private board: Board | null = null
+export class LocalDesk implements Desk, Host {
+  private board: Base | null = null
   private link: Link | null = null
   private pending: Pending[] = []
   private readonly focuses = new Map<number, Focus>()
@@ -342,12 +610,31 @@ export class LocalDesk implements Desk {
   private laneView: Lanes | null = null
   private tableView: Tables | null = null
   private readonly listeners = new Set<(c: Change) => void>()
-  private readonly client = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1
+  readonly clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1
   private counter = 0
   private statusNow: Status = "connecting"
+  // The wire's side: the kernel's board, the documents beside it, and the
+  // snapshot that rebuilds them on the next load.
+  private kernel: KernelBoard | null = null
+  private docs: Resident | null = null
+  readonly hash: number
+  readonly snapshot: Snapshot | null
 
-  /** Predictions the server later contradicted, and refusals predicted; read by the bench. */
+  /** Ops predicted, refused locally, and refused by the server; read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
+
+  constructor(wire?: { kernel: WireKernel; scope: string }) {
+    this.hash = wire?.kernel.schema_hash() ?? 0
+    if (wire) {
+      this.docs = new Resident()
+      this.kernel = new KernelBoard(wire.kernel, this.docs)
+      this.board = this.kernel
+    }
+    const kernel = this.kernel
+    this.snapshot = kernel && wire && wire.scope !== ""
+      ? new Snapshot(wire.scope, this.hash, () => (kernel.n > 0 ? { rev: kernel.rev, bytes: kernel.snapshot() } : null))
+      : null
+  }
 
   attach(link: Link): void { this.link = link }
 
@@ -374,12 +661,23 @@ export class LocalDesk implements Desk {
   str(name: string): StrColumn { return this.board?.str(name) ?? EMPTY_STR }
   rowOf(id: number): number { return this.board?.rowOf(id) ?? -1 }
   get status(): Status { return this.statusNow }
-  hasFocus(id: number): boolean { return this.focuses.has(id) }
+  hasFocus(id: number): boolean { return this.focuses.has(id) || (this.docs?.hasFocus(id) ?? false) }
+
+  /** The focus as the server last sent it, decoded from its frame on the wire. */
+  private baseFocus(id: number): Focus | undefined {
+    const hit = this.focuses.get(id)
+    if (hit || !this.docs) return hit
+    const row = this.rowOf(id)
+    if (row < 0) return undefined
+    const f = this.docs.focus(id, (c) => this.column(c)[row] ?? 0, (c) => this.str(c).at(row))
+    if (f) this.focuses.set(id, f)
+    return f ?? undefined
+  }
 
   focus(id: number): Focus | null {
     const hit = this.views.get(id)
     if (hit) return hit
-    const base = this.focuses.get(id)
+    const base = this.baseFocus(id)
     if (!base) {
       this.link?.want([id], [])
       return null
@@ -391,7 +689,7 @@ export class LocalDesk implements Desk {
   }
 
   root(profileId: number): Root | null {
-    const base = this.roots.get(profileId)
+    const base = this.docs?.roots.get(profileId) ?? this.roots.get(profileId)
     if (!base) {
       this.link?.want([], [profileId])
       return null
@@ -403,11 +701,12 @@ export class LocalDesk implements Desk {
     return r
   }
 
-  scoreboard(): Scoreboard | null { return this.score }
+  scoreboard(): Scoreboard | null { return this.docs?.scoreboard ?? this.score }
 
   lanes(): Lanes | null {
-    if (this.laneView || !this.lane) return this.laneView
-    let l = this.lane
+    const base = this.docs?.lanes ?? this.lane
+    if (this.laneView || !base) return this.laneView
+    let l = base
     for (const p of this.pending) if (p.state === "pending") l = applyLanes(l, p.op)
     this.laneView = l
     return l
@@ -435,24 +734,21 @@ export class LocalDesk implements Desk {
   // -- writes --
 
   run(op: Op): Run {
-    const refusal = this.refuse(op)
+    const opId = (BigInt(this.clientId) << 32n) | BigInt(this.counter + 1)
+    const job = jobOf(op)
+    const p: Pending = { opId, op, job, frame: encodeOp(this.hash, opId, op), state: "pending" }
+    const refusal = this.kernel ? this.kernel.push(p) : this.refuse(op)
     if (refusal !== null) {
       this.counters.refusedLocally++
       return { ok: false, refusal }
     }
-    const opId = (BigInt(this.client) << 32n) | BigInt(++this.counter)
-    const job = jobOf(op)
-    this.pending.push({ opId, op, job, state: "pending" })
+    this.counter++
+    this.pending.push(p)
     this.counters.predicted++
     this.recompute()
     this.emit(touched(op, job))
-    this.link?.send(opId, op)
+    this.link?.send(p)
     return { ok: true, opId, jobId: job }
-  }
-
-  /** Unacknowledged ops, oldest first, for a resend after reconnect. */
-  unacked(): readonly { opId: bigint; op: Op }[] {
-    return this.pending.filter((p) => p.state === "pending")
   }
 
   private refuse(op: Op): Refusal | null {
@@ -471,11 +767,10 @@ export class LocalDesk implements Desk {
       const overridden = this.focuses.get(op.job)?.heat.override === true || this.pending.some((p) => p.job === op.job && p.op.kind === "heat_override")
       if (heat === "blocked" && !overridden) return "heat"
     }
-    if (this.board?.has("leased") && (this.column("leased")[row] ?? 0) !== 0) return "leased"
     return null
   }
 
-  // -- the link reports --
+  // -- the HTTP link reports --
 
   setStatus(s: Status): void {
     if (s === this.statusNow) return
@@ -484,7 +779,7 @@ export class LocalDesk implements Desk {
   }
 
   /** A new base board. Settled ops are in it; ops still pending are applied over it. */
-  rebase(board: Board): void {
+  rebase(board: Base): void {
     this.board = board
     this.pending = this.pending.filter((p) => p.state === "pending")
     this.recompute()
@@ -497,7 +792,7 @@ export class LocalDesk implements Desk {
     this.emit({ focus: [f.job.id] })
   }
 
-  /** A focus is stale: drop it and ask again if anyone still reads it. */
+  /** A focus is stale: ask again if anyone still reads it. */
   staleFocus(id: number): void {
     this.views.delete(id)
     if (this.focuses.has(id)) this.link?.want([id], [])
@@ -524,13 +819,20 @@ export class LocalDesk implements Desk {
     this.emit({ lanes: true })
   }
 
-  /** The server accepted an op; its row effects hold until the next base. */
+  /**
+   * The server accepted an op. On the wire its PATCH and FOCUS came first,
+   * so the base already holds it and the op leaves the pending layer; over
+   * HTTP its row effects hold until the next packet.
+   */
   acked(opId: bigint): void {
     const p = this.pending.find((x) => x.opId === opId)
     if (!p) return
-    p.state = "settling"
+    if (this.kernel) this.pending = this.pending.filter((x) => x !== p)
+    else p.state = "settling"
+    this.views.clear()
     this.laneView = null
-    this.emit({ acked: opId, focus: p.job === null ? [] : [p.job], lanes: true })
+    this.tableView = null
+    this.emit({ ...touched(p.op, p.job), acked: opId })
   }
 
   nacked(opId: bigint, refusal: Refusal, message = ""): void {
@@ -542,79 +844,92 @@ export class LocalDesk implements Desk {
     this.emit({ ...touched(p.op, p.job), refused: { opId, jobId: p.job, op: p.op, refusal, message } })
   }
 
+  // -- the wire reports (Host) --
+
+  rev(): bigint { return this.kernel?.rev ?? 0n }
+
+  unacked(): readonly Bytes[] {
+    return this.pending.filter((p) => p.state === "pending").map((p) => p.frame)
+  }
+
+  connection(s: "connecting" | "webtransport" | "websocket" | "offline"): void {
+    this.setStatus(s)
+  }
+
+  bye(): void {
+    this.snapshot?.clear()
+  }
+
+  frame(f: Bytes, kind: number, flags: number): void {
+    const kernel = this.kernel
+    const docs = this.docs
+    if (!kernel || !docs) return
+    // A BOOT with content replaces everything; an empty one says the snapshot is current.
+    if (kind === KIND.BOOT && f.byteLength > HEADER) {
+      docs.forgetLines()
+      this.focuses.clear()
+    }
+    const bits = kernel.ingest(f)
+    const c: Change = bits & (INGEST.cards | INGEST.tables | INGEST.settled | INGEST.dropped | INGEST.tick) ? { rows: true } : {}
+    switch (kind) {
+      case KIND.BOOT:
+      case KIND.PATCH:
+      case KIND.LINES:
+      case KIND.FOCUS: {
+        Object.assign(c, merge(c, docs.ingest(f, kind)))
+        if (kind === KIND.BOOT || kind === KIND.PATCH) {
+          this.focuses.clear()
+          c.focus = [...(c.focus ?? []), ...this.views.keys()]
+        } else {
+          for (const id of c.focus ?? []) this.focuses.delete(id)
+        }
+        this.snapshot?.touch()
+        break
+      }
+      case KIND.ACK: {
+        const v = new DataView(f.buffer, f.byteOffset, f.byteLength)
+        this.acked(v.getBigUint64(HEADER, true))
+        break
+      }
+      case KIND.NACK: {
+        const v = new DataView(f.buffer, f.byteOffset, f.byteLength)
+        const opId = v.getBigUint64(HEADER, true)
+        const code = v.getUint8(HEADER + 8)
+        const len = v.getUint16(HEADER + 10, true)
+        this.nacked(opId, refusalName(code), DECODER.decode(f.subarray(HEADER + 12, HEADER + 12 + len)))
+        break
+      }
+      case KIND.TICK:
+        c.rows = true
+        break
+      default:
+        break
+    }
+    if (flags & FLAG.END) c.rows = true
+    if (c.rows || c.focus || c.lanes || c.root || c.scoreboard) {
+      this.views.clear()
+      this.laneView = null
+      this.tableView = null
+      this.emit(c)
+    }
+  }
+
   // -- the view --
 
   private recompute(): void {
     this.views.clear()
     this.laneView = null
     this.tableView = null
-    const board = this.board
-    if (!board) return
-    const u32 = new Set<string>()
-    const strs = new Set<string>()
-    for (const p of this.pending) {
-      if (p.job === null || board.rowOf(p.job) < 0) continue
-      switch (p.op.kind) {
-        case "stage": u32.add("stage"); u32.add("stage_on"); strs.add("pips"); break
-        case "next": u32.add("next_due"); strs.add("next_action"); break
-        case "score": u32.add("score"); break
-        case "overlay": u32.add("hidden"); u32.add("altered"); u32.add("emphasized"); break
-        default: break
-      }
-    }
-    const cols = board.shade(u32, strs)
-    const pips = board.str("pips").over
-    const next = board.str("next_action").over
-    pips.clear()
-    next.clear()
-    const stages = board.tables.stages
-    for (const p of this.pending) {
-      const row = p.job === null ? -1 : board.rowOf(p.job)
-      if (row < 0) continue
-      const op = p.op
-      switch (op.kind) {
-        case "stage": {
-          const ix = stages.findIndex((s) => s.key === op.stage)
-          const stage = cols.get("stage")
-          if (ix < 0 || !stage) break
-          if (stage[row] !== ix) {
-            stage[row] = ix
-            const on = cols.get("stage_on")
-            if (on) on[row] = today()
-          }
-          pips.set(row, moveTo(board.str("pips").at(row), stages, op.stage))
-          break
-        }
-        case "next": {
-          next.set(row, op.next_action)
-          const due = cols.get("next_due")
-          if (due) due[row] = epochDay(op.next_due)
-          break
-        }
-        case "score": {
-          const s = cols.get("score")
-          if (s) s[row] = Math.max(0, Math.min(100, Math.round(op.score)))
-          break
-        }
-        case "overlay": {
-          const f = this.focuses.get(op.job)
-          const line = f && findLine(f, op.item)
-          if (!line) break
-          const from = line.mode === "canonical" ? null : line.mode
-          const to = op.mode === "inherit" ? null : op.mode
-          if (from === to) break
-          if (from) { const c = cols.get(from); if (c) c[row] = Math.max(0, (c[row] ?? 0) - 1) }
-          if (to) { const c = cols.get(to); if (c) c[row] = (c[row] ?? 0) + 1 }
-          break
-        }
-        default: break
-      }
-    }
+    this.board?.predict(this.pending, (id) => this.focuses.get(id))
   }
 
   private emit(c: Change): void {
     for (const fn of this.listeners) fn(c)
   }
+}
+
+function merge(a: Change, b: Change): Change {
+  return { ...a, ...b, rows: a.rows || b.rows, focus: [...(a.focus ?? []), ...(b.focus ?? [])] }
 }
 
 function touched(op: Op, job: number | null): Change {
@@ -624,6 +939,67 @@ function touched(op: Op, job: number | null): Change {
     case "narrative": return { root: true, focus: job === null ? [] : [job] }
     default: return { rows: true, focus: job === null ? [] : [job] }
   }
+}
+
+// ---- the snapshot ----
+//
+// The kernel's base as frames (BOOT, LINES, each job's FOCUS), written to
+// IndexedDB under the account's scope a second after the desk goes quiet
+// and when the page hides, so the next load paints before the network
+// answers. Replaying them through the same sink restores the desk, and
+// HELLO then names their rev so the server sends only what changed.
+
+export class Snapshot {
+  private timer = 0
+  private dirty = false
+
+  constructor(private readonly scope: string, private readonly hash: number, private readonly take: () => { rev: bigint; bytes: Bytes } | null) {
+    addEventListener("pagehide", () => this.save())
+  }
+
+  touch(): void {
+    this.dirty = true
+    clearTimeout(this.timer)
+    this.timer = window.setTimeout(() => this.save(), 1000)
+  }
+
+  private save(): void {
+    if (!this.dirty) return
+    const snap = this.take()
+    if (!snap) return
+    this.dirty = false
+    void idb((store) => store.put({ rev: snap.rev, hash: this.hash, blob: new Blob([snap.bytes]) }, this.scope), "readwrite").catch(() => {})
+  }
+
+  clear(): void {
+    this.dirty = false
+    void idb((store) => store.delete(this.scope), "readwrite").catch(() => {})
+  }
+
+  /** The saved frames for this account, if they were written under this schema. */
+  async load(early?: Promise<unknown>): Promise<{ rev: bigint; bytes: Bytes } | null> {
+    const rec = (await (early ?? idb((store) => store.get(this.scope), "readonly")).catch(() => undefined)) as
+      { rev?: bigint; hash?: number; blob?: Blob } | undefined
+    if (!rec?.blob || rec.hash !== this.hash || typeof rec.rev !== "bigint") return null
+    return { rev: rec.rev, bytes: new Uint8Array(await rec.blob.arrayBuffer()) }
+  }
+}
+
+function idb(run: (store: IDBObjectStore) => IDBRequest, mode: IDBTransactionMode): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("hireme", 1)
+    open.onupgradeneeded = () => open.result.createObjectStore("snap")
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      try {
+        const req = run(open.result.transaction("snap", mode).objectStore("snap"))
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      } catch (e) {
+        reject(e)
+      }
+    }
+  })
 }
 
 // ---- predicted documents ----
@@ -791,6 +1167,12 @@ export class Resident {
   }
 
   hasFocus(id: number): boolean { return this.focusDocs.has(id) }
+
+  /** Line ixs belong to one session: a new one starts them over, and the focuses that name them go too. */
+  forgetLines(): void {
+    this.lines.clear()
+    this.focusDocs.clear()
+  }
 
   /** Take what a table frame carries, beside the cards. Answers what changed. */
   ingest(frame: Bytes, kind: number): Change {

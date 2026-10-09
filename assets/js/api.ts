@@ -447,7 +447,7 @@ export function httpLink(desk: LocalDesk, kernel: Kernel): Link {
   void lanes()
 
   return {
-    send(opId, op) {
+    send({ opId, op }) {
       queue.push({ opId, op })
       void drain()
     },

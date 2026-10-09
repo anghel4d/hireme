@@ -12,11 +12,14 @@
   const gate = meta("wire-gate")
   const ticket = meta("wire-ticket")
   const scope = meta("wire-scope")
+  // A dev gate's self-signed certificate is pinned by its hash.
+  const hashes = meta("wire-gate-hashes").split(" ").filter((h) => h !== "")
+    .map((h) => ({ algorithm: "sha-256", value: new Uint8Array((h.match(/../g) ?? []).map((b) => Number.parseInt(b, 16))) }))
   const hw: { wt?: WebTransport; ws?: WebSocket; snap?: Promise<unknown> } = {}
 
   if (gate !== "" && ticket !== "" && "WebTransport" in window) {
     try {
-      hw.wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}`)
+      hw.wt = new WebTransport(`${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}`, hashes.length > 0 ? { serverCertificateHashes: hashes } : {})
       hw.wt.ready.catch(() => {})
       hw.wt.closed.catch(() => {})
     } catch {
