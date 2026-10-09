@@ -260,7 +260,7 @@ export function battleplan(f: Focus, holdError: string | null): Raw {
           ${when(j.batch && j.batch.fire === "hold", () => h`
             <button type="button" id="name-open-fire" class="ghost" data-action="open-fire" data-batch="${j.batch?.code}">Name open fire</button>`)}
           <div id="bp-rail" data-slot></div>
-          <div id="bp-events" data-slot></div>
+          <ul id="bp-events" class="events" data-slot></ul>
         </div>
         <div id="bp-paper" class="paper-scroll" data-slot></div>
       </div>
@@ -275,7 +275,7 @@ export function battleplan(f: Focus, holdError: string | null): Raw {
  * or walked unless its own HTML changed. The rail is keyed by rung, the
  * note last.
  */
-export function battleplanSlots(f: Focus): { bar: Raw; narrative: Raw; rail: [number, Raw][]; events: Raw } {
+export function battleplanSlots(f: Focus): { bar: Raw; narrative: Raw; rail: [number, Raw][]; events: [number, Raw][] } {
   const j = f.job
   const bar = h`
     <button type="button" id="back-to-desk" class="ghost" data-action="back">Back</button>
@@ -303,7 +303,7 @@ export function battleplanSlots(f: Focus): { bar: Raw; narrative: Raw; rail: [nu
     bar,
     narrative: narrative(f.narrative),
     rail,
-    events: h`<ul class="events">${f.events.map((e) => h`<li>${e.body}</li>`)}</ul>`,
+    events: f.events.map((e) => [e.id, h`<li>${e.body}</li>`]),
   }
 }
 
@@ -314,9 +314,9 @@ const NOTE_KEY = 1 << 20
  * or next-action write leaves this text alone, so it is neither re-parsed
  * nor walked on those frames.
  */
-export function battleplanPaper(f: Focus, editing: number | null, alterError: string | null): Raw {
+export function battleplanPaper(f: Focus, editing: number | null, alterError: string | null, chosen: number | null): Raw {
   return h`
-    ${paper(f.cv, true, editing, alterError)}
+    ${paper(f.cv, true, editing, alterError, chosen)}
     ${when(f.job.listing !== "", () => h`<p class="sub">${f.job.listing.trim()}</p>`)}`
 }
 
@@ -329,7 +329,7 @@ export function rootView(r: Root): Raw {
       </div>
       <div class="paper-scroll">
         ${narrative(r.narrative)}
-        ${paper(r.cv, false, null, null)}
+        ${paper(r.cv, false, null, null, null)}
       </div>
     </div>`
 }
@@ -346,7 +346,7 @@ function narrative(n: Focus["narrative"]): Raw {
     </section>`
 }
 
-function paper(cv: Doc, editable: boolean, editing: number | null, alterError: string | null): Raw {
+function paper(cv: Doc, editable: boolean, editing: number | null, alterError: string | null, chosen: number | null): Raw {
   return h`
     <article id="cv" class="paper" data-accent="${cv.accent}" data-density="${cv.density}">
       <header>
@@ -357,20 +357,21 @@ function paper(cv: Doc, editable: boolean, editing: number | null, alterError: s
         ${when(cv.summary_canonical, () => h`<p class="canonical">Root: ${cv.summary_canonical}${cv.summary_reason ? h`<span> — ${cv.summary_reason}</span>` : ""}</p>`)}
         <div class="facts">${cv.facts.map((f) => h`<span>${f.title}: ${f.body}</span>`)}</div>
       </header>
-      ${cv.sections.map((s) => h`<section><h3>${s.label}</h3>${s.lines.map((l) => cvLine(l, editable, editing, alterError))}</section>`)}
-      ${when(cv.hidden.length, () => h`<section class="masked"><h3>Masked out</h3>${cv.hidden.map((l) => cvLine(l, editable, editing, alterError))}</section>`)}
+      ${cv.sections.map((s) => h`<section><h3>${s.label}</h3>${s.lines.map((l) => cvLine(l, editable, editing, alterError, chosen))}</section>`)}
+      ${when(cv.hidden.length, () => h`<section class="masked"><h3>Masked out</h3>${cv.hidden.map((l) => cvLine(l, editable, editing, alterError, chosen))}</section>`)}
     </article>`
 }
 
-function cvLine(l: Line, editable: boolean, editing: number | null, alterError: string | null): Raw {
+// A line's actions are drawn only on the line chosen by a click, not on every line.
+function cvLine(l: Line, editable: boolean, editing: number | null, alterError: string | null, chosen: number | null): Raw {
   const isEditing = editable && editing === l.id
   return h`
-    <div id="line-${l.id}" class="line is-${l.mode}">
+    <div id="line-${l.id}" class="line is-${l.mode}" data-action="${editable ? "line" : ""}" data-item="${l.id}">
       <h4>${when(l.org !== "", () => h`<span class="org">${l.org} · </span>`)}${l.title}${when(l.span !== "", () => h`<span class="org"> · ${l.span}</span>`)}</h4>
       ${when(!isEditing, () => h`<p>${l.body}</p>`)}
       ${when(l.mode === "altered" && l.canonical_body !== l.body, () => h`<p class="canonical">Root: ${l.canonical_body}</p>`)}
       ${when(l.reason, () => h`<p class="reason">${l.reason}</p>`)}
-      ${when(editable && !isEditing, () => h`
+      ${when(editable && !isEditing && chosen === l.id, () => h`
         <div class="line-actions">
           ${when(l.shown, () => h`<button type="button" id="mask-hide-${l.id}" class="text-btn" data-action="mask" data-item="${l.id}" data-mode="hidden">Hide</button>`)}
           ${when(l.shown && l.mode !== "emphasized", () => h`<button type="button" id="mask-emphasize-${l.id}" class="text-btn" data-action="mask" data-item="${l.id}" data-mode="emphasized">Emphasize</button>`)}

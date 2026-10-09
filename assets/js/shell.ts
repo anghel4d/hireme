@@ -33,6 +33,8 @@ interface Model {
   enrolling: views.Enrolling
   stepUp: views.StepUp | null
   editing: number | null
+  /** The CV line whose actions are showing. */
+  line: number | null
   alterError: string | null
   /** Why the selected application's last write was refused, predicted or by the server. */
   refusal: string | null
@@ -48,6 +50,7 @@ type Msg =
   | { t: "lens"; lens: Lens }
   | { t: "escape" }
   | { t: "edit"; item: number | null; error?: string | null }
+  | { t: "line"; item: number | null }
   | { t: "grid"; cols?: number; scroll?: number; viewport?: number; rem?: number }
   | { t: "desk"; change: Change }
   | { t: "ran"; op: Op; refusal: Refusal | null }
@@ -98,6 +101,7 @@ export class Shell {
       enrolling: null,
       stepUp: null,
       editing: null,
+      line: null,
       alterError: null,
       refusal: null,
       notices: [],
@@ -140,6 +144,7 @@ export class Shell {
         if (m.appId !== msg.id) {
           m.appId = msg.id
           m.editing = null
+          m.line = null
           m.alterError = null
           m.refusal = null
           m.index = this.desk.find(msg.id)
@@ -163,6 +168,9 @@ export class Shell {
         if (m.lens !== "board") m.lens = "board"
         else if (this.compactQuery.matches && m.sheet) m.sheet = false
         else if (m.filters.q !== "") this.dispatch({ t: "filters", filters: { ...m.filters, q: "" } })
+        break
+      case "line":
+        m.line = msg.item
         break
       case "edit":
         m.editing = msg.item
@@ -471,8 +479,8 @@ export class Shell {
     }
     slot("#bp-bar", parts.bar)
     slot("#bp-narrative", parts.narrative)
-    slot("#bp-events", parts.events)
-    slot("#bp-paper", views.battleplanPaper(focus, m.editing, m.alterError))
+    this.list(lens.querySelector("#bp-events"), parts.events)
+    slot("#bp-paper", views.battleplanPaper(focus, m.editing, m.alterError, m.line))
     this.list(lens.querySelector("#bp-rail"), parts.rail)
     lens.querySelector("#battleplan")?.classList.toggle("is-pending", mark === "pending")
   }
@@ -727,6 +735,7 @@ export class Shell {
         return
       }
       case "edit": this.dispatch({ t: "edit", item: parseId(el.dataset["item"] ?? null) }); return
+      case "line": this.dispatch({ t: "line", item: parseId(el.dataset["item"] ?? null) }); return
       case "cancel-edit": this.dispatch({ t: "edit", item: null }); return
       case "copy": {
         const text = el.dataset["copy"]

@@ -364,11 +364,14 @@ const scenarios = {
   // CV lines in the battleplan: hide then restore, and an altered line saved.
   async cv() {
     const { page, close } = await fresh(`/?app=${bed.meta.job_ids[0]}&lens=battleplan`)
-    await page.waitForSelector("#bp-paper [id^=mask-hide-]")
+    await page.waitForSelector("#bp-paper .line.is-canonical")
     const hide = [], restore = [], alter = []
     let failed = 0
     for (let i = 0; i < Math.min(N, 40); i++) {
-      const id = await page.$eval("#bp-paper [id^=mask-hide-]", (b) => b.id.replace("mask-hide-", ""))
+      // A line shows its actions once chosen by a click.
+      const id = await page.$eval("#bp-paper .line.is-canonical", (l) => { l.click(); return l.id.replace("line-", "") })
+      await page.waitForSelector(`#mask-hide-${id}`)
+      await page.waitForTimeout(100)
       hide.push(await act(page, `document.getElementById("mask-hide-${id}").click()`, `document.getElementById("line-${id}")?.classList.contains("is-hidden")`))
       restore.push(await act(page, `document.getElementById("mask-restore-${id}").click()`, `document.getElementById("line-${id}")?.classList.contains("is-canonical")`))
       // A refused or still-settling restore leaves no Alter button this round.
