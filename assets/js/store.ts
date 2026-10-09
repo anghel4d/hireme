@@ -344,7 +344,7 @@ export class LocalDesk implements Desk, Host {
   private laneView: Lanes | null = null
   private tableView: Tables | null = null
   private readonly listeners = new Set<(c: Change) => void>()
-  readonly clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1
+  readonly clientId: number
   private counter = 0
   private statusNow: Status = "connecting"
   readonly hash: number
@@ -356,7 +356,8 @@ export class LocalDesk implements Desk, Host {
   /** Ops sent and refused before sending; the kernel's counters hold the rest. Read by the bench. */
   readonly counters = { predicted: 0, refusedLocally: 0, nacked: 0 }
 
-  constructor(kernel: WireKernel, scope: string) {
+  constructor(kernel: WireKernel, scope: string, clientId = crypto.getRandomValues(new Uint32Array(1))[0] ?? 1) {
+    this.clientId = clientId
     this.hash = kernel.schema_hash()
     const board = new KernelBoard(kernel, this.docs)
     this.board = board
