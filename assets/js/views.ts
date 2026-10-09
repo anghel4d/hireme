@@ -201,7 +201,7 @@ export function focusPanel(f: Focus, inFilter: boolean, sheet: boolean, holdErro
     </aside>`
 }
 
-export function battleplan(f: Focus, editing: number | null, alterError: string | null, holdError: string | null, mark: Mark): Raw {
+export function battleplan(f: Focus, holdError: string | null, mark: Mark): Raw {
   const j = f.job
   const active = f.rail.find((r) => r.state === "active") ?? f.rail.find((r) => r.state === "pending")
   return h`
@@ -236,12 +236,20 @@ export function battleplan(f: Focus, editing: number | null, alterError: string 
             </form>`)}
           <ul class="events">${f.events.map((e) => h`<li>${e.body}</li>`)}</ul>
         </div>
-        <div class="paper-scroll">
-          ${paper(f.cv, true, editing, alterError)}
-          ${when(j.listing !== "", () => h`<p class="sub">${j.listing.trim()}</p>`)}
-        </div>
+        <div id="bp-paper" class="paper-scroll" data-slot></div>
       </div>
     </div>`
+}
+
+/**
+ * The battleplan's CV and listing, drawn into its own slot: a stage, note
+ * or next-action write leaves this text alone, so it is neither re-parsed
+ * nor walked on those frames.
+ */
+export function battleplanPaper(f: Focus, editing: number | null, alterError: string | null): Raw {
+  return h`
+    ${paper(f.cv, true, editing, alterError)}
+    ${when(f.job.listing !== "", () => h`<p class="sub">${f.job.listing.trim()}</p>`)}`
 }
 
 export function rootView(r: Root): Raw {
