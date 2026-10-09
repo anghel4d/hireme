@@ -319,8 +319,8 @@ defmodule HiremeWeb.Session do
     }
 
     s =
-      if snapshot == rev do
-        control(s, Packet.frame(:boot, rev, [], flags: @end_flag))
+      if snapshot != 0 and snapshot == rev do
+        control(s, Packet.frame(:patch, rev, [], flags: @end_flag))
         s
       else
         boot(s, rev, snap)
@@ -454,7 +454,11 @@ defmodule HiremeWeb.Session do
     {due, held} = Enum.split_with(s.acks, fn {r, _} -> r <= rev end)
     Enum.each(Enum.reverse(due), fn {r, op_id} -> ack(s, op_id, r) end)
 
-    if s.warmer && delta[:focus] not in [nil, []], do: send(s.warmer, {:urgent, delta.focus, rev})
+    if delta[:focus] not in [nil, []] do
+      HiremeWeb.Session.Cache.dirty(s.account_id, delta.focus, rev)
+      if s.warmer, do: send(s.warmer, {:urgent, delta.focus, rev})
+    end
+
     %{s | rev: rev, acks: held}
   end
 
@@ -512,9 +516,9 @@ defmodule HiremeWeb.Session do
   end
 
   defp read_focus(session, id, rev, urgent) do
-    case Hireme.Desk.focus(id) do
+    case HiremeWeb.Session.Cache.focus(Hireme.Repo.account_id!(), id, rev) do
       nil -> :ok
-      focus -> send(session, {__MODULE__, :focus, JSON.focus(focus), rev, urgent})
+      focus -> send(session, {__MODULE__, :focus, focus, rev, urgent})
     end
   end
 
@@ -541,6 +545,77 @@ defmodule HiremeWeb.Session do
 
   defp sized(text), do: [<<byte_size(text)::little-16>>, text]
   defp align8(n), do: div(n + 7, 8) * 8
+end
+
+defmodule HiremeWeb.Session.Cache do
+  @moduledoc """
+  Focuses as JSON maps, shared by every session on the node, so a second
+  tab or a reload streams the desk's focuses without reading them again.
+  An entry read at rev r serves while no delta after r touched its job;
+  a delta marks the jobs it touched dirty at its rev. Without the table
+  (it is not started) every read goes to `Hireme.Desk.focus/1`.
+  """
+
+  use GenServer
+
+  @table __MODULE__
+
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @impl true
+  def init(:ok) do
+    :ets.new(@table, [
+      :named_table,
+      :public,
+      :set,
+      read_concurrency: true,
+      write_concurrency: true
+    ])
+
+    {:ok, nil}
+  end
+
+  @doc "The focus of `job_id` as of `rev` or later, from the table or read and kept."
+  @spec focus(pos_integer(), pos_integer(), non_neg_integer()) :: map() | nil
+  def focus(account_id, job_id, rev) do
+    key = {account_id, job_id}
+
+    with true <- table?(),
+         [{^key, at, focus}] <- :ets.lookup(@table, key),
+         true <- at >= dirty(account_id, job_id) do
+      focus
+    else
+      _ -> read(key, job_id, rev)
+    end
+  end
+
+  defp read(key, job_id, rev) do
+    case Hireme.Desk.focus(job_id) do
+      nil ->
+        nil
+
+      focus ->
+        json = HiremeWeb.JSON.focus(focus)
+        if table?(), do: :ets.insert(@table, {key, rev, json})
+        json
+    end
+  end
+
+  @doc "Mark `job_ids` changed at `rev`."
+  @spec dirty(pos_integer(), [pos_integer()], non_neg_integer()) :: :ok
+  def dirty(account_id, job_ids, rev) do
+    if table?(), do: :ets.insert(@table, Enum.map(job_ids, &{{:dirty, account_id, &1}, rev}))
+    :ok
+  end
+
+  defp dirty(account_id, job_id) do
+    case :ets.lookup(@table, {:dirty, account_id, job_id}) do
+      [{_, rev}] -> rev
+      [] -> 0
+    end
+  end
+
+  defp table?, do: :ets.whereis(@table) != :undefined
 end
 
 defmodule HiremeWeb.WireSocket do
