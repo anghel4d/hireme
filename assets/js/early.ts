@@ -27,7 +27,7 @@
   } = { clientId: crypto.getRandomValues(new Uint32Array(1))[0] ?? 1, queue: [] }
 
   // The snapshot record for this account, or undefined.
-  const snap: Promise<{ rev?: bigint; hash?: number } | undefined> = new Promise((resolve) => {
+  const snap: Promise<{ format?: number; rev?: bigint; hash?: number } | undefined> = new Promise((resolve) => {
     if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
     const open = indexedDB.open("hireme", 1)
     open.onupgradeneeded = () => open.result.createObjectStore("snap")
@@ -48,7 +48,8 @@
   // A snapshot written under another schema is no snapshot.
   const hello = async () => {
     const rec = await snap
-    const rev = rec && rec.hash === schema && typeof rec.rev === "bigint" ? rec.rev : 0n
+    // A snapshot of another schema or format (store.ts's FORMAT) is no snapshot.
+    const rev = rec && rec.format === 2 && rec.hash === schema && typeof rec.rev === "bigint" ? rec.rev : 0n
     const f = new Uint8Array(40)
     const v = new DataView(f.buffer)
     v.setUint32(0, 40, true)
