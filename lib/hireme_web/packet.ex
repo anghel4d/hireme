@@ -135,44 +135,43 @@ defmodule HiremeWeb.Packet do
   def table(name, rows, only \\ nil) do
     {id, cols} = Map.fetch!(@tables, name)
     cols = if only, do: Enum.filter(cols, fn {c, _, _} -> c in only end), else: cols
-    n = length(rows)
+    block(id, cols, rows, fn row, col, _type -> Map.get(row, col) end)
+  end
 
+  # One pass per column straight off the rows: each value is read and
+  # written once, with no row rebuilt on the way.
+  defp block(id, cols, rows, value) do
     [
-      <<id::little-16, length(cols)::little-16, n::little-32>>
+      <<id::little-16, length(cols)::little-16, length(rows)::little-32>>
       | Enum.map(cols, fn {col, cid, type} ->
-          column(cid, type, Enum.map(rows, &Map.get(&1, col)))
+          {wire, data} = encode(type, rows, &value.(&1, col, type))
+          size = IO.iodata_length(data)
+          [<<cid::little-16, wire::8, 0::8, size::little-32>>, data, pad8(size)]
         end)
     ]
   end
 
-  defp column(cid, type, values) do
-    {wire, data} = encode(type, values)
-    size = IO.iodata_length(data)
-    [<<cid::little-16, wire::8, 0::8, size::little-32>>, data, pad8(size)]
-  end
+  defp encode(type, rows, get) when type in [:u32, :day, :time],
+    do: {1, for(r <- rows, into: <<>>, do: <<u32(get.(r))::little-32>>)}
 
-  defp encode(type, values) when type in [:u32, :day, :time],
-    do: {1, for(v <- values, into: <<>>, do: <<u32(v)::little-32>>)}
+  defp encode(:u64, rows, get), do: {3, for(r <- rows, into: <<>>, do: <<get.(r)::little-64>>)}
 
-  defp encode(:u64, values), do: {3, for(v <- values, into: <<>>, do: <<v::little-64>>)}
-
-  defp encode(:f64, values) do
+  defp encode(:f64, rows, get) do
     {4,
-     for v <- values, into: <<>> do
+     for r <- rows, into: <<>> do
+       v = get.(r)
        if is_number(v), do: <<v * 1.0::little-float-64>>, else: @nan
      end}
   end
 
-  defp encode(:str, values) do
-    strings = Enum.map(values, &text/1)
-
-    {offsets, total} =
-      Enum.reduce(strings, {[<<0::little-32>>], 0}, fn s, {acc, at} ->
+  defp encode(:str, rows, get) do
+    {offsets, strings, _} =
+      Enum.reduce(rows, {<<0::little-32>>, [], 0}, fn r, {offsets, strings, at} ->
+        s = text(get.(r))
         at = at + byte_size(s)
-        {[acc, <<at::little-32>>], at}
+        {<<offsets::binary, at::little-32>>, [strings | s], at}
       end)
 
-    _ = total
     {2, [offsets, strings]}
   end
 
@@ -241,23 +240,25 @@ defmodule HiremeWeb.Packet do
   """
   @spec raw(atom(), [map()]) :: iodata()
   def raw(name, rows) do
-    {_id, cols} = Map.fetch!(@tables, name)
+    {id, cols} = Map.fetch!(@tables, name)
 
     # A struct is a whole row; a map may be partial (a delta carries `id`
     # plus only the fields that changed), and a column it does not carry
     # must not travel, or the reader would overwrite it with none. Rows
     # with the same fields share one block.
     rows
-    |> Enum.group_by(&present(&1, cols))
-    |> Enum.map(fn {present, group} ->
-      table(name, Enum.map(group, &raw_row(&1, cols)), present)
+    |> Enum.map(fn
+      %_{} = row -> Map.from_struct(row)
+      row -> row
+    end)
+    |> Enum.group_by(&Map.keys/1)
+    |> Enum.map(fn {_keys, [first | _] = group} ->
+      block(id, present(first, cols), group, &raw_value/3)
     end)
   end
 
-  defp present(%_{}, cols), do: Enum.map(cols, &elem(&1, 0))
-
   defp present(row, cols) do
-    for {col, _, _} <- cols, carried?(row, col), do: col
+    for {col, _, _} = c <- cols, carried?(row, col), do: c
   end
 
   defp carried?(row, :theme_targets), do: Map.has_key?(row, :theme)
@@ -274,12 +275,6 @@ defmodule HiremeWeb.Packet do
        do: Map.has_key?(row, :variety)
 
   defp carried?(row, col), do: Map.has_key?(row, col)
-
-  defp raw_row(%_{} = row, cols), do: raw_row(Map.from_struct(row), cols)
-
-  defp raw_row(row, cols) do
-    Map.new(cols, fn {col, _cid, type} -> {col, raw_value(row, col, type)} end)
-  end
 
   defp raw_value(row, :theme_targets, _),
     do: unit_list(get_in(row, [:theme, "targets"]) || get_in(row, [:theme, :targets]))
