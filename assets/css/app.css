@@ -269,11 +269,11 @@ kbd {
 .link.is-offline { color: var(--due); }
 
 /*
- * A write drawn before the server answered. Pending: sent, unanswered.
- * Settling: accepted, its derived fields (pips, band, heat) still due.
- * Only a pseudo-element's opacity moves, so the marks cost no layout.
+ * A write drawn before the server answered it. Derived fields are exact
+ * on prediction, so the only state is pending: sent, not yet answered.
+ * Only a pseudo-element's opacity moves, so the mark costs no layout.
  */
-.card.is-pending::after, .card.is-settling::after {
+.card.is-pending::after {
   content: "";
   position: absolute;
   inset: 0 0 auto 0;
@@ -282,7 +282,6 @@ kbd {
   pointer-events: none;
 }
 .card.is-pending::after { animation: pending 0.9s ease-in-out infinite alternate; }
-.card.is-settling::after { opacity: 0.35; }
 .focus.is-pending, .battleplan.is-pending { box-shadow: inset 0 2px 0 var(--accent); }
 @keyframes pending { from { opacity: 0.25; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {

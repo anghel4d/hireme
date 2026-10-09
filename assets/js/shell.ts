@@ -255,7 +255,9 @@ export class Shell {
     if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused) return false
     if (this.desk.tables !== this.tables) return false
     const id = this.model.appId
-    return id === null || !(c.focus ?? []).includes(id)
+    // "all": a write that touches a profile, lineage, items or narratives recomposes every focus.
+    const focus = c.focus as readonly number[] | "all" | undefined
+    return id === null || (focus !== "all" && !(focus ?? []).includes(id))
   }
 
   /** Apply a write: the desk predicts it locally or refuses it at once. */
