@@ -73,7 +73,7 @@ defmodule Hireme.Heat.Ats do
   end
 
   defp host?(host, :workday) do
-    String.contains?(host, "myworkdayjobs.com") or String.contains?(host, "myworkday.com") or
+    String.ends_with?(host, ".myworkdayjobs.com") or String.ends_with?(host, ".myworkday.com") or
       String.ends_with?(host, ".wd1.myworkdaysite.com")
   end
 

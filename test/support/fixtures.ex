@@ -90,4 +90,24 @@ defmodule Hireme.Fixtures do
       {:gone, ^pid} -> :ok
     end
   end
+
+  @doc """
+  A form drawn from `choices`: each field a random one of its choices, under
+  a string or an atom key, and some fields left out. Members of a closed set
+  travel as atoms or names.
+  """
+  def form(choices) do
+    for {field, values} <- choices, :rand.uniform(4) > 1, into: %{} do
+      value =
+        case Enum.random(values) do
+          atom when is_atom(atom) and not is_nil(atom) ->
+            Enum.random([atom, Atom.to_string(atom)])
+
+          other ->
+            other
+        end
+
+      {Enum.random([Atom.to_string(field), field]), value}
+    end
+  end
 end

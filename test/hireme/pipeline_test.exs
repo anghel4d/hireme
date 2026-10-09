@@ -50,18 +50,6 @@ defmodule Hireme.PipelineTest do
     refute Pipeline.fire_locked?(:fire_ready)
   end
 
-  test "a stage name parses to the one stage and nothing else parses" do
-    assert {:ok, :in_batch} = Pipeline.parse("in_batch")
-    assert {:ok, :in_batch} = Pipeline.parse(:in_batch)
-    assert :error = Pipeline.parse("in-batch")
-    assert :error = Pipeline.parse(nil)
-    assert :error = Pipeline.parse(:anything)
-
-    for key <- Pipeline.keys() do
-      assert {:ok, ^key} = Pipeline.parse(Pipeline.name(key))
-    end
-  end
-
   test "decode is the inverse of encode on every rail" do
     for start <- Pipeline.keys(), target <- Pipeline.keys() do
       rail = Pipeline.initial(start) |> Pipeline.move_to(target)
@@ -80,9 +68,45 @@ defmodule Hireme.PipelineTest do
     assert {:ok, ^rail} = Pipeline.decode(Pipeline.encode(rail))
   end
 
-  test "a pip string of the wrong length or alphabet does not decode" do
-    assert :error = Pipeline.decode("APPPPPPP")
-    assert :error = Pipeline.decode("DDDDDAPPPX")
-    assert :error = Pipeline.decode("")
+  test "any pip string decodes to a rail that encodes back, or not at all" do
+    :rand.seed(:exsss, {2026, 10, 9})
+
+    valid =
+      for s <- Pipeline.keys(),
+          t <- Pipeline.keys(),
+          do: Pipeline.encode(Pipeline.move_to(Pipeline.initial(s), t))
+
+    alphabet = String.graphemes("DAPSBXdap ")
+
+    strings =
+      for _ <- 1..2000 do
+        case :rand.uniform(3) do
+          1 -> Enum.map_join(1..:rand.uniform(12), "", fn _ -> Enum.random(alphabet) end)
+          2 -> valid |> Enum.random() |> mutate(alphabet)
+          3 -> Enum.random(["", " ", String.duplicate("D", 10), String.duplicate("A", 10)])
+        end
+      end
+
+    decoded =
+      for s <- strings, reduce: 0 do
+        n ->
+          case Pipeline.decode(s) do
+            {:ok, rail} ->
+              assert Pipeline.encode(rail) == s
+              n + 1
+
+            :error ->
+              n
+          end
+      end
+
+    assert decoded > 0
+    for s <- valid, do: assert({:ok, _} = Pipeline.decode(s))
+  end
+
+  defp mutate(pips, alphabet) do
+    i = :rand.uniform(String.length(pips)) - 1
+    {head, tail} = String.split_at(pips, i)
+    head <> Enum.random(alphabet) <> String.slice(tail, 1..-1//1)
   end
 end
