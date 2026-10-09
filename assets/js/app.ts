@@ -16,8 +16,8 @@ const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[nam
 
 try {
   const kernel = await loadWireKernel("/wasm/kernel.wasm")
-  const desk = new LocalDesk(kernel, meta("wire-scope"))
   const early = window.__hw
+  const desk = new LocalDesk(kernel, meta("wire-scope"), early?.clientId)
   const snap = await desk.snapshot?.load(early?.snap)
   if (snap) {
     desk.restore(snap.bytes, snap.ops)

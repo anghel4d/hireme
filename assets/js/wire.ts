@@ -267,23 +267,40 @@ export interface Early {
   wt?: WebTransport
   ws?: WebSocket
   snap?: Promise<unknown>
+  /** The client id the early HELLO carried; the desk's ops use it too. */
+  clientId?: number
+  /** The early HELLO, once written: the rev it named, and on WebTransport the control stream it opened. */
+  hello?: Promise<{ rev: bigint; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Bytes> } | null>
+  /** Socket messages that arrived before the bundle took over. */
+  queue?: ArrayBuffer[]
 }
+
+/** A control stream the early script opened and already wrote HELLO on. */
+export interface Adopted { writer: WritableStreamDefaultWriter<Uint8Array>; readable: ReadableStream<Bytes> }
 
 declare global {
   interface Window { __hw?: Early }
 }
 
-export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes): Promise<Conn> {
+/** A WebTransport session as a Conn: HELLO goes first on a new control stream, unless one was adopted. */
+export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes | Adopted): Promise<Conn> {
   await wt.ready
   let failed = (_: string) => {}
   const closed = new Promise<string>((resolve) => {
     failed = resolve
     wt.closed.then(() => resolve("closed"), (e: unknown) => resolve(String(e)))
   })
-  const control = await wt.createBidirectionalStream()
-  const writer = control.writable.getWriter()
-  void writer.write(first)
-  void pump(control.readable, new Framer(sink, failed)).then(() => failed("control ended"), (e: unknown) => failed(String(e)))
+  let writer: WritableStreamDefaultWriter<Uint8Array>
+  let readable: ReadableStream<Bytes>
+  if (first instanceof Uint8Array) {
+    const control = await wt.createBidirectionalStream()
+    writer = control.writable.getWriter()
+    readable = control.readable
+    void writer.write(first)
+  } else {
+    ;({ writer, readable } = first)
+  }
+  void pump(readable, new Framer(sink, failed)).then(() => failed("control ended"), (e: unknown) => failed(String(e)))
 
   // Bulk streams, each its own framer: a frame never spans two streams.
   void (async () => {
@@ -319,7 +336,8 @@ export async function openTransport(wt: WebTransport, sink: Sink, first: Bytes):
   }
 }
 
-export function openSocket(ws: WebSocket, sink: Sink, first: Bytes): Promise<Conn> {
+/** A WebSocket as a Conn: HELLO goes first, unless the early script sent it (`null`), and queued messages are taken in order. */
+export function openSocket(ws: WebSocket, sink: Sink, first: Bytes | null, queued: readonly ArrayBuffer[] = []): Promise<Conn> {
   ws.binaryType = "arraybuffer"
   let failed = (_: string) => {}
   const closed = new Promise<string>((resolve) => { failed = resolve })
@@ -327,6 +345,7 @@ export function openSocket(ws: WebSocket, sink: Sink, first: Bytes): Promise<Con
     failed(why)
     ws.close()
   })
+  for (const m of queued) framer.push(new Uint8Array(m))
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) framer.push(new Uint8Array(e.data))
   }
@@ -340,7 +359,7 @@ export function openSocket(ws: WebSocket, sink: Sink, first: Bytes): Promise<Con
   }
   return new Promise((resolve, reject) => {
     const go = () => {
-      ws.send(first)
+      if (first) ws.send(first)
       resolve(conn)
     }
     if (ws.readyState === WebSocket.OPEN) go()
@@ -503,14 +522,18 @@ export class Wire {
     const first = hello(this.host.hash, this.host.rev(), this.host.clientId)
     const early = this.early
     this.early = undefined
+    // The early script's HELLO stands only if it named the rev the desk restored.
+    const said = early?.hello ? await within(early.hello, CONNECT_MS).catch(() => null) : undefined
+    const adopt = said !== undefined && said !== null && said.rev === this.host.rev()
     if (early?.wt) {
-      const c = await within(openTransport(early.wt, this.sink, first), CONNECT_MS).catch(() => null)
+      const own = adopt && said.writer && said.readable ? { writer: said.writer, readable: said.readable } : null
+      const c = said === null || (said && !own) ? null : await within(openTransport(early.wt, this.sink, own ?? first), CONNECT_MS).catch(() => null)
       if (c) return this.settled(c)
       early.wt.close()
-      this.gateDownUntil = performance.now() + 60_000
+      if (said === null) this.gateDownUntil = performance.now() + 60_000
     }
     if (early?.ws) {
-      const c = await within(openSocket(early.ws, this.sink, first), CONNECT_MS).catch(() => null)
+      const c = said === null || (said && !adopt) ? null : await within(openSocket(early.ws, this.sink, said ? null : first, early.queue), CONNECT_MS).catch(() => null)
       if (c) return this.settled(c)
       early.ws.close()
     }
