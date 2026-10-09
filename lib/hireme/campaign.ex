@@ -173,7 +173,14 @@ defmodule Hireme.Campaign do
   def scoreboard(today \\ Date.utc_today()) do
     # With no snapshot yet, the row's own defaults are the targets.
     snap = Repo.one(from s in Snapshot, order_by: [desc: s.noted_on], limit: 1) || %Snapshot{}
-    batches = Repo.all(from b in Batch, order_by: b.ordinal)
+
+    # Keep every batch's variety, without loading unrelated notes and timestamps.
+    batches =
+      Repo.all(
+        from b in Batch,
+          order_by: b.ordinal,
+          select: struct(b, [:id, :code, :ordinal, :status, :fire, :queued_on, :variety])
+      )
 
     queued =
       Enum.filter(batches, &(&1.queued_on == today and &1.status in [:fire_ready, :open_fire]))

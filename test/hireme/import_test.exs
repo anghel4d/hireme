@@ -56,4 +56,32 @@ defmodule Hireme.ImportTest do
     assert board.submitted_today == 0
     assert board.apps_target == 440
   end
+
+  test "scoreboard submission counts retain exact dates and empty queued batches" do
+    today = ~D[2026-10-07]
+    empty = Campaign.scoreboard(today)
+    assert {empty.apps_today, empty.submitted_today, empty.cumulative} == {0, 0, 0}
+
+    profile = profile()
+
+    for {company, stage, date} <- [
+          {"Sent today", :submitted, today},
+          {"Reply tomorrow", :reply, Date.add(today, 1)},
+          {"Sent undated", :submitted, nil},
+          {"Closed today", :closed, today}
+        ] do
+      job(profile, %{company: company})
+      |> Ecto.Changeset.change(current_stage: stage, stage_on: date)
+      |> Repo.update!()
+    end
+
+    board = Campaign.scoreboard(today)
+    assert {board.apps_today, board.submitted_today, board.cumulative} == {0, 1, 3}
+    assert board.chart == Hireme.Desk.score_chart()
+
+    Hireme.DataCase.open_account("Other campaign")
+    other = Campaign.scoreboard(today)
+    assert {other.apps_today, other.submitted_today, other.cumulative} == {0, 0, 0}
+    assert other.chart.n == 0
+  end
 end
