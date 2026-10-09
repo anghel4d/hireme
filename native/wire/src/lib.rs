@@ -455,7 +455,8 @@ impl<'a> Op<'a> {
     pub const FIXED: usize = 16;
 
     /// Reads an op whose kind the schema names, carrying the schema's
-    /// number of fields (an even number for `pairs`), each whole and UTF-8.
+    /// fields (trailing `?` ones may be left off; an even number for
+    /// `pairs`), each whole and UTF-8.
     pub fn parse(body: &'a [u8]) -> Result<Op<'a>, Error> {
         if body.len() < Self::FIXED {
             return Err(Error::Body);
@@ -472,7 +473,10 @@ impl<'a> Op<'a> {
         // key, value strings (gym and net log entries).
         let fits = match def.fields {
             ["pairs"] => op.nfields.is_multiple_of(2),
-            f => op.nfields as usize == f.len(),
+            f => {
+                let required = f.iter().filter(|x| !x.ends_with('?')).count();
+                (required..=f.len()).contains(&(op.nfields as usize))
+            }
         };
         if !fits {
             return Err(Error::Body);

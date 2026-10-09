@@ -1,13 +1,15 @@
-// The kernel's derivations against the Elixir reference.
+// The kernel against what the server still decides.
 //
 //   node native/kernel/parity.mjs [--wasm path] oracle.jsonl...
 //
 // Each file is a dump from test/oracle/run.exs: the account's raw tables
-// (the input) and what the Elixir functions answer over them (the oracle).
-// The tables are encoded as a BOOT frame the way HiremeWeb.Packet.raw/2
-// does, ingested, and every derived table the kernel exposes is compared
-// with the oracle, value for value and float bit for bit. Exits non-zero
-// on any difference and prints the first few of each kind.
+// and what Elixir answers over them. The kernel's predictions stay on
+// purpose (the optimistic path, which the server confirms or rolls back),
+// so they are held to the server exactly: every op's refusal and the raw
+// rows it writes against Ops.run, the heat verdicts a stage write is
+// judged by against Heat.verdict, and the batch mixes against
+// Heat.mix_batch, value for value and float bit for bit. Exits non-zero on
+// any difference and prints the first few of each kind.
 import fs from "node:fs"
 import path from "node:path"
 import { S, NONE, wireType, frame, opBody, ack, nack, concat, kernel, repo } from "./frames.mjs"
@@ -21,12 +23,6 @@ for (let i = 0; i < args.length; i++) {
 }
 const wasm = fs.readFileSync(wasmPath)
 
-const STAGES = ["discovered", "freshness", "gated", "in_batch", "draft_ready", "fire_ready", "open_fire", "submitted", "reply", "closed"]
-const STATUSES = ["open", "paused", "hired", "closed"]
-const FRESHNESS = ["unknown", "open", "thin", "closed", "blocked"]
-const GATES = ["unset", "pursue", "maybe", "skip"]
-const HEAT_STATES = ["cool", "warm", "hot", "blocked"]
-const ix = (list, v) => Math.max(0, list.indexOf(v))
 const none = (v) => (v === null || v === undefined ? NONE : v)
 
 // HiremeWeb.Packet.raw/2: one database row as its wire columns.
@@ -153,37 +149,6 @@ async function one(file) {
   }
 
   const batchId = new Map((tables.find((t) => t.table === "batches")?.rows ?? []).map((b) => [b.code, b.id]))
-  const profileId = new Map((tables.find((t) => t.table === "profiles")?.rows ?? []).map((p) => [p.slug, p.id]))
-
-  // Cards.
-  const cards = lines.filter((l) => l.kind === "card")
-  check("cards", "count", K.k.rows(S.table.cards), cards.length)
-  for (const c of cards) {
-    const got = K.card(c.id)
-    if (!got) {
-      check("cards", `card ${c.id}`, "missing", "present")
-      continue
-    }
-    const want = {
-      score: c.score_100, heat: c.heat, stage: ix(STAGES, c.stage), status: ix(STATUSES, c.status),
-      freshness: ix(FRESHNESS, c.freshness), gate: ix(GATES, c.gate),
-      batch: c.batch_code === null ? 0 : batchId.get(c.batch_code), profile: profileId.get(c.profile_slug),
-      hits: c.keyword_hits, total: c.keyword_total, hidden: c.mask_hidden, altered: c.mask_altered,
-      emphasized: c.mask_emphasized, stage_on: none(c.stage_on), next_due: none(c.next_due),
-      heat_state: ix(HEAT_STATES, c.heat_state), cooldown: none(c.cooldown_days), leased: c.leased ? 1 : 0,
-      company: c.company, role: c.role, location: c.location ?? "", next_action: c.next_action ?? "",
-      cv_label: c.cv_label, fit: c.fit ?? "", pips: c.pips, load: c.load, cap: c.cap,
-      ats_vendor: c.ats_vendor, load_pct: c.cap <= 0 ? 100 : Math.round(c.load / c.cap * 100),
-    }
-    for (const [k, v] of Object.entries(want)) check(`cards.${k}`, `card ${c.id}`, got[k], v)
-  }
-
-  // Board order.
-  const order = lines.find((l) => l.kind === "order")
-  if (order) {
-    const all = { min: -1, lo: -1000, hi: 1000, stage: -1, status: -1, batch: -1, profile: -1, heat: -1 }
-    check("order", "ids", JSON.stringify(K.select(all, "")), JSON.stringify(order.ids))
-  }
 
   // Verdicts.
   for (const v of lines.filter((l) => l.kind === "verdict")) {
@@ -201,29 +166,6 @@ async function one(file) {
     check("verdicts.cooldown_days", `job ${v.id}`, got.cooldown_days, none(v.cooldown_days))
   }
 
-  // The heat chart.
-  const chart = lines.find((l) => l.kind === "heat_chart")?.value
-  if (chart) {
-    const rows = K.rows("heat_rows")
-    for (const [g, list] of [[0, chart.companies], [1, chart.vendors]]) {
-      const mine = rows.filter((r) => r.group === g)
-      check("heat_chart", `group ${g} rows`, mine.length, list.length)
-      list.forEach((want, i) => {
-        const got = mine[i] ?? {}
-        for (const k of ["key", "label", "load", "cap", "ratio", "n"]) check(`heat_chart.${k}`, `group ${g} #${i}`, got[k], want[k])
-        check("heat_chart.cooldown_days", `group ${g} #${i}`, got.cooldown_days, none(want.cooldown_days))
-        check("heat_chart.size", `group ${g} #${i}`, got.size, want.size ?? "")
-      })
-    }
-  }
-
-  // Keywords.extract per job.
-  for (const kw of lines.filter((l) => l.kind === "keywords")) {
-    const n = K.k.extract(kw.id)
-    const words = K.rows("coverage").map((r) => r.word)
-    check("keywords.extract", `job ${kw.id}`, JSON.stringify(words.slice(0, n)), JSON.stringify(kw.extract))
-  }
-
   // Heat.mix_batch per batch.
   for (const m of lines.filter((l) => l.kind === "mix_batch")) {
     const id = batchId.get(m.code)
@@ -235,34 +177,6 @@ async function one(file) {
       JSON.stringify(m.deferred.map((d) => [d.id, d.reason, d.note])))
   }
 
-  // The scoreboard and its chart.
-  const sb = lines.find((l) => l.kind === "scoreboard")?.value
-  if (sb) {
-    const got = K.rows("score")[0] ?? {}
-    for (const k of ["leftover_unique", "batches_today", "batches_target", "apps_today", "apps_target",
-      "submitted_today", "cumulative", "target_total"]) check(`score.${k}`, "scoreboard", got[k], sb[k])
-    check("score.fire", "scoreboard", got.fire, sb.fire === "open_fire" ? 1 : 0)
-    check("score.leftover_noted_on", "scoreboard", got.leftover_noted_on, none(sb.leftover_noted_on))
-    check("score.target_on", "scoreboard", got.target_on, none(sb.target_on))
-    const c = sb.chart
-    check("score.chart_n", "chart", got.chart_n, c.n)
-    check("score.chart_mean", "chart", got.chart_mean, c.mean ?? NaN)
-    check("score.chart_max", "chart", got.chart_max, c.max ?? NaN)
-    check("score.chart_min", "chart", got.chart_min, c.min ?? NaN)
-    const bands = K.rows("chart_bands")
-    c.bands.forEach((b, i) => {
-      for (const k of ["key", "label", "min", "max", "count", "share"]) check(`chart_bands.${k}`, `#${i}`, bands[i]?.[k], b[k])
-    })
-    const bins = K.rows("chart_bins")
-    c.bins.forEach((b, i) => {
-      for (const k of ["lo", "hi", "count"]) check(`chart_bins.${k}`, `#${i}`, bins[i]?.[k], b[k])
-    })
-    const vs = K.rows("varieties")
-    check("varieties", "count", vs.length, sb.varieties.length)
-    sb.varieties.forEach((v, i) => {
-      for (const k of ["code", "fire", "status", "label"]) check(`varieties.${k}`, `#${i}`, vs[i]?.[k], v[k])
-    })
-  }
   // Timing: a one-row PATCH re-derives everything that reads it.
   const jobs = tables.find((t) => t.table === "job_apps")?.rows ?? []
   const times = []
@@ -274,7 +188,7 @@ async function one(file) {
     times.push(performance.now() - t)
   }
   times.sort((a, b) => a - b)
-  return { cards: cards.length, bootMs, patchMs: times[times.length >> 1] ?? 0 }
+  return { jobs: jobs.length, bootMs, patchMs: times[times.length >> 1] ?? 0 }
 }
 
 let failed = false
@@ -282,7 +196,7 @@ for (const f of files) {
   diffs.clear()
   const r = await one(f)
   const n = [...diffs.values()].reduce((a, l) => a + l.length, 0)
-  console.log(`${path.basename(f)}: ${r.cards} cards, boot+derive ${r.bootMs.toFixed(2)} ms, one-row patch+derive ${r.patchMs.toFixed(2)} ms, ${n} differences`)
+  console.log(`${path.basename(f)}: ${r.jobs} jobs, boot+derive ${r.bootMs.toFixed(2)} ms, one-row patch+derive ${r.patchMs.toFixed(2)} ms, ${n} differences`)
   for (const [kind, list] of diffs) {
     console.log(`  ${kind}: ${list.length}`)
     for (const d of list.slice(0, 4)) console.log(`    ${d}`)

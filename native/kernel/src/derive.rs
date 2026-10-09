@@ -51,7 +51,22 @@ pub struct Derived {
     verdicts: BTreeMap<u32, Verdict>,
     /// The joins a card reads: job id → (variant label, lineage); profile
     /// ids; leased job ids. Rebuilt by a full derive.
-    variant_of: BTreeMap<u32, [u32; 2]>,
+    variant_of: BTreeMap<u32, VariantJoin>,
+    /// Lineage id → its theme's targets (U+001F-joined) when the lineage
+    /// carries a theme of its own, else None (the variant's theme applies).
+    lineage_targets: BTreeMap<u32, Option<[u32; 2]>>,
+    /// Per job id: the listing it was extracted from, and its targets.
+    extracted: BTreeMap<u32, ([u32; 2], Vec<String>)>,
+    /// Lineages whose overlays, and profiles whose items, moved.
+    lineages_dirty: Vec<u32>,
+    profiles_dirty: Vec<u32>,
+    overlay_keys: Vec<u32>,
+    item_keys: Vec<u32>,
+    /// Bumped whenever any overlay or item moves; a job's glance is kept
+    /// while this, its listing and its variant's joins stay the same.
+    corpus_gen: u32,
+    corpus: Option<(u32, Corpus)>,
+    glances: BTreeMap<u32, ([u32; 6], [u32; 5])>,
     profiles: Vec<u32>,
     leased: Vec<u32>,
     /// Since the last derive: everything, or these jobs.
@@ -68,6 +83,15 @@ impl Derived {
             consts: Vec::new(),
             verdicts: BTreeMap::new(),
             variant_of: BTreeMap::new(),
+            lineage_targets: BTreeMap::new(),
+            extracted: BTreeMap::new(),
+            lineages_dirty: Vec::new(),
+            profiles_dirty: Vec::new(),
+            overlay_keys: Vec::new(),
+            item_keys: Vec::new(),
+            corpus_gen: 0,
+            corpus: None,
+            glances: BTreeMap::new(),
             profiles: Vec::new(),
             leased: Vec::new(),
             all: true,
@@ -90,6 +114,8 @@ impl Derived {
         if self.epoch != arena.epoch {
             self.consts.clear();
             self.traits.clear();
+            self.extracted.clear();
+            self.glances.clear();
             self.epoch = arena.epoch;
             // The cached joins hold string references of the old epoch.
             self.all = true;
@@ -106,11 +132,19 @@ impl Derived {
             table::BATCHES
             | table::PROFILES
             | table::CV_VARIANTS
+            | table::CV_LINEAGES
             | table::LEASES
             | table::SCOREBOARD_SNAPSHOTS => self.all = true,
+            table::OVERLAYS => self.overlay_keys.push(key),
+            table::ITEMS => self.item_keys.push(key),
             NONE_TABLE => self.all = true,
             _ => {}
         }
+    }
+
+    /// An overlay of `lineage` moved (for a deletion, read before it goes).
+    pub fn mark_lineage(&mut self, lineage: u32) {
+        self.lineages_dirty.push(lineage);
     }
 
     pub fn mark_all(&mut self) {
@@ -119,6 +153,28 @@ impl Derived {
 }
 
 const NONE_TABLE: u16 = u16::MAX;
+
+/// What a card reads from the job's variant.
+#[derive(Clone, Copy)]
+struct VariantJoin {
+    label: [u32; 2],
+    lineage: u32,
+    profile: u32,
+    /// The variant theme's targets, U+001F-joined.
+    targets: [u32; 2],
+}
+
+/// The overlays and items a CV is composed from, indexed once, and the
+/// visible texts built from them; kept until an overlay or item moves.
+pub(crate) struct Corpus {
+    /// Lineage → its overlays: (item, mode 0 hidden 1 altered 2
+    /// emphasized, title, body).
+    overlays: BTreeMap<u32, Vec<(u32, u8, [u32; 2], [u32; 2])>>,
+    /// (id, profile, title, body) of every item.
+    items: Vec<(u32, u32, [u32; 2], [u32; 2])>,
+    /// (profile, lineage) → the downcased text that CV shows.
+    texts: BTreeMap<(u32, u32), keywords::Text>,
+}
 
 /// The job_apps columns the heat governor reads.
 fn heat_column(c: u16) -> bool {
@@ -315,11 +371,7 @@ struct JobCols<'a> {
     heat: &'a [u32],
     batch: &'a [u32],
     profile: &'a [u32],
-    hits: &'a [u32],
-    total: &'a [u32],
-    hidden: &'a [u32],
-    altered: &'a [u32],
-    emphasized: &'a [u32],
+    listing: &'a [[u32; 2]],
     stage_on: &'a [u32],
     next_due: &'a [u32],
     company: &'a [[u32; 2]],
@@ -344,11 +396,7 @@ impl Desk {
             heat: self.w32(t, j::HEAT),
             batch: self.w32(t, j::BATCH_ID),
             profile: self.w32(t, j::PROFILE_ID),
-            hits: self.w32(t, j::KEYWORD_HITS),
-            total: self.w32(t, j::KEYWORD_TOTAL),
-            hidden: self.w32(t, j::MASK_HIDDEN),
-            altered: self.w32(t, j::MASK_ALTERED),
-            emphasized: self.w32(t, j::MASK_EMPHASIZED),
+            listing: self.strs(t, j::LISTING),
             stage_on: self.w32(t, j::STAGE_ON),
             next_due: self.w32(t, j::NEXT_DUE),
             company: self.strs(t, j::COMPANY),
@@ -458,16 +506,13 @@ impl Desk {
         i: usize,
         verdict: &Verdict,
         vnames: &[[u32; 2]],
+        glance: [u32; 5],
     ) -> Row<20, 8, 3> {
         let w = |s: &[u32]| s.get(i).copied().unwrap_or(0);
         let r = |s: &[[u32; 2]]| s.get(i).copied().unwrap_or([0, 0]);
         let arena = &self.store.arena;
         let id = w(j.id);
         let none0 = |x: u32| if x == NONE { 0 } else { x };
-        let (hits, total) = match self.glance.get(&id) {
-            Some(g) => (g[0], g[1]),
-            None => (w(j.hits), w(j.total)),
-        };
         let load_pct = if verdict.company_cap <= 0.0 {
             100
         } else {
@@ -484,11 +529,11 @@ impl Desk {
                 ix_of(&GATES, arena.get(r(j.gate))),
                 none0(w(j.batch)),
                 w(j.profile),
-                hits,
-                total,
-                w(j.hidden),
-                w(j.altered),
-                w(j.emphasized),
+                glance[0],
+                glance[1],
+                glance[2],
+                glance[3],
+                glance[4],
                 j.stage_on.get(i).copied().unwrap_or(NONE),
                 j.next_due.get(i).copied().unwrap_or(NONE),
                 verdict.heat_state(),
@@ -501,7 +546,7 @@ impl Desk {
                 r(j.role),
                 r(j.location),
                 r(j.next_action),
-                d.variant_of.get(&id).copied().unwrap_or([0, 0]),
+                d.variant_of.get(&id).map_or([0, 0], |v| v.label),
                 r(j.fit),
                 r(j.pips),
                 vnames[verdict.vendor as usize],
@@ -514,6 +559,107 @@ impl Desk {
         }
     }
 
+    /// What a card counts of its CV: keyword hits and targets, and the
+    /// hidden, altered and emphasized overlays on its lineage, as Desk's
+    /// glance refresh counted them (Mask.apply, Theme lineage over variant,
+    /// Keywords targets and coverage).
+    fn glance(
+        &self,
+        d: &mut Derived,
+        corpus: &mut Option<Corpus>,
+        j: &JobCols,
+        i: usize,
+    ) -> [u32; 5] {
+        let id = j.id.get(i).copied().unwrap_or(0);
+        let Some(v) = d.variant_of.get(&id).copied() else {
+            return [0; 5];
+        };
+        let listing = j.listing.get(i).copied().unwrap_or([0, 0]);
+        let inputs = [
+            d.corpus_gen,
+            listing[0],
+            listing[1],
+            v.lineage,
+            v.profile,
+            v.targets[0],
+        ];
+        if let Some((k, out)) = d.glances.get(&id) {
+            if *k == inputs {
+                return *out;
+            }
+        }
+        let arena = &self.store.arena;
+        let c = corpus.get_or_insert_with(|| self.read_corpus());
+        let mut counts = [0u32; 3];
+        for o in c.overlays.get(&v.lineage).map_or(&[][..], |o| o.as_slice()) {
+            counts[o.1 as usize] += 1;
+        }
+        let key = ensure_text(arena, c, v.profile, v.lineage);
+        let text = &c.texts[&key];
+        let theme = match d.lineage_targets.get(&v.lineage) {
+            Some(Some(t)) => *t,
+            _ => v.targets,
+        };
+        let themed = keywords::theme_targets(arena.text(theme));
+        let (hits, total) = if !themed.is_empty() {
+            let hits = themed
+                .iter()
+                .filter(|t| text.hit(&heat::downcase(t)))
+                .count();
+            (hits, themed.len())
+        } else {
+            // Extracted words are already lowercase.
+            let fresh = !matches!(d.extracted.get(&id), Some((l, _)) if *l == listing);
+            if fresh {
+                d.extracted
+                    .insert(id, (listing, keywords::extract(arena.text(listing))));
+            }
+            let words = &d.extracted[&id].1;
+            (words.iter().filter(|t| text.hit(t)).count(), words.len())
+        };
+        let out = [hits as u32, total as u32, counts[0], counts[1], counts[2]];
+        d.glances.insert(id, (inputs, out));
+        out
+    }
+
+    fn read_corpus(&self) -> Corpus {
+        let (ot, it) = (table::OVERLAYS, table::ITEMS);
+        let mut overlays: BTreeMap<u32, Vec<(u32, u8, [u32; 2], [u32; 2])>> = BTreeMap::new();
+        let s = |t: u16, c: u16, r: usize| self.strs(t, c).get(r).copied().unwrap_or([0, 0]);
+        for r in 0..self.rows(ot) {
+            let mode = match self.vstr(ot, col::overlays::MODE, r) {
+                b"hidden" => 0,
+                b"altered" => 1,
+                b"emphasized" => 2,
+                _ => continue,
+            };
+            overlays
+                .entry(self.vu32(ot, col::overlays::LINEAGE_ID, r))
+                .or_default()
+                .push((
+                    self.vu32(ot, col::overlays::ITEM_ID, r),
+                    mode,
+                    s(ot, col::overlays::TITLE, r),
+                    s(ot, col::overlays::BODY, r),
+                ));
+        }
+        let items = (0..self.rows(it))
+            .map(|r| {
+                (
+                    self.vu32(it, col::items::ID, r),
+                    self.vu32(it, col::items::PROFILE_ID, r),
+                    s(it, col::items::TITLE, r),
+                    s(it, col::items::BODY, r),
+                )
+            })
+            .collect();
+        Corpus {
+            overlays,
+            items,
+            texts: BTreeMap::new(),
+        }
+    }
+
     /// Does the job get a card: a profile and a variant (the inner joins).
     fn has_card(&self, d: &Derived, j: &JobCols, i: usize) -> bool {
         let id = j.id.get(i).copied().unwrap_or(0);
@@ -523,17 +669,40 @@ impl Desk {
 
     fn rebuild_joins(&self, d: &mut Derived) {
         let vt = table::CV_VARIANTS;
-        let (vjob, vlabel) = (
-            self.w32(vt, col::cv_variants::JOB_APP_ID),
-            self.strs(vt, col::cv_variants::LABEL),
+        use col::cv_variants as cv;
+        let (vjob, vlabel, vlin, vprof, vtar) = (
+            self.w32(vt, cv::JOB_APP_ID),
+            self.strs(vt, cv::LABEL),
+            self.w32(vt, cv::LINEAGE_ID),
+            self.w32(vt, cv::PROFILE_ID),
+            self.strs(vt, cv::THEME_TARGETS),
         );
+        let s = |v: &[[u32; 2]], r: usize| v.get(r).copied().unwrap_or([0, 0]);
+        let u = |v: &[u32], r: usize| v.get(r).copied().unwrap_or(0);
         d.variant_of.clear();
         for r in 0..self.rows(vt) {
             if let Some(&job) = vjob.get(r) {
-                d.variant_of
-                    .entry(job)
-                    .or_insert(vlabel.get(r).copied().unwrap_or([0, 0]));
+                d.variant_of.entry(job).or_insert(VariantJoin {
+                    label: s(vlabel, r),
+                    lineage: u(vlin, r),
+                    profile: u(vprof, r),
+                    targets: s(vtar, r),
+                });
             }
+        }
+        // A lineage's theme wins when it is a non-empty map (theme_of/1).
+        let lt = table::CV_LINEAGES;
+        let arena = &self.store.arena;
+        let (lid, ltheme, ltar) = (
+            self.w32(lt, col::cv_lineages::ID),
+            self.strs(lt, col::cv_lineages::THEME),
+            self.strs(lt, col::cv_lineages::THEME_TARGETS),
+        );
+        d.lineage_targets.clear();
+        for r in 0..self.rows(lt) {
+            let theme = arena.get(s(ltheme, r));
+            let own = !(theme.is_empty() || theme == b"{}" || theme == b"null");
+            d.lineage_targets.insert(u(lid, r), own.then(|| s(ltar, r)));
         }
         d.profiles = self.w32(table::PROFILES, col::profiles::ID).to_vec();
         d.profiles.sort_unstable();
@@ -570,9 +739,45 @@ impl Desk {
                     }
                 });
         }
+        // Overlays and items that moved reach the cards on their lineage or
+        // profile; one whose row is gone cannot say where it was.
+        for k in core::mem::take(&mut d.overlay_keys) {
+            let ot = table::OVERLAYS;
+            match self.row_of(ot, k) {
+                Some(r) => d
+                    .lineages_dirty
+                    .push(self.vu32(ot, col::overlays::LINEAGE_ID, r)),
+                None => all = true,
+            }
+        }
+        for k in core::mem::take(&mut d.item_keys) {
+            let it = table::ITEMS;
+            match self
+                .row_of(it, k)
+                .map(|r| self.vu32(it, col::items::PROFILE_ID, r))
+            {
+                Some(p) if p != NONE && p != 0 => d.profiles_dirty.push(p),
+                _ => all = true,
+            }
+        }
+        if all || !d.lineages_dirty.is_empty() || !d.profiles_dirty.is_empty() {
+            d.corpus_gen = d.corpus_gen.wrapping_add(1);
+        }
         if all {
             self.rebuild_joins(&mut d);
+        } else if !d.lineages_dirty.is_empty() || !d.profiles_dirty.is_empty() {
+            let reach: Vec<u32> = d
+                .variant_of
+                .iter()
+                .filter(|(_, v)| {
+                    d.lineages_dirty.contains(&v.lineage) || d.profiles_dirty.contains(&v.profile)
+                })
+                .map(|(job, _)| *job)
+                .collect();
+            d.card.extend(reach);
         }
+        d.lineages_dirty.clear();
+        d.profiles_dirty.clear();
         let today = if self.today == NONE { 0 } else { self.today };
         let mut heat_moved = all || !d.heat.is_empty();
 
@@ -707,6 +912,12 @@ impl Desk {
         }
         let mut verdict_rows: Vec<Row<3, 7, 7>> = Vec::with_capacity(changed_jobs.len());
         let mut card_rows: Vec<(u32, Row<20, 8, 3>)> = Vec::new();
+        let generation = d.corpus_gen;
+        let mut corpus: Option<Corpus> = d
+            .corpus
+            .take()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, c)| c);
         {
             let j = self.job_cols();
             for (k, &i) in changed_jobs.iter().enumerate() {
@@ -734,10 +945,13 @@ impl Desk {
                     ],
                 });
                 if self.has_card(&d, &j, i) {
-                    card_rows.push((id, self.card_row(&d, &j, i, ver, &vnames)));
+                    let glance = self.glance(&mut d, &mut corpus, &j, i);
+                    let ver = &d.verdicts[&id];
+                    card_rows.push((id, self.card_row(&d, &j, i, ver, &vnames, glance)));
                 }
             }
         }
+        d.corpus = corpus.map(|c| (generation, c));
         let cards_cols = (&CARD_U32, &CARD_STR, &CARD_F64);
         let verdict_cols = (&VERDICT_U32, &VERDICT_STR, &VERDICT_F64);
         if all {
@@ -1161,9 +1375,8 @@ impl Desk {
     /// Keywords.coverage of `targets` (U+001F-joined, as Theme.parse left
     /// them; empty for Keywords.extract of the job's listing) over the
     /// visible text of a CV. Writes the `coverage` table (word, hit in
-    /// target order) and returns the hit count. With `store`, the job's
-    /// card shows these hits and total while ops are pending.
-    pub fn coverage(&mut self, job: u32, text: &[u8], targets: &[u8], store: bool) -> u32 {
+    /// target order) and returns the hit count.
+    pub fn coverage(&mut self, job: u32, text: &[u8], targets: &[u8]) -> u32 {
         let text = heat::downcase(core::str::from_utf8(text).unwrap_or(""));
         let targets = core::str::from_utf8(targets).unwrap_or("");
         let words = if targets.is_empty() {
@@ -1181,12 +1394,6 @@ impl Desk {
             .collect();
         let n = hits.iter().sum();
         self.put_words(&words, hits);
-        if store {
-            self.glance.insert(job, [n, words.len() as u32]);
-            self.derived
-                .mark(table::JOB_APPS, job, Some(col::job_apps::KEYWORD_HITS));
-            self.raw_dirty = true;
-        }
         n
     }
 
@@ -1342,4 +1549,69 @@ fn same_table(a: &Table, b: &Table, arena: &Arena) -> bool {
             b.col(c.id)
                 .is_some_and(|d| (0..a.n).all(|r| cell_eq(c, r, d, r, arena)))
         })
+}
+
+/// Builds (once) the downcased visible text of `profile`'s CV on `lineage`
+/// (Mask.apply's shown lines, "title\nbody" joined by "\n", as
+/// Keywords.visible_text) and returns its key in `c.texts`. A lineage
+/// without overlays shows its profile's items as written, so every such CV
+/// of a profile shares one text.
+fn ensure_text(arena: &Arena, c: &mut Corpus, profile: u32, lineage: u32) -> (u32, u32) {
+    let ovs: &[(u32, u8, [u32; 2], [u32; 2])] =
+        c.overlays.get(&lineage).map_or(&[], |o| o.as_slice());
+    let key = (profile, if ovs.is_empty() { 0 } else { lineage });
+    if c.texts.contains_key(&key) {
+        return key;
+    }
+    let mut text = String::new();
+    let mut first = true;
+    for &(item, p, title, body) in &c.items {
+        if !(p == NONE || p == 0 || p == profile) {
+            continue;
+        }
+        let ov = ovs.iter().find(|o| o.0 == item);
+        if ov.is_some_and(|o| o.1 == 0) {
+            continue;
+        }
+        let (mut t, mut b) = (arena.text(title), arena.text(body));
+        if let Some(o) = ov.filter(|o| o.1 == 1) {
+            if o.2[1] > 0 {
+                t = arena.text(o.2);
+            }
+            if o.3[1] > 0 {
+                b = arena.text(o.3);
+            }
+        }
+        if !first {
+            text.push('\n');
+        }
+        first = false;
+        text.push_str(t);
+        text.push('\n');
+        text.push_str(b);
+    }
+    c.texts
+        .insert(key, keywords::Text::new(heat::downcase(&text)));
+    key
+}
+
+impl Desk {
+    /// The downcased visible text of `profile`'s CV on `lineage`, through
+    /// the pending view, memoized until an item or overlay moves (for a
+    /// focus's coverage; the cards count theirs in `derive`).
+    #[allow(dead_code)] // compose.rs reads it
+    pub(crate) fn cv_text(&mut self, profile: u32, lineage: u32) -> &keywords::Text {
+        self.derive();
+        let mut d = core::mem::replace(&mut self.derived, Derived::new());
+        let generation = d.corpus_gen;
+        let mut c = d
+            .corpus
+            .take()
+            .filter(|(g, _)| *g == generation)
+            .map_or_else(|| self.read_corpus(), |(_, c)| c);
+        let key = ensure_text(&self.store.arena, &mut c, profile, lineage);
+        d.corpus = Some((generation, c));
+        self.derived = d;
+        &self.derived.corpus.as_ref().unwrap().1.texts[&key]
+    }
 }
