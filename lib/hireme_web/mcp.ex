@@ -113,7 +113,15 @@ defmodule HiremeWeb.Mcp do
   @gym_note "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit."
   @net_note "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit."
 
+  @doc """
+  One directory frame. Besides `tools/list` and `tools/call`, the
+  directory answers `letterbox/tools` with the tools a lease would
+  offer, so a client can show them before it holds one.
+  """
   @spec directory(frame()) :: map()
+  def directory(%{"id" => id, "method" => "letterbox/tools"}),
+    do: %{id: id, result: %{tools: leased_tools()}}
+
   def directory(frame), do: dispatch(frame, directory_tools(), &directory_call/2)
 
   @spec handle(Handle.t(), frame()) :: map()

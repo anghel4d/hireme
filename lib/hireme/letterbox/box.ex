@@ -78,6 +78,7 @@ defmodule Hireme.Letterbox.Box do
     Registry.unregister(@registry, {:producer, caller})
     Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
     Registry.unregister(@registry, {:lineage, CvPair.lineage_id(pair)})
+    Registry.unregister(@registry, {:box, state.id})
     {:stop, :normal, :ok, state}
   end
 
