@@ -91,6 +91,7 @@ defmodule HiremeBench.Server do
           interaction: interaction,
           rev: revision,
           queries: query_count,
+          query_scope: "all_repo_processes",
           job_count: metadata["job_count"],
           samples: samples,
           layer: "domain",
@@ -120,21 +121,26 @@ defmodule HiremeBench.Server do
     }
   end
 
-  def handle_query(_event, _measurements, _metadata, owner) do
-    if self() == owner, do: Process.put(:bench_queries, Process.get(:bench_queries, 0) + 1)
+  def handle_query(_event, _measurements, _metadata, counter) do
+    :ets.update_counter(counter, :queries, 1)
   end
 
   defp count_queries(operation) do
     handler = {__MODULE__, make_ref()}
-    Process.put(:bench_queries, 0)
-    :ok = :telemetry.attach(handler, [:hireme, :repo, :query], &__MODULE__.handle_query/4, self())
+    # Ecto can preload associations in other processes. The isolated benchmark
+    # has no concurrent requests; count those queries as part of the operation.
+    counter = :ets.new(:bench_queries, [:public])
+    :ets.insert(counter, {:queries, 0})
+
+    :ok =
+      :telemetry.attach(handler, [:hireme, :repo, :query], &__MODULE__.handle_query/4, counter)
 
     try do
       operation.()
-      Process.get(:bench_queries)
+      :ets.lookup_element(counter, :queries, 2)
     after
       :telemetry.detach(handler)
-      Process.delete(:bench_queries)
+      :ets.delete(counter)
     end
   end
 end
