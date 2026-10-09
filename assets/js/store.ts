@@ -677,6 +677,18 @@ class Documents {
       const moved = tables?.get(k.table("verdicts"))
       c.focus = moved instanceof Set && c.focus !== "all" ? [...new Set([...(c.focus ?? []), ...moved])] : "all"
     }
+    // A focus shows its card's glance, which the kernel fills in after the
+    // card itself (the idle keyword read): a card that moved recomposes.
+    if (t("cards") && c.focus !== "all") {
+      const moved = tables?.get(k.table("cards"))
+      if (moved instanceof Set) {
+        for (const id of moved) this.focuses.delete(id)
+        c.focus = [...new Set([...(c.focus ?? []), ...moved])]
+      } else {
+        this.focuses.clear()
+        c.focus = "all"
+      }
+    }
     if (["profiles", "items", "cv_variants", "kv_pairs", "narratives"].some(t)) {
       this.roots.clear()
       c.root = true
