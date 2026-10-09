@@ -44,6 +44,8 @@ authentication primitives. Each emits JSONL with raw millisecond samples and
 nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
 Known-ATS scaling uses `bench/ats_fixture.exs` on a disposable canonical fixture
 copy under `/tmp/hireme-perf-ats-`, with `BENCH_HOT_JOBS` selecting the hot cohort.
+`bench/parity.exs` fingerprints public packets, JSON responses, charts, and batch
+decisions so baseline/final runs on identical fixtures can check exact equality.
 
 With the local testbed running, `BENCH_DIR=... BENCH_REV=... BENCH_OUTPUT=... node
 bench/http.mjs` measures authenticated HTTP at closed-loop concurrency 1, 4, and
@@ -202,7 +204,7 @@ Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadsid
 
 `assets/wasm/desk.wat` is the column store: a bump allocator, `select` (score floor, band range, stage, status, batch, profile, and a byte-level substring scan of the haystack) that writes passing row indices in packet order, and `find`. It is 656 bytes of WebAssembly and knows nothing about jobs.
 
-`assets/js/` is the shell: `store.ts` reads the packet directory, copies the body into kernel memory, and views columns as typed arrays with strings decoded on demand; `board.ts` is the filter ADT parsed from and written to the address and the row-major `hjkl` rule with the painted window; `html.ts` is an escaping template tag and a `morph` that changes only what differs; `views.ts` are pure functions from model to HTML, lanes included; `api.ts` is every read and write over HTTP plus the signal feed; `shell.ts` is the model, the update, and the draw. Focus, battleplan, and root come from `/api/focus/:id` and `/api/root/:id`; writes are `POST /api/...` and answer with the new focus or a status code that says why not (`409 fire_hold`, `423 leased`). `/feed/websocket` pushes every desk signal so an open board refreshes when an agent writes.
+`assets/js/` is the shell: `store.ts` reads the packet directory, copies the body into kernel memory, and views columns as typed arrays with strings decoded on demand; `board.ts` is the filter ADT parsed from and written to the address and the row-major `hjkl` rule with the painted window; `html.ts` is an escaping template tag and a `morph` that changes only what differs and skips a slot whose HTML has not changed; `views.ts` are pure functions from model to HTML, lanes included; `api.ts` is every read and write over HTTP plus the signal feed; `shell.ts` is the model, the update, and the draw. Focus, battleplan, and root come from `/api/focus/:id` and `/api/root/:id`; writes are `POST /api/...` and answer with the new focus or a status code that says why not (`409 fire_hold`, `423 leased`). `/feed/websocket` pushes every desk signal so an open board refreshes when an agent writes. Each change re-reads only what it can alter (cards, scoreboard, lanes), one read of each kind is in flight at a time, and the signals for a job with a write in flight fold into that write's single refresh.
 
 ## Types
 
