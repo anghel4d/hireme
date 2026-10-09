@@ -108,10 +108,4 @@ defmodule Hireme.NetTest do
            ) ==
              {:error, {:argument, "shipped_on"}}
   end
-
-  test "ascii says not CRM" do
-    text = Net.ascii(Net.progress(@today))
-    assert text =~ "NET"
-    assert text =~ "Not CRM"
-  end
 end

@@ -154,21 +154,6 @@ defmodule Hireme.Gym do
     )
   end
 
-  @spec ascii(Progress.t()) :: String.t()
-  def ascii(%Progress{} = progress) do
-    topic_line =
-      progress.topics
-      |> Enum.filter(&(&1.count > 0))
-      |> Enum.map_join(" · ", &"#{&1.label} #{&1.count}")
-
-    """
-    GYM  today #{progress.solved_today}/#{progress.target}  streak #{progress.streak}d  week #{progress.solved_week}  pace #{progress.score}
-    #{if topic_line == "", do: "no topics yet", else: topic_line}
-    Conditioning, not the job. FIRE HOLD still holds the hunt.
-    """
-    |> String.trim()
-  end
-
   defp parse_target(n) when is_integer(n) and n in 1..30, do: {:ok, n}
 
   defp parse_target(s) when is_binary(s) do

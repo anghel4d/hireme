@@ -148,26 +148,6 @@ defmodule Hireme.LifeEv do
     }
   end
 
-  @spec ascii(Chart.t()) :: String.t()
-  def ascii(%Chart{} = chart) do
-    width = 24
-    peak = chart.bins |> Enum.map(& &1.count) |> Enum.max(fn -> 1 end)
-
-    bins =
-      Enum.map_join(chart.bins, "\n", fn bin ->
-        bar = String.duplicate("█", round(bin.count / max(peak, 1) * width))
-        "#{pad(bin.lo)}–#{pad(bin.hi)} #{String.pad_trailing(bar, width)} #{bin.count}"
-      end)
-
-    bands =
-      Enum.map_join(chart.bands, "\n", fn row ->
-        "#{String.pad_trailing(row.label, 14)} #{pad(row.count)}  #{row.min}–#{row.max}"
-      end)
-
-    mean = if chart.mean, do: :erlang.float_to_binary(chart.mean, decimals: 1), else: "—"
-    "n=#{chart.n} mean=#{mean} max=#{chart.max || "—"} min=#{chart.min || "—"}\n#{bands}\n#{bins}"
-  end
-
   defp chart_score(n) when is_integer(n), do: clamp(n)
   defp chart_score(%{score_100: n}) when is_integer(n), do: clamp(n)
   defp chart_score(%{"score_100" => n}) when is_integer(n), do: clamp(n)
@@ -312,8 +292,4 @@ defmodule Hireme.LifeEv do
       _ -> ""
     end
   end
-
-  defp pad(n) when n < 10, do: "  #{n}"
-  defp pad(n) when n < 100, do: " #{n}"
-  defp pad(n), do: "#{n}"
 end

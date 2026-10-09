@@ -387,18 +387,6 @@ defmodule Hireme.Heat do
     %Chart{companies: companies, vendors: vendors}
   end
 
-  @spec ascii(Chart.t()) :: String.t()
-  def ascii(%Chart{} = chart) do
-    """
-    HEAT companies
-    #{ascii_rows(chart.companies, 12)}
-    HEAT ATS
-    #{ascii_rows(chart.vendors, 8)}
-    FIRE HOLD. Governor gates the queue. It does not submit.
-    """
-    |> String.trim()
-  end
-
   @doc """
   Decorate a board against a snapshot. The peer classifications and ATS
   load totals are derived once per snapshot and day (`prepare/3`), so a
@@ -507,16 +495,6 @@ defmodule Hireme.Heat do
       ratio: ratio(row.load, cap),
       cooldown_days: cooldown(row.load, cfg.application_load, cap, half_life)
     }
-  end
-
-  defp ascii_rows([], _limit), do: "(none)"
-
-  defp ascii_rows(rows, limit) do
-    rows
-    |> Enum.take(limit)
-    |> Enum.map_join("\n", fn row ->
-      "#{String.pad_trailing(row.label, 22)} #{fmt(row.load)}/#{fmt(row.cap)}  n=#{row.n}"
-    end)
   end
 
   # Parse each distinct URL once per mix/snapshot, not once per candidate/peer.

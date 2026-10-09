@@ -44,19 +44,9 @@ authentication primitives. Each emits JSONL with raw millisecond samples and
 nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
 Known-ATS scaling uses `bench/ats_fixture.exs` on a disposable canonical fixture
 copy under `/tmp/hireme-perf-ats-`, with `BENCH_HOT_JOBS` selecting the hot cohort.
-`bench/parity.exs` fingerprints public packets, JSON responses, charts, and batch
-decisions so baseline/final runs on identical fixtures can check exact equality.
 For browser WebAuthn, the testbed sets Wax's origin to `http://localhost:$PORT`;
 the relying-party ID remains automatic and user verification remains required.
 CDP virtual-authenticator measurements do not include physical hardware or human latency.
-
-With the local testbed running, `BENCH_DIR=... BENCH_REV=... BENCH_OUTPUT=... node
-bench/http.mjs` measures authenticated HTTP at closed-loop concurrency 1, 4, and
-16. It validates successful responses, includes full response-body transfer in
-latency, and reports achieved requests/second separately from quantiles.
-`BENCH_N` defaults to 1,000 and `BENCH_PACKET_N` to 200; `BENCH_CONCURRENCY`
-overrides the concurrency list. These are local workload measurements, not
-production Internet latency or an open-loop capacity/SLO guarantee.
 
 The [performance audit](docs/performance.md) records baseline/final latency
 quantiles, achieved throughput, correctness checks, raw evidence and limitations.

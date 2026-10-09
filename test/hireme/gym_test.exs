@@ -178,12 +178,6 @@ defmodule Hireme.GymTest do
     end
   end
 
-  test "ascii names conditioning and not Life-EV" do
-    text = Gym.ascii(Gym.progress(@today))
-    assert text =~ "GYM"
-    assert text =~ "Conditioning, not the job"
-  end
-
   defp log_solved(title, day) do
     {:ok, _} = Gym.log(%{"title" => title, "topic" => "systems"}, day)
   end

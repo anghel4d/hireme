@@ -108,16 +108,6 @@ defmodule Hireme.Net do
     Repo.all(from e in Entry, order_by: [desc: e.id], limit: ^limit)
   end
 
-  @spec ascii(Progress.t()) :: String.t()
-  def ascii(%Progress{} = progress) do
-    """
-    NET  shipped #{progress.shipped_week}/7d  drafts #{progress.drafts}  observer #{progress.observer_runs}
-    lane #{if progress.lane == "", do: "(no Broadside lane yet)", else: progress.lane}
-    Not CRM. Run Observer. Ship the work. Post it.
-    """
-    |> String.trim()
-  end
-
   defp shipped_since(%Date{} = day) do
     Repo.aggregate(
       from(e in Entry,
