@@ -356,7 +356,8 @@ defmodule Hireme.Keywords do
   Coverage of a listing's target words against the CV a reader would see.
 
   Hidden lines do not count. Matching is a whole term, so `ecs` does not
-  hit inside `specs`.
+  hit inside `specs`. Literal terms use binary search with the same ASCII
+  letter/digit boundaries, without compiling a regular expression per target.
   """
 
   alias Hireme.Keywords.Coverage
@@ -405,9 +406,35 @@ defmodule Hireme.Keywords do
   end
 
   @spec hit?(String.t(), String.t()) :: boolean()
+  def hit?(text, "") do
+    Regex.match?(~r/(^|[^a-z0-9])([^a-z0-9]|$)/u, text)
+  end
+
   def hit?(text, term) do
-    escaped = Regex.escape(String.downcase(term))
-    Regex.match?(~r/(^|[^a-z0-9])#{escaped}([^a-z0-9]|$)/u, text)
+    match_term?(text, String.downcase(term), 0, byte_size(text))
+  end
+
+  defp match_term?(text, term, start, size) do
+    case :binary.match(text, term, scope: {start, size - start}) do
+      :nomatch ->
+        false
+
+      {position, length} ->
+        if term_boundary?(text, position - 1, size) and
+             term_boundary?(text, position + length, size) do
+          true
+        else
+          # A rejected occurrence can overlap the next valid one: xa-a-a / a-a.
+          match_term?(text, term, position + 1, size)
+        end
+    end
+  end
+
+  defp term_boundary?(_text, position, size) when position < 0 or position == size, do: true
+
+  defp term_boundary?(text, position, _size) do
+    byte = :binary.at(text, position)
+    not (byte in ?a..?z or byte in ?0..?9)
   end
 end
 

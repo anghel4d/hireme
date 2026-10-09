@@ -57,6 +57,29 @@ defmodule Hireme.MaskTest do
     assert Keywords.hit?("a columnar ecs tick", "ecs")
   end
 
+  test "literal keywords preserve punctuation, Unicode boundaries, and overlapping matches" do
+    for {text, term, expected} <- [
+          {"c++ and c#", "C++", true},
+          {"xc++", "c++", false},
+          {"c++17", "c++", false},
+          {"use node.js", "node.js", true},
+          {"nodeXjs", "node.js", false},
+          {"xa-a-a", "a-a", true},
+          {"ecs_", "ecs", true},
+          {"éecs", "ecs", true},
+          {"ecsélan", "ecs", true},
+          {"", "", true},
+          {"abc", "", false},
+          {"a b", "", false},
+          {" a", "", true},
+          {"a  b", "", true},
+          {"abc", "abcd", false},
+          {"", "ecs", false}
+        ] do
+      assert Keywords.hit?(text, term) == expected
+    end
+  end
+
   test "a theme parses once from loose keys and round-trips through storage" do
     theme =
       Theme.parse(%{"lead" => " Lead line ", "accent" => "signal", :targets => ["ecs", " "]})
