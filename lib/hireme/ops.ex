@@ -365,7 +365,20 @@ defmodule Hireme.Ops do
             {:replay, deltas}
 
           :boot ->
-            {:boot, %{tables: Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)}}
+            :boot
+        end
+
+      # A boot reads every table from the database, so it holds rows
+      # written around the sequencer too, and the sessions already
+      # attached hear of them as a revision of their own.
+      {state, reply} =
+        if reply == :boot do
+          state = reconcile(state)
+
+          {state,
+           {:boot, %{tables: Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)}}}
+        else
+          {state, reply}
         end
 
       {{:ok, state.rev, reply}, state}
@@ -569,6 +582,30 @@ defmodule Hireme.Ops do
 
       send_delta(next, rev, Map.merge(%{empty_delta() | cards: rows, lanes: lanes?}, raw))
       %{next | rev: rev} |> remember(rev, raw)
+    end
+  end
+
+  defp reconcile(state) do
+    case rediff(state, :all) do
+      {next, %{rows: rows, gone: gone}} when rows == %{} and gone == %{} ->
+        next
+
+      {next, raw} ->
+        rev = Repo.transaction(fn -> bump!(state) end) |> elem(1)
+        gap? = Process.delete({__MODULE__, :gap})
+        {next, cards, _lanes?} = repaint_all(next)
+
+        send_delta(
+          next,
+          rev,
+          Map.merge(%{empty_delta() | cards: cards, lanes: true, scoreboard: true}, raw)
+        )
+
+        next = %{next | rev: rev}
+
+        if gap?,
+          do: remember(%{next | ring: :queue.new(), ring_bytes: 0}, rev, raw, true),
+          else: remember(next, rev, raw)
     end
   end
 
