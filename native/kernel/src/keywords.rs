@@ -46,7 +46,7 @@ pub fn extract(listing: &str) -> Vec<String> {
             None => counts.push((w, 1)),
         }
     }
-    counts.sort_by(|a, b| {
+    counts.sort_unstable_by(|a, b| {
         b.1.cmp(&a.1)
             .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
     });

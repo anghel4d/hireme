@@ -707,7 +707,7 @@ impl Desk {
                 let mut order: Vec<u32> = (0..n as u32).collect();
                 {
                     let by = self.order_by();
-                    order.sort_unstable_by(|&a, &b| by(a, b));
+                    store::sort_u32(&mut order, &by);
                 }
                 self.order = order;
                 moved.clear();

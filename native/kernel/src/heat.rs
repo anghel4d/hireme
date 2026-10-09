@@ -11,6 +11,8 @@
 //! The oracle dump from ops is the proof (native/kernel/test.mjs).
 
 use alloc::collections::BTreeMap;
+
+use crate::store::sort_usize;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -898,6 +900,7 @@ fn workday_tenant(host: &str, path: &str) -> Option<String> {
 }
 
 /// Ats.parse/1.
+#[inline(never)]
 pub fn ats(url: &str) -> Ats {
     let unknown = Ats {
         vendor: UNKNOWN,
@@ -1031,6 +1034,7 @@ pub struct Traits {
     pub family: Family,
 }
 
+#[inline(never)]
 pub fn traits(j: &Job) -> Traits {
     Traits {
         key: normalize(j.company),
@@ -1136,11 +1140,12 @@ fn sum_decay(members: impl Iterator<Item = i64>, half_life: f64) -> f64 {
 }
 
 impl Snapshot {
+    #[inline(never)]
     pub fn build(jobs: &[Job], tr: &[&Traits], today: u32) -> Snapshot {
         let mut hot: Vec<usize> = (0..jobs.len())
             .filter(|&i| hot_stage(jobs[i].stage))
             .collect();
-        hot.sort_unstable_by_key(|&i| jobs[i].id);
+        sort_usize(&mut hot, &|a, b| jobs[a].id.cmp(&jobs[b].id));
         let mut is_hot = vec![false; jobs.len()];
         let mut companies: Vec<Company> = Vec::new();
         let mut by_key: BTreeMap<String, usize> = BTreeMap::new();
@@ -1225,6 +1230,7 @@ impl Snapshot {
     }
 
     /// Heat.verdict/4 (what can_apply answers), for job `i` of `jobs`.
+    #[inline(never)]
     pub fn verdict(&self, jobs: &[Job], tr: &[&Traits], i: usize, today: u32) -> Verdict {
         let job = &jobs[i];
         let t = &tr[i];
@@ -1302,6 +1308,7 @@ impl Snapshot {
 
     /// Heat.chart/2: company rows then vendor rows, each by ratio
     /// descending, then label.
+    #[inline(never)]
     pub fn chart(&self, jobs: &[Job]) -> (Vec<ChartRow>, Vec<ChartRow>) {
         let mut companies: Vec<ChartRow> = self
             .companies
@@ -1345,8 +1352,10 @@ impl Snapshot {
                 .unwrap_or(core::cmp::Ordering::Equal)
                 .then_with(|| a.label.as_bytes().cmp(b.label.as_bytes()))
         };
-        companies.sort_by(by);
-        vendors.sort_by(by);
+        // Labels are distinct (one per company key, one per vendor), so the
+        // order is total and an unstable sort gives Elixir's.
+        companies.sort_unstable_by(by);
+        vendors.sort_unstable_by(by);
         (companies, vendors)
     }
 }
@@ -1479,10 +1488,11 @@ pub fn mix(jobs: &[Job], tr: &[&Traits], members: &[usize], today: u32) -> Vec<(
     let mut existing: Vec<usize> = (0..jobs.len())
         .filter(|&i| hot_stage(jobs[i].stage) && !members.iter().any(|&m| jobs[m].id == jobs[i].id))
         .collect();
-    existing.sort_unstable_by_key(|&i| jobs[i].id);
+    sort_usize(&mut existing, &|a, b| jobs[a].id.cmp(&jobs[b].id));
     let mut ordered: Vec<usize> = members.to_vec();
     // Stable sort by {-score, company_key, id}.
-    ordered.sort_by(|&a, &b| {
+    // {-score, company_key, id} is total, so unstable is Elixir's order.
+    sort_usize(&mut ordered, &|a, b| {
         jobs[b]
             .score
             .cmp(&jobs[a].score)
@@ -1507,7 +1517,7 @@ pub fn can_apply(jobs: &[Job], tr: &[&Traits], i: usize, today: u32) -> Verdict 
     let mut existing: Vec<usize> = (0..jobs.len())
         .filter(|&p| hot_stage(jobs[p].stage))
         .collect();
-    existing.sort_unstable_by_key(|&p| jobs[p].id);
+    sort_usize(&mut existing, &|a, b| jobs[a].id.cmp(&jobs[b].id));
     evaluate(jobs, tr, &existing, &[], i, today)
 }
 
