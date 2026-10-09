@@ -518,24 +518,6 @@ defmodule Hireme.Heat do
     |> Map.put(:cooldown_days, verdict.cooldown_days)
   end
 
-  @doc """
-  The cards whose painted heat reads `job` as a peer: those at the same
-  company (department and role-family penalties are scoped to it) and
-  those on the same ATS vendor (vendor and tenant loads). `cards` are
-  decorated, so their vendor is already parsed; `job` is any card or row.
-  The job's own card is among them when it is in `cards`.
-  """
-  @spec kin([map()], map()) :: [pos_integer()]
-  def kin(cards, job) do
-    key = Org.company_key(company_of(job))
-    vendor = Ats.parse(url_of(job)).vendor
-
-    for card <- cards,
-        (Map.get(card, :ats_vendor) == vendor and vendor != :unknown) or
-          Org.company_key(company_of(card)) == key,
-        do: id_of(card)
-  end
-
   @spec state_name(atom()) :: String.t()
   def state_name(state) when state in [:cool, :warm, :hot, :blocked, :all],
     do: Atom.to_string(state)
