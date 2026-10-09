@@ -73,6 +73,7 @@ pub struct Derived {
     varieties: Option<Vec<(u32, String)>>,
     profiles: Vec<u32>,
     leased: Vec<u32>,
+    leases_moved: bool,
     /// Since the last derive: everything, or these jobs.
     all: bool,
     heat: Vec<u32>,
@@ -100,6 +101,7 @@ impl Derived {
             varieties: None,
             profiles: Vec::new(),
             leased: Vec::new(),
+            leases_moved: false,
             all: true,
             heat: Vec::new(),
             card: Vec::new(),
@@ -145,8 +147,9 @@ impl Derived {
             | table::PROFILES
             | table::CV_VARIANTS
             | table::CV_LINEAGES
-            | table::LEASES
             | table::SCOREBOARD_SNAPSHOTS => self.all = true,
+            // A lease only paints the leased flag on its job's card.
+            table::LEASES => self.leases_moved = true,
             table::OVERLAYS => self.overlay_keys.push(key),
             table::ITEMS => self.item_keys.push(key),
             NONE_TABLE => self.all = true,
@@ -774,6 +777,16 @@ impl Desk {
         if all || !d.lineages_dirty.is_empty() || !d.profiles_dirty.is_empty() {
             d.corpus_gen = d.corpus_gen.wrapping_add(1);
         }
+        if d.leases_moved && !all {
+            // The jobs whose lease came or went: the two sorted lists' difference.
+            let mut now = self.w32(table::LEASES, col::leases::ID).to_vec();
+            now.sort_unstable();
+            let only = |a: &[u32], b: &[u32]| a.iter().filter(|x| b.binary_search(x).is_err()).copied().collect::<Vec<_>>();
+            d.card.extend(only(&now, &d.leased));
+            d.card.extend(only(&d.leased, &now));
+            d.leased = now;
+        }
+        d.leases_moved = false;
         if all {
             d.varieties = None;
             self.rebuild_joins(&mut d);

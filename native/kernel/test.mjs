@@ -334,6 +334,12 @@ async function property(seed) {
         tables.push(rowsTable("cv_variants", fresh.filter((j) => M.variants.has(j.id)).map((j) => ({ id: 1000 + j.id, job_app_id: j.id, profile_id: 0, lineage_id: 0, label: M.variants.get(j.id) }))))
       }
       if (gone.length) tables.push(["gone", { table: gone.map(() => S.table.job_apps), id: gone }])
+      // A lease taken or handed back: the registry's leases, whole.
+      if (r.f() < 0.3 && ids.length) {
+        const id = r.pick(ids)
+        M.leases.has(id) ? M.leases.delete(id) : M.leases.add(id)
+        tables.push(rowsTable("leases", [...M.leases].map((id) => ({ id }))))
+      }
       K.ingest(frame("PATCH", ++rev, tables))
     } else if (roll < 0.83) {
       log.push("boot")
