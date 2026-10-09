@@ -103,6 +103,7 @@ defmodule HiremeBench.Server do
           queries: query_count,
           query_scope: "all_repo_processes",
           job_count: metadata["job_count"],
+          scenario: metadata["scenario"] || "canonical_unknown_ats",
           samples: samples,
           layer: "domain",
           schedulers: :erlang.system_info(:schedulers_online)

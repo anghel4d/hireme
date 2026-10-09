@@ -386,15 +386,26 @@ defmodule Hireme.Heat do
     |> String.trim()
   end
 
-  @doc "Decorate a board while classifying each hot peer only once."
+  @doc "Decorate a board with request-local peer classifications and ATS load totals."
   @spec decorate_all([map()], map(), Config.t(), Date.t()) :: [map()]
-  def decorate_all(cards, snapshot, cfg \\ config(), today \\ Date.utc_today()) do
+  def decorate_all(cards, snapshot, cfg \\ config(), today \\ Date.utc_today())
+
+  def decorate_all([], _snapshot, _cfg, _today), do: []
+
+  def decorate_all(cards, snapshot, cfg, today) do
     traits =
       Map.new(snapshot.jobs, fn job ->
-        {id_of(job), {Org.department(job), Org.family(job)}}
+        {id_of(job), {Org.department(job), Org.family(job), job}}
       end)
 
-    snapshot = Map.put(snapshot, :traits, traits)
+    ats = Map.get(snapshot, :ats) || ats_index(snapshot.jobs)
+
+    snapshot =
+      snapshot
+      |> Map.put(:traits, traits)
+      |> Map.put(:ats, ats)
+      |> Map.put(:ats_loads, index_ats_loads(snapshot.jobs, ats, today, cfg))
+
     Enum.map(cards, &decorate(&1, snapshot, cfg, today))
   end
 
@@ -514,29 +525,8 @@ defmodule Hireme.Heat do
     increment = increment(job, company_peers, cfg, snapshot && Map.get(snapshot, :traits))
     projected = round4(company_load + increment)
 
-    vendor_peers =
-      case snapshot do
-        nil ->
-          Enum.filter(
-            others,
-            &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
-          )
-
-        %{vendors: vendors} ->
-          vendors
-          |> Map.get(ats.vendor, %{jobs: []})
-          |> Map.fetch!(:jobs)
-          |> Enum.reject(&same_id?(&1, job))
-      end
-
-    tenant_peers =
-      Enum.filter(
-        vendor_peers,
-        &(ats.tenant != nil and ats_index[url_of(&1)].tenant == ats.tenant)
-      )
-
-    vendor_load = load(vendor_peers, today, cfg.ats_vendor_half_life, cfg)
-    tenant_load = load(tenant_peers, today, cfg.ats_tenant_half_life, cfg)
+    {vendor_load, tenant_load} =
+      ats_peer_loads(job, ats, others, snapshot, today, cfg, ats_index)
 
     batch_vendor_n =
       Enum.count(
@@ -607,6 +597,101 @@ defmodule Hireme.Heat do
       tenant_cap: cfg.ats_tenant_cap,
       cooldown_days: cooldown,
       note: note
+    }
+  end
+
+  defp index_ats_loads(jobs, ats_index, today, cfg) do
+    Enum.reduce(jobs, {%{}, %{}}, fn job, {vendors, tenants} ->
+      ats = ats_index[url_of(job)]
+
+      if ats.vendor == :unknown do
+        {vendors, tenants}
+      else
+        days = age(job, today)
+        vendor_load = decay(cfg.application_load, days, cfg.ats_vendor_half_life)
+        vendors = Map.update(vendors, ats.vendor, vendor_load, &(&1 + vendor_load))
+
+        tenants =
+          if is_nil(ats.tenant) do
+            tenants
+          else
+            tenant_load = decay(cfg.application_load, days, cfg.ats_tenant_half_life)
+            Map.update(tenants, {ats.vendor, ats.tenant}, tenant_load, &(&1 + tenant_load))
+          end
+
+        {vendors, tenants}
+      end
+    end)
+  end
+
+  defp ats_peer_loads(_job, %{vendor: :unknown}, _others, _snapshot, _today, _cfg, _ats_index),
+    do: {0.0, 0.0}
+
+  defp ats_peer_loads(
+         job,
+         ats,
+         _others,
+         %{ats_loads: {vendors, tenants}, traits: traits},
+         today,
+         cfg,
+         ats_index
+       ) do
+    id = id_of(job)
+
+    {own_vendor, own_tenant} =
+      case id && Map.get(traits, id) do
+        {_, _, peer} ->
+          previous = ats_index[url_of(peer)]
+          same_vendor? = ats.vendor != :unknown and previous.vendor == ats.vendor
+          days = age(peer, today)
+
+          vendor =
+            if same_vendor?,
+              do: decay(cfg.application_load, days, cfg.ats_vendor_half_life),
+              else: 0.0
+
+          tenant =
+            if same_vendor? and not is_nil(ats.tenant) and previous.tenant == ats.tenant,
+              do: decay(cfg.application_load, days, cfg.ats_tenant_half_life),
+              else: 0.0
+
+          {vendor, tenant}
+
+        _ ->
+          {0.0, 0.0}
+      end
+
+    {
+      round4(Map.get(vendors, ats.vendor, 0.0) - own_vendor),
+      round4(Map.get(tenants, {ats.vendor, ats.tenant}, 0.0) - own_tenant)
+    }
+  end
+
+  defp ats_peer_loads(job, ats, others, snapshot, today, cfg, ats_index) do
+    vendor_peers =
+      case snapshot do
+        nil ->
+          Enum.filter(
+            others,
+            &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
+          )
+
+        %{vendors: vendors} ->
+          vendors
+          |> Map.get(ats.vendor, %{jobs: []})
+          |> Map.fetch!(:jobs)
+          |> Enum.reject(&same_id?(&1, job))
+      end
+
+    tenant_peers =
+      Enum.filter(
+        vendor_peers,
+        &(ats.tenant != nil and ats_index[url_of(&1)].tenant == ats.tenant)
+      )
+
+    {
+      load(vendor_peers, today, cfg.ats_vendor_half_life, cfg),
+      load(tenant_peers, today, cfg.ats_tenant_half_life, cfg)
     }
   end
 
