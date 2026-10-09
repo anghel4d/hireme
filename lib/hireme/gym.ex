@@ -95,7 +95,7 @@ defmodule Hireme.Gym do
   defp slug(attrs, title) do
     given = Form.string(attrs, :slug)
     slug = Text.slug(if(given == "", do: title, else: given))
-    if given == "" and slug == "", do: {:error, {:argument, "slug"}}, else: {:ok, slug}
+    if slug == "", do: {:error, {:argument, "slug"}}, else: {:ok, slug}
   end
 
   defp upsert_problem!(platform, slug, title, topic, difficulty, url) do

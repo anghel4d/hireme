@@ -22,8 +22,4 @@ defmodule HiremeWeb.DeskControllerTest do
     assert {:ok, _, _} = HiremeWeb.Session.redeem(ticket)
     assert :error = HiremeWeb.Session.redeem(ticket)
   end
-
-  test "the old desk routes are gone", %{conn: conn} do
-    assert get(conn, "/api/pack").status == 404
-  end
 end

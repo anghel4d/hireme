@@ -5,15 +5,6 @@ defmodule Hireme.GymTest do
 
   @today ~D[2026-10-07]
 
-  test "closed atoms parse at the edge and refuse junk" do
-    assert Gym.parse_platform("leetcode") == {:ok, :leetcode}
-    assert Gym.parse_topic("graphs") == {:ok, :graphs}
-    assert Gym.parse_difficulty("hard") == {:ok, :hard}
-    assert Gym.parse_outcome("attempt") == {:ok, :attempt}
-    assert Gym.parse_platform("hackerrank") == :error
-    assert Gym.parse_topic("crm") == :error
-  end
-
   test "daily target is stored in kv and capped" do
     assert {:ok, 5} = Gym.set_target("5")
     assert Hireme.Kv.get("gym", "daily_target").value == "5"
@@ -44,51 +35,46 @@ defmodule Hireme.GymTest do
     assert second.problem.difficulty == :medium
   end
 
-  test "minutes remain strict nonnegative integers, not rounded or trimmed" do
-    for {value, expected} <- [
-          {7, 7},
-          {"7", 7},
-          {"+7", 7},
-          {2.6, 0},
-          {" 7 ", 0},
-          {-1, 0},
-          {"-1", 0},
-          {"7x", 0},
-          {nil, 0}
-        ] do
-      assert {:ok, rep} = Gym.log(%{"title" => "Strict minutes", "minutes" => value}, @today)
-      assert rep.minutes == expected
-    end
-  end
+  # Forms as a page or an agent could send them: closed names, junk, dates,
+  # numbers, under string or atom keys, some fields missing.
+  test "any form logs a rep whose closed fields are members, or names the field it refuses" do
+    :rand.seed(:exsss, {2026, 10, 9})
 
-  test "lane forms prefer truthy string keys before atom keys" do
-    assert {:ok, rep} =
-             Gym.log(
-               %{
-                 :title => nil,
-                 "title" => "Mixed keys",
-                 :platform => :other,
-                 "platform" => "leetcode",
-                 :minutes => 25,
-                 "minutes" => false,
-                 :done_on => @today,
-                 "done_on" => "2020-01-01",
-                 :note => "atom note",
-                 "note" => ""
-               },
-               @today
-             )
+    members = %{
+      platform: Gym.platforms(),
+      topic: Gym.topics(),
+      difficulty: Gym.difficulties(),
+      outcome: Gym.outcomes()
+    }
 
-    assert rep.problem.title == "Mixed keys"
-    assert rep.problem.platform == :leetcode
-    assert {rep.minutes, rep.done_on, rep.note} == {25, ~D[2020-01-01], ""}
-  end
+    results =
+      for i <- 1..150 do
+        form =
+          Hireme.Fixtures.form(
+            Map.merge(members, %{
+              title: ["Two Sum #{i}", "", "!!!", "x"],
+              slug: ["two-sum", "", "!!!", "Ü"],
+              url: ["https://x.test/#{i}", ""],
+              minutes: [0, 7, -1, "9", "x"],
+              note: ["", "n"],
+              done_on: ["2026-10-09", "2026-13-40", "", nil]
+            })
+          )
 
-  test "implicit empty slugs are refused; explicit empty normalized slugs reach the changeset" do
-    assert Gym.log(%{"title" => "!!!"}, @today) == {:error, {:argument, "slug"}}
+        case Gym.log(form, @today) do
+          {:ok, %Gym.Rep{} = rep} ->
+            assert rep.problem.platform in members.platform and rep.problem.topic in members.topic
+            assert rep.problem.difficulty in members.difficulty and rep.outcome in members.outcome
+            assert is_integer(rep.minutes) and rep.minutes >= 0
+            assert match?(%Date{}, rep.done_on)
+            assert rep.problem.title != "" and rep.problem.slug != ""
+            :ok
 
-    assert_raise Ecto.InvalidChangesetError, fn ->
-      Gym.log(%{"title" => "Explicit slug", "slug" => "!!!"}, @today)
-    end
+          {:error, {:argument, field}} when is_binary(field) ->
+            :refused
+        end
+      end
+
+    assert :ok in results and :refused in results
   end
 end

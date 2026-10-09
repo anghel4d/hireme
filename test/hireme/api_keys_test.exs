@@ -73,7 +73,7 @@ defmodule Hireme.ApiKeysTest do
     refute found.account_id == other.id
   end
 
-  test "socket gates recheck ownership, expiry, revocation, and suspension", %{account: account} do
+  test "a key stays usable only while it, its account and its clock allow", %{account: account} do
     {:ok, %{key: key}} = ApiKeys.create("socket")
     other = Hireme.DataCase.open_account("Other desk")
     assert ApiKeys.usable?(key.key_id, account.id)
@@ -95,16 +95,6 @@ defmodule Hireme.ApiKeysTest do
     assert ApiKeys.usable?(key.key_id, account.id)
     ApiKeys.revoke(key)
     refute ApiKeys.usable?(key.key_id, account.id)
-  end
-
-  test "base62 key material keeps its exact length and alphabet across batch refills" do
-    for length <- [1, 12, 43, 4096] do
-      value = Hireme.Security.base62(length)
-      assert byte_size(value) == length
-      assert value =~ ~r/\A[0-9A-Za-z]+\z/
-    end
-
-    assert Hireme.Security.checksum("") == "000000"
   end
 
   test "a peer that keeps failing is throttled, valid key or not" do

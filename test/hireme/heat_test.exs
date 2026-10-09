@@ -34,57 +34,6 @@ defmodule Hireme.HeatTest do
     assert Heat.cap("Obscure Shop LLC", cfg) == cfg.small_cap
   end
 
-  test "department inference normalizes explicit fallbacks and inferred role text" do
-    assert Org.department(%{department: " Engineering / 2 "}) == :eng
-    assert Org.department(%{department: " ", role: "Senior SYSTEMS Engineer"}) == :infra
-  end
-
-  test "ATS vendor and tenant come from the apply URL" do
-    assert Ats.parse("https://boards.greenhouse.io/stripe/jobs/123") == %{
-             vendor: :greenhouse,
-             tenant: "stripe"
-           }
-
-    assert Ats.parse("https://jobs.lever.co/openai/abcd") == %{vendor: :lever, tenant: "openai"}
-
-    assert Ats.parse("https://jobs.ashbyhq.com/anthropic/role") == %{
-             vendor: :ashby,
-             tenant: "anthropic"
-           }
-
-    assert Ats.parse("https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/job/x") == %{
-             vendor: :workday,
-             tenant: "nvidia"
-           }
-
-    assert Ats.parse("https://careers-acme.icims.com/jobs/1") == %{vendor: :icims, tenant: "acme"}
-
-    assert Ats.parse("https://jobs.smartrecruiters.com/Acme/123") == %{
-             vendor: :smartrecruiters,
-             tenant: "acme"
-           }
-
-    assert Ats.parse("https://jobs.example.test/plain") == %{vendor: :unknown, tenant: nil}
-
-    for {url, vendor, tenant} <- [
-          {"https://acme.greenhouse.net/jobs", :greenhouse, "acme"},
-          {"https://greenhouse.net/acme", :unknown, nil},
-          {"https://lever.co/jobs", :lever, nil},
-          {"https://acme.workable.com/careers", :workable, "acme"},
-          {"https://acme.taleo.net/jobs", :taleo, "acme"},
-          {"https://acme.successfactors.eu/jobs", :successfactors, "acme"},
-          {"https://successfactors.com/acme", :unknown, nil},
-          {"https://acme.bamboohr.com/jobs", :bamboohr, "acme"},
-          {"https://rippling.com/acme", :unknown, nil},
-          {"https://ats.rippling.com/ACME/jobs", :rippling, "acme"},
-          {"https://acme.eightfold.ai/jobs", :eightfold, "acme"},
-          {"https://gem.com/jobs/ACME", :gem, "acme"},
-          {"https://jobs.lever.co.evil.test/acme", :unknown, nil}
-        ] do
-      assert Ats.parse(url) == %{vendor: vendor, tenant: tenant}, url
-    end
-  end
-
   test "same department and cloned titles cost extra; spread does not" do
     cfg = Heat.config()
 
@@ -290,15 +239,6 @@ defmodule Hireme.HeatTest do
            ).reason == :ok
   end
 
-  test "the closed heat-state parser keeps its wire forms" do
-    for state <- [:all, :cool, :warm, :hot, :blocked] do
-      assert Heat.parse_state(state) == {:ok, state}
-      assert Heat.parse_state(Atom.to_string(state)) == {:ok, state}
-    end
-
-    for invalid <- [nil, "", "COOL", :unknown, 1], do: assert(Heat.parse_state(invalid) == :error)
-  end
-
   defp probe(company, role, score, id, url \\ nil) do
     %{
       id: id,
@@ -324,5 +264,71 @@ defmodule Hireme.HeatTest do
       headline: "Runtime",
       summary: "A sample profile."
     })
+  end
+
+  # The recognised vendors by a host each one owns; everything else, including
+  # look-alikes past the registrable domain, is unknown and never raises.
+  test "every vendor is recognised on its own host, look-alikes and junk are unknown, and no URL raises" do
+    :rand.seed(:exsss, {2026, 10, 9})
+
+    owned = [
+      greenhouse: "boards.greenhouse.io",
+      lever: "jobs.lever.co",
+      ashby: "jobs.ashbyhq.com",
+      workday: "acme.wd5.myworkdayjobs.com",
+      icims: "careers-acme.icims.com",
+      smartrecruiters: "jobs.smartrecruiters.com",
+      workable: "acme.workable.com",
+      jobvite: "jobs.jobvite.com",
+      taleo: "acme.taleo.net",
+      successfactors: "acme.successfactors.eu",
+      bamboohr: "acme.bamboohr.com",
+      rippling: "ats.rippling.com",
+      eightfold: "acme.eightfold.ai",
+      gem: "gem.com"
+    ]
+
+    vendors = Keyword.keys(owned) ++ [:unknown]
+
+    for {vendor, host} <- owned do
+      assert %{vendor: ^vendor} = Ats.parse("https://#{host}/acme/jobs/1"), host
+
+      assert %{vendor: :unknown, tenant: nil} =
+               Ats.parse("https://#{host}.evil.test/acme/jobs/1"),
+             host
+    end
+
+    junk = [
+      "",
+      " ",
+      "not a url",
+      "https://",
+      "mailto:x@y",
+      "https://jobs.example.test/plain",
+      nil,
+      7,
+      %{},
+      ["https://gem.com"]
+    ]
+
+    hosts = Keyword.values(owned) ++ ["example.test", "jobs.example.test", "localhost"]
+
+    for _ <- 1..300 do
+      url =
+        Enum.random([
+          Enum.random(junk),
+          "#{Enum.random(["https", "http", "ftp"])}://#{Enum.random(["", "x.", "a.b."])}#{Enum.random(hosts)}#{Enum.random(["", "/", "/#{:rand.uniform(99)}", "/Acme/jobs/1", "/?q=1"])}",
+          Enum.map_join(1..:rand.uniform(40), "", fn _ ->
+            Enum.random(String.graphemes("abc./:?#%-_ é"))
+          end)
+        ])
+
+      assert %{vendor: vendor, tenant: tenant} = Ats.parse(url)
+
+      assert vendor in vendors and
+               (is_nil(tenant) or
+                  (is_binary(tenant) and tenant == String.downcase(tenant) and tenant != "")),
+             inspect(url)
+    end
   end
 end

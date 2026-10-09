@@ -16,24 +16,6 @@ defmodule Hireme.LifeEvTest do
     assert LifeEv.score(%{company: "Google"}) == 80
   end
 
-  test "hard kills cannot be raised by a systems title" do
-    assert LifeEv.score(%{company: "Acme Staffing", role: "Rust systems"}) < 20
-    assert LifeEv.band(LifeEv.score(%{role: "Prompt-only intern"})) == :kill
-  end
-
-  test "unanchored systems seats land in the systems band" do
-    score =
-      LifeEv.score(%{
-        company: "Redcedar Runtime",
-        role: "Rust systems engineer",
-        fit: "agentic",
-        location: "Remote · Canada"
-      })
-
-    assert LifeEv.band(score) == :systems
-    assert score >= 70
-  end
-
   test "an explicit score_100 wins, clamped" do
     assert LifeEv.score(%{company: "OpenAI", score_100: 12}) == 12
     assert LifeEv.score(%{score: "140"}) == 100

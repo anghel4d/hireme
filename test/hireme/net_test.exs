@@ -5,40 +5,33 @@ defmodule Hireme.NetTest do
 
   @today ~D[2026-10-07]
 
-  test "closed kinds and channels parse at the edge" do
-    assert Net.parse_kind("observer") == {:ok, :observer}
-    assert Net.parse_kind("draft") == {:ok, :draft}
-    assert Net.parse_channel("x") == {:ok, :x}
-    assert Net.parse_channel("broadside") == {:ok, :broadside}
-    assert Net.parse_kind("contact") == :error
-    assert Net.parse_channel("linkedin-spam") == :error
-  end
+  test "any form logs an entry whose closed fields are members, or names the field it refuses" do
+    :rand.seed(:exsss, {2026, 10, 9})
+    members = %{kind: Net.kinds(), channel: Net.channels()}
 
-  test "mixed-key forms keep wire precedence for kind, text, and dates" do
-    assert {:ok, entry} =
-             Net.log(
-               %{
-                 :kind => :draft,
-                 "kind" => "post",
-                 :title => nil,
-                 "title" => "Wire title",
-                 :shipped_on => nil,
-                 "shipped_on" => "2020-01-01",
-                 :body => "atom body",
-                 "body" => nil,
-                 :url => "atom URL",
-                 "url" => ""
-               },
-               @today
-             )
+    results =
+      for i <- 1..150 do
+        form =
+          Hireme.Fixtures.form(
+            Map.merge(members, %{
+              title: ["Post #{i}", "", " "],
+              url: ["https://x.test/#{i}", ""],
+              body: ["", "b"],
+              shipped_on: ["2026-10-09", "2026-13-40", "", nil]
+            })
+          )
 
-    assert {entry.kind, entry.channel, entry.shipped_on} == {:post, :x, ~D[2020-01-01]}
-    assert {entry.title, entry.body, entry.url} == {"Wire title", "atom body", ""}
+        case Net.log(form, @today) do
+          {:ok, %Net.Entry{} = e} ->
+            assert e.kind in members.kind and e.channel in members.channel and e.title != ""
+            assert is_nil(e.shipped_on) or match?(%Date{}, e.shipped_on)
+            :ok
 
-    assert Net.log(
-             %{"kind" => "post", "title" => "Bad date", "shipped_on" => " 2020-01-01 "},
-             @today
-           ) ==
-             {:error, {:argument, "shipped_on"}}
+          {:error, {:argument, field}} when is_binary(field) ->
+            :refused
+        end
+      end
+
+    assert :ok in results and :refused in results
   end
 end
