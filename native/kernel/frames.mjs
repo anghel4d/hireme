@@ -29,7 +29,7 @@ let h = 0x811c9dc5
 for (const b of schemaBytes) h = Math.imul(h ^ b, 0x01000193) >>> 0
 export const HASH = (h >>> 16) ^ (h & 0xffff)
 export const NONE = 0xffffffff
-export const wireType = (kind) => ({ u32: 1, day: 1, time: 1, str: 2, u64: 3, f64: 4 })[kind]
+export const wireType = (kind) => ({ u32: 1, day: 1, time: 1, str: 2, sym: 2, u64: 3, f64: 4 })[kind]
 
 // ---- encoding -----------------------------------------------------------
 
@@ -56,9 +56,24 @@ export function frame(kind, rev, tables = [], body = null) {
     for (const c of names) {
       const def = S.col[name][c]
       if (!def) throw new Error(`no column ${name}.${c}`)
-      const ty = wireType(def.kind)
+      const ty = def.kind === "sym" ? 5 : wireType(def.kind)
       w.u16(def.id), w.u8(ty), w.u8(0)
-      if (ty === 2) {
+      if (ty === 5) {
+        // The distinct values in order of first sight, then an id per row.
+        const at = new Map()
+        const ids = cols[c].map((s) => (at.has(s ?? "") ? at : at.set(s ?? "", at.size)).get(s ?? ""))
+        const enc = [...at.keys()].map((s) => te.encode(s))
+        const size = enc.reduce((a, b) => a + b.length, 0)
+        const pad = (4 - ((4 + 4 * (enc.length + 1) + size) % 4)) % 4
+        w.u32(4 + 4 * (enc.length + 1) + size + pad + 4 * n)
+        w.u32(enc.length)
+        let o = 0
+        w.u32(0)
+        for (const e of enc) w.u32((o += e.length))
+        for (const e of enc) w.raw(e)
+        for (let i = 0; i < pad; i++) w.u8(0)
+        for (const id of ids) w.u32(id)
+      } else if (ty === 2) {
         const enc = cols[c].map((s) => te.encode(s ?? ""))
         w.u32(4 * (n + 1) + enc.reduce((a, b) => a + b.length, 0))
         let at = 0

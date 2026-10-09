@@ -37,7 +37,9 @@ fn main() {
             "col" if w.len() == 5 => {
                 let ty = match w[4] {
                     "u32" | "day" | "time" => 1,
-                    "str" => 2,
+                    // A sym column is stored like a str one; only its wire
+                    // layout differs.
+                    "str" | "sym" => 2,
                     "u64" => 3,
                     "f64" => 4,
                     _ => panic!("schema.txt:{}: cannot read {line:?}", n + 1),

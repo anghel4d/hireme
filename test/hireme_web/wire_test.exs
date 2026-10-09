@@ -39,6 +39,15 @@ defmodule HiremeWeb.WireTest do
   defp values(3, _n, data), do: for(<<v::little-64 <- data>>, do: v)
   defp values(4, _n, data), do: for(<<v::binary-8 <- data>>, do: v)
 
+  defp values(5, n, data) do
+    <<k::little-32, rest::binary>> = data
+    syms = values(2, k, rest)
+    size = 4 + 4 * (k + 1) + Enum.sum(Enum.map(syms, &byte_size/1))
+    ids_at = size + rem(4 - rem(size, 4), 4)
+    <<_::binary-size(^ids_at), ids::binary-size(4 * ^n)>> = data
+    for <<i::little-32 <- ids>>, do: Enum.at(syms, i)
+  end
+
   defp values(2, n, data) do
     offs_len = 4 * (n + 1)
     <<offs::binary-size(^offs_len), bytes::binary>> = data

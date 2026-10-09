@@ -78,6 +78,9 @@ pub const U32: u8 = 1;
 pub const STR: u8 = 2;
 pub const U64: u8 = 3;
 pub const F64: u8 = 4;
+/// A str column of few distinct values: u32 nuniq | u32 offsets[nuniq + 1]
+/// | bytes | zero pad to 4 | u32 ids[nrows], each id naming a value.
+pub const SYM: u8 = 5;
 
 /// "No value" in a u32 column (a day, a time, a count that is absent).
 pub const NONE: u32 = u32::MAX;
@@ -368,8 +371,24 @@ impl<'a> Col<'a> {
                     return Err(Error::Str);
                 }
             }
+            SYM => {
+                let u = |i: usize| data.get(i * 4..i * 4 + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+                let nuniq = u(0).filter(|&k| k < len / 4).ok_or(Error::Column)?;
+                let base = 4 + (nuniq + 1) * 4;
+                let size = u(nuniq + 1).filter(|&z| z <= len).ok_or(Error::Column)?;
+                let ids = (base + size).next_multiple_of(4);
+                if ids + n * 4 != len || u(1) != Some(0) {
+                    return Err(Error::Column);
+                }
+                if (1..=nuniq).any(|i| u(i) > u(i + 1)) || core::str::from_utf8(&data[base..base + size]).is_err() {
+                    return Err(Error::Str);
+                }
+                if (0..n).any(|r| u(ids / 4 + r).is_none_or(|id| id >= nuniq)) {
+                    return Err(Error::Column);
+                }
+            }
             // An unknown type is skipped whole, like an unknown column.
-            t if t > F64 => {}
+            t if t > SYM => {}
             _ => return Err(Error::Column),
         }
         Ok((
@@ -398,13 +417,39 @@ impl<'a> Col<'a> {
         f64::from_bits(self.u64(i))
     }
 
-    /// The UTF-8 bytes of row `i` of a str column.
+    /// The UTF-8 bytes of row `i` of a str or sym column.
     #[inline]
     pub fn bytes(&self, i: usize) -> &'a [u8] {
+        if self.ty == SYM {
+            return self.sym(self.id_of(i));
+        }
         let base = (self.nrows as usize + 1) * 4;
         let s = u32_at(self.data, i * 4) as usize;
         let e = u32_at(self.data, i * 4 + 4) as usize;
         &self.data[base + s..base + e]
+    }
+
+    /// A sym column's number of distinct values.
+    #[inline]
+    pub fn nsyms(&self) -> usize {
+        u32_at(self.data, 0) as usize
+    }
+
+    /// A sym column's value `k`.
+    #[inline]
+    pub fn sym(&self, k: usize) -> &'a [u8] {
+        let base = 4 + (self.nsyms() + 1) * 4;
+        let s = u32_at(self.data, 4 + k * 4) as usize;
+        let e = u32_at(self.data, 8 + k * 4) as usize;
+        &self.data[base + s..base + e]
+    }
+
+    /// Which value row `i` of a sym column names.
+    #[inline]
+    pub fn id_of(&self, i: usize) -> usize {
+        let n = self.nsyms();
+        let ids = (4 + (n + 1) * 4 + u32_at(self.data, 4 + n * 4) as usize).next_multiple_of(4);
+        u32_at(self.data, ids + i * 4) as usize
     }
 
     /// Row `i` of a str column. The whole column was checked as UTF-8 and

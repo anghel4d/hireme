@@ -15,7 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use wire::schema::{self, col, table};
-use wire::{F64, NONE, STR, U32, U64, Writer};
+use wire::{F64, NONE, STR, SYM, U32, U64, Writer};
 
 /// Bytes of every string column, all tables. Never shrinks except by
 /// [`Store::compact`].
@@ -27,6 +27,11 @@ pub struct Arena {
     /// Bumped whenever existing references stop meaning what they meant
     /// (a clear or a compaction); within an epoch the arena only appends.
     pub epoch: u32,
+    /// The symbols: one reference per distinct string a sym column brought,
+    /// by open addressing on its bytes ([0, 0] empty), so equal values
+    /// share one reference. Emptied by a compaction.
+    syms: Vec<[u32; 2]>,
+    nsyms: usize,
 }
 
 impl Arena {
@@ -38,6 +43,37 @@ impl Arena {
         let at = self.bytes.len() as u32;
         self.bytes.extend_from_slice(s);
         [at, s.len() as u32]
+    }
+
+    /// The one reference for `s` among the symbols, put on first sight.
+    pub fn intern(&mut self, s: &[u8]) -> [u32; 2] {
+        if s.is_empty() {
+            return [0, 0];
+        }
+        if (self.nsyms + 1) * 2 > self.syms.len() {
+            let size = (self.syms.len() * 2).max(256);
+            let old = core::mem::replace(&mut self.syms, vec![[0, 0]; size]);
+            for r in old.into_iter().filter(|r| r[1] > 0) {
+                let k = self.slot(self.get(r));
+                self.syms[k] = r;
+            }
+        }
+        let k = self.slot(s);
+        if self.syms[k][1] == 0 {
+            self.syms[k] = self.put(s);
+            self.nsyms += 1;
+        }
+        self.syms[k]
+    }
+
+    /// The slot holding `s`, or the empty one where it goes.
+    fn slot(&self, s: &[u8]) -> usize {
+        let mask = self.syms.len() - 1;
+        let mut k = s.iter().fold(0x811c_9dc5u32, |h, &c| (h ^ c as u32).wrapping_mul(0x0100_0193)) as usize & mask;
+        while self.syms[k][1] != 0 && self.get(self.syms[k]) != s {
+            k = (k + 1) & mask;
+        }
+        k
     }
 
     #[inline]
@@ -113,11 +149,13 @@ impl Column {
         }
     }
 
-    /// Copies row `r` of a wire column into row `row`.
-    fn write(&mut self, row: usize, c: &wire::Col, r: usize, arena: &mut Arena) {
+    /// Copies row `r` of a wire column into row `row`; a sym column's
+    /// rows take `syms`, its values' references.
+    fn write(&mut self, row: usize, c: &wire::Col, r: usize, arena: &mut Arena, syms: &[[u32; 2]]) {
         match &mut self.data {
             Data::W32(v) => v[row] = c.u32(r),
             Data::W64(v) => v[row] = c.u64(r),
+            Data::Str(v) if c.ty == SYM => v[row] = syms[c.id_of(r)],
             // A row whose offsets split a character is read as empty, so
             // every string in the arena is valid UTF-8.
             Data::Str(v) => {
@@ -246,12 +284,13 @@ impl Table {
         self.cols.clear();
         self.index.clear();
         for c in t.cols() {
-            if c.ty > F64 || self.col(c.id).is_some() {
+            if c.ty > SYM || self.col(c.id).is_some() {
                 continue;
             }
-            let mut col = Column::blank(self.id, c.id, c.ty, self.n);
+            let syms = symbols(&c, arena);
+            let mut col = Column::blank(self.id, c.id, stored(c.ty), self.n);
             for r in 0..self.n {
-                col.write(r, &c, r, arena);
+                col.write(r, &c, r, arena, &syms);
             }
             self.cols.push(col);
         }
@@ -289,19 +328,21 @@ impl Table {
             rows.push(row);
         }
         for c in t.cols() {
-            if c.ty > F64 {
+            if c.ty > SYM {
                 continue;
             }
+            let ty = stored(c.ty);
             if self.col(c.id).is_none() {
-                self.cols.push(Column::blank(self.id, c.id, c.ty, self.n));
+                self.cols.push(Column::blank(self.id, c.id, ty, self.n));
             }
+            let syms = symbols(&c, arena);
             let (id, n) = (self.id, self.n);
             let col = self.col_mut(c.id).unwrap();
-            if col.ty != c.ty {
-                *col = Column::blank(id, c.id, c.ty, n);
+            if col.ty != ty {
+                *col = Column::blank(id, c.id, ty, n);
             }
             for (r, &row) in rows.iter().enumerate() {
-                col.write(row, &c, r, arena);
+                col.write(row, &c, r, arena, &syms);
             }
         }
         true
@@ -382,6 +423,8 @@ impl Store {
                 bytes: Vec::new(),
                 live_floor: 0,
                 epoch: 0,
+                syms: Vec::new(),
+                nsyms: 0,
             },
             tables: Vec::new(),
             rev: 0,
@@ -491,6 +534,8 @@ impl Store {
         self.arena.live_floor = new.len();
         self.arena.bytes = new;
         self.arena.epoch += 1;
+        self.arena.syms.clear();
+        self.arena.nsyms = 0;
     }
 
     /// The raw tables as one BOOT frame; ingesting it into an empty kernel
@@ -629,4 +674,23 @@ pub fn sort_usize(v: &mut [usize], cmp: &dyn Fn(usize, usize) -> core::cmp::Orde
 #[inline(never)]
 pub fn sort_u32(v: &mut [u32], cmp: &dyn Fn(u32, u32) -> core::cmp::Ordering) {
     v.sort_unstable_by(|a, b| cmp(*a, *b));
+}
+
+/// How a wire column is held: a sym column as a str one.
+fn stored(ty: u8) -> u8 {
+    if ty == SYM { STR } else { ty }
+}
+
+/// A sym column's values as interned references (a value whose offsets
+/// split a character is empty); nothing for any other column.
+fn symbols(c: &wire::Col, arena: &mut Arena) -> Vec<[u32; 2]> {
+    if c.ty != SYM {
+        return Vec::new();
+    }
+    (0..c.nsyms())
+        .map(|k| {
+            let b = c.sym(k);
+            if core::str::from_utf8(b).is_ok() { arena.intern(b) } else { [0, 0] }
+        })
+        .collect()
 }
