@@ -598,7 +598,7 @@ kbd {
 }
 .campaign { border-right: 1px solid var(--line); padding: 0.4rem; background: var(--browse); }
 /* The battleplan's slots are drawn apart but lay out as the campaign's own children. */
-.campaign > [data-slot] { display: contents; }
+.campaign > div[data-slot] { display: contents; }
 
 .stage {
   width: 100%;
@@ -643,6 +643,7 @@ kbd {
 .paper section { margin-top: 1.1rem; }
 .paper h3 { margin: 0 0 0.4rem; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 .line { padding: 0.45rem 0; border-top: 1px solid var(--line); }
+.line[data-action="line"] { cursor: pointer; }
 .line.is-altered { background: color-mix(in oklab, var(--accent) 8%, transparent); margin: 0 -0.4rem; padding: 0.45rem 0.4rem; }
 .line.is-emphasized { box-shadow: inset 2px 0 0 var(--accent); }
 .line h4 { margin: 0; font-size: 0.92rem; }
