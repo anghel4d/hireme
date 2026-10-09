@@ -280,11 +280,6 @@ defmodule HiremeWeb.WireTest do
           score_100: 80,
           heat_override: false,
           heat_override_reason: nil,
-          keyword_hits: 2,
-          keyword_total: 3,
-          mask_hidden: 0,
-          mask_altered: 1,
-          mask_emphasized: 0,
           inserted_at: @at,
           updated_at: @at
         },
@@ -316,11 +311,6 @@ defmodule HiremeWeb.WireTest do
           score_100: 40,
           heat_override: false,
           heat_override_reason: nil,
-          keyword_hits: 0,
-          keyword_total: 0,
-          mask_hidden: 0,
-          mask_altered: 0,
-          mask_emphasized: 0,
           inserted_at: @at,
           updated_at: @at
         }

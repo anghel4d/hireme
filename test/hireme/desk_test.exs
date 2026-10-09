@@ -8,7 +8,7 @@ defmodule Hireme.DeskTest do
   alias Hireme.Desk.Filters
   alias Hireme.Repo
 
-  test "glance numbers follow the mask, and the root text stays put" do
+  test "a focus follows the mask, and the root text stays put" do
     profile = profile()
 
     experience =
@@ -36,10 +36,6 @@ defmodule Hireme.DeskTest do
         ]
       })
 
-    assert job.keyword_hits == 1
-    assert job.keyword_total == 2
-    assert job.mask_altered == 1
-    assert job.mask_hidden == 1
     assert job.current_stage == :fire_ready
     assert job.pips == "DDDDDAPPPP"
 
@@ -59,7 +55,7 @@ defmodule Hireme.DeskTest do
     assert Enum.any?(lines, &(&1.body =~ "structure-of-arrays"))
   end
 
-  test "a bare opening returns the persisted glance using its newly stored lineage theme" do
+  test "a bare opening returns the persisted row and its newly stored lineage theme" do
     profile = profile()
     item(profile, %{body: "Elixir systems"})
 
@@ -72,8 +68,6 @@ defmodule Hireme.DeskTest do
       })
 
     assert added == Repo.get!(Hireme.Desk.Job, added.id)
-    assert {added.keyword_hits, added.keyword_total} == {1, 2}
-    assert {added.mask_hidden, added.mask_altered, added.mask_emphasized} == {0, 0, 0}
     assert Enum.find(Desk.rail(added), &(&1.key == :discovered)).note == "Ready for review"
     focus = Desk.focus(added.id)
     assert focus.coverage.hits == ["elixir"]
@@ -111,8 +105,6 @@ defmodule Hireme.DeskTest do
         })
 
       assert added == Repo.get!(Hireme.Desk.Job, added.id)
-      assert {added.keyword_hits, added.keyword_total} == {2, 3}
-      assert {added.mask_hidden, added.mask_altered, added.mask_emphasized} == {1, 1, 1}
       assert Repo.get!(Hireme.Desk.Job, first.id) == first
       focus = Desk.focus(added.id)
       original = Desk.focus(first.id)
@@ -148,12 +140,12 @@ defmodule Hireme.DeskTest do
         item(other_profile, %{body: "Elixir"})
         added = job(other_profile, %{company: "Tenant employer", theme: %{targets: ["elixir"]}})
         assert added == Repo.get!(Hireme.Desk.Job, added.id)
-        assert {added.keyword_hits, added.keyword_total, added.mask_hidden} == {1, 1, 0}
+        assert overlays_on(added) == 0
         added
       end)
 
     refute own.employer_id == foreign.employer_id
-    assert Repo.get!(Hireme.Desk.Job, own.id).mask_hidden == 1
+    assert overlays_on(own) == 1
     assert Repo.get(Hireme.Desk.Job, foreign.id) == nil
   end
 
@@ -275,5 +267,10 @@ defmodule Hireme.DeskTest do
            ]
 
     assert Enum.map(Desk.list_cards(%Filters{status: :all, min_score: 90}), & &1.id) == [high.id]
+  end
+
+  defp overlays_on(job) do
+    lineage = Hireme.CvPair.lineage_id(Hireme.CvPair.bind!(job.id))
+    Repo.aggregate(from(o in Hireme.Desk.Overlay, where: o.lineage_id == ^lineage), :count)
   end
 end

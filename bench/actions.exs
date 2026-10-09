@@ -100,10 +100,6 @@ defmodule HiremeBench.Actions do
         added = ok(result)
         true = added == Repo.get!(Job, added.id)
 
-        true =
-          {added.keyword_hits, added.keyword_total, added.mask_hidden, added.mask_altered,
-           added.mask_emphasized} == {2, 2, 0, 1, 0}
-
         pair = CvPair.bind!(added.id)
         true = CvPair.lineage_id(pair) == lineage_id and CvPair.job_id(pair) == added.id
         focus = Desk.focus(added.id)
@@ -181,11 +177,11 @@ defmodule HiremeBench.Actions do
       no_cleanup
     )
 
-    for {name, mode, field} <- [
-          {"mask_hide_shared_2", :hidden, :mask_hidden},
-          {"mask_alter_shared_2", :altered, :mask_altered},
-          {"mask_emphasize_shared_2", :emphasized, :mask_emphasized},
-          {"mask_restore_shared_2", :inherit, nil}
+    for {name, mode} <- [
+          {"mask_hide_shared_2", :hidden},
+          {"mask_alter_shared_2", :altered},
+          {"mask_emphasize_shared_2", :emphasized},
+          {"mask_restore_shared_2", :inherit}
         ] do
       change =
         if mode == :inherit,
@@ -212,14 +208,6 @@ defmodule HiremeBench.Actions do
         fn _ -> Desk.put_overlay(job.id, item.id, change) end,
         fn result, _ ->
           assert_job(result, job.id, %{})
-
-          for id <- [job.id, sibling.id] do
-            row = Repo.get!(Job, id)
-
-            if field,
-              do: true = Map.fetch!(row, field) == 1,
-              else: true = {row.mask_hidden, row.mask_altered, row.mask_emphasized} == {0, 0, 0}
-          end
 
           overlay = Repo.get_by(Overlay, lineage_id: lineage_id, item_id: item.id)
           if mode == :inherit, do: true = is_nil(overlay), else: true = overlay.mode == mode

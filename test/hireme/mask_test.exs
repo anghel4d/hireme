@@ -3,7 +3,6 @@ defmodule Hireme.MaskTest do
 
   alias Hireme.Cv
   alias Hireme.Keywords
-  alias Hireme.Keywords.Coverage
   alias Hireme.Mask
   alias Hireme.Mask.Line
   alias Hireme.Theme
@@ -41,15 +40,10 @@ defmodule Hireme.MaskTest do
     coverage = Keywords.coverage(["ecs", "theatre"], Mask.apply(items, overlays))
     assert coverage.hits == ["ecs"]
     assert coverage.misses == ["theatre"]
-    assert Coverage.hit(coverage) == 1
-    assert Coverage.total(coverage) == 2
-    assert Coverage.percent(coverage) == 50
 
     root = Keywords.coverage(["ecs", "theatre"], Mask.apply(items, []))
     assert root.hits == ["theatre"]
     assert root.misses == ["ecs"]
-
-    assert Mask.counts(overlays) == %{hidden: 1, altered: 1, emphasized: 0}
   end
 
   test "ecs does not match inside a longer token" do

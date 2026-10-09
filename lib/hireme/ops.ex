@@ -64,8 +64,7 @@ defmodule Hireme.Ops do
        ~w(id profile_id employer_id batch_id company role location listing_url canonical_url
           listing heat status next_action next_due source stage_on current_stage pips
           stage_notes freshness gate fit squad department score_100 heat_override
-          heat_override_reason keyword_hits keyword_total mask_hidden mask_altered
-          mask_emphasized)a},
+          heat_override_reason)a},
     profiles: {Hireme.Corpus.Profile, ~w(id user_id slug name headline summary)a},
     items:
       {Hireme.Corpus.Item, ~w(id profile_id kind key title body org span position keywords)a},
@@ -839,9 +838,6 @@ defmodule Hireme.Ops do
 
       {kind, id, _, _} when kind in [:next, :note] ->
         [{:job_apps, :id, [id]}]
-
-      {:glance, id} ->
-        job_groups(id)
 
       {:generation, id} ->
         [{:cv_lineages, :id, [lineage_of(id)]}]
