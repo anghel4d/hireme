@@ -223,15 +223,6 @@ defmodule Hireme.Ops do
   end
 
   @doc """
-  Start the account's sequencer and load its tables now, without
-  waiting, so the session that follows a page load attaches warm.
-  """
-  @spec prewarm(pos_integer()) :: :ok
-  def prewarm(account_id) when is_integer(account_id) do
-    GenServer.cast(server(account_id), :prewarm)
-  end
-
-  @doc """
   The account's prepared heat snapshot for today, for judging many
   applications at once. Read here, in the
   caller, so an agent's read never waits behind the account's writes.
@@ -443,8 +434,6 @@ defmodule Hireme.Ops do
   end
 
   @impl true
-  def handle_cast(:prewarm, state), do: {:noreply, warm(state)}
-
   def handle_cast({:touch, ids}, state) do
     {:noreply, state |> warm() |> settle([{:leases, :id, ids}])}
   end

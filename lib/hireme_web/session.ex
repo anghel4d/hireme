@@ -69,7 +69,8 @@ defmodule HiremeWeb.Session do
     raw: false,
     early: false,
     acct_dirty: false,
-    rest: nil
+    rest: nil,
+    board: nil
   ]
 
   # ---- Tickets: how a browser reaches the gate ----
@@ -173,7 +174,8 @@ defmodule HiremeWeb.Session do
   defp early(s, %{"raw" => "1"} = query) do
     snapshot = int_param(query["rev"])
     send(self(), {__MODULE__, :early_boot, snapshot})
-    %{s | raw: true, client_id: int_param(query["cid"])}
+    board = if query["board"], do: int_param(query["board"])
+    %{s | raw: true, client_id: int_param(query["cid"]), board: board}
   end
 
   defp early(s, _query), do: s
@@ -431,12 +433,37 @@ defmodule HiremeWeb.Session do
   # encoded only after the board has left, in a callback of its own so a
   # WebSocket sends the board as its own message; any later delta waits
   # for it, and `done` (a stream's FIN) follows it.
+  # A page that came with the board at this very rev gets only the rest.
   defp boot(s, write, rev, tables, account, done) do
     {board, rest} = split_boot(tables)
-    body = [Packet.static_lookups(), raw_boot(board), account]
-    write.(Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag))
+    if s.board != rev, do: write.(board_frame(rev, board, account))
     send(self(), {__MODULE__, :rest})
     %{s | rest: {write, done, rev, rest}}
+  end
+
+  defp board_frame(rev, board, account) do
+    body = [Packet.static_lookups(), raw_boot(board), account]
+    Packet.frame(:boot, rev, body, deflate: true, flags: @end_flag)
+  end
+
+  @doc """
+  The board's BOOT frame at the account's current rev, for the page to
+  carry inline: the first card then waits on no socket. The page's
+  connection names that rev (`board=`) and gets only the rest, or the
+  whole BOOT again if the desk moved in between. Read in a process of its
+  own, so the request's process takes no subscription.
+  """
+  @spec board(pos_integer(), pos_integer()) :: {non_neg_integer(), binary()}
+  def board(account_id, session_id) do
+    fn ->
+      Repo.put_account(account_id)
+      {:ok, rev, {:boot, %{tables: tables}}} = Ops.attach(account_id, nil)
+      {board, _rest} = split_boot(tables)
+      account = HiremeWeb.Account.tables(account_id, session_id)
+      {rev, IO.iodata_to_binary(board_frame(rev, board, account))}
+    end
+    |> Task.async()
+    |> Task.await()
   end
 
   defp flush_rest(%{rest: nil} = s), do: s
