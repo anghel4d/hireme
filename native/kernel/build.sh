@@ -43,11 +43,10 @@ for crate in wire kernel; do
 done
 cp "$repo/priv/wire/schema.txt" "$base/src/priv/wire/"
 
+# Always from a clean target: a build that reuses one can lay the same
+# code out differently from a fresh one.
 target="$base/target"
-if [[ "${1:-}" == "--check" ]]; then
-  target="$base/check-target"
-  rm -rf "$target"
-fi
+rm -rf "$target"
 
 sysroot="$("$rustc" --print sysroot)"
 # Later remaps win, so the most specific prefix goes last.
