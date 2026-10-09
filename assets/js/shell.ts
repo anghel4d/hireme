@@ -426,16 +426,16 @@ export class Shell {
       case "battleplan":
         return focus
           ? h`<div class="battleplan-wrap">${views.battleplan(focus, m.refusal, mark)}</div>`
-          : views.waiting("battleplan", "Streaming the battleplan…")
+          : views.connecting()
       case "root": {
         const root = this.rootProfile()
         const r = root === null ? null : this.desk.root(root)
-        return r ? h`<div class="root-wrap">${views.rootView(r)}</div>` : views.waiting("root", "Streaming the root CV…")
+        return r ? h`<div class="root-wrap">${views.rootView(r)}</div>` : views.connecting()
       }
       case "gym":
-        return lanes ? h`<div class="lane-wrap">${views.gymView(lanes, m.laneError)}</div>` : views.waiting("gym", "Streaming the gym…")
+        return lanes ? h`<div class="lane-wrap">${views.gymView(lanes, m.laneError)}</div>` : views.connecting()
       case "net":
-        return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : views.waiting("net", "Streaming the net lane…")
+        return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : views.connecting()
       case "settings":
         return h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`
       case "board":
@@ -485,14 +485,8 @@ export class Shell {
     const height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
     if (this.plane.style.height !== height) this.plane.style.height = height
     this.cards.set(parts)
-    this.set("#empty", m.count === 0 ? (d.status === "connecting" ? views.waiting("boot", "Connecting to the desk…") : views.emptyBoard()) : raw(""))
-    const row = m.appId === null ? -1 : d.rowOf(m.appId)
-    this.set(
-      "#focus-slot",
-      focus ? views.focusPanel(focus, m.index >= 0, m.sheet, m.refusal, mark)
-      : row >= 0 ? views.focusSkeleton(d, row, m.sheet)
-      : views.emptyFocus(),
-    )
+    this.set("#empty", m.count === 0 ? (d.n === 0 ? views.connecting() : views.emptyBoard()) : raw(""))
+    this.set("#focus-slot", focus ? views.focusPanel(focus, m.index >= 0, m.sheet, m.refusal, mark) : views.emptyFocus())
   }
 
   private set(selector: string, html: Raw): void {

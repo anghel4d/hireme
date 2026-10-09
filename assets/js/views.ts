@@ -356,45 +356,9 @@ function excerpt(text: string): string {
   return t.length > 360 ? `${t.slice(0, 360)}…` : t
 }
 
-/**
- * The focus drawn from the card's own columns while its full focus is
- * still streaming: the same frame as the selection, never a blank panel.
- */
-export function focusSkeleton(store: Rows, row: number, sheet: boolean): Raw {
-  const t = store.tables
-  const id = store.column("id")[row] ?? 0
-  const score = store.column("score")[row] ?? 0
-  const stage = t.stages[store.column("stage")[row] ?? 0]
-  const next = store.str("next_action").at(row)
-  const due = days(store.column("next_due")[row] ?? NONE)
-  return h`
-    <aside id="focus" class="focus is-streaming ${sheet ? "is-sheet" : ""}" aria-busy="true">
-      <header>
-        <p class="kicker"><span>JobApp${id}</span> ${scorePill(score, bandOf(score, t))} <span>${store.str("cv_label").at(row)}</span></p>
-        <h2>${store.str("company").at(row)}</h2>
-        <p class="sub">${store.str("role").at(row)}</p>
-      </header>
-      <div>
-        <div class="meta">
-          <span class="pips">${[...store.str("pips").at(row)].map((p) => h`<i class="pip pip-${p}"></i>`)}</span>
-          <span class="stage-name">${stage?.label ?? ""}</span>
-        </div>
-        <p class="sub">${stage?.hint ?? ""}</p>
-      </div>
-      <p class="sub">${next === "" ? "No next action" : next}${due ? ` · ${shortDate(due)}` : ""}</p>
-      <p class="streaming">Streaming the rest of this application…</p>
-    </aside>`
-}
-
-/** A lens whose state has not arrived yet. */
-export function waiting(id: string, label: string): Raw {
-  return h`
-    <div id="${id}" class="lane">
-      <div class="bp-bar">
-        <button type="button" id="back-${id}" class="ghost" data-action="back">Back</button>
-        <div class="grow"><p class="streaming">${label}</p></div>
-      </div>
-    </div>`
+/** Before the first BOOT there is nothing to draw any lens from. */
+export function connecting(): Raw {
+  return h`<div id="connecting" class="lane"><p class="streaming">Connecting to the desk…</p></div>`
 }
 
 export interface Notice { id: number; text: string }

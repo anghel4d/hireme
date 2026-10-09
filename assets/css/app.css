@@ -309,7 +309,6 @@ kbd {
 
 /* A focus or lens whose state is still streaming in. */
 .streaming { margin: 0; color: var(--faint); font-size: 0.8rem; }
-.focus.is-streaming .pips, .focus.is-streaming .score { opacity: 0.7; }
 .hold-error { color: var(--due); }
 .narrative {
   margin: 0.4rem 0 0.8rem;
