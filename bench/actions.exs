@@ -285,7 +285,7 @@ defmodule HiremeBench.Actions do
       n,
       fn _ -> ok(Gym.set_target(3)) end,
       fn _ -> Gym.set_target(5) end,
-      fn result, _ -> true = ok(result) == 5 and Gym.target() == 5 end,
+      fn result, _ -> true = ok(result) == 5 and Kv.get("gym", "daily_target").value == "5" end,
       no_cleanup
     )
 
@@ -326,7 +326,7 @@ defmodule HiremeBench.Actions do
       fn result, _ ->
         true =
           ok(result) == "https://example.test/bench-lane" and
-            Net.lane() == "https://example.test/bench-lane"
+            Kv.get("net", "broadside_lane").value == "https://example.test/bench-lane"
       end,
       no_cleanup
     )
@@ -386,7 +386,13 @@ defmodule HiremeBench.Actions do
         ok(Letterbox.claim(job.id))
       end,
       fn _pair ->
-        op = %{op_id: System.unique_integer([:positive]), kind: :score, target: job.id, fields: ["82"]}
+        op = %{
+          op_id: System.unique_integer([:positive]),
+          kind: :score,
+          target: job.id,
+          fields: ["82"]
+        }
+
         {:ok, _rev} = Hireme.Ops.run(Repo.account_id!(), op)
         {:ok, Repo.get!(Job, job.id)}
       end,
