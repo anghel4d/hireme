@@ -62,6 +62,7 @@ pub struct Derived {
     lineages_dirty: Vec<u32>,
     profiles_dirty: Vec<u32>,
     overlay_keys: Vec<u32>,
+    lineage_keys: Vec<u32>,
     /// Overlays deleted since the last derive, with the lineage each was on.
     gone_overlays: Vec<(u32, u32)>,
     item_keys: Vec<u32>,
@@ -96,6 +97,7 @@ impl Derived {
             lineages_dirty: Vec::new(),
             profiles_dirty: Vec::new(),
             overlay_keys: Vec::new(),
+            lineage_keys: Vec::new(),
             gone_overlays: Vec::new(),
             item_keys: Vec::new(),
             corpus_gen: 0,
@@ -149,14 +151,28 @@ impl Derived {
             table::BATCHES
             | table::PROFILES
             | table::CV_VARIANTS
-            | table::CV_LINEAGES
             | table::SCOREBOARD_SNAPSHOTS => self.all = true,
+            // A lineage's theme reaches only the cards on it.
+            table::CV_LINEAGES => self.lineage_keys.push(key),
             // A lease only paints the leased flag on its job's card.
             table::LEASES => self.leases_moved = true,
             table::OVERLAYS => self.overlay_keys.push(key),
             table::ITEMS => self.item_keys.push(key),
             NONE_TABLE => self.all = true,
             _ => {}
+        }
+    }
+
+    /// Row `key` of `t` moved in the columns `cols` (bit = column id; all
+    /// bits when not known).
+    pub fn mark_cols(&mut self, t: u16, key: u32, cols: u64) {
+        if cols == u64::MAX {
+            return self.mark(t, key, None);
+        }
+        let mut c = cols;
+        while c != 0 {
+            self.mark(t, key, Some(c.trailing_zeros() as u16));
+            c &= c - 1;
         }
     }
 
@@ -768,6 +784,20 @@ impl Desk {
             }
         }
         d.gone_overlays.clear();
+        // A lineage row that moved: its theme's targets again, and its cards.
+        for k in core::mem::take(&mut d.lineage_keys) {
+            let lt = table::CV_LINEAGES;
+            match self.row_of(lt, k) {
+                Some(r) => {
+                    let theme = self.vstr(lt, col::cv_lineages::THEME, r);
+                    let own = !(theme.is_empty() || theme == b"{}" || theme == b"null");
+                    let targets = self.strs(lt, col::cv_lineages::THEME_TARGETS).get(r).copied().unwrap_or([0, 0]);
+                    d.lineage_targets.insert(k, own.then_some(targets));
+                    d.lineages_dirty.push(k);
+                }
+                None => all = true,
+            }
+        }
         for k in core::mem::take(&mut d.item_keys) {
             let it = table::ITEMS;
             match self

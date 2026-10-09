@@ -616,8 +616,9 @@ impl Desk {
             }
         }
         let drained = core::mem::take(&mut self.store.touched);
-        for &[t, k] in &drained {
-            self.derived.mark(t as u16, k, None);
+        let cols = core::mem::take(&mut self.store.moved_cols);
+        for (&[t, k], &c) in drained.iter().zip(&cols) {
+            self.derived.mark_cols(t as u16, k, c);
         }
         self.touched.extend(drained);
         if base_moved || pending_moved {

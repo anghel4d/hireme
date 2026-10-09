@@ -151,23 +151,32 @@ impl Column {
 
     /// Copies row `r` of a wire column into row `row`; a sym column's
     /// rows take `syms`, its values' references.
-    fn write(&mut self, row: usize, c: &wire::Col, r: usize, arena: &mut Arena, syms: &[[u32; 2]]) {
+    /// Returns whether the row's value changed; an equal string keeps its
+    /// reference and puts nothing in the arena.
+    fn write(&mut self, row: usize, c: &wire::Col, r: usize, arena: &mut Arena, syms: &[[u32; 2]]) -> bool {
         match &mut self.data {
-            Data::W32(v) => v[row] = c.u32(r),
-            Data::W64(v) => v[row] = c.u64(r),
-            Data::Str(v) if c.ty == SYM => v[row] = syms[c.id_of(r)],
-            // A row whose offsets split a character is read as empty, so
-            // every string in the arena is valid UTF-8.
+            Data::W32(v) => core::mem::replace(&mut v[row], c.u32(r)) != c.u32(r),
+            // f64 words by bits, so a NaN rewritten is unchanged.
+            Data::W64(v) => core::mem::replace(&mut v[row], c.u64(r)) != c.u64(r),
+            Data::Str(v) if c.ty == SYM => {
+                let new = syms[c.id_of(r)];
+                let moved = arena.get(v[row]) != arena.get(new);
+                v[row] = new;
+                moved
+            }
             // The reader checked the column's bytes as UTF-8, so a row is
-            // whole characters when it neither starts nor ends inside one.
+            // whole characters when it neither starts nor ends inside one;
+            // one that splits a character is read as empty, so every string
+            // in the arena is valid UTF-8.
             Data::Str(v) => {
                 let b = c.bytes(r);
                 let cont = |x: Option<u8>| x.is_some_and(|x| x & 0xC0 == 0x80);
-                v[row] = if !cont(b.first().copied()) && !cont(c.after(r)) {
-                    arena.put(b)
-                } else {
-                    [0, 0]
-                };
+                let b = if !cont(b.first().copied()) && !cont(c.after(r)) { b } else { &[][..] };
+                if arena.get(v[row]) == b {
+                    return false;
+                }
+                v[row] = arena.put(b);
+                true
             }
         }
     }
@@ -302,12 +311,12 @@ impl Table {
 
     /// Upserts a wire table by its first column. Rows the frame does not
     /// name are untouched; columns it does not carry are untouched on old
-    /// rows and blank on new ones. Returns false when the table had no
-    /// usable key column.
-    pub fn upsert(&mut self, t: &wire::Table, arena: &mut Arena) -> bool {
-        let Some(keys) = t.cols().find(|c| c.id == 1 && c.ty == U32) else {
-            return false;
-        };
+    /// rows and blank on new ones. Returns the key of each row that is new
+    /// or changed with its changed columns (bit = column id, all for a new
+    /// row), or None when the table had no usable key column.
+    pub fn upsert(&mut self, t: &wire::Table, arena: &mut Arena) -> Option<Vec<(u32, u64)>> {
+        let keys = t.cols().find(|c| c.id == 1 && c.ty == U32)?;
+        let mut moved = Vec::with_capacity(t.nrows as usize);
         let mut rows = Vec::with_capacity(t.nrows as usize);
         for r in 0..t.nrows as usize {
             let k = keys.u32(r);
@@ -323,10 +332,16 @@ impl Table {
                     }
                     self.n += 1;
                     self.index.insert(k, row as u32);
+                    moved.push(r);
                     row
                 }
             };
             rows.push(row);
+        }
+        // Per row: the columns that changed (bit = column id), all for a new row.
+        let mut changed = vec![0u64; rows.len()];
+        for &r in &moved {
+            changed[r] = u64::MAX;
         }
         for c in t.cols() {
             if c.ty > SYM {
@@ -342,11 +357,14 @@ impl Table {
             if col.ty != ty {
                 *col = Column::blank(id, c.id, ty, n);
             }
+            let bit = if c.id < 64 { 1u64 << c.id } else { u64::MAX };
             for (r, &row) in rows.iter().enumerate() {
-                col.write(row, &c, r, arena, &syms);
+                if col.write(row, &c, r, arena, &syms) {
+                    changed[r] |= bit;
+                }
             }
         }
-        true
+        Some((0..rows.len()).filter(|&r| changed[r] != 0).map(|r| (keys.u32(r), changed[r])).collect())
     }
 
     /// Removes rows by key. Returns how many existed.
@@ -411,6 +429,9 @@ pub struct Store {
     /// (table, key) of every row a frame wrote or deleted since the
     /// owner last drained it; key NONE is "the whole table".
     pub touched: Vec<[u32; 2]>,
+    /// Beside each `touched` entry: the columns that changed (bit = column
+    /// id), all bits when not known.
+    pub moved_cols: Vec<u64>,
     pub arena: Arena,
     pub tables: Vec<Table>,
     pub rev: u64,
@@ -420,6 +441,7 @@ impl Store {
     pub const fn new() -> Store {
         Store {
             touched: Vec::new(),
+            moved_cols: Vec::new(),
             arena: Arena {
                 bytes: Vec::new(),
                 live_floor: 0,
@@ -466,6 +488,7 @@ impl Store {
                         x.delete(core::iter::once(ids.u32(r)));
                     }
                     self.touched.push([tid as u32, ids.u32(r)]);
+                    self.moved_cols.push(u64::MAX);
                 }
             }
             return;
@@ -481,14 +504,16 @@ impl Store {
                 self.tables.last_mut().unwrap()
             }
         };
-        if keyed(id) && tbl.upsert(t, arena) {
-            if let Some(keys) = t.col(1) {
-                self.touched
-                    .extend((0..t.nrows as usize).map(|r| [id as u32, keys.u32(r)]));
+        // A row the frame names as it already was moves nothing.
+        if let Some(keys) = keyed(id).then(|| tbl.upsert(t, arena)).flatten() {
+            for (k, cols) in keys {
+                self.touched.push([id as u32, k]);
+                self.moved_cols.push(cols);
             }
         } else {
             tbl.replace(t, arena);
             self.touched.push([id as u32, NONE]);
+            self.moved_cols.push(u64::MAX);
         }
     }
 
@@ -496,6 +521,7 @@ impl Store {
     pub fn clear_desk(&mut self) {
         self.tables.clear();
         self.touched.push([NONE, NONE]);
+        self.moved_cols.push(u64::MAX);
     }
 
     /// Rewrites the arena with only the strings something still points at,
