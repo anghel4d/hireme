@@ -889,10 +889,12 @@ defmodule Hireme.Desk do
     {:ok, Repo.get!(Job, CvPair.job_id(pair))}
   end
 
+  # An agent's read judges heat against the sequencer's snapshot rather
+  # than re-reading every hot job, as a tab's focus does.
   defp perform_held(pair, :get) do
-    case focus(CvPair.job_id(pair)) do
-      nil -> {:error, :not_found}
-      focus -> {:ok, focus}
+    case focuses([CvPair.job_id(pair)], Ops.heat(Repo.account_id!())) do
+      [focus] -> {:ok, focus}
+      [] -> {:error, :not_found}
     end
   end
 
