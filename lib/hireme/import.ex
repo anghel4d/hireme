@@ -597,7 +597,5 @@ defmodule Hireme.Seed do
       merged = Map.merge(variant.theme || %{}, doc["theme"]) |> Theme.parse() |> Theme.to_map()
       variant |> Variant.changeset(%{theme: merged}) |> Repo.update!()
     end
-
-    Desk.refresh_glance!(job.id)
   end
 end

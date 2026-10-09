@@ -102,11 +102,6 @@ defmodule HiremeWeb.JSON do
       freshness: j.freshness,
       gate: j.gate,
       fit: j.fit,
-      keyword_hits: j.keyword_hits,
-      keyword_total: j.keyword_total,
-      mask_hidden: j.mask_hidden,
-      mask_altered: j.mask_altered,
-      mask_emphasized: j.mask_emphasized,
       batch: batch(Map.get(j, :batch))
     }
   end

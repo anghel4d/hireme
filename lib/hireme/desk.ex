@@ -9,7 +9,6 @@ defmodule Hireme.Desk.Card do
   alias Hireme.Pipeline
 
   @job_fields ~w(id company role location heat status next_action next_due stage_on pips
-                 keyword_hits keyword_total mask_hidden mask_altered mask_emphasized
                  freshness gate fit score_100 listing_url canonical_url department squad
                  heat_override heat_override_reason)a
   @joined ~w(stage profile_name profile_slug cv_label batch_code batch_fire batch_ordinal)a
@@ -36,11 +35,6 @@ defmodule Hireme.Desk.Card do
           next_due: Date.t() | nil,
           stage_on: Date.t() | nil,
           pips: String.t(),
-          keyword_hits: non_neg_integer(),
-          keyword_total: non_neg_integer(),
-          mask_hidden: non_neg_integer(),
-          mask_altered: non_neg_integer(),
-          mask_emphasized: non_neg_integer(),
           freshness: atom(),
           gate: atom(),
           fit: String.t(),
@@ -367,7 +361,6 @@ defmodule Hireme.Desk do
           | {:overlay, pos_integer(), pos_integer(), :inherit | map()}
           | {:open_fire, String.t()}
           | {:govern, Batch.t()}
-          | {:glance, pos_integer()}
           | {:perform, CvPair.t(), command()}
           | {:generation, pos_integer()}
 
@@ -593,8 +586,6 @@ defmodule Hireme.Desk do
   Open one application. `attrs` is cast through the `Job` changeset, so
   stage, status, freshness, and gate may arrive as atoms or their names.
   `theme` is parsed once. `overlays` are tailored onto the employer's CV.
-  A bare opening reuses its inserted rows to compute the glance, but still
-  resolves the employer's shared overlays and effective lineage theme.
   """
   @spec create_job(map()) :: {:ok, Job.t()} | {:error, refusal() | Ecto.Changeset.t()}
   def create_job(attrs) when is_map(attrs), do: Ops.exec({:create, attrs})
@@ -642,17 +633,16 @@ defmodule Hireme.Desk do
       |> force_id(Map.get(attrs, :id))
       |> Repo.insert!(returning: [:stage_notes])
 
-    variant =
-      %Variant{}
-      |> Variant.changeset(%{
-        job_app_id: job.id,
-        profile_id: job.profile_id,
-        lineage_id: lineage.id,
-        label: Map.get(attrs, :label) || "CV#{job.id}",
-        theme: Theme.to_map(theme),
-        note: Map.get(attrs, :note) || ""
-      })
-      |> Repo.insert!()
+    %Variant{}
+    |> Variant.changeset(%{
+      job_app_id: job.id,
+      profile_id: job.profile_id,
+      lineage_id: lineage.id,
+      label: Map.get(attrs, :label) || "CV#{job.id}",
+      theme: Theme.to_map(theme),
+      note: Map.get(attrs, :note) || ""
+    })
+    |> Repo.insert!()
 
     overlays = Map.get(attrs, :overlays, [])
 
@@ -669,16 +659,6 @@ defmodule Hireme.Desk do
 
     Letterbox.open!(job.id)
     record!(job.id, "open", "Opened at #{Pipeline.label(draft.current_stage)}")
-
-    # A new line on the shared CV moves every sibling's glance; a bare
-    # opening moves only its own.
-    job =
-      if overlays == [] do
-        refresh_opened!(%Variant{variant | lineage: lineage, job_app: job})
-      else
-        refresh_lineage!(lineage.id)
-        Repo.get!(Job, job.id)
-      end
 
     publish(Signal.application_opened(job.id, lineage.id))
     job
@@ -725,9 +705,6 @@ defmodule Hireme.Desk do
   def execute({:open_fire, code}), do: open_fire(code)
   def execute({:govern, %Batch{} = batch}), do: {:ok, govern(batch)}
 
-  def execute({:glance, job_id}),
-    do: {:ok, job_id |> variant_of() |> List.wrap() |> refresh_variants!()}
-
   def execute({:overlay, job_id, item_id, change}) do
     with :ok <- permit(job_id),
          {:ok, pair} <- CvPair.bind(job_id),
@@ -755,12 +732,6 @@ defmodule Hireme.Desk do
       attrs = if is_function(attrs, 1), do: attrs.(job), else: attrs
       job |> Job.changeset(attrs) |> Repo.update()
     end
-  end
-
-  @spec refresh_glance!(pos_integer()) :: :ok
-  def refresh_glance!(job_id) do
-    {:ok, :ok} = Ops.exec({:glance, job_id})
-    :ok
   end
 
   @spec set_stage(pos_integer(), Pipeline.stage()) :: {:ok, Job.t()} | {:error, refusal()}
@@ -882,13 +853,12 @@ defmodule Hireme.Desk do
     do: CvPair.tailor(pair, item_id, attrs)
 
   defp after_cv_change(pair) do
-    refresh_lineage!(CvPair.lineage_id(pair))
     publish(Signal.cv(CvPair.job_id(pair), CvPair.lineage_id(pair)))
     {:ok, Repo.get!(Job, CvPair.job_id(pair))}
   end
 
-  # An agent's read judges heat against the sequencer's snapshot rather
-  # than re-reading every hot job, as a tab's focus does.
+  # An agent's read judges heat against the account's kept snapshot
+  # rather than re-reading every hot job.
   defp perform_held(pair, :get) do
     case focuses([CvPair.job_id(pair)], Ops.heat(Repo.account_id!())) do
       [focus] -> {:ok, focus}
@@ -1024,67 +994,10 @@ defmodule Hireme.Desk do
     )
   end
 
-  defp variant_of(job_id) do
-    Repo.one!(from v in Variant, where: v.job_app_id == ^job_id, preload: [:lineage, :job_app])
-  end
-
-  defp overlays(%Variant{lineage_id: lineage_id}) do
-    Repo.all(from o in Overlay, where: o.lineage_id == ^lineage_id)
-  end
-
   defp theme_of(%Variant{lineage: %Lineage{theme: theme}}) when theme not in [nil, %{}],
     do: Theme.parse(theme)
 
   defp theme_of(%Variant{theme: theme}), do: Theme.parse(theme)
-
-  defp refresh_opened!(%Variant{job_app: job} = variant) do
-    overlays = overlays(variant)
-    resolved = Mask.apply(Corpus.list_items(variant.profile_id), overlays)
-    changes = glance_changes(variant, resolved, Mask.counts(overlays))
-    Repo.update_all(from(j in Job, where: j.id == ^job.id), set: changes)
-    struct(job, changes)
-  end
-
-  defp glance_changes(%Variant{job_app: job} = variant, resolved, counts) do
-    coverage = Keywords.coverage(Keywords.targets(theme_of(variant), job.listing), resolved)
-
-    [
-      keyword_hits: Keywords.Coverage.hit(coverage),
-      keyword_total: Keywords.Coverage.total(coverage),
-      mask_hidden: counts.hidden,
-      mask_altered: counts.altered,
-      mask_emphasized: counts.emphasized
-    ]
-  end
-
-  # Every variant on a lineage shares the overlays, so they are read once
-  # and each card's numbers are written with one update.
-  defp refresh_lineage!(lineage_id) do
-    from(v in Variant, where: v.lineage_id == ^lineage_id, preload: [:lineage, :job_app])
-    |> Repo.all()
-    |> refresh_variants!()
-  end
-
-  defp refresh_variants!([]), do: :ok
-
-  defp refresh_variants!([%Variant{lineage_id: lineage_id} | _] = variants) do
-    overlays = Repo.all(from o in Overlay, where: o.lineage_id == ^lineage_id)
-    counts = Mask.counts(overlays)
-
-    variants
-    |> Enum.group_by(& &1.profile_id)
-    |> Enum.each(fn {profile_id, group} ->
-      resolved = Mask.apply(Corpus.list_items(profile_id), overlays)
-
-      Enum.each(group, fn %Variant{job_app: %Job{} = job} = variant ->
-        changes = glance_changes(variant, resolved, counts)
-
-        Repo.update_all(from(j in Job, where: j.id == ^job.id),
-          set: changes
-        )
-      end)
-    end)
-  end
 
   # Held by the sequencer and sent after commit; a rolled-back write sends nothing.
   defp publish(%Signal{} = signal), do: Ops.after_commit({:desk_event, signal})

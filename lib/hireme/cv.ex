@@ -249,12 +249,6 @@ defmodule Hireme.Mask do
           required(:mode) => :hidden | :altered | :emphasized,
           optional(atom()) => term()
         }
-  @type counts :: %{
-          hidden: non_neg_integer(),
-          altered: non_neg_integer(),
-          emphasized: non_neg_integer()
-        }
-
   @spec modes() :: [applied()]
   def modes, do: @modes
 
@@ -286,13 +280,6 @@ defmodule Hireme.Mask do
 
   defp resolve(item, %{mode: :emphasized} = overlay) do
     line(item, :emphasized, item.title, item.body, reason(overlay))
-  end
-
-  @spec counts([overlay()]) :: counts()
-  def counts(overlays) do
-    Enum.reduce(overlays, %{hidden: 0, altered: 0, emphasized: 0}, fn
-      %{mode: mode}, acc when mode in @modes -> Map.update!(acc, mode, &(&1 + 1))
-    end)
   end
 
   defp line(item, mode, title, body, reason) do
@@ -329,20 +316,6 @@ defmodule Hireme.Keywords.Coverage do
   defstruct hits: [], misses: []
 
   @type t :: %__MODULE__{hits: [String.t()], misses: [String.t()]}
-
-  @spec hit(t()) :: non_neg_integer()
-  def hit(%__MODULE__{hits: hits}), do: length(hits)
-
-  @spec total(t()) :: non_neg_integer()
-  def total(%__MODULE__{hits: hits, misses: misses}), do: length(hits) + length(misses)
-
-  @spec percent(t()) :: 0..100
-  def percent(%__MODULE__{} = coverage) do
-    case total(coverage) do
-      0 -> 0
-      total -> round(hit(coverage) / total * 100)
-    end
-  end
 end
 
 defmodule Hireme.Keywords do

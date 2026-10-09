@@ -391,12 +391,7 @@ defmodule Hireme.Oracle do
             department: pick(@departments),
             score_100: pick([0, 1, 49, 50, 69, 70, 84, 85, 99, 100, rand(0, 100)]),
             heat_override: chance(0.15),
-            heat_override_reason: pick(["", "  ", "warm intro"]),
-            keyword_hits: rand(0, 10),
-            keyword_total: rand(0, 10),
-            mask_hidden: rand(0, 3),
-            mask_altered: rand(0, 3),
-            mask_emphasized: rand(0, 3)
+            heat_override_reason: pick(["", "  ", "warm intro"])
           })
         )
 

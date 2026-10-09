@@ -105,7 +105,6 @@ defmodule Hireme.CvTest do
     attrs = %{profile_id: profile.id, company: first.company, role: "Retry"}
     assert {:ok, bare} = Desk.create_job(attrs)
     assert bare == Repo.get!(Hireme.Desk.Job, bare.id)
-    assert {bare.keyword_hits, bare.keyword_total, bare.mask_altered} == {1, 1, 1}
     assert CvPair.lineage_id(CvPair.bind!(bare.id)) == lineage.id
 
     changed = Map.put(attrs, :overlays, [%{item_id: kept.id, mode: :hidden}])
@@ -117,7 +116,6 @@ defmodule Hireme.CvTest do
     assert Repo.aggregate(Hireme.Desk.Job, :count) == count
     assert {:ok, additive} = Desk.create_job(attrs)
     assert additive == Repo.get!(Hireme.Desk.Job, additive.id)
-    assert additive.mask_altered == 1
     assert Enum.any?(Desk.focus(additive.id).masks, &(&1.body == "Original"))
   end
 end

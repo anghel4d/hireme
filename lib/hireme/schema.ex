@@ -525,11 +525,6 @@ defmodule Hireme.Desk.Job do
     field :score_100, :integer, default: 50
     field :heat_override, :boolean, default: false
     field :heat_override_reason, :string, default: ""
-    field :keyword_hits, :integer, default: 0
-    field :keyword_total, :integer, default: 0
-    field :mask_hidden, :integer, default: 0
-    field :mask_altered, :integer, default: 0
-    field :mask_emphasized, :integer, default: 0
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :employer, Hireme.Desk.Employer
     belongs_to :batch, Hireme.Desk.Batch
