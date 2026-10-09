@@ -287,8 +287,7 @@ col acct_factors transports 7 str
 # Local only: tables the kernel derives in the browser from the raw tables. They never travel on
 # the wire; they are named here so TypeScript reads them through the same table ABI. cards:
 # Desk.list_cards painted by Heat.decorate_all. verdicts: Heat.verdict per job (what can_apply
-# answers), keyed by job id; has_tenant tells an empty tenant from none. mix: Heat.mix_batch for
-# one batch, members in mix order. coverage: the last Keywords coverage call, targets in order.
+# answers), keyed by job id; has_tenant tells an empty tenant from none.
 # heat_rows: Heat.chart, companies (group 0) then vendors (1). score, varieties, chart_bands,
 # chart_bins: Campaign.scoreboard and LifeEv.chart.
 
@@ -344,16 +343,7 @@ col verdicts tenant_cap 15 f64
 col verdicts cooldown_days 16 u32
 col verdicts note 17 str
 
-table mix 71
-col mix batch_id 1 u32
-col mix job 2 u32
-col mix kept 3 u32
-col mix reason 4 str
-col mix note 5 str
 
-table coverage 72
-col coverage word 1 str
-col coverage hit 2 u32
 
 table heat_rows 21
 col heat_rows group 1 u32

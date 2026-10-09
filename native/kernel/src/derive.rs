@@ -441,10 +441,9 @@ impl Desk {
             s(j::SQUAD),
             s(j::FIT),
         );
-        let (stage, stage_on, score, ho, hor) = (
+        let (stage, stage_on, ho, hor) = (
             s(j::CURRENT_STAGE),
             u(j::STAGE_ON),
-            u(j::SCORE_100),
             u(j::HEAT_OVERRIDE),
             s(j::HEAT_OVERRIDE_REASON),
         );
@@ -460,10 +459,6 @@ impl Desk {
                 fit: arena.text(at(fit, i)),
                 stage: heat::stage_ix(arena.text(at(stage, i))),
                 stage_on: stage_on.get(i).copied().unwrap_or(NONE),
-                score: match w(score, i) {
-                    NONE => 0,
-                    v => v,
-                },
                 heat_override: w(ho, i) == 1,
                 heat_override_reason: arena.text(at(hor, i)),
             })
@@ -1432,114 +1427,6 @@ impl Desk {
         ];
         out.push(vr);
         out
-    }
-}
-
-impl Desk {
-    /// Keywords.coverage of `targets` (U+001F-joined, as Theme.parse left
-    /// them; empty for Keywords.extract of the job's listing) over the
-    /// visible text of a CV. Writes the `coverage` table (word, hit in
-    /// target order) and returns the hit count.
-    pub fn coverage(&mut self, job: u32, text: &[u8], targets: &[u8]) -> u32 {
-        let text = heat::downcase(core::str::from_utf8(text).unwrap_or(""));
-        let targets = core::str::from_utf8(targets).unwrap_or("");
-        let words = if targets.is_empty() {
-            let jt = table::JOB_APPS;
-            let listing = self
-                .row_of(jt, job)
-                .map_or(&b""[..], |r| self.vstr(jt, col::job_apps::LISTING, r));
-            keywords::extract(core::str::from_utf8(listing).unwrap_or(""))
-        } else {
-            keywords::theme_targets(targets)
-        };
-        let hits: Vec<u32> = words
-            .iter()
-            .map(|w| keywords::hit(&text, w) as u32)
-            .collect();
-        let n = hits.iter().sum();
-        self.put_words(&words, hits);
-        n
-    }
-
-    fn put_words(&mut self, words: &[String], hits: Vec<u32>) {
-        let mut t = Table::new(table::COVERAGE);
-        t.n = words.len();
-        let refs = words
-            .iter()
-            .map(|w| self.store.arena.put(w.as_bytes()))
-            .collect();
-        t.cols = vec![
-            Column {
-                id: col::coverage::WORD,
-                ty: STR,
-                data: Data::Str(refs),
-            },
-            Column {
-                id: col::coverage::HIT,
-                ty: U32,
-                data: Data::W32(hits),
-            },
-        ];
-        self.store.put_table(t);
-    }
-
-    /// Heat.mix_batch/2 for one batch, read-only: its members in mix order
-    /// with each verdict, into the `mix` table. Returns the member count.
-    pub fn mix(&mut self, batch: u32) -> u32 {
-        let mut d = core::mem::replace(&mut self.derived, Derived::new());
-        let today = if self.today == NONE { 0 } else { self.today };
-        let jt = table::JOB_APPS;
-        let out: Vec<(u32, bool, heat::Reason, String)> = {
-            let (jobs, tr) = self.heat_rows(&mut d);
-            let mut members: Vec<usize> = (0..jobs.len())
-                .filter(|&i| self.vu32(jt, col::job_apps::BATCH_ID, i) == batch)
-                .collect();
-            // The database returns a batch's rows in id order.
-            crate::store::sort_usize(&mut members, &|a, b| jobs[a].id.cmp(&jobs[b].id));
-            heat::mix(&jobs, &tr, &members, today)
-                .into_iter()
-                .map(|(i, v)| (jobs[i].id, v.allow, v.reason, v.note))
-                .collect()
-        };
-        self.derived = d;
-        let n = out.len();
-        let arena = &mut self.store.arena;
-        let reasons = out
-            .iter()
-            .map(|o| arena.put(o.2.name().as_bytes()))
-            .collect();
-        let notes = out.iter().map(|o| arena.put(o.3.as_bytes())).collect();
-        let mut t = Table::new(table::MIX);
-        t.n = n;
-        t.cols = vec![
-            Column {
-                id: col::mix::BATCH_ID,
-                ty: U32,
-                data: Data::W32(vec![batch; n]),
-            },
-            Column {
-                id: col::mix::JOB,
-                ty: U32,
-                data: Data::W32(out.iter().map(|o| o.0).collect()),
-            },
-            Column {
-                id: col::mix::KEPT,
-                ty: U32,
-                data: Data::W32(out.iter().map(|o| o.1 as u32).collect()),
-            },
-            Column {
-                id: col::mix::REASON,
-                ty: STR,
-                data: Data::Str(reasons),
-            },
-            Column {
-                id: col::mix::NOTE,
-                ty: STR,
-                data: Data::Str(notes),
-            },
-        ];
-        self.store.put_table(t);
-        n as u32
     }
 }
 

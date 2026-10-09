@@ -158,9 +158,12 @@ impl Column {
             Data::Str(v) if c.ty == SYM => v[row] = syms[c.id_of(r)],
             // A row whose offsets split a character is read as empty, so
             // every string in the arena is valid UTF-8.
+            // The reader checked the column's bytes as UTF-8, so a row is
+            // whole characters when it neither starts nor ends inside one.
             Data::Str(v) => {
                 let b = c.bytes(r);
-                v[row] = if core::str::from_utf8(b).is_ok() {
+                let cont = |x: Option<u8>| x.is_some_and(|x| x & 0xC0 == 0x80);
+                v[row] = if !cont(b.first().copied()) && !cont(c.after(r)) {
                     arena.put(b)
                 } else {
                     [0, 0]
@@ -234,8 +237,6 @@ pub fn derived(id: u16) -> bool {
         id,
         table::CARDS
             | table::VERDICTS
-            | table::MIX
-            | table::COVERAGE
             | table::HEAT_ROWS
             | table::SCORE
             | table::VARIETIES

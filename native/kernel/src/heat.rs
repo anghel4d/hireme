@@ -983,7 +983,6 @@ pub struct Job<'a> {
     pub fit: &'a str,
     pub stage: Option<u8>,
     pub stage_on: u32,
-    pub score: u32,
     pub heat_override: bool,
     pub heat_override_reason: &'a str,
 }
@@ -1474,35 +1473,6 @@ fn finish(
     v
 }
 
-/// Heat.mix_batch/2 over the batch's members (in the order the database
-/// returns them, by id) against the hot jobs that are not members. Returns
-/// each member in mix order with its verdict.
-pub fn mix(jobs: &[Job], tr: &[&Traits], members: &[usize], today: u32) -> Vec<(usize, Verdict)> {
-    let mut existing: Vec<usize> = (0..jobs.len())
-        .filter(|&i| hot_stage(jobs[i].stage) && !members.iter().any(|&m| jobs[m].id == jobs[i].id))
-        .collect();
-    sort_usize(&mut existing, &|a, b| jobs[a].id.cmp(&jobs[b].id));
-    let mut ordered: Vec<usize> = members.to_vec();
-    // Stable sort by {-score, company_key, id}.
-    // {-score, company_key, id} is total, so unstable is Elixir's order.
-    sort_usize(&mut ordered, &|a, b| {
-        jobs[b]
-            .score
-            .cmp(&jobs[a].score)
-            .then_with(|| tr[a].key.as_bytes().cmp(tr[b].key.as_bytes()))
-            .then_with(|| jobs[a].id.cmp(&jobs[b].id))
-    });
-    let mut kept: Vec<usize> = Vec::new();
-    let mut out = Vec::with_capacity(ordered.len());
-    for &i in &ordered {
-        let v = evaluate(jobs, tr, &existing, &kept, i, today);
-        if v.allow {
-            kept.push(i);
-        }
-        out.push((i, v));
-    }
-    out
-}
 
 /// Heat.can_apply/2: job `i` against every hot job, read afresh (no
 /// prepared snapshot), as `Desk`'s stage write asks it.
