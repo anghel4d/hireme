@@ -310,8 +310,6 @@ kbd {
   font-size: 0.8rem;
 }
 
-/* A focus or lens whose state is still streaming in. */
-.streaming { margin: 0; color: var(--faint); font-size: 0.8rem; }
 .hold-error { color: var(--due); }
 .narrative {
   margin: 0.4rem 0 0.8rem;
@@ -640,8 +638,7 @@ kbd {
   font-size: 0.8rem;
 }
 .facts { display: flex; flex-wrap: wrap; gap: 0.35rem 0.8rem; margin-top: 0.8rem; color: var(--muted); font-size: 0.82rem; }
-.paper section { margin-top: 1.1rem; }
-.paper h3 { margin: 0 0 0.4rem; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.paper h3 { margin: 1.1rem 0 0.4rem; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 .line { padding: 0.45rem 0; border-top: 1px solid var(--line); }
 .line[data-action="line"] { cursor: pointer; }
 .line.is-altered { background: color-mix(in oklab, var(--accent) 8%, transparent); margin: 0 -0.4rem; padding: 0.45rem 0.4rem; }
@@ -655,8 +652,7 @@ kbd {
 .alter textarea { width: 100%; min-height: 5rem; margin-top: 0.35rem; }
 .alter input { width: 100%; margin: 0.35rem 0; }
 .alter-error { color: var(--due); margin: 0.2rem 0; }
-.masked { margin-top: 1.2rem; }
-.masked .line { opacity: 0.8; }
+.line.is-hidden { opacity: 0.8; }
 
 .empty { padding: 1.2rem; color: var(--muted); }
 

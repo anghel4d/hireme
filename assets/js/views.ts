@@ -1,19 +1,10 @@
-// Pure views: model in, HTML out. Nothing here touches the DOM.
+// Views: model in, HTML out, except the board's cards, which are live
+// nodes written value by value (Cards).
 
 import type { Doc, Focus, HeatRow, Identity, Key, Lanes, Line, Method, Option, Root, Scoreboard, Session, Settings } from "./api.ts"
 import type { Filters } from "./board.ts"
 import { h, raw, when, type Raw } from "./html.ts"
-import type { Mark, Status, Tables } from "./store.ts"
-
-/** A write's state on its card: the desk's mark (pending: sent, not yet answered). */
-export type { Mark }
-
-/** The resident rows a card is drawn from: the desk's view columns. */
-export interface Rows {
-  readonly tables: Tables
-  column(name: string): Uint32Array
-  str(name: string): { at(row: number): string }
-}
+import type { Desk, Mark, Status, Tables } from "./store.ts"
 
 const EPOCH_MS = Date.UTC(1970, 0, 1)
 const NONE = 0xffffffff
@@ -109,7 +100,7 @@ export function scoreboard(s: Scoreboard | null): Raw {
 }
 
 /** A card's every visible value, in the order CARD_WRITERS applies them. */
-export function cardValues(store: Rows, row: number, x: number, y: number, active: boolean, mark: Mark): string[] {
+export function cardValues(store: Desk, row: number, x: number, y: number, active: boolean, mark: Mark): string[] {
   const t = store.tables
   const id = store.column("id")[row] ?? 0
   const score = store.column("score")[row] ?? 0
@@ -262,7 +253,10 @@ export function battleplan(f: Focus, holdError: string | null): Raw {
           <div id="bp-rail" data-slot></div>
           <ul id="bp-events" class="events" data-slot></ul>
         </div>
-        <div id="bp-paper" class="paper-scroll" data-slot></div>
+        <div class="paper-scroll">
+          <article id="bp-paper" class="paper" data-accent="${f.cv.accent}" data-density="${f.cv.density}" data-slot></article>
+          ${when(j.listing !== "", () => h`<p class="sub">${j.listing.trim()}</p>`)}
+        </div>
       </div>
     </div>`
 }
@@ -309,17 +303,6 @@ export function battleplanSlots(f: Focus): { bar: Raw; narrative: Raw; rail: [nu
 
 const NOTE_KEY = 1 << 20
 
-/**
- * The battleplan's CV and listing, drawn into its own slot: a stage, note
- * or next-action write leaves this text alone, so it is neither re-parsed
- * nor walked on those frames.
- */
-export function battleplanPaper(f: Focus, editing: number | null, alterError: string | null, chosen: number | null): Raw {
-  return h`
-    ${paper(f.cv, true, editing, alterError, chosen)}
-    ${when(f.job.listing !== "", () => h`<p class="sub">${f.job.listing.trim()}</p>`)}`
-}
-
 export function rootView(r: Root): Raw {
   return h`
     <div class="root-wrap">
@@ -329,7 +312,7 @@ export function rootView(r: Root): Raw {
       </div>
       <div class="paper-scroll">
         ${narrative(r.narrative)}
-        ${paper(r.cv, false, null, null, null)}
+        ${paper(r.cv)}
       </div>
     </div>`
 }
@@ -346,20 +329,34 @@ function narrative(n: Focus["narrative"]): Raw {
     </section>`
 }
 
-function paper(cv: Doc, editable: boolean, editing: number | null, alterError: string | null, chosen: number | null): Raw {
-  return h`
-    <article id="cv" class="paper" data-accent="${cv.accent}" data-density="${cv.density}">
-      <header>
-        <p class="kicker">${cv.label}</p>
-        ${when(cv.person, () => h`<h2>${cv.person}</h2>`)}
-        <p class="headline">${cv.headline}</p>
-        <p class="summary">${cv.summary}</p>
-        ${when(cv.summary_canonical, () => h`<p class="canonical">Root: ${cv.summary_canonical}${cv.summary_reason ? h`<span> — ${cv.summary_reason}</span>` : ""}</p>`)}
-        <div class="facts">${cv.facts.map((f) => h`<span>${f.title}: ${f.body}</span>`)}</div>
-      </header>
-      ${cv.sections.map((s) => h`<section><h3>${s.label}</h3>${s.lines.map((l) => cvLine(l, editable, editing, alterError, chosen))}</section>`)}
-      ${when(cv.hidden.length, () => h`<section class="masked"><h3>Masked out</h3>${cv.hidden.map((l) => cvLine(l, editable, editing, alterError, chosen))}</section>`)}
-    </article>`
+function paper(cv: Doc): Raw {
+  return h`<article class="paper" data-accent="${cv.accent}" data-density="${cv.density}">${paperBlocks(cv, false, null, null, null).map(([, b]) => b)}</article>`
+}
+
+/**
+ * A CV as an ordered keyed list of blocks: its header, each section's
+ * heading and each line by id. The battleplan draws them into its paper
+ * slot, so hiding, restoring or altering a line parses and patches that
+ * line alone, and a hidden line moves to the masked block rather than
+ * the whole CV being redrawn.
+ */
+export function paperBlocks(cv: Doc, editable: boolean, editing: number | null, alterError: string | null, chosen: number | null): [number, Raw][] {
+  const blocks: [number, Raw][] = [[-1, h`
+    <header>
+      <p class="kicker">${cv.label}</p>
+      ${when(cv.person, () => h`<h2>${cv.person}</h2>`)}
+      <p class="headline">${cv.headline}</p>
+      <p class="summary">${cv.summary}</p>
+      ${when(cv.summary_canonical, () => h`<p class="canonical">Root: ${cv.summary_canonical}${cv.summary_reason ? h`<span> — ${cv.summary_reason}</span>` : ""}</p>`)}
+      <div class="facts">${cv.facts.map((f) => h`<span>${f.title}: ${f.body}</span>`)}</div>
+    </header>`]]
+  const lines = (key: number, label: string, ls: Line[]) => {
+    blocks.push([key, h`<h3>${label}</h3>`])
+    for (const l of ls) blocks.push([l.id, cvLine(l, editable, editing, alterError, chosen)])
+  }
+  cv.sections.forEach((s, i) => lines(-2 - i, s.label, s.lines))
+  if (cv.hidden.length) lines(-1e6, "Masked out", cv.hidden)
+  return blocks
 }
 
 // A line's actions are drawn only on the line chosen by a click, not on every line.
@@ -423,11 +420,6 @@ function overdue(iso: string | null): boolean {
 function excerpt(text: string): string {
   const t = (text ?? "").trim()
   return t.length > 360 ? `${t.slice(0, 360)}…` : t
-}
-
-/** Before the first BOOT there is nothing to draw any lens from. */
-export function connecting(): Raw {
-  return h`<div id="connecting" class="lane"><p class="streaming">Connecting to the desk…</p></div>`
 }
 
 export interface Notice { id: number; text: string }
