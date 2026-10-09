@@ -116,6 +116,42 @@ defmodule Hireme.OpsTest do
     end
   end
 
+  # Take a lease on a random job for a stand-in agent, or drop the one
+  # held there; `{:lease, changed?}`, whether a lease row came or went.
+  defp lease_step(%{jobs: jobs}) do
+    job = Enum.random(jobs)
+    producers = Process.get(:producers, %{})
+
+    case Map.pop(producers, job.id) do
+      {nil, _} ->
+        producer = spawn(fn -> Process.sleep(:infinity) end)
+
+        case Hireme.Letterbox.lease(Hireme.Letterbox.for_job(job.id).id, producer) do
+          {:ok, _handle} ->
+            Process.put(:producers, Map.put(producers, job.id, producer))
+            {:lease, true}
+
+          {:error, _busy} ->
+            Process.exit(producer, :kill)
+            {:lease, false}
+        end
+
+      {producer, rest} ->
+        Process.put(:producers, rest)
+        Process.exit(producer, :kill)
+        {:lease, true}
+    end
+  end
+
+  # A lease's repaint is a cast after the fact: wait for it.
+  defp await_delta do
+    receive do
+      {:ops_delta, rev, delta} -> drain([{rev, delta}])
+    after
+      2_000 -> flunk("no delta for a lease change")
+    end
+  end
+
   defp diverged(view, want) do
     for {t, rows} <- want.tables, {id, row} <- rows, view.tables[t][id] != row, do: {t, id}
   end
@@ -132,17 +168,25 @@ defmodule Hireme.OpsTest do
       {view, rev, log} =
         Enum.reduce(1..60, {boot, boot_rev, []}, fn n, {view, rev, log} ->
           op = random_op(fixture, seed * 1000 + n)
-          log = [op | log]
 
-          # Some writes arrive as an agent's, not a tab's: same stream.
-          reply =
-            if rem(n, 7) == 0,
-              do: Desk.set_next(Enum.random(fixture.jobs).id, "agent #{n}", nil),
-              else: Ops.run(account.id, op)
+          # Some writes arrive as an agent's, not a tab's, and agents take
+          # and drop leases: all one stream.
+          {reply, log} =
+            cond do
+              rem(n, 5) == 0 ->
+                {lease_step(fixture), [:lease | log]}
 
-          deltas = drain([])
+              rem(n, 7) == 0 ->
+                {Desk.set_next(Enum.random(fixture.jobs).id, "agent #{n}", nil), log}
+
+              true ->
+                {Ops.run(account.id, op), [op | log]}
+            end
+
+          deltas = if reply == {:lease, true}, do: await_delta(), else: drain([])
 
           case reply do
+            {:lease, changed?} -> assert length(deltas) == if(changed?, do: 1, else: 0)
             {:ok, r} when is_integer(r) -> assert [{^r, _}] = deltas
             {:ok, _} -> assert [_] = deltas
             {:error, _} -> assert deltas == [], "seed #{seed}: a refusal sent a delta"
@@ -157,6 +201,9 @@ defmodule Hireme.OpsTest do
 
           {Enum.reduce(deltas, view, fn {_, d}, v -> apply_delta(v, d) end), rev, log}
         end)
+
+      producers = Process.get(:producers, %{})
+      on_exit(fn -> Enum.each(producers, fn {_, pid} -> Process.exit(pid, :kill) end) end)
 
       want = fresh_view()
 
@@ -288,5 +335,31 @@ defmodule Hireme.OpsTest do
 
     # The revision made elsewhere is not in the ring: a session behind it boots.
     assert {:ok, ^rev, {:boot, _}} = Ops.attach(account.id, boot_rev)
+  end
+
+  test "a row written around the sequencer reaches the next boot and every tab", %{
+    account: account
+  } do
+    desk(98)
+    {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
+    boot = %{tables: by_id(tables), cards: fresh()}
+
+    {:ok, batch} =
+      %Batch{}
+      |> Batch.changeset(%{code: "Around", ordinal: 9, status: :draft_prep, fire: :hold})
+      |> Repo.insert()
+
+    other =
+      Task.async(fn ->
+        Repo.put_account(account.id)
+        Ops.attach(account.id, nil)
+      end)
+
+    assert {:ok, rev, {:boot, %{tables: seen}}} = Task.await(other)
+    assert Enum.any?(seen.batches, &(&1.id == batch.id))
+
+    assert [{^rev, delta}] = drain([])
+    assert rev == boot_rev + 1
+    assert apply_delta(boot, delta) == fresh_view()
   end
 end
