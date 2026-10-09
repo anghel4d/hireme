@@ -296,6 +296,41 @@ defmodule Hireme.HeatTest do
     for invalid <- [nil, "", "COOL", :unknown, 1], do: assert(Heat.parse_state(invalid) == :error)
   end
 
+  test "board heat excludes the current job and keeps company and ATS groups separate" do
+    profile = profile()
+
+    [first, _older, _other, unknown] =
+      for {company, url, age} <- [
+            {"Google", "https://jobs.lever.co/google/first", 0},
+            {"Google", "https://jobs.lever.co/google/older", 35},
+            {"Other Company", "https://jobs.lever.co/other/role", 0},
+            {"Unknown ATS", "https://jobs.example.test/unknown", 0}
+          ] do
+        Desk.create_job!(%{
+          profile_id: profile.id,
+          company: company,
+          role: "Engineer",
+          stage: :submitted,
+          stage_on: Date.add(@today, -age),
+          canonical_url: url
+        })
+      end
+
+    cfg = %{Heat.config() | ats_vendor_cap: 2.0}
+    snapshot = Heat.snapshot(@today, cfg)
+    decorated = Heat.decorate(first, snapshot, cfg, @today)
+    assert decorated.load == 0.5
+    assert decorated.cap == 4.0
+    assert decorated.ats_vendor == :lever
+    assert decorated.heat_state == :blocked
+    assert decorated.cooldown_days == 4
+
+    unknown = Heat.decorate(unknown, snapshot, cfg, @today)
+    assert unknown.load == 0.0
+    assert unknown.ats_vendor == :unknown
+    assert unknown.heat_state == :cool
+  end
+
   defp probe(company, role, score, id, url \\ nil) do
     %{
       id: id,

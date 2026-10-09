@@ -407,7 +407,7 @@ defmodule Hireme.Heat do
     }
 
     existing = Map.get(snapshot, :jobs, [])
-    verdict = evaluate(job, existing, [], today, cfg, Map.get(snapshot, :ats))
+    verdict = evaluate(job, existing, [], today, cfg, Map.get(snapshot, :ats), snapshot)
     ratio = ratio(verdict.company_load, verdict.company_cap)
 
     state =
@@ -461,33 +461,61 @@ defmodule Hireme.Heat do
     jobs |> Enum.map(&url_of/1) |> Enum.uniq() |> Map.new(&{&1, Ats.parse(&1)})
   end
 
-  defp evaluate(job, existing, batch_kept, today, %Config{} = cfg, ats_index \\ nil) do
+  defp evaluate(
+         job,
+         existing,
+         batch_kept,
+         today,
+         %Config{} = cfg,
+         ats_index \\ nil,
+         snapshot \\ nil
+       ) do
     peers = existing ++ batch_kept
     ats_index = ats_index || ats_index(peers)
-    base = verdict_math(job, peers, batch_kept, today, cfg, ats_index)
+    base = verdict_math(job, peers, batch_kept, today, cfg, ats_index, snapshot)
 
     if override?(job),
       do: %{base | decision: :allow, reason: :override, note: "override · #{reason_of(job)}"},
       else: base
   end
 
-  defp verdict_math(job, peers, batch_kept, today, cfg, ats_index) do
+  defp verdict_math(job, peers, batch_kept, today, cfg, ats_index, snapshot) do
     ats = Ats.parse(url_of(job))
     size = Org.size(company_of(job))
     company_cap = cap(size, cfg)
     key = Org.company_key(company_of(job))
-    others = Enum.reject(peers, &same_id?(&1, job))
-    company_peers = Enum.filter(others, &(Org.company_key(company_of(&1)) == key))
+    others = if is_nil(snapshot), do: Enum.reject(peers, &same_id?(&1, job)), else: []
+
+    company_peers =
+      case snapshot do
+        nil ->
+          Enum.filter(others, &(Org.company_key(company_of(&1)) == key))
+
+        %{companies: companies} ->
+          companies
+          |> Map.get(key, %{jobs: []})
+          |> Map.fetch!(:jobs)
+          |> Enum.reject(&same_id?(&1, job))
+      end
 
     company_load = load(company_peers, today, cfg.company_half_life, cfg)
     increment = increment(job, company_peers, cfg)
     projected = round4(company_load + increment)
 
     vendor_peers =
-      Enum.filter(
-        others,
-        &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
-      )
+      case snapshot do
+        nil ->
+          Enum.filter(
+            others,
+            &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
+          )
+
+        %{vendors: vendors} ->
+          vendors
+          |> Map.get(ats.vendor, %{jobs: []})
+          |> Map.fetch!(:jobs)
+          |> Enum.reject(&same_id?(&1, job))
+      end
 
     tenant_peers =
       Enum.filter(
@@ -632,7 +660,8 @@ defmodule Hireme.Heat do
            size: size,
            load: load(group, today, cfg.company_half_life, cfg),
            cap: cap(size, cfg),
-           n: length(group)
+           n: length(group),
+           jobs: group
          }}
       end)
 
@@ -641,7 +670,8 @@ defmodule Hireme.Heat do
       |> Enum.reject(&(ats[url_of(&1)].vendor == :unknown))
       |> Enum.group_by(&ats[url_of(&1)].vendor)
       |> Map.new(fn {vendor, group} ->
-        {vendor, %{load: load(group, today, cfg.ats_vendor_half_life, cfg), n: length(group)}}
+        {vendor,
+         %{load: load(group, today, cfg.ats_vendor_half_life, cfg), n: length(group), jobs: group}}
       end)
 
     %{jobs: jobs, companies: companies, vendors: vendors, ats: ats}

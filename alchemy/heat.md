@@ -2,7 +2,7 @@
 
 Standing order: the pipeline does not snap onto a company or an ATS. Heat gates the queue. FIRE HOLD still owns submit. Nothing here sends an application.
 
-Config lives in `lib/hireme/heat/config.ex`. `Hireme.Heat.Config.defaults/0` is the source of truth.
+Config lives in `lib/hireme/heat/heat.ex`. `Hireme.Heat.Config.defaults/0` is the source of truth.
 
 ## Defaults
 
@@ -43,3 +43,8 @@ Vendor and tenant come from the apply URL host and path: Greenhouse, Lever, Ashb
 ## Visibility
 
 Desk heatmap under the Life-EV chart. Filters: cool / warm / hot / blocked. MCP: `heat_status`, `can_apply`. CLI: `mix hireme.heat`.
+
+Board snapshots group hot jobs by normalized company and ATS vendor once per
+read. Decorating a card inspects only its matching groups, still excluding the
+card itself and applying the same decay, tenant caps, and override rules as a
+single-job verdict. Unrelated companies are not scanned for every card.
