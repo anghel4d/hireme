@@ -99,6 +99,8 @@ export interface Desk {
   str(name: string): StrColumn
   /** Row index of a job id, or -1. */
   rowOf(id: number): number
+  /** A number that changes whenever anything a card shows may have: equal means the card is as it was. */
+  version(id: number): number
 
   /** A job's focus, composed from its rows with pending ops applied; null before the first BOOT. */
   focus(id: number): Focus | null
@@ -458,6 +460,8 @@ class Board {
   private readonly strs = new Map<string, StrColumn>()
   private readonly remapped = new Map<string, Uint32Array>()
   private tableDoc: Tables | null = null
+  private readonly versions = new Map<number, number>()
+  private base = 0
 
   constructor(private readonly k: Kernel) {}
 
@@ -471,6 +475,10 @@ class Board {
     const lookups = ["stages", "statuses", "freshness", "gates", "heat_states", "bands", "batches", "profiles"].some(t)
     if (lookups) this.tableDoc = null
     if (lookups || t("cards")) this.remapped.clear()
+    // A card that moved bumps its version; a whole-table move, or a lookup cards read, bumps them all.
+    const cards = tables?.get(this.t)
+    if (tables === null || lookups || cards === null) this.base++
+    else if (cards instanceof Set) for (const id of cards as Set<number>) this.versions.set(id, (this.versions.get(id) ?? 0) + 1)
   }
 
   get n(): number { return this.k.k.rows(this.t) }
@@ -518,6 +526,8 @@ class Board {
   }
 
   rowOf(id: number): number { return this.k.k.row_of(this.t, id) }
+
+  version(id: number): number { return this.base * 2 ** 21 + (this.versions.get(id) ?? 0) }
 
   select(s: Selection): number {
     const t = this.tables
@@ -779,6 +789,7 @@ export class LocalDesk implements Desk, Host {
   column(name: string): Uint32Array { return this.board.column(name) }
   str(name: string): StrColumn { return this.board.str(name) }
   rowOf(id: number): number { return this.board.rowOf(id) }
+  version(id: number): number { return this.board.version(id) }
   get status(): Status { return this.statusNow }
 
   focus(id: number): Focus | null { return this.docs.focus(id) }
