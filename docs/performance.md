@@ -8,7 +8,15 @@ Later benchmark, test-lint and documentation commits do not change application b
 
 The dominant costs were repeated application work, not evidence of an intrinsically slow Elixir runtime: per-card heat/ATS calculations, loading rich cards for a score histogram, redundant reads after writes, and unnecessary DOM replacement. The packet format and WASM path were exercised end to end; packet construction now makes one binary per column, and startup fetches the kernel and packet concurrently. Public packet bytes remained identical in the parity workloads.
 
-This is a local production-release audit, not a claim about measured live Internet latency. Deployment to `hireme.anghel4d.com` on Hetzner **fsn1-2** requires the operator's hardware-backed SSH authorization. The required SSH master was absent during this audit; no alternative identity or hardware-policy bypass was used. Nothing here claims that this release is already serving production. **fsn1-1 / heijo.org is not a deployment target.**
+The latency tables are local production-release measurements, not measured live Internet latency. **Release `5531fef` was deployed to `hireme.anghel4d.com` on Hetzner fsn1-2 (`49.12.102.5`) at 2026-10-09 10:10:21 UTC**, after the operator opened the hardware-backed SSH master. The previous release was `8104696`; no alternative identity or hardware-policy bypass was used. **fsn1-1 / heijo.org was not touched.**
+
+Deployment evidence:
+
+- Online, WAL-aware backup: `/var/lib/hireme/backups/hireme-20261009T100927.db`, owned by `hireme`, mode `0600`; SQLite integrity check returned `ok` before the release switch.
+- `/nix/var/nix/profiles/hireme` points to the exact final immutable release above. `hireme.service` and nginx are active; Hireme remained at PID 2342 with zero restarts during verification.
+- The service's pre-start migration applied `20261009000000`; `gym_reps_account_id_done_on_index` exists on `(account_id, done_on)`. The live database integrity check returned `ok`, and the application listener remains restricted to `127.0.0.1:4000`.
+- Public HTTPS checks: `/sign-in` returned 200; unauthenticated `/api/pack` returned 401; the final JavaScript bundle and WASM kernel returned 200 and their SHA-256 digests matched the local measured release byte-for-byte.
+- Chromium rendered the live sign-in page and its email form. No synthetic production credentials were created. Signed-in production interactions and external mail delivery were not exercised during this rollout; their local testbed evidence must not be confused with a live authenticated smoke test.
 
 ## How to read the measurements
 
