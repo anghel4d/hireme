@@ -117,7 +117,8 @@ defmodule Hireme.DeskTest do
                stage: "sent"
              })
 
-    assert {:ok, noted} = Desk.set_note(job.id, :gated, "Pursue: strong fit")
+    assert {:ok, _} = Desk.set_note(job.id, :gated, "Pursue: strong fit")
+    noted = Repo.get!(Hireme.Desk.Job, job.id)
     assert Enum.find(Desk.rail(noted), &(&1.key == :gated)).note == "Pursue: strong fit"
   end
 
