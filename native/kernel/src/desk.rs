@@ -338,11 +338,17 @@ impl Desk {
     }
 
     /// Removes a row from `t` in the view.
+    /// The lineage overlay `key` is on, in the view or else in base.
+    pub(crate) fn overlay_lineage(&self, key: u32) -> Option<u32> {
+        let ot = table::OVERLAYS;
+        let base = self.store.table(ot).and_then(|t| Some(t.col(col::overlays::LINEAGE_ID)?.u32(t.row_of(key)?)));
+        self.row_of(ot, key).map(|r| self.vu32(ot, col::overlays::LINEAGE_ID, r)).or(base)
+    }
+
     pub(crate) fn delete_row(&mut self, t: u16, key: u32) {
         if t == table::OVERLAYS {
-            if let Some(r) = self.row_of(t, key) {
-                let lineage = self.vu32(t, col::overlays::LINEAGE_ID, r);
-                self.derived.mark_lineage(lineage);
+            if let Some(l) = self.overlay_lineage(key) {
+                self.derived.mark_gone_overlay(key, l);
             }
         }
         let vt = self.vtable_mut(t);
@@ -354,6 +360,21 @@ impl Desk {
             self.derived.mark(t, key, None);
         }
         self.raw_dirty = true;
+    }
+
+    /// Before a `gone` block deletes overlays: the lineage each was on.
+    fn note_gone_overlays(&mut self, t: &wire::Table) {
+        let (Some(ts), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) else { return };
+        if t.id != table::GONE {
+            return;
+        }
+        for r in 0..t.nrows as usize {
+            if ts.u32(r) == table::OVERLAYS as u32 {
+                if let Some(l) = self.overlay_lineage(ids.u32(r)) {
+                    self.derived.mark_gone_overlay(ids.u32(r), l);
+                }
+            }
+        }
     }
 
     /// An id for a row a prediction adds before the server numbers it:
@@ -499,12 +520,9 @@ impl Desk {
             if p.predicted.iter().any(|x| x.0 == t && x.1 == key) {
                 continue;
             }
-            match self.row_of(t, key) {
-                Some(r) if t == table::OVERLAYS => {
-                    let lineage = self.vu32(t, col::overlays::LINEAGE_ID, r);
-                    self.derived.mark_lineage(lineage);
-                }
-                _ => self.derived.mark(t, key, None),
+            match self.overlay_lineage(key).filter(|_| t == table::OVERLAYS) {
+                Some(l) => self.derived.mark_gone_overlay(key, l),
+                None => self.derived.mark(t, key, None),
             }
         }
     }
@@ -560,6 +578,7 @@ impl Desk {
                     for t in f.tables().flatten() {
                         bits |= TABLES;
                         self.take_clock(&t);
+                        self.note_gone_overlays(&t);
                         self.store.take(&t);
                     }
                     self.store.rev = self.store.rev.max(f.header.rev);

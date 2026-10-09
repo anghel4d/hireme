@@ -669,28 +669,6 @@ impl Writer {
         self.pad();
     }
 
-    /// A sym column: `syms`, then which one each row names.
-    pub fn col_sym(&mut self, id: u16, syms: &[&[u8]], ids: impl ExactSizeIterator<Item = u32>) {
-        let size: usize = syms.iter().map(|s| s.len()).sum();
-        let pad = (4 + (syms.len() + 1) * 4 + size).next_multiple_of(4) - (4 + (syms.len() + 1) * 4 + size);
-        self.col_head(id, SYM, 4 + (syms.len() + 1) * 4 + size + pad + ids.len() * 4);
-        self.buf.extend_from_slice(&(syms.len() as u32).to_le_bytes());
-        let mut at = 0u32;
-        self.buf.extend_from_slice(&0u32.to_le_bytes());
-        for s in syms {
-            at += s.len() as u32;
-            self.buf.extend_from_slice(&at.to_le_bytes());
-        }
-        for s in syms {
-            self.buf.extend_from_slice(s);
-        }
-        self.buf.extend(core::iter::repeat_n(0, pad));
-        for i in ids {
-            self.buf.extend_from_slice(&i.to_le_bytes());
-        }
-        self.pad();
-    }
-
     pub fn col_str<'s>(&mut self, id: u16, vals: impl ExactSizeIterator<Item = &'s [u8]> + Clone) {
         let n = vals.len();
         let total: usize = vals.clone().map(|s| s.len()).sum();
