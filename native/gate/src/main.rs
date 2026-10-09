@@ -11,8 +11,7 @@
 //! The gate behaves like an order gateway, so nothing is allocated for a
 //! peer before it has passed the cheap checks:
 //! - QUIC Retry (stateless address validation) while handshakes pile up,
-//!   and always for an address at its cap, so a refusal goes only to an
-//!   address that proved it is real;
+//!   and always for an address that already holds sessions;
 //! - a per-IP cap on live sessions;
 //! - a path prefix and an `Origin` allow-list (an absent Origin is a native
 //!   agent and is forwarded as "", so the BEAM then insists on an API key);
@@ -38,7 +37,6 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 use wtransport::endpoint::{IncomingSession, SessionRequest};
-use wtransport::quinn::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
 use wtransport::quinn::{TransportConfig, VarInt as QVarInt};
 use wtransport::{Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig, VarInt};
 
@@ -72,16 +70,6 @@ const BIDI_AFTER: u32 = 1 + 64;
 const UNI_AFTER: u32 = 3 + 4;
 const WINDOW_BEFORE: u32 = 64 << 10;
 const WINDOW_AFTER: u32 = 16 << 20;
-const STREAM_WINDOW: u32 = 4 << 20;
-/// Congestion window before the first loss or ACK, in bytes (GATE_INITIAL_WINDOW
-/// overrides it). quinn's default is ten packets, 14,720 bytes, so a cold BOOT
-/// spends its first round trips in slow start. Chromium, 47 ms RTT, 1 MiB on
-/// the bulk stream (a deflated BOOT of ~1,000 real jobs): 372 ms at the
-/// default, 232 ms at 128 KiB, 191 ms at 256 KiB; behind a 20 Mbit/s link
-/// with a 100-packet queue 256 KiB was no worse than any smaller window
-/// (496 ms against 612 ms), because quinn paces the window over the measured
-/// RTT instead of sending it as one burst.
-const INITIAL_WINDOW: usize = 256 << 10;
 
 /// Close codes the gate itself uses (the BEAM picks its own).
 const CODE_DEADLINE: u32 = 0x4001;
@@ -98,9 +86,6 @@ struct Settings {
     path: String,
     per_ip: usize,
     retry_above: usize,
-    /// Congestion controller and its initial window in bytes; see transport().
-    cc: String,
-    initial_window: u64,
 }
 
 impl Settings {
@@ -132,8 +117,6 @@ impl Settings {
             path: var("GATE_PATH").unwrap_or_else(|| "/wt".into()),
             per_ip: num("GATE_PER_IP", 16)?,
             retry_above: num("GATE_RETRY_ABOVE", 32)?,
-            cc: var("GATE_CC").unwrap_or_else(|| "cubic".into()),
-            initial_window: num("GATE_INITIAL_WINDOW", INITIAL_WINDOW)? as u64,
         })
     }
 }
@@ -187,8 +170,8 @@ impl Gate {
         Some(IpSlot(self.clone(), ip))
     }
 
-    fn at_cap(&self, ip: IpAddr) -> bool {
-        self.per_ip.lock().unwrap().get(&ip).is_some_and(|n| *n >= self.settings.per_ip)
+    fn holds(&self, ip: IpAddr) -> bool {
+        self.per_ip.lock().unwrap().contains_key(&ip)
     }
 
     fn origin_ok(&self, origin: Option<&str>) -> bool {
@@ -199,31 +182,12 @@ impl Gate {
     }
 }
 
-fn transport(s: &Settings) -> TransportConfig {
+fn transport() -> TransportConfig {
     let mut t = TransportConfig::default();
-    match s.cc.as_str() {
-        "bbr" => {
-            let mut c = BbrConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-        "newreno" => {
-            let mut c = NewRenoConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-        _ => {
-            let mut c = CubicConfig::default();
-            c.initial_window(s.initial_window);
-            t.congestion_controller_factory(Arc::new(c))
-        }
-    };
-    // The connection window is the pre-auth cap and rises at READY; a stream
-    // window cannot change later, so it is sized for the session's life.
     t.max_concurrent_bidi_streams(QVarInt::from_u32(BIDI_BEFORE))
         .max_concurrent_uni_streams(QVarInt::from_u32(UNI_BEFORE))
         .receive_window(QVarInt::from_u32(WINDOW_BEFORE))
-        .stream_receive_window(QVarInt::from_u32(STREAM_WINDOW))
+        .stream_receive_window(QVarInt::from_u32(WINDOW_BEFORE))
         .max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()))
         .keep_alive_interval(Some(Duration::from_secs(10)));
     t
@@ -252,7 +216,7 @@ async fn identity(s: &Settings) -> Result<Identity, String> {
 async fn server_config(s: &Settings) -> Result<ServerConfig, String> {
     let mut config = ServerConfig::builder()
         .with_bind_address(s.listen)
-        .with_custom_transport(identity(s).await?, transport(s))
+        .with_custom_transport(identity(s).await?, transport())
         .build();
     config.quic_config_mut().retry_token_lifetime(Duration::from_secs(15));
     Ok(config)
@@ -314,7 +278,7 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
     c.incoming.fetch_add(1, Relaxed);
     let ip = incoming.remote_address().ip();
     let validated = incoming.remote_address_validated();
-    if !validated && (gate.handshakes.load(Relaxed) >= gate.settings.retry_above || gate.at_cap(ip)) {
+    if !validated && (gate.handshakes.load(Relaxed) >= gate.settings.retry_above || gate.holds(ip)) {
         c.retried.fetch_add(1, Relaxed);
         incoming.retry();
         return;

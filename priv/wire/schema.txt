@@ -62,6 +62,10 @@ col cards next_action 24 str
 col cards cv_label 25 str
 col cards fit 26 str
 col cards pips 27 str
+col cards load 28 f64
+col cards cap 29 f64
+col cards ats_vendor 30 str
+col cards ratio 31 f64
 
 table cards_gone 2
 col cards_gone id 1 u32
@@ -504,6 +508,42 @@ col acct_factors created_at 4 time
 col acct_factors last_used_at 5 time
 col acct_factors backed_up 6 u32
 col acct_factors transports 7 str
+
+# Local only: tables the kernel derives in the browser from the raw tables. They never travel
+# on the wire; they are named here so TypeScript reads them through the same table ABI.
+# verdicts: Heat.verdict per job (what can_apply answers), keyed by job id; has_tenant tells an
+# empty tenant from none. mix: Heat.mix_batch per batch, members in mix order. coverage: the
+# last Keywords coverage call, targets in order.
+
+table verdicts 70
+col verdicts id 1 u32
+col verdicts decision 2 str
+col verdicts reason 3 str
+col verdicts company 4 str
+col verdicts company_load 5 f64
+col verdicts company_cap 6 f64
+col verdicts company_increment 7 f64
+col verdicts size 8 str
+col verdicts ats_vendor 9 str
+col verdicts ats_tenant 10 str
+col verdicts has_tenant 11 u32
+col verdicts vendor_load 12 f64
+col verdicts vendor_cap 13 f64
+col verdicts tenant_load 14 f64
+col verdicts tenant_cap 15 f64
+col verdicts cooldown_days 16 u32
+col verdicts note 17 str
+
+table mix 71
+col mix batch_id 1 u32
+col mix job 2 u32
+col mix kept 3 u32
+col mix reason 4 str
+col mix note 5 str
+
+table coverage 72
+col coverage word 1 str
+col coverage hit 2 u32
 
 op stage 1 job stage
 op next 2 job next_action next_due

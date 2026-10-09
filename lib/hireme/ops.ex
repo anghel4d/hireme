@@ -206,52 +206,7 @@ defmodule Hireme.Ops do
            {:replay, [{non_neg_integer(), map()}]} | {:boot, %{tables: map()}}}
   def attach(account_id, since) when is_integer(account_id) do
     :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account_id))
-
-    case call(account_id, {:attach, since}) do
-      {:ok, _rev, {:replay, _}} = replay -> replay
-      :boot -> boot(account_id, 3)
-    end
-  end
-
-  # A boot reads every table here, in the attaching process, so writes
-  # on the account never wait behind it: one read transaction, stamped
-  # with the revision it saw. The sequencer then only compares. At the
-  # same revision, what differs is a row written around it, sent to
-  # everyone as a revision of its own; behind it, the ring's deltas
-  # since the read bring the tables level.
-  defp boot(account_id, tries) do
-    {:ok, {read_rev, tables}} =
-      Repo.with_account(account_id, fn ->
-        Repo.transaction(fn ->
-          rev =
-            Repo.one!(from(a in Account, where: a.id == ^account_id, select: a.desk_rev),
-              skip_account: true
-            )
-
-          {rev, read_tables()}
-        end)
-      end)
-
-    case call(account_id, {:boot, read_rev, tables}) do
-      {:ok, rev, :as_read} -> {:ok, rev, {:boot, %{tables: tables}}}
-      {:ok, rev, {:after, deltas}} -> {:ok, rev, {:boot, %{tables: patch(tables, deltas)}}}
-      :retry when tries > 1 -> boot(account_id, tries - 1)
-      :retry -> call(account_id, :boot_inside)
-    end
-  end
-
-  defp patch(tables, deltas) do
-    deltas
-    |> Enum.reduce(Map.new(tables, fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end), fn
-      {_rev, %{rows: rows, gone: gone}}, acc ->
-        acc =
-          Enum.reduce(gone, acc, fn {t, ids}, acc -> Map.update!(acc, t, &Map.drop(&1, ids)) end)
-
-        Enum.reduce(rows, acc, fn {t, list}, acc ->
-          Map.update!(acc, t, fn table -> Enum.reduce(list, table, &Map.put(&2, &1.id, &1)) end)
-        end)
-    end)
-    |> Map.new(fn {t, rows} -> {t, Map.values(rows)} end)
+    call(account_id, {:attach, since})
   end
 
   @doc """
@@ -404,40 +359,29 @@ defmodule Hireme.Ops do
     guard(state, fn ->
       state = warm(state)
 
-      case replay(state, since) do
-        {:ok, deltas} -> {{:ok, state.rev, {:replay, deltas}}, state}
-        :boot -> {:boot, state}
-      end
-    end)
-  end
+      reply =
+        case replay(state, since) do
+          {:ok, deltas} ->
+            {:replay, deltas}
 
-  def handle_call({:boot, read_rev, tables}, _from, state) do
-    guard(state, fn ->
-      state = warm(state)
+          :boot ->
+            :boot
+        end
 
-      cond do
-        read_rev == state.rev ->
-          state = reconcile(state, {:given, tables})
-          {{:ok, state.rev, :as_read}, state}
+      # A boot reads every table from the database, so it holds rows
+      # written around the sequencer too, and the sessions already
+      # attached hear of them as a revision of their own.
+      {state, reply} =
+        if reply == :boot do
+          state = reconcile(state)
 
-        read_rev < state.rev ->
-          case replay(state, read_rev) do
-            {:ok, deltas} -> {{:ok, state.rev, {:after, deltas}}, state}
-            :boot -> {:retry, state}
-          end
+          {state,
+           {:boot, %{tables: Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)}}}
+        else
+          {state, reply}
+        end
 
-        true ->
-          {:retry, state}
-      end
-    end)
-  end
-
-  # The fallback when reads keep losing the race: read in here.
-  def handle_call(:boot_inside, _from, state) do
-    guard(state, fn ->
-      state = reconcile(warm(state), :all)
-      tables = Map.new(state.raw, fn {t, rows} -> {t, Map.values(rows)} end)
-      {{:ok, state.rev, {:boot, %{tables: tables}}}, state}
+      {{:ok, state.rev, reply}, state}
     end)
   end
 
@@ -641,8 +585,8 @@ defmodule Hireme.Ops do
     end
   end
 
-  defp reconcile(state, source) do
-    case rediff(state, source) do
+  defp reconcile(state) do
+    case rediff(state, :all) do
       {next, %{rows: rows, gone: gone}} when rows == %{} and gone == %{} ->
         next
 
@@ -844,11 +788,6 @@ defmodule Hireme.Ops do
     rediff(state, groups)
   end
 
-  defp rediff(state, {:given, tables}) do
-    groups = Enum.map(@table_names, &{&1, :all, {:given, Map.fetch!(tables, &1)}})
-    rediff(state, groups)
-  end
-
   defp rediff(state, groups) do
     {raw, rows, gone} =
       Enum.reduce(groups, {state.raw, %{}, %{}}, fn {table, field, values}, {raw, rows, gone} ->
@@ -872,7 +811,6 @@ defmodule Hireme.Ops do
     {%{state | raw: raw}, %{rows: rows, gone: gone}}
   end
 
-  defp fetch_group(_table, :all, {:given, rows}, _raw), do: rows
   defp fetch_group(:leases, :all, _values, raw), do: leases(Map.keys(raw.job_apps))
 
   defp fetch_group(:leases, :id, ids, raw),

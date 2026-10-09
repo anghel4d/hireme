@@ -45,6 +45,17 @@ impl Arena {
     pub fn get(&self, r: [u32; 2]) -> &[u8] {
         &self.bytes[r[0] as usize..(r[0] + r[1]) as usize]
     }
+
+    /// A string by reference. Everything put in the arena is valid UTF-8
+    /// (`Column::write` empties a row that is not, the kernel's own strings
+    /// are `str`s), and a reference covers whole strings.
+    #[inline]
+    pub fn text(&self, r: [u32; 2]) -> &str {
+        let b = self.get(r);
+        debug_assert!(core::str::from_utf8(b).is_ok());
+        // SAFETY: see above.
+        unsafe { core::str::from_utf8_unchecked(b) }
+    }
 }
 
 pub enum Data {
@@ -106,7 +117,16 @@ impl Column {
         match &mut self.data {
             Data::W32(v) => v[row] = c.u32(r),
             Data::W64(v) => v[row] = c.u64(r),
-            Data::Str(v) => v[row] = arena.put(c.bytes(r)),
+            // A row whose offsets split a character is read as empty, so
+            // every string in the arena is valid UTF-8.
+            Data::Str(v) => {
+                let b = c.bytes(r);
+                v[row] = if core::str::from_utf8(b).is_ok() {
+                    arena.put(b)
+                } else {
+                    [0, 0]
+                };
+            }
         }
     }
 
@@ -151,7 +171,22 @@ fn blank_u32(table: u16, col: u16) -> u32 {
 pub fn keyed(id: u16) -> bool {
     matches!(
         id,
-        table::CARDS | table::BATCHES | table::PROFILES | table::LINES
+        table::CARDS
+            | table::BATCHES
+            | table::PROFILES
+            | table::LINES
+            | table::NARRATIVES
+            | table::ITEMS
+            | table::KV_PAIRS
+            | table::SCOREBOARD_SNAPSHOTS
+            | table::JOB_APPS
+            | table::EVENTS
+            | table::CV_LINEAGES
+            | table::CV_VARIANTS
+            | table::OVERLAYS
+            | table::GYM_PROBLEMS
+            | table::GYM_REPS
+            | table::NET_ENTRIES
     )
 }
 
@@ -282,7 +317,7 @@ impl Table {
         gone
     }
 
-    fn reindex(&mut self) {
+    pub fn reindex(&mut self) {
         self.index.clear();
         if let Some(Column {
             data: Data::W32(keys),
@@ -358,6 +393,14 @@ impl Store {
         }
     }
 
+    /// Puts a derived table in place of the one with its id.
+    pub fn put_table(&mut self, t: Table) {
+        match self.tables.iter().position(|x| x.id == t.id) {
+            Some(i) => self.tables[i] = t,
+            None => self.tables.push(t),
+        }
+    }
+
     pub fn table(&self, id: u16) -> Option<&Table> {
         self.tables.iter().find(|t| t.id == id)
     }
@@ -370,6 +413,18 @@ impl Store {
                 let cards = self.tables.iter_mut().find(|x| x.id == table::CARDS);
                 if let Some(cards) = cards {
                     cards.delete((0..ids.nrows as usize).map(|r| ids.u32(r)));
+                }
+            }
+            return;
+        }
+        if t.id == table::GONE {
+            // Raw-row deletions: (table id, row id).
+            if let (Some(ts), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) {
+                for r in 0..t.nrows as usize {
+                    let tid = ts.u32(r) as u16;
+                    if let Some(x) = self.tables.iter_mut().find(|x| x.id == tid) {
+                        x.delete(core::iter::once(ids.u32(r)));
+                    }
                 }
             }
             return;

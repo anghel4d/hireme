@@ -40,17 +40,23 @@ enum Val {
     S(Vec<u8>),
 }
 
-struct Pending {
+pub(crate) struct Pending {
     id: u64,
-    bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
     /// What the op said each field would become: (table, key, col, value).
     predicted: Vec<(u16, u32, u16, Val)>,
 }
 
 pub struct Desk {
     pub store: Store,
-    overlay: Vec<(u16, Column)>,
-    pending: Vec<Pending>,
+    pub(crate) overlay: Vec<(u16, Column)>,
+    /// The raw tables or their pending view moved since the last derive.
+    pub(crate) raw_dirty: bool,
+    pub(crate) derived: crate::derive::Derived,
+    /// Keyword hits and total TypeScript computed for a job's recomposed
+    /// CV while an op on its lineage is pending.
+    pub(crate) glance: BTreeMap<u32, [u32; 2]>,
+    pub(crate) pending: Vec<Pending>,
     order: Vec<u32>,
     /// What each card row sorted by (see `basis_of`), and the arena epoch
     /// its string references belong to.
@@ -78,6 +84,9 @@ impl Desk {
         Desk {
             store: Store::new(),
             overlay: Vec::new(),
+            raw_dirty: true,
+            derived: crate::derive::Derived::new(),
+            glance: BTreeMap::new(),
             pending: Vec::new(),
             order: Vec::new(),
             basis: Vec::new(),
@@ -107,7 +116,7 @@ impl Desk {
             .or_else(|| self.store.table(t).and_then(|x| x.col(c)))
     }
 
-    fn w32(&self, t: u16, c: u16) -> &[u32] {
+    pub(crate) fn w32(&self, t: u16, c: u16) -> &[u32] {
         match self.vcol(t, c) {
             Some(Column {
                 data: Data::W32(v), ..
@@ -116,7 +125,7 @@ impl Desk {
         }
     }
 
-    fn strs(&self, t: u16, c: u16) -> &[[u32; 2]] {
+    pub(crate) fn strs(&self, t: u16, c: u16) -> &[[u32; 2]] {
         match self.vcol(t, c) {
             Some(Column {
                 data: Data::Str(v), ..
@@ -125,11 +134,11 @@ impl Desk {
         }
     }
 
-    fn vu32(&self, t: u16, c: u16, row: usize) -> u32 {
+    pub(crate) fn vu32(&self, t: u16, c: u16, row: usize) -> u32 {
         self.w32(t, c).get(row).copied().unwrap_or(0)
     }
 
-    fn vstr(&self, t: u16, c: u16, row: usize) -> &[u8] {
+    pub(crate) fn vstr(&self, t: u16, c: u16, row: usize) -> &[u8] {
         let r = self.strs(t, c).get(row).copied().unwrap_or([0, 0]);
         self.store.arena.get(r)
     }
@@ -203,8 +212,29 @@ impl Desk {
         }
     }
 
+    /// `today` from a `clock` table: the server's day, which every
+    /// derivation uses.
+    fn take_clock(&mut self, t: &wire::Table) {
+        if t.id == table::CLOCK && t.nrows > 0 {
+            if let Some(c) = t.col(col::clock::TODAY) {
+                if c.u32(0) != NONE && c.u32(0) != self.today {
+                    self.today = c.u32(0);
+                    self.raw_dirty = true;
+                }
+            }
+        }
+    }
+
+    /// The derived cards were replaced: order and search re-check every
+    /// row (and reuse what did not move).
+    pub(crate) fn mark_cards_derived(&mut self) {
+        self.order_full = true;
+        self.search_dirty = true;
+    }
+
     /// Drops the overlay and replays every pending op over base.
     fn rebuild_view(&mut self) {
+        self.raw_dirty = true;
         self.overlay.clear();
         self.modes.clear();
         self.order_full = true;
@@ -517,6 +547,7 @@ impl Desk {
                             table::LINES => LINES,
                             _ => TABLES,
                         };
+                        self.take_clock(&t);
                         self.store.take(&t);
                     }
                     if boot {
@@ -545,11 +576,13 @@ impl Desk {
                     }
                     Err(_) => bits |= ERROR,
                 },
-                frame::TICK => {
-                    if let Ok(day) = wire::tick(f.body) {
-                        self.today = day;
-                        bits |= TICK;
+                // TICK carries the `clock` table: the server's UTC day turned.
+                frame::TICK if tables_ok => {
+                    for t in f.tables().flatten() {
+                        self.take_clock(&t);
                     }
+                    self.raw_dirty = true;
+                    bits |= TICK | CARDS;
                 }
                 frame::BOOT | frame::PATCH | frame::LINES | frame::FOCUS => {
                     self.counters[BAD_FRAMES] += 1;
@@ -560,6 +593,9 @@ impl Desk {
         }
         if base_moved || pending_moved {
             self.rebuild_view();
+        }
+        if self.raw_dirty && self.derive() {
+            bits |= CARDS | TABLES;
         }
         if base_moved {
             let overlay = self.overlay.iter_mut().map(|(_, c)| c);
@@ -577,7 +613,9 @@ impl Desk {
     /// Stage ix → rank.
     fn ranks(&self) -> Vec<u64> {
         let st = table::STAGES;
-        let mut rank = vec![0xffu64; 64];
+        // Pipeline.rank/1 is the stage's position; a stages lookup the
+        // server sent overrides it.
+        let mut rank: Vec<u64> = (0..64).map(|i| if i < 10 { i } else { 0xff }).collect();
         for r in 0..self.rows(st) {
             let ix = self.vu32(st, col::stages::IX, r) as usize;
             if ix < rank.len() {
@@ -806,6 +844,7 @@ impl Desk {
         heat: i32,
         q: &[u8],
     ) -> usize {
+        self.derive();
         self.sort();
         let mut query = Vec::new();
         lower_into(&mut query, trim(q));

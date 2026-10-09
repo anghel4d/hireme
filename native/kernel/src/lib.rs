@@ -29,7 +29,9 @@
 
 extern crate alloc;
 
+mod derive;
 mod desk;
+mod heat;
 mod store;
 
 use alloc::vec::Vec;
@@ -261,6 +263,14 @@ pub extern "C" fn select(
         k.desk
             .select(min, lo, hi, stage, status, batch, profile, heat, &q) as u32
     })
+}
+
+/// Re-derives every local view (cards, verdicts, heat chart, scoreboard)
+/// if the raw tables or the pending view moved; ingest and select do this
+/// themselves. Returns 1 when it ran.
+#[unsafe(no_mangle)]
+pub extern "C" fn derive() -> u32 {
+    with(|k| k.desk.derive() as u32)
 }
 
 /// The selection: card rows (u32), in board order.
