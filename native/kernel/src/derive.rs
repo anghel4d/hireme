@@ -478,11 +478,17 @@ impl Desk {
                 k
             })
             .collect();
+        // A company's part of the traits once per company: its rows share
+        // one interned reference.
+        let mut companies: BTreeMap<[u32; 2], (String, heat::Size)> = BTreeMap::new();
         for i in 0..n {
             let fresh = !matches!(d.traits.get(&jobs[i].id), Some((k, _)) if *k == keys[i]);
             if fresh {
-                d.traits
-                    .insert(jobs[i].id, (keys[i], heat::traits(&jobs[i])));
+                let c = companies
+                    .entry(at(company, i))
+                    .or_insert_with(|| heat::company(jobs[i].company))
+                    .clone();
+                d.traits.insert(jobs[i].id, (keys[i], heat::traits(&jobs[i], c)));
             }
         }
         let d: &'d Derived = d;

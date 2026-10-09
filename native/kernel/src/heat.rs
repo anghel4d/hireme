@@ -339,19 +339,10 @@ fn decay_exact(days: i64, half_life: f64) -> f64 {
 }
 
 /// Decay is a pure function of (days, half-life), and a derive asks for
-/// the same few hundred values thousands of times; on the single-threaded
-/// WebAssembly build they are kept once computed.
-#[cfg(target_arch = "wasm32")]
+/// the same few hundred values thousands of times: they are kept once
+/// computed, per thread (the WebAssembly build has one).
 mod memo {
     use alloc::vec::Vec;
-    use core::cell::UnsafeCell;
-
-    struct Memo(UnsafeCell<[Vec<f64>; 3]>);
-
-    // SAFETY: wasm32-unknown-unknown without atomics has one thread.
-    unsafe impl Sync for Memo {}
-
-    static MEMO: Memo = Memo(UnsafeCell::new([Vec::new(), Vec::new(), Vec::new()]));
 
     pub fn decay(days: i64, half_life: f64) -> f64 {
         let slot = if half_life == super::COMPANY_HALF_LIFE {
@@ -366,23 +357,32 @@ mod memo {
         if days >= 8192 {
             return super::decay_exact(days, half_life);
         }
-        // SAFETY: one thread, and no reference to the memo outlives this call.
-        let v = unsafe { &mut (*MEMO.0.get())[slot] };
-        let d = days as usize;
-        if v.len() <= d {
-            v.resize(d + 1, f64::NAN);
-        }
-        if v[d].is_nan() {
-            v[d] = super::decay_exact(days, half_life);
-        }
-        v[d]
+        with(|m| {
+            let (v, d) = (&mut m[slot], days as usize);
+            if v.len() <= d {
+                v.resize(d + 1, f64::NAN);
+            }
+            if v[d].is_nan() {
+                v[d] = super::decay_exact(days, half_life);
+            }
+            v[d]
+        })
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-mod memo {
-    pub fn decay(days: i64, half_life: f64) -> f64 {
-        super::decay_exact(days, half_life)
+    #[cfg(target_arch = "wasm32")]
+    fn with<R>(f: impl FnOnce(&mut [Vec<f64>; 3]) -> R) -> R {
+        struct Memo(core::cell::UnsafeCell<[Vec<f64>; 3]>);
+        // SAFETY: wasm32-unknown-unknown without atomics has one thread.
+        unsafe impl Sync for Memo {}
+        static MEMO: Memo = Memo(core::cell::UnsafeCell::new([Vec::new(), Vec::new(), Vec::new()]));
+        // SAFETY: one thread, and no reference to the memo outlives this call.
+        f(unsafe { &mut *MEMO.0.get() })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with<R>(f: impl FnOnce(&mut [Vec<f64>; 3]) -> R) -> R {
+        std::thread_local!(static MEMO: core::cell::RefCell<[Vec<f64>; 3]> = const { core::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new()]) });
+        MEMO.with(|m| f(&mut m.borrow_mut()))
     }
 }
 
@@ -530,10 +530,8 @@ const LARGE: &[&str] = &[
 pub fn size(company: &str) -> Size {
     let name = normalize(company);
     let compact: String = name.chars().filter(|c| *c != ' ').collect();
-    let any = |set: &[&str]| {
-        set.iter()
-            .any(|a| *a == compact || name.split(' ').any(|w| w == *a))
-    };
+    let parts: Vec<&str> = name.split(' ').collect();
+    let any = |set: &[&str]| set.iter().any(|a| *a == compact || parts.contains(a));
     if any(&MEGA) {
         Size::Mega
     } else if any(LARGE) {
@@ -1024,10 +1022,16 @@ pub struct Traits {
 }
 
 #[inline(never)]
-pub fn traits(j: &Job) -> Traits {
+/// Org.key/1 and Org.size/1: what a job's traits take from its company.
+pub fn company(company: &str) -> (String, Size) {
+    (normalize(company), size(company))
+}
+
+/// A job's traits, given its company's.
+pub fn traits(j: &Job, (key, size): (String, Size)) -> Traits {
     Traits {
-        key: normalize(j.company),
-        size: size(j.company),
+        key,
+        size,
         ats: ats(j.url()),
         dept: department(j.department, j.role, j.squad, j.fit),
         family: family(j.role),
