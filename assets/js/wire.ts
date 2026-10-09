@@ -453,11 +453,20 @@ export class Wire {
         case KIND.TICKET:
           this.ticket = text(f, HEADER)[0]
           return
-        case KIND.BYE:
-          this.host.bye()
+        case KIND.BYE: {
+          // The session is over. Signed out or a dead key: sign in again.
+          // Another schema: this bundle is stale, so load the page once
+          // more. Anything else is a protocol fault: reconnect with backoff.
+          const why = text(f, HEADER)[0]
           this.conn?.close()
-          location.assign("/sign-in")
+          if (why === "signed_out" || why === "key") {
+            this.host.bye()
+            location.assign("/sign-in")
+          } else if (why === "schema" && !reloadedLately()) {
+            location.reload()
+          }
           return
+        }
         default:
           this.host.frame(f, kind, flags, rev)
       }
@@ -544,6 +553,18 @@ export class Wire {
       // offline: the socket attempt below decides
     }
   }
+}
+
+/** At most one reload a minute for a schema change, so a mismatch cannot loop. */
+function reloadedLately(): boolean {
+  try {
+    const last = Number(sessionStorage.getItem("hireme:schema-reload") ?? 0)
+    if (Date.now() - last < 60_000) return true
+    sessionStorage.setItem("hireme:schema-reload", String(Date.now()))
+  } catch {
+    // storage blocked: reload anyway, the server's answer will not change within the minute
+  }
+  return false
 }
 
 function sleep(ms: number): Promise<void> {
