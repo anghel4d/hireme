@@ -1,14 +1,12 @@
 # An echoing Session behind the real gate, for native/gate/netem.sh and the
-# probe's echo and bulk modes. It lifts the gate's caps at OPEN, as a
+# probe's echo and boot modes. It lifts the gate's caps at OPEN, as a
 # ticketed browser session does.
 #
 #   GATE_SOCKET=/path/to.sock MIX_ENV=test mix run --no-start bench/gate_echo.exs
 #
-# Control stream: "E" + 8 bytes is echoed back; "B" + u32 LE asks for that
-# many bytes back on the same stream, sent in one write as the real Session
-# sends a BOOT. A CONNECT path with `?boot=N` gets N bytes on server uni
-# stream 3 from inside init, ahead of the ACCEPT, as a ticketed browser's
-# BOOT goes out.
+# Control stream: "E" + 8 bytes is echoed back. A CONNECT path with
+# `?boot=N` gets N bytes on server uni stream 3, written in one go from
+# inside init, ahead of the ACCEPT, as a ticketed browser's BOOT goes out.
 defmodule HiremeBench.GateEcho do
   alias HiremeWeb.Gate
 
@@ -32,11 +30,6 @@ defmodule HiremeBench.GateEcho do
 
   defp drain(%{buf: <<"E", m::binary-size(8), rest::binary>>} = s) do
     Gate.send(s.c, 0, ["E", m])
-    drain(%{s | buf: rest})
-  end
-
-  defp drain(%{buf: <<"B", n::little-32, rest::binary>>} = s) do
-    Gate.send(s.c, 0, :binary.copy(<<7>>, n))
     drain(%{s | buf: rest})
   end
 

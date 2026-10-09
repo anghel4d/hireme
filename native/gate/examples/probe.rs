@@ -9,18 +9,14 @@
 //! probe echo URL [--hash HEX] [--n N]
 //!     N round trips on the control stream (needs an echoing Session, as in
 //!     the localhost loop).
-//! probe bulk URL [--hash HEX] [--bytes B] [--rounds R]
-//!     Ask the echoing Session for B bytes on the control stream, where the
-//!     real Session sends its BOOT, and time the last byte. The first round
-//!     starts from the initial congestion window; later rounds reuse it.
 //! probe boot URL?boot=B [--hash HEX] [--n N]
 //!     N cold sessions whose BOOT (B bytes) the echoing Session pushes on a
 //!     server uni stream as it accepts: time to `ready`, to the first and to
 //!     the last BOOT byte, all from the start of the connect.
 //! ```
 //!
-//! The echoing Session's control protocol: `E` + 8 bytes is echoed back;
-//! `B` + u32 LE asks for that many bytes back on the same stream.
+//! The echoing Session (bench/gate_echo.exs) echoes `E` + 8 bytes on the
+//! control stream.
 
 use std::time::{Duration, Instant};
 use std::net::SocketAddr;
@@ -34,22 +30,18 @@ struct Args {
     url: String,
     hash: Option<String>,
     n: usize,
-    bytes: usize,
-    rounds: usize,
 }
 
 fn args() -> Args {
     let mut it = std::env::args().skip(1);
-    let mode = it.next().expect("mode: handshake | echo | bulk");
+    let mode = it.next().expect("mode: handshake | echo | boot");
     let url = it.next().expect("URL");
-    let mut a = Args { mode, url, hash: None, n: 20, bytes: 2 << 20, rounds: 5 };
+    let mut a = Args { mode, url, hash: None, n: 20 };
     while let Some(flag) = it.next() {
         let v = it.next().expect("flag value");
         match flag.as_str() {
             "--hash" => a.hash = Some(v).filter(|h| h.len() == 64),
             "--n" => a.n = v.parse().unwrap(),
-            "--bytes" => a.bytes = v.parse().unwrap(),
-            "--rounds" => a.rounds = v.parse().unwrap(),
             _ => panic!("unknown flag {flag}"),
         }
     }
@@ -104,7 +96,6 @@ async fn main() {
     match a.mode.as_str() {
         "handshake" => handshake(&a).await,
         "echo" => echo(&a).await,
-        "bulk" => bulk(&a).await,
         "boot" => boot(&a).await,
         m => panic!("unknown mode {m}"),
     }
@@ -169,31 +160,6 @@ async fn echo(a: &Args) {
         ms(pct(&mut samples, 50)),
         ms(pct(&mut samples, 90)),
         ms(pct(&mut samples, 99)),
-        ms(conn.rtt())
-    );
-}
-
-async fn bulk(a: &Args) {
-    let (conn, mut send, mut recv, _) = open(a).await;
-    let mut times = Vec::new();
-    let mut buf = vec![0u8; a.bytes];
-    for _ in 0..a.rounds {
-        let mut req = vec![b'B'];
-        req.extend_from_slice(&(a.bytes as u32).to_le_bytes());
-        let t = Instant::now();
-        send.write_all(&req).await.unwrap();
-        recv.read_exact(&mut buf).await.unwrap();
-        times.push(t.elapsed());
-    }
-    let mbit = a.bytes as f64 * 8.0 / pct(&mut times.clone(), 50).as_secs_f64() / 1e6;
-    println!(
-        "{{\"mode\":\"bulk\",\"bytes\":{},\"rounds\":{},\"bulk_ms\":{{\"p50\":{},\"min\":{},\"max\":{}}},\"mbit_s\":{:.1},\"quic_rtt_ms\":{}}}",
-        a.bytes,
-        a.rounds,
-        ms(pct(&mut times, 50)),
-        ms(pct(&mut times, 0)),
-        ms(pct(&mut times, 100)),
-        mbit,
         ms(conn.rtt())
     );
 }

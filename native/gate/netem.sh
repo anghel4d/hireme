@@ -6,7 +6,7 @@
 # bench/gate.mjs measures through it.
 #
 #   native/gate/netem.sh RTT_MS [RATE|none] [bench/gate.mjs flags...]
-#   native/gate/netem.sh 47 none --n 5 --bytes 1048576 --origin http://localhost:4000
+#   native/gate/netem.sh 47 none --n 5 --boot 1048576 --origin http://localhost:4000
 #
 # Before the first run: `cargo build --release --manifest-path native/gate/Cargo.toml
 # --bin hireme-gate --example probe` and `MIX_ENV=test mix compile`.

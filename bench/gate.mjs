@@ -1,9 +1,9 @@
 // Timing of the WebTransport gate: cold connects, and with a local echoing
 // Session (bench/gate_echo.exs, run under native/gate/netem.sh) the control
-// round trip and a bulk transfer on it.
+// round trip and a BOOT pushed as the session is accepted.
 //
 //   node bench/gate.mjs --url https://GATE_HOST/wt [--n 10] [--origin https://APP_HOST]
-//     [--hash-file FILE --bytes N --boot N] [--out FILE.jsonl] [--rev LABEL]
+//     [--hash-file FILE [--boot BYTES]] [--out FILE.jsonl] [--rev LABEL]
 //
 // Every sample is a fresh connection (no session resumption, no address
 // token), so every sample is a cold start.
@@ -13,17 +13,16 @@
 //   keep-alives. With no Origin and no ticket the production BEAM holds a
 //   pending agent session for at most 2 s and drops it, so no credential is
 //   involved.
-// - chromium (with --origin; NODE_PATH and CHROME as for bench/desk.mjs): a
+// - chromium (with --origin; NODE_PATH and CHROME as for bench/browser.mjs): a
 //   page served locally under that origin opens a session. Against production
 //   it carries no ticket, so the BEAM refuses it with 403 after the CONNECT:
 //   the time until `ready` rejects is exactly the cold connection cost a desk
 //   pays before its first byte, and nothing is allocated.
 // - --hash-file (local only): the self-signed certificate's hash file. The
-//   echoing Session is then expected, and both clients also time the first
-//   control echo and --bytes sent back on the control stream. With --boot N
-//   the Session pushes N bytes on a server uni stream as it accepts, the way
-//   a ticketed browser's BOOT arrives, and both clients time its first and
-//   last byte from the start of the connect.
+//   echoing Session is then expected: both clients time the first control
+//   echo, and the first and last byte of a BOOT of --boot bytes (1 MiB by
+//   default) that the Session pushes on a server uni stream as it accepts,
+//   all from the start of the connect.
 //
 // The production gate's host is never committed; pass it on the command line.
 
@@ -37,12 +36,12 @@ const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1]]] : acc), []),
 )
 if (!args.url) {
-  console.error("usage: node bench/gate.mjs --url https://GATE_HOST/wt [--n 10] [--origin URL] [--hash-file F --bytes N] [--out FILE] [--rev LABEL]")
+  console.error("usage: node bench/gate.mjs --url https://GATE_HOST/wt [--n 10] [--origin URL] [--hash-file F [--boot BYTES]] [--out FILE] [--rev LABEL]")
   process.exit(2)
 }
 const n = Number(args.n ?? 10)
-const bytes = Number(args.bytes ?? 1 << 20)
 const hash = args["hash-file"] ? readFileSync(args["hash-file"], "utf8").trim() : null
+const boot = hash ? Number(args.boot ?? 1 << 20) : 0
 const root = join(dirname(fileURLToPath(import.meta.url)), "..")
 const gate = join(root, "native/gate")
 const probe = join(gate, "target/release/examples/probe")
@@ -60,25 +59,20 @@ function quantiles(xs) {
   return { min: q(0), p50: q(50), p90: q(90), max: q(100) }
 }
 
-function runProbe(mode, ...extra) {
-  const flags = hash ? ["--hash", hash] : []
-  const out = execFileSync(probe, [mode, args.url, ...flags, ...extra], { encoding: "utf8" })
+function runProbe(mode, url, ...extra) {
+  const out = execFileSync(probe, [mode, url, ...(hash ? ["--hash", hash] : []), ...extra], { encoding: "utf8" })
   return JSON.parse(out.trim().split("\n").pop())
 }
 
 if (!existsSync(probe)) {
   execFileSync(process.env.CARGO ?? "cargo", ["build", "--release", "--example", "probe", "--manifest-path", join(gate, "Cargo.toml")], { stdio: "inherit" })
 }
-const shake = runProbe("handshake", "--n", String(n))
+const shake = runProbe("handshake", args.url, "--n", String(n))
 emit({ client: "probe", connect_ms: shake.connect_ms, rtt_ms: shake.rtt_ms })
 if (hash) {
-  const echo = runProbe("echo", "--n", "50")
-  const bulk = runProbe("bulk", "--bytes", String(bytes), "--rounds", "3")
-  emit({ client: "probe", echo_ms: echo.rtt_ms, bytes, bulk_ms: bulk.bulk_ms })
-  if (args.boot) {
-    const b = JSON.parse(execFileSync(probe, ["boot", `${args.url}?boot=${args.boot}`, "--hash", hash, "--n", String(n)], { encoding: "utf8" }))
-    emit({ client: "probe", boot_bytes: Number(args.boot), ready_ms: b.ready_ms, first_byte_ms: b.first_byte_ms, last_byte_ms: b.last_byte_ms })
-  }
+  const echo = runProbe("echo", args.url, "--n", "50")
+  const pushed = runProbe("boot", `${args.url}?boot=${boot}`, "--n", String(n))
+  emit({ client: "probe", echo_ms: echo.rtt_ms, boot, ready_ms: pushed.ready_ms, boot_first_ms: pushed.first_byte_ms, boot_last_ms: pushed.last_byte_ms })
 }
 
 if (args.origin) {
@@ -96,53 +90,39 @@ if (args.origin) {
     await page.goto(`${args.origin}/`)
     runs.push(
       await page.evaluate(
-        async ({ url, hash, bytes, boot }) => {
+        async ({ url, hash, boot }) => {
           const opts = hash
             ? { serverCertificateHashes: [{ algorithm: "sha-256", value: new Uint8Array(hash.match(/../g).map((h) => parseInt(h, 16))) }] }
             : {}
           const t0 = performance.now()
+          const since = () => performance.now() - t0
           const wt = new WebTransport(boot ? `${url}?boot=${boot}` : url, opts)
-          const pushed = boot
-            ? wt.incomingUnidirectionalStreams.getReader().read().then(async ({ value }) => {
-                const r = value.getReader()
-                let first = 0
-                for (;;) {
-                  const x = await r.read()
-                  if (x.done) return { first, last: performance.now() - t0 }
-                  first ||= performance.now() - t0
-                }
-              })
-            : null
           try {
             await wt.ready
           } catch (e) {
-            return { ready: performance.now() - t0, outcome: String(e) }
+            return { ready: since(), outcome: String(e) }
           }
-          const ready = performance.now() - t0
-          const b = pushed ? await pushed : {}
+          const ready = since()
           if (!hash) {
             wt.close()
             return { ready, outcome: "accepted" }
           }
+          const uni = (await wt.incomingUnidirectionalStreams.getReader().read()).value.getReader()
+          await uni.read()
+          const first = since()
+          while (!(await uni.read()).done);
+          const last = since()
           const s = await wt.createBidirectionalStream()
           const w = s.writable.getWriter()
           const r = s.readable.getReader()
-          const e = new Uint8Array(9)
-          e[0] = 69
-          await w.write(e)
+          const te = performance.now()
+          await w.write(new Uint8Array([69, 0, 0, 0, 0, 0, 0, 0, 0]))
           for (let got = 0; got < 9; ) got += (await r.read()).value.length
-          const echo = performance.now() - t0
-          const req = new Uint8Array(5)
-          req[0] = 66
-          new DataView(req.buffer).setUint32(1, bytes, true)
-          const tb = performance.now()
-          await w.write(req)
-          for (let got = 0; got < bytes; ) got += (await r.read()).value.length
-          const bulk = performance.now() - tb
+          const echo = performance.now() - te
           wt.close()
-          return { ready, echo, bulk, boot_first: b.first, boot_last: b.last, outcome: "accepted" }
+          return { ready, first, last, echo, outcome: "accepted" }
         },
-        { url: args.url, hash, bytes, boot: args.boot ? Number(args.boot) : 0 },
+        { url: args.url, hash, boot },
       ),
     )
     await ctx.close()
@@ -152,11 +132,10 @@ if (args.origin) {
   emit({
     client: "chromium",
     ready_ms: pick("ready"),
+    boot: boot || undefined,
+    boot_first_ms: pick("first"),
+    boot_last_ms: pick("last"),
     echo_ms: pick("echo"),
-    bytes: hash ? bytes : undefined,
-    bulk_ms: pick("bulk"),
-    boot_first_byte_ms: pick("boot_first"),
-    boot_last_byte_ms: pick("boot_last"),
     outcome: runs.at(-1).outcome,
   })
 }
