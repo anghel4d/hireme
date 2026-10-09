@@ -143,8 +143,26 @@ defmodule Hireme.MfaTest do
   test "factors belong to their account", %{session: session} do
     enroll_app(session)
     Hireme.DataCase.open_account("Other desk")
+    refute Mfa.enrolled?()
     assert Mfa.methods() == []
     assert Mfa.recovery_codes_left() == 0
+  end
+
+  test "enrollment ignores unverified and disabled factors", %{account: account} do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    method =
+      %Hireme.Mfa.Method{}
+      |> Hireme.Mfa.Method.changeset(%{account_id: account.id, kind: :totp})
+      |> Repo.insert!()
+
+    refute Mfa.enrolled?()
+    verified = method |> Ecto.Changeset.change(verified_at: now) |> Repo.update!()
+    assert Mfa.enrolled?()
+    disabled = verified |> Ecto.Changeset.change(disabled_at: now) |> Repo.update!()
+    refute Mfa.enrolled?()
+    disabled |> Ecto.Changeset.change(disabled_at: nil) |> Repo.update!()
+    assert Mfa.enrolled?()
   end
 
   defp aged(session) do
