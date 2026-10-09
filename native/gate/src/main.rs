@@ -16,7 +16,8 @@
 //! - a path prefix and an `Origin` allow-list (an absent Origin is a native
 //!   agent and is forwarded as "", so the BEAM then insists on an API key);
 //! - the BEAM must ACCEPT within 2 s and declare READY (HELLO verified)
-//!   within 2 s after that, or the connection closes;
+//!   within 2 s after that, or the connection closes (a Session that
+//!   authenticated at OPEN may send READY before ACCEPT);
 //! - until READY, one client bidi stream, a 64 KiB connection receive
 //!   window, and no datagrams or uni streams forwarded.
 //!
@@ -444,7 +445,22 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     }
     let _ = up.send(message(OPEN, &head, &[]));
 
-    match timeout(DEADLINE, read_message(&mut down)).await {
+    // A Session that authenticated at OPEN (a browser's ticket) may send
+    // READY ahead of ACCEPT; the caps then lift as soon as the session exists.
+    let answer = timeout(DEADLINE, async {
+        let mut early = false;
+        loop {
+            match read_message(&mut down).await {
+                Some(m) if m[0] == READY => early = true,
+                other => return (other, early),
+            }
+        }
+    });
+    let (answer, early_ready) = match answer.await {
+        Ok((m, early)) => (Ok(m), early),
+        Err(e) => (Err(e), false),
+    };
+    match answer {
         Ok(Some(m)) if m[0] == ACCEPT => {}
         Ok(Some(m)) if m[0] == REFUSE => {
             c.refused_beam.fetch_add(1, Relaxed);
@@ -464,6 +480,9 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     let Ok(conn) = request.accept().await else { return };
     c.accepted.fetch_add(1, Relaxed);
     let shared = Arc::new(Shared { up, queued: AtomicUsize::new(0), ready: false.into(), gate: gate.clone() });
+    if early_ready {
+        lift(&conn, &shared);
+    }
     // A select! over a partial read would lose bytes, so the BEAM's half
     // is read by its own task and arrives here as whole messages.
     let (beam_tx, beam_rx) = mpsc::channel(64);
@@ -540,6 +559,17 @@ async fn run(conn: &Connection, sh: &Arc<Shared>, mut down: mpsc::Receiver<Vec<u
     }
 }
 
+/// The peer is authenticated: lift the pre-auth stream and window caps.
+fn lift(conn: &Connection, sh: &Shared) {
+    if !sh.ready.swap(true, Relaxed) {
+        let q = conn.quic_connection();
+        q.set_max_concurrent_bi_streams(QVarInt::from_u32(BIDI_AFTER));
+        q.set_max_concurrent_uni_streams(QVarInt::from_u32(UNI_AFTER));
+        q.set_receive_window(QVarInt::from_u32(WINDOW_AFTER));
+        sh.gate.counters.ready.fetch_add(1, Relaxed);
+    }
+}
+
 /// Applies one message from the BEAM.
 fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, Ends>, m: &[u8]) -> Result<Option<(u32, Vec<u8>)>, ()> {
     let to = |streams: &mut HashMap<u32, Ends>, id: u32, cmd: Cmd| {
@@ -548,15 +578,7 @@ fn beam(conn: &Connection, sh: &Arc<Shared>, streams: &mut HashMap<u32, Ends>, m
         }
     };
     match m[0] {
-        READY => {
-            if !sh.ready.swap(true, Relaxed) {
-                let q = conn.quic_connection();
-                q.set_max_concurrent_bi_streams(QVarInt::from_u32(BIDI_AFTER));
-                q.set_max_concurrent_uni_streams(QVarInt::from_u32(UNI_AFTER));
-                q.set_receive_window(QVarInt::from_u32(WINDOW_AFTER));
-                sh.gate.counters.ready.fetch_add(1, Relaxed);
-            }
-        }
+        READY => lift(conn, sh),
         DATA => {
             let id = u32_at(m, 1).ok_or(())?;
             let body = m[5..].to_vec();
