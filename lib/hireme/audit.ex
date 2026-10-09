@@ -22,17 +22,48 @@ defmodule Hireme.Audit do
   """
   @spec record(atom(), map(), context()) :: Event.t()
   def record(kind, meta \\ %{}, context \\ %{}) when is_atom(kind) do
-    %Event{}
-    |> Event.changeset(%{
-      account_id: Map.get(context, :account_id) || Repo.account_id(),
-      kind: Atom.to_string(kind),
-      ip: Map.get(context, :ip, ""),
-      user_agent: String.slice(Map.get(context, :user_agent, ""), 0, 200),
-      meta: meta,
-      inserted_at: DateTime.utc_now() |> DateTime.truncate(:second)
-    })
-    |> Repo.insert!()
+    account_id = Map.get(context, :account_id) || Repo.account_id()
+
+    event =
+      %Event{}
+      |> Event.changeset(%{
+        account_id: account_id,
+        kind: Atom.to_string(kind),
+        ip: Map.get(context, :ip, ""),
+        user_agent: String.slice(Map.get(context, :user_agent, ""), 0, 200),
+        meta: meta,
+        inserted_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+      |> Repo.insert!()
+
+    changed(account_id)
+    event
   end
+
+  @doc """
+  The topic where an account's security state is announced: keys,
+  sessions, ways in, factors. A browser session redraws its account
+  tables on `{Hireme.Audit, :changed}`.
+  """
+  @spec topic(pos_integer()) :: String.t()
+  def topic(account_id), do: "account:#{account_id}"
+
+  @doc """
+  Announce a change to the account's security state. Every recorded event
+  announces itself; a change that is not audited (a key renamed) calls
+  this directly. The calling process is left out: it already knows.
+  """
+  @spec changed(pos_integer() | nil) :: :ok
+  def changed(nil), do: :ok
+
+  def changed(account_id),
+    do:
+      Phoenix.PubSub.broadcast_from(
+        Hireme.PubSub,
+        self(),
+        topic(account_id),
+        {__MODULE__, :changed}
+      )
 
   @doc "The latest events for the account on the process."
   @spec recent(pos_integer()) :: [Event.t()]
