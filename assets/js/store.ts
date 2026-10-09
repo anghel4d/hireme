@@ -150,7 +150,6 @@ export interface WireKernel {
   touched_len(): number
   touched_ptr(): number
   derive(): number
-  warm(): void
   counter(k: number): number
   set_today(day: number): void
   snapshot(): number
@@ -412,17 +411,10 @@ export class Kernel {
 /** The kernel module, compiled once, and its first instance; a trap re-instantiates the module. */
 export interface KernelModule { module: WebAssembly.Module; instance: WireKernel }
 
-/**
- * The kernel, from the module the page started compiling, or fetched now.
- * Every function's first call compiles it, so a throwaway desk takes those
- * calls once `ready` settles (the HELLO is out, and the server is working):
- * not before, where it would hold up the socket's open, and not on the BOOT.
- */
-export async function loadWireKernel(url: string, early?: Promise<WebAssembly.Module>, ready?: Promise<unknown>): Promise<KernelModule> {
+/** The kernel, from the module the page started compiling, or fetched now. */
+export async function loadWireKernel(url: string, early?: Promise<WebAssembly.Module>): Promise<KernelModule> {
   const module = (await early?.catch(() => undefined)) ?? (await WebAssembly.compileStreaming(fetch(url)))
-  const instance = (await WebAssembly.instantiate(module, {})).exports as unknown as WireKernel
-  void (ready ?? Promise.resolve()).then(() => instance.warm(), () => instance.warm())
-  return { module, instance }
+  return { module, instance: (await WebAssembly.instantiate(module, {})).exports as unknown as WireKernel }
 }
 
 // ---- what rows are read as ----

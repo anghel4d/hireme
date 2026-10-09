@@ -18,7 +18,7 @@ const meta = (name: string) => document.querySelector<HTMLMetaElement>(`meta[nam
 
 try {
   const early = window.__hw
-  const kernel = await loadWireKernel("/wasm/kernel.wasm", early?.kernel, early?.hello)
+  const kernel = await loadWireKernel("/wasm/kernel.wasm", early?.kernel)
   const desk = new LocalDesk(kernel, meta("wire-scope"), early?.clientId)
   const wire = new Wire(desk, csrf(), { gate: meta("wire-gate"), ticket: meta("wire-ticket"), hashes: meta("wire-gate-hashes") }, early)
   desk.attach({ send: (p) => void wire.control(p.frame) })

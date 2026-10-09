@@ -28,27 +28,6 @@
     hello?: Promise<{ wt?: WebTransport; uni?: Uni; writer?: WritableStreamDefaultWriter<Uint8Array>; readable?: ReadableStream<Uint8Array> } | null>
     queue: ArrayBuffer[]
   } = { clientId: crypto.getRandomValues(new Uint32Array(1))[0] ?? 1, queue: [] }
-  hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
-  hw.kernel.catch(() => {})
-
-  // The snapshot record for this account, or undefined.
-  const snap: Promise<{ format?: number; rev?: bigint; hash?: number } | undefined> = new Promise((resolve) => {
-    if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
-    const open = indexedDB.open("hireme", 1)
-    open.onupgradeneeded = () => open.result.createObjectStore("snap")
-    open.onerror = () => resolve(undefined)
-    open.onsuccess = () => {
-      try {
-        const get = open.result.transaction("snap").objectStore("snap").get(scope)
-        get.onsuccess = () => resolve(get.result)
-        get.onerror = () => resolve(undefined)
-      } catch {
-        resolve(undefined)
-      }
-    }
-  })
-  hw.snap = snap
-
   // The whole desk (rev 0), as raw tables, for this client id.
   const ask = `rev=0&raw=1&cid=${hw.clientId}`
 
@@ -104,6 +83,29 @@
       })
     }
   }
+
+  // The connection first, then the kernel's compile, then the snapshot.
+  hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
+  hw.kernel.catch(() => {})
+
+  // The snapshot record for this account, or undefined: read a task later,
+  // since opening IndexedDB in a fresh profile holds the main thread.
+  const snap: Promise<{ format?: number; rev?: bigint; hash?: number } | undefined> = new Promise((resolve) => setTimeout(() => {
+    if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
+    const open = indexedDB.open("hireme", 1)
+    open.onupgradeneeded = () => open.result.createObjectStore("snap")
+    open.onerror = () => resolve(undefined)
+    open.onsuccess = () => {
+      try {
+        const get = open.result.transaction("snap").objectStore("snap").get(scope)
+        get.onsuccess = () => resolve(get.result)
+        get.onerror = () => resolve(undefined)
+      } catch {
+        resolve(undefined)
+      }
+    }
+  }))
+  hw.snap = snap
 
   ;(window as { __hw?: unknown }).__hw = hw
 }
