@@ -109,18 +109,35 @@ export function text(frame: Bytes, at: number): [string, number] {
   return [DECODER.decode(frame.subarray(at + 2, at + 2 + n)), at + 2 + n]
 }
 
+let painting: Promise<void> | null = null
+let painted = false
+
+/**
+ * The board is in the desk (from the page, or a stream's first END frame):
+ * what comes after it waits for the next paint, once per page; a hidden
+ * page paints nothing, so not past 100 ms.
+ */
+export function boardIn(): void {
+  if (painted || painting) return
+  painting = new Promise<void>((r) => {
+    requestAnimationFrame(() => setTimeout(r, 0))
+    setTimeout(r, 100)
+  }).then(() => {
+    painted = true
+    painting = null
+  })
+}
+
 /**
  * Cuts a byte stream into frames. Bytes land in one staging buffer that
  * grows to the largest frame seen; a complete frame is passed as a view
- * of it. After the first whole desk (an END frame: the board) the frames
- * behind it wait for one paint, so the board paints from its own frame
- * before the rest of the desk lands.
+ * of it. Once the board is in (boardIn), the frames behind it wait for
+ * one paint, so the board paints before the rest of the desk lands.
  */
 export class Framer {
   private buf = new ArrayBuffer(64 * 1024)
   private filled = 0
   private held: Bytes[] | null = null
-  private painted = false
   private flushed: Promise<void> = Promise.resolve()
 
   constructor(private readonly sink: Sink, private readonly broken: (why: string) => void) {}
@@ -190,21 +207,18 @@ export class Framer {
       this.held.push(f.slice())
       return
     }
-    const h = header(f)
-    this.sink.frame(f, h.kind, h.flags, h.rev)
-    if (h.flags & FLAG.END && !this.painted) {
-      this.painted = true
-      this.held = []
-      // After the frame that paints the board; a hidden page paints nothing, so not past 100 ms.
-      this.flushed = new Promise<void>((r) => {
-        requestAnimationFrame(() => setTimeout(r, 0))
-        setTimeout(r, 100)
-      }).then(() => {
+    if (painting) {
+      this.held = [f.slice()]
+      this.flushed = painting.then(() => {
         const held = this.held ?? []
         this.held = null
         for (const g of held) this.emit(g)
       })
+      return
     }
+    const h = header(f)
+    this.sink.frame(f, h.kind, h.flags, h.rev)
+    if (h.flags & FLAG.END) boardIn()
   }
 
   /** Once every frame cut so far has reached the sink. */
@@ -272,6 +286,8 @@ function drain(wt: WebTransport): Uni {
 export interface Early {
   ws?: WebSocket
   snap?: Promise<unknown>
+  /** The board's BOOT frame, carried in the page. */
+  board?: Bytes
   /** The kernel's module, compiling since the page's first script ran. */
   kernel?: Promise<WebAssembly.Module>
   /** The client id the early connection carried; the desk's ops use it too. */
