@@ -78,8 +78,6 @@ export class Shell {
   private drawQueued = false
   private tables: Tables
   private noticeSeq = 0
-  private readonly plane: HTMLElement
-  private readonly cards: views.Cards
 
   constructor(root: HTMLElement, desk: Desk) {
     this.root = root
@@ -108,6 +106,19 @@ export class Shell {
       sheet: false,
       grid: { cols: 3, scroll: 0, viewport: 640, rem: remPx() },
     }
+    this.linkErrors = LINK_ERRORS.get(params.get("link_error") ?? "") ?? null
+    desk.subscribe((change) => { if (!this.unseen(change)) this.dispatch({ t: "desk", change }) })
+    this.build()
+  }
+
+  private plane: HTMLElement | null = null
+  private cards: views.Cards | null = null
+  private linkErrors: string | null
+
+  // Nothing is laid out or painted before the board arrives (or the link
+  // gives up): until then the main thread belongs to the socket.
+  private build(): void {
+    if (this.plane || (this.desk.n === 0 && this.desk.status !== "offline")) return
     this.root.innerHTML = `
       <div id="topbar"></div>
       <div id="notice-slot"></div>
@@ -125,9 +136,8 @@ export class Shell {
     this.bind()
     this.select()
     if (this.model.appId === null) this.model.appId = this.idAt(0)
-    if (this.model.lens === "settings") void this.loadSettings(LINK_ERRORS.get(params.get("link_error") ?? "") ?? null)
-    desk.subscribe((change) => { if (!this.unseen(change)) this.dispatch({ t: "desk", change }) })
-    this.draw()
+    if (this.model.lens === "settings") void this.loadSettings(this.linkErrors)
+    this.queueDraw()
   }
 
   // ---- update ----
@@ -184,6 +194,7 @@ export class Shell {
         break
       }
       case "desk":
+        this.build()
         this.onDesk(msg.change)
         break
       case "ran": {
@@ -402,6 +413,7 @@ export class Shell {
   }
 
   private draw(): void {
+    if (!this.plane) return
     const m = this.model
     const d = this.desk
     const t = d.tables
@@ -525,8 +537,8 @@ export class Shell {
     if (start >= 0) for (let p = start; p <= last; p++) place(p)
 
     const height = `${Math.round(grid.contentHeight(m.count, m.grid.cols, metrics))}px`
-    if (this.plane.style.height !== height) this.plane.style.height = height
-    this.cards.set(parts)
+    if (this.plane && this.plane.style.height !== height) this.plane.style.height = height
+    this.cards?.set(parts)
     this.set("#empty", m.count === 0 ? (d.n === 0 ? views.connecting() : views.emptyBoard()) : raw(""))
     this.set("#focus-slot", focus ? views.focusPanel(focus, m.index >= 0, m.sheet, m.refusal, mark) : views.emptyFocus())
   }
