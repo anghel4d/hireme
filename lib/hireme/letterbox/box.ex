@@ -50,6 +50,7 @@ defmodule Hireme.Letterbox.Box do
       Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic())
       token = make_ref()
       handle = %Handle{id: id, token: token, pid: self(), pair: pair}
+      Hireme.Ops.touch(Repo.account_id!(), [CvPair.job_id(pair)])
       {:reply, {:ok, handle}, %{state | pair: pair, token: token, producer: producer}}
     else
       {:error, reason} -> {:stop, :normal, {:error, reason}, state}
@@ -73,18 +74,16 @@ defmodule Hireme.Letterbox.Box do
   def handle_call(
         {:release, token},
         {caller, _},
-        %{token: token, producer: caller, pair: pair} = state
+        %{token: token, producer: caller} = state
       ) do
-    Registry.unregister(@registry, {:producer, caller})
-    Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
-    Registry.unregister(@registry, {:lineage, CvPair.lineage_id(pair)})
-    Registry.unregister(@registry, {:box, state.id})
+    drop(caller, state)
     {:stop, :normal, :ok, state}
   end
 
   def handle_call({:release, _token}, _from, state), do: {:reply, {:error, :lease}, state}
 
   def handle_info({:DOWN, _ref, :process, producer, _reason}, %{producer: producer} = state) do
+    drop(producer, state)
     {:stop, :normal, state}
   end
 
@@ -94,6 +93,16 @@ defmodule Hireme.Letterbox.Box do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  # Drop the lease's keys now, not at exit, and repaint the card so tabs
+  # see it free.
+  defp drop(producer, %{pair: pair, id: id}) do
+    Registry.unregister(@registry, {:producer, producer})
+    Registry.unregister(@registry, {:job, CvPair.job_id(pair)})
+    Registry.unregister(@registry, {:lineage, CvPair.lineage_id(pair)})
+    Registry.unregister(@registry, {:box, id})
+    Hireme.Ops.touch(Repo.account_id!(), [CvPair.job_id(pair)])
+  end
 
   defp claim(key, refusal) do
     case Registry.register(@registry, key, true) do

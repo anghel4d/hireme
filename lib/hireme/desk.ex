@@ -16,7 +16,14 @@ defmodule Hireme.Desk.Card do
 
   @enforce_keys @job_fields ++ @joined
   defstruct @enforce_keys ++
-              [load: 0.0, cap: 1.0, heat_state: :cool, ats_vendor: :unknown, cooldown_days: nil]
+              [
+                load: 0.0,
+                cap: 1.0,
+                heat_state: :cool,
+                ats_vendor: :unknown,
+                cooldown_days: nil,
+                leased: false
+              ]
 
   @type t :: %__MODULE__{
           id: pos_integer(),
@@ -55,7 +62,8 @@ defmodule Hireme.Desk.Card do
           cap: float(),
           heat_state: :cool | :warm | :hot | :blocked,
           ats_vendor: atom(),
-          cooldown_days: non_neg_integer() | nil
+          cooldown_days: non_neg_integer() | nil,
+          leased: boolean()
         }
 
   @doc false
@@ -284,8 +292,11 @@ defmodule Hireme.Desk do
   rungs back and `stage_notes` carries the one thing the pips cannot.
 
   Writes return `{:ok, value}` or `{:error, reason}` with `reason` a
-  member of `t:refusal/0` or a changeset. Every change is broadcast as a
-  `Hireme.Desk.Signal` on the account's topic.
+  member of `t:refusal/0` or a changeset. Every public write runs on the
+  account's `Hireme.Ops` sequencer, which calls `execute/1` inside one
+  transaction and, after commit, broadcasts the change as a
+  `Hireme.Desk.Signal` and as an `{:ops_delta, rev, delta}` on the
+  account's topic.
 
   Every function here runs as the account on the process; the repo
   scopes each read to it and `tenant/1` stamps each row.
@@ -315,6 +326,7 @@ defmodule Hireme.Desk do
   alias Hireme.LifeEv
   alias Hireme.Mask
   alias Hireme.Narrative
+  alias Hireme.Ops
   alias Hireme.Pipeline
   alias Hireme.Pipeline.Rung
   alias Hireme.Repo
@@ -342,6 +354,19 @@ defmodule Hireme.Desk do
           | {:set_score, LifeEv.score()}
           | {:tailor, pos_integer(), map()}
 
+  @typedoc "A desk write as `Hireme.Ops` sequences it; see `execute/1`."
+  @type write ::
+          {:create, map()}
+          | {:stage, pos_integer(), Pipeline.stage()}
+          | {:next, pos_integer(), String.t(), Date.t() | nil}
+          | {:note, pos_integer(), Pipeline.stage(), String.t()}
+          | {:score, pos_integer(), LifeEv.score()}
+          | {:overlay, pos_integer(), pos_integer(), :inherit | map()}
+          | {:open_fire, String.t()}
+          | {:govern, Batch.t()}
+          | {:glance, pos_integer()}
+          | {:perform, CvPair.t(), command()}
+
   @type reply ::
           {:ok, Focus.t()}
           | {:ok, Job.t()}
@@ -360,15 +385,61 @@ defmodule Hireme.Desk do
   def list_cards(%Filters{} = filters) do
     cfg = Heat.config()
     today = Date.utc_today()
-    snap = Heat.snapshot(today, cfg)
 
     filters
     |> card_query()
-    |> Repo.all()
-    |> Enum.map(&struct!(Card, &1))
-    |> Heat.decorate_all(snap, cfg, today)
+    |> paint(Heat.snapshot(today, cfg), cfg, today)
     |> Enum.filter(&(filters.heat == :all or &1.heat_state == filters.heat))
     |> Enum.sort_by(&Card.order/1)
+  end
+
+  @doc """
+  Every card, or the cards with these ids, painted against a heat
+  snapshot the caller keeps (`Hireme.Ops` keeps one per account). Not in
+  board order.
+  """
+  @spec cards([pos_integer()] | :all, map(), Date.t()) :: [Card.t()]
+  def cards(ids, snapshot, today) do
+    query = card_query(%Filters{status: :all})
+    query = if ids == :all, do: query, else: where(query, [j], j.id in ^ids)
+    paint(query, snapshot, Heat.config(), today)
+  end
+
+  defp paint(query, snapshot, cfg, today) do
+    leased = Letterbox.leased_jobs()
+
+    query
+    |> Repo.all()
+    |> Enum.map(&struct!(Card, Map.put(&1, :leased, MapSet.member?(leased, &1.id))))
+    |> Heat.decorate_all(snapshot, cfg, today)
+  end
+
+  @doc "The applications that share `job_id`'s CV lineage, itself included."
+  @spec lineage_jobs(pos_integer()) :: [pos_integer()]
+  def lineage_jobs(job_id) do
+    Repo.all(
+      from v in Variant,
+        join: mine in Variant,
+        on: mine.lineage_id == v.lineage_id,
+        where: mine.job_app_id == ^job_id and not is_nil(v.job_app_id),
+        select: v.job_app_id
+    )
+    |> case do
+      [] -> [job_id]
+      ids -> ids
+    end
+  end
+
+  @doc "The applications in one batch."
+  @spec batch_jobs(String.t()) :: [pos_integer()]
+  def batch_jobs(code) do
+    Repo.all(
+      from j in Job,
+        join: b in Batch,
+        on: b.id == j.batch_id,
+        where: b.code == ^code,
+        select: j.id
+    )
   end
 
   @spec list_batches() :: [Batch.t()]
@@ -462,9 +533,7 @@ defmodule Hireme.Desk do
   resolves the employer's shared overlays and effective lineage theme.
   """
   @spec create_job(map()) :: {:ok, Job.t()} | {:error, refusal() | Ecto.Changeset.t()}
-  def create_job(attrs) when is_map(attrs) do
-    Repo.transaction(fn -> open!(attrs) end)
-  end
+  def create_job(attrs) when is_map(attrs), do: Ops.exec({:create, attrs})
 
   @spec create_job!(map()) :: Job.t()
   def create_job!(attrs) do
@@ -553,23 +622,65 @@ defmodule Hireme.Desk do
 
   @spec set_score(pos_integer(), LifeEv.score()) ::
           {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_score(job_id, score) when score in 0..100, do: write(job_id, %{score_100: score})
+  def set_score(job_id, score) when score in 0..100, do: Ops.exec({:score, job_id, score})
 
   @spec set_next(pos_integer(), String.t(), Date.t() | nil) ::
           {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_next(job_id, action, due), do: write(job_id, %{next_action: action, next_due: due})
+  def set_next(job_id, action, due), do: Ops.exec({:next, job_id, action, due})
 
   @spec set_note(pos_integer(), Pipeline.stage(), String.t()) ::
           {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_note(job_id, stage, note) do
+  def set_note(job_id, stage, note), do: Ops.exec({:note, job_id, stage, note})
+
+  @doc """
+  Run one desk write. Called only by `Hireme.Ops`, inside its
+  transaction, on the account's sequencer; a lease is checked against
+  the process that asked (`Hireme.Ops.holder/0`), not the sequencer.
+  """
+  @spec execute(write()) :: {:ok, term()} | {:error, refusal() | Ecto.Changeset.t()}
+  def execute({:create, attrs}), do: Repo.transaction(fn -> open!(attrs) end)
+  def execute({:score, job_id, score}), do: write(job_id, %{score_100: score})
+
+  def execute({:next, job_id, action, due}),
+    do: write(job_id, %{next_action: action, next_due: due})
+
+  def execute({:note, job_id, stage, note}) do
     write(job_id, fn job ->
       %{stage_notes: Map.put(job.stage_notes || %{}, Pipeline.name(stage), note)}
     end)
   end
 
+  def execute({:stage, job_id, stage}) do
+    with :ok <- permit(job_id),
+         :ok <- fire_permits(job_id, stage),
+         :ok <- heat_permits(job_id, stage) do
+      {:ok, write_stage(Repo.get!(Job, job_id), stage)}
+    end
+  end
+
+  def execute({:open_fire, code}), do: open_fire(code)
+  def execute({:govern, %Batch{} = batch}), do: {:ok, govern(batch)}
+
+  def execute({:glance, job_id}),
+    do: {:ok, job_id |> variant_of() |> List.wrap() |> refresh_variants!()}
+
+  def execute({:overlay, job_id, item_id, change}) do
+    with :ok <- permit(job_id),
+         {:ok, pair} <- CvPair.bind(job_id),
+         {:ok, _} <- write_line(pair, item_id, change) do
+      after_cv_change(pair)
+    end
+  end
+
+  def execute({:perform, %CvPair{} = pair, command}) do
+    with :ok <- permit(CvPair.job_id(pair)), do: perform_held(pair, command)
+  end
+
+  defp permit(job_id), do: Letterbox.permit_job(job_id, Ops.holder())
+
   # One row, one changeset, only while no agent holds the lease.
   defp write(job_id, attrs) do
-    with :ok <- Letterbox.permit_job(job_id) do
+    with :ok <- permit(job_id) do
       job = Repo.get!(Job, job_id)
       attrs = if is_function(attrs, 1), do: attrs.(job), else: attrs
       job |> Job.changeset(attrs) |> Repo.update()
@@ -578,17 +689,12 @@ defmodule Hireme.Desk do
 
   @spec refresh_glance!(pos_integer()) :: :ok
   def refresh_glance!(job_id) do
-    job_id |> variant_of() |> List.wrap() |> refresh_variants!()
+    {:ok, :ok} = Ops.exec({:glance, job_id})
+    :ok
   end
 
   @spec set_stage(pos_integer(), Pipeline.stage()) :: {:ok, Job.t()} | {:error, refusal()}
-  def set_stage(job_id, stage) do
-    with :ok <- Letterbox.permit_job(job_id),
-         :ok <- fire_permits(job_id, stage),
-         :ok <- heat_permits(job_id, stage) do
-      Repo.transaction(fn -> write_stage(Repo.get!(Job, job_id), stage) end)
-    end
-  end
+  def set_stage(job_id, stage), do: Ops.exec({:stage, job_id, stage})
 
   defp fire_permits(job_id, stage) do
     if Pipeline.fire_locked?(stage) and not batch_open?(job_id),
@@ -614,8 +720,7 @@ defmodule Hireme.Desk do
           deferred: [{Job.t(), Verdict.t()}]
         }
   def govern_batch(%Batch{} = batch) do
-    result = Heat.mix_batch(batch)
-    Enum.each(result.deferred, fn {job, verdict} -> defer!(job, verdict) end)
+    {:ok, result} = Ops.exec({:govern, batch})
     result
   end
 
@@ -624,6 +729,12 @@ defmodule Hireme.Desk do
       nil -> %{kept: [], deferred: []}
       batch -> govern_batch(batch)
     end
+  end
+
+  defp govern(%Batch{} = batch) do
+    result = Heat.mix_batch(batch)
+    Enum.each(result.deferred, fn {job, verdict} -> defer!(job, verdict) end)
+    result
   end
 
   defp defer!(%Job{} = job, %Verdict{} = verdict) do
@@ -664,7 +775,9 @@ defmodule Hireme.Desk do
   end
 
   @spec name_open_fire(String.t()) :: {:ok, Batch.t()} | {:error, :batch | Ecto.Changeset.t()}
-  def name_open_fire(code) when is_binary(code) do
+  def name_open_fire(code) when is_binary(code), do: Ops.exec({:open_fire, code})
+
+  defp open_fire(code) do
     case Repo.get_by(Batch, code: code) do
       nil ->
         {:error, :batch}
@@ -683,21 +796,15 @@ defmodule Hireme.Desk do
   The pair, not an id in the command, decides which application changes.
   """
   @spec perform(CvPair.t(), command()) :: reply()
-  def perform(%CvPair{} = pair, command) do
-    with :ok <- Letterbox.permit_job(CvPair.job_id(pair)) do
-      perform_held(pair, command)
-    end
+  def perform(%CvPair{} = pair, :get) do
+    with :ok <- Letterbox.permit_job(CvPair.job_id(pair)), do: perform_held(pair, :get)
   end
+
+  def perform(%CvPair{} = pair, command), do: Ops.exec({:perform, pair, command})
 
   @spec put_overlay(pos_integer(), pos_integer(), :inherit | map()) ::
           {:ok, Job.t()} | {:error, refusal() | Ecto.Changeset.t()}
-  def put_overlay(job_id, item_id, change) do
-    with :ok <- Letterbox.permit_job(job_id),
-         {:ok, pair} <- CvPair.bind(job_id),
-         {:ok, _} <- write_line(pair, item_id, change) do
-      after_cv_change(pair)
-    end
-  end
+  def put_overlay(job_id, item_id, change), do: Ops.exec({:overlay, job_id, item_id, change})
 
   defp write_line(pair, item_id, :inherit), do: CvPair.drop_line(pair, item_id)
 
@@ -907,9 +1014,8 @@ defmodule Hireme.Desk do
     end)
   end
 
-  defp publish(%Signal{} = signal) do
-    Phoenix.PubSub.broadcast(Hireme.PubSub, topic(), {:desk_event, signal})
-  end
+  # Held by the sequencer and sent after commit; a rolled-back write sends nothing.
+  defp publish(%Signal{} = signal), do: Ops.after_commit({:desk_event, signal})
 
   defp person_name do
     case Kv.get("global", "candidate") do

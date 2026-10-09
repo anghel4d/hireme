@@ -75,6 +75,7 @@ defmodule Hireme.Application do
         Hireme.Repo,
         {DNSCluster, query: Application.get_env(:hireme, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Hireme.PubSub},
+        Hireme.Ops,
         Hireme.RateLimit,
         {Registry, keys: :unique, name: Hireme.Letterbox.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Hireme.Letterbox.Supervisor}

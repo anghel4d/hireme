@@ -15,6 +15,8 @@ defmodule Hireme.Accounts.Account do
     # Live API keys, moved in the same statement as create and revoke so two
     # mints cannot both pass the cap.
     field :live_key_count, :integer, default: 0
+    # Committed desk changes, bumped by `Hireme.Ops` with each one.
+    field :desk_rev, :integer, default: 0
     timestamps()
   end
 
@@ -778,5 +780,32 @@ defmodule Hireme.Mailer.Notice do
     field :last_error, :string
     belongs_to :account, Hireme.Accounts.Account
     timestamps(updated_at: false)
+  end
+end
+
+defmodule Hireme.Ops.Entry do
+  @moduledoc """
+  One client op's outcome, kept 24 hours under the client's id so a
+  resend is answered from here. `op_id` is the client's u64 read as a
+  signed 64-bit integer. `refusal` is nil for an op that committed at
+  `rev`, and the refusal's name otherwise.
+  """
+  use Hireme.Schema
+
+  schema "wire_ops" do
+    field :op_id, :integer
+    field :kind, :string
+    field :rev, :integer
+    field :refusal, :string
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps(updated_at: false)
+  end
+
+  def changeset(entry, attrs) do
+    entry
+    |> cast(attrs, [:op_id, :kind, :rev, :refusal])
+    |> validate_required([:op_id, :kind, :rev])
+    |> unique_constraint([:account_id, :op_id])
+    |> tenant()
   end
 end

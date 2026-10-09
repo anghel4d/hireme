@@ -1,0 +1,171 @@
+defmodule Hireme.OpsTest do
+  use Hireme.DataCase, async: false
+
+  import Hireme.Fixtures
+
+  alias Hireme.Desk
+  alias Hireme.Desk.Batch
+  alias Hireme.Desk.Filters
+  alias Hireme.Gym
+  alias Hireme.Ops
+  alias Hireme.Pipeline
+
+  @companies ["Acme", "Acme", "Globex", "Initech", "Google", "Umbrella"]
+  @urls [
+    "https://boards.greenhouse.io/acme/jobs/",
+    "https://boards.greenhouse.io/globex/jobs/",
+    "https://jobs.lever.co/initech/",
+    "https://careers.example.test/"
+  ]
+
+  # A desk with company and ATS overlap, hot and cold stages of several
+  # ages, a held batch, and lines to tailor.
+  defp desk(seed) do
+    :rand.seed(:exsss, {seed, seed * 7, seed * 13})
+    profiles = for _ <- 1..2, do: profile()
+    items = Map.new(profiles, fn p -> {p.id, for(n <- 1..3, do: item(p, %{position: n}))} end)
+
+    {:ok, batch} =
+      %Batch{}
+      |> Batch.changeset(%{code: "B-#{seed}", ordinal: 1, status: :fire_ready, fire: :hold})
+      |> Repo.insert()
+
+    jobs =
+      for n <- 1..18 do
+        p = Enum.random(profiles)
+
+        job(p, %{
+          company: Enum.random(@companies),
+          role: Enum.random(["Engineer", "Research Engineer", "SRE"]),
+          listing_url: Enum.random(@urls) <> "#{n}",
+          stage: Enum.random(Pipeline.keys()),
+          stage_on: Date.add(Date.utc_today(), -:rand.uniform(60)),
+          batch_id: if(rem(n, 3) == 0, do: batch.id)
+        })
+      end
+
+    %{jobs: jobs, items: items, batch: batch}
+  end
+
+  defp random_op(%{jobs: jobs, items: items, batch: batch}, op_id) do
+    job = Enum.random(jobs)
+    pick = fn list -> Enum.random(list) end
+
+    {kind, target, fields} =
+      case :rand.uniform(9) do
+        1 ->
+          {:stage, job.id, [pick.(Enum.map(Pipeline.keys(), &Pipeline.name/1) ++ ["nope"])]}
+
+        2 ->
+          {:next, job.id, ["call #{op_id}", pick.(["", "2026-11-0#{:rand.uniform(9)}", "bad"])]}
+
+        3 ->
+          {:note, job.id, [Pipeline.name(pick.(Pipeline.keys())), "note #{op_id}"]}
+
+        4 ->
+          {:score, job.id, [pick.(["0", "55", "100", "101", "x"])]}
+
+        5 ->
+          item = pick.(items[job.profile_id])
+          mode = pick.(~w(hidden emphasized altered inherit bogus))
+          {:overlay, job.id, ["#{item.id}", mode, pick.(["", "Rewritten"]), ""]}
+
+        6 ->
+          {:heat_override, job.id, [pick.(["", "warm intro"])]}
+
+        7 ->
+          {:open_fire, 0, [pick.([batch.code, "missing"])]}
+
+        8 ->
+          {:stage, job.id, [pick.(~w(fire_ready open_fire submitted reply closed gated))]}
+
+        9 ->
+          {:gym_log, 0, ["title", "Two sum #{op_id}", "slug", "two-sum-#{op_id}"]}
+      end
+
+    %{op_id: op_id, kind: kind, target: target, fields: fields}
+  end
+
+  # The client's view: upsert every delta's rows onto the boot, by id.
+  defp apply_delta(view, %{cards: cards, deleted: deleted}) do
+    view = Map.drop(view, deleted)
+    Enum.reduce(cards, view, &Map.put(&2, &1.id, &1))
+  end
+
+  defp fresh, do: Desk.list_cards(%Filters{status: :all}) |> Map.new(&{&1.id, &1})
+
+  defp drain(acc) do
+    receive do
+      {:ops_delta, rev, delta} -> drain([{rev, delta} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  for seed <- 1..6 do
+    test "boot plus every delta equals a fresh board (seed #{seed})", %{account: account} do
+      seed = unquote(seed)
+      fixture = desk(seed)
+      {:ok, boot_rev, %{cards: cards}} = Ops.attach(account.id)
+      assert Map.new(cards, &{&1.id, &1}) == fresh()
+
+      {view, rev, log} =
+        Enum.reduce(1..60, {Map.new(cards, &{&1.id, &1}), boot_rev, []}, fn n, {view, rev, log} ->
+          op = random_op(fixture, seed * 1000 + n)
+          log = [op | log]
+
+          # Some writes arrive as an agent's, not a tab's: same stream.
+          reply =
+            if rem(n, 7) == 0,
+              do: Desk.set_next(Enum.random(fixture.jobs).id, "agent #{n}", nil),
+              else: Ops.run(account.id, op)
+
+          deltas = drain([])
+
+          case reply do
+            {:ok, r} when is_integer(r) -> assert [{^r, _}] = deltas
+            {:ok, _} -> assert [_] = deltas
+            {:error, _} -> assert deltas == [], "seed #{seed}: a refusal sent a delta"
+          end
+
+          # Revisions are consecutive: nothing skipped, nothing twice.
+          rev =
+            Enum.reduce(deltas, rev, fn {r, _}, prev ->
+              assert r == prev + 1, "seed #{seed}: rev #{r} after #{prev}"
+              r
+            end)
+
+          {Enum.reduce(deltas, view, fn {_, d}, v -> apply_delta(v, d) end), rev, log}
+        end)
+
+      board = fresh()
+      stale = for {id, card} <- board, view[id] != card, do: id
+
+      assert view == board,
+             "seed #{seed}: cards #{inspect(stale)} diverged after #{inspect(Enum.reverse(log), limit: :infinity)}"
+
+      assert rev > boot_rev
+    end
+  end
+
+  test "a resent op gets its first answer and writes once", %{account: account} do
+    op = %{
+      op_id: 0xFFFF_FFFF_0000_0001,
+      kind: :gym_log,
+      target: 0,
+      fields: ["title", "Rerun", "slug", "rerun"]
+    }
+
+    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account.id))
+
+    assert {:ok, rev} = Ops.run(account.id, op)
+    assert_received {:ops_delta, ^rev, %{lanes: true}}
+    assert {:ok, ^rev} = Ops.run(account.id, op)
+    refute_received {:ops_delta, _, _}
+    assert length(Gym.recent()) == 1
+
+    refused = %{op | op_id: 2, kind: :score, target: 1, fields: ["101"]}
+    assert {:error, {:argument, "score"}} = Ops.run(account.id, refused)
+    assert {:error, {:argument, "score"}} = Ops.run(account.id, %{refused | fields: ["5"]})
+  end
+end
