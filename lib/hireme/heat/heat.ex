@@ -678,7 +678,26 @@ defmodule Hireme.Heat do
   end
 
   defp hot_jobs do
-    Repo.all(from(j in Job, where: j.current_stage in ^@hot_stages))
+    Repo.all(
+      from j in Job,
+        where: j.current_stage in ^@hot_stages,
+        select:
+          map(j, [
+            :id,
+            :company,
+            :role,
+            :listing_url,
+            :canonical_url,
+            :department,
+            :squad,
+            :fit,
+            :current_stage,
+            :stage_on,
+            :score_100,
+            :heat_override,
+            :heat_override_reason
+          ])
+    )
   end
 
   defp age(job, today) do
