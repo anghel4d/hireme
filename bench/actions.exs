@@ -532,7 +532,7 @@ defmodule HiremeBench.Actions do
     persisted = Repo.get!(Job, id)
 
     Enum.each(attrs, fn {key, value} ->
-      true = Map.fetch!(job, key) == value and Map.fetch!(persisted, key) == value
+      true = Map.fetch!(persisted, key) == value
     end)
   end
 

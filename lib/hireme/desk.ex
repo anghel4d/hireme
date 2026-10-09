@@ -191,11 +191,8 @@ defmodule Hireme.Desk do
   def execute({:next, job_id, action, due}),
     do: write(job_id, %{next_action: action, next_due: due})
 
-  def execute({:note, job_id, stage, note}) do
-    write(job_id, fn job ->
-      %{stage_notes: Map.put(job.stage_notes || %{}, Pipeline.name(stage), note)}
-    end)
-  end
+  def execute({:note, job_id, stage, note}),
+    do: write(job_id, %{stage_notes: {:json_put, Pipeline.name(stage), note}})
 
   def execute({:stage, job_id, stage}) do
     with :ok <- permit(job_id),
@@ -226,23 +223,10 @@ defmodule Hireme.Desk do
 
   # One row, one changeset, only while no agent holds the lease.
   # A set of plain columns is one statement that answers with the row.
-  defp write(job_id, attrs) when is_map(attrs) do
-    with :ok <- permit(job_id) do
-      now = DateTime.utc_now() |> DateTime.truncate(:second)
-      changes = [{:updated_at, now} | Map.to_list(attrs)]
-
-      case Repo.update_all(from(j in Job, where: j.id == ^job_id, select: j), set: changes) do
-        {1, [job]} -> {:ok, job}
-        {0, []} -> {:error, :not_found}
-      end
-    end
-  end
-
+  # A set of plain columns is one statement that answers with the row as
+  # the sequencer ships it.
   defp write(job_id, attrs) do
-    with :ok <- permit(job_id) do
-      job = Repo.get!(Job, job_id)
-      job |> Job.changeset(attrs.(job)) |> Repo.update()
-    end
+    with :ok <- permit(job_id), do: Ops.write_row(:job_apps, job_id, Map.to_list(attrs))
   end
 
   @spec set_stage(pos_integer(), Pipeline.stage()) :: {:ok, Job.t()} | {:error, refusal()}

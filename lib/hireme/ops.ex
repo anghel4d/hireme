@@ -537,10 +537,10 @@ defmodule Hireme.Ops do
 
   # A write from another VM moved the counter: these tables are behind it.
   defp bump!(state) do
-    {1, [rev]} =
-      Repo.update_all(
-        from(a in Account, where: a.id == ^state.account, select: a.desk_rev),
-        [inc: [desk_rev: 1]],
+    %{rows: [[rev]]} =
+      Repo.query!(
+        "UPDATE accounts SET desk_rev = desk_rev + 1 WHERE id = ? RETURNING desk_rev",
+        [state.account],
         skip_account: true
       )
 
@@ -694,6 +694,12 @@ defmodule Hireme.Ops do
       Enum.reduce(groups, {state.raw, %{}, %{}}, fn group, {raw, rows, gone} ->
         {table, field, values, fresh} =
           case group do
+            # Columns a write set, laid over the row as it stood.
+            {:patch, table, moved} ->
+              old = Map.fetch!(raw, table)
+              rows = Enum.map(moved, &Map.merge(Map.get(old, &1.id, %{}), &1))
+              {table, :id, Enum.map(moved, & &1.id), rows}
+
             {table, field, values} ->
               {table, field, values, fetch_group(table, field, values, raw)}
 
@@ -737,6 +743,7 @@ defmodule Hireme.Ops do
   defp prefetch(groups, raw) do
     for group <- groups do
       case group do
+        {:patch, _, _} = patch -> patch
         {table, field, values} -> {table, field, values, fetch_group(table, field, values, raw)}
         {_, _, _, _} = fetched -> fetched
       end
@@ -801,6 +808,56 @@ defmodule Hireme.Ops do
     end
   end
 
+  @doc false
+  # Set plain columns of one row of the account's in one statement and
+  # answer with what moved, as shipped: the id and the columns set (a
+  # JSON column's new text, `{:json_put, key, value}`, read back from it).
+  @spec write_row(atom(), pos_integer(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  def write_row(table, id, changes) do
+    {schema, _cols} = Keyword.fetch!(@tables, table)
+
+    {sets, params} =
+      (changes ++ [updated_at: now()])
+      |> Enum.map(fn
+        {col, {:json_put, key, value}} ->
+          {"#{col} = json_set(#{col}, ?, ?)", ["$." <> key, value]}
+
+        {col, %Date{} = day} ->
+          {"#{col} = ?", [Date.to_iso8601(day)]}
+
+        {col, value} ->
+          {"#{col} = ?", [value]}
+      end)
+      |> Enum.unzip()
+
+    json = for {col, {:json_put, _, _}} <- changes, do: col
+
+    plain =
+      for {col, value} <- changes,
+          not match?({:json_put, _, _}, value),
+          into: %{},
+          do: {col, native(value)}
+
+    sql =
+      "UPDATE #{schema.__schema__(:source)} SET #{Enum.join(sets, ", ")} " <>
+        "WHERE id = ? AND account_id = ?" <>
+        if(json == [], do: "", else: " RETURNING #{Enum.join(json, ",")}")
+
+    case Repo.query!(sql, Enum.concat(params) ++ [id, Repo.account_id!()], skip_account: true) do
+      %{num_rows: 0} ->
+        {:error, :not_found}
+
+      %{rows: [row]} when json != [] ->
+        {:ok, Map.merge(plain, Map.new(Enum.zip(json, row))) |> Map.put(:id, id)}
+
+      %{num_rows: 1} ->
+        {:ok, Map.put(plain, :id, id)}
+    end
+  end
+
+  defp native(%Date{} = day), do: Date.to_iso8601(day)
+  defp native(value), do: value
+
   # The row groups a committed write can have touched.
   defp groups(command, value) do
     case command do
@@ -820,11 +877,12 @@ defmodule Hireme.Ops do
       {kind, id, _} when kind in [:stage, :heat_override] ->
         job_groups(id)
 
-      {:score, id, _} ->
-        [{:job_apps, :id, [id]}]
+      # The write answered with what it moved: no re-read.
+      {:score, _, _} ->
+        [{:patch, :job_apps, [value]}]
 
-      {kind, id, _, _} when kind in [:next, :note] ->
-        [{:job_apps, :id, [id]}]
+      {kind, _, _, _} when kind in [:next, :note] ->
+        [{:patch, :job_apps, [value]}]
 
       {:generation, id} ->
         [{:cv_lineages, :id, [lineage_of(id)]}]
@@ -1034,10 +1092,14 @@ defmodule Hireme.Ops do
   end
 
   defp insert_entry!({op_id, kind}, rev, refusal) do
-    %Entry{}
-    |> Entry.changeset(%{op_id: op_id, kind: kind, rev: rev, refusal: refusal})
-    |> Repo.insert!()
+    Repo.query!(
+      "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [Repo.account_id!(), op_id, kind, rev, refusal, now()],
+      skip_account: true
+    )
   end
+
+  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
   defp record_refusal(ledger, reason, state) do
     reason = normalize(reason)
