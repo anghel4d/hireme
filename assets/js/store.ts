@@ -167,9 +167,6 @@ export interface WireKernel {
 /** What an ingest changed, as the kernel answers it. */
 export const INGEST = { cards: 1, tables: 2, lines: 4, focus: 8, settled: 16, dropped: 32, tick: 64, error: 1 << 30 } as const
 
-/** The tables the kernel derives from the raw rows. */
-const DERIVED = ["cards", "verdicts", "heat_rows", "score", "varieties", "chart_bands", "chart_bins"]
-
 /** Refusal codes from schema.txt. */
 const REFUSAL = ["", "fire_hold", "heat", "leased", "cooldown", "not_additive", "argument", "not_found", "batch", "invalid", "internal"]
 export const refusalName = (code: number): Refusal => REFUSAL[code] ?? "internal"
@@ -256,6 +253,9 @@ export class Kernel {
    * Null: everything (a BOOT).
    */
   touched(): { tables: Map<number, Set<number> | null> | null; jobs: number[] | "all" } {
+    // The derived views follow the rows lazily: derive now, so the rows
+    // that moved with them are listed too, and read fresh.
+    this.k.derive()
     const n = this.k.touched_len()
     const pairs = new Uint32Array(this.mem, this.k.touched_ptr(), n * 2)
     const jobTable = this.table("job_apps")
@@ -269,9 +269,6 @@ export class Kernel {
       else if (keys) keys.add(key)
       else if (keys === undefined) tables.set(t, new Set([key]))
     }
-    // The derived views follow the rows lazily; derive them now, so what
-    // this change moved is known and read fresh.
-    if (this.k.derive() === 1) for (const name of DERIVED) tables.set(this.table(name), null)
     const jobs = tables.get(jobTable)
     return { tables, jobs: jobs === null ? "all" : [...(jobs ?? [])] }
   }
@@ -630,7 +627,8 @@ class Documents {
     // new verdict when next read, without composing again.
     if (t("verdicts")) {
       this.verdicts++
-      c.focus = "all"
+      const moved = tables?.get(k.table("verdicts"))
+      c.focus = moved instanceof Set && c.focus !== "all" ? [...new Set([...(c.focus ?? []), ...moved])] : "all"
     }
     if (["profiles", "items", "cv_variants", "kv_pairs", "narratives"].some(t)) {
       this.roots.clear()
