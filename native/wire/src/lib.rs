@@ -6,8 +6,8 @@
 //! u32 len | u8 kind | u8 flags | u16 schema_hash | u64 rev | body
 //! ```
 //!
-//! `len` counts the whole frame and is a multiple of 8. BOOT, PATCH,
-//! FOCUS and LINES bodies are a run of self-describing columnar tables
+//! `len` counts the whole frame and is a multiple of 8. BOOT, PATCH and
+//! TICK bodies are a run of self-describing columnar tables
 //! (`u16 table | u16 ncols | u32 nrows | col*`, each column
 //! `u16 col | u8 type | u8 0 | u32 byte_len | data | pad to 8`), so every
 //! column starts 8-aligned from the frame start and can be viewed in
@@ -52,10 +52,6 @@ pub mod schema {
 
     include!(concat!(env!("OUT_DIR"), "/schema.rs"));
 
-    pub fn table_name(id: u16) -> Option<&'static str> {
-        TABLES.iter().find(|t| t.0 == id).map(|t| t.1)
-    }
-
     pub fn table_id(name: &str) -> Option<u16> {
         TABLES.iter().find(|t| t.1 == name).map(|t| t.0)
     }
@@ -72,14 +68,6 @@ pub mod schema {
 
     pub fn op_def(kind: u8) -> Option<&'static OpDef> {
         OPS.iter().find(|o| o.kind == kind)
-    }
-
-    pub fn frame_name(kind: u8) -> Option<&'static str> {
-        FRAMES.iter().find(|f| f.0 == kind).map(|f| f.1)
-    }
-
-    pub fn refusal_name(code: u8) -> Option<&'static str> {
-        REFUSALS.iter().find(|r| r.0 == code).map(|r| r.1)
     }
 }
 
@@ -451,15 +439,6 @@ pub fn nack(body: &[u8]) -> Result<(u64, u8, &str), Error> {
     ))
 }
 
-/// A TICK body: the UTC day.
-pub fn tick(body: &[u8]) -> Result<u32, Error> {
-    if body.len() < 4 {
-        Err(Error::Body)
-    } else {
-        Ok(u32_at(body, 0))
-    }
-}
-
 /// An OP body: `u64 op_id | u8 kind | u8 nfields | u16 0 | u32 target |
 /// (u16 len, utf8) * nfields | zero pad`. The count is explicit because
 /// frame padding would otherwise read as empty fields.
@@ -492,7 +471,7 @@ impl<'a> Op<'a> {
         // A schema field named `pairs` stands for any even number of
         // key, value strings (gym and net log entries).
         let fits = match def.fields {
-            ["pairs"] => op.nfields % 2 == 0,
+            ["pairs"] => op.nfields.is_multiple_of(2),
             f => op.nfields as usize == f.len(),
         };
         if !fits {
