@@ -662,7 +662,7 @@ defmodule HiremeBench.Actions do
         Gym: "existing/new problem logging and target",
         Net: "draft/shipped local records and lane",
         Kv: "upsert",
-        Import: "new/update/idempotent batches of 1 and 55; includes governance and variety",
+        Import: "new/update/idempotent batches of 1 and 55; includes governance",
         Letterbox: "real actor claim, committed command, release",
         Pipeline: "stage transitions",
         LifeEv: "scored job creation",

@@ -408,7 +408,6 @@ defmodule Hireme.Desk.Batch do
     field :target_size, :integer, default: 55
     field :queued_on, :date
     field :squad, :string, default: ""
-    field :variety, :map, default: %{}
     field :note, :string, default: ""
     belongs_to :account, Hireme.Accounts.Account
     timestamps()

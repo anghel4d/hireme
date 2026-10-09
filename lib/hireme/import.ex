@@ -52,7 +52,6 @@ defmodule Hireme.Import do
   alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Repo
-  alias Hireme.Variety
 
   @type result :: {:ok, Report.t()} | {:error, :unrecognized}
 
@@ -152,10 +151,7 @@ defmodule Hireme.Import do
     batch = if doc["batch"], do: upsert_batch(doc), else: nil
     count = Enum.reduce(apps, 0, fn app, n -> upsert_app(profile, app, batch, doc) + n end)
 
-    if batch do
-      Desk.govern_batch(batch)
-      refresh_variety(Repo.get!(Batch, batch.id))
-    end
+    if batch, do: Desk.govern_batch(batch)
 
     {:ok, %Report{kind: :apps, count: count, source: filename}}
   end
@@ -305,18 +301,6 @@ defmodule Hireme.Import do
 
   defp hold_action(%{fire: :hold, code: code}), do: "FIRE HOLD · #{code}"
   defp hold_action(_), do: ""
-
-  defp refresh_variety(%Batch{} = batch) do
-    apps =
-      Repo.all(
-        from j in Job,
-          where: j.batch_id == ^batch.id,
-          select: %{company: j.company, role: j.role, location: j.location, fit: j.fit}
-      )
-
-    variety = apps |> Variety.summarize(batch.target_size) |> Variety.to_map()
-    batch |> Batch.changeset(%{variety: variety}) |> Repo.update!()
-  end
 
   defp upsert_employer(name, freshness) when is_binary(name) and name != "" do
     (Repo.get_by(Employer, name: name) || %Employer{})

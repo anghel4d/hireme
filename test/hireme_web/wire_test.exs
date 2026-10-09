@@ -206,14 +206,6 @@ defmodule HiremeWeb.WireTest do
           target_size: 10,
           queued_on: @day,
           squad: "core",
-          variety: %{
-            "apps" => 2,
-            "companies" => 2,
-            "roles" => 1,
-            "locations" => 1,
-            "fits" => 1,
-            "flags" => ["mixed"]
-          },
           note: ""
         }
       ],

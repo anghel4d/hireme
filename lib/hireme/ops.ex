@@ -76,8 +76,7 @@ defmodule Hireme.Ops do
       {Hireme.Desk.Overlay,
        ~w(id job_app_id item_id lineage_id mode title body reason generation)a},
     batches:
-      {Hireme.Desk.Batch,
-       ~w(id code ordinal kind status fire target_size queued_on squad variety note)a},
+      {Hireme.Desk.Batch, ~w(id code ordinal kind status fire target_size queued_on squad note)a},
     events: {Hireme.Desk.Event, ~w(id job_app_id kind body inserted_at)a},
     kv_pairs: {Hireme.Kv.Pair, ~w(id namespace key value)a},
     narratives: {Hireme.Corpus.Narrative, ~w(id user_id body version private)a},
