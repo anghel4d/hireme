@@ -58,6 +58,7 @@ impl Arena {
     }
 }
 
+#[derive(Clone)]
 pub enum Data {
     W32(Vec<u32>),
     /// u64 words, or f64 bits when the column's type is F64.
@@ -65,6 +66,7 @@ pub enum Data {
     Str(Vec<[u32; 2]>),
 }
 
+#[derive(Clone)]
 pub struct Column {
     pub id: u16,
     pub ty: u8,
@@ -92,7 +94,7 @@ impl Column {
         }
     }
 
-    fn push_blank(&mut self, table: u16) {
+    pub fn push_blank(&mut self, table: u16) {
         match &mut self.data {
             Data::W32(v) => v.push(blank_u32(table, self.id)),
             Data::W64(v) => v.push(if self.ty == F64 {
@@ -195,6 +197,7 @@ pub fn focus_table(id: u16) -> bool {
     schema::table_name(id).is_some_and(|n| n.starts_with("focus"))
 }
 
+#[derive(Clone)]
 pub struct Table {
     pub id: u16,
     pub n: usize,
@@ -575,7 +578,7 @@ impl Store {
 /// u32 key → u32 row, open addressing with linear probing and
 /// backward-shift deletion. Keys are ids and line ixs, so a multiplicative
 /// hash spreads them; the table stays at most half full.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IdMap {
     slots: Vec<(u32, u32)>,
     len: usize,

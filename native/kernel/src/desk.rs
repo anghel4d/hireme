@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use wire::schema::{col, op, refusal, table};
 use wire::{NONE, Op, U32};
 
-use crate::store::{self, Column, Data, Store};
+use crate::store::{self, Column, Data, Store, Table};
 
 /// Counter slots readable through the ABI.
 pub const PREDICTED: usize = 0;
@@ -35,7 +35,7 @@ pub const COMPACTIONS: usize = 7;
 pub const COUNTERS: usize = 8;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-enum Val {
+pub(crate) enum Val {
     U(u32),
     S(Vec<u8>),
 }
@@ -50,6 +50,10 @@ pub(crate) struct Pending {
 pub struct Desk {
     pub store: Store,
     pub(crate) overlay: Vec<(u16, Column)>,
+    /// Whole-table copies for tables a pending op adds rows to or removes
+    /// rows from (overlays); they take precedence over `overlay`.
+    pub(crate) vtables: Vec<Table>,
+    provisional: u32,
     /// The raw tables or their pending view moved since the last derive.
     pub(crate) raw_dirty: bool,
     pub(crate) derived: crate::derive::Derived,
@@ -84,6 +88,8 @@ impl Desk {
         Desk {
             store: Store::new(),
             overlay: Vec::new(),
+            vtables: Vec::new(),
+            provisional: 0,
             raw_dirty: true,
             derived: crate::derive::Derived::new(),
             glance: BTreeMap::new(),
@@ -109,6 +115,9 @@ impl Desk {
 
     /// The view's column: the overlay copy if a pending op touched it.
     pub fn vcol(&self, t: u16, c: u16) -> Option<&Column> {
+        if let Some(vt) = self.vtables.iter().find(|x| x.id == t) {
+            return vt.col(c);
+        }
         self.overlay
             .iter()
             .find(|(ot, oc)| *ot == t && oc.id == c)
@@ -144,13 +153,18 @@ impl Desk {
     }
 
     pub fn rows(&self, t: u16) -> usize {
-        self.store.table(t).map_or(0, |x| x.n)
+        self.vtable(t).map_or(0, |x| x.n)
+    }
+
+    /// The table rows are read from: a pending whole-table copy, or base.
+    fn vtable(&self, t: u16) -> Option<&Table> {
+        self.vtables.iter().find(|x| x.id == t).or_else(|| self.store.table(t))
     }
 
     /// Row by key: the index of a keyed table, else a scan of the first
     /// column (narratives and other small whole-replaced tables).
     pub fn row_of(&self, t: u16, key: u32) -> Option<usize> {
-        let x = self.store.table(t)?;
+        let x = self.vtable(t)?;
         if store::keyed(t) {
             return x.row_of(key);
         }
@@ -167,6 +181,14 @@ impl Desk {
     // ---- writing the view -------------------------------------------------
 
     fn overlay_mut(&mut self, t: u16, c: u16) -> Option<&mut Column> {
+        if let Some(i) = self.vtables.iter().position(|x| x.id == t) {
+            let vt = &mut self.vtables[i];
+            if vt.col(c).is_none() {
+                let ty = wire::schema::col_def(t, c).map_or(U32, |d| d.ty);
+                vt.cols.push(Column::blank(t, c, ty, vt.n));
+            }
+            return vt.col_mut(c);
+        }
         if !self.overlay.iter().any(|(ot, oc)| *ot == t && oc.id == c) {
             let base = self.store.table(t)?;
             let copy = match base.col(c) {
@@ -184,7 +206,7 @@ impl Desk {
             .map(|(_, oc)| oc)
     }
 
-    fn set(&mut self, t: u16, key: u32, c: u16, v: Val, rec: &mut Vec<(u16, u32, u16, Val)>) {
+    pub(crate) fn set(&mut self, t: u16, key: u32, c: u16, v: Val, rec: &mut Vec<(u16, u32, u16, Val)>) {
         let Some(row) = self.row_of(t, key) else {
             return;
         };
@@ -203,6 +225,9 @@ impl Desk {
         // Search text is only strings (and the profile name, which no op
         // changes), so a number moving resorts without re-deriving it.
         self.search_dirty |= matches!(v, Val::S(_));
+        if t != table::CARDS {
+            self.raw_dirty = true;
+        }
         rec.push((t, key, c, v));
         match t {
             table::CARDS => self.moved.push(row as u32),
@@ -210,6 +235,84 @@ impl Desk {
             table::STAGES => self.order_full = true,
             _ => {}
         }
+    }
+
+    /// A whole-table copy of `t` in the view, made on first use from base
+    /// and the column copies pending ops already made.
+    fn vtable_mut(&mut self, t: u16) -> &mut Table {
+        if let Some(i) = self.vtables.iter().position(|x| x.id == t) {
+            return &mut self.vtables[i];
+        }
+        let mut copy = self.store.table(t).cloned().unwrap_or_else(|| Table::new(t));
+        let mut i = 0;
+        while i < self.overlay.len() {
+            if self.overlay[i].0 == t {
+                let (_, c) = self.overlay.swap_remove(i);
+                match copy.col_mut(c.id) {
+                    Some(slot) => *slot = c,
+                    None => copy.cols.push(c),
+                }
+            } else {
+                i += 1;
+            }
+        }
+        self.vtables.push(copy);
+        self.vtables.last_mut().unwrap()
+    }
+
+    /// Adds a predicted row to `t` (keyed by its first column) with the
+    /// given values; other columns are blank.
+    pub(crate) fn insert_row(&mut self, t: u16, vals: &[(u16, Val)]) {
+        let puts: Vec<(u16, Val, [u32; 2])> = vals
+            .iter()
+            .map(|(c, v)| {
+                let r = match v {
+                    Val::S(s) => self.store.arena.put(s),
+                    Val::U(_) => [0, 0],
+                };
+                (*c, v.clone(), r)
+            })
+            .collect();
+        let vt = self.vtable_mut(t);
+        let row = vt.n;
+        for (c, v, _) in &puts {
+            if vt.col(*c).is_none() {
+                let ty = match v {
+                    Val::S(_) => wire::STR,
+                    Val::U(_) => U32,
+                };
+                vt.cols.push(Column::blank(t, *c, ty, vt.n));
+            }
+        }
+        for col in vt.cols.iter_mut() {
+            col.push_blank(t);
+        }
+        vt.n += 1;
+        for (c, v, r) in puts {
+            let col = vt.col_mut(c).unwrap();
+            match (&mut col.data, v) {
+                (Data::W32(d), Val::U(x)) => d[row] = x,
+                (Data::Str(d), Val::S(_)) => d[row] = r,
+                _ => {}
+            }
+        }
+        let key = vt.col(1).map_or(0, |c| c.u32(row));
+        vt.index.insert(key, row as u32);
+        self.raw_dirty = true;
+    }
+
+    /// Removes a row from `t` in the view.
+    pub(crate) fn delete_row(&mut self, t: u16, key: u32) {
+        let vt = self.vtable_mut(t);
+        vt.delete(core::iter::once(key));
+        self.raw_dirty = true;
+    }
+
+    /// An id for a row a prediction adds before the server numbers it:
+    /// above every id a database row will have, distinct per row.
+    pub(crate) fn provisional_id(&mut self) -> u32 {
+        self.provisional = self.provisional.wrapping_add(1);
+        0x8000_0000 | (self.provisional & 0x7fff_ffff)
     }
 
     /// `today` from a `clock` table: the server's day, which every
@@ -236,6 +339,7 @@ impl Desk {
     fn rebuild_view(&mut self) {
         self.raw_dirty = true;
         self.overlay.clear();
+        self.vtables.clear();
         self.modes.clear();
         self.order_full = true;
         self.search_dirty = true;
@@ -260,6 +364,9 @@ impl Desk {
         check: bool,
         rec: &mut Vec<(u16, u32, u16, Val)>,
     ) -> Result<(), u8> {
+        if self.store.table(table::JOB_APPS).is_some() {
+            return self.apply_raw(o, check, rec);
+        }
         let target_job = wire::schema::op_def(o.kind)
             .ok_or(refusal::ARGUMENT)?
             .target
@@ -598,7 +705,11 @@ impl Desk {
             bits |= CARDS | TABLES;
         }
         if base_moved {
-            let overlay = self.overlay.iter_mut().map(|(_, c)| c);
+            let overlay = self
+                .overlay
+                .iter_mut()
+                .map(|(_, c)| c)
+                .chain(self.vtables.iter_mut().flat_map(|t| t.cols.iter_mut()));
             let before = self.store.arena.live_floor;
             self.store.compact(overlay, false);
             if self.store.arena.live_floor != before {

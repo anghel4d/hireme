@@ -142,13 +142,97 @@ impl Derived {
     }
 }
 
-/// The job rows as the governor reads them, with their traits.
+/// The job rows as the governor reads them.
 struct Rows<'a> {
     jobs: Vec<Job<'a>>,
-    refs: Vec<[u32; 14]>,
 }
 
 impl Desk {
+    /// The job_apps rows of the view as the governor reads them, in row
+    /// order, with their traits (cached per job while its text holds).
+    fn heat_rows(&self, d: &mut Derived) -> (Vec<Job<'_>>, Vec<Traits>) {
+        let jt = table::JOB_APPS;
+        let n = self.rows(jt);
+        let arena = &self.store.arena;
+        let s = |c: u16| self.strs(jt, c);
+        let u = |c: u16| self.w32(jt, c);
+        let at = |v: &[[u32; 2]], i: usize| v.get(i).copied().unwrap_or([0, 0]);
+        let w = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0);
+        let (ids, company, role, listing, canonical, department, squad, fit) = (
+            u(col::job_apps::ID),
+            s(col::job_apps::COMPANY),
+            s(col::job_apps::ROLE),
+            s(col::job_apps::LISTING_URL),
+            s(col::job_apps::CANONICAL_URL),
+            s(col::job_apps::DEPARTMENT),
+            s(col::job_apps::SQUAD),
+            s(col::job_apps::FIT),
+        );
+        let (stage, stage_on, score, ho, hor) = (
+            s(col::job_apps::CURRENT_STAGE),
+            u(col::job_apps::STAGE_ON),
+            u(col::job_apps::SCORE_100),
+            u(col::job_apps::HEAT_OVERRIDE),
+            s(col::job_apps::HEAT_OVERRIDE_REASON),
+        );
+        let jobs: Vec<Job> = (0..n)
+            .map(|i| Job {
+                id: w(ids, i),
+                company: text(arena, at(company, i)),
+                role: text(arena, at(role, i)),
+                listing_url: text(arena, at(listing, i)),
+                canonical_url: text(arena, at(canonical, i)),
+                department: text(arena, at(department, i)),
+                squad: text(arena, at(squad, i)),
+                fit: text(arena, at(fit, i)),
+                stage: heat::stage_ix(text(arena, at(stage, i))),
+                stage_on: stage_on.get(i).copied().unwrap_or(NONE),
+                score: match w(score, i) {
+                    NONE => 0,
+                    v => v,
+                },
+                heat_override: w(ho, i) == 1,
+                heat_override_reason: text(arena, at(hor, i)),
+            })
+            .collect();
+        if d.epoch != arena.epoch {
+            d.consts.clear();
+            d.traits.clear();
+            d.epoch = arena.epoch;
+        }
+        let tr = (0..n)
+            .map(|i| {
+                let mut k = [0u32; 14];
+                for (j, c) in [company, role, listing, canonical, department, squad, fit].iter().enumerate() {
+                    k[2 * j..2 * j + 2].copy_from_slice(&at(c, i));
+                }
+                let id = jobs[i].id;
+                match d.traits.get(&id) {
+                    Some((key, t)) if *key == k => t.clone(),
+                    _ => {
+                        let t = heat::traits(&jobs[i]);
+                        d.traits.insert(id, (k, t.clone()));
+                        t
+                    }
+                }
+            })
+            .collect();
+        (jobs, tr)
+    }
+
+    /// Heat.can_apply/2 for the job at `row` of job_apps, as the view
+    /// stands: what a stage write into the queue is judged by.
+    pub(crate) fn can_apply(&mut self, row: usize) -> bool {
+        let mut d = core::mem::replace(&mut self.derived, Derived::new());
+        let today = if self.today == NONE { 0 } else { self.today };
+        let allow = {
+            let (jobs, tr) = self.heat_rows(&mut d);
+            heat::can_apply(&jobs, &tr, row, today).allow
+        };
+        self.derived = d;
+        allow
+    }
+
     /// Re-derives every view from the raw tables when they moved. Returns
     /// whether it ran.
     pub fn derive(&mut self) -> bool {
@@ -171,71 +255,9 @@ impl Desk {
         let s = |c: u16| self.strs(jt, c);
         let u = |c: u16| self.w32(jt, c);
         let at = |v: &[[u32; 2]], i: usize| v.get(i).copied().unwrap_or([0, 0]);
-        let (ids, company, role, listing, canonical, department, squad, fit) = (
-            u(col::job_apps::ID),
-            s(col::job_apps::COMPANY),
-            s(col::job_apps::ROLE),
-            s(col::job_apps::LISTING_URL),
-            s(col::job_apps::CANONICAL_URL),
-            s(col::job_apps::DEPARTMENT),
-            s(col::job_apps::SQUAD),
-            s(col::job_apps::FIT),
-        );
-        let (stage, stage_on, score, ho, hor) = (
-            s(col::job_apps::CURRENT_STAGE),
-            u(col::job_apps::STAGE_ON),
-            u(col::job_apps::SCORE_100),
-            u(col::job_apps::HEAT_OVERRIDE),
-            s(col::job_apps::HEAT_OVERRIDE_REASON),
-        );
         let w = |v: &[u32], i: usize| v.get(i).copied().unwrap_or(0);
-        let rows = Rows {
-            jobs: (0..n)
-                .map(|i| Job {
-                    id: w(ids, i),
-                    company: text(arena, at(company, i)),
-                    role: text(arena, at(role, i)),
-                    listing_url: text(arena, at(listing, i)),
-                    canonical_url: text(arena, at(canonical, i)),
-                    department: text(arena, at(department, i)),
-                    squad: text(arena, at(squad, i)),
-                    fit: text(arena, at(fit, i)),
-                    stage: heat::stage_ix(text(arena, at(stage, i))),
-                    stage_on: stage_on.get(i).copied().unwrap_or(NONE),
-                    score: match w(score, i) {
-                        NONE => 0,
-                        v => v,
-                    },
-                    heat_override: w(ho, i) == 1,
-                    heat_override_reason: text(arena, at(hor, i)),
-                })
-                .collect(),
-            refs: (0..n)
-                .map(|i| {
-                    let mut k = [0u32; 14];
-                    for (j, c) in [company, role, listing, canonical, department, squad, fit]
-                        .iter()
-                        .enumerate()
-                    {
-                        k[2 * j..2 * j + 2].copy_from_slice(&at(c, i));
-                    }
-                    k
-                })
-                .collect(),
-        };
-        let tr: Vec<Traits> = (0..n)
-            .map(|i| {
-                let id = rows.jobs[i].id;
-                match d.traits.get(&id) {
-                    Some((k, t)) if *k == rows.refs[i] => t.clone(),
-                    _ => {
-                        let t = heat::traits(&rows.jobs[i]);
-                        d.traits.insert(id, (rows.refs[i], t.clone()));
-                        t
-                    }
-                }
-            })
-            .collect();
+        let (jobs, tr) = self.heat_rows(&mut d);
+        let rows = Rows { jobs };
         let snap = Snapshot::build(&rows.jobs, &tr, today);
         let verdicts: Vec<heat::Verdict> = (0..n)
             .map(|i| snap.verdict(&rows.jobs, &tr, i, today))

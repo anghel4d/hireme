@@ -13,7 +13,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::{format, vec};
+use alloc::vec;
 
 // ---- configuration (Hireme.Heat.Config.defaults/0) ------------------------
 
@@ -701,7 +701,13 @@ pub fn department(department: &str, role: &str, squad: &str, fit: &str) -> Dept 
             infer_department(&n)
         }
     } else {
-        let blob = format!("{} {} {}", trim(role), trim(squad), trim(fit));
+        let mut blob = String::with_capacity(role.len() + squad.len() + fit.len() + 2);
+        for (i, part) in [role, squad, fit].iter().enumerate() {
+            if i > 0 {
+                blob.push(' ');
+            }
+            blob.push_str(trim(part));
+        }
         infer_department(&normalize(&blob))
     }
 }
@@ -882,11 +888,7 @@ fn first_segment(path: &str) -> Option<String> {
 }
 
 fn subdomain(host: &str, root: &str) -> Option<String> {
-    let suffix = format!(".{root}");
-    if !host.ends_with(&suffix) {
-        return None;
-    }
-    let left = &host[..host.len() - suffix.len()];
+    let left = host.strip_suffix(root).and_then(|h| h.strip_suffix('.'))?;
     let name = left.rsplit('.').next().unwrap_or("");
     match name {
         "" | "www" | "jobs" | "boards" | "job-boards" | "apply" | "ats" => None,
@@ -1419,7 +1421,13 @@ fn finish(
     let vname = VENDORS[t.ats.vendor as usize];
     let mut note = String::new();
     let reason = if known && batch_vendor_n >= ATS_BATCH_CAP {
-        note = format!("ATS {vname} already {batch_vendor_n} in this mix (cap {ATS_BATCH_CAP})");
+        note.push_str("ATS ");
+        note.push_str(vname);
+        note.push_str(" already ");
+        push_u64(&mut note, batch_vendor_n as u64);
+        note.push_str(" in this mix (cap ");
+        push_u64(&mut note, ATS_BATCH_CAP as u64);
+        note.push(')');
         Reason::AtsBatchCap
     } else if known && vendor_load + APPLICATION_LOAD > ATS_VENDOR_CAP {
         note.push_str("ATS vendor ");
@@ -1486,7 +1494,8 @@ fn finish(
     if job.overridden() {
         v.allow = true;
         v.reason = Reason::Override;
-        v.note = format!("override · {}", job.heat_override_reason);
+        v.note = String::from("override · ");
+        v.note.push_str(job.heat_override_reason);
     }
     v
 }
@@ -1511,46 +1520,7 @@ pub fn mix(jobs: &[Job], tr: &[Traits], members: &[usize], today: u32) -> Vec<(u
     let mut kept: Vec<usize> = Vec::new();
     let mut out = Vec::with_capacity(ordered.len());
     for &i in &ordered {
-        let job = &jobs[i];
-        let t = &tr[i];
-        let others: Vec<usize> = existing
-            .iter()
-            .chain(kept.iter())
-            .copied()
-            .filter(|&p| jobs[p].id != job.id)
-            .collect();
-        let company: Vec<usize> = others
-            .iter()
-            .copied()
-            .filter(|&p| tr[p].key == t.key)
-            .collect();
-        let company_load = sum_decay(
-            company.iter().map(|&p| jobs[p].age(today)),
-            COMPANY_HALF_LIFE,
-        );
-        let inc = increment(t, company.iter().map(|&p| &tr[p]));
-        let (vendor_load, tenant_load) = if t.ats.vendor == UNKNOWN {
-            (0.0, 0.0)
-        } else {
-            let vp: Vec<usize> = others
-                .iter()
-                .copied()
-                .filter(|&p| tr[p].ats.vendor == t.ats.vendor)
-                .collect();
-            let tp = vp
-                .iter()
-                .copied()
-                .filter(|&p| t.ats.tenant.is_some() && tr[p].ats.tenant == t.ats.tenant);
-            (
-                sum_decay(vp.iter().map(|&p| jobs[p].age(today)), ATS_VENDOR_HALF_LIFE),
-                sum_decay(tp.map(|p| jobs[p].age(today)), ATS_TENANT_HALF_LIFE),
-            )
-        };
-        let batch_n = kept
-            .iter()
-            .filter(|&&k| t.ats.vendor != UNKNOWN && tr[k].ats.vendor == t.ats.vendor)
-            .count() as u32;
-        let v = finish(job, t, company_load, inc, vendor_load, tenant_load, batch_n);
+        let v = evaluate(jobs, tr, &existing, &kept, i, today);
         if v.allow {
             kept.push(i);
         }
@@ -1558,6 +1528,104 @@ pub fn mix(jobs: &[Job], tr: &[Traits], members: &[usize], today: u32) -> Vec<(u
     }
     out
 }
+
+/// Heat.can_apply/2: job `i` against every hot job, read afresh (no
+/// prepared snapshot), as `Desk`'s stage write asks it.
+pub fn can_apply(jobs: &[Job], tr: &[Traits], i: usize, today: u32) -> Verdict {
+    let mut existing: Vec<usize> = (0..jobs.len()).filter(|&p| hot_stage(jobs[p].stage)).collect();
+    existing.sort_unstable_by_key(|&p| jobs[p].id);
+    evaluate(jobs, tr, &existing, &[], i, today)
+}
+
+/// Heat's private evaluate/7 without a snapshot: the peers are `existing`
+/// then `kept`, less the job itself.
+fn evaluate(jobs: &[Job], tr: &[Traits], existing: &[usize], kept: &[usize], i: usize, today: u32) -> Verdict {
+    let job = &jobs[i];
+    let t = &tr[i];
+    let others: Vec<usize> = existing.iter().chain(kept.iter()).copied().filter(|&p| jobs[p].id != job.id).collect();
+    let company: Vec<usize> = others.iter().copied().filter(|&p| tr[p].key == t.key).collect();
+    let company_load = sum_decay(company.iter().map(|&p| jobs[p].age(today)), COMPANY_HALF_LIFE);
+    let inc = increment(t, company.iter().map(|&p| &tr[p]));
+    let (vendor_load, tenant_load) = if t.ats.vendor == UNKNOWN {
+        (0.0, 0.0)
+    } else {
+        let vp: Vec<usize> = others.iter().copied().filter(|&p| tr[p].ats.vendor == t.ats.vendor).collect();
+        let tp = vp.iter().copied().filter(|&p| t.ats.tenant.is_some() && tr[p].ats.tenant == t.ats.tenant);
+        (
+            sum_decay(vp.iter().map(|&p| jobs[p].age(today)), ATS_VENDOR_HALF_LIFE),
+            sum_decay(tp.map(|p| jobs[p].age(today)), ATS_TENANT_HALF_LIFE),
+        )
+    };
+    let batch_n = kept.iter().filter(|&&k| t.ats.vendor != UNKNOWN && tr[k].ats.vendor == t.ats.vendor).count() as u32;
+    finish(job, t, company_load, inc, vendor_load, tenant_load, batch_n)
+}
+
+// ---- the rail (Hireme.Pipeline) -------------------------------------------
+
+/// Rung states, as the pip characters D A P S B.
+const PIPS: [u8; 5] = [b'D', b'A', b'P', b'S', b'B'];
+
+/// Pipeline.decode/1, else Pipeline.initial/1 of the current stage: one
+/// pip per stage, in order.
+pub fn rail(pips: &str, current: Option<u8>) -> [u8; 10] {
+    let b = pips.as_bytes();
+    if b.len() == 10 && b.iter().all(|c| PIPS.contains(c)) {
+        let mut r = [0u8; 10];
+        r.copy_from_slice(b);
+        return r;
+    }
+    let idx = current.unwrap_or(0) as usize;
+    let mut r = [b'P'; 10];
+    for (i, p) in r.iter_mut().enumerate() {
+        *p = if i < idx {
+            b'D'
+        } else if i == idx {
+            b'A'
+        } else {
+            b'P'
+        };
+    }
+    r
+}
+
+/// Pipeline.current/1: the active rung, else the first pending, else the last.
+pub fn current(rail: &[u8; 10]) -> u8 {
+    rail.iter()
+        .position(|&c| c == b'A')
+        .or_else(|| rail.iter().position(|&c| c == b'P'))
+        .unwrap_or(9) as u8
+}
+
+/// Pipeline.move_to/2.
+pub fn move_to(rail: &[u8; 10], to: u8) -> [u8; 10] {
+    let mut r = *rail;
+    for (i, p) in r.iter_mut().enumerate() {
+        *p = if i == to as usize {
+            b'A'
+        } else if *p == b'S' || *p == b'B' {
+            *p
+        } else if i < to as usize {
+            b'D'
+        } else {
+            b'P'
+        };
+    }
+    r
+}
+
+/// Pipeline labels, for the "Stage → Label" event a move records.
+pub const STAGE_LABELS: [&str; 10] = [
+    "Discovered",
+    "Freshness",
+    "Gated",
+    "In batch",
+    "Draft ready",
+    "Fire ready",
+    "Open fire",
+    "Submitted",
+    "Reply",
+    "Closed",
+];
 
 #[cfg(test)]
 mod tests {

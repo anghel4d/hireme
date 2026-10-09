@@ -69,14 +69,60 @@ async function one(file) {
   const meta = lines.find((l) => l.kind === "meta")
   const tables = lines.filter((l) => l.kind === "table" && S.table[l.table])
   const K = await kernel(wasm)
+  // With ops, boot from the tables as they stood before the first one.
+  const before = lines.filter((l) => l.kind === "table_before" && S.table[l.table])
   const boot = frame("BOOT", 1, [
-    ...tables.map((t) => rawTable(t.table, t.rows)),
+    ...(before.length ? before : tables).map((t) => rawTable(t.table, t.rows)),
     ["clock", { today: [meta.today], now: [meta.today * 86400] }],
   ])
   const t0 = performance.now()
   const bits = K.ingest(boot)
   const bootMs = performance.now() - t0
   check("ingest", "boot accepted", bits & (1 << 30), 0)
+
+  // Ops, in order: the kernel's prediction (refusal or raw rows) against
+  // what Ops.run answered and wrote, then the server's rows and its ACK.
+  const CODES = { fire_hold: 1, heat: 2, leased: 3, cooldown: 4, not_additive: 5, argument: 6, not_found: 7, batch: 8, invalid: 9 }
+  const UNPREDICTED = new Set(["events", "gym_reps", "net_entries", "kv_pairs", "gym_problems"])
+  const SKIP_COLS = new Set(["inserted_at", "updated_at"])
+  let rev = 1
+  for (const line of lines.filter((l) => l.kind === "op")) {
+    const o = line.op
+    const what = `op ${o.op_id} ${o.kind}(${o.target}, ${JSON.stringify(o.fields)})`
+    const code = K.push(opBody(o.op_id, o.kind, o.target, o.fields))
+    const want = line.result.error ? CODES[line.result.error] ?? 10 : 0
+    check(`ops.refusal.${o.kind}`, `${what} → ${JSON.stringify(line.result)}`, code, want)
+    if (code !== 0 || want !== 0) {
+      if (code === 0) K.ingest(nack(o.op_id, want, "refused"))
+      continue
+    }
+    // The predicted raw rows, before the server's arrive.
+    for (const [table, rows] of Object.entries(line.rows)) {
+      if (UNPREDICTED.has(table) || !S.table[table]) continue
+      for (const row of rows) {
+        const r = K.k.row_of(S.table[table], row.id)
+        if (r < 0) {
+          // A predicted insert carries a provisional id; find it by its
+          // natural key (overlays: lineage and item).
+          continue
+        }
+        const got = K.row(table, r)
+        const [, cols] = rawTable(table, [row])
+        for (const [c, [v]] of Object.entries(cols)) {
+          if (SKIP_COLS.has(c) || !(c in got)) continue
+          const def = S.col[table][c]
+          const norm = v === null ? (wireType(def.kind) === 2 ? "" : wireType(def.kind) === 4 ? NaN : NONE) : v
+          check(`ops.rows.${table}.${c}`, what, got[c], norm)
+        }
+      }
+    }
+    const tablesOut = Object.entries(line.rows).filter(([t]) => S.table[t]).map(([t, rows]) => rawTable(t, rows))
+    const gone = Object.entries(line.gone ?? {}).flatMap(([t, ids]) => ids.map((id) => [S.table[t], id]))
+    if (gone.length) tablesOut.push(["gone", { table: gone.map((g) => g[0]), id: gone.map((g) => g[1]) }])
+    K.ingest(concat(frame("PATCH", ++rev, tablesOut), ack(o.op_id)))
+    const ev = K.events()
+    check(`ops.settled.${o.kind}`, what, JSON.stringify(ev.map((e) => [e.code, e.mis])), JSON.stringify([[0, 0]]))
+  }
 
   const batchId = new Map((tables.find((t) => t.table === "batches")?.rows ?? []).map((b) => [b.code, b.id]))
   const profileId = new Map((tables.find((t) => t.table === "profiles")?.rows ?? []).map((p) => [p.slug, p.id]))
