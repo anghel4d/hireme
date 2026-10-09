@@ -272,15 +272,6 @@ impl Hub {
 
     /// One frame from the server, in order.
     fn frame(&self, f: wire::Frame<'_>) {
-        // A big BOOT or PATCH travels deflated: `u32 raw_len | u32 deflate_len | raw deflate`.
-        if f.header.flags & wire::DEFLATE != 0 {
-            if let Some(bytes) = inflate(&f)
-                && let Ok(plain) = wire::Frame::parse(&bytes)
-            {
-                self.frame(plain);
-            }
-            return;
-        }
         self.frames.fetch_add(1, Ordering::Relaxed);
         let lane = f.header.rev;
         match f.header.kind {
@@ -288,6 +279,7 @@ impl Hub {
                 if f.header.kind == frame::PATCH {
                     self.notify_rows(&f);
                 }
+                // Deflated ones too: the kernel's ingest inflates them.
                 let mut unread = self.unread.lock().unwrap();
                 unread.extend_from_slice(&f.header.bytes());
                 unread.extend_from_slice(f.body);
@@ -838,17 +830,6 @@ fn letterboxes(d: &mut Desk, a: &Value) -> Outcome {
         Some(1000),
     )?;
     Ok(json!({"letterboxes": rows["applications"]}))
-}
-
-/// A deflated frame as the plain frame it stands for.
-fn inflate(f: &wire::Frame<'_>) -> Option<Vec<u8>> {
-    let n = u32::from_le_bytes(f.body.get(4..8)?.try_into().ok()?) as usize;
-    let raw = miniz_oxide::inflate::decompress_to_vec(f.body.get(8..8 + n)?).ok()?;
-    let mut w = wire::Writer::new();
-    w.begin(f.header.kind, f.header.flags & !wire::DEFLATE, f.header.rev);
-    w.raw(&raw);
-    w.end();
-    Some(w.buf)
 }
 
 // ---- arguments ----------------------------------------------------------------
