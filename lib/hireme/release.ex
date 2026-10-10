@@ -19,15 +19,51 @@ defmodule Hireme.Release do
   end
 
   def start_link do
-    Hireme.Store.write(fn -> Ecto.Migrator.run(Repo, :up, all: true) end)
+    Hireme.Store.write(fn -> leader(fn -> Ecto.Migrator.run(Repo, :up, all: true) end) end)
     :ignore
+  end
+
+  @doc """
+  The migration lock beside the database, the same for every name of it:
+  a symlink to the database is followed. One host, one filesystem whose
+  locks SQLite trusts; nothing is claimed across hosts.
+  """
+  def lock_path do
+    db = Path.expand(Repo.config()[:database])
+
+    case File.read_link(db) do
+      {:ok, target} -> Path.expand(target, Path.dirname(db))
+      {:error, _} -> db
+    end <> ".migrate"
+  end
+
+  # ecto_sqlite3's `lock_for_migrations/3` takes no lock, and the writer
+  # lock is one VM's. So whoever migrates holds an exclusive transaction
+  # on a sidecar database (`<db>.migrate`): another VM booting on the same
+  # database waits there, then finds nothing pending.
+  defp leader(fun) do
+    alias Exqlite.Sqlite3
+    {:ok, conn} = Sqlite3.open(lock_path())
+
+    try do
+      :ok = Sqlite3.set_busy_timeout(conn, :timer.minutes(5))
+      :ok = Sqlite3.execute(conn, "BEGIN EXCLUSIVE")
+      fun.()
+    after
+      Sqlite3.close(conn)
+    end
   end
 
   @doc "Applies all pending migrations without starting the application (`bin/hireme eval`)."
   @spec migrate() :: :ok
   def migrate do
     :ok = Application.ensure_loaded(:hireme)
-    {:ok, _, _} = Ecto.Migrator.with_repo(Repo, &Ecto.Migrator.run(&1, :up, all: true))
+
+    {:ok, _, _} =
+      Ecto.Migrator.with_repo(Repo, fn repo ->
+        leader(fn -> Ecto.Migrator.run(repo, :up, all: true) end)
+      end)
+
     :ok
   end
 end
