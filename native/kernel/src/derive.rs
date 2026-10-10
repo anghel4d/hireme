@@ -145,8 +145,8 @@ impl Derived {
         }
         match t {
             table::JOB_APPS => match c {
-                Some(c) if !heat_column(c) => self.card.push(key),
-                _ => self.heat.push(key),
+                Some(c) if !heat_column(c) => self.card.extend((self.card.last() != Some(&key)).then_some(key)),
+                _ => self.heat.extend((self.heat.last() != Some(&key)).then_some(key)),
             },
             table::BATCHES
             | table::PROFILES
