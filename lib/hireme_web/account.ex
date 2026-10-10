@@ -201,8 +201,12 @@ defmodule HiremeWeb.Account do
 
       n when is_integer(n) ->
         case Enum.find(Accounts.list_sessions(me.account_id), &(&1.id == n)) do
-          nil -> refuse(:not_found)
-          session -> Accounts.revoke_session(session) && done(%{})
+          nil ->
+            refuse(:not_found)
+
+          session ->
+            Accounts.revoke_session(session)
+            done(%{})
         end
 
       nil ->
@@ -302,7 +306,6 @@ defmodule HiremeWeb.Account do
   defp message(:assertion), do: "That passkey was not accepted."
   defp message(:clone), do: "That credential's counter went backwards; it has been disabled."
   defp message(:attestation), do: "That registration was not accepted."
-  defp message(_), do: "That was not accepted."
 
   # The calling session pushes the tables before this reply; the
   # account's other sessions hear of it from the broadcast.
@@ -314,7 +317,6 @@ defmodule HiremeWeb.Account do
   defp refuse(:not_found), do: {:error, 404, "not found"}
   defp refuse({:argument, name}), do: {:error, 400, "bad argument #{name}"}
   defp refuse(%Ecto.Changeset{}), do: {:error, 422, "invalid"}
-  defp refuse(other) when is_atom(other), do: {:error, 409, Atom.to_string(other)}
 
   defp key(id) do
     with n when is_integer(n) <- int(id),

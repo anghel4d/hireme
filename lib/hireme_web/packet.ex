@@ -170,10 +170,10 @@ defmodule HiremeWeb.Packet do
       Enum.reduce(rows, {<<0::little-32>>, [], 0}, fn r, {offsets, strings, at} ->
         s = text(get.(r))
         at = at + byte_size(s)
-        {<<offsets::binary, at::little-32>>, [strings | s], at}
+        {<<offsets::binary, at::little-32>>, [s | strings], at}
       end)
 
-    {2, [offsets, strings]}
+    {2, [offsets, Enum.reverse(strings)]}
   end
 
   # A column of few distinct strings: each distinct value once, in order of

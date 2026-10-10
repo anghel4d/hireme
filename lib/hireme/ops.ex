@@ -106,7 +106,12 @@ defmodule Hireme.Ops do
   @typedoc "Rows changed (new in full, else `id` and the changed columns) and ids removed, per table."
   @type delta :: %{rows: %{atom() => [map()]}, gone: %{atom() => [pos_integer()]}}
 
-  @typedoc "A write as the sequencer runs it: a desk write, or a lane write."
+  @typedoc """
+  A write as the sequencer runs it: a desk write, lane write, or callback.
+  An `:insert` callback returns the row (including its `id`) in the named
+  table; a `:bulk` callback returns any value and refreshes every table.
+  Callback results are wrapped in `{:ok, value}`.
+  """
   @type command ::
           Desk.write()
           | {:heat_override, pos_integer(), String.t()}
@@ -115,6 +120,8 @@ defmodule Hireme.Ops do
           | {:gym_target, term()}
           | {:net_log, map()}
           | {:net_lane, term()}
+          | {:insert, atom(), (-> map())}
+          | {:bulk, (-> term())}
 
   # -- the supervision tree ---------------------------------------------------
 
@@ -303,8 +310,12 @@ defmodule Hireme.Ops do
   # until then the next write would be sent to the dead one.
   defp gone(account_id, pid) do
     case Registry.lookup(@registry, account_id) do
-      [{^pid, _}] -> Process.sleep(1) && gone(account_id, pid)
-      _ -> :ok
+      [{^pid, _}] ->
+        Process.sleep(1)
+        gone(account_id, pid)
+
+      _ ->
+        :ok
     end
   end
 
@@ -558,7 +569,6 @@ defmodule Hireme.Ops do
         case refused do
           {:error, reason} -> {:error, reason}
           {:raise, _, _} = raised -> raised
-          other -> {:error, {:shape, other}}
         end
     end
   end

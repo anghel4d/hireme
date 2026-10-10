@@ -529,5 +529,4 @@ defmodule Hireme.Heat do
   defp round4(n) when is_float(n), do: Float.round(n, 4)
 
   defp fmt(n) when is_float(n), do: :erlang.float_to_binary(n, decimals: 1)
-  defp fmt(n), do: to_string(n)
 end

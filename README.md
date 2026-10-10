@@ -26,6 +26,7 @@ Open http://localhost:4000.
 Run `mix format --check-formatted`, `mix compile --warnings-as-errors`,
 `mix credo --strict`, and `mix test`. ElixirLS with `mixEnv: "test"` and
 Dialyzer enabled checks success typings beyond compiler and Credo warnings.
+Wait for that analysis to finish; a successful compile alone does not clear its diagnostics.
 Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
 socket authentication returns an expiry alongside the account and key IDs, and
 URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
