@@ -768,7 +768,7 @@ impl Desk {
         let rows: Vec<usize> = self.selection().iter().map(|&r| r as usize).filter(|&r| !recommend || self.vu32(table::CARDS, col::cards::HEAT_STATE, r) != 3).take(q.limit).collect();
         let mut j = Json(Vec::new());
         j.raw("{\"applications\":[");
-        rows.into_iter().for_each(|r| self.card_json(&mut j, r));
+        rows.into_iter().for_each(|r| self.card_json(&mut j, r, CARD));
         j.raw("]");
         if recommend {
             j.key("min_score");
@@ -787,19 +787,19 @@ impl Desk {
         self.derive();
         let mut j = Json(Vec::new());
         match self.row_of(table::CARDS, job) {
-            Some(r) => self.card_json(&mut j, r),
+            Some(r) => self.card_json(&mut j, r, CARD),
             None => j.raw(&alloc::format!("{{\"job_id\":{job}}}")),
         }
         String::from_utf8(j.0).unwrap_or_default()
     }
 
-    fn card_json(&self, j: &mut Json, r: usize) {
+    fn card_json(&self, j: &mut Json, r: usize, plain: &[&str]) {
         use col::cards as k;
         let u = |x| self.vu32(table::CARDS, x, r);
         let name = |list: &[&'static str], i: u32| -> &'static [u8] { list.get(i as usize).copied().unwrap_or("").as_bytes() };
         let band = BANDS.iter().find(|b| (b.2..=b.3).contains(&u(k::SCORE))).map_or("", |b| b.0);
         let batch = self.row_of(table::BATCHES, u(k::BATCH)).map_or(&b""[..], |b| self.vstr(table::BATCHES, col::batches::CODE, b));
-        self.rows_json(j, table::CARDS, core::iter::once(r), CARD);
+        self.rows_json(j, table::CARDS, core::iter::once(r), plain);
         j.0.pop(); // reopen the object for the rest
         for (key, v) in [("job_id", &alloc::format!("{}", u(k::ID)).into_bytes()[..]), ("score_100", &alloc::format!("{}", u(k::SCORE)).into_bytes()[..])] {
             j.key(key);
@@ -810,6 +810,31 @@ impl Desk {
             j.opt(v);
         }
         j.raw("}");
+    }
+
+    /// An agent's block: per (entry, job), the card's short form with its entry.
+    pub fn block_json(&mut self, entries: &[(u32, u32)]) -> String {
+        self.derive();
+        let mut j = Json(Vec::from(&b"["[..]));
+        for &(entry, job) in entries {
+            match self.row_of(table::CARDS, job) {
+                Some(r) => self.card_json(&mut j, r, &["company", "role", "next_action", "next_due"]),
+                None => j.raw(&alloc::format!("{}{{\"job_id\":{job}}}", if j.0.len() > 1 { "," } else { "" })),
+            }
+            j.0.pop();
+            j.raw(&alloc::format!(",\"entry\":{entry}}}"));
+        }
+        j.raw("]");
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+
+    /// Every row of raw table `t`, by the schema's names and kinds.
+    pub fn table_json(&mut self, t: u16) -> String {
+        let names: Vec<&str> = schema::COLS.iter().filter(|c| c.table == t).map(|c| c.name).collect();
+        let mut j = Json(Vec::from(&b"["[..]));
+        self.rows_json(&mut j, t, 0..self.rows(t), &names);
+        j.raw("]");
+        String::from_utf8(j.0).unwrap_or_default()
     }
 
     /// score_distribution: band counts and ten-point bins over the filtered board.
