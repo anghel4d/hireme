@@ -15,8 +15,8 @@ defmodule Hireme.Heat.Org do
     linkedin snap pinterest shopify openai anthropic spacex neuralink xai
     starfish valve gdm deepmind ssi mira
   )
-  @mega_names MapSet.new(@mega)
-  @large_names MapSet.new(@large)
+  @mega_names Map.from_keys(@mega, true)
+  @large_names Map.from_keys(@large, true)
 
   @type size :: :mega | :large | :mid | :small
 
@@ -39,8 +39,8 @@ defmodule Hireme.Heat.Org do
     names = [String.replace(name, " ", "") | String.split(name, " ", trim: true)]
 
     cond do
-      Enum.any?(names, &MapSet.member?(@mega_names, &1)) -> :mega
-      Enum.any?(names, &MapSet.member?(@large_names, &1)) -> :large
+      Enum.any?(names, &Map.has_key?(@mega_names, &1)) -> :mega
+      Enum.any?(names, &Map.has_key?(@large_names, &1)) -> :large
       name =~ re(:mid) -> :mid
       true -> :small
     end
