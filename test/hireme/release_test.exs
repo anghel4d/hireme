@@ -59,20 +59,20 @@ defmodule Hireme.ReleaseTest do
     assert :ok = Task.await(eval)
   end
 
-  test "the lock is the same through a chain of symlinks to the database", %{dir: dir} do
+  test "the lock is the same through any symlinked path to the database", %{dir: dir} do
+    # dir/parent -> real/sub, real/sub/link.db -> ../hireme.db: `..` is
+    # physical, from real/sub, not lexical from dir/parent.
     db = Hireme.Repo.config()[:database]
-    File.mkdir_p!(dir)
-    hop = Path.join(dir, "hop.db")
-    link = Path.join(dir, "alias.db")
-    File.ln_s!(Path.expand(db), hop)
-    File.ln_s!("hop.db", link)
-    canonical = Hireme.Release.lock_path()
-    Application.put_env(:hireme, Hireme.Repo, Keyword.put(Hireme.Repo.config(), :database, link))
+    File.mkdir_p!(Path.join(dir, "real/sub"))
+    File.ln_s!(Path.expand(db), Path.join(dir, "real/hireme.db"))
+    File.ln_s!("real/sub", Path.join(dir, "parent"))
+    File.ln_s!("../hireme.db", Path.join(dir, "real/sub/link.db"))
 
-    try do
-      assert Hireme.Release.lock_path() == canonical
-    after
-      Application.put_env(:hireme, Hireme.Repo, Keyword.put(Hireme.Repo.config(), :database, db))
-    end
+    {:ok, conn} = Exqlite.Sqlite3.open(Path.join(dir, "parent/link.db"))
+    {:ok, st} = Exqlite.Sqlite3.prepare(conn, "PRAGMA database_list")
+    {:row, [0, "main", file]} = Exqlite.Sqlite3.step(conn, st)
+    Exqlite.Sqlite3.close(conn)
+
+    assert Hireme.Release.lock_path() == file <> ".migrate"
   end
 end
