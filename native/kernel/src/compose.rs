@@ -713,3 +713,227 @@ fn options(j: &mut Json, name: &str, keys: &[&str]) {
     }
     j.raw("]");
 }
+
+// ---- the board as an agent reads it --------------------------------------
+
+/// The desk's top-bar filters by name, as an agent passes them: a band,
+/// stage, status or heat state by key ("" or "all" for any), a batch by
+/// code, a minimum score (-1 for none), a search query, and how many.
+pub struct Query<'a> {
+    pub band: &'a str,
+    pub stage: &'a str,
+    pub status: &'a str,
+    pub heat: &'a str,
+    pub batch: &'a str,
+    pub min_score: i32,
+    pub q: &'a str,
+    pub limit: usize,
+}
+
+impl Desk {
+    /// The ix of `key` in lookup table `t`: -1 for any, -2 for a key it lacks.
+    fn lookup(&self, t: u16, key: &str) -> i32 {
+        if key.is_empty() || key == "all" {
+            return -1;
+        }
+        (0..self.rows(t)).find(|&r| self.vstr(t, 2, r) == key.as_bytes()).map_or(-2, |r| self.vu32(t, 1, r) as i32)
+    }
+
+    /// The key lookup table `t` gives `ix`, or null.
+    fn key_json(&self, j: &mut Json, t: u16, ix: u32) {
+        match (0..self.rows(t)).find(|&r| self.vu32(t, 1, r) == ix) {
+            Some(r) => j.str(self.vstr(t, 2, r)),
+            None => j.raw("null"),
+        }
+    }
+
+    /// The board in order, filtered as the top bar filters it.
+    fn query(&mut self, q: &Query) -> Vec<usize> {
+        let bt = table::BANDS;
+        let (lo, hi) = match self.lookup(bt, q.band) {
+            -1 => (0, i32::MAX),
+            ix => (0..self.rows(bt))
+                .find(|&r| self.vu32(bt, 1, r) == ix as u32)
+                .map_or((1, 0), |r| (self.vu32(bt, col::bands::MIN, r) as i32, self.vu32(bt, col::bands::MAX, r) as i32)),
+        };
+        let batch = match q.batch {
+            "" => -1,
+            code => (0..self.rows(table::BATCHES))
+                .find(|&r| self.vstr(table::BATCHES, col::batches::CODE, r) == code.as_bytes())
+                .map_or(i32::MAX, |r| self.vu32(table::BATCHES, col::batches::ID, r) as i32),
+        };
+        let (stage, status, heat) = (self.lookup(table::STAGES, q.stage), self.lookup(table::STATUSES, q.status), self.lookup(table::HEAT_STATES, q.heat));
+        self.select(q.min_score, lo, hi, stage, status, batch, -1, heat, q.q.as_bytes());
+        self.selection().iter().map(|&r| r as usize).collect()
+    }
+
+    /// Card row `r` as an agent reads it: the enum columns by key, the
+    /// batch by code, its score band.
+    fn card_json(&self, j: &mut Json, r: usize) {
+        let c = table::CARDS;
+        use col::cards as k;
+        let u = |x: u16| self.vu32(c, x, r);
+        j.item();
+        j.raw("{");
+        j.key("job_id");
+        j.u(u(k::ID) as u64);
+        j.key("score_100");
+        j.optu(u(k::SCORE));
+        for (name, x, t) in [("stage", k::STAGE, table::STAGES), ("status", k::STATUS, table::STATUSES), ("freshness", k::FRESHNESS, table::FRESHNESS), ("gate", k::GATE, table::GATES), ("heat_state", k::HEAT_STATE, table::HEAT_STATES)] {
+            j.key(name);
+            self.key_json(j, t, u(x));
+        }
+        j.key("batch");
+        match self.row_of(table::BATCHES, u(k::BATCH)) {
+            Some(b) => j.str(self.vstr(table::BATCHES, col::batches::CODE, b)),
+            None => j.raw("null"),
+        }
+        j.key("band");
+        let bt = table::BANDS;
+        match (0..self.rows(bt)).find(|&b| (self.vu32(bt, col::bands::MIN, b)..=self.vu32(bt, col::bands::MAX, b)).contains(&u(k::SCORE))) {
+            Some(b) => j.str(self.vstr(bt, col::bands::KEY, b)),
+            None => j.raw("null"),
+        }
+        const SHOWN: &[&str] = &["heat", "stage_on", "next_due", "load_pct", "cooldown", "leased", "company", "role", "location", "next_action", "cv_label", "load", "cap", "ats_vendor", "ratio"];
+        self.cells_json(j, c, r, SHOWN);
+        j.raw("}");
+    }
+
+    /// `"name": value` for each of `names` in row `r` of `t`, by the
+    /// schema's kinds (a day as ISO text, the wire's none as null).
+    fn cells_json(&self, j: &mut Json, t: u16, r: usize, names: &[&str]) {
+        for &n in names {
+            let Some(d) = schema::col_id(t, n).and_then(|c| schema::col_def(t, c)) else { continue };
+            j.key(n);
+            match d.kind {
+                "str" | "sym" => j.str(self.vstr(t, d.col, r)),
+                "f64" => j.f64(self.f64_at(t, d.col, r)),
+                "day" => j.day(self.vu32(t, d.col, r)),
+                _ => j.optu(self.vu32(t, d.col, r)),
+            }
+        }
+    }
+
+    /// list_applications: the filtered board's cards, in board order.
+    pub fn applications_json(&mut self, q: &Query) -> String {
+        let rows = self.query(q);
+        let mut j = Json(Vec::new());
+        j.raw("{\"applications\":[");
+        for r in rows.into_iter().take(q.limit) {
+            self.card_json(&mut j, r);
+        }
+        j.raw("]}");
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+
+    /// One application's card, or `{"job_id": job}` without one.
+    pub fn application_json(&mut self, job: u32) -> String {
+        self.derive();
+        let mut j = Json(Vec::new());
+        match self.row_of(table::CARDS, job) {
+            Some(r) => self.card_json(&mut j, r),
+            None => {
+                j.raw("{\"job_id\":");
+                j.u(job as u64);
+                j.raw("}");
+            }
+        }
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+
+    /// recommend_applications: the filtered board (open, score 90 and up
+    /// unless the query says otherwise) without the blocked, and the fire.
+    pub fn recommend_json(&mut self, q: &Query) -> String {
+        let rows = self.query(q);
+        let blocked = self.lookup(table::HEAT_STATES, "blocked");
+        let mut j = Json(Vec::new());
+        j.raw("{\"applications\":[");
+        for r in rows.into_iter().filter(|&r| self.vu32(table::CARDS, col::cards::HEAT_STATE, r) as i32 != blocked).take(q.limit) {
+            self.card_json(&mut j, r);
+        }
+        j.raw("],\"min_score\":");
+        j.u(q.min_score.max(0) as u64);
+        let fire = (0..self.rows(table::BATCHES)).any(|r| self.vu32(table::BATCHES, col::batches::FIRE, r) == 1);
+        j.raw(if fire { ",\"fire\":\"open_fire\"" } else { ",\"fire\":\"hold\"" });
+        j.raw(",\"note\":\"FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit.\"}");
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+
+    /// score_distribution: band counts and ten-point bins over the filtered board.
+    pub fn distribution_json(&mut self, q: &Query) -> String {
+        let scores: Vec<u32> = self.query(q).into_iter().map(|r| self.vu32(table::CARDS, col::cards::SCORE, r)).collect();
+        let count = |lo: u32, hi: u32| scores.iter().filter(|s| (lo..=hi).contains(*s)).count() as u64;
+        let mut j = Json(Vec::new());
+        j.raw("{\"n\":");
+        j.u(scores.len() as u64);
+        j.key("mean");
+        j.f64(if scores.is_empty() { 0.0 } else { scores.iter().map(|&s| s as f64).sum::<f64>() / scores.len() as f64 });
+        j.key("bands");
+        j.raw("[");
+        let bt = table::BANDS;
+        for r in 0..self.rows(bt) {
+            j.item();
+            j.raw("{");
+            self.cells_json(&mut j, bt, r, &["key", "label", "min", "max"]);
+            j.key("count");
+            j.u(count(self.vu32(bt, col::bands::MIN, r), self.vu32(bt, col::bands::MAX, r)));
+            j.raw("}");
+        }
+        j.raw("],\"bins\":[");
+        for b in 0..10u32 {
+            let (lo, hi) = (b * 10, if b == 9 { 100 } else { b * 10 + 9 });
+            j.item();
+            j.raw("{\"lo\":");
+            j.u(lo as u64);
+            j.key("hi");
+            j.u(hi as u64);
+            j.key("count");
+            j.u(count(lo, hi));
+            j.raw("}");
+        }
+        j.raw("]}");
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+
+    /// heat_status: the heat chart's companies and vendors, those whose key
+    /// or label holds `company` / `ats` (any case) when given.
+    pub fn heat_json(&mut self, company: &str, ats: &str) -> String {
+        self.derive();
+        let t = table::HEAT_ROWS;
+        let names: Vec<&str> = schema::COLS.iter().filter(|c| c.table == t).map(|c| c.name).collect();
+        let mut j = Json(Vec::new());
+        for (key, group, needle) in [("companies", 0, company), ("vendors", 1, ats)] {
+            let needle = heat::downcase(needle);
+            j.key(key);
+            j.raw("[");
+            for r in (0..self.rows(t)).filter(|&r| self.vu32(t, col::heat_rows::GROUP, r) == group) {
+                let has = |c| heat::downcase(core::str::from_utf8(self.vstr(t, c, r)).unwrap_or("")).contains(needle.as_str());
+                if needle.is_empty() || has(col::heat_rows::KEY) || has(col::heat_rows::LABEL) {
+                    j.item();
+                    j.raw("{");
+                    self.cells_json(&mut j, t, r, &names);
+                    j.raw("}");
+                }
+            }
+            j.raw("]");
+        }
+        let mut out = Vec::from(&b"{"[..]);
+        out.extend_from_slice(&j.0);
+        out.extend_from_slice(b",\"note\":\"FIRE HOLD. Heat gates the queue. It does not submit.\"}");
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    /// can_apply: the job's heat verdict, or "null" for an unknown job.
+    pub fn verdict_json(&mut self, job: u32) -> String {
+        self.derive();
+        let t = table::VERDICTS;
+        let Some(r) = self.row_of(t, job) else { return String::from("null") };
+        let names: Vec<&str> = schema::COLS.iter().filter(|c| c.table == t && c.name != "id").map(|c| c.name).collect();
+        let mut j = Json(Vec::new());
+        j.raw("{\"job_id\":");
+        j.u(job as u64);
+        self.cells_json(&mut j, t, r, &names);
+        j.raw(",\"fire\":\"hold\"}");
+        String::from_utf8(j.0).unwrap_or_default()
+    }
+}

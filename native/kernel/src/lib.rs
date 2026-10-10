@@ -33,6 +33,7 @@ mod keywords;
 mod predict;
 mod store;
 
+pub use compose::Query;
 pub use desk::Desk;
 pub use wire::schema;
 
