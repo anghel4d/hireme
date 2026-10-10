@@ -534,7 +534,7 @@ NEXT: {next}"
             .iter()
             .find(|r| r.0 == code)
             .map_or("internal", |r| r.1);
-        let base = Diag::error(code_str(name), format!("{tool} was refused: {msg}")).call(tool, a);
+        let base = Diag::error(name, format!("{tool} was refused: {msg}")).call(tool, a);
         match name {
             "argument" => {
                 let field = msg.trim_start_matches("Need a ").trim_end_matches('.').to_string();
@@ -987,24 +987,6 @@ fn lease_warning(a: &Value, w: &Value, b: &Block) -> Diag {
     }
 }
 
-/// The diagnostic code for a wire refusal name (they are the same words).
-fn code_str(name: &str) -> &'static str {
-    match name {
-        "fire_hold" => "fire_hold",
-        "heat" => "heat",
-        "leased" => "leased",
-        "cooldown" => "cooldown",
-        "not_additive" => "not_additive",
-        "argument" => "argument",
-        "not_found" => "not_found",
-        "batch" => "batch",
-        "invalid" => "invalid",
-        "busy" => "busy",
-        "lineage_busy" => "lineage_busy",
-        _ => "internal",
-    }
-}
-
 /// The account's applications as (entry, job id), by entry: the account's
 /// own numbering, which counts them in the order they were added.
 fn entries(d: &mut Desk) -> Vec<(u32, u32)> {
@@ -1423,16 +1405,15 @@ fn usage(tool: &str) -> &'static str {
 Call shape: hireme {}  |  hireme {\"explain\":\"<code>\"}
 - {}: the desk's size, this agent's block, the workflow, and NEXT: the call to make.
 - explain: the long form of a diagnostic code, e.g. hireme {\"explain\":\"busy\"}.",
-        "lease" => "Take this agent's one lease: a block of consecutive entries (applications, numbered 1..n in the order they were added).
+        "lease" => "Take this agent's one lease: a block of entries (the account's application numbers, 1..n).
 
 Call shape: lease {\"count\":16}  |  lease {\"from\":1,\"to\":16}  |  lease {\"from\":17}
-- count: the first free run of that many entries.
-- from..to: exactly those entries; a range past the desk is clamped, with a warning. from alone takes 16.
-Response branching (do not guess):
-- granted: {from, to, applications:[{entry, job_id, company, role, stage, score_100, ...}]}, warnings first if clamped.
-- error[busy]: part of the range is in another agent's block; nothing was leased; help: names a free block.
-- error[held]: this agent already holds a block; release {} first.
-- error[empty]: the range is outside 1..n.",
+- count: a free block of that size, aligned (16: 1..16, 17..32, ...), picked by the desk.
+- from..to: exactly those entries. from alone takes 16.
+Response branching (do not guess); hireme {\"explain\":\"<code>\"} explains each code:
+- granted: {from, to, applications:[{entry, job_id, company, role, stage, score_100, ...}]},
+  after any warning[truncated | count_capped | size | align].
+- refused, nothing leased: error[busy] (help: a free block), error[held], error[empty].",
         "release" => "Give this agent's block back.
 
 Call shape: release {}
