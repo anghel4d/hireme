@@ -161,6 +161,7 @@ col job_apps heat_override 26 u32
 col job_apps heat_override_reason 27 sym
 col job_apps inserted_at 33 time
 col job_apps updated_at 34 time
+col job_apps no 35 u32
 
 table events 48
 col events id 1 u32
