@@ -22,7 +22,6 @@
 !/lib/
 !/lib/**/
 !/lib/**/*.ex
-!/lib/**/*.heex
 
 !/test/
 !/test/**/
@@ -33,9 +32,7 @@
 !/bench/
 !/bench/*.exs
 !/bench/*.mjs
-!/bench/*.ts
 !/bench/results/
-!/bench/results/*.jsonl
 !/bench/results/*.jsonl.gz
 
 !/assets/
@@ -72,8 +69,6 @@
 !/native/*/src/
 !/native/*/src/**/
 !/native/*/src/**/*.rs
-!/native/*/tests/
-!/native/*/tests/*.rs
 !/native/*/examples/
 !/native/*/examples/*.rs
 !/native/*/*.patch
@@ -87,4 +82,3 @@
 # The last word. A secret is never committed, whitelist or not.
 /.env
 /.env.*
-!/.env.example
