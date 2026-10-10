@@ -1,12 +1,6 @@
-# The host-agnostic half of running Hireme on NixOS: its user, its one
-# systemd unit and that unit's sandbox, and where its secrets come from.
-# Everything about a particular machine (addresses, firewall, certificates,
-# the reverse proxy) belongs to the host that imports this.
-#
-# systemd only starts and sandboxes the node. The node itself migrates the
-# database before it serves, takes the daily backup, drains its sessions on
-# SIGTERM, and runs the WebTransport gate as its own Port (which exits when
-# the node does), so there is no second unit, user or capability.
+# The host-agnostic half of running Hireme on NixOS: the user, one unit that
+# starts and sandboxes the node, and where its secrets come from. Addresses,
+# firewall, certificates and the reverse proxy belong to the importing host.
 { self }:
 {
   config,
@@ -23,22 +17,10 @@ in
   options.services.hireme = {
     enable = lib.mkEnableOption "Hireme";
 
-    package = mkOption {
-      type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.hireme;
-      defaultText = lib.literalExpression "hireme.packages.\${system}.hireme";
-      description = "The release, with `bin/hireme` and `bin/hireme-gate`.";
-    };
-
     release = mkOption {
       type = types.str;
-      default = "${cfg.package}";
-      defaultText = lib.literalExpression "\"\${config.services.hireme.package}\"";
-      example = "/nix/var/nix/profiles/hireme";
-      description = ''
-        Where the unit runs the release from. A profile path here lets a
-        deploy flip the application alone, without a system switch.
-      '';
+      default = "${self.packages.${pkgs.stdenv.hostPlatform.system}.hireme}";
+      description = "The release the unit runs; a profile path lets a deploy flip it without a system switch.";
     };
 
     domain = mkOption {
@@ -55,13 +37,7 @@ in
     environmentFile = mkOption {
       type = types.str;
       example = "/run/agenix/hireme-env";
-      description = ''
-        `KEY=value` lines with SECRET_KEY_BASE, RELEASE_COOKIE and the mail
-        credentials (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_EMAIL_TOKEN). On a
-        host this is the agenix path; in the dev profile a plaintext file
-        generated on the machine. Never a store path: the store is world
-        readable.
-      '';
+      description = "`KEY=value` lines (SECRET_KEY_BASE, RELEASE_COOKIE, the mail credentials); an agenix path on a host, never a store path.";
     };
 
     gate = {
@@ -69,10 +45,7 @@ in
       listen = mkOption {
         type = types.str;
         default = "0.0.0.0:4433";
-        description = ''
-          UDP `address:port` the gate binds. A high port needs no
-          capability; the host forwards UDP 443 to it.
-        '';
+        description = "UDP `address:port` the gate binds; the host forwards 443 to it.";
       };
       url = mkOption {
         type = types.str;
@@ -88,17 +61,7 @@ in
       cert = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = ''
-          Directory holding `fullchain.pem` and `key.pem`, readable by the
-          `hireme` group. The gate rereads them when they change. Null
-          makes the gate sign its own ECDSA P-256 certificate at each start
-          (valid 14 days, pinned by hash): the dev profile only.
-        '';
-      };
-      perIp = mkOption {
-        type = types.ints.positive;
-        default = 16;
-        description = "Live WebTransport sessions allowed per client address.";
+        description = "Directory with `fullchain.pem` and `key.pem`, readable by the `hireme` group and reread on change; null (the dev profile) self-signs a 14-day ECDSA certificate pinned by hash.";
       };
     };
   };
@@ -131,7 +94,6 @@ in
           GATE_URL = gate.url;
           GATE_LISTEN = gate.listen;
           GATE_ORIGINS = lib.concatStringsSep "," gate.origins;
-          GATE_PER_IP = toString gate.perIp;
         }
         // (
           if gate.cert == null then

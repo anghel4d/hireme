@@ -58,40 +58,35 @@ quantiles, achieved throughput, correctness checks, raw evidence and limitations
 
 ## Production deployment
 
-The flake is the build and the NixOS half of a deployment, and knows no host.
-`nix build .#hireme` is the OTP release (`bin/hireme`, and `bin/hireme-gate`
-beside it), built with nixpkgs' `mixRelease` from the flake's own tree at its
-revision; `.#hireme-gate` is the gate alone. The package
-(`nix/package.nix`) builds SQLite's extension against Nix's SQLite, uses the
-committed WASM kernel and Nix's esbuild, digests the assets, and admits only
-application sources. It is reproducible: `nix build .#hireme .#hireme-gate
+The flake is the build and the application's half of a host, and knows no
+host. `nix build .#hireme` is the OTP release (`bin/hireme` with
+`bin/hireme-gate` beside it; `.#hireme-gate` is the gate alone), built by
+`nix/package.nix` from the flake's own tree at its revision: SQLite's
+extension against Nix's SQLite, the committed WASM kernel, Nix's esbuild,
+digested assets, application sources only. `nix build .#hireme .#hireme-gate
 --rebuild` fails on any differing byte. The release is not under a free
-licence, so nixpkgs is imported with `allowUnfree`. When `mix.lock` changes,
+licence, so nixpkgs is imported with `allowUnfree`; when `mix.lock` changes,
 build with `mixDepsHash = lib.fakeHash` and pin the hash it reports.
 
-`nixosModules.hireme` (`nix/module.nix`) is the application's half of a
-host: the `hireme` user and one systemd unit that only starts and sandboxes
-the node (no capabilities, `ProtectSystem=strict`, state in
-`/var/lib/hireme`), with its secrets read from `services.hireme.environmentFile`
-(an agenix path on a host). A host flake imports it with
-`inputs.hireme.inputs.nixpkgs.follows = "nixpkgs"`, or the mix dependency
-hash goes stale, and adds what is its own: addresses, firewall, certificates,
-the reverse proxy. The deploy lives with the host, so there is no cycle
-between the flakes.
+`nixosModules.hireme` (`nix/module.nix`) adds the `hireme` user and one
+systemd unit that only starts and sandboxes the node (no capabilities,
+`ProtectSystem=strict`, state in `/var/lib/hireme`, secrets from
+`services.hireme.environmentFile`). A host flake imports it with
+`inputs.hireme.inputs.nixpkgs.follows = "nixpkgs"` (or the mix dependency
+hash goes stale) and adds its own addresses, firewall, certificates and
+reverse proxy; the deploy lives with the host, so the flakes form no cycle.
 
-The node owns its upkeep: pending migrations run as the first boot step
-(`Hireme.Release`), and a failed one stops the boot. A supervised
-`Hireme.Release.Backup` writes a daily online copy (`VACUUM INTO`) to
-`backups/` beside the database and keeps 13 days, logging a failure as an
-error and retrying within the hour; `bin/hireme rpc
-'Hireme.Release.Backup.run()'` takes one now. On SIGTERM (the unit's
-`KillMode=mixed` sends it to the node alone) no new session is admitted and
-every live one hears BYE `restart`, from which clients reconnect and resume at
-their revision. With `services.hireme.gate.enable` the node runs the gate as
-its own Port on a high UDP port (the host forwards 443 to it), and the gate
-exits when the node does. `Hireme.Release.migrate/0` remains for
-`bin/hireme eval` without starting the application. Do not run `mix setup`,
-`mix ecto.setup`, or `mix ecto.reset` against production.
+The node owns its upkeep. Pending migrations run as the first boot step
+(`Hireme.Release`; a failed one stops the boot). `Hireme.Release.Backup`
+writes a daily online copy (`VACUUM INTO`) to `backups/` beside the database
+and keeps 13 days, logging a failure and retrying within the hour;
+`bin/hireme rpc 'Hireme.Release.Backup.run()'` takes one now. On SIGTERM
+(`KillMode=mixed` sends it to the node alone) no new session is admitted and
+every live one hears BYE `restart`, from which clients resume at their
+revision. With `services.hireme.gate.enable` the node runs the gate as its
+own Port on a high UDP port (the host forwards 443 to it); the gate exits
+when the node does. Do not run `mix setup`, `mix ecto.setup` or `mix
+ecto.reset` against production.
 
 The secrets file holds, as `KEY=value` lines:
 
@@ -103,19 +98,18 @@ The secrets file holds, as `KEY=value` lines:
 | `CLOUDFLARE_EMAIL_TOKEN` | A dedicated API token with only Email Sending Write for that account |
 | `MAIL_FROM` | A sender address on an onboarded sending domain |
 
-Its ciphertext in Git is the design; its plaintext never enters the Nix
-store. On a host it is an agenix secret, rekeyed per host from hardware-held
-master identities; moving values into it keeps them byte-identical, or every
-session and agent breaks.
+Its plaintext never enters the Nix store. On a host it is an agenix secret,
+rekeyed per host from hardware-held master identities; values moved into it
+stay byte-identical, or every session and agent breaks.
 
 `checks.x86_64-linux.dev` is the dev profile, for testing until a vault
 exists and after: a NixOS VM running the module with plaintext secrets it
-generates for itself, no hardware key, and the gate's own self-signed ECDSA
+generates for itself, no hardware key, and the gate's self-signed ECDSA
 P-256 certificate pinned by hash (Chrome accepts only those, for at most 14
 days, so the gate signs a new one at each start). It proves the node
 migrates, backs up, serves, runs the gate on its high port as its own user
 with no capability, restarts a gate that dies, and takes it down when it
-stops. `nix build .#checks.x86_64-linux.dev -L` runs it. Nothing of it ships.
+stops. `nix build .#checks.x86_64-linux.dev -L` runs it; nothing of it ships.
 
 Mail uses Cloudflare's HTTPS API because Hetzner blocks outbound SMTP port 465.
 Req verifies TLS certificates; keep the host's CA trust store available. Serve traffic through an HTTPS
