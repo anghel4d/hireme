@@ -59,8 +59,8 @@ defmodule Hireme.Store do
   @callback answers(account(), [integer()]) :: [
               {integer(), integer(), String.t() | nil}
             ]
-  @doc "Drop the account's op outcomes logged before `before`."
-  @callback sweep(account(), DateTime.t()) :: :ok
+  @doc "Drop up to `limit` of the account's op outcomes logged before `before`; answers how many."
+  @callback sweep(account(), DateTime.t(), pos_integer()) :: non_neg_integer()
   @doc """
   Upkeep off the write path (SQLite: fold the WAL into the database).
   `:behind` asks a writer to run it once between two of its commits:
@@ -187,12 +187,17 @@ defmodule Hireme.Store do
   end
 
   @impl true
-  def sweep(account, before),
-    do:
-      query!("DELETE FROM wire_ops WHERE account_id = ? AND inserted_at < ?", [
-        account,
-        iso(before)
-      ])
+  def sweep(account, before, limit) do
+    %{num_rows: n} =
+      Repo.query!(
+        "DELETE FROM wire_ops WHERE rowid IN (SELECT rowid FROM wire_ops " <>
+          "WHERE account_id = ? AND inserted_at < ? LIMIT ?)",
+        [account, iso(before), limit],
+        skip_account: true
+      )
+
+    n
+  end
 
   # PASSIVE never waits on a writer and never makes one wait; the fsync
   # it costs is paid here, not by the write whose commit crossed
