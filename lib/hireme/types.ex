@@ -69,27 +69,11 @@ defmodule Hireme.Closed do
   end
 end
 
-defmodule Hireme.Attrs do
-  @moduledoc """
-  Reading a loose map once. Keys may be atoms or strings; values come
-  back trimmed, typed, or defaulted. Nothing here raises.
-  """
-
-  @spec get(map(), atom()) :: term()
-  def get(map, key) when is_map(map) and is_atom(key) do
-    case Map.fetch(map, key) do
-      {:ok, v} -> v
-      :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
-end
-
 defmodule Hireme.Form do
   @moduledoc """
   Reading a form once, refusing what it cannot read. Every reader
   answers `{:ok, value}` or `{:error, {:argument, name}}`; nothing
-  raises. Unlike `Hireme.Attrs`, a form prefers a truthy string key
-  over its atom key, so the two readers are not interchangeable.
+  raises. A form prefers a truthy string key over its atom key.
   """
 
   alias Hireme.Closed

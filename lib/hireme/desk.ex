@@ -48,7 +48,6 @@ defmodule Hireme.Desk do
           | :cooldown
           | :not_additive
           | :lineage
-          | :command
           | :heat
           | :reason
 
@@ -168,10 +167,6 @@ defmodule Hireme.Desk do
     job
   end
 
-  @spec set_score(pos_integer(), LifeEv.score()) ::
-          {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_score(job_id, score) when score in 0..100, do: Ops.exec({:score, job_id, score})
-
   @spec set_next(pos_integer(), String.t(), Date.t() | nil) ::
           {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
   def set_next(job_id, action, due), do: Ops.exec({:next, job_id, action, due})
@@ -230,7 +225,6 @@ defmodule Hireme.Desk do
   defp permit(job_id), do: Letterbox.permit_job(job_id, Ops.holder())
 
   # One row, one changeset, only while no agent holds the lease.
-  # A set of plain columns is one statement that answers with the row.
   # A set of plain columns is one statement that answers with the row as
   # the sequencer ships it.
   defp write(job_id, attrs) do

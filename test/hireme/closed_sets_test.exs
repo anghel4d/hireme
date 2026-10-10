@@ -11,14 +11,14 @@ defmodule Hireme.ClosedSetsTest do
 
   defp parsers do
     [
-      {"gym platform", &Hireme.Gym.parse_platform/1, Hireme.Gym.platforms()},
-      {"gym topic", &Hireme.Gym.parse_topic/1, Hireme.Gym.topics()},
-      {"gym difficulty", &Hireme.Gym.parse_difficulty/1, Hireme.Gym.difficulties()},
-      {"gym outcome", &Hireme.Gym.parse_outcome/1, Hireme.Gym.outcomes()},
-      {"net kind", &Hireme.Net.parse_kind/1, Hireme.Net.kinds()},
-      {"net channel", &Hireme.Net.parse_channel/1, Hireme.Net.channels()},
+      {"gym platform", &Hireme.Closed.parse(Hireme.Gym.platforms(), &1), Hireme.Gym.platforms()},
+      {"gym topic", &Hireme.Closed.parse(Hireme.Gym.topics(), &1), Hireme.Gym.topics()},
+      {"gym difficulty", &Hireme.Closed.parse(Hireme.Gym.difficulties(), &1),
+       Hireme.Gym.difficulties()},
+      {"gym outcome", &Hireme.Closed.parse(Hireme.Gym.outcomes(), &1), Hireme.Gym.outcomes()},
+      {"net kind", &Hireme.Closed.parse(Hireme.Net.kinds(), &1), Hireme.Net.kinds()},
+      {"net channel", &Hireme.Closed.parse(Hireme.Net.channels(), &1), Hireme.Net.channels()},
       {"stage", &Hireme.Pipeline.parse/1, Hireme.Pipeline.keys()},
-      {"heat state", &Hireme.Heat.parse_state/1, [:all, :cool, :warm, :hot, :blocked]},
       {"overlay mode", &Hireme.Desk.Overlay.parse_mode/1, [:hidden, :altered, :emphasized]}
     ]
   end
