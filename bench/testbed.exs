@@ -33,7 +33,7 @@ defmodule HiremeBench.Testbed do
       )
     )
 
-    Hireme.Release.migrate()
+    # The application migrates as its first boot step.
     {:ok, _} = Application.ensure_all_started(:hireme)
     account = Hireme.Accounts.use_default!()
     profiles = Hireme.Corpus.list_profiles()
