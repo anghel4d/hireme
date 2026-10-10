@@ -116,9 +116,10 @@ export class Shell {
   private linkErrors: string | null
 
   // Nothing is laid out or painted before the board arrives (or the link
-  // gives up): until then the main thread belongs to the socket.
+  // gives up): until then the main thread belongs to the socket. The board
+  // has arrived when its lookups have, even for an account with no cards.
   private build(): void {
-    if (this.plane || (this.desk.n === 0 && this.desk.status !== "offline")) return
+    if (this.plane || (this.desk.tables.stages.length === 0 && this.desk.status !== "offline")) return
     this.root.innerHTML = `
       <div id="topbar"></div>
       <div id="notice-slot"></div>
