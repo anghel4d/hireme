@@ -69,14 +69,16 @@ if config_env() == :prod do
     account_id: System.fetch_env!("CLOUDFLARE_ACCOUNT_ID"),
     api_token: System.fetch_env!("CLOUDFLARE_EMAIL_TOKEN")
 
-  # The WebTransport gate (native/gate) reaches this node through a Unix
-  # socket; the page learns the gate's public URL from GATE_URL. Both are
-  # host configuration, never committed. Without them the desk runs over
-  # the WebSocket fallback alone.
+  # The WebTransport gate (native/gate, GATE_BIN) runs as this node's
+  # Port, reads its other GATE_* settings from the environment it inherits,
+  # and reaches the node through a Unix socket; the page learns its public
+  # URL from GATE_URL. All are host configuration, never committed. Without
+  # them the desk runs over the WebSocket fallback alone.
   if gate_socket = System.get_env("GATE_SOCKET") do
     config :hireme, HiremeWeb.Gate,
       socket: gate_socket,
-      url: System.fetch_env!("GATE_URL")
+      url: System.fetch_env!("GATE_URL"),
+      cmd: List.wrap(System.get_env("GATE_BIN"))
   end
 
   # The public HTTPS endpoint is served by the reverse proxy, not this socket.

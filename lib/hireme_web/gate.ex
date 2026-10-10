@@ -60,6 +60,18 @@ defmodule HiremeWeb.Gate do
   one client bidi stream and a 64 KiB receive window, and no datagrams
   are forwarded.
 
+  ## Supervision
+
+  This module is the gate's supervisor, `rest_for_one`: the bridge
+  listener first, then, when `opts[:cmd]` names it, the gate binary itself
+  as a Port. The gate inherits the node's environment (its `GATE_*`
+  settings) plus `opts[:env]`, listens on a high UDP port (the host
+  forwards 443 to it, so it needs no capability), and exits when its stdin
+  closes, so it never outlives the node. It takes commands on stdin:
+  `reload/0` rereads the certificate. A gate that exits is started again
+  after 2 s, which keeps a broken binary from exhausting the restart
+  budget, and a listener restart restarts the gate after it.
+
   ## Carrier
 
   A Session sees `%HiremeWeb.Gate{}` as an opaque carrier and calls the
@@ -179,6 +191,21 @@ defmodule HiremeWeb.Gate do
     end
   end
 
+  @doc "Ask the gate to reread its certificate (it also notices PEM changes itself)."
+  @spec reload() :: :ok
+  def reload, do: command("reload")
+
+  @doc "Ask the gate to print its counters to the log."
+  @spec stats() :: :ok
+  def stats, do: command("stats")
+
+  defp command(line) do
+    case Process.whereis(HiremeWeb.Gate.Binary) do
+      nil -> :ok
+      pid -> send(pid, {:command, line}) && :ok
+    end
+  end
+
   # ------------------------------------------------------------ listener
 
   @doc """
@@ -230,8 +257,8 @@ defmodule HiremeWeb.Gate do
         backlog: 1024
       ])
 
-    # Owner and group only: the gate's user reaches it through the group.
-    :ok = File.chmod(path, 0o660)
+    # The gate is this node's own child and runs as its user.
+    :ok = File.chmod(path, 0o600)
 
     children = [
       {Task.Supervisor, name: HiremeWeb.Gate.Sessions},
@@ -239,9 +266,74 @@ defmodule HiremeWeb.Gate do
         id: :acceptor,
         start: {Task, :start_link, [fn -> acceptor(listen, session) end]}
       }
+      | binary(opts)
     ]
 
-    Supervisor.init(children, strategy: :one_for_all)
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  defp binary(opts) do
+    case opts[:cmd] do
+      [exe | args] ->
+        env =
+          [{"GATE_SOCKET", to_string(opts[:socket])} | List.wrap(opts[:env])] ++
+            if(opts[:hash_file], do: [{"GATE_CERT_HASH_FILE", opts[:hash_file]}], else: [])
+
+        port_opts = [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          line: 4096,
+          args: args,
+          env: for({k, v} <- env, do: {~c"#{k}", ~c"#{v}"}),
+          cd: opts[:cd] || File.cwd!()
+        ]
+
+        [%{id: :gate, start: {__MODULE__, :start_binary, [exe, port_opts]}}]
+
+      _ ->
+        []
+    end
+  end
+
+  @doc false
+  def start_binary(exe, port_opts) do
+    path = System.find_executable(exe) || exe
+
+    pid =
+      spawn_link(fn ->
+        try do
+          Port.open({:spawn_executable, path}, port_opts)
+        rescue
+          e -> gate_exited(Exception.message(e))
+        else
+          port -> binary_loop(port)
+        end
+      end)
+
+    Process.register(pid, HiremeWeb.Gate.Binary)
+    {:ok, pid}
+  end
+
+  defp binary_loop(port) do
+    receive do
+      {:command, line} ->
+        Port.command(port, [line, ?\n])
+        binary_loop(port)
+
+      {^port, {:data, {_, line}}} ->
+        Logger.info(line)
+        binary_loop(port)
+
+      {^port, {:exit_status, status}} ->
+        gate_exited("status #{status}")
+    end
+  end
+
+  defp gate_exited(why) do
+    Logger.error("hireme-gate exited (#{why}); starting it again in 2 s")
+    Process.sleep(2_000)
+    exit({:shutdown, :gate_exited})
   end
 
   defp acceptor(listen, session) do
