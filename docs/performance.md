@@ -75,7 +75,7 @@ The browser now receives the account's raw rows instead of server-derived views,
 
 Server and kernel, same fixture: a raw BOOT is 2.03 MB raw, ~90 KB deflated, read in ~32 ms outside the sequencer; a resume within the ring costs 66 µs; the kernel's push + derive + select is 0.08 ms (`next`) and 0.24 ms (stage move) in node, cold BOOT + derive 19 ms; `kernel.wasm` is 227 KB (88 KB gzipped). Agents and the sequencer's write path: see wave 4 below.
 
-Not measured on the real network path yet: only the gate's handshake has been (`bench/gate.mjs`: QUIC RTT ~25–36 ms from the operator's workstation). The release builds byte-identically from any path (`nixos-server/scripts/hireme-repro.sh`), as does `kernel.wasm` (`native/kernel/build.sh --check`).
+Not measured on the real network path yet: only the gate's handshake has been (`bench/gate.mjs`: QUIC RTT ~25–36 ms from the operator's workstation). The release builds byte-identically from any path (`nix build .#hireme .#hireme-gate --rebuild`), as does `kernel.wasm` (`native/kernel/build.sh --check`).
 
 ## Surgical lease-invalidation follow-up
 
