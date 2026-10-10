@@ -52,6 +52,7 @@ defmodule Hireme.Import do
   alias Hireme.LifeEv
   alias Hireme.Pipeline
   alias Hireme.Repo
+  alias Hireme.Store
 
   @type result :: {:ok, Report.t()} | {:error, :unrecognized}
 
@@ -123,7 +124,7 @@ defmodule Hireme.Import do
       daily_apps: doc["daily_apps"] || 440,
       note: doc["note"] || ""
     })
-    |> Repo.insert_or_update!()
+    |> Store.write(&Repo.insert_or_update!/1)
 
     {:ok, %Report{kind: :snapshot, count: 1}}
   end
@@ -136,7 +137,7 @@ defmodule Hireme.Import do
         slice: claim["slice"],
         note: claim["note"] || ""
       })
-      |> Repo.insert_or_update!()
+      |> Store.write(&Repo.insert_or_update!/1)
     end)
 
     {:ok, %Report{kind: :claims, count: length(claims)}}
@@ -189,7 +190,7 @@ defmodule Hireme.Import do
         noted_on: Date.utc_today(),
         source: filename
       })
-      |> Repo.insert_or_update!()
+      |> Store.write(&Repo.insert_or_update!/1)
     end)
 
     apps =
@@ -228,7 +229,7 @@ defmodule Hireme.Import do
       squad: doc["squad"] || "",
       note: doc["note"] || existing.note || ""
     })
-    |> Repo.insert_or_update!()
+    |> Store.write(&Repo.insert_or_update!/1)
   end
 
   # A row's keys are read case-insensitively: a pursue table says
@@ -275,7 +276,7 @@ defmodule Hireme.Import do
       job ->
         # A pack without a score leaves the one already on the card alone.
         attrs = Map.put(attrs, :score_100, score!(attrs.score_100, job.score_100))
-        job |> Job.changeset(Map.delete(attrs, :stage)) |> Repo.update!()
+        job |> Job.changeset(Map.delete(attrs, :stage)) |> Store.write(&Repo.update!/1)
 
         if job.current_stage != stage do
           case Desk.set_stage(job.id, stage) do
@@ -305,7 +306,7 @@ defmodule Hireme.Import do
   defp upsert_employer(name, freshness) when is_binary(name) and name != "" do
     (Repo.get_by(Employer, name: name) || %Employer{})
     |> Employer.changeset(%{name: name, freshness: freshness || "unknown"})
-    |> Repo.insert_or_update!()
+    |> Store.write(&Repo.insert_or_update!/1)
   end
 
   defp upsert_employer(_name, _freshness), do: nil

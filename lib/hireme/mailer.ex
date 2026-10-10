@@ -113,6 +113,7 @@ defmodule Hireme.Mailer.Outbox do
   alias Hireme.Mailer
   alias Hireme.Mailer.Notice
   alias Hireme.Repo
+  alias Hireme.Store
 
   # Seconds to wait after each failure; after the last one the notice is given up.
   @backoff [30, 120, 480, 1_800, 7_200, 21_600, 43_200, 86_400]
@@ -140,7 +141,7 @@ defmodule Hireme.Mailer.Outbox do
           }
 
     try do
-      Repo.insert_all(Notice, rows)
+      Store.write(fn -> Repo.insert_all(Notice, rows) end)
       if pid = GenServer.whereis(__MODULE__), do: send(pid, :drain)
       :ok
     rescue
@@ -229,7 +230,7 @@ defmodule Hireme.Mailer.Outbox do
 
     notice
     |> Ecto.Changeset.change([{:attempts, notice.attempts + 1} | changes])
-    |> Repo.update!()
+    |> Store.write(&Repo.update!/1)
 
     if result == :ok, do: :sent, else: :failed
   end

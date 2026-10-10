@@ -121,6 +121,7 @@ defmodule Hireme.Ops do
   @doc "The registry and the supervisor the account sequencers run under."
   def child_spec(_opts) do
     children = [
+      @store,
       {Registry, keys: :unique, name: @registry},
       {DynamicSupervisor, strategy: :one_for_one, name: @supervisor}
     ]

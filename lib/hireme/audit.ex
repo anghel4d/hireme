@@ -9,6 +9,7 @@ defmodule Hireme.Audit do
   import Ecto.Query
   alias Hireme.Audit.Event
   alias Hireme.Repo
+  alias Hireme.Store
 
   @type context :: %{
           optional(:account_id) => pos_integer() | nil,
@@ -34,7 +35,7 @@ defmodule Hireme.Audit do
         meta: meta,
         inserted_at: DateTime.utc_now() |> DateTime.truncate(:second)
       })
-      |> Repo.insert!()
+      |> Store.write(&Repo.insert!/1)
 
     changed(account_id)
     event

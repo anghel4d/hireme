@@ -17,9 +17,24 @@ defmodule Hireme.Store do
 
   Rows are the database's own values (text, integers, JSON text, ISO
   dates); they go to the wire as they are.
+
+  SQLite has one writer at a time, and a writer that finds it taken
+  sleeps on a growing backoff while another retakes it: under two busy
+  accounts the loser waited up to a second. So every write takes a lock
+  here first, granted in the order asked, and then the database's (a
+  transaction begins IMMEDIATE): the sequencers' through `transaction/1`
+  and `sweep/3`, the rest (sessions, keys, MFA, audit, mail, imports)
+  through `transaction/1` or `write/1`. A holder that dies, or raises,
+  frees it. A write that skips it (tests, migrations) still busy-waits,
+  and the lock is this VM's: another VM on the same file (a release
+  task, a remote console) has its own and contends at SQLite's lock as
+  before. Its writes stay correct (the revision gap re-reads); only
+  their order and fairness against ours are not kept. A store for a
+  database with concurrent writers has no need of the lock.
   """
 
   @behaviour __MODULE__
+  use GenServer
 
   alias Hireme.Repo
 
@@ -70,7 +85,64 @@ defmodule Hireme.Store do
   @callback checkpoint() :: :ok | :behind
 
   @impl true
-  def transaction(fun), do: Repo.transaction(fun)
+  def transaction(fun), do: write(fn -> Repo.transaction(fun, mode: :immediate) end)
+
+  @doc """
+  Run `fun` (one statement, or `fun.(arg)`) holding the writer lock: how
+  a write outside the sequencers (a session, a key, an audit event)
+  takes its turn instead of busy-waiting on SQLite's lock.
+  """
+  def write(arg, fun), do: write(fn -> fun.(arg) end)
+
+  def write(fun) do
+    if Process.get(__MODULE__) do
+      fun.()
+    else
+      :ok = GenServer.call(__MODULE__, :lock, :infinity)
+      Process.put(__MODULE__, true)
+
+      try do
+        fun.()
+      after
+        Process.delete(__MODULE__)
+        GenServer.cast(__MODULE__, {:unlock, self()})
+      end
+    end
+  end
+
+  @doc false
+  def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  # The lock: its holder (pid and monitor) and the callers waiting, in order.
+  @impl GenServer
+  def init(:ok), do: {:ok, grant(:queue.new())}
+
+  @impl GenServer
+  def handle_call(:lock, from, {nil, waiting}), do: {:noreply, grant(:queue.in(from, waiting))}
+  def handle_call(:lock, from, {held, waiting}), do: {:noreply, {held, :queue.in(from, waiting)}}
+
+  @impl GenServer
+  def handle_cast({:unlock, pid}, {{pid, ref}, waiting}) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, grant(waiting)}
+  end
+
+  def handle_cast(_stale, lock), do: {:noreply, lock}
+
+  @impl GenServer
+  def handle_info({:DOWN, ref, _, _, _}, {{_, ref}, waiting}), do: {:noreply, grant(waiting)}
+  def handle_info(_stale, lock), do: {:noreply, lock}
+
+  defp grant(waiting) do
+    case :queue.out(waiting) do
+      {{:value, {pid, _} = from}, rest} ->
+        GenServer.reply(from, :ok)
+        {{pid, Process.monitor(pid)}, rest}
+
+      {:empty, rest} ->
+        {nil, rest}
+    end
+  end
 
   @impl true
   def rollback(reason), do: Repo.rollback(reason)
@@ -189,12 +261,14 @@ defmodule Hireme.Store do
   @impl true
   def sweep(account, before, limit) do
     %{num_rows: n} =
-      Repo.query!(
-        "DELETE FROM wire_ops WHERE rowid IN (SELECT rowid FROM wire_ops " <>
-          "WHERE account_id = ? AND inserted_at < ? LIMIT ?)",
-        [account, iso(before), limit],
-        skip_account: true
-      )
+      write(fn ->
+        Repo.query!(
+          "DELETE FROM wire_ops WHERE rowid IN (SELECT rowid FROM wire_ops " <>
+            "WHERE account_id = ? AND inserted_at < ? LIMIT ?)",
+          [account, iso(before), limit],
+          skip_account: true
+        )
+      end)
 
     n
   end

@@ -23,6 +23,7 @@ defmodule Hireme.ApiKeys do
   alias Hireme.ApiKeys.Key
   alias Hireme.Audit
   alias Hireme.Repo
+  alias Hireme.Store
   alias Hireme.Security
 
   @prefix "hm_"
@@ -63,15 +64,18 @@ defmodule Hireme.ApiKeys do
         expires_at: expires_in_days && DateTime.add(now(), expires_in_days * 86_400, :second)
       }
 
-      case mint(account_id, attrs) do
-        {:ok, key} ->
-          Audit.record(:api_key_created, %{key_id: key_id, name: name}, meta)
-          Accounts.notify(account_id, :api_key_created, %{name: name, key_id: key_id})
-          {:ok, %{key: key, secret: body <> Security.checksum(body)}}
+      # The key, its audit event and its notice in one turn at the writer lock.
+      Store.write(fn ->
+        case mint(account_id, attrs) do
+          {:ok, key} ->
+            Audit.record(:api_key_created, %{key_id: key_id, name: name}, meta)
+            Accounts.notify(account_id, :api_key_created, %{name: name, key_id: key_id})
+            {:ok, %{key: key, secret: body <> Security.checksum(body)}}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end)
     end
   end
 
@@ -79,7 +83,7 @@ defmodule Hireme.ApiKeys do
   # the update matches only while the account is under the cap, so a second
   # mint that races this one sees the incremented count.
   defp mint(account_id, attrs) do
-    Repo.transaction(fn ->
+    Store.transaction(fn ->
       {claimed, _} =
         Repo.update_all(
           from(a in Accounts.Account,
@@ -104,14 +108,17 @@ defmodule Hireme.ApiKeys do
 
   @spec rename(Key.t(), String.t()) :: {:ok, Key.t()} | {:error, Ecto.Changeset.t()}
   def rename(%Key{} = key, name) do
-    key |> Key.changeset(%{name: String.trim(to_string(name))}) |> Repo.update()
+    key |> Key.changeset(%{name: String.trim(to_string(name))}) |> Store.write(&Repo.update/1)
   end
 
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment and stays listed."
   @spec revoke(Key.t(), map()) :: Key.t()
-  def revoke(%Key{revoked_at: nil} = key, meta \\ %{}) do
+  def revoke(%Key{revoked_at: nil} = key, meta \\ %{}),
+    do: Store.write(fn -> revoke!(key, meta) end)
+
+  defp revoke!(key, meta) do
     {:ok, revoked} =
-      Repo.transaction(fn ->
+      Store.transaction(fn ->
         updated = key |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
 
         Repo.update_all(
@@ -200,7 +207,9 @@ defmodule Hireme.ApiKeys do
   # Write last_used_at at most once a minute per key.
   defp used(%Key{} = key) do
     if is_nil(key.last_used_at) or DateTime.diff(now(), key.last_used_at) >= 60 do
-      key |> Ecto.Changeset.change(last_used_at: now()) |> Repo.update!(skip_account: true)
+      key
+      |> Ecto.Changeset.change(last_used_at: now())
+      |> Store.write(&Repo.update!(&1, skip_account: true))
     else
       key
     end

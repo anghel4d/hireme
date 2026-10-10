@@ -45,8 +45,9 @@ defmodule Hireme.Narrative do
   alias Hireme.Corpus.Narrative, as: Row
   alias Hireme.Corpus.User
   alias Hireme.Repo
+  alias Hireme.Store
 
-  def create_user!(attrs), do: %User{} |> User.changeset(attrs) |> Repo.insert!()
+  def create_user!(attrs), do: %User{} |> User.changeset(attrs) |> Store.write(&Repo.insert!/1)
 
   def get_by_user(user_id) when is_integer(user_id), do: Repo.get_by(Row, user_id: user_id)
   def get_by_user(_), do: nil
