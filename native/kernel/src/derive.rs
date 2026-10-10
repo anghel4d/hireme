@@ -199,12 +199,14 @@ struct VariantJoin {
     targets: [u32; 2],
 }
 
+/// (item, mode 0 hidden 1 altered 2 emphasized, title, body).
+type CorpusOverlay = (u32, u8, [u32; 2], [u32; 2]);
+
 /// The overlays and items a CV is composed from, indexed once, and the
 /// visible texts built from them; kept until an overlay or item moves.
 pub(crate) struct Corpus {
-    /// Lineage → its overlays: (item, mode 0 hidden 1 altered 2
-    /// emphasized, title, body).
-    overlays: BTreeMap<u32, Vec<(u32, u8, [u32; 2], [u32; 2])>>,
+    /// Lineage → its overlays.
+    overlays: BTreeMap<u32, Vec<CorpusOverlay>>,
     /// (id, profile, title, body) of every item.
     items: Vec<(u32, u32, [u32; 2], [u32; 2])>,
     /// (profile, lineage) → the downcased text that CV shows.
@@ -616,10 +618,10 @@ impl Desk {
             v.profile,
             v.targets[0],
         ];
-        if let Some((k, out)) = d.glances.get(&id) {
-            if *k == inputs {
-                return *out;
-            }
+        if let Some((k, out)) = d.glances.get(&id)
+            && *k == inputs
+        {
+            return *out;
         }
         let arena = &self.store.arena;
         let c = corpus.get_or_insert_with(|| self.read_corpus());
@@ -661,7 +663,7 @@ impl Desk {
 
     fn read_corpus(&self) -> Corpus {
         let (ot, it) = (table::OVERLAYS, table::ITEMS);
-        let mut overlays: BTreeMap<u32, Vec<(u32, u8, [u32; 2], [u32; 2])>> = BTreeMap::new();
+        let mut overlays: BTreeMap<u32, Vec<CorpusOverlay>> = BTreeMap::new();
         let s = |t: u16, c: u16, r: usize| self.strs(t, c).get(r).copied().unwrap_or([0, 0]);
         for r in 0..self.rows(ot) {
             let mode = match self.vstr(ot, col::overlays::MODE, r) {
@@ -855,10 +857,7 @@ impl Desk {
         let mut cache = core::mem::take(&mut d.verdicts);
         let card_dirty: Vec<u32> = core::mem::take(&mut d.card);
         let heat_dirty: Vec<u32> = core::mem::take(&mut d.heat);
-        let (changed_jobs, chart): (
-            Vec<usize>,
-            Option<(Vec<heat::ChartRow>, Vec<heat::ChartRow>)>,
-        ) = if !heat_moved {
+        let (changed_jobs, chart) = if !heat_moved {
             // A card-only write: its rows, painted with the verdicts they had.
             let mut targets: Vec<usize> = card_dirty
                 .iter()
@@ -947,8 +946,7 @@ impl Desk {
         // note, reusing the previous row's bytes when they hold.
         let prev = self.store.table(table::VERDICTS);
         let prev_str = |id: u32, c: u16| prev.and_then(|t| Some(t.col(c)?.str_ref(t.row_of(id)?)));
-        let mut texts: Vec<(u32, Option<[u32; 2]>, Option<[u32; 2]>)> =
-            Vec::with_capacity(changed_jobs.len());
+        let mut texts = Vec::with_capacity(changed_jobs.len());
         {
             let ids = self.w32(jt, col::job_apps::ID);
             for &i in &changed_jobs {
@@ -1081,7 +1079,7 @@ impl Desk {
         let prev_ref = |c: u16, i: usize| {
             prev.and_then(|t| (i < t.n).then(|| t.col(c).map(|x| x.str_ref(i))).flatten())
         };
-        let prev: Vec<(Option<[u32; 2]>, Option<[u32; 2]>)> = (0..rows.len())
+        let prev: Vec<_> = (0..rows.len())
             .map(|i| {
                 (
                     prev_ref(col::heat_rows::KEY, i),
@@ -1498,10 +1496,11 @@ fn changed_rows(old: Option<&Table>, new: &Table, arena: &Arena) -> Vec<u32> {
             break;
         };
         for (r, a) in at.iter().enumerate() {
-            if let Some(a) = *a {
-                if !moved[r] && !cell_eq(o, a, c, r, arena) {
-                    moved[r] = true;
-                }
+            if let Some(a) = *a
+                && !moved[r]
+                && !cell_eq(o, a, c, r, arena)
+            {
+                moved[r] = true;
             }
         }
     }
@@ -1533,8 +1532,7 @@ fn same_table(a: &Table, b: &Table, arena: &Arena) -> bool {
 /// without overlays shows its profile's items as written, so every such CV
 /// of a profile shares one text.
 fn ensure_text(arena: &Arena, c: &mut Corpus, profile: u32, lineage: u32) -> (u32, u32) {
-    let ovs: &[(u32, u8, [u32; 2], [u32; 2])] =
-        c.overlays.get(&lineage).map_or(&[], |o| o.as_slice());
+    let ovs: &[CorpusOverlay] = c.overlays.get(&lineage).map_or(&[], |o| o.as_slice());
     let key = (profile, if ovs.is_empty() { 0 } else { lineage });
     if c.texts.contains_key(&key) {
         return key;
