@@ -336,6 +336,14 @@ defmodule Hireme.OpsTest do
       for op <- ops, do: assert(Ops.run(account.id, again.(op)) == first[op.op_id])
       :ok = Ops.stop(account.id)
       for op <- ops, do: assert(Ops.run(account.id, again.(op)) == first[op.op_id])
+
+      # Fields that raise when run: a new id is answered :internal, a
+      # resent one still with its first answer.
+      huge = ~w(title probe minutes 9223372036854775808)
+      raising = &%{op_id: &1, kind: :gym_log, target: 0, fields: huge}
+
+      assert Ops.run(account.id, raising.(seed * 10_000 + 999)) == {:error, :internal}
+      for op <- ops, do: assert(Ops.run(account.id, raising.(op.op_id)) == first[op.op_id])
       assert fresh_view() == view and drain([]) == []
     end
   end
