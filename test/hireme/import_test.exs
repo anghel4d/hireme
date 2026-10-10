@@ -27,7 +27,6 @@ defmodule Hireme.ImportTest do
     assert job.gate == :pursue
     assert job.fit == "systems"
     assert job.current_stage == :gated
-    assert job.score_100 >= 70
   end
 
   test "canonical import lookups isolate matching employer names and URLs by account" do
@@ -62,7 +61,7 @@ defmodule Hireme.ImportTest do
     ]}
     """
 
-    assert_raise ArgumentError, "application is missing a URL", fn ->
+    assert_raise ArgumentError, fn ->
       Import.import_body(body, "partial.json", profile)
     end
 

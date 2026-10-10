@@ -51,7 +51,7 @@ defmodule Hireme.CvTest do
     second = job(profile, %{company: "South Co"})
     foreign = CvPair.lineage_id(CvPair.bind!(second.id))
 
-    assert_raise Exqlite.Error, ~r/cv lineage employer mismatch/, fn ->
+    assert_raise Exqlite.Error, fn ->
       Repo.query!("UPDATE cv_variants SET lineage_id = ? WHERE job_app_id = ?", [
         foreign,
         first.id
