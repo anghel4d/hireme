@@ -19,7 +19,8 @@ defmodule Hireme.ReleaseTest do
     File.mkdir_p!(dir)
     old = Path.join(dir, "hireme-20200101T000000.db")
     kept = Path.join(dir, "hireme-20200102T000000.db")
-    for f <- [old, kept], do: File.write!(f, "")
+    stale = Path.join(dir, "hireme-20200103T000000.db.tmp")
+    for f <- [old, kept, stale], do: File.write!(f, "")
     File.touch!(old, System.os_time(:second) - 14 * 86_400)
     File.touch!(kept, System.os_time(:second) - 12 * 86_400)
 
@@ -27,6 +28,7 @@ defmodule Hireme.ReleaseTest do
     assert {:ok, path} = Backup.run(pid)
     assert Backup.status(pid) == {:ok, path}
     refute File.exists?(old)
+    refute File.exists?(stale)
     assert File.exists?(kept)
     refute File.exists?(path <> ".tmp")
 

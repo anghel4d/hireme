@@ -126,6 +126,10 @@ defmodule Hireme.Release.Backup do
   defp prune(dir) do
     cutoff = System.os_time(:millisecond) - @keep * @day
     for name <- backups(dir), mtime(dir, name) < cutoff, do: File.rm(Path.join(dir, name))
+    # A copy cut short by a stop leaves its .tmp under another stamp.
+    for name <- File.ls!(dir),
+        String.ends_with?(name, ".db.tmp"),
+        do: File.rm(Path.join(dir, name))
   end
 
   # Oldest first: the names sort by their UTC stamp.
