@@ -153,8 +153,9 @@ defmodule Hireme.Accounts do
 
   @spec revoke_session(Session.t()) :: Session.t()
   def revoke_session(%Session{} = s) do
+    s = s |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
     Audit.record(:session_revoked, %{session_id: s.id}, %{account_id: s.account_id})
-    s |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
+    s
   end
 
   @doc "Sign every other browser out (ASVS 7.4.3), keeping `keep`."

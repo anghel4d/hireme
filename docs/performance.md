@@ -85,6 +85,10 @@ Not measured on the real network path yet: only the gate's handshake has been (`
 
 The kernel now extends dirty-card IDs directly from the two lease-difference iterators instead of collecting two temporary vectors. The reproducible WASM shrank from 313,972 to 313,500 bytes. An isolated native allocator experiment preserved identical outputs across 40 cases: one-ID churn reduced allocation/reallocation calls from 3 to 1 and cumulative requested bytes from 48 to 16. This is not a universal byte reduction: replacing 16 leases with an already nonempty dirty list changed 8 to 5 calls but 428 to 496 requested bytes because of vector growth. No end-to-end latency gain is claimed for this edit. Verification: kernel rebuild reproduced, kernel fixtures and 40 seeded operation streams passed, a 200-operation Elixir oracle comparison had zero differences, and 184 ExUnit tests passed after integration with the concurrent wave changes.
 
+## Session-revocation notification ordering
+
+`Accounts.revoke_session/1` now persists `revoked_at` before publishing the account-change notification, matching the existing other-session revocation path. This prevents an observer from re-reading the still-active row on the only notification; command-time authentication checks are unchanged. The 10 account tests passed, and a disposable local PubSub smoke observed 20 revocations: the first change notification saw the revoked timestamp, no active-list row, and a rejected token. No latency gain or authorization-bypass claim is made.
+
 ## How to read the measurements
 
 - All latency columns are **milliseconds**. `beforems` and `afterms` are medians. The repeated current `p50` is deliberate: it matches the requested report columns.
