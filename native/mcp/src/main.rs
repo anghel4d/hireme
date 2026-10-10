@@ -370,7 +370,7 @@ NEXT: {next}"
             .at(field, "expected a whole number here")
             .help(usage("lease"))
         })?;
-        let reply = self.acquire(want, 3).await?;
+        let reply = self.rpc("lease/acquire", want).await?;
         match (
             reply.get("result"),
             reply["error"]["data"].get("code").and_then(Value::as_str),
@@ -407,18 +407,6 @@ NEXT: {next}"
             (None, None) => {
                 Err(Diag::error("internal", "the lease answer was empty").call("lease", a))
             }
-        }
-    }
-
-    /// A count names no entries, so losing a race for a free run to another
-    /// agent asking at the same moment is not the caller's mistake: ask again
-    /// a few times before refusing. A range named outright is refused at once.
-    async fn acquire(self: &Arc<Self>, want: Value, tries: u32) -> Result<Value, Diag> {
-        let reply = self.rpc("lease/acquire", want.clone()).await?;
-        let raced = reply["error"]["data"]["code"] == "busy" && want.get("count").is_some();
-        match (raced, tries) {
-            (true, 2..) => Box::pin(self.acquire(want, tries - 1)).await,
-            _ => Ok(reply),
         }
     }
 
