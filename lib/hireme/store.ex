@@ -69,7 +69,9 @@ defmodule Hireme.Store do
   @impl true
   def savepoint(:open), do: query!("SAVEPOINT op", [])
   def savepoint(:keep), do: query!("RELEASE op", [])
-  def savepoint(:undo), do: query!("ROLLBACK TO op; RELEASE op", [])
+  # One statement per query: a prepared query runs its first statement only.
+  def savepoint(:undo),
+    do: with(:ok <- query!("ROLLBACK TO op", []), do: query!("RELEASE op", []))
 
   @impl true
   def rev(account), do: one!("SELECT desk_rev FROM accounts WHERE id = ?", [account])
