@@ -188,6 +188,59 @@ defmodule HiremeWeb.GateTest do
     refute_received {:init, _}
   end
 
+  describe "the gate binary as a Port" do
+    # A stand-in gate: it records its socket, each stdin line, and EOF, then
+    # exits when told to.
+    defp stand_in(dir) do
+      script =
+        ~s(echo "$GATE_SOCKET" >> started; while read l; do echo "$l" >> lines; ) <>
+          ~s([ "$l" = die ] && exit 3; done; echo eof >> lines)
+
+      [cmd: ["sh", "-c", script], cd: dir]
+    end
+
+    defp eventually(fun, tries \\ 100) do
+      cond do
+        fun.() -> :ok
+        tries == 0 -> flunk("condition never held")
+        true -> Process.sleep(30) && eventually(fun, tries - 1)
+      end
+    end
+
+    defp read(dir, file), do: File.read(Path.join(dir, file)) |> elem(1) |> to_string()
+
+    setup %{path: path} do
+      stop_supervised!(Gate)
+      dir = Path.join(System.tmp_dir!(), "gate-bin-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      start_supervised!({Gate, [socket: path, session: Echo] ++ stand_in(dir)})
+      %{dir: dir}
+    end
+
+    test "starts with the socket, takes commands, and sees EOF when the node stops it",
+         %{dir: dir, path: path} do
+      eventually(fn -> read(dir, "started") == path <> "\n" end)
+      Gate.reload()
+      Gate.stats()
+      eventually(fn -> read(dir, "lines") == "reload\nstats\n" end)
+      stop_supervised!(Gate)
+      eventually(fn -> read(dir, "lines") == "reload\nstats\neof\n" end)
+    end
+
+    @tag :capture_log
+    test "a gate that exits is started again; the bridge keeps its sessions",
+         %{dir: dir, path: path} do
+      eventually(fn -> read(dir, "started") != "" end)
+      s = dial(path)
+      assert {:ok, <<0x02>>} = :gen_tcp.recv(s, 0, 1000)
+      send(HiremeWeb.Gate.Binary, {:command, "die"})
+      eventually(fn -> read(dir, "started") == String.duplicate(path <> "\n", 2) end)
+      :ok = :gen_tcp.send(s, <<0x12, 0::32>>)
+      assert_receive {:event, {:fin, 0}}
+    end
+  end
+
   defp encode({:stream, id}), do: <<0x10, id::32>>
   defp encode({:data, id, b}), do: <<0x11, id::32, b::binary>>
   defp encode({:fin, id}), do: <<0x12, id::32>>

@@ -27,8 +27,11 @@
 //! the BEAM opens for bulk (the BOOT, sent as the session is accepted), which
 //! always yield to the client's streams. The gate accepts no uni streams.
 //!
-//! The certificate is reloaded on SIGHUP and whenever the PEM files
-//! change on disk, so an ACME renewal needs no restart.
+//! The BEAM runs the gate as a Port and talks to it on stdin, one command
+//! per line: `reload` rereads the certificate (it is also reloaded whenever
+//! the PEM files change on disk, so an ACME renewal needs no restart) and
+//! `stats` prints the counters. When stdin closes, the BEAM is gone and the
+//! gate shuts down.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -37,10 +40,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{sleep, timeout};
 use wtransport::endpoint::{IncomingSession, SessionRequest};
 use wtransport::quinn::congestion::CubicConfig;
@@ -148,7 +151,7 @@ impl Settings {
     }
 }
 
-/// In-memory counters, printed on SIGUSR1 and never written anywhere.
+/// In-memory counters, printed on `stats` and never written anywhere.
 #[derive(Default)]
 struct Counters {
     incoming: AtomicU64,
@@ -296,15 +299,19 @@ async fn main() {
         per_ip: Mutex::new(HashMap::new()),
         counters: Counters::default(),
     });
-    tokio::spawn(reload(gate.clone(), endpoint.clone()));
-    tokio::spawn(stats(gate.clone()));
+    let reload_now = Arc::new(Notify::new());
+    tokio::spawn(reload(gate.clone(), endpoint.clone(), reload_now.clone()));
 
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut commands = BufReader::new(tokio::io::stdin()).lines();
     loop {
         tokio::select! {
             incoming = endpoint.accept() => admit(&gate, incoming),
-            _ = term.recv() => break,
-            _ = tokio::signal::ctrl_c() => break,
+            line = commands.next_line() => match line.ok().flatten().as_deref() {
+                None => break,
+                Some("reload") => reload_now.notify_one(),
+                Some("stats") => stats(&gate),
+                Some(other) => eprintln!("hireme-gate: unknown command {other:?}"),
+            },
         }
     }
     endpoint.close(VarInt::from_u32(0), b"shutdown");
@@ -338,12 +345,11 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
     });
 }
 
-async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>) {
-    let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>, now: Arc<Notify>) {
     let mut stamp = cert_stamp(&gate.settings);
     loop {
         tokio::select! {
-            _ = hup.recv() => {}
+            _ = now.notified() => {}
             _ = sleep(Duration::from_secs(300)) => {
                 let now = cert_stamp(&gate.settings);
                 if now == stamp { continue; }
@@ -363,19 +369,16 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
     }
 }
 
-async fn stats(gate: Arc<Gate>) {
-    let mut usr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()).unwrap();
-    while usr1.recv().await.is_some() {
-        let c = &gate.counters;
-        eprintln!(
-            "hireme-gate: incoming={} retried={} refused_ip={} refused_origin={} refused_beam={} accepted={} ready={} deadline={} overflow={} bytes_in={} bytes_out={} handshakes={} ips={}",
-            c.incoming.load(Relaxed), c.retried.load(Relaxed), c.refused_ip.load(Relaxed),
-            c.refused_origin.load(Relaxed), c.refused_beam.load(Relaxed), c.accepted.load(Relaxed),
-            c.ready.load(Relaxed), c.deadline.load(Relaxed), c.overflow.load(Relaxed),
-            c.bytes_in.load(Relaxed), c.bytes_out.load(Relaxed), gate.handshakes.load(Relaxed),
-            gate.per_ip.lock().unwrap().len(),
-        );
-    }
+fn stats(gate: &Gate) {
+    let c = &gate.counters;
+    eprintln!(
+        "hireme-gate: incoming={} retried={} refused_ip={} refused_origin={} refused_beam={} accepted={} ready={} deadline={} overflow={} bytes_in={} bytes_out={} handshakes={} ips={}",
+        c.incoming.load(Relaxed), c.retried.load(Relaxed), c.refused_ip.load(Relaxed),
+        c.refused_origin.load(Relaxed), c.refused_beam.load(Relaxed), c.accepted.load(Relaxed),
+        c.ready.load(Relaxed), c.deadline.load(Relaxed), c.overflow.load(Relaxed),
+        c.bytes_in.load(Relaxed), c.bytes_out.load(Relaxed), gate.handshakes.load(Relaxed),
+        gate.per_ip.lock().unwrap().len(),
+    );
 }
 
 // ---------------------------------------------------------------- bridge

@@ -263,7 +263,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes; the desk page (ticket, gate, scope and schema metas) and the reconnect ticket |
 | `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, an agent's block and its lane; the `/wire` WebSocket carrier |
-| `lib/hireme_web/gate.ex` | The BEAM end of the gate's Unix socket; hosts the Session in the connection process |
+| `lib/hireme_web/gate.ex` | The gate's supervisor: its Unix socket, the gate binary as a Port, and the Session in each connection process |
 | `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, sign-out |
 | `lib/hireme_web/sign_in.ex` | The sign-in pages: mailed links, GitHub and X over OAuth 2.0 with PKCE, adding a way in |
 | `lib/hireme_web/account.ex` | The Account page over the session: its tables and commands, step-up and enrolment ceremonies |
