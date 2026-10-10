@@ -87,16 +87,26 @@ defmodule Hireme.Letterbox do
   def acquire(want) do
     account = Repo.account_id!()
     numbered = Repo.all(from j in Job, order_by: j.no, select: {j.no, j.id})
-    n = numbered |> List.last({0, nil}) |> elem(0)
-    held = held(account, n)
+    pick(want, account, numbered, numbered |> List.last({0, nil}) |> elem(0))
+  end
 
-    with {:ok, from, to, warnings} <- window(want, n, held),
+  # A size names no entries, so losing the block it picked to an agent
+  # claiming at the same moment is not a refusal: pick again among what is
+  # still free. Each loss is another agent's gain, so this ends.
+  defp pick(want, account, numbered, n) do
+    with {:ok, from, to, warnings} <- window(want, n, held(account, n)),
          jobs = for({no, id} <- numbered, no in from..to//1, do: {no, id}),
          :ok <- claim(account, from, to, jobs, n) do
       ids = Enum.map(jobs, &elem(&1, 1))
       Ops.touch(account, ids)
       block = %{from: from, to: to, lane: from, jobs: jobs, held: Map.new(ids, &{&1, true})}
       {:ok, block, warnings}
+    else
+      {:error, %{code: :busy, held: [_ | _]}} when elem(want, 0) == :count ->
+        pick(want, account, numbered, n)
+
+      refused ->
+        refused
     end
   end
 

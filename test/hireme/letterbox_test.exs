@@ -55,13 +55,15 @@ defmodule Hireme.LetterboxTest do
     Enum.each([a, b, c], &let_go/1)
   end
 
-  test "agents racing for the same free run never both win it" do
-    jobs(16)
+  # A size names no entries, so a lost race is the desk's to resolve: with
+  # room for ten blocks, ten of twelve racers win one and two hear "none left".
+  test "agents racing for blocks by size all get one while one is free" do
+    jobs(40)
     account_id = Repo.account_id!()
     parent = self()
 
     racers =
-      for _ <- 1..8 do
+      for _ <- 1..12 do
         Task.async(fn ->
           Repo.put_account(account_id)
           receive do: (:go -> send(parent, {self(), Letterbox.acquire({:count, 4})}))
@@ -74,15 +76,18 @@ defmodule Hireme.LetterboxTest do
     wins = for {pid, {:ok, block, _}} <- answers, do: {pid, Map.keys(block.held)}
     claimed = Enum.flat_map(wins, &elem(&1, 1))
 
-    assert wins != []
-    assert length(claimed) == length(Enum.uniq(claimed))
+    assert length(wins) == 10
+    assert length(claimed) == 40 and length(Enum.uniq(claimed)) == 40
 
     for {pid, jobs} <- wins,
         job <- jobs,
         do: assert([{^pid, _}] = Registry.lookup(Hireme.Letterbox.Registry, {:job, job}))
 
     for {_pid, answer} <- answers,
-        do: assert(match?({:ok, _, _}, answer) or match?({:error, %{code: :busy}}, answer))
+        do:
+          assert(
+            match?({:ok, _, _}, answer) or match?({:error, %{code: :busy, free: nil}}, answer)
+          )
 
     Enum.each(racers, &send(&1.pid, :done))
     Enum.each(racers, &Task.await/1)
