@@ -14,6 +14,7 @@ use wire::schema::{self, col, table};
 
 use crate::desk::Desk;
 use crate::store::{sort_u32, sort_usize};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::derive::{BANDS, FRESHNESS, GATES, STATUSES};
 use crate::{heat, keywords, predict};
 
@@ -305,6 +306,19 @@ impl Desk {
             if desc { o.reverse() } else { o }
         });
         rows
+    }
+
+    /// The heat chart, as the derive left it: its companies, then its
+    /// vendors, the rows `keep` keeps.
+    fn heat_chart(&self, j: &mut Json, keep: impl Fn(usize) -> bool) {
+        let ht = table::HEAT_ROWS;
+        for (name, group) in [("companies", 0), ("vendors", 1)] {
+            let rows = (0..self.rows(ht)).filter(|&r| self.vu32(ht, col::heat_rows::GROUP, r) == group && keep(r));
+            j.key(name);
+            j.raw("[");
+            self.rows_json(j, ht, rows, &["key", "label", "load", "cap", "ratio", "n", "cooldown_days"]);
+            j.raw("]");
+        }
     }
 
     /// HiremeWeb.JSON.focus/1 for one application, or "null" when it is unknown.
@@ -652,7 +666,7 @@ impl Desk {
         options(&mut j, "channels", NET_CHANNELS);
 
         j.raw("},\"heat\":{");
-        self.heat_chart(&mut j, ["", ""]);
+        self.heat_chart(&mut j, |_| true);
         j.raw("}}");
         String::from_utf8(j.0).unwrap_or_else(|_| String::from("null"))
     }
@@ -708,10 +722,13 @@ fn options(j: &mut Json, name: &str, keys: &[&str]) {
 }
 
 // ---- the board as an agent reads it --------------------------------------
+//
+// Native only: hireme-mcp's tools read these; the browser draws the board.
 
 /// The top bar's filters by name: a band, stage, status or heat state by
 /// key and a batch by code ("" for any), a minimum score (-1 for none),
 /// the search, and how many cards.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Query<'a> {
     pub band: &'a str,
     pub stage: &'a str,
@@ -723,14 +740,18 @@ pub struct Query<'a> {
     pub limit: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const HEAT_STATES: [&str; 4] = ["cool", "warm", "hot", "blocked"];
+#[cfg(not(target_arch = "wasm32"))]
 const CARD: &[&str] = &["heat", "stage_on", "next_due", "load_pct", "cooldown", "leased", "company", "role", "location", "next_action", "cv_label", "load", "cap", "ats_vendor", "ratio"];
 
 /// `key`'s index in `keys`: -1 for any, -2 for one it lacks.
+#[cfg(not(target_arch = "wasm32"))]
 fn ix(keys: &[&str], key: &str) -> i32 {
     if key.is_empty() || key == "all" { -1 } else { keys.iter().position(|k| *k == key).map_or(-2, |i| i as i32) }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Desk {
     /// The filtered board's cards in board order, at most `limit`: as
     /// list_applications reads them, or as recommend_applications does
@@ -822,7 +843,13 @@ impl Desk {
     pub fn heat_json(&mut self, company: &str, ats: &str) -> String {
         self.derive();
         let mut j = Json(Vec::from(&b"{"[..]));
-        self.heat_chart(&mut j, [company, ats]);
+        let ht = table::HEAT_ROWS;
+        let needles = [heat::downcase(company), heat::downcase(ats)];
+        let holds = |r, c, n: &str| heat::downcase(core::str::from_utf8(self.vstr(ht, c, r)).unwrap_or("")).contains(n);
+        self.heat_chart(&mut j, |r| {
+            let n = &needles[self.vu32(ht, col::heat_rows::GROUP, r).min(1) as usize];
+            holds(r, col::heat_rows::KEY, n) || holds(r, col::heat_rows::LABEL, n)
+        });
         j.raw(",\"note\":\"FIRE HOLD. Heat gates the queue. It does not submit.\"}");
         String::from_utf8(j.0).unwrap_or_default()
     }
@@ -840,17 +867,4 @@ impl Desk {
         String::from_utf8(j.0).unwrap_or_default()
     }
 
-    /// The heat chart, as the derive left it: companies, then vendors, each
-    /// to those whose key or label holds its needle (any case; "" for all).
-    fn heat_chart(&self, j: &mut Json, needles: [&str; 2]) {
-        let ht = table::HEAT_ROWS;
-        for ((name, group), needle) in [("companies", 0), ("vendors", 1)].into_iter().zip(needles.map(heat::downcase)) {
-            let has = |r, c| heat::downcase(core::str::from_utf8(self.vstr(ht, c, r)).unwrap_or("")).contains(needle.as_str());
-            let rows = (0..self.rows(ht)).filter(|&r| self.vu32(ht, col::heat_rows::GROUP, r) == group && (has(r, col::heat_rows::KEY) || has(r, col::heat_rows::LABEL)));
-            j.key(name);
-            j.raw("[");
-            self.rows_json(j, ht, rows, &["key", "label", "load", "cap", "ratio", "n", "cooldown_days"]);
-            j.raw("]");
-        }
-    }
 }
