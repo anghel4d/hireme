@@ -10,13 +10,8 @@
 //! given back with `release` or when the session ends. Writes to those
 //! applications go up as the binary ops the browser sends, and Elixir
 //! decides them. Every tool called with `{}` prints its call shape, and
-//! every refusal reads like a rustc diagnostic (`diag.rs`).
-//!
-//! Configuration is read from the environment: `HIREME_API_KEY`
-//! (required); `HIREME_WT_URL` (e.g. `https://host/wt`); `HIREME_WS_URL`
-//! (e.g. `wss://host`, the fallback); `HIREME_TRANSPORT` = `auto` | `wt`
-//! | `ws`; and, for a development gate's self-signed certificate,
-//! `HIREME_WT_CERT_SHA256` or `HIREME_WT_CERT_SHA256_FILE`.
+//! every refusal reads like a rustc diagnostic (`diag.rs`). Configuration:
+//! the README's agent section.
 
 // A diagnostic is a tool's whole error answer, built once per refusal: its size
 // is not on any hot path.
@@ -61,12 +56,6 @@ struct Block {
     jobs: Vec<(u32, u32)>,
 }
 
-impl Block {
-    fn holds(&self, job: u32) -> bool {
-        self.jobs.iter().any(|&(_, j)| j == job)
-    }
-}
-
 /// A tool's answer: a value and any warnings, or one diagnostic.
 type Reply = Result<(Value, Vec<Diag>), Diag>;
 type Outcome = Result<Value, String>;
@@ -85,8 +74,6 @@ struct Hub {
     events: Mutex<HashMap<u32, VecDeque<Value>>>,
     /// Op ids are the account's ledger keys: this run's random high half, then a count.
     next_op: AtomicU64,
-    frames: AtomicU64,
-    delivered: AtomicU64,
 }
 
 #[tokio::main]
@@ -122,8 +109,6 @@ async fn main() {
         block: Mutex::new(None),
         events: Mutex::new(HashMap::new()),
         next_op: AtomicU64::new(run_id() << 32 | 1),
-        frames: AtomicU64::new(0),
-        delivered: AtomicU64::new(0),
     });
 
     // Connect while the agent is still initializing, so the desk is
@@ -214,17 +199,19 @@ impl Hub {
         match (name, blank) {
             ("hireme", true) => Ok((json!(self.overview()), vec![])),
             ("hireme", false) => explained(a),
-            ("lease", true) => Ok((json!(self.usage_with_next("lease")), vec![])),
+            (
+                "lease" | "application" | "set_stage" | "set_next_action" | "set_score"
+                | "tailor_line" | "open_cv_generation" | "can_apply" | "gym_log" | "gym_set_target"
+                | "net_log" | "net_set_lane",
+                true,
+            ) => Ok((json!(usage(name)), vec![])),
             ("lease", false) => self.lease(a).await,
             ("release", _) => self.release().await,
             ("block", _) => self.block_rows(),
             ("letterbox_events", _) => Ok((self.drain_events(a), vec![])),
-            (_, true) if needs_arguments(name) => Ok((json!(usage(name)), vec![])),
             ("application", false) => {
                 let (job, _) = self.target(name, a)?;
-                self.with_desk(|d| json_text(&d.focus_json(job)))
-                    .map(|v| (v, vec![]))
-                    .map_err(|e| Diag::error("internal", e))
+                self.read(|d| json_text(&d.focus_json(job)))
             }
             ("set_stage", false) => {
                 self.stage(a)?;
@@ -355,10 +342,6 @@ NEXT: {next}"
         )
     }
 
-    fn usage_with_next(&self, tool: &str) -> String {
-        format!("{}\n\nNEXT: {}", usage(tool), self.next_lease())
-    }
-
     /// The lease call to make now: the desk picks a free block of the size.
     fn next_lease(&self) -> String {
         format!("lease {{\"count\":{BLOCK}}}")
@@ -461,7 +444,7 @@ NEXT: {next}"
     /// The job a call names, by `job_id` or `entry`, and its entry.
     fn target(&self, tool: &str, a: &Value) -> Result<(u32, u32), Diag> {
         let ids = self.with_desk(entries);
-        let job = a.get("job_id").or(a.get("role_id")).and_then(int);
+        let job = a.get("job_id").and_then(int);
         let entry = a.get("entry").and_then(int);
         let found = ids
             .iter()
@@ -503,7 +486,7 @@ NEXT: {next}"
         let (job, entry) = self.target(tool, a)?;
         let block = self.block.lock().unwrap().clone();
         match &block {
-            Some(b) if b.holds(job) => {}
+            Some(b) if b.jobs.iter().any(|&(_, j)| j == job) => {}
             Some(b) => {
                 return Err(Diag::error("leased", format!("entry {entry} is not in your block {}..{}", b.from, b.to))
                     .call(tool, a)
@@ -654,7 +637,6 @@ NEXT: {next}"
 
     /// One frame from the server, in order.
     fn frame(&self, f: wire::Frame<'_>) {
-        self.frames.fetch_add(1, Ordering::Relaxed);
         match f.header.kind {
             frame::BOOT | frame::PATCH | frame::TICK => {
                 if f.header.kind == frame::PATCH {
@@ -746,7 +728,7 @@ NEXT: {next}"
         body.extend_from_slice(&[0; 4]);
         body.extend_from_slice(&json);
         match self
-            .ask(RPC_KEY | id, carrier::frame(frame::RPC, 0, &body))
+            .ask(RPC_KEY | id, carrier::frame(frame::RPC, 0, 0, &body))
             .await?
         {
             Answer::Rpc(v) => Ok(v),
@@ -812,7 +794,6 @@ NEXT: {next}"
 
     /// A desk event for the block: a log notification, and kept for polling.
     fn notify(&self, job: u32, event: Value) {
-        self.delivered.fetch_add(1, Ordering::Relaxed);
         let mut events = self.events.lock().unwrap();
         let q = events.entry(job).or_default();
         if q.len() == EVENTS_KEPT {
@@ -828,7 +809,7 @@ NEXT: {next}"
 
     fn drain_events(&self, a: &Value) -> Value {
         let mut events = self.events.lock().unwrap();
-        let jobs: Vec<u32> = match a.get("job_id").or(a.get("role_id")).and_then(int) {
+        let jobs: Vec<u32> = match a.get("job_id").and_then(int) {
             Some(job) => vec![job as u32],
             None => events.keys().copied().collect(),
         };
@@ -1123,14 +1104,7 @@ fn verdict(d: &mut Desk, job: u32) -> Outcome {
 }
 
 fn lanes(d: &mut Desk, which: &str) -> Outcome {
-    let all = json_text(&d.lanes_json())?;
-    let mut lane = all[which].clone();
-    lane["note"] = json!(match which {
-        "gym" =>
-            "Gym score is weekly conditioning pace (0–100), not Life-EV score_100. FIRE HOLD — does not submit.",
-        _ => "Not CRM. Broadside Observer + shipped work. FIRE HOLD — does not submit.",
-    });
-    Ok(lane)
+    Ok(json_text(&d.lanes_json())?[which].take())
 }
 
 /// One of the kernel's composed views, the browser's own JSON.
@@ -1148,7 +1122,6 @@ fn run_id() -> u64 {
     (t ^ (u64::from(std::process::id()) << 16)) & 0xFFFF_FFFF
 }
 
-/// `job_id`, or as the distillation packs call it, `role_id`.
 fn text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -1208,12 +1181,8 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
         "capabilities": {"tools": {"listChanged": false}, "logging": {}},
         "serverInfo": {"name": "hireme-mcp", "version": env!("CARGO_PKG_VERSION")},
-        "instructions": "hireme is a job-search desk. Start with hireme {}: it says where this agent \
-            stands and what to call next. This agent holds one lease, a block of consecutive \
-            applications (lease {\"count\":16}), works through it (block {}, application, set_*, \
-            tailor_line), and releases it (release {}). Any tool called with {} prints its call \
-            shape; refusals read like rustc diagnostics, and hireme {\"explain\":\"<code>\"} gives the \
-            long form. FIRE HOLD: nothing here submits an application."
+        "instructions": "hireme is a job-search desk. Start with hireme {}: it says where this \
+            agent stands, how to work, and what to call next."
     })
 }
 
@@ -1309,24 +1278,6 @@ Call shape: net_set_lane {\"url\":\"https://...\"}",
 Call shape: letterbox_events {}  |  {\"job_id\":J}",
         _ => "No such tool: hireme {} lists them.",
     }
-}
-
-/// Tools whose blank call has nothing to act on, so it prints their call shape.
-fn needs_arguments(tool: &str) -> bool {
-    matches!(
-        tool,
-        "application"
-            | "set_stage"
-            | "set_next_action"
-            | "set_score"
-            | "tailor_line"
-            | "open_cv_generation"
-            | "can_apply"
-            | "gym_log"
-            | "gym_set_target"
-            | "net_log"
-            | "net_set_lane"
-    )
 }
 
 fn tools(d: &mut Desk) -> Vec<Value> {

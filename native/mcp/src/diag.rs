@@ -262,7 +262,9 @@ mod tests {
 
     #[test]
     fn every_code_a_diagnostic_names_has_a_long_form() {
-        for code in [
+        // Every wire refusal, so a new one fails here until it is explained,
+        // and the lease's and the session's own codes.
+        let lease = [
             "busy",
             "empty",
             "held",
@@ -270,19 +272,9 @@ mod tests {
             "count_capped",
             "size",
             "align",
-            "leased",
-            "lineage_busy",
-            "cooldown",
-            "heat",
-            "fire_hold",
-            "not_additive",
-            "argument",
-            "not_found",
-            "batch",
-            "invalid",
-            "internal",
             "session",
-        ] {
+        ];
+        for code in kernel::schema::REFUSALS.iter().map(|r| r.1).chain(lease) {
             assert!(explain(code).is_some_and(|t| t.starts_with(code)), "{code}");
         }
         assert!(explain("E0382").is_none());
