@@ -1,6 +1,7 @@
 defmodule HiremeWeb.AccountTest do
   use Hireme.DataCase, async: false
 
+  import Hireme.Fixtures
   alias Hireme.Accounts
   alias Hireme.ApiKeys
   alias Hireme.Audit
@@ -22,42 +23,8 @@ defmodule HiremeWeb.AccountTest do
 
   defp ctx(account, s), do: %{account_id: account.id, session_id: s.id, ip: "198.51.100.9"}
 
-  # The tables as rows of named values, read straight off the wire layout
-  # (`u16 id | u16 ncols | u32 nrows | col*`), u32 and str columns only.
-  defp read(account, s) do
-    names = %{60 => :acct, 61 => :keys, 62 => :sessions, 63 => :identities, 64 => :factors}
-    bin = IO.iodata_to_binary(Account.tables(account.id, s.id))
-    for {id, rows} <- tables(bin), into: %{}, do: {names[id], rows}
-  end
-
-  defp tables(<<>>), do: []
-
-  defp tables(<<id::little-16, ncols::little-16, nrows::little-32, rest::binary>>) do
-    {cols, rest} =
-      Enum.map_reduce(1..ncols//1, rest, fn _,
-                                            <<cid::little-16, ty, 0, len::little-32, r::binary>> ->
-        <<data::binary-size(len), r::binary>> = r
-        pad = rem(8 - rem(len, 8), 8)
-        <<_::binary-size(pad), r::binary>> = r
-        {{cid, column(ty, data, nrows)}, r}
-      end)
-
-    rows =
-      for i <- 0..(nrows - 1)//1, do: Map.new(cols, fn {cid, vs} -> {cid, Enum.at(vs, i)} end)
-
-    [{id, rows} | tables(rest)]
-  end
-
-  defp column(1, data, _n), do: for(<<v::little-32 <- data>>, do: v)
-
-  defp column(2, data, n) do
-    <<offs::binary-size((n + 1) * 4), text::binary>> = data
-    offs = for <<o::little-32 <- offs>>, do: o
-
-    offs
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.map(fn [a, b] -> binary_part(text, a, b - a) end)
-  end
+  # The account's tables as the session pushes them.
+  defp read(account, s), do: tables(IO.iodata_to_binary(Account.tables(account.id, s.id)))
 
   # Another tab of the same account, listening the way a wire session does.
   defp other_tab(account) do
@@ -190,11 +157,11 @@ defmodule HiremeWeb.AccountTest do
     s = session(account)
     {:ok, _} = ApiKeys.create("visible")
     before = read(account, s)
-    assert [%{3 => me, 5 => 0}] = before.acct
-    assert me == s.id
-    assert Enum.map(before.keys, & &1[3]) == ["visible"]
-    assert before.factors == []
-    assert Enum.any?(before.sessions, &(&1[1] == s.id))
+    me = s.id
+    assert [%{me: ^me, enrolled: 0}] = named(before, :acct)
+    assert Enum.map(named(before, :acct_keys), & &1.name) == ["visible"]
+    assert named(before, :acct_factors) == []
+    assert Enum.any?(named(before, :acct_sessions), &(&1.id == s.id))
 
     assert {:ok, %{secret: b32}, :same} = Account.call("account/begin_totp", %{}, ctx(account, s))
     secret = Base.decode32!(b32, padding: false)
@@ -209,8 +176,8 @@ defmodule HiremeWeb.AccountTest do
              )
 
     after_enrol = read(account, s)
-    assert [%{2 => "totp", 3 => "phone"}] = after_enrol.factors
-    assert [%{4 => left, 5 => 1}] = after_enrol.acct
+    assert [%{kind: "totp", name: "phone"}] = named(after_enrol, :acct_factors)
+    assert [%{recovery_left: left, enrolled: 1}] = named(after_enrol, :acct)
     assert left == length(codes)
 
     # Enrolment proved the factor: this session is fresh. A stale one must step up.

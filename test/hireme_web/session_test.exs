@@ -43,13 +43,14 @@ defmodule HiremeWeb.SessionTest do
     )
   end
 
-  defp frames(id) do
+  # Every frame written to stream `id` so far, in order.
+  defp all_out(id \\ 0) do
     receive do
       {:out, ^id, bin} ->
         {:ok, frames, ""} = Packet.split(bin)
-        frames
+        frames ++ all_out(id)
     after
-      1_000 -> flunk("no frame on stream #{inspect(id)}")
+      50 -> []
     end
   end
 
@@ -92,7 +93,7 @@ defmodule HiremeWeb.SessionTest do
     assert [
              {:nack, 0, _,
               <<42::little-64, code::8, 0::8, len::little-16, msg::binary-size(len), _::binary>>}
-           ] = frames(0)
+           ] = all_out()
 
     assert code == Packet.refusal_code(:argument)
     assert msg =~ "stage"
@@ -108,54 +109,12 @@ defmodule HiremeWeb.SessionTest do
 
     {:ok, s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
     s = drain(s)
-
-    first =
-      frames(0) ++
-        receive do
-          {:out, 0, b} -> elem(Packet.split(b), 1)
-        after
-          100 -> []
-        end
-
-    assert Enum.any?(first, &match?({:ack, _, _, <<43::little-64>>}, &1))
+    assert Enum.any?(all_out(), &match?({:ack, _, _, <<43::little-64>>}, &1))
 
     {:ok, s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
     answered(s)
-    assert [{:ack, 0, _, <<43::little-64>>}] = frames(0)
+    assert [{:ack, 0, _, <<43::little-64>>}] = all_out()
     refute_receive {:ops_delta, _, _}, 100
-  end
-
-  test "a snapshot at the current rev resumes with one PATCH; garbage says bye", %{
-    account: account
-  } do
-    job = job(profile())
-    s = open(account)
-    {:ok, s} = Session.event({:data, 0, hello()}, s)
-    s = drain(s)
-    [{:boot, _, _, _} | _] = all_out()
-    {:ok, s} = Session.event({:data, 0, op(44, 2, job.id, ["Call", ""])}, s)
-    s = drain(s)
-    rev = s.rev
-    assert rev > 0
-
-    _ = all_out()
-    s2 = open(account)
-    {:ok, _} = Session.event({:data, 0, hello(rev)}, s2)
-    assert [{:patch, 0x02, ^rev, _clock_and_account}, {:ticket, 0, ^rev, _}] = all_out()
-
-    assert {:stop, :normal, _} = Session.event({:data, 0, <<12::little-32, 0::96>>}, s)
-    assert [{:bye, 0, _, _}] = all_out()
-  end
-
-  # Every frame written so far, in order.
-  defp all_out do
-    receive do
-      {:out, 0, bin} ->
-        {:ok, frames, ""} = Packet.split(bin)
-        frames ++ all_out()
-    after
-      50 -> []
-    end
   end
 
   test "tickets are single use and name a live session", %{account: account} do
@@ -167,18 +126,14 @@ defmodule HiremeWeb.SessionTest do
     assert :error = Session.redeem("garbage")
   end
 
-  test "the websocket carrier admits a live cookie session", %{account: account} do
+  test "the websocket carrier admits a live cookie session, and an agent only as far as HELLO",
+       %{account: account} do
     {token, session} = Hireme.Accounts.start_session(account)
     Hireme.Repo.put_account(nil)
     info = %{connect_info: %{session: %{HiremeWeb.Auth.session_key() => token}}}
     assert {:ok, %{account_id: id, session_id: sid}} = HiremeWeb.WireSocket.connect(info)
     assert {id, sid} == {account.id, session.id}
-    # Asking for raw tables at upgrade pushes the BOOT before any HELLO.
-    raw = Map.put(info, :params, %{"raw" => "1", "rev" => "0", "cid" => "4"})
-    {:ok, meta} = HiremeWeb.WireSocket.connect(raw)
-    assert {:ok, %{client_id: 4}} = HiremeWeb.WireSocket.init(meta)
-    assert_received {Session, :early_boot, 0}
-    # No cookie: an agent, admitted only as far as its API-key HELLO.
+
     assert {:ok, %{origin: "", path: "/wt"}} =
              HiremeWeb.WireSocket.connect(%{connect_info: %{session: %{}}})
   end
@@ -203,40 +158,6 @@ defmodule HiremeWeb.SessionTest do
     assert Enum.any?(out, &match?({:ack, _, _, <<53::little-64>>}, &1))
   end
 
-  # ---- Raw mode (round two): the client derives every view ----
-
-  defp raw_hello(snapshot \\ 0) do
-    IO.iodata_to_binary(
-      Packet.frame(
-        :hello,
-        0,
-        <<0::little-16, 0::48, snapshot::little-64, 7::little-32, 1::little-32>>
-      )
-    )
-  end
-
-  defp inflate({kind, flags, rev, body}) when Bitwise.band(flags, 1) == 1 do
-    <<_raw::little-32, z_len::little-32, rest::binary>> = body
-    <<z::binary-size(^z_len), _::binary>> = rest
-    {kind, Bitwise.band(flags, 0xFE), rev, :zlib.unzip(z)}
-  end
-
-  defp inflate(frame), do: frame
-
-  defp table_ids(body), do: table_ids(body, [])
-  defp table_ids(<<>>, acc), do: Enum.reverse(acc)
-
-  defp table_ids(<<id::little-16, ncols::little-16, _n::little-32, rest::binary>>, acc) do
-    rest =
-      Enum.reduce(1..ncols//1, rest, fn _, <<_::16, _::8, _::8, size::little-32, rest::binary>> ->
-        skip = size + rem(8 - rem(size, 8), 8)
-        <<_::binary-size(^skip), rest::binary>> = rest
-        rest
-      end)
-
-    table_ids(rest, [id | acc])
-  end
-
   test "a raw hello boots raw tables, account tables and the clock",
        %{account: account} do
     # A batch written before the sequencer starts is in its first read.
@@ -250,14 +171,14 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile(), %{listing: "Elixir, Rust and WebAssembly."})
 
     s = open(account)
-    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    {:ok, s} = Session.event({:data, 0, hello()}, s)
     s = drain(s)
-    [{:boot, 0x02, rev, body}, {:patch, 0, rev2, listings} | _] = Enum.map(all_out(), &inflate/1)
+    [{:boot, 0x02, rev, body}, {:patch, 0, rev2, listings} | _] = Enum.map(all_out(), &plain/1)
     # The listings follow the board in their own frame, at the same rev.
     assert rev2 == rev
     refute body =~ "Elixir, Rust and WebAssembly."
     assert listings =~ "Elixir, Rust and WebAssembly."
-    ids = table_ids(body)
+    ids = Map.keys(tables(body))
     for t <- [:job_apps, :profiles, :clock, :acct, :stages], do: assert(Packet.table_id(t) in ids)
     refute Packet.table_id(:cards) in ids
 
@@ -266,18 +187,18 @@ defmodule HiremeWeb.SessionTest do
     out = all_out()
     [{:patch, 0, prev, pbody} | _] = Enum.filter(out, &match?({:patch, _, _, _}, &1))
     assert prev > rev
-    assert Packet.table_id(:job_apps) in table_ids(pbody)
     # Only the columns the write changed travel, never the listing.
-    assert byte_size(pbody) < 600
+    assert [%{next_action: "Call", listing: nil}] = named(tables(pbody), :job_apps)
 
     assert Enum.find_index(out, &match?({:patch, _, _, _}, &1)) <
              Enum.find_index(out, &match?({:ack, _, _, <<61::little-64>>}, &1))
   end
 
-  test "a raw resume replays only the revisions since the snapshot", %{account: account} do
+  test "a resume replays only the revisions since the snapshot; garbage says bye",
+       %{account: account} do
     job = job(profile())
     s = open(account)
-    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    {:ok, s} = Session.event({:data, 0, hello()}, s)
     s = drain(s)
     [{:boot, _, rev0, _} | _] = all_out()
     {:ok, s} = Session.event({:data, 0, op(62, 2, job.id, ["One", ""])}, s)
@@ -285,8 +206,7 @@ defmodule HiremeWeb.SessionTest do
     s = drain(s)
     _ = all_out()
 
-    s2 = open(account)
-    {:ok, _} = Session.event({:data, 0, raw_hello(rev0)}, s2)
+    {:ok, _} = Session.event({:data, 0, hello(rev0)}, open(account))
     out = all_out()
     patches = for {:patch, _, r, _} <- out, do: r
     assert List.last(patches) == s.rev
@@ -296,12 +216,21 @@ defmodule HiremeWeb.SessionTest do
              Enum.reverse(Enum.filter(out, &match?({:patch, _, _, _}, &1)))
 
     refute Enum.any?(out, &match?({:boot, _, _, _}, &1))
+
+    # At the current rev there is nothing to replay: one PATCH, then the ticket.
+    rev = s.rev
+    {:ok, _} = Session.event({:data, 0, hello(rev)}, open(account))
+    assert [{:patch, 0x02, ^rev, _}, {:ticket, 0, ^rev, _}] = all_out()
+
+    # A frame of no schema ends the session with BYE.
+    assert {:stop, :normal, _} = Session.event({:data, 0, <<12::little-32, 0::96>>}, s)
+    assert [{:bye, 0, _, _}] = all_out()
   end
 
   test "account commands ride the session as RPC, tables before the reply", %{account: account} do
     {:ok, %{key: key}} = Hireme.ApiKeys.create("bench")
     s = open(account)
-    {:ok, s} = Session.event({:data, 0, raw_hello()}, s)
+    {:ok, s} = Session.event({:data, 0, hello()}, s)
     s = drain(s)
     _ = all_out()
 
@@ -330,37 +259,18 @@ defmodule HiremeWeb.SessionTest do
     job = job(profile())
     {:ok, %{secret: secret}} = Hireme.ApiKeys.create("session")
 
-    {:ok, a} =
-      Session.init({Carrier, self()}, %{ip: "198.51.100.9", origin: "", path: "/wt"})
-
-    hello =
-      IO.iodata_to_binary(
-        Packet.frame(
-          :hello,
-          0,
-          [
-            <<byte_size(secret)::little-16, secret::binary>>,
-            :binary.copy(<<0>>, rem(8 - rem(2 + byte_size(secret), 8), 8)),
-            <<0::little-64, 3::little-32, 0::little-32>>
-          ],
-          flags: 0x80
-        )
-      )
-
-    {:ok, a} = Session.event({:data, 0, hello}, a)
-    a = drain(a)
-    assert [{:boot, 0x03, _, _} = boot | _] = all_out()
-    {:boot, 0x02, _, body} = inflate(boot)
-    ids = table_ids(body)
+    {a, [{:boot, 0x03, _, _} = boot | _]} = agent(secret, "198.51.100.9")
     # An agent gets the browser's raw BOOT and derives its own views.
-    assert Packet.table_id(:batches) in ids
-    assert Packet.table_id(:job_apps) in ids
+    {:boot, 0x02, _, body} = plain(boot)
+    booted = tables(body)
+    assert [%{code: "B-agent"}] = named(booted, :batches)
+    assert Enum.map(named(booted, :job_apps), & &1.id) == [job.id]
 
     op = %{op_id: 70, kind: :next, target: job.id, fields: ["Agent sees", ""]}
     assert {:ok, _} = Hireme.Ops.run(account.id, op)
     a = drain(a)
     assert [{:patch, 0, _, pbody}] = all_out()
-    assert Packet.table_id(:job_apps) in table_ids(pbody)
+    assert [%{next_action: "Agent sees"}] = named(tables(pbody), :job_apps)
 
     # Its writes go up as OPs on control; one outside a block is refused.
     {:ok, a} = Session.event({:data, 0, op(71, 2, job.id, ["Agent writes", ""])}, a)
@@ -381,27 +291,19 @@ defmodule HiremeWeb.SessionTest do
     assert [{:bye, 0, _, <<6::little-16, "schema">>}] = all_out()
   end
 
-  # An agent's session, through its HELLO; its BOOT is drained.
+  # An agent's session through its API-key HELLO, with every frame its BOOT wrote.
   defp agent(secret, ip) do
     {:ok, a} = Session.init({Carrier, self()}, %{ip: ip, origin: "", path: "/wt"})
+    pad = :binary.copy(<<0>>, rem(8 - rem(2 + byte_size(secret), 8), 8))
 
-    hello =
-      IO.iodata_to_binary(
-        Packet.frame(
-          :hello,
-          0,
-          [
-            <<byte_size(secret)::little-16, secret::binary>>,
-            :binary.copy(<<0>>, rem(8 - rem(2 + byte_size(secret), 8), 8)),
-            <<0::little-64, 3::little-32, 0::little-32>>
-          ],
-          flags: 0x80
-        )
-      )
+    body = [
+      <<byte_size(secret)::little-16, secret::binary>>,
+      pad,
+      <<0::little-64, 3::little-32, 0::little-32>>
+    ]
 
-    {:ok, a} = Session.event({:data, 0, hello}, a)
-    _ = all_out()
-    a
+    a = send_in(a, Packet.frame(:hello, 0, body, flags: 0x80))
+    {a, all_out()}
   end
 
   defp send_in(a, frame) do
@@ -432,7 +334,7 @@ defmodule HiremeWeb.SessionTest do
     jobs = for i <- 1..6, do: job(profile(), %{company: "Co #{i}"})
     [j1, _j2, j3, j4 | _] = jobs
     {{:ok, _, _}, other} = hold_lease(j3.id)
-    s = agent(secret, "198.51.100.10")
+    {s, _} = agent(secret, "198.51.100.10")
 
     # A block over another agent's entry is refused whole, and says where to go.
     {s, %{"error" => %{"data" => %{"code" => "busy", "held" => [3], "free" => [5, 6]}}}} =
@@ -471,7 +373,8 @@ defmodule HiremeWeb.SessionTest do
   test "a revoked key, or the session ending, gives the block back", %{account: _account} do
     {:ok, %{key: key, secret: secret}} = Hireme.ApiKeys.create("revoked")
     job = job(profile(), %{company: "Revoked"})
-    {s, _} = call(agent(secret, "198.51.100.13"), 1, "lease/acquire", %{"count" => 1})
+    {a, _} = agent(secret, "198.51.100.13")
+    {s, _} = call(a, 1, "lease/acquire", %{"count" => 1})
     assert leased?(job.id)
 
     Hireme.ApiKeys.revoke(key)
@@ -501,9 +404,7 @@ defmodule HiremeWeb.SessionTest do
     {:ok, s} = Session.info(early, s)
     _ = drain(s)
     # The early BOOT stream (3) holds no BOOT, only the rest and the ticket.
-    out = for {:out, 3, bin} <- Process.info(self(), :messages) |> elem(1), do: bin
-    {:ok, frames, ""} = Packet.split(IO.iodata_to_binary(out))
-    assert [:patch, :ticket] = for({kind, _, _, _} <- frames, do: kind)
+    assert [:patch, :ticket] = for({kind, _, _, _} <- all_out(3), do: kind)
   end
 
   test "a ticketed raw browser gets its BOOT on a server stream right after accept",
@@ -520,25 +421,11 @@ defmodule HiremeWeb.SessionTest do
     {:ok, s} = Session.info(early, s)
     assert_received {:uni, 3}
     s = drain(s)
-
-    frames =
-      for {:out, 3, bin} <-
-            Stream.repeatedly(fn ->
-              receive do
-                m -> m
-              after
-                50 -> :done
-              end
-            end)
-            |> Enum.take_while(&(&1 != :done)),
-          {:ok, f, ""} = Packet.split(bin),
-          frame <- f,
-          do: frame
-
+    frames = all_out(3)
     assert [{:boot, _, rev, _} | _] = frames
     assert {:ticket, _, ^rev, _} = List.last(frames)
 
     # The browser's HELLO afterwards only opens control.
-    assert {:ok, %{early: true}} = Session.event({:data, 0, raw_hello()}, s)
+    assert {:ok, %{early: true}} = Session.event({:data, 0, hello()}, s)
   end
 end
