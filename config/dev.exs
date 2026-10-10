@@ -18,11 +18,7 @@ config :hireme, HiremeWeb.Gate,
   url: "https://127.0.0.1:4433/wt",
   hash_file: Path.expand("../_build/gate.hash", __DIR__),
   cmd: ~w(cargo run --quiet --release --manifest-path native/gate/Cargo.toml),
-  cd: Path.expand("..", __DIR__),
-  env: [
-    {"GATE_LISTEN", "127.0.0.1:4433"},
-    {"GATE_ORIGINS", "http://localhost:4000,http://127.0.0.1:4000"}
-  ]
+  env: [{"GATE_ORIGINS", "http://localhost:4000,http://127.0.0.1:4000"}]
 
 # Loopback only; `ip: {0, 0, 0, 0}` opens the desk to the network.
 config :hireme, HiremeWeb.Endpoint,

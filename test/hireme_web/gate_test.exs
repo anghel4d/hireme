@@ -189,12 +189,12 @@ defmodule HiremeWeb.GateTest do
   end
 
   describe "the gate binary as a Port" do
-    # A stand-in gate: it records its socket, each stdin line, and EOF (a
-    # moment after it, as the gate drains), and exits when told to.
+    # A stand-in gate: it records its socket, its pid, each stdin line, and
+    # EOF (a moment after it, as the gate drains).
     defp stand_in(dir) do
       script =
-        ~s(echo "$GATE_SOCKET" >> started; while read l; do echo "$l" >> lines; ) <>
-          ~s([ "$l" = die ] && exit 3; done; sleep 0.3; echo eof >> lines)
+        ~s(echo "$GATE_SOCKET" >> started; echo $$ > pid; ) <>
+          ~s(while read l; do echo "$l" >> lines; done; sleep 0.3; echo eof >> lines)
 
       [cmd: ["sh", "-c", script], cd: dir]
     end
@@ -207,7 +207,12 @@ defmodule HiremeWeb.GateTest do
       end
     end
 
-    defp read(dir, file), do: File.read(Path.join(dir, file)) |> elem(1) |> to_string()
+    defp read(dir, file) do
+      case File.read(Path.join(dir, file)) do
+        {:ok, text} -> text
+        {:error, :enoent} -> ""
+      end
+    end
 
     setup %{path: path} do
       stop_supervised!(Gate)
@@ -231,10 +236,10 @@ defmodule HiremeWeb.GateTest do
     @tag :capture_log
     test "a gate that exits is started again; the bridge keeps its sessions",
          %{dir: dir, path: path} do
-      eventually(fn -> read(dir, "started") != "" end)
+      eventually(fn -> read(dir, "pid") != "" end)
       s = dial(path)
       assert {:ok, <<0x02>>} = :gen_tcp.recv(s, 0, 1000)
-      send(HiremeWeb.Gate.Binary, {:command, "die"})
+      {_, 0} = System.cmd("kill", [String.trim(read(dir, "pid"))])
       eventually(fn -> read(dir, "started") == String.duplicate(path <> "\n", 2) end)
       :ok = :gen_tcp.send(s, <<0x12, 0::32>>)
       assert_receive {:event, {:fin, 0}}

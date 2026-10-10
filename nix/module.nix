@@ -81,7 +81,6 @@ in
       environment = {
         PHX_SERVER = "true";
         PHX_HOST = cfg.domain;
-        PHX_IP = "127.0.0.1";
         PORT = toString cfg.port;
         DATABASE_PATH = "/var/lib/hireme/hireme.db";
         HOME = "/var/lib/hireme";

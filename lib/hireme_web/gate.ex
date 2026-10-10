@@ -62,15 +62,11 @@ defmodule HiremeWeb.Gate do
 
   ## Supervision
 
-  This module is the gate's supervisor, `rest_for_one`: the bridge
-  listener first, then, when `opts[:cmd]` names it, the gate binary itself
-  as a Port. The gate inherits the node's environment (its `GATE_*`
-  settings) plus `opts[:env]`, listens on a high UDP port (the host
-  forwards 443 to it, so it needs no capability), and exits when its stdin
-  closes, so it never outlives the node. It takes commands on stdin:
-  `reload/0` rereads the certificate. A gate that exits is started again
-  after 2 s, which keeps a broken binary from exhausting the restart
-  budget, and a listener restart restarts the gate after it.
+  `rest_for_one`: the bridge listener, then the gate binary (`opts[:cmd]`)
+  as a Port with the node's environment plus `opts[:env]`. The gate exits
+  when its stdin closes and reads `reload` and `stats` there. One that
+  exits is started again after 2 s, so a broken binary cannot exhaust the
+  restart budget.
 
   ## Carrier
 

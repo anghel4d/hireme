@@ -25,16 +25,11 @@
       packages.${system} = {
         inherit hireme;
         hireme-gate = hireme.gate;
-        default = hireme;
       };
 
       nixosModules.hireme = import ./nix/module.nix { inherit self; };
-      nixosModules.default = self.nixosModules.hireme;
 
-      # The dev profile, until the vault exists and for testing after: the
-      # module as a host runs it, with plaintext secrets generated in the VM,
-      # no YubiKey, and the gate's own self-signed certificate. Nothing of it
-      # ships. `nix build .#checks.x86_64-linux.dev -L` runs it.
+      # The dev profile (see README, Production deployment).
       checks.${system}.dev = pkgs.testers.runNixOSTest {
         name = "hireme-dev";
         nodes.machine = {
