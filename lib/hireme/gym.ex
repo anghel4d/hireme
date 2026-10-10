@@ -50,21 +50,22 @@ defmodule Hireme.Gym do
          {:ok, done_on} <- Form.day(attrs, :done_on, today),
          {:ok, title} <- Form.required(attrs, :title),
          {:ok, slug} <- slug(attrs, title) do
-      Repo.transaction(fn ->
-        problem =
-          upsert_problem!(platform, slug, title, topic, difficulty, Form.string(attrs, :url))
+      # In the sequencer's transaction (`Hireme.Ops`): a nested one would
+      # leave it only able to roll back if this raised.
+      problem =
+        upsert_problem!(platform, slug, title, topic, difficulty, Form.string(attrs, :url))
 
-        %Rep{}
-        |> Rep.changeset(%{
-          problem_id: problem.id,
-          done_on: done_on,
-          minutes: Form.nonnegative(attrs, :minutes),
-          outcome: outcome,
-          note: Form.string(attrs, :note)
-        })
-        |> Repo.insert!()
-        |> Map.put(:problem, problem)
-      end)
+      %Rep{}
+      |> Rep.changeset(%{
+        problem_id: problem.id,
+        done_on: done_on,
+        minutes: Form.nonnegative(attrs, :minutes),
+        outcome: outcome,
+        note: Form.string(attrs, :note)
+      })
+      |> Repo.insert!()
+      |> Map.put(:problem, problem)
+      |> then(&{:ok, &1})
     end
   end
 

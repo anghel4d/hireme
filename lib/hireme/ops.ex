@@ -474,7 +474,17 @@ defmodule Hireme.Ops do
           end
         end
 
-      case Enum.map(entries, &hd/1) -- @store.log(state.account, entries) do
+      # A raise is not logged, so a resend that raises (its fields need
+      # not be the first copy's) is looked for by id instead.
+      raised = for {%{op_id: id}, {:raise, _, _}} <- Enum.zip(batch, numbered), id != nil, do: id
+      logged = @store.log(state.account, entries)
+
+      seen =
+        if raised == [],
+          do: [],
+          else: Enum.map(@store.answers(state.account, raised), &elem(&1, 0))
+
+      case (Enum.map(entries, &hd/1) -- logged) ++ seen do
         [] -> numbered
         resent -> @store.rollback({:resent, resent})
       end
