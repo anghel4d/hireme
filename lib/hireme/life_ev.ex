@@ -43,11 +43,6 @@ defmodule Hireme.LifeEv do
   @spec name(band()) :: String.t()
   def name(band) when band in @keys, do: Atom.to_string(band)
 
-  @spec band(score()) :: band()
-  def band(score) when is_integer(score) and score >= 0 and score <= 100 do
-    Enum.find(@bands, fn row -> score >= row.min and score <= row.max end).key
-  end
-
   @spec clamp(integer()) :: score()
   def clamp(n) when is_integer(n), do: min(max(n, 0), 100)
 
