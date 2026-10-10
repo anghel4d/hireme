@@ -4,8 +4,6 @@
 // Every refusal is a typed outcome, not a thrown string.
 
 
-export type Mode = "canonical" | "hidden" | "altered" | "emphasized"
-
 export interface Line {
   id: number
   kind: string
@@ -14,7 +12,7 @@ export interface Line {
   org: string
   span: string
   shown: boolean
-  mode: Mode
+  mode: "canonical" | "hidden" | "altered" | "emphasized"
   reason: string | null
   canonical_body: string
 }
@@ -33,55 +31,33 @@ export interface Doc {
   hidden: Line[]
 }
 
-export interface Job {
-  id: number
-  code: string
-  company: string
-  role: string
-  location: string
-  listing: string
-  heat: number
-  status: string
-  stage: string
-  stage_label: string
-  stage_hint: string
-  pips: string
-  score_100: number
-  band: string
-  next_action: string
-  next_due: string | null
-  stage_on: string | null
-  freshness: string
-  gate: string
-  fit: string
-  keyword_hits: number
-  keyword_total: number
-  mask_hidden: number
-  mask_altered: number
-  mask_emphasized: number
-  batch: { code: string; fire: "hold" | "open_fire" } | null
-}
-
-export interface Rung { key: string; label: string; hint: string; state: string; note: string }
 export interface Narrative { id: number; body: string; version: number }
 export interface Coverage { hits: string[]; misses: string[] }
 
-export interface HeatVerdict {
-  decision: "allow" | "defer"
-  company_load: number
-  company_cap: number
-  size: string | null
-  ats_vendor: string
-  cooldown_days: number | null
-  override: boolean
-  override_reason: string
-}
-
 export interface Focus {
-  job: Job
-  profile: { id: number; slug: string; name: string; headline: string; summary: string }
-  variant: { id: number; label: string; lineage_id: number | null }
-  rail: Rung[]
+  job: {
+    code: string
+    company: string
+    role: string
+    location: string
+    listing: string
+    stage_label: string
+    stage_hint: string
+    pips: string
+    score_100: number
+    band: string
+    next_action: string
+    next_due: string | null
+    freshness: string
+    gate: string
+    mask_hidden: number
+    mask_altered: number
+    mask_emphasized: number
+    batch: { code: string; fire: "hold" | "open_fire" } | null
+  }
+  profile: { name: string }
+  variant: { label: string }
+  rail: { key: string; label: string; hint: string; state: string; note: string }[]
   events: { id: number; kind: string; body: string; at: string }[]
   cv: Doc
   narrative: Narrative | null
@@ -89,7 +65,16 @@ export interface Focus {
   root_coverage: Coverage
   kv: { key: string; value: string }[]
   masks: Line[]
-  heat: HeatVerdict
+  heat: {
+    decision: "allow" | "defer"
+    company_load: number
+    company_cap: number
+    size: string | null
+    ats_vendor: string
+    cooldown_days: number | null
+    override: boolean
+    override_reason: string
+  }
 }
 
 export interface Option { key: string; label: string }
