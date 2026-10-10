@@ -33,7 +33,7 @@ The original testbed's test mail adapter omitted provider latency. Security noti
 
 ## Realtime rework — 2026-10-09
 
-The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssembly kernel (`native/kernel`) and draws every interaction from it; a write is predicted in the same frame and settled by the server. Everything travels as columnar frames (`priv/wire/schema.txt`) over one session per tab: WebTransport through the gate sidecar (`native/gate`), or a WebSocket at `/wire` where UDP is blocked. `Hireme.Ops` serializes every write per account (op ledger, revisions, post-commit deltas of only the changed rows), and agents hold many letterbox leases as streams of one session (`native/mcp`).
+The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssembly kernel (`native/kernel`) and draws every interaction from it; a write is predicted in the same frame and settled by the server. Everything travels as columnar frames (`priv/wire/schema.txt`) over one session per tab: WebTransport through the gate sidecar (`native/gate`), or a WebSocket at `/wire` where UDP is blocked. `Hireme.Ops` serializes every write per account (op ledger, revisions, post-commit deltas of only the changed rows), and an agent holds one block lease on its session (`native/mcp`).
 
 **All numbers in this section are local**: a scratch copy of the canonical 1,000-job fixture, loopback, Chromium 154, the same 5950X/WSL2 host. They are not production Internet latency and were not taken with the corrected harness above; the release has not been deployed.
 
@@ -44,16 +44,12 @@ The desk no longer waits on HTTP. The browser holds the desk in a Rust WebAssemb
 |---|---|---|---|
 | hjkl to full focus painted | p50 60.6 / p99 75.5 ms at 47 ms emulated RTT; 1 fetch per move | p50 4.1 / p99 5.3 ms; same frame; 0 requests | shell lane, input timeStamp → paint |
 | Stage click drawn | p50 59.5 / p99 84.1 ms at 47 ms RTT | p50 3.1 ms; same frame | shell lane |
-| Write ACK after prediction | (the write was the wait) | 8.8–14.7 ms over WT, 13–15 ms over WS, dev server | link lane |
-| Ops.run, write without heat | — | p50 0.7–0.9 ms | ops lane |
-| Ops.run, stage move flipping heat | — | p50 5.5 ms (~210 changed rows) | ops lane |
 | Cold load to 1,000 rows | 3–4 sequential requests | ~400 ms (WS) / ~470 ms (WT, includes browser start) | link lane |
 | Reload | same as cold | snapshot painted at ~120 ms, live at ~130–150 ms; resume = 3 frames, 184 B | link lane |
 | Board bytes | 249 KB raw / 36 KB gzip (HDP1) | 178 KB raw / 24 KB deflated BOOT | wire encoder |
 | Whole-desk focus stream | 29 KB JSON per focus on demand | 0.9 MB deflated for all 1,000, 0.62 s of server reads cold; cached across sessions | lead |
 | Kernel | `desk.wat` select | BOOT ingest 251 µs, select 26 µs, op push 2 µs, one-row PATCH + select 41 µs (node); 83 KB / 33 KB gzipped | kernel lane |
 | Gate hop | — | stream round trip p50 0.32 ms (QUIC alone 0.21 ms) | gate lane |
-| Agents: 3 leases | 3 sockets, 3 key authentications | WT 2–3 ms vs WS 9 ms; RPC p50 0.82 ms WT / 0.66 ms WS | letterbox lane |
 | Sign-in link request | waited on the mail provider | answers before the provider; supervised send with retries, link never stored | ops lane |
 
 Correctness evidence: a seeded property test (boot ⊕ deltas = fresh `list_cards`, consecutive revisions, no delta on refusal, fails if heat kin is disabled); kernel predictions checked against an independent model over 300 seeds; every op kind refused for foreign and missing targets without stalling the session; golden frames shared by the Elixir, Rust and TypeScript readers; `mix test` fails if `kernel.wasm` was built against another schema.
@@ -77,7 +73,7 @@ The browser now receives the account's raw rows instead of server-derived views,
 | Lenses: gym, net, root, account | account 5.5 + 1 HTTP | 6.1, 5.0, 3.8, 3.9 |
 | Another tab's stage write, writer input to watcher paint | — | 23.4 / 38.3 |
 
-Server and kernel, same fixture: a `next` write runs through the sequencer in 0.77 ms with an 80-byte delta; a raw BOOT is 2.03 MB raw, ~90 KB deflated, read in ~32 ms outside the sequencer; a resume within the ring costs 66 µs; the kernel's push + derive + select is 0.08 ms (`next`) and 0.24 ms (stage move) in node, cold BOOT + derive 19 ms; `kernel.wasm` is 227 KB (88 KB gzipped). Agents (`bench/letterbox.mjs`, p50 WT / WS): three leases 2.9 / 11.8 ms, `set_next_action` 3.3 / 2.5 ms; `get_application` under concurrent writes 2.7 ms after heat reads left the sequencer (9.4 before).
+Server and kernel, same fixture: a raw BOOT is 2.03 MB raw, ~90 KB deflated, read in ~32 ms outside the sequencer; a resume within the ring costs 66 µs; the kernel's push + derive + select is 0.08 ms (`next`) and 0.24 ms (stage move) in node, cold BOOT + derive 19 ms; `kernel.wasm` is 227 KB (88 KB gzipped). Agents and the sequencer's write path: see wave 4 below.
 
 Not measured on the real network path yet: only the gate's handshake has been (`bench/gate.mjs`: QUIC RTT ~25–36 ms from the operator's workstation). The release builds byte-identically from any path (`nixos-server/scripts/hireme-repro.sh`), as does `kernel.wasm` (`native/kernel/build.sh --check`).
 
@@ -88,6 +84,25 @@ The kernel now extends dirty-card IDs directly from the two lease-difference ite
 ## Session-revocation notification ordering
 
 `Accounts.revoke_session/1` now persists `revoked_at` before publishing the account-change notification, matching the existing other-session revocation path. This prevents an observer from re-reading the still-active row on the only notification; command-time authentication checks are unchanged. The 10 account tests passed, and a disposable local PubSub smoke observed 20 revocations: the first change notification saw the revoked timestamp, no active-list row, and a rejected token. No latency gain or authorization-bypass claim is made.
+
+## Wave 4: block leases and the group-commit sequencer — 2026-10-10 (main `e5d19a3`, not deployed)
+
+An agent leases a block of its account's entries on one session (`lease {"count": 16}`), and the sequencer seals writes in groups: a session keeps its ops in flight, the drainer commits a batch in one transaction and answers as it seals, the WAL is checkpointed on a budget instead of growing without end, and nothing of the op ledger lives in memory (a resend is caught by the ledger's unique key and answered from the table). Measured locally on a copy of the canonical 1,000-job fixture with `bench/letterbox.mjs`: ten agents with sixteen entries each write `set_score` across their blocks for ten seconds, agent 0 is killed halfway and a spare asks for its block; hireme-mcp over the gate's WebTransport and over `/wire`; the testbed on CPUs 0–15, the agents on 16–31; one run per cell on a quiet box (1-minute load 0.5–2.2; the WS 4-in-flight cell was run three times and its median is shown, with the WS 1-in-flight control at 3,192–3,406 across runs). Before is `c65a37b` (block leases on the old sequencer), after is `e5d19a3`.
+
+| | WS, 1 in flight | WS, 4 in flight | WT, 1 in flight | WT, 4 in flight |
+|---|---|---|---|---|
+| writes/s, before → after | 1,881 → 3,406 | 1,637 → 3,477 (three runs: 3,030 / 3,477 / 3,628; the median) | 1,495 → 3,647 | 1,506 → 5,772 |
+| write p50 ms | 4.79 → 2.59 | 21.73 → 10.25 | 5.66 → 2.37 | 24.30 → 5.87 |
+| write p99 ms | 8.32 → 6.85 | 42.14 → 24.24 | 13.39 → 10.41 | 35.38 → 18.31 |
+| refusals | 0 | 0 | 0 | 0 |
+| dead agent's block back to the spare | 20 → 18 ms | 24 → 33 ms | 2.0 s | 2.0 s (the gate's dead-session detection) |
+| ten leases asked at once, p50 / wall ms | 28 / 31 → 27 / 31 | 21 / 28 → 17 / 20 | 14 / 24 → 18 / 22 | 25 / 28 → 18 / 27 |
+
+Single-write guard, one agent on one application, `set_score` p50 / p99: WS 1.21 / 1.85 → 1.05 / 1.32 ms; WT 1.57 / 8.61 → 1.26 / 1.55 ms. In process, `Ops.run`: `next` 0.235 → 0.177 ms with an 80-byte delta, `score` 0.191 ms, a stage move flipping heat 0.595 ms (5.5 ms in the realtime rework). The WAL after a ten-second run is 58–67 MB and steady run over run; before the checkpoint budget it was 386 MB after one run and still growing.
+
+Sequencer cold start against a retained op ledger (`Ops.stop`, then the first write; ten restarts per cell, fresh fixture copy): reading the ledger whole into memory on the first write cost 25 / 155 ms at 1,000 / 100,000 retained rows, and the warm write right after 0.5 / 41 ms (the hourly sweep walking the map). Now the first write is 22 / 22 / 21 ms at 1,000 / 100,000 / 1,000,000 rows, the writes after it 0.2 ms, one ledger row is read per client op, and the sequencer is 3.9 MB after GC at every size.
+
+Correctness evidence: the sequencer's batch property (boot ⊕ deltas equals a fresh read across seeded op streams; a resend is answered from the ledger and writes nothing; two copies of one op id in a batch run once) and `native/kernel/parity.mjs` against the oracle (zero differences on three seeds after the server-side heat snapshot left) held throughout. Net change to the tree over the wave: hireme -146 lines (21 of them this section), nixos-server 0.
 
 ## How to read the measurements
 
