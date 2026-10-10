@@ -149,7 +149,8 @@ defmodule HiremeWeb.Session do
 
   # An agent proves itself with its HELLO; one that never does is closed.
   defp pending(s) do
-    Process.send_after(self(), {__MODULE__, :hello_deadline}, @hello_deadline_ms)
+    deadline = Application.get_env(:hireme, :hello_deadline_ms, @hello_deadline_ms)
+    Process.send_after(self(), {__MODULE__, :hello_deadline}, deadline)
     s
   end
 
