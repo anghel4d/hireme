@@ -426,13 +426,13 @@ defmodule HiremeWeb.SessionTest do
     s = agent(secret, "198.51.100.10")
 
     # A block over another agent's entry is refused whole, and says where to go.
-    {s, %{"error" => %{"data" => %{"code" => "busy", "held" => [3], "free" => [4, 6]}}}} =
+    {s, %{"error" => %{"data" => %{"code" => "busy", "held" => [3], "free" => [5, 6]}}}} =
       call(s, 1, "lease/acquire", %{"from" => 2, "to" => 4})
 
-    {s, %{"result" => %{"from" => 1, "to" => 2, "jobs" => held, "warnings" => []}}} =
+    {s, %{"result" => %{"from" => 1, "to" => 2, "lane" => 1, "jobs" => held, "warnings" => []}}} =
       call(s, 2, "lease/acquire", %{"count" => 2})
 
-    assert held == Enum.map(Enum.take(jobs, 2), & &1.id)
+    assert held == [[1, j1.id], [2, Enum.at(jobs, 1).id]]
 
     # A write in the block lands, after its delta; one outside is refused `leased`.
     s = send_in(s, op(81, 2, j1.id, ["From the block", ""]))
