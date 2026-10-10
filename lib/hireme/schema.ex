@@ -17,6 +17,8 @@ defmodule Hireme.Accounts.Account do
     field :live_key_count, :integer, default: 0
     # Committed desk changes, bumped by `Hireme.Ops` with each one.
     field :desk_rev, :integer, default: 0
+    # The next application number (`Desk.Job.no`); one is never reused.
+    field :next_no, :integer, default: 1
     timestamps()
   end
 
@@ -524,6 +526,9 @@ defmodule Hireme.Desk.Job do
     field :score_100, :integer, default: 50
     field :heat_override, :boolean, default: false
     field :heat_override_reason, :string, default: ""
+    # The account's number for this application, from 1, never reused:
+    # what a lease names a contiguous range of.
+    field :no, :integer
     belongs_to :profile, Hireme.Corpus.Profile
     belongs_to :employer, Hireme.Desk.Employer
     belongs_to :batch, Hireme.Desk.Batch
@@ -536,7 +541,7 @@ defmodule Hireme.Desk.Job do
 
   def changeset(job, attrs) do
     job
-    |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :inserted_at, :updated_at])
+    |> cast(attrs, __schema__(:fields) -- [:id, :account_id, :no, :inserted_at, :updated_at])
     |> validate_required([:profile_id, :company, :role, :heat, :status, :current_stage, :pips])
     |> validate_number(:heat, greater_than_or_equal_to: 1, less_than_or_equal_to: 5)
     |> validate_number(:score_100, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)

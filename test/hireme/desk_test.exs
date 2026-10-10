@@ -141,4 +141,16 @@ defmodule Hireme.DeskTest do
     lineage = Hireme.CvPair.lineage_id(Hireme.CvPair.bind!(job.id))
     Repo.aggregate(from(o in Hireme.Desk.Overlay, where: o.lineage_id == ^lineage), :count)
   end
+
+  test "applications are numbered from 1 per account, and a number is never handed out again" do
+    p = profile()
+    [a, b, c] = for n <- 1..3, do: job(p, %{company: "No #{n}"})
+    assert Enum.map([a, b, c], & &1.no) == [1, 2, 3]
+
+    Repo.delete!(c)
+    assert job(p, %{company: "No 4"}).no == 4
+
+    other = Hireme.Accounts.create!(%{name: "Numbered elsewhere"})
+    assert Repo.with_account(other.id, fn -> job(profile(), %{company: "Theirs"}).no end) == 1
+  end
 end
