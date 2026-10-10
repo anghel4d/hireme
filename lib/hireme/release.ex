@@ -77,7 +77,8 @@ defmodule Hireme.Release.Backup do
   13 days. `VACUUM INTO` is SQLite's own consistent copy of a live
   database, WAL included; it only reads this one, so it takes no writer
   lock. A missed day (the node was down) is caught up at start; a failure
-  is logged as an error, kept in `status/0` and retried within the hour.
+  is logged as an error and kept in `status/0`; a scheduled one is
+  retried within the hour.
   """
 
   use GenServer
@@ -93,7 +94,10 @@ defmodule Hireme.Release.Backup do
   @doc "The last attempt: `{:ok, path}`, `{:error, reason}`, or nil before the first."
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
 
-  @doc "Back up now; answers what `status/1` will."
+  @doc """
+  Back up now; answers what `status/1` will. A failure here is the
+  caller's to retry: the schedule is left as it was.
+  """
   def run(server \\ __MODULE__), do: GenServer.call(server, :run, :infinity)
 
   @impl true
