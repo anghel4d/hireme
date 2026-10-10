@@ -47,7 +47,30 @@ defmodule Hireme.ReleaseTest do
     assert {:error, _} = Backup.status(pid)
   end
 
-  test "the boot migrator applies nothing twice and starts nothing" do
-    assert :ignore = Hireme.Release.start_link()
+  test "boot and eval migrate under one lock, wait for another VM's, and apply nothing twice" do
+    {:ok, other} = Exqlite.Sqlite3.open(Hireme.Release.lock_path())
+    :ok = Exqlite.Sqlite3.execute(other, "BEGIN EXCLUSIVE")
+    booting = Task.async(&Hireme.Release.start_link/0)
+    eval = Task.async(&Hireme.Release.migrate/0)
+    refute Task.yield(booting, 200)
+    refute Task.yield(eval, 0)
+    Exqlite.Sqlite3.close(other)
+    assert :ignore = Task.await(booting)
+    assert :ok = Task.await(eval)
+  end
+
+  test "the lock is the same for a symlink to the database", %{dir: dir} do
+    db = Hireme.Repo.config()[:database]
+    File.mkdir_p!(dir)
+    link = Path.join(dir, "alias.db")
+    File.ln_s!(Path.expand(db), link)
+    canonical = Hireme.Release.lock_path()
+    Application.put_env(:hireme, Hireme.Repo, Keyword.put(Hireme.Repo.config(), :database, link))
+
+    try do
+      assert Hireme.Release.lock_path() == canonical
+    after
+      Application.put_env(:hireme, Hireme.Repo, Keyword.put(Hireme.Repo.config(), :database, db))
+    end
   end
 end
