@@ -186,20 +186,7 @@ defmodule Hireme.Ops do
   The target is the job id unless noted.
   """
   @spec run(pos_integer(), op()) :: {:ok, non_neg_integer()} | {:error, refusal()}
-  def run(account_id, op) do
-    ref = send_run(account_id, op)
-    pid = whereis(account_id)
-    monitor = pid && Process.monitor(pid)
-
-    receive do
-      {:ops_reply, ^ref, reply} ->
-        if monitor, do: Process.demonitor(monitor, [:flush])
-        reply
-
-      {:DOWN, ^monitor, :process, _, _} ->
-        {:error, :internal}
-    end
-  end
+  def run(account_id, op), do: account_id |> submit(prepare(op)) |> await()
 
   @doc """
   `run/2` without waiting: stage the op here (parse and validate it, this
@@ -210,21 +197,46 @@ defmodule Hireme.Ops do
   same way.
   """
   @spec send_run(pos_integer(), op()) :: reference()
-  def send_run(account_id, %{op_id: op_id, kind: kind, target: target, fields: fields} = op)
-      when is_integer(account_id) and is_integer(op_id) and op_id >= 0 and is_atom(kind) and
-             is_integer(target) and is_list(fields) do
+  def send_run(account_id, op), do: elem(submit(account_id, prepare(op)), 1)
+
+  # A malformed op still goes to the ledger: its id's first answer is the
+  # one a resend gets, whatever the resend carries.
+  defp prepare(%{op_id: op_id, kind: kind, target: target, fields: fields} = op)
+       when is_integer(op_id) and op_id >= 0 and is_atom(kind) and is_integer(target) and
+              is_list(fields) do
+    write = %{op_id: signed(op_id), kind: Atom.to_string(kind), command: nil, refused: nil}
+
+    case parse(op) do
+      {:ok, command} -> %{write | command: command}
+      {:error, reason} -> %{write | refused: reason}
+    end
+  end
+
+  # Every write reaches the sequencer as one shape: a client op carries
+  # its `op_id` (ledgered, answered with its revision), a domain write
+  # `op_id: nil` (answered with its own value, a raise re-raised here).
+  defp submit(account_id, write) when is_integer(account_id) do
+    pid = server(account_id)
     ref = make_ref()
+    send(pid, {:write, Map.merge(write, %{holder: self(), ref: ref})})
+    {pid, ref}
+  end
 
-    # A malformed op still goes to the ledger: its id's first answer is
-    # the one a resend gets, whatever the resend carries.
-    staged =
-      case parse(op) do
-        {:ok, command} -> %{op_id: signed(op_id), kind: Atom.to_string(kind), command: command}
-        {:error, reason} -> %{op_id: signed(op_id), kind: Atom.to_string(kind), refused: reason}
-      end
+  defp await({pid, ref}) do
+    monitor = Process.monitor(pid)
 
-    send(server(account_id), {:run, staged, self(), ref})
-    ref
+    receive do
+      {:ops_reply, ^ref, reply} ->
+        Process.demonitor(monitor, [:flush])
+
+        case reply do
+          {:raise, exception, stacktrace} -> reraise exception, stacktrace
+          reply -> reply
+        end
+
+      {:DOWN, ^monitor, :process, _, _} ->
+        {:error, :internal}
+    end
   end
 
   @doc "The account's sequencer, if one runs."
@@ -263,7 +275,7 @@ defmodule Hireme.Ops do
     case {Process.get(@inside), Repo.account_id()} do
       # With no account the write refuses itself (`Hireme.Schema.tenant/1`).
       {inside, account} when inside == true or account == nil -> apply_command(command)
-      {_, account} -> call(account, {:exec, command, self()})
+      {_, account} -> account |> submit(%{op_id: nil, command: command, refused: nil}) |> await()
     end
   end
 
@@ -435,9 +447,6 @@ defmodule Hireme.Ops do
     end)
   end
 
-  def handle_call({:exec, _command, _holder} = write, from, state),
-    do: {:noreply, seal(state, drain([{write, {:call, from}}], 1))}
-
   @impl true
   def handle_cast({:touch, ids}, state) do
     {:noreply, state |> warm() |> settle([{:leases, :id, ids}])}
@@ -456,8 +465,7 @@ defmodule Hireme.Ops do
     {:noreply, %{state | ledger: ledger}}
   end
 
-  def handle_info({:run, _staged, holder, ref} = write, state),
-    do: {:noreply, seal(state, drain([{write, {:send, holder, ref}}], 1))}
+  def handle_info({:write, write}, state), do: {:noreply, seal(state, drain([write], 1))}
 
   def handle_info({:owner_down, _ref, :process, _pid, _reason}, state),
     do: {:stop, :normal, state}
@@ -468,35 +476,21 @@ defmodule Hireme.Ops do
   @impl true
   def terminate(_reason, _state) do
     receive do
-      {:run, _staged, holder, ref} ->
-        send(holder, {:ops_reply, ref, {:error, :internal}})
+      {:write, write} ->
+        answer(write, {:error, :internal})
         terminate(:drained, nil)
     after
       0 -> :ok
     end
   end
 
-  # A raise inside a write rolled it back. A domain caller gets it
-  # re-raised in its own process; a client op is answered `:internal`,
-  # since its target and fields are the client's and a frame must never
-  # take down the session that carried it. Either way the sequencer
-  # lives on, and because a raise after commit leaves the tables
-  # suspect, the next call re-reads them all.
-  defp guard(state, mode \\ :domain, fun) do
+  # A raise is re-raised in the caller; the sequencer lives on, and since
+  # the tables are suspect, the next call re-reads them all.
+  defp guard(state, fun) do
     {reply, state} = fun.()
     {:reply, reply, state}
   rescue
-    exception ->
-      state = %{state | rev: nil}
-
-      case mode do
-        :domain ->
-          {:reply, {:raise, exception, __STACKTRACE__}, state}
-
-        :wire ->
-          Logger.error(Exception.format(:error, exception, __STACKTRACE__))
-          {:reply, {:error, :internal}, state}
-      end
+    exception -> {:reply, {:raise, exception, __STACKTRACE__}, %{state | rev: nil}}
   end
 
   # -- the batch --------------------------------------------------------------
@@ -507,11 +501,7 @@ defmodule Hireme.Ops do
 
   defp drain(batch, n) do
     receive do
-      {:run, _staged, holder, ref} = write ->
-        drain([{write, {:send, holder, ref}} | batch], n + 1)
-
-      {:"$gen_call", from, {:exec, _, _} = write} ->
-        drain([{write, {:call, from}} | batch], n + 1)
+      {:write, write} -> drain([write | batch], n + 1)
     after
       0 -> Enum.reverse(batch)
     end
@@ -526,22 +516,16 @@ defmodule Hireme.Ops do
     state = if state.ledger, do: state, else: %{state | ledger: read_ledger()}
 
     {todo, answered} =
-      Enum.split_with(batch, fn
-        {{:run, %{op_id: op_id}, _, _}, _} -> not Map.has_key?(state.ledger, op_id)
-        _ -> true
-      end)
+      Enum.split_with(batch, &(&1.op_id == nil or not Map.has_key?(state.ledger, &1.op_id)))
 
-    Enum.each(answered, fn {{:run, %{op_id: op_id}, _, _}, to} ->
-      {reply, _} = Map.fetch!(state.ledger, op_id)
-      answer(to, reply)
-    end)
+    Enum.each(answered, &answer(&1, elem(Map.fetch!(state.ledger, &1.op_id), 0)))
 
     {results, state} = commit(state, todo)
     finish(state, todo, results)
   rescue
     exception ->
       Logger.error(Exception.format(:error, exception, __STACKTRACE__))
-      Enum.each(batch, fn {write, to} -> answer(to, failed(write, exception, __STACKTRACE__)) end)
+      Enum.each(batch, &answer(&1, failed(&1, exception, __STACKTRACE__)))
       %{state | rev: nil}
   end
 
@@ -552,7 +536,7 @@ defmodule Hireme.Ops do
 
     {:ok, results} =
       Repo.transaction(fn ->
-        results = Enum.map(todo, fn {write, _to} -> apply_one(write, state, several?) end)
+        results = Enum.map(todo, &apply_one(&1, state, several?))
         done = Enum.count(results, &match?({:ok, _, _, _}, &1))
 
         if done == 0 and not several? do
@@ -580,12 +564,9 @@ defmodule Hireme.Ops do
 
   # One write of the batch. Alone, a refusal rolls back the transaction;
   # among several, its savepoint.
-  defp apply_one({:run, %{refused: reason}, _, _}, _state, _several?), do: {:error, reason}
+  defp apply_one(%{refused: reason}, _state, _several?) when reason != nil, do: {:error, reason}
 
-  defp apply_one({:run, write, holder, _}, state, several?),
-    do: apply_one({:exec, write.command, holder}, state, several?)
-
-  defp apply_one({:exec, command, holder}, state, several?) do
+  defp apply_one(%{command: command, holder: holder}, state, several?) do
     Process.put(@holder, holder)
     Process.put(@held, [])
     if several?, do: Repo.query!("SAVEPOINT op", [], skip_account: true)
@@ -632,14 +613,13 @@ defmodule Hireme.Ops do
   # Every client op's outcome, in one statement.
   defp log!(todo, results) do
     rows =
-      for {{{:run, staged, _, _}, _}, result} <- Enum.zip(todo, results) do
+      for {%{op_id: op_id} = write, result} <- Enum.zip(todo, results),
+          op_id != nil and not match?({:raise, _, _}, result) do
         case result do
-          {:ok, _, _, _, rev} -> [staged.op_id, staged.kind, rev, nil]
-          {:error, reason} -> [staged.op_id, staged.kind, 0, refusal_name(normalize(reason))]
-          {:raise, _, _} -> nil
+          {:ok, _, _, _, rev} -> [op_id, write.kind, rev, nil]
+          {:error, reason} -> [op_id, write.kind, 0, refusal_name(normalize(reason))]
         end
       end
-      |> Enum.reject(&is_nil/1)
 
     if rows != [] do
       Repo.query!(
@@ -667,39 +647,39 @@ defmodule Hireme.Ops do
 
     now = System.system_time(:second)
 
+    # A raise is not ledgered (nor logged): a resend tries again.
     Enum.zip(todo, results)
-    |> Enum.reduce(state, fn {{write, to}, result}, state ->
+    |> Enum.reduce(state, fn {write, result}, state ->
       reply = reply(write, result)
-      answer(to, reply)
+      answer(write, reply)
 
-      case write do
-        {:run, %{op_id: op_id}, _, _} when not is_tuple(reply) or elem(reply, 0) != :raise ->
-          %{state | ledger: Map.put(state.ledger, op_id, {reply, now})}
-
-        _ ->
-          state
-      end
+      if write.op_id && not match?({:raise, _, _}, result),
+        do: %{state | ledger: Map.put(state.ledger, write.op_id, {reply, now})},
+        else: state
     end)
   end
 
-  defp reply({:run, _, _, _}, {:ok, _value, _fetched, _held, rev}), do: {:ok, rev}
-  defp reply({:exec, _, _}, {:ok, value, _fetched, _held, _rev}), do: {:ok, value}
-  defp reply({:run, _, _, _}, {:error, reason}), do: {:error, normalize(reason)}
-  defp reply({:exec, _, _}, {:error, reason}), do: {:error, reason}
+  # A client op is answered with its revision and a named refusal; a
+  # domain write with its own value and reason.
+  defp reply(write, {:ok, value, _fetched, _held, rev}),
+    do: {:ok, if(write.op_id, do: rev, else: value)}
+
+  defp reply(write, {:error, reason}),
+    do: {:error, if(write.op_id, do: normalize(reason), else: reason)}
+
   defp reply(write, {:raise, exception, stacktrace}), do: failed(write, exception, stacktrace)
 
-  # A client op's raise is answered `:internal` (its target and fields are
-  # the client's, and a frame must never take down the session); a domain
-  # caller's is re-raised in its own process.
-  defp failed({:run, _, _, _}, exception, stacktrace) do
+  # A domain caller's raise is re-raised in its own process; a client op's
+  # is answered `:internal` (its target and fields are the client's, and a
+  # frame must never take down the session).
+  defp failed(%{op_id: nil}, exception, stacktrace), do: {:raise, exception, stacktrace}
+
+  defp failed(_write, exception, stacktrace) do
     Logger.error(Exception.format(:error, exception, stacktrace))
     {:error, :internal}
   end
 
-  defp failed({:exec, _, _}, exception, stacktrace), do: {:raise, exception, stacktrace}
-
-  defp answer({:call, from}, reply), do: GenServer.reply(from, reply)
-  defp answer({:send, holder, ref}, reply), do: send(holder, {:ops_reply, ref, reply})
+  defp answer(write, reply), do: send(write.holder, {:ops_reply, write.ref, reply})
 
   # A write from another VM moved the counter: these tables are behind it.
   defp bump!(state, n \\ 1) do
