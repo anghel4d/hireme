@@ -936,7 +936,6 @@ defmodule Hireme.Ops do
     end
   end
 
-  defp inserted_id({_result, %{id: id}}), do: id
   defp inserted_id(%{id: id}), do: id
 
   defp job_groups(id), do: [{:job_apps, :id, [id]}, {:events, :job_app_id, [id]}]
