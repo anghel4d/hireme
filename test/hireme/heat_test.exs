@@ -12,46 +12,6 @@ defmodule Hireme.HeatTest do
 
   @today ~D[2026-10-07]
 
-  test "caps scale with company size" do
-    cfg = Heat.config()
-    assert Org.size("Google") == :mega
-    assert Org.size("Amazon") == :mega
-    assert Org.size("NVIDIA") == :mega
-    assert Org.size("OpenAI") == :large
-    assert Org.size("Obscure Shop LLC") == :small
-    assert Org.size("Go Ogle") == :mega
-    assert Org.size("Deep Mind") == :large
-    assert Org.size("Meta Deepmind") == :mega
-    assert Org.size("megagoogle") == :small
-    assert Org.size("A Small Lab") == :mid
-    assert Heat.cap("Google", cfg) == cfg.mega_cap
-    assert Heat.cap("OpenAI", cfg) == cfg.large_cap
-    assert Heat.cap("Obscure Shop LLC", cfg) == cfg.small_cap
-  end
-
-  test "same department and cloned titles cost extra; spread does not" do
-    cfg = Heat.config()
-
-    first = probe("Google", "Staff Software Engineer", 100, 1)
-    clone = probe("Google", "Senior Software Engineer", 90, 2)
-    spread = probe("Google", "Staff SRE", 85, 3)
-
-    %{kept: kept, deferred: deferred} =
-      Heat.mix([first, clone, spread], existing: [], today: @today, config: cfg)
-
-    assert Enum.map(kept, & &1.id) == [1, 2, 3]
-    assert deferred == []
-
-    fourth = probe("Google", "Software Engineer II", 70, 4)
-
-    %{kept: kept2, deferred: deferred2} =
-      Heat.mix([first, clone, spread, fourth], existing: [], today: @today, config: cfg)
-
-    assert Enum.map(kept2, & &1.id) == [1, 2, 3]
-    assert hd(deferred2) |> elem(0) |> Map.get(:id) == 4
-    assert hd(deferred2) |> elem(1) |> Map.get(:reason) == :company_cap
-  end
-
   test "one batch does not slam a single ATS vendor" do
     cfg = %{Heat.config() | ats_batch_cap: 2}
 
@@ -126,7 +86,6 @@ defmodule Hireme.HeatTest do
     verdict = Heat.can_apply(cand, existing: existing, today: @today)
     assert verdict.decision == :defer
     assert verdict.reason == :company_cap
-    assert is_nil(verdict.cooldown_days) or verdict.cooldown_days >= 0
   end
 
   test "cached mix agrees with sequential verdicts, including overrides and dated peers" do

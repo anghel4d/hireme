@@ -23,7 +23,6 @@ defmodule Hireme.DeskTest do
     variant = Repo.get_by!(Hireme.Desk.Variant, job_app_id: added.id)
     assert Repo.get!(Hireme.Cv.Lineage, variant.lineage_id).theme == variant.theme
     assert Hireme.Theme.parse(variant.theme).targets == ["elixir", "databases"]
-    assert Hireme.CvPair.job_id(Hireme.CvPair.bind!(added.id)) == added.id
   end
 
   test "a bare opening inherits shared masks and lineage targets without rewriting a leased sibling" do

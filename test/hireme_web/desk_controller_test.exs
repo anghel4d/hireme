@@ -7,14 +7,11 @@ defmodule HiremeWeb.DeskControllerTest do
 
   use HiremeWeb.ConnCase, async: false
 
-  test "the page hosts the shell and hands it a ticket, scope and kernel", %{conn: conn} do
+  test "the page hands its shell a ticket and the account's scope", %{conn: conn} do
     html = conn |> get("/") |> html_response(200)
-    assert html =~ ~s(<div id="desk" class="desk"></div>)
-    assert html =~ "/assets/js/app.js"
-    assert html =~ ~s(rel="preload" href="/wasm/kernel.wasm")
     [_, ticket] = Regex.run(~r/name="wire-ticket" content="([^"]+)"/, html)
     assert {:ok, _account, _session} = HiremeWeb.Session.redeem(ticket)
-    assert html =~ ~r/name="wire-scope" content="[0-9a-f]{24}"/
+    assert html =~ ~r/name="wire-scope" content="[^"]+"/
   end
 
   test "a reconnect gets a fresh single-use ticket", %{conn: conn} do

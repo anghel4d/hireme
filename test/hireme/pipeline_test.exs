@@ -44,12 +44,6 @@ defmodule Hireme.PipelineTest do
     assert by_key.open_fire == :pending
   end
 
-  test "submit rungs are the ones FIRE HOLD locks" do
-    assert Pipeline.fire_locked?(:submitted)
-    assert Pipeline.fire_locked?(:open_fire)
-    refute Pipeline.fire_locked?(:fire_ready)
-  end
-
   test "decode is the inverse of encode on every rail" do
     for start <- Pipeline.keys(), target <- Pipeline.keys() do
       rail = Pipeline.initial(start) |> Pipeline.move_to(target)

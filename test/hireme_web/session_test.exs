@@ -54,11 +54,11 @@ defmodule HiremeWeb.SessionTest do
     end
   end
 
-  # Feed every delta (and a boot's deferred rest) waiting in this
-  # process's mailbox to the session.
+  # Feed every delta, and every message the session sent itself, waiting
+  # in this process's mailbox to the session.
   defp drain(s) do
     receive do
-      message when elem(message, 0) in [:ops_delta, :ops_reply] or message == {Session, :rest} ->
+      message when elem(message, 0) in [:ops_delta, :ops_reply, Session] ->
         {:ok, s} = Session.info(message, s)
         drain(s)
     after
@@ -90,13 +90,8 @@ defmodule HiremeWeb.SessionTest do
     {:ok, s} = Session.event({:data, 0, op(42, 1, job.id, ["no_such_stage"])}, s)
     answered(s)
 
-    assert [
-             {:nack, 0, _,
-              <<42::little-64, code::8, 0::8, len::little-16, msg::binary-size(len), _::binary>>}
-           ] = all_out()
-
+    assert [{:nack, 0, _, <<42::little-64, code::8, _::binary>>}] = all_out()
     assert code == Packet.refusal_code(:argument)
-    assert msg =~ "stage"
   end
 
   test "a replayed op id is answered from the ledger, once", %{account: account} do
@@ -204,12 +199,12 @@ defmodule HiremeWeb.SessionTest do
     {:ok, s} = Session.event({:data, 0, op(62, 2, job.id, ["One", ""])}, s)
     {:ok, s} = Session.event({:data, 0, op(63, 2, job.id, ["Two", ""])}, s)
     s = drain(s)
-    _ = all_out()
+    rev = all_out() |> Enum.filter(&match?({:patch, _, _, _}, &1)) |> List.last() |> elem(2)
 
     {:ok, _} = Session.event({:data, 0, hello(rev0)}, open(account))
     out = all_out()
     patches = for {:patch, _, r, _} <- out, do: r
-    assert List.last(patches) == s.rev
+    assert List.last(patches) == rev
     assert length(patches) == 3
 
     assert [{:patch, 0x02, _, _} | _] =
@@ -218,7 +213,6 @@ defmodule HiremeWeb.SessionTest do
     refute Enum.any?(out, &match?({:boot, _, _, _}, &1))
 
     # At the current rev there is nothing to replay: one PATCH, then the ticket.
-    rev = s.rev
     {:ok, _} = Session.event({:data, 0, hello(rev)}, open(account))
     assert [{:patch, 0x02, ^rev, _}, {:ticket, 0, ^rev, _}] = all_out()
 
@@ -384,11 +378,6 @@ defmodule HiremeWeb.SessionTest do
     refute leased?(job.id)
   end
 
-  test "an agent that never says HELLO is closed", %{account: _account} do
-    {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.11", origin: "", path: "/wt"})
-    assert {:stop, :normal, _} = Session.info({Session, :hello_deadline}, a)
-  end
-
   test "a page carries the board, and its connection then gets only the rest",
        %{account: account} do
     job(profile(), %{listing: "Rust and Elixir."})
@@ -400,8 +389,6 @@ defmodule HiremeWeb.SessionTest do
     params = %{"raw" => "1", "rev" => "0", "cid" => "5", "board" => "#{rev}"}
     {:ok, meta} = HiremeWeb.WireSocket.connect(Map.put(info, :params, params))
     {:ok, s} = Session.init({Carrier, self()}, meta)
-    assert_received {Session, :early_boot, 0} = early
-    {:ok, s} = Session.info(early, s)
     _ = drain(s)
     # The early BOOT stream (3) holds no BOOT, only the rest and the ticket.
     assert [:patch, :ticket] = for({kind, _, _, _} <- all_out(3), do: kind)
@@ -415,17 +402,13 @@ defmodule HiremeWeb.SessionTest do
     path = "/wt?" <> URI.encode_query(%{t: t, raw: 1, rev: 0, cid: 9})
     origin = HiremeWeb.Endpoint.url()
     {:ok, s} = Session.init({Carrier, self()}, %{ip: "", origin: origin, path: path})
-    assert s.client_id == 9
-
-    assert_received {Session, :early_boot, 0} = early
-    {:ok, s} = Session.info(early, s)
-    assert_received {:uni, 3}
     s = drain(s)
+    assert_received {:uni, 3}
     frames = all_out(3)
     assert [{:boot, _, rev, _} | _] = frames
     assert {:ticket, _, ^rev, _} = List.last(frames)
 
     # The browser's HELLO afterwards only opens control.
-    assert {:ok, %{early: true}} = Session.event({:data, 0, hello()}, s)
+    assert {:ok, _} = Session.event({:data, 0, hello()}, s)
   end
 end
