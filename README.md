@@ -98,9 +98,13 @@ The secrets file holds, as `KEY=value` lines:
 | `CLOUDFLARE_EMAIL_TOKEN` | A dedicated API token with only Email Sending Write for that account |
 | `MAIL_FROM` | A sender address on an onboarded sending domain |
 
-Its plaintext never enters the Nix store. On a host it is an agenix secret,
-rekeyed per host from hardware-held master identities; values moved into it
-stay byte-identical, or every session and agent breaks.
+Its ciphertext in Git is the design; its plaintext never enters the Nix
+store. `secrets/master/hireme-env.age` (this file) and `hireme-acme.age` (the
+DNS-01 token for the gate's certificate) are age files encrypted to two
+YubiKeys and nothing else, so either key alone can edit them. The host's own
+flake rekeys each to that host's key with agenix-rekey, and agenix opens it
+at activation with no YubiKey present. Values moved into it stay
+byte-identical, or every session and agent breaks.
 
 `checks.x86_64-linux.dev` is the dev profile: a NixOS VM running the module
 with plaintext secrets it generates for itself, no hardware key, and the
