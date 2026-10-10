@@ -348,6 +348,30 @@ defmodule Hireme.OpsTest do
     end
   end
 
+  # The writer lock is never left held: not by a write that raises, not
+  # by a holder that dies holding it, and the next in line gets it.
+  test "the writer lock is freed by a raise and by its holder's death" do
+    assert_raise RuntimeError, fn -> Hireme.Store.transaction(fn -> raise "boom" end) end
+    assert Hireme.Store.transaction(fn -> :again end) == {:ok, :again}
+
+    me = self()
+
+    # Holding the lock alone, with no connection checked out.
+    holder =
+      Task.async(fn ->
+        :ok = GenServer.call(Hireme.Store, :lock)
+        send(me, :held)
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive :held
+    waiter = Task.async(fn -> Hireme.Store.transaction(fn -> :next end) end)
+    refute Task.yield(waiter, 50)
+    Process.unlink(holder.pid)
+    Process.exit(holder.pid, :kill)
+    assert Task.await(waiter) == {:ok, :next}
+  end
+
   # The target is the client's: an id that is another account's, or no
   # one's, is refused like any other op, and the sequencer carries on.
   test "every kind refuses a target the account cannot see", %{account: account} do

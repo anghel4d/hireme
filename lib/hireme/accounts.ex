@@ -24,6 +24,7 @@ defmodule Hireme.Accounts do
   alias Hireme.Audit
   alias Hireme.Mailer
   alias Hireme.Repo
+  alias Hireme.Store
   alias Hireme.Security
 
   @type meta :: %{optional(:ip) => String.t(), optional(:user_agent) => String.t()}
@@ -38,7 +39,8 @@ defmodule Hireme.Accounts do
   @address ~r/\A[^\s@]+@[^\s@]+\.[^\s@]+\z/
 
   @spec create!(map()) :: Account.t()
-  def create!(attrs \\ %{}), do: %Account{} |> Account.changeset(attrs) |> Repo.insert!()
+  def create!(attrs \\ %{}),
+    do: %Account{} |> Account.changeset(attrs) |> Store.write(&Repo.insert!/1)
 
   @spec get(pos_integer()) :: Account.t() | nil
   def get(id) when is_integer(id), do: Repo.get(Account, id, skip_account: true)
@@ -66,7 +68,11 @@ defmodule Hireme.Accounts do
   and the row; the token is not stored and cannot be recovered.
   """
   @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()}
-  def start_session(%Account{} = account, meta \\ %{}) do
+  def start_session(%Account{} = account, meta \\ %{}),
+    do: Store.write(fn -> start_session!(account, meta) end)
+
+  # The session and its audit event in one turn at the writer lock.
+  defp start_session!(account, meta) do
     token = Security.token(32)
     now = now()
 
@@ -130,7 +136,7 @@ defmodule Hireme.Accounts do
 
   defp touch(%Session{} = s, now) do
     if DateTime.diff(now, s.last_seen_at) >= 60 do
-      s |> Ecto.Changeset.change(last_seen_at: now) |> Repo.update!()
+      s |> Ecto.Changeset.change(last_seen_at: now) |> Store.write(&Repo.update!/1)
     else
       s
     end
@@ -138,7 +144,8 @@ defmodule Hireme.Accounts do
 
   @doc "A second factor was just presented on this session."
   @spec mark_mfa(Session.t()) :: Session.t()
-  def mark_mfa(%Session{} = s), do: s |> Ecto.Changeset.change(mfa_at: now()) |> Repo.update!()
+  def mark_mfa(%Session{} = s),
+    do: s |> Ecto.Changeset.change(mfa_at: now()) |> Store.write(&Repo.update!/1)
 
   @spec list_sessions(pos_integer()) :: [Session.t()]
   def list_sessions(account_id) do
@@ -153,7 +160,7 @@ defmodule Hireme.Accounts do
 
   @spec revoke_session(Session.t()) :: Session.t()
   def revoke_session(%Session{} = s) do
-    s = s |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
+    s = s |> Ecto.Changeset.change(revoked_at: now()) |> Store.write(&Repo.update!/1)
     Audit.record(:session_revoked, %{session_id: s.id}, %{account_id: s.account_id})
     s
   end
@@ -162,13 +169,15 @@ defmodule Hireme.Accounts do
   @spec revoke_other_sessions(Session.t()) :: non_neg_integer()
   def revoke_other_sessions(%Session{} = keep) do
     {n, _} =
-      Repo.update_all(
-        from(s in Session,
-          where: s.account_id == ^keep.account_id and s.id != ^keep.id and is_nil(s.revoked_at)
-        ),
-        [set: [revoked_at: now()]],
-        skip_account: true
-      )
+      Store.write(fn ->
+        Repo.update_all(
+          from(s in Session,
+            where: s.account_id == ^keep.account_id and s.id != ^keep.id and is_nil(s.revoked_at)
+          ),
+          [set: [revoked_at: now()]],
+          skip_account: true
+        )
+      end)
 
     if n > 0, do: Audit.record(:sessions_revoked, %{count: n}, %{account_id: keep.account_id})
     n
@@ -205,7 +214,7 @@ defmodule Hireme.Accounts do
         ip: Map.get(meta, :ip, ""),
         user_agent: String.slice(Map.get(meta, :user_agent, ""), 0, 200)
       })
-      |> Repo.insert!()
+      |> Store.write(&Repo.insert!/1)
 
       Audit.record(:link_requested, trace(email), meta)
 
@@ -292,11 +301,13 @@ defmodule Hireme.Accounts do
 
   # Single use under concurrency: the row is taken only if still unused.
   defp burn(%MagicLink{id: id}, now) do
-    Repo.update_all(
-      from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
-      [set: [used_at: now]],
-      skip_account: true
-    )
+    Store.write(fn ->
+      Repo.update_all(
+        from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
+        [set: [used_at: now]],
+        skip_account: true
+      )
+    end)
   end
 
   @doc """
@@ -390,7 +401,10 @@ defmodule Hireme.Accounts do
   # One statement, so two unlinks racing for the last two ways in cannot both win.
   defp delete_unless_last(%Identity{id: id}, account_id) do
     another = from(o in Identity, where: o.account_id == ^account_id and o.id != ^id)
-    Repo.delete_all(from(i in Identity, where: i.id == ^id and exists(another)))
+
+    Store.write(fn ->
+      Repo.delete_all(from(i in Identity, where: i.id == ^id and exists(another)))
+    end)
   end
 
   @doc """
@@ -435,7 +449,7 @@ defmodule Hireme.Accounts do
   # A visitor nobody knows: an account named after them, with this one way in.
   # Two first sign-ins racing on one subject leave one identity; the loser finds it.
   defp first_identity(provider, claim, meta) do
-    Repo.transaction(fn ->
+    Store.transaction(fn ->
       account = create!(%{name: claim.display})
 
       case insert_identity(account.id, provider, claim) do
@@ -467,7 +481,7 @@ defmodule Hireme.Accounts do
       display: Map.get(claim, :display, ""),
       verified_at: now()
     })
-    |> Repo.insert()
+    |> Store.write(&Repo.insert/1)
   end
 
   defp touch_identity(%Identity{} = identity, claim) do
@@ -476,7 +490,7 @@ defmodule Hireme.Accounts do
       display: Map.get(claim, :display, identity.display),
       verified_at: now()
     })
-    |> Repo.update!()
+    |> Store.write(&Repo.update!/1)
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)

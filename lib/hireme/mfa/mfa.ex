@@ -38,6 +38,7 @@ defmodule Hireme.Mfa do
   alias Hireme.Mfa.RecoveryCode
   alias Hireme.Mfa.WebAuthn
   alias Hireme.Repo
+  alias Hireme.Store
   alias Hireme.Security
 
   @issuer "Hireme"
@@ -162,7 +163,7 @@ defmodule Hireme.Mfa do
             last_used_at: now(),
             consecutive_failures: 0
           )
-          |> Repo.update!()
+          |> Store.write(&Repo.update!/1)
 
           proved(session, method, meta)
       end
@@ -232,7 +233,7 @@ defmodule Hireme.Mfa do
         last_used_at: now(),
         consecutive_failures: 0
       )
-      |> Repo.update!()
+      |> Store.write(&Repo.update!/1)
 
       proved(session, method, meta)
     else
@@ -250,7 +251,7 @@ defmodule Hireme.Mfa do
   @doc "Replace recovery codes with one batch insert. The returned list is the only plaintext copy."
   @spec recovery_codes!(map()) :: [String.t()]
   def recovery_codes!(meta \\ %{}) do
-    Repo.delete_all(from c in RecoveryCode, where: is_nil(c.used_at))
+    Store.write(fn -> Repo.delete_all(from c in RecoveryCode, where: is_nil(c.used_at)) end)
     codes = for _ <- 1..@recovery_count, do: random_code()
     account_id = Repo.account_id!()
     timestamp = now()
@@ -268,7 +269,7 @@ defmodule Hireme.Mfa do
         }
       end
 
-    {@recovery_count, _} = Repo.insert_all(RecoveryCode, rows)
+    {@recovery_count, _} = Store.write(fn -> Repo.insert_all(RecoveryCode, rows) end)
 
     Audit.record(:recovery_codes_issued, %{count: @recovery_count}, meta)
     Enum.map(codes, &format_code/1)
@@ -288,7 +289,7 @@ defmodule Hireme.Mfa do
           {:error, :code}
 
         found ->
-          found |> Ecto.Changeset.change(used_at: now()) |> Repo.update!()
+          found |> Ecto.Changeset.change(used_at: now()) |> Store.write(&Repo.update!/1)
           left = length(unused) - 1
           Audit.record(:recovery_code_used, %{left: left}, meta)
           Accounts.notify(session.account_id, :recovery_code_used, %{left: left})
@@ -306,8 +307,8 @@ defmodule Hireme.Mfa do
   @spec remove(Session.t(), Method.t(), map()) :: :ok | {:error, :step_up}
   def remove(%Session{} = session, %Method{} = method, meta \\ %{}) do
     if fresh?(session) do
-      Repo.delete!(method)
-      if not enrolled?(), do: Repo.delete_all(RecoveryCode)
+      Store.write(fn -> Repo.delete!(method) end)
+      if not enrolled?(), do: Store.write(fn -> Repo.delete_all(RecoveryCode) end)
 
       Audit.record(
         :mfa_method_removed,
@@ -346,7 +347,7 @@ defmodule Hireme.Mfa do
   defp counter_advanced(%Method{sign_count: old}, new, _meta) when new > old, do: :ok
 
   defp counter_advanced(%Method{} = method, new, meta) do
-    method |> Ecto.Changeset.change(disabled_at: now()) |> Repo.update!()
+    method |> Ecto.Changeset.change(disabled_at: now()) |> Store.write(&Repo.update!/1)
 
     Audit.record(
       :mfa_clone_suspected,
@@ -375,7 +376,7 @@ defmodule Hireme.Mfa do
 
       method
       |> Ecto.Changeset.change(consecutive_failures: failures, disabled_at: disabled)
-      |> Repo.update!()
+      |> Store.write(&Repo.update!/1)
 
       if disabled do
         Audit.record(:mfa_method_locked, %{method_id: method.id, kind: method.kind}, meta)
@@ -426,11 +427,13 @@ defmodule Hireme.Mfa do
     |> Method.changeset(
       Map.merge(attrs, %{name: name, account_id: account_id, verified_at: now()})
     )
-    |> Repo.insert!()
+    |> Store.write(&Repo.insert!/1)
   end
 
   defp challenge!(%Session{} = session, kind, term) do
-    Repo.delete_all(from c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
+    Store.write(fn ->
+      Repo.delete_all(from c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
+    end)
 
     %Challenge{}
     |> Challenge.changeset(%{
@@ -440,7 +443,7 @@ defmodule Hireme.Mfa do
       payload: Security.seal(term, @challenge_seal),
       expires_at: DateTime.add(now(), Security.challenge_ttl(), :second)
     })
-    |> Repo.insert!()
+    |> Store.write(&Repo.insert!/1)
   end
 
   # A challenge answers once, and only before it expires.
@@ -452,7 +455,7 @@ defmodule Hireme.Mfa do
         limit: 1
 
     with %Challenge{} = challenge <- Repo.one(query),
-         _ <- Repo.delete!(challenge),
+         _ <- Store.write(fn -> Repo.delete!(challenge) end),
          :lt <- DateTime.compare(now(), challenge.expires_at),
          {:ok, term} <- Security.unseal(challenge.payload, @challenge_seal) do
       {:ok, term}
