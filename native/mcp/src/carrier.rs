@@ -358,17 +358,13 @@ fn hello(key: &str) -> Vec<u8> {
     body.extend_from_slice(&0u64.to_le_bytes());
     body.extend_from_slice(&std::process::id().to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes());
-    let mut w = wire::Writer::new();
-    w.begin(frame::HELLO, wire::AGENT, 0);
-    w.raw(&body);
-    w.end();
-    w.buf
+    frame(frame::HELLO, wire::AGENT, 0, &body)
 }
 
-/// One frame of `kind` on `lane` around `body`.
-pub fn frame(kind: u8, lane: u64, body: &[u8]) -> Vec<u8> {
+/// One frame of `kind`, flagged `flags`, on `lane` around `body`.
+pub fn frame(kind: u8, flags: u8, lane: u64, body: &[u8]) -> Vec<u8> {
     let mut w = wire::Writer::new();
-    w.begin(kind, 0, lane);
+    w.begin(kind, flags, lane);
     w.raw(body);
     w.end();
     w.buf
@@ -402,7 +398,7 @@ mod tests {
     #[test]
     fn frames_survive_any_chunking() {
         let frames: Vec<Vec<u8>> = (0..20u64)
-            .map(|i| frame(frame::OP, i % 4, &vec![i as u8; i as usize * 3]))
+            .map(|i| frame(frame::OP, 0, i % 4, &vec![i as u8; i as usize * 3]))
             .collect();
         let bytes: Vec<u8> = frames.concat();
         for cut in [1usize, 7, 8, 13, 64, 1000] {

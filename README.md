@@ -174,7 +174,7 @@ The scoreboard reads leftover URL counts from the latest snapshot, then counts b
 
 Every job and employer gets `score_100` (0–100). A pack may set it (`score_100` or `score`, or a `Score` column in a pursue table); otherwise `Hireme.LifeEv.score/1` assigns it from company, role, fit, location, and comp along the ladder in [`alchemy/score-ladder.md`](alchemy/score-ladder.md). Eight closed bands: `frontier` 100, `labs` 90–99, `big_tech` 85–89, `systems` 70–84, `craft` 55–69, `mid` 40–54, `thin` 20–39, `kill` 0–19. A re-import without a score leaves the card's score alone.
 
-The board orders by `score_100` first, then cooler company heat, then batch, rung, and interest heat. The top bar filters by band, a minimum score, or heat state. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Agents' tools (`list_applications`, `recommend_applications`, `score_distribution`, `list_letterboxes`) rank the same board on `score_100` and take `min_score`, `band`, and `heat`; a lease can `set_score` on the one application it holds. `mix hireme.score` prints the chart. Scoring does not submit.
+The board orders by `score_100` first, then cooler company heat, then batch, rung, and interest heat. The top bar filters by band, a minimum score, or heat state. The scoreboard draws one bar per band and each bar is that band's filter; every card shows its number. Agents' tools (`list_applications`, `recommend_applications`, `score_distribution`) rank the same board on `score_100` and take `min_score`, `band`, and `heat`; an agent can `set_score` on the applications its block holds. `mix hireme.score` prints the chart. Scoring does not submit.
 
 ## HEAT governor
 
@@ -220,7 +220,7 @@ For 90 days after a generation opens, the lineage can be rewritten. After that, 
 
 An agent is a client of the desk exactly as a browser is. **`hireme-mcp`** (`native/mcp`) is the stdio MCP server an agent such as Claude Code runs locally: it opens one session (WebTransport through the gate, or the `/wire` WebSocket where UDP is blocked), authenticates once with the API key in its HELLO, and receives the account's raw tables and every delta, which it keeps resident in the desk kernel (`native/kernel`, linked natively; the browser runs the same code as WebAssembly). Every read tool is answered from that copy: the ranked board, heat and `can_apply`, the score chart, gym and net progress, one application's composed CV. Writes go up as the ops the browser sends, and Elixir decides them.
 
-An application is changed under a lease, taken by job id. The lease is held by the agent's own session, its one process on the server: while it lives, every other write to that job is refused, and so is a lease of another application on the same employer's CV lineage. An agent holds as many leases as it has parallel tasks, each on its own lane of the session; closing the lane, the session ending, or the key being revoked releases it. Changes to leased applications arrive as log notifications and are kept for `letterbox_events`. Naming open fire stays on the desk, and nothing submits an application.
+Applications are changed under a lease on a block: a contiguous run of the account's application numbers (`no`, from 1, never reused), taken with `lease {"count":16}` or `lease {"from":1,"to":16}`. Asked for a size, the desk grants an aligned power-of-two block, as a buddy allocator would; asked for a range, exactly that, with a warning when it runs past the desk or sits off its alignment. A block is all or nothing, and one session holds one, on its own lane. While it lives, every other write to those applications is refused, and the first CV write for an employer claims that employer's CV lineage from other agents. `release {}`, the session ending, or the key being revoked gives it back. Any tool called with `{}` prints its call shape, a refusal reads like a rustc diagnostic, and `hireme {"explain":"<code>"}` gives a code's long form. Changes to leased applications arrive as log notifications and are kept for `letterbox_events`. Naming open fire stays on the desk, and nothing submits an application.
 
 ```
 cargo build --release --manifest-path native/mcp/Cargo.toml
@@ -258,10 +258,10 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme/import.ex` | JSON, markdown table, freshness note; the `seed/` loader |
 | `lib/hireme/heat/heat.ex` | Company/ATS heat governor: decay, caps, mix, `can_apply` |
 | `alchemy/heat.md` | Heat defaults (half-lives, size tiers, ATS caps) |
-| `lib/hireme/letterbox.ex` | Leases: one holder process per application, and its employer's lineage |
+| `lib/hireme/letterbox.ex` | Leases: an agent session's one block of applications, and the employers' lineages its CV writes claim |
 | `lib/hireme_web/endpoint.ex` | The web layer's entry: endpoint, static paths, error renderers |
 | `lib/hireme_web/router.ex` | Routes; the desk page (ticket, gate, scope and schema metas) and the reconnect ticket |
-| `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, an agent's leases as lanes; the `/wire` WebSocket carrier |
+| `lib/hireme_web/session.ex` | One wire session per tab or agent, on either carrier: HELLO, BOOT/resume, ops, deltas, account RPC, an agent's block and its lane; the `/wire` WebSocket carrier |
 | `lib/hireme_web/gate.ex` | The BEAM end of the gate's Unix socket; hosts the Session in the connection process |
 | `lib/hireme_web/auth.ex` | Who is asking: the session cookie, the account on the process, the security headers, sign-out |
 | `lib/hireme_web/sign_in.ex` | The sign-in pages: mailed links, GitHub and X over OAuth 2.0 with PKCE, adding a way in |
@@ -270,7 +270,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `lib/hireme_web/packet.ex` | Frames and columnar table blocks from `priv/wire/schema.txt`; raw rows in, bytes out |
 | `native/kernel/` | The desk kernel (WebAssembly): raw tables, derived cards/heat/scoreboard, predictions, board order, select |
 | `native/gate/` | The WebTransport gate (Rust, quinn/wtransport): QUIC, TLS, admission, the Unix-socket bridge |
-| `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, a lane per lease |
+| `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, one block of applications |
 | `priv/wire/schema.txt` | The wire: frames, tables, columns, ops, refusals; its hash is in every frame |
 | `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
 | `assets/js/shell.ts` | Model, update, draw |
