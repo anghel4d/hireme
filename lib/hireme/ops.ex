@@ -560,13 +560,15 @@ defmodule Hireme.Ops do
   end
 
   # One write of the batch. Alone, a refusal rolls back the transaction;
-  # among several, its savepoint.
+  # among several, its savepoint. A write of one statement needs none: a
+  # statement that fails is undone by the database itself.
   defp apply_one(%{refused: reason}, _state, _several?) when reason != nil, do: {:error, reason}
 
   defp apply_one(%{command: command, holder: holder}, state, several?) do
     Process.put(@holder, holder)
     Process.put(@held, [])
-    if several?, do: @store.savepoint(:open)
+    saved? = several? and not one_statement?(command)
+    if saved?, do: @store.savepoint(:open)
 
     result =
       try do
@@ -581,13 +583,13 @@ defmodule Hireme.Ops do
 
     case result do
       {:ok, value} ->
-        if several?, do: @store.savepoint(:keep)
+        if saved?, do: @store.savepoint(:keep)
         # Read what the write reached on the connection it holds: the
         # rows as they will commit, without a second checkout.
         {:ok, value, prefetch(groups(command, value), state.raw), held}
 
       refused ->
-        if several?, do: @store.savepoint(:undo)
+        if saved?, do: @store.savepoint(:undo)
 
         case refused do
           {:error, reason} -> {:error, reason}
@@ -596,6 +598,11 @@ defmodule Hireme.Ops do
         end
     end
   end
+
+  # `Hireme.Desk`'s plain-column writes: a lease check, then one UPDATE.
+  defp one_statement?({:score, _, _}), do: true
+  defp one_statement?({kind, _, _, _}), do: kind in [:next, :note]
+  defp one_statement?(_command), do: false
 
   defp number(results, first) do
     {numbered, _} =
