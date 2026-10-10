@@ -129,12 +129,12 @@ defmodule HiremeWeb.Session do
   """
   @spec init(term(), map()) :: {:ok, %__MODULE__{}} | {:refuse, 403 | 404 | 429}
   def init(carrier, meta) do
+    # Subscribed before the check, so a drain that begins in between still reaches it.
+    Phoenix.PubSub.subscribe(Hireme.PubSub, __MODULE__.Drain.topic())
     if __MODULE__.Drain.draining?(), do: {:refuse, 429}, else: admit(carrier, meta)
   end
 
   defp admit(carrier, meta) do
-    Phoenix.PubSub.subscribe(Hireme.PubSub, __MODULE__.Drain.topic())
-
     s = %__MODULE__{carrier: carrier, mod: carrier_mod(carrier), peer: Map.get(meta, :ip, "")}
 
     case meta do
@@ -712,7 +712,7 @@ defmodule HiremeWeb.Session.Drain do
   its revision. It waits, up to `:drain_ms`, for them to close.
   """
 
-  # Longer than the wait in `terminate/2`, so it is not cut short.
+  # Longer than the wait in `terminate/2` (`:drain_ms`, at most 9 s), so it is not cut short.
   use GenServer, shutdown: 10_000
 
   @key {__MODULE__, :draining}
@@ -733,7 +733,11 @@ defmodule HiremeWeb.Session.Drain do
   def terminate(_reason, _s) do
     :persistent_term.put(@key, true)
     Phoenix.PubSub.broadcast(Hireme.PubSub, topic(), HiremeWeb.Session.Drain)
-    deadline = System.monotonic_time(:millisecond) + Application.get_env(:hireme, :drain_ms, 5000)
+
+    deadline =
+      System.monotonic_time(:millisecond) +
+        min(Application.get_env(:hireme, :drain_ms, 5000), 9000)
+
     wait(deadline)
   end
 
