@@ -14,7 +14,7 @@
 # Environment: GATE_INITIAL_WINDOW passes through to the gate, GATE_BIN
 # picks another gate build (the release's, to include the half-RTT patch),
 # LIMIT is netem's queue in packets, MIX the mix to run the BEAM with.
-# NODE_PATH (holding playwright-core) and CHROME as for bench/browser.mjs
+# NODE_PATH (holding playwright-core) and CHROME as for bench/desk.mjs
 # when --origin asks for Chromium. Needs unshare(1) with unprivileged user
 # namespaces, tc and the netem qdisc.
 set -euo pipefail

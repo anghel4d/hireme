@@ -282,20 +282,24 @@ account.
 
 ## Step-up
 
-Invariant: every route in the router's `:step_up` block is refused
-with 403 `{"error":"step_up"}` unless `Hireme.Mfa.fresh?/1`.
+Invariant: every command in `HiremeWeb.Account`'s `@step_up`
+(`create_key`, `revoke_key`, `revoke_other_sessions`, `remove_factor`,
+`recovery_codes`, `unlink`, `begin_totp`, `confirm_totp`,
+`begin_webauthn`, `confirm_webauthn`) and the router's one `:step_up`
+route (`POST /api/account/identities`) is refused with 403 `step_up`
+unless `Hireme.Mfa.fresh?/1`.
 
-- Enumerate the block (`mix phx.routes`): keys create and revoke,
-  sessions revoke-others, every `/mfa/*` write, identities link and
-  unlink. Call each with a stale session and assert 403 before any
+- Call each with a stale session and assert the refusal before any
   side effect (no row written, no mail).
 - Freshness: with a factor, `mfa_at` within 300 s; without one,
   `authenticated_at` within 300 s. Age both and assert the flip at the
   boundary. A stale no-factor account cannot step up with a code (it
   has none); the only path is a new sign-in.
-- Step-up routes (`/api/account/step-up/*`) require a non-pending
-  session; a pending session must not be able to mark `mfa_at` through
-  them (that is the factor page's job).
+- The proofs are the `step_up_totp`, `step_up_recovery`,
+  `step_up_webauthn` and `step_up_webauthn_confirm` commands. They ride
+  the wire session, and a pending session is refused its ticket
+  (`require_account`), so a pending session cannot mark `mfa_at`
+  anywhere but the factor page.
 - The shell retries exactly once after a proof; fuzz by proving and
   then failing the retried request (revoke the key between) and
   assert no duplicate action.
@@ -312,10 +316,10 @@ with no detail; the secret rests only as a hash.
   a key of the right id with a wrong secret and one with a wrong id
   must take the same time within noise.
 - `expires_at` in the past, `revoked_at` set, account suspended: all
-  refused at the next HELLO. Known gap to confirm and file: a session
-  that is already open is not torn down on revoke or expiry until it
-  closes (the browser session rechecks its own every minute; confirm
-  the agent session does the same for its key).
+  refused at the next HELLO. An open agent session ends when its key is
+  revoked (`ApiKeys.revoke` broadcasts `api_key_dead`) and rechecks
+  `ApiKeys.usable?/2` every 60 s, so expiry ends it within a minute;
+  the browser session rechecks its own the same way.
 - Transport: the key travels only in the agent's HELLO on its wire
   session, through the gate or `/wire`, never in a header; fuzz a HELLO
   with a malformed key, with two keys, and with a browser ticket in its
@@ -353,18 +357,12 @@ with no detail; the secret rests only as a hash.
 - Every message is plain text, from `config :hireme, :mail_from`, with
   a subject starting `Hireme:` for notices. Subjects interpolate a key
   name, a method kind, or an identity display: fuzz those with CRLF,
-  very long strings, and non-ASCII, and assert the SMTP conversation
+  very long strings, and non-ASCII, and assert the provider request
   (or the `%Swoosh.Email{}` in test) shows one subject header,
   RFC 2047 encoded where needed.
 - `Accounts.notify/3` mails every `provider: :email` identity of the
   account and records `:notified`; an account with no email identity
   still gets the audit row.
-- Production SMTP (`config/runtime.exs`): `verify: :verify_peer`,
-  system `cacerts`, SNI, https hostname match, `depth: 99`, TLS 1.2 or
-  1.3; port 465 is implicit TLS (`ssl: true`, `sockopts`), any other
-  port is STARTTLS `:always` (`tls_options`, empty `sockopts`).
-  Prove it with `:gen_smtp_client.open/1` against the real relay with
-  `auth: :never`, which sends nothing.
 
 ## Rate limiter
 
@@ -385,8 +383,8 @@ with no detail; the secret rests only as a hash.
   that as an operational note, not a bug.
 - `PHX_HOST` drives `check_origin`, the WebAuthn origin, the OAuth
   `redirect_uri`, and mailed link URLs; one wrong host breaks all four.
-- `SMTP_HOST` is required in prod; the release must refuse to boot
-  without it.
+- `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_EMAIL_TOKEN` are required in
+  prod; the release must refuse to boot without them.
 - `/dev/sign-in` and `/dev/mailbox` are behind `compile_env
   :dev_routes`; assert 404 in a prod build.
 - `mix assets.deploy` then `mix release`; the digest manifest exists;

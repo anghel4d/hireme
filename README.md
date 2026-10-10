@@ -27,9 +27,6 @@ Run `mix format --check-formatted`, `mix compile --warnings-as-errors`,
 `mix credo --strict`, and `mix test`. ElixirLS with `mixEnv: "test"` and
 Dialyzer enabled checks success typings beyond compiler and Credo warnings.
 Wait for that analysis to finish; a successful compile alone does not clear its diagnostics.
-Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
-socket authentication returns an expiry alongside the account and key IDs, and
-URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
 
 Check TypeScript with `tsc -p assets/tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters`.
 For each crate under `native/{wire,kernel,mcp,gate}`, run `cargo clippy --all-targets -- -D warnings`
@@ -55,7 +52,6 @@ Known-ATS scaling uses `bench/ats_fixture.exs` on a disposable canonical fixture
 copy under `/tmp/hireme-perf-ats-`, with `BENCH_HOT_JOBS` selecting the hot cohort.
 For browser WebAuthn, the testbed sets Wax's origin to `http://localhost:$PORT`;
 the relying-party ID remains automatic and user verification remains required.
-CDP virtual-authenticator measurements do not include physical hardware or human latency.
 
 The [performance audit](docs/performance.md) records baseline/final latency
 quantiles, achieved throughput, correctness checks, raw evidence and limitations.
@@ -133,8 +129,6 @@ A browser holds a session: one `__Host-hireme` cookie (Secure, HttpOnly, SameSit
 An account may enrol a second factor: an authenticator app, a passkey in an Apple, Google, or other keychain, or a hardware key such as a YubiKey, with recovery codes issued alongside the first. Never SMS, never email. Once one is enrolled, a new session must present it before anything is served, and the Account page asks for one again, within five minutes, before a key is minted or revoked, a factor or a way in is added or removed, or other sessions are ended. An account with no factor confirms those by having signed in within the last five minutes. `SECURITY.md` says which standards each piece answers.
 
 An agent holds an API key. The Account page mints as many named keys as you like, each shown exactly once as `hm_<id>_<secret><check>` and stored as a hash, optionally expiring, revocable at any time. An agent presents it once, in its session's HELLO (see Agents). A key reads and writes its own account and nothing else; a wrong, revoked, expired, or foreign key is refused at HELLO with no detail. Key authentications are throttled per peer, including successful ones; one session carries every lease.
-
-The migration was rewritten for accounts; an existing local database needs `mix ecto.reset`.
 
 ## `seed/`
 
@@ -288,7 +282,6 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `assets/js/factor.ts` | The factor page's passkey button |
 | `alchemy/distillation-method.md` | DESERT STORM job-alchemy operator method (wide → crème → keepers) |
 | `alchemy/score-ladder.md` | Life-EV `score_100` anchors and descending rungs |
-| `.cursor/skills/job-alchemy-distillation/SKILL.md` | Cursor skill for the same distillation funnel |
 
 ## License
 

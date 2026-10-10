@@ -13,7 +13,7 @@
 //   keep-alives. With no Origin and no ticket the production BEAM holds a
 //   pending agent session for at most 2 s and drops it, so no credential is
 //   involved.
-// - chromium (with --origin; NODE_PATH and CHROME as for bench/browser.mjs): a
+// - chromium (with --origin; NODE_PATH and CHROME as for bench/desk.mjs): a
 //   page served locally under that origin opens a session. Against production
 //   it carries no ticket, so the BEAM refuses it with 403 after the CONNECT:
 //   the time until `ready` rejects is exactly the cold connection cost a desk
