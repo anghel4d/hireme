@@ -29,9 +29,9 @@ defmodule Hireme.Release do
   another name it cannot see). One host, one filesystem whose locks
   SQLite trusts; nothing is claimed across hosts.
   """
-  def lock_path do
+  def lock_path(repo \\ Repo) do
     %{rows: [[_, "main", file] | _]} =
-      Repo.query!("PRAGMA database_list", [], skip_account: true)
+      repo.query!("PRAGMA database_list", [], skip_account: true)
 
     file <> ".migrate"
   end
@@ -51,19 +51,6 @@ defmodule Hireme.Release do
     after
       Sqlite3.close(conn)
     end
-  end
-
-  @doc "Applies all pending migrations without starting the application (`bin/hireme eval`)."
-  @spec migrate() :: :ok
-  def migrate do
-    :ok = Application.ensure_loaded(:hireme)
-
-    {:ok, _, _} =
-      Ecto.Migrator.with_repo(Repo, fn repo ->
-        leader(fn -> Ecto.Migrator.run(repo, :up, all: true) end)
-      end)
-
-    :ok
   end
 end
 

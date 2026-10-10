@@ -40,23 +40,26 @@ defmodule Hireme.ReleaseTest do
     assert n > 0
   end
 
-  test "a failed backup is kept in its status, and leaves nothing behind", %{dir: dir} do
+  test "a failed backup is kept in its status", %{dir: dir} do
     File.write!(dir, "not a directory")
     pid = start(dir)
     assert {:error, _} = Backup.run(pid)
     assert {:error, _} = Backup.status(pid)
   end
 
-  test "boot and eval migrate under one lock, wait for another VM's, and apply nothing twice" do
+  test "the boot migrator waits for another VM's lock, then applies nothing twice" do
+    applied = fn ->
+      Hireme.Repo.query!("SELECT count(*) FROM schema_migrations", [], skip_account: true).rows
+    end
+
+    before = applied.()
     {:ok, other} = Exqlite.Sqlite3.open(Hireme.Release.lock_path())
     :ok = Exqlite.Sqlite3.execute(other, "BEGIN EXCLUSIVE")
     booting = Task.async(&Hireme.Release.start_link/0)
-    eval = Task.async(&Hireme.Release.migrate/0)
     refute Task.yield(booting, 200)
-    refute Task.yield(eval, 0)
     Exqlite.Sqlite3.close(other)
     assert :ignore = Task.await(booting)
-    assert :ok = Task.await(eval)
+    assert applied.() == before
   end
 
   test "the lock is the same through any symlinked path to the database", %{dir: dir} do
