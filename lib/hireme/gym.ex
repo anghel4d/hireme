@@ -9,7 +9,6 @@ defmodule Hireme.Gym do
   write transaction.
   """
 
-  alias Hireme.Closed
   alias Hireme.Form
   alias Hireme.Gym.Problem
   alias Hireme.Gym.Rep
@@ -33,18 +32,6 @@ defmodule Hireme.Gym do
 
   @spec outcomes() :: [atom()]
   def outcomes, do: @outcomes
-
-  @spec parse_platform(term()) :: {:ok, atom()} | :error
-  def parse_platform(value), do: Closed.parse(@platforms, value)
-
-  @spec parse_topic(term()) :: {:ok, atom()} | :error
-  def parse_topic(value), do: Closed.parse(@topics, value)
-
-  @spec parse_difficulty(term()) :: {:ok, atom()} | :error
-  def parse_difficulty(value), do: Closed.parse(@difficulties, value)
-
-  @spec parse_outcome(term()) :: {:ok, atom()} | :error
-  def parse_outcome(value), do: Closed.parse(@outcomes, value)
 
   @spec set_target(term()) :: {:ok, pos_integer()} | {:error, :target}
   def set_target(value) do

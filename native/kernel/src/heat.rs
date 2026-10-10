@@ -1105,8 +1105,8 @@ pub struct Company {
     families: [u32; 7],
 }
 
-/// Heat.snapshot/2, prepared (Heat.prepare/4): the hot jobs in id order,
-/// grouped by company and vendor, with the ATS loads summed for today.
+/// The hot jobs in id order, grouped by company and vendor, with the ATS
+/// loads summed for today: what the server's governor reads per verdict.
 pub struct Snapshot {
     /// Indexes of the hot jobs (into the caller's job list), by id.
     pub hot: Vec<usize>,
@@ -1117,7 +1117,7 @@ pub struct Snapshot {
     pub companies: Vec<Company>,
     /// Per vendor: load (vendor half-life), n, members (indexes into hot).
     pub vendors: Vec<(u8, f64, Vec<usize>)>,
-    /// index_ats_loads: vendor → sum, (vendor, tenant) → sum.
+    /// ATS loads: vendor → sum, (vendor, tenant) → sum.
     pub vendor_sums: [f64; 15],
     pub tenant_sums: BTreeMap<(u8, String), f64>,
 }

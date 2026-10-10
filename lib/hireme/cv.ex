@@ -51,9 +51,6 @@ defmodule Hireme.Narrative do
   def get_by_user(user_id) when is_integer(user_id), do: Repo.get_by(Row, user_id: user_id)
   def get_by_user(_), do: nil
 
-  def for_profile(%{user_id: user_id}), do: get_by_user(user_id)
-  def for_profile(_), do: nil
-
   def write!(%User{id: user_id}, body) when is_binary(body) do
     {:ok, row} =
       Hireme.Ops.exec(
@@ -74,18 +71,9 @@ defmodule Hireme.Narrative do
     row
   end
 
-  def delete(%Row{} = row) do
-    {:ok, result} = Hireme.Ops.exec({:insert, :narratives, fn -> {Repo.delete(row), row} end})
-    elem(result, 0)
-  end
-
   def update!(%Row{} = row, body) when is_binary(body) do
     row |> Row.changeset(%{body: body, version: row.version + 1}) |> Repo.update!()
   end
-
-  @doc "Text that may ride along with an application. Private narratives contribute nothing."
-  def for_application(%Row{private: false, body: body}), do: body
-  def for_application(_), do: nil
 end
 
 defmodule Hireme.Kv do
@@ -178,7 +166,13 @@ defmodule Hireme.Theme do
   @spec empty?(t()) :: boolean()
   def empty?(%__MODULE__{} = theme), do: theme == %__MODULE__{}
 
-  defp fetch(map, key), do: Hireme.Attrs.get(map, key)
+  # The atom key, else its string twin.
+  defp fetch(map, key) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, v} -> v
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
 
   defp text(value) when is_binary(value) do
     case String.trim(value) do

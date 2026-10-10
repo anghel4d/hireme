@@ -7,7 +7,6 @@ defmodule Hireme.Net do
   lane URL lives in kv (`net` / `broadside_lane`).
   """
 
-  alias Hireme.Closed
   alias Hireme.Form
   alias Hireme.Kv
   alias Hireme.Net.Entry
@@ -21,12 +20,6 @@ defmodule Hireme.Net do
 
   @spec channels() :: [atom()]
   def channels, do: @channels
-
-  @spec parse_kind(term()) :: {:ok, atom()} | :error
-  def parse_kind(value), do: Closed.parse(@kinds, value)
-
-  @spec parse_channel(term()) :: {:ok, atom()} | :error
-  def parse_channel(value), do: Closed.parse(@channels, value)
 
   @spec set_lane(term()) :: {:ok, String.t()} | {:error, :lane}
   def set_lane(url) when is_binary(url) do

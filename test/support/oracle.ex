@@ -478,16 +478,7 @@ defmodule Hireme.Oracle do
             {%{error: reason}, %{rows: %{}, gone: %{}}}
         end
 
-      flush()
       %{kind: "op", op: op, result: result, rows: typed_rows(delta.rows), gone: delta.gone}
-    end
-  end
-
-  defp flush do
-    receive do
-      {:desk_event, _} -> flush()
-    after
-      0 -> :ok
     end
   end
 

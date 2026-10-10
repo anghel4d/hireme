@@ -317,9 +317,6 @@ defmodule Hireme.Heat do
 
   def write_override(_, _), do: {:error, :reason}
 
-  @spec parse_state(term()) :: {:ok, atom()} | :error
-  def parse_state(state), do: Hireme.Closed.parse([:all, :cool, :warm, :hot, :blocked], state)
-
   # Parse each distinct URL once per mix/snapshot, not once per candidate/peer.
   defp ats_index(jobs) do
     jobs |> Enum.map(&url_of/1) |> Enum.uniq() |> Map.new(&{&1, Ats.parse(&1)})
