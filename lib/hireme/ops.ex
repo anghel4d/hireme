@@ -49,6 +49,8 @@ defmodule Hireme.Ops do
   @holder {__MODULE__, :holder}
   @ledger_ttl 24 * 3600
   @sweep_ms 3_600_000
+  @sweep_rows 1000
+  @sweep_pause_ms 10
   @batch 64
   @checkpoint_ms 1_000
   @store Application.compile_env(:hireme, :store, Hireme.Store)
@@ -386,9 +388,18 @@ defmodule Hireme.Ops do
 
   @impl true
   def handle_info(:sweep, state) do
-    cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
-    @store.sweep(state.account, cutoff)
+    send(self(), {:sweep, DateTime.add(DateTime.utc_now(), -@ledger_ttl)})
     Process.send_after(self(), :sweep, @sweep_ms)
+    {:noreply, state}
+  end
+
+  # A chunk at a time, each its own short commit, with a pause between:
+  # the database's one writer lock is never held long, and another
+  # account's writer waiting on it gets in.
+  def handle_info({:sweep, cutoff}, state) do
+    if @store.sweep(state.account, cutoff, @sweep_rows) == @sweep_rows,
+      do: Process.send_after(self(), {:sweep, cutoff}, @sweep_pause_ms)
+
     {:noreply, state}
   end
 
