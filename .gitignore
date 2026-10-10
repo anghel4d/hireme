@@ -16,6 +16,10 @@
 !/nix/
 !/nix/*.nix
 
+!/secrets/
+!/secrets/master/
+!/secrets/master/*.age
+
 !/config/
 !/config/*.exs
 
