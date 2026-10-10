@@ -63,11 +63,13 @@ the account routes, mix tasks, and direct `Repo` calls without `put_account`.
   casts exclude `:account_id`).
 - Every op whose target is owned by B, sent as A: refused `not_found`,
   the same answer as for an id no one owns (existence must not leak).
-- A LEASE of B's letterbox on a session authenticated with A's key:
-  refused.
+- A `lease/acquire` on a session authenticated with A's key hands out
+  A's entries only; an op from that block on one of B's ids: refused
+  `not_found`.
 - Deltas: with both accounts subscribed, a write under A publishes only
-  on `desk:<A>`; grep `Phoenix.PubSub.broadcast` for any topic that is
-  not `Hireme.Desk.topic/1`.
+  on `desk:<A>`; grep `Phoenix.PubSub.broadcast` for any topic not keyed
+  by the account (`Hireme.Desk.topic/1`, `Hireme.ApiKeys.topic/1`,
+  `Hireme.Audit.topic/1`).
 - Audit: `Hireme.Audit.recent/1` under B never returns A's events.
 - Concurrency: `Task.async` without `Repo.put_account/1` raises; the
   tests pin the account inside the task on purpose.
@@ -98,12 +100,13 @@ or reused after revocation.
   from two sessions leave at least one alive.
 - Pending: a session with `mfa_at = nil` on an enrolled account is
   routed to `/sign-in/factor` by `require_account`; JSON gets 401
-  `{"error":"second_factor"}`. A pending session must not read or
-  write anything under `/api/` except the factor routes.
+  `{"error":"second_factor"}`. A pending session must not open a wire
+  session or write anything under `/api/`; only `/sign-in/factor/*`
+  answers it.
 
 ## CSRF, headers, parsers
 
-- Every `POST`, `PATCH`, `DELETE` under `/` and `/api` without a valid
+- Every `POST` under `/` and `/api` without a valid
   token: 403 (`Plug.CSRFProtection`). JSON takes `x-csrf-token`;
   forms take `_csrf_token`. Fuzz: token from another session, token
   with one byte changed, token in the wrong place.
@@ -323,8 +326,8 @@ with no detail; the secret rests only as a hash.
 - Limit `api_key_peer`: 20 failures per minute per peer; a valid key
   from the throttled peer is refused until the window passes. Same
   proxy caveat as magic links.
-- Display: `prefix` (4 chars after `hm_`) only; the JSON never carries
-  the secret after the create reply.
+- Display: `prefix` (4 chars after `hm_`) only; the `acct_keys` table
+  never carries the secret after the create reply.
 - Notices: create and revoke mail every email identity.
 
 ## Identities and the account page
@@ -336,10 +339,9 @@ with no detail; the secret rests only as a hash.
 - `sign_in_with/3` on a never-seen subject creates account and
   identity in one transaction; two parallel first sign-ins with the
   same subject leave one account and one identity.
-- Settings JSON shape: `account`, `keys`, `sessions`, `security`
-  (`methods`, `recovery_codes_left`, `fresh`), `identities`,
-  `sign_in_methods`. Nothing in it is a secret: grep the response for
-  `hm_`, base32, or a 43-char base64url string.
+- Account tables on the wire: `acct`, `acct_keys`, `acct_sessions`,
+  `acct_identities`, `acct_factors`. Nothing in them is a secret: grep
+  the frames for `hm_`, base32, or a 43-char base64url string.
 - XSS: key names, method names, identity displays, and the `?linked=`
   and `?link_error=` query values are rendered by the shell's escaping
   template tag or mapped through a fixed table. Fuzz each with
@@ -367,8 +369,8 @@ with no detail; the secret rests only as a hash.
 ## Rate limiter
 
 - `Hireme.RateLimit` is Hammer on ETS, per node. Policies and keys are
-  `Hireme.Security.limit/2` only; grep `lib/` for `RateLimit.hit` and
-  expect exactly one call site.
+  `Hireme.Security.limit/2`, plus the single-use wire ticket; grep
+  `lib/` for `RateLimit.hit` and expect those two call sites.
 - Named policies: `link_address`, `link_peer`, `redeem_peer`,
   `mfa_account`, `api_key_peer`. Assert each cap at the boundary and
   that windows do not bleed between names.

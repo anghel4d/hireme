@@ -117,7 +117,7 @@ Do not run `mix setup`, `mix ecto.setup`, or `mix ecto.reset` against production
 
 ## Accounts
 
-An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and letterboxes do not exist for another. Sign-in is passwordless, with three ways in: a link mailed to an address, GitHub, and X. The first sign-in by any of them makes an account. The Account page adds more (another address, a GitHub user, an X user) and removes any but the last. A mailed link works once, for ten minutes; it opens a page that names the address, and only that page's button spends it, so a mail scanner that follows links spends nothing. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.
+An account is the standalone thing a desk belongs to. Every row the desk stores names its account, and `Hireme.Repo` adds that predicate to every read, so one account's applications, batches, CVs, lanes, and leases do not exist for another. Sign-in is passwordless, with three ways in: a link mailed to an address, GitHub, and X. The first sign-in by any of them makes an account. The Account page adds more (another address, a GitHub user, an X user) and removes any but the last. A mailed link works once, for ten minutes; it opens a page that names the address, and only that page's button spends it, so a mail scanner that follows links spends nothing. In development, the sign-in page also offers a one-click sign-in to the local desk's account; that route is not compiled into other environments.
 
 GitHub and X are offered once their client id and secret are set: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for a GitHub OAuth app, `X_CLIENT_ID` and `X_CLIENT_SECRET` for an X app with OAuth 2.0 as a confidential client. Register `https://<host>/auth/github/callback` and `https://<host>/auth/x/callback` exactly. Production mail uses Cloudflare Email Sending over HTTPS (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_EMAIL_TOKEN`, `MAIL_FROM`); development mail lands at `/dev/mailbox`. Queued delivery counts as accepted; permanent bounces and missing recipients are delivery errors. Requests are not automatically retried, avoiding duplicate sign-in messages.
 
@@ -182,19 +182,19 @@ The pipeline does not snap onto a company or an ATS. `Hireme.Heat` is a decaying
 
 Company load rises for `fire_ready` / `open_fire` / `submitted` / `reply` / `closed`, halves every 35 days, and the cap scales with org size (Google/Amazon/Meta/NVIDIA/Microsoft = 4.0 across departments; a small shop = 1.0). Same department and cloned titles cost extra. ATS vendor and tenant are inferred from the apply URL; one day pack may not put more than 20 on a single vendor. Overrides need an explicit flag and a logged reason.
 
-Heatmap sits under the Life-EV chart. MCP: `heat_status`, `can_apply`. CLI: `mix hireme.heat`. Defaults: [`alchemy/heat.md`](alchemy/heat.md).
+Heatmap sits under the Life-EV chart. MCP: `heat_status`, `can_apply`. Defaults: [`alchemy/heat.md`](alchemy/heat.md).
 
 ## Gym
 
 Jumping jacks / lifting for the fight: LeetCode, Codeforces, systems drills. Necessary conditioning, not the job. `Hireme.Gym` tracks problems (platform, topic, difficulty) and reps (solved / attempt / skip). Daily target lives in kv (`gym` / `daily_target`, default 3). Streak is consecutive days with a solved rep. Weekly pace (`score` 0–100) is solved-this-week against `target × 7`. It is **not** Life-EV `score_100`.
 
-The desk scoreboard shows `gym today/target · streak · pace`. The Gym lens (`?lens=gym`) logs a rep and sets the target. Directory MCP: `gym_status`, `gym_log`, `gym_set_target`. CLI: `mix hireme.gym`.
+The desk scoreboard shows `gym today/target · streak · pace`. The Gym lens (`?lens=gym`) logs a rep and sets the target. Directory MCP: `gym_status`, `gym_log`, `gym_set_target`.
 
 ## Networking
 
 Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadside Observer, ship the artifact, post the work (X and similar), keep outreach drafts here until they ship.
 
-`Hireme.Net` entries are a closed set: `observer`, `artifact`, `post`, `draft`. Channels: `broadside`, `x`, `other`. The Observer research URL lives in kv (`net` / `broadside_lane`). The scoreboard shows shipped-this-week, open drafts, and observer runs. The Net lens (`?lens=net`) sets the lane and logs an entry. Directory MCP: `net_status`, `net_log`, `net_set_lane`. CLI: `mix hireme.net`. FIRE HOLD — networking does not submit jobs.
+`Hireme.Net` entries are a closed set: `observer`, `artifact`, `post`, `draft`. Channels: `broadside`, `x`, `other`. The Observer research URL lives in kv (`net` / `broadside_lane`). The scoreboard shows shipped-this-week, open drafts, and observer runs. The Net lens (`?lens=net`) sets the lane and logs an entry. Directory MCP: `net_status`, `net_log`, `net_set_lane`. FIRE HOLD — networking does not submit jobs.
 
 ## Board
 

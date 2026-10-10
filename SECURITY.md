@@ -4,7 +4,7 @@ How Hireme keeps one account's desk its own, and what it answers to. Standards a
 
 ## Threat model
 
-Assets: the applications, CVs, lanes, letterboxes, and keys that belong to an account. Actors: a browser signed in to an account, an agent holding one of its API keys, and everyone else. Threats answered here: a stolen or guessed credential, a replayed code, a forged request from another origin, a cloned authenticator, a leaked key, a leaked database, one account reading another. Out of scope: a compromised browser or operating system, a compromised host, and a signed-in person acting against their own account.
+Assets: the applications, CVs, lanes, leases, and keys that belong to an account. Actors: a browser signed in to an account, an agent holding one of its API keys, and everyone else. Threats answered here: a stolen or guessed credential, a replayed code, a forged request from another origin, a cloned authenticator, a leaked key, a leaked database, one account reading another. Out of scope: a compromised browser or operating system, a compromised host, and a signed-in person acting against their own account.
 
 ## Tenancy
 
@@ -38,11 +38,11 @@ The step-up window and the pending state are properties of the session row, so a
 
 ## API keys
 
-An agent holds a named key, `hm_<id>_<secret><check>`: a 12-character public id, a 43-character base62 secret (256 bits) and a 6-character checksum so a mistyped key is refused before any lookup. The server stores the SHA-256 of the secret and shows the secret once (ASVS 7.2.1). Keys may expire, are revocable at once, and are capped at one hundred per account. Authentication happens at the websocket upgrade from the `x-api-key` header or the `base64url.bearer.phx.<base64 key>` subprotocol; a wrong, revoked, expired, or foreign key is refused without detail, and a peer address is limited to twenty failures a minute. Comparison is constant-time. A key reaches its own account and nothing else.
+An agent holds a named key, `hm_<id>_<secret><check>`: a 12-character public id, a 43-character base62 secret (256 bits) and a 6-character checksum so a mistyped key is refused before any lookup. The server stores the SHA-256 of the secret and shows the secret once (ASVS 7.2.1). Keys may expire, are revocable at once, and are capped at one hundred per account. An agent presents the key once, in the HELLO frame of its wire session, never in a header or URL; a wrong, revoked, expired, or foreign key is refused without detail, and a peer address is limited to twenty failures a minute. Comparison is constant-time. A key reaches its own account and nothing else.
 
 ## Requests
 
-Every state-changing browser request carries the page's CSRF token; the feed websocket carries it in the upgrade query (ASVS 3.5). The pages are served with a Content Security Policy that allows scripts and connections only from the origin, no framing, no object embedding, and a `base-uri` of none; a Permissions-Policy that denies camera, microphone, geolocation, and payment; and a Cross-Origin-Opener-Policy of same-origin, alongside Phoenix's secure browser headers (ASVS 3.4). JSON endpoints refuse any request without a live, factor-complete session with 401 and never redirect.
+Every state-changing browser request carries the page's CSRF token; the `/wire` WebSocket carries it in the upgrade query (ASVS 3.5). The pages are served with a Content Security Policy that allows scripts and connections only from the origin, no framing, no object embedding, and a `base-uri` of none; a Permissions-Policy that denies camera, microphone, geolocation, and payment; and a Cross-Origin-Opener-Policy of same-origin, alongside Phoenix's secure browser headers (ASVS 3.4). JSON endpoints refuse any request without a live, factor-complete session with 401 and never redirect.
 
 ## Secrets at rest
 
@@ -71,7 +71,7 @@ All in `Hireme.Security`, lifetimes, caps, and every rate limit by name with its
 - The WebAuthn verifier is the `wax_` library, which has not been independently audited; its interface is the only thing this code trusts, and its bang functions are rescued at the boundary.
 - An account is only as safe as the mailbox and the GitHub or X accounts that sign in to it. A mailed link proves control of a mailbox and nothing more; enrol a second factor.
 - A sign-in link opened by someone other than the person who asked signs that browser into the asker's account. The page names the address before the button spends it, but a person who does not read it can be signed in to someone else's desk (login CSRF). Adding a way in is never affected.
-- Notices go by mail to the addresses on the account. An account whose only ways in are GitHub or X has no address to mail, so its notices are on the audit trail only. Mail is sent on the request path, so a slow relay slows the request that asked.
+- Notices go by mail to the addresses on the account. An account whose only ways in are GitHub or X has no address to mail, so its notices are on the audit trail only. Mail is queued by the write and sent by the outbox, so a slow relay delays the notice, never the request that asked.
 - The trail records a sign-in link request by a hash of the address and its domain, not the address, since the asker may be a stranger; the mail itself is the only place the address goes.
 - The rate limiter is per node, in memory. A multi-node deployment needs a shared backend before the limits hold across nodes.
 - GitHub and X are trusted for the user id their own API returns over TLS; their account security is outside this desk. Development also offers a one-click sign-in to the local desk, compiled only into the development environment.

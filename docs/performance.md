@@ -60,7 +60,7 @@ Correctness evidence: a seeded property test (boot ⊕ deltas = fresh `list_card
 
 ## Round two: views derived in the browser — 2026-10-09 (main, not deployed)
 
-The browser now receives the account's raw rows instead of server-derived views, and the Rust kernel plus `assets/js/compose.ts` derive every view (cards, heat verdicts, heat chart, scoreboard, focus, root CV, lanes, account page); writes are predicted exactly, derived fields included. The server sends only the columns a write changed and replays missed revisions on reconnect. Measured locally on a copy of the canonical 1,000-job fixture with [`bench/desk.mjs`](../bench/desk.mjs) (Chromium 154, WebSocket, a fresh browser context per scenario, inputs fired in-page), p50 / p99 ms, every interaction drawn in the input's frame and 0 HTTP requests:
+The browser now receives the account's raw rows instead of server-derived views, and the Rust kernel derives every view (cards, heat verdicts, heat chart, scoreboard, focus, root CV, lanes, account page); writes are predicted exactly, derived fields included. The server sends only the columns a write changed and replays missed revisions on reconnect. Measured locally on a copy of the canonical 1,000-job fixture with [`bench/desk.mjs`](../bench/desk.mjs) (Chromium 154, WebSocket, a fresh browser context per scenario, inputs fired in-page), p50 / p99 ms, every interaction drawn in the input's frame and 0 HTTP requests:
 
 | Interaction | Round one release | Round two |
 |---|---|---|
