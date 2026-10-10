@@ -2,6 +2,7 @@ defmodule Hireme.AccountsTest do
   use Hireme.DataCase, async: false
 
   alias Hireme.Accounts
+  alias Hireme.Accounts.MagicLink
   alias Hireme.Repo
   alias Hireme.Security
 
@@ -11,6 +12,14 @@ defmodule Hireme.AccountsTest do
     assert id == session.id and account_id == account.id
     assert Accounts.session("not a token") == nil
     assert Accounts.session(nil) == nil
+
+    # Seen at most once a minute: a second look within it leaves the stamp.
+    assert {%{last_seen_at: seen}, _} = Accounts.session(token)
+    assert seen == session.last_seen_at
+    aged = DateTime.add(session.last_seen_at, -61, :second)
+    session |> Ecto.Changeset.change(last_seen_at: aged) |> Repo.update!(skip_account: true)
+    assert {%{last_seen_at: touched}, _} = Accounts.session(token)
+    assert DateTime.compare(touched, aged) == :gt
 
     past =
       DateTime.utc_now()
@@ -83,7 +92,22 @@ defmodule Hireme.AccountsTest do
 
       assert {:ok, "someone@example.com"} = Accounts.peek_link(token)
       assert {:ok, "someone@example.com"} = Accounts.peek_link(token)
-      assert {:ok, "someone@example.com"} = Accounts.redeem_link(token)
+
+      # Only a hash is stored, and twenty hands reaching at once sign in once.
+      raw = Base.url_decode64!(token, padding: false)
+
+      hashes =
+        Repo.all(Hireme.Accounts.MagicLink, skip_account: true) |> Enum.map(& &1.token_hash)
+
+      assert Security.hash(raw) in hashes
+      refute Enum.any?(hashes, &(&1 == raw or Base.encode64(&1) == token))
+
+      redeemed =
+        1..20
+        |> Task.async_stream(fn _ -> Accounts.redeem_link(token, %{ip: "203.0.113.9"}) end)
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.count(redeemed, &match?({:ok, "someone@example.com"}, &1)) == 1
       assert {:error, :invalid} = Accounts.peek_link(token)
       assert {:error, :invalid} = Accounts.redeem_link(token)
       assert {:error, :invalid} = Accounts.redeem_link("not-a-token")
@@ -96,13 +120,32 @@ defmodule Hireme.AccountsTest do
       assert :ok = Accounts.request_link("late@example.com", &link_url/1)
       token = mailed_token()
 
-      past = DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.truncate(:second)
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
 
-      Repo.update_all(Hireme.Accounts.MagicLink, [set: [expires_at: past]], skip_account: true)
+      expire = fn at ->
+        Repo.update_all(MagicLink, [set: [expires_at: at]], skip_account: true)
+      end
+
+      expire.(DateTime.add(now, 1, :second))
+      assert {:ok, "late@example.com"} = Accounts.peek_link(token)
+      expire.(now)
       assert {:error, :invalid} = Accounts.redeem_link(token)
 
-      for _ <- 1..4, do: assert(:ok = Accounts.request_link("late@example.com", &link_url/1))
-      assert {:error, :rate_limited} = Accounts.request_link("late@example.com", &link_url/1)
+      # Five asks for one address from anywhere, twenty from one peer for any
+      # address; the two limits keep separate counts.
+      from = fn n -> %{ip: "198.51.100.#{n}"} end
+
+      for n <- 1..4,
+          do: assert(:ok = Accounts.request_link("late@example.com", &link_url/1, from.(n)))
+
+      assert {:error, :rate_limited} =
+               Accounts.request_link("late@example.com", &link_url/1, from.(5))
+
+      for n <- 1..20,
+          do: assert(:ok = Accounts.request_link("peer#{n}@example.com", &link_url/1, from.(99)))
+
+      assert {:error, :rate_limited} =
+               Accounts.request_link("peer21@example.com", &link_url/1, from.(99))
     end
   end
 
