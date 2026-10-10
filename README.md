@@ -103,19 +103,15 @@ reverse proxy with WebSocket support and `X-Forwarded-Proto: https`; production
 HTTPS redirects, HSTS, and secure session cookies remain enabled. Optional OAuth
 credentials and callback URLs are described below under Accounts.
 
-After stopping the previous server and backing up the persistent SQLite database
-(including any live WAL state), run these commands with the service account and
-the same runtime environment supplied by systemd:
-
-```sh
-/nix/var/nix/profiles/hireme/bin/hireme eval 'Hireme.Release.migrate()'
-/nix/var/nix/profiles/hireme/bin/hireme start
-```
-
-`Hireme.Release.migrate/0` loads the application configuration and uses
-`Ecto.Migrator.with_repo/2` to apply all pending migrations, without starting the
-web server or seeding user data. An error aborts deployment. Migrations are an
-explicit pre-start operation, not a side effect of normal application startup.
+Start the release with the service account and the runtime environment supplied
+by systemd (`/nix/var/nix/profiles/hireme/bin/hireme start`). The node owns its
+upkeep: pending migrations run as the first boot step (`Hireme.Release`), and a
+failed one stops the boot. A supervised `Hireme.Release.Backup` writes a daily
+online copy (`VACUUM INTO`) to `backups/` beside the database and keeps 13 days,
+logging a failure as an error and retrying within the hour. On SIGTERM no new
+session is admitted and every live one hears BYE `restart`, from which clients
+reconnect and resume at their revision. `Hireme.Release.migrate/0` remains for
+`bin/hireme eval` without starting the application.
 Do not run `mix setup`, `mix ecto.setup`, or `mix ecto.reset` against production.
 
 ## Accounts

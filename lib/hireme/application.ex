@@ -74,17 +74,22 @@ defmodule Hireme.Application do
       [
         Hireme.Repo,
         {Phoenix.PubSub, name: Hireme.PubSub},
-        Hireme.Ops,
-        {Task.Supervisor, name: Hireme.Accounts.Mail},
-        Hireme.RateLimit,
-        {Registry, keys: :unique, name: Hireme.Letterbox.Registry}
+        Hireme.Ops
       ] ++
+        Hireme.Release.children() ++
+        [
+          {Task.Supervisor, name: Hireme.Accounts.Mail},
+          Hireme.RateLimit,
+          {Registry, keys: :unique, name: Hireme.Letterbox.Registry}
+        ] ++
         outbox ++
         [
           # The WebTransport gate: its Unix socket, then the gate binary as a
           # Port. Nothing starts without config.
           {HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])},
-          HiremeWeb.Endpoint
+          HiremeWeb.Endpoint,
+          # Last, so on SIGTERM it stops first: sessions told to resume elsewhere.
+          HiremeWeb.Session.Drain
         ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Hireme.Supervisor)

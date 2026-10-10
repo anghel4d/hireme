@@ -419,4 +419,26 @@ defmodule HiremeWeb.SessionTest do
     # The browser's HELLO afterwards only opens control.
     assert {:ok, _} = Session.event({:data, 0, hello()}, s)
   end
+
+  test "a stopping node tells its sessions to resume elsewhere and admits no more",
+       %{account: account} do
+    s = open(account) |> drain()
+    all_out()
+    stopping = Task.async(fn -> Supervisor.terminate_child(Hireme.Supervisor, Session.Drain) end)
+
+    try do
+      assert_receive Session.Drain
+      assert {:stop, :normal, _} = Session.info(Session.Drain, s)
+      assert [{:bye, _, _, <<7::little-16, "restart", _::binary>>}] = all_out()
+      assert {:refuse, 429} = Session.init({Carrier, self()}, %{path: "/wt", origin: ""})
+      assert :error = HiremeWeb.WireSocket.connect(%{})
+      # The node waits for its sessions to close, and no longer.
+      Phoenix.PubSub.unsubscribe(Hireme.PubSub, Session.Drain.topic())
+      assert :ok = Task.await(stopping, 1000)
+    after
+      Supervisor.restart_child(Hireme.Supervisor, Session.Drain)
+    end
+
+    refute Session.Drain.draining?()
+  end
 end
