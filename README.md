@@ -102,14 +102,12 @@ Its plaintext never enters the Nix store. On a host it is an agenix secret,
 rekeyed per host from hardware-held master identities; values moved into it
 stay byte-identical, or every session and agent breaks.
 
-`checks.x86_64-linux.dev` is the dev profile, for testing until a vault
-exists and after: a NixOS VM running the module with plaintext secrets it
-generates for itself, no hardware key, and the gate's self-signed ECDSA
-P-256 certificate pinned by hash (Chrome accepts only those, for at most 14
-days, so the gate signs a new one at each start). It proves the node
-migrates, backs up, serves, runs the gate on its high port as its own user
-with no capability, restarts a gate that dies, and takes it down when it
-stops. `nix build .#checks.x86_64-linux.dev -L` runs it; nothing of it ships.
+`checks.x86_64-linux.dev` is the dev profile: a NixOS VM running the module
+with plaintext secrets it generates for itself, no hardware key, and the
+gate's self-signed ECDSA P-256 certificate pinned by hash (Chrome accepts only
+those, for at most 14 days). It proves the node migrates, backs up, serves,
+runs the gate as its own user with no capability, restarts a dead gate and
+stops with it. `nix build .#checks.x86_64-linux.dev -L` runs it; nothing of it ships.
 
 Mail uses Cloudflare's HTTPS API because Hetzner blocks outbound SMTP port 465.
 Req verifies TLS certificates; keep the host's CA trust store available. Serve traffic through an HTTPS
