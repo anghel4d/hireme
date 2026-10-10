@@ -37,9 +37,9 @@ URL canonicalization updates a parsed URI rather than rebuilding its opaque fiel
 these harnesses at a production database. Keep its `testbed.json` private: it holds
 synthetic session credentials.
 
-`bench/server.exs` measures domain reads and packet/JSON construction;
-`bench/actions.exs` and `bench/security_actions.exs` measure real committed writes
-with preparation and cleanup outside the timer. `bench/security.exs` isolates hot
+`bench/server.exs` measures domain reads, packet construction and a 55-application
+pack import; `bench/security_actions.exs` measures real committed writes with
+preparation and cleanup outside the timer. `bench/security.exs` isolates hot
 authentication primitives. Each emits JSONL with raw millisecond samples and
 nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
 `BENCH_VARIETY=1` seeds a testbed whose string columns carry real entropy (every
@@ -200,7 +200,7 @@ Not CRM. No contacts, no sequences, no follow-up spam. The lane is: run Broadsid
 
 The desk travels as columnar frames over one session per tab (`priv/wire/schema.txt` is the one definition: Elixir encodes, `native/wire` decodes, the hash rides in every frame header). The browser connects to the WebTransport gate (`native/gate`, its own address, UDP 443) with a single-use ticket from the page, or to the `/wire` WebSocket where UDP is blocked; the early script in `<head>` sends HELLO before the bundle loads. HELLO carries the revision of the browser's saved copy: the session answers with every raw table of the account (BOOT, deflated), or only the revisions since that copy (PATCH frames from the sequencer's ring), then a fresh ticket for the next reconnect.
 
-`native/kernel` (Rust, built reproducibly to `priv/static/wasm/kernel.wasm`) holds those raw tables and derives the rest: the cards with their heat load, cooldown and verdicts, the board order and search, the heat chart, the scoreboard and its chart, keyword coverage and batch mixes, re-deriving only the jobs a change reaches and their heat kin. A write is an OP: the kernel predicts its rows and its refusals (lease, fire hold, heat) in the same tick, keeps it as pending over the base rows, and settles it when the PATCH and ACK arrive, or drops it on a NACK, so a refusal rolls back by itself. `assets/js/compose.ts` builds the focus, root CV, lanes and account documents from the rows (Mask, Theme, Cv.compose, the rail); `store.ts` keeps them until a row they read changes, saves the tables to IndexedDB when the page is idle, and restores the kernel from that copy if it ever traps. `shell.ts`, `views.ts`, `board.ts` and `html.ts` draw from the desk synchronously in the input's frame, morphing only what changed.
+`native/kernel` (Rust, built reproducibly to `priv/static/wasm/kernel.wasm`) holds those raw tables and derives the rest: the cards with their heat load, cooldown and verdicts, the board order and search, the heat chart, the scoreboard and its chart, keyword coverage and batch mixes, re-deriving only the jobs a change reaches and their heat kin. A write is an OP: the kernel predicts its rows and its refusals (lease, fire hold, heat) in the same tick, keeps it as pending over the base rows, and settles it when the PATCH and ACK arrive, or drops it on a NACK, so a refusal rolls back by itself. The kernel also composes the focus, root CV, lanes and account documents from those rows; `store.ts` keeps them until a row they read changes, saves the tables to IndexedDB when the page is idle, and restores the kernel from that copy if it ever traps. `shell.ts`, `views.ts`, `board.ts` and `html.ts` draw from the desk synchronously in the input's frame, morphing only what changed.
 
 The server stays the authority. `Hireme.Ops` runs every write for an account in one sequencer (op ledger, validation, commit, a delta of the columns that changed) and keeps the ring that serves resumes; Elixir keeps no view logic: `test/support/oracle.ex` dumps what the server decides (raw deltas and refusals, `can_apply`, the batch mix), and `native/kernel/parity.mjs` requires the kernel's ports to equal it exactly.
 
@@ -275,7 +275,6 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
 | `assets/js/shell.ts` | Model, update, draw |
 | `assets/js/store.ts` | The desk: kernel facade, documents, op queue, IndexedDB snapshot, trap recovery |
-| `assets/js/compose.ts` | Focus, root, lanes and account documents composed from raw rows |
 | `assets/js/wire.ts` | WebTransport and WebSocket carriers, framing, HELLO/OP/PING |
 | `assets/js/early.ts` | The inline `<head>` script that connects and sends HELLO before the bundle |
 | `assets/js/webauthn.ts` | The browser's half of a passkey ceremony, base64url in and out |

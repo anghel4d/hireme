@@ -1,6 +1,7 @@
 # Production-release benchmark. State must be a synthetic testbed under BENCH_DIR.
 defmodule HiremeBench.Server do
-  alias Hireme.{Accounts, ApiKeys, Corpus, Desk, Heat, Kv, Mfa, Repo}
+  import Ecto.Query
+  alias Hireme.{Accounts, ApiKeys, Corpus, Desk, Heat, Import, Kv, Mfa, Repo}
 
   def run do
     dir = Path.expand(System.fetch_env!("BENCH_DIR"))
@@ -30,6 +31,38 @@ defmodule HiremeBench.Server do
     revision = System.fetch_env!("BENCH_REV")
     only = System.get_env("BENCH_ONLY", "")
     output = System.fetch_env!("BENCH_OUTPUT")
+    profile = Corpus.get_profile!(profile_id)
+
+    pack =
+      Jason.encode!(%{
+        batch: "Server-Import",
+        fire: "hold",
+        status: "draft_prep",
+        queued_on: "2026-10-09",
+        target_size: 55,
+        apps:
+          for i <- 1..55 do
+            %{
+              company: "Pack employer #{i}",
+              role: "Systems engineer",
+              location: "Remote",
+              url: "https://pack.example.test/#{i}",
+              stage: "gated",
+              gate: "pursue",
+              freshness: "open"
+            }
+          end
+      })
+
+    import_pack = fn ->
+      {:ok, %{kind: :apps, count: 55}} = Import.import_body(pack, "pack.json", profile)
+    end
+
+    clear_pack = fn ->
+      Repo.delete_all(from j in Desk.Job, where: like(j.company, "Pack employer %"))
+      Repo.delete_all(from e in Desk.Employer, where: like(e.name, "Pack employer %"))
+      Repo.delete_all(from b in Desk.Batch, where: b.code == "Server-Import")
+    end
 
     operations = [
       {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
@@ -57,16 +90,34 @@ defmodule HiremeBench.Server do
 
          HiremeWeb.Packet.frame(:boot, 0, body, deflate: true)
          |> IO.iodata_to_binary()
-       end}
+       end},
+      # A pack of 55 applications as an agent imports it: onto a desk without
+      # them (the reset runs before every call, outside the timer), then the
+      # same pack again, which only updates the cards it matches.
+      {"Domain/Import", "pack_55_new", {clear_pack, import_pack}},
+      {"Domain/Import", "pack_55_again", {fn -> :ok end, import_pack}}
     ]
 
     for {page, interaction, operation} <- operations,
         only == "" or String.contains?(page <> "/" <> interaction, only) do
-      for _ <- 1..20, do: operation.()
+      # A write row is {reset, operation}: the reset runs before every call,
+      # outside the timer, and the row takes a tenth of the samples.
+      {reset, operation, n} =
+        case operation do
+          {reset, operation} -> {reset, operation, max(div(count, 10), 1)}
+          operation -> {fn -> :ok end, operation, count}
+        end
+
+      for _ <- 1..20 do
+        reset.()
+        operation.()
+      end
+
       :erlang.garbage_collect()
 
       samples =
-        for _ <- 1..count do
+        for _ <- 1..n do
+          reset.()
           started = System.monotonic_time()
           operation.()
 
@@ -74,6 +125,7 @@ defmodule HiremeBench.Server do
             1_000_000
         end
 
+      reset.()
       query_count = count_queries(operation)
 
       row =

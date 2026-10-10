@@ -102,9 +102,6 @@ defmodule Hireme.Pipeline do
   @spec label(stage()) :: String.t()
   def label(key) when key in @keys, do: Map.fetch!(@by_key, key).label
 
-  @spec hint(stage()) :: String.t()
-  def hint(key) when key in @keys, do: Map.fetch!(@by_key, key).hint
-
   @spec rank(stage()) :: non_neg_integer()
   def rank(key) when key in @keys, do: Map.fetch!(@rank, key)
 
