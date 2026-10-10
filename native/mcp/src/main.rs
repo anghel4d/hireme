@@ -157,12 +157,12 @@ impl Hub {
             "tools/call" => Ok(self.call_tool(&params).await),
             _ => Err((-32601, "unknown method".to_string())),
         };
-        Some(match result {
-            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err((code, message)) => {
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-            }
-        })
+        let mut reply = json!({"jsonrpc": "2.0", "id": id});
+        match result {
+            Ok(result) => reply["result"] = result,
+            Err((code, message)) => reply["error"] = json!({"code": code, "message": message}),
+        }
+        Some(reply)
     }
 
     async fn call_tool(self: &Arc<Self>, params: &Value) -> Value {
