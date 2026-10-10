@@ -251,7 +251,7 @@ defmodule Hireme.Mfa do
   @doc "Replace recovery codes with one batch insert. The returned list is the only plaintext copy."
   @spec recovery_codes!(map()) :: [String.t()]
   def recovery_codes!(meta \\ %{}) do
-    Store.write(fn -> Repo.delete_all(from c in RecoveryCode, where: is_nil(c.used_at)) end)
+    from(c in RecoveryCode, where: is_nil(c.used_at)) |> Store.write(&Repo.delete_all/1)
     codes = for _ <- 1..@recovery_count, do: random_code()
     account_id = Repo.account_id!()
     timestamp = now()
@@ -269,7 +269,7 @@ defmodule Hireme.Mfa do
         }
       end
 
-    {@recovery_count, _} = Store.write(fn -> Repo.insert_all(RecoveryCode, rows) end)
+    {@recovery_count, _} = RecoveryCode |> Store.write(&Repo.insert_all(&1, rows))
 
     Audit.record(:recovery_codes_issued, %{count: @recovery_count}, meta)
     Enum.map(codes, &format_code/1)
@@ -307,8 +307,8 @@ defmodule Hireme.Mfa do
   @spec remove(Session.t(), Method.t(), map()) :: :ok | {:error, :step_up}
   def remove(%Session{} = session, %Method{} = method, meta \\ %{}) do
     if fresh?(session) do
-      Store.write(fn -> Repo.delete!(method) end)
-      if not enrolled?(), do: Store.write(fn -> Repo.delete_all(RecoveryCode) end)
+      method |> Store.write(&Repo.delete!/1)
+      if not enrolled?(), do: RecoveryCode |> Store.write(&Repo.delete_all/1)
 
       Audit.record(
         :mfa_method_removed,
@@ -431,9 +431,8 @@ defmodule Hireme.Mfa do
   end
 
   defp challenge!(%Session{} = session, kind, term) do
-    Store.write(fn ->
-      Repo.delete_all(from c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
-    end)
+    from(c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
+    |> Store.write(&Repo.delete_all/1)
 
     %Challenge{}
     |> Challenge.changeset(%{
@@ -455,7 +454,7 @@ defmodule Hireme.Mfa do
         limit: 1
 
     with %Challenge{} = challenge <- Repo.one(query),
-         _ <- Store.write(fn -> Repo.delete!(challenge) end),
+         _ <- Store.write(challenge, &Repo.delete!/1),
          :lt <- DateTime.compare(now(), challenge.expires_at),
          {:ok, term} <- Security.unseal(challenge.payload, @challenge_seal) do
       {:ok, term}

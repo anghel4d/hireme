@@ -141,7 +141,7 @@ defmodule Hireme.Mailer.Outbox do
           }
 
     try do
-      Store.write(fn -> Repo.insert_all(Notice, rows) end)
+      Notice |> Store.write(&Repo.insert_all(&1, rows))
       if pid = GenServer.whereis(__MODULE__), do: send(pid, :drain)
       :ok
     rescue

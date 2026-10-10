@@ -169,15 +169,10 @@ defmodule Hireme.Accounts do
   @spec revoke_other_sessions(Session.t()) :: non_neg_integer()
   def revoke_other_sessions(%Session{} = keep) do
     {n, _} =
-      Store.write(fn ->
-        Repo.update_all(
-          from(s in Session,
-            where: s.account_id == ^keep.account_id and s.id != ^keep.id and is_nil(s.revoked_at)
-          ),
-          [set: [revoked_at: now()]],
-          skip_account: true
-        )
-      end)
+      from(s in Session,
+        where: s.account_id == ^keep.account_id and s.id != ^keep.id and is_nil(s.revoked_at)
+      )
+      |> Store.write(&Repo.update_all(&1, [set: [revoked_at: now()]], skip_account: true))
 
     if n > 0, do: Audit.record(:sessions_revoked, %{count: n}, %{account_id: keep.account_id})
     n
@@ -301,13 +296,8 @@ defmodule Hireme.Accounts do
 
   # Single use under concurrency: the row is taken only if still unused.
   defp burn(%MagicLink{id: id}, now) do
-    Store.write(fn ->
-      Repo.update_all(
-        from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
-        [set: [used_at: now]],
-        skip_account: true
-      )
-    end)
+    from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at))
+    |> Store.write(&Repo.update_all(&1, [set: [used_at: now]], skip_account: true))
   end
 
   @doc """
@@ -402,9 +392,7 @@ defmodule Hireme.Accounts do
   defp delete_unless_last(%Identity{id: id}, account_id) do
     another = from(o in Identity, where: o.account_id == ^account_id and o.id != ^id)
 
-    Store.write(fn ->
-      Repo.delete_all(from(i in Identity, where: i.id == ^id and exists(another)))
-    end)
+    from(i in Identity, where: i.id == ^id and exists(another)) |> Store.write(&Repo.delete_all/1)
   end
 
   @doc """
