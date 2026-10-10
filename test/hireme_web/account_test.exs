@@ -9,16 +9,7 @@ defmodule HiremeWeb.AccountTest do
 
   defp session(account, opts \\ []) do
     {_token, s} = Accounts.start_session(account, %{ip: "198.51.100.9", user_agent: "test"})
-
-    if opts[:stale] do
-      old = DateTime.utc_now() |> DateTime.add(-(Hireme.Security.step_up_window() + 1))
-
-      s
-      |> Ecto.Changeset.change(authenticated_at: DateTime.truncate(old, :second))
-      |> Repo.update!()
-    else
-      s
-    end
+    if opts[:stale], do: age!(s), else: s
   end
 
   defp ctx(account, s), do: %{account_id: account.id, session_id: s.id, ip: "198.51.100.9"}
