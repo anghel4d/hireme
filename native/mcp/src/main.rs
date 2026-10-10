@@ -252,11 +252,11 @@ impl Hub {
                 let limit = a["limit"]
                     .as_u64()
                     .map_or(100, |l| l.clamp(1, 1000) as usize);
-                self.read(|d| json_text(&d.applications_json(&query(a, "all", -1, limit))))
+                self.read(|d| json_text(&d.board_json(&query(a, "all", -1, limit), false)))
             }
             ("recommend_applications", _) => {
                 let limit = a["limit"].as_u64().map_or(25, |l| l.clamp(1, 100) as usize);
-                self.read(|d| json_text(&d.recommend_json(&query(a, "open", 90, limit))))
+                self.read(|d| json_text(&d.board_json(&query(a, "open", 90, limit), true)))
             }
             ("score_distribution", _) => {
                 self.read(|d| json_text(&d.distribution_json(&query(a, "all", -1, usize::MAX))))
