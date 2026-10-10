@@ -52,6 +52,7 @@ defmodule Hireme.Ops do
   @held {__MODULE__, :held}
   @ledger_ttl 24 * 3600
   @sweep_ms 3_600_000
+  @batch 64
   @checkpoint_ms 1_000
 
   @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
@@ -185,10 +186,54 @@ defmodule Hireme.Ops do
   The target is the job id unless noted.
   """
   @spec run(pos_integer(), op()) :: {:ok, non_neg_integer()} | {:error, refusal()}
-  def run(account_id, %{op_id: op_id, kind: kind, target: target, fields: fields} = op)
+  def run(account_id, op) do
+    ref = send_run(account_id, op)
+    pid = whereis(account_id)
+    monitor = pid && Process.monitor(pid)
+
+    receive do
+      {:ops_reply, ^ref, reply} ->
+        if monitor, do: Process.demonitor(monitor, [:flush])
+        reply
+
+      {:DOWN, ^monitor, :process, _, _} ->
+        {:error, :internal}
+    end
+  end
+
+  @doc """
+  `run/2` without waiting: stage the op here (parse and validate it, this
+  process the lease holder), hand it to the sequencer, and answer with a
+  reference. The result arrives as `{:ops_reply, ref, {:ok, rev} |
+  {:error, refusal}}`, after the `{:ops_delta, rev, _}` it settles, and in
+  the order the ops were sent. A refusal found while staging arrives the
+  same way.
+  """
+  @spec send_run(pos_integer(), op()) :: reference()
+  def send_run(account_id, %{op_id: op_id, kind: kind, target: target, fields: fields} = op)
       when is_integer(account_id) and is_integer(op_id) and op_id >= 0 and is_atom(kind) and
              is_integer(target) and is_list(fields) do
-    call(account_id, {:run, op, self()})
+    ref = make_ref()
+
+    # A malformed op still goes to the ledger: its id's first answer is
+    # the one a resend gets, whatever the resend carries.
+    staged =
+      case parse(op) do
+        {:ok, command} -> %{op_id: signed(op_id), kind: Atom.to_string(kind), command: command}
+        {:error, reason} -> %{op_id: signed(op_id), kind: Atom.to_string(kind), refused: reason}
+      end
+
+    send(server(account_id), {:run, staged, self(), ref})
+    ref
+  end
+
+  @doc "The account's sequencer, if one runs."
+  @spec whereis(pos_integer()) :: pid() | nil
+  def whereis(account_id) do
+    case Registry.lookup(@registry, account_id) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
   end
 
   @doc """
@@ -390,48 +435,8 @@ defmodule Hireme.Ops do
     end)
   end
 
-  def handle_call({:exec, command, holder}, _from, state) do
-    guard(state, fn ->
-      case commit(warm(state, false), command, holder, nil) do
-        {{:ok, value, _rev}, state} -> {{:ok, value}, state}
-        {{:error, reason}, state} -> {{:error, reason}, state}
-      end
-    end)
-  end
-
-  def handle_call({:run, op, holder}, _from, state) do
-    guard(state, :wire, fn ->
-      state = warm(state, false)
-      op_id = signed(op.op_id)
-
-      # The day's answers are kept here too, so a new op costs no lookup.
-      # Read on the first op, not at boot: an attach never waits on it.
-      state = if state.ledger, do: state, else: %{state | ledger: read_ledger()}
-
-      case Map.fetch(state.ledger, op_id) do
-        {:ok, {reply, _at}} ->
-          {reply, state}
-
-        :error ->
-          ledger = {op_id, Atom.to_string(op.kind)}
-
-          {reply, state} =
-            with {:ok, command} <- parse(op),
-                 {{:ok, _value, rev}, state} <- commit(state, command, holder, ledger) do
-              {{:ok, rev}, state}
-            else
-              {{:error, reason}, state} ->
-                {{:error, record_refusal(ledger, reason, state)}, state}
-
-              {:error, reason} ->
-                {{:error, record_refusal(ledger, reason, state)}, state}
-            end
-
-          now = System.system_time(:second)
-          {reply, %{state | ledger: Map.put(state.ledger, op_id, {reply, now})}}
-      end
-    end)
-  end
+  def handle_call({:exec, _command, _holder} = write, from, state),
+    do: {:noreply, seal(state, drain([{write, {:call, from}}], 1))}
 
   @impl true
   def handle_cast({:touch, ids}, state) do
@@ -451,10 +456,25 @@ defmodule Hireme.Ops do
     {:noreply, %{state | ledger: ledger}}
   end
 
+  def handle_info({:run, _staged, holder, ref} = write, state),
+    do: {:noreply, seal(state, drain([{write, {:send, holder, ref}}], 1))}
+
   def handle_info({:owner_down, _ref, :process, _pid, _reason}, state),
     do: {:stop, :normal, state}
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  # Staged ops still queued when the sequencer stops get an answer.
+  @impl true
+  def terminate(_reason, _state) do
+    receive do
+      {:run, _staged, holder, ref} ->
+        send(holder, {:ops_reply, ref, {:error, :internal}})
+        terminate(:drained, nil)
+    after
+      0 -> :ok
+    end
+  end
 
   # A raise inside a write rolled it back. A domain caller gets it
   # re-raised in its own process; a client op is answered `:internal`,
@@ -479,61 +499,218 @@ defmodule Hireme.Ops do
       end
   end
 
-  # -- one write --------------------------------------------------------------
+  # -- the batch --------------------------------------------------------------
 
-  defp commit(state, command, holder, ledger) do
-    Process.put(@holder, holder)
-    Process.put(@held, [])
+  # Take every write already waiting behind the first, up to @batch, in
+  # mailbox order: an idle desk commits one at once, a busy one many.
+  defp drain(batch, n) when n >= @batch, do: Enum.reverse(batch)
 
-    # A row the account cannot see (another account's, or none) is a
-    # refusal, whichever lookup in the write found it missing.
-    result =
-      try do
-        Repo.transaction(fn ->
-          case apply_command(command) do
-            {:ok, value} ->
-              rev = bump!(state)
-              if ledger, do: insert_entry!(ledger, rev, nil)
-              # Read what the write reached on the connection it holds:
-              # the rows as they will commit, without a second checkout.
-              {value, rev, prefetch(groups(command, value), state.raw)}
+  defp drain(batch, n) do
+    receive do
+      {:run, _staged, holder, ref} = write ->
+        drain([{write, {:send, holder, ref}} | batch], n + 1)
 
-            {:error, reason} ->
-              Repo.rollback(reason)
-
-            other ->
-              Repo.rollback({:shape, other})
-          end
-        end)
-      rescue
-        Ecto.NoResultsError -> {:error, :not_found}
-      after
-        Process.delete(@holder)
-      end
-
-    held = (Process.delete(@held) || []) |> Enum.reverse()
-
-    case result do
-      {:ok, {value, rev, fetched}} ->
-        state = publish(state, rev, fetched)
-        Enum.each(held, &broadcast(state, &1))
-        {{:ok, value, rev}, state}
-
-      {:error, reason} ->
-        {{:error, reason}, state}
+      {:"$gen_call", from, {:exec, _, _} = write} ->
+        drain([{write, {:call, from}} | batch], n + 1)
+    after
+      0 -> Enum.reverse(batch)
     end
   end
 
+  # Seal a batch: answer resends from the ledger, run the rest in order
+  # in one transaction (each in a savepoint when there are several, so one
+  # refusal leaves the others), number them, log them, commit once, then
+  # send each revision's delta and each answer.
+  defp seal(state, batch) do
+    state = warm(state, false)
+    state = if state.ledger, do: state, else: %{state | ledger: read_ledger()}
+
+    {todo, answered} =
+      Enum.split_with(batch, fn
+        {{:run, %{op_id: op_id}, _, _}, _} -> not Map.has_key?(state.ledger, op_id)
+        _ -> true
+      end)
+
+    Enum.each(answered, fn {{:run, %{op_id: op_id}, _, _}, to} ->
+      {reply, _} = Map.fetch!(state.ledger, op_id)
+      answer(to, reply)
+    end)
+
+    {results, state} = commit(state, todo)
+    finish(state, todo, results)
+  rescue
+    exception ->
+      Logger.error(Exception.format(:error, exception, __STACKTRACE__))
+      Enum.each(batch, fn {write, to} -> answer(to, failed(write, exception, __STACKTRACE__)) end)
+      %{state | rev: nil}
+  end
+
+  defp commit(state, []), do: {[], state}
+
+  defp commit(state, todo) do
+    several? = match?([_, _ | _], todo)
+
+    {:ok, results} =
+      Repo.transaction(fn ->
+        results = Enum.map(todo, fn {write, _to} -> apply_one(write, state, several?) end)
+        done = Enum.count(results, &match?({:ok, _, _, _}, &1))
+
+        if done == 0 and not several? do
+          [{:error, reason}] = results
+          Repo.rollback({:refused, reason})
+        end
+
+        last = if done > 0, do: bump!(state, done), else: state.rev
+        numbered = number(results, last - done + 1)
+        log!(todo, numbered)
+        numbered
+      end)
+      |> case do
+        # Alone and refused: nothing written, so its log line is its own.
+        {:error, {:refused, reason}} ->
+          log!(todo, [{:error, reason}])
+          {:ok, [{:error, reason}]}
+
+        ok ->
+          ok
+      end
+
+    {results, state}
+  end
+
+  # One write of the batch. Alone, a refusal rolls back the transaction;
+  # among several, its savepoint.
+  defp apply_one({:run, %{refused: reason}, _, _}, _state, _several?), do: {:error, reason}
+
+  defp apply_one({:run, write, holder, _}, state, several?),
+    do: apply_one({:exec, write.command, holder}, state, several?)
+
+  defp apply_one({:exec, command, holder}, state, several?) do
+    Process.put(@holder, holder)
+    Process.put(@held, [])
+    if several?, do: Repo.query!("SAVEPOINT op", [], skip_account: true)
+
+    result =
+      try do
+        apply_command(command)
+      rescue
+        Ecto.NoResultsError -> {:error, :not_found}
+        exception -> {:raise, exception, __STACKTRACE__}
+      end
+
+    held = (Process.delete(@held) || []) |> Enum.reverse()
+    Process.delete(@holder)
+
+    case result do
+      {:ok, value} ->
+        if several?, do: Repo.query!("RELEASE op", [], skip_account: true)
+        # Read what the write reached on the connection it holds: the
+        # rows as they will commit, without a second checkout.
+        {:ok, value, prefetch(groups(command, value), state.raw), held}
+
+      refused ->
+        if several?, do: Repo.query!("ROLLBACK TO op; RELEASE op", [], skip_account: true)
+
+        case refused do
+          {:error, reason} -> {:error, reason}
+          {:raise, _, _} = raised -> raised
+          other -> {:error, {:shape, other}}
+        end
+    end
+  end
+
+  defp number(results, first) do
+    {numbered, _} =
+      Enum.map_reduce(results, first, fn
+        {:ok, value, fetched, held}, rev -> {{:ok, value, fetched, held, rev}, rev + 1}
+        other, rev -> {other, rev}
+      end)
+
+    numbered
+  end
+
+  # Every client op's outcome, in one statement.
+  defp log!(todo, results) do
+    rows =
+      for {{{:run, staged, _, _}, _}, result} <- Enum.zip(todo, results) do
+        case result do
+          {:ok, _, _, _, rev} -> [staged.op_id, staged.kind, rev, nil]
+          {:error, reason} -> [staged.op_id, staged.kind, 0, refusal_name(normalize(reason))]
+          {:raise, _, _} -> nil
+        end
+      end
+      |> Enum.reject(&is_nil/1)
+
+    if rows != [] do
+      Repo.query!(
+        "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES " <>
+          Enum.map_join(rows, ", ", fn _ -> "(?, ?, ?, ?, ?, ?)" end),
+        Enum.flat_map(rows, &([Repo.account_id!() | &1] ++ [now()])),
+        skip_account: true
+      )
+    end
+  end
+
+  # After commit: each revision's delta in order, then each answer, so a
+  # caller holds the delta before the answer that settles it.
+  defp finish(state, todo, results) do
+    state =
+      Enum.reduce(results, state, fn
+        {:ok, _value, fetched, held, rev}, state ->
+          state = publish(state, rev, fetched)
+          Enum.each(held, &broadcast(state, &1))
+          state
+
+        _, state ->
+          state
+      end)
+
+    now = System.system_time(:second)
+
+    Enum.zip(todo, results)
+    |> Enum.reduce(state, fn {{write, to}, result}, state ->
+      reply = reply(write, result)
+      answer(to, reply)
+
+      case write do
+        {:run, %{op_id: op_id}, _, _} when not is_tuple(reply) or elem(reply, 0) != :raise ->
+          %{state | ledger: Map.put(state.ledger, op_id, {reply, now})}
+
+        _ ->
+          state
+      end
+    end)
+  end
+
+  defp reply({:run, _, _, _}, {:ok, _value, _fetched, _held, rev}), do: {:ok, rev}
+  defp reply({:exec, _, _}, {:ok, value, _fetched, _held, _rev}), do: {:ok, value}
+  defp reply({:run, _, _, _}, {:error, reason}), do: {:error, normalize(reason)}
+  defp reply({:exec, _, _}, {:error, reason}), do: {:error, reason}
+  defp reply(write, {:raise, exception, stacktrace}), do: failed(write, exception, stacktrace)
+
+  # A client op's raise is answered `:internal` (its target and fields are
+  # the client's, and a frame must never take down the session); a domain
+  # caller's is re-raised in its own process.
+  defp failed({:run, _, _, _}, exception, stacktrace) do
+    Logger.error(Exception.format(:error, exception, stacktrace))
+    {:error, :internal}
+  end
+
+  defp failed({:exec, _, _}, exception, stacktrace), do: {:raise, exception, stacktrace}
+
+  defp answer({:call, from}, reply), do: GenServer.reply(from, reply)
+  defp answer({:send, holder, ref}, reply), do: send(holder, {:ops_reply, ref, reply})
+
   # A write from another VM moved the counter: these tables are behind it.
-  defp bump!(state) do
+  defp bump!(state, n \\ 1) do
     %{rows: [[rev]]} =
       Repo.query!(
-        "UPDATE accounts SET desk_rev = desk_rev + 1 WHERE id = ? RETURNING desk_rev",
-        [state.account],
+        "UPDATE accounts SET desk_rev = desk_rev + ? WHERE id = ? RETURNING desk_rev",
+        [n, state.account],
         skip_account: true
       )
 
-    if rev != state.rev + 1, do: Process.put({__MODULE__, :gap}, true)
+    if rev != state.rev + n, do: Process.put({__MODULE__, :gap}, true)
     rev
   end
 
@@ -1098,21 +1275,7 @@ defmodule Hireme.Ops do
     end)
   end
 
-  defp insert_entry!({op_id, kind}, rev, refusal) do
-    Repo.query!(
-      "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [Repo.account_id!(), op_id, kind, rev, refusal, now()],
-      skip_account: true
-    )
-  end
-
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-
-  defp record_refusal(ledger, reason, state) do
-    reason = normalize(reason)
-    insert_entry!(ledger, state.rev, refusal_name(reason))
-    reason
-  end
 
   defp normalize(%Ecto.Changeset{}), do: :invalid
   defp normalize({:argument, name}) when is_binary(name), do: {:argument, name}
