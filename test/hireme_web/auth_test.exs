@@ -113,18 +113,7 @@ defmodule HiremeWeb.AuthTest do
 
     # Minting a key is a sensitive write: fresh after the proof, refused once it ages.
     assert %{"secret" => _} = account(fresh, "create_key", %{name: "fresh"}, 200)
-
-    stale =
-      DateTime.utc_now()
-      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
-      |> DateTime.truncate(:second)
-
-    for s <- Hireme.Accounts.list_sessions(account.id),
-        do:
-          s
-          |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
-          |> Hireme.Repo.update!(skip_account: true)
-
+    Hireme.DataCase.age!(account)
     assert %{"error" => "step_up"} = account(fresh, "create_key", %{name: "stale"}, 403)
     assert %{"error" => _} = account(fresh, "step_up_totp", %{code: "000000"}, 401)
 

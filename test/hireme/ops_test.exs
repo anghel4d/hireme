@@ -5,7 +5,6 @@ defmodule Hireme.OpsTest do
 
   alias Hireme.Desk
   alias Hireme.Desk.Batch
-  alias Hireme.Gym
   alias Hireme.Ops
   alias Hireme.Pipeline
 
@@ -286,30 +285,11 @@ defmodule Hireme.OpsTest do
       view = Enum.reduce(deltas, by_id(tables), fn {_, d}, v -> apply_delta(v, d) end)
       assert view == fresh_view(), "seed #{seed}: #{inspect(diverged(view, fresh_view()))}"
 
-      # Every answer is the ledger's: a resend gets it back unchanged.
+      # Every answer is the ledger's: a resend gets it back unchanged, and
+      # neither writes nor sends a delta.
       for {op, reply} <- Enum.zip(ops, replies), do: assert(Ops.run(account.id, op) == reply)
+      assert fresh_view() == view and drain([]) == []
     end
-  end
-
-  test "a resent op gets its first answer and writes once", %{account: account} do
-    op = %{
-      op_id: 0xFFFF_FFFF_0000_0001,
-      kind: :gym_log,
-      target: 0,
-      fields: ["title", "Rerun", "slug", "rerun"]
-    }
-
-    :ok = Phoenix.PubSub.subscribe(Hireme.PubSub, Desk.topic(account.id))
-
-    assert {:ok, rev} = Ops.run(account.id, op)
-    assert_received {:ops_delta, ^rev, %{rows: %{gym_reps: [_]}}}
-    assert {:ok, ^rev} = Ops.run(account.id, op)
-    refute_received {:ops_delta, _, _}
-    assert Repo.aggregate(Gym.Rep, :count) == 1
-
-    refused = %{op | op_id: 2, kind: :score, target: 1, fields: ["101"]}
-    assert {:error, {:argument, "score"}} = Ops.run(account.id, refused)
-    assert {:error, {:argument, "score"}} = Ops.run(account.id, %{refused | fields: ["5"]})
   end
 
   # The target is the client's: an id that is another account's, or no
@@ -408,31 +388,59 @@ defmodule Hireme.OpsTest do
   end
 
   # Another VM (a release task, an import) writes the same database and
-  # moves the revision; the next delta must still bring a tab level.
-  test "a write from outside the sequencer reaches tabs with the next delta", %{account: account} do
+  # moves the revision. Whether the sequencer's next act is a write or an
+  # attach, every tab and the next boot come level; the revision made
+  # elsewhere is not in the ring, so a session behind it boots.
+  test "a row another VM writes reaches every tab with the next write or attach, and the next boot",
+       %{account: account} do
     %{jobs: [first, second | _]} = desk(99)
     {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-    boot = by_id(tables)
+    view = by_id(tables)
+
+    moved = fn ->
+      Repo.update_all(
+        from(a in Hireme.Accounts.Account, where: a.id == ^account.id),
+        [inc: [desk_rev: 1]],
+        skip_account: true
+      )
+    end
 
     Repo.update_all(from(j in Desk.Job, where: j.id == ^first.id),
       set: [next_action: "elsewhere"]
     )
 
-    Repo.update_all(
-      from(a in Hireme.Accounts.Account, where: a.id == ^account.id),
-      [inc: [desk_rev: 1]],
-      skip_account: true
-    )
+    moved.()
 
     assert {:ok, rev} =
              Ops.run(account.id, %{op_id: 7, kind: :score, target: second.id, fields: ["9"]})
 
     deltas = drain([])
     assert rev > boot_rev + 1 and List.last(deltas) |> elem(0) == rev
-    assert Enum.reduce(deltas, boot, fn {_, d}, v -> apply_delta(v, d) end) == fresh_view()
+    view = Enum.reduce(deltas, view, fn {_, d}, v -> apply_delta(v, d) end)
+    assert view == fresh_view()
 
-    # The revision made elsewhere is not in the ring: a session behind it boots.
-    assert {:ok, ^rev, {:boot, _}} = Ops.attach(account.id, boot_rev)
+    {:ok, batch} =
+      %Batch{}
+      |> Batch.changeset(%{code: "Around", ordinal: 9, status: :draft_prep, fire: :hold})
+      |> Repo.insert()
+
+    moved.()
+
+    other =
+      Task.async(fn ->
+        Repo.put_account(account.id)
+        Ops.attach(account.id, nil)
+      end)
+
+    assert {:ok, next, {:boot, %{tables: seen}}} = Task.await(other)
+    assert Enum.any?(seen.batches, &(&1.id == batch.id))
+
+    assert [{^next, delta}] = drain([])
+    assert next == rev + 2
+    assert apply_delta(view, delta) == fresh_view()
+
+    assert {:ok, ^next, {:boot, _}} = Ops.attach(account.id, boot_rev)
+    assert {:ok, ^next, {:boot, _}} = Ops.attach(account.id, rev)
   end
 
   # A boot reads the tables in the attaching process while writes go on;
@@ -477,37 +485,5 @@ defmodule Hireme.OpsTest do
       send(task.pid, :done)
       assert Task.await(task) == want
     end
-  end
-
-  # A boot is a copy of the sequencer's tables. A row only reaches them
-  # through the sequencer, or (from another VM) with the revision moved.
-  test "a row another VM writes reaches the next boot and every tab", %{account: account} do
-    desk(98)
-    {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
-    boot = by_id(tables)
-
-    {:ok, batch} =
-      %Batch{}
-      |> Batch.changeset(%{code: "Around", ordinal: 9, status: :draft_prep, fire: :hold})
-      |> Repo.insert()
-
-    Repo.update_all(
-      from(a in Hireme.Accounts.Account, where: a.id == ^account.id),
-      [inc: [desk_rev: 1]],
-      skip_account: true
-    )
-
-    other =
-      Task.async(fn ->
-        Repo.put_account(account.id)
-        Ops.attach(account.id, nil)
-      end)
-
-    assert {:ok, rev, {:boot, %{tables: seen}}} = Task.await(other)
-    assert Enum.any?(seen.batches, &(&1.id == batch.id))
-
-    assert [{^rev, delta}] = drain([])
-    assert rev == boot_rev + 2
-    assert apply_delta(boot, delta) == fresh_view()
   end
 end

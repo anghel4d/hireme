@@ -1,7 +1,8 @@
 defmodule Hireme.HeatTest do
   use Hireme.DataCase, async: false
 
-  alias Hireme.Corpus
+  import Hireme.Fixtures
+
   alias Hireme.Desk
   alias Hireme.Desk.Batch
   alias Hireme.Heat
@@ -10,12 +11,6 @@ defmodule Hireme.HeatTest do
   alias Hireme.Repo
 
   @today ~D[2026-10-07]
-
-  test "decay halves over one half-life" do
-    assert Heat.decay(1.0, 0, 35) == 1.0
-    assert Heat.decay(1.0, 35, 35) == 0.5
-    assert Heat.decay(1.0, 70, 35) == 0.25
-  end
 
   test "caps scale with company size" do
     cfg = Heat.config()
@@ -57,18 +52,6 @@ defmodule Hireme.HeatTest do
     assert hd(deferred2) |> elem(1) |> Map.get(:reason) == :company_cap
   end
 
-  test "the governor keeps the highest score_100 and defers the rest at a small company" do
-    high = probe("Obscure Shop", "Engineer", 90, 1)
-    low = probe("Obscure Shop", "Engineer", 40, 2)
-
-    %{kept: kept, deferred: deferred} =
-      Heat.mix([low, high], existing: [], today: @today)
-
-    assert Enum.map(kept, & &1.id) == [1]
-    assert hd(deferred) |> elem(0) |> Map.get(:id) == 2
-    assert hd(deferred) |> elem(1) |> Map.get(:decision) == :defer
-  end
-
   test "one batch does not slam a single ATS vendor" do
     cfg = %{Heat.config() | ats_batch_cap: 2}
 
@@ -101,24 +84,8 @@ defmodule Hireme.HeatTest do
 
   test "set_stage refuses a queue move that would exceed company heat" do
     profile = profile()
-
-    first =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Obscure Shop",
-        role: "Engineer",
-        stage: "discovered",
-        canonical_url: "https://jobs.example.test/obscure-1"
-      })
-
-    second =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Obscure Shop",
-        role: "Engineer",
-        stage: "discovered",
-        canonical_url: "https://jobs.example.test/obscure-2"
-      })
+    first = job(profile, %{company: "Obscure Shop"})
+    second = job(profile, %{company: "Obscure Shop"})
 
     assert {:ok, _} = Desk.set_stage(first.id, :fire_ready)
     assert {:error, :heat} = Desk.set_stage(second.id, :fire_ready)
@@ -136,27 +103,9 @@ defmodule Hireme.HeatTest do
       |> Batch.changeset(%{code: "Batch-HEAT", ordinal: 9, status: :fire_ready, fire: :hold})
       |> Repo.insert()
 
-    high =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Obscure Shop",
-        role: "Engineer",
-        stage: "fire_ready",
-        score_100: 90,
-        batch_id: batch.id,
-        canonical_url: "https://jobs.example.test/heat-high"
-      })
-
-    low =
-      Desk.create_job!(%{
-        profile_id: profile.id,
-        company: "Obscure Shop",
-        role: "Engineer",
-        stage: "fire_ready",
-        score_100: 40,
-        batch_id: batch.id,
-        canonical_url: "https://jobs.example.test/heat-low"
-      })
+    hot = %{company: "Obscure Shop", stage: "fire_ready", batch_id: batch.id}
+    high = job(profile, Map.put(hot, :score_100, 90))
+    low = job(profile, Map.put(hot, :score_100, 40))
 
     result = Desk.govern_batch(batch)
     assert Enum.any?(result.kept, &(&1.id == high.id))
@@ -231,6 +180,8 @@ defmodule Hireme.HeatTest do
 
     anonymous = %{job | id: nil}
     assert Heat.can_apply(anonymous, existing: [anonymous], today: @today).company_load == 1.0
+    aged = %{anonymous | stage_on: Date.add(@today, -Heat.config().company_half_life)}
+    assert Heat.can_apply(anonymous, existing: [aged], today: @today).company_load == 0.5
     unknown = %{job | listing_url: "https://jobs.example.test/1"}
 
     assert Heat.can_apply(
@@ -255,15 +206,6 @@ defmodule Hireme.HeatTest do
       heat_override: false,
       heat_override_reason: ""
     }
-  end
-
-  defp profile do
-    Corpus.create_profile!(%{
-      slug: "heat-#{System.unique_integer([:positive])}",
-      name: "Heat",
-      headline: "Runtime",
-      summary: "A sample profile."
-    })
   end
 
   # The recognised vendors by a host each one owns; everything else, including

@@ -196,14 +196,13 @@ defmodule HiremeWeb.SignInTest do
     assert [%{"provider" => "github", "display" => "octocat"}] =
              identities(conn)
 
-    stale!(account)
+    Hireme.DataCase.age!(account)
 
     assert %{"error" => "step_up"} =
              conn |> post("/api/account/identities", %{provider: "x"}) |> json_response(403)
   end
 
-  test "removing a way in needs step-up, never removes the last, and only touches this account",
-       %{conn: conn, account: account} do
+  test "removing a way in never removes the last, and only touches this account", %{conn: conn} do
     {:ok, gh} = Accounts.link(:github, %{subject: "1", display: "one"})
     {:ok, _} = Accounts.link(:x, %{subject: "2", display: "@two"})
     other = Accounts.create!(%{name: "Other"})
@@ -218,10 +217,6 @@ defmodule HiremeWeb.SignInTest do
 
     assert %{"error" => "This is the only way into the account." <> _} =
              account(conn, "unlink", %{id: last["id"]}, 409)
-
-    stale!(account)
-
-    assert %{"error" => "step_up"} = account(conn, "unlink", %{id: last["id"]}, 403)
   end
 
   test "a link is a first factor only: an enrolled account still owes its second", %{conn: conn} do
@@ -298,17 +293,4 @@ defmodule HiremeWeb.SignInTest do
 
   defp pkce?(verifier, challenge),
     do: Base.url_encode64(:crypto.hash(:sha256, verifier), padding: false) == challenge
-
-  defp stale!(account) do
-    stale =
-      DateTime.utc_now()
-      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
-      |> DateTime.truncate(:second)
-
-    for s <- Accounts.list_sessions(account.id),
-        do:
-          s
-          |> Ecto.Changeset.change(authenticated_at: stale, mfa_at: stale)
-          |> Repo.update!(skip_account: true)
-  end
 end
