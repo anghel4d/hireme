@@ -627,29 +627,33 @@ impl Desk {
         for o in c.overlays.get(&v.lineage).map_or(&[][..], |o| o.as_slice()) {
             counts[o.1 as usize] += 1;
         }
-        let key = ensure_text(arena, c, v.profile, v.lineage);
-        let text = &c.texts[&key];
         let theme = match d.lineage_targets.get(&v.lineage) {
             Some(Some(t)) => *t,
             _ => v.targets,
         };
-        let themed = keywords::theme_targets(arena.text(theme));
-        let (hits, total) = if !themed.is_empty() {
-            let hits = themed
-                .iter()
-                .filter(|t| text.hit(&heat::downcase(t)))
-                .count();
-            (hits, themed.len())
+        let themed: Vec<String> = keywords::theme_targets(arena.text(theme)).iter().map(|t| heat::downcase(t)).collect();
+        // The targets: the theme's, else the listing's words (already
+        // lowercase); none without either, as on a board that has not had
+        // its listings yet.
+        let words: &[String] = if !themed.is_empty() {
+            &themed
+        } else if listing[1] == 0 {
+            &[]
         } else {
-            // Extracted words are already lowercase.
-            let fresh = !matches!(d.extracted.get(&id), Some((l, _)) if *l == listing);
-            if fresh {
+            if !matches!(d.extracted.get(&id), Some((l, _)) if *l == listing) {
                 let words = d.words.extract(arena.text(listing));
                 d.extracted.insert(id, (listing, words));
             }
-            let words = &d.extracted[&id].1;
-            (words.iter().filter(|t| text.hit(t)).count(), words.len())
+            &d.extracted[&id].1
         };
+        // A CV with no items shows no text to hit.
+        let hits = if words.is_empty() || c.items.is_empty() {
+            0
+        } else {
+            let key = ensure_text(arena, c, v.profile, v.lineage);
+            words.iter().filter(|t| c.texts[&key].hit(t)).count()
+        };
+        let total = words.len();
         let out = [hits as u32, total as u32, counts[0], counts[1], counts[2]];
         d.glances.insert(id, (inputs, out));
         out

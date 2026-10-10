@@ -363,6 +363,7 @@ impl Desk {
     }
 
     /// Before a `gone` block deletes overlays: the lineage each was on.
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     fn note_gone_overlays(&mut self, t: &wire::Table) {
         let (Some(ts), Some(ids)) = (t.col(col::gone::TABLE), t.col(col::gone::ID)) else { return };
         if t.id != table::GONE {
@@ -483,6 +484,7 @@ impl Desk {
     }
 
     /// An ACK: the PATCH it follows is already in base.
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     fn settle(&mut self, id: u64) {
         let Some(i) = self.pending.iter().position(|p| p.id == id) else {
             self.counters[UNKNOWN_ACK] += 1;
@@ -508,6 +510,7 @@ impl Desk {
 
     /// What leaving an op's prediction moves: everything it moved, the
     /// fields by column and the rows it added or removed whole.
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     fn unmove(&mut self, p: &Pending) {
         self.touched.extend_from_slice(&p.moved);
         for (t, key, c, _) in &p.predicted {
@@ -527,6 +530,7 @@ impl Desk {
         }
     }
 
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     fn drop_op(&mut self, id: u64) {
         if let Some(i) = self.pending.iter().position(|p| p.id == id) {
             let p = self.pending.remove(i);
