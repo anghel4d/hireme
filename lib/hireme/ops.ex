@@ -885,7 +885,6 @@ defmodule Hireme.Ops do
         [
           {:job_apps, :id, Desk.lineage_jobs(value.id)},
           {:cv_variants, :lineage_id, [lineage]},
-          {:cv_variants, :job_app_id, [value.id]},
           {:cv_lineages, :id, [lineage]},
           {:overlays, :lineage_id, [lineage]},
           {:events, :job_app_id, [value.id]},
