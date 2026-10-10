@@ -780,7 +780,7 @@ impl Desk {
         // Overlays and items that moved reach the cards on their lineage or
         // profile; a deleted overlay was noted with its lineage, and one
         // found nowhere cannot say where it was.
-        for k in core::mem::take(&mut d.overlay_keys) {
+        for k in d.overlay_keys.drain(..) {
             let gone = d.gone_overlays.iter().find(|g| g.0 == k).map(|g| g.1);
             match self.overlay_lineage(k).or(gone) {
                 Some(l) => d.lineages_dirty.push(l),
@@ -789,7 +789,7 @@ impl Desk {
         }
         d.gone_overlays.clear();
         // A lineage row that moved: its theme's targets again, and its cards.
-        for k in core::mem::take(&mut d.lineage_keys) {
+        for k in d.lineage_keys.drain(..) {
             let lt = table::CV_LINEAGES;
             match self.row_of(lt, k) {
                 Some(r) => {
@@ -802,7 +802,7 @@ impl Desk {
                 None => all = true,
             }
         }
-        for k in core::mem::take(&mut d.item_keys) {
+        for k in d.item_keys.drain(..) {
             let it = table::ITEMS;
             match self
                 .row_of(it, k)
