@@ -859,11 +859,7 @@ defmodule Hireme.Ops do
         changed = for row <- fresh, Map.get(old, row.id) != row, do: row
         sent = Enum.map(changed, &columns_moved(Map.get(old, &1.id), &1))
 
-        left =
-          for {id, row} <- old,
-              not MapSet.member?(fresh_ids, id),
-              field == :all or Map.fetch!(row, field) in values,
-              do: id
+        left = left(old, fresh_ids, field, values)
 
         table_rows = Enum.reduce(changed, Map.drop(old, left), &Map.put(&2, &1.id, &1))
 
@@ -873,6 +869,18 @@ defmodule Hireme.Ops do
     # Committed by now: a hot job that moved retires the kept snapshot.
     moved_heat(state.account, rows, gone)
     {%{state | raw: raw}, %{rows: rows, gone: gone}}
+  end
+
+  # The group's rows that are no longer in it. A group by id names its
+  # rows, so they are looked up rather than the table walked.
+  defp left(old, fresh_ids, :id, ids),
+    do: for(id <- Enum.uniq(ids), is_map_key(old, id), not MapSet.member?(fresh_ids, id), do: id)
+
+  defp left(old, fresh_ids, field, values) do
+    for {id, row} <- old,
+        not MapSet.member?(fresh_ids, id),
+        field == :all or Map.fetch!(row, field) in values,
+        do: id
   end
 
   # A new row goes in full; a changed one as its id and the columns that
