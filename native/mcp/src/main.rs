@@ -178,15 +178,17 @@ impl Hub {
         match reply {
             // Help and usage are text to read; everything else is data.
             Ok((Value::String(text), _)) => json!({"content": [{"type": "text", "text": text}]}),
-            Ok((v, warnings)) => {
+            Ok((mut v, warnings)) => {
                 let shown: Vec<String> = warnings.iter().map(Diag::render).collect();
                 let text =
                     shown.iter().map(|w| format!("{w}\n\n")).collect::<String>() + &v.to_string();
-                let mut v = v;
                 if !shown.is_empty() {
                     v["warnings"] = json!(shown);
                 }
-                json!({"content": [{"type": "text", "text": text}], "structuredContent": v})
+                let mut reply = json!({"content": [{"type": "text"}]});
+                reply["content"][0]["text"] = text.into();
+                reply["structuredContent"] = v;
+                reply
             }
             Err(d) => json!({"content": [{"type": "text", "text": d.render()}], "isError": true}),
         }
