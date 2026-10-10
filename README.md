@@ -30,6 +30,12 @@ Keep those diagnostics enabled: CV composition accepts a corpus profile struct,
 socket authentication returns an expiry alongside the account and key IDs, and
 URL canonicalization updates a parsed URI rather than rebuilding its opaque fields.
 
+Check TypeScript with `tsc -p assets/tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters`.
+For each crate under `native/{wire,kernel,mcp,gate}`, run `cargo clippy --all-targets -- -D warnings`
+and `cargo test` in that crate: dependency checks do not replace linting the kernel itself.
+Also check the kernel with `cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings`;
+after kernel changes, rebuild with `native/kernel/build.sh`, verify `--check`, and run its JS fixtures and oracle parity.
+
 ### Performance testbed
 
 `bench/testbed.exs` starts a production release against synthetic data confined to

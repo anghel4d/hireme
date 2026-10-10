@@ -80,6 +80,12 @@ pub struct Desk {
     pub counters: [u32; COUNTERS],
 }
 
+impl Default for Desk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Desk {
     pub const fn new() -> Desk {
         Desk {
@@ -346,10 +352,8 @@ impl Desk {
     }
 
     pub(crate) fn delete_row(&mut self, t: u16, key: u32) {
-        if t == table::OVERLAYS {
-            if let Some(l) = self.overlay_lineage(key) {
-                self.derived.mark_gone_overlay(key, l);
-            }
+        if t == table::OVERLAYS && let Some(l) = self.overlay_lineage(key) {
+            self.derived.mark_gone_overlay(key, l);
         }
         let vt = self.vtable_mut(t);
         vt.delete(core::iter::once(key));
@@ -370,10 +374,10 @@ impl Desk {
             return;
         }
         for r in 0..t.nrows as usize {
-            if ts.u32(r) == table::OVERLAYS as u32 {
-                if let Some(l) = self.overlay_lineage(ids.u32(r)) {
-                    self.derived.mark_gone_overlay(ids.u32(r), l);
-                }
+            if ts.u32(r) == table::OVERLAYS as u32
+                && let Some(l) = self.overlay_lineage(ids.u32(r))
+            {
+                self.derived.mark_gone_overlay(ids.u32(r), l);
             }
         }
     }
@@ -388,14 +392,13 @@ impl Desk {
     /// `today` from a `clock` table: the server's day, which every
     /// derivation uses.
     fn take_clock(&mut self, t: &wire::Table) {
-        if t.id == table::CLOCK && t.nrows > 0 {
-            if let Some(c) = t.col(col::clock::TODAY) {
-                if c.u32(0) != NONE && c.u32(0) != self.today {
-                    self.today = c.u32(0);
-                    self.derived.mark_all();
-                    self.raw_dirty = true;
-                }
-            }
+        if t.id == table::CLOCK && t.nrows > 0
+            && let Some(c) = t.col(col::clock::TODAY)
+            && c.u32(0) != NONE && c.u32(0) != self.today
+        {
+            self.today = c.u32(0);
+            self.derived.mark_all();
+            self.raw_dirty = true;
         }
     }
 

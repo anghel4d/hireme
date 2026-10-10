@@ -92,7 +92,7 @@ impl Json {
 
     /// To six decimals: these are loads and caps a reader sees, not values it computes with.
     fn f64(&mut self, x: f64) {
-        if !(x.abs() < 1e12) {
+        if x.abs().partial_cmp(&1e12) != Some(core::cmp::Ordering::Less) {
             return self.raw("null");
         }
         let m = (if x < 0.0 { -x } else { x } * 1e6 + 0.5) as u64;
@@ -892,4 +892,22 @@ impl Desk {
         String::from_utf8(j.0).unwrap_or_default()
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Json;
+
+    #[test]
+    fn json_numbers_reject_nonfinite_and_out_of_range_values() {
+        for (value, expected) in [
+            (f64::NAN, "null"), (f64::INFINITY, "null"), (f64::NEG_INFINITY, "null"),
+            (1e12, "null"), (-1e12, "null"), (0.0, "0"), (-0.0, "0"),
+            (1.25, "1.25"), (-1.25, "-1.25"),
+        ] {
+            let mut json = Json(Vec::new());
+            json.f64(value);
+            assert_eq!(json.0.as_slice(), expected.as_bytes(), "{value:?}");
+        }
+    }
 }

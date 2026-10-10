@@ -16,6 +16,7 @@ use crate::store::sort_usize;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 // ---- configuration (Hireme.Heat.Config.defaults/0) ------------------------
 
@@ -76,7 +77,7 @@ pub fn entering(from: Option<u8>, to: u8) -> bool {
 
 #[inline]
 pub fn trunc(x: f64) -> f64 {
-    if !(x.abs() < 4_503_599_627_370_496.0) {
+    if x.abs().partial_cmp(&4_503_599_627_370_496.0) != Some(Ordering::Less) {
         return x;
     }
     (x as i64) as f64
@@ -291,7 +292,7 @@ pub fn half_pow(y: f64) -> f64 {
 
 /// `:math.log2(z)` for z > 0.
 pub fn log2(z: f64) -> f64 {
-    if !(z > 0.0) || !z.is_finite() {
+    if z.partial_cmp(&0.0) != Some(Ordering::Greater) || !z.is_finite() {
         return f64::NAN;
     }
     let bits = z.to_bits();
@@ -808,8 +809,8 @@ fn uri_host(s: &str) -> Option<&str> {
         None => auth,
     };
     // (\[[a-zA-Z0-9:.]*\]|[^:]*)
-    let host = if rest.starts_with('[') {
-        let close = rest[1..]
+    let host = if let Some(unbracketed) = rest.strip_prefix('[') {
+        let close = unbracketed
             .bytes()
             .position(|c| !(c.is_ascii_alphanumeric() || c == b':' || c == b'.'))
             .map(|k| k + 1);
@@ -1636,7 +1637,7 @@ mod tests {
             (0.1, 0.3, 0.3)
         );
         assert_eq!((round_to(0.1235, 3), round_to(0.0005, 3)), (0.123, 0.001));
-        assert_eq!(round_to(2.2000000000000002, 4), 2.2);
+        assert_eq!(round_to(2.2, 4), 2.2);
         assert_eq!(round_to(1.00005, 4), 1.0001);
         let cases = [
             (0.25, "0.3"),
@@ -1648,7 +1649,7 @@ mod tests {
             (39.95, "40.0"),
             (2.0, "2.0"),
             (0.0, "0.0"),
-            (1.4499999999999999, "1.5"),
+            (1.45, "1.5"),
             (0.9500000000000001, "1.0"),
             (2.05, "2.0"),
             (3.05, "3.0"),
