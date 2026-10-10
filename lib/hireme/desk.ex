@@ -114,7 +114,7 @@ defmodule Hireme.Desk do
     draft =
       case apply_action(changeset, :insert) do
         {:ok, draft} -> draft
-        {:error, changeset} -> Repo.rollback(changeset)
+        {:error, changeset} -> throw({:refused, changeset})
       end
 
     rail = Pipeline.initial(draft.current_stage)
@@ -158,7 +158,7 @@ defmodule Hireme.Desk do
       Enum.each(overlays, fn overlay ->
         case CvPair.tailor(pair, overlay.item_id, Map.delete(overlay, :item_id)) do
           {:ok, _} -> :ok
-          {:error, reason} -> Repo.rollback(reason)
+          {:error, reason} -> throw({:refused, reason})
         end
       end)
     end
@@ -186,7 +186,14 @@ defmodule Hireme.Desk do
   the process that asked (`Hireme.Ops.holder/0`), not the sequencer.
   """
   @spec execute(write()) :: {:ok, term()} | {:error, refusal() | Ecto.Changeset.t()}
-  def execute({:create, attrs}), do: Repo.transaction(fn -> open!(attrs) end)
+  # A refusal part-way through an opening is thrown, not rolled back: the
+  # sequencer's transaction (or the write's savepoint in it) undoes it.
+  def execute({:create, attrs}) do
+    {:ok, open!(attrs)}
+  catch
+    {:refused, reason} -> {:error, reason}
+  end
+
   def execute({:score, job_id, score}), do: write(job_id, %{score_100: score})
 
   def execute({:next, job_id, action, due}),

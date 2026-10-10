@@ -227,6 +227,70 @@ defmodule Hireme.OpsTest do
     end
   end
 
+  # Writes queued behind a busy sequencer are sealed together: one
+  # transaction, one revision each, a refusal undone alone (even part-way
+  # through an opening), every answer after its delta and in send order.
+  for seed <- 1..3 do
+    test "a batch of queued writes commits as one, each with its own revision (seed #{seed})",
+         %{account: account} do
+      seed = unquote(seed)
+      fixture = desk(40 + seed)
+      [p | _] = Map.keys(fixture.items)
+      {:ok, boot_rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
+      seq = Ops.whereis(account.id)
+      :ok = :sys.suspend(seq)
+
+      ops = for n <- 1..40, do: random_op(fixture, seed * 10_000 + n)
+      refs = Enum.map(ops, &Ops.send_run(account.id, &1))
+
+      # An opening that fails after writing its row, queued among them.
+      me = self()
+
+      opener =
+        spawn(fn ->
+          Repo.put_account(account.id)
+
+          attrs = %{
+            profile_id: p,
+            company: "Half Open",
+            role: "x",
+            overlays: [%{item_id: 999_999, mode: :hidden}]
+          }
+
+          send(me, {:opened, Desk.create_job(attrs)})
+        end)
+
+      Process.sleep(20)
+      :ok = :sys.resume(seq)
+
+      replies =
+        for ref <- refs do
+          receive do
+            {:ops_reply, ^ref, reply} -> reply
+          after
+            5_000 -> flunk("no answer, seed #{seed}")
+          end
+        end
+
+      assert_receive {:opened, {:error, _}}, 5_000
+      refute Repo.exists?(from j in Desk.Job, where: j.company == "Half Open")
+      _ = opener
+
+      revs = for {:ok, rev} <- replies, do: rev
+      assert revs == Enum.sort(revs) and length(Enum.uniq(revs)) == length(revs)
+      deltas = drain([])
+
+      assert Enum.map(deltas, &elem(&1, 0)) ==
+               Enum.to_list((boot_rev + 1)..List.last([boot_rev | revs])//1)
+
+      view = Enum.reduce(deltas, by_id(tables), fn {_, d}, v -> apply_delta(v, d) end)
+      assert view == fresh_view(), "seed #{seed}: #{inspect(diverged(view, fresh_view()))}"
+
+      # Every answer is the ledger's: a resend gets it back unchanged.
+      for {op, reply} <- Enum.zip(ops, replies), do: assert(Ops.run(account.id, op) == reply)
+    end
+  end
+
   test "a resent op gets its first answer and writes once", %{account: account} do
     op = %{
       op_id: 0xFFFF_FFFF_0000_0001,
