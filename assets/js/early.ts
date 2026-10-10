@@ -87,7 +87,9 @@
     }
   }
 
-  // The connection first, then the board, the kernel's compile, and the snapshot.
+  // The connection first, then the kernel's compile, the board, and the snapshot.
+  hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
+  hw.kernel.catch(() => {})
   if (board !== "") {
     const from = (Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array<ArrayBuffer> }).fromBase64
     if (from) hw.board = from(board)
@@ -97,8 +99,6 @@
       for (let i = 0; i < s.length; i++) hw.board[i] = s.charCodeAt(i)
     }
   }
-  hw.kernel = WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm"))
-  hw.kernel.catch(() => {})
 
   // The snapshot record for this account, or undefined: read a task later,
   // since opening IndexedDB in a fresh profile holds the main thread.
