@@ -12,7 +12,7 @@ defmodule Hireme.Ops do
 
       {:ops_delta, rev, %{rows: %{table => [row]}, gone: %{table => [id]}}}
 
-  then the held after-commit messages, then the reply. Local
+  then the reply. Local
   PubSub sends from this process and Erlang keeps the order of messages
   between two processes, so a caller always has the delta for its rev in
   its mailbox before the reply lands.
@@ -43,11 +43,9 @@ defmodule Hireme.Ops do
   alias Hireme.Repo
 
   @registry __MODULE__.Registry
-  @heat __MODULE__.Heat
   @supervisor __MODULE__.Supervisor
   @inside {__MODULE__, :inside}
   @holder {__MODULE__, :holder}
-  @held {__MODULE__, :held}
   @ledger_ttl 24 * 3600
   @sweep_ms 3_600_000
   @batch 64
@@ -121,13 +119,6 @@ defmodule Hireme.Ops do
   def child_spec(_opts) do
     children = [
       {Registry, keys: :unique, name: @registry},
-      # Each account's prepared heat snapshot and its generation, read
-      # without a call into the sequencer; and `{:behind}` while the WAL
-      # waits on a sequencer to fold it.
-      Supervisor.child_spec(
-        {Agent, fn -> :ets.new(@heat, [:named_table, :public, read_concurrency: true]) end},
-        id: @heat
-      ),
       {DynamicSupervisor, strategy: :one_for_one, name: @supervisor}
     ]
 
@@ -149,10 +140,14 @@ defmodule Hireme.Ops do
 
   @doc false
   # Every second, the store's upkeep (`c:Hireme.Store.checkpoint/0`). A
-  # log left behind is folded by the next sequencer to finish a batch.
+  # log left behind is folded by a running sequencer between two batches.
   def checkpoints do
     Process.sleep(@checkpoint_ms)
-    if @store.checkpoint() == :behind, do: :ets.insert(@heat, {:behind})
+
+    with :behind <- @store.checkpoint(),
+         [_ | _] = running <- Registry.select(@registry, [{{:_, :"$1", :_}, [], [:"$1"]}]),
+         do: send(Enum.random(running), :fold)
+
     checkpoints()
   end
 
@@ -278,63 +273,6 @@ defmodule Hireme.Ops do
     end
   end
 
-  @doc """
-  The account's prepared heat snapshot for today, for judging many
-  applications at once. Read here, in the
-  caller, so an agent's read never waits behind the account's writes.
-
-  The sequencer bumps the account's heat generation after any commit
-  that moves a hot job's standing; a snapshot is kept under the
-  generation read before it was built, so one built across a write is
-  never served after it. A miss reads the hot jobs, lending the
-  previous snapshot's traits to the next.
-  """
-  @spec heat(pos_integer()) :: map()
-  def heat(account_id) when is_integer(account_id) do
-    today = Date.utc_today()
-    generation = heat_generation(account_id)
-
-    case :ets.lookup(@heat, account_id) do
-      [{_, ^generation, ^today, heat}] ->
-        heat
-
-      found ->
-        previous = with [{_, _, _, heat}] <- found, do: heat
-        cfg = Heat.config()
-
-        previous = if previous == [], do: nil, else: previous
-
-        heat =
-          Repo.with_account(account_id, fn -> Heat.snapshot(today, cfg, previous) end)
-          |> Heat.prepare(cfg, today, previous)
-
-        :ets.insert(@heat, {account_id, generation, today, heat})
-        heat
-    end
-  end
-
-  defp heat_generation(account_id) do
-    case :ets.lookup(@heat, {:generation, account_id}) do
-      [{_, n}] -> n
-      [] -> 0
-    end
-  end
-
-  # What a peer contributes to the heat snapshot (`Heat.snapshot/2`).
-  @heat_fields ~w(current_stage stage_on company role listing_url canonical_url department
-                  squad fit score_100 heat_override heat_override_reason)a
-
-  defp moved_heat(account_id, rows, gone) do
-    moved? =
-      Map.has_key?(gone, :job_apps) or
-        Enum.any?(Map.get(rows, :job_apps, []), fn row ->
-          Enum.any?(@heat_fields, &Map.has_key?(row, &1))
-        end)
-
-    if moved?,
-      do: :ets.update_counter(@heat, {:generation, account_id}, 1, {{:generation, account_id}, 0})
-  end
-
   @doc "Re-read the lease rows of these jobs (a lease taken or released) and send what changed."
   @spec touch(pos_integer(), [pos_integer()]) :: :ok
   def touch(account_id, job_ids) when is_integer(account_id) and is_list(job_ids) do
@@ -355,8 +293,6 @@ defmodule Hireme.Ops do
       GenServer.stop(pid, :normal)
     end
 
-    :ets.delete(@heat, account_id)
-    :ets.delete(@heat, {:generation, account_id})
     :ok
   catch
     :exit, _gone -> :ok
@@ -365,19 +301,6 @@ defmodule Hireme.Ops do
   @doc "The process a write runs for, for lease checks; the caller itself outside the sequencer."
   @spec holder() :: pid()
   def holder, do: Process.get(@holder) || self()
-
-  @doc false
-  # A message to broadcast on the account's topic once the write commits.
-  @spec after_commit(term()) :: :ok
-  def after_commit(message) do
-    if Process.get(@inside) do
-      Process.put(@held, [message | Process.get(@held, [])])
-    else
-      Phoenix.PubSub.broadcast(Hireme.PubSub, Desk.topic(), message)
-    end
-
-    :ok
-  end
 
   defp call(account_id, message) do
     case GenServer.call(server(account_id), message, :infinity) do
@@ -466,6 +389,11 @@ defmodule Hireme.Ops do
 
   def handle_info({:write, write}, state), do: {:noreply, seal(state, drain([write], 1))}
 
+  def handle_info(:fold, state) do
+    @store.checkpoint()
+    {:noreply, state}
+  end
+
   def handle_info({:owner_down, _ref, :process, _pid, _reason}, state),
     do: {:stop, :normal, state}
 
@@ -520,9 +448,7 @@ defmodule Hireme.Ops do
     Enum.each(answered, &answer(&1, elem(Map.fetch!(state.ledger, &1.op_id), 0)))
 
     {results, state} = commit(state, todo)
-    state = finish(state, todo, results)
-    if :ets.take(@heat, :behind) != [], do: @store.checkpoint()
-    state
+    finish(state, todo, results)
   rescue
     exception ->
       Logger.error(Exception.format(:error, exception, __STACKTRACE__))
@@ -538,7 +464,7 @@ defmodule Hireme.Ops do
     {:ok, results} =
       @store.transaction(fn ->
         results = Enum.map(todo, &apply_one(&1, state, several?))
-        done = Enum.count(results, &match?({:ok, _, _, _}, &1))
+        done = Enum.count(results, &match?({:ok, _, _}, &1))
 
         if done == 0 and not several? do
           [{:error, reason}] = results
@@ -570,7 +496,6 @@ defmodule Hireme.Ops do
 
   defp apply_one(%{command: command, holder: holder}, state, several?) do
     Process.put(@holder, holder)
-    Process.put(@held, [])
     saved? = several? and not one_statement?(command)
     if saved?, do: @store.savepoint(:open)
 
@@ -582,7 +507,6 @@ defmodule Hireme.Ops do
         exception -> {:raise, exception, __STACKTRACE__}
       end
 
-    held = (Process.delete(@held) || []) |> Enum.reverse()
     Process.delete(@holder)
 
     case result do
@@ -590,7 +514,7 @@ defmodule Hireme.Ops do
         if saved?, do: @store.savepoint(:keep)
         # Read what the write reached on the connection it holds: the
         # rows as they will commit, without a second checkout.
-        {:ok, value, prefetch(groups(command, value), state.raw), held}
+        {:ok, value, prefetch(groups(command, value), state.raw)}
 
       refused ->
         if saved?, do: @store.savepoint(:undo)
@@ -611,7 +535,7 @@ defmodule Hireme.Ops do
   defp number(results, first) do
     {numbered, _} =
       Enum.map_reduce(results, first, fn
-        {:ok, value, fetched, held}, rev -> {{:ok, value, fetched, held, rev}, rev + 1}
+        {:ok, value, fetched}, rev -> {{:ok, value, fetched, rev}, rev + 1}
         other, rev -> {other, rev}
       end)
 
@@ -625,7 +549,7 @@ defmodule Hireme.Ops do
       for {%{op_id: op_id} = write, result} <- Enum.zip(todo, results),
           op_id != nil and not match?({:raise, _, _}, result) do
         case result do
-          {:ok, _, _, _, rev} -> [op_id, write.kind, rev, nil]
+          {:ok, _, _, rev} -> [op_id, write.kind, rev, nil]
           {:error, reason} -> [op_id, write.kind, 0, refusal_name(normalize(reason))]
         end
       end
@@ -637,10 +561,8 @@ defmodule Hireme.Ops do
   defp finish(state, todo, results) do
     state =
       Enum.reduce(results, state, fn
-        {:ok, _value, fetched, held, rev}, state ->
-          state = publish(state, rev, fetched)
-          Enum.each(held, &broadcast(state, &1))
-          state
+        {:ok, _value, fetched, rev}, state ->
+          publish(state, rev, fetched)
 
         _, state ->
           state
@@ -662,7 +584,7 @@ defmodule Hireme.Ops do
 
   # A client op is answered with its revision and a named refusal; a
   # domain write with its own value and reason.
-  defp reply(write, {:ok, value, _fetched, _held, rev}),
+  defp reply(write, {:ok, value, _fetched, rev}),
     do: {:ok, if(write.op_id, do: rev, else: value)}
 
   defp reply(write, {:error, reason}),
@@ -844,7 +766,6 @@ defmodule Hireme.Ops do
       end)
 
     # Committed by now: a hot job that moved retires the kept snapshot.
-    moved_heat(state.account, rows, gone)
     {%{state | raw: raw}, %{rows: rows, gone: gone}}
   end
 
@@ -998,18 +919,6 @@ defmodule Hireme.Ops do
 
       {:insert, table, _} ->
         [{table, :id, [inserted_id(value)]}]
-
-      {:perform, pair, command} ->
-        job_id = Hireme.CvPair.job_id(pair)
-
-        case command do
-          {:set_stage, stage} -> groups({:stage, job_id, stage}, value)
-          {:set_score, score} -> groups({:score, job_id, score}, value)
-          {:set_next, action} -> groups({:next, job_id, action, nil}, value)
-          {:tailor, item_id, attrs} -> groups({:overlay, job_id, item_id, attrs}, value)
-          :open_generation -> [{:cv_lineages, :id, [lineage_of(job_id)]}]
-          _ -> []
-        end
 
       {:narrative, id, _} ->
         [{:narratives, :id, [id]}]
