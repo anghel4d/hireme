@@ -37,9 +37,9 @@ URL canonicalization updates a parsed URI rather than rebuilding its opaque fiel
 these harnesses at a production database. Keep its `testbed.json` private: it holds
 synthetic session credentials.
 
-`bench/server.exs` measures domain reads, packet construction and a 55-application
-pack import; `bench/security_actions.exs` measures real committed writes with
-preparation and cleanup outside the timer. `bench/security.exs` isolates hot
+`bench/server.exs` measures domain reads, packet construction, a 55-application
+pack import and the account's committed writes (keys, sessions, factors, links),
+each prepared and validated outside the timer. `bench/security.exs` isolates hot
 authentication primitives. Each emits JSONL with raw millisecond samples and
 nearest-rank quantiles; set `BENCH_REV`, `BENCH_OUTPUT`, and optionally `BENCH_N`.
 `BENCH_VARIETY=1` seeds a testbed whose string columns carry real entropy (every
