@@ -43,18 +43,3 @@ Vendor and tenant come from the apply URL host and path: Greenhouse, Lever, Ashb
 ## Visibility
 
 Desk heatmap under the Life-EV chart. Filters: cool / warm / hot / blocked. MCP: `heat_status`, `can_apply`.
-
-Board snapshots group hot jobs by normalized company and ATS vendor once per
-read. Decorating a card inspects only its matching groups, still excluding the
-card itself and applying the same decay, tenant caps, and override rules as a
-single-job verdict. Unrelated companies are not scanned for every card. Snapshot
-queries load only heat inputs, not listing or CV bodies.
-Employer-size classification checks normalized words and the compact company
-name against fixed anchor sets, preserving whole-word matching and tier priority.
-Board decoration classifies hot peers once per read and reuses those role traits
-for overlap penalties. Candidate roles are always classified from the current
-card; chart-only reads do not pay for this overlap index.
-ATS vendor and tenant loads are accumulated once for a board, using that read's
-date and decay configuration. Self-exclusion subtracts only the original hot
-row's contribution to a matching vendor or tenant. Nothing is cached across
-requests, and chart-only reads do not build the board's ATS index.

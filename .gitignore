@@ -79,11 +79,6 @@
 !/docs/
 !/docs/*.md
 
-!/.cursor/
-!/.cursor/skills/
-!/.cursor/skills/job-alchemy-distillation/
-!/.cursor/skills/job-alchemy-distillation/SKILL.md
-
 # The last word. A secret is never committed, whitelist or not.
 /.env
 /.env.*
