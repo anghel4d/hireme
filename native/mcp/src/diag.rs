@@ -107,15 +107,10 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "busy" => {
             "busy: the block you asked for overlaps another agent's.
 
-A block is all or nothing. Entries 1..n are the account's applications in the order
-they were added, and each agent holds at most one contiguous run of them. When any
-entry of the range you named is already in another agent's block, nothing is
-leased: the refusal names the held entries and, when one exists, the nearest free
-block of the same size.
-
-Fix: lease the free block the help line names, or ask by size and let the desk
-pick: lease {\"count\":16}. Blocks come back when their agent releases them or its
-session ends."
+A block is all or nothing: when any entry of the range you named is in another
+agent's block, nothing is leased, and the help line names a free block of the same
+size. Asking by size (lease {\"count\":16}) lets the desk pick one. Blocks come back
+when their agent releases them or its session ends."
         }
         "empty" => {
             "empty: the range names no application.
@@ -162,10 +157,7 @@ The lease covers every free entry it could, up to n. Nothing failed."
 
 An agent writes only the applications its own block holds, and nobody else may
 write them while it does. If the application is in another agent's block, wait for
-that block to come back; if nobody holds it, lease a block that contains it.
-
-Fix: block {} lists what you hold; lease {\"from\":e,\"to\":e+15} takes a block starting
-at entry e."
+that block to come back; if nobody holds it, release yours and lease one holding it."
         }
         "lineage_busy" => {
             "lineage_busy: another agent is editing this employer's CV.
@@ -187,9 +179,7 @@ The note carries the date the lock ends."
             "heat: queueing this application would push its company or ATS past its cap.
 
 Heat is the governor that keeps you from spraying one employer or one applicant
-tracking system. can_apply {\"job_id\":J} shows the load, the cap and the cooldown.
-
-Fix: pick a cooler application (recommend_applications {}), or wait out the cooldown."
+tracking system: pick a cooler application, or wait out the cooldown."
         }
         "fire_hold" => {
             "fire_hold: the batch is on hold.
