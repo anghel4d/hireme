@@ -828,15 +828,14 @@ impl Desk {
             d.varieties = None;
             self.rebuild_joins(&mut d);
         } else if !d.lineages_dirty.is_empty() || !d.profiles_dirty.is_empty() {
-            let reach: Vec<u32> = d
-                .variant_of
-                .iter()
-                .filter(|(_, v)| {
-                    d.lineages_dirty.contains(&v.lineage) || d.profiles_dirty.contains(&v.profile)
-                })
-                .map(|(job, _)| *job)
-                .collect();
-            d.card.extend(reach);
+            d.card.extend(
+                d.variant_of
+                    .iter()
+                    .filter(|(_, v)| {
+                        d.lineages_dirty.contains(&v.lineage) || d.profiles_dirty.contains(&v.profile)
+                    })
+                    .map(|(job, _)| *job),
+            );
         }
         d.lineages_dirty.clear();
         d.profiles_dirty.clear();
