@@ -37,4 +37,22 @@ defmodule Hireme.DataCase do
     on_exit(fn -> Hireme.Ops.stop(account.id) end)
     account
   end
+
+  @doc """
+  A session aged past the step-up window: both stamps backdated, the
+  updated row back. An account ages every session it has.
+  """
+  def age!(%Hireme.Accounts.Account{id: id}),
+    do: for(s <- Hireme.Accounts.list_sessions(id), do: age!(s))
+
+  def age!(%Hireme.Accounts.Session{} = session) do
+    stale =
+      DateTime.utc_now()
+      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
+      |> DateTime.truncate(:second)
+
+    session
+    |> Ecto.Changeset.change(authenticated_at: stale, mfa_at: stale)
+    |> Hireme.Repo.update!(skip_account: true)
+  end
 end

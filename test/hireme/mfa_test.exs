@@ -91,17 +91,7 @@ defmodule Hireme.MfaTest do
     for code <- ["12 34 56", "12345", "1234567", "١٢٣٤٥٦", "", nil],
         do: assert({:error, _} = Mfa.verify_totp(s, code))
 
-    stale =
-      DateTime.utc_now()
-      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
-      |> DateTime.truncate(:second)
-
-    aged =
-      session
-      |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
-      |> Repo.update!(skip_account: true)
-
-    refute Mfa.fresh?(aged)
+    refute Mfa.fresh?(age!(session))
   end
 
   test "a recovery code works once, and removing the last factor discards the rest", %{
@@ -119,7 +109,7 @@ defmodule Hireme.MfaTest do
     assert Mfa.recovery_codes_left() == 9
     assert {:error, :code} = Mfa.verify_recovery(proven, code)
 
-    assert {:error, :step_up} = Mfa.remove(aged(s), method)
+    assert {:error, :step_up} = Mfa.remove(age!(s), method)
     assert :ok = Mfa.remove(Repo.reload!(session), method)
     assert Mfa.methods() == []
     assert Mfa.recovery_codes_left() == 0
@@ -205,17 +195,6 @@ defmodule Hireme.MfaTest do
     refute Mfa.enrolled?()
     disabled |> Ecto.Changeset.change(disabled_at: nil) |> Repo.update!()
     assert Mfa.enrolled?()
-  end
-
-  defp aged(session) do
-    stale =
-      DateTime.utc_now()
-      |> DateTime.add(-(Hireme.Security.step_up_window() + 1), :second)
-      |> DateTime.truncate(:second)
-
-    session
-    |> Ecto.Changeset.change(mfa_at: stale, authenticated_at: stale)
-    |> Repo.update!(skip_account: true)
   end
 
   test "an account with no factor is fresh only just after signing in", %{session: session} do

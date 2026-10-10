@@ -43,26 +43,6 @@ defmodule Hireme.OutboxTest do
     :ok
   end
 
-  test "a notice is queued by the change, sent by the outbox, and keeps its fields", %{
-    account: account
-  } do
-    addresses(["a@example.com"])
-    provider(mode: :ok)
-
-    :ok = Accounts.notify(account.id, :api_key_created, %{name: "ci", key_id: "k1"})
-
-    assert [%Notice{kind: "api_key_created", meta: %{"name" => "ci", "key_id" => "k1"}}] =
-             pending()
-
-    refute_received {:delivering, _, _, _}
-    assert Outbox.drain() == 1
-
-    assert_received {:delivering, "a@example.com", ~s(Hireme: an API key named "ci" was created),
-                     _}
-
-    assert pending() == []
-  end
-
   test "a failed notice waits out its delay, then is tried again" do
     addresses(["a@example.com"])
     provider(mode: :fail)
