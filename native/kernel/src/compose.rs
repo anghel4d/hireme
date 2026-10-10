@@ -801,9 +801,9 @@ impl Desk {
         let batch = self.row_of(table::BATCHES, u(k::BATCH)).map_or(&b""[..], |b| self.vstr(table::BATCHES, col::batches::CODE, b));
         self.rows_json(j, table::CARDS, core::iter::once(r), plain);
         j.0.pop(); // reopen the object for the rest
-        for (key, v) in [("job_id", &alloc::format!("{}", u(k::ID)).into_bytes()[..]), ("score_100", &alloc::format!("{}", u(k::SCORE)).into_bytes()[..])] {
+        for (key, v) in [("job_id", u(k::ID)), ("score_100", u(k::SCORE))] {
             j.key(key);
-            j.0.extend_from_slice(v);
+            j.u(v as u64);
         }
         for (key, v) in [("stage", name(&heat::STAGES, u(k::STAGE))), ("status", name(&STATUSES, u(k::STATUS))), ("freshness", name(&FRESHNESS, u(k::FRESHNESS))), ("gate", name(&GATES, u(k::GATE))), ("heat_state", name(&HEAT_STATES, u(k::HEAT_STATE))), ("batch", batch), ("band", band.as_bytes())] {
             j.key(key);
