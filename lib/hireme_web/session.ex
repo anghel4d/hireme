@@ -127,8 +127,14 @@ defmodule HiremeWeb.Session do
   cookie. A browser authenticates here, before anything is allocated;
   an agent (no Origin, no ticket) must send an API-key HELLO first.
   """
-  @spec init(term(), map()) :: {:ok, %__MODULE__{}} | {:refuse, 403 | 404}
+  @spec init(term(), map()) :: {:ok, %__MODULE__{}} | {:refuse, 403 | 404 | 429}
   def init(carrier, meta) do
+    if __MODULE__.Drain.draining?(), do: {:refuse, 429}, else: admit(carrier, meta)
+  end
+
+  defp admit(carrier, meta) do
+    Phoenix.PubSub.subscribe(Hireme.PubSub, __MODULE__.Drain.topic())
+
     s = %__MODULE__{carrier: carrier, mod: carrier_mod(carrier), peer: Map.get(meta, :ip, "")}
 
     case meta do
@@ -297,6 +303,9 @@ defmodule HiremeWeb.Session do
       bye(s, "expired")
     end
   end
+
+  # The node is stopping: the client resumes from its revision elsewhere.
+  def info(__MODULE__.Drain, s), do: bye(s, "restart")
 
   def info(_message, s), do: {:ok, s}
 
@@ -694,6 +703,49 @@ defmodule HiremeWeb.Session do
   defp align8(n), do: div(n + 7, 8) * 8
 end
 
+defmodule HiremeWeb.Session.Drain do
+  @moduledoc """
+  The graceful stop. The last child of the application, so the first to
+  stop on SIGTERM: from then on no session is admitted (a CONNECT is
+  refused 429, a WebSocket upgrade fails), and every live one hears BYE
+  "restart", on which the client reconnects with backoff and resumes from
+  its revision. It waits, up to `:drain_ms`, for them to close.
+  """
+
+  # Longer than the wait in `terminate/2`, so it is not cut short.
+  use GenServer, shutdown: 10_000
+
+  @key {__MODULE__, :draining}
+
+  def topic, do: "session:drain"
+  def draining?, do: :persistent_term.get(@key, false)
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @impl true
+  def init(:ok) do
+    Process.flag(:trap_exit, true)
+    :persistent_term.put(@key, false)
+    {:ok, nil}
+  end
+
+  @impl true
+  def terminate(_reason, _s) do
+    :persistent_term.put(@key, true)
+    Phoenix.PubSub.broadcast(Hireme.PubSub, topic(), HiremeWeb.Session.Drain)
+    deadline = System.monotonic_time(:millisecond) + Application.get_env(:hireme, :drain_ms, 5000)
+    wait(deadline)
+  end
+
+  defp wait(deadline) do
+    if Registry.lookup(Hireme.PubSub, topic()) != [] and
+         System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(20)
+      wait(deadline)
+    end
+  end
+end
+
 defmodule HiremeWeb.WireSocket do
   @moduledoc """
   The desk session over a WebSocket, for networks that block UDP: the
@@ -709,7 +761,9 @@ defmodule HiremeWeb.WireSocket do
 
   def child_spec(_opts), do: :ignore
 
-  def connect(%{connect_info: %{session: %{} = cookie}} = info) do
+  def connect(info), do: if(Session.Drain.draining?(), do: :error, else: admit(info))
+
+  defp admit(%{connect_info: %{session: %{} = cookie}} = info) do
     case Accounts.session(cookie[Auth.session_key()]) do
       {session, account} ->
         Hireme.Repo.put_account(account.id)
@@ -725,7 +779,7 @@ defmodule HiremeWeb.WireSocket do
     end
   end
 
-  def connect(info), do: agent(info_peer(info))
+  defp admit(info), do: agent(info_peer(info))
 
   # No browser session: an agent, which must send its API-key HELLO first.
   defp agent(ip), do: {:ok, %{ip: ip, origin: "", path: "/wt"}}
