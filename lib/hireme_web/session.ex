@@ -709,10 +709,10 @@ defmodule HiremeWeb.Session.Drain do
   stop on SIGTERM: from then on no session is admitted (a CONNECT is
   refused 429, a WebSocket upgrade fails), and every live one hears BYE
   "restart", on which the client reconnects with backoff and resumes from
-  its revision. It waits, up to `:drain_ms`, for them to close.
+  its revision. It waits, up to 5 s, for them to close.
   """
 
-  # Longer than the wait in `terminate/2` (`:drain_ms`, at most 9 s), so it is not cut short.
+  # Longer than the wait in `terminate/2`, so it is not cut short.
   use GenServer, shutdown: 10_000
 
   @key {__MODULE__, :draining}
@@ -735,8 +735,7 @@ defmodule HiremeWeb.Session.Drain do
     Phoenix.PubSub.broadcast(Hireme.PubSub, topic(), HiremeWeb.Session.Drain)
 
     deadline =
-      System.monotonic_time(:millisecond) +
-        min(Application.get_env(:hireme, :drain_ms, 5000), 9000)
+      System.monotonic_time(:millisecond) + 5000
 
     wait(deadline)
   end
