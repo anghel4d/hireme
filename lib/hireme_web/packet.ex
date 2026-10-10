@@ -260,10 +260,7 @@ defmodule HiremeWeb.Packet do
             key: s.key,
             label: s.label,
             hint: s.hint,
-            rank: Pipeline.rank(s.key),
-            fire_locked: Pipeline.fire_locked?(s.key),
-            hot: Hireme.Heat.hot_stage?(s.key),
-            queue: Hireme.Heat.entering?(:discovered, s.key)
+            rank: Pipeline.rank(s.key)
           }
         end)
       ),

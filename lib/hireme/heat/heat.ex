@@ -170,10 +170,6 @@ defmodule Hireme.Heat do
   @spec config() :: Config.t()
   def config, do: Config.defaults()
 
-  @spec hot_stage?(term()) :: boolean()
-  def hot_stage?(stage) when stage in @hot_stages, do: true
-  def hot_stage?(_), do: false
-
   @spec entering?(Pipeline.stage(), Pipeline.stage()) :: boolean()
   def entering?(from, _to) when from in @hot_stages, do: false
   def entering?(_from, to) when to in @queue_stages, do: true
