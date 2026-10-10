@@ -58,61 +58,70 @@ quantiles, achieved throughput, correctness checks, raw evidence and limitations
 
 ## Production deployment
 
-The production artifact is an OTP release with `bin/hireme`. The Nix package in
-`nixos-server/packages/hireme.nix` uses the infrastructure flake's pinned
-`beamPackages.mixRelease` and `fetchMixDeps`, with `mix.lock`-locked production
-dependencies. Call it with `source` and `revision`; `mixDepsHash` is pinned in the package.
-The proprietary application requires `config.allowUnfree = true` when importing
-nixpkgs. When the lock changes, build the package's `mixFodDeps` with
-`mixDepsHash = pkgs.lib.fakeHash`, then supply the reported actual hash and rebuild.
-The fake hash is only a hash-discovery input, never a deployment value.
+The flake is the build and the NixOS half of a deployment, and knows no host.
+`nix build .#hireme` is the OTP release (`bin/hireme`, and `bin/hireme-gate`
+beside it), built with nixpkgs' `mixRelease` from the flake's own tree at its
+revision; `.#hireme-gate` is the gate alone. The package
+(`nix/package.nix`) builds SQLite's extension against Nix's SQLite, uses the
+committed WASM kernel and Nix's esbuild, digests the assets, and admits only
+application sources. It is reproducible: `nix build .#hireme .#hireme-gate
+--rebuild` fails on any differing byte. The release is not under a free
+licence, so nixpkgs is imported with `allowUnfree`. When `mix.lock` changes,
+build with `mixDepsHash = lib.fakeHash` and pin the hash it reports.
 
-The package builds SQLite's native extension against Nix's SQLite, uses the committed
-WASM kernel, bundles/minifies assets with Nix's esbuild, and runs
-Phoenix's asset digester. Its source filter excludes local databases, seed data,
-secrets, dependency/build caches, and generated assets. Production compilation
-does not enable the development sign-in or mailbox routes. Copy the complete
-Nix closure, not just `bin/hireme`, to the target.
+`nixosModules.hireme` (`nix/module.nix`) is the application's half of a
+host: the `hireme` user and one systemd unit that only starts and sandboxes
+the node (no capabilities, `ProtectSystem=strict`, state in
+`/var/lib/hireme`), with its secrets read from `services.hireme.environmentFile`
+(an agenix path on a host). A host flake imports it with
+`inputs.hireme.inputs.nixpkgs.follows = "nixpkgs"`, or the mix dependency
+hash goes stale, and adds what is its own: addresses, firewall, certificates,
+the reverse proxy. The deploy lives with the host, so there is no cycle
+between the flakes.
 
-For the deployment at `https://hireme.anghel4d.com`, install the release profile at
-`/nix/var/nix/profiles/hireme` on **fsn1-2 (49.12.102.5) only**, not fsn1-1.
-Run it as the unprivileged `hireme` account, with persistent state in
-`/var/lib/hireme`. Systemd reads secrets from the root-owned, mode `0600` file
-`/var/lib/hireme-secrets/environment`; do not put that file or its values in Git
-or the Nix store.
+The node owns its upkeep: pending migrations run as the first boot step
+(`Hireme.Release`), and a failed one stops the boot. A supervised
+`Hireme.Release.Backup` writes a daily online copy (`VACUUM INTO`) to
+`backups/` beside the database and keeps 13 days, logging a failure as an
+error and retrying within the hour; `bin/hireme rpc
+'Hireme.Release.Backup.run()'` takes one now. On SIGTERM (the unit's
+`KillMode=mixed` sends it to the node alone) no new session is admitted and
+every live one hears BYE `restart`, from which clients reconnect and resume at
+their revision. With `services.hireme.gate.enable` the node runs the gate as
+its own Port on a high UDP port (the host forwards 443 to it), and the gate
+exits when the node does. `Hireme.Release.migrate/0` remains for
+`bin/hireme eval` without starting the application. Do not run `mix setup`,
+`mix ecto.setup`, or `mix ecto.reset` against production.
 
-Both migration and server processes need the production runtime environment:
+The secrets file holds, as `KEY=value` lines:
 
 | Variable | Requirement |
 | --- | --- |
-| `DATABASE_PATH` | `/var/lib/hireme/hireme.db`; its parent directory must be writable by `hireme` |
 | `SECRET_KEY_BASE` | A persistent random secret, generated with `mix phx.gen.secret` |
 | `RELEASE_COOKIE` | A separate persistent random release cookie; the package removes the build-time cookie |
-| `RELEASE_TMP` | A writable directory, such as `/var/lib/hireme/tmp`, created for `hireme` |
-| `PHX_SERVER` | `true` to start the HTTP listener |
-| `PHX_HOST` | `hireme.anghel4d.com`, also used for the HTTPS WebAuthn origin |
-| `PHX_IP`, `PORT` | `127.0.0.1`, `4000` (the defaults); only the reverse proxy should reach this listener |
-| `MIX_ENV` | `prod` for deployment tooling; the release itself is compiled for production |
 | `CLOUDFLARE_ACCOUNT_ID` | The account with Cloudflare Email Sending enabled |
 | `CLOUDFLARE_EMAIL_TOKEN` | A dedicated API token with only Email Sending Write for that account |
 | `MAIL_FROM` | A sender address on an onboarded sending domain |
+
+Its ciphertext in Git is the design; its plaintext never enters the Nix
+store. On a host it is an agenix secret, rekeyed per host from hardware-held
+master identities; moving values into it keeps them byte-identical, or every
+session and agent breaks.
+
+`checks.x86_64-linux.dev` is the dev profile, for testing until a vault
+exists and after: a NixOS VM running the module with plaintext secrets it
+generates for itself, no hardware key, and the gate's own self-signed ECDSA
+P-256 certificate pinned by hash (Chrome accepts only those, for at most 14
+days, so the gate signs a new one at each start). It proves the node
+migrates, backs up, serves, runs the gate on its high port as its own user
+with no capability, restarts a gate that dies, and takes it down when it
+stops. `nix build .#checks.x86_64-linux.dev -L` runs it. Nothing of it ships.
 
 Mail uses Cloudflare's HTTPS API because Hetzner blocks outbound SMTP port 465.
 Req verifies TLS certificates; keep the host's CA trust store available. Serve traffic through an HTTPS
 reverse proxy with WebSocket support and `X-Forwarded-Proto: https`; production
 HTTPS redirects, HSTS, and secure session cookies remain enabled. Optional OAuth
 credentials and callback URLs are described below under Accounts.
-
-Start the release with the service account and the runtime environment supplied
-by systemd (`/nix/var/nix/profiles/hireme/bin/hireme start`). The node owns its
-upkeep: pending migrations run as the first boot step (`Hireme.Release`), and a
-failed one stops the boot. A supervised `Hireme.Release.Backup` writes a daily
-online copy (`VACUUM INTO`) to `backups/` beside the database and keeps 13 days,
-logging a failure as an error and retrying within the hour. On SIGTERM no new
-session is admitted and every live one hears BYE `restart`, from which clients
-reconnect and resume at their revision. `Hireme.Release.migrate/0` remains for
-`bin/hireme eval` without starting the application.
-Do not run `mix setup`, `mix ecto.setup`, or `mix ecto.reset` against production.
 
 ## Accounts
 
@@ -270,6 +279,7 @@ Directories with internals behind one door: `heat/` (`heat.ex`; the ATS and org 
 | `native/mcp/` | `hireme-mcp`, the stdio MCP server agents run: one session, the desk resident in the kernel, one block of applications |
 | `priv/wire/schema.txt` | The wire: frames, tables, columns, ops, refusals; its hash is in every frame |
 | `native/wire/` | The frame codec shared by the kernel, the gate and `hireme-mcp` |
+| `flake.nix`, `nix/` | The release, the NixOS module (one unit: start and sandbox), the dev-profile VM check |
 | `assets/js/shell.ts` | Model, update, draw |
 | `assets/js/store.ts` | The desk: kernel facade, documents, op queue, IndexedDB snapshot, trap recovery |
 | `assets/js/wire.ts` | WebTransport and WebSocket carriers, framing, HELLO/OP/PING |

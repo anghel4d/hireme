@@ -201,8 +201,12 @@ defmodule HiremeWeb.Gate do
 
   defp command(line) do
     case Process.whereis(HiremeWeb.Gate.Binary) do
-      nil -> :ok
-      pid -> send(pid, {:command, line}) && :ok
+      nil ->
+        :ok
+
+      pid ->
+        send(pid, {:command, line})
+        :ok
     end
   end
 
@@ -302,6 +306,10 @@ defmodule HiremeWeb.Gate do
 
     pid =
       spawn_link(fn ->
+        # A stop from the supervisor waits for the gate to let go of its
+        # UDP port, so the gate started after it can bind at once.
+        Process.flag(:trap_exit, true)
+
         try do
           Port.open({:spawn_executable, path}, port_opts)
         rescue
@@ -327,6 +335,22 @@ defmodule HiremeWeb.Gate do
 
       {^port, {:exit_status, status}} ->
         gate_exited("status #{status}")
+
+      {:EXIT, _, reason} ->
+        {:os_pid, pid} = Port.info(port, :os_pid)
+        Port.close(port)
+        await_exit("/proc/#{pid}", 150)
+        exit(reason)
+    end
+  end
+
+  # The gate closes its endpoint on EOF and waits at most 2 s for peers.
+  defp await_exit(proc, 0), do: Logger.warning("hireme-gate (#{proc}) outlived its stop")
+
+  defp await_exit(proc, tries) do
+    if File.exists?(proc) do
+      Process.sleep(20)
+      await_exit(proc, tries - 1)
     end
   end
 

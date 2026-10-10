@@ -189,12 +189,12 @@ defmodule HiremeWeb.GateTest do
   end
 
   describe "the gate binary as a Port" do
-    # A stand-in gate: it records its socket, each stdin line, and EOF, then
-    # exits when told to.
+    # A stand-in gate: it records its socket, each stdin line, and EOF (a
+    # moment after it, as the gate drains), and exits when told to.
     defp stand_in(dir) do
       script =
         ~s(echo "$GATE_SOCKET" >> started; while read l; do echo "$l" >> lines; ) <>
-          ~s([ "$l" = die ] && exit 3; done; echo eof >> lines)
+          ~s([ "$l" = die ] && exit 3; done; sleep 0.3; echo eof >> lines)
 
       [cmd: ["sh", "-c", script], cd: dir]
     end
@@ -218,14 +218,14 @@ defmodule HiremeWeb.GateTest do
       %{dir: dir}
     end
 
-    test "starts with the socket, takes commands, and sees EOF when the node stops it",
+    test "starts with the socket, takes commands, and is gone when the node has stopped it",
          %{dir: dir, path: path} do
       eventually(fn -> read(dir, "started") == path <> "\n" end)
       Gate.reload()
       Gate.stats()
       eventually(fn -> read(dir, "lines") == "reload\nstats\n" end)
       stop_supervised!(Gate)
-      eventually(fn -> read(dir, "lines") == "reload\nstats\neof\n" end)
+      assert read(dir, "lines") == "reload\nstats\neof\n"
     end
 
     @tag :capture_log

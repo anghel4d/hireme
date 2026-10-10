@@ -10,6 +10,11 @@
 !/.credo.exs
 !/mix.exs
 !/mix.lock
+!/flake.nix
+!/flake.lock
+
+!/nix/
+!/nix/*.nix
 
 !/config/
 !/config/*.exs

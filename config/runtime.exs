@@ -78,7 +78,9 @@ if config_env() == :prod do
     config :hireme, HiremeWeb.Gate,
       socket: gate_socket,
       url: System.fetch_env!("GATE_URL"),
-      cmd: List.wrap(System.get_env("GATE_BIN"))
+      cmd: List.wrap(System.get_env("GATE_BIN")),
+      # Set only when the gate signs its own certificate (the dev profile).
+      hash_file: System.get_env("GATE_CERT_HASH_FILE")
   end
 
   # The public HTTPS endpoint is served by the reverse proxy, not this socket.
