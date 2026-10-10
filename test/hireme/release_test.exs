@@ -59,11 +59,13 @@ defmodule Hireme.ReleaseTest do
     assert :ok = Task.await(eval)
   end
 
-  test "the lock is the same for a symlink to the database", %{dir: dir} do
+  test "the lock is the same through a chain of symlinks to the database", %{dir: dir} do
     db = Hireme.Repo.config()[:database]
     File.mkdir_p!(dir)
+    hop = Path.join(dir, "hop.db")
     link = Path.join(dir, "alias.db")
-    File.ln_s!(Path.expand(db), link)
+    File.ln_s!(Path.expand(db), hop)
+    File.ln_s!("hop.db", link)
     canonical = Hireme.Release.lock_path()
     Application.put_env(:hireme, Hireme.Repo, Keyword.put(Hireme.Repo.config(), :database, link))
 
