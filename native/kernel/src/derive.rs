@@ -924,13 +924,10 @@ impl Desk {
 
         // ---- write cards and verdicts ------------------------------------
         let arena_mut = &mut self.store.arena;
-        let vnames: Vec<[u32; 2]> = heat::VENDORS
-            .iter()
-            .map(|x| d.konst(arena_mut, x))
-            .collect();
+        let vnames = heat::VENDORS.map(|x| d.konst(arena_mut, x));
         let allow = d.konst(arena_mut, "allow");
         let defer = d.konst(arena_mut, "defer");
-        let reasons: Vec<[u32; 2]> = [
+        let reasons = [
             heat::Reason::Ok,
             heat::Reason::Override,
             heat::Reason::CompanyCap,
@@ -938,18 +935,14 @@ impl Desk {
             heat::Reason::AtsTenantCap,
             heat::Reason::AtsBatchCap,
         ]
-        .iter()
-        .map(|r| d.konst(arena_mut, r.name()))
-        .collect();
-        let sizes: Vec<[u32; 2]> = [
+        .map(|r| d.konst(arena_mut, r.name()));
+        let sizes = [
             heat::Size::Mega,
             heat::Size::Large,
             heat::Size::Mid,
             heat::Size::Small,
         ]
-        .iter()
-        .map(|s| d.konst(arena_mut, s.name()))
-        .collect();
+        .map(|s| d.konst(arena_mut, s.name()));
         // Strings each verdict row needs that are not constants: tenant and
         // note, reusing the previous row's bytes when they hold.
         let prev = self.store.table(table::VERDICTS);
