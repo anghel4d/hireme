@@ -300,14 +300,14 @@ defmodule Hireme.Mfa do
   ## Changing the set
 
   @doc """
-  Remove a factor. The session must be fresh. Removing the last factor
+  Remove a factor. The session must be fresh. Removing the last live factor
   also discards the recovery codes: there is nothing left to recover to.
   """
   @spec remove(Session.t(), Method.t(), map()) :: :ok | {:error, :step_up}
   def remove(%Session{} = session, %Method{} = method, meta \\ %{}) do
     if fresh?(session) do
       Repo.delete!(method)
-      if methods() == [], do: Repo.delete_all(RecoveryCode)
+      if not enrolled?(), do: Repo.delete_all(RecoveryCode)
 
       Audit.record(
         :mfa_method_removed,
