@@ -167,14 +167,6 @@ defmodule Hireme.Desk do
     job
   end
 
-  @spec set_next(pos_integer(), String.t(), Date.t() | nil) ::
-          {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_next(job_id, action, due), do: Ops.exec({:next, job_id, action, due})
-
-  @spec set_note(pos_integer(), Pipeline.stage(), String.t()) ::
-          {:ok, Job.t()} | {:error, :leased | Ecto.Changeset.t()}
-  def set_note(job_id, stage, note), do: Ops.exec({:note, job_id, stage, note})
-
   @doc """
   Run one desk write. Called only by `Hireme.Ops`, inside its
   transaction, on the account's sequencer; a lease is checked against
@@ -310,9 +302,6 @@ defmodule Hireme.Desk do
         where: j.id == ^job_id and b.fire == :open_fire
     )
   end
-
-  @spec name_open_fire(String.t()) :: {:ok, Batch.t()} | {:error, :batch | Ecto.Changeset.t()}
-  def name_open_fire(code) when is_binary(code), do: Ops.exec({:open_fire, code})
 
   defp open_fire(code) do
     case Repo.get_by(Batch, code: code) do

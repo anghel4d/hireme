@@ -177,7 +177,7 @@ defmodule Hireme.OpsTest do
                 {lease_step(fixture), [:lease | log]}
 
               rem(n, 7) == 0 ->
-                {Desk.set_next(Enum.random(fixture.jobs).id, "agent #{n}", nil), log}
+                {Ops.exec({:next, Enum.random(fixture.jobs).id, "agent #{n}", nil}), log}
 
               true ->
                 {Ops.run(account.id, op), [op | log]}

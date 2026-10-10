@@ -117,7 +117,7 @@ defmodule Hireme.DeskTest do
                stage: "sent"
              })
 
-    assert {:ok, _} = Desk.set_note(job.id, :gated, "Pursue: strong fit")
+    assert {:ok, _} = Hireme.Ops.exec({:note, job.id, :gated, "Pursue: strong fit"})
     noted = Repo.get!(Hireme.Desk.Job, job.id)
     assert Enum.find(Desk.rail(noted), &(&1.key == :gated)).note == "Pursue: strong fit"
   end
@@ -132,7 +132,7 @@ defmodule Hireme.DeskTest do
 
     assert {:error, :fire_hold} = Desk.set_stage(job.id, :submitted)
     assert {:error, :fire_hold} = Desk.set_stage(job.id, :open_fire)
-    assert {:ok, _} = Desk.name_open_fire("Batch-001")
+    assert {:ok, _} = Hireme.Ops.exec({:open_fire, "Batch-001"})
     assert {:ok, moved} = Desk.set_stage(job.id, :submitted)
     assert moved.current_stage == :submitted
   end
