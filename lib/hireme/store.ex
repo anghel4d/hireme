@@ -49,7 +49,7 @@ defmodule Hireme.Store do
   """
   @callback write(String.t(), pos_integer(), account(), keyword()) ::
               {:ok, map()} | {:error, :not_found}
-  @doc "Log client ops' outcomes, in one statement."
+  @doc "Log client ops' outcomes in one statement, sharing one timestamp for the batch."
   @callback log(account(), [entry()]) :: :ok
   @doc "The account's op outcomes logged since `since`: `{op_id, rev, refusal | nil, unix}`."
   @callback ledger(account(), DateTime.t()) :: [
@@ -156,10 +156,12 @@ defmodule Hireme.Store do
   def log(_account, []), do: :ok
 
   def log(account, entries) do
+    at = now()
+
     query!(
       "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES " <>
         Enum.map_join(entries, ", ", fn _ -> "(?, ?, ?, ?, ?, ?)" end),
-      Enum.flat_map(entries, &([account | &1] ++ [now()]))
+      Enum.flat_map(entries, &([account | &1] ++ [at]))
     )
   end
 
