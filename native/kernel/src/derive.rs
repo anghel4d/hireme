@@ -761,8 +761,9 @@ impl Desk {
         let mut all = d.all
             || self.store.table(table::CARDS).is_none()
             || self.store.table(table::VERDICTS).is_none();
-        if !all {
+        if !all && (!d.heat.is_empty() || !d.card.is_empty()) {
             let cards = self.store.table(table::CARDS);
+            let j = self.job_cols();
             all = d
                 .heat
                 .iter()
@@ -770,7 +771,6 @@ impl Desk {
                 .any(|&id| match self.row_of(jt, id) {
                     None => true,
                     Some(i) => {
-                        let j = self.job_cols();
                         !d.verdicts.contains_key(&id)
                             || self.has_card(&d, &j, i)
                                 != cards.is_some_and(|t| t.row_of(id).is_some())
