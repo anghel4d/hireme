@@ -66,14 +66,10 @@ defmodule Hireme.ApiKeys do
 
       # The key, its audit event and its notice in one turn at the writer lock.
       Store.write(fn ->
-        case mint(account_id, attrs) do
-          {:ok, key} ->
-            Audit.record(:api_key_created, %{key_id: key_id, name: name}, meta)
-            Accounts.notify(account_id, :api_key_created, %{name: name, key_id: key_id})
-            {:ok, %{key: key, secret: body <> Security.checksum(body)}}
-
-          {:error, reason} ->
-            {:error, reason}
+        with {:ok, key} <- mint(account_id, attrs) do
+          Audit.record(:api_key_created, %{key_id: key_id, name: name}, meta)
+          Accounts.notify(account_id, :api_key_created, %{name: name, key_id: key_id})
+          {:ok, %{key: key, secret: body <> Security.checksum(body)}}
         end
       end)
     end

@@ -1,36 +1,17 @@
 defmodule Hireme.Store do
   @moduledoc """
   What the sequencer (`Hireme.Ops`) asks of the database, and SQLite's
-  answer to it.
+  answer. Every call names its account, so another store (PostgreSQL,
+  Cassandra, a shadow drainer replaying the batches) can stand behind the
+  same sequencer: `config :hireme, :store, Module`. Domain writes still go
+  through `Hireme.Repo`, inside `transaction/1`. Rows are the database's
+  own values, shipped as they are.
 
-  The sequencer is the account's single writer: it seals a batch of
-  writes into one transaction, numbers their revisions, logs each client
-  op's outcome and commits once. Every statement of its own on that path
-  is a callback here, with the account named rather than read off the
-  process, so another database can stand behind the same sequencer: a
-  PostgreSQL or Cassandra store implements this behaviour and is chosen
-  with `config :hireme, :store, Module`. A shadow drainer replaying the
-  sequencer's batches into a second store needs nothing more than these.
-
-  The domain writes themselves (`Hireme.Desk.execute/1` and the lanes)
-  still go through `Hireme.Repo` and Ecto, inside `transaction/1`.
-
-  Rows are the database's own values (text, integers, JSON text, ISO
-  dates); they go to the wire as they are.
-
-  SQLite has one writer at a time, and a writer that finds it taken
-  sleeps on a growing backoff while another retakes it: under two busy
-  accounts the loser waited up to a second. So every write takes a lock
-  here first, granted in the order asked, and then the database's (a
-  transaction begins IMMEDIATE): the sequencers' through `transaction/1`
-  and `sweep/3`, the rest (sessions, keys, MFA, audit, mail, imports)
-  through `transaction/1` or `write/1`. A holder that dies, or raises,
-  frees it. A write that skips it (tests, migrations) still busy-waits,
-  and the lock is this VM's: another VM on the same file (a release
-  task, a remote console) has its own and contends at SQLite's lock as
-  before. Its writes stay correct (the revision gap re-reads); only
-  their order and fairness against ours are not kept. A store for a
-  database with concurrent writers has no need of the lock.
+  SQLite has one writer, and one that finds it taken backs off while
+  another retakes it. So every write in this VM takes a lock here first
+  (`transaction/1`, `write/1,2`), granted in the order asked; one that
+  dies or raises frees it. Writes that skip it, or come from another VM,
+  still contend at SQLite's as before.
   """
 
   @behaviour __MODULE__
@@ -87,21 +68,16 @@ defmodule Hireme.Store do
   @impl true
   def transaction(fun), do: write(fn -> Repo.transaction(fun, mode: :immediate) end)
 
-  @doc """
-  Run `fun` (one statement, or `fun.(arg)`) holding the writer lock: how
-  a write outside the sequencers (a session, a key, an audit event)
-  takes its turn instead of busy-waiting on SQLite's lock.
-  """
+  @doc "Run `fun` (or `fun.(arg)`) holding the writer lock, as one turn."
   def write(arg, fun), do: write(fn -> fun.(arg) end)
 
+  # Held already (a write inside a write): run in place.
   def write(fun) do
-    if Process.get(__MODULE__) do
+    if Process.put(__MODULE__, true) do
       fun.()
     else
-      :ok = GenServer.call(__MODULE__, :lock, :infinity)
-      Process.put(__MODULE__, true)
-
       try do
+        :ok = GenServer.call(__MODULE__, :lock, :infinity)
         fun.()
       after
         Process.delete(__MODULE__)
