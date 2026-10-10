@@ -78,9 +78,6 @@ let
     cargoRoot = "native/gate";
     buildAndTestSubdir = "native/gate";
     cargoLock.lockFile = source + "/native/gate/Cargo.lock";
-    # SETTINGS at 0.5-RTT, one round trip less per cold session, and abandoned
-    # handshakes closed (see the patch's header). Vendored crates carry no
-    # per-file checksums.
     # Cargo hashes each crate's absolute location into its symbols, and so
     # into the code layout, and panic messages name source paths: the gate
     # is the same binary only when built at the same path. The sandbox's
