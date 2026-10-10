@@ -64,6 +64,7 @@ defmodule HiremeWeb.Session do
     client_id: 0,
     buffer: <<>>,
     acks: [],
+    sent: %{},
     lease: nil,
     raw: false,
     early: false,
@@ -233,6 +234,11 @@ defmodule HiremeWeb.Session do
 
   @doc "Any other message the host received: deltas, account changes, key revocations, timers."
   @spec info(term(), %__MODULE__{}) :: {:ok, %__MODULE__{}} | {:stop, term(), %__MODULE__{}}
+  def info({:ops_reply, ref, result}, %{sent: sent} = s) when is_map_key(sent, ref) do
+    {op_id, sent} = Map.pop(sent, ref)
+    answer(%{s | sent: sent}, op_id, result)
+  end
+
   def info({:ops_delta, rev, _delta}, %{rev: seen} = s) when rev <= seen, do: {:ok, s}
 
   def info({:ops_delta, rev, delta}, %{hello: true, raw: true} = s),
@@ -335,10 +341,8 @@ defmodule HiremeWeb.Session do
   defp frame({:op, _, 0, body}, %{role: role} = s) when role in [:browser, :agent],
     do: op(s, body)
 
-  defp frame({:op, _, _lane, <<op_id::little-64, _::binary>>}, %{role: :agent} = s) do
-    control(s, Packet.nack(op_id, {:leased, "That lane is not this agent's block."}, s.rev))
-    {:ok, s}
-  end
+  defp frame({:op, _, _lane, <<op_id::little-64, _::binary>>}, %{role: :agent} = s),
+    do: nack(s, op_id, {:leased, "That lane is not this agent's block."})
 
   defp frame(
          {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>},
@@ -579,25 +583,19 @@ defmodule HiremeWeb.Session do
 
   # ---- Ops ----
 
+  # Ops are staged here and sealed by the sequencer in batches, so a
+  # session keeps as many in flight as its client sends; each answer
+  # (`{:ops_reply, ...}`, after its delta) becomes the ACK or NACK.
   defp op(s, body) do
     case Packet.op(body) do
       {:ok, op} ->
-        case run(s, op) do
-          {:ok, rev} when rev <= s.rev ->
-            ack(s, op.op_id, rev)
-            {:ok, s}
-
-          {:ok, rev} ->
-            {:ok, settle(%{s | acks: [{rev, op.op_id} | s.acks]}, rev)}
-
-          {:error, reason} ->
-            control(s, Packet.nack(op.op_id, reason, s.rev))
-            {:ok, s}
+        case permit(s, op) do
+          :ok -> {:ok, %{s | sent: Map.put(s.sent, Ops.send_run(s.account_id, op), op.op_id)}}
+          {:error, reason} -> nack(s, op.op_id, reason)
         end
 
       {:error, op_id} ->
-        control(s, Packet.nack(op_id, {:argument, "op"}, s.rev))
-        {:ok, s}
+        nack(s, op_id, {:argument, "op"})
 
       :error ->
         bye(s, "op")
@@ -606,23 +604,20 @@ defmodule HiremeWeb.Session do
 
   # An agent writes only what its block holds; a browser, whatever no
   # lease holds (the sequencer's own check).
-  defp run(%{role: :agent} = s, op) do
-    with :ok <- Letterbox.permit(s.lease, op), do: Ops.run(s.account_id, op)
+  defp permit(%{role: :agent} = s, op), do: Letterbox.permit(s.lease, op)
+  defp permit(_s, _op), do: :ok
+
+  defp answer(s, op_id, {:ok, rev}) when rev <= s.rev do
+    control(s, Packet.ack(op_id, rev))
+    {:ok, s}
   end
 
-  defp run(s, op), do: Ops.run(s.account_id, op)
+  defp answer(s, op_id, {:ok, rev}), do: {:ok, %{s | acks: [{rev, op_id} | s.acks]}}
+  defp answer(s, op_id, {:error, reason}), do: nack(s, op_id, reason)
 
-  defp ack(s, op_id, rev), do: control(s, Packet.ack(op_id, rev))
-
-  # The sequencer sends a write's delta before it answers, so the delta is
-  # already in the mailbox: send it (and the ACK it settles) now, not after
-  # the rest of the frames that arrived in the same read.
-  defp settle(s, rev) do
-    receive do
-      {:ops_delta, r, delta} when r <= rev and r > s.rev -> settle(raw_patch(s, r, delta), rev)
-    after
-      0 -> s
-    end
+  defp nack(s, op_id, reason) do
+    control(s, Packet.nack(op_id, reason, s.rev))
+    {:ok, s}
   end
 
   # ---- An agent's block ----

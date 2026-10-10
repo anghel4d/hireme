@@ -57,12 +57,19 @@ defmodule HiremeWeb.SessionTest do
   # process's mailbox to the session.
   defp drain(s) do
     receive do
-      message when elem(message, 0) == :ops_delta or message == {Session, :rest} ->
+      message when elem(message, 0) in [:ops_delta, :ops_reply] or message == {Session, :rest} ->
         {:ok, s} = Session.info(message, s)
         drain(s)
     after
       50 -> s
     end
+  end
+
+  # The sequencer's answer to the one op in flight, and nothing else.
+  defp answered(s) do
+    assert_receive {:ops_reply, _, _} = reply
+    {:ok, s} = Session.info(reply, s)
+    s
   end
 
   defp open(account) do
@@ -79,7 +86,8 @@ defmodule HiremeWeb.SessionTest do
     s = drain(s)
     _ = all_out()
 
-    {:ok, _s} = Session.event({:data, 0, op(42, 1, job.id, ["no_such_stage"])}, s)
+    {:ok, s} = Session.event({:data, 0, op(42, 1, job.id, ["no_such_stage"])}, s)
+    answered(s)
 
     assert [
              {:nack, 0, _,
@@ -111,7 +119,8 @@ defmodule HiremeWeb.SessionTest do
 
     assert Enum.any?(first, &match?({:ack, _, _, <<43::little-64>>}, &1))
 
-    {:ok, _s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
+    {:ok, s} = Session.event({:data, 0, op(43, 2, job.id, ["Call", ""])}, s)
+    answered(s)
     assert [{:ack, 0, _, <<43::little-64>>}] = frames(0)
     refute_receive {:ops_delta, _, _}, 100
   end
