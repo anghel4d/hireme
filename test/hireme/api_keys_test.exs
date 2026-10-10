@@ -16,6 +16,14 @@ defmodule Hireme.ApiKeysTest do
 
     assert {:ok, found} = ApiKeys.authenticate(secret, "10.0.0.1")
     assert found.id == key.id
+
+    # Last use is stamped at most once a minute.
+    assert {:ok, again} = ApiKeys.authenticate(secret, "10.0.0.1")
+    assert again.last_used_at == found.last_used_at
+    aged = DateTime.add(found.last_used_at, -61, :second)
+    key |> Ecto.Changeset.change(last_used_at: aged) |> Repo.update!()
+    assert {:ok, moved} = ApiKeys.authenticate(secret, "10.0.0.1")
+    assert DateTime.compare(moved.last_used_at, aged) == :gt
     assert [%{id: id}] = ApiKeys.list()
     assert id == key.id
 
@@ -105,7 +113,10 @@ defmodule Hireme.ApiKeysTest do
     assert {:ok, _} = ApiKeys.authenticate(secret, "another")
   end
 
-  test "a key needs a name" do
+  test "a key needs a name, and an account holds at most a hundred live ones" do
     assert {:error, :name} = ApiKeys.create("   ")
+    for n <- 1..100, do: assert({:ok, _} = ApiKeys.create("k#{n}"))
+    assert {:error, :limit} = ApiKeys.create("overflow")
+    assert Enum.count(ApiKeys.list(), &is_nil(&1.revoked_at)) == 100
   end
 end

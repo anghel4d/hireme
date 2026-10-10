@@ -91,10 +91,15 @@ defmodule HiremeWeb.AuthTest do
     assert length(enrolled["recovery_codes"]) == 10
 
     # A fresh browser signs in and owes the factor.
-    {token, _} = Hireme.Accounts.start_session(account)
+    {token, pending} = Hireme.Accounts.start_session(account)
     fresh = anonymous() |> Plug.Test.init_test_session(%{HiremeWeb.Auth.session_key() => token})
     assert redirected_to(get(fresh, "/")) == "/sign-in/factor"
     assert %{"error" => "second_factor"} = account(fresh, "rename_key", %{id: 1, name: "x"}, 401)
+
+    # Nor does the right code at step-up stand in for the factor.
+    now_code = NimbleTOTP.verification_code(secret, time: System.os_time(:second) + 30)
+    assert %{"error" => "second_factor"} = account(fresh, "step_up_totp", %{code: now_code}, 401)
+    assert Hireme.Repo.reload!(pending).mfa_at == nil
     assert redirected_to(get(fresh, "/sign-in")) == "/sign-in/factor"
     page = fresh |> get("/sign-in/factor") |> html_response(200)
     assert page =~ "authenticator app" and page =~ "/assets/js/factor.js"

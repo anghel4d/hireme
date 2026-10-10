@@ -91,6 +91,8 @@ defmodule HiremeWeb.AccountTest do
 
     assert is_binary(secret) and created.name == "agent"
     assert Enum.any?(ApiKeys.list(), &(&1.id == created.id))
+    encoded = IO.iodata_to_binary(Account.tables(account.id, s.id))
+    refute encoded =~ secret or encoded =~ ~r/hm_[0-9A-Za-z]{12}_[0-9A-Za-z]{43}/
     assert_receive :other_tab_heard
     # The caller pushes its own tables before the reply; it is not told again.
     refute_receive {Audit, :changed}, 50
@@ -99,18 +101,27 @@ defmodule HiremeWeb.AccountTest do
   test "a stale session is refused every step-up command, and still renames", %{account: account} do
     s = session(account, stale: true)
     {:ok, %{key: key}} = ApiKeys.create("old")
+    {:ok, identity} = Accounts.link(:github, %{subject: "sub-1", display: "octo"})
 
     for {method, params} <- [
           {"create_key", %{"name" => "x"}},
           {"revoke_key", %{"id" => key.id}},
           {"revoke_other_sessions", %{}},
+          {"begin_totp", %{}},
+          {"confirm_totp", %{"code" => "000000"}},
+          {"begin_webauthn", %{}},
+          {"confirm_webauthn", %{}},
           {"remove_factor", %{"id" => 1}},
           {"recovery_codes", %{}},
-          {"unlink", %{"id" => 1}}
+          {"unlink", %{"id" => identity.id}}
         ] do
       assert Account.call("account/" <> method, params, ctx(account, s)) ==
                {:error, 403, "step_up"}
     end
+
+    # Refused before anything is written.
+    assert length(ApiKeys.list()) == 1 and Hireme.Mfa.methods() == []
+    assert Enum.any?(Accounts.identities(), &(&1.id == identity.id))
 
     assert {:ok, _, :changed} =
              Account.call(

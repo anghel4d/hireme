@@ -61,7 +61,13 @@ defmodule Hireme.MfaTest do
   end
 
   test "a wrong code counts, attempts are throttled, and freshness wears off", %{session: session} do
-    {_method, _secret, _codes} = enroll_app(session)
+    {method, secret, _codes} = enroll_app(session)
+
+    # The secret rests sealed: not the key, not base32, not another key's seal.
+    refute method.totp_secret == secret
+    refute Repo.reload!(method).totp_secret == secret
+    assert :error = Base.decode32(method.totp_secret, padding: false)
+    assert :error = Hireme.Security.unseal(method.totp_secret, "other key")
 
     {_, s} =
       Accounts.start_session(
@@ -71,6 +77,19 @@ defmodule Hireme.MfaTest do
     for _ <- 1..10, do: assert({:error, :code} = Mfa.verify_totp(s, "000000"))
     assert {:error, :rate_limited} = Mfa.verify_totp(s, "000000")
     assert [%{consecutive_failures: 10}] = Mfa.methods()
+
+    # One step of grace either way, never two; a code is six digits or nothing.
+    :ets.delete_all_objects(Hireme.RateLimit)
+    now = System.os_time(:second)
+
+    assert {:error, :code} =
+             Mfa.verify_totp(s, NimbleTOTP.verification_code(secret, time: now - 60))
+
+    assert {:error, :code} =
+             Mfa.verify_totp(s, NimbleTOTP.verification_code(secret, time: now + 60))
+
+    for code <- ["12 34 56", "12345", "1234567", "١٢٣٤٥٦", "", nil],
+        do: assert({:error, _} = Mfa.verify_totp(s, code))
 
     stale =
       DateTime.utc_now()
@@ -111,7 +130,14 @@ defmodule Hireme.MfaTest do
     session: session
   } do
     [spent, unused | _] = Mfa.recovery_codes!()
-    assert {:ok, _} = Mfa.verify_recovery(session, spent)
+    bare = spent |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
+
+    refute Enum.any?(
+             Repo.all(Hireme.Mfa.RecoveryCode),
+             &(&1.code_hash == bare or &1.salt == bare)
+           )
+
+    assert {:ok, _} = Mfa.verify_recovery(session, String.replace(spent, "-", " "))
     [replacement | _] = Mfa.recovery_codes!()
     assert Mfa.recovery_codes_left() == 10
     assert {:error, :code} = Mfa.verify_recovery(session, spent)
@@ -134,6 +160,8 @@ defmodule Hireme.MfaTest do
 
     assert byte_size(challenge) > 20
     assert options.publicKey.authenticatorSelection.userVerification == "required"
+    assert options.publicKey.authenticatorSelection.residentKey == "preferred"
+    assert Enum.map(options.publicKey.pubKeyCredParams, & &1.alg) == [-8, -7, -257]
     assert options.publicKey.excludeCredentials == []
 
     assert {:error, :attestation} =
@@ -192,6 +220,20 @@ defmodule Hireme.MfaTest do
 
   test "an account with no factor is fresh only just after signing in", %{session: session} do
     assert Mfa.fresh?(session)
-    refute Mfa.fresh?(aged(session))
+
+    edge =
+      DateTime.utc_now()
+      |> DateTime.add(-Hireme.Security.step_up_window(), :second)
+      |> DateTime.truncate(:second)
+
+    at_edge = session |> Ecto.Changeset.change(authenticated_at: edge) |> Repo.update!()
+    refute Mfa.fresh?(at_edge)
+    inside = DateTime.add(edge, 2, :second)
+
+    assert Mfa.fresh?(
+             at_edge
+             |> Ecto.Changeset.change(authenticated_at: inside)
+             |> Repo.update!()
+           )
   end
 end

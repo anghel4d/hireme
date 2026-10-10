@@ -84,6 +84,13 @@ defmodule HiremeWeb.SignInTest do
 
     assert anonymous() |> post("/sign-in/email", %{email: "not an address"}) |> html_response(422) =~
              "Enter a whole email address"
+
+    # A suspended account's session is over, and its next link is refused at the door.
+    Repo.update!(Ecto.Changeset.change(first, status: :suspended), skip_account: true)
+    assert redirected_to(get(recycle(again), "/")) == "/sign-in"
+    post(anonymous(), "/sign-in/email", %{email: "new@example.com"})
+    refused = post(anonymous(), "/sign-in/email/confirm", token: mailed("new@example.com"))
+    assert html_response(refused, 403) =~ "suspended"
   end
 
   test "a link never joins an address to whichever account happens to open it", %{conn: victim} do
@@ -123,6 +130,11 @@ defmodule HiremeWeb.SignInTest do
   end
 
   test "GitHub and X sign a visitor in through a state-checked round trip with PKCE" do
+    # The authorize URL is built from the configured host, never the request's.
+    evil = Plug.Test.conn(:get, "/") |> Map.put(:host, "evil.example") |> init_test_session(%{})
+    assert {:ok, _, url} = HiremeWeb.SignIn.begin(evil, :github, :sign_in)
+    assert url =~ "localhost" and not (url =~ "evil.example")
+
     {github, query} = start(anonymous(), "/auth/github")
     assert query["client_id"] == "gh-id" and query["code_challenge_method"] == "S256"
     assert query["redirect_uri"] =~ ~r{/auth/github/callback\z}
@@ -151,6 +163,7 @@ defmodule HiremeWeb.SignInTest do
     {github, query} = start(anonymous(), "/auth/github")
     forged = get(github, "/auth/github/callback", code: "octo", state: "not-the-state")
     assert redirected_to(forged) == "/sign-in?error=failed"
+    assert Repo.aggregate(Accounts.Identity, :count, skip_account: true) == 0
 
     late = get(recycle(forged), "/auth/github/callback", code: "octo", state: query["state"])
     assert redirected_to(late) == "/sign-in?error=failed"
