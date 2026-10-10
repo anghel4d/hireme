@@ -248,10 +248,23 @@ impl Hub {
                 let (job, _) = self.target(name, a)?;
                 self.read(|d| verdict(d, job))
             }
-            ("list_applications", _) => self.read(|d| applications(d, a, "all", None)),
-            ("recommend_applications", _) => self.read(|d| recommend(d, a)),
-            ("score_distribution", _) => self.read(|d| distribution(d, a)),
-            ("heat_status", _) => self.read(|d| heat(d, a)),
+            ("list_applications", _) => {
+                let limit = a["limit"]
+                    .as_u64()
+                    .map_or(100, |l| l.clamp(1, 1000) as usize);
+                self.read(|d| json_text(&d.applications_json(&query(a, "all", -1, limit))))
+            }
+            ("recommend_applications", _) => {
+                let limit = a["limit"].as_u64().map_or(25, |l| l.clamp(1, 100) as usize);
+                self.read(|d| json_text(&d.recommend_json(&query(a, "open", 90, limit))))
+            }
+            ("score_distribution", _) => {
+                self.read(|d| json_text(&d.distribution_json(&query(a, "all", -1, usize::MAX))))
+            }
+            ("heat_status", _) => {
+                let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
+                self.read(|d| json_text(&d.heat_json(&s("company"), &s("ats"))))
+            }
             ("list_batches", _) => {
                 self.read(|d| Ok(json!({"batches": all_rows(d, table::BATCHES)})))
             }
@@ -815,9 +828,9 @@ NEXT: {next}"
 
     fn drain_events(&self, a: &Value) -> Value {
         let mut events = self.events.lock().unwrap();
-        let jobs: Vec<u32> = match job_arg(a) {
-            Ok(job) => vec![job],
-            Err(_) => events.keys().copied().collect(),
+        let jobs: Vec<u32> = match a.get("job_id").or(a.get("role_id")).and_then(int) {
+            Some(job) => vec![job as u32],
+            None => events.keys().copied().collect(),
         };
         let mut drained = Vec::new();
         for j in jobs {
@@ -1005,7 +1018,6 @@ fn entries(d: &mut Desk) -> Vec<(u32, u32)> {
 
 /// A block as the agent works through it: one line per application.
 fn block_view(d: &mut Desk, b: &Block) -> Value {
-    d.derive();
     let keep = [
         "job_id",
         "company",
@@ -1022,7 +1034,7 @@ fn block_view(d: &mut Desk, b: &Block) -> Value {
         .jobs
         .iter()
         .map(|&(entry, job)| {
-            let card = application(d, job);
+            let card = json_text(&d.application_json(job)).unwrap_or_default();
             let mut line: Map<String, Value> = keep
                 .iter()
                 .map(|k| ((*k).to_string(), card[*k].clone()))
@@ -1086,208 +1098,28 @@ fn all_rows(d: &Desk, t: u16) -> Vec<Value> {
         .collect()
 }
 
-/// The key a lookup table gives index `ix` (stages, statuses, heat_states...).
-fn key_of(d: &Desk, t: u16, ix: u32) -> Value {
-    d.row_of(t, ix)
-        .map_or(Value::Null, |r| json!(d.str_at(t, 2, r)))
-}
-
-/// The index of a key in a lookup table, or -1 for none or "all".
-fn ix_of(d: &Desk, t: u16, key: &Value) -> i32 {
-    let Some(key) = key.as_str().filter(|k| !k.is_empty() && *k != "all") else {
-        return -1;
-    };
-    (0..d.rows(t))
-        .find(|&r| d.str_at(t, 2, r) == key)
-        .map_or(-2, |r| d.u32_at(t, 1, r) as i32)
-}
-
-fn band(d: &Desk, score: u32) -> Value {
-    let t = table::BANDS;
-    (0..d.rows(t))
-        .find(|&r| (d.u32_at(t, 4, r)..=d.u32_at(t, 5, r)).contains(&score))
-        .map_or(Value::Null, |r| json!(d.str_at(t, 2, r)))
-}
-
-/// One card as an agent reads it: names for the enum columns.
-fn card(d: &Desk, r: usize) -> Value {
-    let mut m = row(d, table::CARDS, r);
-    let c = table::CARDS;
-    for (name, lookup) in [
-        ("stage", table::STAGES),
-        ("status", table::STATUSES),
-        ("freshness", table::FRESHNESS),
-        ("gate", table::GATES),
-        ("heat_state", table::HEAT_STATES),
-    ] {
-        let ix = m[name].as_u64().unwrap_or(u64::from(wire::NONE)) as u32;
-        m.insert(name.into(), key_of(d, lookup, ix));
+/// The board's filters as a call names them, over this tool's defaults.
+fn query<'a>(a: &'a Value, status: &'a str, min: i32, limit: usize) -> kernel::Query<'a> {
+    let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("");
+    kernel::Query {
+        band: s("band"),
+        stage: s("stage"),
+        status: Some(s("status"))
+            .filter(|x| !x.is_empty())
+            .unwrap_or(status),
+        heat: s("heat"),
+        batch: s("batch"),
+        min_score: a["min_score"].as_i64().map_or(min, |m| m as i32),
+        q: s("q"),
+        limit,
     }
-    let batch = d.u32_at(c, col::cards::BATCH, r);
-    m.insert(
-        "batch".into(),
-        d.row_of(table::BATCHES, batch).map_or(Value::Null, |b| {
-            json!(d.str_at(table::BATCHES, col::batches::CODE, b))
-        }),
-    );
-    m.insert("band".into(), band(d, d.u32_at(c, col::cards::SCORE, r)));
-    let score = m.remove("score").unwrap_or(Value::Null);
-    m.insert("score_100".into(), score);
-    let job = m.remove("id").unwrap_or(Value::Null);
-    m.insert("job_id".into(), job);
-    for skip in [
-        "pips",
-        "fit",
-        "hits",
-        "total",
-        "hidden",
-        "altered",
-        "emphasized",
-        "profile",
-    ] {
-        m.remove(skip);
-    }
-    Value::Object(m)
-}
-
-fn application(d: &mut Desk, job: u32) -> Value {
-    d.derive();
-    d.row_of(table::CARDS, job)
-        .map_or(json!({"job_id": job}), |r| card(d, r))
-}
-
-/// The board in order, filtered as the desk's top bar filters it.
-fn select(d: &mut Desk, a: &Value, status: &str) -> Vec<usize> {
-    let (lo, hi) = match ix_of(d, table::BANDS, &a["band"]) {
-        -1 => (0, i32::MAX),
-        ix => d.row_of(table::BANDS, ix as u32).map_or((1, 0), |r| {
-            (
-                d.u32_at(table::BANDS, 4, r) as i32,
-                d.u32_at(table::BANDS, 5, r) as i32,
-            )
-        }),
-    };
-    let status = match &a["status"] {
-        Value::String(s) if !s.is_empty() => json!(s),
-        _ => json!(status),
-    };
-    let batch = match a["batch"].as_str().filter(|b| !b.is_empty()) {
-        None => -1,
-        Some(code) => (0..d.rows(table::BATCHES))
-            .find(|&r| d.str_at(table::BATCHES, col::batches::CODE, r) == code)
-            .map_or(i32::MAX, |r| {
-                d.u32_at(table::BATCHES, col::batches::ID, r) as i32
-            }),
-    };
-    let min = a["min_score"].as_i64().map_or(-1, |m| m as i32);
-    let (stage, status, heat) = (
-        ix_of(d, table::STAGES, &a["stage"]),
-        ix_of(d, table::STATUSES, &status),
-        ix_of(d, table::HEAT_STATES, &a["heat"]),
-    );
-    let q = a["q"].as_str().unwrap_or("").as_bytes().to_vec();
-    d.select(min, lo, hi, stage, status, batch, -1, heat, &q);
-    d.selection().iter().map(|&r| r as usize).collect()
-}
-
-fn applications(d: &mut Desk, a: &Value, status: &str, limit: Option<usize>) -> Outcome {
-    let limit = a["limit"]
-        .as_u64()
-        .map_or(limit.unwrap_or(100), |l| l.clamp(1, 1000) as usize);
-    let rows: Vec<Value> = select(d, a, status)
-        .into_iter()
-        .take(limit)
-        .map(|r| card(d, r))
-        .collect();
-    Ok(json!({"applications": rows}))
-}
-
-fn recommend(d: &mut Desk, a: &Value) -> Outcome {
-    let mut a = a.clone();
-    if a["min_score"].is_null() {
-        a["min_score"] = json!(90);
-    }
-    let limit = a["limit"].as_u64().map_or(25, |l| l.clamp(1, 100) as usize);
-    let apps: Vec<Value> = select(d, &a, "open")
-        .into_iter()
-        .map(|r| card(d, r))
-        .filter(|c| c["heat_state"] != "blocked")
-        .take(limit)
-        .collect();
-    let open_fire =
-        (0..d.rows(table::BATCHES)).any(|r| d.u32_at(table::BATCHES, col::batches::FIRE, r) == 1);
-    Ok(json!({
-        "applications": apps,
-        "min_score": a["min_score"],
-        "fire": if open_fire { "open_fire" } else { "hold" },
-        "note": "FIRE HOLD. Ranked by score_100 then cooler heat. Blocked (over cap) omitted. Does not submit."
-    }))
-}
-
-/// Band counts and ten-point bins over the filtered board.
-fn distribution(d: &mut Desk, a: &Value) -> Outcome {
-    let scores: Vec<u32> = select(d, a, "all")
-        .into_iter()
-        .map(|r| d.u32_at(table::CARDS, col::cards::SCORE, r))
-        .collect();
-    let bands: Vec<Value> = (0..d.rows(table::BANDS))
-        .map(|r| {
-            let (lo, hi) = (d.u32_at(table::BANDS, 4, r), d.u32_at(table::BANDS, 5, r));
-            let n = scores.iter().filter(|s| (lo..=hi).contains(s)).count();
-            json!({"key": d.str_at(table::BANDS, 2, r), "label": d.str_at(table::BANDS, 3, r),
-                   "min": lo, "max": hi, "count": n})
-        })
-        .collect();
-    let bins: Vec<Value> = (0..10)
-        .map(|b| {
-            let (lo, hi) = (b * 10, if b == 9 { 100 } else { b * 10 + 9 });
-            json!({"lo": lo, "hi": hi, "count": scores.iter().filter(|s| (lo..=hi).contains(*s)).count()})
-        })
-        .collect();
-    let n = scores.len();
-    let mean = if n == 0 {
-        0.0
-    } else {
-        f64::from(scores.iter().sum::<u32>()) / n as f64
-    };
-    Ok(json!({"n": n, "mean": mean, "bands": bands, "bins": bins}))
-}
-
-fn heat(d: &mut Desk, a: &Value) -> Outcome {
-    d.derive();
-    let t = table::HEAT_ROWS;
-    let pick = |group: u32, needle: &Value| -> Vec<Value> {
-        let needle = needle.as_str().unwrap_or("").to_lowercase();
-        (0..d.rows(t))
-            .filter(|&r| d.u32_at(t, col::heat_rows::GROUP, r) == group)
-            .filter(|&r| {
-                needle.is_empty()
-                    || d.str_at(t, col::heat_rows::KEY, r)
-                        .to_lowercase()
-                        .contains(&needle)
-                    || d.str_at(t, col::heat_rows::LABEL, r)
-                        .to_lowercase()
-                        .contains(&needle)
-            })
-            .map(|r| Value::Object(row(d, t, r)))
-            .collect()
-    };
-    Ok(json!({
-        "companies": pick(0, &a["company"]),
-        "vendors": pick(1, &a["ats"]),
-        "note": "FIRE HOLD. Heat gates the queue. It does not submit."
-    }))
 }
 
 fn verdict(d: &mut Desk, job: u32) -> Outcome {
-    d.derive();
-    let r = d
-        .row_of(table::VERDICTS, job)
-        .ok_or(format!("job {job}: not found"))?;
-    let mut v = row(d, table::VERDICTS, r);
-    v.insert("job_id".into(), json!(job));
-    v.insert("fire".into(), json!("hold"));
-    Ok(Value::Object(v))
+    match json_text(&d.verdict_json(job))? {
+        Value::Null => Err(format!("job {job}: not found")),
+        v => Ok(v),
+    }
 }
 
 fn lanes(d: &mut Desk, which: &str) -> Outcome {
@@ -1317,18 +1149,6 @@ fn run_id() -> u64 {
 }
 
 /// `job_id`, or as the distillation packs call it, `role_id`.
-fn job_arg(a: &Value) -> Result<u32, String> {
-    ["job_id", "role_id"]
-        .iter()
-        .find_map(|k| match &a[*k] {
-            Value::Number(n) => n.as_u64(),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
-        })
-        .map(|n| n as u32)
-        .ok_or("job_id is required".into())
-}
-
 fn text(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -1594,9 +1414,9 @@ mod tests {
 
     #[test]
     fn arguments_read_as_the_server_did() {
-        assert_eq!(job_arg(&json!({"job_id": 7})), Ok(7));
-        assert_eq!(job_arg(&json!({"role_id": "8"})), Ok(8));
-        assert!(job_arg(&json!({})).is_err());
+        assert_eq!(int(&json!(7)), Some(7));
+        assert_eq!(int(&json!(" 8")), Some(8));
+        assert_eq!(int(&Value::Null), None);
         assert_eq!(
             pairs(&json!({"title": "x", "minutes": 20})),
             ["minutes", "20", "title", "x"]
