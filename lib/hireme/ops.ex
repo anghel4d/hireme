@@ -34,13 +34,11 @@ defmodule Hireme.Ops do
   import Ecto.Query
   require Logger
 
-  alias Hireme.Accounts.Account
   alias Hireme.Desk
   alias Hireme.Desk.Overlay
   alias Hireme.Gym
   alias Hireme.Heat
   alias Hireme.Net
-  alias Hireme.Ops.Entry
   alias Hireme.Pipeline
   alias Hireme.Repo
 
@@ -54,6 +52,7 @@ defmodule Hireme.Ops do
   @sweep_ms 3_600_000
   @batch 64
   @checkpoint_ms 1_000
+  @store Application.compile_env(:hireme, :store, Hireme.Store)
 
   @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
 
@@ -148,12 +147,10 @@ defmodule Hireme.Ops do
   end
 
   @doc false
-  # Every second, copy what the WAL holds into the database. PASSIVE never
-  # waits on a writer and never makes one wait; the fsync it costs is
-  # paid here, not by the write whose commit crossed SQLite's threshold.
+  # Every second, the store's upkeep (`c:Hireme.Store.checkpoint/0`).
   def checkpoints do
     Process.sleep(@checkpoint_ms)
-    Repo.query!("PRAGMA wal_checkpoint(PASSIVE)", [], skip_account: true)
+    @store.checkpoint()
     checkpoints()
   end
 
@@ -455,7 +452,7 @@ defmodule Hireme.Ops do
   @impl true
   def handle_info(:sweep, state) do
     cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
-    Repo.delete_all(from e in Entry, where: e.inserted_at < ^cutoff)
+    @store.sweep(state.account, cutoff)
     Process.send_after(self(), :sweep, @sweep_ms)
     since = DateTime.to_unix(cutoff)
 
@@ -513,7 +510,7 @@ defmodule Hireme.Ops do
   # send each revision's delta and each answer.
   defp seal(state, batch) do
     state = warm(state, false)
-    state = if state.ledger, do: state, else: %{state | ledger: read_ledger()}
+    state = if state.ledger, do: state, else: %{state | ledger: read_ledger(state.account)}
 
     {todo, answered} =
       Enum.split_with(batch, &(&1.op_id == nil or not Map.has_key?(state.ledger, &1.op_id)))
@@ -535,24 +532,24 @@ defmodule Hireme.Ops do
     several? = match?([_, _ | _], todo)
 
     {:ok, results} =
-      Repo.transaction(fn ->
+      @store.transaction(fn ->
         results = Enum.map(todo, &apply_one(&1, state, several?))
         done = Enum.count(results, &match?({:ok, _, _, _}, &1))
 
         if done == 0 and not several? do
           [{:error, reason}] = results
-          Repo.rollback({:refused, reason})
+          @store.rollback({:refused, reason})
         end
 
         last = if done > 0, do: bump!(state, done), else: state.rev
         numbered = number(results, last - done + 1)
-        log!(todo, numbered)
+        log!(state.account, todo, numbered)
         numbered
       end)
       |> case do
         # Alone and refused: nothing written, so its log line is its own.
         {:error, {:refused, reason}} ->
-          log!(todo, [{:error, reason}])
+          log!(state.account, todo, [{:error, reason}])
           {:ok, [{:error, reason}]}
 
         ok ->
@@ -569,7 +566,7 @@ defmodule Hireme.Ops do
   defp apply_one(%{command: command, holder: holder}, state, several?) do
     Process.put(@holder, holder)
     Process.put(@held, [])
-    if several?, do: Repo.query!("SAVEPOINT op", [], skip_account: true)
+    if several?, do: @store.savepoint(:open)
 
     result =
       try do
@@ -584,13 +581,13 @@ defmodule Hireme.Ops do
 
     case result do
       {:ok, value} ->
-        if several?, do: Repo.query!("RELEASE op", [], skip_account: true)
+        if several?, do: @store.savepoint(:keep)
         # Read what the write reached on the connection it holds: the
         # rows as they will commit, without a second checkout.
         {:ok, value, prefetch(groups(command, value), state.raw), held}
 
       refused ->
-        if several?, do: Repo.query!("ROLLBACK TO op; RELEASE op", [], skip_account: true)
+        if several?, do: @store.savepoint(:undo)
 
         case refused do
           {:error, reason} -> {:error, reason}
@@ -611,8 +608,9 @@ defmodule Hireme.Ops do
   end
 
   # Every client op's outcome, in one statement.
-  defp log!(todo, results) do
-    rows =
+  defp log!(account, todo, results) do
+    @store.log(
+      account,
       for {%{op_id: op_id} = write, result} <- Enum.zip(todo, results),
           op_id != nil and not match?({:raise, _, _}, result) do
         case result do
@@ -620,15 +618,7 @@ defmodule Hireme.Ops do
           {:error, reason} -> [op_id, write.kind, 0, refusal_name(normalize(reason))]
         end
       end
-
-    if rows != [] do
-      Repo.query!(
-        "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES " <>
-          Enum.map_join(rows, ", ", fn _ -> "(?, ?, ?, ?, ?, ?)" end),
-        Enum.flat_map(rows, &([Repo.account_id!() | &1] ++ [now()])),
-        skip_account: true
-      )
-    end
+    )
   end
 
   # After commit: each revision's delta in order, then each answer, so a
@@ -683,13 +673,7 @@ defmodule Hireme.Ops do
 
   # A write from another VM moved the counter: these tables are behind it.
   defp bump!(state, n \\ 1) do
-    %{rows: [[rev]]} =
-      Repo.query!(
-        "UPDATE accounts SET desk_rev = desk_rev + ? WHERE id = ? RETURNING desk_rev",
-        [n, state.account],
-        skip_account: true
-      )
-
+    rev = @store.bump(state.account, n)
     if rev != state.rev + n, do: Process.put({__MODULE__, :gap}, true)
     rev
   end
@@ -716,7 +700,7 @@ defmodule Hireme.Ops do
         next
 
       {next, delta} ->
-        rev = Repo.transaction(fn -> bump!(state) end) |> elem(1)
+        rev = @store.transaction(fn -> bump!(state) end) |> elem(1)
 
         if Process.delete({__MODULE__, :gap}) do
           {next, rest} = rediff(next, :all)
@@ -754,7 +738,7 @@ defmodule Hireme.Ops do
   defp warm(%{raw: nil} = state, _look?) do
     # The revision first: a write from another VM landing mid-read leaves
     # it behind the database, so the next attach re-reads.
-    rev = db_rev(state)
+    rev = @store.rev(state.account)
     raw = Map.new(read_tables(), fn {t, rows} -> {t, Map.new(rows, &{&1.id, &1})} end)
 
     %{
@@ -768,21 +752,18 @@ defmodule Hireme.Ops do
   end
 
   defp warm(state, look?) do
-    if state.rev == nil or (look? and state.rev != db_rev(state)) do
+    if state.rev == nil or (look? and state.rev != @store.rev(state.account)) do
       {next, delta} = rediff(state, :all)
-      rev = Repo.transaction(fn -> bump!(%{state | rev: db_rev(state)}) end) |> elem(1)
+
+      rev =
+        @store.transaction(fn -> bump!(%{state | rev: @store.rev(state.account)}) end) |> elem(1)
+
       Process.delete({__MODULE__, :gap})
       broadcast(next, {:ops_delta, rev, delta})
       %{next | rev: rev, ring: :queue.new(), ring_bytes: 0} |> remember(rev, delta, true)
     else
       state
     end
-  end
-
-  defp db_rev(state) do
-    Repo.one!(from(a in Account, where: a.id == ^state.account, select: a.desk_rev),
-      skip_account: true
-    )
   end
 
   # -- the raw tables ---------------------------------------------------------
@@ -801,23 +782,8 @@ defmodule Hireme.Ops do
   # Rows as SQLite holds them: text, integers, JSON text, ISO dates. They
   # go to the wire as they are (`HiremeWeb.Packet.raw/2`), so a boot is
   # one pass from the database to the frame with nothing decoded between.
-  defp read(schema, cols, filter) do
-    {where, params} =
-      case filter do
-        nil ->
-          {"", []}
-
-        {field, values} ->
-          {" AND #{field} IN (#{Enum.map_join(values, ",", fn _ -> "?" end)})", values}
-      end
-
-    sql =
-      "SELECT #{quoted(cols)} FROM #{schema.__schema__(:source)} WHERE account_id = ?" <>
-        where
-
-    %{rows: rows} = Repo.query!(sql, [Repo.account_id!() | params], skip_account: true)
-    Enum.map(rows, &Map.new(Enum.zip(cols, &1)))
-  end
+  defp read(schema, cols, filter),
+    do: @store.read(schema.__schema__(:source), cols, Repo.account_id!(), filter)
 
   defp leases(job_ids) do
     held = Hireme.Letterbox.leased_jobs()
@@ -969,66 +935,14 @@ defmodule Hireme.Ops do
   @spec write_row(atom(), pos_integer(), keyword()) :: {:ok, map()} | {:error, :not_found}
   def write_row(table, id, changes) do
     {schema, _cols} = Keyword.fetch!(@tables, table)
-
-    {sets, params} =
-      (changes ++ [updated_at: now()])
-      |> Enum.map(fn
-        {col, {:json_put, key, value}} ->
-          {"\"#{col}\" = json_set(\"#{col}\", ?, ?)", ["$." <> key, value]}
-
-        {col, %Date{} = day} ->
-          {"#{col} = ?", [Date.to_iso8601(day)]}
-
-        {col, value} ->
-          {"#{col} = ?", [value]}
-      end)
-      |> Enum.unzip()
-
-    json = for {col, {:json_put, _, _}} <- changes, do: col
-
-    plain =
-      for {col, value} <- changes,
-          not match?({:json_put, _, _}, value),
-          into: %{},
-          do: {col, native(value)}
-
-    sql =
-      "UPDATE #{schema.__schema__(:source)} SET #{Enum.join(sets, ", ")} " <>
-        "WHERE id = ? AND account_id = ?" <>
-        if(json == [], do: "", else: " RETURNING #{Enum.join(json, ",")}")
-
-    case Repo.query!(sql, Enum.concat(params) ++ [id, Repo.account_id!()], skip_account: true) do
-      %{num_rows: 0} ->
-        {:error, :not_found}
-
-      %{rows: [row]} when json != [] ->
-        {:ok, Map.merge(plain, Map.new(Enum.zip(json, row))) |> Map.put(:id, id)}
-
-      %{num_rows: 1} ->
-        {:ok, Map.put(plain, :id, id)}
-    end
+    @store.write(schema.__schema__(:source), id, Repo.account_id!(), changes)
   end
 
   @doc false
   # The account's next application number, taken in the write that opens
   # the application so it is never handed out twice.
   @spec number!() :: pos_integer()
-  def number! do
-    %{rows: [[no]]} =
-      Repo.query!(
-        "UPDATE accounts SET next_no = next_no + 1 WHERE id = ? RETURNING next_no - 1",
-        [Repo.account_id!()],
-        skip_account: true
-      )
-
-    no
-  end
-
-  # Column names quoted: `no` is an SQL keyword.
-  defp quoted(cols), do: Enum.map_join(cols, ",", &~s("#{&1}"))
-
-  defp native(%Date{} = day), do: Date.to_iso8601(day)
-  defp native(value), do: value
+  def number!, do: @store.number(Repo.account_id!())
 
   # The row groups a committed write can have touched.
   defp groups(command, value) do
@@ -1249,21 +1163,13 @@ defmodule Hireme.Ops do
 
   # -- the ledger -------------------------------------------------------------
 
-  defp read_ledger do
-    cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
+  defp read_ledger(account) do
+    since = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
 
-    Repo.all(
-      from e in Entry,
-        where: e.inserted_at >= ^cutoff,
-        select: {e.op_id, e.rev, e.refusal, e.inserted_at}
-    )
-    |> Map.new(fn {op_id, rev, refusal, at} ->
-      reply = if refusal, do: {:error, refusal(refusal)}, else: {:ok, rev}
-      {op_id, {reply, DateTime.to_unix(at)}}
+    Map.new(@store.ledger(account, since), fn {op_id, rev, refusal, at} ->
+      {op_id, {if(refusal, do: {:error, refusal(refusal)}, else: {:ok, rev}), at}}
     end)
   end
-
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
   defp normalize(%Ecto.Changeset{}), do: :invalid
   defp normalize({:argument, name}) when is_binary(name), do: {:argument, name}
