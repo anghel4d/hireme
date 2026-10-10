@@ -253,7 +253,7 @@ impl Hub {
                 self.read(|d| json_text(&d.heat_json(&s("company"), &s("ats"))))
             }
             ("list_batches", _) => {
-                self.read(|d| Ok(json!({"batches": all_rows(d, table::BATCHES)})))
+                self.read(|d| Ok(json!({"batches": json_text(&d.table_json(table::BATCHES))?})))
             }
             ("gym_status", _) => self.read(|d| lanes(d, "gym")),
             ("net_status", _) => self.read(|d| lanes(d, "net")),
@@ -999,31 +999,7 @@ fn entries(d: &mut Desk) -> Vec<(u32, u32)> {
 
 /// A block as the agent works through it: one line per application.
 fn block_view(d: &mut Desk, b: &Block) -> Value {
-    let keep = [
-        "job_id",
-        "company",
-        "role",
-        "stage",
-        "score_100",
-        "band",
-        "next_action",
-        "next_due",
-        "heat_state",
-        "batch",
-    ];
-    let rows: Vec<Value> = b
-        .jobs
-        .iter()
-        .map(|&(entry, job)| {
-            let card = json_text(&d.application_json(job)).unwrap_or_default();
-            let mut line: Map<String, Value> = keep
-                .iter()
-                .map(|k| ((*k).to_string(), card[*k].clone()))
-                .collect();
-            line.insert("entry".into(), json!(entry));
-            Value::Object(line)
-        })
-        .collect();
+    let rows = json_text(&d.block_json(&b.jobs)).unwrap_or_default();
     json!({"from": b.from, "to": b.to, "applications": rows})
 }
 
@@ -1052,32 +1028,6 @@ fn int(v: &Value) -> Option<i64> {
 }
 
 // ---- reading the desk ---------------------------------------------------------
-
-/// One row of any table, every column named as the schema names it.
-fn row(d: &Desk, t: u16, r: usize) -> Map<String, Value> {
-    let mut m = Map::new();
-    for def in schema::COLS.iter().filter(|c| c.table == t) {
-        let v = match def.kind {
-            "str" | "sym" => json!(d.str_at(t, def.col, r)),
-            "f64" => json!(d.f64_at(t, def.col, r))
-                .as_f64()
-                .map_or(Value::Null, |x| json!(x)),
-            kind => match d.u32_at(t, def.col, r) {
-                wire::NONE => Value::Null,
-                v if kind == "day" => json!(iso_day(i64::from(v))),
-                v => json!(v),
-            },
-        };
-        m.insert(def.name.into(), v);
-    }
-    m
-}
-
-fn all_rows(d: &Desk, t: u16) -> Vec<Value> {
-    (0..d.rows(t))
-        .map(|r| Value::Object(row(d, t, r)))
-        .collect()
-}
 
 /// The board's filters as a call names them, over this tool's defaults.
 fn query<'a>(a: &'a Value, status: &'a str, min: i32, limit: usize) -> kernel::Query<'a> {
