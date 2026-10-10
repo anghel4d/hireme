@@ -49,11 +49,15 @@ defmodule Hireme.Store do
   """
   @callback write(String.t(), pos_integer(), account(), keyword()) ::
               {:ok, map()} | {:error, :not_found}
-  @doc "Log client ops' outcomes in one statement, sharing one timestamp for the batch."
-  @callback log(account(), [entry()]) :: :ok
-  @doc "The account's op outcomes logged since `since`: `{op_id, rev, refusal | nil, unix}`."
-  @callback ledger(account(), DateTime.t()) :: [
-              {integer(), integer(), String.t() | nil, integer()}
+  @doc """
+  Log client ops' outcomes in one statement, sharing one timestamp for
+  the batch. Answers the op ids logged: one logged already is left as it
+  was.
+  """
+  @callback log(account(), [entry()]) :: [integer()]
+  @doc "The account's logged outcomes of these op ids: `{op_id, rev, refusal | nil}`."
+  @callback answers(account(), [integer()]) :: [
+              {integer(), integer(), String.t() | nil}
             ]
   @doc "Drop the account's op outcomes logged before `before`."
   @callback sweep(account(), DateTime.t()) :: :ok
@@ -153,25 +157,29 @@ defmodule Hireme.Store do
   end
 
   @impl true
-  def log(_account, []), do: :ok
+  def log(_account, []), do: []
 
   def log(account, entries) do
     at = now()
 
-    query!(
-      "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES " <>
-        Enum.map_join(entries, ", ", fn _ -> "(?, ?, ?, ?, ?, ?)" end),
-      Enum.flat_map(entries, &([account | &1] ++ [at]))
-    )
+    %{rows: rows} =
+      Repo.query!(
+        "INSERT INTO wire_ops (account_id, op_id, kind, rev, refusal, inserted_at) VALUES " <>
+          Enum.map_join(entries, ", ", fn _ -> "(?, ?, ?, ?, ?, ?)" end) <>
+          " ON CONFLICT (account_id, op_id) DO NOTHING RETURNING op_id",
+        Enum.flat_map(entries, &([account | &1] ++ [at])),
+        skip_account: true
+      )
+
+    List.flatten(rows)
   end
 
   @impl true
-  def ledger(account, since) do
+  def answers(account, op_ids) do
     %{rows: rows} =
       Repo.query!(
-        "SELECT op_id, rev, refusal, unixepoch(inserted_at) FROM wire_ops " <>
-          "WHERE account_id = ? AND inserted_at >= ?",
-        [account, iso(since)],
+        "SELECT op_id, rev, refusal FROM wire_ops WHERE account_id = ? AND op_id IN (#{marks(op_ids)})",
+        [account | op_ids],
         skip_account: true
       )
 

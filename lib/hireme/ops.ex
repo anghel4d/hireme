@@ -4,11 +4,12 @@ defmodule Hireme.Ops do
 
   Every write on an account runs here, one at a time, whoever asked (a
   browser tab's op, an agent's letterbox command, an import), so the
-  account's changes have one total order. A write is one transaction:
-  the ledger entry when the write is a client op, the domain write
-  (`Hireme.Desk.execute/1` and the lane writes), and the account's
-  revision bump. After commit the sequencer re-reads the rows the write
-  reached and broadcasts what changed on `Hireme.Desk.topic/1`:
+  account's changes have one total order. The writes waiting together
+  are sealed in one transaction: each domain write (`Hireme.Desk.execute/1`
+  and the lane writes) with a revision of its own, each client op's
+  ledger entry, and the account's revision bump. After commit the
+  sequencer sends what each write changed, revision by revision, on
+  `Hireme.Desk.topic/1`:
 
       {:ops_delta, rev, %{rows: %{table => [row]}, gone: %{table => [id]}}}
 
@@ -291,11 +292,21 @@ defmodule Hireme.Ops do
     # query first, so no connection is dropped mid-statement.
     with [{pid, _}] <- Registry.lookup(@registry, account_id) do
       GenServer.stop(pid, :normal)
+      gone(account_id, pid)
     end
 
     :ok
   catch
     :exit, _gone -> :ok
+  end
+
+  # The registry forgets a stopped sequencer a moment after it exits;
+  # until then the next write would be sent to the dead one.
+  defp gone(account_id, pid) do
+    case Registry.lookup(@registry, account_id) do
+      [{^pid, _}] -> Process.sleep(1) && gone(account_id, pid)
+      _ -> :ok
+    end
   end
 
   @doc "The process a write runs for, for lease checks; the caller itself outside the sequencer."
@@ -345,8 +356,7 @@ defmodule Hireme.Ops do
     Repo.put_account(account_id)
     Process.send_after(self(), :sweep, 0)
 
-    {:ok,
-     %{account: account_id, rev: nil, raw: nil, ledger: nil, ring: :queue.new(), ring_bytes: 0}}
+    {:ok, %{account: account_id, rev: nil, raw: nil, ring: :queue.new(), ring_bytes: 0}}
   end
 
   @impl true
@@ -379,12 +389,7 @@ defmodule Hireme.Ops do
     cutoff = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
     @store.sweep(state.account, cutoff)
     Process.send_after(self(), :sweep, @sweep_ms)
-    since = DateTime.to_unix(cutoff)
-
-    ledger =
-      state.ledger && Map.filter(state.ledger, fn {_op_id, {_reply, at}} -> at >= since end)
-
-    {:noreply, %{state | ledger: ledger}}
+    {:noreply, state}
   end
 
   def handle_info({:write, write}, state), do: {:noreply, seal(state, drain([write], 1))}
@@ -434,21 +439,12 @@ defmodule Hireme.Ops do
     end
   end
 
-  # Seal a batch: answer resends from the ledger, run the rest in order
-  # in one transaction (each in a savepoint when there are several, so one
-  # refusal leaves the others), number them, log them, commit once, then
-  # send each revision's delta and each answer.
+  # Seal a batch in one transaction: run it in order, number the writes,
+  # log the client ops, commit once; then send each revision's delta and
+  # each answer.
   defp seal(state, batch) do
-    state = warm(state, false)
-    state = if state.ledger, do: state, else: %{state | ledger: read_ledger(state.account)}
-
-    {todo, answered} =
-      Enum.split_with(batch, &(&1.op_id == nil or not Map.has_key?(state.ledger, &1.op_id)))
-
-    Enum.each(answered, &answer(&1, elem(Map.fetch!(state.ledger, &1.op_id), 0)))
-
-    {results, state} = commit(state, todo)
-    finish(state, todo, results)
+    {results, state} = commit(warm(state, false), batch)
+    finish(state, batch, results)
   rescue
     exception ->
       Logger.error(Exception.format(:error, exception, __STACKTRACE__))
@@ -456,47 +452,74 @@ defmodule Hireme.Ops do
       %{state | rev: nil}
   end
 
-  defp commit(state, []), do: {[], state}
+  # The ledger is not read on the way in: each client op's entry is
+  # written with the batch, and an id already there (a resend, rare) is
+  # turned away by the table's unique key. Then the batch is undone and
+  # run again, those ids answered from their entries. Nothing of the
+  # ledger is kept in memory, so neither memory nor a write's cost grows
+  # with it.
+  defp commit(state, batch, known \\ %{}) do
+    @store.transaction(fn ->
+      results = run(batch, state, known)
+      done = Enum.count(results, &match?({:ok, _, _}, &1))
+      last = if done > 0, do: bump!(state, done), else: state.rev
+      numbered = number(results, last - done + 1)
 
-  defp commit(state, todo) do
-    several? = match?([_, _ | _], todo)
-
-    {:ok, results} =
-      @store.transaction(fn ->
-        results = Enum.map(todo, &apply_one(&1, state, several?))
-        done = Enum.count(results, &match?({:ok, _, _}, &1))
-
-        if done == 0 and not several? do
-          [{:error, reason}] = results
-          @store.rollback({:refused, reason})
+      entries =
+        for {%{op_id: id} = write, result} <- Enum.zip(batch, numbered),
+            id != nil and elem(result, 0) in [:ok, :error] do
+          case result do
+            {:ok, _, _, rev} -> [id, write.kind, rev, nil]
+            {:error, reason} -> [id, write.kind, 0, refusal_name(normalize(reason))]
+          end
         end
 
-        last = if done > 0, do: bump!(state, done), else: state.rev
-        numbered = number(results, last - done + 1)
-        log!(state.account, todo, numbered)
-        numbered
-      end)
-      |> case do
-        # Alone and refused: nothing written, so its log line is its own.
-        {:error, {:refused, reason}} ->
-          log!(state.account, todo, [{:error, reason}])
-          {:ok, [{:error, reason}]}
-
-        ok ->
-          ok
+      case Enum.map(entries, &hd/1) -- @store.log(state.account, entries) do
+        [] -> numbered
+        resent -> @store.rollback({:resent, resent})
       end
+    end)
+    |> case do
+      {:ok, results} ->
+        {results, state}
 
-    {results, state}
+      {:error, {:resent, ids}} ->
+        answered =
+          Map.new(@store.answers(state.account, ids), fn
+            {id, rev, nil} -> {id, {:answered, {:ok, rev}}}
+            {id, _rev, refusal} -> {id, {:answered, {:error, refusal(refusal)}}}
+          end)
+
+        commit(state, batch, Map.merge(known, answered))
+    end
   end
 
-  # One write of the batch. Alone, a refusal rolls back the transaction;
-  # among several, its savepoint. A write of one statement needs none: a
-  # statement that fails is undone by the database itself.
-  defp apply_one(%{refused: reason}, _state, _several?) when reason != nil, do: {:error, reason}
+  # In order; a client op answered already, or sent twice in this batch,
+  # takes that answer and runs no write.
+  defp run(batch, state, known) do
+    {results, _} =
+      Enum.map_reduce(batch, known, fn
+        %{op_id: nil} = write, known ->
+          {apply_one(write, state), known}
 
-  defp apply_one(%{command: command, holder: holder}, state, several?) do
+        %{op_id: id}, known when is_map_key(known, id) ->
+          {known[id], known}
+
+        write, known ->
+          {apply_one(write, state), Map.put(known, write.op_id, {:again, write.op_id})}
+      end)
+
+    results
+  end
+
+  # One write of the batch, in a savepoint so a refusal undoes it alone;
+  # a write of one statement needs none: a statement that fails is
+  # undone by the database itself.
+  defp apply_one(%{refused: reason}, _state) when reason != nil, do: {:error, reason}
+
+  defp apply_one(%{command: command, holder: holder}, state) do
     Process.put(@holder, holder)
-    saved? = several? and not one_statement?(command)
+    saved? = not one_statement?(command)
     if saved?, do: @store.savepoint(:open)
 
     result =
@@ -542,20 +565,6 @@ defmodule Hireme.Ops do
     numbered
   end
 
-  # Every client op's outcome, in one statement.
-  defp log!(account, todo, results) do
-    @store.log(
-      account,
-      for {%{op_id: op_id} = write, result} <- Enum.zip(todo, results),
-          op_id != nil and not match?({:raise, _, _}, result) do
-        case result do
-          {:ok, _, _, rev} -> [op_id, write.kind, rev, nil]
-          {:error, reason} -> [op_id, write.kind, 0, refusal_name(normalize(reason))]
-        end
-      end
-    )
-  end
-
   # After commit: each revision's delta in order, then each answer, so a
   # caller holds the delta before the answer that settles it.
   defp finish(state, todo, results) do
@@ -568,18 +577,17 @@ defmodule Hireme.Ops do
           state
       end)
 
-    now = System.system_time(:second)
-
     # A raise is not ledgered (nor logged): a resend tries again.
     Enum.zip(todo, results)
-    |> Enum.reduce(state, fn {write, result}, state ->
-      reply = reply(write, result)
-      answer(write, reply)
+    |> Enum.reduce(%{}, fn {write, result}, sent ->
+      reply =
+        with {:again, id} <- result, do: Map.fetch!(sent, id), else: (_ -> reply(write, result))
 
-      if write.op_id && not match?({:raise, _, _}, result),
-        do: %{state | ledger: Map.put(state.ledger, write.op_id, {reply, now})},
-        else: state
+      answer(write, reply)
+      if write.op_id, do: Map.put(sent, write.op_id, reply), else: sent
     end)
+
+    state
   end
 
   # A client op is answered with its revision and a named refusal; a
@@ -591,6 +599,7 @@ defmodule Hireme.Ops do
     do: {:error, if(write.op_id, do: normalize(reason), else: reason)}
 
   defp reply(write, {:raise, exception, stacktrace}), do: failed(write, exception, stacktrace)
+  defp reply(_write, {:answered, reply}), do: reply
 
   # A domain caller's raise is re-raised in its own process; a client op's
   # is answered `:internal` (its target and fields are the client's, and a
@@ -678,7 +687,6 @@ defmodule Hireme.Ops do
       state
       | rev: rev,
         raw: raw,
-        ledger: nil,
         ring: :queue.new(),
         ring_bytes: 0
     }
@@ -1080,14 +1088,6 @@ defmodule Hireme.Ops do
   end
 
   # -- the ledger -------------------------------------------------------------
-
-  defp read_ledger(account) do
-    since = DateTime.add(DateTime.utc_now(), -@ledger_ttl)
-
-    Map.new(@store.ledger(account, since), fn {op_id, rev, refusal, at} ->
-      {op_id, {if(refusal, do: {:error, refusal(refusal)}, else: {:ok, rev}), at}}
-    end)
-  end
 
   defp normalize(%Ecto.Changeset{}), do: :invalid
   defp normalize({:argument, name}) when is_binary(name), do: {:argument, name}

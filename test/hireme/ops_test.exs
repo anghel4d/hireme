@@ -292,6 +292,54 @@ defmodule Hireme.OpsTest do
     end
   end
 
+  # An op id is answered once, the first time, whatever a resend carries:
+  # a copy queued in the same batch, a resend answered from the ledger
+  # table (nothing of it is kept in memory), and one after a restart.
+  for seed <- 1..3 do
+    test "a resent op id gets its first answer on every path (seed #{seed})",
+         %{account: account} do
+      seed = unquote(seed)
+      :rand.seed(:exsss, {seed, 7, 11})
+      fixture = desk(60 + seed)
+      {:ok, _rev, {:boot, %{tables: tables}}} = Ops.attach(account.id, nil)
+      ops = for n <- 1..30, do: random_op(fixture, seed * 10_000 + n)
+
+      # The same id with other fields: never the one that counts.
+      again = fn op -> %{random_op(fixture, op.op_id + 500) | op_id: op.op_id} end
+      twice = Enum.take_random(ops, 10)
+      queued = Enum.flat_map(ops, &if(&1 in twice, do: [&1, again.(&1)], else: [&1]))
+
+      seq = Ops.whereis(account.id)
+      :ok = :sys.suspend(seq)
+      refs = Enum.map(queued, &Ops.send_run(account.id, &1))
+      :ok = :sys.resume(seq)
+
+      replies =
+        for ref <- refs do
+          receive do
+            {:ops_reply, ^ref, reply} -> reply
+          after
+            5_000 -> flunk("no answer, seed #{seed}")
+          end
+        end
+
+      first =
+        Map.new(Enum.zip(queued, replies) |> Enum.reverse(), fn {op, r} -> {op.op_id, r} end)
+
+      for {op, reply} <- Enum.zip(queued, replies), do: assert(reply == first[op.op_id])
+
+      deltas = drain([])
+      assert length(deltas) == Enum.count(Map.values(first), &match?({:ok, _}, &1))
+      view = Enum.reduce(deltas, by_id(tables), fn {_, d}, v -> apply_delta(v, d) end)
+      assert view == fresh_view(), "seed #{seed}: #{inspect(diverged(view, fresh_view()))}"
+
+      for op <- ops, do: assert(Ops.run(account.id, again.(op)) == first[op.op_id])
+      :ok = Ops.stop(account.id)
+      for op <- ops, do: assert(Ops.run(account.id, again.(op)) == first[op.op_id])
+      assert fresh_view() == view and drain([]) == []
+    end
+  end
+
   # The target is the client's: an id that is another account's, or no
   # one's, is refused like any other op, and the sequencer carries on.
   test "every kind refuses a target the account cannot see", %{account: account} do
