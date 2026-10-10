@@ -553,7 +553,7 @@ fn at_word(n: &str, phrases: &[&str], whole: bool) -> bool {
     starts.into_iter().any(|at| {
         phrases.iter().any(|p| {
             let end = at + p.len();
-            b[at..].starts_with(p.as_bytes()) && (!whole || end == b.len() || b[end] == b' ')
+            b.get(at) == p.as_bytes().first() && b[at..].starts_with(p.as_bytes()) && (!whole || end == b.len() || b[end] == b' ')
         })
     })
 }

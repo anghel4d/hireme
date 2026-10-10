@@ -299,8 +299,11 @@ impl Table {
             }
             let syms = symbols(&c, arena);
             let mut col = Column::blank(self.id, c.id, stored(c.ty), self.n);
-            for r in 0..self.n {
-                col.write(r, &c, r, arena, &syms);
+            // Numbers straight off the wire, a column at a time.
+            match &mut col.data {
+                Data::W32(v) => v.iter_mut().zip(c.data.chunks_exact(4)).for_each(|(x, b)| *x = u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                Data::W64(v) => v.iter_mut().zip(c.data.chunks_exact(8)).for_each(|(x, b)| *x = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])),
+                Data::Str(_) => (0..self.n).for_each(|r| { col.write(r, &c, r, arena, &syms); }),
             }
             self.cols.push(col);
         }
@@ -314,6 +317,7 @@ impl Table {
     /// rows and blank on new ones. Returns the key of each row that is new
     /// or changed with its changed columns (bit = column id, all for a new
     /// row), or None when the table had no usable key column.
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     pub fn upsert(&mut self, t: &wire::Table, arena: &mut Arena) -> Option<Vec<(u32, u64)>> {
         let keys = t.cols().find(|c| c.id == 1 && c.ty == U32)?;
         let mut moved = Vec::with_capacity(t.nrows as usize);
@@ -368,6 +372,7 @@ impl Table {
     }
 
     /// Removes rows by key. Returns how many existed.
+    #[inline(never)] // not on a BOOT's path: compiled when first used
     pub fn delete(&mut self, keys: impl Iterator<Item = u32>) -> usize {
         let mut gone = 0;
         for k in keys {
@@ -505,7 +510,8 @@ impl Store {
             }
         };
         // A row the frame names as it already was moves nothing.
-        if let Some(keys) = keyed(id).then(|| tbl.upsert(t, arena)).flatten() {
+        // Into an empty table (a BOOT's) every row is new: replaced whole.
+        if let Some(keys) = (keyed(id) && tbl.n > 0).then(|| tbl.upsert(t, arena)).flatten() {
             for (k, cols) in keys {
                 self.touched.push([id as u32, k]);
                 self.moved_cols.push(cols);
