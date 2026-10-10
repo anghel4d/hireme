@@ -2,7 +2,8 @@ defmodule Hireme.Fixtures do
   @moduledoc """
   The rows every test opens with: a profile, a line on it, and an
   application. Defaults are unique wherever the schema demands it;
-  pass `attrs` for anything a test asserts on.
+  pass `attrs` for anything a test asserts on. And the reference reader
+  for wire frames: `tables/1`, `named/2` and `plain/1`.
   """
 
   alias Hireme.Corpus
@@ -116,4 +117,68 @@ defmodule Hireme.Fixtures do
       {Enum.random([Atom.to_string(field), field]), value}
     end
   end
+
+  # ---- The reference reader for wire frames, as the browser reads them ----
+
+  @doc "A frame body's table blocks as `%{table_id => [rows keyed by column id]}`."
+  def tables(body), do: tables(body, %{})
+  defp tables(<<>>, acc), do: acc
+
+  defp tables(<<id::little-16, ncols::little-16, n::little-32, rest::binary>>, acc) do
+    {cols, rest} =
+      Enum.map_reduce(1..ncols//1, rest, fn _,
+                                            <<cid::little-16, type::8, 0::8, size::little-32,
+                                              rest::binary>> ->
+        <<data::binary-size(^size), rest::binary>> = rest
+        pad = rem(8 - rem(size, 8), 8)
+        <<_::binary-size(^pad), rest::binary>> = rest
+        {{cid, values(type, n, data)}, rest}
+      end)
+
+    rows = for i <- 0..(n - 1)//1, do: Map.new(cols, fn {cid, vs} -> {cid, Enum.at(vs, i)} end)
+    tables(rest, Map.update(acc, id, rows, &(&1 ++ rows)))
+  end
+
+  defp values(1, _n, data), do: for(<<v::little-32 <- data>>, do: v)
+  defp values(3, _n, data), do: for(<<v::little-64 <- data>>, do: v)
+  defp values(4, _n, data), do: for(<<v::binary-8 <- data>>, do: v)
+
+  defp values(5, n, data) do
+    <<k::little-32, rest::binary>> = data
+    syms = values(2, k, rest)
+    size = 4 + 4 * (k + 1) + Enum.sum(Enum.map(syms, &byte_size/1))
+    ids_at = size + rem(4 - rem(size, 4), 4)
+    <<_::binary-size(^ids_at), ids::binary-size(4 * ^n)>> = data
+    for <<i::little-32 <- ids>>, do: Enum.at(syms, i)
+  end
+
+  defp values(2, n, data) do
+    offs_len = 4 * (n + 1)
+    <<offs::binary-size(^offs_len), bytes::binary>> = data
+    offs = for <<o::little-32 <- offs>>, do: o
+
+    offs
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.map(fn [a, b] -> binary_part(bytes, a, b - a) end)
+  end
+
+  @doc "A table's rows by column name, through the schema's column ids; `[]` when absent."
+  def named(t, table) do
+    ids = HiremeWeb.Packet.columns(table)
+
+    Enum.map(t[HiremeWeb.Packet.table_id(table)] || [], fn row ->
+      Map.new(ids, fn {name, cid} -> {name, row[cid]} end)
+    end)
+  end
+
+  @doc "A frame with any DEFLATE body inflated, as the browser does before ingest."
+  def plain({kind, flags, rev, body}) when Bitwise.band(flags, 1) == 1 do
+    <<raw_len::little-32, z_len::little-32, rest::binary>> = body
+    <<z::binary-size(^z_len), _pad::binary>> = rest
+    raw = :zlib.unzip(z)
+    ^raw_len = byte_size(raw)
+    {kind, Bitwise.band(flags, 0xFE), rev, raw}
+  end
+
+  def plain(frame), do: frame
 end
