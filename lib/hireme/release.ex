@@ -24,17 +24,20 @@ defmodule Hireme.Release do
   end
 
   @doc """
-  The migration lock beside the database, the same for every name of it:
-  a symlink to the database is followed. One host, one filesystem whose
-  locks SQLite trusts; nothing is claimed across hosts.
+  The migration lock beside the database, the same through any chain of
+  symlinks to its file (a hard link is another name it cannot see). One
+  host, one filesystem whose locks SQLite trusts; nothing is claimed
+  across hosts.
   """
-  def lock_path do
-    db = Path.expand(Repo.config()[:database])
+  def lock_path, do: real(Path.expand(Repo.config()[:database]), 40) <> ".migrate"
 
-    case File.read_link(db) do
-      {:ok, target} -> Path.expand(target, Path.dirname(db))
-      {:error, _} -> db
-    end <> ".migrate"
+  defp real(path, 0), do: raise(File.Error, reason: :eloop, action: "resolve", path: path)
+
+  defp real(path, hops) do
+    case File.read_link(path) do
+      {:ok, target} -> real(Path.expand(target, Path.dirname(path)), hops - 1)
+      {:error, _} -> path
+    end
   end
 
   # ecto_sqlite3's `lock_for_migrations/3` takes no lock, and the writer
