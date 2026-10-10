@@ -144,6 +144,14 @@ Any size works, and the lease was granted as asked. Powers of two (8, 16, 32) ti
 the desk evenly, so agents' blocks line up and the next free block is easy to name;
 the help line shows the nearest one."
         }
+        "align" => {
+            "align (warning): a power-of-two block that does not start at 1 plus a multiple of its size.
+
+Blocks are a buddy allocator's: a block of 16 starts at 1, 17, 33, ..., so two
+neighbours make an aligned 32 and blocks merge back whole when released. A range
+off its alignment is granted as asked; the help line names the aligned block that
+holds its first entry. lease {\"count\":16} always gets an aligned block."
+        }
         "count_capped" => {
             "count_capped (warning): you asked for more entries than the desk has.
 
@@ -271,6 +279,7 @@ mod tests {
             "truncated",
             "count_capped",
             "size",
+            "align",
             "leased",
             "lineage_busy",
             "cooldown",

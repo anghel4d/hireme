@@ -6,10 +6,10 @@
 //!
 //! The client sends an agent HELLO (flag AGENT, the API key as its
 //! credential). The server answers with the account's raw tables, a BOOT
-//! flagged END and the rest as PATCHes, then every delta. Leases ride
-//! the same channel as lanes: a frame whose header `rev` is a lane
-//! number ≥ 1 belongs to that lane's lease, and BYE on a lane ends it.
-//! One key authentication per session, however many leases.
+//! flagged END and the rest as PATCHes, then every delta. The agent's
+//! block rides the same channel as a lane: an OP whose header `rev` is
+//! the block's lane (its first entry) writes the block. One key
+//! authentication per session.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

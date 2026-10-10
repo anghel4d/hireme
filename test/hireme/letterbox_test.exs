@@ -26,7 +26,7 @@ defmodule Hireme.LetterboxTest do
     ids = Enum.map(jobs, & &1.id)
 
     assert {:ok, %{from: 1, to: 4, jobs: first}, []} = Letterbox.acquire({:count, 4})
-    assert first == Enum.take(ids, 4)
+    assert first == Enum.zip(1..4, Enum.take(ids, 4))
 
     # The next agent asking for a size gets the next free run.
     assert {{:ok, %{from: 5, to: 8}, []}, other} = hold_lease({:count, 4})
@@ -37,6 +37,22 @@ defmodule Hireme.LetterboxTest do
 
     refute MapSet.member?(Letterbox.leased_jobs(), Enum.at(ids, 8))
     let_go(other)
+  end
+
+  test "a size gets the aligned buddy block that splits the least; a range is granted as asked" do
+    jobs(16)
+
+    # 9..12 splits 9..16, so the next block of 4 is its buddy, keeping 1..8 whole.
+    assert {{:ok, %{from: 9, to: 12}, []}, a} = hold_lease({:range, 9, 12})
+    assert {{:ok, %{from: 13, to: 16, lane: 13}, []}, b} = hold_lease({:count, 4})
+
+    # A size that is not a power of two starts an aligned block; one off its alignment is named.
+    assert {{:ok, %{from: 1, to: 3}, []}, c} = hold_lease({:count, 3})
+
+    assert {:ok, %{from: 6, to: 7}, [%{code: :align, asked: {6, 7}, aligned: {5, 6}}]} =
+             Letterbox.acquire({:range, 6, 7})
+
+    Enum.each([a, b, c], &let_go/1)
   end
 
   test "agents racing for the same free run never both win it" do
@@ -55,7 +71,7 @@ defmodule Hireme.LetterboxTest do
 
     Enum.each(racers, &send(&1.pid, :go))
     answers = for %{pid: pid} <- racers, do: receive(do: ({^pid, answer} -> {pid, answer}))
-    wins = for {pid, {:ok, block, _}} <- answers, do: {pid, block.jobs}
+    wins = for {pid, {:ok, block, _}} <- answers, do: {pid, Map.keys(block.held)}
     claimed = Enum.flat_map(wins, &elem(&1, 1))
 
     assert wins != []

@@ -51,12 +51,20 @@ enum Answer {
     Rpc(Value),
 }
 
-/// The agent's lease: entries `from..=to`, and the jobs they are.
+/// The agent's lease: entries `from..=to`, the lane its writes ride, and
+/// the applications it holds as (entry, job id).
 #[derive(Clone)]
 struct Block {
     from: u32,
     to: u32,
-    jobs: Vec<u32>,
+    lane: u64,
+    jobs: Vec<(u32, u32)>,
+}
+
+impl Block {
+    fn holds(&self, job: u32) -> bool {
+        self.jobs.iter().any(|&(_, j)| j == job)
+    }
 }
 
 /// A tool's answer: a value and any warnings, or one diagnostic.
@@ -285,7 +293,7 @@ impl Hub {
 
     /// The blank call's answer: what hireme is, where this agent stands, and how to work.
     fn overview(&self) -> String {
-        let n = self.with_desk(|d| entries(d).len());
+        let n = self.with_desk(|d| entries(d).last().map_or(0, |e| e.0));
         let carrier = self
             .link
             .try_lock()
@@ -338,17 +346,9 @@ NEXT: {next}"
         format!("{}\n\nNEXT: {}", usage(tool), self.next_lease())
     }
 
-    /// The lease call to make now, for a free block of the default size.
+    /// The lease call to make now: the desk picks a free block of the size.
     fn next_lease(&self) -> String {
-        let free = self.with_desk(|d| free_block(d, BLOCK));
-        match free {
-            Some((f, t)) => {
-                format!("lease {{\"count\":{BLOCK}}}   (entries {f}..{t} are free now)")
-            }
-            None => format!(
-                "lease {{\"count\":{BLOCK}}}   (no {BLOCK} consecutive entries are free now; ask for fewer)"
-            ),
-        }
+        format!("lease {{\"count\":{BLOCK}}}")
     }
 
     // ---- the lease ----------------------------------------------------------
@@ -380,15 +380,16 @@ NEXT: {next}"
             reply["error"]["data"].get("code").and_then(Value::as_str),
         ) {
             (Some(r), _) => {
+                let pair = |p: &Value| Some((p[0].as_u64()? as u32, p[1].as_u64()? as u32));
                 let block = Block {
                     from: r["from"].as_u64().unwrap_or(0) as u32,
                     to: r["to"].as_u64().unwrap_or(0) as u32,
+                    lane: r["lane"].as_u64().unwrap_or(0),
                     jobs: r["jobs"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter_map(Value::as_u64)
-                        .map(|j| j as u32)
+                        .filter_map(pair)
                         .collect(),
                 };
                 let warnings = r["warnings"]
@@ -447,17 +448,12 @@ NEXT: {next}"
     /// The job a call names, by `job_id` or `entry`, and its entry.
     fn target(&self, tool: &str, a: &Value) -> Result<(u32, u32), Diag> {
         let ids = self.with_desk(entries);
-        let found = match (
-            a.get("job_id").or(a.get("role_id")).and_then(int),
-            a.get("entry").and_then(int),
-        ) {
-            (Some(job), _) => ids
-                .iter()
-                .position(|&j| i64::from(j) == job)
-                .map(|i| (job as u32, i as u32 + 1)),
-            (None, Some(e)) if e >= 1 => ids.get(e as usize - 1).map(|&j| (j, e as u32)),
-            _ => None,
-        };
+        let job = a.get("job_id").or(a.get("role_id")).and_then(int);
+        let entry = a.get("entry").and_then(int);
+        let found = ids
+            .iter()
+            .find(|&&(e, j)| job.map_or(entry == Some(i64::from(e)), |job| i64::from(j) == job))
+            .map(|&(e, j)| (j, e));
         let field = if a.get("job_id").is_some() {
             "job_id"
         } else {
@@ -473,7 +469,7 @@ NEXT: {next}"
                 field,
                 format!(
                     "expected a job id from block {{}}, or an entry in 1..{}",
-                    ids.len()
+                    ids.last().map_or(0, |e| e.0)
                 ),
             )
             .help(format!(
@@ -494,7 +490,7 @@ NEXT: {next}"
         let (job, entry) = self.target(tool, a)?;
         let block = self.block.lock().unwrap().clone();
         match &block {
-            Some(b) if b.jobs.contains(&job) => {}
+            Some(b) if b.holds(job) => {}
             Some(b) => {
                 return Err(Diag::error("leased", format!("entry {entry} is not in your block {}..{}", b.from, b.to))
                     .call(tool, a)
@@ -512,7 +508,8 @@ NEXT: {next}"
                     .help(format!("take the block that starts at this entry:\nlease {{\"from\":{entry},\"to\":{}}}", entry + BLOCK - 1)));
             }
         }
-        match self.write(kind, job, fields).await {
+        let lane = block.map_or(0, |b| b.lane);
+        match self.write(kind, lane, job, fields).await {
             Ok(()) => Ok((json!({"ok": true, "job_id": job, "entry": entry}), vec![])),
             Err((code, msg)) => Err(self.refused(tool, a, job, code, &msg)),
         }
@@ -525,7 +522,7 @@ NEXT: {next}"
         kind: u8,
         fields: Vec<String>,
     ) -> Reply {
-        match self.write(kind, 0, fields).await {
+        match self.write(kind, 0, 0, fields).await {
             Ok(()) => Ok((json!({"ok": true}), vec![])),
             Err((code, msg)) => Err(self.refused(tool, a, 0, code, &msg)),
         }
@@ -705,12 +702,13 @@ NEXT: {next}"
     async fn write(
         self: &Arc<Self>,
         kind: u8,
+        lane: u64,
         target: u32,
         fields: Vec<String>,
     ) -> Result<(), (u8, String)> {
         let op_id = self.next_op.fetch_add(1, Ordering::Relaxed);
         let mut w = wire::Writer::new();
-        w.begin(frame::OP, 0, 0);
+        w.begin(frame::OP, 0, lane);
         w.op(
             op_id,
             kind,
@@ -749,7 +747,7 @@ NEXT: {next}"
     fn session_lost(&self) {
         let lost = self.block.lock().unwrap().take();
         self.waits.lock().unwrap().clear();
-        for job in lost.map(|b| b.jobs).unwrap_or_default() {
+        for (_, job) in lost.map(|b| b.jobs).unwrap_or_default() {
             self.notify(job, json!({"type": "lease_lost", "job_id": job}));
         }
     }
@@ -763,7 +761,7 @@ NEXT: {next}"
             .lock()
             .unwrap()
             .as_ref()
-            .map(|b| b.jobs.clone())
+            .map(|b| b.jobs.iter().map(|&(_, j)| j).collect())
             .unwrap_or_default();
         if held.is_empty() {
             return;
@@ -938,11 +936,11 @@ fn size_advice(a: &Value, b: &Block) -> Option<Diag> {
                 )
                 .call("lease", a)
                 .at(field, format!("{size} entries"))
-                .note("the lease is granted as asked; blocks of 8, 16 or 32 tile the desk evenly")
+                .note("the lease is granted as asked; blocks of 8, 16 or 32, aligned to their size, tile the desk and merge back whole")
                 .help(format!(
                     "next time, {down} or {up}:\nlease {{\"from\":{},\"to\":{}}}",
-                    b.from,
-                    b.from + up - 1
+                    (b.from - 1) / up * up + 1,
+                    (b.from - 1) / up * up + up
                 )),
             )
         }
@@ -969,6 +967,22 @@ fn lease_warning(a: &Value, w: &Value, b: &Block) -> Diag {
         )
         .call("lease", a)
         .at("count", format!("capped to {n}")),
+        "align" => {
+            let (f, t) = (&w["aligned"][0], &w["aligned"][1]);
+            let size = b.to + 1 - b.from;
+            Diag::warning(
+                "align",
+                format!("entries {}..{} are a block of {size} off its alignment", b.from, b.to),
+            )
+            .call("lease", a)
+            .at("from", "granted as asked")
+            .note(format!(
+                "blocks of {size} align at 1, {}, {}, ...: aligned blocks tile the desk and merge back whole",
+                size + 1,
+                2 * size + 1
+            ))
+            .help(format!("the aligned block holding entry {}:\nlease {{\"from\":{f},\"to\":{t}}}", b.from))
+        }
         other => Diag::warning("internal", format!("the lease carried a warning `{other}`")),
     }
 }
@@ -991,30 +1005,20 @@ fn code_str(name: &str) -> &'static str {
     }
 }
 
-/// The account's applications as entries: job ids in the order they were added.
-fn entries(d: &mut Desk) -> Vec<u32> {
+/// The account's applications as (entry, job id), by entry: the account's
+/// own numbering, which counts them in the order they were added.
+fn entries(d: &mut Desk) -> Vec<(u32, u32)> {
     let t = table::JOB_APPS;
-    let mut ids: Vec<u32> = (0..d.rows(t))
-        .map(|r| d.u32_at(t, col::job_apps::ID, r))
+    let mut all: Vec<(u32, u32)> = (0..d.rows(t))
+        .map(|r| {
+            (
+                d.u32_at(t, col::job_apps::NO, r),
+                d.u32_at(t, col::job_apps::ID, r),
+            )
+        })
         .collect();
-    ids.sort_unstable();
-    ids
-}
-
-/// The first run of `count` entries no lease holds, as the server would pick it.
-fn free_block(d: &mut Desk, count: u32) -> Option<(u32, u32)> {
-    let held: std::collections::HashSet<u32> = (0..d.rows(table::LEASES))
-        .map(|r| d.u32_at(table::LEASES, 1, r))
-        .collect();
-    let ids = entries(d);
-    let mut run = 0;
-    for (i, id) in ids.iter().enumerate() {
-        run = if held.contains(id) { 0 } else { run + 1 };
-        if run == count {
-            return Some((i as u32 + 2 - count, i as u32 + 1));
-        }
-    }
-    None
+    all.sort_unstable();
+    all
 }
 
 /// A block as the agent works through it: one line per application.
@@ -1035,8 +1039,7 @@ fn block_view(d: &mut Desk, b: &Block) -> Value {
     let rows: Vec<Value> = b
         .jobs
         .iter()
-        .zip(b.from..)
-        .map(|(&job, entry)| {
+        .map(|&(entry, job)| {
             let card = application(d, job);
             let mut line: Map<String, Value> = keep
                 .iter()
@@ -1678,6 +1681,7 @@ mod tests {
         let block = Block {
             from: 990,
             to: 1000,
+            lane: 990,
             jobs: vec![],
         };
         let a = json!({"from": 990, "to": 1010});
@@ -1704,9 +1708,9 @@ mod tests {
   | lease {\"from\":990,\"to\":1010}
   |                        ^^^^ 11 entries
   |
-  = note: the lease is granted as asked; blocks of 8, 16 or 32 tile the desk evenly
+  = note: the lease is granted as asked; blocks of 8, 16 or 32, aligned to their size, tile the desk and merge back whole
   = help: next time, 8 or 16:
-          lease {\"from\":990,\"to\":1005}
+          lease {\"from\":977,\"to\":992}
   = explain: hireme {\"explain\":\"size\"}"
         );
         assert!(
@@ -1715,10 +1719,39 @@ mod tests {
                 &Block {
                     from: 1,
                     to: 16,
+                    lane: 1,
                     jobs: vec![]
                 }
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unaligned_block_is_granted_and_named() {
+        let block = Block {
+            from: 3,
+            to: 18,
+            lane: 3,
+            jobs: vec![],
+        };
+        let a = json!({"from": 3, "to": 18});
+        let w = lease_warning(
+            &a,
+            &json!({"code": "align", "asked": [3, 18], "aligned": [1, 16]}),
+            &block,
+        );
+        assert_eq!(
+            w.render(),
+            "warning[align]: entries 3..18 are a block of 16 off its alignment
+  |
+  | lease {\"from\":3,\"to\":18}
+  |               ^ granted as asked
+  |
+  = note: blocks of 16 align at 1, 17, 33, ...: aligned blocks tile the desk and merge back whole
+  = help: the aligned block holding entry 3:
+          lease {\"from\":1,\"to\":16}
+  = explain: hireme {\"explain\":\"align\"}"
         );
     }
 

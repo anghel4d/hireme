@@ -328,8 +328,17 @@ defmodule HiremeWeb.Session do
   defp frame({:hello, _, _, _}, s), do: bye(s, "hello")
   defp frame(_frame, %{hello: false} = s), do: bye(s, "hello")
 
-  defp frame({:op, _, _, body}, %{role: role} = s) when role in [:browser, :agent],
+  # An agent's block writes ride the block's lane (header rev); its
+  # desk-wide writes, control's lane 0.
+  defp frame({:op, _, lane, body}, %{role: :agent, lease: %{lane: lane}} = s), do: op(s, body)
+
+  defp frame({:op, _, 0, body}, %{role: role} = s) when role in [:browser, :agent],
     do: op(s, body)
+
+  defp frame({:op, _, _lane, <<op_id::little-64, _::binary>>}, %{role: :agent} = s) do
+    control(s, Packet.nack(op_id, {:leased, "That lane is not this agent's block."}, s.rev))
+    {:ok, s}
+  end
 
   defp frame(
          {:rpc, _, _, <<len::little-32, _::32, json::binary-size(len), _::binary>>},
@@ -636,7 +645,7 @@ defmodule HiremeWeb.Session do
   defp lease(%{lease: nil} = s, "lease/acquire", params) do
     case Letterbox.acquire(want(params)) do
       {:ok, block, warnings} ->
-        result = %{from: block.from, to: block.to, jobs: block.jobs, warnings: warnings}
+        result = Map.take(block, [:from, :to, :lane, :jobs]) |> Map.put(:warnings, warnings)
         {%{s | lease: block}, %{result: plain(result)}}
 
       {:error, refusal} ->

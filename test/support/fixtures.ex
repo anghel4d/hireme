@@ -85,11 +85,8 @@ defmodule Hireme.Fixtures do
     end
   end
 
-  @doc "A job's entry: its place among the account's applications, 1-based, by id."
-  def entry(job_id) do
-    import Ecto.Query
-    Hireme.Repo.aggregate(from(j in Hireme.Desk.Job, where: j.id <= ^job_id), :count)
-  end
+  @doc "A job's entry: the account's number for it (`no`)."
+  def entry(job_id), do: Hireme.Repo.get!(Hireme.Desk.Job, job_id).no
 
   @doc "End a lease `hold_lease/1` took."
   def let_go(pid) do
