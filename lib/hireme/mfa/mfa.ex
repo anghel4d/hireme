@@ -38,8 +38,8 @@ defmodule Hireme.Mfa do
   alias Hireme.Mfa.RecoveryCode
   alias Hireme.Mfa.WebAuthn
   alias Hireme.Repo
-  alias Hireme.Store
   alias Hireme.Security
+  alias Hireme.Store
 
   @issuer "Hireme"
   @recovery_count 10

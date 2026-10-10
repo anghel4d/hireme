@@ -9,8 +9,8 @@ defmodule Hireme.CvTest do
   alias Hireme.CvPair.JobId
   alias Hireme.Desk
   alias Hireme.Desk.Overlay
-  alias Hireme.Theme
   alias Hireme.Repo
+  alias Hireme.Theme
 
   test "a CV pair cannot be aimed at another application" do
     profile = profile()

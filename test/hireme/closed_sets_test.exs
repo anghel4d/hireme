@@ -7,7 +7,9 @@ defmodule Hireme.ClosedSetsTest do
   """
   use ExUnit.Case, async: true
 
-  @seed 2026_10_09
+  alias Hireme.Desk.Overlay
+
+  @seed 20_261_009
 
   defp parsers do
     [
@@ -19,7 +21,7 @@ defmodule Hireme.ClosedSetsTest do
       {"net kind", &Hireme.Closed.parse(Hireme.Net.kinds(), &1), Hireme.Net.kinds()},
       {"net channel", &Hireme.Closed.parse(Hireme.Net.channels(), &1), Hireme.Net.channels()},
       {"stage", &Hireme.Pipeline.parse/1, Hireme.Pipeline.keys()},
-      {"overlay mode", &Hireme.Desk.Overlay.parse_mode/1, [:hidden, :altered, :emphasized]}
+      {"overlay mode", &Overlay.parse_mode/1, [:hidden, :altered, :emphasized]}
     ]
   end
 

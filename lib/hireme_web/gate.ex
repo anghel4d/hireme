@@ -266,21 +266,23 @@ defmodule HiremeWeb.Gate do
 
     carrier = %__MODULE__{socket: socket}
 
-    with {:ok,
-          <<@open, n, ip::binary-size(n), o::16, origin::binary-size(o), p::16,
-            path::binary-size(p)>>} <- :gen_tcp.recv(socket, 0, @open_wait) do
-      case session.init(carrier, %{ip: ip, origin: origin, path: path}) do
-        {:ok, state} ->
-          accept(carrier)
-          :ok = :inet.setopts(socket, active: @burst)
-          loop(socket, session, state)
+    case :gen_tcp.recv(socket, 0, @open_wait) do
+      {:ok,
+       <<@open, n, ip::binary-size(n), o::16, origin::binary-size(o), p::16,
+         path::binary-size(p)>>} ->
+        case session.init(carrier, %{ip: ip, origin: origin, path: path}) do
+          {:ok, state} ->
+            accept(carrier)
+            :ok = :inet.setopts(socket, active: @burst)
+            loop(socket, session, state)
 
-        {:refuse, status} ->
-          refuse(carrier, status)
-          :gen_tcp.close(socket)
-      end
-    else
-      _ -> :gen_tcp.close(socket)
+          {:refuse, status} ->
+            refuse(carrier, status)
+            :gen_tcp.close(socket)
+        end
+
+      _ ->
+        :gen_tcp.close(socket)
     end
   end
 

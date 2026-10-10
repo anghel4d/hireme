@@ -68,11 +68,9 @@ defmodule Hireme.Import do
   def import_body(body, filename, %Profile{} = profile) do
     # An import writes batches and snapshots around the sequencer; one
     # revision after it re-reads every table, so tabs and boots see them.
-    try do
-      import_trimmed(body, filename, profile)
-    after
-      {:ok, :ok} = Hireme.Ops.exec({:bulk, fn -> :ok end})
-    end
+    import_trimmed(body, filename, profile)
+  after
+    {:ok, :ok} = Hireme.Ops.exec({:bulk, fn -> :ok end})
   end
 
   defp import_trimmed(body, filename, profile) do

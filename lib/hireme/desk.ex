@@ -309,10 +309,7 @@ defmodule Hireme.Desk do
         {:error, :batch}
 
       batch ->
-        with {:ok, updated} <-
-               batch |> Batch.changeset(%{fire: :open_fire, status: :open_fire}) |> Repo.update() do
-          {:ok, updated}
-        end
+        batch |> Batch.changeset(%{fire: :open_fire, status: :open_fire}) |> Repo.update()
     end
   end
 

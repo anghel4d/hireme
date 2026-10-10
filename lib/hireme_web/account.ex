@@ -183,11 +183,13 @@ defmodule HiremeWeb.Account do
   end
 
   defp command("revoke_key", %{"id" => id}, _session, meta) do
-    with {:ok, key} <- key(id) do
-      if is_nil(key.revoked_at), do: ApiKeys.revoke(key, meta)
-      done(%{})
-    else
-      {:error, reason} -> refuse(reason)
+    case key(id) do
+      {:ok, key} ->
+        if is_nil(key.revoked_at), do: ApiKeys.revoke(key, meta)
+        done(%{})
+
+      {:error, reason} ->
+        refuse(reason)
     end
   end
 

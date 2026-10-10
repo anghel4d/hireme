@@ -556,25 +556,27 @@ defmodule HiremeWeb.Session do
   # the account's tables before the reply, so the reply lands on current
   # tables; a session that signed itself out hears BYE after its answer.
   defp rpc(s, json) do
-    with {:ok, %{"id" => id, "method" => method} = req} <- Jason.decode(json) do
-      ctx = %{account_id: s.account_id, session_id: s.session_id, ip: s.peer}
+    case Jason.decode(json) do
+      {:ok, %{"id" => id, "method" => method} = req} ->
+        ctx = %{account_id: s.account_id, session_id: s.session_id, ip: s.peer}
 
-      case HiremeWeb.Account.call(method, req["params"] || %{}, ctx) do
-        {:ok, result, changed} ->
-          if changed == :changed, do: control(s, Packet.frame(:patch, s.rev, account_tables(s)))
-          rpc_reply(s, %{id: id, result: result})
-          {:ok, s}
+        case HiremeWeb.Account.call(method, req["params"] || %{}, ctx) do
+          {:ok, result, changed} ->
+            if changed == :changed, do: control(s, Packet.frame(:patch, s.rev, account_tables(s)))
+            rpc_reply(s, %{id: id, result: result})
+            {:ok, s}
 
-        {:error, code, message} ->
-          rpc_reply(s, %{id: id, error: %{code: code, message: message}})
-          {:ok, s}
+          {:error, code, message} ->
+            rpc_reply(s, %{id: id, error: %{code: code, message: message}})
+            {:ok, s}
 
-        {:signed_out, result} ->
-          rpc_reply(s, %{id: id, result: result})
-          bye(s, "signed_out")
-      end
-    else
-      _ -> {:ok, s}
+          {:signed_out, result} ->
+            rpc_reply(s, %{id: id, result: result})
+            bye(s, "signed_out")
+        end
+
+      _ ->
+        {:ok, s}
     end
   end
 
