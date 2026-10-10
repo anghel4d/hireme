@@ -230,13 +230,13 @@ fn heat_column(c: u16) -> bool {
     )
 }
 
-const STATUSES: [&str; 4] = ["open", "paused", "hired", "closed"];
-const FRESHNESS: [&str; 5] = ["unknown", "open", "thin", "closed", "blocked"];
-const GATES: [&str; 4] = ["unset", "pursue", "maybe", "skip"];
+pub(crate) const STATUSES: [&str; 4] = ["open", "paused", "hired", "closed"];
+pub(crate) const FRESHNESS: [&str; 5] = ["unknown", "open", "thin", "closed", "blocked"];
+pub(crate) const GATES: [&str; 4] = ["unset", "pursue", "maybe", "skip"];
 const SENT: [u8; 2] = [7, 8]; // submitted, reply
 
 /// LifeEv bands: key, label, min, max.
-const BANDS: [(&str, &str, u32, u32); 8] = [
+pub(crate) const BANDS: [(&str, &str, u32, u32); 8] = [
     ("frontier", "Frontier", 100, 100),
     ("labs", "Tier-2 labs", 90, 99),
     ("big_tech", "Big tech", 85, 89),
