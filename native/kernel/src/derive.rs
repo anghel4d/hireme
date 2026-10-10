@@ -815,9 +815,8 @@ impl Desk {
             // The jobs whose lease came or went: the two sorted lists' difference.
             let mut now = self.w32(table::LEASES, col::leases::ID).to_vec();
             now.sort_unstable();
-            let only = |a: &[u32], b: &[u32]| a.iter().filter(|x| b.binary_search(x).is_err()).copied().collect::<Vec<_>>();
-            d.card.extend(only(&now, &d.leased));
-            d.card.extend(only(&d.leased, &now));
+            d.card.extend(now.iter().filter(|id| d.leased.binary_search(id).is_err()).copied());
+            d.card.extend(d.leased.iter().filter(|id| now.binary_search(id).is_err()).copied());
             d.leased = now;
         }
         d.leases_moved = false;

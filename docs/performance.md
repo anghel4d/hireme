@@ -81,6 +81,10 @@ Server and kernel, same fixture: a `next` write runs through the sequencer in 0.
 
 Not measured on the real network path yet: only the gate's handshake has been (`bench/gate.mjs`: QUIC RTT ~25–36 ms from the operator's workstation). The release builds byte-identically from any path (`nixos-server/scripts/hireme-repro.sh`), as does `kernel.wasm` (`native/kernel/build.sh --check`).
 
+## Surgical lease-invalidation follow-up
+
+The kernel now extends dirty-card IDs directly from the two lease-difference iterators instead of collecting two temporary vectors. The reproducible WASM shrank from 313,972 to 313,500 bytes. An isolated native allocator experiment preserved identical outputs across 40 cases: one-ID churn reduced allocation/reallocation calls from 3 to 1 and cumulative requested bytes from 48 to 16. This is not a universal byte reduction: replacing 16 leases with an already nonempty dirty list changed 8 to 5 calls but 428 to 496 requested bytes because of vector growth. No end-to-end latency gain is claimed for this edit. Verification: kernel rebuild reproduced, kernel fixtures and 40 seeded operation streams passed, a 200-operation Elixir oracle comparison had zero differences, and 184 ExUnit tests passed after integration with the concurrent wave changes.
+
 ## How to read the measurements
 
 - All latency columns are **milliseconds**. `beforems` and `afterms` are medians. The repeated current `p50` is deliberate: it matches the requested report columns.
