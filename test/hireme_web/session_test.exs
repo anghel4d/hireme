@@ -394,6 +394,14 @@ defmodule HiremeWeb.SessionTest do
     assert [:patch, :ticket] = for({kind, _, _, _} <- all_out(3), do: kind)
   end
 
+  test "an agent that never says HELLO is closed at the deadline" do
+    Application.put_env(:hireme, :hello_deadline_ms, 20)
+    on_exit(fn -> Application.delete_env(:hireme, :hello_deadline_ms) end)
+    {:ok, a} = Session.init({Carrier, self()}, %{ip: "198.51.100.11", origin: "", path: "/wt"})
+    assert_receive {Session, :hello_deadline} = deadline, 500
+    assert {:stop, :normal, _} = Session.info(deadline, a)
+  end
+
   test "a ticketed raw browser gets its BOOT on a server stream right after accept",
        %{account: account} do
     job(profile())
