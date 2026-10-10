@@ -135,6 +135,7 @@ defmodule Hireme.Desk do
       |> put_change(:pips, Pipeline.encode(rail))
       |> put_change(:employer_id, employer.id)
       |> put_change(:stage_on, draft.stage_on || Date.utc_today())
+      |> put_change(:no, Ops.number!())
       |> force_id(Map.get(attrs, :id))
       |> Repo.insert!(returning: [:stage_notes])
 

@@ -353,6 +353,7 @@ defmodule Hireme.Oracle do
             heat_override: chance(0.15),
             heat_override_reason: pick(["", "  ", "warm intro"])
           })
+          |> Ecto.Changeset.put_change(:no, Ops.number!())
         )
 
       Repo.insert!(

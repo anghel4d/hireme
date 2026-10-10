@@ -65,7 +65,7 @@ defmodule Hireme.Ops do
        ~w(id profile_id employer_id batch_id company role location listing_url canonical_url
           listing heat status next_action next_due source stage_on current_stage pips
           stage_notes freshness gate fit squad department score_100 heat_override
-          heat_override_reason)a},
+          heat_override_reason no)a},
     profiles: {Hireme.Corpus.Profile, ~w(id user_id slug name headline summary)a},
     items:
       {Hireme.Corpus.Item, ~w(id profile_id kind key title body org span position keywords)a},
@@ -655,7 +655,7 @@ defmodule Hireme.Ops do
       end
 
     sql =
-      "SELECT #{Enum.join(cols, ",")} FROM #{schema.__schema__(:source)} WHERE account_id = ?" <>
+      "SELECT #{quoted(cols)} FROM #{schema.__schema__(:source)} WHERE account_id = ?" <>
         where
 
     %{rows: rows} = Repo.query!(sql, [Repo.account_id!() | params], skip_account: true)
@@ -809,7 +809,7 @@ defmodule Hireme.Ops do
       (changes ++ [updated_at: now()])
       |> Enum.map(fn
         {col, {:json_put, key, value}} ->
-          {"#{col} = json_set(#{col}, ?, ?)", ["$." <> key, value]}
+          {"\"#{col}\" = json_set(\"#{col}\", ?, ?)", ["$." <> key, value]}
 
         {col, %Date{} = day} ->
           {"#{col} = ?", [Date.to_iso8601(day)]}
@@ -843,6 +843,24 @@ defmodule Hireme.Ops do
         {:ok, Map.put(plain, :id, id)}
     end
   end
+
+  @doc false
+  # The account's next application number, taken in the write that opens
+  # the application so it is never handed out twice.
+  @spec number!() :: pos_integer()
+  def number! do
+    %{rows: [[no]]} =
+      Repo.query!(
+        "UPDATE accounts SET next_no = next_no + 1 WHERE id = ? RETURNING next_no - 1",
+        [Repo.account_id!()],
+        skip_account: true
+      )
+
+    no
+  end
+
+  # Column names quoted: `no` is an SQL keyword.
+  defp quoted(cols), do: Enum.map_join(cols, ",", &~s("#{&1}"))
 
   defp native(%Date{} = day), do: Date.to_iso8601(day)
   defp native(value), do: value
