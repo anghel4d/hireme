@@ -218,7 +218,6 @@ defmodule HiremeWeb.Packet do
        do: day(y, m, d) * 86_400 + digits(hh) * 3600 + digits(mm) * 60 + digits(ss)
 
   defp u32(%DateTime{} = t), do: DateTime.to_unix(t)
-  defp u32(%NaiveDateTime{} = t), do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
   defp u32(n) when is_integer(n) and n >= 0 and n < @none, do: n
   defp u32(n) when is_float(n), do: round(n)
 
@@ -410,7 +409,6 @@ defmodule HiremeWeb.Packet do
 
   defp refusal({:argument, name}), do: {:argument, "Need a #{name}."}
   defp refusal({name, message}) when is_atom(name) and is_binary(message), do: {name, message}
-  defp refusal(%Ecto.Changeset{}), do: {:invalid, "That did not save."}
   defp refusal(name) when is_atom(name), do: {name, Atom.to_string(name)}
   defp refusal(_), do: {:internal, "internal"}
 

@@ -425,7 +425,7 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  # ---- Raw tables (round two): rows as the database holds them ----
+  # ---- Raw tables: rows as the database holds them ----
 
   @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
                  narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
@@ -541,10 +541,9 @@ defmodule HiremeWeb.Session do
     )
   end
 
-  # Raw rows out before the ACKs they settle, as with derived cards.
+  # A delta's raw rows and the ACKs it settles leave as one write, rows first.
   defp raw_patch(s, rev, delta) do
     s = flush_rest(s)
-    # The PATCH and the ACKs it settles leave as one write.
     {due, held} = Enum.split_with(s.acks, fn {r, _} -> r <= rev end)
     acks = for {r, op_id} <- Enum.reverse(due), do: Packet.ack(op_id, r)
     control(s, [Packet.frame(:patch, rev, raw_delta(delta)) | acks])
