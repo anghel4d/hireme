@@ -231,7 +231,7 @@ impl Desk {
     fn rows_json(&self, j: &mut Json, t: u16, rows: impl Iterator<Item = usize>, names: &[&str]) {
         let cols: Vec<(&str, u16, &str)> = names
             .iter()
-            .filter_map(|&n| schema::col_id(t, n).and_then(|c| schema::col_def(t, c)).map(|d| (n, d.col, d.kind)))
+            .filter_map(|&n| schema::COLS.iter().find(|d| d.table == t && d.name == n).map(|d| (n, d.col, d.kind)))
             .collect();
         for r in rows {
             j.item();
