@@ -160,7 +160,7 @@ defmodule Hireme.Mfa do
           method
           |> Ecto.Changeset.change(
             totp_last_used: step,
-            last_used_at: now(),
+            last_used_at: Store.now(),
             consecutive_failures: 0
           )
           |> Store.write(&Repo.update!/1)
@@ -230,7 +230,7 @@ defmodule Hireme.Mfa do
       method
       |> Ecto.Changeset.change(
         sign_count: data.sign_count,
-        last_used_at: now(),
+        last_used_at: Store.now(),
         consecutive_failures: 0
       )
       |> Store.write(&Repo.update!/1)
@@ -254,7 +254,7 @@ defmodule Hireme.Mfa do
     from(c in RecoveryCode, where: is_nil(c.used_at)) |> Store.write(&Repo.delete_all/1)
     codes = for _ <- 1..@recovery_count, do: random_code()
     account_id = Repo.account_id!()
-    timestamp = now()
+    timestamp = Store.now()
 
     rows =
       for code <- codes do
@@ -289,7 +289,7 @@ defmodule Hireme.Mfa do
           {:error, :code}
 
         found ->
-          found |> Ecto.Changeset.change(used_at: now()) |> Store.write(&Repo.update!/1)
+          found |> Ecto.Changeset.change(used_at: Store.now()) |> Store.write(&Repo.update!/1)
           left = length(unused) - 1
           Audit.record(:recovery_code_used, %{left: left}, meta)
           Accounts.notify(session.account_id, :recovery_code_used, %{left: left})
@@ -347,7 +347,7 @@ defmodule Hireme.Mfa do
   defp counter_advanced(%Method{sign_count: old}, new, _meta) when new > old, do: :ok
 
   defp counter_advanced(%Method{} = method, new, meta) do
-    method |> Ecto.Changeset.change(disabled_at: now()) |> Store.write(&Repo.update!/1)
+    method |> Ecto.Changeset.change(disabled_at: Store.now()) |> Store.write(&Repo.update!/1)
 
     Audit.record(
       :mfa_clone_suspected,
@@ -372,7 +372,7 @@ defmodule Hireme.Mfa do
   defp failed(methods, meta) do
     Enum.each(methods, fn method ->
       failures = method.consecutive_failures + 1
-      disabled = if failures >= Security.lockout_failures(), do: now()
+      disabled = if failures >= Security.lockout_failures(), do: Store.now()
 
       method
       |> Ecto.Changeset.change(consecutive_failures: failures, disabled_at: disabled)
@@ -425,7 +425,7 @@ defmodule Hireme.Mfa do
 
     %Method{}
     |> Method.changeset(
-      Map.merge(attrs, %{name: name, account_id: account_id, verified_at: now()})
+      Map.merge(attrs, %{name: name, account_id: account_id, verified_at: Store.now()})
     )
     |> Store.write(&Repo.insert!/1)
   end
@@ -440,7 +440,7 @@ defmodule Hireme.Mfa do
       session_id: session.id,
       kind: kind,
       payload: Security.seal(term, @challenge_seal),
-      expires_at: DateTime.add(now(), Security.challenge_ttl(), :second)
+      expires_at: DateTime.add(Store.now(), Security.challenge_ttl(), :second)
     })
     |> Store.write(&Repo.insert!/1)
   end
@@ -455,7 +455,7 @@ defmodule Hireme.Mfa do
 
     with %Challenge{} = challenge <- Repo.one(query),
          _ <- Store.write(challenge, &Repo.delete!/1),
-         :lt <- DateTime.compare(now(), challenge.expires_at),
+         :lt <- DateTime.compare(Store.now(), challenge.expires_at),
          {:ok, term} <- Security.unseal(challenge.payload, @challenge_seal) do
       {:ok, term}
     else
@@ -476,6 +476,4 @@ defmodule Hireme.Mfa do
 
   defp normalize(code),
     do: code |> to_string() |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
-
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

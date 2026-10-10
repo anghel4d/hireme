@@ -74,7 +74,7 @@ defmodule Hireme.Accounts do
   # The session and its audit event in one turn at the writer lock.
   defp start_session!(account, meta) do
     token = Security.token(32)
-    now = now()
+    now = Store.now()
 
     session =
       %Session{}
@@ -106,7 +106,7 @@ defmodule Hireme.Accounts do
   """
   @spec session(String.t()) :: {Session.t(), Account.t()} | nil
   def session(token) when is_binary(token) do
-    now = now()
+    now = Store.now()
 
     with {:ok, raw} <- Base.url_decode64(token, padding: false),
          {%Session{} = session, %Account{} = account} <-
@@ -145,7 +145,7 @@ defmodule Hireme.Accounts do
   @doc "A second factor was just presented on this session."
   @spec mark_mfa(Session.t()) :: Session.t()
   def mark_mfa(%Session{} = s),
-    do: s |> Ecto.Changeset.change(mfa_at: now()) |> Store.write(&Repo.update!/1)
+    do: s |> Ecto.Changeset.change(mfa_at: Store.now()) |> Store.write(&Repo.update!/1)
 
   @spec list_sessions(pos_integer()) :: [Session.t()]
   def list_sessions(account_id) do
@@ -160,7 +160,7 @@ defmodule Hireme.Accounts do
 
   @spec revoke_session(Session.t()) :: Session.t()
   def revoke_session(%Session{} = s) do
-    s = s |> Ecto.Changeset.change(revoked_at: now()) |> Store.write(&Repo.update!/1)
+    s = s |> Ecto.Changeset.change(revoked_at: Store.now()) |> Store.write(&Repo.update!/1)
     Audit.record(:session_revoked, %{session_id: s.id}, %{account_id: s.account_id})
     s
   end
@@ -172,7 +172,7 @@ defmodule Hireme.Accounts do
       from(s in Session,
         where: s.account_id == ^keep.account_id and s.id != ^keep.id and is_nil(s.revoked_at)
       )
-      |> Store.write(&Repo.update_all(&1, [set: [revoked_at: now()]], skip_account: true))
+      |> Store.write(&Repo.update_all(&1, [set: [revoked_at: Store.now()]], skip_account: true))
 
     if n > 0, do: Audit.record(:sessions_revoked, %{count: n}, %{account_id: keep.account_id})
     n
@@ -199,7 +199,7 @@ defmodule Hireme.Accounts do
          :ok <- Security.limit(:link_address, email),
          :ok <- Security.limit(:link_peer, Map.get(meta, :ip, "")) do
       token = Security.token(32)
-      now = now()
+      now = Store.now()
 
       %MagicLink{}
       |> MagicLink.changeset(%{
@@ -245,7 +245,7 @@ defmodule Hireme.Accounts do
   """
   @spec peek_link(String.t()) :: {:ok, String.t()} | {:error, :invalid}
   def peek_link(token) do
-    case live_link(token, now()) do
+    case live_link(token, Store.now()) do
       %MagicLink{email: email} -> {:ok, email}
       nil -> {:error, :invalid}
     end
@@ -257,7 +257,7 @@ defmodule Hireme.Accounts do
   """
   @spec redeem_link(String.t(), meta()) :: {:ok, String.t()} | {:error, :invalid | :rate_limited}
   def redeem_link(token, meta \\ %{}) do
-    now = now()
+    now = Store.now()
 
     with :ok <- Security.limit(:redeem_peer, Map.get(meta, :ip, "")),
          %MagicLink{} = link <- live_link(token, now),
@@ -467,7 +467,7 @@ defmodule Hireme.Accounts do
       provider: provider,
       subject: claim.subject,
       display: Map.get(claim, :display, ""),
-      verified_at: now()
+      verified_at: Store.now()
     })
     |> Store.write(&Repo.insert/1)
   end
@@ -476,10 +476,8 @@ defmodule Hireme.Accounts do
     identity
     |> Identity.changeset(%{
       display: Map.get(claim, :display, identity.display),
-      verified_at: now()
+      verified_at: Store.now()
     })
     |> Store.write(&Repo.update!/1)
   end
-
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end
