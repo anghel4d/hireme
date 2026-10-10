@@ -52,7 +52,7 @@ defmodule Hireme.Ops do
   @sweep_rows 1000
   @sweep_pause_ms 10
   @batch 64
-  @checkpoint_ms 1_000
+  @checkpoint_ms 100
   @store Application.compile_env(:hireme, :store, Hireme.Store)
 
   @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
@@ -143,15 +143,11 @@ defmodule Hireme.Ops do
   end
 
   @doc false
-  # Every second, the store's upkeep (`c:Hireme.Store.checkpoint/0`). A
-  # log left behind is folded by a running sequencer between two batches.
+  # Every 100 ms, the store's upkeep (`c:Hireme.Store.checkpoint/0`): often,
+  # so each fold under the writer lock is small and the log stays short.
   def checkpoints do
     Process.sleep(@checkpoint_ms)
-
-    with :behind <- @store.checkpoint(),
-         [_ | _] = running <- Registry.select(@registry, [{{:_, :"$1", :_}, [], [:"$1"]}]),
-         do: send(Enum.random(running), :fold)
-
+    @store.checkpoint()
     checkpoints()
   end
 
@@ -405,11 +401,6 @@ defmodule Hireme.Ops do
   end
 
   def handle_info({:write, write}, state), do: {:noreply, seal(state, drain([write], 1))}
-
-  def handle_info(:fold, state) do
-    @store.checkpoint()
-    {:noreply, state}
-  end
 
   def handle_info({:owner_down, _ref, :process, _pid, _reason}, state),
     do: {:stop, :normal, state}

@@ -4,7 +4,7 @@ import Config
 
 config :hireme, ecto_repos: [Hireme.Repo]
 
-# Hireme.Ops checkpoints the WAL every second without blocking a writer,
+# Hireme.Ops checkpoints the WAL every 100 ms (Hireme.Store.checkpoint/0),
 # so no commit pays SQLite's own checkpoint. A log that rewinds is cut
 # back to 64 MB.
 config :hireme, Hireme.Repo, wal_auto_check_point: 0, journal_size_limit: 64 * 1024 * 1024
