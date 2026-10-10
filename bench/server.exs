@@ -79,62 +79,63 @@ defmodule HiremeBench.Server do
       Repo.delete_all(from b in Desk.Batch, where: b.code == "Server-Import")
     end
 
-    operations = [
-      {"Domain/Heat", "snapshot", fn -> Heat.snapshot() end},
-      {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},
-      {"Domain/Heat", "mix_batch_100", fn -> Heat.mix_batch(batch) end},
-      {"Domain/Org", "size", fn -> Heat.Org.size("Company 42") end},
-      {"Domain/Org", "department", fn -> Heat.Org.department(%{department: "Engineering 2"}) end},
-      {"Domain/Org", "family", fn -> Heat.Org.family(%{role: "Senior Systems Engineer"}) end},
-      {"Domain/ATS", "parse",
-       fn -> Heat.Ats.parse("https://boards.greenhouse.io/acme/jobs/42") end},
-      {"Domain/Corpus", "list_items", fn -> Corpus.list_items(profile_id) end},
-      {"Domain/Accounts", "session_authenticate", fn -> Accounts.session(token) end},
-      {"Domain/Accounts", "list_sessions", fn -> Accounts.list_sessions(account.id) end},
-      {"Domain/ApiKeys", "list", fn -> ApiKeys.list() end},
-      {"Domain/Mfa", "enrolled", fn -> Mfa.enrolled?() end},
-      {"Domain/Mfa", "methods", fn -> Mfa.methods() end},
-      {"Domain/Mfa", "fresh", fn -> Mfa.fresh?(session) end},
-      {"Domain/Kv", "list", fn -> Kv.list("global") end},
-      # What a boot costs the attaching process: every raw table read in
-      # one transaction, encoded as the deflated BOOT frame.
-      {"Transport/Packet", "boot",
-       fn ->
-         {:ok, tables} = Repo.transaction(fn -> Hireme.Ops.read_tables() end)
-         body = for {table, rows} <- tables, do: HiremeWeb.Packet.raw(table, rows)
+    operations =
+      [
+        {"Domain/Heat", "can_apply", fn -> Heat.can_apply(job_id) end},
+        {"Domain/Heat", "mix_batch_100", fn -> Heat.mix_batch(batch) end},
+        {"Domain/Org", "size", fn -> Heat.Org.size("Company 42") end},
+        {"Domain/Org", "department",
+         fn -> Heat.Org.department(%{department: "Engineering 2"}) end},
+        {"Domain/Org", "family", fn -> Heat.Org.family(%{role: "Senior Systems Engineer"}) end},
+        {"Domain/ATS", "parse",
+         fn -> Heat.Ats.parse("https://boards.greenhouse.io/acme/jobs/42") end},
+        {"Domain/Corpus", "list_items", fn -> Corpus.list_items(profile_id) end},
+        {"Domain/Accounts", "session_authenticate", fn -> Accounts.session(token) end},
+        {"Domain/Accounts", "list_sessions", fn -> Accounts.list_sessions(account.id) end},
+        {"Domain/ApiKeys", "list", fn -> ApiKeys.list() end},
+        {"Domain/Mfa", "enrolled", fn -> Mfa.enrolled?() end},
+        {"Domain/Mfa", "methods", fn -> Mfa.methods() end},
+        {"Domain/Mfa", "fresh", fn -> Mfa.fresh?(session) end},
+        {"Domain/Kv", "list", fn -> Kv.list("global") end},
+        # What a boot costs the attaching process: every raw table read in
+        # one transaction, encoded as the deflated BOOT frame.
+        {"Transport/Packet", "boot",
+         fn ->
+           {:ok, tables} = Repo.transaction(fn -> Hireme.Ops.read_tables() end)
+           body = for {table, rows} <- tables, do: HiremeWeb.Packet.raw(table, rows)
 
-         HiremeWeb.Packet.frame(:boot, 0, body, deflate: true)
-         |> IO.iodata_to_binary()
-       end},
-      # A pack of 55 applications as an agent imports it: onto a desk without
-      # them, then the same pack again, which only updates the cards it matches.
-      {"Domain/Import", "pack_55_new", import_pack, reset: clear_pack, samples: tenth},
-      {"Domain/Import", "pack_55_again", import_pack, samples: tenth}
-    ] ++
-      for {page, action} <- [
-            {"Domain/ApiKeys", :api_key_create},
-            {"Domain/ApiKeys", :api_key_revoke},
-            {"Domain/Accounts", :session_create},
-            {"Domain/Accounts", :session_revoke},
-            {"Domain/Mfa", :totp_begin_enrollment_qr},
-            {"Domain/Mfa", :totp_confirm_first_factor},
-            {"Domain/Mfa", :totp_step_up},
-            {"Domain/Mfa", :recovery_verify},
-            {"Domain/Mfa", :recovery_reissue},
-            {"Domain/Mfa", :remove_last_factor_and_recovery},
-            {"Domain/Accounts", :identity_link_synthetic_claim},
-            {"Domain/Accounts", :identity_unlink},
-            {"Domain/Accounts", :magic_link_request_test_sink},
-            {"Domain/Accounts", :magic_link_redeem}
-          ] do
-        {page, Atom.to_string(action), &operation(action, &1),
-         reset: fn -> prepare(action) end,
-         settle: fn f, result ->
-           validate(action, f, result)
-           dispose(f)
-         end,
-         labels: @account_row}
-      end
+           HiremeWeb.Packet.frame(:boot, 0, body, deflate: true)
+           |> IO.iodata_to_binary()
+         end},
+        # A pack of 55 applications as an agent imports it: onto a desk without
+        # them, then the same pack again, which only updates the cards it matches.
+        {"Domain/Import", "pack_55_new", import_pack, reset: clear_pack, samples: tenth},
+        {"Domain/Import", "pack_55_again", import_pack, samples: tenth}
+      ] ++
+        for {page, action} <- [
+              {"Domain/ApiKeys", :api_key_create},
+              {"Domain/ApiKeys", :api_key_revoke},
+              {"Domain/Accounts", :session_create},
+              {"Domain/Accounts", :session_revoke},
+              {"Domain/Mfa", :totp_begin_enrollment_qr},
+              {"Domain/Mfa", :totp_confirm_first_factor},
+              {"Domain/Mfa", :totp_step_up},
+              {"Domain/Mfa", :recovery_verify},
+              {"Domain/Mfa", :recovery_reissue},
+              {"Domain/Mfa", :remove_last_factor_and_recovery},
+              {"Domain/Accounts", :identity_link_synthetic_claim},
+              {"Domain/Accounts", :identity_unlink},
+              {"Domain/Accounts", :magic_link_request_test_sink},
+              {"Domain/Accounts", :magic_link_redeem}
+            ] do
+          {page, Atom.to_string(action), &operation(action, &1),
+           reset: fn -> prepare(action) end,
+           settle: fn f, result ->
+             validate(action, f, result)
+             dispose(f)
+           end,
+           labels: @account_row}
+        end
 
     for row <- operations,
         {page, interaction, operation, opts} = with_opts(row),
@@ -230,6 +231,7 @@ defmodule HiremeBench.Server do
       :ets.delete(counter)
     end
   end
+
   defp prepare(action) do
     previous = Repo.account_id()
     account = Accounts.create!(%{name: "Disposable security action benchmark"})

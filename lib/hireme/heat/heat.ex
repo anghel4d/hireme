@@ -19,9 +19,7 @@ defmodule Hireme.Heat.Config do
     :small_cap,
     :ats_vendor_cap,
     :ats_tenant_cap,
-    :ats_batch_cap,
-    :cool_ratio,
-    :hot_ratio
+    :ats_batch_cap
   ]
   defstruct @enforce_keys
 
@@ -38,9 +36,7 @@ defmodule Hireme.Heat.Config do
           small_cap: float(),
           ats_vendor_cap: float(),
           ats_tenant_cap: float(),
-          ats_batch_cap: pos_integer(),
-          cool_ratio: float(),
-          hot_ratio: float()
+          ats_batch_cap: pos_integer()
         }
 
   @spec defaults() :: t()
@@ -70,9 +66,7 @@ defmodule Hireme.Heat.Config do
       # Per-tenant cap (often one company).
       ats_tenant_cap: 3.0,
       # Hard mix: one day pack does not slam a single vendor.
-      ats_batch_cap: 20,
-      cool_ratio: 0.5,
-      hot_ratio: 0.8
+      ats_batch_cap: 20
     }
   end
 end
@@ -156,7 +150,7 @@ defmodule Hireme.Heat do
   alias Hireme.Repo
 
   @hot_stages [:fire_ready, :open_fire, :submitted, :reply, :closed]
-  # What the snapshot keeps of each hot job, besides its stage.
+  # What `hot_jobs/0` reads of each hot job, besides its stage.
   @peer_fields [
     :id,
     :company,
@@ -203,17 +197,6 @@ defmodule Hireme.Heat do
   end
 
   def cap(company, %Config{} = cfg) when is_binary(company), do: cap(Org.size(company), cfg)
-
-  @doc """
-  The hot jobs and their company and ATS loads. A `previous` snapshot
-  lends its URL parses and company sizes, which do not change with a
-  stage move, so a rebuild after one write costs the read and the sums.
-  """
-  @spec snapshot(Date.t(), Config.t(), map() | nil) :: map()
-  def snapshot(today \\ Date.utc_today(), cfg \\ config(), previous \\ nil) do
-    jobs = hot_jobs()
-    build_snapshot(jobs, today, cfg, previous)
-  end
 
   @spec can_apply(pos_integer() | Job.t() | map(), keyword()) :: Verdict.t()
   def can_apply(job_id, opts \\ [])
@@ -334,35 +317,6 @@ defmodule Hireme.Heat do
 
   def write_override(_, _), do: {:error, :reason}
 
-  @doc """
-  A snapshot with its peer traits and ATS loads for `today` derived, for
-  repeated painting. A `previous` prepared snapshot lends the traits of
-  every peer that has not changed.
-  """
-  @spec prepare(map(), Config.t(), Date.t(), map() | nil) :: map()
-  def prepare(snapshot, cfg, today, previous \\ nil)
-  def prepare(%{prepared: {today, cfg}} = snapshot, cfg, today, _previous), do: snapshot
-
-  def prepare(snapshot, cfg, today, previous) do
-    known = (previous && Map.get(previous, :traits)) || %{}
-
-    traits =
-      Map.new(snapshot.jobs, fn job ->
-        case Map.get(known, id_of(job)) do
-          {_, _, ^job} = same -> {id_of(job), same}
-          _ -> {id_of(job), {Org.department(job), Org.family(job), job}}
-        end
-      end)
-
-    ats = Map.get(snapshot, :ats) || ats_index(snapshot.jobs)
-
-    snapshot
-    |> Map.put(:traits, traits)
-    |> Map.put(:ats, ats)
-    |> Map.put(:ats_loads, index_ats_loads(snapshot.jobs, ats, today, cfg))
-    |> Map.put(:prepared, {today, cfg})
-  end
-
   @spec parse_state(term()) :: {:ok, atom()} | :error
   def parse_state(state), do: Hireme.Closed.parse([:all, :cool, :warm, :hot, :blocked], state)
 
@@ -371,49 +325,27 @@ defmodule Hireme.Heat do
     jobs |> Enum.map(&url_of/1) |> Enum.uniq() |> Map.new(&{&1, Ats.parse(&1)})
   end
 
-  defp evaluate(
-         job,
-         existing,
-         batch_kept,
-         today,
-         %Config{} = cfg,
-         ats_index \\ nil,
-         snapshot \\ nil
-       ) do
+  defp evaluate(job, existing, batch_kept, today, %Config{} = cfg, ats_index \\ nil) do
     peers = existing ++ batch_kept
     ats_index = ats_index || ats_index(peers)
-    base = verdict_math(job, peers, batch_kept, today, cfg, ats_index, snapshot)
+    base = verdict_math(job, peers, batch_kept, today, cfg, ats_index)
 
     if override?(job),
       do: %{base | decision: :allow, reason: :override, note: "override · #{reason_of(job)}"},
       else: base
   end
 
-  defp verdict_math(job, peers, batch_kept, today, cfg, ats_index, snapshot) do
+  defp verdict_math(job, peers, batch_kept, today, cfg, ats_index) do
     ats = Ats.parse(url_of(job))
     size = Org.size(company_of(job))
     company_cap = cap(size, cfg)
     key = Org.company_key(company_of(job))
-    others = if is_nil(snapshot), do: Enum.reject(peers, &same_id?(&1, job)), else: []
-
-    company_peers =
-      case snapshot do
-        nil ->
-          Enum.filter(others, &(Org.company_key(company_of(&1)) == key))
-
-        %{companies: companies} ->
-          companies
-          |> Map.get(key, %{jobs: []})
-          |> Map.fetch!(:jobs)
-          |> Enum.reject(&same_id?(&1, job))
-      end
-
+    others = Enum.reject(peers, &same_id?(&1, job))
+    company_peers = Enum.filter(others, &(Org.company_key(company_of(&1)) == key))
     company_load = load(company_peers, today, cfg.company_half_life, cfg)
-    increment = increment(job, company_peers, cfg, snapshot && Map.get(snapshot, :traits))
+    increment = increment(job, company_peers, cfg)
     projected = round4(company_load + increment)
-
-    {vendor_load, tenant_load} =
-      ats_peer_loads(job, ats, others, snapshot, today, cfg, ats_index)
+    {vendor_load, tenant_load} = ats_peer_loads(ats, others, today, cfg, ats_index)
 
     batch_vendor_n =
       Enum.count(
@@ -487,88 +419,10 @@ defmodule Hireme.Heat do
     }
   end
 
-  defp index_ats_loads(jobs, ats_index, today, cfg) do
-    Enum.reduce(jobs, {%{}, %{}}, fn job, {vendors, tenants} ->
-      ats = ats_index[url_of(job)]
+  defp ats_peer_loads(%{vendor: :unknown}, _others, _today, _cfg, _ats_index), do: {0.0, 0.0}
 
-      if ats.vendor == :unknown do
-        {vendors, tenants}
-      else
-        days = age(job, today)
-        vendor_load = decay(cfg.application_load, days, cfg.ats_vendor_half_life)
-        vendors = Map.update(vendors, ats.vendor, vendor_load, &(&1 + vendor_load))
-
-        tenants =
-          if is_nil(ats.tenant) do
-            tenants
-          else
-            tenant_load = decay(cfg.application_load, days, cfg.ats_tenant_half_life)
-            Map.update(tenants, {ats.vendor, ats.tenant}, tenant_load, &(&1 + tenant_load))
-          end
-
-        {vendors, tenants}
-      end
-    end)
-  end
-
-  defp ats_peer_loads(_job, %{vendor: :unknown}, _others, _snapshot, _today, _cfg, _ats_index),
-    do: {0.0, 0.0}
-
-  defp ats_peer_loads(
-         job,
-         ats,
-         _others,
-         %{ats_loads: {vendors, tenants}, traits: traits},
-         today,
-         cfg,
-         ats_index
-       ) do
-    id = id_of(job)
-
-    {own_vendor, own_tenant} =
-      case id && Map.get(traits, id) do
-        {_, _, peer} ->
-          previous = ats_index[url_of(peer)]
-          same_vendor? = ats.vendor != :unknown and previous.vendor == ats.vendor
-          days = age(peer, today)
-
-          vendor =
-            if same_vendor?,
-              do: decay(cfg.application_load, days, cfg.ats_vendor_half_life),
-              else: 0.0
-
-          tenant =
-            if same_vendor? and not is_nil(ats.tenant) and previous.tenant == ats.tenant,
-              do: decay(cfg.application_load, days, cfg.ats_tenant_half_life),
-              else: 0.0
-
-          {vendor, tenant}
-
-        _ ->
-          {0.0, 0.0}
-      end
-
-    {
-      round4(Map.get(vendors, ats.vendor, 0.0) - own_vendor),
-      round4(Map.get(tenants, {ats.vendor, ats.tenant}, 0.0) - own_tenant)
-    }
-  end
-
-  defp ats_peer_loads(job, ats, others, snapshot, today, cfg, ats_index) do
-    vendor_peers =
-      case snapshot do
-        nil ->
-          Enum.filter(
-            others,
-            &(ats.vendor != :unknown and ats_index[url_of(&1)].vendor == ats.vendor)
-          )
-
-        %{vendors: vendors} ->
-          vendors
-          |> Map.get(ats.vendor, %{jobs: []})
-          |> Map.fetch!(:jobs)
-          |> Enum.reject(&same_id?(&1, job))
-      end
+  defp ats_peer_loads(ats, others, today, cfg, ats_index) do
+    vendor_peers = Enum.filter(others, &(ats_index[url_of(&1)].vendor == ats.vendor))
 
     tenant_peers =
       Enum.filter(
@@ -582,15 +436,15 @@ defmodule Hireme.Heat do
     }
   end
 
-  defp increment(_job, [], cfg, _traits), do: round4(cfg.application_load)
+  defp increment(_job, [], cfg), do: round4(cfg.application_load)
 
-  defp increment(job, others, cfg, traits) do
+  defp increment(job, others, cfg) do
     base = cfg.application_load
     dept = Org.department(job)
     family = Org.family(job)
 
-    same_dept? = Enum.any?(others, &(peer_department(&1, traits) == dept))
-    same_fam? = Enum.any?(others, &(peer_family(&1, traits) == family))
+    same_dept? = Enum.any?(others, &(Org.department(&1) == dept))
+    same_fam? = Enum.any?(others, &(Org.family(&1) == family))
 
     extra =
       if(same_dept?, do: cfg.same_department_penalty, else: 0.0) +
@@ -598,11 +452,6 @@ defmodule Hireme.Heat do
 
     round4(base + extra)
   end
-
-  defp peer_department(job, nil), do: Org.department(job)
-  defp peer_department(job, traits), do: elem(Map.fetch!(traits, id_of(job)), 0)
-  defp peer_family(job, nil), do: Org.family(job)
-  defp peer_family(job, traits), do: elem(Map.fetch!(traits, id_of(job)), 1)
 
   defp load(jobs, today, half_life, cfg) do
     jobs
@@ -633,51 +482,6 @@ defmodule Hireme.Heat do
           max(0, ceil(days))
         end
     end
-  end
-
-  defp build_snapshot(jobs, today, cfg, previous) do
-    known_ats = (previous && previous.ats) || %{}
-    known_companies = (previous && previous.companies) || %{}
-
-    ats =
-      jobs
-      |> Enum.map(&url_of/1)
-      |> Enum.uniq()
-      |> Map.new(&{&1, Map.get_lazy(known_ats, &1, fn -> Ats.parse(&1) end)})
-
-    companies =
-      jobs
-      |> Enum.group_by(&Org.company_key(company_of(&1)))
-      |> Map.new(fn {key, group} ->
-        label = company_of(hd(group))
-
-        size =
-          case Map.get(known_companies, key) do
-            %{label: ^label, size: size} -> size
-            _ -> Org.size(label)
-          end
-
-        {key,
-         %{
-           label: label,
-           size: size,
-           load: load(group, today, cfg.company_half_life, cfg),
-           cap: cap(size, cfg),
-           n: length(group),
-           jobs: group
-         }}
-      end)
-
-    vendors =
-      jobs
-      |> Enum.reject(&(ats[url_of(&1)].vendor == :unknown))
-      |> Enum.group_by(&ats[url_of(&1)].vendor)
-      |> Map.new(fn {vendor, group} ->
-        {vendor,
-         %{load: load(group, today, cfg.ats_vendor_half_life, cfg), n: length(group), jobs: group}}
-      end)
-
-    %{jobs: jobs, companies: companies, vendors: vendors, ats: ats}
   end
 
   defp hot_jobs do
