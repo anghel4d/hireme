@@ -42,7 +42,7 @@ Vendor and tenant come from the apply URL host and path: Greenhouse, Lever, Ashb
 
 ## Visibility
 
-Desk heatmap under the Life-EV chart. Filters: cool / warm / hot / blocked. MCP: `heat_status`, `can_apply`. CLI: `mix hireme.heat`.
+Desk heatmap under the Life-EV chart. Filters: cool / warm / hot / blocked. MCP: `heat_status`, `can_apply`.
 
 Board snapshots group hot jobs by normalized company and ATS vendor once per
 read. Decorating a card inspects only its matching groups, still excluding the

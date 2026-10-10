@@ -4,9 +4,8 @@ defmodule HiremeWeb do
   the cookie-bound sign-in routes, and the sockets. The desk itself is
   one wire session per tab or agent (`HiremeWeb.Session`), over
   WebTransport through the gate or the `/wire` WebSocket: raw rows down,
-  ops and account commands up. Agents also keep the `/mcp` JSON-RPC
-  sockets. A browser is an account's session; an agent is an account's
-  API key; neither sees another account.
+  ops and account commands up. A browser is an account's session; an
+  agent is an account's API key; neither sees another account.
   """
 
   def static_paths, do: ~w(assets wasm fonts images favicon.ico robots.txt)
