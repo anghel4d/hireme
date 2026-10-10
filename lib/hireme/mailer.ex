@@ -127,7 +127,7 @@ defmodule Hireme.Mailer.Outbox do
   def enqueue(_account_id, [], _kind, _meta), do: :ok
 
   def enqueue(account_id, addresses, kind, meta) when is_atom(kind) and is_map(meta) do
-    now = now()
+    now = Store.now()
 
     rows =
       for address <- addresses,
@@ -156,7 +156,7 @@ defmodule Hireme.Mailer.Outbox do
 
   @doc "Send every notice due at `now`, in the calling process. Returns how many were sent."
   @spec drain(DateTime.t()) :: non_neg_integer()
-  def drain(now \\ now()) do
+  def drain(now \\ Store.now()) do
     # Each notice's kind and fields are atoms of Hireme.Mailer's texts. In a
     # release modules load on first use, so load it before matching rows.
     Code.ensure_loaded(Mailer)
@@ -219,11 +219,11 @@ defmodule Hireme.Mailer.Outbox do
     changes =
       case result do
         :ok ->
-          [sent_at: now()]
+          [sent_at: Store.now()]
 
         {:error, reason} ->
           [
-            next_at: DateTime.add(now(), Enum.at(@backoff, notice.attempts), :second),
+            next_at: DateTime.add(Store.now(), Enum.at(@backoff, notice.attempts), :second),
             last_error: error(reason)
           ]
       end
@@ -256,6 +256,4 @@ defmodule Hireme.Mailer.Outbox do
   defp error(reason), do: clip(inspect(reason))
 
   defp clip(text), do: text |> String.replace(~r/[^\x20-\x7e]/, "?") |> String.slice(0, 200)
-
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

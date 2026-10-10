@@ -61,7 +61,8 @@ defmodule Hireme.ApiKeys do
         name: name,
         secret_hash: Security.hash(secret),
         prefix: String.slice(secret, 0, 4),
-        expires_at: expires_in_days && DateTime.add(now(), expires_in_days * 86_400, :second)
+        expires_at:
+          expires_in_days && DateTime.add(Store.now(), expires_in_days * 86_400, :second)
       }
 
       # The key, its audit event and its notice in one turn at the writer lock.
@@ -115,7 +116,7 @@ defmodule Hireme.ApiKeys do
   defp revoke!(key, meta) do
     {:ok, revoked} =
       Store.transaction(fn ->
-        updated = key |> Ecto.Changeset.change(revoked_at: now()) |> Repo.update!()
+        updated = key |> Ecto.Changeset.change(revoked_at: Store.now()) |> Repo.update!()
 
         Repo.update_all(
           from(a in Accounts.Account, where: a.id == ^key.account_id and a.live_key_count > 0),
@@ -176,7 +177,7 @@ defmodule Hireme.ApiKeys do
 
   @spec live?(Key.t()) :: boolean()
   def live?(%Key{revoked_at: revoked, expires_at: expires}) do
-    is_nil(revoked) and (is_nil(expires) or DateTime.compare(now(), expires) == :lt)
+    is_nil(revoked) and (is_nil(expires) or DateTime.compare(Store.now(), expires) == :lt)
   end
 
   defp key_with_account(key_id) do
@@ -202,14 +203,12 @@ defmodule Hireme.ApiKeys do
 
   # Write last_used_at at most once a minute per key.
   defp used(%Key{} = key) do
-    if is_nil(key.last_used_at) or DateTime.diff(now(), key.last_used_at) >= 60 do
+    if is_nil(key.last_used_at) or DateTime.diff(Store.now(), key.last_used_at) >= 60 do
       key
-      |> Ecto.Changeset.change(last_used_at: now())
+      |> Ecto.Changeset.change(last_used_at: Store.now())
       |> Store.write(&Repo.update!(&1, skip_account: true))
     else
       key
     end
   end
-
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

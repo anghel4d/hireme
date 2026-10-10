@@ -81,6 +81,10 @@ defmodule Hireme.Store do
     end
   end
 
+  @doc "The second a write is stamped with: UTC, whole seconds."
+  @spec now() :: DateTime.t()
+  def now, do: DateTime.utc_now() |> DateTime.truncate(:second)
+
   @doc false
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -165,7 +169,7 @@ defmodule Hireme.Store do
   @impl true
   def write(source, id, account, changes) do
     {sets, params} =
-      (changes ++ [updated_at: now()])
+      (changes ++ [updated_at: iso(now())])
       |> Enum.map(fn
         {col, {:json_put, key, value}} ->
           {~s["#{col}" = json_set("#{col}", ?, ?)], ["$." <> key, value]}
@@ -203,7 +207,7 @@ defmodule Hireme.Store do
   def log(_account, []), do: []
 
   def log(account, entries) do
-    at = now()
+    at = iso(now())
 
     %{rows: rows} =
       Repo.query!(
@@ -279,6 +283,5 @@ defmodule Hireme.Store do
   defp native(%Date{} = day), do: Date.to_iso8601(day)
   defp native(value), do: value
 
-  defp now, do: DateTime.utc_now() |> iso()
   defp iso(at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 end
