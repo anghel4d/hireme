@@ -42,9 +42,6 @@ col stages key 2 str
 col stages label 3 str
 col stages hint 4 str
 col stages rank 5 u32
-col stages fire_locked 6 u32
-col stages hot 7 u32
-col stages queue 8 u32
 
 table statuses 6
 col statuses ix 1 u32
