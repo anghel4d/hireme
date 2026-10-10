@@ -18,6 +18,7 @@ defmodule Hireme.Oracle do
   import Ecto.Query
 
   alias Hireme.Corpus
+  alias Hireme.Cv.Lineage
   alias Hireme.Desk
   alias Hireme.Desk.Batch
   alias Hireme.Desk.Employer
@@ -26,7 +27,6 @@ defmodule Hireme.Oracle do
   alias Hireme.Desk.Overlay
   alias Hireme.Desk.Snapshot
   alias Hireme.Desk.Variant
-  alias Hireme.Cv.Lineage
   alias Hireme.Gym
   alias Hireme.Heat
   alias Hireme.Kv

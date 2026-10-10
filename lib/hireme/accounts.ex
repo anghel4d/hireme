@@ -24,8 +24,8 @@ defmodule Hireme.Accounts do
   alias Hireme.Audit
   alias Hireme.Mailer
   alias Hireme.Repo
-  alias Hireme.Store
   alias Hireme.Security
+  alias Hireme.Store
 
   @type meta :: %{optional(:ip) => String.t(), optional(:user_agent) => String.t()}
 

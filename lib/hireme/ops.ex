@@ -591,14 +591,18 @@ defmodule Hireme.Ops do
       end)
 
     # A raise is not ledgered (nor logged): a resend tries again.
-    Enum.zip(todo, results)
-    |> Enum.reduce(%{}, fn {write, result}, sent ->
-      reply =
-        with {:again, id} <- result, do: Map.fetch!(sent, id), else: (_ -> reply(write, result))
+    _sent =
+      Enum.zip(todo, results)
+      |> Enum.reduce(%{}, fn {write, result}, sent ->
+        reply =
+          case result do
+            {:again, id} -> Map.fetch!(sent, id)
+            _ -> reply(write, result)
+          end
 
-      answer(write, reply)
-      if write.op_id, do: Map.put(sent, write.op_id, reply), else: sent
-    end)
+        answer(write, reply)
+        if write.op_id, do: Map.put(sent, write.op_id, reply), else: sent
+      end)
 
     state
   end

@@ -7,6 +7,7 @@ defmodule Hireme.ChecklistOracleTest do
 
   alias Hireme.Accounts
   alias Hireme.Audit
+  alias Hireme.Mailer.Outbox
   alias Hireme.Mfa
   alias Hireme.Mfa.Method
   alias Hireme.Repo
@@ -231,7 +232,7 @@ defmodule Hireme.ChecklistOracleTest do
              Repo.all(from(m in Method, where: m.account_id == ^account.id))
 
     assert at
-    Hireme.Mailer.Outbox.drain()
+    Outbox.drain()
 
     subjects =
       Stream.repeatedly(fn ->

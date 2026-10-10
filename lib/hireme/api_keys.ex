@@ -23,8 +23,8 @@ defmodule Hireme.ApiKeys do
   alias Hireme.ApiKeys.Key
   alias Hireme.Audit
   alias Hireme.Repo
-  alias Hireme.Store
   alias Hireme.Security
+  alias Hireme.Store
 
   @prefix "hm_"
   @shape ~r/\Ahm_([0-9A-Za-z]{12})_([0-9A-Za-z]{43})([0-9A-Za-z]{6})\z/
