@@ -285,7 +285,7 @@ async fn ws(cfg: &Config) -> Result<Pipe, String> {
     let req = format!("{base}/wire/websocket")
         .into_client_request()
         .map_err(|e| e.to_string())?;
-    let (socket, _) = tokio_tungstenite::connect_async(req)
+    let (socket, _) = tokio_tungstenite::connect_async_with_config(req, None, true)
         .await
         .map_err(|e| format!("websocket: {e}"))?;
     let (mut sink, mut stream) = socket.split();
