@@ -57,8 +57,13 @@ defmodule Hireme.Store do
             ]
   @doc "Drop the account's op outcomes logged before `before`."
   @callback sweep(account(), DateTime.t()) :: :ok
-  @doc "Periodic upkeep off the write path (SQLite: fold the WAL into the database)."
-  @callback checkpoint() :: :ok
+  @doc """
+  Upkeep off the write path (SQLite: fold the WAL into the database).
+  `:behind` asks a writer to run it once between two of its commits:
+  under a writer that never pauses, the log is never found wholly folded
+  at the start of a write, so it never rewinds and grows without end.
+  """
+  @callback checkpoint() :: :ok | :behind
 
   @impl true
   def transaction(fun), do: Repo.transaction(fun)
@@ -181,9 +186,17 @@ defmodule Hireme.Store do
 
   # PASSIVE never waits on a writer and never makes one wait; the fsync
   # it costs is paid here, not by the write whose commit crossed
-  # SQLite's own threshold (off: `wal_auto_check_point: 0`).
+  # SQLite's own threshold (off: `wal_auto_check_point: 0`). Past
+  # @wal_frames the log is behind.
+  @wal_frames 4096
+
   @impl true
-  def checkpoint, do: query!("PRAGMA wal_checkpoint(PASSIVE)", [])
+  def checkpoint do
+    case Repo.query!("PRAGMA wal_checkpoint(PASSIVE)", [], skip_account: true) do
+      %{rows: [[_busy, log, _done]]} when log > @wal_frames -> :behind
+      _ -> :ok
+    end
+  end
 
   defp query!(sql, params) do
     Repo.query!(sql, params, skip_account: true)

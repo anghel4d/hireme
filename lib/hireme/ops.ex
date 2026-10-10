@@ -122,7 +122,8 @@ defmodule Hireme.Ops do
     children = [
       {Registry, keys: :unique, name: @registry},
       # Each account's prepared heat snapshot and its generation, read
-      # without a call into the sequencer.
+      # without a call into the sequencer; and `{:behind}` while the WAL
+      # waits on a sequencer to fold it.
       Supervisor.child_spec(
         {Agent, fn -> :ets.new(@heat, [:named_table, :public, read_concurrency: true]) end},
         id: @heat
@@ -147,10 +148,11 @@ defmodule Hireme.Ops do
   end
 
   @doc false
-  # Every second, the store's upkeep (`c:Hireme.Store.checkpoint/0`).
+  # Every second, the store's upkeep (`c:Hireme.Store.checkpoint/0`). A
+  # log left behind is folded by the next sequencer to finish a batch.
   def checkpoints do
     Process.sleep(@checkpoint_ms)
-    @store.checkpoint()
+    if @store.checkpoint() == :behind, do: :ets.insert(@heat, {:behind})
     checkpoints()
   end
 
@@ -518,7 +520,9 @@ defmodule Hireme.Ops do
     Enum.each(answered, &answer(&1, elem(Map.fetch!(state.ledger, &1.op_id), 0)))
 
     {results, state} = commit(state, todo)
-    finish(state, todo, results)
+    state = finish(state, todo, results)
+    if :ets.take(@heat, :behind) != [], do: @store.checkpoint()
+    state
   rescue
     exception ->
       Logger.error(Exception.format(:error, exception, __STACKTRACE__))
