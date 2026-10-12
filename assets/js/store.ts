@@ -67,7 +67,7 @@ export type Op =
   | { kind: "gym_target"; target: string }
   | { kind: "net_log"; fields: Record<string, string> }
   | { kind: "net_lane"; url: string }
-  | { kind: "atlas_weights"; qol: number; afford: number; lang: number; route: number; tech: number; ease: number }
+  | { kind: "atlas_weights"; qol: number; afford: number; lang: number; route: number; tech: number; ease: number; energy: number }
 
 export interface Change {
   /** Any card column or the board changed. */
@@ -454,11 +454,16 @@ const SPEC = {
     id: ["id", "u32"], position: ["position", "u32"], name: ["name", "str"], country: ["country", "str"],
     region: ["region", "str"], cost: ["cost", "f64"], qol: ["qol", "f64"], mobility: ["mobility", "str"],
     language: ["language", "str"], tech: ["tech", "u32"], ease: ["ease", "u32"], labeled: ["labeled", "bool"],
+    energy: ["energy", "f64"], energy_year: ["energy_year", "u32"],
+  },
+  geography_countries: {
+    id: ["id", "u32"], name: ["name", "str"], energy: ["energy", "f64"], energy_year: ["energy_year", "u32"],
   },
   geography_profiles: {
     id: ["id", "u32"], field: ["field", "str"], citizenships: ["citizenships", "str"], languages: ["languages", "str"],
     weight_qol: ["weight_qol", "u32"], weight_afford: ["weight_afford", "u32"], weight_lang: ["weight_lang", "u32"],
     weight_route: ["weight_route", "u32"], weight_tech: ["weight_tech", "u32"], weight_ease: ["weight_ease", "u32"],
+    weight_energy: ["weight_energy", "u32"],
   },
 } as const satisfies Record<string, Spec>
 
@@ -475,6 +480,15 @@ export interface AtlasPlace {
   tech: number
   ease: number
   labeled: boolean
+  energy: number
+  energy_year: number
+}
+
+export interface AtlasCountry {
+  id: number
+  name: string
+  energy: number
+  energy_year: number
 }
 
 export interface AtlasProfile {
@@ -488,10 +502,12 @@ export interface AtlasProfile {
   weight_route: number
   weight_tech: number
   weight_ease: number
+  weight_energy: number
 }
 
 export interface AtlasRows {
   places: AtlasPlace[]
+  countries: AtlasCountry[]
   profile: AtlasProfile | null
 }
 
@@ -633,7 +649,7 @@ class Documents {
       this.scoreDoc = undefined
       c.scoreboard = true
     }
-    if (["geography_places", "geography_profiles"].some(t)) c.atlas = true
+    if (["geography_places", "geography_countries", "geography_profiles"].some(t)) c.atlas = true
     if (["acct", "acct_keys", "acct_sessions", "acct_identities", "acct_factors", "clock"].some(t)) {
       this.acctDoc = undefined
       c.account = true
@@ -742,7 +758,7 @@ export function encodeOp(hash: number, opId: bigint, op: Op): Bytes {
     : op.kind === "narrative" ? [op.narrative, [op.body]]
     : op.kind === "gym_target" ? [0, [op.target]]
     : op.kind === "net_lane" ? [0, [op.url]]
-    : op.kind === "atlas_weights" ? [0, [String(op.qol), String(op.afford), String(op.lang), String(op.route), String(op.tech), String(op.ease)]]
+    : op.kind === "atlas_weights" ? [0, [String(op.qol), String(op.afford), String(op.lang), String(op.route), String(op.tech), String(op.ease), String(op.energy)]]
     : [0, pairs(op.fields)]
   return opFrame(hash, opId, OP_KIND[op.kind], target, fields)
 }
@@ -851,8 +867,9 @@ export class LocalDesk implements Desk, Host {
     const k = this.kernel
     if (k.table("geography_places") < 0) return null
     const places = k.all<AtlasPlace>("geography_places", SPEC.geography_places).slice().sort((a, b) => a.position - b.position)
+    const countries = k.all<AtlasCountry>("geography_countries", SPEC.geography_countries)
     const profile = k.all<AtlasProfile>("geography_profiles", SPEC.geography_profiles)[0] ?? null
-    return { places, profile }
+    return { places, countries, profile }
   }
 
   /** An op on the wire for this job: its PATCH and ACK are a round trip away. */

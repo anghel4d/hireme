@@ -3,6 +3,7 @@ defmodule Hireme.GeographyTest do
 
   alias Hireme.Geography
   alias Hireme.Geography.Catalog
+  alias Hireme.Geography.Country
   alias Hireme.Geography.Place
   alias Hireme.Geography.Profile
   alias Hireme.Ops
@@ -24,16 +25,45 @@ defmodule Hireme.GeographyTest do
     assert profile.field == "Software / AI"
     assert profile.citizenships == "RO,CA"
     assert profile.languages == "fr,en"
-    assert Geography.weights(profile) == %{qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2}
+
+    assert Geography.weights(profile) == %{
+             energy: 5,
+             qol: 3,
+             afford: 2,
+             lang: 3,
+             route: 3,
+             tech: 3,
+             ease: 2
+           }
+
     assert Repo.aggregate(Place, :count) == 79
+    assert Repo.aggregate(Country, :count) == 34
 
     assert {:ok, _} =
-             Geography.set_weights(%{qol: 5, afford: 0, lang: 1, route: 2, tech: 4, ease: 3})
+             Geography.set_weights(%{
+               energy: 4,
+               qol: 5,
+               afford: 0,
+               lang: 1,
+               route: 2,
+               tech: 4,
+               ease: 3
+             })
 
     assert :ok = Geography.install_local_desk!()
     again = Repo.one!(Profile)
     assert again.citizenships == "RO,CA"
-    assert Geography.weights(again) == %{qol: 5, afford: 0, lang: 1, route: 2, tech: 4, ease: 3}
+
+    assert Geography.weights(again) == %{
+             energy: 4,
+             qol: 5,
+             afford: 0,
+             lang: 1,
+             route: 2,
+             tech: 4,
+             ease: 3
+           }
+
     assert Repo.aggregate(Place, :count) == 79
   end
 
@@ -45,6 +75,7 @@ defmodule Hireme.GeographyTest do
 
     assert :ok = Geography.install_local_desk!()
     assert Repo.aggregate(Place, :count) == 79
+    assert Repo.aggregate(Country, :count) == 34
     other = Repo.one!(Profile)
     assert other.citizenships == ""
     assert other.field == ""
@@ -59,19 +90,25 @@ defmodule Hireme.GeographyTest do
 
     assert Repo.one!(Profile).weight_qol == 3
 
-    refused = %{op_id: 2, kind: :atlas_weights, target: 0, fields: ["9", "2", "3", "3", "3", "2"]}
+    refused = %{
+      op_id: 2,
+      kind: :atlas_weights,
+      target: 0,
+      fields: ["9", "2", "3", "3", "3", "2", "5"]
+    }
+
     assert {:error, {:argument, "qol"}} = Ops.run(account.id, refused)
 
     accepted = %{
       op_id: 3,
       kind: :atlas_weights,
       target: 0,
-      fields: ["1", "2", "3", "4", "5", "0"]
+      fields: ["1", "2", "3", "4", "5", "0", "5"]
     }
 
     assert {:ok, revision} = Ops.run(account.id, accepted)
     assert is_integer(revision)
-    kept = %{qol: 1, afford: 2, lang: 3, route: 4, tech: 5, ease: 0}
+    kept = %{energy: 5, qol: 1, afford: 2, lang: 3, route: 4, tech: 5, ease: 0}
     assert Geography.weights(Repo.one!(Profile)) == kept
   end
 
@@ -123,10 +160,50 @@ defmodule Hireme.GeographyTest do
   test "fit follows the weights, and a zero total is zero" do
     holder = holder("RO,CA", "fr,en")
     parts = Geography.parts(city("Vienna"), holder)
-    balanced = Geography.fit(parts, %{qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2})
-    career = Geography.fit(parts, %{qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1})
+
+    balanced =
+      Geography.fit(parts, %{energy: 3, qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2})
+
+    career =
+      Geography.fit(parts, %{energy: 1, qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1})
+
     assert balanced != career
-    assert Geography.fit(parts, %{qol: 0, afford: 0, lang: 0, route: 0, tech: 0, ease: 0}) == 0.0
+
+    assert Geography.fit(parts, %{
+             energy: 0,
+             qol: 0,
+             afford: 0,
+             lang: 0,
+             route: 0,
+             tech: 0,
+             ease: 0
+           }) == 0.0
+  end
+
+  test "energy use and its year are stored for countries and for cities" do
+    romania = Enum.find(Catalog.countries(), &(&1.name == "Romania"))
+    albania = Enum.find(Catalog.countries(), &(&1.name == "Albania"))
+    assert romania.energy == 18_694.0 and romania.energy_year == 2024
+    assert albania.energy_year == 2023
+    assert Geography.eu_energy() == 35_318
+
+    vienna = city("Vienna")
+    assert vienna.energy_year == 2024
+    assert_in_delta vienna.energy, 44_250.7, 0.05
+    bucharest = city("Bucharest")
+    assert bucharest.mobility == :eu and bucharest.language == :ro
+    assert bucharest.energy_year == 2024
+    assert bucharest.energy != romania.energy
+
+    holder = holder("RO,CA", "fr,en")
+    vienna_parts = Geography.parts(city("Vienna"), holder)
+    reykjavik = Geography.parts(city("Reykjavik"), holder)
+    assert reykjavik.energy > vienna_parts.energy
+    flipped = Geography.parts(city("Reykjavik"), holder, :less)
+    assert flipped.energy < Geography.parts(city("Vienna"), holder, :less).energy
+
+    heavy = %{energy: 5, qol: 0, afford: 0, lang: 0, route: 0, tech: 0, ease: 0}
+    assert Geography.fit(reykjavik, heavy) > Geography.fit(vienna_parts, heavy)
   end
 
   defp holder(citizenships, languages) do

@@ -436,7 +436,7 @@ defmodule HiremeWeb.Session do
 
   @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
                  narratives scoreboard_snapshots gym_problems gym_reps net_entries
-                 geography_places geography_profiles leases)a
+                 geography_places geography_countries geography_profiles leases)a
 
   # Every raw table the snapshot holds, then the server's clock.
   @board ~w(job_apps profiles batches cv_variants leases scoreboard_snapshots)a

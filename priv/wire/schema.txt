@@ -242,6 +242,15 @@ col geography_places language 9 sym
 col geography_places tech 10 u32
 col geography_places ease 11 u32
 col geography_places labeled 12 u32
+col geography_places energy 13 f64
+col geography_places energy_year 14 u32
+
+# National primary energy per person, and the year of that figure.
+table geography_countries 82
+col geography_countries id 1 u32
+col geography_countries name 2 str
+col geography_countries energy 3 f64
+col geography_countries energy_year 4 u32
 
 table geography_profiles 81
 col geography_profiles id 1 u32
@@ -254,6 +263,7 @@ col geography_profiles weight_lang 7 u32
 col geography_profiles weight_route 8 u32
 col geography_profiles weight_tech 9 u32
 col geography_profiles weight_ease 10 u32
+col geography_profiles weight_energy 11 u32
 
 table gone 56
 col gone table 1 u32
@@ -432,7 +442,7 @@ op gym_target 10 none target
 op net_log 11 none pairs
 op net_lane 12 none url
 op generation 13 job
-op atlas_weights 14 none qol afford lang route tech ease
+op atlas_weights 14 none qol afford lang route tech ease energy
 
 refusal fire_hold 1
 refusal heat 2
