@@ -408,7 +408,8 @@ export class Shell {
     const lanes = d.lanes()
     const focus = m.appId === null ? null : d.focus(m.appId)
     const mark = m.appId === null ? null : d.mark(m.appId)
-    this.set("#topbar", views.topbar(t, d.status))
+    this.set("#topbar", views.topbar(t, d.status, m.lens))
+    if (this.root.dataset["lens"] !== m.lens) this.root.dataset["lens"] = m.lens
     this.set("#count", h`${m.count} showing`)
     // The controls hold the filters' values; a control in use keeps what is in it.
     const form = this.root.querySelector<HTMLFormElement>("#filters")
