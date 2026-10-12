@@ -760,3 +760,110 @@ defmodule Hireme.Mailer.Notice do
     timestamps(updated_at: false)
   end
 end
+
+defmodule Hireme.Geography.Place do
+  @moduledoc """
+  One city on the chart. Mobility and language describe the city, not
+  the person who is looking at it.
+  """
+  use Hireme.Schema
+
+  schema "geography_places" do
+    field :position, :integer, default: 0
+    field :name, :string, default: ""
+    field :country, :string, default: ""
+    field :region, Ecto.Enum, values: [:south, :west, :central, :nordic, :east]
+    field :cost, :float
+    field :qol, :float
+    field :mobility, Ecto.Enum, values: [:eu, :eea, :ch, :uk, :non]
+    field :language, Ecto.Enum, values: [:fr, :en, :de, :ro, :other]
+    field :tech, :integer
+    field :ease, :integer
+    field :labeled, :boolean, default: false
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(place, attrs) do
+    place
+    |> cast(attrs, [
+      :position,
+      :name,
+      :country,
+      :region,
+      :cost,
+      :qol,
+      :mobility,
+      :language,
+      :tech,
+      :ease,
+      :labeled
+    ])
+    |> validate_required([
+      :name,
+      :country,
+      :region,
+      :cost,
+      :qol,
+      :mobility,
+      :language,
+      :tech,
+      :ease
+    ])
+    |> validate_number(:tech, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
+    |> validate_number(:ease, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
+    |> unique_constraint(:name, name: :geography_places_account_id_name_index)
+    |> tenant()
+  end
+end
+
+defmodule Hireme.Geography.Profile do
+  @moduledoc """
+  The holder's passports, languages, field, and axis weights. One row
+  per account. Citizenships and languages are comma-separated codes.
+  """
+  use Hireme.Schema
+
+  schema "geography_profiles" do
+    field :field, :string, default: ""
+    field :citizenships, :string, default: ""
+    field :languages, :string, default: ""
+    field :weight_qol, :integer, default: 3
+    field :weight_afford, :integer, default: 2
+    field :weight_lang, :integer, default: 3
+    field :weight_route, :integer, default: 3
+    field :weight_tech, :integer, default: 3
+    field :weight_ease, :integer, default: 2
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(profile, attrs) do
+    profile
+    |> cast(attrs, [
+      :field,
+      :citizenships,
+      :languages,
+      :weight_qol,
+      :weight_afford,
+      :weight_lang,
+      :weight_route,
+      :weight_tech,
+      :weight_ease
+    ])
+    |> validate_format(:citizenships, ~r/\A(|([A-Z]{2})(,[A-Z]{2})*)\z/, message: "codes")
+    |> validate_format(:languages, ~r/\A(|(fr|en|de|ro)(,(fr|en|de|ro))*)\z/, message: "codes")
+    |> validate_weight(:weight_qol)
+    |> validate_weight(:weight_afford)
+    |> validate_weight(:weight_lang)
+    |> validate_weight(:weight_route)
+    |> validate_weight(:weight_tech)
+    |> validate_weight(:weight_ease)
+    |> unique_constraint(:account_id)
+    |> tenant()
+  end
+
+  defp validate_weight(changeset, field) do
+    validate_number(changeset, field, greater_than_or_equal_to: 0, less_than_or_equal_to: 5)
+  end
+end

@@ -70,6 +70,7 @@ export function topbar(t: Tables, status: Status): Raw {
       <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
       <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym">Gym</button>
       <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net">Net</button>
+      <button type="button" id="open-atlas" class="ghost" data-action="lens" data-lens="atlas">Atlas</button>
       <button type="button" id="open-settings" class="ghost" data-action="lens" data-lens="settings">Account</button>
     </header>`
 }

@@ -55,7 +55,8 @@ defmodule Hireme.Ops do
   @checkpoint_ms 100
   @store Application.compile_env(:hireme, :store, Hireme.Store)
 
-  @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target net_log net_lane generation)a
+  @kinds ~w(stage next note score overlay heat_override open_fire narrative gym_log gym_target
+            net_log net_lane generation atlas_weights)a
 
   # The raw tables a client derives every view from: name, row module,
   # and the columns shipped, in schema order. `leases` is not stored: it
@@ -86,7 +87,13 @@ defmodule Hireme.Ops do
        ~w(id noted_on leftover_unique target_total target_on daily_batches daily_apps note)a},
     gym_problems: {Hireme.Gym.Problem, ~w(id platform slug title topic difficulty url)a},
     gym_reps: {Hireme.Gym.Rep, ~w(id problem_id done_on minutes outcome note)a},
-    net_entries: {Hireme.Net.Entry, ~w(id kind channel title url body shipped_on)a}
+    net_entries: {Hireme.Net.Entry, ~w(id kind channel title url body shipped_on)a},
+    geography_places:
+      {Hireme.Geography.Place,
+       ~w(id position name country region cost qol mobility language tech ease labeled)a},
+    geography_profiles:
+      {Hireme.Geography.Profile,
+       ~w(id field citizenships languages weight_qol weight_afford weight_lang weight_route weight_tech weight_ease)a}
   ]
   @table_names Keyword.keys(@tables) ++ [:leases]
 
@@ -183,6 +190,7 @@ defmodule Hireme.Ops do
     * `:gym_log` and `:net_log` `[key, value, key, value, …]` (target 0)
     * `:gym_target` `[n]` · `:net_lane` `[url]`
     * `:generation` `[]`: open the job's employer CV's next generation
+    * `:atlas_weights` `[qol, afford, lang, route, tech, ease]` each 0–5 (target 0)
 
   The target is the job id unless noted.
   """
@@ -968,6 +976,9 @@ defmodule Hireme.Ops do
 
       {:net_lane, _} ->
         [{:kv_pairs, :namespace, ["net"]}]
+
+      {:atlas_weights, _} ->
+        [{:geography_profiles, :id, [value.id]}]
     end
   end
 
@@ -1006,6 +1017,7 @@ defmodule Hireme.Ops do
   defp apply_command({:gym_target, target}), do: Gym.set_target(target)
   defp apply_command({:net_log, attrs}), do: Net.log(attrs)
   defp apply_command({:net_lane, url}), do: Net.set_lane(url)
+  defp apply_command({:atlas_weights, weights}), do: Hireme.Geography.set_weights(weights)
   defp apply_command(command), do: Desk.execute(command)
 
   # -- parsing a client op ----------------------------------------------------
@@ -1063,8 +1075,29 @@ defmodule Hireme.Ops do
 
   defp parse(%{kind: :net_lane, fields: [url]}), do: {:ok, {:net_lane, url}}
   defp parse(%{kind: :generation, target: id, fields: []}), do: {:ok, {:generation, id}}
+
+  defp parse(%{kind: :atlas_weights, fields: [qol, afford, lang, route, tech, ease]}) do
+    with {:ok, qol} <- weight(qol, "qol"),
+         {:ok, afford} <- weight(afford, "afford"),
+         {:ok, lang} <- weight(lang, "lang"),
+         {:ok, route} <- weight(route, "route"),
+         {:ok, tech} <- weight(tech, "tech"),
+         {:ok, ease} <- weight(ease, "ease") do
+      {:ok,
+       {:atlas_weights,
+        %{qol: qol, afford: afford, lang: lang, route: route, tech: tech, ease: ease}}}
+    end
+  end
+
   defp parse(%{kind: kind}) when kind in @kinds, do: {:error, {:argument, "fields"}}
   defp parse(_op), do: {:error, :kind}
+
+  defp weight(value, name) do
+    case Integer.parse(value) do
+      {n, ""} when n in 0..5 -> {:ok, n}
+      _ -> {:error, {:argument, name}}
+    end
+  end
 
   defp stage(name) do
     case Pipeline.parse(name) do
