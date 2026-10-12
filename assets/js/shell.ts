@@ -13,10 +13,11 @@ import * as grid from "./board.ts"
 import { fromParams, lower, toParams, type Filters } from "./board.ts"
 import { h, Keyed, morph, raw, type Raw } from "./html.ts"
 import * as webauthn from "./webauthn.ts"
+import { Atlas, type Weights } from "./atlas.ts"
 import type { Change, Desk, Mark, Op, Refusal, Tables } from "./store.ts"
 import * as views from "./views.ts"
 
-type Lens = "board" | "battleplan" | "root" | "gym" | "net" | "settings"
+type Lens = "board" | "battleplan" | "root" | "gym" | "net" | "settings" | "atlas"
 
 interface Model {
   filters: Filters
@@ -114,6 +115,7 @@ export class Shell {
   private plane: HTMLElement | null = null
   private cards: views.Cards | null = null
   private linkErrors: string | null
+  private atlasView: Atlas | null = null
 
   // Nothing is laid out or painted before the board arrives (or the link
   // gives up): until then the main thread belongs to the socket. The board
@@ -273,7 +275,7 @@ export class Shell {
    * and each would otherwise cost a draw that changes nothing.
    */
   private unseen(c: Change): boolean {
-    if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused || c.account) return false
+    if (c.rows || c.root || c.scoreboard || c.lanes || c.status || c.acked !== undefined || c.refused || c.account || c.atlas) return false
     if (this.desk.tables !== this.tables) return false
     const id = this.model.appId
     // "all": a write that touches a profile, lineage, items or narratives recomposes every focus.
@@ -406,7 +408,8 @@ export class Shell {
     const lanes = d.lanes()
     const focus = m.appId === null ? null : d.focus(m.appId)
     const mark = m.appId === null ? null : d.mark(m.appId)
-    this.set("#topbar", views.topbar(t, d.status))
+    this.set("#topbar", views.topbar(t, d.status, m.lens))
+    if (this.root.dataset["lens"] !== m.lens) this.root.dataset["lens"] = m.lens
     this.set("#count", h`${m.count} showing`)
     // The controls hold the filters' values; a control in use keeps what is in it.
     const form = this.root.querySelector<HTMLFormElement>("#filters")
@@ -427,10 +430,15 @@ export class Shell {
     // layout underneath, so coming back costs a paint, not a relayout of
     // every card. Covered, it renders nothing and takes no focus.
     if (m.lens === "board") {
+      this.unmountAtlas()
       morph(lens, raw(""))
       if (workspace.dataset["covered"]) delete workspace.dataset["covered"]
       this.drawBoard(focus, mark)
+    } else if (m.lens === "atlas") {
+      if (!workspace.dataset["covered"]) workspace.dataset["covered"] = "1"
+      this.mountAtlas(lens)
     } else {
+      this.unmountAtlas()
       morph(lens, this.lensView(focus, lanes))
       if (m.lens === "battleplan" && focus) this.drawBattleplanSlots(lens, focus, mark)
       if ((m.lens === "gym" || m.lens === "net") && lanes) this.list(lens.querySelector("#lane-recent"), views.laneRecent(lanes, m.lens))
@@ -459,9 +467,32 @@ export class Shell {
         return lanes ? h`<div class="lane-wrap">${views.netView(lanes, m.laneError)}</div>` : raw("")
       case "settings":
         return h`<div class="lane-wrap">${views.settingsView(m.settings, m.reveal, m.renaming, m.settingsError, csrf(), m.enrolling, m.stepUp, m.settingsNotice)}</div>`
+      case "atlas":
       case "board":
         return raw("")
     }
+  }
+
+  /** The atlas keeps its zoom and pins. A redraw feeds it new rows; it boots once. */
+  private mountAtlas(lens: HTMLElement): void {
+    const rows = this.desk.atlas()
+    const host = lens.querySelector<HTMLElement>("#atlas-root")
+    if (host && this.atlasView) {
+      if (rows) this.atlasView.setCatalog(rows)
+      return
+    }
+    this.atlasView?.destroy()
+    lens.replaceChildren()
+    const root = document.createElement("div")
+    root.id = "atlas-root"
+    root.className = "atlas"
+    lens.appendChild(root)
+    this.atlasView = new Atlas(root, rows, (weights: Weights) => this.run({ kind: "atlas_weights", ...weights }))
+  }
+
+  private unmountAtlas(): void {
+    this.atlasView?.destroy()
+    this.atlasView = null
   }
 
   // The battleplan frame leaves its slots alone; each is morphed here and
@@ -925,6 +956,7 @@ function refusalText(r: Refusal): string {
 const WHAT: Record<Op["kind"], string> = {
   stage: "stage change", next: "next action", note: "note", overlay: "CV line change", heat_override: "HEAT override", score: "score",
   open_fire: "open fire", narrative: "narrative", gym_log: "gym rep", gym_target: "gym target", net_log: "net entry", net_lane: "observer lane",
+  atlas_weights: "atlas weights",
 }
 
 function isLaneOp(op: Op): boolean {
@@ -949,7 +981,7 @@ const LINK_ERRORS = new Map([
 ])
 
 function lensOf(v: string | null): Lens {
-  return v === "battleplan" || v === "root" || v === "gym" || v === "net" || v === "settings" ? v : "board"
+  return v === "battleplan" || v === "root" || v === "gym" || v === "net" || v === "settings" || v === "atlas" ? v : "board"
 }
 
 function fields(data: FormData): Record<string, string> {
@@ -973,6 +1005,7 @@ function titleOf(m: Model, focus: Focus | null): string {
   if (m.lens === "gym") return "Gym · Hireme"
   if (m.lens === "net") return "Net · Hireme"
   if (m.lens === "settings") return "Account · Hireme"
+  if (m.lens === "atlas") return "Atlas · Hireme"
   if (focus) return `${focus.job.company} · ${focus.job.code} · Hireme`
   return "Desk · Hireme"
 }

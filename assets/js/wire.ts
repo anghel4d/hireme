@@ -400,15 +400,22 @@ export function openSocket(ws: WebSocket, sink: Sink, first: Bytes | null, queue
   })
 }
 
-/** The socket's URL: like the gate's CONNECT, it names the rev and client id the server pushes the BOOT for. */
-export function socketUrl(csrf: string, rev: bigint, cid: number): string {
+/**
+ * The socket's URL. `rev` is the snapshot the server resumes from: 0 asks
+ * for the whole desk. `board`, when the page already drew that rev, tells
+ * the server to skip the board and send the tables the board left out.
+ */
+export function socketUrl(csrf: string, rev: bigint, cid: number, board = 0n): string {
   const proto = location.protocol === "https:" ? "wss" : "ws"
-  return `${proto}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(csrf)}&rev=${rev}&raw=1&cid=${cid}`
+  const held = board > 0n ? `&board=${board}` : ""
+  return `${proto}://${location.host}/wire/websocket?_csrf_token=${encodeURIComponent(csrf)}&rev=${rev}&raw=1&cid=${cid}${held}`
 }
 
-/** The CONNECT URL: the ticket, and the rev and client id the server pushes the BOOT for. */
-export function gateUrl(gate: string, ticket: string, rev: bigint, cid: number): string {
-  return `${gate}${gate.includes("?") ? "&" : "?"}t=${encodeURIComponent(ticket)}&rev=${rev}&raw=1&cid=${cid}`
+/** The CONNECT URL: the ticket, and the same rev and board the socket names. */
+export function gateUrl(gate: string, ticket: string, rev: bigint, cid: number, board = 0n): string {
+  const held = board > 0n ? `&board=${board}` : ""
+  const join = gate.includes("?") ? "&" : "?"
+  return `${gate}${join}t=${encodeURIComponent(ticket)}&rev=${rev}&raw=1&cid=${cid}${held}`
 }
 
 // ---- the session ----
@@ -452,6 +459,10 @@ export class Wire {
   readonly stats = { connects: 0, resent: 0, frames: 0, bytes: 0 }
   private calls = new Map<number, (r: Reply) => void>()
   private callId = 0
+  // The page's board is not the whole desk. Until a full boot's rest has
+  // arrived, a resume from the board's rev would never send the tables the
+  // board left out (the atlas among them).
+  private needFull = true
 
   private readonly options: WebTransportOptions
 
@@ -556,6 +567,8 @@ export class Wire {
           return
         }
         default:
+          // A PATCH on a full boot is the rest: the tables the board omitted.
+          if (this.needFull && kind === KIND.PATCH) this.needFull = false
           this.host.frame(f, kind, flags, rev)
       }
     },
@@ -609,13 +622,14 @@ export class Wire {
       if (c) return this.settled(c)
       early.ws.close()
     }
+    const resume = this.needFull ? { rev: 0n, board: this.host.rev() } : { rev: this.host.rev(), board: 0n }
     if (this.gate !== "" && "WebTransport" in window && performance.now() >= this.gateDownUntil) {
       if (this.ticket === "") await this.freshTicket()
       if (this.ticket !== "" && this.gate !== "") {
         const ticket = this.ticket
         this.ticket = ""
         try {
-          const wt = new WebTransport(gateUrl(this.gate, ticket, this.host.rev(), this.host.clientId), this.options)
+          const wt = new WebTransport(gateUrl(this.gate, ticket, resume.rev, this.host.clientId, resume.board), this.options)
           wt.closed.catch(() => {})
           const c = await within(openTransport(wt, this.sink, first), CONNECT_MS).catch((e: unknown) => {
             wt.close()
@@ -627,7 +641,7 @@ export class Wire {
         }
       }
     }
-    const ws = new WebSocket(socketUrl(this.csrf, this.host.rev(), this.host.clientId))
+    const ws = new WebSocket(socketUrl(this.csrf, resume.rev, this.host.clientId, resume.board))
     return this.settled(await within(openSocket(ws, this.sink, first), CONNECT_MS).catch((e: unknown) => {
       ws.close()
       throw e

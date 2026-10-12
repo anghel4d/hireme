@@ -760,3 +760,148 @@ defmodule Hireme.Mailer.Notice do
     timestamps(updated_at: false)
   end
 end
+
+defmodule Hireme.Geography.Place do
+  @moduledoc """
+  One city on the chart. Mobility and language describe the city, not
+  the person who is looking at it.
+  """
+  use Hireme.Schema
+
+  schema "geography_places" do
+    field :position, :integer, default: 0
+    field :name, :string, default: ""
+    field :country, :string, default: ""
+    field :region, Ecto.Enum, values: [:south, :west, :central, :nordic, :east]
+    field :cost, :float
+    field :qol, :float
+    field :mobility, Ecto.Enum, values: [:eu, :eea, :ch, :uk, :non]
+    field :language, Ecto.Enum, values: [:fr, :en, :de, :ro, :other]
+    field :tech, :integer
+    field :ease, :integer
+    field :labeled, :boolean, default: false
+    # Primary energy use per person, kWh a year, and the year of that figure.
+    field :energy, :float
+    field :energy_year, :integer
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(place, attrs) do
+    place
+    |> cast(attrs, [
+      :position,
+      :name,
+      :country,
+      :region,
+      :cost,
+      :qol,
+      :mobility,
+      :language,
+      :tech,
+      :ease,
+      :labeled,
+      :energy,
+      :energy_year
+    ])
+    |> validate_required([
+      :name,
+      :country,
+      :region,
+      :cost,
+      :qol,
+      :mobility,
+      :language,
+      :energy,
+      :energy_year,
+      :tech,
+      :ease
+    ])
+    |> validate_number(:tech, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
+    |> validate_number(:ease, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
+    |> validate_number(:energy, greater_than: 0)
+    |> validate_number(:energy_year, greater_than: 1900, less_than: 2100)
+    |> unique_constraint(:name, name: :geography_places_account_id_name_index)
+    |> tenant()
+  end
+end
+
+defmodule Hireme.Geography.Country do
+  @moduledoc """
+  One country's primary energy use per person, and the year of that figure.
+  """
+  use Hireme.Schema
+
+  schema "geography_countries" do
+    field :name, :string, default: ""
+    field :energy, :float
+    field :energy_year, :integer
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(country, attrs) do
+    country
+    |> cast(attrs, [:name, :energy, :energy_year])
+    |> validate_required([:name, :energy, :energy_year])
+    |> validate_number(:energy, greater_than: 0)
+    |> validate_number(:energy_year, greater_than: 1900, less_than: 2100)
+    |> unique_constraint(:name, name: :geography_countries_account_id_name_index)
+    |> tenant()
+  end
+end
+
+defmodule Hireme.Geography.Profile do
+  @moduledoc """
+  The holder's passports, languages, field, and axis weights. One row
+  per account. Citizenships and languages are comma-separated codes.
+  """
+  use Hireme.Schema
+
+  schema "geography_profiles" do
+    field :field, :string, default: ""
+    field :citizenships, :string, default: ""
+    field :languages, :string, default: ""
+    field :weight_qol, :integer, default: 3
+    field :weight_afford, :integer, default: 2
+    field :weight_lang, :integer, default: 3
+    field :weight_route, :integer, default: 3
+    field :weight_tech, :integer, default: 3
+    field :weight_ease, :integer, default: 2
+    # Energy use is the default axis, and the heaviest one.
+    field :weight_energy, :integer, default: 5
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(profile, attrs) do
+    profile
+    |> cast(attrs, [
+      :field,
+      :citizenships,
+      :languages,
+      :weight_qol,
+      :weight_afford,
+      :weight_lang,
+      :weight_route,
+      :weight_tech,
+      :weight_ease,
+      :weight_energy
+    ])
+    |> validate_format(:citizenships, ~r/\A(|([A-Z]{2})(,[A-Z]{2})*)\z/, message: "codes")
+    |> validate_format(:languages, ~r/\A(|(fr|en|de|ro)(,(fr|en|de|ro))*)\z/, message: "codes")
+    |> validate_weight(:weight_qol)
+    |> validate_weight(:weight_afford)
+    |> validate_weight(:weight_lang)
+    |> validate_weight(:weight_route)
+    |> validate_weight(:weight_tech)
+    |> validate_weight(:weight_ease)
+    |> validate_weight(:weight_energy)
+    |> unique_constraint(:account_id)
+    |> tenant()
+  end
+
+  defp validate_weight(changeset, field) do
+    validate_number(changeset, field, greater_than_or_equal_to: 0, less_than_or_equal_to: 5)
+  end
+end

@@ -32,8 +32,6 @@ defmodule HiremeWeb.Session do
   gone out.
   """
 
-  require Logger
-
   alias Hireme.ApiKeys
   alias Hireme.Letterbox
   alias Hireme.Ops
@@ -329,8 +327,7 @@ defmodule HiremeWeb.Session do
          <<cred::binary-size(^cred_len), _::binary>> <- rest,
          skip = align8(2 + cred_len) - 2 - cred_len,
          <<_::binary-size(^skip), _::binary-size(^cred_len), snapshot::little-64,
-           client::little-32, opts::little-32,
-           _::binary>> <-
+           client::little-32, opts::little-32, _::binary>> <-
            rest do
       s = %{s | raw: Bitwise.band(opts, @raw_opt) != 0}
       hello(s, Bitwise.band(flags, @agent) != 0, cred, snapshot, client)
@@ -438,7 +435,8 @@ defmodule HiremeWeb.Session do
   # ---- Raw tables: rows as the database holds them ----
 
   @raw_tables ~w(job_apps profiles items cv_variants cv_lineages overlays batches events kv_pairs
-                 narratives scoreboard_snapshots gym_problems gym_reps net_entries leases)a
+                 narratives scoreboard_snapshots gym_problems gym_reps net_entries
+                 geography_places geography_countries geography_profiles leases)a
 
   # Every raw table the snapshot holds, then the server's clock.
   @board ~w(job_apps profiles batches cv_variants leases scoreboard_snapshots)a

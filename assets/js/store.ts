@@ -67,6 +67,7 @@ export type Op =
   | { kind: "gym_target"; target: string }
   | { kind: "net_log"; fields: Record<string, string> }
   | { kind: "net_lane"; url: string }
+  | { kind: "atlas_weights"; qol: number; afford: number; lang: number; route: number; tech: number; ease: number; energy: number }
 
 export interface Change {
   /** Any card column or the board changed. */
@@ -79,6 +80,8 @@ export interface Change {
   status?: boolean
   /** The account page's tables changed. */
   account?: boolean
+  /** Career-geography rows arrived or moved. */
+  atlas?: boolean
   /** The server accepted this op. */
   acked?: bigint
   /** The server refused this op; it is already rolled back. */
@@ -109,6 +112,8 @@ export interface Desk {
   lanes(): Lanes | null
   /** The Account page, once its tables have arrived. */
   account(): Settings | null
+  /** Career geography: the chart and the holder, once those tables exist. */
+  atlas(): AtlasRows | null
 
   /** Apply locally in this tick and send. A predicted refusal applies nothing. */
   run(op: Op): Run
@@ -445,7 +450,66 @@ const SPEC = {
   varieties: { code: ["code", "str"], fire: ["fire", "str"], status: ["status", "str"], label: ["label", "str"] },
   chart_bands: { key: ["key", "str"], label: ["label", "str"], min: ["min", "u32"], max: ["max", "u32"], count: ["count", "u32"] },
   chart_bins: { lo: ["lo", "u32"], hi: ["hi", "u32"], count: ["count", "u32"] },
+  geography_places: {
+    id: ["id", "u32"], position: ["position", "u32"], name: ["name", "str"], country: ["country", "str"],
+    region: ["region", "str"], cost: ["cost", "f64"], qol: ["qol", "f64"], mobility: ["mobility", "str"],
+    language: ["language", "str"], tech: ["tech", "u32"], ease: ["ease", "u32"], labeled: ["labeled", "bool"],
+    energy: ["energy", "f64"], energy_year: ["energy_year", "u32"],
+  },
+  geography_countries: {
+    id: ["id", "u32"], name: ["name", "str"], energy: ["energy", "f64"], energy_year: ["energy_year", "u32"],
+  },
+  geography_profiles: {
+    id: ["id", "u32"], field: ["field", "str"], citizenships: ["citizenships", "str"], languages: ["languages", "str"],
+    weight_qol: ["weight_qol", "u32"], weight_afford: ["weight_afford", "u32"], weight_lang: ["weight_lang", "u32"],
+    weight_route: ["weight_route", "u32"], weight_tech: ["weight_tech", "u32"], weight_ease: ["weight_ease", "u32"],
+    weight_energy: ["weight_energy", "u32"],
+  },
 } as const satisfies Record<string, Spec>
+
+export interface AtlasPlace {
+  id: number
+  position: number
+  name: string
+  country: string
+  region: string
+  cost: number
+  qol: number
+  mobility: string
+  language: string
+  tech: number
+  ease: number
+  labeled: boolean
+  energy: number
+  energy_year: number
+}
+
+export interface AtlasCountry {
+  id: number
+  name: string
+  energy: number
+  energy_year: number
+}
+
+export interface AtlasProfile {
+  id: number
+  field: string
+  citizenships: string
+  languages: string
+  weight_qol: number
+  weight_afford: number
+  weight_lang: number
+  weight_route: number
+  weight_tech: number
+  weight_ease: number
+  weight_energy: number
+}
+
+export interface AtlasRows {
+  places: AtlasPlace[]
+  countries: AtlasCountry[]
+  profile: AtlasProfile | null
+}
 
 interface RawBatch { id: number; code: string; ordinal: number; fire: number; status: string }
 
@@ -585,6 +649,7 @@ class Documents {
       this.scoreDoc = undefined
       c.scoreboard = true
     }
+    if (["geography_places", "geography_countries", "geography_profiles"].some(t)) c.atlas = true
     if (["acct", "acct_keys", "acct_sessions", "acct_identities", "acct_factors", "clock"].some(t)) {
       this.acctDoc = undefined
       c.account = true
@@ -675,7 +740,7 @@ function jobOf(op: Op): number | null {
 
 const OP_KIND: Record<Op["kind"], number> = {
   stage: 1, next: 2, note: 3, score: 4, overlay: 5, heat_override: 6, open_fire: 7, narrative: 8,
-  gym_log: 9, gym_target: 10, net_log: 11, net_lane: 12,
+  gym_log: 9, gym_target: 10, net_log: 11, net_lane: 12, atlas_weights: 14,
 }
 
 const pairs = (fields: Record<string, string>) => Object.entries(fields).flat()
@@ -693,6 +758,7 @@ export function encodeOp(hash: number, opId: bigint, op: Op): Bytes {
     : op.kind === "narrative" ? [op.narrative, [op.body]]
     : op.kind === "gym_target" ? [0, [op.target]]
     : op.kind === "net_lane" ? [0, [op.url]]
+    : op.kind === "atlas_weights" ? [0, [String(op.qol), String(op.afford), String(op.lang), String(op.route), String(op.tech), String(op.ease), String(op.energy)]]
     : [0, pairs(op.fields)]
   return opFrame(hash, opId, OP_KIND[op.kind], target, fields)
 }
@@ -797,6 +863,14 @@ export class LocalDesk implements Desk, Host {
   scoreboard(): Scoreboard | null { return this.docs.scoreboard() }
   lanes(): Lanes | null { return this.docs.lanes() }
   account(): Settings | null { return this.docs.account() }
+  atlas(): AtlasRows | null {
+    const k = this.kernel
+    if (k.table("geography_places") < 0) return null
+    const places = k.all<AtlasPlace>("geography_places", SPEC.geography_places).slice().sort((a, b) => a.position - b.position)
+    const countries = k.all<AtlasCountry>("geography_countries", SPEC.geography_countries)
+    const profile = k.all<AtlasProfile>("geography_profiles", SPEC.geography_profiles)[0] ?? null
+    return { places, countries, profile }
+  }
 
   /** An op on the wire for this job: its PATCH and ACK are a round trip away. */
   mark(jobId: number): Mark {
@@ -901,7 +975,7 @@ export class LocalDesk implements Desk, Host {
       if (bits & (INGEST.cards | INGEST.tables)) this.snapshot?.touch()
       if (flags & FLAG.END && performance.getEntriesByName("desk:ready").length === 0) performance.mark("desk:ready")
     }
-    if (c.rows || c.focus || c.lanes || c.root || c.scoreboard || c.account) this.emit(c)
+    if (c.rows || c.focus || c.lanes || c.root || c.scoreboard || c.account || c.atlas) this.emit(c)
   }
 
   /** An ACK or NACK for an op of ours. The kernel has already settled or dropped it. */

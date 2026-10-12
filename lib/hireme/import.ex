@@ -448,10 +448,12 @@ defmodule Hireme.Seed do
 
     cond do
       not File.regular?(profile_path) ->
+        maybe_geography()
         IO.puts("No #{profile_path}. The desk starts empty. See README.")
         :empty
 
       Repo.exists?(Profile) ->
+        maybe_geography()
         IO.puts("Desk already seeded. mix ecto.reset to start over.")
         :already_seeded
 
@@ -463,6 +465,7 @@ defmodule Hireme.Seed do
                profile = load_profile!(profile_path, dir)
                import_manifest(dir, profile)
                maybe_overlay(dir)
+               Hireme.Geography.install_local_desk!()
              end}
           )
 
@@ -502,6 +505,14 @@ defmodule Hireme.Seed do
   end
 
   def seed_dir, do: Path.expand("seed", File.cwd!())
+
+  # The chart and the local holder, once. A desk that already has them
+  # is left alone, including weights the holder has since moved.
+  defp maybe_geography do
+    unless Hireme.Geography.installed?() do
+      {:ok, _} = Hireme.Ops.exec({:bulk, fn -> Hireme.Geography.install_local_desk!() end})
+    end
+  end
 
   defp load_profile!(path, dir) do
     doc = path |> File.read!() |> Jason.decode!()
