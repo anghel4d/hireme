@@ -237,6 +237,8 @@ pub fn keyed(id: u16) -> bool {
             | table::GYM_PROBLEMS
             | table::GYM_REPS
             | table::NET_ENTRIES
+            | table::GEOGRAPHY_PLACES
+            | table::GEOGRAPHY_PROFILES
     )
 }
 

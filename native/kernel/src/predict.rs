@@ -410,6 +410,31 @@ impl Desk {
                     ],
                 );
             }
+            op::ATLAS_WEIGHTS => {
+                let mut nums = [0u32; 6];
+                for (i, n) in nums.iter_mut().enumerate() {
+                    let v = integer(o.field(i))
+                        .filter(|n| (0..=5).contains(n))
+                        .ok_or(refusal::ARGUMENT)?;
+                    *n = v as u32;
+                }
+                let t = table::GEOGRAPHY_PROFILES;
+                if self.rows(t) == 0 {
+                    return Err(refusal::NOT_FOUND);
+                }
+                let id = self.vu32(t, col::geography_profiles::ID, 0);
+                let cols = [
+                    col::geography_profiles::WEIGHT_QOL,
+                    col::geography_profiles::WEIGHT_AFFORD,
+                    col::geography_profiles::WEIGHT_LANG,
+                    col::geography_profiles::WEIGHT_ROUTE,
+                    col::geography_profiles::WEIGHT_TECH,
+                    col::geography_profiles::WEIGHT_EASE,
+                ];
+                for (c, n) in cols.into_iter().zip(nums) {
+                    self.set(t, id, c, Val::U(n), rec);
+                }
+            }
             _ => {}
         }
         Ok(())
