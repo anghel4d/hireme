@@ -90,10 +90,12 @@ defmodule Hireme.Ops do
     net_entries: {Hireme.Net.Entry, ~w(id kind channel title url body shipped_on)a},
     geography_places:
       {Hireme.Geography.Place,
-       ~w(id position name country region cost qol mobility language tech ease labeled)a},
+       ~w(id position name country region cost qol mobility language tech ease labeled energy energy_year)a},
+    geography_countries: {Hireme.Geography.Country, ~w(id name energy energy_year)a},
     geography_profiles:
       {Hireme.Geography.Profile,
-       ~w(id field citizenships languages weight_qol weight_afford weight_lang weight_route weight_tech weight_ease)a}
+       ~w(id field citizenships languages weight_qol weight_afford weight_lang weight_route
+          weight_tech weight_ease weight_energy)a}
   ]
   @table_names Keyword.keys(@tables) ++ [:leases]
 
@@ -190,7 +192,7 @@ defmodule Hireme.Ops do
     * `:gym_log` and `:net_log` `[key, value, key, value, …]` (target 0)
     * `:gym_target` `[n]` · `:net_lane` `[url]`
     * `:generation` `[]`: open the job's employer CV's next generation
-    * `:atlas_weights` `[qol, afford, lang, route, tech, ease]` each 0–5 (target 0)
+    * `:atlas_weights` `[qol, afford, lang, route, tech, ease, energy]` each 0–5 (target 0)
 
   The target is the job id unless noted.
   """
@@ -1076,16 +1078,25 @@ defmodule Hireme.Ops do
   defp parse(%{kind: :net_lane, fields: [url]}), do: {:ok, {:net_lane, url}}
   defp parse(%{kind: :generation, target: id, fields: []}), do: {:ok, {:generation, id}}
 
-  defp parse(%{kind: :atlas_weights, fields: [qol, afford, lang, route, tech, ease]}) do
+  defp parse(%{kind: :atlas_weights, fields: [qol, afford, lang, route, tech, ease, energy]}) do
     with {:ok, qol} <- weight(qol, "qol"),
          {:ok, afford} <- weight(afford, "afford"),
          {:ok, lang} <- weight(lang, "lang"),
          {:ok, route} <- weight(route, "route"),
          {:ok, tech} <- weight(tech, "tech"),
-         {:ok, ease} <- weight(ease, "ease") do
+         {:ok, ease} <- weight(ease, "ease"),
+         {:ok, energy} <- weight(energy, "energy") do
       {:ok,
        {:atlas_weights,
-        %{qol: qol, afford: afford, lang: lang, route: route, tech: tech, ease: ease}}}
+        %{
+          qol: qol,
+          afford: afford,
+          lang: lang,
+          route: route,
+          tech: tech,
+          ease: ease,
+          energy: energy
+        }}}
     end
   end
 

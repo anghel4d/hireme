@@ -411,7 +411,7 @@ impl Desk {
                 );
             }
             op::ATLAS_WEIGHTS => {
-                let mut nums = [0u32; 6];
+                let mut nums = [0u32; 7];
                 for (i, n) in nums.iter_mut().enumerate() {
                     let v = integer(o.field(i))
                         .filter(|n| (0..=5).contains(n))
@@ -430,6 +430,7 @@ impl Desk {
                     col::geography_profiles::WEIGHT_ROUTE,
                     col::geography_profiles::WEIGHT_TECH,
                     col::geography_profiles::WEIGHT_EASE,
+                    col::geography_profiles::WEIGHT_ENERGY,
                 ];
                 for (c, n) in cols.into_iter().zip(nums) {
                     self.set(t, id, c, Val::U(n), rec);

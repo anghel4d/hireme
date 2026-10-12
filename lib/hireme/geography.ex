@@ -12,6 +12,7 @@ defmodule Hireme.Geography do
   import Ecto.Query
   alias Hireme.Accounts.Account
   alias Hireme.Geography.Catalog
+  alias Hireme.Geography.Country
   alias Hireme.Geography.Place
   alias Hireme.Geography.Profile
   alias Hireme.Repo
@@ -19,7 +20,12 @@ defmodule Hireme.Geography do
   @regions [:south, :west, :central, :nordic, :east]
   @mobility [:eu, :eea, :ch, :uk, :non]
   @languages [:fr, :en, :de, :ro, :other]
-  @axes [:qol, :afford, :lang, :route, :tech, :ease]
+  @axes [:energy, :qol, :afford, :lang, :route, :tech, :ease]
+  # Log range the energy axis is scored across, kWh per person per year.
+  @energy_floor :math.log10(8000)
+  @energy_ceil :math.log10(160_000)
+  # EU average primary energy per person, the reference line on the energy chart.
+  @eu_energy 35_318
 
   # The local desk's holder. Any other account starts blank and scores
   # the same cities against whatever passports it stores.
@@ -370,14 +376,23 @@ defmodule Hireme.Geography do
   }
 
   @presets [
-    {"Balanced", %{qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2}},
-    {"Career first", %{qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1}},
-    {"Cheap and calm", %{qol: 4, afford: 5, lang: 2, route: 3, tech: 0, ease: 2}},
-    {"Zero friction", %{qol: 2, afford: 1, lang: 5, route: 5, tech: 1, ease: 5}},
-    {"Best life", %{qol: 5, afford: 1, lang: 2, route: 2, tech: 1, ease: 1}}
+    {"Balanced", %{energy: 3, qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2}},
+    {"Career first", %{energy: 1, qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1}},
+    {"Cheap and calm", %{energy: 1, qol: 4, afford: 5, lang: 2, route: 3, tech: 0, ease: 2}},
+    {"Zero friction", %{energy: 1, qol: 2, afford: 1, lang: 5, route: 5, tech: 1, ease: 5}},
+    {"Energy first", %{energy: 5, qol: 2, afford: 1, lang: 1, route: 2, tech: 1, ease: 1}},
+    {"Best life", %{energy: 2, qol: 5, afford: 1, lang: 2, route: 2, tech: 1, ease: 1}}
   ]
 
-  @type weights :: %{qol: 0..5, afford: 0..5, lang: 0..5, route: 0..5, tech: 0..5, ease: 0..5}
+  @type weights :: %{
+          energy: 0..5,
+          qol: 0..5,
+          afford: 0..5,
+          lang: 0..5,
+          route: 0..5,
+          tech: 0..5,
+          ease: 0..5
+        }
 
   @type reading :: %{
           key: atom(),
@@ -406,6 +421,7 @@ defmodule Hireme.Geography do
   @doc "The local desk's passports, languages, and field, written once."
   @spec install_local_desk!() :: :ok
   def install_local_desk! do
+    ensure_countries!()
     ensure_places!()
     profile = ensure_profile!()
 
@@ -432,6 +448,8 @@ defmodule Hireme.Geography do
   @spec installed?() :: boolean()
   def installed? do
     Repo.aggregate(Place, :count) > 0 and
+      Repo.aggregate(Country, :count) > 0 and
+      Repo.exists?(from(p in Place, where: not is_nil(p.energy))) and
       match?(%Profile{citizenships: c, field: f} when c != "" or f != "", Repo.one(Profile))
   end
 
@@ -443,7 +461,8 @@ defmodule Hireme.Geography do
       weight_lang: Map.get(weights, :lang),
       weight_route: Map.get(weights, :route),
       weight_tech: Map.get(weights, :tech),
-      weight_ease: Map.get(weights, :ease)
+      weight_ease: Map.get(weights, :ease),
+      weight_energy: Map.get(weights, :energy)
     }
 
     ensure_profile!() |> Profile.changeset(attrs) |> Repo.update()
@@ -457,8 +476,27 @@ defmodule Hireme.Geography do
       lang: profile.weight_lang,
       route: profile.weight_route,
       tech: profile.weight_tech,
-      ease: profile.weight_ease
+      ease: profile.weight_ease,
+      energy: profile.weight_energy
     }
+  end
+
+  @doc "EU average primary energy use per person, in kWh a year."
+  @spec eu_energy() :: pos_integer()
+  def eu_energy, do: @eu_energy
+
+  @doc """
+  Energy use scored from 0 to 1 across 8,000 to 160,000 kWh per person.
+  `:more` treats higher use as a better fit. `:less` reverses it.
+  """
+  @spec energy_score(number(), :more | :less) :: float()
+  def energy_score(kwh, direction \\ :more) when direction in [:more, :less] do
+    norm =
+      ((:math.log10(kwh) - @energy_floor) / (@energy_ceil - @energy_floor))
+      |> max(0.0)
+      |> min(1.0)
+
+    if direction == :less, do: 1.0 - norm, else: norm
   end
 
   @spec passport_line(Profile.t()) :: String.t()
@@ -553,9 +591,10 @@ defmodule Hireme.Geography do
     pack(key, label, label, tone, score, text)
   end
 
-  @spec parts(Place.t(), Profile.t()) :: %{atom() => float()}
-  def parts(%Place{} = place, %Profile{} = profile) do
+  @spec parts(Place.t(), Profile.t(), :more | :less) :: %{atom() => float()}
+  def parts(%Place{} = place, %Profile{} = profile, direction \\ :more) do
     %{
+      energy: energy_score(place.energy, direction),
       qol: place.qol / 100,
       afford: afford(place.cost),
       lang: language(place, profile).score,
@@ -598,14 +637,36 @@ defmodule Hireme.Geography do
       "Every panel is linked: pick a city anywhere and it lights up everywhere."
   end
 
-  defp ensure_places! do
-    if Repo.aggregate(Place, :count) == 0 do
-      Enum.each(Catalog.places(), fn row ->
-        %Place{} |> Place.changeset(row) |> Repo.insert!()
-      end)
-    end
+  defp ensure_countries! do
+    existing = Map.new(Repo.all(Country), &{&1.name, &1})
 
-    :ok
+    Enum.each(Catalog.countries(), fn row ->
+      case Map.get(existing, row.name) do
+        nil ->
+          %Country{} |> Country.changeset(row) |> Repo.insert!()
+
+        %Country{} = country ->
+          country
+          |> Country.changeset(%{energy: row.energy, energy_year: row.energy_year})
+          |> Repo.update!()
+      end
+    end)
+  end
+
+  defp ensure_places! do
+    existing = Map.new(Repo.all(Place), &{&1.name, &1})
+
+    Enum.each(Catalog.places(), fn row ->
+      case Map.get(existing, row.name) do
+        nil ->
+          %Place{} |> Place.changeset(row) |> Repo.insert!()
+
+        %Place{} = place ->
+          place
+          |> Place.changeset(%{energy: row.energy, energy_year: row.energy_year})
+          |> Repo.update!()
+      end
+    end)
   end
 
   defp ensure_profile! do

@@ -2,9 +2,10 @@
 // scores them: passports, languages, and the field are never named here
 // except as the country table the scorer reads. Hireme.Geography is the spec.
 
-import type { AtlasPlace, AtlasProfile, AtlasRows } from "./store.ts"
+import type { AtlasCountry, AtlasPlace, AtlasProfile, AtlasRows } from "./store.ts"
 
 export interface Weights {
+  energy: number
   qol: number
   afford: number
   lang: number
@@ -13,10 +14,11 @@ export interface Weights {
   ease: number
 }
 
-const AXES = ["qol", "afford", "lang", "route", "tech", "ease"] as const
+const AXES = ["energy", "qol", "afford", "lang", "route", "tech", "ease"] as const
 type Axis = (typeof AXES)[number]
 
 const AXIS_LABEL: Record<Axis, string> = {
+  energy: "Energy use",
   qol: "Quality of life",
   afford: "Affordability",
   lang: "Language",
@@ -26,11 +28,12 @@ const AXIS_LABEL: Record<Axis, string> = {
 }
 
 const PRESETS: { name: string; weights: Weights }[] = [
-  { name: "Balanced", weights: { qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2 } },
-  { name: "Career first", weights: { qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1 } },
-  { name: "Cheap and calm", weights: { qol: 4, afford: 5, lang: 2, route: 3, tech: 0, ease: 2 } },
-  { name: "Zero friction", weights: { qol: 2, afford: 1, lang: 5, route: 5, tech: 1, ease: 5 } },
-  { name: "Best life", weights: { qol: 5, afford: 1, lang: 2, route: 2, tech: 1, ease: 1 } },
+  { name: "Balanced", weights: { energy: 3, qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2 } },
+  { name: "Career first", weights: { energy: 1, qol: 2, afford: 1, lang: 2, route: 3, tech: 5, ease: 1 } },
+  { name: "Cheap and calm", weights: { energy: 1, qol: 4, afford: 5, lang: 2, route: 3, tech: 0, ease: 2 } },
+  { name: "Zero friction", weights: { energy: 1, qol: 2, afford: 1, lang: 5, route: 5, tech: 1, ease: 5 } },
+  { name: "Energy first", weights: { energy: 5, qol: 2, afford: 1, lang: 1, route: 2, tech: 1, ease: 1 } },
+  { name: "Best life", weights: { energy: 2, qol: 5, afford: 1, lang: 2, route: 2, tech: 1, ease: 1 } },
 ]
 
 const REGION: Record<string, string> = {
@@ -112,13 +115,19 @@ const EASE = [
   "Mostly online, or a single office visit.",
 ]
 
-const FULL = { x0: 40, x1: 175, y0: -8, y1: 108 }
-const MEDX = 81.3
+const COST_FULL = { x0: 40, x1: 175, y0: -8, y1: 108 }
+const ENERGY_FULL = { x0: Math.log10(7000), x1: Math.log10(190000), y0: -8, y1: 108 }
+const COST_MED = 81.3
 const MEDY = 50
+/** EU average primary energy per person, kWh a year. Hireme.Geography.eu_energy/0. */
+const EU_ENERGY = 35318
+const ENERGY_LO = Math.log10(8000)
+const ENERGY_HI = Math.log10(160000)
 const PL = { l: 58, r: 16, t: 14, b: 46, w: 1000, h: 620 }
 const NS = "http://www.w3.org/2000/svg"
 
 interface Parts {
+  energy: number
   qol: number
   afford: number
   lang: number
@@ -145,7 +154,16 @@ interface Filters {
   cell: [string, string] | null
 }
 
-const EMPTY_WEIGHTS: Weights = { qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2 }
+const EMPTY_WEIGHTS: Weights = { energy: 5, qol: 3, afford: 2, lang: 3, route: 3, tech: 3, ease: 2 }
+
+function energyNorm(kwh: number): number {
+  const t = (Math.log10(kwh) - ENERGY_LO) / (ENERGY_HI - ENERGY_LO)
+  return Math.max(0, Math.min(1, t))
+}
+
+function fmtK(kwh: number): string {
+  return Math.round(kwh).toLocaleString("en-US")
+}
 
 function codes(text: string): string[] {
   return text.split(",").map((s) => s.trim()).filter((s) => s !== "")
@@ -285,8 +303,10 @@ function languageOf(place: AtlasPlace, profile: AtlasProfile | null): Reading {
   return { key, label, short: label, tone, score, text }
 }
 
-function partsOf(place: AtlasPlace, profile: AtlasProfile | null): Parts {
+function partsOf(place: AtlasPlace, profile: AtlasProfile | null, direction: 1 | -1): Parts {
+  const norm = energyNorm(place.energy)
   return {
+    energy: direction > 0 ? norm : 1 - norm,
     qol: place.qol / 100,
     afford: Math.max(0, Math.min(1, (175 - place.cost) / 125)),
     lang: languageOf(place, profile).score,
@@ -366,6 +386,10 @@ export class Atlas {
   private routes = new Map<number, Reading>()
   private langs = new Map<number, Reading>()
   private w: Weights = { ...EMPTY_WEIGHTS }
+  private chart: "energy" | "cost" = "energy"
+  private energyDir: 1 | -1 = 1
+  private countries = new Map<string, AtlasCountry>()
+  private energyMed = Math.log10(EU_ENERGY)
   private colorBy = "region"
   private query = ""
   private filters: Filters = { free: false, lang: false, tech: false, remote: false, covered: false, cell: null }
@@ -373,7 +397,7 @@ export class Atlas {
   private pins: number[] = []
   private rank: { id: number; score: number }[] = []
   private rankPos = new Map<number, number>()
-  private domain = { ...FULL }
+  private domain = { ...ENERGY_FULL }
   private moved = false
   private svg: SVGSVGElement | null = null
   private frameG: SVGGElement | null = null
@@ -412,8 +436,16 @@ export class Atlas {
     this.booted = true
     this.places = rows.places
     this.profile = rows.profile
+    this.countries = new Map(rows.countries.map((country) => [country.name, country]))
+    const logs = this.places.map((place) => Math.log10(place.energy)).sort((a, b) => a - b)
+    const mid = logs.length >> 1
+    const median = logs.length === 0 ? Math.log10(EU_ENERGY) : logs.length % 2 === 1 ? logs[mid] : ((logs[mid - 1] ?? 0) + (logs[mid] ?? 0)) / 2
+    this.energyMed = median ?? Math.log10(EU_ENERGY)
+    this.chart = "energy"
+    this.domain = { ...ENERGY_FULL }
     this.w = rows.profile
       ? {
+          energy: rows.profile.weight_energy,
           qol: rows.profile.weight_qol,
           afford: rows.profile.weight_afford,
           lang: rows.profile.weight_lang,
@@ -425,7 +457,7 @@ export class Atlas {
     for (const place of this.places) {
       this.routes.set(place.id, routeOf(place, this.profile))
       this.langs.set(place.id, languageOf(place, this.profile))
-      this.parts.set(place.id, partsOf(place, this.profile))
+      this.parts.set(place.id, partsOf(place, this.profile, this.energyDir))
     }
     this.root.innerHTML = this.frame()
     this.bind()
@@ -455,9 +487,13 @@ export class Atlas {
         <section class="atlas-grid">
           <div class="atlas-panel">
             <div class="atlas-ph">
-              <h3>Cost against comfort</h3>
+              <h3 id="atlas-plot-title">Energy against comfort</h3>
+              <div class="atlas-seg" id="atlas-mode">
+                <button type="button" data-chart="energy" aria-pressed="true">Energy × comfort</button>
+                <button type="button" data-chart="cost" aria-pressed="false">Cost × comfort</button>
+              </div>
               <div class="atlas-seg" id="atlas-color">
-                ${["region", "route", "lang", "tech", "fit"].map((key) => `<button type="button" data-color="${key}" aria-pressed="${key === "region"}">${key === "region" ? "Region" : key === "route" ? "Right to live" : key === "lang" ? "Language" : key === "tech" ? "Tech scene" : "Your fit"}</button>`).join("")}
+                ${["energy", "region", "route", "lang", "tech", "fit"].map((key) => `<button type="button" data-color="${key}" aria-pressed="${key === "region"}">${key === "energy" ? "Energy use" : key === "region" ? "Region" : key === "route" ? "Right to live" : key === "lang" ? "Language" : key === "tech" ? "Tech scene" : "Your fit"}</button>`).join("")}
               </div>
             </div>
             <div class="atlas-ph">
@@ -478,8 +514,8 @@ export class Atlas {
               <button type="button" id="atlas-zin" aria-label="Zoom in">+</button>
               <button type="button" id="atlas-zout" aria-label="Zoom out">−</button>
               <button type="button" id="atlas-zall">Whole chart</button>
-              <button type="button" id="atlas-zbest">Best value</button>
-              <button type="button" id="atlas-zcov">Pay covers it</button>
+              <button type="button" id="atlas-zbest" hidden>Best value</button>
+              <button type="button" id="atlas-zcov" hidden>Pay covers it</button>
               <button type="button" id="atlas-zsel">Around selection</button>
               <span id="atlas-zlvl">1.0×</span>
             </div>
@@ -489,7 +525,11 @@ export class Atlas {
         </section>
         <section class="atlas-split">
           <div class="atlas-panel">
-            <div class="atlas-ph"><h3>Your ranking</h3><span class="note">Weights are saved on this desk.</span></div>
+            <div class="atlas-ph"><h3>Your ranking</h3><span class="note">Energy use is the default, and the heaviest weight. Weights are saved on this desk.</span></div>
+            <div class="atlas-seg" id="atlas-edir">
+              <button type="button" data-edir="1" aria-pressed="true">More energy is better</button>
+              <button type="button" data-edir="-1" aria-pressed="false">Less energy is better</button>
+            </div>
             <div class="atlas-presets" id="atlas-presets">
               ${PRESETS.map((preset) => `<button type="button" data-preset="${esc(preset.name)}">${esc(preset.name)}</button>`).join("")}
             </div>
@@ -509,7 +549,7 @@ export class Atlas {
           <div class="atlas-ph"><h3>Language × right to live</h3><span class="note">Click a cell to filter the chart.</span></div>
           <div class="atlas-scroll"><table class="atlas-matrix" id="atlas-matrix"></table></div>
         </section>
-        <p class="atlas-note"><b>Sources.</b> Cost and quality of life are read off the October 2026 Numbeo chart, accurate to about ±2 points. Right to live and language are scored from the passports and languages stored for this desk. Tech scene and paperwork are judgments, not official data.</p>
+        <p class="atlas-note"><b>Sources.</b> Energy is primary energy use per person, stored with its year on each country and each city. City figures are the climate-adjusted values kept with the city. Cost and quality of life are the October 2026 Numbeo chart, accurate to about ±2 points. Right to live and language are scored from the passports and languages stored for this desk. Tech scene and paperwork are judgments, not official data.</p>
       </div>`
   }
 
@@ -582,12 +622,16 @@ export class Atlas {
     svg.addEventListener("pointercancel", end, { signal })
     this.root.querySelector("#atlas-zin")?.addEventListener("click", () => this.zoomAt(500, 310, 1.6), { signal })
     this.root.querySelector("#atlas-zout")?.addEventListener("click", () => this.zoomAt(500, 310, 1 / 1.6), { signal })
-    this.root.querySelector("#atlas-zall")?.addEventListener("click", () => this.setDomain({ ...FULL }), { signal })
+    this.root.querySelector("#atlas-zall")?.addEventListener("click", () => this.setDomain({ ...this.full() }), { signal })
     this.root.querySelector("#atlas-zbest")?.addEventListener("click", () => this.setDomain({ x0: 44, x1: 86, y0: 44, y1: 104 }), { signal })
     this.root.querySelector("#atlas-zcov")?.addEventListener("click", () => this.setDomain({ x0: 44, x1: 102, y0: -8, y1: 108 }), { signal })
     this.root.querySelector("#atlas-zsel")?.addEventListener("click", () => {
       const place = this.place(this.sel)
-      if (place) this.setDomain({ x0: place.cost - 14, x1: place.cost + 14, y0: place.qol - 12, y1: place.qol + 12 })
+      if (place) {
+        const x = this.xOf(place)
+        const span = (this.full().x1 - this.full().x0) / 8
+        this.setDomain({ x0: x - span, x1: x + span, y0: place.qol - 12, y1: place.qol + 12 })
+      }
     }, { signal })
     this.root.querySelector("#atlas-q")?.addEventListener("input", (event) => {
       this.query = (event.target as HTMLInputElement).value.trim().toLowerCase()
@@ -595,6 +639,18 @@ export class Atlas {
       if (this.query !== "" && hits.length === 1) this.sel = hits[0]?.id ?? this.sel
       this.paint()
     }, { signal })
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-chart]")) {
+      button.addEventListener("click", () => {
+        const chart = button.dataset["chart"]
+        if (chart === "energy" || chart === "cost") this.setChart(chart)
+      }, { signal })
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-edir]")) {
+      button.addEventListener("click", () => {
+        const dir = Number(button.dataset["edir"])
+        if (dir === 1 || dir === -1) this.setEnergyDir(dir)
+      }, { signal })
+    }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-color]")) {
       button.addEventListener("click", () => {
         this.colorBy = button.dataset["color"] ?? "region"
@@ -615,7 +671,7 @@ export class Atlas {
     for (const input of this.root.querySelectorAll<HTMLInputElement>("[data-axis]")) {
       input.addEventListener("input", () => {
         const axis = input.dataset["axis"]
-        if (axis !== "qol" && axis !== "afford" && axis !== "lang" && axis !== "route" && axis !== "tech" && axis !== "ease") return
+        if (!axis || !(AXES as readonly string[]).includes(axis)) return
         const next = { ...this.w, [axis]: Number(input.value) }
         this.commit(next)
       }, { signal })
@@ -678,7 +734,7 @@ export class Atlas {
   }
 
   private mustParts(id: number): Parts {
-    return this.parts.get(id) ?? { qol: 0, afford: 0, lang: 0, route: 0, tech: 0, ease: 0 }
+    return this.parts.get(id) ?? { energy: 0, qol: 0, afford: 0, lang: 0, route: 0, tech: 0, ease: 0 }
   }
 
   private mustRoute(id: number): Reading {
@@ -770,13 +826,53 @@ export class Atlas {
     })
   }
 
+  private full(): { x0: number; x1: number; y0: number; y1: number } {
+    return this.chart === "energy" ? ENERGY_FULL : COST_FULL
+  }
+
+  private medX(): number {
+    return this.chart === "energy" ? this.energyMed : COST_MED
+  }
+
+  private xOf(place: AtlasPlace): number {
+    return this.chart === "energy" ? Math.log10(place.energy) : place.cost
+  }
+
+  private setChart(chart: "energy" | "cost"): void {
+    this.chart = chart
+    this.domain = { ...this.full() }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-chart]")) {
+      button.setAttribute("aria-pressed", String(button.dataset["chart"] === chart))
+    }
+    const title = this.root.querySelector("#atlas-plot-title")
+    if (title) title.textContent = chart === "energy" ? "Energy against comfort" : "Cost against comfort"
+    const best = this.root.querySelector<HTMLButtonElement>("#atlas-zbest")
+    const covered = this.root.querySelector<HTMLButtonElement>("#atlas-zcov")
+    if (best) best.hidden = chart !== "cost"
+    if (covered) covered.hidden = chart !== "cost"
+    this.drawFrame()
+    this.paint()
+  }
+
+  private setEnergyDir(direction: 1 | -1): void {
+    this.energyDir = direction
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-edir]")) {
+      button.setAttribute("aria-pressed", String(Number(button.dataset["edir"]) === direction))
+    }
+    for (const place of this.places) this.parts.set(place.id, partsOf(place, this.profile, direction))
+    this.recompute()
+    this.paint()
+  }
+
   private setDomain(next: { x0: number; x1: number; y0: number; y1: number }): void {
-    const width = Math.max(10, Math.min(next.x1 - next.x0, FULL.x1 - FULL.x0))
-    const height = Math.max(8, Math.min(next.y1 - next.y0, FULL.y1 - FULL.y0))
+    const full = this.full()
+    const span = full.x1 - full.x0
+    const width = Math.max(span / 14, Math.min(next.x1 - next.x0, span))
+    const height = Math.max(8, Math.min(next.y1 - next.y0, full.y1 - full.y0))
     let cx = (next.x0 + next.x1) / 2
     let cy = (next.y0 + next.y1) / 2
-    cx = Math.max(FULL.x0 + width / 2, Math.min(FULL.x1 - width / 2, cx))
-    cy = Math.max(FULL.y0 + height / 2, Math.min(FULL.y1 - height / 2, cy))
+    cx = Math.max(full.x0 + width / 2, Math.min(full.x1 - width / 2, cx))
+    cy = Math.max(full.y0 + height / 2, Math.min(full.y1 - height / 2, cy))
     this.domain = { x0: cx - width / 2, x1: cx + width / 2, y0: cy - height / 2, y1: cy + height / 2 }
     this.drawFrame()
     this.placeDots()
@@ -786,11 +882,16 @@ export class Atlas {
     const frame = this.frameG
     if (!frame) return
     frame.replaceChildren()
+    const full = this.full()
+    const med = this.medX()
+    const names = this.chart === "energy"
+      ? ["Livable, lighter use", "Livable, energy-rich", "Lighter use, less livable", "Energy-heavy, less livable"]
+      : ["Best value", "Premium life", "Budget living", "Bad value"]
     const quads: [number, number, number, number, string, string][] = [
-      [FULL.x0, MEDX, MEDY, FULL.y1, "var(--q-best)", "Best value"],
-      [MEDX, FULL.x1, MEDY, FULL.y1, "var(--q-prem)", "Premium life"],
-      [FULL.x0, MEDX, FULL.y0, MEDY, "var(--q-bud)", "Budget living"],
-      [MEDX, FULL.x1, FULL.y0, MEDY, "var(--q-bad)", "Bad value"],
+      [full.x0, med, MEDY, full.y1, "var(--q-best)", names[0] ?? ""],
+      [med, full.x1, MEDY, full.y1, "var(--q-prem)", names[1] ?? ""],
+      [full.x0, med, full.y0, MEDY, "var(--q-bud)", names[2] ?? ""],
+      [med, full.x1, full.y0, MEDY, "var(--q-bad)", names[3] ?? ""],
     ]
     const layer = svgEl("g", { "clip-path": "url(#atlas-clip)" }, frame)
     for (const [a, b, c, d, fill, name] of quads) {
@@ -798,20 +899,34 @@ export class Atlas {
       const label = svgEl("text", { x: this.sx(a) + 8, y: this.sy(d) + 16, class: "qlab" }, layer)
       label.textContent = name
     }
-    svgEl("line", { x1: this.sx(100), x2: this.sx(100), y1: PL.t, y2: PL.h - PL.b, stroke: "var(--bad)", "stroke-width": 2 }, layer)
-    svgEl("line", { x1: this.sx(MEDX), x2: this.sx(MEDX), y1: PL.t, y2: PL.h - PL.b, stroke: "var(--muted)", "stroke-dasharray": "4 4" }, layer)
+    if (this.chart === "cost") {
+      svgEl("line", { x1: this.sx(100), x2: this.sx(100), y1: PL.t, y2: PL.h - PL.b, stroke: "var(--bad)", "stroke-width": 2 }, layer)
+    } else {
+      const eu = Math.log10(EU_ENERGY)
+      svgEl("line", { x1: this.sx(eu), x2: this.sx(eu), y1: PL.t, y2: PL.h - PL.b, stroke: "var(--warn)", "stroke-width": 2 }, layer)
+      const tick = svgEl("text", { x: this.sx(eu) + 8, y: PL.t + 16, class: "qlab" }, layer)
+      tick.textContent = "EU average"
+      for (const kwh of [10000, 20000, 40000, 80000, 160000]) {
+        const x = Math.log10(kwh)
+        if (x < this.domain.x0 || x > this.domain.x1) continue
+        const mark = svgEl("text", { x: this.sx(x), y: PL.h - PL.b + 16, class: "qlab" }, layer)
+        mark.textContent = `${kwh / 1000}k`
+      }
+    }
+    svgEl("line", { x1: this.sx(med), x2: this.sx(med), y1: PL.t, y2: PL.h - PL.b, stroke: "var(--muted)", "stroke-dasharray": "4 4" }, layer)
     svgEl("line", { x1: PL.l, x2: PL.w - PL.r, y1: this.sy(MEDY), y2: this.sy(MEDY), stroke: "var(--muted)", "stroke-dasharray": "4 4" }, layer)
     const level = this.root.querySelector("#atlas-zlvl")
-    if (level) level.textContent = `${((FULL.x1 - FULL.x0) / (this.domain.x1 - this.domain.x0)).toFixed(1)}×`
+    if (level) level.textContent = `${((full.x1 - full.x0) / (this.domain.x1 - this.domain.x0)).toFixed(1)}×`
     this.placeDots()
   }
 
   private placeDots(): void {
-    const zoom = (FULL.x1 - FULL.x0) / (this.domain.x1 - this.domain.x0)
+    const full = this.full()
+    const zoom = (full.x1 - full.x0) / (this.domain.x1 - this.domain.x0)
     for (const place of this.places) {
       const dot = this.dots.get(place.id)
       if (!dot) continue
-      dot.g.style.transform = `translate(${this.sx(place.cost)}px, ${this.sy(place.qol)}px)`
+      dot.g.style.transform = `translate(${this.sx(this.xOf(place))}px, ${this.sy(place.qol)}px)`
       const show = zoom >= 1.8 || place.labeled || place.id === this.sel || this.pins.includes(place.id)
       dot.label.style.display = show && this.passes(place) ? "" : "none"
     }
@@ -835,6 +950,10 @@ export class Atlas {
       if (place.tech >= 3) return "var(--accent)"
       if (place.tech === 2) return "color-mix(in srgb, var(--accent) 55%, var(--faint))"
       return "var(--faint)"
+    }
+    if (this.colorBy === "energy") {
+      const t = energyNorm(place.energy)
+      return `color-mix(in srgb, var(--warn) ${Math.round(15 + 85 * t)}%, var(--faint))`
     }
     const t = Math.max(0, Math.min(1, (this.score(place.id) - 35) / 45))
     return `color-mix(in srgb, var(--accent) ${Math.round(t * 100)}%, var(--faint))`
@@ -866,7 +985,9 @@ export class Atlas {
           ? [["var(--accent)", "French"], ["var(--r-nordic)", "English works"], ["var(--gold)", "Romanian"], ["var(--r-central)", "German"], ["var(--faint)", "Other local language"]]
           : this.colorBy === "tech"
             ? [["var(--faint)", "Small market"], ["color-mix(in srgb, var(--accent) 55%, var(--faint))", "Solid scene"], ["var(--accent)", "Major hub"]]
-            : [["var(--faint)", "Weaker fit"], ["var(--accent)", "Stronger fit"]]
+            : this.colorBy === "energy"
+              ? [["color-mix(in srgb, var(--warn) 30%, var(--faint))", "Under 15,000 kWh"], ["color-mix(in srgb, var(--warn) 65%, var(--faint))", "Around the EU average"], ["var(--warn)", "Over 80,000 kWh"]]
+              : [["var(--faint)", "Weaker fit"], ["var(--accent)", "Stronger fit"]]
     host.innerHTML = items.map(([color, label]) => `<span><i style="background:${color}"></i>${esc(label)}</span>`).join("")
   }
 
@@ -903,21 +1024,28 @@ export class Atlas {
     const parts = this.mustParts(place.id)
     const rank = (this.rankPos.get(place.id) ?? 0) + 1
     const score = Math.round(this.score(place.id))
-    const quad = place.cost < MEDX ? (place.qol >= MEDY ? "Best value" : "Budget living") : (place.qol >= MEDY ? "Premium life" : "Bad value")
+    const high = place.qol >= MEDY
+    const leftSide = this.xOf(place) < this.medX()
+    const quad = this.chart === "energy"
+      ? (leftSide ? (high ? "Livable, lighter use" : "Lighter use, less livable") : (high ? "Livable, energy-rich" : "Energy-heavy, less livable"))
+      : (leftSide ? (high ? "Best value" : "Budget living") : (high ? "Premium life" : "Bad value"))
     const pinned = this.pins.includes(place.id)
     const left = 100 - place.cost
+    const country = this.countries.get(place.country)
     const meter = (label: string, value: number, max: number, text: string) =>
       `<div class="atlas-meter"><span>${label}</span><span class="bar"><span style="width:${Math.max(0, Math.min(100, (value / max) * 100))}%"></span></span><b>${text}</b></div>`
     host.innerHTML = `
       <div class="atlas-dtop"><span>${esc(place.country)} · ${esc(REGION[place.region] ?? place.region)}</span><button type="button" data-pin="${place.id}">${pinned ? "Pinned" : "Pin to compare"}</button></div>
       <h3>${esc(place.name)}</h3>
       <p class="atlas-rank">#${rank} of ${this.places.length} · fit ${score}/100 · ${quad}</p>
+      ${meter("Energy use", energyNorm(place.energy), 1, `${fmtK(place.energy)} kWh`)}
       ${meter("Quality of life", place.qol, 100, place.qol.toFixed(0))}
       ${meter("Affordability", parts.afford, 1, `${Math.round(parts.afford * 100)}`)}
       ${meter("Language", lang.score, 1, `${Math.round(lang.score * 100)}`)}
       ${meter("Right to live", route.score, 1, `${Math.round(route.score * 100)}`)}
       ${meter("Tech scene", place.tech, 3, "●".repeat(place.tech) + "○".repeat(3 - place.tech))}
       ${meter("Online paperwork", place.ease, 3, "●".repeat(place.ease) + "○".repeat(3 - place.ease))}
+      <p class="atlas-pay">About <b>${fmtK(place.energy)} kWh</b> of primary energy per person in ${place.energy_year}${country ? `. ${esc(place.country)} as a whole: <b>${fmtK(country.energy)} kWh</b> (${country.energy_year}).` : "."}</p>
       <p class="atlas-pay">Rent and living costs take <b>${place.cost.toFixed(0)}%</b> of local median take-home pay${left >= 0 ? `, leaving about <b>${left.toFixed(0)}%</b>.` : `, a shortfall of about <b>${(-left).toFixed(0)}%</b>.`}</p>
       <p><span class="atlas-pill is-${route.tone}">${esc(route.label)}</span><br>${esc(route.text)}</p>
       <p><span class="atlas-pill is-${lang.tone}">${esc(lang.label)}</span><br>${esc(lang.text)}</p>

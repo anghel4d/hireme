@@ -780,6 +780,9 @@ defmodule Hireme.Geography.Place do
     field :tech, :integer
     field :ease, :integer
     field :labeled, :boolean, default: false
+    # Primary energy use per person, kWh a year, and the year of that figure.
+    field :energy, :float
+    field :energy_year, :integer
     belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
@@ -797,7 +800,9 @@ defmodule Hireme.Geography.Place do
       :language,
       :tech,
       :ease,
-      :labeled
+      :labeled,
+      :energy,
+      :energy_year
     ])
     |> validate_required([
       :name,
@@ -807,12 +812,41 @@ defmodule Hireme.Geography.Place do
       :qol,
       :mobility,
       :language,
+      :energy,
+      :energy_year,
       :tech,
       :ease
     ])
     |> validate_number(:tech, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
     |> validate_number(:ease, greater_than_or_equal_to: 1, less_than_or_equal_to: 3)
+    |> validate_number(:energy, greater_than: 0)
+    |> validate_number(:energy_year, greater_than: 1900, less_than: 2100)
     |> unique_constraint(:name, name: :geography_places_account_id_name_index)
+    |> tenant()
+  end
+end
+
+defmodule Hireme.Geography.Country do
+  @moduledoc """
+  One country's primary energy use per person, and the year of that figure.
+  """
+  use Hireme.Schema
+
+  schema "geography_countries" do
+    field :name, :string, default: ""
+    field :energy, :float
+    field :energy_year, :integer
+    belongs_to :account, Hireme.Accounts.Account
+    timestamps()
+  end
+
+  def changeset(country, attrs) do
+    country
+    |> cast(attrs, [:name, :energy, :energy_year])
+    |> validate_required([:name, :energy, :energy_year])
+    |> validate_number(:energy, greater_than: 0)
+    |> validate_number(:energy_year, greater_than: 1900, less_than: 2100)
+    |> unique_constraint(:name, name: :geography_countries_account_id_name_index)
     |> tenant()
   end
 end
@@ -834,6 +868,8 @@ defmodule Hireme.Geography.Profile do
     field :weight_route, :integer, default: 3
     field :weight_tech, :integer, default: 3
     field :weight_ease, :integer, default: 2
+    # Energy use is the default axis, and the heaviest one.
+    field :weight_energy, :integer, default: 5
     belongs_to :account, Hireme.Accounts.Account
     timestamps()
   end
@@ -849,7 +885,8 @@ defmodule Hireme.Geography.Profile do
       :weight_lang,
       :weight_route,
       :weight_tech,
-      :weight_ease
+      :weight_ease,
+      :weight_energy
     ])
     |> validate_format(:citizenships, ~r/\A(|([A-Z]{2})(,[A-Z]{2})*)\z/, message: "codes")
     |> validate_format(:languages, ~r/\A(|(fr|en|de|ro)(,(fr|en|de|ro))*)\z/, message: "codes")
@@ -859,6 +896,7 @@ defmodule Hireme.Geography.Profile do
     |> validate_weight(:weight_route)
     |> validate_weight(:weight_tech)
     |> validate_weight(:weight_ease)
+    |> validate_weight(:weight_energy)
     |> unique_constraint(:account_id)
     |> tenant()
   end
