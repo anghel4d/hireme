@@ -80,32 +80,81 @@ kbd {
 
 .topbar {
   flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 1rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "brand nav link" "filters filters filters";
   align-items: center;
-  padding: 0.6rem 1rem 0.55rem;
+  column-gap: 0.85rem;
+  row-gap: 0.4rem;
+  padding: 0.45rem 0.8rem 0.5rem;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
 
-.brand { min-width: 12rem; }
+.brand {
+  grid-area: brand;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+}
 .brand h1 {
   margin: 0;
   font-size: 0.92rem;
   font-weight: 650;
   letter-spacing: 0.08em;
 }
-.lede { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.78rem; }
+.lede {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .lede .showcase { margin-left: 0.45rem; }
 
+.desk-nav {
+  grid-area: nav;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+.desk-nav .ghost {
+  border-radius: 999px;
+  padding: 0.16rem 0.62rem;
+  color: var(--muted);
+}
+.desk-nav .ghost[aria-current="page"] {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+.desk-nav .ghost[aria-current="page"]:hover {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.link { grid-area: link; }
+
+/* Job filters belong to the board. A lens keeps the name and the pages. */
+.desk[data-lens]:not([data-lens="board"]) .filters,
+.desk[data-lens]:not([data-lens="board"]) .scoreboard,
+.desk[data-lens]:not([data-lens="board"]) .heat-chart {
+  display: none;
+}
+
 .filters {
+  grid-area: filters;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.35rem;
   align-items: center;
-  flex: 1;
-  min-width: 16rem;
+  min-width: 0;
+  margin: 0;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line);
 }
 
 .filters input[type="search"],
@@ -129,8 +178,17 @@ kbd {
   resize: vertical;
 }
 
-.filters input[type="search"] { min-width: 12rem; flex: 1; }
-.filters .min-score { width: 4.5rem; font-variant-numeric: tabular-nums; }
+.filters input[type="search"],
+.filters select,
+.filters .min-score {
+  height: 1.75rem;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.filters input[type="search"] { min-width: 9rem; flex: 1 1 11rem; max-width: 18rem; }
+.filters select { max-width: 11rem; }
+.filters .min-score { width: 4.6rem; font-variant-numeric: tabular-nums; }
+.count { margin-left: auto; }
 .filters input:focus,
 .filters select:focus,
 .field input:focus,
@@ -657,6 +715,12 @@ kbd {
 .empty { padding: 1.2rem; color: var(--muted); }
 
 @media (max-width: 980px) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand link" "nav nav" "filters filters";
+  }
+  .lede { display: none; }
+  .desk-nav { justify-content: flex-start; }
   .workspace { grid-template-columns: 1fr; }
   .focus { display: none; }
   .focus.is-sheet {

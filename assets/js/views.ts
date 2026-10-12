@@ -25,9 +25,10 @@ const LINK: Record<Status, [string, string]> = {
  * pick, so they are not in this HTML: the shell writes them into the
  * controls, and this HTML changes only with the tables or the link.
  */
-export function topbar(t: Tables, status: Status): Raw {
+export function topbar(t: Tables, status: Status, here = "board"): Raw {
   const [linkClass, linkLabel] = LINK[status]
   const showcase = t.batches.some((b) => b.code === "Batch-001")
+  const tab = (on: boolean) => on ? h` aria-current="page"` : raw("")
   return h`
     <header class="topbar">
       <div class="brand">
@@ -37,6 +38,14 @@ export function topbar(t: Tables, status: Status): Raw {
           ${when(showcase, () => h`<a href="/?batch=Batch-001" class="showcase" data-link>Batch-001</a>`)}
         </p>
       </div>
+      <nav class="desk-nav" aria-label="Desk">
+        <button type="button" id="root-cv" class="ghost" data-action="root"${tab(here === "root")}>Root CV</button>
+        <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym"${tab(here === "gym")}>Gym</button>
+        <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net"${tab(here === "net")}>Net</button>
+        <button type="button" id="open-atlas" class="ghost" data-action="lens" data-lens="atlas"${tab(here === "atlas")}>Atlas</button>
+        <button type="button" id="open-settings" class="ghost" data-action="lens" data-lens="settings"${tab(here === "settings")}>Account</button>
+      </nav>
+      <span id="link" class="link ${linkClass}" role="status" title="Connection to the desk">${linkLabel}</span>
       <form id="filters" class="filters">
         <input id="q" type="search" name="q" placeholder="Company, role, JobApp, CV" autocomplete="off" aria-label="Search the desk" />
         <select name="stage" aria-label="Stage">
@@ -66,12 +75,6 @@ export function topbar(t: Tables, status: Status): Raw {
         </select>
         <span id="count" class="count" data-slot></span>
       </form>
-      <span id="link" class="link ${linkClass}" role="status" title="Connection to the desk">${linkLabel}</span>
-      <button type="button" id="root-cv" class="ghost" data-action="root">Root CV</button>
-      <button type="button" id="open-gym" class="ghost" data-action="lens" data-lens="gym">Gym</button>
-      <button type="button" id="open-net" class="ghost" data-action="lens" data-lens="net">Net</button>
-      <button type="button" id="open-atlas" class="ghost" data-action="lens" data-lens="atlas">Atlas</button>
-      <button type="button" id="open-settings" class="ghost" data-action="lens" data-lens="settings">Account</button>
     </header>`
 }
 
