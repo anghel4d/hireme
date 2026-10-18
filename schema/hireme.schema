@@ -49,7 +49,9 @@
 #        private (browser sessions only, never a key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)   cascade (a nullable ref whose row is deleted
-#        with the row it names; without it a nullable ref is set null)
+#        with the row it names; without it a nullable ref is set null)   loose (a ref
+#        that is a plain id: no foreign key, no tenant trigger, so a purge of the row
+#        it names never rewrites it; for append-only rows and the ledger)
 # Names are lowercase words ([a-z][a-z0-9_]*), frames uppercase; tokens are
 # separated by spaces and tabs. A default is a value of its column's type
 # (true/false, an integer in range, a decimal, a 'quoted' text, an enum value).
@@ -252,8 +254,8 @@ table audit system server append_only account_optional
   col ip str ?
   col user_agent str ?
   col meta json ?
-  col key_id ref api_keys ?
-  col session_id ref sessions ?
+  col key_id ref api_keys ? loose
+  col session_id ref sessions ? loose
 
 table outbox system server
   cap 100000
@@ -276,7 +278,7 @@ table op_ledger system server
   unique writer op_id
   index inserted_at global
   col op_id i64 !
-  col key_id ref api_keys ?
+  col key_id ref api_keys ? loose
   col verb enum verb !
   # A table id for put and drop, a command id for command.
   col subject u32 !
@@ -386,7 +388,7 @@ table events desk resident append_only
   col kind str !
   col body text ? deferred
   col actor enum actor ! readonly
-  col key_id ref api_keys ? readonly
+  col key_id ref api_keys ? readonly loose
   col op_id i64 ? readonly
 
 table batches desk resident
@@ -603,11 +605,11 @@ table citations world server append_only unmasked
   col table str ! server_only
   col row_id u32 ! server_only
   col column str ! server_only
-  col source_id ref sources ? server_only
+  col source_id ref sources ? server_only loose
   col value json ? server_only
   col as_of day ! server_only
   col actor enum actor ! server_only
-  col key_id ref api_keys ? server_only
+  col key_id ref api_keys ? server_only loose
   col op_id i64 ? server_only
 
 # ---------------------------------------------------------------- mail

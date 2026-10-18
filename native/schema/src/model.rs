@@ -103,6 +103,7 @@ pub mod flag {
     pub const NATURAL: u32 = 2048;
     pub const CASCADE: u32 = 4096;
     pub const SHA_ON: u32 = 8192;
+    pub const LOOSE: u32 = 16384;
 }
 
 /// Reserved cell ids in an op.
@@ -207,6 +208,8 @@ pub struct Column {
     pub unique: bool,
     /// A nullable ref whose row goes with the row it names.
     pub cascade: bool,
+    /// A ref that is a plain id: no foreign key, no tenant trigger.
+    pub loose: bool,
     pub natural: bool,
     pub metric: bool,
     /// On a metric's `_on` twin: the metric it dates.
@@ -233,6 +236,7 @@ impl Column {
             readonly: false,
             unique: false,
             cascade: false,
+            loose: false,
             natural: false,
             metric: false,
             metric_of: None,
@@ -263,6 +267,7 @@ impl Column {
             (self.natural, flag::NATURAL),
             (self.cascade, flag::CASCADE),
             (self.sha_of.is_some(), flag::SHA_ON),
+            (self.loose, flag::LOOSE),
         ] {
             if on {
                 f |= bit;
@@ -575,12 +580,19 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
             "readonly" => col.readonly = true,
             "unique" => col.unique = true,
             "cascade" => col.cascade = true,
+            "loose" => col.loose = true,
             other => return fail(line, format!("flag {other}")),
         }
         i += 1;
     }
     if col.cascade && col.ty != Type::Ref {
         return fail(line, "cascade is a ref's".into());
+    }
+    if col.loose && col.ty != Type::Ref {
+        return fail(line, "loose is a ref's".into());
+    }
+    if col.loose && col.cascade {
+        return fail(line, "a loose ref has no delete to cascade".into());
     }
     if col.deferred && !matches!(col.ty, Type::Str | Type::Text | Type::Json) {
         return fail(line, "only text is deferred".into());

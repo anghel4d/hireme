@@ -48,7 +48,7 @@ pub fn column(col: &Column) -> String {
     if let Some(d) = &col.default {
         s.push_str(&format!(" DEFAULT {}", literal(col, d)));
     }
-    if col.ty == Type::Ref {
+    if col.ty == Type::Ref && !col.loose {
         let on_delete = if col.required || col.cascade { "CASCADE" } else { "SET NULL" };
         s.push_str(&format!(
             " REFERENCES {}(\"id\") ON DELETE {on_delete}",
@@ -131,7 +131,7 @@ pub fn triggers(s: &Schema, t: &Table) -> Vec<IndexDef> {
     if t.global {
         return out;
     }
-    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.implied) {
+    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.implied && !c.loose) {
         let target = c.target.as_deref().unwrap_or("");
         if s.table(target).is_none_or(|p| p.global) {
             continue;
@@ -311,7 +311,7 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                         extra.push(format!("{} changed: {held} -> {}", i.name, norm(&i.sql)));
                     }
                 }
-                for c in t.cols.iter().filter(|c| c.ty == Type::Ref) {
+                for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.loose) {
                     let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
                     if let Some((_, _, held)) = shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name)
                         && held != want

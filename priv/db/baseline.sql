@@ -145,15 +145,11 @@ CREATE TABLE "audit" (
   "ip" TEXT,
   "user_agent" TEXT,
   "meta" TEXT,
-  "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
-  "session_id" INTEGER REFERENCES "sessions"("id") ON DELETE SET NULL
+  "key_id" INTEGER,
+  "session_id" INTEGER
 ) STRICT;
 CREATE INDEX "audit__account_account_id" ON "audit" ("account_id");
 CREATE INDEX "audit__index_id_desc" ON "audit" ("account_id", "id" DESC);
-CREATE TRIGGER "audit__ref_key_id_insert" BEFORE INSERT ON "audit" WHEN NEW."key_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
-CREATE TRIGGER "audit__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "audit" WHEN NEW."key_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
-CREATE TRIGGER "audit__ref_session_id_insert" BEFORE INSERT ON "audit" WHEN NEW."session_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
-CREATE TRIGGER "audit__ref_session_id_update" BEFORE UPDATE OF "session_id", "account_id" ON "audit" WHEN NEW."session_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
 
 CREATE TABLE "outbox" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,7 +175,7 @@ CREATE TABLE "op_ledger" (
   "inserted_at" TEXT NOT NULL,
   "updated_at" TEXT NOT NULL,
   "op_id" INTEGER NOT NULL,
-  "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
+  "key_id" INTEGER,
   "verb" TEXT NOT NULL,
   "subject" INTEGER NOT NULL,
   "target" INTEGER,
@@ -191,8 +187,6 @@ CREATE TABLE "op_ledger" (
 CREATE INDEX "op_ledger__account_account_id" ON "op_ledger" ("account_id");
 CREATE UNIQUE INDEX "op_ledger__unique_writer_op_id" ON "op_ledger" ("account_id", "writer", "op_id");
 CREATE INDEX "op_ledger__index_inserted_at" ON "op_ledger" ("inserted_at");
-CREATE TRIGGER "op_ledger__ref_key_id_insert" BEFORE INSERT ON "op_ledger" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref op_ledger.key_id'); END;
-CREATE TRIGGER "op_ledger__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "op_ledger" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref op_ledger.key_id'); END;
 
 CREATE TABLE "trusted_hosts" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -325,15 +319,13 @@ CREATE TABLE "events" (
   "body" TEXT,
   "body_sha" TEXT,
   "actor" TEXT NOT NULL,
-  "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
+  "key_id" INTEGER,
   "op_id" INTEGER
 ) STRICT;
 CREATE INDEX "events__account_account_id" ON "events" ("account_id");
 CREATE INDEX "events__index_application_id_id_desc" ON "events" ("account_id", "application_id", "id" DESC);
 CREATE TRIGGER "events__ref_application_id_insert" BEFORE INSERT ON "events" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref events.application_id'); END;
 CREATE TRIGGER "events__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "events" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref events.application_id'); END;
-CREATE TRIGGER "events__ref_key_id_insert" BEFORE INSERT ON "events" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref events.key_id'); END;
-CREATE TRIGGER "events__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "events" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref events.key_id'); END;
 
 CREATE TABLE "batches" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -651,19 +643,15 @@ CREATE TABLE "citations" (
   "table" TEXT NOT NULL,
   "row_id" INTEGER NOT NULL,
   "column" TEXT NOT NULL,
-  "source_id" INTEGER REFERENCES "sources"("id") ON DELETE SET NULL,
+  "source_id" INTEGER,
   "value" TEXT,
   "as_of" TEXT NOT NULL,
   "actor" TEXT NOT NULL,
-  "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
+  "key_id" INTEGER,
   "op_id" INTEGER
 ) STRICT;
 CREATE INDEX "citations__account_account_id" ON "citations" ("account_id");
 CREATE INDEX "citations__index_table_row_id_column_id_desc" ON "citations" ("account_id", "table", "row_id", "column", "id" DESC);
-CREATE TRIGGER "citations__ref_source_id_insert" BEFORE INSERT ON "citations" WHEN NEW."source_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sources" WHERE "id" = NEW."source_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref citations.source_id'); END;
-CREATE TRIGGER "citations__ref_source_id_update" BEFORE UPDATE OF "source_id", "account_id" ON "citations" WHEN NEW."source_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sources" WHERE "id" = NEW."source_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref citations.source_id'); END;
-CREATE TRIGGER "citations__ref_key_id_insert" BEFORE INSERT ON "citations" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref citations.key_id'); END;
-CREATE TRIGGER "citations__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "citations" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref citations.key_id'); END;
 
 CREATE TABLE "contacts" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

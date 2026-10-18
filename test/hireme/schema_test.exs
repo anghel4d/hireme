@@ -39,3 +39,57 @@ defmodule Hireme.SchemaCapTest do
     assert nack.refusal == :cap
   end
 end
+
+defmodule Hireme.SchemaLooseRefTest do
+  # A purge removes a key or a session, never who wrote a row that outlives
+  # it: append-only rows and the ledger name them by a loose ref.
+  use Hireme.WireCase, async: false
+
+  import Ecto.Query
+  alias Hireme.Rows.{ApiKey, Audit, Citation}
+
+  test "purging a revoked key leaves the key_id of its citations and trail rows", %{
+    account: a,
+    session: s
+  } do
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+    # The rows a key leaves behind: a citation of what it wrote and its trail.
+    Repo.insert!(
+      %Citation{
+        account_id: a.id,
+        table: "corporations",
+        row_id: 1,
+        column: "headcount",
+        as_of: ~D[2026-01-01],
+        actor: :agent,
+        key_id: key.id
+      },
+      skip_account: true
+    )
+
+    :ok = Hireme.Audit.record(:agent_ops, %{n: 1}, %{account_id: a.id, key_id: key.id})
+
+    Repo.delete_all(from(k in ApiKey, where: k.id == ^key.id), skip_account: true)
+
+    assert Repo.all(from(c in Citation, where: c.column == "headcount", select: c.key_id),
+             skip_account: true
+           ) == [key.id]
+
+    assert key.id in Repo.all(from(e in Audit, where: e.account_id == ^a.id, select: e.key_id),
+             skip_account: true
+           )
+  end
+
+  test "a loose ref is a plain id in the database" do
+    for {t, c} <- [
+          {"audit", "key_id"},
+          {"audit", "session_id"},
+          {"events", "key_id"},
+          {"citations", "key_id"},
+          {"citations", "source_id"},
+          {"op_ledger", "key_id"}
+        ] do
+      assert Schema.column(t, c).loose, "#{t}.#{c}"
+    end
+  end
+end

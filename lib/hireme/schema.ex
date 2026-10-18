@@ -7,7 +7,7 @@ defmodule Hireme.Schema.Parser do
   so the rules below and the crate's cannot drift unnoticed.
   """
 
-  @flags ~w(deferred private server_only human_only readonly unique cascade)
+  @flags ~w(deferred private server_only human_only readonly unique cascade loose)
   @table_mods ~w(append_only soft_delete global account_optional singleton unmasked)
 
   # Names: lowercase words for everything but frames, which are uppercase.
@@ -53,7 +53,8 @@ defmodule Hireme.Schema.Parser do
     metric_on: 1024,
     natural: 2048,
     cascade: 4096,
-    sha_on: 8192
+    sha_on: 8192,
+    loose: 16384
   }
 
   @doc "The resolved declaration of `source`; raises naming the line on any error."
@@ -381,6 +382,7 @@ defmodule Hireme.Schema.Parser do
       readonly: false,
       unique: false,
       cascade: false,
+      loose: false,
       metric: false,
       metric_of: nil,
       sha_of: nil,
@@ -395,6 +397,8 @@ defmodule Hireme.Schema.Parser do
     if target, do: name!(target, n)
     col = walk(rest, %{blank(name, type) | target: target}, n)
     if col.cascade and type != :ref, do: fail(n, "cascade is a ref's")
+    if col.loose and type != :ref, do: fail(n, "loose is a ref's")
+    if col.loose and col.cascade, do: fail(n, "a loose ref has no delete to cascade")
     if col.deferred and type not in [:str, :text, :json], do: fail(n, "only text is deferred")
     default!(col, n)
     col
@@ -841,7 +845,8 @@ defmodule Hireme.Schema.Parser do
       metric_on: c.metric_of != nil,
       natural: Map.get(c, :natural, false),
       cascade: Map.get(c, :cascade, false),
-      sha_on: Map.get(c, :sha_of) != nil
+      sha_on: Map.get(c, :sha_of) != nil,
+      loose: Map.get(c, :loose, false)
     ]
     |> Enum.reduce(0, fn {k, on}, acc -> if on, do: Bitwise.bor(acc, @flag_bits[k]), else: acc end)
   end
