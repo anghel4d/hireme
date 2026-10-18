@@ -20,6 +20,7 @@ defmodule Hireme.Kernel do
   @type t :: %__MODULE__{res: reference(), avg_us: non_neg_integer}
 
   @dirty_above_us 1_000
+  @dirty_above_bytes 16_384
 
   @doc "A resource loaded from a BOOT body."
   @spec new(iodata) :: t
@@ -42,8 +43,9 @@ defmodule Hireme.Kernel do
   @spec judge(t, binary, map) ::
           {{:ok, list} | {:refused, non_neg_integer, binary} | {:error, :panic}, t}
   def judge(%__MODULE__{res: res, avg_us: avg} = k, raw, ctx) do
+    # A big text (a whole listing) is extracted in the judge: dirty from the start.
     {us, result} =
-      if avg > @dirty_above_us,
+      if avg > @dirty_above_us or byte_size(raw) > @dirty_above_bytes,
         do: :timer.tc(Nif, :judge_dirty, [res, raw, ctx]),
         else: :timer.tc(Nif, :judge, [res, raw, ctx])
 

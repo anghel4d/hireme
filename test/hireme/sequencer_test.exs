@@ -616,6 +616,18 @@ defmodule Hireme.SequencerTest do
       assert kinds == ["lease_opened", "lease_released"]
     end
 
+    test "a command with no target ACKs the row it wrote on its table", %{account: a} do
+      {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "lineage.example", name: "L"}))
+      {[ack], []} = run(a.id, op(:command, :open_generation, %{corporation_id: corp.id}))
+      assert ack.id > 0 and ack.rev > 0
+      assert Repo.get!(Hireme.Rows.CvLineage, ack.id).corporation_id == corp.id
+    end
+
+    test "an event's author is the server's, whatever the cells say", %{account: a} do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "E", role: "R"}))
+      assert {[], [%{refusal: :column}]} = run(a.id, op(:put, :events, %{application_id: app.id, kind: "note", actor: :operator}))
+    end
+
     test "a natural_key refusal does not name the row it found", %{account: a} do
       {[_], []} = run(a.id, op(:put, :corporations, %{domain: "nk.example", name: "N"}))
 

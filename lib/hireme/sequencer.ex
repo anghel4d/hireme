@@ -1089,9 +1089,7 @@ defmodule Hireme.Sequencer do
 
         case effect(table, row_id, cells, inserted, ctx) do
           {:ok, row, changed} ->
-            own =
-              table_id == plan.table.id and
-                (row_id == plan.target or (row_id == 0 and plan.target == 0))
+            own = own?(plan, op, table_id, row_id, ack)
 
             inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
 
@@ -1141,6 +1139,14 @@ defmodule Hireme.Sequencer do
       true ->
         nil
     end
+  end
+
+  # The op's own row: its target, its insert, or for a command with no target
+  # (open_generation names a corporation) the first row it writes on its table.
+  defp own?(plan, op, table_id, row_id, ack) do
+    table_id == plan.table.id and
+      (row_id == plan.target or (row_id == 0 and plan.target == 0) or
+         (op.verb == :command and plan.target == 0 and ack == nil))
   end
 
   defp command_ack(plan, op),
@@ -1217,9 +1223,8 @@ defmodule Hireme.Sequencer do
     end)
   end
 
-  # Inside effects a ref of 0 is the op's own insert and `{:new, k}` the k-th insert.
+  # Inside effects `{:new, k}` is the id the k-th insert got.
   defp new_ref({:new, k}, inserted, _col), do: Enum.at(inserted, k)
-  defp new_ref(0, [first | _], %{type: :ref}), do: first
   defp new_ref(v, _inserted, _col), do: v
 
   defp insert(table, values, ctx) do
@@ -1288,9 +1293,9 @@ defmodule Hireme.Sequencer do
 
   defp derive(values, "events", nil, ctx) do
     values
-    |> Map.put_new(:actor, if(ctx.sub.key_id, do: :agent, else: :operator))
-    |> Map.put_new(:key_id, ctx.sub.key_id)
-    |> Map.put_new(:op_id, signed(ctx.op.op_id))
+    |> Map.put(:actor, if(ctx.sub.key_id, do: :agent, else: :operator))
+    |> Map.put(:key_id, ctx.sub.key_id)
+    |> Map.put(:op_id, signed(ctx.op.op_id))
   end
 
   defp derive(values, _table, _row, _ctx), do: values
