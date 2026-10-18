@@ -330,25 +330,53 @@ fn grouping(c: char) -> bool {
     matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\'' | '’')
 }
 
-/// A rate's unit right at `j`: "/h", "/hr", "/day", "per hour", "/tim".
+/// Currency codes and names that make a figure money: after it, it is the
+/// amount ("250 SEK", "250 euros"); before it, glued or spaced, it is a
+/// sign ("USD250k").
+const CURRENCIES: [&[u8]; 44] = [
+    b"usd", b"eur", b"gbp", b"cad", b"chf", b"aud", b"nzd", b"sek", b"nok", b"dkk", b"isk", b"pln", b"czk", b"huf", b"ron",
+    b"bgn", b"jpy", b"cny", b"rmb", b"krw", b"inr", b"sgd", b"hkd", b"brl", b"mxn", b"zar", b"ils", b"try", b"aed", b"sar",
+    b"usdt", b"usdc", b"kr", b"z\xc5\x82", b"k\xc4\x8d", b"r$", b"lei", b"yen", b"euro", b"euros", b"dollar", b"dollars",
+    b"pounds", b"rupees",
+];
+
+/// `w` starts `r` as a whole word, case-insensitively.
+fn word_starts(r: &[u8], w: &[u8]) -> bool {
+    r.len() >= w.len() && r[..w.len()].eq_ignore_ascii_case(w) && !r.get(w.len()).is_some_and(u8::is_ascii_alphanumeric)
+}
+
+/// A rate's unit right at `j`: "/h", "/hr", "/day", "per hour", "an
+/// hour", "hourly", "p.d.", "/tim", "/Std.".
 fn per_unit(b: &[u8], j: usize) -> bool {
-    const UNITS: [&[u8]; 17] =
-        [b"h", b"hr", b"hrs", b"hour", b"hours", b"d", b"day", b"days", b"wk", b"week", b"mo", b"month", b"j", b"jour", b"tim", b"std", b"dag"];
+    const ALONE: [&[u8]; 10] = [b"hourly", b"daily", b"weekly", b"monthly", b"ph", b"pd", b"p.h.", b"p.d.", b"p/h", b"p/d"];
+    const UNITS: [&[u8]; 23] = [
+        b"h", b"hr", b"hrs", b"hour", b"hours", b"d", b"day", b"days", b"wk", b"week", b"mo", b"month", b"j", b"jour", b"tim",
+        b"timme", b"std", b"stunde", b"stunden", b"tag", b"dag", b"dagen", b"dia",
+    ];
     let r = b.get(j..).unwrap_or_default();
+    if ALONE.iter().any(|u| word_starts(r, u)) {
+        return true;
+    }
     let r = match r {
         [b'/', rest @ ..] => rest,
-        [p, e, r2, b' ', rest @ ..] if [*p, *e, *r2].eq_ignore_ascii_case(b"per") => rest,
-        _ => return false,
+        _ => match [&b"per"[..], b"an", b"a", b"pro", b"par"].iter().find(|w| word_starts(r, w)) {
+            Some(w) if r.get(w.len()).is_some_and(u8::is_ascii_whitespace) => &r[w.len()..],
+            _ => return false,
+        },
     };
     let r = r.trim_ascii_start();
-    UNITS.iter().any(|u| r.len() >= u.len() && r[..u.len()].eq_ignore_ascii_case(u) && !r.get(u.len()).is_some_and(u8::is_ascii_alphanumeric))
+    UNITS.iter().any(|u| word_starts(r, u))
 }
 
 /// Only a range's joiner between two figures: "-", "–", "to", "bis",
-/// with spaces and the upper bound's own sign around it ("$200–$300").
+/// "/", with spaces and the upper bound's own sign around it ("$200–$300").
 fn joiner(gap: &str) -> bool {
+    const JOINERS: [&str; 22] = [
+        "-", "--", "\u{2013}", "\u{2014}", "\u{2212}", "~", "/", "...", "\u{2026}", "to", "bis", "\u{e0}", "a", "or", "and", "und",
+        "oder", "et", "ou", "y", "o", "till",
+    ];
     let g = gap.trim_matches(blank).trim_end_matches(|c| sign(c) || blank(c));
-    ["-", "\u{2013}", "\u{2014}", "\u{2212}", "~", "to", "bis", "\u{e0}", "a"].iter().any(|j| g.eq_ignore_ascii_case(j))
+    JOINERS.iter().any(|j| g.eq_ignore_ascii_case(j))
 }
 
 /// A pay figure of $200k or more anywhere in free text: "$210,000",
@@ -390,7 +418,7 @@ pub fn high_comp(comp: &str) -> bool {
                     // Exactly three digits group, unless a suffix makes them a
                     // fraction ("1.250M"); one or two are a fraction ("1,2M",
                     // "3500,00 €").
-                    let group = digits == 3 && (mark == 0 || mark == p) && !b.get(i + 4).is_some_and(u8::is_ascii_alphabetic);
+                    let group = digits == 3 && (mark == 0 || mark == p) && !(p == b'.' && b.get(i + 4).is_some_and(u8::is_ascii_alphabetic));
                     if group && (p == b',' || ((1..=3).contains(&run) && (!grouped || run == 3))) {
                         mark = p;
                         run = 0;
@@ -435,7 +463,6 @@ pub fn high_comp(comp: &str) -> bool {
         // number is a few characters: no copy.
         let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
         let suffix = if i < b.len() && b[i].is_ascii_alphabetic() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
-        let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
         let skip_spaces = |mut j: usize| {
             while let Some(c) = at(j).filter(|c| blank(*c)) {
                 j += c.len_utf8();
@@ -455,23 +482,36 @@ pub fn high_comp(comp: &str) -> bool {
         let word_before = |k: usize, w: &[u8]| {
             k >= w.len() && b[k - w.len()..k].eq_ignore_ascii_case(w) && (k == w.len() || !b[k - w.len() - 1].is_ascii_alphanumeric())
         };
+        // A currency code glued before the figure is its sign ("USD250k").
+        let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic() && !CURRENCIES.iter().any(|c| word_before(start, c));
         // Millions are pay only as money ("$1.2M", "USD 1.2M", "1.2M USD"),
         // not "5M users".
-        const CODES: [&[u8]; 6] = [b"usd", b"eur", b"gbp", b"cad", b"chf", b"aud"];
         let money_sign = |c: char| sign(c) && c != '°';
         let k = back_spaces(start);
         let sign_before = before(k).is_some_and(money_sign);
-        let after = skip_spaces(if suffix != 0 { i + 1 } else { i });
+        // What follows the figure, past a suffix or the punctuation that
+        // closes it ("250.–/h", "250,– €"), but not into the next figure.
+        let end = if suffix != 0 {
+            i + 1
+        } else {
+            let mut j = i;
+            while let Some(c) = at(j).filter(|c| matches!(c, '.' | ',' | '-' | '\u{2013}' | '\u{2014}')) {
+                j += c.len_utf8();
+            }
+            if at(j).is_some_and(|c| c.is_ascii_digit()) { i } else { j }
+        };
+        let after = skip_spaces(end);
         // A sign after the figure, not the next figure's own ("$250 $150").
         let unit_after = at(after).filter(|c| sign(*c) && !at(after + c.len_utf8()).is_some_and(|d| d.is_ascii_digit()));
-        let code_after = CODES.iter().any(|c| word_at(after, c));
-        let money = sign_before || unit_after.is_some_and(money_sign) || code_after || CODES.iter().any(|c| word_before(k, c));
+        let code_after = CURRENCIES.iter().find(|c| word_at(after, c)).map(|c| c.len());
+        let money = sign_before || unit_after.is_some_and(money_sign) || code_after.is_some() || CURRENCIES.iter().any(|c| word_before(k, c));
         // A rate: its unit after the figure, or after the figure's sign or
         // currency word ("$250/h", "250 EUR/h", "800 kr/tim").
         let rate = per_unit(b, after) || {
-            let w = match unit_after {
-                Some(c) => c.len_utf8(),
-                None => b[after..].iter().take_while(|c| c.is_ascii_alphabetic()).count(),
+            let w = match (unit_after, code_after) {
+                (Some(c), _) => c.len_utf8(),
+                (None, Some(w)) => w,
+                (None, None) => b[after..].iter().take_while(|c| c.is_ascii_alphabetic()).count(),
             };
             (1..=3).contains(&w) && per_unit(b, skip_spaces(after + w))
         };
@@ -490,14 +530,14 @@ pub fn high_comp(comp: &str) -> bool {
         };
         let plan = (v == 401.0 && (suffix == b'k' || paren(b'k'))) || ((v == 403.0 || v == 457.0) && paren(b'b'));
         let glued = at(i);
-        let literal = unit_after.is_some() || code_after || rate;
+        let literal = unit_after.is_some() || code_after.is_some() || rate;
         let mut shorthand = false;
         let value = match suffix {
             _ if plan => 0.0,
             b'k' => v * 1e3,
             b'm' if money => v * 1e6,
             b'm' => 0.0,
-            _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
+            _ if i < b.len() && b[i].is_ascii_alphabetic() && code_after.is_none() => 0.0,
             // A sign, code or rate after the figure, glued or spaced ("250¥",
             // "250 €", "250 EUR", "30°", "$250/h"), makes it the amount
             // itself; the thousands shorthand is a bare figure or one after
@@ -656,10 +696,10 @@ mod tests {
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k", "$\t1.2M", "USD\u{202f}1.2M", "1.2M\u{a0}€", "€\u{200b}250k", "250\u{202f}000 €", "250 000 €", "CHF 250’000", "CHF 250'000", "15,000,000円", "120,000,000원", "300000₴", "3000000₸", "20,000,000₦", "1.2M₩", "1.2M¥", "250 000 $", "1 250 000", "250.000 €", "Gehalt: 210.000 € - 250.000 €", "ab 250.000 € brutto", "250.000,00 €", "250.000 $", "1.250.000 €", "€1,2M", "250,000.00", "CHF 250’000.–", "250’000.– CHF", "250.000,– €", "$250,000—depending on level", "Up to $250,000…", "$250 $150", "£250\n£150", "$200 - $250k", "220 - 260k £"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k", "$\t1.2M", "USD\u{202f}1.2M", "1.2M\u{a0}€", "€\u{200b}250k", "250\u{202f}000 €", "250 000 €", "CHF 250’000", "CHF 250'000", "15,000,000円", "120,000,000원", "300000₴", "3000000₸", "20,000,000₦", "1.2M₩", "1.2M¥", "250 000 $", "1 250 000", "250.000 €", "Gehalt: 210.000 € - 250.000 €", "ab 250.000 € brutto", "250.000,00 €", "250.000 $", "1.250.000 €", "€1,2M", "250,000.00", "CHF 250’000.–", "250’000.– CHF", "250.000,– €", "$250,000—depending on level", "Up to $250,000…", "$250 $150", "£250\n£150", "$200 - $250k", "220 - 260k £", "USD250k", "EUR250k", "USD250,000", "CHF250'000", "EUR250 - EUR300", "$250 OTE", "SEK 2 500 000", "$1,200,000USD", "250,000kr"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut", "401\n(k)", "403\t(b)", "457\u{a0}(b)", "150\u{202f}000 €", "CHF 150’000", "5\u{a0}M users", "2 300 km", "250é", "2024 100", "150 0000", "199 000 €", "250$", "250$/h", "250 €", "250 €/h", "220 £", "250\u{a0}€", "250\u{202f}€", "250\t€", "250 °", "250 EUR", "TJM : 500-650 €", "Day rate: 600-700 €", "200-250 €/h", "220 - 260 £", "500–650 €", "300 to 350 €", "$250/h", "$250/hr", "€250/h", "£500/day", "$700 per day", "$200–$300/hr", "250 EUR/h", "250 USD / hour", "800 kr/tim", "3500,00 €", "45 000,00 €", "1.500k"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut", "401\n(k)", "403\t(b)", "457\u{a0}(b)", "150\u{202f}000 €", "CHF 150’000", "5\u{a0}M users", "2 300 km", "250é", "2024 100", "150 0000", "199 000 €", "250$", "250$/h", "250 €", "250 €/h", "220 £", "250\u{a0}€", "250\u{202f}€", "250\t€", "250 °", "250 EUR", "TJM : 500-650 €", "Day rate: 600-700 €", "200-250 €/h", "220 - 260 £", "500–650 €", "300 to 350 €", "$250/h", "$250/hr", "€250/h", "£500/day", "$700 per day", "$200–$300/hr", "250 EUR/h", "250 USD / hour", "800 kr/tim", "3500,00 €", "45 000,00 €", "1.500k", "250 SEK", "500-650 SEK", "250 PLN", "250 JPY", "250 kr", "250 zł", "250 Kč", "250 R$", "250 euros", "250 dollars", "250 USDT", "250USD", "$250 hourly", "$250 an hour", "$500 a day", "$500 daily", "$250 ph", "£250 p.d.", "800 kr/timme", "$250/tag", "$250/dagen", "$250 per\thour", "CHF 250.–/h", "CHF 250.–/Std.", "600 / 700 €", "600 or 700 €", "600 und 700 €", "500 -- 650 €", "500...650 €"] {
             assert!(!high_comp(no), "{no}");
         }
     }

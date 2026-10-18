@@ -36,10 +36,11 @@ the score a card ranks by.
 2. **Named anchors win over heuristics.** A big-tech name sits at 85 only
    with a pay figure of $200k or more in `comp_raw` ("$210,000", "250k",
    "180–240k", "250 000 €", "250.000,00 €", a bare "220" or "$220" read
-   as thousands); otherwise at 80. A figure with a currency sign or code
-   after it, or a rate's unit, is the amount itself, and so is the lower
-   bound of such a range ("250 €", "250 EUR", "$250/h", "600 € per day",
-   "500-650 €" are not $250k). Three digits after a comma or a dot group
+   as thousands); otherwise at 80. A figure with a currency sign, code or
+   name after it, or a rate's unit, is the amount itself, and so is the
+   lower bound of such a range ("250 €", "250 SEK", "250 euros", "$250/h",
+   "$250 an hour", "CHF 250.–/Std.", "500-650 €", "600 / 700 €" are not
+   $250k); a code glued before a figure is its sign ("USD250k"). Three digits after a comma or a dot group
    thousands; one or two are a fraction ("3500,00 €").
 3. **Heuristics move an unanchored seat** from a base of 48: systems,
    runtime, kernel, infrastructure, distributed or compiler work +22;
