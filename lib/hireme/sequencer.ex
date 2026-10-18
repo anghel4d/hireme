@@ -82,29 +82,42 @@ defmodule Hireme.Sequencer do
 
   @doc "The account's sequencer, started when it is not running; nil when it cannot start."
   def whereis(account_id) do
+    # The registry drops a dead sequencer's entry only once it sees the
+    # exit; until then the entry is skipped and a fresh one registers over it.
     case Registry.lookup(Hireme.Sequencer.Registry, account_id) do
-      [{pid, _}] ->
-        pid
-
-      [] ->
-        case DynamicSupervisor.start_child(Hireme.Sequencer.Dynamic, {__MODULE__, account_id}) do
-          {:ok, pid} ->
-            pid
-
-          {:error, {:already_started, pid}} ->
-            pid
-
-          {:error, reason} ->
-            Logger.error("sequencer #{account_id} did not start: #{inspect(reason)}")
-            nil
-        end
+      [{pid, _}] -> if Process.alive?(pid), do: pid, else: start(account_id)
+      [] -> start(account_id)
     end
   end
 
-  defp with_pid(account_id, fun) do
+  defp start(account_id) do
+    case DynamicSupervisor.start_child(Hireme.Sequencer.Dynamic, {__MODULE__, account_id}) do
+      {:ok, pid} ->
+        pid
+
+      {:error, {:already_started, pid}} ->
+        pid
+
+      {:error, reason} ->
+        Logger.error("sequencer #{account_id} did not start: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp with_pid(account_id, fun, retry? \\ true) do
     case whereis(account_id) do
-      nil -> {:error, :unavailable}
-      pid -> fun.(pid)
+      nil ->
+        {:error, :unavailable}
+
+      pid ->
+        try do
+          fun.(pid)
+        catch
+          # The sequencer stopped idle between the lookup and the call: it
+          # stops only with an empty mailbox, so the call never ran.
+          :exit, {reason, {GenServer, :call, _}} when retry? and reason in [:noproc, :normal] ->
+            with_pid(account_id, fun, false)
+        end
     end
   end
 
