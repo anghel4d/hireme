@@ -286,8 +286,10 @@ end
 
 defmodule Hireme.Release.Backup do
   @moduledoc """
-  A daily online copy of the database beside it, in `backups/`, keeping
-  13, after the day's purge (`Hireme.Release.Purge`). `Hireme.Store.backup/1` is SQLite's `VACUUM INTO`, a consistent
+  A daily online copy of the database beside it, in `backups/` as
+  `hireme-v2-<UTC stamp>.db`, keeping its own newest 13, after the day's
+  purge (`Hireme.Release.Purge`). Only its own prefix is pruned: v1's
+  `hireme-<stamp>.db` copies stay until the operator deletes them. `Hireme.Store.backup/1` is SQLite's `VACUUM INTO`, a consistent
   copy of the live database, WAL included, that only reads it. A missed
   day (the node was down) is caught up at start; a failure is logged and
   kept in `status/0`, and a scheduled one is retried within the hour.
@@ -301,7 +303,8 @@ defmodule Hireme.Release.Backup do
   @day :timer.hours(24)
   @retry :timer.hours(1)
   @keep 13
-  @name ~r/^hireme-\d{8}T\d{6}\.db$/
+  @name ~r/^hireme-v2-\d{8}T\d{6}\.db$/
+  @cut ~r/^hireme-v2-\d{8}T\d{6}\.db\.tmp$/
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: opts[:name] || __MODULE__)
@@ -346,7 +349,7 @@ defmodule Hireme.Release.Backup do
     end
 
     stamp = DateTime.utc_now() |> Calendar.strftime("%Y%m%dT%H%M%S")
-    path = Path.join(s.dir, "hireme-#{stamp}.db")
+    path = Path.join(s.dir, "hireme-v2-#{stamp}.db")
     tmp = path <> ".tmp"
 
     last =
@@ -372,7 +375,7 @@ defmodule Hireme.Release.Backup do
   defp prune(dir) do
     names = backups(dir)
     old = Enum.drop(names, -@keep)
-    cut = for name <- File.ls!(dir), name =~ ~r/^hireme-\d{8}T\d{6}\.db\.tmp$/, do: name
+    cut = for name <- File.ls!(dir), name =~ @cut, do: name
 
     for name <- old ++ cut,
         {:error, reason} <- [File.rm(Path.join(dir, name))],

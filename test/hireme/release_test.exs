@@ -100,24 +100,21 @@ defmodule Hireme.ReleaseTest do
     end
 
     @tag :tmp_dir
-    test "a backup keeps the newest 13 copies and clears a copy a stop cut short", %{
-      tmp_dir: dir
-    } do
-      for day <- 1..14,
-          do:
-            File.write!(
-              Path.join(dir, "hireme-202609#{String.pad_leading("#{day}", 2, "0")}T000000.db"),
-              ""
-            )
-
-      File.write!(Path.join(dir, "hireme-20260901T000000.db.tmp"), "")
+    test "a backup keeps its own newest 13 copies, clears a copy a stop cut short, and never touches v1's",
+         %{tmp_dir: dir} do
+      day = fn d -> "202609#{String.pad_leading("#{d}", 2, "0")}T000000" end
+      for d <- 1..14, do: File.write!(Path.join(dir, "hireme-v2-#{day.(d)}.db"), "")
+      v1 = for d <- 1..20, do: "hireme-#{day.(d)}.db"
+      for name <- v1, do: File.write!(Path.join(dir, name), "")
+      File.write!(Path.join(dir, "hireme-v2-#{day.(1)}.db.tmp"), "")
       {:ok, pid} = Backup.start_link(name: :bench_backup, dir: dir, manual: true)
       assert {:ok, path} = Backup.run(pid)
       assert File.exists?(path)
       names = File.ls!(dir)
-      assert length(names) == 13
+      assert length(names -- v1) == 13
+      assert v1 -- names == []
       refute Enum.any?(names, &String.ends_with?(&1, ".tmp"))
-      refute "hireme-20260901T000000.db" in names
+      refute "hireme-v2-#{day.(1)}.db" in names
       GenServer.stop(pid)
     end
   end
