@@ -618,6 +618,22 @@ defmodule Hireme.SequencerTest do
 
     test "a command with no target ACKs the row it wrote on its table", %{account: a} do
       {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "lineage.example", name: "L"}))
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      Repo.insert_all(Hireme.Rows.CvLineage, [
+        %{
+          account_id: a.id,
+          corporation_id: corp.id,
+          generation: 1,
+          opened_on: ~D[2025-01-01],
+          rewrites_allowed: false,
+          rev: 1,
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+      :ok = Sequencer.resync(a.id)
       {[ack], []} = run(a.id, op(:command, :open_generation, %{corporation_id: corp.id}))
       assert ack.id > 0 and ack.rev > 0
       assert Repo.get!(Hireme.Rows.CvLineage, ack.id).corporation_id == corp.id
@@ -625,7 +641,12 @@ defmodule Hireme.SequencerTest do
 
     test "an event's author is the server's, whatever the cells say", %{account: a} do
       {[app], []} = run(a.id, op(:put, :applications, %{company: "E", role: "R"}))
-      assert {[], [%{refusal: :column}]} = run(a.id, op(:put, :events, %{application_id: app.id, kind: "note", actor: :operator}))
+
+      assert {[], [%{refusal: :column}]} =
+               run(
+                 a.id,
+                 op(:put, :events, %{application_id: app.id, kind: "note", actor: :operator})
+               )
     end
 
     test "a natural_key refusal does not name the row it found", %{account: a} do
