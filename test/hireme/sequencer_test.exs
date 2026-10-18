@@ -100,6 +100,29 @@ defmodule Hireme.SequencerTest do
              )
   end
 
+  test "a keyed put names the key whose where its cells meet: a country's iso2 never finds a city",
+       %{account: a} do
+    {[city], []} =
+      run(
+        a.id,
+        op(:put, :places, %{kind: :city, name: "Dresden", iso2: "DE", geonames_id: 2_935_022})
+      )
+
+    {[country], []} =
+      run(a.id, op(:put, :places, %{kind: :country, name: "Germany", iso2: "DE"}, keyed: true))
+
+    assert country.id != city.id
+
+    {[again], []} =
+      run(
+        a.id,
+        op(:put, :places, %{kind: :country, name: "Deutschland", iso2: "DE"}, keyed: true)
+      )
+
+    assert again.id == country.id
+    assert Repo.get!(Place, city.id).name == "Dresden"
+  end
+
   test "cells are typed: a wrong wire type is refused, never cast", %{account: a} do
     t = Schema.table(:corporations)
     name = Enum.find(t.cols, &(&1.name == "name"))

@@ -559,7 +559,7 @@ defmodule Hireme.Sequencer do
       end
 
     case Enum.find(table.naturals, fn n ->
-           Enum.all?(n.cols, &(values[&1] != nil)) and where?(n.where, values)
+           Enum.all?(n.cols, &(values[&1] != nil)) and holds?(table, n.where_term, values)
          end) do
       nil ->
         {:refused, :natural_key,
@@ -569,11 +569,12 @@ defmodule Hireme.Sequencer do
            keys: Enum.map(table.naturals, & &1.cols)
          }}
 
-      %{cols: cols} ->
+      %{cols: cols, where_term: term} ->
         q =
           Enum.reduce(cols, from(r in Schema.row(table.name)), fn c, q ->
             where(q, [r], field(r, ^String.to_atom(c)) == ^values[c])
           end)
+          |> restrict(table, term)
 
         q = if table.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
 
@@ -593,20 +594,28 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  # The two shapes a natural key's `where` takes in the declaration.
-  defp where?(nil, _values), do: true
+  # A key's partial `where` (the schema's where_term) decides which key the
+  # cells name, and bounds its lookup: a country's iso2 never finds a city.
+  defp holds?(_table, nil, _values), do: true
+  defp holds?(_table, {:not_null, c}, values), do: values[c] != nil
+  defp holds?(_table, {:null, c}, values), do: Map.has_key?(values, c) and values[c] == nil
 
-  defp where?(sql, values) do
-    cond do
-      m = Regex.run(~r/^(\w+) is not null$/, sql) ->
-        values[Enum.at(m, 1)] != nil
+  defp holds?(table, {:eq, c, v}, values),
+    do: Map.has_key?(values, c) and values[c] == term_value(table, c, v)
 
-      m = Regex.run(~r/^(\w+) = '([^']*)'$/, sql) ->
-        to_string(values[Enum.at(m, 1)]) == Enum.at(m, 2)
+  defp restrict(q, _table, nil), do: q
 
-      true ->
-        true
-    end
+  defp restrict(q, _table, {:not_null, c}),
+    do: where(q, [r], not is_nil(field(r, ^String.to_atom(c))))
+
+  defp restrict(q, _table, {:null, c}), do: where(q, [r], is_nil(field(r, ^String.to_atom(c))))
+
+  defp restrict(q, table, {:eq, c, v}),
+    do: where(q, [r], field(r, ^String.to_atom(c)) == ^term_value(table, c, v))
+
+  defp term_value(table, c, v) do
+    {:ok, value} = Ecto.Type.cast(Schema.cast_type(col(table, c)), v)
+    value
   end
 
   defp application_of(%{table: %{name: "applications"}, target: t}) when t > 0, do: t
@@ -1203,11 +1212,10 @@ defmodule Hireme.Sequencer do
   defp wire_cols(t, grants),
     do: Enum.reject(Grants.columns(grants, t), &(&1.name == "account_id" or &1.wire == nil))
 
-  # A projection's `where` is `<col> is not null`, the one shape it takes.
-  defp rows(%{residency: :projection, source: source, source_where: where}) do
-    [_, col] = Regex.run(~r/^(\w+) is not null$/, where)
-    col = String.to_atom(col)
-    Repo.all(from(r in Schema.row(source), where: not is_nil(field(r, ^col)), order_by: r.id))
+  defp rows(%{residency: :projection, source: source, source_term: term}) do
+    from(r in Schema.row(source), order_by: r.id)
+    |> restrict(Schema.table(source), term)
+    |> Repo.all()
   end
 
   # Rows as maps of their wire columns. A deferred text is never loaded: its
@@ -1259,11 +1267,12 @@ defmodule Hireme.Sequencer do
     end)
   end
 
-  defp projected?(row, where) do
-    case Regex.run(~r/^(\w+) is not null$/, where) do
-      [_, col] -> Map.get(row, String.to_atom(col)) != nil
-      _ -> true
-    end
+  defp projected?(row, term) do
+    holds?(
+      Schema.table(:places),
+      term,
+      Map.new(Map.from_struct(row), fn {k, v} -> {Atom.to_string(k), v} end)
+    )
   end
 
   defp wire_tables(state, grants, now) do
@@ -1445,7 +1454,7 @@ defmodule Hireme.Sequencer do
 
   defp atlas_put(row) do
     atlas = Schema.table(:atlas)
-    if projected?(row, atlas.source_where), do: [{atlas, row, :all}], else: []
+    if projected?(row, atlas.source_term), do: [{atlas, row, :all}], else: []
   end
 
   # ------------------------------------------------------------- leases

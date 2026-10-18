@@ -6,7 +6,8 @@ defmodule Hireme.Grants do
   A key carries a `read_mask` and a `write_mask` over the five domains
   (world 1, desk 2, mail 4, lanes 8, corpus 16) and `may_delete`. A browser
   session is the operator: every domain both ways and `may_delete`. Tables of
-  the `system` domain, `citations` and `trusted_hosts` are in no mask:
+  the `system` domain (`trusted_hosts` among them) and `unmasked` tables
+  (`citations`) are in no mask:
   nothing reads or writes them through a mask (`history` reads citations
   under the cited table's read bit).
   """
@@ -15,7 +16,6 @@ defmodule Hireme.Grants do
   alias Hireme.Schema
 
   @all 0b11111
-  @outside ["citations", "trusted_hosts"]
 
   defstruct actor: :key, key_id: nil, read_mask: 0, write_mask: 0, may_delete: false
 
@@ -50,7 +50,7 @@ defmodule Hireme.Grants do
   def all, do: @all
 
   @doc "The mask bit of a table or command's domain; 0 for one in no mask."
-  def bit(%{name: name}) when name in @outside, do: 0
+  def bit(%{unmasked: true}), do: 0
   def bit(%{domain: domain}), do: Schema.domain_bit(domain)
 
   def bit(name) when is_atom(name) or is_integer(name), do: bit(Schema.table(name))
