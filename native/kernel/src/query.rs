@@ -23,7 +23,7 @@ use schema::{flag, refusal, ColDef as Column, Cond, KeyDef, Residency, TableDef 
 use serde_json::{json, Map, Value as Json};
 
 use crate::judge::Refusal;
-use crate::rows::{Rows, Table, Val};
+use crate::rows::{Data, Rows, Table, Val};
 
 const FIND_LIMIT: u64 = 50;
 const FIND_MAX: u64 = 500;
@@ -234,14 +234,35 @@ pub(crate) fn enum_values(c: &Column) -> &'static [&'static str] {
 }
 
 /// The value of a row's cell for comparing.
-fn key_of<'a>(t: &'a Table, id: u32, c: &Column) -> Key2<'a> {
-    match ty(c) {
-        Type::Enum => t.u32(id, c.id).and_then(|v| enum_values(c).get(v as usize)).map_or(Key2::Null, |n| Key2::Str(Cow::Borrowed(n))),
-        Type::I64 => t.i64(id, c.id).map_or(Key2::Null, Key2::Int),
-        Type::F64 => t.f64(id, c.id).filter(|f| !f.is_nan()).map_or(Key2::Null, Key2::Float),
-        Type::Str | Type::Text | Type::Json => t.str(id, c.id).map_or(Key2::Null, |s| Key2::Str(Cow::Borrowed(s))),
-        _ => t.u32(id, c.id).map_or(Key2::Null, |v| Key2::Int(v as i64)),
+/// A column's storage, resolved once per read: its cells by slot, with no
+/// lookup per row.
+struct Cells<'a> {
+    c: &'static Column,
+    data: Option<&'a Data>,
+}
+
+impl<'a> Cells<'a> {
+    fn new(t: &'a Table, c: &'static Column) -> Cells<'a> {
+        Cells { c, data: t.column(c.id).map(|x| &x.data) }
     }
+
+    fn key(&self, slot: usize) -> Key2<'a> {
+        match (ty(self.c), self.data) {
+            (Type::Enum, Some(Data::U32(v))) => match v[slot] {
+                wire::NONE => Key2::Null,
+                x => enum_values(self.c).get(x as usize).map_or(Key2::Null, |n| Key2::Str(Cow::Borrowed(n))),
+            },
+            (_, Some(Data::U32(v))) => if v[slot] == wire::NONE { Key2::Null } else { Key2::Int(v[slot] as i64) },
+            (_, Some(Data::I64(v))) => if v[slot] == wire::NONE64 { Key2::Null } else { Key2::Int(v[slot]) },
+            (_, Some(Data::F64(v))) => if v[slot].is_nan() { Key2::Null } else { Key2::Float(v[slot]) },
+            (_, Some(Data::Str(v))) => if v[slot].is_empty() { Key2::Null } else { Key2::Str(Cow::Borrowed(v[slot].as_str())) },
+            _ => Key2::Null,
+        }
+    }
+}
+
+fn key_of<'a>(t: &'a Table, id: u32, c: &'static Column) -> Key2<'a> {
+    t.slot(id).map_or(Key2::Null, |s| Cells::new(t, c).key(s))
 }
 
 fn is_live(t: &Table, tm: &TableModel, id: u32) -> bool {
@@ -377,7 +398,7 @@ fn filters(g: &Grants, t: &TableModel, w: Option<&Json>) -> Result<Vec<Filter<'s
     let mut out = Vec::new();
     for (name, test) in w {
         let c = column(g, t, Some(&Json::String(name.clone())))?;
-        if has(c, flag::DEFERRED) || matches!(ty(c), Type::Json | Type::Bytes) {
+        if matches!(ty(c), Type::Json | Type::Bytes) {
             return Err(Refusal { code: refusal::COLUMN, data: json!({"table": t.name, "column": c.name, "reason": "not filterable"}) });
         }
         out.push(Filter { col: c, test: filter(c, test)? });
@@ -430,10 +451,13 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
     needle.is_empty() || hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-fn holds(t: &Table, id: u32, f: &Filter) -> bool {
-    let k = key_of(t, id, f.col);
+fn holds(t: &Table, id: u32, f: &Filter<'static>) -> bool {
+    test(&key_of(t, id, f.col), &f.test)
+}
+
+fn test(k: &Key2, t: &Test) -> bool {
     let ord = |v: &Key2| (!k.is_null()).then(|| k.cmp(v));
-    match &f.test {
+    match t {
         Test::IsNull => k.is_null(),
         Test::NotNull => !k.is_null(),
         Test::Eq(v) => ord(v) == Some(Ordering::Equal),
@@ -471,7 +495,7 @@ fn order_param(g: &Grants, t: &TableModel, p: &Map<String, Json>) -> Result<(&'s
         Some(other) => (Some(other.clone()), desc_flag),
     };
     let c = column(g, t, name.as_ref())?;
-    if has(c, flag::DEFERRED) || matches!(ty(c), Type::Json | Type::Bytes | Type::Text) {
+    if matches!(ty(c), Type::Json | Type::Bytes | Type::Text) {
         return Err(Refusal { code: refusal::COLUMN, data: json!({"table": t.name, "column": c.name, "reason": "not orderable"}) });
     }
     Ok((c, desc))
@@ -525,18 +549,17 @@ fn find(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
         let o = if desc { o.reverse() } else { o };
         o.then_with(|| if desc { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) })
     };
-    let past = |k: &(Key2, u32)| -> bool {
-        match &after {
-            None => true,
-            Some(c) => by(k, &(c.0.clone(), c.1)) == Ordering::Greater,
-        }
-    };
+    let past = |k: &(Key2, u32)| after.as_ref().is_none_or(|c| by(k, c) == Ordering::Greater);
+    // One pass over the slots, each column's storage resolved once.
+    let tests: Vec<(Cells, &Test)> = fs.iter().map(|f| (Cells::new(t, f.col), &f.test)).collect();
+    let ord = Cells::new(t, order);
+    let deleted = tm.col_named("deleted_at").filter(|_| tm.soft_delete).map(|c| Cells::new(t, c));
     let mut keys: Vec<(Key2, u32)> = t
         .ids()
         .iter()
-        .copied()
-        .filter(|&id| is_live(t, tm, id) && fs.iter().all(|f| holds(t, id, f)))
-        .map(|id| (if order.name == "id" { Key2::Int(id as i64) } else { key_of(t, id, order) }, id))
+        .enumerate()
+        .filter(|(s, _)| deleted.as_ref().is_none_or(|d| d.key(*s).is_null()) && tests.iter().all(|(c, x)| test(&c.key(*s), x)))
+        .map(|(s, &id)| (if order.name == "id" { Key2::Int(id as i64) } else { ord.key(s) }, id))
         .filter(past)
         .collect();
     let page = keys.len().min(limit);
