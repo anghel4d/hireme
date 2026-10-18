@@ -143,7 +143,13 @@ function after(root: HTMLElement): void {
     sized.observe(el)
     watched = el
   }
-  paint(el, width === 0)
+  // The first draw estimates the board from the window (reading it would force a layout of a page
+  // that has not had one); the resize observer's turn, after layout and before paint, corrects it.
+  if (width === 0) {
+    width = Math.min(window.innerWidth, 1400) - (window.innerWidth <= 760 ? 20 : 32)
+    boardTop = 0
+  }
+  paint(el, false)
 }
 
 /** Lays out the window of tiles for the current filter and scroll; writes each tile that changed. */
