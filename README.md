@@ -132,7 +132,7 @@ data, never instructions.
 ```bash
 mix test                                  # every contract suite; a database per run
 cargo test --manifest-path native/Cargo.toml --workspace
-node native/kernel/vectors.mjs            # the kernel's vectors under wasm
+node native/kernel/vectors.mjs priv/static/wasm/kernel.wasm   # the kernel's vectors under wasm
 tsc -p assets                             # the client, strict
 nix flake check                           # all of it, plus the dev VM
 ```
