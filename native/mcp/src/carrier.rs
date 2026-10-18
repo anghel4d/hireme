@@ -70,6 +70,14 @@ struct Live {
     ops: HashMap<u64, oneshot::Sender<Verdict>>,
 }
 
+/// Whether a session that ended for `reason` after `lived`, the end before it being `previous`, may
+/// reconnect at once. Only a restart asked for to get a fresh session ("requested") does, and only
+/// once a session has lived 10 s and not twice running, so no failure can turn it into a loop. The
+/// node's own BYE restart, a frame the kernel could not apply ("unapplied") and every other end back off.
+pub fn skip_backoff(reason: &str, lived: Duration, previous: &str) -> bool {
+    reason == "requested" && lived >= Duration::from_secs(10) && previous != "requested"
+}
+
 /// How long to wait before reconnect `attempt` (0-based) after a session that ended for `reason`:
 /// doubling from 0.5 s to 30 s, and at least a minute when the node said its limit lifts in one.
 pub fn backoff(attempt: u32, reason: &str, message: &str) -> Duration {
@@ -86,7 +94,7 @@ pub struct Carrier {
     /// Ends the current session at once (a frame the caller could not apply, a new session asked for);
     /// the usual reconnect follows, and `why` is the reason its end is logged with.
     kick: tokio::sync::Notify,
-    why: std::sync::Mutex<String>,
+    why: std::sync::Mutex<(&'static str, String)>,
     live: Mutex<Option<Live>>,
     next_rpc: AtomicU32,
     next_op: AtomicU64,
@@ -102,7 +110,7 @@ impl Carrier {
         // An op id is unique per key for the ledger's 24 h: the start time in
         // the high bits, a counter in the low 20 (a million ops per process start).
         let base = (now.as_millis() as u64) << 20;
-        let carrier = Arc::new(Carrier { hash, kick: tokio::sync::Notify::new(), why: std::sync::Mutex::new(String::new()), live: Mutex::new(None), next_rpc: AtomicU32::new(1), next_op: AtomicU64::new(base) });
+        let carrier = Arc::new(Carrier { hash, kick: tokio::sync::Notify::new(), why: std::sync::Mutex::new(("requested", String::new())), live: Mutex::new(None), next_rpc: AtomicU32::new(1), next_op: AtomicU64::new(base) });
         let (events, rx) = mpsc::unbounded_channel();
         let c = carrier.clone();
         let watch = events.clone();
@@ -121,10 +129,12 @@ impl Carrier {
         self.live.lock().await.is_some()
     }
 
-    /// Drops the session for `why`; the next one boots whole.
-    pub fn restart(&self, why: &str) {
+    /// Drops the session; the next one boots whole. `reason` is how its end is reported: "requested"
+    /// when a fresh session is the point (it may reconnect at once, see [`skip_backoff`]), or a failure
+    /// such as "unapplied", which backs off as any failure does. `why` is the message.
+    pub fn restart(&self, reason: &'static str, why: &str) {
         if let Ok(mut w) = self.why.lock() {
-            why.clone_into(&mut w);
+            *w = (reason, why.to_owned());
         }
         self.kick.notify_one();
     }
@@ -186,6 +196,7 @@ impl Carrier {
 
     async fn run(self: Arc<Self>, url: String, key: String, label: String, snapshot: Snapshot, events: mpsc::UnboundedSender<Event>) {
         let mut attempt = 0u32;
+        let mut previous = String::new();
         loop {
             let started = Instant::now();
             let end = self.session(&url, &key, &label, &snapshot, &events).await;
@@ -196,9 +207,9 @@ impl Carrier {
             if !again {
                 return;
             }
-            // A restart this process asked for (`restart()`, reason "requested") is no failure: it reconnects
-            // at once, with backoff reset. The node's own BYE restart is a request to back off and keeps it.
-            if reason == "requested" {
+            let skip = skip_backoff(&reason, started.elapsed(), &previous);
+            previous.clone_from(&reason);
+            if skip {
                 attempt = 0;
                 continue;
             }
@@ -212,6 +223,9 @@ impl Carrier {
 
     /// One session, from connect to close: (reason, message, worth reconnecting).
     async fn session(&self, url: &str, key: &str, label: &str, snapshot: &Snapshot, events: &mpsc::UnboundedSender<Event>) -> (String, String, bool) {
+        // A restart asked for while no session was up has nothing to end: its stored permit must not end
+        // this new session the moment it starts.
+        let _ = futures_util::FutureExt::now_or_never(self.kick.notified());
         let request = match url.into_client_request() {
             Ok(r) => r,
             Err(e) => return ("url".into(), format!("{url}: {e}"), false),
@@ -264,7 +278,10 @@ impl Carrier {
                         Err(e) => break ("frame".into(), format!("{e:?}"), true),
                     }
                 }
-                _ = self.kick.notified() => break ("requested".into(), self.why.lock().map(|w| w.clone()).unwrap_or_default(), true),
+                _ = self.kick.notified() => {
+                    let (reason, why) = self.why.lock().map(|w| w.clone()).unwrap_or(("requested", String::new()));
+                    break (reason.into(), why, true)
+                }
                 _ = tick.tick() => {
                     if heard.elapsed() > SILENT {
                         break ("silent".into(), format!("no frame for {} s", SILENT.as_secs()), true);
@@ -381,5 +398,17 @@ mod tests {
         assert_eq!(backoff(10, "socket", ""), Duration::from_secs(30));
         // A throttled HELLO waits out the minute it was told.
         assert_eq!(backoff(0, "restart", "rate limited; retry in a minute"), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_failure_never_reconnects_at_once() {
+        let long = Duration::from_secs(30);
+        assert!(skip_backoff("requested", long, "restart"));
+        // A frame the kernel cannot apply ends every session the same way: it backs off.
+        assert!(!skip_backoff("unapplied", long, ""));
+        assert!(!skip_backoff("restart", long, ""));
+        // A requested restart of a session that did not live, or twice running, backs off too.
+        assert!(!skip_backoff("requested", Duration::from_secs(2), ""));
+        assert!(!skip_backoff("requested", long, "requested"));
     }
 }

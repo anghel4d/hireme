@@ -307,7 +307,7 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                     // The kernel no longer matches the node: off with judging, and a fresh session boots it whole.
                     eprintln!("hireme-mcp: a row frame did not apply; restarting the session for a whole BOOT");
                     app.trained.store(false, Ordering::Relaxed);
-                    app.carrier.restart("a row frame did not apply");
+                    app.carrier.restart("unapplied", "a row frame did not apply");
                     continue;
                 }
                 // Only a BOOT's END is the train: a later PATCH or TICK flagged END says nothing about the base rows.
@@ -828,7 +828,7 @@ impl App {
         self.paused.write().await.take();
         if self.revoked_session.swap(false, Ordering::Relaxed) {
             let before = self.welcome.read().await.as_ref().map(|w| w.session_id);
-            self.carrier.restart("the operator paused this key; asking again from a new session");
+            self.carrier.restart("requested", "the operator paused this key; asking again from a new session");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             loop {
                 let now = self.welcome.read().await.as_ref().map(|w| w.session_id);
