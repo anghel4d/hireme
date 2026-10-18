@@ -214,6 +214,8 @@ table api_keys system server
   col last_used_at time ?
   col expires_at time ?
   col revoked_at time ?
+  # Set when the operator revokes a key's lease; Keys.resume clears it.
+  col paused_at time ? readonly
 
 table factors system server
   cap 100

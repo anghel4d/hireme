@@ -76,7 +76,8 @@ CREATE TABLE "api_keys" (
   "may_delete" INTEGER NOT NULL DEFAULT 0,
   "last_used_at" TEXT,
   "expires_at" TEXT,
-  "revoked_at" TEXT
+  "revoked_at" TEXT,
+  "paused_at" TEXT
 ) STRICT;
 CREATE INDEX "api_keys__account_account_id" ON "api_keys" ("account_id");
 CREATE UNIQUE INDEX "api_keys__unique_key_id" ON "api_keys" ("key_id");
