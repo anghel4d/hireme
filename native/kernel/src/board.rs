@@ -216,6 +216,18 @@ impl Board {
         self.cache.get(&id)
     }
 
+    /// Seats of the applications in hot stages, from the cache.
+    pub fn hot_seats(&mut self, rows: &Rows) -> Vec<Seat> {
+        let Some(t) = rows.table(table::APPLICATIONS) else { return Vec::new() };
+        let hot: Vec<u32> = t
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&id| t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)).is_some_and(Stage::hot))
+            .collect();
+        hot.into_iter().filter_map(|id| self.cached(rows, t, id).map(|c| c.seat.clone())).collect()
+    }
+
     /// Recomputes every card and the board order.
     pub fn derive(&mut self, rows: &Rows, today: Day) {
         self.config = config(rows);

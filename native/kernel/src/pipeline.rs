@@ -183,14 +183,20 @@ pub fn initial(active: Stage) -> Rail {
 }
 
 /// The rail after a move to `to`. Skipped and blocked rungs keep their
-/// mark (they record a decision, not progress); the rest are recomputed.
+/// mark (they record a decision, not progress). A forward jump marks the
+/// rungs it passes over without visiting them as skipped, so closing a
+/// gated application does not claim it was ever submitted; rungs up to
+/// where it stood are done, rungs after `to` pending.
 pub fn move_to(rail: &Rail, to: Stage) -> Rail {
     let t = to.index();
+    let from = current(rail).index();
     core::array::from_fn(|i| {
         if i == t {
             Pip::Active
         } else if matches!(rail[i], Pip::Skipped | Pip::Blocked) {
             rail[i]
+        } else if i < t && i > from && rail[i] == Pip::Pending {
+            Pip::Skipped
         } else if i < t {
             Pip::Done
         } else {
@@ -310,10 +316,16 @@ mod tests {
     fn move_keeps_decisions() {
         let mut r = initial(Stage::Discovered);
         r[1] = Pip::Skipped;
-        let r = move_to(&r, Stage::DraftReady);
-        assert_eq!(&encode(&r), b"DSDDAPPPPP");
+        // Landing on a skipped rung makes it active.
+        let r = move_to(&r, Stage::Freshness);
+        assert_eq!(&encode(&r), b"DAPPPPPPPP");
+        let r = move_to(&initial(Stage::Gated), Stage::DraftReady);
+        assert_eq!(&encode(&r), b"DDDSAPPPPP");
         let r = move_to(&r, Stage::Gated);
-        assert_eq!(&encode(&r), b"DSAPPPPPPP");
+        assert_eq!(&encode(&r), b"DDASPPPPPP");
+        // Step by step, nothing is skipped.
+        let r = move_to(&move_to(&initial(Stage::Gated), Stage::InBatch), Stage::DraftReady);
+        assert_eq!(&encode(&r), b"DDDDAPPPPP");
     }
 
     #[test]

@@ -8,17 +8,19 @@
 //!
 //! Every computation is deterministic across targets: float math goes
 //! through `libm`, never a platform library, and nothing reads a clock;
-//! the caller passes `today`.
-
-#![cfg_attr(target_arch = "wasm32", no_std)]
+//! the caller passes `today`. The wasm build uses std as the target ships
+//! it (its allocator, panics abort), so one source serves all three.
 
 extern crate alloc;
 
+pub mod abi;
 pub mod atlas;
 pub mod ats;
 pub mod board;
+pub mod compose;
 pub mod cv;
 pub mod heat;
+pub mod judge;
 pub mod keywords;
 pub mod lanes;
 pub mod org;

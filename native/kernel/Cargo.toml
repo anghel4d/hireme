@@ -16,4 +16,5 @@ wire = { path = "../wire" }
 # Float math from one pure-Rust source on every target, so a decay or a
 # fit computed in the browser is bit-identical to the sequencer's.
 libm = "0.2.16"
+sha2 = { version = "0.11.1", default-features = false }
 serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
