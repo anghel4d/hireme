@@ -270,17 +270,8 @@ defmodule Hireme.Sequencer do
   # Check 6's `rate` is taken as ops arrive, for every op a key sends,
   # refused ones too: a flood of cheap refusals still spends the budget.
   defp within_rate({pid, ops}, state) do
-    bytes =
-      Enum.reduce(ops, 0, fn op, n ->
-        n +
-          Enum.reduce(op.cells, 0, fn
-            {_, 2, v}, m -> m + byte_size(v)
-            _, m -> m
-          end)
-      end)
-
     with %{key_id: key_id} when key_id != nil <- state.subs[pid],
-         {:error, retry_ms} <- spend(key_id, length(ops), bytes) do
+         {:error, retry_ms} <- spend(key_id, length(ops), Enum.sum_by(ops, &text_of/1)) do
       nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
       send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
       false
@@ -292,30 +283,14 @@ defmodule Hireme.Sequencer do
   @impl GenServer
   def handle_info({:DOWN, ref, :process, pid, _}, state) do
     case state.subs do
-      %{^pid => %{ref: ^ref, id: id}} ->
-        after_ = %{state | subs: Map.delete(state.subs, pid), lease: Lease.leave(state.lease, id)}
-        send(self(), {:audit_channels, state.lease, after_.lease})
-        after_ = if MapSet.size(Lease.held(state.lease, id)) > 0, do: rescan(after_), else: after_
-        {:noreply, broadcast_leases(after_, []), @idle_ms}
-
-      _ ->
-        {:noreply, state, @idle_ms}
+      %{^pid => %{ref: ^ref} = sub} -> {:noreply, ended([{pid, sub}], state), @idle_ms}
+      _ -> {:noreply, state, @idle_ms}
     end
   end
 
   def handle_info({:bye, who, _reason}, state) do
-    ended = for {pid, sub} <- state.subs, ends?(who, sub), do: {pid, sub}
-
-    after_ =
-      Enum.reduce(ended, state, fn {pid, sub}, st ->
-        if sub.ref, do: Process.demonitor(sub.ref, [:flush])
-        %{st | subs: Map.delete(st.subs, pid), lease: Lease.leave(st.lease, sub.id)}
-      end)
-
-    if ended != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
-    held = Enum.any?(ended, fn {_, sub} -> MapSet.size(Lease.held(state.lease, sub.id)) > 0 end)
-    after_ = if held, do: rescan(after_), else: after_
-    {:noreply, broadcast_leases(after_, []), @idle_ms}
+    gone = for {pid, sub} <- state.subs, ends?(who, sub), do: {pid, sub}
+    {:noreply, ended(gone, state), @idle_ms}
   end
 
   # The operator resumed a paused key: its sessions may claim again.
@@ -405,17 +380,25 @@ defmodule Hireme.Sequencer do
     {:reply, {:ok, reply}, state, @idle_ms}
   end
 
-  # The backfill's ops are the operator's (writer 0) and ledgered: their ids
-  # must not repeat across restarts as unique_integer's do.
-  defp random_op_id do
-    <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
-    id
-  end
-
   defp ends?({:key, id}, %{key_id: id}) when id != nil, do: true
   defp ends?({:session, id}, %{session_id: id}) when id != nil, do: true
   defp ends?(:account, _sub), do: true
   defp ends?(_who, _sub), do: false
+
+  # Sessions that ended: their claims go, the channels they held are
+  # audited, and applications they held (which may have waited for the
+  # keywords backfill) are scanned again.
+  defp ended(gone, state) do
+    after_ =
+      Enum.reduce(gone, state, fn {pid, sub}, st ->
+        if sub.ref, do: Process.demonitor(sub.ref, [:flush])
+        %{st | subs: Map.delete(st.subs, pid), lease: Lease.leave(st.lease, sub.id)}
+      end)
+
+    if gone != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
+    held = Enum.any?(gone, fn {_, sub} -> MapSet.size(Lease.held(state.lease, sub.id)) > 0 end)
+    broadcast_leases(if(held, do: rescan(after_), else: after_), [])
+  end
 
   # Ops from a caller that is not a wire session, as a passing session.
   defp run_as(actor, ops, state) do
@@ -476,14 +459,12 @@ defmodule Hireme.Sequencer do
 
       ops =
         for {id, text} <- stale do
-          raw =
-            Codec.encode_op({random_op_id(), :put, 0, t.id, id, nil, [{listing.id, 2, text}]})
-
+          raw = Codec.encode_op({Codec.op_id(), :put, 0, t.id, id, nil, [{listing.id, 2, text}]})
           {:ok, op, ""} = Codec.op(raw)
           op
         end
 
-      {state, acks, nacks} =
+      {state, _acks, nacks} =
         run_as(%{label: "keywords", grants: Grants.operator(), key_id: nil}, ops, state)
 
       # The cursor walks past refused rows, so they cannot stall the scan.
@@ -495,7 +476,6 @@ defmodule Hireme.Sequencer do
             "sequencer #{state.account_id}: keywords backfill refused #{length(nacks)}"
           )
 
-      _ = acks
       %{state | backfill_after: stale |> List.last() |> elem(0)}
     end
   end
@@ -884,31 +864,26 @@ defmodule Hireme.Sequencer do
         table = Schema.table(command.table)
         params = Map.new(command.params, &{&1.id, &1})
         known = for {id, _, _} <- op.cells, p = params[id], p.column, do: col(table, id)
-
-        {:ok,
-         %{
-           table: table,
-           command: command,
-           params: params,
-           known: known,
-           row: nil,
-           target: op.target
-         }}
+        {:ok, plan(table, op, command: command, params: params, known: known)}
     end
   end
 
   defp resolve(op) do
     case Schema.table(op.subject) do
       %{residency: r} = table when r in [:resident, :server] ->
-        known = for {id, _, _} <- op.cells, c = col(table, id), do: c
-
-        {:ok,
-         %{table: table, command: nil, params: nil, known: known, row: nil, target: op.target}}
+        {:ok, plan(table, op, known: for({id, _, _} <- op.cells, c = col(table, id), do: c))}
 
       _ ->
         {:refused, :not_found, %{table: op.subject}}
     end
   end
+
+  defp plan(table, op, more),
+    do:
+      Map.merge(
+        %{table: table, command: nil, params: nil, known: [], row: nil, target: op.target},
+        Map.new(more)
+      )
 
   # Finds the op's target row: by id, by natural key for a keyed op, or the
   # account's one row of a singleton table.
@@ -960,11 +935,12 @@ defmodule Hireme.Sequencer do
   defp col(table, id) when is_integer(id), do: Enum.find(table.cols, &(&1.id == id))
   defp col(table, name), do: Enum.find(table.cols, &(&1.name == name))
 
-  defp fetch(table, id) do
-    q = from(r in Schema.row(table.name), where: r.id == ^id)
-    q = if table.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
-    Repo.one(q)
-  end
+  defp fetch(table, id),
+    do: from(r in Schema.row(table.name), where: r.id == ^id) |> alive(table) |> Repo.one()
+
+  # A soft-delete table's tombstones are not rows.
+  defp alive(q, %{soft_delete: true}), do: where(q, [r], is_nil(r.deleted_at))
+  defp alive(q, _table), do: q
 
   defp natural(%{table: table} = plan, op) do
     typed =
@@ -1006,8 +982,7 @@ defmodule Hireme.Sequencer do
             where(q, [r], field(r, ^String.to_atom(c)) == ^values[c])
           end)
           |> restrict(table, term)
-
-        q = if table.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
+          |> alive(table)
 
         case Repo.one(q) do
           nil when op.verb == :drop ->
@@ -1080,13 +1055,14 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp held_by_none_other(lease, sid, apps) do
-    Enum.find_value(apps, :ok, fn app ->
-      case Lease.check(lease, sid, app) do
-        :ok -> nil
-        refused -> refused
-      end
-    end)
+  defp held_by_none_other(lease, sid, apps),
+    do: Enum.find_value(apps, :ok, &lease_refusal(lease, sid, &1))
+
+  defp lease_refusal(lease, sid, app) do
+    case Lease.check(lease, sid, app) do
+      :ok -> nil
+      refused -> refused
+    end
   end
 
   # Check 3: every cell names a writable column (or a param) of its type.
@@ -1102,7 +1078,7 @@ defmodule Hireme.Sequencer do
         {:refused, :column, %{table: table.name, reason: "append_only"}}
 
       true ->
-        {:ok, Map.put(plan, :changes, %{})}
+        {:ok, plan}
     end
   end
 
@@ -1134,7 +1110,7 @@ defmodule Hireme.Sequencer do
           {:refused, :rev, %{table: plan.table.name, rev: plan.row.rev}}
 
         true ->
-          {:ok, Map.put(plan, :changes, values)}
+          {:ok, plan}
       end
     else
       missing when is_list(missing) ->
@@ -1231,27 +1207,28 @@ defmodule Hireme.Sequencer do
   # Check 6 (`too_large` is taken right after shape, before the kernel spends
   # time on a text it would refuse; `rate` as ops arrive).
   defp too_large(op) do
-    text =
-      Enum.reduce(op.cells, 0, fn
-        {_, 2, v}, n -> n + byte_size(v)
-        _, n -> n
-      end)
+    text = text_of(op)
 
     if text > @max_op_text,
       do: {:refused, :too_large, %{bytes: text, max: @max_op_text}},
       else: :ok
   end
 
+  # The text bytes an op carries: its str cells.
+  defp text_of(op),
+    do: Enum.sum_by(op.cells, fn {_, ty, v} -> if(ty == 2, do: byte_size(v), else: 0) end)
+
   # A capped table's row count, read from SQLite once and then moved with
   # every insert and delete (count_deltas). A tombstone is gone (its drop
   # moves the count), so a soft-delete table counts its live rows.
   defp counted(%{counts: counts} = state, table) when is_map_key(counts, table.id), do: state
 
-  defp counted(state, table) do
-    q = Schema.row(table.name)
-    q = if table.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
-    put_in(state.counts[table.id], Repo.aggregate(q, :count))
-  end
+  defp counted(state, table),
+    do:
+      put_in(
+        state.counts[table.id],
+        table.name |> Schema.row() |> alive(table) |> Repo.aggregate(:count)
+      )
 
   # ----------------------------------------------------------- the write
 
@@ -1275,38 +1252,29 @@ defmodule Hireme.Sequencer do
   defp write_effects(plan, op, sub, effects, state, turn) do
     ctx = %{sub: sub, op: op, turn: turn, plan: plan}
 
-    {result, _} =
-      Enum.reduce_while(effects, {{:ok, [], %{}, nil}, []}, fn {table_id, row_id, cells},
-                                                               {{:ok, deltas, news, ack},
-                                                                inserted} ->
-        table = Schema.table(table_id)
-        before = if row_id == 0, do: 0, else: text_bytes(table, row_id)
+    effects
+    |> Enum.reduce_while({:ok, [], [], nil}, fn {table_id, row_id, cells},
+                                                {:ok, deltas, inserted, ack} ->
+      table = Schema.table(table_id)
+      before = if row_id == 0, do: 0, else: text_bytes(table, row_id)
 
-        case effect(table, row_id, cells, inserted, ctx) do
-          {:ok, row, changed} ->
-            moved = {:text, text_bytes(table, row.id) - before}
+      case effect(table, row_id, cells, inserted, ctx) do
+        {:ok, row, changed} ->
+          moved = {:text, text_bytes(table, row.id) - before}
+          own = own?(plan, op, table_id, row_id, ack)
+          inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
+          ack = if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
+          {:cont, {:ok, deltas ++ [{:put, table, row, changed}, moved], inserted, ack}}
 
-            own = own?(plan, op, table_id, row_id, ack)
-
-            inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
-
-            ack =
-              if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
-
-            {:cont, {{:ok, deltas ++ [{:put, table, row, changed}, moved], news, ack}, inserted}}
-
-          refused ->
-            {:halt, {refused, inserted}}
-        end
-      end)
-
-    case result do
-      {:ok, deltas, _news, ack} ->
-        ack = ack || command_ack(plan, op)
-
+        refused ->
+          {:halt, refused}
+      end
+    end)
+    |> case do
+      {:ok, deltas, _inserted, ack} ->
         # Claims follow only a write that lands: a refusal in finish rolls
         # the insert back, and its id must not stay leased.
-        with {:ok, state, turn, ack} <- finish(state, turn, deltas, ack),
+        with {:ok, state, turn, ack} <- finish(state, turn, deltas, ack || command_ack(plan, op)),
              do: {:ok, adopt(state, sub, deltas), turn, ack}
 
       refused ->
@@ -1330,10 +1298,7 @@ defmodule Hireme.Sequencer do
         {:refused, :scope, %{table: t.name, reason: "the delete reaches it"}}
 
       t.name == "applications" ->
-        case Lease.check(state.lease, sub.id, id) do
-          :ok -> nil
-          refused -> refused
-        end
+        lease_refusal(state.lease, sub.id, id)
 
       true ->
         nil
@@ -1425,7 +1390,7 @@ defmodule Hireme.Sequencer do
   defp effect_values(table, cells, inserted, _ctx) do
     Enum.reduce_while(cells, {:ok, %{}}, fn {col_id, v}, {:ok, acc} ->
       col = col(table, col_id)
-      v = new_ref(v, inserted, col)
+      v = new_ref(v, inserted)
 
       case col && Codec.from_wire(col, v) do
         nil ->
@@ -1442,24 +1407,23 @@ defmodule Hireme.Sequencer do
   end
 
   # Inside effects `{:new, k}` is the id the k-th insert got.
-  defp new_ref({:new, k}, inserted, _col), do: Enum.at(inserted, k)
-  defp new_ref(v, _inserted, _col), do: v
+  defp new_ref({:new, k}, inserted), do: Enum.at(inserted, k)
+  defp new_ref(v, _inserted), do: v
 
   defp insert(table, values, ctx) do
     now = ctx.turn.now
 
     values =
-      derived(table, values, nil, ctx) |> Map.merge(%{rev: 1, inserted_at: now, updated_at: now})
+      values
+      |> derive(table.name, nil, ctx)
+      |> Map.merge(%{rev: 1, inserted_at: now, updated_at: now})
 
     values = if table.global, do: values, else: Map.put(values, :account_id, Repo.account_id!())
 
     struct(Schema.row(table.name))
     |> Ecto.Changeset.change(values)
     |> Repo.insert()
-    |> case do
-      {:ok, row} -> {:ok, row, :all}
-      {:error, cs} -> {:refused, :column, %{table: table.name, errors: errors(cs)}}
-    end
+    |> landed(table, :all)
   end
 
   defp update(table, id, values, ctx) do
@@ -1472,26 +1436,27 @@ defmodule Hireme.Sequencer do
       {:refused, :not_found, %{table: table.name, id: id}}
     else
       values =
-        derived(table, values, row, ctx)
+        values
+        |> derive(table.name, row, ctx)
         |> Map.merge(%{rev: row.rev + 1, updated_at: ctx.turn.now})
 
       row
       |> Ecto.Changeset.change(values)
       |> Repo.update(force: true)
-      |> case do
-        {:ok, row} -> {:ok, row, Map.keys(values)}
-        {:error, cs} -> {:refused, :column, %{table: table.name, errors: errors(cs)}}
-      end
+      |> landed(table, Map.keys(values))
     end
   end
 
-  defp errors(cs), do: Map.new(cs.errors, fn {k, {msg, _}} -> {k, msg} end)
+  defp landed({:ok, row}, _table, changed), do: {:ok, row, changed}
+
+  defp landed({:error, cs}, table, _changed),
+    do:
+      {:refused, :column,
+       %{table: table.name, errors: Map.new(cs.errors, fn {k, {msg, _}} -> {k, msg} end)}}
 
   # What the server writes and no writer may: a new application's number,
   # a source's host, an event's author. (Metric dates and keywords are the
   # kernel's effects.)
-  defp derived(table, values, row, ctx), do: derive(values, table.name, row, ctx)
-
   defp derive(values, "applications", nil, _ctx), do: Map.put(values, :no, next_no())
 
   defp derive(values, "sources", _row, _ctx) do
@@ -1691,9 +1656,10 @@ defmodule Hireme.Sequencer do
   # Rows as maps of their wire columns, texts whole.
   defp rows(t) do
     fields = for c <- t.cols, c.wire != nil, do: String.to_atom(c.name)
-    q = from(r in Schema.row(t.name), order_by: r.id, select: map(r, ^fields))
-    q = if t.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
-    Repo.all(q)
+
+    from(r in Schema.row(t.name), order_by: r.id, select: map(r, ^fields))
+    |> alive(t)
+    |> Repo.all()
   end
 
   defp projected?(row, term) do
@@ -1784,7 +1750,7 @@ defmodule Hireme.Sequencer do
     trusted = for {%{name: "trusted"}, body} <- moved, do: body
     _ = Kernel.apply(state.kernel, IO.iodata_to_binary(trusted))
 
-    for {_, %{grants: g, pid: pid}} <- state.subs, is_pid(pid) do
+    for %{grants: g, pid: pid} <- live_subs(state) do
       info = if Grants.read?(g, Schema.table(:acct_info)), do: [acct_info_block(state)], else: []
       body = for {t, b} <- moved, Grants.read?(g, t), do: b
       send(pid, {:sequencer, :patch, state.rev, IO.iodata_to_binary([body, info])})
@@ -1793,10 +1759,10 @@ defmodule Hireme.Sequencer do
     state
   end
 
-  defp clock(now) do
-    t = Schema.table(:clock)
-    Codec.rows_block(t, t.cols, [%{today: DateTime.to_date(now), now: now}])
-  end
+  # The wire sessions subscribed (not a passing caller of `call/3`).
+  defp live_subs(state), do: for({pid, sub} <- state.subs, is_pid(pid), do: sub)
+
+  defp clock(now), do: Codec.clock(now)
 
   defp leases_block(state) do
     t = Schema.table(:leases)
@@ -1808,18 +1774,16 @@ defmodule Hireme.Sequencer do
   defp catalog(grants) do
     key = {__MODULE__, :catalog, grants.actor, grants.read_mask, grants.write_mask}
 
-    case :persistent_term.get(key, nil) do
-      nil ->
-        block = IO.iodata_to_binary(build_catalog(grants))
-        :persistent_term.put(key, block)
-        block
-
-      block ->
-        block
-    end
+    :persistent_term.get(key, nil) ||
+      tap(IO.iodata_to_binary(build_catalog(grants)), &:persistent_term.put(key, &1))
   end
 
   @residency %{resident: 1, server: 2, wire: 3, projection: 4}
+  @entry ~w(kind owner id name type flags target)a
+
+  # One catalog row: a table (1) and its columns (2), an enum's values (3),
+  # a command (4) and its params (5), a frame (6).
+  defp entry(values), do: Map.new(Enum.zip(@entry, values))
 
   defp build_catalog(grants) do
     seen = fn t ->
@@ -1827,69 +1791,37 @@ defmodule Hireme.Sequencer do
         Grants.write?(grants, t)
     end
 
-    tables = Enum.filter(Schema.tables(), seen)
-
     rows =
-      Enum.flat_map(tables, fn t ->
-        [
-          %{
-            kind: 1,
-            owner: 0,
-            id: t.id,
-            name: t.name,
-            type: @residency[t.residency],
-            flags: Grants.bit(t),
-            target: t.domain
-          }
-        ] ++
-          for c <- Grants.columns(grants, t) do
-            %{
-              kind: 2,
-              owner: t.id,
-              id: c.id,
-              name: c.name,
-              type: c.type_code,
-              flags: c.flags,
-              target: c.target
-            }
-          end
+      Enum.flat_map(Enum.filter(Schema.tables(), seen), fn t ->
+        [entry([1, 0, t.id, t.name, @residency[t.residency], Grants.bit(t), t.domain])] ++
+          for c <- Grants.columns(grants, t),
+              do: entry([2, t.id, c.id, c.name, c.type_code, c.flags, c.target])
       end) ++
         Enum.flat_map(Enum.with_index(Schema.model().enums, 1), fn {e, eid} ->
           for {v, code} <- Enum.with_index(e.values),
-              do: %{kind: 3, owner: eid, id: code, name: v, type: nil, flags: nil, target: e.name}
+              do: entry([3, eid, code, v, nil, nil, e.name])
         end) ++
         Enum.flat_map(Schema.commands(), fn c ->
           t = Schema.table(c.table)
 
           if Grants.write?(grants, t) and (not c.human_only or grants.actor == :operator) do
-            [
-              %{
-                kind: 4,
-                owner: t.id,
-                id: c.id,
-                name: c.name,
-                type: nil,
-                flags: if(c.human_only, do: 16, else: 0),
-                target: c.table
-              }
-            ] ++
-              for p <- c.params do
-                %{
-                  kind: 5,
-                  owner: c.id,
-                  id: p.id,
-                  name: p.name,
-                  type: p.type_code,
-                  flags: if(p.required, do: 1, else: 0),
-                  target: p.target
-                }
-              end
+            [entry([4, t.id, c.id, c.name, nil, if(c.human_only, do: 16, else: 0), c.table])] ++
+              for p <- c.params,
+                  do:
+                    entry([
+                      5,
+                      c.id,
+                      p.id,
+                      p.name,
+                      p.type_code,
+                      if(p.required, do: 1, else: 0),
+                      p.target
+                    ])
           else
             []
           end
         end) ++
-        for f <- Schema.frames(),
-            do: %{kind: 6, owner: 0, id: f.id, name: f.name, type: nil, flags: nil, target: nil}
+        for f <- Schema.frames(), do: entry([6, 0, f.id, f.name, nil, nil, nil])
 
     t = Schema.table(:catalog)
     Codec.rows_block(t, t.cols, rows)
@@ -1901,9 +1833,8 @@ defmodule Hireme.Sequencer do
   defp publish([], state), do: state
 
   defp publish(deltas, state) do
-    state.subs
-    |> Map.values()
-    |> Enum.filter(&is_pid(&1.pid))
+    state
+    |> live_subs()
     |> Enum.group_by(& &1.grants)
     |> Enum.each(fn {grants, subs} ->
       # Sent even empty: its rev tells a client that server-side rows (the
@@ -1988,8 +1919,9 @@ defmodule Hireme.Sequencer do
 
   # ------------------------------------------------------------- leases
 
-  # A key's lease requests spend its write budget; a claim needs a write bit,
-  # and claiming applications the desk's (the session checks the same).
+  # The channel is for writing: a key with no write bit may not take it, and
+  # only one that writes and reads the desk may claim applications (a claim
+  # ranks and names them). A key's requests then spend its write budget.
   # The subscription a request names by its session id (not the caller's pid).
   defp subscriber(state, {kind, sid, _}) when kind in [:claim, :release],
     do: Enum.find_value(state.subs, fn {_, s} -> s.id == sid && s end) || :unknown
@@ -2001,18 +1933,17 @@ defmodule Hireme.Sequencer do
 
   defp lease_allowed({:claim, _, params}, %{key_id: key_id, grants: g}) when key_id != nil do
     claims = params["count"] not in [nil, 0] or params["ids"] not in [nil, []]
+    desk = Schema.table(:applications)
 
     cond do
-      Security.hit(:agent_write, key_id, 1) != :ok ->
-        {:refused, :rate, %{}}
-
       g.write_mask == 0 ->
         {:refused, :scope, %{reason: "the lease is for writing"}}
 
-      claims and
-          not (Grants.write?(g, Schema.table(:applications)) and
-                   Grants.read?(g, Schema.table(:applications))) ->
+      claims and not (Grants.write?(g, desk) and Grants.read?(g, desk)) ->
         {:refused, :scope, %{table: "applications"}}
+
+      Security.hit(:agent_write, key_id, 1) != :ok ->
+        {:refused, :rate, %{}}
 
       true ->
         :ok
@@ -2155,12 +2086,10 @@ defmodule Hireme.Sequencer do
         Codec.gone_block(for id <- ended, do: {t.id, id})
       ])
 
-    for {pid, sub} <- state.subs,
-        is_pid(pid),
+    for %{pid: pid, grants: g} <- live_subs(state),
         pid != opts[:except],
-        Grants.read?(sub.grants, t) do
-      send(pid, {:sequencer, :patch, state.rev, body})
-    end
+        Grants.read?(g, t),
+        do: send(pid, {:sequencer, :patch, state.rev, body})
 
     state
   end

@@ -173,22 +173,18 @@ defmodule HiremeWeb.Wire.Codec do
   defp dict(kind, level) do
     key = {__MODULE__, kind, level}
 
-    case :persistent_term.get(key, nil) do
-      nil ->
-        {:ok, d} = :zstd.dict(:compress, Map.fetch!(@dicts, kind), %{compressionLevel: level})
-        :persistent_term.put(key, d)
-        d
-
-      d ->
-        d
-    end
+    :persistent_term.get(key, nil) ||
+      tap(
+        elem(:zstd.dict(:compress, Map.fetch!(@dicts, kind), %{compressionLevel: level}), 1),
+        &:persistent_term.put(key, &1)
+      )
   end
 
   # A table run's fixed-width columns as byte planes (and a str column's
   # offsets as deltas first), so like bytes sit together for zstd: headers,
   # pads, text and sym/list columns stay as they are. native/wire undoes it.
   defp shuffle(kind, body) when kind in @runs do
-    case Hireme.Kernel.Nif.shuffle(IO.iodata_to_binary(body)) do
+    case Nif.shuffle(IO.iodata_to_binary(body)) do
       nil -> raise ArgumentError, "a table run that does not walk"
       shuffled -> shuffled
     end
@@ -448,6 +444,16 @@ defmodule HiremeWeb.Wire.Codec do
     frame(:OPS, 0, [<<length(ops)::little-32, 0::32>> | Enum.map(ops, &encode_op/1)])
   end
 
+  @doc """
+  An op id for an op the server makes itself (the importer, the keywords
+  backfill): random, so it never repeats across restarts as
+  `unique_integer`'s do, and under 2^63, so SQLite's i64 keeps it as is.
+  """
+  def op_id do
+    <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
+    id
+  end
+
   def encode_op({op_id, verb, flags, subject, target, expect_rev, cells}) do
     v = %{put: 1, drop: 2, command: 3}[verb]
     flags = if expect_rev, do: flags ||| @expect_rev, else: flags - (flags &&& @expect_rev)
@@ -547,9 +553,6 @@ defmodule HiremeWeb.Wire.Codec do
   def cell_type(%{wire: @t_zstr}), do: @t_str
   def cell_type(%{wire: w}), do: w
 
-  @doc "A column's wire type code in BOOT and PATCH."
-  def wire_type(%{wire: w}), do: w
-
   @doc "An enum value's code; `nil` for one the enum does not have."
   def enum_code(enum, value) when is_atom(value),
     do: get_in(@enum_codes, [to_string(enum), value])
@@ -643,9 +646,15 @@ defmodule HiremeWeb.Wire.Codec do
       Enum.map(cols, fn c ->
         key = String.to_atom(c.name)
         wire = converter(c)
-        {c.id, wire_type(c), Enum.map(rows, &wire.(Map.get(&1, key)))}
+        {c.id, c.wire, Enum.map(rows, &wire.(Map.get(&1, key)))}
       end)
     )
+  end
+
+  @doc "The `clock` block: today and now, as the BOOT and the TICK carry them."
+  def clock(now) do
+    t = Schema.table(:clock)
+    rows_block(t, t.cols, [%{today: DateTime.to_date(now), now: now}])
   end
 
   # `to_wire/2` with the column's decisions taken once, not per cell: BOOT

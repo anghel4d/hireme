@@ -259,21 +259,17 @@ defmodule Hireme.Mfa do
   @spec begin_assertion(Session.t()) :: {:ok, map()} | {:error, :rate_limited}
   def begin_assertion(%Session{} = session) do
     as(session, fn ->
-      with :ok <- begun(session), do: {:ok, assertion(session)}
-    end)
-  end
+      with :ok <- begun(session) do
+        keys = passkeys()
 
-  defp assertion(session) do
-    as(session, fn ->
-      keys = passkeys()
+        challenge =
+          WebAuthn.authentication_challenge(
+            Enum.map(keys, &WebAuthn.credential({&1.credential_id, &1.public_key}))
+          )
 
-      challenge =
-        WebAuthn.authentication_challenge(
-          Enum.map(keys, &WebAuthn.credential({&1.credential_id, &1.public_key}))
-        )
-
-      challenge!(session, :webauthn_assert, challenge)
-      WebAuthn.assertion_options(challenge, keys)
+        challenge!(session, :webauthn_assert, challenge)
+        {:ok, WebAuthn.assertion_options(challenge, keys)}
+      end
     end)
   end
 

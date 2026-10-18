@@ -94,12 +94,10 @@ defmodule Hireme.Lease do
 
   @doc "The account's live leases, for the account lens."
   def leases(account_id) do
-    if Sequencer.running?(account_id), do: list_running(account_id), else: []
-  end
-
-  defp list_running(account_id) do
-    case Sequencer.lease(account_id, :list) do
-      {:ok, rows} -> rows
+    with true <- Sequencer.running?(account_id),
+         {:ok, rows} <- Sequencer.lease(account_id, :list) do
+      rows
+    else
       _ -> []
     end
   end
@@ -298,23 +296,16 @@ defmodule Hireme.Lease do
             else: [id]
 
         held = Enum.any?(ids, &(l.sessions[&1].channel or MapSet.size(l.sessions[&1].held) > 0))
-        {:ok, l, released} = revoke_all(l, ids)
+
+        {l, released} =
+          Enum.reduce(ids, {l, []}, fn sid, {l, released} ->
+            {l, more} = drop_claims(l, sid, :all)
+            shut = &Map.merge(&1, %{channel: false, since: nil, revoked: &1.key_id == nil})
+            {update_in(l.sessions[sid], shut), released ++ more}
+          end)
+
         if held, do: {:ok, l, released}, else: {:unchanged, l}
     end
-  end
-
-  defp revoke_all(l, ids) do
-    Enum.reduce(ids, {:ok, l, []}, fn sid, {:ok, l, released} ->
-      {l, more} = drop_claims(l, sid, :all)
-
-      l =
-        update_in(
-          l.sessions[sid],
-          &Map.merge(&1, %{channel: false, since: nil, revoked: &1.key_id == nil})
-        )
-
-      {:ok, l, released ++ more}
-    end)
   end
 
   @doc "The operator paused `key_id` at `since` (its sessions' leases revoked)."

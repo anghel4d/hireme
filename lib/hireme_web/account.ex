@@ -339,21 +339,12 @@ defmodule HiremeWeb.Account do
 
   ## Projections
 
+  @key_fields ~w(id name paused_at read_mask write_mask may_delete last_used_at expires_at
+    revoked_at inserted_at)a
+  @factor_fields ~w(id kind name verified_at last_used_at backup_eligible backed_up transports)a
+
   defp key(k) do
-    k
-    |> Map.take([
-      :id,
-      :name,
-      :paused_at,
-      :read_mask,
-      :write_mask,
-      :may_delete,
-      :last_used_at,
-      :expires_at,
-      :revoked_at,
-      :inserted_at
-    ])
-    |> Map.merge(%{
+    Map.merge(Map.take(k, @key_fields), %{
       display: Keys.display(k),
       preset: Keys.preset_of(k),
       live: Keys.live?(k),
@@ -361,18 +352,7 @@ defmodule HiremeWeb.Account do
     })
   end
 
-  defp factor(f) do
-    Map.take(f, [
-      :id,
-      :kind,
-      :name,
-      :verified_at,
-      :last_used_at,
-      :backup_eligible,
-      :backed_up,
-      :transports
-    ])
-  end
+  defp factor(f), do: Map.take(f, @factor_fields)
 
   # Seconds the session's step-up still holds; 0 when it must step up again.
   defp fresh_for(%Session{} = s) do
