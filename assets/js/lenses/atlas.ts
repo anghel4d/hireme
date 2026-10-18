@@ -36,18 +36,17 @@ const ROUTE: Record<string, [string, string]> = {
   unknown: ["visa unknown", "No citizenship or work-permit figures for this place yet"],
 }
 
-const scale = (xs: (number | null)[]): number => (xs.some((x) => x !== null && x > 1) ? 100 : 1)
 
 function meter(x: number | null, max: number): Html {
   if (x === null) return html`<span class="muted" title="No figure for this place yet">—</span>`
-  return html`<meter min="0" max="${max}" value="${x}" title="${x.toFixed(2)}"></meter>`
+  // A figure is its bar and its number (a zero is a figure, not a gap: its bar is empty, its number 0).
+  return html`<meter min="0" max="${max}" value="${x}"></meter> ${Math.round(max === 1 ? x * 100 : x)}`
 }
 
 function view(): Html {
   const preset = model.address.q.get("preset") ?? ""
   const d = atlas(preset) as Doc | null
   if (!d) return html`<p class="empty">Loading…</p>`
-  const max = scale(d.places.flatMap((p) => [p.fit, ...Object.values(p.parts)]))
   const kind = model.address.q.get("kind") ?? ""
   const places = kind === "" ? d.places : d.places.filter((p) => p.kind === kind)
   return html`<div class="atlas">
@@ -76,9 +75,9 @@ function view(): Html {
       <tbody>${places.map((p) => html`<tr data-key="p${p.id}" class="route-${p.route}">
         <th scope="row">${p.name} <span class="muted">${p.iso2 ?? ""}</span></th>
         <td><span class="tag" title="${ROUTE[p.route]?.[1] ?? ""}">${ROUTE[p.route]?.[0] ?? p.route}</span>${p.speaks ? html` <span class="tag" title="You speak a language spoken here">speaks your language</span>` : EMPTY}</td>
-        <td>${meter(p.fit, max)}${p.fit === null ? EMPTY : html` ${max === 1 ? Math.round(p.fit * 100) : Math.round(p.fit)}`}</td>
-        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, max)}</td>`)}</tr>`)}</tbody></table></div>
-      <p class="hint">— no figure for that place yet. Fit is the weighted mean of the parts a place has.</p>`}
+        <td>${meter(p.fit, 100)}</td>
+        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, 1)}</td>`)}</tr>`)}</tbody></table></div>
+      <p class="hint">— no figure for that place yet. Each part is 0–100 among the places charted; fit is the weighted mean of the parts a place has.</p>`}
   </div>`
 }
 
