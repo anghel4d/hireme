@@ -148,10 +148,10 @@ CREATE TABLE "audit" (
 ) STRICT;
 CREATE INDEX "audit__account_account_id" ON "audit" ("account_id");
 CREATE INDEX "audit__index_id_desc" ON "audit" ("account_id", "id" DESC);
-CREATE TRIGGER "audit__ref_key_id_insert" BEFORE INSERT ON "audit" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
-CREATE TRIGGER "audit__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "audit" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
-CREATE TRIGGER "audit__ref_session_id_insert" BEFORE INSERT ON "audit" WHEN NEW."session_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
-CREATE TRIGGER "audit__ref_session_id_update" BEFORE UPDATE OF "session_id", "account_id" ON "audit" WHEN NEW."session_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
+CREATE TRIGGER "audit__ref_key_id_insert" BEFORE INSERT ON "audit" WHEN NEW."key_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
+CREATE TRIGGER "audit__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "audit" WHEN NEW."key_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.key_id'); END;
+CREATE TRIGGER "audit__ref_session_id_insert" BEFORE INSERT ON "audit" WHEN NEW."session_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
+CREATE TRIGGER "audit__ref_session_id_update" BEFORE UPDATE OF "session_id", "account_id" ON "audit" WHEN NEW."session_id" IS NOT NULL AND NEW."account_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = NEW."session_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref audit.session_id'); END;
 
 CREATE TABLE "outbox" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

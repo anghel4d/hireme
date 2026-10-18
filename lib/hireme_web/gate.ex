@@ -211,13 +211,22 @@ defmodule HiremeWeb.Gate do
               else: []
             )
 
+        # The gate faces the internet and needs only its own settings: every
+        # other variable the node holds (SECRET_KEY_BASE, the cookie, the
+        # mail token) is unset for it, since a Port extends the environment.
+        unset =
+          for {k, _} <- System.get_env(),
+              not String.starts_with?(k, "GATE_"),
+              not List.keymember?(env, k, 0),
+              do: {String.to_charlist(k), false}
+
         port_opts = [
           :binary,
           :exit_status,
           :stderr_to_stdout,
           line: 4096,
           args: args,
-          env: for({k, v} <- env, do: {~c"#{k}", ~c"#{v}"}),
+          env: unset ++ for({k, v} <- env, do: {~c"#{k}", ~c"#{v}"}),
           cd: opts[:cd] || File.cwd!()
         ]
 
@@ -265,9 +274,15 @@ defmodule HiremeWeb.Gate do
         gate_exited("status #{status}")
 
       {:EXIT, _, reason} ->
-        {:os_pid, pid} = Port.info(port, :os_pid)
-        Port.close(port)
-        await_exit("/proc/#{pid}", 150)
+        case Port.info(port, :os_pid) do
+          {:os_pid, pid} ->
+            Port.close(port)
+            await_exit("/proc/#{pid}", 150)
+
+          nil ->
+            :ok
+        end
+
         exit(reason)
     end
   end

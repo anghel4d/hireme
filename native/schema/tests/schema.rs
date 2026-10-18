@@ -43,6 +43,19 @@ fn malformed_lines_are_refused_with_their_line_number() {
         with("table places world server", "  col y enum stage ! = nonsense"),
         with("table places world server", "  metric z f64 !"),
         with("table places world server", "  index account_id name"),
+        with("table places world server", "  natural region where kind = 'contry'"),
+        with("table places world server", "  natural region where kind like 'c%'"),
+        with("table places world server", "  index name global global"),
+        with("table places world server", "  cap -1"),
+        with("table places world server", "  col Bad str ?"),
+        with("table places world server", "  col flag bool ? = maybe"),
+        with("table places world server", "  col n u8 ? = 300"),
+        with("table places world server", "  command poke n:text??"),
+        with("table places world server", "  command poke human_only human_only"),
+        SOURCE.replacen("frame HELLO 1", "frame HELLO 300", 1),
+        SOURCE.replacen("frame WELCOME 2", "frame WELCOME 1", 1),
+        SOURCE.replacen("domain world desk", "domain world world desk", 1),
+        SOURCE.replacen("enum verb put drop command", "enum verb put drop put", 1),
         SOURCE.replacen("\nlayout ", "\n# layout ", 1),
     ];
     for (i, source) in cases.iter().enumerate() {
@@ -52,6 +65,14 @@ fn malformed_lines_are_refused_with_their_line_number() {
     let err = parse(&with("table places world server", "  col nope widget ?")).unwrap_err();
     let line = SOURCE[..SOURCE.find("table places world server").unwrap()].matches('\n').count() + 2;
     assert_eq!(err.line, line);
+}
+
+#[test]
+fn a_server_enum_inserted_anywhere_leaves_the_wire_alone() {
+    let base = parse(SOURCE).unwrap();
+    let inserted = parse(&SOURCE.replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1)).unwrap();
+    assert_eq!(inserted.wire_hash, base.wire_hash);
+    assert_ne!(inserted.schema_rev, base.schema_rev);
 }
 
 #[test]

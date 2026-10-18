@@ -39,9 +39,14 @@ defmodule Hireme.Import do
 
   - Groups run in order, each after the one before it has committed, so a
     later group's refs may name rows an earlier one made.
-  - A row carrying every column of one of its table's natural keys is a
-    keyed put: it updates the row with that key, or makes it. Any other
-    row makes a new row.
+  - A row carrying every column of one of its table's natural keys, with
+    the key's where holding for its values, is a keyed put: it updates the
+    row with that key, or makes it. A row naming a unique key updates the
+    row that holds it. Any other row makes a new row on every import, and
+    every import cites the metrics and prose it writes again.
+  - Numbers past their column's range are refused, never wrapped; a
+    markdown row whose cell count is not its header's is refused (`\\|` is a
+    pipe inside a cell).
   - A ref is a row id or a natural key of the referenced table (an object,
     or for a one-column key its bare value); it is resolved when its group
     runs, and a key that names no row refuses the row (`not_found`).
@@ -85,6 +90,14 @@ defmodule Hireme.Import do
   @spec run(pos_integer(), String.t(), :json | :markdown) :: {:ok, report()} | {:error, term()}
   def run(account_id, body, format) do
     with {:ok, pack} <- parse(body, format) do
+      write(account_id, pack)
+    end
+  catch
+    {:import, reason} -> {:error, reason}
+  end
+
+  defp write(account_id, pack) do
+    begin = fn ->
       actor = %{label: "import", grants: Grants.operator(), key_id: nil}
       initial = %{rev: 0, groups: [], refusals: []}
 
@@ -99,6 +112,8 @@ defmodule Hireme.Import do
       {:ok,
        %{report | groups: Enum.reverse(report.groups), refusals: Enum.reverse(report.refusals)}}
     end
+
+    begin.()
   end
 
   # ------------------------------------------------------------------ parse
@@ -167,18 +182,33 @@ defmodule Hireme.Import do
       |> Enum.reject(fn cells -> Enum.all?(cells, &(&1 =~ ~r/^:?-+:?$/)) end)
 
     case rows do
-      [header | body] -> {table, Enum.map(body, &(Enum.zip(header, &1) |> Map.new())), :text}
+      [header | body] -> {table, Enum.map(body, &row(header, &1)), :text}
       [] -> {table, [], :text}
     end
   end
 
+  # A row with more or fewer cells than the header is refused, not trimmed.
+  defp row(header, cells) when length(header) == length(cells),
+    do: Map.new(Enum.zip(header, cells))
+
+  defp row(header, cells),
+    do: %{"$shape" => "#{length(cells)} cells under a #{length(header)}-column header"}
+
+  # One leading and one trailing pipe frame the row; `\\|` is a pipe in a cell.
   defp cells(line) do
+    line = String.trim(line)
+
+    line =
+      if String.starts_with?(line, "|"), do: binary_part(line, 1, byte_size(line) - 1), else: line
+
+    line =
+      if String.ends_with?(line, "|") and not String.ends_with?(line, "\\|"),
+        do: binary_part(line, 0, byte_size(line) - 1),
+        else: line
+
     line
-    |> String.trim()
-    |> String.trim_leading("|")
-    |> String.trim_trailing("|")
-    |> String.split("|")
-    |> Enum.map(&String.trim/1)
+    |> String.split(~r/(?<!\\)\|/)
+    |> Enum.map(&(&1 |> String.replace("\\|", "|") |> String.trim()))
   end
 
   defp pack(as_of, source, groups),
@@ -231,8 +261,11 @@ defmodule Hireme.Import do
     |> Enum.reduce({0, 0, []}, fn chunk, {rev, written, nacked} ->
       by_op = Map.new(chunk, fn {i, op} -> {op.op_id, i} end)
 
-      {:ok, new_rev, acks, nacks} =
-        Sequencer.call(account_id, actor, Enum.map(chunk, &elem(&1, 1)))
+      {new_rev, acks, nacks} =
+        case Sequencer.call(account_id, actor, Enum.map(chunk, &elem(&1, 1))) do
+          {:ok, new_rev, acks, nacks} -> {new_rev, acks, nacks}
+          {:error, reason} -> throw({:import, reason})
+        end
 
       refused =
         for n <- nacks do
@@ -249,6 +282,16 @@ defmodule Hireme.Import do
     {directives, values} = Map.split_with(row, fn {k, _} -> String.starts_with?(k, "$") end)
     values = if mode == :text, do: Map.reject(values, fn {_, v} -> v == "" end), else: values
 
+    if shape = directives["$shape"] do
+      {:refused, :type, %{row: shape}}
+    else
+      lower_row(account_id, table, pack, directives, values, mode)
+    end
+  end
+
+  defp lower(_account_id, _table, _pack, row, _mode), do: {:refused, :type, %{row: inspect(row)}}
+
+  defp lower_row(account_id, table, pack, directives, values, mode) do
     with {:ok, cells} <- cells(account_id, table, values, mode),
          {:ok, key} <- natural(table, values),
          unique = if(key, do: nil, else: unique(table, values)),
@@ -263,8 +306,6 @@ defmodule Hireme.Import do
       {:ok, op}
     end
   end
-
-  defp lower(_account_id, _table, _pack, row, _mode), do: {:refused, :type, %{row: inspect(row)}}
 
   defp cells(account_id, table, values, mode) do
     Enum.reduce_while(values, {:ok, []}, fn {name, value}, {:ok, acc} ->
@@ -323,13 +364,31 @@ defmodule Hireme.Import do
   defp cast(col, value, _mode) do
     case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, nil} -> {:refused, :type, %{column: col.name, value: value}}
-      {:ok, v} -> {:ok, v}
+      {:ok, v} -> in_range(col, v, value)
       _ -> {:refused, :type, %{column: col.name, value: value}}
     end
   end
 
+  # The wire's integers: a value past its column's range would be truncated
+  # by the encoding, so it is refused; each type's top or bottom is null.
+  @ranges %{
+    u8: 0..255,
+    u32: 0..4_294_967_294,
+    i64: -9_223_372_036_854_775_807..9_223_372_036_854_775_807
+  }
+
+  defp in_range(%{type: t} = col, v, value) when is_map_key(@ranges, t) do
+    if v in Map.fetch!(@ranges, t),
+      do: {:ok, v},
+      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+  end
+
+  defp in_range(_col, v, _value), do: {:ok, v}
+
   # A ref is an id, a natural key object, or (one-column key) its value.
-  defp resolve_ref(_account_id, _target, id, _mode) when is_integer(id) and id > 0, do: {:ok, id}
+  defp resolve_ref(_account_id, _target, id, _mode)
+       when is_integer(id) and id > 0 and id < 4_294_967_295,
+       do: {:ok, id}
 
   defp resolve_ref(account_id, target, value, mode) do
     table = Schema.table(target)
@@ -358,7 +417,7 @@ defmodule Hireme.Import do
 
       key ->
         with {:ok, cells} <- cells(account_id, table, key, mode),
-             {:ok, natural} when natural != nil <- natural(table, key),
+             {:ok, natural} when natural != nil <- ref_key(table, key),
              {:ok, %{id: id}} <- existing(account_id, table, natural, cells) do
           {:ok, id}
         else
@@ -371,16 +430,40 @@ defmodule Hireme.Import do
   # The first natural key whose every column the row names (and whose
   # partial-index condition is the database's to decide).
   defp natural(table, values) do
-    case Enum.find(table.naturals, fn k -> Enum.all?(k.cols, &Map.has_key?(values, &1)) end) do
+    case Enum.find(table.naturals, &names?(&1, values)) do
       nil -> {:ok, nil}
       k -> {:ok, k}
     end
   end
 
+  # A ref names its row by a key's columns; the key's where is the lookup's
+  # (World.get applies it), since a ref carries no other column to judge.
+  defp ref_key(table, key) do
+    case Enum.find(table.naturals ++ table.uniques, fn k ->
+           Enum.sort(k.cols) == Enum.sort(Map.keys(key))
+         end) do
+      nil -> {:ok, nil}
+      k -> {:ok, k}
+    end
+  end
+
+  # A key the row names: every column given, and its where held by the row.
+  defp names?(k, values) do
+    Enum.all?(k.cols, &Map.has_key?(values, &1)) and holds?(Map.get(k, :where_term), values)
+  end
+
+  defp holds?(nil, _values), do: true
+
+  defp holds?({:eq, col, v}, values),
+    do: Map.has_key?(values, col) and to_string(values[col]) == v
+
+  defp holds?({:null, col}, values), do: values[col] in [nil, ""]
+  defp holds?({:not_null, col}, values), do: values[col] not in [nil, ""]
+
   # The first unique key (or unique column) whose every column the row names.
   defp unique(table, values) do
-    keys = table.uniques ++ for(c <- table.cols, c.unique, do: %{cols: [c.name]})
-    Enum.find(keys, fn k -> Enum.all?(k.cols, &Map.has_key?(values, &1)) end)
+    keys = table.uniques ++ for(c <- table.cols, c.unique, do: %{cols: [c.name], where_term: nil})
+    Enum.find(keys, &names?(&1, values))
   end
 
   defp existing(_account_id, _table, nil, _cells), do: {:ok, nil}

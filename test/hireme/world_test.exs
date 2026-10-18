@@ -291,4 +291,59 @@ defmodule Hireme.WorldTest do
                "key" => %{"domain" => "none.example"}
              })
   end
+
+  test "a row dropped between a page's ids and its rows is left out, not an error", %{account: a} do
+    t = tag()
+    ids = for i <- 1..4, do: corp(a.id, %{domain: "#{i}.#{t}.example", name: "D#{i}"})
+    gone = List.last(ids)
+    handler = "drop-#{t}"
+    test_pid = self()
+
+    # After the page query names the ids, the last row goes, as a concurrent
+    # drop would take it.
+    :telemetry.attach(
+      handler,
+      [:hireme, :repo, :query],
+      fn _e, _m, meta, _ ->
+        if self() == test_pid and meta.source == "corporations" and Process.delete(:drop_once) do
+          Repo.query!("DELETE FROM corporations WHERE id = ?", [gone], skip_account: true)
+        end
+      end,
+      nil
+    )
+
+    Process.put(:drop_once, true)
+
+    try do
+      assert {:ok, %{"rows" => rows}} =
+               World.find(a.id, Grants.operator(), %{
+                 "table" => "corporations",
+                 "where" => %{"domain" => %{"like" => t}}
+               })
+
+      assert ids(rows) == ids -- [gone]
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  test "a tampered cursor, an id past int64 or a filter for a key is refused type", %{account: a} do
+    corp(a.id, %{domain: "#{tag()}.example", name: "C"})
+    ctx = %{account_id: a.id, grants: Grants.operator()}
+
+    bad_cursor =
+      ["not a bool", %{"x" => 1}, 1] |> Jason.encode!() |> Base.url_encode64(padding: false)
+
+    wrong_value = [false, %{"x" => 1}, 1] |> Jason.encode!() |> Base.url_encode64(padding: false)
+
+    for params <- [
+          %{"table" => "corporations", "after" => bad_cursor},
+          %{"table" => "corporations", "order" => "name", "after" => wrong_value},
+          %{"table" => "corporations", "id" => 9_223_372_036_854_775_808},
+          %{"table" => "corporations", "key" => %{"domain" => %{"like" => "x"}}}
+        ] do
+      method = if Map.has_key?(params, "after"), do: "find", else: "get"
+      assert {:error, :type, _} = World.call(method, params, ctx), inspect(params)
+    end
+  end
 end

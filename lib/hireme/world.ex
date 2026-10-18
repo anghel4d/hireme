@@ -51,6 +51,12 @@ defmodule Hireme.World do
       "text" -> text(account_id, grants, params)
       _ -> {:error, :not_found, %{method: method}}
     end
+  rescue
+    # A value the checks let through but the database cannot take (a cursor
+    # tampered with, a number past int64) is the caller's mistake, not a
+    # reason to end its session.
+    e in [Ecto.Query.CastError, Ecto.CastError, Exqlite.Error, ArgumentError] ->
+      {:error, :type, %{reason: Exception.message(e)}}
   end
 
   def call(_method, params, _ctx), do: {:error, :type, %{params: inspect(params)}}
@@ -167,7 +173,10 @@ defmodule Hireme.World do
             where(
               from(r in row, limit: ^limit),
               [r],
-              r.id in subquery(from(s in row, select: s.id) |> where(^where))
+              r.id in subquery(
+                from(s in row, where: s.account_id == ^account_id, select: s.id)
+                |> where(^where)
+              )
             ),
           else: from(r in row, limit: ^limit) |> where(^where)
 
@@ -186,7 +195,8 @@ defmodule Hireme.World do
           |> Repo.all()
           |> Map.new(&{&1.id, &1})
 
-        rows = Enum.map(ids, &Map.fetch!(by_id, &1))
+        # A row dropped between the two reads is gone, not an error.
+        rows = Enum.flat_map(ids, &List.wrap(Map.get(by_id, &1)))
 
         next =
           case List.last(keys) do
@@ -497,7 +507,19 @@ defmodule Hireme.World do
     with {:ok, id} <- id(id), do: {:ok, dynamic([r], r.id == ^id)}
   end
 
-  defp identity(grants, table, %{"key" => key}) when is_map(key) and map_size(key) > 0 do
+  defp identity(grants, table, %{"key" => key})
+       when is_map(key) and map_size(key) > 0 and
+              not is_map_key(key, :__struct__) do
+    # A key names values, never a filter.
+    if Enum.any?(Map.values(key), &(is_map(&1) or is_list(&1))),
+      do: {:error, :type, %{table: table.name, key: "values, not filters"}},
+      else: key_identity(grants, table, key)
+  end
+
+  defp identity(_grants, table, _params),
+    do: {:error, :type, %{table: table.name, need: "id or key"}}
+
+  defp key_identity(grants, table, key) do
     keys = table.naturals ++ table.uniques
     unique_cols = for c <- table.cols, c.unique, do: %{cols: [c.name], where_term: nil}
     wanted = Enum.sort(Map.keys(key))
@@ -513,9 +535,6 @@ defmodule Hireme.World do
     end
   end
 
-  defp identity(_grants, table, _params),
-    do: {:error, :type, %{table: table.name, need: "id or key"}}
-
   defp term(_table, nil), do: dynamic(true)
 
   defp term(table, {:eq, col, value}) do
@@ -529,7 +548,9 @@ defmodule Hireme.World do
   defp term(_table, {:not_null, col}),
     do: dynamic([r], not is_nil(field(r, ^String.to_atom(col))))
 
-  defp id(id) when is_integer(id) and id > 0, do: {:ok, id}
+  @int64 9_223_372_036_854_775_807
+
+  defp id(id) when is_integer(id) and id > 0 and id <= @int64, do: {:ok, id}
   defp id(other), do: {:error, :type, %{param: "id", got: inspect(other)}}
 
   defp optional_id(nil), do: {:ok, nil}
@@ -544,7 +565,9 @@ defmodule Hireme.World do
   defp bound(other, _default, _max), do: {:error, :type, %{param: "limit", got: inspect(other)}}
 
   defp non_negative(nil, default, _name), do: {:ok, default}
-  defp non_negative(n, _default, _name) when is_integer(n) and n >= 0, do: {:ok, n}
+
+  defp non_negative(n, _default, _name) when is_integer(n) and n >= 0 and n <= @int64,
+    do: {:ok, n}
 
   defp non_negative(other, _default, name),
     do: {:error, :type, %{param: name, got: inspect(other)}}
@@ -681,10 +704,11 @@ defmodule Hireme.World do
         is_nil(field(r, ^f)) or field(r, ^f) > ^v or (field(r, ^f) == ^v and r.id > ^id)
       )
 
+  # A cursor carries a value of its order column; any other is tampered with.
   defp cast_cursor(col, value) do
     case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, v} -> v
-      _ -> value
+      _ -> raise ArgumentError, "the cursor's value is not a #{col.type} for #{col.name}"
     end
   end
 

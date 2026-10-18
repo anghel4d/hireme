@@ -43,7 +43,7 @@ fn args() -> Result<Args, String> {
     while let Some(flag) = it.next() {
         let v = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
-            "--hash" if v.len() == 64 => a.hash = Some(v),
+            "--hash" if v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()) => a.hash = Some(v),
             "--hash" => return Err("--hash: 64 hex digits".into()),
             "--n" => a.n = v.parse().map_err(|_| "--n: a number")?,
             "--frame" => a.frame = Some(v),

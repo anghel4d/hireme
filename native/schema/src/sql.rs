@@ -136,8 +136,10 @@ pub fn triggers(s: &Schema, t: &Table) -> Vec<IndexDef> {
         if s.table(target).is_none_or(|p| p.global) {
             continue;
         }
+        // A row with no account yet (audit before sign-in) names nothing to hold.
+        let unowned = if t.account_optional { " AND NEW.\"account_id\" IS NOT NULL" } else { "" };
         let check = format!(
-            "WHEN NEW.{col} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {p} WHERE \"id\" = NEW.{col} AND \"account_id\" IS NEW.\"account_id\") BEGIN SELECT RAISE(ABORT, 'ref {t}.{c}'); END;",
+            "WHEN NEW.{col} IS NOT NULL{unowned} AND NOT EXISTS (SELECT 1 FROM {p} WHERE \"id\" = NEW.{col} AND \"account_id\" IS NEW.\"account_id\") BEGIN SELECT RAISE(ABORT, 'ref {t}.{c}'); END;",
             col = q(&c.name),
             p = q(target),
             t = t.name,

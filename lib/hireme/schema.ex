@@ -669,7 +669,13 @@ defmodule Hireme.Schema.Parser do
 
         unless Enum.any?(source.cols, &(&1.name == col)),
           do: raise(ArgumentError, "#{t.name}: its where names no #{t.source} column #{col}")
+
+        term_fits!(source, t.source_term, enums)
       end
+
+      for k <- t.naturals ++ t.uniques ++ t.indexes,
+          k.where_term,
+          do: term_fits!(t, k.where_term, enums)
 
       for c <- keys,
           not MapSet.member?(names, c),
@@ -678,6 +684,25 @@ defmodule Hireme.Schema.Parser do
 
     :ok
   end
+
+  # A where's value must be one its column can hold, or the key never holds.
+  defp term_fits!(t, {:eq, col, v}, enums) do
+    c = Enum.find(t.cols, &(&1.name == col))
+
+    ok =
+      case c && c.type do
+        nil -> true
+        :enum -> v in Map.fetch!(enums, c.target).values
+        :bool -> v in ~w(true false)
+        t when t in [:u8, :u32, :i64, :id, :ref] -> v =~ ~r/^-?[0-9]+$/
+        :f64 -> v =~ ~r/^-?[0-9]+(\.[0-9]+)?$/
+        _ -> true
+      end
+
+    unless ok, do: raise(ArgumentError, "#{t.name}: where #{col} = '#{v}' is no value of #{col}")
+  end
+
+  defp term_fits!(_t, _term, _enums), do: :ok
 
   defp dupes(names, what) do
     case names -- Enum.uniq(names) do
@@ -719,7 +744,7 @@ defmodule Hireme.Schema.Parser do
       Enum.map(model.domains, &"domain #{&1.name} #{&1.bit}") ++
         ["layout #{model.layout}"] ++
         Enum.map(model.frames, &"frame #{&1.name} #{&1.id}") ++
-        Enum.map(enums, &"enum #{&1.id} #{&1.name} #{Enum.join(&1.values, " ")}") ++
+        Enum.map(enums, &"enum #{&1.name} #{Enum.join(&1.values, " ")}") ++
         Enum.flat_map(tables, &table_lines(&1, scope)) ++
         Enum.map(model.commands, &command_line/1)
 

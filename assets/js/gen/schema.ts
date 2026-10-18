@@ -2,8 +2,8 @@
 // Row interfaces hold decoded values: an enum by name, a day as days since
 // 1970-01-01, a time as unix seconds, and a nullable column as T | null.
 
-export const WIRE_HASH = 0xecd7;
-export const SCHEMA_REV = 0xc4801d22;
+export const WIRE_HASH = 0x8ed5;
+export const SCHEMA_REV = 0xa5deffd4;
 export const LAYOUT = 2;
 
 export const DOMAIN = { world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16, system: 0 } as const;

@@ -90,7 +90,7 @@ defmodule Hireme.ImportTest do
     assert Enum.all?(cited, &(&1["source"]["host"] == "stats.example.org"))
   end
 
-  test "importing the same pack again changes nothing it already holds", %{account: a} do
+  test "importing the same pack again leaves every row a key names as it was", %{account: a} do
     t = "#{System.unique_integer([:positive])}"
     body = Jason.encode!(pack(t))
     {:ok, %{refusals: []}} = Import.run(a.id, body, :json)
@@ -184,5 +184,91 @@ defmodule Hireme.ImportTest do
 
     {corps, _} = state(t)
     assert Enum.map(corps, &elem(&1, 1)) == ["One", "Three"]
+  end
+
+  test "a number past its column's range is refused, not wrapped", %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+
+    rows =
+      for {n, i} <- Enum.with_index([5_000_000_000, -2, 4_294_967_296, 4_294_967_294]),
+          do: %{"domain" => "#{i}.#{t}.example", "name" => "N#{i}", "headcount" => n}
+
+    pack = %{"as_of" => "2026-09-01", "tables" => [%{"table" => "corporations", "rows" => rows}]}
+    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
+
+    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{0, :type}, {1, :type}, {2, :type}]
+
+    assert Repo.all(
+             from c in Corporation, where: like(c.domain, ^"%.#{t}.example"), select: c.headcount
+           ) == [4_294_967_294]
+  end
+
+  test "a row names the natural key its own values satisfy", %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+    iso = "Z#{rem(String.to_integer(t), 9)}"
+
+    pack = %{
+      "source" => "https://stats.example.org/#{t}",
+      "tables" => [
+        %{
+          "table" => "places",
+          "rows" => [%{"kind" => "country", "iso2" => iso, "name" => "Country"}]
+        },
+        %{
+          "table" => "places",
+          "rows" => [
+            %{
+              "kind" => "city",
+              "iso2" => iso,
+              "geonames_id" => String.to_integer(t),
+              "name" => "City",
+              "notes" => "a city"
+            }
+          ]
+        }
+      ]
+    }
+
+    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
+    assert report.refusals == []
+
+    kinds = Repo.all(from p in Place, where: p.iso2 == ^iso, select: p.kind, order_by: p.id)
+    assert kinds == [:country, :city]
+  end
+
+  test "a markdown row unlike its header is refused, and an escaped pipe stays in its cell", %{
+    account: a
+  } do
+    t = "#{System.unique_integer([:positive])}"
+
+    markdown = """
+    ## corporations
+    | domain | name |
+    | --- | --- |
+    | a.#{t}.example | A \\| B |
+    | b.#{t}.example | B | extra |
+    """
+
+    {:ok, report} = Import.run(a.id, markdown, :markdown)
+    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{1, :type}]
+
+    assert Repo.one(from c in Corporation, where: c.domain == ^"a.#{t}.example", select: c.name) ==
+             "A | B"
+  end
+
+  test "an import into an account with no sequencer answers an error" do
+    assert {:error, _} =
+             Import.run(
+               987_654_321,
+               Jason.encode!(%{
+                 "tables" => [
+                   %{
+                     "table" => "corporations",
+                     "rows" => [%{"domain" => "x.example", "name" => "X"}]
+                   }
+                 ]
+               }),
+               :json
+             )
   end
 end

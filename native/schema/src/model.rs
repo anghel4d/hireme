@@ -1097,6 +1097,10 @@ fn validate(s: &Schema) -> Result<(), Error> {
             if source.col(term.col()).is_none() {
                 return fail(0, format!("{}: its where names no {src} column {}", t.name, term.col()));
             }
+            term_fits(s, source, term)?;
+        }
+        for term in t.naturals.iter().chain(t.uniques.iter()).filter_map(|k| k.term.as_ref()).chain(t.indexes.iter().filter_map(|i| i.term.as_ref())) {
+            term_fits(s, t, term)?;
         }
         let keys = t
             .naturals
@@ -1112,6 +1116,27 @@ fn validate(s: &Schema) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+// A where's value must be one its column can hold, or the key never holds.
+fn term_fits(s: &Schema, t: &Table, term: &Where) -> Result<(), Error> {
+    let Where::Eq(col, v) = term else { return Ok(()) };
+    let Some(c) = t.col(col) else { return Ok(()) };
+    let digits = |x: &str| {
+        let d = x.strip_prefix('-').unwrap_or(x);
+        !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
+    };
+    let ok = match c.ty {
+        Type::Enum => s.enum_(c.target.as_deref().unwrap_or("")).is_some_and(|e| e.values.contains(v)),
+        Type::Bool => v == "true" || v == "false",
+        Type::U8 | Type::U32 | Type::I64 | Type::Id | Type::Ref => digits(v),
+        Type::F64 => {
+            let (w, f) = v.split_once('.').map_or((v.as_str(), None), |(w, f)| (w, Some(f)));
+            digits(w) && f.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+        }
+        _ => true,
+    };
+    if ok { Ok(()) } else { fail(0, format!("{}: where {col} = '{v}' is no value of {col}", t.name)) }
 }
 
 // ------------------------------------------------------------------ hashes
@@ -1163,7 +1188,7 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
     };
     for e in &s.enums {
         if scope == Scope::Full || wire_enum(&e.name) {
-            line(format!("enum {} {} {}", e.id, e.name, e.values.join(" ")));
+            line(format!("enum {} {}", e.name, e.values.join(" ")));
         }
     }
     for t in &s.tables {
