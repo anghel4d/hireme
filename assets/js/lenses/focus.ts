@@ -121,8 +121,8 @@ function prose(a: Row, appId: number): Html {
           <h2>${title}</h2>${moved ? html`<p class="notice" role="alert">This application changed after you opened it; saving will be refused rather than overwrite the change. Copy your text, cancel, and reopen.</p>` : EMPTY}
           <textarea name="value" rows="10" data-autofocus>${v().editText.startsWith("\n") ? `\n${v().editText}` : v().editText}</textarea>
           <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
-      : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}">Edit</button></h2>
-          ${t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
+      : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}">${t !== "" ? "Edit" : "Write"}</button></h2>
+          ${t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">No ${title} yet.</p>`}</section>`
   })}`
 }
 
@@ -143,9 +143,9 @@ function around(a: Row, appId: number): Html {
 function events(d: Doc, appId: number): Html {
   const stage = str(d.application.stage)
   return html`<section class="card" data-key="events"><h2>Events</h2>
-    <form class="row" data-submit="note" data-act="note" data-id="${appId}" data-stage="${stage}"><input name="body" placeholder="Add a note to the history" aria-label="Note" required>
+    <form class="row grow" data-submit="note" data-act="note" data-id="${appId}" data-stage="${stage}"><input name="body" placeholder="Add a note to the history" aria-label="Note" required>
       <button>Add</button></form>
-    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf(e.body)}
+    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${str(e.kind) === "stage" ? textOf(e.body).replace(/_/g, " ") : textOf(e.body)}
       <span class="muted">${str(e.actor)}${e.key_id ? ` · key ${str(e.key_id)}` : ""}</span></li>`)}</ol></section>`
 }
 
@@ -170,7 +170,7 @@ function view(): Html {
       <div class="col">${score(d)}${coverage(d)}${cv(d)}${listing(a, appId)}</div>
       <div class="col">${around(a, appId)}${prose(a, appId)}${events(d, appId)}
         <section class="card" data-key="override"><h2>Heat override</h2>
-          ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row" data-submit="override" data-act="override" data-id="${appId}">
+          ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row grow" data-submit="override" data-act="override" data-id="${appId}">
             <input name="reason" placeholder="Why this one goes over the cap" aria-label="Reason" required><button>Override</button></form>`}</section>
       </div>
     </div>
