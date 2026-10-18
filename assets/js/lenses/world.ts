@@ -43,6 +43,24 @@ function order(t: TableDef): [string, string] | null {
   return t.cols.some((c) => c.name === name) ? [name, s.startsWith("-") ? "desc" : "asc"] : null
 }
 
+/** Re-reads the rows already shown, one page at a time from the start, without closing an open editor. */
+async function reread(): Promise<void> {
+  const t = current()
+  const key = fetchKey()
+  const params: Record<string, unknown> = { table: t.name, limit: Math.max(PAGE, Math.min(500, v().rows.length)) }
+  const o = order(t)
+  if (o) params.order = o
+  const q = model.address.q.get("q") ?? ""
+  const search = SEARCH[t.name as Shown]
+  if (q !== "" && search) params.where = { [search]: { prefix: q } }
+  try {
+    const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
+    if (fetchKey() === key) patch({ rows: r.rows, next: r.next ?? null })
+  } catch {
+    // The next advance tries again.
+  }
+}
+
 async function fetchRows(more: boolean): Promise<void> {
   const t = current()
   const key = fetchKey()
@@ -315,6 +333,9 @@ const world: View = {
     if (v().key !== fetchKey()) void fetchRows(false)
   },
   act,
+  refresh() {
+    if (v().key === fetchKey() && !v().loading) void reread()
+  },
   key(ev) {
     if (ev.key === "Escape" && (v().edit !== "" || v().cites || v().text)) {
       patch({ edit: "", cites: null, text: null })

@@ -438,6 +438,9 @@ export class Wire {
   private ended = false
   private nextCall = 1
   private readonly calls = new Map<number, { resolve: (r: Reply) => void; reject: (e: Error) => void }>()
+  /** RPCs asked for before this session's WELCOME, sent the moment it lands. */
+  private early: Bytes[] = []
+  private welcomed = false
 
   constructor(private readonly hooks: Hooks) {
     const m = meta()
@@ -468,8 +471,11 @@ export class Wire {
   call(method: string, params: unknown = {}): Promise<Reply> {
     const id = this.nextCall++
     return new Promise((resolve, reject) => {
-      if (!this.send(rpc(this.hash, id, method, params))) return reject(new Error("not connected"))
+      if (this.ended) return reject(new Error("the session has ended"))
       this.calls.set(id, { resolve, reject })
+      const f = rpc(this.hash, id, method, params)
+      // Before WELCOME (or while reconnecting) the call waits rather than fails: a lens may ask on its first draw.
+      if (!this.welcomed || !this.send(f)) this.early.push(f)
     })
   }
 
@@ -477,6 +483,9 @@ export class Wire {
   end(): void {
     this.ended = true
     this.close_?.()
+    for (const c of this.calls.values()) c.reject(new Error("the session has ended"))
+    this.calls.clear()
+    this.early = []
   }
 
   private credential(): Bytes {
@@ -610,6 +619,10 @@ export class Wire {
       return
     }
     this.hooks.frame(f, h)
+    if (h.kind === KIND.WELCOME) {
+      this.welcomed = true
+      for (const g of this.early.splice(0)) this.send(g)
+    }
     if (this.held && (h.flags & FLAG.END) !== 0) {
       const held = this.held
       this.held = null
@@ -622,9 +635,14 @@ export class Wire {
     this.send_ = null
     this.close_ = null
     this.held = null
+    this.welcomed = false
     clearInterval(this.pinger)
-    for (const c of this.calls.values()) c.reject(new Error(why))
-    this.calls.clear()
+    // A call in flight may or may not have run; its caller decides. Queued ones wait for the next session.
+    for (const [id, c] of this.calls) {
+      if (this.early.some((f) => new DataView(f.buffer, f.byteOffset + HEADER, 4).getUint32(0, true) === id)) continue
+      c.reject(new Error(why))
+      this.calls.delete(id)
+    }
     this.retry(why)
   }
 

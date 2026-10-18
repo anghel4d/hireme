@@ -135,8 +135,16 @@ function ingest(f: Uint8Array): void {
   if (withBytes(f, (p, n) => k!.ingest(p, n)) < 0) notice("error", "A frame did not apply; reconnecting will resync.")
 }
 
+let advanced: () => void = () => {}
+
+/** app.ts: called when a PATCH moves the account's rev, so server-side reads go stale. */
+export function onAdvance(fn: () => void): void {
+  advanced = fn
+}
+
 /** Every frame the shell does not handle itself. */
 export function frame(f: Bytes, h: Header): void {
+  if (h.kind === KIND.PATCH && h.rev > rowsRev && rowsRev !== 0n) advanced()
   if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
   if (h.kind === KIND.ACK) for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
   if (h.kind === KIND.NACK) for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })

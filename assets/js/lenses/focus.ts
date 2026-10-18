@@ -224,6 +224,15 @@ const focus: View = {
     if (appId !== 0 && appId !== v().id) focus.enter?.()
   },
   act,
+  refresh() {
+    const appId = id()
+    if (appId === 0) return
+    void rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
+      .then((r) => patch({ messages: r.rows }))
+      .catch(() => {})
+    const corp = v().corporation
+    if (corp) void rpc<{ row: Row }>("get", { table: "corporations", id: Number(corp.id) }).then((r) => patch({ corporation: r.row })).catch(() => {})
+  },
   key(ev) {
     if (ev.key === "Escape") {
       if (v().edit !== "") patch({ edit: "" })

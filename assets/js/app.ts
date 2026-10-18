@@ -30,6 +30,8 @@ export interface View {
   act?(name: string, el: HTMLElement, ev: Event): void
   /** After every morph: a lens that owns subtrees (the board's cards) writes them here. */
   after?(root: HTMLElement): void
+  /** Server-side rows may have moved (a PATCH advanced the rev): re-read what is shown, keeping what is being edited. */
+  refresh?(): void
   /** A key with no focused field; true when handled. */
   key?(ev: KeyboardEvent): boolean
 }
@@ -174,6 +176,14 @@ const wire = new Wire({
   hello: () => ({ snapshotRev: kernel.snapshotRev(), schemaRev: 0n, label: navigator.userAgent.slice(0, 120) }),
 })
 kernel.attach(wire)
+
+// Server-side tables never ride PATCH as rows; a PATCH that advanced the rev
+// says they may have moved, so the current lens re-reads, at most every 400 ms.
+let refreshing = 0
+kernel.onAdvance(() => {
+  clearTimeout(refreshing)
+  refreshing = window.setTimeout(() => VIEWS[model.address.lens]?.refresh?.(), 400)
+})
 
 void (async () => {
   await hw?.ready

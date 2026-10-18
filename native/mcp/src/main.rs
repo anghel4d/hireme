@@ -230,12 +230,20 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
     }
 }
 
-/// Re-reads subscribed server-side rows; a moved rev is an update.
+/// A fallback for a quiet session: subscribed server-side rows are re-read on a slow timer too.
 async fn poll(app: Arc<App>) {
     let mut tick = tokio::time::interval(POLL);
     loop {
         tick.tick().await;
-        let Some(cat) = app.catalog.read().await.clone() else { continue };
+        app.recheck().await;
+    }
+}
+
+impl App {
+    /// Re-reads subscribed server-side rows; a moved rev is an update.
+    async fn recheck(&self) {
+        let Some(cat) = self.catalog.read().await.clone() else { return };
+        let app = self;
         let targets: Vec<(String, String, u32, u64)> = app
             .watches
             .lock()
@@ -851,6 +859,13 @@ impl App {
             return;
         }
         let boot = f.kind() == wire::BOOT;
+        // Server-side rows never ride PATCH; a PATCH that moved the rev says they may have moved.
+        if f.kind() == wire::PATCH {
+            let advanced = f.header.rev > self.rev.swap(f.header.rev.max(self.rev.load(Ordering::Relaxed)), Ordering::Relaxed);
+            if advanced {
+                self.recheck().await;
+            }
+        }
         let mut moved: HashSet<(u16, u32)> = HashSet::new();
         if !boot {
             let Ok(body) = f.body() else { return };

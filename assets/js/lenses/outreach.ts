@@ -33,7 +33,8 @@ async function fetchContacts(more: boolean): Promise<void> {
   if (corp > 0) where.corporation_id = corp
   const params: Record<string, unknown> = { table: "contacts", order: ["last_touch_on", "desc"], limit: PAGE, where }
   if (more && v().next !== null) params.after = v().next
-  patch({ loading: true, ...(more ? {} : { key, contacts: [], next: null }) })
+  // A refetch of the same list keeps the rows on screen until the answer replaces them.
+  patch({ loading: true, ...(more || key === v().key ? {} : { key, contacts: [], next: null }) })
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
     if (listKey() !== key) return
@@ -246,6 +247,10 @@ const outreach: View = {
     }
   },
   act,
+  refresh() {
+    if (v().edit === "" && !v().loading) void fetchContacts(false)
+    void fetchMessages()
+  },
 }
 
 export default outreach
