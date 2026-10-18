@@ -307,11 +307,11 @@ const world: View = {
   view,
   enter() {
     if (!TABLES_SHOWN.includes(model.address.sub as Shown)) return go({ sub: "corporations" }, true)
-    // A new table, sort or search shows its first page; a new table also closes the last one's panels.
+    // A new table, sort or search shows its first page with no editor; a new table closes its panels too.
     const fresh = model.address.sub !== shownTable
     shownTable = model.address.sub
     if (fresh) patch({ limit: PAGE, edit: "", cites: null, text: null })
-    else if (v().limit !== PAGE) patch({ limit: PAGE })
+    else if (v().limit !== PAGE || v().edit !== "") patch({ limit: PAGE, edit: "" })
   },
   act,
   key(ev) {

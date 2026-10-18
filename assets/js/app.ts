@@ -160,6 +160,7 @@ function actOn(ev: Event): void {
   try {
     VIEWS[model.address.lens]?.act?.(name, el, ev)
   } catch (e) {
+    if (!(e instanceof kernel.Refused)) console.error("hireme: an action failed", e)
     kernel.failed(e)
   }
 }
@@ -200,7 +201,7 @@ function frame(f: Bytes, h: Header): void {
       kernel.setGrants(w.readMask, w.writeMask, w.mayDelete)
       set({ writeMask: w.writeMask, sessionId: Number(w.sessionId), rev: w.accountRev, link: "open" })
       kernel.resend()
-      // After a reconnect the lens re-reads what it shows (and the account lens parks its watch again).
+      // After a reconnect the lens re-reads what it shows.
       if (++welcomes > 1) refresh()
       return
     }

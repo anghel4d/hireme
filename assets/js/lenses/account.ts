@@ -37,8 +37,7 @@ const num = (x: unknown): number => (typeof x === "number" ? x : Number(x ?? 0))
 const BITS: Record<string, number> = { world: DOMAIN.world, desk: DOMAIN.desk, mail: DOMAIN.mail, lanes: DOMAIN.lanes, corpus: DOMAIN.corpus }
 
 const maskNames = (mask: number): string => {
-  const b = BITS
-  const on = DOMAINS.filter((d) => (mask & (b[d] ?? 0)) !== 0)
+  const on = DOMAINS.filter((d) => (mask & (BITS[d] ?? 0)) !== 0)
   return on.length === 0 ? "none" : on.length === DOMAINS.length ? "all" : on.join(", ")
 }
 
@@ -61,12 +60,21 @@ const time = (x: unknown): Html => (str(x) === "" ? EMPTY : html`<time datetime=
 /** A step-up proof's life (Security's step_up_window): sensitive changes need one this fresh. */
 const STEP_UP_S = 300
 const ALL = DOMAIN.world | DOMAIN.desk | DOMAIN.mail | DOMAIN.lanes | DOMAIN.corpus
-const PRESET_MASKS: Record<string, { read_mask: number; write_mask: number }> = {
-  read_only: { read_mask: ALL, write_mask: 0 },
-  write_only: { read_mask: 0, write_mask: ALL },
-  read_write: { read_mask: ALL, write_mask: ALL },
+/** Each preset's masks (Grants.preset). */
+const PRESET_MASKS: Record<string, { read: number; write: number }> = { read_only: { read: ALL, write: 0 }, write_only: { read: 0, write: ALL }, read_write: { read: ALL, write: ALL } }
+/** Up to `limit` rows of a replica view, in find's pages of 500. */
+function rowsOf(table: string, params: Record<string, unknown> = {}, limit = 500): Row[] {
+  const out: Row[] = []
+  let after: unknown = null
+  do {
+    const r = read<{ rows: Row[]; next: unknown }>("find", { table, ...params, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
+    out.push(...r.rows)
+    after = r.next ?? null
+  } while (after !== null && out.length < limit)
+  return out
 }
-const rowsOf = (table: string, params: Record<string, unknown> = {}): Row[] => read<{ rows: Row[] }>("find", { table, limit: 500, ...params }).rows
+/** A session lapses a day after sign-in or an hour idle (Security's session_ttl and session_idle). */
+const IDLE_S = 3600
 const later = (x: unknown): boolean => str(x) !== "" && Date.parse(str(x)) > Date.now()
 
 /**
@@ -78,20 +86,25 @@ function overview(): Row | null {
   try {
     // acct_info is one wire row with no id column (find orders by id): read its first row's cells.
     const at = ids("acct_info")[0]
-    const info: Row = at === undefined ? {} : { name: value("acct_info", at, "name"), status: value("acct_info", at, "status"), recovery_codes_left: value("acct_info", at, "recovery_codes_left") }
+    if (at === undefined) return null
+    const info: Row = { name: value("acct_info", at, "name"), status: value("acct_info", at, "status"), recovery_codes_left: value("acct_info", at, "recovery_codes_left") }
     const factors = rowsOf("acct_factors")
-    const sessions: Row[] = rowsOf("acct_sessions").map((x) => ({ ...x, current: num(x.id) === model.sessionId }))
+    // The view keeps every unrevoked session; the page lists the live ones, the latest seen first.
+    const sessions: Row[] = rowsOf("acct_sessions")
+      .filter((x) => later(x.expires_at) && Date.parse(str(x.last_seen_at)) > Date.now() - IDLE_S * 1000)
+      .sort((a, b) => str(b.last_seen_at).localeCompare(str(a.last_seen_at)))
+      .map((x) => ({ ...x, current: num(x.id) === model.sessionId }))
     const me = sessions.find((x) => x.current)
     // A step-up is the factor's proof when the account has one, the sign-in's when it has none.
     const proof = Date.parse(str(factors.length > 0 ? me?.mfa_at : me?.authenticated_at))
     const keys = rowsOf("acct_keys", { order: ["id", "desc"] }).map((k) => {
-      const preset = k.may_delete === true ? undefined : Object.keys(PRESET_MASKS).find((p) => PRESET_MASKS[p]!.read_mask === num(k.read_mask) && PRESET_MASKS[p]!.write_mask === num(k.write_mask))
+      const preset = k.may_delete === true ? undefined : Object.keys(PRESET_MASKS).find((p) => PRESET_MASKS[p]!.read === num(k.read_mask) && PRESET_MASKS[p]!.write === num(k.write_mask))
       return { ...k, display: `hm_${str(k.prefix)}…`, preset: preset ?? "custom", live: str(k.revoked_at) === "" && (str(k.expires_at) === "" || later(k.expires_at)), paused: str(k.paused_at) !== "" }
     })
     const leases = rowsOf("leases").map((l) => ({ ...l, ids: str(l.held).split("\u001f").filter((x) => x !== "") }))
     return {
       account: { name: info.name, status: info.status },
-      fresh_for: Number.isNaN(proof) ? 0 : Math.max(0, STEP_UP_S - (Date.now() - proof) / 1000),
+      fresh_for: Number.isNaN(proof) ? 0 : Math.min(STEP_UP_S, Math.max(0, STEP_UP_S - (Date.now() - proof) / 1000)),
       recovery_codes_left: info.recovery_codes_left,
       identities: rowsOf("acct_identities"),
       factors,
@@ -178,19 +191,11 @@ function reveal(method: string, r: Row): void {
   }
 }
 
-function fields(form: HTMLFormElement): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [k, val] of new FormData(form)) out[k] = String(val)
-  return out
-}
+const fields = (form: HTMLFormElement): Record<string, string> => Object.fromEntries([...new FormData(form)].map(([k, x]) => [k, String(x)]))
 
 type Draft = NonNullable<AccountView["masks"]>
 
-/** A preset's masks (Grants.preset). */
-function presetMasks(preset: string): { read: number; write: number } {
-  const p = PRESET_MASKS[preset]
-  return { read: num(p?.read_mask), write: num(p?.write_mask) }
-}
+const presetMasks = (preset: string): { read: number; write: number } => PRESET_MASKS[preset] ?? { read: 0, write: 0 }
 
 /** The form's access: what was chosen in it, or what it opened with. */
 function draft(form: string, read: number, write: number, preset: string, mayDelete: boolean): Draft {
@@ -199,14 +204,10 @@ function draft(form: string, read: number, write: number, preset: string, mayDel
 }
 
 /** The masks a draft grants: a preset's own, or the custom checkboxes. */
-function grants(d: Draft): { read: number; write: number } {
-  return d.preset === "custom" ? { read: d.read, write: d.write } : presetMasks(d.preset)
-}
+const grants = (d: Draft): { read: number; write: number } => (d.preset === "custom" ? { read: d.read, write: d.write } : presetMasks(d.preset))
 
-function masksFrom(d: Draft): Record<string, unknown> {
-  if (d.preset !== "custom") return { preset: d.preset, may_delete: d.mayDelete }
-  return { read_mask: d.read, write_mask: d.write, may_delete: d.mayDelete }
-}
+const masksFrom = (d: Draft): Record<string, unknown> =>
+  d.preset !== "custom" ? { preset: d.preset, may_delete: d.mayDelete } : { read_mask: d.read, write_mask: d.write, may_delete: d.mayDelete }
 
 /** The form's controls, read back into its draft after any change. */
 function redraft(form: HTMLFormElement, prev: Draft): Draft {
@@ -215,12 +216,11 @@ function redraft(form: HTMLFormElement, prev: Draft): Draft {
   if (preset !== "custom") return { ...prev, preset, mayDelete }
   // Turning to custom starts from what the previous preset granted.
   const start = prev.preset === "custom" ? null : presetMasks(prev.preset)
-  const b = BITS
   let read = 0
   let write = 0
   for (const d of DOMAINS) {
-    if (start ? (start.read & (b[d] ?? 0)) !== 0 : (form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= b[d] ?? 0
-    if (start ? (start.write & (b[d] ?? 0)) !== 0 : (form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= b[d] ?? 0
+    if (start ? (start.read & (BITS[d] ?? 0)) !== 0 : (form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= BITS[d] ?? 0
+    if (start ? (start.write & (BITS[d] ?? 0)) !== 0 : (form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= BITS[d] ?? 0
   }
   return { ...prev, preset, read, write, mayDelete }
 }
@@ -248,7 +248,6 @@ async function link(provider: string, email?: string): Promise<void> {
  * all drawn from the form's draft before anything is minted.
  */
 function maskPicker(prefix: string, read: number, write: number, preset: string, mayDelete: boolean): Html {
-  const b = BITS
   const d = draft(prefix, read, write, preset, mayDelete)
   const g = grants(d)
   const custom = d.preset === "custom"
@@ -260,8 +259,8 @@ function maskPicker(prefix: string, read: number, write: number, preset: string,
       <legend>${custom ? "Choose per domain" : "What this preset grants"}</legend>
       <table class="grid compact"><thead><tr><th></th>${DOMAINS.map((x) => html`<th scope="col">${x}</th>`)}</tr></thead>
       <tbody>
-        <tr><th scope="row">read</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="r_${x}" aria-label="read ${x}"${flag("checked", (g.read & (b[x] ?? 0)) !== 0)}></td>`)}</tr>
-        <tr><th scope="row">write</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="w_${x}" aria-label="write ${x}"${flag("checked", (g.write & (b[x] ?? 0)) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">read</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="r_${x}" aria-label="read ${x}"${flag("checked", (g.read & (BITS[x] ?? 0)) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">write</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="w_${x}" aria-label="write ${x}"${flag("checked", (g.write & (BITS[x] ?? 0)) !== 0)}></td>`)}</tr>
       </tbody></table>
     </fieldset>
     <label class="check"><input type="checkbox" name="may_delete"${flag("checked", d.mayDelete)}> may delete rows</label>
@@ -457,7 +456,7 @@ function audit(): Html {
   const tab = (view: "security" | "activity", label: string) =>
     html`<button type="button" class="chip${a?.view === view ? " on" : ""}" aria-pressed="${String(a?.view === view)}" data-act="audit" data-view="${view}">${label}</button>`
   // The replica holds the newest events (acct_audit); each view is a filter of them, newest first.
-  const all = a ? rowsOf("acct_audit", { where: { security: a.view === "security" }, order: ["id", "desc"], limit: Math.min(500, a.limit + 1) }) : []
+  const all = a ? rowsOf("acct_audit", { where: { security: a.view === "security" }, order: ["id", "desc"] }, a.limit + 1) : []
   const events = all.slice(0, a?.limit ?? 0)
   return html`<section class="card" data-key="audit"><h2>Audit</h2>
     ${a === null ? html`<button type="button" data-act="audit" data-view="security">Show security events</button>` : html`

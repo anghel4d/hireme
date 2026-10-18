@@ -174,11 +174,10 @@ function act(name: string, el: HTMLElement): void {
       const f = form(el)
       const email = f.email
       // Predicted: the contact is listed now and the form closes (a local refusal threw here and kept it
-      // open); the sequencer's refusal rolls it back and says why. Opened unless another was picked since.
-      const was = selected()
+      // open); the sequencer's refusal rolls it back and says why. Opened unless a contact is open by then.
       void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
-          if (model.address.lens === "outreach" && selected() === was) query("contact", String(r.id))
+          if (model.address.lens === "outreach" && selected() === 0) query("contact", String(r.id))
         })
         .catch(failed)
       return patch({ edit: "" })
