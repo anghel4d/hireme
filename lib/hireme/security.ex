@@ -1,0 +1,183 @@
+defmodule Hireme.RateLimit do
+  @moduledoc false
+  # Fixed-window counters in ETS, one table per node. `Hireme.Security`
+  # is the only caller.
+  use Hammer, backend: :ets
+end
+
+defmodule Hireme.Security do
+  @moduledoc """
+  The security policy in one place, and the primitives it is built on.
+
+  Numbers answer the standards current on 2026-10-18: NIST SP 800-63B-4
+  (July 2025) at assurance level 2, OWASP ASVS 5.0 for sessions and
+  factors, CIS Controls v8.1 for MFA and logging, WebAuthn Level 3. Each
+  constant names the clause it answers. Every throttle is named here and
+  counted through `limit/2` or `hit/3`; no other module holds a number
+  that bounds an attacker.
+
+  Primitives: CSPRNG tokens, SHA-256, constant-time comparison, base62
+  text for keys, a CRC shape check, and authenticated encryption for
+  secrets that must be read back (a TOTP seed, a ceremony in flight).
+  """
+
+  @base62 "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+  ## Sessions and ceremonies
+
+  # NIST SP 800-63B-4 Sec. 2.2.3 (AAL2): reauthenticate at least every 24 h
+  # and after at most 1 h of inactivity. ASVS 7.3.1, 7.3.2.
+  @spec session_lifetime() :: pos_integer()
+  def session_lifetime, do: 24 * 60 * 60
+
+  @spec session_idle() :: pos_integer()
+  def session_idle, do: 60 * 60
+
+  # ASVS 7.5.1, 7.5.3: re-authenticate before a sensitive change; a second
+  # factor presented within this window counts.
+  @spec step_up_window() :: pos_integer()
+  def step_up_window, do: 5 * 60
+
+  # A ceremony in flight (WebAuthn challenge, pending TOTP seed).
+  @spec challenge_ttl() :: pos_integer()
+  def challenge_ttl, do: 5 * 60
+
+  # A mailed sign-in link: one use, short-lived.
+  @spec magic_link_ttl() :: pos_integer()
+  def magic_link_ttl, do: 10 * 60
+
+  # A wire ticket: minted by the signed-in page, spent by one HELLO.
+  @spec ticket_ttl() :: pos_integer()
+  def ticket_ttl, do: 60
+
+  # NIST SP 800-63B-4 Sec. 3.2.2: at most 100 consecutive failures on one
+  # authenticator before it is disabled.
+  @spec lockout_failures() :: pos_integer()
+  def lockout_failures, do: 100
+
+  @spec api_keys_per_account() :: pos_integer()
+  def api_keys_per_account, do: 100
+
+  ## The wire carrier
+
+  # Liveness is the carrier: a PING every 15 s, and 45 s without any frame
+  # ends the session and with it the lease (SECURITY.md, "Carrier").
+  @spec ping_interval() :: pos_integer()
+  def ping_interval, do: 15_000
+
+  @spec carrier_timeout() :: pos_integer()
+  def carrier_timeout, do: 45_000
+
+  ## Named limits
+
+  # The window in ms and how many fit in it. ASVS 6.3.1, 6.6.3: brute force
+  # on any factor or credential stops here. `agent_write` is the sequencer's
+  # per-key op budget (docs/rebuild.md, "The sequencer's checks", 6).
+  @limits %{
+    link_address: {:timer.minutes(10), 5},
+    link_peer: {:timer.minutes(10), 20},
+    redeem_peer: {:timer.minutes(10), 20},
+    mfa_account: {:timer.minutes(15), 10},
+    api_key_peer: {:timer.minutes(1), 20},
+    ticket_peer: {:timer.minutes(1), 60},
+    agent_write: {:timer.minutes(1), 600}
+  }
+
+  @doc "The named limits, for SECURITY.md and the account lens."
+  @spec limits() :: %{atom() => {pos_integer(), pos_integer()}}
+  def limits, do: @limits
+
+  @doc "Count one attempt under the named limit for `key`; refuse past its cap."
+  @spec limit(atom(), term()) :: :ok | {:error, :rate_limited}
+  def limit(name, key) do
+    case hit(name, key, 1) do
+      :ok -> :ok
+      {:error, _retry_ms} -> {:error, :rate_limited}
+    end
+  end
+
+  @doc """
+  Count `n` under the named limit for `key`. A refusal says how many ms
+  remain in the window; the refused count is not taken back, so a caller
+  that keeps hammering stays refused.
+  """
+  @spec hit(atom(), term(), pos_integer()) :: :ok | {:error, non_neg_integer()}
+  def hit(name, key, n) when is_map_key(@limits, name) and is_integer(n) and n > 0 do
+    {scale_ms, max} = Map.fetch!(@limits, name)
+
+    case Hireme.RateLimit.hit("#{name}:#{key}", scale_ms, max, n) do
+      {:allow, _} -> :ok
+      {:deny, retry_ms} -> {:error, retry_ms}
+    end
+  end
+
+  ## Primitives
+
+  @doc "`bytes` of CSPRNG output; 32 is 256 bits (ASVS 7.2.3 asks for 128)."
+  @spec token(pos_integer()) :: binary()
+  def token(bytes \\ 32), do: :crypto.strong_rand_bytes(bytes)
+
+  @spec hash(binary()) :: binary()
+  def hash(binary) when is_binary(binary), do: :crypto.hash(:sha256, binary)
+
+  @doc "Constant-time equality; different lengths are unequal without comparing."
+  @spec equal?(binary(), binary()) :: boolean()
+  def equal?(a, b) when is_binary(a) and is_binary(b) and byte_size(a) == byte_size(b),
+    do: :crypto.hash_equals(a, b)
+
+  def equal?(_, _), do: false
+
+  @doc "A token as URL text, and back."
+  @spec encode(binary()) :: String.t()
+  def encode(raw), do: Base.url_encode64(raw, padding: false)
+
+  @spec decode(term()) :: {:ok, binary()} | :error
+  def decode(text) when is_binary(text), do: Base.url_decode64(text, padding: false)
+  def decode(_), do: :error
+
+  @doc """
+  `n` base62 characters from batched CSPRNG bytes. Rejecting bytes 248-255
+  leaves exactly four equally likely bytes per character.
+  """
+  @spec base62(pos_integer()) :: String.t()
+  def base62(n) when is_integer(n) and n > 0, do: base62(<<>>, n, <<>>)
+
+  defp base62(_, 0, acc), do: acc
+
+  defp base62(<<>>, left, acc),
+    do: base62(:crypto.strong_rand_bytes(left + div(left, 31) + 1), left, acc)
+
+  defp base62(<<byte, rest::binary>>, left, acc) when byte < 248,
+    do: base62(rest, left - 1, <<acc::binary, :binary.at(@base62, rem(byte, 62))>>)
+
+  defp base62(<<_, rest::binary>>, left, acc), do: base62(rest, left, acc)
+
+  @doc "CRC32 of `text` as six base62 characters: a shape check before any lookup."
+  @spec checksum(String.t()) :: String.t()
+  def checksum(text) do
+    text |> :erlang.crc32() |> digits([]) |> List.to_string() |> String.pad_leading(6, "0")
+  end
+
+  defp digits(0, acc), do: acc
+  defp digits(n, acc), do: digits(div(n, 62), [:binary.at(@base62, rem(n, 62)) | acc])
+
+  @doc "Encrypt a term for storage under `purpose`; the key derives from the application secret."
+  @spec seal(term(), String.t()) :: binary()
+  def seal(term, purpose) when is_binary(purpose),
+    do: Plug.Crypto.encrypt(key_base(), purpose, term, max_age: :infinity)
+
+  @spec unseal(binary(), String.t()) :: {:ok, term()} | :error
+  def unseal(sealed, purpose) when is_binary(sealed) and is_binary(purpose) do
+    case Plug.Crypto.decrypt(key_base(), purpose, sealed, max_age: :infinity) do
+      {:ok, term} -> {:ok, term}
+      _ -> :error
+    end
+  end
+
+  @doc "A clipped, printable copy of request metadata for the trail."
+  @spec clip(term(), pos_integer()) :: String.t()
+  def clip(text, max \\ 200),
+    do: text |> to_string() |> String.replace(~r/[^\x20-\x7e]/u, "?") |> String.slice(0, max)
+
+  defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)
+end
