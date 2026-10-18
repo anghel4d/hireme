@@ -126,11 +126,11 @@ function draft(c: Row): Html {
 
 function view(): Html {
   const id = selected()
-  const c = v().contacts.find((x) => Number(x.id) === id)
+  const c = contact(id)
   const corp = model.address.q.get("corporation")
   return html`<div class="outreach split">
     <aside class="list" data-key="list">
-      <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" aria-label="Search contacts">
+      <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search contacts">
         ${writable() ? html`<button type="button" data-act="new-contact">New</button>` : EMPTY}</div>
       ${corp ? html`<p class="muted">At corporation #${corp} <button type="button" class="ghost" data-act="all">show all</button></p>` : EMPTY}
       ${v().edit === "new" ? html`<form class="stack card" data-submit="create-contact" data-act="create-contact" data-key="new">
@@ -150,6 +150,11 @@ function view(): Html {
 }
 
 // ------------------------------------------------------------------ actions
+
+/** A contact by id: on the loaded page, or the one picked by link. */
+function contact(id: number): Row | undefined {
+  return v().contacts.find((x) => Number(x.id) === id) ?? (Number(v().picked?.id) === id ? v().picked ?? undefined : undefined)
+}
 
 let typing = 0
 
@@ -192,7 +197,7 @@ function act(name: string, el: HTMLElement): void {
         .catch(failed)
     }
     case "save-contact": {
-      const c = v().contacts.find((x) => Number(x.id) === id)
+      const c = contact(id)
       if (!c) return
       const f = form(el)
       const changed: Record<string, Input> = {}
@@ -201,12 +206,12 @@ function act(name: string, el: HTMLElement): void {
       return void put("contacts", changed, { id })
         .then(async () => {
           const r = await rpc<{ row: Row }>("get", { table: "contacts", id })
-          patch({ edit: "", contacts: v().contacts.map((x) => (Number(x.id) === id ? r.row : x)) })
+          patch({ edit: "", contacts: v().contacts.map((x) => (Number(x.id) === id ? r.row : x)), ...(Number(v().picked?.id) === id ? { picked: r.row } : {}) })
         })
         .catch(failed)
     }
     case "save-draft": {
-      const c = v().contacts.find((x) => Number(x.id) === id)
+      const c = contact(id)
       const f = form(el)
       return void put("messages", {
         channel: f.channel ?? "email",
@@ -242,8 +247,15 @@ const outreach: View = {
     if (v().key !== listKey()) void fetchContacts(false)
     if (selected() !== shownContact) {
       shownContact = selected()
-      patch({ messages: [], bodies: new Map(), edit: "" })
+      patch({ messages: [], bodies: new Map(), edit: "", picked: null })
       void fetchMessages()
+      const want = selected()
+      if (want !== 0)
+        void rpc<{ row: Row }>("get", { table: "contacts", id: want })
+          .then((r) => {
+            if (selected() === want) patch({ picked: r.row })
+          })
+          .catch(() => {})
     }
   },
   act,

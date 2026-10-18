@@ -30,7 +30,7 @@ export interface View {
   act?(name: string, el: HTMLElement, ev: Event): void
   /** After every morph: a lens that owns subtrees (the board's cards) writes them here. */
   after?(root: HTMLElement): void
-  /** Server-side rows may have moved (a PATCH advanced the rev): re-read what is shown, keeping what is being edited. */
+  /** Server-side rows may have moved (a PATCH advanced the rev, or the session came back): re-read what is shown, keeping what is being edited. */
   refresh?(): void
   /** A key with no focused field; true when handled. */
   key?(ev: KeyboardEvent): boolean
@@ -48,16 +48,12 @@ const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "account", label: "Account", key: "7" },
 ]
 
-export function register(lens: Lens, v: View): void {
-  VIEWS[lens] = v
-}
-
 const root = document.getElementById("app")
 let entered = ""
 
 function link(): Html {
   const label = { connecting: "connecting", open: model.carrier === "webtransport" ? "live (WT)" : "live", lost: "reconnecting", ended: "offline" }[model.link]
-  return html`<span class="link link-${model.link}" role="status" title="wire rev ${model.rev.toString()}">${label}${model.pending > 0 ? html` · ${model.pending} pending` : EMPTY}</span>`
+  return html`<span class="link link-${model.link}" role="status" title="account rev ${model.rev.toString()} at connect">${label}${model.pending > 0 ? html` · ${model.pending} pending` : EMPTY}</span>`
 }
 
 function shell(): Html {
@@ -86,7 +82,15 @@ function render(): void {
   morph(root, shell())
   const lens = document.getElementById("lens")
   if (lens) v?.after?.(lens)
+  // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
+  const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
+  if (want && !focusedOnce.has(want)) {
+    focusedOnce.add(want)
+    want.focus({ preventScroll: false })
+  }
 }
+
+const focusedOnce = new WeakSet<Element>()
 
 onRender(render)
 
@@ -131,6 +135,8 @@ addEventListener("keydown", (ev) => {
     return
   }
   if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || typing(ev.target)) return
+  // Enter and Space on a focused button or link are that control's own.
+  if ((ev.key === "Enter" || ev.key === " ") && ev.target instanceof Element && ev.target.closest("button, a, summary, [role=button]")) return
   const n = NAV.find((x) => x.key === ev.key)
   if (n) {
     ev.preventDefault()
@@ -148,8 +154,10 @@ function frame(f: Bytes, h: Header): void {
   switch (h.kind) {
     case KIND.WELCOME: {
       const w = welcome(f)
-      set({ readMask: w.readMask, writeMask: w.writeMask, mayDelete: w.mayDelete, leased: w.leased, rev: w.accountRev, link: "open" })
+      set({ writeMask: w.writeMask, rev: w.accountRev, link: "open" })
       kernel.resend()
+      // After a reconnect the lens re-reads what it shows (and the account lens parks its watch again).
+      if (++welcomes > 1) refresh()
       return
     }
     case KIND.BYE: {
@@ -183,12 +191,22 @@ const wire = new Wire({
 kernel.attach(wire)
 
 // Server-side tables never ride PATCH as rows; a PATCH that advanced the rev
-// says they may have moved, so the current lens re-reads, at most every 400 ms.
-let refreshing = 0
-kernel.onAdvance(() => {
-  clearTimeout(refreshing)
-  refreshing = window.setTimeout(() => VIEWS[model.address.lens]?.refresh?.(), 400)
-})
+// says they may have moved, so the current lens re-reads: at once, then at
+// most every 400 ms while writes keep coming, and once more after the last.
+let lastRefresh = 0
+let trailing = 0
+function refresh(): void {
+  const now = Date.now()
+  clearTimeout(trailing)
+  if (now - lastRefresh >= 400) {
+    lastRefresh = now
+    VIEWS[model.address.lens]?.refresh?.()
+  } else {
+    trailing = window.setTimeout(refresh, 400 - (now - lastRefresh))
+  }
+}
+kernel.onAdvance(refresh)
+let welcomes = 0
 
 void (async () => {
   await hw?.ready

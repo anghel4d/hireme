@@ -84,8 +84,8 @@ function view(): Html {
   return html`<div class="desk">
     <div class="toolbar" data-key="toolbar">
       <input type="search" class="search" placeholder="Search company, role, place or #no" value="${model.address.q.get("q") ?? ""}"
-        data-act="search" data-on="input" aria-label="Search the board" id="desk-search">
-      <label class="inline">min score <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" class="narrow"></label>
+        data-act="search" data-on="input" data-bound aria-label="Search the board" id="desk-search">
+      <label class="inline">min score <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow"></label>
       <span class="muted">${ids.length} shown</span>
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>

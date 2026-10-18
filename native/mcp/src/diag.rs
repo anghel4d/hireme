@@ -20,7 +20,7 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("type", "shape", "the value does not fit the column's type", "Ints for u8/u32/i64, numbers for f64, true/false for bool, 'YYYY-MM-DD' for a day, ISO-8601 UTC for a time, an enum's value by name. The server never casts strings."),
     ("not_found", "shape", "no such row, table or command", "The id or natural key names nothing this key can see. `find` it first."),
     ("natural_key", "shape", "a row with this natural key exists", "create_only refuses an existing natural key. Drop create_only to update that row, or `get` it by key."),
-    ("stage", "domain", "the pipeline does not allow this move", "Stages move along the rail (discovered, freshness, gated, in_batch, draft_ready, fire_ready, open_fire, submitted, reply, closed). The data names the legal moves from here."),
+    ("stage", "domain", "the pipeline does not allow this move", "Stages move along the rail (discovered, freshness, gated, in_batch, draft_ready, fire_ready, open_fire, submitted, reply, closed). The data names the move (from, to) and the rule that refused it."),
     ("fire_hold", "domain", "FIRE HOLD: nothing past fire_ready without the operator", "No agent opens fire or submits. Leave the application at fire_ready."),
     ("heat", "domain", "the company or vendor is over its heat cap", "Too many recent applications at this company, vendor or department. The data names the load and the cap. Wait, or the operator can set heat_override with a reason."),
     ("lineage_busy", "domain", "the CV lineage for this corporation is busy", "Another application holds the lineage's current generation. Use the same generation, or `open_generation` when rewrites are allowed."),

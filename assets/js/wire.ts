@@ -241,6 +241,11 @@ export function reply(f: Bytes): Reply {
   return ok ? { id, ok, result: value } : { id, ok, error: value as RpcError }
 }
 
+/** A NACK the page tells itself: rolls a pending write back in the kernel when the server can never answer it. */
+export function nackFrame(hash: number, opId: bigint, code: number, message: string): Bytes {
+  return new Writer().u32(1).u32(0).u64(opId).u16(code).u16(0).u32(0).field(JSON.stringify({ message })).done(KIND.NACK, hash)
+}
+
 export function bye(f: Bytes): { reason: string; message: string } {
   const r = new Reader(f)
   const code = r.u8()
@@ -466,6 +471,8 @@ export class Wire {
   private held: Bytes[] | null = null
   private welcomeRev = -1n
   private trained = false
+  /** A BOOT flagged END passed before WELCOME did (it rides its own stream on WebTransport). */
+  private trainEndEarly = false
   private heard = 0
   private pinger = 0
   private attempt = 0
@@ -589,6 +596,7 @@ export class Wire {
     this.held = kind === "webtransport" ? [] : null
     this.welcomeRev = -1n
     this.trained = false
+    this.trainEndEarly = false
     this.welcomed = false
     return this.serial
   }
@@ -702,6 +710,8 @@ export class Wire {
         this.held = []
         for (const g of held) this.pass(g, header(g))
       }
+      // The BOOT's END came first: the train is already in, so what waited goes now.
+      if (this.trainEndEarly && !this.trained) this.trainDone()
       return
     }
     this.pass(f, h)
@@ -713,15 +723,22 @@ export class Wire {
       this.held.push(f.slice())
       return
     }
+    const me = this.serial
     this.hooks.frame(f, h)
-    if (!this.trained && this.welcomeRev >= 0n && (h.flags & FLAG.END) !== 0 && (train || this.held === null)) {
-      // The train is in: the session is established, so the next drop starts its backoff from the bottom.
-      this.trained = true
-      this.attempt = 0
-      const held = this.held
-      this.held = null
-      for (const g of held ?? []) this.hooks.frame(g, header(g))
-    }
+    // A frame the kernel could not apply restarts the session from inside that call: it is no train end.
+    if (this.downed === me) return
+    if (this.trained || (h.flags & FLAG.END) === 0 || !(train || this.held === null)) return
+    if (this.welcomeRev >= 0n) this.trainDone()
+    else if (h.kind === KIND.BOOT) this.trainEndEarly = true
+  }
+
+  /** The train is in: the session is established, so the next drop starts its backoff from the bottom. */
+  private trainDone(): void {
+    this.trained = true
+    this.attempt = 0
+    const held = this.held
+    this.held = null
+    for (const g of held ?? []) this.hooks.frame(g, header(g))
   }
 
   private down(why: string, me: number): void {

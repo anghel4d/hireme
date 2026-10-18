@@ -93,7 +93,6 @@ label > input, label > select, label > textarea { color: var(--ink); font-size: 
 label.check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--ink); }
 fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 0; padding: 8px 10px; }
 legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
-.folded { display: none; }
 
 .row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 .stack { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }

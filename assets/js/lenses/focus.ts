@@ -49,7 +49,9 @@ function textOf(table: string, rowId: number, column: string, v_: unknown): stri
   if (!reading.has(key)) {
     reading.add(key)
     void readAll(table, rowId, column)
-      .then((t) => patch({ texts: new Map(v().texts).set(key, t) }))
+      .then((t) => {
+        if (v().id === rowId || table !== "applications") patch({ texts: new Map(v().texts).set(key, t) })
+      })
       .catch(failed)
       .finally(() => reading.delete(key))
   }
@@ -72,15 +74,21 @@ function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
+/** A reply about one application lands only while that application is the one shown. */
+const mine = (appId: number, p: Partial<FocusView>) => {
+  if (v().id === appId) patch(p)
+}
+
 async function fetchAround(appId: number, a: Row): Promise<void> {
-  patch({ id: appId, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "" })
+  // Deferred text read for the last application is dropped: only this one's is wanted now.
+  patch({ id: appId, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "", texts: new Map() })
   const jobs: Promise<void>[] = [
     rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
-      .then((r) => patch({ messages: r.rows }))
+      .then((r) => mine(appId, { messages: r.rows }))
       .catch(() => {}),
   ]
-  if (a.contact_id) jobs.push(rpc<{ row: Row }>("get", { table: "contacts", id: Number(a.contact_id) }).then((r) => patch({ contact: r.row })).catch(() => {}))
-  if (a.corporation_id) jobs.push(rpc<{ row: Row }>("get", { table: "corporations", id: Number(a.corporation_id) }).then((r) => patch({ corporation: r.row })).catch(() => {}))
+  if (a.contact_id) jobs.push(rpc<{ row: Row }>("get", { table: "contacts", id: Number(a.contact_id) }).then((r) => mine(appId, { contact: r.row })).catch(() => {}))
+  if (a.corporation_id) jobs.push(rpc<{ row: Row }>("get", { table: "corporations", id: Number(a.corporation_id) }).then((r) => mine(appId, { corporation: r.row })).catch(() => {}))
   await Promise.all(jobs)
 }
 
@@ -136,7 +144,7 @@ function listing(a: Row, appId: number): Html {
     ${raw && raw.length ? l === null
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${raw.length.toLocaleString()} bytes)</button>`
       : html`<p class="hint">As it was captured; shown as text, never run.</p><pre class="untrusted">${l.text}</pre>
-          ${l.text.length < l.total ? html`<button type="button" data-act="listing-more" data-id="${appId}">More</button>` : EMPTY}`
+          ${l.bytes < l.total ? html`<button type="button" data-act="listing-more" data-id="${appId}">More</button>` : EMPTY}`
       : html`<p class="hint">No listing: this application came another way${a.channel ? ` (${str(a.channel)})` : ""}.</p>`}
   </section>`
 }
@@ -148,7 +156,7 @@ function prose(a: Row, appId: number): Html {
     // An edit starts from the whole text, so the form opens only once it has arrived.
     return v().edit === f && t !== null
       ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-rev="${str(a.rev)}" data-key="p-${f}">
-          <h2>${title}</h2><textarea name="value" rows="10">${t}</textarea>
+          <h2>${title}</h2><textarea name="value" rows="10" data-autofocus>${t}</textarea>
           <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
       : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}"${flag("disabled", t === null)}>Edit</button></h2>
           ${t === null ? html`<p class="hint">Loading…</p>` : t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
@@ -221,13 +229,15 @@ function act(name: string, el: HTMLElement): void {
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":
       return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", length: 262_144 })
-        .then((r) => patch({ listing: { text: r.text, total: r.total } }))
+        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total } }))
         .catch(failed)
     case "listing-more": {
       const l = v().listing
       if (!l) return
-      return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", offset: new TextEncoder().encode(l.text).byteLength, length: 262_144 })
-        .then((r) => patch({ listing: { text: l.text + r.text, total: r.total } }))
+      return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", offset: l.bytes, length: 262_144 })
+        .then((r) => {
+          if (v().listing === l) mine(appId, { listing: { text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
+        })
         .catch(failed)
     }
     case "edit":

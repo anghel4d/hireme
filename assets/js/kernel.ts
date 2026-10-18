@@ -9,7 +9,7 @@
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
-import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
+import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
 
 let wire: Wire | null = null
@@ -108,13 +108,23 @@ export function load(hw: Boot): void {
   void (async () => {
     const module = await hw.kernel
     const inst = await WebAssembly.instantiate(module, {})
-    k = inst.exports as unknown as Exports
-    if (k.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
-    k.set_today(Math.floor(Date.now() / DAY_MS))
-    const snap = await hw.snap
+    const x = inst.exports as unknown as Exports
+    if (x.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
+    x.set_today(Math.floor(Date.now() / DAY_MS))
+    // The snapshot goes in before any frame: frames wait in `early` until `k` is set, so a
+    // BOOT that beat a slow snapshot read is never replaced by the older snapshot.
+    const snap = await hw.snap.catch(() => undefined)
+    k = x
     if (snap) {
-      const rev = withBytes(snap.bytes, (p, n) => k!.restore(p, n))
-      if (rev >= 0n) rowsRev = rev
+      const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
+      if (rev >= 0n) {
+        rowsRev = rev
+      } else if (wire) {
+        // HELLO named a snapshot the kernel refused: only a whole BOOT puts the rows right.
+        rowsRev = 0n
+        early.length = 0
+        wire.restart()
+      }
     }
     for (const f of early.splice(0)) if (!ingest(f)) break
     moved()
@@ -236,13 +246,6 @@ export function value(name: TableName, id: number, col: string): string | number
   return null
 }
 
-/** A whole resident row as decoded values, for a lens that wants it at once. */
-export function row(name: TableName, id: number): Record<string, ReturnType<typeof value>> {
-  const out: Record<string, ReturnType<typeof value>> = { id }
-  for (const c of TABLES[name].cols) if (!c.implied || c.name === "rev") out[c.name] = value(name, id, c.name)
-  return out
-}
-
 // ------------------------------------------------------------------ derived documents
 
 export interface Filter {
@@ -306,8 +309,8 @@ function predict(op: Op): void {
   const c = ctx()
   const r = withBytes(bytes, (p, n) => withBytes(c, (q, m) => k!.predict(p, n, q, m)))
   if (r < 0) {
-    const refusal = JSON.parse(DEC.decode(result(-r - 1))) as { refusal: string; data: { message?: string } | null }
-    throw new Refused(refusal.refusal, refusal.data?.message ?? refusal.refusal, refusal.data)
+    const refusal = JSON.parse(DEC.decode(result(-r - 1))) as { refusal: string; data: unknown }
+    throw new Refused(refusal.refusal, refusalText(refusal.refusal, refusal.data), refusal.data)
   }
   moved()
 }
@@ -322,14 +325,24 @@ function saveSoon(): void {
   saving = window.setTimeout(save, 4000)
 }
 
+let savedRev = -1n
+
 function save(): void {
   const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
-  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0) return
+  // A TICK moves no row: the snapshot is written only when the rows' rev has.
+  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0 || rowsRev === savedRev || rowsRev === 0n) return
   const len = k.snapshot()
   if (len <= 0) return
   const bytes = result(len).slice()
   const record = { rev: rowsRev, schemaRev: BigInt(SCHEMA_REV), wireHash: WIRE_HASH, bytes }
-  const open = indexedDB.open("hireme", 1)
+  let open: IDBOpenDBRequest
+  try {
+    open = indexedDB.open("hireme", 1)
+  } catch {
+    return
+  }
+  savedRev = rowsRev
+  open.onerror = () => {}
   open.onupgradeneeded = () => open.result.createObjectStore("snap")
   open.onsuccess = () => {
     try {
@@ -345,7 +358,10 @@ function save(): void {
 export type Verdict = { ok: true; id: number; rev: bigint } | { ok: false; code: number; data: unknown }
 
 /** Ops sent and not yet answered, with their bytes for a resend after a reconnect. */
-const pending = new Map<bigint, { done: (v: Verdict) => void; bytes: Bytes }>()
+/** Ops sent and not yet answered, with their bytes and how often a new session has resent them. */
+const pending = new Map<bigint, { done: (v: Verdict) => void; bytes: Bytes; resent: number }>()
+/** A write resent into this many fresh sessions without an answer is one the server cannot read. */
+const RESENDS = 3
 // Unique per session for the ledger's 24 h: the page's start in the high bits, a counter below.
 let nextOp = (BigInt(Date.now()) << 20n) | BigInt(crypto.getRandomValues(new Uint16Array(1))[0] ?? 0)
 
@@ -360,12 +376,18 @@ function settle(id: bigint, v: Verdict): void {
 }
 
 /** Sends ops in one OPS frame (at most OPS_MAX); each resolves with its own verdict. */
+/** What send() would refuse, checked before a prediction is applied. */
+function sendable(op: Op): void {
+  if (!wire) throw new Error("not connected")
+  if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
+}
+
 export function send(ops: readonly Op[]): Promise<Verdict>[] {
   if (!wire) throw new Error("not connected")
   if (ops.length === 0 || ops.length > OPS_MAX) throw new Error(`1..${OPS_MAX} ops per frame`)
-  for (const op of ops) if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
+  for (const op of ops) sendable(op)
   const bytes = ops.map(encodeOp)
-  const out = ops.map((op, i) => new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes: bytes[i]! })))
+  const out = ops.map((op, i) => new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes: bytes[i]!, resent: 0 })))
   set({ pending: pending.size })
   // Offline, the ops wait: the reconnect resends them, and the ledger answers a resent op once.
   for (const f of frames(bytes)) wire.send(opsFrame(wire.hash, f))
@@ -394,6 +416,16 @@ function frames(ops: readonly Bytes[]): Bytes[][] {
 /** app.ts, when a session opens: every unanswered op again, as it was. */
 export function resend(): void {
   if (!wire || pending.size === 0) return
+  // A write that ends every session it is sent into (a frame the server refuses to read) is
+  // dropped after RESENDS tries: rolled back in the kernel and refused to its caller, so it
+  // cannot hold the page in a reconnect loop.
+  for (const [id, p] of pending) {
+    if (++p.resent <= RESENDS) continue
+    if (k) ingest(nackFrame(wire.hash, id, REFUSAL.indexOf("internal"), "the server could not read this write"))
+    settle(id, { ok: false, code: REFUSAL.indexOf("internal"), data: { message: "the server could not read this write; it was not saved" } })
+    moved()
+  }
+  if (pending.size === 0) return
   for (const f of frames([...pending.values()].map((p) => p.bytes))) wire.send(opsFrame(wire.hash, f))
 }
 
@@ -415,6 +447,19 @@ export const values = (name: string | null): readonly string[] => (name === null
 
 export const refusalName = (code: number): string => REFUSAL[code] ?? (code < 0 ? "session" : `refusal ${code}`)
 
+/** A refusal's words: its message if it has one, else the data that decided it ("gated → submitted: needs_batch"). */
+export function refusalText(code: string, data: unknown): string {
+  const d = (data ?? {}) as Record<string, unknown>
+  if (typeof d.message === "string" && d.message !== "") return d.message
+  const parts: string[] = []
+  if (d.from !== undefined || d.to !== undefined) parts.push(`${String(d.from ?? "?")} → ${String(d.to ?? "?")}`)
+  for (const [k2, x] of Object.entries(d)) {
+    if (k2 === "from" || k2 === "to" || k2 === "refusal") continue
+    parts.push(`${k2.replace(/_/g, " ")} ${typeof x === "object" ? JSON.stringify(x) : String(x)}`)
+  }
+  return parts.length > 0 ? parts.join(", ") : code.replace(/_/g, " ")
+}
+
 const DAY_MS = 86_400_000
 
 export function day(s: string): number | null {
@@ -432,14 +477,16 @@ export function cell(c: { id: number; name: string; type: ColumnDef["type"]; enu
   const bad = (what: string): never => {
     throw new Refused("type", `${c.name} needs ${what}`)
   }
-  if (raw === null || raw === "") return { col: c.id, type: CELL.null, value: null }
-  const text = typeof raw === "string" ? raw.trim() : raw
+  const text = typeof raw === "string" && c.type !== "str" && c.type !== "text" ? raw.trim() : raw
+  if (text === null || text === "") return { col: c.id, type: CELL.null, value: null }
+  // Number() reads "0x10", "1e3" and " " too; a cell takes plain digits only.
+  const whole = (t: string | number | boolean): number => (typeof t === "number" ? t : /^-?\d+$/.test(String(t)) ? Number(t) : Number.NaN)
   switch (c.type) {
     case "id":
     case "ref":
     case "u32":
     case "u8": {
-      const n = typeof text === "number" ? text : Number(text)
+      const n = whole(text)
       if (!Number.isInteger(n) || n < 0 || n >= (c.type === "u8" ? 256 : 0xffff_ffff)) bad("a whole number")
       return { col: c.id, type: CELL.u32, value: n }
     }
@@ -460,14 +507,12 @@ export function cell(c: { id: number; name: string; type: ColumnDef["type"]; enu
       return { col: c.id, type: CELL.u32, value: Math.floor(t / 1000) }
     }
     case "i64":
-      try {
-        return { col: c.id, type: CELL.i64, value: BigInt(text) }
-      } catch {
-        return bad("a whole number")
-      }
+      if (typeof text !== "number" && !/^-?\d+$/.test(String(text))) return bad("a whole number")
+      return { col: c.id, type: CELL.i64, value: BigInt(text) }
     case "f64": {
-      const n = typeof text === "number" ? text : Number(String(text).replace(/[_,\s]/g, ""))
-      if (!Number.isFinite(n)) bad("a number")
+      // A comma is refused rather than guessed: "3,5" is three and a half in half the world.
+      const n = typeof text === "number" ? text : /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(String(text)) ? Number(text) : Number.NaN
+      if (!Number.isFinite(n)) bad("a number, with a point for decimals")
       return { col: c.id, type: CELL.f64, value: n }
     }
     case "json":
@@ -504,7 +549,14 @@ export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}):
     flags |= OP_FLAG.KEYED
     for (const [k, val] of Object.entries(p.key)) cells.push(cell(column(t, k), val))
   }
-  for (const [k, val] of Object.entries(set)) cells.push(cell(column(t, k), val))
+  for (const [k, val] of Object.entries(set)) {
+    // A key column named again in set is the same cell; the server refuses a frame that names one twice.
+    if (p.key && k in p.key) {
+      if (String(p.key[k] ?? "") !== String(val ?? "")) throw new Refused("column", `${k} is the key; change it by id, not in the same put`)
+      continue
+    }
+    cells.push(cell(column(t, k), val))
+  }
   if (p.asOf !== undefined) cells.push({ col: AS_OF, type: CELL.u32, value: day(p.asOf) ?? (() => { throw new Refused("freshness", "as_of needs a day, YYYY-MM-DD") })() })
   if (p.source !== undefined && p.source !== "") cells.push({ col: SOURCE, type: typeof p.source === "number" ? CELL.u32 : CELL.str, value: p.source })
   if (p.expectRev !== undefined) flags |= OP_FLAG.EXPECT_REV
@@ -515,12 +567,12 @@ export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}):
 /** One put, sent and settled: the new rev and id, or a `Refused` named from the catalog. */
 export async function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
   const op = putOp(name, set, p)
+  sendable(op)
   if (TABLES[name].residency === "resident") predict(op)
   const [verdict] = send([op])
   const v = await verdict!
   if (v.ok) return { id: v.id, rev: v.rev }
-  const data = v.data as { message?: string } | null
-  throw new Refused(refusalName(v.code), data?.message ?? refusalName(v.code), v.data)
+  throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
 }
 
 /** A declared command on one row, judged locally first when its table is resident. */
@@ -536,12 +588,12 @@ export async function command(name: CommandName, target: number, params: Record<
     cells.push(cell(p, raw))
   }
   const op: Op = { opId: opId(), verb: VERB.command, flags: 0, target: c.id, id: target, expectRev: 0, cells }
+  sendable(op)
   if (TABLES[c.table as TableName].residency === "resident") predict(op)
   const [verdict] = send([op])
   const v = await verdict!
   if (v.ok) return { id: v.id, rev: v.rev }
-  const data = v.data as { message?: string } | null
-  throw new Refused(refusalName(v.code), data?.message ?? refusalName(v.code), v.data)
+  throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
 }
 
 const lookups = new Map<string, { version: number; at: Map<string, number> }>()

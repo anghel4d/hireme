@@ -2,7 +2,7 @@
 //
 // Rows live in the kernel; this file holds what the kernel does not: where
 // the operator is (the address), what is selected, what the connection is
-// doing, drafts of fields being typed, and notices. A change goes through
+// doing, each lens's view state, and notices. A change goes through
 // `set`, which schedules one render on the next frame; lenses read
 // `model` and return markup, they never write it.
 //
@@ -43,17 +43,12 @@ export interface Model {
   selected: number
   link: Link
   carrier: "webtransport" | "websocket" | null
-  /** The last rev the page has applied. */
+  /** The account's rev as of this session's WELCOME. */
   rev: bigint
-  /** From WELCOME. */
-  readMask: number
+  /** From WELCOME: the domains this session may write. */
   writeMask: number
-  mayDelete: boolean
-  leased: boolean
-  /** Ops sent and not yet settled, by op id. */
+  /** How many ops are sent and not yet answered. */
   pending: number
-  /** What is being typed, keyed `table:id:column`; a NACK keeps the draft, an ACK drops it. */
-  drafts: Map<string, string>
   notices: Notice[]
   /** Bumped by the kernel ingest so lenses know rows moved. */
   rows: number
@@ -69,7 +64,8 @@ export interface Model {
 export interface FocusView {
   /** The application id these were fetched for. */
   id: number
-  listing: { text: string; total: number } | null
+  /** The raw listing read so far; `bytes` (not characters) is where the next chunk starts. */
+  listing: { text: string; bytes: number; total: number } | null
   messages: Record<string, unknown>[]
   contact: Record<string, unknown> | null
   corporation: Record<string, unknown> | null
@@ -84,6 +80,8 @@ export interface FocusView {
 export interface OutreachView {
   key: string
   contacts: Record<string, unknown>[]
+  /** The selected contact when it is not on the loaded page (a link from the focus lens). */
+  picked: Record<string, unknown> | null
   next: unknown
   messages: Record<string, unknown>[]
   /** Message bodies read so far, by message id. */
@@ -106,7 +104,8 @@ export interface WorldView {
   /** The citations of one cell. */
   cites: { id: number; column: string; list: Record<string, unknown>[] } | null
   /** Deferred text being read. */
-  text: { id: number; column: string; body: string; total: number } | null
+  /** `bytes` is how much of `total` (bytes, not characters) has arrived. */
+  text: { table: string; id: number; column: string; body: string; bytes: number; total: number } | null
   error: string
 }
 
@@ -159,19 +158,15 @@ export const model: Model = {
   link: "connecting",
   carrier: null,
   rev: 0n,
-  readMask: 0,
   writeMask: 0,
-  mayDelete: false,
-  leased: false,
   pending: 0,
-  drafts: new Map(),
   notices: [],
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
   deskLimit: 120,
   focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "", texts: new Map() },
-  outreach: { key: "", contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
+  outreach: { key: "", picked: null, contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 
 type Render = () => void
@@ -238,7 +233,5 @@ function expire(): void {
   const left = model.notices.filter((n) => n.until === 0 || n.until > now)
   if (left.length !== model.notices.length) set({ notices: left })
 }
-
-export const draftKey = (table: string, id: number, column: string): string => `${table}:${id}:${column}`
 
 addEventListener("popstate", () => set({ address: parse(location.pathname, location.search) }))

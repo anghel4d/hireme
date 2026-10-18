@@ -9,7 +9,8 @@ import { Refused, atlas, ids, put, value, type Input } from "../kernel.ts"
 import { EMPTY, flag, html, type Html } from "../morph.ts"
 import { model, notice, query } from "../state.ts"
 
-type Fit = { id: number; name: string; iso2: string | null; kind: string; route: string; speaks: boolean; fit: number; parts: Record<string, number>; labeled: boolean | null }
+/** A place's fit; `fit` is null for a place with no part the kernel can score, and a part may be null too. */
+type Fit = { id: number; name: string; iso2: string | null; kind: string; route: string; speaks: boolean; fit: number | null; parts: Record<string, number | null>; labeled: boolean | null }
 type Doc = { parts: string[]; weights: number[]; presets: Record<string, number[]>; places: Fit[] }
 
 const SEP = "\u001f"
@@ -29,7 +30,12 @@ function save(set: Record<string, Input>): void {
   void put("settings", set, id === 0 ? {} : { id }).catch(failed)
 }
 
-const scale = (xs: number[]): number => (xs.some((x) => x > 1) ? 100 : 1)
+const scale = (xs: (number | null)[]): number => (xs.some((x) => x !== null && x > 1) ? 100 : 1)
+
+function meter(x: number | null, max: number): Html {
+  if (x === null) return html`<span class="muted">unscored</span>`
+  return html`<meter min="0" max="${max}" value="${x}" title="${x.toFixed(2)}"></meter>`
+}
 
 function view(): Html {
   const preset = model.address.q.get("preset") ?? ""
@@ -64,8 +70,8 @@ function view(): Html {
       <tbody>${places.map((p) => html`<tr data-key="p${p.id}" class="route-${p.route}">
         <th scope="row">${p.name} <span class="muted">${p.iso2 ?? ""}</span></th>
         <td><span class="tag">${p.route}</span>${p.speaks ? html` <span class="tag" title="you speak a language spoken here">speaks</span>` : EMPTY}</td>
-        <td><meter min="0" max="${max}" value="${p.fit}" title="${p.fit.toFixed(2)}"></meter> ${max === 1 ? Math.round(p.fit * 100) : Math.round(p.fit)}</td>
-        ${d.parts.map((part) => html`<td><meter min="0" max="${max}" value="${p.parts[part] ?? 0}" title="${(p.parts[part] ?? 0).toFixed(2)}"></meter></td>`)}</tr>`)}</tbody></table></div>`}
+        <td>${meter(p.fit, max)}${p.fit === null ? EMPTY : html` ${max === 1 ? Math.round(p.fit * 100) : Math.round(p.fit)}`}</td>
+        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, max)}</td>`)}</tr>`)}</tbody></table></div>`}
   </div>`
 }
 
@@ -89,6 +95,8 @@ const atlasLens: View = {
         const f = new FormData(el as HTMLFormElement)
         const set: Record<string, Input> = {}
         for (const [k, x] of f) set[k] = Number(x)
+        // Every weight at zero scores nothing at all.
+        if (Object.values(set).every((x) => x === 0)) return notice("warn", "Give at least one part a weight above zero.")
         return save(set)
       }
       case "adopt": {

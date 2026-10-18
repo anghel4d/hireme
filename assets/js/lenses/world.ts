@@ -119,19 +119,19 @@ function editor(t: TableDef, c: ColumnDef, row: Row): Html {
   let field: Html
   switch (c.type) {
     case "enum":
-      field = html`<select name="value" autofocus><option value=""></option>${values(c.enum).map((e) => html`<option${flag("selected", e === value)}>${e}</option>`)}</select>`
+      field = html`<select name="value" data-autofocus><option value=""></option>${values(c.enum).map((e) => html`<option${flag("selected", e === value)}>${e}</option>`)}</select>`
       break
     case "bool":
-      field = html`<select name="value" autofocus><option value=""></option><option value="true"${flag("selected", value === "true")}>yes</option><option value="false"${flag("selected", value === "false")}>no</option></select>`
+      field = html`<select name="value" data-autofocus><option value=""></option><option value="true"${flag("selected", value === "true")}>yes</option><option value="false"${flag("selected", value === "false")}>no</option></select>`
       break
     case "day":
-      field = html`<input type="date" name="value" value="${value}" autofocus>`
+      field = html`<input type="date" name="value" value="${value}" data-autofocus>`
       break
     case "text":
-      field = html`<textarea name="value" rows="8" autofocus>${c.deferred ? v().text?.id === id && v().text?.column === c.name ? v().text?.body ?? "" : "" : value}</textarea>`
+      field = html`<textarea name="value" rows="8" data-autofocus>${c.deferred ? v().text?.id === id && v().text?.column === c.name ? v().text?.body ?? "" : "" : value}</textarea>`
       break
     default:
-      field = html`<input name="value" value="${value}" autofocus${flag("required", c.required)}
+      field = html`<input name="value" value="${value}" data-autofocus${flag("required", c.required)}
         ${c.type === "f64" || c.type === "u32" || c.type === "u8" || c.type === "i64" ? html` inputmode="decimal"` : EMPTY}>`
   }
   return html`<form class="cell-edit" data-submit="save" data-act="save" data-id="${id}" data-col="${c.name}">
@@ -177,7 +177,7 @@ function reader(): Html {
     <h2 id="text-h">${current().name} #${t.id} · ${t.column}</h2>
     <p class="hint">Written by a person or an agent; shown as text, never run.</p>
     <pre class="untrusted">${t.body}</pre>
-    ${t.body.length < t.total ? html`<button type="button" data-act="read-more">Read more (${(t.total - t.body.length).toLocaleString()} left)</button>` : EMPTY}
+    ${t.bytes < t.total ? html`<button type="button" data-act="read-more">Read more (${(t.total - t.bytes).toLocaleString()} bytes left)</button>` : EMPTY}
     <button type="button" class="ghost" data-act="close-panel">Close</button>
   </section>`
 }
@@ -206,7 +206,7 @@ function view(): Html {
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
       <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
-      ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" aria-label="Search ${t.name}">` : EMPTY}
+      ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
       <span class="muted">${v().rows.length}${v().next !== null ? "+" : ""} rows</span>
     </div>
     ${v().error !== "" ? html`<p class="error" role="alert">${v().error}</p>` : EMPTY}
@@ -235,10 +235,27 @@ function failed(e: unknown): void {
   else notice("error", e instanceof Error ? e.message : String(e))
 }
 
-async function readText(id: number, column: string, offset: number): Promise<{ body: string; total: number }> {
-  const r = await rpc<{ text: string; total: number }>("text", { table: current().name, id, column, offset, length: 262_144 })
-  return { body: r.text, total: r.total }
+const BYTES = new TextEncoder()
+
+/** One chunk of a deferred text, from `offset` bytes; `bytes` is where the next chunk starts. */
+async function readText(table: string, id: number, column: string, offset: number): Promise<{ body: string; bytes: number; total: number }> {
+  const r = await rpc<{ text: string; total: number }>("text", { table, id, column, offset, length: 262_144 })
+  return { body: r.text, bytes: offset + BYTES.encode(r.text).byteLength, total: r.total }
 }
+
+/** All of it, for an editor: saving a cell rewrites the whole text, so it must start from the whole text. */
+async function readWhole(table: string, id: number, column: string): Promise<{ body: string; bytes: number; total: number }> {
+  let r = await readText(table, id, column, 0)
+  while (r.bytes < r.total) {
+    const next = await readText(table, id, column, r.bytes)
+    if (next.body === "") break
+    r = { body: r.body + next.body, bytes: next.bytes, total: next.total }
+  }
+  return r
+}
+
+/** A reply is shown only if the grid still shows the table it was asked for. */
+const still = (table: string): boolean => current().name === table
 
 function act(name: string, el: HTMLElement, ev: Event): void {
   const t = current()
@@ -261,7 +278,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       const c = t.cols.find((x) => x.name === col)
       if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
       if (c.deferred && c.prose) {
-        return void readText(id, col, 0).then((r) => patch({ edit: `${id}:${col}`, text: { id, column: col, ...r } })).catch(failed)
+        const tbl = t.name
+        return void readWhole(tbl, id, col).then((r) => still(tbl) && patch({ edit: `${id}:${col}`, text: { table: tbl, id, column: col, ...r } })).catch(failed)
       }
       return patch({ edit: `${id}:${col}` })
     }
@@ -315,12 +333,17 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         .catch(failed)
     case "read":
       ev.stopPropagation()
-      return void readText(id, col, 0).then((r) => patch({ text: { id, column: col, ...r }, cites: null })).catch(failed)
+      return void readText(t.name, id, col, 0).then((r) => still(t.name) && patch({ text: { table: t.name, id, column: col, ...r }, cites: null })).catch(failed)
     case "read-more": {
       const cur = v().text
       if (!cur) return
-      return void readText(cur.id, cur.column, new TextEncoder().encode(cur.body).byteLength)
-        .then((r) => patch({ text: { ...cur, body: cur.body + r.body, total: r.total } }))
+      return void readText(cur.table, cur.id, cur.column, cur.bytes)
+        .then((r) => {
+          // Only if the reader still shows this text: a late chunk never lands in another.
+          const now = v().text
+          if (now && now.table === cur.table && now.id === cur.id && now.column === cur.column && now.bytes === cur.bytes)
+            patch({ text: { ...now, body: now.body + r.body, bytes: r.bytes, total: r.total } })
+        })
         .catch(failed)
     }
     case "close-panel":

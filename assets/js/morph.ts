@@ -168,10 +168,17 @@ function patch(old: Node, next: Node): void {
   const a = old as Element
   const b = next as Element
   if (a.getAttribute(OWN) === "own" && b.getAttribute(OWN) === "own") return
+  // Whether the user changed this control, read before the attributes move its default.
+  // `data-bound` marks a control that mirrors the address (a search box): the model is its truth.
+  const edited =
+    b.hasAttribute("data-bound") ? false
+    : a instanceof HTMLInputElement ? (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)
+    : a instanceof HTMLTextAreaElement ? a.value !== a.defaultValue
+    : false
   attributes(a, b)
   if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement) {
     // control() has already matched a select's options; a second pass would undo it.
-    control(a, b)
+    control(a, b, edited)
     return
   }
   children(a, b)
@@ -190,8 +197,9 @@ function attributes(a: Element, b: Element): void {
 }
 
 // The value attribute is only the default; the live value is a property.
-// A focused control is the user's: the model catches up to it, not the reverse.
-function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, b: Element): void {
+// A control the user is in, or has typed into and left, is theirs: a redraw
+// (a PATCH, the minute's TICK) moves its default, never what they typed.
+function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, b: Element, edited: boolean): void {
   const value = b instanceof HTMLTextAreaElement ? b.value : b.getAttribute("value") ?? ""
   if (a instanceof HTMLSelectElement) {
     children(a, b)
@@ -199,9 +207,11 @@ function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, 
     if (chosen !== undefined && chosen !== null && a !== focused) a.value = chosen
     return
   }
-  if (a === focused) return
+  if (a instanceof HTMLTextAreaElement) a.defaultValue = value
+  if (a === focused || edited) return
   if (a instanceof HTMLInputElement && (a.type === "checkbox" || a.type === "radio")) {
     a.checked = b.hasAttribute("checked")
+    a.defaultChecked = a.checked
     return
   }
   if (a.value !== value) a.value = value

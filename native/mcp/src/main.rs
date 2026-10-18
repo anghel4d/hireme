@@ -69,7 +69,7 @@ struct App {
     carrier: Arc<Carrier>,
     /// The account's resident rows, fed every BOOT, PATCH and TICK: the same kernel the sequencer judges with.
     kernel: Arc<std::sync::Mutex<Kernel>>,
-    /// Application ids this session's lease holds, for the kernel's judge.
+    /// Application ids this session's lease claimed, as `hireme` reports them (the server's lease is the authority).
     held: Mutex<Vec<u32>>,
     out: mpsc::UnboundedSender<String>,
     welcome: RwLock<Option<Welcome>>,
@@ -88,15 +88,27 @@ struct App {
     cancelled: Mutex<HashSet<String>>,
     /// A tools/list was answered before the first catalog: its arrival must say the list changed.
     listed_early: std::sync::atomic::AtomicBool,
+    /// This session's initial train (its BOOT) is in the kernel, so a local verdict means something.
+    trained: std::sync::atomic::AtomicBool,
 }
 
 /// The node's /wire URL. A plain-text scheme carries the key unencrypted, so it is refused off loopback.
 fn url() -> Result<String, String> {
-    let raw = std::env::var("HIREME_URL").map_err(|_| "set HIREME_URL to your node, e.g. https://your-node.example".to_owned())?;
-    let (scheme, rest) = raw.split_once("://").unwrap_or(("https", raw.as_str()));
+    wire_url(&std::env::var("HIREME_URL").map_err(|_| "set HIREME_URL to your node, e.g. https://your-node.example".to_owned())?)
+}
+
+fn wire_url(raw: &str) -> Result<String, String> {
+    let (scheme, rest) = raw.split_once("://").unwrap_or(("https", raw));
     let plain = matches!(scheme, "http" | "ws");
     let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, String::new()));
-    let name = host.rsplit_once(':').map_or(host, |(h, _)| h).trim_matches(['[', ']']);
+    // `user@host` would make the host something other than what the loopback check reads.
+    if host.contains('@') {
+        return Err(format!("{raw}: no user@ in HIREME_URL; the key goes in HIREME_KEY or HIREME_KEY_FILE"));
+    }
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']').map_or(v6, |(h, _)| h),
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    };
     if plain && !matches!(name, "localhost" | "127.0.0.1" | "::1") {
         return Err(format!("{raw}: the key would cross the network unencrypted; use https:// (plain http only for localhost)"));
     }
@@ -145,14 +157,10 @@ async fn main() {
 
     let kernel = Arc::new(std::sync::Mutex::new(Kernel::new()));
     kernel.lock().unwrap_or_else(|p| p.into_inner()).set_today(today());
-    // A reconnect names the rev the kernel's rows stand at, so the server resumes with PATCHes.
-    let snapshot: carrier::Snapshot = {
-        let k = kernel.clone();
-        Arc::new(move || {
-            let rev = k.lock().map(|k| k.rows().rev).unwrap_or(0);
-            (rev, if rev == 0 { 0 } else { u64::from(schema::SCHEMA_REV) })
-        })
-    };
+    // Every session asks for a whole BOOT (the node sends a key one anyway) into a fresh kernel:
+    // a BOOT replaces only the tables it names, so rows a narrowed mask no longer covers would
+    // otherwise outlive the mask in this cache.
+    let snapshot: carrier::Snapshot = Arc::new(|| (0, 0));
     let (carrier, events) = Carrier::start(url.clone(), key, label, schema::WIRE_HASH, snapshot);
     let app = Arc::new(App {
         carrier,
@@ -171,6 +179,7 @@ async fn main() {
         inflight: Mutex::new(HashSet::new()),
         cancelled: Mutex::new(HashSet::new()),
         listed_early: std::sync::atomic::AtomicBool::new(false),
+        trained: std::sync::atomic::AtomicBool::new(false),
     });
     tokio::spawn(follow(app.clone(), events));
     tokio::spawn(poll(app.clone()));
@@ -187,6 +196,15 @@ async fn main() {
                 continue;
             }
         };
+        // A cancel written right behind its request must find it: requests register and cancels
+        // apply here, in arrival order, before any handler task gets to run.
+        if msg.get("id").is_none() && msg.get("method").and_then(Json::as_str) == Some("notifications/cancelled") {
+            app.notification("notifications/cancelled", msg.get("params").unwrap_or(&Json::Null)).await;
+            continue;
+        }
+        if let (Some(id), Some(_)) = (msg.get("id"), msg.get("method")) {
+            app.inflight.lock().await.insert(id.to_string());
+        }
         let app = app.clone();
         tokio::spawn(async move {
             // A handler that panics still answers its request, so no client waits on it forever.
@@ -207,6 +225,15 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
     while let Some(e) = events.recv().await {
         match e {
             Event::Welcome(w) => {
+                app.trained.store(false, Ordering::Relaxed);
+                if let Ok(mut k) = app.kernel.lock() {
+                    *k = Kernel::new();
+                    k.set_today(today());
+                }
+                // A lease lives as long as its session: a new session holds nothing until it leases again.
+                if !w.leased {
+                    app.held.lock().await.clear();
+                }
                 let before = app.welcome.read().await.as_ref().map(|o| (o.read_mask, o.write_mask, o.may_delete, o.schema_rev));
                 app.rev.store(w.rev, Ordering::Relaxed);
                 let now = (w.read_mask, w.write_mask, w.may_delete, w.schema_rev);
@@ -227,13 +254,25 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 app.ready.notify_waiters();
             }
             Event::Rows(frame) => {
+                let mut applied = true;
                 if let Ok(mut k) = app.kernel.lock() {
                     if k.ingest(&frame).is_err() {
-                        eprintln!("hireme-mcp: a row frame did not apply; the next session boots whole");
+                        eprintln!("hireme-mcp: a row frame did not apply; local judging is off until the next session boots");
                         *k = Kernel::new();
+                        applied = false;
                     }
                 }
-                app.rows(&frame).await
+                let end = wire::Header::peek(&frame).is_ok_and(|h| h.flags & wire::END != 0);
+                if !applied {
+                    app.trained.store(false, Ordering::Relaxed);
+                } else if end {
+                    app.trained.store(true, Ordering::Relaxed);
+                }
+                // Re-reading watched server rows takes RPCs: off this loop, so frames keep flowing into the kernel.
+                if app.rows(&frame).await {
+                    let a = app.clone();
+                    tokio::spawn(async move { a.recheck().await });
+                }
             }
             Event::Ended { reason, message, again } => {
                 eprintln!("hireme-mcp: session ended: {reason} {message}");
@@ -368,7 +407,6 @@ impl App {
             }
         }
         let key = id.to_string();
-        self.inflight.lock().await.insert(key.clone());
         let answer = match method.as_str() {
             "initialize" => Ok(self.initialize(&params).await),
             "server/discover" => Ok(cached(modern, json!({
@@ -535,10 +573,10 @@ impl App {
         }
         let w = self.welcome.read().await.clone().unwrap_or_default();
         let connected = self.welcome.read().await.is_some();
-        let next = if !connected {
+        let next = if self.dead.read().await.is_some() {
+            "The session has ended; nothing can be read or written until the operator restores the key (or hireme-mcp is rebuilt for the node)."
+        } else if !connected {
             "Not connected yet: check HIREME_URL and the key; hireme-mcp keeps retrying."
-        } else if self.dead.read().await.is_some() {
-            "The session has ended; nothing can be read or written until the operator restores the key."
         } else if m.write == 0 {
             "This key reads only. `schema`, then `find` and `get`; `text` for raw listings and prose."
         } else if !w.leased {
@@ -779,7 +817,16 @@ impl App {
     async fn settle(&self, cat: &Catalog, ops: Vec<One>) -> Json {
         let held = self.held.lock().await.clone();
         let mut local: HashMap<u64, (String, Json)> = HashMap::new();
-        if let Ok(mut k) = self.kernel.lock() {
+        // Judged before its BOOT is in, an op would meet empty tables and a false not_found:
+        // wait a little for the train, and send unjudged if it has not come.
+        if ops.iter().any(|o| o.resident) {
+            let deadline = tokio::time::Instant::now() + READY_WAIT;
+            while !self.trained.load(Ordering::Relaxed) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        let judge = self.trained.load(Ordering::Relaxed);
+        if let Ok(mut k) = self.kernel.lock().map_err(|_| ()).and_then(|k| if judge { Ok(k) } else { Err(()) }) {
             let ctx = kernel::judge::Ctx { today: k.today(), now: now(), human: false, key_id: None, held: &held };
             for op in ops.iter().filter(|o| o.resident) {
                 if let Err(r) = k.judge(&op.bytes, &ctx) {
@@ -799,6 +846,13 @@ impl App {
             let ids: Vec<u64> = frame.iter().map(|o| o.op_id).collect();
             match self.carrier.ops(w.finish(), &ids).await {
                 Ok(v) => verdicts.extend(ids.into_iter().zip(v)),
+                Err(lost) if lost.0 == "not connected" && verdicts.is_empty() => {
+                    return text_result(
+                        format!("error[session]: not connected to {}\n   = note: nothing was sent\n   = help: hireme-mcp reconnects on its own; call again\n", self.url),
+                        None,
+                        true,
+                    );
+                }
                 Err(lost) => {
                     let done = verdicts.len();
                     return text_result(
@@ -981,23 +1035,18 @@ impl App {
     }
 
     /// A row frame: every watched resident row it names (or a BOOT, all of them) is updated.
-    async fn rows(&self, frame: &[u8]) {
-        let Ok(f) = wire::Frame::parse(frame, schema::WIRE_HASH) else { return };
+    /// True when a PATCH moved the rev, so watched server-side rows may have moved too.
+    async fn rows(&self, frame: &[u8]) -> bool {
+        let Ok(f) = wire::Frame::parse(frame, schema::WIRE_HASH) else { return false };
         if f.kind() == wire::TICK {
-            return;
+            return false;
         }
         let boot = f.kind() == wire::BOOT;
-        // Server-side rows never ride PATCH; a PATCH that moved the rev says they may have moved.
-        if f.kind() == wire::PATCH {
-            let advanced = f.header.rev > self.rev.swap(f.header.rev.max(self.rev.load(Ordering::Relaxed)), Ordering::Relaxed);
-            if advanced {
-                self.recheck().await;
-            }
-        }
+        let advanced = f.kind() == wire::PATCH && f.header.rev > self.rev.fetch_max(f.header.rev, Ordering::Relaxed);
         let mut moved: HashSet<(u16, u32)> = HashSet::new();
         if !boot {
-            let Ok(body) = f.body() else { return };
-            let Ok(blocks) = wire::Blocks::new(&body) else { return };
+            let Ok(body) = f.body() else { return advanced };
+            let Ok(blocks) = wire::Blocks::new(&body) else { return advanced };
             for b in blocks.iter() {
                 if let Some(gone) = b.gone() {
                     moved.extend(gone.iter().map(|id| (b.table, id)));
@@ -1017,6 +1066,7 @@ impl App {
         for uri in hits {
             self.updated(&uri).await;
         }
+        advanced
     }
 }
 
@@ -1230,11 +1280,21 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::from_json(&json!({
             "schema_rev": 1,
-            "tables": [{"id": 23, "name": "corporations", "domain": "world", "residency": "server", "natural": [{"cols": ["domain"]}],
+            "tables": [{"id": 23, "name": "corporations", "domain": "world", "residency": "server", "natural": [["domain"]],
               "cols": [{"id": 8, "name": "domain", "type": "str", "flags": 1}, {"id": 9, "name": "name", "type": "str", "flags": 1},
                        {"id": 10, "name": "headcount", "type": "u32", "flags": 128}]}],
             "commands": [], "enums": {}
         }))
+    }
+
+    #[test]
+    fn the_key_never_crosses_the_network_in_plain_text() {
+        assert_eq!(wire_url("http://localhost:4000").as_deref(), Ok("ws://localhost:4000/wire"));
+        assert_eq!(wire_url("http://[::1]:4000/").as_deref(), Ok("ws://[::1]:4000/wire"));
+        assert_eq!(wire_url("https://node.example").as_deref(), Ok("wss://node.example/wire"));
+        for bad in ["http://node.example", "ws://10.0.0.1:4000", "http://localhost:4000@evil.example", "https://u:p@node.example"] {
+            assert!(wire_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

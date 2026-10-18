@@ -69,11 +69,12 @@ async function load(): Promise<void> {
 
 let watching = false
 
-/** One parked watch at a time; it re-parks after every answer and after a reconnect. */
 /**
- * The watch re-parks with the cursor of the overview it last drew (the
- * newest audit event id), so a change that lands between one answer and the
- * next park answers the next park at once instead of being lost.
+ * One parked watch at a time. It re-parks with the cursor of the overview it
+ * last drew (the newest audit event id), so a change that lands between one
+ * answer and the next park answers the next park at once instead of being
+ * lost. A dropped carrier ends the loop; the shell's refresh after the
+ * reconnect starts it again.
  */
 async function watch(): Promise<void> {
   if (watching) return
@@ -86,7 +87,7 @@ async function watch(): Promise<void> {
       if (model.address.lens !== "account") return
     }
   } catch {
-    // The carrier dropped or the session ended: the next enter parks again.
+    // The carrier dropped or the session ended: refresh() parks again once a session is back.
   } finally {
     watching = false
   }
@@ -137,7 +138,9 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
     return
   }
   patch({ stepUp: null })
-  if (waiting) await call(waiting.method, waiting.params, (r) => reveal(waiting.method, r as Row))
+  // Linking a way in is HTTP, not an account.* method: it is retried as itself.
+  if (waiting?.method === "link") await link(String(waiting.params.provider ?? ""), typeof waiting.params.email === "string" ? waiting.params.email : undefined)
+  else if (waiting) await call(waiting.method, waiting.params, (r) => reveal(waiting.method, r as Row))
   else await load()
 }
 
@@ -543,6 +546,10 @@ const view_: View = {
     void load().then(watch)
   },
   act,
+  refresh() {
+    // After a reconnect (or a write elsewhere) the watch may have ended with the old carrier.
+    if (!watching) void load().then(watch)
+  },
 }
 
 export default view_

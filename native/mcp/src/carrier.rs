@@ -144,9 +144,14 @@ impl Carrier {
             l.out.send(frame).map_err(|_| Lost("socket closed".into()))?;
             rxs
         };
+        // The ledger may hold a verdict that never comes back down: like an RPC, an OPS waits a bounded time.
+        let deadline = tokio::time::Instant::now() + RPC_WAIT;
         let mut out = Vec::with_capacity(rxs.len());
         for rx in rxs {
-            out.push(rx.await.map_err(|_| Lost("the session ended before the verdict".into()))?);
+            match tokio::time::timeout_at(deadline, rx).await {
+                Ok(v) => out.push(v.map_err(|_| Lost("the session ended before the verdict".into()))?),
+                Err(_) => return Err(Lost(format!("no verdict in {} s", RPC_WAIT.as_secs()))),
+            }
         }
         Ok(out)
     }

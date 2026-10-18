@@ -8,6 +8,7 @@
 // adopts all of it from `window.__hw`; frames that land first wait in a
 // queue. It imports only frame builders, which esbuild tree-shakes down.
 
+import { SCHEMA_REV } from "./gen/schema.ts"
 import { CRED, hello, meta, type Early } from "./wire.ts"
 
 /** What the bundle finds on `window.__hw`. */
@@ -55,7 +56,8 @@ const WT_WAIT_MS = 3000
           const get = open.result.transaction("snap").objectStore("snap").get(scope)
           get.onsuccess = () => {
             const s = get.result as Snapshot | undefined
-            resolve(s && s.wireHash === m.hash ? s : undefined)
+            // A snapshot of another schema is refused by the kernel; naming its rev in HELLO would resume rows the page cannot hold.
+            resolve(s && s.wireHash === m.hash && s.schemaRev === BigInt(SCHEMA_REV) ? s : undefined)
           }
           get.onerror = () => resolve(undefined)
         } catch {

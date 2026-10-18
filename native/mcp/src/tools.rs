@@ -119,59 +119,40 @@ const FLAG_BITS: [(u32, &str); 12] = {
     ]
 };
 
-fn type_of(v: &Json) -> Option<String> {
-    let t = v.get("type").or_else(|| v.get("type_code"))?;
-    match t {
-        Json::String(s) => Some(s.clone()),
-        // A type code is its 1-based position in the schema crate's type table.
-        Json::Number(n) => n.as_u64().and_then(|c| schema::TYPES.get((c as usize).checked_sub(1)?)).map(|(name, _)| (*name).to_owned()),
-        _ => None,
-    }
-}
-
-fn flags_of(v: &Json) -> Flags {
+/// A column's (or a command param's) flags from the catalog's bits.
+fn flags_of(bits: u32) -> Flags {
     let mut f = Flags::default();
-    let mut set = |name: &str| match name {
-        "required" | "!" => f.required = true,
-        "deferred" => f.deferred = true,
-        "private" => f.private = true,
-        "server_only" => f.server_only = true,
-        "human_only" => f.human_only = true,
-        "readonly" => f.readonly = true,
-        "unique" => f.unique = true,
-        "implied" => f.readonly = true,
-        "metric" => f.metric = true,
-        "prose" => f.prose = true,
-        _ => {}
-    };
-    match v {
-        Json::Number(n) => {
-            let bits = n.as_u64().unwrap_or(0) as u32;
-            for (bit, name) in FLAG_BITS {
-                if bits & bit != 0 {
-                    set(name);
-                }
-            }
+    for (bit, name) in FLAG_BITS {
+        if bits & bit == 0 {
+            continue;
         }
-        Json::Array(a) => a.iter().filter_map(Json::as_str).for_each(&mut set),
-        Json::Object(o) => o.iter().filter(|(_, v)| v.as_bool() == Some(true)).for_each(|(k, _)| set(k)),
-        _ => {}
+        match name {
+            "required" => f.required = true,
+            "deferred" => f.deferred = true,
+            "private" => f.private = true,
+            "server_only" => f.server_only = true,
+            "human_only" => f.human_only = true,
+            "readonly" | "implied" => f.readonly = true,
+            "unique" => f.unique = true,
+            "metric" => f.metric = true,
+            "prose" => f.prose = true,
+            _ => {}
+        }
     }
     f
 }
 
+/// One catalog column or command param, as Hireme.World.schema writes it.
 fn col_of(v: &Json) -> Option<Col> {
+    let mut flags = flags_of(v.get("flags").and_then(Json::as_u64).unwrap_or(0) as u32);
+    // A param says `required` as a boolean of its own.
+    flags.required |= v.get("required").and_then(Json::as_bool) == Some(true);
     Some(Col {
         id: v.get("id")?.as_u64()? as u16,
         name: v.get("name")?.as_str()?.to_owned(),
-        ty: type_of(v).unwrap_or_else(|| "str".into()),
-        target: v.get("target").or_else(|| v.get("enum")).or_else(|| v.get("ref")).and_then(Json::as_str).map(str::to_owned),
-        flags: {
-            let mut f = flags_of(v.get("flags").unwrap_or(&Json::Null));
-            // Command params say `required` as a boolean of their own, not as a flag bit.
-            f.required |= v.get("required").and_then(Json::as_bool) == Some(true);
-            f
-        },
+        ty: v.get("type")?.as_str()?.to_owned(),
+        target: v.get("target").and_then(Json::as_str).map(str::to_owned),
+        flags,
     })
 }
 
@@ -190,12 +171,7 @@ impl Catalog {
                     natural: t
                         .get("natural")
                         .and_then(Json::as_array)
-                        .map(|n| {
-                            n.iter()
-                                .filter_map(|k| k.get("cols").or(Some(k)).and_then(Json::as_array))
-                                .map(|cols| cols.iter().filter_map(Json::as_str).map(str::to_owned).collect())
-                                .collect()
-                        })
+                        .map(|n| n.iter().filter_map(Json::as_array).map(|cols| cols.iter().filter_map(Json::as_str).map(str::to_owned).collect()).collect())
                         .unwrap_or_default(),
                 })
             })
@@ -208,8 +184,7 @@ impl Catalog {
                     name: c.get("name")?.as_str()?.to_owned(),
                     table: c.get("table").and_then(Json::as_str).unwrap_or("").to_owned(),
                     params: c.get("params").and_then(Json::as_array).map(|p| p.iter().filter_map(col_of).collect()).unwrap_or_default(),
-                    human_only: c.get("human_only").or_else(|| c.get("humanOnly")).and_then(Json::as_bool).unwrap_or(false)
-                        || c.get("flags").map(|f| flags_of(f).human_only).unwrap_or(false),
+                    human_only: c.get("human_only").and_then(Json::as_bool).unwrap_or(false),
                 })
             })
             .collect();
