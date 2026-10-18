@@ -238,6 +238,64 @@
       ]
     },
     {
+      "name": "FIRE HOLD holds for an application put into a batch the operator already fired: submitted only follows open_fire",
+      "today": 20000,
+      "rows": {
+        "batches": [
+          {
+            "id": 9,
+            "code": "B9",
+            "ordinal": 1,
+            "fire": "open_fire"
+          }
+        ],
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "discovered",
+            "company": "Acme",
+            "batch_id": 9,
+            "stage_on": 20000
+          },
+          {
+            "id": 2,
+            "no": 2,
+            "stage": "fire_ready",
+            "company": "Bolt",
+            "batch_id": 9,
+            "stage_on": 20000
+          }
+        ]
+      },
+      "steps": [
+        {
+          "command": "stage",
+          "target": 1,
+          "params": {
+            "stage": "submitted"
+          },
+          "refusal": "fire_hold",
+          "data": {
+            "from": "discovered",
+            "to": "submitted"
+          }
+        },
+        {
+          "command": "stage",
+          "target": 2,
+          "params": {
+            "stage": "submitted"
+          },
+          "refusal": "fire_hold",
+          "data": {
+            "from": "fire_ready",
+            "to": "submitted"
+          }
+        }
+      ]
+    },
+    {
       "name": "the dates a move writes: a reopened listing that never went out loses its close; a listing reply needs a send, an outreach reply does not; standing still writes nothing",
       "today": 20000,
       "rows": {

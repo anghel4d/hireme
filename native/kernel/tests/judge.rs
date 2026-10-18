@@ -116,8 +116,15 @@ fn batches_and_fire_hold() {
 
     let mut a = app(2, S::FIRE_READY, "Acme");
     a.batch = Some(9);
-    let mut opened = kernel(&[a], &[(9, enums::fire::OPEN_FIRE)], &[]);
-    assert!(opened.judge(&stage_cmd(2, S::SUBMITTED), &ctx()).is_ok());
+    // A batch the operator already fired opens nothing for an application
+    // an agent moves into it: submitted only follows open_fire.
+    let mut opened = kernel(&[a, app(3, S::DISCOVERED, "Acme")], &[(9, enums::fire::OPEN_FIRE)], &[]);
+    assert_eq!(code(opened.judge(&stage_cmd(2, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
+    let join = op(wire::PUT, table::APPLICATIONS, 3, |o| {
+        o.u32(A::BATCH_ID, 9);
+    });
+    opened.predict(&join, &ctx()).unwrap();
+    assert_eq!(code(opened.judge(&stage_cmd(3, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
 }
 
 #[test]
