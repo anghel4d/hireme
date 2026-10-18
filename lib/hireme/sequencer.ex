@@ -795,8 +795,18 @@ defmodule Hireme.Sequencer do
     with {:ok, values} <-
            reduce_cells(op.cells, fn {id, _, _} = cell ->
              case params[id] do
-               nil -> {:refused, :column, %{command: command.name, param: id}}
-               p -> typed(p, cell, command.name)
+               nil ->
+                 {:refused, :column, %{command: command.name, param: id}}
+
+               # An empty required param is a missing one, as the kernel's judge says it.
+               p ->
+                 case typed(p, cell, command.name) do
+                   {:refused, :column, %{reason: "required"}} ->
+                     {:refused, :column, %{command: command.name, missing: [p.name]}}
+
+                   other ->
+                     other
+                 end
              end
            end),
          [] <- for(p <- command.params, p.required, not Map.has_key?(values, p.name), do: p.name),

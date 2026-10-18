@@ -649,6 +649,17 @@ defmodule Hireme.SequencerTest do
                )
     end
 
+    test "a command's required param, absent or empty, is refused column with the missing names",
+         %{account: a} do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "H", role: "R"}))
+
+      for cells <- [%{}, %{reason: ""}] do
+        {[], [nack]} = run(a.id, op(:command, :heat_override, cells, target: app.id))
+        assert nack.refusal == :column
+        assert JSON.decode!(nack.data)["missing"] == ["reason"]
+      end
+    end
+
     test "a natural_key refusal does not name the row it found", %{account: a} do
       {[_], []} = run(a.id, op(:put, :corporations, %{domain: "nk.example", name: "N"}))
 
