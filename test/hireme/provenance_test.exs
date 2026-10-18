@@ -11,7 +11,7 @@ defmodule Hireme.ProvenanceTest do
     ack.id
   end
 
-  property "stale is monotonic: a metric's date only moves forward, and every accepted write is cited",
+  property "stale is monotonic: a metric's date only moves forward, and every accepted change is cited",
            %{account: a} do
     check all(days <- list_of(integer(0..60), min_length: 1, max_length: 10), max_runs: 20) do
       id = corp(a, "m#{System.unique_integer([:positive])}.example")
@@ -28,7 +28,8 @@ defmodule Hireme.ProvenanceTest do
             {newest, n}
           else
             assert [_] = acks
-            {on, n + 1}
+            # The same value at the stored date restates it: no citation.
+            {on, if(on == newest, do: n, else: n + 1)}
           end
         end)
 
