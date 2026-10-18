@@ -74,6 +74,13 @@ fn main() {
     }
     writeln!(o, "}}").unwrap();
 
+    writeln!(o, "/// Every enum's values by the declaration's name.").unwrap();
+    writeln!(o, "pub static ENUMS: &[(&str, &[&str])] = &[").unwrap();
+    for e in &s.enums {
+        writeln!(o, "    ({:?}, enums::{}::NAMES),", e.name, e.name).unwrap();
+    }
+    writeln!(o, "];").unwrap();
+
     let refusal = s.enum_("refusal").expect("enum refusal");
     writeln!(o, "/// NACK codes: positions in `enum refusal`.").unwrap();
     writeln!(o, "pub mod refusal {{").unwrap();

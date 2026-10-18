@@ -160,6 +160,11 @@ pub fn emit(s: &Schema) -> String {
         w(&format!("export const {} = [{}] as const;", upper(&e.name), values.join(", ")));
         w(&format!("export type {} = (typeof {})[number];", camel(&e.name), upper(&e.name)));
     }
+    let names: Vec<String> = s.enums.iter().map(|e| format!("{}: {}", e.name, upper(&e.name))).collect();
+    w(&format!(
+        "export const ENUMS: {{ readonly [name: string]: readonly string[] }} = {{ {} }};",
+        names.join(", ")
+    ));
     w("");
 
     let ids: Vec<String> = s.tables.iter().map(|t| format!("{}: {}", t.name, t.id)).collect();

@@ -92,6 +92,11 @@ pub fn table_def(id: u16) -> Option<&'static TableDef> {
     TABLES.iter().find(|t| t.id == id)
 }
 
+/// An enum's values in code order, by the declaration's name.
+pub fn enum_names(name: &str) -> Option<&'static [&'static str]> {
+    ENUMS.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+}
+
 /// A command of the catalog by id.
 pub fn command_def(id: u16) -> Option<&'static CommandDef> {
     COMMANDS.iter().find(|c| c.id == id)
