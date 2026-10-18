@@ -31,7 +31,7 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("source_missing", "provenance", "this write needs a source", "Prose and metrics cite where they came from: put {..., \"source\":\"https://...\"} (the server derives the host)."),
     ("source_trust", "provenance", "this source's host is not trusted for this", "Culture and ratings come only from hosts the operator trusts (levels.fyi and the like). Cite one of those, or leave the cell."),
     ("too_large", "limits", "more than 1 MiB of text in one op", "Split the text, or store the raw listing once and refer to it."),
-    ("rate", "limits", "over the agent write rate", "600 ops a minute per key. Wait the data's retry_ms and resend: a resent op_id writes nothing twice."),
+    ("rate", "limits", "over the agent write rate", "600 ops a minute per key. Nothing of the refused op was written: wait the data's retry_ms, then call again."),
     ("cap", "limits", "the table is full for this account", "The table's row cap is reached (data: cap). Drop rows that no longer matter, or ask the operator."),
     ("internal", "limits", "the server failed", "Nothing was written. Retry once; if it repeats, tell the operator with the op_id."),
 ];

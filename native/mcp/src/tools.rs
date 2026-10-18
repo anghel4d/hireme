@@ -15,11 +15,11 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value as Json, json};
 
-pub const WORLD: u16 = 1;
-pub const DESK: u16 = 2;
-pub const MAIL: u16 = 4;
-pub const LANES: u16 = 8;
-pub const CORPUS: u16 = 16;
+pub const WORLD: u16 = schema::domain::WORLD as u16;
+pub const DESK: u16 = schema::domain::DESK as u16;
+pub const MAIL: u16 = schema::domain::MAIL as u16;
+pub const LANES: u16 = schema::domain::LANES as u16;
+pub const CORPUS: u16 = schema::domain::CORPUS as u16;
 
 pub fn domain_bit(name: &str) -> u16 {
     match name {
@@ -107,18 +107,22 @@ pub struct Catalog {
     pub enums: HashMap<String, Vec<String>>,
 }
 
-/// The catalog's flag bits and type codes, as the schema file's reader numbers them.
-const FLAG_BITS: [(u64, &str); 12] = [
-    (1, "required"), (2, "deferred"), (4, "private"), (8, "server_only"), (16, "human_only"), (32, "readonly"),
-    (64, "unique"), (128, "metric"), (256, "prose"), (512, "implied"), (1024, "metric_on"), (2048, "natural"),
-];
-const TYPES: [&str; 14] = ["id", "ref", "enum", "bool", "u8", "u32", "i64", "f64", "day", "time", "str", "text", "json", "bytes"];
+/// The catalog's flag bits by name; the numbers are the schema crate's.
+const FLAG_BITS: [(u32, &str); 12] = {
+    use schema::flag::*;
+    [
+        (REQUIRED, "required"), (DEFERRED, "deferred"), (PRIVATE, "private"), (SERVER_ONLY, "server_only"),
+        (HUMAN_ONLY, "human_only"), (READONLY, "readonly"), (UNIQUE, "unique"), (METRIC, "metric"),
+        (PROSE, "prose"), (IMPLIED, "implied"), (METRIC_ON, "metric_on"), (NATURAL, "natural"),
+    ]
+};
 
 fn type_of(v: &Json) -> Option<String> {
     let t = v.get("type").or_else(|| v.get("type_code"))?;
     match t {
         Json::String(s) => Some(s.clone()),
-        Json::Number(n) => n.as_u64().and_then(|c| TYPES.get((c as usize).checked_sub(1)?)).map(|s| (*s).to_owned()),
+        // A type code is its 1-based position in the schema crate's type table.
+        Json::Number(n) => n.as_u64().and_then(|c| schema::TYPES.get((c as usize).checked_sub(1)?)).map(|(name, _)| (*name).to_owned()),
         _ => None,
     }
 }
@@ -140,7 +144,7 @@ fn flags_of(v: &Json) -> Flags {
     };
     match v {
         Json::Number(n) => {
-            let bits = n.as_u64().unwrap_or(0);
+            let bits = n.as_u64().unwrap_or(0) as u32;
             for (bit, name) in FLAG_BITS {
                 if bits & bit != 0 {
                     set(name);
@@ -160,7 +164,12 @@ fn col_of(v: &Json) -> Option<Col> {
         name: v.get("name")?.as_str()?.to_owned(),
         ty: type_of(v).unwrap_or_else(|| "str".into()),
         target: v.get("target").or_else(|| v.get("enum")).or_else(|| v.get("ref")).and_then(Json::as_str).map(str::to_owned),
-        flags: flags_of(v.get("flags").unwrap_or(&Json::Null)),
+        flags: {
+            let mut f = flags_of(v.get("flags").unwrap_or(&Json::Null));
+            // Command params say `required` as a boolean of their own, not as a flag bit.
+            f.required |= v.get("required").and_then(Json::as_bool) == Some(true);
+            f
+        },
     })
 }
 
@@ -276,7 +285,7 @@ pub fn list(cat: &Catalog, m: Masks) -> Vec<Json> {
         "schema",
         "Tables and columns",
         "The tables this key can see, or one table's columns with type, flags (required, metric, prose, readonly, deferred) and enum values. Read it before a put.".into(),
-        json!({"type":"object","properties":{"table":{"type":"string","enum":names(cat.tables.iter().filter(|t| m.reads(t) || m.writes(t)).map(|t| t.name.clone()))}},"additionalProperties":false}),
+        json!({"type":"object","properties":{"table":{"type":"string","enum":names(cat.tables.iter().filter(|t| t.stored() && (m.reads(t) || m.writes(t))).map(|t| t.name.clone()))}},"additionalProperties":false}),
         true,
         false,
     ));
@@ -531,7 +540,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 pub fn parse_day(s: &str) -> Option<u32> {
     let b = s.as_bytes();
-    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+    let digits = |r: core::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || !digits(0..4) || !digits(5..7) || !digits(8..10) {
         return None;
     }
     let y: i64 = s[0..4].parse().ok()?;
@@ -630,5 +640,6 @@ mod tests {
         assert_eq!(parse_time("1970-01-02T00:00:01Z"), Some(86_401));
         assert_eq!(parse_time("2026-10-18T09:30:00.250+00:00"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
         assert_eq!(parse_time("2026-10-18T09:30:00+02:00"), None);
+        assert_eq!(parse_day("2026-+1-18"), None);
     }
 }

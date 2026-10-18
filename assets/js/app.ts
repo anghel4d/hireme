@@ -125,6 +125,11 @@ const typing = (t: EventTarget | null) =>
   t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)
 
 addEventListener("keydown", (ev) => {
+  // Escape leaves a field (a search box clears itself first), so the lens's keys work again at once.
+  if (ev.key === "Escape" && typing(ev.target) && ev.target instanceof HTMLElement) {
+    ev.target.blur()
+    return
+  }
   if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || typing(ev.target)) return
   const n = NAV.find((x) => x.key === ev.key)
   if (n) {

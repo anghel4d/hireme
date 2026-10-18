@@ -6,8 +6,9 @@
 //! [`Carrier::rpc`] and [`Carrier::ops`], which resolve with their REPLY or
 //! their ACK/NACK, and the [`Event`] stream, which carries WELCOME, the row
 //! frames (BOOT, PATCH, TICK) for the kernel, and the end of a session.
-//! A call in flight when the socket drops fails with [`Lost`]; ops are
-//! idempotent by `op_id` for 24 h, so the caller may resend them as they were.
+//! A call in flight when the socket drops fails with [`Lost`]: whether an
+//! op in it was written is unknown, and a new call is a new op (the ledger
+//! dedupes only a resent `op_id`), so the caller reads before it retries.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +23,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub const PING: Duration = Duration::from_secs(15);
 pub const SILENT: Duration = Duration::from_secs(45);
+/// An RPC whose REPLY never comes fails instead of hanging its tool call.
+pub const RPC_WAIT: Duration = Duration::from_secs(30);
 
 /// What WELCOME said about this session.
 #[derive(Clone, Debug, Default)]
@@ -79,7 +82,7 @@ pub type Snapshot = Arc<dyn Fn() -> (u64, u64) + Send + Sync>;
 
 impl Carrier {
     /// Connects and keeps reconnecting until a session ends for good.
-    pub fn start(url: String, key: String, hash: u16, snapshot: Snapshot) -> (Arc<Carrier>, mpsc::UnboundedReceiver<Event>) {
+    pub fn start(url: String, key: String, label: String, hash: u16, snapshot: Snapshot) -> (Arc<Carrier>, mpsc::UnboundedReceiver<Event>) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         // An op id is unique per key for the ledger's 24 h: the start time in
         // the high bits, a counter in the low 20 (a million ops per process start).
@@ -87,7 +90,14 @@ impl Carrier {
         let carrier = Arc::new(Carrier { hash, live: Mutex::new(None), next_rpc: AtomicU32::new(1), next_op: AtomicU64::new(base) });
         let (events, rx) = mpsc::unbounded_channel();
         let c = carrier.clone();
-        tokio::spawn(async move { c.run(url, key, snapshot, events).await });
+        let watch = events.clone();
+        let task = tokio::spawn(async move { c.run(url, key, label, snapshot, events).await });
+        // A panic in the carrier is the end of the session, said out loud, not a silent hang.
+        tokio::spawn(async move {
+            if let Err(e) = task.await {
+                let _ = watch.send(Event::Ended { reason: "internal".into(), message: format!("the wire carrier failed: {e}"), again: false });
+            }
+        });
         (carrier, rx)
     }
 
@@ -107,7 +117,15 @@ impl Carrier {
             l.out.send(frame).map_err(|_| Lost("socket closed".into()))?;
             rx
         };
-        rx.await.map_err(|_| Lost("the session ended before the reply".into()))
+        match tokio::time::timeout(RPC_WAIT, rx).await {
+            Ok(r) => r.map_err(|_| Lost("the session ended before the reply".into())),
+            Err(_) => {
+                if let Some(l) = self.live.lock().await.as_mut() {
+                    l.rpcs.remove(&id);
+                }
+                Err(Lost(format!("no reply in {} s", RPC_WAIT.as_secs())))
+            }
+        }
     }
 
     /// Sends one OPS frame of already-encoded ops (`wire::OpsWriter`) and waits for every verdict.
@@ -133,11 +151,11 @@ impl Carrier {
         Ok(out)
     }
 
-    async fn run(self: Arc<Self>, url: String, key: String, snapshot: Snapshot, events: mpsc::UnboundedSender<Event>) {
+    async fn run(self: Arc<Self>, url: String, key: String, label: String, snapshot: Snapshot, events: mpsc::UnboundedSender<Event>) {
         let mut attempt = 0u32;
         loop {
             let started = Instant::now();
-            let end = self.session(&url, &key, &snapshot, &events).await;
+            let end = self.session(&url, &key, &label, &snapshot, &events).await;
             let failed = self.live.lock().await.take();
             drop(failed);
             let (reason, message, again) = end;
@@ -155,7 +173,7 @@ impl Carrier {
     }
 
     /// One session, from connect to close: (reason, message, worth reconnecting).
-    async fn session(&self, url: &str, key: &str, snapshot: &Snapshot, events: &mpsc::UnboundedSender<Event>) -> (String, String, bool) {
+    async fn session(&self, url: &str, key: &str, label: &str, snapshot: &Snapshot, events: &mpsc::UnboundedSender<Event>) -> (String, String, bool) {
         let request = match url.into_client_request() {
             Ok(r) => r,
             Err(e) => return ("url".into(), format!("{url}: {e}"), false),
@@ -171,7 +189,7 @@ impl Carrier {
             snapshot_rev,
             schema_rev,
             credential: key.as_bytes(),
-            label: concat!("hireme-mcp/", env!("CARGO_PKG_VERSION")),
+            label,
         }
         .encode(self.hash);
         if let Err(e) = sink.send(Message::binary(hello)).await {
@@ -224,6 +242,12 @@ impl Carrier {
     }
 
     async fn frame(&self, bytes: &[u8], events: &mpsc::UnboundedSender<Event>) -> Result<Option<(String, String, bool)>, wire::Error> {
+        // A BYE is read whatever wire it was stamped for: a node on a newer schema says so in one.
+        let h = wire::Header::peek(bytes)?;
+        if h.kind == wire::BYE && h.hash != self.hash {
+            let b = wire::Bye::decode(bytes.get(wire::HEADER..h.len as usize).ok_or(wire::Error::Short)?)?;
+            return Ok(Some(("schema".into(), format!("the node speaks another wire ({}); update hireme-mcp", b.message), false)));
+        }
         let f = wire::Frame::parse(bytes, self.hash)?;
         match f.kind() {
             wire::WELCOME => {
@@ -294,6 +318,7 @@ impl Carrier {
                     wire::BYE_SUSPENDED => ("suspended", false),
                     wire::BYE_GRANTS => ("grants", true),
                     wire::BYE_RESTART => ("restart", true),
+                    // Same wire, new schema_rev (a server-side column): reconnect and refetch the catalog.
                     wire::BYE_SCHEMA => ("schema", true),
                     _ => ("bye", true),
                 };
