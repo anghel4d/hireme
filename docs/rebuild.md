@@ -220,7 +220,7 @@ carry `deleted_at`. Ids and `applications.no` are never reused.
 
 ### `system` — server, never key-visible
 
-`accounts` (`name`, `status`, `desk_rev`, `next_no`, `audit_rev`,
+`accounts` (`name`, `status`, `desk_rev`, `next_no`,
 `text_bytes`), `sessions`, `identities`,
 `magic_links`, `api_keys` (`read_mask`, `write_mask`, `may_delete`),
 `factors` (one fat table for TOTP and WebAuthn), `challenges`,

@@ -166,7 +166,6 @@ table accounts system server global
   col next_no u32 ! = 1
   # Announcing audit events, bumped by Audit.record in the same write: the
   # account lens's cursor, one row read instead of a scan of the trail.
-  col audit_rev i64 ! = 0 readonly
   # Text bytes the account stores (str, text and json cells), kept
   # by the sequencer in the write that changes them; past
   # Security.account_text_bytes a write is refused `cap`.

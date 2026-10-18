@@ -9,7 +9,6 @@ CREATE TABLE "accounts" (
   "status" TEXT NOT NULL DEFAULT 'active',
   "desk_rev" INTEGER NOT NULL DEFAULT 0,
   "next_no" INTEGER NOT NULL DEFAULT 1,
-  "audit_rev" INTEGER NOT NULL DEFAULT 0,
   "text_bytes" INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
