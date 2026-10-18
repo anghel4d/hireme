@@ -511,11 +511,11 @@ impl Index {
         let Some(s) = self.seats.remove(&id) else { return };
         let (c, v, t, bv) = keys(&s);
         let age = s.age(self.today);
-        if let Some(g) = c.and_then(|c| self.by_company.get_mut(&c)) {
-            if g.take(id, age) {
-                g.depts[s.department as usize] -= 1;
-                g.fams[s.family as usize] -= 1;
-            }
+        if let Some(g) = c.and_then(|c| self.by_company.get_mut(&c))
+            && g.take(id, age)
+        {
+            g.depts[s.department as usize] -= 1;
+            g.fams[s.family as usize] -= 1;
         }
         if let Some(g) = v.and_then(|v| self.by_vendor.get_mut(&v)) {
             g.take(id, age);

@@ -168,20 +168,20 @@ impl Lines {
     }
 
     fn set_overlay(&mut self, id: u32, line: Option<(u32, u32)>) {
-        if let Some(old) = self.line_of_overlay.get(&id) {
-            if let Some(set) = self.overlays_of_lineage.get_mut(&old.0) {
-                set.remove(&id);
-            }
+        if let Some(old) = self.line_of_overlay.get(&id)
+            && let Some(set) = self.overlays_of_lineage.get_mut(&old.0)
+        {
+            set.remove(&id);
         }
         if let Some(l) = line {
             self.overlays_of_lineage.entry(l.0).or_default().insert(id);
         }
-        if let Some(old) = self.line_of_overlay.remove(&id) {
-            if let Some(n) = self.overlays_on_line.get_mut(&old) {
-                *n -= 1;
-                if *n == 0 {
-                    self.overlays_on_line.remove(&old);
-                }
+        if let Some(old) = self.line_of_overlay.remove(&id)
+            && let Some(n) = self.overlays_on_line.get_mut(&old)
+        {
+            *n -= 1;
+            if *n == 0 {
+                self.overlays_on_line.remove(&old);
             }
         }
         if let Some(l) = line {
@@ -191,10 +191,10 @@ impl Lines {
     }
 
     fn set_owner(&mut self, id: u32, app: Option<u32>) {
-        if let Some(old) = self.app_of_overlay.remove(&id) {
-            if let Some(set) = self.overlays_of_app.get_mut(&old) {
-                set.remove(&id);
-            }
+        if let Some(old) = self.app_of_overlay.remove(&id)
+            && let Some(set) = self.overlays_of_app.get_mut(&old)
+        {
+            set.remove(&id);
         }
         if let Some(a) = app {
             self.app_of_overlay.insert(id, a);
@@ -367,10 +367,10 @@ impl Board {
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
-                    if stages.get(i).and_then(|v| u8::try_from(*v).ok().and_then(Stage::from_u8)).is_some_and(|s| s.queued() || s.after_send()) {
-                        if let Some(c) = self.cached(rows, t, id) {
-                            hot.push(c.seat.clone());
-                        }
+                    if stages.get(i).and_then(|v| u8::try_from(*v).ok().and_then(Stage::from_u8)).is_some_and(|s| s.queued() || s.after_send())
+                        && let Some(c) = self.cached(rows, t, id)
+                    {
+                        hot.push(c.seat.clone());
                     }
                 }
             }

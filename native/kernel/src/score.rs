@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(suggest(&s("Google DeepMind", "Research Engineer")).score, 90);
         assert_eq!(suggest(&s("Thinking Machines Lab", "Engineer")).score, 90);
         assert_eq!(suggest(&s("Stripe", "Engineer")).score, 80);
-        assert_eq!(suggest(&s("Fair Oaks Capital", "Engineer")).anchored, false);
+        assert!(!suggest(&s("Fair Oaks Capital", "Engineer")).anchored);
         let paid = Seat { comp_raw: "$180k – $240k", ..s("Stripe", "Engineer") };
         assert_eq!(suggest(&paid).score, 85);
         assert_eq!(suggest(&paid).band, Band::BigTech);

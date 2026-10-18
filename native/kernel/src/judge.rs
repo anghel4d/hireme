@@ -49,6 +49,11 @@ use crate::{cv, keywords, Day};
 /// Who is writing and when.
 #[derive(Clone, Copy, Debug)]
 pub struct Ctx<'a> {
+    /// The day the op is judged on, in days since 1970-01-01 (UTC).
+    /// Through `Kernel::judge` and `Kernel::predict` the kernel's own day
+    /// replaces it (`Kernel::today`: the sequencer's pinned day, else the
+    /// server's clock row, else this); only a direct caller of `judge`
+    /// decides it.
     pub today: Day,
     /// Unix seconds.
     pub now: i64,
@@ -333,19 +338,19 @@ fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
         let Some(t) = rows.table(table::CV_OVERLAYS).filter(|t| t.has(op.target)) else {
             return not_found(op.table, op.target);
         };
-        if let Some(lid) = t.u32(op.target, col::cv_overlays::LINEAGE_ID) {
-            if let Some(l) = rows.table(table::CV_LINEAGES).filter(|l| l.has(lid)) {
-                let opened = l.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
-                let rewrites = l.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
-                match cv::check(cv::phase(opened, rewrites, ctx.today), false) {
-                    Ok(()) => {}
-                    Err(cv::Refusal::Cooldown) => {
-                        return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": opened, "need": "open_generation"}));
-                    }
-                    Err(cv::Refusal::Additive) => {
-                        let generation = l.u32(lid, col::cv_lineages::GENERATION);
-                        return refuse(refusal::LINEAGE_BUSY, json!({"lineage_id": lid, "generation": generation}));
-                    }
+        if let Some(lid) = t.u32(op.target, col::cv_overlays::LINEAGE_ID)
+            && let Some(l) = rows.table(table::CV_LINEAGES).filter(|l| l.has(lid))
+        {
+            let opened = l.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
+            let rewrites = l.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
+            match cv::check(cv::phase(opened, rewrites, ctx.today), false) {
+                Ok(()) => {}
+                Err(cv::Refusal::Cooldown) => {
+                    return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": opened, "need": "open_generation"}));
+                }
+                Err(cv::Refusal::Additive) => {
+                    let generation = l.u32(lid, col::cv_lineages::GENERATION);
+                    return refuse(refusal::LINEAGE_BUSY, json!({"lineage_id": lid, "generation": generation}));
                 }
             }
         }

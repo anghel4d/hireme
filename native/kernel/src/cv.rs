@@ -241,7 +241,7 @@ pub fn compose<'a>(profile_id: Option<u32>, items: &[Item<'a>], overlays: &[Over
         };
         out.push((it.kind, it.position, it.id, line));
     }
-    out.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    out.sort_by_key(|a| (a.0, a.1, a.2));
     out.into_iter().map(|t| t.3).collect()
 }
 

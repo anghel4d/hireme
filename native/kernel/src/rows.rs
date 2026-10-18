@@ -340,10 +340,10 @@ impl Table {
         // A keyed table always carries its ids as a column, even when the
         // first row is one the client inserted itself, so every reader of
         // the row sees its id.
-        if keyed(self.id) {
-            if let Some(c) = self.column_mut(ID, Kind::U32, false) {
-                c.data.set(s, &Val::U32(id));
-            }
+        if keyed(self.id)
+            && let Some(c) = self.column_mut(ID, Kind::U32, false)
+        {
+            c.data.set(s, &Val::U32(id));
         }
         s
     }
@@ -516,7 +516,7 @@ impl Rows {
                 }
                 continue;
             }
-            let n = b.nrows as usize;
+            let n = b.nrows;
             let ids: Vec<u32> = match b.col(ID) {
                 _ if !keyed(tid) => (1..=n as u32).collect(),
                 Some(c) if c.ty == wire::U32 && c.nrows() == n => (0..n).map(|i| c.u32(i)).collect(),
