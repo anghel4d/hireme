@@ -261,4 +261,88 @@ defmodule Hireme.SequencerTest do
     assert_receive :other_nothing, 3_000
     _ = other
   end
+
+  property "a subscriber's BOOT plus its PATCHes is a fresh BOOT, and a mask never lets a row through",
+           %{account: a} do
+    gen_action =
+      one_of([
+        tuple({constant(:rep), string(:alphanumeric, min_length: 1, max_length: 6)}),
+        tuple({constant(:app), string(:alphanumeric, min_length: 1, max_length: 6)}),
+        tuple({constant(:note), integer(0..20), string(:printable, max_length: 12)}),
+        tuple({constant(:drop), integer(0..20)})
+      ])
+
+    check all(actions <- list_of(gen_action, min_length: 1, max_length: 12), max_runs: 12) do
+      me = self()
+
+      sub = fn id, grants ->
+        %{id: id, label: "s", grants: grants, key_id: nil, session_id: nil}
+      end
+
+      lanes_only = Grants.key(%{id: 3, read_mask: 8, write_mask: 0, may_delete: false})
+
+      watcher =
+        spawn_link(fn ->
+          {:ok, %{frames: [f]}} =
+            Sequencer.subscribe(a.id, sub.(System.unique_integer([:positive]), lanes_only), 0)
+
+          send(me, {:watching, f})
+          watch(me)
+        end)
+
+      assert_receive {:watching, _}
+
+      {:ok, %{frames: [boot]}} =
+        Sequencer.subscribe(a.id, sub.(System.unique_integer([:positive]), Grants.operator()), 0)
+
+      {:ok, :BOOT, _, _, body} = Codec.decode(boot)
+      model = ingest(%{}, :BOOT, body)
+
+      ids = fn table -> Map.keys(Map.get(model, table, %{})) end
+
+      ops =
+        Enum.map(actions, fn
+          {:rep, slug} ->
+            op(:put, :gym_reps, %{platform: :leetcode, slug: slug, done_on: ~D[2026-10-18]})
+
+          {:app, role} ->
+            op(:put, :applications, %{company: "Co", role: role})
+
+          {:note, i, text} ->
+            op(:put, :gym_reps, %{note: text}, target: Enum.at(ids.("gym_reps"), i, 999_999))
+
+          {:drop, i} ->
+            op(:drop, :gym_reps, %{}, target: Enum.at(ids.("gym_reps"), i, 999_999))
+        end)
+
+      Sequencer.submit(a.id, ops)
+      model = drain(model)
+
+      {:ok, %{frames: [fresh]}} =
+        Sequencer.subscribe(a.id, sub.(System.unique_integer([:positive]), Grants.operator()), 0)
+
+      {:ok, :BOOT, _, _, fresh_body} = Codec.decode(fresh)
+      assert model == ingest(%{}, :BOOT, fresh_body)
+
+      send(watcher, {:done, me})
+      assert_receive {:watched, tables}
+      assert Enum.all?(tables, &(&1 in ~w(gym_reps net_entries gone leases)))
+    end
+  end
+
+  defp drain(model) do
+    receive do
+      {:sequencer, :patch, _, body} -> drain(ingest(model, :PATCH, body))
+      {:sequencer, :verdicts, _, _, _} -> model
+    after
+      3_000 -> flunk("no verdicts")
+    end
+  end
+
+  defp watch(parent, seen \\ []) do
+    receive do
+      {:sequencer, :patch, _, body} -> watch(parent, seen ++ Enum.map(tables(body), &elem(&1, 0)))
+      {:done, ^parent} -> send(parent, {:watched, Enum.uniq(seen)})
+    end
+  end
 end

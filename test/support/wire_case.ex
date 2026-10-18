@@ -97,4 +97,74 @@ defmodule Hireme.WireCase do
   end
 
   defp skip(bin, n), do: binary_part(bin, n, byte_size(bin) - n)
+
+  @doc """
+  A client's model of the resident tables: `%{table_name => %{id => %{col_id
+  => value}}}`. A BOOT replaces the tables it names; a PATCH merges rows by
+  id and the `gone` table deletes. Wire tables are left out.
+  """
+  def ingest(model, kind, body) do
+    Enum.reduce(blocks(body), model, fn {table, rows}, model ->
+      case {kind, table} do
+        {_, t} when t in ~w(clock catalog leases) ->
+          model
+
+        {_, "gone"} ->
+          Enum.reduce(rows, model, fn r, m ->
+            name = Schema.table(r[col_id("gone", "table")]).name
+            Map.update(m, name, %{}, &Map.delete(&1, r[col_id("gone", "id")]))
+          end)
+
+        {:BOOT, t} ->
+          Map.put(model, t, Map.new(rows, &{&1[1], &1}))
+
+        {:PATCH, t} ->
+          Map.update(model, t, Map.new(rows, &{&1[1], &1}), fn old ->
+            Enum.reduce(rows, old, fn r, acc -> Map.update(acc, r[1], r, &Map.merge(&1, r)) end)
+          end)
+      end
+    end)
+  end
+
+  defp col_id(table, name), do: Schema.column(table, name).id
+
+  defp blocks(<<>>), do: []
+
+  defp blocks(<<table::little-16, ncols::little-16, nrows::little-32, rest::binary>>) do
+    {cols, rest} =
+      Enum.map_reduce(1..ncols//1, rest, fn _,
+                                            <<id::little-16, ty, 0, len::little-32, r::binary>> ->
+        <<data::binary-size(^len), r::binary>> = r
+        {{id, values(ty, nrows, data)}, skip(r, rem(8 - rem(len, 8), 8))}
+      end)
+
+    rows = for i <- 0..(nrows - 1)//1, do: Map.new(cols, fn {id, vs} -> {id, Enum.at(vs, i)} end)
+    [{Schema.table(table).name, rows} | blocks(rest)]
+  end
+
+  defp values(1, _n, data),
+    do: for(<<v::little-32 <- data>>, do: if(v == 0xFFFFFFFF, do: nil, else: v))
+
+  defp values(3, _n, data),
+    do: for(<<v::little-signed-64 <- data>>, do: if(v == -0x8000000000000000, do: nil, else: v))
+
+  defp values(4, _n, data), do: for(<<v::binary-8 <- data>>, do: float(v))
+
+  defp values(5, _n, data),
+    do:
+      for(<<len::little-32, sha::binary-8 <- data>>,
+        do: if(len == 0xFFFFFFFF, do: nil, else: {len, sha})
+      )
+
+  defp values(2, n, data) do
+    size = (n + 1) * 4
+    <<offsets::binary-size(^size), bytes::binary>> = data
+    offs = for <<o::little-32 <- offsets>>, do: o
+
+    for [a, b] <- Enum.chunk_every(offs, 2, 1, :discard),
+        do: if(a == b, do: nil, else: binary_part(bytes, a, b - a))
+  end
+
+  defp float(<<v::little-float-64>>), do: v
+  defp float(_nan), do: nil
 end
