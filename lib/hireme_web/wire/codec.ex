@@ -233,28 +233,24 @@ defmodule HiremeWeb.Wire.Codec do
 
   # ------------------------------------------------------- small frames
 
-  def hello(body) do
-    case body do
-      <<cred::8, 0::56, snapshot::little-64, schema_rev::little-64, rest::binary>> ->
-        with {:ok, credential, rest} <- field(rest),
-             {:ok, label, ""} <- field(rest),
-             true <- String.valid?(label) do
-          {:ok,
-           %{
-             cred: cred_name(cred),
-             snapshot_rev: snapshot,
-             schema_rev: schema_rev,
-             credential: credential,
-             label: label
-           }}
-        else
-          _ -> {:error, :body}
-        end
-
-      _ ->
-        {:error, :body}
+  def hello(<<cred::8, 0::56, snapshot::little-64, schema_rev::little-64, rest::binary>>) do
+    with {:ok, credential, rest} <- field(rest),
+         {:ok, label, ""} <- field(rest),
+         true <- String.valid?(label) do
+      {:ok,
+       %{
+         cred: cred_name(cred),
+         snapshot_rev: snapshot,
+         schema_rev: schema_rev,
+         credential: credential,
+         label: label
+       }}
+    else
+      _ -> {:error, :body}
     end
   end
+
+  def hello(_), do: {:error, :body}
 
   defp cred_name(1), do: :ticket
   defp cred_name(2), do: :key

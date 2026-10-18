@@ -319,17 +319,11 @@ defmodule Hireme.Mfa do
           {:ok, [String.t()]} | {:error, :step_up | :no_factor}
   def regenerate_recovery_codes(%Session{} = session, meta \\ %{}) do
     as(session, fn ->
-      cond do
-        not fresh?(session) ->
-          {:error, :step_up}
-
-        not enrolled?() ->
-          {:error, :no_factor}
-
-        true ->
-          codes = recovery_codes!(session, meta)
-          Accounts.notify(session.account_id, :recovery_codes_issued, %{})
-          {:ok, codes}
+      with :ok <- fresh(session),
+           true <- enrolled?() || {:error, :no_factor} do
+        codes = recovery_codes!(session, meta)
+        Accounts.notify(session.account_id, :recovery_codes_issued, %{})
+        {:ok, codes}
       end
     end)
   end

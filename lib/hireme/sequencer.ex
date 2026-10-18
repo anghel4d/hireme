@@ -1613,12 +1613,8 @@ defmodule Hireme.Sequencer do
     {state, rows} = resident_rows(state)
 
     blocks =
-      for t <- Schema.tables(),
-          t.residency in [:resident, :projection],
-          not live?(t),
-          Map.has_key?(rows, t.id),
-          into: %{} do
-        {t.id, Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))}
+      for {id, rs} <- rows, t = Schema.table(id), into: %{} do
+        {id, Codec.rows_block(t, wire_cols(t, grants), rs)}
       end
 
     {%{state | blocks: {state.rev, grants, blocks}}, blocks}

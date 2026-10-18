@@ -88,13 +88,11 @@ defmodule Hireme.Accounts do
   """
   @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()} | {:error, :cap}
   def start_session(%Account{} = account, meta \\ %{}) do
-    token = Security.token(32)
     now = Store.now()
 
-    case Store.transaction(fn -> room_for_session(account.id, now) || Repo.rollback(:cap) end) do
-      {:ok, _} -> open_session(account, token, now, meta)
-      {:error, :cap} -> {:error, :cap}
-    end
+    with {:ok, _} <-
+           Store.transaction(fn -> room_for_session(account.id, now) || Repo.rollback(:cap) end),
+         do: open_session(account, Security.token(32), now, meta)
   end
 
   # At the declared cap, the oldest ended sessions (revoked, expired, idle)
@@ -316,12 +314,8 @@ defmodule Hireme.Accounts do
   `activity?` false it only checks, for what a client does by itself.
   """
   @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
-  def live_session(session_id) when is_integer(session_id) do
-    case read_live(session_id) do
-      {:ok, s, now} -> {:ok, touch(s, now)}
-      :error -> :error
-    end
-  end
+  def live_session(session_id) when is_integer(session_id),
+    do: with({:ok, s, now} <- read_live(session_id), do: {:ok, touch(s, now)})
 
   @doc """
   Whether browser session `session_id` may still act (live, active, and

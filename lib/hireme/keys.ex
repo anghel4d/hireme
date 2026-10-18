@@ -254,9 +254,7 @@ defmodule Hireme.Keys do
 
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment, its sessions end, and it stays listed."
   @spec revoke(Key.t(), map()) :: Key.t()
-  def revoke(key, meta \\ %{})
-
-  def revoke(%Key{} = key, meta) do
+  def revoke(%Key{} = key, meta \\ %{}) do
     now = Store.now()
 
     # Revoked only if still live: a second revoke, or one from a stale

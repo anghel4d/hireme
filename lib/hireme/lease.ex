@@ -192,10 +192,11 @@ defmodule Hireme.Lease do
 
     case params do
       %{"ids" => ids} when is_list(ids) ->
+        unknown = Enum.reject(ids, &(is_integer(&1) and MapSet.member?(all, &1)))
+
         cond do
-          not Enum.all?(ids, &(is_integer(&1) and MapSet.member?(all, &1))) ->
-            {:refused, :not_found,
-             %{ids: Enum.reject(ids, &(is_integer(&1) and MapSet.member?(all, &1)))}}
+          unknown != [] ->
+            {:refused, :not_found, %{ids: unknown}}
 
           taken = Enum.find(ids, &(Map.get(l.holder, &1, id) != id)) ->
             {:refused, :leased, holder(l, taken)}

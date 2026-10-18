@@ -82,7 +82,7 @@ defmodule Hireme.Audit do
       budget when is_atom(budget) and budget != nil ->
         if within?(budget, name, account_id, context),
           do: write(kind, meta, context, account_id),
-          else: coalesce(budget, name, account_id, context)
+          else: __MODULE__.Coalescer.count(account_id, budget, name, context)
 
       _ ->
         write(kind, meta, context, account_id)
@@ -117,9 +117,6 @@ defmodule Hireme.Audit do
         false
     end
   end
-
-  defp coalesce(budget, name, account_id, context),
-    do: __MODULE__.Coalescer.count(account_id, budget, name, context)
 
   @doc false
   # Whether this process recorded an event since `recorded?(:reset)`: how an

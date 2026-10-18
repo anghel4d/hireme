@@ -60,26 +60,19 @@ defmodule HiremeWeb.Account do
     guarded(method, fn -> checked(method, params, ctx) end)
   end
 
+  # The browser session's own lifetime, idle limit, revocation and the
+  # account's suspension hold here exactly as for a page.
   defp checked(method, params, ctx) do
     with nil <- ctx[:key],
          true <- ids?(params) || :invalid,
          id when is_integer(id) <- ctx[:session_id],
-         {:ok, %Session{account_id: account_id} = session} <- live(id),
+         {:ok, %Session{account_id: account_id} = session} <- Accounts.live_session(id),
          true <- account_id == ctx.account_id do
       Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
-      :session -> {:error, %{error: "session"}}
+      :error -> {:error, %{error: "session"}}
       :invalid -> {:error, %{error: "invalid"}}
       _ -> {:error, %{error: "scope"}}
-    end
-  end
-
-  # The browser session's own lifetime, idle limit, revocation and the
-  # account's suspension hold here exactly as for a page.
-  defp live(id) do
-    case Accounts.live_session(id) do
-      {:ok, session} -> {:ok, session}
-      :error -> :session
     end
   end
 
@@ -183,10 +176,7 @@ defmodule HiremeWeb.Account do
         {:error, :rate_limited}
 
       true ->
-        account
-        |> Ecto.Changeset.change(name: name, rev: account.rev + 1)
-        |> then(&Hireme.Store.write(fn -> Repo.update!(&1, skip_account: true) end))
-
+        Hireme.Store.update!(account, [name: name], skip_account: true)
         Audit.record(:account_renamed, %{}, ctx(meta, s))
         :ok
     end
