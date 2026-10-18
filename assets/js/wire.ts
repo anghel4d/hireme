@@ -436,6 +436,8 @@ export class Wire {
   private attempt = 0
   private nonce = 0n
   private ended = false
+  private nextCall = 1
+  private readonly calls = new Map<number, { resolve: (r: Reply) => void; reject: (e: Error) => void }>()
 
   constructor(private readonly hooks: Hooks) {
     const m = meta()
@@ -457,6 +459,18 @@ export class Wire {
     if (!this.send_) return false
     this.send_(f)
     return true
+  }
+
+  /**
+   * One RPC; resolves with its REPLY, rejects if the carrier drops first.
+   * A parked method (account.watch) simply resolves late.
+   */
+  call(method: string, params: unknown = {}): Promise<Reply> {
+    const id = this.nextCall++
+    return new Promise((resolve, reject) => {
+      if (!this.send(rpc(this.hash, id, method, params))) return reject(new Error("not connected"))
+      this.calls.set(id, { resolve, reject })
+    })
   }
 
   /** The session is over for good (BYE revoked, suspended): no reconnect. */
@@ -577,6 +591,19 @@ export class Wire {
   // Frames are copied while held: a framer's view is only good during the call.
   private deliver(f: Bytes, h: Header): void {
     this.heard = Date.now()
+    if (h.kind === KIND.REPLY) {
+      const r = reply(f)
+      const call = this.calls.get(r.id)
+      if (call) {
+        this.calls.delete(r.id)
+        call.resolve(r)
+      }
+      return
+    }
+    if (h.kind === KIND.PING) {
+      this.send(new Writer().u64(pong(f)).done(KIND.PONG, this.hash))
+      return
+    }
     const train = h.kind === KIND.BOOT || h.kind === KIND.WELCOME || h.kind === KIND.BYE || h.kind === KIND.PONG
     if (this.held && !train) {
       this.held.push(f.slice())
@@ -596,6 +623,8 @@ export class Wire {
     this.close_ = null
     this.held = null
     clearInterval(this.pinger)
+    for (const c of this.calls.values()) c.reject(new Error(why))
+    this.calls.clear()
     this.retry(why)
   }
 

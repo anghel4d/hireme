@@ -57,17 +57,44 @@ export interface Model {
   notices: Notice[]
   /** Bumped by the kernel ingest so lenses know rows moved. */
   rows: number
+  account: AccountView
 }
+
+/** The account lens: the server's projection, and the ceremony in progress. */
+export interface AccountView {
+  overview: Record<string, unknown> | null
+  loading: boolean
+  /** A secret or recovery codes shown once, until dismissed. */
+  reveal: { title: string; lines: string[] } | null
+  /** TOTP enrollment between begin and confirm. */
+  totp: { uri: string; secret: string; svg: string } | null
+  /** The action waiting on a step-up, retried once the session is fresh. */
+  stepUp: { method: string; params: Record<string, unknown> } | null
+  /** Which form is open: "mint", "rename", "trust", "change:<key id>". */
+  open: string
+  error: string
+  audit: Record<string, unknown>[] | null
+}
+
+/** The shell answers /world/:table and /lanes/:lane only, so those lenses always name one. */
+const DEFAULT_SUB: Partial<Record<Lens, string>> = { world: "corporations", lanes: "gym" }
 
 export function parse(path: string, search: string): Address {
   const parts = path.split("/").filter((s) => s !== "")
   const first = parts[0] ?? "desk"
   const lens = (LENSES as readonly string[]).includes(first) ? (first as Lens) : "desk"
-  return { lens, sub: decodeURIComponent(parts[1] ?? ""), q: new Map(new URLSearchParams(search)) }
+  let sub = ""
+  try {
+    sub = decodeURIComponent(parts[1] ?? "")
+  } catch {
+    // A malformed escape is no sub at all.
+  }
+  return { lens, sub: sub === "" ? DEFAULT_SUB[lens] ?? "" : sub, q: new Map(new URLSearchParams(search)) }
 }
 
 export function format(a: Address): string {
-  const path = a.sub === "" ? `/${a.lens}` : `/${a.lens}/${encodeURIComponent(a.sub)}`
+  const sub = a.sub === "" ? DEFAULT_SUB[a.lens] ?? "" : a.sub
+  const path = sub === "" ? `/${a.lens}` : `/${a.lens}/${encodeURIComponent(sub)}`
   const q = new URLSearchParams()
   for (const [k, v] of a.q) if (v !== "") q.set(k, v)
   const s = q.toString()
@@ -88,6 +115,7 @@ export const model: Model = {
   drafts: new Map(),
   notices: [],
   rows: 0,
+  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
 }
 
 type Render = () => void
