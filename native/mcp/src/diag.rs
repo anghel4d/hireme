@@ -66,7 +66,7 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
     ("column", "not filterable", "this column cannot be filtered on", "Deferred text, json and bytes columns are not compared in `where`. Filter on another column, or `get` the rows and read them."),
     ("column", "not orderable", "this column cannot order rows", "Deferred text, json, bytes and text columns do not order. Order by another column (id by default)."),
     ("column", "not text", "this column is not text", "`text` reads text columns (a deferred one comes as {len, sha} elsewhere); `get` returns every other column whole."),
-    ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it."),
+    ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it. A host is ASCII letters, digits and hyphens: write an international one in its punycode form (bücher.example as xn--bcher-kva.example); the path may be any text."),
     ("type", "an http(s) URL or a source id", "source must be an http(s) URL or a source id", "Give `source` as \"https://...\" (the server finds or makes that source) or as an existing source's id."),
     ("type", "inside a character", "the offset falls inside a UTF-8 character", "Continue from the `next` offset the previous `text` answer gave, or from 0."),
     ("type", "compares with null", "only eq and ne compare with null", "Use {\"eq\": null} for an empty cell and {\"ne\": null} for a filled one; lt, gt, prefix and the rest take a value."),
