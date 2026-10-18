@@ -727,6 +727,9 @@ defmodule Hireme.Schema do
         String.ends_with?(name, ["ches", "shes", "xes", "sses"]) ->
           String.replace_suffix(name, "es", "")
 
+        String.ends_with?(name, ["ss", "us", "as"]) ->
+          name
+
         String.ends_with?(name, "s") ->
           String.replace_suffix(name, "s", "")
 

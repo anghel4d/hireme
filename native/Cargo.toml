@@ -1,0 +1,14 @@
+# One workspace, one lockfile: every crate in native/ builds against the same
+# dependency versions, so the wasm kernel, the NIF and hireme-mcp agree.
+[workspace]
+resolver = "3"
+# A crate joins when its Cargo.toml lands: nif, gate and mcp add themselves.
+members = ["schema", "wire", "kernel", "mcp"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1

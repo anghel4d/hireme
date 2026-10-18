@@ -1,0 +1,20 @@
+[package]
+name = "schema"
+version = "2.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "hireme's declaration: the parser of schema/hireme.schema, its resolved model and hashes, named constants for every crate, and the SQL and TypeScript emitters"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hireme-schema"
+path = "src/main.rs"
+required-features = ["std"]
+
+[features]
+default = ["std"]
+# The model() cache and the binary; the constants and the parser need only alloc.
+std = []
