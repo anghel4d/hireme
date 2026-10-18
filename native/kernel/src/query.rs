@@ -147,7 +147,7 @@ fn bound(v: Option<&Json>, default: u64, max: u64, name: &str) -> Result<u64, Re
         None | Some(Json::Null) => Ok(default),
         Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > 0 && n <= max) => Ok(n.as_u64().unwrap_or(default)),
         // Past u64 a number reads as a float: still a too-large integer.
-        Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > max) || n.as_f64().is_some_and(|f| f >= u64::MAX as f64 && f.fract() == 0.0) => {
+        Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > max) || n.as_f64().is_some_and(|f| f >= u64::MAX as f64) => {
             let mut d = json!({"limit": n, "max": max});
             if name != "limit" {
                 d["param"] = name.into();
