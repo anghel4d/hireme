@@ -524,12 +524,16 @@ export const refusalName = (code: number): string => REFUSAL[code] ?? (code < 0 
 export function refusalText(code: string, data: unknown): string {
   const d = (data ?? {}) as Record<string, unknown>
   if (typeof d.message === "string" && d.message !== "") return d.message
+  // The reason leads in its own words (the node gives every refusal one, its code's if the site named
+  // none); the other fields follow in parentheses. reason_default only says which it was.
+  const reason = typeof d.reason === "string" && d.reason !== "" ? d.reason : null
   const parts: string[] = []
   if (d.from !== undefined || d.to !== undefined) parts.push(`${String(d.from ?? "?")} → ${String(d.to ?? "?")}`)
   for (const [k2, x] of Object.entries(d)) {
-    if (k2 === "from" || k2 === "to" || k2 === "refusal") continue
+    if (["from", "to", "refusal", "reason", "reason_default", "message"].includes(k2)) continue
     parts.push(`${k2.replace(/_/g, " ")} ${typeof x === "object" ? JSON.stringify(x) : String(x)}`)
   }
+  if (reason) return parts.length > 0 ? `${reason} (${parts.join(", ")})` : reason
   return parts.length > 0 ? parts.join(", ") : code.replace(/_/g, " ")
 }
 

@@ -684,7 +684,7 @@ impl App {
         } else if m.write == 0 {
             "This key reads only. `schema`, then `find` and `get`; `text` for raw listings and prose."
         } else if !w.leased {
-            "Open the write channel with `lease` ({} or {\"count\":16}), then `put` rows; `schema` with a table lists its writable columns."
+            "Open the write channel with `lease` ({} or {\"count\":16}), then `put` rows; `schema` with a table lists its writable columns. If the operator has paused this key, `lease` says so."
         } else {
             "The lease is open: `put` rows (metrics need as_of, prose needs source and expect_rev) and run commands on your claimed applications."
         };
