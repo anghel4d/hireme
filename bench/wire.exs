@@ -278,6 +278,23 @@ defmodule Bench.WS do
 
   defp parse(_), do: :more
 
+  # The next whole frame of kind id `kind`, raw, read by its header alone:
+  # no inflate, no parse. Answers the frame, the frames after it, and the
+  # socket's leftover bytes.
+  def raw_until(sock, buf, frames, kind) do
+    case Codec.split(frames, 64 <<< 20) do
+      {:ok, <<_len::little-32, ^kind, _::binary>> = frame, rest} ->
+        {frame, rest, buf}
+
+      {:ok, _other, rest} ->
+        raw_until(sock, buf, rest, kind)
+
+      :more ->
+        {payload, buf} = recv(sock, buf)
+        raw_until(sock, buf, frames <> payload, kind)
+    end
+  end
+
   # Frames until one is `kind`; a message may carry several frames.
   def until(sock, buf, kind), do: until(sock, buf, kind, "")
 
@@ -450,12 +467,38 @@ queries =
     end
   end
 
-{find_times, op} =
-  Enum.map_reduce(Enum.with_index(queries, 1), op, fn {{shape, q}, id}, op ->
-    {t, {ok, _reply, op}} = Bench.us(fn -> Bench.rpc(op, id, "find", q) end)
-    if ok != 1, do: IO.puts(:stderr, "bench: find refused #{inspect(q)}")
-    {{shape, t}, op}
-  end)
+# Timed over a real /wire session, a server process of its own: from the
+# RPC leaving to the whole REPLY frame arriving. Nothing the client does
+# with the answer (inflate, JSON) is on the clock; it is checked after.
+port = String.to_integer(System.get_env("PORT", "4100"))
+
+find_times =
+  if HiremeWeb.Endpoint.config(:server) do
+    {sock, buf} = Bench.WS.connect(port)
+
+    :ok =
+      Bench.WS.send_bin(sock, Codec.encode_hello(:ticket, Accounts.ticket(session), "bench-find"))
+
+    {_, state} = Bench.WS.until(sock, buf, :BOOT)
+
+    {times, _} =
+      Enum.map_reduce(Enum.with_index(queries, 1), state, fn {{shape, q}, id}, {buf, pending} ->
+        frame = Codec.encode_rpc(id, "find", Jason.encode!(q))
+        t0 = System.monotonic_time(:microsecond)
+        :ok = Bench.WS.send_bin(sock, frame)
+        {reply, rest, buf} = Bench.WS.raw_until(sock, buf, pending, Schema.frame(:reply))
+        t = System.monotonic_time(:microsecond) - t0
+        {:ok, :REPLY, _, _, <<^id::little-32, ok, _::binary>>} = Codec.decode(reply)
+        if ok != 1, do: IO.puts(:stderr, "bench: find refused #{inspect(q)}")
+        {{shape, t}, {buf, rest}}
+      end)
+
+    :gen_tcp.close(sock)
+    times
+  else
+    IO.puts(:stderr, "bench: the endpoint is not serving (PHX_SERVER=true); no find timing")
+    []
+  end
 
 find_shapes =
   find_times
@@ -465,8 +508,6 @@ find_shapes =
 find_times = Enum.map(find_times, &elem(&1, 1))
 
 ## Op round trip across the loopback: one put over the /wire WebSocket, ACK back.
-
-port = String.to_integer(System.get_env("PORT", "4100"))
 
 roundtrips =
   if HiremeWeb.Endpoint.config(:server) do
@@ -591,11 +632,17 @@ lines = [
     "bytes",
     %{note: "a 256-application insert burst with listing_raw deferred"}
   ),
-  Bench.line("find_p99_us_at_#{places}_places", Bench.percentile(find_times, 99), 10_000, "us", %{
-    p50: Bench.percentile(find_times, 50),
-    queries: length(find_times),
-    p99_by_shape: find_shapes
-  }),
+  Bench.line(
+    "find_p99_us_at_#{places}_places_over_wire",
+    Bench.percentile(find_times, 99),
+    10_000,
+    "us",
+    %{
+      p50: Bench.percentile(find_times, 50),
+      queries: length(find_times),
+      p99_by_shape: find_shapes
+    }
+  ),
   Bench.line(
     "op_round_trip_p50_us_loopback",
     (roundtrips != [] && Bench.percentile(roundtrips, 50)) || nil,
