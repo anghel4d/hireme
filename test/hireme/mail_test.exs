@@ -160,6 +160,66 @@ defmodule Hireme.MailTest do
   end
 
   @tag window: [:notices, :notice_rows]
+  test "an account's outbox holds no more than its declared cap" do
+    %{account: a} = sign_in()
+    cap = Hireme.Schema.table("outbox").cap
+    now = Hireme.Store.now()
+
+    sent = fn _ ->
+      %{
+        account_id: a.id,
+        address: "old@example.com",
+        kind: "api_key_renamed",
+        meta: %{},
+        attempts: 1,
+        next_at: now,
+        sent_at: now,
+        rev: 1,
+        inserted_at: now,
+        updated_at: now
+      }
+    end
+
+    for chunk <- Enum.chunk_every(1..(cap - 2), 3_000),
+        do: Repo.insert_all(Hireme.Rows.Outbox, Enum.map(chunk, sent), skip_account: true)
+
+    # One digest already pending for a@, which leaves room for one row.
+    :ok = Mail.enqueue(a.id, ["a@example.com"], :api_key_renamed, %{name: "k"})
+
+    Repo.update_all(
+      from(n in Hireme.Rows.Outbox, where: n.address == "a@example.com"),
+      [set: [kind: "digest", meta: %{count: 1}, next_at: DateTime.add(now, 600)]],
+      skip_account: true
+    )
+
+    held = fn ->
+      Repo.aggregate(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id), :count,
+        skip_account: true
+      )
+    end
+
+    assert held.() == cap - 1
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok =
+          Mail.enqueue(a.id, ~w(a@example.com b@example.com c@example.com), :api_key_renamed, %{
+            name: "k2"
+          })
+      end)
+
+    assert log =~ "the outbox is at its cap"
+    assert held.() == cap - 1
+
+    [digest] =
+      Repo.all(from(n in Hireme.Rows.Outbox, where: n.address == "a@example.com"),
+        skip_account: true
+      )
+
+    assert digest.meta["count"] == 2
+  end
+
+  @tag window: [:notices, :notice_rows]
   test "notice rows are bounded per account however many addresses an account links" do
     %{account: a} = sign_in()
     many = for i <- 1..100, do: "a#{i}@example.com"

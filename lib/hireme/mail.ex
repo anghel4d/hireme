@@ -137,14 +137,22 @@ defmodule Hireme.Mail do
     try do
       # Within the account's notice budget each notice goes as itself; past
       # it, each address gets one pending digest, counted up, never repeated.
-      case budget(account_id, kind, length(addresses)) do
+      # The outbox's declared cap holds per account: without room, only a
+      # digest already pending is counted up (the event is on the trail).
+      room = room(account_id) >= length(addresses)
+
+      case if(room, do: budget(account_id, kind, length(addresses)), else: {:error, :cap}) do
         :ok ->
           Hireme.Store.write(fn ->
             Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
           end)
 
         {:error, _} ->
-          Hireme.Store.write(fn -> Enum.each(addresses, &digest(account_id, &1, now)) end)
+          unless room,
+            do:
+              Logger.warning("notice #{kind} for account #{account_id}: the outbox is at its cap")
+
+          Hireme.Store.write(fn -> Enum.each(addresses, &digest(account_id, &1, now, room)) end)
       end
 
       if pid = GenServer.whereis(__MODULE__.Outbox), do: send(pid, :drain)
@@ -194,7 +202,20 @@ defmodule Hireme.Mail do
   # ends, so a flood of changes coalesces into it instead of mail. Only a
   # digest not yet due counts as pending: one the drain has taken up, or has
   # given up on, is never added to.
-  defp digest(account_id, address, now) do
+  defp room(account_id) do
+    require Ecto.Query
+
+    held =
+      Hireme.Repo.aggregate(
+        Ecto.Query.from(n in Hireme.Rows.Outbox, where: n.account_id == ^account_id),
+        :count,
+        skip_account: true
+      )
+
+    Hireme.Schema.table("outbox").cap - held
+  end
+
+  defp digest(account_id, address, now, room) do
     require Ecto.Query
     alias Hireme.Rows.Outbox
 
@@ -210,6 +231,9 @@ defmodule Hireme.Mail do
       )
 
     case pending do
+      nil when not room ->
+        :ok
+
       nil ->
         {window, _} = Security.limits()[:notices]
 
