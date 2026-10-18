@@ -17,6 +17,13 @@ defmodule Mix.Tasks.Hireme.Schema do
       declaration minus the previous baseline (additive only; a destructive
       change is refused and written by hand as `NNNN_drop_<what>.sql`)
     * `--renumber`: allow existing ids to move (before the cutover only)
+    * `--freeze`: write `priv/db/baseline.lock`, the SHA-256 of the
+      checked-in baseline. The cutover runs it once: from then on deployed
+      databases hold that baseline, so a plain emit that would change it is
+      refused (a change ships as `--migration NAME`, which writes its
+      `NNNN` step and locks the new baseline), and `--check` fails on a
+      baseline the lock does not name. Before the freeze, an emit rewrites
+      the baseline freely.
 
   A database is built from the baseline when empty, and from the `NNNN`
   files it has not applied otherwise (`Hireme.Release`), so the baseline is
@@ -27,12 +34,15 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   @root Path.expand("../../..", __DIR__)
   @baseline "priv/db/baseline.sql"
+  @lock "priv/db/baseline.lock"
   @ts "assets/js/gen/schema.ts"
 
   @impl Mix.Task
   def run(argv) do
     {opts, rest, invalid} =
-      OptionParser.parse(argv, strict: [check: :boolean, migration: :string, renumber: :boolean])
+      OptionParser.parse(argv,
+        strict: [check: :boolean, migration: :string, renumber: :boolean, freeze: :boolean]
+      )
 
     # A mistyped --check must not turn into a write.
     if invalid != [] or rest != [],
@@ -46,18 +56,69 @@ defmodule Mix.Tasks.Hireme.Schema do
     sql = emit!(["sql"])
     ts = emit!(["ts"])
 
-    if opts[:check], do: check!(sql, ts, opts), else: write!(sql, ts, opts)
+    cond do
+      opts[:freeze] -> freeze!(sql, ts, opts)
+      opts[:check] -> check!(sql, ts, opts)
+      true -> write!(sql, ts, opts)
+    end
   end
 
   defp write!(sql, ts, opts) do
     guard_ids!(ts, opts)
 
-    if name = opts[:migration] do
-      migration!(name)
+    case {locked(), opts[:migration]} do
+      {nil, nil} ->
+        :ok
+
+      {nil, name} ->
+        migration!(name)
+
+      {hash, nil} ->
+        if sha(sql) != hash,
+          do:
+            Mix.raise(
+              "#{@baseline} is frozen: deployed databases hold it. " <>
+                "Ship this change as mix hireme.schema --migration NAME"
+            )
+
+      {_hash, name} ->
+        migration!(name)
+        put!(@lock, lock_text(sql))
     end
 
     put!(@baseline, sql)
     put!(@ts, ts)
+  end
+
+  # The cutover's one step: lock the baseline every deployed database starts from.
+  defp freeze!(sql, ts, opts) do
+    check!(sql, ts, opts)
+    put!(@lock, lock_text(sql))
+  end
+
+  defp locked do
+    case File.read(Path.join(@root, @lock)) do
+      {:ok, text} -> text |> String.split("\n") |> Enum.find(&(&1 =~ ~r/^[0-9a-f]{64}$/))
+      {:error, _} -> nil
+    end
+  end
+
+  defp lock_text(sql),
+    do: "# The deployed baseline's SHA-256; see mix help hireme.schema (--freeze).\n#{sha(sql)}\n"
+
+  defp sha(text), do: :crypto.hash(:sha256, text) |> Base.encode16(case: :lower)
+
+  defp lock_problem do
+    case {locked(), File.read(Path.join(@root, @baseline))} do
+      {nil, _} ->
+        nil
+
+      {hash, {:ok, sql}} ->
+        if sha(sql) != hash, do: "#{@baseline} is not the baseline #{@lock} names"
+
+      {_, {:error, _}} ->
+        nil
+    end
   end
 
   defp check!(sql, ts, opts) do
@@ -66,7 +127,8 @@ defmodule Mix.Tasks.Hireme.Schema do
         differs(@baseline, sql),
         differs(@ts, ts),
         canonical_problem(),
-        apply_problem(sql)
+        apply_problem(sql),
+        lock_problem()
       ] ++ id_problems(ts, opts)
 
     case Enum.reject(problems, &is_nil/1) do
