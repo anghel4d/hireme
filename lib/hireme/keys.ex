@@ -190,8 +190,10 @@ defmodule Hireme.Keys do
   @doc "Whether `new` grants anything `old` did not."
   @spec widens?(masks() | Key.t(), masks()) :: boolean()
   def widens?(old, new) do
-    Bitwise.band(new.read_mask, Bitwise.bnot(old.read_mask)) != 0 or
-      Bitwise.band(new.write_mask, Bitwise.bnot(old.write_mask)) != 0 or
+    # Bits in new and not in old, without bnot: Dialyzer types `x band bnot(y)`
+    # as never zero, which made the `or` below unreachable to it.
+    Bitwise.band(new.read_mask, old.read_mask) != new.read_mask or
+      Bitwise.band(new.write_mask, old.write_mask) != new.write_mask or
       (new.may_delete and not old.may_delete)
   end
 
@@ -202,8 +204,9 @@ defmodule Hireme.Keys do
     cond do
       not name?(name) -> {:error, :name}
       name == key.name -> {:ok, key}
-      Security.limit(:renames, key.account_id) != :ok -> {:error, :rate_limited}
-      true -> rename!(key, name, meta)
+      # A cond's literal-true tail after a boolean clause reads to Dialyzer
+      # as an unreachable false branch; the limit's own answer decides here.
+      :else -> with :ok <- Security.limit(:renames, key.account_id), do: rename!(key, name, meta)
     end
   end
 
@@ -227,7 +230,7 @@ defmodule Hireme.Keys do
       is_nil(key.paused_at) ->
         {:ok, key}
 
-      true ->
+      :else ->
         {n, _} =
           Store.bump(
             from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
@@ -297,8 +300,15 @@ defmodule Hireme.Keys do
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
-    with false <- Security.blocked?(:api_key_peer, peer),
-         {:ok, key_id, secret} <- parse(presented),
+    if Security.blocked?(:api_key_peer, peer),
+      do: {:error, :rate_limited},
+      else: check(presented, peer)
+  end
+
+  def authenticate(_, _), do: :error
+
+  defp check(presented, peer) do
+    with {:ok, key_id, secret} <- parse(presented),
          {%Key{} = key, account} <- with_account(dynamic([k], k.key_id == ^key_id)),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
          true <- live?(key) and Accounts.active?(account) do
@@ -307,17 +317,11 @@ defmodule Hireme.Keys do
       {:ok,
        Map.take(key, [:id, :key_id, :account_id, :name, :read_mask, :write_mask, :may_delete])}
     else
-      # Only the throttle answers `true` here; every failed check is false.
-      true ->
-        {:error, :rate_limited}
-
       _ ->
         Security.failed(:api_key_peer, peer)
         :error
     end
   end
-
-  def authenticate(_, _), do: :error
 
   @doc "How a key is shown after mint: `hm_Ed6k…`."
   @spec display(Key.t()) :: String.t()
@@ -331,7 +335,7 @@ defmodule Hireme.Keys do
     all = Hireme.Grants.all()
     d = Map.get(m, :may_delete, false)
 
-    if Bitwise.band(r, Bitwise.bnot(all)) == 0 and Bitwise.band(w, Bitwise.bnot(all)) == 0 and
+    if Bitwise.band(r, all) == r and Bitwise.band(w, all) == w and
          is_boolean(d) and (r != 0 or w != 0),
        do: {:ok, %{read_mask: r, write_mask: w, may_delete: d}},
        else: {:error, :masks}

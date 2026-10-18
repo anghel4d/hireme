@@ -201,8 +201,14 @@ defmodule Hireme.Security do
   @spec refund(atom(), term()) :: :ok
   def refund(name, key) when is_map_key(@limits, name) do
     {scale_ms, _} = Map.fetch!(@limits, name)
-    Hireme.RateLimit.inc(bucket(name, key), scale_ms, -1)
+    # Hammer's API only adds (its increment is a pos_integer), so the take-back
+    # is on its fixed window's ETS row, {{key, window}, count, expires_at}:
+    # a decrement floored at zero, and nothing once that window has rolled.
+    window = div(System.system_time(:millisecond), scale_ms)
+    :ets.update_counter(Hireme.RateLimit, {bucket(name, key), window}, {2, -1, 0, 0})
     :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc "Count one failure under the named limit for `key`."
