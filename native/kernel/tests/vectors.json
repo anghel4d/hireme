@@ -1160,6 +1160,173 @@
           }
         }
       ]
+    },
+    {
+      "name": "a reply to a submitted listing is contact: the company's load decays from replied_on, the later of the two dates, and closing it keeps that origin",
+      "today": 20000,
+      "rows": {
+        "batches": [
+          {
+            "id": 9,
+            "code": "B9",
+            "ordinal": 1,
+            "fire": "hold"
+          }
+        ],
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 20000,
+            "applied_on": 20000
+          },
+          {
+            "id": 2,
+            "no": 2,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 20000,
+            "applied_on": 20000
+          },
+          {
+            "id": 3,
+            "no": 3,
+            "stage": "reply",
+            "pips": "DDDDDDDDAP",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 19990,
+            "applied_on": 19940,
+            "replied_on": 19990
+          },
+          {
+            "id": 4,
+            "no": 4,
+            "stage": "draft_ready",
+            "company": "google",
+            "role": "Senior Software Engineer",
+            "batch_id": 9,
+            "stage_on": 20000
+          }
+        ]
+      },
+      "steps": [
+        {
+          "command": "stage",
+          "target": 4,
+          "params": {
+            "stage": "fire_ready"
+          },
+          "refusal": "heat",
+          "data": {
+            "reason": "company_cap",
+            "company_load": 2.8203353560076607,
+            "to": "fire_ready",
+            "allow": false
+          }
+        },
+        {
+          "command": "stage",
+          "target": 3,
+          "params": {
+            "stage": "closed"
+          },
+          "human": true,
+          "apply": true,
+          "effects": [
+            {
+              "table": "applications",
+              "id": 3,
+              "cells": {
+                "stage": "closed"
+              }
+            },
+            {
+              "table": "events",
+              "id": 0,
+              "cells": {}
+            }
+          ]
+        },
+        {
+          "command": "stage",
+          "target": 4,
+          "params": {
+            "stage": "fire_ready"
+          },
+          "refusal": "heat",
+          "data": {
+            "reason": "company_cap",
+            "company_load": 2.8203353560076607,
+            "to": "fire_ready",
+            "allow": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "a close with no pips is read by its dates: unanswered and unsubmitted it never went out and reopens; answered, it was sent and cannot",
+      "today": 20000,
+      "rows": {
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "closed",
+            "company": "Acme",
+            "role": "R",
+            "stage_on": 19990
+          },
+          {
+            "id": 2,
+            "no": 2,
+            "stage": "closed",
+            "company": "Bolt",
+            "role": "R",
+            "stage_on": 19990,
+            "replied_on": 19980
+          }
+        ]
+      },
+      "steps": [
+        {
+          "command": "stage",
+          "target": 1,
+          "params": {
+            "stage": "gated"
+          },
+          "effects": [
+            {
+              "table": "applications",
+              "id": 1,
+              "cells": {
+                "stage": "gated",
+                "pips": "DDAPPPPSSP"
+              }
+            },
+            {
+              "table": "events",
+              "id": 0,
+              "cells": {}
+            }
+          ]
+        },
+        {
+          "command": "stage",
+          "target": 2,
+          "params": {
+            "stage": "gated"
+          },
+          "refusal": "stage",
+          "data": {
+            "rule": "sent"
+          }
+        }
+      ]
     }
   ]
 }

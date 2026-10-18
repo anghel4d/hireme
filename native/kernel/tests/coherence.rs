@@ -1,7 +1,7 @@
 //! A kernel kept current must equal a fresh one: after any run of PATCHes
-//! (applications, settings, atlas, lineages, overlays, gone rows), predicted
-//! ops, their ACKs and NACKs, and day changes, a kernel booted from the same
-//! rows derives the same board, documents and verdicts. The board's cache
+//! (applications, settings, atlas, lineages, gone rows), BOOTs, predicted
+//! ops, their ACKs and NACKs, TICKs and day pins, a kernel booted from the
+//! same rows derives the same board, documents and verdicts. The board's cache
 //! and the governor's index are maintained incrementally; this is their law.
 
 use kernel::abi::Kernel;
@@ -221,7 +221,7 @@ fn derived(k: &mut Kernel, probes: &[Vec<u8>], ctx: &Ctx) -> Vec<String> {
 
 #[test]
 fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
-    let (seeds, steps): (u64, u64) = if cfg!(debug_assertions) { (8, 30) } else { (60, 60) };
+    let (seeds, steps): (u64, u64) = if cfg!(debug_assertions) { (12, 30) } else { (60, 60) };
     let agent = Ctx { today: TODAY, now: 0, human: false, key_id: Some(1), held: &[1, 2, 3] };
     let human = Ctx { today: TODAY, now: 0, human: true, key_id: None, held: &[] };
     for seed in 1..=seeds {
@@ -257,6 +257,20 @@ fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
                 8 => {
                     a.pin_today(TODAY + r.below(130) as i32 - 5);
                     log.push("day");
+                }
+                // The server's TICK moving the day (unless a day is pinned),
+                // or a BOOT replacing the desk whole.
+                _ if r.below(2) == 0 => {
+                    let mut w = wire::BodyWriter::new();
+                    let mut b = w.block(table::CLOCK, 1);
+                    b.u32s(col::clock::TODAY, [TODAY as u32 + r.below(60) as u32].into_iter());
+                    b.done();
+                    let _ = a.patch(&w.finish(), 2 + step);
+                    log.push("tick");
+                }
+                _ if pending.is_empty() => {
+                    let _ = a.boot(&desk(&mut r), 2 + step);
+                    log.push("boot");
                 }
                 _ => {}
             }

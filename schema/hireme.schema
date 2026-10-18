@@ -369,7 +369,7 @@ table applications desk resident
   col heat_override_reason str ? readonly
   col score_100 u8 ?
   # Set by the stage command as it moves (submitted, reply, closed); heat
-  # decays a sent application's load from applied_on.
+  # decays an application's load from the later of applied_on and replied_on.
   col applied_on day ? readonly
   col replied_on day ? readonly
   col closed_on day ? readonly

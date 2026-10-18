@@ -364,7 +364,7 @@ fn app_stage(t: &Table, id: u32) -> Stage {
 
 /// The cells a move to `to` writes on the application, and its event.
 fn moved(t: &Table, id: u32, from: Stage, to: Stage, note: Option<String>, op: &Op, ctx: &Ctx) -> Vec<Row> {
-    let rail = pipeline::move_to(&pipeline::rail_of(from, t.str(id, A::PIPS)), to);
+    let rail = pipeline::move_to(&board::rail(t, id).unwrap_or_else(|| pipeline::initial(from)), to);
     let mut row = Row { table: table::APPLICATIONS, id, cells: Vec::new() };
     if from != to {
         row.set(A::STAGE, u(to as u32));

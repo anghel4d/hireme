@@ -253,37 +253,27 @@ fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> 
     Some(citizenships.iter().any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
+/// The rail an application row shows: its stored pips when they parse and
+/// agree with its stage, else the stage's fresh rail with a reply's or a
+/// close's `submitted` and `reply` rungs read from the row's dates. `None`
+/// when the row has no stage.
+pub fn rail(t: &Table, id: u32) -> Option<crate::pipeline::Rail> {
+    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8))?;
+    let stored = t.str(id, A::PIPS).and_then(crate::pipeline::decode).filter(|r| crate::pipeline::current(r) == stage);
+    Some(stored.unwrap_or_else(|| {
+        crate::pipeline::rail_by_dates(stage, day(t, id, A::APPLIED_ON).is_some(), day(t, id, A::REPLIED_ON).is_some())
+    }))
+}
+
 /// Whether anything went out for an application row (submitted, or an
 /// outreach answered), by its rail.
 pub fn sent(t: &Table, id: u32) -> bool {
-    match stored_rail(t, id) {
-        Ok(rail) => crate::pipeline::sent(&rail),
-        // Answered: something went out, a submission or an outreach.
-        Err(Some(Stage::Reply)) => true,
-        Err(_) => day(t, id, A::APPLIED_ON).is_some() || day(t, id, A::REPLIED_ON).is_some(),
-    }
+    rail(t, id).is_some_and(|r| crate::pipeline::sent(&r))
 }
 
 /// Whether an application row was submitted (not merely answered), by its rail.
 pub fn submitted(t: &Table, id: u32) -> bool {
-    match stored_rail(t, id) {
-        Ok(rail) => crate::pipeline::submitted(&rail),
-        Err(_) => day(t, id, A::APPLIED_ON).is_some(),
-    }
-}
-
-/// The row's rail. Before `submitted` the stage alone says what happened;
-/// a reply or a close without stored pips that agree with it does not (an
-/// outreach is answered unsubmitted, a listing may close unsent), so it
-/// answers `Err(stage)` and the dates decide.
-fn stored_rail(t: &Table, id: u32) -> Result<crate::pipeline::Rail, Option<Stage>> {
-    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).ok_or(None)?;
-    let pips = t.str(id, A::PIPS).and_then(crate::pipeline::decode).filter(|r| crate::pipeline::current(r) == stage);
-    match (pips, stage) {
-        (Some(rail), _) => Ok(rail),
-        (None, Stage::Reply | Stage::Closed) => Err(Some(stage)),
-        (None, _) => Ok(crate::pipeline::initial(stage)),
-    }
+    rail(t, id).is_some_and(|r| crate::pipeline::submitted(&r))
 }
 
 /// The governor's seat for one application row. Its score is the stored

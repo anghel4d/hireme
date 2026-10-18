@@ -49,7 +49,7 @@ the score a card ranks by.
 `work_mode` is remote, or when its `place_id` is charted in the atlas and
 that place (or a city's country) is one of `settings.citizenships`; it is
 away when that place is charted and not one of them; otherwise it is
-unknown. An onsite seat (by `work_mode`, or location text saying onsite
+unknown. With no citizenships set, every place is unknown. An onsite seat (by `work_mode`, or location text saying onsite
 only or no remote) is killed as "onsite away" only when it is known to be
 away. Unknown is never killed for location.
 

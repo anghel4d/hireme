@@ -74,7 +74,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         return None;
     }
     let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered);
-    let rail = pipeline::rail_of(stage, t.str(id, A::PIPS));
+    let rail = board::rail(t, id).unwrap_or_else(|| pipeline::initial(stage));
     let rail: Vec<Json> = STAGES
         .iter()
         .map(|s| json!({"stage": s.name(), "label": s.label(), "hint": s.hint(), "pip": rail[s.index()].name(), "fire_locked": s.fire_locked()}))

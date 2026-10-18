@@ -5,9 +5,9 @@
 //! Every hot application (queued, or replied or closed after being sent)
 //! puts a load of `application_load` on its company, its ATS vendor and
 //! its ATS tenant, decaying from the latest of its submission and its
-//! reply that exists (else the day it entered its stage) with each one's half-life: `load · 0.5^(days / half_life)`,
-//! and counting for nothing once under `load_floor`. A company's cap scales with its size
-//! tier. An application entering the queue adds its increment: the base
+//! reply that exists (else the day it entered its stage) with each one's
+//! half-life: `load · 0.5^(days / half_life)`, and counting for nothing
+//! once under `load_floor`. A company's cap scales with its size tier. An application entering the queue adds its increment: the base
 //! load, plus `same_department_penalty` if a hot peer at that company
 //! shares its department, plus `clone_penalty` if one shares its role
 //! family (live peers only). The move is deferred when the company would pass its cap, the
@@ -182,8 +182,8 @@ pub struct Seat {
     /// `reply`/`closed` after having been sent. A listing closed before
     /// anything went out costs nothing.
     pub hot: bool,
-    /// The day its load decays from: the submission once sent, else the
-    /// day it entered its stage.
+    /// The day its load decays from: the latest of its submission and its
+    /// reply that exists, else the day it entered its stage.
     pub since: Option<Day>,
     /// The score it ranks by in a mix.
     pub score: u8,

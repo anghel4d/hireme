@@ -722,6 +722,26 @@ defmodule HiremeWeb.AgentAttackTest do
       assert {:ok, _} = rpc(c2, "lease.claim", %{})
     end
 
+    test "an operator revoke landing just after the agent let go is sticky, and records nothing",
+         %{port: port, session: s, account: a} do
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{})
+      [lease] = Hireme.Lease.leases(a.id)
+      {:ok, _} = rpc(c, "lease.release", %{})
+      :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
+
+      assert refused(c, "lease.claim", %{}) == :lease_missing
+
+      assert Repo.aggregate(
+               from(r in Hireme.Rows.Audit,
+                 where: r.kind == "lease_revoked" and r.account_id == ^a.id
+               ),
+               :count,
+               skip_account: true
+             ) == 0
+    end
+
     test "a JSON cell's integers fit an i64: a bignum cannot hold the writer lock for seconds", %{
       port: port,
       session: s,

@@ -227,13 +227,19 @@ pub fn decode(pips: &str) -> Option<Rail> {
     Some(rail)
 }
 
-/// The rail an application shows: its stored pips when they parse and
-/// agree with its stage, otherwise the fresh rail for its stage.
-pub fn rail_of(stage: Stage, pips: Option<&str>) -> Rail {
-    match pips.and_then(decode) {
-        Some(rail) if current(&rail) == stage => rail,
-        _ => initial(stage),
+/// The rail of a row whose stored pips do not agree with its stage: the
+/// stage's fresh rail, where a reply or a close keeps the `submitted` and
+/// `reply` rungs only if the row's dates say they happened (an outreach is
+/// answered unsubmitted; a listing may close unsent).
+pub fn rail_by_dates(stage: Stage, applied: bool, replied: bool) -> Rail {
+    let mut rail = initial(stage);
+    if stage >= Stage::Reply && !applied {
+        rail[Stage::Submitted.index()] = Pip::Skipped;
     }
+    if stage == Stage::Closed && !replied {
+        rail[Stage::Reply.index()] = Pip::Skipped;
+    }
+    rail
 }
 
 /// Whether the rail records that something went out: its `submitted` or

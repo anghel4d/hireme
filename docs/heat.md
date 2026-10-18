@@ -14,7 +14,9 @@ the verdict and to colour the board.
 
 An application carries heat when it is queued (`fire_ready`, `open_fire`,
 `submitted`) or in `reply`/`closed` after something went out: its rail's
-`submitted` or `reply` rung was reached, never jumped over. An answered
+`submitted` or `reply` rung was reached, never jumped over. A reply or a
+close whose stored pips do not agree with its stage is read by its dates:
+`applied_on` means it was submitted, `replied_on` that it was answered. An answered
 outreach application (referral, recruiter, cold, inbound or other
 channel) is a live conversation with the company and carries load like a
 sent one; a listing closed before anything went out carries none. It puts a load of `application_load` on
