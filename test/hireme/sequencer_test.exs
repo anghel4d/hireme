@@ -68,6 +68,42 @@ defmodule Hireme.SequencerTest do
     end
   end
 
+  test "no refusal leaves the node without a reason", %{account: a, session: s} do
+    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "r.example", name: "R"}))
+    {[app], []} = run(a.id, op(:put, :applications, %{company: "R", role: "R"}))
+
+    ops = [
+      op(:put, :corporations, %{domain: "r2.example"}),
+      op(:put, :corporations, %{name: "X"}, target: 999_999_999),
+      op(:put, :corporations, %{domain: "r.example", name: "R"}, keyed: true, create_only: true),
+      op(:put, :corporations, %{name: "Y"}, target: corp.id, expect_rev: 7),
+      op(:put, :corporations, %{headcount: 5}, target: corp.id),
+      op(:put, :corporations, %{about: "x"}, target: corp.id, expect_rev: 1),
+      op(:command, :stage, %{stage: :reply}, target: app.id),
+      op(:put, :applications, %{notes: String.duplicate("x", 1_048_577)}, target: app.id)
+    ]
+
+    {[], nacks} = run(a.id, ops)
+    assert length(nacks) == length(ops)
+
+    # A key's refusals too, including one redacted for a table it cannot read.
+    {:ok, %{key: key}} =
+      Hireme.Keys.mint(s, "blind", %{read_mask: 0, write_mask: 2, may_delete: false})
+
+    {agent, _} = key_session(a.id, key, 994)
+
+    {[], key_nacks} =
+      key_session_ops(agent, [
+        op(:put, :corporations, %{domain: "k.example", name: "K"}),
+        op(:put, :applications, %{role: "x"}, target: app.id, expect_rev: 9)
+      ])
+
+    for n <- nacks ++ key_nacks do
+      reason = JSON.decode!(n.data)["reason"]
+      assert is_binary(reason) and reason != "", "#{n.refusal} has no reason: #{n.data}"
+    end
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))

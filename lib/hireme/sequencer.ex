@@ -680,14 +680,56 @@ defmodule Hireme.Sequencer do
   end
 
   defp nack(op, refusal, {:json, data}),
-    do: %{op_id: op.op_id, code: Schema.refusal(refusal), data: data}
+    do: %{
+      op_id: op.op_id,
+      code: Schema.refusal(refusal),
+      data: data |> JSON.decode!() |> reasoned(refusal) |> JSON.encode!()
+    }
 
   defp nack(op, refusal, data),
     do: %{
       op_id: op.op_id,
       code: Schema.refusal(refusal),
-      data: JSON.encode!(Map.put(data, :refusal, refusal))
+      data: JSON.encode!(data |> reasoned(refusal) |> Map.put(:refusal, refusal))
     }
+
+  # docs/rebuild.md, 'The sequencer's checks': "A refusal's `reason` names
+  # the cause in the server's words" (every refusal, by shannon's ruling).
+  # A site that names its own keeps it; any other gets its code's.
+  @reasons %{
+    scope: "the key's masks do not allow this",
+    human_only: "only the operator's browser session may do this",
+    lease_missing: "this session holds no write lease",
+    leased: "another session holds this application",
+    column: "a column is unknown, not writable, or missing",
+    type: "a value does not fit its column",
+    not_found: "the row, or a row a ref names, does not exist",
+    natural_key: "a row with this natural key already exists",
+    stage: "the pipeline does not allow this move",
+    fire_hold: "submitted follows only the operator's open_fire",
+    heat: "the heat governor defers this move",
+    lineage_busy: "the lineage is mid-generation; only new overlays",
+    cooldown: "the lineage's cooldown has not passed",
+    freshness: "a metric needs as_of no later than today",
+    stale: "a newer value is already stored",
+    rev: "the row has moved past expect_rev",
+    source_missing: "this cell needs a source",
+    source_trust: "this source's host is not trusted for this cell",
+    too_large: "the op is over its size bound",
+    rate: "over the rate limit; retry later",
+    cap: "a table or the account is at its cap",
+    internal: "the server failed on this op; it wrote nothing"
+  }
+
+  @doc "`data` with a `reason`: its own, else the refusal code's."
+  def reasoned(data, refusal) when is_map(data) do
+    if Map.has_key?(data, :reason) or Map.has_key?(data, "reason"),
+      do: data,
+      else:
+        Map.put(data, :reason, @reasons[refusal] || String.replace(to_string(refusal), "_", " "))
+  end
+
+  def reasoned(data, _refusal), do: data
 
   # op_id is a u64 on the wire and an i64 in SQLite.
   defp signed(id) when id >= 1 <<< 63, do: id - (1 <<< 64)

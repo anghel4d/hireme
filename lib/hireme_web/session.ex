@@ -521,7 +521,8 @@ defmodule HiremeWeb.Session do
   defp answer(id, {:error, reason}, state),
     do: {:push, [reply(id, false, error(reason, %{}), state)], state}
 
-  defp error(refusal, data), do: %{code: refusal, message: to_string(refusal), data: data}
+  defp error(refusal, data),
+    do: %{code: refusal, message: to_string(refusal), data: Sequencer.reasoned(data, refusal)}
 
   defp reply(id, ok?, result, state), do: Codec.reply(state.rev, id, ok?, JSON.encode!(result))
 
