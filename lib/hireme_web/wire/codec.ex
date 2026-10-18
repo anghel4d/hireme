@@ -48,6 +48,7 @@ defmodule HiremeWeb.Wire.Codec do
 
   @as_of 0xFFF0
   @source 0xFFF1
+  @gone 0xFFFE
 
   @verbs %{1 => :put, 2 => :drop, 3 => :command}
   @keyed 0x01
@@ -102,19 +103,27 @@ defmodule HiremeWeb.Wire.Codec do
 
   def split(_buf, _max), do: :more
 
-  @doc "Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`."
+  @doc """
+  Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`. A
+  DEFLATE body may inflate to at most `max_inflated` bytes; a session
+  reading a peer's frame passes `max_up/0`.
+  """
+  def decode(frame, max_inflated \\ @max_inflated)
+
   def decode(
-        <<len::little-32, kind::8, flags::8, hash::little-16, rev::little-64, body::binary>> = f
+        <<len::little-32, kind::8, flags::8, hash::little-16, rev::little-64, body::binary>> = f,
+        max_inflated
       )
       when byte_size(f) == len and len >= @header and rem(len, 8) == 0 do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- frame_name(kind),
-         {:ok, body} <- inflate(flags, body) do
+         :ok <- if((flags &&& bnot(@deflate ||| @end_flag)) == 0, do: :ok, else: {:error, :body}),
+         {:ok, body} <- inflate(flags, body, max_inflated) do
       {:ok, name, flags, rev, body}
     end
   end
 
-  def decode(_), do: {:error, :len}
+  def decode(_, _), do: {:error, :len}
 
   defp frame_name(kind) do
     case Map.fetch(@frame_names, kind) do
@@ -123,11 +132,13 @@ defmodule HiremeWeb.Wire.Codec do
     end
   end
 
-  defp inflate(flags, body) when (flags &&& @deflate) == 0, do: {:ok, body}
+  defp inflate(flags, body, _max) when (flags &&& @deflate) == 0, do: {:ok, body}
 
-  defp inflate(_, <<raw::little-32, n::little-32, rest::binary>> = body)
-       when raw <= @max_inflated and 8 + n <= byte_size(body) do
-    if pad8(8 + n) == byte_size(body) do
+  defp inflate(_, <<raw::little-32, n::little-32, rest::binary>> = body, max)
+       when raw <= max and rem(raw, 8) == 0 and 8 + n <= byte_size(body) do
+    pad = byte_size(body) - 8 - n
+
+    if pad8(8 + n) == byte_size(body) and zeros?(binary_part(rest, n, pad)) do
       try do
         out = inflate_raw(binary_part(rest, 0, n), raw)
         if byte_size(out) == raw, do: {:ok, out}, else: {:error, :inflate}
@@ -139,7 +150,7 @@ defmodule HiremeWeb.Wire.Codec do
     end
   end
 
-  defp inflate(_, _), do: {:error, :inflate}
+  defp inflate(_, _, _), do: {:error, :inflate}
 
   defp deflate(bin) do
     z = :zlib.open()
@@ -550,17 +561,15 @@ defmodule HiremeWeb.Wire.Codec do
     )
   end
 
-  @doc "The `gone` block deleting `[{table_id, id}]`."
+  @doc "The gone blocks deleting `[{table_id, id}]`."
   def gone_block([]), do: []
 
+  # One block per table, its only column the reserved GONE id (native/wire).
   def gone_block(pairs) do
-    t = Schema.table(:gone)
-    [tc, ic] = Enum.map([:table, :id], &Schema.column(:gone, &1))
-
-    block(t.id, length(pairs), [
-      {tc.id, @t_u32, Enum.map(pairs, &elem(&1, 0))},
-      {ic.id, @t_u32, Enum.map(pairs, &elem(&1, 1))}
-    ])
+    pairs
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort()
+    |> Enum.map(fn {table_id, ids} -> block(table_id, length(ids), [{@gone, @t_u32, ids}]) end)
   end
 
   defp pad8(n), do: n + 7 &&& bnot(7)

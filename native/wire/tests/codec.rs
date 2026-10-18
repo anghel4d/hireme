@@ -19,6 +19,7 @@ enum Column {
     F64(Vec<f64>),
     Deferred(Vec<Option<(u32, [u8; 8])>>),
     List(Vec<Vec<u32>>),
+    Sym(Vec<String>),
 }
 
 fn column(n: usize) -> impl Strategy<Value = Column> {
@@ -26,14 +27,27 @@ fn column(n: usize) -> impl Strategy<Value = Column> {
         prop::collection::vec(any::<u32>(), n).prop_map(Column::U32),
         prop::collection::vec(text(), n).prop_map(Column::Str),
         prop::collection::vec(any::<i64>(), n).prop_map(Column::I64),
-        prop::collection::vec(any::<f64>().prop_filter("NaN is null", |v| !v.is_nan()), n).prop_map(Column::F64),
-        prop::collection::vec(prop::option::of((0u32..NONE, any::<[u8; 8]>())), n).prop_map(Column::Deferred),
+        prop::collection::vec(prop_oneof![any::<f64>(), Just(f64::NAN)], n).prop_map(Column::F64),
+        prop::collection::vec(prop::option::of((0u32..NONE, any::<[u8; 8]>())), n)
+            .prop_map(Column::Deferred),
         prop::collection::vec(prop::collection::vec(any::<u32>(), 0..4), n).prop_map(Column::List),
+        prop::collection::vec(
+            prop::sample::select(vec!["", "remote", "hybrid", "onsite"]).prop_map(String::from),
+            n
+        )
+        .prop_map(Column::Sym),
     ]
 }
 
 fn block() -> impl Strategy<Value = (u16, usize, Vec<Column>)> {
-    (1u16..200, 0usize..6).prop_flat_map(|(t, n)| (Just(t), Just(n), prop::collection::vec(column(n), 0..5)))
+    // A block with rows has at least one column; one without may have none.
+    (1u16..200, 0usize..6).prop_flat_map(|(t, n)| {
+        (
+            Just(t),
+            Just(n),
+            prop::collection::vec(column(n), usize::from(n > 0)..5),
+        )
+    })
 }
 
 fn write_blocks(blocks: &[(u16, usize, Vec<Column>)]) -> Vec<u8> {
@@ -49,6 +63,7 @@ fn write_blocks(blocks: &[(u16, usize, Vec<Column>)]) -> Vec<u8> {
                 Column::F64(v) => b.f64s(id, v.iter().copied()),
                 Column::Deferred(v) => b.deferred(id, v.iter().copied()),
                 Column::List(v) => b.lists(id, v.iter().map(|l| l.as_slice())),
+                Column::Sym(v) => b.syms(id, v.iter().map(|s| s.as_str())),
             };
         }
     }
@@ -59,10 +74,11 @@ fn expect(c: &Column, i: usize) -> Value<'_> {
     match c {
         Column::U32(v) if v[i] == NONE => Value::None,
         Column::U32(v) => Value::U32(v[i]),
-        Column::Str(v) if v[i].is_empty() => Value::None,
-        Column::Str(v) => Value::Str(&v[i]),
+        Column::Str(v) | Column::Sym(v) if v[i].is_empty() => Value::None,
+        Column::Str(v) | Column::Sym(v) => Value::Str(&v[i]),
         Column::I64(v) if v[i] == NONE64 => Value::None,
         Column::I64(v) => Value::I64(v[i]),
+        Column::F64(v) if v[i].is_nan() => Value::None,
         Column::F64(v) => Value::F64(v[i]),
         Column::Deferred(v) => v[i].map_or(Value::None, |(l, s)| Value::Deferred(l, s)),
         Column::List(_) => unreachable!(),
@@ -70,7 +86,12 @@ fn expect(c: &Column, i: usize) -> Value<'_> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5A17_0002),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn table_runs_round_trip(blocks in prop::collection::vec(block(), 0..4)) {
@@ -134,7 +155,7 @@ proptest! {
         masks in (any::<u16>(), any::<u16>(), any::<bool>(), any::<bool>()),
         acks in prop::collection::vec((any::<u64>(), any::<u64>(), any::<u32>()), 0..10),
         nacks in prop::collection::vec((any::<u64>(), any::<u16>(), text()), 0..10),
-        reason in 1u8..6, id in any::<u32>(), ok in any::<bool>(),
+        reason in 0u8..5, id in any::<u32>(), ok in any::<bool>(),
     ) {
         let body = |f: &[u8]| Frame::parse(f, HASH).unwrap().raw_body().to_vec();
         macro_rules! rt {
@@ -205,6 +226,7 @@ proptest! {
                 let want = match ty {
                     0 => Value::None,
                     1 => Value::U32(*u),
+                    2 if s.is_empty() => Value::None,
                     2 => Value::Str(s),
                     3 => Value::I64(*l),
                     _ => Value::F64(*f),
@@ -221,12 +243,21 @@ proptest! {
     fn mangled_input_never_panics(
         blocks in prop::collection::vec(block(), 1..3),
         flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..8),
+        lens in prop::collection::vec(
+            (any::<prop::sample::Index>(), prop::sample::select(vec![0u32, 1, 0x3FFF_FFFF, 0x4000_0000, 0x7FFF_FFFF, 0xFFFF_FFF6, 0xFFFF_FFF8, u32::MAX])),
+            0..4,
+        ),
         cut in any::<prop::sample::Index>(),
     ) {
         let mut body = write_blocks(&blocks);
         for (i, v) in &flips {
             let i = i.index(body.len().max(1));
             if i < body.len() { body[i] = *v; }
+        }
+        // Lengths and counts at their boundaries, where 32-bit arithmetic wraps.
+        for (i, v) in &lens {
+            let at = i.index(body.len().max(4) / 4) * 4;
+            if at + 4 <= body.len() { body[at..at + 4].copy_from_slice(&v.to_le_bytes()); }
         }
         let body = &body[..cut.index(body.len() + 1)];
         if let Ok(b) = Blocks::new(body) {
@@ -254,7 +285,10 @@ fn gone_blocks_delete_ids() {
     w.gone(3, &[1, 2, 40]);
     let body = w.finish();
     let b = Blocks::new(&body).unwrap().iter().next().unwrap();
-    assert_eq!((b.table, b.gone().unwrap().iter().collect::<Vec<_>>()), (3, vec![1, 2, 40]));
+    assert_eq!(
+        (b.table, b.gone().unwrap().iter().collect::<Vec<_>>()),
+        (3, vec![1, 2, 40])
+    );
 }
 
 #[test]
@@ -268,4 +302,185 @@ fn refuses_what_is_not_a_frame() {
     let mut huge = ok.clone();
     huge[0..4].copy_from_slice(&((MAX_UP as u32) + 8).to_le_bytes());
     assert_eq!(split(&huge, MAX_UP).unwrap_err(), Error::Len);
+}
+
+// Bytes worked out by hand from the layout in the crate doc.
+#[test]
+fn golden_bytes() {
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    assert_eq!(
+        hex(&encode_ping(PING, 0x5A17, 1)),
+        "180000000d00175a00000000000000000100000000000000"
+    );
+
+    let mut w = BodyWriter::new();
+    w.block(3, 2)
+        .u32s(1, [7, NONE].into_iter())
+        .strs(2, ["ab", ""].into_iter());
+    assert_eq!(
+        hex(&w.finish()),
+        "0300020002000000010001000800000007000000ffffffff020002000e00000000000000020000000200000061620000"
+    );
+
+    let mut g = BodyWriter::new();
+    g.gone(9, &[4, 5]);
+    assert_eq!(
+        hex(&g.finish()),
+        "0900010002000000feff0100080000000400000005000000"
+    );
+}
+
+// The frame ids and BYE codes are the schema's, not a second list.
+#[test]
+fn ids_are_the_schemas() {
+    let schema = include_str!("../../../schema/hireme.schema");
+    let frames: Vec<(&str, u8)> = schema
+        .lines()
+        .filter_map(|l| l.strip_prefix("frame "))
+        .map(|l| {
+            let mut p = l.split_whitespace();
+            (p.next().unwrap(), p.next().unwrap().parse().unwrap())
+        })
+        .collect();
+    let ours = [
+        ("HELLO", HELLO),
+        ("WELCOME", WELCOME),
+        ("BOOT", BOOT),
+        ("PATCH", PATCH),
+        ("OPS", OPS),
+        ("ACK", ACK),
+        ("NACK", NACK),
+        ("TICK", TICK),
+        ("PING", PING),
+        ("PONG", PONG),
+        ("BYE", BYE),
+        ("RPC", RPC),
+        ("REPLY", REPLY),
+    ];
+    assert_eq!(frames, ours.to_vec());
+
+    let bye: Vec<&str> = schema
+        .lines()
+        .find_map(|l| l.strip_prefix("enum bye "))
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert_eq!(bye, ["revoked", "grants", "restart", "schema", "suspended"]);
+    assert_eq!(
+        [
+            BYE_REVOKED,
+            BYE_GRANTS,
+            BYE_RESTART,
+            BYE_SCHEMA,
+            BYE_SUSPENDED
+        ],
+        [0, 1, 2, 3, 4]
+    );
+}
+
+#[test]
+fn sentinel_cells_are_named() {
+    let mut w = OpsWriter::new();
+    w.op(1, PUT, 0, 2, 0, None)
+        .u32(8, NONE)
+        .i64(9, NONE64)
+        .f64(10, f64::INFINITY)
+        .f64(11, 1.5)
+        .u32(12, 3)
+        .str(13, "");
+    let body = w.finish();
+    let ops = Ops::new(&body).unwrap();
+    let op = ops.iter().next().unwrap();
+    let flags: Vec<bool> = op.cells().map(|c| c.is_sentinel()).collect();
+    assert_eq!(flags, [true, true, true, false, false, false]);
+    assert_eq!(op.cell(13).unwrap().value(), Value::None);
+}
+
+#[test]
+fn refuses_malformed_bodies() {
+    let block = |table: u16, ncols: u16, nrows: u32, cols: &[u8]| {
+        let mut b = Vec::new();
+        b.extend_from_slice(&table.to_le_bytes());
+        b.extend_from_slice(&ncols.to_le_bytes());
+        b.extend_from_slice(&nrows.to_le_bytes());
+        b.extend_from_slice(cols);
+        b
+    };
+    let col = |id: u16, data: &[u8], pad: u8| {
+        let mut c = Vec::new();
+        c.extend_from_slice(&id.to_le_bytes());
+        c.extend_from_slice(&[U32, 0]);
+        c.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        c.extend_from_slice(data);
+        c.resize(8 + data.len().div_ceil(8) * 8, pad);
+        c
+    };
+    let one = col(1, &7u32.to_le_bytes(), 0);
+    assert!(Blocks::new(&block(3, 1, 1, &one)).is_ok());
+    assert_eq!(
+        Blocks::new(&block(0, 1, 1, &one)).unwrap_err(),
+        Error::Body,
+        "table 0"
+    );
+    assert_eq!(
+        Blocks::new(&block(3, 0, u32::MAX, &[])).unwrap_err(),
+        Error::Body,
+        "rows without columns"
+    );
+    assert_eq!(
+        Blocks::new(&block(3, 2, 1, &[one.clone(), one.clone()].concat())).unwrap_err(),
+        Error::Body,
+        "duplicate column"
+    );
+    assert_eq!(
+        Blocks::new(&block(3, 1, 1, &col(1, &7u32.to_le_bytes(), 1))).unwrap_err(),
+        Error::Body,
+        "nonzero pad"
+    );
+    let backwards = [0u32, 3, 1]
+        .iter()
+        .flat_map(|o| o.to_le_bytes())
+        .chain(*b"abc")
+        .collect::<Vec<u8>>();
+    let mut str_col = col(2, &backwards, 0);
+    str_col[2] = STR;
+    assert_eq!(
+        Blocks::new(&block(3, 1, 2, &str_col)).unwrap_err(),
+        Error::Str,
+        "offsets run backwards"
+    );
+
+    let mut f = Writer::new(PING, HASH, 0);
+    f.u64(1);
+    let mut bad_kind = f.finish();
+    bad_kind[4] = 99;
+    assert_eq!(Frame::parse(&bad_kind, HASH).unwrap_err(), Error::Kind);
+    let mut bad_flag = encode_ping(PING, HASH, 1);
+    bad_flag[5] = 0x40;
+    assert_eq!(Frame::parse(&bad_flag, HASH).unwrap_err(), Error::Body);
+
+    let hello = Hello {
+        cred: 3,
+        snapshot_rev: 0,
+        schema_rev: 0,
+        credential: b"k",
+        label: "x",
+    }
+    .encode(HASH);
+    assert!(Hello::decode(Frame::parse(&hello, HASH).unwrap().raw_body()).is_err());
+    let bye = Bye {
+        reason: 5,
+        message: "",
+    }
+    .encode(HASH, 0);
+    assert!(Bye::decode(Frame::parse(&bye, HASH).unwrap().raw_body()).is_err());
+
+    // A small frame that inflates past the reader's limit is refused.
+    let mut big = Writer::new(BOOT, HASH, 0);
+    big.zeros(1 << 20);
+    let packed = big.finish_deflated(6);
+    let frame = Frame::parse(&packed, HASH).unwrap();
+    assert!(packed.len() < 4096);
+    assert_eq!(frame.body_max(1 << 16).unwrap_err(), Error::Inflate);
+    assert_eq!(frame.body().unwrap().len(), 1 << 20);
 }

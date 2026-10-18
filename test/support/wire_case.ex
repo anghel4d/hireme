@@ -101,32 +101,27 @@ defmodule Hireme.WireCase do
   @doc """
   A client's model of the resident tables: `%{table_name => %{id => %{col_id
   => value}}}`. A BOOT replaces the tables it names; a PATCH merges rows by
-  id and the `gone` table deletes. Wire tables are left out.
+  id, and a gone block (its one column 0xFFFE) deletes. Wire tables are left out.
   """
   def ingest(model, kind, body) do
     Enum.reduce(blocks(body), model, fn {table, rows}, model ->
-      case {kind, table} do
-        {_, t} when t in ~w(clock catalog leases) ->
+      case {kind, table, rows} do
+        {_, t, _} when t in ~w(clock catalog leases) ->
           model
 
-        {_, "gone"} ->
-          Enum.reduce(rows, model, fn r, m ->
-            name = Schema.table(r[col_id("gone", "table")]).name
-            Map.update(m, name, %{}, &Map.delete(&1, r[col_id("gone", "id")]))
-          end)
+        {_, t, [%{0xFFFE => _} | _]} ->
+          Map.update(model, t, %{}, &Map.drop(&1, Enum.map(rows, fn r -> r[0xFFFE] end)))
 
-        {:BOOT, t} ->
+        {:BOOT, t, _} ->
           Map.put(model, t, Map.new(rows, &{&1[1], &1}))
 
-        {:PATCH, t} ->
+        {:PATCH, t, _} ->
           Map.update(model, t, Map.new(rows, &{&1[1], &1}), fn old ->
             Enum.reduce(rows, old, fn r, acc -> Map.update(acc, r[1], r, &Map.merge(&1, r)) end)
           end)
       end
     end)
   end
-
-  defp col_id(table, name), do: Schema.column(table, name).id
 
   defp blocks(<<>>), do: []
 

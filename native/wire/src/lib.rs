@@ -34,7 +34,7 @@
 //! TICK   11 down  table runs (`clock`)
 //! PING   13 both  u64 nonce
 //! PONG   14 both  u64 nonce, echoed
-//! BYE    16 down  u8 reason (1 revoked, 2 grants, 3 restart, 4 schema, 5 suspended) | 7×0
+//! BYE    16 down  u8 reason (the `bye` enum: 0 revoked, 1 grants, 2 restart, 3 schema, 4 suspended) | 7×0
 //!                 | field message
 //! RPC    33 up    u32 id | u32 0 | field method | field params_json
 //! REPLY  34 down  u32 id | u8 ok (1, 0) | 3×0 | field result_or_error_json
@@ -63,14 +63,15 @@
 //! | 6 | sym | `u32 nuniq`, `u32 offsets × (nuniq + 1)`, UTF-8, pad to 4, `u32 × nrows` naming one | empty |
 //! | 7 | list | `u32 offsets × (nrows + 1)` into the u32 values that follow | empty |
 //!
-//! Codes 1–5 are the schema's wire types; 6 and 7 are encodings the codec
-//! may pick for a column (a str of few distinct values; `leases`' held ids).
+//! Codes 1–5 are the schema's wire types; 6 and 7 are encodings a writer
+//! may pick for a column (a str of few distinct values; a list of ids).
 //! A null and an empty string are the same thing: the sequencer stores a
 //! put of `""` as NULL, so the database never holds an empty string.
 //!
-//! A *gone* block deletes rows: its only column is [`GONE`] of type u32,
-//! holding the deleted ids. A PATCH block carries the table's `id` column
-//! and only the columns that moved.
+//! A *gone* block deletes rows of the table it names: its only column is
+//! [`GONE`] (0xFFFE) of type u32, holding the deleted ids. A PATCH block
+//! carries the table's `id` column and only the columns that moved. Table
+//! ids start at 1, and a block with no columns has no rows.
 //!
 //! **Ops.** One op in OPS:
 //!
@@ -83,13 +84,27 @@
 //!
 //! An op cell's type is null (0, len 0: clears the column), u32 (1, len
 //! 4), str (2, UTF-8), i64 (3, len 8) or f64 (4, len 8); a cell holding its
-//! type's null sentinel is refused `type` by the sequencer, and an empty str
+//! type's null sentinel (or a non-finite f64, see [`Cell::is_sentinel`]) is refused
+//! `type` by the sequencer, and an empty str
 //! cell writes NULL; [`AS_OF`] and
 //! [`SOURCE`] are reserved column ids. The server never casts a string
 //! into another type.
 //!
+//! WELCOME's `session_label` and BYE's `message` go beyond the design's
+//! list of their contents: the label is what `leases` shows for the
+//! session, and the message says why in words.
+//!
+//! **Limits.** An up frame is at most [`MAX_UP`] (16 MiB), inflated as
+//! well; a client with more to send splits it across frames
+//! ([`OpsWriter::is_full`]). One OPS frame holds at most [`MAX_OPS`] (256)
+//! ops, and one op at most [`MAX_OP_TEXT`] (1 MiB) of text, past which the
+//! server refuses it `too_large`. A down body inflates to at most
+//! [`MAX_INFLATED`]. [`LAYOUT`] numbers this layout; the schema's
+//! `wire_hash` folds it in.
+//!
 //! The crate is `no_std` + `alloc`, `unsafe`-free, and validates every
-//! length once at parse time; accessors after that are plain slices.
+//! length once at parse time with checked arithmetic, on 32-bit (wasm) as
+//! on 64-bit targets; accessors after that are plain slices.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -100,6 +115,10 @@ use alloc::vec::Vec;
 use core::str;
 
 pub const HEADER: usize = 16;
+
+/// Bumped whenever a byte layout below changes, so the schema's `wire_hash`
+/// (which folds it in) refuses a client built against another layout.
+pub const LAYOUT: u16 = 2;
 
 /// Frame kinds.
 pub const HELLO: u8 = 1;
@@ -116,6 +135,10 @@ pub const BYE: u8 = 16;
 pub const RPC: u8 = 33;
 pub const REPLY: u8 = 34;
 
+const KINDS: [u8; 13] = [
+    HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY,
+];
+
 /// Header flags.
 pub const DEFLATE: u8 = 0x01;
 pub const END: u8 = 0x02;
@@ -124,12 +147,12 @@ pub const END: u8 = 0x02;
 pub const CRED_TICKET: u8 = 1;
 pub const CRED_KEY: u8 = 2;
 
-/// BYE reasons.
-pub const BYE_REVOKED: u8 = 1;
-pub const BYE_GRANTS: u8 = 2;
-pub const BYE_RESTART: u8 = 3;
-pub const BYE_SCHEMA: u8 = 4;
-pub const BYE_SUSPENDED: u8 = 5;
+/// BYE reasons: the codes of the schema's `bye` enum (0-based, declaration order).
+pub const BYE_REVOKED: u8 = 0;
+pub const BYE_GRANTS: u8 = 1;
+pub const BYE_RESTART: u8 = 2;
+pub const BYE_SCHEMA: u8 = 3;
+pub const BYE_SUSPENDED: u8 = 4;
 
 /// Op verbs and flags.
 pub const PUT: u8 = 1;
@@ -191,6 +214,24 @@ pub enum Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let what = match self {
+            Error::Short => "fewer bytes than a length claims",
+            Error::Len => "a frame length that is not a multiple of 8, too small or over the limit",
+            Error::Hash => "a frame of another wire",
+            Error::Kind => "an unknown frame kind",
+            Error::Column => "a column or cell that does not fit its type",
+            Error::Str => "string offsets or UTF-8 that do not hold",
+            Error::Body => "a body that is not what its kind promises",
+            Error::Inflate => "a DEFLATE body that does not inflate to its stated length",
+        };
+        f.write_str(what)
+    }
+}
+
+impl core::error::Error for Error {}
+
 #[inline]
 pub const fn pad8(n: usize) -> usize {
     (n + 7) & !7
@@ -213,6 +254,23 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(w)
 }
 
+/// Column ids seen so far in one block or op, as a bitmap over u16: a duplicate is O(1).
+struct Seen([u64; 1024]);
+
+impl Seen {
+    fn new() -> Seen {
+        Seen([0; 1024])
+    }
+
+    /// True when `id` had not been seen.
+    fn add(&mut self, id: u16) -> bool {
+        let (w, bit) = ((id >> 6) as usize, 1u64 << (id & 63));
+        let fresh = self.0[w] & bit == 0;
+        self.0[w] |= bit;
+        fresh
+    }
+}
+
 // ------------------------------------------------------------------ header
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,7 +288,13 @@ impl Header {
         if b.len() < HEADER {
             return Err(Error::Short);
         }
-        let h = Header { len: u32_at(b, 0), kind: b[4], flags: b[5], hash: u16_at(b, 6), rev: u64_at(b, 8) };
+        let h = Header {
+            len: u32_at(b, 0),
+            kind: b[4],
+            flags: b[5],
+            hash: u16_at(b, 6),
+            rev: u64_at(b, 8),
+        };
         if (h.len as usize) < HEADER || h.len % 8 != 0 {
             return Err(Error::Len);
         }
@@ -275,10 +339,20 @@ impl<'a> Frame<'a> {
     pub fn parse(b: &'a [u8], wire_hash: u16) -> Result<Frame<'a>> {
         let header = Header::peek(b)?;
         if header.len as usize != b.len() {
-            return Err(if (header.len as usize) > b.len() { Error::Short } else { Error::Len });
+            return Err(if (header.len as usize) > b.len() {
+                Error::Short
+            } else {
+                Error::Len
+            });
         }
         if header.hash != wire_hash {
             return Err(Error::Hash);
+        }
+        if !KINDS.contains(&header.kind) {
+            return Err(Error::Kind);
+        }
+        if header.flags & !(DEFLATE | END) != 0 {
+            return Err(Error::Body);
         }
         Ok(Frame { header, raw: b })
     }
@@ -292,8 +366,15 @@ impl<'a> Frame<'a> {
         &self.raw[HEADER..]
     }
 
-    /// The plain body, inflated if needed.
+    /// The plain body, inflated if needed, up to [`MAX_INFLATED`].
     pub fn body(&self) -> Result<Body<'a>> {
+        self.body_max(MAX_INFLATED)
+    }
+
+    /// The plain body, refusing one that would inflate past `limit` bytes.
+    /// A server reading a client's frame passes [`MAX_UP`]: compression must
+    /// not let a small frame cost more than a large one.
+    pub fn body_max(&self, limit: usize) -> Result<Body<'a>> {
         let b = self.raw_body();
         if self.header.flags & DEFLATE == 0 {
             return Ok(Body::Borrowed(b));
@@ -302,10 +383,14 @@ impl<'a> Frame<'a> {
             return Err(Error::Short);
         }
         let (raw_len, def_len) = (u32_at(b, 0) as usize, u32_at(b, 4) as usize);
-        if raw_len > MAX_INFLATED || 8 + def_len > b.len() || pad8(8 + def_len) != b.len() {
+        let end = 8usize.checked_add(def_len).ok_or(Error::Inflate)?;
+        if raw_len > limit || raw_len % 8 != 0 || end > b.len() || pad8(end) != b.len() {
             return Err(Error::Inflate);
         }
-        let out = miniz_oxide::inflate::decompress_to_vec_with_limit(&b[8..8 + def_len], raw_len)
+        if b[end..].iter().any(|&z| z != 0) {
+            return Err(Error::Body);
+        }
+        let out = miniz_oxide::inflate::decompress_to_vec_with_limit(&b[8..end], raw_len)
             .map_err(|_| Error::Inflate)?;
         if out.len() != raw_len {
             return Err(Error::Inflate);
@@ -315,6 +400,7 @@ impl<'a> Frame<'a> {
 }
 
 /// A frame body, borrowed from the frame or inflated into a buffer.
+#[derive(Debug)]
 pub enum Body<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
@@ -345,7 +431,13 @@ impl Writer {
     pub fn new(kind: u8, hash: u16, rev: u64) -> Writer {
         let mut buf = Vec::with_capacity(64);
         buf.resize(HEADER, 0);
-        Writer { buf, kind, flags: 0, hash, rev }
+        Writer {
+            buf,
+            kind,
+            flags: 0,
+            hash,
+            rev,
+        }
     }
 
     pub fn end(mut self) -> Writer {
@@ -398,13 +490,20 @@ impl Writer {
 
     pub fn finish(mut self) -> Vec<u8> {
         self.pad();
-        let h = Header { len: self.buf.len() as u32, kind: self.kind, flags: self.flags, hash: self.hash, rev: self.rev };
+        let h = Header {
+            len: self.buf.len() as u32,
+            kind: self.kind,
+            flags: self.flags,
+            hash: self.hash,
+            rev: self.rev,
+        };
         h.write(&mut self.buf[..HEADER]);
         self.buf
     }
 
     /// Finishes with the body deflated when that is smaller.
-    pub fn finish_deflated(self, level: u8) -> Vec<u8> {
+    pub fn finish_deflated(mut self, level: u8) -> Vec<u8> {
+        self.pad();
         let body = &self.buf[HEADER..];
         if body.len() < 256 {
             return self.finish();
@@ -415,7 +514,9 @@ impl Writer {
         }
         let mut w = Writer::new(self.kind, self.hash, self.rev);
         w.flags = self.flags | DEFLATE;
-        w.u32(body.len() as u32).u32(packed.len() as u32).bytes(&packed);
+        w.u32(body.len() as u32)
+            .u32(packed.len() as u32)
+            .bytes(&packed);
         w.finish()
     }
 }
@@ -458,7 +559,11 @@ impl<'a> Reader<'a> {
 
     /// Skips `n` bytes that must be zero.
     pub fn zeros(&mut self, n: usize) -> Result<()> {
-        if self.take(n)?.iter().all(|&z| z == 0) { Ok(()) } else { Err(Error::Body) }
+        if self.take(n)?.iter().all(|&z| z == 0) {
+            Ok(())
+        } else {
+            Err(Error::Body)
+        }
     }
 
     fn pad(&mut self) -> Result<()> {
@@ -482,7 +587,11 @@ impl<'a> Reader<'a> {
     }
 
     pub fn done(&self) -> Result<()> {
-        if self.at == self.b.len() { Ok(()) } else { Err(Error::Body) }
+        if self.at == self.b.len() {
+            Ok(())
+        } else {
+            Err(Error::Body)
+        }
     }
 }
 
@@ -500,7 +609,10 @@ pub struct Hello<'a> {
 impl<'a> Hello<'a> {
     pub fn encode(&self, hash: u16) -> Vec<u8> {
         let mut w = Writer::new(HELLO, hash, 0);
-        w.u8(self.cred).zeros(7).u64(self.snapshot_rev).u64(self.schema_rev);
+        w.u8(self.cred)
+            .zeros(7)
+            .u64(self.snapshot_rev)
+            .u64(self.schema_rev);
         w.field(self.credential).field(self.label.as_bytes());
         w.finish()
     }
@@ -509,7 +621,16 @@ impl<'a> Hello<'a> {
         let mut r = Reader::new(body);
         let cred = r.u8()?;
         r.zeros(7)?;
-        let h = Hello { cred, snapshot_rev: r.u64()?, schema_rev: r.u64()?, credential: r.field()?, label: r.str_field()? };
+        if !(CRED_TICKET..=CRED_KEY).contains(&cred) {
+            return Err(Error::Body);
+        }
+        let h = Hello {
+            cred,
+            snapshot_rev: r.u64()?,
+            schema_rev: r.u64()?,
+            credential: r.field()?,
+            label: r.str_field()?,
+        };
         r.done()?;
         Ok(h)
     }
@@ -530,8 +651,14 @@ pub struct Welcome<'a> {
 impl<'a> Welcome<'a> {
     pub fn encode(&self, hash: u16, rev: u64) -> Vec<u8> {
         let mut w = Writer::new(WELCOME, hash, rev);
-        w.u64(self.account_id).u64(self.session_id).u64(self.schema_rev);
-        w.u16(self.read_mask).u16(self.write_mask).u8(self.may_delete as u8).u8(self.lease as u8).u16(0);
+        w.u64(self.account_id)
+            .u64(self.session_id)
+            .u64(self.schema_rev);
+        w.u16(self.read_mask)
+            .u16(self.write_mask)
+            .u8(self.may_delete as u8)
+            .u8(self.lease as u8)
+            .u16(0);
         w.field(self.label.as_bytes());
         w.finish()
     }
@@ -547,7 +674,16 @@ impl<'a> Welcome<'a> {
         }
         let label = r.str_field()?;
         r.done()?;
-        Ok(Welcome { account_id, session_id, schema_rev, read_mask, write_mask, may_delete: may_delete == 1, lease: lease == 1, label })
+        Ok(Welcome {
+            account_id,
+            session_id,
+            schema_rev,
+            read_mask,
+            write_mask,
+            may_delete: may_delete == 1,
+            lease: lease == 1,
+            label,
+        })
     }
 }
 
@@ -576,7 +712,11 @@ pub fn decode_acks(body: &[u8]) -> Result<Vec<Ack>> {
     }
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        let a = Ack { op_id: r.u64()?, rev: r.u64()?, id: r.u32()? };
+        let a = Ack {
+            op_id: r.u64()?,
+            rev: r.u64()?,
+            id: r.u32()?,
+        };
         r.zeros(4)?;
         out.push(a);
     }
@@ -612,7 +752,11 @@ pub fn decode_nacks(body: &[u8]) -> Result<Vec<Nack<'_>>> {
         let op_id = r.u64()?;
         let code = r.u16()?;
         r.zeros(6)?;
-        out.push(Nack { op_id, code, data: r.field()? });
+        out.push(Nack {
+            op_id,
+            code,
+            data: r.field()?,
+        });
     }
     r.done()?;
     Ok(out)
@@ -649,7 +793,13 @@ impl<'a> Bye<'a> {
         let mut r = Reader::new(body);
         let reason = r.u8()?;
         r.zeros(7)?;
-        let b = Bye { reason, message: r.str_field()? };
+        if reason > BYE_SUSPENDED {
+            return Err(Error::Body);
+        }
+        let b = Bye {
+            reason,
+            message: r.str_field()?,
+        };
         r.done()?;
         Ok(b)
     }
@@ -665,7 +815,10 @@ pub struct Rpc<'a> {
 impl<'a> Rpc<'a> {
     pub fn encode(&self, hash: u16) -> Vec<u8> {
         let mut w = Writer::new(RPC, hash, 0);
-        w.u32(self.id).u32(0).field(self.method.as_bytes()).field(self.params);
+        w.u32(self.id)
+            .u32(0)
+            .field(self.method.as_bytes())
+            .field(self.params);
         w.finish()
     }
 
@@ -673,7 +826,11 @@ impl<'a> Rpc<'a> {
         let mut r = Reader::new(body);
         let id = r.u32()?;
         r.zeros(4)?;
-        let rpc = Rpc { id, method: r.str_field()?, params: r.field()? };
+        let rpc = Rpc {
+            id,
+            method: r.str_field()?,
+            params: r.field()?,
+        };
         r.done()?;
         Ok(rpc)
     }
@@ -701,7 +858,11 @@ impl<'a> Reply<'a> {
         if ok > 1 {
             return Err(Error::Body);
         }
-        let reply = Reply { id, ok: ok == 1, json: r.field()? };
+        let reply = Reply {
+            id,
+            ok: ok == 1,
+            json: r.field()?,
+        };
         r.done()?;
         Ok(reply)
     }
@@ -739,8 +900,10 @@ impl<'a> U32s<'a> {
         u32_at(self.0, i * 4)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = u32> + 'a {
-        self.0.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    pub fn iter(&self) -> impl Iterator<Item = u32> + use<'a> {
+        self.0
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
     }
 }
 
@@ -765,18 +928,31 @@ fn check_strs(offsets: &[u8], n: usize, bytes: &[u8]) -> Result<()> {
         }
         prev = o;
     }
-    if prev != bytes.len() { Err(Error::Str) } else { Ok(()) }
+    if prev != bytes.len() {
+        Err(Error::Str)
+    } else {
+        Ok(())
+    }
 }
 
 impl<'a> Col<'a> {
     fn parse(ty: u8, nrows: usize, data: &'a [u8]) -> Result<()> {
-        let fixed = |w: usize| if nrows.checked_mul(w) == Some(data.len()) { Ok(()) } else { Err(Error::Column) };
+        let fixed = |w: usize| {
+            if nrows.checked_mul(w) == Some(data.len()) {
+                Ok(())
+            } else {
+                Err(Error::Column)
+            }
+        };
         match ty {
             U32 => fixed(4),
             I64 | F64 => fixed(8),
             DEFERRED => fixed(12),
             STR | LIST => {
-                let head = (nrows + 1).checked_mul(4).ok_or(Error::Column)?;
+                let head = nrows
+                    .checked_add(1)
+                    .and_then(|n| n.checked_mul(4))
+                    .ok_or(Error::Column)?;
                 if data.len() < head {
                     return Err(Error::Column);
                 }
@@ -787,29 +963,42 @@ impl<'a> Col<'a> {
                 if rest.len() % 4 != 0 {
                     return Err(Error::Column);
                 }
+                let vals = rest.len() / 4;
                 let mut prev = 0;
                 for i in 0..=nrows {
                     let o = u32_at(offsets, i * 4) as usize;
-                    if (i == 0 && o != 0) || o < prev || o * 4 > rest.len() {
+                    if (i == 0 && o != 0) || o < prev || o > vals {
                         return Err(Error::Column);
                     }
                     prev = o;
                 }
-                if prev * 4 != rest.len() { Err(Error::Column) } else { Ok(()) }
+                if prev != vals {
+                    Err(Error::Column)
+                } else {
+                    Ok(())
+                }
             }
             SYM => {
                 if data.len() < 4 {
                     return Err(Error::Column);
                 }
                 let nuniq = u32_at(data, 0) as usize;
-                let off_end = (nuniq + 1).checked_mul(4).and_then(|n| n.checked_add(4)).ok_or(Error::Column)?;
+                let off_end = nuniq
+                    .checked_add(1)
+                    .and_then(|n| n.checked_mul(4))
+                    .and_then(|n| n.checked_add(4))
+                    .ok_or(Error::Column)?;
                 if data.len() < off_end {
                     return Err(Error::Column);
                 }
                 let last = u32_at(data, off_end - 4) as usize;
-                let bytes_end = off_end.checked_add(last).ok_or(Error::Column)?;
-                let ids_at = (bytes_end + 3) & !3;
-                if ids_at.checked_add(nrows * 4) != Some(data.len()) {
+                let bytes_end = off_end
+                    .checked_add(last)
+                    .filter(|&e| e <= data.len())
+                    .ok_or(Error::Column)?;
+                let ids_at = bytes_end.checked_add(3).ok_or(Error::Column)? & !3;
+                let ids_len = nrows.checked_mul(4).ok_or(Error::Column)?;
+                if ids_at.checked_add(ids_len) != Some(data.len()) {
                     return Err(Error::Column);
                 }
                 check_strs(&data[4..off_end], nuniq, &data[off_end..bytes_end])?;
@@ -834,7 +1023,10 @@ impl<'a> Col<'a> {
     }
 
     fn str_at(offsets: &'a [u8], bytes: &'a [u8], i: usize) -> &'a str {
-        let (a, b) = (u32_at(offsets, i * 4) as usize, u32_at(offsets, i * 4 + 4) as usize);
+        let (a, b) = (
+            u32_at(offsets, i * 4) as usize,
+            u32_at(offsets, i * 4 + 4) as usize,
+        );
         // Validated in parse: whole UTF-8, offsets on char boundaries.
         str::from_utf8(&bytes[a..b]).unwrap_or("")
     }
@@ -883,8 +1075,15 @@ impl<'a> Col<'a> {
             }
             LIST => {
                 let (offsets, vals) = d.split_at((self.nrows + 1) * 4);
-                let (a, b) = (u32_at(offsets, i * 4) as usize, u32_at(offsets, i * 4 + 4) as usize);
-                if a == b { Value::None } else { Value::List(U32s(&vals[a * 4..b * 4])) }
+                let (a, b) = (
+                    u32_at(offsets, i * 4) as usize,
+                    u32_at(offsets, i * 4 + 4) as usize,
+                );
+                if a == b {
+                    Value::None
+                } else {
+                    Value::List(U32s(&vals[a * 4..b * 4]))
+                }
             }
             _ => Value::None,
         }
@@ -892,7 +1091,11 @@ impl<'a> Col<'a> {
 
     /// For a u32 column: row `i` raw, `NONE` included.
     pub fn u32(&self, i: usize) -> u32 {
-        if self.ty == U32 { u32_at(self.data, i * 4) } else { NONE }
+        if self.ty == U32 {
+            u32_at(self.data, i * 4)
+        } else {
+            NONE
+        }
     }
 }
 
@@ -906,13 +1109,18 @@ pub struct Block<'a> {
 }
 
 impl<'a> Block<'a> {
-    pub fn cols(&self) -> impl Iterator<Item = Col<'a>> + 'a {
+    pub fn cols(&self) -> impl Iterator<Item = Col<'a>> + use<'a> {
         let (mut at, nrows, b) = (0usize, self.nrows, self.cols);
         (0..self.ncols).map(move |_| {
             let (id, ty, len) = (u16_at(b, at), b[at + 2], u32_at(b, at + 4) as usize);
             let data = &b[at + 8..at + 8 + len];
             at = pad8(at + 8 + len);
-            Col { id, ty, nrows, data }
+            Col {
+                id,
+                ty,
+                nrows,
+                data,
+            }
         })
     }
 
@@ -941,18 +1149,30 @@ impl<'a> Blocks<'a> {
             if b.len() - at < 8 {
                 return Err(Error::Short);
             }
-            let (ncols, nrows) = (u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
+            let (table, ncols, nrows) = (
+                u16_at(b, at),
+                u16_at(b, at + 2) as usize,
+                u32_at(b, at + 4) as usize,
+            );
+            // Tables are numbered from 1; a block with no columns has no rows.
+            if table == 0 || (ncols == 0 && nrows != 0) {
+                return Err(Error::Body);
+            }
             at += 8;
-            let mut seen: Vec<u16> = Vec::with_capacity(ncols);
+            let mut seen = Seen::new();
             for _ in 0..ncols {
                 if b.len() - at < 8 {
                     return Err(Error::Short);
                 }
-                let (id, ty, zero, len) = (u16_at(b, at), b[at + 2], b[at + 3], u32_at(b, at + 4) as usize);
-                if zero != 0 || seen.contains(&id) {
+                let (id, ty, zero, len) = (
+                    u16_at(b, at),
+                    b[at + 2],
+                    b[at + 3],
+                    u32_at(b, at + 4) as usize,
+                );
+                if zero != 0 || !seen.add(id) {
                     return Err(Error::Body);
                 }
-                seen.push(id);
                 let end = (at + 8).checked_add(len).ok_or(Error::Short)?;
                 if end > b.len() || pad8(end) > b.len() {
                     return Err(Error::Short);
@@ -970,21 +1190,30 @@ impl<'a> Blocks<'a> {
         Ok(Blocks { b })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Block<'a>> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = Block<'a>> + use<'a> {
         let b = self.b;
         let mut at = 0;
         core::iter::from_fn(move || {
             if at >= b.len() {
                 return None;
             }
-            let (table, ncols, nrows) = (u16_at(b, at), u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
+            let (table, ncols, nrows) = (
+                u16_at(b, at),
+                u16_at(b, at + 2) as usize,
+                u32_at(b, at + 4) as usize,
+            );
             let start = at + 8;
             let mut end = start;
             for _ in 0..ncols {
                 end = pad8(end + 8 + u32_at(b, end + 4) as usize);
             }
             at = end;
-            Some(Block { table, nrows, ncols, cols: &b[start..end] })
+            Some(Block {
+                table,
+                nrows,
+                ncols,
+                cols: &b[start..end],
+            })
         })
     }
 }
@@ -1013,7 +1242,12 @@ impl BodyWriter {
         self.buf.extend_from_slice(&table.to_le_bytes());
         self.buf.extend_from_slice(&0u16.to_le_bytes());
         self.buf.extend_from_slice(&(nrows as u32).to_le_bytes());
-        BlockWriter { buf: &mut self.buf, head, nrows, ncols: 0 }
+        BlockWriter {
+            buf: &mut self.buf,
+            head,
+            nrows,
+            ncols: 0,
+        }
     }
 
     pub fn gone(&mut self, table: u16, ids: &[u32]) {
@@ -1047,65 +1281,136 @@ impl BlockWriter<'_> {
         self
     }
 
+    // Every column writer takes exactly `nrows` values; another count is a
+    // caller's bug, and a frame the decoder would refuse, so it panics here.
+    fn count(n: usize, got: usize) {
+        assert!(got == n, "a column of {got} values in a block of {n} rows");
+    }
+
     /// A u32 column; `NONE` marks an absent value.
     pub fn u32s(&mut self, id: u16, vals: impl Iterator<Item = u32>) -> &mut Self {
         let n = self.nrows;
         self.col(id, U32, |b| {
-            let start = b.len();
-            vals.for_each(|v| b.extend_from_slice(&v.to_le_bytes()));
-            debug_assert_eq!(b.len() - start, n * 4);
+            Self::count(
+                n,
+                vals.map(|v| b.extend_from_slice(&v.to_le_bytes())).count(),
+            )
         })
     }
 
+    /// An i64 column; `NONE64` marks an absent value.
     pub fn i64s(&mut self, id: u16, vals: impl Iterator<Item = i64>) -> &mut Self {
-        self.col(id, I64, |b| vals.for_each(|v| b.extend_from_slice(&v.to_le_bytes())))
+        let n = self.nrows;
+        self.col(id, I64, |b| {
+            Self::count(
+                n,
+                vals.map(|v| b.extend_from_slice(&v.to_le_bytes())).count(),
+            )
+        })
     }
 
+    /// An f64 column; NaN marks an absent value.
     pub fn f64s(&mut self, id: u16, vals: impl Iterator<Item = f64>) -> &mut Self {
-        self.col(id, F64, |b| vals.for_each(|v| b.extend_from_slice(&v.to_bits().to_le_bytes())))
+        let n = self.nrows;
+        self.col(id, F64, |b| {
+            Self::count(
+                n,
+                vals.map(|v| b.extend_from_slice(&v.to_bits().to_le_bytes()))
+                    .count(),
+            )
+        })
     }
 
+    /// A str column; the empty string is absent.
     pub fn strs<'s>(&mut self, id: u16, vals: impl Iterator<Item = &'s str>) -> &mut Self {
         let n = self.nrows;
         self.col(id, STR, |b| {
-            let offsets_at = b.len();
-            b.resize(offsets_at + (n + 1) * 4, 0);
-            let bytes_at = b.len();
-            for (i, s) in vals.enumerate() {
-                b.extend_from_slice(s.as_bytes());
-                let o = (b.len() - bytes_at) as u32;
-                b[offsets_at + (i + 1) * 4..offsets_at + (i + 2) * 4].copy_from_slice(&o.to_le_bytes());
-            }
+            let (offsets, bytes) = offsets_and_bytes(vals.map(str::as_bytes));
+            Self::count(n, offsets.len() - 1);
+            offsets
+                .iter()
+                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            b.extend_from_slice(&bytes);
         })
     }
 
-    pub fn deferred(&mut self, id: u16, vals: impl Iterator<Item = Option<(u32, [u8; 8])>>) -> &mut Self {
+    /// A str column as a dictionary of its distinct values, for a column of few.
+    pub fn syms<'s>(&mut self, id: u16, vals: impl Iterator<Item = &'s str>) -> &mut Self {
+        let n = self.nrows;
+        self.col(id, SYM, |b| {
+            let mut uniq: Vec<&str> = Vec::new();
+            let ids: Vec<u32> = vals
+                .map(|v| match uniq.iter().position(|u| *u == v) {
+                    Some(i) => i as u32,
+                    None => {
+                        uniq.push(v);
+                        uniq.len() as u32 - 1
+                    }
+                })
+                .collect();
+            Self::count(n, ids.len());
+            let (offsets, bytes) = offsets_and_bytes(uniq.iter().map(|u| u.as_bytes()));
+            b.extend_from_slice(&(uniq.len() as u32).to_le_bytes());
+            offsets
+                .iter()
+                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            let start = b.len();
+            b.extend_from_slice(&bytes);
+            b.resize(b.len() + (4 - (b.len() - start) % 4) % 4, 0);
+            ids.iter()
+                .for_each(|i| b.extend_from_slice(&i.to_le_bytes()));
+        })
+    }
+
+    /// A deferred text column: `(length, first 8 bytes of SHA-256)` or absent.
+    pub fn deferred(
+        &mut self,
+        id: u16,
+        vals: impl Iterator<Item = Option<(u32, [u8; 8])>>,
+    ) -> &mut Self {
+        let n = self.nrows;
         self.col(id, DEFERRED, |b| {
-            for v in vals {
-                let (len, sha) = v.unwrap_or((NONE, [0; 8]));
-                b.extend_from_slice(&len.to_le_bytes());
-                b.extend_from_slice(&sha);
-            }
+            let got = vals
+                .map(|v| {
+                    let (len, sha) = v.unwrap_or((NONE, [0; 8]));
+                    b.extend_from_slice(&len.to_le_bytes());
+                    b.extend_from_slice(&sha);
+                })
+                .count();
+            Self::count(n, got);
         })
     }
 
+    /// A column of u32 lists; the empty list is absent.
     pub fn lists<'s>(&mut self, id: u16, vals: impl Iterator<Item = &'s [u32]>) -> &mut Self {
         let n = self.nrows;
         self.col(id, LIST, |b| {
-            let offsets_at = b.len();
-            b.resize(offsets_at + (n + 1) * 4, 0);
-            let mut o = 0u32;
+            let mut offsets = alloc::vec![0u32];
             let mut values = Vec::new();
-            for (i, l) in vals.enumerate() {
-                o += l.len() as u32;
+            for l in vals {
                 values.extend(l.iter().flat_map(|v| v.to_le_bytes()));
-                b[offsets_at + (i + 1) * 4..offsets_at + (i + 2) * 4].copy_from_slice(&o.to_le_bytes());
+                offsets.push((values.len() / 4) as u32);
             }
+            Self::count(n, offsets.len() - 1);
+            offsets
+                .iter()
+                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
             b.extend_from_slice(&values);
         })
     }
 
     pub fn done(self) {}
+}
+
+/// `(n + 1)` offsets from 0 and the concatenated bytes of `n` values.
+fn offsets_and_bytes<'s>(vals: impl Iterator<Item = &'s [u8]>) -> (Vec<u32>, Vec<u8>) {
+    let mut offsets = alloc::vec![0u32];
+    let mut bytes = Vec::new();
+    for v in vals {
+        bytes.extend_from_slice(v);
+        offsets.push(bytes.len() as u32);
+    }
+    (offsets, bytes)
 }
 
 // -------------------------------------------------------------------- ops
@@ -1119,14 +1424,28 @@ pub struct Cell<'a> {
 }
 
 impl<'a> Cell<'a> {
+    /// The cell's value; an empty str is `None` (it writes NULL). A
+    /// sentinel ([`Cell::is_sentinel`]) comes back as its raw value.
     pub fn value(&self) -> Value<'a> {
         match self.ty {
             U32 => Value::U32(u32_at(self.bytes, 0)),
             I64 => Value::I64(u64_at(self.bytes, 0) as i64),
             F64 => Value::F64(f64::from_bits(u64_at(self.bytes, 0))),
+            STR if self.bytes.is_empty() => Value::None,
             // Validated UTF-8 at parse time.
             STR => Value::Str(str::from_utf8(self.bytes).unwrap_or("")),
             _ => Value::None,
+        }
+    }
+
+    /// A cell holding its type's null sentinel or a non-finite float: the
+    /// server refuses the op `type` (a clear is a NULL cell, never a sentinel).
+    pub fn is_sentinel(&self) -> bool {
+        match self.ty {
+            U32 => u32_at(self.bytes, 0) == NONE,
+            I64 => u64_at(self.bytes, 0) as i64 == NONE64,
+            F64 => !f64::from_bits(u64_at(self.bytes, 0)).is_finite(),
+            _ => false,
         }
     }
 }
@@ -1156,24 +1475,31 @@ impl<'a> Op<'a> {
         let op_id = u64_at(b, 0);
         let (verb, flags, table, target) = (b[8], b[9], u16_at(b, 10), u32_at(b, 12));
         let (ncols, zero, expect_rev) = (u16_at(b, 16) as usize, u16_at(b, 18), u32_at(b, 20));
-        if !(PUT..=COMMAND).contains(&verb) || flags & !(KEYED | CREATE_ONLY | EXPECT_REV) != 0 || zero != 0 {
+        if !(PUT..=COMMAND).contains(&verb)
+            || flags & !(KEYED | CREATE_ONLY | EXPECT_REV) != 0
+            || zero != 0
+        {
             return Err(Error::Body);
         }
         if flags & EXPECT_REV == 0 && expect_rev != 0 {
             return Err(Error::Body);
         }
         let mut at = OP_HEAD;
-        let mut seen: Vec<u16> = Vec::with_capacity(ncols);
+        let mut seen = Seen::new();
         for _ in 0..ncols {
             if b.len() - at < 8 {
                 return Err(Error::Short);
             }
-            let (col, ty, z, len) = (u16_at(b, at), b[at + 2], b[at + 3], u32_at(b, at + 4) as usize);
+            let (col, ty, z, len) = (
+                u16_at(b, at),
+                b[at + 2],
+                b[at + 3],
+                u32_at(b, at + 4) as usize,
+            );
             let end = (at + 8).checked_add(len).ok_or(Error::Short)?;
-            if z != 0 || seen.contains(&col) {
+            if z != 0 || !seen.add(col) {
                 return Err(Error::Body);
             }
-            seen.push(col);
             if end > b.len() || pad8(end) > b.len() {
                 return Err(Error::Short);
             }
@@ -1192,7 +1518,16 @@ impl<'a> Op<'a> {
             }
             at = pad8(end);
         }
-        let op = Op { op_id, verb, flags, table, target, expect_rev, ncols, raw: &b[..at] };
+        let op = Op {
+            op_id,
+            verb,
+            flags,
+            table,
+            target,
+            expect_rev,
+            ncols,
+            raw: &b[..at],
+        };
         Ok((op, &b[at..]))
     }
 
@@ -1204,7 +1539,7 @@ impl<'a> Op<'a> {
         }
     }
 
-    pub fn cells(&self) -> impl Iterator<Item = Cell<'a>> + 'a {
+    pub fn cells(&self) -> impl Iterator<Item = Cell<'a>> + use<'a> {
         let b = self.raw;
         let mut at = OP_HEAD;
         (0..self.ncols).map(move |_| {
@@ -1221,7 +1556,10 @@ impl<'a> Op<'a> {
 
     /// Text bytes the op carries, for the `too_large` limit.
     pub fn text_len(&self) -> usize {
-        self.cells().filter(|c| c.ty == STR).map(|c| c.bytes.len()).sum()
+        self.cells()
+            .filter(|c| c.ty == STR)
+            .map(|c| c.bytes.len())
+            .sum()
     }
 
     pub fn has(&self, flag: u8) -> bool {
@@ -1264,7 +1602,7 @@ impl<'a> Ops<'a> {
         self.n == 0
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Op<'a>> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = Op<'a>> + use<'a> {
         let mut rest = self.b;
         (0..self.n).map(move |_| {
             let (op, r) = Op::parse(rest).expect("validated in Ops::new");
@@ -1295,20 +1633,37 @@ impl OpsWriter {
         OpsWriter { buf, n: 0 }
     }
 
-    pub fn op(&mut self, op_id: u64, verb: u8, flags: u8, table: u16, target: u32, expect_rev: Option<u32>) -> OpWriter<'_> {
+    pub fn op(
+        &mut self,
+        op_id: u64,
+        verb: u8,
+        flags: u8,
+        table: u16,
+        target: u32,
+        expect_rev: Option<u32>,
+    ) -> OpWriter<'_> {
         self.n += 1;
         let n = self.n.to_le_bytes();
         self.buf[0..4].copy_from_slice(&n);
         let head = self.buf.len();
-        let flags = if expect_rev.is_some() { flags | EXPECT_REV } else { flags & !EXPECT_REV };
+        let flags = if expect_rev.is_some() {
+            flags | EXPECT_REV
+        } else {
+            flags & !EXPECT_REV
+        };
         self.buf.extend_from_slice(&op_id.to_le_bytes());
         self.buf.push(verb);
         self.buf.push(flags);
         self.buf.extend_from_slice(&table.to_le_bytes());
         self.buf.extend_from_slice(&target.to_le_bytes());
         self.buf.extend_from_slice(&[0; 4]);
-        self.buf.extend_from_slice(&expect_rev.unwrap_or(0).to_le_bytes());
-        OpWriter { buf: &mut self.buf, head, ncols: 0 }
+        self.buf
+            .extend_from_slice(&expect_rev.unwrap_or(0).to_le_bytes());
+        OpWriter {
+            buf: &mut self.buf,
+            head,
+            ncols: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1317,6 +1672,12 @@ impl OpsWriter {
 
     pub fn is_empty(&self) -> bool {
         self.n == 0
+    }
+
+    /// Whether the frame holds [`MAX_OPS`] ops, or `bytes` more would take
+    /// it past [`MAX_UP`]: the caller sends it and starts another.
+    pub fn is_full(&self, bytes: usize) -> bool {
+        self.n as usize >= MAX_OPS || HEADER + self.buf.len() + bytes > MAX_UP
     }
 
     pub fn finish(self) -> Vec<u8> {
@@ -1335,7 +1696,8 @@ impl OpWriter<'_> {
         self.buf.extend_from_slice(&col.to_le_bytes());
         self.buf.push(ty);
         self.buf.push(0);
-        self.buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        self.buf
+            .extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         self.buf.extend_from_slice(bytes);
         self.buf.resize(pad8(self.buf.len()), 0);
         self.ncols += 1;

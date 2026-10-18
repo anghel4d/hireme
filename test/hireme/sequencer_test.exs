@@ -206,6 +206,19 @@ defmodule Hireme.SequencerTest do
     assert Repo.get(Place, place.id)
   end
 
+  test "a deleted application leaves the kernel too: it is no longer claimable", %{account: a} do
+    {[keep], []} = run(a.id, op(:put, :applications, %{company: "Keep", role: "R"}))
+    {[gone], []} = run(a.id, op(:put, :applications, %{company: "Gone", role: "R"}))
+    {[_], []} = run(a.id, op(:drop, :applications, %{}, target: gone.id))
+    session = %{id: 903, label: "agent", grants: Grants.operator(), key_id: nil, session_id: nil}
+    {:ok, _} = Sequencer.subscribe(a.id, session, 0)
+
+    assert {:ok, %{"ids" => [id], "truncated" => true}} =
+             Hireme.Lease.claim(a.id, 903, %{"count" => 5})
+
+    assert id == keep.id
+  end
+
   test "a key's session writes only after it opens the lease", %{account: a, session: s} do
     {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
     session = %{id: 900, label: "agent", grants: Grants.key(key), key_id: key.id, session_id: nil}

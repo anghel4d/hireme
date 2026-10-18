@@ -61,7 +61,7 @@ defmodule HiremeWeb.Session do
   def frame(bin, state) do
     state = %{state | last_in: now_ms()}
 
-    case Codec.decode(bin) do
+    case Codec.decode(bin, Codec.max_up()) do
       {:ok, kind, _flags, _rev, body} -> on_frame(kind, body, state)
       {:error, :hash} -> bye(:schema, "the wire changed; reload", state)
       {:error, reason} -> {:stop, {:protocol, reason}, [], state}
@@ -210,8 +210,8 @@ defmodule HiremeWeb.Session do
            label: label(label, key.name)
          }}
 
-      :error ->
-        :error
+      refused ->
+        refused
     end
   end
 
