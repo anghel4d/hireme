@@ -34,7 +34,8 @@ defmodule Hireme.Accounts do
   alias Hireme.Security
   alias Hireme.Store
 
-  @type meta :: %{optional(:ip) => String.t(), optional(:user_agent) => String.t()}
+  @typedoc "Where a request came from, and the account, session or key it carries: the trail's context."
+  @type meta :: Hireme.Audit.context()
 
   @typedoc "What a provider vouched for: its id for the person (the address, for mail) and a name to show."
   @type claim :: %{subject: String.t(), display: String.t()}
