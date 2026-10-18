@@ -37,8 +37,8 @@ function gym(g: Gym): Html {
         <label>Platform <select name="platform">${options("platform", "leetcode")}</select></label>
         <label>Slug <input name="slug" required placeholder="two-sum"></label>
         <label>Title <input name="title"></label>
-        <label>Topic <select name="topic"><option value=""></option>${options("topic", "")}</select></label>
-        <label>Difficulty <select name="difficulty"><option value=""></option>${options("difficulty", "")}</select></label>
+        <label>Topic <select name="topic"><option value="">Any topic</option>${options("topic", "")}</select></label>
+        <label>Difficulty <select name="difficulty"><option value="">Not rated</option>${options("difficulty", "")}</select></label>
         <label>Minutes <input type="number" name="minutes" min="0" max="600" class="narrow"></label>
         <label>Outcome <select name="outcome">${options("rep_outcome", "solved")}</select></label>
         <label>Day <input type="date" name="done_on" value="${today()}" required></label>
