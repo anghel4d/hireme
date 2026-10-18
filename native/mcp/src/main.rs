@@ -82,6 +82,8 @@ struct App {
     /// Open subscriptions/listen streams: request id (as JSON text) → wants tool list changes.
     listens: Mutex<HashMap<String, (Json, bool)>>,
     cancelled: Mutex<HashSet<String>>,
+    /// A tools/list was answered before the first catalog: its arrival must say the list changed.
+    listed_early: std::sync::atomic::AtomicBool,
 }
 
 fn url() -> String {
@@ -154,6 +156,7 @@ async fn main() {
         watches: Mutex::new(HashMap::new()),
         listens: Mutex::new(HashMap::new()),
         cancelled: Mutex::new(HashSet::new()),
+        listed_early: std::sync::atomic::AtomicBool::new(false),
     });
     tokio::spawn(follow(app.clone(), events));
     tokio::spawn(poll(app.clone()));
@@ -195,7 +198,7 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                         Ok(Err(e)) => eprintln!("hireme-mcp: schema refused: {e}"),
                         Err(e) => eprintln!("hireme-mcp: schema: {}", e.0),
                     }
-                    if before.is_some() {
+                    if before.is_some() || app.listed_early.swap(false, Ordering::Relaxed) {
                         app.tools_changed().await;
                     }
                 }
@@ -294,11 +297,23 @@ impl App {
         if let Some(c) = self.catalog.read().await.clone() {
             return Some(c);
         }
-        if self.dead.read().await.is_some() {
-            return None;
+        // A Notify wakes only who is already waiting, and WELCOME can land between the check and the wait:
+        // so the wait re-checks on every wake and on a short tick until the deadline.
+        let deadline = tokio::time::Instant::now() + READY_WAIT;
+        loop {
+            if self.dead.read().await.is_some() {
+                return None;
+            }
+            if self.welcome.read().await.is_some() {
+                if let Some(c) = self.catalog.read().await.clone() {
+                    return Some(c);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return self.catalog.read().await.clone();
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.ready.notified()).await;
         }
-        let _ = tokio::time::timeout(READY_WAIT, self.ready.notified()).await;
-        self.catalog.read().await.clone()
     }
 
     async fn message(self: Arc<Self>, msg: Json) {
@@ -376,10 +391,15 @@ impl App {
     }
 
     async fn tools_list(&self) -> Json {
+        // The catalog first: waiting for it is waiting for WELCOME, which carries the masks.
+        let cat = self.catalog().await;
         let m = self.masks().await;
-        match self.catalog().await {
+        match cat {
             Some(cat) => json!({"tools": tools::list(&cat, m)}),
-            None => json!({"tools": tools::list(&Catalog::default(), Masks::default())}),
+            None => {
+                self.listed_early.store(true, Ordering::Relaxed);
+                json!({"tools": tools::list(&Catalog::default(), Masks::default())})
+            }
         }
     }
 
@@ -650,6 +670,8 @@ impl App {
                 Ok(id) => id,
                 Err(e) => return text_result(diag::render("not_found", &format!("{} no={no}", c.name), &json!({"message": e})), None, true),
             },
+            // A command whose params name its row (open_generation by corporation_id) carries no target.
+            (None, None) if args.as_object().is_some_and(|o| !o.is_empty()) => 0,
             (None, None) => return text_result(format!("{} {}\n", c.name, command_shape(c)), None, false),
         };
         let mut cells = Vec::new();
@@ -745,8 +767,8 @@ impl App {
     // ------------------------------------------------------------ resources
 
     async fn templates(&self) -> Json {
-        let m = self.masks().await;
         let cat = self.catalog().await.unwrap_or_default();
+        let m = self.masks().await;
         let mut out = Vec::new();
         for (table, key, title) in [
             ("applications", "no", "An application by its number"),
