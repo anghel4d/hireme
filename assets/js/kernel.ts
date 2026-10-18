@@ -446,10 +446,13 @@ export function forget(): void {
   savedRev = -2n
   try {
     indexedDB.deleteDatabase("hireme")
+    for (const key of Object.keys(localStorage)) if (key.startsWith(SNAP_FLAG)) localStorage.removeItem(key)
   } catch {
     // Storage is blocked: there is nothing stored to delete.
   }
 }
+/** early.ts reads it before HELLO, synchronously: a snapshot is stored for this scope (set once one is written). */
+const SNAP_FLAG = "hireme-snap:"
 
 function save(): void {
   const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
@@ -474,7 +477,15 @@ function save(): void {
     db.onversionchange = () => db.close()
     try {
       const tx = db.transaction("snap", "readwrite")
-      tx.oncomplete = tx.onerror = tx.onabort = () => db.close()
+      tx.onerror = tx.onabort = () => db.close()
+      tx.oncomplete = () => {
+        db.close()
+        try {
+          localStorage.setItem(SNAP_FLAG + scope, "1")
+        } catch {
+          // Without the flag the next load simply asks the server for a whole BOOT.
+        }
+      }
       tx.objectStore("snap").put(record, scope)
     } catch {
       db.close()
