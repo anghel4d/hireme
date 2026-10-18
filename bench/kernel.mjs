@@ -24,8 +24,8 @@ const N = Number(process.argv[3] ?? 10000);
 const HOT = Number(process.argv[4] ?? 0.1);
 const BOUND_MS = 8;
 const FIRST_BOUND_MS = 30;
-// DISTINCT=1: every company, role and location is its own text, the desk
-// on which reading each distinct text once saves nothing.
+// DISTINCT=1: every company, role and location is its own text (one
+// application per company, the usual job hunt): the worst-case desk.
 const DISTINCT = process.env.DISTINCT === "1";
 const bytes = readFileSync(wasmPath);
 
@@ -95,6 +95,4 @@ const report = {
   wasm_bytes: bytes.length,
 };
 console.log(JSON.stringify(report));
-// The first-derive bound is set on the repeating desk; DISTINCT reports it.
-const firstOk = DISTINCT || report.derive_after_boot_ms <= FIRST_BOUND_MS;
-process.exit(report.derive_after_patch_ms <= BOUND_MS && firstOk ? 0 : 1);
+process.exit(report.derive_after_patch_ms <= BOUND_MS && report.derive_after_boot_ms <= FIRST_BOUND_MS ? 0 : 1);
