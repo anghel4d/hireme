@@ -503,9 +503,9 @@ fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Re
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
     let Some(seat) = board::seat(t, id) else { return Ok(()) };
     let hot = board.hot_seats(rows);
-    let ix = heat::Index::new(hot.iter());
     let cfg = board::config(rows);
-    let v = heat::verdict(&ix, &seat, &[], ctx.today, &cfg);
+    let ix = heat::Index::new(hot.iter(), ctx.today, &cfg);
+    let v = heat::verdict(&ix, &seat, &[], &cfg);
     if v.allow {
         return Ok(());
     }

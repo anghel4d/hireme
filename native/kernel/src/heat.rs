@@ -318,90 +318,160 @@ impl Class {
     }
 }
 
-/// The hot seats of an account, grouped so one verdict reads only its
-/// company's, vendor's and tenant's peers.
+/// The hot seats of an account on one day, each seat's decayed loads
+/// computed once, grouped by company, vendor, tenant and batch, so a
+/// verdict reads only its groups. A group's load is always summed over
+/// its members in index order, the asking seat skipped, then any `kept`
+/// seats: the board, `judge` and `mix` therefore get bit-identical numbers
+/// for the same rows.
 pub struct Index<'a> {
-    by_company: BTreeMap<&'a str, Vec<&'a Seat>>,
-    by_vendor: BTreeMap<Vendor, Vec<&'a Seat>>,
-    by_tenant: BTreeMap<(Vendor, &'a str), Vec<&'a Seat>>,
+    today: Day,
+    seats: Vec<&'a Seat>,
+    /// Indexed seat ids, so asking whether a seat is its own peer is a lookup.
+    ids: alloc::collections::BTreeSet<u32>,
+    /// Per seat: its decayed load at the company, vendor and tenant
+    /// half-lives, 0 under the floor.
+    loads: Vec<[f64; 3]>,
+    by_company: BTreeMap<&'a str, Group>,
+    by_vendor: BTreeMap<Vendor, Group>,
+    by_tenant: BTreeMap<(Vendor, &'a str), Group>,
+    by_batch_vendor: BTreeMap<(u32, Vendor), u32>,
 }
+
+#[derive(Default)]
+struct Group {
+    members: Vec<u32>,
+    /// The sum over every member, in member order.
+    total: f64,
+}
+
+const COMPANY: usize = 0;
+const VENDOR: usize = 1;
+const TENANT: usize = 2;
 
 impl<'a> Index<'a> {
     /// Indexes the seats in hot stages; the rest carry no load.
-    pub fn new(seats: impl IntoIterator<Item = &'a Seat>) -> Index<'a> {
-        let mut ix = Index { by_company: BTreeMap::new(), by_vendor: BTreeMap::new(), by_tenant: BTreeMap::new() };
+    pub fn new(seats: impl IntoIterator<Item = &'a Seat>, today: Day, cfg: &Config) -> Index<'a> {
+        let mut ix = Index {
+            today,
+            seats: Vec::new(),
+            ids: alloc::collections::BTreeSet::new(),
+            loads: Vec::new(),
+            by_company: BTreeMap::new(),
+            by_vendor: BTreeMap::new(),
+            by_tenant: BTreeMap::new(),
+            by_batch_vendor: BTreeMap::new(),
+        };
         for s in seats.into_iter().filter(|s| s.stage.hot()) {
-            ix.add(s);
+            let i = ix.seats.len() as u32;
+            let l = loads(s, today, cfg);
+            ix.seats.push(s);
+            ix.loads.push(l);
+            ix.ids.insert(s.id);
+            if !s.key.is_empty() {
+                let g = ix.by_company.entry(&s.key).or_default();
+                g.members.push(i);
+                g.total += l[COMPANY];
+            }
+            if s.ats.vendor != Vendor::Unknown {
+                let g = ix.by_vendor.entry(s.ats.vendor).or_default();
+                g.members.push(i);
+                g.total += l[VENDOR];
+                if let Some(t) = &s.ats.tenant {
+                    let g = ix.by_tenant.entry((s.ats.vendor, t)).or_default();
+                    g.members.push(i);
+                    g.total += l[TENANT];
+                }
+                if let Some(b) = s.batch_id {
+                    *ix.by_batch_vendor.entry((b, s.ats.vendor)).or_default() += 1;
+                }
+            }
         }
         ix
     }
 
-    fn add(&mut self, s: &'a Seat) {
-        if !s.key.is_empty() {
-            self.by_company.entry(&s.key).or_default().push(s);
-        }
-        if s.ats.vendor != Vendor::Unknown {
-            self.by_vendor.entry(s.ats.vendor).or_default().push(s);
-            if let Some(t) = &s.ats.tenant {
-                self.by_tenant.entry((s.ats.vendor, t)).or_default().push(s);
+    /// A group's load for `seat`: the precomputed total when the seat is
+    /// not a member, else the members' sum without it; then `kept`.
+    fn load(&self, g: Option<&Group>, k: usize, seat: &Seat, kept: &[(&Seat, [f64; 3])], same: impl Fn(&Seat) -> bool) -> f64 {
+        // An indexed seat is a member of every group its own fields name.
+        let member = self.ids.contains(&seat.id);
+        let mut sum = match g {
+            None => 0.0,
+            Some(g) if !member => g.total,
+            Some(g) => {
+                let mut s = 0.0;
+                for &m in &g.members {
+                    if self.seats[m as usize].id != seat.id {
+                        s += self.loads[m as usize][k];
+                    }
+                }
+                s
+            }
+        };
+        for (p, l) in kept {
+            if p.id != seat.id && same(p) {
+                sum += l[k];
             }
         }
-    }
-
-    fn company(&self, key: &str) -> &[&'a Seat] {
-        self.by_company.get(key).map_or(&[], Vec::as_slice)
+        sum
     }
 }
 
-const NONE: &[&Seat] = &[];
+fn loads(s: &Seat, today: Day, cfg: &Config) -> [f64; 3] {
+    let at = |half: f64| {
+        let l = decay(cfg.application_load, s.age(today), half);
+        if l >= cfg.load_floor { l } else { 0.0 }
+    };
+    [at(cfg.company_half_life), at(cfg.ats_vendor_half_life), at(cfg.ats_tenant_half_life)]
+}
 
-/// The governor's verdict on `seat` entering the queue, against the
-/// indexed hot seats plus `kept` (seats already admitted in the same
+/// The governor's verdict on `seat` entering the queue on the index's
+/// day, against the indexed hot seats plus `kept` (seats already admitted in the same
 /// pass, which count as fresh peers). The seat itself is never its own
 /// peer.
-pub fn verdict<'s>(ix: &Index<'s>, seat: &Seat, kept: &[&'s Seat], today: Day, cfg: &Config) -> Verdict {
-    let others = |v: &[&'s Seat]| -> Vec<&'s Seat> {
-        let mut out: Vec<&'s Seat> = v.iter().copied().filter(|p| p.id != seat.id).collect();
-        out.extend(kept.iter().copied().filter(|p| p.id != seat.id));
-        out
+pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config) -> Verdict {
+    let kept: Vec<(&Seat, [f64; 3])> = kept.iter().map(|p| (*p, loads(p, ix.today, cfg))).collect();
+    let others = |g: Option<&Group>| -> Vec<&Seat> {
+        let mut v: Vec<&Seat> = g
+            .map(|g| g.members.iter().map(|&m| ix.seats[m as usize]).filter(|p| p.id != seat.id).collect())
+            .unwrap_or_default();
+        v.extend(kept.iter().map(|k| k.0).filter(|p| p.id != seat.id && p.key == seat.key));
+        v
     };
-    let company: Vec<&Seat> = if seat.key.is_empty() {
-        Vec::new()
-    } else {
-        others(ix.company(&seat.key)).into_iter().filter(|p| p.key == seat.key).collect()
-    };
-    let load = |peers: &[&Seat], half: f64| {
-        peers.iter().map(|p| decay(cfg.application_load, p.age(today), half)).filter(|l| *l >= cfg.load_floor).sum::<f64>()
-    };
-    let company_load = load(&company, cfg.company_half_life);
+    let company_group = if seat.key.is_empty() { None } else { ix.by_company.get(seat.key.as_str()) };
+    let company_load =
+        if seat.key.is_empty() { 0.0 } else { ix.load(company_group, COMPANY, seat, &kept, |p| p.key == seat.key) };
     let company_cap = cfg.cap(seat.size);
+    // Department and family only matter among the company's peers, which
+    // are few; the vendor's are not walked per seat.
+    let company: Vec<&Seat> = if seat.key.is_empty() { Vec::new() } else { others(company_group) };
     let increment = cfg.application_load
         + if company.iter().any(|p| p.department == seat.department) { cfg.same_department_penalty } else { 0.0 }
         + if company.iter().any(|p| p.family == seat.family) { cfg.clone_penalty } else { 0.0 };
 
     let vendor = seat.ats.vendor;
-    let (vendor_peers, tenant_peers) = if vendor == Vendor::Unknown {
-        (Vec::new(), Vec::new())
-    } else {
-        let vp: Vec<&Seat> =
-            others(ix.by_vendor.get(&vendor).map_or(NONE, Vec::as_slice)).into_iter().filter(|p| p.ats.vendor == vendor).collect();
-        let tp: Vec<&Seat> = match &seat.ats.tenant {
-            Some(t) => vp.iter().copied().filter(|p| p.ats.tenant.as_ref() == Some(t)).collect(),
-            None => Vec::new(),
-        };
-        (vp, tp)
+    let known = vendor != Vendor::Unknown;
+    let vendor_load = if known { ix.load(ix.by_vendor.get(&vendor), VENDOR, seat, &kept, |p| p.ats.vendor == vendor) } else { 0.0 };
+    let tenant_load = match (&seat.ats.tenant, known) {
+        (Some(t), true) => ix.load(ix.by_tenant.get(&(vendor, t.as_str())), TENANT, seat, &kept, |p| {
+            p.ats.vendor == vendor && p.ats.tenant.as_ref() == Some(t)
+        }),
+        _ => 0.0,
     };
-    let vendor_load = load(&vendor_peers, cfg.ats_vendor_half_life);
-    let tenant_load = load(&tenant_peers, cfg.ats_tenant_half_life);
     let batch_vendor = match seat.batch_id {
-        Some(b) if vendor != Vendor::Unknown => vendor_peers.iter().filter(|p| p.batch_id == Some(b)).count() as u32,
+        Some(b) if known => {
+            let indexed = ix.by_batch_vendor.get(&(b, vendor)).copied().unwrap_or(0);
+            let own = ix.ids.contains(&seat.id) as u32;
+            let fresh = kept.iter().filter(|k| k.0.id != seat.id && k.0.batch_id == Some(b) && k.0.ats.vendor == vendor).count() as u32;
+            indexed - own + fresh
+        }
         _ => 0,
     };
 
     let tenant = seat.ats.tenant.is_some();
-    let (reason, cooldown) = if vendor != Vendor::Unknown && batch_vendor as f64 >= cfg.ats_batch_cap {
+    let (reason, cooldown) = if known && batch_vendor as f64 >= cfg.ats_batch_cap {
         (Reason::BatchCap, None)
-    } else if vendor != Vendor::Unknown && vendor_load + cfg.application_load > cfg.ats_vendor_cap {
+    } else if known && vendor_load + cfg.application_load > cfg.ats_vendor_cap {
         (Reason::VendorCap, cooldown(vendor_load, cfg.application_load, cfg.ats_vendor_cap, cfg.ats_vendor_half_life, cfg.load_floor))
     } else if tenant && tenant_load + cfg.application_load > cfg.ats_tenant_cap {
         (Reason::TenantCap, cooldown(tenant_load, cfg.application_load, cfg.ats_tenant_cap, cfg.ats_tenant_half_life, cfg.load_floor))
@@ -455,13 +525,13 @@ fn cooldown(load: f64, increment: f64, cap: f64, half_life: f64, floor: f64) -> 
 /// admitted if the governor allows it against the hot seats and those
 /// already admitted. Returns the admitted ids in order and the deferred
 /// with their verdicts.
-pub fn mix<'a>(candidates: &'a [Seat], ix: &Index, today: Day, cfg: &Config) -> (Vec<u32>, Vec<(u32, Verdict)>) {
+pub fn mix<'a>(candidates: &'a [Seat], ix: &Index<'a>, cfg: &Config) -> (Vec<u32>, Vec<(u32, Verdict)>) {
     let mut order: Vec<&Seat> = candidates.iter().collect();
     order.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.key.cmp(&b.key)).then(a.id.cmp(&b.id)));
     let mut kept: Vec<&Seat> = Vec::new();
     let mut deferred = Vec::new();
     for s in order {
-        let v = verdict(ix, s, &kept, today, cfg);
+        let v = verdict(ix, s, &kept, cfg);
         if v.allow {
             kept.push(s);
         } else {
@@ -503,24 +573,24 @@ mod tests {
         let cfg = Config::default();
         let day = 20_000;
         let hot = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, day)];
-        let ix = Index::new(&hot);
+        let ix = Index::new(&hot, day, &cfg);
         let next = seat(2, "ACME", "Data Engineer", "", Stage::Gated, day);
-        let v = verdict(&ix, &next, &[], day, &cfg);
+        let v = verdict(&ix, &next, &[], &cfg);
         assert!(!v.allow);
         assert_eq!(v.reason, Reason::CompanyCap);
         assert_eq!(v.increment, 1.0);
         // The increment fills the cap, so the wait is until the one peer
         // falls under the floor: 35 · log2(1 / 0.05) = 151.3 → 152 days.
         assert_eq!(v.cooldown_days, Some(152));
-        assert!(verdict(&ix, &next, &[], day + 152, &cfg).allow);
-        assert!(!verdict(&ix, &next, &[], day + 151, &cfg).allow);
+        assert!(verdict(&Index::new(&hot, day + 152, &cfg), &next, &[], &cfg).allow);
+        assert!(!verdict(&Index::new(&hot, day + 151, &cfg), &next, &[], &cfg).allow);
         let mega = [seat(1, "Google", "Software Engineer", "", Stage::Submitted, day)];
-        let ix = Index::new(&mega);
-        let v = verdict(&ix, &seat(2, "Google", "Software Engineer", "", Stage::Gated, day), &[], day, &cfg);
+        let ix = Index::new(&mega, day, &cfg);
+        let v = verdict(&ix, &seat(2, "Google", "Software Engineer", "", Stage::Gated, day), &[], &cfg);
         // 1.0 load + 1.0 + 0.6 dept + 0.6 clone = 3.2 ≤ 4.0
         assert!(v.allow);
         assert!((v.increment - 2.2).abs() < 1e-12);
-        let v2 = verdict(&ix, &seat(2, "Google", "Software Engineer", "", Stage::Gated, day), &[&mega[0], &mega[0]], day, &cfg);
+        let v2 = verdict(&ix, &seat(2, "Google", "Software Engineer", "", Stage::Gated, day), &[&mega[0], &mega[0]], &cfg);
         assert!(!v2.allow);
         assert_eq!(v2.reason, Reason::CompanyCap);
         // load 3.0, room 4.0 − 2.2 = 1.8: 35 · log2(3 / 1.8) = 25.8 → 26 days.
@@ -531,12 +601,12 @@ mod tests {
     fn override_needs_a_reason_and_is_reported() {
         let cfg = Config::default();
         let hot = [seat(1, "Acme", "Engineer", "", Stage::Submitted, 0)];
-        let ix = Index::new(&hot);
+        let ix = Index::new(&hot, 0, &cfg);
         let mut s = seat(2, "Acme", "Engineer", "", Stage::Gated, 0);
         s.overridden = Seat::new(&SeatIn { heat_override: true, heat_override_reason: "  ", ..seat_in() }).overridden;
-        assert!(!verdict(&ix, &s, &[], 0, &cfg).allow);
+        assert!(!verdict(&ix, &s, &[], &cfg).allow);
         s.overridden = true;
-        let v = verdict(&ix, &s, &[], 0, &cfg);
+        let v = verdict(&ix, &s, &[], &cfg);
         assert!(v.allow);
         assert_eq!(v.reason, Reason::Override);
     }
@@ -562,8 +632,8 @@ mod tests {
         let url = "https://boards.greenhouse.io/acme/jobs/1";
         let hot: Vec<Seat> =
             (1..=3).map(|i| seat(i, "Corp", "Engineer", url, Stage::Submitted, 0)).map(|mut s| { s.key = alloc::format!("c{}", s.id); s }).collect();
-        let ix = Index::new(&hot);
-        let v = verdict(&ix, &seat(10, "Other", "Engineer", url, Stage::Gated, 0), &[], 0, &cfg);
+        let ix = Index::new(&hot, 0, &cfg);
+        let v = verdict(&ix, &seat(10, "Other", "Engineer", url, Stage::Gated, 0), &[], &cfg);
         assert_eq!(v.reason, Reason::TenantCap);
         assert_eq!(v.tenant.as_deref(), Some("acme"));
 
@@ -576,7 +646,7 @@ mod tests {
         };
         let cands = [mk(1, "a"), mk(2, "b"), mk(3, "c")];
         let empty: [Seat; 0] = [];
-        let (kept, deferred) = mix(&cands, &Index::new(&empty), 0, &cfg);
+        let (kept, deferred) = mix(&cands, &Index::new(&empty, 0, &cfg), &cfg);
         assert_eq!(kept, [1, 2]);
         assert_eq!(deferred[0].0, 3);
         assert_eq!(deferred[0].1.reason, Reason::BatchCap);

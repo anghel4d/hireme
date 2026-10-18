@@ -13,7 +13,7 @@
 //! frame or a write moved; the settings row or the atlas moving
 //! recomputes all of them, since "home" is read from both.
 
-use alloc::collections::BTreeMap;
+use std::collections::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -102,10 +102,10 @@ impl Scoreboard {
 
 #[derive(Default)]
 pub struct Board {
-    cache: BTreeMap<u32, Cached>,
+    cache: HashMap<u32, Cached>,
     cards: Vec<Card>,
     /// Card index by application id.
-    at: BTreeMap<u32, usize>,
+    at: HashMap<u32, usize>,
     /// Every card id in board order.
     order: Vec<u32>,
     config: heat::Config,
@@ -242,9 +242,9 @@ impl Board {
             self.cached(rows, t, id);
         }
         let live: Vec<&Cached> = ids.iter().filter_map(|id| self.cache.get(id)).collect();
-        let ix = heat::Index::new(live.iter().map(|c| &c.seat));
+        let ix = heat::Index::new(live.iter().map(|c| &c.seat), today, &self.config);
         for c in &live {
-            let verdict = heat::verdict(&ix, &c.seat, &[], today, &self.config);
+            let verdict = heat::verdict(&ix, &c.seat, &[], &self.config);
             let class = Class::of(&verdict, &self.config);
             let score = c.stored.unwrap_or(c.suggestion.score);
             self.cards.push(Card {
@@ -259,18 +259,10 @@ impl Board {
                 verdict,
             });
         }
-        let cards = &self.cards;
-        let mut idx: Vec<usize> = (0..cards.len()).collect();
-        idx.sort_by(|&a, &b| {
-            let (x, y) = (&cards[a], &cards[b]);
-            y.score
-                .cmp(&x.score)
-                .then(x.class.cmp(&y.class))
-                .then(x.verdict.ratio().total_cmp(&y.verdict.ratio()))
-                .then(x.no.cmp(&y.no))
-                .then(x.id.cmp(&y.id))
-        });
-        self.order = idx.iter().map(|&i| cards[i].id).collect();
+        let mut keys: Vec<(core::cmp::Reverse<u8>, Class, f64, u32, u32)> =
+            self.cards.iter().map(|c| (core::cmp::Reverse(c.score), c.class, c.verdict.ratio(), c.no, c.id)).collect();
+        keys.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.total_cmp(&y.2)).then(x.3.cmp(&y.3)).then(x.4.cmp(&y.4)));
+        self.order = keys.iter().map(|k| k.4).collect();
         for (i, c) in self.cards.iter().enumerate() {
             self.at.insert(c.id, i);
         }
