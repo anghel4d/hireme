@@ -261,22 +261,26 @@ await step("a reload from the snapshot paints the desk restoring before its card
 
 // No path leaves the desk on "Restoring the desk…": a fresh page in the same
 // context (the same IndexedDB snapshot) with one of the kernel module's
-// exports made to trap, injected before the page instantiates it.
-async function faulted(fault) {
-  const p = await ctx.newPage();
-  await p.addInitScript((fault) => {
+// exports replaced, before the page instantiates it, by one that traps. The
+// exports object's properties are read-only, so it is a plain copy, not a
+// Proxy (which may not answer for them).
+async function faulted(fault, { context = ctx, path = "/desk", changing = false } = {}) {
+  const p = await context.newPage();
+  p.consoleErrors = [];
+  p.on("console", (m) => { if (m.type() === "error") p.consoleErrors.push(m.text()) });
+  await p.addInitScript(({ fault, changing }) => {
     const real = WebAssembly.instantiate.bind(WebAssembly);
+    let n = 0;
     WebAssembly.instantiate = async (m, imports) => {
       if (fault === "ingest") await new Promise((r) => setTimeout(r, 1500)); // frames queue meanwhile
       const out = await real(m, imports);
       const inst = out.instance ?? out;
-      const exports = new Proxy(inst.exports, {
-        get: (t, k) => (k === fault ? () => { throw new WebAssembly.RuntimeError(`unreachable (injected in ${fault})`) } : t[k]),
-      });
-      return out.instance ? { module: out.module, instance: { exports } } : { exports };
+      const boom = () => { throw new WebAssembly.RuntimeError(changing ? `boom ${n++} ${"x".repeat(5000)}` : `unreachable (injected in ${fault})`) };
+      const fake = { exports: { ...inst.exports, [fault]: boom } };
+      return out.instance ? { module: out.module, instance: fake } : fake;
     };
-  }, fault);
-  await p.goto(`${BASE}/desk`);
+  }, { fault, changing });
+  await p.goto(`${BASE}${path}`);
   return p;
 }
 const lensText = async (p) => (await p.locator("#lens").innerText()).replace(/\s+/g, " ");
@@ -295,6 +299,30 @@ await step("a view that throws after a restore shows its error line and one noti
   } finally { await p.close() }
 });
 
+await step("focus's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => {
+  // Its own signed-in context and snapshot, so nothing the other pages did is in it.
+  const own = await browser.newContext();
+  try {
+    const p0 = await own.newPage();
+    await p0.goto(`${BASE}/sign-in`);
+    await p0.locator('form[action="/dev/sign-in"] button').click();
+    await until(async () => !p0.url().includes("/sign-in"), "signed in");
+    await p0.goto(`${BASE}/desk`);
+    await until(async () => (await p0.locator("article.app-card").count()) >= 20, "20 article.app-card");
+    await sleep(6000); // the snapshot is saved
+    const no = (await p0.locator("article.app-card .no").first().textContent()).replace("#", "").trim();
+    const p = await faulted("application", { context: own, path: `/focus/${no}` });
+    await until(async () => /focus lens failed to (load|draw)/.test(await notices(p)), "the focus lens's failure notice");
+    await sleep(1500);
+    const t = await lensText(p);
+    if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
+    const n = await p.locator(".notices .notice", { hasText: "focus lens failed" }).count();
+    if (n !== 1) throw new Error(`${n} focus failure notices, not one`);
+    if (!p.consoleErrors.some((x) => x.includes("focus lens failed"))) throw new Error("not logged to the console");
+    return `one notice, logged, lens "${t.trim().slice(0, 60)}"`;
+  } finally { await own.close() }
+});
+
 await step("a trap in ingest while loading says the kernel did not load, never restoring", pages, async () => {
   const p = await faulted("ingest");
   try {
@@ -303,6 +331,23 @@ await step("a trap in ingest while loading says the kernel did not load, never r
     const t = await lensText(p);
     if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
     return `lens "${t.trim().slice(0, 60)}"`;
+  } finally { await p.close() }
+});
+
+await step("a view throwing a new long message each time raises one clipped notice and one console error, no repaint loop", pages, async () => {
+  const p = await faulted("view", { changing: true });
+  try {
+    await until(async () => /failed to draw/.test(await notices(p)), "the notice");
+    const count = () => p.evaluate(() => document.querySelectorAll(".notices .notice").length);
+    const before = await count();
+    await sleep(3000);
+    const after = await count();
+    const shown = await p.locator(".notices .notice", { hasText: "failed to draw" }).allInnerTexts();
+    if (shown.length !== 1 || after !== before) throw new Error(`${shown.length} draw notices; notices ${before} -> ${after}`);
+    if (shown[0].length >= 400) throw new Error(`a notice of ${shown[0].length} characters`);
+    const logged = p.consoleErrors.filter((x) => x.includes("failed to draw")).length;
+    if (logged !== 1) throw new Error(`${logged} console errors, not one`);
+    return `1 notice (${shown[0].length} chars), steady at ${after}, 1 console error`;
   } finally { await p.close() }
 });
 
