@@ -110,14 +110,7 @@ defmodule Hireme.Mfa do
       with :ok <- fresh(session) do
         secret = NimbleTOTP.secret()
         challenge!(session, :totp_enroll, secret)
-        # A label is the account's own text; `?` or `#` in it would end the
-        # path and smuggle parameters (another secret) into the URI.
-        uri =
-          NimbleTOTP.otpauth_uri(
-            "#{@issuer}:#{URI.encode(label, &URI.char_unreserved?/1)}",
-            secret,
-            issuer: @issuer
-          )
+        uri = otpauth(label, secret)
 
         {:ok,
          %{
@@ -127,6 +120,15 @@ defmodule Hireme.Mfa do
          }}
       end
     end)
+  end
+
+  # Built here, each part encoded once: a label is the account's own text,
+  # and `?` or `#` in it must not end the path and smuggle parameters (another
+  # secret) into the URI.
+  defp otpauth(label, secret) do
+    path = @issuer <> ":" <> URI.encode(label, &URI.char_unreserved?/1)
+    query = URI.encode_query(secret: Base.encode32(secret, padding: false), issuer: @issuer)
+    "otpauth://totp/#{path}?#{query}"
   end
 
   # The page's CSP refuses inline style attributes, and EQRCode colours every
@@ -411,15 +413,19 @@ defmodule Hireme.Mfa do
   defp as(%Session{account_id: id}, fun), do: Repo.with_account(id, fun)
 
   # One step of grace either side; `since` refuses every step at or before
-  # the one spent. Answers the step the code matched, so that step is
-  # recorded as spent: a code accepted early through the grace is not good
-  # again when its own step arrives.
-  defp totp_step(secret, code, now, since),
-    do:
-      Enum.find(
-        [now, now - 30, now + 30],
-        &NimbleTOTP.valid?(secret, code, time: &1, since: since)
-      )
+  # the one spent. Answers the start of the 30 s step the code matched, so
+  # that step is recorded as spent (a code accepted early through the grace
+  # is not good again when its own step arrives) and two presentations of
+  # one code record the same value, which the compare-and-set lets pass once.
+  defp totp_step(secret, code, now, since) do
+    case Enum.find(
+           [now, now - 30, now + 30],
+           &NimbleTOTP.valid?(secret, code, time: &1, since: since)
+         ) do
+      nil -> nil
+      t -> t - rem(t, 30)
+    end
+  end
 
   defp unseal_totp(%Factor{totp_secret: sealed}) when is_binary(sealed) do
     case Security.unseal(sealed, @totp_seal) do

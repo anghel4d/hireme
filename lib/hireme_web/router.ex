@@ -26,6 +26,7 @@ defmodule HiremeWeb.Router do
     plug :accepts, ["json"]
     plug :fetch_session
     plug :protect_from_forgery
+    plug :put_secure_browser_headers
     plug :security_headers
     plug :fetch_account
     plug :require_account
@@ -44,6 +45,7 @@ defmodule HiremeWeb.Router do
     plug :accepts, ["json"]
     plug :fetch_session
     plug :protect_from_forgery
+    plug :put_secure_browser_headers
     plug :security_headers
     plug :fetch_account
     plug :require_pending

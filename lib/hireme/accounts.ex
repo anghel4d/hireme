@@ -259,13 +259,28 @@ defmodule Hireme.Accounts do
   def redeem_ticket(_), do: :error
 
   @doc """
-  Whether browser session `session_id` may still act, and keeps it alive.
-  The wire calls this on its tick and every `account.*` call checks it, so
-  a wire session obeys the same lifetime, idle limit, revocation and
-  suspension as a page, and wire activity counts as activity.
+  Whether browser session `session_id` may still act, counting this as its
+  activity: what a page's request does, for a wire session's own requests
+  (an `account.*` call, an OPS frame). A wire session thus obeys the same
+  lifetime, idle limit, revocation and suspension as a page.
   """
   @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
   def live_session(session_id) when is_integer(session_id) do
+    case read_live(session_id) do
+      {:ok, s, now} -> {:ok, touch(s, now)}
+      :error -> :error
+    end
+  end
+
+  @doc """
+  Whether browser session `session_id` may still act, without counting as
+  activity: for a timer (the wire's tick), which must let an abandoned tab
+  idle out.
+  """
+  @spec session_live?(pos_integer()) :: boolean()
+  def session_live?(session_id) when is_integer(session_id), do: read_live(session_id) != :error
+
+  defp read_live(session_id) do
     now = Store.now()
 
     with {%Session{} = s, %Account{} = a} <-
@@ -279,7 +294,7 @@ defmodule Hireme.Accounts do
              skip_account: true
            ),
          true <- live?(s, now) and active?(a) do
-      {:ok, touch(s, now)}
+      {:ok, s, now}
     else
       _ -> :error
     end
@@ -303,7 +318,8 @@ defmodule Hireme.Accounts do
   def request_link(email, url_for, meta \\ %{}) when is_function(url_for, 1) do
     with {:ok, email} <- normalize_email(email),
          :ok <- Security.limit(:link_peer, Map.get(meta, :ip, "")),
-         :ok <- Security.limit(:link_address, email) do
+         :ok <- Security.limit(:link_address, email),
+         :ok <- Security.limit(:link_global, :all) do
       token = Security.token(32)
       now = Store.now()
 
@@ -523,7 +539,7 @@ defmodule Hireme.Accounts do
   # loser finds the winner's.
   defp first_identity(provider, claim, meta) do
     Store.transaction(fn ->
-      account = Repo.insert!(%Account{name: Security.clip(claim.display), rev: 1})
+      account = Repo.insert!(%Account{name: text(claim.display, 200), rev: 1})
 
       case insert_identity(account.id, provider, claim) do
         {:ok, identity} ->

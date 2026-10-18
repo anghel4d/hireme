@@ -8,12 +8,18 @@ defmodule HiremeWeb do
   neither sees another account.
   """
 
-  def static_paths, do: ~w(assets wasm favicon.ico robots.txt)
+  def static_paths, do: ~w(assets wasm)
 end
 
 defmodule HiremeWeb.ErrorHTML do
-  @moduledoc "Plain-text error pages, named by status."
+  @moduledoc """
+  Error pages, named by status, as plain text. It is also the html format
+  encoder (`config :phoenix, :format_encoders`): the node renders no
+  templates, so there is nothing for an HTML engine to do.
+  """
   def render(template, _assigns), do: Phoenix.Controller.status_message_from_template(template)
+
+  def encode_to_iodata!(text) when is_binary(text), do: text
 end
 
 defmodule HiremeWeb.ErrorJSON do
@@ -24,6 +30,7 @@ end
 
 defmodule HiremeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :hireme
+  import Bitwise, only: [>>>: 2]
 
   # The one cookie. `__Host-` pins it to this origin, path `/`, over https
   # (localhost counts). Encrypted and signed with keys derived from the
@@ -108,6 +115,8 @@ defmodule HiremeWeb.Endpoint do
 
   defp loopback?({127, _, _, _}), do: true
   defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  # ::ffff:127.0.0.0/104, loopback as a dual-stack socket reports it.
+  defp loopback?({0, 0, 0, 0, 0, 0xFFFF, hi, _}) when hi >>> 8 == 127, do: true
   defp loopback?(_), do: false
 
   # The wire's WebSocket carrier, for when UDP (and so the gate) is
@@ -122,7 +131,7 @@ defmodule HiremeWeb.Endpoint do
     conn
     |> WebSockAdapter.upgrade(HiremeWeb.Session, state,
       timeout: 60_000,
-      max_frame_size: 2 * 1_048_576
+      max_frame_size: HiremeWeb.Wire.Codec.max_up()
     )
     |> Plug.Conn.halt()
   end

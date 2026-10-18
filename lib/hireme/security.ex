@@ -76,6 +76,9 @@ defmodule Hireme.Security do
   @limits %{
     link_address: {:timer.minutes(10), 5},
     link_peer: {:timer.minutes(10), 20},
+    # Every sign-in link the node sends, whoever asks: the mail provider's
+    # reputation is the node's, and peers are cheap.
+    link_global: {:timer.minutes(10), 300},
     redeem_peer: {:timer.minutes(10), 20},
     mfa_account: {:timer.minutes(15), 10},
     api_key_peer: {:timer.minutes(1), 20},
@@ -106,7 +109,7 @@ defmodule Hireme.Security do
   def hit(name, key, n) when is_map_key(@limits, name) and is_integer(n) and n > 0 do
     {scale_ms, max} = Map.fetch!(@limits, name)
 
-    case Hireme.RateLimit.hit("#{name}:#{key}", scale_ms, max, n) do
+    case Hireme.RateLimit.hit(bucket(name, key), scale_ms, max, n) do
       {:allow, _} -> :ok
       {:deny, retry_ms} -> {:error, retry_ms}
     end
@@ -120,15 +123,34 @@ defmodule Hireme.Security do
   @spec blocked?(atom(), term()) :: boolean()
   def blocked?(name, key) when is_map_key(@limits, name) do
     {scale_ms, max} = Map.fetch!(@limits, name)
-    Hireme.RateLimit.get("#{name}:#{key}", scale_ms) >= max
+    Hireme.RateLimit.get(bucket(name, key), scale_ms) >= max
   end
 
   @doc "Count one failure under the named limit for `key`."
   @spec failed(atom(), term()) :: :ok
   def failed(name, key) when is_map_key(@limits, name) do
     {scale_ms, _} = Map.fetch!(@limits, name)
-    Hireme.RateLimit.inc("#{name}:#{key}", scale_ms)
+    Hireme.RateLimit.inc(bucket(name, key), scale_ms)
     :ok
+  end
+
+  # A `*_peer` limit counts an IPv6 peer by its /64: one host holds a whole
+  # /64 and could otherwise rotate through 2^64 peers.
+  defp bucket(name, key) do
+    if String.ends_with?(Atom.to_string(name), "_peer"),
+      do: "#{name}:#{peer(key)}",
+      else: "#{name}:#{key}"
+  end
+
+  @doc "The peer a limit counts: an IPv4 address as is, an IPv6 one by its /64."
+  @spec peer(term()) :: String.t()
+  def peer(ip) do
+    with true <- is_binary(ip),
+         {:ok, {a, b, c, d, _, _, _, _}} <- :inet.parse_ipv6strict_address(String.to_charlist(ip)) do
+      :inet.ntoa({a, b, c, d, 0, 0, 0, 0}) |> to_string() |> Kernel.<>("/64")
+    else
+      _ -> to_string(ip)
+    end
   end
 
   ## Primitives

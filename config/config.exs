@@ -32,7 +32,7 @@ config :esbuild,
   ]
 
 # Set by the Nix build, which compiles the kernel NIF itself and puts it at
-# priv/native/libnif.so; everywhere else Rustler builds native/nif.
+# priv/native/nif.so; everywhere else Rustler builds native/nif.
 config :hireme, :nif_prebuilt, System.get_env("HIREME_NIF_PREBUILT") == "1"
 
 config :logger, :default_formatter,
@@ -40,6 +40,10 @@ config :logger, :default_formatter,
   metadata: [:request_id]
 
 config :phoenix, :json_library, Jason
+# `phx.digest` gzips these, and Plug.Static serves the .gz to a browser
+# that accepts it; kernel.wasm compresses to about a third.
+config :phoenix, :gzippable_exts, ~w(.js .map .css .txt .text .html .json .svg .eot .ttf .wasm)
+config :phoenix, :format_encoders, html: HiremeWeb.ErrorHTML
 
 # Sign-in tokens, factor codes, OAuth state, keys and addresses never reach the log.
 config :phoenix, :filter_parameters, ~w(password secret token ticket code state email key)

@@ -139,6 +139,7 @@
                   echo "RELEASE_COOKIE=$(openssl rand -hex 32)"
                   echo "CLOUDFLARE_ACCOUNT_ID=dev"
                   echo "CLOUDFLARE_EMAIL_TOKEN=dev"
+                  echo "MAIL_FROM=hireme@localhost"
                 } > /var/lib/hireme-dev/env
               '';
             };

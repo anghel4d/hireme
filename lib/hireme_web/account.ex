@@ -44,6 +44,7 @@ defmodule HiremeWeb.Account do
   `clone`, `revoked`, `no_factor`, `unknown_method`.
   """
 
+  require Logger
   alias Hireme.Accounts
   alias Hireme.Audit
   alias Hireme.Keys
@@ -86,7 +87,10 @@ defmodule HiremeWeb.Account do
   defp safely(method, params, session, ctx) do
     method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
   rescue
-    _ -> {:error, %{error: "invalid"}}
+    # Logged without the params, which may carry codes or names.
+    e ->
+      Logger.error("account.* #{method} raised: " <> Exception.format(:error, e, __STACKTRACE__))
+      {:error, %{error: "invalid"}}
   end
 
   defp answer({:park, _} = park), do: park

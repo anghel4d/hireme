@@ -15,7 +15,13 @@ config :hireme, :oauth,
   ],
   x: [client_id: System.get_env("X_CLIENT_ID"), client_secret: System.get_env("X_CLIENT_SECRET")]
 
-if from = System.get_env("MAIL_FROM"), do: config(:hireme, :mail_from, {"Hireme", from})
+# The sender the provider accepts; production refuses to boot without one,
+# since a default address would be rejected and nobody could sign in.
+case {config_env(), System.get_env("MAIL_FROM", "")} do
+  {:prod, ""} -> raise "MAIL_FROM is missing, the sender address the mail provider accepts"
+  {_, ""} -> :ok
+  {_, from} -> config :hireme, :mail_from, {"Hireme", from}
+end
 
 # A throwaway database for a certification run; dev defaults to ../hireme_dev.db.
 if config_env() == :dev do
