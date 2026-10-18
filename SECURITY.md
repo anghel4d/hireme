@@ -188,7 +188,8 @@ well as by count.
 Every write is a `put`, `drop` or `command`, judged in order by the
 account's sequencer: grant, lease, shape, domain, provenance, limits. A
 refusal rolls back exactly its own op. Cells are typed on the wire and
-never cast from strings. Each key may write 600 ops per wall-clock minute
+never cast from strings; a day counts from 0000-01-01 (0 to 3,652,424,
+9999-12-31) and one outside that range is refused `type`. Each key may write 600 ops per wall-clock minute
 (`agent_write`; a fixed window, so a burst straddling a minute boundary
 can land up to 1,200 in a moment). The ledger keeps each writer's ACKs for
 24 hours: an ACKed op id resent, whatever it now carries, answers its first
@@ -202,7 +203,11 @@ the stored one; prose needs a source and the row's current revision; a
 source's host is derived by the server from its URL, which must name a
 real hostname, never taken from the writer; a source's identity (URL,
 publisher, title, kind) is fixed once written, so no later write can
-rewrite the citations that name it; culture and ratings need a host on the
+rewrite the citations that name it; a put that restates its row exactly
+(every cell as stored and, for a cited cell, the same `as_of` and the
+source of its last citation) writes nothing, so a re-run cannot inflate a
+cell's citations, while the same value from another source is still cited,
+as corroboration; culture and ratings need a host on the
 operator's trusted list, which only the operator edits, from a browser,
 stepped up. A JSON value's integers must fit in 64 bits. A refusal never
 carries a stored value from a table the key cannot read.
@@ -263,7 +268,9 @@ user agent of the request or wire connection that caused it, where one
 did (CIS 8.2, 8.5); a lease the sequencer ends by itself carries no
 address. A
 sign-in link request is recorded by a hash of the address and its domain,
-since the asker may be a stranger. Notices go to the account's addresses
+since the asker may be a stranger; the hash stays on the server, and the
+account lens is never sent a row's meta key naming a hash, secret, token
+or code. Notices go to the account's addresses
 through a durable outbox with bounded retries.
 
 Past its budgets an account's activity is not written row by row: the
