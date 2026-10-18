@@ -7,7 +7,7 @@
 //! numbers), json is `unknown`, bytes are a `Uint8Array`, and a nullable
 //! column is `T | null`.
 
-use crate::model::{Column, Residency, Schema, Type, flag, wire, AS_OF, DAY_MAX, FREE_PARAM, SOURCE_CELL, TYPES};
+use crate::model::{Column, Residency, Schema, Table, Type, flag, wire, AS_OF, DAY_MAX, FREE_PARAM, SOURCE_CELL, TYPES};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -93,31 +93,15 @@ fn ts_type(s: &Schema, c: &Column) -> String {
     if c.required { base } else { format!("{base} | null") }
 }
 
-fn column_json(c: &Column) -> String {
-    format!(
-        "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"flags\":{},\"required\":{},\"private\":{},\"serverOnly\":{},\"humanOnly\":{},\"readonly\":{},\"unique\":{},\"natural\":{},\"metric\":{},\"metricOf\":{},\"prose\":{},\"implied\":{},\"ref\":{},\"enum\":{},\"default\":{},\"group\":{}}}",
-        json_str(&c.name),
-        c.id,
-        json_str(c.ty.name()),
-        c.ty.code(),
-        c.wire(),
-        c.flags(),
-        c.required,
-        c.private,
-        c.server_only,
-        c.human_only,
-        c.readonly,
-        c.unique,
-        c.natural,
-        c.metric,
-        opt_str(c.metric_of.as_deref()),
-        c.prose,
-        c.implied,
-        opt_str(if c.ty == Type::Ref { c.target.as_deref() } else { None }),
-        opt_str(if c.ty == Type::Enum { c.target.as_deref() } else { None }),
-        opt_str(c.default.as_deref()),
-        opt_str(c.group.as_deref()),
-    )
+/// A column as the client ships it: `[name, id, type, flags, target, default, metricOf, group]`,
+/// trailing nulls left off; the generated `col` expands it once at load (every boolean is a flag bit).
+fn column_tuple(c: &Column) -> String {
+    let mut tail = [c.target.as_deref(), c.default.as_deref(), c.metric_of.as_deref(), c.group.as_deref()].map(opt_str).to_vec();
+    while tail.last().is_some_and(|x| x == "null") {
+        tail.pop();
+    }
+    let head = [json_str(&c.name), format!("{}", c.id), json_str(c.ty.name()), format!("{}", c.flags())];
+    format!("[{}]", head.into_iter().chain(tail).collect::<Vec<_>>().join(","))
 }
 
 /// The whole of `assets/js/gen/schema.ts`.
@@ -147,6 +131,8 @@ pub fn emit(s: &Schema) -> String {
     ));
     let codes: Vec<String> = TYPES.iter().map(|(n, t)| format!("{n}: {}", t.code())).collect();
     w(&format!("export const TYPE_CODE = {{ {} }} as const;", codes.join(", ")));
+    let wires: Vec<String> = TYPES.iter().map(|(n, t)| format!("{n}: {}", t.wire())).collect();
+    w(&format!("export const TYPE_WIRE = {{ {} }} as const;", wires.join(", ")));
     w(&format!(
         "export const FLAG = {{ required: {}, private: {}, serverOnly: {}, humanOnly: {}, readonly: {}, unique: {}, metric: {}, prose: {}, implied: {}, metricOn: {}, natural: {}, cascade: {}, loose: {} }} as const;",
         flag::REQUIRED, flag::PRIVATE, flag::SERVER_ONLY, flag::HUMAN_ONLY, flag::READONLY,
@@ -171,7 +157,9 @@ pub fn emit(s: &Schema) -> String {
     ));
     w("");
 
-    let ids: Vec<String> = s.tables.iter().map(|t| format!("{}: {}", t.name, t.id)).collect();
+    // A server table never reaches a client: it ships only what the browser holds.
+    let client: Vec<&Table> = s.tables.iter().filter(|t| t.residency != Residency::Server).collect();
+    let ids: Vec<String> = client.iter().map(|t| format!("{}: {}", t.name, t.id)).collect();
     w(&format!("export const TABLE_ID = {{ {} }} as const;", ids.join(", ")));
     w("export type TableName = keyof typeof TABLE_ID;");
     let cids: Vec<String> = s.commands.iter().map(|c| format!("{}: {}", c.name, c.id)).collect();
@@ -195,10 +183,20 @@ pub fn emit(s: &Schema) -> String {
     w("export interface CommandDef { id: number; name: string; table: string; humanOnly: boolean; params: ParamDef[]; }");
     w("");
 
-    // One JSON object, one table per line: `mix hireme.schema --check` reads
-    // it back to refuse a renumbered column.
-    w("export const TABLES: { readonly [T in TableName]: TableDef } = {");
-    for t in &s.tables {
+    // One JSON object, one table per line, its columns packed: `mix hireme.schema
+    // --check` reads it back to refuse a renumbered column.
+    w("type Packed = readonly [string, number, keyof typeof TYPE_CODE, number, (string | null)?, (string | null)?, (string | null)?, (string | null)?];");
+    w("const col = ([name, id, type, flags, target = null, def = null, metricOf = null, group = null]: Packed): ColumnDef => {");
+    w("  const on = (bit: number) => (flags & bit) !== 0;");
+    w("  return {");
+    w("    name, id, type, typeCode: TYPE_CODE[type], wire: TYPE_WIRE[type], flags, required: on(FLAG.required), private: on(FLAG.private),");
+    w("    serverOnly: on(FLAG.serverOnly), humanOnly: on(FLAG.humanOnly), readonly: on(FLAG.readonly), unique: on(FLAG.unique), natural: on(FLAG.natural),");
+    w("    metric: on(FLAG.metric), metricOf, prose: on(FLAG.prose), implied: on(FLAG.implied), ref: type === \"ref\" ? target : null,");
+    w("    enum: type === \"enum\" ? target : null, default: def, group,");
+    w("  };");
+    w("};");
+    w("const PACKED: { readonly [T in TableName]: Omit<TableDef, \"cols\"> & { cols: readonly Packed[] } } = {");
+    for t in &client {
         let naturals: Vec<String> = t
             .naturals
             .iter()
@@ -207,7 +205,7 @@ pub fn emit(s: &Schema) -> String {
                 format!("{{\"cols\":[{}],\"global\":false,\"where\":{}}}", cols.join(","), opt_str(k.where_.as_deref()))
             })
             .collect();
-        let cols: Vec<String> = t.cols.iter().map(column_json).collect();
+        let cols: Vec<String> = t.cols.iter().map(column_tuple).collect();
         w(&format!(
             "  {}: {{\"id\":{},\"name\":{},\"domain\":{},\"residency\":{},\"cap\":{},\"appendOnly\":{},\"softDelete\":{},\"global\":{},\"accountOptional\":{},\"singleton\":{},\"natural\":[{}],\"source\":{},\"cols\":[{}]}},",
             json_str(&t.name),
@@ -227,6 +225,7 @@ pub fn emit(s: &Schema) -> String {
         ));
     }
     w("};");
+    w("export const TABLES = Object.fromEntries(Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };");
     w("");
 
     w("export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {");

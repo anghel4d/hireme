@@ -367,7 +367,7 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   defp ids(ts) do
     entries =
-      for {block, kind} <- [{"TABLES", :table}, {"COMMANDS", :command}],
+      for {block, kind} <- [{"const PACKED:", :table}, {"export const COMMANDS:", :command}],
           line <- block_lines(ts, block),
           entry <- entry_ids(line, kind),
           into: %{},
@@ -392,7 +392,7 @@ defmodule Mix.Tasks.Hireme.Schema do
   defp block_lines(ts, name) do
     ts
     |> String.split("\n")
-    |> Enum.drop_while(&(not String.starts_with?(&1, "export const #{name}:")))
+    |> Enum.drop_while(&(not String.starts_with?(&1, name)))
     |> Enum.drop(1)
     |> Enum.take_while(&(&1 != "};"))
   end
@@ -404,8 +404,11 @@ defmodule Mix.Tasks.Hireme.Schema do
 
         case kind do
           :table ->
+            # A column is packed: [name, id, ...].
             [{"table #{entry["name"]}", entry["id"]}] ++
-              Enum.map(entry["cols"], &{"column #{entry["name"]}.#{&1["name"]}", &1["id"]})
+              Enum.map(entry["cols"], fn [name, id | _] ->
+                {"column #{entry["name"]}.#{name}", id}
+              end)
 
           :command ->
             [{"command #{entry["name"]}", entry["id"]}] ++
