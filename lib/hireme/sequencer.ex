@@ -182,7 +182,8 @@ defmodule Hireme.Sequencer do
       subs: %{},
       counts: %{},
       kernel: nil,
-      rows: nil
+      rows: nil,
+      backfill_after: 0
     }
 
     purge_ledger(Store.now())
@@ -278,6 +279,7 @@ defmodule Hireme.Sequencer do
       %{^pid => %{ref: ^ref, id: id}} ->
         after_ = %{state | subs: Map.delete(state.subs, pid), lease: Lease.leave(state.lease, id)}
         send(self(), {:audit_channels, state.lease, after_.lease})
+        after_ = if MapSet.size(Lease.held(state.lease, id)) > 0, do: rescan(after_), else: after_
         {:noreply, broadcast_leases(after_, []), @idle_ms}
 
       _ ->
@@ -348,11 +350,13 @@ defmodule Hireme.Sequencer do
 
     # Held applications wait for their holder to let go; a text that is not
     # UTF-8 (only a hand-edited database has one) is left alone.
+    after_id = state.backfill_after
+
     stale =
       Repo.all(
         from(r in Hireme.Rows.Application,
           where:
-            not is_nil(r.listing_raw) and
+            r.id > ^after_id and not is_nil(r.listing_raw) and
               (is_nil(r.keywords_version) or r.keywords_version != ^version),
           select: {r.id, r.listing_raw},
           order_by: r.id,
@@ -363,7 +367,8 @@ defmodule Hireme.Sequencer do
       |> Enum.take(@batch)
 
     if stale == [] do
-      state
+      # The scan reached the end; a release starts it again from the top.
+      %{state | backfill_after: 0}
     else
       t = Schema.table(:applications)
       listing = col(t, "listing_raw")
@@ -383,8 +388,8 @@ defmodule Hireme.Sequencer do
       {state, acks, nacks} =
         run_as(%{label: "keywords", grants: Grants.operator(), key_id: nil}, ops, state)
 
-      # Stop when nothing moved, so a listing the kernel keeps refusing cannot loop.
-      if acks != [], do: send(self(), :backfill)
+      # The cursor walks past refused rows, so they cannot stall the scan.
+      send(self(), :backfill)
 
       if nacks != [],
         do:
@@ -392,7 +397,8 @@ defmodule Hireme.Sequencer do
             "sequencer #{state.account_id}: keywords backfill refused #{length(nacks)}"
           )
 
-      state
+      _ = acks
+      %{state | backfill_after: stale |> List.last() |> elem(0)}
     end
   end
 
@@ -490,6 +496,7 @@ defmodule Hireme.Sequencer do
   end
 
   # Deleted applications leave the claims that held them.
+  # (Released ones may have waited for the backfill; see backfill/1.)
   defp forget_gone(state, deltas) do
     ids = for {:gone, %{name: "applications"}, id} <- deltas, do: id
     if ids == [], do: state, else: %{state | lease: Lease.forget(state.lease, ids)}
@@ -539,10 +546,14 @@ defmodule Hireme.Sequencer do
           end
 
         case verdict do
-          {:ok, state, turn, ack} ->
+          {:ok, state, after_, ack} ->
             :ok = Store.savepoint(:keep)
-            record(op, sub, ack, turn.now)
-            {state, %{turn | acked: turn.acked + 1}, {:ack, ack}}
+            record(op, sub, ack, after_.now)
+            # The account's rev counts writes: an op that wrote nothing (a stage
+            # move to where the application stands) moves no rev, or a client's
+            # snapshot would lag a PATCH that never came.
+            wrote = length(after_.deltas) > length(turn.deltas)
+            {state, %{after_ | acked: after_.acked + if(wrote, do: 1, else: 0)}, {:ack, ack}}
 
           {:refused, refusal, data, state} ->
             :ok = Store.savepoint(:undo)
@@ -1850,7 +1861,15 @@ defmodule Hireme.Sequencer do
 
   defp lease_request({:release, sid, ids}, _pid, state) do
     {lease, released} = Lease.free(state.lease, sid, ids)
+    state = if released != [], do: rescan(state), else: state
     {{:ok, %{"released" => released}}, broadcast_leases(%{state | lease: lease}, [])}
+  end
+
+  # Applications that were held may have waited for the keywords backfill;
+  # it scans again from the top once they are free.
+  defp rescan(state) do
+    send(self(), :backfill)
+    %{state | backfill_after: 0}
   end
 
   # A key's session taking or giving up the channel is audited, which also

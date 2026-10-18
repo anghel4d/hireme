@@ -943,6 +943,13 @@ defmodule Hireme.SequencerTest do
       assert Enum.frequencies(kinds) == %{"lease_opened" => 10, "lease_released" => 10}
     end
 
+    test "an op that writes nothing moves no rev", %{account: a} do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Still", role: "R"}))
+      rev = Sequencer.rev(a.id)
+      assert {[_], []} = run(a.id, op(:command, :stage, %{stage: :discovered}, target: app.id))
+      assert Sequencer.rev(a.id) == rev
+    end
+
     test "expect_rev guards a drop and a command too", %{account: a} do
       {[app], []} = run(a.id, op(:put, :applications, %{company: "Rev", role: "R"}))
 
