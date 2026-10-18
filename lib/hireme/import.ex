@@ -612,7 +612,13 @@ defmodule Hireme.Import do
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 
   # A name the pack gave that no schema declares is echoed as given when
-  # short, bounded otherwise.
-  defp named(name) when is_binary(name) and byte_size(name) <= 64, do: name
+  # short, UTF-8 and free of control characters (the mix task prints it to
+  # a terminal), escaped and bounded otherwise.
+  defp named(name) when is_binary(name) and byte_size(name) <= 64 do
+    if String.valid?(name) and not String.match?(name, ~r/\p{Cc}/u),
+      do: name,
+      else: brief(name)
+  end
+
   defp named(name), do: brief(name)
 end
