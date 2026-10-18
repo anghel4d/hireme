@@ -215,7 +215,10 @@ defmodule Mix.Tasks.Hireme.Schema do
         Mix.shell().info("wrote #{Path.relative_to(path, @root)}")
 
       _ ->
-        Mix.raise("hireme-schema diff:\n" <> out)
+        Mix.raise(
+          "the declaration changes the database in a way no added step can; " <>
+            "write priv/db/NNNN_<what>.sql by hand:\n" <> out
+        )
     end
   end
 

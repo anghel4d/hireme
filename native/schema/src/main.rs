@@ -3,7 +3,8 @@
 //!   hireme-schema sql                 priv/db/baseline.sql on stdout
 //!   hireme-schema ts                  assets/js/gen/schema.ts on stdout
 //!   hireme-schema diff <shape-file>   additive SQL for a database's shape;
-//!                                     extras (destructive) on stderr, exit 3
+//!                                     or, for a destructive change, only its
+//!                                     `destructive:` lines and exit 3
 //!   hireme-schema canonical wire|full the bytes the hashes cover
 //!   hireme-schema hash                wire_hash and schema_rev
 //!
@@ -50,11 +51,11 @@ fn main() -> ExitCode {
             };
             match sql::additive(&model, &shape) {
                 Ok(diff) if diff.extra.is_empty() => diff.sql,
+                // A destructive change is the hand's: say what it is, on the
+                // stream the mix task quotes, and emit no partial step.
                 Ok(diff) => {
-                    print(&diff.sql);
-                    for x in &diff.extra {
-                        eprintln!("destructive: {x}");
-                    }
+                    let lines: String = diff.extra.iter().map(|x| format!("destructive: {x}\n")).collect();
+                    print(&lines);
                     return ExitCode::from(3);
                 }
                 Err(e) => return fail(&e),
