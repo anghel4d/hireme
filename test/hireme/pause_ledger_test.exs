@@ -1,0 +1,269 @@
+defmodule Hireme.PauseLedgerTest do
+  @moduledoc """
+  The operator's pause of a key and the op ledger's cap, through the
+  sequencer: what a review's mutation run found unpinned, and its races.
+  """
+
+  use Hireme.WireCase, async: false
+  import Ecto.Query
+
+  alias Hireme.{Keys, Lease}
+  alias Hireme.Rows.{ApiKey, OpLedger}
+
+  defp key_row(id), do: Repo.get!(ApiKey, id, skip_account: true)
+
+  defp mint(s, name, preset \\ :read_write) do
+    {:ok, %{key: key}} = Keys.mint(s, name, Keys.preset(preset))
+    key
+  end
+
+  defp seq(account_id),
+    do: Registry.lookup(Hireme.Sequencer.Registry, account_id) |> hd() |> elem(0)
+
+  defp stop_seq(account_id) do
+    DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, seq(account_id))
+    # the sandbox connection of the killed process is torn down; let it settle
+    Process.sleep(300)
+  end
+
+  defp open_session(a, key, sid) do
+    info = %{
+      id: sid,
+      label: "again#{sid}",
+      grants: Hireme.Grants.key(key),
+      key_id: key.id,
+      session_id: nil
+    }
+
+    {:ok, _} = Hireme.Sequencer.subscribe(a.id, info, 0)
+  end
+
+  defp ledger_ids(account_id),
+    do:
+      Repo.all(
+        from(l in OpLedger,
+          where: l.account_id == ^account_id,
+          order_by: l.id,
+          select: l.op_id
+        ),
+        skip_account: true
+      )
+
+  defp ledger_rows(account_id, from_op, n) do
+    now = Hireme.Store.now()
+
+    for i <- from_op..(from_op + n - 1)//1,
+        do: %{
+          account_id: account_id,
+          op_id: i,
+          key_id: nil,
+          writer: 0,
+          verb: :put,
+          subject: 1,
+          target: 0,
+          row_id: i,
+          ack_rev: 1,
+          rev: 1,
+          inserted_at: now,
+          updated_at: now
+        }
+  end
+
+  defp insert_ledger(rows) do
+    for chunk <- Enum.chunk_every(rows, 2_000),
+        do: Repo.insert_all(OpLedger, chunk, skip_account: true)
+  end
+
+  defp gym(slug),
+    do: op(:put, :gym_reps, %{platform: :other, slug: slug, done_on: ~D[2026-10-01]})
+
+  defp ledger_table, do: Hireme.Schema.table("op_ledger")
+
+  # ------------------------------------------------------------ the ledger
+
+  test "at the cap the ledger evicts this account's oldest 1% and keeps the newest",
+       %{account: a} do
+    t = ledger_table()
+    window = div(t.cap, 100)
+    base = 1_000_000_000
+
+    insert_ledger(ledger_rows(a.id, base + 1, window + 1))
+    {[_], []} = run(a.id, gym("one"))
+    assert length(ledger_ids(a.id)) == window + 2
+
+    :sys.replace_state(seq(a.id), &put_in(&1.counts[t.id], t.cap))
+    {[_], []} = run(a.id, gym("two"))
+
+    ids = ledger_ids(a.id)
+    # the oldest `window` went; the newest of the old rows, the first op's entry
+    # and this op's entry stay
+    assert length(ids) == 3
+    assert (base + window + 1) in ids
+    refute (base + 1) in ids
+  end
+
+  test "another account's older ledger rows neither shield this account's eviction nor are lost",
+       %{account: a} do
+    t = ledger_table()
+    b = Hireme.DataCase.sign_in()
+    window = div(t.cap, 100)
+
+    # B's rows are the globally oldest ids, as many as an eviction takes.
+    insert_ledger(ledger_rows(b.account.id, 1, window))
+    for s <- ["a", "b", "c"], do: {[_], []} = run(a.id, gym(s))
+
+    :sys.replace_state(seq(a.id), &put_in(&1.counts[t.id], t.cap))
+    {[_], []} = run(a.id, gym("d"))
+
+    assert length(ledger_ids(a.id)) == 1
+    assert length(ledger_ids(b.account.id)) == window
+  end
+
+  test "expired ledger entries go in chunks across messages, live ones stay", %{account: a} do
+    old = DateTime.add(Hireme.Store.now(), -25 * 3600)
+    expired = for r <- ledger_rows(a.id, 1, 12_000), do: %{r | inserted_at: old, updated_at: old}
+    insert_ledger(expired ++ ledger_rows(a.id, 20_000, 1))
+
+    # The sequencer's start purges them as messages between batches, never
+    # one statement; its first op does not wait for them all.
+    {[_], []} = run(a.id, gym("after"))
+    _ = :sys.get_state(seq(a.id))
+    Process.sleep(200)
+    _ = :sys.get_state(seq(a.id))
+    assert length(ledger_ids(a.id)) == 2
+  end
+
+  # ---------------------------------------------------------- the pause
+
+  test "an operator (browser) session's revoke closes it, says why, and pauses no key",
+       %{account: a, session: s} do
+    key = mint(s, "bystander")
+
+    info = fn id ->
+      %{id: id, label: "b#{id}", grants: Hireme.Grants.operator(), key_id: nil, session_id: nil}
+    end
+
+    {:ok, %{lease: true}} = Hireme.Sequencer.subscribe(a.id, info.(700), 0)
+    assert :ok = Lease.revoke(a.id, 700, %{})
+
+    assert {:refused, :lease_missing, %{reason: "the operator revoked" <> _} = data} =
+             Lease.claim(a.id, 700, %{})
+
+    refute Map.has_key?(data, :paused)
+    assert key_row(key.id).paused_at == nil
+
+    # reconnecting takes the channel again, as it always did
+    assert {:ok, %{lease: true}} = Hireme.Sequencer.subscribe(a.id, info.(701), 0)
+  end
+
+  test "the pause keeps the time of the first revoke, in the row and in what the agent is told",
+       %{account: a, session: s} do
+    key = mint(s, "since")
+    {_agent, _} = key_session(a.id, key, 996)
+    past = ~U[2026-10-01 00:00:00Z]
+
+    # paused earlier (the row says so); the sequencer's memory only learns at the revoke
+    from(k in ApiKey, where: k.id == ^key.id)
+    |> Repo.update_all([set: [paused_at: past]], skip_account: true)
+
+    :ok = Lease.revoke(a.id, 996, %{})
+    assert key_row(key.id).paused_at == past
+
+    assert {:refused, :lease_missing, %{since: "2026-10-01T00:00:00Z"}} =
+             Lease.claim(a.id, 996, %{})
+
+    # and across a restart
+    stop_seq(a.id)
+    open_session(a, key, 997)
+
+    assert {:refused, :lease_missing, %{since: "2026-10-01T00:00:00Z"}} =
+             Lease.claim(a.id, 997, %{})
+  end
+
+  test "a held key learns it is paused from a write even when it cannot read the table",
+       %{account: a, session: s} do
+    key = mint(s, "write-only", :write_only)
+    {agent, _} = key_session(a.id, key, 902)
+    :ok = Lease.revoke(a.id, 902, %{})
+
+    {[], [nack]} =
+      key_session_ops(agent, op(:put, :corporations, %{domain: "wo.example", name: "W"}))
+
+    assert nack.refusal == :lease_missing
+    assert %{"paused" => true, "reason" => "paused by the operator"} = JSON.decode!(nack.data)
+  end
+
+  test "a lease revoke landing before the key's own revoke is heard does not pause a revoked key",
+       %{account: a, session: s} do
+    key = mint(s, "revoked-late")
+    {_agent, _} = key_session(a.id, key, 903)
+    pid = seq(a.id)
+
+    :sys.suspend(pid)
+    t = Task.async(fn -> Lease.revoke(a.id, 903, %{}) end)
+    Process.sleep(100)
+    Keys.revoke(key_row(key.id))
+    :sys.resume(pid)
+    assert :ok = Task.await(t)
+    Process.sleep(100)
+
+    row = key_row(key.id)
+    assert row.revoked_at
+    assert row.paused_at == nil
+  end
+
+  test "a Resume that lands between the sequencer's load and its subscription is not lost",
+       %{account: a, session: s} do
+    key = mint(s, "window")
+    {_agent, _} = key_session(a.id, key, 904)
+    :ok = Lease.revoke(a.id, 904, %{})
+    assert key_row(key.id).paused_at
+    stop_seq(a.id)
+
+    fired = :atomics.new(1, [])
+    kid = key.id
+    handler = "rev3-window-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:hireme, :repo, :query],
+      fn _e, _m, meta, _c ->
+        # paused_keys has just returned inside init/1: the operator's Resume lands here.
+        if String.contains?(meta.query, ~s(SELECT a0."id", a0."paused_at" FROM "api_keys")) and
+             :atomics.compare_exchange(fired, 1, 0, 1) == :ok do
+          {:ok, _} = Keys.resume(key_row(kid))
+        end
+      end,
+      nil
+    )
+
+    open_session(a, key, 905)
+    :telemetry.detach(handler)
+
+    assert key_row(kid).paused_at == nil
+    assert {:ok, _} = Lease.claim(a.id, 905, %{})
+  end
+
+  test "a re-pause that lands before an earlier Resume's message stands", %{
+    account: a,
+    session: s
+  } do
+    key = mint(s, "repause")
+    {_agent, _} = key_session(a.id, key, 906)
+    :ok = Lease.revoke(a.id, 906, %{})
+
+    # Keys.resume, in its steps: the row is cleared ...
+    from(k in ApiKey, where: k.id == ^key.id)
+    |> Repo.update_all([set: [paused_at: nil]], skip_account: true)
+
+    # ... the operator revokes the idle lease again before the message is sent ...
+    :ok = Lease.revoke(a.id, 906, %{})
+    assert key_row(key.id).paused_at
+
+    # ... and Keys.resume's broadcast arrives.
+    send(seq(a.id), {:resume, {:key, key.id}})
+    _ = :sys.get_state(seq(a.id))
+
+    assert {:refused, :lease_missing, %{paused: true}} = Lease.claim(a.id, 906, %{})
+  end
+end

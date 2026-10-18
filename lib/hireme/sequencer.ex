@@ -212,8 +212,8 @@ defmodule Hireme.Sequencer do
     Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(account_id))
     # Read after subscribing, so a resume in between is not lost.
     state = %{state | lease: paused_keys(account_id)}
-    purge_ledger(Store.now())
-    Process.send_after(self(), :purge, @purge_ms)
+    # The first purge, and every hour's, runs as messages between batches.
+    send(self(), :purge)
     send(self(), :backfill)
     {:ok, rebuild(state), @idle_ms}
   end
@@ -322,8 +322,16 @@ defmodule Hireme.Sequencer do
   end
 
   # The operator resumed a paused key: its sessions may claim again.
-  def handle_info({:resume, {:key, id}}, state),
-    do: {:noreply, %{state | lease: Lease.lift(state.lease, id)}, @idle_ms}
+  def handle_info({:resume, {:key, id}}, state) do
+    # The row is the truth: a pause written after this message was sent stands.
+    lease =
+      case Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^id, select: k.paused_at)) do
+        nil -> Lease.lift(state.lease, id)
+        since -> Lease.hold(state.lease, id, since)
+      end
+
+    {:noreply, %{state | lease: lease}, @idle_ms}
+  end
 
   def handle_info(:backfill, state) do
     {:noreply, backfill(state), @idle_ms}
@@ -343,8 +351,13 @@ defmodule Hireme.Sequencer do
   end
 
   def handle_info(:purge, state) do
-    purge_ledger(Store.now())
     Process.send_after(self(), :purge, @purge_ms)
+    handle_info(:purge_more, state)
+  end
+
+  # One chunk per message, so ops queued meanwhile run between chunks.
+  def handle_info(:purge_more, state) do
+    if purge_ledger(Store.now()), do: send(self(), :purge_more)
     # The purge moved the ledger's count; the next write reads it afresh.
     ledger = Schema.table("op_ledger").id
     {:noreply, %{state | counts: Map.delete(state.counts, ledger)}, @idle_ms}
@@ -643,14 +656,18 @@ defmodule Hireme.Sequencer do
 
           {:refused, refusal, data, state} ->
             :ok = Store.savepoint(:undo)
-            {state, turn, {:nack, nack(op, refusal, redact(data, op, sub))}}
+            {state, turn, {:nack, nack(op, refusal, redact(refusal, data, op, sub))}}
         end
     end
   end
 
   # A refusal says why in its data (a stage, a rev, a stored date); a key
   # that may not read the table gets only the refusal, never its rows' state.
-  defp redact(data, op, sub) do
+  # The lease's refusals say nothing of any row: a key that cannot read the
+  # table still learns it holds no channel, or that the operator paused it.
+  defp redact(:lease_missing, data, _op, _sub), do: data
+
+  defp redact(_refusal, data, op, sub) do
     table =
       case op.verb do
         :command -> (c = Schema.command(op.subject)) && Schema.table(c.table)
@@ -809,12 +826,29 @@ defmodule Hireme.Sequencer do
     update_in(state.counts[t.id], &(&1 - evicted + 1))
   end
 
+  # Expired entries go in chunks, each its own short write, the ids picked
+  # outside the writer lock: a ledger that expired whole (a million rows)
+  # never holds other accounts' writes for seconds. `true` while more remain.
+  @purge_chunk 5_000
   defp purge_ledger(now) do
     since = DateTime.add(now, -@ledger_s)
 
-    Store.write(fn ->
-      Repo.delete_all(from(l in Hireme.Rows.OpLedger, where: l.inserted_at <= ^since))
-    end)
+    ids =
+      Repo.all(
+        from(l in Hireme.Rows.OpLedger,
+          where: l.inserted_at <= ^since,
+          limit: @purge_chunk,
+          select: l.id
+        )
+      )
+
+    if ids != [],
+      do:
+        Store.write(fn ->
+          Repo.delete_all(from(l in Hireme.Rows.OpLedger, where: l.id in ^ids))
+        end)
+
+    length(ids) == @purge_chunk
   end
 
   # ------------------------------------------------------- the checks
@@ -2214,7 +2248,9 @@ defmodule Hireme.Sequencer do
     {n, _} =
       Store.write(fn ->
         Repo.update_all(
-          from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id and is_nil(k.paused_at)),
+          from(k in Hireme.Rows.ApiKey,
+            where: k.id == ^key_id and is_nil(k.paused_at) and is_nil(k.revoked_at)
+          ),
           set: [paused_at: now, updated_at: now],
           inc: [rev: 1]
         )
