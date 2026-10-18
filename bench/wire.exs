@@ -176,6 +176,13 @@ defmodule Bench do
     benefits equity salary visa relocation travel customers product research inference training
     model evaluation dataset gpu cluster scheduler autoscaling cost efficiency documentation)
 
+  # An operator's or an agent's prose: notes, a battleplan, a letter.
+  def prose(n) do
+    for(_ <- 1..n, do: Enum.random(@words))
+    |> Enum.chunk_every(12)
+    |> Enum.map_join(". ", &String.capitalize(Enum.join(&1, " ")))
+  end
+
   def listing(i) do
     n = 450 + rem(i * 7919, 500)
 
@@ -345,10 +352,16 @@ watcher = Bench.watcher(Accounts.ticket(session))
       ops =
         for i <- chunk do
           Bench.put(:applications, %{
-            company: "Company #{rem(i, 1500)}",
-            role: "Engineer #{i}",
-            location: Enum.random(~w(Berlin Lisbon Toronto Remote Zurich Tallinn)),
+            company: "Company #{rem(i * 7919, 9973)}",
+            role:
+              "#{Enum.random(~w(Staff Senior Principal Lead))} #{Enum.random(~w(Platform Systems Runtime Infra Data))} Engineer #{i}",
+            location:
+              "#{Enum.random(~w(Berlin Lisbon Toronto Zurich Tallinn Austin Kyoto Oslo Dublin Remote))}, #{rem(i, 97)}",
             listing_raw: Bench.listing(i),
+            # Every inline text column filled, as a worked desk has them.
+            notes: Bench.prose(60),
+            battleplan: Bench.prose(120),
+            letter_raw: Bench.prose(220),
             listing_url: "https://jobs.example.com/#{i}",
             canonical_url: "https://jobs.example.com/#{i}",
             score_100: rem(i * 37, 101)
@@ -369,6 +382,7 @@ IO.puts(:stderr, "bench: seeded #{apps} applications in #{div(seed_us, 1000)} ms
 {boot_frames, _} = Bench.open(:ticket, Accounts.ticket(session), "bench-cold")
 boot = Enum.filter(boot_frames, &(&1.kind == :BOOT))
 boot_bytes = boot |> Enum.map(& &1.bytes) |> Enum.sum()
+boot_raw = boot |> Enum.map(&byte_size(&1.body)) |> Enum.sum()
 
 ## One burst of 64 ordinary edits, as an agent's batch would land: its PATCH.
 
@@ -383,6 +397,24 @@ edits =
 
 {_frames, op} = Bench.send_ops(op, Codec.encode_ops(edits), 64)
 burst = watcher |> Bench.patches(100) |> Enum.sum()
+
+# And a burst of 64 prose edits, an agent rewriting notes, plans and letters.
+prose_edits =
+  for i <- 1..64 do
+    Bench.put(
+      :applications,
+      %{
+        canonical_url: "https://jobs.example.com/#{i * 17}",
+        notes: Bench.prose(60),
+        battleplan: Bench.prose(120),
+        letter_raw: Bench.prose(220)
+      },
+      keyed: true
+    )
+  end
+
+{_frames, op} = Bench.send_ops(op, Codec.encode_ops(prose_edits), 64)
+prose_burst = watcher |> Bench.patches(100) |> Enum.sum()
 
 ## 256 ops per OPS frame: a full frame is taken whole; one more is not a frame.
 
@@ -604,6 +636,10 @@ carrier_gate =
 {_, agent} = Bench.open(:key, secret, "bench-agent")
 {1, _, agent} = Bench.rpc(agent, 1, "lease.claim", %{"count" => 0})
 
+# agent_write is a wall-clock-minute window; start the batches just past a
+# minute boundary so the run measures one window, not two.
+Process.sleep(60_000 - rem(System.os_time(:millisecond), 60_000) + 200)
+
 {agent_results, _} =
   Enum.map_reduce(1..12, agent, fn b, agent ->
     batch = for i <- 1..64, do: Bench.put(:net_entries, %{kind: :draft, title: "agent #{b}.#{i}"})
@@ -622,9 +658,14 @@ agent_acked = Enum.sum(agent_results)
 
 lines = [
   Bench.line("boot_deflated_bytes_at_#{apps}_apps", boot_bytes, 2 * 1024 * 1024, "bytes", %{
-    frames: length(boot)
+    frames: length(boot),
+    raw: boot_raw,
+    note: "every inline text column filled; listing_raw deferred"
   }),
-  Bench.line("patch_bytes_per_64_op_burst", burst, 64 * 1024, "bytes"),
+  Bench.line("patch_bytes_per_64_op_burst", burst, 64 * 1024, "bytes", %{note: "score edits"}),
+  Bench.line("patch_bytes_per_64_prose_edit_burst", prose_burst, 64 * 1024, "bytes", %{
+    note: "notes, battleplan and letter_raw rewritten"
+  }),
   Bench.line(
     "patch_bytes_per_256_op_seed_frame_max",
     Enum.max(patch_sizes),
@@ -633,12 +674,14 @@ lines = [
     %{note: "a 256-application insert burst with listing_raw deferred"}
   ),
   Bench.line(
-    "find_p99_us_at_#{places}_places_over_wire",
-    Bench.percentile(find_times, 99),
+    # The bound holds only if every shape's p99 holds, not the pool's.
+    "find_worst_shape_p99_us_at_#{places}_places_over_wire",
+    find_shapes |> Map.values() |> Enum.max(fn -> nil end),
     10_000,
     "us",
     %{
       p50: Bench.percentile(find_times, 50),
+      pooled_p99: Bench.percentile(find_times, 99),
       queries: length(find_times),
       p99_by_shape: find_shapes
     }
