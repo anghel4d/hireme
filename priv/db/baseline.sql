@@ -147,11 +147,13 @@ CREATE TABLE "audit" (
   "user_agent" TEXT,
   "meta" TEXT,
   "key_id" INTEGER,
-  "session_id" INTEGER
+  "session_id" INTEGER,
+  "security" INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 CREATE INDEX "audit__account_account_id" ON "audit" ("account_id");
 CREATE INDEX "audit__index_id_desc" ON "audit" ("account_id", "id" DESC);
 CREATE INDEX "audit__index_kind_inserted_at" ON "audit" ("kind", "inserted_at");
+CREATE INDEX "audit__index_security_id_desc" ON "audit" ("account_id", "security", "id" DESC);
 
 CREATE TABLE "outbox" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
