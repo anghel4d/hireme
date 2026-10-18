@@ -363,4 +363,55 @@ defmodule Hireme.WorldTest do
       refute inspect(data) =~ "SELECT"
     end
   end
+
+  test "a cursor past int64 or with a false null flag, a float past the double, an offset that overflows: refused, never internal",
+       %{account: a} do
+    corp(a.id, %{domain: "#{tag()}.example", name: "C", ticker: "T"})
+    ctx = %{account_id: a.id, grants: Grants.operator()}
+    cursor = &(&1 |> Jason.encode!() |> Base.url_encode64(padding: false))
+
+    for {method, params} <- [
+          {"find",
+           %{
+             "table" => "corporations",
+             "after" => cursor.([false, nil, 9_223_372_036_854_775_808])
+           }},
+          {"find",
+           %{"table" => "corporations", "order" => "ticker", "after" => cursor.([false, nil, 1])}},
+          {"find",
+           %{
+             "table" => "corporations",
+             "order" => "headcount",
+             "after" => cursor.([false, 99_999_999_999_999, 1])
+           }},
+          {"find",
+           %{
+             "table" => "corporations",
+             "where" => %{
+               "rating" => %{"gt" => String.to_integer("1" <> String.duplicate("0", 400))}
+             }
+           }},
+          {"text",
+           %{
+             "table" => "corporations",
+             "id" => 1,
+             "column" => "note",
+             "offset" => 9_223_372_036_854_775_807
+           }}
+        ] do
+      assert {:error, code, _} = World.call(method, params, ctx), inspect(params, limit: 3)
+      assert code in [:type, :too_large]
+    end
+  end
+
+  test "get leaves a row's empty cells out", %{account: a} do
+    id = corp(a.id, %{domain: "#{tag()}.example", name: "Sparse"})
+
+    {:ok, %{"row" => row}} =
+      World.get(a.id, Grants.operator(), %{"table" => "corporations", "id" => id})
+
+    assert row["name"] == "Sparse"
+    refute Map.has_key?(row, "ticker")
+    assert Enum.all?(row, fn {_, v} -> v != nil end)
+  end
 end

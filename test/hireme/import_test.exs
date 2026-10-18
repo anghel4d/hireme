@@ -362,4 +362,31 @@ defmodule Hireme.ImportTest do
       File.rm_rf!(dir)
     end
   end
+
+  test "prose around a markdown table, a pipe in it or not, is not data", %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+
+    markdown = """
+    ## corporations
+    Notes first: the a|b form is how we quote.
+
+    | domain | name |
+    | --- | --- |
+    | p1.#{t}.example | One |
+    p2.#{t}.example | Two
+
+    Use `a|b` when quoting.
+    """
+
+    {:ok, report} = Import.run(a.id, markdown, :markdown)
+    assert report.refusals == []
+
+    assert Repo.all(
+             from c in Corporation,
+               where: like(c.domain, ^"%.#{t}.example"),
+               select: c.name,
+               order_by: c.domain
+           ) ==
+             ["One", "Two"]
+  end
 end

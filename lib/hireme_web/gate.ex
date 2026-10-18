@@ -239,12 +239,12 @@ defmodule HiremeWeb.Gate do
 
   # A built gate needs only its GATE_* settings; the development profile
   # runs it through cargo, which also needs a shell's basics and its own.
-  @cargo_env ~w(PATH HOME USER LANG TMPDIR TZ)
+  # Exact names only: a prefix would also keep a CARGO_REGISTRY_TOKEN.
+  @cargo_env ~w(PATH HOME USER LANG TMPDIR TZ CARGO_HOME CARGO_TARGET_DIR CARGO_NET_OFFLINE
+                RUSTUP_HOME RUSTUP_TOOLCHAIN RUSTFLAGS RUSTC)
 
   defp kept?(name, exe) do
-    String.starts_with?(name, "GATE_") or
-      (Path.basename(exe) == "cargo" and
-         (name in @cargo_env or String.starts_with?(name, ["CARGO_", "RUST"])))
+    String.starts_with?(name, "GATE_") or (Path.basename(exe) == "cargo" and name in @cargo_env)
   end
 
   @doc false

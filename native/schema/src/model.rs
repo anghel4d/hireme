@@ -1243,7 +1243,9 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
             ));
         }
         line(head);
-        for c in &t.cols {
+        // A server_only column never travels, so it is no part of what a
+        // client is compiled against.
+        for c in t.cols.iter().filter(|c| scope == Scope::Full || !c.server_only) {
             line(format!(
                 "col {} {} {} {} {} {}",
                 t.id,

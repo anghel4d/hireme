@@ -4,11 +4,13 @@ defmodule Hireme.SchemaTest do
   # declaration to the same canonical bytes.
   use ExUnit.Case, async: false
 
+  alias Mix.Tasks.Hireme.Schema, as: SchemaTask
+
   test "the checked-in baseline and TypeScript are a fresh emit, and both parsers read the declaration alike" do
     Mix.shell(Mix.Shell.Process)
 
     try do
-      Mix.Tasks.Hireme.Schema.run(["--check"])
+      SchemaTask.run(["--check"])
       assert_received {:mix_shell, :info, ["schema: " <> _]}
     after
       Mix.shell(Mix.Shell.IO)

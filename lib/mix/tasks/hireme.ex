@@ -25,6 +25,11 @@ defmodule Mix.Tasks.Hireme.Schema do
       baseline the lock does not name. Before the freeze, an emit rewrites
       the baseline freely.
 
+  A step written by hand that rebuilds a table (the only way SQLite changes
+  a column's type, nullability or ON DELETE) runs between
+  `PRAGMA legacy_alter_table = ON` and `OFF`: the ref triggers of other
+  tables name the table being renamed.
+
   A database is built from the baseline when empty, and from the `NNNN`
   files it has not applied otherwise (`Hireme.Release`), so the baseline is
   always the whole declaration and each `NNNN` file is one step of it.

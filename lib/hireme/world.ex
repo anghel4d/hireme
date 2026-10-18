@@ -35,6 +35,7 @@ defmodule Hireme.World do
   @find_max 500
   @history_max 200
   @chunk 256 * 1024
+  @int64 9_223_372_036_854_775_807
 
   @ops ~w(eq ne lt le gt ge in null prefix like)
 
@@ -241,7 +242,8 @@ defmodule Hireme.World do
       run(account_id, fn ->
         case Repo.one(query) do
           nil -> {:error, :not_found, %{table: table.name}}
-          row -> {:ok, %{"row" => out(row, cols)}}
+          # A row's empty cells are left out: every non-null column.
+          row -> {:ok, %{"row" => row |> out(cols) |> Map.reject(fn {_, v} -> is_nil(v) end)}}
         end
       end)
     end
@@ -324,7 +326,8 @@ defmodule Hireme.World do
          {:ok, id} <- id(params["id"]),
          {:ok, column} <- text_column(grants, table, params["column"]),
          {:ok, offset} <- non_negative(params["offset"], 0, "offset"),
-         {:ok, length} <- bound(params["length"], @chunk, @chunk) do
+         {:ok, length} <- bound(params["length"], @chunk, @chunk),
+         true <- offset + length + 4 <= @int64 || {:error, :too_large, %{param: "offset"}} do
       name = column.name
 
       query =
@@ -558,8 +561,6 @@ defmodule Hireme.World do
   defp term(_table, {:not_null, col}),
     do: dynamic([r], not is_nil(field(r, ^String.to_atom(col))))
 
-  @int64 9_223_372_036_854_775_807
-
   defp id(id) when is_integer(id) and id > 0 and id <= @int64, do: {:ok, id}
   defp id(other), do: {:error, :type, %{param: "id", got: inspect(other)}}
 
@@ -628,12 +629,12 @@ defmodule Hireme.World do
       {"in", vs} when is_list(vs) and length(vs) <= @find_max -> cast_list(col, vs, f)
       {"like", s} when is_binary(s) and col.type in [:str, :text] -> {:ok, like(f, "%", s, "%")}
       {"prefix", s} when is_binary(s) and col.type in [:str, :text] -> {:ok, like(f, "", s, "%")}
-      _ -> {:error, :type, %{column: col.name, filter: test}}
+      _ -> {:error, :type, %{column: col.name, filter: brief(test)}}
     end
   end
 
   defp filter(col, value) when not is_map(value), do: filter(col, %{"eq" => value})
-  defp filter(col, test), do: {:error, :type, %{column: col.name, filter: test}}
+  defp filter(col, test), do: {:error, :type, %{column: col.name, filter: brief(test)}}
 
   defp like(f, before, s, after_) do
     pattern = before <> String.replace(s, ~r/[\\%_]/, "\\\\\\0") <> after_
@@ -641,7 +642,7 @@ defmodule Hireme.World do
   end
 
   defp cast(col, value, build) do
-    with {:ok, v} <- Ecto.Type.cast(Schema.cast_type(col), value),
+    with {:ok, v} <- safe_cast(col, value),
          true <- fits?(col, v) do
       {:ok, build.(v)}
     else
@@ -658,15 +659,21 @@ defmodule Hireme.World do
   defp fits?(%{type: :i64}, v) when is_integer(v), do: v in -@int64..@int64
   defp fits?(_col, _v), do: true
 
+  # Ecto's cast of a number too large for a float raises; any value that
+  # will not cast is the caller's, never an exception.
+  defp safe_cast(col, value) do
+    Ecto.Type.cast(Schema.cast_type(col), value)
+  rescue
+    _ in [ArithmeticError, ArgumentError] -> :error
+  end
+
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 
   defp cast_list(col, values, f) do
-    type = Schema.cast_type(col)
-
     values
     |> Enum.reduce_while({:ok, []}, fn v, {:ok, acc} ->
-      with {:ok, cast} <- Ecto.Type.cast(type, v),
+      with {:ok, cast} <- safe_cast(col, v),
            true <- fits?(col, cast) do
         {:cont, {:ok, [cast | acc]}}
       else
@@ -730,9 +737,22 @@ defmodule Hireme.World do
 
   # A cursor carries a value of its order column; any other is tampered with.
   defp cast_cursor(col, value) do
-    case Ecto.Type.cast(Schema.cast_type(col), value) do
-      {:ok, v} -> v
-      _ -> raise Ecto.Query.CastError, value: value, type: col.type, message: "a tampered cursor"
+    case safe_cast(col, value) do
+      {:ok, v} when v == nil ->
+        v
+
+      {:ok, v} ->
+        if fits?(col, v),
+          do: v,
+          else:
+            raise(Ecto.Query.CastError,
+              value: value,
+              type: col.type,
+              message: "a tampered cursor"
+            )
+
+      _ ->
+        raise Ecto.Query.CastError, value: value, type: col.type, message: "a tampered cursor"
     end
   end
 
@@ -745,8 +765,10 @@ defmodule Hireme.World do
 
   defp decode_cursor(cursor) when is_binary(cursor) do
     with {:ok, json} <- Base.url_decode64(cursor, padding: false),
-         {:ok, [null?, _value, id] = c} when is_boolean(null?) and is_integer(id) <-
-           Jason.decode(json) do
+         {:ok, [null?, value, id] = c}
+         when is_boolean(null?) and is_integer(id) and id >= 0 and id <= @int64 <-
+           Jason.decode(json),
+         true <- null? == is_nil(value) do
       {:ok, c}
     else
       _ -> {:error, :type, %{param: "after"}}

@@ -780,8 +780,12 @@ defmodule Hireme.Schema.Parser do
       "table #{t.id} #{t.name} #{t.domain} #{t.residency} #{dash(mods)} #{dash(t.cap)}" <>
         if(t.residency == :projection, do: " #{t.source} #{t.source_where}", else: "")
 
+    # A server_only column never travels, so it is no part of what a
+    # client is compiled against.
     cols =
-      Enum.map(t.cols, fn c ->
+      t.cols
+      |> Enum.reject(&(scope == :wire and &1.server_only))
+      |> Enum.map(fn c ->
         "col #{t.id} #{c.id} #{c.name} #{type_name(c)} #{flags(c)} #{dash(c.default)}"
       end)
 

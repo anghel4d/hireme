@@ -485,7 +485,8 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     let pending = Arc::new(AtomicUsize::new(0));
     tokio::spawn(bridge_writer(w, rx, pending.clone()));
 
-    let ip = request.remote_address().ip().to_string();
+    // An IPv4 peer on a dual-stack socket is named as itself.
+    let ip = request.remote_address().ip().to_canonical().to_string();
     let open = open_body(&ip, request.origin().unwrap_or(""), request.path(), request.user_agent().unwrap_or(""));
     let _ = up.send(message(OPEN, &open));
 

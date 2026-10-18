@@ -20,6 +20,9 @@ fn a_server_table_metric_moves_schema_rev_alone_and_a_resident_column_moves_both
     assert_ne!(server.schema_rev, base.schema_rev);
     assert!(server.table("places").unwrap().col("probe_metric_on").is_some());
 
+    let hidden = parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap();
+    assert_eq!(hidden.wire_hash, base.wire_hash, "a server_only column never travels");
+
     let resident = parse(&with("table applications desk resident", "  col probe_col str ?")).unwrap();
     assert_ne!(resident.wire_hash, base.wire_hash);
     assert_ne!(resident.schema_rev, base.schema_rev);

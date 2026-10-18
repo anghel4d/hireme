@@ -178,19 +178,25 @@ defmodule Hireme.Import do
   end
 
   defp finish({table, lines}) do
-    rows =
-      lines
-      |> Enum.reverse()
-      # A table row is any line with a pipe; the outer pipes are optional.
-      |> Enum.filter(&String.contains?(&1, "|"))
-      |> Enum.map(&cells/1)
-      |> Enum.reject(fn cells -> Enum.all?(cells, &(&1 =~ ~r/^:?-+:?$/)) end)
+    {table, lines |> Enum.reverse() |> table_rows(), :text}
+  end
 
-    case rows do
-      [header | body] -> {table, Enum.map(body, &row(header, &1)), :text}
-      [] -> {table, [], :text}
+  # A GFM table: a header line, a delimiter row of `---` cells as many as
+  # the header's, then the rows up to the first line without a pipe. The
+  # outer pipes are optional; prose before or after is not data.
+  defp table_rows([line, delimiter | rest]) do
+    header = cells(line)
+    marks = cells(delimiter)
+
+    if String.contains?(line, "|") and length(marks) == length(header) and
+         Enum.all?(marks, &(&1 =~ ~r/^:?-+:?$/)) do
+      rest |> Enum.take_while(&String.contains?(&1, "|")) |> Enum.map(&row(header, cells(&1)))
+    else
+      table_rows([delimiter | rest])
     end
   end
+
+  defp table_rows(_lines), do: []
 
   # A row with more or fewer cells than the header is refused, not trimmed.
   defp row(header, cells) when length(header) == length(cells),
