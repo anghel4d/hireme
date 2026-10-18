@@ -6,7 +6,7 @@
 // without it: naming the snapshot's rev turns a full BOOT into a few
 // PATCHes, which is worth a short wait but not a long one. The bundle
 // adopts all of it from `window.__hw`; frames that land first wait in a
-// queue. It imports only frame builders, which esbuild tree-shakes down.
+// queue. It imports only frame builders, which the bundler tree-shakes down.
 
 import { SCHEMA_REV } from "./gen/schema.ts"
 import { CRED, hello, meta, type Early } from "./wire.ts"

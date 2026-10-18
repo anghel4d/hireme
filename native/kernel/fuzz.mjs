@@ -5,7 +5,6 @@
 //
 //   bun native/kernel/fuzz.mjs <kernel.wasm>
 
-import { readFileSync } from "node:fs";
 import { bootFrame, enc, instance, op } from "./wasm.mjs";
 
 const wasmPath = process.argv[2];
@@ -13,7 +12,7 @@ if (!wasmPath) {
   console.error("usage: bun fuzz.mjs <kernel.wasm>");
   process.exit(2);
 }
-const bytes = readFileSync(wasmPath);
+const bytes = await Bun.file(wasmPath).bytes();
 const TODAY = 739528;
 const SEEDS = 12;
 const BOUND_MS = 3000;

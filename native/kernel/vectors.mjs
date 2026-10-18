@@ -3,19 +3,15 @@
 //
 //   bun native/kernel/vectors.mjs path/to/kernel.wasm
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { W, asU32, bootFrame, enc, instance, op } from "./wasm.mjs";
 
-const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath = process.argv[2];
 if (!wasmPath) {
   console.error("usage: bun vectors.mjs <kernel.wasm>");
   process.exit(2);
 }
-const file = JSON.parse(readFileSync(join(here, "tests/vectors.json"), "utf8"));
-const bytes = readFileSync(wasmPath);
+const file = await Bun.file(`${import.meta.dir}/tests/vectors.json`).json();
+const bytes = await Bun.file(wasmPath).bytes();
 const OP_ID = 7n;
 const KEY_ID = 3;
 

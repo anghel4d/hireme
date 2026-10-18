@@ -8,7 +8,6 @@
 // which boots the node; this script needs BASE, HIREME_MCP, CHROMIUM, OUT.
 
 import { chromium } from "playwright";
-import { spawn } from "node:child_process";
 
 const { BASE, HIREME_MCP, CHROMIUM, OUT } = process.env;
 const STEP_MS = 20_000;
@@ -44,32 +43,35 @@ async function step(name, pages, fn) {
 
 /** An MCP client over stdio: `call(tool, args)` answers the tool's text. */
 function mcp(key) {
-  const p = spawn(HIREME_MCP, [], { env: { ...process.env, HIREME_KEY: key, HIREME_URL: BASE }, stdio: ["pipe", "pipe", "pipe"] });
+  const p = Bun.spawn([HIREME_MCP], { env: { ...process.env, HIREME_KEY: key, HIREME_URL: BASE }, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
   const waiting = new Map();
   let buf = "", next = 1;
-  p.stdout.on("data", (d) => {
-    buf += d;
-    for (let i; (i = buf.indexOf("\n")) >= 0; ) {
-      const line = buf.slice(0, i).trim();
-      buf = buf.slice(i + 1);
-      if (!line) continue;
-      try {
-        const j = JSON.parse(line);
-        if (j.id && waiting.has(j.id)) { waiting.get(j.id)(j); waiting.delete(j.id) }
-      } catch {}
+  const write = (line) => { p.stdin.write(line); p.stdin.flush() };
+  (async () => {
+    for await (const d of p.stdout.pipeThrough(new TextDecoderStream())) {
+      buf += d;
+      for (let i; (i = buf.indexOf("\n")) >= 0; ) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        try {
+          const j = JSON.parse(line);
+          if (j.id && waiting.has(j.id)) { waiting.get(j.id)(j); waiting.delete(j.id) }
+        } catch {}
+      }
     }
-  });
+  })();
   const ask = (method, params) => new Promise((resolve, reject) => {
     const id = next++;
     const timer = setTimeout(() => reject(new Error(`no MCP answer to ${method}`)), STEP_MS);
     waiting.set(id, (j) => { clearTimeout(timer); resolve(j) });
-    p.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   });
   const text = (j) => (j.result?.content ?? []).map((c) => c.text ?? "").join("\n") || JSON.stringify(j.error ?? j);
   return {
     async start() {
       await ask("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "acceptance4", version: "1" } });
-      p.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+      write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
       await until(async () => !/not connected|error\[session\]/.test(text(await ask("tools/call", { name: "hireme", arguments: {} }))), "hireme-mcp connected");
     },
     async call(name, args) {

@@ -10,7 +10,6 @@
 // one-row PATCH (the steady state a write or a TICK causes), medians of
 // repeated runs. Exits 1 when a median passes its bound.
 
-import { readFileSync } from "node:fs";
 import { W, bootFrame, enc, instance } from "../native/kernel/wasm.mjs";
 
 const wasmPath = process.argv[2];
@@ -27,7 +26,7 @@ const FIRST_BOUND_MS = 30;
 // DISTINCT=1: every company, role and location is its own text (one
 // application per company, the usual job hunt): the worst-case desk.
 const DISTINCT = process.env.DISTINCT === "1";
-const bytes = readFileSync(wasmPath);
+const bytes = await Bun.file(wasmPath).bytes();
 
 let seed = 0x9e3779b9;
 const rand = (n) => {
