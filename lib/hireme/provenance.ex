@@ -63,7 +63,14 @@ defmodule Hireme.Provenance do
         case Repo.one(from s in Source, where: s.url == ^url) do
           nil ->
             %Source{}
-            |> Ecto.Changeset.change(url: url, host: host, rev: 1, mutable: true, inserted_at: now, updated_at: now)
+            |> Ecto.Changeset.change(
+              url: url,
+              host: host,
+              rev: 1,
+              mutable: true,
+              inserted_at: now,
+              updated_at: now
+            )
             |> Ecto.Changeset.put_change(:account_id, Repo.account_id!())
             |> Repo.insert()
             |> case do
@@ -98,12 +105,17 @@ defmodule Hireme.Provenance do
   end
 
   defp check_cell(table, %{metric: true, name: name} = col, row, ctx) do
-    stored = row && Map.get(row, String.to_existing_atom(name <> "_on"))
+    stored = row && Map.get(row, String.to_atom(name <> "_on"))
 
     cond do
-      ctx.as_of == nil -> {:refused, :freshness, %{table: table.name, column: name}}
-      stored && Date.compare(ctx.as_of, stored) == :lt -> {:refused, :stale, %{table: table.name, column: name, on: Date.to_iso8601(stored)}}
-      true -> trusted_source(table, col, ctx)
+      ctx.as_of == nil ->
+        {:refused, :freshness, %{table: table.name, column: name}}
+
+      stored && Date.compare(ctx.as_of, stored) == :lt ->
+        {:refused, :stale, %{table: table.name, column: name, on: Date.to_iso8601(stored)}}
+
+      true ->
+        trusted_source(table, col, ctx)
     end
   end
 
@@ -173,7 +185,9 @@ defmodule Hireme.Provenance do
 
   @doc "The account's trusted hosts (account on the process)."
   def trusted_hosts do
-    Repo.all(from t in TrustedHost, order_by: t.host, select: %{id: t.id, host: t.host, note: t.note})
+    Repo.all(
+      from t in TrustedHost, order_by: t.host, select: %{id: t.id, host: t.host, note: t.note}
+    )
   end
 
   @doc "Trusts a host (a bare host or a URL). The account lens gates this behind step-up."
@@ -187,7 +201,10 @@ defmodule Hireme.Provenance do
         %TrustedHost{}
         |> TrustedHost.changeset(%{host: host, note: note})
         |> Ecto.Changeset.change(rev: 1, inserted_at: now, updated_at: now)
-        |> Repo.insert(on_conflict: {:replace, [:note, :updated_at]}, conflict_target: [:account_id, :host])
+        |> Repo.insert(
+          on_conflict: {:replace, [:note, :updated_at]},
+          conflict_target: [:account_id, :host]
+        )
       end)
       |> tap(fn
         {:ok, _} -> Audit.record(:host_trusted, %{host: host}, audit_ctx(meta))

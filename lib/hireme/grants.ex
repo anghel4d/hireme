@@ -28,11 +28,18 @@ defmodule Hireme.Grants do
         }
 
   @doc "The operator's grants, held by every browser session."
-  def operator, do: %__MODULE__{actor: :operator, read_mask: @all, write_mask: @all, may_delete: true}
+  def operator,
+    do: %__MODULE__{actor: :operator, read_mask: @all, write_mask: @all, may_delete: true}
 
   @doc "A key's grants, from `Hireme.Keys.authenticate/2`."
   def key(%{id: id, read_mask: r, write_mask: w, may_delete: d}),
-    do: %__MODULE__{actor: :key, key_id: id, read_mask: r &&& @all, write_mask: w &&& @all, may_delete: d == true}
+    do: %__MODULE__{
+      actor: :key,
+      key_id: id,
+      read_mask: r &&& @all,
+      write_mask: w &&& @all,
+      may_delete: d == true
+    }
 
   @doc "The masks a preset stands for: `{read_mask, write_mask}`."
   def preset(:read_only), do: {@all, 0}
@@ -63,7 +70,8 @@ defmodule Hireme.Grants do
   end
 
   @doc "Whether a single column is visible to these grants."
-  def column?(%__MODULE__{actor: actor}, col), do: not col.server_only and (not col.private or actor == :operator)
+  def column?(%__MODULE__{actor: actor}, col),
+    do: not col.server_only and (not col.private or actor == :operator)
 
   @doc """
   Check 1 of the sequencer, `grant`: the write mask covers the op's domain,
@@ -73,9 +81,14 @@ defmodule Hireme.Grants do
   """
   def check(%__MODULE__{} = g, :command, command, _table, _cols) do
     cond do
-      not write?(g, Schema.table(command.table)) -> {:refused, :scope, %{command: command.name}}
-      command.human_only and g.actor != :operator -> {:refused, :human_only, %{command: command.name}}
-      true -> :ok
+      not write?(g, Schema.table(command.table)) ->
+        {:refused, :scope, %{command: command.name}}
+
+      command.human_only and g.actor != :operator ->
+        {:refused, :human_only, %{command: command.name}}
+
+      true ->
+        :ok
     end
   end
 
@@ -83,10 +96,17 @@ defmodule Hireme.Grants do
     human = if g.actor == :operator, do: nil, else: Enum.find(cols, & &1.human_only)
 
     cond do
-      not write?(g, table) -> {:refused, :scope, %{table: table.name}}
-      verb == :drop and not g.may_delete -> {:refused, :scope, %{table: table.name, need: :may_delete}}
-      human -> {:refused, :human_only, %{table: table.name, column: human.name}}
-      true -> :ok
+      not write?(g, table) ->
+        {:refused, :scope, %{table: table.name}}
+
+      verb == :drop and not g.may_delete ->
+        {:refused, :scope, %{table: table.name, need: :may_delete}}
+
+      human ->
+        {:refused, :human_only, %{table: table.name, column: human.name}}
+
+      true ->
+        :ok
     end
   end
 end

@@ -36,15 +36,20 @@ defmodule Hireme.Lease do
           since: DateTime.t() | nil,
           held: MapSet.t()
         }
-  @type t :: %__MODULE__{sessions: %{pos_integer => session}, holder: %{pos_integer => pos_integer}}
+  @type t :: %__MODULE__{
+          sessions: %{pos_integer => session},
+          holder: %{pos_integer => pos_integer}
+        }
 
   # ------------------------------------------------------------- API
 
   @doc "Claims applications for `session_id` (opening its channel); see the moduledoc."
-  def claim(account_id, session_id, params), do: Sequencer.lease(account_id, {:claim, session_id, params})
+  def claim(account_id, session_id, params),
+    do: Sequencer.lease(account_id, {:claim, session_id, params})
 
   @doc "Releases `ids` (or everything, closing the channel, for `nil`)."
-  def release(account_id, session_id, ids), do: Sequencer.lease(account_id, {:release, session_id, ids})
+  def release(account_id, session_id, ids),
+    do: Sequencer.lease(account_id, {:release, session_id, ids})
 
   @doc """
   The operator ends a session's lease: its claims go and its channel
@@ -54,7 +59,12 @@ defmodule Hireme.Lease do
   def revoke(account_id, lease_id, meta) do
     with true <- Sequencer.running?(account_id) || {:error, :not_found},
          :ok <- Sequencer.lease(account_id, {:revoke, lease_id}) do
-      Hireme.Audit.record(:lease_revoked, %{lease_id: lease_id}, Map.put(meta, :account_id, account_id))
+      Hireme.Audit.record(
+        :lease_revoked,
+        %{lease_id: lease_id},
+        Map.put(meta, :account_id, account_id)
+      )
+
       :ok
     end
   end
@@ -138,7 +148,8 @@ defmodule Hireme.Lease do
       %{"ids" => ids} when is_list(ids) ->
         cond do
           not Enum.all?(ids, &(is_integer(&1) and MapSet.member?(all, &1))) ->
-            {:refused, :not_found, %{ids: Enum.reject(ids, &(is_integer(&1) and MapSet.member?(all, &1)))}}
+            {:refused, :not_found,
+             %{ids: Enum.reject(ids, &(is_integer(&1) and MapSet.member?(all, &1)))}}
 
           taken = Enum.find(ids, &(Map.get(l.holder, &1, id) != id)) ->
             {:refused, :leased, holder(l, taken)}
@@ -165,7 +176,13 @@ defmodule Hireme.Lease do
   @doc "Releases `ids`, or everything and the channel for `nil`. Returns `{lease, released_ids}`."
   def free(%__MODULE__{} = l, id, nil) do
     {l, released} = drop_claims(l, id, :all)
-    l = update_in(l.sessions[id], &(&1 && %{&1 | channel: &1.key_id == nil, since: if(&1.key_id == nil, do: &1.since)}))
+
+    l =
+      update_in(
+        l.sessions[id],
+        &(&1 && %{&1 | channel: &1.key_id == nil, since: if(&1.key_id == nil, do: &1.since)})
+      )
+
     {l, released}
   end
 
@@ -188,7 +205,14 @@ defmodule Hireme.Lease do
   @doc "The account lens's view of every lease (`leases/1`)."
   def list(%__MODULE__{sessions: sessions}) do
     for {_, s} <- sessions, s.channel or MapSet.size(s.held) > 0 do
-      %{id: s.id, label: s.label, key_id: s.key_id, session_id: s.session_id, ids: Enum.sort(s.held), since: s.since}
+      %{
+        id: s.id,
+        label: s.label,
+        key_id: s.key_id,
+        session_id: s.session_id,
+        ids: Enum.sort(s.held),
+        since: s.since
+      }
     end
     |> Enum.sort_by(& &1.id)
   end
@@ -212,7 +236,12 @@ defmodule Hireme.Lease do
 
   defp put_claims(l, s, ids) do
     s = %{s | held: MapSet.union(s.held, MapSet.new(ids))}
-    %{l | sessions: Map.put(l.sessions, s.id, s), holder: Enum.reduce(ids, l.holder, &Map.put(&2, &1, s.id))}
+
+    %{
+      l
+      | sessions: Map.put(l.sessions, s.id, s),
+        holder: Enum.reduce(ids, l.holder, &Map.put(&2, &1, s.id))
+    }
   end
 
   defp drop_claims(l, id, which) do
@@ -224,7 +253,9 @@ defmodule Hireme.Lease do
         drop = if which == :all, do: s.held, else: MapSet.intersection(s.held, MapSet.new(which))
         s = %{s | held: MapSet.difference(s.held, drop)}
         holder = Map.drop(l.holder, MapSet.to_list(drop))
-        {%{l | sessions: Map.put(l.sessions, id, s), holder: holder}, drop |> MapSet.to_list() |> Enum.sort()}
+
+        {%{l | sessions: Map.put(l.sessions, id, s), holder: holder},
+         drop |> MapSet.to_list() |> Enum.sort()}
     end
   end
 end

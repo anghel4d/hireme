@@ -31,7 +31,8 @@ defmodule Hireme.Kernel do
 
   @doc "Feeds one PATCH body (the rows an op wrote and the ids it deleted)."
   @spec apply(t, iodata) :: :ok | {:error, term}
-  def apply(%__MODULE__{res: res}, patch_body), do: Nif.apply(res, IO.iodata_to_binary(patch_body))
+  def apply(%__MODULE__{res: res}, patch_body),
+    do: Nif.apply(res, IO.iodata_to_binary(patch_body))
 
   @doc """
   Check 4 of the sequencer, `domain`, for one op's raw OPS bytes. Returns
@@ -68,7 +69,13 @@ defmodule Hireme.Kernel.Nif do
     skip_compilation?:
       Application.compile_env(:hireme, :nif_prebuilt, false) or
         not File.exists?(Path.expand("../../native/nif/Cargo.toml", __DIR__)),
-    load_from: {:hireme, "priv/native/libnif"}
+    # Rustler names its own build nif.so; the Nix package installs libnif.so.
+    load_from:
+      {:hireme,
+       if(Application.compile_env(:hireme, :nif_prebuilt, false),
+         do: "priv/native/libnif",
+         else: "priv/native/nif"
+       )}
 
   def new, do: :erlang.nif_error(:nif_not_loaded)
   def load(_res, _boot), do: :erlang.nif_error(:nif_not_loaded)

@@ -52,7 +52,10 @@ defmodule Hireme.WireCase do
 
     flags = if(opts[:keyed], do: 1, else: 0) + if(opts[:create_only], do: 2, else: 0)
     op_id = opts[:op_id] || System.unique_integer([:positive])
-    raw = Codec.encode_op({op_id, verb, flags, owner, opts[:target] || 0, opts[:expect_rev], encoded})
+
+    raw =
+      Codec.encode_op({op_id, verb, flags, owner, opts[:target] || 0, opts[:expect_rev], encoded})
+
     {:ok, op, ""} = Codec.op(raw)
     op
   end
@@ -85,7 +88,11 @@ defmodule Hireme.WireCase do
   def tables(<<>>), do: []
 
   def tables(<<table::little-16, ncols::little-16, nrows::little-32, rest::binary>>) do
-    rest = Enum.reduce(1..ncols//1, rest, fn _, <<_::32, len::little-32, r::binary>> -> skip(r, len + rem(8 - rem(len, 8), 8)) end)
+    rest =
+      Enum.reduce(1..ncols//1, rest, fn _, <<_::32, len::little-32, r::binary>> ->
+        skip(r, len + rem(8 - rem(len, 8), 8))
+      end)
+
     [{Schema.table(table).name, nrows} | tables(rest)]
   end
 

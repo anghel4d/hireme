@@ -11,11 +11,15 @@ defmodule Hireme.GrantsTest do
   defp key(r, w, d \\ false), do: Grants.key(%{id: 7, read_mask: r, write_mask: w, may_delete: d})
 
   property "a mask reads and writes exactly the tables of its domains, never system, citations or trusted hosts" do
-    check all r <- integer(0..31), w <- integer(0..31), max_runs: 64 do
+    check all(r <- integer(0..31), w <- integer(0..31), max_runs: 64) do
       g = key(r, w)
 
       for t <- @stored do
-        bit = if t.domain in @domains, do: Bitwise.bsl(1, Enum.find_index(@domains, &(&1 == t.domain))), else: 0
+        bit =
+          if t.domain in @domains,
+            do: Bitwise.bsl(1, Enum.find_index(@domains, &(&1 == t.domain))),
+            else: 0
+
         bit = if t.name in @outside, do: 0, else: bit
         assert Grants.read?(g, t) == (Bitwise.band(r, bit) != 0), "read #{t.name} with #{r}"
         assert Grants.write?(g, t) == (Bitwise.band(w, bit) != 0), "write #{t.name} with #{w}"
@@ -28,7 +32,11 @@ defmodule Hireme.GrantsTest do
     assert Grants.preset(:write_only) == {0, 31}
     assert Grants.preset(:read_write) == {31, 31}
     op = Grants.operator()
-    assert Enum.all?(@stored, &(Grants.read?(op, &1) == (&1.domain != "system" and &1.name not in @outside)))
+
+    assert Enum.all?(
+             @stored,
+             &(Grants.read?(op, &1) == (&1.domain != "system" and &1.name not in @outside))
+           )
   end
 
   test "a key never sees a server_only or private column; the operator sees private ones" do

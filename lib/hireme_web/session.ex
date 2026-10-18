@@ -44,7 +44,17 @@ defmodule HiremeWeb.Session do
   def open(peer) when is_map(peer) do
     Process.send_after(self(), {__MODULE__, :hello_deadline}, @hello_ms)
     Phoenix.PubSub.subscribe(Hireme.PubSub, "wire:drain")
-    {:ok, %{peer: peer, phase: :hello, last_in: now_ms(), account_id: nil, session: nil, rev: 0, parked: nil}}
+
+    {:ok,
+     %{
+       peer: peer,
+       phase: :hello,
+       last_in: now_ms(),
+       account_id: nil,
+       session: nil,
+       rev: 0,
+       parked: nil
+     }}
   end
 
   @doc "One whole frame from the peer."
@@ -81,7 +91,8 @@ defmodule HiremeWeb.Session do
   def info({Hireme.Audit, :changed}, %{parked: id} = state) when id != nil,
     do: {:push, [reply(id, true, %{changed: true}, state)], %{state | parked: nil}}
 
-  def info({__MODULE__, :hello_deadline}, %{phase: :hello} = state), do: {:stop, :hello_deadline, [], state}
+  def info({__MODULE__, :hello_deadline}, %{phase: :hello} = state),
+    do: {:stop, :hello_deadline, [], state}
 
   def info({__MODULE__, :ping}, %{phase: :live} = state) do
     if now_ms() - state.last_in > Security.carrier_timeout() do
@@ -112,7 +123,8 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  defp on_frame(_kind, _body, %{phase: :hello} = state), do: {:stop, {:protocol, :hello_first}, [], state}
+  defp on_frame(_kind, _body, %{phase: :hello} = state),
+    do: {:stop, {:protocol, :hello_first}, [], state}
 
   defp on_frame(:OPS, body, state) do
     case Codec.ops(body) do
@@ -141,8 +153,13 @@ defmodule HiremeWeb.Session do
     case Codec.rpc(body) do
       {:ok, id, method, json} ->
         case params(json) do
-          {:ok, params} -> rpc(id, method, params, state)
-          :error -> {:push, [reply(id, false, error(:type, %{reason: "params are a JSON object"}), state)], state}
+          {:ok, params} ->
+            rpc(id, method, params, state)
+
+          :error ->
+            {:push,
+             [reply(id, false, error(:type, %{reason: "params are a JSON object"}), state)],
+             state}
         end
 
       {:error, _} ->
@@ -166,8 +183,16 @@ defmodule HiremeWeb.Session do
 
   defp authenticate(%{cred: :ticket, credential: ticket, label: label}, peer) do
     with true <- allowed_origin?(peer[:origin]),
-         {:ok, %{account_id: account_id, session_id: session_id}} <- Hireme.Accounts.redeem_ticket(ticket) do
-      {:ok, %{account_id: account_id, session_id: session_id, key_id: nil, grants: Grants.operator(), label: label(label, "browser")}}
+         {:ok, %{account_id: account_id, session_id: session_id}} <-
+           Hireme.Accounts.redeem_ticket(ticket) do
+      {:ok,
+       %{
+         account_id: account_id,
+         session_id: session_id,
+         key_id: nil,
+         grants: Grants.operator(),
+         label: label(label, "browser")
+       }}
     else
       _ -> :error
     end
@@ -176,7 +201,14 @@ defmodule HiremeWeb.Session do
   defp authenticate(%{cred: :key, credential: secret, label: label}, peer) do
     case Hireme.Keys.authenticate(secret, to_string(peer[:peer_ip] || "")) do
       {:ok, key} ->
-        {:ok, %{account_id: key.account_id, session_id: nil, key_id: key.id, grants: Grants.key(key), label: label(label, key.name)}}
+        {:ok,
+         %{
+           account_id: key.account_id,
+           session_id: nil,
+           key_id: key.id,
+           grants: Grants.key(key),
+           label: label(label, key.name)
+         }}
 
       :error ->
         :error
@@ -186,7 +218,9 @@ defmodule HiremeWeb.Session do
   defp authenticate(_, _), do: :error
 
   defp allowed_origin?(nil), do: false
-  defp allowed_origin?(origin), do: String.trim_trailing(origin, "/") in HiremeWeb.Endpoint.origins()
+
+  defp allowed_origin?(origin),
+    do: String.trim_trailing(origin, "/") in HiremeWeb.Endpoint.origins()
 
   defp label(given, fallback) do
     case String.slice(String.trim(given), 0, 64) do
@@ -199,9 +233,17 @@ defmodule HiremeWeb.Session do
     Phoenix.PubSub.subscribe(Hireme.PubSub, "account:#{who.account_id}")
     session = Map.put(who, :id, System.unique_integer([:positive, :monotonic]))
 
-    {:ok, %{rev: rev, lease: lease, frames: train}} =
-      Sequencer.subscribe(who.account_id, Map.take(session, [:id, :label, :grants, :key_id, :session_id]), hello.snapshot_rev)
+    case Sequencer.subscribe(
+           who.account_id,
+           Map.take(session, [:id, :label, :grants, :key_id, :session_id]),
+           hello.snapshot_rev
+         ) do
+      {:ok, joined} -> welcome(joined, who, session, state)
+      {:error, _} -> bye(:restart, "the account is unavailable; retry", state)
+    end
+  end
 
+  defp welcome(%{rev: rev, lease: lease, frames: train}, who, session, state) do
     welcome =
       Codec.welcome(rev, %{
         account_id: who.account_id,
@@ -271,8 +313,12 @@ defmodule HiremeWeb.Session do
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
   defp answer(id, :ok, state), do: {:push, [reply(id, true, %{}, state)], state}
-  defp answer(id, {:refused, refusal, data}, state), do: {:push, [reply(id, false, error(refusal, data), state)], state}
-  defp answer(id, {:error, reason}, state), do: {:push, [reply(id, false, error(reason, %{}), state)], state}
+
+  defp answer(id, {:refused, refusal, data}, state),
+    do: {:push, [reply(id, false, error(refusal, data), state)], state}
+
+  defp answer(id, {:error, reason}, state),
+    do: {:push, [reply(id, false, error(reason, %{}), state)], state}
 
   defp error(refusal, data), do: %{code: refusal, message: to_string(refusal), data: data}
 
@@ -280,7 +326,8 @@ defmodule HiremeWeb.Session do
 
   # --------------------------------------------------------------- BYE
 
-  defp bye(reason, message, state), do: {:stop, {:bye, reason}, [Codec.bye(state.rev, reason, message)], state}
+  defp bye(reason, message, state),
+    do: {:stop, {:bye, reason}, [Codec.bye(state.rev, reason, message)], state}
 
   defp clock do
     t = Hireme.Schema.table(:clock)
@@ -308,8 +355,12 @@ defmodule HiremeWeb.Session do
   defp ws({:ok, state}), do: {:ok, state}
   defp ws({:push, [], state}), do: {:ok, state}
   defp ws({:push, frames, state}), do: {:push, Enum.map(frames, &{:binary, &1}), state}
-  defp ws({:stop, {:bye, _}, frames, state}), do: {:stop, :normal, 1000, Enum.map(frames, &{:binary, &1}), state}
-  defp ws({:stop, reason, frames, state}), do: {:stop, :normal, close_code(reason), Enum.map(frames, &{:binary, &1}), state}
+
+  defp ws({:stop, {:bye, _}, frames, state}),
+    do: {:stop, :normal, 1000, Enum.map(frames, &{:binary, &1}), state}
+
+  defp ws({:stop, reason, frames, state}),
+    do: {:stop, :normal, close_code(reason), Enum.map(frames, &{:binary, &1}), state}
 
   defp close_code({:protocol, _}), do: 1002
   defp close_code(_), do: 1000
@@ -342,7 +393,8 @@ defmodule HiremeWeb.Session.Drain do
 
   # Sessions leave the drain topic as they exit.
   defp wait(deadline) do
-    if Registry.count_match(Hireme.PubSub, "wire:drain", :_) > 0 and System.monotonic_time(:millisecond) < deadline do
+    if Registry.count_match(Hireme.PubSub, "wire:drain", :_) > 0 and
+         System.monotonic_time(:millisecond) < deadline do
       Process.sleep(50)
       wait(deadline)
     end
@@ -350,5 +402,6 @@ defmodule HiremeWeb.Session.Drain do
     :ok
   end
 
-  def child_spec(arg), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [arg]}, shutdown: @grace_ms + 1_000}
+  def child_spec(arg),
+    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [arg]}, shutdown: @grace_ms + 1_000}
 end

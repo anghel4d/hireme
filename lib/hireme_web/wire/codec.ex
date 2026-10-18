@@ -38,9 +38,13 @@ defmodule HiremeWeb.Wire.Codec do
   @frames Map.new(Schema.frames(), &{String.to_atom(&1.name), &1.id})
   @frame_names Map.new(Schema.frames(), &{&1.id, String.to_atom(&1.name)})
   @enum_codes Map.new(Schema.model().enums, fn e ->
-                {e.name, e.values |> Enum.with_index() |> Map.new(fn {v, i} -> {String.to_atom(v), i} end)}
+                {e.name,
+                 e.values |> Enum.with_index() |> Map.new(fn {v, i} -> {String.to_atom(v), i} end)}
               end)
-  @enum_atoms Map.new(Schema.model().enums, &{&1.name, List.to_tuple(Enum.map(&1.values, fn v -> String.to_atom(v) end))})
+  @enum_atoms Map.new(
+                Schema.model().enums,
+                &{&1.name, List.to_tuple(Enum.map(&1.values, fn v -> String.to_atom(v) end))}
+              )
 
   @as_of 0xFFF0
   @source 0xFFF1
@@ -67,7 +71,9 @@ defmodule HiremeWeb.Wire.Codec do
         packed = deflate(body)
 
         if pad8(8 + byte_size(packed)) < byte_size(body),
-          do: {flags ||| @deflate, <<byte_size(body)::little-32, byte_size(packed)::little-32, packed::binary>>},
+          do:
+            {flags ||| @deflate,
+             <<byte_size(body)::little-32, byte_size(packed)::little-32, packed::binary>>},
           else: {flags, body}
       else
         {flags, body}
@@ -75,7 +81,9 @@ defmodule HiremeWeb.Wire.Codec do
 
     body = pad(body)
     len = @header + byte_size(body)
-    <<len::little-32, Map.fetch!(@frames, kind)::8, flags::8, Schema.wire_hash()::little-16, rev::little-64, body::binary>>
+
+    <<len::little-32, Map.fetch!(@frames, kind)::8, flags::8, Schema.wire_hash()::little-16,
+      rev::little-64, body::binary>>
   end
 
   @doc """
@@ -95,7 +103,9 @@ defmodule HiremeWeb.Wire.Codec do
   def split(_buf, _max), do: :more
 
   @doc "Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`."
-  def decode(<<len::little-32, kind::8, flags::8, hash::little-16, rev::little-64, body::binary>> = f)
+  def decode(
+        <<len::little-32, kind::8, flags::8, hash::little-16, rev::little-64, body::binary>> = f
+      )
       when byte_size(f) == len and len >= @header and rem(len, 8) == 0 do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- frame_name(kind),
@@ -210,8 +220,9 @@ defmodule HiremeWeb.Wire.Codec do
 
   def welcome(rev, w) do
     frame(:WELCOME, rev, [
-      <<w.account_id::little-64, w.session_id::little-64, w.schema_rev::little-64, w.read_mask::little-16,
-        w.write_mask::little-16, bool(w.may_delete)::8, bool(w.lease)::8, 0::16>>,
+      <<w.account_id::little-64, w.session_id::little-64, w.schema_rev::little-64,
+        w.read_mask::little-16, w.write_mask::little-16, bool(w.may_delete)::8, bool(w.lease)::8,
+        0::16>>,
       put_field(w.label)
     ])
   end
@@ -312,8 +323,8 @@ defmodule HiremeWeb.Wire.Codec do
 
   @doc "One op from the start of `bin`: `{:ok, op, rest}` or `:error`."
   def op(
-        <<op_id::little-64, verb::8, flags::8, subject::little-16, target::little-32, ncols::little-16, 0::16,
-          expect::little-32, rest::binary>> = bin
+        <<op_id::little-64, verb::8, flags::8, subject::little-16, target::little-32,
+          ncols::little-16, 0::16, expect::little-32, rest::binary>> = bin
       )
       when verb in 1..3 and (flags &&& bnot(@keyed ||| @create_only ||| @expect_rev)) == 0 do
     if (flags &&& @expect_rev) == 0 and expect != 0 do
@@ -379,12 +390,17 @@ defmodule HiremeWeb.Wire.Codec do
     flags = if expect_rev, do: flags ||| @expect_rev, else: flags &&& bnot(@expect_rev)
 
     [
-      <<op_id::little-64, v::8, flags::8, subject::little-16, target::little-32, length(cells)::little-16, 0::16,
-        expect_rev || 0::little-32>>
+      <<op_id::little-64, v::8, flags::8, subject::little-16, target::little-32,
+        length(cells)::little-16, 0::16, expect_rev || 0::little-32>>
       | Enum.map(cells, fn {col, ty, value} ->
           bytes = encode_cell(ty, value)
           n = byte_size(bytes)
-          [<<col::little-16, ty::8, 0::8, n::little-32>>, bytes, :binary.copy(<<0>>, pad8(8 + n) - 8 - n)]
+
+          [
+            <<col::little-16, ty::8, 0::8, n::little-32>>,
+            bytes,
+            :binary.copy(<<0>>, pad8(8 + n) - 8 - n)
+          ]
         end)
     ]
     |> IO.iodata_to_binary()
@@ -446,15 +462,24 @@ defmodule HiremeWeb.Wire.Codec do
   def wire_type(%{wire: w}), do: w
 
   @doc "An enum value's code; `nil` for one the enum does not have."
-  def enum_code(enum, value) when is_atom(value), do: get_in(@enum_codes, [to_string(enum), value])
-  def enum_code(enum, value) when is_binary(value), do: enum_code(enum, String.to_existing_atom(value))
+  def enum_code(enum, value) when is_atom(value),
+    do: get_in(@enum_codes, [to_string(enum), value])
+
+  def enum_code(enum, value) when is_binary(value) do
+    enum_code(enum, String.to_existing_atom(value))
+  rescue
+    ArgumentError -> nil
+  end
 
   @doc "A column's Elixir value as its wire value (the kernel's and BOOT's form)."
   def to_wire(_col, nil), do: nil
   def to_wire(%{type: :bool}, v), do: bool(v)
   def to_wire(%{type: :day}, %Date{} = d), do: Date.diff(d, @epoch)
   def to_wire(%{type: :time}, %DateTime{} = t), do: DateTime.to_unix(t)
-  def to_wire(%{type: :time}, %NaiveDateTime{} = t), do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
+
+  def to_wire(%{type: :time}, %NaiveDateTime{} = t),
+    do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
+
   def to_wire(%{type: :enum, enum: e}, v), do: enum_code(e, v)
   def to_wire(%{type: :json}, v), do: JSON.encode!(v)
   def to_wire(%{deferred: true}, v) when is_binary(v), do: deferred_stub(v)
@@ -488,12 +513,18 @@ defmodule HiremeWeb.Wire.Codec do
     [<<id::little-16, ty::8, 0::8, n::little-32>>, data, :binary.copy(<<0>>, pad8(n) - n)]
   end
 
-  defp col_data(@t_u32, vs), do: Enum.map(vs, &<<(&1 || @none32)::little-32>>)
-  defp col_data(@t_i64, vs), do: Enum.map(vs, &<<(&1 || @min64)::little-signed-64>>)
-  defp col_data(@t_f64, vs), do: Enum.map(vs, &if(&1, do: <<&1 * 1.0::little-float-64>>, else: @nan))
+  defp col_data(@t_u32, vs), do: Enum.map(vs, &<<&1 || @none32::little-32>>)
+  defp col_data(@t_i64, vs), do: Enum.map(vs, &<<&1 || @min64::little-signed-64>>)
+
+  defp col_data(@t_f64, vs),
+    do: Enum.map(vs, &if(&1, do: <<&1 * 1.0::little-float-64>>, else: @nan))
 
   defp col_data(@t_deferred, vs),
-    do: Enum.map(vs, fn {len, sha} -> <<len::little-32, sha::binary-8>>; nil -> <<@none32::little-32, 0::64>> end)
+    do:
+      Enum.map(vs, fn
+        {len, sha} -> <<len::little-32, sha::binary-8>>
+        nil -> <<@none32::little-32, 0::64>>
+      end)
 
   defp col_data(@t_str, vs) do
     {offsets, _} =
@@ -513,7 +544,9 @@ defmodule HiremeWeb.Wire.Codec do
     block(
       table.id,
       length(rows),
-      Enum.map(cols, fn c -> {c.id, wire_type(c), Enum.map(rows, &to_wire(c, Map.get(&1, String.to_existing_atom(c.name))))} end)
+      Enum.map(cols, fn c ->
+        {c.id, wire_type(c), Enum.map(rows, &to_wire(c, Map.get(&1, String.to_atom(c.name))))}
+      end)
     )
   end
 
@@ -523,7 +556,11 @@ defmodule HiremeWeb.Wire.Codec do
   def gone_block(pairs) do
     t = Schema.table(:gone)
     [tc, ic] = Enum.map([:table, :id], &Schema.column(:gone, &1))
-    block(t.id, length(pairs), [{tc.id, @t_u32, Enum.map(pairs, &elem(&1, 0))}, {ic.id, @t_u32, Enum.map(pairs, &elem(&1, 1))}])
+
+    block(t.id, length(pairs), [
+      {tc.id, @t_u32, Enum.map(pairs, &elem(&1, 0))},
+      {ic.id, @t_u32, Enum.map(pairs, &elem(&1, 1))}
+    ])
   end
 
   defp pad8(n), do: n + 7 &&& bnot(7)
