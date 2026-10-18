@@ -28,7 +28,7 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("freshness", "provenance", "a metric needs as_of", "Every metric write carries the day the figure is true as of: put {..., \"as_of\":\"YYYY-MM-DD\"}."),
     ("stale", "provenance", "older than the stored figure", "The cell already holds a figure as of a later day (data: stored _on). Only newer figures replace older ones; history keeps both."),
     ("rev", "provenance", "prose needs the row's current rev", "Prose (about, culture, liveability, notes) is compare-and-swap: put with \"expect_rev\" set to the row's rev from `get`. A changed rev means someone wrote first; re-read and merge."),
-    ("source_missing", "provenance", "this write needs a source", "Prose and metrics cite where they came from: put {..., \"source\":\"https://...\"} (the server derives the host)."),
+    ("source_missing", "provenance", "this write needs a source", "Prose cites where it came from: put {..., \"source\":\"https://...\"} with its expect_rev (the server derives the host). A metric may cite one too, and its as_of is what it needs."),
     ("source_trust", "provenance", "this source's host is not trusted for this", "Culture and ratings come only from hosts the operator trusts (levels.fyi and the like). Cite one of those, or leave the cell."),
     ("too_large", "limits", "more than 1 MiB of text in one op", "Split the text, or store the raw listing once and refer to it."),
     ("rate", "limits", "over the agent write rate", "600 ops a minute per key. Nothing of the refused op was written: wait the data's retry_ms, then call again."),
