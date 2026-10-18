@@ -61,18 +61,39 @@ second-factor page are plain HTTP forms.
 
 ## Running it
 
-The toolchain comes from the flake's pinned nixpkgs: Elixir 1.20 on OTP 28,
+Every tool comes from the flake's pinned nixpkgs: Elixir 1.20 on OTP 28,
 Rust with the `wasm32-unknown-unknown` target, Node, SQLite, esbuild and
-TypeScript.
+TypeScript. `nix develop` opens a shell with exactly those; run everything
+below inside it (an `elixir` or `mix` from elsewhere is not these versions).
 
 ```bash
+nix develop
 mix setup          # deps, esbuild, kernel.wasm, the bundles
-mix phx.server     # http://localhost:4000
+DATABASE_PATH=/tmp/hireme-dev/hireme.db mix phx.server   # http://localhost:4000
 ```
 
-`DATABASE_PATH` picks the SQLite file (a fresh one gets the baseline);
-`HIREME_GATE=off` runs the wire over the WebSocket alone; `PORT` moves the
-listener. A new database starts empty; there is no older data to bring.
+`DATABASE_PATH` picks the SQLite file; its directory must exist, and a new
+file gets the baseline schema on first boot (`schema: applied
+0000_baseline`). Without it, development writes `../hireme_dev.db`.
+`HIREME_GATE=off` runs the wire over the WebSocket alone (with the gate on,
+the header shows `live (WT)`); `PORT` moves the listener. A new database
+starts empty; there is no older data to bring.
+
+### Signing in locally
+
+In development the sign-in page has a **Sign in locally (development)**
+button. It signs you in as `dev@localhost`, and the first sign-in on a fresh
+database creates that account (it is account 1, the id `mix hireme.import`
+takes below).
+
+The real ways in work locally too. An email link lands in the development
+mailbox at <http://localhost:4000/dev/mailbox/> rather than being sent;
+opening it shows "Sign in as …?", and you are signed in after you confirm.
+GitHub and X need `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` or
+`X_CLIENT_ID`/`X_CLIENT_SECRET` in the environment.
+
+Development logs every SQL query at debug level, so a command's own output
+comes after the queries it ran.
 
 Data comes in three ways: an agent through the MCP, the lenses, or a pack:
 
@@ -90,9 +111,16 @@ wire write meets.
 API key, keeps the key's resident rows in the native kernel, and builds its
 tools from the catalog the key can see.
 
-1. In the account lens, mint a key: read only, write only, read and write,
-   or custom masks over world, desk, mail, lanes and corpus; deleting is a
-   separate permission. The secret is shown once.
+1. In the account lens, **Mint a key**. Its **Access** choice is *Read
+   only* (the default: it reads every domain and writes none, so an agent
+   with it cannot `put`; an agent that adds or changes data needs *Read and
+   write*), *Write only*, *Read and write*, or *Custom*, which
+   shows a read and a write checkbox for each of world, desk, mail, lanes
+   and corpus. *may delete rows* is a separate permission. Minting, widening
+   a key and allowing deletes need a factor from the last few minutes: the
+   lens asks for one (passkey, authenticator code or a recovery code) when
+   it is due. The form states what the key will read, write and delete
+   before you mint it. The secret is shown once; save it to a file.
 2. Build it (`nix build .#hireme-mcp`, or `cargo build -p hireme-mcp
    --release` in `native/`) and point your MCP client at the binary:
 
@@ -108,8 +136,16 @@ tools from the catalog the key can see.
 ```
 
 The key is read from `HIREME_KEY` or `HIREME_KEY_FILE`, never from the
-command line. The server speaks MCP 2026-07-28 and answers the older
-`initialize` handshake too.
+command line. `HIREME_URL` is required; plain `http://` is accepted only for
+`localhost`, since the key would otherwise cross the network unencrypted.
+`HIREME_LABEL` sets the name a lease shows for this agent.
+
+The server speaks both eras of MCP. A current client (MCP 2026-07-28, as
+Claude Code is) sends the version in every request's `_meta` and never
+calls `initialize`; `server/discover` lists the versions served. An older
+client opens with `initialize`, the handshake of 2025-11-25 and earlier, and
+gets the newest of those, so `initialize` never answers 2026-07-28: that
+revision has no handshake to answer.
 
 Tools: `hireme` (start here: masks, lease, the desk at a glance, the next
 step; `{"explain": "<code>"}` explains any refusal), `schema`, `find`, `get`,

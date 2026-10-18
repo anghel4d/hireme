@@ -156,16 +156,45 @@ function fields(form: HTMLFormElement): Record<string, string> {
   return out
 }
 
-function masksFrom(f: Record<string, string>, form: HTMLFormElement): Record<string, unknown> {
-  if (f.preset && f.preset !== "custom") return { preset: f.preset, may_delete: f.may_delete === "on" }
+type Draft = NonNullable<AccountView["masks"]>
+
+/** A preset's masks, as the server's overview states them. */
+function presetMasks(preset: string): { read: number; write: number } {
+  const p = (v().overview?.presets as Record<string, { read_mask?: number; write_mask?: number }> | undefined)?.[preset]
+  return { read: num(p?.read_mask), write: num(p?.write_mask) }
+}
+
+/** The form's access: what was chosen in it, or what it opened with. */
+function draft(form: string, read: number, write: number, preset: string, mayDelete: boolean): Draft {
+  const d = v().masks
+  return d && d.form === form ? d : { form, preset, read, write, mayDelete }
+}
+
+/** The masks a draft grants: a preset's own, or the custom checkboxes. */
+function grants(d: Draft): { read: number; write: number } {
+  return d.preset === "custom" ? { read: d.read, write: d.write } : presetMasks(d.preset)
+}
+
+function masksFrom(d: Draft): Record<string, unknown> {
+  if (d.preset !== "custom") return { preset: d.preset, may_delete: d.mayDelete }
+  return { read_mask: d.read, write_mask: d.write, may_delete: d.mayDelete }
+}
+
+/** The form's controls, read back into its draft after any change. */
+function redraft(form: HTMLFormElement, prev: Draft): Draft {
+  const preset = (form.elements.namedItem("preset") as HTMLSelectElement | null)?.value ?? prev.preset
+  const mayDelete = (form.elements.namedItem("may_delete") as HTMLInputElement | null)?.checked ?? prev.mayDelete
+  if (preset !== "custom") return { ...prev, preset, mayDelete }
+  // Turning to custom starts from what the previous preset granted.
+  const start = prev.preset === "custom" ? null : presetMasks(prev.preset)
   const b = bits()
   let read = 0
   let write = 0
   for (const d of DOMAINS) {
-    if ((form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= b[d] ?? 0
-    if ((form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= b[d] ?? 0
+    if (start ? (start.read & (b[d] ?? 0)) !== 0 : (form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= b[d] ?? 0
+    if (start ? (start.write & (b[d] ?? 0)) !== 0 : (form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= b[d] ?? 0
   }
-  return { read_mask: read, write_mask: write, may_delete: f.may_delete === "on" }
+  return { ...prev, preset, read, write, mayDelete }
 }
 
 async function link(provider: string, email?: string): Promise<void> {
@@ -185,20 +214,32 @@ async function link(provider: string, email?: string): Promise<void> {
 
 // ------------------------------------------------------------------ view
 
+/**
+ * The key's access, chosen in the open: the preset, the per-domain grid it
+ * grants (editable only for custom), and a sentence of what the key will do,
+ * all drawn from the form's draft before anything is minted.
+ */
 function maskPicker(prefix: string, read: number, write: number, preset: string, mayDelete: boolean): Html {
   const b = bits()
-  return html`<label>Access <select name="preset" data-act="preset" data-on="change">
-      ${PRESETS.map(([p, label]) => html`<option value="${p}"${flag("selected", p === preset)}>${label}</option>`)}
+  const d = draft(prefix, read, write, preset, mayDelete)
+  const g = grants(d)
+  const custom = d.preset === "custom"
+  return html`<div class="mask-picker" data-act="masks" data-on="change" data-form="${prefix}" data-key="${prefix}-picker">
+    <label>Access <select name="preset">
+      ${PRESETS.map(([p, label]) => html`<option value="${p}"${flag("selected", p === d.preset)}>${label}</option>`)}
     </select></label>
-    <fieldset class="masks${preset === "custom" ? "" : " folded"}" data-key="${prefix}-masks">
-      <legend>Domains</legend>
-      <table class="grid compact"><thead><tr><th></th>${DOMAINS.map((d) => html`<th scope="col">${d}</th>`)}</tr></thead>
+    <fieldset class="masks" data-key="${prefix}-masks"${flag("disabled", !custom)}>
+      <legend>${custom ? "Choose per domain" : "What this preset grants"}</legend>
+      <table class="grid compact"><thead><tr><th></th>${DOMAINS.map((x) => html`<th scope="col">${x}</th>`)}</tr></thead>
       <tbody>
-        <tr><th scope="row">read</th>${DOMAINS.map((d) => html`<td><input type="checkbox" name="r_${d}" aria-label="read ${d}"${flag("checked", (read & (b[d] ?? 0)) !== 0)}></td>`)}</tr>
-        <tr><th scope="row">write</th>${DOMAINS.map((d) => html`<td><input type="checkbox" name="w_${d}" aria-label="write ${d}"${flag("checked", (write & (b[d] ?? 0)) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">read</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="r_${x}" aria-label="read ${x}"${flag("checked", (g.read & (b[x] ?? 0)) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">write</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="w_${x}" aria-label="write ${x}"${flag("checked", (g.write & (b[x] ?? 0)) !== 0)}></td>`)}</tr>
       </tbody></table>
     </fieldset>
-    <label class="check"><input type="checkbox" name="may_delete"${flag("checked", mayDelete)}> may delete rows</label>`
+    <label class="check"><input type="checkbox" name="may_delete"${flag("checked", d.mayDelete)}> may delete rows</label>
+    <p class="mask-summary" role="status">This key reads ${maskNames(g.read)}, writes ${maskNames(g.write)}${d.mayDelete ? ", and may delete rows" : ", and cannot delete"}.
+      ${g.write === 0 ? html`<b>An agent with it cannot add or change data</b>: choose Read and write for one that should.` : EMPTY}</p>
+  </div>`
 }
 
 function stepUp(): Html {
@@ -385,13 +426,16 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   const id = Number(el.dataset.id)
   switch (name) {
     case "open":
-      return patch({ open: el.dataset.form ?? "", error: "" })
+      return patch({ open: el.dataset.form ?? "", error: "", masks: null })
     case "close":
-      return patch({ open: "" })
-    case "preset": {
-      const set = el.closest("form")?.querySelector("fieldset.masks")
-      set?.classList.toggle("folded", (el as HTMLSelectElement).value !== "custom")
-      return
+      return patch({ open: "", masks: null })
+    case "masks": {
+      const f2 = el.closest("form")
+      if (!f2) return
+      const id2 = el.dataset.form ?? ""
+      const key = list("keys").find((x) => `k${num(x.id)}` === id2)
+      const prev = draft(id2, num(key?.read_mask), num(key?.write_mask), key ? str(key.preset) || "custom" : "read_only", key?.may_delete === true)
+      return patch({ masks: redraft(f2, prev) })
     }
     case "rename":
       return void call("account.rename", { name: f.name ?? "" }, () => patch({ open: "" }))
@@ -408,14 +452,18 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "mint": {
       if (!form) return
       const days = Number(f.expires_in_days)
-      const params = { name: f.name ?? "", ...masksFrom(f, form), ...(days > 0 ? { expires_in_days: days } : {}) }
-      return void call("account.key.mint", params, (r) => reveal("account.key.mint", r))
+      const params = { name: f.name ?? "", ...masksFrom(draft("mint", 0, 0, "read_only", false)), ...(days > 0 ? { expires_in_days: days } : {}) }
+      return void call("account.key.mint", params, (r) => {
+        patch({ masks: null })
+        reveal("account.key.mint", r)
+      })
     }
     case "key-change": {
       if (!form) return
       const key = list("keys").find((k) => num(k.id) === id)
       const rename = key && str(key.name) !== f.name ? call("account.key.rename", { id, name: f.name ?? "" }) : Promise.resolve()
-      return void rename.then(() => call("account.key.change", { id, ...masksFrom(f, form) }, () => patch({ open: "" })))
+      const d = draft(`k${id}`, num(key?.read_mask), num(key?.write_mask), key ? str(key.preset) || "custom" : "custom", key?.may_delete === true)
+      return void rename.then(() => call("account.key.change", { id, ...masksFrom(d) }, () => patch({ open: "", masks: null })))
     }
     case "key-revoke":
       return void call("account.key.revoke", { id }, () => patch({ open: "" }))

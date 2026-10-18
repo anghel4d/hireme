@@ -357,3 +357,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .atlas-grid meter { width: 72px; height: 10px; vertical-align: middle; }
 .atlas-grid tr.route-citizen th { font-weight: 700; }
 .atlas-grid tr.route-unknown { color: var(--muted); }
+
+.mask-picker { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.mask-picker fieldset[disabled] { opacity: 0.75; }
+.mask-summary { margin: 0; padding: 6px 10px; border-radius: var(--radius); background: var(--sunk); border-left: 3px solid var(--accent); }

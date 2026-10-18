@@ -122,6 +122,8 @@ export interface AccountView {
   open: string
   error: string
   audit: Record<string, unknown>[] | null
+  /** The access being chosen in the open key form ("mint" or "k<id>"), so a redraw never resets it. */
+  masks: { form: string; preset: string; read: number; write: number; mayDelete: boolean } | null
 }
 
 /** The shell answers /world/:table and /lanes/:lane only, so those lenses always name one. */
@@ -163,7 +165,7 @@ export const model: Model = {
   drafts: new Map(),
   notices: [],
   rows: 0,
-  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
+  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
   deskLimit: 120,
   focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "" },
