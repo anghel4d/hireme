@@ -108,6 +108,38 @@ defmodule Hireme.ProvenanceTest do
     assert Repo.get!(Citation, c.id).source_id == c.source_id
   end
 
+  test "a key cannot drop a source a citation names: provenance outlives it", %{
+    account: a,
+    session: s
+  } do
+    id = corp(a, "k.example")
+
+    {[_], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "x", source: "https://k.example/about"},
+          target: id,
+          expect_rev: 1
+        )
+      )
+
+    [c] = Repo.all(from(c in Citation, where: c.row_id == ^id and c.column == "about"))
+
+    {:ok, %{key: key}} =
+      Hireme.Keys.mint(s, "deleter", %{read_mask: 31, write_mask: 31, may_delete: true})
+
+    {agent, _} = key_session(a.id, key, 997)
+
+    assert {[], [%{refusal: :scope} = nack]} =
+             key_session_ops(agent, op(:drop, :sources, %{}, target: c.source_id))
+
+    assert JSON.decode!(nack.data)["reason"] =~ "provenance"
+    assert Repo.get(Source, c.source_id)
+
+    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://k.example/other"}))
+    assert {[_], []} = key_session_ops(agent, op(:drop, :sources, %{}, target: uncited.id))
+  end
+
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
   } do

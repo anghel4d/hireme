@@ -1298,9 +1298,9 @@ defmodule Hireme.Sequencer do
   # ----------------------------------------------------------- the write
 
   defp write(plan, %{verb: :drop} = op, sub, _effects, _prov, state, turn) do
-    {deltas, rev} = delete(plan.table, plan.row, turn.now)
-
-    with :ok <- cascade_allowed(deltas, sub, state) do
+    with :ok <- provenance_kept(plan, sub),
+         {deltas, rev} = delete(plan.table, plan.row, turn.now),
+         :ok <- cascade_allowed(deltas, sub, state) do
       finish(state, turn, deltas, %{op_id: op.op_id, rev: rev, id: plan.row.id})
     end
   end
@@ -1625,12 +1625,36 @@ defmodule Hireme.Sequencer do
     })
   end
 
-  # Deletes a row and, first, everything whose ref names it.
+  # Provenance outlives what it names: only the operator drops a row a
+  # loose ref names (a cited source), and that drop is a tombstone.
+  defp provenance_kept(%{table: table, row: row}, sub) do
+    if sub.grants.actor != :operator and loosely_named?(table, row.id),
+      do: {:refused, :scope, %{table: table.name, reason: "cited; provenance outlives it"}},
+      else: :ok
+  end
+
+  defp loose_refs(table) do
+    for t <- Schema.tables(), c <- t.cols, c.loose and c.ref == table.name, do: {t, c}
+  end
+
+  defp loosely_named?(table, id) do
+    Enum.any?(loose_refs(table), fn {t, c} ->
+      field = String.to_atom(c.name)
+
+      Repo.exists?(from(r in Schema.row(t.name), where: field(r, ^field) == ^id),
+        skip_account: true
+      )
+    end)
+  end
+
+  # Deletes a row and, first, everything whose ref names it. A soft-delete
+  # table tombstones the row; one that loose refs name (sources) tombstones
+  # only a row they name, and deletes the rest.
   defp delete(table, row, now) do
     deltas = dependents(table, row.id, now)
     pid = row.id
 
-    if table.soft_delete do
+    if table.soft_delete and (loose_refs(table) == [] or loosely_named?(table, pid)) do
       {:ok, row} =
         row
         |> Ecto.Changeset.change(deleted_at: now, rev: row.rev + 1, updated_at: now)
