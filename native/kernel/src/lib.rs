@@ -18,6 +18,7 @@ pub mod ats;
 pub mod heat;
 pub mod org;
 pub mod pipeline;
+pub mod score;
 pub mod text;
 
 /// A calendar day as days since 1970-01-01, the schema's `day`.
