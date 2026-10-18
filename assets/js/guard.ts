@@ -1,11 +1,11 @@
-// Running a lens's hooks (enter, view, after, refresh) so one that throws
+// Running a lens's hooks (enter, view, after) so one that throws
 // cannot take the page down with it: the hook's fallback stands in, its first
 // failure is logged once with the error and told once in a clipped notice,
 // and the failure latches per lens and hook until that hook works again, so a
 // hook that keeps throwing (whatever its message) raises one notice, not one
 // per repaint. Pure: the shell passes in how to notify, log and defer.
 
-export const VERB = { enter: "load", view: "draw", after: "update", refresh: "refresh" } as const
+export const VERB = { enter: "load", view: "draw", after: "update" } as const
 export type Part = keyof typeof VERB
 
 /** The longest a failure's message runs in its notice. */

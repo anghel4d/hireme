@@ -51,10 +51,10 @@ test("the notice clips the message to 200 characters and folds its whitespace", 
 
 test("a hook that works again lifts its latch: the next failure is told again", () => {
   const { g, notes, logs } = setup()
-  g.run("lanes", "refresh", boom("down"), undefined)
-  g.run("lanes", "refresh", () => "ok", undefined)
-  expect(!g.failing("lanes", "refresh")).toBeTruthy()
-  g.run("lanes", "refresh", boom("down again"), undefined)
+  g.run("lanes", "after", boom("down"), undefined)
+  g.run("lanes", "after", () => "ok", undefined)
+  expect(!g.failing("lanes", "after")).toBeTruthy()
+  g.run("lanes", "after", boom("down again"), undefined)
   expect(notes.length).toBe(2)
   expect(logs.length).toBe(2)
   expect(notes[1]).toMatch(/down again/)

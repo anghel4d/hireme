@@ -32,8 +32,6 @@ export interface View {
   act?(name: string, el: HTMLElement, ev: Event): void
   /** After every morph: a lens that owns subtrees (the board's cards) writes them here. */
   after?(root: HTMLElement): void
-  /** Server-side rows may have moved (a PATCH advanced the rev, or the session came back): re-read what is shown, keeping what is being edited. */
-  refresh?(): void
   /** A key with no focused field; true when handled. */
   key?(ev: KeyboardEvent): boolean
 }
@@ -219,8 +217,6 @@ function frame(f: Bytes, h: Header): void {
       kernel.setGrants(w.readMask, w.writeMask, w.mayDelete)
       set({ writeMask: w.writeMask, sessionId: Number(w.sessionId), rev: w.accountRev, link: "open" })
       kernel.resend()
-      // After a reconnect the lens re-reads what it shows.
-      if (++welcomes > 1) refresh()
       return
     }
     case KIND.BYE: {
@@ -261,26 +257,6 @@ const wire = new Wire({
 })
 kernel.attach(wire)
 
-// Server-side tables never ride PATCH as rows; a PATCH that advanced the rev
-// says they may have moved, so the current lens re-reads: at once, then at
-// most every 400 ms while writes keep coming, and once more after the last.
-let lastRefresh = 0
-let trailing = 0
-function refresh(): void {
-  const now = Date.now()
-  clearTimeout(trailing)
-  if (now - lastRefresh >= 400) {
-    lastRefresh = now
-    // A lens still waiting for the first derive reads everything when it enters.
-    // Called from a frame's arrival: a lens whose refresh throws must not take the frame down with it.
-    const lens = model.address.lens
-    if (!waiting(lens)) guarded(lens, "refresh", () => VIEWS[lens]?.refresh?.(), undefined)
-  } else {
-    trailing = window.setTimeout(refresh, 400 - (now - lastRefresh))
-  }
-}
-kernel.onAdvance(refresh)
-let welcomes = 0
 
 void (async () => {
   await hw?.ready

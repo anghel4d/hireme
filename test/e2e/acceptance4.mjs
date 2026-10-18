@@ -162,7 +162,8 @@ let cardId = 0, corpId = 0, officeId = 0;
 await step("open the desk and world lenses", pages, async () => {
   await desk.goto(`${BASE}/desk`);
   await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "20 article.app-card on the desk");
-  await corps.goto(`${BASE}/world/corporations`);
+  // Every column group, empty columns too: the domain is in Identity, the headcount in Size.
+  await corps.goto(`${BASE}/world/corporations?cols=all&empty=show`);
   await offices.goto(`${BASE}/world/offices`);
   await until(async () => (await corps.locator("table").count()) > 0, "a table in world/corporations");
   await until(async () => (await offices.locator("table").count()) > 0, "a table in world/offices");
@@ -356,33 +357,36 @@ await step("a view throwing a new long message each time raises one clipped noti
   } finally { await p.close() }
 });
 
-// A page whose kernel `application` export traps while window.__trap is true
-// (from the start if `now`): each lens hook (enter, refresh, after) that runs
-// it must fail into its notice, not out of the frame.
-async function trapping(path, now) {
+// A page whose kernel export `name` traps while window.__trap is true (from
+// the start if `now`): each lens hook (enter, view, after) that runs it must
+// fail into its notice, not out of the frame.
+async function trapping(path, now, name = "application") {
   const p = await ctx.newPage();
-  await p.addInitScript((now) => {
+  await p.addInitScript(([now, name]) => {
     window.__trap = now;
     const real = WebAssembly.instantiate.bind(WebAssembly);
     WebAssembly.instantiate = async (m, imports) => {
       const out = await real(m, imports);
       const inst = out.instance ?? out;
-      const app = inst.exports.application;
-      const application = (...a) => { if (window.__trap) throw new WebAssembly.RuntimeError("unreachable (injected in application)"); return app(...a) };
-      const fake = { exports: { ...inst.exports, application } };
+      const real_ = inst.exports[name];
+      const trapped = (...a) => { if (window.__trap) throw new WebAssembly.RuntimeError(`unreachable (injected in ${name})`); return real_(...a) };
+      const fake = { exports: { ...inst.exports, [name]: trapped } };
       return out.instance ? { module: out.module, instance: fake } : fake;
     };
-  }, now);
+  }, [now, name]);
   await p.goto(`${BASE}${path}`);
   return p;
 }
 const cardNo = async () => (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
 
-await step("enter: from a drawn desk to focus with application trapping, focus shows its failure and the load notice", pages, async () => {
-  const p = await trapping("/desk", true);
+// Focus's enter resolves its application by number in the replica (kernel lookup, over the
+// ids_ptr export), so that is the export its enter runs: trapped once the desk is drawn.
+await step("enter: from a drawn desk to focus with the replica's ids trapping, focus shows its failure and the load notice", pages, async () => {
+  const p = await trapping("/desk", false, "ids_ptr");
   try {
     await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "the desk drawn");
     const no = await cardNo();
+    await p.evaluate(() => { window.__trap = true });
     await p.evaluate((no) => { history.pushState(null, "", `/focus/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
     await until(async () => /focus lens failed to load/.test(await notices(p)), '"focus lens failed to load" notice');
     const t = await lensText(p);
@@ -391,18 +395,8 @@ await step("enter: from a drawn desk to focus with application trapping, focus s
   } finally { await p.close() }
 });
 
-await step("refresh: a PATCH while focus's application traps raises the refresh notice", pages, async () => {
-  const no = await cardNo();
-  const p = await trapping(`/focus/${no}`, false);
-  try {
-    await until(async () => /Draft ready|draft ready/i.test(await lensText(p)), "focus drawn");
-    await p.evaluate(() => { window.__trap = true });
-    await agent.call("put", { table: "applications", id: cardId, set: { role: "Role rewritten" } });
-    await until(async () => /focus lens failed to refresh/.test(await notices(p)), '"focus lens failed to refresh" notice');
-    return "refresh notice on the PATCH";
-  } finally { await p.close() }
-});
-
+// No lens has a refresh hook since every read is the replica's (the PATCH redraws what it moved), so
+// the refresh step that trapped one is retired with the hook.
 await step("after: the desk's cards failing to fill (card traps) raises the update notice, the board drawn", pages, async () => {
   const p = await faulted("card");
   try {

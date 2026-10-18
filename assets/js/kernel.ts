@@ -129,7 +129,6 @@ export const ready = (): boolean => k !== null
 /** The rev the rows stand at: from BOOT, PATCH and TICK headers and the snapshot, never from WELCOME. */
 let rowsRev = 0n
 /** A BOOT (or a snapshot) is in, so a PATCH after it is news, whatever the rev (a fresh account's is 0). */
-let booted = false
 
 /** What HELLO names on a reconnect, so the server sends only what moved since. */
 export function snapshotRev(): bigint {
@@ -160,7 +159,6 @@ export function load(hw: Boot): void {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
       if (rev >= 0n) {
         rowsRev = rev
-        booted = true
         restored = true
       } else if (wire) {
         // HELLO named a snapshot the kernel refused: only a whole BOOT puts the rows right.
@@ -270,21 +268,12 @@ function ingest(f: Uint8Array): boolean {
     return false
   }
   const h = header(f as Bytes)
-  if (h.kind === KIND.BOOT) booted = true
   if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
   return true
 }
 
-let advanced: () => void = () => {}
-
-/** app.ts: called when a PATCH moves the account's rev, so server-side reads go stale. */
-export function onAdvance(fn: () => void): void {
-  advanced = fn
-}
-
 /** Every frame the shell does not handle itself. */
 export function frame(f: Bytes, h: Header): void {
-  if (h.kind === KIND.PATCH && booted && h.rev > rowsRev) advanced()
   if (h.kind === KIND.ACK) for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
   if (h.kind === KIND.NACK) for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })
   // The kernel takes the whole frame: rows, and the settle or rollback of pending writes.
