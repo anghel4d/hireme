@@ -30,8 +30,8 @@ function current(): TableDef {
 
 const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
 
-/** The columns a grid shows: declared, not secret, and not a metric's `_on` twin (shown inside its metric). */
-const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
+/** The columns a grid shows: declared, not secret, and no twin (a metric's `_on` shows inside its metric; a deferred text's `_sha` is only its fingerprint). */
+const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null && c.shaOf === null)
 
 /** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
 const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
