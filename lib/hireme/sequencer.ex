@@ -1161,7 +1161,6 @@ defmodule Hireme.Sequencer do
   defp reduce_cells(cells, fun) do
     Enum.reduce_while(cells, {:ok, %{}}, fn cell, {:ok, acc} ->
       case fun.(cell) do
-        :skip -> {:cont, {:ok, acc}}
         {:ok, name, value} -> {:cont, {:ok, Map.put(acc, name, value)}}
         refused -> {:halt, refused}
       end
@@ -1256,10 +1255,10 @@ defmodule Hireme.Sequencer do
   # ----------------------------------------------------------- the write
 
   defp write(plan, %{verb: :drop} = op, sub, _effects, state, turn) do
-    with {deltas, rev} = delete(plan.table, plan.row, turn.now),
-         :ok <- cascade_allowed(deltas, sub, state) do
-      finish(state, turn, deltas, %{op_id: op.op_id, rev: rev, id: plan.row.id})
-    end
+    {deltas, rev} = delete(plan.table, plan.row, turn.now)
+
+    with :ok <- cascade_allowed(deltas, sub, state),
+         do: finish(state, turn, deltas, %{op_id: op.op_id, rev: rev, id: plan.row.id})
   end
 
   # The kernel judged the op (check 4, the one judge: shape, provenance,

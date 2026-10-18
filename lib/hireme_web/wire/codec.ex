@@ -116,7 +116,8 @@ defmodule HiremeWeb.Wire.Codec do
       when byte_size(f) == len and len >= @header and rem(len, 8) == 0 do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- frame_name(kind),
-         :ok <- if((flags &&& bnot(@deflate ||| @end_flag)) == 0, do: :ok, else: {:error, :body}),
+         # Bits tested without bnot, which Dialyzer types as never zero.
+         :ok <- if((flags &&& (@deflate ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
          {:ok, body} <- inflate(flags, body, max_inflated) do
       {:ok, name, flags, rev, body}
     end
@@ -342,7 +343,7 @@ defmodule HiremeWeb.Wire.Codec do
         <<op_id::little-64, verb::8, flags::8, subject::little-16, target::little-32,
           ncols::little-16, 0::16, expect::little-32, rest::binary>> = bin
       )
-      when verb in 1..3 and (flags &&& bnot(@keyed ||| @create_only ||| @expect_rev)) == 0 do
+      when verb in 1..3 and (flags &&& (@keyed ||| @create_only ||| @expect_rev)) == flags do
     if (flags &&& @expect_rev) == 0 and expect != 0 do
       :error
     else
@@ -405,7 +406,7 @@ defmodule HiremeWeb.Wire.Codec do
 
   def encode_op({op_id, verb, flags, subject, target, expect_rev, cells}) do
     v = %{put: 1, drop: 2, command: 3}[verb]
-    flags = if expect_rev, do: flags ||| @expect_rev, else: flags &&& bnot(@expect_rev)
+    flags = if expect_rev, do: flags ||| @expect_rev, else: flags - (flags &&& @expect_rev)
 
     [
       <<op_id::little-64, v::8, flags::8, subject::little-16, target::little-32,

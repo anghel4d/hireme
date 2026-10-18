@@ -81,7 +81,7 @@ defmodule Hireme.WireClient do
             _, acc -> acc
           end)
 
-        if done,
+        if done and is_integer(status),
           do: {conn, status, headers, early},
           else: upgrade_response(conn, ref, status, headers, early)
     after
