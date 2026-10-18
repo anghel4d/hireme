@@ -204,26 +204,37 @@ defmodule Hireme.ImportTest do
            ) == [4_294_967_294]
   end
 
-  test "a day before 1970 imports; a day or as_of past 9999-12-31 is refused", %{account: a} do
+  test "a parseable day outside 0000-01-01..9999-12-31 is refused (a BC date, a year 10000), as is such an as_of",
+       %{account: a} do
     t = "#{System.unique_integer([:positive])}"
 
     rows =
-      for {d, i} <- Enum.with_index(["1897-01-01", "+10000-01-01", "0000-01-01"]),
-          do: %{"domain" => "d#{i}.#{t}.example", "name" => "D#{i}", "last_round_on" => d}
+      for {d, i} <-
+            Enum.with_index([
+              "-0001-12-31",
+              %{"year" => 10_000, "month" => 1, "day" => 1},
+              "0000-01-01",
+              "1897-01-01"
+            ]),
+          do: %{"domain" => "r#{i}.#{t}.example", "name" => "R#{i}", "last_round_on" => d}
 
     pack = %{"tables" => [%{"table" => "corporations", "rows" => rows}]}
     {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
-    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{1, :type}]
+
+    assert [
+             %{row: 0, code: :type, data: %{reason: "out of range", column: "last_round_on"}},
+             %{row: 1, code: :type, data: %{reason: "out of range", column: "last_round_on"}}
+           ] = report.refusals
 
     assert Repo.all(
              from c in Corporation,
                where: like(c.domain, ^"%.#{t}.example"),
                order_by: c.domain,
                select: c.last_round_on
-           ) == [~D[1897-01-01], ~D[0000-01-01]]
+           ) == [~D[0000-01-01], ~D[1897-01-01]]
 
     far = %{
-      "as_of" => "+10000-01-01",
+      "as_of" => "-0001-12-31",
       "tables" => [
         %{
           "table" => "corporations",
@@ -233,7 +244,7 @@ defmodule Hireme.ImportTest do
     }
 
     {:ok, report} = Import.run(a.id, Jason.encode!(far), :json)
-    assert [%{code: :type}] = report.refusals
+    assert [%{code: :type, data: %{column: "as_of"}}] = report.refusals
   end
 
   test "a row names the natural key its own values satisfy", %{account: a} do
@@ -480,6 +491,24 @@ defmodule Hireme.ImportTest do
     {:ok, %{refusals: refusals} = report} = Import.run(a.id, body, :json)
     assert length(refusals) == 4
     assert byte_size(inspect(report)) < 4_000
+
+    sly = "\e[2J\e[31mFAKE\e[0m\rok"
+
+    sly_body =
+      Jason.encode!(%{
+        "tables" => [
+          %{"table" => "corporations", "rows" => [%{"domain" => "s.example", sly => 1}]},
+          %{"table" => sly, "rows" => [%{"name" => "S"}]}
+        ]
+      })
+
+    {:ok, sly_report} = Import.run(a.id, sly_body, :json)
+    refute inspect(sly_report, printable_limit: :infinity) =~ "\e"
+
+    for r <- sly_report.refusals,
+        name <- [r.table, r.data[:table], r.data[:column]],
+        is_binary(name),
+        do: refute(name =~ ~r/[\e\r]/)
 
     bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
     assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)

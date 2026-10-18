@@ -119,20 +119,61 @@ defmodule Hireme.PauseLedgerTest do
     assert length(ledger_ids(b.account.id)) == window
   end
 
-  test "expired ledger entries go in chunks across messages, live ones stay, another account's are its own",
-       %{account: a} do
+  test "the purge ends once this account's expired rows are gone, in chunks of at most 5,000", %{
+    account: a
+  } do
     old = DateTime.add(Hireme.Store.now(), -25 * 3600)
     expire = fn rows -> for r <- rows, do: %{r | inserted_at: old, updated_at: old} end
     b = Hireme.DataCase.sign_in()
     insert_ledger(expire.(ledger_rows(b.account.id, 1, 5_001)))
     insert_ledger(expire.(ledger_rows(a.id, 10_000, 12_000)) ++ ledger_rows(a.id, 30_000, 1))
 
-    # The sequencer's start purges them as messages between batches, never
-    # one statement; its first op does not wait for them all.
+    me = self()
+    handler = "zz-purge-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:hireme, :repo, :query],
+      fn _e, _m, meta, _c ->
+        if String.contains?(meta.query, ~s(DELETE FROM "op_ledger")),
+          do: send(me, {:delete, length(meta.params)})
+      end,
+      nil
+    )
+
     {[_], []} = run(a.id, gym("after"))
     assert eventually(fn -> length(ledger_ids(a.id)) == 2 end)
-    # Another account's expired entries are its own sequencer's to purge.
+    :telemetry.detach(handler)
+
+    # three chunk deletes for 12,000 expired rows (5,000 + 5,000 + 2,000), none bigger
+    sizes =
+      for _ <- 1..3,
+          do:
+            (
+              assert_receive {:delete, n}, 1_000
+              n
+            )
+
+    assert Enum.all?(sizes, &(&1 <= 5_001))
+    refute_receive {:delete, _}, 100
+
+    # and it is over: an idle sequencer, not one re-selecting rows it cannot delete
+    pid = seq(a.id)
+    {:reductions, r1} = Process.info(pid, :reductions)
+    Process.sleep(150)
+    {:reductions, r2} = Process.info(pid, :reductions)
+    assert r2 - r1 < 50_000
     assert length(ledger_ids(b.account.id)) == 5_001
+  end
+
+  # ---- P1: a purge drops the cached ledger count
+
+  test "a purge drops the cached ledger count", %{account: a} do
+    {[_], []} = run(a.id, gym("warm"))
+    t = Hireme.Schema.table("op_ledger")
+    :sys.replace_state(seq(a.id), &put_in(&1.counts[t.id], t.cap))
+    send(seq(a.id), :purge_more)
+    refute Map.has_key?(:sys.get_state(seq(a.id)).counts, t.id)
   end
 
   defp eventually(f, tries \\ 100) do
@@ -220,6 +261,7 @@ defmodule Hireme.PauseLedgerTest do
     row = key_row(key.id)
     assert row.revoked_at
     assert row.paused_at == nil
+    refute Map.has_key?(:sys.get_state(pid).lease.paused, key.id)
   end
 
   test "a Resume that lands between the sequencer's load and its subscription is not lost",
@@ -253,6 +295,27 @@ defmodule Hireme.PauseLedgerTest do
     assert key_row(kid).paused_at == nil
     assert {:ok, _} = Lease.claim(a.id, 905, %{})
   end
+
+  test "a Resume message corrects a stale in-memory pause time to the row's", %{
+    account: a,
+    session: s
+  } do
+    key = mint(s, "since2")
+    {_agent, _} = key_session(a.id, key, 907)
+    :ok = Lease.revoke(a.id, 907, %{})
+
+    :sys.replace_state(seq(a.id), fn st ->
+      put_in(st.lease.paused[key.id], ~U[2026-09-01 00:00:00Z])
+    end)
+
+    send(seq(a.id), {:resume, {:key, key.id}})
+    _ = :sys.get_state(seq(a.id))
+
+    row_since = DateTime.to_iso8601(key_row(key.id).paused_at)
+    assert {:refused, :lease_missing, %{since: ^row_since}} = Lease.claim(a.id, 907, %{})
+  end
+
+  # ---- Q6: a lease revoke landing after the key's own revoke holds nothing in memory
 
   test "a re-pause that lands before an earlier Resume's message stands", %{
     account: a,

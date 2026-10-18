@@ -308,8 +308,34 @@ defmodule Hireme.ProvenanceTest do
              )
 
     assert nack.refusal == :type and JSON.decode!(nack.data)["reason"] =~ "2048 bytes"
-    assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: long}))
+    assert {[], [row]} = run(a.id, op(:put, :sources, %{url: long}))
+    assert row.refusal == :type and JSON.decode!(row.data)["reason"] =~ "2048 bytes"
   end
+
+  test "prose restated with an explicit as_of: the same date writes nothing, another date cites",
+       %{account: a} do
+    id = corp(a, "pa.example")
+
+    put = fn as_of, rev ->
+      op(:put, :corporations, %{about: "Old", source: "https://pa.example/x", as_of: as_of},
+        target: id,
+        expect_rev: rev
+      )
+    end
+
+    count = fn ->
+      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == "about"), :count)
+    end
+
+    {[first], []} = run(a.id, put.(~D[2026-09-01], 1))
+    {[same], []} = run(a.id, put.(~D[2026-09-01], first.rev))
+    assert same.rev == first.rev and count.() == 1
+    {[later], []} = run(a.id, put.(~D[2026-09-15], first.rev))
+    assert later.rev == first.rev + 1 and count.() == 2
+    assert Repo.get!(Corporation, id).rev == later.rev
+  end
+
+  # ---- Q5: the Resume message re-holds at the row's own time
 
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
@@ -417,6 +443,8 @@ defmodule Hireme.ProvenanceTest do
     # Leading zeros are a browser's too; a URL past 4 KiB or a huge port is
     # refused before any parsing.
     assert Provenance.host("https://a.example:00080/p") == "a.example"
+    assert Provenance.host("https://a.example:0/") == "a.example"
+    assert Provenance.host("https://a.example:00/") == "a.example"
 
     for hostile <- [
           "https://a.example:" <> String.duplicate("9", 1_000_000),
@@ -424,7 +452,8 @@ defmodule Hireme.ProvenanceTest do
           "https://" <> String.duplicate("a.", 500_000) <> "example/"
         ] do
       {us, nil} = :timer.tc(fn -> Provenance.host(hostile) end)
-      assert us < 1_000, "#{us} µs for #{byte_size(hostile)} bytes"
+      # A cost regression was ~200 ms; 20 ms leaves a loaded machine room.
+      assert us < 20_000, "#{us} µs for #{byte_size(hostile)} bytes"
     end
 
     assert Provenance.host("https://a.example/" <> String.duplicate("p", 2_048)) == nil

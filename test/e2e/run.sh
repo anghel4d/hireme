@@ -38,24 +38,29 @@ done
 E2E_NODE=$(mktemp -d /tmp/hireme-e2e-node.XXXXXX)
 TMP=$(mktemp -d /tmp/hireme-e2e-db.XXXXXX)
 OUT=${OUT:-$(mktemp -d /tmp/hireme-e2e.XXXXXX)}
-mkdir -p "$OUT"
+mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
 
 echo "out=$OUT sha=${SHA:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)}"
 
+# Long steps run in the background and are waited for, so a signal to this
+# script is acted on at once, not when the step ends.
+bg() { "$@" & wait $!; }
+
 if [ -z "${HIREME_MCP:-}" ]; then
-  cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
+  bg cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
   HIREME_MCP="${CARGO_TARGET_DIR:-$ROOT/native/target}/release/hireme-mcp"
 fi
 [ -x "$HIREME_MCP" ] || { echo "FAIL setup: no hireme-mcp at $HIREME_MCP"; echo "res=1"; exit 1; }
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
 printf '{"private":true}\n' >"$E2E_NODE/package.json"
-(cd "$E2E_NODE" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix "$E2E_NODE" --no-workspaces \
+(cd "$E2E_NODE" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bg npm --prefix "$E2E_NODE" --no-workspaces \
   --ignore-scripts --no-audit --no-fund install --silent playwright@1.64.1)
 [ -f "$E2E_NODE/node_modules/playwright/index.mjs" ] || { echo "FAIL setup: playwright did not install into $E2E_NODE"; echo "res=1"; exit 1; }
 
 cd "$ROOT"
-MIX_ENV=dev mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mix assets.build (see $OUT/build.log)"; echo "res=1"; exit 1; }
+# mix.exs copies kernel.wasm from native/target, so the build lands there.
+CARGO_TARGET_DIR="$ROOT/native/target" MIX_ENV=dev bg mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mix assets.build (see $OUT/build.log)"; echo "res=1"; exit 1; }
 
 # The port is picked just before the node binds it, and the node is ours
 # only if it is alive and its log names that port.
