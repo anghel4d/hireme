@@ -22,6 +22,9 @@ config :hireme, HiremeWeb.Endpoint,
   secret_key_base: secret_key_base,
   server: false
 
+# No gate: a test that needs the wire speaks to the session directly.
+config :hireme, :gate, false
+
 # Tests drain the outbox themselves; no worker sends behind their back.
 config :hireme, :mail_outbox, false
 

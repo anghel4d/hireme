@@ -1,0 +1,64 @@
+defmodule Hireme.DataCase do
+  @moduledoc """
+  A test that touches the database: a sandboxed connection, no account on
+  the process, and empty rate limiters (they live in ETS and outlive the
+  sandbox, while account ids repeat across tests).
+  """
+
+  use ExUnit.CaseTemplate
+
+  using do
+    quote do
+      import Ecto.Query
+      import Hireme.DataCase
+      alias Hireme.Repo
+    end
+  end
+
+  setup tags do
+    setup_sandbox(tags)
+    :ok
+  end
+
+  def setup_sandbox(tags) do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Hireme.Repo, shared: not tags[:async])
+    ExUnit.Callbacks.on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+    # The sandbox's transaction is deferred, and a deferred transaction that
+    # has read cannot wait for the write lock: SQLite answers BUSY at once,
+    # past the busy timeout, while the last test's connection may still be
+    # rolling back. A write before any read takes the lock where the timeout
+    # waits, so every test starts holding it.
+    Ecto.Adapters.SQL.query!(
+      Hireme.Repo,
+      "UPDATE schema_files SET applied_at = applied_at WHERE 0"
+    )
+
+    Hireme.Repo.put_account(nil)
+    :ets.delete_all_objects(Hireme.RateLimit)
+  end
+
+  @doc """
+  A signed-in account through the same path a mailed link takes. Answers
+  the account, its session, and the cookie token.
+  """
+  def sign_in(email \\ "person#{System.unique_integer([:positive])}@example.com") do
+    {:ok, token, session} =
+      Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email}, %{ip: "127.0.0.1"})
+
+    %{
+      account: Hireme.Accounts.get(session.account_id),
+      session: session,
+      token: token,
+      email: email
+    }
+  end
+
+  @doc "Move a row's timestamps into the past, as a clock would."
+  def age(row, field, seconds) do
+    value = DateTime.add(Map.fetch!(row, field), -seconds)
+
+    row
+    |> Ecto.Changeset.change([{field, value}])
+    |> Hireme.Repo.update!(skip_account: true)
+  end
+end
