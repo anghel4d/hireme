@@ -37,6 +37,8 @@ defmodule Hireme.DataCase do
 
     Hireme.Repo.put_account(nil)
     :ets.delete_all_objects(Hireme.RateLimit)
+    # Like the limiter, the coalescer's counts outlive a test's sandbox.
+    :ets.delete_all_objects(Hireme.Audit.Coalescer)
   end
 
   @doc """
