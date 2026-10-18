@@ -42,34 +42,38 @@ const WT_WAIT_MS = 3000
     snap: new Promise((resolve) => {
       if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
       setTimeout(() => resolve(undefined), 2000)
-      let open: IDBOpenDBRequest
-      try {
-        // Blocked storage throws here rather than failing the request.
-        open = indexedDB.open("hireme", 1)
-      } catch {
-        return resolve(undefined)
-      }
-      open.onupgradeneeded = () => open.result.createObjectStore("snap")
-      open.onerror = () => resolve(undefined)
-      open.onsuccess = () => {
-        const db = open.result
-        // The read's connection closes when it is done, so a sign-out's deleteDatabase is not blocked.
-        db.onversionchange = () => db.close()
+      // A profile with no database has no snapshot: known at once, not after opening (creating) one.
+      void (indexedDB.databases?.() ?? Promise.resolve([{ name: "hireme" }])).then((dbs) => dbs.some((d) => d.name === "hireme"), () => true).then((has) => {
+        if (!has) return resolve(undefined)
+        let open: IDBOpenDBRequest
         try {
-          const tx = db.transaction("snap")
-          tx.oncomplete = tx.onerror = tx.onabort = () => db.close()
-          const get = tx.objectStore("snap").get(scope)
-          get.onsuccess = () => {
-            const s = get.result as Snapshot | undefined
-            // A snapshot of another schema is refused by the kernel; naming its rev in HELLO would resume rows the page cannot hold.
-            resolve(s && s.wireHash === m.hash && s.schemaRev === BigInt(SCHEMA_REV) ? s : undefined)
-          }
-          get.onerror = () => resolve(undefined)
+          // Blocked storage throws here rather than failing the request.
+          open = indexedDB.open("hireme", 1)
         } catch {
-          db.close()
-          resolve(undefined)
+          return resolve(undefined)
         }
-      }
+        open.onupgradeneeded = () => open.result.createObjectStore("snap")
+        open.onerror = () => resolve(undefined)
+        open.onsuccess = () => {
+          const db = open.result
+          // The read's connection closes when it is done, so a sign-out's deleteDatabase is not blocked.
+          db.onversionchange = () => db.close()
+          try {
+            const tx = db.transaction("snap")
+            tx.oncomplete = tx.onerror = tx.onabort = () => db.close()
+            const get = tx.objectStore("snap").get(scope)
+            get.onsuccess = () => {
+              const s = get.result as Snapshot | undefined
+              // A snapshot of another schema is refused by the kernel; naming its rev in HELLO would resume rows the page cannot hold.
+              resolve(s && s.wireHash === m.hash && s.schemaRev === BigInt(SCHEMA_REV) ? s : undefined)
+            }
+            get.onerror = () => resolve(undefined)
+          } catch {
+            db.close()
+            resolve(undefined)
+          }
+        }
+      })
     }),
   }
   hw.kernel.catch(() => {})
