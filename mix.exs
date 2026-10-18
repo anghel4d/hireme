@@ -51,16 +51,41 @@ defmodule Hireme.MixProject do
   # There is no ecto.migrate: a database is the generated baseline plus
   # additive files, applied by `Hireme.Release` at boot (and by the test
   # helper on each run's own database).
+  # Build the kernel for wasm and copy it from wherever cargo put it (its
+  # target dir may be moved by CARGO_TARGET_DIR or a cargo config), so the
+  # page never gets a kernel.wasm left from another build.
+  defp wasm(_) do
+    manifest = ["--manifest-path", "native/Cargo.toml"]
+
+    cargo = fn args ->
+      case System.cmd("cargo", args ++ manifest, into: IO.stream(), stderr_to_stdout: true) do
+        {_, 0} -> :ok
+        {_, status} -> Mix.raise("cargo #{hd(args)} failed (exit #{status})")
+      end
+    end
+
+    cargo.(
+      ~w(rustc -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib)
+    )
+
+    {json, 0} = System.cmd("cargo", ["metadata", "--format-version", "1", "--no-deps" | manifest])
+
+    built =
+      Path.join(
+        JSON.decode!(json)["target_directory"],
+        "wasm32-unknown-unknown/release/kernel.wasm"
+      )
+
+    File.mkdir_p!("priv/static/wasm")
+    File.cp!(built, "priv/static/wasm/kernel.wasm")
+  end
+
   defp aliases do
     [
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["esbuild.install --if-missing"],
       # The kernel as WebAssembly for the browser; Nix builds it for a release.
-      "assets.wasm": [
-        "cmd cargo rustc --manifest-path native/Cargo.toml -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib",
-        "cmd mkdir -p priv/static/wasm",
-        "cmd cp native/target/wasm32-unknown-unknown/release/kernel.wasm priv/static/wasm/kernel.wasm"
-      ],
+      "assets.wasm": &wasm/1,
       "assets.build": ["compile", "assets.wasm", "esbuild app", "esbuild early", "esbuild auth"],
       "assets.deploy": [
         "esbuild app --minify",
