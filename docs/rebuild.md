@@ -109,7 +109,8 @@ without a reload; only passkey ceremonies need a small script.
 
 ## The schema compiler
 
-One neutral declaration, parsed by every language. Not an Elixir DSL:
+One neutral declaration, parsed once (`native/schema`) and read by every
+language. Not an Elixir DSL:
 enums and commands belong to the kernel, so the file is the only place
 that can name them without a language owning them.
 
@@ -152,7 +153,7 @@ enum refusal scope human_only lease_missing leased column type not_found natural
 ```
 
 The grammar is stated once, in the header of `schema/hireme.schema`, and
-both parsers refuse anything else. In outline: `domain`, `frame`,
+the parser refuses anything else. In outline: `domain`, `frame`,
 `layout`, `enum`, `table` (residency `resident` | `server` | `wire`, and
 `append_only`, `soft_delete`, `global`, `account_optional`, `singleton`),
 `projection` with `pick`, `natural`/`unique`/`index` (optionally `where`),
@@ -170,15 +171,14 @@ with no foreign key, for references from append-only tables that a purge
 must never rewrite).
 
 Emitters (`mix hireme.schema`). `--check`, and `mix test`, fail when a
-checked-in output differs from a fresh emit, when the Rust and Elixir
-canonical dumps differ, when the baseline does not apply, when an existing
-id moved, or when a frozen baseline no longer matches `priv/db/baseline.lock`.
+checked-in output differs from a fresh emit, when the baseline does not
+apply, when an existing id moved, or when a frozen baseline no longer matches `priv/db/baseline.lock`.
 `--migration NAME` writes an additive step, `--renumber` allows an id move
 before the freeze, and `--freeze` locks the deployed baseline at cutover:
 
 | Emitter | Output | Checked in? |
 | --- | --- | --- |
-| Ecto row macros | compile-time, from the file (`@external_resource`) | no |
+| model JSON | `priv/schema.json`, the resolved declaration `Hireme.Schema` and its Ecto row macros compile from | yes |
 | baseline SQL | `priv/db/baseline.sql` | yes |
 | additive SQL | `priv/db/NNNN_<name>.sql`, declaration minus `PRAGMA table_info` | yes |
 | wire catalog | the `catalog` table in every BOOT, built at runtime | no |

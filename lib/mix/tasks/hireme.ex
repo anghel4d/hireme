@@ -6,12 +6,12 @@ defmodule Mix.Tasks.Hireme.Schema do
 
     * `priv/db/baseline.sql`: the whole declaration on an empty database
     * `assets/js/gen/schema.ts`: ids, enums, the catalog and row interfaces
+    * `priv/schema.json`: the resolved model `Hireme.Schema` compiles from
 
   Options:
 
     * `--check`: write nothing; fail when a checked-in output differs from
-      a fresh emit, when the Rust and Elixir readings of the file differ,
-      when the baseline does not apply to an empty database, or when an
+      a fresh emit, when the baseline does not apply to an empty database, or when an
       existing table, column or command changed its id
     * `--migration NAME`: also write `priv/db/NNNN_NAME.sql`, the
       declaration minus the previous baseline (additive only; a destructive
@@ -51,6 +51,8 @@ defmodule Mix.Tasks.Hireme.Schema do
   @baseline "priv/db/baseline.sql"
   @lock "priv/db/baseline.lock"
   @ts "assets/js/gen/schema.ts"
+  @json "priv/schema.json"
+  @schema "schema/hireme.schema"
 
   @impl Mix.Task
   def run(argv) do
@@ -66,19 +68,19 @@ defmodule Mix.Tasks.Hireme.Schema do
           "unknown arguments #{inspect(Enum.map(invalid, &elem(&1, 0)) ++ rest)}; see mix help hireme.schema"
         )
 
-    Mix.Task.run("compile")
-
+    # The emits need no compiled app, and the app compiles from the json.
     sql = emit!(["sql"])
     ts = emit!(["ts"])
+    json = emit!(["json"])
 
     cond do
-      opts[:freeze] -> freeze!(sql, ts, opts)
-      opts[:check] -> check!(sql, ts, opts)
-      true -> write!(sql, ts, opts)
+      opts[:freeze] -> freeze!(sql, ts, json, opts)
+      opts[:check] -> check!(sql, ts, json, opts)
+      true -> write!(sql, ts, json, opts)
     end
   end
 
-  defp write!(sql, ts, opts) do
+  defp write!(sql, ts, json, opts) do
     # Ids are the wire's ABI: once a baseline is deployed they never move,
     # so a reorder belongs before --freeze.
     if opts[:renumber] && locked(),
@@ -108,11 +110,12 @@ defmodule Mix.Tasks.Hireme.Schema do
 
     put!(@baseline, sql)
     put!(@ts, ts)
+    put!(@json, json)
   end
 
   # The cutover's one step: lock the baseline every deployed database starts from.
-  defp freeze!(sql, ts, opts) do
-    check!(sql, ts, opts)
+  defp freeze!(sql, ts, json, opts) do
+    check!(sql, ts, json, opts)
     put!(@lock, lock_text(sql))
   end
 
@@ -141,19 +144,20 @@ defmodule Mix.Tasks.Hireme.Schema do
     end
   end
 
-  defp check!(sql, ts, opts) do
+  defp check!(sql, ts, json, opts) do
     problems =
       [
         differs(@baseline, sql),
         differs(@ts, ts),
-        canonical_problem(),
+        differs(@json, json),
         apply_problem(sql),
         lock_problem()
-      ] ++ id_problems(ts, opts)
+      ] ++
+        id_problems(ts, opts)
 
     case Enum.reject(problems, &is_nil/1) do
       [] ->
-        Mix.shell().info("schema: #{@baseline} and #{@ts} match schema/hireme.schema")
+        Mix.shell().info("schema: #{@baseline}, #{@ts} and #{@json} match #{@schema}")
 
       problems ->
         Mix.raise(
@@ -168,18 +172,6 @@ defmodule Mix.Tasks.Hireme.Schema do
       {:ok, _} -> "#{path} differs from a fresh emit"
       {:error, _} -> "#{path} is missing"
     end
-  end
-
-  # The crate and Hireme.Schema read the file by the same rules; the
-  # canonical dumps they hash must be the same bytes.
-  defp canonical_problem do
-    Enum.find_value([:wire, :full], fn scope ->
-      rust = emit!(["canonical", Atom.to_string(scope)])
-
-      if rust != Hireme.Schema.canonical(scope) do
-        "the #{scope} canonical dump differs between native/schema and Hireme.Schema"
-      end
-    end)
   end
 
   defp apply_problem(sql) do
@@ -438,7 +430,7 @@ defmodule Mix.Tasks.Hireme.Schema do
     System.cmd(
       "cargo",
       ~w(run --quiet --manifest-path native/Cargo.toml -p schema --bin hireme-schema --) ++
-        ["--schema", Hireme.Schema.path()] ++ args,
+        ["--schema", Path.join(@root, @schema)] ++ args,
       # Warnings and diagnostics go to the terminal; stdout is the output.
       cd: @root
     )

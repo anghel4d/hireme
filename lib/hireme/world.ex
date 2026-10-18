@@ -29,7 +29,6 @@ defmodule Hireme.World do
   require Logger
   alias Hireme.{Grants, Repo, Schema}
   alias Hireme.Rows.{Citation, Source}
-  alias Hireme.Schema.Parser
 
   @find_limit 50
   @find_max 500
@@ -103,7 +102,7 @@ defmodule Hireme.World do
                 "type" => c.type,
                 "type_code" => c.type_code,
                 "wire" => c.wire,
-                "flags" => Parser.flags(c),
+                "flags" => c.flags,
                 "target" => c.target
               }
             end

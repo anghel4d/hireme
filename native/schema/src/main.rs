@@ -2,6 +2,7 @@
 //!
 //!   hireme-schema sql                 priv/db/baseline.sql on stdout
 //!   hireme-schema ts                  assets/js/gen/schema.ts on stdout
+//!   hireme-schema json                priv/schema.json on stdout
 //!   hireme-schema diff <shape-file>   additive SQL for a database's shape;
 //!                                     or, for a destructive change, only its
 //!                                     `destructive:` lines and exit 3
@@ -11,7 +12,7 @@
 //! Every command reads the declaration from `--schema <path>` (default: the
 //! one compiled in), so the mix task can run it against the tree's file.
 
-use schema::{Scope, sql, ts};
+use schema::{Scope, json, sql, ts};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
     let out = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["sql"] => sql::baseline(&model),
         ["ts"] => ts::emit(&model),
+        ["json"] => json::emit(&model),
         ["canonical", "wire"] => schema::canonical(&model, Scope::Wire),
         ["canonical", "full"] => schema::canonical(&model, Scope::Full),
         ["hash"] => format!("wire_hash {:#06x}\nschema_rev {:#010x}\n", model.wire_hash, model.schema_rev),
@@ -61,7 +63,7 @@ fn main() -> ExitCode {
                 Err(e) => return fail(&e),
             }
         }
-        _ => return fail("usage: hireme-schema [--schema <path>] sql | ts | diff <shape> | canonical wire|full | hash"),
+        _ => return fail("usage: hireme-schema [--schema <path>] sql | ts | json | diff <shape> | canonical wire|full | hash"),
     };
     print(&out);
     ExitCode::SUCCESS

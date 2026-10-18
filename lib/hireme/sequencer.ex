@@ -52,7 +52,6 @@ defmodule Hireme.Sequencer do
   require Logger
 
   alias Hireme.{Grants, Kernel, Lease, Provenance, Repo, Schema, Security, Store}
-  alias Hireme.Schema.Parser
   alias HiremeWeb.Wire.Codec
 
   @batch 64
@@ -1832,7 +1831,7 @@ defmodule Hireme.Sequencer do
               id: c.id,
               name: c.name,
               type: c.type_code,
-              flags: Parser.flags(c),
+              flags: c.flags,
               target: c.target
             }
           end

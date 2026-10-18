@@ -54,7 +54,7 @@ impl Lossless for char {
     }
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::from("\"");
     for ch in s.chars() {
         match ch {
@@ -69,7 +69,7 @@ fn json_str(s: &str) -> String {
     out
 }
 
-fn opt_str(v: Option<&str>) -> String {
+pub(crate) fn opt_str(v: Option<&str>) -> String {
     match v {
         Some(v) => json_str(v),
         None => String::from("null"),

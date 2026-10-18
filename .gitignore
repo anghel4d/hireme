@@ -34,6 +34,7 @@
 
 # Generated SQL is a checked artifact; build output is not.
 !/priv/
+!/priv/schema.json
 !/priv/db/
 !/priv/db/*.sql
 # The deployed baseline's hash: `mix hireme.schema --freeze` writes it, and
