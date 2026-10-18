@@ -313,7 +313,7 @@ pub fn time_iso(secs: i64) -> alloc::string::String {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::{day_iso, time_iso, LAST_DAY, UNIX_EPOCH_DAY};
+    use super::{day_iso, iso_time, time_iso, LAST_DAY, UNIX_EPOCH_DAY};
 
     /// Every day from 0000-01-01 to 9999-12-31 is the next date after
     /// the one before, counted by a plain calendar.
@@ -338,6 +338,14 @@ mod tests {
         assert_eq!(time_iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(time_iso(1_792_281_600 + 13 * 3600 + 5 * 60 + 9), "2026-10-18T13:05:09Z");
         assert_eq!(time_iso(-1), "1969-12-31T23:59:59Z");
+        // Offsets as Elixir reads them.
+        let noon = iso_time("2026-10-18T12:00:00Z").unwrap();
+        for s in ["2026-10-18T14:00:00+02:00", "2026-10-18T14:00:00+0200", "2026-10-18T14:00:00+02", "2026-10-18T12:00:00,5Z", "2026-10-18 12:00:00"] {
+            assert_eq!(iso_time(s), Some(noon), "{s}");
+        }
+        for s in ["2026-10-18T12:00:00-00:00", "2026-10-18T12:00:00+25:00", "2026-10-18T12:00:00+02:99", "2026-10-18T12:00:00.Z", "2026-10-18T12:00:00+0é:0"] {
+            assert_eq!(iso_time(s), None, "{s}");
+        }
     }
 
     /// The kernel's enums are the declaration's, value for value.
