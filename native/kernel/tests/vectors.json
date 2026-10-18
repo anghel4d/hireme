@@ -1327,6 +1327,122 @@
           }
         }
       ]
+    },
+    {
+      "name": "the focus document shows the rail the scoreboard reads: an answered outreach with no pips never submitted",
+      "today": 20000,
+      "rows": {
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "reply",
+            "company": "Acme",
+            "role": "R",
+            "stage_on": 19990,
+            "replied_on": 19990
+          }
+        ]
+      },
+      "steps": [
+        {
+          "doc": "application",
+          "arg": 1,
+          "expect": {
+            "rail": [
+              {
+                "stage": "discovered",
+                "pip": "done"
+              },
+              {
+                "stage": "freshness",
+                "pip": "done"
+              },
+              {
+                "stage": "gated",
+                "pip": "done"
+              },
+              {
+                "stage": "in_batch",
+                "pip": "done"
+              },
+              {
+                "stage": "draft_ready",
+                "pip": "done"
+              },
+              {
+                "stage": "fire_ready",
+                "pip": "done"
+              },
+              {
+                "stage": "open_fire",
+                "pip": "done"
+              },
+              {
+                "stage": "submitted",
+                "pip": "skipped"
+              },
+              {
+                "stage": "reply",
+                "pip": "active"
+              },
+              {
+                "stage": "closed",
+                "pip": "pending"
+              }
+            ]
+          }
+        },
+        {
+          "doc": "overview",
+          "expect": {
+            "scoreboard": {
+              "submitted": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "stored pips that belong to another stage are not believed: a close whose pips say reply, with no dates, never went out and reopens",
+      "today": 20000,
+      "rows": {
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "closed",
+            "pips": "DDDDDDDDAP",
+            "company": "Acme",
+            "role": "R",
+            "stage_on": 19990
+          }
+        ]
+      },
+      "steps": [
+        {
+          "command": "stage",
+          "target": 1,
+          "params": {
+            "stage": "gated"
+          },
+          "effects": [
+            {
+              "table": "applications",
+              "id": 1,
+              "cells": {
+                "stage": "gated",
+                "pips": "DDAPPPPSSP"
+              }
+            },
+            {
+              "table": "events",
+              "id": 0,
+              "cells": {}
+            }
+          ]
+        }
+      ]
     }
   ]
 }

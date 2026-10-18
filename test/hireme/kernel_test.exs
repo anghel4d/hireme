@@ -43,9 +43,20 @@ defmodule Hireme.KernelTest do
 
   defp judged(k, op, ctx), do: elem(Kernel.judge(k, op, ctx), 0)
 
-  test "the sequencer's ctx judges, for a key and for the operator", %{k: k, op: op, ctx: ctx} do
-    assert {:ok, [_ | _]} = judged(k, op, ctx)
-    assert {:ok, [_ | _]} = judged(k, op, %{ctx | actor: :human, key_id: nil})
+  test "the sequencer's ctx judges, as the agent for a key and as the operator for a human",
+       %{k: k, op: op, ctx: ctx} do
+    events = Schema.table(:events).id
+    actor = Schema.column(:events, "actor").id
+
+    actor_of = fn c ->
+      {:ok, effects} = judged(k, op, c)
+      for {^events, 0, cells} <- effects, {^actor, v} <- cells, do: v
+    end
+
+    assert actor_of.(ctx) == [Codec.enum_code("actor", :agent)]
+    assert actor_of.(%{ctx | actor: :human, key_id: nil}) == [Codec.enum_code("actor", :operator)]
+    # The last day a date holds, 9999-12-31.
+    assert {:ok, _} = judged(k, op, %{ctx | now_day: 2_932_896})
   end
 
   test "any other ctx is badarg", %{k: k, op: op, ctx: ctx} do

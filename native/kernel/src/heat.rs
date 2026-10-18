@@ -7,11 +7,12 @@
 //! its ATS tenant, decaying from the latest of its submission and its
 //! reply that exists (else the day it entered its stage) with each one's
 //! half-life: `load · 0.5^(days / half_life)`, and counting for nothing
-//! once under `load_floor`. A company's cap scales with its size tier. An application entering the queue adds its increment: the base
-//! load, plus `same_department_penalty` if a hot peer at that company
-//! shares its department, plus `clone_penalty` if one shares its role
-//! family (live peers only). The move is deferred when the company would pass its cap, the
-//! vendor or tenant would pass theirs, or its batch already holds
+//! once under `load_floor`. A company's cap scales with its size tier. An
+//! application entering the queue adds its increment: the base load, plus
+//! `same_department_penalty` if a hot peer at that company shares its
+//! department, plus `clone_penalty` if one shares its role family (live
+//! peers only). The move is deferred when the company would pass its cap,
+//! the vendor or tenant would pass theirs, or its batch already holds
 //! `ats_batch_cap` of that vendor. A heat override with a written reason
 //! lets one application past, and the verdict says so.
 //!

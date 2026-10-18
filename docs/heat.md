@@ -19,8 +19,8 @@ close whose stored pips do not agree with its stage is read by its dates:
 `applied_on` means it was submitted, `replied_on` that it was answered. An answered
 outreach application (referral, recruiter, cold, inbound or other
 channel) is a live conversation with the company and carries load like a
-sent one; a listing closed before anything went out carries none. It puts a load of `application_load` on
-three things:
+sent one; a listing closed before anything went out carries none. It puts
+a load of `application_load` on three things:
 
 - its **company**: its `corporation_id` when linked, else the normalized
   `applications.company`,
