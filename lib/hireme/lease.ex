@@ -66,8 +66,8 @@ defmodule Hireme.Lease do
   def revoke(account_id, lease_id, meta) do
     with true <- Sequencer.running?(account_id) || {:error, :not_found},
          {:ok, changed} <- Sequencer.lease(account_id, {:revoke, lease_id}) do
-      # Revoking what is already revoked, or holds nothing, changes
-      # nothing and records nothing.
+      # Revoking what is already revoked, or holds nothing, releases
+      # nothing and records nothing; the session is revoked all the same.
       if changed,
         do:
           Hireme.Audit.record(
@@ -260,8 +260,10 @@ defmodule Hireme.Lease do
   end
 
   @doc """
-  The operator's revoke: claims released, channel closed, even a browser's.
-  `:unchanged` when no session it reaches holds the channel or a claim.
+  The operator's revoke: claims released, channel closed, even a browser's,
+  and sticky: the session cannot claim again until it reconnects. It
+  answers `{:unchanged, l}` (still marking the sessions revoked) when none
+  it reaches held the channel or a claim, so the caller records nothing.
   """
   def revoke(%__MODULE__{} = l, id) do
     case l.sessions[id] do
@@ -276,9 +278,9 @@ defmodule Hireme.Lease do
             do: for({sid, s} <- l.sessions, s.key_id == target.key_id, do: sid),
             else: [id]
 
-        if Enum.any?(ids, &(l.sessions[&1].channel or MapSet.size(l.sessions[&1].held) > 0)),
-          do: revoke_all(l, ids),
-          else: :unchanged
+        held = Enum.any?(ids, &(l.sessions[&1].channel or MapSet.size(l.sessions[&1].held) > 0))
+        {:ok, l, released} = revoke_all(l, ids)
+        if held, do: {:ok, l, released}, else: {:unchanged, l}
     end
   end
 
