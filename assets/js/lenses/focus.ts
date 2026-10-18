@@ -8,7 +8,7 @@
 
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { Refused, application, command, lookup, put, query as read, type Input } from "../kernel.ts"
+import { failed, application, command, lookup, put, query as read, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
@@ -33,10 +33,6 @@ const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
 /** A text column of the replica: its text, "" when there is none. */
 const textOf = (v_: unknown): string => (typeof v_ === "string" ? v_ : "")
-
-function failed(e: unknown): void {
-  notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
-}
 
 /** A row of the replica by id, or null. */
 function rowOf(table: string, rowId: number): Row | null {

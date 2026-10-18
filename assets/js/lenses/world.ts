@@ -9,9 +9,9 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
-import { Refused, put, query as read, table, today, values, type Input } from "../kernel.ts"
+import { Refused, failed, put, query as read, table, today, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
-import { go, model, notice, query, set, type WorldView } from "../state.ts"
+import { go, model, query, set, type WorldView } from "../state.ts"
 
 type Row = Record<string, unknown>
 
@@ -48,7 +48,7 @@ const editable = (c: ColumnDef): boolean =>
 function order(t: TableDef): [string, string] | null {
   const s = model.address.q.get("sort") ?? ""
   const name = s.replace(/^-/, "")
-  return t.cols.some((c) => c.name === name) ? [name, s.startsWith("-") ? "desc" : "asc"] : null
+  return t.cols.some((c) => c.name === name && sortable(c)) ? [name, s.startsWith("-") ? "desc" : "asc"] : null
 }
 
 /** The first `limit` rows of the grid's table, sort and search, from the replica (pages of find's 500). */
@@ -153,7 +153,14 @@ function cellOf(t: TableDef, c: ColumnDef, row: Row): Html {
 function cites(t: TableDef): Html {
   const c = v().cites
   if (!c) return EMPTY
-  const list = read<{ citations: Row[] }>("history", { table: t.name, id: c.id, column: c.column, limit: 50 }).citations
+  let list: Row[]
+  try {
+    list = read<{ citations: Row[] }>("history", { table: t.name, id: c.id, column: c.column, limit: 50 }).citations
+  } catch (e) {
+    // The row went (an agent dropped it) while its citations were open: said in the panel, not the lens.
+    if (!(e instanceof Refused)) throw e
+    list = []
+  }
   return html`<section class="card panel" data-key="cites" aria-labelledby="cites-h">
     <h2 id="cites-h">${t.name} #${c.id} · ${c.column}</h2>
     ${list.length === 0 ? html`<p class="hint">No citations.</p>` : html`<ol class="rows">${list.map((x) => {
@@ -227,11 +234,6 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
-function failed(e: unknown): void {
-  if (e instanceof Refused) notice("error", `${e.code}: ${e.message}`)
-  else notice("error", e instanceof Error ? e.message : String(e))
-}
-
 function act(name: string, el: HTMLElement, ev: Event): void {
   const t = current()
   const id = Number(el.dataset.id ?? el.closest<HTMLElement>("tr")?.dataset.key?.slice(1))
@@ -301,11 +303,18 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   }
 }
 
+let shownTable = ""
+
 const world: View = {
   title: "World",
   view,
   enter() {
     if (!TABLES_SHOWN.includes(model.address.sub as Shown)) return go({ sub: "corporations" }, true)
+    // A new table, sort or search shows its first page; a new table also closes the last one's panels.
+    const fresh = model.address.sub !== shownTable
+    shownTable = model.address.sub
+    if (fresh) patch({ limit: PAGE, edit: "", cites: null, text: null })
+    else if (v().limit !== PAGE) patch({ limit: PAGE })
   },
   act,
   key(ev) {

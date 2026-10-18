@@ -7,9 +7,9 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { Refused, put, query as read, values, type Input } from "../kernel.ts"
+import { failed, put, query as read, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
-import { model, notice, query, set, type OutreachView } from "../state.ts"
+import { model, query, set, type OutreachView } from "../state.ts"
 
 type Row = Record<string, unknown>
 
@@ -52,10 +52,6 @@ function contact(id: number): Row | undefined {
 }
 
 const messages = (id: number): Row[] => read<{ rows: Row[] }>("find", { table: "messages", where: { contact_id: id }, order: ["sent_at", "asc"], limit: 500 }).rows
-
-function failed(e: unknown): void {
-  notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
-}
 
 // ------------------------------------------------------------------ view
 
@@ -177,13 +173,15 @@ function act(name: string, el: HTMLElement): void {
     case "create-contact": {
       const f = form(el)
       const email = f.email
-      // Predicted: the form closes and the contact is listed now; a refusal rolls it back and says why.
-      patch({ edit: "" })
-      return void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
+      // Predicted: the contact is listed now and the form closes (a local refusal threw here and kept it
+      // open); the sequencer's refusal rolls it back and says why. Opened unless another was picked since.
+      const was = selected()
+      void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
-          if (model.address.lens === "outreach" && selected() === 0) query("contact", String(r.id))
+          if (model.address.lens === "outreach" && selected() === was) query("contact", String(r.id))
         })
         .catch(failed)
+      return patch({ edit: "" })
     }
     case "save-contact": {
       const c = contact(id)
@@ -198,7 +196,7 @@ function act(name: string, el: HTMLElement): void {
     case "save-draft": {
       const c = contact(id)
       const f = form(el)
-      return void put("messages", {
+      void put("messages", {
         channel: f.channel ?? "email",
         direction: "outbound",
         status: "draft",
@@ -208,7 +206,7 @@ function act(name: string, el: HTMLElement): void {
         contact_id: id,
         corporation_id: c && c.corporation_id ? Number(c.corporation_id) : null,
       }).catch(failed)
-      return void patch({ edit: "" })
+      return patch({ edit: "" })
     }
     case "open-body": {
       return patch({ open: [...v().open, Number(el.dataset.id)] })

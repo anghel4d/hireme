@@ -27,6 +27,9 @@ export class Refused extends Error {
   }
 }
 
+/** A failed write told in a notice: a refusal by its catalog code. */
+export const failed = (e: unknown): void => notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : describe(e))
+
 function refusal(r: Reply & { ok: false }): Refused {
   // Sequencer and world refusals say {code, message, data}; account.* says {error}.
   const e = r.error as { code?: string; error?: string; message?: string; data?: unknown } | null
@@ -131,7 +134,7 @@ export function load(hw: Boot): void {
       ? undefined
       : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
     k = x
-    if (grants) x.set_grants(...grants, 1)
+    x.set_grants(...grants, 1)
     let restored = false
     if (snap) {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
@@ -163,13 +166,19 @@ export function load(hw: Boot): void {
   })
 }
 
-/** This session's grants from WELCOME, for the replica's reads: what it may read answers, the rest is scope. */
-let grants: [number, number, number] | null = null
+/**
+ * This session's grants from WELCOME, for the replica's reads: what it may read answers, the rest is
+ * scope. Until WELCOME, a browser's session is the operator's (every domain), which WELCOME narrows.
+ */
+let grants: [number, number, number] = [31, 31, 1]
 export function setGrants(read: number, write: number, mayDelete: boolean): void {
   grants = [read, write, mayDelete ? 1 : 0]
   k?.set_grants(...grants, 1)
   version++
 }
+
+/** Whether the replica is in: before it is, its lenses wait rather than draw nothing. */
+export const loaded = (): boolean => k !== null
 
 /** Answers of the replica's reads, per version: a view drawn twice in a frame asks once. */
 const answers = new Map<string, unknown>()
@@ -688,19 +697,26 @@ export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}):
   return { opId: opId(), verb: VERB.put, flags, target: t.id, id: p.key ? 0 : p.id ?? 0, expectRev: p.expectRev ?? 0, cells }
 }
 
-/** One put, sent and settled: the new rev and id, or a `Refused` named from the catalog. */
-export async function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
+/** The sequencer's verdict on a sent op: the new rev and id, or a `Refused` named from the catalog. */
+const settled = (verdict: Promise<Verdict>): Promise<{ id: number; rev: bigint }> =>
+  verdict.then((v) => {
+    if (v.ok) return { id: v.id, rev: v.rev }
+    throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
+  })
+
+/**
+ * One put: predicted into the replica now, and sent. The replica's own refusal throws here, in the
+ * caller's frame (so a form can stay open with its input); the sequencer's verdict is the promise.
+ */
+export function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
   const op = putOp(name, set, p)
   sendable(op)
   if (TABLES[name].residency === "resident") predict(op)
-  const [verdict] = send([op])
-  const v = await verdict!
-  if (v.ok) return { id: v.id, rev: v.rev }
-  throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
+  return settled(send([op])[0]!)
 }
 
-/** A declared command on one row, judged locally first when its table is resident. */
-export async function command(name: CommandName, target: number, params: Record<string, Input> = {}): Promise<{ id: number; rev: bigint }> {
+/** A declared command on one row, judged locally first (a refusal throws here), its verdict the promise. */
+export function command(name: CommandName, target: number, params: Record<string, Input> = {}): Promise<{ id: number; rev: bigint }> {
   const c = COMMANDS[name]
   const cells: Cell[] = []
   for (const p of c.params) {
@@ -714,10 +730,7 @@ export async function command(name: CommandName, target: number, params: Record<
   const op: Op = { opId: opId(), verb: VERB.command, flags: 0, target: c.id, id: target, expectRev: 0, cells }
   sendable(op)
   if (TABLES[c.table as TableName].residency === "resident") predict(op)
-  const [verdict] = send([op])
-  const v = await verdict!
-  if (v.ok) return { id: v.id, rev: v.rev }
-  throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
+  return settled(send([op])[0]!)
 }
 
 const lookups = new Map<string, { version: number; at: Map<string, number> }>()

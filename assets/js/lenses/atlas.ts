@@ -5,7 +5,7 @@
 // `settings` row. No passport or language is in source: they are rows.
 
 import type { View } from "../app.ts"
-import { Refused, atlas, ids, put, value, type Input } from "../kernel.ts"
+import { failed, atlas, ids, put, value, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { model, notice, query } from "../state.ts"
 
@@ -19,10 +19,6 @@ const setting = (col: string): string => {
   const id = settingsId()
   const x = id === 0 ? null : value("settings", id, col)
   return x === null ? "" : String(x)
-}
-
-function failed(e: unknown): void {
-  notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
 function save(set: Record<string, Input>, form?: HTMLFormElement): void {

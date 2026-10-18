@@ -49,6 +49,8 @@ export interface Model {
   rev: bigint
   /** From WELCOME: the domains this session may write. */
   writeMask: number
+  /** This browser's session (WELCOME's): the account lens marks it, and times its step-up from it. */
+  sessionId: number
   /** How many ops are sent and not yet answered. */
   pending: number
   notices: Notice[]
@@ -98,14 +100,12 @@ export interface WorldView {
   editRev: number
   /** The cell whose citations are open. */
   cites: { id: number; column: string } | null
-  /** The deferred text being read. */
+  /** The text being read, whole, in the reader panel. */
   text: { id: number; column: string } | null
 }
 
 /** The account lens: the server's projection, and the ceremony in progress. */
 export interface AccountView {
-  overview: Record<string, unknown> | null
-  loading: boolean
   /** A secret or recovery codes shown once, until dismissed. */
   reveal: { title: string; lines: string[] } | null
   /** TOTP enrollment between begin and confirm. */
@@ -115,8 +115,8 @@ export interface AccountView {
   /** Which form is open: "mint", "rename", "trust", "change:<key id>". */
   open: string
   error: string
-  /** The trail as shown: security events by default, or the activity view, paged older by `next`. */
-  audit: { view: "security" | "activity"; events: Record<string, unknown>[]; next: number | null; loading: boolean } | null
+  /** The trail as shown: security events by default, or the activity view, and how many. */
+  audit: { view: "security" | "activity"; limit: number } | null
   /** The access being chosen in the open key form ("mint" or "k<id>"), so a redraw never resets it. */
   masks: { form: string; preset: string; read: number; write: number; mayDelete: boolean } | null
   /** A mint in flight: a second click must not mint a second key whose secret is never shown. */
@@ -155,10 +155,11 @@ export const model: Model = {
   carrier: null,
   rev: 0n,
   writeMask: 0,
+  sessionId: 0,
   pending: 0,
   notices: [],
   rows: 0,
-  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
+  account: { reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
   deskLimit: 120,
   focus: { id: 0, listing: false, fireArmed: 0, edit: "", editRev: 0, editText: "" },

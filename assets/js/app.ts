@@ -59,9 +59,13 @@ function link(): Html {
   return html`<span class="link link-${model.link}" role="status" title="account rev ${model.rev.toString()} at connect">${label}${model.pending > 0 ? html` · ${model.pending} pending` : EMPTY}</span>`
 }
 
-/** The lenses that read the board derive: after a snapshot restore they wait for it, one paint later. */
+/**
+ * The lenses that read the board derive wait for it after a snapshot restore, one paint later; every
+ * lens that reads the replica waits for the kernel to load.
+ */
 const DERIVES: readonly Lens[] = ["desk", "focus"]
-const waiting = (lens: Lens): boolean => DERIVES.includes(lens) && kernel.warming()
+const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "account"]
+const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !kernel.loaded())
 
 /** The lens hooks' guard (guard.ts): a failing hook's fallback stands in, told once, logged once. */
 const hooks = guard(
@@ -152,7 +156,12 @@ function actOn(ev: Event): void {
     kernel.forget()
     return (el as HTMLFormElement).submit()
   }
-  VIEWS[model.address.lens]?.act?.(name, el, ev)
+  // A write the replica refuses throws here, in the input's frame: told, and the form it came from stays open.
+  try {
+    VIEWS[model.address.lens]?.act?.(name, el, ev)
+  } catch (e) {
+    kernel.failed(e)
+  }
 }
 
 if (root) {
@@ -189,7 +198,7 @@ function frame(f: Bytes, h: Header): void {
     case KIND.WELCOME: {
       const w = welcome(f)
       kernel.setGrants(w.readMask, w.writeMask, w.mayDelete)
-      set({ writeMask: w.writeMask, rev: w.accountRev, link: "open" })
+      set({ writeMask: w.writeMask, sessionId: Number(w.sessionId), rev: w.accountRev, link: "open" })
       kernel.resend()
       // After a reconnect the lens re-reads what it shows (and the account lens parks its watch again).
       if (++welcomes > 1) refresh()

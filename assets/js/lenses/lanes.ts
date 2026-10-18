@@ -5,19 +5,15 @@
 
 import type { View } from "../app.ts"
 import { ENUMS, type TableName } from "../gen/schema.ts"
-import { Refused, ids, lanes, put, today, value, type Input } from "../kernel.ts"
+import { failed, ids, lanes, put, today, value, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
-import { model, notice } from "../state.ts"
+import { model } from "../state.ts"
 
 type Gym = { today: number; streak: number; week: number; target: number | null; pace: number | null; owed: number | null }
 type Net = Record<string, { total: number; week: number } | number>
 
 const str = (x: unknown): string => (x === null || x === undefined ? "" : x instanceof Date ? x.toISOString().slice(0, 10) : String(x))
 const settingsId = (): number => ids("settings")[0] ?? 0
-
-function failed(e: unknown): void {
-  notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
-}
 
 const options = (name: string, pick: string): Html => html`${(ENUMS[name] ?? []).map((x) => html`<option${flag("selected", x === pick)}>${x}</option>`)}`
 

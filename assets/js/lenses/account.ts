@@ -1,17 +1,19 @@
 // The account lens: identities, factors, sessions, keys with masks, live
-// leases with revoke, trusted hosts and the audit trail, all over
-// `account.*` RPC on the wire session (lib/hireme_web/account.ex lists the
-// methods). Linking a provider is the one HTTP step: it leaves the page.
+// leases with revoke, trusted hosts and the audit trail. It reads the
+// replica's account views (acct_*, leases, trusted), patched when anything
+// audited changes, so a revoke made on another device redraws it at once;
+// it changes the account with `account.*` RPC on the wire session
+// (lib/hireme_web/account.ex lists them). Linking a provider is the one
+// HTTP step: it leaves the page.
 //
 // A change that needs a fresh session is refused `step_up`; the lens keeps
 // the action, asks for a factor (passkey, TOTP or a recovery code), and
-// retries it once the session is fresh. `account.watch` parks on the
-// server and answers when anything audited changes, so a revoke made on
-// another device redraws this lens without a reload.
+// retries it once the session is fresh.
 
 import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
-import { Refused, rpc } from "../kernel.ts"
+import { DOMAIN } from "../gen/schema.ts"
+import { Refused, ids, query as read, rpc, value } from "../kernel.ts"
 import { EMPTY, entries, flag, html, resetIfUnchanged, trusted, type Html } from "../morph.ts"
 import { detail } from "./trail.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
@@ -28,13 +30,12 @@ const PRESETS = [
 
 const v = (): AccountView => model.account
 const patch = (p: Partial<AccountView>) => set({ account: { ...model.account, ...p } })
-const list = (k: string): Row[] => (Array.isArray(v().overview?.[k]) ? (v().overview?.[k] as Row[]) : [])
+const list = (k: string): Row[] => (Array.isArray(overview()?.[k]) ? (overview()?.[k] as Row[]) : [])
 const str = (x: unknown): string => (x === null || x === undefined ? "" : String(x))
 const num = (x: unknown): number => (typeof x === "number" ? x : Number(x ?? 0))
 
 function bits(): Record<string, number> {
-  const d = v().overview?.domains as Record<string, number> | undefined
-  return d ?? { world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16 }
+  return { world: DOMAIN.world, desk: DOMAIN.desk, mail: DOMAIN.mail, lanes: DOMAIN.lanes, corpus: DOMAIN.corpus }
 }
 
 const maskNames = (mask: number): string => {
@@ -57,45 +58,52 @@ function when(x: unknown): string {
 
 const time = (x: unknown): Html => (str(x) === "" ? EMPTY : html`<time datetime="${str(x)}">${when(x)}</time>`)
 
-// ------------------------------------------------------------------ calls
+// ------------------------------------------------------------------ the account, from the replica
 
-/** The overview; `passive` when the lens asks by itself (a watch answered, a reconnect), which the node does not count as the operator's activity. */
-async function load(passive = false): Promise<void> {
-  patch({ loading: true })
-  try {
-    patch({ overview: await rpc("account.overview", passive ? { passive: true } : {}), loading: false, error: "" })
-  } catch (e) {
-    patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
-  }
+/** A step-up proof's life (Security's step_up_window): sensitive changes need one this fresh. */
+const STEP_UP_S = 300
+const ALL = DOMAIN.world | DOMAIN.desk | DOMAIN.mail | DOMAIN.lanes | DOMAIN.corpus
+const PRESET_MASKS: Record<string, { read_mask: number; write_mask: number }> = {
+  read_only: { read_mask: ALL, write_mask: 0 },
+  write_only: { read_mask: 0, write_mask: ALL },
+  read_write: { read_mask: ALL, write_mask: ALL },
 }
-
-let watching = false
+const rowsOf = (table: string, params: Record<string, unknown> = {}): Row[] => read<{ rows: Row[] }>("find", { table, limit: 500, ...params }).rows
+const later = (x: unknown): boolean => str(x) !== "" && Date.parse(str(x)) > Date.now()
 
 /**
- * One parked watch at a time. It re-parks with the cursor of the overview it
- * last drew (the newest audit event id), so a change that lands between one
- * answer and the next park answers the next park at once instead of being
- * lost. A dropped carrier ends the loop; the shell's refresh after the
- * reconnect starts it again.
+ * The account page's data, as account.overview answered it, from the replica's account views
+ * (acct_*, the leases and the trusted hosts), so the page reads in its frame and a change reaches it as a
+ * PATCH. Null until the replica answers.
  */
-async function watch(): Promise<void> {
-  if (watching) return
-  watching = true
+function overview(): Row | null {
   try {
-    for (;;) {
-      const since = v().overview?.cursor
-      const r = await rpc<{ changed?: boolean }>("account.watch", typeof since === "number" ? { since } : {})
-      if (r.changed) {
-        await load(true)
-        // An overview that keeps failing leaves the cursor where it was, and the next park would answer at once: pause.
-        if (v().error !== "") await new Promise((res) => setTimeout(res, 5000))
-      }
-      if (model.address.lens !== "account") return
+    // acct_info is one wire row with no id column (find orders by id): read its first row's cells.
+    const at = ids("acct_info")[0]
+    const info: Row = at === undefined ? {} : { name: value("acct_info", at, "name"), status: value("acct_info", at, "status"), recovery_codes_left: value("acct_info", at, "recovery_codes_left") }
+    const factors = rowsOf("acct_factors")
+    const sessions: Row[] = rowsOf("acct_sessions").map((x) => ({ ...x, current: num(x.id) === model.sessionId }))
+    const me = sessions.find((x) => x.current)
+    // A step-up is the factor's proof when the account has one, the sign-in's when it has none.
+    const proof = Date.parse(str(factors.length > 0 ? me?.mfa_at : me?.authenticated_at))
+    const keys = rowsOf("acct_keys", { order: ["id", "desc"] }).map((k) => {
+      const preset = k.may_delete === true ? undefined : Object.keys(PRESET_MASKS).find((p) => PRESET_MASKS[p]!.read_mask === num(k.read_mask) && PRESET_MASKS[p]!.write_mask === num(k.write_mask))
+      return { ...k, display: `hm_${str(k.prefix)}…`, preset: preset ?? "custom", live: str(k.revoked_at) === "" && (str(k.expires_at) === "" || later(k.expires_at)), paused: str(k.paused_at) !== "" }
+    })
+    const leases = rowsOf("leases").map((l) => ({ ...l, ids: str(l.held).split("\u001f").filter((x) => x !== "") }))
+    return {
+      account: { name: info.name, status: info.status },
+      fresh_for: Number.isNaN(proof) ? 0 : Math.max(0, STEP_UP_S - (Date.now() - proof) / 1000),
+      recovery_codes_left: info.recovery_codes_left,
+      identities: rowsOf("acct_identities"),
+      factors,
+      sessions,
+      keys,
+      leases,
+      trusted_hosts: rowsOf("trusted"),
     }
   } catch {
-    // The carrier dropped or the session ended: refresh() parks again once a session is back.
-  } finally {
-    watching = false
+    return null
   }
 }
 
@@ -132,7 +140,6 @@ async function call<T = Row>(method: string, params: Record<string, unknown> = {
     const r = await rpc<T>(method, params)
     patch({ error: "" })
     done?.(r)
-    await load()
   } catch (e) {
     if (e instanceof Refused && e.code === "step_up") {
       parked = done as ((r: Row) => void) | undefined
@@ -162,7 +169,6 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
     parked = undefined
     await call(waiting.method, waiting.params, then ?? ((r) => reveal(waiting.method, r)))
   }
-  else await load()
 }
 
 /** What a call returned that is shown once: a key's secret, recovery codes. */
@@ -182,9 +188,9 @@ function fields(form: HTMLFormElement): Record<string, string> {
 
 type Draft = NonNullable<AccountView["masks"]>
 
-/** A preset's masks, as the server's overview states them. */
+/** A preset's masks (Grants.preset). */
 function presetMasks(preset: string): { read: number; write: number } {
-  const p = (v().overview?.presets as Record<string, { read_mask?: number; write_mask?: number }> | undefined)?.[preset]
+  const p = PRESET_MASKS[preset]
   return { read: num(p?.read_mask), write: num(p?.write_mask) }
 }
 
@@ -323,7 +329,7 @@ function identities(): Html {
 
 function factors(): Html {
   const rows = list("factors")
-  const left = num(v().overview?.recovery_codes_left)
+  const left = num(overview()?.recovery_codes_left)
   const t = v().totp
   return html`<section class="card" data-key="factors"><h2>Second factors</h2>
     ${rows.length === 0 ? html`<p class="hint">No second factor yet. A passkey is the strongest; an authenticator app works too.</p>` : EMPTY}
@@ -452,25 +458,28 @@ function audit(): Html {
   const a = v().audit
   const tab = (view: "security" | "activity", label: string) =>
     html`<button type="button" class="chip${a?.view === view ? " on" : ""}" aria-pressed="${String(a?.view === view)}" data-act="audit" data-view="${view}">${label}</button>`
+  // The replica holds the newest events (acct_audit); each view is a filter of them, newest first.
+  const all = a ? rowsOf("acct_audit", { where: { security: a.view === "security" }, order: ["id", "desc"], limit: Math.min(500, a.limit + 1) }) : []
+  const events = all.slice(0, a?.limit ?? 0)
   return html`<section class="card" data-key="audit"><h2>Audit</h2>
     ${a === null ? html`<button type="button" data-act="audit" data-view="security">Show security events</button>` : html`
       <div class="chips" role="group" aria-label="Which events">${tab("security", "Security")}${tab("activity", "Activity")}</div>
       <p class="hint">${a.view === "security" ? "Sign-ins, factors, keys, sessions and revokes: kept for good." : "Agent writes, leases and connections, counted per window once busy; it expires."}</p>
-      ${a.events.length === 0 && !a.loading ? html`<p class="empty">No events.</p>` : html`<div class="table-scroll"><table class="grid compact">
+      ${events.length === 0 ? html`<p class="empty">No events.</p>` : html`<div class="table-scroll"><table class="grid compact">
       <thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">From</th></tr></thead>
-      <tbody>${a.events.map((e) => {
+      <tbody>${events.map((e) => {
         const kind = str(e.kind)
         const many = kind === "activity_coalesced" || kind === "revokes_coalesced"
         return html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${kind.replace(/_/g, " ")}${e.key_id ? html` <span class="tag">${keyName(String(e.key_id))}</span>` : EMPTY}${many ? coalesced(e) : detail(e, keyName)}</td>
         <td class="muted">${str(e.ip)}</td></tr>`
       })}</tbody></table></div>`}
-      ${a.loading ? html`<p class="muted">Loading…</p>` : a.next !== null ? html`<button type="button" class="more" data-act="audit-more">Older events</button>` : EMPTY}`}
+      ${all.length > events.length ? html`<button type="button" class="more" data-act="audit-more">Older events</button>` : EMPTY}`}
   </section>`
 }
 
 function view(): Html {
-  const o = v().overview
-  if (!o) return v().error !== "" ? html`<p class="error" role="alert">${v().error}</p>` : html`<p class="empty">Loading the account…</p>`
+  const o = overview()
+  if (!o) return html`<p class="empty">Loading the account…</p>`
   const account = (o.account ?? {}) as Row
   const fresh = num(o.fresh_for)
   return html`<div class="account">
@@ -566,9 +575,9 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "host-remove":
       return void call("account.trusted_host.remove", { id })
     case "audit":
-      return void trail(el.dataset.view === "activity" ? "activity" : "security", false)
+      return patch({ audit: { view: el.dataset.view === "activity" ? "activity" : "security", limit: 50 } })
     case "audit-more":
-      return void trail(v().audit?.view ?? "security", true)
+      return patch({ audit: { view: v().audit?.view ?? "security", limit: (v().audit?.limit ?? 50) + 50 } })
     case "step-passkey":
       return void (async () => {
         try {
@@ -591,28 +600,6 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return patch({ reveal: null })
   }
   void ev
-}
-
-let trailing = 0
-
-/** One page of the trail: the first of a view, or the next older one of the view shown. */
-async function trail(view: "security" | "activity", more: boolean): Promise<void> {
-  const me = ++trailing
-  const now = v().audit
-  const keep = more && now?.view === view
-  const before = keep ? now.next : null
-  patch({ audit: { view, events: keep ? now.events : [], next: keep ? now.next : null, loading: true } })
-  try {
-    const r = await rpc<{ events: Row[]; next?: number | null }>("account.audit", { view, limit: 50, ...(before !== null ? { before } : {}) })
-    if (me !== trailing) return
-    const shown = keep ? v().audit?.events ?? [] : []
-    // An older node pages nothing: no `next`, and the page is the whole answer.
-    patch({ audit: { view, events: [...shown, ...r.events], next: typeof r.next === "number" ? r.next : null, loading: false } })
-  } catch (e) {
-    if (me !== trailing) return
-    const a = v().audit
-    patch({ audit: a ? { ...a, loading: false } : null, error: said(e) })
-  }
 }
 
 function totpBegin(): void {
@@ -645,14 +632,8 @@ const view_: View = {
       query("linked", "")
       query("link_error", "")
     }
-    // The first park waits for the first overview, so it carries that overview's cursor.
-    void load().then(watch)
   },
   act,
-  refresh() {
-    // After a reconnect (or a write elsewhere) the watch may have ended with the old carrier.
-    if (!watching) void load(true).then(watch)
-  },
 }
 
 export default view_
