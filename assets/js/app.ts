@@ -62,26 +62,32 @@ function link(): Html {
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const waiting = (lens: Lens): boolean => DERIVES.includes(lens) && kernel.warming()
 
-let failedView = ""
-let failedAfter = ""
+/** Which lens hooks are failing ("focus:enter"): latched until that hook succeeds again, whatever its
+ * error says, so a hook that keeps throwing raises one notice, not one per repaint. */
+const broken = new Set<string>()
+const VERB = { enter: "load", view: "draw", after: "update", refresh: "refresh" } as const
 
-/** A lens's view, or, when it throws, a line saying so (and one notice per failure): the shell around
- * it, nav, link and notices, keeps painting. */
-function lensView(lens: Lens, v: View): Html {
+/** A lens hook, or `fallback` when it throws: the shell around it (nav, link, notices) keeps painting.
+ * The first failure is logged with its stack and told once, clipped; it latches until the hook works. */
+function guarded<T>(lens: Lens, part: keyof typeof VERB, fn: () => T, fallback: T): T {
+  const key = `${lens}:${part}`
   try {
-    const h = v.view()
-    failedView = ""
-    return h
+    const r = fn()
+    broken.delete(key)
+    return r
   } catch (e) {
-    const why = `${lens}: ${e instanceof Error ? e.message : String(e)}`
-    // Raised after this paint, and once: the notice repaints, and the view would throw again.
-    if (why !== failedView) {
-      failedView = why
-      queueMicrotask(() => notice("error", `This view failed to draw (${why}). Reload the page; if it repeats, tell the operator's maintainer.`))
+    if (!broken.has(key)) {
+      broken.add(key)
+      console.error(`hireme: the ${lens} lens failed to ${VERB[part]}`, e)
+      const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200)
+      // After this paint: the notice repaints, and the hook would throw again.
+      queueMicrotask(() => notice("error", `The ${lens} lens failed to ${VERB[part]} (${why}). Reload the page; if it repeats, tell the operator's maintainer.`))
     }
-    return html`<p class="error" role="alert">This view failed to draw.</p>`
+    return fallback
   }
 }
+
+const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
 
 function shell(): Html {
   const lens = model.address.lens
@@ -111,25 +117,14 @@ function render(): void {
     entered = where
     const fresh = model.address.lens !== enteredLens
     enteredLens = model.address.lens
-    v?.enter?.(fresh)
+    // A lens whose enter throws (focus derives there) still reaches morph, its failure told once.
+    guarded(model.address.lens, "enter", () => v?.enter?.(fresh), undefined)
     document.title = `${v?.title ?? "hireme"} · hireme`
   }
   morph(root, shell())
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
-  if (lens && failedView === "") {
-    try {
-      v?.after?.(lens)
-      failedAfter = ""
-    } catch (e) {
-      const why = `${model.address.lens}: ${e instanceof Error ? e.message : String(e)}`
-      // Once per failure: the notice repaints, and the hook would throw again.
-      if (why !== failedAfter) {
-        failedAfter = why
-        queueMicrotask(() => notice("error", `This view failed to update (${why}).`))
-      }
-    }
-  }
+  if (lens && !broken.has(`${model.address.lens}:view`)) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
   // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
   const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
   if (want && !focusedOnce.has(want)) {
@@ -265,7 +260,9 @@ function refresh(): void {
   if (now - lastRefresh >= 400) {
     lastRefresh = now
     // A lens still waiting for the first derive reads everything when it enters.
-    if (!waiting(model.address.lens)) VIEWS[model.address.lens]?.refresh?.()
+    // Called from a frame's arrival: a lens whose refresh throws must not take the frame down with it.
+    const lens = model.address.lens
+    if (!waiting(lens)) guarded(lens, "refresh", () => VIEWS[lens]?.refresh?.(), undefined)
   } else {
     trailing = window.setTimeout(refresh, 400 - (now - lastRefresh))
   }
