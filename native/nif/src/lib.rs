@@ -164,7 +164,7 @@ fn judge_dirty<'a>(env: Env<'a>, res: ResourceArc<Res>, op: Binary, ctx: Term<'a
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn board_ids(res: ResourceArc<Res>, stage: Option<u32>) -> Vec<u32> {
-    with(&res, |k| match stage.map(|s| u8::try_from(s).ok().and_then(Stage::from_u8)) {
+    with(&res, |k| match stage.map(Stage::from_u32) {
         Some(None) => Vec::new(),
         stage => k.board_ids(stage.flatten()),
     })

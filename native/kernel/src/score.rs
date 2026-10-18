@@ -57,19 +57,6 @@ impl Band {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Band::Frontier => "Frontier",
-            Band::Labs => "Tier-2 labs",
-            Band::BigTech => "Big tech",
-            Band::Systems => "Systems",
-            Band::Craft => "Craft",
-            Band::Mid => "Mid",
-            Band::Thin => "Thin",
-            Band::Kill => "Kill",
-        }
-    }
-
     /// The lowest and highest score on this rung.
     pub fn range(self) -> (u8, u8) {
         match self {
@@ -164,11 +151,6 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The tier of a normalized company name.
-    pub fn of(n: &str) -> Tier {
-        Tier::of_hits(Hits::of(n))
-    }
-
     /// The tier from a name's [`Hits`].
     pub fn of_hits(h: Hits) -> Tier {
         if h.has(lexicon::FRONTIER) {
@@ -190,11 +172,6 @@ impl Tier {
             Tier::BigTech => Some(if high_comp { 85 } else { 80 }),
         }
     }
-}
-
-/// The anchor a company name sits on, if any.
-pub fn anchor(company: &str, high_comp: bool) -> Option<u8> {
-    Tier::of(&text::normalize(company)).anchor(high_comp)
 }
 
 /// What the score reads off one normalized text (a company name, a role
@@ -291,10 +268,6 @@ impl Read {
 }
 
 /// The hard kill a seat falls under, if any.
-pub fn kill(seat: &Seat) -> Option<Kill> {
-    kill_read(seat, &Read::of(seat))
-}
-
 fn kill_read(seat: &Seat, r: &Read) -> Option<Kill> {
     let t = r.company.join(r.role);
     if t.has(Facts::STAFFING) {

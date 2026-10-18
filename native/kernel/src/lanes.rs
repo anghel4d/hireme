@@ -163,15 +163,7 @@ mod tests {
         let sunday = 740_272;
         let g = gym([(sunday, Solved), (sunday - 6, Solved), (sunday - 7, Solved)], None, sunday);
         assert_eq!((g.week, g.streak), (2, 1));
-        let n = net([(NetKind::Post, Some(sunday - 6)), (NetKind::Post, Some(sunday - 7))], sunday);
-        assert_eq!(n.week, [0, 0, 1, 0]);
-    }
-
-    #[test]
-    fn net_counts() {
-        let n = net([(NetKind::Post, Some(10)), (NetKind::Post, Some(3)), (NetKind::Draft, None)], 10);
-        assert_eq!(n.total, [0, 0, 2, 1]);
-        assert_eq!(n.week, [0, 0, 1, 0]);
-        assert_eq!(n.unshipped, 1);
+        let n = net([(NetKind::Post, Some(sunday - 6)), (NetKind::Post, Some(sunday - 7)), (NetKind::Draft, None)], sunday);
+        assert_eq!((n.total, n.week, n.unshipped), ([0, 0, 2, 1], [0, 0, 1, 0], 1));
     }
 }

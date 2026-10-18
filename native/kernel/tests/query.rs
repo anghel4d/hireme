@@ -10,6 +10,8 @@ use serde_json::{json, Value as Json};
 
 const N: u32 = 300;
 const REGIONS: [&str; 4] = ["Europe", "Asia", "", "Americas"];
+/// A browser session's grants: every domain both ways.
+const OPERATOR: Grants = Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true };
 
 fn kernel() -> Kernel {
     let mut w = wire::BodyWriter::new();
@@ -39,7 +41,7 @@ fn kernel() -> Kernel {
         .u32s(C::AS_OF, [739_000, 739_100, 739_100].into_iter());
     b.done();
     let mut k = Kernel::new();
-    k.set_grants(Grants::operator());
+    k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
     k
 }
@@ -236,7 +238,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     b.u32s(S::ID, [1, 2].into_iter()).strs(S::URL, ["https://a.example/1", "https://b.example/2"].into_iter()).zstrs(S::DOC, [&packed[..], &raw[..]].into_iter());
     b.done();
     let mut k = Kernel::new();
-    k.set_grants(Grants::operator());
+    k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
     let docs = |k: &Kernel| q(k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"].clone();
     assert_eq!(docs(&k), json!([{"id": 1, "doc": doc}, {"id": 2, "doc": "short note"}]));
@@ -246,7 +248,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     let snap = k.snapshot();
     assert!(snap.len() < doc.len() / 4, "snapshot {} B for a {} B text", snap.len(), doc.len());
     let mut again = Kernel::new();
-    again.set_grants(Grants::operator());
+    again.set_grants(OPERATOR);
     again.restore(&snap).unwrap();
     assert_eq!(docs(&again), docs(&k));
     // A predicted write, then its NACK: the packed cell comes back as it was.
@@ -280,7 +282,7 @@ fn session_tables_are_whole_and_never_at_rest() {
     let rows = q(&k, json!({"op": "find", "table": "acct_keys"}))["rows"].clone();
     assert_eq!(rows.as_array().map(|r| r.iter().map(|x| x["id"].clone()).collect::<Vec<_>>()), Some(vec![json!(2)]));
     let mut again = Kernel::new();
-    again.set_grants(Grants::operator());
+    again.set_grants(OPERATOR);
     again.restore(&k.snapshot()).unwrap();
     assert_eq!(q(&again, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
 }

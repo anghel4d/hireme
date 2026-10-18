@@ -356,6 +356,9 @@ mod tests {
 
     #[test]
     fn letters_markup_and_abbreviations() {
+        // The binary searches below need their tables sorted.
+        assert!(STOP.windows(2).all(|w| w[0] < w[1]));
+        assert!(ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
         let k = extract("Zürich Zu\u{308}rich Müller développeur C# C# F# ### +++ A+ a+ e.g. e.g. i.e. u.s. go go ai ai", Format::Text);
         assert_eq!(k, ["c#", "zurich", "developpeur", "f#", "muller"]);
         let style = extract("<style>.a{color:red}</style><SCRIPT>var foo = bar;</script><!-- a > comment --><p>kernel kernel</p>", Format::Html);
@@ -384,12 +387,6 @@ mod tests {
         assert_eq!(named, ["muller", "developpeur", "don", "kernel", "quoted"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
         assert_eq!(md, ["kernels", "apply", "see"]);
-    }
-
-    #[test]
-    fn the_lookup_tables_are_sorted() {
-        assert!(STOP.windows(2).all(|w| w[0] < w[1]));
-        assert!(ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

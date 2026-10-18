@@ -46,6 +46,11 @@ impl Stage {
         STAGES.get(v as usize).copied()
     }
 
+    /// From a row's `stage` cell.
+    pub fn from_u32(v: u32) -> Option<Stage> {
+        u8::try_from(v).ok().and_then(Stage::from_u8)
+    }
+
     pub fn parse(name: &str) -> Option<Stage> {
         STAGES.iter().copied().find(|s| s.name() == name)
     }

@@ -76,10 +76,11 @@ fn every_text_reader_survives_any_text() {
         bounded("text", seed, limit, || {
             let n = text::normalize(&a);
             assert_eq!(text::normalize(&n), n, "normalize is idempotent (seed {seed})");
-            let _ = (text::fold(&a), text::codes(&b), text::word(&n, "rust"), text::starts(&n, "eng"));
+            let _ = (text::fold(&a), text::codes(&b));
         });
         bounded("org/ats", seed, limit, || {
-            let _ = (org::size(&a), org::department(&b), org::family(&b), org::company_key(&a));
+            let (company, role) = (text::normalize(&a), text::normalize(&b));
+            let _ = (org::size(&company), org::department(&role), org::family(&role));
             let _ = (ats::parse(&c), ats::parse(&format!("https://{c}/{d}?for={a}")));
         });
         bounded("score", seed, limit, || {

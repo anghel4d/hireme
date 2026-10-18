@@ -292,14 +292,24 @@ impl Hits {
 mod tests {
     use super::*;
 
+    /// A needle at a word start, by brute force; a `whole` one ends at a
+    /// word end too.
+    fn found(t: &str, n: &str, whole: bool) -> bool {
+        let (t, n) = (t.as_bytes(), n.as_bytes());
+        !n.is_empty()
+            && (0..=t.len().saturating_sub(n.len())).any(|at| {
+                t[at..].starts_with(n) && (at == 0 || t[at - 1] == b' ') && (!whole || t.get(at + n.len()).is_none_or(|b| *b == b' '))
+            })
+    }
+
     /// The rule as written, needle by needle: what one pass must equal.
     fn plain(n: &str) -> u64 {
         let compact: String = n.chars().filter(|c| *c != ' ').collect();
         let mut hits = 0;
         for (words, mode, group) in NEEDLES {
             let hit = match mode {
-                Whole => text::any_word(n, words),
-                Start => text::any_start(n, words),
+                Whole => words.iter().any(|w| found(n, w, true)),
+                Start => words.iter().any(|w| found(n, w, false)),
                 Named => words.contains(&compact.as_str()) || text::words(n).any(|w| words.contains(&w)),
             };
             if hit {
@@ -311,6 +321,8 @@ mod tests {
 
     #[test]
     fn one_pass_reads_what_each_needle_does() {
+        let t = text::normalize("Infrastructure engineer at Meta FAIR");
+        assert!(found(&t, "meta fair", true) && !found(&t, "infra", true) && found(&t, "infra", false) && !found(&t, "structure", false));
         let mut pieces: Vec<&str> = NEEDLES.iter().flat_map(|(w, _, _)| w.iter().copied()).collect();
         pieces.extend(["", "a", "s", "ing", "er", "x", "senior", "deep", "mind", "open", "ai", "c", "+", "staffing", "ü", "日本"]);
         let mut r = 0x2545_F491_4F6C_DD1Du64;

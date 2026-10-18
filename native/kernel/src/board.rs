@@ -323,7 +323,7 @@ pub fn rail(t: &Table, id: u32) -> Option<crate::pipeline::Rail> {
 }
 
 fn rail_of_row(r: Row<'_>) -> Option<crate::pipeline::Rail> {
-    let stage = r.u32(A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8))?;
+    let stage = r.u32(A::STAGE).and_then(Stage::from_u32)?;
     let stored = r.str(A::PIPS).and_then(crate::pipeline::decode).filter(|p| crate::pipeline::current(p) == stage);
     Some(stored.unwrap_or_else(|| crate::pipeline::rail_by_dates(stage, r.u32(A::APPLIED_ON).is_some(), r.u32(A::REPLIED_ON).is_some())))
 }
@@ -342,15 +342,11 @@ pub fn submitted(t: &Table, id: u32) -> bool {
 /// The governor's seat for one application row. Its score is the stored
 /// one; the board's cache sets the effective score.
 pub fn seat(t: &Table, id: u32) -> Option<Seat> {
-    seat_in(t, id).map(|f| Seat::new(&f))
-}
-
-fn seat_in(t: &Table, id: u32) -> Option<SeatIn<'_>> {
-    seat_of_row(t.row(id)?, id)
+    seat_of_row(t.row(id)?, id).map(|f| Seat::new(&f))
 }
 
 fn seat_of_row(r: Row<'_>, id: u32) -> Option<SeatIn<'_>> {
-    let stage = u8::try_from(r.u32(A::STAGE)?).ok().and_then(Stage::from_u8)?;
+    let stage = r.u32(A::STAGE).and_then(Stage::from_u32)?;
     let day = |c: u16| r.u32(c).map(|d| d as Day);
     Some(SeatIn {
         id,
@@ -408,10 +404,6 @@ pub fn config(rows: &Rows) -> heat::Config {
 }
 
 impl Board {
-    pub fn new() -> Board {
-        Board::default()
-    }
-
     /// Forgets what a frame or a write moved, before the next derive;
     /// `rows` are the rows after it.
     pub fn forget(&mut self, moved: &Moved, rows: &Rows) {
@@ -463,7 +455,7 @@ impl Board {
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
-                    if stages.get(i).and_then(|v| u8::try_from(*v).ok().and_then(Stage::from_u8)).is_some_and(|s| s.queued() || s.after_send())
+                    if stages.get(i).and_then(|v| Stage::from_u32(*v)).is_some_and(|s| s.queued() || s.after_send())
                         && self.cached(rows, t, id).is_some()
                     {
                         hot.push(id);
@@ -626,10 +618,6 @@ impl Board {
     /// Every card id in board order.
     pub fn order(&self) -> &[u32] {
         &self.order
-    }
-
-    pub fn heat_config(&self) -> &heat::Config {
-        &self.config
     }
 
     /// The card ids a filter keeps, in board order.

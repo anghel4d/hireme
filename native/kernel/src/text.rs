@@ -5,9 +5,8 @@
 //! their marks) folded to their base
 //! ("Zürich" and a decomposed "Zu\u{308}rich" both read "zurich"), its
 //! words are runs of alphanumerics, and exactly one space sits between
-//! words. Every matcher below takes an already normalized text
-//! and an ASCII needle in the same form, so a match is a byte search with
-//! a boundary check, never a regex.
+//! words, so `lexicon` matches its needles by bytes with a boundary
+//! check, never a regex.
 
 use alloc::string::String;
 
@@ -149,54 +148,6 @@ pub fn normalize(s: &str) -> String {
     out
 }
 
-fn boundary_before(t: &[u8], at: usize) -> bool {
-    at == 0 || t[at - 1] == b' '
-}
-
-fn boundary_after(t: &[u8], end: usize) -> bool {
-    end == t.len() || t[end] == b' '
-}
-
-pub fn word(text: &str, needle: &str) -> bool {
-    find(text, needle, true)
-}
-
-/// `needle` (one word or a phrase) at a word start; its end may run into a word,
-/// so "infra" finds "infrastructure".
-pub fn starts(text: &str, needle: &str) -> bool {
-    find(text, needle, false)
-}
-
-fn find(text: &str, needle: &str, whole: bool) -> bool {
-    let (t, n) = (text.as_bytes(), needle.as_bytes());
-    if n.is_empty() || n.len() > t.len() {
-        return false;
-    }
-    let mut from = 0;
-    while let Some(p) = memfind(&t[from..], n) {
-        let at = from + p;
-        if boundary_before(t, at) && (!whole || boundary_after(t, at + n.len())) {
-            return true;
-        }
-        from = at + 1;
-    }
-    false
-}
-
-fn memfind(h: &[u8], n: &[u8]) -> Option<usize> {
-    let first = n[0];
-    let last = h.len().checked_sub(n.len())?;
-    (0..=last).find(|&i| h[i] == first && &h[i..i + n.len()] == n)
-}
-
-pub fn any_word(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| word(text, n))
-}
-
-pub fn any_start(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| starts(text, n))
-}
-
 pub fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(' ').filter(|w| !w.is_empty())
 }
@@ -246,30 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn ascii_only_lowercases_wherever_it_sits() {
-        let pieces = ["A", "z", "Q", " ", "-", "9", "~", "\u{7f}", "é", "Ü", "\u{308}", "Ƕ", "İ", "ß", "🙂", "Ł"];
-        let mut r = 0x9E37_79B9_7F4A_7C15u64;
-        for _ in 0..5_000 {
-            let mut s = alloc::string::String::new();
-            let mut ascii = alloc::string::String::new();
-            for _ in 0..(r % 9) {
-                r ^= r << 13;
-                r ^= r >> 7;
-                r ^= r << 17;
-                let p = pieces[(r % pieces.len() as u64) as usize];
-                s.push_str(p);
-                if p.is_ascii() {
-                    ascii.push_str(p);
-                }
-            }
-            // All-ASCII text folds to its lowercase, and ASCII appended to
-            // anything folds independently of what precedes it.
-            assert_eq!(fold(&ascii), ascii.to_ascii_lowercase(), "{ascii:?}");
-            assert_eq!(fold(&alloc::format!("{s}{ascii}")), alloc::format!("{}{}", fold(&s), ascii.to_ascii_lowercase()), "{s:?}");
-        }
-    }
-
-    #[test]
     fn fold_meets_its_specification() {
         // Written out by hand, not derived from the tables: Latin-1's
         // letters fold to their base, lowercased; everything else lowercases.
@@ -310,15 +237,5 @@ mod tests {
             }
             assert_eq!(fold(&alloc::format!("{a}{b}")), alloc::format!("{}{}", fold(&a), fold(&b)), "{a:?} {b:?}");
         }
-    }
-
-    #[test]
-    fn word_needs_both_boundaries_and_starts_one() {
-        let t = normalize("Infrastructure engineer at Meta FAIR");
-        assert!(word(&t, "meta fair"));
-        assert!(!word(&t, "infra"));
-        assert!(starts(&t, "infra"));
-        assert!(!starts(&t, "structure"));
-        assert!(!word(&t, "fai"));
     }
 }

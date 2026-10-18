@@ -121,7 +121,7 @@ impl Kernel {
                 Ok(m)
             }
             Err(_) => {
-                self.board = Board::new();
+                self.board = Board::default();
                 self.indexes.get_mut().clear();
                 self.stale = true;
                 Err(Error::Body)
@@ -148,18 +148,15 @@ impl Kernel {
         match f.kind() {
             wire::BOOT | wire::TICK => self.boot(&body, rev),
             wire::PATCH => self.patch(&body, rev),
-            wire::ACK => {
+            kind @ (wire::ACK | wire::NACK) => {
+                let ops: Vec<u64> = if kind == wire::ACK {
+                    wire::decode_acks(&body).map_err(|_| Error::Frame)?.into_iter().map(|a| a.op_id).collect()
+                } else {
+                    wire::decode_nacks(&body).map_err(|_| Error::Frame)?.into_iter().map(|n| n.op_id).collect()
+                };
                 let mut all = Moved::default();
-                for a in wire::decode_acks(&body).map_err(|_| Error::Frame)? {
-                    merge(&mut all, self.rows.settle(a.op_id));
-                }
-                self.moved(&all, self.today());
-                Ok(all)
-            }
-            wire::NACK => {
-                let mut all = Moved::default();
-                for n in wire::decode_nacks(&body).map_err(|_| Error::Frame)? {
-                    merge(&mut all, self.rows.rollback(n.op_id));
+                for op in ops {
+                    merge(&mut all, self.rows.resolve(op));
                 }
                 self.moved(&all, self.today());
                 Ok(all)
@@ -337,13 +334,7 @@ pub fn effects_json(rows: &[judge::Row]) -> Json {
                     let name = def.and_then(|d| d.col(*c)).map_or_else(|| c.to_string(), |c| c.name.into());
                     let v = match v {
                         EVal::New(k) => json!({"new": k}),
-                        EVal::Val(Val::None) => Json::Null,
-                        EVal::Val(Val::U32(x)) => json!(x),
-                        EVal::Val(Val::I64(x)) => json!(x),
-                        EVal::Val(Val::F64(x)) => json!(x),
-                        EVal::Val(Val::Str(x)) => json!(x),
-                        EVal::Val(Val::List(l)) => json!(l),
-                        EVal::Val(Val::Packed(p)) => crate::rows::unpack(p).map_or(Json::Null, |t| json!(t)),
+                        EVal::Val(v) => v.json(),
                     };
                     (name, v)
                 })
@@ -386,15 +377,10 @@ pub fn refusal_json(r: &Refusal) -> Json {
     json!({"code": r.code, "refusal": name, "data": r.data})
 }
 
+/// A keyboard direction by its code (0 next, 1 prev, 2 up, 3 down, 4
+/// first, else last).
 pub fn dir(code: u32) -> Dir {
-    match code {
-        0 => Dir::Next,
-        1 => Dir::Prev,
-        2 => Dir::Up,
-        3 => Dir::Down,
-        4 => Dir::First,
-        _ => Dir::Last,
-    }
+    [Dir::Next, Dir::Prev, Dir::Up, Dir::Down, Dir::First].get(code as usize).copied().unwrap_or(Dir::Last)
 }
 
 /// The browser's exports. One kernel per module instance.
@@ -426,6 +412,11 @@ mod exports {
         put(ids.iter().flat_map(|i| i.to_le_bytes()).collect())
     }
 
+    /// A refusal's JSON, returned as minus its length minus one.
+    fn refused(r: &Refusal) -> i32 {
+        -put_json(&refusal_json(r)) - 1
+    }
+
     /// # Safety
     /// `ptr` and `len` name a buffer from `alloc`, alive for the call.
     unsafe fn input<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
@@ -441,16 +432,17 @@ mod exports {
         json!({"tables": tables, "replaced": m.replaced})
     }
 
-    fn ctx_json(json: &[u8]) -> (Day, i64, bool, Option<u32>, Vec<u32>) {
+    /// Runs `f` under the JSON ctx `{today, now, human, key_id, held}`.
+    fn with_ctx<R>(json: &[u8], f: impl FnOnce(&Ctx) -> R) -> R {
         let v: Json = serde_json::from_slice(json).unwrap_or(Json::Null);
-        let held = v["held"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32).collect()).unwrap_or_default();
-        (
-            v["today"].as_i64().unwrap_or(0) as Day,
-            v["now"].as_i64().unwrap_or(0),
-            v["human"].as_bool().unwrap_or(true),
-            v["key_id"].as_u64().map(|x| x as u32),
-            held,
-        )
+        let held: Vec<u32> = v["held"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as u32).collect()).unwrap_or_default();
+        f(&Ctx {
+            today: v["today"].as_i64().unwrap_or(0) as Day,
+            now: v["now"].as_i64().unwrap_or(0),
+            human: v["human"].as_bool().unwrap_or(true),
+            key_id: v["key_id"].as_u64().map(|x| x as u32),
+            held: &held,
+        })
     }
 
     #[unsafe(no_mangle)]
@@ -513,13 +505,11 @@ mod exports {
     pub unsafe extern "C" fn predict(op: *const u8, op_len: usize, ctx: *const u8, ctx_len: usize) -> i32 {
         let (op, c) = unsafe { (input(op, op_len), input(ctx, ctx_len)) };
         TEXT.with(|t| *t.borrow_mut() = None);
-        let (today, now, human, key_id, held) = ctx_json(c);
-        K.with(|k| {
-            let ctx = Ctx { today, now, human, key_id, held: &held };
-            match k.borrow_mut().predict(op, &ctx) {
+        with_ctx(c, |ctx| {
+            K.with(|k| match k.borrow_mut().predict(op, ctx) {
                 Ok(m) => put_json(&moved_json(&m)),
-                Err(r) => -put_json(&refusal_json(&r)) - 1,
-            }
+                Err(r) => refused(&r),
+            })
         })
     }
 
@@ -528,13 +518,11 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn judge(op: *const u8, op_len: usize, ctx: *const u8, ctx_len: usize) -> i32 {
         let (op, c) = unsafe { (input(op, op_len), input(ctx, ctx_len)) };
-        let (today, now, human, key_id, held) = ctx_json(c);
-        K.with(|k| {
-            let ctx = Ctx { today, now, human, key_id, held: &held };
-            match k.borrow_mut().judge(op, &ctx) {
+        with_ctx(c, |ctx| {
+            K.with(|k| match k.borrow_mut().judge(op, ctx) {
                 Ok(rows) => put_json(&effects_json(&rows)),
-                Err(r) => -put_json(&refusal_json(&r)) - 1,
-            }
+                Err(r) => refused(&r),
+            })
         })
     }
 
@@ -553,7 +541,7 @@ mod exports {
         let req = serde_json::from_slice(unsafe { input(ptr, len) }).unwrap_or(Json::Null);
         K.with(|k| match k.borrow().query(&req) {
             Ok(j) => put_json(&j),
-            Err(r) => -put_json(&refusal_json(&r)) - 1,
+            Err(r) => refused(&r),
         })
     }
 
@@ -636,49 +624,46 @@ mod exports {
         K.with(|k| k.borrow_mut().restore(s).map_or(-1, |rev| rev as i64))
     }
 
+    /// `f` over one of the kernel's tables, if it holds it.
+    fn table<R>(t: u32, f: impl FnOnce(Option<&crate::rows::Table>) -> R) -> R {
+        K.with(|k| f(k.borrow().rows.table(t as u16)))
+    }
+
     /// Row count of a table.
     #[unsafe(no_mangle)]
     pub extern "C" fn rows(t: u32) -> u32 {
-        K.with(|k| k.borrow().rows.table(t as u16).map_or(0, |t| t.len() as u32))
+        table(t, |t| t.map_or(0, |t| t.len() as u32))
     }
 
     /// The table's ids, `rows(t)` u32s in slot order.
     #[unsafe(no_mangle)]
     pub extern "C" fn ids_ptr(t: u32) -> *const u32 {
-        K.with(|k| k.borrow().rows.table(t as u16).map_or(core::ptr::null(), |t| t.ids().as_ptr()))
+        table(t, |t| t.map_or(core::ptr::null(), |t| t.ids().as_ptr()))
     }
 
     /// A column's storage in slot order: u32 (kind 1), i64 (3) or f64
     /// (4) values, `rows(t)` of them; null for other kinds.
     #[unsafe(no_mangle)]
     pub extern "C" fn col_ptr(t: u32, c: u32) -> *const u8 {
-        K.with(|k| {
-            let k = k.borrow();
-            match k.rows.table(t as u16).and_then(|t| t.column(c as u16)).map(|c| &c.data) {
-                Some(Data::U32(v)) => v.as_ptr() as *const u8,
-                Some(Data::I64(v)) => v.as_ptr() as *const u8,
-                Some(Data::F64(v)) => v.as_ptr() as *const u8,
-                _ => core::ptr::null(),
-            }
+        table(t, |t| match t.and_then(|t| t.column(c as u16)).map(|c| &c.data) {
+            Some(Data::U32(v)) => v.as_ptr() as *const u8,
+            Some(Data::I64(v)) => v.as_ptr() as *const u8,
+            Some(Data::F64(v)) => v.as_ptr() as *const u8,
+            _ => core::ptr::null(),
         })
     }
 
-    /// A column's storage kind: 1 u32, 2 str, 3 i64, 4 f64,
-    /// 7 list; 0 when absent.
+    /// A column's storage kind: 1 u32, 2 str (packed text too: `str_len`
+    /// and `str_ptr` unpack it), 3 i64, 4 f64, 7 list; 0 when absent.
     #[unsafe(no_mangle)]
     pub extern "C" fn col_kind(t: u32, c: u32) -> u32 {
-        K.with(|k| {
-            let k = k.borrow();
-            match k.rows.table(t as u16).and_then(|t| t.column(c as u16)).map(|c| &c.data) {
-                Some(Data::U32(_)) => 1,
-                Some(Data::Str(_)) => 2,
-                Some(Data::I64(_)) => 3,
-                Some(Data::F64(_)) => 4,
-                Some(Data::List(_)) => 7,
-                // Packed text reads as str: str_len and str_ptr unpack it.
-                Some(Data::Packed(_)) => 2,
-                None => 0,
-            }
+        table(t, |t| match t.and_then(|t| t.column(c as u16)).map(|c| &c.data) {
+            Some(Data::U32(_)) => 1,
+            Some(Data::Str(_) | Data::Packed(_)) => 2,
+            Some(Data::I64(_)) => 3,
+            Some(Data::F64(_)) => 4,
+            Some(Data::List(_)) => 7,
+            None => 0,
         })
     }
 
@@ -697,9 +682,8 @@ mod exports {
     /// A str cell in place, or a packed one unpacked into TEXT (kept for the
     /// call after it): what `str_len` and `str_ptr` read.
     fn cell<R>(t: u32, c: u32, id: u32, f: impl Fn(&str) -> R) -> Option<R> {
-        K.with(|k| {
-            let k = k.borrow();
-            let table = k.rows.table(t as u16)?;
+        table(t, |table| {
+            let table = table?;
             if let Some(s) = table.str(id, c as u16) {
                 return Some(f(s));
             }
@@ -716,6 +700,6 @@ mod exports {
     /// The slot of a row id in its table's column views; `u32::MAX` if absent.
     #[unsafe(no_mangle)]
     pub extern "C" fn slot(t: u32, id: u32) -> u32 {
-        K.with(|k| k.borrow().rows.table(t as u16).and_then(|t| t.slot(id)).map_or(u32::MAX, |s| s as u32))
+        table(t, |t| t.and_then(|t| t.slot(id)).map_or(u32::MAX, |s| s as u32))
     }
 }

@@ -58,11 +58,6 @@ impl Default for Grants {
 }
 
 impl Grants {
-    /// A browser session's: every domain both ways.
-    pub fn operator() -> Grants {
-        Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true }
-    }
-
     pub fn visible(&self, c: &Column) -> bool {
         !has(c, flag::SERVER_ONLY) && (!has(c, flag::PRIVATE) || self.human)
     }
@@ -338,8 +333,9 @@ fn key_of<'a>(t: &'a Table, id: u32, c: &'static Column) -> Key2<'a> {
     t.slot(id).map_or(Key2::Null, |s| Cells::new(t, c).key(s))
 }
 
-fn is_live(t: &Table, tm: &TableModel, id: u32) -> bool {
-    !tm.soft_delete || tm.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none() && t.i64(id, c.id).is_none())
+/// Whether row `id` is in `t` and not a tombstone (`deleted_at` set).
+pub(crate) fn live(t: &Table, tm: &TableModel, id: u32) -> bool {
+    t.has(id) && (!tm.soft_delete || tm.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none()))
 }
 
 /// A cell as World's JSON shows it.
@@ -357,12 +353,7 @@ pub(crate) fn value_json(c: &Column, v: &Val) -> Json {
         (Type::Time, Val::U32(s)) => crate::time_iso(*s as i64).into(),
         (Type::Time, Val::I64(s)) => crate::time_iso(*s).into(),
         (Type::Json, Val::Str(s)) => serde_json::from_str(s).unwrap_or_else(|_| Json::String(s.clone())),
-        (_, Val::U32(x)) => Json::from(*x),
-        (_, Val::I64(x)) => Json::from(*x),
-        (_, Val::F64(x)) => serde_json::Number::from_f64(*x).map_or(Json::Null, Json::Number),
-        (_, Val::Str(s)) => Json::String(s.clone()),
-        (_, Val::List(l)) => Json::from(l.clone()),
-        (_, Val::Packed(p)) => crate::rows::unpack(p).map_or(Json::Null, |t| Json::String(t.into_owned())),
+        _ => v.json(),
     }
 }
 
@@ -546,14 +537,20 @@ fn test(k: &Key2, t: &Test) -> bool {
     }
 }
 
-fn cond_holds(tm: &TableModel, t: &Table, id: u32, w: &Cond) -> bool {
-    let (Cond::Eq(c, _) | Cond::Null(c) | Cond::NotNull(c)) = w;
-    let Some(c) = tm.col_named(c) else { return false };
-    let k = key_of(t, id, c);
-    match w {
-        Cond::Null(_) => k.is_null(),
-        Cond::NotNull(_) => !k.is_null(),
-        Cond::Eq(_, v) => cast(c, &Json::String((*v).into())).is_some_and(|v| !k.is_null() && k.cmp(&v) == Ordering::Equal),
+/// Whether a key's where holds on a row read through `value`.
+pub(crate) fn cond_holds(td: &TableModel, value: &dyn Fn(&Column) -> Val, c: &Cond) -> bool {
+    let (Cond::Eq(n, _) | Cond::Null(n) | Cond::NotNull(n)) = c;
+    let Some(col) = td.col_named(n) else { return false };
+    let v = value(col);
+    match c {
+        Cond::Null(_) => v.is_none(),
+        Cond::NotNull(_) => !v.is_none(),
+        Cond::Eq(_, want) => match (ty(col), &v) {
+            (Type::Enum, Val::U32(x)) => enum_values(col).get(*x as usize) == Some(want),
+            (_, Val::Str(s)) => s == want,
+            (_, Val::U32(x)) => want.parse() == Ok(*x),
+            _ => false,
+        },
     }
 }
 
@@ -684,7 +681,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     let found = match (p.get("id"), p.get("key")) {
         (Some(id), _) => {
             let id = id_param(Some(id))?;
-            rows.table(tm.id).filter(|t| t.has(id) && is_live(t, tm, id)).map(|t| (t, id))
+            rows.table(tm.id).filter(|t| live(t, tm, id)).map(|t| (t, id))
         }
         (None, Some(Json::Object(key))) if !key.is_empty() => {
             if key.values().any(|v| v.is_object() || v.is_array()) {
@@ -696,7 +693,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
                 t.ids()
                     .iter()
                     .copied()
-                    .find(|&id| is_live(t, tm, id) && fs.iter().all(|f| holds(t, id, f)) && k.1.is_none_or(|w| cond_holds(tm, t, id, w)))
+                    .find(|&id| live(t, tm, id) && fs.iter().all(|f| holds(t, id, f)) && k.1.is_none_or(|w| cond_holds(tm, &|c| t.get(id, c.id), w)))
                     .map(|id| (t, id))
             })
         }
@@ -761,7 +758,7 @@ fn text(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     if offset + length + 4 > INT64 {
         return refuse(refusal::TOO_LARGE, json!({"param": "offset"}));
     }
-    let Some(t) = rows.table(tm.id).filter(|t| t.has(id) && is_live(t, tm, id)) else {
+    let Some(t) = rows.table(tm.id).filter(|t| live(t, tm, id)) else {
         return refuse(refusal::NOT_FOUND, json!({"table": tm.name, "id": id}));
     };
     let Some(whole) = t.text(id, c.id) else {
@@ -838,7 +835,7 @@ fn history(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
                 let sf = |n: &str| sm.col_named(n).map_or(Json::Null, |c| out(s, sid, c));
                 Some(json!({
                     "id": sid, "url": sf("url"), "host": sf("host"), "publisher": sf("publisher"),
-                    "title": sf("title"), "kind": sf("kind"), "dropped": !is_live(s, sm, sid),
+                    "title": sf("title"), "kind": sf("kind"), "dropped": !live(s, sm, sid),
                 }))
             });
             json!({

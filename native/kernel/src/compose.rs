@@ -33,6 +33,13 @@ pub fn row(t: &Table, id: u32) -> Json {
     crate::query::row_out(t, id, &cols, false)
 }
 
+/// The lineage telling a corporation's story: the `cv_lineages` row naming it.
+fn lineage_of(rows: &Rows, corporation: Option<u32>) -> Option<(&Table, u32)> {
+    let c = corporation?;
+    let lt = rows.table(table::CV_LINEAGES)?;
+    lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c)).map(|l| (lt, l))
+}
+
 /// One application: its row, card, rail, heat, suggestion, coverage, CV,
 /// events, batch and lineage.
 pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Json> {
@@ -40,7 +47,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
     if !t.has(id) {
         return None;
     }
-    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered);
+    let stage = t.u32(id, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered);
     let rail = board::rail(t, id).unwrap_or_else(|| pipeline::initial(stage));
     let rail: Vec<Json> = STAGES
         .iter()
@@ -75,25 +82,19 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         .unwrap_or_default();
 
     let batch = t.u32(id, A::BATCH_ID).and_then(|b| rows.table(table::BATCHES).filter(|bt| bt.has(b)).map(|bt| row(bt, b)));
-    let lineage = t
-        .u32(id, A::CORPORATION_ID)
-        .and_then(|c| {
-            let lt = rows.table(table::CV_LINEAGES)?;
-            lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c)).map(|l| (lt, l))
-        })
-        .map(|(lt, l)| {
-            let opened = lt.u32(l, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
-            let rewrites = lt.u32(l, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
-            let phase = match cv::phase(opened, rewrites, today) {
-                cv::Phase::Tailor => "tailor",
-                cv::Phase::Additive => "additive",
-                cv::Phase::Ready => "ready",
-            };
-            let mut j = row(lt, l);
-            j["phase"] = phase.into();
-            j["days_to_open"] = cv::days_to_open(opened, today).into();
-            j
-        });
+    let lineage = lineage_of(rows, t.u32(id, A::CORPORATION_ID)).map(|(lt, l)| {
+        let opened = lt.u32(l, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
+        let rewrites = lt.u32(l, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
+        let phase = match cv::phase(opened, rewrites, today) {
+            cv::Phase::Tailor => "tailor",
+            cv::Phase::Additive => "additive",
+            cv::Phase::Ready => "ready",
+        };
+        let mut j = row(lt, l);
+        j["phase"] = phase.into();
+        j["days_to_open"] = cv::days_to_open(opened, today).into();
+        j
+    });
 
     let card = board.card(id).zip(board.seat(id)).map(|(c, seat)| {
         let mut heat = c.verdict.to_json(seat);
@@ -141,10 +142,8 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
         .unwrap_or_default();
     // The lineage's overlays, from every application to the corporation:
     // one story per company.
-    let lineage = t.u32(id, A::CORPORATION_ID).and_then(|c| {
-        let lt = rows.table(table::CV_LINEAGES)?;
-        lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c))
-    });
+    let lin = lineage_of(rows, t.u32(id, A::CORPORATION_ID));
+    let lineage = lin.map(|(_, l)| l);
     let overlays: Vec<Overlay> = rows
         .table(table::CV_OVERLAYS)
         .map(|o| {
@@ -182,14 +181,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
                 .collect()
         })
         .unwrap_or_default();
-    let lineage_theme = t
-        .u32(id, A::CORPORATION_ID)
-        .and_then(|c| {
-            let lt = rows.table(table::CV_LINEAGES)?;
-            let l = lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c))?;
-            Some(Theme::parse(lt.str(l, col::cv_lineages::THEME)))
-        })
-        .unwrap_or_default();
+    let lineage_theme = lin.map(|(lt, l)| Theme::parse(lt.str(l, col::cv_lineages::THEME))).unwrap_or_default();
     let theme = Theme::parse(t.str(id, A::CV_THEME)).over(lineage_theme);
     (cv::compose(profile, &items, &overlays), theme)
 }
