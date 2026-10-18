@@ -1013,4 +1013,128 @@ defmodule Hireme.SequencerTest do
       }
     end
   end
+
+  describe "account size" do
+    # Every byte of text the account's own tables hold, counted from scratch.
+    defp recount(account_id) do
+      for t <- Schema.tables(),
+          t.residency in [:resident, :server],
+          t.domain != "system" or t.name == "citations",
+          reduce: 0 do
+        acc ->
+          case for(
+                 c <- t.cols,
+                 c.type in [:str, :text, :json],
+                 do: ~s{coalesce(length(CAST("#{c.name}" AS BLOB)),0)}
+               ) do
+            [] ->
+              acc
+
+            parts ->
+              %{rows: [[n]]} =
+                Repo.query!(
+                  ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{t.name}" WHERE account_id = ?},
+                  [account_id], skip_account: true)
+
+              acc + n
+          end
+      end
+    end
+
+    defp counter(account_id),
+      do:
+        Repo.one!(
+          from(a in Hireme.Rows.Account, where: a.id == ^account_id, select: a.text_bytes),
+          skip_account: true
+        )
+
+    test "the text counter stays exact through inserts, replaces, cascading drops and citations",
+         %{account: a} do
+      {[corp], []} =
+        run(
+          a.id,
+          op(
+            :put,
+            :corporations,
+            %{
+              domain: "bytes.example",
+              name: "Bytes",
+              about: String.duplicate("long about ", 50),
+              source: "https://bytes.example/a",
+              headcount: 9,
+              as_of: ~D[2026-10-01]
+            }, expect_rev: 0)
+        )
+
+      {[app], []} =
+        run(
+          a.id,
+          op(:put, :applications, %{
+            company: "Bytes",
+            role: "R",
+            corporation_id: corp.id,
+            notes: String.duplicate("n", 1_000),
+            listing_raw: String.duplicate("listing ", 100)
+          })
+        )
+
+      assert counter(a.id) == recount(a.id)
+
+      {[_], []} = run(a.id, op(:put, :applications, %{notes: "short"}, target: app.id))
+      assert counter(a.id) == recount(a.id)
+
+      {[_], []} =
+        run(
+          a.id,
+          op(:put, :events, %{
+            application_id: app.id,
+            kind: "note",
+            body: String.duplicate("e", 300)
+          })
+        )
+
+      {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
+      assert counter(a.id) == recount(a.id)
+
+      {[_], []} = run(a.id, op(:drop, :applications, %{}, target: app.id))
+      assert counter(a.id) == recount(a.id)
+    end
+
+    test "past the account's text budget a write is refused cap", %{account: a} do
+      budget = Hireme.Security.account_text_bytes()
+
+      from(x in Hireme.Rows.Account, where: x.id == ^a.id)
+      |> Repo.update_all([set: [text_bytes: budget - 10]], skip_account: true)
+
+      assert {[], [%{refusal: :cap}]} =
+               run(
+                 a.id,
+                 op(:put, :applications, %{
+                   company: "Too much",
+                   role: "R",
+                   notes: String.duplicate("x", 100)
+                 })
+               )
+
+      assert {[_], []} =
+               run(
+                 a.id,
+                 op(:put, :gym_reps, %{platform: :other, slug: "s", done_on: ~D[2026-10-01]})
+               )
+    end
+
+    test "a key's text per minute is bounded beside its op count", %{account: a, session: s} do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "bulk", Hireme.Keys.preset(:read_write))
+      {agent, _} = key_session(a.id, key, 999)
+      {_, budget} = Hireme.Security.limits()[:agent_write_bytes]
+      mib = String.duplicate("x", 1_048_000)
+
+      ops =
+        for i <- 1..(div(budget, 1_048_000) + 1),
+            do: op(:put, :net_entries, %{kind: :draft, body: mib, title: "#{i}"})
+
+      {[], nacks} = key_session_ops(agent, ops)
+      assert Enum.all?(nacks, &(&1.refusal == :rate))
+    end
+  end
 end

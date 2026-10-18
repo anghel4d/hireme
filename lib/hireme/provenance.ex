@@ -201,7 +201,7 @@ defmodule Hireme.Provenance do
   @doc """
   One citation per metric or prose cell of a committed write. `cells` are
   `{column_name, value}`; `ctx` carries `source`, `as_of`, `today`, `actor`,
-  `key_id`, `op_id`, `now`.
+  `key_id`, `op_id`, `now`. Answers `{count, ids}`.
   """
   def cite(table, row_id, cells, ctx) do
     cols = Map.new(table.cols, &{&1.name, &1})
@@ -225,8 +225,15 @@ defmodule Hireme.Provenance do
         }
       end
 
-    if rows != [], do: Repo.insert_all(Citation, rows)
-    length(rows)
+    # The count and the new rows' ids (the sequencer weighs their text).
+    case rows do
+      [] ->
+        {0, []}
+
+      _ ->
+        {n, written} = Repo.insert_all(Citation, rows, returning: [:id])
+        {n, Enum.map(written, & &1.id)}
+    end
   end
 
   defp json_value(%Date{} = d), do: Date.to_iso8601(d)

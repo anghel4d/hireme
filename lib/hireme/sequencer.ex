@@ -170,8 +170,12 @@ defmodule Hireme.Sequencer do
   def init(account_id) do
     Repo.put_account(account_id)
 
-    rev =
-      Repo.one!(from(a in Hireme.Rows.Account, where: a.id == ^account_id, select: a.desk_rev),
+    {rev, text_bytes} =
+      Repo.one!(
+        from(a in Hireme.Rows.Account,
+          where: a.id == ^account_id,
+          select: {a.desk_rev, a.text_bytes}
+        ),
         skip_account: true
       )
 
@@ -184,7 +188,8 @@ defmodule Hireme.Sequencer do
       counts: %{},
       kernel: nil,
       rows: nil,
-      backfill_after: 0
+      backfill_after: 0,
+      text_bytes: text_bytes
     }
 
     # A revoked or changed key, a revoked browser session or a suspension is
@@ -241,11 +246,28 @@ defmodule Hireme.Sequencer do
     {:noreply, state, @idle_ms}
   end
 
+  # A key's budget per minute: ops (:agent_write) and their text bytes
+  # (:agent_write_bytes); either one spent refuses the whole submission.
+  defp spend(key_id, n, bytes) do
+    with :ok <- Security.hit(:agent_write, key_id, max(n, 1)) do
+      if bytes > 0, do: Security.hit(:agent_write_bytes, key_id, bytes), else: :ok
+    end
+  end
+
   # Check 6's `rate` is taken as ops arrive, for every op a key sends,
   # refused ones too: a flood of cheap refusals still spends the budget.
   defp within_rate({pid, ops}, state) do
+    bytes =
+      Enum.reduce(ops, 0, fn op, n ->
+        n +
+          Enum.reduce(op.cells, 0, fn
+            {_, 2, v}, m -> m + byte_size(v)
+            _, m -> m
+          end)
+      end)
+
     with %{key_id: key_id} when key_id != nil <- state.subs[pid],
-         {:error, retry_ms} <- Security.hit(:agent_write, key_id, max(length(ops), 1)) do
+         {:error, retry_ms} <- spend(key_id, length(ops), bytes) do
       nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
       send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
       false
@@ -490,7 +512,7 @@ defmodule Hireme.Sequencer do
 
   defp batch(chunk, state) do
     now = Store.now()
-    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0}
+    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0, text: 0}
 
     result =
       try do
@@ -503,12 +525,15 @@ defmodule Hireme.Sequencer do
 
           rev = state.rev + turn.acked
 
-          if turn.acked > 0 do
+          if turn.acked > 0 or turn.text != 0 do
             from(a in Hireme.Rows.Account, where: a.id == ^state.account_id)
-            |> Repo.update_all([set: [desk_rev: rev]], skip_account: true)
+            |> Repo.update_all([set: [desk_rev: rev], inc: [text_bytes: turn.text]],
+              skip_account: true
+            )
           end
 
-          {%{state | rev: rev}, turn, Enum.reverse(verdicts)}
+          {%{state | rev: rev, text_bytes: state.text_bytes + turn.text}, turn,
+           Enum.reverse(verdicts)}
         end)
       rescue
         e ->
@@ -711,7 +736,7 @@ defmodule Hireme.Sequencer do
          :ok <- too_large(op),
          {:ok, effects, state} <- domain(plan, op, sub, state, turn),
          {:ok, prov} <- provenance(plan, op, effects, turn),
-         {:ok, state} <- limits(plan, effects, state),
+         {:ok, state} <- limits(plan, effects, state, op, turn),
          {:ok, state, turn, ack} <- write(plan, op, sub, effects, prov, state, turn) do
       {:ok, state, turn, ack}
     else
@@ -778,6 +803,31 @@ defmodule Hireme.Sequencer do
         {:ok, plan}
     end
   end
+
+  # The text a row of `table` holds, in bytes, as SQLite stores it: every
+  # str, text and json column (deferred ones included). The per-account
+  # text budget counts exactly this, before and after each write.
+  defp text_bytes(table, ids) when is_list(ids) do
+    case for(
+           c <- table.cols,
+           c.type in [:str, :text, :json],
+           do: ~s{coalesce(length(CAST("#{c.name}" AS BLOB)),0)}
+         ) do
+      [] ->
+        0
+
+      parts ->
+        marks = Enum.map_join(ids, ",", fn _ -> "?" end)
+
+        sql =
+          ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{table.name}" WHERE id IN (#{marks})}
+
+        %{rows: [[n]]} = Repo.query!(sql, ids, skip_account: true)
+        n
+    end
+  end
+
+  defp text_bytes(table, id), do: text_bytes(table, [id])
 
   defp col(table, id) when is_integer(id), do: Enum.find(table.cols, &(&1.id == id))
   defp col(table, name), do: Enum.find(table.cols, &(&1.name == name))
@@ -1143,12 +1193,22 @@ defmodule Hireme.Sequencer do
                else: :ok
              ),
            # Today in UTC, plus the day a writer east of it may already be in.
+           new_source =
+             is_binary(source_cell) and
+               not Repo.exists?(from(x in Hireme.Rows.Source, where: x.url == ^source_cell)),
            {:ok, source} <- Provenance.source(source_cell, turn.now),
            ctx = %{as_of: as_of, source: source, expect_rev: op.expect_rev},
            changes = Map.new(names, &{&1, true}),
            {:ok, changes} <- Provenance.check(table, plan.row, changes, ctx) do
         ons = for {k, %Date{} = d} <- changes, String.ends_with?(k, "_on"), do: {k, d}
-        {:ok, %{as_of: as_of, source: source, ons: Map.new(ons)}}
+
+        {:ok,
+         %{
+           as_of: as_of,
+           source: source,
+           ons: Map.new(ons),
+           new_source: new_source and source != nil
+         }}
       end
     else
       {:ok, nil}
@@ -1179,6 +1239,26 @@ defmodule Hireme.Sequencer do
     if text > @max_op_text,
       do: {:refused, :too_large, %{bytes: text, max: @max_op_text}},
       else: :ok
+  end
+
+  defp limits(plan, effects, state, op, turn) do
+    with {:ok, state} <- limits(plan, effects, state), do: text_budget(op, state, turn)
+  end
+
+  # The account's text: what it holds, what this turn has moved, and what
+  # this op brings may not pass Security.account_text_bytes.
+  defp text_budget(op, state, turn) do
+    adds =
+      Enum.reduce(op.cells, 0, fn
+        {_, 2, v}, n -> n + byte_size(v)
+        _, n -> n
+      end)
+
+    budget = Security.account_text_bytes()
+
+    if state.text_bytes + turn.text + adds > budget,
+      do: {:refused, :cap, %{table: "account", reason: "text", cap: budget}, state},
+      else: {:ok, state}
   end
 
   defp limits(plan, effects, state) do
@@ -1230,9 +1310,12 @@ defmodule Hireme.Sequencer do
                                                                {{:ok, deltas, news, ack},
                                                                 inserted} ->
         table = Schema.table(table_id)
+        before = if row_id == 0, do: 0, else: text_bytes(table, row_id)
 
         case effect(table, row_id, cells, inserted, ctx) do
           {:ok, row, changed} ->
+            moved = {:text, text_bytes(table, row.id) - before}
+
             own = own?(plan, op, table_id, row_id, ack)
 
             inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
@@ -1240,8 +1323,10 @@ defmodule Hireme.Sequencer do
             ack =
               if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
 
-            cited = if own and prov, do: [{:cited, cite(table, row, cells, prov, ctx)}], else: []
-            {:cont, {{:ok, deltas ++ [{:put, table, row, changed} | cited], news, ack}, inserted}}
+            cited = if own and prov, do: cite(table, row, cells, prov, ctx), else: []
+
+            {:cont,
+             {{:ok, deltas ++ [{:put, table, row, changed}, moved | cited], news, ack}, inserted}}
 
           refused ->
             {:halt, {refused, inserted}}
@@ -1339,7 +1424,14 @@ defmodule Hireme.Sequencer do
           state
       end
 
-    {:ok, count_deltas(state, deltas), %{turn | deltas: turn.deltas ++ deltas}, ack}
+    text =
+      Enum.reduce(deltas, 0, fn
+        {:text, n}, acc -> acc + n
+        _, acc -> acc
+      end)
+
+    {:ok, count_deltas(state, deltas),
+     %{turn | deltas: turn.deltas ++ deltas, text: turn.text + text}, ack}
   end
 
   defp effect(table, row_id, cells, inserted, ctx) do
@@ -1483,6 +1575,20 @@ defmodule Hireme.Sequencer do
   end
 
   defp cite(table, row, cells, prov, ctx) do
+    {n, ids} = cite_rows(table, row, cells, prov, ctx)
+
+    source =
+      if prov.new_source,
+        do: [{:text, text_bytes(Schema.table(:sources), prov.source.id)}],
+        else: []
+
+    [
+      {:cited, n},
+      {:text, if(ids == [], do: 0, else: text_bytes(Schema.table(:citations), ids))} | source
+    ]
+  end
+
+  defp cite_rows(table, row, cells, prov, ctx) do
     named =
       for {col_id, v} <- cells,
           c = col(table, col_id),
@@ -1513,8 +1619,9 @@ defmodule Hireme.Sequencer do
 
       {deltas ++ [{:gone, table, pid}], row.rev}
     else
+      freed = text_bytes(table, pid)
       Repo.delete!(row)
-      {deltas ++ [{:gone, table, pid}], row.rev + 1}
+      {deltas ++ [{:gone, table, pid}, {:text, -freed}], row.rev + 1}
     end
   end
 
