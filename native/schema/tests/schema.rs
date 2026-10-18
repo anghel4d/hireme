@@ -135,6 +135,8 @@ fn a_table_def_names_its_keys_and_their_wheres() {
     assert!(sources.soft_delete && !sources.singleton && !sources.unmasked);
     assert!(table_def(table::SETTINGS).unwrap().singleton);
     assert!(table_def(table::EVENTS).unwrap().append_only);
+    let session: Vec<_> = schema::TABLES.iter().filter(|t| t.session).map(|t| t.name).collect();
+    assert_eq!(session, ["leases", "clock", "catalog", "trusted", "acct_keys", "acct_sessions", "acct_identities", "acct_factors", "acct_audit", "acct_info"]);
     let fire = table_def(table::BATCHES).unwrap().col_named("fire").unwrap();
     assert_eq!(fire.default, Some("hold"));
 }

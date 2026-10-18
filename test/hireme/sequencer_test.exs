@@ -200,6 +200,61 @@ defmodule Hireme.SequencerTest do
            end)
   end
 
+  test "the account views follow every trail event, keep security events past an activity burst, and come fresh to a resumed session",
+       %{account: a, session: s} do
+    # A snapshot of rev 0 holds nothing to resume from.
+    {[_], []} = run(a.id, op(:put, :corporations, %{domain: "views.example", name: "V"}))
+    sub = %{id: 990, label: "v", grants: Grants.operator(), key_id: nil, session_id: nil}
+    {:ok, %{frames: [f], rev: rev}} = Sequencer.subscribe(a.id, sub, 0)
+    {:ok, :BOOT, _, _, body} = Codec.decode(f)
+    kind = Schema.column(:acct_audit, "kind").id
+    kinds = fn model -> for {_, r} <- model["acct_audit"] || %{}, do: r[kind] end
+
+    # Activity wakes the views too: an agent's op batch reaches the replica.
+    :ok = Hireme.Audit.record(:agent_ops, %{ops: 1}, %{account_id: a.id})
+    assert_receive {:sequencer, :patch, _, patch}, 2_000
+    model = ingest(ingest(%{}, :BOOT, body), :PATCH, patch)
+    assert "agent_ops" in kinds.(model)
+    security = Enum.reject(kinds.(model), &(&1 in Hireme.Audit.activity_kinds()))
+    assert security != []
+
+    # A window's worth of activity after them pushes no security event out.
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    burst =
+      for _ <- 1..1_000,
+          do: %{
+            account_id: a.id,
+            kind: "agent_ops",
+            security: false,
+            rev: 1,
+            inserted_at: now,
+            updated_at: now
+          }
+
+    Repo.insert_all(Hireme.Rows.Audit, burst, skip_account: true)
+    Hireme.Audit.changed(a.id)
+    assert_receive {:sequencer, :patch, _, patch}, 2_000
+    model = ingest(model, :PATCH, patch)
+    assert Enum.sort(security) -- kinds.(model) == []
+
+    # A resumed session's snapshot holds the account's tables; its views come fresh.
+    {:ok, %{key: _}} = Hireme.Keys.mint(s, "while away", Hireme.Keys.preset(:read_only))
+    assert_receive {:sequencer, :patch, _, _}, 2_000
+    resumed = %{sub | id: 989}
+
+    {:PATCH, body} =
+      Task.async(fn ->
+        {:ok, %{frames: [f]}} = Sequencer.subscribe(a.id, resumed, rev)
+        {:ok, k, _, _, b} = Codec.decode(f)
+        {k, b}
+      end)
+      |> Task.await()
+
+    name = Schema.column(:acct_keys, "name").id
+    assert "while away" in for({_, r} <- ingest(%{}, :PATCH, body)["acct_keys"], do: r[name])
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))
@@ -1379,7 +1434,8 @@ defmodule Hireme.SequencerTest do
                )
 
       [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
-      DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+      # Between messages: a stop mid-query costs the sandbox its connection.
+      GenServer.stop(pid)
 
       info = %{
         id: 995,

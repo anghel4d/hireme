@@ -720,7 +720,7 @@ table catalog system wire
 
 # The trusted hosts, replicated read-only so a replica predicts source_trust.
 projection trusted world trusted_hosts where host is not null
-  pick host
+  pick host note
 
 # The account page's views: read by the operator's browser session only,
 # never a key, and never a secret (no hash, token, TOTP secret, credential

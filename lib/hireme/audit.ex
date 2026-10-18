@@ -10,7 +10,7 @@ defmodule Hireme.Audit do
 
   The topic `"account:<id>"` on `Hireme.PubSub` carries what a live
   session must react to: `{Hireme.Audit, :changed}` after every recorded
-  event (the account lens re-reads), and the `{:bye, ...}` messages that
+  event (the sequencer re-reads the account's views), and the `{:bye, ...}` messages that
   end wire sessions (`bye/2`).
   """
 
@@ -18,9 +18,6 @@ defmodule Hireme.Audit do
   alias Hireme.Repo
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
-
-  # Kinds on the trail that are activity, not a change to the account.
-  @quiet ~w(agent_ops wire_key wire_key_refused activity_coalesced)
 
   # Kinds under a per-account budget, and the node-wide one for activity;
   # past them a row is counted, not written, and the window's counts become
@@ -45,7 +42,7 @@ defmodule Hireme.Audit do
   @doc "The kinds that are activity, not security events: what the account lens's activity view shows."
   @spec activity_kinds() :: [String.t()]
   def activity_kinds,
-    do: Enum.uniq(@quiet ++ @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
+    do: Enum.uniq(@expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
 
   @doc """
   Announce that the account's factors changed (bound, removed, disabled):
@@ -133,7 +130,7 @@ defmodule Hireme.Audit do
   @doc false
   def write(kind, meta, context, account_id) do
     commit(kind, meta, context, account_id)
-    announce(kind, account_id)
+    changed(account_id)
   end
 
   @doc false
@@ -166,12 +163,6 @@ defmodule Hireme.Audit do
     :ok
   end
 
-  @doc false
-  # After the commit. An agent's op batch or a key's HELLO is not a change to
-  # the account's security state: it wakes no parked account.watch.
-  def announce(kind, account_id),
-    do: if(Atom.to_string(kind) in @quiet, do: :ok, else: changed(account_id))
-
   defp blank(nil, _), do: nil
 
   defp blank(value, max) do
@@ -185,20 +176,13 @@ defmodule Hireme.Audit do
   def topic(account_id), do: "account:#{account_id}"
 
   @doc """
-  Announce a change to the account's security state to every other
-  process on its topic. Recording an event does this; every change to
-  that state is recorded.
+  Announce that the account's trail moved to every process on its topic,
+  the recorder too (the sequencer records lease events and re-reads the
+  account's views on this). Recording an event does this.
   """
   @spec changed(pos_integer() | nil) :: :ok
   def changed(nil), do: :ok
-
-  def changed(account_id),
-    do:
-      Hireme.PubSub.broadcast_from(
-        self(),
-        topic(account_id),
-        {__MODULE__, :changed}
-      )
+  def changed(account_id), do: Hireme.PubSub.broadcast(topic(account_id), {__MODULE__, :changed})
 
   @doc "End the wire sessions `bye` names; each sends BYE with the reason and drops its lease."
   @spec bye(pos_integer(), bye()) :: :ok
@@ -396,7 +380,7 @@ defmodule Hireme.Audit.Coalescer do
     # Committed: what follows never puts back, so the row is never written twice.
     if written do
       try do
-        Audit.announce(written, account_id)
+        Audit.changed(account_id)
       rescue
         e -> Logger.error("trail wake for account #{account_id} failed: #{inspect(e.__struct__)}")
       end

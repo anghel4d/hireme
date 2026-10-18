@@ -379,9 +379,11 @@ defmodule Hireme.Mfa do
              # Spent only if still unspent: two racing presentations cannot both pass.
              {1, _} <- spend_code(found) do
           left = length(unused) - 1
+          # Stepped up before the event, so the views it refreshes read the new mfa_at.
+          session = Accounts.mark_mfa(session)
           Audit.record(:recovery_code_used, %{left: left}, ctx(meta, session))
           Accounts.notify(session.account_id, :recovery_code_used, %{left: left})
-          {:ok, Accounts.mark_mfa(session)}
+          {:ok, session}
         else
           _ ->
             Audit.record(:recovery_failed, %{}, ctx(meta, session))
@@ -530,8 +532,9 @@ defmodule Hireme.Mfa do
   end
 
   defp proved(%Session{} = session, %Factor{} = factor, meta) do
+    session = Accounts.mark_mfa(session)
     Audit.record(:factor_verified, %{factor_id: factor.id, kind: factor.kind}, ctx(meta, session))
-    {:ok, Accounts.mark_mfa(session)}
+    {:ok, session}
   end
 
   defp bind(%Session{} = session, attrs, meta) do

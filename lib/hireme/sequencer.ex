@@ -387,7 +387,7 @@ defmodule Hireme.Sequencer do
 
     {state, body} =
       if resume,
-        do: {state, wire_tables(state, session.grants, now)},
+        do: resumed(session.grants, state, now),
         else: snapshot(session.grants, state, now)
 
     kind = if resume, do: :PATCH, else: :BOOT
@@ -1617,6 +1617,20 @@ defmodule Hireme.Sequencer do
     {state, [tables | if(grants, do: wire_tables(state, grants, now), else: [clock(now)])]}
   end
 
+  # A resumed session's snapshot holds the account's tables; the session's
+  # own (the live views and the wire tables) come fresh, whole.
+  defp resumed(grants, state, now) do
+    {state, views} = live_views(state)
+
+    blocks =
+      for t <- Schema.tables(),
+          live?(t),
+          Grants.read?(grants, t),
+          do: Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
+
+    {state, [blocks | wire_tables(state, grants, now)]}
+  end
+
   # The resident rows as of the account's rev, read once per rev: the
   # kernel's snapshot and the BOOTs of sessions joining before the next
   # write share one read.
@@ -1691,11 +1705,19 @@ defmodule Hireme.Sequencer do
     {%{state | account: views}, views}
   end
 
-  # The newest events, their meta as the lens shows it.
+  # The newest security events and, apart, the newest activity, so a burst
+  # of agent ops never pushes a security event out; meta as the lens shows it.
   defp view_rows(%{name: "acct_audit"}) do
-    from(e in Hireme.Rows.Audit, order_by: [desc: e.id], limit: @audit_rows)
-    |> Repo.all()
-    |> Enum.map(&%{&1 | meta: Hireme.Audit.visible(&1.meta || %{}, &1.kind)})
+    for security <- [true, false],
+        e <-
+          Repo.all(
+            from(e in Hireme.Rows.Audit,
+              where: e.security == ^security,
+              order_by: [desc: e.id],
+              limit: @audit_rows
+            )
+          ),
+        do: %{e | meta: Hireme.Audit.visible(e.meta || %{}, e.kind)}
   end
 
   defp view_rows(t), do: rows(t)

@@ -129,7 +129,7 @@ fn main() {
     for t in &s.tables {
         writeln!(
             o,
-            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, keys: &[{}], cols: &[",
+            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, session: {}, keys: &[{}], cols: &[",
             t.id,
             t.name,
             t.domain,
@@ -143,6 +143,8 @@ fn main() {
             t.soft_delete,
             t.unmasked,
             t.singleton,
+            t.residency == model::Residency::Wire
+                || t.source.as_deref().and_then(|n| s.table(n)).is_some_and(|src| src.residency == model::Residency::Server),
             t.naturals.iter().map(|k| key_def(k, true)).chain(t.uniques.iter().map(|k| key_def(k, false))).collect::<Vec<_>>().join(", ")
         )
         .unwrap();
