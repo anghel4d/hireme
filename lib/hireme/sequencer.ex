@@ -97,6 +97,14 @@ defmodule Hireme.Sequencer do
   @doc "Submits decoded ops (`HiremeWeb.Wire.Codec.ops/1`) for the calling session."
   def submit(account_id, ops), do: GenServer.cast(whereis(account_id), {:ops, self(), ops})
 
+  @doc """
+  Runs ops for a caller that is not a wire session (the importer), as
+  `actor` (`%{label, grants, key_id}`), and answers their verdicts:
+  `{:ok, rev, acks, nacks}`. Subscribers get the PATCH as usual.
+  """
+  def call(account_id, actor, ops),
+    do: GenServer.call(whereis(account_id), {:call, actor, ops}, :infinity)
+
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request), do: GenServer.call(whereis(account_id), {:lease, self(), request})
 
@@ -140,13 +148,26 @@ defmodule Hireme.Sequencer do
     {:reply, reply, state, @idle_ms}
   end
 
+  def handle_call({:call, actor, ops}, _from, state) do
+    key = {:call, make_ref()}
+    session = Map.merge(%{id: System.unique_integer([:positive]), session_id: nil}, actor)
+    sub = Map.merge(session, %{ref: nil, pid: key})
+    state = %{state | subs: Map.put(state.subs, key, sub), lease: Lease.join(state.lease, session, Store.now())}
+    {state, verdicts} = run([{key, ops}], state)
+    state = %{state | subs: Map.delete(state.subs, key), lease: Lease.leave(state.lease, session.id)}
+    acks = for {^key, {:ack, a}} <- verdicts, do: a
+    nacks = for {^key, {:nack, n}} <- verdicts, do: n
+    {:reply, {:ok, state.rev, acks, nacks}, state, @idle_ms}
+  end
+
   def handle_call(:rev, _from, state), do: {:reply, state.rev, state, @idle_ms}
   def handle_call(:resync, _from, state), do: {:reply, :ok, rebuild(state), @idle_ms}
 
   @impl GenServer
   def handle_cast({:ops, pid, ops}, state) do
     submissions = take_more([{pid, ops}], length(ops))
-    {:noreply, run(submissions, state), @idle_ms}
+    {state, _} = run(submissions, state)
+    {:noreply, state, @idle_ms}
   end
 
   @impl GenServer
@@ -181,13 +202,15 @@ defmodule Hireme.Sequencer do
   defp run(submissions, state) do
     flat = for {pid, ops} <- submissions, op <- ops, do: {pid, op}
 
-    {state, tallies} =
+    {state, all} =
       flat
       |> Enum.chunk_every(@batch)
-      |> Enum.reduce({state, %{}}, fn chunk, {state, tallies} ->
+      |> Enum.reduce({state, []}, fn chunk, {state, all} ->
         {state, verdicts} = batch(chunk, state)
-        {state, Enum.reduce(verdicts, tallies, &tally/2)}
+        {state, all ++ verdicts}
       end)
+
+    tallies = Enum.reduce(all, %{}, &tally/2)
 
     for {pid, {acks, nacks}} <- tallies, sub = state.subs[pid], sub.key_id do
       Hireme.Audit.record(
@@ -197,7 +220,7 @@ defmodule Hireme.Sequencer do
       )
     end
 
-    state
+    {state, all}
   end
 
   defp tally({pid, {:ack, _}}, t), do: Map.update(t, pid, {1, 0}, fn {a, n} -> {a + 1, n} end)
@@ -247,6 +270,7 @@ defmodule Hireme.Sequencer do
 
   defp deliver(verdicts, rev) do
     verdicts
+    |> Enum.filter(fn {pid, _} -> is_pid(pid) end)
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.each(fn {pid, vs} ->
       acks = for {:ack, a} <- vs, do: a
@@ -1004,6 +1028,7 @@ defmodule Hireme.Sequencer do
   defp publish(deltas, state) do
     state.subs
     |> Map.values()
+    |> Enum.filter(&is_pid(&1.pid))
     |> Enum.group_by(& &1.grants)
     |> Enum.each(fn {grants, subs} ->
       body = IO.iodata_to_binary(patch(deltas, grants))
@@ -1097,7 +1122,7 @@ defmodule Hireme.Sequencer do
     t = Schema.table(:leases)
     body = IO.iodata_to_binary(leases_block(state))
 
-    for {pid, sub} <- state.subs, pid != opts[:except], Grants.read?(sub.grants, t) do
+    for {pid, sub} <- state.subs, is_pid(pid), pid != opts[:except], Grants.read?(sub.grants, t) do
       send(pid, {:sequencer, :patch, state.rev, body})
     end
 

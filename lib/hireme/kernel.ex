@@ -64,7 +64,11 @@ defmodule Hireme.Kernel.Nif do
     otp_app: :hireme,
     crate: "nif",
     path: "native/nif",
-    skip_compilation?: not File.exists?(Path.expand("../../native/nif/Cargo.toml", __DIR__))
+    # Nix builds the library itself; until native/nif exists there is nothing to build.
+    skip_compilation?:
+      Application.compile_env(:hireme, :nif_prebuilt, false) or
+        not File.exists?(Path.expand("../../native/nif/Cargo.toml", __DIR__)),
+    load_from: {:hireme, "priv/native/libnif"}
 
   def new, do: :erlang.nif_error(:nif_not_loaded)
   def load(_res, _boot), do: :erlang.nif_error(:nif_not_loaded)
