@@ -7,29 +7,32 @@ defmodule HiremeWeb do
   A browser is an account's session; an agent is an account's key;
   neither sees another account.
   """
+  import Plug.Conn
 
   def static_paths, do: ~w(assets wasm)
-end
 
-defmodule HiremeWeb.ErrorHTML do
-  @moduledoc """
-  Error pages, named by status, as plain text. It is also the html format
-  encoder (`config :phoenix, :format_encoders`): the node renders no
-  templates, so there is nothing for an HTML engine to do.
-  """
-  def render(template, _assigns), do: Phoenix.Controller.status_message_from_template(template)
+  @doc "A JSON body, at the conn's status (200 unless one was put)."
+  def json(conn, data) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(conn.status || 200, JSON.encode_to_iodata!(data))
+  end
 
-  def encode_to_iodata!(text) when is_binary(text), do: text
-end
+  @doc "A redirect to a path on this origin, or with `external:` to another site."
+  def redirect(conn, to: "/" <> _ = path), do: found(conn, path)
+  def redirect(conn, external: url), do: found(conn, url)
 
-defmodule HiremeWeb.ErrorJSON do
-  @moduledoc "Error bodies for JSON requests, named by status."
-  def render(template, _assigns),
-    do: %{error: Phoenix.Controller.status_message_from_template(template)}
+  defp found(conn, url), do: conn |> put_resp_header("location", url) |> send_resp(302, "")
 end
 
 defmodule HiremeWeb.Endpoint do
-  use Phoenix.Endpoint, otp_app: :hireme
+  @moduledoc """
+  The HTTP front door, a plug Bandit serves: static files, who is asking,
+  the wire's WebSocket upgrade, then the session cookie and the router.
+  It serves only when HIREME_SERVER is set; tests call it directly or
+  start their own Bandit.
+  """
+  use Plug.Builder
   import Bitwise, only: [>>>: 2, &&&: 2]
   alias HiremeWeb.Wire.Codec
 
@@ -48,6 +51,29 @@ defmodule HiremeWeb.Endpoint do
     max_age: 24 * 60 * 60
   ]
 
+  @ssl Application.compile_env(:hireme, [__MODULE__, :force_ssl])
+  @manifest Application.compile_env(:hireme, [__MODULE__, :cache_static_manifest])
+
+  @doc "Bandit on the configured address when this node serves (`HIREME_SERVER`)."
+  def child_spec(_) do
+    if System.get_env("HIREME_SERVER"),
+      do: Bandit.child_spec([plug: __MODULE__] ++ config(:http)),
+      else: %{id: __MODULE__, start: {Function, :identity, [:ignore]}}
+  end
+
+  @doc "This endpoint's setting `key`."
+  def config(key), do: Application.get_env(:hireme, __MODULE__, [])[key]
+
+  @doc "The URL this node is reached at, from `url:` (the port falls back to the listener's)."
+  @spec url() :: String.t()
+  def url do
+    u = config(:url) || []
+    scheme = u[:scheme] || "http"
+    port = u[:port] || config(:http)[:port]
+    base = "#{scheme}://#{u[:host] || "localhost"}"
+    if port in [nil, 80, 443], do: base, else: "#{base}:#{port}"
+  end
+
   @doc "Origins a browser's wire session may come from: this endpoint's own URL, plus `check_origin` in dev."
   @spec origins() :: [String.t()]
   def origins do
@@ -64,22 +90,34 @@ defmodule HiremeWeb.Endpoint do
     end
   end
 
-  plug Plug.Static,
-    at: "/",
-    from: :hireme,
-    gzip: not code_reloading?,
-    only: HiremeWeb.static_paths(),
-    raise_on_missing_only: code_reloading?
+  @doc "A static file's path; in a release its digested name (`mix hireme.digest`), which browsers keep for good."
+  @spec static_path(String.t()) :: String.t()
+  if @manifest do
+    def static_path("/" <> name = path) do
+      case Map.fetch(manifest(), name) do
+        {:ok, digested} -> "/" <> digested <> "?vsn=d"
+        :error -> path
+      end
+    end
 
-  if code_reloading? do
-    socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
-    plug Phoenix.LiveReloader
-    plug Phoenix.CodeReloader
+    # Read once: a release's manifest does not change under it.
+    defp manifest do
+      with nil <- :persistent_term.get({__MODULE__, :manifest}, nil) do
+        read = Application.app_dir(:hireme, @manifest) |> File.read!() |> JSON.decode!()
+        :persistent_term.put({__MODULE__, :manifest}, read)
+        read
+      end
+    end
+  else
+    def static_path(path), do: path
   end
 
+  if @ssl, do: plug(Plug.SSL, @ssl)
+  plug :secret
+  plug Plug.Static, at: "/", from: :hireme, gzip: true, only: HiremeWeb.static_paths()
   plug :peer
   plug Plug.RequestId
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug Plug.Logger
   plug :wire
 
   # Pages post forms (urlencoded, carrying `_csrf_token`); scripts post JSON.
@@ -87,11 +125,15 @@ defmodule HiremeWeb.Endpoint do
     parsers: [:urlencoded, :json],
     pass: ["*/*"],
     length: 1_048_576,
-    json_decoder: Phoenix.json_library()
+    json_decoder: JSON
 
   plug Plug.Head
   plug Plug.Session, @session_options
   plug HiremeWeb.Router
+
+  # The cookie's keys derive from the application secret.
+  defp secret(conn, _opts),
+    do: %{conn | secret_key_base: Application.fetch_env!(:hireme, :secret_key_base)}
 
   # Who is asking. Behind the host's nginx every request arrives from
   # loopback, so per-peer limits and the trail would see one peer: from

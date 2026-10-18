@@ -18,7 +18,7 @@ defmodule Hireme.Application do
       [
         Hireme.Repo,
         Hireme.Store,
-        {Phoenix.PubSub, name: Hireme.PubSub},
+        Hireme.PubSub,
         Hireme.RateLimit,
         Hireme.Accounts.Tickets,
         Coalescer,
@@ -40,10 +40,32 @@ defmodule Hireme.Application do
       do: [{HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])}],
       else: []
   end
+end
 
-  @impl true
-  def config_change(changed, _new, removed) do
-    HiremeWeb.Endpoint.config_change(changed, removed)
+defmodule Hireme.PubSub do
+  @moduledoc """
+  Topics on this node: a Registry of subscribers, and a message sent
+  straight to each pid on its topic. A subscription ends with its process.
+  """
+
+  def child_spec(_),
+    do:
+      Registry.child_spec(
+        keys: :duplicate,
+        name: __MODULE__,
+        partitions: System.schedulers_online()
+      )
+
+  def subscribe(topic) do
+    {:ok, _} = Registry.register(__MODULE__, topic, nil)
     :ok
   end
+
+  def broadcast(topic, message), do: broadcast_from(nil, topic, message)
+
+  def broadcast_from(from, topic, message),
+    do:
+      Registry.dispatch(__MODULE__, topic, fn subs ->
+        for {pid, _} <- subs, pid != from, do: send(pid, message)
+      end)
 end

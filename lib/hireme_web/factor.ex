@@ -12,8 +12,8 @@ defmodule HiremeWeb.FactorController do
   binary fields base64url without padding.
   """
 
-  use Phoenix.Controller, formats: [:html, :json]
   import Plug.Conn
+  import HiremeWeb, only: [json: 2, redirect: 2]
   import HiremeWeb.Auth, only: [esc: 1, page: 5, csrf_field: 0, meta: 1]
   alias Hireme.Mfa
 

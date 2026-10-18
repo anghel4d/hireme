@@ -256,8 +256,6 @@
           pkgs.rustc
           pkgs.clippy
           pkgs.sqlite
-          # Phoenix's live reload watches files through it.
-          pkgs.inotify-tools
           bun
           binaryen
         ];

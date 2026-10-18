@@ -180,7 +180,7 @@ defmodule Hireme.AuditTest do
     %{account: a} = sign_in()
     for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
     cursor = Audit.rev(a.id)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Audit.topic(a.id))
+    Hireme.PubSub.subscribe(Audit.topic(a.id))
     # Recorded by another process, as the sequencer records it: a process
     # never hears its own announcement.
     parent = self()
@@ -201,7 +201,7 @@ defmodule Hireme.AuditTest do
     %{account: a} = sign_in()
     for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
     cursor = Audit.rev(a.id)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Audit.topic(a.id))
+    Hireme.PubSub.subscribe(Audit.topic(a.id))
     parent = self()
     t0 = System.monotonic_time(:millisecond)
 

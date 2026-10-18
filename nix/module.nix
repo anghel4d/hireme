@@ -110,8 +110,8 @@ in
             after = [ "network-online.target" ];
             wants = [ "network-online.target" ];
             environment = {
-              PHX_SERVER = "true";
-              PHX_HOST = cfg.domain;
+              HIREME_SERVER = "true";
+              HIREME_HOST = cfg.domain;
               PORT = toString cfg.port;
               DATABASE_PATH = "/var/lib/hireme/hireme.db";
               HOME = "/var/lib/hireme";

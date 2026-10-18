@@ -234,7 +234,8 @@ the inlined early script by its hash, WebAssembly compilation but never
 gate, no framing, no objects, `base-uri 'none'`, forms to the origin.
 Alongside it a Permissions-Policy denying camera, microphone,
 geolocation, payment and USB, same-origin opener and resource policies,
-and Phoenix's secure headers (ASVS 3.4). JSON endpoints answer 401, 403
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and no
+cross-domain policies (ASVS 3.4). JSON endpoints answer 401, 403
 or 409 with a code and never redirect.
 
 ## Secrets at rest

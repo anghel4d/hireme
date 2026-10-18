@@ -69,7 +69,7 @@ below inside it (an `elixir` or `mix` from elsewhere is not these versions).
 ```bash
 nix develop
 mix setup          # deps, kernel.wasm, the bundles
-DATABASE_PATH=/tmp/hireme-dev/hireme.db mix phx.server   # http://localhost:4000
+DATABASE_PATH=/tmp/hireme-dev/hireme.db HIREME_SERVER=true mix run --no-halt   # http://localhost:4000
 ```
 
 `DATABASE_PATH` picks the SQLite file (its directory is created if

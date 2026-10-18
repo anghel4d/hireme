@@ -549,3 +549,38 @@ defmodule Mix.Tasks.Hireme.Bundle do
     end)
   end
 end
+
+defmodule Mix.Tasks.Hireme.Digest do
+  @shortdoc "Names each static file by its content and gzips it, for a release"
+  @moduledoc """
+  Every file under priv/static's `assets` and `wasm` gets a copy named by
+  its content (`app-<md5>.js`), and both are gzipped beside it: Plug.Static
+  serves the `.gz` to a browser that takes it (kernel.wasm to about a
+  third). priv/static/cache_manifest.json maps each name to its digested
+  one for `HiremeWeb.Endpoint.static_path/1`. No clock goes in, so the
+  output is a function of the files.
+  """
+  use Mix.Task
+
+  @impl true
+  def run(_args) do
+    root = "priv/static"
+
+    manifest =
+      for dir <- HiremeWeb.static_paths(),
+          file <- Path.wildcard(Path.join([root, dir, "**", "*"])),
+          File.regular?(file),
+          not String.ends_with?(file, ".gz"),
+          not Regex.match?(~r/-[0-9a-f]{32}\.[^\/]+$/, file),
+          into: %{} do
+        bin = File.read!(file)
+        hash = Base.encode16(:crypto.hash(:md5, bin), case: :lower)
+        digested = Path.rootname(file) <> "-" <> hash <> Path.extname(file)
+        File.write!(digested, bin)
+        for f <- [file, digested], do: File.write!(f <> ".gz", :zlib.gzip(bin))
+        {Path.relative_to(file, root), Path.relative_to(digested, root)}
+      end
+
+    File.write!(Path.join(root, "cache_manifest.json"), JSON.encode!(manifest))
+  end
+end

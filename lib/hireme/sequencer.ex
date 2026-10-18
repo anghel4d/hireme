@@ -205,7 +205,7 @@ defmodule Hireme.Sequencer do
     # A revoked or changed key, a revoked browser session or a suspension is
     # heard here too: its sessions stop writing the moment the sequencer
     # knows, not when their carrier closes.
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(account_id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(account_id))
     # Read after subscribing, so a resume in between is not lost.
     state = %{state | lease: paused_keys(account_id)}
     # The first purge, and every hour's, runs as messages between batches.

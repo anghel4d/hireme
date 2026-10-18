@@ -8,7 +8,7 @@ defmodule Hireme.KeysTest do
   setup do
     signed = sign_in()
     Repo.put_account(signed.account.id)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(signed.account.id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(signed.account.id))
     signed
   end
 

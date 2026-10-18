@@ -242,8 +242,7 @@ defmodule Hireme.Keys do
           trail(:key_resumed, key, %{}, Map.put(meta, :account_id, key.account_id))
 
           # The sequencer holds paused keys in memory; this lifts its hold.
-          Phoenix.PubSub.broadcast(
-            Hireme.PubSub,
+          Hireme.PubSub.broadcast(
             Audit.topic(key.account_id),
             {:resume, {:key, key.id}}
           )

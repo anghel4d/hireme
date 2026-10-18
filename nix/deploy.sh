@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ship Hireme to fsn1-2: the release (Phoenix + the WebTransport gate) and,
+# Ship Hireme to fsn1-2: the release (the node + the WebTransport gate) and,
 # with --switch, the host configuration that runs it.
 #
 # The workstation builds the release from this flake at a pushed revision,

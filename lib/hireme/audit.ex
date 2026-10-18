@@ -59,7 +59,7 @@ defmodule Hireme.Audit do
   """
   @spec factors(pos_integer()) :: :ok
   def factors(account_id),
-    do: Phoenix.PubSub.broadcast(Hireme.PubSub, topic(account_id), {__MODULE__, :factors})
+    do: Hireme.PubSub.broadcast(topic(account_id), {__MODULE__, :factors})
 
   @type context :: %{
           optional(:account_id) => pos_integer() | nil,
@@ -228,8 +228,7 @@ defmodule Hireme.Audit do
 
   def changed(account_id),
     do:
-      Phoenix.PubSub.broadcast_from(
-        Hireme.PubSub,
+      Hireme.PubSub.broadcast_from(
         self(),
         topic(account_id),
         {__MODULE__, :changed}
@@ -238,7 +237,7 @@ defmodule Hireme.Audit do
   @doc "End the wire sessions `bye` names; each sends BYE with the reason and drops its lease."
   @spec bye(pos_integer(), bye()) :: :ok
   def bye(account_id, {who, reason}),
-    do: Phoenix.PubSub.broadcast(Hireme.PubSub, topic(account_id), {:bye, who, reason})
+    do: Hireme.PubSub.broadcast(topic(account_id), {:bye, who, reason})
 
   @doc """
   How far the account's security state has moved: a count of the changes

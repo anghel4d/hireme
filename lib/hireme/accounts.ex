@@ -270,8 +270,8 @@ defmodule Hireme.Accounts do
     # Eight bytes of the session's own token hash: a ticket is good only for
     # the session row that minted it, not for anything the application
     # secret alone could sign.
-    Phoenix.Token.encrypt(
-      HiremeWeb.Endpoint,
+    Plug.Crypto.encrypt(
+      Application.fetch_env!(:hireme, :secret_key_base),
       @ticket_salt,
       {account_id, id, binary_part(hash, 0, 8), Security.token(12)}
     )
@@ -287,7 +287,10 @@ defmodule Hireme.Accounts do
     now = Store.now()
 
     with {:ok, {account_id, session_id, bound, nonce}} <-
-           Phoenix.Token.decrypt(HiremeWeb.Endpoint, @ticket_salt, ticket,
+           Plug.Crypto.decrypt(
+             Application.fetch_env!(:hireme, :secret_key_base),
+             @ticket_salt,
+             ticket,
              max_age: Security.ticket_ttl()
            ),
          :ok <- __MODULE__.Tickets.spend(nonce),

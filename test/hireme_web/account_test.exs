@@ -104,7 +104,7 @@ defmodule HiremeWeb.AccountTest do
     {:ok, %{secret: secret}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
     {:ok, %{cursor: cursor, leases: []}} = Account.call("account.overview", %{}, ctx)
     assert {:park, :account} = Account.call("account.watch", %{"since" => cursor}, ctx)
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
 
     alias HiremeWeb.Wire.Codec
     {:ok, wire} = HiremeWeb.Session.open(%{peer_ip: "127.0.0.1", origin: nil, carrier: :ws})
@@ -442,7 +442,7 @@ defmodule HiremeWeb.AccountTest do
     {:ok, _} = Account.call("account.key.change", %{"id" => key.id, "preset" => "read_only"}, ctx)
     assert Repo.get(Hireme.Rows.ApiKey, key.id, skip_account: true).paused_at
 
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
 
     assert {:ok, %{key: %{paused: false, paused_at: nil}}} =
              Account.call("account.key.resume", %{"id" => key.id}, ctx)

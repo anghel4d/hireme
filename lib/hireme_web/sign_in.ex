@@ -242,8 +242,8 @@ defmodule HiremeWeb.SignInController do
   (`start_link/2`), behind a fresh second factor.
   """
 
-  use Phoenix.Controller, formats: [:html, :json]
   import Plug.Conn
+  import HiremeWeb, only: [json: 2, redirect: 2]
   import HiremeWeb.Auth, only: [esc: 1, page: 4, csrf_field: 0, notice: 1, meta: 1]
 
   alias Hireme.Accounts

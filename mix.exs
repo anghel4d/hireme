@@ -10,8 +10,7 @@ defmodule Hireme.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       releases: [hireme: []],
-      deps: deps(),
-      listeners: [Phoenix.CodeReloader]
+      deps: deps()
     ]
   end
 
@@ -26,7 +25,8 @@ defmodule Hireme.MixProject do
 
   defp deps do
     [
-      {:phoenix, "~> 1.8.15"},
+      {:plug, "~> 1.20"},
+      {:websock_adapter, "~> 0.6.0"},
       {:ecto_sql, "~> 3.14"},
       {:ecto_sqlite3, "~> 0.25"},
       {:jason, "~> 1.4"},
@@ -39,7 +39,6 @@ defmodule Hireme.MixProject do
       {:swoosh, "~> 1.29"},
       {:assent, "~> 0.3.1"},
       {:req, "~> 0.7.5"},
-      {:phoenix_live_reload, "~> 1.7", only: :dev},
       {:stream_data, "~> 1.4", only: :test},
       # The acceptance suite drives the node over a real /wire WebSocket.
       {:mint_web_socket, "~> 1.0", only: :test},
@@ -100,7 +99,7 @@ defmodule Hireme.MixProject do
       # The kernel as WebAssembly for the browser; Nix builds it for a release.
       "assets.wasm": &wasm/1,
       "assets.build": ["compile", "assets.wasm", "hireme.bundle"],
-      "assets.deploy": ["hireme.bundle --minify", "phx.digest"],
+      "assets.deploy": ["hireme.bundle --minify", "hireme.digest"],
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",

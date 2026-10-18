@@ -72,9 +72,9 @@ MIX_ENV=dev bg mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mi
 # The port is picked just before the node binds it, and the node is ours
 # only if it is alive and its log names that port.
 PORT=$(bun -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
-# Its own process group, so teardown takes Bun's watchers too.
-DATABASE_PATH="$TMP/e2e.db" PORT=$PORT PHX_SERVER=true HIREME_GATE=off MIX_ENV=dev \
-  setsid mix phx.server >"$OUT/node.log" 2>&1 &
+# Its own process group, so teardown takes its children too.
+DATABASE_PATH="$TMP/e2e.db" PORT=$PORT HIREME_SERVER=true HIREME_GATE=off MIX_ENV=dev \
+  setsid mix run --no-halt >"$OUT/node.log" 2>&1 &
 NODE_PID=$!
 
 BASE="http://localhost:$PORT"

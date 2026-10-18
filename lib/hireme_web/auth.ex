@@ -21,7 +21,7 @@ defmodule HiremeWeb.Auth do
   """
 
   import Plug.Conn
-  import Phoenix.Controller, only: [json: 2, redirect: 2, get_format: 1]
+  import HiremeWeb, only: [json: 2, redirect: 2]
 
   alias Hireme.Accounts
   alias Hireme.Repo
@@ -126,6 +126,8 @@ defmodule HiremeWeb.Auth do
     |> put_resp_header("cross-origin-resource-policy", "same-origin")
     |> put_resp_header("referrer-policy", "same-origin")
     |> put_resp_header("x-frame-options", "DENY")
+    |> put_resp_header("x-content-type-options", "nosniff")
+    |> put_resp_header("x-permitted-cross-domain-policies", "none")
   end
 
   @spec session_key() :: String.t()
@@ -183,7 +185,7 @@ defmodule HiremeWeb.Auth do
   end
 
   defp refuse(conn, status, error, to) do
-    if get_format(conn) == "json",
+    if conn.private[:format] == "json",
       do: conn |> put_status(status) |> json(%{error: error}) |> halt(),
       else: conn |> redirect(to: to) |> halt()
   end

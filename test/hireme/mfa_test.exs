@@ -190,7 +190,7 @@ defmodule Hireme.MfaTest do
   end
 
   test "binding or removing a factor tells the account's wire sessions at once", %{session: s} do
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
     {_secret, factor, _} = enroll(s)
     assert_receive {Hireme.Audit, :factors}
     s = Repo.get(Hireme.Rows.Session, s.id, skip_account: true)

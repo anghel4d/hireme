@@ -12,15 +12,14 @@ config :hireme, Hireme.Repo,
   pool_size: 5,
   pool: Ecto.Adapters.SQL.Sandbox
 
-secret_key_base = "test+only+Qm2vX8kR1nB5tY7wE3uI9oP0aS4dF6gH2jK8lZ1xC5vB7nM3qW9eR0tY"
-config :hireme, :secret_key_base, secret_key_base
+config :hireme,
+       :secret_key_base,
+       "test+only+Qm2vX8kR1nB5tY7wE3uI9oP0aS4dF6gH2jK8lZ1xC5vB7nM3qW9eR0tY"
+
 config :wax_, origin: "http://www.example.com"
 config :hireme, Hireme.Mail, adapter: Swoosh.Adapters.Test
 
-config :hireme, HiremeWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: secret_key_base,
-  server: false
+config :hireme, HiremeWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: 4002]
 
 # No gate: a test that needs the wire speaks to the session directly.
 config :hireme, :gate, false
@@ -29,4 +28,3 @@ config :hireme, :gate, false
 config :hireme, :mail_outbox, false
 
 config :logger, level: :warning
-config :phoenix, :plug_init_mode, :runtime

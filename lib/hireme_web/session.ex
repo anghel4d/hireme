@@ -53,7 +53,7 @@ defmodule HiremeWeb.Session do
          Security.wire_sessions_per_peer(),
        do: send(self(), {__MODULE__, :too_many})
 
-    Phoenix.PubSub.subscribe(Hireme.PubSub, "wire:drain")
+    Hireme.PubSub.subscribe("wire:drain")
 
     {:ok,
      %{
@@ -361,7 +361,7 @@ defmodule HiremeWeb.Session do
   end
 
   defp live(hello, who, state) do
-    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(who.account_id))
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(who.account_id))
     session = Map.put(who, :id, System.unique_integer([:positive, :monotonic]))
 
     case Sequencer.subscribe(
@@ -580,7 +580,7 @@ defmodule HiremeWeb.Session.Drain do
 
   @impl GenServer
   def terminate(_reason, _state) do
-    Phoenix.PubSub.broadcast(Hireme.PubSub, "wire:drain", :drain)
+    Hireme.PubSub.broadcast("wire:drain", :drain)
     wait(System.monotonic_time(:millisecond) + @grace_ms)
   end
 

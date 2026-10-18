@@ -101,7 +101,7 @@ defmodule Hireme.AccountsTest do
 
     test "revoking a session ends its wire sessions" do
       %{session: s} = sign_in()
-      Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+      Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
       :ok = Accounts.revoke_session(s.account_id, s.id)
       assert_receive {:bye, {:session, id}, :revoked} when id == s.id
     end
@@ -114,7 +114,7 @@ defmodule Hireme.AccountsTest do
 
     test "suspension ends every session and refuses sign-in" do
       %{account: a, token: t, email: email} = sign_in()
-      Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(a.id))
+      Hireme.PubSub.subscribe(Hireme.Audit.topic(a.id))
       :ok = Accounts.set_status(a.id, :suspended)
       assert_receive {:bye, :account, :suspended}
       assert Accounts.session(t) == nil

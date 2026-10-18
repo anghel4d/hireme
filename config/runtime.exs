@@ -2,8 +2,6 @@
 # compile-time belongs here.
 import Config
 
-if System.get_env("PHX_SERVER"), do: config(:hireme, HiremeWeb.Endpoint, server: true)
-
 config :hireme, HiremeWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
@@ -59,9 +57,9 @@ if config_env() == :prod do
 
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      raise "SECRET_KEY_BASE is missing; generate one with `mix phx.gen.secret`"
+      raise "SECRET_KEY_BASE is missing; generate one with `head -c 48 /dev/urandom | base64`"
 
-  host = System.get_env("PHX_HOST") || raise "PHX_HOST is missing"
+  host = System.get_env("HIREME_HOST") || raise "HIREME_HOST is missing"
 
   config :hireme, :secret_key_base, secret_key_base
   config :wax_, origin: "https://#{host}"
@@ -87,10 +85,9 @@ if config_env() == :prod do
 
   # The public HTTPS endpoint is the reverse proxy, not this socket.
   {:ok, ip} =
-    System.get_env("PHX_IP", "127.0.0.1") |> String.to_charlist() |> :inet.parse_address()
+    System.get_env("HIREME_IP", "127.0.0.1") |> String.to_charlist() |> :inet.parse_address()
 
   config :hireme, HiremeWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [ip: ip],
-    secret_key_base: secret_key_base
+    http: [ip: ip]
 end

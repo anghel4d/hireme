@@ -161,11 +161,8 @@ let
       install -Dm644 ${kernel-wasm}/kernel.wasm priv/static/wasm/kernel.wasm
     '';
 
-    # The digester stamps the manifest with the build's clock; pin it to
-    # SOURCE_DATE_EPOCH so the manifest is a function of the sources.
     postBuild = ''
       mix do deps.loadpaths --no-deps-check + assets.deploy
-      sed -i -E "s/\"mtime\":[0-9]+/\"mtime\":$((62167219200 + SOURCE_DATE_EPOCH))/g" priv/static/cache_manifest.json
     '';
 
     # One profile carries the node and its gate, so a deploy flips both.
