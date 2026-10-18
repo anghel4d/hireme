@@ -48,10 +48,18 @@ impl Rng {
     }
 }
 
-/// Runs `f`, failing past `limit`; the seed is in the message.
+/// Runs `f`, failing past `limit` or on a panic; either way the message
+/// names the seed, so a failure replays.
 fn bounded<T>(what: &str, seed: u64, limit: Duration, f: impl FnOnce() -> T) -> T {
     let t = Instant::now();
-    let out = f();
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|e| {
+        let why = e
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .unwrap_or("a panic");
+        panic!("{what} panicked (seed {seed}): {why}")
+    });
     assert!(t.elapsed() < limit, "{what} took {:?} (seed {seed})", t.elapsed());
     out
 }
@@ -108,7 +116,7 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
     for seed in 1..=seeds {
         let mut r = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
         let n = 40;
-        let texts: Vec<[String; 8]> = (0..n).map(|_| core::array::from_fn(|_| r.text(12))).collect();
+        let texts: Vec<[String; 13]> = (0..n).map(|_| core::array::from_fn(|_| r.text(12))).collect();
         let mut w = wire::BodyWriter::new();
         let mut b = w.block(table::APPLICATIONS, n);
         let col = |i: usize| texts.iter().map(move |t| t[i].as_str());
@@ -125,7 +133,25 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             .strs(A::LISTING_URL, col(4))
             .strs(A::KEYWORDS, col(5))
             .strs(A::STAGE_NOTES, col(6))
-            .strs(A::CV_THEME, col(7));
+            .strs(A::CV_THEME, col(7))
+            .strs(A::PIPS, col(8))
+            .strs(A::CANONICAL_URL, col(9));
+        b.done();
+        let mut b = w.block(table::CV_OVERLAYS, n);
+        b.u32s(col::cv_overlays::ID, 1..=n as u32)
+            .u32s(col::cv_overlays::APPLICATION_ID, 1..=n as u32)
+            .u32s(col::cv_overlays::ITEM_ID, (0..n).map(|i| 1 + (i % 7) as u32))
+            .u32s(col::cv_overlays::MODE, (0..n).map(|i| (i % 3) as u32))
+            .strs(col::cv_overlays::TITLE, col(10))
+            .strs(col::cv_overlays::BODY, col(11))
+            .strs(col::cv_overlays::REASON, col(12));
+        b.done();
+        // An event's body is deferred: it reaches the kernel as a stub, its kind as text.
+        let mut b = w.block(table::EVENTS, n);
+        b.u32s(col::events::ID, 1..=n as u32)
+            .u32s(col::events::APPLICATION_ID, (0..n).map(|i| 1 + (i % 5) as u32))
+            .strs(col::events::KIND, col(11))
+            .deferred(col::events::BODY, texts.iter().map(|t| Some((t[12].len() as u32, [7; 8]))));
         b.done();
         let mut b = w.block(table::ITEMS, n);
         b.u32s(col::items::ID, 1..=n as u32).strs(col::items::TITLE, col(1)).strs(col::items::BODY, col(5)).strs(col::items::KEY, col(0));
