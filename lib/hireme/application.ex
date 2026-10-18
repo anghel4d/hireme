@@ -41,15 +41,6 @@ defmodule Hireme.Application do
       else: []
   end
 
-  # Counts held past the trail's budgets are written before the node goes.
-  @impl true
-  def prep_stop(state) do
-    unless Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
-      do: Coalescer.flush(:all)
-
-    state
-  end
-
   @impl true
   def config_change(changed, _new, removed) do
     HiremeWeb.Endpoint.config_change(changed, removed)

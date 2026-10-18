@@ -32,6 +32,35 @@ defmodule Hireme.AuditTest do
     assert row.meta["counts"] == %{"agent_ops" => %{"7" => 5}}
   end
 
+  @tag window: [:activity, :activity_node]
+  test "one account's flood of counted activity leaves the node's row ceiling to the others" do
+    %{account: loud} = sign_in()
+    %{account: quiet} = sign_in()
+    {_, node_max} = Hireme.Security.limits()[:activity_node]
+
+    # Past its own budget every event of the loud account is only a count.
+    for _ <- 1..(node_max + 100),
+        do: :ok = Audit.record(:agent_ops, %{count: 1}, %{account_id: loud.id, key_id: 7})
+
+    for _ <- 1..5,
+        do: :ok = Audit.record(:agent_ops, %{count: 1}, %{account_id: quiet.id, key_id: 8})
+
+    assert Enum.count(kinds(quiet.id), &(&1 == "agent_ops")) == 5
+  end
+
+  @tag window: [:activity, :activity_node, :activity_floor]
+  test "past the node's ceiling an account still writes its floor" do
+    %{account: a} = sign_in()
+    {_, node_max} = Hireme.Security.limits()[:activity_node]
+    {_, floor} = Hireme.Security.limits()[:activity_floor]
+    Hireme.Security.hit(:activity_node, :node, node_max)
+
+    for _ <- 1..(floor + 5),
+        do: :ok = Audit.record(:agent_ops, %{count: 1}, %{account_id: a.id, key_id: 7})
+
+    assert Enum.count(kinds(a.id), &(&1 == "agent_ops")) == floor
+  end
+
   @tag window: :revokes
   test "lease revokes past their budget coalesce too, and are never refused" do
     %{account: a} = sign_in()
@@ -40,6 +69,8 @@ defmodule Hireme.AuditTest do
     assert Enum.count(kinds(a.id), &(&1 == "lease_revoked")) == 120
     Audit.Coalescer.flush(:all)
     assert "revokes_coalesced" in kinds(a.id)
+    # A revoke is a security event, coalesced or not.
+    refute "revokes_coalesced" in Audit.activity_kinds()
   end
 
   test "a security event is never coalesced" do
@@ -85,6 +116,22 @@ defmodule Hireme.AuditTest do
     assert row.meta["user_agents"] == ["agent/1"]
   end
 
+  @tag window: [:hellos, :activity_node]
+  test "a key's first HELLOs count a /64 as one peer, and only its first 50 peers a window" do
+    %{account: a} = sign_in()
+    ctx = fn ip -> %{account_id: a.id, key_id: 9, ip: ip, user_agent: "agent/1"} end
+    {_, budget} = Hireme.Security.limits()[:hellos]
+    for _ <- 1..budget, do: Audit.record(:wire_key, %{}, ctx.("10.0.0.1"))
+    hellos = fn -> Enum.count(kinds(a.id), &(&1 == "wire_key")) end
+
+    for i <- 1..10, do: :ok = Audit.record(:wire_key, %{}, ctx.("2001:db8::#{i}"))
+    assert hellos.() == budget + 1
+
+    # 10.0.0.1 and 2001:db8::/64 were two of the 50.
+    for i <- 1..60, do: :ok = Audit.record(:wire_key, %{}, ctx.("2001:db8:0:#{i}::1"))
+    assert hellos.() == budget + 1 + 48
+  end
+
   @tag window: [:activity, :activity_node]
   test "a coalesced lease change still moves the cursor and wakes the account's watchers" do
     %{account: a} = sign_in()
@@ -104,6 +151,38 @@ defmodule Hireme.AuditTest do
 
     assert Audit.rev(a.id) == cursor + 1
     assert_receive {Hireme.Audit, :changed}
+  end
+
+  @tag window: [:activity, :activity_node]
+  test "a burst of coalesced lease changes wakes the watchers once, and once more after it" do
+    %{account: a} = sign_in()
+    for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
+    cursor = Audit.rev(a.id)
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Audit.topic(a.id))
+    parent = self()
+    t0 = System.monotonic_time(:millisecond)
+
+    Task.await(
+      Task.async(fn ->
+        Sandbox.allow(Repo, parent, self())
+        for _ <- 1..20, do: Audit.record(:lease_released, %{}, %{account_id: a.id})
+      end)
+    )
+
+    seconds = div(System.monotonic_time(:millisecond) - t0, 1000)
+    # The burst's last change still arrives: a wake follows it.
+    assert_receive {Hireme.Audit, :changed}
+    assert_receive {Hireme.Audit, :changed}, 2_000
+
+    wakes =
+      2 +
+        Enum.count(
+          Stream.repeatedly(fn -> receive do: (m -> m), after: (1_500 -> nil) end)
+          |> Enum.take_while(& &1)
+        )
+
+    assert wakes <= seconds + 2
+    assert Audit.rev(a.id) == cursor + wakes
   end
 
   @tag window: [:activity, :activity_node]

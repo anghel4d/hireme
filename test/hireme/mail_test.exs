@@ -89,7 +89,7 @@ defmodule Hireme.MailTest do
     assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
   end
 
-  @tag window: [:notices, :critical_notices, :notice_rows]
+  @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
   test "one event is one charge however many addresses hear of it; critical kinds keep their own budget" do
     %{account: a, email: email} = sign_in()
     many = for i <- 1..40, do: "addr#{i}@example.com"
@@ -128,7 +128,7 @@ defmodule Hireme.MailTest do
              "1 security change since 2026-10-18 10:00:00 UTC"
   end
 
-  @tag window: [:notices, :critical_notices]
+  @tag window: [:notices, :factor_notices, :key_notices]
   test "a key's revoke notice and the critical kinds reach the owner as themselves past the general budget" do
     %{account: a, email: email} = sign_in()
     for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
@@ -141,6 +141,22 @@ defmodule Hireme.MailTest do
       )
 
     assert "api_key_revoked" in kinds and "authenticator_added" in kinds
+  end
+
+  @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
+  test "a flood of key notices never turns a factor's notice into a digest" do
+    %{account: a, email: email} = sign_in()
+    for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    for i <- 1..15, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "n#{i}"})
+    :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
+
+    kinds =
+      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id, select: n.kind),
+        skip_account: true
+      )
+
+    assert Enum.count(kinds, &(&1 == "api_key_created")) == 10
+    assert "authenticator_added" in kinds
   end
 
   @tag window: [:notices, :notice_rows]

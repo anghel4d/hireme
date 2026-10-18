@@ -132,13 +132,18 @@ defmodule Hireme.Security do
     # A key's HELLOs on the trail; past it the first per (key, address) in a
     # window is still written.
     hellos: {:timer.minutes(10), 600},
-    # Every account's activity rows together: the node's ceiling.
+    # Every account's activity rows together: the node's ceiling. Past it an
+    # account still writes its floor.
     activity_node: {:timer.minutes(10), 20_000},
+    activity_floor: {:timer.minutes(10), 100},
     # Notice rows queued per account (an event to many addresses is many).
     notice_rows: {:timer.minutes(10), 300},
-    # Notices of a change that must reach the owner as itself (a factor
-    # removed or disabled, a way in linked or unlinked, a key widened).
-    critical_notices: {:timer.minutes(10), 10},
+    # Notices of a change that must reach the owner as itself, in two
+    # classes so one cannot spend the other's: a factor or a way in (added,
+    # removed, disabled, linked, unlinked, recovery codes), and a key
+    # (created, widened).
+    factor_notices: {:timer.minutes(10), 10},
+    key_notices: {:timer.minutes(10), 10},
     # Ceremonies begun (a TOTP QR, passkey options), per browser session.
     ceremony_session: {:timer.minutes(10), 30},
     # Security notices queued per account, every address together; past

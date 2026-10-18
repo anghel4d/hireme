@@ -50,7 +50,11 @@ defmodule Hireme.Audit do
   @doc "The kinds that are activity, not security events: what the account lens's activity view shows."
   @spec activity_kinds() :: [String.t()]
   def activity_kinds,
-    do: Enum.uniq(@quiet ++ @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
+    do:
+      Enum.uniq(
+        (@quiet -- ["revokes_coalesced"]) ++
+          @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"])
+      )
 
   @doc """
   Announce that the account's factors changed (bound, removed, disabled):
@@ -98,11 +102,17 @@ defmodule Hireme.Audit do
   end
 
   defp within?(budget, name, account_id, context) do
-    node_ok? =
-      budget not in [:activity, :hellos] or Hireme.Security.hit(:activity_node, :node, 1) == :ok
+    # The node's ceiling is on rows: only a row the account's own budget
+    # admits spends it, so one account's flood of counts never spends another's.
+    # Past the node's ceiling an account still writes its floor.
+    admitted? =
+      Hireme.Security.hit(budget, account_id, 1) == :ok and
+        (budget not in [:activity, :hellos] or
+           Hireme.Security.hit(:activity_node, :node, 1) == :ok or
+           Hireme.Security.hit(:activity_floor, account_id, 1) == :ok)
 
     cond do
-      node_ok? and Hireme.Security.hit(budget, account_id, 1) == :ok ->
+      admitted? ->
         # A HELLO written under the budget is its address's first, too.
         if name == "wire_key",
           do: __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
@@ -110,7 +120,8 @@ defmodule Hireme.Audit do
         true
 
       # Past the budget, a key's first HELLO from an address in the window
-      # is still a row, so which addresses held a key is never a count.
+      # is still a row (up to `Coalescer.first?/3`'s cap of addresses), so
+      # which addresses held a key is never only a count.
       name == "wire_key" ->
         __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
 
@@ -121,12 +132,14 @@ defmodule Hireme.Audit do
 
   defp coalesce(budget, name, account_id, context) do
     __MODULE__.Coalescer.count(account_id, budget, name, context)
-    if name in @leases, do: moved(account_id), else: :ok
+    if name in @leases, do: __MODULE__.Coalescer.wake(account_id), else: :ok
   end
 
+  @doc false
   # The cursor moves and parked watches wake, with no row: a coalesced lease
-  # change still reaches the account lens.
-  defp moved(account_id) do
+  # change still reaches the account lens (at most once a second per
+  # account, `Coalescer.wake/1`).
+  def moved(account_id) do
     Store.write(fn ->
       Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
         skip_account: true
@@ -160,6 +173,7 @@ defmodule Hireme.Audit do
               meta: meta,
               key_id: Map.get(context, :key_id),
               session_id: Map.get(context, :session_id),
+              security: Atom.to_string(kind) not in activity_kinds(),
               rev: 1,
               inserted_at: now,
               updated_at: now
@@ -240,13 +254,10 @@ defmodule Hireme.Audit do
   """
   @spec page(:security | :activity, pos_integer(), integer() | nil) :: [struct()]
   def page(view, limit, before) do
-    activity = activity_kinds()
-    q = from(e in Event, order_by: [desc: e.id], limit: ^limit)
+    security? = view == :security
 
     q =
-      if view == :activity,
-        do: where(q, [e], e.kind in ^activity),
-        else: where(q, [e], e.kind not in ^activity)
+      from(e in Event, where: e.security == ^security?, order_by: [desc: e.id], limit: ^limit)
 
     q = if is_integer(before), do: where(q, [e], e.id < ^before), else: q
     Repo.all(q)
@@ -270,16 +281,22 @@ defmodule Hireme.Audit.Coalescer do
   `Hireme.Application.start/2`), not to this process: a crash here loses no
   count. Each window's group is written on its own, under a rescue, and
   only what was written is deleted. Without the table (the node starting or
-  stopping) an event is written as itself.
+  stopping) an event is written as itself. It stops after the sessions and
+  sequencers (it starts before them), and writes every open window as it
+  goes; an unclean exit of the VM loses the open windows' counts.
   """
 
-  use GenServer
+  use GenServer, shutdown: :timer.seconds(30)
   require Logger
   alias Hireme.Audit
 
   @table __MODULE__
   @tick :timer.seconds(30)
   @named 20
+  # Distinct addresses a key's first HELLOs are written for, per window.
+  @firsts 50
+  # A coalesced lease change wakes the account lens at most this often.
+  @wake 1000
 
   @doc "Make the counts table; the application's own process owns it."
   def table, do: :ets.new(@table, [:named_table, :public, :set, write_concurrency: true])
@@ -308,21 +325,50 @@ defmodule Hireme.Audit.Coalescer do
         {{what, account_id, budget, w, Hireme.Security.clip(value, 200)}, true}
       )
 
-  @doc "Whether this is the first HELLO of `key_id` from `ip` in the account's current window."
+  @doc """
+  Whether this is the first HELLO of `key_id` from `ip`'s peer
+  (`Hireme.Security.peer/1`) in the account's current window, among the
+  first #{@firsts} such peers of the key.
+  """
   @spec first?(pos_integer(), pos_integer() | nil, String.t() | nil) :: boolean()
   def first?(account_id, key_id, ip) do
     w = window(:hellos, System.os_time(:millisecond))
-    :ets.insert_new(@table, {{:first, account_id, w, key_id, ip}, true})
+    peer = Hireme.Security.peer(ip)
+
+    :ets.insert_new(@table, {{:first, account_id, w, key_id, peer}, true}) and
+      :ets.update_counter(@table, {:first, account_id, w, key_id, :peers}, 1, {nil, 0}) <=
+        @firsts
   rescue
     ArgumentError -> true
+  end
+
+  @doc """
+  Wake the account lens for a coalesced lease change: at once if it was not
+  woken in the last second, else once when that second ends.
+  """
+  @spec wake(pos_integer()) :: :ok
+  def wake(account_id) do
+    now = System.os_time(:millisecond)
+
+    case :ets.lookup(@table, {:wake, account_id}) do
+      [{_, last}] when now - last < @wake ->
+        if :ets.insert_new(@table, {{:trailing, account_id}, true}),
+          do: Process.send_after(__MODULE__, {:wake, account_id}, last + @wake - now)
+
+        :ok
+
+      _ ->
+        :ets.insert(@table, {{:wake, account_id}, now})
+        Audit.moved(account_id)
+    end
+  rescue
+    ArgumentError -> Audit.moved(account_id)
   end
 
   @doc "Write every window closed by `now_ms` (all of them with `:all`). Answers the rows written."
   @spec flush(integer() | :all) :: non_neg_integer()
   def flush(now_ms \\ System.os_time(:millisecond)) do
-    rows = :ets.tab2list(@table)
-
-    rows
+    :ets.tab2list(@table)
     |> Enum.filter(fn {key, _} -> closed?(key, now_ms) end)
     |> Enum.group_by(fn {key, _} -> group(key) end)
     |> Enum.count(fn {group, entries} -> write_group(group, entries) end)
@@ -330,6 +376,8 @@ defmodule Hireme.Audit.Coalescer do
     ArgumentError -> 0
   end
 
+  defp closed?({:wake, _}, _), do: false
+  defp closed?({:trailing, _}, _), do: false
   defp closed?({:first, _, w, _, _}, now_ms), do: now_ms == :all or w < window(:hellos, now_ms)
   defp closed?(key, now_ms), do: now_ms == :all or elem(key, 3) < window(elem(key, 2), now_ms)
 
@@ -394,8 +442,10 @@ defmodule Hireme.Audit.Coalescer do
   @impl true
   def init(:ok) do
     # Tests flush themselves, in their own sandboxed process.
-    unless Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
-      do: :timer.send_interval(@tick, :flush)
+    unless sandbox?() do
+      Process.flag(:trap_exit, true)
+      :timer.send_interval(@tick, :flush)
+    end
 
     {:ok, nil}
   end
@@ -403,8 +453,27 @@ defmodule Hireme.Audit.Coalescer do
   @impl true
   def handle_info(:flush, s) do
     flush()
+    now = System.os_time(:millisecond)
+    :ets.select_delete(@table, [{{{:wake, :_}, :"$1"}, [{:<, :"$1", now - @wake}], [true]}])
+    {:noreply, s}
+  end
+
+  # Only a trailing wake still pending is sent.
+  def handle_info({:wake, account_id}, s) do
+    if :ets.take(@table, {:trailing, account_id}) != [] do
+      :ets.insert(@table, {{:wake, account_id}, System.os_time(:millisecond)})
+      Audit.moved(account_id)
+    end
+
     {:noreply, s}
   end
 
   def handle_info(_other, s), do: {:noreply, s}
+
+  # The node is stopping: the sessions and sequencers are gone, so no count
+  # comes after this.
+  @impl true
+  def terminate(_reason, _s), do: unless(sandbox?(), do: flush(:all))
+
+  defp sandbox?, do: Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox
 end

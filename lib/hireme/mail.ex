@@ -160,9 +160,19 @@ defmodule Hireme.Mail do
   end
 
   # One event is one charge, however many addresses hear of it. A change
-  # the owner must see as itself spends its own small budget first.
-  @critical ~w(authenticator_removed authenticator_disabled authenticator_added identity_linked
-    identity_unlinked api_key_widened api_key_created recovery_codes_issued recovery_code_used)a
+  # the owner must see as itself spends its class's own small budget first,
+  # so a flood of key changes never turns a factor's notice into a digest.
+  @critical %{
+    authenticator_removed: :factor_notices,
+    authenticator_disabled: :factor_notices,
+    authenticator_added: :factor_notices,
+    identity_linked: :factor_notices,
+    identity_unlinked: :factor_notices,
+    recovery_codes_issued: :factor_notices,
+    recovery_code_used: :factor_notices,
+    api_key_widened: :key_notices,
+    api_key_created: :key_notices
+  }
 
   # A revoke's notice: bounded by what there is to revoke, and the owner's
   # emergency tool must not spend the budget a later change needs.
@@ -173,7 +183,7 @@ defmodule Hireme.Mail do
     event =
       cond do
         kind in @free -> :ok
-        kind in @critical and Security.hit(:critical_notices, account_id, 1) == :ok -> :ok
+        is_map_key(@critical, kind) and Security.hit(@critical[kind], account_id, 1) == :ok -> :ok
         true -> Security.hit(:notices, account_id, 1)
       end
 

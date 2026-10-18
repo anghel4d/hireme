@@ -326,4 +326,19 @@ defmodule HiremeWeb.AccountTest do
     assert {:error, %{error: "not_found"}} =
              Account.call("account.key.resume", %{"id" => other.id}, ctx)
   end
+
+  test "a stale session is told to step up before resuming a key", %{session: s, ctx: ctx} do
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+    key
+    |> Ecto.Changeset.change(paused_at: Hireme.Store.now())
+    |> Repo.update!(skip_account: true)
+
+    age(s, :authenticated_at, Hireme.Security.step_up_window() + 1)
+
+    assert {:error, %{error: "step_up"}} =
+             Account.call("account.key.resume", %{"id" => key.id}, ctx)
+
+    assert Repo.get(Hireme.Rows.ApiKey, key.id, skip_account: true).paused_at
+  end
 end

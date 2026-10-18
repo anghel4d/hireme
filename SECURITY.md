@@ -166,13 +166,12 @@ session's label. The operator's browser session is never refused
 `leased`: the owner's write lands, and the claiming agent receives it as a
 PATCH. A lease lives exactly as long as its session: release, disconnect,
 a revoked key, a mask change, a suspended account, or the operator's revoke
-in the account lens, which is sticky (the revoked session cannot claim
-again until it reconnects). There is no TTL.
+in the account lens. There is no TTL.
 
 An operator lease revoke pauses that key: until you resume it from the
 account lens, none of its sessions may open the channel or claim
 (refused, "paused by the operator"), however often the agent reconnects.
-A key revoke stops it for good.
+Resuming a key needs a step-up. A key revoke stops it for good.
 
 ## Carrier
 
@@ -255,15 +254,21 @@ Past its budgets an account's activity is not written row by row: the
 window's events become one `activity_coalesced` row (or
 `revokes_coalesced` for lease revokes) when the window closes, holding the
 counts by kind and key and the distinct addresses and user agents they
-came from (20 of each named, the rest counted). A key's HELLO from an
-address it has not used in the window is always its own row, so which
-addresses held a key is never only a count. A lease opening or closing
-moves the account lens's cursor even when coalesced.
+came from (20 of each named, the rest counted). A key's HELLO from a peer
+(an IPv6 address counts by its /64) it has not used in the window is its
+own row, for the first 50 peers of the key in the window, so which
+addresses held a key is not only a count. A lease opening or closing moves
+the account lens's cursor even when coalesced, waking a parked watch at
+most once a second (and once more when that second ends). The counts are
+held in memory until their window closes; they are written as the node
+stops, after its sessions and sequencers, but an unclean exit of the VM
+loses the open windows' counts.
 
 Security events are kept forever: sign-ins and their refusals, sessions,
-factors, identities, keys, mask changes, lease revokes, suspension and
-step-up. Activity is kept 90 days (`Security.activity_retention_days/0`)
-and then deleted by the daily purge: an agent's op batches (`agent_ops`),
+factors, identities, keys, mask changes, lease revokes (and their
+coalesced rows), keys paused and resumed, suspension and step-up.
+Activity is kept 90 days (`Security.activity_retention_days/0`) and then
+deleted by the daily purge: an agent's op batches (`agent_ops`),
 its HELLOs (`wire_key`, `wire_key_refused`) and its leases opening and
 closing (`lease_opened`, `lease_released`). Refused key HELLOs, which
 anyone can cause, are kept 7 days (`Security.refusal_retention_days/0`).
@@ -292,8 +297,8 @@ writer for long.
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
 | Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
 | Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes, charged only when the call wrote (renames have their own 30); revoking a key, a session or a lease is outside it, so the owner can always revoke |
-| Notices | 30 events per account in 10 minutes, however many addresses hear each; a factor added, removed or disabled, recovery codes issued or used, a way in linked or unlinked, and a key created or widened have 10 more of their own, and a key's revoke notice spends neither; past them, one pending digest per address ("N security changes since ..."), sent when the window ends; every event still lands on the trail |
-| Trail activity | per account in 10 minutes: 1,000 activity rows (op batches, leases opening and closing), 600 key HELLOs, 120 lease revokes; 20,000 activity rows for the node; past them, one coalesced row per window; a revoke itself is never refused |
+| Notices | 30 events per account in 10 minutes, however many addresses hear each; a factor added, removed or disabled, recovery codes issued or used, or a way in linked or unlinked have 10 more of their own, a key created or widened another 10, and a key's revoke notice spends none; past them, one pending digest per address ("N security changes since ..."), sent when the window ends; every event still lands on the trail |
+| Trail activity | per account in 10 minutes: 1,000 activity rows (op batches, leases opening and closing), 600 key HELLOs, 120 lease revokes; 20,000 activity rows for the node, charged only for rows written, past which an account still writes 100 of its own; past them, one coalesced row per window; a revoke itself is never refused |
 | Notice rows | 300 per account in 10 minutes (one per address an event reaches); past it, only the per-address digest |
 | Ceremonies begun | 30 per browser session in 10 minutes (a TOTP QR, passkey options) |
 | Pending notices | within the notice budget, one per linked address per change; each tries 8 times over about two days, then is given up; sent or given-up notices go a month later; the outbox sends round-robin across accounts |

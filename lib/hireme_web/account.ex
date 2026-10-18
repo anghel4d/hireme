@@ -22,8 +22,9 @@ defmodule HiremeWeb.Account do
   Any method takes `passive: true` when the client sends it by itself (the
   reload after a watch answers); such a call does not count as activity.
 
-  - `account.overview` {} -> everything the lens draws, and `cursor`, the
-    account's newest audit event id (0 when none)
+  - `account.overview` {} -> everything the lens draws, and `cursor`, how
+    far the account's security state has moved (`Hireme.Audit.rev/1`; 0
+    when never)
   - `account.watch` {since: cursor} -> {changed: true} at once if the
     account moved past the cursor of the overview the lens drew, else
     parked; {changed}
@@ -33,7 +34,8 @@ defmodule HiremeWeb.Account do
   - `account.key.change` {id, preset | read_mask + write_mask, may_delete?}
   - `account.key.rename` {id, name}; `account.key.revoke` {id}
   - `account.key.resume` {id} -> {key}: lifts the pause an operator lease
-    revoke put on the key; not_found for an unknown or revoked key
+    revoke put on the key (needs a step-up); not_found for an unknown or
+    revoked key
   - `account.lease.revoke` {id}
   - `account.identity.unlink` {id}
   - `account.totp.begin` {label} -> {uri, secret, svg}; `account.totp.confirm` {code, name} -> {factor, recovery_codes}
@@ -41,7 +43,9 @@ defmodule HiremeWeb.Account do
   - `account.factor.remove` {id}; `account.recovery.regenerate` {} -> {recovery_codes}
   - `account.step_up.passkey_options` {} -> {publicKey}; `account.step_up.passkey` {assertion fields}; `account.step_up.totp` {code}; `account.step_up.recovery` {code}
   - `account.trusted_host.add` {host, note?}; `account.trusted_host.remove` {id}
-  - `account.audit` {limit?} -> {events}
+  - `account.audit` {view?: "security" | "activity", limit?, before?} ->
+    {events, next}: a page of the trail, newest first; `next` is the
+    `before` of the page after it (nil at the end)
 
   An error answers `%{error: code}` with the code a string: `scope`,
   `step_up`, `not_found`, `invalid`, `limit`, `rate_limited`, `last`,
@@ -272,7 +276,8 @@ defmodule HiremeWeb.Account do
 
   # An operator lease revoke paused the key; this lifts it.
   defp run("account.key.resume", %{"id" => id}, s, meta) when is_integer(id) do
-    with %{} = key <- Keys.get(id) || {:error, :not_found},
+    with true <- Mfa.fresh?(s) || {:error, :step_up},
+         %{} = key <- Keys.get(id) || {:error, :not_found},
          {:ok, key} <- Keys.resume(key, ctx(meta, s)) do
       {:ok, %{key: key(key)}}
     end
