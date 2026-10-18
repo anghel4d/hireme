@@ -142,13 +142,40 @@ fn keys_shape_uniques_and_drops_are_the_sequencers() {
     assert_eq!(refused(&mut k, &put(0, 1, None, |o| { o.u32(K::HQ_PLACE_ID, 999); })).0, refusal::NOT_FOUND);
     assert_eq!(refused(&mut k, &put(0, 1, None, |o| { o.u32(K::HEADCOUNT_ON, D0); })).0, refusal::COLUMN);
     assert_eq!(refused(&mut k, &put(0, 9, None, |o| { o.str(K::NAME, "Ghost"); })).0, refusal::NOT_FOUND);
-    // A cited source outlives a key's drop; the operator's is a tombstone.
+    // A cited source outlives a key's drop, not the operator's; a stale rev
+    // and an append-only table refuse a drop.
+    let drop = |t: u16, id: u32, rev: Option<u32>| {
+        let mut w = wire::OpsWriter::new();
+        w.op(79, wire::DROP, 0, t, id, rev).done();
+        w.finish()[8..].to_vec()
+    };
+    assert_eq!(refused(&mut k, &drop(table::SOURCES, 1, None)).0, refusal::SCOPE);
+    assert!(k.judge(&drop(table::SOURCES, 1, None), &ctx(true)).is_ok());
+    assert_eq!(refused(&mut k, &drop(table::CORPORATIONS, 1, Some(1))).0, refusal::REV);
+    assert_eq!(refused(&mut k, &drop(table::CITATIONS, 1, None)).0, refusal::COLUMN);
+    // Citations are the server's to write.
     let mut w = wire::OpsWriter::new();
-    w.op(79, wire::DROP, 0, table::SOURCES, 1, None).done();
-    let drop = w.finish()[8..].to_vec();
-    assert_eq!(refused(&mut k, &drop).0, refusal::SCOPE);
-    let fx = k.judge(&drop, &ctx(true)).unwrap();
-    assert_eq!(cell(&fx, table::SOURCES, S::DELETED_AT), Some(&EVal::Val(Val::U32(1_792_000_000))));
+    w.op(80, wire::PUT, 0, table::CITATIONS, 0, None).done();
+    let (code, data) = refused(&mut k, &w.finish()[8..]);
+    assert_eq!((code, data["reason"].as_str()), (refusal::COLUMN, Some("the server writes this table")));
+}
+
+/// A table at its cap refuses an insert, never a restatement (which
+/// writes nothing): the citations a write adds count the same way.
+#[test]
+fn a_cap_refuses_inserts_not_restatements() {
+    let cap = schema::table_def(table::CORPORATIONS).and_then(|t| t.cap).unwrap();
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::CORPORATIONS, cap as usize);
+    let domains: Vec<String> = (1..=cap).map(|i| format!("c{i}.example")).collect();
+    b.u32s(K::ID, 1..=cap).strs(K::DOMAIN, domains.iter().map(String::as_str)).strs(K::NAME, (1..=cap).map(|_| "C"));
+    b.done();
+    let mut k = Kernel::new();
+    k.set_today(TODAY);
+    k.boot(&w.finish(), 1).unwrap();
+    let (code, data) = refused(&mut k, &put(0, 0, None, |o| { o.str(K::DOMAIN, "one-more.example").str(K::NAME, "C"); }));
+    assert_eq!((code, data["cap"].as_u64()), (refusal::CAP, Some(cap as u64)));
+    assert_eq!(judge(&mut k, &put(0, 7, None, |o| { o.str(K::NAME, "C"); })).unwrap(), Vec::new());
 }
 
 #[test]
@@ -156,6 +183,7 @@ fn a_source_host_is_what_a_browser_opens() {
     use kernel::write::host;
     assert_eq!(host("https://WWW.Levels.FYI./x?y#z").as_deref(), Some("www.levels.fyi"));
     assert_eq!(host("http://a.example:080/").as_deref(), Some("a.example"));
+    assert_eq!(host("HTTPS://ABC.com.:443/p").as_deref(), Some("abc.com"));
     for bad in ["https://evil.example\\@levels.fyi/", "https://u@levels.fyi/", "ftp://a.example/", "https://127.0.0.1/", "https://0x7f.1/", "https://a.example:99999/", "https://a b.example/", "https://localhost/", "https://-a.example/"] {
         assert_eq!(host(bad), None, "{bad}");
     }

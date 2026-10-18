@@ -267,8 +267,7 @@ fn merge(into: &mut Moved, m: Moved) {
 /// An op's effects as row writes, inserts given ids by `fresh`.
 pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> u32) -> Vec<Write> {
     let mut out = Vec::new();
-    // A soft-delete table's drop is its tombstone, an effect like any other.
-    if op.verb == wire::DROP && !schema::table_def(op.table).is_some_and(|t| t.soft_delete) {
+    if op.verb == wire::DROP {
         out.push(Write::Remove { table: op.table, id: op.target });
     }
     let mut inserted: Vec<u32> = Vec::new();

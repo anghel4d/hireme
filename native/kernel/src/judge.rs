@@ -168,9 +168,8 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
             Ok(effects)
         }
         wire::DROP => {
-            let mut effects = write::drop_effects(rows, &op, ctx)?;
-            effects.extend(drop(rows, &op, ctx)?);
-            Ok(effects)
+            write::drop_checks(rows, &op, ctx)?;
+            drop(rows, &op, ctx)
         }
         wire::COMMAND => run(rows, board, &op, ctx),
         _ => refuse(refusal::TYPE, json!({"verb": op.verb})),

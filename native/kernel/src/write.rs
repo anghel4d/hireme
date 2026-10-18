@@ -72,6 +72,10 @@ pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal>
     let td = schema::table_def(op.table)
         .filter(|t| t.residency == schema::Residency::Resident || t.residency == schema::Residency::Server)
         .ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": op.table})))?;
+    // A table no op writes a column of (citations) is the server's alone.
+    if td.cols.iter().all(|c| has(c, flag::IMPLIED | flag::READONLY | flag::SERVER_ONLY)) {
+        return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "the server writes this table"})));
+    }
     let t = rows.table(op.table);
     let target = if op.flags & wire::KEYED != 0 {
         natural(t, td, op)?
@@ -265,7 +269,7 @@ pub fn host(url: &str) -> Option<String> {
         return None;
     }
     let (scheme, rest) = url.split_once("://")?;
-    if scheme != "http" && scheme != "https" {
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return None;
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -544,13 +548,21 @@ pub(crate) fn limits(rows: &Rows, plan: &Plan, effects: &[Row]) -> Result<(), Re
 
 // ------------------------------------------------------------------ drops
 
-/// A drop's checks: the row lives; a key never drops a row a loose ref
-/// names (a cited source: provenance outlives it). A soft-delete table's
-/// drop is a tombstone, `deleted_at` now.
-pub(crate) fn drop_effects(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Vec<Row>, Refusal> {
+/// A drop's checks, as the sequencer's: the row lives, its rev is the one
+/// expected, its table is not append-only, and a key never drops a row a
+/// loose ref names (a cited source: provenance outlives it). The server
+/// sends any drop as gone, a tombstone too, so the replica removes it.
+pub(crate) fn drop_checks(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<(), Refusal> {
     let Some(td) = schema::table_def(op.table) else { return Err(no(refusal::NOT_FOUND, json!({"table": op.table}))) };
-    if !rows.table(op.table).is_some_and(|t| live(t, td, op.target)) {
+    let Some(t) = rows.table(op.table).filter(|t| live(t, td, op.target)) else {
         return Err(no(refusal::NOT_FOUND, json!({"table": td.name, "id": op.target})));
+    };
+    let rev = t.i64(op.target, 3).unwrap_or(0);
+    if op.flags & wire::EXPECT_REV != 0 && op.expect_rev as i64 != rev {
+        return Err(no(refusal::REV, json!({"table": td.name, "rev": rev})));
+    }
+    if td.append_only {
+        return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "append_only"})));
     }
     let named = schema::TABLES.iter().any(|o| {
         o.cols.iter().filter(|c| has(c, flag::LOOSE) && c.target == Some(td.name)).any(|c| {
@@ -560,8 +572,5 @@ pub(crate) fn drop_effects(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Vec<Row>, 
     if named && !ctx.human {
         return Err(no(refusal::SCOPE, json!({"table": td.name, "reason": "cited; provenance outlives it"})));
     }
-    Ok(match td.col_named("deleted_at").filter(|_| td.soft_delete) {
-        Some(c) => alloc::vec![Row { table: op.table, id: op.target, cells: alloc::vec![(c.id, EVal::Val(Val::U32(ctx.now as u32)))] }],
-        None => Vec::new(),
-    })
+    Ok(())
 }
