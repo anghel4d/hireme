@@ -144,6 +144,12 @@ fn advice(code: &str, data: &Json) -> (String, String) {
         let help = if keys.is_empty() { "This table declares no key; name the row by id.".to_owned() } else { format!("Name the row by id, or by exactly one of the table's keys: {list}.") };
         return ("no declared key is made of exactly these columns".to_owned(), help);
     }
+    // A parameter the call left out (or sent as null): {param, got: null}.
+    if code == "type" && data.get("got").is_some_and(Json::is_null) {
+        if let Some(p) = data.get("param").and_then(Json::as_str) {
+            return (format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes."));
+        }
+    }
     // A column refusal that lists what a new row lacks.
     if code == "column" {
         if let Some(cols) = data.get("missing").and_then(Json::as_array) {
@@ -371,6 +377,8 @@ mod tests {
         let budget = render("cap", "put t", &serde_json::json!({"table": "account", "reason": "text", "cap": 1}));
         assert!(budget.contains("text budget") && !budget.contains("the table is full"), "{budget}");
         // A reason this table does not know leads in the node's own words.
+        let left_out = render("type", "history places", &serde_json::json!({"param": "id", "got": null}));
+        assert!(left_out.starts_with("error[type]: id is required here\n"), "{left_out}");
         let odd = render("column", "put t", &serde_json::json!({"reason": "something new"}));
         assert!(odd.starts_with("error[column]: something new\n"), "{odd}");
     }
