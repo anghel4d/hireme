@@ -6,6 +6,8 @@ defmodule Hireme.DataCase do
   """
 
   use ExUnit.CaseTemplate
+  alias Ecto.Adapters.SQL
+  alias Ecto.Adapters.SQL.Sandbox
 
   using do
     quote do
@@ -21,14 +23,14 @@ defmodule Hireme.DataCase do
   end
 
   def setup_sandbox(tags) do
-    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Hireme.Repo, shared: not tags[:async])
-    ExUnit.Callbacks.on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+    pid = Sandbox.start_owner!(Hireme.Repo, shared: not tags[:async])
+    ExUnit.Callbacks.on_exit(fn -> Sandbox.stop_owner(pid) end)
     # The sandbox's transaction is deferred, and a deferred transaction that
     # has read cannot wait for the write lock: SQLite answers BUSY at once,
     # past the busy timeout, while the last test's connection may still be
     # rolling back. A write before any read takes the lock where the timeout
     # waits, so every test starts holding it.
-    Ecto.Adapters.SQL.query!(
+    SQL.query!(
       Hireme.Repo,
       "UPDATE schema_files SET applied_at = applied_at WHERE 0"
     )

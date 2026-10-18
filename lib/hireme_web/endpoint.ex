@@ -31,6 +31,7 @@ end
 defmodule HiremeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :hireme
   import Bitwise, only: [>>>: 2, &&&: 2]
+  alias HiremeWeb.Wire.Codec
 
   # The one cookie. `__Host-` pins it to this origin, path `/`, over https
   # (localhost counts). Encrypted and signed with keys derived from the
@@ -146,7 +147,7 @@ defmodule HiremeWeb.Endpoint do
         conn
         |> WebSockAdapter.upgrade(HiremeWeb.Session, state,
           timeout: 60_000,
-          max_frame_size: HiremeWeb.Wire.Codec.max_up()
+          max_frame_size: Codec.max_up()
         )
         |> Plug.Conn.halt()
 

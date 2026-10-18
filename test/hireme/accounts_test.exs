@@ -1,6 +1,7 @@
 defmodule Hireme.AccountsTest do
   use Hireme.DataCase, async: false
 
+  alias Ecto.Adapters.SQL.Sandbox
   alias Hireme.Accounts
 
   # The URL a mailed link carries is whatever the router makes of the token.
@@ -43,7 +44,7 @@ defmodule Hireme.AccountsTest do
         1..8
         |> Enum.map(fn _ ->
           Task.async(fn ->
-            Ecto.Adapters.SQL.Sandbox.allow(Hireme.Repo, parent, self())
+            Sandbox.allow(Hireme.Repo, parent, self())
             Accounts.redeem_link(token)
           end)
         end)

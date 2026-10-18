@@ -230,6 +230,8 @@ defmodule Hireme.Release.Backup do
   use GenServer
   require Logger
 
+  alias Hireme.Release.Purge
+
   @day :timer.hours(24)
   @retry :timer.hours(1)
   @keep 13
@@ -272,7 +274,7 @@ defmodule Hireme.Release.Backup do
 
   defp backup(s) do
     try do
-      Hireme.Release.Purge.run()
+      Purge.run()
     rescue
       e -> Logger.error("purge failed: #{Exception.message(e)}")
     end

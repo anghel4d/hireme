@@ -1,6 +1,7 @@
 defmodule Hireme.MfaTest do
   use Hireme.DataCase, async: false
 
+  alias Ecto.Adapters.SQL.Sandbox
   alias Hireme.Accounts
   alias Hireme.Mfa
 
@@ -126,7 +127,7 @@ defmodule Hireme.MfaTest do
       sessions
       |> Enum.map(fn x ->
         Task.async(fn ->
-          Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, self())
+          Sandbox.allow(Repo, parent, self())
           Mfa.verify_totp(x, c)
         end)
       end)
