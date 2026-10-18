@@ -81,7 +81,9 @@ defmodule HiremeWeb.AcceptanceTest do
     do:
       for(
         <<op_id::little-64, rev::little-64, id::little-32,
-          0::32 <- binary_part(rest, 0, n * 24)>>, do: %{op_id: op_id, rev: rev, id: id})
+          0::32 <- binary_part(rest, 0, n * 24)>>,
+        do: %{op_id: op_id, rev: rev, id: id}
+      )
 
   defp nack_refusals(%{body: <<_n::little-32, 0::32, rest::binary>>}), do: refusals(rest)
   defp refusals(<<>>), do: []
@@ -236,7 +238,9 @@ defmodule HiremeWeb.AcceptanceTest do
             headcount: 120,
             as_of: ~D[2026-10-01],
             source: "https://acme.example/about"
-          }, keyed: true)
+          },
+          keyed: true
+        )
       )
 
     {:ack, %{id: place}} =
@@ -259,7 +263,8 @@ defmodule HiremeWeb.AcceptanceTest do
     {:ok, %{"rows" => [found]}} =
       WireClient.rpc(browser, 9, "find", %{
         "table" => "corporations",
-        "where" => %{"domain" => "acme.example"}
+        "where" => %{"domain" => "acme.example"},
+        "cols" => ["id", "headcount", "headcount_on"]
       })
 
     assert found["id"] == corp and found["headcount"] == 120 and
