@@ -72,6 +72,8 @@
             beamPackages.elixir
             beamPackages.erlang
             beamPackages.hex
+            # idna and telemetry build with rebar3; mix must not fetch one.
+            beamPackages.rebar3
             pkgs.rustPlatform.cargoSetupHook
             pkgs.cargo
             pkgs.rustc
@@ -83,6 +85,7 @@
           ];
           env = {
             MIX_ENV = "test";
+            MIX_REBAR3 = "${beamPackages.rebar3}/bin/rebar3";
             EXQLITE_USE_SYSTEM = "1";
             EXQLITE_SYSTEM_CFLAGS = "-I${pkgs.sqlite.dev}/include";
             EXQLITE_SYSTEM_LDFLAGS = "-L${pkgs.sqlite.out}/lib -lsqlite3";
