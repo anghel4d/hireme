@@ -77,8 +77,11 @@ fn op(build: impl FnOnce(&mut wire::OpsWriter)) -> Vec<u8> {
     w.finish()[8..].to_vec()
 }
 
+/// A write landing before an op is judged, untimed.
+type Before<'a> = Option<&'a dyn Fn(&mut Kernel, usize)>;
+
 /// Times each op's judge; `before` runs first, untimed (a write landing).
-fn time(k: &mut Kernel, ops: &[Vec<u8>], before: Option<&dyn Fn(&mut Kernel, usize)>) -> (f64, f64) {
+fn time(k: &mut Kernel, ops: &[Vec<u8>], before: Before) -> (f64, f64) {
     let ctx = Ctx { today: TODAY, now: 0, human: false, key_id: Some(1), held: &[] };
     let mut us: Vec<f64> = ops
         .iter()
@@ -123,7 +126,7 @@ fn main() {
         k.patch(&w.finish(), 2).unwrap();
     };
     let mut worst: f64 = 0.0;
-    let cases: [(&str, &Vec<Vec<u8>>, Option<&dyn Fn(&mut Kernel, usize)>); 5] = [
+    let cases: [(&str, &Vec<Vec<u8>>, Before); 5] = [
         ("stage into the queue", &into_queue, None),
         ("  … after a hot write", &into_queue, Some(&touch)),
         ("stage, no heat", &plain, None),

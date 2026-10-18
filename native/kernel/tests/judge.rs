@@ -77,7 +77,7 @@ fn stage_cmd(target: u32, to: u8) -> Vec<u8> {
     })
 }
 
-fn cell<'a>(rows: &'a [Row], table: u16, col: u16) -> Option<&'a EVal> {
+fn cell(rows: &[Row], table: u16, col: u16) -> Option<&EVal> {
     rows.iter().find(|r| r.table == table)?.cells.iter().find(|c| c.0 == col).map(|c| &c.1)
 }
 

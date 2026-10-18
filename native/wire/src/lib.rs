@@ -934,9 +934,7 @@ impl<'a> U32s<'a> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = u32> + use<'a> {
-        self.0
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        self.0.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
 }
 
