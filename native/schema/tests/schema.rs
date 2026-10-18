@@ -124,3 +124,14 @@ fn a_frozen_database_whose_foreign_keys_disagree_with_the_declaration_needs_a_re
     let diff = additive(&s, &missing).unwrap();
     assert!(diff.extra.iter().any(|x| x.contains("applications.corporation_id has no foreign key")), "{:?}", diff.extra);
 }
+
+#[test]
+fn a_table_def_names_its_keys_and_their_wheres() {
+    use schema::{Cond, table_def, table};
+    let places = table_def(table::PLACES).unwrap();
+    let naturals: Vec<_> = places.keys.iter().filter(|k| k.natural).map(|k| (k.cols, &k.cond)).collect();
+    assert_eq!(naturals, [(&["iso2"][..], &Some(Cond::Eq("kind", "country"))), (&["geonames_id"][..], &Some(Cond::Eq("kind", "city")))]);
+    let sources = table_def(table::SOURCES).unwrap();
+    assert!(sources.soft_delete && !sources.singleton && !sources.unmasked);
+    assert!(table_def(table::SETTINGS).unwrap().singleton);
+}

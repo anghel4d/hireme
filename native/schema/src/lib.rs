@@ -36,7 +36,30 @@ pub struct TableDef {
     pub domain_bit: u8,
     pub residency: Residency,
     pub cap: Option<u32>,
+    pub soft_delete: bool,
+    pub unmasked: bool,
+    pub singleton: bool,
+    /// Its natural keys, then its declared uniques (a `unique` column flag
+    /// is `flag::UNIQUE`).
+    pub keys: &'static [KeyDef],
     pub cols: &'static [ColDef],
+}
+
+/// A natural key or a declared unique, with its where.
+#[derive(Debug)]
+pub struct KeyDef {
+    pub cols: &'static [&'static str],
+    pub natural: bool,
+    pub global: bool,
+    pub cond: Option<Cond>,
+}
+
+/// A key's where: `col = 'value'`, `col is null`, `col is not null`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cond {
+    Eq(&'static str, &'static str),
+    Null(&'static str),
+    NotNull(&'static str),
 }
 
 /// One column of the catalog.

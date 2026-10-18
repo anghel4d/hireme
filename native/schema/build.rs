@@ -24,6 +24,16 @@ fn opt(v: Option<&str>) -> String {
     }
 }
 
+fn key_def(k: &model::Key, natural: bool) -> String {
+    let cond = match &k.term {
+        None => "None".into(),
+        Some(model::Where::Eq(c, v)) => format!("Some(Cond::Eq({c:?}, {v:?}))"),
+        Some(model::Where::Null(c)) => format!("Some(Cond::Null({c:?}))"),
+        Some(model::Where::NotNull(c)) => format!("Some(Cond::NotNull({c:?}))"),
+    };
+    format!("KeyDef {{ cols: &{:?}, natural: {natural}, global: {}, cond: {cond} }}", k.cols, k.global)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed={SCHEMA}");
     let source = std::fs::read_to_string(SCHEMA).expect("read schema/hireme.schema");
@@ -115,7 +125,7 @@ fn main() {
     for t in &s.tables {
         writeln!(
             o,
-            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, cols: &[",
+            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, soft_delete: {}, unmasked: {}, singleton: {}, keys: &[{}], cols: &[",
             t.id,
             t.name,
             t.domain,
@@ -124,7 +134,11 @@ fn main() {
             match t.cap {
                 Some(c) => format!("Some({c})"),
                 None => "None".into(),
-            }
+            },
+            t.soft_delete,
+            t.unmasked,
+            t.singleton,
+            t.naturals.iter().map(|k| key_def(k, true)).chain(t.uniques.iter().map(|k| key_def(k, false))).collect::<Vec<_>>().join(", ")
         )
         .unwrap();
         for c in &t.cols {
