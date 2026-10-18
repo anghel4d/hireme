@@ -210,6 +210,9 @@ export function go(next: Partial<Address>, replace = false): void {
     if (next.q === undefined) address.q = new Map()
     if (next.sub === undefined) address.sub = ""
   }
+  // The address holds its canonical sub, as parse() gives it: a lens's redirect to its default is then
+  // no address change at all, and a view that enters on "" sees what format() prints.
+  if (address.sub === "") address.sub = DEFAULT_SUB[address.lens] ?? ""
   const url = format(address)
   if (url !== `${location.pathname}${location.search}`) {
     if (replace) history.replaceState(null, "", url)

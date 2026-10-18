@@ -44,7 +44,7 @@ function toggle(key: string, v: string): void {
 function chips(key: string, all: readonly string[], counts: readonly number[] | undefined, label: string): Html {
   const on = list(key)
   return html`<div class="chips" role="group" aria-label="${label}" data-key="chips-${key}">${all.map((x, i) => html`<button type="button"
-      class="chip${on.includes(x) ? " on" : ""} chip-${x}" aria-pressed="${on.includes(x)}" data-act="toggle" data-k="${key}" data-v="${x}" data-key="${x}">
+      class="chip${on.includes(x) ? " on" : ""} chip-${x}" aria-pressed="${String(on.includes(x))}" data-act="toggle" data-k="${key}" data-v="${x}" data-key="${x}">
       ${x.replace(/_/g, " ")}${counts ? html` <span class="n">${counts[i] ?? 0}</span>` : EMPTY}</button>`)}</div>`
 }
 

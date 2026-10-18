@@ -38,7 +38,8 @@ function part(p: Part): string {
   return esc(String(p))
 }
 
-/** A template whose every interpolation is escaped; `false`, `null` and `undefined` print nothing. */
+/** A template whose every interpolation is escaped; booleans, `null` and `undefined` print nothing (so `x && html`…``
+ * reads as a condition): a boolean attribute value is interpolated as `String(b)`. */
 export function html(strings: TemplateStringsArray, ...parts: readonly Part[]): Html {
   let out = strings[0] ?? ""
   for (let i = 0; i < parts.length; i++) out += part(parts[i]) + (strings[i + 1] ?? "")

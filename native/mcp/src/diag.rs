@@ -54,12 +54,14 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
         .find(|r| r.0 == code)
         .map(|r| (r.2, first_sentence(r.3)))
         .unwrap_or(("refused", String::new()));
-    // natural_key also covers a keyed put on a table that declares no natural key: other words, other advice.
-    let nokey = code == "natural_key" && data.get("reason").and_then(Json::as_str).is_some_and(|r| r.contains("no natural key"));
-    let (line, todo) = if nokey {
-        ("this table declares no natural key", "Put by id, or without key to insert; `schema` with the table lists its keys.".to_owned())
-    } else {
-        (line, todo)
+    // natural_key also covers a keyed put whose cells name no natural key: the table declares none at
+    // all (`keys` empty), or the cells hold none of the keys it declares. Other words, other advice.
+    let unkeyed = code == "natural_key" && data.get("reason").and_then(Json::as_str).is_some_and(|r| r.contains("no natural key"));
+    let declared = data.get("keys").and_then(Json::as_array).is_some_and(|k| !k.is_empty());
+    let (line, todo) = match (unkeyed, declared) {
+        (true, false) => ("this table declares no natural key", "Put by id, or without key to insert; `schema` with the table lists its keys.".to_owned()),
+        (true, true) => ("the cells hold none of this table's natural keys", "Give every column of one of the listed keys, or put by id.".to_owned()),
+        _ => (line, todo),
     };
     let mut out = format!("error[{code}]: {line}\n  --> {what}\n");
     if let Some(msg) = data.get("message").and_then(Json::as_str) {
@@ -128,5 +130,17 @@ mod tests {
     #[test]
     fn every_refusal_the_schema_declares_is_explained_and_no_other() {
         assert_eq!(names().collect::<Vec<_>>(), schema::refusal::NAMES.to_vec());
+    }
+
+    #[test]
+    fn a_keyed_put_naming_no_key_says_whether_the_table_declares_any() {
+        let refused = |keys: Json| render("natural_key", "put t x=1", &serde_json::json!({"table": "t", "reason": "no natural key among the cells", "keys": keys}));
+        let none = refused(serde_json::json!([]));
+        assert!(none.contains("this table declares no natural key"), "{none}");
+        let some = refused(serde_json::json!([["domain"]]));
+        assert!(some.contains("the cells hold none of this table's natural keys"), "{some}");
+        assert!(!some.contains("declares no natural key"), "{some}");
+        let taken = render("natural_key", "put t x=1", &serde_json::json!({"table": "t", "key": {"domain": "a.com"}}));
+        assert!(taken.contains("a row with this natural key exists"), "{taken}");
     }
 }

@@ -26,15 +26,20 @@ const CONTACT: ColumnDef[] = TABLES.contacts.cols.filter((c) => !c.implied && !c
 
 let fetching = 0
 
-async function fetchContacts(more: boolean): Promise<void> {
-  const me = ++fetching
-  const key = listKey()
+/** The contact list's find, without its paging. */
+function listParams(limit: number): Record<string, unknown> {
   const q = model.address.q.get("q") ?? ""
   const corp = Number(model.address.q.get("corporation") ?? 0)
   const where: Record<string, unknown> = {}
   if (q !== "") where.name = { prefix: q }
   if (corp > 0) where.corporation_id = corp
-  const params: Record<string, unknown> = { table: "contacts", order: ["last_touch_on", "desc"], limit: PAGE, where }
+  return { table: "contacts", order: ["last_touch_on", "desc"], limit, where }
+}
+
+async function fetchContacts(more: boolean): Promise<void> {
+  const me = ++fetching
+  const key = listKey()
+  const params = listParams(PAGE)
   if (more && v().next !== null) params.after = v().next
   // A refetch of the same list keeps the rows on screen until the answer replaces them.
   patch({ loading: true, ...(more || key === v().key ? {} : { key, contacts: [], next: null }) })
@@ -46,6 +51,22 @@ async function fetchContacts(more: boolean): Promise<void> {
     patch({ contacts: more ? [...v().contacts, ...r.rows] : r.rows, next: r.next ?? null, loading: false, error: "" })
   } catch (e) {
     if (me === fetching) patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
+  }
+}
+
+/** The loaded list read again in place, as world's reread: one page of up to 500 (find's cap), so a
+ * paged list keeps its length, and a longer one keeps its tail. A fetch started meanwhile wins. */
+async function reread(): Promise<void> {
+  const me = fetching
+  const key = listKey()
+  if (v().key !== key) return void fetchContacts(false)
+  const have = v().contacts.length
+  try {
+    const r = await rpc<{ rows: Row[]; next: unknown }>("find", listParams(Math.min(500, Math.max(PAGE, have))))
+    if (me !== fetching || listKey() !== key || v().key !== key) return
+    patch({ contacts: have > 500 ? [...r.rows, ...v().contacts.slice(r.rows.length)] : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
+  } catch {
+    // The next advance tries again.
   }
 }
 
@@ -142,7 +163,7 @@ function view(): Html {
       ${v().edit === "new" ? html`<form class="stack card" data-submit="create-contact" data-act="create-contact" data-key="new">
           ${CONTACT.filter((x) => x.required || x.name === "email" || x.name === "title" || x.name === "corporation_id").map((x) => field(x, x.name === "corporation_id" ? corp : null))}
           <span class="row"><button class="primary">Add</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>` : EMPTY}
-      <ul class="rows pick" role="listbox" aria-label="Contacts">${v().contacts.map((x) => html`<li data-key="c${str(x.id)}" role="option" aria-selected="${Number(x.id) === id}">
+      <ul class="rows pick" role="listbox" aria-label="Contacts">${v().contacts.map((x) => html`<li data-key="c${str(x.id)}" role="option" aria-selected="${String(Number(x.id) === id)}">
         <a href="/outreach?${new URLSearchParams({ ...(corp ? { corporation: corp } : {}), contact: str(x.id) }).toString()}" data-nav class="${Number(x.id) === id ? "on" : ""}">
           <b>${str(x.name)}</b> <span class="muted">${str(x.title)}</span></a></li>`)}</ul>
       ${v().loading ? html`<p class="empty">Loading…</p>` : v().contacts.length === 0 ? html`<p class="empty">No contacts yet.</p>` : EMPTY}
@@ -222,7 +243,7 @@ function act(name: string, el: HTMLElement): void {
           patch({ edit: "" })
           if (model.address.lens !== "outreach") return
           if (listKey() === from) query("contact", String(r.id))
-          return fetchContacts(false)
+          return reread()
         })
         .catch(failed)
     }
@@ -279,7 +300,7 @@ const outreach: View = {
     // Back on the lens: contacts and threads an agent wrote meanwhile are read again. Picking a
     // contact is only an address change, so it does not re-read (which collapsed a paged list).
     else if (fresh && !v().loading) {
-      void fetchContacts(false)
+      void reread()
       if (selected() === shownContact) void fetchMessages()
     }
     if (selected() !== shownContact) {
@@ -297,7 +318,7 @@ const outreach: View = {
   },
   act,
   refresh() {
-    if (v().edit === "" && !v().loading) void fetchContacts(false)
+    if (v().edit === "" && !v().loading) void reread()
     void fetchMessages()
   },
 }
