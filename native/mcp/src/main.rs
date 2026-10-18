@@ -222,12 +222,11 @@ async fn main() {
             // A handler that panics still answers its request, so no client waits on it forever.
             let id = msg.get("method").and(msg.get("id")).cloned();
             let inner = app.clone();
-            if tokio::spawn(async move { inner.message(msg).await }).await.is_err() {
-                if let Some(id) = id {
+            if tokio::spawn(async move { inner.message(msg).await }).await.is_err()
+                && let Some(id) = id {
                     app.reqs.lock().await.inflight.remove(&id.to_string());
                     app.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"internal error"}}));
                 }
-            }
         });
     }
 }
@@ -267,12 +266,11 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
             }
             Event::Rows(frame) => {
                 let mut applied = true;
-                if let Ok(mut k) = app.kernel.lock() {
-                    if k.ingest(&frame).is_err() {
+                if let Ok(mut k) = app.kernel.lock()
+                    && k.ingest(&frame).is_err() {
                         *k = Kernel::new();
                         applied = false;
                     }
-                }
                 if !applied {
                     // The kernel no longer matches the node: off with judging, and a fresh session boots it whole.
                     eprintln!("hireme-mcp: a row frame did not apply; restarting the session for a whole BOOT");
@@ -395,11 +393,10 @@ impl App {
             if self.dead.read().await.is_some() {
                 return None;
             }
-            if self.welcome.read().await.is_some() {
-                if let Some(c) = self.catalog.read().await.clone() {
+            if self.welcome.read().await.is_some()
+                && let Some(c) = self.catalog.read().await.clone() {
                     return Some(c);
                 }
-            }
             if tokio::time::Instant::now() >= deadline {
                 return self.catalog.read().await.clone();
             }
@@ -537,11 +534,10 @@ impl App {
     async fn call_tool(&self, name: &str, params: &Json) -> Result<Json, Json> {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let blank = args.as_object().is_none_or(|o| o.is_empty());
-        if let Some(why) = self.dead.read().await.clone() {
-            if name != "hireme" {
+        if let Some(why) = self.dead.read().await.clone()
+            && name != "hireme" {
                 return Ok(text_result(format!("error[session]: {why}\n   = help: the key may be revoked, the account suspended, or hireme-mcp too old for the node; ask the operator\n"), None, true));
             }
-        }
         if name == "hireme" {
             // An explain is local text: it never waits for the session.
             let cat = if args.get("explain").is_some() { Catalog::default() } else { self.catalog().await.unwrap_or_default() };
@@ -556,11 +552,10 @@ impl App {
         if !known || !tools::list(&cat, m).iter().any(|t| t["name"] == name) {
             return Err(json!({"code":-32602,"message":format!("Unknown tool: {name}")}));
         }
-        if blank {
-            if let Some(shape) = shape(name) {
+        if blank
+            && let Some(shape) = shape(name) {
                 return Ok(text_result(format!("{name} {shape}\n"), None, false));
             }
-        }
         Ok(match name {
             "hireme" => self.hireme(&cat, m, &args).await,
             "schema" => match args.get("table").and_then(Json::as_str) {
@@ -966,11 +961,10 @@ impl App {
             }
             json!({"contents":[{"uri":uri,"mimeType":"application/json","text":serde_json::to_string_pretty(&doc).unwrap_or_default(),"annotations":{"audience":["assistant"]}}]})
         };
-        if let Some(no) = get.get("key").and_then(|k| k.get("no")).and_then(Json::as_u64) {
-            if let Some(doc) = u32::try_from(no).ok().and_then(|n| self.application_doc(n)) {
+        if let Some(no) = get.get("key").and_then(|k| k.get("no")).and_then(Json::as_u64)
+            && let Some(doc) = u32::try_from(no).ok().and_then(|n| self.application_doc(n)) {
                 return Ok(wrap(doc));
             }
-        }
         match self.carrier.rpc("get", &get).await {
             Ok(Ok(v)) => Ok(wrap(v)),
             Ok(Err(_)) => Err(not_found(uri, modern)),
@@ -1017,11 +1011,10 @@ impl App {
         let sub = Some(key.clone());
         let mut agreed = Vec::new();
         for uri in n.get("resourceSubscriptions").and_then(Json::as_array).cloned().unwrap_or_default() {
-            if let Some(u) = uri.as_str() {
-                if self.subscribe(u, sub.clone(), true).await.is_ok() {
+            if let Some(u) = uri.as_str()
+                && self.subscribe(u, sub.clone(), true).await.is_ok() {
                     agreed.push(json!(u));
                 }
-            }
             if self.reqs.lock().await.cancelled.contains(&key) {
                 break;
             }
@@ -1155,13 +1148,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' {
-            if let (Some(h), Some(l)) = (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
                 out.push(h << 4 | l);
                 i += 3;
                 continue;
             }
-        }
         out.push(b[i]);
         i += 1;
     }
@@ -1216,7 +1208,7 @@ fn frames<'a>(ops: &[&'a One]) -> Vec<Vec<&'a One>> {
             bytes = wire::HEADER + 8;
         }
         bytes += o.bytes.len();
-        out.last_mut().map(|f| f.push(*o));
+        if let Some(f) = out.last_mut() { f.push(*o) }
     }
     out
 }

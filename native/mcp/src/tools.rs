@@ -437,11 +437,10 @@ pub fn value_schema(cat: &Catalog, c: &Col) -> Json {
         "json" => json!({}),
         _ => json!({"type":"string"}),
     };
-    if !c.flags.required {
-        if let Some(t) = s.get("type").cloned() {
+    if !c.flags.required
+        && let Some(t) = s.get("type").cloned() {
             s["type"] = json!([t, "null"]);
         }
-    }
     s
 }
 
