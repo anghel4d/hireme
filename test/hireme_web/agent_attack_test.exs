@@ -245,6 +245,68 @@ defmodule HiremeWeb.AgentAttackTest do
     end
   end
 
+  describe "forgery across accounts" do
+    test "a cursor, an op id or a PATCH never carries another account's rows or a private column",
+         %{port: port, session: s, account: a} do
+      other = sign_in()
+
+      their =
+        Repo.with_account(other.account.id, fn ->
+          {[c], []} =
+            run(
+              other.account.id,
+              op(:put, :corporations, %{domain: "zz-theirs.example", name: "Theirs"})
+            )
+
+          c.id
+        end)
+
+      {[_], []} = run(a.id, op(:put, :corporations, %{domain: "aa-mine.example", name: "Mine"}))
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+
+      # A cursor forged to start before their row still pages only this account.
+      forged =
+        Base.url_encode64(JSON.encode!(%{"id" => their - 1, "v" => their - 1}), padding: false)
+
+      case rpc(c, "find", %{"table" => "corporations", "after" => forged}) do
+        {:ok, %{"rows" => rows}} -> refute Enum.any?(rows, &(&1["id"] == their))
+        {:error, %{"code" => code}} -> assert code in ["type", "column"]
+      end
+
+      # Their op id is not this account's: a put with it writes here.
+      Repo.with_account(other.account.id, fn ->
+        run(
+          other.account.id,
+          op(:put, :gym_reps, %{platform: :other, slug: "t", done_on: ~D[2026-10-01]},
+            op_id: 31_337
+          )
+        )
+      end)
+
+      {:ok, _} = rpc(c, "lease.claim", %{})
+
+      assert {:ack, _} =
+               put(
+                 c,
+                 op(:put, :gym_reps, %{platform: :other, slug: "m", done_on: ~D[2026-10-01]},
+                   op_id: 31_337
+                 )
+               )
+
+      # The operator's private narrative never rides a key's PATCH.
+      {[p], []} = run(a.id, op(:put, :profiles, %{slug: "p", name: "P"}))
+      {[_], []} = run(a.id, op(:put, :profiles, %{narrative_private: "secret"}, target: p.id))
+      private = Schema.column(:profiles, "narrative_private").id
+
+      patches =
+        Stream.repeatedly(fn -> WireClient.await(c, :PATCH, 1_000) |> elem(0) end) |> Enum.take(2)
+
+      model = Enum.reduce(patches, %{}, &ingest(&2, :PATCH, &1.body))
+      refute Enum.any?(Map.values(model["profiles"] || %{}), &Map.has_key?(&1, private))
+    end
+  end
+
   describe "provenance and authorship" do
     test "a key cannot write who wrote, where from, when, or the derived columns", %{
       port: port,
@@ -438,8 +500,10 @@ defmodule HiremeWeb.AgentAttackTest do
 
       {_, budget} = Hireme.Security.limits()[:agent_read]
 
+      # Twice the budget and a little: the window is fixed, so a burst
+      # that straddles a minute boundary still meets a refusal.
       refusals =
-        for _ <- 1..(budget + 20), reduce: 0 do
+        for _ <- 1..(2 * budget + 20), reduce: 0 do
           n ->
             case rpc(c, "find", %{"table" => "places", "limit" => 1}) do
               {:ok, _} -> n
@@ -447,7 +511,7 @@ defmodule HiremeWeb.AgentAttackTest do
             end
         end
 
-      assert refusals == 20, "#{budget + 20} reads in a minute, #{refusals} refused"
+      assert refusals >= 20, "#{2 * budget + 20} reads in a burst, #{refusals} refused"
     end
 
     test "connecting over and over is bounded, and does not flood the trail", %{
