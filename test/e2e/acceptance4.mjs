@@ -92,22 +92,25 @@ const browser = await chromium.launch({ executablePath: CHROMIUM, headless: true
 // pages are tall enough for this 20-application fixture's whole board.
 const VIEW = { viewport: { width: 1440, height: 1400 } };
 const ctx = await browser.newContext(VIEW);
-const account = await ctx.newPage();
 const watch = (label, p) => {
   p.on("pageerror", (e) => errors.push(`${label}: ${String(e).slice(0, 200)}`));
   p.on("console", (m) => { if (m.type() === "error") errors.push(`${label} console: ${m.text().slice(0, 200)}`) });
   return p;
 };
-watch("account", account);
+const account = watch("account", await ctx.newPage());
 let secret = "", seeded = [], agent;
 const pages = { account };
-
-await step("sign in (dev)", pages, async () => {
-  await account.goto(`${BASE}/sign-in`);
-  const button = account.locator('form[action="/dev/sign-in"] button');
+const cards = (p) => p.locator("#lens article.app-card").count();
+const signIn = async (p) => {
+  await p.goto(`${BASE}/sign-in`);
+  const button = p.locator('form[action="/dev/sign-in"] button');
   if ((await button.count()) === 0) throw new Error('missing form[action="/dev/sign-in"] button (is this a dev node?)');
   await button.click();
-  await until(async () => !account.url().includes("/sign-in"), "left /sign-in");
+  await until(async () => !p.url().includes("/sign-in"), "left /sign-in");
+};
+
+await step("sign in (dev)", pages, async () => {
+  await signIn(account);
   await until(async () => (await account.locator(".link-open").count()) > 0, ".link-open (the shell's carrier is up)");
   return account.url().replace(BASE, "");
 });
@@ -161,7 +164,7 @@ let cardId = 0, corpId = 0, officeId = 0;
 
 await step("open the desk and world lenses", pages, async () => {
   await desk.goto(`${BASE}/desk`);
-  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "20 article.app-card on the desk");
+  await until(async () => (await cards(desk)) >= 20, "20 article.app-card on the desk");
   // Every column group, empty columns too: the domain is in Identity, the headcount in Size.
   await corps.goto(`${BASE}/world/corporations?cols=all&empty=show`);
   await offices.goto(`${BASE}/world/offices`);
@@ -177,7 +180,7 @@ const typed = "Company";
 await step("type in the desk search", pages, async () => {
   await desk.locator("#desk-search").click();
   await desk.keyboard.type(typed);
-  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "the search keeps the 20 cards");
+  await until(async () => (await cards(desk)) >= 20, "the search keeps the 20 cards");
   for (const p of [desk, corps, offices]) await p.evaluate(() => { window.__acceptance = 1 });
   return `"${typed}"`;
 });
@@ -254,43 +257,50 @@ await step("a reload from the snapshot paints the desk restoring before its card
     watch();
   });
   await desk.reload();
-  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "20 article.app-card after the reload");
+  await until(async () => (await cards(desk)) >= 20, "20 article.app-card after the reload");
   const order = await desk.evaluate(() => globalThis.__order);
   const first = (w) => order.find((x) => x.what === w)?.at;
-  const [fcp, restoring, cards] = [first("first-contentful-paint"), first("restoring"), first("cards")];
+  const [fcp, restoring, cards_] = [first("first-contentful-paint"), first("restoring"), first("cards")];
   if (restoring === undefined) throw new Error(`never painted "Restoring the desk…": ${JSON.stringify(order.slice(0, 8))}`);
-  if (!(cards > restoring)) throw new Error(`restoring at ${restoring} is not before the cards at ${cards}`);
-  if (!(fcp < cards)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards}`);
+  if (!(cards_ > restoring)) throw new Error(`restoring at ${restoring} is not before the cards at ${cards_}`);
+  if (!(fcp < cards_)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards_}`);
   if (errors.length) throw new Error(errors.join(" | "));
-  return `restoring ${restoring.toFixed(1)} ms, first contentful paint ${fcp.toFixed(1)} ms, cards ${cards.toFixed(1)} ms`;
+  return `restoring ${restoring.toFixed(1)} ms, first contentful paint ${fcp.toFixed(1)} ms, cards ${cards_.toFixed(1)} ms`;
 });
 
 // No path leaves the desk on "Restoring the desk…": a fresh page in the same
 // context (the same IndexedDB snapshot) with one of the kernel module's
-// exports replaced, before the page instantiates it, by one that traps. The
-// exports object's properties are read-only, so it is a plain copy, not a
-// Proxy (which may not answer for them).
-async function faulted(fault, { context = ctx, path = "/desk", changing = false } = {}) {
+// exports replaced, before the page instantiates it, by one that traps:
+// always (`changing`: with a new long message each time), or, when `gated`,
+// only while window.__trap is true. The exports object's properties are
+// read-only, so it is a plain copy, not a Proxy (which may not answer for them).
+async function faulted(fault, { context = ctx, path = "/desk", changing = false, gated = false } = {}) {
   const p = await context.newPage();
   p.consoleErrors = [];
   p.on("console", (m) => { if (m.type() === "error") p.consoleErrors.push(m.text()) });
-  await p.addInitScript(({ fault, changing }) => {
+  await p.addInitScript(({ fault, changing, gated }) => {
+    window.__trap = false;
     const real = WebAssembly.instantiate.bind(WebAssembly);
     let n = 0;
     WebAssembly.instantiate = async (m, imports) => {
       if (fault === "ingest") await new Promise((r) => setTimeout(r, 1500)); // frames queue meanwhile
       const out = await real(m, imports);
       const inst = out.instance ?? out;
-      const boom = () => { throw new WebAssembly.RuntimeError(changing ? `boom ${n++} ${"x".repeat(5000)}` : `unreachable (injected in ${fault})`) };
+      const real_ = inst.exports[fault];
+      const boom = (...a) => {
+        if (gated && !window.__trap) return real_(...a);
+        throw new WebAssembly.RuntimeError(changing ? `boom ${n++} ${"x".repeat(5000)}` : `unreachable (injected in ${fault})`);
+      };
       const fake = { exports: { ...inst.exports, [fault]: boom } };
       return out.instance ? { module: out.module, instance: fake } : fake;
     };
-  }, { fault, changing });
+  }, { fault, changing, gated });
   await p.goto(`${BASE}${path}`);
   return p;
 }
 const lensText = async (p) => (await p.locator("#lens").innerText()).replace(/\s+/g, " ");
 const notices = (p) => p.locator(".notices").innerText();
+const noticeCount = (p, text) => p.locator(".notices .notice", { hasText: text }).count();
 
 await step("a view that throws after a restore shows its error line and one notice, never restoring", pages, async () => {
   const p = await faulted("view");
@@ -298,7 +308,7 @@ await step("a view that throws after a restore shows its error line and one noti
     const t = await until(async () => { const x = await lensText(p); return /failed to draw/.test(x) ? x : ""; }, "the lens's error line");
     await sleep(1500);
     if (/Restoring the desk/.test(await lensText(p))) throw new Error("still restoring");
-    const n = await p.locator(".notices .notice", { hasText: "failed to draw" }).count();
+    const n = await noticeCount(p, "failed to draw");
     if (n !== 1) throw new Error(`${n} "failed to draw" notices, not one`);
     if ((await p.locator('nav a[href="/world/corporations"]').count()) !== 1) throw new Error("the nav did not paint");
     return `lens "${t.trim().slice(0, 60)}", one notice, nav painted`;
@@ -310,11 +320,9 @@ await step("focus's derive trapping after a restore paints its failure with one 
   const own = await browser.newContext(VIEW);
   try {
     const p0 = await own.newPage();
-    await p0.goto(`${BASE}/sign-in`);
-    await p0.locator('form[action="/dev/sign-in"] button').click();
-    await until(async () => !p0.url().includes("/sign-in"), "signed in");
+    await signIn(p0);
     await p0.goto(`${BASE}/desk`);
-    await until(async () => (await p0.locator("#lens article.app-card").count()) >= 20, "20 article.app-card");
+    await until(async () => (await cards(p0)) >= 20, "20 article.app-card");
     await sleep(6000); // the snapshot is saved
     const no = (await p0.locator("#lens article.app-card .no").first().textContent()).replace("#", "").trim();
     const p = await faulted("application", { context: own, path: `/focus/${no}` });
@@ -322,7 +330,7 @@ await step("focus's derive trapping after a restore paints its failure with one 
     await sleep(1500);
     const t = await lensText(p);
     if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
-    const n = await p.locator(".notices .notice", { hasText: "focus lens failed" }).count();
+    const n = await noticeCount(p, "focus lens failed");
     if (n !== 1) throw new Error(`${n} focus failure notices, not one`);
     if (!p.consoleErrors.some((x) => x.includes("focus lens failed"))) throw new Error("not logged to the console");
     return `one notice, logged, lens "${t.trim().slice(0, 60)}"`;
@@ -357,40 +365,20 @@ await step("a view throwing a new long message each time raises one clipped noti
   } finally { await p.close() }
 });
 
-// A page whose kernel export `name` traps while window.__trap is true (from
-// the start if `now`): each lens hook (enter, view, after) that runs it must
-// fail into its notice, not out of the frame.
-async function trapping(path, now, name = "application") {
-  const p = await ctx.newPage();
-  await p.addInitScript(([now, name]) => {
-    window.__trap = now;
-    const real = WebAssembly.instantiate.bind(WebAssembly);
-    WebAssembly.instantiate = async (m, imports) => {
-      const out = await real(m, imports);
-      const inst = out.instance ?? out;
-      const real_ = inst.exports[name];
-      const trapped = (...a) => { if (window.__trap) throw new WebAssembly.RuntimeError(`unreachable (injected in ${name})`); return real_(...a) };
-      const fake = { exports: { ...inst.exports, [name]: trapped } };
-      return out.instance ? { module: out.module, instance: fake } : fake;
-    };
-  }, [now, name]);
-  await p.goto(`${BASE}${path}`);
-  return p;
-}
-const cardNo = async () => (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
-
-// Focus's enter resolves its application by number in the replica (kernel lookup, over the
-// ids_ptr export), so that is the export its enter runs: trapped once the desk is drawn.
+// Each lens hook (enter, view, after) that runs a trapping export must fail
+// into its notice, not out of the frame. Focus's enter resolves its
+// application by number in the replica (kernel lookup, over the ids_ptr
+// export), so that is the export its enter runs: trapped once the desk is drawn.
 await step("enter: from a drawn desk to focus with the replica's ids trapping, focus shows its failure and the load notice", pages, async () => {
-  const p = await trapping("/desk", false, "ids_ptr");
+  const p = await faulted("ids_ptr", { gated: true });
   try {
-    await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "the desk drawn");
-    const no = await cardNo();
+    await until(async () => (await cards(p)) >= 20, "the desk drawn");
+    const no = (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
     await p.evaluate(() => { window.__trap = true });
     await p.evaluate((no) => { history.pushState(null, "", `/focus/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
     await until(async () => /focus lens failed to load/.test(await notices(p)), '"focus lens failed to load" notice');
     const t = await lensText(p);
-    if (!/failed to draw/.test(t) || (await p.locator("#lens article.app-card").count()) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
+    if (!/failed to draw/.test(t) || (await cards(p)) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
     return `lens "${t.trim().slice(0, 40)}", load notice`;
   } finally { await p.close() }
 });
@@ -401,7 +389,7 @@ await step("after: the desk's cards failing to fill (card traps) raises the upda
   const p = await faulted("card");
   try {
     await until(async () => /desk lens failed to update/.test(await notices(p)), '"desk lens failed to update" notice');
-    const n = await p.locator("#lens article.app-card").count();
+    const n = await cards(p);
     if (n < 20) throw new Error(`${n} card shells`);
     return `${n} card shells, update notice`;
   } finally { await p.close() }
@@ -411,7 +399,7 @@ await step("the same page, unwrapped, restores and shows its cards", pages, asyn
   const p = await ctx.newPage();
   try {
     await p.goto(`${BASE}/desk`);
-    await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "20 article.app-card");
+    await until(async () => (await cards(p)) >= 20, "20 article.app-card");
     return "20 cards";
   } finally { await p.close() }
 });

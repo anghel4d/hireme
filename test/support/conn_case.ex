@@ -1,9 +1,9 @@
 defmodule HiremeWeb.ConnCase do
   @moduledoc """
   A test that goes through the endpoint. Requests carry an https URL so
-  the `__Host-` cookie is kept between them, and `signed_in/2` puts a
-  session cookie on a conn. A conn that has answered is recycled before
-  the next request: its cookies carry over, as a browser's would.
+  the `__Host-` cookie is kept between them; `signed_in/2` puts a session
+  cookie on a conn; a conn that has answered is recycled before the next
+  request, its cookies carried over as a browser's would be.
   """
 
   use ExUnit.CaseTemplate

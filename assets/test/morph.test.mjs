@@ -17,16 +17,16 @@ test("RFC 3492's sample strings decode (section 7.1)", () => {
   for (const [code, text] of Object.entries(samples)) expect(punyDecode(code)).toBe(text)
 })
 
-test("a host reads in Unicode, label by label", () => {
-  expect(unicodeHost("xn--mller-kva.example")).toBe("müller.example")
-  expect(unicodeHost("jobs.xn--eckwd4c7c.example")).toBe("jobs.ドメイン.example")
-  expect(unicodeHost("plain.example")).toBe("plain.example")
-  // The seed's Vietnamese host is v-i-t + a combining n (U+1DE1): what its punycode says, valid to the URL parser.
-  expect(unicodeHost("xn--vit-nam-ge3c.example")).toBe("vitᷡ-nam.example")
-})
-
-test("in doubt the xn-- form stands", () => {
-  expect(unicodeHost("xn--zz.example")).toBe("xn--zz.example")
-  // A label that would begin with a combining mark is not a host the URL parser accepts.
-  expect(unicodeHost("xn--ab-7tb.example")).toBe("xn--ab-7tb.example")
+test("a host reads in Unicode label by label; in doubt the xn-- form stands", () => {
+  const hosts = {
+    "xn--mller-kva.example": "müller.example",
+    "jobs.xn--eckwd4c7c.example": "jobs.ドメイン.example",
+    "plain.example": "plain.example",
+    // The seed's Vietnamese host is v-i-t + a combining n (U+1DE1): what its punycode says, valid to the URL parser.
+    "xn--vit-nam-ge3c.example": "vitᷡ-nam.example",
+    "xn--zz.example": "xn--zz.example",
+    // A label that would begin with a combining mark is not a host the URL parser accepts.
+    "xn--ab-7tb.example": "xn--ab-7tb.example",
+  }
+  for (const [host, shown] of Object.entries(hosts)) expect(unicodeHost(host)).toBe(shown)
 })

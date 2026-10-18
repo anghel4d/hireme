@@ -73,45 +73,49 @@ defmodule Hireme.McpCase do
   def call(p, method, params) do
     id = System.unique_integer([:positive])
     line(p, %{jsonrpc: "2.0", id: id, method: method, params: params})
-    reply(p, id)
+    lines = lines_until(p, id)
+    # Notifications that arrive while waiting for a reply are kept for `updated/3`.
+    for %{"method" => "notifications/resources/updated", "params" => %{"uri" => uri}} <- lines,
+        do: send(self(), {:updated, uri})
+
+    List.last(lines)
   end
 
-  # Notifications that arrive while waiting for a reply are kept for `updated/3`.
-  defp reply(p, id) do
+  # The next JSON line from the port within `ms`, or `:timeout`.
+  defp next_line(p, ms) do
     receive do
-      {^p, {:data, {:eol, l}}} ->
-        case JSON.decode(l) do
-          {:ok, %{"id" => ^id} = r} ->
-            r
-
-          {:ok, %{"method" => "notifications/resources/updated", "params" => %{"uri" => uri}}} ->
-            send(self(), {:updated, uri})
-            reply(p, id)
-
-          _ ->
-            reply(p, id)
-        end
+      {^p, {:data, {:eol, l}}} -> JSON.decode(l)
     after
-      10_000 -> flunk("no MCP reply to #{id}")
+      ms -> :timeout
+    end
+  end
+
+  @doc "Every line up to and including the reply to `id`, decoded."
+  def lines_until(p, id, acc \\ []) do
+    case next_line(p, 10_000) do
+      {:ok, %{"id" => ^id} = r} -> Enum.reverse([r | acc])
+      {:ok, m} -> lines_until(p, id, [m | acc])
+      :timeout -> flunk("no MCP reply to #{id}")
+      _ -> lines_until(p, id, acc)
     end
   end
 
   @doc "Whether `uri` was announced within `ms`, reading any lines still on the port."
   def updated(p, uri, ms \\ 5_000) do
     receive do
-      {:updated, ^uri} ->
-        true
-
-      {^p, {:data, {:eol, l}}} ->
-        case JSON.decode(l) do
+      {:updated, ^uri} -> true
+    after
+      0 ->
+        case next_line(p, ms) do
           {:ok, %{"method" => "notifications/resources/updated", "params" => %{"uri" => ^uri}}} ->
             true
+
+          :timeout ->
+            false
 
           _ ->
             updated(p, uri, ms)
         end
-    after
-      ms -> false
     end
   end
 
