@@ -150,15 +150,18 @@ defmodule Hireme.Keys do
 
   @doc """
   Change a live key's masks. Widening either mask or granting
-  `may_delete` needs a fresh session; narrowing does not. Any change ends
-  the key's wire sessions with BYE `grants`, so the next HELLO sees the
-  new masks.
+  `may_delete` needs a fresh session; narrowing does not. A change that
+  moves a mask or `may_delete` ends the key's wire sessions with BYE
+  `grants`, so the next HELLO sees the new masks; asking for the masks it
+  already has is a no-op.
   """
   @spec change(Session.t(), Key.t(), masks(), map()) ::
           {:ok, Key.t()} | {:error, :step_up | :masks | :revoked}
   def change(%Session{} = session, %Key{} = key, masks, meta \\ %{}) do
     with true <- live?(key) || {:error, :revoked},
          {:ok, masks} <- masks(masks),
+         # Asking for the masks the key has changes nothing and ends nothing.
+         true <- masks != Map.take(key, [:read_mask, :write_mask, :may_delete]) || {:ok, key},
          widened = widens?(key, masks),
          :ok <- if(widened, do: fresh(session), else: :ok) do
       key =

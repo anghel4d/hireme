@@ -64,6 +64,12 @@ defmodule Hireme.KeysTest do
     assert {:error, :step_up} = Keys.change(s, narrowed, Keys.preset(:read_write))
   end
 
+  test "asking for the masks a key already has ends none of its sessions", %{session: s} do
+    {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_write))
+    assert {:ok, _} = Keys.change(s, key, Keys.preset(:read_write))
+    refute_receive {:bye, {:key, _}, :grants}, 50
+  end
+
   test "masks outside the five domains, or granting nothing, are refused", %{session: s} do
     for bad <- [
           %{read_mask: 32, write_mask: 0},
