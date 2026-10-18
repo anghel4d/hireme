@@ -212,7 +212,7 @@ pub struct Column {
 pub struct Table {
     pub id: u16,
     ids: Vec<u32>,
-    slots: BTreeMap<u32, u32>,
+    slots: std::collections::HashMap<u32, u32>,
     /// Sorted by column id.
     cols: Vec<Column>,
 }
@@ -241,6 +241,14 @@ impl Table {
 
     pub fn has(&self, id: u32) -> bool {
         self.slots.contains_key(&id)
+    }
+
+    /// A u32 column's values in slot order (aligned with `ids`).
+    pub fn u32s(&self, col: u16) -> Option<&[u32]> {
+        match self.column(col).map(|c| &c.data) {
+            Some(Data::U32(v)) => Some(v),
+            _ => None,
+        }
     }
 
     pub fn column(&self, col: u16) -> Option<&Column> {

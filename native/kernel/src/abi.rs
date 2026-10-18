@@ -75,7 +75,7 @@ impl Kernel {
 
     fn moved(&mut self, m: &Moved) {
         if !m.is_empty() {
-            self.board.forget(m);
+            self.board.forget(m, &self.rows);
             self.stale = true;
         }
     }

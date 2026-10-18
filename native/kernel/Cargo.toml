@@ -18,3 +18,8 @@ wire = { path = "../wire" }
 libm = "0.2.16"
 sha2 = { version = "0.11.1", default-features = false }
 serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+
+# `cargo bench -p kernel --bench judge`: judge's bound at a 10k desk.
+[[bench]]
+name = "judge"
+harness = false

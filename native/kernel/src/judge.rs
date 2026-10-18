@@ -502,10 +502,8 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
 fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Result<(), Refusal> {
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
     let Some(seat) = board::seat(t, id) else { return Ok(()) };
-    let hot = board.hot_seats(rows);
-    let cfg = board::config(rows);
-    let ix = heat::Index::new(hot.iter(), ctx.today, &cfg);
-    let v = heat::verdict(&ix, &seat, &[], &cfg);
+    let (ix, cfg) = board.governor(rows, ctx.today);
+    let v = heat::verdict(ix, &seat, &[], cfg);
     if v.allow {
         return Ok(());
     }

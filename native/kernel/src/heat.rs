@@ -321,27 +321,26 @@ impl Class {
 /// The hot seats of an account on one day, each seat's decayed loads
 /// computed once, grouped by company, vendor, tenant and batch, so a
 /// verdict reads only its groups. A group's load is always summed over
-/// its members in index order, the asking seat skipped, then any `kept`
-/// seats: the board, `judge` and `mix` therefore get bit-identical numbers
-/// for the same rows.
-pub struct Index<'a> {
+/// its members in ascending id order, the asking seat skipped, then any
+/// `kept` seats; [`Index::update`] re-sums only the groups a seat leaves
+/// or joins. So an index kept current seat by seat, a fresh one, the
+/// board, `judge` and `mix` all get bit-identical numbers for the same rows.
+pub struct Index {
     today: Day,
-    seats: Vec<&'a Seat>,
-    /// Indexed seat ids, so asking whether a seat is its own peer is a lookup.
-    ids: alloc::collections::BTreeSet<u32>,
-    /// Per seat: its decayed load at the company, vendor and tenant
-    /// half-lives, 0 under the floor.
-    loads: Vec<[f64; 3]>,
-    by_company: BTreeMap<&'a str, Group>,
+    cfg: Config,
+    /// Per hot seat: the seat and its decayed load at the company, vendor
+    /// and tenant half-lives, 0 under the floor.
+    seats: BTreeMap<u32, (Seat, [f64; 3])>,
+    by_company: BTreeMap<String, Group>,
     by_vendor: BTreeMap<Vendor, Group>,
-    by_tenant: BTreeMap<(Vendor, &'a str), Group>,
+    by_tenant: BTreeMap<(Vendor, String), Group>,
     by_batch_vendor: BTreeMap<(u32, Vendor), u32>,
 }
 
 #[derive(Default)]
 struct Group {
-    members: Vec<u32>,
-    /// The sum over every member, in member order.
+    members: alloc::collections::BTreeSet<u32>,
+    /// The sum over every member, in id order.
     total: f64,
 }
 
@@ -349,64 +348,153 @@ const COMPANY: usize = 0;
 const VENDOR: usize = 1;
 const TENANT: usize = 2;
 
-impl<'a> Index<'a> {
-    /// Indexes the seats in hot stages; the rest carry no load.
-    pub fn new(seats: impl IntoIterator<Item = &'a Seat>, today: Day, cfg: &Config) -> Index<'a> {
+/// The group keys a seat belongs to.
+fn keys(s: &Seat) -> (Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>) {
+    let known = s.ats.vendor != Vendor::Unknown;
+    (
+        (!s.key.is_empty()).then(|| s.key.clone()),
+        known.then_some(s.ats.vendor),
+        s.ats.tenant.clone().filter(|_| known).map(|t| (s.ats.vendor, t)),
+        s.batch_id.filter(|_| known).map(|b| (b, s.ats.vendor)),
+    )
+}
+
+impl Index {
+    /// Indexes (a copy of) the seats in hot stages; the rest carry no load.
+    pub fn new<'s>(seats: impl IntoIterator<Item = &'s Seat>, today: Day, cfg: &Config) -> Index {
         let mut ix = Index {
             today,
-            seats: Vec::new(),
-            ids: alloc::collections::BTreeSet::new(),
-            loads: Vec::new(),
+            cfg: cfg.clone(),
+            seats: BTreeMap::new(),
             by_company: BTreeMap::new(),
             by_vendor: BTreeMap::new(),
             by_tenant: BTreeMap::new(),
             by_batch_vendor: BTreeMap::new(),
         };
         for s in seats.into_iter().filter(|s| s.stage.hot()) {
-            let i = ix.seats.len() as u32;
-            let l = loads(s, today, cfg);
-            ix.seats.push(s);
-            ix.loads.push(l);
-            ix.ids.insert(s.id);
-            if !s.key.is_empty() {
-                let g = ix.by_company.entry(&s.key).or_default();
-                g.members.push(i);
-                g.total += l[COMPANY];
-            }
-            if s.ats.vendor != Vendor::Unknown {
-                let g = ix.by_vendor.entry(s.ats.vendor).or_default();
-                g.members.push(i);
-                g.total += l[VENDOR];
-                if let Some(t) = &s.ats.tenant {
-                    let g = ix.by_tenant.entry((s.ats.vendor, t)).or_default();
-                    g.members.push(i);
-                    g.total += l[TENANT];
-                }
-                if let Some(b) = s.batch_id {
-                    *ix.by_batch_vendor.entry((b, s.ats.vendor)).or_default() += 1;
-                }
-            }
+            ix.join(s.clone());
+        }
+        let (c, v, t) = (ix.by_company.keys().cloned().collect::<Vec<_>>(), ix.by_vendor.keys().copied().collect::<Vec<_>>(), ix.by_tenant.keys().cloned().collect::<Vec<_>>());
+        for k in c {
+            ix.resum_company(&k);
+        }
+        for k in v {
+            ix.resum_vendor(k);
+        }
+        for k in t {
+            ix.resum_tenant(&k);
         }
         ix
     }
 
-    /// A group's load for `seat`: the precomputed total when the seat is
-    /// not a member, else the members' sum without it; then `kept`.
+    /// Replaces seat `id` with `seat` (or removes it with `None`); a seat
+    /// that is not hot is removed. Only the groups it left or joined are
+    /// re-summed.
+    pub fn update(&mut self, id: u32, seat: Option<Seat>) {
+        let old = self.leave(id);
+        let new = seat.filter(|s| s.stage.hot()).map(|s| self.join(s));
+        for (c, v, t, _) in [old, new].into_iter().flatten() {
+            if let Some(c) = c {
+                self.resum_company(&c);
+            }
+            if let Some(v) = v {
+                self.resum_vendor(v);
+            }
+            if let Some(t) = t {
+                self.resum_tenant(&t);
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn join(&mut self, s: Seat) -> (Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>) {
+        let k = keys(&s);
+        let id = s.id;
+        let l = loads(&s, self.today, &self.cfg);
+        self.seats.insert(id, (s, l));
+        if let Some(c) = &k.0 {
+            self.by_company.entry(c.clone()).or_default().members.insert(id);
+        }
+        if let Some(v) = k.1 {
+            self.by_vendor.entry(v).or_default().members.insert(id);
+        }
+        if let Some(t) = &k.2 {
+            self.by_tenant.entry(t.clone()).or_default().members.insert(id);
+        }
+        if let Some(bv) = k.3 {
+            *self.by_batch_vendor.entry(bv).or_default() += 1;
+        }
+        k
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn leave(&mut self, id: u32) -> Option<(Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>)> {
+        let (s, _) = self.seats.remove(&id)?;
+        let k = keys(&s);
+        if let Some(c) = &k.0 {
+            self.by_company.get_mut(c).map(|g| g.members.remove(&id));
+        }
+        if let Some(v) = k.1 {
+            self.by_vendor.get_mut(&v).map(|g| g.members.remove(&id));
+        }
+        if let Some(t) = &k.2 {
+            self.by_tenant.get_mut(t).map(|g| g.members.remove(&id));
+        }
+        if let Some(bv) = k.3 {
+            if let Some(n) = self.by_batch_vendor.get_mut(&bv) {
+                *n -= 1;
+            }
+        }
+        Some(k)
+    }
+
+    fn sum(seats: &BTreeMap<u32, (Seat, [f64; 3])>, g: &Group, k: usize, skip: u32) -> f64 {
+        let mut s = 0.0;
+        for m in &g.members {
+            if *m != skip {
+                s += seats.get(m).map_or(0.0, |e| e.1[k]);
+            }
+        }
+        s
+    }
+
+    fn resum_company(&mut self, c: &str) {
+        if let Some(g) = self.by_company.get(c) {
+            let t = Index::sum(&self.seats, g, COMPANY, u32::MAX);
+            self.by_company.get_mut(c).map(|g| g.total = t);
+        }
+    }
+
+    fn resum_vendor(&mut self, v: Vendor) {
+        if let Some(g) = self.by_vendor.get(&v) {
+            let t = Index::sum(&self.seats, g, VENDOR, u32::MAX);
+            self.by_vendor.get_mut(&v).map(|g| g.total = t);
+        }
+    }
+
+    fn resum_tenant(&mut self, k: &(Vendor, String)) {
+        if let Some(g) = self.by_tenant.get(k) {
+            let t = Index::sum(&self.seats, g, TENANT, u32::MAX);
+            self.by_tenant.get_mut(k).map(|g| g.total = t);
+        }
+    }
+
+    /// Whether a seat (by id) is one of the indexed hot seats.
+    pub fn contains(&self, id: u32) -> bool {
+        self.seats.contains_key(&id)
+    }
+
+    pub fn today(&self) -> Day {
+        self.today
+    }
+
+    /// A group's load for `seat`: the total when the seat is not a
+    /// member, else the members' sum without it; then `kept`.
     fn load(&self, g: Option<&Group>, k: usize, seat: &Seat, kept: &[(&Seat, [f64; 3])], same: impl Fn(&Seat) -> bool) -> f64 {
-        // An indexed seat is a member of every group its own fields name.
-        let member = self.ids.contains(&seat.id);
         let mut sum = match g {
             None => 0.0,
-            Some(g) if !member => g.total,
-            Some(g) => {
-                let mut s = 0.0;
-                for &m in &g.members {
-                    if self.seats[m as usize].id != seat.id {
-                        s += self.loads[m as usize][k];
-                    }
-                }
-                s
-            }
+            Some(g) if !g.members.contains(&seat.id) => g.total,
+            Some(g) => Index::sum(&self.seats, g, k, seat.id),
         };
         for (p, l) in kept {
             if p.id != seat.id && same(p) {
@@ -433,12 +521,12 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config) -> Verdict
     let kept: Vec<(&Seat, [f64; 3])> = kept.iter().map(|p| (*p, loads(p, ix.today, cfg))).collect();
     let others = |g: Option<&Group>| -> Vec<&Seat> {
         let mut v: Vec<&Seat> = g
-            .map(|g| g.members.iter().map(|&m| ix.seats[m as usize]).filter(|p| p.id != seat.id).collect())
+            .map(|g| g.members.iter().filter(|&&m| m != seat.id).filter_map(|m| ix.seats.get(m).map(|e| &e.0)).collect())
             .unwrap_or_default();
         v.extend(kept.iter().map(|k| k.0).filter(|p| p.id != seat.id && p.key == seat.key));
         v
     };
-    let company_group = if seat.key.is_empty() { None } else { ix.by_company.get(seat.key.as_str()) };
+    let company_group = if seat.key.is_empty() { None } else { ix.by_company.get(&seat.key) };
     let company_load =
         if seat.key.is_empty() { 0.0 } else { ix.load(company_group, COMPANY, seat, &kept, |p| p.key == seat.key) };
     let company_cap = cfg.cap(seat.size);
@@ -453,7 +541,7 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config) -> Verdict
     let known = vendor != Vendor::Unknown;
     let vendor_load = if known { ix.load(ix.by_vendor.get(&vendor), VENDOR, seat, &kept, |p| p.ats.vendor == vendor) } else { 0.0 };
     let tenant_load = match (&seat.ats.tenant, known) {
-        (Some(t), true) => ix.load(ix.by_tenant.get(&(vendor, t.as_str())), TENANT, seat, &kept, |p| {
+        (Some(t), true) => ix.load(ix.by_tenant.get(&(vendor, t.clone())), TENANT, seat, &kept, |p| {
             p.ats.vendor == vendor && p.ats.tenant.as_ref() == Some(t)
         }),
         _ => 0.0,
@@ -461,7 +549,7 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config) -> Verdict
     let batch_vendor = match seat.batch_id {
         Some(b) if known => {
             let indexed = ix.by_batch_vendor.get(&(b, vendor)).copied().unwrap_or(0);
-            let own = ix.ids.contains(&seat.id) as u32;
+            let own = ix.seats.get(&seat.id).is_some_and(|e| e.0.batch_id == Some(b) && e.0.ats.vendor == vendor) as u32;
             let fresh = kept.iter().filter(|k| k.0.id != seat.id && k.0.batch_id == Some(b) && k.0.ats.vendor == vendor).count() as u32;
             indexed - own + fresh
         }
@@ -525,7 +613,7 @@ fn cooldown(load: f64, increment: f64, cap: f64, half_life: f64, floor: f64) -> 
 /// admitted if the governor allows it against the hot seats and those
 /// already admitted. Returns the admitted ids in order and the deferred
 /// with their verdicts.
-pub fn mix<'a>(candidates: &'a [Seat], ix: &Index<'a>, cfg: &Config) -> (Vec<u32>, Vec<(u32, Verdict)>) {
+pub fn mix(candidates: &[Seat], ix: &Index, cfg: &Config) -> (Vec<u32>, Vec<(u32, Verdict)>) {
     let mut order: Vec<&Seat> = candidates.iter().collect();
     order.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.key.cmp(&b.key)).then(a.id.cmp(&b.id)));
     let mut kept: Vec<&Seat> = Vec::new();
@@ -650,6 +738,43 @@ mod tests {
         assert_eq!(kept, [1, 2]);
         assert_eq!(deferred[0].0, 3);
         assert_eq!(deferred[0].1.reason, Reason::BatchCap);
+    }
+
+    #[test]
+    fn an_index_kept_current_answers_as_a_fresh_one() {
+        let cfg = Config::default();
+        let mut r = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: u64| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r % n
+        };
+        let mk = |id: u32, c: u64, stage: u64, on: u64, url: u64, batch: u64| {
+            let u = alloc::format!("https://jobs.lever.co/t{url}/1");
+            let mut s = seat(id, &alloc::format!("Co{c}"), ["Engineer", "Research Engineer", "SRE"][(c % 3) as usize], &u, crate::pipeline::STAGES[stage as usize], 1000 - on as Day);
+            s.batch_id = (batch > 0).then_some(batch as u32);
+            s
+        };
+        for round in 0..40 {
+            let mut seats: Vec<Seat> = (1..=60).map(|id| mk(id, next(6), next(10), next(200), next(4), next(3))).collect();
+            let mut ix = Index::new(&seats, 1000, &cfg);
+            for _ in 0..80 {
+                let i = next(60) as usize;
+                if next(5) == 0 {
+                    ix.update(seats[i].id, None);
+                    seats[i].stage = Stage::Discovered;
+                } else {
+                    seats[i] = mk(seats[i].id, next(6), next(10), next(200), next(4), next(3));
+                    ix.update(seats[i].id, Some(seats[i].clone()));
+                }
+                let fresh = Index::new(&seats, 1000, &cfg);
+                let probe = mk(999, next(6), 3, 0, next(4), next(3));
+                for s in seats.iter().chain([&probe]) {
+                    assert_eq!(verdict(&ix, s, &[], &cfg), verdict(&fresh, s, &[], &cfg), "round {round} seat {}", s.id);
+                }
+            }
+        }
     }
 
     #[test]

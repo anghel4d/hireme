@@ -109,6 +109,9 @@ pub struct Board {
     /// Every card id in board order.
     order: Vec<u32>,
     config: heat::Config,
+    /// The governor's index of hot seats, for the day and config it was
+    /// built with, kept current as applications move.
+    governor: Option<(Day, heat::Config, heat::Index)>,
 }
 
 fn day(t: &Table, id: u32, c: u16) -> Option<Day> {
@@ -179,17 +182,49 @@ impl Board {
         Board::default()
     }
 
-    /// Forgets what a frame or a write moved, before the next derive.
-    pub fn forget(&mut self, moved: &Moved) {
+    /// Forgets what a frame or a write moved, before the next derive;
+    /// `rows` are the rows after it.
+    pub fn forget(&mut self, moved: &Moved, rows: &Rows) {
         if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
             self.cache.clear();
+            self.governor = None;
             return;
         }
         if let Some((wrote, gone)) = moved.tables.get(&table::APPLICATIONS) {
+            let t = rows.table(table::APPLICATIONS);
             for id in wrote.iter().chain(gone) {
                 self.cache.remove(id);
+                if let Some((_, _, ix)) = self.governor.as_mut() {
+                    let now = t.filter(|t| t.has(*id)).and_then(|t| seat(t, *id));
+                    if ix.contains(*id) || now.as_ref().is_some_and(|s| s.stage.hot()) {
+                        ix.update(*id, now);
+                    }
+                }
             }
         }
+    }
+
+    /// The governor's index for `today`, built from the hot applications
+    /// when missing or stale.
+    pub fn governor(&mut self, rows: &Rows, today: Day) -> (&heat::Index, &heat::Config) {
+        let cfg = config(rows);
+        if !self.governor.as_ref().is_some_and(|g| g.0 == today && g.1 == cfg) {
+            let mut hot: Vec<Seat> = Vec::new();
+            if let Some(t) = rows.table(table::APPLICATIONS) {
+                let stages = t.u32s(A::STAGE).unwrap_or(&[]);
+                for (i, &id) in t.ids().iter().enumerate() {
+                    if stages.get(i).and_then(|v| Stage::from_u8(*v as u8)).is_some_and(Stage::hot) {
+                        if let Some(c) = self.cached(rows, t, id) {
+                            hot.push(c.seat.clone());
+                        }
+                    }
+                }
+            }
+            let ix = heat::Index::new(hot.iter(), today, &cfg);
+            self.governor = Some((today, cfg, ix));
+        }
+        let g = self.governor.as_ref().map(|g| (&g.2, &g.1));
+        g.unwrap_or_else(|| unreachable!())
     }
 
     fn cached(&mut self, rows: &Rows, t: &Table, id: u32) -> Option<&Cached> {
@@ -216,18 +251,6 @@ impl Board {
         self.cache.get(&id)
     }
 
-    /// Seats of the applications in hot stages, from the cache.
-    pub fn hot_seats(&mut self, rows: &Rows) -> Vec<Seat> {
-        let Some(t) = rows.table(table::APPLICATIONS) else { return Vec::new() };
-        let hot: Vec<u32> = t
-            .ids()
-            .iter()
-            .copied()
-            .filter(|&id| t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)).is_some_and(Stage::hot))
-            .collect();
-        hot.into_iter().filter_map(|id| self.cached(rows, t, id).map(|c| c.seat.clone())).collect()
-    }
-
     /// Recomputes every card and the board order.
     pub fn derive(&mut self, rows: &Rows, today: Day) {
         self.config = config(rows);
@@ -241,10 +264,11 @@ impl Board {
         for &id in &ids {
             self.cached(rows, t, id);
         }
+        self.governor(rows, today);
+        let Some((_, _, ix)) = self.governor.as_ref() else { return };
         let live: Vec<&Cached> = ids.iter().filter_map(|id| self.cache.get(id)).collect();
-        let ix = heat::Index::new(live.iter().map(|c| &c.seat), today, &self.config);
         for c in &live {
-            let verdict = heat::verdict(&ix, &c.seat, &[], &self.config);
+            let verdict = heat::verdict(ix, &c.seat, &[], &self.config);
             let class = Class::of(&verdict, &self.config);
             let score = c.stored.unwrap_or(c.suggestion.score);
             self.cards.push(Card {
