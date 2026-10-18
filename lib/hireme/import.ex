@@ -281,6 +281,7 @@ defmodule Hireme.Import do
         }
 
       _ ->
+        name = named(name)
         refusal = %{table: name, row: nil, code: :not_found, data: %{table: name}}
 
         %{
@@ -354,7 +355,7 @@ defmodule Hireme.Import do
     Enum.reduce_while(values, {:ok, []}, fn {name, value}, {:ok, acc} ->
       case Schema.column(table.name, name) do
         nil ->
-          {:halt, {:refused, :column, %{table: table.name, column: name}}}
+          {:halt, {:refused, :column, %{table: table.name, column: named(name)}}}
 
         %{implied: true} ->
           {:halt, {:refused, :column, %{table: table.name, column: name, reason: "implied"}}}
@@ -609,4 +610,9 @@ defmodule Hireme.Import do
 
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
+
+  # A name the pack gave that no schema declares is echoed as given when
+  # short, bounded otherwise.
+  defp named(name) when is_binary(name) and byte_size(name) <= 64, do: name
+  defp named(name), do: brief(name)
 end
