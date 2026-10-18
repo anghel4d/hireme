@@ -1,0 +1,16 @@
+[package]
+name = "nif"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "The kernel inside the BEAM: one resource per account sequencer, for Hireme.Kernel"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+kernel = { path = "../kernel" }
+# Pinned to the Hex package's version (0.38.0), which mix compiles against;
+# the crate's 0.39 has no matching Hex release.
+rustler = "0.38.0"

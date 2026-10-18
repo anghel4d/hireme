@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # A crate joins when its Cargo.toml lands: nif, gate and mcp add themselves.
-members = ["schema", "wire", "kernel", "mcp"]
+members = ["schema", "wire", "kernel", "nif", "mcp"]
 
 [workspace.package]
 edition = "2024"
@@ -12,3 +12,8 @@ publish = false
 [profile.release]
 lto = true
 codegen-units = 1
+strip = true
+
+# kernel.wasm is downloaded by every tab: size over the last few percent of speed.
+[profile.release.package.kernel]
+opt-level = "s"
