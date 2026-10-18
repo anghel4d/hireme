@@ -23,3 +23,10 @@ serde_json = { version = "1.0.154", default-features = false, features = ["alloc
 [[bench]]
 name = "judge"
 harness = false
+
+# `cargo bench -p kernel --bench board`: the board derive at a 10k desk,
+# natively, for profiling; the bound itself is measured under wasm by
+# bench/kernel.mjs.
+[[bench]]
+name = "board"
+harness = false

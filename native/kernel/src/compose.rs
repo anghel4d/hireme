@@ -127,8 +127,8 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
             j
         });
 
-    let card = board.card(id).map(|c| {
-        let mut heat = c.verdict.to_json();
+    let card = board.card(id).zip(board.seat(id)).map(|(c, seat)| {
+        let mut heat = c.verdict.to_json(seat);
         heat["cooldown_days"] = json!(board.cooldown(id));
         json!({
             "score_100": c.score, "stored": c.stored, "band": c.band.name(), "class": c.class.name(),

@@ -135,6 +135,12 @@ fn heat_defers_a_second_seat_until_overridden() {
         o.str(param::heat_override::REASON, "  ");
     });
     assert_eq!(code(k.judge(&blank, &ctx())), refusal::HEAT);
+    // No reason at all is the sequencer's shape refusal, answered alike.
+    let none = op(wire::COMMAND, command::HEAT_OVERRIDE, 2, |o| {
+        o.str(param::heat_override::REASON, "");
+    });
+    let r = k.judge(&none, &ctx()).unwrap_err();
+    assert_eq!((r.code, r.data["missing"][0].as_str()), (refusal::COLUMN, Some("reason")));
     let reason = op(wire::COMMAND, command::HEAT_OVERRIDE, 2, |o| {
         o.str(param::heat_override::REASON, "different org entirely");
     });

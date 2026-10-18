@@ -29,6 +29,58 @@ pub mod rows;
 pub mod score;
 pub mod text;
 
+/// Hash maps for lookups by id or precomputed hash. Nothing iterates one
+/// to produce a result, so the cheap multiply hash (no per-process seed)
+/// costs no determinism.
+pub(crate) mod fx {
+    use core::hash::{BuildHasherDefault, Hasher};
+
+    #[derive(Default)]
+    pub struct Fx(u64);
+
+    impl Hasher for Fx {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            for b in bytes {
+                self.write_u64(*b as u64);
+            }
+        }
+
+        fn write_u8(&mut self, n: u8) {
+            self.write_u64(n as u64);
+        }
+
+        fn write_u32(&mut self, n: u32) {
+            self.write_u64(n as u64);
+        }
+
+        fn write_u64(&mut self, n: u64) {
+            self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+
+        fn write_usize(&mut self, n: usize) {
+            self.write_u64(n as u64);
+        }
+    }
+
+    pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
+
+    /// FNV-1a over bytes: a stable 64-bit name for a string key.
+    pub fn name(parts: &[&[u8]]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for p in parts {
+            for b in *p {
+                h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h = (h ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+}
+
 /// A calendar day as days since 1970-01-01, the schema's `day`.
 pub type Day = i32;
 

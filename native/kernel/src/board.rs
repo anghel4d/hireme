@@ -13,7 +13,6 @@
 //! frame or a write moved; the settings row or the atlas moving
 //! recomputes all of them, since "home" is read from both.
 
-use std::collections::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -102,10 +101,10 @@ impl Scoreboard {
 
 #[derive(Default)]
 pub struct Board {
-    cache: HashMap<u32, Cached>,
+    cache: crate::fx::Map<u32, Cached>,
     cards: Vec<Card>,
     /// Card index by application id.
-    at: HashMap<u32, usize>,
+    at: crate::fx::Map<u32, usize>,
     /// Every card id in board order.
     order: Vec<u32>,
     config: heat::Config,
@@ -319,6 +318,11 @@ impl Board {
     pub fn cooldown(&self, id: u32) -> Option<u32> {
         let (_, _, ix) = self.governor.as_ref()?;
         heat::cooldown(ix, &self.cache.get(&id)?.seat, &[])
+    }
+
+    /// A card's governor seat, as of the last derive.
+    pub fn seat(&self, id: u32) -> Option<&Seat> {
+        self.cache.get(&id).map(|c| &c.seat)
     }
 
     pub fn card(&self, id: u32) -> Option<&Card> {

@@ -173,6 +173,10 @@ pub struct Seat {
     /// The company the seat counts against: its corporation when linked,
     /// else its normalized name.
     pub key: String,
+    /// `key` and the ATS tenant (with its vendor) as 64-bit names, the
+    /// governor's group keys.
+    key_hash: u64,
+    tenant_hash: Option<u64>,
     pub size: Size,
     pub department: Department,
     pub family: Family,
@@ -213,15 +217,20 @@ pub struct SeatIn<'a> {
 impl Seat {
     pub fn new(f: &SeatIn) -> Seat {
         let sent = f.sent || f.stage == Stage::Submitted;
+        let key = f.corporation_id.map_or_else(|| org::company_key(f.company), |c| alloc::format!("\u{1}{c}"));
+        let ats = ats::parse(f.url);
+        let tenant_hash = ats.tenant.as_ref().map(|t| crate::fx::name(&[ats.vendor.name().as_bytes(), t.as_bytes()]));
         Seat {
+            key_hash: crate::fx::name(&[key.as_bytes()]),
+            tenant_hash,
             id: f.id,
             company: String::from(f.company.trim()),
             // A control character no normalized name can contain.
-            key: f.corporation_id.map_or_else(|| org::company_key(f.company), |c| alloc::format!("\u{1}{c}")),
+            key,
             size: org::size(f.company),
             department: org::department(f.role),
             family: org::family(f.role),
-            ats: ats::parse(f.url),
+            ats,
             stage: f.stage,
             hot: f.stage.queued() || (f.stage.after_send() && sent),
             since: if f.stage.after_send() { f.applied_on.or(f.stage_on) } else { f.stage_on },
@@ -268,7 +277,6 @@ pub struct Verdict {
     pub increment: f64,
     pub size: Size,
     pub vendor: Vendor,
-    pub tenant: Option<String>,
     pub vendor_load: f64,
     pub vendor_cap: f64,
     pub tenant_load: f64,
@@ -285,8 +293,10 @@ impl Verdict {
         if self.company_cap > 0.0 { (self.company_load + self.increment) / self.company_cap } else { f64::INFINITY }
     }
 
-    pub fn to_json(&self) -> serde_json::Value {
+    /// The verdict as JSON, with the seat's ATS tenant.
+    pub fn to_json(&self, seat: &Seat) -> serde_json::Value {
         serde_json::json!({
+            "ats_tenant": seat.ats.tenant,
             "allow": self.allow,
             "reason": self.reason.name(),
             "company_load": self.company_load,
@@ -294,7 +304,6 @@ impl Verdict {
             "increment": self.increment,
             "size": self.size.name(),
             "ats_vendor": self.vendor.name(),
-            "ats_tenant": self.tenant,
             "vendor_load": self.vendor_load,
             "vendor_cap": self.vendor_cap,
             "tenant_load": self.tenant_load,
@@ -365,13 +374,13 @@ fn real(x: u64) -> f64 {
 pub struct Index {
     today: Day,
     cfg: Config,
-    seats: BTreeMap<u32, Seat>,
-    by_company: BTreeMap<String, Group>,
-    by_vendor: BTreeMap<Vendor, Group>,
-    by_tenant: BTreeMap<Vendor, BTreeMap<String, Group>>,
+    seats: crate::fx::Map<u32, Seat>,
+    by_company: crate::fx::Map<u64, Group>,
+    by_vendor: crate::fx::Map<Vendor, Group>,
+    by_tenant: crate::fx::Map<u64, Group>,
     /// Queued members per (batch, vendor), with their vendor load: a
     /// member counts toward the batch cap while that load is live.
-    by_batch_vendor: BTreeMap<(u32, Vendor), Group>,
+    by_batch_vendor: crate::fx::Map<(u32, Vendor), Group>,
 }
 
 #[derive(Default)]
@@ -401,15 +410,15 @@ const VENDOR: usize = 1;
 const TENANT: usize = 2;
 
 #[allow(clippy::type_complexity)]
-type Keys = (Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>);
+type Keys = (Option<u64>, Option<Vendor>, Option<u64>, Option<(u32, Vendor)>);
 
 /// The group keys a seat belongs to; a batch counts only queued seats.
 fn keys(s: &Seat) -> Keys {
     let known = s.ats.vendor != Vendor::Unknown;
     (
-        (!s.key.is_empty()).then(|| s.key.clone()),
+        (!s.key.is_empty()).then_some(s.key_hash),
         known.then_some(s.ats.vendor),
-        s.ats.tenant.clone().filter(|_| known).map(|t| (s.ats.vendor, t)),
+        s.tenant_hash.filter(|_| known),
         s.batch_id.filter(|_| known && s.stage.queued()).map(|b| (b, s.ats.vendor)),
     )
 }
@@ -430,11 +439,11 @@ impl Index {
         let mut ix = Index {
             today,
             cfg: cfg.clone(),
-            seats: BTreeMap::new(),
-            by_company: BTreeMap::new(),
-            by_vendor: BTreeMap::new(),
-            by_tenant: BTreeMap::new(),
-            by_batch_vendor: BTreeMap::new(),
+            seats: Default::default(),
+            by_company: Default::default(),
+            by_vendor: Default::default(),
+            by_tenant: Default::default(),
+            by_batch_vendor: Default::default(),
         };
         for s in seats.into_iter().filter(|s| s.hot) {
             ix.join(s.clone());
@@ -463,8 +472,8 @@ impl Index {
         if let Some(v) = v.filter(|_| l[VENDOR] > 0) {
             self.by_vendor.entry(v).or_default().put(id, l[VENDOR]);
         }
-        if let Some((v, t)) = t.filter(|_| l[TENANT] > 0) {
-            self.by_tenant.entry(v).or_default().entry(t).or_default().put(id, l[TENANT]);
+        if let Some(t) = t.filter(|_| l[TENANT] > 0) {
+            self.by_tenant.entry(t).or_default().put(id, l[TENANT]);
         }
         if let Some(bv) = bv.filter(|_| l[VENDOR] > 0) {
             self.by_batch_vendor.entry(bv).or_default().put(id, l[VENDOR]);
@@ -481,7 +490,7 @@ impl Index {
         if let Some(g) = v.and_then(|v| self.by_vendor.get_mut(&v)) {
             g.take(id);
         }
-        if let Some(g) = t.and_then(|(v, t)| self.by_tenant.get_mut(&v)?.get_mut(&t)) {
+        if let Some(g) = t.and_then(|t| self.by_tenant.get_mut(&t)) {
             g.take(id);
         }
         if let Some(g) = bv.and_then(|bv| self.by_batch_vendor.get_mut(&bv)) {
@@ -570,7 +579,7 @@ fn check(ix: &Index, seat: &Seat, kept: &[&Seat], at: At) -> Check {
     let kept_load = |same: &dyn Fn(&Seat) -> bool, k: usize| -> u64 { kept.iter().filter(|p| same(p)).fold(0u64, |a, _| a.saturating_add(fresh[k])) };
 
     let has_key = !seat.key.is_empty();
-    let company_group = if has_key { ix.by_company.get(&seat.key) } else { None };
+    let company_group = if has_key { ix.by_company.get(&seat.key_hash) } else { None };
     let same_company = |p: &Seat| has_key && p.key == seat.key;
     let company_load = real(ix.load(company_group, COMPANY, seat, at).saturating_add(kept_load(&same_company, COMPANY)));
     // Penalties come from live peers only: a peer under the floor no
@@ -604,7 +613,7 @@ fn check(ix: &Index, seat: &Seat, kept: &[&Seat], at: At) -> Check {
     let tenant_load = match (&seat.ats.tenant, known) {
         (Some(t), true) => {
             let same = |p: &Seat| p.ats.vendor == vendor && p.ats.tenant.as_ref() == Some(t);
-            let g = ix.by_tenant.get(&vendor).and_then(|m| m.get(t.as_str()));
+            let g = seat.tenant_hash.and_then(|h| ix.by_tenant.get(&h));
             real(ix.load(g, TENANT, seat, at).saturating_add(kept_load(&same, TENANT)))
         }
         _ => 0.0,
@@ -652,7 +661,6 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Verdict {
         increment: c.increment,
         size: seat.size,
         vendor: seat.ats.vendor,
-        tenant: seat.ats.tenant.clone(),
         vendor_load: c.vendor_load,
         vendor_cap: cfg.ats_vendor_cap,
         tenant_load: c.tenant_load,
@@ -821,11 +829,11 @@ mod tests {
         let cfg = Config::default();
         let url = "https://boards.greenhouse.io/acme/jobs/1";
         let hot: Vec<Seat> =
-            (1..=3).map(|i| seat(i, "Corp", "Engineer", url, Stage::Submitted, 0)).map(|mut s| { s.key = alloc::format!("c{}", s.id); s }).collect();
+            (1..=3).map(|i| seat(i, &alloc::format!("Corp{i}"), "Engineer", url, Stage::Submitted, 0)).collect();
         let ix = Index::new(&hot, 0, &cfg);
         let v = verdict(&ix, &seat(10, "Other", "Engineer", url, Stage::Gated, 0), &[]);
         assert_eq!(v.reason, Reason::TenantCap);
-        assert_eq!(v.tenant.as_deref(), Some("acme"));
+        assert_eq!(hot[0].ats.tenant.as_deref(), Some("acme"));
 
         let cfg = Config { ats_batch_cap: 2.0, ..Config::default() };
         let mk = |id: u32, t: &str| {

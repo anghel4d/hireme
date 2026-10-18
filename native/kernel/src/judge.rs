@@ -426,6 +426,20 @@ fn with_note(json: Option<&str>, stage: Stage, note: &str) -> String {
 }
 
 fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
+    // A required param that is absent (an empty string is a null) is the
+    // sequencer's shape refusal; answering it the same way keeps a
+    // prediction and its verdict one thing.
+    if let Some(def) = schema::command_def(op.table) {
+        let missing: Vec<&str> = def
+            .params
+            .iter()
+            .filter(|p| p.required && op.cell(p.id).is_none_or(|c| Val::from_wire(c.value()).is_none()))
+            .map(|p| p.name)
+            .collect();
+        if !missing.is_empty() {
+            return refuse(refusal::COLUMN, json!({"command": def.name, "missing": missing}));
+        }
+    }
     match op.table {
         command::STAGE => {
             let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(op.target)) else {
@@ -539,7 +553,7 @@ fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Re
         return Ok(());
     }
     v.cooldown_days = heat::cooldown(ix, &seat, &[]);
-    let mut data = v.to_json();
+    let mut data = v.to_json(&seat);
     data["to"] = Json::String(to.name().into());
     Err(Refusal { code: refusal::HEAT, data })
 }
