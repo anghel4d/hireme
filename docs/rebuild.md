@@ -576,7 +576,9 @@ New: masks enforced on BOOT, PATCH and every RPC; `human_only` commands;
 `BYE grants`; server-derived source hosts; citations and trusted hosts out
 of every mask; an audit row per agent op batch within a per-account activity
 budget, past which activity is coalesced into one counted row per window
-(each key's first connection from an address is always its own row); raw
+(each key's first connection from an address is always its own row); the
+node has a ceiling on activity rows per window across all accounts, and
+past it each account still keeps a floor of 100 rows per window; raw
 text marked untrusted
 in MCP replies; an operator revoke for leases and sessions; the carrier
 timeout written down.
