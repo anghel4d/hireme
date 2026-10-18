@@ -351,6 +351,63 @@ await step("a view throwing a new long message each time raises one clipped noti
   } finally { await p.close() }
 });
 
+// A page whose kernel `application` export traps while window.__trap is true
+// (from the start if `now`): each lens hook (enter, refresh, after) that runs
+// it must fail into its notice, not out of the frame.
+async function trapping(path, now) {
+  const p = await ctx.newPage();
+  await p.addInitScript((now) => {
+    window.__trap = now;
+    const real = WebAssembly.instantiate.bind(WebAssembly);
+    WebAssembly.instantiate = async (m, imports) => {
+      const out = await real(m, imports);
+      const inst = out.instance ?? out;
+      const app = inst.exports.application;
+      const application = (...a) => { if (window.__trap) throw new WebAssembly.RuntimeError("unreachable (injected in application)"); return app(...a) };
+      const fake = { exports: { ...inst.exports, application } };
+      return out.instance ? { module: out.module, instance: fake } : fake;
+    };
+  }, now);
+  await p.goto(`${BASE}${path}`);
+  return p;
+}
+const cardNo = async () => (await desk.locator(`article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
+
+await step("enter: from a drawn desk to focus with application trapping, focus shows its failure and the load notice", pages, async () => {
+  const p = await trapping("/desk", true);
+  try {
+    await until(async () => (await p.locator("article.app-card").count()) >= 20, "the desk drawn");
+    const no = await cardNo();
+    await p.evaluate((no) => { history.pushState(null, "", `/focus/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
+    await until(async () => /focus lens failed to load/.test(await notices(p)), '"focus lens failed to load" notice');
+    const t = await lensText(p);
+    if (!/failed to draw/.test(t) || (await p.locator("article.app-card").count()) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
+    return `lens "${t.trim().slice(0, 40)}", load notice`;
+  } finally { await p.close() }
+});
+
+await step("refresh: a PATCH while focus's application traps raises the refresh notice", pages, async () => {
+  const no = await cardNo();
+  const p = await trapping(`/focus/${no}`, false);
+  try {
+    await until(async () => /Draft ready|draft ready/i.test(await lensText(p)), "focus drawn");
+    await p.evaluate(() => { window.__trap = true });
+    await agent.call("put", { table: "applications", id: cardId, set: { role: "Role rewritten" } });
+    await until(async () => /focus lens failed to refresh/.test(await notices(p)), '"focus lens failed to refresh" notice');
+    return "refresh notice on the PATCH";
+  } finally { await p.close() }
+});
+
+await step("after: the desk's cards failing to fill (card traps) raises the update notice, the board drawn", pages, async () => {
+  const p = await faulted("card");
+  try {
+    await until(async () => /desk lens failed to update/.test(await notices(p)), '"desk lens failed to update" notice');
+    const n = await p.locator("article.app-card").count();
+    if (n < 20) throw new Error(`${n} card shells`);
+    return `${n} card shells, update notice`;
+  } finally { await p.close() }
+});
+
 await step("the same page, unwrapped, restores and shows its cards", pages, async () => {
   const p = await ctx.newPage();
   try {
