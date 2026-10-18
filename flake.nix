@@ -143,6 +143,9 @@
             # The store as a disk image, not a virtiofs share (see qemuWaiting).
             virtualisation.mountHostNixStore = false;
             virtualisation.useNixStoreImage = true;
+            # An overlay over the read-only image, so nix can register the
+            # closure and make its .links at boot.
+            virtualisation.writableStore = true;
             # The driver's own shares (xchg, shared) are virtiofs still.
             virtualisation.qemu.package = lib.mkForce qemuWaiting;
             environment.systemPackages = [
