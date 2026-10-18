@@ -204,9 +204,6 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     match op.table {
         table::APPLICATIONS => {
             let apps = rows.table(table::APPLICATIONS);
-            if op.target != 0 && !apps.is_some_and(|t| t.has(op.target)) {
-                return not_found(op.table, op.target);
-            }
             if op.target == 0 {
                 let stage = Stage::Discovered;
                 row.set(A::STAGE, u(stage as u32));
@@ -247,9 +244,6 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 row.set(col::cv_lineages::GENERATION, u(1));
                 row.set(col::cv_lineages::OPENED_ON, day_val(ctx.today));
             } else if let Some(t) = t {
-                if !t.has(op.target) {
-                    return not_found(op.table, op.target);
-                }
                 // Turning rewrites back on would let a later application
                 // reword what an earlier one sent.
                 let was = t.u32(op.target, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
@@ -346,10 +340,8 @@ fn lineage_of<'r>(rows: &'r Rows, board: &mut Board, corporation: u32) -> Option
 
 fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
     if op.table == table::CV_OVERLAYS {
-        let Some(t) = rows.table(table::CV_OVERLAYS).filter(|t| t.has(op.target)) else {
-            return not_found(op.table, op.target);
-        };
-        if let Some(lid) = t.u32(op.target, col::cv_overlays::LINEAGE_ID)
+        // write::drop_checks found the row.
+        if let Some(lid) = rows.table(table::CV_OVERLAYS).and_then(|t| t.u32(op.target, col::cv_overlays::LINEAGE_ID))
             && let Some(l) = rows.table(table::CV_LINEAGES).filter(|l| l.has(lid))
         {
             let opened = l.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;

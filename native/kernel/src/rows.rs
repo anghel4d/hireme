@@ -9,8 +9,7 @@
 //! nothing and the board orders rows itself.
 //!
 //! Nulls are the codec's sentinels: `u32::MAX`, `i64::MIN`, NaN, an empty
-//! string (null and empty are one thing on the wire), a deferred length
-//! of `u32::MAX`, an empty list.
+//! string (null and empty are one thing on the wire), an empty list.
 //!
 //! **Base ⊕ pending.** A client applies its own op before the server has
 //! judged it. Every pending op's writes are recorded with what they
