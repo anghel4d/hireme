@@ -136,13 +136,14 @@ defmodule Hireme.Audit do
   # change still reaches the account lens (at most once a second per
   # account, `Coalescer.wake/1`).
   def moved(account_id) do
-    Store.write(fn ->
-      Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
-        skip_account: true
-      )
-    end)
-
+    Store.write(fn -> cursor(account_id) end)
     changed(account_id)
+  end
+
+  defp cursor(account_id) do
+    Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
+      skip_account: true
+    )
   end
 
   @doc false
@@ -192,10 +193,7 @@ defmodule Hireme.Audit do
         # move it too.
         if account_id && not quiet? do
           _ = id
-
-          Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
-            skip_account: true
-          )
+          cursor(account_id)
         end
       end)
 
@@ -366,19 +364,24 @@ defmodule Hireme.Audit.Coalescer do
 
   defp seen(account_id, budget, w, what, value) do
     key = {what, account_id, budget, w, Hireme.Security.clip(value, 200)}
+    track(key, 1, System.unique_integer([:monotonic]))
+  end
 
-    # {key, events, first seen}: a row names the values with the most events.
-    # A flush may take the key between any two steps here; none raises for it.
+  # {key, events, first seen}: a row names the values with the most events.
+  # A value already tracked counts on; a new one is tracked under the cap,
+  # else only counted. A flush may take the key between any two steps here;
+  # none raises for it.
+  defp track({what, account_id, budget, w, _} = key, n, first) do
     cond do
-      bump(key, 1) ->
+      bump(key, n) ->
         true
 
       :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
           @tracked ->
-        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) or bump(key, 1)
+        :ets.insert_new(@table, {key, n, first}) or bump(key, n)
 
       true ->
-        :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, 1, {nil, 0})
+        :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, n, {nil, 0})
     end
   end
 
@@ -545,21 +548,7 @@ defmodule Hireme.Audit.Coalescer do
         elem(key, 0) != :tracked,
         do: :ets.update_counter(@table, key, n, {key, 0})
 
-    for {key, n, first} <- values, do: put_back(key, n, first)
-  end
-
-  defp put_back({what, account_id, budget, w, _} = key, n, first) do
-    cond do
-      bump(key, n) ->
-        true
-
-      :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
-          @tracked ->
-        :ets.insert_new(@table, {key, n, first}) or bump(key, n)
-
-      true ->
-        :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, n, {nil, 0})
-    end
+    for {key, n, first} <- values, do: track(key, n, first)
   end
 
   # The values with the most events, the first seen first among equals, so

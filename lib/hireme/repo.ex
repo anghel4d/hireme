@@ -8,9 +8,8 @@ defmodule Hireme.Repo do
   or key looked up by its secret before the account is known) pass
   `skip_account: true` on purpose.
 
-  Inserts are not filtered by Ecto; a row the desk owns gets its account
-  from `Hireme.Rows` changesets, which stamp the process's account and
-  refuse a row with none.
+  Inserts are not filtered by Ecto: a writer stamps the account on the row
+  it inserts (`account_id/0`).
   """
 
   use Ecto.Repo, otp_app: :hireme, adapter: Ecto.Adapters.SQLite3

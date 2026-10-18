@@ -266,44 +266,10 @@ defmodule Hireme.Schema.Json do
   defp json?(v), do: is_binary(v) or is_number(v) or is_atom(v)
 end
 
-defmodule Hireme.Rows do
-  @moduledoc """
-  One Ecto row module per stored table, generated from the declaration:
-  `Hireme.Rows.Application` for `applications`, `Hireme.Rows.ApiKey` for
-  `api_keys`. Each has `changeset/2`, which casts every declared column,
-  requires the `!` ones and, on a table an account owns, stamps the
-  process's account (`Hireme.Repo.put_account/1`) on a row that has none.
-  Domain checks are the sequencer's, not the changeset's.
-  """
-
-  import Ecto.Changeset
-
-  @doc false
-  def changeset(row, attrs, table) do
-    declared = for c <- table.cols, not c.implied, do: String.to_atom(c.name)
-
-    required =
-      for c <- table.cols, not c.implied, c.required, do: String.to_atom(c.name)
-
-    row
-    |> cast(attrs, declared)
-    |> validate_required(required)
-    |> tenant(table)
-  end
-
-  defp tenant(cs, %{global: true}), do: cs
-
-  defp tenant(cs, table) do
-    cs =
-      if get_field(cs, :account_id),
-        do: cs,
-        else: put_change(cs, :account_id, Hireme.Repo.account_id())
-
-    cs = if table.account_optional, do: cs, else: validate_required(cs, [:account_id])
-    foreign_key_constraint(cs, :account_id)
-  end
-end
-
+# One Ecto row module per stored table, generated from the declaration:
+# `Hireme.Rows.Application` for `applications`, `Hireme.Rows.ApiKey` for
+# `api_keys`. Domain checks are the kernel's and the sequencer's; a row
+# module only maps the columns.
 for table <- Hireme.Schema.tables(), table.residency in [:resident, :server] do
   fields =
     for col <- table.cols, col.name not in ~w(id inserted_at updated_at) do
@@ -341,10 +307,6 @@ for table <- Hireme.Schema.tables(), table.residency in [:resident, :server] do
 
       @doc "The declared table this row is."
       def __table__, do: Hireme.Schema.table(unquote(id))
-
-      @doc "Cast every declared column; see `Hireme.Rows`."
-      def changeset(row \\ %__MODULE__{}, attrs),
-        do: Hireme.Rows.changeset(row, attrs, __table__())
     end
 
   Module.create(Hireme.Schema.row(table.name), body, Macro.Env.location(__ENV__))

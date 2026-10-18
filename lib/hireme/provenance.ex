@@ -87,49 +87,6 @@ defmodule Hireme.Provenance do
        do: h
   end
 
-  @fixed ~w(url host publisher title kind)a
-
-  @doc """
-  A source's identity is fixed once written: its URL (and so its host),
-  publisher, title and kind. Every citation of it says what it said when
-  cited, so a later writer cannot retarget or relabel it; a new claim is a
-  new source. Only its retrieval (`retrieved_at`, `doc`) moves.
-  """
-  def source_change(nil, %{"url" => url}) when is_binary(url) and byte_size(url) > @url_max,
-    do:
-      {:refused, :type,
-       %{
-         table: "sources",
-         column: "url",
-         reason: "a source URL is at most #{@url_max} bytes",
-         max: @url_max
-       }}
-
-  def source_change(nil, %{"url" => url}) do
-    if host(url),
-      do: :ok,
-      else:
-        {:refused, :type,
-         %{table: "sources", column: "url", reason: "an http(s) URL on a real hostname"}}
-  end
-
-  def source_change(nil, _values), do: :ok
-
-  def source_change(row, values) do
-    case Enum.find(
-           @fixed,
-           &(Map.has_key?(values, Atom.to_string(&1)) and
-               values[Atom.to_string(&1)] != Map.get(row, &1))
-         ) do
-      nil ->
-        :ok
-
-      col ->
-        {:refused, :column,
-         %{table: "sources", column: col, reason: "a source's identity is fixed once written"}}
-    end
-  end
-
   @doc """
   The source an op names in its `source` cell: an existing source's id, or
   a URL, found by its natural key or created with its host derived.
@@ -316,11 +273,17 @@ defmodule Hireme.Provenance do
   defp trust_host(host, note, meta) do
     now = Store.now()
 
+    row = %TrustedHost{
+      account_id: Repo.account_id(),
+      host: host,
+      note: if(note == "", do: nil, else: note),
+      rev: 1,
+      inserted_at: now,
+      updated_at: now
+    }
+
     Store.write(fn ->
-      %TrustedHost{}
-      |> TrustedHost.changeset(%{host: host, note: note})
-      |> Ecto.Changeset.change(rev: 1, inserted_at: now, updated_at: now)
-      |> Repo.insert(
+      Repo.insert(row,
         on_conflict: {:replace, [:note, :updated_at]},
         conflict_target: [:account_id, :host]
       )
