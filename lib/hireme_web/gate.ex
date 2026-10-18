@@ -145,7 +145,7 @@ defmodule HiremeWeb.Gate do
     path = opts[:socket] && to_string(opts[:socket])
 
     cond do
-      Application.get_env(:hireme, :gate, true) == false or is_nil(path) ->
+      is_nil(path) ->
         :ignore
 
       held?(path) ->

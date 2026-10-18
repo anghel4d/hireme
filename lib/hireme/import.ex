@@ -248,10 +248,14 @@ defmodule Hireme.Import do
 
     with {:ok, cells} <- cells(account_id, table, values, mode),
          {:ok, key} <- natural(table, values),
-         {:ok, existing} <- existing(account_id, table, key, cells),
+         unique = if(key, do: nil, else: unique(table, values)),
+         {:ok, existing} <- existing(account_id, table, key || unique, cells),
          {:ok, extra, expect_rev} <- provenance(table, pack, directives, cells, existing) do
+      # A natural key is the sequencer's (a keyed put); a row named by a
+      # unique key alone updates the row that holds it.
       flags = if key, do: @keyed, else: 0
-      raw = Codec.encode_op({op_id(), :put, flags, table.id, 0, expect_rev, cells ++ extra})
+      target = if(unique && existing, do: existing.id, else: 0)
+      raw = Codec.encode_op({op_id(), :put, flags, table.id, target, expect_rev, cells ++ extra})
       {:ok, op, ""} = Codec.op(raw)
       {:ok, op}
     end
@@ -368,6 +372,12 @@ defmodule Hireme.Import do
       nil -> {:ok, nil}
       k -> {:ok, k}
     end
+  end
+
+  # The first unique key (or unique column) whose every column the row names.
+  defp unique(table, values) do
+    keys = table.uniques ++ for(c <- table.cols, c.unique, do: %{cols: [c.name]})
+    Enum.find(keys, fn k -> Enum.all?(k.cols, &Map.has_key?(values, &1)) end)
   end
 
   defp existing(_account_id, _table, nil, _cells), do: {:ok, nil}
