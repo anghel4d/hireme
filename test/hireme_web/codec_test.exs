@@ -17,6 +17,30 @@ defmodule HiremeWeb.Wire.CodecTest do
              "0900010002000000feff0100080000000400000005000000"
   end
 
+  test "a day is days since 0000-01-01 to 9999-12-31, both ways, and past it a type refusal" do
+    for d <- [
+          ~D[0000-01-01],
+          ~D[1897-01-01],
+          ~D[1969-12-31],
+          ~D[1970-01-01],
+          Date.utc_today(),
+          ~D[9999-12-31]
+        ] do
+      n = Codec.day_to_wire(d)
+      assert n in 0..Hireme.Schema.day_max()
+      assert Codec.day_from_wire(n) == d
+      assert {:ok, ^d} = Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, n})
+    end
+
+    assert Codec.day_to_wire(~D[0000-01-01]) == 0
+    assert Codec.day_to_wire(~D[9999-12-31]) == Hireme.Schema.day_max()
+    assert Codec.day_to_wire(Date.new!(10_000, 1, 1)) == nil
+    assert Codec.day_to_wire(Date.new!(-1, 12, 31)) == nil
+
+    assert {:error, :type} =
+             Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, Hireme.Schema.day_max() + 1})
+  end
+
   test "an OPS body holds at most 256 ops; 257 is refused whole" do
     op = {7, :put, 0, 3, 0, nil, [{8, 1, 5}]}
 
@@ -38,7 +62,7 @@ defmodule HiremeWeb.Wire.CodecTest do
     assert {:ok, op, ""} = Codec.op(raw)
     assert op.cells == [{8, 1, 5}, {9, 2, "x"}, {10, 3, -2}, {11, 4, 1.5}, {12, 0, nil}]
     assert {:error, :type} = Codec.cell_to_value(%{type: :u32, wire: 1}, {8, 1, 0xFFFF_FFFF})
-    assert {:error, :type} = Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, 2_932_897})
+    assert {:error, :type} = Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, 3_652_425})
     assert {:ok, nil} = Codec.cell_to_value(%{type: :str, wire: 2}, {8, 2, ""})
   end
 

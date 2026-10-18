@@ -26,8 +26,6 @@ defmodule HiremeWeb.Wire.Codec do
   @max_up 16 <<< 20
   @max_ops 256
   @max_inflated 256 <<< 20
-  @epoch ~D[1970-01-01]
-  @last_day 2_932_896
 
   @t_null 0
   @t_u32 1
@@ -454,9 +452,13 @@ defmodule HiremeWeb.Wire.Codec do
   defp to_value(%{type: :u8}, v) when v in 0..255, do: {:ok, v}
   defp to_value(%{type: :bool}, 0), do: {:ok, false}
   defp to_value(%{type: :bool}, 1), do: {:ok, true}
-  # Days run to 9999-12-31, the last date SQLite and Ecto read back.
-  defp to_value(%{type: :day}, v) when is_integer(v) and v <= @last_day,
-    do: {:ok, Date.add(@epoch, v)}
+
+  defp to_value(%{type: :day}, v) when is_integer(v) do
+    case day_from_wire(v) do
+      nil -> {:error, :type}
+      d -> {:ok, d}
+    end
+  end
 
   defp to_value(%{type: :time}, v) when is_integer(v), do: {:ok, DateTime.from_unix!(v)}
 
@@ -503,10 +505,26 @@ defmodule HiremeWeb.Wire.Codec do
     ArgumentError -> nil
   end
 
+  @doc """
+  A date as a wire `day`: days since 0000-01-01, proleptic Gregorian
+  (`Date.to_gregorian_days/1`), from 0 to `Schema.day_max/0` (9999-12-31);
+  nil outside it. Every day conversion in Elixir goes through this pair.
+  """
+  def day_to_wire(%Date{} = d) do
+    n = Date.to_gregorian_days(d)
+    if n in 0..Schema.day_max(), do: n
+  end
+
+  @doc "A wire `day` as a date; nil outside 0..`Schema.day_max/0`."
+  def day_from_wire(n) when is_integer(n) and n >= 0,
+    do: if(n <= Schema.day_max(), do: Date.from_gregorian_days(n))
+
+  def day_from_wire(_), do: nil
+
   @doc "A column's Elixir value as its wire value (the kernel's and BOOT's form)."
   def to_wire(_col, nil), do: nil
   def to_wire(%{type: :bool}, v), do: bool(v)
-  def to_wire(%{type: :day}, %Date{} = d), do: Date.diff(d, @epoch)
+  def to_wire(%{type: :day}, %Date{} = d), do: day_to_wire(d)
   def to_wire(%{type: :time}, %DateTime{} = t), do: DateTime.to_unix(t)
 
   def to_wire(%{type: :time}, %NaiveDateTime{} = t),

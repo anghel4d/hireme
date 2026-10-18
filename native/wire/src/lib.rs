@@ -118,7 +118,7 @@ pub const HEADER: usize = 16;
 
 /// Bumped whenever a byte layout below changes, so the schema's `wire_hash`
 /// (which folds it in) refuses a client built against another layout.
-pub const LAYOUT: u16 = 2;
+pub const LAYOUT: u16 = 3;
 const _: () = assert!(
     LAYOUT == schema::LAYOUT,
     "a byte-layout change bumps `layout` in schema/hireme.schema too"

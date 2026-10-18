@@ -110,6 +110,30 @@ defmodule Hireme.SequencerTest do
     refute Map.has_key?(JSON.decode!(own.data), "reason_default")
   end
 
+  test "a day before 1970 is written, cited and read back: an office opened in 1897", %{
+    account: a
+  } do
+    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "old.example", name: "Old"}))
+    {[place], []} = run(a.id, op(:put, :places, %{kind: :city, name: "Old Town"}))
+
+    {[office], []} =
+      run(
+        a.id,
+        op(:put, :offices, %{
+          corporation_id: corp.id,
+          place_id: place.id,
+          kind: :hq,
+          opened_on: ~D[1897-01-01],
+          headcount: 12,
+          as_of: ~D[1899-06-30],
+          source: "https://old.example/history"
+        })
+      )
+
+    row = Repo.get!(Office, office.id)
+    assert row.opened_on == ~D[1897-01-01] and row.headcount_on == ~D[1899-06-30]
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))
@@ -225,7 +249,7 @@ defmodule Hireme.SequencerTest do
     cells = [
       {col.("platform").id, 1, 0},
       {col.("slug").id, 2, "far"},
-      {col.("done_on").id, 1, 2_932_897}
+      {col.("done_on").id, 1, Schema.day_max() + 1}
     ]
 
     {:ok, op, ""} = Codec.op(Codec.encode_op({1, :put, 0, t.id, 0, nil, cells}))

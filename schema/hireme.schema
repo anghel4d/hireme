@@ -66,8 +66,9 @@
 # text is stored as NULL, so no column holds ''. In OPS a cell of type 0 with
 # length 0 clears its column; a u32 0xFFFFFFFF, an i64::MIN or a NaN cell is
 # refused `type`. Wire type codes: 1 u32 (id ref bool u8 u32 day time enum;
-# day = days since 1970-01-01, at most 2932896 = 9999-12-31, past which a cell
-# is refused `type`; time = unix seconds), 2 str (str text json, json any JSON value),
+# day = days since 0000-01-01, proleptic Gregorian (Elixir's
+# Date.to_gregorian_days/1), 0 to 3652424 = 9999-12-31, past which a cell is
+# refused `type`; time = unix seconds), 2 str (str text json, json any JSON value),
 # 3 i64, 4 f64, 5 deferred (u32 length + 8 bytes of SHA-256); the codec may
 # also run a column as 6 sym (a dictionary of strs) or 7 list (u32 ids).
 # A PATCH deletes rows with a block of their own table whose only column is
@@ -84,7 +85,7 @@
 
 domain world desk mail lanes corpus system
 
-layout 2
+layout 3
 
 frame HELLO 1
 frame WELCOME 2

@@ -991,6 +991,9 @@ defmodule Hireme.Schema do
 
   @doc "The byte layout `native/wire` implements."
   def layout, do: @model.layout
+
+  @doc "The last day a `day` cell holds: 9999-12-31 as days since 0000-01-01."
+  def day_max, do: 3_652_424
   def schema_rev, do: @model.schema_rev
 
   @doc "The canonical dump the hashes cover (`:wire` or `:full`)."

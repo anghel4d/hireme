@@ -37,6 +37,8 @@ fn main() {
 
     writeln!(o, "/// The byte layout native/wire implements; native/wire asserts its own equals it.").unwrap();
     writeln!(o, "pub const LAYOUT: u16 = {};", s.layout).unwrap();
+    writeln!(o, "/// A day is days since 0000-01-01 (proleptic Gregorian), 0 to this (9999-12-31).").unwrap();
+    writeln!(o, "pub const DAY_MAX: u32 = {};", model::DAY_MAX).unwrap();
     writeln!(o, "pub mod domain {{").unwrap();
     for d in &s.domains {
         writeln!(o, "    pub const {}: u8 = {};", upper(&d.name), d.bit).unwrap();

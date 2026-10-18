@@ -43,7 +43,7 @@ defmodule Hireme.WireCase do
 
     encoded =
       Enum.map(cells, fn
-        {:as_of, %Date{} = d} -> {Codec.as_of_col(), 1, Date.diff(d, ~D[1970-01-01])}
+        {:as_of, %Date{} = d} -> {Codec.as_of_col(), 1, Codec.day_to_wire(d)}
         {:source, s} when is_integer(s) -> {Codec.source_col(), 1, s}
         {:source, s} -> {Codec.source_col(), 2, s}
         {name, nil} -> {Map.fetch!(cols, to_string(name)).id, 0, nil}

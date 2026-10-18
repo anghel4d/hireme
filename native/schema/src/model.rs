@@ -112,6 +112,9 @@ pub const SOURCE_CELL: u16 = 0xFFF1;
 /// A free command param's cell id is this plus its position in the command.
 pub const FREE_PARAM: u16 = 0xFE00;
 
+/// The last day a `day` cell holds: 9999-12-31 as days since 0000-01-01.
+pub const DAY_MAX: u32 = 3_652_424;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Residency {
     Resident,

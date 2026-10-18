@@ -62,7 +62,6 @@ defmodule Hireme.Sequencer do
   @source 0xFFF1
   @ledger_s 24 * 3600
   # 9999-12-31, the last day SQLite and Ecto read back.
-  @last_day 2_932_896
   @purge_ms :timer.hours(1)
 
   # ---------------------------------------------------------------- API
@@ -1228,7 +1227,7 @@ defmodule Hireme.Sequencer do
   defp special_cells(cells) do
     Enum.reduce_while(cells, :ok, fn
       {@as_of, ty, v}, :ok ->
-        if ty == 1 and v <= @last_day,
+        if ty == 1 and Codec.day_from_wire(v) != nil,
           do: {:cont, :ok},
           else: {:halt, {:refused, :type, %{column: "as_of", want: :day}}}
 
@@ -1267,7 +1266,7 @@ defmodule Hireme.Sequencer do
     ctx = %{
       actor: if(sub.grants.actor == :operator, do: :human, else: :key),
       key_id: sub.key_id,
-      now_day: Date.diff(turn.today, ~D[1970-01-01]),
+      now_day: Codec.day_to_wire(turn.today),
       now_s: DateTime.to_unix(turn.now),
       session_label: sub.label,
       held_ids: Enum.to_list(Lease.held(state.lease, sub.id)),
@@ -1315,7 +1314,7 @@ defmodule Hireme.Sequencer do
     if Enum.any?(names, &cited?(table, &1)) do
       as_of =
         Enum.find_value(op.cells, fn
-          {@as_of, _, d} -> Date.add(~D[1970-01-01], d)
+          {@as_of, _, d} -> Codec.day_from_wire(d)
           _ -> nil
         end)
 

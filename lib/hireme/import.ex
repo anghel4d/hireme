@@ -414,7 +414,6 @@ defmodule Hireme.Import do
 
   # The wire's integers: a value past its column's range would be truncated
   # by the encoding, so it is refused; each type's top or bottom is null.
-  @days 0..2_932_896
   @times 0..4_294_967_294
 
   @ranges %{
@@ -429,10 +428,11 @@ defmodule Hireme.Import do
       else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
   end
 
-  # A day is days since 1970-01-01 and a time unix seconds, both u32 on the
-  # wire with its top for null; past either a value would not travel.
+  # A day travels as days since 0000-01-01 to 9999-12-31 and a time as unix
+  # seconds, both u32 on the wire with its top for null; past either a value
+  # would not travel.
   defp in_range(%{type: :day} = col, %Date{} = d, value) do
-    if Date.diff(d, ~D[1970-01-01]) in @days,
+    if Codec.day_to_wire(d) != nil,
       do: {:ok, d},
       else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
   end
@@ -593,8 +593,7 @@ defmodule Hireme.Import do
 
   defp as_of_cell(true, as_of) when is_binary(as_of) do
     with {:ok, d} <- Date.from_iso8601(as_of),
-         days = Date.diff(d, ~D[1970-01-01]),
-         true <- days in @days do
+         days when days != nil <- Codec.day_to_wire(d) do
       {:ok, [{@as_of, 1, days}]}
     else
       _ -> {:refused, :type, %{column: "as_of", value: brief(as_of)}}
