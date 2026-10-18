@@ -10,6 +10,7 @@ defmodule Hireme.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       releases: [hireme: []],
+      dialyzer: [plt_add_apps: [:mix]],
       deps: deps()
     ]
   end
