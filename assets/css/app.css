@@ -238,6 +238,8 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 .msg { padding: 8px 10px; border-radius: var(--radius); background: var(--sunk); max-width: 88%; }
 .msg.outbound { align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
 .msg .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 4px; font-size: 12px; }
+/* A message's first lines, as written (line breaks kept), before "Show all". */
+.msg .opening { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .notes { white-space: pre-wrap; }
 
 @media (max-width: 760px) {

@@ -51,7 +51,26 @@ function contact(id: number): Row | undefined {
   }
 }
 
-const messages = (id: number): Row[] => read<{ rows: Row[] }>("find", { table: "messages", where: { contact_id: id }, order: ["sent_at", "asc"], limit: 500 }).rows
+// A body comes as its byte count here: its opening is a text chunk, its whole a get, each read when drawn.
+const messages = (id: number): Row[] => read<{ rows: Row[] }>("find", { table: "messages", where: { contact_id: id }, order: ["sent_at", "asc"], limit: 500, sizes: ["body"] }).rows
+/** A message's first lines (a 240-byte chunk), so a thread reads without a click; `more` when the body goes on. */
+function opening(id: number): { text: string; more: boolean } {
+  const r = read<{ text: string | null; next: number | null }>("text", { table: "messages", id, column: "body", length: 240 })
+  const lines = (r.text ?? "").split("\n").filter((l) => l.trim() !== "")
+  return { text: lines.slice(0, 3).join("\n"), more: r.next !== null || lines.length > 3 }
+}
+/** A corporation's name from the replica, or "" when it is not there. */
+function corpName(id: unknown): string {
+  try {
+    return str(read<{ row: Row }>("get", { table: "corporations", id: Number(id) }).row.name)
+  } catch {
+    return ""
+  }
+}
+const corpLink = (id: unknown): Html => {
+  const name = corpName(id)
+  return name === "" ? html`corporation #${str(id)}` : html`<a href="/world/corporations?q=${encodeURIComponent(name)}" data-nav>${name}</a>`
+}
 
 // ------------------------------------------------------------------ view
 
@@ -77,7 +96,7 @@ function contactCard(c: Row): Html {
     <p class="row">${c.email ? html`<a href="${href(`mailto:${str(c.email)}`)}">${str(c.email)}</a>` : EMPTY}
       ${c.linkedin_url ? html`<a href="${href(str(c.linkedin_url))}" rel="noopener noreferrer" target="_blank">LinkedIn</a>` : EMPTY}
       ${c.x_handle ? html`<span>@${str(c.x_handle).replace(/^@/, "")}</span>` : EMPTY}</p>
-    ${c.corporation_id ? html`<p class="muted">corporation #${str(c.corporation_id)} ·
+    ${c.corporation_id ? html`<p class="muted">${corpLink(c.corporation_id)} ·
       <a href="/outreach?corporation=${str(c.corporation_id)}" data-nav>everyone there</a></p>` : EMPTY}
     ${c.notes ? html`<p class="notes">${str(c.notes)}</p>` : EMPTY}
     <p class="muted">${c.last_touch_on ? `last touch ${str(c.last_touch_on)}` : "no touch yet"}</p>
@@ -94,13 +113,14 @@ function threads(id: number): Html {
     <h3>${str(ms[0]?.subject) || "(no subject)"} <span class="muted">${ms.length} message${ms.length === 1 ? "" : "s"}</span></h3>
     <ol class="messages">${ms.map((m) => {
       const id = Number(m.id)
-      const body = v().open.includes(id) ? str(m.body) : undefined
+      const body = v().open.includes(id) ? str(read<{ row: Row }>("get", { table: "messages", id }).row.body) : undefined
+      const first = body === undefined && m.body ? opening(id) : null
       return html`<li data-key="m${id}" class="msg ${str(m.direction)}">
         <div class="meta"><b>${m.direction === "inbound" ? str(m.from_addr) || "them" : "you"}</b>
-          <span class="tag">${str(m.status)}</span> <span class="muted">${str(m.sent_at).slice(0, 16).replace("T", " ")} · ${str(m.channel)}</span>
+          ${m.status === "sent" ? EMPTY : html`<span class="tag">${str(m.status)}</span> `}<span class="muted">${str(m.sent_at).slice(0, 16).replace("T", " ")} · ${str(m.channel)}</span>
           ${m.application_id ? html`<span class="muted">application #${str(m.application_id)}</span>` : EMPTY}</div>
         ${body === undefined
-          ? m.body ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}">Read</button>` : html`<p class="muted">no body</p>`
+          ? first ? html`<p class="opening untrusted">${first.text}</p>${first.more ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}">Show all</button>` : EMPTY}` : html`<p class="muted">no body</p>`
           : html`<pre class="untrusted">${body}</pre>`}
       </li>`
     })}</ol></section>`)}`
@@ -128,7 +148,7 @@ function view(): Html {
     <aside class="list" data-key="list">
       <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search contacts">
         ${writable() ? html`<button type="button" data-act="new-contact">New</button>` : EMPTY}</div>
-      ${corp ? html`<p class="muted">At corporation #${corp} <button type="button" class="ghost" data-act="all">show all</button></p>` : EMPTY}
+      ${corp ? html`<p class="muted">At ${corpLink(corp)} <button type="button" class="ghost" data-act="all">show all</button></p>` : EMPTY}
       ${v().edit === "new" ? html`<form class="stack card" data-submit="create-contact" data-act="create-contact" data-key="new">
           ${CONTACT.filter((x) => x.required || x.name === "email" || x.name === "title" || x.name === "corporation_id").map((x) => field(x, x.name === "corporation_id" ? corp : null))}
           <span class="row"><button class="primary">Add</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>` : EMPTY}
