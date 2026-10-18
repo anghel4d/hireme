@@ -142,9 +142,12 @@ mail 4, lanes 8, corpus 16, and `may_delete`:
 
 ## Leases
 
-A wire session writes only while it holds the lease, and an agent's
-application writes are bounded by the application ids it claimed;
-another session's claim is refused `leased`. A lease lives exactly as long
+A wire session writes only while it holds the lease: taking it opens the
+write channel for the domains in its key's write mask (a browser session
+holds one implicitly, with every domain), and a write without it is
+refused `lease_missing`. Claims are explicit application ids, so two
+agents do not work one application at once: a write to an application
+another session holds is refused `leased`, with that session's label. A lease lives exactly as long
 as its session: release, disconnect, a revoked key, a mask change, a
 suspended account, or the operator's revoke in the account lens. There is
 no TTL.
