@@ -181,16 +181,6 @@ fn event(application: EVal, kind: &str, body: String, op: &Op, ctx: &Ctx) -> Row
     }
 }
 
-fn hex_sha256(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut out = String::with_capacity(64);
-    for b in Sha256::digest(text.as_bytes()).iter() {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-        out.push(char::from_digit((b & 15) as u32, 16).unwrap_or('0'));
-    }
-    out
-}
-
 fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     let c = cells(op);
     let mut row = own(op, c);
@@ -226,12 +216,10 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                         let words = keywords::extract(&text, keywords::Format::from_code(format));
                         row.set(A::KEYWORDS, s(keywords::join(&words)));
                         row.set(A::KEYWORDS_VERSION, u(keywords::VERSION));
-                        row.set(A::LISTING_SHA, s(hex_sha256(&text)));
                     }
                     _ => {
                         row.set(A::KEYWORDS, Val::None);
                         row.set(A::KEYWORDS_VERSION, Val::None);
-                        row.set(A::LISTING_SHA, Val::None);
                     }
                 }
             }

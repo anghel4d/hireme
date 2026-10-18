@@ -143,6 +143,9 @@ let
       EXQLITE_SYSTEM_LDFLAGS = "-L${sqlite.out}/lib -lsqlite3";
       # The kernel NIF is built above; Rustler loads it and compiles nothing.
       HIREME_NIF_PREBUILT = "1";
+      # The pinned esbuild, without the Mix task's network installer; read at
+      # build time only, so the release does not keep it in its closure.
+      MIX_ESBUILD_PATH = lib.getExe esbuild;
       # One scheduler, so the parallel compiler creates atoms in one order:
       # small maps order atom keys by creation, the type pass iterates them,
       # and two builds once emitted different code for one module.
@@ -150,9 +153,6 @@ let
     };
 
     postPatch = ''
-      # The pinned esbuild, without the Mix task's network installer.
-      substituteInPlace config/config.exs \
-        --replace-fail 'version: "0.28.2",' 'version: "${lib.getVersion esbuild}", path: "${lib.getExe esbuild}",'
       install -Dm644 ${native}/lib/libnif.so priv/native/nif.so
       install -Dm644 ${kernel-wasm}/kernel.wasm priv/static/wasm/kernel.wasm
     '';
@@ -160,7 +160,7 @@ let
     # The digester stamps the manifest with the build's clock; pin it to
     # SOURCE_DATE_EPOCH so the manifest is a function of the sources.
     postBuild = ''
-      mix do deps.loadpaths --no-deps-check, assets.deploy
+      mix do deps.loadpaths --no-deps-check + assets.deploy
       sed -i -E "s/\"mtime\":[0-9]+/\"mtime\":$((62167219200 + SOURCE_DATE_EPOCH))/g" priv/static/cache_manifest.json
     '';
 

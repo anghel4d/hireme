@@ -15,6 +15,9 @@ config :hireme, HiremeWeb.Endpoint,
 # passkey script.
 config :esbuild,
   version: "0.28.2",
+  # The Nix build points this at its own esbuild; elsewhere the Mix task
+  # installs this version.
+  path: System.get_env("MIX_ESBUILD_PATH"),
   app: [
     args:
       ~w(js/app.ts css/app.css --bundle --format=esm --target=es2022 --outdir=../priv/static/assets --entry-names=[name] --external:/wasm/*),

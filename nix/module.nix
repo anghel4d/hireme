@@ -116,6 +116,10 @@ in
               DATABASE_PATH = "/var/lib/hireme/hireme.db";
               HOME = "/var/lib/hireme";
               RELEASE_TMP = "/var/lib/hireme/tmp";
+              # Distribution (for `bin/hireme rpc`) stays on loopback: epmd
+              # and the node's own port bind 127.0.0.1 only.
+              ERL_EPMD_ADDRESS = "127.0.0.1";
+              ELIXIR_ERL_OPTIONS = "-kernel inet_dist_use_interface {127,0,0,1}";
             }
             // lib.optionalAttrs gate.enable (
               {

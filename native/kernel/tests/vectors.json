@@ -436,7 +436,7 @@
       ]
     },
     {
-      "name": "a listing is read once at write time: keywords, their version, the text's hash",
+      "name": "a listing is read once at write time: keywords and their version",
       "today": 20000,
       "rows": {
         "applications": [
@@ -462,8 +462,7 @@
               "cells": {
                 "listing_raw": "Rust rust RUST kernels and GPU kernels",
                 "keywords": "rust\u001fkernels\u001fgpu",
-                "keywords_version": 2,
-                "listing_sha": "5c30ee3a7955db37eb976227d644077b3be01dd975a5877f248b6c76f15536a3"
+                "keywords_version": 2
               }
             }
           ]
