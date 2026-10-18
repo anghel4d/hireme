@@ -108,6 +108,9 @@ defmodule Hireme.Sequencer do
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request), do: GenServer.call(whereis(account_id), {:lease, self(), request})
 
+  @doc "Whether the account's sequencer is running (it is not started)."
+  def running?(account_id), do: Registry.lookup(Hireme.Sequencer.Registry, account_id) != []
+
   @doc "The account's committed rev."
   def rev(account_id), do: GenServer.call(whereis(account_id), :rev)
 
@@ -936,11 +939,11 @@ defmodule Hireme.Sequencer do
   defp wire_cols(t, nil), do: Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil))
   defp wire_cols(t, grants), do: Enum.reject(Grants.columns(grants, t), &(&1.name == "account_id" or &1.wire == nil))
 
+  # A projection's `where` is `<col> is not null`, the one shape it takes.
   defp rows(%{residency: :projection, source: source, source_where: where}) do
-    q = from(r in Schema.row(source), order_by: r.id)
-    q = if where, do: where(q, [r], fragment(^"1") == 1), else: q
-    rows = Repo.all(q)
-    if where, do: Enum.filter(rows, &projected?(&1, where)), else: rows
+    [_, col] = Regex.run(~r/^(\w+) is not null$/, where)
+    col = String.to_existing_atom(col)
+    Repo.all(from(r in Schema.row(source), where: not is_nil(field(r, ^col)), order_by: r.id))
   end
 
   defp rows(t) do

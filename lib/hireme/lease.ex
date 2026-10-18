@@ -52,7 +52,8 @@ defmodule Hireme.Lease do
   context of the operator's request. `:ok` or `{:error, :not_found}`.
   """
   def revoke(account_id, lease_id, meta) do
-    with :ok <- Sequencer.lease(account_id, {:revoke, lease_id}) do
+    with true <- Sequencer.running?(account_id) || {:error, :not_found},
+         :ok <- Sequencer.lease(account_id, {:revoke, lease_id}) do
       Hireme.Audit.record(:lease_revoked, %{lease_id: lease_id}, Map.put(meta, :account_id, account_id))
       :ok
     end
@@ -60,6 +61,10 @@ defmodule Hireme.Lease do
 
   @doc "The account's live leases, for the account lens."
   def leases(account_id) do
+    if Sequencer.running?(account_id), do: list_running(account_id), else: []
+  end
+
+  defp list_running(account_id) do
     case Sequencer.lease(account_id, :list) do
       {:ok, rows} -> rows
       _ -> []
