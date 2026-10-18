@@ -582,6 +582,20 @@ defmodule HiremeWeb.AgentAttackTest do
       assert Hireme.Lease.leases(a.id) == []
     end
 
+    test "a node shutting down tells each wire session BYE restart, then lets it go", %{
+      port: port,
+      session: s
+    } do
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      # Drain is the node's last child: stopping it is what shutdown does first.
+      {us, :ok} = :timer.tc(fn -> GenServer.stop(HiremeWeb.Session.Drain) end)
+      {bye, _} = WireClient.await(c, :BYE)
+      assert <<2, _::binary>> = bye.body
+      # It waited for the session to go, not the whole 5 s grace.
+      assert us < 4_000_000
+    end
+
     test "a mask change ends the session with BYE grants; the next HELLO carries the new masks",
          %{port: port, session: s} do
       {key, secret} = key(s, 31, 31)
