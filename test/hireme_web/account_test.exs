@@ -69,4 +69,24 @@ defmodule HiremeWeb.AccountTest do
       assert is_binary(code)
     end
   end
+
+  test "a change between a REPLY and the next park is never lost", %{session: s, ctx: ctx} do
+    {:ok, %{cursor: cursor}} = Account.call("account.overview", %{}, ctx)
+    assert {:park, :account} = Account.call("account.watch", %{"since" => cursor}, ctx)
+
+    # Another page mints a key while this one is between parks.
+    {:ok, _} = Hireme.Keys.mint(s, "from elsewhere", Hireme.Keys.preset(:read_only))
+    assert {:ok, %{changed: true}} = Account.call("account.watch", %{"since" => cursor}, ctx)
+
+    {:ok, %{cursor: newer, keys: [_]}} = Account.call("account.overview", %{}, ctx)
+    assert newer > cursor
+    assert {:park, :account} = Account.call("account.watch", %{"since" => newer}, ctx)
+  end
+
+  test "renaming a key moves the cursor like every other change", %{session: s, ctx: ctx} do
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_only))
+    {:ok, %{cursor: cursor}} = Account.call("account.overview", %{}, ctx)
+    {:ok, _} = Account.call("account.key.rename", %{"id" => key.id, "name" => "renamed"}, ctx)
+    assert {:ok, %{changed: true}} = Account.call("account.watch", %{"since" => cursor}, ctx)
+  end
 end

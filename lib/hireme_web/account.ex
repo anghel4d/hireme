@@ -19,8 +19,11 @@ defmodule HiremeWeb.Account do
 
   Methods (params -> result):
 
-  - `account.overview` {} -> everything the lens draws
-  - `account.watch` {} -> parked; {changed}
+  - `account.overview` {} -> everything the lens draws, and `cursor`, the
+    account's newest audit event id (0 when none)
+  - `account.watch` {since: cursor} -> {changed: true} at once if the
+    account moved past the cursor of the overview the lens drew, else
+    parked; {changed}
   - `account.rename` {name}
   - `account.session.revoke` {id}; `account.session.revoke_others` {}
   - `account.key.mint` {name, preset | read_mask + write_mask, may_delete?, expires_in_days?} -> {key, secret}
@@ -101,6 +104,14 @@ defmodule HiremeWeb.Account do
   ## Reading
 
   defp run("account.overview", _, s, _), do: {:ok, overview(s)}
+  # Level-triggered: a change between the last REPLY and this re-park
+  # moved the cursor past the caller's, and answers at once. The check and the
+  # park run in the session process, so a change after the check arrives
+  # as a message after the park and wakes it.
+  defp run("account.watch", %{"since" => since}, s, _) when is_integer(since) do
+    if Audit.rev(s.account_id) > since, do: {:ok, %{changed: true}}, else: {:park, :account}
+  end
+
   defp run("account.watch", _, _, _), do: {:park, :account}
 
   defp run("account.audit", p, _, _) do
@@ -153,10 +164,10 @@ defmodule HiremeWeb.Account do
     end
   end
 
-  defp run("account.key.rename", %{"id" => id, "name" => name}, _s, _meta)
+  defp run("account.key.rename", %{"id" => id, "name" => name}, s, meta)
        when is_integer(id) and is_binary(name) do
     with %{} = key <- Keys.get(id) || {:error, :not_found},
-         {:ok, key} <- Keys.rename(key, name) do
+         {:ok, key} <- Keys.rename(key, name, ctx(meta, s)) do
       {:ok, %{key: key(key)}}
     end
   end
@@ -244,9 +255,13 @@ defmodule HiremeWeb.Account do
   ## Projections
 
   defp overview(%Session{} = s) do
+    # Read first: anything that lands while the rest is read moves the
+    # account past this cursor, and the next watch answers at once.
+    cursor = Audit.rev(s.account_id)
     account = Accounts.get(s.account_id)
 
     %{
+      cursor: cursor,
       account: %{id: account.id, name: account.name, status: account.status},
       fresh_for: fresh_for(s),
       domains: Map.new(Keys.domains()),

@@ -83,8 +83,8 @@ defmodule Hireme.Audit do
 
   @doc """
   Announce a change to the account's security state to every other
-  process on its topic. Recording an event does this; a change that is
-  not audited (a key renamed) calls it directly.
+  process on its topic. Recording an event does this; every change to
+  that state is recorded, so `rev/1` moves with every announcement.
   """
   @spec changed(pos_integer() | nil) :: :ok
   def changed(nil), do: :ok
@@ -102,6 +102,22 @@ defmodule Hireme.Audit do
   @spec bye(pos_integer(), bye()) :: :ok
   def bye(account_id, {who, reason}),
     do: Phoenix.PubSub.broadcast(Hireme.PubSub, topic(account_id), {:bye, who, reason})
+
+  @doc """
+  How far the account's security state has moved: the newest event that
+  announces itself (every kind but `:agent_ops`). The trail is
+  append-only, so it only grows; `account.watch` compares against it.
+  """
+  @spec rev(pos_integer()) :: non_neg_integer()
+  def rev(account_id) do
+    Repo.one(
+      from(e in Event,
+        where: e.account_id == ^account_id and e.kind != "agent_ops",
+        select: max(e.id)
+      ),
+      skip_account: true
+    ) || 0
+  end
 
   @doc "The latest events for the account on the process, newest first."
   @spec recent(pos_integer()) :: [struct()]

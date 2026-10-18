@@ -188,8 +188,8 @@ defmodule Hireme.Keys do
       (new.may_delete and not old.may_delete)
   end
 
-  @spec rename(Key.t(), String.t()) :: {:ok, Key.t()} | {:error, :name}
-  def rename(%Key{} = key, name) do
+  @spec rename(Key.t(), String.t(), map()) :: {:ok, Key.t()} | {:error, :name}
+  def rename(%Key{} = key, name, meta \\ %{}) do
     name = name |> to_string() |> String.trim()
 
     if name != "" and String.length(name) <= 100 do
@@ -198,7 +198,12 @@ defmodule Hireme.Keys do
         |> Ecto.Changeset.change(name: name, rev: key.rev + 1)
         |> then(&Store.write(fn -> Repo.update!(&1) end))
 
-      Audit.changed(key.account_id)
+      Audit.record(
+        :api_key_renamed,
+        %{key_id: key.id, name: name},
+        Map.put(meta, :account_id, key.account_id)
+      )
+
       {:ok, key}
     else
       {:error, :name}
