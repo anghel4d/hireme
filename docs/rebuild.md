@@ -423,7 +423,8 @@ In order, inside the op's savepoint:
    `may_delete` (`scope`); a `human_only` command from a key
    (`human_only`).
 2. **lease** — the session holds the channel (`lease_missing`); an
-   application held by another session (`leased`).
+   agent's write to an application held by another session (`leased`;
+   the operator's browser session is exempt, see 'Lease and keys').
 3. **shape** — table, columns, types, natural key exist and are writable
    (`column`, `type`, `not_found`, `natural_key` for `create_only`).
 4. **domain** — `judge.rs` on the sequencer's kernel: pipeline moves, fire
@@ -447,7 +448,12 @@ entry, and the delta to subscribers and to the sequencer's kernel.
   {"count":16}` claims the 16 highest-ranked unclaimed applications in
   board order; `lease {"ids":[...]}` names them; `lease
   {"stage":"draft_ready","count":8}` filters. An agent's new applications
-  are claimed by it. The buddy allocator is gone.
+  are claimed by it. The buddy allocator is gone. Claims keep agent
+  sessions off each other's applications; the operator's browser session
+  is never refused `leased` (the owner's write, a human act like
+  `open_fire`, always lands, and the claiming agent sees it as a PATCH and
+  has its pending ops re-judged). An operator revoke is sticky: the
+  revoked session cannot claim again until it reconnects.
 - `lease.claim` answers the ids granted; a `count` larger than the
   unclaimed set grants what exists with a `truncated` warning; naming an
   id another session holds is refused `leased` with that session's label
