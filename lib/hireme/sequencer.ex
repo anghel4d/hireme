@@ -123,7 +123,7 @@ defmodule Hireme.Sequencer do
   def init(account_id) do
     Repo.put_account(account_id)
     rev = Repo.one!(from(a in Hireme.Rows.Account, where: a.id == ^account_id, select: a.desk_rev), skip_account: true)
-    state = %{account_id: account_id, rev: rev, lease: %Lease{}, subs: %{}, counts: %{}, kernel: nil}
+    state = %{account_id: account_id, rev: rev, lease: %Lease{}, lease_rows: [], subs: %{}, counts: %{}, kernel: nil}
     {:ok, rebuild(state), @idle_ms}
   end
 
@@ -1121,7 +1121,16 @@ defmodule Hireme.Sequencer do
     {{:ok, %{"released" => released}}, broadcast_leases(%{state | lease: lease}, [])}
   end
 
+  # Only when the rows moved: a browser joining changes nothing anyone sees.
   defp broadcast_leases(state, opts) do
+    rows = Lease.rows(state.lease)
+
+    if rows == state.lease_rows,
+      do: state,
+      else: send_leases(%{state | lease_rows: rows}, opts)
+  end
+
+  defp send_leases(state, opts) do
     t = Schema.table(:leases)
     body = IO.iodata_to_binary(leases_block(state))
 
