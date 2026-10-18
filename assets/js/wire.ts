@@ -27,7 +27,7 @@ export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as c
 /**
  * Cell wire types, the schema's WIRE_TYPE plus null (0, length 0, clears).
  * id, ref, bool, u8, enum codes, days (since 0000-01-01, proleptic Gregorian) and times (unix
- * seconds) all ride as u32; str, text and json as utf8.
+ * seconds) all ride as u32; str, text and json as utf8 (text comes down as zstr, 5).
  */
 export const CELL = WIRE_TYPE
 export const CRED = { ticket: 1, key: 2 } as const

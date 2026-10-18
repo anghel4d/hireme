@@ -211,6 +211,11 @@ defmodule Hireme.WireCase do
         do: if(a == b, do: nil, else: binary_part(bytes, a, b - a))
   end
 
+  defp values(5, n, data) do
+    # native/wire reads a packed cell, as every client does.
+    for cell <- values(2, n, data), do: cell && Hireme.Kernel.Nif.text(cell)
+  end
+
   defp float(<<v::little-float-64>>), do: v
   defp float(_nan), do: nil
 end

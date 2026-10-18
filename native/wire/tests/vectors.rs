@@ -112,7 +112,7 @@ fn ops_body(ops: &[Vec<u8>]) -> Vec<u8> {
 #[test]
 fn the_documented_numbers() {
     assert_eq!(HEADER, 16);
-    assert_eq!((ZSTD, END, LAYOUT), (0x01, 0x02, 4));
+    assert_eq!((ZSTD, END, ZSTR, LAYOUT), (0x01, 0x02, 5, 4));
     assert_eq!(
         (NULL, U32, STR, I64, F64, SYM, LIST),
         (0, 1, 2, 3, 4, 6, 7)
@@ -350,6 +350,40 @@ fn an_op_is_the_documented_bytes() {
 }
 
 #[test]
+fn a_zstr_column_keeps_its_cells_packed_until_one_is_read() {
+    let listing = "Senior Rust engineer. About the team: kernels, schedulers and GPU runtimes. ".repeat(12);
+    let cells = [pack::text(&listing), [&[0u8][..], b"short"].concat(), vec![]];
+    let mut w = BodyWriter::new();
+    w.block(3, 3).zstrs(5, cells.iter().map(Vec::as_slice));
+    let body = w.finish();
+    let col = Blocks::new(&body).unwrap().iter().next().unwrap().col(5).unwrap();
+    assert_eq!(col.ty, ZSTR);
+    let mut texts = Texts::default();
+    let got: Vec<_> = (0..3)
+        .map(|i| match col.value(i) {
+            Value::ZStr(c) => Some(texts.cell(c).unwrap().into_owned()),
+            Value::None => None,
+            v => panic!("{v:?}"),
+        })
+        .collect();
+    assert_eq!(got, [Some(listing.clone()), Some("short".to_owned()), None]);
+    assert!(cells[0].len() < listing.len() / 4, "the dictionary pays");
+}
+
+#[test]
+fn text_cells_are_refused_unless_they_unpack_to_their_stated_text() {
+    let s = "Rust, kernels, GPUs. ".repeat(30);
+    let z = pack::text(&s);
+    assert_eq!(text_cell(&z).unwrap(), s);
+    // a frame of another dictionary, a cut frame, an unknown tag, raw bytes that are not UTF-8
+    assert_eq!(text_cell(&pack::text_with(s.as_bytes(), FRAME_DICT)).unwrap_err(), Error::Inflate);
+    assert!(text_cell(&z[..z.len() - 3]).is_err());
+    assert_eq!(text_cell(&[2, b'a']).unwrap_err(), Error::Column);
+    assert_eq!(text_cell(&[0, 0xFF]).unwrap_err(), Error::Str);
+    assert_eq!(text_cell(&pack::text_with(&[0xC3; 300], TEXT_DICT)).unwrap_err(), Error::Str);
+}
+
+#[test]
 fn a_sym_dictionary_holds_each_value_once() {
     let mut w = BodyWriter::new();
     w.block(1, 4).syms(1, ["x", "x", "y", "x"].into_iter());
@@ -411,6 +445,10 @@ fn zstd_lengths_and_frames_are_refused() {
     let mut long = pack::zbody(64, &z, &vec![0; pad]);
     long[4..8].copy_from_slice(&10_000u32.to_le_bytes());
     assert!(good(pack::raw(PING, ZSTD, HASH, 0, &long)).is_err());
+    // a frame of the text dictionary, or of none, is not a ZSTD body
+    let other = &pack::text(&"x".repeat(64))[1..];
+    let opad = (8 - (8 + other.len()) % 8) % 8;
+    assert!(good(zstd_ping(64, other, &vec![0; opad])).is_err());
     // raw_len past the reader's limit
     let fr_bytes = zstd_ping(64, &z, &vec![0; pad]);
     let fr = Frame::parse(&fr_bytes, HASH).unwrap();
@@ -989,6 +1027,8 @@ fn mangled_ops_blocks_and_frames_never_panic() {
         b.syms(3, ["x", "y", "x"].into_iter());
         let (l1, l2): (&[u32], &[u32]) = (&[1, 2], &[]);
         b.lists(4, [l1, l2, l1].into_iter());
+        let z = pack::text(&"a long enough text to pack. ".repeat(20));
+        b.zstrs(5, [&z[..], &[], &[0, b'r']].into_iter());
     }
     w.gone(9, &[4, 5, 6]);
     let blocks = w.finish();
@@ -1048,7 +1088,9 @@ fn mangled_ops_blocks_and_frames_never_panic() {
                 let _ = blk.gone().map(|g| g.iter().count());
                 for c in blk.cols() {
                     for r in 0..c.nrows().min(64) {
-                        let _ = c.value(r);
+                        if let Value::ZStr(z) = c.value(r) {
+                            let _ = text_cell(z);
+                        }
                     }
                 }
             }

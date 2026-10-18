@@ -328,10 +328,13 @@ changes, each with its wire type, and the server does not cast strings.
 command's params are its declared columns or typed free params. One op carries up to 1 MiB of
 text (`too_large` past it); one `OPS` frame carries up to 256 ops.
 
-Texts travel whole in BOOT/PATCH. A BOOT or PATCH body of 256 bytes or
-more is shuffled (byte planes) and packed with zstd 9 against
-`priv/wire/frame.zdict`, declared in the schema (its `dict` line), so
-retraining it moves `wire_hash`. Every read (`find`, `get`, `text`,
+Texts travel whole in BOOT/PATCH, packed at rest and read on touch: a
+text column is a zstr run whose cells of 256 bytes or more are zstd 19
+against `priv/wire/text.zdict`, unpacked one by one (`wire::Texts`). A
+BOOT or PATCH body of 256 bytes or more is shuffled (byte planes) and
+packed with zstd 9 against `priv/wire/frame.zdict`. Both dictionaries
+are declared in the schema (`dict` lines), so retraining one moves
+`wire_hash`. Every read (`find`, `get`, `text`,
 `history`) is the replica's own: the browser's and hireme-mcp's kernel
 answers it locally. The RPC methods left are `account.*` (the account
 lens) and `lease.*`.

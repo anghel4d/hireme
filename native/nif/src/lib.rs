@@ -22,7 +22,8 @@
 //!   (none for a code that is no stage).
 //! - `keywords_version()`.
 //! - `unpack(frame, max)` → a ZSTD frame's plain body (at most `max`
-//!   bytes) or `nil`: native/wire's reading, the one every client does.
+//!   bytes) or `nil`, and `text(cell)` → a zstr cell's string or `nil`:
+//!   native/wire's reading, the one every client does.
 //!
 //! A panic in the kernel is caught here and answered `{:error, :panic}`;
 //! the sequencer then rebuilds the resource from SQLite.
@@ -180,6 +181,11 @@ fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>>
     let mut out = rustler::OwnedBinary::new(body.len())?;
     out.as_mut_slice().copy_from_slice(&body);
     Some(out.release(env))
+}
+
+#[rustler::nif]
+fn text(cell: Binary) -> Option<String> {
+    wire::text_cell(cell.as_slice()).ok().map(|s| s.into_owned())
 }
 
 rustler::init!("Elixir.Hireme.Kernel.Nif");

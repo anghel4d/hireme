@@ -2119,11 +2119,15 @@ end
 defmodule Hireme.Sequencer.Supervisor do
   @moduledoc "The registry and the dynamic supervisor every account's sequencer runs under."
   use Supervisor
+  alias HiremeWeb.Wire.Codec
 
   def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
 
   @impl Supervisor
   def init(_) do
+    # The packed text cells every sequencer's BOOT and PATCH reuse.
+    Codec.ztext_table()
+
     Supervisor.init(
       [
         {Registry, keys: :unique, name: Hireme.Sequencer.Registry},

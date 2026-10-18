@@ -27,7 +27,7 @@ defmodule HiremeWeb.Wire.Codec do
   @max_up 16 <<< 20
   @max_ops 256
   @max_inflated 256 <<< 20
-  # Bodies under this many bytes travel raw.
+  # Bodies and text cells under this many bytes travel raw.
   @floor 256
 
   @t_null 0
@@ -35,10 +35,11 @@ defmodule HiremeWeb.Wire.Codec do
   @t_str 2
   @t_i64 3
   @t_f64 4
+  @t_zstr 5
 
-  # The zstd dictionary both ends embed; its id and hash are in
-  # schema/hireme.schema's dict line, so wire_hash moves with it.
-  @dicts Map.new([:frame], fn k ->
+  # The zstd dictionaries both ends embed; their ids and hashes are in
+  # schema/hireme.schema's dict lines, so wire_hash moves with them.
+  @dicts Map.new([:text, :frame], fn k ->
            path = Path.expand("../../../priv/wire/#{k}.zdict", __DIR__)
            @external_resource path
            {k, File.read!(path)}
@@ -210,7 +211,7 @@ defmodule HiremeWeb.Wire.Codec do
   defp column(ty, _n, data) when ty in [@t_i64, @t_f64], do: planes(data, 8)
 
   # A str column's offsets as wrapping deltas, then planes; its bytes as they are.
-  defp column(@t_str, n, data) do
+  defp column(ty, n, data) when ty in [@t_str, @t_zstr] do
     k = (n + 1) * 4
     <<offsets::binary-size(^k), text::binary>> = data
 
@@ -228,6 +229,45 @@ defmodule HiremeWeb.Wire.Codec do
       q = w - 1 - p
       for <<_::binary-size(^p), b, _::binary-size(^q) <- data>>, into: <<>>, do: <<b>>
     end
+  end
+
+  # A text cell as it travels: raw under the floor or when packing does not
+  # pay, else zstd 19 against the text dictionary, packed once per content.
+  defp zcell(s) when s in [nil, ""], do: ""
+  defp zcell(s) when byte_size(s) < @floor, do: <<0, s::binary>>
+
+  defp zcell(s) do
+    key = :crypto.hash(:sha256, s)
+
+    case lookup(key) do
+      nil ->
+        z = zstd(s, 19, :text)
+        cell = if byte_size(z) < byte_size(s), do: <<1, z::binary>>, else: <<0, s::binary>>
+        remember(key, cell)
+        cell
+
+      cell ->
+        cell
+    end
+  end
+
+  @ztext :hireme_ztext
+  @ztext_max 200_000
+
+  @doc "The packed-text cache's table: one per node, owned by its caller (the sequencers' supervisor)."
+  def ztext_table,
+    do: :ets.new(@ztext, [:named_table, :public, read_concurrency: true, write_concurrency: true])
+
+  defp lookup(key) do
+    case :ets.lookup(@ztext, key) do
+      [{_, cell}] -> cell
+      [] -> nil
+    end
+  end
+
+  defp remember(key, cell) do
+    if :ets.info(@ztext, :size) >= @ztext_max, do: :ets.delete_all_objects(@ztext)
+    :ets.insert(@ztext, {key, cell})
   end
 
   # ------------------------------------------------------- small frames
@@ -538,7 +578,8 @@ defmodule HiremeWeb.Wire.Codec do
   defp bounded?(m) when is_map(m), do: Enum.all?(m, fn {_, v} -> bounded?(v) end)
   defp bounded?(_), do: true
 
-  @doc "The type an op cell for this column must carry: its wire type."
+  @doc "The type an op cell for this column must carry: its wire type (a text column's is str)."
+  def cell_type(%{wire: @t_zstr}), do: @t_str
   def cell_type(%{wire: w}), do: w
 
   @doc "A column's wire type code in BOOT and PATCH."
@@ -613,6 +654,8 @@ defmodule HiremeWeb.Wire.Codec do
 
   defp col_data(@t_f64, vs),
     do: Enum.map(vs, &if(&1, do: <<&1 * 1.0::little-float-64>>, else: @nan))
+
+  defp col_data(@t_zstr, vs), do: col_data(@t_str, Enum.map(vs, &zcell/1))
 
   defp col_data(@t_str, vs) do
     {offsets, _} =

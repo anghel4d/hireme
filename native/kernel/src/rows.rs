@@ -73,6 +73,8 @@ impl Val {
             Value::F64(x) => Val::F64(x),
             Value::Str("") => Val::None,
             Value::Str(s) => Val::Str(String::from(s)),
+            // Unpacked on arrival for now; a cell that does not unpack reads as none.
+            Value::ZStr(c) => wire::text_cell(c).map_or(Val::None, |s| Val::Str(s.into_owned())),
             Value::List(l) if l.is_empty() => Val::None,
             Value::List(l) => Val::List(l.iter().collect()),
             #[allow(unreachable_patterns)]
@@ -109,7 +111,7 @@ fn kind_of_wire(ty: u8) -> Option<Kind> {
         wire::U32 => Kind::U32,
         wire::I64 => Kind::I64,
         wire::F64 => Kind::F64,
-        wire::STR | wire::SYM => Kind::Str,
+        wire::STR | wire::ZSTR | wire::SYM => Kind::Str,
         wire::LIST => Kind::List,
         _ => return None,
     })

@@ -10,7 +10,7 @@
 #   frame <NAME> <id>                wire frame kinds
 #   layout <n>                       the byte layout native/wire implements; in
 #                                    wire_hash, so a client of another refuses
-#   dict frame <id> <fnv>            the zstd dictionary of ZSTD bodies, in wire_hash
+#   dict <text|frame> <id> <fnv>     a zstd dictionary, in wire_hash
 #   enum <name> <value>...           codes are 0-based declaration order
 #   carry <enum>...                  enums the frames carry (NACK, BYE, op verbs);
 #                                    an enum enters wire_hash when a resident,
@@ -83,7 +83,9 @@
 domain world desk mail lanes corpus system
 
 layout 4
-# priv/wire/frame.zdict: a ZSTD body packs against it.
+# priv/wire/<name>.zdict: a text cell of 256 bytes or more packs against
+# `text`, a ZSTD body against `frame`.
+dict text 1213355092 7083223
 dict frame 1213351506 3169144972
 
 frame HELLO 1

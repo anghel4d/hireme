@@ -155,14 +155,14 @@ fn writable(td: &TableDef, c: Option<&ColDef>, id: u16, cell: &wire::Cell, ctx: 
 /// (or an empty str in a str column) only where the column is nullable.
 fn typed(td: &TableDef, c: &ColDef, cell: &wire::Cell) -> Result<(), Refusal> {
     let bad = || no(refusal::TYPE, json!({"in": td.name, "column": c.name, "want": ty(c).name()}));
-    if cell.ty == wire::NULL || (cell.ty == wire::STR && cell.bytes.is_empty() && c.wire == wire::STR) {
+    if cell.ty == wire::NULL || (cell.ty == wire::STR && cell.bytes.is_empty() && c.cell_type() == wire::STR) {
         return if has(c, flag::REQUIRED) {
             Err(no(refusal::COLUMN, json!({"in": td.name, "column": c.name, "reason": "required"})))
         } else {
             Ok(())
         };
     }
-    if cell.ty != c.wire || cell.is_sentinel() {
+    if cell.ty != c.cell_type() || cell.is_sentinel() {
         return Err(bad());
     }
     let ok = match (ty(c), cell.value()) {

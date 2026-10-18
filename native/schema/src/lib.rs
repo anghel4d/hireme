@@ -81,6 +81,13 @@ pub struct ColDef {
     pub default: Option<&'static str>,
 }
 
+impl ColDef {
+    /// An op cell's type: the wire type, but text (ZSTR) is a plain str.
+    pub const fn cell_type(&self) -> u8 {
+        if self.wire == wire::ZSTR { wire::STR } else { self.wire }
+    }
+}
+
 /// One command of the catalog.
 #[derive(Debug)]
 pub struct CommandDef {

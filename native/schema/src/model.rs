@@ -67,7 +67,8 @@ impl Type {
             Type::Id | Type::Ref | Type::Bool | Type::U8 | Type::U32 | Type::Day | Type::Time | Type::Enum => {
                 wire::U32
             }
-            Type::Str | Type::Text | Type::Json | Type::Bytes => wire::STR,
+            Type::Str | Type::Json | Type::Bytes => wire::STR,
+            Type::Text => wire::ZSTR,
             Type::I64 => wire::I64,
             Type::F64 => wire::F64,
         }
@@ -81,6 +82,10 @@ pub mod wire {
     pub const STR: u8 = 2;
     pub const I64: u8 = 3;
     pub const F64: u8 = 4;
+    /// A text column in BOOT and PATCH: str offsets over cells that each
+    /// carry a tag byte (0 raw UTF-8, 1 a zstd frame against the text
+    /// dictionary). An op cell of text is a plain str.
+    pub const ZSTR: u8 = 5;
     /// Codec-only run encodings, never a declared type.
     pub const SYM: u8 = 6;
     pub const LIST: u8 = 7;
@@ -148,9 +153,9 @@ pub struct Frame {
     pub id: u8,
 }
 
-/// A zstd dictionary both ends embed (`priv/wire/<name>.zdict`): `frame`
-/// for ZSTD bodies. Its id is the one its frames name; its fnv covers its
-/// bytes, so a retrained dictionary moves wire_hash.
+/// A zstd dictionary both ends embed (`priv/wire/<name>.zdict`): `text` for
+/// packed text cells, `frame` for ZSTD bodies. Its id is the one its frames
+/// name; its fnv covers its bytes, so a retrained dictionary moves wire_hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dict {
     pub name: String,
@@ -334,8 +339,9 @@ pub struct Param {
 }
 
 impl Param {
+    /// A param only travels in an op cell, where text is a plain str.
     pub fn wire(&self) -> u8 {
-        self.ty.wire()
+        if self.ty == Type::Text { wire::STR } else { self.ty.wire() }
     }
 }
 
@@ -773,7 +779,7 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 }
                 frames.push(Frame { name: (*fname).to_owned(), id: int(id, line, 1, 255)? as u8 })
             }
-            ["dict", dname @ "frame", id, fnv] => {
+            ["dict", dname @ ("text" | "frame"), id, fnv] => {
                 if dicts.iter().any(|d| d.name == *dname) {
                     return fail(line, format!("dict {dname} twice"));
                 }
@@ -868,8 +874,8 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
     }
 
     let Some(layout) = layout else { return fail(0, "no layout line".into()) };
-    if dicts.len() != 1 {
-        return fail(0, "no dict frame line".into());
+    if dicts.len() != 2 {
+        return fail(0, "a dict text and a dict frame line".into());
     }
     resolve(layout, carry, domains, frames, dicts, enums, tables)
 }

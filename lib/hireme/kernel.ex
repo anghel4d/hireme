@@ -79,4 +79,5 @@ defmodule Hireme.Kernel.Nif do
   def board_ids(_res, _stage), do: :erlang.nif_error(:nif_not_loaded)
   def keywords_version, do: :erlang.nif_error(:nif_not_loaded)
   def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
+  def text(_cell), do: :erlang.nif_error(:nif_not_loaded)
 end

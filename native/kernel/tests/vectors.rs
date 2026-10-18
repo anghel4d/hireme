@@ -55,7 +55,7 @@ fn boot(rows: &J) -> Vec<u8> {
         for c in cols {
             match c.wire {
                 wire::U32 => b.u32s(c.id, list.iter().map(|r| as_u32(&get(r, c), c.type_code, c.target))),
-                wire::STR => {
+                wire::STR | wire::ZSTR => {
                     let s: Vec<String> = list.iter().map(|r| get(r, c).as_str().unwrap_or("").to_string()).collect();
                     b.strs(c.id, s.iter().map(String::as_str))
                 }
@@ -88,7 +88,7 @@ fn op(step: &J) -> Vec<u8> {
         let mut o = w.op(OP_ID, wire::PUT, 0, t.id, target, None);
         for (k, v) in step["cells"].as_object().unwrap() {
             let c = t.col_named(k).unwrap();
-            cell(&mut o, c.id, c.wire, c.type_code, c.target, v);
+            cell(&mut o, c.id, c.cell_type(), c.type_code, c.target, v);
         }
         o.done();
     } else if let Some(name) = step["command"].as_str() {

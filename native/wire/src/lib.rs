@@ -61,16 +61,18 @@
 //! | 2 | str | `u32 offsets × (nrows + 1)` from 0, then UTF-8 (str, text, json) | empty |
 //! | 3 | i64 | `i64 × nrows` | `i64::MIN` |
 //! | 4 | f64 | `f64 × nrows` | NaN |
+//! | 5 | zstr | `u32 offsets × (nrows + 1)` from 0, then per non-empty cell a tag byte and its bytes: 0 UTF-8, 1 a zstd frame (content size stated) against the text dictionary (text) | empty |
 //! | 6 | sym | `u32 nuniq`, `u32 offsets × (nuniq + 1)`, UTF-8, pad to 4, `u32 × nrows` naming one | empty |
 //! | 7 | list | `u32 offsets × (nrows + 1)` into the u32 values that follow | empty |
 //!
 //! Codes 1–5 are the schema's wire types; 6 and 7 are encodings a writer
 //! may pick for a column (a str of few distinct values; a list of ids).
+//! A zstr cell stays packed until it is read ([`Texts`]).
 //!
 //! **Shuffle.** A ZSTD body of table runs (BOOT, PATCH, TICK) is shuffled
 //! before packing: every u32 column's data becomes 4 byte planes (plane p
 //! holds byte p of each value), every i64 and f64 column's 8 planes, and a
-//! str column's offsets become wrapping deltas, then 4 planes, its
+//! str or zstr column's offsets become wrapping deltas, then 4 planes, its
 //! bytes as they are. Block and column headers, pads and sym and list
 //! columns stay as they are, so the shuffled body walks like the plain one.
 //! A null and an empty string are the same thing: the sequencer stores a
@@ -107,8 +109,9 @@
 //! ([`OpsWriter::is_full`]). One OPS frame holds at most [`MAX_OPS`] (256)
 //! ops, and one op at most [`MAX_OP_TEXT`] (1 MiB) of text, past which the
 //! server refuses it `too_large`. A down body inflates to at most
-//! [`MAX_INFLATED`]. [`LAYOUT`] numbers this layout; the schema's
-//! `wire_hash` folds it in, and the frame dictionary's id and hash.
+//! [`MAX_INFLATED`], and one text cell to at most [`MAX_TEXT`]. [`LAYOUT`]
+//! numbers this layout; the schema's `wire_hash` folds it in, and both
+//! dictionaries' ids and hashes.
 //!
 //! The crate is `no_std` + `alloc`, `unsafe`-free, and validates every
 //! length once at parse time with checked arithmetic, on 32-bit (wasm) as
@@ -119,6 +122,7 @@
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::str;
 use ruzstd::decoding::{BlockDecodingStrategy, Dictionary, FrameDecoder};
@@ -207,6 +211,7 @@ pub const U32: u8 = 1;
 pub const STR: u8 = 2;
 pub const I64: u8 = 3;
 pub const F64: u8 = 4;
+pub const ZSTR: u8 = 5;
 pub const SYM: u8 = 6;
 pub const LIST: u8 = 7;
 
@@ -229,7 +234,11 @@ pub const MAX_OP_TEXT: usize = 1 << 20;
 pub const MAX_UP: usize = 16 << 20;
 /// The largest body an inflate may produce.
 pub const MAX_INFLATED: usize = 256 << 20;
-/// The zstd dictionary of ZSTD bodies, the bytes the schema's dict line names.
+/// The largest text cell a zstr frame may unpack to.
+pub const MAX_TEXT: usize = 16 << 20;
+
+/// The zstd dictionaries, the bytes the schema's dict lines name.
+pub const TEXT_DICT: &[u8] = include_bytes!("../../../priv/wire/text.zdict");
 pub const FRAME_DICT: &[u8] = include_bytes!("../../../priv/wire/frame.zdict");
 
 const fn fnv(b: &[u8]) -> u32 {
@@ -245,6 +254,10 @@ const fn dict_id(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[4], b[5], b[6], b[7]])
 }
 
+const _: () = assert!(
+    dict_id(TEXT_DICT) == schema::TEXT_DICT.0 && fnv(TEXT_DICT) == schema::TEXT_DICT.1,
+    "priv/wire/text.zdict is not the schema's dict text line"
+);
 const _: () = assert!(
     dict_id(FRAME_DICT) == schema::FRAME_DICT.0 && fnv(FRAME_DICT) == schema::FRAME_DICT.1,
     "priv/wire/frame.zdict is not the schema's dict frame line"
@@ -266,7 +279,7 @@ pub enum Error {
     Str,
     /// A body that is not what its kind promises (nonzero pad, bad counts, trailing bytes).
     Body,
-    /// A ZSTD body that does not unpack to its stated length.
+    /// A ZSTD body or a packed text cell that does not unpack to its stated length.
     Inflate,
 }
 
@@ -282,7 +295,7 @@ impl core::fmt::Display for Error {
             Error::Column => "a column or cell that does not fit its type",
             Error::Str => "string offsets or UTF-8 that do not hold",
             Error::Body => "a body that is not what its kind promises",
-            Error::Inflate => "a ZSTD body that does not unpack to its stated length",
+            Error::Inflate => "a ZSTD body or text cell that does not unpack to its stated length",
         };
         f.write_str(what)
     }
@@ -515,7 +528,7 @@ fn unshuffle(b: &mut [u8]) -> Result<()> {
             match ty {
                 U32 => unplane(data, 4),
                 I64 | F64 => unplane(data, 8),
-                STR => {
+                STR | ZSTR => {
                     let head = nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)?;
                     let offsets = &mut data[..head];
                     unplane(offsets, 4);
@@ -545,6 +558,42 @@ fn unplane(data: &mut [u8], w: usize) {
             *x = planes[p * n + i];
         }
     }
+}
+
+/// Reads zstr cells, keeping the text dictionary decoded between them.
+pub struct Texts {
+    dec: FrameDecoder,
+}
+
+impl Default for Texts {
+    fn default() -> Texts {
+        let mut dec = FrameDecoder::new();
+        // The embedded dictionary is checked against the schema at compile time.
+        if let Ok(d) = Dictionary::decode_dict(TEXT_DICT) {
+            let _ = dec.add_dict(d);
+        }
+        Texts { dec }
+    }
+}
+
+impl Texts {
+    /// A zstr cell's text: tag 0 borrowed UTF-8, tag 1 a zstd frame against
+    /// the text dictionary (its content size stated, at most [`MAX_TEXT`]).
+    pub fn cell<'a>(&mut self, cell: &'a [u8]) -> Result<Cow<'a, str>> {
+        match cell {
+            [0, s @ ..] => str::from_utf8(s).map(Cow::Borrowed).map_err(|_| Error::Str),
+            [1, z @ ..] => {
+                let out = unzstd_with(&mut self.dec, z, 1..=MAX_TEXT)?;
+                alloc::string::String::from_utf8(out).map(Cow::Owned).map_err(|_| Error::Str)
+            }
+            _ => Err(Error::Column),
+        }
+    }
+}
+
+/// [`Texts::cell`] for one cell; a reader of many keeps a [`Texts`].
+pub fn text_cell(cell: &[u8]) -> Result<Cow<'_, str>> {
+    Texts::default().cell(cell)
 }
 
 // ------------------------------------------------------------------ writer
@@ -990,6 +1039,8 @@ pub enum Value<'a> {
     I64(i64),
     F64(f64),
     Str(&'a str),
+    /// A zstr cell as sent, tag byte first; [`Texts::cell`] reads it.
+    ZStr(&'a [u8]),
     List(U32s<'a>),
 }
 
@@ -1055,7 +1106,8 @@ impl<'a> Col<'a> {
         match ty {
             U32 => fixed(4),
             I64 | F64 => fixed(8),
-            STR | LIST => {
+            // A zstr cell's tag and bytes are checked when it is read.
+            STR | ZSTR | LIST => {
                 let head = nrows
                     .checked_add(1)
                     .and_then(|n| n.checked_mul(4))
@@ -1067,10 +1119,11 @@ impl<'a> Col<'a> {
                 if ty == STR {
                     return check_strs(offsets, nrows, rest);
                 }
-                if rest.len() % 4 != 0 {
+                let unit = if ty == ZSTR { 1 } else { 4 };
+                if rest.len() % unit != 0 {
                     return Err(Error::Column);
                 }
-                let vals = rest.len() / 4;
+                let vals = rest.len() / unit;
                 let mut prev = 0;
                 for i in 0..=nrows {
                     let o = u32_at(offsets, i * 4) as usize;
@@ -1160,6 +1213,11 @@ impl<'a> Col<'a> {
                     "" => Value::None,
                     s => Value::Str(s),
                 }
+            }
+            ZSTR => {
+                let (offsets, bytes) = d.split_at((self.nrows + 1) * 4);
+                let (a, b) = (u32_at(offsets, i * 4) as usize, u32_at(offsets, i * 4 + 4) as usize);
+                if a == b { Value::None } else { Value::ZStr(&bytes[a..b]) }
             }
             SYM => {
                 let nuniq = u32_at(d, 0) as usize;
@@ -1428,15 +1486,25 @@ impl BlockWriter<'_> {
 
     /// A str column; the empty string is absent.
     pub fn strs<'s>(&mut self, id: u16, vals: impl Iterator<Item = &'s str>) -> &mut Self {
+        self.runs(id, STR, vals.map(str::as_bytes))
+    }
+
+    fn runs<'s>(&mut self, id: u16, ty: u8, vals: impl Iterator<Item = &'s [u8]>) -> &mut Self {
         let n = self.nrows;
-        self.col(id, STR, |b| {
-            let (offsets, bytes) = offsets_and_bytes(vals.map(str::as_bytes));
+        self.col(id, ty, |b| {
+            let (offsets, bytes) = offsets_and_bytes(vals);
             Self::count(n, offsets.len() - 1);
             offsets
                 .iter()
                 .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
             b.extend_from_slice(&bytes);
         })
+    }
+
+    /// A zstr column of cells as they travel (tag byte first, `&[]` absent),
+    /// written verbatim: a replica keeps its texts packed and hands them on.
+    pub fn zstrs<'s>(&mut self, id: u16, cells: impl Iterator<Item = &'s [u8]>) -> &mut Self {
+        self.runs(id, ZSTR, cells)
     }
 
     /// A str column as a dictionary of its distinct values, for a column of few.

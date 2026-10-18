@@ -7,7 +7,8 @@ export const enc = new TextEncoder();
 export const dec = new TextDecoder();
 
 // Wire constants from the codec's doc (native/wire/src/lib.rs).
-export const W = { NULL: 0, U32: 1, STR: 2, I64: 3, F64: 4, BOOT: 3, PATCH: 4, PUT: 1, COMMAND: 3 };
+export const W = { NULL: 0, U32: 1, STR: 2, I64: 3, F64: 4, ZSTR: 5, BOOT: 3, PATCH: 4, PUT: 1, COMMAND: 3 };
+const plain = (w) => (w === W.ZSTR ? W.STR : w);
 
 export class Bytes {
   constructor() { this.a = []; }
@@ -79,17 +80,18 @@ export function bootFrame(catalog, rows, kind = W.BOOT) {
     for (const [k, c] of cols) {
       const data = new Bytes();
       const vals = list.map((r) => r[k] ?? null);
-      if (c.wire === W.U32) vals.forEach((v) => data.u32(asU32(catalog, v, c.type, c.target)));
-      else if (c.wire === W.STR) {
+      const wire = plain(c.wire);
+      if (wire === W.U32) vals.forEach((v) => data.u32(asU32(catalog, v, c.type, c.target)));
+      else if (wire === W.STR) {
         const strs = vals.map((v) => enc.encode(v ?? ""));
         let o = 0;
         data.u32(0);
         for (const s of strs) data.u32((o += s.length));
         for (const s of strs) data.raw(s);
-      } else if (c.wire === W.I64) vals.forEach((v) => data.i64(v ?? -(2n ** 63n)));
-      else if (c.wire === W.F64) vals.forEach((v) => data.f64(v ?? NaN));
+      } else if (wire === W.I64) vals.forEach((v) => data.i64(v ?? -(2n ** 63n)));
+      else if (wire === W.F64) vals.forEach((v) => data.f64(v ?? NaN));
       else throw new Error(`wire type ${c.wire} in a vector`);
-      body.u16(c.id).u8(c.wire).u8(0).u32(data.length).raw(data.a).pad();
+      body.u16(c.id).u8(wire).u8(0).u32(data.length).raw(data.a).pad();
     }
   }
   const frame = new Bytes();
@@ -126,6 +128,6 @@ export function op(catalog, step, opId = 7n) {
     });
   }
   o.u64(opId).u8(verb).u8(0).u16(subject).u32(target).u16(cells.length).u16(0).u32(0);
-  for (const [c, v] of cells) cell(o, catalog, c.id, c.wire, c.type, c.target, v);
+  for (const [c, v] of cells) cell(o, catalog, c.id, plain(c.wire), c.type, c.target, v);
   return o.bytes();
 }

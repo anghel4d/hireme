@@ -1,4 +1,4 @@
-//! Packing as the server does it, against the dictionary. A table run's
+//! Packing as the server does it, against the dictionaries. A table run's
 //! shuffle is the Elixir encoder's, crossed with this decoder in
 //! test/hireme_web/codec_test.exs; these frames are of other kinds.
 
@@ -33,4 +33,13 @@ pub fn frame(kind: u8, hash: u16, body: &[u8]) -> Vec<u8> {
 /// zstd against the frame dictionary.
 pub fn packed(bytes: &[u8]) -> Vec<u8> {
     zstd(bytes, FRAME_DICT)
+}
+
+/// A packed zstr cell of any bytes: tag 1 and a zstd frame against `dict`.
+pub fn text_with(b: &[u8], dict: &[u8]) -> Vec<u8> {
+    [&[1u8][..], &zstd(b, dict)].concat()
+}
+
+pub fn text(s: &str) -> Vec<u8> {
+    text_with(s.as_bytes(), TEXT_DICT)
 }
