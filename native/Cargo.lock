@@ -398,6 +398,7 @@ version = "2.0.0"
 dependencies = [
  "futures-util",
  "kernel",
+ "rustls",
  "schema",
  "serde_json",
  "tokio",
@@ -1036,6 +1037,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
