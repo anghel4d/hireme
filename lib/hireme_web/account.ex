@@ -14,20 +14,8 @@ defmodule HiremeWeb.Account do
   `Hireme.Mfa`); this module adds it only where no owner holds it
   (unlinking a way in, trusted hosts, resuming a paused key).
 
-  `account.watch` parks: the session answers it when the account's topic
-  announces a change, so a revoke elsewhere appears without a reload.
-
   Methods (params -> result):
 
-  Any method takes `passive: true` when the client sends it by itself (the
-  reload after a watch answers); such a call does not count as activity.
-
-  - `account.overview` {} -> everything the lens draws, and `cursor`, how
-    far the account's security state has moved (`Hireme.Audit.rev/1`; 0
-    when never)
-  - `account.watch` {since: cursor} -> {changed: true} at once if the
-    account moved past the cursor of the overview the lens drew, else
-    parked; {changed}
   - `account.rename` {name}
   - `account.session.revoke` {id}; `account.session.revoke_others` {}
   - `account.key.mint` {name, preset | read_mask + write_mask, may_delete?, expires_in_days?} -> {key, secret}
@@ -43,9 +31,6 @@ defmodule HiremeWeb.Account do
   - `account.factor.remove` {id}; `account.recovery.regenerate` {} -> {recovery_codes}
   - `account.step_up.passkey_options` {} -> {publicKey}; `account.step_up.passkey` {assertion fields}; `account.step_up.totp` {code}; `account.step_up.recovery` {code}
   - `account.trusted_host.add` {host, note?}; `account.trusted_host.remove` {id}
-  - `account.audit` {view?: "security" | "activity", limit?, before?} ->
-    {events, next}: a page of the trail, newest first; `next` is the
-    `before` of the page after it (nil at the end)
 
   An error answers `%{error: code}` with the code a string: `scope`,
   `step_up`, `not_found`, `invalid`, `limit`, `rate_limited`, `last`,
@@ -70,7 +55,7 @@ defmodule HiremeWeb.Account do
         }
 
   @doc "Run one method for the browser session in `ctx`."
-  @spec call(String.t(), map(), ctx()) :: {:ok, map()} | {:park, :account} | {:error, map()}
+  @spec call(String.t(), map(), ctx()) :: {:ok, map()} | {:error, map()}
   def call(method, params, ctx) when is_binary(method) and is_map(params) do
     guarded(method, fn -> checked(method, params, ctx) end)
   end
@@ -79,7 +64,7 @@ defmodule HiremeWeb.Account do
     with nil <- ctx[:key],
          true <- ids?(params) || :invalid,
          id when is_integer(id) <- ctx[:session_id],
-         {:ok, %Session{account_id: account_id} = session} <- live(id, activity?(method, params)),
+         {:ok, %Session{account_id: account_id} = session} <- live(id),
          true <- account_id == ctx.account_id do
       Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
@@ -91,23 +76,16 @@ defmodule HiremeWeb.Account do
 
   # The browser session's own lifetime, idle limit, revocation and the
   # account's suspension hold here exactly as for a page.
-  defp live(id, activity?) do
-    case Accounts.live_session(id, activity?) do
+  defp live(id) do
+    case Accounts.live_session(id) do
       {:ok, session} -> {:ok, session}
       :error -> :session
     end
   end
 
-  # What the lens does by itself (a parked watch, the reload it triggers,
-  # sent with `passive: true`) is not the operator's activity: an Account tab
-  # left open must still idle out.
-  defp activity?("account.watch", _), do: false
-  defp activity?(_, %{"passive" => true}), do: false
-  defp activity?(_, _), do: true
-
   # Every id a call names is a row id: a positive 64-bit integer.
   defp ids?(params) do
-    Enum.all?(~w(id since before), fn k ->
+    Enum.all?(~w(id), fn k ->
       case Map.get(params, k) do
         nil -> true
         n when is_integer(n) -> n >= 0 and n < 0x8000000000000000
@@ -177,7 +155,6 @@ defmodule HiremeWeb.Account do
       {:error, %{error: "invalid"}}
   end
 
-  defp answer({:park, _} = park), do: park
   defp answer({:ok, %{} = result}), do: {:ok, result}
   defp answer(:ok), do: {:ok, %{ok: true}}
 
@@ -188,32 +165,6 @@ defmodule HiremeWeb.Account do
     do: {:error, error}
 
   defp answer(_), do: {:error, %{error: "invalid"}}
-
-  ## Reading
-
-  defp run("account.overview", _, s, _), do: {:ok, overview(s)}
-  # Level-triggered: a change between the last REPLY and this re-park
-  # moved the cursor past the caller's, and answers at once. The check and the
-  # park run in the session process, so a change after the check arrives
-  # as a message after the park and wakes it.
-  defp run("account.watch", %{"since" => since}, s, _) when is_integer(since) do
-    if Audit.rev(s.account_id) > since, do: {:ok, %{changed: true}}, else: {:park, :account}
-  end
-
-  defp run("account.watch", _, _, _), do: {:park, :account}
-
-  # The trail a page at a time, security events (the default) or activity,
-  # newest first, `before` the last page's `next`.
-  defp run("account.audit", p, _, _) do
-    limit =
-      p |> Map.get("limit", 50) |> then(&if(is_integer(&1), do: min(max(&1, 1), 200), else: 50))
-
-    view = if p["view"] == "activity", do: :activity, else: :security
-    events = Audit.page(view, limit, p["before"])
-    next = if length(events) == limit, do: List.last(events).id
-
-    {:ok, %{events: Enum.map(events, &event/1), next: next}}
-  end
 
   ## The account and its sessions
 
@@ -388,43 +339,6 @@ defmodule HiremeWeb.Account do
 
   ## Projections
 
-  defp overview(%Session{} = s) do
-    # Read first: anything that lands while the rest is read moves the
-    # account past this cursor, and the next watch answers at once.
-    cursor = Audit.rev(s.account_id)
-    account = Accounts.get(s.account_id)
-
-    %{
-      cursor: cursor,
-      account: %{id: account.id, name: account.name, status: account.status},
-      fresh_for: fresh_for(s),
-      domains: Map.new(Keys.domains()),
-      presets: Map.new([:read_only, :write_only, :read_write], &{&1, Keys.preset(&1)}),
-      identities:
-        for(i <- Accounts.identities(), do: Map.take(i, [:id, :provider, :display, :verified_at])),
-      factors: Enum.map(Mfa.factors(), &factor/1),
-      recovery_codes_left: Mfa.recovery_codes_left(),
-      sessions:
-        for(
-          x <- Accounts.sessions(s.account_id),
-          do:
-            x
-            |> Map.take([:id, :ip, :user_agent, :authenticated_at, :last_seen_at, :expires_at])
-            |> Map.put(:current, x.id == s.id)
-        ),
-      keys: Enum.map(Keys.list(), &key/1),
-      leases: Hireme.Lease.leases(s.account_id),
-      trusted_hosts:
-        for(h <- Hireme.Provenance.trusted_hosts(), do: Map.take(h, [:id, :host, :note])),
-      limits:
-        for(
-          {name, {ms, max}} <- Hireme.Security.limits(),
-          into: %{},
-          do: {name, %{window_ms: ms, max: max}}
-        )
-    }
-  end
-
   defp key(k) do
     k
     |> Map.take([
@@ -460,12 +374,7 @@ defmodule HiremeWeb.Account do
     ])
   end
 
-  defp event(e) do
-    e
-    |> Map.take([:id, :kind, :ip, :user_agent, :meta, :key_id, :session_id, :inserted_at])
-    |> Map.update!(:meta, &Audit.visible(&1, e.kind))
-  end
-
+  # Seconds the session's step-up still holds; 0 when it must step up again.
   defp fresh_for(%Session{} = s) do
     if Mfa.fresh?(s) do
       proof = if Mfa.enrolled?(), do: s.mfa_at, else: s.authenticated_at

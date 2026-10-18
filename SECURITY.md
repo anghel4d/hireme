@@ -287,9 +287,7 @@ came from (20 of each named, the rest counted, up to 1,000 tracked a
 window; events from any past those are counted as such). A key's HELLO from a peer
 (an IPv6 address counts by its /64) it has not used in the window is its
 own row, for the first 50 peers of the key in the window, so which
-addresses held a key is not only a count. A lease opening or closing moves
-the account lens's cursor even when coalesced, waking a parked watch at
-most once a second (and once more when that second ends). The counts are
+addresses held a key is not only a count. The counts are
 held in memory until their window closes; they are written as the node
 stops, after its sessions and sequencers, but an unclean exit of the VM
 loses the open windows' counts.
@@ -322,7 +320,7 @@ writer for long.
 | OAuth refusals recorded | 20 per peer in 10 minutes |
 | Wire tickets | 60 per peer a minute |
 | Agent ops | 600 per key per wall-clock minute |
-| Agent read RPCs | 3,000 per key per wall-clock minute |
+| Agent lease RPCs | 3,000 per key per wall-clock minute |
 | Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
 | Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the outbox holds at most its declared 100,000 rows per account, past which only a digest already pending is counted up (the event stays on the trail); the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |

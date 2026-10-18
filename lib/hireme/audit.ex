@@ -16,7 +16,6 @@ defmodule Hireme.Audit do
 
   import Ecto.Query
   alias Hireme.Repo
-  alias Hireme.Rows.Account
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
 
@@ -34,10 +33,6 @@ defmodule Hireme.Audit do
     "wire_key" => :hellos,
     "lease_revoked" => :revokes
   }
-
-  # A lease opening or closing changes what the account lens shows, so it
-  # moves the cursor and wakes a parked watch even when coalesced.
-  @leases ~w(lease_opened lease_released lease_revoked)
 
   # Activity that expires (`Hireme.Release.Purge`, after
   # `Security.activity_retention_days/0`); every other kind is kept forever.
@@ -126,25 +121,8 @@ defmodule Hireme.Audit do
     end
   end
 
-  defp coalesce(budget, name, account_id, context) do
-    __MODULE__.Coalescer.count(account_id, budget, name, context)
-    if name in @leases, do: __MODULE__.Coalescer.wake(account_id), else: :ok
-  end
-
-  @doc false
-  # The cursor moves and parked watches wake, with no row: a coalesced lease
-  # change still reaches the account lens (at most once a second per
-  # account, `Coalescer.wake/1`).
-  def moved(account_id) do
-    Store.write(fn -> cursor(account_id) end)
-    changed(account_id)
-  end
-
-  defp cursor(account_id) do
-    Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
-      skip_account: true
-    )
-  end
+  defp coalesce(budget, name, account_id, context),
+    do: __MODULE__.Coalescer.count(account_id, budget, name, context)
 
   @doc false
   # Whether this process recorded an event since `recorded?(:reset)`: how an
@@ -159,42 +137,30 @@ defmodule Hireme.Audit do
   end
 
   @doc false
-  # The row and the cursor it moves, in one transaction: both or neither.
   def commit(kind, meta, context, account_id) do
     now = Store.now()
-    quiet? = Atom.to_string(kind) in @quiet
 
-    {:ok, _} =
-      Store.transaction(fn ->
-        {1, [%{id: id}]} =
-          Repo.insert_all(
-            Event,
-            [
-              %{
-                account_id: account_id,
-                kind: Atom.to_string(kind),
-                ip: blank(context[:ip], 64),
-                user_agent: blank(context[:user_agent], 200),
-                meta: meta,
-                key_id: Map.get(context, :key_id),
-                session_id: Map.get(context, :session_id),
-                security: Atom.to_string(kind) not in activity_kinds(),
-                rev: 1,
-                inserted_at: now,
-                updated_at: now
-              }
-            ],
-            skip_account: true,
-            returning: [:id]
-          )
-
-        # The cursor moves in the same turn as the row that moves it: a count
-        # of the account's announced changes, so a coalesced lease change can
-        # move it too.
-        if account_id && not quiet? do
-          _ = id
-          cursor(account_id)
-        end
+    {1, _} =
+      Store.write(fn ->
+        Repo.insert_all(
+          Event,
+          [
+            %{
+              account_id: account_id,
+              kind: Atom.to_string(kind),
+              ip: blank(context[:ip], 64),
+              user_agent: blank(context[:user_agent], 200),
+              meta: meta,
+              key_id: Map.get(context, :key_id),
+              session_id: Map.get(context, :session_id),
+              security: Atom.to_string(kind) not in activity_kinds(),
+              rev: 1,
+              inserted_at: now,
+              updated_at: now
+            }
+          ],
+          skip_account: true
+        )
       end)
 
     :ok
@@ -221,7 +187,7 @@ defmodule Hireme.Audit do
   @doc """
   Announce a change to the account's security state to every other
   process on its topic. Recording an event does this; every change to
-  that state is recorded, so `rev/1` moves with every announcement.
+  that state is recorded.
   """
   @spec changed(pos_integer() | nil) :: :ok
   def changed(nil), do: :ok
@@ -238,35 +204,6 @@ defmodule Hireme.Audit do
   @spec bye(pos_integer(), bye()) :: :ok
   def bye(account_id, {who, reason}),
     do: Hireme.PubSub.broadcast(topic(account_id), {:bye, who, reason})
-
-  @doc """
-  How far the account's security state has moved: a count of the changes
-  it announced (every event but activity, and every lease opening or
-  closing, coalesced or not). It only grows, is kept on the account row
-  (`accounts.audit_rev`) in the turn that announces, and `account.watch`
-  compares against it.
-  """
-  @spec rev(pos_integer()) :: non_neg_integer()
-  def rev(account_id) do
-    Repo.one(from(a in Account, where: a.id == ^account_id, select: a.audit_rev),
-      skip_account: true
-    ) || 0
-  end
-
-  @doc """
-  A page of the account's trail on the process, newest first: its security
-  events or its activity (`activity_kinds/0`), with ids below `before`.
-  """
-  @spec page(:security | :activity, pos_integer(), integer() | nil) :: [struct()]
-  def page(view, limit, before) do
-    security? = view == :security
-
-    q =
-      from(e in Event, where: e.security == ^security?, order_by: [desc: e.id], limit: ^limit)
-
-    q = if is_integer(before), do: where(q, [e], e.id < ^before), else: q
-    Repo.all(q)
-  end
 
   @doc "The latest events for the account on the process, newest first."
   @spec recent(pos_integer()) :: [struct()]
@@ -338,8 +275,6 @@ defmodule Hireme.Audit.Coalescer do
   @tracked 1000
   # Distinct addresses a key's first HELLOs are written for, per window.
   @firsts 50
-  # A coalesced lease change wakes the account lens at most this often.
-  @wake 1000
 
   @doc "Make the counts table; the application's own process owns it."
   def table, do: :ets.new(@table, [:named_table, :public, :set, write_concurrency: true])
@@ -411,38 +346,6 @@ defmodule Hireme.Audit.Coalescer do
     ArgumentError -> true
   end
 
-  @doc """
-  Wake the account lens for a coalesced lease change: at once if it was not
-  woken in the last second, else once when that second ends.
-  """
-  @spec wake(pos_integer()) :: :ok
-  def wake(account_id) do
-    now = System.os_time(:millisecond)
-    key = {:wake, account_id}
-
-    # Claimed atomically: racing changes wake the lens once, not each.
-    claimed? =
-      :ets.insert_new(@table, {key, now}) or
-        :ets.select_replace(@table, [
-          {{key, :"$1"}, [{:<, :"$1", now - @wake}], [{{{:const, key}, now}}]}
-        ]) == 1
-
-    if claimed? do
-      Audit.moved(account_id)
-    else
-      last = :ets.lookup_element(@table, key, 2, now)
-
-      # The marker holds when its wake is due, so a lost message cannot
-      # keep it (the tick drops one long past due).
-      if :ets.insert_new(@table, {{:trailing, account_id}, last + @wake}),
-        do: Process.send_after(__MODULE__, {:wake, account_id}, max(last + @wake - now, 0))
-
-      :ok
-    end
-  rescue
-    ArgumentError -> Audit.moved(account_id)
-  end
-
   @doc "Write every window closed by `now_ms` (all of them with `:all`). Answers the rows written."
   @spec flush(integer() | :all) :: non_neg_integer()
   def flush(now_ms \\ System.os_time(:millisecond)) do
@@ -454,8 +357,6 @@ defmodule Hireme.Audit.Coalescer do
     ArgumentError -> 0
   end
 
-  defp closed?({:wake, _}, _), do: false
-  defp closed?({:trailing, _}, _), do: false
   defp closed?({:first, _, w, _, _}, now_ms), do: now_ms == :all or w < window(:hellos, now_ms)
   defp closed?(key, now_ms), do: now_ms == :all or elem(key, 3) < window(elem(key, 2), now_ms)
 
@@ -584,28 +485,6 @@ defmodule Hireme.Audit.Coalescer do
   @impl true
   def handle_info(:flush, s) do
     flush()
-    now = System.os_time(:millisecond)
-    :ets.select_delete(@table, [{{{:wake, :_}, :"$1"}, [{:<, :"$1", now - @wake}], [true]}])
-
-    :ets.select_delete(@table, [
-      {{{:trailing, :_}, :"$1"}, [{:<, :"$1", now - 2 * @wake}], [true]}
-    ])
-
-    {:noreply, s}
-  end
-
-  # Only a trailing wake still pending is sent.
-  def handle_info({:wake, account_id}, s) do
-    if :ets.take(@table, {:trailing, account_id}) != [] do
-      :ets.insert(@table, {{:wake, account_id}, System.os_time(:millisecond)})
-
-      try do
-        Audit.moved(account_id)
-      rescue
-        e -> Logger.error("trail wake for account #{account_id} failed: #{inspect(e.__struct__)}")
-      end
-    end
-
     {:noreply, s}
   end
 

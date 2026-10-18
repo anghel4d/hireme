@@ -19,8 +19,7 @@ defmodule HiremeWeb.Session do
   - OPS go to the sequencer; ACK and NACK come back after the PATCH that
     carries the writes.
   - RPC: `lease.claim`, `lease.release` (`Hireme.Lease`), `account.*`
-    (`HiremeWeb.Account`, browser sessions only; `account.watch` is parked
-    and answered `{changed: true}` at the account's next audited change).
+    (`HiremeWeb.Account`, browser sessions only).
   - Liveness: a PING every 15 s each way; 45 s without any frame from the
     peer ends the session, and with it the lease.
   - A key revoked or its masks changed, the session revoked, the account
@@ -63,7 +62,6 @@ defmodule HiremeWeb.Session do
        account_id: nil,
        session: nil,
        rev: 0,
-       parked: nil,
        sequencer: nil,
        touched: now_ms()
      }}
@@ -130,9 +128,6 @@ defmodule HiremeWeb.Session do
       do: {:ok, state},
       else: bye(:revoked, "credential lapsed", state)
   end
-
-  def info({Hireme.Audit, :changed}, %{parked: id} = state) when id != nil,
-    do: {:push, [reply(id, true, %{changed: true}, state)], %{state | parked: nil}}
 
   def info({__MODULE__, :too_many}, state),
     do: bye(:restart, "too many sessions from this address; retry later", state)
@@ -446,7 +441,6 @@ defmodule HiremeWeb.Session do
     case HiremeWeb.Account.call(method, params, ctx) do
       {:ok, result} -> {:push, [reply(id, true, result, state)], state}
       {:error, err} -> {:push, [reply(id, false, err, state)], state}
-      {:park, :account} -> park(id, state)
     end
   end
 
@@ -492,16 +486,6 @@ defmodule HiremeWeb.Session do
         :ok
     end
   end
-
-  # account.watch goes through HiremeWeb.Account first (it answers at once
-  # when the audit cursor has moved past `since`); only then is it parked.
-  # One parked watch per browser session: a new one answers the old.
-  defp park(id, %{session: %{key_id: nil}} = state) do
-    old = if state.parked, do: [reply(state.parked, true, %{changed: false}, state)], else: []
-    {:push, old, %{state | parked: id}}
-  end
-
-  defp park(id, state), do: {:push, [reply(id, false, error(:scope, %{}), state)], state}
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
   defp answer(id, :ok, state), do: {:push, [reply(id, true, %{}, state)], state}

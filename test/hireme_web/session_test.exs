@@ -268,24 +268,6 @@ defmodule HiremeWeb.SessionTest do
     |> then(&Session.frame(Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b"), &1))
   end
 
-  test "account.watch asks the account lens first: a cursor already passed answers at once", %{
-    session: s
-  } do
-    {:push, _, state} = browser(s)
-
-    {:push, [frame], state} =
-      Session.frame(Codec.encode_rpc(1, "account.watch", JSON.encode!(%{since: 0})), state)
-
-    assert %{kind: :REPLY, body: <<1::little-32, 1, _::binary>>} = decode(frame)
-    {:ok, %{"cursor" => cursor}} = rpc_ok(state, "account.overview", %{})
-    # At the current cursor it parks: no reply until the account moves.
-    assert {:push, [], _} =
-             Session.frame(
-               Codec.encode_rpc(2, "account.watch", JSON.encode!(%{since: cursor})),
-               state
-             )
-  end
-
   test "a snapshot under another schema_rev is answered with a full BOOT", %{
     session: s,
     account: a

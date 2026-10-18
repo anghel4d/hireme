@@ -315,10 +315,10 @@ defmodule Hireme.Accounts do
   lifetime, idle limit, revocation and suspension as a page. With
   `activity?` false it only checks, for what a client does by itself.
   """
-  @spec live_session(pos_integer(), boolean()) :: {:ok, Session.t()} | :error
-  def live_session(session_id, activity? \\ true) when is_integer(session_id) do
+  @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
+  def live_session(session_id) when is_integer(session_id) do
     case read_live(session_id) do
-      {:ok, s, now} -> {:ok, if(activity?, do: touch(s, now), else: s)}
+      {:ok, s, now} -> {:ok, touch(s, now)}
       :error -> :error
     end
   end

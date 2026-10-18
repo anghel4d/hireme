@@ -176,75 +176,6 @@ defmodule Hireme.AuditTest do
   end
 
   @tag window: [:activity, :activity_node]
-  test "a coalesced lease change still moves the cursor and wakes the account's watchers" do
-    %{account: a} = sign_in()
-    for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
-    cursor = Audit.rev(a.id)
-    Hireme.PubSub.subscribe(Audit.topic(a.id))
-    # Recorded by another process, as the sequencer records it: a process
-    # never hears its own announcement.
-    parent = self()
-
-    Task.await(
-      Task.async(fn ->
-        Sandbox.allow(Repo, parent, self())
-        Audit.record(:lease_released, %{}, %{account_id: a.id})
-      end)
-    )
-
-    assert Audit.rev(a.id) == cursor + 1
-    assert_receive {Hireme.Audit, :changed}
-  end
-
-  @tag window: [:activity, :activity_node]
-  test "a burst of coalesced lease changes wakes the watchers once, and once more after it" do
-    %{account: a} = sign_in()
-    for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
-    cursor = Audit.rev(a.id)
-    Hireme.PubSub.subscribe(Audit.topic(a.id))
-    parent = self()
-    t0 = System.monotonic_time(:millisecond)
-
-    Task.await(
-      Task.async(fn ->
-        Sandbox.allow(Repo, parent, self())
-        for _ <- 1..20, do: Audit.record(:lease_released, %{}, %{account_id: a.id})
-      end)
-    )
-
-    seconds = div(System.monotonic_time(:millisecond) - t0, 1000)
-    # The burst's last change still arrives: a wake follows it.
-    assert_receive {Hireme.Audit, :changed}
-    assert_receive {Hireme.Audit, :changed}, 2_000
-
-    wakes =
-      2 +
-        Enum.count(
-          Stream.repeatedly(fn -> receive do: (m -> m), after: (1_500 -> nil) end)
-          |> Enum.take_while(& &1)
-        )
-
-    assert wakes <= seconds + 2
-    assert Audit.rev(a.id) == cursor + wakes
-  end
-
-  @tag window: [:activity, :activity_node]
-  test "a trailing wake whose message was lost does not silence the next ones" do
-    %{account: a} = sign_in()
-    for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
-    # As if its timer fired while the Coalescer was restarting: a marker long past due.
-    past = System.os_time(:millisecond) - 5_000
-    :ets.insert(Audit.Coalescer, {{:trailing, a.id}, past})
-    send(Audit.Coalescer, :flush)
-    Process.sleep(1_100)
-    cursor = Audit.rev(a.id)
-    Audit.record(:lease_opened, %{}, %{account_id: a.id})
-    Audit.record(:lease_opened, %{}, %{account_id: a.id})
-    Process.sleep(1_500)
-    assert Audit.rev(a.id) == cursor + 2
-  end
-
-  @tag window: [:activity, :activity_node]
   test "events recorded while flushes run are each a row or a count, never lost" do
     %{account: a} = sign_in()
     {_, budget} = Hireme.Security.limits()[:activity]
@@ -291,28 +222,6 @@ defmodule Hireme.AuditTest do
   end
 
   @tag window: :revokes
-  test "a coalesced row whose cursor cannot move is not written, and is written once when it can" do
-    %{account: a} = sign_in()
-    for _ <- 1..125, do: Audit.record(:lease_revoked, %{}, %{account_id: a.id})
-
-    Repo.query!(
-      "CREATE TRIGGER no_cursor BEFORE UPDATE ON accounts BEGIN SELECT RAISE(ABORT, 'no'); END"
-    )
-
-    coalesced = fn -> Enum.count(kinds(a.id), &(&1 == "revokes_coalesced")) end
-    ExUnit.CaptureLog.capture_log(fn -> Audit.Coalescer.flush(:all) end)
-    assert coalesced.() == 0
-
-    Repo.query!("DROP TRIGGER no_cursor")
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "revokes_coalesced", :meta)
-
-    assert meta["counts"] == %{"lease_revoked" => %{"none" => 5}}
-  end
-
-  @tag window: [:activity, :activity_node]
   test "a failed write puts its values back under the tracking cap, beside what came meanwhile" do
     %{account: a} = sign_in()
     for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})

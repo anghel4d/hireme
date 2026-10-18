@@ -291,7 +291,6 @@ for table <- Hireme.Schema.tables(), table.residency in [:resident, :server] do
     end
 
   name = table.name
-  id = table.id
 
   body =
     quote do
@@ -304,9 +303,6 @@ for table <- Hireme.Schema.tables(), table.residency in [:resident, :server] do
         unquote_splicing(fields)
         timestamps()
       end
-
-      @doc "The declared table this row is."
-      def __table__, do: Hireme.Schema.table(unquote(id))
     end
 
   Module.create(Hireme.Schema.row(table.name), body, Macro.Env.location(__ENV__))
