@@ -82,12 +82,9 @@ defmodule Hireme.Accounts do
 
   ## Sessions
 
-  @doc """
-  Open a session for `account`. Answers the token the cookie carries and
-  the row; the token is not stored and cannot be recovered.
-  """
-  @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()} | {:error, :cap}
-  def start_session(%Account{} = account, meta \\ %{}) do
+  # Opens a session for `account`: the token the cookie carries and the
+  # row. The token is not stored and cannot be recovered.
+  defp start_session(%Account{} = account, meta) do
     now = Store.now()
 
     with {:ok, _} <-

@@ -113,8 +113,7 @@ defmodule Hireme.Import do
 
   # ------------------------------------------------------------------ parse
 
-  @doc false
-  def parse(body, :json) do
+  defp parse(body, :json) do
     case Jason.decode(String.trim_leading(body, "\uFEFF")) do
       {:ok, %{"tables" => tables} = pack} when is_list(tables) ->
         groups =
@@ -139,7 +138,7 @@ defmodule Hireme.Import do
     end
   end
 
-  def parse(body, :markdown) do
+  defp parse(body, :markdown) do
     # A byte-order mark (what some editors write first) is not text, and one
     # can open any joined file, not only the first.
     lines =

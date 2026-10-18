@@ -1553,8 +1553,7 @@ defmodule Hireme.Sequencer do
 
   # ----------------------------------------------------------- the reads
 
-  @doc false
-  def rebuild(state) do
+  defp rebuild(state) do
     # Inside a batch the rows read are uncommitted, so they are not kept.
     {read, body} = snapshot(nil, %{state | rows: nil, blocks: nil}, Store.now())
     rows = if Repo.in_transaction?(), do: nil, else: read.rows

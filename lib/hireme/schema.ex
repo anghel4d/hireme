@@ -139,8 +139,7 @@ defmodule Hireme.Schema do
   @doc "The row module of a stored table."
   def row(table), do: Module.concat(Hireme.Rows, singular(table(table).name))
 
-  @doc false
-  def singular(name) do
+  defp singular(name) do
     name =
       cond do
         String.ends_with?(name, "ies") ->
