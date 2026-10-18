@@ -103,9 +103,16 @@ defmodule HiremeWeb.Session do
     end
   end
 
+  # Each tick re-checks the credential the session stands on: a browser
+  # session's lifetime, idle limit and revocation (and wire activity counts
+  # as its activity), a key's expiry. A lapsed one ends the session.
   def info({__MODULE__, :tick}, %{phase: :live} = state) do
-    Process.send_after(self(), {__MODULE__, :tick}, @tick_ms)
-    {:push, [Codec.frame(:TICK, state.rev, clock(), end: true)], state}
+    if credential_live?(state.session) do
+      Process.send_after(self(), {__MODULE__, :tick}, @tick_ms)
+      {:push, [Codec.frame(:TICK, state.rev, clock(), end: true)], state}
+    else
+      bye(:revoked, "credential lapsed", state)
+    end
   end
 
   def info(:drain, state), do: bye(:restart, "the node is restarting", state)
@@ -219,6 +226,12 @@ defmodule HiremeWeb.Session do
 
   defp authenticate(_, _), do: :error
 
+  defp credential_live?(%{key_id: nil, session_id: id}),
+    do: match?({:ok, _}, Hireme.Accounts.live_session(id))
+
+  defp credential_live?(%{key_id: key_id, account_id: account_id}),
+    do: Hireme.Keys.usable?(key_id, account_id)
+
   defp allowed_origin?(nil), do: false
 
   defp allowed_origin?(origin),
@@ -232,7 +245,7 @@ defmodule HiremeWeb.Session do
   end
 
   defp live(hello, who, state) do
-    Phoenix.PubSub.subscribe(Hireme.PubSub, "account:#{who.account_id}")
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(who.account_id))
     session = Map.put(who, :id, System.unique_integer([:positive, :monotonic]))
 
     case Sequencer.subscribe(

@@ -146,6 +146,24 @@ defmodule HiremeWeb.SessionTest do
     assert bye.kind == :BYE
   end
 
+  test "each tick re-checks the key: one that expired mid-connection ends the session", %{
+    session: s
+  } do
+    {key, rw} = key(s, :read_write)
+    {_, state} = hello(open(), :key, rw)
+    assert {:push, [tick], state} = Session.info({Session, :tick}, state)
+    assert decode(tick).kind == :TICK
+
+    key
+    |> Ecto.Changeset.change(
+      expires_at: DateTime.add(DateTime.utc_now(), -60) |> DateTime.truncate(:second)
+    )
+    |> Repo.update!(skip_account: true)
+
+    assert {:stop, {:bye, :revoked}, [bye], _} = Session.info({Session, :tick}, state)
+    assert decode(bye).kind == :BYE
+  end
+
   test "a PING is answered with the same nonce; a frame before HELLO ends the session" do
     assert {:stop, {:protocol, :hello_first}, [], _} = Session.frame(Codec.ping(:PING, 1), open())
   end
