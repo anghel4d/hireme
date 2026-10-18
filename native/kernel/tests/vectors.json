@@ -1443,6 +1443,39 @@
           ]
         }
       ]
+    },
+    {
+      "name": "a document shows days as dates, as put takes them back: 0000-01-01, an office opened 1897-01-01, today, 9999-12-31",
+      "today": 740272,
+      "rows": {
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "closed",
+            "company": "Acme",
+            "role": "R",
+            "stage_on": 0,
+            "applied_on": 692866,
+            "replied_on": 740272,
+            "closed_on": 3652424
+          }
+        ]
+      },
+      "steps": [
+        {
+          "doc": "application",
+          "arg": 1,
+          "expect": {
+            "application": {
+              "stage_on": "0000-01-01",
+              "applied_on": "1897-01-01",
+              "replied_on": "2026-10-18",
+              "closed_on": "9999-12-31"
+            }
+          }
+        }
+      ]
     }
   ]
 }

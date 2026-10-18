@@ -39,7 +39,8 @@ fn val(v: Val) -> Json {
     }
 }
 
-/// Every column of a row, named by the catalog, enums by name.
+/// Every column of a row, named by the catalog: enums by name, days and
+/// times as ISO dates.
 pub fn row(t: &Table, id: u32) -> Json {
     let Some(def) = schema::table_def(t.id) else { return Json::Null };
     let mut m = Map::new();
@@ -51,6 +52,14 @@ pub fn row(t: &Table, id: u32) -> Json {
         let j = match (c.type_code, c.target) {
             (code, Some(e)) if code == schema::Type::Enum.code() => enum_name(enum_names(e), t.u32(id, c.id)),
             (code, _) if code == schema::Type::Bool.code() => t.u32(id, c.id).map_or(Json::Null, |b| Json::Bool(b == 1)),
+            // Dates as `put` takes them back: a day `YYYY-MM-DD`, a time
+            // ISO-8601 UTC.
+            (code, _) if code == schema::Type::Day.code() => t.u32(id, c.id).map_or(Json::Null, |d| crate::day_iso(d as Day).into()),
+            (code, _) if code == schema::Type::Time.code() => match v {
+                Val::U32(s) => crate::time_iso(s as i64).into(),
+                Val::I64(s) => crate::time_iso(s).into(),
+                _ => Json::Null,
+            },
             (code, _) if code == schema::Type::Json.code() => match &v {
                 Val::Str(s) => serde_json::from_str(s).unwrap_or(Json::String(s.clone())),
                 _ => Json::Null,
