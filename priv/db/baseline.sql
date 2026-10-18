@@ -150,6 +150,7 @@ CREATE TABLE "audit" (
 ) STRICT;
 CREATE INDEX "audit__account_account_id" ON "audit" ("account_id");
 CREATE INDEX "audit__index_id_desc" ON "audit" ("account_id", "id" DESC);
+CREATE INDEX "audit__index_kind_inserted_at" ON "audit" ("kind", "inserted_at");
 
 CREATE TABLE "outbox" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -250,6 +250,8 @@ table recovery_codes system server
 table audit system server append_only account_optional
   cap 10000000
   index id desc
+  # The trail purge reads expiring kinds past a date across every account.
+  index kind inserted_at global
   col kind str !
   col ip str ?
   col user_agent str ?
