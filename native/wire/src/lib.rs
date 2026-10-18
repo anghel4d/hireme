@@ -154,33 +154,17 @@ pub const REPLY: u8 = 34;
 
 // The schema owns these numbers; a drift fails the build, not a client.
 const _: () = {
-    assert!(
-        HELLO == schema::frame::HELLO
-            && WELCOME == schema::frame::WELCOME
-            && BOOT == schema::frame::BOOT
-    );
-    assert!(
-        PATCH == schema::frame::PATCH && OPS == schema::frame::OPS && ACK == schema::frame::ACK
-    );
-    assert!(
-        NACK == schema::frame::NACK && TICK == schema::frame::TICK && PING == schema::frame::PING
-    );
-    assert!(PONG == schema::frame::PONG && BYE == schema::frame::BYE && RPC == schema::frame::RPC);
-    assert!(REPLY == schema::frame::REPLY);
-    assert!(NULL == schema::wire::NULL && U32 == schema::wire::U32 && STR == schema::wire::STR);
-    assert!(
-        I64 == schema::wire::I64 && F64 == schema::wire::F64
-    );
-    assert!(SYM == schema::wire::SYM && LIST == schema::wire::LIST);
-    assert!(AS_OF == schema::AS_OF && SOURCE == schema::SOURCE_CELL);
-    assert!(BYE_REVOKED == schema::enums::bye::REVOKED && BYE_GRANTS == schema::enums::bye::GRANTS);
-    assert!(BYE_RESTART == schema::enums::bye::RESTART && BYE_SCHEMA == schema::enums::bye::SCHEMA);
-    assert!(BYE_SUSPENDED == schema::enums::bye::SUSPENDED);
+    use schema::{enums::bye, frame, wire as ty};
+    assert!(HELLO == frame::HELLO && WELCOME == frame::WELCOME && BOOT == frame::BOOT && PATCH == frame::PATCH && OPS == frame::OPS);
+    assert!(ACK == frame::ACK && NACK == frame::NACK && TICK == frame::TICK && PING == frame::PING && PONG == frame::PONG);
+    assert!(BYE == frame::BYE && RPC == frame::RPC && REPLY == frame::REPLY);
+    assert!(NULL == ty::NULL && U32 == ty::U32 && STR == ty::STR && I64 == ty::I64 && F64 == ty::F64 && ZSTR == ty::ZSTR);
+    assert!(SYM == ty::SYM && LIST == ty::LIST && AS_OF == schema::AS_OF && SOURCE == schema::SOURCE_CELL);
+    assert!(BYE_REVOKED == bye::REVOKED && BYE_GRANTS == bye::GRANTS && BYE_RESTART == bye::RESTART);
+    assert!(BYE_SCHEMA == bye::SCHEMA && BYE_SUSPENDED == bye::SUSPENDED);
 };
 
-const KINDS: [u8; 13] = [
-    HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY,
-];
+const KINDS: [u8; 13] = [HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY];
 
 /// Header flags.
 pub const ZSTD: u8 = 0x01;
@@ -241,27 +225,15 @@ pub const MAX_TEXT: usize = 16 << 20;
 pub const TEXT_DICT: &[u8] = include_bytes!("../../../priv/wire/text.zdict");
 pub const FRAME_DICT: &[u8] = include_bytes!("../../../priv/wire/frame.zdict");
 
-const fn fnv(b: &[u8]) -> u32 {
-    let (mut h, mut i) = (0x811C_9DC5u32, 0);
-    while i < b.len() {
-        h = (h ^ b[i] as u32).wrapping_mul(0x0100_0193);
-        i += 1;
-    }
-    h
+/// A dictionary's (id, fnv) as the schema's dict lines state them.
+const fn dict_line(b: &[u8]) -> (u32, u32) {
+    (u32::from_le_bytes([b[4], b[5], b[6], b[7]]), schema::fnv(b))
 }
 
-const fn dict_id(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[4], b[5], b[6], b[7]])
-}
-
-const _: () = assert!(
-    dict_id(TEXT_DICT) == schema::TEXT_DICT.0 && fnv(TEXT_DICT) == schema::TEXT_DICT.1,
-    "priv/wire/text.zdict is not the schema's dict text line"
-);
-const _: () = assert!(
-    dict_id(FRAME_DICT) == schema::FRAME_DICT.0 && fnv(FRAME_DICT) == schema::FRAME_DICT.1,
-    "priv/wire/frame.zdict is not the schema's dict frame line"
-);
+const _: () = {
+    assert!(matches!(dict_line(TEXT_DICT), schema::TEXT_DICT), "priv/wire/text.zdict is not the schema's dict text line");
+    assert!(matches!(dict_line(FRAME_DICT), schema::FRAME_DICT), "priv/wire/frame.zdict is not the schema's dict frame line");
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -359,13 +331,7 @@ impl Header {
         if b.len() < HEADER {
             return Err(Error::Short);
         }
-        let h = Header {
-            len: u32_at(b, 0),
-            kind: b[4],
-            flags: b[5],
-            hash: u16_at(b, 6),
-            rev: u64_at(b, 8),
-        };
+        let h = Header { len: u32_at(b, 0), kind: b[4], flags: b[5], hash: u16_at(b, 6), rev: u64_at(b, 8) };
         if (h.len as usize) < HEADER || !h.len.is_multiple_of(8) {
             return Err(Error::Len);
         }
@@ -413,11 +379,7 @@ impl<'a> Frame<'a> {
     pub fn parse(b: &'a [u8], wire_hash: u16) -> Result<Frame<'a>> {
         let header = Header::peek(b)?;
         if header.len as usize != b.len() {
-            return Err(if (header.len as usize) > b.len() {
-                Error::Short
-            } else {
-                Error::Len
-            });
+            return Err(if (header.len as usize) > b.len() { Error::Short } else { Error::Len });
         }
         if header.hash != wire_hash {
             return Err(Error::Hash);
@@ -515,9 +477,10 @@ fn unzstd_with(dec: &mut FrameDecoder, z: &[u8], size: core::ops::RangeInclusive
     Ok(out)
 }
 
-/// Undoes the shuffle of a table-run body in place (see the crate doc). A
-/// body that does not walk is left to [`Blocks::new`] to refuse.
-fn unshuffle(b: &mut [u8]) -> Result<()> {
+/// Walks a table-run body's columns in place, handing `f` each one's type,
+/// data and its block's row count. A body that does not walk is left to
+/// [`Blocks::new`] to refuse.
+fn each_column(b: &mut [u8], mut f: impl FnMut(u8, &mut [u8], usize) -> Result<()>) -> Result<()> {
     let mut at = 0usize;
     while at + 8 <= b.len() {
         let (ncols, nrows) = (u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
@@ -525,25 +488,33 @@ fn unshuffle(b: &mut [u8]) -> Result<()> {
         for _ in 0..ncols {
             let (ty, len) = (*b.get(at + 2).ok_or(Error::Short)?, u32_at(b.get(at..at + 8).ok_or(Error::Short)?, 4) as usize);
             let data = b.get_mut(at + 8..(at + 8).checked_add(len).ok_or(Error::Short)?).ok_or(Error::Short)?;
-            match ty {
-                U32 => unplane(data, 4),
-                I64 | F64 => unplane(data, 8),
-                STR | ZSTR => {
-                    let head = nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)?;
-                    let offsets = &mut data[..head];
-                    unplane(offsets, 4);
-                    let mut sum = 0u32;
-                    for o in offsets.as_chunks_mut::<4>().0 {
-                        sum = sum.wrapping_add(u32::from_le_bytes(*o));
-                        *o = sum.to_le_bytes();
-                    }
-                }
-                _ => {}
-            }
+            f(ty, data, nrows)?;
             at = pad8(at + 8 + len);
         }
     }
     Ok(())
+}
+
+/// Undoes the shuffle of a table-run body in place (see the crate doc).
+fn unshuffle(b: &mut [u8]) -> Result<()> {
+    each_column(b, |ty, data, nrows| {
+        match ty {
+            U32 => transpose(data, 4, false),
+            I64 | F64 => transpose(data, 8, false),
+            STR | ZSTR => {
+                let head = head_of(nrows, data.len())?;
+                let offsets = &mut data[..head];
+                transpose(offsets, 4, false);
+                let mut sum = 0u32;
+                for o in offsets.as_chunks_mut::<4>().0 {
+                    sum = sum.wrapping_add(u32::from_le_bytes(*o));
+                    *o = sum.to_le_bytes();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })
 }
 
 /// Shuffles a table-run body in place before packing: the inverse of
@@ -551,59 +522,39 @@ fn unshuffle(b: &mut [u8]) -> Result<()> {
 /// zstr column's offsets into wrapping deltas then 4 planes). The node packs
 /// BOOTs through it, so the walk over a whole desk is native, not Elixir's.
 pub fn shuffle(b: &mut [u8]) -> Result<()> {
-    let mut at = 0usize;
-    while at + 8 <= b.len() {
-        let (ncols, nrows) = (u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
-        at += 8;
-        for _ in 0..ncols {
-            let (ty, len) = (*b.get(at + 2).ok_or(Error::Short)?, u32_at(b.get(at..at + 8).ok_or(Error::Short)?, 4) as usize);
-            let data = b.get_mut(at + 8..(at + 8).checked_add(len).ok_or(Error::Short)?).ok_or(Error::Short)?;
-            match ty {
-                U32 => plane(data, 4),
-                I64 | F64 => plane(data, 8),
-                STR | ZSTR => {
-                    let head = nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)?;
-                    let offsets = &mut data[..head];
-                    let mut prev = 0u32;
-                    for o in offsets.as_chunks_mut::<4>().0 {
-                        let v = u32::from_le_bytes(*o);
-                        *o = v.wrapping_sub(prev).to_le_bytes();
-                        prev = v;
-                    }
-                    plane(offsets, 4);
+    each_column(b, |ty, data, nrows| {
+        match ty {
+            U32 => transpose(data, 4, true),
+            I64 | F64 => transpose(data, 8, true),
+            STR | ZSTR => {
+                let head = head_of(nrows, data.len())?;
+                let offsets = &mut data[..head];
+                let mut prev = 0u32;
+                for o in offsets.as_chunks_mut::<4>().0 {
+                    let v = u32::from_le_bytes(*o);
+                    *o = v.wrapping_sub(prev).to_le_bytes();
+                    prev = v;
                 }
-                _ => {}
+                transpose(offsets, 4, true);
             }
-            at = pad8(at + 8 + len);
+            _ => {}
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
-/// `w`-byte values into planes (plane p holds byte p of each); a ragged tail is left as is.
-fn plane(data: &mut [u8], w: usize) {
+/// `w`-byte values into byte planes (plane p holds byte p of each value), or
+/// planes back into values; a ragged tail is left as is.
+fn transpose(data: &mut [u8], w: usize, into_planes: bool) {
     let n = data.len() / w;
     if n == 0 {
         return;
     }
-    let values = data[..n * w].to_vec();
-    for (i, v) in values.chunks_exact(w).enumerate() {
-        for (p, x) in v.iter().enumerate() {
-            data[p * n + i] = *x;
-        }
-    }
-}
-
-/// Planes of `w`-byte values back into values; a ragged tail is left as is.
-fn unplane(data: &mut [u8], w: usize) {
-    let n = data.len() / w;
-    if n == 0 {
-        return;
-    }
-    let planes = data[..n * w].to_vec();
-    for (i, v) in data[..n * w].chunks_exact_mut(w).enumerate() {
-        for (p, x) in v.iter_mut().enumerate() {
-            *x = planes[p * n + i];
+    let copy = data[..n * w].to_vec();
+    for i in 0..n {
+        for p in 0..w {
+            let (value, plane) = (i * w + p, p * n + i);
+            if into_planes { data[plane] = copy[value] } else { data[value] = copy[plane] }
         }
     }
 }
@@ -646,11 +597,11 @@ pub fn text_cell(cell: &[u8]) -> Result<Cow<'_, str>> {
 
 // ------------------------------------------------------------------ writer
 
-/// Builds one frame: header, then body writes, then [`Writer::finish`].
+/// Builds one plain frame (the node alone packs and flags END): header,
+/// then body writes, then [`Writer::finish`].
 pub struct Writer {
     buf: Vec<u8>,
     kind: u8,
-    flags: u8,
     hash: u16,
     rev: u64,
 }
@@ -659,38 +610,30 @@ impl Writer {
     pub fn new(kind: u8, hash: u16, rev: u64) -> Writer {
         let mut buf = Vec::with_capacity(64);
         buf.resize(HEADER, 0);
-        Writer {
-            buf,
-            kind,
-            flags: 0,
-            hash,
-            rev,
-        }
+        Writer { buf, kind, hash, rev }
     }
 
-    pub fn end(mut self) -> Writer {
-        self.flags |= END;
+    /// Appends bytes as they are: a fixed part, or an already-built body
+    /// (table runs, ops), which is a multiple of 8.
+    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        self.buf.extend_from_slice(b);
         self
     }
 
     pub fn u8(&mut self, v: u8) -> &mut Self {
-        self.buf.push(v);
-        self
+        self.bytes(&[v])
     }
 
     pub fn u16(&mut self, v: u16) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-        self
+        self.bytes(&v.to_le_bytes())
     }
 
     pub fn u32(&mut self, v: u32) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-        self
+        self.bytes(&v.to_le_bytes())
     }
 
     pub fn u64(&mut self, v: u64) -> &mut Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-        self
+        self.bytes(&v.to_le_bytes())
     }
 
     pub fn zeros(&mut self, n: usize) -> &mut Self {
@@ -705,27 +648,12 @@ impl Writer {
 
     /// `u32 len | bytes | pad to 8`.
     pub fn field(&mut self, bytes: &[u8]) -> &mut Self {
-        self.u32(bytes.len() as u32);
-        self.buf.extend_from_slice(bytes);
-        self.pad()
-    }
-
-    /// Appends an already-built body (table runs, ops); it must be a multiple of 8.
-    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
-        self.buf.extend_from_slice(b);
-        self
+        self.u32(bytes.len() as u32).bytes(bytes).pad()
     }
 
     pub fn finish(mut self) -> Vec<u8> {
         self.pad();
-        let h = Header {
-            len: self.buf.len() as u32,
-            kind: self.kind,
-            flags: self.flags,
-            hash: self.hash,
-            rev: self.rev,
-        };
-        h.write(&mut self.buf[..HEADER]);
+        Header { len: self.buf.len() as u32, kind: self.kind, flags: 0, hash: self.hash, rev: self.rev }.write(&mut self.buf[..HEADER]);
         self.buf
     }
 }
@@ -802,6 +730,14 @@ impl<'a> Reader<'a> {
             Err(Error::Body)
         }
     }
+
+    /// Reads a whole body with `f`; bytes after what it read are refused.
+    fn whole<T>(b: &'a [u8], f: impl FnOnce(&mut Reader<'a>) -> Result<T>) -> Result<T> {
+        let mut r = Reader::new(b);
+        let v = f(&mut r)?;
+        r.done()?;
+        Ok(v)
+    }
 }
 
 // ------------------------------------------------------------ small frames
@@ -818,30 +754,19 @@ pub struct Hello<'a> {
 impl<'a> Hello<'a> {
     pub fn encode(&self, hash: u16) -> Vec<u8> {
         let mut w = Writer::new(HELLO, hash, 0);
-        w.u8(self.cred)
-            .zeros(7)
-            .u64(self.snapshot_rev)
-            .u64(self.schema_rev);
-        w.field(self.credential).field(self.label.as_bytes());
+        w.u8(self.cred).zeros(7).u64(self.snapshot_rev).u64(self.schema_rev).field(self.credential).field(self.label.as_bytes());
         w.finish()
     }
 
     pub fn decode(body: &'a [u8]) -> Result<Hello<'a>> {
-        let mut r = Reader::new(body);
-        let cred = r.u8()?;
-        r.zeros(7)?;
-        if !(CRED_TICKET..=CRED_KEY).contains(&cred) {
-            return Err(Error::Body);
-        }
-        let h = Hello {
-            cred,
-            snapshot_rev: r.u64()?,
-            schema_rev: r.u64()?,
-            credential: r.field()?,
-            label: r.str_field()?,
-        };
-        r.done()?;
-        Ok(h)
+        Reader::whole(body, |r| {
+            let cred = r.u8()?;
+            r.zeros(7)?;
+            if !(CRED_TICKET..=CRED_KEY).contains(&cred) {
+                return Err(Error::Body);
+            }
+            Ok(Hello { cred, snapshot_rev: r.u64()?, schema_rev: r.u64()?, credential: r.field()?, label: r.str_field()? })
+        })
     }
 }
 
@@ -860,38 +785,22 @@ pub struct Welcome<'a> {
 impl<'a> Welcome<'a> {
     pub fn encode(&self, hash: u16, rev: u64) -> Vec<u8> {
         let mut w = Writer::new(WELCOME, hash, rev);
-        w.u64(self.account_id)
-            .u64(self.session_id)
-            .u64(self.schema_rev);
-        w.u16(self.read_mask)
-            .u16(self.write_mask)
-            .u8(self.may_delete as u8)
-            .u8(self.lease as u8)
-            .u16(0);
-        w.field(self.label.as_bytes());
+        w.u64(self.account_id).u64(self.session_id).u64(self.schema_rev).u16(self.read_mask).u16(self.write_mask);
+        w.u8(self.may_delete as u8).u8(self.lease as u8).u16(0).field(self.label.as_bytes());
         w.finish()
     }
 
     pub fn decode(body: &'a [u8]) -> Result<Welcome<'a>> {
-        let mut r = Reader::new(body);
-        let (account_id, session_id, schema_rev) = (r.u64()?, r.u64()?, r.u64()?);
-        let (read_mask, write_mask) = (r.u16()?, r.u16()?);
-        let (may_delete, lease) = (r.u8()?, r.u8()?);
-        r.zeros(2)?;
-        if may_delete > 1 || lease > 1 {
-            return Err(Error::Body);
-        }
-        let label = r.str_field()?;
-        r.done()?;
-        Ok(Welcome {
-            account_id,
-            session_id,
-            schema_rev,
-            read_mask,
-            write_mask,
-            may_delete: may_delete == 1,
-            lease: lease == 1,
-            label,
+        Reader::whole(body, |r| {
+            let (account_id, session_id, schema_rev) = (r.u64()?, r.u64()?, r.u64()?);
+            let (read_mask, write_mask) = (r.u16()?, r.u16()?);
+            let (may_delete, lease) = (r.u8()?, r.u8()?);
+            r.zeros(2)?;
+            if may_delete > 1 || lease > 1 {
+                return Err(Error::Body);
+            }
+            let label = r.str_field()?;
+            Ok(Welcome { account_id, session_id, schema_rev, read_mask, write_mask, may_delete: may_delete == 1, lease: lease == 1, label })
         })
     }
 }
@@ -912,25 +821,24 @@ pub fn encode_acks(hash: u16, rev: u64, acks: &[Ack]) -> Vec<u8> {
     w.finish()
 }
 
-pub fn decode_acks(body: &[u8]) -> Result<Vec<Ack>> {
-    let mut r = Reader::new(body);
-    let n = r.u32()? as usize;
-    r.zeros(4)?;
-    if n > MAX_OPS {
-        return Err(Error::Body);
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let a = Ack {
-            op_id: r.u64()?,
-            rev: r.u64()?,
-            id: r.u32()?,
-        };
+/// `u32 n | u32 0`, then `n` of `one`; at most [`MAX_OPS`].
+fn counted<'a, T>(body: &'a [u8], mut one: impl FnMut(&mut Reader<'a>) -> Result<T>) -> Result<Vec<T>> {
+    Reader::whole(body, |r| {
+        let n = r.u32()? as usize;
         r.zeros(4)?;
-        out.push(a);
-    }
-    r.done()?;
-    Ok(out)
+        if n > MAX_OPS {
+            return Err(Error::Body);
+        }
+        (0..n).map(|_| one(r)).collect()
+    })
+}
+
+pub fn decode_acks(body: &[u8]) -> Result<Vec<Ack>> {
+    counted(body, |r| {
+        let a = Ack { op_id: r.u64()?, rev: r.u64()?, id: r.u32()? };
+        r.zeros(4)?;
+        Ok(a)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -950,25 +858,11 @@ pub fn encode_nacks(hash: u16, rev: u64, nacks: &[Nack]) -> Vec<u8> {
 }
 
 pub fn decode_nacks(body: &[u8]) -> Result<Vec<Nack<'_>>> {
-    let mut r = Reader::new(body);
-    let n = r.u32()? as usize;
-    r.zeros(4)?;
-    if n > MAX_OPS {
-        return Err(Error::Body);
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let op_id = r.u64()?;
-        let code = r.u16()?;
+    counted(body, |r| {
+        let (op_id, code) = (r.u64()?, r.u16()?);
         r.zeros(6)?;
-        out.push(Nack {
-            op_id,
-            code,
-            data: r.field()?,
-        });
-    }
-    r.done()?;
-    Ok(out)
+        Ok(Nack { op_id, code, data: r.field()? })
+    })
 }
 
 /// PING or PONG.
@@ -979,10 +873,7 @@ pub fn encode_ping(kind: u8, hash: u16, nonce: u64) -> Vec<u8> {
 }
 
 pub fn decode_ping(body: &[u8]) -> Result<u64> {
-    let mut r = Reader::new(body);
-    let n = r.u64()?;
-    r.done()?;
-    Ok(n)
+    Reader::whole(body, Reader::u64)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -999,18 +890,14 @@ impl<'a> Bye<'a> {
     }
 
     pub fn decode(body: &'a [u8]) -> Result<Bye<'a>> {
-        let mut r = Reader::new(body);
-        let reason = r.u8()?;
-        r.zeros(7)?;
-        if reason > BYE_SUSPENDED {
-            return Err(Error::Body);
-        }
-        let b = Bye {
-            reason,
-            message: r.str_field()?,
-        };
-        r.done()?;
-        Ok(b)
+        Reader::whole(body, |r| {
+            let reason = r.u8()?;
+            r.zeros(7)?;
+            if reason > BYE_SUSPENDED {
+                return Err(Error::Body);
+            }
+            Ok(Bye { reason, message: r.str_field()? })
+        })
     }
 }
 
@@ -1024,24 +911,16 @@ pub struct Rpc<'a> {
 impl<'a> Rpc<'a> {
     pub fn encode(&self, hash: u16) -> Vec<u8> {
         let mut w = Writer::new(RPC, hash, 0);
-        w.u32(self.id)
-            .u32(0)
-            .field(self.method.as_bytes())
-            .field(self.params);
+        w.u32(self.id).u32(0).field(self.method.as_bytes()).field(self.params);
         w.finish()
     }
 
     pub fn decode(body: &'a [u8]) -> Result<Rpc<'a>> {
-        let mut r = Reader::new(body);
-        let id = r.u32()?;
-        r.zeros(4)?;
-        let rpc = Rpc {
-            id,
-            method: r.str_field()?,
-            params: r.field()?,
-        };
-        r.done()?;
-        Ok(rpc)
+        Reader::whole(body, |r| {
+            let id = r.u32()?;
+            r.zeros(4)?;
+            Ok(Rpc { id, method: r.str_field()?, params: r.field()? })
+        })
     }
 }
 
@@ -1060,20 +939,14 @@ impl<'a> Reply<'a> {
     }
 
     pub fn decode(body: &'a [u8]) -> Result<Reply<'a>> {
-        let mut r = Reader::new(body);
-        let id = r.u32()?;
-        let ok = r.u8()?;
-        r.zeros(3)?;
-        if ok > 1 {
-            return Err(Error::Body);
-        }
-        let reply = Reply {
-            id,
-            ok: ok == 1,
-            json: r.field()?,
-        };
-        r.done()?;
-        Ok(reply)
+        Reader::whole(body, |r| {
+            let (id, ok) = (r.u32()?, r.u8()?);
+            r.zeros(3)?;
+            if ok > 1 {
+                return Err(Error::Body);
+            }
+            Ok(Reply { id, ok: ok == 1, json: r.field()? })
+        })
     }
 }
 
@@ -1123,23 +996,29 @@ pub struct Col<'a> {
     data: &'a [u8],
 }
 
-/// Checks offsets `(n + 1) × u32` from 0, monotonic, ending at `bytes.len()`
-/// on char boundaries of valid UTF-8.
-fn check_strs(offsets: &[u8], n: usize, bytes: &[u8]) -> Result<()> {
-    let s = str::from_utf8(bytes).map_err(|_| Error::Str)?;
+/// The byte length of `(nrows + 1)` u32 offsets, which must fit in `len`.
+fn head_of(nrows: usize, len: usize) -> Result<usize> {
+    nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)
+}
+
+/// Checks `(n + 1)` offsets from 0, monotonic and ending at `end`, each
+/// passing `ok`; `err` names what failed.
+fn check_offsets(offsets: &[u8], n: usize, end: usize, ok: impl Fn(usize) -> bool, err: Error) -> Result<()> {
     let mut prev = 0usize;
     for i in 0..=n {
         let o = u32_at(offsets, i * 4) as usize;
-        if (i == 0 && o != 0) || o < prev || o > bytes.len() || !s.is_char_boundary(o) {
-            return Err(Error::Str);
+        if (i == 0 && o != 0) || o < prev || o > end || !ok(o) {
+            return Err(err);
         }
         prev = o;
     }
-    if prev != bytes.len() {
-        Err(Error::Str)
-    } else {
-        Ok(())
-    }
+    if prev != end { Err(err) } else { Ok(()) }
+}
+
+/// Str offsets: on char boundaries of valid UTF-8.
+fn check_strs(offsets: &[u8], n: usize, bytes: &[u8]) -> Result<()> {
+    let s = str::from_utf8(bytes).map_err(|_| Error::Str)?;
+    check_offsets(offsets, n, bytes.len(), |o| s.is_char_boundary(o), Error::Str)
 }
 
 impl<'a> Col<'a> {
@@ -1156,14 +1035,7 @@ impl<'a> Col<'a> {
             I64 | F64 => fixed(8),
             // A zstr cell's tag and bytes are checked when it is read.
             STR | ZSTR | LIST => {
-                let head = nrows
-                    .checked_add(1)
-                    .and_then(|n| n.checked_mul(4))
-                    .ok_or(Error::Column)?;
-                if data.len() < head {
-                    return Err(Error::Column);
-                }
-                let (offsets, rest) = data.split_at(head);
+                let (offsets, rest) = data.split_at(head_of(nrows, data.len())?);
                 if ty == STR {
                     return check_strs(offsets, nrows, rest);
                 }
@@ -1171,39 +1043,16 @@ impl<'a> Col<'a> {
                 if rest.len() % unit != 0 {
                     return Err(Error::Column);
                 }
-                let vals = rest.len() / unit;
-                let mut prev = 0;
-                for i in 0..=nrows {
-                    let o = u32_at(offsets, i * 4) as usize;
-                    if (i == 0 && o != 0) || o < prev || o > vals {
-                        return Err(Error::Column);
-                    }
-                    prev = o;
-                }
-                if prev != vals {
-                    Err(Error::Column)
-                } else {
-                    Ok(())
-                }
+                check_offsets(offsets, nrows, rest.len() / unit, |_| true, Error::Column)
             }
             SYM => {
                 if data.len() < 4 {
                     return Err(Error::Column);
                 }
                 let nuniq = u32_at(data, 0) as usize;
-                let off_end = nuniq
-                    .checked_add(1)
-                    .and_then(|n| n.checked_mul(4))
-                    .and_then(|n| n.checked_add(4))
-                    .ok_or(Error::Column)?;
-                if data.len() < off_end {
-                    return Err(Error::Column);
-                }
+                let off_end = head_of(nuniq, data.len() - 4)? + 4;
                 let last = u32_at(data, off_end - 4) as usize;
-                let bytes_end = off_end
-                    .checked_add(last)
-                    .filter(|&e| e <= data.len())
-                    .ok_or(Error::Column)?;
+                let bytes_end = off_end.checked_add(last).filter(|&e| e <= data.len()).ok_or(Error::Column)?;
                 let ids_at = bytes_end.checked_add(3).ok_or(Error::Column)? & !3;
                 let ids_len = nrows.checked_mul(4).ok_or(Error::Column)?;
                 if ids_at.checked_add(ids_len) != Some(data.len()) {
@@ -1226,17 +1075,18 @@ impl<'a> Col<'a> {
         self.nrows
     }
 
-    pub fn data(&self) -> &'a [u8] {
-        self.data
+    /// Row `i` of an offsets column: its `(start, end)` and the data after the offsets.
+    fn span(&self, i: usize) -> (usize, usize, &'a [u8]) {
+        let (offsets, rest) = self.data.split_at((self.nrows + 1) * 4);
+        (u32_at(offsets, i * 4) as usize, u32_at(offsets, i * 4 + 4) as usize, rest)
     }
 
-    fn str_at(offsets: &'a [u8], bytes: &'a [u8], i: usize) -> &'a str {
-        let (a, b) = (
-            u32_at(offsets, i * 4) as usize,
-            u32_at(offsets, i * 4 + 4) as usize,
-        );
-        // Validated in parse: whole UTF-8, offsets on char boundaries.
-        str::from_utf8(&bytes[a..b]).unwrap_or("")
+    /// A str cell (validated in parse: whole UTF-8 on char boundaries); empty is `None`.
+    fn text(b: &'a [u8]) -> Value<'a> {
+        match str::from_utf8(b).unwrap_or("") {
+            "" => Value::None,
+            s => Value::Str(s),
+        }
     }
 
     /// The value in row `i` (`i < nrows`). An empty str or list is `None`.
@@ -1256,40 +1106,26 @@ impl<'a> Col<'a> {
                 v => Value::F64(v),
             },
             STR => {
-                let (offsets, bytes) = d.split_at((self.nrows + 1) * 4);
-                match Self::str_at(offsets, bytes, i) {
-                    "" => Value::None,
-                    s => Value::Str(s),
-                }
+                let (a, b, bytes) = self.span(i);
+                Self::text(&bytes[a..b])
             }
-            ZSTR => {
-                let (offsets, bytes) = d.split_at((self.nrows + 1) * 4);
-                let (a, b) = (u32_at(offsets, i * 4) as usize, u32_at(offsets, i * 4 + 4) as usize);
-                if a == b { Value::None } else { Value::ZStr(&bytes[a..b]) }
-            }
+            ZSTR => match self.span(i) {
+                (a, b, _) if a == b => Value::None,
+                (a, b, bytes) => Value::ZStr(&bytes[a..b]),
+            },
             SYM => {
                 let nuniq = u32_at(d, 0) as usize;
                 let off_end = 4 + (nuniq + 1) * 4;
                 let bytes_end = off_end + u32_at(d, off_end - 4) as usize;
                 let ids_at = (bytes_end + 3) & !3;
                 let k = u32_at(d, ids_at + i * 4) as usize;
-                match Self::str_at(&d[4..off_end], &d[off_end..bytes_end], k) {
-                    "" => Value::None,
-                    s => Value::Str(s),
-                }
+                let (a, b) = (u32_at(d, 4 + k * 4) as usize, u32_at(d, 8 + k * 4) as usize);
+                Self::text(&d[off_end + a..off_end + b])
             }
-            LIST => {
-                let (offsets, vals) = d.split_at((self.nrows + 1) * 4);
-                let (a, b) = (
-                    u32_at(offsets, i * 4) as usize,
-                    u32_at(offsets, i * 4 + 4) as usize,
-                );
-                if a == b {
-                    Value::None
-                } else {
-                    Value::List(U32s(&vals[a * 4..b * 4]))
-                }
-            }
+            LIST => match self.span(i) {
+                (a, b, _) if a == b => Value::None,
+                (a, b, vals) => Value::List(U32s(&vals[a * 4..b * 4])),
+            },
             _ => Value::None,
         }
     }
@@ -1313,19 +1149,50 @@ pub struct Block<'a> {
     cols: &'a [u8],
 }
 
+/// A validated column or cell header at `at` (`u16 id | u8 type | u8 0 | u32
+/// len | data | pad`): its id, type, data and the offset after its pad.
+fn cell_at(b: &[u8], at: usize) -> (u16, u8, &[u8], usize) {
+    let (id, ty, len) = (u16_at(b, at), b[at + 2], u32_at(b, at + 4) as usize);
+    (id, ty, &b[at + 8..at + 8 + len], pad8(at + 8 + len))
+}
+
+/// Walks `n` column or cell headers from `at`, refusing a reserved byte, a
+/// repeated id, a body that stops short and a nonzero pad; `check` judges
+/// each one's type against its data. Returns the offset after the last.
+fn walk_cells(b: &[u8], mut at: usize, n: usize, mut check: impl FnMut(u16, u8, &[u8]) -> Result<()>) -> Result<usize> {
+    // Fewer than two cannot repeat an id: skip the 8 KiB bitmap.
+    let mut seen = (n > 1).then(Seen::new);
+    for _ in 0..n {
+        if b.len() - at < 8 {
+            return Err(Error::Short);
+        }
+        let (id, ty, zero, len) = (u16_at(b, at), b[at + 2], b[at + 3], u32_at(b, at + 4) as usize);
+        if zero != 0 || seen.as_mut().is_some_and(|s| !s.add(id)) {
+            return Err(Error::Body);
+        }
+        if len > b.len() - at - 8 {
+            return Err(Error::Short);
+        }
+        let end = at + 8 + len;
+        if pad8(end) > b.len() {
+            return Err(Error::Short);
+        }
+        check(id, ty, &b[at + 8..end])?;
+        if b[end..pad8(end)].iter().any(|&z| z != 0) {
+            return Err(Error::Body);
+        }
+        at = pad8(end);
+    }
+    Ok(at)
+}
+
 impl<'a> Block<'a> {
     pub fn cols(&self) -> impl Iterator<Item = Col<'a>> + use<'a> {
         let (mut at, nrows, b) = (0usize, self.nrows, self.cols);
         (0..self.ncols).map(move |_| {
-            let (id, ty, len) = (u16_at(b, at), b[at + 2], u32_at(b, at + 4) as usize);
-            let data = &b[at + 8..at + 8 + len];
-            at = pad8(at + 8 + len);
-            Col {
-                id,
-                ty,
-                nrows,
-                data,
-            }
+            let (id, ty, data, next) = cell_at(b, at);
+            at = next;
+            Col { id, ty, nrows, data }
         })
     }
 
@@ -1354,47 +1221,17 @@ impl<'a> Blocks<'a> {
             if b.len() - at < 8 {
                 return Err(Error::Short);
             }
-            let (table, ncols, nrows) = (
-                u16_at(b, at),
-                u16_at(b, at + 2) as usize,
-                u32_at(b, at + 4) as usize,
-            );
+            let (table, ncols, nrows) = (u16_at(b, at), u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
             // Tables are numbered from 1; a block with no columns has no rows.
             if table == 0 || (ncols == 0 && nrows != 0) {
                 return Err(Error::Body);
             }
-            at += 8;
-            // Fewer than two columns cannot repeat one: skip the 8 KiB bitmap.
-            let mut seen = (ncols > 1).then(Seen::new);
-            for _ in 0..ncols {
-                if b.len() - at < 8 {
-                    return Err(Error::Short);
-                }
-                let (id, ty, zero, len) = (
-                    u16_at(b, at),
-                    b[at + 2],
-                    b[at + 3],
-                    u32_at(b, at + 4) as usize,
-                );
-                if zero != 0 || seen.as_mut().is_some_and(|s| !s.add(id)) {
-                    return Err(Error::Body);
-                }
-                if len > b.len() - at - 8 {
-                    return Err(Error::Short);
-                }
-                let end = at + 8 + len;
-                if pad8(end) > b.len() {
-                    return Err(Error::Short);
-                }
+            at = walk_cells(b, at + 8, ncols, |id, ty, data| {
                 if id == GONE && (ty != U32 || ncols != 1) {
                     return Err(Error::Column);
                 }
-                Col::parse(ty, nrows, &b[at + 8..end])?;
-                if b[end..pad8(end)].iter().any(|&z| z != 0) {
-                    return Err(Error::Body);
-                }
-                at = pad8(end);
-            }
+                Col::parse(ty, nrows, data)
+            })?;
         }
         Ok(Blocks { b })
     }
@@ -1406,23 +1243,11 @@ impl<'a> Blocks<'a> {
             if at >= b.len() {
                 return None;
             }
-            let (table, ncols, nrows) = (
-                u16_at(b, at),
-                u16_at(b, at + 2) as usize,
-                u32_at(b, at + 4) as usize,
-            );
+            let (table, ncols, nrows) = (u16_at(b, at), u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
             let start = at + 8;
-            let mut end = start;
-            for _ in 0..ncols {
-                end = pad8(end + 8 + u32_at(b, end + 4) as usize);
-            }
+            let end = (0..ncols).fold(start, |end, _| cell_at(b, end).3);
             at = end;
-            Some(Block {
-                table,
-                nrows,
-                ncols,
-                cols: &b[start..end],
-            })
+            Some(Block { table, nrows, ncols, cols: &b[start..end] })
         })
     }
 }
@@ -1453,12 +1278,7 @@ impl BodyWriter {
         self.buf.extend_from_slice(&table.to_le_bytes());
         self.buf.extend_from_slice(&0u16.to_le_bytes());
         self.buf.extend_from_slice(&(nrows as u32).to_le_bytes());
-        BlockWriter {
-            buf: &mut self.buf,
-            head,
-            nrows,
-            ncols: 0,
-        }
+        BlockWriter { buf: &mut self.buf, head, nrows, ncols: 0 }
     }
 
     pub fn gone(&mut self, table: u16, ids: &[u32]) {
@@ -1479,16 +1299,13 @@ impl BlockWriter<'_> {
     fn col(&mut self, id: u16, ty: u8, data: impl FnOnce(&mut Vec<u8>)) -> &mut Self {
         let at = self.buf.len();
         self.buf.extend_from_slice(&id.to_le_bytes());
-        self.buf.push(ty);
-        self.buf.push(0);
-        self.buf.extend_from_slice(&0u32.to_le_bytes());
+        self.buf.extend_from_slice(&[ty, 0, 0, 0, 0, 0]);
         data(self.buf);
         let len = (self.buf.len() - at - 8) as u32;
         self.buf[at + 4..at + 8].copy_from_slice(&len.to_le_bytes());
         self.buf.resize(pad8(self.buf.len()), 0);
         self.ncols += 1;
-        let n = self.ncols.to_le_bytes();
-        self.buf[self.head + 2..self.head + 4].copy_from_slice(&n);
+        self.buf[self.head + 2..self.head + 4].copy_from_slice(&self.ncols.to_le_bytes());
         self
     }
 
@@ -1498,38 +1315,25 @@ impl BlockWriter<'_> {
         assert!(got == n, "a column of {got} values in a block of {n} rows");
     }
 
+    /// A column of `N`-byte values, as encoded.
+    fn fixed<const N: usize>(&mut self, id: u16, ty: u8, vals: impl Iterator<Item = [u8; N]>) -> &mut Self {
+        let n = self.nrows;
+        self.col(id, ty, |b| Self::count(n, vals.map(|v| b.extend_from_slice(&v)).count()))
+    }
+
     /// A u32 column; `NONE` marks an absent value.
     pub fn u32s(&mut self, id: u16, vals: impl Iterator<Item = u32>) -> &mut Self {
-        let n = self.nrows;
-        self.col(id, U32, |b| {
-            Self::count(
-                n,
-                vals.map(|v| b.extend_from_slice(&v.to_le_bytes())).count(),
-            )
-        })
+        self.fixed(id, U32, vals.map(u32::to_le_bytes))
     }
 
     /// An i64 column; `NONE64` marks an absent value.
     pub fn i64s(&mut self, id: u16, vals: impl Iterator<Item = i64>) -> &mut Self {
-        let n = self.nrows;
-        self.col(id, I64, |b| {
-            Self::count(
-                n,
-                vals.map(|v| b.extend_from_slice(&v.to_le_bytes())).count(),
-            )
-        })
+        self.fixed(id, I64, vals.map(i64::to_le_bytes))
     }
 
     /// An f64 column; NaN marks an absent value.
     pub fn f64s(&mut self, id: u16, vals: impl Iterator<Item = f64>) -> &mut Self {
-        let n = self.nrows;
-        self.col(id, F64, |b| {
-            Self::count(
-                n,
-                vals.map(|v| b.extend_from_slice(&v.to_bits().to_le_bytes()))
-                    .count(),
-            )
-        })
+        self.fixed(id, F64, vals.map(|v| v.to_bits().to_le_bytes()))
     }
 
     /// A str column; the empty string is absent.
@@ -1542,9 +1346,7 @@ impl BlockWriter<'_> {
         self.col(id, ty, |b| {
             let (offsets, bytes) = offsets_and_bytes(vals);
             Self::count(n, offsets.len() - 1);
-            offsets
-                .iter()
-                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            put_u32s(b, &offsets);
             b.extend_from_slice(&bytes);
         })
     }
@@ -1572,14 +1374,11 @@ impl BlockWriter<'_> {
             Self::count(n, ids.len());
             let (offsets, bytes) = offsets_and_bytes(uniq.iter().map(|u| u.as_bytes()));
             b.extend_from_slice(&(uniq.len() as u32).to_le_bytes());
-            offsets
-                .iter()
-                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            put_u32s(b, &offsets);
             let start = b.len();
             b.extend_from_slice(&bytes);
             b.resize(b.len() + (4 - (b.len() - start) % 4) % 4, 0);
-            ids.iter()
-                .for_each(|i| b.extend_from_slice(&i.to_le_bytes()));
+            put_u32s(b, &ids);
         })
     }
 
@@ -1590,13 +1389,11 @@ impl BlockWriter<'_> {
             let mut offsets = alloc::vec![0u32];
             let mut values = Vec::new();
             for l in vals {
-                values.extend(l.iter().flat_map(|v| v.to_le_bytes()));
+                put_u32s(&mut values, l);
                 offsets.push((values.len() / 4) as u32);
             }
             Self::count(n, offsets.len() - 1);
-            offsets
-                .iter()
-                .for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
+            put_u32s(b, &offsets);
             b.extend_from_slice(&values);
         })
     }
@@ -1613,6 +1410,10 @@ fn offsets_and_bytes<'s>(vals: impl Iterator<Item = &'s [u8]>) -> (Vec<u32>, Vec
         offsets.push(bytes.len() as u32);
     }
     (offsets, bytes)
+}
+
+fn put_u32s(b: &mut Vec<u8>, v: &[u32]) {
+    v.iter().for_each(|o| b.extend_from_slice(&o.to_le_bytes()));
 }
 
 // -------------------------------------------------------------------- ops
@@ -1677,62 +1478,20 @@ impl<'a> Op<'a> {
         let op_id = u64_at(b, 0);
         let (verb, flags, table, target) = (b[8], b[9], u16_at(b, 10), u32_at(b, 12));
         let (ncols, zero, expect_rev) = (u16_at(b, 16) as usize, u16_at(b, 18), u32_at(b, 20));
-        if !(PUT..=COMMAND).contains(&verb)
-            || flags & !(KEYED | CREATE_ONLY | EXPECT_REV) != 0
-            || zero != 0
-        {
+        if !(PUT..=COMMAND).contains(&verb) || flags & !(KEYED | CREATE_ONLY | EXPECT_REV) != 0 || zero != 0 || (flags & EXPECT_REV == 0 && expect_rev != 0) {
             return Err(Error::Body);
         }
-        if flags & EXPECT_REV == 0 && expect_rev != 0 {
-            return Err(Error::Body);
-        }
-        let mut at = OP_HEAD;
-        let mut seen = (ncols > 1).then(Seen::new);
-        for _ in 0..ncols {
-            if b.len() - at < 8 {
-                return Err(Error::Short);
-            }
-            let (col, ty, z, len) = (
-                u16_at(b, at),
-                b[at + 2],
-                b[at + 3],
-                u32_at(b, at + 4) as usize,
-            );
-            if len > b.len() - at - 8 {
-                return Err(Error::Short);
-            }
-            let end = at + 8 + len;
-            if z != 0 || seen.as_mut().is_some_and(|s| !s.add(col)) {
-                return Err(Error::Body);
-            }
-            if pad8(end) > b.len() {
-                return Err(Error::Short);
-            }
+        let at = walk_cells(b, OP_HEAD, ncols, |_, ty, data| {
             let ok = match ty {
-                NULL => len == 0,
-                U32 => len == 4,
-                I64 | F64 => len == 8,
-                STR => str::from_utf8(&b[at + 8..end]).is_ok(),
+                NULL => data.is_empty(),
+                U32 => data.len() == 4,
+                I64 | F64 => data.len() == 8,
+                STR => str::from_utf8(data).is_ok(),
                 _ => false,
             };
-            if !ok {
-                return Err(Error::Column);
-            }
-            if b[end..pad8(end)].iter().any(|&z| z != 0) {
-                return Err(Error::Body);
-            }
-            at = pad8(end);
-        }
-        let op = Op {
-            op_id,
-            verb,
-            flags,
-            table,
-            target,
-            expect_rev,
-            ncols,
-            raw: &b[..at],
-        };
+            if ok { Ok(()) } else { Err(Error::Column) }
+        })?;
+        let op = Op { op_id, verb, flags, table, target, expect_rev, ncols, raw: &b[..at] };
         Ok((op, &b[at..]))
     }
 
@@ -1748,9 +1507,8 @@ impl<'a> Op<'a> {
         let b = self.raw;
         let mut at = OP_HEAD;
         (0..self.ncols).map(move |_| {
-            let (col, ty, len) = (u16_at(b, at), b[at + 2], u32_at(b, at + 4) as usize);
-            let bytes = &b[at + 8..at + 8 + len];
-            at = pad8(at + 8 + len);
+            let (col, ty, bytes, next) = cell_at(b, at);
+            at = next;
             Cell { col, ty, bytes }
         })
     }
@@ -1838,37 +1596,18 @@ impl OpsWriter {
         OpsWriter { buf, n: 0 }
     }
 
-    pub fn op(
-        &mut self,
-        op_id: u64,
-        verb: u8,
-        flags: u8,
-        table: u16,
-        target: u32,
-        expect_rev: Option<u32>,
-    ) -> OpWriter<'_> {
+    pub fn op(&mut self, op_id: u64, verb: u8, flags: u8, table: u16, target: u32, expect_rev: Option<u32>) -> OpWriter<'_> {
         self.n += 1;
-        let n = self.n.to_le_bytes();
-        self.buf[0..4].copy_from_slice(&n);
+        self.buf[0..4].copy_from_slice(&self.n.to_le_bytes());
         let head = self.buf.len();
-        let flags = if expect_rev.is_some() {
-            flags | EXPECT_REV
-        } else {
-            flags & !EXPECT_REV
-        };
+        let flags = if expect_rev.is_some() { flags | EXPECT_REV } else { flags & !EXPECT_REV };
         self.buf.extend_from_slice(&op_id.to_le_bytes());
-        self.buf.push(verb);
-        self.buf.push(flags);
+        self.buf.extend_from_slice(&[verb, flags]);
         self.buf.extend_from_slice(&table.to_le_bytes());
         self.buf.extend_from_slice(&target.to_le_bytes());
         self.buf.extend_from_slice(&[0; 4]);
-        self.buf
-            .extend_from_slice(&expect_rev.unwrap_or(0).to_le_bytes());
-        OpWriter {
-            buf: &mut self.buf,
-            head,
-            ncols: 0,
-        }
+        self.buf.extend_from_slice(&expect_rev.unwrap_or(0).to_le_bytes());
+        OpWriter { buf: &mut self.buf, head, ncols: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -1900,15 +1639,12 @@ impl OpsWriter {
 impl OpWriter<'_> {
     fn cell(&mut self, col: u16, ty: u8, bytes: &[u8]) -> &mut Self {
         self.buf.extend_from_slice(&col.to_le_bytes());
-        self.buf.push(ty);
-        self.buf.push(0);
-        self.buf
-            .extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        self.buf.extend_from_slice(&[ty, 0]);
+        self.buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         self.buf.extend_from_slice(bytes);
         self.buf.resize(pad8(self.buf.len()), 0);
         self.ncols += 1;
-        let n = self.ncols.to_le_bytes();
-        self.buf[self.head + 16..self.head + 18].copy_from_slice(&n);
+        self.buf[self.head + 16..self.head + 18].copy_from_slice(&self.ncols.to_le_bytes());
         self
     }
 

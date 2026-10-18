@@ -109,10 +109,7 @@ impl Settings {
         let num = |k: &str, d: usize| -> Result<usize, String> {
             var(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("{k}: not a number")))
         };
-        let listen = var("GATE_LISTEN")
-            .unwrap_or_else(|| "127.0.0.1:4433".into())
-            .parse()
-            .map_err(|_| "GATE_LISTEN: want ip:port".to_string())?;
+        let listen = var("GATE_LISTEN").unwrap_or_else(|| "127.0.0.1:4433".into()).parse().map_err(|_| "GATE_LISTEN: want ip:port".to_string())?;
         let cert = match (var("GATE_CERT"), var("GATE_KEY")) {
             (Some(c), Some(k)) => Some((c.into(), k.into())),
             (None, None) => None,
@@ -123,12 +120,7 @@ impl Settings {
             socket: var("GATE_SOCKET").ok_or("GATE_SOCKET: the BEAM's Unix socket")?.into(),
             cert,
             hash_file: var("GATE_CERT_HASH_FILE").map(Into::into),
-            origins: var("GATE_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|o| o.trim().trim_end_matches('/').to_string())
-                .filter(|o| !o.is_empty())
-                .collect(),
+            origins: var("GATE_ORIGINS").unwrap_or_default().split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect(),
             path: var("GATE_PATH").unwrap_or_else(|| "/wt".into()),
             per_ip: num("GATE_PER_IP", 16)?,
             initial_window: num("GATE_INITIAL_WINDOW", INITIAL_WINDOW)? as u64,
@@ -239,16 +231,9 @@ async fn identity(s: &Settings) -> Result<Identity, String> {
     if let Some(path) = &s.hash_file {
         // The hash a page passes as `serverCertificateHashes`, written
         // whole (rename) for the BEAM to read.
-        let hex: String = id.certificate_chain().as_slice()[0]
-            .hash()
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hex: String = id.certificate_chain().as_slice()[0].hash().as_ref().iter().map(|b| format!("{b:02x}")).collect();
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, hex + "\n")
-            .and_then(|_| std::fs::rename(&tmp, path))
-            .map_err(|e| format!("hash file: {e}"))?;
+        std::fs::write(&tmp, hex + "\n").and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("hash file: {e}"))?;
     }
     Ok(id)
 }
@@ -273,27 +258,9 @@ fn cert_stamp(s: &Settings) -> Option<(SystemTime, SystemTime)> {
 // on another core. The gate's work is I/O, which one core carries.
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let settings = match Settings::from_env() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("hireme-gate: {e}");
-            std::process::exit(2);
-        }
-    };
-    let config = match server_config(&settings).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("hireme-gate: {e}");
-            std::process::exit(1);
-        }
-    };
-    let endpoint = match Endpoint::server(config) {
-        Ok(e) => Arc::new(e),
-        Err(e) => {
-            eprintln!("hireme-gate: bind {}: {e}", settings.listen);
-            std::process::exit(1);
-        }
-    };
+    let settings = Settings::from_env().unwrap_or_else(|e| die(2, e));
+    let config = server_config(&settings).await.unwrap_or_else(|e| die(1, e));
+    let endpoint = Endpoint::server(config).map(Arc::new).unwrap_or_else(|e| die(1, format!("bind {}: {e}", settings.listen)));
     let gate = Arc::new(Gate {
         settings,
         handshakes: AtomicUsize::new(0),
@@ -317,6 +284,12 @@ async fn main() {
     }
     endpoint.close(VarInt::from_u32(0), b"shutdown");
     let _ = timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
+}
+
+/// A gate that cannot start says why and exits with `code`.
+fn die(code: i32, message: impl std::fmt::Display) -> ! {
+    eprintln!("hireme-gate: {message}");
+    std::process::exit(code)
 }
 
 /// Decides, from the first datagram alone, whether a handshake may begin.
@@ -455,12 +428,9 @@ async fn bridge_writer(w: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Vec<u8
             pending.fetch_sub(m.len() - 5, Relaxed);
         }
     };
-    while let Some(m) = rx.recv().await {
-        if w.write_all(&m).await.is_err() {
-            return;
-        }
-        written(&m);
-        while let Ok(m) = rx.try_recv() {
+    while let Some(first) = rx.recv().await {
+        // Whatever else is queued by now goes out in the same flush.
+        for m in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             if w.write_all(&m).await.is_err() {
                 return;
             }

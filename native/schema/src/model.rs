@@ -117,8 +117,9 @@ pub const FREE_PARAM: u16 = 0xFE00;
 /// The last day a `day` cell holds: 9999-12-31 as days since 0000-01-01.
 pub const DAY_MAX: u32 = 3_652_424;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Residency {
+    #[default]
     Resident,
     Server,
     Wire,
@@ -212,79 +213,29 @@ pub struct Column {
     pub ty: Type,
     /// The table a ref names or the enum an enum names.
     pub target: Option<String>,
-    pub required: bool,
     /// As written in the file.
     pub default: Option<String>,
-    pub private: bool,
-    pub server_only: bool,
-    pub human_only: bool,
-    pub readonly: bool,
-    pub unique: bool,
-    /// A nullable ref whose row goes with the row it names.
-    pub cascade: bool,
-    /// A ref that is a plain id: no foreign key, no tenant trigger.
-    pub loose: bool,
-    pub natural: bool,
-    pub metric: bool,
-    /// On a metric's `_on` twin: the metric it dates.
+    /// `flag::*` bits. `CASCADE` is a nullable ref whose row goes with the
+    /// row it names; `LOOSE` a ref that is a plain id (no foreign key, no
+    /// tenant trigger); `METRIC_ON` a metric's `_on` twin, `metric_of` naming
+    /// the metric it dates.
+    pub flags: u32,
     pub metric_of: Option<String>,
-    pub prose: bool,
-    pub implied: bool,
     /// The `group` line it falls under (World's column groups): presentation only, in no hash.
     pub group: Option<String>,
 }
 
 impl Column {
     fn blank(name: &str, ty: Type) -> Column {
-        Column {
-            id: 0,
-            name: name.to_owned(),
-            ty,
-            target: None,
-            required: false,
-            default: None,
-            private: false,
-            server_only: false,
-            human_only: false,
-            readonly: false,
-            unique: false,
-            cascade: false,
-            loose: false,
-            natural: false,
-            metric: false,
-            metric_of: None,
-            prose: false,
-            implied: false,
-            group: None,
-        }
+        Column { id: 0, name: name.to_owned(), ty, target: None, default: None, flags: 0, metric_of: None, group: None }
+    }
+
+    pub fn has(&self, bit: u32) -> bool {
+        self.flags & bit != 0
     }
 
     pub fn wire(&self) -> u8 {
         self.ty.wire()
-    }
-
-    pub fn flags(&self) -> u32 {
-        let mut f = 0;
-        for (on, bit) in [
-            (self.required, flag::REQUIRED),
-            (self.private, flag::PRIVATE),
-            (self.server_only, flag::SERVER_ONLY),
-            (self.human_only, flag::HUMAN_ONLY),
-            (self.readonly, flag::READONLY),
-            (self.unique, flag::UNIQUE),
-            (self.metric, flag::METRIC),
-            (self.prose, flag::PROSE),
-            (self.implied, flag::IMPLIED),
-            (self.metric_of.is_some(), flag::METRIC_ON),
-            (self.natural, flag::NATURAL),
-            (self.cascade, flag::CASCADE),
-            (self.loose, flag::LOOSE),
-        ] {
-            if on {
-                f |= bit;
-            }
-        }
-        f
     }
 
     pub fn type_name(&self) -> String {
@@ -413,14 +364,17 @@ fn fail<T>(line: usize, message: String) -> Result<T, Error> {
 const TABLE_MODS: [&str; 6] = ["append_only", "soft_delete", "global", "account_optional", "singleton", "unmasked"];
 
 /// Names: lowercase words for everything but frames, which are uppercase.
-fn is_name(s: &str) -> bool {
+fn word(s: &str, letters: core::ops::RangeInclusive<u8>) -> bool {
     let b = s.as_bytes();
-    !b.is_empty() && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+    !b.is_empty() && letters.contains(&b[0]) && b.iter().all(|c| letters.contains(c) || c.is_ascii_digit() || *c == b'_')
+}
+
+fn is_name(s: &str) -> bool {
+    word(s, b'a'..=b'z')
 }
 
 fn is_frame_name(s: &str) -> bool {
-    let b = s.as_bytes();
-    !b.is_empty() && b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+    word(s, b'A'..=b'Z')
 }
 
 fn name(s: &str, line: usize) -> Result<(), Error> {
@@ -444,21 +398,15 @@ fn where_term(where_: &Option<String>, line: usize) -> Result<Option<Where>, Err
     let Some(w) = where_ else { return Ok(None) };
     if let Some((col, rest)) = w.split_once(" = ")
         && is_name(col)
-        && rest.len() >= 2
-        && rest.starts_with('\'')
-        && rest.ends_with('\'')
-        && !rest[1..rest.len() - 1].contains('\'')
+        && let Some(v) = rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\''))
+        && !v.contains('\'')
     {
-        return Ok(Some(Where::Eq(col.to_owned(), rest[1..rest.len() - 1].to_owned())));
+        return Ok(Some(Where::Eq(col.to_owned(), v.to_owned())));
     }
-    if let Some(col) = w.strip_suffix(" is not null")
-        && is_name(col)
-    {
+    if let Some(col) = w.strip_suffix(" is not null").filter(|c| is_name(c)) {
         return Ok(Some(Where::NotNull(col.to_owned())));
     }
-    if let Some(col) = w.strip_suffix(" is null")
-        && is_name(col)
-    {
+    if let Some(col) = w.strip_suffix(" is null").filter(|c| is_name(c)) {
         return Ok(Some(Where::Null(col.to_owned())));
     }
     fail(line, format!("where takes col = 'value', col is null or col is not null: {w}"))
@@ -503,6 +451,7 @@ struct RawCommand {
     line: usize,
 }
 
+#[derive(Default)]
 struct RawTable {
     name: String,
     domain: String,
@@ -575,12 +524,23 @@ fn desc(cols: &[&str]) -> Vec<(String, bool)> {
     out
 }
 
+/// A column's flag words, as the declaration spells them.
+const FLAG_WORDS: [(&str, u32); 7] = [
+    ("private", flag::PRIVATE),
+    ("server_only", flag::SERVER_ONLY),
+    ("human_only", flag::HUMAN_ONLY),
+    ("readonly", flag::READONLY),
+    ("unique", flag::UNIQUE),
+    ("cascade", flag::CASCADE),
+    ("loose", flag::LOOSE),
+];
+
 fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
     let mut i = 0;
     while i < rest.len() {
         match rest[i] {
-            "!" => col.required = true,
-            "?" => col.required = false,
+            "!" => col.flags |= flag::REQUIRED,
+            "?" => col.flags &= !flag::REQUIRED,
             "=" => {
                 let Some(v) = rest.get(i + 1) else {
                     return fail(line, "= needs a value".into());
@@ -588,24 +548,20 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
                 col.default = Some((*v).to_owned());
                 i += 1;
             }
-            "private" => col.private = true,
-            "server_only" => col.server_only = true,
-            "human_only" => col.human_only = true,
-            "readonly" => col.readonly = true,
-            "unique" => col.unique = true,
-            "cascade" => col.cascade = true,
-            "loose" => col.loose = true,
-            other => return fail(line, format!("flag {other}")),
+            other => match FLAG_WORDS.iter().find(|(w, _)| *w == other) {
+                Some((_, bit)) => col.flags |= bit,
+                None => return fail(line, format!("flag {other}")),
+            },
         }
         i += 1;
     }
-    if col.cascade && col.ty != Type::Ref {
+    if col.has(flag::CASCADE) && col.ty != Type::Ref {
         return fail(line, "cascade is a ref's".into());
     }
-    if col.loose && col.ty != Type::Ref {
+    if col.has(flag::LOOSE) && col.ty != Type::Ref {
         return fail(line, "loose is a ref's".into());
     }
-    if col.loose && col.cascade {
+    if col.has(flag::LOOSE) && col.has(flag::CASCADE) {
         return fail(line, "a loose ref has no delete to cascade".into());
     }
     default_ok(&col, line)?;
@@ -701,33 +657,26 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
                 other => return fail(line, format!("metric type {other}")),
             };
             let mut col = walk(rest, Column::blank(mname, ty), line)?;
-            if col.required {
+            if col.has(flag::REQUIRED) {
                 return fail(line, "a metric is nullable".into());
             }
-            col.metric = true;
+            col.flags |= flag::METRIC;
             // The twin is the metric's own date: written with it, never
             // alone, and seen by whoever sees the metric.
             let mut twin = Column::blank(&format!("{mname}_on"), Type::Day);
             twin.metric_of = Some((*mname).to_owned());
-            twin.readonly = true;
-            twin.private = col.private;
-            twin.server_only = col.server_only;
-            twin.human_only = col.human_only;
+            twin.flags = flag::METRIC_ON | flag::READONLY | (col.flags & (flag::PRIVATE | flag::SERVER_ONLY | flag::HUMAN_ONLY));
             t.cols.push(col);
             t.cols.push(twin);
         }
         ["prose", pname, rest @ ..] => {
             name(pname, line)?;
+            // `prose x`, `prose x text`, `prose x ?` and `prose x text ?` all declare a nullable text.
             let rest = match rest {
-                ["text", r @ ..] => r,
-                r => r,
-            };
-            let rest = match rest {
-                ["?", r @ ..] => r,
-                r => r,
+                ["text", "?", r @ ..] | ["text", r @ ..] | ["?", r @ ..] | r => r,
             };
             let mut col = walk(rest, Column::blank(pname, Type::Text), line)?;
-            col.prose = true;
+            col.flags |= flag::PROSE;
             t.cols.push(col);
         }
         ["command", cname, rest @ ..] => {
@@ -822,24 +771,8 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 if mods.contains(&"global") && mods.contains(&"singleton") {
                     return fail(line, "a global table has no account to be one row of".into());
                 }
-                tables.push(RawTable {
-                    name: (*tname).to_owned(),
-                    domain: (*domain).to_owned(),
-                    residency,
-                    mods: mods.iter().map(|m| m.to_string()).collect(),
-                    naturals: vec![],
-                    uniques: vec![],
-                    indexes: vec![],
-                    cap: None,
-                    cols: vec![],
-                    picks: vec![],
-                    source: None,
-                    source_where: None,
-                    source_term: None,
-                    commands: vec![],
-                    group: None,
-                    line,
-                });
+                let mods = mods.iter().map(|m| m.to_string()).collect();
+                tables.push(RawTable { name: (*tname).to_owned(), domain: (*domain).to_owned(), residency, mods, line, ..RawTable::default() });
             }
             ["projection", pname, domain, source] => {
                 name(pname, line)?;
@@ -847,24 +780,8 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                     return fail(line, "a projection needs a where".into());
                 }
                 let source_term = where_term(&where_, line)?;
-                tables.push(RawTable {
-                name: (*pname).to_owned(),
-                domain: (*domain).to_owned(),
-                residency: Residency::Projection,
-                mods: vec![],
-                naturals: vec![],
-                uniques: vec![],
-                indexes: vec![],
-                cap: None,
-                cols: vec![],
-                picks: vec![],
-                source: Some((*source).to_owned()),
-                source_where: where_.clone(),
-                source_term,
-                commands: vec![],
-                group: None,
-                line,
-            })
+                let (name, domain, source) = ((*pname).to_owned(), (*domain).to_owned(), Some((*source).to_owned()));
+                tables.push(RawTable { name, domain, residency: Residency::Projection, source, source_where: where_, source_term, line, ..RawTable::default() });
             }
             [kind, ..]
                 if matches!(
@@ -897,37 +814,27 @@ fn implied(t: &RawTable) -> Vec<Column> {
         return vec![];
     }
     let has = |m: &str| t.mods.iter().any(|x| x == m);
-    let mut cols = Vec::new();
-    let mut id = Column::blank("id", Type::Id);
-    id.required = true;
-    cols.push((1, id));
+    let col = |id: u16, name: &str, ty: Type, required: bool| {
+        let mut c = Column::blank(name, ty);
+        c.id = id;
+        c.flags = flag::IMPLIED | flag::READONLY | if required { flag::REQUIRED } else { 0 };
+        c
+    };
+    let mut cols = vec![col(1, "id", Type::Id, true)];
     if !has("global") {
-        let mut a = Column::blank("account_id", Type::Ref);
+        let mut a = col(2, "account_id", Type::Ref, !has("account_optional"));
         a.target = Some("accounts".into());
-        a.required = !has("account_optional");
-        cols.push((2, a));
+        cols.push(a);
     }
-    let mut rev = Column::blank("rev", Type::I64);
-    rev.required = true;
+    let mut rev = col(3, "rev", Type::I64, true);
     rev.default = Some("1".into());
-    cols.push((3, rev));
-    let mut ins = Column::blank("inserted_at", Type::Time);
-    ins.required = true;
-    cols.push((4, ins));
-    let mut upd = Column::blank("updated_at", Type::Time);
-    upd.required = true;
-    cols.push((5, upd));
+    cols.push(rev);
+    cols.push(col(4, "inserted_at", Type::Time, true));
+    cols.push(col(5, "updated_at", Type::Time, true));
     if has("soft_delete") {
-        cols.push((6, Column::blank("deleted_at", Type::Time)));
+        cols.push(col(6, "deleted_at", Type::Time, false));
     }
-    cols.into_iter()
-        .map(|(id, mut c)| {
-            c.id = id;
-            c.implied = true;
-            c.readonly = true;
-            c
-        })
-        .collect()
+    cols
 }
 
 fn resolve_cols(t: &RawTable, all: &[RawTable]) -> Result<Vec<Column>, Error> {
@@ -1000,8 +907,8 @@ fn resolve(
     for (i, t) in raw.iter().enumerate() {
         let natural: Vec<&String> = t.naturals.iter().flat_map(|k| k.cols.iter()).collect();
         let mut cols = resolve_cols(t, &raw)?;
-        for c in cols.iter_mut() {
-            c.natural = natural.contains(&&c.name);
+        for c in cols.iter_mut().filter(|c| natural.contains(&&c.name)) {
+            c.flags |= flag::NATURAL;
         }
         let has = |m: &str| t.mods.iter().any(|x| x == m);
         tables.push(Table {
@@ -1037,32 +944,12 @@ fn resolve(
                         let Some(col) = table.col(&p.name) else {
                             return fail(c.line, format!("command {}: no column {}", c.name, p.name));
                         };
-                        params.push(Param {
-                            id: col.id,
-                            name: p.name.clone(),
-                            ty: col.ty,
-                            target: col.target.clone(),
-                            required: p.required,
-                            column: true,
-                        });
+                        params.push(Param { id: col.id, name: p.name.clone(), ty: col.ty, target: col.target.clone(), required: p.required, column: true });
                     }
-                    Some(ty) => params.push(Param {
-                        id: FREE_PARAM + i as u16,
-                        name: p.name.clone(),
-                        ty,
-                        target: None,
-                        required: p.required,
-                        column: false,
-                    }),
+                    Some(ty) => params.push(Param { id: FREE_PARAM + i as u16, name: p.name.clone(), ty, target: None, required: p.required, column: false }),
                 }
             }
-            commands.push(Command {
-                id: commands.len() as u16 + 1,
-                name: c.name.clone(),
-                table: t.name.clone(),
-                params,
-                human_only: c.human_only,
-            });
+            commands.push(Command { id: commands.len() as u16 + 1, name: c.name.clone(), table: t.name.clone(), params, human_only: c.human_only });
         }
     }
 
@@ -1137,14 +1024,8 @@ fn validate(s: &Schema) -> Result<(), Error> {
                 }
             }
         }
-        let where_cols: Vec<String> = t
-            .naturals
-            .iter()
-            .chain(t.uniques.iter())
-            .filter_map(|k| k.term.as_ref())
-            .chain(t.indexes.iter().filter_map(|i| i.term.as_ref()))
-            .map(|w| w.col().to_owned())
-            .collect();
+        // Every where a key or index of the table holds under.
+        let terms = || t.naturals.iter().chain(t.uniques.iter()).filter_map(|k| k.term.as_ref()).chain(t.indexes.iter().filter_map(|i| i.term.as_ref()));
         if let (Some(src), Some(term)) = (&t.source, &t.source_term) {
             let source = s.table(src).unwrap();
             if source.col(term.col()).is_none() {
@@ -1152,9 +1033,10 @@ fn validate(s: &Schema) -> Result<(), Error> {
             }
             term_fits(s, source, term)?;
         }
-        for term in t.naturals.iter().chain(t.uniques.iter()).filter_map(|k| k.term.as_ref()).chain(t.indexes.iter().filter_map(|i| i.term.as_ref())) {
+        for term in terms() {
             term_fits(s, t, term)?;
         }
+        let where_cols: Vec<String> = terms().map(|w| w.col().to_owned()).collect();
         let keys = t
             .naturals
             .iter()
@@ -1231,7 +1113,7 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
                 .iter()
                 .filter(|t| t.residency != Residency::Server)
                 .flat_map(|t| t.cols.iter())
-                .any(|c| c.ty == Type::Enum && !c.server_only && c.target.as_deref() == Some(name))
+                .any(|c| c.ty == Type::Enum && !c.has(flag::SERVER_ONLY) && c.target.as_deref() == Some(name))
             || s.commands.iter().flat_map(|c| c.params.iter()).any(|p| p.ty == Type::Enum && p.target.as_deref() == Some(name))
     };
     for e in &s.enums {
@@ -1255,100 +1137,43 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
         .filter(|(on, _)| *on)
         .map(|(_, n)| *n)
         .collect();
-        let mods = mods.join(",");
         let cap = t.cap.map(|c| c.to_string());
-        let mut head = format!(
-            "table {} {} {} {} {} {}",
-            t.id,
-            t.name,
-            t.domain,
-            t.residency.name(),
-            dash(Some(&mods)),
-            dash(cap.as_deref())
-        );
+        let mut head = format!("table {} {} {} {} {} {}", t.id, t.name, t.domain, t.residency.name(), dash(Some(&mods.join(","))), dash(cap.as_deref()));
         if t.residency == Residency::Projection {
-            head.push_str(&format!(
-                " {} {}",
-                t.source.as_deref().unwrap_or(""),
-                t.source_where.as_deref().unwrap_or("")
-            ));
+            head.push_str(&format!(" {} {}", t.source.as_deref().unwrap_or(""), t.source_where.as_deref().unwrap_or("")));
         }
         line(head);
         // A server_only column never travels, so it is no part of what a
         // client is compiled against.
-        for c in t.cols.iter().filter(|c| scope == Scope::Full || !c.server_only) {
-            line(format!(
-                "col {} {} {} {} {} {}",
-                t.id,
-                c.id,
-                c.name,
-                c.type_name(),
-                c.flags(),
-                dash(c.default.as_deref())
-            ));
+        for c in t.cols.iter().filter(|c| scope == Scope::Full || !c.has(flag::SERVER_ONLY)) {
+            line(format!("col {} {} {} {} {} {}", t.id, c.id, c.name, c.type_name(), c.flags, dash(c.default.as_deref())));
         }
         if scope == Scope::Full {
             for k in &t.naturals {
                 line(format!("natural {} {} {}", t.id, k.cols.join(","), dash(k.where_.as_deref())));
             }
             for k in &t.uniques {
-                line(format!(
-                    "unique {} {} {} {}",
-                    t.id,
-                    k.cols.join(","),
-                    bit(k.global),
-                    dash(k.where_.as_deref())
-                ));
+                line(format!("unique {} {} {} {}", t.id, k.cols.join(","), bit(k.global), dash(k.where_.as_deref())));
             }
             for i in &t.indexes {
-                let cols: Vec<String> = i
-                    .cols
-                    .iter()
-                    .map(|(c, d)| if *d { format!("{c}:desc") } else { c.clone() })
-                    .collect();
-                line(format!(
-                    "index {} {} {} {}",
-                    t.id,
-                    cols.join(","),
-                    bit(i.global),
-                    dash(i.where_.as_deref())
-                ));
+                let cols: Vec<String> = i.cols.iter().map(|(c, d)| if *d { format!("{c}:desc") } else { c.clone() }).collect();
+                line(format!("index {} {} {} {}", t.id, cols.join(","), bit(i.global), dash(i.where_.as_deref())));
             }
         }
     }
     for c in &s.commands {
-        let params: Vec<String> = c
-            .params
-            .iter()
-            .map(|p| {
-                format!(
-                    "{}:{}:{}:{}",
-                    p.name,
-                    type_name(p.ty, p.target.as_deref()),
-                    bit(p.required),
-                    bit(p.column)
-                )
-            })
-            .collect();
-        let params = params.join(",");
-        line(format!(
-            "command {} {} {} {} {}",
-            c.id,
-            c.name,
-            c.table,
-            bit(c.human_only),
-            dash(Some(&params))
-        ));
+        let params: Vec<String> = c.params.iter().map(|p| format!("{}:{}:{}:{}", p.name, type_name(p.ty, p.target.as_deref()), bit(p.required), bit(p.column))).collect();
+        line(format!("command {} {} {} {} {}", c.id, c.name, c.table, bit(c.human_only), dash(Some(&params.join(",")))));
     }
     out
 }
 
-/// FNV-1a, 32 bits.
-pub fn fnv(bytes: &[u8]) -> u32 {
-    let mut h: u32 = 0x811C_9DC5;
-    for b in bytes {
-        h ^= *b as u32;
-        h = h.wrapping_mul(0x0100_0193);
+/// FNV-1a, 32 bits (const: native/wire checks its dictionaries against the dict lines at compile time).
+pub const fn fnv(bytes: &[u8]) -> u32 {
+    let (mut h, mut i) = (0x811C_9DC5u32, 0);
+    while i < bytes.len() {
+        h = (h ^ bytes[i] as u32).wrapping_mul(0x0100_0193);
+        i += 1;
     }
     h
 }

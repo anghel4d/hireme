@@ -258,13 +258,6 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
     }
 }
 
-/// Every (code, reason) and (code, need) the diagnostics describe, for tests.
-#[cfg(test)]
-fn described() -> impl Iterator<Item = (&'static str, &'static str)> {
-    let special = [("natural_key", "no declared key is made of exactly these columns")];
-    REASONS.iter().map(|r| (r.0, r.1)).chain(NEEDS.iter().map(|r| (r.0, r.1))).chain(special)
-}
-
 /// A natural key as the node reports it, in either shape: a bare column list (an older node) or
 /// `{cols, where, reads}` (and, in a refusal's `unmet`, `missing`). Normalised to the object.
 pub fn natural_key(v: &Json) -> Option<Json> {
@@ -385,49 +378,59 @@ fn compact(v: &Json) -> String {
 mod tests {
     use super::*;
 
+    /// Every (code, reason) and (code, need) the diagnostics describe.
+    fn described() -> impl Iterator<Item = (&'static str, &'static str)> {
+        let special = [("natural_key", "no declared key is made of exactly these columns")];
+        REASONS.iter().map(|r| (r.0, r.1)).chain(NEEDS.iter().map(|r| (r.0, r.1))).chain(special)
+    }
+
     #[test]
-    fn every_refusal_renders_with_its_explain_pointer() {
+    fn every_refusal_the_schema_declares_renders_and_is_explained_and_no_other() {
+        assert_eq!(names().collect::<Vec<_>>(), schema::refusal::NAMES.to_vec());
         for name in names() {
-            let d = render(name, "put corporations domain=example.com", &serde_json::json!({"cap": 50000}));
-            assert!(d.starts_with(&format!("error[{name}]")), "{d}");
-            assert!(d.contains(&format!("hireme {{\"explain\":\"{name}\"}}")), "{d}");
+            let d = render(name, "put corporations domain=example.com", &json!({"cap": 50000}));
+            assert!(d.starts_with(&format!("error[{name}]")) && d.contains(&format!("hireme {{\"explain\":\"{name}\"}}")), "{d}");
             assert!(explain(name).is_some());
         }
         assert!(explain("nope").is_none());
     }
 
     #[test]
-    fn every_refusal_the_schema_declares_is_explained_and_no_other() {
-        assert_eq!(names().collect::<Vec<_>>(), schema::refusal::NAMES.to_vec());
-    }
-
-    #[test]
-    fn a_keyed_put_naming_no_key_says_whether_the_table_declares_any() {
-        let refused = |keys: Json| render("natural_key", "put t x=1", &serde_json::json!({"table": "t", "reason": "no natural key among the cells", "keys": keys}));
-        let none = refused(serde_json::json!([]));
+    fn a_natural_key_refusal_says_which_key_the_cells_miss() {
+        let refused = |keys: Json| render("natural_key", "put t x=1", &json!({"table": "t", "reason": "no natural key among the cells", "keys": keys}));
+        let none = refused(json!([]));
         assert!(none.contains("this table declares no natural key"), "{none}");
-        let some = refused(serde_json::json!([["domain"]]));
-        assert!(some.contains("the cells hold none of this table's natural keys"), "{some}");
-        assert!(!some.contains("declares no natural key"), "{some}");
-        let conditioned = serde_json::json!([{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"]}, {"cols": ["geonames_id"], "where": "kind = 'city'", "reads": ["kind"]}]);
+        let some = refused(json!([["domain"]]));
+        assert!(some.contains("the cells hold none of this table's natural keys") && !some.contains("declares no natural key"), "{some}");
+        let conditioned = json!([{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"]}, {"cols": ["geonames_id"], "where": "kind = 'city'", "reads": ["kind"]}]);
         let place = |extra: Json| {
-            let mut d = serde_json::json!({"table": "places", "reason": "no natural key among the cells", "keys": conditioned});
+            let mut d = json!({"table": "places", "reason": "no natural key among the cells", "keys": conditioned});
             d.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             render("natural_key", "put places iso2=DE", &d)
         };
-        let absent = place(serde_json::json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": ["kind"]}]}));
+        let absent = place(json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": ["kind"]}]}));
         assert!(absent.starts_with("error[natural_key]: places: iso2 is a key only where kind = 'country'\n"), "{absent}");
         assert!(absent.contains("= help: Add kind to the cells (kind = 'country' for iso2), or put by id."), "{absent}");
-        assert!(absent.contains("= keys: iso2 where kind = 'country'; geonames_id where kind = 'city'"), "{absent}");
-        assert!(!absent.contains("geonames_id is a key"), "{absent}");
-        let wrong = place(serde_json::json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": []}]}));
+        assert!(absent.contains("= keys: iso2 where kind = 'country'; geonames_id where kind = 'city'") && !absent.contains("geonames_id is a key"), "{absent}");
+        let wrong = place(json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": []}]}));
         assert!(wrong.contains("= help: Set kind so that the condition holds (kind = 'country' for iso2), or put by id."), "{wrong}");
-        let bare = place(serde_json::json!({"missing": ["kind"]}));
+        let bare = place(json!({"missing": ["kind"]}));
         assert!(bare.contains("iso2 is a key only where kind = 'country'; geonames_id is a key only where kind = 'city'"), "{bare}");
-        let neither = place(serde_json::json!({}));
+        let neither = place(json!({}));
         assert!(neither.contains("with its condition met: iso2 where kind = 'country'; geonames_id where kind = 'city'"), "{neither}");
-        assert_eq!(natural_key(&serde_json::json!(["domain"])), Some(serde_json::json!({"cols": ["domain"], "where": null, "reads": []})));
-        let taken = render("natural_key", "put t x=1", &serde_json::json!({"table": "t", "key": {"domain": "a.com"}}));
+        // Both conditioned keys unmet: one step, naming each key's value, never the same step twice.
+        let k = |c: &str, v: &str| json!({"cols": [c], "where": format!("kind = '{v}'"), "reads": ["kind"], "missing": ["kind"]});
+        let both = render("natural_key", "put places iso2=DE geonames_id=1", &json!({"table": "places", "reason": "no natural key among the cells", "keys": [], "unmet": [k("iso2", "country"), k("geonames_id", "city")]}));
+        assert!(both.contains("= help: Add kind to the cells (kind = 'country' for iso2; kind = 'city' for geonames_id), or put by id."), "{both}");
+        assert_eq!(both.matches("add kind").count() + both.matches("Add kind").count(), 1, "{both}");
+        assert!(!both.contains("= keys: \n"), "{both}");
+        // A lookup (get, history) by columns no declared key is made of names the table's keys, not an existing row.
+        let lookup = render("natural_key", "get places name=Berlin", &json!({"table": "places", "key": ["name"], "reason": "no declared key is made of exactly these columns", "keys": conditioned}));
+        assert!(lookup.starts_with("error[natural_key]: no declared key is made of exactly these columns\n"), "{lookup}");
+        assert!(lookup.contains("exactly one of the table's keys: iso2 where kind = 'country'; geonames_id where kind = 'city'."), "{lookup}");
+        assert!(!lookup.contains("exists") && !lookup.contains("create_only"), "{lookup}");
+        assert_eq!(natural_key(&json!(["domain"])), Some(json!({"cols": ["domain"], "where": null, "reads": []})));
+        let taken = render("natural_key", "put corporations domain=a.com", &json!({"table": "corporations", "key": {"domain": "a.com"}}));
         assert!(taken.contains("a row with this natural key exists"), "{taken}");
     }
 
@@ -512,25 +515,5 @@ mod tests {
         assert!(taken.contains("a row with this natural key exists"), "{taken}");
         let odd = render("column", "put t", &serde_json::json!({"reason": "something new"}));
         assert!(odd.starts_with("error[column]: something new\n"), "{odd}");
-    }
-
-    #[test]
-    fn a_lookup_by_columns_no_key_is_made_of_says_so() {
-        let keys = serde_json::json!([{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"]}, {"cols": ["geonames_id"], "where": "kind = 'city'", "reads": ["kind"]}]);
-        let d = render("natural_key", "get places name=Berlin", &serde_json::json!({"table": "places", "key": ["name"], "reason": "no declared key is made of exactly these columns", "keys": keys}));
-        assert!(d.starts_with("error[natural_key]: no declared key is made of exactly these columns\n"), "{d}");
-        assert!(d.contains("exactly one of the table's keys: iso2 where kind = 'country'; geonames_id where kind = 'city'."), "{d}");
-        assert!(!d.contains("exists") && !d.contains("create_only"), "{d}");
-        let taken = render("natural_key", "put corporations domain=a.com", &serde_json::json!({"table": "corporations", "key": {"domain": "a.com"}}));
-        assert!(taken.contains("a row with this natural key exists"), "{taken}");
-    }
-
-    #[test]
-    fn both_conditioned_keys_without_their_condition_ask_once_and_name_the_values() {
-        let k = |c: &str, v: &str| serde_json::json!({"cols": [c], "where": format!("kind = '{v}'"), "reads": ["kind"], "missing": ["kind"]});
-        let d = render("natural_key", "put places iso2=DE geonames_id=1", &serde_json::json!({"table": "places", "reason": "no natural key among the cells", "keys": [], "unmet": [k("iso2", "country"), k("geonames_id", "city")]}));
-        assert!(d.contains("= help: Add kind to the cells (kind = 'country' for iso2; kind = 'city' for geonames_id), or put by id."), "{d}");
-        assert_eq!(d.matches("add kind").count() + d.matches("Add kind").count(), 1, "{d}");
-        assert!(!d.contains("= keys: \n"), "{d}");
     }
 }

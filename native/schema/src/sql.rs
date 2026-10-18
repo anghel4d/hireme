@@ -7,7 +7,7 @@
 //! `global`, and every account's table has `<table>__account (account_id)`. Enum values are stored by name, without a CHECK, so adding a
 //! value is never a table rebuild.
 
-use crate::model::{Column, Schema, Table, Type};
+use crate::model::{Column, Schema, Table, Type, flag};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -42,20 +42,21 @@ pub fn column(col: &Column) -> String {
         return format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", q(&col.name));
     }
     let mut s = format!("{} {}", q(&col.name), sql_type(col.ty));
-    if col.required {
+    if col.has(flag::REQUIRED) {
         s.push_str(" NOT NULL");
     }
     if let Some(d) = &col.default {
         s.push_str(&format!(" DEFAULT {}", literal(col, d)));
     }
-    if col.ty == Type::Ref && !col.loose {
-        let on_delete = if col.required || col.cascade { "CASCADE" } else { "SET NULL" };
-        s.push_str(&format!(
-            " REFERENCES {}(\"id\") ON DELETE {on_delete}",
-            q(col.target.as_deref().unwrap_or(""))
-        ));
+    if col.ty == Type::Ref && !col.has(flag::LOOSE) {
+        s.push_str(&format!(" REFERENCES {}(\"id\") ON DELETE {}", q(col.target.as_deref().unwrap_or("")), on_delete(col)));
     }
     s
+}
+
+/// A required ref cascades on delete and a nullable one is set null, unless it says `cascade`.
+fn on_delete(col: &Column) -> &'static str {
+    if col.has(flag::REQUIRED | flag::CASCADE) { "CASCADE" } else { "SET NULL" }
 }
 
 /// A named index of a table: its name and its `CREATE` statement.
@@ -71,8 +72,7 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
     // Columns as (name, descending).
     let mut add = |kind: &str, unique: bool, global: bool, cols: Vec<(String, bool)>, where_: Option<&str>| {
         let lead = if scoped && !global { Some("\"account_id\"".to_string()) } else { None };
-        let stem: Vec<String> =
-            cols.iter().map(|(c, d)| if *d { format!("{c}_desc") } else { c.clone() }).collect();
+        let stem: Vec<String> = cols.iter().map(|(c, d)| if *d { format!("{c}_desc") } else { c.clone() }).collect();
         let stem = if stem.is_empty() { String::from("account_id") } else { stem.join("_") };
         let mut name = format!("{}__{kind}_{stem}", t.name);
         let mut n = 2;
@@ -80,17 +80,8 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
             name = format!("{}__{kind}_{stem}_{n}", t.name);
             n += 1;
         }
-        let cols: Vec<String> = lead
-            .into_iter()
-            .chain(cols.iter().map(|(c, d)| if *d { format!("{} DESC", q(c)) } else { q(c) }))
-            .collect();
-        let mut sql = format!(
-            "CREATE {}INDEX {} ON {} ({})",
-            if unique { "UNIQUE " } else { "" },
-            q(&name),
-            q(&t.name),
-            cols.join(", ")
-        );
+        let cols: Vec<String> = lead.into_iter().chain(cols.iter().map(|(c, d)| if *d { format!("{} DESC", q(c)) } else { q(c) })).collect();
+        let mut sql = format!("CREATE {}INDEX {} ON {} ({})", if unique { "UNIQUE " } else { "" }, q(&name), q(&t.name), cols.join(", "));
         // A soft-deleted row is a tombstone: it holds no key, so the same
         // key may name a live row again.
         let live = (unique && t.soft_delete).then_some("\"deleted_at\" IS NULL");
@@ -118,7 +109,7 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
     for k in &t.uniques {
         add("unique", true, k.global, plain(&k.cols), k.where_.as_deref());
     }
-    for c in t.cols.iter().filter(|c| c.unique) {
+    for c in t.cols.iter().filter(|c| c.has(flag::UNIQUE)) {
         add("unique", true, false, alloc::vec![(c.name.clone(), false)], None);
     }
     for i in &t.indexes {
@@ -136,7 +127,7 @@ pub fn triggers(s: &Schema, t: &Table) -> Vec<IndexDef> {
     if t.global {
         return out;
     }
-    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.implied && !c.loose) {
+    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.has(flag::IMPLIED | flag::LOOSE)) {
         let target = c.target.as_deref().unwrap_or("");
         if s.table(target).is_none_or(|p| p.global) {
             continue;
@@ -279,25 +270,15 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                             None => String::from("-"),
                         };
                         let ty = if c.ty == Type::Id { "INTEGER" } else { sql_type(c.ty) };
-                        let not_null = c.required && c.ty != Type::Id;
+                        let not_null = c.has(flag::REQUIRED) && c.ty != Type::Id;
                         if h.sql_type != ty || h.not_null != not_null || h.default != default {
-                            extra.push(format!(
-                                "column {}.{} changed: {} {} {} -> {ty} {} {default}",
-                                t.name,
-                                c.name,
-                                h.sql_type,
-                                if h.not_null { "NOT NULL" } else { "NULL" },
-                                h.default,
-                                if not_null { "NOT NULL" } else { "NULL" }
-                            ));
+                            let null = |nn: bool| if nn { "NOT NULL" } else { "NULL" };
+                            extra.push(format!("column {}.{} changed: {} {} {} -> {ty} {} {default}", t.name, c.name, h.sql_type, null(h.not_null), h.default, null(not_null)));
                         }
                         continue;
                     }
-                    if c.required && c.default.is_none() {
-                        return Err(format!(
-                            "{}.{} is new, required and has no default; write that migration by hand",
-                            t.name, c.name
-                        ));
+                    if c.has(flag::REQUIRED) && c.default.is_none() {
+                        return Err(format!("{}.{} is new, required and has no default; write that migration by hand", t.name, c.name));
                     }
                     sql.push_str(&format!("ALTER TABLE {} ADD COLUMN {};\n", q(&t.name), column(c)));
                 }
@@ -320,23 +301,19 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                 // a column no longer a ref) keeps acting in the database: only a
                 // rebuild removes it.
                 for (tn, cn, _) in shape.fks.iter().filter(|(tn, _, _)| *tn == t.name) {
-                    if t.col(cn).is_none_or(|c| c.ty != Type::Ref || c.loose) {
+                    if t.col(cn).is_none_or(|c| c.ty != Type::Ref || c.has(flag::LOOSE)) {
                         extra.push(format!("column {tn}.{cn} has a foreign key in the database, not the declaration"));
                     }
                 }
-                for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.loose) {
-                    let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
+                for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.has(flag::LOOSE)) {
+                    let want = on_delete(c);
                     match shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name) {
-                        Some((_, _, held)) if held != want => extra.push(format!(
-                            "column {}.{} changed: ON DELETE {held} -> ON DELETE {want}",
-                            t.name, c.name
-                        )),
+                        Some((_, _, held)) if held != want => extra.push(format!("column {}.{} changed: ON DELETE {held} -> ON DELETE {want}", t.name, c.name)),
                         // An existing column that has to become a foreign key: no
                         // ALTER adds one, so only a rebuild does.
-                        None if have.iter().any(|h| h.name == c.name) => extra.push(format!(
-                            "column {}.{} has no foreign key in the database; the declaration's needs a rebuild",
-                            t.name, c.name
-                        )),
+                        None if have.iter().any(|h| h.name == c.name) => {
+                            extra.push(format!("column {}.{} has no foreign key in the database; the declaration's needs a rebuild", t.name, c.name))
+                        }
                         _ => {}
                     }
                 }

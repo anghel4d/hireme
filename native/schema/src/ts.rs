@@ -9,7 +9,7 @@
 
 use crate::model::{Column, Residency, Schema, Table, Type, flag, wire, AS_OF, DAY_MAX, FREE_PARAM, SOURCE_CELL, TYPES};
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// A table name as a singular CamelCase type name: `api_keys` is `ApiKey`.
@@ -35,23 +35,11 @@ fn camel(name: &str) -> String {
         .map(|p| {
             let mut c = p.chars();
             match c.next() {
-                Some(f) => f.to_ascii_uppercase().to_string_lossless() + c.as_str(),
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
                 None => String::new(),
             }
         })
         .collect()
-}
-
-trait Lossless {
-    fn to_string_lossless(self) -> String;
-}
-
-impl Lossless for char {
-    fn to_string_lossless(self) -> String {
-        let mut s = String::new();
-        s.push(self);
-        s
-    }
 }
 
 pub(crate) fn json_str(s: &str) -> String {
@@ -76,11 +64,7 @@ pub(crate) fn opt_str(v: Option<&str>) -> String {
     }
 }
 
-fn upper(name: &str) -> String {
-    name.to_ascii_uppercase()
-}
-
-fn ts_type(s: &Schema, c: &Column) -> String {
+fn ts_type(c: &Column) -> String {
     let base = match c.ty {
         Type::Enum => camel(c.target.as_deref().unwrap_or("")),
         Type::Bool => String::from("boolean"),
@@ -89,8 +73,7 @@ fn ts_type(s: &Schema, c: &Column) -> String {
         Type::Bytes => String::from("Uint8Array"),
         _ => String::from("number"),
     };
-    let _ = s;
-    if c.required { base } else { format!("{base} | null") }
+    if c.has(flag::REQUIRED) { base } else { format!("{base} | null") }
 }
 
 /// A column as the client ships it: `[name, id, type, flags, target, default, metricOf, group]`,
@@ -100,7 +83,7 @@ fn column_tuple(c: &Column) -> String {
     while tail.last().is_some_and(|x| x == "null") {
         tail.pop();
     }
-    let head = [json_str(&c.name), format!("{}", c.id), json_str(c.ty.name()), format!("{}", c.flags())];
+    let head = [json_str(&c.name), format!("{}", c.id), json_str(c.ty.name()), format!("{}", c.flags)];
     format!("[{}]", head.into_iter().chain(tail).collect::<Vec<_>>().join(","))
 }
 
@@ -147,14 +130,11 @@ pub fn emit(s: &Schema) -> String {
 
     for e in &s.enums {
         let values: Vec<String> = e.values.iter().map(|v| json_str(v)).collect();
-        w(&format!("export const {} = [{}] as const;", upper(&e.name), values.join(", ")));
-        w(&format!("export type {} = (typeof {})[number];", camel(&e.name), upper(&e.name)));
+        w(&format!("export const {} = [{}] as const;", e.name.to_ascii_uppercase(), values.join(", ")));
+        w(&format!("export type {} = (typeof {})[number];", camel(&e.name), e.name.to_ascii_uppercase()));
     }
-    let names: Vec<String> = s.enums.iter().map(|e| format!("{}: {}", e.name, upper(&e.name))).collect();
-    w(&format!(
-        "export const ENUMS: {{ readonly [name: string]: readonly string[] }} = {{ {} }};",
-        names.join(", ")
-    ));
+    let names: Vec<String> = s.enums.iter().map(|e| format!("{}: {}", e.name, e.name.to_ascii_uppercase())).collect();
+    w(&format!("export const ENUMS: {{ readonly [name: string]: readonly string[] }} = {{ {} }};", names.join(", ")));
     w("");
 
     // A server table never reaches a client: it ships only what the browser holds.
@@ -200,10 +180,7 @@ pub fn emit(s: &Schema) -> String {
         let naturals: Vec<String> = t
             .naturals
             .iter()
-            .map(|k| {
-                let cols: Vec<String> = k.cols.iter().map(|c| json_str(c)).collect();
-                format!("{{\"cols\":[{}],\"global\":false,\"where\":{}}}", cols.join(","), opt_str(k.where_.as_deref()))
-            })
+            .map(|k| format!("{{\"cols\":[{}],\"global\":false,\"where\":{}}}", k.cols.iter().map(|c| json_str(c)).collect::<Vec<_>>().join(","), opt_str(k.where_.as_deref())))
             .collect();
         let cols: Vec<String> = t.cols.iter().map(column_tuple).collect();
         w(&format!(
@@ -234,29 +211,14 @@ pub fn emit(s: &Schema) -> String {
             .params
             .iter()
             .map(|p| {
+                let target = |ty: Type| opt_str(if p.ty == ty { p.target.as_deref() } else { None });
                 format!(
                     "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"required\":{},\"column\":{},\"ref\":{},\"enum\":{}}}",
-                    json_str(&p.name),
-                    p.id,
-                    json_str(p.ty.name()),
-                    p.ty.code(),
-                    p.wire(),
-                    p.required,
-                    p.column,
-                    opt_str(if p.ty == Type::Ref { p.target.as_deref() } else { None }),
-                    opt_str(if p.ty == Type::Enum { p.target.as_deref() } else { None }),
+                    json_str(&p.name), p.id, json_str(p.ty.name()), p.ty.code(), p.wire(), p.required, p.column, target(Type::Ref), target(Type::Enum)
                 )
             })
             .collect();
-        w(&format!(
-            "  {}: {{\"id\":{},\"name\":{},\"table\":{},\"humanOnly\":{},\"params\":[{}]}},",
-            json_str(&c.name),
-            c.id,
-            json_str(&c.name),
-            json_str(&c.table),
-            c.human_only,
-            params.join(",")
-        ));
+        w(&format!("  {}: {{\"id\":{},\"name\":{},\"table\":{},\"humanOnly\":{},\"params\":[{}]}},", json_str(&c.name), c.id, json_str(&c.name), json_str(&c.table), c.human_only, params.join(",")));
     }
     w("};");
     w("");
@@ -271,8 +233,8 @@ pub fn emit(s: &Schema) -> String {
         w(&format!("/** `{}`: {kind}. */", t.name));
         w(&format!("export interface {} {{", singular(&t.name)));
         // A server_only column never reaches a client, so no row has it.
-        for c in t.cols.iter().filter(|c| !c.server_only) {
-            w(&format!("  {}: {};", c.name, ts_type(s, c)));
+        for c in t.cols.iter().filter(|c| !c.has(flag::SERVER_ONLY)) {
+            w(&format!("  {}: {};", c.name, ts_type(c)));
         }
         w("}");
     }

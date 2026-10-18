@@ -24,6 +24,20 @@ fn opt(v: Option<&str>) -> String {
     }
 }
 
+/// `pub mod <name> { pub const <k: T = v>; ... }`, `indent` deep.
+fn module(o: &mut String, indent: &str, name: &str, consts: impl IntoIterator<Item = String>) {
+    writeln!(o, "{indent}pub mod {name} {{").unwrap();
+    for c in consts {
+        writeln!(o, "{indent}    pub const {c};").unwrap();
+    }
+    writeln!(o, "{indent}}}").unwrap();
+}
+
+/// An enum's values as consts, then `NAMES`.
+fn values(values: &[String], ty: &str) -> Vec<String> {
+    values.iter().enumerate().map(|(i, v)| format!("{}: {ty} = {i}", upper(v))).chain([format!("NAMES: &[&str] = &{values:?}")]).collect()
+}
+
 fn key_def(k: &model::Key, natural: bool) -> String {
     let cond = match &k.term {
         None => "None".into(),
@@ -53,42 +67,17 @@ fn main() {
     }
     writeln!(o, "/// A day is days since 0000-01-01 (proleptic Gregorian), 0 to this (9999-12-31).").unwrap();
     writeln!(o, "pub const DAY_MAX: u32 = {};", model::DAY_MAX).unwrap();
-    writeln!(o, "pub mod domain {{").unwrap();
-    for d in &s.domains {
-        writeln!(o, "    pub const {}: u8 = {};", upper(&d.name), d.bit).unwrap();
-    }
-    writeln!(o, "}}").unwrap();
-
-    writeln!(o, "pub mod frame {{").unwrap();
-    for f in &s.frames {
-        writeln!(o, "    pub const {}: u8 = {};", f.name, f.id).unwrap();
-    }
-    writeln!(o, "}}").unwrap();
-
-    writeln!(o, "pub mod table {{").unwrap();
-    for t in &s.tables {
-        writeln!(o, "    pub const {}: u16 = {};", upper(&t.name), t.id).unwrap();
-    }
-    writeln!(o, "}}").unwrap();
-
+    module(&mut o, "", "domain", s.domains.iter().map(|d| format!("{}: u8 = {}", upper(&d.name), d.bit)));
+    module(&mut o, "", "frame", s.frames.iter().map(|f| format!("{}: u8 = {}", f.name, f.id)));
+    module(&mut o, "", "table", s.tables.iter().map(|t| format!("{}: u16 = {}", upper(&t.name), t.id)));
     writeln!(o, "pub mod col {{").unwrap();
     for t in &s.tables {
-        writeln!(o, "    pub mod {} {{", t.name).unwrap();
-        for c in &t.cols {
-            writeln!(o, "        pub const {}: u16 = {};", upper(&c.name), c.id).unwrap();
-        }
-        writeln!(o, "    }}").unwrap();
+        module(&mut o, "    ", &t.name, t.cols.iter().map(|c| format!("{}: u16 = {}", upper(&c.name), c.id)));
     }
     writeln!(o, "}}").unwrap();
-
     writeln!(o, "pub mod enums {{").unwrap();
     for e in &s.enums {
-        writeln!(o, "    pub mod {} {{", e.name).unwrap();
-        for (i, v) in e.values.iter().enumerate() {
-            writeln!(o, "        pub const {}: u8 = {};", upper(v), i).unwrap();
-        }
-        writeln!(o, "        pub const NAMES: &[&str] = &{:?};", e.values).unwrap();
-        writeln!(o, "    }}").unwrap();
+        module(&mut o, "    ", &e.name, values(&e.values, "u8"));
     }
     writeln!(o, "}}").unwrap();
 
@@ -101,66 +90,28 @@ fn main() {
 
     let refusal = s.enum_("refusal").expect("enum refusal");
     writeln!(o, "/// NACK codes: positions in `enum refusal`.").unwrap();
-    writeln!(o, "pub mod refusal {{").unwrap();
-    for (i, v) in refusal.values.iter().enumerate() {
-        writeln!(o, "    pub const {}: u16 = {};", upper(v), i).unwrap();
-    }
-    writeln!(o, "    pub const NAMES: &[&str] = &{:?};", refusal.values).unwrap();
-    writeln!(o, "}}").unwrap();
-
-    writeln!(o, "pub mod command {{").unwrap();
-    for c in &s.commands {
-        writeln!(o, "    pub const {}: u16 = {};", upper(&c.name), c.id).unwrap();
-    }
-    writeln!(o, "}}").unwrap();
-
+    module(&mut o, "", "refusal", values(&refusal.values, "u16"));
+    module(&mut o, "", "command", s.commands.iter().map(|c| format!("{}: u16 = {}", upper(&c.name), c.id)));
     writeln!(o, "/// Each command's param cell ids.").unwrap();
     writeln!(o, "pub mod param {{").unwrap();
     for c in &s.commands {
-        writeln!(o, "    pub mod {} {{", c.name).unwrap();
-        for p in &c.params {
-            writeln!(o, "        pub const {}: u16 = {:#06x};", upper(&p.name), p.id).unwrap();
-        }
-        writeln!(o, "    }}").unwrap();
+        module(&mut o, "    ", &c.name, c.params.iter().map(|p| format!("{}: u16 = {:#06x}", upper(&p.name), p.id)));
     }
     writeln!(o, "}}").unwrap();
 
     writeln!(o, "pub static TABLES: &[TableDef] = &[").unwrap();
     for t in &s.tables {
+        let session = t.residency == model::Residency::Wire
+            || t.source.as_deref().and_then(|n| s.table(n)).is_some_and(|src| src.residency == model::Residency::Server);
+        let keys = t.naturals.iter().map(|k| key_def(k, true)).chain(t.uniques.iter().map(|k| key_def(k, false))).collect::<Vec<_>>().join(", ");
         writeln!(
             o,
-            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, session: {}, keys: &[{}], cols: &[",
-            t.id,
-            t.name,
-            t.domain,
-            s.domain_bit(&t.domain),
-            t.residency,
-            match t.cap {
-                Some(c) => format!("Some({c})"),
-                None => "None".into(),
-            },
-            t.append_only,
-            t.soft_delete,
-            t.unmasked,
-            t.singleton,
-            t.residency == model::Residency::Wire
-                || t.source.as_deref().and_then(|n| s.table(n)).is_some_and(|src| src.residency == model::Residency::Server),
-            t.naturals.iter().map(|k| key_def(k, true)).chain(t.uniques.iter().map(|k| key_def(k, false))).collect::<Vec<_>>().join(", ")
+            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {:?}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, session: {session}, keys: &[{keys}], cols: &[",
+            t.id, t.name, t.domain, s.domain_bit(&t.domain), t.residency, t.cap, t.append_only, t.soft_delete, t.unmasked, t.singleton
         )
         .unwrap();
         for c in &t.cols {
-            writeln!(
-                o,
-                "        ColDef {{ id: {}, name: {:?}, type_code: {}, wire: {}, flags: {}, target: {}, default: {} }},",
-                c.id,
-                c.name,
-                c.ty.code(),
-                c.wire(),
-                c.flags(),
-                opt(c.target.as_deref()),
-                opt(c.default.as_deref())
-            )
-            .unwrap();
+            writeln!(o, "        ColDef {{ id: {}, name: {:?}, type_code: {}, wire: {}, flags: {}, target: {}, default: {} }},", c.id, c.name, c.ty.code(), c.wire(), c.flags, opt(c.target.as_deref()), opt(c.default.as_deref())).unwrap();
         }
         writeln!(o, "    ] }},").unwrap();
     }
@@ -169,25 +120,9 @@ fn main() {
     writeln!(o, "pub static COMMANDS: &[CommandDef] = &[").unwrap();
     for c in &s.commands {
         let table = s.table(&c.table).unwrap();
-        writeln!(
-            o,
-            "    CommandDef {{ id: {}, name: {:?}, table: {}, human_only: {}, params: &[",
-            c.id, c.name, table.id, c.human_only
-        )
-        .unwrap();
+        writeln!(o, "    CommandDef {{ id: {}, name: {:?}, table: {}, human_only: {}, params: &[", c.id, c.name, table.id, c.human_only).unwrap();
         for p in &c.params {
-            writeln!(
-                o,
-                "        ParamDef {{ id: {:#06x}, name: {:?}, type_code: {}, wire: {}, required: {}, column: {}, target: {} }},",
-                p.id,
-                p.name,
-                p.ty.code(),
-                p.wire(),
-                p.required,
-                p.column,
-                opt(p.target.as_deref())
-            )
-            .unwrap();
+            writeln!(o, "        ParamDef {{ id: {:#06x}, name: {:?}, type_code: {}, wire: {}, required: {}, column: {}, target: {} }},", p.id, p.name, p.ty.code(), p.wire(), p.required, p.column, opt(p.target.as_deref())).unwrap();
         }
         writeln!(o, "    ] }},").unwrap();
     }

@@ -61,6 +61,11 @@ pub enum Verdict {
 /// An RPC's answer: `Ok(result)` or `Err(error)` as the server sent them.
 pub type Answer = Result<Json, Json>;
 
+/// A frame's JSON field; an empty one, or one that does not parse, is null.
+fn json(b: &[u8]) -> Json {
+    if b.is_empty() { Json::Null } else { serde_json::from_slice(b).unwrap_or(Json::Null) }
+}
+
 type Out = mpsc::UnboundedSender<Vec<u8>>;
 
 struct Live {
@@ -296,6 +301,13 @@ impl Carrier {
         end
     }
 
+    /// An op's verdict reaches the `ops` call waiting on it, if one still is.
+    async fn verdict(&self, op_id: u64, v: Verdict) {
+        if let Some(tx) = self.live.lock().await.as_mut().and_then(|l| l.ops.remove(&op_id)) {
+            let _ = tx.send(v);
+        }
+    }
+
     async fn frame(&self, bytes: &[u8], events: &mpsc::UnboundedSender<Event>) -> Result<Option<(String, String, bool)>, wire::Error> {
         // A BYE is read whatever wire it was stamped for: a node on a newer schema says so in one.
         let h = wire::Header::peek(bytes)?;
@@ -323,37 +335,21 @@ impl Carrier {
                 let _ = events.send(Event::Rows(bytes.to_vec()));
             }
             wire::ACK => {
-                let body = f.body()?;
-                let acks = wire::decode_acks(&body)?;
-                let mut live = self.live.lock().await;
-                if let Some(l) = live.as_mut() {
-                    for a in acks {
-                        if let Some(tx) = l.ops.remove(&a.op_id) {
-                            let _ = tx.send(Verdict::Ack { rev: a.rev, id: a.id });
-                        }
-                    }
+                for a in wire::decode_acks(&f.body()?)? {
+                    self.verdict(a.op_id, Verdict::Ack { rev: a.rev, id: a.id }).await;
                 }
             }
             wire::NACK => {
-                let body = f.body()?;
-                let nacks = wire::decode_nacks(&body)?;
-                let mut live = self.live.lock().await;
-                if let Some(l) = live.as_mut() {
-                    for n in nacks {
-                        let data = if n.data.is_empty() { Json::Null } else { serde_json::from_slice(n.data).unwrap_or(Json::Null) };
-                        if let Some(tx) = l.ops.remove(&n.op_id) {
-                            let _ = tx.send(Verdict::Nack { code: n.code, data });
-                        }
-                    }
+                for n in wire::decode_nacks(&f.body()?)? {
+                    self.verdict(n.op_id, Verdict::Nack { code: n.code, data: json(n.data) }).await;
                 }
             }
             wire::REPLY => {
                 let body = f.body()?;
                 let r = wire::Reply::decode(&body)?;
-                let json: Json = if r.json.is_empty() { Json::Null } else { serde_json::from_slice(r.json).unwrap_or(Json::Null) };
                 let mut live = self.live.lock().await;
                 if let Some(tx) = live.as_mut().and_then(|l| l.rpcs.remove(&r.id)) {
-                    let _ = tx.send(if r.ok { Ok(json) } else { Err(json) });
+                    let _ = tx.send(if r.ok { Ok(json(r.json)) } else { Err(json(r.json)) });
                 }
             }
             wire::PING => {
@@ -389,17 +385,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_restart_asked_for_here_skips_the_backoff() {
+    fn reconnects_back_off_unless_a_fresh_session_was_asked_for_here() {
         // The node's BYE restart (a session cap, an address cap, the node restarting) backs off as any end does.
         assert_eq!(backoff(0, "restart", "too many sessions for this key"), Duration::from_millis(500));
         assert_eq!(backoff(3, "restart", "the node is restarting"), Duration::from_millis(4000));
         assert_eq!(backoff(10, "socket", ""), Duration::from_secs(30));
         // A throttled HELLO waits out the minute it was told.
         assert_eq!(backoff(0, "restart", "rate limited; retry in a minute"), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn a_failure_never_reconnects_at_once() {
         let long = Duration::from_secs(30);
         assert!(skip_backoff("requested", long, "restart"));
         // A frame the kernel cannot apply ends every session the same way: it backs off.
