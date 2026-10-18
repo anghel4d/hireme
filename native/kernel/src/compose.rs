@@ -253,7 +253,7 @@ pub fn overview(rows: &Rows, board: &Board, today: Day, top: usize) -> Json {
         })
         .collect();
     json!({
-        "today": today,
+        "today": crate::day_iso(today),
         "scoreboard": board.scoreboard(rows, today).to_json(),
         "lanes": lanes_doc(rows, today),
         "top": head,

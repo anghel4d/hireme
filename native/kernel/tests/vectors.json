@@ -1398,7 +1398,8 @@
           "expect": {
             "scoreboard": {
               "submitted": 0
-            }
+            },
+            "today": "2024-10-04"
           }
         }
       ]
