@@ -31,6 +31,10 @@ config :esbuild,
     cd: Path.expand("../assets", __DIR__)
   ]
 
+# Set by the Nix build, which compiles the kernel NIF itself and puts it at
+# priv/native/libnif.so; everywhere else Rustler builds native/nif.
+config :hireme, :nif_prebuilt, System.get_env("HIREME_NIF_PREBUILT") == "1"
+
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]

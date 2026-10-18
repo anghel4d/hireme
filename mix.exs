@@ -55,7 +55,7 @@ defmodule Hireme.MixProject do
       "assets.setup": ["esbuild.install --if-missing"],
       # The kernel as WebAssembly for the browser; Nix builds it for a release.
       "assets.wasm": [
-        "cmd cargo build --manifest-path native/Cargo.toml -p kernel --lib --release --target wasm32-unknown-unknown",
+        "cmd cargo rustc --manifest-path native/Cargo.toml -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib",
         "cmd mkdir -p priv/static/wasm",
         "cmd cp native/target/wasm32-unknown-unknown/release/kernel.wasm priv/static/wasm/kernel.wasm"
       ],
