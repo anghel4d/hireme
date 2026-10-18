@@ -439,10 +439,11 @@ export class Wire {
     this.hashes = m.hashes
   }
 
-  /** Adopt what early.ts opened, or connect from nothing. */
+  /** Adopt what early.ts opened, or connect from nothing. Early spent the page's ticket either way. */
   start(early: Early | undefined): void {
+    if (early) this.ticket = ""
     if (early?.wt && early.writer && early.control) this.adoptTransport(early.wt, early.writer, early.control, early.queue, early.helloSent)
-    else if (early?.ws) this.adoptSocket(early.ws, early.queue, early.helloSent)
+    else if (early?.ws && early.ws.readyState <= WebSocket.OPEN) this.adoptSocket(early.ws, early.queue, early.helloSent)
     else void this.connect()
   }
 
