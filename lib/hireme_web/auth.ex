@@ -90,6 +90,34 @@ defmodule HiremeWeb.Auth do
     end
   end
 
+  @doc """
+  The chunks app.js imports statically (the code Bun split out for the desk and the lenses to share),
+  preloaded beside it so they do not wait for it to arrive. Named by content already, they are linked
+  as app.js names them. Read once per node, like the early script.
+  """
+  @spec chunks() :: [String.t()]
+  def chunks do
+    case :persistent_term.get({__MODULE__, :chunks}, :unread) do
+      :unread ->
+        found =
+          case File.read(Application.app_dir(:hireme, "priv/static/assets/app.js")) do
+            {:ok, js} ->
+              Regex.scan(~r/from\s*"\.\/([\w.-]+\.js)"/, js, capture: :all_but_first)
+              |> List.flatten()
+              |> Enum.uniq()
+
+            _ ->
+              nil
+          end
+
+        if found, do: :persistent_term.put({__MODULE__, :chunks}, found)
+        found || []
+
+      found ->
+        found
+    end
+  end
+
   @doc "The Content-Security-Policy header value."
   @spec csp() :: String.t()
   def csp do

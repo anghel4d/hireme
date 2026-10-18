@@ -9,18 +9,12 @@
 
 import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
-import { guard, type Part } from "./guard.ts"
+import { describe, guard, type Part } from "./guard.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { SCHEMA_REV } from "./gen/schema.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
-import account from "./lenses/account.ts"
-import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
-import focus from "./lenses/focus.ts"
-import lanes from "./lenses/lanes.ts"
-import outreach from "./lenses/outreach.ts"
-import world from "./lenses/world.ts"
 
 /** What every lens is: a view of the model, and the actions its markup names. */
 export interface View {
@@ -36,7 +30,39 @@ export interface View {
   key?(ev: KeyboardEvent): boolean
 }
 
-const VIEWS: Partial<Record<Lens, View>> = { account, atlas, desk, focus, lanes, outreach, world }
+/**
+ * The desk is in the entry; every other lens is its own chunk, fetched the first time it is wanted and
+ * all of them in the page's idle time from the start, so a first visit finds it loaded.
+ */
+const VIEWS: Partial<Record<Lens, View>> = { desk }
+const LAZY: Partial<Record<Lens, () => Promise<{ default: View }>>> = {
+  focus: () => import("./lenses/focus.ts"),
+  world: () => import("./lenses/world.ts"),
+  atlas: () => import("./lenses/atlas.ts"),
+  outreach: () => import("./lenses/outreach.ts"),
+  lanes: () => import("./lenses/lanes.ts"),
+  account: () => import("./lenses/account.ts"),
+}
+const asked = new Set<Lens>()
+function fetchLens(lens: Lens): void {
+  const load = LAZY[lens]
+  if (VIEWS[lens] || !load || asked.has(lens)) return
+  asked.add(lens)
+  load().then(
+    (m) => {
+      VIEWS[lens] = m.default
+      if (model.address.lens === lens) schedule()
+    },
+    (e: unknown) => {
+      asked.delete(lens)
+      notice("error", `The ${lens} lens did not load: ${describe(e).slice(0, 200)}. Reload the page.`)
+    },
+  )
+}
+function preload(): void {
+  const idle = (fn: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(() => fn()) : setTimeout(fn, 50))
+  for (const l of Object.keys(LAZY) as Lens[]) idle(() => fetchLens(l))
+}
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
@@ -63,7 +89,7 @@ function link(): Html {
  */
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "account"]
-const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !kernel.loaded())
+const waiting = (lens: Lens): boolean => !VIEWS[lens] || (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !kernel.loaded())
 
 /** The lens hooks' guard (guard.ts): a failing hook's fallback stands in, told once, logged once. */
 const hooks = guard(
@@ -84,7 +110,7 @@ const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" c
   v ? lensView(lens, v)
   : kernel.broken() ? html`<div class="empty"><p class="error" role="alert">This page could not load its data: the kernel did not load.</p>
       <p><a class="button" href="${format(model.address)}">Reload</a> If it keeps failing, sign out and sign in again.</p></div>`
-  : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
+  : html`<p class="empty">${VIEWS[lens] && waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
 
 // The first time a lens parks, its own markup is passed (an empty one would morph it away); after that it is left alone.
 const parkedMain = (l: Lens): Html => {
@@ -115,6 +141,7 @@ function shell(): Html {
 
 function render(): void {
   if (!root) return
+  fetchLens(model.address.lens)
   const hold = waiting(model.address.lens)
   const v = hold ? undefined : VIEWS[model.address.lens]
   const where = format(model.address)
@@ -269,3 +296,6 @@ void (async () => {
 })()
 
 schedule()
+// The other lenses load in the page's idle time from the start (waiting on the socket, the BOOT), so
+// even a click the moment the desk appears finds its lens loaded, and the cold path is not slowed.
+preload()
