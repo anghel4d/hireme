@@ -167,6 +167,33 @@ defmodule HiremeWeb.SessionTest do
     refute log =~ public
   end
 
+  test "a wire whose browser session now owes its factor ends when the factor is enrolled", %{
+    session: s,
+    account: a,
+    email: email
+  } do
+    origin = hd(HiremeWeb.Endpoint.origins())
+
+    {:push, _, state} =
+      Session.frame(
+        Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b"),
+        open(%{@peer | origin: origin})
+      )
+
+    # The owner, in another browser (another process), enrols an authenticator app.
+    Task.async(fn ->
+      {:ok, _, owner} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+      Repo.put_account(a.id)
+      {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(owner, "me")
+      code = secret |> Base.decode32!(padding: false) |> NimbleTOTP.verification_code()
+      {:ok, _, _} = Hireme.Mfa.confirm_totp(owner, code, "phone")
+    end)
+    |> Task.await()
+
+    {frames, {:stopped, {:bye, :revoked}, _}} = until(state, :BYE)
+    assert Enum.any?(frames, &(&1.kind == :BYE))
+  end
+
   test "a bad credential, or a ticket from a foreign origin, is BYE revoked", %{session: s} do
     assert {:stop, {:bye, :revoked}, [bye], _} =
              Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
