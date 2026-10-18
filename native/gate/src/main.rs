@@ -352,23 +352,41 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
 
 async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::endpoint_side::Server>>, now: Arc<Notify>) {
     let mut stamp = cert_stamp(&gate.settings);
+    // A failed attempt is tried again at the next poll, changed pair or not:
+    // a renewal caught half-written must not leave the old certificate to
+    // expire.
+    let mut failed = false;
     loop {
         tokio::select! {
             _ = now.notified() => {}
             _ = sleep(Duration::from_secs(300)) => {
-                if cert_stamp(&gate.settings) == stamp { continue; }
+                if !failed && cert_stamp(&gate.settings) == stamp { continue; }
             }
         }
         // A renewal may still be writing the pair.
         sleep(Duration::from_secs(1)).await;
-        stamp = cert_stamp(&gate.settings);
-        match server_config(&gate.settings).await {
-            Ok(config) => {
-                if let Err(e) = endpoint.reload_config(config, false) {
-                    eprintln!("hireme-gate: reload: {e}");
-                }
+        let seen = cert_stamp(&gate.settings);
+        // In its own task: wtransport panics on a pair whose key does not
+        // match, which must cost this attempt, not every later one.
+        let (g, e) = (gate.clone(), endpoint.clone());
+        let attempt = tokio::spawn(async move {
+            let config = server_config(&g.settings).await?;
+            e.reload_config(config, false).map_err(|e| format!("reload: {e}"))
+        })
+        .await;
+        match attempt {
+            Ok(Ok(())) => {
+                stamp = seen;
+                failed = false;
             }
-            Err(e) => eprintln!("hireme-gate: reload kept the old certificate: {e}"),
+            Ok(Err(e)) => {
+                eprintln!("hireme-gate: reload kept the old certificate: {e}");
+                failed = true;
+            }
+            Err(_) => {
+                eprintln!("hireme-gate: reload kept the old certificate: the pair does not load (a mismatched or malformed key)");
+                failed = true;
+            }
         }
     }
 }
