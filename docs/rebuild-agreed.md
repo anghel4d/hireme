@@ -1,16 +1,14 @@
 # Rebuild, agreed
 
-Two whole-application designs, one document. Written independently by
-**opus-shannon** (`docs/rebuild-opus-shannon.md`) and **whalechan**
-(`docs/rebuild-whalechan.md`), then converged here.
+Two whole-application designs, written independently by **opus-shannon**
+and **whalechan**, converged into this one document.
 
 The nuke is the premise. A replaced file is deleted and its replacement is
 written as if the old one never existed. No compatibility paths, no dual
 readers, no "keep this until phase 3". The cutover commit is the nuke.
 
-`docs/full-duplex-agreed.md` remains the record of the data-model round
-and the operator's original ask; its names, frames and phase plan are
-superseded by this document.
+It supersedes the earlier data-model round (fat world rows, leases, key
+masks, the MCP); the operator's original ask is quoted in full below.
 
 ## The operator's mandate
 
