@@ -145,17 +145,18 @@ fn advice(code: &str, data: &Json) -> (String, String) {
         return ("no declared key is made of exactly these columns".to_owned(), help);
     }
     // A parameter the call left out (or sent as null): {param, got: null}.
-    if code == "type" && data.get("got").is_some_and(Json::is_null) {
-        if let Some(p) = data.get("param").and_then(Json::as_str) {
-            return (format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes."));
-        }
+    if code == "type"
+        && data.get("got").is_some_and(Json::is_null)
+        && let Some(p) = data.get("param").and_then(Json::as_str)
+    {
+        return (format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes."));
     }
     // A column refusal that lists what a new row lacks.
-    if code == "column" {
-        if let Some(cols) = data.get("missing").and_then(Json::as_array) {
-            let cols = cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ");
-            return (line, format!("A new row needs its required columns: {cols}. Add them to `set`, or name an existing row by id or key."));
-        }
+    if code == "column"
+        && let Some(cols) = data.get("missing").and_then(Json::as_array)
+    {
+        let cols = cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ");
+        return (line, format!("A new row needs its required columns: {cols}. Add them to `set`, or name an existing row by id or key."));
     }
     if let Some(r) = reason {
         return match REASONS.iter().find(|x| x.0 == code && x.1 == r) {
@@ -164,10 +165,10 @@ fn advice(code: &str, data: &Json) -> (String, String) {
             None => (r.to_owned(), todo),
         };
     }
-    if let Some(n) = need {
-        if let Some(x) = NEEDS.iter().find(|x| x.0 == code && x.1 == n) {
-            return (x.2.to_owned(), x.3.to_owned());
-        }
+    if let Some(n) = need
+        && let Some(x) = NEEDS.iter().find(|x| x.0 == code && x.1 == n)
+    {
+        return (x.2.to_owned(), x.3.to_owned());
     }
     (line, todo)
 }
