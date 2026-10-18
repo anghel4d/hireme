@@ -381,3 +381,4 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 /* The trail: a coalesced row's counts and the addresses it came from, under its kind. */
 .coalesced .counts { margin: 2px 0; padding-left: 1.1em; }
 .coalesced p { margin: 2px 0; }
+p.warn { color: var(--warn); font-weight: 600; }

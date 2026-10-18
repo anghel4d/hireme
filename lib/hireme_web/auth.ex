@@ -232,7 +232,7 @@ defmodule HiremeWeb.Auth do
       if s = opts[:script], do: ~s(<script type="module" src="#{static(s)}"></script>), else: ""
 
     document(conn, status, "#{esc(title)} · Hireme", script, """
-    <body class="auth"><main class="auth-card"><h1>HIREME</h1>
+    <body class="auth"><main class="auth-card"><h1>hireme</h1>
     #{body}
     </main></body>
     """)

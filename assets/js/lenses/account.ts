@@ -346,8 +346,8 @@ function factors(): Html {
           <label>Name <input name="name" maxlength="100" placeholder="Phone"></label>
           <button class="primary">Confirm</button><button type="button" class="ghost" data-act="totp-cancel">Cancel</button>
         </form></div>` : EMPTY}
-    <p class="muted">${left} recovery code${left === 1 ? "" : "s"} left.
-      ${confirmButton("recovery", "Make new codes", "recovery", {})}</p>
+    ${rows.length === 0 ? EMPTY : html`<p class="${left === 0 ? "warn" : "muted"}">${left === 0 ? "No recovery codes left: if you lose your factors you cannot get back in." : `${left} recovery code${left === 1 ? "" : "s"} left.`}
+      ${confirmButton("recovery", "Make new codes", "recovery", {})}</p>`}
   </section>`
 }
 
