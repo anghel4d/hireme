@@ -1522,7 +1522,10 @@ defmodule Hireme.Sequencer do
     {%{state | rows: {state.rev, rows}}, rows}
   end
 
-  defp wire_cols(t, nil), do: Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil))
+  # The kernel's columns: never a server_only one (a deferred column's hash
+  # twin stays server-side; the stub already carries its first 8 bytes).
+  defp wire_cols(t, nil),
+    do: Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil or &1.server_only))
 
   defp wire_cols(t, grants),
     do: Enum.reject(Grants.columns(grants, t), &(&1.name == "account_id" or &1.wire == nil))
