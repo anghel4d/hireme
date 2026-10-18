@@ -431,7 +431,10 @@ function coalesced(e: Row): Html {
     const shown = Array.isArray(m[field]) ? (m[field] as unknown[]).map(str) : []
     if (shown.length === 0) return EMPTY
     const total = Math.max(shown.length, num(m[`${field}_total`]))
-    return html`<p class="muted">from ${total} ${total === 1 ? one : many}: ${shown.join(", ")}${total > shown.length ? ` and ${total - shown.length} more` : ""}</p>`
+    // Past the node's tracking cap a window still counts events, but no longer which value each came from.
+    const untracked = num(m[`${field}_untracked_events`])
+    return html`<p class="muted">from ${total}${untracked > 0 ? "+" : ""} ${total === 1 && untracked === 0 ? one : many}: ${shown.join(", ")}${total > shown.length ? ` and ${total - shown.length} more` : ""}${
+      untracked > 0 ? ` (${untracked} more event${untracked === 1 ? "" : "s"} from untracked ones)` : ""}</p>`
   }
   return html`<div class="coalesced">
       ${m.from ? html`<span class="muted">${time(m.from)} – ${time(m.to)}</span>` : EMPTY}
