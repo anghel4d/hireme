@@ -33,7 +33,7 @@ defmodule Hireme.ReleaseTest do
 
   test "a database that already holds tables it did not get from a baseline is refused", %{db: db} do
     {:ok, conn} = Sqlite3.open(db)
-    :ok = Sqlite3.execute(conn, "CREATE TABLE job_apps (id INTEGER PRIMARY KEY)")
+    :ok = Sqlite3.execute(conn, "CREATE TABLE stranger (id INTEGER PRIMARY KEY)")
     Sqlite3.close(conn)
 
     assert_raise RuntimeError, ~r/not empty/, fn -> Release.migrate(db) end

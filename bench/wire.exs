@@ -359,7 +359,9 @@ edits =
   for i <- 1..64 do
     Bench.put(
       :applications,
-      %{canonical_url: "https://jobs.example.com/#{i * 13}", score_100: rem(i, 100)}, keyed: true)
+      %{canonical_url: "https://jobs.example.com/#{i * 13}", score_100: rem(i, 100)},
+      keyed: true
+    )
   end
 
 {_frames, op} = Bench.send_ops(op, Codec.encode_ops(edits), 64)
@@ -496,6 +498,59 @@ roundtrips =
     []
   end
 
+## Carrier: HELLO to a whole BOOT on a fresh connection, /wire WebSocket
+## against the gate (WebTransport, through BENCH_PROBE, the gate's probe).
+
+# A key, as an agent dials: a ticket needs a page's origin, which the probe
+# has none of. Eight per carrier keeps both under the failed-attempt limit.
+{:ok, %{secret: carrier_key}} =
+  Keys.mint(
+    Hireme.Repo.get(Hireme.Rows.Session, session.id, skip_account: true),
+    "bench-carrier",
+    Keys.preset(:read_write)
+  )
+
+carrier_ws =
+  if HiremeWeb.Endpoint.config(:server) do
+    for _ <- 1..8 do
+      t0 = System.monotonic_time(:microsecond)
+      {sock, buf} = Bench.WS.connect(port)
+
+      :ok =
+        Bench.WS.send_bin(
+          sock,
+          Codec.encode_hello(:ticket, Accounts.ticket(session), "bench-carrier")
+        )
+
+      {_, _} = Bench.WS.until(sock, buf, :BOOT)
+      :gen_tcp.close(sock)
+      System.monotonic_time(:microsecond) - t0
+    end
+  else
+    []
+  end
+
+carrier_gate =
+  with probe when is_binary(probe) <- System.get_env("BENCH_PROBE"),
+       url when is_binary(url) <- HiremeWeb.Gate.url() do
+    hash = HiremeWeb.Gate.cert_hash()
+
+    file =
+      Path.join(System.tmp_dir!(), "hireme-bench-hello-#{System.unique_integer([:positive])}")
+
+    File.write!(file, Codec.encode_hello(:key, carrier_key, "bench-carrier"))
+
+    for _ <- 1..8 do
+      args = ["hello", url, "--frame", file] ++ if(hash, do: ["--hash", hash], else: [])
+      {out, 0} = System.cmd(probe, args)
+      %{"bulk_ms" => ms} = out |> String.split("\n", trim: true) |> List.last() |> Jason.decode!()
+      round(ms * 1000)
+    end
+    |> tap(fn _ -> File.rm(file) end)
+  else
+    _ -> []
+  end
+
 ## The agent's budget: a read/write key writing flat out, 64 ops a batch.
 
 {:ok, %{secret: secret}} =
@@ -548,6 +603,12 @@ lines = [
     "us",
     %{p99: roundtrips != [] && Bench.percentile(roundtrips, 99), samples: length(roundtrips)}
   ),
+  Bench.line("carrier_hello_to_boot_p50_us", nil, nil, "us", %{
+    ws: carrier_ws != [] && Bench.percentile(carrier_ws, 50),
+    gate: carrier_gate != [] && Bench.percentile(carrier_gate, 50),
+    note:
+      "fresh connection to a whole BOOT on loopback; the gate's case for itself is lossy networks and 0.5-RTT, which loopback cannot show"
+  }),
   Bench.line("ops_acked_in_one_full_frame", acked, nil, "ops", %{
     pass: acked == 256,
     frame_257_refused: over_refused
