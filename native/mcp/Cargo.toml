@@ -3,13 +3,14 @@ name = "hireme-mcp"
 version = "2.0.0"
 edition.workspace = true
 publish.workspace = true
-description = "hireme's MCP server: one wire session under an API key; tools and resources from the catalog the key can see"
+description = "hireme's MCP server: one wire session under an API key, the resident rows in the native kernel, tools and resources from the catalog the key can see"
 
 [[bin]]
 name = "hireme-mcp"
 path = "src/main.rs"
 
 [dependencies]
+kernel = { path = "../kernel" }
 schema = { path = "../schema" }
 wire = { path = "../wire" }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
