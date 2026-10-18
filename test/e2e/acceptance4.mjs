@@ -7,6 +7,7 @@
 // traps never leaves it restoring. Run by test/e2e/run.sh,
 // which boots the node; this script needs BASE, HIREME_MCP, CHROMIUM, OUT.
 
+import { createHmac } from "node:crypto";
 import { chromium } from "playwright";
 
 const { BASE, HIREME_MCP, CHROMIUM, OUT } = process.env;
@@ -413,6 +414,59 @@ await step("the same page, unwrapped, restores and shows its cards", pages, asyn
     await p.goto(`${BASE}/desk`);
     await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "20 article.app-card");
     return "20 cards";
+  } finally { await p.close() }
+});
+
+// RFC 6238 (SHA-1, 30 s, 6 digits) from a base32 secret, for a step not yet spent (the server refuses
+// a replayed one): it waits for the next step when the last code used this one.
+let spent = -1;
+async function totp(secret) {
+  while (Math.floor(Date.now() / 30000) === spent) await sleep(500);
+  spent = Math.floor(Date.now() / 30000);
+  let bits = "";
+  for (const ch of secret.replace(/=+$/, "").toUpperCase()) bits += "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(ch).toString(2).padStart(5, "0");
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(spent));
+  const h = createHmac("sha1", Buffer.from(bits.match(/.{8}/g).map((x) => parseInt(x, 2)))).update(msg).digest();
+  return String((h.readUInt32BE(h[h.length - 1] & 15) & 0x7fffffff) % 1e6).padStart(6, "0");
+}
+
+// The account page's live views take deltas: a factor added or removed elsewhere in the list leaves the
+// others shown (they once vanished: the kernel replaced the view with the PATCH's one row). Last, as it
+// enrolls the account's first factor.
+await step("the account page keeps its factors through live changes: an app, a passkey added, then removed", pages, async () => {
+  const p = await ctx.newPage();
+  try {
+    const cdp = await ctx.newCDPSession(p);
+    await cdp.send("WebAuthn.enable");
+    await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
+    await p.goto(`${BASE}/account`);
+    await p.waitForSelector('#lens [data-act="totp-begin"]');
+    await p.click('#lens [data-act="totp-begin"]');
+    const secret = (await p.locator("#lens .totp code.secret").textContent()).trim();
+    await p.fill('#lens .totp input[name="code"]', await totp(secret));
+    await p.locator("#lens .totp button.primary").click();
+    await p.waitForSelector(".reveal");
+    await p.click('[data-act="reveal-done"]');
+    const listed = async () => (await p.locator('#lens [data-key="factors"] li').allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim()).join(" | ");
+    // A factor change may ask for a fresh factor first: the app's next code answers.
+    const stepUp = async () => {
+      await sleep(800);
+      if (await p.locator("#lens .step-up").count()) {
+        await p.fill('#lens form[data-act="step-totp"] input[name="code"]', await totp(secret));
+        await p.locator('#lens form[data-act="step-totp"] button').click();
+      }
+    };
+    await p.fill('#lens form[data-act="passkey"] input[name="name"]', "Key A");
+    await p.locator('#lens form[data-act="passkey"] button').click();
+    await stepUp();
+    await until(async () => /Authenticator/.test(await listed()) && /Key A/.test(await listed()), "the app and the passkey both listed");
+    const both = await listed();
+    await p.locator('#lens [data-key="factors"] li', { hasText: "Key A" }).locator('[data-act="open"]').click();
+    await p.locator('#lens [data-act="factor-remove"]').click();
+    await stepUp();
+    await until(async () => { const l = await listed(); return /Authenticator/.test(l) && !/Key A/.test(l); }, "only the app listed");
+    return `${both} -> ${await listed()}`;
   } finally { await p.close() }
 });
 

@@ -1619,7 +1619,10 @@ defmodule Hireme.Sequencer do
   end
 
   # A resumed session's snapshot holds the account's tables; the session's
-  # own (the live views and the wire tables) come fresh, whole.
+  # own (the live views and the wire tables) come fresh, whole. A page that
+  # resumes without a reload still holds its views, so each goes empty first
+  # (a block with no rows and no columns) and then whole; live changes after
+  # that are deltas.
   defp resumed(grants, state, now) do
     {state, views} = live_views(state)
 
@@ -1627,7 +1630,10 @@ defmodule Hireme.Sequencer do
       for t <- Schema.tables(),
           live?(t),
           Grants.read?(grants, t),
-          do: Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
+          do: [
+            Codec.block(t.id, 0, []),
+            Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
+          ]
 
     {state, [blocks | wire_tables(state, grants, now)]}
   end
@@ -1635,13 +1641,18 @@ defmodule Hireme.Sequencer do
   # The resident tables' encoded blocks as of the account's rev, per grants:
   # sessions joining between two writes (a reload, a second tab, an agent
   # reconnecting) share one encoding instead of re-encoding the desk each.
-  defp resident_blocks(%{blocks: {rev, grants, blocks}, rev: rev} = state, grants), do: {state, blocks}
+  defp resident_blocks(%{blocks: {rev, grants, blocks}, rev: rev} = state, grants),
+    do: {state, blocks}
 
   defp resident_blocks(state, grants) do
     {state, rows} = resident_rows(state)
 
     blocks =
-      for t <- Schema.tables(), t.residency in [:resident, :projection], not live?(t), Map.has_key?(rows, t.id), into: %{} do
+      for t <- Schema.tables(),
+          t.residency in [:resident, :projection],
+          not live?(t),
+          Map.has_key?(rows, t.id),
+          into: %{} do
         {t.id, Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))}
       end
 

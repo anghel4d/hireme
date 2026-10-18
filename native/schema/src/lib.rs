@@ -43,8 +43,9 @@ pub struct TableDef {
     pub singleton: bool,
     /// The session's, not the account's: a wire table, or a view of a table
     /// the sequencer does not write (`acct_*`, `trusted`). Sent whole with
-    /// every WELCOME, replaced whole by any frame naming it, never kept in a
-    /// snapshot.
+    /// every WELCOME (a resume empties a view first), never kept in a
+    /// snapshot; a wire table is replaced whole by any frame naming it, a
+    /// view takes deltas like any table.
     pub session: bool,
     /// Its natural keys, then its declared uniques (a `unique` column flag
     /// is `flag::UNIQUE`).

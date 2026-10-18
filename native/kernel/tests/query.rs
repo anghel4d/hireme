@@ -261,26 +261,42 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     assert_eq!(k.snapshot(), snap);
 }
 
-/// A session table (the account's live views) arrives whole each time, so
-/// a row the server no longer sends (a revoked key) goes; and the snapshot
-/// at rest never holds one.
+/// The account's live views take deltas: a PATCH naming one factor (a passkey added) keeps the rest
+/// (the authenticator app). A resume sends each view empty, then whole, so a page that kept rows
+/// from before (a factor removed elsewhere) drops them; and the snapshot at rest never holds one.
 #[test]
-fn session_tables_are_whole_and_never_at_rest() {
-    use schema::col::acct_keys as AK;
+fn live_views_take_deltas_and_a_resume_empties_them_first() {
+    use schema::col::acct_factors as AF;
     let mut k = kernel();
-    let keys = |ids: &[u32]| {
-        let mut w = wire::BodyWriter::new();
-        let mut b = w.block(table::ACCT_KEYS, ids.len());
-        b.u32s(AK::ID, ids.iter().copied()).strs(AK::NAME, ids.iter().map(|_| "k"));
+    let factors = |w: &mut wire::BodyWriter, rows: &[(u32, &str)]| {
+        let mut b = w.block(table::ACCT_FACTORS, rows.len());
+        b.u32s(AF::ID, rows.iter().map(|r| r.0)).strs(AF::NAME, rows.iter().map(|r| r.1));
         b.done();
-        w.finish()
     };
-    k.patch(&keys(&[1, 2]), 2).unwrap();
-    k.patch(&keys(&[2]), 3).unwrap();
-    let rows = q(&k, json!({"op": "find", "table": "acct_keys"}))["rows"].clone();
-    assert_eq!(rows.as_array().map(|r| r.iter().map(|x| x["id"].clone()).collect::<Vec<_>>()), Some(vec![json!(2)]));
+    let ids = |k: &Kernel| q(k, json!({"op": "find", "table": "acct_factors"}))["rows"].as_array().unwrap().iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
+    let mut w = wire::BodyWriter::new();
+    factors(&mut w, &[(1, "Phone"), (2, "Laptop")]);
+    k.patch(&w.finish(), 2).unwrap();
+    // A passkey added: the delta names it alone; both earlier factors stay.
+    let mut w = wire::BodyWriter::new();
+    factors(&mut w, &[(3, "Key A")]);
+    k.patch(&w.finish(), 3).unwrap();
+    assert_eq!(ids(&k), vec![json!(1), json!(2), json!(3)]);
+    // Gone by a gone block, like any table: the others stay.
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::ACCT_FACTORS, 1);
+    b.u32s(wire::GONE, [3].into_iter());
+    b.done();
+    k.patch(&w.finish(), 4).unwrap();
+    assert_eq!(ids(&k), vec![json!(1), json!(2)]);
+    // A resume: the view empty, then whole. Factor 2 was removed while this page was away.
+    let mut w = wire::BodyWriter::new();
+    w.block(table::ACCT_FACTORS, 0).done();
+    factors(&mut w, &[(1, "Phone")]);
+    k.patch(&w.finish(), 5).unwrap();
+    assert_eq!(ids(&k), vec![json!(1)]);
     let mut again = Kernel::new();
     again.set_grants(Grants::operator());
     again.restore(&k.snapshot()).unwrap();
-    assert_eq!(q(&again, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
+    assert_eq!(q(&again, json!({"op": "find", "table": "acct_factors"}))["rows"], json!([]));
 }

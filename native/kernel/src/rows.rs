@@ -40,9 +40,10 @@ fn keyed(table: u16) -> bool {
 
 /// Whether a frame naming a table replaces it whole: every wire table
 /// (`leases`, `clock`, `catalog`) is sent whole, so a row missing from it
-/// is gone.
+/// is gone. The account's live views (`acct_*`, `trusted`) take deltas like
+/// any table; a resume empties each first with an empty block.
 fn whole(table: u16) -> bool {
-    schema::table_def(table).is_some_and(|t| t.session) || !keyed(table)
+    schema::table_def(table).is_some_and(|t| t.residency == schema::Residency::Wire) || !keyed(table)
 }
 /// The row revision column.
 pub const REV: u16 = 3;
@@ -662,7 +663,10 @@ impl Rows {
                 _ => return Err(Error::Shape),
             };
             let t = self.table_mut(tid);
-            if (replace || whole(tid)) && !replaced.contains(&tid) {
+            // A block with no rows and no columns empties its table in any frame: a resume's live view
+            // ahead of its rows (a BOOT empties every table it names anyway).
+            let empty = n == 0 && b.cols().next().is_none();
+            if (replace || whole(tid) || empty) && !replaced.contains(&tid) {
                 t.clear();
                 replaced.push(tid);
             }
