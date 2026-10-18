@@ -5,6 +5,7 @@
 //! and the governor's index are maintained incrementally; this is their law.
 
 use kernel::abi::Kernel;
+use kernel::board;
 use kernel::judge::Ctx;
 use kernel::pipeline::{self, Stage};
 use kernel::rows::Data;
@@ -39,6 +40,7 @@ impl Rng {
 
 const TEXTS: &[&str] = &[
     "", "Rust engineer", "Senior Staff Software Engineer", "Google", "ACME Corp", "$250k", "250 000 €", "remote", "onsite only",
+    "no remote", "Remote, no remote", "Acme Body", "Shop Lead", "Sales", "Engineer", "Staffing Partners", "Systems Intern",
     "https://boards.greenhouse.io/acme/jobs/1", "https://jobs.lever.co/acme/2", "https://acme.wd5.myworkdayjobs.com/x/job/3",
 ];
 
@@ -144,7 +146,10 @@ fn patch(r: &mut Rng) -> Vec<u8> {
             b.u32s(A::ID, [id].into_iter());
             match r.below(6) {
                 0 => b.u32s(A::STAGE, [stage].into_iter()).strs(A::PIPS, [pips(stage, r.below(2) == 0).as_str()].into_iter()),
-                1 => b.strs(A::COMPANY, [*r.pick(TEXTS)].into_iter()).strs(A::ROLE, [*r.pick(TEXTS)].into_iter()),
+                1 => b
+                    .strs(A::COMPANY, [*r.pick(TEXTS)].into_iter())
+                    .strs(A::ROLE, [*r.pick(TEXTS)].into_iter())
+                    .strs(A::LOCATION, [*r.pick(TEXTS)].into_iter()),
                 2 => b.strs(A::COMP_RAW, [*r.pick(TEXTS)].into_iter()).u32s(A::SCORE_100, [r.below(101) as u32].into_iter()),
                 3 => b.u32s(A::APPLIED_ON, [r.day(200)].into_iter()).u32s(A::STAGE_ON, [r.day(100)].into_iter()),
                 4 => b.u32s(A::PLACE_ID, [1 + r.below(3) as u32].into_iter()).u32s(A::WORK_MODE, [r.below(3) as u32].into_iter()),
@@ -283,6 +288,16 @@ fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
             let (x, y) = (derived(&mut a, &probes, &agent), derived(&mut b, &probes, &agent));
             if let Some((i, (x, y))) = x.iter().zip(&y).enumerate().find(|(_, (x, y))| x != y) {
                 panic!("seed {seed} step {step} after {log:?}: derived item {i}\n  kept current: {x}\n  fresh:        {y}");
+            }
+            // Each card's suggestion, read through the board's memos, is the
+            // one the row reads to on its own.
+            let ids = a.board_ids(None);
+            let cards: Vec<_> = ids.iter().map(|id| a.board().card(*id).map(|c| c.suggestion)).collect();
+            let rows = a.rows();
+            let t = rows.table(table::APPLICATIONS).unwrap();
+            let citizens = board::citizenships(rows);
+            for (id, card) in ids.iter().zip(cards) {
+                assert_eq!(card, Some(board::suggestion(rows, &citizens, t, *id)), "seed {seed} step {step} application {id}");
             }
         }
     }

@@ -338,11 +338,10 @@ pub fn citizenships(rows: &Rows) -> Vec<String> {
     text::codes(settings(rows).and_then(|(s, sid)| s.str(sid, col::settings::CITIZENSHIPS)).unwrap_or(""))
 }
 
-/// The Life-EV suggestion for one application row; `citizenships` is
-/// [`citizenships`].
+/// The Life-EV suggestion for one application row, read without the
+/// board's memos; `citizenships` is [`citizenships`].
 pub fn suggestion(rows: &Rows, citizenships: &[String], t: &Table, id: u32) -> Suggestion {
-    let s = score_seat(rows, citizenships, t, id);
-    score::suggest(&s)
+    score::suggest(&score_seat(rows, citizenships, t, id))
 }
 
 fn score_seat<'t>(rows: &Rows, citizenships: &[String], t: &'t Table, id: u32) -> score::Seat<'t> {
@@ -398,11 +397,6 @@ impl Board {
                 }
             }
         }
-        if moved.replaced.contains(&table::APPLICATIONS) {
-            self.names.clear();
-            self.titles.clear();
-            self.places.clear();
-        }
         if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
             self.cache.clear();
             self.citizens = None;
@@ -441,6 +435,7 @@ impl Board {
             }
             let ix = heat::Index::new(hot.iter(), today, &cfg);
             self.governor = Some((today, cfg, ix));
+            self.forget_reads();
         }
         let g = self.governor.as_ref().map(|g| (&g.2, &g.1));
         g.unwrap_or_else(|| unreachable!())
@@ -476,7 +471,7 @@ impl Board {
             let place = match self.places.get(location) {
                 Some(p) => *p,
                 None => {
-                    let p = score::Facts::of(&text::normalize(location));
+                    let p = score::Facts::of_place(&text::normalize(location));
                     self.places.insert(String::from(location), p);
                     p
                 }
@@ -568,6 +563,16 @@ impl Board {
         keys.extend(self.cards.iter().enumerate().filter(|(i, _)| !placed[*i]).map(|(_, c)| (order_key(c), c.id)));
         keys.sort();
         self.order = keys.iter().map(|k| k.1).collect();
+        self.forget_reads();
+    }
+
+    /// Drops the per-distinct-text reads once a pass has used them: a
+    /// rewritten name, title or place must not stay in memory until the
+    /// next BOOT.
+    fn forget_reads(&mut self) {
+        self.names.clear();
+        self.titles.clear();
+        self.places.clear();
     }
 
     /// The lineage index, built on first use.

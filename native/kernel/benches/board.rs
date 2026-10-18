@@ -21,14 +21,19 @@ fn main() {
         r ^= r << 17;
         r % n
     };
+    // DISTINCT=1: every company, role and location is its own text, the
+    // desk on which reading each distinct text once saves nothing.
+    let distinct = std::env::var("DISTINCT").is_ok_and(|d| d == "1");
     let roles = ["Software Engineer", "Senior Software Engineer", "Rust Systems Engineer", "Research Engineer", "SRE"];
-    let (mut stage, mut company, mut role, mut url, mut on) = (vec![], vec![], vec![], vec![], vec![]);
-    for _ in 0..N {
-        let c = below(2500);
+    let (mut stage, mut company, mut role, mut place, mut url, mut on) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    for i in 0..N {
+        let c = if distinct { i as u64 } else { below(2500) };
         let is_hot = (below(1000) as f64) < hot * 1000.0;
         stage.push(if is_hot { 5 + below(5) as u32 } else { below(5) as u32 });
         company.push(format!("Company {c} Systems"));
-        role.push(roles[below(5) as usize].to_string());
+        let r = roles[below(5) as usize];
+        role.push(if distinct { format!("{r} {i}") } else { r.to_string() });
+        place.push(if distinct { format!("Office {i}, remote friendly") } else { ["Lisbon", "Remote", "Berlin, onsite only", ""][below(4) as usize].to_string() });
         url.push(match below(5) {
             0 => format!("https://boards.greenhouse.io/c{c}/jobs/1"),
             1 => format!("https://jobs.lever.co/c{c}/x"),
@@ -45,6 +50,7 @@ fn main() {
         .u32s(A::STAGE, stage.iter().copied())
         .strs(A::COMPANY, company.iter().map(String::as_str))
         .strs(A::ROLE, role.iter().map(String::as_str))
+        .strs(A::LOCATION, place.iter().map(String::as_str))
         .strs(A::LISTING_URL, url.iter().map(String::as_str))
         .u32s(A::STAGE_ON, on.iter().copied())
         .u32s(A::HEAT_OVERRIDE, (0..N).map(|_| 0));
