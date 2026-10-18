@@ -260,6 +260,9 @@ through a durable outbox with bounded retries.
 | Wire tickets | 60 per peer a minute |
 | Agent ops | 600 per key per wall-clock minute |
 | Agent read RPCs | 3,000 per key per wall-clock minute |
+| Agent write bytes | 64 MiB per key per wall-clock minute |
+| Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
+| Rows per table | every stored account table has a cap in the declaration; none is unbounded |
 | Key HELLOs | 60 per key per wall-clock minute |
 | Wire sessions open per key / per peer | 16 / 16 |
 | /wire upgrades | 300 per peer a minute |
