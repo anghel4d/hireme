@@ -12,10 +12,10 @@
   --line: #dcd8d0;
   --accent: #2f5bd3;
   --accent-ink: #ffffff;
-  --ok: #217a45;
-  --warn: #9a6400;
+  --ok: #1d7040;
+  --warn: #8a5a00;
   --bad: #b3261e;
-  --hot: #c2410c;
+  --hot: #b03a0b;
   --focus: #2f5bd3;
   --radius: 6px;
   --gap: 12px;
@@ -302,7 +302,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .chip.on .n { color: inherit; opacity: 0.8; }
 .inline { flex-direction: row; align-items: center; gap: 6px; }
 .narrow { width: 72px; }
-.board { position: relative; margin: 12px 0; }
+.board { position: relative; margin: 12px 0; contain: layout size style; }
 .app-card {
   background: var(--panel);
   border: 1px solid var(--line);
