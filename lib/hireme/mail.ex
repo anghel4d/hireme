@@ -72,7 +72,7 @@ defmodule Hireme.Mail do
   end
 
   @doc "Send one notice now; the outbox worker is the caller."
-  @spec notice(String.t(), atom(), map()) :: :ok | {:error, term()}
+  @spec notice(String.t(), atom(), map()) :: {:ok, term()} | {:error, term()}
   def notice(to, kind, meta \\ %{}) do
     post(to, "Hireme: #{line(kind, meta)}", """
     #{line(kind, meta)}

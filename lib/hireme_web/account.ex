@@ -61,14 +61,29 @@ defmodule HiremeWeb.Account do
   def call(method, params, ctx) when is_binary(method) and is_map(params) do
     with nil <- ctx[:key],
          id when is_integer(id) <- ctx[:session_id],
-         %Session{} = session <- Repo.get(Session, id, skip_account: true),
-         true <- session.account_id == ctx.account_id and is_nil(session.revoked_at) do
-      Repo.with_account(ctx.account_id, fn ->
-        method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
-      end)
+         {:ok, %Session{account_id: account_id} = session} <- live(id),
+         true <- account_id == ctx.account_id do
+      Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
+      :session -> {:error, %{error: "session"}}
       _ -> {:error, %{error: "scope"}}
     end
+  end
+
+  # The browser session's own lifetime, idle limit, revocation and the
+  # account's suspension hold here exactly as for a page.
+  defp live(id) do
+    case Accounts.live_session(id) do
+      {:ok, session} -> {:ok, session}
+      :error -> :session
+    end
+  end
+
+  # A malformed call answers `invalid` and the wire session lives on.
+  defp safely(method, params, session, ctx) do
+    method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+  rescue
+    _ -> {:error, %{error: "invalid"}}
   end
 
   defp answer({:park, _} = park), do: park
@@ -78,8 +93,10 @@ defmodule HiremeWeb.Account do
   defp answer({:error, reason}) when is_atom(reason),
     do: {:error, %{error: Atom.to_string(reason)}}
 
-  defp answer({:error, %{} = error}), do: {:error, error}
-  defp answer({:error, _}), do: {:error, %{error: "invalid"}}
+  defp answer({:error, %{error: code} = error}) when is_binary(code) and not is_struct(error),
+    do: {:error, error}
+
+  defp answer(_), do: {:error, %{error: "invalid"}}
 
   ## Reading
 
@@ -123,7 +140,7 @@ defmodule HiremeWeb.Account do
   defp run("account.key.mint", p, s, meta) do
     with {:ok, masks} <- masks(p),
          {:ok, %{key: key, secret: secret}} <-
-           Keys.mint(s, p["name"], masks, days(p["expires_in_days"]), ctx(meta, s)) do
+           Keys.mint(s, text(p["name"]), masks, days(p["expires_in_days"]), ctx(meta, s)) do
       {:ok, %{key: key(key), secret: secret}}
     end
   end
@@ -136,7 +153,8 @@ defmodule HiremeWeb.Account do
     end
   end
 
-  defp run("account.key.rename", %{"id" => id, "name" => name}, _s, _meta) when is_integer(id) do
+  defp run("account.key.rename", %{"id" => id, "name" => name}, _s, _meta)
+       when is_integer(id) and is_binary(name) do
     with %{} = key <- Keys.get(id) || {:error, :not_found},
          {:ok, key} <- Keys.rename(key, name) do
       {:ok, %{key: key(key)}}
@@ -165,9 +183,9 @@ defmodule HiremeWeb.Account do
 
   defp run("account.totp.begin", p, s, _meta), do: Mfa.begin_totp(s, label(p["label"], s))
 
-  defp run("account.totp.confirm", %{"code" => code} = p, s, meta) do
+  defp run("account.totp.confirm", %{"code" => code} = p, s, meta) when is_binary(code) do
     with {:ok, factor, codes} <-
-           Mfa.confirm_totp(s, code, to_string(p["name"] || ""), ctx(meta, s)),
+           Mfa.confirm_totp(s, code, text(p["name"]), ctx(meta, s)),
          do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
   end
 
@@ -193,17 +211,17 @@ defmodule HiremeWeb.Account do
   defp run("account.step_up.passkey", p, s, meta),
     do: stepped(Mfa.verify_assertion(s, p, ctx(meta, s)))
 
-  defp run("account.step_up.totp", %{"code" => c}, s, meta),
+  defp run("account.step_up.totp", %{"code" => c}, s, meta) when is_binary(c),
     do: stepped(Mfa.verify_totp(s, c, ctx(meta, s)))
 
-  defp run("account.step_up.recovery", %{"code" => c}, s, meta),
+  defp run("account.step_up.recovery", %{"code" => c}, s, meta) when is_binary(c),
     do: stepped(Mfa.verify_recovery(s, c, ctx(meta, s)))
 
   ## Trusted hosts: operator-owned, browser plus step-up, in no key's mask.
 
   defp run("account.trusted_host.add", %{"host" => host} = p, s, meta) when is_binary(host) do
     if Mfa.fresh?(s),
-      do: Hireme.Provenance.trust(host, p["note"], ctx(meta, s)) |> host_answer(),
+      do: Hireme.Provenance.trust(host, text(p["note"]), ctx(meta, s)) |> host_answer(),
       else: {:error, :step_up}
   end
 
@@ -308,6 +326,9 @@ defmodule HiremeWeb.Account do
     do: {:ok, %{read_mask: r, write_mask: w, may_delete: p["may_delete"] == true}}
 
   defp masks(_), do: {:error, :masks}
+
+  defp text(value) when is_binary(value), do: value
+  defp text(_), do: ""
 
   defp days(n) when is_integer(n) and n > 0 and n <= 3650, do: n
   defp days(_), do: nil

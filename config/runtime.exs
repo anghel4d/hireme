@@ -23,6 +23,12 @@ if config_env() == :dev do
     "" -> :ok
     path -> config :hireme, Hireme.Repo, database: path
   end
+
+  # A Unix socket path holds 107 bytes; a tree checked out deep needs a short one.
+  case System.get_env("GATE_SOCKET", "") do
+    "" -> :ok
+    path -> config :hireme, HiremeWeb.Gate, socket: path
+  end
 end
 
 # HIREME_GATE=off runs the wire over the WebSocket carrier alone, with no

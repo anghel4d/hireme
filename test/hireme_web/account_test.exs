@@ -51,4 +51,22 @@ defmodule HiremeWeb.AccountTest do
     assert {:error, %{error: "step_up"}} =
              Account.call("account.identity.unlink", %{"id" => identity.id}, ctx)
   end
+
+  test "a session past its life is refused on the wire as on a page", %{session: s, ctx: ctx} do
+    age(s, :last_seen_at, Hireme.Security.session_idle() + 1)
+    assert {:error, %{error: "session"}} = Account.call("account.overview", %{}, ctx)
+  end
+
+  test "malformed params answer invalid and never raise", %{ctx: ctx} do
+    for {m, p} <- [
+          {"account.key.mint", %{"name" => %{"x" => 1}, "preset" => "read_only"}},
+          {"account.key.rename", %{"id" => 1, "name" => [1]}},
+          {"account.step_up.totp", %{"code" => %{}}},
+          {"account.totp.confirm", %{"code" => 5}},
+          {"account.session.revoke", %{"id" => "x"}}
+        ] do
+      assert {:error, %{error: code}} = Account.call(m, p, ctx)
+      assert is_binary(code)
+    end
+  end
 end

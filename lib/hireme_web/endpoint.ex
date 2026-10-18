@@ -47,7 +47,9 @@ defmodule HiremeWeb.Endpoint do
 
     case config(:check_origin) do
       list when is_list(list) ->
-        [own | for(o <- list, do: String.replace_prefix(o, "//", "http://"))] |> Enum.uniq()
+        port = config(:url)[:port]
+        others = for o <- list, do: "http:" <> o <> if(port, do: ":#{port}", else: "")
+        Enum.uniq([own | others])
 
       _ ->
         [own]
@@ -67,6 +69,7 @@ defmodule HiremeWeb.Endpoint do
     plug Phoenix.CodeReloader
   end
 
+  plug :peer
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
   plug :wire
@@ -81,6 +84,31 @@ defmodule HiremeWeb.Endpoint do
   plug Plug.Head
   plug Plug.Session, @session_options
   plug HiremeWeb.Router
+
+  # Who is asking. Behind the host's nginx every request arrives from
+  # loopback, so per-peer limits and the trail would see one peer: from
+  # loopback only, nginx's X-Real-IP ($remote_addr, which it overwrites)
+  # names the client. X-Forwarded-For is never read; its left end is the
+  # client's to write. The process account is cleared here too: Bandit
+  # reuses a connection's process across requests, and nothing about the
+  # last request's account may reach the next (or the wire session an
+  # upgrade turns this process into).
+  defp peer(conn, _opts) do
+    Hireme.Repo.put_account(nil)
+
+    with true <- loopback?(conn.remote_ip),
+         [real | _] <- Plug.Conn.get_req_header(conn, "x-real-ip"),
+         {:ok, ip} <-
+           real |> String.trim() |> String.to_charlist() |> :inet.parse_strict_address() do
+      %{conn | remote_ip: ip}
+    else
+      _ -> conn
+    end
+  end
+
+  defp loopback?({127, _, _, _}), do: true
+  defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp loopback?(_), do: false
 
   # The wire's WebSocket carrier, for when UDP (and so the gate) is
   # blocked. The credential travels in HELLO, never in the upgrade, so no

@@ -103,4 +103,28 @@ defmodule HiremeWeb.SignInTest do
     [_, token] = Regex.run(~r/name="csrf-token" content="([^"]+)"/, conn.resp_body)
     token
   end
+
+  test "behind the local proxy the client is X-Real-IP; from elsewhere it is the peer", %{
+    conn: conn
+  } do
+    for i <- 1..20 do
+      conn
+      |> put_req_header("x-real-ip", "203.0.113.#{i}")
+      |> post("/sign-in/email", %{"email" => "a#{i}@example.com"})
+    end
+
+    # Twenty distinct clients through one proxy are twenty peers, not one.
+    ok =
+      conn
+      |> put_req_header("x-real-ip", "203.0.113.99")
+      |> post("/sign-in/email", %{"email" => "b@example.com"})
+
+    assert ok.status == 200
+
+    spoofed =
+      %{conn | remote_ip: {198, 51, 100, 7}} |> put_req_header("x-real-ip", "203.0.113.99")
+
+    for _ <- 1..20, do: post(spoofed, "/sign-in/email", %{"email" => "c@example.com"})
+    assert post(spoofed, "/sign-in/email", %{"email" => "d@example.com"}).status == 429
+  end
 end

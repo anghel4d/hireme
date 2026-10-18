@@ -437,8 +437,14 @@ defmodule HiremeWeb.SignInController do
     end
   end
 
+  # Anyone can hit a callback; the trail takes a bounded number of their
+  # refusals, so it cannot be grown or the writer held from outside.
   defp refuse(conn, provider, reason) do
-    Audit.record(:sign_in_refused, %{provider: provider, reason: reason}, meta(conn))
+    m = meta(conn)
+
+    if Hireme.Security.limit(:refusal_peer, m.ip) == :ok,
+      do: Audit.record(:sign_in_refused, %{provider: provider, reason: reason}, m)
+
     code = if reason == :denied, do: "denied", else: "failed"
 
     if conn.assigns.account,

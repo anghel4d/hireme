@@ -104,7 +104,8 @@ defmodule Hireme.Release do
     :ok = Sqlite3.execute(conn, "BEGIN IMMEDIATE")
 
     try do
-      :ok = Sqlite3.execute(conn, sql)
+      with {:error, reason} <- Sqlite3.execute(conn, sql),
+           do: raise("schema file #{Path.basename(file)} failed: #{inspect(reason)}")
 
       for name <- names,
           do:

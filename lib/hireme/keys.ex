@@ -62,13 +62,14 @@ defmodule Hireme.Keys do
 
   @doc "Every domain's bit."
   @spec all() :: 0..31
-  def all, do: domains() |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+  def all, do: Hireme.Grants.all()
 
-  @doc "A preset's masks. `may_delete` is never part of a preset; it is granted on its own."
+  @doc "A preset's masks (`Hireme.Grants` owns them). `may_delete` is never part of a preset; it is granted on its own."
   @spec preset(:read_only | :write_only | :read_write) :: masks()
-  def preset(:read_only), do: %{read_mask: all(), write_mask: 0, may_delete: false}
-  def preset(:write_only), do: %{read_mask: 0, write_mask: all(), may_delete: false}
-  def preset(:read_write), do: %{read_mask: all(), write_mask: all(), may_delete: false}
+  def preset(name) do
+    {r, w} = Hireme.Grants.preset(name)
+    %{read_mask: r, write_mask: w, may_delete: false}
+  end
 
   @doc "The preset these masks are, or `:custom`."
   @spec preset_of(masks() | Key.t()) :: :read_only | :write_only | :read_write | :custom
@@ -125,22 +126,25 @@ defmodule Hireme.Keys do
     end
   end
 
-  # The cap and the insert commit together. The account row is the lock:
-  # the update matches only while under the cap, so a racing mint sees the
-  # incremented count.
+  # The count and the insert commit in one BEGIN IMMEDIATE transaction, so
+  # a racing mint sees this one; an expired key no longer counts.
   defp insert_under_cap(account_id, row) do
+    now = Store.now()
+
     Store.transaction(fn ->
-      {claimed, _} =
-        Repo.update_all(
-          from(a in Account,
-            where: a.id == ^account_id and a.live_key_count < ^Security.api_keys_per_account()
+      live =
+        Repo.aggregate(
+          from(k in Key,
+            where:
+              k.account_id == ^account_id and is_nil(k.revoked_at) and
+                (is_nil(k.expires_at) or k.expires_at > ^now)
           ),
-          [inc: [live_key_count: 1]],
+          :count,
           skip_account: true
         )
 
-      if claimed == 0, do: Repo.rollback(:limit)
-      Repo.insert!(struct(Key, row), skip_account: true)
+      if live >= Security.api_keys_per_account(), do: Repo.rollback(:limit)
+      Repo.insert!(struct(Key, Map.put(row, :rev, 1)), skip_account: true)
     end)
   end
 
@@ -205,35 +209,33 @@ defmodule Hireme.Keys do
   @spec revoke(Key.t(), map()) :: Key.t()
   def revoke(key, meta \\ %{})
 
-  def revoke(%Key{revoked_at: nil} = key, meta) do
-    {:ok, revoked} =
-      Store.transaction(fn ->
-        updated =
-          key
-          |> Ecto.Changeset.change(revoked_at: Store.now(), rev: key.rev + 1)
-          |> Repo.update!(skip_account: true)
+  def revoke(%Key{} = key, meta) do
+    now = Store.now()
 
+    # Revoked only if still live: a second revoke, or one from a stale
+    # struct, changes nothing and announces nothing.
+    {n, _} =
+      Store.write(fn ->
         Repo.update_all(
-          from(a in Account, where: a.id == ^key.account_id and a.live_key_count > 0),
-          [inc: [live_key_count: -1]],
+          from(k in Key, where: k.id == ^key.id and is_nil(k.revoked_at)),
+          [set: [revoked_at: now, updated_at: now], inc: [rev: 1]],
           skip_account: true
         )
-
-        updated
       end)
 
-    Audit.record(
-      :api_key_revoked,
-      %{key_id: key.id, name: key.name},
-      Map.put(meta, :account_id, key.account_id)
-    )
+    if n == 1 do
+      Audit.record(
+        :api_key_revoked,
+        %{key_id: key.id, name: key.name},
+        Map.put(meta, :account_id, key.account_id)
+      )
 
-    Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name})
-    Audit.bye(key.account_id, {{:key, key.id}, :revoked})
-    revoked
+      Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name})
+      Audit.bye(key.account_id, {{:key, key.id}, :revoked})
+    end
+
+    Repo.get(Key, key.id, skip_account: true)
   end
-
-  def revoke(%Key{} = key, _meta), do: key
 
   @doc "Whether key `id` is still one `account_id` may use: live, on an active account."
   @spec usable?(pos_integer(), pos_integer()) :: boolean()
@@ -246,7 +248,7 @@ defmodule Hireme.Keys do
 
   @doc """
   The live key a presented secret names, or `:error`. `peer` throttles
-  attempts per address, twenty a minute; a throttled attempt is
+  failed attempts per address, twenty a minute; a throttled attempt is
   `{:error, :rate_limited}`, said apart so a client retries later instead
   of giving the key up. It is decided before the key is read, so it says
   nothing about the key.
@@ -256,7 +258,7 @@ defmodule Hireme.Keys do
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
-    with :ok <- Security.limit(:api_key_peer, peer),
+    with false <- Security.blocked?(:api_key_peer, peer),
          {:ok, key_id, secret} <- parse(presented),
          {%Key{} = key, account} <- with_account(dynamic([k], k.key_id == ^key_id)),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
@@ -266,8 +268,13 @@ defmodule Hireme.Keys do
       {:ok,
        Map.take(key, [:id, :key_id, :account_id, :name, :read_mask, :write_mask, :may_delete])}
     else
-      {:error, :rate_limited} -> {:error, :rate_limited}
-      _ -> :error
+      # Only the throttle answers `true` here; every failed check is false.
+      true ->
+        {:error, :rate_limited}
+
+      _ ->
+        Security.failed(:api_key_peer, peer)
+        :error
     end
   end
 

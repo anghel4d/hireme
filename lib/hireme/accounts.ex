@@ -100,8 +100,9 @@ defmodule Hireme.Accounts do
           authenticated_at: now,
           last_seen_at: now,
           expires_at: DateTime.add(now, Security.session_lifetime()),
-          ip: Security.clip(Map.get(meta, :ip, ""), 64),
-          user_agent: Security.clip(Map.get(meta, :user_agent, ""))
+          ip: text(meta[:ip], 64),
+          user_agent: text(meta[:user_agent], 200),
+          rev: 1
         })
       end)
 
@@ -218,8 +219,15 @@ defmodule Hireme.Accounts do
 
   @doc "A single-use ticket that opens one wire session as this browser session."
   @spec ticket(Session.t()) :: String.t()
-  def ticket(%Session{id: id, account_id: account_id}) do
-    Phoenix.Token.encrypt(HiremeWeb.Endpoint, @ticket_salt, {account_id, id, Security.token(12)})
+  def ticket(%Session{id: id, account_id: account_id, token_hash: hash}) do
+    # Eight bytes of the session's own token hash: a ticket is good only for
+    # the session row that minted it, not for anything the application
+    # secret alone could sign.
+    Phoenix.Token.encrypt(
+      HiremeWeb.Endpoint,
+      @ticket_salt,
+      {account_id, id, binary_part(hash, 0, 8), Security.token(12)}
+    )
   end
 
   @doc """
@@ -231,13 +239,14 @@ defmodule Hireme.Accounts do
   def redeem_ticket(ticket) when is_binary(ticket) do
     now = Store.now()
 
-    with {:ok, {account_id, session_id, nonce}} <-
+    with {:ok, {account_id, session_id, bound, nonce}} <-
            Phoenix.Token.decrypt(HiremeWeb.Endpoint, @ticket_salt, ticket,
              max_age: Security.ticket_ttl()
            ),
          :ok <- __MODULE__.Tickets.spend(nonce),
          %Session{account_id: ^account_id} = session <-
            Repo.get(Session, session_id, skip_account: true),
+         true <- Security.equal?(bound, binary_part(session.token_hash, 0, 8)),
          %Account{} = account <- get(account_id),
          true <- live?(session, now) and active?(account),
          false <- Hireme.Mfa.required?(session) do
@@ -248,6 +257,33 @@ defmodule Hireme.Accounts do
   end
 
   def redeem_ticket(_), do: :error
+
+  @doc """
+  Whether browser session `session_id` may still act, and keeps it alive.
+  The wire calls this on its tick and every `account.*` call checks it, so
+  a wire session obeys the same lifetime, idle limit, revocation and
+  suspension as a page, and wire activity counts as activity.
+  """
+  @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
+  def live_session(session_id) when is_integer(session_id) do
+    now = Store.now()
+
+    with {%Session{} = s, %Account{} = a} <-
+           Repo.one(
+             from(s in Session,
+               join: a in Account,
+               on: a.id == s.account_id,
+               where: s.id == ^session_id,
+               select: {s, a}
+             ),
+             skip_account: true
+           ),
+         true <- live?(s, now) and active?(a) do
+      {:ok, touch(s, now)}
+    else
+      _ -> :error
+    end
+  end
 
   ## Sign-in methods
 
@@ -266,8 +302,8 @@ defmodule Hireme.Accounts do
           :ok | {:error, :invalid | :rate_limited}
   def request_link(email, url_for, meta \\ %{}) when is_function(url_for, 1) do
     with {:ok, email} <- normalize_email(email),
-         :ok <- Security.limit(:link_address, email),
-         :ok <- Security.limit(:link_peer, Map.get(meta, :ip, "")) do
+         :ok <- Security.limit(:link_peer, Map.get(meta, :ip, "")),
+         :ok <- Security.limit(:link_address, email) do
       token = Security.token(32)
       now = Store.now()
 
@@ -276,8 +312,9 @@ defmodule Hireme.Accounts do
           email: email,
           token_hash: Security.hash(token),
           expires_at: DateTime.add(now, Security.magic_link_ttl()),
-          ip: Security.clip(Map.get(meta, :ip, ""), 64),
-          user_agent: Security.clip(Map.get(meta, :user_agent, ""))
+          ip: text(meta[:ip], 64),
+          user_agent: text(meta[:user_agent], 200),
+          rev: 1
         })
       end)
 
@@ -486,7 +523,7 @@ defmodule Hireme.Accounts do
   # loser finds the winner's.
   defp first_identity(provider, claim, meta) do
     Store.transaction(fn ->
-      account = Repo.insert!(%Account{name: Security.clip(claim.display)})
+      account = Repo.insert!(%Account{name: Security.clip(claim.display), rev: 1})
 
       case insert_identity(account.id, provider, claim) do
         {:ok, identity} ->
@@ -513,8 +550,9 @@ defmodule Hireme.Accounts do
       account_id: account_id,
       provider: provider,
       subject: String.slice(claim.subject, 0, 320),
-      display: Security.clip(Map.get(claim, :display, "")),
-      verified_at: Store.now()
+      display: text(Map.get(claim, :display), 200),
+      verified_at: Store.now(),
+      rev: 1
     }
     |> Ecto.Changeset.change()
     |> Ecto.Changeset.unique_constraint([:provider, :subject])
@@ -532,6 +570,15 @@ defmodule Hireme.Accounts do
     row
     |> Ecto.Changeset.change([{:rev, row.rev + 1} | changes])
     |> then(&Store.write(fn -> Repo.update!(&1, skip_account: true) end))
+  end
+
+  # Blank is NULL, never '': no column holds an empty string.
+  defp text(value, max) do
+    case value && Security.clip(value, max) do
+      nil -> nil
+      "" -> nil
+      text -> text
+    end
   end
 
   defp context(meta, account_id, session_id),

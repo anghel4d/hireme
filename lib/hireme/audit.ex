@@ -50,8 +50,8 @@ defmodule Hireme.Audit do
           %{
             account_id: account_id,
             kind: Atom.to_string(kind),
-            ip: Hireme.Security.clip(Map.get(context, :ip, ""), 64),
-            user_agent: Hireme.Security.clip(Map.get(context, :user_agent, "")),
+            ip: blank(context[:ip], 64),
+            user_agent: blank(context[:user_agent], 200),
             meta: meta,
             key_id: Map.get(context, :key_id),
             session_id: Map.get(context, :session_id),
@@ -64,7 +64,18 @@ defmodule Hireme.Audit do
       )
     end)
 
-    changed(account_id)
+    # An agent's op batch is not a change to the account's security state:
+    # it wakes no parked account.watch.
+    if kind != :agent_ops, do: changed(account_id), else: :ok
+  end
+
+  defp blank(nil, _), do: nil
+
+  defp blank(value, max) do
+    case Hireme.Security.clip(value, max) do
+      "" -> nil
+      text -> text
+    end
   end
 
   @spec topic(pos_integer()) :: String.t()

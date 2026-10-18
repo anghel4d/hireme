@@ -80,6 +80,7 @@ defmodule Hireme.Security do
     mfa_account: {:timer.minutes(15), 10},
     api_key_peer: {:timer.minutes(1), 20},
     ticket_peer: {:timer.minutes(1), 60},
+    refusal_peer: {:timer.minutes(10), 20},
     agent_write: {:timer.minutes(1), 600}
   }
 
@@ -109,6 +110,25 @@ defmodule Hireme.Security do
       {:allow, _} -> :ok
       {:deny, retry_ms} -> {:error, retry_ms}
     end
+  end
+
+  @doc """
+  Whether `key` is already over the named limit, without counting. With
+  `failed/2` this throttles failures only, so callers that succeed behind
+  one address (agents behind a NAT) never spend the budget.
+  """
+  @spec blocked?(atom(), term()) :: boolean()
+  def blocked?(name, key) when is_map_key(@limits, name) do
+    {scale_ms, max} = Map.fetch!(@limits, name)
+    Hireme.RateLimit.get("#{name}:#{key}", scale_ms) >= max
+  end
+
+  @doc "Count one failure under the named limit for `key`."
+  @spec failed(atom(), term()) :: :ok
+  def failed(name, key) when is_map_key(@limits, name) do
+    {scale_ms, _} = Map.fetch!(@limits, name)
+    Hireme.RateLimit.inc("#{name}:#{key}", scale_ms)
+    :ok
   end
 
   ## Primitives

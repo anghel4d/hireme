@@ -147,4 +147,24 @@ defmodule Hireme.KeysTest do
     assert Keys.usable?(key.id, s.account_id)
     refute Keys.usable?(key.id, s.account_id + 1)
   end
+
+  test "a second revoke, even from a stale struct, frees no extra room under the cap", %{
+    session: s
+  } do
+    {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_only))
+    Keys.revoke(key)
+    assert_receive {:bye, {:key, _}, :revoked}
+    Keys.revoke(key)
+    refute_receive {:bye, {:key, _}, :revoked}, 50
+
+    for i <- 1..Hireme.Security.api_keys_per_account(),
+        do: {:ok, _} = Keys.mint(s, "k#{i}", Keys.preset(:read_only))
+
+    assert {:error, :limit} = Keys.mint(s, "one more", Keys.preset(:read_only))
+  end
+
+  test "successful authentications never spend a peer's budget", %{session: s} do
+    {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
+    for _ <- 1..30, do: assert({:ok, _} = Keys.authenticate(secret, "10.2.2.2"))
+  end
 end

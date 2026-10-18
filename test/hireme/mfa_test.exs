@@ -90,4 +90,61 @@ defmodule Hireme.MfaTest do
     assert {:error, :attestation} =
              Mfa.confirm_webauthn(s, %{"attestationObject" => "AAAA", "clientDataJSON" => "AAAA"})
   end
+
+  test "a factor worn out by wrong codes keeps the account behind a second factor", %{
+    session: s,
+    email: email
+  } do
+    {_secret, factor, [code | _]} = enroll(s)
+
+    factor
+    |> Ecto.Changeset.change(consecutive_failures: Hireme.Security.lockout_failures() - 1)
+    |> Repo.update!()
+
+    {:ok, _, pending} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    assert {:error, :code} = Mfa.verify_totp(pending, "000000")
+    assert Mfa.factors() == []
+    assert Mfa.required?(pending)
+    refute Mfa.fresh?(pending)
+
+    assert {:ok, proved} = Mfa.verify_recovery(pending, code)
+    refute Mfa.required?(proved)
+  end
+
+  test "one code presented by racing sessions is accepted once", %{session: s, email: email} do
+    {secret, _, _} = enroll(s)
+    c = code(secret, System.os_time(:second) + 30)
+    parent = self()
+
+    sessions =
+      for _ <- 1..6 do
+        {:ok, _, x} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+        x
+      end
+
+    results =
+      sessions
+      |> Enum.map(fn x ->
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, self())
+          Mfa.verify_totp(x, c)
+        end)
+      end)
+      |> Enum.map(&Task.await/1)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+  end
+
+  test "a mistyped enrolment code leaves the enrolment open", %{session: s} do
+    {:ok, %{secret: secret}} = Mfa.begin_totp(s, "me")
+    assert {:error, :code} = Mfa.confirm_totp(s, "000000", "phone")
+    assert {:ok, _, _} = Mfa.confirm_totp(s, code(secret), "phone")
+  end
+
+  test "the QR draws without inline styles, and a label cannot change the secret", %{session: s} do
+    {:ok, %{svg: svg, uri: uri, secret: secret}} = Mfa.begin_totp(s, "a?secret=AAAA#x")
+    refute svg =~ "style="
+    assert svg =~ ~s(fill="#000)
+    assert URI.decode_query(URI.parse(uri).query)["secret"] == secret
+  end
 end
