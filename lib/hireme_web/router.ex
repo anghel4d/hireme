@@ -88,10 +88,13 @@ defmodule HiremeWeb.Router do
 
     get "/", PageController, :shell
     get "/desk", PageController, :shell
+    get "/focus", PageController, :shell
     get "/focus/:no", PageController, :shell
+    get "/world", PageController, :shell
     get "/world/:table", PageController, :shell
     get "/atlas", PageController, :shell
     get "/outreach", PageController, :shell
+    get "/lanes", PageController, :shell
     get "/lanes/:lane", PageController, :shell
     get "/account", PageController, :shell
   end

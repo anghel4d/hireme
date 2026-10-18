@@ -57,7 +57,7 @@ defmodule HiremeWeb.SignInTest do
        %{conn: conn} do
     %{token: token} = sign_in()
 
-    for path <- ~w(/ /desk /focus/12 /world/places /atlas /outreach /lanes/gym /account) do
+    for path <- ~w(/ /desk /focus /focus/12 /world /world/places /atlas /outreach /lanes /lanes/gym /account) do
       assert html_response(conn |> signed_in(token) |> get(path), 200) =~ "hireme-wire"
       assert redirected_to(get(build_conn(:get, "https://www.example.com/"), path)) == "/sign-in"
     end
