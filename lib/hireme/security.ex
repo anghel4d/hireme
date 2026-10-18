@@ -152,7 +152,7 @@ defmodule Hireme.Security do
     agent_write: {:timer.minutes(1), 600},
     # The text bytes a key's ops may write in a minute, beside their count.
     agent_write_bytes: {:timer.minutes(1), 64 * 1024 * 1024},
-    # A key's read RPCs (find, get, history, text, schema, lease.*).
+    # A key's lease requests (lease.*).
     agent_read: {:timer.minutes(1), 3000},
     # A key's successful HELLOs; each is a trail row.
     key_hello: {:timer.minutes(1), 60}

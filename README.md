@@ -33,10 +33,9 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   enum.
 - **One wire.** Binary frames over WebTransport (the gate) or a WebSocket at
   `/wire`. Tables the kernel derives from (applications, events, batches,
-  the CV corpus, settings, the lanes) are resident: `BOOT` sends them,
-  `PATCH` keeps them current. The world (places, corporations, offices,
-  sources, citations) and the mail (contacts, messages) stay server-side
-  and are read with `find`, `get`, `history` and `text` over RPC.
+  the CV corpus, settings, the lanes, the world and the mail) are resident:
+  `BOOT` sends them whole, `PATCH` keeps them current, and every read is
+  the client's own replica.
 - **Provenance.** Every metric carries the day it is true as of, every prose
   cell its source; each such write makes a citation, and a cell's newest
   citation is its source.

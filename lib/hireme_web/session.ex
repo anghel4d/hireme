@@ -18,8 +18,7 @@ defmodule HiremeWeb.Session do
     when the snapshot is current), its last frame flagged END.
   - OPS go to the sequencer; ACK and NACK come back after the PATCH that
     carries the writes.
-  - RPC: `schema`, `find`, `get`, `history`, `text` (`Hireme.World`),
-    `lease.claim`, `lease.release` (`Hireme.Lease`), `account.*`
+  - RPC: `lease.claim`, `lease.release` (`Hireme.Lease`), `account.*`
     (`HiremeWeb.Account`, browser sessions only; `account.watch` is parked
     and answered `{changed: true}` at the account's next audited change).
   - Liveness: a PING every 15 s each way; 45 s without any frame from the
@@ -37,7 +36,6 @@ defmodule HiremeWeb.Session do
   alias HiremeWeb.Wire.Codec
 
   @hello_ms 10_000
-  @world ~w(schema find get history text)
   @tick_ms 60_000
 
   # --------------------------------------------------- carrier-neutral
@@ -252,9 +250,9 @@ defmodule HiremeWeb.Session do
 
   defp active(state, _now), do: state
 
-  # A key's reads (and lease requests) are metered like its writes.
+  # A key's lease requests are metered like its writes.
   defp metered(method, %{session: %{key_id: key_id}}) when key_id != nil do
-    if method in @world or String.starts_with?(method, "lease."),
+    if String.starts_with?(method, "lease."),
       do: Security.hit(:agent_read, key_id, 1),
       else: :ok
   end
@@ -416,15 +414,6 @@ defmodule HiremeWeb.Session do
   end
 
   # --------------------------------------------------------------- RPC
-
-  defp rpc(id, method, params, state) when method in @world do
-    ctx = %{account_id: state.account_id, grants: state.session.grants}
-
-    case Hireme.World.call(method, params, ctx) do
-      {:ok, result} -> {:push, [reply(id, true, result, state)], state}
-      {:error, refusal, data} -> {:push, [reply(id, false, error(refusal, data), state)], state}
-    end
-  end
 
   defp rpc(id, "lease.claim", params, state) do
     with :ok <- claim_shape(params),

@@ -330,17 +330,10 @@ changes, each with its wire type, and the server does not cast strings.
 command's params are its declared columns or typed free params. One op carries up to 1 MiB of
 text (`too_large` past it); one `OPS` frame carries up to 256 ops.
 
-Deferred text (`listing_raw`, `applications.notes`, `battleplan`,
-`letter_raw`, `events.body`, `profiles.narrative`, `messages.body`, world
-prose) travels in BOOT/PATCH as `u32 len | 8 bytes of SHA-256`, the 8 bytes
-read from the column's stored `_sha` twin, which the sequencer writes with
-the column and which never travels itself. `RPC text {table, id, column,
-offset, length}` returns 256 KiB chunks and re-checks the read mask per
-chunk; server-side reads give a deferred cell as `{len, sha}` JSON. `find` returns a table's non-metric columns unless `cols` names
-more; `get` returns every non-null column.
-
-Server-side reads are RPC methods: `schema`, `find`, `get`, `history`,
-`text`, plus `account.*` (the account lens) and `lease.*`.
+Texts travel whole in BOOT/PATCH. Every read (`find`, `get`, `text`,
+`history`) is the replica's own: the browser's and hireme-mcp's kernel
+answers it locally. The RPC methods left are `account.*` (the account
+lens) and `lease.*`.
 
 ## Kernel and NIF
 
@@ -410,7 +403,6 @@ lib/hireme/
   kernel.ex        the NIF: one kernel resource per sequencer
   grants.ex        masks, presets, domain of a table or command
   lease.ex         the channel, application claims, since, operator revoke
-  world.ex         server-side reads: find, get, history, text; keyset paging
   provenance.ex    sources (host derived), citations, trusted_hosts
   import.ex        packs (JSON, markdown) lowered to put ops through the sequencer
   accounts.ex      accounts, sessions, identities, magic links
@@ -607,7 +599,7 @@ timeout written down.
 - Bounds: BOOT ≤ 2 MiB deflated at 10k applications with `listing_raw`
   deferred; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
   wasm at 10k, and the first derive after BOOT (which follows the snapshot's
-  paint) ≤ 30 ms on the worst-case bench desk; `judge` ≤ 200 µs in the NIF; `find` p99 ≤ 10 ms at 50k places; op
+  paint) ≤ 30 ms on the worst-case bench desk; `judge` ≤ 200 µs in the NIF; op
   round trip p50 ≤ 5 ms on loopback; 256 ops per `OPS` frame.
 
 ## The nuke manifest
@@ -699,8 +691,6 @@ reader for the v1 database.
 - BOOT at 10k applications with `listing_raw` deferred and keywords
   stored: if it exceeds 2 MiB, the next lever is a projection, not a
   compat path.
-- `find` p99 at 50k places: met with the declared indexes (the account,
-  `country_id`, name and `(region, population)`).
 - The `:agent_write` cap (600/min) and the 64-op batch, against the bench;
   the 15 s/45 s liveness, against a silent session in the final
   certification.

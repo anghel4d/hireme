@@ -2,19 +2,15 @@ defmodule Hireme.DayTest do
   # A `day` is days since 0000-01-01, proleptic Gregorian, 0 to 3652424
   # (9999-12-31), past which a cell is refused `type`. End to end on the
   # node: a day cell through the codec, the kernel's judge and SQLite, and
-  # back out through World, on a resident table and a server one.
+  # back out of the database, on a resident table and a server one.
   use Hireme.WireCase, async: false
 
-  alias Hireme.World
   alias HiremeWeb.Wire.Codec
 
   @days [~D[0000-01-01], ~D[1897-01-01], ~D[1969-12-31], ~D[1970-01-01], ~D[9999-12-31]]
 
   defp read(a, table, id, col) do
-    {:ok, %{"row" => row}} =
-      World.get(a.id, Grants.operator(), %{"table" => table, "id" => id, "cols" => [col]})
-
-    row[col]
+    Repo.with_account(a.id, fn -> Map.fetch!(Repo.get!(Schema.row(table), id), col) end)
   end
 
   test "every day from 0000-01-01 to 9999-12-31 is its Gregorian day number on the wire and reads back as itself",
@@ -29,7 +25,7 @@ defmodule Hireme.DayTest do
       {[%{id: app}], []} =
         run(a.id, op(:put, :applications, %{company: "C#{i}", role: "R", listing_on: d}))
 
-      assert read(a, "applications", app, "listing_on") == d
+      assert read(a, "applications", app, :listing_on) == d
 
       # Server-side: an office opened that day.
       {[%{id: place}], []} =
@@ -46,7 +42,7 @@ defmodule Hireme.DayTest do
           })
         )
 
-      assert read(a, "offices", office, "opened_on") == d
+      assert read(a, "offices", office, :opened_on) == d
     end
   end
 

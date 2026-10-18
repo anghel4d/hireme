@@ -134,16 +134,15 @@ to retry later; successes never spend the budget).
 What a key may do is two masks over the five domains, world 1, desk 2,
 mail 4, lanes 8, corpus 16, and `may_delete`:
 
-- `read_mask` bounds BOOT, PATCH and every read RPC: a table outside it is
-  never sent, and `text` re-checks the mask on every chunk.
+- `read_mask` bounds BOOT and PATCH: a table outside it is never sent,
+  and every read is the client's own replica of what was sent.
 - `write_mask` bounds every op (`scope`); a `drop` also needs `may_delete`.
 - The presets are read only, write only and read/write; anything else is
   custom. A write-only key's BOOT carries no table.
 - `system` tables (accounts, sessions, identities, keys, factors, the
-  trail, the outbox, the ledger), `citations` and `trusted_hosts` are in
-  no mask: no key reads or writes them as tables. A cell's citation
-  history is the one view of `citations`, through the `history` read,
-  under the read bit of the table it cites.
+  trail, the outbox, the ledger) and `trusted_hosts` are in no mask: no
+  key reads or writes them. `citations` replicates under the world read
+  bit, and only the server writes it.
 - A key never mints, widens or revokes keys: only a browser session can
   call `account.*`, and minting, widening a mask and granting
   `may_delete` need that session stepped up. Narrowing does not.

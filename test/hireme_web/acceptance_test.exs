@@ -251,40 +251,24 @@ defmodule HiremeWeb.AcceptanceTest do
     {:ack, %{id: office}} =
       write(agent, op(:put, :offices, %{corporation_id: corp, place_id: place, kind: :hq}))
 
-    # The application's move arrives as a row; the server-side rows as a rev
-    # that moved, which the world view answers with a find on the same session.
+    # Every move arrives as rows of the replica; the browser reads them locally.
     stage = Codec.enum_code("stage", :draft_ready)
-    stage_col = Schema.column(:applications, "stage").id
     patches = collect_patches(browser, 600)
     model = Enum.reduce(patches, %{}, &Hireme.WireCase.ingest(&2, :PATCH, &1.body))
-    assert get_in(model, ["applications", app, stage_col]) == stage
+    cell = fn table, id, col -> get_in(model, [table, id, Schema.column(table, col).id]) end
+    assert cell.("applications", app, "stage") == stage
+    assert cell.("corporations", corp, "headcount") == 120
+    assert cell.("corporations", corp, "headcount_on") == Date.to_gregorian_days(~D[2026-10-01])
+    assert cell.("offices", office, "corporation_id") == corp
 
-    {:ok, %{"rows" => [found]}} =
-      WireClient.rpc(browser, 9, "find", %{
-        "table" => "corporations",
-        "where" => %{"domain" => "acme.example"},
-        "cols" => ["id", "headcount", "headcount_on"]
-      })
+    [source] =
+      for {_, row} <- model["citations"],
+          row[Schema.column("citations", "table").id] == "corporations",
+          row[Schema.column("citations", "row_id").id] == corp,
+          row[Schema.column("citations", "column").id] == "headcount",
+          do: row[Schema.column("citations", "source_id").id]
 
-    assert found["id"] == corp and found["headcount"] == 120 and
-             found["headcount_on"] == "2026-10-01"
-
-    {:ok, %{"rows" => offices}} =
-      WireClient.rpc(browser, 10, "find", %{
-        "table" => "offices",
-        "where" => %{"corporation_id" => corp}
-      })
-
-    assert Enum.map(offices, & &1["id"]) == [office]
-
-    {:ok, %{"citations" => [cite | _]}} =
-      WireClient.rpc(browser, 11, "history", %{
-        "table" => "corporations",
-        "id" => corp,
-        "column" => "headcount"
-      })
-
-    assert cite["source"]["host"] == "acme.example"
+    assert cell.("sources", source, "host") == "acme.example"
   end
 
   defp collect_patches(client, quiet_ms, acc \\ []) do

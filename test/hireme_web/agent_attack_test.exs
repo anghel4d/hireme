@@ -114,54 +114,15 @@ defmodule HiremeWeb.AgentAttackTest do
       end
     end
 
-    test "reads outside the mask are refused, private and server_only columns cannot be selected, filtered or sorted",
-         %{port: port, session: s, account: a} do
-      ids = seeded(a)
-      {_, secret} = key(s, 1, 0)
-      {c, _, _} = agent(port, secret)
-
-      assert refused(c, "find", %{"table" => "applications"}) == :scope
-      assert refused(c, "get", %{"table" => "applications", "id" => ids.app}) == :scope
-
-      assert refused(c, "text", %{"table" => "applications", "id" => ids.app, "column" => "notes"}) ==
-               :scope
-
-      assert refused(c, "history", %{"table" => "applications", "id" => ids.app}) == :scope
-
-      for t <- ~w(api_keys sessions audit op_ledger trusted_hosts accounts factors) do
-        assert refused(c, "find", %{"table" => t}) in [:scope, :not_found], "#{t} readable"
-      end
-
-      {_, all} = key(s, 31, 0)
+    test "every read is the replica's: the read RPCs are gone", %{port: port, session: s} do
+      {_, all} = key(s, 31, 31)
       {c, _, _} = agent(port, all)
 
-      assert refused(c, "get", %{
-               "table" => "profiles",
-               "id" => ids.profile,
-               "cols" => ["narrative_private"]
-             }) == :column
-
-      assert refused(c, "find", %{
-               "table" => "profiles",
-               "where" => %{"narrative_private" => %{"prefix" => "priv"}}
-             }) == :column
-
-      assert refused(c, "find", %{"table" => "profiles", "order" => ["narrative_private", "asc"]}) ==
-               :column
-
-      assert refused(c, "find", %{"table" => "applications", "cols" => ["notes_sha"]}) == :column
-
-      assert refused(c, "text", %{
-               "table" => "profiles",
-               "id" => ids.profile,
-               "column" => "narrative_private"
-             }) == :column
-
-      {:ok, %{"row" => row}} = rpc(c, "get", %{"table" => "profiles", "id" => ids.profile})
-      refute Map.has_key?(row, "narrative_private")
+      for m <- ~w(schema find get text history),
+          do: assert(refused(c, m, %{"table" => "applications"}) == :not_found)
     end
 
-    test "a desk-only key's PATCH never carries a world row, and the schema shows only what it may touch",
+    test "a desk-only key's PATCH never carries a world row",
          %{port: port, session: s, account: a} do
       {_, secret} = key(s, 2, 0)
       {c, _, _} = agent(port, secret)
@@ -172,9 +133,6 @@ defmodule HiremeWeb.AgentAttackTest do
 
       {patch, _} = WireClient.await(c, :PATCH)
       assert tables(patch.body) == []
-      {:ok, schema} = rpc(c, "schema", %{})
-      names = Enum.map(schema["tables"], & &1["name"])
-      refute Enum.any?(names, &(&1 in ~w(corporations gym_reps api_keys citations)))
     end
   end
 
@@ -190,22 +148,6 @@ defmodule HiremeWeb.AgentAttackTest do
       {_, secret} = key(s, 31, 31, true)
       {c, _, _} = agent(port, secret)
       {:ok, _} = rpc(c, "lease.claim", %{})
-
-      assert refused(c, "get", %{"table" => "corporations", "id" => theirs.corp}) == :not_found
-
-      assert refused(c, "get", %{
-               "table" => "corporations",
-               "key" => %{"domain" => "seed.example"}
-             }) == :not_found
-
-      assert {:ok, %{"citations" => []}} =
-               rpc(c, "history", %{"table" => "corporations", "id" => theirs.corp})
-
-      assert refused(c, "text", %{
-               "table" => "applications",
-               "id" => theirs.app,
-               "column" => "notes"
-             }) == :not_found
 
       assert refused(c, "lease.claim", %{"ids" => [theirs.app]}) == :not_found
 
@@ -246,7 +188,7 @@ defmodule HiremeWeb.AgentAttackTest do
   end
 
   describe "forgery across accounts" do
-    test "a cursor, an op id or a PATCH never carries another account's rows or a private column",
+    test "an op id or a PATCH never carries another account's rows or a private column",
          %{port: port, session: s, account: a} do
       other = sign_in()
 
@@ -261,18 +203,15 @@ defmodule HiremeWeb.AgentAttackTest do
           c.id
         end)
 
-      {[_], []} = run(a.id, op(:put, :corporations, %{domain: "aa-mine.example", name: "Mine"}))
+      {[mine], []} =
+        run(a.id, op(:put, :corporations, %{domain: "aa-mine.example", name: "Mine"}))
+
       {_, secret} = key(s, 31, 31)
-      {c, _, _} = agent(port, secret)
+      {c, _, boot} = agent(port, secret)
 
-      # A cursor forged to start before their row still pages only this account.
-      forged =
-        Base.url_encode64(JSON.encode!(%{"id" => their - 1, "v" => their - 1}), padding: false)
-
-      case rpc(c, "find", %{"table" => "corporations", "after" => forged}) do
-        {:ok, %{"rows" => rows}} -> refute Enum.any?(rows, &(&1["id"] == their))
-        {:error, %{"code" => code}} -> assert code in ["type", "column"]
-      end
+      # The key's replica holds this account's world, never theirs.
+      corps = ingest(%{}, :BOOT, boot.body)["corporations"]
+      assert Map.has_key?(corps, mine.id) and not Map.has_key?(corps, their)
 
       # Their op id is not this account's: a put with it writes here.
       Repo.with_account(other.account.id, fn ->
@@ -504,7 +443,7 @@ defmodule HiremeWeb.AgentAttackTest do
   end
 
   describe "floods" do
-    test "a key's reads are metered like its writes", %{port: port, session: s} do
+    test "a key's lease requests are metered like its writes", %{port: port, session: s} do
       {_, secret} = key(s, 31, 0)
       {c, _, _} = agent(port, secret)
 
@@ -515,13 +454,13 @@ defmodule HiremeWeb.AgentAttackTest do
       refusals =
         for _ <- 1..(2 * budget + 20), reduce: 0 do
           n ->
-            case rpc(c, "find", %{"table" => "places", "limit" => 1}) do
-              {:ok, _} -> n
+            case rpc(c, "lease.release", %{"ids" => []}) do
               {:error, %{"code" => "rate"}} -> n + 1
+              _ -> n
             end
         end
 
-      assert refusals >= 20, "#{2 * budget + 20} reads in a burst, #{refusals} refused"
+      assert refusals >= 20, "#{2 * budget + 20} requests in a burst, #{refusals} refused"
     end
 
     test "connecting over and over is bounded, and does not flood the trail", %{
@@ -658,10 +597,14 @@ defmodule HiremeWeb.AgentAttackTest do
 
       assert {:nack, :column} = put(c, op(:put, :sources, %{kind: :official}, target: source))
 
-      {:ok, %{"citations" => [cite]}} =
-        rpc(c, "history", %{"table" => "corporations", "id" => corp.id, "column" => "headcount"})
-
-      assert cite["source"]["host"] == "news.example"
+      assert Repo.all(
+               from(x in Hireme.Rows.Citation,
+                 join: o in Hireme.Rows.Source,
+                 on: o.id == x.source_id,
+                 where: x.row_id == ^corp.id and x.column == "headcount",
+                 select: o.host
+               )
+             ) == ["news.example"]
     end
 
     test "only real hostnames can be trusted: an escaped label is not a subdomain", %{

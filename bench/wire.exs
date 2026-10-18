@@ -3,7 +3,6 @@
 #   BOOT <= 2 MiB deflated at 10k applications with listing_raw deferred
 #   PATCH <= 64 KiB per burst
 #   judge <= 200 us in the NIF (every shape's p99, via Hireme.Kernel.judge/3)
-#   find p99 <= 10 ms at 50k places
 #   op round trip p50 <= 5 ms on loopback
 #   256 ops per OPS frame
 #
@@ -330,7 +329,6 @@ Logger.configure(level: :warning)
 database = System.get_env("DATABASE_PATH") || raise "DATABASE_PATH must name a fresh file"
 seed = String.to_integer(System.get_env("BENCH_SEED", "20261018"))
 apps = String.to_integer(System.get_env("BENCH_APPS", "10000"))
-places = String.to_integer(System.get_env("BENCH_PLACES", "50000"))
 :rand.seed(:exsss, {seed, seed, seed})
 
 {:ok, _, session} =
@@ -450,102 +448,7 @@ over_refused =
     {:ok, _} -> false
   end
 
-## find at 50k places.
-
-{place_us, _op} =
-  Bench.us(fn ->
-    1..places
-    |> Enum.chunk_every(256)
-    |> Enum.reduce(op, fn chunk, op ->
-      ops =
-        for i <- chunk do
-          Bench.put(:places, %{
-            kind: :city,
-            geonames_id: 1_000_000 + i,
-            name: "City #{i}",
-            region: Enum.random(~w(Europe Americas Asia Africa Oceania)),
-            population: 10_000 + rem(i * 7907, 5_000_000),
-            as_of: ~D[2026-01-01]
-          })
-        end
-
-      {_frames, op} = Bench.send_ops(op, Codec.encode_ops(ops), length(ops))
-      op
-    end)
-  end)
-
-IO.puts(:stderr, "bench: seeded #{places} places in #{div(place_us, 1000)} ms")
-
-# What the world lens and an agent ask: a name, a sorted filtered page, a
-# substring, and the default page in id order.
-queries =
-  for i <- 1..500 do
-    case rem(i, 4) do
-      0 ->
-        {:name, %{"table" => "places", "where" => %{"name" => "City #{:rand.uniform(places)}"}}}
-
-      1 ->
-        {:sorted,
-         %{
-           "table" => "places",
-           "where" => %{"region" => "Europe"},
-           "order" => "population",
-           "desc" => true,
-           "limit" => 50
-         }}
-
-      2 ->
-        {:like,
-         %{
-           "table" => "places",
-           "where" => %{"name" => %{"like" => "City #{:rand.uniform(999)}"}},
-           "limit" => 25
-         }}
-
-      3 ->
-        {:page, %{"table" => "places", "where" => %{"kind" => "city"}, "limit" => 100}}
-    end
-  end
-
-# Timed over a real /wire session, a server process of its own: from the
-# RPC leaving to the whole REPLY frame arriving. Nothing the client does
-# with the answer (inflate, JSON) is on the clock; it is checked after.
 port = String.to_integer(System.get_env("PORT", "4100"))
-
-find_times =
-  if HiremeWeb.Endpoint.config(:server) do
-    {sock, buf} = Bench.WS.connect(port)
-
-    :ok =
-      Bench.WS.send_bin(sock, Codec.encode_hello(:ticket, Accounts.ticket(session), "bench-find"))
-
-    {_, state} = Bench.WS.until(sock, buf, :BOOT)
-
-    {times, _} =
-      Enum.map_reduce(Enum.with_index(queries, 1), state, fn {{shape, q}, id}, {buf, pending} ->
-        frame = Codec.encode_rpc(id, "find", Jason.encode!(q))
-        t0 = System.monotonic_time(:microsecond)
-        :ok = Bench.WS.send_bin(sock, frame)
-        {reply, rest, buf} = Bench.WS.raw_until(sock, buf, pending, Schema.frame(:reply))
-        t = System.monotonic_time(:microsecond) - t0
-        {:ok, :REPLY, _, _, <<^id::little-32, ok, _::binary>>} = Codec.decode(reply)
-        if ok != 1, do: IO.puts(:stderr, "bench: find refused #{inspect(q)}")
-        {{shape, t}, {buf, rest}}
-      end)
-
-    :gen_tcp.close(sock)
-    times
-  else
-    IO.puts(:stderr, "bench: the endpoint is not serving (PHX_SERVER=true); no find timing")
-    []
-  end
-
-find_shapes =
-  find_times
-  |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-  |> Map.new(fn {k, ts} -> {k, Bench.percentile(ts, 99)} end)
-
-find_times = Enum.map(find_times, &elem(&1, 1))
 
 ## judge across Rustler: Hireme.Kernel.judge/3 on the sequencer's own
 ## resource (the 10k desk), as check 4 calls it, for each op shape.
@@ -761,20 +664,6 @@ lines = [
     %{
       note: "a 256-application insert frame, summed over the PATCH frames it causes",
       largest_patch_frame: patch_sizes |> List.flatten() |> Enum.max(fn -> 0 end)
-    }
-  ),
-  Bench.line(
-    # The bound is find as a whole (shannon's ruling); each shape's p99 is
-    # reported beside it.
-    "find_p99_us_at_#{places}_places_over_wire",
-    Bench.percentile(find_times, 99),
-    10_000,
-    "us",
-    %{
-      p50: Bench.percentile(find_times, 50),
-      worst_shape_p99: find_shapes |> Map.values() |> Enum.max(fn -> nil end),
-      queries: length(find_times),
-      p99_by_shape: find_shapes
     }
   ),
   Bench.line(

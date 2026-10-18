@@ -6,10 +6,8 @@ defmodule Hireme.Grants do
   A key carries a `read_mask` and a `write_mask` over the five domains
   (world 1, desk 2, mail 4, lanes 8, corpus 16) and `may_delete`. A browser
   session is the operator: every domain both ways and `may_delete`. Tables of
-  the `system` domain (`trusted_hosts` among them) and `unmasked` tables
-  (`citations`) are in no mask:
-  nothing reads or writes them through a mask (`history` reads citations
-  under the cited table's read bit).
+  the `system` domain (`trusted_hosts` among them) are in no mask: nothing
+  reads or writes them through a mask.
   """
 
   import Bitwise

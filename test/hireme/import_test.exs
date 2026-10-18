@@ -3,7 +3,7 @@ defmodule Hireme.ImportTest do
   use ExUnitProperties
 
   import Ecto.Query
-  alias Hireme.{Import, World}
+  alias Hireme.Import
   alias Hireme.Rows.{Corporation, Office, Place}
 
   defp pack(t) do
@@ -84,11 +84,19 @@ defmodule Hireme.ImportTest do
 
     a_id = Repo.one!(from c in Corporation, where: c.domain == ^"a.#{t}.example", select: c.id)
 
-    {:ok, %{"citations" => cited}} =
-      World.history(a.id, Grants.operator(), %{"table" => "corporations", "id" => a_id})
+    cited =
+      Repo.all(
+        from c in Hireme.Rows.Citation,
+          join: s in Hireme.Rows.Source,
+          on: s.id == c.source_id,
+          where: c.table == "corporations" and c.row_id == ^a_id,
+          select: {c.column, s.host}
+      )
 
-    assert Enum.sort(Enum.map(cited, & &1["column"])) == ["about", "headcount"]
-    assert Enum.all?(cited, &(&1["source"]["host"] == "stats.example.org"))
+    assert Enum.sort(cited) == [
+             {"about", "stats.example.org"},
+             {"headcount", "stats.example.org"}
+           ]
   end
 
   test "importing the same pack again leaves every row a key names as it was", %{account: a} do
