@@ -20,8 +20,12 @@ CHROMIUM=${CHROMIUM:-/nix/store/ini1ifgvcsvw48x4mxawrv9jvbdwn70p-chromium-155.0.
 # Playwright is installed fresh each run into a directory only this run
 # made (npm's own cache makes it quick): code is never run from a path
 # someone else could have prepared.
+for tool in mix cargo node npm curl setsid git; do
+  command -v "$tool" >/dev/null || { echo "FAIL setup: $tool is not on PATH (BRIEF.md, 'Toolchain')"; echo "res=1"; exit 1; }
+done
 E2E_NODE=$(mktemp -d /tmp/hireme-e2e-node.XXXXXX)
 OUT=${OUT:-$(mktemp -d /tmp/hireme-e2e.XXXXXX)}
+mkdir -p "$OUT"
 TMP=$(mktemp -d /tmp/hireme-e2e-db.XXXXXX)
 NODE_PID=
 
