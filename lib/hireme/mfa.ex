@@ -515,7 +515,9 @@ defmodule Hireme.Mfa do
                 f.id == ^factor.id and is_nil(f.disabled_at) and
                   f.consecutive_failures >= ^Security.lockout_failures()
             ),
-            set: [disabled_at: now]
+            set: [disabled_at: now],
+            # Locking a factor disables it: a domain write.
+            inc: [rev: 1]
           )
         end)
 
