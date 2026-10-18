@@ -1,15 +1,15 @@
 // The world lens: corporations, places, offices and sources as sparse
 // grids. Columns are the declared fields, straight from gen/schema.ts, so a
 // metric added to the declaration is a column here with no change to this
-// file. Rows are server-side and read over `find`, keyset-paged; a cell
-// shows its `_on` and opens its citations (`history`); empty is empty.
-// An edit is a `put`: a metric carries as_of (and a source when there is
-// one), prose carries its source and the row's rev, and the server's
-// verdict is the answer.
+// file. Rows are the kernel's replica, read in the frame they are drawn
+// (`find`, `get`, `text`, `history` answered locally); a cell shows its `_on`
+// and opens its citations; empty is empty. An edit is a `put`: the kernel
+// predicts it at once (a metric carries as_of, prose its source and the
+// row's rev) and the sequencer's verdict confirms it or rolls it back.
 
 import type { View } from "../app.ts"
 import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
-import { Refused, put, rpc, spliced, table, today, values, type Input } from "../kernel.ts"
+import { Refused, put, query as read, table, today, values, wholeText, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { go, model, notice, query, set, type WorldView } from "../state.ts"
 
@@ -45,64 +45,37 @@ const FIXED: Partial<Record<string, readonly string[]>> = { sources: ["url", "ho
 const editable = (c: ColumnDef): boolean =>
   writable() && !c.readonly && !c.implied && c.type !== "bytes" && !(FIXED[current().name] ?? []).includes(c.name)
 
-const fetchKey = (): string => `${current().name}|${model.address.q.get("sort") ?? ""}|${model.address.q.get("q") ?? ""}`
-
 function order(t: TableDef): [string, string] | null {
   const s = model.address.q.get("sort") ?? ""
   const name = s.replace(/^-/, "")
   return t.cols.some((c) => c.name === name) ? [name, s.startsWith("-") ? "desc" : "asc"] : null
 }
 
-/** Re-reads the rows already shown, one page at a time from the start, without closing an open editor. */
-async function reread(): Promise<void> {
-  const t = current()
-  const key = fetchKey()
-  // One page of up to 500 (find's cap): a longer loaded list keeps its tail rather than shrinking to the first 500.
-  const have = v().rows.length
-  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: Math.min(500, Math.max(PAGE, have)) }
+/** The first `limit` rows of the grid's table, sort and search, from the replica (pages of find's 500). */
+function rows(t: TableDef, limit: number): { rows: Row[]; more: boolean } {
+  const params: Record<string, unknown> = { table: t.name, cols: cols(t) }
   const o = order(t)
   if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
   const search = SEARCH[t.name as Shown]
   if (q !== "" && search) params.where = { [search]: { prefix: q } }
+  const out: Row[] = []
+  let after: unknown = null
+  while (out.length < limit) {
+    const r = read<{ rows: Row[]; next: unknown }>("find", { ...params, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
+    out.push(...r.rows)
+    after = r.next ?? null
+    if (after === null) return { rows: out, more: false }
+  }
+  return { rows: out, more: true }
+}
+
+const rowOf = (t: TableDef, id: number): Row | null => {
   try {
-    const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    if (fetchKey() === key) patch({ rows: have > 500 ? spliced(r.rows, v().rows) : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
+    return read<{ row: Row }>("get", { table: t.name, id }).row
   } catch {
-    // The next advance tries again.
+    return null
   }
-}
-
-let fetching = 0
-
-async function fetchRows(more: boolean): Promise<void> {
-  const me = ++fetching
-  const t = current()
-  const key = fetchKey()
-  const q = model.address.q.get("q") ?? ""
-  const search = SEARCH[t.name as Shown]
-  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: PAGE }
-  const o = order(t)
-  if (o) params.order = o
-  if (q !== "" && search) params.where = { [search]: { prefix: q } }
-  if (more && v().next !== null) params.after = v().next
-  patch({ loading: true, ...(more ? {} : { key, rows: [], next: null, edit: "", cites: null, text: null }) })
-  try {
-    const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    // Only the newest fetch lands; a superseded one that is still the newest ends its "Loading…".
-    if (me !== fetching) return
-    if (fetchKey() !== key) return patch({ loading: false })
-    patch({ rows: more ? [...v().rows, ...r.rows] : r.rows, next: r.next ?? null, loading: false, error: "" })
-  } catch (e) {
-    if (me === fetching) patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
-  }
-}
-
-async function refresh(id: number): Promise<void> {
-  const table = current().name
-  const r = await rpc<{ row: Row }>("get", { table, id })
-  // Only into the grid it was read for: another table's grid has rows with the same ids.
-  if (current().name === table) patch({ rows: v().rows.map((x) => (Number(x.id) === id ? r.row : x)) })
 }
 
 // ------------------------------------------------------------------ cells
@@ -147,7 +120,7 @@ function editor(t: TableDef, c: ColumnDef, row: Row): Html {
       break
     case "text":
       {
-        const body = c.deferred ? (v().text?.id === id && v().text?.column === c.name ? v().text?.body ?? "" : "") : value
+        const body = c.deferred ? wholeText(t.name, id, c.name) : value
         // HTML drops a textarea's first newline, so a text that begins with one gets a second.
         field = html`<textarea name="value" rows="8" data-autofocus>${body.startsWith("\n") ? `\n${body}` : body}</textarea>`
       }
@@ -177,12 +150,13 @@ function cellOf(t: TableDef, c: ColumnDef, row: Row): Html {
 
 // ------------------------------------------------------------------ panels
 
-function cites(): Html {
+function cites(t: TableDef): Html {
   const c = v().cites
   if (!c) return EMPTY
+  const list = read<{ citations: Row[] }>("history", { table: t.name, id: c.id, column: c.column, limit: 50 }).citations
   return html`<section class="card panel" data-key="cites" aria-labelledby="cites-h">
-    <h2 id="cites-h">${current().name} #${c.id} · ${c.column}</h2>
-    ${c.list.length === 0 ? html`<p class="hint">No citations.</p>` : html`<ol class="rows">${c.list.map((x) => {
+    <h2 id="cites-h">${t.name} #${c.id} · ${c.column}</h2>
+    ${list.length === 0 ? html`<p class="hint">No citations.</p>` : html`<ol class="rows">${list.map((x) => {
       const s = (x.source ?? {}) as Row
       return html`<li data-key="c${String(x.id)}"><b>${typeof x.value === "object" ? JSON.stringify(x.value) : String(x.value ?? "")}</b>
         <span class="muted">as of ${String(x.as_of ?? "")} · ${String(x.actor ?? "")}${x.key_id ? ` (key ${String(x.key_id)})` : ""}</span>
@@ -192,24 +166,13 @@ function cites(): Html {
   </section>`
 }
 
-/** Whether the row's deferred stub now names another version than the one the reader holds. */
-function changed(t: NonNullable<WorldView["text"]>): boolean {
-  const stub = v().rows.find((r) => Number(r.id) === t.id)?.[t.column] as { sha?: string } | null | undefined
-  const a = (stub?.sha ?? "").toLowerCase()
-  const b = t.sha.toLowerCase()
-  return a !== "" && b !== "" && !a.startsWith(b) && !b.startsWith(a)
-}
-
-function reader(): Html {
-  const t = v().text
-  if (!t || v().edit !== "") return EMPTY
+function reader(t: TableDef): Html {
+  const x = v().text
+  if (!x || v().edit !== "") return EMPTY
   return html`<section class="card panel" data-key="text" aria-labelledby="text-h">
-    <h2 id="text-h">${current().name} #${t.id} · ${t.column}</h2>
+    <h2 id="text-h">${t.name} #${x.id} · ${x.column}</h2>
     <p class="hint">Written by a person or an agent; shown as text, never run.</p>
-    ${changed(t) ? html`<p class="notice" role="alert">This text has changed since it was read.
-      <button type="button" class="ghost" data-act="read" data-id="${t.id}" data-col="${t.column}">Read it again</button></p>` : EMPTY}
-    <pre class="untrusted">${t.body}</pre>
-    ${t.bytes < t.total ? html`<button type="button" data-act="read-more">Read more (${(t.total - t.bytes).toLocaleString()} bytes left)</button>` : EMPTY}
+    <pre class="untrusted">${wholeText(t.name, x.id, x.column)}</pre>
     <button type="button" class="ghost" data-act="close-panel">Close</button>
   </section>`
 }
@@ -239,14 +202,14 @@ function view(): Html {
   const cols = shown(t)
   const sort = model.address.q.get("sort") ?? ""
   const search = SEARCH[t.name as Shown]
+  const got = rows(t, v().limit)
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
       <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
       ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
-      <span class="muted">${v().rows.length}${v().next !== null ? "+" : ""} rows</span>
+      <span class="muted">${got.rows.length}${got.more ? "+" : ""} rows</span>
     </div>
-    ${v().error !== "" ? html`<p class="error" role="alert">${v().error}</p>` : EMPTY}
-    ${adder(t)}${cites()}${reader()}
+    ${adder(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
         <thead><tr><th scope="col" class="id">#</th>${cols.map((c) => {
@@ -254,53 +217,20 @@ function view(): Html {
           return html`<th scope="col" data-key="${c.name}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
             ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}">${c.name}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span class="muted">${c.name}</span>`}</th>`
         })}</tr></thead>
-        <tbody>${v().rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
+        <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
       </table>
     </div>
-    ${v().loading ? html`<p class="empty">Loading…</p>` : v().rows.length === 0 && v().error === "" ? html`<p class="empty">No ${t.name} yet. Agents add them through the MCP; you can add one above.</p>` : EMPTY}
-    ${v().next !== null && !v().loading ? html`<button type="button" data-act="more">Load ${PAGE} more</button>` : EMPTY}
+    ${got.rows.length === 0 ? html`<p class="empty">No ${t.name} yet. Agents add them through the MCP; you can add one above.</p>` : EMPTY}
+    ${got.more ? html`<button type="button" data-act="more">Show ${PAGE} more</button>` : EMPTY}
   </div>`
 }
 
 // ------------------------------------------------------------------ actions
 
-let typing = 0
-
 function failed(e: unknown): void {
   if (e instanceof Refused) notice("error", `${e.code}: ${e.message}`)
   else notice("error", e instanceof Error ? e.message : String(e))
 }
-
-const BYTES = new TextEncoder()
-
-/** One chunk of a deferred text, from `offset` bytes; `bytes` is where the next chunk starts. */
-async function readText(table: string, id: number, column: string, offset: number): Promise<{ body: string; bytes: number; total: number; sha: string }> {
-  const r = await rpc<{ text: string; total: number; sha?: string }>("text", { table, id, column, offset, length: 262_144 })
-  return { body: r.text, bytes: offset + BYTES.encode(r.text).byteLength, total: r.total, sha: r.sha ?? "" }
-}
-
-/** All of it, for an editor: saving a cell rewrites the whole text, so it must start from the whole text. */
-async function readWhole(table: string, id: number, column: string): Promise<{ body: string; bytes: number; total: number; sha: string }> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    let r = await readText(table, id, column, 0)
-    let torn = false
-    while (r.bytes < r.total) {
-      const next = await readText(table, id, column, r.bytes)
-      // The text was rewritten between chunks: start over rather than stitch two versions.
-      if (next.sha !== r.sha) {
-        torn = true
-        break
-      }
-      if (next.body === "") break
-      r = { ...r, body: r.body + next.body, bytes: next.bytes, total: next.total }
-    }
-    if (!torn) return r
-  }
-  throw new Error("the text kept changing while it was read; try again")
-}
-
-/** A reply is shown only if the grid still shows the table it was asked for. */
-const still = (table: string): boolean => current().name === table
 
 function act(name: string, el: HTMLElement, ev: Event): void {
   const t = current()
@@ -311,32 +241,23 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       const s = model.address.q.get("sort") ?? ""
       return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
     }
-    case "search": {
-      const value = (el as HTMLInputElement).value
-      clearTimeout(typing)
-      typing = window.setTimeout(() => query("q", value), 200)
-      return
-    }
+    case "search":
+      // The replica answers in the keystroke's frame: no wait before asking.
+      return query("q", (el as HTMLInputElement).value)
     case "more":
-      return void fetchRows(true)
+      return patch({ limit: v().limit + PAGE })
     case "edit": {
       const c = t.cols.find((x) => x.name === col)
       if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
-      const rev = Number(v().rows.find((r) => Number(r.id) === id)?.rev ?? 0)
-      // Any deferred cell (prose or a source's doc) opens on its whole text: a save replaces all of it.
-      if (c.deferred) {
-        const tbl = t.name
-        return void readWhole(tbl, id, col).then((r) => still(tbl) && patch({ edit: `${id}:${col}`, editRev: rev, text: { table: tbl, id, column: col, ...r } })).catch(failed)
-      }
-      return patch({ edit: `${id}:${col}`, editRev: rev })
+      // A deferred cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
+      return patch({ edit: `${id}:${col}`, editRev: Number(rowOf(t, id)?.rev ?? 0) })
     }
     case "cancel":
       return patch({ edit: "" })
     case "save": {
       const form = el as HTMLFormElement
       const c = t.cols.find((x) => x.name === col)
-      const row = v().rows.find((r) => Number(r.id) === id)
-      if (!c || !row) return
+      if (!c || !rowOf(t, id)) return
       const data = new FormData(form)
       const raw = String(data.get("value") ?? "")
       const source = String(data.get("source") ?? "")
@@ -347,11 +268,9 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         // The rev the editor opened on, not the row's rev now: a re-read since must not let this save overwrite it.
         ...(c.prose ? { expectRev: v().editRev } : {}),
       })
-        .then(() => {
-          patch({ edit: "", text: null })
-          return refresh(id)
-        })
         .catch(failed)
+      // Predicted: the grid shows the write now; a refusal rolls it back and says why.
+      patch({ edit: "", text: null })
     }
     case "new":
       return patch({ edit: "new" })
@@ -367,42 +286,15 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         else rest[k] = s
       }
       const keyed = Object.keys(key).length > 0
-      return void put(t.name as TableName, rest, keyed ? { key, createOnly: true } : {})
-        .then(() => {
-          patch({ edit: "" })
-          return fetchRows(false)
-        })
-        .catch(failed)
+      void put(t.name as TableName, rest, keyed ? { key, createOnly: true } : {}).catch(failed)
+      return patch({ edit: "" })
     }
     case "cites":
       ev.stopPropagation()
-      return void rpc<{ citations: Row[] }>("history", { table: t.name, id, column: col, limit: 50 })
-        .then((r) => still(t.name) && patch({ cites: { id, column: col, list: r.citations } }))
-        .catch(failed)
+      return patch({ cites: { id, column: col }, text: null })
     case "read":
       ev.stopPropagation()
-      return void readText(t.name, id, col, 0).then((r) => still(t.name) && patch({ text: { table: t.name, id, column: col, ...r }, cites: null })).catch(failed)
-    case "read-more": {
-      const cur = v().text
-      if (!cur) return
-      return void readText(cur.table, cur.id, cur.column, cur.bytes)
-        .then((r) => {
-          // Only if the reader still shows this text: a late chunk never lands in another.
-          const now = v().text
-          if (!now || now.table !== cur.table || now.id !== cur.id || now.column !== cur.column || now.bytes !== cur.bytes) return
-          // A chunk of a rewritten text is not appended at the old text's offset: the reader starts over.
-          if (r.sha !== now.sha)
-            return void readText(cur.table, cur.id, cur.column, 0)
-              .then((f) => {
-                // Only into the same reader, still open on the same cell and version it restarted from.
-                const at = v().text
-                if (at && at.table === now.table && at.id === now.id && at.column === now.column && at.sha === now.sha) patch({ text: { ...at, ...f } })
-              })
-              .catch(failed)
-          patch({ text: { ...now, body: now.body + r.body, bytes: r.bytes, total: r.total } })
-        })
-        .catch(failed)
-    }
+      return patch({ text: { id, column: col }, cites: null })
     case "close-panel":
       return patch({ cites: null, text: null })
   }
@@ -411,16 +303,10 @@ function act(name: string, el: HTMLElement, ev: Event): void {
 const world: View = {
   title: "World",
   view,
-  enter(fresh) {
+  enter() {
     if (!TABLES_SHOWN.includes(model.address.sub as Shown)) return go({ sub: "corporations" }, true)
-    if (v().key !== fetchKey()) void fetchRows(false)
-    // Back on the lens: rows an agent wrote while another lens was shown are read again.
-    else if (fresh && !v().loading) void reread()
   },
   act,
-  refresh() {
-    if (v().key === fetchKey() && !v().loading) void reread()
-  },
   key(ev) {
     if (ev.key === "Escape" && (v().edit !== "" || v().cites || v().text)) {
       patch({ edit: "", cites: null, text: null })

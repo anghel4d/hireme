@@ -102,21 +102,16 @@ export interface OutreachView {
 
 /** The world lens: one server-side table as a sparse grid, paged by keyset. */
 export interface WorldView {
-  /** The table, sort and search the rows were fetched for; a change refetches. */
-  key: string
-  rows: Record<string, unknown>[]
-  next: unknown
-  loading: boolean
+  /** How many rows the grid shows; "more" raises it. */
+  limit: number
   /** The cell being edited, `id:column`, or "new" for a new row. */
   edit: string
   /** The row's rev when that editor opened: a prose save's expect_rev, so an agent's write since is refused, not overwritten. */
   editRev: number
-  /** The citations of one cell. */
-  cites: { id: number; column: string; list: Record<string, unknown>[] } | null
-  /** Deferred text being read. */
-  /** `bytes` is how much of `total` (bytes, not characters) has arrived. */
-  text: { table: string; id: number; column: string; body: string; bytes: number; total: number; sha: string } | null
-  error: string
+  /** The cell whose citations are open. */
+  cites: { id: number; column: string } | null
+  /** The deferred text being read. */
+  text: { id: number; column: string } | null
 }
 
 /** The account lens: the server's projection, and the ceremony in progress. */
@@ -176,7 +171,7 @@ export const model: Model = {
   notices: [],
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
-  world: { key: "", rows: [], next: null, loading: false, edit: "", editRev: 0, cites: null, text: null, error: "" },
+  world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
   deskLimit: 120,
   focus: { id: 0, fireArmed: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
   outreach: { key: "", picked: null, contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },

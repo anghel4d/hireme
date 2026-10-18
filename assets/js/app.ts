@@ -188,6 +188,7 @@ function frame(f: Bytes, h: Header): void {
   switch (h.kind) {
     case KIND.WELCOME: {
       const w = welcome(f)
+      kernel.setGrants(w.readMask, w.writeMask, w.mayDelete)
       set({ writeMask: w.writeMask, rev: w.accountRev, link: "open" })
       kernel.resend()
       // After a reconnect the lens re-reads what it shows (and the account lens parks its watch again).

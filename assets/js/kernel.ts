@@ -81,6 +81,8 @@ interface Exports {
   lanes(): number
   snapshot(): number
   restore(ptr: number, len: number): bigint
+  set_grants(readMask: number, writeMask: number, mayDelete: number, human: number): void
+  query(ptr: number, len: number): number
   rows(t: number): number
   ids_ptr(t: number): number
   col_ptr(t: number, c: number): number
@@ -143,6 +145,7 @@ export function load(hw: Boot): void {
       ? undefined
       : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
     k = x
+    if (grants) x.set_grants(...grants, 1)
     let restored = false
     if (snap) {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
@@ -172,6 +175,53 @@ export function load(hw: Boot): void {
     // The root cause of whatever fails after it: pinned, so the symptoms' notices never push it out.
     notice("error", `The kernel did not load: ${describe(e).slice(0, 300)}`, 0, true)
   })
+}
+
+/** This session's grants from WELCOME, for the replica's reads: what it may read answers, the rest is scope. */
+let grants: [number, number, number] | null = null
+export function setGrants(read: number, write: number, mayDelete: boolean): void {
+  grants = [read, write, mayDelete ? 1 : 0]
+  k?.set_grants(...grants, 1)
+  version++
+}
+
+/** Answers of the replica's reads, per version: a view drawn twice in a frame asks once. */
+const answers = new Map<string, unknown>()
+let answered = -1
+
+/**
+ * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
+ * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
+ */
+export function query<T = Record<string, unknown>>(op: "find" | "get" | "text" | "history", params: Record<string, unknown>): T {
+  if (!k) throw new Error("the desk is still loading")
+  if (answered !== version) {
+    answers.clear()
+    answered = version
+  }
+  const req = JSON.stringify({ op, ...params })
+  const hit = answers.get(req)
+  if (hit !== undefined) return hit as T
+  const n = withBytes(ENC.encode(req), (p, len) => k!.query(p, len))
+  if (n < 0) {
+    const e = JSON.parse(DEC.decode(result(-n - 1))) as { refusal?: string; code?: unknown; data?: unknown }
+    const code = typeof e.refusal === "string" ? e.refusal : String(e.code ?? "internal")
+    throw new Refused(code, refusalText(code, e.data ?? null), e.data ?? null)
+  }
+  const answer = JSON.parse(DEC.decode(result(n))) as T
+  answers.set(req, answer)
+  return answer
+}
+
+/** A whole text of the replica, chunk by chunk as `text` answers it. */
+export function wholeText(table: string, id: number, column: string): string {
+  let out = ""
+  for (let offset = 0; ; ) {
+    const r = query<{ text: string; next: number | null }>("text", { table, id, column, offset, length: 262_144 })
+    out += r.text
+    if (r.next === null || r.next === undefined || r.next <= offset) return out
+    offset = r.next
+  }
 }
 
 /** Restored rows whose first derive has not run yet: the lenses that derive wait one paint. */

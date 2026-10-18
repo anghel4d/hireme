@@ -604,6 +604,13 @@
             "opened_on": 739428,
             "rewrites_allowed": true
           }
+        ],
+        "items": [
+          {
+            "id": 5,
+            "key": "k",
+            "title": "Kernel work"
+          }
         ]
       },
       "steps": [

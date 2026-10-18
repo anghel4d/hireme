@@ -33,11 +33,11 @@ const HISTORY_MAX: u64 = 200;
 const CHUNK: u64 = 256 * 1024;
 const INT64: u64 = i64::MAX as u64;
 
-fn has(c: &Column, f: u32) -> bool {
+pub(crate) fn has(c: &Column, f: u32) -> bool {
     c.flags & f != 0
 }
 
-fn ty(c: &Column) -> Type {
+pub(crate) fn ty(c: &Column) -> Type {
     TYPES.get((c.type_code as usize).wrapping_sub(1)).map_or(Type::U32, |t| t.1)
 }
 
@@ -214,7 +214,7 @@ impl Key2<'_> {
     }
 }
 
-fn enum_values(c: &Column) -> &'static [&'static str] {
+pub(crate) fn enum_values(c: &Column) -> &'static [&'static str] {
     c.target.and_then(schema::enum_names).unwrap_or(&[])
 }
 
@@ -244,20 +244,24 @@ fn out(t: &Table, id: u32, c: &Column) -> Json {
     if has(c, flag::DEFERRED) {
         return t.str(id, c.id).map_or(Json::Null, |s| json!({"len": s.len(), "sha": sha8(s)}));
     }
-    match ty(c) {
-        Type::Enum => t.u32(id, c.id).and_then(|v| enum_values(c).get(v as usize)).map_or(Json::Null, |n| Json::String((*n).into())),
-        Type::Bool => t.u32(id, c.id).map_or(Json::Null, |b| Json::Bool(b == 1)),
-        Type::Day => t.u32(id, c.id).map_or(Json::Null, |d| crate::day_iso(d as crate::Day).into()),
-        Type::Time => match t.get(id, c.id) {
-            Val::U32(s) => crate::time_iso(s as i64).into(),
-            Val::I64(s) => crate::time_iso(s).into(),
-            _ => Json::Null,
-        },
-        Type::I64 => t.i64(id, c.id).map_or(Json::Null, Json::from),
-        Type::F64 => t.f64(id, c.id).and_then(serde_json::Number::from_f64).map_or(Json::Null, Json::Number),
-        Type::Json => t.str(id, c.id).map_or(Json::Null, |s| serde_json::from_str(s).unwrap_or_else(|_| Json::String(s.into()))),
-        Type::Str | Type::Text | Type::Bytes => t.str(id, c.id).map_or(Json::Null, |s| Json::String(s.into())),
-        _ => t.u32(id, c.id).map_or(Json::Null, Json::from),
+    value_json(c, &t.get(id, c.id))
+}
+
+/// A value of a column as JSON: enums by name, bools, days and times ISO.
+pub(crate) fn value_json(c: &Column, v: &Val) -> Json {
+    match (ty(c), v) {
+        (_, Val::None) => Json::Null,
+        (Type::Enum, Val::U32(v)) => enum_values(c).get(*v as usize).map_or(Json::Null, |n| Json::String((*n).into())),
+        (Type::Bool, Val::U32(b)) => Json::Bool(*b == 1),
+        (Type::Day, Val::U32(d)) => crate::day_iso(*d as crate::Day).into(),
+        (Type::Time, Val::U32(s)) => crate::time_iso(*s as i64).into(),
+        (Type::Time, Val::I64(s)) => crate::time_iso(*s).into(),
+        (Type::Json, Val::Str(s)) => serde_json::from_str(s).unwrap_or_else(|_| Json::String(s.clone())),
+        (_, Val::U32(x)) => Json::from(*x),
+        (_, Val::I64(x)) => Json::from(*x),
+        (_, Val::F64(x)) => serde_json::Number::from_f64(*x).map_or(Json::Null, Json::Number),
+        (_, Val::Str(s)) => Json::String(s.clone()),
+        (_, Val::List(l)) => Json::from(l.clone()),
     }
 }
 
@@ -542,7 +546,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     }
 }
 
-fn key_doc(k: &KeyDef) -> Json {
+pub(crate) fn key_doc(k: &KeyDef) -> Json {
     let (w, reads) = match k.cond {
         Some(Cond::Eq(c, v)) => (Some(alloc::format!("{c} = '{v}'")), alloc::vec![c]),
         Some(Cond::Null(c)) => (Some(alloc::format!("{c} is null")), alloc::vec![c]),

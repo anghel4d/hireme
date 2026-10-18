@@ -44,7 +44,7 @@ use crate::board::{self, Board};
 use crate::heat;
 use crate::pipeline::{self, Stage};
 use crate::rows::{Rows, Table, Val};
-use crate::{cv, keywords, Day};
+use crate::{cv, keywords, write, Day};
 
 /// Who is writing and when.
 #[derive(Clone, Copy, Debug)]
@@ -159,8 +159,19 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
         return refuse(refusal::TYPE, json!({"column": c.col, "sentinel": true}));
     }
     match op.verb {
-        wire::PUT => put(rows, board, &op, ctx),
-        wire::DROP => drop(rows, &op, ctx),
+        wire::PUT => {
+            let plan = write::put_plan(rows, &op, ctx)?;
+            let op = Op { target: plan.target, flags: op.flags & !(wire::KEYED | wire::CREATE_ONLY), ..op };
+            let mut effects = put(rows, board, &op, ctx)?;
+            write::provenance(rows, &op, ctx, &plan, &mut effects)?;
+            write::limits(rows, &plan, &effects)?;
+            Ok(effects)
+        }
+        wire::DROP => {
+            let mut effects = write::drop_effects(rows, &op, ctx)?;
+            effects.extend(drop(rows, &op, ctx)?);
+            Ok(effects)
+        }
         wire::COMMAND => run(rows, board, &op, ctx),
         _ => refuse(refusal::TYPE, json!({"verb": op.verb})),
     }

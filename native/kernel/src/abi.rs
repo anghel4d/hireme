@@ -175,42 +175,12 @@ impl Kernel {
     /// Judges one op and, if it passes, applies it as pending: the
     /// client's write in its own frame, settled or rolled back later.
     pub fn predict(&mut self, op: &[u8], ctx: &Ctx) -> Result<Moved, Refusal> {
-        let op = self.resolve(op)?;
-        let effects = self.judge(&op, ctx)?;
-        let parsed = wire::Op::one(&op).map_err(|_| Refusal { code: schema::refusal::TYPE, data: Json::Null })?;
+        let effects = self.judge(op, ctx)?;
+        let parsed = wire::Op::one(op).map_err(|_| Refusal { code: schema::refusal::TYPE, data: Json::Null })?;
         let writes = writes(&parsed, &effects, &mut || self.rows.temp_id());
         let m = self.rows.apply_pending(parsed.op_id, writes);
         self.moved(&m, self.today());
         Ok(m)
-    }
-
-    /// A KEYED op as the sequencer would judge it: retargeted at the row
-    /// its natural key names and unkeyed, or an insert when none does
-    /// (the browser holds only `applications`' key, `canonical_url`; the
-    /// other natural keys are on server tables, which judge does not
-    /// look into).
-    fn resolve(&self, raw: &[u8]) -> Result<Vec<u8>, Refusal> {
-        let mut out = raw.to_vec();
-        let Ok(op) = wire::Op::one(raw) else { return Ok(out) };
-        if op.flags & wire::KEYED == 0 {
-            return Ok(out);
-        }
-        let url = match op.cell(schema::col::applications::CANONICAL_URL).map(|c| c.value()) {
-            Some(wire::Value::Str(u)) if op.table == table::APPLICATIONS => Some(u),
-            _ => None,
-        };
-        let target = url.and_then(|u| {
-            let t = self.rows.table(table::APPLICATIONS)?;
-            t.ids().iter().copied().find(|&id| t.str(id, schema::col::applications::CANONICAL_URL) == Some(u))
-        });
-        if let (Some(_), true) = (target, op.flags & wire::CREATE_ONLY != 0) {
-            // As the server answers it: the key, not the row it found.
-            return Err(Refusal { code: schema::refusal::NATURAL_KEY, data: json!({"table": "applications", "key": {"canonical_url": url}}) });
-        }
-        // The op layout: flags at byte 9, target at bytes 12..16.
-        out[9] &= !(wire::KEYED | wire::CREATE_ONLY);
-        out[12..16].copy_from_slice(&target.unwrap_or(0).to_le_bytes());
-        Ok(out)
     }
 
     /// Recomputes the board if anything moved since the last derive.
@@ -297,7 +267,8 @@ fn merge(into: &mut Moved, m: Moved) {
 /// An op's effects as row writes, inserts given ids by `fresh`.
 pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> u32) -> Vec<Write> {
     let mut out = Vec::new();
-    if op.verb == wire::DROP {
+    // A soft-delete table's drop is its tombstone, an effect like any other.
+    if op.verb == wire::DROP && !schema::table_def(op.table).is_some_and(|t| t.soft_delete) {
         out.push(Write::Remove { table: op.table, id: op.target });
     }
     let mut inserted: Vec<u32> = Vec::new();

@@ -56,6 +56,10 @@ fn kernel(apps: &[App], batches: &[(u32, u8)], lineages: &[(u32, u32, i32, bool)
         .u32s(col::cv_lineages::GENERATION, lineages.iter().map(|_| 1))
         .u32s(col::cv_lineages::REWRITES_ALLOWED, lineages.iter().map(|x| x.3 as u32));
     b.done();
+    // The item the overlays name: a ref must name a row.
+    let mut b = w.block(table::ITEMS, 2);
+    b.u32s(col::items::ID, [5, 6].into_iter()).strs(col::items::KEY, ["k", "j"].into_iter()).strs(col::items::TITLE, ["Kernel work", "Wire work"].into_iter());
+    b.done();
     let mut k = Kernel::new();
     k.set_today(TODAY);
     k.boot(&w.finish(), 1).unwrap();
@@ -346,7 +350,11 @@ fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() 
     let mut w = wire::BodyWriter::new();
     w.gone(table::CV_LINEAGES, &[3]);
     k.patch(&w.finish(), 3).unwrap();
-    let fx = k.judge(&overlay(1, 0), &ctx()).unwrap();
+    // Another item on the same line (the same item twice is a unique clash).
+    let other = op(wire::PUT, table::CV_OVERLAYS, 0, |o| {
+        o.u32(col::cv_overlays::APPLICATION_ID, 1).u32(col::cv_overlays::ITEM_ID, 6).u32(col::cv_overlays::MODE, 0);
+    });
+    let fx = k.judge(&other, &ctx()).unwrap();
     assert!(fx.iter().all(|r| r.table != table::CV_LINEAGES), "no second lineage: {fx:?}");
 }
 

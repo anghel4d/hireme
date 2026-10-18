@@ -30,6 +30,7 @@ pub mod query;
 pub mod rows;
 pub mod score;
 pub mod text;
+pub mod write;
 
 /// Hash maps for lookups by integer id. Nothing iterates one
 /// to produce a result, so the cheap multiply hash (no per-process seed)
