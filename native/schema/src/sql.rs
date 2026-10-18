@@ -182,24 +182,42 @@ pub fn baseline(s: &Schema) -> String {
 /// A database's shape, as `mix hireme.schema` reads it from SQLite.
 #[derive(Default)]
 pub struct Shape {
-    /// Table name and its column names.
-    pub tables: Vec<(String, Vec<String>)>,
+    /// Table name and its columns.
+    pub tables: Vec<(String, Vec<ShapeCol>)>,
     pub indexes: Vec<String>,
     pub triggers: Vec<String>,
 }
 
+/// A column as SQLite reports it (`pragma_table_info`).
+pub struct ShapeCol {
+    pub name: String,
+    pub sql_type: String,
+    pub not_null: bool,
+    /// The default's SQL text, `-` for none.
+    pub default: String,
+}
+
 impl Shape {
-    /// Lines of `table <name>`, `col <table> <name>` and `index <name>`.
+    /// Lines of `table <name>`, `col <table> <name> <type> <0|1> <default|->`,
+    /// `index <name>` and `trigger <name>`.
     pub fn read(text: &str) -> Result<Shape, String> {
         let mut shape = Shape::default();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             match parts.as_slice() {
                 ["table", name] => shape.tables.push((name.to_string(), Vec::new())),
-                ["col", table, name] => match shape.tables.iter_mut().find(|(t, _)| t == table) {
-                    Some((_, cols)) => cols.push(name.to_string()),
-                    None => shape.tables.push((table.to_string(), alloc::vec![name.to_string()])),
-                },
+                ["col", table, name, ty, nn, default @ ..] => {
+                    let col = ShapeCol {
+                        name: name.to_string(),
+                        sql_type: ty.to_string(),
+                        not_null: *nn == "1",
+                        default: default.join(" "),
+                    };
+                    match shape.tables.iter_mut().find(|(t, _)| t == table) {
+                        Some((_, cols)) => cols.push(col),
+                        None => shape.tables.push((table.to_string(), alloc::vec![col])),
+                    }
+                }
                 ["index", name] => shape.indexes.push(name.to_string()),
                 ["trigger", name] => shape.triggers.push(name.to_string()),
                 _ => return Err(format!("unreadable shape line: {line}")),
@@ -235,7 +253,26 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
             }
             Some((_, have)) => {
                 for c in &t.cols {
-                    if have.contains(&c.name) {
+                    if let Some(h) = have.iter().find(|h| h.name == c.name) {
+                        // An existing column whose type, nullability or default
+                        // moved: no ADD COLUMN reaches it, so it is the hand's.
+                        let default = match &c.default {
+                            Some(d) => literal(c, d),
+                            None => String::from("-"),
+                        };
+                        let ty = if c.ty == Type::Id { "INTEGER" } else { sql_type(c.ty) };
+                        let not_null = c.required && c.ty != Type::Id;
+                        if h.sql_type != ty || h.not_null != not_null || h.default != default {
+                            extra.push(format!(
+                                "column {}.{} changed: {} {} {} -> {ty} {} {default}",
+                                t.name,
+                                c.name,
+                                h.sql_type,
+                                if h.not_null { "NOT NULL" } else { "NULL" },
+                                h.default,
+                                if not_null { "NOT NULL" } else { "NULL" }
+                            ));
+                        }
                         continue;
                     }
                     if c.required && c.default.is_none() {
@@ -247,8 +284,8 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                     sql.push_str(&format!("ALTER TABLE {} ADD COLUMN {};\n", q(&t.name), column(c)));
                 }
                 for c in have {
-                    if t.col(c).is_none() {
-                        extra.push(format!("column {}.{c}", t.name));
+                    if t.col(&c.name).is_none() {
+                        extra.push(format!("column {}.{} is in the database, not the declaration", t.name, c.name));
                     }
                 }
                 for i in indexes(t) {
@@ -268,19 +305,19 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
     }
     for (name, _) in &shape.tables {
         if !stored(s).any(|t| t.name == *name) {
-            extra.push(format!("table {name}"));
+            extra.push(format!("table {name} is in the database, not the declaration"));
         }
     }
     let declared: Vec<String> = stored(s).flat_map(|t| indexes(t).into_iter().map(|i| i.name)).collect();
     for i in &shape.indexes {
         if !declared.contains(i) {
-            extra.push(format!("index {i}"));
+            extra.push(format!("index {i} is in the database, not the declaration"));
         }
     }
     let declared: Vec<String> = stored(s).flat_map(|t| triggers(s, t).into_iter().map(|i| i.name)).collect();
     for i in &shape.triggers {
         if !declared.contains(i) {
-            extra.push(format!("trigger {i}"));
+            extra.push(format!("trigger {i} is in the database, not the declaration"));
         }
     }
     Ok(Diff { sql, extra })

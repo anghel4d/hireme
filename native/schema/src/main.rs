@@ -53,7 +53,7 @@ fn main() -> ExitCode {
                 Ok(diff) => {
                     print(&diff.sql);
                     for x in &diff.extra {
-                        eprintln!("destructive: {x} is in the database and not in the declaration");
+                        eprintln!("destructive: {x}");
                     }
                     return ExitCode::from(3);
                 }

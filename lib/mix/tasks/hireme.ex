@@ -164,7 +164,8 @@ defmodule Mix.Tasks.Hireme.Schema do
     cols =
       query(
         db,
-        "SELECT m.name, p.name FROM sqlite_master m JOIN pragma_table_info(m.name) p " <>
+        "SELECT m.name, p.name, p.type, p.\"notnull\", coalesce(p.dflt_value, '-') " <>
+          "FROM sqlite_master m JOIN pragma_table_info(m.name) p " <>
           "WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND m.name != 'schema_files' " <>
           "ORDER BY m.name, p.cid"
       )
@@ -179,7 +180,7 @@ defmodule Mix.Tasks.Hireme.Schema do
     tables = cols |> Enum.map(&hd/1) |> Enum.uniq()
 
     Enum.map_join(tables, "", &"table #{&1}\n") <>
-      Enum.map_join(cols, "", fn [t, c] -> "col #{t} #{c}\n" end) <>
+      Enum.map_join(cols, "", fn [t, c, ty, nn, d] -> "col #{t} #{c} #{ty} #{nn} #{d}\n" end) <>
       Enum.map_join(indexes, "", fn [i] -> "index #{i}\n" end) <>
       Enum.map_join(triggers, "", fn [i] -> "trigger #{i}\n" end)
   end
