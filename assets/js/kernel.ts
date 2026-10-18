@@ -77,6 +77,9 @@ interface Exports {
 let k: Exports | null = null
 /** Frames that land before the instance does, in order. */
 const early: Bytes[] = []
+let bootArrived: () => void = () => {}
+/** Settles when a BOOT is queued before the kernel is live. */
+const bootQueued = new Promise<void>((r) => (bootArrived = r))
 const ENC = new TextEncoder()
 const DEC = new TextDecoder()
 
@@ -99,6 +102,8 @@ export const ready = (): boolean => k !== null
 
 /** The rev the rows stand at: from BOOT, PATCH and TICK headers and the snapshot, never from WELCOME. */
 let rowsRev = 0n
+/** A BOOT (or a snapshot) is in, so a PATCH after it is news, whatever the rev (a fresh account's is 0). */
+let booted = false
 
 /** What HELLO names on a reconnect, so the server sends only what moved since. */
 export function snapshotRev(): bigint {
@@ -116,13 +121,16 @@ export function load(hw: Boot): void {
     // The snapshot goes in before any frame: frames wait in `early` until `k` is set, so a
     // BOOT that beat a slow snapshot read is never replaced by the older snapshot.
     // A BOOT already queued replaces every table anyway: go live now rather than wait on the read.
-    const booted = early.some((f) => header(f).kind === KIND.BOOT)
-    const snap = booted ? undefined : await hw.snap.catch(() => undefined)
+    // A BOOT replaces every table anyway: if one is queued, or arrives before the read answers, go live without the snapshot.
+    const snap = early.some((f) => header(f).kind === KIND.BOOT)
+      ? undefined
+      : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
     k = x
     if (snap) {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
       if (rev >= 0n) {
         rowsRev = rev
+        booted = true
       } else if (wire) {
         // HELLO named a snapshot the kernel refused: only a whole BOOT puts the rows right.
         rowsRev = 0n
@@ -160,6 +168,7 @@ function ingest(f: Uint8Array): boolean {
     return false
   }
   const h = header(f as Bytes)
+  if (h.kind === KIND.BOOT) booted = true
   if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
   return true
 }
@@ -173,7 +182,7 @@ export function onAdvance(fn: () => void): void {
 
 /** Every frame the shell does not handle itself. */
 export function frame(f: Bytes, h: Header): void {
-  if (h.kind === KIND.PATCH && h.rev > rowsRev && rowsRev !== 0n) advanced()
+  if (h.kind === KIND.PATCH && booted && h.rev > rowsRev) advanced()
   if (h.kind === KIND.ACK) for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
   if (h.kind === KIND.NACK) for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })
   // The kernel takes the whole frame: rows, and the settle or rollback of pending writes.
@@ -182,6 +191,7 @@ export function frame(f: Bytes, h: Header): void {
       if (ingest(f)) moved()
     } else {
       early.push(f.slice())
+      if (h.kind === KIND.BOOT) bootArrived()
     }
   }
 }
@@ -363,9 +373,15 @@ function save(): void {
   open.onerror = () => {}
   open.onupgradeneeded = () => open.result.createObjectStore("snap")
   open.onsuccess = () => {
+    // Closed as soon as the write settles (and whenever a delete asks), so forget() is never blocked by this page.
+    const db = open.result
+    db.onversionchange = () => db.close()
     try {
-      open.result.transaction("snap", "readwrite").objectStore("snap").put(record, scope)
+      const tx = db.transaction("snap", "readwrite")
+      tx.oncomplete = tx.onerror = tx.onabort = () => db.close()
+      tx.objectStore("snap").put(record, scope)
     } catch {
+      db.close()
       // A private window or a full disk: the next BOOT is whole, nothing else changes.
     }
   }
@@ -395,6 +411,8 @@ function settle(id: bigint, v: Verdict): void {
 /** What send() would refuse, checked before a prediction is applied. */
 function sendable(op: Op): void {
   if (!wire) throw new Error("not connected")
+  // Refused before the prediction is applied, so the page never shows a write that will not be sent.
+  if (wire.ended) throw new Refused("session", "This session has ended; sign in again to write.")
   if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
 }
 

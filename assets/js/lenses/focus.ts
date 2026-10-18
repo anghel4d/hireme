@@ -339,12 +339,12 @@ function act(name: string, el: HTMLElement): void {
 const focus: View = {
   title: "Focus",
   view,
-  enter() {
+  enter(fresh) {
     const appId = id()
     if (appId !== 0 && appId !== v().id) {
       const d = application(appId) as Doc | null
       if (d) void fetchAround(appId, d.application)
-    } else if (appId !== 0) {
+    } else if (appId !== 0 && fresh) {
       // Back on the same application: what an agent changed meanwhile is read again.
       focus.refresh?.()
     }
@@ -352,12 +352,14 @@ const focus: View = {
   after() {
     // The application may land after the address (a cold load straight to /focus/<no>).
     const appId = id()
-    if (appId !== 0 && appId !== v().id) focus.enter?.()
+    if (appId !== 0 && appId !== v().id) focus.enter?.(true)
   },
   act,
   refresh() {
     const appId = id()
     if (appId === 0) return
+    // A read that failed is tried again now (a server back, a reconnect), not left failed for the page's life.
+    unread.clear()
     // The application's current links, read from its row now: a changed contact or corporation is followed.
     const a = (application(appId) as Doc | null)?.application
     void rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })

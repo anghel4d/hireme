@@ -39,7 +39,11 @@ const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) =>
 /** What find can order by: the node refuses deferred, text, json and bytes columns. */
 const sortable = (c: ColumnDef): boolean => !c.deferred && c.type !== "text" && c.type !== "json" && c.type !== "bytes"
 
-const editable = (c: ColumnDef): boolean => writable() && !c.readonly && !c.implied && c.type !== "bytes"
+/** A source's identity is fixed once written (the node refuses a change): its url, host, publisher, title and kind. */
+const FIXED: Partial<Record<string, readonly string[]>> = { sources: ["url", "host", "publisher", "title", "kind"] }
+
+const editable = (c: ColumnDef): boolean =>
+  writable() && !c.readonly && !c.implied && c.type !== "bytes" && !(FIXED[current().name] ?? []).includes(c.name)
 
 const fetchKey = (): string => `${current().name}|${model.address.q.get("sort") ?? ""}|${model.address.q.get("q") ?? ""}`
 
@@ -400,11 +404,11 @@ function act(name: string, el: HTMLElement, ev: Event): void {
 const world: View = {
   title: "World",
   view,
-  enter() {
+  enter(fresh) {
     if (!TABLES_SHOWN.includes(model.address.sub as Shown)) return go({ sub: "corporations" }, true)
     if (v().key !== fetchKey()) void fetchRows(false)
-    // Back on the same table: rows an agent wrote while another lens was shown are read again.
-    else if (!v().loading) void reread()
+    // Back on the lens: rows an agent wrote while another lens was shown are read again.
+    else if (fresh && !v().loading) void reread()
   },
   act,
   refresh() {

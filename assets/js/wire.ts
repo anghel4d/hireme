@@ -477,7 +477,12 @@ export class Wire {
   private pinger = 0
   private attempt = 0
   private nonce = 0n
-  private ended = false
+  private ended_ = false
+
+  /** The session is over for good: nothing more will be sent. */
+  get ended(): boolean {
+    return this.ended_
+  }
   private nextCall = 1
   private readonly calls = new Map<number, { resolve: (r: Reply) => void; reject: (e: Error) => void }>()
   /** RPCs asked for before this session's WELCOME, sent the moment it lands. */
@@ -513,7 +518,7 @@ export class Wire {
   call(method: string, params: unknown = {}): Promise<Reply> {
     const id = this.nextCall++
     return new Promise((resolve, reject) => {
-      if (this.ended) return reject(new Error("the session has ended"))
+      if (this.ended_) return reject(new Error("the session has ended"))
       this.calls.set(id, { resolve, reject })
       const f = rpc(this.hash, id, method, params)
       // Before WELCOME (or while reconnecting) the call waits rather than fails: a lens may ask on its first draw.
@@ -530,7 +535,7 @@ export class Wire {
 
   /** The session is over for good (BYE revoked, suspended): no reconnect. */
   end(): void {
-    this.ended = true
+    this.ended_ = true
     this.close_?.()
     for (const c of this.calls.values()) c.reject(new Error("the session has ended"))
     this.calls.clear()
@@ -545,13 +550,13 @@ export class Wire {
   }
 
   private async connect(): Promise<void> {
-    if (this.ended) return
+    if (this.ended_) return
     if (this.ticket === "") {
       try {
         const csrf = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""
         const res = await fetch("/api/wire/ticket", { method: "POST", headers: { "x-csrf-token": csrf }, credentials: "same-origin" })
         if (res.status === 401 || res.status === 403) {
-          this.ended = true
+          this.ended_ = true
           this.hooks.lost("signed out", 0)
           return
         }
@@ -759,7 +764,7 @@ export class Wire {
   }
 
   private retry(why: string): void {
-    if (this.ended) {
+    if (this.ended_) {
       this.hooks.lost(why, 0)
       return
     }

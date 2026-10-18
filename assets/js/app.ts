@@ -25,8 +25,8 @@ import world from "./lenses/world.ts"
 export interface View {
   title: string
   view(): Html
-  /** The lens became current, or its address (sub or query) changed. */
-  enter?(): void
+  /** The lens became current (`fresh`), or its address (sub or query) changed while it was current. */
+  enter?(fresh: boolean): void
   /** An element with `data-act` was used; `ev` is the click, input, change, keydown or submit. */
   act?(name: string, el: HTMLElement, ev: Event): void
   /** After every morph: a lens that owns subtrees (the board's cards) writes them here. */
@@ -50,6 +50,7 @@ const NAV: { lens: Lens; label: string; key: string }[] = [
 ]
 
 const root = document.getElementById("app")
+let enteredLens = ""
 let entered = ""
 
 function link(): Html {
@@ -81,7 +82,9 @@ function render(): void {
   const where = format(model.address)
   if (where !== entered) {
     entered = where
-    v?.enter?.()
+    const fresh = model.address.lens !== enteredLens
+    enteredLens = model.address.lens
+    v?.enter?.(fresh)
     document.title = `${v?.title ?? "hireme"} · hireme`
   }
   morph(root, shell())

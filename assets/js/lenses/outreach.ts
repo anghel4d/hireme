@@ -71,7 +71,8 @@ function field(c: ColumnDef, value: unknown): Html {
   const label = c.name.replace(/_/g, " ")
   if (c.type === "enum")
     return html`<label>${label}<select name="${c.name}"><option value=""></option>${values(c.enum).map((e) => html`<option${flag("selected", e === x)}>${e}</option>`)}</select></label>`
-  if (c.type === "text") return html`<label>${label}<textarea name="${c.name}" rows="4">${x}</textarea></label>`
+  // HTML drops a textarea's first newline, so a text that begins with one gets a second.
+  if (c.type === "text") return html`<label>${label}<textarea name="${c.name}" rows="4">${x.startsWith("\n") ? `\n${x}` : x}</textarea></label>`
   if (c.type === "day") return html`<label>${label}<input type="date" name="${c.name}" value="${x}"></label>`
   return html`<label>${label}<input name="${c.name}" value="${x}"${flag("required", c.required)}${c.name === "email" ? html` type="email"` : EMPTY}></label>`
 }
@@ -267,10 +268,11 @@ let shownContact = -1
 const outreach: View = {
   title: "Outreach",
   view,
-  enter() {
+  enter(fresh) {
     if (v().key !== listKey()) void fetchContacts(false)
-    // Back on the same list: contacts and threads an agent wrote meanwhile are read again.
-    else if (!v().loading) {
+    // Back on the lens: contacts and threads an agent wrote meanwhile are read again. Picking a
+    // contact is only an address change, so it does not re-read (which collapsed a paged list).
+    else if (fresh && !v().loading) {
       void fetchContacts(false)
       if (selected() === shownContact) void fetchMessages()
     }

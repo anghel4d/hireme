@@ -52,8 +52,13 @@ const WT_WAIT_MS = 3000
       open.onupgradeneeded = () => open.result.createObjectStore("snap")
       open.onerror = () => resolve(undefined)
       open.onsuccess = () => {
+        const db = open.result
+        // The read's connection closes when it is done, so a sign-out's deleteDatabase is not blocked.
+        db.onversionchange = () => db.close()
         try {
-          const get = open.result.transaction("snap").objectStore("snap").get(scope)
+          const tx = db.transaction("snap")
+          tx.oncomplete = tx.onerror = tx.onabort = () => db.close()
+          const get = tx.objectStore("snap").get(scope)
           get.onsuccess = () => {
             const s = get.result as Snapshot | undefined
             // A snapshot of another schema is refused by the kernel; naming its rev in HELLO would resume rows the page cannot hold.
@@ -61,6 +66,7 @@ const WT_WAIT_MS = 3000
           }
           get.onerror = () => resolve(undefined)
         } catch {
+          db.close()
           resolve(undefined)
         }
       }

@@ -54,6 +54,13 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
         .find(|r| r.0 == code)
         .map(|r| (r.2, first_sentence(r.3)))
         .unwrap_or(("refused", String::new()));
+    // natural_key also covers a keyed put on a table that declares no natural key: other words, other advice.
+    let nokey = code == "natural_key" && data.get("reason").and_then(Json::as_str).is_some_and(|r| r.contains("no natural key"));
+    let (line, todo) = if nokey {
+        ("this table declares no natural key", "Put by id, or without key to insert; `schema` with the table lists its keys.".to_owned())
+    } else {
+        (line, todo)
+    };
     let mut out = format!("error[{code}]: {line}\n  --> {what}\n");
     if let Some(msg) = data.get("message").and_then(Json::as_str) {
         out.push_str(&format!("   = note: {msg}\n"));
