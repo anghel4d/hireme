@@ -63,9 +63,9 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
     ("column", "required", "a required column is missing or null", "That column is required on a new row; set it to a value, not null."),
     ("column", "implied", "this column is implied by the row it belongs to", "Leave it out; the server fills it."),
     ("column", "a source's identity is fixed once written", "a source's identity is fixed once written", "Its url (and the host derived from it) never changes. To cite another page, put a new source; only retrieved_at and doc move."),
-    ("column", "not filterable", "this column cannot be filtered on", "Deferred text, json and bytes columns are not compared in `where`. Filter on another column, or `get` the rows and read them."),
-    ("column", "not orderable", "this column cannot order rows", "Deferred text, json, bytes and text columns do not order. Order by another column (id by default)."),
-    ("column", "not text", "this column is not text", "`text` reads text columns (a deferred one comes as {len, sha} elsewhere); `get` returns every other column whole."),
+    ("column", "not filterable", "this column cannot be filtered on", "Json and bytes columns are not compared in `where`. Filter on another column, or `get` the rows and read them."),
+    ("column", "not orderable", "this column cannot order rows", "Json, bytes and text columns do not order. Order by another column (id by default)."),
+    ("column", "not text", "this column is not text", "`text` reads text columns in chunks; `get` returns every column whole."),
     ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it. A host is ASCII letters, digits and hyphens: write an international one in its punycode form (bücher.example as xn--bcher-kva.example); the path may be any text."),
     ("type", "an http(s) URL or a source id", "source must be an http(s) URL or a source id", "Give `source` as \"https://...\" (the server finds or makes that source) or as an existing source's id."),
     ("type", "inside a character", "the offset falls inside a UTF-8 character", "Continue from the `next` offset the previous `text` answer gave, or from 0."),
@@ -233,7 +233,7 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
             (_, Some(max), Some("in"), _) => Some((format!("an `in` list over {max} values"), format!("Split the list into calls of at most {max} values each."))),
             // like and prefix take a pattern, bounded in bytes.
             (_, Some(max), Some(f), _) => Some((format!("a `{f}` pattern over {max} bytes"), format!("Shorten the pattern to at most {max} bytes."))),
-            (_, _, _, Some("offset")) => Some(("the offset is past any text".to_owned(), "Give an offset inside the text: below the `len` of its {len, sha} stub.".to_owned())),
+            (_, _, _, Some("offset")) => Some(("the offset is past any text".to_owned(), "Give an offset inside the text: below its length in bytes.".to_owned())),
             _ => None,
         },
         "column" => {

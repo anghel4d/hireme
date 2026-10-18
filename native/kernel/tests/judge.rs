@@ -196,8 +196,6 @@ fn listing_text_is_read_once_at_write_time() {
     let fx = k.judge(&put, &ctx()).unwrap();
     assert_eq!(cell(&fx, table::APPLICATIONS, A::KEYWORDS), Some(&EVal::Val(Val::Str("rust\u{1f}kernels\u{1f}gpu".into()))));
     assert_eq!(cell(&fx, table::APPLICATIONS, A::KEYWORDS_VERSION), Some(&EVal::Val(Val::U32(kernel::keywords::VERSION))));
-    // The text's hash twin is the sequencer's to write.
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::LISTING_SHA), None);
     // A new application starts discovered, on today.
     let new = op(wire::PUT, table::APPLICATIONS, 0, |o| {
         o.str(A::COMPANY, "Acme");

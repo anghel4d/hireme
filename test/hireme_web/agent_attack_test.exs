@@ -262,7 +262,6 @@ defmodule HiremeWeb.AgentAttackTest do
             {:events, %{application_id: ids.app, kind: "note", key_id: 1}, 0},
             {:sources, %{url: "https://x.example/", host: "trusted.example"}, 0},
             {:corporations, %{headcount_on: ~D[2026-12-31]}, ids.corp},
-            {:applications, %{notes_sha: String.duplicate("0", 64)}, ids.app},
             {:applications, %{stage: :submitted}, ids.app},
             {:applications, %{no: 1}, ids.app}
           ] do

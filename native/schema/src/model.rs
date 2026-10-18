@@ -61,7 +61,7 @@ impl Type {
         TYPES.iter().position(|(_, t)| *t == self).unwrap() as u8 + 1
     }
 
-    /// The wire type a non-deferred value of this type travels as.
+    /// The wire type a value of this type travels as.
     pub fn wire(self) -> u8 {
         match self {
             Type::Id | Type::Ref | Type::Bool | Type::U8 | Type::U32 | Type::Day | Type::Time | Type::Enum => {
@@ -89,7 +89,6 @@ pub mod wire {
 /// The catalog's flag bits.
 pub mod flag {
     pub const REQUIRED: u32 = 1;
-    pub const DEFERRED: u32 = 2;
     pub const PRIVATE: u32 = 4;
     pub const SERVER_ONLY: u32 = 8;
     pub const HUMAN_ONLY: u32 = 16;
@@ -101,7 +100,6 @@ pub mod flag {
     pub const METRIC_ON: u32 = 1024;
     pub const NATURAL: u32 = 2048;
     pub const CASCADE: u32 = 4096;
-    pub const SHA_ON: u32 = 8192;
     pub const LOOSE: u32 = 16384;
 }
 
@@ -202,7 +200,6 @@ pub struct Column {
     pub required: bool,
     /// As written in the file.
     pub default: Option<String>,
-    pub deferred: bool,
     pub private: bool,
     pub server_only: bool,
     pub human_only: bool,
@@ -216,8 +213,6 @@ pub struct Column {
     pub metric: bool,
     /// On a metric's `_on` twin: the metric it dates.
     pub metric_of: Option<String>,
-    /// On a deferred column's `_sha` twin: the column it hashes.
-    pub sha_of: Option<String>,
     pub prose: bool,
     pub implied: bool,
 }
@@ -231,7 +226,6 @@ impl Column {
             target: None,
             required: false,
             default: None,
-            deferred: false,
             private: false,
             server_only: false,
             human_only: false,
@@ -242,7 +236,6 @@ impl Column {
             natural: false,
             metric: false,
             metric_of: None,
-            sha_of: None,
             prose: false,
             implied: false,
         }
@@ -256,7 +249,6 @@ impl Column {
         let mut f = 0;
         for (on, bit) in [
             (self.required, flag::REQUIRED),
-            (self.deferred, flag::DEFERRED),
             (self.private, flag::PRIVATE),
             (self.server_only, flag::SERVER_ONLY),
             (self.human_only, flag::HUMAN_ONLY),
@@ -268,7 +260,6 @@ impl Column {
             (self.metric_of.is_some(), flag::METRIC_ON),
             (self.natural, flag::NATURAL),
             (self.cascade, flag::CASCADE),
-            (self.sha_of.is_some(), flag::SHA_ON),
             (self.loose, flag::LOOSE),
         ] {
             if on {
@@ -575,7 +566,6 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
                 col.default = Some((*v).to_owned());
                 i += 1;
             }
-            "deferred" => col.deferred = true,
             "private" => col.private = true,
             "server_only" => col.server_only = true,
             "human_only" => col.human_only = true,
@@ -595,9 +585,6 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
     }
     if col.loose && col.cascade {
         return fail(line, "a loose ref has no delete to cascade".into());
-    }
-    if col.deferred && !matches!(col.ty, Type::Str | Type::Text | Type::Json) {
-        return fail(line, "only text is deferred".into());
     }
     default_ok(&col, line)?;
     Ok(col)
@@ -626,23 +613,6 @@ fn param(token: &str, line: usize) -> Result<RawParam, Error> {
             Ok(RawParam { name: token.to_owned(), ty: None, required })
         }
     }
-}
-
-// A deferred column travels as its length and hash, so its hash is stored
-// beside it: the readonly `<name>_sha` (a trailing `_raw` dropped, so
-// listing_raw's is listing_sha). It stays on the server, which builds the
-// stub's 8 bytes from it; no client needs the 64 hex characters.
-fn push_with_sha(t: &mut RawTable, col: Column) {
-    let twin = col.deferred.then(|| {
-        let stem = col.name.strip_suffix("_raw").unwrap_or(&col.name);
-        let mut twin = Column::blank(&format!("{stem}_sha"), Type::Str);
-        twin.sha_of = Some(col.name.clone());
-        twin.readonly = true;
-        twin.server_only = true;
-        twin
-    });
-    t.cols.push(col);
-    t.cols.extend(twin);
 }
 
 fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: usize) -> Result<(), Error> {
@@ -696,7 +666,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
             };
             let mut col = Column::blank(cname, ty);
             col.target = target;
-            push_with_sha(t, walk(rest, col, line)?);
+            t.cols.push(walk(rest, col, line)?);
         }
         ["metric", mname, ty, rest @ ..] => {
             name(mname, line)?;
@@ -734,8 +704,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
             };
             let mut col = walk(rest, Column::blank(pname, Type::Text), line)?;
             col.prose = true;
-            col.deferred = true;
-            push_with_sha(t, col);
+            t.cols.push(col);
         }
         ["command", cname, rest @ ..] => {
             name(cname, line)?;

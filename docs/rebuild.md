@@ -139,7 +139,7 @@ table applications desk resident
   cap 50000
   col no u32 ! unique readonly
   col corporation_id ref corporations ?
-  col listing_raw text ? deferred
+  col listing_raw text ?
   col listing_on day ?
   col keywords str ? readonly
   col stage enum stage ! = discovered readonly
@@ -163,9 +163,7 @@ and `account_id` are implied, never declared. A `day` is days since
 0000-01-01 in the proleptic Gregorian calendar (0 to 3652424, which is
 9999-12-31), so an office opened in 1897 is a plain day; a `time` is unix
 seconds. Types include `ref <table>`;
-flags include `!`, `?`, `= default`, `deferred` (implies a readonly,
-server-only `<name>_sha` twin holding the text's hex SHA-256, a trailing
-`_raw` dropped, so `listing_raw`'s twin is `listing_sha`), `private`,
+flags include `!`, `?`, `= default`, `private`,
 `server_only`, `human_only`, `readonly`, `unique`, and `loose` (a plain id
 with no foreign key, for references from append-only tables that a purge
 must never rewrite).
@@ -239,7 +237,7 @@ carry `deleted_at`. Ids and `applications.no` are never reused.
 
 | Table | Notes |
 | --- | --- |
-| `applications` | `no`, `corporation_id`, `place_id`, `contact_id`, `profile_id`, `batch_id`, typed card fields (`company`, `role`, `location`, `work_mode`, `employment`, `comp_raw`), `channel`, listing (`listing_raw` **deferred**, `listing_format`, `listing_sha`, `listing_url`, `canonical_url`, `listing_on`, `keywords`, `keywords_version`, `source_id`), pipeline (`stage`, `pips`, `stage_on`, `stage_notes`, `status`, `gate`, `freshness`, `heat_override`, `heat_override_reason`, `score_100`), dates (`applied_on`, `replied_on`, `closed_on`, readonly, written by `stage`; `outcome`), deferred text (`notes`, `battleplan`, `letter_raw`; plain text, no citation or CAS), `cv_theme` |
+| `applications` | `no`, `corporation_id`, `place_id`, `contact_id`, `profile_id`, `batch_id`, typed card fields (`company`, `role`, `location`, `work_mode`, `employment`, `comp_raw`), `channel`, listing (`listing_raw`, `listing_format`, `listing_url`, `canonical_url`, `listing_on`, `keywords`, `keywords_version`, `source_id`), pipeline (`stage`, `pips`, `stage_on`, `stage_notes`, `status`, `gate`, `freshness`, `heat_override`, `heat_override_reason`, `score_100`), dates (`applied_on`, `replied_on`, `closed_on`, readonly, written by `stage`; `outcome`), long text (`notes`, `battleplan`, `letter_raw`; plain text, no citation or CAS), `cv_theme` |
 | `events` | append-only: `application_id`, `kind`, `body`, `actor`, `key_id`, `op_id` |
 | `batches` | `code`, `ordinal`, `kind`, `status`, `fire`, `target_size`, `queued_on`, `note` |
 | `cv_lineages` | per corporation: `corporation_id`, `generation`, `opened_on`, `rewrites_allowed`, `theme` |
@@ -257,7 +255,7 @@ the CV and coverage derivations read.
 | `places` | countries and cities, `kind` + self `country_id`; identity, demography, economy, liveability, energy, career (`mobility`, `language`, `tech`, `ease`, `work_permit`, `atlas_position` (u32, null = not charted), `atlas_labeled`); every figure a `metric`; prose `liveability`, `notes`; partial uniques for `iso2` and `geonames_id` |
 | `corporations` | `domain` natural key; identity, size, private and public economics, comp and reputation, hiring (`careers_url`, `ats`, `ats_tenant`, `remote_policy`), desk columns (`score_100`, `freshness`, `freshness_on`, `eng_urls`, `note`), prose `about`, `culture` |
 | `offices` | `corporation_id`, `place_id`, `kind`, `headcount` (metric), `opened_on`; unique triple |
-| `sources` | soft-delete; `url` natural key over live rows, at most 2,048 bytes (refused `type`, "a source URL is at most 2048 bytes", with `max`, before any parsing), its port absent, empty or ASCII digits up to 65535 (WHATWG); `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (deferred text); identity fixed once written; a cited source is tombstoned, never deleted |
+| `sources` | soft-delete; `url` natural key over live rows, at most 2,048 bytes (refused `type`, "a source URL is at most 2048 bytes", with `max`, before any parsing), its port absent, empty or ASCII digits up to 65535 (WHATWG); `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (long text); identity fixed once written; a cited source is tombstoned, never deleted |
 | `citations` | append-only, `server_only`: `table`, `row_id`, `column`, loose `source_id`, `value`, `as_of`, `actor`, loose `key_id`, `op_id`; indexes `(account_id, table, row_id, column, id desc)` and `(account_id, source_id)` |
 | `atlas` | **resident projection**, not stored: places rows with `atlas_position` set, only the columns the fit reads |
 
@@ -269,8 +267,8 @@ is operator-owned, browser plus step-up, in no key's mask.
 
 `contacts` (`corporation_id`, `place_id`, `name`, `title`, `email`,
 `linkedin_url`, `x_handle`, `relation`, `last_touch_on`, `notes`) and
-`messages` (`channel`, `direction`, addresses, `subject`, `body`
-deferred, `message_id` natural key, `thread_key`, `sent_at`, `status`,
+`messages` (`channel`, `direction`, addresses, `subject`, `body`,
+`message_id` natural key, `thread_key`, `sent_at`, `status`,
 links to corporation, application, contact). No tracking pixels.
 
 ### `lanes` — resident
@@ -384,8 +382,7 @@ and fed the same deltas subscribers get in the same sequencer turn.
 
 ### Keywords at write time
 
-`listing_raw` is deferred from the first BOOT. On `put`, the sequencer
-runs `keywords.rs` over the raw text and stores
+On `put` of `listing_raw`, the sequencer runs `keywords.rs` over the raw text and stores
 `applications.keywords` + `keywords_version`. The CV composition and
 coverage read the extracted words, not the blob. A kernel upgrade that
 changes extraction bumps the version and re-extracts in a backfill task;
@@ -596,8 +593,7 @@ timeout written down.
 - The kernel's own vectors run native and under wasm. No Elixir oracle, no
   parity fixtures.
 - `bench/` is rewritten for v2.
-- Bounds: BOOT ≤ 2 MiB deflated at 10k applications with `listing_raw`
-  deferred; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
+- Bounds: BOOT ≤ 2 MiB deflated at 10k applications; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
   wasm at 10k, and the first derive after BOOT (which follows the snapshot's
   paint) ≤ 30 ms on the worst-case bench desk; `judge` ≤ 200 µs in the NIF; op
   round trip p50 ≤ 5 ms on loopback; 256 ops per `OPS` frame.
@@ -688,8 +684,7 @@ reader for the v1 database.
 
 ## Measurements, not decisions
 
-- BOOT at 10k applications with `listing_raw` deferred and keywords
-  stored: if it exceeds 2 MiB, the next lever is a projection, not a
+- BOOT at 10k applications with keywords stored: if it exceeds 2 MiB, the next lever is a projection, not a
   compat path.
 - The `:agent_write` cap (600/min) and the 64-op batch, against the bench;
   the 15 s/45 s liveness, against a silent session in the final

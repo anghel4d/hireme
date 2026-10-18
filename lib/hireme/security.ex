@@ -63,8 +63,8 @@ defmodule Hireme.Security do
   @spec wire_sessions_per_peer() :: pos_integer()
   def wire_sessions_per_peer, do: 16
 
-  # The bytes an account's text may hold (every str, text, json and
-  # deferred cell, as the sequencer counts them in accounts.text_bytes):
+  # The bytes an account's text may hold (every str, text and json cell,
+  # as the sequencer counts them in accounts.text_bytes):
   # one SQLite file serves every account.
   @spec account_text_bytes() :: pos_integer()
   def account_text_bytes, do: 1024 * 1024 * 1024

@@ -381,7 +381,7 @@ defmodule Hireme.Import do
 
   defp cell(_account_id, col, value, mode) do
     with {:ok, v} <- cast(col, value, mode) do
-      wire = if col.deferred, do: v, else: Codec.to_wire(col, v)
+      wire = Codec.to_wire(col, v)
       {:ok, {col.id, Codec.cell_type(col), wire}}
     end
   end

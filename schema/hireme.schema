@@ -38,15 +38,13 @@
 #   col <name> <type> [<target>] [! | ?] [= <default>] [flag]...
 #   metric <name> <u32|i64|f64> [flag]...   nullable; implies `<name>_on day ?`;
 #                                    a write needs `as_of` and makes a citation
-#   prose <name> [flag]...           text ?, deferred; a write needs `source` and
+#   prose <name> [flag]...           text ?; a write needs `source` and
 #                                    `expect_rev` and makes a citation
 #   command <name> [<col> | <name>:<type>[?]]... [human_only]
 #                                    params are table columns or typed free params
 #
 # Types: id ref(<table>) enum(<enum>) bool u8 u32 i64 f64 day time str text json bytes
-# Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (a long text:
-#        it travels whole, and implies the readonly, server_only `<name>_sha`,
-#        its hex SHA-256, a trailing `_raw` dropped: listing_raw's is listing_sha)
+# Flags: ! required (NOT NULL)   ? nullable (the default)
 #        private (browser sessions only, never a key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)   cascade (a nullable ref whose row is deleted
@@ -164,7 +162,7 @@ table accounts system server global
   # Announcing audit events, bumped by Audit.record in the same write: the
   # account lens's cursor, one row read instead of a scan of the trail.
   col audit_rev i64 ! = 0 readonly
-  # Text bytes the account stores (str, text, json and deferred cells), kept
+  # Text bytes the account stores (str, text and json cells), kept
   # by the sequencer in the write that changes them; past
   # Security.account_text_bytes a write is refused `cap`.
   col text_bytes i64 ! = 0 readonly
@@ -315,7 +313,7 @@ table profiles corpus resident
   col name str !
   col headline str ?
   col summary text ?
-  col narrative text ? deferred
+  col narrative text ?
   col narrative_private text ? private
 
 # CV atoms; a null profile_id is shared by every profile.
@@ -356,7 +354,7 @@ table applications desk resident
   col employment enum employment ?
   col comp_raw str ?
   col channel enum app_channel ?
-  col listing_raw text ? deferred
+  col listing_raw text ?
   col listing_format enum listing_format ?
   col listing_url str ?
   col canonical_url str ?
@@ -382,9 +380,9 @@ table applications desk resident
   col replied_on day ? readonly
   col closed_on day ? readonly
   col outcome enum outcome ?
-  col notes text ? deferred
-  col battleplan text ? deferred
-  col letter_raw text ? deferred
+  col notes text ?
+  col battleplan text ?
+  col letter_raw text ?
   col cv_theme json ?
   command stage stage note:text?
   command note stage body:text
@@ -396,7 +394,7 @@ table events desk resident append_only
   index application_id id desc
   col application_id ref applications !
   col kind str !
-  col body text ? deferred
+  col body text ?
   col actor enum actor ! readonly
   col key_id ref api_keys ? readonly loose
   col op_id i64 ? readonly
@@ -606,7 +604,7 @@ table sources world resident soft_delete
   col retrieved_at time ?
   # A mutable page keeps only its newest doc; an immutable one keeps each.
   col mutable bool ! = true
-  col doc text ? deferred
+  col doc text ?
 
 # The only provenance authority: the newest citation for a cell is its source.
 # Replicated read-only under the world bit: the server writes every row.
@@ -654,7 +652,7 @@ table messages mail resident
   col to_addr str ?
   col cc_addr str ?
   col subject str ?
-  col body text ? deferred
+  col body text ?
   col message_id str ?
   col thread_key str ?
   col sent_at time ?

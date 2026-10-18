@@ -72,7 +72,7 @@ defmodule Hireme.WireCase do
 
   defp cell(col, v) do
     ty = Codec.cell_type(col)
-    v = if Map.get(col, :deferred), do: v, else: Codec.to_wire(col, v)
+    v = Codec.to_wire(col, v)
     v = if ty == 4, do: v * 1.0, else: v
     {col.id, ty, v}
   end

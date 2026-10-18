@@ -106,13 +106,12 @@ fn typed(ty: Type, target: Option<&str>) -> String {
 
 fn column(c: &Column) -> String {
     format!(
-        "{{\"id\":{},\"name\":{},{},\"required\":{},\"default\":{},\"deferred\":{},\"private\":{},\"server_only\":{},\"human_only\":{},\"readonly\":{},\"unique\":{},\"cascade\":{},\"loose\":{},\"natural\":{},\"metric\":{},\"metric_of\":{},\"sha_of\":{},\"prose\":{},\"implied\":{},\"flags\":{}}}",
+        "{{\"id\":{},\"name\":{},{},\"required\":{},\"default\":{},\"private\":{},\"server_only\":{},\"human_only\":{},\"readonly\":{},\"unique\":{},\"cascade\":{},\"loose\":{},\"natural\":{},\"metric\":{},\"metric_of\":{},\"prose\":{},\"implied\":{},\"flags\":{}}}",
         c.id,
         json_str(&c.name),
         typed(c.ty, c.target.as_deref()),
         c.required,
         opt_str(c.default.as_deref()),
-        c.deferred,
         c.private,
         c.server_only,
         c.human_only,
@@ -123,7 +122,6 @@ fn column(c: &Column) -> String {
         c.natural,
         c.metric,
         opt_str(c.metric_of.as_deref()),
-        opt_str(c.sha_of.as_deref()),
         c.prose,
         c.implied,
         c.flags()

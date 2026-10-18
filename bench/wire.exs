@@ -1,6 +1,6 @@
 # The wire against docs/rebuild.md's bounds:
 #
-#   BOOT <= 2 MiB deflated at 10k applications with listing_raw deferred
+#   BOOT <= 2 MiB deflated at 10k applications
 #   PATCH <= 64 KiB per burst
 #   judge <= 200 us in the NIF (every shape's p99, via Hireme.Kernel.judge/3)
 #   op round trip p50 <= 5 ms on loopback
@@ -168,7 +168,7 @@ defmodule Bench do
 
   defp cell(col, v) do
     ty = Codec.cell_type(col)
-    v = if Map.get(col, :deferred), do: v, else: Codec.to_wire(col, v)
+    v = Codec.to_wire(col, v)
     {col.id, ty, if(ty == 4, do: v * 1.0, else: v)}
   end
 
@@ -650,7 +650,7 @@ lines = [
   Bench.line("boot_deflated_bytes_at_#{apps}_apps", boot_bytes, 2 * 1024 * 1024, "bytes", %{
     frames: length(boot),
     raw: boot_raw,
-    note: "every inline text column filled; listing_raw deferred"
+    note: "every text column filled, texts whole"
   }),
   Bench.line("patch_bytes_per_64_op_burst", burst, 64 * 1024, "bytes", %{note: "score edits"}),
   Bench.line("patch_bytes_per_64_prose_edit_burst", prose_burst, 64 * 1024, "bytes", %{

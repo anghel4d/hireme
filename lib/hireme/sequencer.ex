@@ -932,7 +932,7 @@ defmodule Hireme.Sequencer do
   end
 
   # The text a row of `table` holds, in bytes, as SQLite stores it: every
-  # str, text and json column (deferred ones included). The per-account
+  # str, text and json column. The per-account
   # text budget counts exactly this, before and after each write.
   defp text_bytes(table, ids) when is_list(ids) do
     case for(
@@ -1487,37 +1487,9 @@ defmodule Hireme.Sequencer do
   defp errors(cs), do: Map.new(cs.errors, fn {k, {msg, _}} -> {k, msg} end)
 
   # What the server writes and no writer may: a new application's number,
-  # a source's host, an event's author. (Metric dates, the listing's hash
-  # and keywords are the kernel's effects.)
-  defp derived(table, values, row, ctx),
-    do: values |> derive(table.name, row, ctx) |> hashes(table)
-
-  # Every deferred column written gets its hex SHA-256 twin in the same
-  # write, so a BOOT or PATCH stub is read from the twin, never the text.
-  defp hashes(values, table) do
-    Enum.reduce(table.cols, values, fn c, acc ->
-      key = String.to_atom(c.name)
-      twin = c.deferred && sha_twin(table, c)
-
-      case twin && Map.fetch(acc, key) do
-        {:ok, text} when is_binary(text) ->
-          Map.put(acc, twin, Base.encode16(:crypto.hash(:sha256, text), case: :lower))
-
-        {:ok, nil} ->
-          Map.put(acc, twin, nil)
-
-        _ ->
-          acc
-      end
-    end)
-  end
-
-  # A deferred column's twin is the column whose sha_of names it.
-  defp sha_twin(table, col) do
-    Enum.find_value(table.cols, fn c ->
-      Map.get(c, :sha_of) == col.name and String.to_atom(c.name)
-    end)
-  end
+  # a source's host, an event's author. (Metric dates and keywords are the
+  # kernel's effects.)
+  defp derived(table, values, row, ctx), do: derive(values, table.name, row, ctx)
 
   defp derive(values, "applications", nil, _ctx), do: Map.put(values, :no, next_no())
 
@@ -1661,8 +1633,7 @@ defmodule Hireme.Sequencer do
     {%{state | rows: {state.rev, rows}}, rows}
   end
 
-  # The kernel's columns: never a server_only one (a deferred column's hash
-  # twin stays server-side; the stub already carries its first 8 bytes).
+  # The kernel's columns: never a server_only one.
   defp wire_cols(t, nil),
     do: Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil or &1.server_only))
 

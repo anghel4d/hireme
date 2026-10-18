@@ -134,7 +134,7 @@ defmodule Hireme.SequencerTest do
     assert row.opened_on == ~D[1897-01-01] and row.headcount_on == ~D[1899-06-30]
   end
 
-  test "an exact restatement of a long deferred text writes nothing, and its ACK is ledgered", %{
+  test "an exact restatement of a long text writes nothing, and its ACK is ledgered", %{
     account: a
   } do
     listing = String.duplicate("Rust systems, kernels and GPU runtimes. ", 400)
@@ -817,9 +817,6 @@ defmodule Hireme.SequencerTest do
       [row] = Repo.all(Hireme.Rows.Application)
       assert row.keywords_version == Hireme.Kernel.keywords_version()
       assert row.keywords not in [nil, ""]
-      # The kernel's realization stores the listing's hash too.
-      assert row.listing_sha ==
-               Base.encode16(:crypto.hash(:sha256, row.listing_raw), case: :lower)
     end
 
     test "a key's session opening and giving up the lease is audited", %{account: a, session: s} do
@@ -1111,7 +1108,7 @@ defmodule Hireme.SequencerTest do
       assert Repo.aggregate(Hireme.Rows.GymRep, :count) == 2
     end
 
-    test "texts travel whole in the BOOT, world and mail rows replicate, and a text keeps its hash twin",
+    test "texts travel whole in the BOOT, and world and mail rows replicate",
          %{account: a} do
       text = "Staff engineer, Rust. " |> String.duplicate(20)
 
@@ -1120,9 +1117,6 @@ defmodule Hireme.SequencerTest do
 
       {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "w.example", name: "W"}))
       {[contact], []} = run(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
-
-      assert Repo.get!(Hireme.Rows.Application, app.id).listing_sha ==
-               Base.encode16(:crypto.hash(:sha256, text), case: :lower)
 
       {:ok, %{frames: [boot]}} =
         Sequencer.subscribe(

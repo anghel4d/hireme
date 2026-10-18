@@ -30,14 +30,14 @@ function current(): TableDef {
 
 const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
 
-/** The columns a grid shows: declared, not secret, and no twin (a metric's `_on` shows inside its metric; a deferred text's `_sha` is only its fingerprint). */
-const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null && c.shaOf === null)
+/** The columns a grid shows: declared, not secret, and no twin (a metric's `_on` shows inside its metric). */
+const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
 
 /** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
 const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
 
-/** What find can order by: the node refuses deferred, text, json and bytes columns. */
-const sortable = (c: ColumnDef): boolean => !c.deferred && c.type !== "text" && c.type !== "json" && c.type !== "bytes"
+/** What find can order by: the node refuses text, json and bytes columns. */
+const sortable = (c: ColumnDef): boolean => c.type !== "text" && c.type !== "json" && c.type !== "bytes"
 
 /** A source's identity is fixed once written (the node refuses a change): its url, host, publisher, title and kind. */
 const FIXED: Partial<Record<string, readonly string[]>> = { sources: ["url", "host", "publisher", "title", "kind"] }
@@ -85,7 +85,7 @@ const BIG = new Intl.NumberFormat(undefined, { notation: "compact", maximumFract
 
 function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
-  if (c.deferred) {
+  if (c.type === "text") {
     const len = new TextEncoder().encode(String(x)).byteLength
     return html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${len.toLocaleString()} bytes</button>`
   }
@@ -249,7 +249,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "edit": {
       const c = t.cols.find((x) => x.name === col)
       if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
-      // A deferred cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
+      // A text cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
       return patch({ edit: `${id}:${col}`, editRev: Number(rowOf(t, id)?.rev ?? 0) })
     }
     case "cancel":
@@ -261,7 +261,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       const data = new FormData(form)
       const raw = String(data.get("value") ?? "")
       const source = String(data.get("source") ?? "")
-      return void put(t.name as TableName, { [col]: raw === "" ? null : (raw as Input) }, {
+      void put(t.name as TableName, { [col]: raw === "" ? null : (raw as Input) }, {
         id,
         ...(c.metric ? { asOf: String(data.get("as_of") ?? today()) } : {}),
         ...(source !== "" ? { source } : {}),
@@ -269,8 +269,9 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         ...(c.prose ? { expectRev: v().editRev } : {}),
       })
         .catch(failed)
-      // Predicted: the grid shows the write now; a refusal rolls it back and says why.
-      patch({ edit: "", text: null })
+      // Predicted: the grid shows the write now (a local refusal threw above and kept the editor); the
+      // sequencer's refusal rolls it back and says why.
+      return patch({ edit: "", text: null })
     }
     case "new":
       return patch({ edit: "new" })

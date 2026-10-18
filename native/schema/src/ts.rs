@@ -95,7 +95,7 @@ fn ts_type(s: &Schema, c: &Column) -> String {
 
 fn column_json(c: &Column) -> String {
     format!(
-        "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"flags\":{},\"required\":{},\"deferred\":{},\"private\":{},\"serverOnly\":{},\"humanOnly\":{},\"readonly\":{},\"unique\":{},\"natural\":{},\"metric\":{},\"metricOf\":{},\"shaOf\":{},\"prose\":{},\"implied\":{},\"ref\":{},\"enum\":{},\"default\":{}}}",
+        "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"flags\":{},\"required\":{},\"private\":{},\"serverOnly\":{},\"humanOnly\":{},\"readonly\":{},\"unique\":{},\"natural\":{},\"metric\":{},\"metricOf\":{},\"prose\":{},\"implied\":{},\"ref\":{},\"enum\":{},\"default\":{}}}",
         json_str(&c.name),
         c.id,
         json_str(c.ty.name()),
@@ -103,7 +103,6 @@ fn column_json(c: &Column) -> String {
         c.wire(),
         c.flags(),
         c.required,
-        c.deferred,
         c.private,
         c.server_only,
         c.human_only,
@@ -112,7 +111,6 @@ fn column_json(c: &Column) -> String {
         c.natural,
         c.metric,
         opt_str(c.metric_of.as_deref()),
-        opt_str(c.sha_of.as_deref()),
         c.prose,
         c.implied,
         opt_str(if c.ty == Type::Ref { c.target.as_deref() } else { None }),
@@ -149,9 +147,9 @@ pub fn emit(s: &Schema) -> String {
     let codes: Vec<String> = TYPES.iter().map(|(n, t)| format!("{n}: {}", t.code())).collect();
     w(&format!("export const TYPE_CODE = {{ {} }} as const;", codes.join(", ")));
     w(&format!(
-        "export const FLAG = {{ required: {}, deferred: {}, private: {}, serverOnly: {}, humanOnly: {}, readonly: {}, unique: {}, metric: {}, prose: {}, implied: {}, metricOn: {}, natural: {}, cascade: {}, shaOn: {}, loose: {} }} as const;",
-        flag::REQUIRED, flag::DEFERRED, flag::PRIVATE, flag::SERVER_ONLY, flag::HUMAN_ONLY, flag::READONLY,
-        flag::UNIQUE, flag::METRIC, flag::PROSE, flag::IMPLIED, flag::METRIC_ON, flag::NATURAL, flag::CASCADE, flag::SHA_ON, flag::LOOSE
+        "export const FLAG = {{ required: {}, private: {}, serverOnly: {}, humanOnly: {}, readonly: {}, unique: {}, metric: {}, prose: {}, implied: {}, metricOn: {}, natural: {}, cascade: {}, loose: {} }} as const;",
+        flag::REQUIRED, flag::PRIVATE, flag::SERVER_ONLY, flag::HUMAN_ONLY, flag::READONLY,
+        flag::UNIQUE, flag::METRIC, flag::PROSE, flag::IMPLIED, flag::METRIC_ON, flag::NATURAL, flag::CASCADE, flag::LOOSE
     ));
     let frames: Vec<String> = s.frames.iter().map(|f| format!("{}: {}", f.name, f.id)).collect();
     w(&format!("export const FRAME = {{ {} }} as const;", frames.join(", ")));
@@ -182,8 +180,8 @@ pub fn emit(s: &Schema) -> String {
 
     w("export interface ColumnDef {");
     w("  name: string; id: number; type: keyof typeof TYPE_CODE; typeCode: number; wire: number; flags: number;");
-    w("  required: boolean; deferred: boolean; private: boolean; serverOnly: boolean; humanOnly: boolean;");
-    w("  readonly: boolean; unique: boolean; natural: boolean; metric: boolean; metricOf: string | null; shaOf: string | null;");
+    w("  required: boolean; private: boolean; serverOnly: boolean; humanOnly: boolean;");
+    w("  readonly: boolean; unique: boolean; natural: boolean; metric: boolean; metricOf: string | null;");
     w("  prose: boolean; implied: boolean; ref: string | null; enum: string | null; default: string | null;");
     w("}");
     w("export interface KeyDef { cols: string[]; global: boolean; where: string | null; }");
