@@ -400,12 +400,26 @@ export interface Card {
   reason: string
 }
 
-export const card = (id: number): Card | null => (k ? resultJson<Card>(k.card(id)) : null)
-export const scoreboard = (): Record<string, unknown> | null => (k ? resultJson(k.scoreboard()) : null)
-export const application = (id: number): Record<string, unknown> | null => (k ? resultJson(k.application(id)) : null)
-export const lanes = (): Record<string, unknown> | null => (k ? resultJson(k.lanes()) : null)
+/**
+ * A kernel document, per version, beside the reads: drawn again with no row moved (a filter chip, a
+ * subtab, a fold, a form opening) it is not composed and parsed again. Lenses only read it.
+ */
+function memo<T>(key: string, make: () => T): T {
+  if (answered !== version) {
+    answers.clear()
+    answered = version
+  }
+  if (answers.has(key)) return answers.get(key) as T
+  const doc = make()
+  answers.set(key, doc)
+  return doc
+}
+export const card = (id: number): Card | null => (k ? memo(`card:${id}`, () => resultJson<Card>(k!.card(id))) : null)
+export const scoreboard = (): Record<string, unknown> | null => (k ? memo("scoreboard", () => resultJson(k!.scoreboard())) : null)
+export const application = (id: number): Record<string, unknown> | null => (k ? memo(`application:${id}`, () => resultJson(k!.application(id))) : null)
+export const lanes = (): Record<string, unknown> | null => (k ? memo("lanes", () => resultJson(k!.lanes())) : null)
 export const atlas = (preset: string): Record<string, unknown> | null =>
-  k ? resultJson(withBytes(ENC.encode(preset), (p, n) => k!.atlas(p, n))) : null
+  k ? memo(`atlas:${preset}`, () => resultJson(withBytes(ENC.encode(preset), (p, n) => k!.atlas(p, n)))) : null
 
 /** The ctx the kernel judges a browser write in: the operator, today. */
 function ctx(): Uint8Array {
