@@ -632,6 +632,11 @@ defmodule Hireme.Schema.Parser do
 
     for t <- model.tables do
       unless t.domain in domains, do: raise(ArgumentError, "#{t.name}: domain #{t.domain}")
+
+      # An account's rows are bounded in every table it owns.
+      if t.residency in [:resident, :server] and not t.global and t.cap == nil,
+        do: raise(ArgumentError, "#{t.name}: an account's table needs a cap")
+
       dupes(Enum.map(t.cols, & &1.name), "#{t.name} column")
       names = MapSet.new(t.cols, & &1.name)
 

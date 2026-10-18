@@ -17,3 +17,25 @@ defmodule Hireme.SchemaTest do
     end
   end
 end
+
+defmodule Hireme.SchemaCapTest do
+  # Every table an account owns is bounded by its declared cap.
+  use Hireme.WireCase, async: false
+
+  test "every stored table an account owns has a cap, and a write past it is refused cap", %{
+    account: a
+  } do
+    for t <- Schema.tables(),
+        t.residency in [:resident, :server],
+        not t.global,
+        do: assert(is_integer(t.cap) and t.cap > 0, t.name)
+
+    cap = Schema.table(:profiles).cap
+    ops = for i <- 1..cap, do: op(:put, :profiles, %{slug: "p#{i}", name: "P#{i}"})
+    {acks, []} = run(a.id, ops)
+    assert length(acks) == cap
+
+    {[], [nack]} = run(a.id, op(:put, :profiles, %{slug: "one-more", name: "One more"}))
+    assert nack.refusal == :cap
+  end
+end

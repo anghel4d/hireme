@@ -31,7 +31,8 @@
 #   unique <col>... [global] [where <w>]   per account unless `global`
 #   index <col> [desc]... [global] [where <w>]   per account (account_id leads,
 #                                    so a key never names it) unless `global`
-#   cap <n>                          most rows per account (`cap` refusal)
+#   cap <n>                          most rows per account (`cap` refusal); every
+#                                    stored table an account owns has one
 #   col <name> <type> [<target>] [! | ?] [= <default>] [flag]...
 #   metric <name> <u32|i64|f64> [flag]...   nullable; implies `<name>_on day ?`;
 #                                    a write needs `as_of` and makes a citation
@@ -160,8 +161,13 @@ table accounts system server global
   # Announcing audit events, bumped by Audit.record in the same write: the
   # account lens's cursor, one row read instead of a scan of the trail.
   col audit_rev i64 ! = 0 readonly
+  # Text bytes the account stores (str, text, json and deferred cells), kept
+  # by the sequencer in the write that changes them; past
+  # Security.account_text_bytes a write is refused `cap`.
+  col text_bytes i64 ! = 0 readonly
 
 table sessions system server
+  cap 10000
   index revoked_at
   col token_hash bytes ! server_only
   unique token_hash global
@@ -174,6 +180,7 @@ table sessions system server
   col user_agent str ?
 
 table identities system server
+  cap 100
   unique provider subject global
   col provider enum provider !
   col subject str !
@@ -191,6 +198,7 @@ table magic_links system server global
   col user_agent str ?
 
 table api_keys system server
+  cap 1000
   unique key_id global
   col key_id str !
   col name str !
@@ -204,6 +212,7 @@ table api_keys system server
   col revoked_at time ?
 
 table factors system server
+  cap 100
   index kind
   unique credential_id global where credential_id is not null
   col kind enum factor_kind !
@@ -223,6 +232,7 @@ table factors system server
   col disabled_at time ?
 
 table challenges system server
+  cap 10000
   index session_id
   col session_id ref sessions !
   col kind enum challenge_kind !
@@ -230,11 +240,13 @@ table challenges system server
   col expires_at time !
 
 table recovery_codes system server
+  cap 100
   col salt bytes ! server_only
   col code_hash bytes ! server_only
   col used_at time ?
 
 table audit system server append_only account_optional
+  cap 10000000
   index id desc
   col kind str !
   col ip str ?
@@ -244,6 +256,7 @@ table audit system server append_only account_optional
   col session_id ref sessions ?
 
 table outbox system server
+  cap 100000
   # The drain reads due notices across every account.
   index next_at global where sent_at is null
   col address str !
@@ -257,6 +270,7 @@ table outbox system server
 # A resent op_id answers its first verdict and writes nothing; rows age out
 # after 24 h.
 table op_ledger system server
+  cap 1000000
   # An op_id is the writer's own: two keys, or a key and the operator, may
   # pick the same one.
   unique writer op_id
@@ -275,6 +289,7 @@ table op_ledger system server
 
 # Hosts whose pages may source `culture` and ratings. Operator-owned.
 table trusted_hosts system server
+  cap 1000
   unique host
   col host str !
   col note text ?
@@ -282,6 +297,7 @@ table trusted_hosts system server
 # ---------------------------------------------------------------- corpus
 
 table profiles corpus resident
+  cap 100
   unique slug
   col slug str !
   col name str !
@@ -292,6 +308,7 @@ table profiles corpus resident
 
 # CV atoms; a null profile_id is shared by every profile.
 table items corpus resident
+  cap 10000
   unique key
   index profile_id kind
   # A profile's own items go with it; a shared item has no profile.
@@ -363,6 +380,7 @@ table applications desk resident
   command open_fire human_only
 
 table events desk resident append_only
+  cap 1000000
   index application_id id desc
   col application_id ref applications !
   col kind str !
@@ -372,6 +390,7 @@ table events desk resident append_only
   col op_id i64 ? readonly
 
 table batches desk resident
+  cap 10000
   unique code
   col code str !
   col ordinal u32 !
@@ -383,6 +402,7 @@ table batches desk resident
   col note text ?
 
 table cv_lineages desk resident
+  cap 50000
   unique corporation_id
   col corporation_id ref corporations !
   col generation u32 ! = 1 readonly
@@ -392,6 +412,7 @@ table cv_lineages desk resident
   command open_generation corporation_id
 
 table cv_overlays desk resident
+  cap 500000
   unique application_id item_id
   col application_id ref applications !
   col item_id ref items !
@@ -403,6 +424,7 @@ table cv_overlays desk resident
   col generation u32 ! = 1 readonly
 
 table settings desk resident singleton
+  cap 1
   col gym_target u32 ?
   col net_lane_url str ?
   # U+001F-joined ISO 3166-1 alpha-2 and ISO 639-1 codes.
@@ -550,6 +572,7 @@ table corporations world server
   prose culture
 
 table offices world server
+  cap 200000
   unique corporation_id place_id kind
   index place_id
   col corporation_id ref corporations !
@@ -559,6 +582,7 @@ table offices world server
   col opened_on day ?
 
 table sources world server
+  cap 200000
   natural url
   index host
   col url str !
@@ -627,6 +651,7 @@ table messages mail server
 # ---------------------------------------------------------------- lanes
 
 table gym_reps lanes resident
+  cap 100000
   index done_on
   col platform enum platform !
   col slug str !
@@ -640,6 +665,7 @@ table gym_reps lanes resident
   col note str ?
 
 table net_entries lanes resident
+  cap 100000
   index shipped_on
   col kind enum net_kind !
   col channel enum net_channel ! = other

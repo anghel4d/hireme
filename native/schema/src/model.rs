@@ -1069,6 +1069,10 @@ fn validate(s: &Schema) -> Result<(), Error> {
         if !s.domains.iter().any(|d| d.name == t.domain) {
             return fail(0, format!("{}: domain {}", t.name, t.domain));
         }
+        // An account's rows are bounded in every table it owns.
+        if t.residency.stored() && !t.global && t.cap.is_none() {
+            return fail(0, format!("{}: an account's table needs a cap", t.name));
+        }
         dupes(t.cols.iter().map(|c| c.name.as_str()), &format!("{} column", t.name))?;
         for c in &t.cols {
             if c.id >= AS_OF {

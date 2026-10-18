@@ -58,6 +58,7 @@ fn malformed_lines_are_refused_with_their_line_number() {
         with("table places world server", "  natural region where population = '5'"),
         with("table places world server", "  col n u32 ? deferred"),
         with("table places world server", "  col n u32 ? = 4294967295"),
+        format!("{SOURCE}\ntable probe_uncapped lanes server\n  col x str ?\n"),
         with("table places world server", "  index name global global"),
         with("table places world server", "  cap -1"),
         with("table places world server", "  col Bad str ?"),
