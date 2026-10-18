@@ -236,6 +236,11 @@ async fn main() {
             app.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"not a JSON-RPC request: an object with a string method is needed"}}));
             continue;
         }
+        // A response (result or error, no method) answers a request; hireme-mcp sends the client none,
+        // so there is nothing to match it to and nothing to answer.
+        if msg.get("method").is_none() {
+            continue;
+        }
         // A cancel written right behind its request must find it: requests register and cancels
         // apply here, in arrival order, before any handler task gets to run.
         if msg.get("id").is_none() && msg.get("method").and_then(Json::as_str) == Some("notifications/cancelled") {
