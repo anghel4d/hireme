@@ -243,28 +243,60 @@ pub fn high_comp(comp: &str) -> bool {
         }
         let v = n + frac;
         // A suffix letter counts only when it ends the token: "250k", not
-        // "300km"; "401k" is a retirement plan.
+        // "300km"; "401k" is a retirement plan. Every look around the
+        // number is a few bytes, byte-wise: no copy, no slicing.
         let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
-        let suffix = if i < b.len() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
+        let suffix = if i < b.len() && b[i].is_ascii_alphabetic() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
         let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
+        let skip_spaces = |mut j: usize| {
+            while j < b.len() && b[j] == b' ' {
+                j += 1;
+            }
+            j
+        };
+        let back_spaces = |mut j: usize| {
+            while j > 0 && b[j - 1] == b' ' {
+                j -= 1;
+            }
+            j
+        };
+        // `w` is at `j` as a whole word, case-insensitively.
+        let word_at = |j: usize, w: &[u8]| {
+            j + w.len() <= b.len() && b[j..j + w.len()].eq_ignore_ascii_case(w) && ends(j + w.len())
+        };
+        let word_before = |k: usize, w: &[u8]| {
+            k >= w.len() && b[k - w.len()..k].eq_ignore_ascii_case(w) && (k == w.len() || !b[k - w.len() - 1].is_ascii_alphanumeric())
+        };
         // Millions are pay only as money ("$1.2M", "USD 1.2M", "1.2M USD"),
         // not "5M users".
-        const CODES: [&str; 6] = ["usd", "eur", "gbp", "cad", "chf", "aud"];
-        let before = comp[..start].trim_end().to_ascii_lowercase();
-        // After the suffix letter (ASCII, so i + 1 is a char boundary).
-        let after = if suffix != 0 { comp[i + 1..].trim_start().to_ascii_lowercase() } else { String::new() };
-        let money = before.ends_with(['$', '€', '£'])
-            || CODES.iter().any(|c| before.ends_with(c))
-            || CODES.iter().any(|c| after.starts_with(c) && after[c.len()..].chars().next().is_none_or(|x| !x.is_alphanumeric()));
+        const CODES: [&[u8]; 6] = [b"usd", b"eur", b"gbp", b"cad", b"chf", b"aud"];
+        let k = back_spaces(start);
+        let sign_before = k > 0 && b[k - 1] == b'$' || b[..k].ends_with("€".as_bytes()) || b[..k].ends_with("£".as_bytes());
+        let after = skip_spaces(if suffix != 0 { i + 1 } else { i });
+        let sign_after = [b"$".as_slice(), "€".as_bytes(), "£".as_bytes()].iter().any(|c| b[after..].starts_with(c));
+        let money = sign_before || sign_after || CODES.iter().any(|c| word_before(k, c)) || CODES.iter().any(|c| word_at(after, c));
         // Retirement plans: 401(k), 403(b), 457(b), in any spacing.
-        let rest = comp[i..].trim_start().to_ascii_lowercase();
-        let plan = (v == 401.0 && (suffix == b'k' || rest.starts_with("(k)"))) || ((v == 403.0 || v == 457.0) && rest.starts_with("(b)"));
+        let paren = |letter: u8| {
+            let j = skip_spaces(i);
+            if j >= b.len() || b[j] != b'(' {
+                return false;
+            }
+            let j = skip_spaces(j + 1);
+            if j >= b.len() || b[j].to_ascii_lowercase() != letter {
+                return false;
+            }
+            let j = skip_spaces(j + 1);
+            j < b.len() && b[j] == b')'
+        };
+        let plan = (v == 401.0 && (suffix == b'k' || paren(b'k'))) || ((v == 403.0 || v == 457.0) && paren(b'b'));
         let value = match suffix {
             _ if plan => 0.0,
             b'k' => v * 1e3,
             b'm' if money => v * 1e6,
             b'm' => 0.0,
             _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
+            // A sign or unit glued on ("250¥", "30°") is the amount itself.
+            _ if i < b.len() && !b[i].is_ascii() && !b[skip_spaces(i)..].starts_with("\u{a0}".as_bytes()) => v,
             _ if (200.0..1_000.0).contains(&v) => v * 1e3,
             _ => v,
         };
@@ -375,11 +407,31 @@ mod tests {
     }
 
     #[test]
+    fn pay_reading_never_panics_and_stays_linear() {
+        let pieces = ["1", "25", "0", "k", "K", "m", "M", "$", "€", "£", "¥", "°", "\u{a0}", " ", "(", ")", "b", "usd", ".", ",", "é", "ü", "🙂", "401", "\u{308}"];
+        let mut r = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..20_000 {
+            let mut t = alloc::string::String::new();
+            for _ in 0..(r % 12) {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                t.push_str(pieces[(r % pieces.len() as u64) as usize]);
+            }
+            let _ = high_comp(&t);
+        }
+        let long = "1 ".repeat(50_000);
+        let t = std::time::Instant::now();
+        assert!(!high_comp(&long));
+        assert!(t.elapsed().as_millis() < 200);
+    }
+
+    #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut"] {
             assert!(!high_comp(no), "{no}");
         }
     }
