@@ -377,8 +377,8 @@ defmodule Hireme.Import do
   defp cell(account_id, %{type: :ref} = col, value, mode) do
     case resolve_ref(account_id, col.target, value, mode) do
       {:ok, id} -> {:ok, {col.id, Codec.cell_type(col), id}}
-      :none -> {:refused, :not_found, %{column: col.name, ref: value}}
-      :error -> {:refused, :type, %{column: col.name, value: value}}
+      :none -> {:refused, :not_found, %{column: col.name, ref: brief(value)}}
+      :error -> {:refused, :type, %{column: col.name, value: brief(value)}}
     end
   end
 
@@ -392,7 +392,7 @@ defmodule Hireme.Import do
   defp cast(%{type: :json} = col, value, :text) do
     case Jason.decode(value) do
       {:ok, v} -> {:ok, v}
-      _ -> {:refused, :type, %{column: col.name, value: value}}
+      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
     end
   end
 
@@ -400,15 +400,15 @@ defmodule Hireme.Import do
     case String.downcase(value) do
       v when v in ~w(true yes 1) -> {:ok, true}
       v when v in ~w(false no 0) -> {:ok, false}
-      _ -> {:refused, :type, %{column: col.name, value: value}}
+      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
     end
   end
 
   defp cast(col, value, _mode) do
     case Ecto.Type.cast(Schema.cast_type(col), value) do
-      {:ok, nil} -> {:refused, :type, %{column: col.name, value: value}}
+      {:ok, nil} -> {:refused, :type, %{column: col.name, value: brief(value)}}
       {:ok, v} -> in_range(col, v, value)
-      _ -> {:refused, :type, %{column: col.name, value: value}}
+      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
     end
   end
 
@@ -426,7 +426,7 @@ defmodule Hireme.Import do
   defp in_range(%{type: t} = col, v, value) when is_map_key(@ranges, t) do
     if v in Map.fetch!(@ranges, t),
       do: {:ok, v},
-      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
   end
 
   # A day is days since 1970-01-01 and a time unix seconds, both u32 on the
@@ -434,13 +434,13 @@ defmodule Hireme.Import do
   defp in_range(%{type: :day} = col, %Date{} = d, value) do
     if Date.diff(d, ~D[1970-01-01]) in @days,
       do: {:ok, d},
-      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
   end
 
   defp in_range(%{type: :time} = col, %DateTime{} = t, value) do
     if DateTime.to_unix(t) in @times,
       do: {:ok, t},
-      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
   end
 
   defp in_range(%{type: t} = col, v, value) when t in [:str, :text] and is_binary(v) do
@@ -597,7 +597,7 @@ defmodule Hireme.Import do
          true <- days in @days do
       {:ok, [{@as_of, 1, days}]}
     else
-      _ -> {:refused, :type, %{column: "as_of", value: as_of}}
+      _ -> {:refused, :type, %{column: "as_of", value: brief(as_of)}}
     end
   end
 

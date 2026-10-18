@@ -424,4 +424,27 @@ defmodule Hireme.ImportTest do
            ) ==
              ["One", "Two"]
   end
+
+  test "a refusal echoes a bad cell bounded, however long the cell", %{account: a} do
+    huge = String.duplicate("x", 3_000_000)
+
+    body =
+      Jason.encode!(%{
+        "as_of" => "2026-09-01",
+        "source" => "https://stats.example.org/huge",
+        "tables" => [
+          %{
+            "table" => "corporations",
+            "rows" => [
+              %{"domain" => "huge.example", "name" => "Huge", "headcount" => huge},
+              %{"domain" => "late.example", "name" => "Late", "as_of" => huge}
+            ]
+          }
+        ]
+      })
+
+    {:ok, %{refusals: refusals}} = Import.run(a.id, body, :json)
+    assert length(refusals) == 2
+    for r <- refusals, do: assert(byte_size(inspect(r)) < 1_000, inspect(r, limit: 5))
+  end
 end
