@@ -27,7 +27,7 @@ use crate::board::{Board, Dir, Filter};
 use crate::judge::{self, Ctx, EVal, Refusal};
 use crate::pipeline::Stage;
 use crate::rows::{Moved, Rows, Val, Write};
-use crate::{compose, Day};
+use crate::{compose, query, Day};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -49,6 +49,8 @@ pub struct Kernel {
     /// over any `clock` row.
     pinned: Option<Day>,
     stale: bool,
+    /// The session's grants, from its WELCOME: what `query` may read.
+    grants: query::Grants,
 }
 
 impl Kernel {
@@ -58,6 +60,16 @@ impl Kernel {
 
     pub fn rows(&self) -> &Rows {
         &self.rows
+    }
+
+    /// The session's masks, from its WELCOME, before its BOOT is ingested.
+    pub fn set_grants(&mut self, grants: query::Grants) {
+        self.grants = grants;
+    }
+
+    /// A read of the replica: find, get, text or history (`query`).
+    pub fn query(&self, req: &Json) -> Result<Json, Refusal> {
+        query::query(&self.rows, &self.grants, req)
     }
 
     pub fn set_today(&mut self, today: Day) {
@@ -546,6 +558,25 @@ mod exports {
         })
     }
 
+    /// The session's grants from its WELCOME (masks over the five
+    /// domains; `human` for the operator's browser session).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn set_grants(read_mask: u32, write_mask: u32, may_delete: u32, human: u32) {
+        let grants = query::Grants { human: human == 1, read_mask: read_mask as u8, write_mask: write_mask as u8, may_delete: may_delete == 1 };
+        K.with(|k| k.borrow_mut().set_grants(grants));
+    }
+
+    /// A read of the replica (`query::query`): the answer JSON (returns its
+    /// length), or the refusal JSON (returns minus its length minus one).
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn query(ptr: *const u8, len: usize) -> i32 {
+        let req = serde_json::from_slice(unsafe { input(ptr, len) }).unwrap_or(Json::Null);
+        K.with(|k| match k.borrow().query(&req) {
+            Ok(j) => put_json(&j),
+            Err(r) => -put_json(&refusal_json(&r)) - 1,
+        })
+    }
+
     /// Board ids (u32 LE) a JSON filter keeps, in order.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn view(ptr: *const u8, len: usize) -> i32 {
@@ -651,7 +682,7 @@ mod exports {
         })
     }
 
-    /// A column's storage kind: 1 u32, 2 str, 3 i64, 4 f64, 5 deferred,
+    /// A column's storage kind: 1 u32, 2 str, 3 i64, 4 f64,
     /// 7 list; 0 when absent.
     #[unsafe(no_mangle)]
     pub extern "C" fn col_kind(t: u32, c: u32) -> u32 {

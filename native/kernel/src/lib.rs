@@ -26,6 +26,7 @@ pub mod lanes;
 pub mod lexicon;
 pub mod org;
 pub mod pipeline;
+pub mod query;
 pub mod rows;
 pub mod score;
 pub mod text;
@@ -237,6 +238,54 @@ pub fn day_iso(d: Day) -> alloc::string::String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     alloc::format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// A `YYYY-MM-DD` date as a [`Day`], if it is one in 0000-01-01..=9999-12-31.
+pub fn iso_day(s: &str) -> Option<Day> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |r: core::ops::Range<usize>| s.get(r).filter(|p| p.bytes().all(|c| c.is_ascii_digit()))?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let len = *[31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31].get((m as usize).wrapping_sub(1))?;
+    if d < 1 || d > len {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil, counted from 0000-03-01.
+    let (y, mp) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Day::try_from(era * 146_097 + doe + 60).ok().filter(|d| (0..=LAST_DAY).contains(d))
+}
+
+/// An ISO-8601 time (`YYYY-MM-DDTHH:MM:SS`, optional fraction, `Z` or an
+/// offset, or none for UTC) as unix seconds.
+pub fn iso_time(s: &str) -> Option<i64> {
+    let day = iso_day(s.get(..10)?)? as i64;
+    let rest = s.get(10..)?.strip_prefix(['T', ' '])?;
+    let num = |p: &str| p.bytes().all(|c| c.is_ascii_digit()).then(|| p.parse::<i64>().ok()).flatten();
+    let (h, mi, sec) = (num(rest.get(0..2)?)?, num(rest.get(3..5)?)?, num(rest.get(6..8)?)?);
+    if rest.as_bytes().get(2) != Some(&b':') || rest.as_bytes().get(5) != Some(&b':') || h > 23 || mi > 59 || sec > 59 {
+        return None;
+    }
+    let mut tail = &rest[8..];
+    if let Some(f) = tail.strip_prefix('.') {
+        let n = f.bytes().take_while(u8::is_ascii_digit).count();
+        tail = &f[n..];
+    }
+    let offset = match tail {
+        "" | "Z" => 0,
+        t if t.len() == 6 && (t.starts_with('+') || t.starts_with('-')) && &t[3..4] == ":" => {
+            let o = num(&t[1..3])? * 3600 + num(&t[4..6])? * 60;
+            if t.starts_with('-') { -o } else { o }
+        }
+        _ => return None,
+    };
+    Some((day - UNIX_EPOCH_DAY as i64) * 86_400 + h * 3600 + mi * 60 + sec - offset)
 }
 
 /// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
