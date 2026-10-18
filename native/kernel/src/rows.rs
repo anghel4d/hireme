@@ -245,6 +245,17 @@ impl Data {
 
     /// Writes `v` at `slot`; a value of another kind than the column's is
     /// written as null.
+    /// A cell written by moving its value in: a frame's string, list or packed text is copied
+    /// once (decoding it), not twice. Anything else is `set`.
+    fn put(&mut self, slot: usize, v: Val) {
+        match (self, v) {
+            (Data::Str(d), Val::Str(x)) => d[slot] = x,
+            (Data::List(d), Val::List(x)) => d[slot] = x,
+            (Data::Packed(d), Val::Packed(x)) => d[slot] = x,
+            (d, v) => d.set(slot, &v),
+        }
+    }
+
     fn set(&mut self, slot: usize, v: &Val) {
         match (self, v) {
             (Data::U32(d), Val::U32(x)) => d[slot] = *x,
@@ -663,7 +674,7 @@ impl Rows {
                 let Some(kind) = kind_of_wire(c.ty) else { continue };
                 let Some(col) = t.column_mut(c.id, kind, true) else { continue };
                 for (i, &s) in slots.iter().enumerate() {
-                    col.data.set(s, &Val::from_wire(c.value(i)));
+                    col.data.put(s, Val::from_wire(c.value(i)));
                 }
             }
             if !replace {
