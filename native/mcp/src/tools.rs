@@ -516,12 +516,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 pub fn parse_day(s: &str) -> Option<u32> {
+    u32::try_from(parse_day_any(s)?).ok()
+}
+
+/// A real calendar day as days from 1970-01-01, negative before it: whether a day is well formed,
+/// apart from whether the wire can carry it.
+pub fn parse_day_any(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    let digits = |r: core::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
-    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || !digits(0..4) || !digits(5..7) || !digits(8..10) {
+    if s.len() != 10 || b[4] != b'-' || b[7] != b'-' || !s.bytes().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()) {
         return None;
     }
-    let y: i64 = s[0..4].parse().ok()?;
+    let y: i64 = s[..4].parse().ok()?;
     let m: u32 = s[5..7].parse().ok()?;
     let d: u32 = s[8..10].parse().ok()?;
     let max = match m {
@@ -534,13 +539,18 @@ pub fn parse_day(s: &str) -> Option<u32> {
     if d == 0 || d > max {
         return None;
     }
-    u32::try_from(days_from_civil(y, m, d)).ok()
+    Some(days_from_civil(y, m, d))
 }
 
 /// ISO-8601 UTC (`Z` or `+00:00`), seconds precision kept, fraction dropped.
 pub fn parse_time(s: &str) -> Option<u32> {
+    u32::try_from(parse_time_any(s)?).ok()
+}
+
+/// A well-formed UTC time as seconds from 1970-01-01, negative before it.
+pub fn parse_time_any(s: &str) -> Option<i64> {
     let (date, rest) = s.split_once(['T', ' '])?;
-    let days = parse_day(date)? as i64;
+    let days = parse_day_any(date)?;
     let rest = rest.strip_suffix('Z').or_else(|| rest.strip_suffix("+00:00"))?;
     let hms = rest.split('.').next()?;
     // Two digits each, no sign: "+1" or "-5" would otherwise parse as numbers.
@@ -552,7 +562,7 @@ pub fn parse_time(s: &str) -> Option<u32> {
     if h > 23 || mi > 59 || se > 60 || parts.next().is_some() {
         return None;
     }
-    u32::try_from(days * 86_400 + h * 3600 + mi * 60 + se).ok()
+    Some(days * 86_400 + h * 3600 + mi * 60 + se)
 }
 
 /// A typed cell for one column, or why the value does not fit.
@@ -575,8 +585,14 @@ pub fn cell(cat: &Catalog, c: &Col, v: &Json) -> Result<Cell, String> {
         "bool" => Cell::U32(v.as_bool().ok_or_else(|| want("true or false"))? as u32),
         "i64" => Cell::I64(v.as_i64().filter(|n| *n != i64::MIN).ok_or_else(|| want("a whole number"))?),
         "f64" => Cell::F64(v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| want("a number"))?),
-        "day" => Cell::U32(v.as_str().and_then(parse_day).ok_or_else(|| want("'YYYY-MM-DD'"))?),
-        "time" => Cell::U32(v.as_str().and_then(parse_time).ok_or_else(|| want("ISO-8601 UTC, e.g. 2026-10-18T09:30:00Z"))?),
+        // The wire counts days and seconds from 1970-01-01 in a u32: a real date outside that range is
+        // said to be out of range, not malformed.
+        "day" => Cell::U32(v.as_str().and_then(parse_day).ok_or_else(|| {
+            if v.as_str().is_some_and(|d| parse_day_any(d).is_some()) { want("a day from 1970-01-01 on") } else { want("'YYYY-MM-DD'") }
+        })?),
+        "time" => Cell::U32(v.as_str().and_then(parse_time).ok_or_else(|| {
+            if v.as_str().is_some_and(|t| parse_time_any(t).is_some()) { want("a time from 1970 to 2106") } else { want("ISO-8601 UTC, e.g. 2026-10-18T09:30:00Z") }
+        })?),
         "enum" => {
             let values = c.target.as_ref().and_then(|e| cat.enums.get(e)).cloned().unwrap_or_default();
             match v {
@@ -620,6 +636,12 @@ mod tests {
         assert_eq!(parse_time("2026-10-18T09:30:00.250+00:00"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
         assert_eq!(parse_time("2026-10-18T09:30:00+02:00"), None);
         assert_eq!(parse_day("2026-+1-18"), None);
+        // A real day before 1970 is well formed but past what the wire carries.
+        assert_eq!(parse_day("1897-01-01"), None);
+        assert!(parse_day_any("1897-01-01").is_some_and(|d| d < 0));
+        assert_eq!(parse_day_any("1897-02-30"), None);
+        assert_eq!(parse_time("1969-12-31T23:59:59Z"), None);
+        assert_eq!(parse_time_any("1969-12-31T23:59:59Z"), Some(-1));
         assert_eq!(parse_time("2026-10-18T-1:+5:00Z"), None);
         assert_eq!(parse_time("2026-10-18T09:30Z"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
     }
