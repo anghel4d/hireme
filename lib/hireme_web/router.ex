@@ -21,7 +21,7 @@ defmodule HiremeWeb.Router do
     plug :fetch_account
   end
 
-  # JSON for a signed-in page: the same cookie, the CSRF token as a header.
+  # JSON for a page: the same cookie, the CSRF token as a header.
   pipeline :api do
     plug :accepts, ["json"]
     plug :fetch_session
@@ -29,7 +29,6 @@ defmodule HiremeWeb.Router do
     plug :put_secure_browser_headers
     plug :security_headers
     plug :fetch_account
-    plug :require_account
   end
 
   pipeline :signed_in do
@@ -38,16 +37,6 @@ defmodule HiremeWeb.Router do
 
   # A session that owes its second factor may reach only the factor page.
   pipeline :factor do
-    plug :require_pending
-  end
-
-  pipeline :factor_json do
-    plug :accepts, ["json"]
-    plug :fetch_session
-    plug :protect_from_forgery
-    plug :put_secure_browser_headers
-    plug :security_headers
-    plug :fetch_account
     plug :require_pending
   end
 
@@ -76,7 +65,7 @@ defmodule HiremeWeb.Router do
   end
 
   scope "/sign-in/factor", HiremeWeb do
-    pipe_through :factor_json
+    pipe_through [:api, :factor]
 
     post "/webauthn", FactorController, :webauthn
     post "/webauthn/verify", FactorController, :webauthn_verify
@@ -100,7 +89,7 @@ defmodule HiremeWeb.Router do
   end
 
   scope "/api", HiremeWeb do
-    pipe_through :api
+    pipe_through [:api, :signed_in]
 
     post "/wire/ticket", PageController, :ticket
 

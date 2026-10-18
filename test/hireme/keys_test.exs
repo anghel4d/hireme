@@ -18,7 +18,7 @@ defmodule Hireme.KeysTest do
     {:ok, %{key: key, secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     assert {:ok, auth} = Keys.authenticate(secret, "10.0.0.1")
     assert auth.id == key.id and auth.account_id == s.account_id
-    assert {auth.read_mask, auth.write_mask, auth.may_delete} == {Keys.all(), 0, false}
+    assert {auth.read_mask, auth.write_mask, auth.may_delete} == {Hireme.Grants.all(), 0, false}
     refute Map.has_key?(auth, :secret_hash)
 
     Keys.revoke(key)

@@ -121,18 +121,7 @@ defmodule Hireme.Mail do
     now = Hireme.Store.now()
 
     rows =
-      for address <- addresses,
-          do: %{
-            account_id: account_id,
-            address: address,
-            kind: Atom.to_string(kind),
-            meta: meta,
-            attempts: 0,
-            next_at: now,
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
+      for address <- addresses, do: row(account_id, address, Atom.to_string(kind), meta, now, now)
 
     try do
       # Within the account's notice budget each notice goes as itself; past
@@ -240,17 +229,14 @@ defmodule Hireme.Mail do
         Hireme.Repo.insert_all(
           Outbox,
           [
-            %{
-              account_id: account_id,
-              address: address,
-              kind: "digest",
-              meta: %{count: 1, since: DateTime.to_iso8601(now)},
-              attempts: 0,
-              next_at: DateTime.add(now, div(window, 1000)),
-              rev: 1,
-              inserted_at: now,
-              updated_at: now
-            }
+            row(
+              account_id,
+              address,
+              "digest",
+              %{count: 1, since: DateTime.to_iso8601(now)},
+              DateTime.add(now, div(window, 1000)),
+              now
+            )
           ],
           skip_account: true
         )
@@ -267,6 +253,20 @@ defmodule Hireme.Mail do
         )
         |> Hireme.Repo.update!(skip_account: true)
     end
+  end
+
+  defp row(account_id, address, kind, meta, next_at, now) do
+    %{
+      account_id: account_id,
+      address: address,
+      kind: kind,
+      meta: meta,
+      attempts: 0,
+      next_at: next_at,
+      rev: 1,
+      inserted_at: now,
+      updated_at: now
+    }
   end
 
   defp post(to, subject, body) do
@@ -415,9 +415,7 @@ defmodule Hireme.Mail.Outbox do
           ]
       end
 
-    notice
-    |> Ecto.Changeset.change([attempts: notice.attempts + 1, rev: notice.rev + 1] ++ changes)
-    |> then(&Store.write(fn -> Repo.update!(&1, skip_account: true) end))
+    Store.update!(notice, [attempts: notice.attempts + 1] ++ changes, skip_account: true)
 
     if match?({:ok, _}, result), do: :sent, else: :failed
   end

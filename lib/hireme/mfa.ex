@@ -210,15 +210,15 @@ defmodule Hireme.Mfa do
   defp spend_step(%Factor{id: id}, step) do
     now = Store.now()
 
-    Store.write(fn ->
-      Repo.update_all(
-        from(f in Factor,
-          where: f.id == ^id and (is_nil(f.totp_last_step) or f.totp_last_step < ^step)
-        ),
-        set: [totp_last_step: step, last_used_at: now, consecutive_failures: 0, updated_at: now],
-        inc: [rev: 1]
-      )
-    end)
+    Store.bump(
+      from(f in Factor,
+        where: f.id == ^id and (is_nil(f.totp_last_step) or f.totp_last_step < ^step)
+      ),
+      totp_last_step: step,
+      last_used_at: now,
+      consecutive_failures: 0,
+      updated_at: now
+    )
   end
 
   ## WebAuthn
@@ -290,7 +290,7 @@ defmodule Hireme.Mfa do
            %Factor{} = factor <-
              Enum.find(keys, &(&1.credential_id == credential_id)) || {:error, :assertion},
            :ok <- counter_advanced(factor, data.sign_count, meta, session) do
-        update!(factor,
+        Store.update!(factor,
           sign_count: data.sign_count,
           last_used_at: Store.now(),
           consecutive_failures: 0
@@ -391,15 +391,11 @@ defmodule Hireme.Mfa do
     end)
   end
 
-  defp spend_code(%RecoveryCode{id: id}) do
-    Store.write(fn ->
-      Repo.update_all(
-        from(c in RecoveryCode, where: c.id == ^id and is_nil(c.used_at)),
-        set: [used_at: Store.now()],
-        inc: [rev: 1]
+  defp spend_code(%RecoveryCode{id: id}),
+    do:
+      Store.bump(from(c in RecoveryCode, where: c.id == ^id and is_nil(c.used_at)),
+        used_at: Store.now()
       )
-    end)
-  end
 
   ## Changing the set
 
@@ -462,22 +458,30 @@ defmodule Hireme.Mfa do
   defp counter_advanced(%Factor{sign_count: old}, new, _meta, _session) when new > old, do: :ok
 
   defp counter_advanced(%Factor{} = factor, new, meta, session) do
-    update!(factor, disabled_at: Store.now())
-    Audit.factors(factor.account_id)
+    Store.update!(factor, disabled_at: Store.now())
 
-    Audit.record(
+    disabled(
+      factor,
       :factor_clone_suspected,
-      %{factor_id: factor.id, stored: factor.sign_count, presented: new},
-      ctx(meta, session)
+      %{stored: factor.sign_count, presented: new},
+      :clone,
+      meta,
+      session
     )
 
-    Accounts.notify(factor.account_id, :authenticator_disabled, %{
-      kind: :webauthn,
-      name: factor.name,
-      reason: :clone
-    })
-
     {:error, :clone}
+  end
+
+  # A factor just disabled: the trail row, and the owner told.
+  defp disabled(factor, event, about, reason, meta, session) do
+    Audit.factors(factor.account_id)
+    Audit.record(event, Map.put(about, :factor_id, factor.id), ctx(meta, session))
+
+    Accounts.notify(factor.account_id, :authenticator_disabled, %{
+      kind: factor.kind,
+      name: factor.name,
+      reason: reason
+    })
   end
 
   # The declared most factors an account holds, disabled ones included.
@@ -507,35 +511,19 @@ defmodule Hireme.Mfa do
         )
       end)
 
+      # Locking a factor disables it: a domain write, so its rev moves.
       {n, _} =
-        Store.write(fn ->
-          Repo.update_all(
-            from(f in Factor,
-              where:
-                f.id == ^factor.id and is_nil(f.disabled_at) and
-                  f.consecutive_failures >= ^Security.lockout_failures()
-            ),
-            set: [disabled_at: now],
-            # Locking a factor disables it: a domain write.
-            inc: [rev: 1]
-          )
-        end)
-
-      if n == 1 do
-        Audit.factors(factor.account_id)
-
-        Audit.record(
-          :factor_locked,
-          %{factor_id: factor.id, kind: factor.kind},
-          ctx(meta, session)
+        Store.bump(
+          from(f in Factor,
+            where:
+              f.id == ^factor.id and is_nil(f.disabled_at) and
+                f.consecutive_failures >= ^Security.lockout_failures()
+          ),
+          disabled_at: now
         )
 
-        Accounts.notify(factor.account_id, :authenticator_disabled, %{
-          kind: factor.kind,
-          name: factor.name,
-          reason: :failures
-        })
-      end
+      if n == 1,
+        do: disabled(factor, :factor_locked, %{kind: factor.kind}, :failures, meta, session)
     end
 
     Audit.record(:factor_failed, %{kind: kind}, ctx(meta, session))
@@ -635,12 +623,6 @@ defmodule Hireme.Mfa do
          :ok <- spend_challenge(challenge) do
       {:ok, term}
     end
-  end
-
-  defp update!(row, changes) do
-    row
-    |> Ecto.Changeset.change([{:rev, row.rev + 1} | changes])
-    |> then(&Store.write(fn -> Repo.update!(&1) end))
   end
 
   defp random_code do

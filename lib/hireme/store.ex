@@ -4,8 +4,8 @@ defmodule Hireme.Store do
 
   SQLite has one writer, and a connection that finds it taken backs off
   while another retakes it, so under load writers starve each other. Every
-  write in this VM therefore takes the lock here first (`write/1,2`,
-  `transaction/1`), granted in the order asked; a holder that dies or
+  write in this VM therefore takes the lock here first (`write/1`,
+  `bump/3`, `update!/3`, `transaction/1`), granted in the order asked; a holder that dies or
   raises frees it. A write inside a write runs in place. Writers from
   another VM (a release RPC) still meet SQLite's own lock, which the
   connection's busy timeout (`Hireme.Repo`) waits out.
@@ -16,7 +16,7 @@ defmodule Hireme.Store do
   use GenServer
   alias Hireme.Repo
 
-  @doc "Run `fun` (or `fun.(arg)`) holding the writer lock, as one turn."
+  @doc "Run `fun` holding the writer lock, as one turn."
   @spec write((-> result)) :: result when result: term()
   def write(fun) do
     if Process.put(__MODULE__, true) do
@@ -32,8 +32,18 @@ defmodule Hireme.Store do
     end
   end
 
-  @spec write(arg, (arg -> result)) :: result when arg: term(), result: term()
-  def write(arg, fun), do: write(fn -> fun.(arg) end)
+  @doc "Update the rows `query` names and bump their rev, under the writer lock."
+  @spec bump(Ecto.Query.t(), keyword(), keyword()) :: {non_neg_integer(), term()}
+  def bump(query, set, opts \\ []),
+    do: write(fn -> Repo.update_all(query, [set: set, inc: [rev: 1]], opts) end)
+
+  @doc "Change `row` and bump its rev, under the writer lock."
+  @spec update!(struct(), keyword(), keyword()) :: struct()
+  def update!(row, changes, opts \\ []) do
+    row
+    |> Ecto.Changeset.change([{:rev, row.rev + 1} | changes])
+    |> then(&write(fn -> Repo.update!(&1, opts) end))
+  end
 
   @doc """
   Run `fun` in one `BEGIN IMMEDIATE` transaction under the writer lock:

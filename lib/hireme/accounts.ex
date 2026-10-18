@@ -68,13 +68,11 @@ defmodule Hireme.Accounts do
   @doc "Suspend or reinstate. Suspension ends every session, key use and lease at once."
   @spec set_status(pos_integer(), :active | :suspended, meta()) :: :ok
   def set_status(account_id, status, meta \\ %{}) when status in [:active, :suspended] do
-    Store.write(fn ->
-      Repo.update_all(
-        from(a in Account, where: a.id == ^account_id),
-        [set: [status: status, updated_at: Store.now()], inc: [rev: 1]],
-        skip_account: true
-      )
-    end)
+    Store.bump(
+      from(a in Account, where: a.id == ^account_id),
+      [status: status, updated_at: Store.now()],
+      skip_account: true
+    )
 
     Audit.record(:"account_#{status}", %{}, Map.put(meta, :account_id, account_id))
     if status == :suspended, do: Audit.bye(account_id, {:account, :suspended})
@@ -101,39 +99,41 @@ defmodule Hireme.Accounts do
   # At the declared cap, the oldest ended sessions (revoked, expired, idle)
   # go to make room; only an account whose every session is live is refused.
   defp room_for_session(account_id, now) do
-    cap = Hireme.Schema.table(:sessions).cap
+    {need, ended} = need(account_id, now)
 
-    count =
-      Repo.aggregate(from(s in Session, where: s.account_id == ^account_id), :count,
-        skip_account: true
-      )
-
-    if count < cap do
+    if need <= 0 do
       true
     else
-      idle = DateTime.add(now, -Security.session_idle())
-
-      ended =
-        Repo.all(
-          from(s in Session,
-            where:
-              s.account_id == ^account_id and
-                (not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle),
-            order_by: [asc: s.last_seen_at],
-            limit: ^(count - cap + 1),
-            select: s.id
-          ),
+      ids =
+        Repo.all(from(s in ended, order_by: [asc: s.last_seen_at], limit: ^need, select: s.id),
           skip_account: true
         )
 
-      if length(ended) == count - cap + 1 do
+      if length(ids) == need do
         # In batches: one IN list past SQLite's variable limit would raise.
-        for ids <- Enum.chunk_every(ended, 500),
+        for ids <- Enum.chunk_every(ids, 500),
             do: Repo.delete_all(from(s in Session, where: s.id in ^ids), skip_account: true)
 
         true
       end
     end
+  end
+
+  # Room for one more session is the cap, or enough ended sessions to bring
+  # the count under it: how many must go, and the query of those that may.
+  defp need(account_id, now) do
+    idle = DateTime.add(now, -Security.session_idle())
+    all = from(s in Session, where: s.account_id == ^account_id)
+
+    need =
+      Repo.aggregate(all, :count, skip_account: true) - Hireme.Schema.table(:sessions).cap + 1
+
+    ended =
+      from(s in all,
+        where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
+      )
+
+    {need, ended}
   end
 
   defp open_session(account, token, now, meta) do
@@ -175,12 +175,15 @@ defmodule Hireme.Accounts do
     end
   end
 
-  defp by_token(hash) do
+  defp by_token(hash), do: pair(dynamic([s], s.token_hash == ^hash))
+
+  # A session with its account.
+  defp pair(where) do
     Repo.one(
       from(s in Session,
         join: a in Account,
         on: a.id == s.account_id,
-        where: s.token_hash == ^hash,
+        where: ^where,
         select: {s, a}
       ),
       skip_account: true
@@ -194,13 +197,13 @@ defmodule Hireme.Accounts do
 
   defp touch(%Session{} = s, now) do
     if DateTime.diff(now, s.last_seen_at) >= 60,
-      do: update!(s, last_seen_at: now),
+      do: Store.update!(s, [last_seen_at: now], skip_account: true),
       else: s
   end
 
   @doc "A second factor was just presented on this session."
   @spec mark_mfa(Session.t()) :: Session.t()
-  def mark_mfa(%Session{} = s), do: update!(s, mfa_at: Store.now())
+  def mark_mfa(%Session{} = s), do: Store.update!(s, [mfa_at: Store.now()], skip_account: true)
 
   @doc "The account's open sessions, most recently seen first."
   @spec sessions(pos_integer()) :: [Session.t()]
@@ -221,15 +224,13 @@ defmodule Hireme.Accounts do
   @spec revoke_session(pos_integer(), pos_integer(), meta()) :: :ok | {:error, :not_found}
   def revoke_session(account_id, session_id, meta \\ %{}) do
     {n, _} =
-      Store.write(fn ->
-        Repo.update_all(
-          from(s in Session,
-            where: s.id == ^session_id and s.account_id == ^account_id and is_nil(s.revoked_at)
-          ),
-          [set: [revoked_at: Store.now(), updated_at: Store.now()], inc: [rev: 1]],
-          skip_account: true
-        )
-      end)
+      Store.bump(
+        from(s in Session,
+          where: s.id == ^session_id and s.account_id == ^account_id and is_nil(s.revoked_at)
+        ),
+        [revoked_at: Store.now(), updated_at: Store.now()],
+        skip_account: true
+      )
 
     if n == 1 do
       Audit.record(
@@ -330,16 +331,7 @@ defmodule Hireme.Accounts do
   defp read_live(session_id) do
     now = Store.now()
 
-    with {%Session{} = s, %Account{} = a} <-
-           Repo.one(
-             from(s in Session,
-               join: a in Account,
-               on: a.id == s.account_id,
-               where: s.id == ^session_id,
-               select: {s, a}
-             ),
-             skip_account: true
-           ),
+    with {%Session{} = s, %Account{} = a} <- pair(dynamic([s], s.id == ^session_id)),
          true <- live?(s, now) and active?(a),
          # A session that owes its second factor (one was enrolled since it
          # signed in) may hold no wire, as it may mint no ticket.
@@ -445,13 +437,11 @@ defmodule Hireme.Accounts do
 
   # Single use under concurrency: the row is taken only while still unused.
   defp burn(%MagicLink{id: id}, now) do
-    Store.write(fn ->
-      Repo.update_all(
-        from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
-        [set: [used_at: now, updated_at: now], inc: [rev: 1]],
-        skip_account: true
-      )
-    end)
+    Store.bump(
+      from(l in MagicLink, where: l.id == ^id and is_nil(l.used_at)),
+      [used_at: now, updated_at: now],
+      skip_account: true
+    )
   end
 
   @doc """
@@ -516,20 +506,7 @@ defmodule Hireme.Accounts do
         true
 
       %Identity{account_id: id} ->
-        now = Store.now()
-        idle = DateTime.add(now, -Security.session_idle())
-        all = from(s in Session, where: s.account_id == ^id)
-
-        # The same arithmetic as eviction: room for one more is the cap, or
-        # enough ended sessions to bring the count under it.
-        need =
-          Repo.aggregate(all, :count, skip_account: true) - Hireme.Schema.table(:sessions).cap + 1
-
-        ended =
-          from(s in all,
-            where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
-          )
-
+        {need, ended} = need(id, Store.now())
         need <= 0 or Repo.aggregate(ended, :count, skip_account: true) >= need
     end
   end
@@ -686,16 +663,14 @@ defmodule Hireme.Accounts do
 
   defp touch_identity(%Identity{} = identity, claim),
     do:
-      update!(identity,
-        display: Security.clip(Map.get(claim, :display, identity.display)),
-        verified_at: Store.now()
+      Store.update!(
+        identity,
+        [
+          display: Security.clip(Map.get(claim, :display, identity.display)),
+          verified_at: Store.now()
+        ],
+        skip_account: true
       )
-
-  defp update!(row, changes) do
-    row
-    |> Ecto.Changeset.change([{:rev, row.rev + 1} | changes])
-    |> then(&Store.write(fn -> Repo.update!(&1, skip_account: true) end))
-  end
 
   # Blank is NULL, never '': no column holds an empty string.
   defp text(value, max) do

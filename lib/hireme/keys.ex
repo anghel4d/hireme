@@ -60,10 +60,6 @@ defmodule Hireme.Keys do
   @spec domains() :: [{atom(), pos_integer()}]
   def domains, do: for(d <- @domains, do: {d, Hireme.Schema.domain_bit(d)})
 
-  @doc "Every domain's bit."
-  @spec all() :: 0..31
-  def all, do: Hireme.Grants.all()
-
   @doc "A preset's masks (`Hireme.Grants` owns them). `may_delete` is never part of a preset; it is granted on its own."
   @spec preset(:read_only | :write_only | :read_write) :: masks()
   def preset(name) do
@@ -118,8 +114,7 @@ defmodule Hireme.Keys do
         })
 
       with {:ok, key} <- insert_under_cap(session.account_id, row) do
-        about = %{key_id: key.id, name: name, preset: preset_of(key)}
-        Audit.record(:api_key_created, about, on_key(ctx(meta, session), key))
+        trail(:api_key_created, key, %{preset: preset_of(key)}, ctx(meta, session))
         Accounts.notify(session.account_id, :api_key_created, %{name: name})
         {:ok, %{key: key, secret: body <> Security.checksum(body)}}
       end
@@ -173,19 +168,15 @@ defmodule Hireme.Keys do
          true <- masks != Map.take(key, [:read_mask, :write_mask, :may_delete]) || {:ok, key},
          widened = widens?(key, masks),
          :ok <- if(widened, do: fresh(session), else: :ok) do
-      key =
-        key
-        |> Ecto.Changeset.change(Map.put(masks, :rev, key.rev + 1))
-        |> then(&Store.write(fn -> Repo.update!(&1) end))
+      key = Store.update!(key, Map.to_list(masks))
 
-      about = %{
-        key_id: key.id,
-        name: key.name,
-        preset: preset_of(key),
-        may_delete: key.may_delete
-      }
+      trail(
+        :api_key_changed,
+        key,
+        %{preset: preset_of(key), may_delete: key.may_delete},
+        ctx(meta, session)
+      )
 
-      Audit.record(:api_key_changed, about, on_key(ctx(meta, session), key))
       if widened, do: Accounts.notify(key.account_id, :api_key_widened, %{name: key.name})
       Audit.bye(key.account_id, {{:key, key.id}, :grants})
       {:ok, key}
@@ -217,17 +208,8 @@ defmodule Hireme.Keys do
   end
 
   defp rename!(key, name, meta) do
-    key =
-      key
-      |> Ecto.Changeset.change(name: name, rev: key.rev + 1)
-      |> then(&Store.write(fn -> Repo.update!(&1) end))
-
-    Audit.record(
-      :api_key_renamed,
-      %{key_id: key.id, name: name},
-      on_key(Map.put(meta, :account_id, key.account_id), key)
-    )
-
+    key = Store.update!(key, name: name)
+    trail(:api_key_renamed, key, %{}, Map.put(meta, :account_id, key.account_id))
     {:ok, key}
   end
 
@@ -247,20 +229,14 @@ defmodule Hireme.Keys do
 
       true ->
         {n, _} =
-          Store.write(fn ->
-            Repo.update_all(
-              from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
-              [set: [paused_at: nil, updated_at: Store.now()], inc: [rev: 1]],
-              skip_account: true
-            )
-          end)
+          Store.bump(
+            from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
+            [paused_at: nil, updated_at: Store.now()],
+            skip_account: true
+          )
 
         if n == 1 do
-          Audit.record(
-            :key_resumed,
-            %{key_id: key.id, name: key.name},
-            on_key(Map.put(meta, :account_id, key.account_id), key)
-          )
+          trail(:key_resumed, key, %{}, Map.put(meta, :account_id, key.account_id))
 
           # The sequencer holds paused keys in memory; this lifts its hold.
           Phoenix.PubSub.broadcast(
@@ -284,20 +260,14 @@ defmodule Hireme.Keys do
     # Revoked only if still live: a second revoke, or one from a stale
     # struct, changes nothing and announces nothing.
     {n, _} =
-      Store.write(fn ->
-        Repo.update_all(
-          from(k in Key, where: k.id == ^key.id and is_nil(k.revoked_at)),
-          [set: [revoked_at: now, paused_at: nil, updated_at: now], inc: [rev: 1]],
-          skip_account: true
-        )
-      end)
+      Store.bump(
+        from(k in Key, where: k.id == ^key.id and is_nil(k.revoked_at)),
+        [revoked_at: now, paused_at: nil, updated_at: now],
+        skip_account: true
+      )
 
     if n == 1 do
-      Audit.record(
-        :api_key_revoked,
-        %{key_id: key.id, name: key.name},
-        on_key(Map.put(meta, :account_id, key.account_id), key)
-      )
+      trail(:api_key_revoked, key, %{}, Map.put(meta, :account_id, key.account_id))
 
       Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name})
       Audit.bye(key.account_id, {{:key, key.id}, :revoked})
@@ -358,7 +328,7 @@ defmodule Hireme.Keys do
     do: is_nil(revoked) and (is_nil(expires) or DateTime.compare(Store.now(), expires) == :lt)
 
   defp masks(%{read_mask: r, write_mask: w} = m) when r in 0..31 and w in 0..31 do
-    all = all()
+    all = Hireme.Grants.all()
     d = Map.get(m, :may_delete, false)
 
     if Bitwise.band(r, Bitwise.bnot(all)) == 0 and Bitwise.band(w, Bitwise.bnot(all)) == 0 and
@@ -403,6 +373,10 @@ defmodule Hireme.Keys do
   defp ctx(meta, %Session{} = s),
     do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
 
-  # A key's own lifecycle row names that key, so the trail's key tag shows it.
-  defp on_key(context, key), do: Map.put(context, :key_id, key.id)
+  # A key's own lifecycle row names that key (its id and name in the meta,
+  # its id as the row's key tag).
+  defp trail(kind, key, about, context) do
+    about = Map.merge(%{key_id: key.id, name: key.name}, about)
+    Audit.record(kind, about, Map.put(context, :key_id, key.id))
+  end
 end

@@ -7,11 +7,12 @@ defmodule Hireme.Application do
   """
 
   use Application
+  alias Hireme.Audit.Coalescer
 
   @impl true
   def start(_type, _args) do
     # The trail's coalesced counts outlive the process that flushes them.
-    Hireme.Audit.Coalescer.table()
+    Coalescer.table()
 
     children =
       [
@@ -20,7 +21,7 @@ defmodule Hireme.Application do
         {Phoenix.PubSub, name: Hireme.PubSub},
         Hireme.RateLimit,
         Hireme.Accounts.Tickets,
-        Hireme.Audit.Coalescer,
+        Coalescer,
         Hireme.Sequencer.Supervisor,
         # Applies the baseline and pending additive files before any request,
         # then keeps the daily backup.
