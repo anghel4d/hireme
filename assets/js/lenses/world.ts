@@ -9,7 +9,7 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
-import { Refused, put, rpc, table, today, values, type Input } from "../kernel.ts"
+import { Refused, put, rpc, spliced, table, today, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { go, model, notice, query, set, type WorldView } from "../state.ts"
 
@@ -67,7 +67,7 @@ async function reread(): Promise<void> {
   if (q !== "" && search) params.where = { [search]: { prefix: q } }
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    if (fetchKey() === key) patch({ rows: have > 500 ? [...r.rows, ...v().rows.slice(r.rows.length)] : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
+    if (fetchKey() === key) patch({ rows: have > 500 ? spliced(r.rows, v().rows) : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
   } catch {
     // The next advance tries again.
   }

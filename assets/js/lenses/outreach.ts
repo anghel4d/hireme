@@ -6,7 +6,7 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { Refused, put, rpc, values, type Input } from "../kernel.ts"
+import { Refused, put, rpc, spliced, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { model, notice, query, set, type OutreachView } from "../state.ts"
 
@@ -64,7 +64,7 @@ async function reread(): Promise<void> {
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", listParams(Math.min(500, Math.max(PAGE, have))))
     if (me !== fetching || listKey() !== key || v().key !== key) return
-    patch({ contacts: have > 500 ? [...r.rows, ...v().contacts.slice(r.rows.length)] : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
+    patch({ contacts: have > 500 ? spliced(r.rows, v().contacts) : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
   } catch {
     // The next advance tries again.
   }
