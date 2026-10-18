@@ -613,16 +613,15 @@ fn param(token: &str, line: usize) -> Result<RawParam, Error> {
 
 // A deferred column travels as its length and hash, so its hash is stored
 // beside it: the readonly `<name>_sha` (a trailing `_raw` dropped, so
-// listing_raw's is listing_sha), as visible as the column.
+// listing_raw's is listing_sha). It stays on the server, which builds the
+// stub's 8 bytes from it; no client needs the 64 hex characters.
 fn push_with_sha(t: &mut RawTable, col: Column) {
     let twin = col.deferred.then(|| {
         let stem = col.name.strip_suffix("_raw").unwrap_or(&col.name);
         let mut twin = Column::blank(&format!("{stem}_sha"), Type::Str);
         twin.sha_of = Some(col.name.clone());
         twin.readonly = true;
-        twin.private = col.private;
-        twin.server_only = col.server_only;
-        twin.human_only = col.human_only;
+        twin.server_only = true;
         twin
     });
     t.cols.push(col);

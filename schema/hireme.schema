@@ -42,8 +42,9 @@
 #
 # Types: id ref(<table>) enum(<enum>) bool u8 u32 i64 f64 day time str text json bytes
 # Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (BOOT/PATCH carry
-#        length + hash, `RPC text` the bytes; implies the readonly `<name>_sha`, its
-#        hex SHA-256, a trailing `_raw` dropped: listing_raw's is listing_sha)
+#        length + hash, `RPC text` the bytes; implies the readonly, server_only
+#        `<name>_sha`, its hex SHA-256, a trailing `_raw` dropped: listing_raw's
+#        is listing_sha)
 #        private (browser sessions only, never a key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)   cascade (a nullable ref whose row is deleted

@@ -278,15 +278,14 @@ defmodule Hireme.Schema.Parser do
 
   # A deferred column travels as its length and hash, so its hash is stored
   # beside it: the readonly `<name>_sha` (a trailing `_raw` dropped, so
-  # listing_raw's is listing_sha), as visible as the column.
+  # listing_raw's is listing_sha). It stays on the server, which builds the
+  # stub's 8 bytes from it; no client needs the 64 hex characters.
   defp with_sha(%{deferred: true} = col) do
     twin = %{
       blank(String.replace_suffix(col.name, "_raw", "") <> "_sha", :str)
       | sha_of: col.name,
         readonly: true,
-        private: col.private,
-        server_only: col.server_only,
-        human_only: col.human_only
+        server_only: true
     }
 
     [col, twin]

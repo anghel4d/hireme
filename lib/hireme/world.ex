@@ -17,8 +17,9 @@ defmodule Hireme.World do
 
   Paging is by keyset: `find` orders by one column then `id`, nulls last,
   and hands back an opaque `next` cursor that resumes after the last row.
-  Deferred text is not inlined: `find` gives its byte length, `get` its
-  length and the first 8 bytes of its SHA-256 (hex), and `text` the bytes.
+  Deferred text is not inlined: `find` and `get` give its byte length and
+  the first 8 bytes (hex) of its SHA-256, read from the column's stored
+  `_sha` twin, and `text` the bytes.
   """
 
   import Ecto.Query
@@ -191,7 +192,7 @@ defmodule Hireme.World do
         ids = Enum.map(keys, &elem(&1, 0))
 
         by_id =
-          from(r in row, where: r.id in ^ids, select: ^select_map(cols, :length))
+          from(r in row, where: r.id in ^ids, select: ^select_map(table, cols))
           |> Repo.all()
           |> Map.new(&{&1.id, &1})
 
@@ -226,12 +227,12 @@ defmodule Hireme.World do
          {:ok, where} <- identity(grants, table, params) do
       query =
         from(r in Schema.row(table.name), where: ^where, limit: 1)
-        |> select(^select_map(cols, :text))
+        |> select(^select_map(table, cols))
 
       run(account_id, fn ->
         case Repo.one(query) do
           nil -> {:error, :not_found, %{table: table.name}}
-          row -> {:ok, %{"row" => out(row, cols, :digest)}}
+          row -> {:ok, %{"row" => out(row, cols)}}
         end
       end)
     end
@@ -731,36 +732,49 @@ defmodule Hireme.World do
 
   # ------------------------------------------------------------------ rows out
 
-  # Deferred columns come back as their byte length (`find`) or their text
-  # (`get`, digested before it leaves); the order column is always selected
-  # so a cursor can be built from the last row.
-  defp select_map(cols, deferred) do
+  # A deferred column comes back as its byte length and the first 8 bytes
+  # (hex) of its stored hash twin: no text is read to answer a find or a
+  # get. The order column is always selected so a cursor can be built from
+  # the last row.
+  defp select_map(table, cols) do
     Enum.reduce(cols, %{}, fn col, acc ->
       f = String.to_atom(col.name)
 
-      value =
-        if col.deferred and deferred == :length,
-          do: dynamic([r], fragment("length(CAST(? AS BLOB))", field(r, ^f))),
-          else: dynamic([r], field(r, ^f))
+      if col.deferred do
+        twin = Enum.find(table.cols, &(&1.sha_of == col.name))
 
-      Map.put(acc, f, value)
+        acc
+        |> Map.put(f, dynamic([r], fragment("length(CAST(? AS BLOB))", field(r, ^f))))
+        |> then(
+          &if(twin,
+            do: Map.put(&1, sha_key(col), dynamic([r], field(r, ^String.to_atom(twin.name)))),
+            else: &1
+          )
+        )
+      else
+        Map.put(acc, f, dynamic([r], field(r, ^f)))
+      end
     end)
   end
 
-  defp out(row, cols, mode \\ :length) do
+  defp sha_key(col), do: String.to_atom(col.name <> "__sha")
+
+  defp out(row, cols) do
     Map.new(cols, fn col ->
       v = Map.get(row, String.to_atom(col.name))
 
       v =
         cond do
           not col.deferred or v == nil -> v
-          mode == :length -> %{"len" => v}
-          true -> %{"len" => byte_size(v), "sha" => sha(v)}
+          true -> %{"len" => v, "sha" => short(Map.get(row, sha_key(col)))}
         end
 
       {col.name, v}
     end)
   end
+
+  defp short(nil), do: nil
+  defp short(hex), do: binary_part(hex, 0, min(16, byte_size(hex)))
 
   defp sha(nil), do: nil
 
