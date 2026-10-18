@@ -9,7 +9,7 @@
   sqlite,
   source,
   revision,
-  mixDepsHash ? "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  mixDepsHash ? "sha256-wh1q2KvQYDCdk/lsD8d6eV58J/0R8TDgct9dn1eRcdE=",
 }:
 let
   version = "0.2.0-${builtins.substring 0 12 revision}";

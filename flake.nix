@@ -57,10 +57,16 @@
           cargoRoot = "native";
           mixDeps = beamPackages.fetchMixDeps {
             pname = "hireme-test-deps";
-            version = "0";
-            src = ./.;
+            version = builtins.substring 0 12 (builtins.hashFile "sha256" ./mix.lock);
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.unions [
+                ./mix.exs
+                ./mix.lock
+              ];
+            };
             mixEnv = "test";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-FiUGeQyZom0bambhbhE8nusKI7pqVIU+UvnSEE3HlLg=";
           };
           nativeBuildInputs = [
             beamPackages.elixir
