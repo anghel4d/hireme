@@ -155,7 +155,9 @@ enum refusal scope human_only lease_missing leased column type not_found natural
 Line grammar: `domain`, `enum`, `table`, `col`, `metric` (implies
 `<name>_on day`), `prose` (implies citation and CAS), `command`, plus
 table modifiers (`resident` | `server`, `natural`, `cap`, `append_only`,
-`soft_delete`). Flags: `!` required, `?` nullable, `deferred`,
+`soft_delete`). Flags: `!` required, `?` nullable, `deferred` (implies a
+readonly, server-only `<name>_sha` twin holding the text's hex SHA-256, a
+trailing `_raw` dropped, so `listing_raw`'s twin is `listing_sha`),
 `private`, `server_only`, `human_only`, `unique`, `ref`.
 
 Emitters (`mix hireme.schema`; `mix test` fails when a checked-in output
@@ -309,10 +311,14 @@ changes, each with its wire type, and the server does not cast strings.
 command's params are its declared columns. One op carries up to 1 MiB of
 text (`too_large` past it); one `OPS` frame carries up to 256 ops.
 
-Deferred text (`listing_raw`, `messages.body`, world prose) travels in
-BOOT/PATCH as `u32 len | 8 bytes of SHA-256`. `RPC text {table, id,
-column, offset, length}` returns 256 KiB chunks and re-checks the read
-mask per chunk.
+Deferred text (`listing_raw`, `applications.notes`, `battleplan`,
+`letter_raw`, `events.body`, `profiles.narrative`, `messages.body`, world
+prose) travels in BOOT/PATCH as `u32 len | 8 bytes of SHA-256`, the 8 bytes
+read from the column's stored `_sha` twin, which the sequencer writes with
+the column and which never travels itself. `RPC text {table, id, column,
+offset, length}` returns 256 KiB chunks and re-checks the read mask per
+chunk. `find` returns a table's non-metric columns unless `cols` names
+more; `get` returns every non-null column.
 
 Server-side reads are RPC methods: `schema`, `find`, `get`, `history`,
 `text`, plus `account.*` (the account lens) and `lease.*`.
