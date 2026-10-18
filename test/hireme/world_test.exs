@@ -433,4 +433,18 @@ defmodule Hireme.WorldTest do
       assert byte_size(inspect(data)) < 400
     end
   end
+
+  test "the schema names each natural key with the condition it holds under and the columns that reads" do
+    {:ok, schema} = World.call("schema", %{}, %{account_id: 1, grants: key(Grants.all())})
+
+    natural =
+      Map.new(Jason.decode!(Jason.encode!(schema))["tables"], &{&1["name"], &1["natural"]})
+
+    assert natural["places"] == [
+             %{"cols" => ["iso2"], "where" => "kind = 'country'", "reads" => ["kind"]},
+             %{"cols" => ["geonames_id"], "where" => "kind = 'city'", "reads" => ["kind"]}
+           ]
+
+    assert natural["corporations"] == [%{"cols" => ["domain"], "where" => nil, "reads" => []}]
+  end
 end

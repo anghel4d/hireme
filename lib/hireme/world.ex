@@ -94,7 +94,7 @@ defmodule Hireme.World do
           "residency" => t.residency,
           "read" => Grants.read?(grants, t),
           "write" => Grants.write?(grants, t),
-          "natural" => Enum.map(t.naturals, & &1.cols),
+          "natural" => Enum.map(t.naturals, &Schema.key_doc/1),
           "cols" =>
             for c <- Grants.columns(grants, t) do
               %{

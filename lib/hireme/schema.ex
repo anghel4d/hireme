@@ -910,6 +910,15 @@ defmodule Hireme.Schema do
 
   def tables, do: @tables
 
+  @doc """
+  A natural or unique key as an interface states it: its columns, its
+  condition as declared (`nil` when it has none) and the columns that
+  condition reads (`[]` when none). A conditioned key names a row only
+  when its condition holds, so a caller must give what it reads too.
+  """
+  def key_doc(%{cols: cols, where: where, where_term: term}),
+    do: %{cols: cols, where: where, reads: if(term, do: [elem(term, 1)], else: [])}
+
   @doc "A table by name (string or atom) or id; nil when there is none."
   def table(id) when is_integer(id), do: Map.get(@by_id, id)
   def table(name) when is_atom(name), do: table(Atom.to_string(name))
