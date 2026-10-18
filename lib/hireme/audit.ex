@@ -153,48 +153,60 @@ defmodule Hireme.Audit do
 
   @doc false
   def write(kind, meta, context, account_id) do
+    commit(kind, meta, context, account_id)
+    announce(kind, account_id)
+  end
+
+  @doc false
+  # The row and the cursor it moves, in one transaction: both or neither.
+  def commit(kind, meta, context, account_id) do
     now = Store.now()
     quiet? = Atom.to_string(kind) in @quiet
 
-    Store.write(fn ->
-      {1, [%{id: id}]} =
-        Repo.insert_all(
-          Event,
-          [
-            %{
-              account_id: account_id,
-              kind: Atom.to_string(kind),
-              ip: blank(context[:ip], 64),
-              user_agent: blank(context[:user_agent], 200),
-              meta: meta,
-              key_id: Map.get(context, :key_id),
-              session_id: Map.get(context, :session_id),
-              security: Atom.to_string(kind) not in activity_kinds(),
-              rev: 1,
-              inserted_at: now,
-              updated_at: now
-            }
-          ],
-          skip_account: true,
-          returning: [:id]
-        )
+    {:ok, _} =
+      Store.transaction(fn ->
+        {1, [%{id: id}]} =
+          Repo.insert_all(
+            Event,
+            [
+              %{
+                account_id: account_id,
+                kind: Atom.to_string(kind),
+                ip: blank(context[:ip], 64),
+                user_agent: blank(context[:user_agent], 200),
+                meta: meta,
+                key_id: Map.get(context, :key_id),
+                session_id: Map.get(context, :session_id),
+                security: Atom.to_string(kind) not in activity_kinds(),
+                rev: 1,
+                inserted_at: now,
+                updated_at: now
+              }
+            ],
+            skip_account: true,
+            returning: [:id]
+          )
 
-      # The cursor moves in the same turn as the row that moves it: a count
-      # of the account's announced changes, so a coalesced lease change can
-      # move it too.
-      if account_id && not quiet? do
-        _ = id
+        # The cursor moves in the same turn as the row that moves it: a count
+        # of the account's announced changes, so a coalesced lease change can
+        # move it too.
+        if account_id && not quiet? do
+          _ = id
 
-        Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
-          skip_account: true
-        )
-      end
-    end)
+          Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
+            skip_account: true
+          )
+        end
+      end)
 
-    # An agent's op batch or a key's HELLO is not a change to the account's
-    # security state: it wakes no parked account.watch and moves no cursor.
-    if quiet?, do: :ok, else: changed(account_id)
+    :ok
   end
+
+  @doc false
+  # After the commit. An agent's op batch or a key's HELLO is not a change to
+  # the account's security state: it wakes no parked account.watch.
+  def announce(kind, account_id),
+    do: if(Atom.to_string(kind) in @quiet, do: :ok, else: changed(account_id))
 
   defp blank(nil, _), do: nil
 
@@ -278,7 +290,9 @@ defmodule Hireme.Audit.Coalescer do
   `Hireme.Application.start/2`), not to this process: a crash here loses no
   count. Each window's group is written on its own, under a rescue, and
   only what was written is deleted. Without the table (the node starting or
-  stopping) an event is written as itself. It stops after the sessions and
+  stopping) an event is written as itself. A write that fails or exits puts
+  back what it took; only an untrappable kill of the flushing process between
+  its take and its commit loses that one window's counts. It stops after the sessions and
   sequencers (it starts before them), and writes every open window as it
   goes; an unclean exit of the VM loses the open windows' counts.
   """
@@ -324,20 +338,20 @@ defmodule Hireme.Audit.Coalescer do
     # {key, events, first seen}: a row names the values with the most events.
     # A flush may take the key between any two steps here; none raises for it.
     cond do
-      bump(key) ->
+      bump(key, 1) ->
         true
 
       :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
           @tracked ->
-        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) or bump(key)
+        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) or bump(key, 1)
 
       true ->
         :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, 1, {nil, 0})
     end
   end
 
-  defp bump(key) do
-    :ets.update_counter(@table, key, {2, 1})
+  defp bump(key, n) do
+    :ets.update_counter(@table, key, {2, n})
     true
   rescue
     ArgumentError -> false
@@ -426,22 +440,34 @@ defmodule Hireme.Audit.Coalescer do
   defp write_group({account_id, _, _} = group, entries) do
     taken = Enum.flat_map(entries, &:ets.take(@table, elem(&1, 0)))
 
-    try do
-      write_taken(group, taken)
-    rescue
-      e ->
-        Logger.error(
-          "trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}"
-        )
+    written =
+      try do
+        write_taken(group, taken)
+      rescue
+        e ->
+          Logger.error(
+            "trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}"
+          )
 
-        Enum.each(taken, &put_back/1)
-        false
-    catch
-      :exit, _ ->
-        Logger.error("trail coalescing for account #{account_id} failed: the write exited")
-        Enum.each(taken, &put_back/1)
-        false
+          put_back(taken)
+          nil
+      catch
+        :exit, _ ->
+          Logger.error("trail coalescing for account #{account_id} failed: the write exited")
+          put_back(taken)
+          nil
+      end
+
+    # Committed: what follows never puts back, so the row is never written twice.
+    if written do
+      try do
+        Audit.announce(written, account_id)
+      rescue
+        e -> Logger.error("trail wake for account #{account_id} failed: #{inspect(e.__struct__)}")
+      end
     end
+
+    written != nil
   end
 
   defp write_taken({account_id, budget, w}, entries) do
@@ -470,15 +496,38 @@ defmodule Hireme.Audit.Coalescer do
     }
 
     kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced
-    if counts != %{}, do: Audit.write(kind, meta, %{account_id: account_id}, account_id)
-    counts != %{}
+
+    if counts != %{} do
+      :ok = Audit.commit(kind, meta, %{account_id: account_id}, account_id)
+      kind
+    end
   end
 
-  defp put_back({key, n}) when is_integer(n), do: :ets.update_counter(@table, key, n, {key, 0})
+  # What a failed write took goes back. A tracked value passes the tracking
+  # cap again, beside what arrived meanwhile (the old :tracked count is not
+  # restored; re-tracking counts afresh), so the cap holds after a put-back.
+  defp put_back(taken) do
+    {values, counters} = Enum.split_with(taken, &(tuple_size(&1) == 3))
 
-  defp put_back({key, n, first}) do
-    :ets.insert_new(@table, {key, 0, first})
-    :ets.update_counter(@table, key, {2, n})
+    for {key, n} <- counters,
+        elem(key, 0) != :tracked,
+        do: :ets.update_counter(@table, key, n, {key, 0})
+
+    for {key, n, first} <- values, do: put_back(key, n, first)
+  end
+
+  defp put_back({what, account_id, budget, w, _} = key, n, first) do
+    cond do
+      bump(key, n) ->
+        true
+
+      :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
+          @tracked ->
+        :ets.insert_new(@table, {key, n, first}) or bump(key, n)
+
+      true ->
+        :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, n, {nil, 0})
+    end
   end
 
   # The values with the most events, the first seen first among equals, so

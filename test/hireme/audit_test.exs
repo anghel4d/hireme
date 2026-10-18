@@ -314,6 +314,86 @@ defmodule Hireme.AuditTest do
     assert rows + counted == 4 * 3_000
   end
 
+  @tag window: :revokes
+  test "a coalesced row whose cursor cannot move is not written, and is written once when it can" do
+    %{account: a} = sign_in()
+    for _ <- 1..125, do: Audit.record(:lease_revoked, %{}, %{account_id: a.id})
+
+    Repo.query!(
+      "CREATE TRIGGER no_cursor BEFORE UPDATE ON accounts BEGIN SELECT RAISE(ABORT, 'no'); END"
+    )
+
+    coalesced = fn -> Enum.count(kinds(a.id), &(&1 == "revokes_coalesced")) end
+    ExUnit.CaptureLog.capture_log(fn -> Audit.Coalescer.flush(:all) end)
+    assert coalesced.() == 0
+
+    Repo.query!("DROP TRIGGER no_cursor")
+    Audit.Coalescer.flush(:all)
+
+    [meta] =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^a.id and e.kind == "revokes_coalesced",
+          select: e.meta
+        ),
+        skip_account: true
+      )
+
+    assert meta["counts"] == %{"lease_revoked" => %{"none" => 5}}
+  end
+
+  @tag window: [:activity, :activity_node]
+  test "a failed write puts its values back under the tracking cap, beside what came meanwhile" do
+    %{account: a} = sign_in()
+    for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})
+    ip = fn net, i -> "10.#{net}.#{div(i, 250)}.#{rem(i, 250)}" end
+    rec = fn ip -> Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7, ip: ip}) end
+    for i <- 1..1_000, do: rec.(ip.(1, i))
+
+    Repo.query!(
+      "CREATE TRIGGER no_row BEFORE INSERT ON audit WHEN NEW.kind = 'activity_coalesced' " <>
+        "BEGIN SELECT RAISE(ABORT, 'no'); END"
+    )
+
+    # The flush takes the window, then waits for the writer while new addresses arrive.
+    parent = self()
+
+    holder =
+      Task.async(fn ->
+        Hireme.Store.write(fn ->
+          send(parent, :held)
+          receive do: (:release -> :ok)
+        end)
+      end)
+
+    assert_receive :held
+
+    flush =
+      Task.async(fn -> ExUnit.CaptureLog.capture_log(fn -> Audit.Coalescer.flush(:all) end) end)
+
+    Process.sleep(200)
+    for i <- 1..1_000, do: rec.(ip.(2, i))
+    send(holder.pid, :release)
+    Task.await(holder)
+    Task.await(flush)
+
+    Repo.query!("DROP TRIGGER no_row")
+    Audit.Coalescer.flush(:all)
+
+    [meta] =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
+          select: e.meta
+        ),
+        skip_account: true
+      )
+
+    assert meta["counts"] == %{"agent_ops" => %{"7" => 2_000}}
+    assert meta["addresses_total"] == 1_000
+    assert meta["addresses_untracked_events"] == 1_000
+  end
+
   @tag window: [:activity, :activity_node]
   test "the counts outlive the coalescer's own process" do
     %{account: a} = sign_in()

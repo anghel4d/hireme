@@ -467,13 +467,15 @@ defmodule HiremeWeb.Account do
   end
 
   # A trail row's meta as the lens sees it: never a hash, secret, token or
-  # code, even a truncated one (a link request's email_hash stays server-side).
+  # code at any depth, even a truncated one (a link request's email_hash
+  # stays server-side).
   @hidden ~r/hash|secret|token|code/i
 
-  defp shown(meta) when is_map(meta),
-    do: Map.reject(meta, fn {k, _} -> to_string(k) =~ @hidden end)
+  defp shown(meta) when is_map(meta) and not is_struct(meta),
+    do: for({k, v} <- meta, not (to_string(k) =~ @hidden), into: %{}, do: {k, shown(v)})
 
-  defp shown(meta), do: meta
+  defp shown(list) when is_list(list), do: Enum.map(list, &shown/1)
+  defp shown(value), do: value
 
   defp fresh_for(%Session{} = s) do
     if Mfa.fresh?(s) do

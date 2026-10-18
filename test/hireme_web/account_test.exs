@@ -275,14 +275,21 @@ defmodule HiremeWeb.AccountTest do
         token: "t",
         recovery_code: "c",
         secret: "s",
-        domain: "example.com"
+        domain: "example.com",
+        nested: %{api_secret: "s", ok: 1},
+        list: [%{token: "t", n: 2}]
       },
       %{account_id: s.account_id}
     )
 
     {:ok, %{events: events}} = Account.call("account.audit", %{}, ctx)
     redeemed = Enum.find(events, &(&1.kind == "link_redeemed"))
-    assert redeemed.meta == %{"domain" => "example.com"}
+
+    assert redeemed.meta == %{
+             "domain" => "example.com",
+             "nested" => %{"ok" => 1},
+             "list" => [%{"n" => 2}]
+           }
 
     for e <- events,
         k <- Map.keys(e.meta || %{}),
