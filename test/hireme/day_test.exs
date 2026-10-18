@@ -27,7 +27,10 @@ defmodule Hireme.DayTest do
 
       assert read(a, "applications", app, :listing_on) == d
 
-      # Server-side: an office opened that day.
+      # Server-side: an office opened that day, its headcount cited as of it
+      # (as_of is never in the future).
+      as_of = Enum.min([d, Date.utc_today()], Date)
+
       {[%{id: place}], []} =
         run(a.id, op(:put, :places, %{kind: :country, iso2: "D" <> <<?A + i>>, name: "Day #{i}"}))
 
@@ -38,11 +41,15 @@ defmodule Hireme.DayTest do
             corporation_id: corp,
             place_id: place,
             kind: :hq,
-            opened_on: d
+            opened_on: d,
+            headcount: 12,
+            as_of: as_of,
+            source: "https://day.example/#{i}"
           })
         )
 
       assert read(a, "offices", office, :opened_on) == d
+      assert read(a, "offices", office, :headcount_on) == as_of
     end
   end
 

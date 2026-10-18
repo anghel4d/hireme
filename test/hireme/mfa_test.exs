@@ -20,13 +20,18 @@ defmodule Hireme.MfaTest do
     {secret, factor, codes}
   end
 
-  test "an enrolled app makes new sessions pending until a code is presented, and a code works once",
+  defp pending(email) do
+    {:ok, _, session} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    session
+  end
+
+  test "an enrolled app makes new sessions pending until an app code or a recovery code is presented, and each works once",
        %{session: s, email: email} do
     {secret, _factor, codes} = enroll(s)
     assert length(codes) == 10
     assert Enum.all?(codes, &(&1 =~ ~r/\A[a-z2-9]{4}(-[a-z2-9]{4}){3}\z/))
 
-    {:ok, _, later} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    later = pending(email)
     assert Mfa.required?(later)
 
     # The enrolment spent the current step; the next step's code is inside
@@ -35,25 +40,23 @@ defmodule Hireme.MfaTest do
     assert {:ok, proved} = Mfa.verify_totp(later, c)
     refute Mfa.required?(proved)
     assert {:error, :code} = Mfa.verify_totp(proved, c)
-  end
 
-  test "a recovery code proves the session once", %{session: s, email: email} do
-    {_secret, _factor, [first | _]} = enroll(s)
-    {:ok, _, later} = Accounts.sign_in_with(:email, %{subject: email, display: email})
-
-    assert {:ok, proved} = Mfa.verify_recovery(later, String.upcase(first))
+    again = pending(email)
+    [first | _] = codes
+    assert {:ok, proved} = Mfa.verify_recovery(again, String.upcase(first))
     refute Mfa.required?(proved)
-    assert {:error, :code} = Mfa.verify_recovery(later, first)
+    assert {:error, :code} = Mfa.verify_recovery(again, first)
     assert Mfa.recovery_codes_left() == 9
   end
 
-  test "enrolling and removing need a fresh session; removing the last factor drops the codes", %{
-    session: s
-  } do
+  test "enrolling and removing need a fresh session and tell the account's wire sessions at once; removing the last factor drops the codes",
+       %{session: s} do
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
     stale = age(s, :authenticated_at, Hireme.Security.step_up_window() + 1)
     assert {:error, :step_up} = Mfa.begin_totp(stale, "me")
 
     {_secret, factor, _codes} = enroll(s)
+    assert_receive {Hireme.Audit, :factors}
     s = Repo.get(Hireme.Rows.Session, s.id, skip_account: true)
     assert Mfa.fresh?(s)
 
@@ -62,6 +65,7 @@ defmodule Hireme.MfaTest do
     assert {:error, :step_up} = Mfa.remove(stale, factor.id)
 
     assert :ok = Mfa.remove(s, factor.id)
+    assert_receive {Hireme.Audit, :factors}
     refute Mfa.enrolled?()
     assert Mfa.recovery_codes_left() == 0
   end
@@ -72,8 +76,9 @@ defmodule Hireme.MfaTest do
     assert {:error, :rate_limited} = List.last(results)
   end
 
-  test "an enrollment challenge answers once", %{session: s} do
+  test "an enrolment challenge survives a mistyped code and answers once", %{session: s} do
     {:ok, %{secret: secret}} = Mfa.begin_totp(s, "me")
+    assert {:error, :code} = Mfa.confirm_totp(s, "000000", "phone")
     assert {:ok, _, _} = Mfa.confirm_totp(s, code(secret), "phone")
     s = Repo.get(Hireme.Rows.Session, s.id, skip_account: true)
     assert {:error, :challenge} = Mfa.confirm_totp(s, code(secret), "phone")
@@ -102,7 +107,7 @@ defmodule Hireme.MfaTest do
     |> Ecto.Changeset.change(consecutive_failures: Hireme.Security.lockout_failures() - 1)
     |> Repo.update!()
 
-    {:ok, _, pending} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    pending = pending(email)
     assert {:error, :code} = Mfa.verify_totp(pending, "000000")
     assert Mfa.factors() == []
 
@@ -130,12 +135,7 @@ defmodule Hireme.MfaTest do
     {secret, _, _} = enroll(s)
     c = code(secret, System.os_time(:second) + 30)
     parent = self()
-
-    sessions =
-      for _ <- 1..6 do
-        {:ok, _, x} = Accounts.sign_in_with(:email, %{subject: email, display: email})
-        x
-      end
+    sessions = for _ <- 1..6, do: pending(email)
 
     results =
       sessions
@@ -150,20 +150,13 @@ defmodule Hireme.MfaTest do
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
   end
 
-  test "a mistyped enrolment code leaves the enrolment open", %{session: s} do
-    {:ok, %{secret: secret}} = Mfa.begin_totp(s, "me")
-    assert {:error, :code} = Mfa.confirm_totp(s, "000000", "phone")
-    assert {:ok, _, _} = Mfa.confirm_totp(s, code(secret), "phone")
-  end
-
-  test "the QR draws without inline styles, and a label cannot change the secret", %{session: s} do
+  test "the QR draws without inline styles; an authenticator shows the account's own label, an address included, and a label cannot change the secret",
+       %{session: s} do
     {:ok, %{svg: svg, uri: uri, secret: secret}} = Mfa.begin_totp(s, "a?secret=AAAA#x")
     refute svg =~ "style="
     assert svg =~ ~s(fill="#000)
     assert URI.decode_query(URI.parse(uri).query)["secret"] == secret
-  end
 
-  test "an authenticator shows the account's own label, an address included", %{session: s} do
     {:ok, %{uri: uri}} = Mfa.begin_totp(s, "me@example.com")
     assert URI.decode(URI.parse(uri).path) == "/Hireme:me@example.com"
   end
@@ -172,9 +165,8 @@ defmodule Hireme.MfaTest do
     session: s,
     email: email
   } do
-    {:ok, %{secret: secret}} = Mfa.begin_totp(s, "me")
-    {:ok, _, _} = Mfa.confirm_totp(s, code(secret), "phone")
-    {:ok, _, pending} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    {secret, _, _} = enroll(s)
+    pending = pending(email)
 
     old = Application.fetch_env!(:hireme, :secret_key_base)
     Application.put_env(:hireme, :secret_key_base, "rotated+" <> String.duplicate("x", 64))
@@ -187,14 +179,5 @@ defmodule Hireme.MfaTest do
 
     assert {:error, :code} = Mfa.verify_totp(pending, code(secret, later))
     assert Mfa.required?(pending)
-  end
-
-  test "binding or removing a factor tells the account's wire sessions at once", %{session: s} do
-    Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
-    {_secret, factor, _} = enroll(s)
-    assert_receive {Hireme.Audit, :factors}
-    s = Repo.get(Hireme.Rows.Session, s.id, skip_account: true)
-    :ok = Mfa.remove(s, factor.id)
-    assert_receive {Hireme.Audit, :factors}
   end
 end

@@ -3,41 +3,43 @@ defmodule Hireme.MailTest do
   import Swoosh.TestAssertions
 
   alias Hireme.Mail
+  alias Hireme.Rows.Outbox
 
-  test "a queued notice is sent once by a drain, one per linked address" do
+  defp count(account_id, kind) do
+    Repo.aggregate(
+      from(n in Outbox, where: n.account_id == ^account_id and n.kind == ^kind),
+      :count,
+      skip_account: true
+    )
+  end
+
+  test "a queued notice is sent once by a drain, one per linked address; an account is told about changes on its linked addresses" do
     %{account: a, email: email} = sign_in()
     :ok = Mail.enqueue(a.id, [email, "second@example.com"], :api_key_created, %{name: "ci"})
-
     assert Mail.Outbox.drain() == 2
     assert_email_sent(to: [{"", email}], subject: ~s(Hireme: an API key named "ci" was created))
+    assert_email_sent(to: [{"", "second@example.com"}])
     assert Mail.Outbox.drain() == 0
-  end
 
-  test "a notice subject is one header line whatever a name holds" do
-    %{account: a, email: email} = sign_in()
-    :ok = Mail.enqueue(a.id, [email], :api_key_revoked, %{name: "x\r\nBcc: victim@example.com ü"})
-    assert Mail.Outbox.drain() == 1
-
-    assert_email_sent(fn mail ->
-      refute mail.subject =~ ~r/[\r\n]/
-      assert mail.subject =~ "=?utf-8?B?"
-    end)
-  end
-
-  test "a notice whose meta names fields no line reads still sends, without minting atoms" do
-    %{account: a, email: email} = sign_in()
-    field = "never_an_atom_#{System.unique_integer([:positive])}"
-    :ok = Mail.enqueue(a.id, [email], :recovery_code_used, %{field => 1, "left" => 3})
-    assert Mail.Outbox.drain() == 1
-    assert_email_sent(subject: "Hireme: a recovery code was used; 3 left")
-    assert_raise ArgumentError, fn -> String.to_existing_atom(field) end
-  end
-
-  test "an account is told about changes on its linked addresses" do
-    %{account: a, email: email} = sign_in()
     :ok = Hireme.Accounts.notify(a.id, :authenticator_added, %{kind: :totp})
     assert Mail.Outbox.drain() == 1
     assert_email_sent(to: [{"", email}], subject: "Hireme: a second factor (totp) was added")
+  end
+
+  test "a notice subject is one header line whatever a name holds, and a meta naming fields no line reads still sends, without minting atoms" do
+    %{account: a, email: email} = sign_in()
+    :ok = Mail.enqueue(a.id, [email], :api_key_revoked, %{name: "x\r\nBcc: victim@example.com ü"})
+    field = "never_an_atom_#{System.unique_integer([:positive])}"
+    :ok = Mail.enqueue(a.id, [email], :recovery_code_used, %{field => 1, "left" => 3})
+    assert Mail.Outbox.drain() == 2
+
+    assert_email_sent(fn mail ->
+      refute mail.subject =~ ~r/[\r\n]/
+      mail.subject =~ "=?utf-8?B?"
+    end)
+
+    assert_email_sent(subject: "Hireme: a recovery code was used; 3 left")
+    assert_raise ArgumentError, fn -> String.to_existing_atom(field) end
   end
 
   test "the outbox sends round-robin: one account's backlog does not hold back another's" do
@@ -60,9 +62,8 @@ defmodule Hireme.MailTest do
             updated_at: now
           }
 
-    Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
+    Repo.insert_all(Outbox, rows, skip_account: true)
     :ok = Mail.enqueue(other.id, [other_email], :api_key_created, %{name: "y"})
-
     assert Mail.Outbox.drain() == 121
 
     order =
@@ -76,71 +77,43 @@ defmodule Hireme.MailTest do
   end
 
   @tag window: [:notices, :notice_rows]
-  test "past the notice budget, changes coalesce into one pending digest per address" do
+  test "past the notice budget, changes coalesce into one pending digest per address; a digest the drain has taken up or given up on is never added to" do
     %{account: a, email: email} = sign_in()
     for i <- 1..35, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    assert count(a.id, "api_key_renamed") == 30
 
-    rows =
-      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id), skip_account: true)
-
-    assert Enum.count(rows, &(&1.kind == "api_key_renamed")) == 30
-    assert [digest] = Enum.filter(rows, &(&1.kind == "digest"))
-    assert digest.meta["count"] == 5
-    assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
-  end
-
-  @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
-  test "one event is one charge however many addresses hear of it; critical kinds keep their own budget" do
-    %{account: a, email: email} = sign_in()
-    many = for i <- 1..40, do: "addr#{i}@example.com"
-    :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
-
-    rows = fn kind ->
-      Repo.aggregate(
-        from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id and n.kind == ^kind),
-        :count,
+    [digest] =
+      Repo.all(from(n in Outbox, where: n.account_id == ^a.id and n.kind == "digest"),
         skip_account: true
       )
-    end
 
-    assert rows.("api_key_renamed") == 40
-    for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
-    :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "past"})
-    assert rows.("digest") == 1
+    assert digest.meta["count"] == 5
+    assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
 
-    :ok = Mail.enqueue(a.id, [email], :authenticator_removed, %{kind: :totp})
-    assert rows.("authenticator_removed") == 1
-  end
-
-  @tag window: [:notices, :notice_rows]
-  test "a digest the drain has taken up or given up on is never added to" do
-    %{account: a, email: email} = sign_in()
-    for i <- 1..31, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
-    [d] = Repo.all(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), skip_account: true)
-    d |> Ecto.Changeset.change(attempts: 8) |> Repo.update!(skip_account: true)
+    digest |> Ecto.Changeset.change(attempts: 8) |> Repo.update!(skip_account: true)
     :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "later"})
-
-    assert Repo.aggregate(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), :count,
-             skip_account: true
-           ) == 2
+    assert count(a.id, "digest") == 2
 
     assert Mail.line(:digest, %{count: 1, since: "2026-10-18T10:00:00Z"}) =~
              "1 security change since 2026-10-18 10:00:00 UTC"
   end
 
-  @tag window: [:notices, :factor_notices, :key_notices]
-  test "a key's revoke notice and the critical kinds reach the owner as themselves past the general budget" do
+  @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
+  test "one event is one charge however many addresses hear of it; a key's revoke and a factor's notices reach the owner as themselves past the general budget" do
     %{account: a, email: email} = sign_in()
-    for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    many = for i <- 1..40, do: "addr#{i}@example.com"
+    :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
+    assert count(a.id, "api_key_renamed") == 40
+    for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "past"})
+    assert count(a.id, "digest") == 1
+
     :ok = Mail.enqueue(a.id, [email], :api_key_revoked, %{name: "leaked"})
     :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
+    :ok = Mail.enqueue(a.id, [email], :authenticator_removed, %{kind: :totp})
 
-    kinds =
-      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id, select: n.kind),
-        skip_account: true
-      )
-
-    assert "api_key_revoked" in kinds and "authenticator_added" in kinds
+    for kind <- ~w(api_key_revoked authenticator_added authenticator_removed),
+        do: assert(count(a.id, kind) == 1, kind)
   end
 
   @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
@@ -149,14 +122,8 @@ defmodule Hireme.MailTest do
     for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
     for i <- 1..15, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "n#{i}"})
     :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
-
-    kinds =
-      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id, select: n.kind),
-        skip_account: true
-      )
-
-    assert Enum.count(kinds, &(&1 == "api_key_created")) == 10
-    assert "authenticator_added" in kinds
+    assert count(a.id, "api_key_created") == 10
+    assert count(a.id, "authenticator_added") == 1
   end
 
   @tag window: [:notices, :notice_rows]
@@ -181,21 +148,19 @@ defmodule Hireme.MailTest do
     end
 
     for chunk <- Enum.chunk_every(1..(cap - 2), 3_000),
-        do: Repo.insert_all(Hireme.Rows.Outbox, Enum.map(chunk, sent), skip_account: true)
+        do: Repo.insert_all(Outbox, Enum.map(chunk, sent), skip_account: true)
 
     # One digest already pending for a@, which leaves room for one row.
     :ok = Mail.enqueue(a.id, ["a@example.com"], :api_key_renamed, %{name: "k"})
 
     Repo.update_all(
-      from(n in Hireme.Rows.Outbox, where: n.address == "a@example.com"),
+      from(n in Outbox, where: n.address == "a@example.com"),
       [set: [kind: "digest", meta: %{count: 1}, next_at: DateTime.add(now, 600)]],
       skip_account: true
     )
 
     held = fn ->
-      Repo.aggregate(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id), :count,
-        skip_account: true
-      )
+      Repo.aggregate(from(n in Outbox, where: n.account_id == ^a.id), :count, skip_account: true)
     end
 
     assert held.() == cap - 1
@@ -212,9 +177,7 @@ defmodule Hireme.MailTest do
     assert held.() == cap - 1
 
     [digest] =
-      Repo.all(from(n in Hireme.Rows.Outbox, where: n.address == "a@example.com"),
-        skip_account: true
-      )
+      Repo.all(from(n in Outbox, where: n.address == "a@example.com"), skip_account: true)
 
     assert digest.meta["count"] == 2
   end
@@ -224,16 +187,7 @@ defmodule Hireme.MailTest do
     %{account: a} = sign_in()
     many = for i <- 1..100, do: "a#{i}@example.com"
     for _ <- 1..4, do: :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
-
-    count = fn kind ->
-      Repo.aggregate(
-        from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id and n.kind == ^kind),
-        :count,
-        skip_account: true
-      )
-    end
-
-    assert count.("api_key_renamed") == 300
-    assert count.("digest") == 100
+    assert count(a.id, "api_key_renamed") == 300
+    assert count(a.id, "digest") == 100
   end
 end

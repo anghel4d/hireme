@@ -18,6 +18,29 @@ defmodule Hireme.AccountsTest do
     token
   end
 
+  defp claim(email), do: %{subject: email, display: email}
+
+  # `n` more sessions of the account, as rows, each last seen at `seen`.
+  defp fill_sessions(account_id, n, seen) do
+    salt = System.unique_integer([:positive])
+
+    rows =
+      for i <- 1..n,
+          do: %{
+            account_id: account_id,
+            token_hash: :crypto.hash(:sha256, "#{salt}-#{i}"),
+            authenticated_at: seen,
+            last_seen_at: seen,
+            expires_at: DateTime.add(Hireme.Store.now(), 3600),
+            rev: 1,
+            inserted_at: seen,
+            updated_at: seen
+          }
+
+    for chunk <- Enum.chunk_every(rows, 500),
+        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
+  end
+
   describe "sign-in by mailed link" do
     test "proves the address once; a visitor becomes an account, and comes back to it" do
       token = mailed_token("Visitor@Example.com ")
@@ -27,12 +50,12 @@ defmodule Hireme.AccountsTest do
       assert {:error, :invalid} = Accounts.redeem_link(token)
       assert {:error, :invalid} = Accounts.peek_link(token)
 
-      {:ok, cookie, session} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+      {:ok, cookie, session} = Accounts.sign_in_with(:email, claim(email))
       assert {%{id: id}, account} = Accounts.session(cookie)
       assert id == session.id
       assert account.id == session.account_id
 
-      {:ok, _, again} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+      {:ok, _, again} = Accounts.sign_in_with(:email, claim(email))
       assert again.account_id == session.account_id
     end
 
@@ -77,9 +100,11 @@ defmodule Hireme.AccountsTest do
   end
 
   describe "sessions" do
-    test "a revoked, expired or idle session is not a session" do
+    test "a revoked, expired or idle session is not a session; one account cannot revoke another's" do
       %{session: s1, token: t1} = sign_in()
+      %{session: theirs} = sign_in()
       assert {_, _} = Accounts.session(t1)
+      assert {:error, :not_found} = Accounts.revoke_session(theirs.account_id, s1.id)
       assert :ok = Accounts.revoke_session(s1.account_id, s1.id)
       assert Accounts.session(t1) == nil
 
@@ -94,72 +119,105 @@ defmodule Hireme.AccountsTest do
       |> Repo.update!(skip_account: true)
 
       assert Accounts.session(t3) == nil
-
       assert Accounts.session("garbage") == nil
       assert Accounts.session(nil) == nil
     end
 
-    test "revoking a session ends its wire sessions" do
+    test "revoking a session ends its wire sessions; suspension ends every session, refuses sign-in, and the refusal is on the trail" do
       %{session: s} = sign_in()
       Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
       :ok = Accounts.revoke_session(s.account_id, s.id)
       assert_receive {:bye, {:session, id}, :revoked} when id == s.id
-    end
 
-    test "one account cannot revoke another's session" do
-      %{session: mine} = sign_in()
-      %{session: theirs} = sign_in()
-      assert {:error, :not_found} = Accounts.revoke_session(mine.account_id, theirs.id)
-    end
-
-    test "suspension ends every session and refuses sign-in" do
       %{account: a, token: t, email: email} = sign_in()
       Hireme.PubSub.subscribe(Hireme.Audit.topic(a.id))
       :ok = Accounts.set_status(a.id, :suspended)
       assert_receive {:bye, :account, :suspended}
       assert Accounts.session(t) == nil
-
-      assert {:error, :suspended} =
-               Accounts.sign_in_with(:email, %{subject: email, display: email})
-    end
-  end
-
-  describe "wire tickets" do
-    test "a ticket opens one wire session as its browser session, once" do
-      %{session: s} = sign_in()
-      ticket = Accounts.ticket(s)
-      assert {:ok, %{account_id: a, session_id: id}} = Accounts.redeem_ticket(ticket)
-      assert {a, id} == {s.account_id, s.id}
-      assert :error = Accounts.redeem_ticket(ticket)
-    end
-
-    test "a ticket for a revoked session, or forged, opens nothing" do
-      %{session: s} = sign_in()
-      ticket = Accounts.ticket(s)
-      :ok = Accounts.revoke_session(s.account_id, s.id)
-      assert :error = Accounts.redeem_ticket(ticket)
-      assert :error = Accounts.redeem_ticket(ticket <> "x")
-      assert :error = Accounts.redeem_ticket(nil)
-    end
-  end
-
-  describe "ways in" do
-    test "linking binds a new identity, refuses one bound elsewhere, and the last cannot be unlinked" do
-      %{account: a, email: email} = sign_in()
-      %{email: other} = sign_in()
+      assert {:error, :suspended} = Accounts.sign_in_with(:email, claim(email))
       Repo.put_account(a.id)
 
-      assert {:ok, gh} = Accounts.link(:github, %{subject: "4242", display: "octo"})
-      assert {:error, :taken} = Accounts.link(:email, %{subject: other, display: other})
-      assert length(Accounts.identities()) == 2
-
-      [mail] =
-        Enum.filter(Accounts.identities(), &(&1.provider == :email and &1.subject == email))
-
-      assert :ok = Accounts.unlink(mail.id)
-      assert {:error, :last} = Accounts.unlink(gh.id)
-      assert {:error, :not_found} = Accounts.unlink(mail.id)
+      assert Enum.any?(
+               Hireme.Audit.recent(10),
+               &(&1.kind == "sign_in_refused" and &1.meta["reason"] == "suspended")
+             )
     end
+
+    test "a session that now owes a second factor is not live, on a timer or as activity" do
+      %{session: old, email: email} = sign_in()
+      {:ok, _, owner} = Accounts.sign_in_with(:email, claim(email))
+      Repo.put_account(owner.account_id)
+      {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(owner, "me")
+      code = secret |> Base.decode32!(padding: false) |> NimbleTOTP.verification_code()
+      {:ok, _, _} = Hireme.Mfa.confirm_totp(owner, code, "phone")
+
+      refute Accounts.session_live?(old.id)
+      assert :error = Accounts.live_session(old.id)
+      assert Accounts.session_live?(owner.id)
+    end
+
+    test "at the session cap the oldest ended sessions make room; only all-live sessions refuse, by eviction's arithmetic, before a link is spent; the refusal is on the trail" do
+      %{account: a, session: first, email: email} = sign_in()
+      cap = Hireme.Schema.table(:sessions).cap
+      now = Hireme.Store.now()
+      fill_sessions(a.id, cap - 1, now)
+
+      refute Accounts.room?(:email, email)
+      assert Accounts.room?(:email, "stranger@example.com")
+      assert {:error, :cap} = Accounts.sign_in_with(:email, claim(email))
+      Repo.put_account(a.id)
+      [last | _] = Hireme.Audit.recent(5)
+      assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
+      Repo.put_account(nil)
+
+      :ok = Accounts.revoke_session(a.id, first.id)
+      assert {:ok, _, _} = Accounts.sign_in_with(:email, claim(email))
+      refute Repo.get(Hireme.Rows.Session, first.id, skip_account: true)
+
+      # Over the cap by five, with only one ended session: no room.
+      fill_sessions(a.id, 1, DateTime.add(now, -2 * 3600))
+      fill_sessions(a.id, 4, now)
+      refute Accounts.room?(:email, email)
+      assert {:error, :cap} = Accounts.sign_in_with(:email, claim(email))
+    end
+  end
+
+  test "a ticket opens one wire session as its browser session, once; for a revoked session, or forged, it opens nothing" do
+    %{session: s} = sign_in()
+    ticket = Accounts.ticket(s)
+    assert {:ok, %{account_id: a, session_id: id}} = Accounts.redeem_ticket(ticket)
+    assert {a, id} == {s.account_id, s.id}
+    assert :error = Accounts.redeem_ticket(ticket)
+
+    ticket = Accounts.ticket(s)
+    :ok = Accounts.revoke_session(s.account_id, s.id)
+    assert :error = Accounts.redeem_ticket(ticket)
+    assert :error = Accounts.redeem_ticket(ticket <> "x")
+    assert :error = Accounts.redeem_ticket(nil)
+  end
+
+  test "linking binds a new identity, refuses one bound elsewhere, stops at the declared cap, and the last cannot be unlinked" do
+    %{account: a, email: email} = sign_in()
+    %{email: other} = sign_in()
+    Repo.put_account(a.id)
+
+    assert {:ok, gh} = Accounts.link(:github, %{subject: "4242", display: "octo"})
+    assert {:error, :taken} = Accounts.link(:email, %{subject: other, display: other})
+    assert length(Accounts.identities()) == 2
+
+    cap = Hireme.Schema.table(:identities).cap
+    for i <- 3..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
+    assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
+
+    [mail] =
+      Enum.filter(Accounts.identities(), &(&1.provider == :email and &1.subject == email))
+
+    assert :ok = Accounts.unlink(mail.id)
+    for i <- Enum.drop(Accounts.identities(), 1), do: :ok = Accounts.unlink(i.id)
+    assert [%{id: last}] = Accounts.identities()
+    assert {:error, :last} = Accounts.unlink(last)
+    assert {:error, :not_found} = Accounts.unlink(mail.id)
+    _ = gh
   end
 
   test "addresses normalize to one spelling and only address-shaped text passes" do
@@ -182,125 +240,5 @@ defmodule Hireme.AccountsTest do
     assert Accounts.scope(1) == Accounts.scope(1)
     refute Accounts.scope(1) == Accounts.scope(2)
     assert Accounts.scope(1) =~ ~r/\A[0-9a-f]{32}\z/
-  end
-
-  test "a sign-in refused as suspended is on the trail" do
-    %{account: a, email: email} = sign_in()
-    :ok = Accounts.set_status(a.id, :suspended)
-    assert {:error, :suspended} = Accounts.sign_in_with(:email, %{subject: email, display: email})
-    Repo.put_account(a.id)
-
-    assert Enum.any?(
-             Hireme.Audit.recent(10),
-             &(&1.kind == "sign_in_refused" and &1.meta["reason"] == "suspended")
-           )
-  end
-
-  test "a session that now owes a second factor is not live, on a timer or as activity" do
-    %{session: old, email: email} = sign_in()
-    {:ok, _, owner} = Accounts.sign_in_with(:email, %{subject: email, display: email})
-    Repo.put_account(owner.account_id)
-    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(owner, "me")
-    code = secret |> Base.decode32!(padding: false) |> NimbleTOTP.verification_code()
-    {:ok, _, _} = Hireme.Mfa.confirm_totp(owner, code, "phone")
-
-    refute Accounts.session_live?(old.id)
-    assert :error = Accounts.live_session(old.id)
-    assert Accounts.session_live?(owner.id)
-  end
-
-  test "an account holds at most the declared number of ways in" do
-    %{account: a} = sign_in()
-    Repo.put_account(a.id)
-    cap = Hireme.Schema.table(:identities).cap
-    for i <- 2..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
-    assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
-  end
-
-  test "at the session cap the oldest ended sessions make room; only all-live sessions refuse" do
-    %{account: a, session: first, email: email} = sign_in()
-    cap = Hireme.Schema.table(:sessions).cap
-    now = Hireme.Store.now()
-
-    rows =
-      for i <- 1..(cap - 1),
-          do: %{
-            account_id: a.id,
-            token_hash: :crypto.hash(:sha256, "t#{i}"),
-            authenticated_at: now,
-            last_seen_at: now,
-            expires_at: DateTime.add(now, 3600),
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
-
-    for chunk <- Enum.chunk_every(rows, 500),
-        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
-
-    claim = %{subject: email, display: email}
-    assert {:error, :cap} = Accounts.sign_in_with(:email, claim)
-    :ok = Accounts.revoke_session(a.id, first.id)
-    assert {:ok, _, _} = Accounts.sign_in_with(:email, claim)
-    refute Repo.get(Hireme.Rows.Session, first.id, skip_account: true)
-  end
-
-  test "a sign-in refused at the session cap is recorded as refused, and a mailed link would keep" do
-    %{account: a, email: email} = sign_in()
-    cap = Hireme.Schema.table(:sessions).cap
-    now = Hireme.Store.now()
-
-    rows =
-      for i <- 1..(cap - 1),
-          do: %{
-            account_id: a.id,
-            token_hash: :crypto.hash(:sha256, "u#{i}"),
-            authenticated_at: now,
-            last_seen_at: now,
-            expires_at: DateTime.add(now, 3600),
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
-
-    for chunk <- Enum.chunk_every(rows, 500),
-        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
-
-    refute Accounts.room?(:email, email)
-    assert Accounts.room?(:email, "stranger@example.com")
-    assert {:error, :cap} = Accounts.sign_in_with(:email, %{subject: email, display: email})
-
-    Repo.put_account(a.id)
-    [last | _] = Hireme.Audit.recent(5)
-    assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
-  end
-
-  test "room for a sign-in uses eviction's arithmetic, so a link is never spent on a refusal" do
-    %{account: a, email: email} = sign_in()
-    cap = Hireme.Schema.table(:sessions).cap
-    now = Hireme.Store.now()
-    old = DateTime.add(now, -2 * 3600)
-
-    row = fn i, seen ->
-      %{
-        account_id: a.id,
-        token_hash: :crypto.hash(:sha256, "r#{i}"),
-        authenticated_at: seen,
-        last_seen_at: seen,
-        expires_at: DateTime.add(now, 3600),
-        rev: 1,
-        inserted_at: seen,
-        updated_at: seen
-      }
-    end
-
-    # Over the cap by five, with only one ended session: no room.
-    rows = [row.(0, old) | for(i <- 1..(cap + 3), do: row.(i, now))]
-
-    for chunk <- Enum.chunk_every(rows, 500),
-        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
-
-    refute Accounts.room?(:email, email)
-    assert {:error, :cap} = Accounts.sign_in_with(:email, %{subject: email, display: email})
   end
 end
