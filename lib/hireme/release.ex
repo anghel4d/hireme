@@ -225,32 +225,57 @@ defmodule Hireme.Release.Purge do
   def run(now \\ Hireme.Store.now()) do
     day = DateTime.add(now, -@day)
     month = DateTime.add(now, -@month)
-    kept = DateTime.add(now, -Hireme.Security.activity_retention_days() * @day)
-    expiring = Hireme.Audit.expiring_kinds()
 
-    Hireme.Store.write(fn ->
-      %{
-        magic_links: delete(from(l in MagicLink, where: l.expires_at < ^day)),
-        challenges: delete(from(c in Challenge, where: c.expires_at < ^day)),
-        sessions:
-          delete(
-            from(s in Session,
-              where: (not is_nil(s.revoked_at) or s.expires_at < ^now) and s.updated_at < ^month
+    rows =
+      Hireme.Store.write(fn ->
+        %{
+          magic_links: delete(from(l in MagicLink, where: l.expires_at < ^day)),
+          challenges: delete(from(c in Challenge, where: c.expires_at < ^day)),
+          sessions:
+            delete(
+              from(s in Session,
+                where: (not is_nil(s.revoked_at) or s.expires_at < ^now) and s.updated_at < ^month
+              )
+            ),
+          # A revoked key a month on: it counts toward the table's cap until then.
+          api_keys:
+            delete(from(k in ApiKey, where: not is_nil(k.revoked_at) and k.revoked_at < ^month)),
+          outbox:
+            delete(
+              from(n in Outbox,
+                where: (not is_nil(n.sent_at) and n.sent_at < ^month) or n.next_at < ^month
+              )
             )
-          ),
-        # A revoked key a month on: it counts toward the table's cap until then.
-        api_keys:
-          delete(from(k in ApiKey, where: not is_nil(k.revoked_at) and k.revoked_at < ^month)),
-        # Activity rows past their retention; security events stay.
-        audit: delete(from(e in Audit, where: e.kind in ^expiring and e.inserted_at < ^kept)),
-        outbox:
-          delete(
-            from(n in Outbox,
-              where: (not is_nil(n.sent_at) and n.sent_at < ^month) or n.next_at < ^month
-            )
-          )
-      }
-    end)
+        }
+      end)
+
+    Map.put(rows, :audit, purge_activity(now))
+  end
+
+  # Activity rows past their retention (refused HELLOs a week, the rest
+  # 90 days); security events stay. In batches, each its own turn at the
+  # writer lock with a pause between, so a large trail never stalls writers.
+  defp purge_activity(now) do
+    refused = DateTime.add(now, -Hireme.Security.refusal_retention_days() * @day)
+    kept = DateTime.add(now, -Hireme.Security.activity_retention_days() * @day)
+    activity = Hireme.Audit.expiring_kinds() -- ["wire_key_refused"]
+
+    batches(from(e in Audit, where: e.kind == "wire_key_refused" and e.inserted_at < ^refused)) +
+      batches(from(e in Audit, where: e.kind in ^activity and e.inserted_at < ^kept))
+  end
+
+  @batch 5_000
+  defp batches(query, done \\ 0) do
+    ids = from(e in query, select: e.id, limit: @batch)
+
+    case Hireme.Store.write(fn -> delete(from(e in Audit, where: e.id in subquery(ids))) end) do
+      0 ->
+        done
+
+      n ->
+        Process.sleep(20)
+        batches(query, done + n)
+    end
   end
 
   defp delete(query) do

@@ -208,11 +208,21 @@ defmodule Hireme.Mail.Outbox do
     # release modules load on first use, so load it before matching rows.
     Code.ensure_loaded(Hireme.Mail)
 
+    # Round-robin across accounts: every account's oldest due notice goes
+    # before any account's second, so one account's backlog never holds
+    # back another's notices.
+    ranked =
+      from(n in Notice,
+        where: is_nil(n.sent_at) and n.next_at <= ^now and n.attempts < ^length(@backoff),
+        select: %{id: n.id, rank: over(row_number(), partition_by: n.account_id, order_by: n.id)}
+      )
+
     due =
       Repo.all(
         from(n in Notice,
-          where: is_nil(n.sent_at) and n.next_at <= ^now and n.attempts < ^length(@backoff),
-          order_by: n.id,
+          join: r in subquery(ranked),
+          on: r.id == n.id,
+          order_by: [asc: r.rank, asc: n.id],
           limit: @batch
         ),
         skip_account: true

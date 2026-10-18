@@ -318,6 +318,11 @@ defmodule HiremeWeb.SignInController do
   def redeem_email(conn, %{"token" => token}) when is_binary(token) do
     with {:ok, email} <- Accounts.peek_link(token),
          {:ok, mode} <- mode(conn, email),
+         :ok <-
+           if(mode == :sign_in and not Accounts.room?(:email, email),
+             do: {:error, :cap},
+             else: :ok
+           ),
          {:ok, ^email} <- Accounts.redeem_link(token, meta(conn)) do
       claim = %{subject: email, display: email}
 
@@ -326,9 +331,21 @@ defmodule HiremeWeb.SignInController do
         :sign_in -> enter(conn, :email, claim)
       end
     else
-      {:error, :signed_in} -> signed_in(conn)
-      {:error, :rate_limited} -> methods(conn, 429, "Too many tries. Wait a few minutes.")
-      _ -> methods(conn, 410, @notices["link"])
+      {:error, :signed_in} ->
+        signed_in(conn)
+
+      {:error, :cap} ->
+        methods(
+          conn,
+          409,
+          "This account has too many open sessions; sign out of one, then try again. The link still works."
+        )
+
+      {:error, :rate_limited} ->
+        methods(conn, 429, "Too many tries. Wait a few minutes.")
+
+      _ ->
+        methods(conn, 410, @notices["link"])
     end
   end
 

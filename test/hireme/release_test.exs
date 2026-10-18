@@ -139,16 +139,27 @@ defmodule Hireme.ReleaseTest do
 
       Hireme.Repo.insert_all(
         Hireme.Rows.Audit,
-        [row.("agent_ops", 91), row.("agent_ops", 1), row.("factor_added", 5 * 365)],
+        [
+          row.("agent_ops", 91),
+          row.("agent_ops", 1),
+          row.("wire_key_refused", 8),
+          row.("wire_key_refused", 1),
+          row.("factor_added", 5 * 365)
+        ],
         skip_account: true
       )
 
-      Purge.run(now)
+      # Many expired rows go in batches, the writer free between them.
+      for chunk <- Enum.chunk_every(List.duplicate(row.("agent_ops", 100), 12_000), 2_000),
+          do: Hireme.Repo.insert_all(Hireme.Rows.Audit, chunk, skip_account: true)
+
+      assert %{audit: 12_002} = Purge.run(now)
 
       kinds =
         Hireme.Repo.with_account(a.id, fn -> Enum.map(Hireme.Audit.recent(50), & &1.kind) end)
 
       assert Enum.count(kinds, &(&1 == "agent_ops")) == 1
+      assert Enum.count(kinds, &(&1 == "wire_key_refused")) == 1
       assert "factor_added" in kinds
     end
 

@@ -243,4 +243,34 @@ defmodule Hireme.AccountsTest do
     assert {:ok, _, _} = Accounts.sign_in_with(:email, claim)
     refute Repo.get(Hireme.Rows.Session, first.id, skip_account: true)
   end
+
+  test "a sign-in refused at the session cap is recorded as refused, and a mailed link would keep" do
+    %{account: a, email: email} = sign_in()
+    cap = Hireme.Schema.table(:sessions).cap
+    now = Hireme.Store.now()
+
+    rows =
+      for i <- 1..(cap - 1),
+          do: %{
+            account_id: a.id,
+            token_hash: :crypto.hash(:sha256, "u#{i}"),
+            authenticated_at: now,
+            last_seen_at: now,
+            expires_at: DateTime.add(now, 3600),
+            rev: 1,
+            inserted_at: now,
+            updated_at: now
+          }
+
+    for chunk <- Enum.chunk_every(rows, 500),
+        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
+
+    refute Accounts.room?(:email, email)
+    assert Accounts.room?(:email, "stranger@example.com")
+    assert {:error, :cap} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+
+    Repo.put_account(a.id)
+    [last | _] = Hireme.Audit.recent(5)
+    assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
+  end
 end

@@ -163,4 +163,25 @@ defmodule HiremeWeb.AccountTest do
     assert {:error, %{error: "invalid"}} =
              Account.call("account.rename", %{"name" => String.duplicate("é", 250)}, ctx)
   end
+
+  test "account writes share one budget per account", %{ctx: ctx} do
+    results = for _ <- 1..61, do: Account.call("account.session.revoke", %{"id" => 999_999}, ctx)
+    assert Enum.count(results, &(&1 == {:error, %{error: "not_found"}})) == 60
+    assert {:error, %{error: "rate_limited"}} = List.last(results)
+    assert {:ok, _} = Account.call("account.overview", %{}, ctx)
+  end
+
+  test "trusting a host already trusted with the same note records nothing", %{ctx: ctx} do
+    args = %{"host" => "levels.fyi", "note" => "pay data"}
+    assert {:ok, %{trusted_host: %{id: id}}} = Account.call("account.trusted_host.add", args, ctx)
+    cursor = Hireme.Audit.rev(ctx.account_id)
+
+    assert {:ok, %{trusted_host: %{id: ^id}}} =
+             Account.call("account.trusted_host.add", args, ctx)
+
+    assert Hireme.Audit.rev(ctx.account_id) == cursor
+
+    long = %{"host" => "example.org", "note" => String.duplicate("n", 501)}
+    assert {:error, %{error: "invalid"}} = Account.call("account.trusted_host.add", long, ctx)
+  end
 end

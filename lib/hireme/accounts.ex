@@ -127,7 +127,10 @@ defmodule Hireme.Accounts do
         )
 
       if length(ended) == count - cap + 1 do
-        Repo.delete_all(from(s in Session, where: s.id in ^ended), skip_account: true)
+        # In batches: one IN list past SQLite's variable limit would raise.
+        for ids <- Enum.chunk_every(ended, 500),
+            do: Repo.delete_all(from(s in Session, where: s.id in ^ids), skip_account: true)
+
         true
       end
     end
@@ -464,29 +467,66 @@ defmodule Hireme.Accounts do
 
     if active?(account) do
       Repo.put_account(account.id)
-      touch_identity(identity, claim)
 
-      Audit.record(
-        :signed_in,
-        %{provider: provider, identity_id: identity.id},
-        Map.put(meta, :account_id, account.id)
-      )
-
+      # The session first: an account at its session cap is refused before
+      # anything says it signed in.
       case start_session(account, meta) do
-        {:error, :cap} -> {:error, :cap}
-        {token, session} -> {:ok, token, session}
+        {:error, :cap} ->
+          refused(provider, identity, :cap, meta)
+          {:error, :cap}
+
+        {token, session} ->
+          touch_identity(identity, claim)
+
+          Audit.record(
+            :signed_in,
+            %{provider: provider, identity_id: identity.id},
+            Map.put(meta, :account_id, account.id)
+          )
+
+          {:ok, token, session}
       end
     else
-      # A refusal anyone can cause is recorded under the refusal budget.
-      if Security.limit(:refusal_peer, Map.get(meta, :ip, "")) == :ok do
-        Audit.record(
-          :sign_in_refused,
-          %{provider: provider, identity_id: identity.id, reason: :suspended},
-          Map.put(meta, :account_id, identity.account_id)
-        )
-      end
-
+      refused(provider, identity, :suspended, meta)
       {:error, :suspended}
+    end
+  end
+
+  # A refusal anyone can cause is recorded under the refusal budget.
+  defp refused(provider, identity, reason, meta) do
+    if Security.limit(:refusal_peer, Map.get(meta, :ip, "")) == :ok do
+      Audit.record(
+        :sign_in_refused,
+        %{provider: provider, identity_id: identity.id, reason: reason},
+        Map.put(meta, :account_id, identity.account_id)
+      )
+    end
+  end
+
+  @doc """
+  Whether signing in with this identity would get a session: true for an
+  identity nobody has yet, false when its account is at the session cap
+  with every session live. A mailed link is checked with this before it
+  is spent, so a refusal keeps it good.
+  """
+  @spec room?(:email | :github | :x, String.t()) :: boolean()
+  def room?(provider, subject) do
+    case find_identity(provider, subject) do
+      nil ->
+        true
+
+      %Identity{account_id: id} ->
+        now = Store.now()
+        idle = DateTime.add(now, -Security.session_idle())
+        all = from(s in Session, where: s.account_id == ^id)
+
+        Repo.aggregate(all, :count, skip_account: true) < Hireme.Schema.table(:sessions).cap or
+          Repo.exists?(
+            from(s in all,
+              where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
+            ),
+            skip_account: true
+          )
     end
   end
 

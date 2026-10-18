@@ -47,8 +47,14 @@ defmodule Hireme.Mfa.WebAuthn do
          public_key: :erlang.term_to_binary(credential.credential_public_key),
          sign_count: auth_data.sign_count,
          aaguid: credential.aaguid,
+         # The transports WebAuthn names, each once: the list is stored
+         # and shown, so nothing else gets in.
          transports:
-           params["transports"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.join(","),
+           params["transports"]
+           |> List.wrap()
+           |> Enum.filter(&(&1 in ~w(usb nfc ble internal hybrid smart-card)))
+           |> Enum.uniq()
+           |> Enum.join(","),
          backup_eligible: auth_data.flag_backup_eligible == true,
          backed_up: auth_data.flag_credential_backed_up == true
        }}

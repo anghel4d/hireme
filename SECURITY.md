@@ -247,7 +247,10 @@ factors, identities, keys, mask changes, lease revokes, suspension and
 step-up. Activity is kept 90 days (`Security.activity_retention_days/0`)
 and then deleted by the daily purge: an agent's op batches (`agent_ops`),
 its HELLOs (`wire_key`, `wire_key_refused`) and its leases opening and
-closing (`lease_opened`, `lease_released`).
+closing (`lease_opened`, `lease_released`). Refused key HELLOs, which
+anyone can cause, are kept 7 days (`Security.refusal_retention_days/0`).
+The purge deletes in batches, a pause between, so it never holds the
+writer for long.
 
 ## Policy numbers
 
@@ -269,7 +272,10 @@ closing (`lease_opened`, `lease_released`).
 | Agent read RPCs | 3,000 per key per wall-clock minute |
 | Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
-| Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies and notices are bounded by the daily purge; the trail's declared 10M is not enforced: its activity rows expire after 90 days, and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
+| Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
+| Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes (renames have their own 30) |
+| Pending notices | at most one per linked address per account write; each tries 8 times over about two days, then is given up; sent or given-up notices go a month later; the outbox sends round-robin across accounts |
+| Trusted host note / passkey transports | 500 bytes / the WebAuthn transport names only |
 | OAuth callbacks | 20 per peer and 300 in all in 10 minutes |
 | Renames (account and keys) | 30 per account in 10 minutes; renaming to the same name records nothing |
 | Names | key: 100 characters and 200 bytes; account: 200 and 400; no control or format characters, no run of over four combining marks |

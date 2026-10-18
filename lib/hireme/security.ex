@@ -74,6 +74,11 @@ defmodule Hireme.Security do
   @spec activity_retention_days() :: pos_integer()
   def activity_retention_days, do: 90
 
+  # Refused key HELLOs are anonymous and come at the global budget's rate;
+  # they are kept a week.
+  @spec refusal_retention_days() :: pos_integer()
+  def refusal_retention_days, do: 7
+
   # One key's wire sessions open at once; a connect loop or a leaked key
   # cannot hold the node's sessions.
   @spec key_sessions() :: pos_integer()
@@ -117,6 +122,8 @@ defmodule Hireme.Security do
     oauth_global: {:timer.minutes(10), 300},
     # Renames of an account or its keys, each a trail row.
     renames: {:timer.minutes(10), 30},
+    # Every other account.* call that writes the trail or mails a notice.
+    account_writes: {:timer.minutes(10), 60},
     agent_write: {:timer.minutes(1), 600},
     # The text bytes a key's ops may write in a minute, beside their count.
     agent_write_bytes: {:timer.minutes(1), 64 * 1024 * 1024},

@@ -97,6 +97,22 @@ defmodule HiremeWeb.Account do
   defp activity?(_, %{"passive" => true}), do: false
   defp activity?(_, _), do: true
 
+  # The methods that write the trail or mail a notice, under one budget per
+  # account (renames have their own); reads, ceremonies begun and step-up
+  # (throttled as factor attempts) are not.
+  @writes ~w(account.session.revoke account.session.revoke_others account.key.mint
+    account.key.change account.key.revoke account.lease.revoke account.identity.unlink
+    account.totp.confirm account.passkey.finish account.factor.remove
+    account.recovery.regenerate account.trusted_host.add account.trusted_host.remove)
+
+  defp safely(method, params, session, ctx)
+       when method in @writes do
+    case Hireme.Security.limit(:account_writes, session.account_id) do
+      :ok -> method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+      {:error, :rate_limited} -> {:error, %{error: "rate_limited"}}
+    end
+  end
+
   defp safely(method, params, session, ctx),
     do: method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
 
@@ -274,9 +290,28 @@ defmodule HiremeWeb.Account do
   ## Trusted hosts: operator-owned, browser plus step-up, in no key's mask.
 
   defp run("account.trusted_host.add", %{"host" => host} = p, s, meta) when is_binary(host) do
-    if Mfa.fresh?(s),
-      do: Hireme.Provenance.trust(host, text(p["note"]), ctx(meta, s)) |> host_answer(),
-      else: {:error, :step_up}
+    note = text(p["note"])
+
+    cond do
+      not Mfa.fresh?(s) ->
+        {:error, :step_up}
+
+      # A note, when there is one, is bounded like a name (500 bytes).
+      note != "" and not Hireme.Security.name?(note, 500, 500) ->
+        {:error, :invalid}
+
+      # Trusting a host already trusted with the same note changes nothing
+      # and records nothing.
+      same =
+          Enum.find(
+            Hireme.Provenance.trusted_hosts(),
+            &(&1.host == String.downcase(host) and (&1.note || "") == note)
+          ) ->
+        host_answer({:ok, same})
+
+      true ->
+        Hireme.Provenance.trust(host, note, ctx(meta, s)) |> host_answer()
+    end
   end
 
   defp run("account.trusted_host.remove", %{"id" => id}, s, meta) when is_integer(id) do

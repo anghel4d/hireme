@@ -39,4 +39,22 @@ defmodule Hireme.MailTest do
     assert Mail.Outbox.drain() == 1
     assert_email_sent(to: [{"", email}], subject: "Hireme: a second factor (totp) was added")
   end
+
+  test "the outbox sends round-robin: one account's backlog does not hold back another's" do
+    %{account: busy, email: busy_email} = sign_in()
+    %{account: other, email: other_email} = sign_in()
+    :ok = Mail.enqueue(busy.id, List.duplicate(busy_email, 120), :api_key_created, %{name: "x"})
+    :ok = Mail.enqueue(other.id, [other_email], :api_key_created, %{name: "y"})
+
+    assert Mail.Outbox.drain() == 121
+
+    order =
+      for _ <- 1..121 do
+        assert_receive {:email, mail}
+        [{_, to}] = mail.to
+        to
+      end
+
+    assert Enum.find_index(order, &(&1 == other_email)) < 2
+  end
 end
