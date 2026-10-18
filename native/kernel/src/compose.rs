@@ -20,59 +20,19 @@ use crate::board::{self, Board};
 use crate::cv::{self, Item, Overlay, Theme};
 use crate::lanes::{self, NetKind, RepOutcome};
 use crate::pipeline::{self, Stage, STAGES};
-use crate::rows::{Rows, Table, Val};
+use crate::rows::{Rows, Table};
 use crate::{keywords, Day};
 
 fn enum_name(names: &[&'static str], v: Option<u32>) -> Json {
     v.and_then(|v| names.get(v as usize)).map_or(Json::Null, |n| Json::String((*n).into()))
 }
 
-fn val(v: Val) -> Json {
-    match v {
-        Val::None => Json::Null,
-        Val::U32(x) => x.into(),
-        Val::I64(x) => x.into(),
-        Val::F64(x) => x.into(),
-        Val::Str(s) => s.into(),
-        Val::Deferred(n, h) => json!({"length": n, "sha": h.iter().map(|b| alloc::format!("{b:02x}")).collect::<String>()}),
-        Val::List(l) => l.into(),
-    }
-}
-
-/// Every column of a row, named by the catalog: enums by name, days and
-/// times as ISO dates.
+/// Every column of a row but the private and server-only ones, as a
+/// read of the replica shows it (`query`).
 pub fn row(t: &Table, id: u32) -> Json {
-    let Some(def) = schema::table_def(t.id) else { return Json::Null };
-    let mut m = Map::new();
-    for c in def.cols {
-        if c.flags & (schema::flag::SERVER_ONLY | schema::flag::PRIVATE) != 0 {
-            continue;
-        }
-        let v = t.get(id, c.id);
-        let j = match (c.type_code, c.target) {
-            (code, Some(e)) if code == schema::Type::Enum.code() => enum_name(enum_names(e), t.u32(id, c.id)),
-            (code, _) if code == schema::Type::Bool.code() => t.u32(id, c.id).map_or(Json::Null, |b| Json::Bool(b == 1)),
-            // Dates as `put` takes them back: a day `YYYY-MM-DD`, a time
-            // ISO-8601 UTC.
-            (code, _) if code == schema::Type::Day.code() => t.u32(id, c.id).map_or(Json::Null, |d| crate::day_iso(d as Day).into()),
-            (code, _) if code == schema::Type::Time.code() => match v {
-                Val::U32(s) => crate::time_iso(s as i64).into(),
-                Val::I64(s) => crate::time_iso(s).into(),
-                _ => Json::Null,
-            },
-            (code, _) if code == schema::Type::Json.code() => match &v {
-                Val::Str(s) => serde_json::from_str(s).unwrap_or(Json::String(s.clone())),
-                _ => Json::Null,
-            },
-            _ => val(v),
-        };
-        m.insert(c.name.into(), j);
-    }
-    Json::Object(m)
-}
-
-fn enum_names(name: &str) -> &'static [&'static str] {
-    schema::enum_names(name).unwrap_or(&[])
+    let Some(tm) = crate::query::model().tables.iter().find(|m| m.id == t.id) else { return Json::Null };
+    let cols: Vec<_> = tm.cols.iter().filter(|c| !c.server_only && !c.private).collect();
+    crate::query::row_out(t, id, &cols, false)
 }
 
 /// One application: its row, card, rail, heat, suggestion, coverage, CV,
