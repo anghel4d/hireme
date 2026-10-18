@@ -103,6 +103,25 @@ defmodule HiremeWeb.SessionTest do
              )
   end
 
+  test "a throttled HELLO is BYE restart, retryable, not revoked", %{session: s} do
+    {_, rw} = key(s, :read_write)
+    :ets.delete_all_objects(Hireme.RateLimit)
+
+    [last | _] =
+      for _ <- 1..25 do
+        {:stop, {:bye, reason}, _, _} =
+          Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
+
+        reason
+      end
+      |> Enum.reverse()
+
+    assert last == :restart
+
+    assert {:stop, {:bye, :restart}, _, _} =
+             Session.frame(Codec.encode_hello(:key, rw, "x"), open())
+  end
+
   test "a browser's ticket makes the operator's session, holding the channel", %{session: s} do
     ticket = Hireme.Accounts.ticket(s)
     origin = hd(HiremeWeb.Endpoint.origins())

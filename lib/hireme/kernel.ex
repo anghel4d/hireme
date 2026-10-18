@@ -65,17 +65,15 @@ defmodule Hireme.Kernel.Nif do
     otp_app: :hireme,
     crate: "nif",
     path: "native/nif",
-    # Nix builds the library itself; until native/nif exists there is nothing to build.
-    skip_compilation?:
-      Application.compile_env(:hireme, :nif_prebuilt, false) or
-        not File.exists?(Path.expand("../../native/nif/Cargo.toml", __DIR__)),
-    # Rustler names its own build nif.so; the Nix package installs libnif.so.
-    load_from:
-      {:hireme,
-       if(Application.compile_env(:hireme, :nif_prebuilt, false),
-         do: "priv/native/libnif",
-         else: "priv/native/nif"
-       )}
+    # Nix builds the library itself.
+    skip_compilation?: Application.compile_env(:hireme, :nif_prebuilt, false),
+    load_from: {:hireme, "priv/native/nif"}
+
+  {:hireme,
+   if(Application.compile_env(:hireme, :nif_prebuilt, false),
+     do: "priv/native/libnif",
+     else: "priv/native/nif"
+   )}
 
   def new, do: :erlang.nif_error(:nif_not_loaded)
   def load(_res, _boot), do: :erlang.nif_error(:nif_not_loaded)

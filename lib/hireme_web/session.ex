@@ -119,6 +119,8 @@ defmodule HiremeWeb.Session do
          {:ok, who} <- authenticate(hello, state.peer) do
       live(hello, who, state)
     else
+      # A throttled peer may come back; a bad credential may not.
+      {:error, :rate_limited} -> bye(:restart, "rate limited; retry in a minute", state)
       _ -> bye(:revoked, "credential", state)
     end
   end

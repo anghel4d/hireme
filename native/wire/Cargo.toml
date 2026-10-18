@@ -9,6 +9,8 @@ description = "hireme's frame codec: the header, every frame body, columnar tabl
 path = "src/lib.rs"
 
 [dependencies]
+# Only for LAYOUT: the declaration owns the number, this crate asserts it.
+schema = { path = "../schema", default-features = false }
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
