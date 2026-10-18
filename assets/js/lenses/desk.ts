@@ -171,10 +171,11 @@ function paint(el: HTMLElement, measure: boolean): void {
   const first = r0 * cols
   const last = Math.min(ids.length, (r1 + 1) * cols)
   const want = new Set(ids.subarray(first, last))
+  // A tile leaving the window is hidden in place, not removed: taking it back is a write, not an insert.
   for (const [id, t] of tiles) {
     if (want.has(id)) continue
     tiles.delete(id)
-    t.remove()
+    t.hidden = true
     spare.push(t)
   }
   const held = claims()
@@ -187,8 +188,9 @@ function paint(el: HTMLElement, measure: boolean): void {
       t = spare.pop() ?? (shell.content.firstElementChild!.cloneNode(true) as HTMLElement)
       t.dataset.id = String(id)
       t.dataset.sig = ""
+      t.hidden = false
       tiles.set(id, t)
-      el.append(t)
+      if (t.parentElement !== el) el.append(t)
     }
     const at = `translate(${(i % cols) * (w + GAP)}px, ${Math.floor(i / cols) * (TILE_H + GAP)}px)`
     if (t.style.transform !== at) t.style.transform = at
