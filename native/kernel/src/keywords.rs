@@ -2,8 +2,9 @@
 //! written, and their coverage by the text a composed CV shows.
 //!
 //! Extraction reads the raw listing and its format, nothing else. Markup
-//! goes first: HTML tags, comments, entities and `<style>`/`<script>`
-//! bodies, Markdown link targets, and bare URLs anywhere. Words are then runs of letters and digits (Unicode,
+//! goes first: HTML tags, comments and `<style>`/`<script>` bodies,
+//! Markdown link targets, and bare URLs anywhere; an HTML entity, in any
+//! format, reads as the character it names. Words are then runs of letters and digits (Unicode,
 //! lowercased, Latin accents folded as `text::normalize` folds them) with
 //! `+`, `#` and inner `.` kept, so "c++", "c#" and "node.js" are words
 //! and a sentence's full stop is not part of one. A word counts when it
@@ -23,7 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Bump on any change to what `extract` returns for some input.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// How many keywords a listing keeps.
 pub const TOP: usize = 12;
@@ -62,7 +63,7 @@ impl Format {
     }
 }
 
-/// The listing's prose: tags, entities, link targets and URLs blanked.
+/// The listing's prose: tags, link targets and URLs blanked, entities decoded.
 fn prose(listing: &str, format: Format) -> String {
     let (html, md) = (format == Format::Html, format == Format::Markdown);
     let mut out = String::with_capacity(listing.len());
@@ -79,10 +80,12 @@ fn prose(listing: &str, format: Format) -> String {
             Some(find_ci(rest, close).map_or(rest.len(), |j| j + close.len()))
         } else if html && c == '<' {
             Some(through('>'))
-        } else if html && c == '&' && entity(rest).is_some() {
+        } else if c == '&' && entity(rest).is_some() {
             let n = entity(rest).unwrap_or(1);
-            // An entity reads as the character it stands for, so "M&uuml;ller"
-            // is one word, as "Müller" is; a symbol is a space.
+            // An entity reads as the character it stands for in every format
+            // (HTML and Markdown decode them; a plain listing that carries one
+            // is escaped HTML), so "M&uuml;ller" is one word, as "Müller" is;
+            // a symbol is a space.
             if let Some(ch) = decoded(&rest[1..n - 1]) {
                 out.push(ch);
                 prev = ch;
@@ -132,76 +135,68 @@ fn entity(s: &str) -> Option<usize> {
     let ok = match body {
         [b'#', b'x' | b'X', hex @ ..] => !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit),
         [b'#', dec @ ..] => !dec.is_empty() && dec.iter().all(u8::is_ascii_digit),
-        name => ENTITIES.binary_search(&name).is_ok(),
+        name => ENTITIES.binary_search_by_key(&name, |e| e.0).is_ok(),
     };
     ok.then_some(end + 1)
 }
 
-/// The letter an entity's body names (`uuml`, `#252`, `#xFC`), or `None`
-/// for a symbol or punctuation, which reads as a space.
+/// The letter or digit an entity's body names (`uuml`, `alpha`, `#252`,
+/// `#xFC`), or `None` for a symbol or punctuation, which reads as a space.
 fn decoded(body: &str) -> Option<char> {
-    let c = match body.as_bytes() {
-        [b'#', b'x' | b'X', hex @ ..] => u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok().and_then(char::from_u32),
-        [b'#', dec @ ..] => core::str::from_utf8(dec).ok()?.parse::<u32>().ok().and_then(char::from_u32),
-        _ => named_letter(body),
-    }?;
-    (c.is_alphanumeric() || c == '\'').then_some(c)
+    let cp = match body.as_bytes() {
+        [b'#', b'x' | b'X', hex @ ..] => u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok()?,
+        [b'#', dec @ ..] => core::str::from_utf8(dec).ok()?.parse::<u32>().ok()?,
+        name => ENTITIES.binary_search_by_key(&name, |e| e.0).ok().map(|k| ENTITIES[k].1)?,
+    };
+    char::from_u32(cp).filter(|c| c.is_alphanumeric() || *c == '\'')
 }
 
-/// A named entity that is a letter: an accented Latin letter
-/// (`<letter><mark>`) or one of the few ligatures and runes HTML 4 names.
-fn named_letter(name: &str) -> Option<char> {
-    const MARKS: [(&str, &str, &str); 8] = [
-        ("grave", "AEIOUaeiou", "ÀÈÌÒÙàèìòù"),
-        ("acute", "AEIOUYaeiouy", "ÁÉÍÓÚÝáéíóúý"),
-        ("circ", "AEIOUaeiou", "ÂÊÎÔÛâêîôû"),
-        ("tilde", "ANOano", "ÃÑÕãñõ"),
-        ("uml", "AEIOUYaeiouy", "ÄËÏÖÜŸäëïöüÿ"),
-        ("ring", "Aa", "Åå"),
-        ("cedil", "Cc", "Çç"),
-        ("slash", "Oo", "Øø"),
-    ];
-    const WHOLE: [(&str, char); 12] = [
-        ("AElig", 'Æ'), ("aelig", 'æ'), ("OElig", 'Œ'), ("oelig", 'œ'), ("szlig", 'ß'), ("ETH", 'Ð'),
-        ("eth", 'ð'), ("THORN", 'Þ'), ("thorn", 'þ'), ("Scaron", 'Š'), ("scaron", 'š'), ("apos", '\''),
-    ];
-    if let Some(&(_, c)) = WHOLE.iter().find(|(n, _)| *n == name) {
-        return Some(c);
-    }
-    let mut chars = name.chars();
-    let base = chars.next()?;
-    let mark = chars.as_str();
-    let (_, bases, letters) = MARKS.iter().find(|(m, _, _)| *m == mark)?;
-    bases.chars().position(|b| b == base).and_then(|k| letters.chars().nth(k))
-}
-
-/// The HTML 4 named entities (sorted, for a binary search); anything
-/// else between '&' and ';' is prose ("salary&bonus;").
-const ENTITIES: &[&[u8]] = &[
-    b"AElig", b"Aacute", b"Acirc", b"Agrave", b"Alpha", b"Aring", b"Atilde", b"Auml", b"Beta", b"Ccedil",
-    b"Chi", b"Dagger", b"Delta", b"ETH", b"Eacute", b"Ecirc", b"Egrave", b"Epsilon", b"Eta", b"Euml",
-    b"Gamma", b"Iacute", b"Icirc", b"Igrave", b"Iota", b"Iuml", b"Kappa", b"Lambda", b"Mu", b"Ntilde", b"Nu",
-    b"OElig", b"Oacute", b"Ocirc", b"Ograve", b"Omega", b"Omicron", b"Oslash", b"Otilde", b"Ouml", b"Phi",
-    b"Pi", b"Prime", b"Psi", b"Rho", b"Scaron", b"Sigma", b"THORN", b"Tau", b"Theta", b"Uacute", b"Ucirc",
-    b"Ugrave", b"Upsilon", b"Uuml", b"Xi", b"Yacute", b"Yuml", b"Zeta", b"aacute", b"acirc", b"acute",
-    b"aelig", b"agrave", b"alefsym", b"alpha", b"amp", b"and", b"ang", b"apos", b"aring", b"asymp", b"atilde",
-    b"auml", b"bdquo", b"beta", b"brvbar", b"bull", b"cap", b"ccedil", b"cedil", b"cent", b"chi", b"circ",
-    b"clubs", b"cong", b"copy", b"crarr", b"cup", b"curren", b"dArr", b"dagger", b"darr", b"deg", b"delta",
-    b"diams", b"divide", b"eacute", b"ecirc", b"egrave", b"empty", b"emsp", b"ensp", b"epsilon", b"equiv",
-    b"eta", b"eth", b"euml", b"euro", b"exist", b"fnof", b"forall", b"frac12", b"frac14", b"frac34",
-    b"frasl", b"gamma", b"ge", b"gt", b"hArr", b"harr", b"hearts", b"hellip", b"iacute", b"icirc", b"iexcl",
-    b"igrave", b"image", b"infin", b"int", b"iota", b"iquest", b"isin", b"iuml", b"kappa", b"lArr",
-    b"lambda", b"lang", b"laquo", b"larr", b"lceil", b"ldquo", b"le", b"lfloor", b"lowast", b"loz", b"lrm",
-    b"lsaquo", b"lsquo", b"lt", b"macr", b"mdash", b"micro", b"middot", b"minus", b"mu", b"nabla", b"nbsp",
-    b"ndash", b"ne", b"ni", b"not", b"notin", b"nsub", b"ntilde", b"nu", b"oacute", b"ocirc", b"oelig",
-    b"ograve", b"oline", b"omega", b"omicron", b"oplus", b"or", b"ordf", b"ordm", b"oslash", b"otilde",
-    b"otimes", b"ouml", b"para", b"part", b"permil", b"perp", b"phi", b"pi", b"piv", b"plusmn", b"pound",
-    b"prime", b"prod", b"prop", b"psi", b"quot", b"rArr", b"radic", b"rang", b"raquo", b"rarr", b"rceil",
-    b"rdquo", b"real", b"reg", b"rfloor", b"rho", b"rlm", b"rsaquo", b"rsquo", b"sbquo", b"scaron", b"sdot",
-    b"sect", b"shy", b"sigma", b"sigmaf", b"sim", b"spades", b"sub", b"sube", b"sum", b"sup", b"sup1",
-    b"sup2", b"sup3", b"supe", b"szlig", b"tau", b"there4", b"theta", b"thetasym", b"thinsp", b"thorn",
-    b"tilde", b"times", b"trade", b"uArr", b"uacute", b"uarr", b"ucirc", b"ugrave", b"uml", b"upsih",
-    b"upsilon", b"uuml", b"weierp", b"xi", b"yacute", b"yen", b"yuml", b"zeta", b"zwj", b"zwnj",
+/// The HTML 4 named entities and `&apos;`, with the code point each names
+/// (sorted by name, for a binary search); anything else between '&' and ';'
+/// is prose ("salary&bonus;").
+const ENTITIES: &[(&[u8], u32)] = &[
+    (b"AElig", 198), (b"Aacute", 193), (b"Acirc", 194), (b"Agrave", 192), (b"Alpha", 913), (b"Aring", 197),
+    (b"Atilde", 195), (b"Auml", 196), (b"Beta", 914), (b"Ccedil", 199), (b"Chi", 935), (b"Dagger", 8225),
+    (b"Delta", 916), (b"ETH", 208), (b"Eacute", 201), (b"Ecirc", 202), (b"Egrave", 200), (b"Epsilon", 917),
+    (b"Eta", 919), (b"Euml", 203), (b"Gamma", 915), (b"Iacute", 205), (b"Icirc", 206), (b"Igrave", 204),
+    (b"Iota", 921), (b"Iuml", 207), (b"Kappa", 922), (b"Lambda", 923), (b"Mu", 924), (b"Ntilde", 209), (b"Nu", 925),
+    (b"OElig", 338), (b"Oacute", 211), (b"Ocirc", 212), (b"Ograve", 210), (b"Omega", 937), (b"Omicron", 927),
+    (b"Oslash", 216), (b"Otilde", 213), (b"Ouml", 214), (b"Phi", 934), (b"Pi", 928), (b"Prime", 8243), (b"Psi", 936),
+    (b"Rho", 929), (b"Scaron", 352), (b"Sigma", 931), (b"THORN", 222), (b"Tau", 932), (b"Theta", 920),
+    (b"Uacute", 218), (b"Ucirc", 219), (b"Ugrave", 217), (b"Upsilon", 933), (b"Uuml", 220), (b"Xi", 926),
+    (b"Yacute", 221), (b"Yuml", 376), (b"Zeta", 918), (b"aacute", 225), (b"acirc", 226), (b"acute", 180),
+    (b"aelig", 230), (b"agrave", 224), (b"alefsym", 8501), (b"alpha", 945), (b"amp", 38), (b"and", 8743),
+    (b"ang", 8736), (b"apos", 39), (b"aring", 229), (b"asymp", 8776), (b"atilde", 227), (b"auml", 228),
+    (b"bdquo", 8222), (b"beta", 946), (b"brvbar", 166), (b"bull", 8226), (b"cap", 8745), (b"ccedil", 231),
+    (b"cedil", 184), (b"cent", 162), (b"chi", 967), (b"circ", 710), (b"clubs", 9827), (b"cong", 8773),
+    (b"copy", 169), (b"crarr", 8629), (b"cup", 8746), (b"curren", 164), (b"dArr", 8659), (b"dagger", 8224),
+    (b"darr", 8595), (b"deg", 176), (b"delta", 948), (b"diams", 9830), (b"divide", 247), (b"eacute", 233),
+    (b"ecirc", 234), (b"egrave", 232), (b"empty", 8709), (b"emsp", 8195), (b"ensp", 8194), (b"epsilon", 949),
+    (b"equiv", 8801), (b"eta", 951), (b"eth", 240), (b"euml", 235), (b"euro", 8364), (b"exist", 8707),
+    (b"fnof", 402), (b"forall", 8704), (b"frac12", 189), (b"frac14", 188), (b"frac34", 190), (b"frasl", 8260),
+    (b"gamma", 947), (b"ge", 8805), (b"gt", 62), (b"hArr", 8660), (b"harr", 8596), (b"hearts", 9829),
+    (b"hellip", 8230), (b"iacute", 237), (b"icirc", 238), (b"iexcl", 161), (b"igrave", 236), (b"image", 8465),
+    (b"infin", 8734), (b"int", 8747), (b"iota", 953), (b"iquest", 191), (b"isin", 8712), (b"iuml", 239),
+    (b"kappa", 954), (b"lArr", 8656), (b"lambda", 955), (b"lang", 9001), (b"laquo", 171), (b"larr", 8592),
+    (b"lceil", 8968), (b"ldquo", 8220), (b"le", 8804), (b"lfloor", 8970), (b"lowast", 8727), (b"loz", 9674),
+    (b"lrm", 8206), (b"lsaquo", 8249), (b"lsquo", 8216), (b"lt", 60), (b"macr", 175), (b"mdash", 8212),
+    (b"micro", 181), (b"middot", 183), (b"minus", 8722), (b"mu", 956), (b"nabla", 8711), (b"nbsp", 160),
+    (b"ndash", 8211), (b"ne", 8800), (b"ni", 8715), (b"not", 172), (b"notin", 8713), (b"nsub", 8836),
+    (b"ntilde", 241), (b"nu", 957), (b"oacute", 243), (b"ocirc", 244), (b"oelig", 339), (b"ograve", 242),
+    (b"oline", 8254), (b"omega", 969), (b"omicron", 959), (b"oplus", 8853), (b"or", 8744), (b"ordf", 170),
+    (b"ordm", 186), (b"oslash", 248), (b"otilde", 245), (b"otimes", 8855), (b"ouml", 246), (b"para", 182),
+    (b"part", 8706), (b"permil", 8240), (b"perp", 8869), (b"phi", 966), (b"pi", 960), (b"piv", 982),
+    (b"plusmn", 177), (b"pound", 163), (b"prime", 8242), (b"prod", 8719), (b"prop", 8733), (b"psi", 968),
+    (b"quot", 34), (b"rArr", 8658), (b"radic", 8730), (b"rang", 9002), (b"raquo", 187), (b"rarr", 8594),
+    (b"rceil", 8969), (b"rdquo", 8221), (b"real", 8476), (b"reg", 174), (b"rfloor", 8971), (b"rho", 961),
+    (b"rlm", 8207), (b"rsaquo", 8250), (b"rsquo", 8217), (b"sbquo", 8218), (b"scaron", 353), (b"sdot", 8901),
+    (b"sect", 167), (b"shy", 173), (b"sigma", 963), (b"sigmaf", 962), (b"sim", 8764), (b"spades", 9824),
+    (b"sub", 8834), (b"sube", 8838), (b"sum", 8721), (b"sup", 8835), (b"sup1", 185), (b"sup2", 178), (b"sup3", 179),
+    (b"supe", 8839), (b"szlig", 223), (b"tau", 964), (b"there4", 8756), (b"theta", 952), (b"thetasym", 977),
+    (b"thinsp", 8201), (b"thorn", 254), (b"tilde", 732), (b"times", 215), (b"trade", 8482), (b"uArr", 8657),
+    (b"uacute", 250), (b"uarr", 8593), (b"ucirc", 251), (b"ugrave", 249), (b"uml", 168), (b"upsih", 978),
+    (b"upsilon", 965), (b"uuml", 252), (b"weierp", 8472), (b"xi", 958), (b"yacute", 253), (b"yen", 165),
+    (b"yuml", 255), (b"zeta", 950), (b"zwj", 8205), (b"zwnj", 8204),
 ];
 
 fn find_ci(s: &str, p: &str) -> Option<usize> {
@@ -225,7 +220,7 @@ fn counts(w: &str) -> bool {
 pub fn extract(listing: &str, format: Format) -> Vec<String> {
     // Folded before splitting, so a decomposed accent stays in its word.
     // Plain text with no URL needs no markup pass.
-    let plain = format == Format::Text && !listing.contains("http") && !listing.contains("www.");
+    let plain = format == Format::Text && !listing.contains("http") && !listing.contains("www.") && !listing.contains('&');
     let text = if plain { crate::text::fold(listing) } else { crate::text::fold(&prose(listing, format)) };
     let mut seen: BTreeMap<&str, u32> = BTreeMap::new();
     for raw in text.split(|c: char| !word_char(c)) {
@@ -371,6 +366,20 @@ mod tests {
         assert_eq!(html, ["kernel", "gpu"]);
         // An entity is the character it names: one word, folded like the
         // letter itself; an apostrophe splits as it does in plain text.
+        // Every named entity reads as its own character: a letter or digit
+        // joins the word around it, anything else splits it.
+        for &(name, cp) in ENTITIES {
+            let c = char::from_u32(cp).unwrap();
+            let name = core::str::from_utf8(name).unwrap();
+            let word = alloc::format!("zz&{name};zz");
+            let joined = c.is_alphanumeric();
+            assert_eq!(decoded(name), (joined || c == '\'').then_some(c), "{name}");
+            let k = extract(&word, Format::Html);
+            assert_eq!(k.len() == 1 && k[0].starts_with("zz") && k[0].len() > 4, joined, "{name}: {k:?}");
+        }
+        for format in [Format::Markdown, Format::Text] {
+            assert_eq!(extract("M&uuml;ller M&uuml;ller &amp; R&D; &eacute;quipe", format), ["muller", "equipe"]);
+        }
         let named = extract("M&uuml;ller M&#252;ller M&#xFC;ller d&eacute;veloppeur &#x6B;ernel don&apos;t &apos;quoted&apos;", Format::Html);
         assert_eq!(named, ["muller", "developpeur", "don", "kernel", "quoted"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
@@ -380,7 +389,7 @@ mod tests {
     #[test]
     fn the_lookup_tables_are_sorted() {
         assert!(STOP.windows(2).all(|w| w[0] < w[1]));
-        assert!(ENTITIES.windows(2).all(|w| w[0] < w[1]));
+        assert!(ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

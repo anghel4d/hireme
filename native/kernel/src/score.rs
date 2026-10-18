@@ -221,7 +221,10 @@ fn blank(c: char) -> bool {
 
 /// A sign glued to a figure that makes the figure the amount itself.
 fn sign(c: char) -> bool {
-    matches!(c, '$' | '€' | '£' | '¥' | '₹' | '₩' | '₽' | '₺' | '₪' | '₫' | '₱' | '฿' | '¢' | '°')
+    matches!(c, '$' | '£' | '¥' | '¢' | '°' | '円' | '元' | '圆' | '원' | '﷼' | '＄' | '￠' | '￡' | '￥' | '￦')
+        // The currency symbols block: € ₹ ₩ ₽ ₺ ₪ ₫ ₱ ₴ ₸ ₦ ₿ and the rest.
+        || ('\u{20a0}'..='\u{20cf}').contains(&c)
+        || c == '฿'
 }
 
 /// What separates thousands besides a comma: "250 000", "250\u{202f}000",
@@ -235,8 +238,8 @@ fn grouping(c: char) -> bool {
 /// from 200 to 999 read as thousands ("$220 base").
 pub fn high_comp(comp: &str) -> bool {
     let b = comp.as_bytes();
-    let at = |j: usize| comp[j..].chars().next();
-    let before = |j: usize| comp[..j].chars().next_back();
+    let at = |j: usize| comp.get(j..).and_then(|t| t.chars().next());
+    let before = |j: usize| comp.get(..j).and_then(|t| t.chars().next_back());
     let mut i = 0;
     let mut best = 0f64;
     while i < b.len() {
@@ -249,18 +252,25 @@ pub fn high_comp(comp: &str) -> bool {
         let mut frac = 0f64;
         let mut scale = 0.1;
         let mut in_frac = false;
+        // Digits since the last separator, and whether one was taken: the
+        // first group has one to three digits, every later one three.
+        let mut run = 0u32;
+        let mut grouped = false;
         loop {
             match b.get(i) {
-                Some(b',') => {}
+                Some(b',') => run = 0,
                 Some(b'.') if !in_frac => in_frac = true,
                 Some(&d) if d.is_ascii_digit() && in_frac => {
                     frac += (d - b'0') as f64 * scale;
                     scale /= 10.0;
                 }
-                Some(&d) if d.is_ascii_digit() => n = n * 10.0 + (d - b'0') as f64,
+                Some(&d) if d.is_ascii_digit() => {
+                    n = n * 10.0 + (d - b'0') as f64;
+                    run += 1;
+                }
                 // A separator inside the integer part, between a digit and a
                 // group of exactly three digits.
-                Some(_) if !in_frac && b[i - 1].is_ascii_digit() => match at(i) {
+                Some(_) if !in_frac && b[i - 1].is_ascii_digit() && (1..=3).contains(&run) && (!grouped || run == 3) => match at(i) {
                     Some(c) if grouping(c) => {
                         let g = i + c.len_utf8();
                         let three = g + 3 <= b.len() && b[g..g + 3].iter().all(u8::is_ascii_digit);
@@ -268,6 +278,8 @@ pub fn high_comp(comp: &str) -> bool {
                             break;
                         }
                         i = g;
+                        run = 0;
+                        grouped = true;
                         continue;
                     }
                     _ => break,
@@ -333,7 +345,8 @@ pub fn high_comp(comp: &str) -> bool {
             b'm' => 0.0,
             _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
             // A sign or unit glued on ("250¥", "30°") is the amount itself.
-            _ if glued.is_some_and(sign) => v,
+            // An ASCII "$" after the figure is only a sign ("250$" is 250k).
+            _ if glued.is_some_and(|c| sign(c) && c != '$') => v,
             // Any other glued character but space is a word ("250é").
             _ if glued.is_some_and(|c| !c.is_ascii() && !blank(c)) => 0.0,
             _ if (200.0..1_000.0).contains(&v) => v * 1e3,
@@ -467,10 +480,10 @@ mod tests {
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k", "$\t1.2M", "USD\u{202f}1.2M", "1.2M\u{a0}€", "€\u{200b}250k", "250\u{202f}000 €", "250 000 €", "CHF 250’000", "CHF 250'000"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k", "$\t1.2M", "USD\u{202f}1.2M", "1.2M\u{a0}€", "€\u{200b}250k", "250\u{202f}000 €", "250 000 €", "CHF 250’000", "CHF 250'000", "15,000,000円", "120,000,000원", "300000₴", "3000000₸", "20,000,000₦", "1.2M₩", "1.2M¥", "250$", "250$/h", "1 250 000"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut", "401\n(k)", "403\t(b)", "457\u{a0}(b)", "150\u{202f}000 €", "CHF 150’000", "5\u{a0}M users", "2 300 km", "250é"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut", "401\n(k)", "403\t(b)", "457\u{a0}(b)", "150\u{202f}000 €", "CHF 150’000", "5\u{a0}M users", "2 300 km", "250é", "2024 100", "150 0000", "199 000 €"] {
             assert!(!high_comp(no), "{no}");
         }
     }

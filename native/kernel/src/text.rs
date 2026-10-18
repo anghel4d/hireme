@@ -253,6 +253,49 @@ mod tests {
     }
 
     #[test]
+    fn fold_meets_its_specification() {
+        // Written out by hand, not derived from the tables: Latin-1's
+        // letters fold to their base, lowercased; everything else lowercases.
+        let spec = [
+            ("ÀÁÂÃÄÅàáâãäå", "aaaaaaaaaaaa"),
+            ("ÇçÈÉÊËèéêë", "cceeeeeeee"),
+            ("ÌÍÎÏìíîïÑñ", "iiiiiiiinn"),
+            ("ÒÓÔÕÖØòóôõöø", "oooooooooooo"),
+            ("ÙÚÛÜùúûüÝýÿ", "uuuuuuuuyyy"),
+            ("ÆæŒœßÐðÞþ", "aeaeoeoessddthth"),
+            ("ŁłŚśŹźŻżĆćŃńĘęĄą", "llsszzzzccnneeaa"),
+            ("ŞşŢţĞğİıŠšŽž", "ssttggiisszz"),
+            ("Ωμλ ПРИВЕТ 東京", "ωμλ привет 東京"),
+            ("ABC xyz 123 !?", "abc xyz 123 !?"),
+            ("e\u{301}u\u{308}n\u{303}", "eun"),
+        ];
+        for (input, want) in spec {
+            assert_eq!(fold(input), want, "{input}");
+        }
+    }
+
+    #[test]
+    fn fold_is_piecewise() {
+        // Folding a concatenation is the concatenation of the folds, at any
+        // split before a non-combining character: no character's fold
+        // depends on what is around it, ASCII or not.
+        let pieces = ["A", "z", " ", "9", "é", "Ü", "Ƕ", "İ", "ß", "🙂", "Ł", "Ω", "東", "Ǆ"];
+        let mut r = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..20_000 {
+            let mut a = alloc::string::String::new();
+            let mut b = alloc::string::String::new();
+            for k in 0..(r % 10) {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                let p = pieces[(r % pieces.len() as u64) as usize];
+                if k % 2 == 0 { a.push_str(p) } else { b.push_str(p) }
+            }
+            assert_eq!(fold(&alloc::format!("{a}{b}")), alloc::format!("{}{}", fold(&a), fold(&b)), "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
     fn word_needs_both_boundaries_and_starts_one() {
         let t = normalize("Infrastructure engineer at Meta FAIR");
         assert!(word(&t, "meta fair"));
