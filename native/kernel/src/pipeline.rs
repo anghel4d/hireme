@@ -318,8 +318,8 @@ pub fn check(from: Stage, to: Stage, f: Facts) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether `open_fire` (the human's command on a batch) moves a member
-/// at `from`: members packed and ready go to `open_fire`; the rest stay.
+/// Whether `open_fire` (the human's command on one application) moves it
+/// from `from`: only a `fire_ready` application goes to `open_fire`.
 pub fn opens(from: Stage) -> bool {
     from == Stage::FireReady
 }

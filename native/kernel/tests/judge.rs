@@ -87,6 +87,27 @@ fn code(r: Result<Vec<Row>, kernel::judge::Refusal>) -> u16 {
 
 use enums::stage as S;
 
+/// The day a move is judged on, through the facade: a pinned day, else the
+/// server's clock row, else `set_today`'s; never the ctx's own.
+#[test]
+fn the_day_a_move_writes_is_pinned_then_clock_then_set_today() {
+    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
+    let stage_on = |k: &mut Kernel| {
+        let ctx = Ctx { today: TODAY + 50, ..ctx() };
+        cell(&k.judge(&stage_cmd(1, S::CLOSED), &ctx).unwrap(), table::APPLICATIONS, A::STAGE_ON).cloned()
+    };
+    let day = |d: i32| Some(EVal::Val(Val::U32(d as u32)));
+    assert_eq!(stage_on(&mut k), day(TODAY));
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::CLOCK, 1);
+    b.u32s(col::clock::TODAY, [(TODAY + 1) as u32].into_iter());
+    b.done();
+    k.patch(&w.finish(), 2).unwrap();
+    assert_eq!(stage_on(&mut k), day(TODAY + 1));
+    k.pin_today(TODAY + 2);
+    assert_eq!(stage_on(&mut k), day(TODAY + 2));
+}
+
 #[test]
 fn a_move_writes_stage_pips_day_and_an_event() {
     let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
@@ -347,11 +368,18 @@ fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() 
 }
 
 /// The scoreboard counts submissions: an outreach answered without one
-/// reached `reply` with `submitted` skipped, and is not counted.
+/// reached `reply` with `submitted` skipped, and is not counted. Without
+/// pips that agree with its stage, a reply or close counts by `applied_on`.
 #[test]
 fn scoreboard_counts_only_submissions() {
     let mut w = wire::BodyWriter::new();
-    let rows: [(u32, u8, &str); 3] = [(1, enums::stage::SUBMITTED, "DDDDDDDAPP"), (2, enums::stage::REPLY, "DDSSSSSSAP"), (3, enums::stage::REPLY, "DDDDDDDDAP")];
+    let rows: [(u32, u8, &str); 5] = [
+        (1, enums::stage::SUBMITTED, "DDDDDDDAPP"),
+        (2, enums::stage::REPLY, "DDSSSSSSAP"),
+        (3, enums::stage::REPLY, "DDDDDDDDAP"),
+        (4, enums::stage::CLOSED, ""),
+        (5, enums::stage::REPLY, "DDDDDDDAPP"),
+    ];
     let mut b = w.block(table::APPLICATIONS, rows.len());
     b.u32s(A::ID, rows.iter().map(|r| r.0))
         .u32s(A::NO, rows.iter().map(|r| r.0))
@@ -359,14 +387,14 @@ fn scoreboard_counts_only_submissions() {
         .strs(A::PIPS, rows.iter().map(|r| r.2))
         .strs(A::COMPANY, rows.iter().map(|_| "Co"))
         .strs(A::ROLE, rows.iter().map(|_| "R"))
-        .u32s(A::APPLIED_ON, rows.iter().map(|r| if r.0 == 2 { wire::NONE } else { TODAY as u32 }))
+        .u32s(A::APPLIED_ON, rows.iter().map(|r| if matches!(r.0, 2 | 4) { wire::NONE } else { TODAY as u32 }))
         .u32s(A::HEAT_OVERRIDE, rows.iter().map(|_| 0));
     b.done();
     let mut k = Kernel::new();
     k.set_today(TODAY);
     k.boot(&w.finish(), 1).unwrap();
     let board = k.overview(0);
-    assert_eq!(board["scoreboard"]["submitted"], 2, "{board}");
-    assert_eq!(board["scoreboard"]["submitted_today"], 2);
+    assert_eq!(board["scoreboard"]["submitted"], 3, "{board}");
+    assert_eq!(board["scoreboard"]["submitted_today"], 3);
 }
 

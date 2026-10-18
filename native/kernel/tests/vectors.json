@@ -1018,6 +1018,148 @@
           ]
         }
       ]
+    },
+    {
+      "name": "with no citizenships set, a charted place is unknown, not away: an onsite seat there is never killed for location",
+      "today": 20000,
+      "rows": {
+        "atlas": [
+          {
+            "id": 1,
+            "kind": "country",
+            "iso2": "PT",
+            "name": "Portugal",
+            "atlas_position": 1
+          }
+        ],
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "gated",
+            "company": "Acme",
+            "role": "Software Engineer",
+            "place_id": 1,
+            "work_mode": "onsite"
+          }
+        ]
+      },
+      "steps": [
+        {
+          "view": {
+            "min_score": 16
+          },
+          "ids": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "name": "closing an answered outreach is no new contact: the company's load keeps decaying from replied_on",
+      "today": 20000,
+      "rows": {
+        "batches": [
+          {
+            "id": 9,
+            "code": "B9",
+            "ordinal": 1,
+            "fire": "hold"
+          }
+        ],
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 20000,
+            "applied_on": 20000
+          },
+          {
+            "id": 2,
+            "no": 2,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 20000,
+            "applied_on": 20000
+          },
+          {
+            "id": 3,
+            "no": 3,
+            "stage": "reply",
+            "pips": "DDSSSSSSAP",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 19940,
+            "replied_on": 19940
+          },
+          {
+            "id": 4,
+            "no": 4,
+            "stage": "draft_ready",
+            "company": "google",
+            "role": "Senior Software Engineer",
+            "batch_id": 9,
+            "stage_on": 20000
+          }
+        ]
+      },
+      "steps": [
+        {
+          "command": "stage",
+          "target": 4,
+          "params": {
+            "stage": "fire_ready"
+          },
+          "refusal": "heat",
+          "data": {
+            "reason": "company_cap",
+            "company_load": 2.3047534135511114,
+            "to": "fire_ready",
+            "allow": false
+          }
+        },
+        {
+          "command": "stage",
+          "target": 3,
+          "params": {
+            "stage": "closed"
+          },
+          "human": true,
+          "apply": true,
+          "effects": [
+            {
+              "table": "applications",
+              "id": 3,
+              "cells": {
+                "stage": "closed"
+              }
+            },
+            {
+              "table": "events",
+              "id": 0,
+              "cells": {}
+            }
+          ]
+        },
+        {
+          "command": "stage",
+          "target": 4,
+          "params": {
+            "stage": "fire_ready"
+          },
+          "refusal": "heat",
+          "data": {
+            "reason": "company_cap",
+            "company_load": 2.3047534135511114,
+            "to": "fire_ready",
+            "allow": false
+          }
+        }
+      ]
     }
   ]
 }

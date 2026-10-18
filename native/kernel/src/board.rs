@@ -239,10 +239,11 @@ pub fn settings(rows: &Rows) -> Option<(&Table, u32)> {
 }
 
 /// Whether a place is "home": in a country the operator is a citizen of,
-/// read from the atlas projection (a city through its country).
+/// read from the atlas projection (a city through its country). With no
+/// citizenships set, every place is unknown: nothing is away.
 fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> {
     let at = rows.table(table::ATLAS)?;
-    if !at.has(place) {
+    if citizenships.is_empty() || !at.has(place) {
         return None;
     }
     let iso2 = at.str(place, col::atlas::ISO2).or_else(|| {
@@ -252,16 +253,37 @@ fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> 
     Some(citizenships.iter().any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
-/// Whether an application row was ever submitted, by its rail.
+/// Whether anything went out for an application row (submitted, or an
+/// outreach answered), by its rail.
 pub fn sent(t: &Table, id: u32) -> bool {
-    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)) else { return false };
-    crate::pipeline::sent(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
+    match stored_rail(t, id) {
+        Ok(rail) => crate::pipeline::sent(&rail),
+        // Answered: something went out, a submission or an outreach.
+        Err(Some(Stage::Reply)) => true,
+        Err(_) => day(t, id, A::APPLIED_ON).is_some() || day(t, id, A::REPLIED_ON).is_some(),
+    }
 }
 
 /// Whether an application row was submitted (not merely answered), by its rail.
 pub fn submitted(t: &Table, id: u32) -> bool {
-    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)) else { return false };
-    crate::pipeline::submitted(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
+    match stored_rail(t, id) {
+        Ok(rail) => crate::pipeline::submitted(&rail),
+        Err(_) => day(t, id, A::APPLIED_ON).is_some(),
+    }
+}
+
+/// The row's rail. Before `submitted` the stage alone says what happened;
+/// a reply or a close without stored pips that agree with it does not (an
+/// outreach is answered unsubmitted, a listing may close unsent), so it
+/// answers `Err(stage)` and the dates decide.
+fn stored_rail(t: &Table, id: u32) -> Result<crate::pipeline::Rail, Option<Stage>> {
+    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).ok_or(None)?;
+    let pips = t.str(id, A::PIPS).and_then(crate::pipeline::decode).filter(|r| crate::pipeline::current(r) == stage);
+    match (pips, stage) {
+        (Some(rail), _) => Ok(rail),
+        (None, Stage::Reply | Stage::Closed) => Err(Some(stage)),
+        (None, _) => Ok(crate::pipeline::initial(stage)),
+    }
 }
 
 /// The governor's seat for one application row. Its score is the stored
@@ -277,6 +299,7 @@ pub fn seat(t: &Table, id: u32) -> Option<Seat> {
         stage,
         stage_on: day(t, id, A::STAGE_ON),
         applied_on: day(t, id, A::APPLIED_ON),
+        replied_on: day(t, id, A::REPLIED_ON),
         sent: sent(t, id),
         score: t.u32(id, A::SCORE_100).map_or(0, |s| s.min(100) as u8),
         batch_id: t.u32(id, A::BATCH_ID),
@@ -530,7 +553,7 @@ impl Board {
         if let Some((st, id)) = settings(rows) {
             s.goal_total = st.u32(id, col::settings::GOAL_TOTAL);
             s.goal_daily = st.u32(id, col::settings::GOAL_DAILY);
-            s.goal_days_left = day(st, id, col::settings::GOAL_ON).map(|d| d - today);
+            s.goal_days_left = day(st, id, col::settings::GOAL_ON).map(|d| d.saturating_sub(today));
         }
         s
     }

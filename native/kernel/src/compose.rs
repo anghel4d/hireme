@@ -3,9 +3,10 @@
 //! atlas and the lanes. A document is a pure function of the resident
 //! rows and `today`; the browser and `hireme-mcp` render the same one.
 //!
-//! Raw text the operator or an agent wrote (`listing_raw` is deferred and
-//! never here; notes, prose, letters, event bodies are) is returned as
-//! written; marking it untrusted is the MCP's job at its edge.
+//! Short text the operator or an agent wrote is returned as written;
+//! deferred text (`listing_raw`, notes, prose, letters, event bodies) is
+//! here only as its stub, `{length, sha}`, read in full through `text`.
+//! Marking it untrusted is the MCP's job at its edge.
 
 use alloc::string::String;
 use alloc::vec::Vec;

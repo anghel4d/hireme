@@ -9,17 +9,25 @@
 //! - `judge(res, op, ctx)` and `judge_dirty` (the same on a dirty CPU
 //!   scheduler) → `{:ok, effects}` | `{:refused, code, data_json}` |
 //!   `{:error, :panic}`. `op` is one op in the OPS layout; `ctx` is
-//!   `%{actor: :human | :key, key_id, now_day, now_s, held_ids, ...}`.
+//!   `%{actor: :human | :key, key_id: id | nil, now_day, now_s, held_ids,
+//!   ...}`, every key present (`now_day` a day 0..=9999-12-31), else
+//!   `badarg`.
 //!   `effects` are `[{table_id, row_id, [{col_id, value}]}]` in write
 //!   order, `row_id` 0 an insert; a value is an integer, float, binary or
 //!   `nil` (bool 0/1, day = days since 1970-01-01, enum = its code), and
 //!   a ref to a row inserted by the same effects is `{:new, k}` (the
 //!   k-th insert).
-//! - `board_ids(res, stage_code | nil)` → application ids in board order.
+//! - `board_ids(res, stage_code | nil)` → application ids in board order
+//!   (none for a code that is no stage).
 //! - `keywords_version()`.
 //!
 //! A panic in the kernel is caught here and answered `{:error, :panic}`;
 //! the sequencer then rebuilds the resource from SQLite.
+
+// `with` turns a kernel panic into `{:error, :panic}` and the sequencer
+// rebuilds the resource; under panic=abort that would abort the BEAM.
+#[cfg(panic = "abort")]
+compile_error!("the NIF catches kernel panics: build it with panic=unwind");
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
@@ -81,15 +89,25 @@ struct CtxIn {
     held: Vec<u32>,
 }
 
+/// The last day a date column holds, 9999-12-31.
+const LAST_DAY: i64 = 2_932_896;
+
+/// A ctx that is not exactly the documented map is `badarg`: a missing or
+/// out-of-range day must never judge as day 0 and persist as a date.
 fn ctx_in(t: Term) -> NifResult<CtxIn> {
-    let get = |k: Atom| t.map_get(k).ok();
-    let actor: Atom = get(atoms::actor()).map(|v| v.decode()).transpose()?.unwrap_or(atoms::key());
+    let get = |k: Atom| t.map_get(k).map_err(|_| rustler::Error::BadArg);
+    let actor: Atom = get(atoms::actor())?.decode()?;
+    if actor != atoms::human() && actor != atoms::key() {
+        return Err(rustler::Error::BadArg);
+    }
+    let today: i64 = get(atoms::now_day())?.decode()?;
+    let today = i32::try_from(today).ok().filter(|d| (0..=LAST_DAY).contains(&(*d as i64))).ok_or(rustler::Error::BadArg)?;
     Ok(CtxIn {
         human: actor == atoms::human(),
-        key_id: get(atoms::key_id()).and_then(|v| v.decode::<u32>().ok()),
-        today: get(atoms::now_day()).map(|v| v.decode::<i64>()).transpose()?.unwrap_or(0) as i32,
-        now: get(atoms::now_s()).map(|v| v.decode::<i64>()).transpose()?.unwrap_or(0),
-        held: get(atoms::held_ids()).and_then(|v| v.decode::<Vec<u32>>().ok()).unwrap_or_default(),
+        key_id: get(atoms::key_id())?.decode()?,
+        today,
+        now: get(atoms::now_s())?.decode()?,
+        held: get(atoms::held_ids())?.decode()?,
     })
 }
 
@@ -145,7 +163,11 @@ fn judge_dirty<'a>(env: Env<'a>, res: ResourceArc<Res>, op: Binary, ctx: Term<'a
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn board_ids(res: ResourceArc<Res>, stage: Option<u8>) -> Vec<u32> {
-    with(&res, |k| k.board_ids(stage.and_then(Stage::from_u8))).unwrap_or_default()
+    with(&res, |k| match stage.map(Stage::from_u8) {
+        Some(None) => Vec::new(),
+        stage => k.board_ids(stage.flatten()),
+    })
+    .unwrap_or_default()
 }
 
 #[rustler::nif]

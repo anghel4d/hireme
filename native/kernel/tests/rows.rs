@@ -240,4 +240,14 @@ fn an_unreadable_table_arrives_as_an_empty_block_and_is_emptied() {
     rows.boot(&w.finish(), 2).unwrap();
     assert_eq!(rows.table(5).map_or(0, |t| t.len()), 0);
     assert_eq!(rows.table(9).unwrap().str(3, S), Some("x"));
+    // The server sends it as an id column with no rows.
+    let mut w = wire::BodyWriter::new();
+    block(&mut w, 5, &[(7, vec![(U, Val::U32(1))])], &[U]);
+    rows.boot(&w.finish(), 3).unwrap();
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(5, 0);
+    b.u32s(1, std::iter::empty());
+    b.done();
+    rows.boot(&w.finish(), 4).unwrap();
+    assert_eq!(rows.table(5).map_or(0, |t| t.len()), 0);
 }

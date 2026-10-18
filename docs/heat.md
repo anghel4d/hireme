@@ -25,8 +25,10 @@ three things:
 - its **ATS vendor** (from `listing_url`, else `canonical_url`),
 - its **ATS tenant** (one company's board on that vendor).
 
-The load decays from the submission (`applied_on`) once sent, else from
-the day it entered its stage: `load · 0.5^(days / half_life)`. A peer
+The load decays from the latest of `applied_on` and `replied_on` that
+exists, else from the day it entered its stage: `load · 0.5^(days /
+half_life)`. Closing an answered application is no new contact with the
+company, so it does not re-warm it. A peer
 whose decayed load is under `load_floor` stops counting for anything,
 load and penalties alike, because decay never reaches zero and a company
 whose cap is one application's load would otherwise never take a second
@@ -90,8 +92,9 @@ when the name has a systems, runtime, infra or lab word; else `small`.
 
 Every number is overridable per account by name in
 `settings.heat_config` (a JSON object); an unknown key, a non-number, or a
-value that is not positive and finite is ignored, so a bad setting cannot
-loosen anything by accident.
+value that is not positive and finite is ignored (the two penalties may be
+0, and `application_load` is at most 16), so a bad setting cannot loosen
+anything by accident.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

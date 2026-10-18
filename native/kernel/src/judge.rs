@@ -25,8 +25,8 @@
 //!
 //! | code | data |
 //! | --- | --- |
-//! | `stage` | `{from, to, rule}`, rule one of `needs_batch`, `open_fire_by_command`, `sent`, `not_fire_ready` |
-//! | `fire_hold` | `{from, to}` |
+//! | `stage` | `{from, to, rule}`, rule one of `needs_batch`, `open_fire_by_command`, `sent`, `not_sent`, `not_fire_ready` |
+//! | `fire_hold` | `{from, to, rule: "fire_hold"}` |
 //! | `heat` | the governor's verdict plus `to`; or `{need: "reason"}` for a blank override |
 //! | `lineage_busy` | `{lineage_id, generation}`: rewrites are off, only new overlays |
 //! | `cooldown` | `{lineage_id, opened_on, days_left}` (open_generation too early), or `{lineage_id, opened_on, need: "open_generation"}` (the window has passed) |
@@ -51,9 +51,9 @@ use crate::{cv, keywords, Day};
 pub struct Ctx<'a> {
     /// The day the op is judged on, in days since 1970-01-01 (UTC).
     /// Through `Kernel::judge` and `Kernel::predict` the kernel's own day
-    /// replaces it (`Kernel::today`: the sequencer's pinned day, else the
-    /// server's clock row, else this); only a direct caller of `judge`
-    /// decides it.
+    /// replaces it (`Kernel::today`: the day pinned by `pin_today`, else
+    /// the server's clock row, else the day last given to `set_today`, 0
+    /// before any); only a direct caller of `judge` decides it.
     pub today: Day,
     /// Unix seconds.
     pub now: i64,

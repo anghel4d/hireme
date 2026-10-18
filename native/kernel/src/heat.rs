@@ -4,8 +4,8 @@
 //!
 //! Every hot application (queued, or replied or closed after being sent)
 //! puts a load of `application_load` on its company, its ATS vendor and
-//! its ATS tenant, decaying from its submission (else the day it entered
-//! its stage) with each one's half-life: `load · 0.5^(days / half_life)`,
+//! its ATS tenant, decaying from the latest of its submission and its
+//! reply that exists (else the day it entered its stage) with each one's half-life: `load · 0.5^(days / half_life)`,
 //! and counting for nothing once under `load_floor`. A company's cap scales with its size
 //! tier. An application entering the queue adds its increment: the base
 //! load, plus `same_department_penalty` if a hot peer at that company
@@ -202,7 +202,8 @@ pub struct SeatIn<'a> {
     pub stage: Stage,
     pub stage_on: Option<Day>,
     pub applied_on: Option<Day>,
-    /// Whether it was ever submitted (its rail's `submitted` rung reached).
+    pub replied_on: Option<Day>,
+    /// Whether anything went out (its rail's `submitted` or `reply` rung reached).
     pub sent: bool,
     pub score: u8,
     pub batch_id: Option<u32>,
@@ -226,7 +227,9 @@ impl Seat {
             ats,
             stage: f.stage,
             hot: f.stage.queued() || (f.stage.after_send() && sent),
-            since: if f.stage.after_send() { f.applied_on.or(f.stage_on) } else { f.stage_on },
+            // The last contact with the company, else the stage's day: closing
+            // an answered application is no new contact and must not re-warm it.
+            since: f.applied_on.max(f.replied_on).or(f.stage_on),
             score: f.score,
             batch_id: f.batch_id,
             overridden: f.heat_override && !f.heat_override_reason.trim().is_empty(),
@@ -900,6 +903,7 @@ mod tests {
             stage: Stage::Gated,
             stage_on: None,
             applied_on: None,
+            replied_on: None,
             sent: false,
             score: 50,
             batch_id: None,

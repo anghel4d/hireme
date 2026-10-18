@@ -2,13 +2,14 @@
 //! no panic, and a bounded run time. Agents write these fields, so any
 //! string an op can carry must be survivable: multi-byte signs, combining
 //! marks, emoji, right-to-left text, NUL, the edges of the scalar range,
-//! and very long runs. native/kernel/fuzz.mjs drives the same shapes
+//! and very long runs. native/kernel/fuzz.mjs drives arbitrary text
 //! through the wasm exports.
 
 use std::time::{Duration, Instant};
 
 use kernel::abi::{self, Kernel};
 use kernel::judge::Ctx;
+use kernel::pipeline::{self, Stage};
 use kernel::{ats, atlas, cv, keywords, org, score, text};
 use schema::{col, enums, table};
 
@@ -120,6 +121,18 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
         let mut w = wire::BodyWriter::new();
         let mut b = w.block(table::APPLICATIONS, n);
         let col = |i: usize| texts.iter().map(move |t| t[i].as_str());
+        // Most rails are real ones, so the paths reading a rail run; the
+        // rest are arbitrary text, which falls back to the stage.
+        let rails: Vec<String> = (0..n)
+            .map(|i| match i % 3 {
+                0 => texts[i][8].clone(),
+                k => {
+                    let s = Stage::from_u8((i % 10) as u8).unwrap();
+                    let rail = if k == 1 { pipeline::initial(s) } else { pipeline::move_to(&pipeline::initial(Stage::Discovered), s) };
+                    String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
+                }
+            })
+            .collect();
         b.u32s(A::ID, 1..=n as u32)
             .u32s(A::NO, 1..=n as u32)
             .u32s(A::STAGE, (0..n).map(|i| (i % 10) as u32))
@@ -134,7 +147,7 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             .strs(A::KEYWORDS, col(5))
             .strs(A::STAGE_NOTES, col(6))
             .strs(A::CV_THEME, col(7))
-            .strs(A::PIPS, col(8))
+            .strs(A::PIPS, rails.iter().map(String::as_str))
             .strs(A::CANONICAL_URL, col(9));
         b.done();
         let mut b = w.block(table::CV_OVERLAYS, n);
@@ -142,9 +155,17 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             .u32s(col::cv_overlays::APPLICATION_ID, 1..=n as u32)
             .u32s(col::cv_overlays::ITEM_ID, (0..n).map(|i| 1 + (i % 7) as u32))
             .u32s(col::cv_overlays::MODE, (0..n).map(|i| (i % 3) as u32))
+            .u32s(col::cv_overlays::LINEAGE_ID, (0..n).map(|i| if i % 4 == 0 { wire::NONE } else { 1 + (i % 2) as u32 }))
             .strs(col::cv_overlays::TITLE, col(10))
             .strs(col::cv_overlays::BODY, col(11))
             .strs(col::cv_overlays::REASON, col(12));
+        b.done();
+        let mut b = w.block(table::CV_LINEAGES, 2);
+        b.u32s(col::cv_lineages::ID, 1..=2)
+            .u32s(col::cv_lineages::CORPORATION_ID, [1, 2].into_iter())
+            .u32s(col::cv_lineages::GENERATION, [1, 2].into_iter())
+            .u32s(col::cv_lineages::OPENED_ON, [(TODAY - 10) as u32, (TODAY - 100) as u32].into_iter())
+            .u32s(col::cv_lineages::REWRITES_ALLOWED, [1, 0].into_iter());
         b.done();
         // An event's body is deferred: it reaches the kernel as a stub, its kind as text.
         let mut b = w.block(table::EVENTS, n);
