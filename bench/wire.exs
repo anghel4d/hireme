@@ -2,6 +2,7 @@
 #
 #   BOOT <= 2 MiB deflated at 10k applications with listing_raw deferred
 #   PATCH <= 64 KiB per burst
+#   judge <= 200 us in the NIF (every shape's p99, via Hireme.Kernel.judge/3)
 #   find p99 <= 10 ms at 50k places
 #   op round trip p50 <= 5 ms on loopback
 #   256 ops per OPS frame
@@ -12,15 +13,22 @@
 #   DATABASE_PATH=/tmp/hireme-bench.db HIREME_GATE=off PHX_SERVER=true PORT=4100 \
 #     mix run bench/wire.exs
 #
+# With the gate measured too (UDP 4433 free; the probe is the gate's example):
+#
+#   cargo build --release --manifest-path native/Cargo.toml -p gate --example probe
+#   DATABASE_PATH=/tmp/hireme-bench.db PHX_SERVER=true PORT=4100 GATE_SOCKET=/tmp/g.sock \
+#     BENCH_PROBE=native/target/release/examples/probe mix run bench/wire.exs
+#
 # DATABASE_PATH must name a file that does not exist yet: every number is for
 # a fresh account on an empty database, seeded through OPS frames the way a
 # client writes. Sizes are exact; times are wall clock on this machine, with
 # the seed and counts printed so a run can be repeated. One JSON line per
-# bound goes to stdout at the end.
+# bound goes to stdout at the end, and the run exits 1 if any bound fails.
 
 alias Hireme.{Accounts, Keys, Schema}
 alias HiremeWeb.Session
 alias HiremeWeb.Wire.Codec
+import Ecto.Query, only: [from: 2]
 
 defmodule Bench do
   @moduledoc false
@@ -444,7 +452,7 @@ over_refused =
 
 ## find at 50k places.
 
-{place_us, op} =
+{place_us, _op} =
   Bench.us(fn ->
     1..places
     |> Enum.chunk_every(256)
@@ -539,7 +547,68 @@ find_shapes =
 
 find_times = Enum.map(find_times, &elem(&1, 1))
 
+## judge across Rustler: Hireme.Kernel.judge/3 on the sequencer's own
+## resource (the 10k desk), as check 4 calls it, for each op shape.
+
+[{sequencer, _}] = Registry.lookup(Hireme.Sequencer.Registry, account_id)
+kernel = :sys.get_state(sequencer).kernel
+
+app_ids =
+  Hireme.Repo.all(
+    from(a in Hireme.Rows.Application, select: a.id, order_by: fragment("random()"), limit: 500)
+  )
+
+judge_shapes = %{
+  "score edit" => fn i -> %{score_100: rem(i, 100)} end,
+  "prose edit" => fn i -> %{notes: Bench.prose(60 + rem(i, 40))} end
+}
+
+{judge_p99, judge_refused} =
+  for {shape, cells} <- judge_shapes, reduce: {%{}, 0} do
+    {p99s, refused} ->
+      {times, refused} =
+        Enum.map_reduce(1..2_000, refused, fn i, refused ->
+          id = Enum.at(app_ids, rem(i, length(app_ids)))
+          {op_id, :put, _, subject, _, _, encoded} = Bench.put(:applications, cells.(i))
+          raw = IO.iodata_to_binary(Codec.encode_op({op_id, :put, 0, subject, id, nil, encoded}))
+          now = DateTime.utc_now()
+
+          ctx = %{
+            actor: :human,
+            key_id: nil,
+            now_day: Date.diff(DateTime.to_date(now), ~D[1970-01-01]),
+            now_s: DateTime.to_unix(now),
+            session_label: "bench",
+            held_ids: [],
+            target: id
+          }
+
+          t0 = System.monotonic_time(:microsecond)
+          {result, _} = Hireme.Kernel.judge(kernel, raw, ctx)
+          t = System.monotonic_time(:microsecond) - t0
+          {t, if(match?({:ok, _}, result), do: refused, else: refused + 1)}
+        end)
+
+      {Map.put(p99s, shape, Bench.percentile(times, 99)), refused}
+  end
+
 ## Op round trip across the loopback: one put over the /wire WebSocket, ACK back.
+
+# BENCH_NETEM (netem's arguments, e.g. "delay 25ms loss 1%") puts a lossy
+# link on lo for the round trip and the carrier, and only inside a named
+# network namespace (bench/netns.sh), never on the machine's own lo.
+netem = System.get_env("BENCH_NETEM")
+
+qdisc = fn args ->
+  {_, 0} = System.cmd("sudo", ["-n", "tc", "qdisc" | args], stderr_to_stdout: true)
+end
+
+if netem do
+  {name, 0} = System.cmd("ip", ["netns", "identify"])
+  if String.trim(name) == "", do: raise("BENCH_NETEM runs only inside a named netns")
+  qdisc.(["replace", "dev", "lo", "root", "netem" | String.split(netem)])
+  IO.puts(:stderr, "bench: netem #{netem} on #{String.trim(name)}'s lo")
+end
 
 roundtrips =
   if HiremeWeb.Endpoint.config(:server) do
@@ -640,6 +709,8 @@ carrier_gate =
     _ -> []
   end
 
+if netem, do: qdisc.(["del", "dev", "lo", "root"])
+
 ## The agent's budget: a read/write key writing flat out, 64 ops a batch.
 
 {:ok, %{secret: secret}} =
@@ -693,22 +764,32 @@ lines = [
     }
   ),
   Bench.line(
-    # The bound holds only if every shape's p99 holds, not the pool's.
-    "find_worst_shape_p99_us_at_#{places}_places_over_wire",
-    find_shapes |> Map.values() |> Enum.max(fn -> nil end),
+    # The bound is find as a whole (shannon's ruling); each shape's p99 is
+    # reported beside it.
+    "find_p99_us_at_#{places}_places_over_wire",
+    Bench.percentile(find_times, 99),
     10_000,
     "us",
     %{
       p50: Bench.percentile(find_times, 50),
-      pooled_p99: Bench.percentile(find_times, 99),
+      worst_shape_p99: find_shapes |> Map.values() |> Enum.max(fn -> nil end),
       queries: length(find_times),
       p99_by_shape: find_shapes
     }
   ),
   Bench.line(
-    "op_round_trip_p50_us_loopback",
+    # Every shape's p99, across the NIF boundary, on a normal scheduler.
+    "judge_worst_shape_p99_us_at_#{apps}_apps_via_nif",
+    judge_p99 |> Map.values() |> Enum.max(),
+    200,
+    "us",
+    %{p99_by_shape: judge_p99, refused: judge_refused, calls: 2_000 * map_size(judge_shapes)}
+  ),
+  Bench.line(
+    # The bound is on loopback; under netem the number is a measurement.
+    if(netem, do: "op_round_trip_p50_us_netem", else: "op_round_trip_p50_us_loopback"),
     (roundtrips != [] && Bench.percentile(roundtrips, 50)) || nil,
-    5_000,
+    if(netem, do: nil, else: 5_000),
     "us",
     %{p99: roundtrips != [] && Bench.percentile(roundtrips, 99), samples: length(roundtrips)}
   ),
@@ -733,3 +814,11 @@ lines = [
 ]
 
 for l <- lines, do: IO.puts(Jason.encode!(l))
+
+# A bound that fails fails the run.
+failed = for %{pass: false, bound: name} <- lines, do: name
+
+if failed != [] do
+  IO.puts(:stderr, "bench: FAILED #{Enum.join(failed, ", ")}")
+  System.halt(1)
+end
