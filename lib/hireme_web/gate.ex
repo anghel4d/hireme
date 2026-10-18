@@ -350,9 +350,10 @@ defmodule HiremeWeb.Gate do
   end
 
   # The CONNECT's user agent, trailing the OPEN; "" when the gate sent none.
-  # Clipped as the WebSocket path clips it: printable ASCII, 200 bytes.
+  # Clipped as the WebSocket path clips it: printable ASCII, any other byte
+  # a "?", 200 bytes.
   defp user_agent(<<u::16, ua::binary-size(u), _::binary>>) do
-    printable = for <<c <- ua>>, c in 0x20..0x7E, into: "", do: <<c>>
+    printable = for <<c <- ua>>, into: "", do: if(c in 0x20..0x7E, do: <<c>>, else: "?")
     binary_part(printable, 0, min(200, byte_size(printable)))
   end
 

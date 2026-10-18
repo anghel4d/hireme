@@ -710,7 +710,10 @@ defmodule Hireme.World do
   end
 
   # A name the caller sent, as a refusal repeats it: 64 bytes at most.
-  defp name_echo(name) when is_binary(name), do: String.slice(name, 0, 64)
+  # Cut by bytes first: one grapheme can be any length.
+  defp name_echo(name) when is_binary(name),
+    do: name |> binary_part(0, min(64, byte_size(name))) |> trim_invalid()
+
   defp name_echo(name), do: brief(name)
 
   # A refusal names the value it refused, bounded.

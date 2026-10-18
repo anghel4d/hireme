@@ -28,7 +28,17 @@ defmodule Mix.Tasks.Hireme.Schema do
   A step written by hand that rebuilds a table (the only way SQLite changes
   a column's type, nullability or ON DELETE) runs between
   `PRAGMA legacy_alter_table = ON` and `OFF`: the ref triggers of other
-  tables name the table being renamed.
+  tables name the table being renamed. It also carries the table's
+  `sqlite_sequence` row across the rebuild, or ids are reused:
+
+      CREATE TEMP TABLE keep_seq AS SELECT seq FROM sqlite_sequence WHERE name = '<t>';
+      -- ... the rebuild: CREATE the new table, copy, DROP, RENAME ...
+      INSERT INTO sqlite_sequence (name, seq)
+        SELECT '<t>', seq FROM keep_seq
+        WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = '<t>');
+      UPDATE sqlite_sequence SET seq = (SELECT seq FROM keep_seq)
+        WHERE name = '<t>' AND seq < (SELECT seq FROM keep_seq);
+      DROP TABLE keep_seq;
 
   A database is built from the baseline when empty, and from the `NNNN`
   files it has not applied otherwise (`Hireme.Release`), so the baseline is

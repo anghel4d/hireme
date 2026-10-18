@@ -417,13 +417,17 @@ defmodule Hireme.WorldTest do
 
   test "a refusal repeats a name the caller sent at most 64 bytes long", %{account: a} do
     long = String.duplicate("x", 100_000)
+    # One grapheme of any length: a letter and its combining marks.
+    cluster = "a" <> String.duplicate("\u0301", 50_000)
     ctx = %{account_id: a.id, grants: Grants.operator()}
 
     for {method, params} <- [
           {long, %{}},
           {"find", %{"table" => long}},
           {"find", %{"table" => "corporations", "cols" => [long]}},
-          {"find", %{"table" => "corporations", "order" => long}}
+          {"find", %{"table" => "corporations", "order" => long}},
+          {"find", %{"table" => cluster}},
+          {cluster, %{}}
         ] do
       {:error, _, data} = World.call(method, params, ctx)
       assert byte_size(inspect(data)) < 400
