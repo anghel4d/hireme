@@ -12,18 +12,23 @@ the verdict and to colour the board.
 
 ## What carries heat
 
-An application in a hot stage (`fire_ready`, `open_fire`, `submitted`,
-`reply`, `closed`) puts a load of `application_load` on three things:
+An application carries heat when it is queued (`fire_ready`, `open_fire`,
+`submitted`) or in `reply`/`closed` after having been sent (its rail's
+`submitted` rung reached, or `applied_on` set). A listing closed before
+anything went out carries none. It puts a load of `application_load` on
+three things:
 
-- its **company** (the normalized `applications.company`),
+- its **company**: its `corporation_id` when linked, else the normalized
+  `applications.company`,
 - its **ATS vendor** (from `listing_url`, else `canonical_url`),
 - its **ATS tenant** (one company's board on that vendor).
 
-The load decays from the application's `stage_on` day:
-`load · 0.5^(days / half_life)`. A peer whose decayed load is under
-`load_floor` stops counting, because decay never reaches zero and a
-company whose cap is one application's load would otherwise never take a
-second one.
+The load decays from the submission (`applied_on`) once sent, else from
+the day it entered its stage: `load · 0.5^(days / half_life)`. A peer
+whose decayed load is under `load_floor` stops counting for anything,
+load and penalties alike, because decay never reaches zero and a company
+whose cap is one application's load would otherwise never take a second
+one.
 
 ## The check
 
@@ -32,7 +37,7 @@ When the `stage` command moves an application from a cold stage into
 every hot application except this one:
 
 - the company's load and the **increment**: `application_load`, plus
-  `same_department_penalty` when a hot peer at the company shares the
+  `same_department_penalty` when a live peer at the company shares the
   role's department, plus `clone_penalty` when one shares its role family
   (seniority words stripped, so "Senior" and "Staff Software Engineer"
   are clones);
@@ -40,17 +45,18 @@ every hot application except this one:
 
 It defers the move, first match wins, when:
 
-1. the application's batch already holds `ats_batch_cap` hot applications
-   on the same vendor (`ats_batch_cap`);
+1. the application's batch already holds `ats_batch_cap` queued
+   applications on the same vendor (`ats_batch_cap`);
 2. the vendor's load plus one application passes `ats_vendor_cap`;
 3. the tenant's load plus one application passes `ats_tenant_cap`;
 4. the company's load plus the increment passes its size tier's cap.
 
 An unknown vendor never trips 1–3. A deferred move is refused `heat` with
-the verdict as data, including `cooldown_days`: how long until the load
-has decayed enough for the move to fit, nothing else changing (when the
-increment alone fills the cap, until the load falls under the floor; when
-it exceeds the cap, never, and the field is null).
+the verdict as data, including `cooldown_days`: the first day every check
+passes with nothing else changing, found by searching the days ahead
+(loads and live peers only shrink, so the answer is exact). It is null
+when a batch cap holds the move (decay does not change that) or it is
+still held ten years on.
 
 **Override.** The `heat_override` command with a non-blank reason sets
 the application's flag and reason and writes a `heat` event; afterwards
