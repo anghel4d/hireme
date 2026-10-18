@@ -81,7 +81,10 @@ const PARKED: readonly Lens[] = ["desk", "focus", "world", "atlas", "outreach", 
 const parked = new Set<Lens>()
 
 const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${
-  v ? lensView(lens, v) : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
+  v ? lensView(lens, v)
+  : kernel.broken() ? html`<div class="empty"><p class="error" role="alert">This page could not load its data: the kernel did not load.</p>
+      <p><a class="button" href="${format(model.address)}">Reload</a> If it keeps failing, sign out and sign in again.</p></div>`
+  : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
 
 // The first time a lens parks, its own markup is passed (an empty one would morph it away); after that it is left alone.
 const parkedMain = (l: Lens): Html => {

@@ -179,6 +179,7 @@ export function load(hw: Boot): void {
     })
   })().catch((e: unknown) => {
     warm = false
+    broke = true
     // The root cause of whatever fails after it: pinned, so the symptoms' notices never push it out.
     notice("error", `The kernel did not load: ${describe(e).slice(0, 300)}`, 0, true)
   })
@@ -194,6 +195,10 @@ export function setGrants(read: number, write: number, mayDelete: boolean): void
   k?.set_grants(...grants, 1)
   version++
 }
+
+let broke = false
+/** Whether the kernel failed to load: then no lens that reads the replica will draw, and the page says so. */
+export const broken = (): boolean => broke
 
 /** Whether the replica is in: before it is, its lenses wait rather than draw nothing. */
 export const loaded = (): boolean => k !== null
