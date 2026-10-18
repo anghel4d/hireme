@@ -534,7 +534,10 @@ recovery codes, no SMS or email factors, CSP, named limits.
 
 New: masks enforced on BOOT, PATCH and every RPC; `human_only` commands;
 `BYE grants`; server-derived source hosts; citations and trusted hosts out
-of every mask; an audit row per agent op batch; raw text marked untrusted
+of every mask; an audit row per agent op batch within a per-account activity
+budget, past which activity is coalesced into one counted row per window
+(each key's first connection from an address is always its own row); raw
+text marked untrusted
 in MCP replies; an operator revoke for leases and sessions; the carrier
 timeout written down.
 
