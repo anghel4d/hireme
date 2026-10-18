@@ -97,6 +97,8 @@ fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 
 legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 
 .row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.row.grow > input { flex: 1 1 14em; }
+.notice .times { font-weight: 600; margin-left: 4px; }
 .stack { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .stack > label { width: min(100%, 420px); }
 .muted { color: var(--muted); }

@@ -35,6 +35,8 @@ export interface Notice {
   text: string
   /** Epoch ms after which it fades; 0 stays until dismissed. */
   until: number
+  /** How many times the same words were noticed. */
+  times?: number
   /** A root cause (the kernel did not load): newer notices never push it out. */
   pinned?: boolean
 }
@@ -220,6 +222,13 @@ let nextNotice = 1
 
 export function notice(tone: Notice["tone"], text: string, ms = tone === "error" ? 0 : 6000, pinned = false): void {
   const until = ms === 0 ? 0 : Date.now() + ms
+  // The same words again count up on the notice already shown rather than stacking a copy.
+  const same = model.notices.find((n) => n.text === text && n.tone === tone)
+  if (same) {
+    set({ notices: model.notices.map((n) => (n === same ? { ...n, times: (n.times ?? 1) + 1, until: Math.max(n.until, until) } : n)) })
+    if (ms !== 0) setTimeout(expire, ms + 50)
+    return
+  }
   // Five at most: the oldest unpinned give way; a pinned root cause stays until dismissed.
   const kept = model.notices.filter((n) => n.pinned)
   const rest = model.notices.filter((n) => !n.pinned).slice(-Math.max(0, 4 - kept.length))

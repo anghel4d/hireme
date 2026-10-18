@@ -91,7 +91,7 @@ function shell(): Html {
     </header>
     <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? lensView(lens, v) : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>
     <aside class="notices" aria-live="polite">${model.notices.map((n) => html`<div class="notice notice-${n.tone}" data-key="n${n.id}">
-      <span>${n.text}</span><button type="button" class="ghost" data-act="dismiss" data-id="${n.id}" aria-label="Dismiss">×</button></div>`)}</aside>`
+      <span>${n.text}${(n.times ?? 1) > 1 ? html` <b class="times">×${n.times}</b>` : EMPTY}</span><button type="button" class="ghost" data-act="dismiss" data-id="${n.id}" aria-label="Dismiss">×</button></div>`)}</aside>`
 }
 
 function render(): void {

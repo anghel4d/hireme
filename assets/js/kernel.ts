@@ -28,7 +28,27 @@ export class Refused extends Error {
 }
 
 /** A failed write told in a notice: a refusal by its catalog code. */
-export const failed = (e: unknown): void => notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : describe(e))
+export const failed = (e: unknown): void => notice("error", e instanceof Refused ? said(e) : describe(e))
+
+/** What a refusal means to the person who made the write: a plain sentence first, the node's words after it. */
+const SAID: Partial<Record<string, string>> = {
+  rev: "Someone changed this before your edit landed, so your edit was undone. Open it again to see their version.",
+  stale: "A newer figure is already stored, so this older one was not saved.",
+  leased: "An agent is working on this application right now, so the change was not saved.",
+  lease_missing: "This session cannot write right now.",
+  scope: "This key is not allowed to change that.",
+  human_only: "Only you can do that, from the desk.",
+  fire_hold: "Fire is on hold for this batch.",
+  rate: "Too many changes at once. Wait a moment and try again.",
+  internal: "Something went wrong on the server. Nothing was saved.",
+}
+
+function said(e: Refused): string {
+  const lead = SAID[e.code]
+  // The node's own words name the mechanism (expect_rev, a table); a mapped refusal keeps them for the console.
+  if (lead) console.info(`refused ${e.code}: ${e.message}`)
+  return lead ?? e.message.charAt(0).toUpperCase() + e.message.slice(1)
+}
 
 function refusal(r: Reply & { ok: false }): Refused {
   // Sequencer and world refusals say {code, message, data}; account.* says {error}.
