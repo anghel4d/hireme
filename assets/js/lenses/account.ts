@@ -355,7 +355,7 @@ function sessions(): Html {
   const rows = list("sessions")
   return html`<section class="card" data-key="sessions"><h2>Sessions</h2>
     <ul class="rows">${rows.map((s) => html`<li data-key="s${num(s.id)}">
-      <b>${s.current === true ? "This browser" : str(s.user_agent).slice(0, 80) || "Unknown browser"}</b>
+      <b title="${str(s.user_agent)}">${s.current === true ? "This browser" : browserName(str(s.user_agent))}</b>
       <span class="muted">${str(s.ip)} · seen ${time(s.last_seen_at)} · signed in ${time(s.authenticated_at)}</span>
       ${s.current === true ? EMPTY : confirmButton(`s${num(s.id)}`, "Revoke", "session-revoke", { id: num(s.id) })}</li>`)}</ul>
     ${rows.length > 1 ? confirmButton("others", "Sign out everywhere else", "session-others", {}) : EMPTY}
@@ -484,7 +484,7 @@ function view(): Html {
       ${v().open === "rename" ? html`<form class="row" data-submit="rename" data-act="rename"><input name="name" value="${str(account.name)}" required maxlength="200" aria-label="Account name">
           <button class="primary">Save</button><button type="button" class="ghost" data-act="close">Cancel</button></form>`
         : html`<h1>${str(account.name) || "Account"} <button type="button" class="ghost" data-act="open" data-form="rename">Rename</button></h1>`}
-      <p class="muted">${fresh > 0 ? `Confirmed for another ${Math.ceil(fresh / 60)} min.` : "Sensitive changes will ask for a factor."}</p>
+      <p class="muted">${fresh > 0 ? `Recently verified: sensitive changes go through for ${Math.ceil(fresh / 60)} more min.` : "Sensitive changes will ask for a second factor first."}</p>
     </section>
     ${v().error !== "" ? html`<p class="error" role="alert" data-key="err">${v().error}</p>` : EMPTY}
     ${stepUp()}${revealed()}${identities()}${factors()}${keys()}${leases()}${sessions()}${hosts()}${audit()}
@@ -634,3 +634,12 @@ const view_: View = {
 }
 
 export default view_
+
+/** A user agent as a person names it ("Chrome on Linux"); the raw string stays in the row's title. */
+function browserName(ua: string): string {
+  if (ua === "") return "Unknown browser"
+  const b = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\/|Chromium\//.test(ua) ? (/Headless/.test(ua) ? "Headless Chrome" : "Chrome")
+    : /Safari\//.test(ua) ? "Safari" : /hireme-mcp/i.test(ua) ? "hireme-mcp" : "A browser"
+  const os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : ""
+  return os ? `${b} on ${os}` : b
+}
