@@ -59,7 +59,6 @@ pub enum Val {
     I64(i64),
     F64(f64),
     Str(String),
-    Deferred(u32, [u8; 8]),
     List(Vec<u32>),
 }
 
@@ -75,10 +74,10 @@ impl Val {
             Value::F64(x) => Val::F64(x),
             Value::Str("") => Val::None,
             Value::Str(s) => Val::Str(String::from(s)),
-            Value::Deferred(wire::NONE, _) => Val::None,
-            Value::Deferred(n, h) => Val::Deferred(n, h),
             Value::List(l) if l.is_empty() => Val::None,
             Value::List(l) => Val::List(l.iter().collect()),
+            #[allow(unreachable_patterns)]
+            _ => Val::None,
         }
     }
 
@@ -94,7 +93,6 @@ pub enum Data {
     I64(Vec<i64>),
     F64(Vec<f64>),
     Str(Vec<String>),
-    Deferred(Vec<(u32, [u8; 8])>),
     List(Vec<Vec<u32>>),
 }
 
@@ -104,7 +102,6 @@ enum Kind {
     I64,
     F64,
     Str,
-    Deferred,
     List,
 }
 
@@ -114,7 +111,6 @@ fn kind_of_wire(ty: u8) -> Option<Kind> {
         wire::I64 => Kind::I64,
         wire::F64 => Kind::F64,
         wire::STR | wire::SYM => Kind::Str,
-        wire::DEFERRED => Kind::Deferred,
         wire::LIST => Kind::List,
         _ => return None,
     })
@@ -127,7 +123,6 @@ fn kind_of_val(v: &Val) -> Option<Kind> {
         Val::I64(_) => Kind::I64,
         Val::F64(_) => Kind::F64,
         Val::Str(_) => Kind::Str,
-        Val::Deferred(..) => Kind::Deferred,
         Val::List(_) => Kind::List,
     })
 }
@@ -139,7 +134,6 @@ impl Data {
             Kind::I64 => Data::I64(alloc::vec![wire::NONE64; n]),
             Kind::F64 => Data::F64(alloc::vec![f64::NAN; n]),
             Kind::Str => Data::Str(alloc::vec![String::new(); n]),
-            Kind::Deferred => Data::Deferred(alloc::vec![(wire::NONE, [0; 8]); n]),
             Kind::List => Data::List(alloc::vec![Vec::new(); n]),
         }
     }
@@ -150,7 +144,6 @@ impl Data {
             Data::I64(_) => Kind::I64,
             Data::F64(_) => Kind::F64,
             Data::Str(_) => Kind::Str,
-            Data::Deferred(_) => Kind::Deferred,
             Data::List(_) => Kind::List,
         }
     }
@@ -161,7 +154,6 @@ impl Data {
             Data::I64(v) => v.push(wire::NONE64),
             Data::F64(v) => v.push(f64::NAN),
             Data::Str(v) => v.push(String::new()),
-            Data::Deferred(v) => v.push((wire::NONE, [0; 8])),
             Data::List(v) => v.push(Vec::new()),
         }
     }
@@ -172,7 +164,6 @@ impl Data {
             Data::I64(v) => drop(v.swap_remove(slot)),
             Data::F64(v) => drop(v.swap_remove(slot)),
             Data::Str(v) => drop(v.swap_remove(slot)),
-            Data::Deferred(v) => drop(v.swap_remove(slot)),
             Data::List(v) => drop(v.swap_remove(slot)),
         }
     }
@@ -183,7 +174,6 @@ impl Data {
             Data::I64(v) => Val::from_wire(Value::I64(v[slot])),
             Data::F64(v) => Val::from_wire(Value::F64(v[slot])),
             Data::Str(v) => if v[slot].is_empty() { Val::None } else { Val::Str(v[slot].clone()) },
-            Data::Deferred(v) => Val::from_wire(Value::Deferred(v[slot].0, v[slot].1)),
             Data::List(v) => if v[slot].is_empty() { Val::None } else { Val::List(v[slot].clone()) },
         }
     }
@@ -196,13 +186,11 @@ impl Data {
             (Data::I64(d), Val::I64(x)) => d[slot] = *x,
             (Data::F64(d), Val::F64(x)) => d[slot] = *x,
             (Data::Str(d), Val::Str(x)) => d[slot].clone_from(x),
-            (Data::Deferred(d), Val::Deferred(n, h)) => d[slot] = (*n, *h),
             (Data::List(d), Val::List(x)) => d[slot].clone_from(x),
             (Data::U32(d), _) => d[slot] = wire::NONE,
             (Data::I64(d), _) => d[slot] = wire::NONE64,
             (Data::F64(d), _) => d[slot] = f64::NAN,
             (Data::Str(d), _) => d[slot].clear(),
-            (Data::Deferred(d), _) => d[slot] = (wire::NONE, [0; 8]),
             (Data::List(d), _) => d[slot].clear(),
         }
     }
@@ -734,7 +722,6 @@ impl Rows {
                     Data::I64(v) => b.i64s(c.id, v.iter().copied()),
                     Data::F64(v) => b.f64s(c.id, v.iter().copied()),
                     Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
-                    Data::Deferred(v) => b.deferred(c.id, v.iter().map(|d| (d.0 != wire::NONE).then_some(*d))),
                     Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
                 };
             }

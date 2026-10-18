@@ -207,7 +207,6 @@ fn boot_of(k: &Kernel) -> Vec<u8> {
                 Data::I64(v) => b.i64s(c.id, v.iter().copied()),
                 Data::F64(v) => b.f64s(c.id, v.iter().copied()),
                 Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
-                Data::Deferred(v) => b.deferred(c.id, v.iter().map(|d| (d.0 != wire::NONE).then_some(*d))),
                 Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
             };
         }

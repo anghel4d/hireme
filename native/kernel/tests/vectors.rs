@@ -73,8 +73,7 @@ fn cell(o: &mut wire::OpWriter, id: u16, wire_ty: u8, type_code: u8, target: Opt
     match (wire_ty, v) {
         (_, J::Null) => o.null(id),
         (wire::U32, _) => o.u32(id, as_u32(v, type_code, target)),
-        // Deferred text is written in full; only BOOT and PATCH defer it.
-        (wire::STR | wire::DEFERRED, J::String(s)) => o.str(id, s),
+        (wire::STR, J::String(s)) => o.str(id, s),
         (wire::I64, _) => o.i64(id, v.as_i64().unwrap()),
         (wire::F64, _) => o.f64(id, v.as_f64().unwrap()),
         _ => panic!("cell {id} = {v}"),

@@ -34,7 +34,6 @@ fn val(v: Val) -> Json {
         Val::I64(x) => x.into(),
         Val::F64(x) => x.into(),
         Val::Str(s) => s.into(),
-        Val::Deferred(n, h) => json!({"length": n, "sha": h.iter().map(|b| alloc::format!("{b:02x}")).collect::<String>()}),
         Val::List(l) => l.into(),
     }
 }

@@ -306,17 +306,7 @@ pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> 
             out.push(Write::Insert { table: r.table, id });
         }
         for (c, v) in &r.cells {
-            let deferred = schema::table_def(r.table).and_then(|t| t.col(*c)).is_some_and(|c| c.wire == wire::DEFERRED);
             let val = match v {
-                // The rows hold deferred text as the stub BOOT carries: its
-                // length and the first 8 bytes of its SHA-256.
-                EVal::Val(Val::Str(text)) if deferred => {
-                    use sha2::{Digest, Sha256};
-                    let h = Sha256::digest(text.as_bytes());
-                    let mut sha = [0u8; 8];
-                    sha.copy_from_slice(&h[..8]);
-                    Val::Deferred(text.len() as u32, sha)
-                }
                 EVal::Val(v) => v.clone(),
                 EVal::New(k) => inserted.get(*k as usize).map_or(Val::None, |&i| Val::U32(i)),
             };
@@ -366,7 +356,6 @@ pub fn effects_json(rows: &[judge::Row]) -> Json {
                         EVal::Val(Val::I64(x)) => json!(x),
                         EVal::Val(Val::F64(x)) => json!(x),
                         EVal::Val(Val::Str(x)) => json!(x),
-                        EVal::Val(Val::Deferred(n, _)) => json!(n),
                         EVal::Val(Val::List(l)) => json!(l),
                     };
                     (name, v)
@@ -673,7 +662,6 @@ mod exports {
                 Some(Data::Str(_)) => 2,
                 Some(Data::I64(_)) => 3,
                 Some(Data::F64(_)) => 4,
-                Some(Data::Deferred(_)) => 5,
                 Some(Data::List(_)) => 7,
                 None => 0,
             }

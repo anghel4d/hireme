@@ -118,7 +118,6 @@ fn value<'a>(env: Env<'a>, v: &EVal) -> Term<'a> {
             Val::I64(x) => x.encode(env),
             Val::F64(x) => x.encode(env),
             Val::Str(s) => s.as_str().encode(env),
-            Val::Deferred(n, _) => n.encode(env),
             Val::List(l) => l.encode(env),
         },
     }

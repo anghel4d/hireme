@@ -167,12 +167,11 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             .u32s(col::cv_lineages::OPENED_ON, [(TODAY - 10) as u32, (TODAY - 100) as u32].into_iter())
             .u32s(col::cv_lineages::REWRITES_ALLOWED, [1, 0].into_iter());
         b.done();
-        // An event's body is deferred: it reaches the kernel as a stub, its kind as text.
         let mut b = w.block(table::EVENTS, n);
         b.u32s(col::events::ID, 1..=n as u32)
             .u32s(col::events::APPLICATION_ID, (0..n).map(|i| 1 + (i % 5) as u32))
             .strs(col::events::KIND, col(11))
-            .deferred(col::events::BODY, texts.iter().map(|t| Some((t[12].len() as u32, [7; 8]))));
+            .strs(col::events::BODY, col(12));
         b.done();
         let mut b = w.block(table::ITEMS, n);
         b.u32s(col::items::ID, 1..=n as u32).strs(col::items::TITLE, col(1)).strs(col::items::BODY, col(5)).strs(col::items::KEY, col(0));

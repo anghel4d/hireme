@@ -7,7 +7,7 @@ export const enc = new TextEncoder();
 export const dec = new TextDecoder();
 
 // Wire constants from the codec's doc (native/wire/src/lib.rs).
-export const W = { NULL: 0, U32: 1, STR: 2, I64: 3, F64: 4, DEFERRED: 5, BOOT: 3, PATCH: 4, PUT: 1, COMMAND: 3 };
+export const W = { NULL: 0, U32: 1, STR: 2, I64: 3, F64: 4, BOOT: 3, PATCH: 4, PUT: 1, COMMAND: 3 };
 
 export class Bytes {
   constructor() { this.a = []; }
@@ -102,7 +102,7 @@ export function cell(o, catalog, id, wire, type, target, v) {
   let ty;
   if (v === null) ty = W.NULL;
   else if (wire === W.U32) { ty = W.U32; data.u32(asU32(catalog, v, type, target)); }
-  else if (wire === W.STR || wire === W.DEFERRED) { ty = W.STR; data.raw(enc.encode(v)); }
+  else if (wire === W.STR) { ty = W.STR; data.raw(enc.encode(v)); }
   else if (wire === W.I64) { ty = W.I64; data.i64(v); }
   else if (wire === W.F64) { ty = W.F64; data.f64(v); }
   else throw new Error(`cell ${id} = ${v}`);
