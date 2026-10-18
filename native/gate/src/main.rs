@@ -175,7 +175,8 @@ impl Drop for IpSlot {
 /// The address a cap counts: an IPv6 peer by its /64, which one host holds
 /// whole, so it cannot take a fresh address for each session.
 fn peer_key(ip: IpAddr) -> IpAddr {
-    match ip {
+    // An IPv4 peer on a dual-stack socket arrives as ::ffff:a.b.c.d.
+    match ip.to_canonical() {
         IpAddr::V6(v6) => {
             let s = v6.segments();
             IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
@@ -221,7 +222,9 @@ fn transport(s: &Settings) -> TransportConfig {
         .receive_window(QVarInt::from_u32(WINDOW_BEFORE))
         .stream_receive_window(QVarInt::from_u32(STREAM_WINDOW))
         .max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()))
-        .keep_alive_interval(Some(Duration::from_secs(10)));
+        .keep_alive_interval(Some(Duration::from_secs(10)))
+        // A session takes no datagrams, so the peer is offered none.
+        .datagram_receive_buffer_size(None);
     t
 }
 
@@ -552,6 +555,9 @@ async fn run(
     let (control_tx, control_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut control_rx = Some(control_rx);
     let mut drained: Option<tokio::task::JoinHandle<()>> = None;
+    // The reader of the client's stream ends with the session, whatever
+    // ends it, so it cannot outlive it waiting on a backlog.
+    let mut reader = AbortOnDrop(None);
     let mut held = 0;
     for m in &early {
         if m[0] == DATA {
@@ -603,12 +609,22 @@ async fn run(
                     continue;
                 };
                 drained = Some(tokio::spawn(drain(sh.clone(), send, rx)));
-                tokio::spawn(read_loop(sh.clone(), recv));
+                reader.0 = Some(tokio::spawn(read_loop(sh.clone(), recv)));
             }
         }
         if sh.queued.load(Relaxed) > MAX_QUEUED || (control_rx.is_some() && held > HELD_MAX) {
             c.overflow.fetch_add(1, Relaxed);
             return Some((CODE_OVERFLOW, b"peer is not reading".to_vec()));
+        }
+    }
+}
+
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
         }
     }
 }
@@ -680,11 +696,16 @@ async fn read_loop(sh: Arc<Shared>, mut recv: RecvStream) {
         // A BEAM that falls behind stops the reads, and QUIC's flow control
         // then stops the client: the queue never outgrows MAX_QUEUED.
         while sh.pending.load(Relaxed) > MAX_QUEUED {
+            if sh.up.is_closed() {
+                return;
+            }
             sleep(Duration::from_millis(1)).await;
         }
         let Ok(Some(n)) = recv.read(&mut buf).await else { return };
         sh.gate.counters.bytes_in.fetch_add(n as u64, Relaxed);
         sh.pending.fetch_add(n, Relaxed);
-        let _ = sh.up.send(message(DATA, &buf[..n]));
+        if sh.up.send(message(DATA, &buf[..n])).is_err() {
+            return;
+        }
     }
 }

@@ -15,6 +15,9 @@ defmodule Hireme.World do
   Answers are `{:ok, map}` or `{:error, refusal, data}`, the refusal one of
   the declaration's (`not_found`, `column`, `type`, `scope`, `too_large`).
 
+  An enum column orders and compares by its value's name, as SQLite holds
+  it, not by its code.
+
   Paging is by keyset: `find` orders by one column then `id`, nulls last,
   and hands back an opaque `next` cursor that resumes after the last row.
   Deferred text is not inlined: `find` and `get` give its byte length and
@@ -23,6 +26,7 @@ defmodule Hireme.World do
   """
 
   import Ecto.Query
+  require Logger
   alias Hireme.{Grants, Repo, Schema}
   alias Hireme.Rows.{Citation, Source}
   alias Hireme.Schema.Parser
@@ -53,11 +57,16 @@ defmodule Hireme.World do
       _ -> {:error, :not_found, %{method: method}}
     end
   rescue
-    # A value the checks let through but the database cannot take (a cursor
-    # tampered with, a number past int64) is the caller's mistake, not a
-    # reason to end its session.
-    e in [Ecto.Query.CastError, Ecto.CastError, Exqlite.Error, ArgumentError] ->
-      {:error, :type, %{reason: Exception.message(e)}}
+    # A value the checks let through but cannot be cast (a cursor tampered
+    # with) is the caller's mistake; anything else is the server's, logged
+    # and answered `internal`. Neither ends the session, and neither answer
+    # carries the exception's text (it can hold the generated SQL).
+    _ in [Ecto.Query.CastError, Ecto.CastError] ->
+      {:error, :type, %{reason: "a value of the wrong type"}}
+
+    e ->
+      Logger.warning("world #{method}: #{Exception.format(:error, e, __STACKTRACE__)}")
+      {:error, :internal, %{}}
   end
 
   def call(_method, params, _ctx), do: {:error, :type, %{params: inspect(params)}}
@@ -632,20 +641,36 @@ defmodule Hireme.World do
   end
 
   defp cast(col, value, build) do
-    case Ecto.Type.cast(Schema.cast_type(col), value) do
-      {:ok, v} -> {:ok, build.(v)}
-      _ -> {:error, :type, %{column: col.name, value: value}}
+    with {:ok, v} <- Ecto.Type.cast(Schema.cast_type(col), value),
+         true <- fits?(col, v) do
+      {:ok, build.(v)}
+    else
+      _ -> {:error, :type, %{column: col.name, value: brief(value)}}
     end
   end
+
+  # An integer filter beyond what its column can hold matches nothing a
+  # database can compare, so it is refused before it reaches SQLite.
+  defp fits?(%{type: t}, v) when t in [:id, :ref, :u32] and is_integer(v),
+    do: v in 0..4_294_967_295
+
+  defp fits?(%{type: :u8}, v) when is_integer(v), do: v in 0..255
+  defp fits?(%{type: :i64}, v) when is_integer(v), do: v in -@int64..@int64
+  defp fits?(_col, _v), do: true
+
+  # A refusal names the value it refused, bounded.
+  defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 
   defp cast_list(col, values, f) do
     type = Schema.cast_type(col)
 
     values
     |> Enum.reduce_while({:ok, []}, fn v, {:ok, acc} ->
-      case Ecto.Type.cast(type, v) do
-        {:ok, v} -> {:cont, {:ok, [v | acc]}}
-        _ -> {:halt, {:error, :type, %{column: col.name, value: v}}}
+      with {:ok, cast} <- Ecto.Type.cast(type, v),
+           true <- fits?(col, cast) do
+        {:cont, {:ok, [cast | acc]}}
+      else
+        _ -> {:halt, {:error, :type, %{column: col.name, value: brief(v)}}}
       end
     end)
     |> case do
@@ -707,7 +732,7 @@ defmodule Hireme.World do
   defp cast_cursor(col, value) do
     case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, v} -> v
-      _ -> raise ArgumentError, "the cursor's value is not a #{col.type} for #{col.name}"
+      _ -> raise Ecto.Query.CastError, value: value, type: col.type, message: "a tampered cursor"
     end
   end
 
@@ -764,10 +789,9 @@ defmodule Hireme.World do
       v = Map.get(row, String.to_atom(col.name))
 
       v =
-        cond do
-          not col.deferred or v == nil -> v
-          true -> %{"len" => v, "sha" => short(Map.get(row, sha_key(col)))}
-        end
+        if not col.deferred or v == nil,
+          do: v,
+          else: %{"len" => v, "sha" => short(Map.get(row, sha_key(col)))}
 
       {col.name, v}
     end)

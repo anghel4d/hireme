@@ -70,7 +70,7 @@ defmodule Hireme.Import do
   @source 0xFFF1
   @keyed 0x01
 
-  @type refusal :: %{table: String.t(), row: non_neg_integer(), code: atom(), data: map()}
+  @type refusal :: %{table: String.t(), row: non_neg_integer() | nil, code: atom(), data: map()}
   @type report :: %{
           rev: non_neg_integer(),
           groups: [%{table: String.t(), written: non_neg_integer(), refused: non_neg_integer()}],
@@ -81,7 +81,7 @@ defmodule Hireme.Import do
   @spec file(pos_integer(), Path.t()) :: {:ok, report()} | {:error, term()}
   def file(account_id, path) do
     with {:ok, body} <- File.read(path) do
-      format = if Path.extname(path) == ".json", do: :json, else: :markdown
+      format = if String.downcase(Path.extname(path)) == ".json", do: :json, else: :markdown
       run(account_id, body, format)
     end
   end
@@ -120,7 +120,7 @@ defmodule Hireme.Import do
 
   @doc false
   def parse(body, :json) do
-    case Jason.decode(body) do
+    case Jason.decode(String.trim_leading(body, "\uFEFF")) do
       {:ok, %{"tables" => tables} = pack} when is_list(tables) ->
         groups =
           Enum.map(tables, fn
@@ -145,6 +145,8 @@ defmodule Hireme.Import do
   end
 
   def parse(body, :markdown) do
+    # A byte-order mark (what some editors write first) is not text.
+    body = String.trim_leading(body, "\uFEFF")
     lines = body |> String.split("\n") |> Enum.map(&String.trim/1)
     {head, rest} = Enum.split_while(lines, &(not String.starts_with?(&1, "## ")))
 
@@ -170,14 +172,17 @@ defmodule Hireme.Import do
         end
       )
 
-    {:ok, pack(defaults["as_of"], defaults["source"], groups)}
+    if groups == [],
+      do: {:error, :no_tables},
+      else: {:ok, pack(defaults["as_of"], defaults["source"], groups)}
   end
 
   defp finish({table, lines}) do
     rows =
       lines
       |> Enum.reverse()
-      |> Enum.filter(&String.starts_with?(&1, "|"))
+      # A table row is any line with a pipe; the outer pipes are optional.
+      |> Enum.filter(&String.contains?(&1, "|"))
       |> Enum.map(&cells/1)
       |> Enum.reject(fn cells -> Enum.all?(cells, &(&1 =~ ~r/^:?-+:?$/)) end)
 
@@ -287,6 +292,10 @@ defmodule Hireme.Import do
     else
       lower_row(account_id, table, pack, directives, values, mode)
     end
+  rescue
+    # One bad row costs that row alone: a value the checks below did not
+    # foresee is that row's refusal, never the pack's crash.
+    e -> {:refused, :type, %{row: "unreadable", reason: Exception.message(e)}}
   end
 
   defp lower(_account_id, _table, _pack, row, _mode), do: {:refused, :type, %{row: inspect(row)}}
@@ -302,8 +311,11 @@ defmodule Hireme.Import do
       flags = if key, do: @keyed, else: 0
       target = if(unique && existing, do: existing.id, else: 0)
       raw = Codec.encode_op({op_id(), :put, flags, table.id, target, expect_rev, cells ++ extra})
-      {:ok, op, ""} = Codec.op(raw)
-      {:ok, op}
+
+      case Codec.op(raw) do
+        {:ok, op, ""} -> {:ok, op}
+        _ -> {:refused, :type, %{row: "a cell the wire cannot carry (text must be UTF-8)"}}
+      end
     end
   end
 
@@ -371,6 +383,9 @@ defmodule Hireme.Import do
 
   # The wire's integers: a value past its column's range would be truncated
   # by the encoding, so it is refused; each type's top or bottom is null.
+  @days 0..2_932_896
+  @times 0..4_294_967_294
+
   @ranges %{
     u8: 0..255,
     u32: 0..4_294_967_294,
@@ -381,6 +396,26 @@ defmodule Hireme.Import do
     if v in Map.fetch!(@ranges, t),
       do: {:ok, v},
       else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+  end
+
+  # A day is days since 1970-01-01 and a time unix seconds, both u32 on the
+  # wire with its top for null; past either a value would not travel.
+  defp in_range(%{type: :day} = col, %Date{} = d, value) do
+    if Date.diff(d, ~D[1970-01-01]) in @days,
+      do: {:ok, d},
+      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+  end
+
+  defp in_range(%{type: :time} = col, %DateTime{} = t, value) do
+    if DateTime.to_unix(t) in @times,
+      do: {:ok, t},
+      else: {:refused, :type, %{column: col.name, value: value, reason: "out of range"}}
+  end
+
+  defp in_range(%{type: t} = col, v, value) when t in [:str, :text] and is_binary(v) do
+    if String.valid?(v),
+      do: {:ok, v},
+      else: {:refused, :type, %{column: col.name, value: inspect(value), reason: "not UTF-8"}}
   end
 
   defp in_range(_col, v, _value), do: {:ok, v}
@@ -399,7 +434,7 @@ defmodule Hireme.Import do
           value
 
         mode == :text and value =~ ~r/^\d+$/ ->
-          {:id, String.to_integer(value)}
+          String.to_integer(value) |> then(&if(&1 in 1..4_294_967_294, do: {:id, &1}, else: nil))
 
         true ->
           case Enum.find(table.naturals, &(length(&1.cols) == 1)) do
@@ -473,8 +508,11 @@ defmodule Hireme.Import do
       Map.new(natural.cols, fn name ->
         col = Schema.column(table.name, name)
         {_, _, wire} = Enum.find(cells, fn {id, _, _} -> id == col.id end)
-        {:ok, value} = Codec.from_wire(col, wire)
-        {name, value}
+
+        case Codec.from_wire(col, wire) do
+          {:ok, value} -> {name, value}
+          _ -> throw({:refused, :type, %{column: name}})
+        end
       end)
 
     grants = Grants.operator()
@@ -488,6 +526,8 @@ defmodule Hireme.Import do
       {:error, :not_found, _} -> {:ok, nil}
       {:error, code, data} -> {:refused, code, data}
     end
+  catch
+    {:refused, _, _} = refusal -> refusal
   end
 
   defp json_key(params) do
@@ -520,12 +560,17 @@ defmodule Hireme.Import do
   defp as_of_cell(false, _), do: {:ok, []}
   defp as_of_cell(true, nil), do: {:ok, []}
 
-  defp as_of_cell(true, as_of) do
-    case Date.from_iso8601(to_string(as_of)) do
-      {:ok, d} -> {:ok, [{@as_of, 1, Date.diff(d, ~D[1970-01-01])}]}
+  defp as_of_cell(true, as_of) when is_binary(as_of) do
+    with {:ok, d} <- Date.from_iso8601(as_of),
+         days = Date.diff(d, ~D[1970-01-01]),
+         true <- days in @days do
+      {:ok, [{@as_of, 1, days}]}
+    else
       _ -> {:refused, :type, %{column: "as_of", value: as_of}}
     end
   end
+
+  defp as_of_cell(true, as_of), do: {:refused, :type, %{column: "as_of", value: inspect(as_of)}}
 
   defp op_id do
     <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)

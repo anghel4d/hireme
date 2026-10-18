@@ -216,7 +216,7 @@ defmodule HiremeWeb.Gate do
         # mail token) is unset for it, since a Port extends the environment.
         unset =
           for {k, _} <- System.get_env(),
-              not String.starts_with?(k, "GATE_"),
+              not kept?(k, exe),
               not List.keymember?(env, k, 0),
               do: {String.to_charlist(k), false}
 
@@ -235,6 +235,16 @@ defmodule HiremeWeb.Gate do
       _ ->
         []
     end
+  end
+
+  # A built gate needs only its GATE_* settings; the development profile
+  # runs it through cargo, which also needs a shell's basics and its own.
+  @cargo_env ~w(PATH HOME USER LANG TMPDIR TZ)
+
+  defp kept?(name, exe) do
+    String.starts_with?(name, "GATE_") or
+      (Path.basename(exe) == "cargo" and
+         (name in @cargo_env or String.starts_with?(name, ["CARGO_", "RUST"])))
   end
 
   @doc false

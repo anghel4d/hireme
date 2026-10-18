@@ -456,8 +456,8 @@ fn default_ok(col: &Column, line: usize) -> Result<(), Error> {
     let ok = match col.ty {
         Type::Bool => d == "true" || d == "false",
         Type::U8 => int_in(d, 0, 255),
-        Type::U32 => int_in(d, 0, 4_294_967_295),
-        Type::I64 => int_in(d, i64::MIN as i128, i64::MAX as i128),
+        Type::U32 => int_in(d, 0, 4_294_967_294),
+        Type::I64 => int_in(d, i64::MIN as i128 + 1, i64::MAX as i128),
         Type::F64 => {
             let digits = d.strip_prefix('-').unwrap_or(d);
             let (whole, frac) = digits.split_once('.').map_or((digits, None), |(w, f)| (w, Some(f)));
@@ -581,6 +581,9 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
     }
     if col.cascade && col.ty != Type::Ref {
         return fail(line, "cascade is a ref's".into());
+    }
+    if col.deferred && !matches!(col.ty, Type::Str | Type::Text | Type::Json) {
+        return fail(line, "only text is deferred".into());
     }
     default_ok(&col, line)?;
     Ok(col)
@@ -1144,19 +1147,11 @@ fn validate(s: &Schema) -> Result<(), Error> {
 fn term_fits(s: &Schema, t: &Table, term: &Where) -> Result<(), Error> {
     let Where::Eq(col, v) = term else { return Ok(()) };
     let Some(c) = t.col(col) else { return Ok(()) };
-    let digits = |x: &str| {
-        let d = x.strip_prefix('-').unwrap_or(x);
-        !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
-    };
+    // A quoted value matches only a column stored as its text.
     let ok = match c.ty {
         Type::Enum => s.enum_(c.target.as_deref().unwrap_or("")).is_some_and(|e| e.values.contains(v)),
-        Type::Bool => v == "true" || v == "false",
-        Type::U8 | Type::U32 | Type::I64 | Type::Id | Type::Ref => digits(v),
-        Type::F64 => {
-            let (w, f) = v.split_once('.').map_or((v.as_str(), None), |(w, f)| (w, Some(f)));
-            digits(w) && f.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
-        }
-        _ => true,
+        Type::Str | Type::Text => true,
+        _ => false,
     };
     if ok { Ok(()) } else { fail(0, format!("{}: where {col} = '{v}' is no value of {col}", t.name)) }
 }

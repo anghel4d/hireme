@@ -346,4 +346,21 @@ defmodule Hireme.WorldTest do
       assert {:error, :type, _} = World.call(method, params, ctx), inspect(params)
     end
   end
+
+  test "a filter value past its column's range is refused type, and no refusal carries SQL", %{
+    account: a
+  } do
+    ctx = %{account_id: a.id, grants: Grants.operator()}
+
+    for where <- [
+          %{"headcount" => 99_999_999_999_999_999_999},
+          %{"rev" => %{"in" => [1, 9_223_372_036_854_775_808]}},
+          %{"headcount" => %{"gt" => -1}}
+        ] do
+      assert {:error, :type, data} =
+               World.call("find", %{"table" => "corporations", "where" => where}, ctx)
+
+      refute inspect(data) =~ "SELECT"
+    end
+  end
 end

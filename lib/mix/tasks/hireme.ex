@@ -239,7 +239,8 @@ defmodule Mix.Tasks.Hireme.Schema do
 
       {0, []} when out == "" ->
         Mix.raise(
-          "the declaration adds no table, column, index or trigger to the previous baseline"
+          "the declaration adds no table, column, index or trigger to the previous baseline, " <>
+            "and changes none: a plain mix hireme.schema ships it"
         )
 
       {0, []} ->
@@ -283,12 +284,29 @@ defmodule Mix.Tasks.Hireme.Schema do
       )
 
     triggers = query(db, "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+
+    # Definitions too, so a changed index, trigger or ON DELETE is a change.
+    sqls =
+      query(
+        db,
+        "SELECT name, sql FROM sqlite_master WHERE type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name"
+      )
+
+    fks =
+      query(
+        db,
+        "SELECT m.name, f.\"from\", f.on_delete FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f " <>
+          "WHERE m.type = 'table' ORDER BY m.name, f.\"from\""
+      )
+
     tables = cols |> Enum.map(&hd/1) |> Enum.uniq()
 
     Enum.map_join(tables, "", &"table #{&1}\n") <>
       Enum.map_join(cols, "", fn [t, c, ty, nn, d] -> "col #{t} #{c} #{ty} #{nn} #{d}\n" end) <>
       Enum.map_join(indexes, "", fn [i] -> "index #{i}\n" end) <>
-      Enum.map_join(triggers, "", fn [i] -> "trigger #{i}\n" end)
+      Enum.map_join(triggers, "", fn [i] -> "trigger #{i}\n" end) <>
+      Enum.map_join(sqls, "", fn [n, sql] -> "sql #{n} #{String.replace(sql, ~r/\s+/, " ")}\n" end) <>
+      Enum.map_join(fks, "", fn [t, c, action] -> "fk #{t} #{c} #{action}\n" end)
   end
 
   defp query(db, sql) do

@@ -186,6 +186,15 @@ pub struct Shape {
     pub tables: Vec<(String, Vec<ShapeCol>)>,
     pub indexes: Vec<String>,
     pub triggers: Vec<String>,
+    /// An index's or trigger's SQL as SQLite holds it, by name.
+    pub sql: Vec<(String, String)>,
+    /// A ref's ON DELETE action: table, column, action.
+    pub fks: Vec<(String, String, String)>,
+}
+
+// SQL compared as text: single spaces, no trailing semicolon.
+fn norm(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(';').to_string()
 }
 
 /// A column as SQLite reports it (`pragma_table_info`).
@@ -220,6 +229,10 @@ impl Shape {
                 }
                 ["index", name] => shape.indexes.push(name.to_string()),
                 ["trigger", name] => shape.triggers.push(name.to_string()),
+                ["sql", name, rest @ ..] => shape.sql.push((name.to_string(), norm(&rest.join(" ")))),
+                ["fk", table, col, action @ ..] => {
+                    shape.fks.push((table.to_string(), col.to_string(), action.join(" ")))
+                }
                 _ => return Err(format!("unreadable shape line: {line}")),
             }
         }
@@ -288,16 +301,22 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                         extra.push(format!("column {}.{} is in the database, not the declaration", t.name, c.name));
                     }
                 }
-                for i in indexes(t) {
-                    if !shape.indexes.contains(&i.name) {
+                for (i, have) in indexes(t).into_iter().map(|i| (i, &shape.indexes)).chain(triggers(s, t).into_iter().map(|i| (i, &shape.triggers))) {
+                    if !have.contains(&i.name) {
                         sql.push_str(&i.sql);
                         sql.push('\n');
+                    } else if let Some((_, held)) = shape.sql.iter().find(|(n, _)| *n == i.name)
+                        && *held != norm(&i.sql)
+                    {
+                        extra.push(format!("{} changed: {held} -> {}", i.name, norm(&i.sql)));
                     }
                 }
-                for i in triggers(s, t) {
-                    if !shape.triggers.contains(&i.name) {
-                        sql.push_str(&i.sql);
-                        sql.push('\n');
+                for c in t.cols.iter().filter(|c| c.ty == Type::Ref) {
+                    let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
+                    if let Some((_, _, held)) = shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name)
+                        && held != want
+                    {
+                        extra.push(format!("column {}.{} changed: ON DELETE {held} -> ON DELETE {want}", t.name, c.name));
                     }
                 }
             }

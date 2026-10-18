@@ -1,5 +1,6 @@
 defmodule Hireme.ImportTest do
   use Hireme.WireCase, async: false
+  use ExUnitProperties
 
   import Ecto.Query
   alias Hireme.{Import, World}
@@ -270,5 +271,95 @@ defmodule Hireme.ImportTest do
                }),
                :json
              )
+  end
+
+  # Values no column should take: out-of-range dates and numbers, Latin-1
+  # bytes, objects where text belongs, refs past the wire.
+  defp hostile do
+    one_of([
+      constant("1950-06-01"),
+      constant("2200-01-01T00:00:00Z"),
+      constant(5_000_000_000),
+      constant(-2),
+      constant("4294967296"),
+      constant(%{"x" => 1}),
+      constant([1, 2]),
+      integer(),
+      string(:printable, max_length: 6)
+    ])
+  end
+
+  property "whatever a row holds, an import answers a report and every other row is written", %{
+    account: a
+  } do
+    tables = ~w(corporations offices places sources contacts gym_reps items cv_lineages batches)
+
+    check all(
+            table <- member_of(tables),
+            col_pick <- integer(0..400),
+            value <- hostile(),
+            as_of <- one_of([constant("2026-09-01"), constant("1969-01-01"), constant(%{})]),
+            max_runs: 60
+          ) do
+      t = Schema.table(table)
+      cols = for c <- t.cols, not c.implied, not c.readonly, not c.server_only, do: c.name
+      col = Enum.at(cols, rem(col_pick, length(cols)))
+      tag = "#{System.unique_integer([:positive])}"
+      good = %{"domain" => "good.#{tag}.example", "name" => "Good"}
+
+      pack = %{
+        "as_of" => as_of,
+        "tables" => [
+          %{"table" => table, "rows" => [%{col => value}]},
+          %{"table" => "corporations", "rows" => [good]}
+        ]
+      }
+
+      assert {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
+      assert Enum.all?(report.refusals, &is_atom(&1.code))
+      assert Repo.exists?(from c in Corporation, where: c.domain == ^good["domain"])
+    end
+  end
+
+  test "a byte-order mark, an upper-case .JSON and a heading-less markdown pack are read for what they are",
+       %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "hireme-import-#{t}")
+    File.mkdir_p!(dir)
+
+    try do
+      md = "\uFEFF## corporations\n| domain | name |\n| --- | --- |\n| bom.#{t}.example | Bom |\n"
+      {:ok, %{refusals: []}} = Import.run(a.id, md, :markdown)
+      assert Repo.exists?(from c in Corporation, where: c.domain == ^"bom.#{t}.example")
+
+      json = Path.join(dir, "PACK.JSON")
+
+      File.write!(
+        json,
+        Jason.encode!(%{
+          "tables" => [
+            %{
+              "table" => "corporations",
+              "rows" => [%{"domain" => "up.#{t}.example", "name" => "Up"}]
+            }
+          ]
+        })
+      )
+
+      {:ok, %{refusals: []}} = Import.file(a.id, json)
+      assert Repo.exists?(from c in Corporation, where: c.domain == ^"up.#{t}.example")
+
+      assert {:error, :no_tables} = Import.run(a.id, "just some notes\n", :markdown)
+
+      latin1 =
+        "## corporations\n| domain | name |\n| --- | --- |\n| l1.#{t}.example | Caf" <>
+          <<0xE9>> <> " |\n| l2.#{t}.example | Fine |\n"
+
+      {:ok, report} = Import.run(a.id, latin1, :markdown)
+      assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{0, :type}]
+      assert Repo.exists?(from c in Corporation, where: c.domain == ^"l2.#{t}.example")
+    after
+      File.rm_rf!(dir)
+    end
   end
 end

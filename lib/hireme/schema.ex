@@ -395,6 +395,7 @@ defmodule Hireme.Schema.Parser do
     if target, do: name!(target, n)
     col = walk(rest, %{blank(name, type) | target: target}, n)
     if col.cascade and type != :ref, do: fail(n, "cascade is a ref's")
+    if col.deferred and type not in [:str, :text, :json], do: fail(n, "only text is deferred")
     default!(col, n)
     col
   end
@@ -407,8 +408,8 @@ defmodule Hireme.Schema.Parser do
       case type do
         :bool -> d in ~w(true false)
         :u8 -> int_in?(d, 0..255)
-        :u32 -> int_in?(d, 0..4_294_967_295)
-        :i64 -> int_in?(d, -9_223_372_036_854_775_808..9_223_372_036_854_775_807)
+        :u32 -> int_in?(d, 0..4_294_967_294)
+        :i64 -> int_in?(d, -9_223_372_036_854_775_807..9_223_372_036_854_775_807)
         :f64 -> d =~ ~r/^-?[0-9]+(\.[0-9]+)?$/
         t when t in [:str, :text] -> d =~ ~r/^'[^']*'$/
         :enum -> true
@@ -708,14 +709,13 @@ defmodule Hireme.Schema.Parser do
   defp term_fits!(t, {:eq, col, v}, enums) do
     c = Enum.find(t.cols, &(&1.name == col))
 
+    # A quoted value matches only a column stored as its text.
     ok =
       case c && c.type do
         nil -> true
         :enum -> v in Map.fetch!(enums, c.target).values
-        :bool -> v in ~w(true false)
-        t when t in [:u8, :u32, :i64, :id, :ref] -> v =~ ~r/^-?[0-9]+$/
-        :f64 -> v =~ ~r/^-?[0-9]+(\.[0-9]+)?$/
-        _ -> true
+        t when t in [:str, :text] -> true
+        _ -> false
       end
 
     unless ok, do: raise(ArgumentError, "#{t.name}: where #{col} = '#{v}' is no value of #{col}")
