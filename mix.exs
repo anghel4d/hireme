@@ -77,6 +77,21 @@ defmodule Hireme.MixProject do
 
     File.mkdir_p!("priv/static/wasm")
     File.cp!(built, "priv/static/wasm/kernel.wasm")
+    wasm_opt("priv/static/wasm/kernel.wasm")
+  end
+
+  # binaryen's wasm-opt (the flake pins version_133): a fifth smaller, as fast.
+  defp wasm_opt(path) do
+    case System.find_executable("wasm-opt") do
+      nil ->
+        Mix.shell().info("wasm-opt is not on PATH: kernel.wasm is left unoptimized")
+
+      opt ->
+        flags =
+          ~w(-O3 --enable-bulk-memory --enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types)
+
+        {_, 0} = System.cmd(opt, flags ++ [path, "-o", path], stderr_to_stdout: true)
+    end
   end
 
   defp aliases do

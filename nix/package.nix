@@ -6,6 +6,7 @@
   beamPackages,
   rustPlatform,
   bun,
+  binaryen,
   sqlite,
   lld,
   source,
@@ -92,8 +93,8 @@ let
     // {
       pname = "kernel-wasm";
       inherit version;
-      # rustc links wasm32 with lld.
-      nativeBuildInputs = [ lld ];
+      # rustc links wasm32 with lld; binaryen's wasm-opt shrinks the result.
+      nativeBuildInputs = [ lld binaryen ];
       buildPhase = ''
         runHook preBuild
         cd native
@@ -103,7 +104,9 @@ let
       '';
       doCheck = false;
       installPhase = ''
-        install -Dm644 target/wasm32-unknown-unknown/release/kernel.wasm $out/kernel.wasm
+        wasm-opt -O3 --enable-bulk-memory --enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types \
+          target/wasm32-unknown-unknown/release/kernel.wasm -o kernel.wasm
+        install -Dm644 kernel.wasm $out/kernel.wasm
       '';
     }
   );
