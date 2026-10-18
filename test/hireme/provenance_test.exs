@@ -168,6 +168,20 @@ defmodule Hireme.ProvenanceTest do
 
     {[other], []} = run(a.id, put.("https://same.example/b"))
     assert other.rev == first.rev + 1 and cites.() == 2
+
+    # Unsourced: restated exactly, it is the same citation too.
+    unsourced = fn ->
+      op(:put, :corporations, %{revenue_usd: 1.0e6, as_of: ~D[2026-09-01]}, target: id)
+    end
+
+    {[u1], []} = run(a.id, unsourced.())
+    {[u2], []} = run(a.id, unsourced.())
+    assert u2.rev == u1.rev
+
+    assert Repo.aggregate(
+             from(c in Citation, where: c.row_id == ^id and c.column == "revenue_usd"),
+             :count
+           ) == 1
   end
 
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{

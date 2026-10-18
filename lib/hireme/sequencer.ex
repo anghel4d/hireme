@@ -1471,18 +1471,20 @@ defmodule Hireme.Sequencer do
   defp same_citation?(table, row, col, prov) do
     on = col.metric && Map.get(row, String.to_atom(col.name <> "_on"))
 
+    # The last citation's id too, so no citation is not taken for one with
+    # no source: an unsourced metric restated is the same citation.
     last =
       Repo.one(
         from(x in Hireme.Rows.Citation,
           where: x.table == ^table.name and x.row_id == ^row.id and x.column == ^col.name,
           order_by: [desc: x.id],
           limit: 1,
-          select: x.source_id
+          select: {x.id, x.source_id}
         )
       )
 
-    (not col.metric or on == prov.as_of) and last != nil and
-      last == (prov.source && prov.source.id)
+    source = prov.source && prov.source.id
+    (not col.metric or on == prov.as_of) and match?({_, ^source}, last)
   end
 
   defp write_effects(plan, op, sub, effects, prov, state, turn) do

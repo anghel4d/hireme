@@ -134,6 +134,28 @@ defmodule Hireme.SequencerTest do
     assert row.opened_on == ~D[1897-01-01] and row.headcount_on == ~D[1899-06-30]
   end
 
+  test "an exact restatement of a long deferred text writes nothing, and its ACK is ledgered", %{
+    account: a
+  } do
+    listing = String.duplicate("Rust systems, kernels and GPU runtimes. ", 400)
+
+    {[app], []} =
+      run(a.id, op(:put, :applications, %{company: "L", role: "R", listing_raw: listing}))
+
+    again = op(:put, :applications, %{listing_raw: listing}, target: app.id)
+    {[same], []} = run(a.id, again)
+    assert same.rev == app.rev and same.id == app.id
+
+    # A resend of the same op is answered from the ledger with the same ACK.
+    {[resent], []} = run(a.id, again)
+    assert resent == same
+
+    assert Repo.exists?(
+             from(l in Hireme.Rows.OpLedger, where: l.op_id == ^again.op_id),
+             skip_account: true
+           )
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))
