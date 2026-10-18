@@ -36,6 +36,9 @@
 !/priv/
 !/priv/db/
 !/priv/db/*.sql
+# The deployed baseline's hash: `mix hireme.schema --freeze` writes it, and
+# the cutover revision must carry it.
+!/priv/db/baseline.lock
 !/priv/db/.formatter.exs
 
 !/test/
