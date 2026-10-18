@@ -8,6 +8,7 @@
   esbuild,
   sqlite,
   lld,
+  removeReferencesTo,
   source,
   revision,
   mixDepsHash ? "sha256-wh1q2KvQYDCdk/lsD8d6eV58J/0R8TDgct9dn1eRcdE=",
@@ -135,6 +136,7 @@ let
     };
 
     buildInputs = [ sqlite ];
+    nativeBuildInputs = [ removeReferencesTo ];
 
     env = {
       # The SQLite NIF against Nix's library instead of a downloaded binary.
@@ -167,6 +169,8 @@ let
     # One profile carries the node and its gate, so a deploy flips both.
     postInstall = ''
       install -Dm755 ${native}/bin/hireme-gate $out/bin/hireme-gate
+      # sys.config keeps the build's esbuild path; the node never runs it.
+      remove-references-to -t ${esbuild} $out/releases/*/sys.config
     '';
 
     # RELEASE_COOKIE comes at runtime, outside the public store.
