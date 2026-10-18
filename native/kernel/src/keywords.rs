@@ -298,8 +298,7 @@ impl Coverage {
 
     /// Covered over total, as a whole percent; 0 with no targets.
     pub fn percent(&self) -> u8 {
-        let n = self.terms.len();
-        if n == 0 { 0 } else { (self.hits() * 100 / n) as u8 }
+        (self.hits() * 100).checked_div(self.terms.len()).unwrap_or(0) as u8
     }
 
     pub fn to_json(&self) -> serde_json::Value {

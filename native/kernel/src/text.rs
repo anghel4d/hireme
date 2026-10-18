@@ -73,8 +73,18 @@ fn latin(cp: u32) -> Option<&'static str> {
 /// Lowercase with Latin letters folded to their base and combining marks
 /// (a decomposed accent, the dot of "İ") dropped; everything else kept.
 pub fn fold(s: &str) -> String {
+    // Below U+00C0 nothing folds and a letter only lowercases: the common
+    // case (an all-ASCII listing, or the ASCII between accents) skips the
+    // tables and the Unicode case mapping.
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase());
+            continue;
+        }
         let cp = c as u32;
         if (0x300..=0x36F).contains(&cp) {
             continue;
@@ -216,6 +226,30 @@ mod tests {
         }
         assert_eq!(normalize(&normalize("İstanbul")), normalize("İstanbul"));
         assert_eq!(normalize("---"), "");
+    }
+
+    #[test]
+    fn ascii_only_lowercases_wherever_it_sits() {
+        let pieces = ["A", "z", "Q", " ", "-", "9", "~", "\u{7f}", "é", "Ü", "\u{308}", "Ƕ", "İ", "ß", "🙂", "Ł"];
+        let mut r = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..5_000 {
+            let mut s = alloc::string::String::new();
+            let mut ascii = alloc::string::String::new();
+            for _ in 0..(r % 9) {
+                r ^= r << 13;
+                r ^= r >> 7;
+                r ^= r << 17;
+                let p = pieces[(r % pieces.len() as u64) as usize];
+                s.push_str(p);
+                if p.is_ascii() {
+                    ascii.push_str(p);
+                }
+            }
+            // All-ASCII text folds to its lowercase, and ASCII appended to
+            // anything folds independently of what precedes it.
+            assert_eq!(fold(&ascii), ascii.to_ascii_lowercase(), "{ascii:?}");
+            assert_eq!(fold(&alloc::format!("{s}{ascii}")), alloc::format!("{}{}", fold(&s), ascii.to_ascii_lowercase()), "{s:?}");
+        }
     }
 
     #[test]
