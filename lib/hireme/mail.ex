@@ -137,7 +137,7 @@ defmodule Hireme.Mail do
     try do
       # Within the account's notice budget each notice goes as itself; past
       # it, each address gets one pending digest, counted up, never repeated.
-      case budget(account_id, kind) do
+      case budget(account_id, kind, length(addresses)) do
         :ok ->
           Hireme.Store.write(fn ->
             Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
@@ -161,12 +161,23 @@ defmodule Hireme.Mail do
 
   # One event is one charge, however many addresses hear of it. A change
   # the owner must see as itself spends its own small budget first.
-  @critical ~w(authenticator_removed authenticator_disabled identity_linked identity_unlinked api_key_widened)a
+  @critical ~w(authenticator_removed authenticator_disabled authenticator_added identity_linked
+    identity_unlinked api_key_widened api_key_created recovery_codes_issued recovery_code_used)a
 
-  defp budget(account_id, kind) do
-    if kind in @critical and Security.hit(:critical_notices, account_id, 1) == :ok,
-      do: :ok,
-      else: Security.hit(:notices, account_id, 1)
+  # A revoke's notice: bounded by what there is to revoke, and the owner's
+  # emergency tool must not spend the budget a later change needs.
+  @free ~w(api_key_revoked)a
+
+  # Every notice also spends the account's row budget, one per address.
+  defp budget(account_id, kind, rows) do
+    event =
+      cond do
+        kind in @free -> :ok
+        kind in @critical and Security.hit(:critical_notices, account_id, 1) == :ok -> :ok
+        true -> Security.hit(:notices, account_id, 1)
+      end
+
+    with :ok <- event, do: Security.hit(:notice_rows, account_id, rows)
   end
 
   # The one pending digest for an address, due when the budget's window

@@ -7,9 +7,13 @@ defmodule Hireme.Application do
   """
 
   use Application
+  alias Hireme.Audit.Coalescer
 
   @impl true
   def start(_type, _args) do
+    # The trail's coalesced counts outlive the process that flushes them.
+    Coalescer.table()
+
     children =
       [
         Hireme.Repo,
@@ -35,6 +39,15 @@ defmodule Hireme.Application do
     if Application.get_env(:hireme, :gate, true),
       do: [{HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])}],
       else: []
+  end
+
+  # Counts held past the trail's budgets are written before the node goes.
+  @impl true
+  def prep_stop(state) do
+    unless Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
+      do: Coalescer.flush(:all)
+
+    state
   end
 
   @impl true

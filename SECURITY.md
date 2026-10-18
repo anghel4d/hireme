@@ -246,6 +246,15 @@ sign-in link request is recorded by a hash of the address and its domain,
 since the asker may be a stranger. Notices go to the account's addresses
 through a durable outbox with bounded retries.
 
+Past its budgets an account's activity is not written row by row: the
+window's events become one `activity_coalesced` row (or
+`revokes_coalesced` for lease revokes) when the window closes, holding the
+counts by kind and key and the distinct addresses and user agents they
+came from (20 of each named, the rest counted). A key's HELLO from an
+address it has not used in the window is always its own row, so which
+addresses held a key is never only a count. A lease opening or closing
+moves the account lens's cursor even when coalesced.
+
 Security events are kept forever: sign-ins and their refusals, sessions,
 factors, identities, keys, mask changes, lease revokes, suspension and
 step-up. Activity is kept 90 days (`Security.activity_retention_days/0`)
@@ -278,8 +287,9 @@ writer for long.
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
 | Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
 | Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes, charged only when the call wrote (renames have their own 30); revoking a key, a session or a lease is outside it, so the owner can always revoke |
-| Notices | 30 events per account in 10 minutes, however many addresses hear each; a factor removed or disabled, a way in linked or unlinked, or a key widened has 10 more of its own; past them, one pending digest per address ("N security changes since ..."), sent when the window ends; every event still lands on the trail |
-| Trail activity | 1,000 activity rows (op batches, key HELLOs, leases opening and closing) and 120 lease revokes per account in 10 minutes; past them, one coalesced row per window with counts by kind and key; a revoke itself is never refused |
+| Notices | 30 events per account in 10 minutes, however many addresses hear each; a factor added, removed or disabled, recovery codes issued or used, a way in linked or unlinked, and a key created or widened have 10 more of their own, and a key's revoke notice spends neither; past them, one pending digest per address ("N security changes since ..."), sent when the window ends; every event still lands on the trail |
+| Trail activity | per account in 10 minutes: 1,000 activity rows (op batches, leases opening and closing), 600 key HELLOs, 120 lease revokes; 20,000 activity rows for the node; past them, one coalesced row per window; a revoke itself is never refused |
+| Notice rows | 300 per account in 10 minutes (one per address an event reaches); past it, only the per-address digest |
 | Ceremonies begun | 30 per browser session in 10 minutes (a TOTP QR, passkey options) |
 | Pending notices | within the notice budget, one per linked address per change; each tries 8 times over about two days, then is given up; sent or given-up notices go a month later; the outbox sends round-robin across accounts |
 | Trusted host note / passkey transports | 500 bytes / the WebAuthn transport names only |

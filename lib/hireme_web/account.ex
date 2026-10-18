@@ -71,12 +71,14 @@ defmodule HiremeWeb.Account do
 
   defp checked(method, params, ctx) do
     with nil <- ctx[:key],
+         true <- ids?(params) || :invalid,
          id when is_integer(id) <- ctx[:session_id],
          {:ok, %Session{account_id: account_id} = session} <- live(id, activity?(method, params)),
          true <- account_id == ctx.account_id do
       Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
       :session -> {:error, %{error: "session"}}
+      :invalid -> {:error, %{error: "invalid"}}
       _ -> {:error, %{error: "scope"}}
     end
   end
@@ -96,6 +98,17 @@ defmodule HiremeWeb.Account do
   defp activity?("account.watch", _), do: false
   defp activity?(_, %{"passive" => true}), do: false
   defp activity?(_, _), do: true
+
+  # Every id a call names is a row id: a positive 64-bit integer.
+  defp ids?(params) do
+    Enum.all?(~w(id since before), fn k ->
+      case Map.get(params, k) do
+        nil -> true
+        n when is_integer(n) -> n >= 0 and n < 0x8000000000000000
+        _ -> k == "id"
+      end
+    end)
+  end
 
   # The methods that write the trail or mail a notice, under one budget per
   # account (renames have their own); reads, ceremonies begun and step-up
@@ -121,9 +134,13 @@ defmodule HiremeWeb.Account do
 
       :ok ->
         Audit.recorded?(:reset)
-        answer = method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
-        unless Audit.recorded?(:check), do: Hireme.Security.refund(:account_writes, id)
-        answer
+
+        try do
+          method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+        after
+          # A call that raised wrote nothing either.
+          unless Audit.recorded?(:check), do: Hireme.Security.refund(:account_writes, id)
+        end
     end
   end
 
@@ -179,11 +196,17 @@ defmodule HiremeWeb.Account do
 
   defp run("account.watch", _, _, _), do: {:park, :account}
 
+  # The trail a page at a time, security events (the default) or activity,
+  # newest first, `before` the last page's `next`.
   defp run("account.audit", p, _, _) do
     limit =
       p |> Map.get("limit", 50) |> then(&if(is_integer(&1), do: min(max(&1, 1), 200), else: 50))
 
-    {:ok, %{events: Enum.map(Audit.recent(limit), &event/1)}}
+    view = if p["view"] == "activity", do: :activity, else: :security
+    events = Audit.page(view, limit, p["before"])
+    next = if length(events) == limit, do: List.last(events).id
+
+    {:ok, %{events: Enum.map(events, &event/1), next: next}}
   end
 
   ## The account and its sessions

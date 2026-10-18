@@ -129,6 +129,13 @@ defmodule Hireme.Security do
     # rows coalesce into one per window (`Hireme.Audit.Coalescer`).
     activity: {:timer.minutes(10), 1000},
     revokes: {:timer.minutes(10), 120},
+    # A key's HELLOs on the trail; past it the first per (key, address) in a
+    # window is still written.
+    hellos: {:timer.minutes(10), 600},
+    # Every account's activity rows together: the node's ceiling.
+    activity_node: {:timer.minutes(10), 20_000},
+    # Notice rows queued per account (an event to many addresses is many).
+    notice_rows: {:timer.minutes(10), 300},
     # Notices of a change that must reach the owner as itself (a factor
     # removed or disabled, a way in linked or unlinked, a key widened).
     critical_notices: {:timer.minutes(10), 10},

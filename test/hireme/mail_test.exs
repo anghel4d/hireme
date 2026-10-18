@@ -77,12 +77,12 @@ defmodule Hireme.MailTest do
 
   test "past the notice budget, changes coalesce into one pending digest per address" do
     %{account: a, email: email} = sign_in()
-    for i <- 1..35, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
+    for i <- 1..35, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
 
     rows =
       Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id), skip_account: true)
 
-    assert Enum.count(rows, &(&1.kind == "api_key_created")) == 30
+    assert Enum.count(rows, &(&1.kind == "api_key_renamed")) == 30
     assert [digest] = Enum.filter(rows, &(&1.kind == "digest"))
     assert digest.meta["count"] == 5
     assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
@@ -91,17 +91,19 @@ defmodule Hireme.MailTest do
   test "one event is one charge however many addresses hear of it; critical kinds keep their own budget" do
     %{account: a, email: email} = sign_in()
     many = for i <- 1..40, do: "addr#{i}@example.com"
-    :ok = Mail.enqueue(a.id, many, :api_key_created, %{name: "k"})
+    :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
 
     rows = fn kind ->
       Repo.aggregate(
         from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id and n.kind == ^kind),
-        :count, skip_account: true)
+        :count,
+        skip_account: true
+      )
     end
 
-    assert rows.("api_key_created") == 40
-    for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
-    :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "past"})
+    assert rows.("api_key_renamed") == 40
+    for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "past"})
     assert rows.("digest") == 1
 
     :ok = Mail.enqueue(a.id, [email], :authenticator_removed, %{kind: :totp})
@@ -110,10 +112,10 @@ defmodule Hireme.MailTest do
 
   test "a digest the drain has taken up or given up on is never added to" do
     %{account: a, email: email} = sign_in()
-    for i <- 1..31, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
+    for i <- 1..31, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
     [d] = Repo.all(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), skip_account: true)
     d |> Ecto.Changeset.change(attempts: 8) |> Repo.update!(skip_account: true)
-    :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "later"})
+    :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "later"})
 
     assert Repo.aggregate(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), :count,
              skip_account: true
@@ -121,5 +123,36 @@ defmodule Hireme.MailTest do
 
     assert Mail.line(:digest, %{count: 1, since: "2026-10-18T10:00:00Z"}) =~
              "1 security change since 2026-10-18 10:00:00 UTC"
+  end
+
+  test "a key's revoke notice and the critical kinds reach the owner as themselves past the general budget" do
+    %{account: a, email: email} = sign_in()
+    for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
+    :ok = Mail.enqueue(a.id, [email], :api_key_revoked, %{name: "leaked"})
+    :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
+
+    kinds =
+      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id, select: n.kind),
+        skip_account: true
+      )
+
+    assert "api_key_revoked" in kinds and "authenticator_added" in kinds
+  end
+
+  test "notice rows are bounded per account however many addresses an account links" do
+    %{account: a} = sign_in()
+    many = for i <- 1..100, do: "a#{i}@example.com"
+    for _ <- 1..4, do: :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
+
+    count = fn kind ->
+      Repo.aggregate(
+        from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id and n.kind == ^kind),
+        :count,
+        skip_account: true
+      )
+    end
+
+    assert count.("api_key_renamed") == 300
+    assert count.("digest") == 100
   end
 end

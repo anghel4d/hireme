@@ -23,15 +23,21 @@ defmodule Hireme.Audit do
   # Kinds on the trail that are activity, not a change to the account.
   @quiet ~w(agent_ops wire_key wire_key_refused activity_coalesced revokes_coalesced)
 
-  # Kinds under a per-account budget; past it a row is counted, not written,
-  # and the window's counts become one coalesced row.
+  # Kinds under a per-account budget, and the node-wide one for activity;
+  # past them a row is counted, not written, and the window's counts become
+  # one coalesced row. A key's HELLO past its budget is still written the
+  # first time a (key, address) is seen in the window.
   @budgeted %{
     "agent_ops" => :activity,
     "lease_opened" => :activity,
     "lease_released" => :activity,
-    "wire_key" => :activity,
+    "wire_key" => :hellos,
     "lease_revoked" => :revokes
   }
+
+  # A lease opening or closing changes what the account lens shows, so it
+  # moves the cursor and wakes a parked watch even when coalesced.
+  @leases ~w(lease_opened lease_released lease_revoked)
 
   # Activity that expires (`Hireme.Release.Purge`, after
   # `Security.activity_retention_days/0`); every other kind is kept forever.
@@ -40,6 +46,11 @@ defmodule Hireme.Audit do
   @doc "The trail's kinds that expire; every other kind is a security event, kept forever."
   @spec expiring_kinds() :: [String.t()]
   def expiring_kinds, do: @expiring
+
+  @doc "The kinds that are activity, not security events: what the account lens's activity view shows."
+  @spec activity_kinds() :: [String.t()]
+  def activity_kinds,
+    do: Enum.uniq(@quiet ++ @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
 
   @doc """
   Announce that the account's factors changed (bound, removed, disabled):
@@ -75,12 +86,54 @@ defmodule Hireme.Audit do
     name = Atom.to_string(kind)
     Process.put({__MODULE__, :recorded}, true)
 
-    with budget when budget != nil and account_id != nil <- @budgeted[name],
-         {:error, _} <- Hireme.Security.hit(budget, account_id, 1) do
-      __MODULE__.Coalescer.count(account_id, budget, name, Map.get(context, :key_id))
-    else
-      _ -> write(kind, meta, context, account_id)
+    case account_id && @budgeted[name] do
+      budget when is_atom(budget) and budget != nil ->
+        if within?(budget, name, account_id, context),
+          do: write(kind, meta, context, account_id),
+          else: coalesce(budget, name, account_id, context)
+
+      _ ->
+        write(kind, meta, context, account_id)
     end
+  end
+
+  defp within?(budget, name, account_id, context) do
+    node_ok? =
+      budget not in [:activity, :hellos] or Hireme.Security.hit(:activity_node, :node, 1) == :ok
+
+    cond do
+      node_ok? and Hireme.Security.hit(budget, account_id, 1) == :ok ->
+        # A HELLO written under the budget is its address's first, too.
+        if name == "wire_key",
+          do: __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
+
+        true
+
+      # Past the budget, a key's first HELLO from an address in the window
+      # is still a row, so which addresses held a key is never a count.
+      name == "wire_key" ->
+        __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
+
+      true ->
+        false
+    end
+  end
+
+  defp coalesce(budget, name, account_id, context) do
+    __MODULE__.Coalescer.count(account_id, budget, name, context)
+    if name in @leases, do: moved(account_id), else: :ok
+  end
+
+  # The cursor moves and parked watches wake, with no row: a coalesced lease
+  # change still reaches the account lens.
+  defp moved(account_id) do
+    Store.write(fn ->
+      Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
+        skip_account: true
+      )
+    end)
+
+    changed(account_id)
   end
 
   @doc false
@@ -116,9 +169,13 @@ defmodule Hireme.Audit do
           returning: [:id]
         )
 
-      # The cursor moves in the same turn as the row that moves it.
+      # The cursor moves in the same turn as the row that moves it: a count
+      # of the account's announced changes, so a coalesced lease change can
+      # move it too.
       if account_id && not quiet? do
-        Repo.update_all(from(a in Account, where: a.id == ^account_id), [set: [audit_rev: id]],
+        _ = id
+
+        Repo.update_all(from(a in Account, where: a.id == ^account_id), [inc: [audit_rev: 1]],
           skip_account: true
         )
       end
@@ -164,18 +221,35 @@ defmodule Hireme.Audit do
     do: Phoenix.PubSub.broadcast(Hireme.PubSub, topic(account_id), {:bye, who, reason})
 
   @doc """
-  How far the account's security state has moved: the newest event that
-  announces itself (every kind but activity: agent op batches and key
-  HELLOs). The trail is
-  append-only, so it only grows. Kept on the account row
-  (`accounts.audit_rev`), written with the event, so reading it is one row;
-  `account.watch` compares against it.
+  How far the account's security state has moved: a count of the changes
+  it announced (every event but activity, and every lease opening or
+  closing, coalesced or not). It only grows, is kept on the account row
+  (`accounts.audit_rev`) in the turn that announces, and `account.watch`
+  compares against it.
   """
   @spec rev(pos_integer()) :: non_neg_integer()
   def rev(account_id) do
     Repo.one(from(a in Account, where: a.id == ^account_id, select: a.audit_rev),
       skip_account: true
     ) || 0
+  end
+
+  @doc """
+  A page of the account's trail on the process, newest first: its security
+  events or its activity (`activity_kinds/0`), with ids below `before`.
+  """
+  @spec page(:security | :activity, pos_integer(), integer() | nil) :: [struct()]
+  def page(view, limit, before) do
+    activity = activity_kinds()
+    q = from(e in Event, order_by: [desc: e.id], limit: ^limit)
+
+    q =
+      if view == :activity,
+        do: where(q, [e], e.kind in ^activity),
+        else: where(q, [e], e.kind not in ^activity)
+
+    q = if is_integer(before), do: where(q, [e], e.id < ^before), else: q
+    Repo.all(q)
   end
 
   @doc "The latest events for the account on the process, newest first."
@@ -186,62 +260,123 @@ end
 defmodule Hireme.Audit.Coalescer do
   @moduledoc """
   An account's activity past its trail budget, counted instead of written:
-  per window, per kind and key. When the window closes its counts become one
-  row (`activity_coalesced`, or `revokes_coalesced` for lease revokes), so
-  the trail stays bounded per account and nothing is ever edited. A stop
-  writes what it holds.
+  per window, per kind and key, with the distinct addresses and user agents
+  it came from (20 of each named, the rest counted). When the window closes
+  its counts become one row (`activity_coalesced`, or `revokes_coalesced`
+  for lease revokes), so the trail stays bounded per account and nothing is
+  ever edited.
+
+  The table belongs to the application (`table/0`, made in
+  `Hireme.Application.start/2`), not to this process: a crash here loses no
+  count. Each window's group is written on its own, under a rescue, and
+  only what was written is deleted. Without the table (the node starting or
+  stopping) an event is written as itself.
   """
 
   use GenServer
+  require Logger
   alias Hireme.Audit
 
   @table __MODULE__
   @tick :timer.seconds(30)
+  @named 20
+
+  @doc "Make the counts table; the application's own process owns it."
+  def table, do: :ets.new(@table, [:named_table, :public, :set, write_concurrency: true])
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
-  @doc "Count one event of `kind` by `key_id` for the account's current window."
-  @spec count(pos_integer(), atom(), String.t(), pos_integer() | nil) :: :ok
-  def count(account_id, budget, kind, key_id) do
-    key = {account_id, budget, window(budget, System.os_time(:millisecond)), kind, key_id}
-    :ets.update_counter(@table, key, 1, {key, 0})
+  @doc "Count one event of `kind` for the account's current window, with where it came from."
+  @spec count(pos_integer(), atom(), String.t(), map()) :: :ok
+  def count(account_id, budget, kind, context) do
+    w = window(budget, System.os_time(:millisecond))
+    :ets.update_counter(@table, {:n, account_id, budget, w, kind, context[:key_id]}, 1, {nil, 0})
+    seen(account_id, budget, w, :ip, context[:ip])
+    seen(account_id, budget, w, :ua, context[:user_agent])
     :ok
+  rescue
+    ArgumentError ->
+      Audit.write(String.to_existing_atom(kind), %{}, context, account_id)
   end
 
-  @doc "Write every window that has closed by `now_ms` (all of them with `:all`). Answers the rows written."
-  @spec flush(integer() | :all) :: non_neg_integer()
-  def flush(now_ms \\ System.os_time(:millisecond)) do
-    closed =
-      for {{account_id, budget, w, _, _} = key, n} <- :ets.tab2list(@table),
-          now_ms == :all or w < window(budget, now_ms),
-          do: {key, n, {account_id, budget, w}}
+  defp seen(_, _, _, _, nil), do: :ok
 
-    closed
-    |> Enum.group_by(&elem(&1, 2))
-    |> Enum.map(fn {{account_id, budget, w}, entries} ->
-      {scale, _} = Hireme.Security.limits()[budget]
-
-      counts =
-        Enum.reduce(entries, %{}, fn {{_, _, _, kind, key_id}, n, _}, acc ->
-          put_in(acc, [Access.key(kind, %{}), to_string(key_id || "none")], n)
-        end)
-
-      kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced
-
-      Audit.write(
-        kind,
-        %{
-          from: iso(w * scale),
-          to: iso((w + 1) * scale),
-          counts: counts
-        },
-        %{account_id: account_id},
-        account_id
+  defp seen(account_id, budget, w, what, value),
+    do:
+      :ets.insert_new(
+        @table,
+        {{what, account_id, budget, w, Hireme.Security.clip(value, 200)}, true}
       )
 
-      Enum.each(entries, fn {key, _, _} -> :ets.delete(@table, key) end)
-    end)
-    |> length()
+  @doc "Whether this is the first HELLO of `key_id` from `ip` in the account's current window."
+  @spec first?(pos_integer(), pos_integer() | nil, String.t() | nil) :: boolean()
+  def first?(account_id, key_id, ip) do
+    w = window(:hellos, System.os_time(:millisecond))
+    :ets.insert_new(@table, {{:first, account_id, w, key_id, ip}, true})
+  rescue
+    ArgumentError -> true
+  end
+
+  @doc "Write every window closed by `now_ms` (all of them with `:all`). Answers the rows written."
+  @spec flush(integer() | :all) :: non_neg_integer()
+  def flush(now_ms \\ System.os_time(:millisecond)) do
+    rows = :ets.tab2list(@table)
+
+    rows
+    |> Enum.filter(fn {key, _} -> closed?(key, now_ms) end)
+    |> Enum.group_by(fn {key, _} -> group(key) end)
+    |> Enum.count(fn {group, entries} -> write_group(group, entries) end)
+  rescue
+    ArgumentError -> 0
+  end
+
+  defp closed?({:first, _, w, _, _}, now_ms), do: now_ms == :all or w < window(:hellos, now_ms)
+  defp closed?(key, now_ms), do: now_ms == :all or elem(key, 3) < window(elem(key, 2), now_ms)
+
+  defp group({:first, account_id, w, _, _}), do: {:first, account_id, w}
+  defp group(key), do: {elem(key, 1), elem(key, 2), elem(key, 3)}
+
+  # The first-HELLO marks only expire; every other group becomes one row.
+  defp write_group({:first, _, _}, entries) do
+    Enum.each(entries, fn {key, _} -> :ets.delete(@table, key) end)
+    false
+  end
+
+  defp write_group({account_id, budget, w}, entries) do
+    {scale, _} = Hireme.Security.limits()[budget]
+
+    counts =
+      for {{:n, _, _, _, kind, key_id}, n} <- entries, reduce: %{} do
+        acc -> put_in(acc, [Access.key(kind, %{}), to_string(key_id || "none")], n)
+      end
+
+    {ips, ip_total} = named(entries, :ip)
+    {uas, ua_total} = named(entries, :ua)
+
+    meta = %{
+      from: iso(w * scale),
+      to: iso((w + 1) * scale),
+      counts: counts,
+      addresses: ips,
+      addresses_total: ip_total,
+      user_agents: uas,
+      user_agents_total: ua_total
+    }
+
+    kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced
+    if counts != %{}, do: Audit.write(kind, meta, %{account_id: account_id}, account_id)
+    Enum.each(entries, fn {key, _} -> :ets.delete(@table, key) end)
+    counts != %{}
+  rescue
+    # A group that cannot be written stays for the next flush; the others go on.
+    e ->
+      Logger.error("trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}")
+      false
+  end
+
+  defp named(entries, what) do
+    values = for {{^what, _, _, _, value}, _} <- entries, do: value
+    {Enum.take(Enum.sort(values), @named), length(values)}
   end
 
   defp iso(ms),
@@ -258,8 +393,6 @@ defmodule Hireme.Audit.Coalescer do
 
   @impl true
   def init(:ok) do
-    Process.flag(:trap_exit, true)
-    :ets.new(@table, [:named_table, :public, :set, write_concurrency: true])
     # Tests flush themselves, in their own sandboxed process.
     unless Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
       do: :timer.send_interval(@tick, :flush)
@@ -273,9 +406,5 @@ defmodule Hireme.Audit.Coalescer do
     {:noreply, s}
   end
 
-  @impl true
-  def terminate(_reason, _s) do
-    unless Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox, do: flush(:all)
-    :ok
-  end
+  def handle_info(_other, s), do: {:noreply, s}
 end

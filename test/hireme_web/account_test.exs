@@ -1,6 +1,7 @@
 defmodule HiremeWeb.AccountTest do
   use Hireme.DataCase, async: false
 
+  alias Ecto.Adapters.SQL.Sandbox
   alias HiremeWeb.Account
 
   setup do
@@ -231,7 +232,7 @@ defmodule HiremeWeb.AccountTest do
       1..90
       |> Enum.map(fn _ ->
         Task.async(fn ->
-          Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, self())
+          Sandbox.allow(Repo, parent, self())
           Account.call("account.key.mint", args, ctx)
         end)
       end)
@@ -239,5 +240,40 @@ defmodule HiremeWeb.AccountTest do
 
     # One trusted host was written; the 29 repeats were given back.
     assert Enum.count(results, &match?({:ok, _}, &1)) == 59
+  end
+
+  test "the trail pages by view and cursor, security events by default", %{session: s, ctx: ctx} do
+    for _ <- 1..3, do: Hireme.Audit.record(:agent_ops, %{}, %{account_id: s.account_id})
+
+    {:ok, %{key: _}} =
+      Account.call("account.key.mint", %{"name" => "k", "preset" => "read_only"}, ctx)
+
+    {:ok, %{events: sec}} = Account.call("account.audit", %{}, ctx)
+    assert Enum.any?(sec, &(&1.kind == "api_key_created"))
+    refute Enum.any?(sec, &(&1.kind == "agent_ops"))
+
+    {:ok, %{events: [_, _], next: next}} =
+      Account.call("account.audit", %{"view" => "activity", "limit" => 2}, ctx)
+
+    {:ok, %{events: [last], next: nil}} =
+      Account.call("account.audit", %{"view" => "activity", "limit" => 2, "before" => next}, ctx)
+
+    assert last.kind == "agent_ops"
+  end
+
+  test "an id past a 64-bit row id is refused at the boundary, before anything is charged", %{
+    ctx: ctx
+  } do
+    for _ <- 1..100 do
+      assert {:error, %{error: "invalid"}} =
+               Account.call(
+                 "account.key.change",
+                 %{"id" => 1_000_000_000_000_000_000_000_000_000, "preset" => "read_only"},
+                 ctx
+               )
+    end
+
+    assert {:ok, _} =
+             Account.call("account.key.mint", %{"name" => "k", "preset" => "read_only"}, ctx)
   end
 end
