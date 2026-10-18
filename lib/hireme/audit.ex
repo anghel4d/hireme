@@ -274,6 +274,38 @@ defmodule Hireme.Audit do
   @doc "The latest events for the account on the process, newest first."
   @spec recent(pos_integer()) :: [struct()]
   def recent(limit \\ 50), do: Repo.all(from(e in Event, order_by: [desc: e.id], limit: ^limit))
+
+  # A trail row's meta as the lens sees it: never a hash, secret, token,
+  # code, password, API key or credential at any depth, even a truncated one
+  # (a link request's email_hash stays server-side). A matching key goes
+  # whole, whatever it holds.
+  # The lens's allowlist is the real control; this is the server's backstop.
+  # Bare auth, key, pin or seed would strip ordinary fields, so they are not here.
+  @hidden ~r/hash|secret|token|code|password|passwd|api_key|private_key|signing_key|session_key|credential|bearer|cookie|jwt|otp/i
+  @coalesced ~w(activity_coalesced revokes_coalesced)
+
+  # A coalesced row's counts are keyed by kind names, not data, so they pass
+  # by shape: kind => key => integer, and nothing else, whoever wrote the row.
+  # The rest of its meta is stripped like any other.
+  @doc "A trail row's meta as a reader sees it (the account lens, its replica)."
+  def visible(%{"counts" => counts} = meta, kind) when kind in @coalesced,
+    do: meta |> Map.delete("counts") |> shown() |> Map.put("counts", counted(counts))
+
+  def visible(meta, _kind), do: shown(meta)
+
+  defp shown(meta) when is_map(meta) and not is_struct(meta),
+    do: for({k, v} <- meta, not (to_string(k) =~ @hidden), into: %{}, do: {k, shown(v)})
+
+  defp shown(list) when is_list(list), do: Enum.map(list, &shown/1)
+  defp shown(value), do: value
+
+  defp counted(counts) when is_map(counts) do
+    for {kind, by} <- counts, is_binary(kind) and is_map(by), into: %{} do
+      {kind, for({key, n} <- by, is_binary(key) and is_integer(n), into: %{}, do: {key, n})}
+    end
+  end
+
+  defp counted(_), do: %{}
 end
 
 defmodule Hireme.Audit.Coalescer do

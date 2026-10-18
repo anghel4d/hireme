@@ -205,6 +205,44 @@ defmodule Hireme.SequencerTest do
              )
   end
 
+  test "secrets never replicate: the account views carry none, reach no key, and follow the trail",
+       %{account: a, session: s} do
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "views", Hireme.Keys.preset(:read_write))
+
+    boot = fn id, grants ->
+      sub = %{id: id, label: "v", grants: grants, key_id: nil, session_id: nil}
+      {:ok, %{frames: [f]}} = Sequencer.subscribe(a.id, sub, 0)
+      {:ok, :BOOT, _, _, body} = Codec.decode(f)
+      ingest(%{}, :BOOT, body)
+    end
+
+    secret =
+      ~w(token_hash secret_hash totp_secret totp_last_step credential_id public_key sign_count aaguid subject)
+
+    op = boot.(993, Grants.operator())
+
+    refute Enum.any?(
+             Map.keys(op),
+             &(&1 in ~w(sessions api_keys factors recovery_codes audit op_ledger))
+           )
+
+    for {t, rows} <- op,
+        {_, row} <- rows,
+        {c, _} <- row,
+        do: refute(Schema.column(t, c).name in secret, "#{t} carried a secret")
+
+    name = Schema.column(:acct_keys, "name").id
+    assert "views" in for({_, r} <- op["acct_keys"], do: r[name])
+
+    assert Enum.all?(boot.(992, Grants.key(key)), fn {t, rows} ->
+             not String.starts_with?(t, "acct_") or rows == %{}
+           end)
+
+    {:ok, _} = Hireme.Keys.mint(s, "later", Hireme.Keys.preset(:read_only))
+    assert_receive {:sequencer, :patch, _, body}, 2_000
+    assert "later" in for({_, r} <- ingest(%{}, :PATCH, body)["acct_keys"], do: r[name])
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))

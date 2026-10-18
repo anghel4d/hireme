@@ -196,6 +196,8 @@ defmodule Hireme.Sequencer do
       rev: rev,
       lease: %Lease{},
       lease_rows: [],
+      account: nil,
+      account_due: false,
       subs: %{},
       counts: %{},
       kernel: nil,
@@ -330,6 +332,16 @@ defmodule Hireme.Sequencer do
 
     {:noreply, %{state | lease: lease}, @idle_ms}
   end
+
+  # The account's trail moved (a key, a session, a factor, a host): the
+  # operator's account views follow, at most every 100 ms.
+  def handle_info({Hireme.Audit, kind}, state) when kind in [:changed, :factors] do
+    unless state.account_due, do: Process.send_after(self(), :account, 100)
+    {:noreply, %{state | account_due: true}, @idle_ms}
+  end
+
+  def handle_info(:account, state),
+    do: {:noreply, %{refresh_account(state) | account_due: false}, @idle_ms}
 
   def handle_info(:backfill, state) do
     {:noreply, backfill(state), @idle_ms}
@@ -1933,11 +1945,16 @@ defmodule Hireme.Sequencer do
 
     # A table the grants do not read goes as an empty block, so a BOOT clears
     # whatever a client kept of it from wider grants.
+    {state, account} = if grants, do: account_views(state), else: {state, %{}}
+
     tables =
       for t <- Schema.tables(), t.residency in [:resident, :projection] do
-        if grants == nil or Grants.read?(grants, t),
-          do: Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id)),
-          else: Codec.block(t.id, 0, [{1, 1, []}])
+        cond do
+          grants != nil and not Grants.read?(grants, t) -> Codec.block(t.id, 0, [{1, 1, []}])
+          account?(t) and grants == nil -> Codec.block(t.id, 0, [{1, 1, []}])
+          account?(t) -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(account, t.id))
+          true -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))
+        end
       end
 
     {state, [tables | if(grants, do: wire_tables(state, grants, now), else: [clock(now)])]}
@@ -1952,6 +1969,7 @@ defmodule Hireme.Sequencer do
     rows =
       for t <- Schema.tables(),
           t.residency in [:resident, :projection],
+          not account?(t),
           into: %{},
           do: {t.id, rows(t)}
 
@@ -1993,7 +2011,76 @@ defmodule Hireme.Sequencer do
       catalog(grants),
       clock(now)
       | if(Grants.read?(grants, Schema.table(:leases)), do: [leases_block(state)], else: [])
-    ]
+    ] ++
+      if(Grants.read?(grants, Schema.table(:acct_info)), do: [acct_info_block(state)], else: [])
+  end
+
+  # ------------------------------------------------------- account views
+
+  # The account page's views (acct_*, the operator's alone) are read from the
+  # system tables they project, never cached by rev: they move with the trail,
+  # not with the desk. `state.account` keeps what the last read held, so a
+  # trail change patches only what moved.
+  defp account?(%{name: name}), do: String.starts_with?(name, "acct_")
+
+  @audit_rows 1_000
+
+  defp account_views(state) do
+    views =
+      for t <- Schema.tables(), t.residency == :projection, account?(t), into: %{} do
+        {t.id, account_rows(t)}
+      end
+
+    {%{state | account: views}, views}
+  end
+
+  # The newest events, their meta as the lens shows it.
+  defp account_rows(%{name: "acct_audit"}) do
+    from(e in Hireme.Rows.Audit, order_by: [desc: e.id], limit: @audit_rows)
+    |> Repo.all()
+    |> Enum.map(&%{&1 | meta: Hireme.Audit.visible(&1.meta || %{}, &1.kind)})
+  end
+
+  defp account_rows(t), do: rows(t)
+
+  defp acct_info_block(state) do
+    t = Schema.table(:acct_info)
+
+    a =
+      Repo.one!(from(x in Hireme.Rows.Account, where: x.id == ^state.account_id),
+        skip_account: true
+      )
+
+    row = %{name: a.name, status: a.status, recovery_codes_left: Hireme.Mfa.recovery_codes_left()}
+    Codec.rows_block(t, t.cols, [row])
+  end
+
+  # The trail moved: patch the operator's sessions with the account views'
+  # changed and gone rows, and acct_info whole. Debounced: a burst of trail
+  # rows is one read.
+  defp refresh_account(%{account: nil} = state), do: state
+
+  defp refresh_account(state) do
+    before = state.account
+    {state, views} = account_views(state)
+
+    blocks =
+      for {id, rows} <- views do
+        t = Schema.table(id)
+        old = Map.new(before[id] || [], &{&1.id, &1})
+        changed = Enum.reject(rows, &(old[&1.id] == &1))
+        gone = Map.keys(old) -- Enum.map(rows, & &1.id)
+        moved = if changed == [], do: [], else: [Codec.rows_block(t, t.cols, changed)]
+        moved ++ [Codec.gone_block(for i <- gone, do: {t.id, i})]
+      end
+
+    body = IO.iodata_to_binary([blocks, acct_info_block(state)])
+
+    for {_, %{grants: %{actor: :operator}, pid: pid}} <- state.subs,
+        is_pid(pid),
+        do: send(pid, {:sequencer, :patch, state.rev, body})
+
+    state
   end
 
   defp clock(now) do
@@ -2025,7 +2112,11 @@ defmodule Hireme.Sequencer do
   @residency %{resident: 1, server: 2, wire: 3, projection: 4}
 
   defp build_catalog(grants) do
-    seen = fn t -> t.residency == :wire or Grants.read?(grants, t) or Grants.write?(grants, t) end
+    seen = fn t ->
+      (t.residency == :wire and not account?(t)) or Grants.read?(grants, t) or
+        Grants.write?(grants, t)
+    end
+
     tables = Enum.filter(Schema.tables(), seen)
 
     rows =

@@ -718,3 +718,23 @@ table catalog system wire
 # The trusted hosts, replicated read-only so a replica predicts source_trust.
 projection trusted world trusted_hosts where host is not null
   pick host
+
+# The account page's views: read by the operator's browser session only,
+# never a key, and never a secret (no hash, token, TOTP secret, credential
+# or recovery code). The sequencer re-reads them when the account's trail
+# moves and patches what changed; acct_audit holds the newest events.
+projection acct_keys system api_keys where key_id is not null
+  pick key_id name prefix read_mask write_mask may_delete last_used_at expires_at revoked_at paused_at inserted_at
+projection acct_sessions system sessions where revoked_at is null
+  pick authenticated_at mfa_at last_seen_at expires_at ip user_agent
+projection acct_identities system identities where subject is not null
+  pick provider display verified_at
+projection acct_factors system factors where disabled_at is null
+  pick kind name transports backup_eligible backed_up verified_at last_used_at
+projection acct_audit system audit where kind is not null
+  pick kind ip user_agent meta key_id session_id security inserted_at
+
+table acct_info system wire
+  col name str ?
+  col status enum account_status !
+  col recovery_codes_left u32 !
