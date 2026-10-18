@@ -36,6 +36,7 @@ pub struct TableDef {
     pub domain_bit: u8,
     pub residency: Residency,
     pub cap: Option<u32>,
+    pub append_only: bool,
     pub soft_delete: bool,
     pub unmasked: bool,
     pub singleton: bool,
@@ -75,6 +76,8 @@ pub struct ColDef {
     pub flags: u32,
     /// The table a ref names or the enum an enum names.
     pub target: Option<&'static str>,
+    /// The declared default, as written (`= <value>`).
+    pub default: Option<&'static str>,
 }
 
 /// One command of the catalog.

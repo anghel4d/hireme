@@ -134,4 +134,7 @@ fn a_table_def_names_its_keys_and_their_wheres() {
     let sources = table_def(table::SOURCES).unwrap();
     assert!(sources.soft_delete && !sources.singleton && !sources.unmasked);
     assert!(table_def(table::SETTINGS).unwrap().singleton);
+    assert!(table_def(table::EVENTS).unwrap().append_only);
+    let fire = table_def(table::BATCHES).unwrap().col_named("fire").unwrap();
+    assert_eq!(fire.default, Some("hold"));
 }

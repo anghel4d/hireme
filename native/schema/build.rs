@@ -125,7 +125,7 @@ fn main() {
     for t in &s.tables {
         writeln!(
             o,
-            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, soft_delete: {}, unmasked: {}, singleton: {}, keys: &[{}], cols: &[",
+            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, keys: &[{}], cols: &[",
             t.id,
             t.name,
             t.domain,
@@ -135,6 +135,7 @@ fn main() {
                 Some(c) => format!("Some({c})"),
                 None => "None".into(),
             },
+            t.append_only,
             t.soft_delete,
             t.unmasked,
             t.singleton,
@@ -144,13 +145,14 @@ fn main() {
         for c in &t.cols {
             writeln!(
                 o,
-                "        ColDef {{ id: {}, name: {:?}, type_code: {}, wire: {}, flags: {}, target: {} }},",
+                "        ColDef {{ id: {}, name: {:?}, type_code: {}, wire: {}, flags: {}, target: {}, default: {} }},",
                 c.id,
                 c.name,
                 c.ty.code(),
                 c.wire(),
                 c.flags(),
-                opt(c.target.as_deref())
+                opt(c.target.as_deref()),
+                opt(c.default.as_deref())
             )
             .unwrap();
         }
