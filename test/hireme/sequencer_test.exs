@@ -378,12 +378,26 @@ defmodule Hireme.SequencerTest do
 
   property "a subscriber's BOOT plus its PATCHes is a fresh BOOT, and a mask never lets a row through",
            %{account: a} do
+    word = string(:alphanumeric, min_length: 1, max_length: 6)
+
+    # Writes to every resident table and to a world table with a resident
+    # projection (places, seen as atlas), with drops that cascade.
     gen_action =
       one_of([
-        tuple({constant(:rep), string(:alphanumeric, min_length: 1, max_length: 6)}),
-        tuple({constant(:app), string(:alphanumeric, min_length: 1, max_length: 6)}),
+        tuple({constant(:rep), word}),
+        tuple({constant(:app), word}),
         tuple({constant(:note), integer(0..20), string(:printable, max_length: 12)}),
-        tuple({constant(:drop), integer(0..20)})
+        tuple({constant(:drop), integer(0..20)}),
+        tuple({constant(:profile), word}),
+        tuple({constant(:item), word}),
+        tuple({constant(:batch), word}),
+        tuple({constant(:net), word}),
+        tuple({constant(:settings), member_of(["pt", "de", "pt\u001fde", ""])}),
+        tuple({constant(:place), word}),
+        tuple({constant(:event), integer(0..20), word}),
+        tuple({constant(:overlay), integer(0..20), integer(0..20)}),
+        tuple({constant(:stage), integer(0..20), member_of([:gated, :closed, :in_batch])}),
+        tuple({constant(:drop_app), integer(0..20)})
       ])
 
     check all(actions <- list_of(gen_action, min_length: 1, max_length: 12), max_runs: 12) do
@@ -427,6 +441,39 @@ defmodule Hireme.SequencerTest do
 
           {:drop, i} ->
             op(:drop, :gym_reps, %{}, target: Enum.at(ids.("gym_reps"), i, 999_999))
+
+          {:profile, s} ->
+            op(:put, :profiles, %{slug: "p-#{s}", name: s})
+
+          {:item, s} ->
+            op(:put, :items, %{kind: :skill, key: "k-#{s}", title: s})
+
+          {:batch, s} ->
+            op(:put, :batches, %{code: "b-#{s}", ordinal: 1})
+
+          {:net, s} ->
+            op(:put, :net_entries, %{kind: :post, title: s})
+
+          {:settings, c} ->
+            op(:put, :settings, %{citizenships: c})
+
+          {:place, s} ->
+            op(:put, :places, %{kind: :city, name: s})
+
+          {:event, i, s} ->
+            app = Enum.at(ids.("applications"), i, 999_999)
+            op(:put, :events, %{application_id: app, kind: s})
+
+          {:overlay, i, j} ->
+            app = Enum.at(ids.("applications"), i, 999_999)
+            item = Enum.at(ids.("items"), j, 999_999)
+            op(:put, :cv_overlays, %{application_id: app, item_id: item, mode: :add})
+
+          {:stage, i, to} ->
+            op(:command, :stage, %{stage: to}, target: Enum.at(ids.("applications"), i, 999_999))
+
+          {:drop_app, i} ->
+            op(:drop, :applications, %{}, target: Enum.at(ids.("applications"), i, 999_999))
         end)
 
       Sequencer.submit(a.id, ops)
