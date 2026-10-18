@@ -179,6 +179,8 @@ function patch(old: Node, next: Node): void {
   const a = old as Element
   const b = next as Element
   if (a.getAttribute(OWN) === "own" && b.getAttribute(OWN) === "own") return
+  // A keyed element that is node for node what it was (a row a sort moved) stands: one native compare.
+  if (a.hasAttribute(KEY) && a.isEqualNode(b)) return
   // Whether the user changed this control, read before the attributes move its default.
   // `data-bound` marks a control that mirrors the address (a search box): the model is its truth.
   const edited =

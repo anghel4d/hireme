@@ -119,11 +119,8 @@ function editor(t: TableDef, c: ColumnDef, row: Row): Html {
       field = html`<input type="date" name="value" value="${value}" data-autofocus>`
       break
     case "text":
-      {
-        const body = value
-        // HTML drops a textarea's first newline, so a text that begins with one gets a second.
-        field = html`<textarea name="value" rows="8" data-autofocus>${body.startsWith("\n") ? `\n${body}` : body}</textarea>`
-      }
+      // HTML drops a textarea's first newline, so a text that begins with one gets a second.
+      field = html`<textarea name="value" rows="8" data-autofocus>${value.startsWith("\n") ? `\n${value}` : value}</textarea>`
       break
     default:
       field = html`<input name="value" value="${value}" data-autofocus${flag("required", c.required)}
@@ -165,7 +162,9 @@ function cites(t: TableDef): Html {
     <h2 id="cites-h">${t.name} #${c.id} · ${c.column}</h2>
     ${list.length === 0 ? html`<p class="hint">No citations.</p>` : html`<ol class="rows">${list.map((x) => {
       const s = (x.source ?? {}) as Row
-      return html`<li data-key="c${String(x.id)}"><b>${typeof x.value === "object" ? JSON.stringify(x.value) : String(x.value ?? "")}</b>
+      // A citation keeps the value it cited as {"v": value} (provenance.ex).
+      const cited = (x.value as { v?: unknown } | null)?.v ?? x.value
+      return html`<li data-key="c${String(x.id)}"><b>${typeof cited === "object" ? JSON.stringify(cited) : String(cited ?? "")}</b>
         <span class="muted">as of ${String(x.as_of ?? "")} · ${String(x.actor ?? "")}${x.key_id ? ` (key ${String(x.key_id)})` : ""}</span>
         ${s.url ? html`<a href="${href(String(s.url))}" rel="noopener noreferrer" target="_blank">${String(s.title ?? s.host ?? s.url)}</a>` : EMPTY}</li>`
     })}</ol>`}

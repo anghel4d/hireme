@@ -34,12 +34,10 @@ const list = (k: string): Row[] => (Array.isArray(overview()?.[k]) ? (overview()
 const str = (x: unknown): string => (x === null || x === undefined ? "" : String(x))
 const num = (x: unknown): number => (typeof x === "number" ? x : Number(x ?? 0))
 
-function bits(): Record<string, number> {
-  return { world: DOMAIN.world, desk: DOMAIN.desk, mail: DOMAIN.mail, lanes: DOMAIN.lanes, corpus: DOMAIN.corpus }
-}
+const BITS: Record<string, number> = { world: DOMAIN.world, desk: DOMAIN.desk, mail: DOMAIN.mail, lanes: DOMAIN.lanes, corpus: DOMAIN.corpus }
 
 const maskNames = (mask: number): string => {
-  const b = bits()
+  const b = BITS
   const on = DOMAINS.filter((d) => (mask & (b[d] ?? 0)) !== 0)
   return on.length === 0 ? "none" : on.length === DOMAINS.length ? "all" : on.join(", ")
 }
@@ -217,7 +215,7 @@ function redraft(form: HTMLFormElement, prev: Draft): Draft {
   if (preset !== "custom") return { ...prev, preset, mayDelete }
   // Turning to custom starts from what the previous preset granted.
   const start = prev.preset === "custom" ? null : presetMasks(prev.preset)
-  const b = bits()
+  const b = BITS
   let read = 0
   let write = 0
   for (const d of DOMAINS) {
@@ -250,7 +248,7 @@ async function link(provider: string, email?: string): Promise<void> {
  * all drawn from the form's draft before anything is minted.
  */
 function maskPicker(prefix: string, read: number, write: number, preset: string, mayDelete: boolean): Html {
-  const b = bits()
+  const b = BITS
   const d = draft(prefix, read, write, preset, mayDelete)
   const g = grants(d)
   const custom = d.preset === "custom"
