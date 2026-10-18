@@ -247,9 +247,18 @@ pub fn high_comp(comp: &str) -> bool {
         let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
         let suffix = if i < b.len() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
         let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
-        // Millions are pay only as money ("$1.2M"), not "5M users".
-        let money = comp[..start].trim_end().ends_with(['$', '€', '£']);
-        let plan = v == 401.0 && (suffix == b'k' || comp[i..].starts_with("(k)") || comp[i..].starts_with("(K)"));
+        // Millions are pay only as money ("$1.2M", "USD 1.2M", "1.2M USD"),
+        // not "5M users".
+        const CODES: [&str; 6] = ["usd", "eur", "gbp", "cad", "chf", "aud"];
+        let before = comp[..start].trim_end().to_ascii_lowercase();
+        // After the suffix letter (ASCII, so i + 1 is a char boundary).
+        let after = if suffix != 0 { comp[i + 1..].trim_start().to_ascii_lowercase() } else { String::new() };
+        let money = before.ends_with(['$', '€', '£'])
+            || CODES.iter().any(|c| before.ends_with(c))
+            || CODES.iter().any(|c| after.starts_with(c) && after[c.len()..].chars().next().is_none_or(|x| !x.is_alphanumeric()));
+        // Retirement plans: 401(k), 403(b), 457(b), in any spacing.
+        let rest = comp[i..].trim_start().to_ascii_lowercase();
+        let plan = (v == 401.0 && (suffix == b'k' || rest.starts_with("(k)"))) || ((v == 403.0 || v == 457.0) && rest.starts_with("(b)"));
         let value = match suffix {
             _ if plan => 0.0,
             b'k' => v * 1e3,
@@ -367,10 +376,10 @@ mod tests {
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé"] {
             assert!(!high_comp(no), "{no}");
         }
     }

@@ -515,6 +515,9 @@ impl Rows {
             let ids: Vec<u32> = match b.col(ID) {
                 _ if !keyed(tid) => (1..=n as u32).collect(),
                 Some(c) if c.ty == wire::U32 && c.nrows() == n => (0..n).map(|i| c.u32(i)).collect(),
+                // A table the session may not read comes as an empty block
+                // with no columns: it is emptied, nothing more.
+                None if n == 0 => Vec::new(),
                 _ => return Err(Error::Shape),
             };
             let t = self.table_mut(tid);

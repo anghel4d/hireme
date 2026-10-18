@@ -122,7 +122,7 @@ fn effects<'a>(env: Env<'a>, rows: &[Row]) -> Term<'a> {
 fn judge_any<'a>(env: Env<'a>, res: &Res, op: Binary, ctx: Term<'a>) -> NifResult<Term<'a>> {
     let c = ctx_in(ctx)?;
     let verdict = with(res, |k| {
-        k.set_today(c.today);
+        k.pin_today(c.today);
         let ctx = Ctx { today: c.today, now: c.now, human: c.human, key_id: c.key_id, held: &c.held };
         k.judge(op.as_slice(), &ctx)
     });

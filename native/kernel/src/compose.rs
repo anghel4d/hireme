@@ -79,7 +79,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         .map(|s| json!({"stage": s.name(), "label": s.label(), "hint": s.hint(), "pip": rail[s.index()].name(), "fire_locked": s.fire_locked()}))
         .collect();
 
-    let (lines, theme) = cv_of(rows, t, id);
+    let (lines, theme) = cv_of(rows, board.lines_built(), t, id);
     let cv_text = cv::visible(&lines, &theme);
     let listing_words: Vec<&str> = t.str(id, A::KEYWORDS).map(|k| crate::text::list(k).collect()).unwrap_or_default();
     let coverage = keywords::coverage(
@@ -149,7 +149,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
 }
 
 /// The CV lines and theme for one application.
-pub fn cv_of<'r>(rows: &'r Rows, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, Theme) {
+pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, Theme) {
     use col::items as I;
     let profile = t.u32(id, A::PROFILE_ID);
     let items: Vec<Item> = rows
@@ -181,11 +181,19 @@ pub fn cv_of<'r>(rows: &'r Rows, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, T
         .table(table::CV_OVERLAYS)
         .map(|o| {
             use col::cv_overlays as O;
-            o.ids()
-                .iter()
-                .filter(|&&x| {
-                    o.u32(x, O::APPLICATION_ID) == Some(id) || (lineage.is_some() && o.u32(x, O::LINEAGE_ID) == lineage)
-                })
+            // The lineage's overlays from the index when there is one; an
+            // application with no lineage reads its own by a scan.
+            let ids: Vec<u32> = match (lines, lineage) {
+                (Some(l), Some(lid)) => l.overlays(lid).collect(),
+                _ => o
+                    .ids()
+                    .iter()
+                    .copied()
+                    .filter(|&x| o.u32(x, O::APPLICATION_ID) == Some(id) || (lineage.is_some() && o.u32(x, O::LINEAGE_ID) == lineage))
+                    .collect(),
+            };
+            ids.iter()
+                .filter(|&&x| o.has(x))
                 .filter_map(|&x| {
                     Some(Overlay {
                         id: x,

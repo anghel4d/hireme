@@ -1,7 +1,13 @@
 # Float math goes through libm so wasm and native agree bit for bit; the
-# std methods call the platform's library and are refused here.
+# std methods call the platform's library and are refused here (denied in
+# Cargo.toml's [lints.clippy]).
 disallowed-methods = [
-  "f64::powf", "f64::powi", "f64::exp", "f64::exp2", "f64::ln", "f64::log", "f64::log2", "f64::log10",
-  "f64::sqrt", "f64::cbrt", "f64::hypot", "f64::sin", "f64::cos", "f64::tan", "f64::mul_add",
-  "f64::round", "f64::ceil", "f64::floor", "f64::trunc",
+  "f64::powf", "f64::powi", "f64::exp", "f64::exp2", "f64::exp_m1", "f64::ln", "f64::ln_1p", "f64::log",
+  "f64::log2", "f64::log10", "f64::sqrt", "f64::cbrt", "f64::hypot", "f64::sin", "f64::cos", "f64::tan",
+  "f64::asin", "f64::acos", "f64::atan", "f64::atan2", "f64::sinh", "f64::cosh", "f64::tanh", "f64::mul_add",
+  "f64::round", "f64::round_ties_even", "f64::ceil", "f64::floor", "f64::trunc", "f64::fract",
+  "f32::powf", "f32::powi", "f32::exp", "f32::exp2", "f32::exp_m1", "f32::ln", "f32::ln_1p", "f32::log",
+  "f32::log2", "f32::log10", "f32::sqrt", "f32::cbrt", "f32::hypot", "f32::sin", "f32::cos", "f32::tan",
+  "f32::asin", "f32::acos", "f32::atan", "f32::atan2", "f32::sinh", "f32::cosh", "f32::tanh", "f32::mul_add",
+  "f32::round", "f32::round_ties_even", "f32::ceil", "f32::floor", "f32::trunc", "f32::fract",
 ]

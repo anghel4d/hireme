@@ -10,6 +10,10 @@ description = "hireme's one implementation of every desk rule: rows, judging and
 crate-type = ["rlib"]
 path = "src/lib.rs"
 
+[lints.clippy]
+# The float methods listed in clippy.toml break cross-target determinism.
+disallowed_methods = "deny"
+
 [dependencies]
 schema = { path = "../schema", default-features = false }
 wire = { path = "../wire" }

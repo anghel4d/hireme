@@ -6,6 +6,7 @@
 //! Prints medians and p99s in µs; exits 1 past the bound.
 //!
 //!   cargo bench -p kernel --bench judge
+//!   HOT=0.85 COMPANIES=150 cargo bench -p kernel --bench judge   (a mature, concentrated desk)
 
 use std::time::Instant;
 
@@ -29,12 +30,14 @@ impl Rng {
 }
 
 fn desk() -> Kernel {
+    let hot: f64 = std::env::var("HOT").ok().and_then(|h| h.parse().ok()).unwrap_or(0.1);
+    let companies: u64 = std::env::var("COMPANIES").ok().and_then(|h| h.parse().ok()).unwrap_or(2500);
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
     let roles = ["Software Engineer", "Senior Software Engineer", "Rust Systems Engineer", "Research Engineer", "SRE"];
     let (mut stage, mut company, mut role, mut url, mut on, mut batch) = (vec![], vec![], vec![], vec![], vec![], vec![]);
     for _ in 0..N {
-        let c = r.below(2500);
-        stage.push(if r.below(10) == 0 { 5 + r.below(5) as u32 } else { r.below(5) as u32 });
+        let c = r.below(companies);
+        stage.push(if (r.below(1000) as f64) < hot * 1000.0 { 5 + r.below(5) as u32 } else { r.below(5) as u32 });
         company.push(format!("Company {c} Systems"));
         role.push(roles[r.below(5) as usize].to_string());
         url.push(match r.below(4) {

@@ -125,6 +125,8 @@ pub struct Lines {
     corp_of_lineage: crate::fx::Map<u32, u32>,
     line_of_overlay: crate::fx::Map<u32, (u32, u32)>,
     overlays_on_line: crate::fx::Map<(u32, u32), u32>,
+    /// Overlay ids per lineage, for composing a CV without a scan.
+    overlays_of_lineage: crate::fx::Map<u32, alloc::collections::BTreeSet<u32>>,
 }
 
 impl Lines {
@@ -154,6 +156,14 @@ impl Lines {
     }
 
     fn set_overlay(&mut self, id: u32, line: Option<(u32, u32)>) {
+        if let Some(old) = self.line_of_overlay.get(&id) {
+            if let Some(set) = self.overlays_of_lineage.get_mut(&old.0) {
+                set.remove(&id);
+            }
+        }
+        if let Some(l) = line {
+            self.overlays_of_lineage.entry(l.0).or_default().insert(id);
+        }
         if let Some(old) = self.line_of_overlay.remove(&id) {
             if let Some(n) = self.overlays_on_line.get_mut(&old) {
                 *n -= 1;
@@ -170,6 +180,11 @@ impl Lines {
 
     pub fn lineage(&self, corporation: u32) -> Option<u32> {
         self.lineage_of_corp.get(&corporation).copied()
+    }
+
+    /// The overlay ids of a lineage, ascending.
+    pub fn overlays(&self, lineage: u32) -> impl Iterator<Item = u32> + '_ {
+        self.overlays_of_lineage.get(&lineage).into_iter().flatten().copied()
     }
 
     /// Whether an overlay other than `except` tells `item` in `lineage`.
@@ -372,6 +387,9 @@ impl Board {
             self.cached(rows, t, id);
         }
         self.governor(rows, today);
+        // Built here too, so the first overlay judged after a rebuild is
+        // as fast as any.
+        self.lines(rows);
         let Some((_, _, ix)) = self.governor.as_ref() else { return };
         let live: Vec<&Cached> = ids.iter().filter_map(|id| self.cache.get(id)).collect();
         for c in &live {
@@ -402,6 +420,11 @@ impl Board {
     /// The lineage index, built on first use.
     pub fn lines(&mut self, rows: &Rows) -> &Lines {
         self.lines.get_or_insert_with(|| Lines::build(rows))
+    }
+
+    /// The lineage index as of the last derive, if built.
+    pub fn lines_built(&self) -> Option<&Lines> {
+        self.lines.as_ref()
     }
 
     /// Days until a blocked card's move would fit (`heat::cooldown`), as

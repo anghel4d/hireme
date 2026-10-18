@@ -1,7 +1,8 @@
 //! Normalized text and word matching, the one reading of free text the
 //! org, score and board rules share.
 //!
-//! A normalized text is lowercase, Latin letters folded to their base
+//! A normalized text is lowercase, Latin letters (only: other scripts keep
+//! their marks) folded to their base
 //! ("Zürich" and a decomposed "Zu\u{308}rich" both read "zurich"), its
 //! words are runs of alphanumerics, and exactly one space sits between
 //! words. Every matcher below takes an already normalized text
@@ -80,7 +81,15 @@ pub fn fold(s: &str) -> String {
         }
         match latin(cp) {
             Some(b) => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
-            None => out.extend(c.to_lowercase()),
+            // A capital outside the tables can lowercase into them (Ƕ → ƕ).
+            None => {
+                for l in c.to_lowercase() {
+                    match latin(l as u32) {
+                        Some(b) => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
+                        None => out.push(l),
+                    }
+                }
+            }
         }
     }
     out
@@ -194,7 +203,9 @@ mod tests {
         assert_eq!(normalize("Timi\u{219}oara"), normalize("Timis\u{326}oara"));
         assert_eq!(normalize("Hà Nội"), "ha noi");
         assert_eq!(normalize("Ha\u{300} No\u{323}\u{302}i"), "ha noi");
-        assert_eq!(normalize("\u{1e9e}"), normalize(&normalize("\u{1e9e}")));
+        for c in ["\u{1e9e}", "\u{1f6}", "\u{24a}", "\u{212b}", "\u{2c7e}", "\u{2c7f}"] {
+            assert_eq!(normalize(c), normalize(&normalize(c)), "{c}");
+        }
         assert_eq!(normalize(&normalize("İstanbul")), normalize("İstanbul"));
         assert_eq!(normalize("---"), "");
     }

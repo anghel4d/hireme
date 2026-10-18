@@ -173,10 +173,6 @@ pub struct Seat {
     /// The company the seat counts against: its corporation when linked,
     /// else its normalized name.
     pub key: String,
-    /// `key` and the ATS tenant (with its vendor) as 64-bit names, the
-    /// governor's group keys.
-    key_hash: u64,
-    tenant_hash: Option<u64>,
     pub size: Size,
     pub department: Department,
     pub family: Family,
@@ -219,10 +215,7 @@ impl Seat {
         let sent = f.sent || f.stage == Stage::Submitted;
         let key = f.corporation_id.map_or_else(|| org::company_key(f.company), |c| alloc::format!("\u{1}{c}"));
         let ats = ats::parse(f.url);
-        let tenant_hash = ats.tenant.as_ref().map(|t| crate::fx::name(&[ats.vendor.name().as_bytes(), t.as_bytes()]));
         Seat {
-            key_hash: crate::fx::name(&[key.as_bytes()]),
-            tenant_hash,
             id: f.id,
             company: String::from(f.company.trim()),
             // A control character no normalized name can contain.
@@ -375,9 +368,11 @@ pub struct Index {
     today: Day,
     cfg: Config,
     seats: crate::fx::Map<u32, Seat>,
-    by_company: crate::fx::Map<u64, Group>,
+    // Keyed by the agent-written names themselves, in seeded maps: exact,
+    // and no crafted set of names can pile into one bucket.
+    by_company: std::collections::HashMap<String, Group>,
     by_vendor: crate::fx::Map<Vendor, Group>,
-    by_tenant: crate::fx::Map<u64, Group>,
+    by_tenant: crate::fx::Map<Vendor, std::collections::HashMap<String, Group>>,
     /// Queued members per (batch, vendor), with their vendor load: a
     /// member counts toward the batch cap while that load is live.
     by_batch_vendor: crate::fx::Map<(u32, Vendor), Group>,
@@ -388,19 +383,38 @@ struct Group {
     /// Member id → its load at this group's half-life today, 0 under the floor.
     members: BTreeMap<u32, u64>,
     total: u64,
+    /// Members by department and by role family (a company's group only),
+    /// so the penalties read two counts instead of the members.
+    depts: [u32; 7],
+    fams: [u32; 7],
+    /// Members by age in days at the index's day: a load on any later day
+    /// is one decay per distinct age, never a walk of the members.
+    ages: BTreeMap<i64, u32>,
 }
 
 impl Group {
-    fn put(&mut self, id: u32, l: u64) {
+    fn put(&mut self, id: u32, l: u64, age: i64) {
         self.total = self.total.saturating_add(l);
         if let Some(old) = self.members.insert(id, l) {
             self.total = self.total.saturating_sub(old);
+        } else {
+            *self.ages.entry(age).or_insert(0) += 1;
         }
     }
 
-    fn take(&mut self, id: u32) {
-        if let Some(old) = self.members.remove(&id) {
-            self.total = self.total.saturating_sub(old);
+    fn take(&mut self, id: u32, age: i64) -> bool {
+        match self.members.remove(&id) {
+            Some(old) => {
+                self.total = self.total.saturating_sub(old);
+                if let Some(n) = self.ages.get_mut(&age) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.ages.remove(&age);
+                    }
+                }
+                true
+            }
+            None => false,
         }
     }
 }
@@ -410,27 +424,29 @@ const VENDOR: usize = 1;
 const TENANT: usize = 2;
 
 #[allow(clippy::type_complexity)]
-type Keys = (Option<u64>, Option<Vendor>, Option<u64>, Option<(u32, Vendor)>);
+type Keys = (Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>);
 
 /// The group keys a seat belongs to; a batch counts only queued seats.
 fn keys(s: &Seat) -> Keys {
     let known = s.ats.vendor != Vendor::Unknown;
     (
-        (!s.key.is_empty()).then_some(s.key_hash),
+        (!s.key.is_empty()).then(|| s.key.clone()),
         known.then_some(s.ats.vendor),
-        s.tenant_hash.filter(|_| known),
+        s.ats.tenant.clone().filter(|_| known).map(|t| (s.ats.vendor, t)),
         s.batch_id.filter(|_| known && s.stage.queued()).map(|b| (b, s.ats.vendor)),
     )
 }
 
-/// A seat's load at the company, vendor and tenant half-lives `age` days
+/// A seat's load at half-life `k` (company, vendor, tenant) `age` days
 /// on, 0 under the floor.
+fn load_at(age: i64, k: usize, cfg: &Config) -> u64 {
+    let half = [cfg.company_half_life, cfg.ats_vendor_half_life, cfg.ats_tenant_half_life][k];
+    let l = decay(cfg.application_load, age, half);
+    if l >= cfg.load_floor { fp(l) } else { 0 }
+}
+
 fn loads_at(age: i64, cfg: &Config) -> [u64; 3] {
-    let at = |half: f64| {
-        let l = decay(cfg.application_load, age, half);
-        if l >= cfg.load_floor { fp(l) } else { 0 }
-    };
-    [at(cfg.company_half_life), at(cfg.ats_vendor_half_life), at(cfg.ats_tenant_half_life)]
+    [load_at(age, COMPANY, cfg), load_at(age, VENDOR, cfg), load_at(age, TENANT, cfg)]
 }
 
 impl Index {
@@ -462,21 +478,25 @@ impl Index {
 
     fn join(&mut self, s: Seat) {
         let (c, v, t, bv) = keys(&s);
-        let l = loads_at(s.age(self.today), &self.cfg);
+        let age = s.age(self.today);
+        let l = loads_at(age, &self.cfg);
         let id = s.id;
         // A member whose load is already under the floor today adds
         // nothing to any group on any later day, so it is left out.
         if let Some(c) = c.filter(|_| l[COMPANY] > 0) {
-            self.by_company.entry(c).or_default().put(id, l[COMPANY]);
+            let g = self.by_company.entry(c).or_default();
+            g.put(id, l[COMPANY], age);
+            g.depts[s.department as usize] += 1;
+            g.fams[s.family as usize] += 1;
         }
         if let Some(v) = v.filter(|_| l[VENDOR] > 0) {
-            self.by_vendor.entry(v).or_default().put(id, l[VENDOR]);
+            self.by_vendor.entry(v).or_default().put(id, l[VENDOR], age);
         }
-        if let Some(t) = t.filter(|_| l[TENANT] > 0) {
-            self.by_tenant.entry(t).or_default().put(id, l[TENANT]);
+        if let Some((v, t)) = t.filter(|_| l[TENANT] > 0) {
+            self.by_tenant.entry(v).or_default().entry(t).or_default().put(id, l[TENANT], age);
         }
         if let Some(bv) = bv.filter(|_| l[VENDOR] > 0) {
-            self.by_batch_vendor.entry(bv).or_default().put(id, l[VENDOR]);
+            self.by_batch_vendor.entry(bv).or_default().put(id, l[VENDOR], age);
         }
         self.seats.insert(id, s);
     }
@@ -484,17 +504,21 @@ impl Index {
     fn leave(&mut self, id: u32) {
         let Some(s) = self.seats.remove(&id) else { return };
         let (c, v, t, bv) = keys(&s);
+        let age = s.age(self.today);
         if let Some(g) = c.and_then(|c| self.by_company.get_mut(&c)) {
-            g.take(id);
+            if g.take(id, age) {
+                g.depts[s.department as usize] -= 1;
+                g.fams[s.family as usize] -= 1;
+            }
         }
         if let Some(g) = v.and_then(|v| self.by_vendor.get_mut(&v)) {
-            g.take(id);
+            g.take(id, age);
         }
-        if let Some(g) = t.and_then(|t| self.by_tenant.get_mut(&t)) {
-            g.take(id);
+        if let Some(g) = t.and_then(|(v, t)| self.by_tenant.get_mut(&v)?.get_mut(&t)) {
+            g.take(id, age);
         }
         if let Some(g) = bv.and_then(|bv| self.by_batch_vendor.get_mut(&bv)) {
-            g.take(id);
+            g.take(id, age);
         }
     }
 
@@ -511,51 +535,51 @@ impl Index {
         &self.cfg
     }
 
-    /// The loads of `g`'s members other than `skip`, `at` days on at
-    /// half-life `k`, in id order.
-    fn loads<'g>(&'g self, g: &'g Group, k: usize, skip: u32, at: At) -> impl Iterator<Item = (u32, u64)> + 'g {
-        let half = [self.cfg.company_half_life, self.cfg.ats_vendor_half_life, self.cfg.ats_tenant_half_life][k];
-        let factor = match at {
-            At::Probe(dt) => libm::pow(0.5, dt as f64 / half),
-            _ => 1.0,
-        };
-        let floor = fp(self.cfg.load_floor);
-        g.members.iter().filter(move |(m, _)| **m != skip).map(move |(m, l)| {
-            let x = match at {
-                At::Today => *l,
-                // One factor per half-life: cheap, within a rounding of exact.
-                At::Probe(_) => fp(real(*l) * factor),
-                At::Exact(dt) => self.seats.get(m).map_or(0, |s| loads_at(s.age(self.today) + dt, &self.cfg)[k]),
-            };
-            (*m, if x >= floor { x } else { 0 })
-        })
+    /// The age of `seat` if it is a member of `g` (and so its own share
+    /// comes out of `g`'s load).
+    fn own_age(&self, g: &Group, seat: &Seat) -> Option<i64> {
+        g.members.contains_key(&seat.id).then(|| self.seats.get(&seat.id).map(|s| s.age(self.today))).flatten()
+    }
+
+    /// Members of `g` other than `seat`, by age, with their load `dt`
+    /// days on at half-life `k`: one decay per distinct age.
+    fn by_age<'g>(&'g self, g: &'g Group, k: usize, seat: &Seat, dt: i64) -> impl Iterator<Item = (u32, u64)> + 'g {
+        let own = self.own_age(g, seat);
+        g.ages.iter().map(move |(age, n)| (n - (own == Some(*age)) as u32, load_at(age + dt, k, &self.cfg)))
     }
 
     /// A group's load for `seat`: the total less its own share today, the
-    /// members summed on another day.
+    /// members by age on a later day.
     fn load(&self, g: Option<&Group>, k: usize, seat: &Seat, at: At) -> u64 {
         match (g, at) {
             (None, _) => 0,
             (Some(g), At::Today) => g.total.saturating_sub(g.members.get(&seat.id).copied().unwrap_or(0)),
-            (Some(g), _) => self.loads(g, k, seat.id, at).fold(0u64, |a, (_, l)| a.saturating_add(l)),
+            (Some(g), At::Day(dt)) => self.by_age(g, k, seat, dt).fold(0u64, |a, (n, l)| a.saturating_add(l.saturating_mul(n as u64))),
+        }
+    }
+
+    /// How many members of `g` other than `seat` still carry load at
+    /// half-life `k` on a day.
+    fn live(&self, g: &Group, k: usize, seat: &Seat, at: At) -> u32 {
+        match at {
+            At::Today => g.members.iter().filter(|(m, l)| **m != seat.id && **l > 0).count() as u32,
+            At::Day(dt) => self.by_age(g, k, seat, dt).filter(|(_, l)| *l > 0).map(|(n, _)| n).sum(),
         }
     }
 }
 
-/// When a check is made: today, a cheap probe `dt` days on, or the exact
-/// loads `dt` days on.
+/// When a check is made: today, or `dt` days on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum At {
     Today,
-    Probe(i64),
-    Exact(i64),
+    Day(i64),
 }
 
 impl At {
     fn dt(self) -> i64 {
         match self {
             At::Today => 0,
-            At::Probe(d) | At::Exact(d) => d,
+            At::Day(d) => d,
         }
     }
 }
@@ -570,62 +594,146 @@ struct Check {
     batch_vendor: u32,
 }
 
-fn check(ix: &Index, seat: &Seat, kept: &[&Seat], at: At) -> Check {
-    let cfg = &ix.cfg;
-    // Kept seats were admitted in this pass: fresh load, and never one
-    // the index already counts.
-    let kept: Vec<&Seat> = kept.iter().copied().filter(|p| p.id != seat.id && !ix.contains(p.id)).collect();
-    let fresh = if kept.is_empty() { [0; 3] } else { loads_at(at.dt(), cfg) };
-    let kept_load = |same: &dyn Fn(&Seat) -> bool, k: usize| -> u64 { kept.iter().filter(|p| same(p)).fold(0u64, |a, _| a.saturating_add(fresh[k])) };
+/// One of the governor's four conditions, each monotone in time (loads,
+/// live peers and live batch members only shrink), so each has its own
+/// first passing day.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cond {
+    Batch,
+    Vendor,
+    Tenant,
+    Company,
+}
 
-    let has_key = !seat.key.is_empty();
-    let company_group = if has_key { ix.by_company.get(&seat.key_hash) } else { None };
-    let same_company = |p: &Seat| has_key && p.key == seat.key;
-    let company_load = real(ix.load(company_group, COMPANY, seat, at).saturating_add(kept_load(&same_company, COMPANY)));
-    // Penalties come from live peers only: a peer under the floor no
-    // longer counts for anything.
-    let (mut dept, mut fam) = (false, false);
-    if let Some(g) = company_group {
-        for (m, l) in ix.loads(g, COMPANY, seat.id, at) {
-            if let Some(p) = ix.seats.get(&m).filter(|_| l > 0) {
+/// What the checks share: the seat's kept peers, admitted in this pass
+/// (fresh load, never one the index already counts).
+struct Probe<'a> {
+    ix: &'a Index,
+    seat: &'a Seat,
+    kept: Vec<&'a Seat>,
+}
+
+impl<'a> Probe<'a> {
+    fn new(ix: &'a Index, seat: &'a Seat, kept: &[&'a Seat]) -> Probe<'a> {
+        let kept = kept.iter().copied().filter(|p| p.id != seat.id && !ix.contains(p.id)).collect();
+        Probe { ix, seat, kept }
+    }
+
+    fn fresh(&self, at: At, k: usize) -> u64 {
+        if self.kept.is_empty() { 0 } else { load_at(at.dt(), k, &self.ix.cfg) }
+    }
+
+    fn kept_load(&self, at: At, k: usize, same: impl Fn(&Seat) -> bool) -> u64 {
+        let f = self.fresh(at, k);
+        self.kept.iter().filter(|p| same(p)).fold(0u64, |a, _| a.saturating_add(f))
+    }
+
+    fn company_group(&self) -> Option<&'a Group> {
+        if self.seat.key.is_empty() { None } else { self.ix.by_company.get(self.seat.key.as_str()) }
+    }
+
+    fn company(&self, at: At) -> (f64, f64) {
+        let (ix, seat, cfg) = (self.ix, self.seat, &self.ix.cfg);
+        let g = self.company_group();
+        let same = |p: &Seat| !seat.key.is_empty() && p.key == seat.key;
+        let load = real(ix.load(g, COMPANY, seat, at).saturating_add(self.kept_load(at, COMPANY, same)));
+        // Penalties come from live peers only: a peer under the floor no
+        // longer counts for anything.
+        let (mut dept, mut fam) = (false, false);
+        if let Some(g) = g {
+            match at {
+                At::Today => {
+                    let own = ix.seats.get(&seat.id).filter(|_| g.members.contains_key(&seat.id));
+                    let less = |n: u32, mine: bool| n > mine as u32;
+                    dept = less(g.depts[seat.department as usize], own.is_some_and(|o| o.department == seat.department));
+                    fam = less(g.fams[seat.family as usize], own.is_some_and(|o| o.family == seat.family));
+                }
+                At::Day(dt) => {
+                    for m in g.members.keys().filter(|m| **m != seat.id) {
+                        if let Some(p) = ix.seats.get(m).filter(|p| load_at(p.age(ix.today) + dt, COMPANY, cfg) > 0) {
+                            dept |= p.department == seat.department;
+                            fam |= p.family == seat.family;
+                        }
+                    }
+                }
+            }
+        }
+        if self.fresh(at, COMPANY) > 0 {
+            for p in self.kept.iter().filter(|p| same(p)) {
                 dept |= p.department == seat.department;
                 fam |= p.family == seat.family;
             }
         }
+        let increment = cfg.application_load
+            + if dept { cfg.same_department_penalty } else { 0.0 }
+            + if fam { cfg.clone_penalty } else { 0.0 };
+        (load, increment)
     }
-    if fresh[COMPANY] > 0 {
-        for p in kept.iter().filter(|p| same_company(p)) {
-            dept |= p.department == seat.department;
-            fam |= p.family == seat.family;
-        }
-    }
-    let increment = cfg.application_load
-        + if dept { cfg.same_department_penalty } else { 0.0 }
-        + if fam { cfg.clone_penalty } else { 0.0 };
 
-    let vendor = seat.ats.vendor;
-    let known = vendor != Vendor::Unknown;
-    let vendor_load = if known {
-        real(ix.load(ix.by_vendor.get(&vendor), VENDOR, seat, at).saturating_add(kept_load(&|p| p.ats.vendor == vendor, VENDOR)))
-    } else {
-        0.0
-    };
-    let tenant_load = match (&seat.ats.tenant, known) {
-        (Some(t), true) => {
-            let same = |p: &Seat| p.ats.vendor == vendor && p.ats.tenant.as_ref() == Some(t);
-            let g = seat.tenant_hash.and_then(|h| ix.by_tenant.get(&h));
-            real(ix.load(g, TENANT, seat, at).saturating_add(kept_load(&same, TENANT)))
+    fn vendor(&self, at: At) -> f64 {
+        let v = self.seat.ats.vendor;
+        if v == Vendor::Unknown {
+            return 0.0;
         }
-        _ => 0.0,
-    };
-    let batch_vendor = match seat.batch_id {
-        Some(b) if known => {
-            let live = ix.by_batch_vendor.get(&(b, vendor)).map_or(0, |g| ix.loads(g, VENDOR, seat.id, at).filter(|(_, l)| *l > 0).count());
-            let fresh = if fresh[VENDOR] > 0 { kept.iter().filter(|p| p.batch_id == Some(b) && p.ats.vendor == vendor).count() } else { 0 };
-            (live + fresh) as u32
+        real(self.ix.load(self.ix.by_vendor.get(&v), VENDOR, self.seat, at).saturating_add(self.kept_load(at, VENDOR, |p| p.ats.vendor == v)))
+    }
+
+    fn tenant(&self, at: At) -> f64 {
+        let v = self.seat.ats.vendor;
+        let Some(t) = self.seat.ats.tenant.as_ref().filter(|_| v != Vendor::Unknown) else { return 0.0 };
+        let g = self.ix.by_tenant.get(&v).and_then(|m| m.get(t.as_str()));
+        let same = |p: &Seat| p.ats.vendor == v && p.ats.tenant.as_ref() == Some(t);
+        real(self.ix.load(g, TENANT, self.seat, at).saturating_add(self.kept_load(at, TENANT, same)))
+    }
+
+    fn batch(&self, at: At) -> u32 {
+        let (seat, v) = (self.seat, self.seat.ats.vendor);
+        let Some(b) = seat.batch_id.filter(|_| v != Vendor::Unknown) else { return 0 };
+        let live = self.ix.by_batch_vendor.get(&(b, v)).map_or(0, |g| self.ix.live(g, VENDOR, seat, at));
+        let fresh = if self.fresh(at, VENDOR) > 0 { self.kept.iter().filter(|p| p.batch_id == Some(b) && p.ats.vendor == v).count() as u32 } else { 0 };
+        live + fresh
+    }
+
+    fn passes(&self, c: Cond, at: At) -> bool {
+        let cfg = &self.ix.cfg;
+        let known = self.seat.ats.vendor != Vendor::Unknown;
+        match c {
+            Cond::Batch => !known || (self.batch(at) as f64) < cfg.ats_batch_cap,
+            Cond::Vendor => !known || self.vendor(at) + cfg.application_load <= cfg.ats_vendor_cap,
+            Cond::Tenant => self.seat.ats.tenant.is_none() || !known || self.tenant(at) + cfg.application_load <= cfg.ats_tenant_cap,
+            Cond::Company => {
+                let (load, inc) = self.company(at);
+                load + inc <= cfg.cap(self.seat.size)
+            }
         }
-        _ => 0,
-    };
+    }
+
+    /// The first day `c` passes, by bisection over exact loads; `None`
+    /// past the horizon.
+    fn first_day(&self, c: Cond) -> Option<i64> {
+        if self.passes(c, At::Today) {
+            return Some(0);
+        }
+        if !self.passes(c, At::Day(HORIZON_DAYS)) {
+            return None;
+        }
+        let (mut lo, mut hi) = (0, HORIZON_DAYS);
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if self.passes(c, At::Day(mid)) { hi = mid } else { lo = mid }
+        }
+        Some(hi)
+    }
+}
+
+fn check(ix: &Index, seat: &Seat, kept: &[&Seat], at: At) -> Check {
+    let p = Probe::new(ix, seat, kept);
+    let cfg = &ix.cfg;
+    let known = seat.ats.vendor != Vendor::Unknown;
+    let (company_load, increment) = p.company(at);
+    let vendor_load = p.vendor(at);
+    let tenant_load = p.tenant(at);
+    let batch_vendor = p.batch(at);
     let reason = if known && batch_vendor as f64 >= cfg.ats_batch_cap {
         Reason::BatchCap
     } else if known && vendor_load + cfg.application_load > cfg.ats_vendor_cap {
@@ -675,29 +783,19 @@ pub const HORIZON_DAYS: i64 = 3650;
 
 /// Days until the governor would let `seat` in with nothing else
 /// changing: 0 when it would now, `None` when it is still held
-/// [`HORIZON_DAYS`] on. Loads, live peers and live batch members only
-/// shrink with time, so the day is found by bisection over cheap probes,
-/// then confirmed against the exact loads.
+/// [`HORIZON_DAYS`] on. Each condition is monotone in time, so the first
+/// day they all pass is the latest of their own first days, and only the
+/// conditions failing today are searched, each over its own group.
 pub fn cooldown(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Option<u32> {
-    let ok = |at: At| check(ix, seat, kept, at).reason == Reason::Ok;
-    if seat.overridden || ok(At::Today) {
+    if seat.overridden {
         return Some(0);
     }
-    if !ok(At::Exact(HORIZON_DAYS)) {
-        return None;
+    let p = Probe::new(ix, seat, kept);
+    let mut day = 0;
+    for c in [Cond::Batch, Cond::Vendor, Cond::Tenant, Cond::Company] {
+        day = day.max(p.first_day(c)?);
     }
-    let (mut lo, mut hi) = (0, HORIZON_DAYS);
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if ok(At::Probe(mid)) { hi = mid } else { lo = mid }
-    }
-    while hi < HORIZON_DAYS && !ok(At::Exact(hi)) {
-        hi += 1;
-    }
-    while hi > 1 && ok(At::Exact(hi - 1)) {
-        hi -= 1;
-    }
-    Some(hi as u32)
+    Some(day as u32)
 }
 
 /// A batch's mix: candidates in score order (then company, then id), each

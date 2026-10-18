@@ -68,17 +68,15 @@ fn prose(listing: &str, format: Format) -> String {
         let rest = &listing[i..];
         let through = |end: char| rest.find(end).map_or(rest.len(), |j| j + end.len_utf8());
         let url = !word_char(prev) && (rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("www."));
-        // Bounded so a run of '&' with no ';' costs a fixed look-ahead each.
-        let entity = || rest.as_bytes()[1..].iter().take(9).position(|b| *b == b';').map(|j| j + 2);
         let skip = if html && rest.starts_with("<!--") {
             Some(rest.find("-->").map_or(rest.len(), |j| j + 3))
-        } else if html && (starts_ci(rest, "<style") || starts_ci(rest, "<script")) {
-            let close = if starts_ci(rest, "<style") { "</style" } else { "</script" };
+        } else if html && (tag(rest, "<style") || tag(rest, "<script")) {
+            let close = if tag(rest, "<style") { "</style" } else { "</script" };
             Some(find_ci(rest, close).map_or(rest.len(), |j| j + close.len()))
         } else if html && c == '<' {
             Some(through('>'))
-        } else if html && c == '&' && entity().is_some() {
-            entity()
+        } else if html && c == '&' && entity(rest).is_some() {
+            entity(rest)
         } else if md && rest.starts_with("](") {
             Some(through(')'))
         } else if url {
@@ -106,6 +104,36 @@ fn starts_ci(s: &str, p: &str) -> bool {
     s.len() >= p.len() && s.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
 }
 
+/// `s` opens the tag `p` ("<style"), not a longer name ("<styles").
+fn tag(s: &str, p: &str) -> bool {
+    starts_ci(s, p) && s.as_bytes().get(p.len()).is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+}
+
+/// The length of an HTML entity at the start of `s` ("&amp;", "&#38;",
+/// "&#x26;"), looking at most a few bytes ahead; `None` for prose like
+/// "R&D;".
+fn entity(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let end = b.iter().take(12).position(|c| *c == b';')?;
+    let body = &b[1..end];
+    let ok = match body {
+        [b'#', b'x' | b'X', hex @ ..] => !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit),
+        [b'#', dec @ ..] => !dec.is_empty() && dec.iter().all(u8::is_ascii_digit),
+        name => ENTITIES.contains(&name),
+    };
+    ok.then_some(end + 1)
+}
+
+/// The named entities listings use; anything else between '&' and ';' is
+/// prose ("salary&bonus;").
+const ENTITIES: &[&[u8]] = &[
+    b"amp", b"lt", b"gt", b"quot", b"apos", b"nbsp", b"ndash", b"mdash", b"hellip", b"bull", b"middot",
+    b"lsquo", b"rsquo", b"ldquo", b"rdquo", b"laquo", b"raquo", b"copy", b"reg", b"trade", b"euro", b"pound",
+    b"yen", b"cent", b"times", b"divide", b"deg", b"plusmn", b"para", b"sect", b"shy", b"zwj", b"zwnj",
+    b"aacute", b"eacute", b"iacute", b"oacute", b"uacute", b"agrave", b"egrave", b"ograve", b"auml", b"ouml",
+    b"uuml", b"ntilde", b"ccedil", b"szlig", b"Aacute", b"Eacute", b"Ouml", b"Uuml", b"Auml",
+];
+
 fn find_ci(s: &str, p: &str) -> Option<usize> {
     let (b, n) = (s.as_bytes(), p.as_bytes());
     (0..=b.len().checked_sub(n.len())?).find(|&i| b[i..i + n.len()].eq_ignore_ascii_case(n))
@@ -119,14 +147,16 @@ fn counts(w: &str) -> bool {
     let len = w.chars().count();
     w.chars().any(char::is_alphabetic)
         && (len >= 3 || (w.contains('#') && len >= 2))
-        && !STOP.contains(&w)
+        && STOP.binary_search(&w).is_err()
         && (!w.contains('.') || w.split('.').all(|p| p.chars().count() >= 2))
 }
 
 /// The listing's keywords, most frequent first, ties by bytes.
 pub fn extract(listing: &str, format: Format) -> Vec<String> {
     // Folded before splitting, so a decomposed accent stays in its word.
-    let text = crate::text::fold(&prose(listing, format));
+    // Plain text with no URL needs no markup pass.
+    let plain = format == Format::Text && !listing.contains("http") && !listing.contains("www.");
+    let text = if plain { crate::text::fold(listing) } else { crate::text::fold(&prose(listing, format)) };
     let mut seen: BTreeMap<&str, u32> = BTreeMap::new();
     for raw in text.split(|c: char| !word_char(c)) {
         let w = raw.trim_matches('.');
@@ -266,6 +296,8 @@ mod tests {
         assert_eq!(k, ["c#", "zurich", "developpeur", "f#", "muller"]);
         let style = extract("<style>.a{color:red}</style><SCRIPT>var foo = bar;</script><!-- a > comment --><p>kernel kernel</p>", Format::Html);
         assert_eq!(style, ["kernel"]);
+        let lookalike = extract("<styles>kernel kernel</styles> <scripting>gpu</scripting> R&D; salary&bonus; &amp; &#38; &#x26;", Format::Html);
+        assert_eq!(lookalike, ["kernel", "bonus", "gpu", "salary"]);
         let html = extract("<div class=\"x\"><a href=\"https://acme.example/jobs\">Kernel</a>&nbsp;kernel&amp;GPU</div>", Format::Html);
         assert_eq!(html, ["kernel", "gpu"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);

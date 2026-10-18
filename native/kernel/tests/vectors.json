@@ -238,7 +238,7 @@
       ]
     },
     {
-      "name": "the dates a move writes: a reopened listing that never went out loses its close; a reply needs a send; standing still writes nothing",
+      "name": "the dates a move writes: a reopened listing that never went out loses its close; a listing reply needs a send, an outreach reply does not; standing still writes nothing",
       "today": 20000,
       "rows": {
         "applications": [
@@ -256,6 +256,14 @@
             "no": 2,
             "stage": "fire_ready",
             "company": "Bolt",
+            "stage_on": 19990
+          },
+          {
+            "id": 3,
+            "no": 3,
+            "stage": "discovered",
+            "company": "Cogs",
+            "channel": "cold",
             "stage_on": 19990
           }
         ]
@@ -305,6 +313,28 @@
             "stage": "gated"
           },
           "effects": []
+        },
+        {
+          "command": "stage",
+          "target": 3,
+          "params": {
+            "stage": "reply"
+          },
+          "effects": [
+            {
+              "table": "applications",
+              "id": 3,
+              "cells": {
+                "stage": "reply",
+                "replied_on": 20000
+              }
+            },
+            {
+              "table": "events",
+              "id": 0,
+              "cells": {}
+            }
+          ]
         }
       ]
     },

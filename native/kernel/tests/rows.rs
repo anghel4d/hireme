@@ -226,3 +226,18 @@ fn a_settled_write_stays_through_its_patch() {
     assert_eq!(rows.pending_ops().count(), 0);
     assert_eq!(rows.rev, 2);
 }
+
+#[test]
+fn an_unreadable_table_arrives_as_an_empty_block_and_is_emptied() {
+    let mut rows = Rows::new();
+    let mut w = wire::BodyWriter::new();
+    block(&mut w, 5, &[(7, vec![(U, Val::U32(1))])], &[U]);
+    rows.boot(&w.finish(), 1).unwrap();
+    // The BOOT of a key that cannot read table 5, then a table it can.
+    let mut w = wire::BodyWriter::new();
+    w.block(5, 0).done();
+    block(&mut w, 9, &[(3, vec![(S, Val::Str("x".into()))])], &[S]);
+    rows.boot(&w.finish(), 2).unwrap();
+    assert_eq!(rows.table(5).map_or(0, |t| t.len()), 0);
+    assert_eq!(rows.table(9).unwrap().str(3, S), Some("x"));
+}

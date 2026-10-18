@@ -254,7 +254,7 @@ pub enum Refusal {
     FireHold,
     /// Once sent, an application cannot go back to a pre-send stage.
     Sent,
-    /// A reply needs something sent first.
+    /// A reply to a listing application needs it sent first.
     NotSent,
 }
 
@@ -272,16 +272,19 @@ impl Refusal {
 
 /// Whether the `stage` command may move an application `from` → `to`.
 /// `batch_fire` is the application's batch's `fire` flag (false with no
-/// batch); `sent` is whether it was ever submitted. A move to the stage it
-/// is on is allowed and changes nothing.
-pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool, sent: bool) -> Result<(), Refusal> {
+/// batch); `sent` is whether it was ever submitted; `outreach` is whether
+/// it goes through a person rather than a listing (its channel is
+/// referral, recruiter, cold, inbound or other), where a reply needs no
+/// submission: the first message went out, or came in, by hand. A move to
+/// the stage it is on is allowed and changes nothing.
+pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool, sent: bool, outreach: bool) -> Result<(), Refusal> {
     if from == to {
         return Ok(());
     }
     if sent && !to.after_send() {
         return Err(Refusal::Sent);
     }
-    if to == Stage::Reply && !sent {
+    if to == Stage::Reply && !sent && !outreach {
         return Err(Refusal::NotSent);
     }
     if to == Stage::OpenFire {
@@ -339,20 +342,22 @@ mod tests {
     #[test]
     fn fire_hold_and_batches() {
         use Refusal::*;
-        assert_eq!(check(Stage::Gated, Stage::InBatch, false, false, false), Err(NeedsBatch));
-        assert_eq!(check(Stage::Gated, Stage::InBatch, true, false, false), Ok(()));
-        assert_eq!(check(Stage::FireReady, Stage::OpenFire, true, true, false), Err(OpenFireByCommand));
-        assert_eq!(check(Stage::FireReady, Stage::Submitted, true, false, false), Err(FireHold));
-        assert_eq!(check(Stage::OpenFire, Stage::Submitted, true, false, false), Ok(()));
-        assert_eq!(check(Stage::Submitted, Stage::Gated, true, true, true), Err(Sent));
-        assert_eq!(check(Stage::Submitted, Stage::Closed, true, true, true), Ok(()));
-        assert_eq!(check(Stage::Discovered, Stage::Closed, false, false, false), Ok(()));
-        assert_eq!(check(Stage::Reply, Stage::Reply, false, false, true), Ok(()));
-        assert_eq!(check(Stage::FireReady, Stage::Reply, true, false, false), Err(NotSent));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, false, false, false, false), Err(NeedsBatch));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, true, false, false, false), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::OpenFire, true, true, false, false), Err(OpenFireByCommand));
+        assert_eq!(check(Stage::FireReady, Stage::Submitted, true, false, false, false), Err(FireHold));
+        assert_eq!(check(Stage::OpenFire, Stage::Submitted, true, false, false, false), Ok(()));
+        assert_eq!(check(Stage::Submitted, Stage::Gated, true, true, true, false), Err(Sent));
+        assert_eq!(check(Stage::Submitted, Stage::Closed, true, true, true, false), Ok(()));
+        assert_eq!(check(Stage::Discovered, Stage::Closed, false, false, false, false), Ok(()));
+        assert_eq!(check(Stage::Reply, Stage::Reply, false, false, true, false), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::Reply, true, false, false, false), Err(NotSent));
+        // Cold outreach and referrals get replies without a submission.
+        assert_eq!(check(Stage::Discovered, Stage::Reply, false, false, false, true), Ok(()));
         // A listing closed before anything went out can be reopened.
         let closed = move_to(&initial(Stage::Gated), Stage::Closed);
         assert!(!sent(&closed));
-        assert_eq!(check(Stage::Closed, Stage::Gated, false, false, sent(&closed)), Ok(()));
+        assert_eq!(check(Stage::Closed, Stage::Gated, false, false, sent(&closed), false), Ok(()));
         assert!(sent(&move_to(&initial(Stage::Submitted), Stage::Closed)));
     }
 }

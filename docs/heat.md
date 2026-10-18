@@ -14,8 +14,10 @@ the verdict and to colour the board.
 
 An application carries heat when it is queued (`fire_ready`, `open_fire`,
 `submitted`) or in `reply`/`closed` after having been sent (its rail's
-`submitted` rung reached, or `applied_on` set). A listing closed before
-anything went out carries none. It puts a load of `application_load` on
+`submitted` rung reached, never jumped over). A listing closed before
+anything went out carries none, and neither does a reply to outreach
+(a referral, recruiter, cold or inbound application) that never went
+through a submission. It puts a load of `application_load` on
 three things:
 
 - its **company**: its `corporation_id` when linked, else the normalized
@@ -46,17 +48,25 @@ every hot application except this one:
 It defers the move, first match wins, when:
 
 1. the application's batch already holds `ats_batch_cap` queued
-   applications on the same vendor (`ats_batch_cap`);
+   applications on the same vendor whose vendor load still lives
+   (`ats_batch_cap`);
 2. the vendor's load plus one application passes `ats_vendor_cap`;
 3. the tenant's load plus one application passes `ats_tenant_cap`;
 4. the company's load plus the increment passes its size tier's cap.
 
 An unknown vendor never trips 1–3. A deferred move is refused `heat` with
 the verdict as data, including `cooldown_days`: the first day every check
-passes with nothing else changing, found by searching the days ahead
-(loads and live peers only shrink, so the answer is exact). It is null
-when a batch cap holds the move (decay does not change that) or it is
-still held ten years on.
+passes with nothing else changing. Each check only loosens with time
+(loads, live peers and live batch members only shrink), so each failing
+one is searched for its own first passing day and the latest of those is
+the answer, exact. It is null when the move is still held ten years on.
+
+The `stage` command also refuses, before heat: a batched stage without a
+batch (`stage`, `needs_batch`), `open_fire` by anything but its human
+command (`stage`), `submitted` while the batch is on hold (`fire_hold`),
+a sent application moved back before `submitted` (`stage`, `sent`), and
+`reply` for a listing application that was never sent (`stage`,
+`not_sent`).
 
 **Override.** The `heat_override` command with a non-blank reason sets
 the application's flag and reason and writes a `heat` event; afterwards

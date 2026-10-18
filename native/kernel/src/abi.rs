@@ -43,9 +43,11 @@ pub enum Error {
 pub struct Kernel {
     rows: Rows,
     board: Board,
-    /// Set by the caller (the sequencer's day, the browser's before its
-    /// first TICK); the later of it and the `clock` row is the day.
+    /// The caller's day, used until the server's `clock` row arrives.
     today: Day,
+    /// The server's own day (the sequencer pins its kernel), which wins
+    /// over any `clock` row.
+    pinned: Option<Day>,
     stale: bool,
 }
 
@@ -65,10 +67,21 @@ impl Kernel {
         }
     }
 
-    /// The day judged by: the later of the caller's and the `clock`'s.
+    /// The server's day when this kernel is the server's; else the
+    /// server's `clock`, so a client never predicts on a day the server
+    /// has not reached; else the caller's.
     pub fn today(&self) -> Day {
         let clock = self.rows.table(table::CLOCK).and_then(|t| t.ids().first().and_then(|&id| t.u32(id, col::clock::TODAY)));
-        clock.map_or(self.today, |d| self.today.max(d as Day))
+        self.pinned.or(clock.map(|d| d as Day)).unwrap_or(self.today)
+    }
+
+    /// The server's day for the sequencer's kernel: it wins over any
+    /// `clock` row a BOOT carries.
+    pub fn pin_today(&mut self, today: Day) {
+        if self.pinned != Some(today) {
+            self.pinned = Some(today);
+            self.stale = true;
+        }
     }
 
     fn moved(&mut self, m: &Moved, day_before: Day) {
@@ -147,7 +160,7 @@ impl Kernel {
     /// Judges one op and, if it passes, applies it as pending: the
     /// client's write in its own frame, settled or rolled back later.
     pub fn predict(&mut self, op: &[u8], ctx: &Ctx) -> Result<Moved, Refusal> {
-        let op = self.resolve(op);
+        let op = self.resolve(op)?;
         let effects = self.judge(&op, ctx)?;
         let parsed = wire::Op::one(&op).map_err(|_| Refusal { code: schema::refusal::TYPE, data: Json::Null })?;
         let writes = writes(&parsed, &effects, &mut || self.rows.temp_id());
@@ -161,11 +174,11 @@ impl Kernel {
     /// (the browser holds only `applications`' key, `canonical_url`; the
     /// other natural keys are on server tables, which judge does not
     /// look into).
-    fn resolve(&self, raw: &[u8]) -> Vec<u8> {
+    fn resolve(&self, raw: &[u8]) -> Result<Vec<u8>, Refusal> {
         let mut out = raw.to_vec();
-        let Ok(op) = wire::Op::one(raw) else { return out };
+        let Ok(op) = wire::Op::one(raw) else { return Ok(out) };
         if op.flags & wire::KEYED == 0 {
-            return out;
+            return Ok(out);
         }
         let url = match op.cell(schema::col::applications::CANONICAL_URL).map(|c| c.value()) {
             Some(wire::Value::Str(u)) if op.table == table::APPLICATIONS => Some(u),
@@ -175,10 +188,13 @@ impl Kernel {
             let t = self.rows.table(table::APPLICATIONS)?;
             t.ids().iter().copied().find(|&id| t.str(id, schema::col::applications::CANONICAL_URL) == Some(u))
         });
+        if let (Some(id), true) = (target, op.flags & wire::CREATE_ONLY != 0) {
+            return Err(Refusal { code: schema::refusal::NATURAL_KEY, data: json!({"table": "applications", "id": id}) });
+        }
         // The op layout: flags at byte 9, target at bytes 12..16.
         out[9] &= !(wire::KEYED | wire::CREATE_ONLY);
         out[12..16].copy_from_slice(&target.unwrap_or(0).to_le_bytes());
-        out
+        Ok(out)
     }
 
     /// Recomputes the board if anything moved since the last derive.
@@ -245,9 +261,9 @@ impl Kernel {
         if srev != schema::SCHEMA_REV || hash != schema::WIRE_HASH {
             return Err(Error::Snapshot);
         }
-        let today = self.today;
+        let (today, pinned) = (self.today, self.pinned);
         *self = Kernel::new();
-        self.today = today;
+        (self.today, self.pinned) = (today, pinned);
         self.boot(&snap[16..], rev).map_err(|_| Error::Snapshot)?;
         Ok(rev)
     }
