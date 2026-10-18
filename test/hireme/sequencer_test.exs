@@ -706,25 +706,46 @@ defmodule Hireme.SequencerTest do
       assert Repo.get(Corporation, corp.id)
     end
 
-    test "a place taken off the chart leaves the atlas", %{account: a} do
+    test "the replica's atlas follows every places write as a fresh BOOT shows it", %{account: a} do
       {[p], []} =
         run(
           a.id,
           op(:put, :places, %{kind: :country, name: "Chartland", iso2: "CL", atlas_position: 3})
         )
 
-      {:ok, %{frames: [boot]}} =
-        Sequencer.subscribe(
-          a.id,
-          %{id: 920, label: "o", grants: Grants.operator(), key_id: nil, session_id: nil},
-          0
-        )
+      boot = fn id ->
+        {:ok, %{frames: [boot]}} =
+          Sequencer.subscribe(
+            a.id,
+            %{id: id, label: "o", grants: Grants.operator(), key_id: nil, session_id: nil},
+            0
+          )
 
-      {:ok, :BOOT, _, _, body} = Codec.decode(boot)
-      model = ingest(%{}, :BOOT, body)
+        {:ok, :BOOT, _, _, body} = Codec.decode(boot)
+        ingest(%{}, :BOOT, body)
+      end
+
+      model = boot.(920)
       assert Map.has_key?(model["atlas"], p.id)
-      Sequencer.submit(a.id, [op(:put, :places, %{atlas_position: nil}, target: p.id)])
-      model = drain(model)
+
+      steps = [
+        [op(:put, :places, %{name: "Renamed"}, target: p.id)],
+        [op(:put, :places, %{kind: :country, name: "Second", iso2: "SC", atlas_position: 4})],
+        [op(:put, :places, %{atlas_position: nil}, target: p.id)],
+        [op(:put, :places, %{atlas_position: 5}, target: p.id)],
+        [op(:drop, :places, %{}, target: p.id)]
+      ]
+
+      model =
+        Enum.reduce(steps, model, fn ops, model ->
+          Sequencer.submit(a.id, ops)
+          model = drain(model)
+          # A second pid subscribes; this one keeps its live subscription.
+          fresh = Task.async(fn -> boot.(921) end) |> Task.await()
+          assert model["atlas"] == fresh["atlas"], inspect(ops)
+          model
+        end)
+
       refute Map.has_key?(model["atlas"], p.id)
     end
 

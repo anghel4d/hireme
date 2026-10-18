@@ -202,12 +202,6 @@ defmodule Hireme.WireCase do
 
   defp values(4, _n, data), do: for(<<v::binary-8 <- data>>, do: float(v))
 
-  defp values(5, _n, data),
-    do:
-      for(<<len::little-32, sha::binary-8 <- data>>,
-        do: if(len == 0xFFFFFFFF, do: nil, else: {len, sha})
-      )
-
   defp values(2, n, data) do
     size = (n + 1) * 4
     <<offsets::binary-size(^size), bytes::binary>> = data

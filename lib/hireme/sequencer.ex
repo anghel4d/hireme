@@ -1367,8 +1367,6 @@ defmodule Hireme.Sequencer do
       Enum.reduce(deltas, state.counts, fn
         {:put, %{cap: cap} = t, _, :all}, c when cap != nil -> bump(c, t.id, 1)
         {:gone, %{cap: cap} = t, _}, c when cap != nil -> bump(c, t.id, -1)
-        {:cited, n}, c -> bump(c, Schema.table(:citations).id, n)
-        :new_source, c -> bump(c, Schema.table(:sources).id, 1)
         _, c -> c
       end)
 
@@ -1913,8 +1911,8 @@ defmodule Hireme.Sequencer do
     puts =
       deltas
       |> Enum.flat_map(fn
+        {:put, %{name: "places"} = t, row, changed} -> [{t, row, changed} | atlas_put(row)]
         {:put, %{residency: :resident} = t, row, changed} -> [{t, row, changed}]
-        {:put, %{name: "places"}, row, _changed} -> atlas_put(row)
         _ -> []
       end)
       |> Enum.filter(fn {t, _, _} -> visible.(t) end)
@@ -1944,8 +1942,8 @@ defmodule Hireme.Sequencer do
     gone =
       deltas
       |> Enum.flat_map(fn
+        {:gone, %{name: "places"} = t, id} -> [{t, id}, {Schema.table(:atlas), id}]
         {:gone, %{residency: :resident} = t, id} -> [{t, id}]
-        {:gone, %{name: "places"}, id} -> [{Schema.table(:atlas), id}]
         {:put, %{name: "places"}, row, changed} -> atlas_gone(row, changed)
         _ -> []
       end)
