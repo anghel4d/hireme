@@ -40,7 +40,11 @@ the score a card ranks by.
    name after it, or a rate's unit, is the amount itself, and so is the
    lower bound of such a range ("250 €", "250 SEK", "250 euros", "$250/h",
    "$250 an hour", "CHF 250.–/Std.", "500-650 €", "600 / 700 €" are not
-   $250k); a code glued before a figure is its sign ("USD250k"). Three digits after a comma or a dot group
+   $250k); a code glued before a figure is its sign ("USD250k").
+   Pay reading is a heuristic over raw listings. Known limits: "US$"
+   after a figure, a glued "T€", millions as "2,4 MSEK" or "2,4 Mkr",
+   "€/J" for Jahr, rate words beyond the common ones ("each day"), and
+   Turkish lira text are not read; a stored `score_100` is the correction. Three digits after a comma or a dot group
    thousands; one or two are a fraction ("3500,00 €").
 3. **Heuristics move an unanchored seat** from a base of 48: systems,
    runtime, kernel, infrastructure, distributed or compiler work +22;
