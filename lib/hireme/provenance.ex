@@ -28,8 +28,12 @@ defmodule Hireme.Provenance do
 
   @doc "The host of a URL as sources store it: lowercase, no port, no trailing dot; nil for a non-web URL."
   def host(url) when is_binary(url) do
-    case URI.parse(url) do
-      %URI{scheme: s, host: h} when s in ["http", "https"] and is_binary(h) and h != "" ->
+    # A URL a browser would read another way is refused outright: a browser
+    # treats a backslash as a slash, so "https://evil.example\\@levels.fyi/"
+    # opens evil.example while URI.parse names levels.fyi; userinfo, spaces
+    # and control characters have no place in a source's URL either.
+    case !String.match?(url, ~r/[\\\s\p{Cc}]/u) and URI.parse(url) do
+      %URI{scheme: s, host: h, userinfo: nil} when s in ["http", "https"] and is_binary(h) and h != "" ->
         h |> String.downcase() |> String.trim_trailing(".") |> hostname()
 
       _ ->
@@ -53,6 +57,10 @@ defmodule Hireme.Provenance do
   cited, so a later writer cannot retarget or relabel it; a new claim is a
   new source. Only its retrieval (`retrieved_at`, `doc`) moves.
   """
+  def source_change(nil, %{"url" => url}) do
+    if host(url), do: :ok, else: {:refused, :type, %{table: "sources", column: "url", reason: "an http(s) URL on a real hostname"}}
+  end
+
   def source_change(nil, _values), do: :ok
 
   def source_change(row, values) do

@@ -51,25 +51,39 @@ defmodule Hireme.WireClient do
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
     headers = if origin, do: [{"origin", origin}], else: []
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/wire", headers)
-    {conn, status, resp_headers} = upgrade_response(conn, ref, nil, [])
+    {conn, status, resp_headers, early} = upgrade_response(conn, ref, nil, [], [])
     {:ok, conn, ws} = Mint.WebSocket.new(conn, ref, status, resp_headers)
-    {:ok, %{owner: owner, conn: conn, ref: ref, ws: ws}}
+    s = %{owner: owner, conn: conn, ref: ref, ws: ws}
+
+    # Frames the node sent at once (a BYE to a session past a cap) can ride
+    # the same read as the 101; they are decoded now, not dropped.
+    ws =
+      Enum.reduce(early, ws, fn data, ws ->
+        {:ok, ws, messages} = Mint.WebSocket.decode(ws, data)
+        Enum.each(messages, &deliver(&1, s))
+        ws
+      end)
+
+    {:ok, %{s | ws: ws}}
   end
 
-  defp upgrade_response(conn, ref, status, headers) do
+  defp upgrade_response(conn, ref, status, headers, early) do
     receive do
       msg ->
         {:ok, conn, responses} = Mint.WebSocket.stream(conn, msg)
 
-        {status, headers, done} =
-          Enum.reduce(responses, {status, headers, false}, fn
-            {:status, ^ref, s}, {_, h, d} -> {s, h, d}
-            {:headers, ^ref, h}, {s, _, d} -> {s, h, d}
-            {:done, ^ref}, {s, h, _} -> {s, h, true}
+        {status, headers, early, done} =
+          Enum.reduce(responses, {status, headers, early, false}, fn
+            {:status, ^ref, s}, {_, h, e, d} -> {s, h, e, d}
+            {:headers, ^ref, h}, {s, _, e, d} -> {s, h, e, d}
+            {:data, ^ref, data}, {s, h, e, d} -> {s, h, e ++ [data], d}
+            {:done, ^ref}, {s, h, e, _} -> {s, h, e, true}
             _, acc -> acc
           end)
 
-        if done, do: {conn, status, headers}, else: upgrade_response(conn, ref, status, headers)
+        if done,
+          do: {conn, status, headers, early},
+          else: upgrade_response(conn, ref, status, headers, early)
     after
       3_000 -> raise "no WebSocket upgrade"
     end

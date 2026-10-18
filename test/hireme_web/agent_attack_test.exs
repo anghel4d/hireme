@@ -475,10 +475,11 @@ defmodule HiremeWeb.AgentAttackTest do
 
     test "one address holds a bounded number of wire sessions, even before HELLO", %{port: port} do
       limit = Hireme.Security.wire_sessions_per_peer()
-      clients = for _ <- 1..limit, do: WireClient.connect(port)
-      extra = WireClient.connect(port)
-      {bye, _} = WireClient.await(extra, :BYE)
-      assert <<2, _::binary>> = bye.body
+      clients = for _ <- 1..(limit + 1), do: WireClient.connect(port)
+
+      # Whichever session is past the cap (other tests' sessions from this
+      # address count too) is told to retry; under load it may take a moment.
+      assert_receive {:wire, c, %{kind: :BYE, body: <<2, _::binary>>}} when is_pid(c), 10_000
       _ = clients
     end
 
@@ -774,6 +775,74 @@ defmodule HiremeWeb.AgentAttackTest do
                )
 
       _ = app
+    end
+
+    test "an operator revoke stops every session of the key, not just the one named", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Two sockets", role: "R"}))
+      {_, secret} = key(s, 31, 31)
+      {c1, _, _} = agent(port, secret, "one")
+      {c2, _, _} = agent(port, secret, "two")
+      {:ok, %{"ids" => [_]}} = rpc(c1, "lease.claim", %{"ids" => [app.id]})
+      {:ok, _} = rpc(c2, "lease.claim", %{})
+      lease = Enum.find(Hireme.Lease.leases(a.id), &(&1.label == "one"))
+      :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
+      assert refused(c2, "lease.claim", %{"ids" => [app.id]}) == :lease_missing
+
+      assert {:nack, :lease_missing} =
+               put(c2, op(:put, :applications, %{role: "x"}, target: app.id))
+    end
+
+    test "a keyed put needs the table's read bit: its answer names an existing row", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[_], []} = run(a.id, op(:put, :corporations, %{domain: "known.example", name: "Known"}))
+      {_, secret} = key(s, 0, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{})
+
+      assert {:nack, :scope} =
+               put(
+                 c,
+                 op(:put, :corporations, %{domain: "known.example", name: "Overwritten"},
+                   keyed: true
+                 )
+               )
+
+      assert {:ack, _} = put(c, op(:put, :corporations, %{domain: "fresh.example", name: "New"}))
+    end
+
+    test "a URL a browser would read another way is refused", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "bs.example", name: "B"}))
+      {:ok, _} = Hireme.Provenance.trust("levels.fyi", nil, %{})
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{})
+
+      for url <- [
+            "https://evil.example\\@levels.fyi/x",
+            "https://evil.example:80\\@levels.fyi/",
+            "https://user@levels.fyi/"
+          ] do
+        assert {:nack, refusal} =
+                 put(
+                   c,
+                   op(:put, :corporations, %{rating: 5.0, as_of: ~D[2026-10-01], source: url},
+                     target: corp.id
+                   )
+                 )
+
+        assert refusal in [:type, :source_trust], url
+      end
     end
 
     test "a claim names at most 1,000 ids", %{port: port, session: s} do

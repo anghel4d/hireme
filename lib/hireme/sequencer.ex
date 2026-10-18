@@ -703,6 +703,7 @@ defmodule Hireme.Sequencer do
   defp judge(op, sub, state, turn) do
     with {:ok, plan} <- resolve(op),
          :ok <- Grants.check(sub.grants, op.verb, plan.command, plan.table, plan.known),
+         :ok <- keyed_read(op, plan, sub),
          :ok <- Lease.check(state.lease, sub.id, nil),
          {:ok, plan} <- locate(plan, op),
          :ok <- held_by_none_other(state.lease, sub.id, applications_of(plan, op)),
@@ -859,6 +860,17 @@ defmodule Hireme.Sequencer do
     {:ok, value} = Ecto.Type.cast(Schema.cast_type(col(table, c)), v)
     value
   end
+
+  # A keyed op finds a row by its natural key and answers with its id (or
+  # refuses natural_key): a lookup the key must be allowed to make, so it
+  # needs the table's read bit as well as its write bit.
+  defp keyed_read(%{keyed: true}, %{table: table}, sub) do
+    if Grants.read?(sub.grants, table),
+      do: :ok,
+      else: {:refused, :scope, %{table: table.name, reason: "a keyed op reads the table"}}
+  end
+
+  defp keyed_read(_op, _plan, _sub), do: :ok
 
   defp applications_of(%{table: %{name: "applications"}, target: t}, _op) when t > 0, do: [t]
 

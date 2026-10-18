@@ -261,12 +261,25 @@ defmodule Hireme.Lease do
       nil ->
         :error
 
-      _ ->
-        {l, released} = drop_claims(l, id, :all)
+      target ->
+        # Revoking an agent's lease revokes it on every session of its key,
+        # or a second socket would simply claim what the first gave up.
+        ids =
+          if target.key_id,
+            do: for({sid, s} <- l.sessions, s.key_id == target.key_id, do: sid),
+            else: [id]
 
-        {:ok,
-         update_in(l.sessions[id], &Map.merge(&1, %{channel: false, since: nil, revoked: true})),
-         released}
+        Enum.reduce(ids, {:ok, l, []}, fn sid, {:ok, l, released} ->
+          {l, more} = drop_claims(l, sid, :all)
+
+          l =
+            update_in(
+              l.sessions[sid],
+              &Map.merge(&1, %{channel: false, since: nil, revoked: true})
+            )
+
+          {:ok, l, released ++ more}
+        end)
     end
   end
 

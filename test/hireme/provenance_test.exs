@@ -118,6 +118,20 @@ defmodule Hireme.ProvenanceTest do
              )
   end
 
+  test "a source written directly needs an http(s) URL on a real hostname", %{account: a} do
+    for url <- [
+          "https://ex_ample.com/",
+          "http://localhost/",
+          "https://münchen.example/",
+          "ftp://a.example/",
+          "https://evil.example\\@levels.fyi/"
+        ] do
+      assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: url})), url
+    end
+
+    assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
+  end
+
   test "citations are in no mask: no key writes one", %{account: a} do
     key = %{
       label: "k",
