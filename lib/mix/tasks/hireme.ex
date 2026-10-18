@@ -70,7 +70,9 @@ defmodule Mix.Tasks.Hireme.Schema do
         Mix.shell().info("schema: #{@baseline} and #{@ts} match schema/hireme.schema")
 
       problems ->
-        Mix.raise("schema --check:\n  " <> Enum.join(problems, "\n  ") <> "\nrun `mix hireme.schema`")
+        Mix.raise(
+          "schema --check:\n  " <> Enum.join(problems, "\n  ") <> "\nrun `mix hireme.schema`"
+        )
     end
   end
 
@@ -118,7 +120,9 @@ defmodule Mix.Tasks.Hireme.Schema do
         shape(db)
       end)
 
-    shape_file = Path.join(System.tmp_dir!(), "hireme-shape-#{System.unique_integer([:positive])}")
+    shape_file =
+      Path.join(System.tmp_dir!(), "hireme-shape-#{System.unique_integer([:positive])}")
+
     File.write!(shape_file, shape)
 
     {out, status} =
@@ -162,7 +166,10 @@ defmodule Mix.Tasks.Hireme.Schema do
       )
 
     indexes =
-      query(db, "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name")
+      query(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name"
+      )
 
     tables = cols |> Enum.map(&hd/1) |> Enum.uniq()
 
@@ -196,8 +203,11 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   defp guard_ids!(ts, opts) do
     case id_problems(ts, opts) do
-      [] -> :ok
-      moved -> Mix.raise(Enum.join(moved, "\n") <> "\nappend new entries at the end, or pass --renumber")
+      [] ->
+        :ok
+
+      moved ->
+        Mix.raise(Enum.join(moved, "\n") <> "\nappend new entries at the end, or pass --renumber")
     end
   end
 
@@ -284,5 +294,52 @@ defmodule Mix.Tasks.Hireme.Schema do
         File.write!(full, content)
         Mix.shell().info("wrote #{path}")
     end
+  end
+end
+
+defmodule Mix.Tasks.Hireme.Import do
+  @shortdoc "Import a pack (JSON or markdown) into an account through its sequencer"
+  @moduledoc """
+      mix hireme.import --account ID PATH...
+
+  Each pack is lowered to puts and run as the operator (`Hireme.Import`,
+  whose moduledoc is the pack format). Prints what each group wrote and
+  every refusal; exits non-zero when any row was refused.
+  """
+
+  use Mix.Task
+
+  @impl Mix.Task
+  def run(argv) do
+    {opts, paths, _} = OptionParser.parse(argv, strict: [account: :integer])
+    account = opts[:account] || Mix.raise("--account ID is required")
+    if paths == [], do: Mix.raise("name at least one pack")
+
+    Mix.Task.run("app.start")
+
+    refused =
+      Enum.reduce(paths, 0, fn path, refused ->
+        case Hireme.Import.file(account, path) do
+          {:ok, report} ->
+            Mix.shell().info("#{path}: rev #{report.rev}")
+
+            for g <- report.groups,
+                do: Mix.shell().info("  #{g.table}: #{g.written} written, #{g.refused} refused")
+
+            for r <- report.refusals,
+                do:
+                  Mix.shell().error(
+                    "  #{r.table} row #{inspect(r.row)}: #{r.code} #{inspect(r.data)}"
+                  )
+
+            refused + length(report.refusals)
+
+          {:error, reason} ->
+            Mix.shell().error("#{path}: #{inspect(reason)}")
+            refused + 1
+        end
+      end)
+
+    if refused > 0, do: exit({:shutdown, 1})
   end
 end
