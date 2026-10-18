@@ -117,4 +117,9 @@ mod tests {
         }
         assert!(explain("nope").is_none());
     }
+
+    #[test]
+    fn every_refusal_the_schema_declares_is_explained_and_no_other() {
+        assert_eq!(names().collect::<Vec<_>>(), schema::refusal::NAMES.to_vec());
+    }
 }

@@ -1,8 +1,10 @@
 //! The catalog as the key sees it, and the tools built from it.
 //!
 //! The catalog is the `schema` RPC's answer, filtered by the key's masks on
-//! the server; it wins over anything compiled in, so a new metric on
-//! `places` is a new writable column here without a rebuild. Tools: the
+//! the server, so a new metric on `places` is a new writable column here
+//! without a rebuild. What a new wire would change (frames, flag bits, type
+//! codes) is compiled in from the schema crate, and a node on another wire
+//! ends the session asking for a rebuild. Tools: the
 //! fixed ones (`hireme`, `schema`, `find`, `get`, `text`, `history`,
 //! `put`, `drop`, `lease`, `release`) and one per declared command. A tool
 //! the masks forbid is not listed, and a `human_only` command never is.
