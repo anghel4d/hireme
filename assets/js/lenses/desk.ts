@@ -162,7 +162,6 @@ function rail(el: HTMLElement | null, pips: string): void {
   el.setAttribute("aria-label", now >= 0 ? `stage ${now + 1} of ${pips.length}` : "")
 }
 
-let typing = 0
 
 function columns(): number {
   const cards = document.querySelectorAll<HTMLElement>("article.app-card")
@@ -199,13 +198,9 @@ const desk: View = {
       case "toggle":
         return toggle(el.dataset.k ?? "", el.dataset.v ?? "")
       case "search": {
-        const v = (el as HTMLInputElement).value
-        clearTimeout(typing)
-        typing = window.setTimeout(() => {
-          query("q", v)
-          set({ deskLimit: PAGE })
-        }, 120)
-        return
+        // The board is the kernel's, so the answer is drawn in the keystroke's frame (no debounce).
+        model.deskLimit = PAGE
+        return query("q", (el as HTMLInputElement).value)
       }
       case "min":
         return query("min", (el as HTMLInputElement).value)
