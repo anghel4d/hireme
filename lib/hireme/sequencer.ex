@@ -579,10 +579,10 @@ defmodule Hireme.Sequencer do
 
     q =
       from(l in Hireme.Rows.OpLedger,
-        where: l.op_id == ^signed(op_id) and l.inserted_at > ^since and is_nil(l.refusal)
+        where:
+          l.writer == ^(key_id || 0) and l.op_id == ^signed(op_id) and l.inserted_at > ^since and
+            is_nil(l.refusal)
       )
-
-    q = if key_id, do: where(q, [l], l.key_id == ^key_id), else: where(q, [l], is_nil(l.key_id))
 
     case Repo.one(q) do
       nil -> nil
@@ -598,6 +598,7 @@ defmodule Hireme.Sequencer do
           account_id: Repo.account_id!(),
           op_id: signed(op.op_id),
           key_id: sub.key_id,
+          writer: sub.key_id || 0,
           verb: op.verb,
           subject: op.subject,
           target: op.target,
@@ -608,8 +609,9 @@ defmodule Hireme.Sequencer do
           updated_at: now
         }
       ],
-      # Another key that reuses an op_id still writes; only its own resends dedupe.
-      on_conflict: :nothing
+      # Only an entry past its 24 h (not yet purged) can be in the way.
+      on_conflict: {:replace_all_except, [:id]},
+      conflict_target: [:account_id, :writer, :op_id]
     )
   end
 

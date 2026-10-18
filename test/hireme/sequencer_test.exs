@@ -783,6 +783,48 @@ defmodule Hireme.SequencerTest do
       assert again.id != first.id
     end
 
+    test "two writers picking the same op_id each keep their own verdict and resend", %{
+      account: a,
+      session: s
+    } do
+      me = self()
+
+      # Each key's session is its own process, holding its own lease.
+      writer = fn name, sid ->
+        {:ok, %{key: key}} = Hireme.Keys.mint(s, name, Hireme.Keys.preset(:read_write))
+
+        spawn_link(fn ->
+          {:ok, _} =
+            Sequencer.subscribe(
+              a.id,
+              %{id: sid, label: name, grants: Grants.key(key), key_id: key.id, session_id: nil},
+              0
+            )
+
+          {:ok, _} = Hireme.Lease.claim(a.id, sid, %{})
+
+          put =
+            op(:put, :gym_reps, %{platform: :other, slug: name, done_on: ~D[2026-10-01]},
+              op_id: 7
+            )
+
+          for _ <- 1..2 do
+            Sequencer.submit(a.id, [put])
+            receive do: ({:sequencer, :verdicts, _, acks, []} -> send(me, {name, acks}))
+          end
+        end)
+      end
+
+      writer.("a", 990)
+      assert_receive {"a", [first_a]}
+      assert_receive {"a", [^first_a]}
+      writer.("b", 991)
+      assert_receive {"b", [first_b]}
+      assert_receive {"b", [^first_b]}
+      assert first_a.id != first_b.id
+      assert Repo.aggregate(Hireme.Rows.GymRep, :count) == 2
+    end
+
     test "expect_rev guards a drop and a command too", %{account: a} do
       {[app], []} = run(a.id, op(:put, :applications, %{company: "Rev", role: "R"}))
 
