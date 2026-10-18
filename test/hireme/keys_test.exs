@@ -3,6 +3,7 @@ defmodule Hireme.KeysTest do
   use ExUnitProperties
 
   alias Hireme.Keys
+  alias Hireme.Release.Purge
 
   setup do
     signed = sign_in()
@@ -218,7 +219,7 @@ defmodule Hireme.KeysTest do
 
     assert {:ok, _} = Keys.mint(s, "last", Keys.preset(:read_only))
     assert {:error, :limit} = Keys.mint(s, "past the cap", Keys.preset(:read_only))
-    Hireme.Release.Purge.run(now)
+    Purge.run(now)
     assert {:ok, _} = Keys.mint(s, "after the purge", Keys.preset(:read_only))
   end
 

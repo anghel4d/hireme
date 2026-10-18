@@ -232,7 +232,9 @@ the host's vault at runtime, never the store or the repository.
 
 ## The trail
 
-Append-only (`audit`): rows are never edited. every sign-in, refusal, session, factor, key,
+Append-only (`audit`), its rows never edited (they name keys and
+sessions by id, so a purge of either rewrites nothing): every sign-in,
+refusal, session, factor, key,
 identity and lease event, every key HELLO, and one row per agent op
 batch, each with its time, kind, key or session, and the address and
 user agent of the request or wire connection that caused it, where one
