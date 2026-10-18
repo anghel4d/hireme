@@ -117,6 +117,56 @@ defmodule HiremeWeb.SessionTest do
     assert {kid, aid} == {key.id, a.id}
   end
 
+  test "key HELLO rows carry the peer's address and user agent", %{session: s} do
+    {_, rw} = key(s, :read_write)
+
+    peer = %{
+      peer_ip: "198.51.100.9",
+      origin: nil,
+      carrier: :ws,
+      user_agent: "agent-under-test/1.0"
+    }
+
+    {:push, _, _} = Session.frame(Codec.encode_hello(:key, rw, "x"), open(peer))
+    {:stop, _, _, _} = Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open(peer))
+
+    rows =
+      Repo.all(
+        from(r in Hireme.Rows.Audit,
+          where: r.kind in ["wire_key", "wire_key_refused"],
+          order_by: r.id,
+          select: {r.kind, r.ip, r.user_agent}
+        ),
+        skip_account: true
+      )
+
+    assert [
+             {"wire_key", "198.51.100.9", "agent-under-test/1.0"},
+             {"wire_key_refused", "198.51.100.9", "agent-under-test/1.0"}
+           ] = rows
+  end
+
+  test "an exception while handling a HELLO ends the session and logs neither the frame nor the key",
+       %{session: s} do
+    {_, rw} = key(s, :read_write)
+
+    Hireme.Repo.query!(
+      "CREATE TRIGGER boom BEFORE INSERT ON audit WHEN NEW.kind = 'wire_key' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+      [],
+      skip_account: true
+    )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:stop, :internal, [], _} =
+                 Session.frame(Codec.encode_hello(:key, rw, "x"), open())
+      end)
+
+    [_, public, secret_part] = Regex.run(~r/^hm_([^_]+)_(.+)$/, rw)
+    refute log =~ secret_part
+    refute log =~ public
+  end
+
   test "a bad credential, or a ticket from a foreign origin, is BYE revoked", %{session: s} do
     assert {:stop, {:bye, :revoked}, [bye], _} =
              Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())

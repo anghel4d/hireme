@@ -32,6 +32,7 @@ defmodule HiremeWeb.Session do
 
   @behaviour WebSock
 
+  require Logger
   alias Hireme.{Grants, Lease, Security, Sequencer}
   alias HiremeWeb.Wire.Codec
 
@@ -71,7 +72,21 @@ defmodule HiremeWeb.Session do
   end
 
   @doc "One whole frame from the peer."
+  # Whatever goes wrong inside a frame ends this session and nothing else,
+  # and the log never holds the frame: a HELLO carries an API key.
   def frame(bin, state) do
+    handle_frame(bin, state)
+  rescue
+    e ->
+      Logger.error("wire session: a #{inspect(e.__struct__)} handling a frame")
+      {:stop, :internal, [], state}
+  catch
+    :exit, _reason ->
+      Logger.error("wire session: an exit handling a frame")
+      {:stop, :internal, [], state}
+  end
+
+  defp handle_frame(bin, state) do
     state = %{state | last_in: now_ms()}
 
     case Codec.decode(bin, Codec.max_up()) do
@@ -109,8 +124,20 @@ defmodule HiremeWeb.Session do
 
   def info({:bye, :account, reason}, %{phase: :live} = state), do: bye(reason, "", state)
 
-  def info({Hireme.Audit, :changed}, %{parked: id} = state) when id != nil,
-    do: {:push, [reply(id, true, %{changed: true}, state)], %{state | parked: nil}}
+  # An audited change (a factor enrolled, a session revoked) re-checks the
+  # credential at once, not at the next tick; then wakes a parked watch.
+  def info({Hireme.Audit, :changed}, %{phase: :live} = state) do
+    cond do
+      not credential_live?(state.session) ->
+        bye(:revoked, "credential lapsed", state)
+
+      state.parked ->
+        {:push, [reply(state.parked, true, %{changed: true}, state)], %{state | parked: nil}}
+
+      true ->
+        {:ok, state}
+    end
+  end
 
   def info({__MODULE__, :too_many}, state),
     do: bye(:restart, "too many sessions from this address; retry later", state)
@@ -274,7 +301,12 @@ defmodule HiremeWeb.Session do
         if Security.limit(:key_hello, key.id) != :ok, do: throw(:rate_limited)
         meta = %{key: key.key_id, label: label(label, key.name), carrier: peer[:carrier]}
 
-        Hireme.Audit.record(:wire_key, meta, %{account_id: key.account_id, key_id: key.id, ip: ip})
+        Hireme.Audit.record(:wire_key, meta, %{
+          account_id: key.account_id,
+          key_id: key.id,
+          ip: ip,
+          user_agent: peer[:user_agent]
+        })
 
         {:ok,
          %{
@@ -291,7 +323,11 @@ defmodule HiremeWeb.Session do
         # Past the global refusal budget a refused key is still refused,
         # only no longer recorded.
         if Security.limit(:refusal_global, :all) == :ok,
-          do: Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{ip: ip})
+          do:
+            Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{
+              ip: ip,
+              user_agent: peer[:user_agent]
+            })
 
         :error
 
