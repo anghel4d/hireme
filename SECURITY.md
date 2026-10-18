@@ -262,7 +262,7 @@ through a durable outbox with bounded retries.
 | Agent read RPCs | 3,000 per key per wall-clock minute |
 | Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
-| Rows per table | every stored account table has a cap in the declaration; none is unbounded |
+| Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes, and identities and factors for theirs; sessions, ceremonies and notices are bounded by rates and the daily purge, keys by the 100-live cap and step-up; the trail is not capped (see Limits) |
 | Key HELLOs | 60 per key per wall-clock minute |
 | Wire sessions open per key / per peer | 16 / 16 |
 | /wire upgrades | 300 per peer a minute |
@@ -284,6 +284,9 @@ through a durable outbox with bounded retries.
 - Rate limits and spent wire tickets are per node, in memory. A
   multi-node deployment needs a shared backend before they hold across
   nodes.
+- The trail is append-only and never purged, and an agent's activity
+  writes to it (a row per op batch and per HELLO, under the agent's rate
+  limits), so it grows with agent use; its declared cap is not enforced.
 - Development offers a one-click local sign-in, compiled into the
   development environment only.
 
