@@ -1127,6 +1127,34 @@ defmodule Hireme.SequencerTest do
                )
     end
 
+    test "an insert refused at the text budget leaves no claim behind", %{
+      account: a,
+      session: s
+    } do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "near", Hireme.Keys.preset(:read_write))
+      budget = Hireme.Security.account_text_bytes()
+
+      from(x in Hireme.Rows.Account, where: x.id == ^a.id)
+      |> Repo.update_all([set: [text_bytes: budget - 10]], skip_account: true)
+
+      for {pid, _} <- Registry.lookup(Hireme.Sequencer.Registry, a.id),
+          do: DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+
+      {agent, _} = key_session(a.id, key, 998)
+
+      assert {[], [%{refusal: :cap}]} =
+               key_session_ops(
+                 agent,
+                 op(:put, :applications, %{
+                   company: "C",
+                   role: "R",
+                   notes: String.duplicate("x", 100)
+                 })
+               )
+
+      assert [%{ids: []}] = Hireme.Lease.leases(a.id)
+    end
+
     test "at its budget an account can still rewrite text shorter, never longer", %{account: a} do
       {[app], []} =
         run(

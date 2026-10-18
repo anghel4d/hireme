@@ -87,6 +87,27 @@ defmodule Hireme.ProvenanceTest do
     assert Repo.get!(Source, s.id).host == "b.example"
   end
 
+  test "dropping a source leaves its citations naming it: a loose ref is never cleared", %{
+    account: a
+  } do
+    id = corp(a, "l.example")
+
+    {[_], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "x", source: "https://l.example/about"},
+          target: id,
+          expect_rev: 1
+        )
+      )
+
+    [c] = Repo.all(from(c in Citation, where: c.row_id == ^id and c.column == "about"))
+    assert c.source_id
+
+    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: c.source_id))
+    assert Repo.get!(Citation, c.id).source_id == c.source_id
+  end
+
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
   } do

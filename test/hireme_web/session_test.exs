@@ -231,16 +231,19 @@ defmodule HiremeWeb.SessionTest do
     {_, rw} = key(s, :read_write)
     :ets.delete_all_objects(Hireme.RateLimit)
 
-    [last | _] =
-      for _ <- 1..25 do
-        {:stop, {:bye, reason}, _, _} =
-          Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
+    # The limiter's window is a fixed wall-clock minute: start with seconds
+    # to spare, so the HELLOs that fill it and the one after share it.
+    ms = rem(System.system_time(:millisecond), 60_000)
+    if ms > 50_000, do: Process.sleep(60_000 - ms + 100)
 
-        reason
-      end
-      |> Enum.reverse()
+    bad = fn ->
+      {:stop, {:bye, reason}, _, _} =
+        Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
 
-    assert last == :restart
+      reason
+    end
+
+    assert Enum.any?(1..200, fn _ -> bad.() == :restart end)
 
     assert {:stop, {:bye, :restart}, _, _} =
              Session.frame(Codec.encode_hello(:key, rw, "x"), open())

@@ -1316,8 +1316,11 @@ defmodule Hireme.Sequencer do
     case result do
       {:ok, deltas, _news, ack} ->
         ack = ack || command_ack(plan, op)
-        state = adopt(state, sub, deltas)
-        finish(state, turn, deltas, ack)
+
+        # Claims follow only a write that lands: a refusal in finish rolls
+        # the insert back, and its id must not stay leased.
+        with {:ok, state, turn, ack} <- finish(state, turn, deltas, ack),
+             do: {:ok, adopt(state, sub, deltas), turn, ack}
 
       refused ->
         refused
@@ -1623,7 +1626,9 @@ defmodule Hireme.Sequencer do
         t.residency in [:resident, :server],
         c <- t.cols,
         c.ref == table.name,
-        not c.implied do
+        # A loose ref records who or what wrote a row; it outlives its
+        # target and is never cleared or cascaded.
+        not c.implied and not c.loose do
       {t, c}
     end
     |> Enum.flat_map(fn {t, c} ->
