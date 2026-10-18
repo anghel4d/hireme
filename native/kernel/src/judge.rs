@@ -154,8 +154,9 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
         return refuse(refusal::TYPE, json!({"op": "malformed"}));
     };
     // A cell holding its type's null sentinel is refused, not read as a
-    // clear, exactly as the sequencer's shape check refuses it.
-    if let Some(c) = op.cells().find(|c| c.is_sentinel()) {
+    // clear, exactly as the sequencer's shape check refuses it (a put's
+    // cells are typed with their column by write::put_plan).
+    if let Some(c) = op.cells().find(|c| c.is_sentinel()).filter(|_| op.verb != wire::PUT) {
         return refuse(refusal::TYPE, json!({"column": c.col, "sentinel": true}));
     }
     match op.verb {
@@ -164,7 +165,7 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
             let op = Op { target: plan.target, flags: op.flags & !(wire::KEYED | wire::CREATE_ONLY), ..op };
             let mut effects = put(rows, board, &op, ctx)?;
             write::provenance(rows, &op, ctx, &plan, &mut effects)?;
-            write::limits(rows, &plan, &effects)?;
+            write::limits(rows, &effects)?;
             Ok(effects)
         }
         wire::DROP => {

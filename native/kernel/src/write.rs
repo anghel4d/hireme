@@ -97,6 +97,9 @@ pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal>
     if op.flags & wire::EXPECT_REV != 0 && op.expect_rev as i64 != rev {
         return Err(no(refusal::REV, json!({"table": td.name, "rev": rev})));
     }
+    for cell in op.cells().filter(|c| c.col != schema::AS_OF && c.col != schema::SOURCE_CELL) {
+        writable(td, td.col(cell.col), cell.col, &cell, ctx)?;
+    }
     for cell in op.cells() {
         match cell.col {
             schema::AS_OF => {
@@ -104,12 +107,10 @@ pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal>
                     return Err(no(refusal::TYPE, json!({"column": "as_of", "want": "day"})));
                 }
             }
-            schema::SOURCE_CELL => {
-                if cell.ty != wire::U32 && cell.ty != wire::STR {
-                    return Err(no(refusal::TYPE, json!({"column": "source", "want": "source id or URL"})));
-                }
+            schema::SOURCE_CELL if cell.ty != wire::U32 && cell.ty != wire::STR => {
+                return Err(no(refusal::TYPE, json!({"column": "source", "want": "source id or URL"})));
             }
-            id => writable(td, td.col(id), id, &cell, ctx)?,
+            _ => {}
         }
     }
     if insert {
@@ -147,8 +148,14 @@ fn writable(td: &TableDef, c: Option<&ColDef>, id: u16, cell: &wire::Cell, ctx: 
     if has(c, flag::PRIVATE) && !ctx.human {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "column": c.name, "reason": "private"})));
     }
+    typed(td, c, cell)
+}
+
+/// A cell of its column's type, as Codec.cell_to_value reads it; a null
+/// (or an empty str in a str column) only where the column is nullable.
+fn typed(td: &TableDef, c: &ColDef, cell: &wire::Cell) -> Result<(), Refusal> {
     let bad = || no(refusal::TYPE, json!({"in": td.name, "column": c.name, "want": ty(c).name()}));
-    if cell.ty == wire::NULL || (cell.ty == wire::STR && cell.bytes.is_empty()) {
+    if cell.ty == wire::NULL || (cell.ty == wire::STR && cell.bytes.is_empty() && c.wire == wire::STR) {
         return if has(c, flag::REQUIRED) {
             Err(no(refusal::COLUMN, json!({"in": td.name, "column": c.name, "reason": "required"})))
         } else {
@@ -203,6 +210,14 @@ fn long_integer(s: &str) -> bool {
 /// A KEYED op's row: the first natural key whose columns it gives all of
 /// and whose where holds; 0 for a new row. CREATE_ONLY refuses one found.
 fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
+    // As the sequencer: every cell typed first.
+    for cell in op.cells() {
+        if let Some(c) = td.col(cell.col)
+            && typed(td, c, &cell).is_err()
+        {
+            return Err(no(refusal::TYPE, json!({"table": td.name, "column": c.name})));
+        }
+    }
     let given = |c: &ColDef| cell_val(op, c.id).unwrap_or(Val::None);
     let naturals = || td.keys.iter().filter(|k| k.natural);
     let key = naturals().find(|k| {
@@ -227,7 +242,9 @@ fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
     };
     let found = t.and_then(|t| {
         t.ids().iter().copied().find(|&id| {
-            live(t, td, id) && key.cols.iter().all(|n| td.col_named(n).is_some_and(|c| t.get(id, c.id) == given(c)))
+            live(t, td, id)
+                && key.cols.iter().all(|n| td.col_named(n).is_some_and(|c| t.get(id, c.id) == given(c)))
+                && key.cond.as_ref().is_none_or(|w| cond_holds(td, &|c| t.get(id, c.id), w))
         })
     });
     match found {
@@ -273,9 +290,12 @@ pub fn host(url: &str) -> Option<String> {
         return None;
     }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') {
-        return None;
-    }
+    // An empty userinfo is none (URI.parse); any other has no place here.
+    let authority = match authority.split_once('@') {
+        Some(("", host)) if !host.contains('@') => host,
+        Some(_) => return None,
+        None => authority,
+    };
     let (h, port) = authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
     if let Some(p) = port.filter(|p| !p.is_empty()) {
         let digits = p.trim_start_matches('0');
@@ -354,7 +374,11 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
     let stored = |c: &ColDef| t.map_or(Val::None, |t| t.get(plan.target, c.id));
     let restated = |c: u16, v: &EVal, src: &Source, as_of: Option<Day>| -> bool {
         let Some(col) = td.col(c) else { return false };
-        matches!(v, EVal::Val(v) if t.is_some() && *v == stored(col)) && (!has(col, flag::METRIC | flag::PROSE) || same_citation(rows, td, plan.target, col, src, as_of))
+        let same = |v: &Val| match (ty(col), v, stored(col)) {
+            (Type::Json, Val::Str(a), Val::Str(b)) => serde_json::from_str::<Json>(a).ok().is_some_and(|a| serde_json::from_str::<Json>(&b).ok() == Some(a)),
+            (_, v, s) => *v == s,
+        };
+        matches!(v, EVal::Val(v) if t.is_some() && same(v)) && (!has(col, flag::METRIC | flag::PROSE) || same_citation(rows, td, plan.target, col, src, as_of))
     };
     if cited.is_empty() {
         if op.verb == wire::PUT && t.is_some() && effects.len() == 1 && effects[own].cells.iter().all(|(c, v)| restated(*c, v, &None, None)) {
@@ -474,11 +498,14 @@ fn same_citation(rows: &Rows, td: &TableDef, id: u32, col: &ColDef, src: &Source
     let Some(cd) = schema::table_def(table::CITATIONS) else { return false };
     let Some(ct) = rows.table(cd.id) else { return false };
     let c = |n: &str| cd.col_named(n).map_or(0, |c| c.id);
+    let (tc, cc) = (c("table"), c("column"));
     let last = ct
         .ids()
         .iter()
-        .copied()
-        .filter(|&x| ct.str(x, c("table")) == Some(td.name) && ct.u32(x, c("row_id")) == Some(id) && ct.str(x, c("column")) == Some(col.name))
+        .zip(ct.u32s(c("row_id")).unwrap_or(&[]))
+        .filter(|(_, r)| **r == id)
+        .map(|(x, _)| *x)
+        .filter(|&x| ct.str(x, tc) == Some(td.name) && ct.str(x, cc) == Some(col.name))
         .max();
     let Some(last) = last else { return false };
     let dated = if has(col, flag::METRIC) {
@@ -492,9 +519,26 @@ fn same_citation(rows: &Rows, td: &TableDef, id: u32, col: &ColDef, src: &Source
 
 // ------------------------------------------------------------------ limits
 
-/// Check 6: no live row of the table already holds a unique key the write
-/// makes, and no table passes its cap.
-pub(crate) fn limits(rows: &Rows, plan: &Plan, effects: &[Row]) -> Result<(), Refusal> {
+/// Check 6: no table passes its cap, and no live row of the table already
+/// holds a unique key the write makes.
+pub(crate) fn limits(rows: &Rows, effects: &[Row]) -> Result<(), Refusal> {
+    // The cap first, then the keys, as the sequencer met them.
+    let mut inserts: Vec<(u16, usize)> = Vec::new();
+    for r in effects.iter().filter(|r| r.id == 0) {
+        match inserts.iter_mut().find(|x| x.0 == r.table) {
+            Some(x) => x.1 += 1,
+            None => inserts.push((r.table, 1)),
+        }
+    }
+    for (tid, n) in inserts {
+        let Some(td) = schema::table_def(tid) else { continue };
+        if let Some(cap) = td.cap {
+            let have = rows.table(tid).map_or(0, |t| if td.soft_delete { t.ids().iter().filter(|&&id| live(t, td, id)).count() } else { t.len() });
+            if have + n > cap as usize {
+                return Err(no(refusal::CAP, json!({"table": td.name, "cap": cap})));
+            }
+        }
+    }
     for r in effects {
         let Some(td) = schema::table_def(r.table) else { continue };
         let t = rows.table(r.table);
@@ -510,7 +554,9 @@ pub(crate) fn limits(rows: &Rows, plan: &Plan, effects: &[Row]) -> Result<(), Re
         let keys = td.keys.iter().filter(|k| !k.global).map(|k| (k.cols, k.cond.as_ref())).chain(singles.iter().map(|s| (&s[..], None)));
         for (cols, cond) in keys {
             let cs: Vec<&ColDef> = cols.iter().filter_map(|n| td.col_named(n)).collect();
-            if !cs.iter().any(|c| r.cells.iter().any(|x| x.0 == c.id)) || cs.iter().any(|c| after(c).is_none()) || cond.is_some_and(|w| !cond_holds(td, &after, w)) {
+            let cond_col = cond.and_then(|(Cond::Eq(n, _) | Cond::Null(n) | Cond::NotNull(n))| td.col_named(n));
+            let touched = cs.iter().chain(cond_col.iter()).any(|c| r.cells.iter().any(|x| x.0 == c.id));
+            if !touched || cs.iter().any(|c| after(c).is_none()) || cond.is_some_and(|w| !cond_holds(td, &after, w)) {
                 continue;
             }
             let clash = t.is_some_and(|t| {
@@ -526,23 +572,6 @@ pub(crate) fn limits(rows: &Rows, plan: &Plan, effects: &[Row]) -> Result<(), Re
             }
         }
     }
-    let _ = plan;
-    let mut inserts: Vec<(u16, usize)> = Vec::new();
-    for r in effects.iter().filter(|r| r.id == 0) {
-        match inserts.iter_mut().find(|x| x.0 == r.table) {
-            Some(x) => x.1 += 1,
-            None => inserts.push((r.table, 1)),
-        }
-    }
-    for (tid, n) in inserts {
-        let Some(td) = schema::table_def(tid) else { continue };
-        if let Some(cap) = td.cap {
-            let have = rows.table(tid).map_or(0, |t| t.ids().iter().filter(|&&id| live(t, td, id)).count());
-            if have + n > cap as usize {
-                return Err(no(refusal::CAP, json!({"table": td.name, "cap": cap})));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -553,7 +582,9 @@ pub(crate) fn limits(rows: &Rows, plan: &Plan, effects: &[Row]) -> Result<(), Re
 /// loose ref names (a cited source: provenance outlives it). The server
 /// sends any drop as gone, a tombstone too, so the replica removes it.
 pub(crate) fn drop_checks(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<(), Refusal> {
-    let Some(td) = schema::table_def(op.table) else { return Err(no(refusal::NOT_FOUND, json!({"table": op.table}))) };
+    let Some(td) = schema::table_def(op.table).filter(|t| t.residency == schema::Residency::Resident || t.residency == schema::Residency::Server) else {
+        return Err(no(refusal::NOT_FOUND, json!({"table": op.table})));
+    };
     let Some(t) = rows.table(op.table).filter(|t| live(t, td, op.target)) else {
         return Err(no(refusal::NOT_FOUND, json!({"table": td.name, "id": op.target})));
     };

@@ -160,6 +160,41 @@ fn keys_shape_uniques_and_drops_are_the_sequencers() {
     assert_eq!((code, data["reason"].as_str()), (refusal::COLUMN, Some("the server writes this table")));
 }
 
+/// The review's cases: a KEYED key honours its where on stored rows; an
+/// empty str is a clear only in a str column; a projection is no op's to
+/// drop; a JSON restatement compares values, not text.
+#[test]
+fn keys_hold_their_where_and_cells_their_type() {
+    use schema::col::{places as P, settings as T};
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::PLACES, 2);
+    b.u32s(P::ID, [1, 2].into_iter())
+        .u32s(P::KIND, [schema::enums::place_kind::CITY as u32, schema::enums::place_kind::COUNTRY as u32].into_iter())
+        .strs(P::ISO2, ["US", "US"].into_iter())
+        .strs(P::NAME, ["Springfield", "United States"].into_iter());
+    b.done();
+    let mut b = w.block(table::SETTINGS, 1);
+    b.u32s(T::ID, [1].into_iter()).strs(T::HEAT_CONFIG, [r#"{"a":1,"b":2}"#].into_iter());
+    b.done();
+    let mut k = Kernel::new();
+    k.set_today(TODAY);
+    k.boot(&w.finish(), 1).unwrap();
+    let op = |verb: u8, flags: u8, t: u16, target: u32, cells: &dyn Fn(&mut wire::OpWriter)| {
+        let mut w = wire::OpsWriter::new();
+        let mut o = w.op(81, verb, flags, t, target, None);
+        cells(&mut o);
+        o.done();
+        w.finish()[8..].to_vec()
+    };
+    let country = op(wire::PUT, wire::KEYED, table::PLACES, 0, &|o| {
+        o.u32(P::KIND, schema::enums::place_kind::COUNTRY as u32).str(P::ISO2, "US").str(P::NAME, "USA");
+    });
+    assert_eq!(judge(&mut k, &country).unwrap().last().map(|r| r.id), Some(2));
+    assert_eq!(refused(&mut k, &op(wire::PUT, 0, table::PLACES, 2, &|o| { o.str(P::KIND, ""); })).0, refusal::TYPE);
+    assert_eq!(refused(&mut k, &op(wire::DROP, 0, table::TRUSTED, 1, &|_| {})).0, refusal::NOT_FOUND);
+    assert_eq!(judge(&mut k, &op(wire::PUT, 0, table::SETTINGS, 1, &|o| { o.str(T::HEAT_CONFIG, r#"{ "b": 2, "a": 1 }"#); })).unwrap(), Vec::new());
+}
+
 /// A table at its cap refuses an insert, never a restatement (which
 /// writes nothing): the citations a write adds count the same way.
 #[test]
@@ -184,6 +219,7 @@ fn a_source_host_is_what_a_browser_opens() {
     assert_eq!(host("https://WWW.Levels.FYI./x?y#z").as_deref(), Some("www.levels.fyi"));
     assert_eq!(host("http://a.example:080/").as_deref(), Some("a.example"));
     assert_eq!(host("HTTPS://ABC.com.:443/p").as_deref(), Some("abc.com"));
+    assert_eq!(host("https://@a.example/x").as_deref(), Some("a.example"));
     for bad in ["https://evil.example\\@levels.fyi/", "https://u@levels.fyi/", "ftp://a.example/", "https://127.0.0.1/", "https://0x7f.1/", "https://a.example:99999/", "https://a b.example/", "https://localhost/", "https://-a.example/"] {
         assert_eq!(host(bad), None, "{bad}");
     }
