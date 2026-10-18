@@ -119,7 +119,7 @@ defmodule Hireme.ProvenanceTest do
   end
 
   test "a source written directly needs an http(s) URL on a real hostname", %{account: a} do
-    long = Enum.map_join(~w(a b c d), ".", &String.duplicate(&1, 60)) <> ".example"
+    long = Enum.map_join(~w(a b c d e), ".", &String.duplicate(&1, 60)) <> ".example"
 
     for url <- [
           "http://10.0.0.1/x",
