@@ -5,6 +5,7 @@ import { get, supported, why } from "./webauthn.ts"
 
 const button = document.getElementById("use-passkey")
 const error = document.getElementById("factor-error")
+const LIMITED = "Too many attempts. Wait a few minutes."
 const csrf = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""
 
 const say = (text: string) => {
@@ -27,6 +28,8 @@ async function assert(): Promise<void> {
   button?.setAttribute("aria-busy", "true")
   try {
     const begin = await post("/sign-in/factor/webauthn")
+    // Beginning a ceremony is bounded per browser session: a 429 is that limit, whatever its body says.
+    if (begin.status === 429) throw new Error(LIMITED)
     if (!begin.ok) throw new Error(((await begin.json().catch(() => ({}))) as { error?: string }).error ?? "The passkey could not start.")
     const { publicKey } = (await begin.json()) as { publicKey: Record<string, unknown> }
     const verify = await post("/sign-in/factor/webauthn/verify", await get(publicKey))

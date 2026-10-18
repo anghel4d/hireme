@@ -162,6 +162,23 @@ defmodule HiremeWeb.SignInTest do
     assert redirected_to(rec) == "/"
   end
 
+  test "the factor page's passkey options are bounded per browser session, and say so", %{
+    conn: conn
+  } do
+    %{session: s, email: email} = sign_in()
+    Hireme.Repo.put_account(s.account_id)
+    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(s, "me")
+    raw = Base.decode32!(secret, padding: false)
+    {:ok, _, _} = Hireme.Mfa.confirm_totp(s, NimbleTOTP.verification_code(raw), "phone")
+    {:ok, pending, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+
+    answers = for _ <- 1..31, do: conn |> signed_in(pending) |> post("/sign-in/factor/webauthn")
+    assert Enum.count(answers, &(&1.status == 200)) == 30
+    limited = List.last(answers)
+    assert limited.status == 429
+    assert json_response(limited, 429) == %{"error" => "Too many attempts. Wait a few minutes."}
+  end
+
   test "an unknown page is a plain 404, not a crash", %{conn: conn} do
     conn = get(conn, "/nope")
     assert conn.status == 404

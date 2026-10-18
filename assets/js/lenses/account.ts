@@ -104,7 +104,7 @@ const MESSAGES: Record<string, string> = {
   invalid: "That is not valid.",
   masks: "Pick a preset or at least one domain.",
   limit: "A limit was reached.",
-  rate_limited: "Too many attempts; wait a little.",
+  rate_limited: "Too many attempts. Wait a few minutes.",
   last: "That is the last way in; add another first.",
   taken: "That is already linked to another account.",
   challenge: "The ceremony expired; start again.",
@@ -118,6 +118,9 @@ const MESSAGES: Record<string, string> = {
   cap: "That is past the limit of 100; remove one first.",
 }
 
+/** What a failed call says to the operator: a refusal by its code, a ceremony by why(). */
+const said = (e: unknown): string => (e instanceof Refused ? MESSAGES[e.code] ?? e.message : e instanceof Error ? why(e) : String(e))
+
 /** Run an account method; a `step_up` refusal parks it until the session is fresh. */
 async function call<T = Row>(method: string, params: Record<string, unknown> = {}, done?: (r: T) => void): Promise<void> {
   try {
@@ -130,8 +133,7 @@ async function call<T = Row>(method: string, params: Record<string, unknown> = {
       patch({ stepUp: { method, params }, error: "" })
       return
     }
-    const msg = e instanceof Refused ? MESSAGES[e.code] ?? e.message : e instanceof Error ? e.message : String(e)
-    patch({ error: msg })
+    patch({ error: said(e) })
   }
 }
 
@@ -140,7 +142,7 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
   try {
     await rpc(method, params)
   } catch (e) {
-    patch({ error: e instanceof Refused ? MESSAGES[e.code] ?? e.message : why(e) })
+    patch({ error: said(e) })
     return
   }
   patch({ stepUp: null })
@@ -509,14 +511,14 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "host-remove":
       return void call("account.trusted_host.remove", { id })
     case "audit":
-      return void rpc<{ events: Row[] }>("account.audit", { limit: 100 }).then((r) => patch({ audit: r.events })).catch((e: unknown) => patch({ error: String(e) }))
+      return void rpc<{ events: Row[] }>("account.audit", { limit: 100 }).then((r) => patch({ audit: r.events })).catch((e: unknown) => patch({ error: said(e) }))
     case "step-passkey":
       return void (async () => {
         try {
           const { publicKey } = await rpc<{ publicKey: Record<string, unknown> }>("account.step_up.passkey_options")
           await stepped("account.step_up.passkey", await get(publicKey))
         } catch (e) {
-          patch({ error: why(e) })
+          patch({ error: said(e) })
         }
       })()
     case "step-totp":
@@ -536,7 +538,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
 function totpBegin(): void {
   void rpc<{ uri: string; secret: string; svg: string }>("account.totp.begin", {})
     .then((t) => patch({ totp: t, error: "" }))
-    .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? patch({ stepUp: { method: "account.totp.begin", params: {} } }) : patch({ error: String(e) })))
+    .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? patch({ stepUp: { method: "account.totp.begin", params: {} } }) : patch({ error: said(e) })))
 }
 
 async function enroll(name: string): Promise<void> {
@@ -546,7 +548,7 @@ async function enroll(name: string): Promise<void> {
     await call("account.passkey.finish", { name, ...att }, (r) => reveal("account.passkey.finish", r))
   } catch (e) {
     if (e instanceof Refused && e.code === "step_up") return patch({ stepUp: { method: "account.passkey.begin", params: { name } } })
-    patch({ error: e instanceof Refused ? MESSAGES[e.code] ?? e.message : why(e) })
+    patch({ error: said(e) })
   }
 }
 
