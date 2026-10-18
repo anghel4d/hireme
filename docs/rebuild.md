@@ -257,7 +257,7 @@ the CV and coverage derivations read.
 | `places` | countries and cities, `kind` + self `country_id`; identity, demography, economy, liveability, energy, career (`mobility`, `language`, `tech`, `ease`, `work_permit`, `atlas_position` (u32, null = not charted), `atlas_labeled`); every figure a `metric`; prose `liveability`, `notes`; partial uniques for `iso2` and `geonames_id` |
 | `corporations` | `domain` natural key; identity, size, private and public economics, comp and reputation, hiring (`careers_url`, `ats`, `ats_tenant`, `remote_policy`), desk columns (`score_100`, `freshness`, `freshness_on`, `eng_urls`, `note`), prose `about`, `culture` |
 | `offices` | `corporation_id`, `place_id`, `kind`, `headcount` (metric), `opened_on`; unique triple |
-| `sources` | soft-delete; `url` natural key over live rows, `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (deferred text); identity fixed once written; a cited source is tombstoned, never deleted |
+| `sources` | soft-delete; `url` natural key over live rows, at most 2,048 bytes (refused `type`, "a source URL is at most 2048 bytes", with `max`, before any parsing), its port absent, empty or ASCII digits up to 65535 (WHATWG); `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (deferred text); identity fixed once written; a cited source is tombstoned, never deleted |
 | `citations` | append-only, `server_only`: `table`, `row_id`, `column`, loose `source_id`, `value`, `as_of`, `actor`, loose `key_id`, `op_id`; indexes `(account_id, table, row_id, column, id desc)` and `(account_id, source_id)` |
 | `atlas` | **resident projection**, not stored: places rows with `atlas_position` set, only the columns the fit reads |
 
