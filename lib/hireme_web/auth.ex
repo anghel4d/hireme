@@ -218,6 +218,7 @@ defmodule HiremeWeb.Auth do
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" href="data:," />
         <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
         <title>#{esc(title)} · Hireme</title>
         <link rel="stylesheet" href="#{static("/assets/app.css")}" />

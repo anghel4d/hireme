@@ -109,6 +109,14 @@ defmodule Hireme.KeysTest do
     end
   end
 
+  test "a throttled peer is told so, before any key is read; other peers are not", %{session: s} do
+    {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
+    for _ <- 1..20, do: Keys.authenticate("hm_garbage", "10.1.1.1")
+    assert {:error, :rate_limited} = Keys.authenticate(secret, "10.1.1.1")
+    assert {:error, :rate_limited} = Keys.authenticate("hm_garbage", "10.1.1.1")
+    assert {:ok, _} = Keys.authenticate(secret, "10.1.1.2")
+  end
+
   test "a key on a suspended account does not authenticate", %{session: s} do
     {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     :ok = Hireme.Accounts.set_status(s.account_id, :suspended)

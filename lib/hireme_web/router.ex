@@ -145,6 +145,7 @@ defmodule HiremeWeb.PageController do
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" href="data:," />
         <title>Hireme</title>
         <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
         <meta name="hireme-ticket" content="#{Hireme.Accounts.ticket(session)}" />

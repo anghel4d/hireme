@@ -246,9 +246,13 @@ defmodule Hireme.Keys do
 
   @doc """
   The live key a presented secret names, or `:error`. `peer` throttles
-  attempts per address: twenty a minute.
+  attempts per address, twenty a minute; a throttled attempt is
+  `{:error, :rate_limited}`, said apart so a client retries later instead
+  of giving the key up. It is decided before the key is read, so it says
+  nothing about the key.
   """
-  @spec authenticate(term(), String.t()) :: {:ok, authenticated()} | :error
+  @spec authenticate(term(), String.t()) ::
+          {:ok, authenticated()} | :error | {:error, :rate_limited}
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
@@ -262,6 +266,7 @@ defmodule Hireme.Keys do
       {:ok,
        Map.take(key, [:id, :key_id, :account_id, :name, :read_mask, :write_mask, :may_delete])}
     else
+      {:error, :rate_limited} -> {:error, :rate_limited}
       _ -> :error
     end
   end
@@ -312,7 +317,9 @@ defmodule Hireme.Keys do
       Store.write(fn ->
         Repo.update_all(
           from(k in Key, where: k.id == ^key.id),
-          [set: [last_used_at: Store.now()]], skip_account: true)
+          [set: [last_used_at: Store.now()]],
+          skip_account: true
+        )
       end)
     end
   end
