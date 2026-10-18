@@ -113,6 +113,75 @@ pub struct Board {
     governor: Option<(Day, heat::Config, heat::Index)>,
     /// The settings' citizenships, parsed once per settings change.
     citizens: Option<Vec<String>>,
+    lines: Option<Lines>,
+}
+
+/// Which lineage tells each corporation's story and which of its lines
+/// have been told, kept current row by row, so judging an overlay reads
+/// two lookups instead of every overlay.
+#[derive(Default)]
+pub struct Lines {
+    lineage_of_corp: crate::fx::Map<u32, u32>,
+    corp_of_lineage: crate::fx::Map<u32, u32>,
+    line_of_overlay: crate::fx::Map<u32, (u32, u32)>,
+    overlays_on_line: crate::fx::Map<(u32, u32), u32>,
+}
+
+impl Lines {
+    fn build(rows: &Rows) -> Lines {
+        let mut l = Lines::default();
+        if let Some(t) = rows.table(table::CV_LINEAGES) {
+            t.ids().iter().for_each(|&id| l.set_lineage(id, t.u32(id, col::cv_lineages::CORPORATION_ID)));
+        }
+        if let Some(t) = rows.table(table::CV_OVERLAYS) {
+            t.ids().iter().for_each(|&id| l.set_overlay(id, line(t, id)));
+        }
+        l
+    }
+
+    fn set_lineage(&mut self, id: u32, corp: Option<u32>) {
+        if let Some(old) = self.corp_of_lineage.remove(&id) {
+            if self.lineage_of_corp.get(&old) == Some(&id) {
+                self.lineage_of_corp.remove(&old);
+            }
+        }
+        if let Some(c) = corp {
+            self.corp_of_lineage.insert(id, c);
+            // One lineage per corporation; the lowest id holds when rows disagree.
+            let held = self.lineage_of_corp.entry(c).or_insert(id);
+            *held = (*held).min(id);
+        }
+    }
+
+    fn set_overlay(&mut self, id: u32, line: Option<(u32, u32)>) {
+        if let Some(old) = self.line_of_overlay.remove(&id) {
+            if let Some(n) = self.overlays_on_line.get_mut(&old) {
+                *n -= 1;
+                if *n == 0 {
+                    self.overlays_on_line.remove(&old);
+                }
+            }
+        }
+        if let Some(l) = line {
+            self.line_of_overlay.insert(id, l);
+            *self.overlays_on_line.entry(l).or_insert(0) += 1;
+        }
+    }
+
+    pub fn lineage(&self, corporation: u32) -> Option<u32> {
+        self.lineage_of_corp.get(&corporation).copied()
+    }
+
+    /// Whether an overlay other than `except` tells `item` in `lineage`.
+    pub fn told(&self, lineage: u32, item: u32, except: u32) -> bool {
+        let n = self.overlays_on_line.get(&(lineage, item)).copied().unwrap_or(0);
+        let own = self.line_of_overlay.get(&except) == Some(&(lineage, item));
+        n > own as u32
+    }
+}
+
+fn line(t: &Table, id: u32) -> Option<(u32, u32)> {
+    Some((t.u32(id, col::cv_overlays::LINEAGE_ID)?, t.u32(id, col::cv_overlays::ITEM_ID)?))
 }
 
 fn day(t: &Table, id: u32, c: u16) -> Option<Day> {
@@ -200,6 +269,23 @@ impl Board {
     /// Forgets what a frame or a write moved, before the next derive;
     /// `rows` are the rows after it.
     pub fn forget(&mut self, moved: &Moved, rows: &Rows) {
+        let cv = [table::CV_LINEAGES, table::CV_OVERLAYS];
+        if cv.iter().any(|t| moved.replaced.contains(t)) {
+            self.lines = None;
+        } else if let Some(lines) = self.lines.as_mut() {
+            if let Some((wrote, gone)) = moved.tables.get(&table::CV_LINEAGES) {
+                let t = rows.table(table::CV_LINEAGES);
+                for id in wrote.iter().chain(gone) {
+                    lines.set_lineage(*id, t.filter(|t| t.has(*id)).and_then(|t| t.u32(*id, col::cv_lineages::CORPORATION_ID)));
+                }
+            }
+            if let Some((wrote, gone)) = moved.tables.get(&table::CV_OVERLAYS) {
+                let t = rows.table(table::CV_OVERLAYS);
+                for id in wrote.iter().chain(gone) {
+                    lines.set_overlay(*id, t.filter(|t| t.has(*id)).and_then(|t| line(t, *id)));
+                }
+            }
+        }
         if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
             self.cache.clear();
             self.citizens = None;
@@ -311,6 +397,11 @@ impl Board {
         for (i, c) in self.cards.iter().enumerate() {
             self.at.insert(c.id, i);
         }
+    }
+
+    /// The lineage index, built on first use.
+    pub fn lines(&mut self, rows: &Rows) -> &Lines {
+        self.lines.get_or_insert_with(|| Lines::build(rows))
     }
 
     /// Days until a blocked card's move would fit (`heat::cooldown`), as

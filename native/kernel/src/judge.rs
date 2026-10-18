@@ -154,7 +154,7 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
         return refuse(refusal::TYPE, json!({"column": c.col, "sentinel": true}));
     }
     match op.verb {
-        wire::PUT => put(rows, &op, ctx),
+        wire::PUT => put(rows, board, &op, ctx),
         wire::DROP => drop(rows, &op, ctx),
         wire::COMMAND => run(rows, board, &op, ctx),
         _ => refuse(refusal::TYPE, json!({"verb": op.verb})),
@@ -191,7 +191,7 @@ fn hex_sha256(text: &str) -> String {
     out
 }
 
-fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
+fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     let c = cells(op);
     let mut row = own(op, c);
     let mut extra = Vec::new();
@@ -236,7 +236,7 @@ fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
                 }
             }
         }
-        table::CV_OVERLAYS => overlay(rows, op, ctx, &mut row, &mut extra)?,
+        table::CV_OVERLAYS => overlay(rows, board, op, ctx, &mut row, &mut extra)?,
         table::CV_LINEAGES => {
             let t = rows.table(table::CV_LINEAGES);
             if op.target == 0 {
@@ -267,7 +267,7 @@ fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
 
 /// The lineage rule on an overlay write, and the overlay's lineage and
 /// generation. A corporation's first overlay opens its lineage.
-fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>) -> Result<(), Refusal> {
+fn overlay(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>) -> Result<(), Refusal> {
     use col::cv_overlays as O;
     let existing = rows.table(table::CV_OVERLAYS);
     let inserting = op.target == 0;
@@ -284,7 +284,7 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
     let Some(corp) = rows.table(table::APPLICATIONS).and_then(|t| t.u32(app, A::CORPORATION_ID)) else {
         return Err(Refusal { code: refusal::NOT_FOUND, data: json!({"need": "corporation_id", "application_id": app}) });
     };
-    match lineage_of(rows, corp) {
+    match lineage_of(rows, board, corp) {
         Some((t, lid)) => {
             let opened = t.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
             let rewrites = t.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
@@ -295,11 +295,7 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
                 Some(EVal::Val(Val::U32(i))) => Some(*i),
                 _ => existing.and_then(|t| t.u32(op.target, O::ITEM_ID)),
             };
-            let told = existing.is_some_and(|t| {
-                t.ids().iter().any(|&o| {
-                    o != op.target && t.u32(o, O::LINEAGE_ID) == Some(lid) && t.u32(o, O::ITEM_ID) == item
-                })
-            });
+            let told = item.is_some_and(|i| board.lines(rows).told(lid, i, op.target));
             let creates = inserting && !told;
             match cv::check(cv::phase(opened, rewrites, ctx.today), creates) {
                 Ok(()) => {}
@@ -339,9 +335,9 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
     Ok(())
 }
 
-fn lineage_of(rows: &Rows, corporation: u32) -> Option<(&Table, u32)> {
-    let t = rows.table(table::CV_LINEAGES)?;
-    t.ids().iter().copied().find(|&id| t.u32(id, col::cv_lineages::CORPORATION_ID) == Some(corporation)).map(|id| (t, id))
+fn lineage_of<'r>(rows: &'r Rows, board: &mut Board, corporation: u32) -> Option<(&'r Table, u32)> {
+    let id = board.lines(rows).lineage(corporation)?;
+    rows.table(table::CV_LINEAGES).filter(|t| t.has(id)).map(|t| (t, id))
 }
 
 fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
@@ -517,7 +513,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 _ => None,
             };
             let found = match corp {
-                Some(c) => lineage_of(rows, c),
+                Some(c) => lineage_of(rows, board, c),
                 None => rows.table(table::CV_LINEAGES).filter(|t| t.has(op.target)).map(|t| (t, op.target)),
             };
             let Some((t, lid)) = found else {
