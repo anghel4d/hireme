@@ -257,8 +257,9 @@ defmodule Hireme.SequencerTest do
     assert_receive {:sequencer, :patch, _, body}
     assert {"gym_reps", 1} in tables(body)
     assert_receive {:sequencer, :verdicts, _, [_], []}
-    # The desk-only reader is not sent a lanes row.
-    assert_receive :other_nothing, 3_000
+    # The desk-only reader learns the rev moved, and is sent no lanes row.
+    assert_receive {:other_patch, other_body}, 3_000
+    assert tables(other_body) == []
     _ = other
   end
 
