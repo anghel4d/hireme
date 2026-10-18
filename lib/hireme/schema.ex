@@ -951,14 +951,6 @@ defmodule Hireme.Schema do
     Enum.find_index(enum_names(name), &(&1 == to_string(value)))
   end
 
-  @doc "The value an enum code names, as an atom; nil past the enum."
-  def enum_value(name, code) do
-    case Enum.at(enum_names(name), code) do
-      nil -> nil
-      value -> String.to_atom(value)
-    end
-  end
-
   @doc "An enum's values in code order, as strings."
   def enum_names(name), do: Map.fetch!(@enums, to_string(name)).values
 

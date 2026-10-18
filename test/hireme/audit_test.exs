@@ -10,6 +10,16 @@ defmodule Hireme.AuditTest do
     )
   end
 
+  defp values(account_id, kind, col) do
+    Repo.all(
+      from(e in Hireme.Rows.Audit,
+        where: e.account_id == ^account_id and e.kind == ^kind,
+        select: field(e, ^col)
+      ),
+      skip_account: true
+    )
+  end
+
   @tag window: [:activity, :activity_node]
   test "past its budget an account's activity coalesces into one row per window" do
     %{account: a} = sign_in()
@@ -21,15 +31,10 @@ defmodule Hireme.AuditTest do
 
     Audit.Coalescer.flush(:all)
 
-    [row] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced"
-        ),
-        skip_account: true
-      )
+    [meta] =
+      values(a.id, "activity_coalesced", :meta)
 
-    assert row.meta["counts"] == %{"agent_ops" => %{"7" => 5}}
+    assert meta["counts"] == %{"agent_ops" => %{"7" => 5}}
   end
 
   @tag window: [:activity, :activity_node]
@@ -90,30 +95,19 @@ defmodule Hireme.AuditTest do
     :ok = Audit.record(:wire_key, %{}, ctx.("203.0.113.9"))
 
     ips =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "wire_key",
-          select: e.ip
-        ),
-        skip_account: true
-      )
+      values(a.id, "wire_key", :ip)
 
     assert "203.0.113.9" in ips
     assert length(ips) == 601
 
     Audit.Coalescer.flush(:all)
 
-    [row] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced"
-        ),
-        skip_account: true
-      )
+    [meta] =
+      values(a.id, "activity_coalesced", :meta)
 
-    assert row.meta["counts"] == %{"wire_key" => %{"9" => 6}}
-    assert Enum.sort(row.meta["addresses"]) == ["10.0.0.1", "203.0.113.9"]
-    assert row.meta["user_agents"] == ["agent/1"]
+    assert meta["counts"] == %{"wire_key" => %{"9" => 6}}
+    assert Enum.sort(meta["addresses"]) == ["10.0.0.1", "203.0.113.9"]
+    assert meta["user_agents"] == ["agent/1"]
   end
 
   @tag window: [:activity, :activity_node]
@@ -133,13 +127,7 @@ defmodule Hireme.AuditTest do
     Audit.Coalescer.flush(:all)
 
     [meta] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
-          select: e.meta
-        ),
-        skip_account: true
-      )
+      values(a.id, "activity_coalesced", :meta)
 
     assert meta["counts"] == %{"agent_ops" => %{"7" => 1_005}}
     assert meta["addresses_total"] == 1_000
@@ -157,13 +145,7 @@ defmodule Hireme.AuditTest do
     Audit.Coalescer.flush(:all)
 
     [meta] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
-          select: e.meta
-        ),
-        skip_account: true
-      )
+      values(a.id, "activity_coalesced", :meta)
 
     busiest = for i <- 1..5, do: "203.0.113.#{i}"
     assert busiest -- meta["addresses"] == []
@@ -300,13 +282,7 @@ defmodule Hireme.AuditTest do
     rows = Enum.count(kinds(a.id), &(&1 == "agent_ops"))
 
     counted =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
-          select: e.meta
-        ),
-        skip_account: true
-      )
+      values(a.id, "activity_coalesced", :meta)
       |> Enum.flat_map(&Map.values(&1["counts"]["agent_ops"]))
       |> Enum.sum()
 
@@ -331,13 +307,7 @@ defmodule Hireme.AuditTest do
     Audit.Coalescer.flush(:all)
 
     [meta] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "revokes_coalesced",
-          select: e.meta
-        ),
-        skip_account: true
-      )
+      values(a.id, "revokes_coalesced", :meta)
 
     assert meta["counts"] == %{"lease_revoked" => %{"none" => 5}}
   end
@@ -381,13 +351,7 @@ defmodule Hireme.AuditTest do
     Audit.Coalescer.flush(:all)
 
     [meta] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
-          select: e.meta
-        ),
-        skip_account: true
-      )
+      values(a.id, "activity_coalesced", :meta)
 
     assert meta["counts"] == %{"agent_ops" => %{"7" => 2_000}}
     assert meta["addresses_total"] == 1_000
@@ -404,14 +368,9 @@ defmodule Hireme.AuditTest do
     assert_receive {:DOWN, ^ref, _, _, _}
     Audit.Coalescer.flush(:all)
 
-    [row] =
-      Repo.all(
-        from(e in Hireme.Rows.Audit,
-          where: e.account_id == ^a.id and e.kind == "activity_coalesced"
-        ),
-        skip_account: true
-      )
+    [meta] =
+      values(a.id, "activity_coalesced", :meta)
 
-    assert row.meta["counts"] == %{"agent_ops" => %{"1" => 3}}
+    assert meta["counts"] == %{"agent_ops" => %{"1" => 3}}
   end
 end

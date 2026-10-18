@@ -621,11 +621,6 @@ pub fn suggest_read(seat: &Seat, r: &Read) -> Suggestion {
     Suggestion { score, band: Band::of(score), kill: None, anchored: false }
 }
 
-/// The score a seat ranks by: its stored number, else the suggestion.
-pub fn effective(stored: Option<u8>, seat: &Seat) -> u8 {
-    stored.map_or_else(|| suggest(seat).score, |s| s.min(100))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
