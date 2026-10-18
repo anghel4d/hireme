@@ -391,7 +391,14 @@ function act(name: string, el: HTMLElement, ev: Event): void {
           const now = v().text
           if (!now || now.table !== cur.table || now.id !== cur.id || now.column !== cur.column || now.bytes !== cur.bytes) return
           // A chunk of a rewritten text is not appended at the old text's offset: the reader starts over.
-          if (r.sha !== now.sha) return void readText(cur.table, cur.id, cur.column, 0).then((f) => still(cur.table) && patch({ text: { ...now, ...f } }))
+          if (r.sha !== now.sha)
+            return void readText(cur.table, cur.id, cur.column, 0)
+              .then((f) => {
+                // Only into the same reader, still open on the same cell and version it restarted from.
+                const at = v().text
+                if (at && at.table === now.table && at.id === now.id && at.column === now.column && at.sha === now.sha) patch({ text: { ...at, ...f } })
+              })
+              .catch(failed)
           patch({ text: { ...now, body: now.body + r.body, bytes: r.bytes, total: r.total } })
         })
         .catch(failed)

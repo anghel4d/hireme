@@ -415,12 +415,17 @@ impl App {
                 if *self.catalog_for.read().await == Some(m) {
                     return self.catalog.read().await.clone();
                 }
-                if let Ok(Ok(v)) = self.carrier.rpc("schema", &json!({})).await {
+                // Bounded by this call's own deadline, not the RPC's 30 s: a node that never answers schema costs READY_WAIT.
+                if let Ok(Ok(Ok(v))) = tokio::time::timeout_at(deadline, self.carrier.rpc("schema", &json!({}))).await {
                     let still = self.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete, w.schema_rev)) == Some(m);
                     if still {
                         let cat = Catalog::from_json(&v);
-                        *self.catalog.write().await = Some(cat.clone());
+                        let had = self.catalog.write().await.replace(cat.clone()).is_some();
                         *self.catalog_for.write().await = Some(m);
+                        // A list served before (or under other masks) is out of date: say so, as WELCOME's own fetch does.
+                        if had || self.listed_early.swap(false, Ordering::Relaxed) {
+                            self.tools_changed().await;
+                        }
                         return Some(cat);
                     }
                 }
@@ -1061,7 +1066,10 @@ impl App {
                 self.watches.lock().await.entry(uri.to_owned()).or_insert_with(|| Watch { table, id, rev, subs: HashSet::new() }).subs.insert(sub);
                 Ok(())
             }
-            _ => Err(not_found(uri, modern)),
+            // As for resources/read: only a missing row is not found; a refusal or a lost call is an internal error.
+            Ok(Err(e)) if e.get("code").and_then(Json::as_str) == Some("not_found") => Err(not_found(uri, modern)),
+            Ok(Err(e)) => Err(json!({"code":-32603,"message":e.get("message").and_then(Json::as_str).unwrap_or("refused"),"data":{"uri":uri,"refusal":e.get("code")}})),
+            Err(l) => Err(json!({"code":-32603,"message":l.0})),
         }
     }
 

@@ -157,8 +157,12 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
-/** Which version of a message's body: its id, rev and the deferred stub's sha, so a rewritten draft never shows its old text. */
-const bodyKey = (m: Row): string => `${String(m.id)}:${String(m.rev ?? "")}:${String((m.body as { sha?: string } | null)?.sha ?? "")}`
+/** Which version of a message's body: its id and the deferred stub's sha (the rev only when there is no sha), so a
+ * rewritten draft never shows its old text while a status change, which keeps the sha, keeps the body shown. */
+const bodyKey = (m: Row): string => {
+  const sha = (m.body as { sha?: string } | null)?.sha
+  return sha ? `${String(m.id)}:${sha}` : `${String(m.id)}:rev${String(m.rev ?? "")}`
+}
 
 /** A whole message body, chunk by chunk (a long thread quote runs past one 256 KiB chunk). */
 async function readBody(id: number): Promise<string> {
@@ -213,9 +217,11 @@ function act(name: string, el: HTMLElement): void {
       const from = listKey()
       return void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
-          if (model.address.lens !== "outreach" || listKey() !== from) return
+          // The form closes either way (a second submit would duplicate the contact); the new
+          // contact is opened only if the operator is still on the list it was made from.
           patch({ edit: "" })
-          query("contact", String(r.id))
+          if (model.address.lens !== "outreach") return
+          if (listKey() === from) query("contact", String(r.id))
           return fetchContacts(false)
         })
         .catch(failed)
