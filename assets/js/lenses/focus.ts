@@ -71,7 +71,7 @@ function score(d: Doc): Html {
   return html`<section class="card facts" data-key="score">
     <div class="stat"><b>${c.score_100}</b><span>${c.stored ? "score" : "suggested score"}</span></div>
     <div class="stat"><b>${c.band.replace(/_/g, " ")}</b><span>band</span></div>
-    <div class="stat"><b class="heat-${c.class}">${c.class}</b><span>heat ${str(h.company_load ?? "")}${h.company_cap ? ` / ${h.company_cap}` : ""}</span></div>
+    <div class="stat"><b class="heat-${c.class}">${c.class}</b><span title="Applications in flight at this company, against the heat cap">heat · ${str(h.company_load ?? 0)}${h.company_cap ? ` of ${h.company_cap}` : ""} at this company</span></div>
     ${s.kill ? html`<p class="error">Hard kill: ${s.kill.replace(/_/g, " ")}</p>` : EMPTY}
     ${!c.stored ? html`<p class="hint">The kernel suggests ${str(s.score_100)} (${str(s.band)}). It never overwrites a stored score.
       <button type="button" data-act="keep-score" data-score="${str(s.score_100)}">Keep it</button></p>` : EMPTY}
@@ -89,7 +89,8 @@ function coverage(d: Doc): Html {
 function cv(d: Doc): Html {
   const theme = d.cv.theme as { lead?: string | null; accent?: string; density?: string }
   return html`<section class="card cv cv-${str(theme.accent)} cv-${str(theme.density)}" data-key="cv">
-    <h2>CV <span class="muted">${str(theme.density)} · ${str(theme.accent)}${d.lineage ? html` · generation ${str(d.lineage.generation)}, ${str(d.lineage.phase)}` : EMPTY}</span></h2>
+    <h2>CV for this application${d.lineage ? html` <span class="muted">version ${str(d.lineage.generation)}</span>` : EMPTY}
+      <span class="muted" title="CV layout and lineage phase">${str(theme.density)} · ${str(theme.accent)}${d.lineage ? ` · ${str(d.lineage.phase)}` : ""}</span></h2>
     ${theme.lead ? html`<p class="lead">${theme.lead}</p>` : EMPTY}
     ${d.cv.lines.length === 0 ? html`<p class="hint">No CV items yet. Agents add them to the corpus (profiles and items).</p>` : EMPTY}
     <ul class="cv-lines">${d.cv.lines.map((l) => html`<li data-key="i${str(l.item_id)}" class="kind-${str(l.kind)}${l.mode ? ` mode-${str(l.mode)}` : ""}">
@@ -101,7 +102,7 @@ function cv(d: Doc): Html {
 
 function listing(a: Row, appId: number): Html {
   const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf(a.listing_raw)
-  return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open</a>` : EMPTY}</h2>
+  return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open the posting ↗</a>` : EMPTY}</h2>
     ${text !== "" ? !v().listing
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${new TextEncoder().encode(text).byteLength.toLocaleString()} bytes)</button>`
       : html`<p class="hint">As it was captured; shown as text, never run.</p><pre class="untrusted">${text}</pre>`
