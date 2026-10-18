@@ -133,15 +133,13 @@ enum net_channel broadside x other
 table accounts system server global
   col name str ?
   col status enum account_status ! = active
-  # Live API keys, moved in the statement that mints or revokes one.
-  col live_key_count u32 ! = 0
   # Committed account writes, bumped by the sequencer with each one.
   col desk_rev i64 ! = 0
   # The next applications.no; a number is never reused.
   col next_no u32 ! = 1
 
 table sessions system server
-  index account_id revoked_at
+  index revoked_at
   col token_hash bytes ! server_only
   unique token_hash global
   col authenticated_at time !
@@ -170,7 +168,6 @@ table magic_links system server global
   col user_agent str ?
 
 table api_keys system server
-  index account_id
   unique key_id global
   col key_id str !
   col name str !
@@ -184,7 +181,7 @@ table api_keys system server
   col revoked_at time ?
 
 table factors system server
-  index account_id kind
+  index kind
   unique credential_id global where credential_id is not null
   col kind enum factor_kind !
   col name str ?
@@ -210,13 +207,12 @@ table challenges system server
   col expires_at time !
 
 table recovery_codes system server
-  index account_id
   col salt bytes ! server_only
   col code_hash bytes ! server_only
   col used_at time ?
 
 table audit system server append_only account_optional
-  index account_id id desc
+  index id desc
   col kind str !
   col ip str ?
   col user_agent str ?

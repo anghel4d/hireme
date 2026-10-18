@@ -42,6 +42,7 @@ fn malformed_lines_are_refused_with_their_line_number() {
         with("table places world server", "  col x ref nowhere ?"),
         with("table places world server", "  col y enum stage ! = nonsense"),
         with("table places world server", "  metric z f64 !"),
+        with("table places world server", "  index account_id name"),
         SOURCE.replacen("\nlayout ", "\n# layout ", 1),
     ];
     for (i, source) in cases.iter().enumerate() {

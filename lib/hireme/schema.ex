@@ -427,7 +427,7 @@ defmodule Hireme.Schema.Parser do
         ([{1, %{blank("id", :id) | required: true}}] ++
            account ++
            [
-             {3, %{blank("rev", :i64) | required: true, default: "0"}},
+             {3, %{blank("rev", :i64) | required: true, default: "1"}},
              {4, %{blank("inserted_at", :time) | required: true}},
              {5, %{blank("updated_at", :time) | required: true}}
            ] ++ deleted)
@@ -497,6 +497,25 @@ defmodule Hireme.Schema.Parser do
             :ok
         end
       end
+
+      scoped = not t.global
+
+      leads =
+        (t.naturals ++ t.uniques ++ t.indexes)
+        |> Enum.reject(&Map.get(&1, :global, false))
+        |> Enum.map(fn k ->
+          case List.first(k.cols) do
+            {col, _desc} -> col
+            col -> col
+          end
+        end)
+
+      if scoped and "account_id" in leads,
+        do:
+          raise(
+            ArgumentError,
+            "#{t.name}: account_id already leads every per-account key and index"
+          )
 
       keys =
         Enum.flat_map(t.naturals ++ t.uniques, & &1.cols) ++

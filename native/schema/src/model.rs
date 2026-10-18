@@ -669,7 +669,7 @@ fn implied(t: &RawTable) -> Vec<Column> {
     }
     let mut rev = Column::blank("rev", Type::I64);
     rev.required = true;
-    rev.default = Some("0".into());
+    rev.default = Some("1".into());
     cols.push((3, rev));
     let mut ins = Column::blank("inserted_at", Type::Time);
     ins.required = true;
@@ -854,6 +854,20 @@ fn validate(s: &Schema) -> Result<(), Error> {
                     }
                 }
                 _ => {}
+            }
+        }
+        if !t.global {
+            let leads = t
+                .naturals
+                .iter()
+                .chain(t.uniques.iter())
+                .filter(|k| !k.global)
+                .filter_map(|k| k.cols.first())
+                .chain(t.indexes.iter().filter(|i| !i.global).filter_map(|i| i.cols.first().map(|(c, _)| c)));
+            for c in leads {
+                if c == "account_id" {
+                    return fail(0, format!("{}: account_id already leads every per-account key and index", t.name));
+                }
             }
         }
         let keys = t
