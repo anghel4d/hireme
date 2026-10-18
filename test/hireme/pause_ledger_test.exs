@@ -21,6 +21,8 @@ defmodule Hireme.PauseLedgerTest do
     do: Registry.lookup(Hireme.Sequencer.Registry, account_id) |> hd() |> elem(0)
 
   defp stop_seq(account_id) do
+    # Idle first: a stop mid-query costs the sandbox its connection.
+    _ = :sys.get_state(seq(account_id))
     DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, seq(account_id))
     # the sandbox connection of the killed process is torn down; let it settle
     Process.sleep(300)

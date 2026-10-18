@@ -195,7 +195,6 @@ defmodule Hireme.Sequencer do
       lease: %Lease{},
       lease_rows: [],
       account: nil,
-      account_due: false,
       subs: %{},
       counts: %{},
       kernel: nil,
@@ -333,13 +332,8 @@ defmodule Hireme.Sequencer do
 
   # The account's trail moved (a key, a session, a factor, a host): the
   # operator's account views follow, at most every 100 ms.
-  def handle_info({Hireme.Audit, kind}, state) when kind in [:changed, :factors] do
-    unless state.account_due, do: Process.send_after(self(), :account, 100)
-    {:noreply, %{state | account_due: true}, @idle_ms}
-  end
-
-  def handle_info(:account, state),
-    do: {:noreply, %{refresh_account(state) | account_due: false}, @idle_ms}
+  def handle_info({Hireme.Audit, kind}, state) when kind in [:changed, :factors],
+    do: {:noreply, refresh_views(state), @idle_ms}
 
   def handle_info(:backfill, state) do
     {:noreply, backfill(state), @idle_ms}
@@ -1630,7 +1624,7 @@ defmodule Hireme.Sequencer do
     # Inside a batch the rows read are uncommitted, so they are not kept.
     {read, body} = snapshot(nil, %{state | rows: nil}, Store.now())
     rows = if Repo.in_transaction?(), do: nil, else: read.rows
-    %{state | kernel: Kernel.new(body), counts: %{}, rows: rows}
+    %{state | kernel: Kernel.new(body), counts: %{}, rows: rows, account: read.account}
   end
 
   # Every resident table and projection the grants read (all of them, for
@@ -1640,14 +1634,14 @@ defmodule Hireme.Sequencer do
 
     # A table the grants do not read goes as an empty block, so a BOOT clears
     # whatever a client kept of it from wider grants.
-    {state, account} = if grants, do: account_views(state), else: {state, %{}}
+    {state, views} = live_views(state)
 
     tables =
       for t <- Schema.tables(), t.residency in [:resident, :projection] do
         cond do
           grants != nil and not Grants.read?(grants, t) -> Codec.block(t.id, 0, [{1, 1, []}])
           account?(t) and grants == nil -> Codec.block(t.id, 0, [{1, 1, []}])
-          account?(t) -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(account, t.id))
+          live?(t) -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
           true -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))
         end
       end
@@ -1664,7 +1658,7 @@ defmodule Hireme.Sequencer do
     rows =
       for t <- Schema.tables(),
           t.residency in [:resident, :projection],
-          not account?(t),
+          not live?(t),
           into: %{},
           do: {t.id, rows(t)}
 
@@ -1712,31 +1706,32 @@ defmodule Hireme.Sequencer do
 
   # ------------------------------------------------------- account views
 
-  # The account page's views (acct_*, the operator's alone) are read from the
-  # system tables they project, never cached by rev: they move with the trail,
-  # not with the desk. `state.account` keeps what the last read held, so a
-  # trail change patches only what moved.
+  # Views of tables the sequencer does not write (the account page's acct_*,
+  # the operator's alone, and the trusted hosts) are read when a BOOT is
+  # built and again when the account's trail moves, never cached by rev.
+  # `state.account` keeps the last read, so a change patches only what moved.
   defp account?(%{name: name}), do: String.starts_with?(name, "acct_")
+
+  defp live?(%{residency: :projection, source: source}),
+    do: Schema.table(source).residency == :server
+
+  defp live?(_t), do: false
 
   @audit_rows 1_000
 
-  defp account_views(state) do
-    views =
-      for t <- Schema.tables(), t.residency == :projection, account?(t), into: %{} do
-        {t.id, account_rows(t)}
-      end
-
+  defp live_views(state) do
+    views = for t <- Schema.tables(), live?(t), into: %{}, do: {t.id, view_rows(t)}
     {%{state | account: views}, views}
   end
 
   # The newest events, their meta as the lens shows it.
-  defp account_rows(%{name: "acct_audit"}) do
+  defp view_rows(%{name: "acct_audit"}) do
     from(e in Hireme.Rows.Audit, order_by: [desc: e.id], limit: @audit_rows)
     |> Repo.all()
     |> Enum.map(&%{&1 | meta: Hireme.Audit.visible(&1.meta || %{}, &1.kind)})
   end
 
-  defp account_rows(t), do: rows(t)
+  defp view_rows(t), do: rows(t)
 
   defp acct_info_block(state) do
     t = Schema.table(:acct_info)
@@ -1750,30 +1745,33 @@ defmodule Hireme.Sequencer do
     Codec.rows_block(t, t.cols, [row])
   end
 
-  # The trail moved: patch the operator's sessions with the account views'
-  # changed and gone rows, and acct_info whole. Debounced: a burst of trail
-  # rows is one read.
-  defp refresh_account(%{account: nil} = state), do: state
+  # The trail moved (a key, a session, a factor, a trusted host): re-read the
+  # views, give the kernel the trusted hosts at once (the next op is judged
+  # against them), and patch each session with what moved of what it reads.
+  defp refresh_views(%{account: nil} = state), do: state
 
-  defp refresh_account(state) do
+  defp refresh_views(state) do
     before = state.account
-    {state, views} = account_views(state)
+    {state, views} = live_views(state)
 
-    blocks =
+    moved =
       for {id, rows} <- views do
         t = Schema.table(id)
         old = Map.new(before[id] || [], &{&1.id, &1})
         changed = Enum.reject(rows, &(old[&1.id] == &1))
         gone = Map.keys(old) -- Enum.map(rows, & &1.id)
-        moved = if changed == [], do: [], else: [Codec.rows_block(t, t.cols, changed)]
-        moved ++ [Codec.gone_block(for i <- gone, do: {t.id, i})]
+        put = if changed == [], do: [], else: [Codec.rows_block(t, t.cols, changed)]
+        {t, [put, Codec.gone_block(for i <- gone, do: {t.id, i})]}
       end
 
-    body = IO.iodata_to_binary([blocks, acct_info_block(state)])
+    trusted = for {%{name: "trusted"}, body} <- moved, do: body
+    _ = Kernel.apply(state.kernel, IO.iodata_to_binary(trusted))
 
-    for {_, %{grants: %{actor: :operator}, pid: pid}} <- state.subs,
-        is_pid(pid),
-        do: send(pid, {:sequencer, :patch, state.rev, body})
+    for {_, %{grants: g, pid: pid}} <- state.subs, is_pid(pid) do
+      info = if Grants.read?(g, Schema.table(:acct_info)), do: [acct_info_block(state)], else: []
+      body = for {t, b} <- moved, Grants.read?(g, t), do: b
+      send(pid, {:sequencer, :patch, state.rev, IO.iodata_to_binary([body, info])})
+    end
 
     state
   end
