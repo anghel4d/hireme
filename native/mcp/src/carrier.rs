@@ -31,7 +31,6 @@ pub const RPC_WAIT: Duration = Duration::from_secs(30);
 pub struct Welcome {
     pub account_id: u64,
     pub session_id: u64,
-    pub schema_rev: u64,
     pub read_mask: u16,
     pub write_mask: u16,
     pub may_delete: bool,
@@ -312,7 +311,6 @@ impl Carrier {
                 let _ = events.send(Event::Welcome(Welcome {
                     account_id: w.account_id,
                     session_id: w.session_id,
-                    schema_rev: w.schema_rev,
                     read_mask: w.read_mask,
                     write_mask: w.write_mask,
                     may_delete: w.may_delete,
@@ -374,7 +372,7 @@ impl Carrier {
                     wire::BYE_SUSPENDED => ("suspended", false),
                     wire::BYE_GRANTS => ("grants", true),
                     wire::BYE_RESTART => ("restart", true),
-                    // Same wire, new schema_rev (a server-side column): reconnect and refetch the catalog.
+                    // Same wire, new schema_rev: reconnect (the catalog is this build's own declaration).
                     wire::BYE_SCHEMA => ("schema", true),
                     _ => ("bye", true),
                 };

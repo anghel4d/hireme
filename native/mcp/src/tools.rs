@@ -143,66 +143,57 @@ fn flags_of(bits: u32) -> Flags {
     f
 }
 
-/// One catalog column or command param, as Hireme.World.schema writes it.
-fn col_of(v: &Json) -> Option<Col> {
-    let mut flags = flags_of(v.get("flags").and_then(Json::as_u64).unwrap_or(0) as u32);
-    // A param says `required` as a boolean of its own.
-    flags.required |= v.get("required").and_then(Json::as_bool) == Some(true);
-    Some(Col {
-        id: v.get("id")?.as_u64()? as u16,
-        name: v.get("name")?.as_str()?.to_owned(),
-        ty: v.get("type")?.as_str()?.to_owned(),
-        target: v.get("target").and_then(Json::as_str).map(str::to_owned),
-        flags,
-    })
+/// A type code's name (`schema::TYPES`, from 1).
+fn type_name(code: u8) -> String {
+    schema::TYPES.get((code as usize).wrapping_sub(1)).map_or("u32", |t| t.0).to_owned()
+}
+
+/// A natural key as `{cols, where, reads}`: its condition as declared, and the column the condition reads.
+fn key_doc(k: &schema::KeyDef) -> Json {
+    let (text, reads) = match &k.cond {
+        Some(schema::Cond::Eq(c, v)) => (Some(format!("{c} = '{v}'")), vec![*c]),
+        Some(schema::Cond::Null(c)) => (Some(format!("{c} is null")), vec![*c]),
+        Some(schema::Cond::NotNull(c)) => (Some(format!("{c} is not null")), vec![*c]),
+        None => (None, vec![]),
+    };
+    json!({"cols": k.cols, "where": text, "reads": reads})
 }
 
 impl Catalog {
-    pub fn from_json(v: &Json) -> Catalog {
-        let list = |k: &str| v.get(k).and_then(Json::as_array).cloned().unwrap_or_default();
-        let tables = list("tables")
+    /// The catalog this build was made for: the schema crate's own declaration. A node of another
+    /// schema refuses this build's HELLO (the wire hash folds the schema), so it is never out of date.
+    pub fn from_schema() -> Catalog {
+        let tables = schema::TABLES
             .iter()
-            .filter_map(|t| {
-                Some(Table {
-                    id: t.get("id")?.as_u64()? as u16,
-                    name: t.get("name")?.as_str()?.to_owned(),
-                    domain: t.get("domain").and_then(Json::as_str).unwrap_or("").to_owned(),
-                    residency: t.get("residency").and_then(Json::as_str).unwrap_or("server").to_owned(),
-                    cols: t.get("cols").and_then(Json::as_array).map(|c| c.iter().filter_map(col_of).collect()).unwrap_or_default(),
-                    natural: t
-                        .get("natural")
-                        .and_then(Json::as_array)
-                        .map(|n| n.iter().filter_map(crate::diag::natural_key).collect())
-                        .unwrap_or_default(),
-                })
+            .map(|t| Table {
+                id: t.id,
+                name: t.name.to_owned(),
+                domain: t.domain.to_owned(),
+                residency: format!("{:?}", t.residency).to_lowercase(),
+                cols: t.cols.iter().map(|c| Col { id: c.id, name: c.name.to_owned(), ty: type_name(c.type_code), target: c.target.map(str::to_owned), flags: flags_of(c.flags) }).collect(),
+                natural: t.keys.iter().filter(|k| k.natural).map(key_doc).collect(),
             })
             .collect();
-        let commands = list("commands")
+        let commands = schema::COMMANDS
             .iter()
-            .filter_map(|c| {
-                Some(Command {
-                    id: c.get("id")?.as_u64()? as u16,
-                    name: c.get("name")?.as_str()?.to_owned(),
-                    table: c.get("table").and_then(Json::as_str).unwrap_or("").to_owned(),
-                    params: c.get("params").and_then(Json::as_array).map(|p| p.iter().filter_map(col_of).collect()).unwrap_or_default(),
-                    human_only: c.get("human_only").and_then(Json::as_bool).unwrap_or(false),
-                })
+            .map(|c| Command {
+                id: c.id,
+                name: c.name.to_owned(),
+                table: schema::table_def(c.table).map_or("", |t| t.name).to_owned(),
+                params: c
+                    .params
+                    .iter()
+                    .map(|p| Col { id: p.id, name: p.name.to_owned(), ty: type_name(p.type_code), target: p.target.map(str::to_owned), flags: Flags { required: p.required, ..Flags::default() } })
+                    .collect(),
+                human_only: c.human_only,
             })
             .collect();
-        let enums = v
-            .get("enums")
-            .and_then(Json::as_object)
-            .map(|o| o.iter().map(|(k, vals)| (k.clone(), vals.as_array().map(|a| a.iter().filter_map(Json::as_str).map(str::to_owned).collect()).unwrap_or_default())).collect())
-            .unwrap_or_default();
-        Catalog { schema_rev: v.get("schema_rev").and_then(Json::as_u64).unwrap_or(0), tables, commands, enums }
+        let enums = schema::ENUMS.iter().map(|(n, v)| ((*n).to_owned(), v.iter().map(|x| (*x).to_owned()).collect())).collect();
+        Catalog { schema_rev: schema::SCHEMA_REV as u64, tables, commands, enums }
     }
 
     pub fn table(&self, name: &str) -> Option<&Table> {
         self.tables.iter().find(|t| t.name == name)
-    }
-
-    pub fn table_by_id(&self, id: u16) -> Option<&Table> {
-        self.tables.iter().find(|t| t.id == id)
     }
 
     pub fn command(&self, name: &str) -> Option<&Command> {
@@ -491,89 +482,9 @@ pub fn describe(cat: &Catalog, t: &Table, m: Masks) -> Json {
 
 // ---------------------------------------------------------------- values
 
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m as i64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-#[cfg(test)]
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
-}
-
-/// Days from 0000-01-01 to 1970-01-01: the wire's `day` counts from 0000-01-01 (proleptic Gregorian,
-/// Elixir's `Date.to_gregorian_days/1`), the clock and `time` from 1970-01-01.
-pub const EPOCH_DAYS: i64 = 719_528;
-/// The last day the wire carries, 9999-12-31 (the schema's).
-pub const LAST_DAY: u32 = schema::DAY_MAX;
-
-/// A `'YYYY-MM-DD'` day as the wire carries it, days from 0000-01-01; None when malformed or past 9999-12-31.
+/// A `'YYYY-MM-DD'` day as the wire carries it (days from 0000-01-01), by the kernel's own parser.
 pub fn parse_day(s: &str) -> Option<u32> {
-    to_wire_day(parse_day_any(s)?)
-}
-
-/// Days from 1970-01-01 (the clock's count) as the wire's day, if it is in 0000-01-01..=9999-12-31.
-pub fn to_wire_day(unix_days: i64) -> Option<u32> {
-    u32::try_from(unix_days + EPOCH_DAYS).ok().filter(|d| *d <= LAST_DAY)
-}
-
-/// A real calendar day as days from 1970-01-01 (the clock's count), negative before it.
-pub fn parse_day_any(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if s.len() != 10 || b[4] != b'-' || b[7] != b'-' || !s.bytes().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()) {
-        return None;
-    }
-    let y: i64 = s[..4].parse().ok()?;
-    let m: u32 = s[5..7].parse().ok()?;
-    let d: u32 = s[8..10].parse().ok()?;
-    let max = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
-        2 => 28,
-        _ => return None,
-    };
-    if d == 0 || d > max {
-        return None;
-    }
-    Some(days_from_civil(y, m, d))
-}
-
-/// ISO-8601 UTC (`Z` or `+00:00`), seconds precision kept, fraction dropped.
-pub fn parse_time(s: &str) -> Option<u32> {
-    u32::try_from(parse_time_any(s)?).ok()
-}
-
-/// A well-formed UTC time as seconds from 1970-01-01, negative before it.
-pub fn parse_time_any(s: &str) -> Option<i64> {
-    let (date, rest) = s.split_once(['T', ' '])?;
-    let days = parse_day_any(date)?;
-    let rest = rest.strip_suffix('Z').or_else(|| rest.strip_suffix("+00:00"))?;
-    let hms = rest.split('.').next()?;
-    // Two digits each, no sign: "+1" or "-5" would otherwise parse as numbers.
-    let two = |p: &str| -> Option<i64> { (p.len() == 2 && p.bytes().all(|c| c.is_ascii_digit())).then(|| p.parse().ok()).flatten() };
-    let mut parts = hms.split(':');
-    let h = two(parts.next()?)?;
-    let mi = two(parts.next()?)?;
-    let se = parts.next().map_or(Some(0), two)?;
-    if h > 23 || mi > 59 || se > 60 || parts.next().is_some() {
-        return None;
-    }
-    Some(days * 86_400 + h * 3600 + mi * 60 + se)
+    kernel::iso_day(s).and_then(|d| u32::try_from(d).ok())
 }
 
 /// A typed cell for one column, or why the value does not fit.
@@ -599,9 +510,8 @@ pub fn cell(cat: &Catalog, c: &Col, v: &Json) -> Result<Cell, String> {
         // Every four-digit year is a day the wire carries; `time` counts seconds from 1970-01-01 in a
         // u32, so a real time outside 1970-2106 is said to be out of range, not malformed.
         "day" => Cell::U32(v.as_str().and_then(parse_day).ok_or_else(|| want("'YYYY-MM-DD', 0000-01-01 to 9999-12-31"))?),
-        "time" => Cell::U32(v.as_str().and_then(parse_time).ok_or_else(|| {
-            if v.as_str().is_some_and(|t| parse_time_any(t).is_some()) { want("a time from 1970 to 2106") } else { want("ISO-8601 UTC, e.g. 2026-10-18T09:30:00Z") }
-        })?),
+        // The kernel reads a time as Elixir does; the wire carries it as u32 unix seconds (1970 to 2106).
+        "time" => Cell::U32(v.as_str().and_then(kernel::iso_time).map(|t| u32::try_from(t).map_err(|_| want("a time from 1970 to 2106"))).ok_or_else(|| want("ISO-8601, e.g. 2026-10-18T09:30:00Z"))??),
         "enum" => {
             let values = c.target.as_ref().and_then(|e| cat.enums.get(e)).cloned().unwrap_or_default();
             match v {
@@ -625,39 +535,3 @@ pub fn write_cell(w: &mut wire::OpWriter<'_>, col: u16, c: &Cell) {
     };
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn days_round_trip_and_reject_impossible_dates() {
-        for z in [-800_000i64, -1, 0, 1, 19_000, 20_744, 2_932_896] {
-            let (y, m, d) = civil_from_days(z);
-            assert_eq!(days_from_civil(y, m, d), z);
-        }
-        // Days from 0000-01-01, as Elixir's Date.to_gregorian_days/1 counts them.
-        assert_eq!(parse_day("0000-01-01"), Some(0));
-        assert_eq!(parse_day("1970-01-01"), Some(719_528));
-        assert_eq!(parse_day("2026-10-18"), Some(719_528 + 20_744));
-        assert_eq!(parse_day("2024-02-29"), Some(719_528 + 19_782));
-        assert_eq!(parse_day("9999-12-31"), Some(LAST_DAY));
-        assert_eq!(parse_day("10000-01-01"), None);
-        assert_eq!(to_wire_day(-719_529), None);
-        for bad in ["2025-02-29", "2026-13-01", "2026-00-10", "2026-1-01", "26-10-18", "2026-04-31"] {
-            assert_eq!(parse_day(bad), None, "{bad}");
-        }
-        assert_eq!(parse_time("1970-01-02T00:00:01Z"), Some(86_401));
-        assert_eq!(parse_time("2026-10-18T09:30:00.250+00:00"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
-        assert_eq!(parse_time("2026-10-18T09:30:00+02:00"), None);
-        assert_eq!(parse_day("2026-+1-18"), None);
-        // A day before 1970 is a day like any other; a time before it is out of the clock's range.
-        assert_eq!(parse_day("1897-01-01"), Some(692_866));
-        assert_eq!(parse_day("1969-12-31"), Some(719_527));
-        assert!(parse_day_any("1897-01-01").is_some_and(|d| d < 0));
-        assert_eq!(parse_day_any("1897-02-30"), None);
-        assert_eq!(parse_time("1969-12-31T23:59:59Z"), None);
-        assert_eq!(parse_time_any("1969-12-31T23:59:59Z"), Some(-1));
-        assert_eq!(parse_time("2026-10-18T-1:+5:00Z"), None);
-        assert_eq!(parse_time("2026-10-18T09:30Z"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
-    }
-}

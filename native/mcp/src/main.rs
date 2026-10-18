@@ -37,8 +37,6 @@ const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_SUB: &str = "io.modelcontextprotocol/subscriptionId";
 /// How long a request waits for the first WELCOME and catalog before answering without them.
 const READY_WAIT: Duration = Duration::from_secs(10);
-/// Server-side rows have no PATCH; a subscribed one is re-read this often.
-const POLL: Duration = Duration::from_secs(20);
 /// An OPS frame stays under the node's 2 MiB WebSocket frame limit; a batch past it goes as several frames.
 const FRAME_BYTES: usize = 1_900_000;
 
@@ -67,11 +65,10 @@ struct Reqs {
     listens: HashMap<String, (Json, bool)>,
 }
 
-/// A resource a client watches: its URI's row, and (for server-side tables) the rev last seen.
+/// A resource a client watches: its URI's row, announced when a frame moves it.
 struct Watch {
     table: u16,
     id: u32,
-    rev: u64,
     /// The listen request ids that asked for it; `None` = a legacy resources/subscribe.
     subs: HashSet<Option<String>>,
 }
@@ -88,8 +85,8 @@ struct App {
     out: mpsc::UnboundedSender<String>,
     welcome: RwLock<Option<Welcome>>,
     /// The masks and schema_rev the catalog was fetched under; set only when that fetch succeeded.
-    catalog_for: RwLock<Option<(u16, u16, bool, u64)>>,
-    catalog: RwLock<Option<Catalog>>,
+    /// This build's catalog, the schema crate's declaration: the node's matches it, or HELLO is refused.
+    catalog: Catalog,
     ready: Notify,
     /// Why the session ended for good, once it has.
     dead: RwLock<Option<String>>,
@@ -111,9 +108,6 @@ struct App {
     listed_early: std::sync::atomic::AtomicBool,
     /// This session's initial train (its BOOT) is in the kernel, so a local verdict means something.
     trained: std::sync::atomic::AtomicBool,
-    /// Watched server rows are being re-read, and whether another advance came since the last pass.
-    rechecking: std::sync::atomic::AtomicBool,
-    recheck_again: std::sync::atomic::AtomicBool,
 }
 
 /// The node's /wire URL. A plain-text scheme carries the key unencrypted, so it is refused off loopback.
@@ -192,8 +186,7 @@ async fn main() {
         held: Mutex::new(Vec::new()),
         out,
         welcome: RwLock::new(None),
-        catalog_for: RwLock::new(None),
-        catalog: RwLock::new(None),
+        catalog: Catalog::from_schema(),
         ready: Notify::new(),
         dead: RwLock::new(None),
         paused: RwLock::new(None),
@@ -205,11 +198,8 @@ async fn main() {
         reqs: Mutex::new(Reqs::default()),
         listed_early: std::sync::atomic::AtomicBool::new(false),
         trained: std::sync::atomic::AtomicBool::new(false),
-        rechecking: std::sync::atomic::AtomicBool::new(false),
-        recheck_again: std::sync::atomic::AtomicBool::new(false),
     });
     tokio::spawn(follow(app.clone(), events));
-    tokio::spawn(poll(app.clone()));
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -278,26 +268,17 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 if !w.leased {
                     app.held.lock().await.clear();
                 }
-                let had = app.catalog_for.read().await.is_some();
                 app.rev.store(w.rev, Ordering::Relaxed);
-                let now = (w.read_mask, w.write_mask, w.may_delete, w.schema_rev);
+                if let Ok(mut k) = app.kernel.lock() {
+                    k.set_grants(kernel::query::Grants { human: false, read_mask: w.read_mask as u8, write_mask: w.write_mask as u8, may_delete: w.may_delete });
+                }
+                // The tools a key is offered follow its masks: a list served before this WELCOME, or under
+                // the masks it replaces, is out of date.
+                let now = (w.read_mask, w.write_mask, w.may_delete);
+                let before = app.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete));
                 *app.welcome.write().await = Some(w);
-                // Refetched until a fetch under these very masks succeeds: one failed call after a
-                // widening must not leave the narrow catalog in place for the life of the process.
-                let fresh = *app.catalog_for.read().await != Some(now);
-                if fresh {
-                    let before = had;
-                    match app.carrier.rpc("schema", &json!({})).await {
-                        Ok(Ok(v)) => {
-                            *app.catalog.write().await = Some(Catalog::from_json(&v));
-                            *app.catalog_for.write().await = Some(now);
-                        }
-                        Ok(Err(e)) => eprintln!("hireme-mcp: schema refused: {e}"),
-                        Err(e) => eprintln!("hireme-mcp: schema: {}", e.0),
-                    }
-                    if before || app.listed_early.swap(false, Ordering::Relaxed) {
-                        app.tools_changed().await;
-                    }
+                if before.is_some_and(|b| b != now) || app.listed_early.swap(false, Ordering::Relaxed) {
+                    app.tools_changed().await;
                 }
                 app.ready.notify_waiters();
             }
@@ -319,20 +300,7 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 if wire::Header::peek(&frame).is_ok_and(|h| h.kind == wire::BOOT && h.flags & wire::END != 0) {
                     app.trained.store(true, Ordering::Relaxed);
                 }
-                // Re-reading watched server rows takes RPCs: off this loop, so frames keep flowing into the
-                // kernel, and coalesced, so a burst of PATCHes is one pass (or two), not one per PATCH.
-                if app.rows(&frame).await {
-                    app.recheck_again.store(true, Ordering::Relaxed);
-                    if !app.rechecking.swap(true, Ordering::Relaxed) {
-                        let a = app.clone();
-                        tokio::spawn(async move {
-                            while a.recheck_again.swap(false, Ordering::Relaxed) {
-                                a.recheck().await;
-                            }
-                            a.rechecking.store(false, Ordering::Relaxed);
-                        });
-                    }
-                }
+                app.rows(&frame).await;
             }
             Event::Ended { reason, message, again } => {
                 eprintln!("hireme-mcp: session ended: {reason} {message}");
@@ -364,41 +332,6 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
     }
 }
 
-/// A fallback for a quiet session: subscribed server-side rows are re-read on a slow timer too.
-async fn poll(app: Arc<App>) {
-    let mut tick = tokio::time::interval(POLL);
-    loop {
-        tick.tick().await;
-        app.recheck().await;
-    }
-}
-
-impl App {
-    /// Re-reads subscribed server-side rows; a moved rev is an update.
-    async fn recheck(&self) {
-        let Some(cat) = self.catalog.read().await.clone() else { return };
-        let app = self;
-        let targets: Vec<(String, String, u32, u64)> = app
-            .watches
-            .lock()
-            .await
-            .iter()
-            .filter_map(|(uri, w)| cat.table_by_id(w.table).filter(|t| t.residency == "server").map(|t| (uri.clone(), t.name.clone(), w.id, w.rev)))
-            .collect();
-        for (uri, table, id, rev) in targets {
-            if let Ok(Ok(v)) = app.carrier.rpc("get", &json!({"table": table, "id": id})).await {
-                let now = v.get("row").and_then(|r| r.get("rev")).and_then(Json::as_u64).unwrap_or(rev);
-                if now != rev {
-                    if let Some(w) = app.watches.lock().await.get_mut(&uri) {
-                        w.rev = now;
-                    }
-                    app.updated(&uri).await;
-                }
-            }
-        }
-    }
-}
-
 fn result_type(modern: bool, mut v: Json) -> Json {
     if modern {
         v["resultType"] = json!("complete");
@@ -423,43 +356,42 @@ impl App {
         self.welcome.read().await.as_ref().map(|w| Masks { read: w.read_mask, write: w.write_mask, may_delete: w.may_delete }).unwrap_or_default()
     }
 
-    /// The catalog, waiting briefly for the first one.
-    /// The catalog fetched under the session's current masks, never one fetched under older ones.
-    /// A fetch WELCOME's handler could not complete (dropped or refused) is retried here, lazily;
-    /// the call waits for it a bounded time. A Notify wakes only who is already waiting, and
-    /// WELCOME can land between the check and the wait, so the wait also ticks.
+    /// The catalog, once a WELCOME has said which masks this key holds (waiting briefly for it).
     async fn catalog(&self) -> Option<Catalog> {
+        self.welcomed().await.then(|| self.catalog.clone())
+    }
+
+    /// Whether a WELCOME is in (or comes within READY_WAIT); false once the session ended for good.
+    async fn welcomed(&self) -> bool {
         let deadline = tokio::time::Instant::now() + READY_WAIT;
         loop {
             if self.dead.read().await.is_some() {
-                return None;
+                return false;
             }
-            let masks = self.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete, w.schema_rev));
-            if let Some(m) = masks {
-                if *self.catalog_for.read().await == Some(m) {
-                    return self.catalog.read().await.clone();
-                }
-                // Bounded by this call's own deadline, not the RPC's 30 s: a node that never answers schema costs READY_WAIT.
-                if let Ok(Ok(Ok(v))) = tokio::time::timeout_at(deadline, self.carrier.rpc("schema", &json!({}))).await {
-                    let still = self.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete, w.schema_rev)) == Some(m);
-                    if still {
-                        let cat = Catalog::from_json(&v);
-                        let had = self.catalog.write().await.replace(cat.clone()).is_some();
-                        *self.catalog_for.write().await = Some(m);
-                        // A list served before (or under other masks) is out of date: say so, as WELCOME's own fetch does.
-                        if had || self.listed_early.swap(false, Ordering::Relaxed) {
-                            self.tools_changed().await;
-                        }
-                        return Some(cat);
-                    }
-                }
+            if self.welcome.read().await.is_some() {
+                return true;
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return false;
             }
-            let pause = if masks.is_some() { 500 } else { 50 };
-            let _ = tokio::time::timeout(Duration::from_millis(pause), self.ready.notified()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.ready.notified()).await;
         }
+    }
+
+    /// A read of this process's own replica (the kernel's query: World's find, get, text and history), once
+    /// the session's BOOT is in; answered as the node's RPC was, a refusal by its name.
+    async fn local(&self, op: &str, args: &Json) -> Result<carrier::Answer, carrier::Lost> {
+        let deadline = tokio::time::Instant::now() + READY_WAIT;
+        while !self.trained.load(Ordering::Relaxed) {
+            if self.dead.read().await.is_some() || tokio::time::Instant::now() >= deadline {
+                return Err(carrier::Lost("not connected yet: the replica has not booted".into()));
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.ready.notified()).await;
+        }
+        let mut req = args.clone();
+        req["op"] = json!(op);
+        let k = self.kernel.lock().map_err(|_| carrier::Lost("the replica is unavailable".into()))?;
+        Ok(k.query(&req).map_err(|r| json!({"code": self.catalog.refusal(r.code), "data": r.data})))
     }
 
     async fn message(self: Arc<Self>, msg: Json) {
@@ -726,7 +658,9 @@ impl App {
     }
 
     async fn rpc_tool(&self, tool: &str, method: &str, args: &Json, untrusted: bool) -> Json {
-        match self.carrier.rpc(method, args).await {
+        // Reads answer from this process's replica; only writes and the lease go to the node.
+        let answer = if matches!(method, "find" | "get" | "text" | "history") { self.local(method, args).await } else { self.carrier.rpc(method, args).await };
+        match answer {
             Ok(Ok(v)) => {
                 if untrusted {
                     let what = format!(
@@ -869,7 +803,7 @@ impl App {
     /// The id of application `no`, or the tool result that says why there is none: a missing row is
     /// not_found, a refusal keeps its own code (a write-only key's scope), a lost call is the session's.
     async fn application_id(&self, no: u64, what: &str) -> Result<u32, Json> {
-        match self.carrier.rpc("get", &json!({"table":"applications","key":{"no":no}})).await {
+        match self.local("get", &json!({"table":"applications","key":{"no":no}})).await {
             Ok(Ok(v)) => v.get("row").and_then(|r| r.get("id")).and_then(Json::as_u64).map(|i| i as u32).ok_or_else(|| {
                 text_result(diag::render("not_found", what, &json!({"message": format!("no application {no}")})), None, true)
             }),
@@ -1132,7 +1066,7 @@ impl App {
             && let Some(doc) = u32::try_from(no).ok().and_then(|n| self.application_doc(n)) {
                 return Ok(wrap(doc));
             }
-        match self.carrier.rpc("get", &get).await {
+        match self.local("get", &get).await {
             Ok(Ok(v)) => Ok(wrap(v)),
             Ok(Err(_)) => Err(not_found(uri, modern)),
             Err(l) => Err(json!({"code":-32603,"message":l.0})),
@@ -1147,12 +1081,11 @@ impl App {
         let Some(get) = Self::locate(uri) else { return Err(not_found(uri, modern)) };
         let cat = self.catalog().await.unwrap_or_default();
         let table = cat.table(get["table"].as_str().unwrap_or("")).map(|t| t.id).unwrap_or(0);
-        match self.carrier.rpc("get", &get).await {
+        match self.local("get", &get).await {
             Ok(Ok(v)) => {
                 let row = v.get("row").cloned().unwrap_or(Json::Null);
                 let id = row.get("id").and_then(Json::as_u64).unwrap_or(0) as u32;
-                let rev = row.get("rev").and_then(Json::as_u64).unwrap_or(0);
-                self.watches.lock().await.entry(uri.to_owned()).or_insert_with(|| Watch { table, id, rev, subs: HashSet::new() }).subs.insert(sub);
+                self.watches.lock().await.entry(uri.to_owned()).or_insert_with(|| Watch { table, id, subs: HashSet::new() }).subs.insert(sub);
                 Ok(())
             }
             // As for resources/read: only a missing row is not found; a refusal or a lost call is an internal error.
@@ -1278,7 +1211,7 @@ impl App {
 /** Today by the system clock, as the wire's day (from 0000-01-01); the kernel prefers the server's `clock` once a TICK lands. */
 fn today() -> i32 {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    tools::to_wire_day((secs / 86_400) as i64).map_or(0, |d| d as i32)
+    (secs / 86_400) as i32 + kernel::UNIX_EPOCH_DAY
 }
 
 fn now() -> i64 {
@@ -1489,13 +1422,7 @@ mod tests {
     use super::*;
 
     fn catalog() -> Catalog {
-        Catalog::from_json(&json!({
-            "schema_rev": 1,
-            "tables": [{"id": 23, "name": "corporations", "domain": "world", "residency": "server", "natural": [["domain"]],
-              "cols": [{"id": 8, "name": "domain", "type": "str", "flags": 1}, {"id": 9, "name": "name", "type": "str", "flags": 1},
-                       {"id": 10, "name": "headcount", "type": "u32", "flags": 128}]}],
-            "commands": [], "enums": {}
-        }))
+        Catalog::from_schema()
     }
 
     #[test]
@@ -1540,7 +1467,7 @@ mod tests {
         let body = w.finish();
         let op = wire::Ops::new(&body).unwrap().iter().next().unwrap();
         let cols: Vec<u16> = op.cells().map(|c| c.col).collect();
-        assert_eq!(cols, vec![8, 9]);
+        assert_eq!(cols, vec![schema::col::corporations::DOMAIN, schema::col::corporations::NAME]);
     }
 
     #[test]
