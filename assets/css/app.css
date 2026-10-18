@@ -361,3 +361,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .mask-picker { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .mask-picker fieldset[disabled] { opacity: 0.75; }
 .mask-summary { margin: 0; padding: 6px 10px; border-radius: var(--radius); background: var(--sunk); border-left: 3px solid var(--accent); }
+
+/* The trail: a coalesced row's counts and the addresses it came from, under its kind. */
+.coalesced .counts { margin: 2px 0; padding-left: 1.1em; }
+.coalesced p { margin: 2px 0; }

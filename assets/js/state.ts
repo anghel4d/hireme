@@ -130,7 +130,8 @@ export interface AccountView {
   /** Which form is open: "mint", "rename", "trust", "change:<key id>". */
   open: string
   error: string
-  audit: Record<string, unknown>[] | null
+  /** The trail as shown: security events by default, or the activity view, paged older by `next`. */
+  audit: { view: "security" | "activity"; events: Record<string, unknown>[]; next: number | null; loading: boolean } | null
   /** The access being chosen in the open key form ("mint" or "k<id>"), so a redraw never resets it. */
   masks: { form: string; preset: string; read: number; write: number; mayDelete: boolean } | null
   /** A mint in flight: a second click must not mint a second key whose secret is never shown. */

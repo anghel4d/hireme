@@ -405,13 +405,52 @@ function hosts(): Html {
   </section>`
 }
 
+/** Who a coalesced count belongs to: a key by its name while the overview still lists it. */
+function keyName(id: string): string {
+  if (id === "none") return "no key"
+  const k = list("keys").find((x) => String(x.id) === id)
+  return k ? str(k.name) || `key ${id}` : `key ${id}`
+}
+
+/** A coalesced row: its window, its counts by kind and key, and the distinct addresses it came from. */
+function coalesced(e: Row): Html {
+  const m = (e.meta ?? {}) as Row & { from?: string; to?: string; counts?: Record<string, Record<string, number>> }
+  const counts = Object.entries(m.counts ?? {})
+  // Distinct values, capped by the node; `<field>_total` counts them all.
+  const distinct = (field: string, one: string, many: string): Html => {
+    const shown = Array.isArray(m[field]) ? (m[field] as unknown[]).map(str) : []
+    if (shown.length === 0) return EMPTY
+    const total = Math.max(shown.length, num(m[`${field}_total`]))
+    return html`<p class="muted">from ${total} ${total === 1 ? one : many}: ${shown.join(", ")}${total > shown.length ? ` and ${total - shown.length} more` : ""}</p>`
+  }
+  return html`<div class="coalesced">
+      ${m.from ? html`<span class="muted">${time(m.from)} – ${time(m.to)}</span>` : EMPTY}
+      <ul class="counts">${counts.map(([kind, by]) => {
+        const per = Object.entries(by ?? {})
+        const total = per.reduce((n, [, c]) => n + num(c), 0)
+        return html`<li data-key="${kind}"><b>${total}</b> ${kind.replace(/_/g, " ")}${per.length > 0 ? html` <span class="muted">(${per.map(([k, c]) => `${keyName(k)}: ${num(c)}`).join(", ")})</span>` : EMPTY}</li>`
+      })}</ul>
+      ${distinct("addresses", "address", "addresses")}${distinct("user_agents", "user agent", "user agents")}
+    </div>`
+}
+
 function audit(): Html {
-  const rows = v().audit
+  const a = v().audit
+  const tab = (view: "security" | "activity", label: string) =>
+    html`<button type="button" class="chip${a?.view === view ? " on" : ""}" aria-pressed="${String(a?.view === view)}" data-act="audit" data-view="${view}">${label}</button>`
   return html`<section class="card" data-key="audit"><h2>Audit</h2>
-    ${rows === null ? html`<button type="button" data-act="audit">Show recent events</button>` : html`<table class="grid compact">
+    ${a === null ? html`<button type="button" data-act="audit" data-view="security">Show security events</button>` : html`
+      <div class="chips" role="group" aria-label="Which events">${tab("security", "Security")}${tab("activity", "Activity")}</div>
+      <p class="hint">${a.view === "security" ? "Sign-ins, factors, keys, sessions and revokes: kept for good." : "Agent writes, leases and connections, counted per window once busy; it expires."}</p>
+      ${a.events.length === 0 && !a.loading ? html`<p class="empty">No events.</p>` : html`<table class="grid compact">
       <thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">From</th></tr></thead>
-      <tbody>${rows.map((e) => html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${str(e.kind)}${e.key_id ? html` <span class="tag">key ${num(e.key_id)}</span>` : EMPTY}</td>
-        <td class="muted">${str(e.ip)}</td></tr>`)}</tbody></table>`}
+      <tbody>${a.events.map((e) => {
+        const kind = str(e.kind)
+        const many = kind === "activity_coalesced" || kind === "revokes_coalesced"
+        return html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${kind.replace(/_/g, " ")}${e.key_id ? html` <span class="tag">${keyName(String(e.key_id))}</span>` : EMPTY}${many ? coalesced(e) : EMPTY}</td>
+        <td class="muted">${str(e.ip)}</td></tr>`
+      })}</tbody></table>`}
+      ${a.loading ? html`<p class="muted">Loading…</p>` : a.next !== null ? html`<button type="button" class="more" data-act="audit-more">Older events</button>` : EMPTY}`}
   </section>`
 }
 
@@ -511,7 +550,9 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "host-remove":
       return void call("account.trusted_host.remove", { id })
     case "audit":
-      return void rpc<{ events: Row[] }>("account.audit", { limit: 100 }).then((r) => patch({ audit: r.events })).catch((e: unknown) => patch({ error: said(e) }))
+      return void trail(el.dataset.view === "activity" ? "activity" : "security", false)
+    case "audit-more":
+      return void trail(v().audit?.view ?? "security", true)
     case "step-passkey":
       return void (async () => {
         try {
@@ -533,6 +574,28 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return patch({ reveal: null })
   }
   void ev
+}
+
+let trailing = 0
+
+/** One page of the trail: the first of a view, or the next older one of the view shown. */
+async function trail(view: "security" | "activity", more: boolean): Promise<void> {
+  const me = ++trailing
+  const now = v().audit
+  const keep = more && now?.view === view
+  const before = keep ? now.next : null
+  patch({ audit: { view, events: keep ? now.events : [], next: keep ? now.next : null, loading: true } })
+  try {
+    const r = await rpc<{ events: Row[]; next?: number | null }>("account.audit", { view, limit: 50, ...(before !== null ? { before } : {}) })
+    if (me !== trailing) return
+    const shown = keep ? v().audit?.events ?? [] : []
+    // An older node pages nothing: no `next`, and the page is the whole answer.
+    patch({ audit: { view, events: [...shown, ...r.events], next: typeof r.next === "number" ? r.next : null, loading: false } })
+  } catch (e) {
+    if (me !== trailing) return
+    const a = v().audit
+    patch({ audit: a ? { ...a, loading: false } : null, error: said(e) })
+  }
 }
 
 function totpBegin(): void {
