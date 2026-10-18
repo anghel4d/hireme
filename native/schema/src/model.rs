@@ -419,20 +419,24 @@ fn tokens(s: &str) -> Vec<&str> {
 
 fn where_term(where_: &Option<String>, line: usize) -> Result<Option<Where>, Error> {
     let Some(w) = where_ else { return Ok(None) };
-    if let Some((col, rest)) = w.split_once(" = ") {
-        if is_name(col) && rest.len() >= 2 && rest.starts_with('\'') && rest.ends_with('\'') && !rest[1..rest.len() - 1].contains('\'') {
-            return Ok(Some(Where::Eq(col.to_owned(), rest[1..rest.len() - 1].to_owned())));
-        }
+    if let Some((col, rest)) = w.split_once(" = ")
+        && is_name(col)
+        && rest.len() >= 2
+        && rest.starts_with('\'')
+        && rest.ends_with('\'')
+        && !rest[1..rest.len() - 1].contains('\'')
+    {
+        return Ok(Some(Where::Eq(col.to_owned(), rest[1..rest.len() - 1].to_owned())));
     }
-    if let Some(col) = w.strip_suffix(" is not null") {
-        if is_name(col) {
-            return Ok(Some(Where::NotNull(col.to_owned())));
-        }
+    if let Some(col) = w.strip_suffix(" is not null")
+        && is_name(col)
+    {
+        return Ok(Some(Where::NotNull(col.to_owned())));
     }
-    if let Some(col) = w.strip_suffix(" is null") {
-        if is_name(col) {
-            return Ok(Some(Where::Null(col.to_owned())));
-        }
+    if let Some(col) = w.strip_suffix(" is null")
+        && is_name(col)
+    {
+        return Ok(Some(Where::Null(col.to_owned())));
     }
     fail(line, format!("where takes col = 'value', col is null or col is not null: {w}"))
 }
@@ -1057,10 +1061,10 @@ fn validate(s: &Schema) -> Result<(), Error> {
                     let Some(e) = s.enum_(target) else {
                         return fail(0, format!("{}.{}: no enum {target}", t.name, c.name));
                     };
-                    if let Some(d) = &c.default {
-                        if !e.values.contains(d) {
-                            return fail(0, format!("{}.{}: {d} not in {target}", t.name, c.name));
-                        }
+                    if let Some(d) = &c.default
+                        && !e.values.contains(d)
+                    {
+                        return fail(0, format!("{}.{}: {d} not in {target}", t.name, c.name));
                     }
                 }
                 _ => {}

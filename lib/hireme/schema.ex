@@ -827,6 +827,8 @@ defmodule Hireme.Schema do
   Recompiles when the file changes.
   """
 
+  alias Hireme.Schema.Parser
+
   @path Path.expand("../../schema/hireme.schema", __DIR__)
   @external_resource @path
   @model Hireme.Schema.Parser.parse!(File.read!(@path))
@@ -924,7 +926,7 @@ defmodule Hireme.Schema do
   def schema_rev, do: @model.schema_rev
 
   @doc "The canonical dump the hashes cover (`:wire` or `:full`)."
-  def canonical(scope), do: Hireme.Schema.Parser.canonical(@model, scope)
+  def canonical(scope), do: Parser.canonical(@model, scope)
 
   @doc "The row module of a stored table."
   def row(table), do: Module.concat(Hireme.Rows, singular(table(table).name))

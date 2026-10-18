@@ -24,6 +24,7 @@ defmodule Hireme.World do
   import Ecto.Query
   alias Hireme.{Grants, Repo, Schema}
   alias Hireme.Rows.{Citation, Source}
+  alias Hireme.Schema.Parser
 
   @find_limit 50
   @find_max 500
@@ -85,7 +86,7 @@ defmodule Hireme.World do
                 "type" => c.type,
                 "type_code" => c.type_code,
                 "wire" => c.wire,
-                "flags" => Hireme.Schema.Parser.flags(c),
+                "flags" => Parser.flags(c),
                 "target" => c.target
               }
             end
@@ -373,17 +374,15 @@ defmodule Hireme.World do
   defp utf8_prefix(want, all) do
     n = byte_size(want)
 
-    cond do
-      String.valid?(want) ->
-        want
-
-      true ->
-        Enum.find_value(1..3, fn extra ->
-          if n + extra <= byte_size(all) do
-            longer = binary_part(all, 0, n + extra)
-            if String.valid?(longer), do: longer
-          end
-        end) || trim_invalid(want)
+    if String.valid?(want) do
+      want
+    else
+      Enum.find_value(1..3, fn extra ->
+        if n + extra <= byte_size(all) do
+          longer = binary_part(all, 0, n + extra)
+          if String.valid?(longer), do: longer
+        end
+      end) || trim_invalid(want)
     end
   end
 
