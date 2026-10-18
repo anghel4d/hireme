@@ -31,11 +31,73 @@ function current(): TableDef {
 const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
 
 /** The columns a grid shows: declared, not secret, and no twin (a metric's `_on` shows inside its metric). */
-const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
+const shown = (t: TableDef): ColumnDef[] => {
+  const all = t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
+  // The column a row is known by (its search column: a name, a url) leads, held in view beside # while the grid scrolls.
+  const lead = SEARCH[t.name as Shown]
+  return [...all.filter((c) => c.name === lead), ...all.filter((c) => c.name !== lead)]
+}
+
+/** The declaration's abbreviations, spelled as people write them; every other word of a column's name is itself. */
+const WORDS: Record<string, string> = {
+  usd: "(USD)", swe: "SWE", url: "URL", urls: "URLs", ats: "ATS", hq: "HQ", pe: "P/E", wlb: "work-life balance", iso2: "ISO 2", iso3: "ISO 3",
+  geonames: "GeoNames", gdp: "GDP", ppp: "PPP", km2: "km²", twh: "TWh", kwh: "kWh", mbps: "Mbps", co2: "CO₂", t: "(t)", qol: "quality of life", hdi: "HDI", lat: "latitude", lon: "longitude", id: "",
+}
+/** A column's label, generated from its declared name: hq_place_id is "HQ place", comp_swe_median_usd "Comp SWE median (USD)". */
+export function label(name: string): string {
+  const words = name.split("_").map((w) => WORDS[w] ?? w).filter((w) => w !== "").join(" ")
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** A host as people read it: each punycode label (xn--) decoded (RFC 3492), so xn--mller-kva.example is müller.example. */
+export function unicodeHost(host: string): string {
+  return host.split(".").map((l) => (l.startsWith("xn--") ? puny(l.slice(4)) ?? l : l)).join(".")
+}
+function puny(s: string): string | null {
+  const out: number[] = []
+  const dash = s.lastIndexOf("-")
+  for (const ch of dash > 0 ? s.slice(0, dash) : "") out.push(ch.charCodeAt(0))
+  let n = 128, i = 0, bias = 72, p = dash > 0 ? dash + 1 : 0
+  while (p < s.length) {
+    const old = i
+    for (let w = 1, k = 36; ; k += 36) {
+      if (p >= s.length) return null
+      const c = s.charCodeAt(p++)
+      const d = c >= 48 && c <= 57 ? c - 22 : c >= 97 && c <= 122 ? c - 97 : c >= 65 && c <= 90 ? c - 65 : -1
+      if (d < 0) return null
+      i += d * w
+      const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias
+      if (d < t) break
+      w *= 36 - t
+    }
+    const len = out.length + 1
+    let delta = old === 0 ? Math.floor((i - old) / 700) : (i - old) >> 1
+    delta += Math.floor(delta / len)
+    let k = 0
+    for (; delta > 455; k += 36) delta = Math.floor(delta / 35)
+    bias = k + Math.floor((36 * delta) / (delta + 38))
+    n += Math.floor(i / len)
+    i %= len
+    out.splice(i++, 0, n)
+  }
+  return String.fromCodePoint(...out)
+}
+
+/**
+ * The columns drawn: the lead and the declaration's group picked in the address (`cols`), the first
+ * group (identity) by default, or every column for `all` and for a table the declaration does not group.
+ */
+const groups = (t: TableDef): string[] => [...new Set(shown(t).flatMap((c) => (c.group === null ? [] : [c.group])))]
+function drawn(t: TableDef): ColumnDef[] {
+  const g = groups(t)
+  const pick = model.address.q.get("cols") ?? g[0]
+  const lead = SEARCH[t.name as Shown]
+  return g.length < 2 || pick === "all" ? shown(t) : shown(t).filter((c) => c.name === lead || c.group === pick)
+}
 
 /** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
 // A text column is drawn as its byte count: the grid asks find for its size, never its text.
-const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).filter((c) => c.type !== "text").flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
+const cols = (cs: ColumnDef[]): string[] => ["id", "rev", ...cs.filter((c) => c.type !== "text").flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
 
 /** What find can order by: the node refuses text, json and bytes columns. */
 const sortable = (c: ColumnDef): boolean => c.type !== "text" && c.type !== "json" && c.type !== "bytes"
@@ -53,8 +115,8 @@ function order(t: TableDef): [string, string] | null {
 }
 
 /** The first `limit` rows of the grid's table, sort and search, from the replica (pages of find's 500). */
-function rows(t: TableDef, limit: number): { rows: Row[]; more: boolean } {
-  const params: Record<string, unknown> = { table: t.name, cols: cols(t), sizes: shown(t).filter((c) => c.type === "text").map((c) => c.name) }
+function rows(t: TableDef, cs: ColumnDef[], limit: number): { rows: Row[]; more: boolean } {
+  const params: Record<string, unknown> = { table: t.name, cols: cols(cs), sizes: cs.filter((c) => c.type === "text").map((c) => c.name) }
   const o = order(t)
   if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
@@ -87,6 +149,14 @@ const BIG = new Intl.NumberFormat(undefined, { notation: "compact", maximumFract
 function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
   if (c.type === "text") return x === 0 ? EMPTY : html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${Number(x).toLocaleString()} bytes</button>`
+  if (c.ref !== null) {
+    // A ref is the row it names, by its name, from the replica; a world table's row is a link to it there.
+    const to = TABLES_SHOWN.find((n) => n === c.ref)
+    const named = to ? rowOf(table(to), Number(x)) : null
+    const name = named ? String(named[SEARCH[to!] ?? "id"] ?? "") : ""
+    if (!to || name === "") return html`<span class="ref">#${String(x)}</span>`
+    return html`<a class="ref" href="/world/${to}?q=${encodeURIComponent(name)}" data-nav title="${to} #${String(x)}">${to === "sources" ? unicodeHost(name.replace(/^https?:\/\//, "")) : name}</a>`
+  }
   // A plain whole-number column (a year, a count of URLs) is shown as written, not grouped like a quantity.
   if (typeof x === "number" && !c.metric && c.type !== "f64") return html`${String(x)}`
   if (typeof x === "number") {
@@ -95,8 +165,11 @@ function display(c: ColumnDef, x: unknown): Html {
   }
   if (typeof x === "boolean") return html`${x ? "yes" : "no"}`
   const s = String(x)
-  if (c.ref !== null) return html`<span class="ref">#${s}</span>`
-  if (/_url$|^url$/.test(c.name)) return html`<a href="${href(s)}" rel="noopener noreferrer" target="_blank">${s.replace(/^https?:\/\//, "").slice(0, 48)}</a>`
+  if (c.name === "domain" || c.name === "host") return html`<span title="${s}">${unicodeHost(s)}</span>`
+  if (/_url$|^url$/.test(c.name)) {
+    const [, host = "", rest = ""] = s.match(/^https?:\/\/([^/]*)(.*)$/) ?? []
+    return html`<a href="${href(s)}" rel="noopener noreferrer" target="_blank" title="${s}">${(unicodeHost(host) + rest).slice(0, 48)}</a>`
+  }
   if (c.type === "str" && c.name.endsWith("language") || c.name === "work_permit") return html`${s.split("\u001f").join(", ")}`
   return html`${s.length > 80 ? `${s.slice(0, 80)}…` : s}`
 }
@@ -139,7 +212,7 @@ function cellOf(t: TableDef, c: ColumnDef, row: Row): Html {
   const can = editable(c)
   return html`<td data-key="${c.name}" class="${c.metric ? "metric" : ""}${can ? " can" : ""}"${can ? html` data-act="edit" data-click data-on="keydown" data-id="${id}" data-col="${c.name}" tabindex="0"` : EMPTY}>${display(c, row[c.name])}${
     on ? html`<button type="button" class="on" data-act="cites" data-id="${id}" data-col="${c.name}" title="as of ${String(on)}; citations">${String(on)}</button>`
-      : c.prose && row[c.name] ? html`<button type="button" class="on" data-act="cites" data-id="${id}" data-col="${c.name}">cited</button>` : EMPTY
+      : c.prose && row[c.name] ? html`<button type="button" class="on cite" data-act="cites" data-id="${id}" data-col="${c.name}" title="Sources: where this text came from" aria-label="Sources for ${label(c.name)}">❝</button>` : EMPTY
   }</td>`
 }
 
@@ -203,23 +276,26 @@ function adder(t: TableDef): Html {
 
 function view(): Html {
   const t = current()
-  const cols = shown(t)
+  const cols = drawn(t)
+  const g = groups(t)
+  const pick = model.address.q.get("cols") ?? g[0]
   const sort = model.address.q.get("sort") ?? ""
   const search = SEARCH[t.name as Shown]
-  const got = rows(t, v().limit)
+  const got = rows(t, cols, v().limit)
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
       <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
       ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
       <span class="muted">${got.rows.length}${got.more ? "+" : ""} rows</span>
     </div>
+    ${g.length < 2 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${[...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}</div>`}
     ${adder(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
-        <thead><tr><th scope="col" class="id">#</th>${cols.map((c) => {
+        <thead><tr><th scope="col" class="id">#</th>${cols.map((c, n) => {
           const dir = sort === c.name ? "asc" : sort === `-${c.name}` ? "desc" : ""
-          return html`<th scope="col" data-key="${c.name}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
-            ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}">${c.name}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span class="muted">${c.name}</span>`}</th>`
+          return html`<th scope="col" data-key="${c.name}"${n === 0 && search ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
+            ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
         })}</tr></thead>
         <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
       </table>
@@ -236,6 +312,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   const id = Number(el.dataset.id ?? el.closest<HTMLElement>("tr")?.dataset.key?.slice(1))
   const col = el.dataset.col ?? ""
   switch (name) {
+    case "cols":
+      return query("cols", el.dataset.v ?? "")
     case "sort": {
       const s = model.address.q.get("sort") ?? ""
       return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
@@ -301,6 +379,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
 }
 
 let shownTable = ""
+let rescroll = false
 
 const world: View = {
   title: "World",
@@ -310,10 +389,16 @@ const world: View = {
     // A new table, sort or search shows its first page with no editor; a new table closes its panels too.
     const fresh = model.address.sub !== shownTable
     shownTable = model.address.sub
+    rescroll = true
     if (fresh) patch({ limit: PAGE, edit: "", cites: null, text: null })
     else if (v().limit !== PAGE || v().edit !== "") patch({ limit: PAGE, edit: "" })
   },
   act,
+  after(root) {
+    // A new table, sort or search starts at the grid's left edge, not where the last one was scrolled.
+    if (rescroll) root.querySelector(".grid-wrap")?.scrollTo({ left: 0 })
+    rescroll = false
+  },
   key(ev) {
     if (ev.key === "Escape" && (v().edit !== "" || v().cites || v().text)) {
       patch({ edit: "", cites: null, text: null })

@@ -41,6 +41,8 @@
 #                                    a write needs `as_of` and makes a citation
 #   prose <name> [flag]...           text ?; a write needs `source` and
 #                                    `expect_rev` and makes a citation
+#   group <words>                    the columns after it fall under it (World's
+#                                    column groups); presentation only, in no hash
 #   command <name> [<col> | <name>:<type>[?]]... [human_only]
 #                                    params are table columns or typed free params
 #
@@ -467,6 +469,7 @@ table places world resident
   # The world lens and agents look places up by name and filter by region.
   index name
   index region population
+  group identity
   col kind enum place_kind !
   col country_id ref places ?
   col iso2 str ?
@@ -479,7 +482,7 @@ table places world resident
   col lon f64 ?
   col timezone str ?
   col currency str ?
-  # identity and demography
+  group demography
   metric population u32
   metric area_km2 f64
   metric density_per_km2 f64
@@ -487,7 +490,7 @@ table places world resident
   metric urban_share f64
   metric foreign_born_share f64
   metric english_proficiency f64
-  # economy
+  group economy
   metric gdp_usd f64
   metric gdp_per_capita_usd f64
   metric gdp_ppp_usd f64
@@ -499,7 +502,7 @@ table places world resident
   metric cost_of_living_index f64
   metric rent_index f64
   metric income_tax_top f64
-  # liveability
+  group liveability
   metric qol_index f64
   metric hdi f64
   metric safety_index f64
@@ -507,7 +510,7 @@ table places world resident
   metric pollution_index f64
   metric climate_index f64
   metric internet_mbps f64
-  # energy
+  group energy
   metric energy_consumption_twh f64
   metric energy_production_twh f64
   metric energy_consumption_per_capita_kwh f64
@@ -515,18 +518,21 @@ table places world resident
   metric renewable_share f64
   metric electricity_usd_kwh f64
   metric co2_per_capita_t f64
-  # career
+  group career
   metric swe_median_usd f64
   metric tech_jobs u32
   metric mobility f64
+  group fit
   # U+001F-joined ISO 639-1 codes spoken.
   col language str ?
   metric tech f64
   metric ease f64
   # U+001F-joined iso2 of citizenships that need no work permit here.
   col work_permit str ?
+  group atlas
   col atlas_position u32 ?
   col atlas_labeled bool ?
+  group prose
   prose liveability
   prose notes
 
@@ -538,6 +544,7 @@ table corporations world resident
   natural domain
   cap 50000
   index name
+  group identity
   col domain str !
   col name str !
   col legal_name str ?
@@ -550,38 +557,39 @@ table corporations world resident
   col industry str ?
   col sector str ?
   col linkedin_url str ?
-  # size
+  group size
   metric headcount u32
   metric engineers u32
   metric headcount_growth f64
-  # private economics
+  group private economics
   metric valuation_usd f64
   metric total_raised_usd f64
   col last_round str ?
   col last_round_on day ?
-  # public economics
+  group public economics
   metric market_cap_usd f64
   metric revenue_usd f64
   metric revenue_growth f64
   metric profit_margin f64
   metric pe_ratio f64
-  # comp and reputation
+  group comp and reputation
   metric comp_median_usd f64
   metric comp_swe_median_usd f64
   metric rating f64
   metric rating_count u32
   metric wlb_rating f64
-  # hiring
+  group hiring
   col careers_url str ?
   col ats str ?
   col ats_tenant str ?
   col remote_policy enum remote_policy ?
-  # desk
+  group desk
   col score_100 u8 ?
   col freshness enum freshness ?
   col freshness_on day ?
   col eng_urls u32 ?
   col note text ?
+  group prose
   prose about
   prose culture
 

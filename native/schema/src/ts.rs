@@ -95,7 +95,7 @@ fn ts_type(s: &Schema, c: &Column) -> String {
 
 fn column_json(c: &Column) -> String {
     format!(
-        "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"flags\":{},\"required\":{},\"private\":{},\"serverOnly\":{},\"humanOnly\":{},\"readonly\":{},\"unique\":{},\"natural\":{},\"metric\":{},\"metricOf\":{},\"prose\":{},\"implied\":{},\"ref\":{},\"enum\":{},\"default\":{}}}",
+        "{{\"name\":{},\"id\":{},\"type\":{},\"typeCode\":{},\"wire\":{},\"flags\":{},\"required\":{},\"private\":{},\"serverOnly\":{},\"humanOnly\":{},\"readonly\":{},\"unique\":{},\"natural\":{},\"metric\":{},\"metricOf\":{},\"prose\":{},\"implied\":{},\"ref\":{},\"enum\":{},\"default\":{},\"group\":{}}}",
         json_str(&c.name),
         c.id,
         json_str(c.ty.name()),
@@ -116,6 +116,7 @@ fn column_json(c: &Column) -> String {
         opt_str(if c.ty == Type::Ref { c.target.as_deref() } else { None }),
         opt_str(if c.ty == Type::Enum { c.target.as_deref() } else { None }),
         opt_str(c.default.as_deref()),
+        opt_str(c.group.as_deref()),
     )
 }
 
@@ -182,7 +183,7 @@ pub fn emit(s: &Schema) -> String {
     w("  name: string; id: number; type: keyof typeof TYPE_CODE; typeCode: number; wire: number; flags: number;");
     w("  required: boolean; private: boolean; serverOnly: boolean; humanOnly: boolean;");
     w("  readonly: boolean; unique: boolean; natural: boolean; metric: boolean; metricOf: string | null;");
-    w("  prose: boolean; implied: boolean; ref: string | null; enum: string | null; default: string | null;");
+    w("  prose: boolean; implied: boolean; ref: string | null; enum: string | null; default: string | null; group: string | null;");
     w("}");
     w("export interface KeyDef { cols: string[]; global: boolean; where: string | null; }");
     w("export interface TableDef {");

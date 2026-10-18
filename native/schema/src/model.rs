@@ -230,6 +230,8 @@ pub struct Column {
     pub metric_of: Option<String>,
     pub prose: bool,
     pub implied: bool,
+    /// The `group` line it falls under (World's column groups): presentation only, in no hash.
+    pub group: Option<String>,
 }
 
 impl Column {
@@ -253,6 +255,7 @@ impl Column {
             metric_of: None,
             prose: false,
             implied: false,
+            group: None,
         }
     }
 
@@ -515,6 +518,8 @@ struct RawTable {
     source_where: Option<String>,
     source_term: Option<Where>,
     commands: Vec<RawCommand>,
+    /// The last `group` line: the columns declared after it fall under it.
+    group: Option<String>,
     line: usize,
 }
 
@@ -633,7 +638,9 @@ fn param(token: &str, line: usize) -> Result<RawParam, Error> {
 }
 
 fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: usize) -> Result<(), Error> {
+    let before = t.cols.len();
     match tokens {
+        ["group", words @ ..] if !words.is_empty() => t.group = Some(words.join(" ")),
         ["pick", cols @ ..] => {
             for c in cols {
                 name(c, line)?;
@@ -739,6 +746,9 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
         }
         _ => return fail(line, format!("unreadable: {}", tokens.join(" "))),
     }
+    for c in &mut t.cols[before..] {
+        c.group.clone_from(&t.group);
+    }
     Ok(())
 }
 
@@ -827,6 +837,7 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                     source_where: None,
                     source_term: None,
                     commands: vec![],
+                    group: None,
                     line,
                 });
             }
@@ -851,13 +862,14 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 source_where: where_.clone(),
                 source_term,
                 commands: vec![],
+                group: None,
                 line,
             })
             }
             [kind, ..]
                 if matches!(
                     *kind,
-                    "col" | "metric" | "prose" | "natural" | "unique" | "index" | "cap" | "command" | "pick"
+                    "col" | "metric" | "prose" | "group" | "natural" | "unique" | "index" | "cap" | "command" | "pick"
                 ) =>
             {
                 let Some(t) = tables.last_mut() else {
