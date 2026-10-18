@@ -203,7 +203,9 @@ function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, 
   const value = b instanceof HTMLTextAreaElement ? b.value : b.getAttribute("value") ?? ""
   if (a instanceof HTMLSelectElement) {
     children(a, b)
-    const chosen = b.querySelector("option[selected]")?.getAttribute("value")
+    // An option's value is its text when it has no value attribute.
+    // With no option marked selected, a fresh page shows the first: so does a redraw.
+    const chosen = (b.querySelector("option[selected]") ?? b.querySelector("option"))?.getAttribute("value") ?? (b.querySelector("option[selected]") ?? b.querySelector("option"))?.textContent ?? undefined
     if (chosen !== undefined && chosen !== null && a !== focused) a.value = chosen
     return
   }

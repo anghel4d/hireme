@@ -30,7 +30,9 @@ function refusal(r: Reply & { ok: false }): Refused {
   // Sequencer and world refusals say {code, message, data}; account.* says {error}.
   const e = r.error as { code?: string; error?: string; message?: string; data?: unknown } | null
   const code = e?.code ?? e?.error ?? "internal"
-  return new Refused(code, e?.message ?? code, e?.data ?? null)
+  // The node's message is often the code again; the data says what decided it.
+  const message = e?.message && e.message !== code ? e.message : refusalText(code, e?.data ?? null)
+  return new Refused(code, message, e?.data ?? null)
 }
 
 /** One RPC: its result, or a `Refused`. A dropped carrier rejects with a plain Error. */
@@ -113,7 +115,9 @@ export function load(hw: Boot): void {
     x.set_today(Math.floor(Date.now() / DAY_MS))
     // The snapshot goes in before any frame: frames wait in `early` until `k` is set, so a
     // BOOT that beat a slow snapshot read is never replaced by the older snapshot.
-    const snap = await hw.snap.catch(() => undefined)
+    // A BOOT already queued replaces every table anyway: go live now rather than wait on the read.
+    const booted = early.some((f) => header(f).kind === KIND.BOOT)
+    const snap = booted ? undefined : await hw.snap.catch(() => undefined)
     k = x
     if (snap) {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
@@ -327,10 +331,24 @@ function saveSoon(): void {
 
 let savedRev = -1n
 
+/**
+ * The session ended for good (signed out, revoked, suspended): the desk's
+ * snapshot leaves this browser's storage with it, and nothing more is saved.
+ */
+export function forget(): void {
+  clearTimeout(saving)
+  savedRev = -2n
+  try {
+    indexedDB.deleteDatabase("hireme")
+  } catch {
+    // Storage is blocked: there is nothing stored to delete.
+  }
+}
+
 function save(): void {
   const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
   // A TICK moves no row: the snapshot is written only when the rows' rev has.
-  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0 || rowsRev === savedRev || rowsRev === 0n) return
+  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0 || rowsRev === savedRev || rowsRev === 0n || savedRev === -2n) return
   const len = k.snapshot()
   if (len <= 0) return
   const bytes = result(len).slice()
@@ -357,7 +375,6 @@ function save(): void {
 
 export type Verdict = { ok: true; id: number; rev: bigint } | { ok: false; code: number; data: unknown }
 
-/** Ops sent and not yet answered, with their bytes for a resend after a reconnect. */
 /** Ops sent and not yet answered, with their bytes and how often a new session has resent them. */
 const pending = new Map<bigint, { done: (v: Verdict) => void; bytes: Bytes; resent: number }>()
 /** A write resent into this many fresh sessions without an answer is one the server cannot read. */
@@ -375,13 +392,13 @@ function settle(id: bigint, v: Verdict): void {
   done.done(v)
 }
 
-/** Sends ops in one OPS frame (at most OPS_MAX); each resolves with its own verdict. */
 /** What send() would refuse, checked before a prediction is applied. */
 function sendable(op: Op): void {
   if (!wire) throw new Error("not connected")
   if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
 }
 
+/** Sends ops in OPS frames (at most OPS_MAX each, under the frame limit); each resolves with its own verdict. */
 export function send(ops: readonly Op[]): Promise<Verdict>[] {
   if (!wire) throw new Error("not connected")
   if (ops.length === 0 || ops.length > OPS_MAX) throw new Error(`1..${OPS_MAX} ops per frame`)
@@ -422,7 +439,7 @@ export function resend(): void {
   for (const [id, p] of pending) {
     if (++p.resent <= RESENDS) continue
     if (k) ingest(nackFrame(wire.hash, id, REFUSAL.indexOf("internal"), "the server could not read this write"))
-    settle(id, { ok: false, code: REFUSAL.indexOf("internal"), data: { message: "the server could not read this write; it was not saved" } })
+    settle(id, { ok: false, code: REFUSAL.indexOf("internal"), data: { message: "the server never answered this write; check whether it landed before writing it again" } })
     moved()
   }
   if (pending.size === 0) return

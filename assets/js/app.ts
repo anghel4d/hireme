@@ -11,6 +11,7 @@ import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
+import { SCHEMA_REV } from "./gen/schema.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
 import atlas from "./lenses/atlas.ts"
@@ -64,6 +65,10 @@ function shell(): Html {
       <nav aria-label="Lenses">${NAV.map((n) => html`<a href="/${n.lens}" data-nav data-key="${n.lens}"
         class="tab${n.lens === lens ? " on" : ""}"${n.lens === lens ? html` aria-current="page"` : EMPTY} title="${n.label} (${n.key})">${n.label}</a>`)}</nav>
       ${link()}
+      <form method="post" action="/sign-out" data-submit="sign-out" class="sign-out">
+        <input type="hidden" name="_csrf_token" value="${document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""}">
+        <button class="ghost">Sign out</button>
+      </form>
     </header>
     <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? v.view() : html`<p class="empty">Loading…</p>`}</main>
     <aside class="notices" aria-live="polite">${model.notices.map((n) => html`<div class="notice notice-${n.tone}" data-key="n${n.id}">
@@ -115,9 +120,17 @@ function actOn(ev: Event): void {
   if (!name) return
   // A click acts on buttons and links; input/change/keydown act on fields that ask for them.
   if (ev.type === "click" && !(el instanceof HTMLButtonElement || el instanceof HTMLAnchorElement || el.dataset.click !== undefined)) return
+  // A link inside a clickable cell is followed, not taken as the cell's click.
+  const inner = target.closest("a[href]")
+  if (ev.type === "click" && inner && inner !== el && el.contains(inner)) return
   if (ev.type !== "click" && ev.type !== "submit" && el.dataset.on !== ev.type) return
   if (ev.type === "submit" || el instanceof HTMLAnchorElement) ev.preventDefault()
   if (name === "dismiss") return dismiss(Number(el.dataset.id))
+  // Signing out takes the desk's snapshot out of this browser before the form goes.
+  if (name === "sign-out") {
+    kernel.forget()
+    return (el as HTMLFormElement).submit()
+  }
   VIEWS[model.address.lens]?.act?.(name, el, ev)
 }
 
@@ -163,6 +176,7 @@ function frame(f: Bytes, h: Header): void {
     case KIND.BYE: {
       const b = bye(f)
       if (b.reason === "revoked" || b.reason === "suspended") {
+        kernel.forget()
         wire.end()
         set({ link: "ended" })
         notice("error", b.reason === "revoked" ? "This session was revoked. Sign in again." : "This account is suspended.")
@@ -184,9 +198,16 @@ const wire = new Wire({
   open: (carrier) => set({ carrier, link: "connecting" }),
   lost: (why, retry) => {
     set({ link: retry === 0 ? "ended" : "lost" })
-    if (retry === 0 && why === "signed out") location.assign("/sign-in")
+    if (retry === 0 && why === "signed out") {
+      kernel.forget()
+      location.assign("/sign-in")
+    }
   },
-  hello: () => ({ snapshotRev: kernel.snapshotRev(), schemaRev: 0n, label: navigator.userAgent.slice(0, 120) }),
+  // The node resumes from a snapshot rev only when the schema it was taken under is its own.
+  hello: () => {
+    const rev = kernel.snapshotRev()
+    return { snapshotRev: rev, schemaRev: rev > 0n ? BigInt(SCHEMA_REV) : 0n, label: navigator.userAgent.slice(0, 120) }
+  },
 })
 kernel.attach(wire)
 
@@ -211,7 +232,8 @@ let welcomes = 0
 void (async () => {
   await hw?.ready
   wire.start(hw)
-  if (hw) kernel.load(hw)
+  // Without early.ts (the inline script blocked or stripped) the bundle compiles the kernel itself.
+  kernel.load(hw ?? { queue: [], helloSent: false, ready: Promise.resolve(), kernel: WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm")), snap: Promise.resolve(undefined) })
 })()
 
 schedule()

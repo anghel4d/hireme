@@ -84,7 +84,11 @@ async function watch(): Promise<void> {
     for (;;) {
       const since = v().overview?.cursor
       const r = await rpc<{ changed?: boolean }>("account.watch", typeof since === "number" ? { since } : {})
-      if (r.changed) await load(true)
+      if (r.changed) {
+        await load(true)
+        // An overview that keeps failing leaves the cursor where it was, and the next park would answer at once: pause.
+        if (v().error !== "") await new Promise((res) => setTimeout(res, 5000))
+      }
       if (model.address.lens !== "account") return
     }
   } catch {
@@ -467,7 +471,11 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       const key = list("keys").find((k) => num(k.id) === id)
       const rename = key && str(key.name) !== f.name ? call("account.key.rename", { id, name: f.name ?? "" }) : Promise.resolve()
       const d = draft(`k${id}`, num(key?.read_mask), num(key?.write_mask), key ? str(key.preset) || "custom" : "custom", key?.may_delete === true)
-      return void rename.then(() => call("account.key.change", { id, ...masksFrom(d) }, () => patch({ open: "", masks: null })))
+      const g = grants(d)
+      // Changing masks ends the agent's session (BYE grants) and its lease: only a real change does that.
+      const changed = !key || g.read !== num(key.read_mask) || g.write !== num(key.write_mask) || d.mayDelete !== (key.may_delete === true)
+      return void rename.then(() =>
+        changed ? call("account.key.change", { id, ...masksFrom(d) }, () => patch({ open: "", masks: null })) : patch({ open: "", masks: null }))
     }
     case "key-revoke":
       return void call("account.key.revoke", { id }, () => patch({ open: "" }))

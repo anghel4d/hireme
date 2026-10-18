@@ -37,37 +37,61 @@ const PROSE = ["notes", "battleplan", "letter_raw"] as const
  * Answers the text, null while it is on its way, or "" when there is none.
  */
 const reading = new Set<string>()
+/** Texts whose read failed: shown as such until the operator retries, never re-asked on every render. */
+const unread = new Set<string>()
+/** An event the kernel predicted but the node has not answered yet: a temp id (or none), nothing to read. */
+const unsaved = (id: number): boolean => !Number.isFinite(id) || id <= 0 || id >= 0xc000_0000
 
 function textOf(table: string, rowId: number, column: string, v_: unknown): string | null {
   if (v_ === null || v_ === undefined) return ""
   if (typeof v_ === "string") return v_
   const stub = v_ as { length?: number; sha?: string }
   if (!stub.length) return ""
+  if (unsaved(rowId)) return null
   const key = `${table}:${rowId}:${column}:${stub.sha ?? ""}`
   const have = v().texts.get(key)
   if (have !== undefined) return have
-  if (!reading.has(key)) {
+  if (!reading.has(key) && !unread.has(key)) {
     reading.add(key)
-    void readAll(table, rowId, column)
+    void readAll(table, rowId, column, stub.sha ?? "")
       .then((t) => {
         if (v().id === rowId || table !== "applications") patch({ texts: new Map(v().texts).set(key, t) })
       })
-      .catch(failed)
+      .catch(() => {
+        unread.add(key)
+        patch({})
+      })
       .finally(() => reading.delete(key))
   }
   return null
 }
 
-/** Every chunk of one deferred text (prose is small; a listing has its own paged reader). */
-async function readAll(table: string, rowId: number, column: string): Promise<string> {
-  let out = ""
-  let offset = 0
-  for (;;) {
-    const r = await rpc<{ text: string; total: number }>("text", { table, id: rowId, column, offset, length: 262_144 })
-    out += r.text
-    offset += new TextEncoder().encode(r.text).byteLength
-    if (r.text === "" || offset >= r.total) return out
+const failedText = (table: string, rowId: number, column: string, v_: unknown): boolean => {
+  const stub = v_ as { sha?: string } | null
+  return typeof v_ === "object" && v_ !== null && unread.has(`${table}:${rowId}:${column}:${stub?.sha ?? ""}`)
+}
+
+/**
+ * Every chunk of one deferred text (prose is small; a listing has its own paged reader). A read
+ * that races a write can answer the old text under the new stub, so the answer is kept only
+ * when its sha is the stub's; a few short retries cover the gap until the write commits.
+ */
+async function readAll(table: string, rowId: number, column: string, sha: string): Promise<string> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let out = ""
+    let offset = 0
+    let full = ""
+    for (;;) {
+      const r = await rpc<{ text: string; total: number; sha?: string }>("text", { table, id: rowId, column, offset, length: 262_144 })
+      out += r.text
+      full = r.sha ?? ""
+      offset += new TextEncoder().encode(r.text).byteLength
+      if (r.text === "" || offset >= r.total) break
+    }
+    if (sha === "" || full === "" || full.toLowerCase().startsWith(sha.toLowerCase())) return out
+    await new Promise((res) => setTimeout(res, 150 * (attempt + 1)))
   }
+  throw new Error("the text changed while it was being read")
 }
 
 function failed(e: unknown): void {
@@ -162,14 +186,19 @@ function listing(a: Row, appId: number): Html {
 function prose(a: Row, appId: number): Html {
   return html`${PROSE.map((f) => {
     const t = textOf("applications", appId, f, a[f])
+    const lost = t === null && failedText("applications", appId, f, a[f])
+    const moved = v().edit === f && Number(a.rev) !== v().editRev
     const title = f.replace(/_raw$/, "").replace(/_/g, " ")
-    // An edit starts from the whole text, so the form opens only once it has arrived.
-    return v().edit === f && t !== null
-      ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-rev="${str(a.rev)}" data-key="p-${f}">
-          <h2>${title}</h2><textarea name="value" rows="10" data-autofocus>${t}</textarea>
+    // An edit starts from the whole text (Edit is enabled only once it is in), and stays on that text
+    // while open: an agent's write meanwhile is announced, never swapped in under the operator's typing.
+    return v().edit === f
+      ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-key="p-${f}">
+          <h2>${title}</h2>${moved ? html`<p class="notice" role="alert">This application changed after you opened it; saving will be refused rather than overwrite the change. Copy your text, cancel, and reopen.</p>` : EMPTY}
+          <textarea name="value" rows="10" data-autofocus>${v().editText.startsWith("\n") ? `\n${v().editText}` : v().editText}</textarea>
           <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
       : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}"${flag("disabled", t === null)}>Edit</button></h2>
-          ${t === null ? html`<p class="hint">Loading…</p>` : t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
+          ${lost ? html`<p class="hint">The text could not be read. <button type="button" class="ghost" data-act="retry-text" data-field="${f}">Try again</button></p>`
+            : t === null ? html`<p class="hint">Loading…</p>` : t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
   })}`
 }
 
@@ -256,15 +285,23 @@ function act(name: string, el: HTMLElement): void {
         })
         .catch(failed)
     }
-    case "edit":
-      return patch({ edit: el.dataset.field ?? "" })
+    case "edit": {
+      const d = application(appId) as Doc | null
+      const field = el.dataset.field ?? ""
+      const t = d ? textOf("applications", appId, field, d.application[field]) : null
+      if (t === null) return
+      return patch({ edit: field, editRev: Number(d?.application.rev ?? 0), editText: t })
+    }
+    case "retry-text":
+      unread.clear()
+      return patch({})
     case "cancel":
       return patch({ edit: "" })
     case "save-prose": {
       const f = form(el)
       const field = el.dataset.field ?? ""
       // The edit was made against the row's rev when the form opened; a write since then is refused, not overwritten.
-      return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId, expectRev: Number(el.dataset.rev) })
+      return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId, expectRev: v().editRev })
         .then(() => patch({ edit: "" }))
         .catch(failed)
     }
@@ -285,6 +322,9 @@ const focus: View = {
     if (appId !== 0 && appId !== v().id) {
       const d = application(appId) as Doc | null
       if (d) void fetchAround(appId, d.application)
+    } else if (appId !== 0) {
+      // Back on the same application: what an agent changed meanwhile is read again.
+      focus.refresh?.()
     }
   },
   after() {

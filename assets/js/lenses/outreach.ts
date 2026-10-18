@@ -151,6 +151,18 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
+/** A whole message body, chunk by chunk (a long thread quote runs past one 256 KiB chunk). */
+async function readBody(id: number): Promise<string> {
+  let out = ""
+  let offset = 0
+  for (;;) {
+    const r = await rpc<{ text: string; total: number }>("text", { table: "messages", id, column: "body", offset, length: 262_144 })
+    out += r.text
+    offset += new TextEncoder().encode(r.text).byteLength
+    if (r.text === "" || offset >= r.total) return out
+  }
+}
+
 /** A contact by id: on the loaded page, or the one picked by link. */
 function contact(id: number): Row | undefined {
   return v().contacts.find((x) => Number(x.id) === id) ?? (Number(v().picked?.id) === id ? v().picked ?? undefined : undefined)
@@ -231,8 +243,8 @@ function act(name: string, el: HTMLElement): void {
     }
     case "open-body": {
       const mid = Number(el.dataset.id)
-      return void rpc<{ text: string }>("text", { table: "messages", id: mid, column: "body", length: 262_144 })
-        .then((r) => patch({ bodies: new Map(v().bodies).set(mid, r.text) }))
+      return void readBody(mid)
+        .then((t) => patch({ bodies: new Map(v().bodies).set(mid, t) }))
         .catch(failed)
     }
   }
@@ -245,6 +257,11 @@ const outreach: View = {
   view,
   enter() {
     if (v().key !== listKey()) void fetchContacts(false)
+    // Back on the same list: contacts and threads an agent wrote meanwhile are read again.
+    else if (!v().loading) {
+      void fetchContacts(false)
+      if (selected() === shownContact) void fetchMessages()
+    }
     if (selected() !== shownContact) {
       shownContact = selected()
       patch({ messages: [], bodies: new Map(), edit: "", picked: null })

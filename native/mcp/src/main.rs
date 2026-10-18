@@ -56,6 +56,16 @@ struct One {
     bytes: Vec<u8>,
 }
 
+/// Keyed by the request id as JSON text.
+#[derive(Default)]
+struct Reqs {
+    /// Requests being answered; a cancel marks only these, so a late cancel cannot swallow a reused id.
+    inflight: HashSet<String>,
+    cancelled: HashSet<String>,
+    /// Open subscriptions/listen streams: the request id, and whether it wants tool list changes.
+    listens: HashMap<String, (Json, bool)>,
+}
+
 /// A resource a client watches: its URI's row, and (for server-side tables) the rev last seen.
 struct Watch {
     table: u16,
@@ -82,14 +92,16 @@ struct App {
     url: String,
     watches: Mutex<HashMap<String, Watch>>,
     /// Open subscriptions/listen streams: request id (as JSON text) → wants tool list changes.
-    listens: Mutex<HashMap<String, (Json, bool)>>,
-    /// Requests being answered, by id; a cancel marks only these, so a late cancel cannot swallow a reused id.
-    inflight: Mutex<HashSet<String>>,
-    cancelled: Mutex<HashSet<String>>,
+    /// Requests in flight, cancels pending against them, and open listen streams, under one lock:
+    /// every cancel-or-finish decision is one critical section, so none can interleave.
+    reqs: Mutex<Reqs>,
     /// A tools/list was answered before the first catalog: its arrival must say the list changed.
     listed_early: std::sync::atomic::AtomicBool,
     /// This session's initial train (its BOOT) is in the kernel, so a local verdict means something.
     trained: std::sync::atomic::AtomicBool,
+    /// Watched server rows are being re-read, and whether another advance came since the last pass.
+    rechecking: std::sync::atomic::AtomicBool,
+    recheck_again: std::sync::atomic::AtomicBool,
 }
 
 /// The node's /wire URL. A plain-text scheme carries the key unencrypted, so it is refused off loopback.
@@ -175,11 +187,11 @@ async fn main() {
         rev: AtomicU64::new(0),
         url,
         watches: Mutex::new(HashMap::new()),
-        listens: Mutex::new(HashMap::new()),
-        inflight: Mutex::new(HashSet::new()),
-        cancelled: Mutex::new(HashSet::new()),
+        reqs: Mutex::new(Reqs::default()),
         listed_early: std::sync::atomic::AtomicBool::new(false),
         trained: std::sync::atomic::AtomicBool::new(false),
+        rechecking: std::sync::atomic::AtomicBool::new(false),
+        recheck_again: std::sync::atomic::AtomicBool::new(false),
     });
     tokio::spawn(follow(app.clone(), events));
     tokio::spawn(poll(app.clone()));
@@ -203,7 +215,7 @@ async fn main() {
             continue;
         }
         if let (Some(id), Some(_)) = (msg.get("id"), msg.get("method")) {
-            app.inflight.lock().await.insert(id.to_string());
+            app.reqs.lock().await.inflight.insert(id.to_string());
         }
         let app = app.clone();
         tokio::spawn(async move {
@@ -212,7 +224,7 @@ async fn main() {
             let inner = app.clone();
             if tokio::spawn(async move { inner.message(msg).await }).await.is_err() {
                 if let Some(id) = id {
-                    app.inflight.lock().await.remove(&id.to_string());
+                    app.reqs.lock().await.inflight.remove(&id.to_string());
                     app.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"internal error"}}));
                 }
             }
@@ -257,21 +269,34 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 let mut applied = true;
                 if let Ok(mut k) = app.kernel.lock() {
                     if k.ingest(&frame).is_err() {
-                        eprintln!("hireme-mcp: a row frame did not apply; local judging is off until the next session boots");
                         *k = Kernel::new();
                         applied = false;
                     }
                 }
-                let end = wire::Header::peek(&frame).is_ok_and(|h| h.flags & wire::END != 0);
                 if !applied {
+                    // The kernel no longer matches the node: off with judging, and a fresh session boots it whole.
+                    eprintln!("hireme-mcp: a row frame did not apply; restarting the session for a whole BOOT");
                     app.trained.store(false, Ordering::Relaxed);
-                } else if end {
+                    app.carrier.restart();
+                    continue;
+                }
+                // Only a BOOT's END is the train: a later PATCH or TICK flagged END says nothing about the base rows.
+                if wire::Header::peek(&frame).is_ok_and(|h| h.kind == wire::BOOT && h.flags & wire::END != 0) {
                     app.trained.store(true, Ordering::Relaxed);
                 }
-                // Re-reading watched server rows takes RPCs: off this loop, so frames keep flowing into the kernel.
+                // Re-reading watched server rows takes RPCs: off this loop, so frames keep flowing into the
+                // kernel, and coalesced, so a burst of PATCHes is one pass (or two), not one per PATCH.
                 if app.rows(&frame).await {
-                    let a = app.clone();
-                    tokio::spawn(async move { a.recheck().await });
+                    app.recheck_again.store(true, Ordering::Relaxed);
+                    if !app.rechecking.swap(true, Ordering::Relaxed) {
+                        let a = app.clone();
+                        tokio::spawn(async move {
+                            while a.recheck_again.swap(false, Ordering::Relaxed) {
+                                a.recheck().await;
+                            }
+                            a.rechecking.store(false, Ordering::Relaxed);
+                        });
+                    }
                 }
             }
             Event::Ended { reason, message, again } => {
@@ -289,7 +314,7 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                     app.ready.notify_waiters();
                     app.tools_changed().await;
                     // The server ended every stream: each listen gets its graceful closing answer.
-                    for (_, (id, _)) in app.listens.lock().await.drain() {
+                    for (_, (id, _)) in app.reqs.lock().await.listens.drain() {
                         app.send(json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","_meta":{META_SUB: id}}}));
                     }
                     app.watches.lock().await.clear();
@@ -427,15 +452,13 @@ impl App {
                 self.unsubscribe(params.get("uri").and_then(Json::as_str).unwrap_or(""), &None).await;
                 Ok(json!({}))
             }
-            "subscriptions/listen" => {
-                self.listen(id, &params).await;
-                self.inflight.lock().await.remove(&key);
-                return;
-            }
+            "subscriptions/listen" => return self.listen(id, &params).await,
             _ => Err(json!({"code":-32601,"message":format!("unknown method {method}")})),
         };
-        self.inflight.lock().await.remove(&key);
-        if self.cancelled.lock().await.remove(&key) {
+        // Finished and not cancelled is decided, and answered, in one critical section.
+        let mut reqs = self.reqs.lock().await;
+        reqs.inflight.remove(&key);
+        if reqs.cancelled.remove(&key) {
             return;
         }
         match answer {
@@ -448,15 +471,19 @@ impl App {
         if method == "notifications/cancelled" {
             let Some(rid) = params.get("requestId") else { return };
             let key = rid.to_string();
-            if self.listens.lock().await.remove(&key).is_some() {
-                let sub = Some(key.clone());
-                let mut watches = self.watches.lock().await;
-                for w in watches.values_mut() {
-                    w.subs.remove(&sub);
+            let open = {
+                let mut reqs = self.reqs.lock().await;
+                if reqs.listens.remove(&key).is_some() {
+                    true
+                } else {
+                    if reqs.inflight.contains(&key) {
+                        reqs.cancelled.insert(key.clone());
+                    }
+                    false
                 }
-                watches.retain(|_, w| !w.subs.is_empty());
-            } else if self.inflight.lock().await.contains(&key) {
-                self.cancelled.lock().await.insert(key);
+            };
+            if open {
+                self.drop_subs(&key).await;
             }
         }
     }
@@ -487,8 +514,7 @@ impl App {
     }
 
     async fn tools_changed(&self) {
-        for (rid, (id, tools)) in self.listens.lock().await.iter() {
-            let _ = rid;
+        for (id, tools) in self.reqs.lock().await.listens.values() {
             if *tools {
                 self.send(json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{META_SUB: id}}}));
             }
@@ -703,6 +729,7 @@ impl App {
     }
 
     async fn put(&self, cat: &Catalog, args: &Json) -> Json {
+        let m = self.masks().await;
         let one = [args.clone()];
         let puts: &[Json] = match args.get("puts").and_then(Json::as_array) {
             Some(list) => list,
@@ -721,7 +748,7 @@ impl App {
                     ops.push(One {
                         op_id,
                         label,
-                        resident: t.is_some_and(|t| t.residency == "resident"),
+                        resident: t.is_some_and(|t| local(t, m)),
                         claims: creates && t.is_some_and(|t| t.name == "applications"),
                         bytes: w.finish()[8..].to_vec(),
                     });
@@ -764,7 +791,7 @@ impl App {
             op.done();
         }
         let label = format!("drop {} {}", t.name, keyed.map(|k| Json::Object(k).to_string()).unwrap_or_else(|| target.to_string()));
-        let resident = t.residency == "resident";
+        let resident = local(t, self.masks().await);
         self.settle(cat, vec![One { op_id, label, resident, claims: false, bytes: w.finish()[8..].to_vec() }]).await
     }
 
@@ -807,7 +834,8 @@ impl App {
             }
             op.done();
         }
-        let resident = cat.table(&c.table).is_some_and(|t| t.residency == "resident");
+        let m = self.masks().await;
+        let resident = cat.table(&c.table).is_some_and(|t| local(t, m));
         let label = format!("{} {} {target}", c.name, c.table);
         self.settle(cat, vec![One { op_id, label, resident, claims: false, bytes: w.finish()[8..].to_vec() }]).await
     }
@@ -857,7 +885,7 @@ impl App {
                     let done = verdicts.len();
                     return text_result(
                         format!(
-                            "error[session]: {}\n   = note: {done} op(s) were answered before the drop; the rest may or may not have been written\n   = help: a call again is a new write: `find` or `get` first, so an insert does not land twice\n",
+                            "error[session]: {}\n   = note: {done} op(s) were answered; the rest may or may not have been written\n   = help: a call again is a new write: `find` or `get` first, so an insert does not land twice\n",
                             lost.0
                         ),
                         Some(json!({"answered": done})),
@@ -994,19 +1022,9 @@ impl App {
                     agreed.push(json!(u));
                 }
             }
-            if self.cancelled.lock().await.contains(&key) {
+            if self.reqs.lock().await.cancelled.contains(&key) {
                 break;
             }
-        }
-        let mut listens = self.listens.lock().await;
-        if self.cancelled.lock().await.remove(&key) {
-            drop(listens);
-            let mut watches = self.watches.lock().await;
-            for w in watches.values_mut() {
-                w.subs.remove(&sub);
-            }
-            watches.retain(|_, w| !w.subs.is_empty());
-            return;
         }
         let mut ack = json!({});
         if tools {
@@ -1015,13 +1033,37 @@ impl App {
         if !agreed.is_empty() {
             ack["resourceSubscriptions"] = json!(agreed);
         }
-        self.send(json!({"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{META_SUB: id},"notifications":ack}}));
-        listens.insert(key, (id.clone(), tools));
+        // The last cancel check, the acknowledgment and opening the stream are one critical section.
+        let cancelled = {
+            let mut reqs = self.reqs.lock().await;
+            reqs.inflight.remove(&key);
+            if reqs.cancelled.remove(&key) {
+                true
+            } else {
+                self.send(json!({"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{META_SUB: id},"notifications":ack}}));
+                reqs.listens.insert(key.clone(), (id.clone(), tools));
+                false
+            }
+        };
+        if cancelled {
+            self.drop_subs(&key).await;
+        }
+    }
+
+    /// A closed stream's watches go with it.
+    async fn drop_subs(&self, key: &str) {
+        let sub = Some(key.to_owned());
+        let mut watches = self.watches.lock().await;
+        for w in watches.values_mut() {
+            w.subs.remove(&sub);
+        }
+        watches.retain(|_, w| !w.subs.is_empty());
     }
 
     async fn updated(&self, uri: &str) {
         let subs = self.watches.lock().await.get(uri).map(|w| w.subs.clone()).unwrap_or_default();
-        let listens = self.listens.lock().await;
+        let reqs = self.reqs.lock().await;
+        let listens = &reqs.listens;
         for s in subs {
             match s {
                 None => self.send(json!({"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":uri}})),
@@ -1124,6 +1166,13 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether the local kernel can judge ops on this table: it holds the table only when it is resident
+/// and the key's read mask covers it (the node filters BOOT and PATCH by that mask). Otherwise the
+/// op goes to the sequencer unjudged, so a write-only key is never refused a false not_found.
+fn local(t: &tools::Table, m: Masks) -> bool {
+    t.residency == "resident" && m.reads(t)
 }
 
 /// A modern result's caching hints: its time to live and whether it is the same for every caller.

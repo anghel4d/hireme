@@ -318,7 +318,7 @@ pub fn list(cat: &Catalog, m: Masks) -> Vec<Json> {
                 "id":{"type":"integer","minimum":1},
                 "column":{"type":"string"},
                 "after":{},
-                "limit":{"type":"integer","minimum":1,"maximum":500}
+                "limit":{"type":"integer","minimum":1,"maximum":200}
             },"additionalProperties":false}),
             true,
             false,
@@ -543,10 +543,12 @@ pub fn parse_time(s: &str) -> Option<u32> {
     let days = parse_day(date)? as i64;
     let rest = rest.strip_suffix('Z').or_else(|| rest.strip_suffix("+00:00"))?;
     let hms = rest.split('.').next()?;
+    // Two digits each, no sign: "+1" or "-5" would otherwise parse as numbers.
+    let two = |p: &str| -> Option<i64> { (p.len() == 2 && p.bytes().all(|c| c.is_ascii_digit())).then(|| p.parse().ok()).flatten() };
     let mut parts = hms.split(':');
-    let h: i64 = parts.next()?.parse().ok()?;
-    let mi: i64 = parts.next()?.parse().ok()?;
-    let se: i64 = parts.next().unwrap_or("0").parse().ok()?;
+    let h = two(parts.next()?)?;
+    let mi = two(parts.next()?)?;
+    let se = parts.next().map_or(Some(0), two)?;
     if h > 23 || mi > 59 || se > 60 || parts.next().is_some() {
         return None;
     }
@@ -618,5 +620,7 @@ mod tests {
         assert_eq!(parse_time("2026-10-18T09:30:00.250+00:00"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
         assert_eq!(parse_time("2026-10-18T09:30:00+02:00"), None);
         assert_eq!(parse_day("2026-+1-18"), None);
+        assert_eq!(parse_time("2026-10-18T-1:+5:00Z"), None);
+        assert_eq!(parse_time("2026-10-18T09:30Z"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
     }
 }

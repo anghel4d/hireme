@@ -36,6 +36,9 @@ const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !
 /** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
 const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
 
+/** What find can order by: the node refuses deferred, text, json and bytes columns. */
+const sortable = (c: ColumnDef): boolean => !c.deferred && c.type !== "text" && c.type !== "json" && c.type !== "bytes"
+
 const editable = (c: ColumnDef): boolean => writable() && !c.readonly && !c.implied && c.type !== "bytes"
 
 const fetchKey = (): string => `${current().name}|${model.address.q.get("sort") ?? ""}|${model.address.q.get("q") ?? ""}`
@@ -50,7 +53,9 @@ function order(t: TableDef): [string, string] | null {
 async function reread(): Promise<void> {
   const t = current()
   const key = fetchKey()
-  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: Math.max(PAGE, Math.min(500, v().rows.length)) }
+  // One page of up to 500 (find's cap): a longer loaded list keeps its tail rather than shrinking to the first 500.
+  const have = v().rows.length
+  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: Math.min(500, Math.max(PAGE, have)) }
   const o = order(t)
   if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
@@ -58,7 +63,7 @@ async function reread(): Promise<void> {
   if (q !== "" && search) params.where = { [search]: { prefix: q } }
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    if (fetchKey() === key) patch({ rows: r.rows, next: r.next ?? null })
+    if (fetchKey() === key) patch({ rows: have > 500 ? [...r.rows, ...v().rows.slice(r.rows.length)] : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
   } catch {
     // The next advance tries again.
   }
@@ -98,8 +103,10 @@ function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
   if (c.deferred) {
     const len = typeof x === "object" && x !== null ? Number((x as { len?: number }).len ?? 0) : 0
-    return html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${len.toLocaleString()} chars</button>`
+    return html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${len.toLocaleString()} bytes</button>`
   }
+  // A plain whole-number column (a year, a count of URLs) is shown as written, not grouped like a quantity.
+  if (typeof x === "number" && !c.metric && c.type !== "f64") return html`${String(x)}`
   if (typeof x === "number") {
     if (c.type === "f64" && Math.abs(x) < 1 && x !== 0 && /share|growth|margin|inflation|unemployment|rate|tax/.test(c.name)) return html`${NUM.format(x * 100)}%`
     return html`${Math.abs(x) >= 1e6 ? BIG.format(x) : NUM.format(x)}`
@@ -128,7 +135,11 @@ function editor(t: TableDef, c: ColumnDef, row: Row): Html {
       field = html`<input type="date" name="value" value="${value}" data-autofocus>`
       break
     case "text":
-      field = html`<textarea name="value" rows="8" data-autofocus>${c.deferred ? v().text?.id === id && v().text?.column === c.name ? v().text?.body ?? "" : "" : value}</textarea>`
+      {
+        const body = c.deferred ? (v().text?.id === id && v().text?.column === c.name ? v().text?.body ?? "" : "") : value
+        // HTML drops a textarea's first newline, so a text that begins with one gets a second.
+        field = html`<textarea name="value" rows="8" data-autofocus>${body.startsWith("\n") ? `\n${body}` : body}</textarea>`
+      }
       break
     default:
       field = html`<input name="value" value="${value}" data-autofocus${flag("required", c.required)}
@@ -186,12 +197,16 @@ function adder(t: TableDef): Html {
   if (!writable()) return EMPTY
   if (v().edit !== "new") return html`<button type="button" data-act="new">Add a row</button>`
   const key = new Set(t.natural.flatMap((k) => k.cols))
+  // A table with one natural key needs it; one with several (places: iso2 or geonames_id) needs one of them, so none is forced.
+  const needed = (c: ColumnDef) => c.required || (t.natural.length === 1 && key.has(c.name))
   const cols = t.cols.filter((c) => !c.implied && !c.readonly && (c.required || key.has(c.name)) && c.metricOf === null)
   return html`<form class="stack card" data-submit="create" data-act="create" data-key="new">
     <h2>New ${t.name.replace(/s$/, "")}</h2>
     ${cols.map((c) => html`<label>${c.name}${c.type === "enum"
       ? html`<select name="${c.name}"${flag("required", c.required)}><option value=""></option>${values(c.enum).map((e) => html`<option>${e}</option>`)}</select>`
-      : html`<input name="${c.name}"${flag("required", c.required || key.has(c.name))}>`}</label>`)}
+      : c.type === "bool"
+        ? html`<select name="${c.name}"${flag("required", c.required)}><option value=""></option><option value="true">yes</option><option value="false">no</option></select>`
+        : html`<input name="${c.name}"${flag("required", needed(c))}>`}</label>`)}
     <span class="row"><button class="primary">Create</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span>
   </form>`
 }
@@ -216,7 +231,7 @@ function view(): Html {
         <thead><tr><th scope="col" class="id">#</th>${cols.map((c) => {
           const dir = sort === c.name ? "asc" : sort === `-${c.name}` ? "desc" : ""
           return html`<th scope="col" data-key="${c.name}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
-            <button type="button" class="ghost" data-act="sort" data-col="${c.name}">${c.name}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button></th>`
+            ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}">${c.name}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span class="muted">${c.name}</span>`}</th>`
         })}</tr></thead>
         <tbody>${v().rows.map((r) => html`<tr data-key="r${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
       </table>
@@ -277,11 +292,13 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "edit": {
       const c = t.cols.find((x) => x.name === col)
       if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
-      if (c.deferred && c.prose) {
+      const rev = Number(v().rows.find((r) => Number(r.id) === id)?.rev ?? 0)
+      // Any deferred cell (prose or a source's doc) opens on its whole text: a save replaces all of it.
+      if (c.deferred) {
         const tbl = t.name
-        return void readWhole(tbl, id, col).then((r) => still(tbl) && patch({ edit: `${id}:${col}`, text: { table: tbl, id, column: col, ...r } })).catch(failed)
+        return void readWhole(tbl, id, col).then((r) => still(tbl) && patch({ edit: `${id}:${col}`, editRev: rev, text: { table: tbl, id, column: col, ...r } })).catch(failed)
       }
-      return patch({ edit: `${id}:${col}` })
+      return patch({ edit: `${id}:${col}`, editRev: rev })
     }
     case "cancel":
       return patch({ edit: "" })
@@ -297,7 +314,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         id,
         ...(c.metric ? { asOf: String(data.get("as_of") ?? today()) } : {}),
         ...(source !== "" ? { source } : {}),
-        ...(c.prose ? { expectRev: Number(row.rev) } : {}),
+        // The rev the editor opened on, not the row's rev now: a re-read since must not let this save overwrite it.
+        ...(c.prose ? { expectRev: v().editRev } : {}),
       })
         .then(() => {
           patch({ edit: "", text: null })
@@ -357,6 +375,8 @@ const world: View = {
   enter() {
     if (!TABLES_SHOWN.includes(model.address.sub as Shown)) return go({ sub: "corporations" }, true)
     if (v().key !== fetchKey()) void fetchRows(false)
+    // Back on the same table: rows an agent wrote while another lens was shown are read again.
+    else if (!v().loading) void reread()
   },
   act,
   refresh() {

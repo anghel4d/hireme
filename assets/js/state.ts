@@ -71,6 +71,10 @@ export interface FocusView {
   corporation: Record<string, unknown> | null
   /** The prose field open for editing, or "". */
   edit: string
+  /** The application's rev when that editor opened: the save's expect_rev, so a write since is refused, not overwritten. */
+  editRev: number
+  /** The text that editor opened on. It stays the editor's while open, whatever an agent writes meanwhile. */
+  editText: string
   error: string
   /** Deferred text read so far, by `table:id:column:sha`: a changed text has a new sha, so a stale entry is never shown. */
   texts: Map<string, string>
@@ -101,6 +105,8 @@ export interface WorldView {
   loading: boolean
   /** The cell being edited, `id:column`, or "new" for a new row. */
   edit: string
+  /** The row's rev when that editor opened: a prose save's expect_rev, so an agent's write since is refused, not overwritten. */
+  editRev: number
   /** The citations of one cell. */
   cites: { id: number; column: string; list: Record<string, unknown>[] } | null
   /** Deferred text being read. */
@@ -163,9 +169,9 @@ export const model: Model = {
   notices: [],
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null },
-  world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
+  world: { key: "", rows: [], next: null, loading: false, edit: "", editRev: 0, cites: null, text: null, error: "" },
   deskLimit: 120,
-  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "", texts: new Map() },
+  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
   outreach: { key: "", picked: null, contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 

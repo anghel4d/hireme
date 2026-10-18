@@ -25,9 +25,10 @@ function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
-function save(set: Record<string, Input>): void {
+function save(set: Record<string, Input>, form?: HTMLFormElement): void {
   const id = settingsId()
-  void put("settings", set, id === 0 ? {} : { id }).catch(failed)
+  // The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them.
+  void put("settings", set, id === 0 ? {} : { id }).then(() => form?.reset()).catch(failed)
 }
 
 const scale = (xs: (number | null)[]): number => (xs.some((x) => x !== null && x > 1) ? 100 : 1)
@@ -89,7 +90,7 @@ const atlasLens: View = {
         return query("preset", (el as HTMLSelectElement).value)
       case "me": {
         const f = new FormData(el as HTMLFormElement)
-        return save({ citizenships: codes(String(f.get("citizenships") ?? ""), true), languages: codes(String(f.get("languages") ?? ""), false), field: String(f.get("field") ?? "") || null })
+        return save({ citizenships: codes(String(f.get("citizenships") ?? ""), true), languages: codes(String(f.get("languages") ?? ""), false), field: String(f.get("field") ?? "") || null }, el as HTMLFormElement)
       }
       case "weights": {
         const f = new FormData(el as HTMLFormElement)
