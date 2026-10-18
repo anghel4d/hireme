@@ -11,7 +11,7 @@
 
 import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
-import { DIR, board, card, scoreboard, step, value, type Filter } from "../kernel.ts"
+import { DIR, board, card, ids, scoreboard, step, value, type Filter } from "../kernel.ts"
 import { EMPTY, html, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
 
@@ -74,6 +74,7 @@ function cardShell(id: number): Html {
     <p class="role"></p>
     <p class="where muted"></p>
     <footer><span class="stage tag"></span><span class="band tag"></span><span class="heat"></span><span class="pips"></span></footer>
+    <p class="lease muted"></p>
   </article>`
 }
 
@@ -103,17 +104,34 @@ function write(el: Element | null, s: string): void {
   if (el && el.textContent !== s) el.textContent = s
 }
 
-/** Each drawn card, value by value. */
+/** Which session's lease claims each application: the node's live lease rows (`held` is the claimed ids). */
+function claims(): Map<number, string> {
+  const by = new Map<number, string>()
+  for (const l of ids("leases")) {
+    const label = String(value("leases", l, "label") ?? "")
+    for (const a of String(value("leases", l, "held") ?? "").split("\u001f")) if (a !== "") by.set(Number(a), label)
+  }
+  return by
+}
+
+/** Each drawn card, value by value. Its stage and claim are also attributes (data-stage, data-leased). */
 function after(root: HTMLElement): void {
+  const held = claims()
   for (const el of root.querySelectorAll<HTMLElement>("article.app-card")) {
     const id = Number(el.dataset.id)
     const c = card(id)
+    const stage = c?.stage ?? String(value("applications", id, "stage") ?? "")
+    if (el.dataset.stage !== stage) el.dataset.stage = stage
+    const by = held.get(id)
+    if (by === undefined) delete el.dataset.leased
+    else if (el.dataset.leased !== by) el.dataset.leased = by
+    write(el.querySelector(".lease"), by === undefined ? "" : `leased by ${by || "an agent"}`)
     write(el.querySelector(".no"), `#${text(value("applications", id, "no"))}`)
     write(el.querySelector(".score"), c ? `${c.score_100}${c.stored ? "" : "?"}` : "")
     write(el.querySelector(".company"), text(value("applications", id, "company")) || "(no company)")
     write(el.querySelector(".role"), text(value("applications", id, "role")))
     write(el.querySelector(".where"), [value("applications", id, "location"), value("applications", id, "work_mode")].filter((x) => x).map(text).join(" · "))
-    write(el.querySelector(".stage"), (c?.stage ?? text(value("applications", id, "stage"))).replace(/_/g, " "))
+    write(el.querySelector(".stage"), stage.replace(/_/g, " "))
     write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
     write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
     write(el.querySelector(".pips"), text(value("applications", id, "pips")))

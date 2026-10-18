@@ -254,7 +254,7 @@ function view(): Html {
           return html`<th scope="col" data-key="${c.name}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
             ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}">${c.name}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span class="muted">${c.name}</span>`}</th>`
         })}</tr></thead>
-        <tbody>${v().rows.map((r) => html`<tr data-key="r${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
+        <tbody>${v().rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
       </table>
     </div>
     ${v().loading ? html`<p class="empty">Loading…</p>` : v().rows.length === 0 && v().error === "" ? html`<p class="empty">No ${t.name} yet. Agents add them through the MCP; you can add one above.</p>` : EMPTY}

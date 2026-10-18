@@ -311,6 +311,9 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
   gap: 2px;
 }
 .app-card:hover { border-color: var(--muted); }
+/* Which agent's lease claims the card; empty when none does. */
+.app-card .lease { margin: 2px 0 0; font-size: 12px; }
+.app-card .lease:empty { display: none; }
 .app-card.selected { outline: 2px solid var(--focus); outline-offset: 1px; }
 .app-card header { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .app-card .score { font-weight: 700; color: var(--ink); font-size: 15px; }
