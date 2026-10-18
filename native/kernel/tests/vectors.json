@@ -3,7 +3,7 @@
   "cases": [
     {
       "name": "a move writes the stage, the rail with the jumped rungs skipped, the day and an event",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -12,7 +12,7 @@
             "stage": "gated",
             "company": "Acme",
             "role": "Engineer",
-            "stage_on": 19990,
+            "stage_on": 739518,
             "heat_override": false
           }
         ]
@@ -32,8 +32,8 @@
               "cells": {
                 "stage": "closed",
                 "pips": "DDDSSSSSSA",
-                "stage_on": 20000,
-                "closed_on": 20000,
+                "stage_on": 739528,
+                "closed_on": 739528,
                 "stage_notes": "{\"closed\":\"no longer hiring\"}"
               }
             },
@@ -55,7 +55,7 @@
     },
     {
       "name": "FIRE HOLD: open_fire is the human's command, submitted waits for it",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "batches": [
           {
@@ -71,7 +71,7 @@
             "no": 1,
             "stage": "gated",
             "company": "Acme",
-            "stage_on": 20000
+            "stage_on": 739528
           },
           {
             "id": 2,
@@ -79,7 +79,7 @@
             "stage": "fire_ready",
             "company": "Acme",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           }
         ]
       },
@@ -163,7 +163,7 @@
               "id": 2,
               "cells": {
                 "stage": "submitted",
-                "applied_on": 20000
+                "applied_on": 739528
               }
             },
             {
@@ -189,7 +189,7 @@
               "id": 2,
               "cells": {
                 "stage": "reply",
-                "replied_on": 20000
+                "replied_on": 739528
               }
             },
             {
@@ -214,7 +214,7 @@
               "id": 2,
               "cells": {
                 "stage": "closed",
-                "closed_on": 20000
+                "closed_on": 739528
               }
             },
             {
@@ -239,7 +239,7 @@
     },
     {
       "name": "FIRE HOLD holds for an application put into a batch the operator already fired: submitted only follows open_fire",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "batches": [
           {
@@ -256,7 +256,7 @@
             "stage": "discovered",
             "company": "Acme",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           },
           {
             "id": 2,
@@ -264,7 +264,7 @@
             "stage": "fire_ready",
             "company": "Bolt",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           }
         ]
       },
@@ -297,7 +297,7 @@
     },
     {
       "name": "the dates a move writes: a reopened listing that never went out loses its close; a listing reply needs a send, an outreach reply does not; standing still writes nothing",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -306,15 +306,15 @@
             "stage": "closed",
             "pips": "DDDSSSSSSA",
             "company": "Acme",
-            "stage_on": 19990,
-            "closed_on": 19990
+            "stage_on": 739518,
+            "closed_on": 739518
           },
           {
             "id": 2,
             "no": 2,
             "stage": "fire_ready",
             "company": "Bolt",
-            "stage_on": 19990
+            "stage_on": 739518
           },
           {
             "id": 3,
@@ -322,7 +322,7 @@
             "stage": "discovered",
             "company": "Cogs",
             "channel": "cold",
-            "stage_on": 19990
+            "stage_on": 739518
           }
         ]
       },
@@ -384,7 +384,7 @@
               "id": 3,
               "cells": {
                 "stage": "reply",
-                "replied_on": 20000
+                "replied_on": 739528
               }
             },
             {
@@ -398,7 +398,7 @@
     },
     {
       "name": "the heat governor defers a fourth seat at a mega company, with the decayed load and the wait",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "batches": [
           {
@@ -415,7 +415,7 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000
+            "stage_on": 739528
           },
           {
             "id": 2,
@@ -423,7 +423,7 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000
+            "stage_on": 739528
           },
           {
             "id": 3,
@@ -431,7 +431,7 @@
             "stage": "reply",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 19990
+            "stage_on": 739518
           },
           {
             "id": 4,
@@ -440,7 +440,7 @@
             "company": "google",
             "role": "Senior Software Engineer",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           }
         ]
       },
@@ -525,7 +525,7 @@
     },
     {
       "name": "a listing is read once at write time: keywords and their version",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -569,7 +569,7 @@
                 "company": "Newco",
                 "stage": "discovered",
                 "pips": "APPPPPPPPP",
-                "stage_on": 20000
+                "stage_on": 739528
               }
             }
           ]
@@ -578,7 +578,7 @@
     },
     {
       "name": "a corporation's first overlay opens its lineage; a closed window waits for the next generation",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -601,7 +601,7 @@
             "id": 7,
             "corporation_id": 41,
             "generation": 1,
-            "opened_on": 19900,
+            "opened_on": 739428,
             "rewrites_allowed": true
           }
         ]
@@ -623,7 +623,7 @@
               "cells": {
                 "corporation_id": 40,
                 "generation": 1,
-                "opened_on": 20000,
+                "opened_on": 739528,
                 "rewrites_allowed": 1
               }
             },
@@ -667,7 +667,7 @@
               "id": 7,
               "cells": {
                 "generation": 2,
-                "opened_on": 20000,
+                "opened_on": 739528,
                 "rewrites_allowed": 0
               }
             }
@@ -677,7 +677,7 @@
     },
     {
       "name": "the board ranks by score, stored or suggested, and filters by band and search",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -756,7 +756,7 @@
     },
     {
       "name": "the atlas fit: routes from citizenship and permits, ranks within kind, the weighted mean",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "settings": [
           {
@@ -854,7 +854,7 @@
     },
     {
       "name": "the gym lane: a streak that survives the morning, the week's pace against the target",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "settings": [
           {
@@ -867,35 +867,35 @@
             "id": 1,
             "platform": "leetcode",
             "slug": "a",
-            "done_on": 19999,
+            "done_on": 739527,
             "outcome": "solved"
           },
           {
             "id": 2,
             "platform": "leetcode",
             "slug": "b",
-            "done_on": 19998,
+            "done_on": 739526,
             "outcome": "attempt"
           },
           {
             "id": 3,
             "platform": "leetcode",
             "slug": "c",
-            "done_on": 19998,
+            "done_on": 739526,
             "outcome": "solved"
           },
           {
             "id": 4,
             "platform": "leetcode",
             "slug": "d",
-            "done_on": 19997,
+            "done_on": 739525,
             "outcome": "skip"
           },
           {
             "id": 5,
             "platform": "leetcode",
             "slug": "e",
-            "done_on": 19996,
+            "done_on": 739524,
             "outcome": "solved"
           }
         ],
@@ -903,7 +903,7 @@
           {
             "id": 1,
             "kind": "post",
-            "shipped_on": 20000
+            "shipped_on": 739528
           },
           {
             "id": 2,
@@ -940,7 +940,7 @@
     },
     {
       "name": "pay reads through any space, NBSP and U+202F, and thousands grouped by spaces or apostrophes: big tech anchors at 85 only on high pay",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -1021,7 +1021,7 @@
     },
     {
       "name": "with no citizenships set, a charted place is unknown, not away: an onsite seat there is never killed for location",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "atlas": [
           {
@@ -1057,7 +1057,7 @@
     },
     {
       "name": "closing an answered outreach is no new contact: the company's load keeps decaying from replied_on",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "batches": [
           {
@@ -1074,8 +1074,8 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000,
-            "applied_on": 20000
+            "stage_on": 739528,
+            "applied_on": 739528
           },
           {
             "id": 2,
@@ -1083,8 +1083,8 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000,
-            "applied_on": 20000
+            "stage_on": 739528,
+            "applied_on": 739528
           },
           {
             "id": 3,
@@ -1093,8 +1093,8 @@
             "pips": "DDSSSSSSAP",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 19940,
-            "replied_on": 19940
+            "stage_on": 739468,
+            "replied_on": 739468
           },
           {
             "id": 4,
@@ -1103,7 +1103,7 @@
             "company": "google",
             "role": "Senior Software Engineer",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           }
         ]
       },
@@ -1163,7 +1163,7 @@
     },
     {
       "name": "a reply to a submitted listing is contact: the company's load decays from replied_on, the later of the two dates, and closing it keeps that origin",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "batches": [
           {
@@ -1180,8 +1180,8 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000,
-            "applied_on": 20000
+            "stage_on": 739528,
+            "applied_on": 739528
           },
           {
             "id": 2,
@@ -1189,8 +1189,8 @@
             "stage": "submitted",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 20000,
-            "applied_on": 20000
+            "stage_on": 739528,
+            "applied_on": 739528
           },
           {
             "id": 3,
@@ -1199,9 +1199,9 @@
             "pips": "DDDDDDDDAP",
             "company": "Google",
             "role": "Software Engineer",
-            "stage_on": 19990,
-            "applied_on": 19940,
-            "replied_on": 19990
+            "stage_on": 739518,
+            "applied_on": 739468,
+            "replied_on": 739518
           },
           {
             "id": 4,
@@ -1210,7 +1210,7 @@
             "company": "google",
             "role": "Senior Software Engineer",
             "batch_id": 9,
-            "stage_on": 20000
+            "stage_on": 739528
           }
         ]
       },
@@ -1270,7 +1270,7 @@
     },
     {
       "name": "a close with no pips is read by its dates: unanswered and unsubmitted it never went out and reopens; answered, it was sent and cannot",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -1279,7 +1279,7 @@
             "stage": "closed",
             "company": "Acme",
             "role": "R",
-            "stage_on": 19990
+            "stage_on": 739518
           },
           {
             "id": 2,
@@ -1287,8 +1287,8 @@
             "stage": "closed",
             "company": "Bolt",
             "role": "R",
-            "stage_on": 19990,
-            "replied_on": 19980
+            "stage_on": 739518,
+            "replied_on": 739508
           }
         ]
       },
@@ -1330,7 +1330,7 @@
     },
     {
       "name": "the focus document shows the rail the scoreboard reads: an answered outreach with no pips never submitted",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -1339,8 +1339,8 @@
             "stage": "reply",
             "company": "Acme",
             "role": "R",
-            "stage_on": 19990,
-            "replied_on": 19990
+            "stage_on": 739518,
+            "replied_on": 739518
           }
         ]
       },
@@ -1405,7 +1405,7 @@
     },
     {
       "name": "stored pips that belong to another stage are not believed: a close whose pips say reply, with no dates, never went out and reopens",
-      "today": 20000,
+      "today": 739528,
       "rows": {
         "applications": [
           {
@@ -1415,7 +1415,7 @@
             "pips": "DDDDDDDDAP",
             "company": "Acme",
             "role": "R",
-            "stage_on": 19990
+            "stage_on": 739518
           }
         ]
       },

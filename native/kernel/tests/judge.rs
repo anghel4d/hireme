@@ -10,10 +10,10 @@ use kernel::rows::Val;
 use schema::col::applications as A;
 use schema::{col, command, enums, param, refusal, table};
 
-const TODAY: i32 = 20_000;
+const TODAY: i32 = 739_528;
 
 fn ctx() -> Ctx<'static> {
-    Ctx { today: TODAY, now: TODAY as i64 * 86_400, human: false, key_id: Some(3), held: &[] }
+    Ctx { today: TODAY, now: (TODAY - kernel::UNIX_EPOCH_DAY) as i64 * 86_400, human: false, key_id: Some(3), held: &[] }
 }
 
 struct App {

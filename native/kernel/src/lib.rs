@@ -69,8 +69,17 @@ pub(crate) mod fx {
     pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
 }
 
-/// A calendar day as days since 1970-01-01, the schema's `day`.
+/// A calendar day as days since 0000-01-01 in the proleptic Gregorian
+/// calendar, the schema's `day` (Elixir's `Date.to_gregorian_days/1`):
+/// 0 is 0000-01-01, 719528 is 1970-01-01. The kernel only ever compares
+/// and subtracts days, so it never converts one to a date.
 pub type Day = i32;
+
+/// 1970-01-01 as a [`Day`], where unix time begins.
+pub const UNIX_EPOCH_DAY: Day = 719_528;
+
+/// The last day a `day` column holds, 9999-12-31 (the schema's).
+pub const LAST_DAY: Day = schema::DAY_MAX as Day;
 
 #[cfg(test)]
 mod tests {

@@ -178,7 +178,7 @@ fn vectors() {
             } else {
                 let raw = op(step);
                 let held = [];
-                let ctx = Ctx { today, now: today as i64 * 86_400, human: step["human"].as_bool().unwrap_or(false), key_id: Some(KEY_ID), held: &held };
+                let ctx = Ctx { today, now: (today - kernel::UNIX_EPOCH_DAY) as i64 * 86_400, human: step["human"].as_bool().unwrap_or(false), key_id: Some(KEY_ID), held: &held };
                 match (k.judge(&raw, &ctx), step["refusal"].as_str()) {
                     (Ok(rows), None) => {
                         let r = holds(&expected_effects(&step["effects"]), &abi::effects_json(&rows), &at);

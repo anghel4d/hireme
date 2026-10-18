@@ -14,7 +14,8 @@
 //!   `badarg`.
 //!   `effects` are `[{table_id, row_id, [{col_id, value}]}]` in write
 //!   order, `row_id` 0 an insert; a value is an integer, float, binary or
-//!   `nil` (bool 0/1, day = days since 1970-01-01, enum = its code), and
+//!   `nil` (bool 0/1, day = days since 0000-01-01 as
+//!   `Date.to_gregorian_days/1` counts them, enum = its code), and
 //!   a ref to a row inserted by the same effects is `{:new, k}` (the
 //!   k-th insert).
 //! - `board_ids(res, stage_code | nil)` → application ids in board order
@@ -89,9 +90,6 @@ struct CtxIn {
     held: Vec<u32>,
 }
 
-/// The last day a date column holds, 9999-12-31.
-const LAST_DAY: i64 = 2_932_896;
-
 /// A ctx that is not exactly the documented map is `badarg`: a missing or
 /// out-of-range day must never judge as day 0 and persist as a date.
 fn ctx_in(t: Term) -> NifResult<CtxIn> {
@@ -101,7 +99,7 @@ fn ctx_in(t: Term) -> NifResult<CtxIn> {
         return Err(rustler::Error::BadArg);
     }
     let today: i64 = get(atoms::now_day())?.decode()?;
-    let today = i32::try_from(today).ok().filter(|d| (0..=LAST_DAY).contains(&(*d as i64))).ok_or(rustler::Error::BadArg)?;
+    let today = i32::try_from(today).ok().filter(|d| (0..=kernel::LAST_DAY).contains(d)).ok_or(rustler::Error::BadArg)?;
     Ok(CtxIn {
         human: actor == atoms::human(),
         key_id: get(atoms::key_id())?.decode()?,

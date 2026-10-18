@@ -32,7 +32,7 @@ const rand = (n) => {
 const STAGES = ["discovered", "freshness", "gated", "in_batch", "draft_ready", "fire_ready", "open_fire", "submitted", "reply", "closed"];
 const ROLES = ["Software Engineer", "Senior Software Engineer", "Rust Systems Engineer", "Research Engineer", "SRE", "Full Stack Engineer", "Data Engineer", "Staff Infrastructure Engineer"];
 const HOSTS = (c) => [`https://boards.greenhouse.io/c${c}/jobs/1`, `https://jobs.lever.co/c${c}/x`, `https://jobs.ashbyhq.com/c${c}`, `https://c${c}.wd5.myworkdayjobs.com/en-US/x`, `https://c${c}.example.com/careers`];
-const today = 20000;
+const today = 739528;
 
 const apps = [];
 for (let id = 1; id <= N; id++) {

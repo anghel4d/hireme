@@ -10,7 +10,7 @@ use schema::col::applications as A;
 use schema::table;
 
 const N: u32 = 10_000;
-const TODAY: i32 = 20_000;
+const TODAY: i32 = 739_528;
 
 fn main() {
     let hot: f64 = std::env::var("HOT").ok().and_then(|h| h.parse().ok()).unwrap_or(0.1);

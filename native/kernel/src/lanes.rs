@@ -155,6 +155,18 @@ mod tests {
         assert_eq!(gym([(t - 2, Solved)], Some(0), t).streak, 0);
     }
 
+    /// The week is the seven days ending today, never a calendar week:
+    /// on Sunday 2026-10-18 it starts Monday the 12th, whatever weekday
+    /// the day count's epoch fell on.
+    #[test]
+    fn the_week_is_the_last_seven_days() {
+        let sunday = 740_272;
+        let g = gym([(sunday, Solved), (sunday - 6, Solved), (sunday - 7, Solved)], None, sunday);
+        assert_eq!((g.week, g.streak), (2, 1));
+        let n = net([(NetKind::Post, Some(sunday - 6)), (NetKind::Post, Some(sunday - 7))], sunday);
+        assert_eq!(n.week, [0, 0, 1, 0]);
+    }
+
     #[test]
     fn net_counts() {
         let n = net([(NetKind::Post, Some(10)), (NetKind::Post, Some(3)), (NetKind::Draft, None)], 10);

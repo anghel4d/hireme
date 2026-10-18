@@ -13,7 +13,7 @@ use kernel::pipeline::{self, Stage};
 use kernel::{ats, atlas, cv, keywords, org, score, text};
 use schema::{col, enums, table};
 
-const TODAY: i32 = 20_000;
+const TODAY: i32 = 739_528;
 
 /// Pieces that have broken text code before, or could.
 const PIECES: &[&str] = &[

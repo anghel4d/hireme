@@ -31,8 +31,8 @@ defmodule Hireme.KernelTest do
     ctx = %{
       actor: :key,
       key_id: 7,
-      now_day: 20_000,
-      now_s: 20_000 * 86_400,
+      now_day: 739_528,
+      now_s: (739_528 - 719_528) * 86_400,
       session_label: "agent",
       held_ids: [1, 2],
       target: 1
@@ -56,7 +56,7 @@ defmodule Hireme.KernelTest do
     assert actor_of.(ctx) == [Codec.enum_code("actor", :agent)]
     assert actor_of.(%{ctx | actor: :human, key_id: nil}) == [Codec.enum_code("actor", :operator)]
     # The last day a date holds, 9999-12-31.
-    assert {:ok, _} = judged(k, op, %{ctx | now_day: 2_932_896})
+    assert {:ok, _} = judged(k, op, %{ctx | now_day: 3_652_424})
   end
 
   test "any other ctx is badarg", %{k: k, op: op, ctx: ctx} do
@@ -65,7 +65,7 @@ defmodule Hireme.KernelTest do
         [
           %{ctx | actor: :agent},
           %{ctx | now_day: -1},
-          %{ctx | now_day: 2_932_897},
+          %{ctx | now_day: 3_652_425},
           %{ctx | now_day: nil},
           %{ctx | key_id: -1},
           %{ctx | held_ids: [1, :a]},

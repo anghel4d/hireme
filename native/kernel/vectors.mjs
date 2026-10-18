@@ -78,7 +78,7 @@ for (const kase of file.cases) {
       else if (step.doc === "application") n = x.application(step.arg);
       err = n < 0 ? `${at}: no document` : holds(step.expect, JSON.parse(out(n)), at);
     } else {
-      const ctx = enc.encode(JSON.stringify({ today: kase.today, now: kase.today * 86400, human: step.human ?? false, key_id: KEY_ID, held: [] }));
+      const ctx = enc.encode(JSON.stringify({ today: kase.today, now: (kase.today - 719528) * 86400, human: step.human ?? false, key_id: KEY_ID, held: [] }));
       const raw = op(catalog, step, OP_ID);
       const n = call(x.judge, raw, ctx);
       if (n >= 0) {

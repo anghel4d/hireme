@@ -16,7 +16,7 @@ use schema::col::applications as A;
 use schema::{command, enums, param, table};
 
 const N: u32 = 10_000;
-const TODAY: i32 = 20_000;
+const TODAY: i32 = 739_528;
 const BOUND_US: f64 = 200.0;
 
 struct Rng(u64);

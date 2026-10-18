@@ -11,7 +11,7 @@ use kernel::rows::Data;
 use schema::col::applications as A;
 use schema::{col, command, enums, param, table};
 
-const TODAY: i32 = 20_000;
+const TODAY: i32 = 739_528;
 const N: u32 = 24;
 
 struct Rng(u64);

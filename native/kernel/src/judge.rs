@@ -49,7 +49,7 @@ use crate::{cv, keywords, Day};
 /// Who is writing and when.
 #[derive(Clone, Copy, Debug)]
 pub struct Ctx<'a> {
-    /// The day the op is judged on, in days since 1970-01-01 (UTC).
+    /// The day the op is judged on (UTC), a [`Day`].
     /// Through `Kernel::judge` and `Kernel::predict` the kernel's own day
     /// replaces it (`Kernel::today`: the day pinned by `pin_today`, else
     /// the server's clock row, else the day last given to `set_today`, 0

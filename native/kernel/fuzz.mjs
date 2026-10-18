@@ -14,7 +14,7 @@ if (!wasmPath) {
   process.exit(2);
 }
 const bytes = readFileSync(wasmPath);
-const TODAY = 20000;
+const TODAY = 739528;
 const SEEDS = 12;
 const BOUND_MS = 3000;
 
