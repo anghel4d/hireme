@@ -53,7 +53,8 @@ defmodule HiremeWeb.Session do
        account_id: nil,
        session: nil,
        rev: 0,
-       parked: nil
+       parked: nil,
+       sequencer: nil
      }}
   end
 
@@ -116,6 +117,9 @@ defmodule HiremeWeb.Session do
   end
 
   def info(:drain, state), do: bye(:restart, "the node is restarting", state)
+
+  def info({:DOWN, ref, :process, _, _}, %{sequencer: ref} = state),
+    do: bye(:restart, "the account restarted; reconnect", state)
 
   def info(_msg, state), do: {:ok, state}
 
@@ -258,7 +262,7 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  defp welcome(%{rev: rev, lease: lease, frames: train}, who, session, state) do
+  defp welcome(%{rev: rev, lease: lease, frames: train, pid: sequencer}, who, session, state) do
     welcome =
       Codec.welcome(rev, %{
         account_id: who.account_id,
@@ -273,7 +277,18 @@ defmodule HiremeWeb.Session do
 
     Process.send_after(self(), {__MODULE__, :ping}, Security.ping_interval())
     Process.send_after(self(), {__MODULE__, :tick}, @tick_ms)
-    state = %{state | phase: :live, account_id: who.account_id, session: session, rev: rev}
+    # A restarted sequencer has forgotten this session; the client reconnects.
+    ref = Process.monitor(sequencer)
+
+    state = %{
+      state
+      | phase: :live,
+        account_id: who.account_id,
+        session: session,
+        rev: rev,
+        sequencer: ref
+    }
+
     {:push, [welcome | train], state}
   end
 
@@ -291,7 +306,12 @@ defmodule HiremeWeb.Session do
   end
 
   defp rpc(id, "lease.claim", params, state) do
-    answer(id, Lease.claim(state.account_id, state.session.id, params), state)
+    with :ok <- claim_shape(params),
+         :ok <- claim_grants(params, state.session.grants) do
+      answer(id, Lease.claim(state.account_id, state.session.id, params), state)
+    else
+      {:refused, refusal, data} -> {:push, [reply(id, false, error(refusal, data), state)], state}
+    end
   end
 
   defp rpc(id, "lease.release", params, state) do
@@ -325,6 +345,36 @@ defmodule HiremeWeb.Session do
 
   defp rpc(id, method, _params, state),
     do: {:push, [reply(id, false, error(:not_found, %{method: method}), state)], state}
+
+  # `{count, stage?}`, `{ids}` or `{}`, each of its type.
+  defp claim_shape(params) do
+    ok =
+      Enum.all?(params, fn
+        {"count", n} -> is_integer(n) and n >= 0
+        {"ids", ids} -> is_list(ids) and Enum.all?(ids, &(is_integer(&1) and &1 > 0))
+        {"stage", st} -> is_binary(st) and Codec.enum_code("stage", st) != nil
+        _ -> false
+      end)
+
+    if ok, do: :ok, else: {:refused, :type, %{expected: "{count, stage?} | {ids} | {}"}}
+  end
+
+  # The channel is for writing: a key with no write bit may not take it, and
+  # only one that writes the desk may claim applications.
+  defp claim_grants(params, grants) do
+    claims = params["count"] not in [nil, 0] or params["ids"] not in [nil, []]
+
+    cond do
+      grants.write_mask == 0 ->
+        {:refused, :scope, %{reason: "the lease is for writing"}}
+
+      claims and not Grants.write?(grants, Hireme.Schema.table(:applications)) ->
+        {:refused, :scope, %{table: "applications"}}
+
+      true ->
+        :ok
+    end
+  end
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
   defp answer(id, :ok, state), do: {:push, [reply(id, true, %{}, state)], state}

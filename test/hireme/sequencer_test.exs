@@ -422,4 +422,213 @@ defmodule Hireme.SequencerTest do
       {:done, ^parent} -> send(parent, {:watched, Enum.uniq(seen)})
     end
   end
+
+  describe "from the write-path review" do
+    test "a hostile op costs only itself, whatever it raises", %{account: a} do
+      t = Schema.table(:corporations)
+      domain = Enum.find(t.cols, &(&1.name == "domain"))
+      {:ok, bad, ""} = Codec.op(Codec.encode_op({41, :put, 1, t.id, 0, nil, [{domain.id, 1, 7}]}))
+      good = op(:put, :corporations, %{domain: "good.example", name: "G"})
+      assert {[%{op_id: id}], [%{refusal: :type}]} = run(a.id, [bad, good])
+      assert id == good.op_id
+    end
+
+    test "as_of is a real day, never in the future", %{account: a} do
+      {[c], []} = run(a.id, op(:put, :corporations, %{domain: "asof.example", name: "A"}))
+      t = Schema.table(:corporations)
+      hc = Enum.find(t.cols, &(&1.name == "headcount"))
+
+      huge =
+        Codec.encode_op(
+          {1, :put, 0, t.id, c.id, nil, [{hc.id, 1, 5}, {Codec.as_of_col(), 1, 4_000_000_000}]}
+        )
+
+      {:ok, huge, ""} = Codec.op(huge)
+      assert {[], [%{refusal: :type}]} = run(a.id, huge)
+
+      future =
+        op(:put, :corporations, %{headcount: 5, as_of: Date.add(Date.utc_today(), 30)},
+          target: c.id
+        )
+
+      assert {[], [%{refusal: :freshness}]} = run(a.id, future)
+      assert Repo.get!(Corporation, c.id).headcount == nil
+    end
+
+    test "an insert naming an application another session holds is leased", %{
+      account: a,
+      session: s
+    } do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Held", role: "R"}))
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+      holder = %{
+        id: 910,
+        label: "holder",
+        grants: Grants.key(key),
+        key_id: key.id,
+        session_id: nil
+      }
+
+      {:ok, _} = Sequencer.subscribe(a.id, holder, 0)
+      {:ok, %{"ids" => [_]}} = Hireme.Lease.claim(a.id, 910, %{"ids" => [app.id]})
+
+      assert {[], [%{refusal: :leased}]} =
+               run(a.id, op(:put, :events, %{application_id: app.id, kind: "note"}))
+    end
+
+    test "a delete may not reach rows outside the write mask", %{account: a} do
+      {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "reach.example", name: "R"}))
+
+      {[_], []} =
+        run(a.id, op(:put, :applications, %{company: "R", role: "R", corporation_id: corp.id}))
+
+      world_only = %{
+        label: "w",
+        grants: Grants.key(%{id: 1, read_mask: 1, write_mask: 1, may_delete: true}),
+        key_id: nil
+      }
+
+      assert {[], [%{refusal: :scope}]} =
+               run(a.id, op(:drop, :corporations, %{}, target: corp.id), world_only)
+
+      assert Repo.get(Corporation, corp.id)
+    end
+
+    test "a place taken off the chart leaves the atlas", %{account: a} do
+      {[p], []} =
+        run(
+          a.id,
+          op(:put, :places, %{kind: :country, name: "Chartland", iso2: "CL", atlas_position: 3})
+        )
+
+      {:ok, %{frames: [boot]}} =
+        Sequencer.subscribe(
+          a.id,
+          %{id: 920, label: "o", grants: Grants.operator(), key_id: nil, session_id: nil},
+          0
+        )
+
+      {:ok, :BOOT, _, _, body} = Codec.decode(boot)
+      model = ingest(%{}, :BOOT, body)
+      assert Map.has_key?(model["atlas"], p.id)
+      Sequencer.submit(a.id, [op(:put, :places, %{atlas_position: nil}, target: p.id)])
+      model = drain(model)
+      refute Map.has_key?(model["atlas"], p.id)
+    end
+
+    test "a refused op resent after the state changed is judged again; ACKs are a key's own", %{
+      account: a,
+      session: s
+    } do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+      session = %{
+        id: 930,
+        label: "agent",
+        grants: Grants.key(key),
+        key_id: key.id,
+        session_id: nil
+      }
+
+      {:ok, _} = Sequencer.subscribe(a.id, session, 0)
+      put = op(:put, :corporations, %{domain: "resend.example", name: "R"}, op_id: 77)
+      Sequencer.submit(a.id, [put])
+      assert_receive {:sequencer, :verdicts, _, [], [%{op_id: 77}]}
+      {:ok, _} = Hireme.Lease.claim(a.id, 930, %{})
+      Sequencer.submit(a.id, [put])
+      assert_receive {:sequencer, :verdicts, _, [%{op_id: 77, id: id}], []}
+      # The operator reusing op_id 77 writes its own row.
+      {[%{id: other}], []} =
+        run(a.id, op(:put, :corporations, %{domain: "other.example", name: "O"}, op_id: 77))
+
+      assert other != id
+    end
+
+    test "a key reconnecting at the current rev still gets a BOOT", %{account: a} do
+      key = %{
+        id: 940,
+        label: "k",
+        grants: Grants.key(%{id: 9, read_mask: 1, write_mask: 0, may_delete: false}),
+        key_id: 9,
+        session_id: nil
+      }
+
+      {:ok, %{rev: rev}} = Sequencer.subscribe(a.id, key, 0)
+      {:ok, %{frames: [f]}} = Sequencer.subscribe(a.id, %{key | id: 941}, rev)
+      {:ok, kind, _, _, body} = Codec.decode(f)
+      assert kind == :BOOT
+      assert {"applications", 0} in tables(body)
+    end
+
+    test "listings stored under another keywords version are re-extracted when the sequencer starts",
+         %{account: a} do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      Repo.insert_all(Hireme.Rows.Application, [
+        %{
+          account_id: a.id,
+          no: 1,
+          stage: :discovered,
+          status: :open,
+          heat_override: false,
+          rev: 1,
+          listing_raw: "Senior Rust engineer, distributed systems, Elixir.",
+          keywords_version: 0,
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+      _ = Sequencer.rev(a.id)
+      Process.sleep(300)
+      [row] = Repo.all(Hireme.Rows.Application)
+      assert row.keywords_version == Hireme.Kernel.keywords_version()
+      assert row.keywords not in [nil, ""]
+      # The kernel's realization stores the listing's hash too.
+      assert row.listing_sha ==
+               Base.encode16(:crypto.hash(:sha256, row.listing_raw), case: :lower)
+    end
+
+    test "a key's session opening and giving up the lease is audited", %{account: a, session: s} do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+      session = %{
+        id: 950,
+        label: "agent",
+        grants: Grants.key(key),
+        key_id: key.id,
+        session_id: nil
+      }
+
+      {:ok, _} = Sequencer.subscribe(a.id, session, 0)
+      {:ok, _} = Hireme.Lease.claim(a.id, 950, %{})
+      {:ok, _} = Hireme.Lease.release(a.id, 950, nil)
+
+      kinds =
+        Repo.all(
+          from r in Hireme.Rows.Audit,
+            where: r.kind in ["lease_opened", "lease_released"],
+            order_by: r.id,
+            select: r.kind
+        )
+
+      assert kinds == ["lease_opened", "lease_released"]
+    end
+
+    test "a natural_key refusal does not name the row it found", %{account: a} do
+      {[_], []} = run(a.id, op(:put, :corporations, %{domain: "nk.example", name: "N"}))
+
+      {[], [nack]} =
+        run(
+          a.id,
+          op(:put, :corporations, %{domain: "nk.example", name: "M"},
+            keyed: true,
+            create_only: true
+          )
+        )
+
+      refute JSON.decode!(nack.data)["id"]
+    end
+  end
 end

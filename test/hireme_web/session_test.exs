@@ -67,8 +67,6 @@ defmodule HiremeWeb.SessionTest do
     assert welcome.kind == :WELCOME and boot.kind == :BOOT and Bitwise.band(boot.flags, 2) == 2
     assert {"applications", 0} in tables(boot.body)
 
-    {:ok, %{"ids" => []}} = rpc_ok(state, "lease.claim", %{})
-
     {:ok, state} =
       Session.frame(ops(op(:put, :corporations, %{domain: "ro.example", name: "RO"})), state)
 
@@ -77,7 +75,11 @@ defmodule HiremeWeb.SessionTest do
 
     {_, wo} = key(s, :write_only)
     {[_, boot], state} = hello(open(), :key, wo)
-    assert tables(boot.body) |> Enum.map(&elem(&1, 0)) |> Enum.all?(&(&1 in ~w(catalog clock)))
+
+    assert Enum.all?(tables(boot.body), fn {name, rows} ->
+             name in ~w(catalog clock) or rows == 0
+           end)
+
     {:ok, %{"ids" => []}} = rpc_ok(state, "lease.claim", %{})
 
     {:ok, state} =
@@ -143,7 +145,7 @@ defmodule HiremeWeb.SessionTest do
     {_, state} = hello(open(), :key, rw)
     Keys.revoke(key)
     {[bye], {:stopped, {:bye, :revoked}, _}} = until(state, :BYE)
-    assert bye.kind == :BYE
+    assert <<0, 0::56, _::binary>> = bye.body
   end
 
   test "each tick re-checks the key: one that expired mid-connection ends the session", %{
@@ -162,6 +164,43 @@ defmodule HiremeWeb.SessionTest do
 
     assert {:stop, {:bye, :revoked}, [bye], _} = Session.info({Session, :tick}, state)
     assert decode(bye).kind == :BYE
+  end
+
+  test "malformed lease.claim params are refused type and the sequencer lives", %{
+    session: s,
+    account: a
+  } do
+    {_, rw} = key(s, :read_write)
+    {_, state} = hello(open(), :key, rw)
+    [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+
+    for params <- [
+          %{"stage" => 3},
+          %{"stage" => false},
+          %{"ids" => %{}},
+          %{"count" => -1},
+          %{"nope" => 1}
+        ] do
+      {:push, [frame], _} =
+        Session.frame(Codec.encode_rpc(1, "lease.claim", JSON.encode!(params)), state)
+
+      assert %{kind: :REPLY, body: <<1::little-32, 0, _::binary>>} = decode(frame)
+    end
+
+    assert Process.alive?(pid)
+  end
+
+  test "a session whose sequencer died is told to reconnect, with the restart reason byte", %{
+    session: s,
+    account: a
+  } do
+    {_, rw} = key(s, :read_write)
+    {_, state} = hello(open(), :key, rw)
+    [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+    Process.exit(pid, :kill)
+    {[bye], {:stopped, {:bye, :restart}, _}} = until(state, :BYE)
+    assert <<code, 0::56, _::binary>> = bye.body
+    assert code == Codec.enum_code("bye", :restart)
   end
 
   test "a PING is answered with the same nonce; a frame before HELLO ends the session" do

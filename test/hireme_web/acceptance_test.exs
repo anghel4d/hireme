@@ -168,17 +168,16 @@ defmodule HiremeWeb.AcceptanceTest do
       })
 
     {reader, _, _} = hello(port, :key, ro)
-    {:ok, _} = WireClient.rpc(reader, 1, "lease.claim", %{})
+    assert {:error, %{"code" => "scope"}} = WireClient.rpc(reader, 1, "lease.claim", %{})
 
     assert {:nack, :scope} =
              write(reader, op(:put, :corporations, %{domain: "ro.example", name: "RO"}))
 
     {writer, _, boot} = hello(port, :key, wo)
 
-    assert boot.body
-           |> tables()
-           |> Enum.map(&elem(&1, 0))
-           |> Enum.all?(&(&1 in ~w(catalog clock)))
+    assert Enum.all?(tables(boot.body), fn {name, rows} ->
+             name in ~w(catalog clock) or rows == 0
+           end)
 
     {:ok, _} = WireClient.rpc(writer, 1, "lease.claim", %{})
 

@@ -140,7 +140,14 @@ defmodule Hireme.Lease do
   or `{:refused, refusal, data}`.
   """
   def claim(%__MODULE__{} = l, id, params, ranked, all, now) do
-    s = l.sessions[id]
+    case l.sessions[id] do
+      nil -> {:refused, :lease_missing, %{}}
+      s -> claim_as(l, s, params, ranked, all, now)
+    end
+  end
+
+  defp claim_as(l, s, params, ranked, all, now) do
+    id = s.id
     s = if s.channel, do: s, else: %{s | channel: true, since: now}
     l = %{l | sessions: Map.put(l.sessions, id, s)}
 
@@ -159,8 +166,9 @@ defmodule Hireme.Lease do
         end
 
       %{"count" => n} when is_integer(n) and n >= 0 ->
-        n = min(n, @max_count)
-        free = ranked |> Stream.reject(&Map.has_key?(l.holder, &1)) |> Enum.take(n)
+        free =
+          ranked |> Stream.reject(&Map.has_key?(l.holder, &1)) |> Enum.take(min(n, @max_count))
+
         reply = %{"ids" => free}
         reply = if length(free) < n, do: Map.put(reply, "truncated", true), else: reply
         {:ok, put_claims(l, s, free), reply}
@@ -200,6 +208,16 @@ defmodule Hireme.Lease do
       }
     end
     |> Enum.sort_by(& &1.id)
+  end
+
+  @doc "Applications that no longer exist leave every claim."
+  def forget(%__MODULE__{} = l, app_ids) do
+    Enum.reduce(app_ids, l, fn app, l ->
+      case l.holder[app] do
+        nil -> l
+        sid -> l |> drop_claims(sid, [app]) |> elem(0)
+      end
+    end)
   end
 
   @doc "The account lens's view of every lease (`leases/1`)."
