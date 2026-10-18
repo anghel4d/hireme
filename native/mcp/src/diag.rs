@@ -47,18 +47,54 @@ pub fn explain(code: &str) -> Option<String> {
     })
 }
 
+/// What a refusal's `reason` (or `need`) says, when it says more than its code: (code, reason, one
+/// line, what to do). Every reason the node sends today; a reason not listed here leads the
+/// diagnostic in the node's own words, since the code's general line may contradict it.
+const REASONS: &[(&str, &str, &str, &str)] = &[
+    ("scope", "cited; provenance outlives it", "this row is cited, and provenance outlives it", "Citations name it, so no key may drop it; leave it in place. The operator's drop keeps it as a tombstone the citations still name."),
+    ("scope", "a keyed op reads the table", "a keyed op reads the table, and this key cannot read it", "A put by natural key looks the row up first, which needs the table's read mask too. Put by id, or ask the operator for a key that reads this domain."),
+    ("scope", "the delete reaches it", "the drop reaches a row this key cannot write", "Dropping this row removes or changes rows on another table (data: table), whose domain the key does not write. Ask the operator for that domain, or leave the row."),
+    ("scope", "the lease is for writing", "the lease is for writing, and this key writes nothing", "A read-only key reads without a lease: call `find` and `get` directly."),
+    ("lease_missing", "the operator revoked this session's lease; reconnect", "the operator revoked this session's lease", "A revoked lease is not claimed again in the same session: hireme-mcp opens a new one; call `lease` then."),
+    ("column", "append_only", "this table is append-only", "Its rows are only ever inserted: put without id or key to add a row; an existing row is never updated or dropped."),
+    ("column", "readonly", "this column is readonly", "The server or a command writes it; leave it out of `set`. `schema` with the table lists the writable columns."),
+    ("column", "private", "this column is the operator's private data", "No key writes it; leave it out of `set`."),
+    ("column", "required", "a required column is missing or null", "That column is required on a new row; set it to a value, not null."),
+    ("column", "implied", "this column is implied by the row it belongs to", "Leave it out; the server fills it."),
+    ("column", "a source's identity is fixed once written", "a source's identity is fixed once written", "Its url (and the host derived from it) never changes. To cite another page, put a new source; only retrieved_at and doc move."),
+    ("column", "not filterable", "this column cannot be filtered on", "Deferred text, json and bytes columns are not compared in `where`. Filter on another column, or `get` the rows and read them."),
+    ("column", "not orderable", "this column cannot order rows", "Deferred text, json, bytes and text columns do not order. Order by another column (id by default)."),
+    ("column", "not text", "this column is not text", "`text` reads text columns (a deferred one comes as {len, sha} elsewhere); `get` returns every other column whole."),
+    ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it."),
+    ("type", "an http(s) URL or a source id", "source must be an http(s) URL or a source id", "Give `source` as \"https://...\" (the server finds or makes that source) or as an existing source's id."),
+    ("type", "inside a character", "the offset falls inside a UTF-8 character", "Continue from the `next` offset the previous `text` answer gave, or from 0."),
+    ("type", "compares with null", "only eq and ne compare with null", "Use {\"eq\": null} for an empty cell and {\"ne\": null} for a filled one; lt, gt, prefix and the rest take a value."),
+    ("type", "params are a JSON object", "the call's params must be a JSON object", "Send the arguments as an object, e.g. {\"table\": \"places\"}."),
+    ("type", "a value of the wrong type", "a value of the wrong type", "Match the column's type (`schema` with the table lists it); the server never casts strings."),
+    ("type", "out of range", "the value is out of the column's range", "u8 is 0-255, u32 0-4294967295, i64 64-bit signed; a day is a real calendar day."),
+    ("type", "not UTF-8", "the text is not UTF-8", "Send text as UTF-8."),
+    ("freshness", "in the future", "as_of is in the future", "as_of is the day the figure was true: today or earlier, as 'YYYY-MM-DD'."),
+    ("cap", "text", "the account's text budget is spent", "Long text counts against the account's budget (data: cap, in bytes); a rewrite that shortens a text always lands. Shorten or drop text that no longer matters, or ask the operator."),
+    ("not_found", "a ref names no row", "a reference names no row", "A ref column (an ..._id) must name an existing row this key can see; `find` it first, or put the row it names."),
+    ("natural_key", "a unique column already holds this value", "a unique column already holds this value", "Another row holds it; `find` that row and update it, or choose another value."),
+    ("heat", "company_cap", "this company is at its heat cap", "Too many recent applications here (data: load and cap). Wait, or the operator can set heat_override with a reason."),
+    ("heat", "ats_vendor_cap", "this ATS vendor is at its heat cap", "Too many recent applications through this ATS (data: load and cap). Wait, or the operator can set heat_override with a reason."),
+    ("heat", "ats_tenant_cap", "this ATS tenant is at its heat cap", "Too many recent applications to this ATS tenant (data: load and cap). Wait, or the operator can set heat_override with a reason."),
+    ("heat", "ats_batch_cap", "this ATS is at its cap for the batch", "Too many applications through this ATS in one batch (data: load and cap). Move one to another batch, or the operator can set heat_override with a reason."),
+    ("internal", "kernel", "the kernel failed on this op", "Nothing was written. Retry once; if it repeats, tell the operator with the op_id."),
+];
+
+/// What a refusal's `need` asks for: (code, need, one line, what to do).
+const NEEDS: &[(&str, &str, &str, &str)] = &[
+    ("heat", "reason", "a heat override needs a reason", "Set heat_override_reason to why the cap is lifted, with heat_override."),
+    ("cooldown", "open_generation", "this lineage's window has passed: open a new generation", "Call `open_generation` for the lineage (data: lineage_id), then write to the new generation."),
+    ("not_found", "application_id", "this needs an application", "Give the application (its id, or `no` where the tool takes one)."),
+    ("not_found", "corporation_id", "the application has no corporation", "Set the application's corporation_id first, then retry."),
+];
+
 /// A refusal of `what` (e.g. `put corporations domain=example.com`) as a diagnostic.
 pub fn render(code: &str, what: &str, data: &Json) -> String {
-    let (line, todo) = REFUSALS
-        .iter()
-        .find(|r| r.0 == code)
-        .map(|r| (r.2, first_sentence(r.3)))
-        .unwrap_or(("refused", String::new()));
-    // natural_key also covers a keyed put whose cells name no natural key: the table declares none at
-    // all, the cells hold none of the keys it declares, or they hold a conditioned key's columns but
-    // not its condition (places: iso2 only where kind = 'country'). Other words, other advice.
-    let unkeyed = code == "natural_key" && data.get("reason").and_then(Json::as_str).is_some_and(|r| r.contains("no natural key"));
-    let (line, todo): (String, String) = if unkeyed { unkeyed_advice(data) } else { (line.to_owned(), todo) };
+    let (line, todo) = advice(code, data);
     let mut out = format!("error[{code}]: {line}\n  --> {what}\n");
     if let Some(msg) = data.get("message").and_then(Json::as_str) {
         out.push_str(&format!("   = note: {msg}\n"));
@@ -72,25 +108,69 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
                 ("natural_key", "keys" | "unmet") => keys_of(Some(v)).iter().map(key_text).collect::<Vec<_>>().join("; "),
                 _ => compact(v),
             };
+            // An empty list, map or string says nothing.
+            if shown.is_empty() || shown == "[]" || shown == "{}" {
+                continue;
+            }
             out.push_str(&format!("   = {k}: {shown}\n"));
         }
     }
-    // A refusal's data can say more precisely what to do than its code's general advice.
-    let todo = match (code, data.get("missing").and_then(Json::as_array)) {
-        ("column", Some(cols)) => format!(
-            "A new row needs its required columns: {}. Add them to `set`, or name an existing row by id or key.",
-            cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ")
-        ),
-        _ if code == "column" && data.get("reason").and_then(Json::as_str) == Some("required") => {
-            "That column is required on a new row; set it to a value, not null.".to_owned()
-        }
-        _ => todo,
-    };
     if !todo.is_empty() {
         out.push_str(&format!("   = help: {todo}\n"));
     }
     out.push_str(&format!("   = explain: hireme {{\"explain\":\"{code}\"}}\n"));
     out
+}
+
+/// The headline and the next step: the most precise thing the data says, else the code's own.
+fn advice(code: &str, data: &Json) -> (String, String) {
+    let reason = data.get("reason").and_then(Json::as_str);
+    let need = data.get("need").and_then(Json::as_str);
+    let (line, todo) = REFUSALS
+        .iter()
+        .find(|r| r.0 == code)
+        .map(|r| (r.2.to_owned(), first_sentence(r.3)))
+        .unwrap_or(("refused".to_owned(), String::new()));
+    // natural_key also covers a keyed put whose cells name no natural key: the table declares none at
+    // all, the cells hold none of the keys it declares, or they hold a conditioned key's columns but
+    // not its condition (places: iso2 only where kind = 'country'). Other words, other advice.
+    if code == "natural_key" && reason.is_some_and(|r| r.contains("no natural key")) {
+        return unkeyed_advice(data);
+    }
+    // A lookup (get, history) by columns no declared key is made of: World names the table's keys.
+    if code == "natural_key" && reason == Some("no declared key is made of exactly these columns") {
+        let keys = keys_of(data.get("keys"));
+        let list = keys.iter().map(key_text).collect::<Vec<_>>().join("; ");
+        let help = if keys.is_empty() { "This table declares no key; name the row by id.".to_owned() } else { format!("Name the row by id, or by exactly one of the table's keys: {list}.") };
+        return ("no declared key is made of exactly these columns".to_owned(), help);
+    }
+    // A column refusal that lists what a new row lacks.
+    if code == "column" {
+        if let Some(cols) = data.get("missing").and_then(Json::as_array) {
+            let cols = cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ");
+            return (line, format!("A new row needs its required columns: {cols}. Add them to `set`, or name an existing row by id or key."));
+        }
+    }
+    if let Some(r) = reason {
+        return match REASONS.iter().find(|x| x.0 == code && x.1 == r) {
+            Some(x) => (x.2.to_owned(), x.3.to_owned()),
+            // The node said why in words this table does not know: lead with them, not a guess.
+            None => (r.to_owned(), todo),
+        };
+    }
+    if let Some(n) = need {
+        if let Some(x) = NEEDS.iter().find(|x| x.0 == code && x.1 == n) {
+            return (x.2.to_owned(), x.3.to_owned());
+        }
+    }
+    (line, todo)
+}
+
+/// Every (code, reason) and (code, need) the diagnostics describe, for tests.
+#[cfg(test)]
+fn described() -> impl Iterator<Item = (&'static str, &'static str)> {
+    let special = [("natural_key", "no declared key is made of exactly these columns")];
+    REASONS.iter().map(|r| (r.0, r.1)).chain(NEEDS.iter().map(|r| (r.0, r.1))).chain(special)
 }
 
 /// A natural key as the node reports it, in either shape: a bare column list (an older node) or
@@ -151,11 +231,26 @@ fn unkeyed_advice(data: &Json) -> (String, String) {
             .map(|k| format!("{} is a key only where {}", listed(k, "cols").join(" + "), k.get("where").and_then(Json::as_str).unwrap_or("its condition holds")))
             .collect::<Vec<_>>()
             .join("; ");
-        let fix = unmet
+        // One step per set of missing columns, naming each key's condition (its values), never twice.
+        let mut steps: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+        for k in &unmet {
+            let missing = listed(k, "missing");
+            let cond = format!("{} for {}", k.get("where").and_then(Json::as_str).unwrap_or("its condition"), listed(k, "cols").join(" + "));
+            let group = if missing.is_empty() { listed(k, "reads") } else { missing.clone() };
+            let tag = if missing.is_empty() { "set" } else { "add" };
+            let key = [vec![tag.to_owned()], group].concat();
+            match steps.iter_mut().find(|s| s.0 == key) {
+                Some(s) if !s.1.contains(&cond) => s.1.push(cond),
+                Some(_) => {}
+                None => steps.push((key, vec![cond])),
+            }
+        }
+        let fix = steps
             .iter()
-            .map(|k| match listed(k, "missing") {
-                m if !m.is_empty() => format!("add {} to the cells", m.join(", ")),
-                _ => format!("set {} so that {} holds", listed(k, "reads").join(", "), k.get("where").and_then(Json::as_str).unwrap_or("its condition")),
+            .map(|(key, conds)| {
+                let cols = key[1..].join(", ");
+                let conds = conds.join("; ");
+                if key[0] == "add" { format!("add {cols} to the cells ({conds})") } else { format!("set {cols} so that the condition holds ({conds})") }
             })
             .collect::<Vec<_>>()
             .join("; or ");
@@ -230,11 +325,11 @@ mod tests {
         };
         let absent = place(serde_json::json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": ["kind"]}]}));
         assert!(absent.starts_with("error[natural_key]: places: iso2 is a key only where kind = 'country'\n"), "{absent}");
-        assert!(absent.contains("= help: Add kind to the cells, or put by id."), "{absent}");
+        assert!(absent.contains("= help: Add kind to the cells (kind = 'country' for iso2), or put by id."), "{absent}");
         assert!(absent.contains("= keys: iso2 where kind = 'country'; geonames_id where kind = 'city'"), "{absent}");
         assert!(!absent.contains("geonames_id is a key"), "{absent}");
         let wrong = place(serde_json::json!({"unmet": [{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"], "missing": []}]}));
-        assert!(wrong.contains("= help: Set kind so that kind = 'country' holds, or put by id."), "{wrong}");
+        assert!(wrong.contains("= help: Set kind so that the condition holds (kind = 'country' for iso2), or put by id."), "{wrong}");
         let bare = place(serde_json::json!({"missing": ["kind"]}));
         assert!(bare.contains("iso2 is a key only where kind = 'country'; geonames_id is a key only where kind = 'city'"), "{bare}");
         let neither = place(serde_json::json!({}));
@@ -242,5 +337,61 @@ mod tests {
         assert_eq!(natural_key(&serde_json::json!(["domain"])), Some(serde_json::json!({"cols": ["domain"], "where": null, "reads": []})));
         let taken = render("natural_key", "put t x=1", &serde_json::json!({"table": "t", "key": {"domain": "a.com"}}));
         assert!(taken.contains("a row with this natural key exists"), "{taken}");
+    }
+
+    #[test]
+    fn a_reason_the_node_sends_is_described_and_never_contradicted() {
+        // Every (code, reason) and (code, need) the node and the kernel send today (sequencer, world,
+        // provenance, session, lease, judge and the heat governor).
+        let sent = [
+            ("scope", "cited; provenance outlives it"), ("scope", "a keyed op reads the table"), ("scope", "the delete reaches it"),
+            ("scope", "the lease is for writing"), ("lease_missing", "the operator revoked this session's lease; reconnect"),
+            ("column", "append_only"), ("column", "readonly"), ("column", "private"), ("column", "required"), ("column", "implied"),
+            ("column", "a source's identity is fixed once written"), ("column", "not filterable"), ("column", "not orderable"), ("column", "not text"),
+            ("type", "an http(s) URL on a real hostname"), ("type", "an http(s) URL or a source id"), ("type", "inside a character"),
+            ("type", "compares with null"), ("type", "params are a JSON object"), ("type", "a value of the wrong type"), ("type", "out of range"),
+            ("type", "not UTF-8"), ("freshness", "in the future"), ("cap", "text"), ("not_found", "a ref names no row"),
+            ("natural_key", "a unique column already holds this value"), ("heat", "company_cap"), ("heat", "ats_vendor_cap"),
+            ("heat", "ats_tenant_cap"), ("heat", "ats_batch_cap"), ("internal", "kernel"),
+            ("natural_key", "no declared key is made of exactly these columns"),
+            ("heat", "reason"), ("cooldown", "open_generation"), ("not_found", "application_id"), ("not_found", "corporation_id"),
+        ];
+        let known: Vec<_> = described().collect();
+        for (code, r) in sent {
+            assert!(known.contains(&(code, r)), "{code} {r} is not described");
+            let field = if NEEDS.iter().any(|x| x.0 == code && x.1 == r) { "need" } else { "reason" };
+            let d = render(code, "put t", &serde_json::json!({ field: r }));
+            let general = REFUSALS.iter().find(|x| x.0 == code).unwrap().2;
+            assert!(!d.starts_with(&format!("error[{code}]: {general}\n")), "{d}");
+        }
+        let cited = render("scope", "drop sources id=3", &serde_json::json!({"table": "sources", "reason": "cited; provenance outlives it"}));
+        assert!(cited.starts_with("error[scope]: this row is cited, and provenance outlives it\n") && !cited.contains("write mask"), "{cited}");
+        let future = render("freshness", "put t", &serde_json::json!({"column": "as_of", "reason": "in the future"}));
+        assert!(future.contains("today or earlier") && !future.contains("needs as_of"), "{future}");
+        let budget = render("cap", "put t", &serde_json::json!({"table": "account", "reason": "text", "cap": 1}));
+        assert!(budget.contains("text budget") && !budget.contains("the table is full"), "{budget}");
+        // A reason this table does not know leads in the node's own words.
+        let odd = render("column", "put t", &serde_json::json!({"reason": "something new"}));
+        assert!(odd.starts_with("error[column]: something new\n"), "{odd}");
+    }
+
+    #[test]
+    fn a_lookup_by_columns_no_key_is_made_of_says_so() {
+        let keys = serde_json::json!([{"cols": ["iso2"], "where": "kind = 'country'", "reads": ["kind"]}, {"cols": ["geonames_id"], "where": "kind = 'city'", "reads": ["kind"]}]);
+        let d = render("natural_key", "get places name=Berlin", &serde_json::json!({"table": "places", "key": ["name"], "reason": "no declared key is made of exactly these columns", "keys": keys}));
+        assert!(d.starts_with("error[natural_key]: no declared key is made of exactly these columns\n"), "{d}");
+        assert!(d.contains("exactly one of the table's keys: iso2 where kind = 'country'; geonames_id where kind = 'city'."), "{d}");
+        assert!(!d.contains("exists") && !d.contains("create_only"), "{d}");
+        let taken = render("natural_key", "put corporations domain=a.com", &serde_json::json!({"table": "corporations", "key": {"domain": "a.com"}}));
+        assert!(taken.contains("a row with this natural key exists"), "{taken}");
+    }
+
+    #[test]
+    fn both_conditioned_keys_without_their_condition_ask_once_and_name_the_values() {
+        let k = |c: &str, v: &str| serde_json::json!({"cols": [c], "where": format!("kind = '{v}'"), "reads": ["kind"], "missing": ["kind"]});
+        let d = render("natural_key", "put places iso2=DE geonames_id=1", &serde_json::json!({"table": "places", "reason": "no natural key among the cells", "keys": [], "unmet": [k("iso2", "country"), k("geonames_id", "city")]}));
+        assert!(d.contains("= help: Add kind to the cells (kind = 'country' for iso2; kind = 'city' for geonames_id), or put by id."), "{d}");
+        assert_eq!(d.matches("add kind").count() + d.matches("Add kind").count(), 1, "{d}");
+        assert!(!d.contains("= keys: \n"), "{d}");
     }
 }
