@@ -515,12 +515,23 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
+/// Days from 0000-01-01 to 1970-01-01: the wire's `day` counts from 0000-01-01 (proleptic Gregorian,
+/// Elixir's `Date.to_gregorian_days/1`), the clock and `time` from 1970-01-01.
+pub const EPOCH_DAYS: i64 = 719_528;
+/// The last day the wire carries, 9999-12-31 (the schema's).
+pub const LAST_DAY: u32 = schema::DAY_MAX;
+
+/// A `'YYYY-MM-DD'` day as the wire carries it, days from 0000-01-01; None when malformed or past 9999-12-31.
 pub fn parse_day(s: &str) -> Option<u32> {
-    u32::try_from(parse_day_any(s)?).ok()
+    to_wire_day(parse_day_any(s)?)
 }
 
-/// A real calendar day as days from 1970-01-01, negative before it: whether a day is well formed,
-/// apart from whether the wire can carry it.
+/// Days from 1970-01-01 (the clock's count) as the wire's day, if it is in 0000-01-01..=9999-12-31.
+pub fn to_wire_day(unix_days: i64) -> Option<u32> {
+    u32::try_from(unix_days + EPOCH_DAYS).ok().filter(|d| *d <= LAST_DAY)
+}
+
+/// A real calendar day as days from 1970-01-01 (the clock's count), negative before it.
 pub fn parse_day_any(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if s.len() != 10 || b[4] != b'-' || b[7] != b'-' || !s.bytes().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()) {
@@ -585,11 +596,9 @@ pub fn cell(cat: &Catalog, c: &Col, v: &Json) -> Result<Cell, String> {
         "bool" => Cell::U32(v.as_bool().ok_or_else(|| want("true or false"))? as u32),
         "i64" => Cell::I64(v.as_i64().filter(|n| *n != i64::MIN).ok_or_else(|| want("a whole number"))?),
         "f64" => Cell::F64(v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| want("a number"))?),
-        // The wire counts days and seconds from 1970-01-01 in a u32: a real date outside that range is
-        // said to be out of range, not malformed.
-        "day" => Cell::U32(v.as_str().and_then(parse_day).ok_or_else(|| {
-            if v.as_str().is_some_and(|d| parse_day_any(d).is_some()) { want("a day from 1970-01-01 on") } else { want("'YYYY-MM-DD'") }
-        })?),
+        // Every four-digit year is a day the wire carries; `time` counts seconds from 1970-01-01 in a
+        // u32, so a real time outside 1970-2106 is said to be out of range, not malformed.
+        "day" => Cell::U32(v.as_str().and_then(parse_day).ok_or_else(|| want("'YYYY-MM-DD', 0000-01-01 to 9999-12-31"))?),
         "time" => Cell::U32(v.as_str().and_then(parse_time).ok_or_else(|| {
             if v.as_str().is_some_and(|t| parse_time_any(t).is_some()) { want("a time from 1970 to 2106") } else { want("ISO-8601 UTC, e.g. 2026-10-18T09:30:00Z") }
         })?),
@@ -626,9 +635,14 @@ mod tests {
             let (y, m, d) = civil_from_days(z);
             assert_eq!(days_from_civil(y, m, d), z);
         }
-        assert_eq!(parse_day("1970-01-01"), Some(0));
-        assert_eq!(parse_day("2026-10-18"), Some(20_744));
-        assert_eq!(parse_day("2024-02-29"), Some(19_782));
+        // Days from 0000-01-01, as Elixir's Date.to_gregorian_days/1 counts them.
+        assert_eq!(parse_day("0000-01-01"), Some(0));
+        assert_eq!(parse_day("1970-01-01"), Some(719_528));
+        assert_eq!(parse_day("2026-10-18"), Some(719_528 + 20_744));
+        assert_eq!(parse_day("2024-02-29"), Some(719_528 + 19_782));
+        assert_eq!(parse_day("9999-12-31"), Some(LAST_DAY));
+        assert_eq!(parse_day("10000-01-01"), None);
+        assert_eq!(to_wire_day(-719_529), None);
         for bad in ["2025-02-29", "2026-13-01", "2026-00-10", "2026-1-01", "26-10-18", "2026-04-31"] {
             assert_eq!(parse_day(bad), None, "{bad}");
         }
@@ -636,8 +650,9 @@ mod tests {
         assert_eq!(parse_time("2026-10-18T09:30:00.250+00:00"), Some(20_744 * 86_400 + 9 * 3600 + 30 * 60));
         assert_eq!(parse_time("2026-10-18T09:30:00+02:00"), None);
         assert_eq!(parse_day("2026-+1-18"), None);
-        // A real day before 1970 is well formed but past what the wire carries.
-        assert_eq!(parse_day("1897-01-01"), None);
+        // A day before 1970 is a day like any other; a time before it is out of the clock's range.
+        assert_eq!(parse_day("1897-01-01"), Some(692_866));
+        assert_eq!(parse_day("1969-12-31"), Some(719_527));
         assert!(parse_day_any("1897-01-01").is_some_and(|d| d < 0));
         assert_eq!(parse_day_any("1897-02-30"), None);
         assert_eq!(parse_time("1969-12-31T23:59:59Z"), None);

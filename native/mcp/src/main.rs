@@ -1275,10 +1275,10 @@ impl App {
     }
 }
 
-/** Days since 1970-01-01 by the system clock; the kernel prefers the server's `clock` once a TICK lands. */
+/** Today by the system clock, as the wire's day (from 0000-01-01); the kernel prefers the server's `clock` once a TICK lands. */
 fn today() -> i32 {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    (secs / 86_400) as i32
+    tools::to_wire_day((secs / 86_400) as i64).map_or(0, |d| d as i32)
 }
 
 fn now() -> i64 {

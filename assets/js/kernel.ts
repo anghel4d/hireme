@@ -8,7 +8,7 @@
 
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
-import { AS_OF, COMMANDS, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
+import { AS_OF, COMMANDS, DAY_MAX, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
 
@@ -131,7 +131,7 @@ export function load(hw: Boot): void {
     const inst = await WebAssembly.instantiate(module, {})
     const x = inst.exports as unknown as Exports
     if (x.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
-    x.set_today(Math.floor(Date.now() / DAY_MS))
+    x.set_today(todayDay())
     // The snapshot goes in before any frame: frames wait in `early` until `k` is set, so a
     // BOOT that beat a slow snapshot read is never replaced by the older snapshot.
     // A BOOT already queued replaces every table anyway: go live now rather than wait on the read.
@@ -327,7 +327,7 @@ export const atlas = (preset: string): Record<string, unknown> | null =>
 
 /** The ctx the kernel judges a browser write in: the operator, today. */
 function ctx(): Uint8Array {
-  return ENC.encode(JSON.stringify({ today: Math.floor(Date.now() / DAY_MS), now: Math.floor(Date.now() / 1000), human: true, key_id: null, held: [] }))
+  return ENC.encode(JSON.stringify({ today: todayDay(), now: Math.floor(Date.now() / 1000), human: true, key_id: null, held: [] }))
 }
 
 /** Judges an op on the local rows and applies it as pending; a refusal is the kernel's own verdict. */
@@ -509,15 +509,27 @@ export function refusalText(code: string, data: unknown): string {
   return parts.length > 0 ? parts.join(", ") : code.replace(/_/g, " ")
 }
 
+// The wire's `day` counts days from 0000-01-01 (proleptic Gregorian, Elixir's
+// Date.to_gregorian_days/1); the clock counts from 1970-01-01. Every day the
+// client reads, writes or hands the kernel goes through these.
 const DAY_MS = 86_400_000
+/** Days from 0000-01-01 to 1970-01-01. */
+const EPOCH_DAYS = 719_528
 
+/** A 'YYYY-MM-DD' day as the wire's day number, or null when malformed. */
 export function day(s: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null
   const t = Date.parse(`${s}T00:00:00Z`)
-  return Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== s ? null : t / DAY_MS
+  if (Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== s) return null
+  const d = t / DAY_MS + EPOCH_DAYS
+  return d >= 0 && d <= DAY_MAX ? d : null
 }
 
-export const dayText = (d: number): string => new Date(d * DAY_MS).toISOString().slice(0, 10)
+/** A wire day number as 'YYYY-MM-DD'. */
+export const dayText = (d: number): string => new Date((d - EPOCH_DAYS) * DAY_MS).toISOString().slice(0, 10)
+
+/** Today by this browser's clock, as the wire's day number. */
+export const todayDay = (): number => Math.floor(Date.now() / DAY_MS) + EPOCH_DAYS
 
 export const today = (): string => new Date().toISOString().slice(0, 10)
 
