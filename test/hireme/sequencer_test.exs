@@ -169,7 +169,9 @@ defmodule Hireme.SequencerTest do
       op(
         :put,
         :corporations,
-        %{headcount: n, as_of: ~D[2026-09-01], source: "https://cap.example/a"}, target: corp.id)
+        %{headcount: n, as_of: ~D[2026-09-01], source: "https://cap.example/a"},
+        target: corp.id
+      )
     end
 
     {[first], []} = run(a.id, cited.(5))
