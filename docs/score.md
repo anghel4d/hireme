@@ -35,7 +35,9 @@ the score a card ranks by.
    not even a named anchor.
 2. **Named anchors win over heuristics.** A big-tech name sits at 85 only
    with a pay figure over $200k in `comp_raw` ("$210,000", "250k",
-   "180–240k", a bare "220" read as thousands); otherwise at 80.
+   "180–240k", "250 000 €", a bare "220" or "$220" read as thousands);
+   otherwise at 80. A figure with a currency sign after it is the amount
+   itself ("250 €/h", "250$" are not $250k).
 3. **Heuristics move an unanchored seat** from a base of 48: systems,
    runtime, kernel, infrastructure, distributed or compiler work +22;
    agentic work +10; Rust, C++ or low-level +8; home or remote +5; the pay
