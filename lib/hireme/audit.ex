@@ -287,12 +287,12 @@ defmodule Hireme.Audit.Coalescer do
   ever edited.
 
   The table belongs to the application (`table/0`, made in
-  `Hireme.Application.start/2`), not to this process: a crash here loses no
-  count. Each window's group is written on its own, under a rescue, and
-  only what was written is deleted. Without the table (the node starting or
-  stopping) an event is written as itself. A write that fails or exits puts
-  back what it took; only an untrappable kill of the flushing process between
-  its take and its commit loses that one window's counts. It stops after the sessions and
+  `Hireme.Application.start/2`), not to this process, so a crash here keeps
+  every count the table holds. Each window's group is taken, then written on
+  its own: a write that fails or exits puts back what it took, so only an
+  untrappable kill of the flushing process between its take and its commit
+  loses that one window's counts. Without the table (the node starting or
+  stopping) an event is written as itself. It stops after the sessions and
   sequencers (it starts before them), and writes every open window as it
   goes; an unclean exit of the VM loses the open windows' counts.
   """

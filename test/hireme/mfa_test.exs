@@ -105,6 +105,18 @@ defmodule Hireme.MfaTest do
     {:ok, _, pending} = Accounts.sign_in_with(:email, %{subject: email, display: email})
     assert {:error, :code} = Mfa.verify_totp(pending, "000000")
     assert Mfa.factors() == []
+
+    assert %{"kind" => "totp"} =
+             Repo.one(
+               from(e in Hireme.Rows.Audit,
+                 where: e.kind == "factor_failed",
+                 order_by: [desc: e.id],
+                 limit: 1,
+                 select: e.meta
+               ),
+               skip_account: true
+             )
+
     # Disabling it is a write of its own: its rev moves past the failure's.
     assert Repo.get(Hireme.Rows.Factor, factor.id).rev > factor.rev + 1
     assert Mfa.required?(pending)

@@ -466,13 +466,22 @@ defmodule HiremeWeb.Account do
     |> Map.update!(:meta, &shown/1)
   end
 
-  # A trail row's meta as the lens sees it: never a hash, secret, token or
-  # code at any depth, even a truncated one (a link request's email_hash
+  # A trail row's meta as the lens sees it: never a hash, secret, token,
+  # code, password, API key or credential at any depth, even a truncated one (a link request's email_hash
   # stays server-side).
-  @hidden ~r/hash|secret|token|code/i
+  @hidden ~r/hash|secret|token|code|password|api_key|credential/i
 
+  # A matching key is dropped when it holds a value; a map or list under one
+  # is kept and searched, so a coalesced row's counts, keyed by kind names,
+  # pass whole.
   defp shown(meta) when is_map(meta) and not is_struct(meta),
-    do: for({k, v} <- meta, not (to_string(k) =~ @hidden), into: %{}, do: {k, shown(v)})
+    do:
+      for(
+        {k, v} <- meta,
+        is_map(v) or is_list(v) or not (to_string(k) =~ @hidden),
+        into: %{},
+        do: {k, shown(v)}
+      )
 
   defp shown(list) when is_list(list), do: Enum.map(list, &shown/1)
   defp shown(value), do: value

@@ -119,7 +119,7 @@ defmodule Hireme.Keys do
 
       with {:ok, key} <- insert_under_cap(session.account_id, row) do
         about = %{key_id: key.id, name: name, preset: preset_of(key)}
-        Audit.record(:api_key_created, about, ctx(meta, session))
+        Audit.record(:api_key_created, about, on_key(ctx(meta, session), key))
         Accounts.notify(session.account_id, :api_key_created, %{name: name})
         {:ok, %{key: key, secret: body <> Security.checksum(body)}}
       end
@@ -185,7 +185,7 @@ defmodule Hireme.Keys do
         may_delete: key.may_delete
       }
 
-      Audit.record(:api_key_changed, about, ctx(meta, session))
+      Audit.record(:api_key_changed, about, on_key(ctx(meta, session), key))
       if widened, do: Accounts.notify(key.account_id, :api_key_widened, %{name: key.name})
       Audit.bye(key.account_id, {{:key, key.id}, :grants})
       {:ok, key}
@@ -225,7 +225,7 @@ defmodule Hireme.Keys do
     Audit.record(
       :api_key_renamed,
       %{key_id: key.id, name: name},
-      Map.put(meta, :account_id, key.account_id)
+      on_key(Map.put(meta, :account_id, key.account_id), key)
     )
 
     {:ok, key}
@@ -259,7 +259,7 @@ defmodule Hireme.Keys do
           Audit.record(
             :key_resumed,
             %{key_id: key.id, name: key.name},
-            Map.put(meta, :account_id, key.account_id)
+            on_key(Map.put(meta, :account_id, key.account_id), key)
           )
 
           # The sequencer holds paused keys in memory; this lifts its hold.
@@ -296,7 +296,7 @@ defmodule Hireme.Keys do
       Audit.record(
         :api_key_revoked,
         %{key_id: key.id, name: key.name},
-        Map.put(meta, :account_id, key.account_id)
+        on_key(Map.put(meta, :account_id, key.account_id), key)
       )
 
       Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name})
@@ -402,4 +402,7 @@ defmodule Hireme.Keys do
 
   defp ctx(meta, %Session{} = s),
     do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
+
+  # A key's own lifecycle row names that key, so the trail's key tag shows it.
+  defp on_key(context, key), do: Map.put(context, :key_id, key.id)
 end

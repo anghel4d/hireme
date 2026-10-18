@@ -272,6 +272,9 @@ defmodule HiremeWeb.AccountTest do
       :link_redeemed,
       %{
         email_hash: "0123456789abcdef",
+        password: "p",
+        api_key: "k",
+        credential: "c",
         token: "t",
         recovery_code: "c",
         secret: "s",
@@ -294,6 +297,79 @@ defmodule HiremeWeb.AccountTest do
     for e <- events,
         k <- Map.keys(e.meta || %{}),
         do: refute(to_string(k) =~ ~r/hash|secret|token|code/i, "#{e.kind} meta #{k}")
+  end
+
+  test "every meta field the lens shows survives the server's strip", %{session: s, ctx: ctx} do
+    # The lens's own list (assets/js/lenses/trail.ts, SHOWN), so a field the
+    # strip would hide cannot vanish from the lens unnoticed.
+    trail = File.read!(Path.expand("../../assets/js/lenses/trail.ts", __DIR__))
+    [shown] = Regex.run(~r/const SHOWN(.*?)\n\]\)/s, trail, capture: :all_but_first)
+
+    fields =
+      ~r/\["([a-z_]+)", "[^"]*"\]/
+      |> Regex.scan(shown, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.uniq()
+
+    assert "left" in fields
+
+    Hireme.Audit.record(:host_trusted, Map.new(fields, &{&1, 1}), %{account_id: s.account_id})
+    {:ok, %{events: events}} = Account.call("account.audit", %{}, ctx)
+    row = Enum.find(events, &(&1.kind == "host_trusted"))
+    assert Enum.sort(Map.keys(row.meta)) == Enum.sort(fields)
+  end
+
+  test "a key's lifecycle rows name the key", %{ctx: ctx} do
+    {:ok, %{key: key}} =
+      Account.call("account.key.mint", %{"name" => "k", "preset" => "read_only"}, ctx)
+
+    {:ok, _} = Account.call("account.key.rename", %{"id" => key.id, "name" => "k2"}, ctx)
+
+    {:ok, _} =
+      Account.call("account.key.change", %{"id" => key.id, "preset" => "read_write"}, ctx)
+
+    Hireme.Rows.ApiKey
+    |> Repo.get(key.id, skip_account: true)
+    |> Ecto.Changeset.change(paused_at: Hireme.Store.now())
+    |> Repo.update!(skip_account: true)
+
+    {:ok, _} = Account.call("account.key.resume", %{"id" => key.id}, ctx)
+    {:ok, _} = Account.call("account.key.revoke", %{"id" => key.id}, ctx)
+
+    {:ok, %{events: events}} = Account.call("account.audit", %{}, ctx)
+    lifecycle = ~w(api_key_created api_key_renamed api_key_changed key_resumed api_key_revoked)
+    rows = Enum.filter(events, &(&1.kind in lifecycle))
+    assert Enum.sort(Enum.map(rows, & &1.kind)) == Enum.sort(lifecycle)
+    assert Enum.all?(rows, &(&1.key_id == key.id))
+  end
+
+  test "a coalesced row reaches the lens as stored, whatever its counts are keyed by", %{
+    session: s,
+    ctx: ctx
+  } do
+    for _ <- 1..1_005,
+        do: Hireme.Audit.record(:agent_ops, %{}, %{account_id: s.account_id, key_id: 3})
+
+    Hireme.Audit.Coalescer.flush(:all)
+    # A future kind whose name the strip would match, counted the same way.
+    future = %{"from" => "x", "counts" => %{"link_token" => %{"3" => 2}}, "addresses" => []}
+    Hireme.Audit.record(:activity_coalesced, future, %{account_id: s.account_id})
+
+    stored =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^s.account_id and e.kind == "activity_coalesced",
+          select: {e.id, e.meta}
+        ),
+        skip_account: true
+      )
+
+    {:ok, %{events: events}} =
+      Account.call("account.audit", %{"view" => "activity", "limit" => 200}, ctx)
+
+    shown = for e <- events, e.kind == "activity_coalesced", into: %{}, do: {e.id, e.meta}
+    assert length(stored) == 2
+    for {id, meta} <- stored, do: assert(shown[id] == meta)
   end
 
   test "an id past a 64-bit row id is refused at the boundary, before anything is charged", %{

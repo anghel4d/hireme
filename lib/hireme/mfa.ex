@@ -199,7 +199,7 @@ defmodule Hireme.Mfa do
           proved(session, factor, meta)
         else
           _ ->
-            failed(apps, meta, session)
+            failed(:totp, apps, meta, session)
             {:error, :code}
         end
       end
@@ -299,7 +299,7 @@ defmodule Hireme.Mfa do
         proved(session, factor, meta)
       else
         {:error, :assertion} = error ->
-          failed(keys, meta, session)
+          failed(:webauthn, keys, meta, session)
           error
 
         error ->
@@ -497,7 +497,7 @@ defmodule Hireme.Mfa do
 
   # Every factor that could have matched took a failure, counted in SQL so
   # parallel wrong codes all count; at the limit the factor is disabled.
-  defp failed(factors, meta, session) do
+  defp failed(kind, factors, meta, session) do
     now = Store.now()
 
     for factor <- factors do
@@ -538,7 +538,7 @@ defmodule Hireme.Mfa do
       end
     end
 
-    Audit.record(:factor_failed, %{}, ctx(meta, session))
+    Audit.record(:factor_failed, %{kind: kind}, ctx(meta, session))
   end
 
   defp proved(%Session{} = session, %Factor{} = factor, meta) do
