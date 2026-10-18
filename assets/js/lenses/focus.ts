@@ -1,14 +1,14 @@
 // The focus lens: one application. Everything derived about it (the rail,
 // the score and its suggestion, heat, keyword coverage, the CV composed
 // through its lineage's overlays, events) is the kernel's one document,
-// the same the MCP reads. The raw listing is deferred and fetched only when
-// asked for; the application's messages, contact and corporation are
-// server-side and read over RPC. Moves along the rail are the `stage`
+// the same the MCP reads. The raw listing is in the replica and unfolded only when
+// asked for; the application's messages, contact and corporation are in
+// the replica too, read in the frame they are drawn. Moves along the rail are the `stage`
 // command, judged by the kernel here before the sequencer judges it again.
 
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { Refused, application, command, lookup, put, query as read, wholeText, type Input } from "../kernel.ts"
+import { Refused, application, command, lookup, put, query as read, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
@@ -31,20 +31,8 @@ const id = (): number => lookup("applications", "no", model.address.sub)
 
 const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
-/** An event the kernel predicted but the node has not answered yet: a temp id (or none), nothing to read. */
-const unsaved = (id: number): boolean => !Number.isFinite(id) || id <= 0 || id >= 0xc000_0000
-
-/** A text column of the replica: the text itself, or a stub read whole from the replica in this frame. */
-function textOf(table: string, rowId: number, column: string, v_: unknown): string {
-  if (v_ === null || v_ === undefined) return ""
-  if (typeof v_ === "string") return v_
-  if (unsaved(rowId)) return ""
-  try {
-    return wholeText(table, rowId, column)
-  } catch {
-    return ""
-  }
-}
+/** A text column of the replica: its text, "" when there is none. */
+const textOf = (v_: unknown): string => (typeof v_ === "string" ? v_ : "")
 
 function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
@@ -116,7 +104,7 @@ function cv(d: Doc): Html {
 }
 
 function listing(a: Row, appId: number): Html {
-  const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf("applications", appId, "listing_raw", a.listing_raw)
+  const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf(a.listing_raw)
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open</a>` : EMPTY}</h2>
     ${text !== "" ? !v().listing
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${new TextEncoder().encode(text).byteLength.toLocaleString()} bytes)</button>`
@@ -127,7 +115,7 @@ function listing(a: Row, appId: number): Html {
 
 function prose(a: Row, appId: number): Html {
   return html`${PROSE.map((f) => {
-    const t = textOf("applications", appId, f, a[f])
+    const t = textOf(a[f])
     const moved = v().edit === f && Number(a.rev) !== v().editRev
     const title = f.replace(/_raw$/, "").replace(/_/g, " ")
     // An edit starts from the whole text, and stays on that text
@@ -161,7 +149,7 @@ function events(d: Doc, appId: number): Html {
   return html`<section class="card" data-key="events"><h2>Events</h2>
     <form class="row" data-submit="note" data-act="note" data-id="${appId}" data-stage="${stage}"><input name="body" placeholder="Add a note to the history" aria-label="Note" required>
       <button>Add</button></form>
-    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf("events", Number(e.id), "body", e.body)}
+    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf(e.body)}
       <span class="muted">${str(e.actor)}${e.key_id ? ` · key ${str(e.key_id)}` : ""}</span></li>`)}</ol></section>`
 }
 
@@ -224,7 +212,7 @@ function act(name: string, el: HTMLElement): void {
       const d = application(appId) as Doc | null
       const field = el.dataset.field ?? ""
       if (!d) return
-      return patch({ edit: field, editRev: Number(d.application.rev ?? 0), editText: textOf("applications", appId, field, d.application[field]) })
+      return patch({ edit: field, editRev: Number(d.application.rev ?? 0), editText: textOf(d.application[field]) })
     }
     case "cancel":
       return patch({ edit: "" })

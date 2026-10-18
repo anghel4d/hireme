@@ -7,7 +7,7 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { Refused, put, query as read, values, wholeText, type Input } from "../kernel.ts"
+import { Refused, put, query as read, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { model, notice, query, set, type OutreachView } from "../state.ts"
 
@@ -98,7 +98,7 @@ function threads(id: number): Html {
     <h3>${str(ms[0]?.subject) || "(no subject)"} <span class="muted">${ms.length} message${ms.length === 1 ? "" : "s"}</span></h3>
     <ol class="messages">${ms.map((m) => {
       const id = Number(m.id)
-      const body = v().open.includes(id) ? wholeText("messages", id, "body") : undefined
+      const body = v().open.includes(id) ? str(m.body) : undefined
       return html`<li data-key="m${id}" class="msg ${str(m.direction)}">
         <div class="meta"><b>${m.direction === "inbound" ? str(m.from_addr) || "them" : "you"}</b>
           <span class="tag">${str(m.status)}</span> <span class="muted">${str(m.sent_at).slice(0, 16).replace("T", " ")} · ${str(m.channel)}</span>

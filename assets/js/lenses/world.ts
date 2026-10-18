@@ -9,7 +9,7 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
-import { Refused, put, query as read, table, today, values, wholeText, type Input } from "../kernel.ts"
+import { Refused, put, query as read, table, today, values, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { go, model, notice, query, set, type WorldView } from "../state.ts"
 
@@ -86,7 +86,7 @@ const BIG = new Intl.NumberFormat(undefined, { notation: "compact", maximumFract
 function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
   if (c.deferred) {
-    const len = typeof x === "object" && x !== null ? Number((x as { len?: number }).len ?? 0) : 0
+    const len = new TextEncoder().encode(String(x)).byteLength
     return html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${len.toLocaleString()} bytes</button>`
   }
   // A plain whole-number column (a year, a count of URLs) is shown as written, not grouped like a quantity.
@@ -120,7 +120,7 @@ function editor(t: TableDef, c: ColumnDef, row: Row): Html {
       break
     case "text":
       {
-        const body = c.deferred ? wholeText(t.name, id, c.name) : value
+        const body = value
         // HTML drops a textarea's first newline, so a text that begins with one gets a second.
         field = html`<textarea name="value" rows="8" data-autofocus>${body.startsWith("\n") ? `\n${body}` : body}</textarea>`
       }
@@ -172,7 +172,7 @@ function reader(t: TableDef): Html {
   return html`<section class="card panel" data-key="text" aria-labelledby="text-h">
     <h2 id="text-h">${t.name} #${x.id} · ${x.column}</h2>
     <p class="hint">Written by a person or an agent; shown as text, never run.</p>
-    <pre class="untrusted">${wholeText(t.name, x.id, x.column)}</pre>
+    <pre class="untrusted">${String(rowOf(t, x.id)?.[x.column] ?? "")}</pre>
     <button type="button" class="ghost" data-act="close-panel">Close</button>
   </section>`
 }

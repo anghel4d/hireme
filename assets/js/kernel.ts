@@ -199,17 +199,6 @@ export function query<T = Record<string, unknown>>(op: "find" | "get" | "text" |
   return answer
 }
 
-/** A whole text of the replica, chunk by chunk as `text` answers it. */
-export function wholeText(table: string, id: number, column: string): string {
-  let out = ""
-  for (let offset = 0; ; ) {
-    const r = query<{ text: string; next: number | null }>("text", { table, id, column, offset, length: 262_144 })
-    out += r.text
-    if (r.next === null || r.next === undefined || r.next <= offset) return out
-    offset = r.next
-  }
-}
-
 /** Restored rows whose first derive has not run yet: the lenses that derive wait one paint. */
 let warm = false
 export const warming = (): boolean => warm
