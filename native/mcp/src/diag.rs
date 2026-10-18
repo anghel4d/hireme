@@ -66,7 +66,7 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
     ("column", "not filterable", "this column cannot be filtered on", "Deferred text, json and bytes columns are not compared in `where`. Filter on another column, or `get` the rows and read them."),
     ("column", "not orderable", "this column cannot order rows", "Deferred text, json, bytes and text columns do not order. Order by another column (id by default)."),
     ("column", "not text", "this column is not text", "`text` reads text columns (a deferred one comes as {len, sha} elsewhere); `get` returns every other column whole."),
-    ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it. A host is ASCII letters, digits and hyphens: write an international one in its punycode form (bücher.example as xn--bcher-kva.example); the path may be any text, and the whole URL at most 4096 bytes."),
+    ("type", "an http(s) URL on a real hostname", "a source's url must be http(s) on a real hostname", "Give the page's full URL, e.g. https://example.com/page; the server derives the host from it. A host is ASCII letters, digits and hyphens: write an international one in its punycode form (bücher.example as xn--bcher-kva.example); the path may be any text."),
     ("type", "an http(s) URL or a source id", "source must be an http(s) URL or a source id", "Give `source` as \"https://...\" (the server finds or makes that source) or as an existing source's id."),
     ("type", "inside a character", "the offset falls inside a UTF-8 character", "Continue from the `next` offset the previous `text` answer gave, or from 0."),
     ("type", "compares with null", "only eq and ne compare with null", "Use {\"eq\": null} for an empty cell and {\"ne\": null} for a filled one; lt, gt, prefix and the rest take a value."),
@@ -212,6 +212,14 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
         "type" if text("param").is_some() && site_reason(code, data).is_none() && data.get("got").is_some_and(|g| g.is_null() || g.as_str() == Some("nil")) => {
             let p = text("param")?;
             Some((format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes.")))
+        }
+        // A source URL over the node's cap (Provenance's url_max): the cap is the refusal's own `max`.
+        "type" if site_reason(code, data).is_some_and(|r| r.starts_with("a source URL is at most")) && int("max").is_some() => {
+            let max = int("max")?;
+            Some((
+                format!("a source URL is at most {max} bytes"),
+                format!("Cite the page by a URL of at most {max} bytes: drop tracking parameters and the fragment, or cite the page that links to it."),
+            ))
         }
         // A cursor handed back changed: `after` takes only what an answer's `next` gave.
         "type" if text("param") == Some("after") && site_reason(code, data).is_none() => Some((
@@ -477,6 +485,9 @@ mod tests {
             ("column", serde_json::json!({"table": "corporations", "missing": ["name"]}), "a new row lacks its required columns: name"),
             ("column", serde_json::json!({"command": "open_generation", "missing": ["lineage_id"]}), "open_generation needs lineage_id"),
             ("source_missing", serde_json::json!({"source": 7}), "no live source has id 7"),
+            ("type", serde_json::json!({"column": "source", "reason": "a source URL is at most 2048 bytes", "max": 2048}), "a source URL is at most 2048 bytes"),
+            // The cap is read from the data, never assumed: a node with another cap is quoted as it is.
+            ("type", serde_json::json!({"table": "sources", "column": "url", "reason": "a source URL is at most 512 bytes", "max": 512}), "a source URL is at most 512 bytes"),
             ("not_found", serde_json::json!({"column": "corporation_id", "id": 999999}), "corporation_id 999999 names no row"),
             ("not_found", serde_json::json!({"table": "corporations", "id": 4}), "no such row, table or command"),
             ("source_missing", serde_json::json!({"table": "corporations", "column": "headcount"}), "this write needs a source"),
