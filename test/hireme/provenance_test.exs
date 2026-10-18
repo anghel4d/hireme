@@ -406,14 +406,14 @@ defmodule Hireme.ProvenanceTest do
     assert {:ok, _} = Provenance.trust("last.example", "edited", %{})
   end
 
-  test "citations are in no mask: no key writes one", %{account: a} do
+  test "citations are the server's to write; trusted hosts are in no mask", %{account: a} do
     key = %{
       label: "k",
       grants: Grants.key(%{id: 1, read_mask: 31, write_mask: 31, may_delete: true}),
       key_id: nil
     }
 
-    assert {[], [%{refusal: :scope}]} = run(a.id, op(:put, :citations, %{}), key)
+    assert {[], [%{refusal: :column}]} = run(a.id, op(:put, :citations, %{}), key)
 
     assert {[], [%{refusal: :scope}]} =
              run(a.id, op(:put, :trusted_hosts, %{host: "x.example"}), key)

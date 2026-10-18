@@ -14,11 +14,11 @@ fn a_server_table_metric_moves_schema_rev_alone_and_a_resident_column_moves_both
     let base = parse(SOURCE).unwrap();
 
     // Appended, as a new column must be: one inserted earlier renumbers the
-    // columns after it, and the resident atlas projection picks those ids.
-    let server = parse(&with("  prose liveability\n  prose notes", "  metric probe_metric u32")).unwrap();
+    // columns after it. A server table (api_keys) never travels.
+    let server = parse(&with("  col paused_at time ? readonly", "  metric probe_metric u32")).unwrap();
     assert_eq!(server.wire_hash, base.wire_hash);
     assert_ne!(server.schema_rev, base.schema_rev);
-    assert!(server.table("places").unwrap().col("probe_metric_on").is_some());
+    assert!(server.table("api_keys").unwrap().col("probe_metric_on").is_some());
 
     let hidden = parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap();
     assert_eq!(hidden.wire_hash, base.wire_hash, "a server_only column never travels");
@@ -44,28 +44,28 @@ fn the_layout_line_is_part_of_what_a_client_is_compiled_against() {
 #[test]
 fn malformed_lines_are_refused_with_their_line_number() {
     let cases = [
-        with("table places world server", "  col nope widget ?"),
-        with("table places world server", "  pick name"),
+        with("table places world resident", "  col nope widget ?"),
+        with("table places world resident", "  pick name"),
         with("pick kind", "  col oops str ?"),
-        with("table places world server", "  col kind str ?"),
-        with("table places world server", "  col x ref nowhere ?"),
-        with("table places world server", "  col y enum stage ! = nonsense"),
-        with("table places world server", "  metric z f64 !"),
-        with("table places world server", "  index account_id name"),
-        with("table places world server", "  natural region where kind = 'contry'"),
-        with("table places world server", "  natural region where kind like 'c%'"),
-        with("table places world server", "  natural region where atlas_labeled = 'true'"),
-        with("table places world server", "  natural region where population = '5'"),
-        with("table places world server", "  col n u32 ? deferred"),
-        with("table places world server", "  col n u32 ? = 4294967295"),
+        with("table places world resident", "  col kind str ?"),
+        with("table places world resident", "  col x ref nowhere ?"),
+        with("table places world resident", "  col y enum stage ! = nonsense"),
+        with("table places world resident", "  metric z f64 !"),
+        with("table places world resident", "  index account_id name"),
+        with("table places world resident", "  natural region where kind = 'contry'"),
+        with("table places world resident", "  natural region where kind like 'c%'"),
+        with("table places world resident", "  natural region where atlas_labeled = 'true'"),
+        with("table places world resident", "  natural region where population = '5'"),
+        with("table places world resident", "  col n u32 ? deferred"),
+        with("table places world resident", "  col n u32 ? = 4294967295"),
         format!("{SOURCE}\ntable probe_uncapped lanes server\n  col x str ?\n"),
-        with("table places world server", "  index name global global"),
-        with("table places world server", "  cap -1"),
-        with("table places world server", "  col Bad str ?"),
-        with("table places world server", "  col flag bool ? = maybe"),
-        with("table places world server", "  col n u8 ? = 300"),
-        with("table places world server", "  command poke n:text??"),
-        with("table places world server", "  command poke human_only human_only"),
+        with("table places world resident", "  index name global global"),
+        with("table places world resident", "  cap -1"),
+        with("table places world resident", "  col Bad str ?"),
+        with("table places world resident", "  col flag bool ? = maybe"),
+        with("table places world resident", "  col n u8 ? = 300"),
+        with("table places world resident", "  command poke n:text??"),
+        with("table places world resident", "  command poke human_only human_only"),
         SOURCE.replacen("frame HELLO 1", "frame HELLO 300", 1),
         SOURCE.replacen("frame WELCOME 2", "frame WELCOME 1", 1),
         SOURCE.replacen("domain world desk", "domain world world desk", 1),
@@ -76,8 +76,8 @@ fn malformed_lines_are_refused_with_their_line_number() {
         assert!(parse(source).is_err(), "accepted case {i}");
     }
 
-    let err = parse(&with("table places world server", "  col nope widget ?")).unwrap_err();
-    let line = SOURCE[..SOURCE.find("table places world server").unwrap()].matches('\n').count() + 2;
+    let err = parse(&with("table places world resident", "  col nope widget ?")).unwrap_err();
+    let line = SOURCE[..SOURCE.find("table places world resident").unwrap()].matches('\n').count() + 2;
     assert_eq!(err.line, line);
 }
 

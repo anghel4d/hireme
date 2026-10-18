@@ -44,10 +44,9 @@
 #                                    params are table columns or typed free params
 #
 # Types: id ref(<table>) enum(<enum>) bool u8 u32 i64 f64 day time str text json bytes
-# Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (BOOT/PATCH carry
-#        length + hash, `RPC text` the bytes; implies the readonly, server_only
-#        `<name>_sha`, its hex SHA-256, a trailing `_raw` dropped: listing_raw's
-#        is listing_sha)
+# Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (a long text:
+#        it travels whole, and implies the readonly, server_only `<name>_sha`,
+#        its hex SHA-256, a trailing `_raw` dropped: listing_raw's is listing_sha)
 #        private (browser sessions only, never a key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)   cascade (a nullable ref whose row is deleted
@@ -61,15 +60,14 @@
 #
 # Null (the codec's rule, native/wire): in BOOT/PATCH a u32 run carries null as
 # 0xFFFFFFFF (so an id, ref, day, time or enum code never takes it; bool is 0, 1
-# or null), str as the empty string, i64 as i64::MIN, f64 as NaN, deferred as
-# length 0xFFFFFFFF. NULL and '' are one value: a put of '' or of zero-length
+# or null), str as the empty string, i64 as i64::MIN, f64 as NaN. NULL and '' are one value: a put of '' or of zero-length
 # text is stored as NULL, so no column holds ''. In OPS a cell of type 0 with
 # length 0 clears its column; a u32 0xFFFFFFFF, an i64::MIN or a NaN cell is
 # refused `type`. Wire type codes: 1 u32 (id ref bool u8 u32 day time enum;
 # day = days since 0000-01-01, proleptic Gregorian (Elixir's
 # Date.to_gregorian_days/1), 0 to 3652424 = 9999-12-31, past which a cell is
 # refused `type`; time = unix seconds), 2 str (str text json, json any JSON value),
-# 3 i64, 4 f64, 5 deferred (u32 length + 8 bytes of SHA-256); the codec may
+# 3 i64, 4 f64; the codec may
 # also run a column as 6 sym (a dictionary of strs) or 7 list (u32 ids).
 # A PATCH deletes rows with a block of their own table whose only column is
 # 0xFFFE (u32 ids). A BYE's reason is its `bye` enum code; an op's verb byte
@@ -459,7 +457,7 @@ table settings desk resident singleton
 
 # ---------------------------------------------------------------- world
 
-table places world server
+table places world resident
   natural iso2 where kind = 'country'
   natural geonames_id where kind = 'city'
   cap 100000
@@ -534,7 +532,7 @@ table places world server
 projection atlas world places where atlas_position is not null
   pick kind country_id iso2 name atlas_position atlas_labeled gdp_per_capita_ppp_usd qol_index energy_production_per_capita_kwh energy_consumption_per_capita_kwh mobility language tech ease work_permit
 
-table corporations world server
+table corporations world resident
   natural domain
   cap 50000
   index name
@@ -585,7 +583,7 @@ table corporations world server
   prose about
   prose culture
 
-table offices world server
+table offices world resident
   cap 200000
   unique corporation_id place_id kind
   index place_id
@@ -595,7 +593,7 @@ table offices world server
   metric headcount u32
   col opened_on day ?
 
-table sources world server soft_delete
+table sources world resident soft_delete
   cap 200000
   natural url
   index host
@@ -611,24 +609,25 @@ table sources world server soft_delete
   col doc text ? deferred
 
 # The only provenance authority: the newest citation for a cell is its source.
-table citations world server append_only unmasked
+# Replicated read-only under the world bit: the server writes every row.
+table citations world resident append_only
   cap 5000000
   index table row_id column id desc
   # A source's drop asks whether any citation names it, under the writer lock.
   index source_id
-  col table str ! server_only
-  col row_id u32 ! server_only
-  col column str ! server_only
-  col source_id ref sources ? server_only loose
-  col value json ? server_only
-  col as_of day ! server_only
-  col actor enum actor ! server_only
-  col key_id ref api_keys ? server_only loose
-  col op_id i64 ? server_only
+  col table str ! readonly
+  col row_id u32 ! readonly
+  col column str ! readonly
+  col source_id ref sources ? readonly loose
+  col value json ? readonly
+  col as_of day ! readonly
+  col actor enum actor ! readonly
+  col key_id ref api_keys ? readonly loose
+  col op_id i64 ? readonly
 
 # ---------------------------------------------------------------- mail
 
-table contacts mail server
+table contacts mail resident
   natural email where email is not null
   cap 50000
   index corporation_id
@@ -643,7 +642,7 @@ table contacts mail server
   col last_touch_on day ?
   col notes text ?
 
-table messages mail server
+table messages mail resident
   natural message_id where message_id is not null
   cap 200000
   index thread_key
@@ -715,3 +714,7 @@ table catalog system wire
   col type u32 ?
   col flags u32 ?
   col target str ?
+
+# The trusted hosts, replicated read-only so a replica predicts source_trust.
+projection trusted world trusted_hosts where host is not null
+  pick host

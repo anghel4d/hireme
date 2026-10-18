@@ -128,7 +128,7 @@ defmodule HiremeWeb.AgentAttackTest do
 
       assert refused(c, "history", %{"table" => "applications", "id" => ids.app}) == :scope
 
-      for t <- ~w(api_keys sessions audit op_ledger citations trusted_hosts accounts factors) do
+      for t <- ~w(api_keys sessions audit op_ledger trusted_hosts accounts factors) do
         assert refused(c, "find", %{"table" => t}) in [:scope, :not_found], "#{t} readable"
       end
 
@@ -331,7 +331,7 @@ defmodule HiremeWeb.AgentAttackTest do
                "#{table} #{inspect(cells)}"
       end
 
-      assert {:nack, :scope} = put(c, op(:put, :citations, %{}))
+      assert {:nack, :column} = put(c, op(:put, :citations, %{}))
 
       assert {:nack, :stale} =
                put(

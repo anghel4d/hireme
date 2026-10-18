@@ -558,7 +558,7 @@ defmodule Hireme.Schema.Parser do
   # The derived keys every reader wants on a column or param.
   defp decorate(c) do
     Map.merge(c, %{
-      wire: if(Map.get(c, :deferred), do: 5, else: Map.fetch!(@wire, c.type)),
+      wire: Map.fetch!(@wire, c.type),
       type_code: Map.fetch!(@type_codes, c.type),
       ref: if(c.type == :ref, do: c.target),
       enum: if(c.type == :enum, do: c.target)

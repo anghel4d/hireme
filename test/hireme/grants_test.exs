@@ -5,12 +5,12 @@ defmodule Hireme.GrantsTest do
   alias Hireme.{Grants, Schema}
 
   @domains ~w(world desk mail lanes corpus)
-  @outside ~w(citations trusted_hosts)
+  @outside ~w(trusted_hosts)
   @stored for t <- Schema.tables(), t.residency in [:resident, :server], do: t
 
   defp key(r, w, d \\ false), do: Grants.key(%{id: 7, read_mask: r, write_mask: w, may_delete: d})
 
-  property "a mask reads and writes exactly the tables of its domains, never system, citations or trusted hosts" do
+  property "a mask reads and writes exactly the tables of its domains, never system or trusted hosts" do
     check all(r <- integer(0..31), w <- integer(0..31), max_runs: 64) do
       g = key(r, w)
 

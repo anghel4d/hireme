@@ -275,33 +275,6 @@ fn lineage_windows() {
 }
 
 #[test]
-fn a_predicted_listing_keeps_every_other_rows_stub_and_rolls_back() {
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::APPLICATIONS, 3);
-    b.u32s(A::ID, 1..=3)
-        .u32s(A::STAGE, (0..3).map(|_| S::DISCOVERED as u32))
-        .deferred(A::LISTING_RAW, (0..3).map(|i| Some((100 + i, [i as u8; 8]))));
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.boot(&w.finish(), 1).unwrap();
-    let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
-        o.str(A::LISTING_RAW, "Rust kernels");
-    });
-    k.predict(&put, &ctx()).unwrap();
-    let t = k.rows().table(table::APPLICATIONS).unwrap();
-    let Val::Deferred(len, _) = t.get(1, A::LISTING_RAW) else { panic!("row 1 is not a stub") };
-    assert_eq!(len, 12);
-    assert_eq!(t.get(2, A::LISTING_RAW), Val::Deferred(101, [1; 8]));
-    // A put of the wrong kind for a column changes nothing.
-    k.predict(&op(wire::PUT, table::APPLICATIONS, 2, |o| { o.u32(A::COMPANY, 5); }), &ctx()).unwrap();
-    assert_eq!(k.rows().table(table::APPLICATIONS).unwrap().get(3, A::LISTING_RAW), Val::Deferred(102, [2; 8]));
-    // The server refuses the listing (op 77): its writes go, the stub returns.
-    k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 2, &[wire::Nack { op_id: 77, code: 0, data: b"{}" }])).unwrap();
-    assert_eq!(k.rows().table(table::APPLICATIONS).unwrap().get(1, A::LISTING_RAW), Val::Deferred(100, [0; 8]));
-}
-
-#[test]
 fn a_keyed_put_is_predicted_where_the_server_puts_it() {
     let mut w = wire::BodyWriter::new();
     let mut b = w.block(table::APPLICATIONS, 1);

@@ -1146,7 +1146,8 @@ defmodule Hireme.Sequencer do
     insert = plan.row == nil
     rev = if insert, do: 0, else: plan.row.rev
 
-    with :ok <-
+    with :ok <- server_written(table),
+         :ok <-
            if(table.append_only and not insert,
              do: {:refused, :column, %{table: table.name, reason: "append_only"}},
              else: :ok
@@ -1191,6 +1192,14 @@ defmodule Hireme.Sequencer do
         refused -> {:halt, refused}
       end
     end)
+  end
+
+  # A table every declared column of which is readonly (citations) is the
+  # server's to write: replicated for reading, never put by an op.
+  defp server_written(table) do
+    if Enum.all?(table.cols, &(&1.implied or &1.readonly)),
+      do: {:refused, :column, %{table: table.name, reason: "the server writes this table"}},
+      else: :ok
   end
 
   defp writable(table, nil, id, _cell, _sub),
@@ -1963,61 +1972,12 @@ defmodule Hireme.Sequencer do
     |> Repo.all()
   end
 
-  # Rows as maps of their wire columns. A deferred text is never loaded: its
-  # length comes from SQLite and its hash from the hex SHA-256 the table
-  # keeps beside it (`listing_raw` beside `listing_sha`).
+  # Rows as maps of their wire columns, texts whole.
   defp rows(t) do
-    deferred = for c <- t.cols, c.deferred, do: c
-    fields = for c <- t.cols, not c.deferred, c.wire != nil, do: String.to_atom(c.name)
+    fields = for c <- t.cols, c.wire != nil, do: String.to_atom(c.name)
     q = from(r in Schema.row(t.name), order_by: r.id, select: map(r, ^fields))
     q = if t.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
-    Enum.reduce(deferred, Repo.all(q), &stubs(t, &1, &2))
-  end
-
-  defp stubs(t, col, rows) do
-    name = String.to_atom(col.name)
-    sha = sha_twin(t, col)
-
-    lens =
-      from(r in Schema.row(t.name),
-        where: not is_nil(field(r, ^name)),
-        select: {r.id, fragment("length(CAST(? AS BLOB))", field(r, ^name))}
-      )
-      |> Repo.all()
-      |> Map.new()
-
-    # A listing without its stored hash (written before it, or by hand) is
-    # hashed from the text, which only those rows load.
-    missing = for r <- rows, lens[r.id] != nil, sha == nil or Map.get(r, sha) == nil, do: r.id
-
-    texts =
-      if missing == [],
-        do: %{},
-        else:
-          Map.new(
-            Repo.all(
-              from(r in Schema.row(t.name),
-                where: r.id in ^missing,
-                select: {r.id, field(r, ^name)}
-              )
-            )
-          )
-
-    Enum.map(rows, fn row ->
-      stub =
-        case {lens[row.id], texts[row.id]} do
-          {nil, _} ->
-            nil
-
-          {_, text} when is_binary(text) ->
-            Codec.deferred_stub(text)
-
-          {len, nil} ->
-            {len, row |> Map.fetch!(sha) |> Base.decode16!(case: :lower) |> binary_part(0, 8)}
-        end
-
-      Map.put(row, name, stub)
-    end)
+    Repo.all(q)
   end
 
   defp projected?(row, term) do

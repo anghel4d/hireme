@@ -32,7 +32,6 @@ defmodule HiremeWeb.Wire.Codec do
   @t_str 2
   @t_i64 3
   @t_f64 4
-  @t_deferred 5
 
   @frames Map.new(Schema.frames(), &{String.to_atom(&1.name), &1.id})
   @frame_names Map.new(Schema.frames(), &{&1.id, String.to_atom(&1.name)})
@@ -499,8 +498,7 @@ defmodule HiremeWeb.Wire.Codec do
   defp bounded?(m) when is_map(m), do: Enum.all?(m, fn {_, v} -> bounded?(v) end)
   defp bounded?(_), do: true
 
-  @doc "The type an op cell for this column must carry: its wire type, but a deferred text travels whole, as str."
-  def cell_type(%{deferred: true}), do: @t_str
+  @doc "The type an op cell for this column must carry: its wire type."
   def cell_type(%{wire: w}), do: w
 
   @doc "A column's wire type code in BOOT and PATCH."
@@ -543,11 +541,6 @@ defmodule HiremeWeb.Wire.Codec do
 
   def to_wire(%{type: :enum, enum: e}, v), do: enum_code(e, v)
   def to_wire(%{type: :json}, v), do: JSON.encode!(v)
-  def to_wire(%{deferred: true}, v) when is_binary(v), do: deferred_stub(v)
-
-  def to_wire(%{deferred: true}, {len, sha} = stub) when is_integer(len) and byte_size(sha) == 8,
-    do: stub
-
   def to_wire(_col, v), do: v
 
   @doc """
@@ -558,9 +551,6 @@ defmodule HiremeWeb.Wire.Codec do
   def from_wire(_col, nil), do: {:ok, nil}
   def from_wire(%{type: t} = col, v) when t in [:str, :text], do: to_value(col, v)
   def from_wire(col, v), do: to_value(col, v)
-
-  @doc "The `{len, sha8}` a deferred text travels as."
-  def deferred_stub(text), do: {byte_size(text), binary_part(:crypto.hash(:sha256, text), 0, 8)}
 
   # -------------------------------------------------------- table runs
 
@@ -583,13 +573,6 @@ defmodule HiremeWeb.Wire.Codec do
 
   defp col_data(@t_f64, vs),
     do: Enum.map(vs, &if(&1, do: <<&1 * 1.0::little-float-64>>, else: @nan))
-
-  defp col_data(@t_deferred, vs),
-    do:
-      Enum.map(vs, fn
-        {len, sha} -> <<len::little-32, sha::binary-8>>
-        nil -> <<@none32::little-32, 0::64>>
-      end)
 
   defp col_data(@t_str, vs) do
     {offsets, _} =
@@ -628,7 +611,7 @@ defmodule HiremeWeb.Wire.Codec do
     end
   end
 
-  defp converter(%{type: t, deferred: false})
+  defp converter(%{type: t})
        when t in [:id, :ref, :u8, :u32, :i64, :f64, :str, :text],
        do: &Function.identity/1
 

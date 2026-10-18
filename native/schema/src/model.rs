@@ -250,7 +250,7 @@ impl Column {
     }
 
     pub fn wire(&self) -> u8 {
-        if self.deferred { wire::DEFERRED } else { self.ty.wire() }
+        self.ty.wire()
     }
 
     pub fn flags(&self) -> u32 {

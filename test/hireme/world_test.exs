@@ -189,7 +189,7 @@ defmodule Hireme.WorldTest do
       end
     end
 
-    for hidden <- ~w(citations trusted_hosts accounts api_keys op_ledger),
+    for hidden <- ~w(trusted_hosts accounts api_keys op_ledger),
         do:
           assert(
             {:error, :not_found, _} = World.find(a.id, Grants.operator(), %{"table" => hidden})
