@@ -149,8 +149,13 @@ impl Lines {
 
     fn set_lineage(&mut self, id: u32, corp: Option<u32>) {
         if let Some(old) = self.corp_of_lineage.remove(&id) {
+            // The corporation falls back to its next lineage, if one is
+            // still there (a predicted one beside the server's, for a while).
             if self.lineage_of_corp.get(&old) == Some(&id) {
-                self.lineage_of_corp.remove(&old);
+                match self.corp_of_lineage.iter().filter(|(_, c)| **c == old).map(|(l, _)| *l).min() {
+                    Some(next) => self.lineage_of_corp.insert(old, next),
+                    None => self.lineage_of_corp.remove(&old),
+                };
             }
         }
         if let Some(c) = corp {

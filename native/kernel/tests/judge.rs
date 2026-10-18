@@ -314,3 +314,34 @@ fn a_sentinel_cell_is_refused_as_the_server_refuses_it() {
     });
     assert!(k.judge(&clear, &ctx()).is_ok());
 }
+
+#[test]
+fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() {
+    let mut a = app(1, S::DRAFT_READY, "Acme");
+    a.corp = Some(40);
+    let mut k = kernel(&[a], &[], &[]);
+    // A note's event is the events table's first row, inserted by the client.
+    let note = op(wire::COMMAND, command::NOTE, 1, |o| {
+        o.u32(param::note::STAGE, S::GATED as u32).str(param::note::BODY, "called");
+    });
+    k.predict(&note, &ctx()).unwrap();
+    let ev = k.rows().table(table::EVENTS).unwrap();
+    let id = ev.ids()[0];
+    assert_eq!(ev.u32(id, col::events::ID), Some(id));
+    // A predicted overlay opens a lineage for corporation 40; the server's
+    // own arrives, then goes: the predicted one still tells the story.
+    k.predict(&overlay(1, 0), &ctx()).unwrap();
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::CV_LINEAGES, 1);
+    b.u32s(col::cv_lineages::ID, [3].into_iter())
+        .u32s(col::cv_lineages::CORPORATION_ID, [40].into_iter())
+        .u32s(col::cv_lineages::OPENED_ON, [TODAY as u32].into_iter())
+        .u32s(col::cv_lineages::REWRITES_ALLOWED, [1].into_iter());
+    b.done();
+    k.patch(&w.finish(), 2).unwrap();
+    let mut w = wire::BodyWriter::new();
+    w.gone(table::CV_LINEAGES, &[3]);
+    k.patch(&w.finish(), 3).unwrap();
+    let fx = k.judge(&overlay(1, 0), &ctx()).unwrap();
+    assert!(fx.iter().all(|r| r.table != table::CV_LINEAGES), "no second lineage: {fx:?}");
+}

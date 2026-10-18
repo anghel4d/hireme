@@ -13,11 +13,11 @@ the verdict and to colour the board.
 ## What carries heat
 
 An application carries heat when it is queued (`fire_ready`, `open_fire`,
-`submitted`) or in `reply`/`closed` after having been sent (its rail's
-`submitted` rung reached, never jumped over). A listing closed before
-anything went out carries none, and neither does a reply to outreach
-(a referral, recruiter, cold or inbound application) that never went
-through a submission. It puts a load of `application_load` on
+`submitted`) or in `reply`/`closed` after something went out: its rail's
+`submitted` or `reply` rung was reached, never jumped over. An answered
+outreach application (referral, recruiter, cold, inbound or other
+channel) is a live conversation with the company and carries load like a
+sent one; a listing closed before anything went out carries none. It puts a load of `application_load` on
 three things:
 
 - its **company**: its `corporation_id` when linked, else the normalized
@@ -63,7 +63,7 @@ the answer, exact. It is null when the move is still held ten years on.
 
 The `stage` command also refuses, before heat: a batched stage without a
 batch (`stage`, `needs_batch`), `open_fire` by anything but its human
-command (`stage`), `submitted` while the batch is on hold (`fire_hold`),
+command (`stage`), `submitted` from anywhere but `open_fire` (`fire_hold`),
 a sent application moved back before `submitted` (`stage`, `sent`), and
 `reply` for a listing application that was never sent (`stage`,
 `not_sent`).

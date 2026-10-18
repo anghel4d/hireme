@@ -337,8 +337,13 @@ impl Table {
         for c in &mut self.cols {
             c.data.push_none();
         }
-        if let Some(c) = self.cols.iter_mut().find(|c| c.id == ID) {
-            c.data.set(s, &Val::U32(id));
+        // A keyed table always carries its ids as a column, even when the
+        // first row is one the client inserted itself, so every reader of
+        // the row sees its id.
+        if keyed(self.id) {
+            if let Some(c) = self.column_mut(ID, Kind::U32, false) {
+                c.data.set(s, &Val::U32(id));
+            }
         }
         s
     }
