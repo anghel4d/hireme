@@ -207,18 +207,17 @@ in
             recommendedTlsSettings = true;
             recommendedOptimisation = true;
             recommendedProxySettings = true;
-            # A request's path without its query: a mailed sign-in link
-            # carries its live token there, and the log must not.
+            # A request's path without its query, in every server block (the
+            # port-80 redirect included): a mailed sign-in link carries its
+            # live token in the query, and the access log must not.
             commonHttpConfig = ''
               log_format hireme '$remote_addr - [$time_local] "$request_method $uri $server_protocol" '
                                 '$status $body_bytes_sent "$http_user_agent"';
+              access_log /var/log/nginx/access.log hireme;
             '';
             virtualHosts.${cfg.domain} = {
               enableACME = true;
               forceSSL = true;
-              extraConfig = ''
-                access_log /var/log/nginx/access.log hireme;
-              '';
               locations."/" = {
                 proxyPass = "http://127.0.0.1:${toString cfg.port}";
                 proxyWebsockets = true;

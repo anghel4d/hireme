@@ -17,6 +17,7 @@ defmodule Hireme.Application do
         {Phoenix.PubSub, name: Hireme.PubSub},
         Hireme.RateLimit,
         Hireme.Accounts.Tickets,
+        Hireme.Audit.Coalescer,
         Hireme.Sequencer.Supervisor,
         # Applies the baseline and pending additive files before any request,
         # then keeps the daily backup.

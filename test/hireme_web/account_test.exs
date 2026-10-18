@@ -215,4 +215,29 @@ defmodule HiremeWeb.AccountTest do
     assert Enum.count(results, &match?({:ok, _}, &1)) == 30
     assert {:error, %{error: "rate_limited"}} = List.last(results)
   end
+
+  test "parallel writes cannot all pass the budget, and calls that wrote nothing cost nothing", %{
+    ctx: ctx
+  } do
+    parent = self()
+    args = %{"name" => "k", "preset" => "read_only"}
+
+    for _ <- 1..30,
+        do:
+          {:ok, _} =
+            Account.call("account.trusted_host.add", %{"host" => "levels.fyi", "note" => ""}, ctx)
+
+    results =
+      1..90
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.allow(Repo, parent, self())
+          Account.call("account.key.mint", args, ctx)
+        end)
+      end)
+      |> Enum.map(&Task.await(&1, 30_000))
+
+    # One trusted host was written; the 29 repeats were given back.
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 59
+  end
 end

@@ -124,6 +124,14 @@ defmodule Hireme.Security do
     renames: {:timer.minutes(10), 30},
     # Every other account.* call that writes the trail or mails a notice.
     account_writes: {:timer.minutes(10), 60},
+    # Trail rows for an account's activity (agent op batches, key HELLOs,
+    # leases opening and closing), and for lease revokes; past either the
+    # rows coalesce into one per window (`Hireme.Audit.Coalescer`).
+    activity: {:timer.minutes(10), 1000},
+    revokes: {:timer.minutes(10), 120},
+    # Notices of a change that must reach the owner as itself (a factor
+    # removed or disabled, a way in linked or unlinked, a key widened).
+    critical_notices: {:timer.minutes(10), 10},
     # Ceremonies begun (a TOTP QR, passkey options), per browser session.
     ceremony_session: {:timer.minutes(10), 30},
     # Security notices queued per account, every address together; past
@@ -175,6 +183,14 @@ defmodule Hireme.Security do
   def blocked?(name, key) when is_map_key(@limits, name) do
     {scale_ms, max} = Map.fetch!(@limits, name)
     Hireme.RateLimit.get(bucket(name, key), scale_ms) >= max
+  end
+
+  @doc "Give back one count taken under the named limit for `key` (a call that wrote nothing)."
+  @spec refund(atom(), term()) :: :ok
+  def refund(name, key) when is_map_key(@limits, name) do
+    {scale_ms, _} = Map.fetch!(@limits, name)
+    Hireme.RateLimit.inc(bucket(name, key), scale_ms, -1)
+    :ok
   end
 
   @doc "Count one failure under the named limit for `key`."

@@ -103,22 +103,27 @@ defmodule HiremeWeb.Account do
   #
   # Revocations are outside it: they are bounded by what exists and record
   # only a real change, and the owner must always be able to revoke a
-  # leaked key or a thief's session. A call is charged only when it wrote:
-  # a refused or no-op call costs nothing, so a stale cookie cannot spend
-  # the owner's budget.
+  # leaked key or a thief's session. A call that wrote nothing (refused, or
+  # a no-op) is given its charge back, so a stale cookie cannot spend the
+  # owner's budget.
   @writes ~w(account.key.mint account.key.change account.identity.unlink
     account.totp.confirm account.passkey.finish account.factor.remove
     account.recovery.regenerate account.trusted_host.add account.trusted_host.remove)
 
   defp safely(method, params, %Session{account_id: id} = session, ctx)
        when method in @writes do
-    if Hireme.Security.blocked?(:account_writes, id) do
-      {:error, %{error: "rate_limited"}}
-    else
-      cursor = Audit.rev(id)
-      answer = method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
-      if Audit.rev(id) > cursor, do: Hireme.Security.failed(:account_writes, id)
-      answer
+    # Charged up front, atomically, so parallel calls cannot all pass; given
+    # back unless this very call recorded an event (what the account does
+    # elsewhere meanwhile never counts against it).
+    case Hireme.Security.limit(:account_writes, id) do
+      {:error, :rate_limited} ->
+        {:error, %{error: "rate_limited"}}
+
+      :ok ->
+        Audit.recorded?(:reset)
+        answer = method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+        unless Audit.recorded?(:check), do: Hireme.Security.refund(:account_writes, id)
+        answer
     end
   end
 

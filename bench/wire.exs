@@ -623,13 +623,19 @@ carrier_gate =
     File.chmod!(file, 0o600)
     File.write!(file, Codec.encode_hello(:key, carrier_key, "bench-carrier"))
 
-    for _ <- 1..8 do
-      args = ["hello", url, "--frame", file] ++ if(hash, do: ["--hash", hash], else: [])
-      {out, 0} = System.cmd(probe, args)
-      %{"bulk_ms" => ms} = out |> String.split("\n", trim: true) |> List.last() |> Jason.decode!()
-      round(ms * 1000)
+    try do
+      for _ <- 1..8 do
+        args = ["hello", url, "--frame", file] ++ if(hash, do: ["--hash", hash], else: [])
+        {out, 0} = System.cmd(probe, args)
+
+        %{"bulk_ms" => ms} =
+          out |> String.split("\n", trim: true) |> List.last() |> Jason.decode!()
+
+        round(ms * 1000)
+      end
+    after
+      File.rm_rf!(dir)
     end
-    |> tap(fn _ -> File.rm_rf!(dir) end)
   else
     _ -> []
   end

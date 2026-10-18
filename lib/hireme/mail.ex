@@ -71,6 +71,11 @@ defmodule Hireme.Mail do
     """
   end
 
+  defp since(%{since: since}) when is_binary(since),
+    do: since |> String.replace("T", " ") |> String.trim_trailing("Z") |> Kernel.<>(" UTC")
+
+  defp since(_), do: "the last notice"
+
   @doc "Send one notice now; the outbox worker is the caller."
   @spec notice(String.t(), atom(), map()) :: {:ok, term()} | {:error, term()}
   def notice(to, kind, meta \\ %{}) do
@@ -91,8 +96,11 @@ defmodule Hireme.Mail do
   def line(:authenticator_disabled, m), do: "a second factor (#{m[:kind]}) was disabled"
   def line(:recovery_code_used, m), do: "a recovery code was used; #{m[:left]} left"
 
+  def line(:digest, %{count: 1} = m),
+    do: "1 security change since #{since(m)}; see the account page"
+
   def line(:digest, m),
-    do: "#{m[:count]} more security changes on your account; see the account page"
+    do: "#{m[:count]} security changes since #{since(m)}; see the account page"
 
   def line(:recovery_codes_issued, _),
     do: "new recovery codes were issued; the old ones no longer work"
@@ -129,7 +137,7 @@ defmodule Hireme.Mail do
     try do
       # Within the account's notice budget each notice goes as itself; past
       # it, each address gets one pending digest, counted up, never repeated.
-      case Security.hit(:notices, account_id, length(addresses)) do
+      case budget(account_id, kind) do
         :ok ->
           Hireme.Store.write(fn ->
             Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
@@ -151,8 +159,20 @@ defmodule Hireme.Mail do
     end
   end
 
+  # One event is one charge, however many addresses hear of it. A change
+  # the owner must see as itself spends its own small budget first.
+  @critical ~w(authenticator_removed authenticator_disabled identity_linked identity_unlinked api_key_widened)a
+
+  defp budget(account_id, kind) do
+    if kind in @critical and Security.hit(:critical_notices, account_id, 1) == :ok,
+      do: :ok,
+      else: Security.hit(:notices, account_id, 1)
+  end
+
   # The one pending digest for an address, due when the budget's window
-  # ends, so a flood of changes coalesces into it instead of mail.
+  # ends, so a flood of changes coalesces into it instead of mail. Only a
+  # digest not yet due counts as pending: one the drain has taken up, or has
+  # given up on, is never added to.
   defp digest(account_id, address, now) do
     require Ecto.Query
     alias Hireme.Rows.Outbox
@@ -162,7 +182,7 @@ defmodule Hireme.Mail do
         Ecto.Query.from(n in Outbox,
           where:
             n.account_id == ^account_id and n.address == ^address and n.kind == "digest" and
-              is_nil(n.sent_at),
+              is_nil(n.sent_at) and n.attempts == 0 and n.next_at > ^now,
           limit: 1
         ),
         skip_account: true
@@ -179,7 +199,7 @@ defmodule Hireme.Mail do
               account_id: account_id,
               address: address,
               kind: "digest",
-              meta: %{count: 1},
+              meta: %{count: 1, since: DateTime.to_iso8601(now)},
               attempts: 0,
               next_at: DateTime.add(now, div(window, 1000)),
               rev: 1,
@@ -191,10 +211,15 @@ defmodule Hireme.Mail do
         )
 
       %Outbox{meta: meta} = row ->
-        count = Map.get(meta || %{}, "count", 0) + 1
+        meta = meta || %{}
+        count = Map.get(meta, "count", 0) + 1
 
         row
-        |> Ecto.Changeset.change(meta: %{"count" => count}, rev: row.rev + 1, updated_at: now)
+        |> Ecto.Changeset.change(
+          meta: Map.put(meta, "count", count),
+          rev: row.rev + 1,
+          updated_at: now
+        )
         |> Hireme.Repo.update!(skip_account: true)
     end
   end

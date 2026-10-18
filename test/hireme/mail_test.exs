@@ -87,4 +87,39 @@ defmodule Hireme.MailTest do
     assert digest.meta["count"] == 5
     assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
   end
+
+  test "one event is one charge however many addresses hear of it; critical kinds keep their own budget" do
+    %{account: a, email: email} = sign_in()
+    many = for i <- 1..40, do: "addr#{i}@example.com"
+    :ok = Mail.enqueue(a.id, many, :api_key_created, %{name: "k"})
+
+    rows = fn kind ->
+      Repo.aggregate(
+        from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id and n.kind == ^kind),
+        :count, skip_account: true)
+    end
+
+    assert rows.("api_key_created") == 40
+    for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
+    :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "past"})
+    assert rows.("digest") == 1
+
+    :ok = Mail.enqueue(a.id, [email], :authenticator_removed, %{kind: :totp})
+    assert rows.("authenticator_removed") == 1
+  end
+
+  test "a digest the drain has taken up or given up on is never added to" do
+    %{account: a, email: email} = sign_in()
+    for i <- 1..31, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
+    [d] = Repo.all(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), skip_account: true)
+    d |> Ecto.Changeset.change(attempts: 8) |> Repo.update!(skip_account: true)
+    :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "later"})
+
+    assert Repo.aggregate(from(n in Hireme.Rows.Outbox, where: n.kind == "digest"), :count,
+             skip_account: true
+           ) == 2
+
+    assert Mail.line(:digest, %{count: 1, since: "2026-10-18T10:00:00Z"}) =~
+             "1 security change since 2026-10-18 10:00:00 UTC"
+  end
 end
