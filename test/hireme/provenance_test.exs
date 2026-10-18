@@ -87,7 +87,7 @@ defmodule Hireme.ProvenanceTest do
     assert Repo.get!(Source, s.id).host == "b.example"
   end
 
-  test "dropping a source leaves its citations naming it: a loose ref is never cleared", %{
+  test "the operator's drop of a cited source is a tombstone its citations keep naming", %{
     account: a
   } do
     id = corp(a, "l.example")
@@ -106,6 +106,13 @@ defmodule Hireme.ProvenanceTest do
 
     assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: c.source_id))
     assert Repo.get!(Citation, c.id).source_id == c.source_id
+    # The operator's drop of a cited source is a tombstone; an uncited one goes.
+    assert %{deleted_at: %DateTime{}, url: "https://l.example/about"} =
+             Repo.get!(Source, c.source_id)
+
+    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://l.example/other"}))
+    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: uncited.id))
+    refute Repo.get(Source, uncited.id)
   end
 
   test "a key cannot drop a source a citation names: provenance outlives it", %{
