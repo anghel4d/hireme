@@ -264,6 +264,31 @@ defmodule HiremeWeb.AccountTest do
     assert last.kind == "agent_ops"
   end
 
+  test "no trail row reaches the lens with a hash, secret, token or code in its meta", %{
+    session: s,
+    ctx: ctx
+  } do
+    Hireme.Audit.record(
+      :link_redeemed,
+      %{
+        email_hash: "0123456789abcdef",
+        token: "t",
+        recovery_code: "c",
+        secret: "s",
+        domain: "example.com"
+      },
+      %{account_id: s.account_id}
+    )
+
+    {:ok, %{events: events}} = Account.call("account.audit", %{}, ctx)
+    redeemed = Enum.find(events, &(&1.kind == "link_redeemed"))
+    assert redeemed.meta == %{"domain" => "example.com"}
+
+    for e <- events,
+        k <- Map.keys(e.meta || %{}),
+        do: refute(to_string(k) =~ ~r/hash|secret|token|code/i, "#{e.kind} meta #{k}")
+  end
+
   test "an id past a 64-bit row id is refused at the boundary, before anything is charged", %{
     ctx: ctx
   } do

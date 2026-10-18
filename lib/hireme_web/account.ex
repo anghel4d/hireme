@@ -460,8 +460,20 @@ defmodule HiremeWeb.Account do
     ])
   end
 
-  defp event(e),
-    do: Map.take(e, [:id, :kind, :ip, :user_agent, :meta, :key_id, :session_id, :inserted_at])
+  defp event(e) do
+    e
+    |> Map.take([:id, :kind, :ip, :user_agent, :meta, :key_id, :session_id, :inserted_at])
+    |> Map.update!(:meta, &shown/1)
+  end
+
+  # A trail row's meta as the lens sees it: never a hash, secret, token or
+  # code, even a truncated one (a link request's email_hash stays server-side).
+  @hidden ~r/hash|secret|token|code/i
+
+  defp shown(meta) when is_map(meta),
+    do: Map.reject(meta, fn {k, _} -> to_string(k) =~ @hidden end)
+
+  defp shown(meta), do: meta
 
   defp fresh_for(%Session{} = s) do
     if Mfa.fresh?(s) do
