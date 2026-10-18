@@ -426,7 +426,12 @@ In order, inside the op's savepoint:
    agent's write to an application held by another session (`leased`;
    the operator's browser session is exempt, see 'Lease and keys').
 3. **shape** — table, columns, types, natural key exist and are writable
-   (`column`, `type`, `not_found`, `natural_key` for `create_only`).
+   (`column`, `type`, `not_found`; `natural_key` when a `create_only` key
+   already exists, or when a keyed op's cells hold none of the table's
+   natural keys: its data lists every key as `{cols, where, reads}` and,
+   under `unmet`, the keys whose columns were given but whose condition
+   failed, with the condition columns `missing`). A refusal's `reason`
+   names the cause in the server's words.
 4. **domain** — `judge.rs` on the sequencer's kernel: pipeline moves, fire
    hold, heat caps without an override, lineage and cooldown (`stage`,
    `fire_hold`, `heat`, `lineage_busy`, `cooldown`).
