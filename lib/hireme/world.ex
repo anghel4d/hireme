@@ -544,13 +544,22 @@ defmodule Hireme.World do
 
   defp key_identity(grants, table, key) do
     keys = table.naturals ++ table.uniques
-    unique_cols = for c <- table.cols, c.unique, do: %{cols: [c.name], where_term: nil}
+
+    unique_cols =
+      for c <- table.cols, c.unique, do: %{cols: [c.name], where: nil, where_term: nil}
+
     wanted = Enum.sort(Map.keys(key))
 
     # A partial key (places' iso2 is a country's) holds only where its where does.
     case Enum.find(keys ++ unique_cols, &(Enum.sort(&1.cols) == wanted)) do
       nil ->
-        {:error, :natural_key, %{table: table.name, key: brief(Map.keys(key))}}
+        {:error, :natural_key,
+         %{
+           table: table.name,
+           key: brief(Map.keys(key)),
+           reason: "no declared key is made of exactly these columns",
+           keys: Enum.map(keys ++ unique_cols, &Schema.key_doc/1)
+         }}
 
       k ->
         with {:ok, d} <- filters(grants, table, key),

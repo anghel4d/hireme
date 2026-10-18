@@ -500,4 +500,19 @@ defmodule Hireme.WorldTest do
 
     assert fresh != sid
   end
+
+  test "a key made of no declared key's columns is refused with the reason and the table's keys" do
+    assert {:error, :natural_key, data} =
+             World.get(1, Grants.operator(), %{
+               "table" => "places",
+               "key" => %{"name" => "Lisbon"}
+             })
+
+    assert data.reason == "no declared key is made of exactly these columns"
+    assert %{cols: ["iso2"], where: "kind = 'country'", reads: ["kind"]} in data.keys
+    assert %{cols: ["geonames_id"], where: "kind = 'city'", reads: ["kind"]} in data.keys
+
+    # The refusal goes out as JSON, as the wire carries it.
+    assert %{"keys" => [_ | _]} = Jason.decode!(Jason.encode!(data))
+  end
 end
