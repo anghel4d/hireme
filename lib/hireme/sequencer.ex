@@ -228,12 +228,12 @@ defmodule Hireme.Sequencer do
 
   def handle_call({:lease, pid, request}, _from, state) do
     {reply, after_} =
-      case lease_allowed(request, state.subs[pid]) do
+      case lease_allowed(request, subscriber(state, request)) do
         :ok -> lease_request(request, pid, state)
         refused -> {refused, state}
       end
 
-    send(self(), {:audit_channels, state.lease})
+    send(self(), {:audit_channels, state.lease, after_.lease})
     {:reply, reply, after_, @idle_ms}
   rescue
     e ->
@@ -277,7 +277,7 @@ defmodule Hireme.Sequencer do
     case state.subs do
       %{^pid => %{ref: ^ref, id: id}} ->
         after_ = %{state | subs: Map.delete(state.subs, pid), lease: Lease.leave(state.lease, id)}
-        send(self(), {:audit_channels, state.lease})
+        send(self(), {:audit_channels, state.lease, after_.lease})
         {:noreply, broadcast_leases(after_, []), @idle_ms}
 
       _ ->
@@ -285,10 +285,16 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  def handle_info(:backfill, state), do: {:noreply, backfill(state), @idle_ms}
+  def handle_info(:backfill, state) do
+    {:noreply, backfill(state), @idle_ms}
+  rescue
+    e ->
+      Logger.error("sequencer #{state.account_id}: keywords backfill: #{Exception.message(e)}")
+      {:noreply, state, @idle_ms}
+  end
 
-  def handle_info({:audit_channels, before}, state) do
-    audit_channels(before, state)
+  def handle_info({:audit_channels, before, after_}, state) do
+    audit_channels(before, after_, state.account_id)
     {:noreply, state, @idle_ms}
   rescue
     e ->
@@ -338,7 +344,7 @@ defmodule Hireme.Sequencer do
   # through the sequencer, a batch per turn, so the kernel re-extracts it.
   defp backfill(state) do
     version = Kernel.keywords_version()
-    held = state.lease.holder |> Map.keys()
+    held = MapSet.new(Map.keys(state.lease.holder))
 
     # Held applications wait for their holder to let go; a text that is not
     # UTF-8 (only a hand-edited database has one) is left alone.
@@ -346,14 +352,15 @@ defmodule Hireme.Sequencer do
       Repo.all(
         from(r in Hireme.Rows.Application,
           where:
-            not is_nil(r.listing_raw) and r.id not in ^held and
+            not is_nil(r.listing_raw) and
               (is_nil(r.keywords_version) or r.keywords_version != ^version),
           select: {r.id, r.listing_raw},
           order_by: r.id,
-          limit: @batch
+          limit: ^(@batch + MapSet.size(held))
         )
       )
-      |> Enum.filter(fn {_, text} -> String.valid?(text) end)
+      |> Enum.reject(fn {id, text} -> id in held or not String.valid?(text) end)
+      |> Enum.take(@batch)
 
     if stale == [] do
       state
@@ -1360,12 +1367,11 @@ defmodule Hireme.Sequencer do
     end)
   end
 
-  # A deferred column's twin: `<col>_sha`, or for listing_raw its listing_sha.
+  # A deferred column's twin is the column whose sha_of names it.
   defp sha_twin(table, col) do
-    Enum.find_value(
-      [col.name <> "_sha", String.replace_suffix(col.name, "_raw", "_sha")],
-      fn name -> (name != col.name and col(table, name)) && String.to_atom(name) end
-    )
+    Enum.find_value(table.cols, fn c ->
+      Map.get(c, :sha_of) == col.name and String.to_atom(c.name)
+    end)
   end
 
   defp atomize(m), do: Map.new(m, fn {k, v} -> {String.to_atom(k), v} end)
@@ -1782,6 +1788,15 @@ defmodule Hireme.Sequencer do
 
   # A key's lease requests spend its write budget; a claim needs a write bit,
   # and claiming applications the desk's (the session checks the same).
+  # The subscription a request names by its session id (not the caller's pid).
+  defp subscriber(state, {kind, sid, _}) when kind in [:claim, :release],
+    do: Enum.find_value(state.subs, fn {_, s} -> s.id == sid && s end) || :unknown
+
+  defp subscriber(_state, _request), do: :none
+
+  defp lease_allowed({kind, _, _}, :unknown) when kind in [:claim, :release],
+    do: {:refused, :lease_missing, %{}}
+
   defp lease_allowed({:claim, _, params}, %{key_id: key_id, grants: g}) when key_id != nil do
     claims = params["count"] not in [nil, 0] or params["ids"] not in [nil, []]
 
@@ -1840,15 +1855,17 @@ defmodule Hireme.Sequencer do
 
   # A key's session taking or giving up the channel is audited, which also
   # wakes the account lens's parked watch: the operator sees agents come and go.
-  defp audit_channels(before, after_) do
+  # `before` and `after_` are the leases around one request, captured then:
+  # another session's change in between is its own request's to audit.
+  defp audit_channels(before, after_, account_id) do
     for {sid, s} <- before.sessions,
         s.key_id != nil,
-        s.channel != Lease.channel?(after_.lease, sid) do
+        s.channel != Lease.channel?(after_, sid) do
       kind = if s.channel, do: :lease_released, else: :lease_opened
-      held = MapSet.size(Lease.held(if(s.channel, do: before, else: after_.lease), sid))
+      held = MapSet.size(Lease.held(if(s.channel, do: before, else: after_), sid))
 
       Hireme.Audit.record(kind, %{lease_id: sid, label: s.label, count: held}, %{
-        account_id: after_.account_id,
+        account_id: account_id,
         key_id: s.key_id
       })
     end

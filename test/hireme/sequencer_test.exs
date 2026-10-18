@@ -852,6 +852,97 @@ defmodule Hireme.SequencerTest do
                {byte_size(text), binary_part(sha, 0, 8)}
     end
 
+    test "deferred prose travels as stubs read from its hash twin", %{account: a} do
+      notes = String.duplicate("Talked to the hiring manager. ", 30)
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "P", role: "R", notes: notes}))
+      sha = :crypto.hash(:sha256, notes)
+
+      assert Repo.get!(Hireme.Rows.Application, app.id).notes_sha ==
+               Base.encode16(sha, case: :lower)
+
+      {:ok, %{frames: [boot]}} =
+        Sequencer.subscribe(
+          a.id,
+          %{id: 996, label: "o", grants: Grants.operator(), key_id: nil, session_id: nil},
+          0
+        )
+
+      {:ok, :BOOT, _, _, body} = Codec.decode(boot)
+      col = Schema.column(:applications, "notes").id
+
+      assert get_in(ingest(%{}, :BOOT, body), ["applications", app.id, col]) ==
+               {byte_size(notes), binary_part(sha, 0, 8)}
+    end
+
+    test "a capped table refuses the row past its cap, and a delete frees a slot", %{account: a} do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      cap = Schema.table(:corporations).cap
+
+      for chunk <- Enum.chunk_every(1..(cap - 1), 2_000) do
+        Repo.insert_all(
+          Hireme.Rows.Corporation,
+          for(
+            i <- chunk,
+            do: %{
+              account_id: a.id,
+              domain: "c#{i}.example",
+              name: "C",
+              rev: 1,
+              inserted_at: now,
+              updated_at: now
+            }
+          )
+        )
+      end
+
+      {[last], []} = run(a.id, op(:put, :corporations, %{domain: "last.example", name: "L"}))
+
+      assert {[], [%{refusal: :cap}]} =
+               run(a.id, op(:put, :corporations, %{domain: "over.example", name: "O"}))
+
+      {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: last.id))
+      assert {[_], []} = run(a.id, op(:put, :corporations, %{domain: "again.example", name: "A"}))
+    end
+
+    test "two sessions' lease audits are each their own, however they interleave", %{
+      account: a,
+      session: s
+    } do
+      sessions =
+        for {name, sid} <- [{"x", 997}, {"y", 998}] do
+          {:ok, %{key: key}} = Hireme.Keys.mint(s, name, Hireme.Keys.preset(:read_write))
+
+          me = self()
+          info = %{id: sid, label: name, grants: Grants.key(key), key_id: key.id, session_id: nil}
+
+          # Each session its own process, as on the wire.
+          spawn_link(fn ->
+            {:ok, _} = Sequencer.subscribe(a.id, info, 0)
+            send(me, {:joined, sid})
+            Process.sleep(:infinity)
+          end)
+
+          assert_receive {:joined, ^sid}
+          sid
+        end
+
+      for _ <- 1..5, sid <- sessions do
+        {:ok, _} = Hireme.Lease.claim(a.id, sid, %{})
+        {:ok, _} = Hireme.Lease.release(a.id, sid, nil)
+      end
+
+      _ = Sequencer.rev(a.id)
+
+      kinds =
+        Repo.all(
+          from r in Hireme.Rows.Audit,
+            where: r.kind in ["lease_opened", "lease_released"],
+            select: r.kind
+        )
+
+      assert Enum.frequencies(kinds) == %{"lease_opened" => 10, "lease_released" => 10}
+    end
+
     test "expect_rev guards a drop and a command too", %{account: a} do
       {[app], []} = run(a.id, op(:put, :applications, %{company: "Rev", role: "R"}))
 
