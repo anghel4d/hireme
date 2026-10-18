@@ -8,7 +8,10 @@ const error = document.getElementById("factor-error")
 const csrf = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""
 
 const say = (text: string) => {
-  if (error) error.textContent = text
+  if (!error) return
+  error.textContent = text
+  // The page renders the box hidden when there is nothing to say yet.
+  error.hidden = text === ""
 }
 
 const post = (path: string, body?: unknown) =>

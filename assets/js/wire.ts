@@ -10,10 +10,9 @@
 // A field is `u32 len | bytes | zero pad to 8`. On WebTransport the first
 // bidi stream is control (HELLO, OPS, RPC, PING up; WELCOME, PATCH, ACK,
 // NACK, REPLY, TICK, PONG, BYE down) and the server may push the BOOT on a
-// uni stream. A PATCH must never be applied before the BOOT it follows, so
-// control frames after WELCOME wait until a frame flagged END lands from
-// any stream: on the socket, everything is one ordered stream and nothing
-// waits longer than it would anyway.
+// uni stream, so on WebTransport live frames wait until the initial train
+// has ended (see Wire); on the socket everything is one ordered stream and
+// nothing waits.
 
 import { BYE, FRAME, WIRE_TYPE } from "./gen/schema.ts"
 
@@ -345,8 +344,8 @@ export class Framer {
         if (len < HEADER || len % 8 !== 0) return this.fail(len)
         if (len > whole.byteLength - at) break
         const f = whole.subarray(at, at + len)
-        this.sink(f, header(f))
         at += len
+        this.emit(f)
       }
       if (at === whole.byteLength) return
       bytes = whole.subarray(at)
@@ -364,11 +363,22 @@ export class Framer {
       if (len < HEADER || len % 8 !== 0) return this.fail(len)
       if (this.filled - at < len) break
       const f = this.buf.subarray(at, at + len)
-      this.sink(f, header(f))
       at += len
+      this.emit(f)
     }
     this.buf.copyWithin(0, at, this.filled)
     this.filled -= at
+  }
+
+  // A sink that throws must not make the framer hand the same frame over again: it is reported, and cutting goes on.
+  private emit(f: Bytes): void {
+    try {
+      this.sink(f, header(f))
+    } catch (e) {
+      queueMicrotask(() => {
+        throw e
+      })
+    }
   }
 
   private fail(len: number): void {
@@ -419,10 +429,27 @@ export function meta(): Meta {
   }
 }
 
+/** How long a WebTransport handshake may take before the socket is used instead. */
+const WT_WAIT_MS = 3000
+
+type CarrierKind = "webtransport" | "websocket"
+
 /**
  * One wire session, reconnecting. It owns the carrier, the framer, the
  * BOOT-train hold, liveness, and the ticket for each attempt; it knows
  * nothing about rows.
+ *
+ * Every attempt has a serial: a carrier's handlers name the attempt they
+ * belong to, so a socket that closes before it ever opened still ends its
+ * attempt (and schedules the next), and a late event from an old carrier
+ * changes nothing.
+ *
+ * The hold exists only on WebTransport, where the BOOT may ride a stream of
+ * its own and a control-stream PATCH could otherwise beat it. Train frames
+ * are a BOOT, or a PATCH stamped no later than WELCOME's rev (the resume of
+ * a current snapshot); a live PATCH is later. They pass, and the train's
+ * END releases what waited. On the socket everything is one ordered stream:
+ * nothing is held.
  */
 export class Wire {
   readonly hash: number
@@ -431,7 +458,14 @@ export class Wire {
   private ticket: string
   private gate: string
   private readonly hashes: Meta["hashes"]
+  private serial = 0
+  private downed = 0
+  private carrierKind: CarrierKind | null = null
+  /** WebTransport failed or stalled once on this page: the socket is used from then on. */
+  private wtBroken = false
   private held: Bytes[] | null = null
+  private welcomeRev = -1n
+  private trained = false
   private heard = 0
   private pinger = 0
   private attempt = 0
@@ -515,16 +549,25 @@ export class Wire {
         return this.retry(String(e))
       }
     }
-    if (this.gate !== "" && "WebTransport" in window && this.attempt < 2) {
+    if (this.gate !== "" && "WebTransport" in window && !this.wtBroken) {
+      let wt: WebTransport | null = null
       try {
-        const wt = new WebTransport(this.gate, this.hashes.length > 0 ? { serverCertificateHashes: this.hashes } : {})
-        await wt.ready
+        wt = new WebTransport(this.gate, this.hashes.length > 0 ? { serverCertificateHashes: this.hashes } : {})
+        wt.closed.catch(() => {})
+        let timer = 0
+        await Promise.race([wt.ready, new Promise((_, no) => (timer = window.setTimeout(() => no(new Error("slow")), WT_WAIT_MS)))])
+        clearTimeout(timer)
         const stream = await wt.createBidirectionalStream()
-        const writer = stream.writable.getWriter()
-        this.adoptTransport(wt, writer, stream.readable, [], false)
+        this.adoptTransport(wt, stream.writable.getWriter(), stream.readable, [], false)
         return
       } catch {
-        // UDP blocked or the gate is down: the socket is the fallback, at once.
+        // UDP blocked, the gate down or slow: close what was opened and use the socket from now on.
+        try {
+          wt?.close()
+        } catch {
+          // Already closed.
+        }
+        this.wtBroken = true
       }
     }
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire`)
@@ -532,35 +575,52 @@ export class Wire {
     this.adoptSocket(ws, [], false)
   }
 
+  /** A new attempt: its serial, and the hold (WebTransport only) armed before anything is delivered. */
+  private begin(kind: CarrierKind): number {
+    this.serial++
+    this.carrierKind = kind
+    this.held = kind === "webtransport" ? [] : null
+    this.welcomeRev = -1n
+    this.trained = false
+    this.welcomed = false
+    return this.serial
+  }
+
   private adoptSocket(ws: WebSocket, queue: ArrayBuffer[], helloSent: boolean): void {
-    const framer = this.framer()
+    const me = this.begin("websocket")
+    const framer = this.framer(me)
     const up = () => {
+      if (me !== this.serial) return
       this.send_ = (f) => ws.send(f)
       this.close_ = () => ws.close()
       if (!helloSent) ws.send(this.credential())
-      this.up("websocket")
+      this.up(me)
     }
-    ws.onmessage = (e) => framer.push(new Uint8Array(e.data as ArrayBuffer))
-    ws.onclose = () => this.down("socket closed")
+    ws.onmessage = (e) => {
+      if (me === this.serial) framer.push(new Uint8Array(e.data as ArrayBuffer))
+    }
+    ws.onclose = () => this.down("socket closed", me)
     ws.onerror = () => {}
     for (const b of queue.splice(0)) framer.push(new Uint8Array(b))
     if (ws.readyState === WebSocket.OPEN) up()
-    else ws.onopen = up
+    else if (ws.readyState === WebSocket.CONNECTING) ws.onopen = up
+    else this.down("socket closed", me)
   }
 
   private adoptTransport(wt: WebTransport, writer: WritableStreamDefaultWriter<Uint8Array>, control: ReadableStream<Uint8Array>,
     queue: ArrayBuffer[], helloSent: boolean): void {
-    const framer = this.framer()
+    const me = this.begin("webtransport")
+    const framer = this.framer(me)
     this.send_ = (f) => void writer.write(f).catch(() => {})
     this.close_ = () => wt.close()
     for (const b of queue.splice(0)) framer.push(new Uint8Array(b))
     if (!helloSent) void writer.write(this.credential())
-    this.up("webtransport")
-    const drain = async (s: ReadableStream<Uint8Array>, f: Framer) => {
-      const r = s.getReader()
+    this.up(me)
+    const drain = async (st: ReadableStream<Uint8Array>, f: Framer) => {
+      const r = st.getReader()
       for (;;) {
         const { done, value } = await r.read()
-        if (done) return
+        if (done || me !== this.serial) return
         f.push(value)
       }
     }
@@ -570,32 +630,41 @@ export class Wire {
       for (;;) {
         const { done, value } = await uni.read()
         if (done) return
-        void drain(value, this.framer()).catch(() => {})
+        void drain(value, this.framer(me)).catch(() => {})
       }
     })().catch(() => {})
-    void wt.closed.then(() => this.down("transport closed"), () => this.down("transport failed"))
+    void wt.closed.then(() => this.down("transport closed", me), () => this.down("transport failed", me))
   }
 
-  private framer(): Framer {
-    return new Framer((f, h) => this.deliver(f, h), (why) => {
+  private framer(me: number): Framer {
+    return new Framer((f, h) => {
+      if (me === this.serial) this.deliver(f, h)
+    }, (why) => {
       this.hooks.lost(why, 0)
       this.close_?.()
+      this.down(why, me)
     })
   }
 
-  private up(carrier: "webtransport" | "websocket"): void {
-    this.attempt = 0
+  private up(me: number): void {
     this.heard = Date.now()
-    this.held = []
     clearInterval(this.pinger)
     this.pinger = window.setInterval(() => {
       if (Date.now() - this.heard > SILENT_MS) {
-        this.close_?.()
+        // A half-open link may never finish closing: the attempt ends now, the close is best effort.
+        const close = this.close_
+        this.down(`no frame for ${SILENT_MS / 1000} s`, me)
+        close?.()
         return
       }
       this.send(ping(this.hash, ++this.nonce))
     }, PING_MS)
-    this.hooks.open(carrier)
+    this.hooks.open(this.carrierKind ?? "websocket")
+  }
+
+  /** Part of the initial train: a BOOT, or the resume PATCHes stamped at or before WELCOME's rev. */
+  private train(h: Header): boolean {
+    return h.kind === KIND.BOOT || (h.kind === KIND.PATCH && this.welcomeRev >= 0n && h.rev <= this.welcomeRev)
   }
 
   // Frames are copied while held: a framer's view is only good during the call.
@@ -614,25 +683,42 @@ export class Wire {
       this.send(new Writer().u64(pong(f)).done(KIND.PONG, this.hash))
       return
     }
-    const train = h.kind === KIND.BOOT || h.kind === KIND.WELCOME || h.kind === KIND.BYE || h.kind === KIND.PONG
-    if (this.held && !train) {
+    if (h.kind === KIND.WELCOME) {
+      this.welcomeRev = h.rev
+      this.hooks.frame(f, h)
+      this.welcomed = true
+      for (const g of this.early.splice(0)) this.send(g)
+      // A resume PATCH that beat WELCOME was held as live; it is the train after all.
+      if (this.held) {
+        const held = this.held
+        this.held = []
+        for (const g of held) this.pass(g, header(g))
+      }
+      return
+    }
+    this.pass(f, h)
+  }
+
+  private pass(f: Bytes, h: Header): void {
+    const train = this.train(h)
+    if (this.held && !train && h.kind !== KIND.BYE && h.kind !== KIND.PONG) {
       this.held.push(f.slice())
       return
     }
     this.hooks.frame(f, h)
-    if (h.kind === KIND.WELCOME) {
-      this.welcomed = true
-      for (const g of this.early.splice(0)) this.send(g)
-    }
-    if (this.held && (h.flags & FLAG.END) !== 0) {
+    if (!this.trained && this.welcomeRev >= 0n && (h.flags & FLAG.END) !== 0 && (train || this.held === null)) {
+      // The train is in: the session is established, so the next drop starts its backoff from the bottom.
+      this.trained = true
+      this.attempt = 0
       const held = this.held
       this.held = null
-      for (const g of held) this.hooks.frame(g, header(g))
+      for (const g of held ?? []) this.hooks.frame(g, header(g))
     }
   }
 
-  private down(why: string): void {
-    if (this.send_ === null && this.close_ === null) return
+  private down(why: string, me: number): void {
+    if (me !== this.serial || this.downed === me) return
+    this.downed = me
     this.send_ = null
     this.close_ = null
     this.held = null

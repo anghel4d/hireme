@@ -196,7 +196,11 @@ export function set(patch: Partial<Model>): void {
 /** Move to an address; a filter change replaces the history entry, a lens change pushes one. */
 export function go(next: Partial<Address>, replace = false): void {
   const address: Address = { ...model.address, ...next }
-  if (next.lens !== undefined && next.lens !== model.address.lens && next.q === undefined) address.q = new Map()
+  // A new lens starts from its own defaults: the old lens's sub and query mean nothing there.
+  if (next.lens !== undefined && next.lens !== model.address.lens) {
+    if (next.q === undefined) address.q = new Map()
+    if (next.sub === undefined) address.sub = ""
+  }
   const url = format(address)
   if (url !== `${location.pathname}${location.search}`) {
     if (replace) history.replaceState(null, "", url)

@@ -56,6 +56,8 @@ export const flag = (name: string, on: boolean): Html => new Html(on ? ` ${name}
 /** An href for a value someone else wrote: http(s), mailto and same-origin paths only. */
 export function href(url: string | null | undefined): string {
   if (url === null || url === undefined || url === "") return "#"
+  // A backslash or a control character lets a browser read "/\\host" or "/<tab>/host" as another origin.
+  if (/[\\\u0000-\u001f\u007f]/.test(url)) return "#"
   if (url.startsWith("/") && !url.startsWith("//")) return url
   try {
     const u = new URL(url)
@@ -80,14 +82,23 @@ function place(into: Movable, node: Node, before: Node | null): void {
   else into.insertBefore(node, before)
 }
 
+/**
+ * The control that had focus when this morph began. A keyed move without
+ * moveBefore blurs it mid-morph, so "is this the user's field?" is asked of
+ * this, never of document.activeElement.
+ */
+let focused: Element | null = null
+
 /** Make `target`'s children match `next`. */
 export function morph(target: Element, next: Html): void {
   const active = document.activeElement
+  focused = active
   const field = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active : null
   const caret = field ? [field.selectionStart, field.selectionEnd, field.selectionDirection] as const : null
   const tpl = document.createElement("template")
   tpl.innerHTML = next.text
   children(target, tpl.content)
+  focused = null
   if (active instanceof HTMLElement && active !== document.activeElement && active.isConnected) {
     active.focus({ preventScroll: true })
     if (field && caret) {
@@ -158,18 +169,23 @@ function patch(old: Node, next: Node): void {
   const b = next as Element
   if (a.getAttribute(OWN) === "own" && b.getAttribute(OWN) === "own") return
   attributes(a, b)
-  if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement) control(a, b)
-  if (a instanceof HTMLTextAreaElement) return
+  if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement) {
+    // control() has already matched a select's options; a second pass would undo it.
+    control(a, b)
+    return
+  }
   children(a, b)
 }
 
 function attributes(a: Element, b: Element): void {
+  // A <details> the user opened or closed keeps that state: `open` is theirs once it has landed.
+  const theirs = a.localName === "details" ? "open" : null
   for (let i = a.attributes.length - 1; i >= 0; i--) {
     const name = a.attributes[i]?.name
-    if (name !== undefined && !b.hasAttribute(name)) a.removeAttribute(name)
+    if (name !== undefined && name !== theirs && !b.hasAttribute(name)) a.removeAttribute(name)
   }
   for (const { name, value } of Array.from(b.attributes)) {
-    if (a.getAttribute(name) !== value) a.setAttribute(name, value)
+    if (name !== theirs && a.getAttribute(name) !== value) a.setAttribute(name, value)
   }
 }
 
@@ -180,10 +196,10 @@ function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, 
   if (a instanceof HTMLSelectElement) {
     children(a, b)
     const chosen = b.querySelector("option[selected]")?.getAttribute("value")
-    if (chosen !== undefined && chosen !== null && a !== document.activeElement) a.value = chosen
+    if (chosen !== undefined && chosen !== null && a !== focused) a.value = chosen
     return
   }
-  if (a === document.activeElement) return
+  if (a === focused) return
   if (a instanceof HTMLInputElement && (a.type === "checkbox" || a.type === "radio")) {
     a.checked = b.hasAttribute("checked")
     return

@@ -354,15 +354,33 @@ export function send(ops: readonly Op[]): Promise<Verdict>[] {
   const out = ops.map((op, i) => new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes: bytes[i]! })))
   set({ pending: pending.size })
   // Offline, the ops wait: the reconnect resends them, and the ledger answers a resent op once.
-  wire.send(opsFrame(wire.hash, bytes))
+  for (const f of frames(bytes)) wire.send(opsFrame(wire.hash, f))
+  return out
+}
+
+/** The node takes WebSocket frames up to 2 MiB: ops go in as many OPS frames as that needs. */
+const FRAME_BYTES = 1_900_000
+
+function frames(ops: readonly Bytes[]): Bytes[][] {
+  const out: Bytes[][] = []
+  let size = 0
+  for (const op of ops) {
+    const last = out[out.length - 1]
+    if (!last || last.length >= OPS_MAX || size + op.byteLength > FRAME_BYTES) {
+      out.push([op])
+      size = 24 + op.byteLength
+    } else {
+      last.push(op)
+      size += op.byteLength
+    }
+  }
   return out
 }
 
 /** app.ts, when a session opens: every unanswered op again, as it was. */
 export function resend(): void {
   if (!wire || pending.size === 0) return
-  const all = [...pending.values()].map((p) => p.bytes)
-  for (let i = 0; i < all.length; i += OPS_MAX) wire.send(opsFrame(wire.hash, all.slice(i, i + OPS_MAX)))
+  for (const f of frames([...pending.values()].map((p) => p.bytes))) wire.send(opsFrame(wire.hash, f))
 }
 
 // ------------------------------------------------------------------ typed puts
