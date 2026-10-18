@@ -52,7 +52,8 @@ defmodule Hireme.Schema.Parser do
     implied: 512,
     metric_on: 1024,
     natural: 2048,
-    cascade: 4096
+    cascade: 4096,
+    sha_on: 8192
   }
 
   @doc "The resolved declaration of `source`; raises naming the line on any error."
@@ -228,7 +229,7 @@ defmodule Hireme.Schema.Parser do
 
   defp table_line(["col", name, type | rest], _where, n, t, _) do
     {type, target, rest} = type!(type, rest, n)
-    %{t | cols: t.cols ++ [column(name, type, target, rest, n)]}
+    %{t | cols: t.cols ++ with_sha(column(name, type, target, rest, n))}
   end
 
   defp table_line(["metric", name, type | rest], _where, n, t, _) do
@@ -254,7 +255,7 @@ defmodule Hireme.Schema.Parser do
   defp table_line(["prose", name | rest], _where, n, t, _) do
     rest = rest |> drop_prefix(["text"]) |> drop_prefix(["?"])
     col = column(name, :text, nil, rest, n)
-    %{t | cols: t.cols ++ [%{col | prose: true, deferred: true}]}
+    %{t | cols: t.cols ++ with_sha(%{col | prose: true, deferred: true})}
   end
 
   defp table_line(["command", name | rest], _where, n, t, _state) do
@@ -274,6 +275,24 @@ defmodule Hireme.Schema.Parser do
   end
 
   defp table_line(tokens, _where, n, _t, _), do: fail(n, "unreadable: #{Enum.join(tokens, " ")}")
+
+  # A deferred column travels as its length and hash, so its hash is stored
+  # beside it: the readonly `<name>_sha` (a trailing `_raw` dropped, so
+  # listing_raw's is listing_sha), as visible as the column.
+  defp with_sha(%{deferred: true} = col) do
+    twin = %{
+      blank(String.replace_suffix(col.name, "_raw", "") <> "_sha", :str)
+      | sha_of: col.name,
+        readonly: true,
+        private: col.private,
+        server_only: col.server_only,
+        human_only: col.human_only
+    }
+
+    [col, twin]
+  end
+
+  defp with_sha(col), do: [col]
 
   defp drop_prefix([p | rest], [p]), do: rest
   defp drop_prefix(rest, _), do: rest
@@ -365,6 +384,7 @@ defmodule Hireme.Schema.Parser do
       cascade: false,
       metric: false,
       metric_of: nil,
+      sha_of: nil,
       prose: false,
       implied: false,
       id: nil
@@ -812,7 +832,8 @@ defmodule Hireme.Schema.Parser do
       implied: c.implied,
       metric_on: c.metric_of != nil,
       natural: Map.get(c, :natural, false),
-      cascade: Map.get(c, :cascade, false)
+      cascade: Map.get(c, :cascade, false),
+      sha_on: Map.get(c, :sha_of) != nil
     ]
     |> Enum.reduce(0, fn {k, on}, acc -> if on, do: Bitwise.bor(acc, @flag_bits[k]), else: acc end)
   end

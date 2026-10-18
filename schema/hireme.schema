@@ -42,8 +42,9 @@
 #
 # Types: id ref(<table>) enum(<enum>) bool u8 u32 i64 f64 day time str text json bytes
 # Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (BOOT/PATCH carry
-#        length + hash, `RPC text` the bytes)   private (browser sessions only, never a
-#        key)   server_only (never leaves the server)   human_only (a key's write is
+#        length + hash, `RPC text` the bytes; implies the readonly `<name>_sha`, its
+#        hex SHA-256, a trailing `_raw` dropped: listing_raw's is listing_sha)
+#        private (browser sessions only, never a key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)   cascade (a nullable ref whose row is deleted
 #        with the row it names; without it a nullable ref is set null)
@@ -282,7 +283,7 @@ table profiles corpus resident
   col name str !
   col headline str ?
   col summary text ?
-  col narrative text ?
+  col narrative text ? deferred
   col narrative_private text ? private
 
 # CV atoms; a null profile_id is shared by every profile.
@@ -324,8 +325,6 @@ table applications desk resident
   col channel enum app_channel ?
   col listing_raw text ? deferred
   col listing_format enum listing_format ?
-  # Hex SHA-256 of listing_raw.
-  col listing_sha str ? readonly
   col listing_url str ?
   col canonical_url str ?
   col listing_on day ?
@@ -350,9 +349,9 @@ table applications desk resident
   col replied_on day ? readonly
   col closed_on day ? readonly
   col outcome enum outcome ?
-  col notes text ?
-  col battleplan text ?
-  col letter_raw text ?
+  col notes text ? deferred
+  col battleplan text ? deferred
+  col letter_raw text ? deferred
   col cv_theme json ?
   command stage stage note:text?
   command note stage body:text
@@ -363,7 +362,7 @@ table events desk resident append_only
   index application_id id desc
   col application_id ref applications !
   col kind str !
-  col body text ?
+  col body text ? deferred
   col actor enum actor ! readonly
   col key_id ref api_keys ? readonly
   col op_id i64 ? readonly
@@ -427,7 +426,7 @@ table places world server
   index country_id name
   # The world lens and agents look places up by name and filter by region.
   index name
-  index region
+  index region population
   col kind enum place_kind !
   col country_id ref places ?
   col iso2 str ?

@@ -655,18 +655,16 @@ defmodule Hireme.World do
 
   # ------------------------------------------------------------------ paging
 
-  # Order by (col is null), col, id: nulls last in both directions.
+  # Order by col, then id, nulls last in both directions. NULLS LAST, not an
+  # IS NULL term: a descending page then walks an index on the column
+  # backwards instead of sorting every row the filter keeps.
   defp order(query, %{name: "id"}, desc),
     do: order_by(query, [r], [{^dir(desc), r.id}])
 
   defp order(query, col, desc) do
     f = String.to_atom(col.name)
-
-    order_by(query, [r], [
-      {:asc, fragment("? IS NULL", field(r, ^f))},
-      {^dir(desc), field(r, ^f)},
-      {^dir(desc), r.id}
-    ])
+    nulls_last = if desc, do: :desc_nulls_last, else: :asc_nulls_last
+    order_by(query, [r], [{^nulls_last, field(r, ^f)}, {^dir(desc), r.id}])
   end
 
   defp dir(true), do: :desc

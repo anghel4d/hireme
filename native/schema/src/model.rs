@@ -102,6 +102,7 @@ pub mod flag {
     pub const METRIC_ON: u32 = 1024;
     pub const NATURAL: u32 = 2048;
     pub const CASCADE: u32 = 4096;
+    pub const SHA_ON: u32 = 8192;
 }
 
 /// Reserved cell ids in an op.
@@ -210,6 +211,8 @@ pub struct Column {
     pub metric: bool,
     /// On a metric's `_on` twin: the metric it dates.
     pub metric_of: Option<String>,
+    /// On a deferred column's `_sha` twin: the column it hashes.
+    pub sha_of: Option<String>,
     pub prose: bool,
     pub implied: bool,
 }
@@ -233,6 +236,7 @@ impl Column {
             natural: false,
             metric: false,
             metric_of: None,
+            sha_of: None,
             prose: false,
             implied: false,
         }
@@ -258,6 +262,7 @@ impl Column {
             (self.metric_of.is_some(), flag::METRIC_ON),
             (self.natural, flag::NATURAL),
             (self.cascade, flag::CASCADE),
+            (self.sha_of.is_some(), flag::SHA_ON),
         ] {
             if on {
                 f |= bit;
@@ -606,6 +611,24 @@ fn param(token: &str, line: usize) -> Result<RawParam, Error> {
     }
 }
 
+// A deferred column travels as its length and hash, so its hash is stored
+// beside it: the readonly `<name>_sha` (a trailing `_raw` dropped, so
+// listing_raw's is listing_sha), as visible as the column.
+fn push_with_sha(t: &mut RawTable, col: Column) {
+    let twin = col.deferred.then(|| {
+        let stem = col.name.strip_suffix("_raw").unwrap_or(&col.name);
+        let mut twin = Column::blank(&format!("{stem}_sha"), Type::Str);
+        twin.sha_of = Some(col.name.clone());
+        twin.readonly = true;
+        twin.private = col.private;
+        twin.server_only = col.server_only;
+        twin.human_only = col.human_only;
+        twin
+    });
+    t.cols.push(col);
+    t.cols.extend(twin);
+}
+
 fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: usize) -> Result<(), Error> {
     match tokens {
         ["pick", cols @ ..] => {
@@ -657,7 +680,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
             };
             let mut col = Column::blank(cname, ty);
             col.target = target;
-            t.cols.push(walk(rest, col, line)?);
+            push_with_sha(t, walk(rest, col, line)?);
         }
         ["metric", mname, ty, rest @ ..] => {
             name(mname, line)?;
@@ -696,7 +719,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
             let mut col = walk(rest, Column::blank(pname, Type::Text), line)?;
             col.prose = true;
             col.deferred = true;
-            t.cols.push(col);
+            push_with_sha(t, col);
         }
         ["command", cname, rest @ ..] => {
             name(cname, line)?;

@@ -215,6 +215,7 @@ CREATE TABLE "profiles" (
   "headline" TEXT,
   "summary" TEXT,
   "narrative" TEXT,
+  "narrative_sha" TEXT,
   "narrative_private" TEXT
 ) STRICT;
 CREATE INDEX "profiles__account_account_id" ON "profiles" ("account_id");
@@ -262,8 +263,8 @@ CREATE TABLE "applications" (
   "comp_raw" TEXT,
   "channel" TEXT,
   "listing_raw" TEXT,
-  "listing_format" TEXT,
   "listing_sha" TEXT,
+  "listing_format" TEXT,
   "listing_url" TEXT,
   "canonical_url" TEXT,
   "listing_on" TEXT,
@@ -285,8 +286,11 @@ CREATE TABLE "applications" (
   "closed_on" TEXT,
   "outcome" TEXT,
   "notes" TEXT,
+  "notes_sha" TEXT,
   "battleplan" TEXT,
+  "battleplan_sha" TEXT,
   "letter_raw" TEXT,
+  "letter_sha" TEXT,
   "cv_theme" TEXT
 ) STRICT;
 CREATE INDEX "applications__account_account_id" ON "applications" ("account_id");
@@ -317,6 +321,7 @@ CREATE TABLE "events" (
   "application_id" INTEGER NOT NULL REFERENCES "applications"("id") ON DELETE CASCADE,
   "kind" TEXT NOT NULL,
   "body" TEXT,
+  "body_sha" TEXT,
   "actor" TEXT NOT NULL,
   "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
   "op_id" INTEGER
@@ -509,14 +514,16 @@ CREATE TABLE "places" (
   "atlas_position" INTEGER,
   "atlas_labeled" INTEGER,
   "liveability" TEXT,
-  "notes" TEXT
+  "liveability_sha" TEXT,
+  "notes" TEXT,
+  "notes_sha" TEXT
 ) STRICT;
 CREATE INDEX "places__account_account_id" ON "places" ("account_id");
 CREATE UNIQUE INDEX "places__natural_iso2" ON "places" ("account_id", "iso2") WHERE kind = 'country';
 CREATE UNIQUE INDEX "places__natural_geonames_id" ON "places" ("account_id", "geonames_id") WHERE kind = 'city';
 CREATE INDEX "places__index_country_id_name" ON "places" ("account_id", "country_id", "name");
 CREATE INDEX "places__index_name" ON "places" ("account_id", "name");
-CREATE INDEX "places__index_region" ON "places" ("account_id", "region");
+CREATE INDEX "places__index_region_population" ON "places" ("account_id", "region", "population");
 CREATE TRIGGER "places__ref_country_id_insert" BEFORE INSERT ON "places" WHEN NEW."country_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."country_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref places.country_id'); END;
 CREATE TRIGGER "places__ref_country_id_update" BEFORE UPDATE OF "country_id", "account_id" ON "places" WHEN NEW."country_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."country_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref places.country_id'); END;
 
@@ -580,7 +587,9 @@ CREATE TABLE "corporations" (
   "eng_urls" INTEGER,
   "note" TEXT,
   "about" TEXT,
-  "culture" TEXT
+  "about_sha" TEXT,
+  "culture" TEXT,
+  "culture_sha" TEXT
 ) STRICT;
 CREATE INDEX "corporations__account_account_id" ON "corporations" ("account_id");
 CREATE UNIQUE INDEX "corporations__natural_domain" ON "corporations" ("account_id", "domain");
@@ -624,7 +633,8 @@ CREATE TABLE "sources" (
   "kind" TEXT,
   "retrieved_at" TEXT,
   "mutable" INTEGER NOT NULL DEFAULT 1,
-  "doc" TEXT
+  "doc" TEXT,
+  "doc_sha" TEXT
 ) STRICT;
 CREATE INDEX "sources__account_account_id" ON "sources" ("account_id");
 CREATE UNIQUE INDEX "sources__natural_url" ON "sources" ("account_id", "url");
@@ -691,6 +701,7 @@ CREATE TABLE "messages" (
   "cc_addr" TEXT,
   "subject" TEXT,
   "body" TEXT,
+  "body_sha" TEXT,
   "message_id" TEXT,
   "thread_key" TEXT,
   "sent_at" TEXT,
