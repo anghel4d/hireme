@@ -112,8 +112,8 @@ fn the_documented_numbers() {
     assert_eq!(HEADER, 16);
     assert_eq!((DEFLATE, END), (0x01, 0x02));
     assert_eq!(
-        (NULL, U32, STR, I64, F64, DEFERRED, SYM, LIST),
-        (0, 1, 2, 3, 4, 5, 6, 7)
+        (NULL, U32, STR, I64, F64, SYM, LIST),
+        (0, 1, 2, 3, 4, 6, 7)
     );
     assert_eq!((PUT, DROP, COMMAND), (1, 2, 3));
     assert_eq!((KEYED, CREATE_ONLY, EXPECT_REV), (0x01, 0x02, 0x04));
@@ -274,7 +274,6 @@ fn small_frames_are_the_documented_bytes() {
 
 #[test]
 fn every_column_type_is_the_documented_bytes() {
-    let sha = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let want = block(
         5,
         2,
@@ -289,11 +288,6 @@ fn every_column_type_is_the_documented_bytes() {
                     1.5f64.to_bits().to_le_bytes().to_vec(),
                     f64::NAN.to_bits().to_le_bytes().to_vec(),
                 ]),
-            ),
-            col(
-                5,
-                DEFERRED,
-                &cat(&[le32(9), sha.to_vec(), le32(NONE), vec![0; 8]]),
             ),
             // sym: u32 nuniq | offsets x (nuniq + 1) | utf-8 | pad to 4 | u32 x nrows (dictionary in first-seen order)
             col(
@@ -318,7 +312,6 @@ fn every_column_type_is_the_documented_bytes() {
         b.strs(2, ["ab", ""].into_iter());
         b.i64s(3, [1, i64::MIN].into_iter());
         b.f64s(4, [1.5, f64::NAN].into_iter());
-        b.deferred(5, [Some((9, sha)), None].into_iter());
         b.syms(6, ["bc", "a"].into_iter());
         b.lists(7, [&[10u32, 11][..], &[][..]].into_iter());
     }
@@ -669,7 +662,6 @@ fn table_run_refusals() {
     assert!(refused(&[col(1, 9, &u32s(&[1]))], 1));
     assert!(refused(&[col(1, U32, &u32s(&[1, 2]))], 1));
     assert!(refused(&[col(1, I64, &le32(1))], 1));
-    assert!(refused(&[col(1, DEFERRED, &[0; 8])], 1));
     // a body that stops inside a block header or a column
     assert!(Blocks::new(&[1, 0, 0, 0]).is_err());
     let whole = block(3, 1, &[col(1, U32, &u32s(&[1]))]);
@@ -768,7 +760,6 @@ fn sym_layouts_are_refused() {
 
 #[test]
 fn nulls_read_as_none_in_every_column_type() {
-    let sha = [9u8; 8];
     let body = block(
         5,
         3,
@@ -785,18 +776,6 @@ fn nulls_read_as_none_in_every_column_type() {
                 ]),
             ),
             col(4, STR, &str_data(&[0, 0, 1, 2], b"xy")),
-            col(
-                5,
-                DEFERRED,
-                &cat(&[
-                    le32(NONE),
-                    vec![0; 8],
-                    le32(1),
-                    sha.to_vec(),
-                    le32(3),
-                    sha.to_vec(),
-                ]),
-            ),
             col(6, LIST, &cat(&[u32s(&[0, 0, 1, 3]), u32s(&[4, 5, 6])])),
             col(
                 7,
@@ -829,14 +808,6 @@ fn nulls_read_as_none_in_every_column_type() {
     assert_eq!(
         [v(4, 0), v(4, 1), v(4, 2)],
         [Value::None, Value::Str("x"), Value::Str("y")]
-    );
-    assert_eq!(
-        [v(5, 0), v(5, 1), v(5, 2)],
-        [
-            Value::None,
-            Value::Deferred(1, sha),
-            Value::Deferred(3, sha)
-        ]
     );
     let list = |i| match v(6, i) {
         Value::List(l) => Some(l.iter().collect::<Vec<_>>()),
@@ -920,10 +891,6 @@ fn op_refusals() {
     assert!(
         ops_err(&[op(PUT, 0, 0, &[cell(8, STR, &[0xFF])])]),
         "str cell not UTF-8"
-    );
-    assert!(
-        ops_err(&[op(PUT, 0, 0, &[cell(8, DEFERRED, &[0; 12])])]),
-        "deferred cell"
     );
     assert!(
         ops_err(&[op(PUT, 0, 0, &[cell(8, SYM, &[0; 4])])]),
@@ -1120,7 +1087,6 @@ fn mangled_ops_blocks_and_frames_never_panic() {
         b.syms(3, ["x", "y", "x"].into_iter());
         let (l1, l2): (&[u32], &[u32]) = (&[1, 2], &[]);
         b.lists(4, [l1, l2, l1].into_iter());
-        b.deferred(5, [Some((1, [0; 8])), None, Some((2, [1; 8]))].into_iter());
     }
     w.gone(9, &[4, 5, 6]);
     let blocks = w.finish();

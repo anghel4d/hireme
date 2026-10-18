@@ -59,7 +59,6 @@
 //! | 2 | str | `u32 offsets × (nrows + 1)` from 0, then UTF-8 (str, text, json) | empty |
 //! | 3 | i64 | `i64 × nrows` | `i64::MIN` |
 //! | 4 | f64 | `f64 × nrows` | NaN |
-//! | 5 | deferred | `(u32 len, 8 bytes of SHA-256) × nrows`, 12 bytes each | len `0xFFFF_FFFF` |
 //! | 6 | sym | `u32 nuniq`, `u32 offsets × (nuniq + 1)`, UTF-8, pad to 4, `u32 × nrows` naming one | empty |
 //! | 7 | list | `u32 offsets × (nrows + 1)` into the u32 values that follow | empty |
 //!
@@ -156,7 +155,7 @@ const _: () = {
     assert!(REPLY == schema::frame::REPLY);
     assert!(NULL == schema::wire::NULL && U32 == schema::wire::U32 && STR == schema::wire::STR);
     assert!(
-        I64 == schema::wire::I64 && F64 == schema::wire::F64 && DEFERRED == schema::wire::DEFERRED
+        I64 == schema::wire::I64 && F64 == schema::wire::F64
     );
     assert!(SYM == schema::wire::SYM && LIST == schema::wire::LIST);
     assert!(AS_OF == schema::AS_OF && SOURCE == schema::SOURCE_CELL);
@@ -198,7 +197,6 @@ pub const U32: u8 = 1;
 pub const STR: u8 = 2;
 pub const I64: u8 = 3;
 pub const F64: u8 = 4;
-pub const DEFERRED: u8 = 5;
 pub const SYM: u8 = 6;
 pub const LIST: u8 = 7;
 
@@ -207,7 +205,7 @@ pub const AS_OF: u16 = 0xFFF0;
 pub const SOURCE: u16 = 0xFFF1;
 pub const GONE: u16 = 0xFFFE;
 
-/// "No value" in a u32 column, and in a deferred column's length.
+/// "No value" in a u32 column.
 pub const NONE: u32 = u32::MAX;
 /// "No value" in an i64 column.
 pub const NONE64: i64 = i64::MIN;
@@ -911,8 +909,6 @@ pub enum Value<'a> {
     I64(i64),
     F64(f64),
     Str(&'a str),
-    /// A deferred text: its byte length and the first 8 bytes of its SHA-256.
-    Deferred(u32, [u8; 8]),
     List(U32s<'a>),
 }
 
@@ -978,7 +974,6 @@ impl<'a> Col<'a> {
         match ty {
             U32 => fixed(4),
             I64 | F64 => fixed(8),
-            DEFERRED => fixed(12),
             STR | LIST => {
                 let head = nrows
                     .checked_add(1)
@@ -1077,14 +1072,6 @@ impl<'a> Col<'a> {
             F64 => match f64::from_bits(u64_at(d, i * 8)) {
                 v if v.is_nan() => Value::None,
                 v => Value::F64(v),
-            },
-            DEFERRED => match u32_at(d, i * 12) {
-                NONE => Value::None,
-                len => {
-                    let mut sha = [0u8; 8];
-                    sha.copy_from_slice(&d[i * 12 + 4..i * 12 + 12]);
-                    Value::Deferred(len, sha)
-                }
             },
             STR => {
                 let (offsets, bytes) = d.split_at((self.nrows + 1) * 4);
@@ -1396,25 +1383,6 @@ impl BlockWriter<'_> {
             b.resize(b.len() + (4 - (b.len() - start) % 4) % 4, 0);
             ids.iter()
                 .for_each(|i| b.extend_from_slice(&i.to_le_bytes()));
-        })
-    }
-
-    /// A deferred text column: `(length, first 8 bytes of SHA-256)` or absent.
-    pub fn deferred(
-        &mut self,
-        id: u16,
-        vals: impl Iterator<Item = Option<(u32, [u8; 8])>>,
-    ) -> &mut Self {
-        let n = self.nrows;
-        self.col(id, DEFERRED, |b| {
-            let got = vals
-                .map(|v| {
-                    let (len, sha) = v.unwrap_or((NONE, [0; 8]));
-                    b.extend_from_slice(&len.to_le_bytes());
-                    b.extend_from_slice(&sha);
-                })
-                .count();
-            Self::count(n, got);
         })
     }
 

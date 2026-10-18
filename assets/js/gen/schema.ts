@@ -10,7 +10,7 @@ export const DAY_MAX = 3652424;
 
 export const DOMAIN = { world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16, system: 0 } as const;
 export type Domain = keyof typeof DOMAIN;
-export const WIRE_TYPE = { null: 0, u32: 1, str: 2, i64: 3, f64: 4, deferred: 5, sym: 6, list: 7 } as const;
+export const WIRE_TYPE = { null: 0, u32: 1, str: 2, i64: 3, f64: 4, sym: 6, list: 7 } as const;
 export const TYPE_CODE = { id: 1, ref: 2, enum: 3, bool: 4, u8: 5, u32: 6, i64: 7, f64: 8, day: 9, time: 10, str: 11, text: 12, json: 13, bytes: 14 } as const;
 export const FLAG = { required: 1, deferred: 2, private: 4, serverOnly: 8, humanOnly: 16, readonly: 32, unique: 64, metric: 128, prose: 256, implied: 512, metricOn: 1024, natural: 2048, cascade: 4096, shaOn: 8192, loose: 16384 } as const;
 export const FRAME = { HELLO: 1, WELCOME: 2, BOOT: 3, PATCH: 4, OPS: 8, ACK: 9, NACK: 10, TICK: 11, PING: 13, PONG: 14, BYE: 16, RPC: 33, REPLY: 34 } as const;

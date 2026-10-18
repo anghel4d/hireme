@@ -143,8 +143,8 @@ pub fn emit(s: &Schema) -> String {
     w(&format!("export const DOMAIN = {{ {} }} as const;", domains.join(", ")));
     w("export type Domain = keyof typeof DOMAIN;");
     w(&format!(
-        "export const WIRE_TYPE = {{ null: {}, u32: {}, str: {}, i64: {}, f64: {}, deferred: {}, sym: {}, list: {} }} as const;",
-        wire::NULL, wire::U32, wire::STR, wire::I64, wire::F64, wire::DEFERRED, wire::SYM, wire::LIST
+        "export const WIRE_TYPE = {{ null: {}, u32: {}, str: {}, i64: {}, f64: {}, sym: {}, list: {} }} as const;",
+        wire::NULL, wire::U32, wire::STR, wire::I64, wire::F64, wire::SYM, wire::LIST
     ));
     let codes: Vec<String> = TYPES.iter().map(|(n, t)| format!("{n}: {}", t.code())).collect();
     w(&format!("export const TYPE_CODE = {{ {} }} as const;", codes.join(", ")));

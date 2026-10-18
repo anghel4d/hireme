@@ -17,7 +17,6 @@ enum Column {
     Str(Vec<String>),
     I64(Vec<i64>),
     F64(Vec<f64>),
-    Deferred(Vec<Option<(u32, [u8; 8])>>),
     List(Vec<Vec<u32>>),
     Sym(Vec<String>),
 }
@@ -28,8 +27,6 @@ fn column(n: usize) -> impl Strategy<Value = Column> {
         prop::collection::vec(text(), n).prop_map(Column::Str),
         prop::collection::vec(any::<i64>(), n).prop_map(Column::I64),
         prop::collection::vec(prop_oneof![any::<f64>(), Just(f64::NAN)], n).prop_map(Column::F64),
-        prop::collection::vec(prop::option::of((0u32..NONE, any::<[u8; 8]>())), n)
-            .prop_map(Column::Deferred),
         prop::collection::vec(prop::collection::vec(any::<u32>(), 0..4), n).prop_map(Column::List),
         prop::collection::vec(
             prop::sample::select(vec!["", "remote", "hybrid", "onsite"]).prop_map(String::from),
@@ -61,7 +58,6 @@ fn write_blocks(blocks: &[(u16, usize, Vec<Column>)]) -> Vec<u8> {
                 Column::Str(v) => b.strs(id, v.iter().map(|s| s.as_str())),
                 Column::I64(v) => b.i64s(id, v.iter().copied()),
                 Column::F64(v) => b.f64s(id, v.iter().copied()),
-                Column::Deferred(v) => b.deferred(id, v.iter().copied()),
                 Column::List(v) => b.lists(id, v.iter().map(|l| l.as_slice())),
                 Column::Sym(v) => b.syms(id, v.iter().map(|s| s.as_str())),
             };
@@ -80,7 +76,6 @@ fn expect(c: &Column, i: usize) -> Value<'_> {
         Column::I64(v) => Value::I64(v[i]),
         Column::F64(v) if v[i].is_nan() => Value::None,
         Column::F64(v) => Value::F64(v[i]),
-        Column::Deferred(v) => v[i].map_or(Value::None, |(l, s)| Value::Deferred(l, s)),
         Column::List(_) => unreachable!(),
     }
 }

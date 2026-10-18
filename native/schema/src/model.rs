@@ -81,7 +81,6 @@ pub mod wire {
     pub const STR: u8 = 2;
     pub const I64: u8 = 3;
     pub const F64: u8 = 4;
-    pub const DEFERRED: u8 = 5;
     /// Codec-only run encodings, never a declared type.
     pub const SYM: u8 = 6;
     pub const LIST: u8 = 7;
