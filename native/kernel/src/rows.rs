@@ -1,0 +1,672 @@
+//! The resident rows: one columnar table per wire table, filled from
+//! BOOT and moved by PATCH, with the client's pending writes laid over
+//! them.
+//!
+//! The store is generic over the declaration: a column's storage comes
+//! from the wire type its block carries, so nothing here names a table.
+//! Each table keeps its ids in a dense vector with an id → slot map;
+//! deleting a row moves the last row into its slot, so slot order means
+//! nothing and the board orders rows itself.
+//!
+//! Nulls are the codec's sentinels: `u32::MAX`, `i64::MIN`, NaN, an empty
+//! string (null and empty are one thing on the wire), a deferred length
+//! of `u32::MAX`, an empty list.
+//!
+//! **Base ⊕ pending.** A client applies its own op before the server has
+//! judged it. Every pending op's writes are recorded with what they
+//! replaced. When a BOOT or PATCH arrives, the pending writes are undone,
+//! the frame is applied to the base, and the pending writes are applied
+//! again; an ACK drops its op from the pending list (its PATCH, sent
+//! first in the same sequencer turn, already carried the write into the
+//! base); a NACK undoes every pending write, drops that op, and reapplies
+//! the rest. So the visible rows are always the base the server sent with
+//! the still-unanswered writes on top, and the server's sequencer, which
+//! has no pending ops, holds exactly the base.
+
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use wire::{Blocks, Value};
+
+/// The id column every stored and leased table carries.
+pub const ID: u16 = 1;
+/// The row revision column.
+pub const REV: u16 = 3;
+/// Ids a client gives rows it inserts before the server answers. Server
+/// ids stay far below.
+pub const TEMP_BASE: u32 = 0xC000_0000;
+
+/// One owned value, as a pending write records it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Val {
+    None,
+    U32(u32),
+    I64(i64),
+    F64(f64),
+    Str(String),
+    Deferred(u32, [u8; 8]),
+    List(Vec<u32>),
+}
+
+impl Val {
+    pub fn from_wire(v: Value) -> Val {
+        match v {
+            Value::None => Val::None,
+            Value::U32(wire::NONE) => Val::None,
+            Value::U32(x) => Val::U32(x),
+            Value::I64(wire::NONE64) => Val::None,
+            Value::I64(x) => Val::I64(x),
+            Value::F64(x) if x.is_nan() => Val::None,
+            Value::F64(x) => Val::F64(x),
+            Value::Str("") => Val::None,
+            Value::Str(s) => Val::Str(String::from(s)),
+            Value::Deferred(wire::NONE, _) => Val::None,
+            Value::Deferred(n, h) => Val::Deferred(n, h),
+            Value::List(l) if l.is_empty() => Val::None,
+            Value::List(l) => Val::List(l.iter().collect()),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        *self == Val::None
+    }
+}
+
+/// A column's storage.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Data {
+    U32(Vec<u32>),
+    I64(Vec<i64>),
+    F64(Vec<f64>),
+    Str(Vec<String>),
+    Deferred(Vec<(u32, [u8; 8])>),
+    List(Vec<Vec<u32>>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    U32,
+    I64,
+    F64,
+    Str,
+    Deferred,
+    List,
+}
+
+fn kind_of_wire(ty: u8) -> Option<Kind> {
+    Some(match ty {
+        wire::U32 => Kind::U32,
+        wire::I64 => Kind::I64,
+        wire::F64 => Kind::F64,
+        wire::STR | wire::SYM => Kind::Str,
+        wire::DEFERRED => Kind::Deferred,
+        wire::LIST => Kind::List,
+        _ => return None,
+    })
+}
+
+fn kind_of_val(v: &Val) -> Option<Kind> {
+    Some(match v {
+        Val::None => return None,
+        Val::U32(_) => Kind::U32,
+        Val::I64(_) => Kind::I64,
+        Val::F64(_) => Kind::F64,
+        Val::Str(_) => Kind::Str,
+        Val::Deferred(..) => Kind::Deferred,
+        Val::List(_) => Kind::List,
+    })
+}
+
+impl Data {
+    fn new(kind: Kind, n: usize) -> Data {
+        match kind {
+            Kind::U32 => Data::U32(alloc::vec![wire::NONE; n]),
+            Kind::I64 => Data::I64(alloc::vec![wire::NONE64; n]),
+            Kind::F64 => Data::F64(alloc::vec![f64::NAN; n]),
+            Kind::Str => Data::Str(alloc::vec![String::new(); n]),
+            Kind::Deferred => Data::Deferred(alloc::vec![(wire::NONE, [0; 8]); n]),
+            Kind::List => Data::List(alloc::vec![Vec::new(); n]),
+        }
+    }
+
+    fn kind(&self) -> Kind {
+        match self {
+            Data::U32(_) => Kind::U32,
+            Data::I64(_) => Kind::I64,
+            Data::F64(_) => Kind::F64,
+            Data::Str(_) => Kind::Str,
+            Data::Deferred(_) => Kind::Deferred,
+            Data::List(_) => Kind::List,
+        }
+    }
+
+    fn push_none(&mut self) {
+        match self {
+            Data::U32(v) => v.push(wire::NONE),
+            Data::I64(v) => v.push(wire::NONE64),
+            Data::F64(v) => v.push(f64::NAN),
+            Data::Str(v) => v.push(String::new()),
+            Data::Deferred(v) => v.push((wire::NONE, [0; 8])),
+            Data::List(v) => v.push(Vec::new()),
+        }
+    }
+
+    fn swap_remove(&mut self, slot: usize) {
+        match self {
+            Data::U32(v) => drop(v.swap_remove(slot)),
+            Data::I64(v) => drop(v.swap_remove(slot)),
+            Data::F64(v) => drop(v.swap_remove(slot)),
+            Data::Str(v) => drop(v.swap_remove(slot)),
+            Data::Deferred(v) => drop(v.swap_remove(slot)),
+            Data::List(v) => drop(v.swap_remove(slot)),
+        }
+    }
+
+    fn get(&self, slot: usize) -> Val {
+        match self {
+            Data::U32(v) => Val::from_wire(Value::U32(v[slot])),
+            Data::I64(v) => Val::from_wire(Value::I64(v[slot])),
+            Data::F64(v) => Val::from_wire(Value::F64(v[slot])),
+            Data::Str(v) => if v[slot].is_empty() { Val::None } else { Val::Str(v[slot].clone()) },
+            Data::Deferred(v) => Val::from_wire(Value::Deferred(v[slot].0, v[slot].1)),
+            Data::List(v) => if v[slot].is_empty() { Val::None } else { Val::List(v[slot].clone()) },
+        }
+    }
+
+    /// Writes `v` at `slot`; a value of another kind than the column's is
+    /// written as null.
+    fn set(&mut self, slot: usize, v: &Val) {
+        match (self, v) {
+            (Data::U32(d), Val::U32(x)) => d[slot] = *x,
+            (Data::I64(d), Val::I64(x)) => d[slot] = *x,
+            (Data::F64(d), Val::F64(x)) => d[slot] = *x,
+            (Data::Str(d), Val::Str(x)) => d[slot].clone_from(x),
+            (Data::Deferred(d), Val::Deferred(n, h)) => d[slot] = (*n, *h),
+            (Data::List(d), Val::List(x)) => d[slot].clone_from(x),
+            (Data::U32(d), _) => d[slot] = wire::NONE,
+            (Data::I64(d), _) => d[slot] = wire::NONE64,
+            (Data::F64(d), _) => d[slot] = f64::NAN,
+            (Data::Str(d), _) => d[slot].clear(),
+            (Data::Deferred(d), _) => d[slot] = (wire::NONE, [0; 8]),
+            (Data::List(d), _) => d[slot].clear(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Column {
+    pub id: u16,
+    pub data: Data,
+}
+
+/// One resident table.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Table {
+    pub id: u16,
+    ids: Vec<u32>,
+    slots: BTreeMap<u32, u32>,
+    /// Sorted by column id.
+    cols: Vec<Column>,
+}
+
+impl Table {
+    pub fn new(id: u16) -> Table {
+        Table { id, ..Table::default() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Row ids in slot order.
+    pub fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    pub fn slot(&self, id: u32) -> Option<usize> {
+        self.slots.get(&id).map(|s| *s as usize)
+    }
+
+    pub fn has(&self, id: u32) -> bool {
+        self.slots.contains_key(&id)
+    }
+
+    pub fn column(&self, col: u16) -> Option<&Column> {
+        self.cols.binary_search_by_key(&col, |c| c.id).ok().map(|i| &self.cols[i])
+    }
+
+    pub fn columns(&self) -> &[Column] {
+        &self.cols
+    }
+
+    fn column_mut(&mut self, col: u16, kind: Kind) -> &mut Column {
+        let n = self.ids.len();
+        let i = match self.cols.binary_search_by_key(&col, |c| c.id) {
+            Ok(i) => {
+                if self.cols[i].data.kind() != kind {
+                    self.cols[i].data = Data::new(kind, n);
+                }
+                i
+            }
+            Err(i) => {
+                self.cols.insert(i, Column { id: col, data: Data::new(kind, n) });
+                i
+            }
+        };
+        &mut self.cols[i]
+    }
+
+    /// The value at `(id, col)`, `Val::None` when either is absent.
+    pub fn get(&self, id: u32, col: u16) -> Val {
+        match (self.slot(id), self.column(col)) {
+            (Some(s), Some(c)) => c.data.get(s),
+            _ => Val::None,
+        }
+    }
+
+    pub fn u32(&self, id: u32, col: u16) -> Option<u32> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::U32(v))) if v[s] != wire::NONE => Some(v[s]),
+            _ => None,
+        }
+    }
+
+    pub fn i64(&self, id: u32, col: u16) -> Option<i64> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::I64(v))) if v[s] != wire::NONE64 => Some(v[s]),
+            _ => None,
+        }
+    }
+
+    pub fn f64(&self, id: u32, col: u16) -> Option<f64> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::F64(v))) if !v[s].is_nan() => Some(v[s]),
+            _ => None,
+        }
+    }
+
+    pub fn str(&self, id: u32, col: u16) -> Option<&str> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(v[s].as_str()),
+            _ => None,
+        }
+    }
+
+    /// Adds an empty row (every column null) and returns its slot; an
+    /// existing id returns its slot unchanged.
+    pub fn insert(&mut self, id: u32) -> usize {
+        if let Some(s) = self.slot(id) {
+            return s;
+        }
+        let s = self.ids.len();
+        self.ids.push(id);
+        self.slots.insert(id, s as u32);
+        for c in &mut self.cols {
+            c.data.push_none();
+        }
+        if let Some(c) = self.cols.iter_mut().find(|c| c.id == ID) {
+            c.data.set(s, &Val::U32(id));
+        }
+        s
+    }
+
+    /// Removes a row, returning its values (by column) for an undo.
+    pub fn remove(&mut self, id: u32) -> Option<Vec<(u16, Val)>> {
+        let s = self.slot(id)?;
+        let old = self.cols.iter().map(|c| (c.id, c.data.get(s))).collect();
+        self.slots.remove(&id);
+        let last = self.ids.len() - 1;
+        self.ids.swap_remove(s);
+        for c in &mut self.cols {
+            c.data.swap_remove(s);
+        }
+        if s != last {
+            self.slots.insert(self.ids[s], s as u32);
+        }
+        Some(old)
+    }
+
+    /// Writes one cell of an existing row; returns the old value.
+    pub fn set(&mut self, id: u32, col: u16, v: &Val) -> Option<Val> {
+        let s = self.slot(id)?;
+        let old = self.column(col).map_or(Val::None, |c| c.data.get(s));
+        match kind_of_val(v) {
+            Some(k) => self.column_mut(col, k).data.set(s, v),
+            None => {
+                if let Some(i) = self.cols.iter().position(|c| c.id == col) {
+                    self.cols[i].data.set(s, &Val::None);
+                }
+            }
+        }
+        Some(old)
+    }
+
+    fn clear(&mut self) {
+        self.ids.clear();
+        self.slots.clear();
+        self.cols.clear();
+    }
+}
+
+/// What a frame moved, so a client re-renders only that.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Moved {
+    /// Per table: rows written (ids) and rows deleted.
+    pub tables: BTreeMap<u16, (Vec<u32>, Vec<u32>)>,
+    /// Tables a BOOT replaced whole.
+    pub replaced: Vec<u16>,
+}
+
+impl Moved {
+    fn wrote(&mut self, t: u16, id: u32) {
+        self.tables.entry(t).or_default().0.push(id);
+    }
+
+    fn gone(&mut self, t: u16, id: u32) {
+        self.tables.entry(t).or_default().1.push(id);
+    }
+
+    pub fn touched(&self, t: u16) -> bool {
+        self.tables.contains_key(&t) || self.replaced.contains(&t)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty() && self.replaced.is_empty()
+    }
+}
+
+/// One pending write's undo record.
+#[derive(Clone, Debug, PartialEq)]
+enum Undo {
+    Set { table: u16, id: u32, col: u16, old: Val },
+    Inserted { table: u16, id: u32 },
+    Removed { table: u16, id: u32, row: Vec<(u16, Val)> },
+}
+
+/// A write the kernel applies: a cell, an insert or a delete.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Write {
+    Set { table: u16, id: u32, col: u16, val: Val },
+    Insert { table: u16, id: u32 },
+    Remove { table: u16, id: u32 },
+}
+
+#[derive(Clone, Debug, Default)]
+struct Pending {
+    op_id: u64,
+    writes: Vec<Write>,
+    undo: Vec<Undo>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Rows {
+    tables: BTreeMap<u16, Table>,
+    /// The account rev of the newest frame applied.
+    pub rev: u64,
+    pending: Vec<Pending>,
+    next_temp: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Wire(wire::Error),
+    /// A block's column has a different row count than the block.
+    Shape,
+}
+
+impl From<wire::Error> for Error {
+    fn from(e: wire::Error) -> Error {
+        Error::Wire(e)
+    }
+}
+
+impl Rows {
+    pub fn new() -> Rows {
+        Rows { next_temp: TEMP_BASE, ..Rows::default() }
+    }
+
+    pub fn table(&self, id: u16) -> Option<&Table> {
+        self.tables.get(&id)
+    }
+
+    pub fn tables(&self) -> impl Iterator<Item = &Table> {
+        self.tables.values()
+    }
+
+    fn table_mut(&mut self, id: u16) -> &mut Table {
+        self.tables.entry(id).or_insert_with(|| Table::new(id))
+    }
+
+    /// A BOOT or TICK body: every table it names is replaced.
+    pub fn boot(&mut self, body: &[u8], rev: u64) -> Result<Moved, Error> {
+        self.frame(body, rev, true)
+    }
+
+    /// A PATCH body: rows upserted by id with the columns that moved, and
+    /// gone blocks deleted.
+    pub fn patch(&mut self, body: &[u8], rev: u64) -> Result<Moved, Error> {
+        self.frame(body, rev, false)
+    }
+
+    fn frame(&mut self, body: &[u8], rev: u64, replace: bool) -> Result<Moved, Error> {
+        let blocks = Blocks::new(body)?;
+        let pending = core::mem::take(&mut self.pending);
+        self.unwind(&pending);
+        let mut moved = Moved::default();
+        let result = self.apply_blocks(&blocks, replace, &mut moved);
+        self.pending = pending;
+        self.rewind(&mut moved);
+        result?;
+        self.rev = self.rev.max(rev);
+        Ok(moved)
+    }
+
+    fn apply_blocks(&mut self, blocks: &Blocks, replace: bool, moved: &mut Moved) -> Result<(), Error> {
+        let mut replaced: Vec<u16> = Vec::new();
+        for b in blocks.iter() {
+            let tid = b.table;
+            if let Some(gone) = b.gone() {
+                let t = self.table_mut(tid);
+                for id in gone.iter() {
+                    if t.remove(id).is_some() {
+                        moved.gone(tid, id);
+                    }
+                }
+                continue;
+            }
+            let n = b.nrows as usize;
+            let ids: Vec<u32> = match b.col(ID) {
+                Some(c) if c.ty == wire::U32 && c.nrows() == n => (0..n).map(|i| c.u32(i)).collect(),
+                Some(_) => return Err(Error::Shape),
+                // A table with no id column (`clock`, `catalog`) is
+                // positional: replaced whole, rows numbered from 1.
+                None => (1..=n as u32).collect(),
+            };
+            let t = self.table_mut(tid);
+            if replace && !replaced.contains(&tid) {
+                t.clear();
+                replaced.push(tid);
+            }
+            let slots: Vec<usize> = ids.iter().map(|&id| t.insert(id)).collect();
+            for c in b.cols() {
+                if c.nrows() != n {
+                    return Err(Error::Shape);
+                }
+                let Some(kind) = kind_of_wire(c.ty) else { continue };
+                let col = t.column_mut(c.id, kind);
+                for (i, &s) in slots.iter().enumerate() {
+                    col.data.set(s, &Val::from_wire(c.value(i)));
+                }
+            }
+            if !replace {
+                for &id in &ids {
+                    moved.wrote(tid, id);
+                }
+            }
+        }
+        moved.replaced = replaced;
+        Ok(())
+    }
+
+    fn apply_write(&mut self, w: &Write, undo: &mut Vec<Undo>) {
+        match w {
+            Write::Set { table, id, col, val } => {
+                if let Some(old) = self.table_mut(*table).set(*id, *col, val) {
+                    undo.push(Undo::Set { table: *table, id: *id, col: *col, old });
+                }
+            }
+            Write::Insert { table, id } => {
+                let t = self.table_mut(*table);
+                if !t.has(*id) {
+                    t.insert(*id);
+                    undo.push(Undo::Inserted { table: *table, id: *id });
+                }
+            }
+            Write::Remove { table, id } => {
+                if let Some(row) = self.table_mut(*table).remove(*id) {
+                    undo.push(Undo::Removed { table: *table, id: *id, row });
+                }
+            }
+        }
+    }
+
+    fn undo(&mut self, u: &Undo) {
+        match u {
+            Undo::Set { table, id, col, old } => {
+                self.table_mut(*table).set(*id, *col, old);
+            }
+            Undo::Inserted { table, id } => {
+                self.table_mut(*table).remove(*id);
+            }
+            Undo::Removed { table, id, row } => {
+                let t = self.table_mut(*table);
+                t.insert(*id);
+                for (c, v) in row {
+                    t.set(*id, *c, v);
+                }
+            }
+        }
+    }
+
+    /// Undoes every pending write, newest first.
+    fn unwind(&mut self, pending: &[Pending]) {
+        for p in pending.iter().rev() {
+            for u in p.undo.iter().rev() {
+                self.undo(u);
+            }
+        }
+    }
+
+    /// Reapplies every pending op's writes over the current base,
+    /// recording fresh undo entries and what they touched.
+    fn rewind(&mut self, moved: &mut Moved) {
+        let mut pending = core::mem::take(&mut self.pending);
+        for p in &mut pending {
+            let mut undo = Vec::new();
+            for w in &p.writes {
+                self.apply_write(w, &mut undo);
+                note(moved, w);
+            }
+            p.undo = undo;
+        }
+        self.pending = pending;
+    }
+
+    /// Applies `writes` now, as pending op `op_id`.
+    pub fn apply_pending(&mut self, op_id: u64, writes: Vec<Write>) -> Moved {
+        let mut moved = Moved::default();
+        let mut undo = Vec::new();
+        for w in &writes {
+            self.apply_write(w, &mut undo);
+            note(&mut moved, w);
+        }
+        self.pending.push(Pending { op_id, writes, undo });
+        moved
+    }
+
+    /// Applies writes to the base directly (the sequencer's own cache,
+    /// which has no pending ops).
+    pub fn apply(&mut self, writes: &[Write]) -> Moved {
+        let mut moved = Moved::default();
+        let mut undo = Vec::new();
+        for w in writes {
+            self.apply_write(w, &mut undo);
+            note(&mut moved, w);
+        }
+        moved
+    }
+
+    /// The server took op `op_id`: its PATCH already carried the write.
+    pub fn settle(&mut self, op_id: u64) -> Moved {
+        self.drop_pending(op_id)
+    }
+
+    /// The server refused op `op_id`: its writes are taken back.
+    pub fn rollback(&mut self, op_id: u64) -> Moved {
+        self.drop_pending(op_id)
+    }
+
+    fn drop_pending(&mut self, op_id: u64) -> Moved {
+        let mut moved = Moved::default();
+        let Some(i) = self.pending.iter().position(|p| p.op_id == op_id) else { return moved };
+        let pending = core::mem::take(&mut self.pending);
+        self.unwind(&pending);
+        for w in &pending[i].writes {
+            note(&mut moved, w);
+        }
+        self.pending = pending;
+        self.pending.remove(i);
+        self.rewind(&mut moved);
+        moved
+    }
+
+    pub fn pending_ops(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter().map(|p| p.op_id)
+    }
+
+    /// A fresh id for a row inserted before the server names it.
+    pub fn temp_id(&mut self) -> u32 {
+        self.next_temp = self.next_temp.wrapping_add(1).max(TEMP_BASE + 1);
+        self.next_temp
+    }
+
+    /// The base rows (pending writes left out) as a BOOT body, for a
+    /// client's cold-start snapshot. `boot` on it restores the same base.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut base = self.clone();
+        let pending = core::mem::take(&mut base.pending);
+        base.unwind(&pending);
+        let mut w = wire::BodyWriter::new();
+        for t in base.tables.values() {
+            let n = t.len();
+            let mut b = w.block(t.id, n);
+            if t.column(ID).is_none() && n > 0 {
+                b.u32s(ID, t.ids.iter().copied());
+            }
+            for c in &t.cols {
+                match &c.data {
+                    Data::U32(v) => b.u32s(c.id, v.iter().copied()),
+                    Data::I64(v) => b.i64s(c.id, v.iter().copied()),
+                    Data::F64(v) => b.f64s(c.id, v.iter().copied()),
+                    Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
+                    Data::Deferred(v) => b.deferred(c.id, v.iter().map(|d| (d.0 != wire::NONE).then_some(*d))),
+                    Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
+                };
+            }
+            b.done();
+        }
+        w.finish()
+    }
+}
+
+fn note(moved: &mut Moved, w: &Write) {
+    match w {
+        Write::Set { table, id, .. } | Write::Insert { table, id } => moved.wrote(*table, *id),
+        Write::Remove { table, id } => moved.gone(*table, *id),
+    }
+}

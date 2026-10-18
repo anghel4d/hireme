@@ -22,6 +22,7 @@ pub mod keywords;
 pub mod lanes;
 pub mod org;
 pub mod pipeline;
+pub mod rows;
 pub mod score;
 pub mod text;
 
