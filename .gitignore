@@ -45,6 +45,8 @@
 !/test/**/
 !/test/**/*.exs
 !/test/**/*.ex
+!/test/e2e/run.sh
+!/test/e2e/*.mjs
 
 !/bench/
 !/bench/*.exs
