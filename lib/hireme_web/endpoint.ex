@@ -30,7 +30,7 @@ end
 
 defmodule HiremeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :hireme
-  import Bitwise, only: [>>>: 2]
+  import Bitwise, only: [>>>: 2, &&&: 2]
 
   # The one cookie. `__Host-` pins it to this origin, path `/`, over https
   # (localhost counts). Encrypted and signed with keys derived from the
@@ -107,11 +107,18 @@ defmodule HiremeWeb.Endpoint do
          [real | _] <- Plug.Conn.get_req_header(conn, "x-real-ip"),
          {:ok, ip} <-
            real |> String.trim() |> String.to_charlist() |> :inet.parse_strict_address() do
-      %{conn | remote_ip: ip}
+      %{conn | remote_ip: canonical(ip)}
     else
-      _ -> conn
+      _ -> %{conn | remote_ip: canonical(conn.remote_ip)}
     end
   end
+
+  # A v4 client a dual-stack socket reports as ::ffff:a.b.c.d is that v4
+  # address, to the limits and on the trail.
+  defp canonical({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
+    do: {hi >>> 8, hi &&& 0xFF, lo >>> 8, lo &&& 0xFF}
+
+  defp canonical(ip), do: ip
 
   defp loopback?({127, _, _, _}), do: true
   defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
@@ -122,19 +129,33 @@ defmodule HiremeWeb.Endpoint do
   # The wire's WebSocket carrier, for when UDP (and so the gate) is
   # blocked. The credential travels in HELLO, never in the upgrade, so no
   # cookie is read here; the session checks a ticket's origin itself.
+  # A connection may buffer a whole frame before HELLO, so upgrades are
+  # metered per peer (`wire_peer`); the session caps how many a peer holds
+  # open (`Hireme.Security.wire_sessions_per_peer/0`).
   defp wire(%Plug.Conn{path_info: ["wire"], method: "GET"} = conn, _opts) do
-    state = %{
-      peer_ip: conn.remote_ip |> :inet.ntoa() |> to_string(),
-      origin: conn |> Plug.Conn.get_req_header("origin") |> List.first()
-    }
+    peer = conn.remote_ip |> :inet.ntoa() |> to_string()
 
-    conn
-    |> WebSockAdapter.upgrade(HiremeWeb.Session, state,
-      timeout: 60_000,
-      max_frame_size: HiremeWeb.Wire.Codec.max_up()
-    )
-    |> Plug.Conn.halt()
+    case Hireme.Security.limit(:wire_peer, peer) do
+      :ok ->
+        state = %{
+          peer_ip: peer,
+          origin: header(conn, "origin"),
+          user_agent: conn |> header("user-agent") |> then(&(&1 && Hireme.Security.clip(&1)))
+        }
+
+        conn
+        |> WebSockAdapter.upgrade(HiremeWeb.Session, state,
+          timeout: 60_000,
+          max_frame_size: HiremeWeb.Wire.Codec.max_up()
+        )
+        |> Plug.Conn.halt()
+
+      {:error, :rate_limited} ->
+        conn |> Plug.Conn.send_resp(429, "") |> Plug.Conn.halt()
+    end
   end
 
   defp wire(conn, _opts), do: conn
+
+  defp header(conn, name), do: conn |> Plug.Conn.get_req_header(name) |> List.first()
 end

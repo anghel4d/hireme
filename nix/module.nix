@@ -117,9 +117,13 @@ in
               HOME = "/var/lib/hireme";
               RELEASE_TMP = "/var/lib/hireme/tmp";
               # Distribution (for `bin/hireme rpc`) stays on loopback: epmd
-              # and the node's own port bind 127.0.0.1 only.
+              # and the node's port bind 127.0.0.1, and the node is named by
+              # that address, since a host name may resolve to 127.0.1.1 or
+              # 127.0.0.2. A client (deploy.sh, an operator) sets the same.
               ERL_EPMD_ADDRESS = "127.0.0.1";
               ELIXIR_ERL_OPTIONS = "-kernel inet_dist_use_interface {127,0,0,1}";
+              RELEASE_DISTRIBUTION = "name";
+              RELEASE_NODE = "hireme@127.0.0.1";
             }
             // lib.optionalAttrs gate.enable (
               {

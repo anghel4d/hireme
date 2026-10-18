@@ -19,6 +19,9 @@ defmodule HiremeWeb.Account do
 
   Methods (params -> result):
 
+  Any method takes `passive: true` when the client sends it by itself (the
+  reload after a watch answers); such a call does not count as activity.
+
   - `account.overview` {} -> everything the lens draws, and `cursor`, the
     account's newest audit event id (0 when none)
   - `account.watch` {since: cursor} -> {changed: true} at once if the
@@ -65,7 +68,7 @@ defmodule HiremeWeb.Account do
   def call(method, params, ctx) when is_binary(method) and is_map(params) do
     with nil <- ctx[:key],
          id when is_integer(id) <- ctx[:session_id],
-         {:ok, %Session{account_id: account_id} = session} <- live(id),
+         {:ok, %Session{account_id: account_id} = session} <- live(id, activity?(method, params)),
          true <- account_id == ctx.account_id do
       Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
@@ -76,12 +79,19 @@ defmodule HiremeWeb.Account do
 
   # The browser session's own lifetime, idle limit, revocation and the
   # account's suspension hold here exactly as for a page.
-  defp live(id) do
-    case Accounts.live_session(id) do
+  defp live(id, activity?) do
+    case Accounts.live_session(id, activity?) do
       {:ok, session} -> {:ok, session}
       :error -> :session
     end
   end
+
+  # What the lens does by itself (a parked watch, the reload it triggers,
+  # sent with `passive: true`) is not the operator's activity: an Account tab
+  # left open must still idle out.
+  defp activity?("account.watch", _), do: false
+  defp activity?(_, %{"passive" => true}), do: false
+  defp activity?(_, _), do: true
 
   # A malformed call answers `invalid` and the wire session lives on.
   defp safely(method, params, session, ctx) do

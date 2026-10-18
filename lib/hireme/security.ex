@@ -58,6 +58,11 @@ defmodule Hireme.Security do
   @spec api_keys_per_account() :: pos_integer()
   def api_keys_per_account, do: 100
 
+  # Wire sessions one peer holds open at once, authenticated or not, as the
+  # gate's GATE_PER_IP bounds its carrier.
+  @spec wire_sessions_per_peer() :: pos_integer()
+  def wire_sessions_per_peer, do: 16
+
   # One key's wire sessions open at once; a connect loop or a leaked key
   # cannot hold the node's sessions.
   @spec key_sessions() :: pos_integer()
@@ -88,6 +93,13 @@ defmodule Hireme.Security do
     mfa_account: {:timer.minutes(15), 10},
     api_key_peer: {:timer.minutes(1), 20},
     ticket_peer: {:timer.minutes(1), 60},
+    # /wire upgrades; each connection may buffer a frame before its HELLO,
+    # and agents behind one NAT share a peer, so this bounds the rate and
+    # `wire_sessions_per_peer/0` the memory held at once.
+    wire_peer: {:timer.minutes(1), 300},
+    # Refused key HELLOs the trail records, from everyone together; past it
+    # they are still refused, just not recorded.
+    refusal_global: {:timer.minutes(1), 600},
     refusal_peer: {:timer.minutes(10), 20},
     agent_write: {:timer.minutes(1), 600},
     # A key's read RPCs (find, get, history, text, schema, lease.*).
@@ -154,11 +166,16 @@ defmodule Hireme.Security do
   @doc "The peer a limit counts: an IPv4 address as is, an IPv6 one by its /64."
   @spec peer(term()) :: String.t()
   def peer(ip) do
-    with true <- is_binary(ip),
-         {:ok, {a, b, c, d, _, _, _, _}} <- :inet.parse_ipv6strict_address(String.to_charlist(ip)) do
-      :inet.ntoa({a, b, c, d, 0, 0, 0, 0}) |> to_string() |> Kernel.<>("/64")
-    else
-      _ -> to_string(ip)
+    case is_binary(ip) && :inet.parse_ipv6strict_address(String.to_charlist(ip)) do
+      # ::ffff:a.b.c.d is the v4 peer a.b.c.d.
+      {:ok, {0, 0, 0, 0, 0, 0xFFFF, hi, lo}} ->
+        :inet.ntoa({div(hi, 256), rem(hi, 256), div(lo, 256), rem(lo, 256)}) |> to_string()
+
+      {:ok, {a, b, c, d, _, _, _, _}} ->
+        :inet.ntoa({a, b, c, d, 0, 0, 0, 0}) |> to_string() |> Kernel.<>("/64")
+
+      _ ->
+        to_string(ip)
     end
   end
 

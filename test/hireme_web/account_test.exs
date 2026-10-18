@@ -102,13 +102,35 @@ defmodule HiremeWeb.AccountTest do
     {:ok, %{secret: secret}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
     {:ok, %{cursor: cursor, leases: []}} = Account.call("account.overview", %{}, ctx)
     assert {:park, :account} = Account.call("account.watch", %{"since" => cursor}, ctx)
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
 
     alias HiremeWeb.Wire.Codec
     {:ok, wire} = HiremeWeb.Session.open(%{peer_ip: "127.0.0.1", origin: nil, carrier: :ws})
     {:push, _, wire} = HiremeWeb.Session.frame(Codec.encode_hello(:key, secret, "agent"), wire)
     {:push, _, _} = HiremeWeb.Session.frame(Codec.encode_rpc(1, "lease.claim", "{}"), wire)
 
+    # The sequencer records the lease in its own turn; once that announces
+    # itself, a watch from the old cursor answers at once.
+    assert_receive {Hireme.Audit, :changed}, 2_000
     assert {:ok, %{changed: true}} = Account.call("account.watch", %{"since" => cursor}, ctx)
     assert {:ok, %{leases: [_]}} = Account.call("account.overview", %{}, ctx)
+  end
+
+  test "what the lens does by itself never keeps an abandoned tab alive", %{
+    session: s,
+    ctx: ctx
+  } do
+    stale = age(s, :last_seen_at, Hireme.Security.session_idle() - 120)
+    cursor = Hireme.Audit.rev(s.account_id)
+    {:park, :account} = Account.call("account.watch", %{"since" => cursor}, ctx)
+    {:ok, _} = Account.call("account.overview", %{"passive" => true}, ctx)
+
+    assert Repo.get(Hireme.Rows.Session, s.id, skip_account: true).last_seen_at ==
+             stale.last_seen_at
+
+    {:ok, _} = Account.call("account.overview", %{}, ctx)
+
+    refute Repo.get(Hireme.Rows.Session, s.id, skip_account: true).last_seen_at ==
+             stale.last_seen_at
   end
 end

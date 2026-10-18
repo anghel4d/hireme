@@ -16,6 +16,7 @@ defmodule Hireme.Audit do
 
   import Ecto.Query
   alias Hireme.Repo
+  alias Hireme.Rows.Account
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
 
@@ -46,30 +47,41 @@ defmodule Hireme.Audit do
     account_id = Map.get(context, :account_id) || Repo.account_id()
     now = Store.now()
 
+    quiet? = Atom.to_string(kind) in @quiet
+
     Store.write(fn ->
-      Repo.insert_all(
-        Event,
-        [
-          %{
-            account_id: account_id,
-            kind: Atom.to_string(kind),
-            ip: blank(context[:ip], 64),
-            user_agent: blank(context[:user_agent], 200),
-            meta: meta,
-            key_id: Map.get(context, :key_id),
-            session_id: Map.get(context, :session_id),
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
-        ],
-        skip_account: true
-      )
+      {1, [%{id: id}]} =
+        Repo.insert_all(
+          Event,
+          [
+            %{
+              account_id: account_id,
+              kind: Atom.to_string(kind),
+              ip: blank(context[:ip], 64),
+              user_agent: blank(context[:user_agent], 200),
+              meta: meta,
+              key_id: Map.get(context, :key_id),
+              session_id: Map.get(context, :session_id),
+              rev: 1,
+              inserted_at: now,
+              updated_at: now
+            }
+          ],
+          skip_account: true,
+          returning: [:id]
+        )
+
+      # The cursor moves in the same turn as the row that moves it.
+      if account_id && not quiet? do
+        Repo.update_all(from(a in Account, where: a.id == ^account_id), [set: [audit_rev: id]],
+          skip_account: true
+        )
+      end
     end)
 
     # An agent's op batch or a key's HELLO is not a change to the account's
     # security state: it wakes no parked account.watch and moves no cursor.
-    if Atom.to_string(kind) in @quiet, do: :ok, else: changed(account_id)
+    if quiet?, do: :ok, else: changed(account_id)
   end
 
   defp blank(nil, _), do: nil
@@ -110,15 +122,13 @@ defmodule Hireme.Audit do
   How far the account's security state has moved: the newest event that
   announces itself (every kind but activity: agent op batches and key
   HELLOs). The trail is
-  append-only, so it only grows; `account.watch` compares against it.
+  append-only, so it only grows. Kept on the account row
+  (`accounts.audit_rev`), written with the event, so reading it is one row;
+  `account.watch` compares against it.
   """
   @spec rev(pos_integer()) :: non_neg_integer()
   def rev(account_id) do
-    Repo.one(
-      from(e in Event,
-        where: e.account_id == ^account_id and e.kind not in @quiet,
-        select: max(e.id)
-      ),
+    Repo.one(from(a in Account, where: a.id == ^account_id, select: a.audit_rev),
       skip_account: true
     ) || 0
   end

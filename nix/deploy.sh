@@ -91,10 +91,13 @@ fi
 nix copy --no-check-sigs --to "ssh-ng://$target" "$release" ${system:+"$system"}
 
 # 4. Back up, flip, switch, restart.
-# The running node backs itself up on request.
-remote "systemd-run --quiet --wait --pipe --uid=hireme --gid=hireme -p EnvironmentFile=/run/agenix/hireme-env \
-    -E HOME=/var/lib/hireme -E RELEASE_TMP=/var/lib/hireme/tmp \
-    $profile/bin/hireme rpc '{:ok, _} = Hireme.Release.Backup.run()' &&
+# The running node backs itself up on request. It is named on loopback
+# (hireme@127.0.0.1); a node from before that was named by its host, so the
+# call falls back to that once.
+remote "rpc() { systemd-run --quiet --wait --pipe --uid=hireme --gid=hireme -p EnvironmentFile=/run/agenix/hireme-env \
+    -E HOME=/var/lib/hireme -E RELEASE_TMP=/var/lib/hireme/tmp \"\$@\" \
+    $profile/bin/hireme rpc '{:ok, _} = Hireme.Release.Backup.run()'; }
+  { rpc -E ERL_EPMD_ADDRESS=127.0.0.1 -E RELEASE_DISTRIBUTION=name -E RELEASE_NODE=hireme@127.0.0.1 || rpc; } &&
   ls -1t /var/lib/hireme/backups | head -1" |
   sed 's/^/[hireme] backup /'
 remote "nix-env --profile $profile --set $release"

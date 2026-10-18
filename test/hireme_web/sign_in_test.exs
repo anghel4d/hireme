@@ -159,4 +159,34 @@ defmodule HiremeWeb.SignInTest do
     rec = conn |> signed_in(other) |> post("/sign-in/factor/recovery", %{"code" => recovery})
     assert redirected_to(rec) == "/"
   end
+
+  test "an unknown page is a plain 404, not a crash", %{conn: conn} do
+    conn = get(conn, "/nope")
+    assert conn.status == 404
+    assert conn.resp_body == "Not Found"
+  end
+
+  test "a v4 client reported as ::ffff:a.b.c.d through the proxy is that v4 peer", %{
+    conn: conn
+  } do
+    for _ <- 1..20 do
+      conn
+      |> put_req_header("x-real-ip", "::ffff:198.51.100.1")
+      |> post("/sign-in/email", %{"email" => "mapped@example.com"})
+    end
+
+    other =
+      conn
+      |> put_req_header("x-real-ip", "::ffff:198.51.100.2")
+      |> post("/sign-in/email", %{"email" => "other@example.com"})
+
+    assert other.status == 200
+
+    same =
+      conn
+      |> put_req_header("x-real-ip", "198.51.100.1")
+      |> post("/sign-in/email", %{"email" => "again@example.com"})
+
+    assert same.status == 429
+  end
 end

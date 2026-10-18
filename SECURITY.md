@@ -218,8 +218,11 @@ the host's vault at runtime, never the store or the repository.
 ## The trail
 
 Append-only (`audit`): every sign-in, refusal, session, factor, key,
-identity and lease event, and one row per agent op batch, each with its
-address, user agent, time, kind, key and session (CIS 8.2, 8.5). A
+identity and lease event, every key HELLO, and one row per agent op
+batch, each with its time, kind, key or session, and the address and
+user agent of the request or wire connection that caused it, where one
+did (CIS 8.2, 8.5); a lease the sequencer ends by itself carries no
+address. A
 sign-in link request is recorded by a hash of the address and its domain,
 since the asker may be a stranger. Notices go to the account's addresses
 through a durable outbox with bounded retries.
@@ -243,7 +246,9 @@ through a durable outbox with bounded retries.
 | Agent ops | 600 per key per wall-clock minute |
 | Agent read RPCs | 3,000 per key per wall-clock minute |
 | Key HELLOs | 60 per key per wall-clock minute |
-| Wire sessions open per key | 16 |
+| Wire sessions open per key / per peer | 16 / 16 |
+| /wire upgrades | 300 per peer a minute |
+| Refused key HELLOs recorded | 600 a minute in all |
 | Live keys per account | 100 |
 | Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
 

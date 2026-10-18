@@ -100,6 +100,7 @@
             (cd native && cargo test --offline --workspace --release)
             (cd native && cargo rustc --offline -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib)
             node native/kernel/vectors.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
+            node native/kernel/fuzz.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
             mix test
             tsc -p assets/tsconfig.json --noEmit
           '';
@@ -156,6 +157,18 @@
             machine.succeed("sqlite3 /var/lib/hireme/hireme.db \"select name from schema_files\" | grep -qx 0000_baseline")
             machine.succeed("sqlite3 /var/lib/hireme/hireme.db 'select count(*) from accounts'")
             machine.wait_until_succeeds("ls /var/lib/hireme/backups/hireme-*.db")
+
+            # The operator's and the deploy's way in: an rpc over loopback
+            # distribution, with the unit's environment.
+            machine.succeed(
+                "systemd-run --quiet --wait --pipe --uid=hireme --gid=hireme"
+                " -p EnvironmentFile=/var/lib/hireme-dev/env"
+                " -E HOME=/var/lib/hireme -E RELEASE_TMP=/var/lib/hireme/tmp"
+                " -E ERL_EPMD_ADDRESS=127.0.0.1 -E RELEASE_DISTRIBUTION=name -E RELEASE_NODE=hireme@127.0.0.1"
+                " $(systemctl show -P ExecStart hireme | grep -o '/nix/store/[^ ]*/bin/hireme' | head -1) rpc 'IO.puts(:ok)'"
+                " | grep -qx ok"
+            )
+            machine.fail("ss -Htlpn | grep -E ':4369|beam' | grep -v '127.0.0.1'")
 
             # The page ships the kernel the release was built with.
             machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/wasm/kernel.wasm")
