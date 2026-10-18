@@ -123,7 +123,6 @@ table places world server
   natural iso2 where kind = 'country'
   natural geonames_id where kind = 'city'
   cap 100000
-  col id id
   col kind enum place_kind !
   col country_id ref places
   col iso2 str ?
@@ -137,14 +136,14 @@ table places world server
 table applications desk resident
   natural canonical_url where canonical_url is not null
   cap 50000
-  col no u32 ! unique
+  col no u32 ! unique readonly
   col corporation_id ref corporations ?
   col listing_raw text ? deferred
   col listing_on day ?
-  col keywords str ? server_only
-  col stage enum stage !
+  col keywords str ? readonly
+  col stage enum stage ! = discovered readonly
   ...
-  command stage stage
+  command stage stage note:text?
   command open_fire human_only
 
 enum stage discovered freshness gated in_batch draft_ready fire_ready open_fire submitted reply closed
@@ -152,16 +151,27 @@ enum place_kind country city
 enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal
 ```
 
-Line grammar: `domain`, `enum`, `table`, `col`, `metric` (implies
-`<name>_on day`), `prose` (implies citation and CAS), `command`, plus
-table modifiers (`resident` | `server`, `natural`, `cap`, `append_only`,
-`soft_delete`). Flags: `!` required, `?` nullable, `deferred` (implies a
-readonly, server-only `<name>_sha` twin holding the text's hex SHA-256, a
-trailing `_raw` dropped, so `listing_raw`'s twin is `listing_sha`),
-`private`, `server_only`, `human_only`, `unique`, `ref`.
+The grammar is stated once, in the header of `schema/hireme.schema`, and
+both parsers refuse anything else. In outline: `domain`, `frame`,
+`layout`, `enum`, `table` (residency `resident` | `server` | `wire`, and
+`append_only`, `soft_delete`, `global`, `account_optional`, `singleton`),
+`projection` with `pick`, `natural`/`unique`/`index` (optionally `where`),
+a mandatory `cap` on every stored table, `col`, `metric` (implies
+`<name>_on day`), `prose` (implies citation and CAS), and `command`. `id`
+and `account_id` are implied, never declared. Types include `ref <table>`;
+flags include `!`, `?`, `= default`, `deferred` (implies a readonly,
+server-only `<name>_sha` twin holding the text's hex SHA-256, a trailing
+`_raw` dropped, so `listing_raw`'s twin is `listing_sha`), `private`,
+`server_only`, `human_only`, `readonly`, `unique`, and `loose` (a plain id
+with no foreign key, for references from append-only tables that a purge
+must never rewrite).
 
-Emitters (`mix hireme.schema`; `mix test` fails when a checked-in output
-differs from a fresh emit):
+Emitters (`mix hireme.schema`). `--check`, and `mix test`, fail when a
+checked-in output differs from a fresh emit, when the Rust and Elixir
+canonical dumps differ, when the baseline does not apply, when an existing
+id moved, or when a frozen baseline no longer matches `priv/db/baseline.lock`.
+`--migration NAME` writes an additive step, `--renumber` allows an id move
+before the freeze, and `--freeze` locks the deployed baseline at cutover:
 
 | Emitter | Output | Checked in? |
 | --- | --- | --- |
@@ -170,7 +180,7 @@ differs from a fresh emit):
 | additive SQL | `priv/db/NNNN_<name>.sql`, declaration minus `PRAGMA table_info` | yes |
 | wire catalog | the `catalog` table in every BOOT, built at runtime | no |
 | JSON schema | `schema` / `find` / `get` / `put` argument shapes, built at runtime | no |
-| Rust constants | `native/schema` crate, consumed by every `build.rs` | no |
+| Rust constants | `native/schema` crate (its own `build.rs`), a dependency of every crate | no |
 | TypeScript | `assets/js/gen/schema.ts` (ids, enums, row interfaces) | yes |
 
 Two hashes, because two different things can change:
@@ -178,7 +188,8 @@ Two hashes, because two different things can change:
 - `wire_hash` — frame layouts plus the **resident** tables the kernel is
   compiled against. A change forces a client rebuild.
 - `schema_rev` — the whole catalog, server-side tables included. A new
-  `places` metric bumps it; clients refetch `schema`; nothing rebuilds.
+  `places` metric bumps it; `hireme-mcp` and the wasm kernel need no
+  rebuild; the browser's checked-in `gen/schema.ts` is re-emitted.
 
 Rules:
 
@@ -197,20 +208,24 @@ Rules:
 ## Data model
 
 One rule decides residency: **a table is resident iff the kernel derives
-from it.** Everything else is read over RPC, server-side, under `Repo`'s
-account predicate.
+from it**, and the corpus (`profiles`, `items`) is resident as a unit.
+Everything else is read over RPC, server-side, under `Repo`'s account
+predicate.
 
 Every table has `id`, `account_id` (except `accounts`, `magic_links`),
-`inserted_at`, `updated_at`, `rev` (+1 per write). Soft-delete tables
+`inserted_at`, `updated_at`, `rev` (+1 per domain write; bookkeeping such
+as a key's `last_used_at` does not move it). Soft-delete tables
 carry `deleted_at`. Ids and `applications.no` are never reused.
 
 ### `system` — server, never key-visible
 
-`accounts` (`desk_rev`, `next_no`), `sessions`, `identities`,
+`accounts` (`name`, `status`, `desk_rev`, `next_no`, `audit_rev`,
+`text_bytes`), `sessions`, `identities`,
 `magic_links`, `api_keys` (`read_mask`, `write_mask`, `may_delete`),
 `factors` (one fat table for TOTP and WebAuthn), `challenges`,
-`recovery_codes`, `audit` (append-only; `key_id`), `outbox`, `op_ledger`
-(24 h idempotency), `trusted_hosts`.
+`recovery_codes`, `audit` (append-only; loose `key_id`/`session_id`),
+`outbox`, `op_ledger` (24 h, acknowledged ops only), `trusted_hosts`; and
+`schema_files`, the release's own record of applied SQL (not declared).
 
 ### `corpus` — resident
 
@@ -221,7 +236,7 @@ carry `deleted_at`. Ids and `applications.no` are never reused.
 
 | Table | Notes |
 | --- | --- |
-| `applications` | `no`, `corporation_id`, `place_id`, `contact_id`, `profile_id`, `batch_id`, typed card fields (`company`, `role`, `location`, `work_mode`, `employment`, `comp_raw`), `channel`, listing (`listing_raw` **deferred**, `listing_format`, `listing_sha`, `listing_url`, `canonical_url`, `listing_on`, `keywords`, `keywords_version`, `source_id`), pipeline (`stage`, `pips`, `stage_on`, `stage_notes`, `status`, `gate`, `freshness`, `heat_override`, `heat_override_reason`, `score_100`), dates (`applied_on`, `replied_on`, `closed_on`, `outcome`), prose (`notes`, `battleplan`, `letter_raw`), `cv_theme` |
+| `applications` | `no`, `corporation_id`, `place_id`, `contact_id`, `profile_id`, `batch_id`, typed card fields (`company`, `role`, `location`, `work_mode`, `employment`, `comp_raw`), `channel`, listing (`listing_raw` **deferred**, `listing_format`, `listing_sha`, `listing_url`, `canonical_url`, `listing_on`, `keywords`, `keywords_version`, `source_id`), pipeline (`stage`, `pips`, `stage_on`, `stage_notes`, `status`, `gate`, `freshness`, `heat_override`, `heat_override_reason`, `score_100`), dates (`applied_on`, `replied_on`, `closed_on`, readonly, written by `stage`; `outcome`), deferred text (`notes`, `battleplan`, `letter_raw`; plain text, no citation or CAS), `cv_theme` |
 | `events` | append-only: `application_id`, `kind`, `body`, `actor`, `key_id`, `op_id` |
 | `batches` | `code`, `ordinal`, `kind`, `status`, `fire`, `target_size`, `queued_on`, `note` |
 | `cv_lineages` | per corporation: `corporation_id`, `generation`, `opened_on`, `rewrites_allowed`, `theme` |
@@ -239,8 +254,8 @@ the CV and coverage derivations read.
 | `places` | countries and cities, `kind` + self `country_id`; identity, demography, economy, liveability, energy, career (`mobility`, `language`, `tech`, `ease`, `work_permit`, `atlas_position` (u32, null = not charted), `atlas_labeled`); every figure a `metric`; prose `liveability`, `notes`; partial uniques for `iso2` and `geonames_id` |
 | `corporations` | `domain` natural key; identity, size, private and public economics, comp and reputation, hiring (`careers_url`, `ats`, `ats_tenant`, `remote_policy`), desk columns (`score_100`, `freshness`, `freshness_on`, `eng_urls`, `note`), prose `about`, `culture` |
 | `offices` | `corporation_id`, `place_id`, `kind`, `headcount` (metric), `opened_on`; unique triple |
-| `sources` | `url` natural key, `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (deferred, retention by mutability) |
-| `citations` | append-only, `server_only`: `table`, `row_id`, `column`, `source_id`, `value`, `as_of`, `actor`, `key_id`, `op_id`; index `(account_id, table, row_id, column, id desc)` |
+| `sources` | soft-delete; `url` natural key over live rows, `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (deferred text); identity fixed once written; a cited source is tombstoned, never deleted |
+| `citations` | append-only, `server_only`: `table`, `row_id`, `column`, loose `source_id`, `value`, `as_of`, `actor`, loose `key_id`, `op_id`; indexes `(account_id, table, row_id, column, id desc)` and `(account_id, source_id)` |
 | `atlas` | **resident projection**, not stored: places rows with `atlas_position` set, only the columns the fit reads |
 
 `citations` is the only provenance authority. The newest citation for a
@@ -264,9 +279,10 @@ body, shipped_on).
 Derived on the wire, never stored: `leases` (session label, key, held
 application ids, since), `clock`, `catalog`.
 
-Gone with no successor: `claims`, squads, `freshness_verdicts`,
-`scoreboard_snapshots`, `kv_pairs`, `cv_variants`, `narratives`,
-`gym_problems`, `employers`, `geography_*`, `application_event`.
+Gone with no successor: `claims`, squads, `scoreboard_snapshots`,
+`application_event`. Folded into a successor (see the rename table):
+`kv_pairs`, `cv_variants`, `narratives`, `gym_problems`, `employers`,
+`geography_*`, `freshness_verdicts`.
 
 ## Wire v2
 
@@ -276,7 +292,7 @@ bytes, bodies 8-aligned. Flags: `DEFLATE 0x01`, `END 0x02`.
 | Frame | Id | Direction | Body |
 | --- | --- | --- | --- |
 | `HELLO` | 1 | up | credential kind (ticket, key), credential, `snapshot_rev`, `schema_rev`, client label |
-| `WELCOME` | 2 | down | account id, session id, `read_mask`, `write_mask`, `may_delete`, `schema_rev`, lease state |
+| `WELCOME` | 2 | down | account id, session id, session label, `read_mask`, `write_mask`, `may_delete`, `schema_rev`, lease state |
 | `BOOT` | 3 | down | every resident table the read mask allows, plus `catalog`, `leases`, `clock` |
 | `PATCH` | 4 | down | changed rows (id + moved columns) and `gone` |
 | `OPS` | 8 | up | a batch of ops (below) |
@@ -286,7 +302,7 @@ bytes, bodies 8-aligned. Flags: `DEFLATE 0x01`, `END 0x02`.
 | `PING`/`PONG` | 13/14 | both | liveness, 15 s interval, 45 s timeout ends the session |
 | `RPC` | 33 | up | `u32 id`, method (str), params (json) |
 | `REPLY` | 34 | down | `u32 id`, result or error (json) |
-| `BYE` | 16 | down | reason (`revoked`, `grants`, `restart`, `schema`, `suspended`) |
+| `BYE` | 16 | down | reason (`revoked`, `grants`, `restart`, `schema`, `suspended`) and a message |
 
 There is no `LEASE` frame: lease and release are RPC methods. There is no
 `WRITE` frame: `OPS` is the only write path.
@@ -308,7 +324,7 @@ u16 ncols cells:  u16 col_id | u8 type | u8 0 | u32 len | bytes | pad to 8
 Cells are **named and typed**: a sparse put sends only the columns it
 changes, each with its wire type, and the server does not cast strings.
 `as_of` and `source` are reserved column ids (`0xFFF0`, `0xFFF1`). A
-command's params are its declared columns. One op carries up to 1 MiB of
+command's params are its declared columns or typed free params. One op carries up to 1 MiB of
 text (`too_large` past it); one `OPS` frame carries up to 256 ops.
 
 Deferred text (`listing_raw`, `applications.notes`, `battleplan`,
@@ -317,7 +333,7 @@ prose) travels in BOOT/PATCH as `u32 len | 8 bytes of SHA-256`, the 8 bytes
 read from the column's stored `_sha` twin, which the sequencer writes with
 the column and which never travels itself. `RPC text {table, id, column,
 offset, length}` returns 256 KiB chunks and re-checks the read mask per
-chunk. `find` returns a table's non-metric columns unless `cols` names
+chunk; server-side reads give a deferred cell as `{len, sha}` JSON. `find` returns a table's non-metric columns unless `cols` names
 more; `get` returns every non-null column.
 
 Server-side reads are RPC methods: `schema`, `find`, `get`, `history`,
@@ -340,7 +356,7 @@ Kernel modules, one owner each:
 
 | Module | Owns |
 | --- | --- |
-| `rows.rs` | resident columns, arena strings, BOOT/PATCH ingest, base ⊕ pending, deltas |
+| `rows.rs` | resident columns, BOOT/PATCH ingest, base ⊕ pending, deltas |
 | `judge.rs` | every domain check of a put, drop or command; returns the refusal code and its data |
 | `pipeline.rs` | stages, pips, rail encode/decode, legal moves, fire hold |
 | `heat.rs` | decaying company/vendor loads, caps by size tier, department and clone penalties, mix |
@@ -351,6 +367,7 @@ Kernel modules, one owner each:
 | `board.rs` | order, filter, select, search, keyboard geometry |
 | `atlas.rs` | route, language fit, seven parts, weighted fit, presets — the only copy |
 | `lanes.rs` | gym streak, pace, today; net counts |
+| `text.rs` | Unicode-safe normalising and folding every text reader shares |
 | `compose.rs` | the documents the focus lens and the MCP read |
 | `abi.rs` | wasm exports; native facade for the NIF and MCP |
 
@@ -382,10 +399,10 @@ clients never need the raw listing to derive.
 
 ```
 lib/hireme/
-  application.ex   supervision: Repo, PubSub, Registry, Sequencer.Supervisor, Release, Mail, Endpoint, Drain
-  repo.ex          tenancy: put_account/1, every read scoped, skip_account explicit
+  application.ex   supervision: Repo, Store, PubSub, rate limits, tickets, the audit coalescer, Registry, Sequencer.Supervisor, Release, Mail, Gate, Endpoint, Drain
+  repo.ex          tenancy: put_account/1, every read scoped, skip_account explicit; SQLite pragmas
   schema.ex        compile-time reader and row macros
-  store.ex         SQLite pragmas, writer lock, busy backoff, VACUUM INTO
+  store.ex         the writer lock (granted in order), savepoints, VACUUM INTO
   sequencer.ex     one process per account: order, batch of 64, transaction, ledger, rev, deltas
   kernel.ex        the NIF: one kernel resource per sequencer
   grants.ex        masks, presets, domain of a table or command
@@ -417,33 +434,41 @@ runs SQL, not domain code.
 
 ### The sequencer's checks
 
-In order, inside the op's savepoint:
+Per submission, before any op: the `rate` limits (`:agent_write` ops and
+`:agent_write_bytes` text per key). Then, per op and inside its savepoint,
+in this order:
 
 1. **grant** — write mask covers the domain (`scope`); drop needs
-   `may_delete` (`scope`); a `human_only` command from a key
-   (`human_only`).
+   `may_delete`, and a key may not drop a row a loose ref names, such as
+   a cited source (`scope`); a keyed op needs the read bit too; a
+   `human_only` command or column from a key (`human_only`).
 2. **lease** — the session holds the channel (`lease_missing`); an
    agent's write to an application held by another session (`leased`;
-   the operator's browser session is exempt, see 'Lease and keys').
+   the operator's browser session is exempt, see 'Lease and keys'); a
+   paused key's write (`lease_missing`, "paused by the operator").
 3. **shape** — table, columns, types, natural key exist and are writable
    (`column`, `type`, `not_found`; `natural_key` when a `create_only` key
    already exists, or when a keyed op's cells hold none of the table's
    natural keys: its data lists every key as `{cols, where, reads}` and,
    under `unmet`, the keys whose columns were given but whose condition
-   failed, with the condition columns `missing`). A refusal's `reason`
-   names the cause in the server's words.
+   failed, with the condition columns `missing`; and any other unique
+   violation). `expect_rev` applies to any verb. Every refusal carries a
+   `reason` naming the cause in the server's words.
 4. **domain** — `judge.rs` on the sequencer's kernel: pipeline moves, fire
    hold, heat caps without an override, lineage and cooldown (`stage`,
    `fire_hold`, `heat`, `lineage_busy`, `cooldown`).
-5. **provenance** — metric without `as_of` (`freshness`), older than the
-   stored `_on` (`stale`), prose without `expect_rev` (`rev`) or source
-   (`source_missing`), culture/rating hosts (`source_trust`).
-6. **limits** — `too_large` (1 MiB), `rate` (600/min, `:agent_write`),
-   `cap` (places 100k, corporations 50k, contacts 50k, messages 200k,
-   citations 5M, applications 50k).
+5. **provenance** — metric without `as_of` (`freshness`), an `as_of` in
+   the future (`freshness`), older than the stored `_on` (`stale`), prose
+   without `expect_rev` (`rev`) or source (`source_missing`, also for an
+   id that is no live source), culture/rating hosts (`source_trust`).
+6. **limits** — `too_large` (1 MiB of text in one op, checked with
+   shape), `cap` (every stored table's declared row cap), and at commit
+   the account's text budget (`cap`, 1 GiB).
 
 Then the write, one citation per metric/prose cell, `rev + 1`, the ledger
-entry, and the delta to subscribers and to the sequencer's kernel.
+entry (acknowledged ops only; a resend is answered from it, a refused op
+is judged again), and the delta to subscribers and to the sequencer's
+kernel.
 
 ## Lease and keys
 
@@ -457,10 +482,11 @@ entry, and the delta to subscribers and to the sequencer's kernel.
   sessions off each other's applications; the operator's browser session
   is never refused `leased` (the owner's write, a human act like
   `open_fire`, always lands, and the claiming agent sees it as a PATCH and
-  has its pending ops re-judged). An operator lease revoke pauses that key: none of its sessions may open
+  has its pending ops judged at their turn as usual). An operator lease revoke pauses that key: none of its sessions may open
   the channel or claim (refused, "paused by the operator") until the operator
   resumes it from the account lens or the key is revoked.
-- `lease.claim` answers the ids granted; a `count` larger than the
+- `lease.claim` needs desk read and write, takes at most 1,000 ids per
+  request, and answers the ids granted; a `count` larger than the
   unclaimed set grants what exists with a `truncated` warning; naming an
   id another session holds is refused `leased` with that session's label
   and `since`; nothing is partially granted for `ids`.
@@ -513,7 +539,8 @@ assets/
 - A write is judged and applied locally by the kernel in the input's
   frame, then settled or rolled back by ACK/NACK.
 - The account lens speaks `account.*` RPC; sign-in and the factor page
-  stay HTTP forms; only passkey enrollment ships a script.
+  stay HTTP forms; the factor page's passkey assertion is its one script
+  (`auth/factor.ts`); enrollment lives in the account lens.
 - The `world` lens is a sparse grid: columns are the declared fields, a
   cell shows `_on` and opens its citations; empty is empty, not a dash.
   The `outreach` lens is contacts and threads keyed to corporations and
@@ -523,12 +550,15 @@ assets/
 ## Release, edge, nix
 
 - `flake.nix`: packages `hireme` (OTP release with the NIF and
-  `hireme-gate`), `hireme-mcp`, `kernel-wasm`; `nixosModules.hireme` as
-  committed in `1157dbe` (proxy, vault, gate forwarding, deploy script);
+  `hireme-gate`), `hireme-mcp`, `kernel-wasm`; `nixosModules.hireme`
+  (proxy and its query-free log format, vault, gate forwarding, deploy
+  script);
   `checks.dev` (the VM) and `checks.unit` (mix test, cargo test, tsc).
 - Baseline: `Hireme.Release` applies `priv/db/baseline.sql` to an empty
-  database, then additive files in order, under the sidecar lock. Backups
-  daily by `VACUUM INTO`, 13 kept. SIGTERM drains with BYE `restart`, 5 s,
+  database and records every additive file present as contained; an
+  existing database runs only the files it has not recorded, in order,
+  under the sidecar lock. Backups daily by `VACUUM INTO`, the newest 13 of
+  v2's own prefix kept (v1's backups are never pruned automatically). SIGTERM drains with BYE `restart`, 5 s,
   then the node stops the gate.
 - Nix builds the wasm, the NIF and the release; no build output is
   committed. `nix build --rebuild` proves reproducibility.
@@ -568,8 +598,9 @@ timeout written down.
 
 ## The nuke manifest
 
-Everything below is deleted at cutover. No file is copied, adapted, or
-left behind as a shim.
+Everything below was deleted at cutover (`f8430dd`); no shim was left
+behind. A v2 file may carry text quarried from v1, as the operator allowed:
+"Anything from those can be stolen as needed only."
 
 | v1 | v2 owner |
 | --- | --- |
@@ -590,22 +621,25 @@ left behind as a shim.
 | `native/{wire,kernel,mcp,gate}` sources (16 files) and 4 lockfiles | `native/` workspace, 6 crates, 1 lockfile |
 | `priv/wire/schema.txt` | `schema/hireme.schema` |
 | `priv/repo/migrations/*.exs` | `priv/db/baseline.sql` + additive files |
-| `priv/static/*`, `priv/wasm/kernel.wasm` | built artifacts, not committed |
+| `priv/static/*` (v1's `priv/static/wasm/kernel.wasm`) | built artifacts, not committed |
 | `assets/js/*`, `assets/css/*` | the tree above |
 | `config/*.exs`, `mix.exs`, `.formatter.exs`, `.credo.exs` | re-derived for the new tree |
 | `bench/*`, `docs/checklist.md`, `docs/performance.md`, `README.md`, `SECURITY.md`, `alchemy/*` | re-authored as `bench/`, `docs/heat.md`, `docs/score.md`, new README and SECURITY |
 | `flake.nix` (app half) | re-derived with the NIF and wasm packages |
 | `nix/package.nix` | rewritten: release with the NIF, `kernel-wasm`, `hireme-mcp` |
 
-Kept because they are the host half, rebuilt in `1157dbe` and not part of
-the application: `nix/module.nix`, `nix/deploy.sh`, `secrets/`, `LICENSE`.
+Kept: `nix/module.nix`, `nix/deploy.sh`, `secrets/`, `LICENSE`,
+`flake.lock` (the nixpkgs pin), `.gitignore` (the allowlist) and `.agents/`
+(team tooling).
 Kept as input: the design docs. `seed/` is local, untracked, and not part
 of the tree.
 
 ## Cutover acceptance
 
-1. `rg` finds no v1 module name: `job_apps`, `letterbox`, `packet`,
-   `kv_pairs`, `geography`, `oracle`, `parity`.
+1. A word-bound search finds no v1 identifier (`HiremeWeb.Packet`,
+   `Hireme.Letterbox`, `job_apps`, `kv_pairs`, `geography_*`, an oracle or
+   parity module or file); Erlang's `:gen_tcp` `packet` options and the
+   company Oracle in employer data are not v1 names.
 2. `mix test`, `cargo test --workspace`, the wasm vectors, `tsc`, and
    `nix flake check` (dev VM included) pass.
 3. A fresh account signs in by email link, enrolls a passkey, mints a
@@ -615,9 +649,10 @@ of the tree.
    a cited headcount and an office; the browser shows all three without a
    reload.
 5. The bounds above hold on the bench.
-6. Every in-scope v1 path is absent from `git ls-tree`.
+6. No in-scope v1 file survives as v1 content (the nuke commit removed
+   them all; paths reused by v2 rewrites are new files).
 7. The cutover deletes the v1 database file; the node's existing daily
-   backups are the only copy kept.
+   backups are the only copy kept, and v2 never prunes them.
 
 ## The v1 data
 
@@ -650,11 +685,10 @@ reader for the v1 database.
 - BOOT at 10k applications with `listing_raw` deferred and keywords
   stored: if it exceeds 2 MiB, the next lever is a projection, not a
   compat path.
-- `find` p99 at 50k places; add the `(account_id, country_id, name)` index
-  if the planner wants it.
-- Prose conflict rate; move CAS to the cell (`expect_citation`) if
-  whole-row `expect_rev` causes more than a rare retry.
-- The `:agent_write` cap (600/min), the 64-op batch and the 15 s/45 s
-  liveness numbers, against the bench.
+- `find` p99 at 50k places: met with the declared indexes (the account,
+  `country_id`, name and `(region, population)`).
+- The `:agent_write` cap (600/min) and the 64-op batch, against the bench;
+  the 15 s/45 s liveness, against a silent session in the final
+  certification.
 - Whether the gate earns its keep against `wire.ws`; the bench answers,
   and dropping it is a deletion, not a deprecation.
