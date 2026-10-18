@@ -1,9 +1,11 @@
-# The host-agnostic half of running Hireme on NixOS: the user, one unit that
-# starts and sandboxes the node, and where its secrets come from. Addresses,
-# firewall, certificates and the reverse proxy belong to the importing host.
+# Everything Hireme needs from a NixOS host: the user and one sandboxed unit,
+# and with `public.enable` the reverse proxy, the vault's secrets and the
+# profile `nix/deploy.sh` flips; with `gate.address` the gate's forwarding
+# and its wildcard certificate. The importing host names its addresses only.
 { self }:
 {
   config,
+  options,
   lib,
   pkgs,
   ...
@@ -11,6 +13,8 @@
 let
   cfg = config.services.hireme;
   gate = cfg.gate;
+  cert = "hireme-gate";
+  gatePort = 4433;
   inherit (lib) mkOption types;
 in
 {
@@ -40,8 +44,32 @@ in
       description = "`KEY=value` lines (SECRET_KEY_BASE, RELEASE_COOKIE, the mail credentials); an agenix path on a host, never a store path.";
     };
 
+    public = {
+      enable = lib.mkEnableOption "the public host: nginx with ACME on `domain`, the vault's secrets, and the release profile the deploy flips";
+      acmeEmail = mkOption {
+        type = types.str;
+        description = "Contact address for ACME registration.";
+      };
+    };
+
     gate = {
       enable = lib.mkEnableOption "the WebTransport gate, run by the node as a Port";
+      address = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Floating IPv4 only the gate listens on; UDP 443 there is forwarded
+          to the gate's high port. The host puts the address on its interface.
+        '';
+      };
+      host = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          DNS-only name (one label under `domain`, so the wildcard certificate
+          covers it) whose A record points at `address`.
+        '';
+      };
       listen = mkOption {
         type = types.str;
         default = "0.0.0.0:4433";
@@ -66,89 +94,206 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    users.groups.hireme = { };
-    users.users.hireme = {
-      isSystemUser = true;
-      group = "hireme";
-    };
-
-    systemd.services.hireme = {
-      description = "Hireme";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      environment = {
-        PHX_SERVER = "true";
-        PHX_HOST = cfg.domain;
-        PORT = toString cfg.port;
-        DATABASE_PATH = "/var/lib/hireme/hireme.db";
-        HOME = "/var/lib/hireme";
-        RELEASE_TMP = "/var/lib/hireme/tmp";
-      }
-      // lib.optionalAttrs gate.enable (
+  config = lib.mkIf cfg.enable (
+    lib.mkMerge (
+      [
         {
-          GATE_BIN = "${cfg.release}/bin/hireme-gate";
-          GATE_SOCKET = "/run/hireme/gate.sock";
-          GATE_URL = gate.url;
-          GATE_LISTEN = gate.listen;
-          GATE_ORIGINS = lib.concatStringsSep "," gate.origins;
-        }
-        // (
-          if gate.cert == null then
-            { GATE_CERT_HASH_FILE = "/run/hireme/gate.hash"; }
-          else
-            {
-              GATE_CERT = "${gate.cert}/fullchain.pem";
-              GATE_KEY = "${gate.cert}/key.pem";
+          users.groups.hireme = { };
+          users.users.hireme = {
+            isSystemUser = true;
+            group = "hireme";
+          };
+
+          systemd.services.hireme = {
+            description = "Hireme";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network-online.target" ];
+            wants = [ "network-online.target" ];
+            environment = {
+              PHX_SERVER = "true";
+              PHX_HOST = cfg.domain;
+              PORT = toString cfg.port;
+              DATABASE_PATH = "/var/lib/hireme/hireme.db";
+              HOME = "/var/lib/hireme";
+              RELEASE_TMP = "/var/lib/hireme/tmp";
             }
+            // lib.optionalAttrs gate.enable (
+              {
+                GATE_BIN = "${cfg.release}/bin/hireme-gate";
+                GATE_SOCKET = "/run/hireme/gate.sock";
+                GATE_URL = gate.url;
+                GATE_LISTEN = gate.listen;
+                GATE_ORIGINS = lib.concatStringsSep "," gate.origins;
+              }
+              // (
+                if gate.cert == null then
+                  { GATE_CERT_HASH_FILE = "/run/hireme/gate.hash"; }
+                else
+                  {
+                    GATE_CERT = "${gate.cert}/fullchain.pem";
+                    GATE_KEY = "${gate.cert}/key.pem";
+                  }
+              )
+            );
+            serviceConfig = {
+              User = "hireme";
+              Group = "hireme";
+              WorkingDirectory = "/var/lib/hireme";
+              ExecStart = "${cfg.release}/bin/hireme start";
+              EnvironmentFile = cfg.environmentFile;
+              # SIGTERM reaches the node alone, which drains its sessions through
+              # the gate and then closes the gate's stdin; the rest of the cgroup
+              # is killed only if that outlasts the stop timeout.
+              KillMode = "mixed";
+              Restart = "on-failure";
+              RestartSec = 5;
+              StateDirectory = [
+                "hireme"
+                "hireme/tmp"
+              ];
+              StateDirectoryMode = "0700";
+              RuntimeDirectory = "hireme";
+              RuntimeDirectoryMode = "0700";
+              LimitNOFILE = 65536;
+              UMask = "0077";
+              CapabilityBoundingSet = "";
+              NoNewPrivileges = true;
+              PrivateTmp = true;
+              PrivateDevices = true;
+              ProtectSystem = "strict";
+              ProtectHome = true;
+              ProtectKernelTunables = true;
+              ProtectKernelModules = true;
+              ProtectKernelLogs = true;
+              ProtectControlGroups = true;
+              ProtectClock = true;
+              ProtectHostname = true;
+              ProtectProc = "invisible";
+              RestrictSUIDSGID = true;
+              RestrictNamespaces = true;
+              RestrictRealtime = true;
+              LockPersonality = true;
+              SystemCallArchitectures = "native";
+              RestrictAddressFamilies = [
+                "AF_UNIX"
+                "AF_INET"
+                "AF_INET6"
+              ];
+            };
+          };
+        }
+
+        (lib.mkIf cfg.public.enable {
+          services.hireme.release = lib.mkDefault "/nix/var/nix/profiles/hireme";
+
+          networking.firewall.allowedTCPPorts = [
+            80
+            443
+          ];
+          security.acme = {
+            acceptTerms = true;
+            defaults.email = lib.mkDefault cfg.public.acmeEmail;
+          };
+          services.nginx = {
+            enable = true;
+            recommendedTlsSettings = true;
+            recommendedOptimisation = true;
+            recommendedProxySettings = true;
+            virtualHosts.${cfg.domain} = {
+              enableACME = true;
+              forceSSL = true;
+              locations."/" = {
+                proxyPass = "http://127.0.0.1:${toString cfg.port}";
+                proxyWebsockets = true;
+                # Recommended proxy headers include Host and X-Forwarded-Proto $scheme.
+                extraConfig = ''
+                  proxy_buffering off;
+                  proxy_read_timeout 300s;
+                '';
+              };
+            };
+          };
+        })
+
+        (lib.mkIf (gate.enable && gate.address != null) {
+          assertions = [
+            {
+              assertion =
+                gate.host != null
+                && lib.hasSuffix ".${cfg.domain}" gate.host
+                && !(lib.hasInfix "." (lib.removeSuffix ".${cfg.domain}" gate.host));
+              message = "services.hireme.gate.host must be one label under ${cfg.domain}, inside the wildcard.";
+            }
+            {
+              assertion = cfg.public.enable;
+              message = "services.hireme.gate.address needs services.hireme.public.enable for its certificate.";
+            }
+          ];
+
+          services.hireme.gate = {
+            listen = "${gate.address}:${toString gatePort}";
+            url = "https://${gate.host}/wt";
+            cert = "/var/lib/acme/${cert}";
+          };
+
+          # UDP 443 on the gate's address only, forwarded to its high port;
+          # the high port takes nothing that was not forwarded.
+          networking.firewall.extraCommands = ''
+            iptables -t nat -N hireme-gate 2>/dev/null || iptables -t nat -F hireme-gate
+            iptables -t nat -A hireme-gate -d ${gate.address}/32 -p udp --dport 443 -j DNAT --to-destination ${gate.address}:${toString gatePort}
+            iptables -t nat -C PREROUTING -j hireme-gate 2>/dev/null || iptables -t nat -A PREROUTING -j hireme-gate
+            iptables -A nixos-fw -d ${gate.address}/32 -p udp --dport ${toString gatePort} -m conntrack --ctstate DNAT -j nixos-fw-accept
+          '';
+          networking.firewall.extraStopCommands = ''
+            iptables -t nat -D PREROUTING -j hireme-gate 2>/dev/null || true
+            iptables -t nat -F hireme-gate 2>/dev/null || true
+            iptables -t nat -X hireme-gate 2>/dev/null || true
+          '';
+
+          # quinn's recommended socket buffers for bursts of QUIC datagrams.
+          boot.kernel.sysctl = {
+            "net.core.rmem_max" = 7500000;
+            "net.core.wmem_max" = 7500000;
+          };
+
+          # Wildcard by DNS-01, so certificate transparency shows
+          # *.${cfg.domain} and not the gate's own name. The gate rereads
+          # the pair when a renewal rewrites it.
+          security.acme.certs.${cert} = {
+            domain = "*.${cfg.domain}";
+            dnsProvider = "cloudflare";
+            dnsResolver = "1.1.1.1:53";
+            # CF_DNS_API_TOKEN: Zone DNS Edit on the domain's zone only.
+            environmentFile = config.age.secrets.hireme-acme.path;
+            group = "hireme";
+          };
+          systemd.services.hireme = {
+            wants = [ "acme-${cert}.service" ];
+            after = [ "acme-${cert}.service" ];
+          };
+        })
+      ]
+      # The vault (secrets/master), rekeyed to the host by agenix-rekey; only
+      # where the host imports it, so the dev profile needs none.
+      ++ lib.optional (options ? age) (
+        lib.mkIf cfg.public.enable (
+          lib.mkMerge [
+            {
+              services.hireme.environmentFile = lib.mkDefault config.age.secrets.hireme-env.path;
+              age.secrets.hireme-env = {
+                rekeyFile = "${self}/secrets/master/hireme-env.age";
+                mode = "0400";
+              };
+            }
+            (lib.mkIf (gate.enable && gate.address != null) {
+              age.secrets.hireme-acme = {
+                rekeyFile = "${self}/secrets/master/hireme-acme.age";
+                mode = "0400";
+              };
+            })
+          ]
         )
-      );
-      serviceConfig = {
-        User = "hireme";
-        Group = "hireme";
-        WorkingDirectory = "/var/lib/hireme";
-        ExecStart = "${cfg.release}/bin/hireme start";
-        EnvironmentFile = cfg.environmentFile;
-        # SIGTERM reaches the node alone, which drains its sessions through
-        # the gate and then closes the gate's stdin; the rest of the cgroup
-        # is killed only if that outlasts the stop timeout.
-        KillMode = "mixed";
-        Restart = "on-failure";
-        RestartSec = 5;
-        StateDirectory = [
-          "hireme"
-          "hireme/tmp"
-        ];
-        StateDirectoryMode = "0700";
-        RuntimeDirectory = "hireme";
-        RuntimeDirectoryMode = "0700";
-        LimitNOFILE = 65536;
-        UMask = "0077";
-        CapabilityBoundingSet = "";
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        ProtectProc = "invisible";
-        RestrictSUIDSGID = true;
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        LockPersonality = true;
-        SystemCallArchitectures = "native";
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
-      };
-    };
-  };
+      )
+    )
+  );
 }

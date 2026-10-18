@@ -1,10 +1,10 @@
 {
-  description = "Hireme: the release, its NixOS module, and the dev profile that tests them";
+  description = "Hireme: the release, its NixOS module, its deploy, and the dev profile that tests them";
 
-  # Pure on purpose: nothing about any host. A host flake imports
+  # Everything Hireme is: the release, the module that runs it (proxy,
+  # gate forwarding, vault included), and nix/deploy.sh. A host imports
   # nixosModules.hireme with `inputs.hireme.inputs.nixpkgs.follows =
-  # "nixpkgs"`, so the release builds against the host's nixpkgs and the
-  # mix dependency hash stays valid; the deploy lives with the host.
+  # "nixpkgs"` and names its addresses; the release builds from this lock.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =

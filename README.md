@@ -71,10 +71,22 @@ build with `mixDepsHash = lib.fakeHash` and pin the hash it reports.
 `nixosModules.hireme` (`nix/module.nix`) adds the `hireme` user and one
 systemd unit that only starts and sandboxes the node (no capabilities,
 `ProtectSystem=strict`, state in `/var/lib/hireme`, secrets from
-`services.hireme.environmentFile`). A host flake imports it with
+`services.hireme.environmentFile`). `services.hireme.public.enable` adds
+nginx with ACME on `domain`, the vault's secrets (`secrets/master`, rekeyed
+by agenix-rekey where the host imports it) and the release profile the
+deploy flips; `services.hireme.gate.address` and `gate.host` add the gate's
+UDP 443 forwarding on its floating IP and its wildcard certificate by
+Cloudflare DNS-01. A host imports the module with
 `inputs.hireme.inputs.nixpkgs.follows = "nixpkgs"` (or the mix dependency
-hash goes stale) and adds its own addresses, firewall, certificates and
-reverse proxy; the deploy lives with the host, so the flakes form no cycle.
+hash goes stale), puts the floating IP on its interface, and sets those
+options; nothing else about Hireme lives in the host's flake.
+
+`nix/deploy.sh` ships a pushed revision to fsn1-2 (the host flake is
+`NIXOS_SERVER`, default `~/workspace/nixos-server`): it builds the release
+from this checkout (the repository is private; nothing fetches from GitHub),
+backs up, flips `/nix/var/nix/profiles/hireme`, restarts, and proves the
+public names answer; `--switch` also switches the host. Its header lists
+the flags and the rollback.
 
 The node owns its upkeep. Pending migrations run as the first boot step
 (`Hireme.Release`; a failed one stops the boot). `Hireme.Release.Backup`

@@ -15,6 +15,7 @@
 
 !/nix/
 !/nix/*.nix
+!/nix/deploy.sh
 
 !/secrets/
 !/secrets/master/
