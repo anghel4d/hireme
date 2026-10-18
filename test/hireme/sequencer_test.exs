@@ -690,6 +690,28 @@ defmodule Hireme.SequencerTest do
                Hireme.Kernel.keywords_version()
     end
 
+    test "a keyed put that misses a key's condition is told the condition and what it lacks",
+         %{account: a} do
+      refused = fn cells ->
+        {[], [nack]} = run(a.id, op(:put, :places, cells, keyed: true))
+        assert nack.refusal == :natural_key
+        JSON.decode!(nack.data)
+      end
+
+      country = %{"cols" => ["iso2"], "where" => "kind = 'country'", "reads" => ["kind"]}
+      city = %{"cols" => ["geonames_id"], "where" => "kind = 'city'", "reads" => ["kind"]}
+
+      data = refused.(%{iso2: "DE", name: "Germany"})
+      assert data["keys"] == [country, city]
+      assert data["unmet"] == [Map.put(country, "missing", ["kind"])]
+
+      # The condition column given, with a value the condition refuses.
+      data = refused.(%{iso2: "DE", kind: :city, name: "Germany"})
+      assert data["unmet"] == [Map.put(country, "missing", [])]
+
+      assert refused.(%{name: "Germany"})["unmet"] == []
+    end
+
     test "a natural_key refusal does not name the row it found", %{account: a} do
       {[_], []} = run(a.id, op(:put, :corporations, %{domain: "nk.example", name: "N"}))
 

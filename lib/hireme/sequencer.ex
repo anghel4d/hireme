@@ -868,11 +868,20 @@ defmodule Hireme.Sequencer do
            Enum.all?(n.cols, &(values[&1] != nil)) and holds?(table, n.where_term, values)
          end) do
       nil ->
+        # Each key with its condition; a key whose columns were all given
+        # but whose condition failed is unmet, naming the condition's
+        # columns the cells left out ([] when one was given another value).
+        unmet =
+          for n <- table.naturals, Enum.all?(n.cols, &(values[&1] != nil)) do
+            Map.put(key_doc(n), :missing, Enum.reject(key_reads(n), &Map.has_key?(values, &1)))
+          end
+
         {:refused, :natural_key,
          %{
            table: table.name,
            reason: "no natural key among the cells",
-           keys: Enum.map(table.naturals, & &1.cols)
+           keys: Enum.map(table.naturals, &key_doc/1),
+           unmet: unmet
          }}
 
       %{cols: cols, where_term: term} ->
@@ -899,6 +908,10 @@ defmodule Hireme.Sequencer do
         end
     end
   end
+
+  defp key_doc(n), do: %{cols: n.cols, where: n.where, reads: key_reads(n)}
+  defp key_reads(%{where_term: nil}), do: []
+  defp key_reads(%{where_term: term}), do: [elem(term, 1)]
 
   # A key's partial `where` (the schema's where_term) decides which key the
   # cells name, and bounds its lookup: a country's iso2 never finds a city.
