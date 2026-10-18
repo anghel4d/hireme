@@ -124,20 +124,17 @@ defmodule HiremeWeb.Session do
 
   def info({:bye, :account, reason}, %{phase: :live} = state), do: bye(reason, "", state)
 
-  # An audited change (a factor enrolled, a session revoked) re-checks the
-  # credential at once, not at the next tick; then wakes a parked watch.
-  def info({Hireme.Audit, :changed}, %{phase: :live} = state) do
-    cond do
-      not credential_live?(state.session) ->
-        bye(:revoked, "credential lapsed", state)
-
-      state.parked ->
-        {:push, [reply(state.parked, true, %{changed: true}, state)], %{state | parked: nil}}
-
-      true ->
-        {:ok, state}
-    end
+  # A factor bound, removed or disabled may leave a browser session owing
+  # its factor: re-checked at once, not at the next tick. (Revocations and
+  # suspension arrive as BYEs; other audited events only wake a watch.)
+  def info({Hireme.Audit, :factors}, %{phase: :live} = state) do
+    if credential_live?(state.session),
+      do: {:ok, state},
+      else: bye(:revoked, "credential lapsed", state)
   end
+
+  def info({Hireme.Audit, :changed}, %{parked: id} = state) when id != nil,
+    do: {:push, [reply(id, true, %{changed: true}, state)], %{state | parked: nil}}
 
   def info({__MODULE__, :too_many}, state),
     do: bye(:restart, "too many sessions from this address; retry later", state)

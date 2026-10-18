@@ -194,6 +194,25 @@ defmodule HiremeWeb.SessionTest do
     assert Enum.any?(frames, &(&1.kind == :BYE))
   end
 
+  test "only a factor change re-checks the session at once; other audited events cost it nothing",
+       %{session: s} do
+    origin = hd(HiremeWeb.Endpoint.origins())
+
+    {:push, _, state} =
+      Session.frame(
+        Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b"),
+        open(%{@peer | origin: origin})
+      )
+
+    # The session row lapses without a broadcast: only a re-check would see it.
+    s
+    |> Ecto.Changeset.change(revoked_at: DateTime.utc_now() |> DateTime.truncate(:second))
+    |> Repo.update!(skip_account: true)
+
+    assert {:ok, _} = Session.info({Hireme.Audit, :changed}, state)
+    assert {:stop, {:bye, :revoked}, _, _} = Session.info({Hireme.Audit, :factors}, state)
+  end
+
   test "a bad credential, or a ticket from a foreign origin, is BYE revoked", %{session: s} do
     assert {:stop, {:bye, :revoked}, [bye], _} =
              Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
