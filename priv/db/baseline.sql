@@ -185,7 +185,6 @@ CREATE TABLE "op_ledger" (
   "target" INTEGER,
   "row_id" INTEGER,
   "ack_rev" INTEGER,
-  "refusal" TEXT,
   "writer" INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE INDEX "op_ledger__account_account_id" ON "op_ledger" ("account_id");

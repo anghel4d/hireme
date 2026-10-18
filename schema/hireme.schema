@@ -280,8 +280,9 @@ table outbox system server
   col sent_at time ?
   col last_error str ?
 
-# A resent op_id answers its first verdict and writes nothing; rows age out
-# after 24 h.
+# A resent op_id that was ACKed answers its ACK and writes nothing; a refused
+# op is not kept, so its writer may send it again once fixed. Rows age out
+# after 24 h, and at the cap an account's oldest make room.
 table op_ledger system server
   cap 1000000
   # An op_id is the writer's own: two keys, or a key and the operator, may
@@ -296,7 +297,6 @@ table op_ledger system server
   col target u32 ?
   col row_id u32 ?
   col ack_rev i64 ?
-  col refusal enum refusal ?
   # The key that wrote the op, 0 for the operator (key_id is null then).
   col writer u32 ! = 0
 
