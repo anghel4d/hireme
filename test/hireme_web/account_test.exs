@@ -164,11 +164,22 @@ defmodule HiremeWeb.AccountTest do
              Account.call("account.rename", %{"name" => String.duplicate("é", 250)}, ctx)
   end
 
-  test "account writes share one budget per account", %{ctx: ctx} do
-    results = for _ <- 1..61, do: Account.call("account.session.revoke", %{"id" => 999_999}, ctx)
-    assert Enum.count(results, &(&1 == {:error, %{error: "not_found"}})) == 60
-    assert {:error, %{error: "rate_limited"}} = List.last(results)
-    assert {:ok, _} = Account.call("account.overview", %{}, ctx)
+  test "account writes are charged only when they write, and revoking is always possible", %{
+    ctx: ctx
+  } do
+    mint = fn p -> Account.call("account.key.mint", Map.merge(%{"name" => "k"}, p), ctx) end
+
+    # Refused calls cost nothing.
+    for _ <- 1..70, do: {:error, _} = mint.(%{"read_mask" => 99, "write_mask" => 0})
+
+    keys = for _ <- 1..60, do: mint.(%{"preset" => "read_only"})
+    assert Enum.all?(keys, &match?({:ok, _}, &1))
+    assert {:error, %{error: "rate_limited"}} = mint.(%{"preset" => "read_only"})
+
+    # The budget spent, the owner still revokes.
+    {:ok, %{key: %{id: id}}} = hd(keys)
+    assert {:ok, %{key: %{live: false}}} = Account.call("account.key.revoke", %{"id" => id}, ctx)
+    assert {:ok, _} = Account.call("account.session.revoke_others", %{}, ctx)
   end
 
   test "trusting a host already trusted with the same note records nothing", %{ctx: ctx} do
@@ -183,5 +194,25 @@ defmodule HiremeWeb.AccountTest do
 
     long = %{"host" => "example.org", "note" => String.duplicate("n", 501)}
     assert {:error, %{error: "invalid"}} = Account.call("account.trusted_host.add", long, ctx)
+  end
+
+  test "a host is the same host however it is written", %{ctx: ctx} do
+    {:ok, %{trusted_host: %{id: id}}} =
+      Account.call("account.trusted_host.add", %{"host" => "levels.fyi", "note" => "n"}, ctx)
+
+    cursor = Hireme.Audit.rev(ctx.account_id)
+
+    for host <- ["LEVELS.FYI", "levels.fyi.", "https://levels.fyi/x"] do
+      assert {:ok, %{trusted_host: %{id: ^id}}} =
+               Account.call("account.trusted_host.add", %{"host" => host, "note" => "n"}, ctx)
+    end
+
+    assert Hireme.Audit.rev(ctx.account_id) == cursor
+  end
+
+  test "beginning ceremonies is bounded per session", %{ctx: ctx} do
+    results = for _ <- 1..31, do: Account.call("account.totp.begin", %{}, ctx)
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 30
+    assert {:error, %{error: "rate_limited"}} = List.last(results)
   end
 end

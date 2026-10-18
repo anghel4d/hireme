@@ -266,13 +266,13 @@ defmodule Hireme.Release.Purge do
 
   @batch 5_000
   defp batches(query, done \\ 0) do
-    ids = from(e in query, select: e.id, limit: @batch)
-
-    case Hireme.Store.write(fn -> delete(from(e in Audit, where: e.id in subquery(ids))) end) do
-      0 ->
+    # The ids are found outside the writer lock; only their delete holds it.
+    case Repo.all(from(e in query, select: e.id, limit: @batch), skip_account: true) do
+      [] ->
         done
 
-      n ->
+      ids ->
+        n = Hireme.Store.write(fn -> delete(from(e in Audit, where: e.id in ^ids)) end)
         Process.sleep(20)
         batches(query, done + n)
     end

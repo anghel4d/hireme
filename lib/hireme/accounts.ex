@@ -520,13 +520,17 @@ defmodule Hireme.Accounts do
         idle = DateTime.add(now, -Security.session_idle())
         all = from(s in Session, where: s.account_id == ^id)
 
-        Repo.aggregate(all, :count, skip_account: true) < Hireme.Schema.table(:sessions).cap or
-          Repo.exists?(
-            from(s in all,
-              where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
-            ),
-            skip_account: true
+        # The same arithmetic as eviction: room for one more is the cap, or
+        # enough ended sessions to bring the count under it.
+        need =
+          Repo.aggregate(all, :count, skip_account: true) - Hireme.Schema.table(:sessions).cap + 1
+
+        ended =
+          from(s in all,
+            where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
           )
+
+        need <= 0 or Repo.aggregate(ended, :count, skip_account: true) >= need
     end
   end
 

@@ -91,6 +91,9 @@ defmodule Hireme.Mail do
   def line(:authenticator_disabled, m), do: "a second factor (#{m[:kind]}) was disabled"
   def line(:recovery_code_used, m), do: "a recovery code was used; #{m[:left]} left"
 
+  def line(:digest, m),
+    do: "#{m[:count]} more security changes on your account; see the account page"
+
   def line(:recovery_codes_issued, _),
     do: "new recovery codes were issued; the old ones no longer work"
 
@@ -124,9 +127,17 @@ defmodule Hireme.Mail do
           }
 
     try do
-      Hireme.Store.write(fn ->
-        Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
-      end)
+      # Within the account's notice budget each notice goes as itself; past
+      # it, each address gets one pending digest, counted up, never repeated.
+      case Security.hit(:notices, account_id, length(addresses)) do
+        :ok ->
+          Hireme.Store.write(fn ->
+            Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
+          end)
+
+        {:error, _} ->
+          Hireme.Store.write(fn -> Enum.each(addresses, &digest(account_id, &1, now)) end)
+      end
 
       if pid = GenServer.whereis(__MODULE__.Outbox), do: send(pid, :drain)
       :ok
@@ -137,6 +148,54 @@ defmodule Hireme.Mail do
         )
 
         {:error, :not_queued}
+    end
+  end
+
+  # The one pending digest for an address, due when the budget's window
+  # ends, so a flood of changes coalesces into it instead of mail.
+  defp digest(account_id, address, now) do
+    require Ecto.Query
+    alias Hireme.Rows.Outbox
+
+    pending =
+      Hireme.Repo.one(
+        Ecto.Query.from(n in Outbox,
+          where:
+            n.account_id == ^account_id and n.address == ^address and n.kind == "digest" and
+              is_nil(n.sent_at),
+          limit: 1
+        ),
+        skip_account: true
+      )
+
+    case pending do
+      nil ->
+        {window, _} = Security.limits()[:notices]
+
+        Hireme.Repo.insert_all(
+          Outbox,
+          [
+            %{
+              account_id: account_id,
+              address: address,
+              kind: "digest",
+              meta: %{count: 1},
+              attempts: 0,
+              next_at: DateTime.add(now, div(window, 1000)),
+              rev: 1,
+              inserted_at: now,
+              updated_at: now
+            }
+          ],
+          skip_account: true
+        )
+
+      %Outbox{meta: meta} = row ->
+        count = Map.get(meta || %{}, "count", 0) + 1
+
+        row
+        |> Ecto.Changeset.change(meta: %{"count" => count}, rev: row.rev + 1, updated_at: now)
+        |> Hireme.Repo.update!(skip_account: true)
     end
   end
 

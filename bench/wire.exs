@@ -608,9 +608,19 @@ carrier_gate =
        url when is_binary(url) <- HiremeWeb.Gate.url() do
     hash = HiremeWeb.Gate.cert_hash()
 
-    file =
-      Path.join(System.tmp_dir!(), "hireme-bench-hello-#{System.unique_integer([:positive])}")
+    # The HELLO carries a key's secret: a private directory, the file
+    # written 0600, both gone after.
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "hireme-bench-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+      )
 
+    File.mkdir!(dir)
+    File.chmod!(dir, 0o700)
+    file = Path.join(dir, "hello")
+    File.touch!(file)
+    File.chmod!(file, 0o600)
     File.write!(file, Codec.encode_hello(:key, carrier_key, "bench-carrier"))
 
     for _ <- 1..8 do
@@ -619,7 +629,7 @@ carrier_gate =
       %{"bulk_ms" => ms} = out |> String.split("\n", trim: true) |> List.last() |> Jason.decode!()
       round(ms * 1000)
     end
-    |> tap(fn _ -> File.rm(file) end)
+    |> tap(fn _ -> File.rm_rf!(dir) end)
   else
     _ -> []
   end

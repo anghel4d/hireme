@@ -45,7 +45,8 @@ and the address. It works once, for ten minutes. Opening it is a GET that
 shows the address and spends nothing, so a mail scanner that follows every
 link leaves it good; the page's button, a POST with the page's CSRF token,
 spends it atomically. The token rides in the query, is filtered from the
-log with `token`, `ticket`, `code`, `state`, `email`, `key` and `secret`,
+log with `token`, `ticket`, `code`, `state`, `email`, `key` and `secret`
+(and the host's proxy logs a request's path, never its query),
 and the page is `no-store` with no referrer. The link itself is never
 written to a table: it lives in the sending task's memory only. Any
 well-formed address gets the same answer whether or not an account has it.
@@ -275,8 +276,10 @@ writer for long.
 | Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
 | Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
-| Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes (renames have their own 30) |
-| Pending notices | at most one per linked address per account write; each tries 8 times over about two days, then is given up; sent or given-up notices go a month later; the outbox sends round-robin across accounts |
+| Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes, charged only when the call wrote (renames have their own 30); revoking a key, a session or a lease is outside it, so the owner can always revoke |
+| Notices | 30 per account in 10 minutes, every address together; past it, one pending digest per address, counted up and sent when the window ends; every event still lands on the trail |
+| Ceremonies begun | 30 per browser session in 10 minutes (a TOTP QR, passkey options) |
+| Pending notices | within the notice budget, one per linked address per change; each tries 8 times over about two days, then is given up; sent or given-up notices go a month later; the outbox sends round-robin across accounts |
 | Trusted host note / passkey transports | 500 bytes / the WebAuthn transport names only |
 | OAuth callbacks | 20 per peer and 300 in all in 10 minutes |
 | Renames (account and keys) | 30 per account in 10 minutes; renaming to the same name records nothing |

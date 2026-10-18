@@ -43,7 +43,24 @@ defmodule Hireme.MailTest do
   test "the outbox sends round-robin: one account's backlog does not hold back another's" do
     %{account: busy, email: busy_email} = sign_in()
     %{account: other, email: other_email} = sign_in()
-    :ok = Mail.enqueue(busy.id, List.duplicate(busy_email, 120), :api_key_created, %{name: "x"})
+    # A backlog from earlier windows, as rows: the budget bounds each window.
+    now = Hireme.Store.now()
+
+    rows =
+      for _ <- 1..120,
+          do: %{
+            account_id: busy.id,
+            address: busy_email,
+            kind: "api_key_created",
+            meta: %{name: "x"},
+            attempts: 0,
+            next_at: now,
+            rev: 1,
+            inserted_at: now,
+            updated_at: now
+          }
+
+    Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
     :ok = Mail.enqueue(other.id, [other_email], :api_key_created, %{name: "y"})
 
     assert Mail.Outbox.drain() == 121
@@ -56,5 +73,18 @@ defmodule Hireme.MailTest do
       end
 
     assert Enum.find_index(order, &(&1 == other_email)) < 2
+  end
+
+  test "past the notice budget, changes coalesce into one pending digest per address" do
+    %{account: a, email: email} = sign_in()
+    for i <- 1..35, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "k#{i}"})
+
+    rows =
+      Repo.all(from(n in Hireme.Rows.Outbox, where: n.account_id == ^a.id), skip_account: true)
+
+    assert Enum.count(rows, &(&1.kind == "api_key_created")) == 30
+    assert [digest] = Enum.filter(rows, &(&1.kind == "digest"))
+    assert digest.meta["count"] == 5
+    assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
   end
 end

@@ -273,4 +273,33 @@ defmodule Hireme.AccountsTest do
     [last | _] = Hireme.Audit.recent(5)
     assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
   end
+
+  test "room for a sign-in uses eviction's arithmetic, so a link is never spent on a refusal" do
+    %{account: a, email: email} = sign_in()
+    cap = Hireme.Schema.table(:sessions).cap
+    now = Hireme.Store.now()
+    old = DateTime.add(now, -2 * 3600)
+
+    row = fn i, seen ->
+      %{
+        account_id: a.id,
+        token_hash: :crypto.hash(:sha256, "r#{i}"),
+        authenticated_at: seen,
+        last_seen_at: seen,
+        expires_at: DateTime.add(now, 3600),
+        rev: 1,
+        inserted_at: seen,
+        updated_at: seen
+      }
+    end
+
+    # Over the cap by five, with only one ended session: no room.
+    rows = [row.(0, old) | for(i <- 1..(cap + 3), do: row.(i, now))]
+
+    for chunk <- Enum.chunk_every(rows, 500),
+        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
+
+    refute Accounts.room?(:email, email)
+    assert {:error, :cap} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+  end
 end

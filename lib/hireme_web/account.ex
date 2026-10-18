@@ -100,16 +100,25 @@ defmodule HiremeWeb.Account do
   # The methods that write the trail or mail a notice, under one budget per
   # account (renames have their own); reads, ceremonies begun and step-up
   # (throttled as factor attempts) are not.
-  @writes ~w(account.session.revoke account.session.revoke_others account.key.mint
-    account.key.change account.key.revoke account.lease.revoke account.identity.unlink
+  #
+  # Revocations are outside it: they are bounded by what exists and record
+  # only a real change, and the owner must always be able to revoke a
+  # leaked key or a thief's session. A call is charged only when it wrote:
+  # a refused or no-op call costs nothing, so a stale cookie cannot spend
+  # the owner's budget.
+  @writes ~w(account.key.mint account.key.change account.identity.unlink
     account.totp.confirm account.passkey.finish account.factor.remove
     account.recovery.regenerate account.trusted_host.add account.trusted_host.remove)
 
-  defp safely(method, params, session, ctx)
+  defp safely(method, params, %Session{account_id: id} = session, ctx)
        when method in @writes do
-    case Hireme.Security.limit(:account_writes, session.account_id) do
-      :ok -> method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
-      {:error, :rate_limited} -> {:error, %{error: "rate_limited"}}
+    if Hireme.Security.blocked?(:account_writes, id) do
+      {:error, %{error: "rate_limited"}}
+    else
+      cursor = Audit.rev(id)
+      answer = method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+      if Audit.rev(id) > cursor, do: Hireme.Security.failed(:account_writes, id)
+      answer
     end
   end
 
@@ -276,7 +285,7 @@ defmodule HiremeWeb.Account do
 
   ## Step-up: a factor presented now makes the session fresh for the window.
 
-  defp run("account.step_up.passkey_options", _, s, _), do: {:ok, Mfa.begin_assertion(s)}
+  defp run("account.step_up.passkey_options", _, s, _), do: Mfa.begin_assertion(s)
 
   defp run("account.step_up.passkey", p, s, meta),
     do: stepped(Mfa.verify_assertion(s, p, ctx(meta, s)))
@@ -302,11 +311,7 @@ defmodule HiremeWeb.Account do
 
       # Trusting a host already trusted with the same note changes nothing
       # and records nothing.
-      same =
-          Enum.find(
-            Hireme.Provenance.trusted_hosts(),
-            &(&1.host == String.downcase(host) and (&1.note || "") == note)
-          ) ->
+      same = trusted(host, note) ->
         host_answer({:ok, same})
 
       true ->
@@ -322,6 +327,14 @@ defmodule HiremeWeb.Account do
     if String.starts_with?(method, "account."),
       do: {:error, :unknown_method},
       else: {:error, :invalid}
+  end
+
+  # The host as Provenance stores it, whether given bare or as a URL.
+  defp trusted(host, note) do
+    norm = Hireme.Provenance.host(host) || Hireme.Provenance.host("https://" <> String.trim(host))
+
+    norm &&
+      Enum.find(Hireme.Provenance.trusted_hosts(), &(&1.host == norm and (&1.note || "") == note))
   end
 
   defp stepped({:ok, s}), do: {:ok, %{fresh_for: fresh_for(s)}}

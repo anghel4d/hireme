@@ -107,7 +107,8 @@ defmodule Hireme.Mfa do
           {:ok, %{uri: String.t(), secret: String.t(), svg: String.t()}} | {:error, :step_up}
   def begin_totp(%Session{} = session, label) do
     as(session, fn ->
-      with :ok <- fresh(session) do
+      with :ok <- fresh(session),
+           :ok <- begun(session) do
         secret = NimbleTOTP.secret()
         challenge!(session, :totp_enroll, secret)
         uri = otpauth(label, secret)
@@ -225,7 +226,8 @@ defmodule Hireme.Mfa do
   @spec begin_webauthn(Session.t(), String.t()) :: {:ok, map()} | {:error, :step_up}
   def begin_webauthn(%Session{} = session, label) do
     as(session, fn ->
-      with :ok <- fresh(session) do
+      with :ok <- fresh(session),
+           :ok <- begun(session) do
         challenge = WebAuthn.registration_challenge()
         challenge!(session, :webauthn_register, challenge)
         exclude = for f <- all_passkeys(), do: f.credential_id
@@ -252,8 +254,14 @@ defmodule Hireme.Mfa do
   end
 
   @doc "Start an assertion: the request options for the browser."
-  @spec begin_assertion(Session.t()) :: map()
+  @spec begin_assertion(Session.t()) :: {:ok, map()} | {:error, :rate_limited}
   def begin_assertion(%Session{} = session) do
+    as(session, fn ->
+      with :ok <- begun(session), do: {:ok, assertion(session)}
+    end)
+  end
+
+  defp assertion(session) do
     as(session, fn ->
       keys = passkeys()
 
@@ -476,6 +484,10 @@ defmodule Hireme.Mfa do
       do: :ok,
       else: {:error, :cap}
   end
+
+  # Every ceremony begun writes a challenge (and a QR); a session begins a
+  # bounded number.
+  defp begun(%Session{id: id}), do: Security.limit(:ceremony_session, id)
 
   defp fresh(session), do: if(fresh?(session), do: :ok, else: {:error, :step_up})
 

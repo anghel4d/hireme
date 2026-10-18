@@ -63,7 +63,12 @@ defmodule HiremeWeb.FactorController do
   def recovery(conn, params),
     do: proved(conn, Mfa.verify_recovery(conn.assigns.session, params["code"], meta(conn)))
 
-  def webauthn(conn, _params), do: json(conn, Mfa.begin_assertion(conn.assigns.session))
+  def webauthn(conn, _params) do
+    case Mfa.begin_assertion(conn.assigns.session) do
+      {:ok, options} -> json(conn, options)
+      {:error, reason} -> conn |> put_status(429) |> json(%{error: message(reason)})
+    end
+  end
 
   def webauthn_verify(conn, params) do
     case Mfa.verify_assertion(conn.assigns.session, params, meta(conn)) do

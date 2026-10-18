@@ -438,16 +438,18 @@ defmodule HiremeWeb.SignInController do
 
   def sign_out(conn, _), do: conn |> Auth.sign_out() |> redirect(to: "/sign-in")
 
-  @doc "Development only: one click into a local account, through the same path a mailed link takes."
-  def dev_sign_in(conn, _) do
-    {:ok, token, _} =
-      Accounts.sign_in_with(
-        :email,
-        %{subject: "dev@localhost", display: "dev@localhost"},
-        meta(conn)
-      )
+  if Application.compile_env(:hireme, :dev_routes) do
+    @doc "Development only: one click into a local account, through the same path a mailed link takes."
+    def dev_sign_in(conn, _) do
+      {:ok, token, _} =
+        Accounts.sign_in_with(
+          :email,
+          %{subject: "dev@localhost", display: "dev@localhost"},
+          meta(conn)
+        )
 
-    conn |> Auth.sign_in(token) |> redirect(to: "/")
+      conn |> Auth.sign_in(token) |> redirect(to: "/")
+    end
   end
 
   # The browser that started a link is still that account, past its factor.

@@ -124,6 +124,11 @@ defmodule Hireme.Security do
     renames: {:timer.minutes(10), 30},
     # Every other account.* call that writes the trail or mails a notice.
     account_writes: {:timer.minutes(10), 60},
+    # Ceremonies begun (a TOTP QR, passkey options), per browser session.
+    ceremony_session: {:timer.minutes(10), 30},
+    # Security notices queued per account, every address together; past
+    # it they coalesce into one digest per address.
+    notices: {:timer.minutes(10), 30},
     agent_write: {:timer.minutes(1), 600},
     # The text bytes a key's ops may write in a minute, beside their count.
     agent_write_bytes: {:timer.minutes(1), 64 * 1024 * 1024},
