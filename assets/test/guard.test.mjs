@@ -4,40 +4,40 @@
 import { expect, test } from "bun:test"
 import { guard, describe, CLIP } from "../js/guard.ts"
 
-function setup() {
+function setup(log, defer = (fn) => fn()) {
   const notes = [], logs = []
-  const g = guard((t) => notes.push(t), (what, e) => logs.push([what, e]), (fn) => fn())
+  const g = guard((t) => notes.push(t), log ?? ((what, e) => logs.push([what, e])), defer)
   return { g, notes, logs }
 }
 const boom = (msg) => () => { throw new Error(msg) }
 
-test("a hook's value passes through, and a throwing one gives its fallback", () => {
+test("a hook's value passes through, a throwing one gives its fallback, and the latch is per lens and per part", () => {
   const { g, notes } = setup()
   expect(g.run("desk", "view", () => 7, 0)).toBe(7)
   expect(g.run("desk", "view", boom("x"), "fallback")).toBe("fallback")
-  expect(notes.length).toBe(1)
-})
-
-test("the latch is per lens and per part", () => {
-  const { g, notes } = setup()
   g.run("focus", "enter", boom("a"), undefined)
   g.run("focus", "enter", boom("a"), undefined)
   g.run("focus", "view", boom("a"), undefined)
-  g.run("desk", "enter", boom("a"), undefined)
   expect(notes.length).toBe(3)
-  expect(g.failing("focus", "enter") && g.failing("focus", "view") && g.failing("desk", "enter")).toBeTruthy()
-  expect(!g.failing("desk", "view")).toBeTruthy()
-  expect(notes[0]).toMatch(/The focus lens failed to load/)
-  expect(notes[1]).toMatch(/The focus lens failed to draw/)
+  expect(g.failing("desk", "view") && g.failing("focus", "enter") && g.failing("focus", "view")).toBeTruthy()
+  expect(!g.failing("desk", "enter")).toBeTruthy()
+  expect(notes[1]).toMatch(/The focus lens failed to load/)
+  expect(notes[2]).toMatch(/The focus lens failed to draw/)
 })
 
-test("a message that changes on every throw still raises one notice and one log", () => {
+test("a message that changes on every throw still raises one notice and one log; a hook that works again lifts its latch", () => {
   const { g, notes, logs } = setup()
   for (let n = 0; n < 50; n++) g.run("desk", "view", boom(`boom ${n}`), null)
   expect(notes.length).toBe(1)
   expect(logs.length).toBe(1)
   expect(logs[0][0]).toBe("the desk lens failed to draw")
   expect(logs[0][1] instanceof Error && logs[0][1].message === "boom 0").toBeTruthy()
+  g.run("desk", "view", () => "ok", undefined)
+  expect(!g.failing("desk", "view")).toBeTruthy()
+  g.run("desk", "view", boom("down again"), undefined)
+  expect(notes.length).toBe(2)
+  expect(logs.length).toBe(2)
+  expect(notes[1]).toMatch(/down again/)
 })
 
 test("the notice clips the message to 200 characters and folds its whitespace", () => {
@@ -47,17 +47,6 @@ test("the notice clips the message to 200 characters and folds its whitespace", 
   expect(inside.length).toBe(CLIP)
   expect(inside.startsWith("start x")).toBeTruthy()
   expect(notes[0].length < 300).toBeTruthy()
-})
-
-test("a hook that works again lifts its latch: the next failure is told again", () => {
-  const { g, notes, logs } = setup()
-  g.run("lanes", "after", boom("down"), undefined)
-  g.run("lanes", "after", () => "ok", undefined)
-  expect(!g.failing("lanes", "after")).toBeTruthy()
-  g.run("lanes", "after", boom("down again"), undefined)
-  expect(notes.length).toBe(2)
-  expect(logs.length).toBe(2)
-  expect(notes[1]).toMatch(/down again/)
 })
 
 test("odd thrown values are told, never thrown again from the catch", () => {
@@ -81,18 +70,11 @@ test("odd thrown values are told, never thrown again from the catch", () => {
   expect(describe(new Error("m"))).toBe("m")
 })
 
-test("a log that throws loses the log, not the notice", () => {
-  const notes = []
-  const g = guard((t) => notes.push(t), () => { throw new Error("console gone") }, (fn) => fn())
-  expect(g.run("desk", "view", boom("x"), 0)).toBe(0)
-  expect(notes.length).toBe(1)
-})
-
-test("the notice is deferred, not raised inside the hook's paint", () => {
-  const notes = [], queued = []
-  const g = guard((t) => notes.push(t), () => {}, (fn) => queued.push(fn))
-  g.run("desk", "view", boom("x"), 0)
-  expect(notes.length).toBe(0)
+test("the notice is deferred past the hook's paint, and a log that throws loses the log, not the notice", () => {
+  const queued = []
+  const deferred = setup(() => { throw new Error("console gone") }, (fn) => queued.push(fn))
+  expect(deferred.g.run("desk", "view", boom("x"), 0)).toBe(0)
+  expect(deferred.notes.length).toBe(0)
   queued.forEach((fn) => fn())
-  expect(notes.length).toBe(1)
+  expect(deferred.notes.length).toBe(1)
 })

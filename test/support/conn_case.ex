@@ -1,9 +1,9 @@
 defmodule HiremeWeb.ConnCase do
   @moduledoc """
   A test that goes through the endpoint. Requests carry an https URL so
-  the `__Host-` cookie is kept between them, and `signed_in/2` puts a
-  session cookie on a conn. A conn that has answered is recycled before
-  the next request: its cookies carry over, as a browser's would.
+  the `__Host-` cookie is kept between them; `signed_in/2` puts a session
+  cookie on a conn; a conn that has answered is recycled before the next
+  request, its cookies carried over as a browser's would be.
   """
 
   use ExUnit.CaseTemplate
@@ -47,6 +47,44 @@ defmodule HiremeWeb.ConnCase do
     build_conn(:get, "#{conn.scheme}://#{conn.host}/")
     |> Plug.Test.recycle_cookies(conn)
     |> Map.update!(:req_headers, &(kept ++ &1))
+  end
+
+  @doc "The CSRF token a page answered with, as its hidden input or its meta tag; a conn not yet sent fetches /sign-in."
+  def csrf(conn) do
+    conn = if conn.state == :unset, do: get(conn, "/sign-in"), else: conn
+
+    [_, token] =
+      ~r/name="_csrf_token" value="([^"]+)"|name="csrf-token" content="([^"]+)"/
+      |> Regex.run(html_response(conn, 200))
+      |> Enum.reject(&(&1 == ""))
+
+    token
+  end
+
+  @doc """
+  The mailed-link ceremony for `email`: the link asked for, its GET shown,
+  only its POST spent. Answers the signed-in conn and the token, now spent.
+  """
+  def email_sign_in(conn, email) do
+    page = get(conn, "/sign-in")
+    ask = %{"email" => email, "_csrf_token" => csrf(page)}
+    assert html_response(page |> recycle() |> post("/sign-in/email", ask), 200) =~ "on its way"
+    assert_receive {:email, mail}, 1_000
+    [_, token] = Regex.run(~r/token=([A-Za-z0-9_%-]+)/, mail.text_body)
+    token = URI.decode_www_form(token)
+    shown = get(build_conn(), "/sign-in/email", %{"token" => token})
+    assert html_response(shown, 200) =~ "Sign in as #{email}?"
+    confirm = %{"token" => token, "_csrf_token" => csrf(shown)}
+    signed = shown |> recycle() |> post("/sign-in/email/confirm", confirm)
+    assert redirected_to(signed) == "/"
+    {signed, token}
+  end
+
+  @doc "The wire ticket the desk serves the browser of `conn`, with the page."
+  def ticket(conn) do
+    html = conn |> recycle() |> get("/desk") |> html_response(200)
+    [_, ticket] = Regex.run(~r/name="hireme-ticket" content="([^"]+)"/, html)
+    {ticket, html}
   end
 
   def html_response(conn, status), do: body(conn, status, "text/html")

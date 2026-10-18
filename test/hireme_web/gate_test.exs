@@ -125,16 +125,13 @@ defmodule HiremeWeb.GateTest do
     end
   end
 
-  test "bytes that are not frames close the session with an error code", %{socket: socket} do
+  test "bytes that are not frames close the session with an error code; a bad credential is BYE'd over the control stream before it closes",
+       %{socket: socket} do
     s = connect(socket)
     send_data(s, <<3::little-32, 0::96>>)
     assert [{:close, code}] = recv_until(s, &match?({:close, _}, &1))
     assert code != 0
-  end
 
-  test "a bad credential is BYE'd over the control stream and the session closes", %{
-    socket: socket
-  } do
     s = connect(socket)
     send_data(s, Codec.encode_hello(:key, "hm_nope", "probe"))
     got = recv_until(s, &match?({:close, _}, &1))

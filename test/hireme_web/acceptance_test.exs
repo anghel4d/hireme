@@ -7,7 +7,7 @@ defmodule HiremeWeb.AcceptanceTest do
 
   use HiremeWeb.ConnCase, async: false
 
-  import Hireme.WireCase, only: [op: 3, op: 4, tables: 1]
+  import Hireme.WireCase, only: [op: 3, op: 4, tables: 1, ingest: 3]
   alias Hireme.{Schema, WireClient}
   alias HiremeWeb.Wire.Codec
 
@@ -25,45 +25,29 @@ defmodule HiremeWeb.AcceptanceTest do
     {:ok, port: port}
   end
 
-  # A fresh account signs in by email link; the page it opens carries a wire ticket.
-  defp email_sign_in(conn) do
-    page = get(conn, "/sign-in")
-    csrf = csrf(page)
-
-    conn =
-      page
-      |> recycle()
-      |> post("/sign-in/email", %{"email" => "acceptance@example.com", "_csrf_token" => csrf})
-
-    assert html_response(conn, 200) =~ "on its way"
-    assert_receive {:email, mail}, 1_000
-    [_, token] = Regex.run(~r/token=([A-Za-z0-9_%-]+)/, mail.text_body)
-    token = URI.decode_www_form(token)
-
-    shown =
-      build_conn(:get, "https://www.example.com/") |> get("/sign-in/email", %{"token" => token})
-
-    signed =
-      shown
-      |> recycle()
-      |> post("/sign-in/email/confirm", %{"token" => token, "_csrf_token" => csrf(shown)})
-
-    assert redirected_to(signed) == "/"
-    html = signed |> recycle() |> get("/desk") |> html_response(200)
-    [_, ticket] = Regex.run(~r/name="hireme-ticket" content="([^"]+)"/, html)
-    ticket
+  # A fresh account signs in by email link; the page it opens carries a wire
+  # ticket, over which it enrols a passkey. Answers the browser's wire session.
+  defp browser(conn, port) do
+    {signed, _} = email_sign_in(conn, "acceptance@example.com")
+    {ticket, _} = ticket(signed)
+    {browser, welcome, _} = hello(port, :ticket, ticket, hd(HiremeWeb.Endpoint.origins()))
+    assert welcome.kind == :WELCOME
+    {:ok, options} = rpc(browser, "account.passkey.begin", %{"name" => "virtual"})
+    attestation = attest(options, Application.get_env(:wax_, :origin))
+    {:ok, %{"factor" => factor}} = rpc(browser, "account.passkey.finish", attestation)
+    assert factor["kind"] == "webauthn"
+    browser
   end
 
-  defp csrf(conn) do
-    [_, token] =
-      Regex.run(
-        ~r/name="_csrf_token" value="([^"]+)"|name="csrf-token" content="([^"]+)"/,
-        html_response(conn, 200)
-      )
-      |> Enum.reject(&(&1 == ""))
+  defp mint(browser, name, preset) do
+    {:ok, %{"secret" => secret}} =
+      rpc(browser, "account.key.mint", %{"name" => name, "preset" => preset})
 
-    token
+    secret
   end
+
+  defp rpc(c, method, params),
+    do: WireClient.rpc(c, System.unique_integer([:positive]), method, params)
 
   defp hello(port, cred, credential, origin \\ nil) do
     client = WireClient.connect(port, origin)
@@ -73,35 +57,33 @@ defmodule HiremeWeb.AcceptanceTest do
     {client, welcome, boot}
   end
 
-  defp ops_frame(ops) do
-    Codec.frame(:OPS, 0, [<<length(ops)::little-32, 0::32>> | Enum.map(ops, & &1.raw)])
-  end
-
-  defp acks(%{body: <<n::little-32, 0::32, rest::binary>>}),
-    do:
-      for(
-        <<op_id::little-64, rev::little-64, id::little-32,
-          0::32 <- binary_part(rest, 0, n * 24)>>,
-        do: %{op_id: op_id, rev: rev, id: id}
-      )
-
-  defp nack_refusals(%{body: <<_n::little-32, 0::32, rest::binary>>}), do: refusals(rest)
-  defp refusals(<<>>), do: []
-
-  defp refusals(<<_op::little-64, code::little-16, _::48, len::little-32, rest::binary>>) do
-    skip = len + rem(8 - rem(4 + len, 8), 8)
-    [Schema.refusal_name(code) | refusals(binary_part(rest, skip, byte_size(rest) - skip))]
-  end
-
-  # The one put and its verdict.
+  # The one put and its verdict: `{:ack, id}` or `{:nack, refusal}`.
   defp write(client, op) do
-    WireClient.send_frame(client, ops_frame([op]))
+    WireClient.send_frame(client, Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw]))
 
     receive do
-      {:wire, ^client, %{kind: :ACK} = f} -> {:ack, hd(acks(f))}
-      {:wire, ^client, %{kind: :NACK} = f} -> {:nack, hd(nack_refusals(f))}
+      {:wire, ^client,
+       %{
+         kind: :ACK,
+         body: <<1::little-32, 0::32, _::little-64, _::little-64, id::little-32, _::32>>
+       }} ->
+        {:ack, id}
+
+      {:wire, ^client,
+       %{kind: :NACK, body: <<1::little-32, 0::32, _::little-64, code::little-16, _::binary>>}} ->
+        {:nack, Schema.refusal_name(code)}
     after
       3_000 -> flunk("no verdict")
+    end
+  end
+
+  # The PATCHes `client` receives until it has been quiet for `quiet_ms`.
+  defp patches(client, quiet_ms, acc \\ []) do
+    receive do
+      {:wire, ^client, %{kind: :PATCH} = f} -> patches(client, quiet_ms, [f | acc])
+      {:wire, ^client, _} -> patches(client, quiet_ms, acc)
+    after
+      quiet_ms -> Enum.reverse(acc)
     end
   end
 
@@ -138,50 +120,23 @@ defmodule HiremeWeb.AcceptanceTest do
 
   test "3. sign in by email link, enroll a passkey, mint keys: read-only puts are scope, write-only BOOTs empty and ACKs",
        %{conn: conn, port: port} do
-    ticket = email_sign_in(conn)
-    origin = hd(HiremeWeb.Endpoint.origins())
-    {browser, welcome, _boot} = hello(port, :ticket, ticket, origin)
-    assert welcome.kind == :WELCOME
+    browser = browser(conn, port)
 
-    {:ok, options} = WireClient.rpc(browser, 1, "account.passkey.begin", %{"name" => "virtual"})
-
-    {:ok, %{"factor" => factor}} =
-      WireClient.rpc(
-        browser,
-        2,
-        "account.passkey.finish",
-        attest(options, Application.get_env(:wax_, :origin))
-      )
-
-    assert factor["kind"] == "webauthn"
-
-    {:ok, %{"secret" => ro}} =
-      WireClient.rpc(browser, 3, "account.key.mint", %{
-        "name" => "reader",
-        "preset" => "read_only"
-      })
-
-    {:ok, %{"secret" => wo}} =
-      WireClient.rpc(browser, 4, "account.key.mint", %{
-        "name" => "writer",
-        "preset" => "write_only"
-      })
-
-    {reader, _, _} = hello(port, :key, ro)
-    assert {:error, %{"code" => "scope"}} = WireClient.rpc(reader, 1, "lease.claim", %{})
+    {reader, _, _} = hello(port, :key, mint(browser, "reader", "read_only"))
+    assert {:error, %{"code" => "scope"}} = rpc(reader, "lease.claim", %{})
 
     assert {:nack, :scope} =
              write(reader, op(:put, :corporations, %{domain: "ro.example", name: "RO"}))
 
-    {writer, _, boot} = hello(port, :key, wo)
+    {writer, _, boot} = hello(port, :key, mint(browser, "writer", "write_only"))
 
     assert Enum.all?(tables(boot.body), fn {name, rows} ->
              name in ~w(catalog clock) or rows == 0
            end)
 
-    {:ok, _} = WireClient.rpc(writer, 1, "lease.claim", %{})
+    {:ok, _} = rpc(writer, "lease.claim", %{})
 
-    assert {:ack, %{id: id}} =
+    assert {:ack, id} =
              write(writer, op(:put, :corporations, %{domain: "wo.example", name: "WO"}))
 
     assert id > 0
@@ -189,74 +144,43 @@ defmodule HiremeWeb.AcceptanceTest do
 
   test "4. an agent leases 16, moves one to draft_ready, adds a cited corporation and an office; the browser sees all three without reconnecting",
        %{conn: conn, port: port} do
-    ticket = email_sign_in(conn)
-    origin = hd(HiremeWeb.Endpoint.origins())
-    {browser, _, _} = hello(port, :ticket, ticket, origin)
+    browser = browser(conn, port)
 
     for i <- 1..20 do
       {:ack, _} =
         write(browser, op(:put, :applications, %{company: "Company #{i}", role: "Engineer"}))
     end
 
-    {:ok, options} = WireClient.rpc(browser, 1, "account.passkey.begin", %{"name" => "virtual"})
-
-    {:ok, _} =
-      WireClient.rpc(
-        browser,
-        2,
-        "account.passkey.finish",
-        attest(options, Application.get_env(:wax_, :origin))
-      )
-
-    {:ok, %{"secret" => rw}} =
-      WireClient.rpc(browser, 3, "account.key.mint", %{
-        "name" => "agent",
-        "preset" => "read_write"
-      })
-
-    flush(browser)
+    rw = mint(browser, "agent", "read_write")
+    patches(browser, 100)
 
     {agent, _, _} = hello(port, :key, rw)
-    {:ok, %{"ids" => ids}} = WireClient.rpc(agent, 1, "lease.claim", %{"count" => 16})
+    {:ok, %{"ids" => ids}} = rpc(agent, "lease.claim", %{"count" => 16})
     assert length(ids) == 16
     app = hd(ids)
 
-    {:ack, %{id: batch}} = write(agent, op(:put, :batches, %{code: "B-1", ordinal: 1}))
+    {:ack, batch} = write(agent, op(:put, :batches, %{code: "B-1", ordinal: 1}))
     {:ack, _} = write(agent, op(:put, :applications, %{batch_id: batch}, target: app))
     {:ack, _} = write(agent, op(:command, :stage, %{stage: :draft_ready}, target: app))
 
-    {:ack, %{id: corp}} =
-      write(
-        agent,
-        op(
-          :put,
-          :corporations,
-          %{
-            domain: "acme.example",
-            name: "Acme",
-            headcount: 120,
-            as_of: ~D[2026-10-01],
-            source: "https://acme.example/about"
-          },
-          keyed: true
-        )
-      )
+    acme = %{
+      domain: "acme.example",
+      name: "Acme",
+      headcount: 120,
+      as_of: ~D[2026-10-01],
+      source: "https://acme.example/about"
+    }
 
-    {:ack, %{id: place}} =
-      write(
-        agent,
-        op(:put, :places, %{kind: :country, iso2: "AC", name: "Acmeland"}, keyed: true)
-      )
-
-    {:ack, %{id: office}} =
-      write(agent, op(:put, :offices, %{corporation_id: corp, place_id: place, kind: :hq}))
+    {:ack, corp} = write(agent, op(:put, :corporations, acme, keyed: true))
+    place = op(:put, :places, %{kind: :country, iso2: "AC", name: "Acmeland"}, keyed: true)
+    {:ack, place} = write(agent, place)
+    office = op(:put, :offices, %{corporation_id: corp, place_id: place, kind: :hq})
+    {:ack, office} = write(agent, office)
 
     # Every move arrives as rows of the replica; the browser reads them locally.
-    stage = Codec.enum_code("stage", :draft_ready)
-    patches = collect_patches(browser, 600)
-    model = Enum.reduce(patches, %{}, &Hireme.WireCase.ingest(&2, :PATCH, &1.body))
+    model = Enum.reduce(patches(browser, 600), %{}, &ingest(&2, :PATCH, &1.body))
     cell = fn table, id, col -> get_in(model, [table, id, Schema.column(table, col).id]) end
-    assert cell.("applications", app, "stage") == stage
+    assert cell.("applications", app, "stage") == Codec.enum_code("stage", :draft_ready)
     assert cell.("corporations", corp, "headcount") == 120
     assert cell.("corporations", corp, "headcount_on") == Date.to_gregorian_days(~D[2026-10-01])
     assert cell.("offices", office, "corporation_id") == corp
@@ -269,22 +193,5 @@ defmodule HiremeWeb.AcceptanceTest do
           do: row[Schema.column("citations", "source_id").id]
 
     assert cell.("sources", source, "host") == "acme.example"
-  end
-
-  defp collect_patches(client, quiet_ms, acc \\ []) do
-    receive do
-      {:wire, ^client, %{kind: :PATCH} = f} -> collect_patches(client, quiet_ms, [f | acc])
-      {:wire, ^client, _} -> collect_patches(client, quiet_ms, acc)
-    after
-      quiet_ms -> Enum.reverse(acc)
-    end
-  end
-
-  defp flush(client) do
-    receive do
-      {:wire, ^client, _} -> flush(client)
-    after
-      100 -> :ok
-    end
   end
 end

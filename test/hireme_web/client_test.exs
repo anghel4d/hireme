@@ -1,10 +1,6 @@
 defmodule HiremeWeb.ClientTest do
-  @moduledoc """
-  The client's pure modules under Bun's test runner: every
-  `assets/test/*.test.mjs`, run with `bun test`. A gate (HIREME_MCP set)
-  must have bun and fails without it; elsewhere a missing bun only skips.
-  """
-
+  # The client's pure modules under Bun's test runner (assets/test/*.test.mjs).
+  # A gate (HIREME_MCP set) must have bun; elsewhere a missing bun only skips.
   use ExUnit.Case, async: true
 
   @bun System.find_executable("bun")
@@ -19,8 +15,6 @@ defmodule HiremeWeb.ClientTest do
            "no assets/test/*.test.mjs"
 
     {out, status} = System.cmd(bun, ["test", "./assets/test/"], cd: root, stderr_to_stdout: true)
-
-    assert status == 0, out
-    assert out =~ ~r/\b0 fail\b/, out
+    assert status == 0 and out =~ ~r/\b0 fail\b/, out
   end
 end
