@@ -172,8 +172,21 @@ impl Drop for IpSlot {
     }
 }
 
+/// The address a cap counts: an IPv6 peer by its /64, which one host holds
+/// whole, so it cannot take a fresh address for each session.
+fn peer_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        v4 => v4,
+    }
+}
+
 impl Gate {
     fn claim(self: &Arc<Self>, ip: IpAddr) -> Option<IpSlot> {
+        let ip = peer_key(ip);
         let mut map = self.per_ip.lock().unwrap();
         let n = map.entry(ip).or_insert(0);
         if *n >= self.settings.per_ip {
@@ -184,6 +197,7 @@ impl Gate {
     }
 
     fn at_cap(&self, ip: IpAddr) -> bool {
+        let ip = peer_key(ip);
         self.per_ip.lock().unwrap().get(&ip).is_some_and(|n| *n >= self.settings.per_ip)
     }
 
