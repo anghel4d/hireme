@@ -8,9 +8,9 @@
 
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
-import { AS_OF, ENUMS, REFUSAL, SOURCE, TABLES, type ColumnDef, type TableDef, type TableName } from "./gen/schema.ts"
+import { AS_OF, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type TableDef, type TableName } from "./gen/schema.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
-import { model, notice, set } from "./state.ts"
+import { notice, set } from "./state.ts"
 
 let wire: Wire | null = null
 
@@ -43,45 +43,278 @@ export async function rpc<T = Record<string, unknown>>(method: string, params: R
 
 // ------------------------------------------------------------------ rows
 
-/** The instance, once compiled and instantiated; frames that land before it wait. */
-let instance: WebAssembly.Instance | null = null
+/** The wasm exports, per native/kernel/src/abi.rs: one result buffer, read before the next call. */
+interface Exports {
+  memory: WebAssembly.Memory
+  alloc(len: number): number
+  dealloc(ptr: number, len: number): void
+  result_ptr(): number
+  wire_hash(): number
+  set_today(day: number): void
+  ingest(ptr: number, len: number): number
+  predict(op: number, opLen: number, ctx: number, ctxLen: number): number
+  judge(op: number, opLen: number, ctx: number, ctxLen: number): number
+  view(ptr: number, len: number): number
+  step(ptr: number, len: number, selected: number, dir: number, columns: number): number
+  card(id: number): number
+  scoreboard(): number
+  application(id: number): number
+  overview(top: number): number
+  atlas(ptr: number, len: number): number
+  lanes(): number
+  snapshot(): number
+  restore(ptr: number, len: number): bigint
+  rows(t: number): number
+  ids_ptr(t: number): number
+  col_ptr(t: number, c: number): number
+  col_kind(t: number, c: number): number
+  str_ptr(t: number, c: number, id: number): number
+  str_len(t: number, c: number, id: number): number
+}
+
+let k: Exports | null = null
+/** Frames that land before the instance does, in order. */
 const early: Bytes[] = []
+const ENC = new TextEncoder()
+const DEC = new TextDecoder()
 
-/** The rev the kernel's rows stand at, for HELLO on a reconnect. */
+/** Calls `fn` with `bytes` copied into the module's memory, freed after. */
+function withBytes<T>(bytes: Uint8Array, fn: (ptr: number, len: number) => T): T {
+  const x = k!
+  const ptr = x.alloc(bytes.byteLength)
+  new Uint8Array(x.memory.buffer, ptr, bytes.byteLength).set(bytes)
+  try {
+    return fn(ptr, bytes.byteLength)
+  } finally {
+    x.dealloc(ptr, bytes.byteLength)
+  }
+}
+
+const result = (len: number): Uint8Array => new Uint8Array(k!.memory.buffer, k!.result_ptr(), len)
+const resultJson = <T>(len: number): T | null => (len < 0 ? null : (JSON.parse(DEC.decode(result(len))) as T))
+
+export const ready = (): boolean => k !== null
+
+/** The rev the rows stand at: from BOOT, PATCH and TICK headers and the snapshot, never from WELCOME. */
+let rowsRev = 0n
+
+/** What HELLO names on a reconnect, so the server sends only what moved since. */
 export function snapshotRev(): bigint {
-  return instance ? model.rev : 0n
+  return k ? rowsRev : 0n
 }
 
-/** app.ts: early's compiled module. */
+/** app.ts: early's compiled module and snapshot. The snapshot goes in before any frame. */
 export function load(hw: Boot): void {
-  void hw.kernel.then(async (module) => {
-    instance = await WebAssembly.instantiate(module, {})
+  void (async () => {
+    const module = await hw.kernel
+    const inst = await WebAssembly.instantiate(module, {})
+    k = inst.exports as unknown as Exports
+    if (k.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
+    k.set_today(Math.floor(Date.now() / DAY_MS))
+    const snap = await hw.snap
+    if (snap) {
+      const rev = withBytes(snap.bytes, (p, n) => k!.restore(p, n))
+      if (rev >= 0n) rowsRev = rev
+    }
     for (const f of early.splice(0)) ingest(f)
-  }).catch((e: unknown) => notice("error", `The kernel did not load: ${String(e)}`))
+    moved()
+  })().catch((e: unknown) => notice("error", `The kernel did not load: ${String(e)}`))
 }
 
-function ingest(f: Bytes): void {
-  // The abi's ingest goes here; until it lands the rows are only counted.
-  void f
-  set({ rows: model.rows + 1 })
+/** Bumped whenever rows move; derived views are cached against it. */
+let version = 0
+const slots = new Map<number, { version: number; at: Map<number, number> }>()
+
+function moved(): void {
+  version++
+  set({ rows: version })
+  saveSoon()
+}
+
+function ingest(f: Uint8Array): void {
+  if (withBytes(f, (p, n) => k!.ingest(p, n)) < 0) notice("error", "A frame did not apply; reconnecting will resync.")
 }
 
 /** Every frame the shell does not handle itself. */
 export function frame(f: Bytes, h: Header): void {
-  switch (h.kind) {
-    case KIND.BOOT:
-    case KIND.PATCH:
-    case KIND.TICK:
-      if (h.rev > model.rev) model.rev = h.rev
-      if (instance) ingest(f)
-      else early.push(f.slice())
-      return
-    case KIND.ACK:
-      for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
-      return
-    case KIND.NACK:
-      for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })
-      return
+  if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
+  if (h.kind === KIND.ACK) for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
+  if (h.kind === KIND.NACK) for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })
+  // The kernel takes the whole frame: rows, and the settle or rollback of pending writes.
+  if (h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK || h.kind === KIND.ACK || h.kind === KIND.NACK) {
+    if (k) {
+      ingest(f)
+      moved()
+    } else {
+      early.push(f.slice())
+    }
+  }
+}
+
+// ------------------------------------------------------------------ reading rows
+
+/** A resident table's ids in slot order. */
+export function ids(name: TableName): Uint32Array {
+  if (!k) return new Uint32Array(0)
+  const t = TABLES[name].id
+  const n = k.rows(t)
+  return n === 0 ? new Uint32Array(0) : new Uint32Array(k.memory.buffer, k.ids_ptr(t), n).slice()
+}
+
+function slot(t: number, id: number): number {
+  let s = slots.get(t)
+  if (!s || s.version !== version) {
+    const at = new Map<number, number>()
+    const n = k!.rows(t)
+    const view = new Uint32Array(k!.memory.buffer, k!.ids_ptr(t), n)
+    for (let i = 0; i < n; i++) at.set(view[i]!, i)
+    s = { version, at }
+    slots.set(t, s)
+  }
+  return s.at.get(id) ?? -1
+}
+
+/** One decoded value of a resident row: enum by name, day as YYYY-MM-DD, time as a Date; null when empty. */
+export function value(name: TableName, id: number, col: string): string | number | boolean | Date | null {
+  if (!k) return null
+  const t = TABLES[name]
+  const c = t.cols.find((x) => x.name === col)
+  if (!c) return null
+  const kind = k.col_kind(t.id, c.id)
+  if (kind === 2) {
+    const len = k.str_len(t.id, c.id, id)
+    return len === 0 ? null : DEC.decode(new Uint8Array(k.memory.buffer, k.str_ptr(t.id, c.id, id), len))
+  }
+  const i = slot(t.id, id)
+  if (i < 0 || kind === 0) return null
+  const ptr = k.col_ptr(t.id, c.id)
+  if (kind === 1) {
+    const x = new Uint32Array(k.memory.buffer, ptr, i + 1)[i]!
+    if (x === 0xffff_ffff) return null
+    switch (c.type) {
+      case "enum":
+        return values(c.enum)[x] ?? null
+      case "bool":
+        return x === 1
+      case "day":
+        return dayText(x)
+      case "time":
+        return new Date(x * 1000)
+      default:
+        return x
+    }
+  }
+  if (kind === 3) {
+    const x = new BigInt64Array(k.memory.buffer, ptr, i + 1)[i]!
+    return x === -(2n ** 63n) ? null : Number(x)
+  }
+  if (kind === 4) {
+    const x = new Float64Array(k.memory.buffer, ptr, i + 1)[i]!
+    return Number.isNaN(x) ? null : x
+  }
+  return null
+}
+
+/** A whole resident row as decoded values, for a lens that wants it at once. */
+export function row(name: TableName, id: number): Record<string, ReturnType<typeof value>> {
+  const out: Record<string, ReturnType<typeof value>> = { id }
+  for (const c of TABLES[name].cols) if (!c.implied || c.name === "rev") out[c.name] = value(name, id, c.name)
+  return out
+}
+
+// ------------------------------------------------------------------ derived documents
+
+export interface Filter {
+  bands?: string[]
+  stages?: string[]
+  classes?: string[]
+  min_score?: number
+  search?: string
+}
+
+const views = new Map<string, { version: number; ids: Uint32Array }>()
+
+/** Application ids the filter keeps, in board order (score, then heat). */
+export function board(f: Filter): Uint32Array {
+  if (!k) return new Uint32Array(0)
+  const key = JSON.stringify(f)
+  const hit = views.get(key)
+  if (hit && hit.version === version) return hit.ids
+  const len = withBytes(ENC.encode(key), (p, n) => k!.view(p, n))
+  const out = len <= 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
+  if (views.size > 16) views.clear()
+  views.set(key, { version, ids: out })
+  return out
+}
+
+export const DIR = { next: 0, prev: 1, up: 2, down: 3, first: 4, last: 5 } as const
+
+/** The card after `selected` in a direction, over the filtered board; 0 for none. */
+export function step(f: Filter, selected: number, dir: number, columns: number): number {
+  if (!k) return 0
+  return withBytes(ENC.encode(JSON.stringify(f)), (p, n) => k!.step(p, n, selected, dir, columns))
+}
+
+export interface Card {
+  score_100: number
+  stored: boolean
+  band: string
+  class: string
+  stage: string
+  ratio: number
+  reason: string
+}
+
+export const card = (id: number): Card | null => (k ? resultJson<Card>(k.card(id)) : null)
+export const scoreboard = (): Record<string, unknown> | null => (k ? resultJson(k.scoreboard()) : null)
+export const application = (id: number): Record<string, unknown> | null => (k ? resultJson(k.application(id)) : null)
+export const lanes = (): Record<string, unknown> | null => (k ? resultJson(k.lanes()) : null)
+export const atlas = (preset: string): Record<string, unknown> | null =>
+  k ? resultJson(withBytes(ENC.encode(preset), (p, n) => k!.atlas(p, n))) : null
+
+/** The ctx the kernel judges a browser write in: the operator, today. */
+function ctx(): Uint8Array {
+  return ENC.encode(JSON.stringify({ today: Math.floor(Date.now() / DAY_MS), now: Math.floor(Date.now() / 1000), human: true, key_id: null, held: [] }))
+}
+
+/** Judges an op on the local rows and applies it as pending; a refusal is the kernel's own verdict. */
+function predict(op: Op): void {
+  if (!k) return
+  const bytes = encodeOp(op)
+  const c = ctx()
+  const r = withBytes(bytes, (p, n) => withBytes(c, (q, m) => k!.predict(p, n, q, m)))
+  if (r < 0) {
+    const refusal = JSON.parse(DEC.decode(result(-r - 1))) as { refusal: string; data: { message?: string } | null }
+    throw new Refused(refusal.refusal, refusal.data?.message ?? refusal.refusal, refusal.data)
+  }
+  moved()
+}
+
+// ------------------------------------------------------------------ snapshot
+
+let saving = 0
+
+/** The base rows go to IndexedDB a few seconds after they stop moving, keyed by the shell's scope. */
+function saveSoon(): void {
+  clearTimeout(saving)
+  saving = window.setTimeout(save, 4000)
+}
+
+function save(): void {
+  const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
+  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0) return
+  const len = k.snapshot()
+  if (len <= 0) return
+  const bytes = result(len).slice()
+  const record = { rev: rowsRev, schemaRev: BigInt(SCHEMA_REV), wireHash: WIRE_HASH, bytes }
+  const open = indexedDB.open("hireme", 1)
+  open.onupgradeneeded = () => open.result.createObjectStore("snap")
+  open.onsuccess = () => {
+    try {
+      open.result.transaction("snap", "readwrite").objectStore("snap").put(record, scope)
+    } catch {
+      // A private window or a full disk: the next BOOT is whole, nothing else changes.
+    }
   }
 }
 
@@ -89,7 +322,8 @@ export function frame(f: Bytes, h: Header): void {
 
 export type Verdict = { ok: true; id: number; rev: bigint } | { ok: false; code: number; data: unknown }
 
-const pending = new Map<bigint, (v: Verdict) => void>()
+/** Ops sent and not yet answered, with their bytes for a resend after a reconnect. */
+const pending = new Map<bigint, { done: (v: Verdict) => void; bytes: Bytes }>()
 // Unique per session for the ledger's 24 h: the page's start in the high bits, a counter below.
 let nextOp = (BigInt(Date.now()) << 20n) | BigInt(crypto.getRandomValues(new Uint16Array(1))[0] ?? 0)
 
@@ -100,7 +334,7 @@ function settle(id: bigint, v: Verdict): void {
   if (!done) return
   pending.delete(id)
   set({ pending: pending.size })
-  done(v)
+  done.done(v)
 }
 
 /** Sends ops in one OPS frame (at most OPS_MAX); each resolves with its own verdict. */
@@ -108,12 +342,19 @@ export function send(ops: readonly Op[]): Promise<Verdict>[] {
   if (!wire) throw new Error("not connected")
   if (ops.length === 0 || ops.length > OPS_MAX) throw new Error(`1..${OPS_MAX} ops per frame`)
   for (const op of ops) if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
-  const out = ops.map((op) => new Promise<Verdict>((resolve) => pending.set(op.opId, resolve)))
+  const bytes = ops.map(encodeOp)
+  const out = ops.map((op, i) => new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes: bytes[i]! })))
   set({ pending: pending.size })
-  if (!wire.send(opsFrame(wire.hash, ops.map(encodeOp)))) {
-    for (const op of ops) settle(op.opId, { ok: false, code: -1, data: { message: "not connected" } })
-  }
+  // Offline, the ops wait: the reconnect resends them, and the ledger answers a resent op once.
+  wire.send(opsFrame(wire.hash, bytes))
   return out
+}
+
+/** app.ts, when a session opens: every unanswered op again, as it was. */
+export function resend(): void {
+  if (!wire || pending.size === 0) return
+  const all = [...pending.values()].map((p) => p.bytes)
+  for (let i = 0; i < all.length; i += OPS_MAX) wire.send(opsFrame(wire.hash, all.slice(i, i + OPS_MAX)))
 }
 
 // ------------------------------------------------------------------ typed puts
@@ -233,7 +474,9 @@ export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}):
 
 /** One put, sent and settled: the new rev and id, or a `Refused` named from the catalog. */
 export async function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
-  const [verdict] = send([putOp(name, set, p)])
+  const op = putOp(name, set, p)
+  if (TABLES[name].residency === "resident") predict(op)
+  const [verdict] = send([op])
   const v = await verdict!
   if (v.ok) return { id: v.id, rev: v.rev }
   const data = v.data as { message?: string } | null

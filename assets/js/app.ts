@@ -134,6 +134,7 @@ function frame(f: Bytes, h: Header): void {
     case KIND.WELCOME: {
       const w = welcome(f)
       set({ readMask: w.readMask, writeMask: w.writeMask, mayDelete: w.mayDelete, leased: w.leased, rev: w.accountRev, link: "open" })
+      kernel.resend()
       return
     }
     case KIND.BYE: {
