@@ -1,13 +1,14 @@
-// The board's bound under WebAssembly (docs/rebuild.md "Tests, bench,
-// bounds"): a full board derive at 10k applications in ≤ 8 ms.
+// The board's bounds under WebAssembly (docs/rebuild.md "Tests, bench,
+// bounds"): at 10k applications, a derive after a change in ≤ 8 ms and
+// the first derive after BOOT in ≤ 30 ms.
 //
-//   node bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
+//   [DISTINCT=1] node bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
 //
 // Seeded synthetic desk: 10k applications over 2,500 companies, a tenth
 // of them hot, half with a stored score, listing URLs across a few ATS
 // vendors. Measures the derive after BOOT (every card cold) and after a
 // one-row PATCH (the steady state a write or a TICK causes), medians of
-// repeated runs. Exits 1 when the steady-state median passes the bound.
+// repeated runs. Exits 1 when a median passes its bound.
 
 import { readFileSync } from "node:fs";
 import { W, bootFrame, enc, instance } from "../native/kernel/wasm.mjs";
@@ -22,6 +23,10 @@ const N = Number(process.argv[3] ?? 10000);
 // mostly cold, a mature one mostly hot.
 const HOT = Number(process.argv[4] ?? 0.1);
 const BOUND_MS = 8;
+const FIRST_BOUND_MS = 30;
+// DISTINCT=1: every company, role and location is its own text, the desk
+// on which reading each distinct text once saves nothing.
+const DISTINCT = process.env.DISTINCT === "1";
 const bytes = readFileSync(wasmPath);
 
 let seed = 0x9e3779b9;
@@ -40,9 +45,9 @@ for (let id = 1; id <= N; id++) {
   const hot = rand(1000) < HOT * 1000;
   apps.push({
     id, no: id,
-    company: c < 5 ? ["Google", "Meta", "Anthropic", "Stripe", "Valve"][c] : `Company ${c} Systems`,
-    role: ROLES[rand(ROLES.length)],
-    location: rand(2) ? "Remote" : "Onsite",
+    company: DISTINCT ? `Company ${id} Systems` : c < 5 ? ["Google", "Meta", "Anthropic", "Stripe", "Valve"][c] : `Company ${c} Systems`,
+    role: DISTINCT ? `${ROLES[rand(ROLES.length)]}, Team ${id}` : ROLES[rand(ROLES.length)],
+    location: DISTINCT ? `Remote - City ${id}` : rand(2) ? "Remote" : "Onsite",
     stage: hot ? STAGES[5 + rand(5)] : STAGES[rand(5)],
     stage_on: today - rand(120),
     listing_url: HOSTS(c)[rand(5)],
@@ -81,11 +86,15 @@ for (let run = 0; run < 7; run++) {
 const report = {
   applications: N,
   hot_share: HOT,
+  distinct: DISTINCT,
   derive_after_boot_ms: +median(cold).toFixed(2),
   derive_after_patch_ms: +median(warm).toFixed(2),
   filtered_view_ms: +median(filtered).toFixed(2),
   bound_ms: BOUND_MS,
+  first_bound_ms: FIRST_BOUND_MS,
   wasm_bytes: bytes.length,
 };
 console.log(JSON.stringify(report));
-process.exit(report.derive_after_patch_ms <= BOUND_MS ? 0 : 1);
+// The first-derive bound is set on the repeating desk; DISTINCT reports it.
+const firstOk = DISTINCT || report.derive_after_boot_ms <= FIRST_BOUND_MS;
+process.exit(report.derive_after_patch_ms <= BOUND_MS && firstOk ? 0 : 1);
