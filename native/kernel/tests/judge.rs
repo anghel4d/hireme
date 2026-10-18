@@ -228,3 +228,74 @@ fn lineage_windows() {
     assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::GENERATION), Some(&EVal::Val(Val::U32(2))));
     assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::REWRITES_ALLOWED), Some(&EVal::Val(Val::U32(0))));
 }
+
+#[test]
+fn a_predicted_listing_keeps_every_other_rows_stub_and_rolls_back() {
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::APPLICATIONS, 3);
+    b.u32s(A::ID, 1..=3)
+        .u32s(A::STAGE, (0..3).map(|_| S::DISCOVERED as u32))
+        .deferred(A::LISTING_RAW, (0..3).map(|i| Some((100 + i, [i as u8; 8]))));
+    b.done();
+    let mut k = Kernel::new();
+    k.boot(&w.finish(), 1).unwrap();
+    let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
+        o.str(A::LISTING_RAW, "Rust kernels");
+    });
+    k.predict(&put, &ctx()).unwrap();
+    let t = k.rows().table(table::APPLICATIONS).unwrap();
+    let Val::Deferred(len, _) = t.get(1, A::LISTING_RAW) else { panic!("row 1 is not a stub") };
+    assert_eq!(len, 12);
+    assert_eq!(t.get(2, A::LISTING_RAW), Val::Deferred(101, [1; 8]));
+    // A put of the wrong kind for a column changes nothing.
+    k.predict(&op(wire::PUT, table::APPLICATIONS, 2, |o| { o.u32(A::COMPANY, 5); }), &ctx()).unwrap();
+    assert_eq!(k.rows().table(table::APPLICATIONS).unwrap().get(3, A::LISTING_RAW), Val::Deferred(102, [2; 8]));
+    // The server refuses the listing (op 77): its writes go, the stub returns.
+    k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 2, &[wire::Nack { op_id: 77, code: 0, data: b"{}" }])).unwrap();
+    assert_eq!(k.rows().table(table::APPLICATIONS).unwrap().get(1, A::LISTING_RAW), Val::Deferred(100, [0; 8]));
+}
+
+#[test]
+fn a_keyed_put_is_predicted_where_the_server_puts_it() {
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::APPLICATIONS, 1);
+    b.u32s(A::ID, [4].into_iter()).u32s(A::STAGE, [S::GATED as u32].into_iter()).strs(A::CANONICAL_URL, ["https://acme.example/1"].into_iter());
+    b.done();
+    let mut k = Kernel::new();
+    k.boot(&w.finish(), 1).unwrap();
+    let mut ow = wire::OpsWriter::new();
+    ow.op(9, wire::PUT, wire::KEYED, table::APPLICATIONS, 0, None).str(A::CANONICAL_URL, "https://acme.example/1").u32(A::SCORE_100, 77);
+    let raw = ow.finish()[8..].to_vec();
+    k.predict(&raw, &ctx()).unwrap();
+    let t = k.rows().table(table::APPLICATIONS).unwrap();
+    assert_eq!(t.len(), 1);
+    assert_eq!(t.u32(4, A::SCORE_100), Some(77));
+}
+
+#[test]
+fn a_frame_that_fails_part_way_leaves_nothing_stale() {
+    let mut k = kernel(&[app(1, S::GATED, "Acme"), app(2, S::GATED, "Bolt")], &[], &[]);
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::APPLICATIONS, 1);
+    b.u32s(A::ID, [1].into_iter()).u32s(A::SCORE_100, [99].into_iter());
+    b.done();
+    // A keyed table's block with no id column: the body fails after the first block.
+    let mut b = w.block(table::EVENTS, 1);
+    b.u32s(col::events::APPLICATION_ID, [1].into_iter());
+    b.done();
+    assert!(k.patch(&w.finish(), 2).is_err());
+    assert_eq!(k.board_ids(None)[0], 1);
+}
+
+#[test]
+fn a_sentinel_cell_is_refused_as_the_server_refuses_it() {
+    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
+    let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
+        o.u32(A::SCORE_100, wire::NONE);
+    });
+    assert_eq!(code(k.judge(&put, &ctx())), refusal::TYPE);
+    let clear = op(wire::PUT, table::APPLICATIONS, 1, |o| {
+        o.null(A::SCORE_100);
+    });
+    assert!(k.judge(&clear, &ctx()).is_ok());
+}

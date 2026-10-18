@@ -16,10 +16,10 @@
 //! Effects are rows in write order. The op's own row is the one on the
 //! op's table (its target; id 0 is the op's insert), and no other effect
 //! row touches that table; a drop has no own row, its deletion is the
-//! sequencer's. Any other row with id 0 is a fresh insert. A ref cell
-//! holds [`EVal::Own`] for the op's insert id, or [`EVal::New`]`(k)` for
-//! the id of the k-th insert among the effect rows (0-based, the op's own
-//! insert counted); a referenced row always comes before its referrer.
+//! sequencer's. Any other row with id 0 is a fresh insert. A ref cell to a
+//! row inserted by the same effects holds [`EVal::New`]`(k)`, the id of
+//! the k-th insert among the effect rows (0-based, the op's own insert
+//! counted); a referenced row always comes before its referrer.
 //!
 //! Refusal data, by code:
 //!
@@ -63,8 +63,6 @@ pub struct Ctx<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum EVal {
     Val(Val),
-    /// The id the op's own insert gets.
-    Own,
     /// The id the k-th insert of this effect list gets.
     New(u32),
 }
@@ -211,7 +209,7 @@ fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
             } else if let Some(t) = apps {
                 // A batched stage keeps its batch.
                 if row.get(A::BATCH_ID) == Some(&EVal::Val(Val::None)) {
-                    let stage = t.u32(op.target, A::STAGE).and_then(|v| Stage::from_u8(v as u8));
+                    let stage = t.u32(op.target, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8));
                     if let Some(st) = stage.filter(|s| s.batched()) {
                         return refuse(refusal::STAGE, json!({"from": st.name(), "to": st.name(), "rule": "needs_batch"}));
                     }
@@ -372,7 +370,7 @@ fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
 }
 
 fn app_stage(t: &Table, id: u32) -> Stage {
-    t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)).unwrap_or(Stage::Discovered)
+    t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered)
 }
 
 /// The cells a move to `to` writes on the application, and its event.
@@ -393,12 +391,22 @@ fn moved(t: &Table, id: u32, from: Stage, to: Stage, note: Option<String>, op: &
         if to == Stage::Closed && first(A::CLOSED_ON) {
             row.set(A::CLOSED_ON, day_val(ctx.today));
         }
+        // Reopened: it is no longer closed. What was sent and replied to
+        // stays recorded.
+        if from == Stage::Closed {
+            row.set(A::CLOSED_ON, Val::None);
+        }
     }
-    if let Some(n) = note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+    let note = note.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    // A move to where it stands, with nothing to say, is nothing.
+    if from == to && note.is_none() {
+        return Vec::new();
+    }
+    if let Some(n) = note {
         row.set(A::STAGE_NOTES, s(with_note(t.str(id, A::STAGE_NOTES), to, n)));
     }
     let mut body = alloc::format!("{} → {}", from.name(), to.name());
-    if let Some(n) = note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+    if let Some(n) = note {
         body.push_str(" · ");
         body.push_str(n);
     }
@@ -424,7 +432,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 return not_found(table::APPLICATIONS, op.target);
             };
             let Some(to) = (match param_val(op, param::stage::STAGE) {
-                Val::U32(v) => Stage::from_u8(v as u8),
+                Val::U32(v) => u8::try_from(v).ok().and_then(Stage::from_u8),
                 _ => None,
             }) else {
                 return refuse(refusal::TYPE, json!({"param": "stage"}));
@@ -449,7 +457,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 return not_found(table::APPLICATIONS, op.target);
             };
             let Some(stage) = (match param_val(op, param::note::STAGE) {
-                Val::U32(v) => Stage::from_u8(v as u8),
+                Val::U32(v) => u8::try_from(v).ok().and_then(Stage::from_u8),
                 _ => None,
             }) else {
                 return refuse(refusal::TYPE, json!({"param": "stage"}));
@@ -525,12 +533,12 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
 fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Result<(), Refusal> {
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
     let Some(seat) = board::seat(t, id) else { return Ok(()) };
-    let (ix, cfg) = board.governor(rows, ctx.today);
-    let mut v = heat::verdict(ix, &seat, &[], cfg);
+    let (ix, _) = board.governor(rows, ctx.today);
+    let mut v = heat::verdict(ix, &seat, &[]);
     if v.allow {
         return Ok(());
     }
-    v.cooldown_days = heat::cooldown(ix, &seat, &[], cfg);
+    v.cooldown_days = heat::cooldown(ix, &seat, &[]);
     let mut data = v.to_json();
     data["to"] = Json::String(to.name().into());
     Err(Refusal { code: refusal::HEAT, data })

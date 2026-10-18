@@ -140,16 +140,16 @@ fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> 
     Some(citizenships.iter().any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
-/// Whether an application row was ever submitted.
+/// Whether an application row was ever submitted, by its rail.
 pub fn sent(t: &Table, id: u32) -> bool {
-    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)) else { return false };
-    t.u32(id, A::APPLIED_ON).is_some() || crate::pipeline::sent(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
+    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)) else { return false };
+    crate::pipeline::sent(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
 }
 
 /// The governor's seat for one application row. Its score is the stored
 /// one; the board's cache sets the effective score.
 pub fn seat(t: &Table, id: u32) -> Option<Seat> {
-    let stage = Stage::from_u8(t.u32(id, A::STAGE)? as u8)?;
+    let stage = u8::try_from(t.u32(id, A::STAGE)?).ok().and_then(Stage::from_u8)?;
     Some(Seat::new(&SeatIn {
         id,
         corporation_id: t.u32(id, A::CORPORATION_ID),
@@ -230,7 +230,7 @@ impl Board {
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
-                    if stages.get(i).and_then(|v| Stage::from_u8(*v as u8)).is_some_and(|s| s.queued() || s.after_send()) {
+                    if stages.get(i).and_then(|v| u8::try_from(*v).ok().and_then(Stage::from_u8)).is_some_and(|s| s.queued() || s.after_send()) {
                         if let Some(c) = self.cached(rows, t, id) {
                             hot.push(c.seat.clone());
                         }
@@ -290,7 +290,7 @@ impl Board {
         let Some((_, _, ix)) = self.governor.as_ref() else { return };
         let live: Vec<&Cached> = ids.iter().filter_map(|id| self.cache.get(id)).collect();
         for c in &live {
-            let verdict = heat::verdict(ix, &c.seat, &[], &self.config);
+            let verdict = heat::verdict(ix, &c.seat, &[]);
             let class = Class::of(&verdict, &self.config);
             let score = c.stored.unwrap_or(c.suggestion.score);
             self.cards.push(Card {
@@ -317,8 +317,8 @@ impl Board {
     /// Days until a blocked card's move would fit (`heat::cooldown`), as
     /// of the last derive; `Some(0)` when it fits now.
     pub fn cooldown(&self, id: u32) -> Option<u32> {
-        let (_, cfg, ix) = self.governor.as_ref()?;
-        heat::cooldown(ix, &self.cache.get(&id)?.seat, &[], cfg)
+        let (_, _, ix) = self.governor.as_ref()?;
+        heat::cooldown(ix, &self.cache.get(&id)?.seat, &[])
     }
 
     pub fn card(&self, id: u32) -> Option<&Card> {

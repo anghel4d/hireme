@@ -2,13 +2,13 @@
 //! written, and their coverage by the text a composed CV shows.
 //!
 //! Extraction reads the raw listing and its format, nothing else. Markup
-//! goes first: HTML tags and entities, Markdown link targets, and bare
-//! URLs anywhere. Words are then runs of letters and digits (Unicode,
+//! goes first: HTML tags, comments, entities and `<style>`/`<script>`
+//! bodies, Markdown link targets, and bare URLs anywhere. Words are then runs of letters and digits (Unicode,
 //! lowercased, Latin accents folded as `text::normalize` folds them) with
 //! `+`, `#` and inner `.` kept, so "c++", "c#" and "node.js" are words
 //! and a sentence's full stop is not part of one. A word counts when it
 //! has a letter, is not a stop word, and is three characters or more (two
-//! when it carries `+` or `#`: "c#", "f#"); a dotted word counts only when
+//! when it carries `#`: "c#", "f#"); a dotted word counts only when
 //! every part has two characters or more, which keeps "node.js" and drops
 //! "e.g". The [`TOP`] most frequent, ties by bytes, are the keywords.
 //! They are stored in `applications.keywords` with [`VERSION`]; a change
@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Bump on any change to what `extract` returns for some input.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// How many keywords a listing keeps.
 pub const TOP: usize = 12;
@@ -68,10 +68,17 @@ fn prose(listing: &str, format: Format) -> String {
         let rest = &listing[i..];
         let through = |end: char| rest.find(end).map_or(rest.len(), |j| j + end.len_utf8());
         let url = !word_char(prev) && (rest.starts_with("http://") || rest.starts_with("https://") || rest.starts_with("www."));
-        let skip = if html && c == '<' {
+        // Bounded so a run of '&' with no ';' costs a fixed look-ahead each.
+        let entity = || rest.as_bytes()[1..].iter().take(9).position(|b| *b == b';').map(|j| j + 2);
+        let skip = if html && rest.starts_with("<!--") {
+            Some(rest.find("-->").map_or(rest.len(), |j| j + 3))
+        } else if html && (starts_ci(rest, "<style") || starts_ci(rest, "<script")) {
+            let close = if starts_ci(rest, "<style") { "</style" } else { "</script" };
+            Some(find_ci(rest, close).map_or(rest.len(), |j| j + close.len()))
+        } else if html && c == '<' {
             Some(through('>'))
-        } else if html && c == '&' && rest[1..].find(';').is_some_and(|j| j < 9) {
-            Some(through(';'))
+        } else if html && c == '&' && entity().is_some() {
+            entity()
         } else if md && rest.starts_with("](") {
             Some(through(')'))
         } else if url {
@@ -95,34 +102,43 @@ fn prose(listing: &str, format: Format) -> String {
     out
 }
 
+fn starts_ci(s: &str, p: &str) -> bool {
+    s.len() >= p.len() && s.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+}
+
+fn find_ci(s: &str, p: &str) -> Option<usize> {
+    let (b, n) = (s.as_bytes(), p.as_bytes());
+    (0..=b.len().checked_sub(n.len())?).find(|&i| b[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
 fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '+' || c == '#' || c == '.'
 }
 
 fn counts(w: &str) -> bool {
     let len = w.chars().count();
-    let marked = w.contains(['+', '#']);
     w.chars().any(char::is_alphabetic)
-        && (len >= 3 || (marked && len >= 2))
+        && (len >= 3 || (w.contains('#') && len >= 2))
         && !STOP.contains(&w)
         && (!w.contains('.') || w.split('.').all(|p| p.chars().count() >= 2))
 }
 
 /// The listing's keywords, most frequent first, ties by bytes.
 pub fn extract(listing: &str, format: Format) -> Vec<String> {
-    let text = prose(listing, format);
-    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
-    for raw in text.split(|c: char| !word_char(c)).filter(|w| !w.trim_matches('.').is_empty()) {
-        let w = crate::text::fold(raw.trim_matches('.'));
-        if counts(&w) {
+    // Folded before splitting, so a decomposed accent stays in its word.
+    let text = crate::text::fold(&prose(listing, format));
+    let mut seen: BTreeMap<&str, u32> = BTreeMap::new();
+    for raw in text.split(|c: char| !word_char(c)) {
+        let w = raw.trim_matches('.');
+        if !w.is_empty() && counts(w) {
             *seen.entry(w).or_insert(0) += 1;
         }
     }
-    let mut all: Vec<(String, u32)> = seen.into_iter().collect();
+    let mut all: Vec<(&str, u32)> = seen.into_iter().collect();
     // BTreeMap order is by bytes already; a stable sort by count keeps it.
     all.sort_by_key(|w| core::cmp::Reverse(w.1));
     all.truncate(TOP);
-    all.into_iter().map(|(w, _)| w).collect()
+    all.into_iter().map(|(w, _)| String::from(w)).collect()
 }
 
 /// The stored form: U+001F-joined.
@@ -246,12 +262,22 @@ mod tests {
 
     #[test]
     fn letters_markup_and_abbreviations() {
-        let k = extract("Zürich Zürich Müller développeur C# C# F# ### +++ e.g. e.g. i.e. u.s. go go ai ai", Format::Text);
+        let k = extract("Zürich Zu\u{308}rich Müller développeur C# C# F# ### +++ A+ a+ e.g. e.g. i.e. u.s. go go ai ai", Format::Text);
         assert_eq!(k, ["c#", "zurich", "developpeur", "f#", "muller"]);
+        let style = extract("<style>.a{color:red}</style><SCRIPT>var foo = bar;</script><!-- a > comment --><p>kernel kernel</p>", Format::Html);
+        assert_eq!(style, ["kernel"]);
         let html = extract("<div class=\"x\"><a href=\"https://acme.example/jobs\">Kernel</a>&nbsp;kernel&amp;GPU</div>", Format::Html);
         assert_eq!(html, ["kernel", "gpu"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
         assert_eq!(md, ["kernels", "apply", "see"]);
+    }
+
+    #[test]
+    fn ampersands_cost_a_bounded_look_ahead() {
+        let t = std::time::Instant::now();
+        assert!(extract(&"&".repeat(1 << 20), Format::Html).is_empty());
+        assert!(extract(&("&a".repeat(1 << 18) + ";"), Format::Html).is_empty());
+        assert!(t.elapsed().as_secs() < 5);
     }
 
     #[test]

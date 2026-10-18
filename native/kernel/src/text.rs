@@ -10,9 +10,11 @@
 
 use alloc::string::String;
 
-/// Latin-1 Supplement and Latin Extended-A (U+00C0..U+017F) to their
-/// base letters; "" for the two symbols in the range.
-const LATIN: [&str; 192] = [
+/// Latin letters to their base letters: Latin-1 Supplement through
+/// Latin Extended-B (U+00C0..U+024F) and Latin Extended Additional
+/// (U+1E00..U+1EFF), generated from Unicode's decompositions; "" for a
+/// symbol or a letter with no ASCII base.
+const LATIN_1: [&str; 400] = [
     "A", "A", "A", "A", "A", "A", "AE", "C", "E", "E", "E", "E", "I", "I", "I", "I",
     "D", "N", "O", "O", "O", "O", "O", "", "O", "U", "U", "U", "U", "Y", "TH", "ss",
     "a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i", "i",
@@ -25,7 +27,47 @@ const LATIN: [&str; 192] = [
     "O", "o", "OE", "oe", "R", "r", "R", "r", "R", "r", "S", "s", "S", "s", "S", "s",
     "S", "s", "T", "t", "T", "t", "T", "t", "U", "u", "U", "u", "U", "u", "U", "u",
     "U", "u", "U", "u", "W", "w", "Y", "y", "Y", "Z", "z", "Z", "z", "Z", "z", "s",
+    "b", "B", "B", "b", "", "", "", "C", "c", "", "D", "D", "d", "", "", "",
+    "", "F", "f", "G", "", "hv", "", "I", "K", "k", "l", "", "", "N", "n", "O",
+    "O", "o", "OI", "oi", "P", "p", "", "", "", "", "", "t", "T", "t", "T", "U",
+    "u", "", "V", "Y", "y", "Z", "z", "", "", "", "", "", "", "", "", "",
+    "", "", "", "", "DZ", "Dz", "dz", "LJ", "Lj", "lj", "NJ", "Nj", "nj", "A", "a", "I",
+    "i", "O", "o", "U", "u", "U", "u", "U", "u", "U", "u", "U", "u", "", "A", "a",
+    "A", "a", "AE", "ae", "G", "g", "G", "g", "K", "k", "O", "o", "O", "o", "", "",
+    "j", "DZ", "Dz", "dz", "G", "g", "", "", "N", "n", "A", "a", "AE", "ae", "O", "o",
+    "A", "a", "A", "a", "E", "e", "E", "e", "I", "i", "I", "i", "O", "o", "O", "o",
+    "R", "r", "R", "r", "U", "u", "U", "u", "S", "s", "T", "t", "", "", "H", "h",
+    "N", "d", "OU", "ou", "Z", "z", "A", "a", "E", "e", "O", "o", "O", "o", "O", "o",
+    "O", "o", "Y", "y", "l", "n", "t", "", "", "", "A", "C", "c", "L", "T", "s",
+    "z", "", "", "B", "", "", "E", "e", "J", "j", "", "q", "R", "r", "Y", "y",
 ];
+const LATIN_ADDITIONAL: [&str; 256] = [
+    "A", "a", "B", "b", "B", "b", "B", "b", "C", "c", "D", "d", "D", "d", "D", "d",
+    "D", "d", "D", "d", "E", "e", "E", "e", "E", "e", "E", "e", "E", "e", "F", "f",
+    "G", "g", "H", "h", "H", "h", "H", "h", "H", "h", "H", "h", "I", "i", "I", "i",
+    "K", "k", "K", "k", "K", "k", "L", "l", "L", "l", "L", "l", "L", "l", "M", "m",
+    "M", "m", "M", "m", "N", "n", "N", "n", "N", "n", "N", "n", "O", "o", "O", "o",
+    "O", "o", "O", "o", "P", "p", "P", "p", "R", "r", "R", "r", "R", "r", "R", "r",
+    "S", "s", "S", "s", "S", "s", "S", "s", "S", "s", "T", "t", "T", "t", "T", "t",
+    "T", "t", "U", "u", "U", "u", "U", "u", "U", "u", "U", "u", "V", "v", "V", "v",
+    "W", "w", "W", "w", "W", "w", "W", "w", "W", "w", "X", "x", "X", "x", "Y", "y",
+    "Z", "z", "Z", "z", "Z", "z", "h", "t", "w", "y", "a", "s", "", "", "SS", "",
+    "A", "a", "A", "a", "A", "a", "A", "a", "A", "a", "A", "a", "A", "a", "A", "a",
+    "A", "a", "A", "a", "A", "a", "A", "a", "E", "e", "E", "e", "E", "e", "E", "e",
+    "E", "e", "E", "e", "E", "e", "E", "e", "I", "i", "I", "i", "O", "o", "O", "o",
+    "O", "o", "O", "o", "O", "o", "O", "o", "O", "o", "O", "o", "O", "o", "O", "o",
+    "O", "o", "O", "o", "U", "u", "U", "u", "U", "u", "U", "u", "U", "u", "U", "u",
+    "U", "u", "Y", "y", "Y", "y", "Y", "y", "Y", "y", "", "", "", "", "Y", "y",
+];
+
+fn latin(cp: u32) -> Option<&'static str> {
+    let b = match cp {
+        0xC0..0x250 => LATIN_1[(cp - 0xC0) as usize],
+        0x1E00..0x1F00 => LATIN_ADDITIONAL[(cp - 0x1E00) as usize],
+        _ => return None,
+    };
+    (!b.is_empty()).then_some(b)
+}
 
 /// Lowercase with Latin letters folded to their base and combining marks
 /// (a decomposed accent, the dot of "İ") dropped; everything else kept.
@@ -36,9 +78,9 @@ pub fn fold(s: &str) -> String {
         if (0x300..=0x36F).contains(&cp) {
             continue;
         }
-        match (0xC0..0x180).contains(&cp).then(|| LATIN[(cp - 0xC0) as usize]) {
-            Some(b) if !b.is_empty() => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
-            _ => out.extend(c.to_lowercase()),
+        match latin(cp) {
+            Some(b) => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
+            None => out.extend(c.to_lowercase()),
         }
     }
     out
@@ -149,6 +191,10 @@ mod tests {
         assert_eq!(normalize("  Senior C++/Rust  Engineer, Zürich! "), "senior c++ rust engineer zurich");
         assert_eq!(normalize("Zu\u{308}rich"), "zurich");
         assert_eq!(normalize("Æsir × Łódź"), "aesir lodz");
+        assert_eq!(normalize("Timi\u{219}oara"), normalize("Timis\u{326}oara"));
+        assert_eq!(normalize("Hà Nội"), "ha noi");
+        assert_eq!(normalize("Ha\u{300} No\u{323}\u{302}i"), "ha noi");
+        assert_eq!(normalize("\u{1e9e}"), normalize(&normalize("\u{1e9e}")));
         assert_eq!(normalize(&normalize("İstanbul")), normalize("İstanbul"));
         assert_eq!(normalize("---"), "");
     }

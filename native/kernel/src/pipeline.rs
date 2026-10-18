@@ -254,6 +254,8 @@ pub enum Refusal {
     FireHold,
     /// Once sent, an application cannot go back to a pre-send stage.
     Sent,
+    /// A reply needs something sent first.
+    NotSent,
 }
 
 impl Refusal {
@@ -263,6 +265,7 @@ impl Refusal {
             Refusal::OpenFireByCommand => "open_fire_by_command",
             Refusal::FireHold => "fire_hold",
             Refusal::Sent => "sent",
+            Refusal::NotSent => "not_sent",
         }
     }
 }
@@ -277,6 +280,9 @@ pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool, sent: bo
     }
     if sent && !to.after_send() {
         return Err(Refusal::Sent);
+    }
+    if to == Stage::Reply && !sent {
+        return Err(Refusal::NotSent);
     }
     if to == Stage::OpenFire {
         return Err(Refusal::OpenFireByCommand);
@@ -342,6 +348,7 @@ mod tests {
         assert_eq!(check(Stage::Submitted, Stage::Closed, true, true, true), Ok(()));
         assert_eq!(check(Stage::Discovered, Stage::Closed, false, false, false), Ok(()));
         assert_eq!(check(Stage::Reply, Stage::Reply, false, false, true), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::Reply, true, false, false), Err(NotSent));
         // A listing closed before anything went out can be reopened.
         let closed = move_to(&initial(Stage::Gated), Stage::Closed);
         assert!(!sent(&closed));

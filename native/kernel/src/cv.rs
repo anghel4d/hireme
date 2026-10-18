@@ -184,8 +184,10 @@ pub struct Item<'a> {
 /// One application's overlay on one item.
 #[derive(Clone, Debug)]
 pub struct Overlay<'a> {
-    /// The overlay row's id; the lowest wins when two name one item.
+    /// The overlay row's id; among overlays on one item the application's
+    /// own wins, then the lowest id (the line as first told).
     pub id: u32,
+    pub own: bool,
     pub item_id: u32,
     pub mode: Mode,
     pub title: Option<&'a str>,
@@ -209,11 +211,11 @@ pub struct Line<'a> {
 }
 
 /// The composed CV: the profile's items and the shared ones, ordered by
-/// kind, position, id, with tailored lines rewritten, added lines brought
+/// kind, position, id, with the lineage's tailored lines rewritten, added lines brought
 /// in and dropped lines left out. An overlay naming an item that does not
 /// exist is ignored.
 pub fn compose<'a>(profile_id: Option<u32>, items: &[Item<'a>], overlays: &[Overlay<'a>]) -> Vec<Line<'a>> {
-    let overlay = |id: u32| overlays.iter().filter(|o| o.item_id == id).min_by_key(|o| o.id);
+    let overlay = |id: u32| overlays.iter().filter(|o| o.item_id == id).min_by_key(|o| (!o.own, o.id));
     let mut out: Vec<(u8, u32, u32, Line<'a>)> = Vec::new();
     for it in items {
         let own = it.profile_id.is_none() || it.profile_id == profile_id;
@@ -277,16 +279,25 @@ mod tests {
     fn overlays_shape_the_profile() {
         let items = [item(1, None, 2, "shared"), item(2, Some(7), 1, "mine"), item(3, Some(8), 0, "theirs"), item(4, Some(7), 3, "old")];
         let overlays = [
-            Overlay { id: 1, item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits") },
-            Overlay { id: 2, item_id: 4, mode: Mode::Drop, title: None, body: None, reason: None },
-            Overlay { id: 3, item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b"), reason: None },
-            Overlay { id: 4, item_id: 99, mode: Mode::Add, title: None, body: None, reason: None },
+            Overlay { id: 1, own: true, item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits") },
+            Overlay { id: 2, own: true, item_id: 4, mode: Mode::Drop, title: None, body: None, reason: None },
+            Overlay { id: 3, own: true, item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b"), reason: None },
+            Overlay { id: 4, own: true, item_id: 99, mode: Mode::Add, title: None, body: None, reason: None },
         ];
         let cv = compose(Some(7), &items, &overlays);
         let titles: Vec<&str> = cv.iter().map(|l| l.title).collect();
         assert_eq!(titles, ["theirs", "mine, tailored", "shared"]);
         assert_eq!(cv[1].body, Some("b"));
         assert_eq!(cv[0].mode, Some(Mode::Add));
+        // Another application's earlier wording of a line is the story; the
+        // application's own wording of it wins.
+        let told = [
+            Overlay { id: 9, own: false, item_id: 1, mode: Mode::Tailor, title: Some("told first"), body: None, reason: None },
+            Overlay { id: 12, own: false, item_id: 1, mode: Mode::Drop, title: None, body: None, reason: None },
+        ];
+        assert_eq!(compose(Some(7), &items, &told).iter().find(|l| l.item_id == 1).map(|l| l.title), Some("told first"));
+        let mine = [told[0].clone(), Overlay { id: 20, own: true, item_id: 1, mode: Mode::Tailor, title: Some("mine"), body: None, reason: None }];
+        assert_eq!(compose(Some(7), &items, &mine).iter().find(|l| l.item_id == 1).map(|l| l.title), Some("mine"));
         let t = Theme { lead: Some("Lead".into()), ..Theme::default() };
         assert_eq!(visible(&cv, &t), "Lead\ntheirs\nmine, tailored\nb\nshared\n");
     }

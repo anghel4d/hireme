@@ -1,7 +1,7 @@
 // The board's bound under WebAssembly (docs/rebuild.md "Tests, bench,
 // bounds"): a full board derive at 10k applications in ≤ 8 ms.
 //
-//   node bench/kernel.mjs <kernel.wasm> [applications=10000]
+//   node bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
 //
 // Seeded synthetic desk: 10k applications over 2,500 companies, a tenth
 // of them hot, half with a stored score, listing URLs across a few ATS
@@ -18,6 +18,9 @@ if (!wasmPath) {
   process.exit(2);
 }
 const N = Number(process.argv[3] ?? 10000);
+// The share of applications queued, sent or answered: a young campaign is
+// mostly cold, a mature one mostly hot.
+const HOT = Number(process.argv[4] ?? 0.1);
 const BOUND_MS = 8;
 const bytes = readFileSync(wasmPath);
 
@@ -34,7 +37,7 @@ const today = 20000;
 const apps = [];
 for (let id = 1; id <= N; id++) {
   const c = rand(2500);
-  const hot = rand(10) === 0;
+  const hot = rand(1000) < HOT * 1000;
   apps.push({
     id, no: id,
     company: c < 5 ? ["Google", "Meta", "Anthropic", "Stripe", "Valve"][c] : `Company ${c} Systems`,
@@ -77,6 +80,7 @@ for (let run = 0; run < 7; run++) {
 
 const report = {
   applications: N,
+  hot_share: HOT,
   derive_after_boot_ms: +median(cold).toFixed(2),
   derive_after_patch_ms: +median(warm).toFixed(2),
   filtered_view_ms: +median(filtered).toFixed(2),

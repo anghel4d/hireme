@@ -1,0 +1,7 @@
+# Float math goes through libm so wasm and native agree bit for bit; the
+# std methods call the platform's library and are refused here.
+disallowed-methods = [
+  "f64::powf", "f64::powi", "f64::exp", "f64::exp2", "f64::ln", "f64::log", "f64::log2", "f64::log10",
+  "f64::sqrt", "f64::cbrt", "f64::hypot", "f64::sin", "f64::cos", "f64::tan", "f64::mul_add",
+  "f64::round", "f64::ceil", "f64::floor", "f64::trunc",
+]

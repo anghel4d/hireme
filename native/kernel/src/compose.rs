@@ -72,7 +72,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
     if !t.has(id) {
         return None;
     }
-    let stage = t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)).unwrap_or(Stage::Discovered);
+    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered);
     let rail = pipeline::rail_of(stage, t.str(id, A::PIPS));
     let rail: Vec<Json> = STAGES
         .iter()
@@ -171,18 +171,27 @@ pub fn cv_of<'r>(rows: &'r Rows, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, T
                 .collect()
         })
         .unwrap_or_default();
+    // The lineage's overlays, from every application to the corporation:
+    // one story per company.
+    let lineage = t.u32(id, A::CORPORATION_ID).and_then(|c| {
+        let lt = rows.table(table::CV_LINEAGES)?;
+        lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c))
+    });
     let overlays: Vec<Overlay> = rows
         .table(table::CV_OVERLAYS)
         .map(|o| {
             use col::cv_overlays as O;
             o.ids()
                 .iter()
-                .filter(|&&x| o.u32(x, O::APPLICATION_ID) == Some(id))
+                .filter(|&&x| {
+                    o.u32(x, O::APPLICATION_ID) == Some(id) || (lineage.is_some() && o.u32(x, O::LINEAGE_ID) == lineage)
+                })
                 .filter_map(|&x| {
                     Some(Overlay {
                         id: x,
+                        own: o.u32(x, O::APPLICATION_ID) == Some(id),
                         item_id: o.u32(x, O::ITEM_ID)?,
-                        mode: cv::Mode::from_u8(o.u32(x, O::MODE)? as u8)?,
+                        mode: u8::try_from(o.u32(x, O::MODE)?).ok().and_then(cv::Mode::from_u8)?,
                         title: o.str(x, O::TITLE),
                         body: o.str(x, O::BODY),
                         reason: o.str(x, O::REASON),
@@ -237,7 +246,7 @@ pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
                 .iter()
                 .filter_map(|&id| {
                     let d = t.u32(id, col::gym_reps::DONE_ON)? as Day;
-                    let o = RepOutcome::from_u8(t.u32(id, col::gym_reps::OUTCOME).unwrap_or(0) as u8)?;
+                    let o = u8::try_from(t.u32(id, col::gym_reps::OUTCOME).unwrap_or(0)).ok().and_then(RepOutcome::from_u8)?;
                     Some((d, o))
                 })
                 .collect()
@@ -249,7 +258,7 @@ pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
             t.ids()
                 .iter()
                 .filter_map(|&id| {
-                    let k = NetKind::from_u8(t.u32(id, col::net_entries::KIND)? as u8)?;
+                    let k = u8::try_from(t.u32(id, col::net_entries::KIND)?).ok().and_then(NetKind::from_u8)?;
                     Some((k, t.u32(id, col::net_entries::SHIPPED_ON).map(|d| d as Day)))
                 })
                 .collect()

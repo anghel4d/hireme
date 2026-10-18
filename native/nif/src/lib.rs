@@ -4,6 +4,8 @@
 //! - `new()` → an empty resource; `load(res, boot_body)` → `:ok`, the
 //!   rows of a BOOT body read from SQLite; `apply(res, patch_body)` →
 //!   `:ok`, the PATCH body subscribers get, in the same sequencer turn.
+//!   Both, and `board_ids`, run on a dirty CPU scheduler: their cost grows
+//!   with the desk.
 //! - `judge(res, op, ctx)` and `judge_dirty` (the same on a dirty CPU
 //!   scheduler) → `{:ok, effects}` | `{:refused, code, data_json}` |
 //!   `{:error, :panic}`. `op` is one op in the OPS layout; `ctx` is
@@ -11,8 +13,8 @@
 //!   `effects` are `[{table_id, row_id, [{col_id, value}]}]` in write
 //!   order, `row_id` 0 an insert; a value is an integer, float, binary or
 //!   `nil` (bool 0/1, day = days since 1970-01-01, enum = its code), and
-//!   a ref to a row inserted in the same effects is `0` (the op's own
-//!   insert) or `{:new, k}` (the k-th insert).
+//!   a ref to a row inserted by the same effects is `{:new, k}` (the
+//!   k-th insert).
 //! - `board_ids(res, stage_code | nil)` → application ids in board order.
 //! - `keywords_version()`.
 //!
@@ -38,7 +40,6 @@ pub struct Res(Mutex<Kernel>);
 impl rustler::Resource for Res {}
 
 fn with<T>(res: &Res, f: impl FnOnce(&mut Kernel) -> T) -> Option<T> {
-    // A poisoned lock means a panic mid-write; the caller rebuilds.
     let mut k = res.0.lock().ok()?;
     catch_unwind(AssertUnwindSafe(|| f(&mut k))).ok()
 }
@@ -48,12 +49,18 @@ fn new() -> ResourceArc<Res> {
     ResourceArc::new(Res(Mutex::new(Kernel::new())))
 }
 
-#[rustler::nif]
+/// Loading builds the board and the governor's index too, so the first
+/// judge after a (re)build is as fast as any.
+#[rustler::nif(schedule = "DirtyCpu")]
 fn load<'a>(env: Env<'a>, res: ResourceArc<Res>, boot: Binary<'a>) -> Term<'a> {
-    body(env, &res, |k| k.boot(boot.as_slice(), 0).is_ok())
+    body(env, &res, |k| {
+        let ok = k.boot(boot.as_slice(), 0).is_ok();
+        k.derive();
+        ok
+    })
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn apply<'a>(env: Env<'a>, res: ResourceArc<Res>, patch: Binary<'a>) -> Term<'a> {
     body(env, &res, |k| k.patch(patch.as_slice(), 0).is_ok())
 }
@@ -88,7 +95,6 @@ fn ctx_in(t: Term) -> NifResult<CtxIn> {
 
 fn value<'a>(env: Env<'a>, v: &EVal) -> Term<'a> {
     match v {
-        EVal::Own => 0u32.encode(env),
         EVal::New(k) => (atoms::new(), *k).encode(env),
         EVal::Val(v) => match v {
             Val::None => rustler::types::atom::nil().encode(env),
@@ -137,7 +143,7 @@ fn judge_dirty<'a>(env: Env<'a>, res: ResourceArc<Res>, op: Binary, ctx: Term<'a
     judge_any(env, &res, op, ctx)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn board_ids(res: ResourceArc<Res>, stage: Option<u8>) -> Vec<u32> {
     with(&res, |k| k.board_ids(stage.and_then(Stage::from_u8))).unwrap_or_default()
 }

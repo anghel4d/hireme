@@ -122,8 +122,9 @@ pub fn parse(url: &str) -> Ats {
     };
     let tenant = match vendor {
         // The embed form names the board in its query: /embed/job_app?for=acme.
-        Vendor::Greenhouse => param("for")
-            .or_else(|| (!path.starts_with("/embed")).then(|| first_segment(path)).flatten())
+        Vendor::Greenhouse => {
+            if path.starts_with("/embed") { param("for") } else { first_segment(path) }
+        }
             .or_else(|| subdomain(&host, "greenhouse.io"))
             .or_else(|| subdomain(&host, "greenhouse.net")),
         Vendor::Lever | Vendor::Ashby => {
@@ -146,7 +147,7 @@ pub fn parse(url: &str) -> Ats {
         Vendor::Workday => {
             let first = host.split('.').next().unwrap_or("");
             let data_center = first.len() > 2 && first.starts_with("wd") && first[2..].bytes().all(|b| b.is_ascii_digit());
-            (!data_center && first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(|| first_segment(path))
+            (!data_center && first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(|| workday_segment(path))
         }
         // careers-acme.icims.com
         Vendor::Icims => {
@@ -172,18 +173,21 @@ fn param(query: &str, key: &str) -> Option<String> {
         .map(|(_, v)| v.trim().to_ascii_lowercase())
 }
 
-/// The first path segment that is not a generic jobs word, a locale
-/// ("en-US") or an id (all digits).
+/// The first path segment that is not a generic jobs word or an id (all
+/// digits).
 fn first_segment(path: &str) -> Option<String> {
-    let locale = |s: &str| s.len() == 5 && s.as_bytes()[2] == b'-' || s.len() == 2;
-    path.split('/')
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .find(|s| {
-            !locale(s)
-                && !s.bytes().all(|b| b.is_ascii_digit())
-                && !matches!(s.as_str(), "job" | "jobs" | "career" | "careers" | "apply" | "embed" | "job_app" | "recruiting" | "j")
-        })
+    segments(path).find(|s| !matches!(s.as_str(), "job" | "jobs" | "career" | "careers" | "apply" | "embed" | "job_app" | "j"))
+}
+
+/// Workday's path tenant, after an optional locale ("en-US") and
+/// `recruiting`.
+fn workday_segment(path: &str) -> Option<String> {
+    let locale = |s: &str| s.len() == 5 && s.as_bytes()[2] == b'-';
+    segments(path).find(|s| !locale(s) && s != "recruiting")
+}
+
+fn segments(path: &str) -> impl Iterator<Item = String> + '_ {
+    path.split('/').filter(|s| !s.is_empty() && !s.bytes().all(|b| b.is_ascii_digit())).map(str::to_ascii_lowercase)
 }
 
 /// The label just left of `root` in `host`, unless it is a generic one.
@@ -218,6 +222,9 @@ mod tests {
         assert_eq!(t("https://boards.greenhouse.io/embed/job_app?token=1"), (Vendor::Greenhouse, None));
         assert_eq!(t("https://boards.greenhouse.io/embed/job_app?for=acme%0A#x?for=evil"), (Vendor::Greenhouse, Some("acme%0a")));
         assert_eq!(t("https://jobs.lever.co./acme"), (Vendor::Lever, Some("acme")));
+        assert_eq!(t("https://jobs.lever.co/ai/3f2a"), (Vendor::Lever, Some("ai")));
+        assert_eq!(t("https://boards.greenhouse.io/ey/jobs/1"), (Vendor::Greenhouse, Some("ey")));
+        assert_eq!(t("https://boards.greenhouse.io/acme/jobs/1?for=other"), (Vendor::Greenhouse, Some("acme")));
         assert_eq!(t("jobs.lever.co/acme?next=https://x.y"), (Vendor::Lever, Some("acme")));
         assert_eq!(t("https://x.successfactors.com/career"), (Vendor::SuccessFactors, None));
         assert_eq!(t("https://acme.bamboohr.com/careers/12"), (Vendor::BambooHr, Some("acme")));

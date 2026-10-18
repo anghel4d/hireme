@@ -43,8 +43,8 @@ pub enum Error {
 pub struct Kernel {
     rows: Rows,
     board: Board,
-    /// Set by the caller; the `clock` table wins once a TICK or BOOT
-    /// carries it.
+    /// Set by the caller (the sequencer's day, the browser's before its
+    /// first TICK); the later of it and the `clock` row is the day.
     today: Day,
     stale: bool,
 }
@@ -65,33 +65,49 @@ impl Kernel {
         }
     }
 
-    /// The day judged by: the `clock`'s when the server sent one.
+    /// The day judged by: the later of the caller's and the `clock`'s.
     pub fn today(&self) -> Day {
-        self.rows
-            .table(table::CLOCK)
-            .and_then(|t| t.ids().first().and_then(|&id| t.u32(id, col::clock::TODAY)))
-            .map_or(self.today, |d| d as Day)
+        let clock = self.rows.table(table::CLOCK).and_then(|t| t.ids().first().and_then(|&id| t.u32(id, col::clock::TODAY)));
+        clock.map_or(self.today, |d| self.today.max(d as Day))
     }
 
-    fn moved(&mut self, m: &Moved) {
-        if !m.is_empty() {
-            self.board.forget(m, &self.rows);
-            self.stale = true;
+    fn moved(&mut self, m: &Moved, day_before: Day) {
+        // A TICK that leaves the day as it was moves nothing derived.
+        let only_clock = m.tables.keys().chain(&m.replaced).all(|t| *t == table::CLOCK);
+        if m.is_empty() || (only_clock && self.today() == day_before) {
+            return;
+        }
+        self.board.forget(m, &self.rows);
+        self.stale = true;
+    }
+
+    /// A frame body into the rows. A body that fails part way may have
+    /// applied some of its blocks, so everything derived is dropped and
+    /// rebuilt from the rows on the next derive.
+    fn frame(&mut self, body: &[u8], rev: u64, boot: bool) -> Result<Moved, Error> {
+        let day = self.today();
+        let r = if boot { self.rows.boot(body, rev) } else { self.rows.patch(body, rev) };
+        match r {
+            Ok(m) => {
+                self.moved(&m, day);
+                Ok(m)
+            }
+            Err(_) => {
+                self.board = Board::new();
+                self.stale = true;
+                Err(Error::Body)
+            }
         }
     }
 
     /// A BOOT body (the server's cache build and resync, a snapshot).
     pub fn boot(&mut self, body: &[u8], rev: u64) -> Result<Moved, Error> {
-        let m = self.rows.boot(body, rev).map_err(|_| Error::Body)?;
-        self.moved(&m);
-        Ok(m)
+        self.frame(body, rev, true)
     }
 
     /// A PATCH body.
     pub fn patch(&mut self, body: &[u8], rev: u64) -> Result<Moved, Error> {
-        let m = self.rows.patch(body, rev).map_err(|_| Error::Body)?;
-        self.moved(&m);
-        Ok(m)
+        self.frame(body, rev, false)
     }
 
     /// One whole frame from the server: BOOT, PATCH, TICK, ACK or NACK
@@ -108,7 +124,7 @@ impl Kernel {
                 for a in wire::decode_acks(&body).map_err(|_| Error::Frame)? {
                     merge(&mut all, self.rows.settle(a.op_id));
                 }
-                self.moved(&all);
+                self.moved(&all, self.today());
                 Ok(all)
             }
             wire::NACK => {
@@ -116,7 +132,7 @@ impl Kernel {
                 for n in wire::decode_nacks(&body).map_err(|_| Error::Frame)? {
                     merge(&mut all, self.rows.rollback(n.op_id));
                 }
-                self.moved(&all);
+                self.moved(&all, self.today());
                 Ok(all)
             }
             _ => Ok(Moved::default()),
@@ -131,12 +147,38 @@ impl Kernel {
     /// Judges one op and, if it passes, applies it as pending: the
     /// client's write in its own frame, settled or rolled back later.
     pub fn predict(&mut self, op: &[u8], ctx: &Ctx) -> Result<Moved, Refusal> {
-        let effects = self.judge(op, ctx)?;
-        let parsed = wire::Op::one(op).map_err(|_| Refusal { code: schema::refusal::TYPE, data: Json::Null })?;
+        let op = self.resolve(op);
+        let effects = self.judge(&op, ctx)?;
+        let parsed = wire::Op::one(&op).map_err(|_| Refusal { code: schema::refusal::TYPE, data: Json::Null })?;
         let writes = writes(&parsed, &effects, &mut || self.rows.temp_id());
         let m = self.rows.apply_pending(parsed.op_id, writes);
-        self.moved(&m);
+        self.moved(&m, self.today());
         Ok(m)
+    }
+
+    /// A KEYED op as the sequencer would judge it: retargeted at the row
+    /// its natural key names and unkeyed, or an insert when none does
+    /// (the browser holds only `applications`' key, `canonical_url`; the
+    /// other natural keys are on server tables, which judge does not
+    /// look into).
+    fn resolve(&self, raw: &[u8]) -> Vec<u8> {
+        let mut out = raw.to_vec();
+        let Ok(op) = wire::Op::one(raw) else { return out };
+        if op.flags & wire::KEYED == 0 {
+            return out;
+        }
+        let url = match op.cell(schema::col::applications::CANONICAL_URL).map(|c| c.value()) {
+            Some(wire::Value::Str(u)) if op.table == table::APPLICATIONS => Some(u),
+            _ => None,
+        };
+        let target = url.and_then(|u| {
+            let t = self.rows.table(table::APPLICATIONS)?;
+            t.ids().iter().copied().find(|&id| t.str(id, schema::col::applications::CANONICAL_URL) == Some(u))
+        });
+        // The op layout: flags at byte 9, target at bytes 12..16.
+        out[9] &= !(wire::KEYED | wire::CREATE_ONLY);
+        out[12..16].copy_from_slice(&target.unwrap_or(0).to_le_bytes());
+        out
     }
 
     /// Recomputes the board if anything moved since the last derive.
@@ -203,7 +245,9 @@ impl Kernel {
         if srev != schema::SCHEMA_REV || hash != schema::WIRE_HASH {
             return Err(Error::Snapshot);
         }
+        let today = self.today;
         *self = Kernel::new();
+        self.today = today;
         self.boot(&snap[16..], rev).map_err(|_| Error::Snapshot)?;
         Ok(rev)
     }
@@ -225,7 +269,6 @@ pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> 
         out.push(Write::Remove { table: op.table, id: op.target });
     }
     let mut inserted: Vec<u32> = Vec::new();
-    let mut own: Option<u32> = None;
     // Ids first, so a ref resolves whatever its row's position.
     let ids: Vec<u32> = effects
         .iter()
@@ -235,9 +278,6 @@ pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> 
             }
             let id = fresh();
             inserted.push(id);
-            if r.table == op.table && op.verb == wire::PUT {
-                own = Some(id);
-            }
             id
         })
         .collect();
@@ -246,9 +286,18 @@ pub fn writes(op: &wire::Op, effects: &[judge::Row], fresh: &mut dyn FnMut() -> 
             out.push(Write::Insert { table: r.table, id });
         }
         for (c, v) in &r.cells {
+            let deferred = schema::table_def(r.table).and_then(|t| t.col(*c)).is_some_and(|c| c.wire == wire::DEFERRED);
             let val = match v {
+                // The rows hold deferred text as the stub BOOT carries: its
+                // length and the first 8 bytes of its SHA-256.
+                EVal::Val(Val::Str(text)) if deferred => {
+                    use sha2::{Digest, Sha256};
+                    let h = Sha256::digest(text.as_bytes());
+                    let mut sha = [0u8; 8];
+                    sha.copy_from_slice(&h[..8]);
+                    Val::Deferred(text.len() as u32, sha)
+                }
                 EVal::Val(v) => v.clone(),
-                EVal::Own => own.map_or(Val::None, Val::U32),
                 EVal::New(k) => inserted.get(*k as usize).map_or(Val::None, |&i| Val::U32(i)),
             };
             out.push(Write::Set { table: r.table, id, col: *c, val });
@@ -278,8 +327,8 @@ pub fn filter(json: &str) -> Filter {
 }
 
 /// Effects as JSON: `[{table, id, cells: {column: value}}]` with names
-/// from the catalog; a value is null, a number, a string, `"own"` (the
-/// op's insert id) or `{"new": k}`.
+/// from the catalog; a value is null, a number, a string or `{"new": k}`
+/// (the id of the k-th insert).
 pub fn effects_json(rows: &[judge::Row]) -> Json {
     let rows: Vec<Json> = rows
         .iter()
@@ -291,7 +340,6 @@ pub fn effects_json(rows: &[judge::Row]) -> Json {
                 .map(|(c, v)| {
                     let name = def.and_then(|d| d.col(*c)).map_or_else(|| c.to_string(), |c| c.name.into());
                     let v = match v {
-                        EVal::Own => json!("own"),
                         EVal::New(k) => json!({"new": k}),
                         EVal::Val(Val::None) => Json::Null,
                         EVal::Val(Val::U32(x)) => json!(x),

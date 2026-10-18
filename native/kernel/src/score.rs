@@ -213,7 +213,7 @@ fn onsite_away(seat: &Seat, loc: &str) -> bool {
 }
 
 /// A pay figure over $200k anywhere in free text: "$210,000", "250k",
-/// "180-240k", "220000", "1.2M". Bare numbers from 200 to 999 read as
+/// "180-240k", "220000", "$1.2M". Bare numbers from 200 to 999 read as
 /// thousands ("$220 base").
 pub fn high_comp(comp: &str) -> bool {
     let b = comp.as_bytes();
@@ -247,10 +247,14 @@ pub fn high_comp(comp: &str) -> bool {
         let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
         let suffix = if i < b.len() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
         let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
+        // Millions are pay only as money ("$1.2M"), not "5M users".
+        let money = comp[..start].trim_end().ends_with(['$', '€', '£']);
+        let plan = v == 401.0 && (suffix == b'k' || comp[i..].starts_with("(k)") || comp[i..].starts_with("(K)"));
         let value = match suffix {
-            b'k' if v == 401.0 => 0.0,
+            _ if plan => 0.0,
             b'k' => v * 1e3,
-            b'm' => v * 1e6,
+            b'm' if money => v * 1e6,
+            b'm' => 0.0,
             _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
             _ if (200.0..1_000.0).contains(&v) => v * 1e3,
             _ => v,
@@ -363,10 +367,10 @@ mod tests {
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "1.2M"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users"] {
             assert!(!high_comp(no), "{no}");
         }
     }

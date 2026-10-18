@@ -33,10 +33,17 @@ use wire::{Blocks, Value};
 pub const ID: u16 = 1;
 
 /// Whether a table's rows are keyed by an `id` column. The other wire
-/// tables (`clock`, `catalog`, `gone`) number their own columns from 1,
-/// so their rows are positional: replaced whole, numbered from 1.
+/// tables (`clock`, `catalog`) number their own columns from 1, so their
+/// rows are positional, numbered from 1.
 fn keyed(table: u16) -> bool {
     schema::table_def(table).is_none_or(|t| t.cols.iter().any(|c| c.id == ID && c.name == "id"))
+}
+
+/// Whether a frame naming a table replaces it whole: every wire table
+/// (`leases`, `clock`, `catalog`) is sent whole, so a row missing from it
+/// is gone.
+fn whole(table: u16) -> bool {
+    schema::table_def(table).is_some_and(|t| t.residency == schema::Residency::Wire) || !keyed(table)
 }
 /// The row revision column.
 pub const REV: u16 = 3;
@@ -259,11 +266,17 @@ impl Table {
         &self.cols
     }
 
-    fn column_mut(&mut self, col: u16, kind: Kind) -> &mut Column {
+    /// The column, created when absent. A frame from the server may
+    /// change a column's kind (`replace`); a local write of another kind
+    /// gets `None` and changes nothing.
+    fn column_mut(&mut self, col: u16, kind: Kind, replace: bool) -> Option<&mut Column> {
         let n = self.ids.len();
         let i = match self.cols.binary_search_by_key(&col, |c| c.id) {
             Ok(i) => {
                 if self.cols[i].data.kind() != kind {
+                    if !replace {
+                        return None;
+                    }
                     self.cols[i].data = Data::new(kind, n);
                 }
                 i
@@ -273,7 +286,7 @@ impl Table {
                 i
             }
         };
-        &mut self.cols[i]
+        Some(&mut self.cols[i])
     }
 
     /// The value at `(id, col)`, `Val::None` when either is absent.
@@ -351,7 +364,11 @@ impl Table {
         let s = self.slot(id)?;
         let old = self.column(col).map_or(Val::None, |c| c.data.get(s));
         match kind_of_val(v) {
-            Some(k) => self.column_mut(col, k).data.set(s, v),
+            Some(k) => {
+                if let Some(c) = self.column_mut(col, k, false) {
+                    c.data.set(s, v);
+                }
+            }
             None => {
                 if let Some(i) = self.cols.iter().position(|c| c.id == col) {
                     self.cols[i].data.set(s, &Val::None);
@@ -501,7 +518,7 @@ impl Rows {
                 _ => return Err(Error::Shape),
             };
             let t = self.table_mut(tid);
-            if (replace || !keyed(tid)) && !replaced.contains(&tid) {
+            if (replace || whole(tid)) && !replaced.contains(&tid) {
                 t.clear();
                 replaced.push(tid);
             }
@@ -511,7 +528,7 @@ impl Rows {
                     return Err(Error::Shape);
                 }
                 let Some(kind) = kind_of_wire(c.ty) else { continue };
-                let col = t.column_mut(c.id, kind);
+                let Some(col) = t.column_mut(c.id, kind, true) else { continue };
                 for (i, &s) in slots.iter().enumerate() {
                     col.data.set(s, &Val::from_wire(c.value(i)));
                 }
@@ -648,14 +665,17 @@ impl Rows {
         self.next_temp
     }
 
-    /// The base rows (pending writes left out) as a BOOT body, for a
-    /// client's cold-start snapshot. `boot` on it restores the same base.
+    /// The account's base rows (pending writes and wire tables left out)
+    /// as a BOOT body, for a client's cold-start snapshot. `boot` on it restores the same base.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut base = self.clone();
         let pending = core::mem::take(&mut base.pending);
         base.unwind(&pending);
         let mut w = wire::BodyWriter::new();
-        for t in base.tables.values() {
+        // Wire tables (leases, clock, catalog) are the session's, not the
+        // account's: the next BOOT brings them fresh.
+        let session = |id: u16| schema::table_def(id).is_some_and(|t| t.residency == schema::Residency::Wire);
+        for t in base.tables.values().filter(|t| !session(t.id)) {
             let n = t.len();
             let mut b = w.block(t.id, n);
             for c in &t.cols {
