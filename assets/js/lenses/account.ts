@@ -58,10 +58,11 @@ const time = (x: unknown): Html => (str(x) === "" ? EMPTY : html`<time datetime=
 
 // ------------------------------------------------------------------ calls
 
-async function load(): Promise<void> {
+/** The overview; `passive` when the lens asks by itself (a watch answered, a reconnect), which the node does not count as the operator's activity. */
+async function load(passive = false): Promise<void> {
   patch({ loading: true })
   try {
-    patch({ overview: await rpc("account.overview"), loading: false, error: "" })
+    patch({ overview: await rpc("account.overview", passive ? { passive: true } : {}), loading: false, error: "" })
   } catch (e) {
     patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
   }
@@ -83,7 +84,7 @@ async function watch(): Promise<void> {
     for (;;) {
       const since = v().overview?.cursor
       const r = await rpc<{ changed?: boolean }>("account.watch", typeof since === "number" ? { since } : {})
-      if (r.changed) await load()
+      if (r.changed) await load(true)
       if (model.address.lens !== "account") return
     }
   } catch {
@@ -548,7 +549,7 @@ const view_: View = {
   act,
   refresh() {
     // After a reconnect (or a write elsewhere) the watch may have ended with the old carrier.
-    if (!watching) void load().then(watch)
+    if (!watching) void load(true).then(watch)
   },
 }
 
