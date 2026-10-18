@@ -470,13 +470,16 @@ defmodule HiremeWeb.Account do
   # code, password, API key or credential at any depth, even a truncated one
   # (a link request's email_hash stays server-side). A matching key goes
   # whole, whatever it holds.
-  @hidden ~r/hash|secret|token|code|password|api_key|credential/i
+  # The lens's allowlist is the real control; this is the server's backstop.
+  # Bare auth, key, pin or seed would strip ordinary fields, so they are not here.
+  @hidden ~r/hash|secret|token|code|password|passwd|api_key|private_key|signing_key|session_key|credential|bearer|cookie|jwt|otp/i
   @coalesced ~w(activity_coalesced revokes_coalesced)
 
-  # A coalesced row's counts are keyed by kind names, not data: they pass as
-  # stored, and the rest of its meta is stripped like any other.
+  # A coalesced row's counts are keyed by kind names, not data, so they pass
+  # by shape: kind => key => integer, and nothing else, whoever wrote the row.
+  # The rest of its meta is stripped like any other.
   defp shown(%{"counts" => counts} = meta, kind) when kind in @coalesced,
-    do: meta |> Map.delete("counts") |> shown() |> Map.put("counts", counts)
+    do: meta |> Map.delete("counts") |> shown() |> Map.put("counts", counted(counts))
 
   defp shown(meta, _kind), do: shown(meta)
 
@@ -485,6 +488,14 @@ defmodule HiremeWeb.Account do
 
   defp shown(list) when is_list(list), do: Enum.map(list, &shown/1)
   defp shown(value), do: value
+
+  defp counted(counts) when is_map(counts) do
+    for {kind, by} <- counts, is_binary(kind) and is_map(by), into: %{} do
+      {kind, for({key, n} <- by, is_binary(key) and is_integer(n), into: %{}, do: {key, n})}
+    end
+  end
+
+  defp counted(_), do: %{}
 
   defp fresh_for(%Session{} = s) do
     if Mfa.fresh?(s) do

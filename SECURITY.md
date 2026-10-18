@@ -269,8 +269,12 @@ did (CIS 8.2, 8.5); a lease the sequencer ends by itself carries no
 address. A
 sign-in link request is recorded by a hash of the address and its domain,
 since the asker may be a stranger; the hash stays on the server, and the
-account lens is never sent a row's meta key naming a hash, secret, token
-or code. Notices go to the account's addresses
+account lens is never sent a row's meta key, at any depth, naming a hash,
+secret, token, code, password or passwd, an API, private, signing or
+session key, a credential, a bearer, a cookie, a JWT or an OTP; the one
+exemption is a coalesced row's counts (kind, key, integer), which pass by
+their shape. The lens's own allowlist of the fields it shows is the real
+control. Notices go to the account's addresses
 through a durable outbox with bounded retries.
 
 Past its budgets an account's activity is not written row by row: the

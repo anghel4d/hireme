@@ -306,12 +306,12 @@ defmodule HiremeWeb.AccountTest do
     trail = File.read!(Path.expand("../../assets/js/lenses/trail.ts", __DIR__))
     [shown] = Regex.run(~r/const SHOWN(.*?)\n\]\)/s, trail, capture: :all_but_first)
 
-    fields =
-      ~r/\["([a-z_]+)", "[^"]*"\]/
-      |> Regex.scan(shown, capture: :all_but_first)
-      |> List.flatten()
-      |> Enum.uniq()
-
+    # Every [field, label] pair literal, however it is spaced or cased; the
+    # names read must be one per pair, so a format the regex misses fails.
+    pairs = Regex.scan(~r/\[\s*"[^"]*"\s*,\s*"[^"]*"\s*\]/, shown)
+    named = Regex.scan(~r/\[\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*,\s*"[^"]*"\s*\]/, shown)
+    assert length(named) == length(pairs) and pairs != []
+    fields = named |> Enum.map(fn [_, f] -> f end) |> Enum.uniq()
     assert "left" in fields
 
     Hireme.Audit.record(:host_trusted, Map.new(fields, &{&1, 1}), %{account_id: s.account_id})
@@ -342,6 +342,37 @@ defmodule HiremeWeb.AccountTest do
     rows = Enum.filter(events, &(&1.kind in lifecycle))
     assert Enum.sort(Enum.map(rows, & &1.kind)) == Enum.sort(lifecycle)
     assert Enum.all?(rows, &(&1.key_id == key.id))
+  end
+
+  test "only a coalesced row's counts are exempt, and only in their shape", %{
+    session: s,
+    ctx: ctx
+  } do
+    revokes = %{"counts" => %{"link_token" => %{"none" => 4}}, "token" => "t"}
+    Hireme.Audit.record(:revokes_coalesced, revokes, %{account_id: s.account_id})
+    # An ordinary row's counts are data like any other, even in a counts shape.
+    plain = %{counts: %{token: 1, link_token: %{a: 1}}, host: "h"}
+    Hireme.Audit.record(:host_trusted, plain, %{account_id: s.account_id})
+
+    odd = %{
+      "counts" => %{"agent_ops" => %{"7" => 3, "x" => "secret", "y" => %{"z" => 1}}, "k" => 5}
+    }
+
+    Hireme.Audit.record(:activity_coalesced, odd, %{account_id: s.account_id})
+
+    {:ok, %{events: security}} = Account.call("account.audit", %{}, ctx)
+
+    {:ok, %{events: activity}} =
+      Account.call("account.audit", %{"view" => "activity", "limit" => 200}, ctx)
+
+    meta = fn events, kind -> Enum.find(events, &(&1.kind == kind)).meta end
+
+    assert meta.(security, "revokes_coalesced") == %{
+             "counts" => %{"link_token" => %{"none" => 4}}
+           }
+
+    assert meta.(security, "host_trusted") == %{"counts" => %{}, "host" => "h"}
+    assert meta.(activity, "activity_coalesced") == %{"counts" => %{"agent_ops" => %{"7" => 3}}}
   end
 
   test "a coalesced row reaches the lens as stored, whatever its counts are keyed by", %{
