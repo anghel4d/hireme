@@ -2,6 +2,7 @@ defmodule HiremeWeb.AccountTest do
   use Hireme.DataCase, async: false
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias Hireme.Audit.Coalescer
   alias HiremeWeb.Account
 
   setup do
@@ -274,13 +275,13 @@ defmodule HiremeWeb.AccountTest do
         email_hash: "0123456789abcdef",
         password: "p",
         api_key: "k",
-        credential: "c",
-        token: "t",
+        token: ["abc"],
         recovery_code: "c",
         secret: "s",
         domain: "example.com",
         nested: %{api_secret: "s", ok: 1},
-        list: [%{token: "t", n: 2}]
+        list: [%{token: "t", n: 2}],
+        credential: %{value: "v"}
       },
       %{account_id: s.account_id}
     )
@@ -350,7 +351,7 @@ defmodule HiremeWeb.AccountTest do
     for _ <- 1..1_005,
         do: Hireme.Audit.record(:agent_ops, %{}, %{account_id: s.account_id, key_id: 3})
 
-    Hireme.Audit.Coalescer.flush(:all)
+    Coalescer.flush(:all)
     # A future kind whose name the strip would match, counted the same way.
     future = %{"from" => "x", "counts" => %{"link_token" => %{"3" => 2}}, "addresses" => []}
     Hireme.Audit.record(:activity_coalesced, future, %{account_id: s.account_id})
