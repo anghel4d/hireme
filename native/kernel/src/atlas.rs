@@ -77,7 +77,8 @@ impl Weights {
     pub fn from_settings(w: [Option<f64>; 7]) -> Weights {
         Weights(w.map(|x| match x {
             None => 1.0,
-            Some(x) if x.is_finite() && x > 0.0 => x,
+            // Bounded so a sum of weights stays finite.
+            Some(x) if x.is_finite() && x > 0.0 => x.min(1e6),
             Some(_) => 0.0,
         }))
     }
@@ -129,6 +130,7 @@ pub struct Fit {
     /// when its languages are unknown.
     pub speaks: Option<bool>,
     pub fit: Option<u8>,
+    pub position: u32,
 }
 
 impl Fit {
@@ -163,12 +165,14 @@ fn ranks(values: &[(usize, f64)]) -> BTreeMap<usize, f64> {
         .collect()
 }
 
-fn holds(list: &str, code: &str) -> bool {
-    text::list(list).any(|c| c.eq_ignore_ascii_case(code))
+/// Whether a place's list names any of `mine` (already lowercased).
+fn names_any(list: &str, mine: &[String]) -> bool {
+    !mine.is_empty() && text::list(list).any(|c| mine.iter().any(|m| m.eq_ignore_ascii_case(c)))
 }
 
 /// Every place's fit, in input order.
-pub fn fit(places: &[Place], me: &Me) -> Vec<Fit> {
+pub fn fit<'a>(places: &[Place<'a>], me: &Me) -> Vec<Fit> {
+    let (citizen, spoken) = (text::codes(me.citizenships), text::codes(me.languages));
     let by_id: BTreeMap<u32, usize> = places.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
     let country = |p: &Place| -> Option<usize> {
         if p.city { p.country_id.and_then(|c| by_id.get(&c).copied()).filter(|&c| !places[c].city) } else { None }
@@ -210,19 +214,21 @@ pub fn fit(places: &[Place], me: &Me) -> Vec<Fit> {
         .enumerate()
         .map(|(i, p)| {
             let c = country(p).map(|c| &places[c]);
-            let iso2 = if p.city { c.and_then(|c| c.iso2).or(p.iso2) } else { p.iso2 };
-            let permit = p.work_permit.or_else(|| c.and_then(|c| c.work_permit));
-            let langs = p.language.or_else(|| c.and_then(|c| c.language));
-            let route = if iso2.is_some_and(|code| holds(me.citizenships, code)) {
+            // The wire's null string is empty; empty inherits like absent.
+            let some = |s: Option<&'a str>| s.filter(|s| !s.trim().is_empty());
+            let iso2 = if p.city { some(c.and_then(|c| c.iso2)).or(some(p.iso2)) } else { some(p.iso2) };
+            let permit = some(p.work_permit).or_else(|| some(c.and_then(|c| c.work_permit)));
+            let langs = some(p.language).or_else(|| some(c.and_then(|c| c.language)));
+            let route = if iso2.is_some_and(|code| citizen.iter().any(|m| m.eq_ignore_ascii_case(code))) {
                 Route::Citizen
-            } else if permit.is_some_and(|l| text::list(me.citizenships).any(|mine| holds(l, mine))) {
+            } else if permit.is_some_and(|l| names_any(l, &citizen)) {
                 Route::Free
             } else if iso2.is_some() || permit.is_some() {
                 Route::Permit
             } else {
                 Route::Unknown
             };
-            let speaks = langs.map(|l| text::list(me.languages).any(|mine| holds(l, mine)));
+            let speaks = langs.map(|l| names_any(l, &spoken));
             let mobility = match route {
                 Route::Citizen => Some(1.0),
                 Route::Free => Some(0.9),
@@ -246,21 +252,20 @@ pub fn fit(places: &[Place], me: &Me) -> Vec<Fit> {
                 }
             }
             let fit = (den > 0.0).then(|| libm::round(100.0 * num / den).clamp(0.0, 100.0) as u8);
-            Fit { id: p.id, route, parts, speaks, fit }
+            Fit { id: p.id, route, parts, speaks, fit, position: p.position }
         })
         .collect()
 }
 
-/// Place ids by fit, best first; unscored last; ties by atlas position.
-pub fn order(places: &[Place], fits: &[Fit]) -> Vec<u32> {
-    let mut ix: Vec<usize> = (0..fits.len()).collect();
-    ix.sort_by(|&a, &b| {
-        let key = |i: usize| (fits[i].fit.map_or(-1, |f| f as i32), places[i].position);
-        let (fa, pa) = key(a);
-        let (fb, pb) = key(b);
-        fb.cmp(&fa).then(pa.cmp(&pb))
+/// Place ids by fit, best first; unscored last; ties by atlas position,
+/// then id.
+pub fn order(fits: &[Fit]) -> Vec<u32> {
+    let mut v: Vec<&Fit> = fits.iter().collect();
+    v.sort_by(|a, b| {
+        let fit = |f: &Fit| f.fit.map_or(-1, |x| x as i32);
+        fit(b).cmp(&fit(a)).then(a.position.cmp(&b.position)).then(a.id.cmp(&b.id))
     });
-    ix.into_iter().map(|i| fits[i].id).collect()
+    v.into_iter().map(|f| f.id).collect()
 }
 
 #[cfg(test)]
@@ -310,7 +315,23 @@ mod tests {
         let econ_only = Me { citizenships: "", languages: "", weights: Weights([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]) };
         let f = fit(&places, &econ_only);
         assert_eq!((f[0].fit, f[1].fit), (Some(0), Some(100)));
-        assert_eq!(order(&places, &f), [2, 1]);
+        assert_eq!(order(&f), [2, 1]);
+    }
+
+    #[test]
+    fn empty_lists_inherit_and_ties_order_by_id() {
+        let mut ps = [
+            country(1, "AA", 10.0, "", "xx"),
+            Place { id: 3, city: true, country_id: Some(1), name: "c", position: 5, work_permit: Some(""), language: Some(" "), ..Place::default() },
+            Place { id: 2, city: true, country_id: Some(1), name: "b", position: 5, ..Place::default() },
+        ];
+        ps[0].work_permit = Some("BB");
+        let me = Me { citizenships: "bb", languages: "xx", weights: Weights::default() };
+        let f = fit(&ps, &me);
+        assert_eq!((f[1].route, f[1].speaks), (Route::Free, Some(true)));
+        assert_eq!(order(&f[1..]), [2, 3]);
+        let huge = Weights::from_settings([Some(1.7e308), Some(1.7e308), None, None, None, None, None]);
+        assert!(fit(&ps, &Me { weights: huge, ..me }).iter().all(|x| x.fit.is_some_and(|v| v <= 100)));
     }
 
     #[test]

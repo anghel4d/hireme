@@ -11,8 +11,9 @@
 //! [`COOLDOWN_DAYS`] from `opened_on`. While it is open and
 //! `rewrites_allowed`, overlays may be written, rewritten and removed;
 //! once rewrites are off (every generation after the first opens that
-//! way) only new overlays may be added, so a later application cannot
-//! reword what an earlier one already sent. When the window has passed,
+//! way) only an overlay on a line no application of the lineage has
+//! overlaid yet may be added, so a later application cannot reword what
+//! an earlier one already sent. When the window has passed,
 //! overlay writes wait until `open_generation` opens the next one, which
 //! is itself refused until the window has passed.
 
@@ -57,7 +58,7 @@ pub enum Phase {
 }
 
 pub fn phase(opened_on: Day, rewrites_allowed: bool, today: Day) -> Phase {
-    if today - opened_on >= COOLDOWN_DAYS {
+    if today as i64 - opened_on as i64 >= COOLDOWN_DAYS as i64 {
         Phase::Ready
     } else if rewrites_allowed {
         Phase::Tailor
@@ -68,7 +69,7 @@ pub fn phase(opened_on: Day, rewrites_allowed: bool, today: Day) -> Phase {
 
 /// Days until `open_generation` is allowed; 0 when it is.
 pub fn days_to_open(opened_on: Day, today: Day) -> Day {
-    (COOLDOWN_DAYS - (today - opened_on)).max(0)
+    (COOLDOWN_DAYS as i64 - (today as i64 - opened_on as i64)).clamp(0, COOLDOWN_DAYS as i64) as Day
 }
 
 /// Why an overlay write is refused by its lineage.
@@ -80,8 +81,9 @@ pub enum Refusal {
     Additive,
 }
 
-/// Whether a lineage in `phase` takes an overlay write that `creates` a
-/// new overlay (else it rewrites or removes one).
+/// Whether a lineage in `phase` takes an overlay write that `creates` an
+/// overlay on a line the lineage has not overlaid yet (else it rewrites,
+/// removes, or overlays a line again).
 pub fn check(phase: Phase, creates: bool) -> Result<(), Refusal> {
     match phase {
         Phase::Ready => Err(Refusal::Cooldown),
@@ -113,11 +115,10 @@ impl Theme {
         };
         let text = |k: &str| m.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         let pick = |k: &str, set: [&'static str; 3]| m.get(k).and_then(|v| v.as_str()).and_then(|s| set.into_iter().find(|x| *x == s));
-        let targets = m
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|t| t.as_str()).map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect())
-            .unwrap_or_default();
+        let mut targets = Vec::new();
+        for t in m.get("targets").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|t| t.as_str()) {
+            push_target(&mut targets, t);
+        }
         Theme {
             lead: text("lead"),
             lead_reason: text("lead_reason"),
@@ -131,10 +132,8 @@ impl Theme {
     /// are the union, `self`'s first.
     pub fn over(self, base: Theme) -> Theme {
         let mut targets = self.targets;
-        for t in base.targets {
-            if !targets.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
-                targets.push(t);
-            }
+        for t in &base.targets {
+            push_target(&mut targets, t);
         }
         Theme {
             lead: self.lead.or(base.lead),
@@ -151,6 +150,20 @@ impl Theme {
             "accent": self.accent.unwrap_or("ink"), "density": self.density.unwrap_or("cv"),
             "targets": self.targets,
         })
+    }
+}
+
+/// Adds a theme target: trimmed, at most [`keywords::MAX_TARGET_LEN`]
+/// bytes, no case-folded duplicate, at most [`keywords::MAX_TARGETS`].
+fn push_target(targets: &mut Vec<String>, t: &str) {
+    use crate::keywords::{MAX_TARGETS, MAX_TARGET_LEN};
+    let t = t.trim();
+    if t.is_empty() || t.len() > MAX_TARGET_LEN || targets.len() >= MAX_TARGETS {
+        return;
+    }
+    let folded = crate::text::fold(t);
+    if !targets.iter().any(|x| crate::text::fold(x) == folded) {
+        targets.push(String::from(t));
     }
 }
 
@@ -171,6 +184,8 @@ pub struct Item<'a> {
 /// One application's overlay on one item.
 #[derive(Clone, Debug)]
 pub struct Overlay<'a> {
+    /// The overlay row's id; the lowest wins when two name one item.
+    pub id: u32,
     pub item_id: u32,
     pub mode: Mode,
     pub title: Option<&'a str>,
@@ -198,7 +213,7 @@ pub struct Line<'a> {
 /// in and dropped lines left out. An overlay naming an item that does not
 /// exist is ignored.
 pub fn compose<'a>(profile_id: Option<u32>, items: &[Item<'a>], overlays: &[Overlay<'a>]) -> Vec<Line<'a>> {
-    let overlay = |id: u32| overlays.iter().find(|o| o.item_id == id);
+    let overlay = |id: u32| overlays.iter().filter(|o| o.item_id == id).min_by_key(|o| o.id);
     let mut out: Vec<(u8, u32, u32, Line<'a>)> = Vec::new();
     for it in items {
         let own = it.profile_id.is_none() || it.profile_id == profile_id;
@@ -216,7 +231,7 @@ pub fn compose<'a>(profile_id: Option<u32>, items: &[Item<'a>], overlays: &[Over
             kind: it.kind,
             key: it.key,
             title: o.and_then(|o| o.title).filter(|t| !t.trim().is_empty()).unwrap_or(it.title),
-            body: o.and_then(|o| o.body).or(it.body),
+            body: o.and_then(|o| o.body).filter(|b| !b.trim().is_empty()).or(it.body),
             org: it.org,
             span: it.span,
             mode: o.map(|o| o.mode),
@@ -262,10 +277,10 @@ mod tests {
     fn overlays_shape_the_profile() {
         let items = [item(1, None, 2, "shared"), item(2, Some(7), 1, "mine"), item(3, Some(8), 0, "theirs"), item(4, Some(7), 3, "old")];
         let overlays = [
-            Overlay { item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits") },
-            Overlay { item_id: 4, mode: Mode::Drop, title: None, body: None, reason: None },
-            Overlay { item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b"), reason: None },
-            Overlay { item_id: 99, mode: Mode::Add, title: None, body: None, reason: None },
+            Overlay { id: 1, item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits") },
+            Overlay { id: 2, item_id: 4, mode: Mode::Drop, title: None, body: None, reason: None },
+            Overlay { id: 3, item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b"), reason: None },
+            Overlay { id: 4, item_id: 99, mode: Mode::Add, title: None, body: None, reason: None },
         ];
         let cv = compose(Some(7), &items, &overlays);
         let titles: Vec<&str> = cv.iter().map(|l| l.title).collect();

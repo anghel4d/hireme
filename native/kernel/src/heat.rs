@@ -82,18 +82,25 @@ impl Default for Config {
 
 impl Config {
     /// The defaults with every recognized key of a JSON object applied.
-    /// A key that is unknown, not a number, or not positive and finite is
-    /// ignored, so a bad setting can loosen nothing by accident.
+    /// A key that is unknown, not a finite number, or out of its range is
+    /// ignored (the two penalties may be 0, everything else must be
+    /// positive), and a cool ratio above the hot ratio drops both, so a bad
+    /// setting can loosen nothing by accident.
     pub fn from_json(json: Option<&str>) -> Config {
         let mut c = Config::default();
         let Some(Ok(serde_json::Value::Object(m))) = json.map(serde_json::from_str::<serde_json::Value>) else {
             return c;
         };
         for (k, v) in m.iter() {
-            let Some(x) = v.as_f64().filter(|x| x.is_finite() && *x > 0.0) else { continue };
+            let zero_ok = matches!(k.as_str(), "same_department_penalty" | "clone_penalty");
+            let Some(x) = v.as_f64().filter(|x| x.is_finite() && (*x > 0.0 || (zero_ok && *x == 0.0))) else { continue };
             if let Some(slot) = c.field(k) {
                 *slot = x;
             }
+        }
+        if c.cool_ratio > c.hot_ratio {
+            let d = Config::default();
+            (c.cool_ratio, c.hot_ratio) = (d.cool_ratio, d.hot_ratio);
         }
         c
     }
@@ -478,12 +485,16 @@ impl Index {
         self.today
     }
 
-    /// The members of `g` other than `skip`, with their load `dt` days on
-    /// at half-life `k` (today's loads when `dt` is 0), in id order.
-    fn members<'g>(&'g self, g: &'g Group, k: usize, skip: u32, dt: i64) -> impl Iterator<Item = (&'g Seat, f64)> + 'g {
-        g.members.iter().filter(move |(m, _)| **m != skip).filter_map(move |(m, l)| {
-            let s = self.seats.get(m)?;
-            Some((s, if dt == 0 { *l } else { loads_at(s.age(self.today) + dt, &self.cfg)[k] }))
+    /// The loads of `g`'s members other than `skip`, `dt` days on at
+    /// half-life `k`, in id order. Later loads are today's times one decay
+    /// factor, so a probe costs one `pow` per half-life, not per member.
+    fn loads<'g>(&'g self, g: &'g Group, k: usize, skip: u32, dt: i64) -> impl Iterator<Item = (u32, f64)> + 'g {
+        let half = [self.cfg.company_half_life, self.cfg.ats_vendor_half_life, self.cfg.ats_tenant_half_life][k];
+        let f = if dt == 0 { 1.0 } else { libm::pow(0.5, dt as f64 / half) };
+        let floor = self.cfg.load_floor;
+        g.members.iter().filter(move |(m, _)| **m != skip).map(move |(m, l)| {
+            let x = l * f;
+            (*m, if dt == 0 || x >= floor { x } else { 0.0 })
         })
     }
 
@@ -495,7 +506,7 @@ impl Index {
             Some(g) if dt == 0 && !g.members.contains_key(&seat.id) => g.total,
             Some(g) => {
                 let mut s = 0.0;
-                for (_, l) in self.members(g, k, seat.id, dt) {
+                for (_, l) in self.loads(g, k, seat.id, dt) {
                     s += l;
                 }
                 s
@@ -532,7 +543,7 @@ fn check(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config, dt: i64) -> Chec
     // Kept seats were admitted in this pass: fresh load, and never one
     // the index already counts.
     let kept: Vec<&Seat> = kept.iter().copied().filter(|p| p.id != seat.id && !ix.contains(p.id)).collect();
-    let fresh = loads_at(dt, cfg);
+    let fresh = if kept.is_empty() { [0.0; 3] } else { loads_at(dt, cfg) };
     let in_group = |same: &dyn Fn(&Seat) -> bool, k: usize| -> Vec<(&Seat, f64)> {
         kept.iter().filter(|p| same(p)).map(|p| (*p, fresh[k])).collect()
     };
@@ -542,14 +553,20 @@ fn check(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config, dt: i64) -> Chec
     let company_load = if has_key { ix.load(company_group, COMPANY, seat, &kept_company, dt) } else { 0.0 };
     // Penalties come from live peers only: a peer under the floor no
     // longer counts for anything.
-    let live: Vec<&Seat> = company_group
-        .map(|g| ix.members(g, COMPANY, seat.id, dt).filter(|(_, l)| *l > 0.0).map(|(s, _)| s).collect())
-        .unwrap_or_default();
-    let live = live.into_iter().chain(kept_company.iter().filter(|(_, l)| *l > 0.0).map(|(s, _)| *s));
     let (mut dept, mut fam) = (false, false);
-    for p in live {
-        dept |= p.department == seat.department;
-        fam |= p.family == seat.family;
+    if let Some(g) = company_group {
+        for (m, l) in ix.loads(g, COMPANY, seat.id, dt) {
+            if let Some(p) = ix.seats.get(&m).filter(|_| l > 0.0) {
+                dept |= p.department == seat.department;
+                fam |= p.family == seat.family;
+            }
+        }
+    }
+    for (p, l) in &kept_company {
+        if *l > 0.0 {
+            dept |= p.department == seat.department;
+            fam |= p.family == seat.family;
+        }
     }
     let increment = cfg.application_load
         + if dept { cfg.same_department_penalty } else { 0.0 }
@@ -837,6 +854,8 @@ mod tests {
         assert_eq!(c.mega_cap, 4.0);
         assert_eq!(c.mid_cap, 1.5);
         assert_eq!(Config::from_json(Some("[")), Config::default());
+        let z = Config::from_json(Some(r#"{"clone_penalty": 0, "load_floor": 0, "cool_ratio": 0.9}"#));
+        assert_eq!((z.clone_penalty, z.load_floor, z.cool_ratio, z.hot_ratio), (0.0, 0.05, 0.5, 0.8));
         assert_eq!(Config::from_json(None), Config::default());
     }
 }

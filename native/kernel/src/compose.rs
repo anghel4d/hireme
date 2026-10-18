@@ -128,9 +128,11 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         });
 
     let card = board.card(id).map(|c| {
+        let mut heat = c.verdict.to_json();
+        heat["cooldown_days"] = json!(board.cooldown(id));
         json!({
             "score_100": c.score, "stored": c.stored, "band": c.band.name(), "class": c.class.name(),
-            "suggestion": c.suggestion.to_json(), "heat": c.verdict.to_json(),
+            "suggestion": c.suggestion.to_json(), "heat": heat,
         })
     });
 
@@ -178,6 +180,7 @@ pub fn cv_of<'r>(rows: &'r Rows, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, T
                 .filter(|&&x| o.u32(x, O::APPLICATION_ID) == Some(id))
                 .filter_map(|&x| {
                     Some(Overlay {
+                        id: x,
                         item_id: o.u32(x, O::ITEM_ID)?,
                         mode: cv::Mode::from_u8(o.u32(x, O::MODE)? as u8)?,
                         title: o.str(x, O::TITLE),
@@ -302,7 +305,7 @@ pub fn atlas_doc(rows: &Rows, preset: Option<&str>) -> Json {
     let ps = places(rows);
     let me = me(rows, preset);
     let fits = atlas::fit(&ps, &me);
-    let order = atlas::order(&ps, &fits);
+    let order = atlas::order(&fits);
     let by_id: alloc::collections::BTreeMap<u32, usize> = ps.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
     let places: Vec<Json> = order
         .iter()

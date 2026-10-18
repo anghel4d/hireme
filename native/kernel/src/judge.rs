@@ -272,8 +272,8 @@ fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
 fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>) -> Result<(), Refusal> {
     use col::cv_overlays as O;
     let existing = rows.table(table::CV_OVERLAYS);
-    let creates = op.target == 0;
-    if !creates && !existing.is_some_and(|t| t.has(op.target)) {
+    let inserting = op.target == 0;
+    if !inserting && !existing.is_some_and(|t| t.has(op.target)) {
         return Err(Refusal { code: refusal::NOT_FOUND, data: json!({"table": "cv_overlays", "id": op.target}) });
     }
     let app = match row.get(O::APPLICATION_ID) {
@@ -291,6 +291,18 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
             let opened = t.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
             let rewrites = t.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
             let generation = t.u32(lid, col::cv_lineages::GENERATION).unwrap_or(1);
+            // Creating means a line no application of the lineage has
+            // overlaid yet; overlaying it again is a rewrite.
+            let item = match row.get(O::ITEM_ID) {
+                Some(EVal::Val(Val::U32(i))) => Some(*i),
+                _ => existing.and_then(|t| t.u32(op.target, O::ITEM_ID)),
+            };
+            let told = existing.is_some_and(|t| {
+                t.ids().iter().any(|&o| {
+                    o != op.target && t.u32(o, O::LINEAGE_ID) == Some(lid) && t.u32(o, O::ITEM_ID) == item
+                })
+            });
+            let creates = inserting && !told;
             match cv::check(cv::phase(opened, rewrites, ctx.today), creates) {
                 Ok(()) => {}
                 Err(cv::Refusal::Cooldown) => {
@@ -304,7 +316,7 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
                 }
             }
             row.set(O::LINEAGE_ID, u(lid));
-            if creates {
+            if inserting {
                 row.set(O::GENERATION, u(generation));
             }
         }
@@ -321,7 +333,7 @@ fn overlay(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
             });
             // The lineage row is written first: insert 0.
             row.set(O::LINEAGE_ID, EVal::New(0));
-            if creates {
+            if inserting {
                 row.set(O::GENERATION, u(1));
             }
         }

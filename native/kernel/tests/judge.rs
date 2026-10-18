@@ -206,6 +206,12 @@ fn lineage_windows() {
     let existing = k.rows().table(table::CV_OVERLAYS).unwrap().ids()[0];
     assert_eq!(code(k.judge(&overlay(1, existing), &ctx())), refusal::LINEAGE_BUSY);
     assert_eq!(code(k.judge(&op(wire::DROP, table::CV_OVERLAYS, existing, |_| {}), &ctx())), refusal::LINEAGE_BUSY);
+    // Another application of the same company may not overlay that line again.
+    let mut other = app(2, S::DRAFT_READY, "Acme");
+    other.corp = Some(40);
+    let mut k2 = kernel(&[{ let mut a = app(1, S::DRAFT_READY, "Acme"); a.corp = Some(40); a }, other], &[], &[(7, 40, TODAY - 10, false)]);
+    k2.predict(&overlay(1, 0), &ctx()).unwrap();
+    assert_eq!(code(k2.judge(&overlay(2, 0), &ctx())), refusal::LINEAGE_BUSY);
     // Too early for the next generation.
     let open = op(wire::COMMAND, command::OPEN_GENERATION, 0, |o| {
         o.u32(param::open_generation::CORPORATION_ID, 40);

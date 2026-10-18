@@ -46,13 +46,16 @@ pub fn gym(reps: impl IntoIterator<Item = (Day, RepOutcome)>, target: Option<u32
         }
     }
     let on = |d: Day| by_day.get(&d).copied().unwrap_or(0);
-    let mut day = if on(today) > 0 { today } else { today - 1 };
+    let mut day = if on(today) > 0 { today } else { today.saturating_sub(1) };
     let mut streak = 0;
     while on(day) > 0 {
         streak += 1;
-        day -= 1;
+        day = match day.checked_sub(1) {
+            Some(d) => d,
+            None => break,
+        };
     }
-    let week: u32 = by_day.range(today - 6..=today).map(|(_, n)| n).sum();
+    let week: u32 = by_day.range(today.saturating_sub(6)..=today).map(|(_, n)| n).sum();
     let target = target.filter(|t| *t > 0);
     Gym {
         today: on(today),
@@ -116,7 +119,7 @@ pub fn net(entries: impl IntoIterator<Item = (NetKind, Option<Day>)>, today: Day
         let k = kind as usize;
         n.total[k] += 1;
         match shipped {
-            Some(d) if d <= today && d > today - 7 => n.week[k] += 1,
+            Some(d) if d <= today && d > today.saturating_sub(7) => n.week[k] += 1,
             Some(_) => {}
             None => n.unshipped += 1,
         }

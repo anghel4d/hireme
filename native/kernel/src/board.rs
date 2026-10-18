@@ -112,6 +112,8 @@ pub struct Board {
     /// The governor's index of hot seats, for the day and config it was
     /// built with, kept current as applications move.
     governor: Option<(Day, heat::Config, heat::Index)>,
+    /// The settings' citizenships, parsed once per settings change.
+    citizens: Option<Vec<String>>,
 }
 
 fn day(t: &Table, id: u32, c: u16) -> Option<Day> {
@@ -126,7 +128,7 @@ pub fn settings(rows: &Rows) -> Option<(&Table, u32)> {
 
 /// Whether a place is "home": in a country the operator is a citizen of,
 /// read from the atlas projection (a city through its country).
-fn home_place(rows: &Rows, citizenships: &str, place: u32) -> Option<bool> {
+fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> {
     let at = rows.table(table::ATLAS)?;
     if !at.has(place) {
         return None;
@@ -135,7 +137,7 @@ fn home_place(rows: &Rows, citizenships: &str, place: u32) -> Option<bool> {
         let country = at.u32(place, col::atlas::COUNTRY_ID)?;
         at.str(country, col::atlas::ISO2)
     })?;
-    Some(text::list(citizenships).any(|c| c.eq_ignore_ascii_case(iso2)))
+    Some(citizenships.iter().any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
 /// Whether an application row was ever submitted.
@@ -165,9 +167,14 @@ pub fn seat(t: &Table, id: u32) -> Option<Seat> {
     }))
 }
 
-/// The Life-EV suggestion for one application row.
-pub fn suggestion(rows: &Rows, t: &Table, id: u32) -> Suggestion {
-    let citizenships = settings(rows).and_then(|(s, sid)| s.str(sid, col::settings::CITIZENSHIPS)).unwrap_or("");
+/// The operator's citizenships from the settings row, read once.
+pub fn citizenships(rows: &Rows) -> Vec<String> {
+    text::codes(settings(rows).and_then(|(s, sid)| s.str(sid, col::settings::CITIZENSHIPS)).unwrap_or(""))
+}
+
+/// The Life-EV suggestion for one application row; `citizenships` is
+/// [`citizenships`].
+pub fn suggestion(rows: &Rows, citizenships: &[String], t: &Table, id: u32) -> Suggestion {
     let mode = t.u32(id, A::WORK_MODE);
     let remote = mode == Some(enums::work_mode::REMOTE as u32);
     let home = t.u32(id, A::PLACE_ID).and_then(|p| home_place(rows, citizenships, p));
@@ -196,6 +203,7 @@ impl Board {
     pub fn forget(&mut self, moved: &Moved, rows: &Rows) {
         if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
             self.cache.clear();
+            self.citizens = None;
             self.governor = None;
             return;
         }
@@ -248,7 +256,8 @@ impl Board {
             }
             let no = t.u32(id, A::NO).unwrap_or(0);
             search.push_str(&alloc::format!("#{no}"));
-            let suggestion = suggestion(rows, t, id);
+            let citizens = self.citizens.get_or_insert_with(|| citizenships(rows));
+            let suggestion = suggestion(rows, citizens, t, id);
             let stored = t.u32(id, A::SCORE_100).map(|s| s.min(100) as u8);
             let mut seat = seat;
             seat.score = stored.unwrap_or(suggestion.score);
@@ -303,6 +312,13 @@ impl Board {
         for (i, c) in self.cards.iter().enumerate() {
             self.at.insert(c.id, i);
         }
+    }
+
+    /// Days until a blocked card's move would fit (`heat::cooldown`), as
+    /// of the last derive; `Some(0)` when it fits now.
+    pub fn cooldown(&self, id: u32) -> Option<u32> {
+        let (_, cfg, ix) = self.governor.as_ref()?;
+        heat::cooldown(ix, &self.cache.get(&id)?.seat, &[], cfg)
     }
 
     pub fn card(&self, id: u32) -> Option<&Card> {
