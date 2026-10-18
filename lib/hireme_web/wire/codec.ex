@@ -96,7 +96,8 @@ defmodule HiremeWeb.Wire.Codec do
     cond do
       len < @header or rem(len, 8) != 0 or len > max -> {:error, :len}
       byte_size(buf) < len -> :more
-      true -> {:ok, binary_part(buf, 0, len), binary_part(buf, len, byte_size(buf) - len)}
+      # Not `true ->`: Dialyzer reads a literal-true tail as a false branch it cannot match.
+      :else -> {:ok, binary_part(buf, 0, len), binary_part(buf, len, byte_size(buf) - len)}
     end
   end
 
@@ -243,7 +244,9 @@ defmodule HiremeWeb.Wire.Codec do
   def acks(rev, acks) do
     frame(:ACK, rev, [
       <<length(acks)::little-32, 0::32>>
-      | Enum.map(acks, &<<&1.op_id::little-64, &1.rev::little-64, &1.id::little-32, 0::32>>)
+      | Enum.map(acks, fn %{op_id: op_id, rev: rev, id: id} ->
+          <<op_id::little-64, rev::little-64, id::little-32, 0::32>>
+        end)
     ])
   end
 
@@ -251,7 +254,9 @@ defmodule HiremeWeb.Wire.Codec do
   def nacks(rev, nacks) do
     frame(:NACK, rev, [
       <<length(nacks)::little-32, 0::32>>
-      | Enum.map(nacks, &[<<&1.op_id::little-64, &1.code::little-16, 0::48>>, put_field(&1.data)])
+      | Enum.map(nacks, fn %{op_id: op_id, code: code, data: data} ->
+          [<<op_id::little-64, code::little-16, 0::48>>, put_field(data)]
+        end)
     ])
   end
 
@@ -342,7 +347,7 @@ defmodule HiremeWeb.Wire.Codec do
     if (flags &&& @expect_rev) == 0 and expect != 0 do
       :error
     else
-      case cells(rest, ncols, [], MapSet.new()) do
+      case cells(rest, ncols, [], %{}) do
         {:ok, cells, more} ->
           raw = binary_part(bin, 0, byte_size(bin) - byte_size(more))
 
@@ -372,11 +377,13 @@ defmodule HiremeWeb.Wire.Codec do
   defp cells(<<col::little-16, ty::8, 0::8, len::little-32, rest::binary>>, n, acc, seen) do
     p = pad8(8 + len) - 8 - len
 
-    with false <- MapSet.member?(seen, col),
+    # The columns seen so far, as a plain map (a MapSet's opaque type does
+    # not survive this recursion for Dialyzer).
+    with false <- Map.has_key?(seen, col),
          <<v::binary-size(^len), pad::binary-size(^p), more::binary>> <- rest,
          true <- zeros?(pad),
          {:ok, value} <- cell_value(ty, v) do
-      cells(more, n - 1, [{col, ty, value} | acc], MapSet.put(seen, col))
+      cells(more, n - 1, [{col, ty, value} | acc], Map.put(seen, col, true))
     else
       _ -> :error
     end
@@ -483,7 +490,11 @@ defmodule HiremeWeb.Wire.Codec do
 
   # A JSON integer is an i64: a million-digit one decodes fast but costs
   # seconds to encode again under the node's single write lock.
-  defp bounded?(i) when is_integer(i), do: i in -0x8000_0000_0000_0000..0x7FFF_FFFF_FFFF_FFFF
+  # Comparisons, not `in`: `in` repeats is_integer/1, which the guard has
+  # settled, and Dialyzer flags the branch it can never take.
+  defp bounded?(i) when is_integer(i),
+    do: i >= -0x8000_0000_0000_0000 and i <= 0x7FFF_FFFF_FFFF_FFFF
+
   defp bounded?(l) when is_list(l), do: Enum.all?(l, &bounded?/1)
   defp bounded?(m) when is_map(m), do: Enum.all?(m, fn {_, v} -> bounded?(v) end)
   defp bounded?(_), do: true
@@ -512,7 +523,7 @@ defmodule HiremeWeb.Wire.Codec do
   """
   def day_to_wire(%Date{} = d) do
     n = Date.to_gregorian_days(d)
-    if n in 0..Schema.day_max(), do: n
+    if n >= 0 and n <= Schema.day_max(), do: n
   end
 
   @doc "A wire `day` as a date; nil outside 0..`Schema.day_max/0`."
@@ -634,6 +645,7 @@ defmodule HiremeWeb.Wire.Codec do
     |> Enum.map(fn {table_id, ids} -> block(table_id, length(ids), [{@gone, @t_u32, ids}]) end)
   end
 
-  defp pad8(n), do: n + 7 &&& bnot(7)
+  # Arithmetic, not a bit mask, so the type checker sees a non-negative size.
+  defp pad8(n), do: n + rem(8 - rem(n, 8), 8)
   defp pad(bin), do: <<bin::binary, 0::size((pad8(byte_size(bin)) - byte_size(bin)) * 8)>>
 end

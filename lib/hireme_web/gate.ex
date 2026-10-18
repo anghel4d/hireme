@@ -461,14 +461,16 @@ defmodule HiremeWeb.Gate do
   end
 
   defp close(c, code, reason) do
-    _ = :gen_tcp.send(c.socket, [<<@close, code::32>> | reason])
+    _ = :gen_tcp.send(c.socket, [<<@close, code::32>>, reason])
     :gen_tcp.close(c.socket)
   end
 
-  defp close_code(reason) when reason in [:normal, :shutdown], do: @close_normal
+  # A Session stops with a BYE (it told the client why: a normal close, as
+  # the WebSocket carrier's 1000) or for a fault of the carrier's own (an
+  # atom: carrier_timeout, hello_deadline, internal; or {:protocol, _}).
+  defp close_code({:bye, _}), do: @close_normal
   defp close_code(_), do: @close_error
 
   defp close_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp close_reason({kind, _}) when is_atom(kind), do: Atom.to_string(kind)
-  defp close_reason(_), do: "closed"
 end
