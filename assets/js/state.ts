@@ -76,6 +76,8 @@ export interface FocusView {
   /** The prose field open for editing, or "". */
   edit: string
   error: string
+  /** Deferred text read so far, by `table:id:column:sha`: a changed text has a new sha, so a stale entry is never shown. */
+  texts: Map<string, string>
 }
 
 /** The outreach lens: contacts, and the selected one's threads. */
@@ -168,7 +170,7 @@ export const model: Model = {
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
   deskLimit: 120,
-  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "" },
+  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "", texts: new Map() },
   outreach: { key: "", contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 

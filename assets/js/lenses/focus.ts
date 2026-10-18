@@ -31,6 +31,43 @@ const id = (): number => lookup("applications", "no", model.address.sub)
 
 const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
+/**
+ * A text column as the kernel's document holds it: inline, or deferred as a
+ * `{length, sha}` stub whose bytes come over RPC `text` once, on demand.
+ * Answers the text, null while it is on its way, or "" when there is none.
+ */
+const reading = new Set<string>()
+
+function textOf(table: string, rowId: number, column: string, v_: unknown): string | null {
+  if (v_ === null || v_ === undefined) return ""
+  if (typeof v_ === "string") return v_
+  const stub = v_ as { length?: number; sha?: string }
+  if (!stub.length) return ""
+  const key = `${table}:${rowId}:${column}:${stub.sha ?? ""}`
+  const have = v().texts.get(key)
+  if (have !== undefined) return have
+  if (!reading.has(key)) {
+    reading.add(key)
+    void readAll(table, rowId, column)
+      .then((t) => patch({ texts: new Map(v().texts).set(key, t) }))
+      .catch(failed)
+      .finally(() => reading.delete(key))
+  }
+  return null
+}
+
+/** Every chunk of one deferred text (prose is small; a listing has its own paged reader). */
+async function readAll(table: string, rowId: number, column: string): Promise<string> {
+  let out = ""
+  let offset = 0
+  for (;;) {
+    const r = await rpc<{ text: string; total: number }>("text", { table, id: rowId, column, offset, length: 262_144 })
+    out += r.text
+    offset += new TextEncoder().encode(r.text).byteLength
+    if (r.text === "" || offset >= r.total) return out
+  }
+}
+
 function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
@@ -105,12 +142,17 @@ function listing(a: Row, appId: number): Html {
 }
 
 function prose(a: Row, appId: number): Html {
-  return html`${PROSE.map((f) => v().edit === f
-    ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-key="p-${f}">
-        <h2>${f.replace(/_raw$/, "").replace(/_/g, " ")}</h2><textarea name="value" rows="10">${str(a[f])}</textarea>
-        <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
-    : html`<section class="card" data-key="p-${f}"><h2>${f.replace(/_raw$/, "").replace(/_/g, " ")} <button type="button" class="ghost" data-act="edit" data-field="${f}">Edit</button></h2>
-        ${a[f] ? html`<p class="notes">${str(a[f])}</p>` : html`<p class="hint">Empty.</p>`}</section>`)}`
+  return html`${PROSE.map((f) => {
+    const t = textOf("applications", appId, f, a[f])
+    const title = f.replace(/_raw$/, "").replace(/_/g, " ")
+    // An edit starts from the whole text, so the form opens only once it has arrived.
+    return v().edit === f && t !== null
+      ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-rev="${str(a.rev)}" data-key="p-${f}">
+          <h2>${title}</h2><textarea name="value" rows="10">${t}</textarea>
+          <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
+      : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}"${flag("disabled", t === null)}>Edit</button></h2>
+          ${t === null ? html`<p class="hint">Loading…</p>` : t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
+  })}`
 }
 
 function around(): Html {
@@ -131,7 +173,7 @@ function events(d: Doc, appId: number): Html {
   return html`<section class="card" data-key="events"><h2>Events</h2>
     <form class="row" data-submit="note" data-act="note" data-id="${appId}" data-stage="${stage}"><input name="body" placeholder="Add a note to the history" aria-label="Note" required>
       <button>Add</button></form>
-    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${str(e.body)}
+    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf("events", Number(e.id), "body", e.body) ?? "…"}
       <span class="muted">${str(e.actor)}${e.key_id ? ` · key ${str(e.key_id)}` : ""}</span></li>`)}</ol></section>`
 }
 
@@ -195,7 +237,8 @@ function act(name: string, el: HTMLElement): void {
     case "save-prose": {
       const f = form(el)
       const field = el.dataset.field ?? ""
-      return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId })
+      // The edit was made against the row's rev when the form opened; a write since then is refused, not overwritten.
+      return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId, expectRev: Number(el.dataset.rev) })
         .then(() => patch({ edit: "" }))
         .catch(failed)
     }
