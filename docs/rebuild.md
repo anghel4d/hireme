@@ -1,14 +1,8 @@
-# Rebuild, agreed
-
-Two whole-application designs, written independently by **opus-shannon**
-and **whalechan**, converged into this one document.
+# Rebuild
 
 The nuke is the premise. A replaced file is deleted and its replacement is
 written as if the old one never existed. No compatibility paths, no dual
 readers, no "keep this until phase 3". The cutover commit is the nuke.
-
-It supersedes the earlier data-model round (fat world rows, leases, key
-masks, the MCP); the operator's original ask is quoted in full below.
 
 ## The operator's mandate
 
@@ -16,7 +10,7 @@ masks, the MCP); the operator's original ask is quoted in full below.
 
 > You should both design the whole, than converge, is the unique thought I had just now.
 
-The original ask, verbatim, still the product truth:
+The original ask, verbatim, the product truth:
 
 > Let's get creative and design an ideal system. Right now, the MCP allows reads in a very narrow sense I am a little unhappy with. MCPs cannot yet write in any useful sense. What I need is that a connected AI agent should be given a full duplex (r/w) channel when it gets a "lease", and that it should be able to add new data. In this system, that being hireme, we care about it like this:
 >
@@ -39,7 +33,7 @@ The original ask, verbatim, still the product truth:
 
 It repeals every decision made only to avoid churn. Names are re-chosen:
 
-| v1 / first-round name | Rebuild | Why |
+| v1 name | Rebuild | Why |
 | --- | --- | --- |
 | `job_apps` | `applications` | it is an application |
 | `listing` | `listing_raw` | the name says unparsed |
