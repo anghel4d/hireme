@@ -28,10 +28,18 @@ function save(set: Record<string, Input>, form?: HTMLFormElement): void {
   void put("settings", set, id === 0 ? {} : { id }).then(() => form && resetIfUnchanged(form, before)).catch(failed)
 }
 
+/** What a route means for you, from your citizenships and the place's work-permit list (kernel atlas.rs). */
+const ROUTE: Record<string, [string, string]> = {
+  citizen: ["citizen", "You hold this country's citizenship"],
+  free: ["no permit needed", "One of your citizenships needs no work permit here"],
+  permit: ["needs a permit", "None of your citizenships is on this place's no-permit list"],
+  unknown: ["visa unknown", "No citizenship or work-permit figures for this place yet"],
+}
+
 const scale = (xs: (number | null)[]): number => (xs.some((x) => x !== null && x > 1) ? 100 : 1)
 
 function meter(x: number | null, max: number): Html {
-  if (x === null) return html`<span class="muted">unscored</span>`
+  if (x === null) return html`<span class="muted" title="No figure for this place yet">—</span>`
   return html`<meter min="0" max="${max}" value="${x}" title="${x.toFixed(2)}"></meter>`
 }
 
@@ -57,8 +65,8 @@ function view(): Html {
           ${Object.keys(d.presets).map((p) => html`<option${flag("selected", p === preset)}>${p}</option>`)}</select></label>
         ${preset !== "" ? html`<button type="button" data-act="adopt" data-preset="${preset}">Use ${preset} as mine</button>` : EMPTY}
       </div>
-      ${preset === "" ? html`<form class="weights" data-submit="weights" data-act="weights">${d.parts.map((p, i) => html`<label>${p}
-          <input type="range" name="w_${p}" min="0" max="5" step="0.5" value="${String(d.weights[i] ?? 1)}"></label>`)}
+      ${preset === "" ? html`<form class="weights" data-submit="weights" data-act="weights">${d.parts.map((p, i) => html`<label>${p} <output>${String(d.weights[i] ?? 1)}</output>
+          <input type="range" name="w_${p}" min="0" max="5" step="0.5" value="${String(d.weights[i] ?? 1)}" data-act="weight" data-on="input"></label>`)}
           <button>Save weights</button></form>` : html`<p class="muted">${d.parts.map((p, i) => `${p} ${d.presets[preset]?.[i] ?? 1}`).join(" · ")}</p>`}
     </section>
     <div class="toolbar"><nav class="subtabs">${[["", "all"], ["country", "countries"], ["city", "cities"]].map(([k, l]) => html`<a href="/atlas?${new URLSearchParams({ ...(preset ? { preset } : {}), ...(k ? { kind: k! } : {}) }).toString()}" data-nav class="${kind === k ? "on" : ""}" data-key="k${k}">${l}</a>`)}</nav>
@@ -67,9 +75,10 @@ function view(): Html {
       <thead><tr><th scope="col">Place</th><th scope="col">Route</th><th scope="col">Fit</th>${d.parts.map((p) => html`<th scope="col">${p}</th>`)}</tr></thead>
       <tbody>${places.map((p) => html`<tr data-key="p${p.id}" class="route-${p.route}">
         <th scope="row">${p.name} <span class="muted">${p.iso2 ?? ""}</span></th>
-        <td><span class="tag">${p.route}</span>${p.speaks ? html` <span class="tag" title="you speak a language spoken here">speaks</span>` : EMPTY}</td>
+        <td><span class="tag" title="${ROUTE[p.route]?.[1] ?? ""}">${ROUTE[p.route]?.[0] ?? p.route}</span>${p.speaks ? html` <span class="tag" title="You speak a language spoken here">speaks your language</span>` : EMPTY}</td>
         <td>${meter(p.fit, max)}${p.fit === null ? EMPTY : html` ${max === 1 ? Math.round(p.fit * 100) : Math.round(p.fit)}`}</td>
-        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, max)}</td>`)}</tr>`)}</tbody></table></div>`}
+        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, max)}</td>`)}</tr>`)}</tbody></table></div>
+      <p class="hint">— no figure for that place yet. Fit is the weighted mean of the parts a place has.</p>`}
   </div>`
 }
 
@@ -83,6 +92,9 @@ const atlasLens: View = {
   view,
   act(name, el) {
     switch (name) {
+      case "weight":
+        // The number beside a slider follows it as it moves; Save weights stores them.
+        return void ((el.previousElementSibling as HTMLOutputElement | null)?.replaceChildren((el as HTMLInputElement).value))
       case "preset":
         return query("preset", (el as HTMLSelectElement).value)
       case "me": {
