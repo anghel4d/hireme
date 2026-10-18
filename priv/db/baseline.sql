@@ -183,10 +183,11 @@ CREATE TABLE "op_ledger" (
   "target" INTEGER,
   "row_id" INTEGER,
   "ack_rev" INTEGER,
-  "refusal" TEXT
+  "refusal" TEXT,
+  "writer" INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE INDEX "op_ledger__account_account_id" ON "op_ledger" ("account_id");
-CREATE UNIQUE INDEX "op_ledger__unique_op_id" ON "op_ledger" ("account_id", "op_id");
+CREATE UNIQUE INDEX "op_ledger__unique_writer_op_id" ON "op_ledger" ("account_id", "writer", "op_id");
 CREATE INDEX "op_ledger__index_inserted_at" ON "op_ledger" ("inserted_at");
 CREATE TRIGGER "op_ledger__ref_key_id_insert" BEFORE INSERT ON "op_ledger" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref op_ledger.key_id'); END;
 CREATE TRIGGER "op_ledger__ref_key_id_update" BEFORE UPDATE OF "key_id", "account_id" ON "op_ledger" WHEN NEW."key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "api_keys" WHERE "id" = NEW."key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref op_ledger.key_id'); END;
