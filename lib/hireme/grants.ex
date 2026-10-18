@@ -15,7 +15,7 @@ defmodule Hireme.Grants do
   alias Hireme.Schema
 
   @all 0b11111
-  @outside [:citations, :trusted_hosts]
+  @outside ["citations", "trusted_hosts"]
 
   defstruct actor: :key, key_id: nil, read_mask: 0, write_mask: 0, may_delete: false
 
@@ -44,7 +44,7 @@ defmodule Hireme.Grants do
 
   @doc "The mask bit of a table or command's domain; 0 for one in no mask."
   def bit(%{name: name}) when name in @outside, do: 0
-  def bit(%{domain: domain}), do: Schema.domain_bit(domain) || 0
+  def bit(%{domain: domain}), do: Schema.domain_bit(domain)
 
   def bit(name) when is_atom(name) or is_integer(name), do: bit(Schema.table(name))
 

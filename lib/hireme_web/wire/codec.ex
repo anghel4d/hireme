@@ -35,6 +35,13 @@ defmodule HiremeWeb.Wire.Codec do
   @t_f64 4
   @t_deferred 5
 
+  @frames Map.new(Schema.frames(), &{String.to_atom(&1.name), &1.id})
+  @frame_names Map.new(Schema.frames(), &{&1.id, String.to_atom(&1.name)})
+  @enum_codes Map.new(Schema.model().enums, fn e ->
+                {e.name, e.values |> Enum.with_index() |> Map.new(fn {v, i} -> {String.to_atom(v), i} end)}
+              end)
+  @enum_atoms Map.new(Schema.model().enums, &{&1.name, List.to_tuple(Enum.map(&1.values, fn v -> String.to_atom(v) end))})
+
   @as_of 0xFFF0
   @source 0xFFF1
 
@@ -68,7 +75,7 @@ defmodule HiremeWeb.Wire.Codec do
 
     body = pad(body)
     len = @header + byte_size(body)
-    <<len::little-32, Schema.frame(kind)::8, flags::8, Schema.wire_hash()::little-16, rev::little-64, body::binary>>
+    <<len::little-32, Map.fetch!(@frames, kind)::8, flags::8, Schema.wire_hash()::little-16, rev::little-64, body::binary>>
   end
 
   @doc """
@@ -100,9 +107,9 @@ defmodule HiremeWeb.Wire.Codec do
   def decode(_), do: {:error, :len}
 
   defp frame_name(kind) do
-    case Schema.frame_name(kind) do
-      nil -> {:error, :kind}
-      name -> {:ok, name}
+    case Map.fetch(@frame_names, kind) do
+      :error -> {:error, :kind}
+      ok -> ok
     end
   end
 
@@ -231,7 +238,7 @@ defmodule HiremeWeb.Wire.Codec do
   def nonce(_), do: {:error, :body}
 
   def bye(rev, reason, message \\ "") do
-    frame(:BYE, rev, [<<Schema.enum_code(:bye, reason)::8, 0::56>>, put_field(message)], end: true)
+    frame(:BYE, rev, [<<enum_code("bye", reason)::8, 0::56>>, put_field(message)], end: true)
   end
 
   def rpc(<<id::little-32, 0::32, rest::binary>>) do
@@ -259,7 +266,7 @@ defmodule HiremeWeb.Wire.Codec do
     p = pad8(4 + n) - 4 - n
 
     case rest do
-      <<v::binary-size(n), pad::binary-size(p), more::binary>> ->
+      <<v::binary-size(^n), pad::binary-size(^p), more::binary>> ->
         if zeros?(pad), do: {:ok, v, more}, else: :error
 
       _ ->
@@ -343,7 +350,7 @@ defmodule HiremeWeb.Wire.Codec do
     p = pad8(8 + len) - 8 - len
 
     with false <- MapSet.member?(seen, col),
-         <<v::binary-size(len), pad::binary-size(p), more::binary>> <- rest,
+         <<v::binary-size(^len), pad::binary-size(^p), more::binary>> <- rest,
          true <- zeros?(pad),
          {:ok, value} <- cell_value(ty, v) do
       cells(more, n - 1, [{col, ty, value} | acc], MapSet.put(seen, col))
@@ -414,10 +421,8 @@ defmodule HiremeWeb.Wire.Codec do
   defp to_value(%{type: :time}, v) when is_integer(v), do: {:ok, DateTime.from_unix!(v)}
 
   defp to_value(%{type: :enum, enum: e}, v) when is_integer(v) do
-    case Enum.at(Schema.enum(e), v) do
-      nil -> {:error, :type}
-      atom -> {:ok, atom}
-    end
+    atoms = Map.fetch!(@enum_atoms, e)
+    if v < tuple_size(atoms), do: {:ok, elem(atoms, v)}, else: {:error, :type}
   end
 
   defp to_value(%{type: :i64}, v) when is_integer(v), do: {:ok, v}
@@ -435,15 +440,14 @@ defmodule HiremeWeb.Wire.Codec do
 
   @doc "The type an op cell for this column must carry: its wire type, but a deferred text travels whole, as str."
   def cell_type(%{deferred: true}), do: @t_str
-  def cell_type(col), do: wire_type(col)
+  def cell_type(%{wire: w}), do: w
 
   @doc "A column's wire type code in BOOT and PATCH."
-  def wire_type(%{type: t}) when t in [:id, :ref, :enum, :bool, :u8, :u32, :day, :time], do: @t_u32
-  def wire_type(%{deferred: true}), do: @t_deferred
-  def wire_type(%{type: t}) when t in [:str, :text, :json], do: @t_str
-  def wire_type(%{type: :i64}), do: @t_i64
-  def wire_type(%{type: :f64}), do: @t_f64
-  def wire_type(%{type: :bytes}), do: nil
+  def wire_type(%{wire: w}), do: w
+
+  @doc "An enum value's code; `nil` for one the enum does not have."
+  def enum_code(enum, value) when is_atom(value), do: get_in(@enum_codes, [to_string(enum), value])
+  def enum_code(enum, value) when is_binary(value), do: enum_code(enum, String.to_existing_atom(value))
 
   @doc "A column's Elixir value as its wire value (the kernel's and BOOT's form)."
   def to_wire(_col, nil), do: nil
@@ -451,7 +455,7 @@ defmodule HiremeWeb.Wire.Codec do
   def to_wire(%{type: :day}, %Date{} = d), do: Date.diff(d, @epoch)
   def to_wire(%{type: :time}, %DateTime{} = t), do: DateTime.to_unix(t)
   def to_wire(%{type: :time}, %NaiveDateTime{} = t), do: t |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
-  def to_wire(%{type: :enum, enum: e}, v) when is_atom(v), do: Schema.enum_code(e, v)
+  def to_wire(%{type: :enum, enum: e}, v), do: enum_code(e, v)
   def to_wire(%{type: :json}, v), do: JSON.encode!(v)
   def to_wire(%{deferred: true}, v) when is_binary(v), do: deferred_stub(v)
   def to_wire(_col, v), do: v
@@ -500,7 +504,7 @@ defmodule HiremeWeb.Wire.Codec do
     block(
       table.id,
       length(rows),
-      Enum.map(cols, fn c -> {c.id, wire_type(c), Enum.map(rows, &to_wire(c, Map.get(&1, c.name)))} end)
+      Enum.map(cols, fn c -> {c.id, wire_type(c), Enum.map(rows, &to_wire(c, Map.get(&1, String.to_existing_atom(c.name))))} end)
     )
   end
 
