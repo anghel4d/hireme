@@ -13,6 +13,7 @@ import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
 import { Refused, rpc } from "../kernel.ts"
 import { EMPTY, entries, flag, html, resetIfUnchanged, trusted, type Html } from "../morph.ts"
+import { detail } from "./trail.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
 
 type Row = Record<string, unknown>
@@ -422,17 +423,6 @@ function keyName(id: string): string {
   return k ? str(k.name) || `key ${id}` : `key ${id}`
 }
 
-/** What an event's meta names (a host, a provider, a label, a count), at most four scalar fields; the
- * trail holds names, kinds, counts and hashes, never a secret. A key's id reads as the key's name. */
-function detail(e: Row): Html {
-  const m = e.meta && typeof e.meta === "object" ? (e.meta as Row) : {}
-  const parts = Object.entries(m)
-    .filter(([, x]) => typeof x === "string" || typeof x === "number" || typeof x === "boolean")
-    .slice(0, 4)
-    .map(([k, x]) => (k === "key_id" ? keyName(String(x)) : `${k.replace(/_/g, " ")}: ${String(x)}`))
-  return parts.length === 0 ? EMPTY : html` <span class="muted">${parts.join(" · ")}</span>`
-}
-
 /** A coalesced row: its window, its counts by kind and key, and the distinct addresses it came from. */
 function coalesced(e: Row): Html {
   const m = (e.meta ?? {}) as Row & { from?: string; to?: string; counts?: Record<string, Record<string, number>> }
@@ -471,7 +461,7 @@ function audit(): Html {
       <tbody>${a.events.map((e) => {
         const kind = str(e.kind)
         const many = kind === "activity_coalesced" || kind === "revokes_coalesced"
-        return html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${kind.replace(/_/g, " ")}${e.key_id ? html` <span class="tag">${keyName(String(e.key_id))}</span>` : EMPTY}${many ? coalesced(e) : detail(e)}</td>
+        return html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${kind.replace(/_/g, " ")}${e.key_id ? html` <span class="tag">${keyName(String(e.key_id))}</span>` : EMPTY}${many ? coalesced(e) : detail(e, keyName)}</td>
         <td class="muted">${str(e.ip)}</td></tr>`
       })}</tbody></table></div>`}
       ${a.loading ? html`<p class="muted">Loading…</p>` : a.next !== null ? html`<button type="button" class="more" data-act="audit-more">Older events</button>` : EMPTY}`}

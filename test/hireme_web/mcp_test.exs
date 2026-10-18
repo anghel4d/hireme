@@ -184,4 +184,31 @@ defmodule HiremeWeb.McpTest do
     assert %{"error" => %{"code" => _}} =
              call(p, "resources/subscribe", %{uri: "hireme://corporations/none.test"})
   end
+
+  # Every line up to the reply to `id`, decoded.
+  defp lines_until(p, id, acc \\ []) do
+    receive do
+      {^p, {:data, {:eol, l}}} ->
+        case JSON.decode(l) do
+          {:ok, %{"id" => ^id} = r} -> Enum.reverse([r | acc])
+          {:ok, m} -> lines_until(p, id, [m | acc])
+          _ -> lines_until(p, id, acc)
+        end
+    after
+      10_000 -> flunk("no MCP reply to #{id}")
+    end
+  end
+
+  test "a JSON-RPC response from the client is not answered; requests around it are", ctx do
+    p = mcp(ctx)
+    line(p, %{jsonrpc: "2.0", id: 4242, result: %{}})
+    line(p, %{jsonrpc: "2.0", id: 4243, error: %{code: -32_000, message: "client side"}})
+    line(p, %{jsonrpc: "2.0", id: 4244, method: "ping"})
+    seen = lines_until(p, 4244)
+    assert %{"result" => %{}} = List.last(seen)
+    refute Enum.any?(seen, &(&1["id"] in [4242, 4243])), inspect(seen)
+    # An object that is neither a request nor a response is still an invalid request.
+    line(p, %{jsonrpc: "2.0", id: 4245})
+    assert %{"error" => %{"code" => -32_600}} = List.last(lines_until(p, 4245))
+  end
 end
