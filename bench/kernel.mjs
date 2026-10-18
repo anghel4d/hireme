@@ -88,10 +88,20 @@ for (let run = 0; run < 7; run++) {
 const QUERY_BOUND_MS = 1;
 const query = {};
 {
-  const notes = "Walkable, with a strong tech scene and ".repeat(50);
+  // Notes about 5 KB each, packed as the server packs a text cell (tag 1,
+  // a zstd frame): a text read unpacks one on touch.
+  const WORDS = "walkable transit river rent old town tech scene harbour hills museum quiet loud cheap dear sunny rainy cafes trams bikes startups banks universities parks markets coast north south".split(" ");
+  const note = () => Array.from({ length: 820 }, () => WORDS[rand(WORDS.length)]).join(" ");
+  const pack = (text) => {
+    const z = Bun.zstdCompressSync(new TextEncoder().encode(text));
+    const p = new Uint8Array(z.length + 1);
+    p[0] = 1;
+    p.set(z, 1);
+    return p;
+  };
   const places = Array.from({ length: 50000 }, (_, i) => ({
     id: i + 1, kind: i < 250 ? "country" : "city", iso2: i < 250 ? `C${i}` : null, name: `${["Lis", "Ber", "Tok"][rand(3)]}${["bon", "lin", "yo"][rand(3)]} ${i}`,
-    region: ["Europe", "Asia", "Americas"][rand(3)], population: rand(10) ? rand(10_000_000) : null, population_on: today, notes: rand(10) ? null : notes,
+    region: ["Europe", "Asia", "Americas"][rand(3)], population: rand(10) ? rand(10_000_000) : null, population_on: today, notes: rand(10) ? null : pack(note()),
   }));
   const { x, out, call } = await instance(bytes);
   x.set_grants(31, 31, 1, 1);
@@ -105,7 +115,8 @@ const query = {};
     find_filter_sort: { op: "find", table: "places", where: { region: "Asia", kind: "city" }, order: "name", limit: 50 },
     find_next_page: { op: "find", table: "places", order: ["population", "desc"], limit: 50, after: next },
     get_key: { op: "get", table: "places", key: { iso2: "C7" } },
-    text: { op: "text", table: "places", id: noted, column: "notes", length: 4096 },
+    text_packed: { op: "text", table: "places", id: noted, column: "notes" },
+    find_sizes: { op: "find", table: "places", where: { kind: "city" }, sizes: ["notes"], limit: 50 },
   };
   for (const [name, q] of Object.entries(cases)) {
     for (let i = 0; i < 20; i++) ask(q);

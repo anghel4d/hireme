@@ -80,10 +80,13 @@ export function bootFrame(catalog, rows, kind = W.BOOT) {
     for (const [k, c] of cols) {
       const data = new Bytes();
       const vals = list.map((r) => r[k] ?? null);
-      const wire = plain(c.wire);
+      // A zstr column given packed cells (bytes, tag first) goes as zstr;
+      // its strings ride raw, tag 0. Otherwise text goes as plain str.
+      const wire = c.wire === W.ZSTR && vals.some((v) => v instanceof Uint8Array) ? W.ZSTR : plain(c.wire);
       if (wire === W.U32) vals.forEach((v) => data.u32(asU32(catalog, v, c.type, c.target)));
-      else if (wire === W.STR) {
-        const strs = vals.map((v) => enc.encode(v ?? ""));
+      else if (wire === W.STR || wire === W.ZSTR) {
+        const tagged = (s) => { const b = enc.encode(s); const t = new Uint8Array(b.length + 1); t.set(b, 1); return t; };
+        const strs = vals.map((v) => (v instanceof Uint8Array ? v : v == null ? new Uint8Array() : wire === W.ZSTR ? tagged(v) : enc.encode(v)));
         let o = 0;
         data.u32(0);
         for (const s of strs) data.u32((o += s.length));
