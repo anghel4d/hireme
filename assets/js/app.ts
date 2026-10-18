@@ -76,9 +76,26 @@ const guarded = <T>(lens: Lens, part: Part, fn: () => T, fallback: T): T => hook
 
 const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
 
+// The desk and focus, once drawn, stay in the page when the other is current, parked under
+// content-visibility: hidden, which keeps their style and layout: going back and forth uncovers a
+// laid-out lens instead of building one. A parked lens is left alone by morph (data-morph="own").
+const PARKED: readonly Lens[] = ["desk", "focus"]
+const parked = new Set<Lens>()
+
+const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${
+  v ? lensView(lens, v) : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
+
+// The first time a lens parks, its own markup is passed (an empty one would morph it away); after that it is left alone.
+const parkedMain = (l: Lens): Html => {
+  const view = VIEWS[l]
+  const first = !document.querySelector(`main.lens-${l}.parked`) && view !== undefined
+  return html`<main class="lens lens-${l} parked" data-key="lens-${l}" data-morph="own" inert aria-hidden="true">${first ? lensView(l, view) : EMPTY}</main>`
+}
+
 function shell(): Html {
   const lens = model.address.lens
   const v = waiting(lens) ? undefined : VIEWS[lens]
+  if (PARKED.includes(lens) && v) parked.add(lens)
   return html`<header class="bar">
       <a class="brand" href="/desk" data-nav>hireme</a>
       <nav aria-label="Lenses">${NAV.map((n) => html`<a href="${format({ lens: n.lens, sub: "", q: new Map() })}" data-nav data-key="${n.lens}"
@@ -89,7 +106,8 @@ function shell(): Html {
         <button class="ghost">Sign out</button>
       </form>
     </header>
-    <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? lensView(lens, v) : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>
+    ${PARKED.filter((l) => l === lens || parked.has(l)).map((l) => (l === lens ? active(lens, v) : parkedMain(l)))}
+    ${PARKED.includes(lens) ? EMPTY : active(lens, v)}
     <aside class="notices" aria-live="polite">${model.notices.map((n) => html`<div class="notice notice-${n.tone}" data-key="n${n.id}">
       <span>${n.text}${(n.times ?? 1) > 1 ? html` <b class="times">×${n.times}</b>` : EMPTY}</span><button type="button" class="ghost" data-act="dismiss" data-id="${n.id}" aria-label="Dismiss">×</button></div>`)}</aside>`
 }

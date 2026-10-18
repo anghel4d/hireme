@@ -131,6 +131,8 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .link-lost::before, .link-connecting::before { background: var(--warn); }
 .link-ended::before { background: var(--bad); }
 .lens { padding: 16px; max-width: 1400px; margin: 0 auto; }
+/* A parked lens keeps its rendering state out of sight (app.ts): no height, same width. */
+.lens.parked { content-visibility: hidden; height: 0; padding-block: 0; overflow: hidden; }
 .notices { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 20; max-width: min(420px, calc(100vw - 32px)); }
 .notice {
   display: flex;
