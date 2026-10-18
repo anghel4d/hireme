@@ -721,6 +721,17 @@ defmodule HiremeWeb.AgentAttackTest do
       # revokes cannot grow the trail.
       for _ <- 1..5, do: :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
 
+      # The row says whose lease it was and what it held.
+      assert [%{meta: %{"label" => label, "count" => 1}}] =
+               Repo.all(
+                 from(r in Hireme.Rows.Audit,
+                   where: r.kind == "lease_revoked" and r.account_id == ^a.id
+                 ),
+                 skip_account: true
+               )
+
+      assert label == lease.label
+
       assert Repo.aggregate(
                from(r in Hireme.Rows.Audit,
                  where: r.kind == "lease_revoked" and r.account_id == ^a.id

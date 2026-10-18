@@ -70,7 +70,7 @@ defmodule Hireme.Lease do
   """
   def revoke(account_id, lease_id, meta) do
     with true <- Sequencer.running?(account_id) || {:error, :not_found},
-         {:ok, changed, paused} <- Sequencer.lease(account_id, {:revoke, lease_id}) do
+         {:ok, released, paused} <- Sequencer.lease(account_id, {:revoke, lease_id}) do
       meta = Map.put(meta, :account_id, account_id)
 
       # The pause itself is a security event, recorded once, when it begins:
@@ -79,8 +79,14 @@ defmodule Hireme.Lease do
 
       # Revoking what is already revoked, or holds nothing, releases
       # nothing and records nothing; the session is revoked all the same.
-      if changed,
-        do: Hireme.Audit.record(:lease_revoked, %{lease_id: lease_id}, meta)
+      # Whose lease it was, as lease_opened names it, and what it held.
+      if released,
+        do:
+          Hireme.Audit.record(
+            :lease_revoked,
+            %{lease_id: lease_id, label: released.label, count: released.count},
+            meta
+          )
 
       :ok
     end

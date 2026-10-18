@@ -2241,17 +2241,20 @@ defmodule Hireme.Sequencer do
 
   defp lease_request(:list, _pid, state), do: {{:ok, Lease.list(state.lease)}, state}
 
-  # Answers whether anything was released and the key this revoke paused,
+  # Answers what was released (the session's label and how many claims;
+  # nil when nothing was) and the key this revoke paused,
   # if it paused one now (nil when it was paused already, or a browser's).
   defp lease_request({:revoke, lease_id}, _pid, state) do
-    {state, paused} = pause(state, state.lease.sessions[lease_id])
+    target = state.lease.sessions[lease_id]
+    {state, paused} = pause(state, target)
 
     case Lease.revoke(state.lease, lease_id) do
-      {:ok, lease, _released} ->
-        {{:ok, true, paused}, broadcast_leases(%{state | lease: lease}, [])}
+      {:ok, lease, released} ->
+        released = %{label: target.label, count: length(released)}
+        {{:ok, released, paused}, broadcast_leases(%{state | lease: lease}, [])}
 
       {:unchanged, lease} ->
-        {{:ok, false, paused}, %{state | lease: lease}}
+        {{:ok, nil, paused}, %{state | lease: lease}}
 
       :error ->
         {{:error, :not_found}, state}
