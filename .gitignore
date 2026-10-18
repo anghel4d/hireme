@@ -57,6 +57,8 @@
 !/assets/css/
 !/assets/css/*.css
 !/assets/tsconfig.json
+!/assets/test/
+!/assets/test/*.mjs
 !/assets/js/
 !/assets/js/*.ts
 !/assets/js/gen/
