@@ -51,6 +51,8 @@ export function detail(e: Row, keyName: (id: string) => string): Html {
       if (e.key_id === undefined || e.key_id === null) parts.push(`${label}: ${keyName(String(x))}`)
       continue
     }
+    // A key's name the row's key tag already shows is not repeated; a name it has since changed is kept.
+    if (label === "key" && e.key_id !== undefined && e.key_id !== null && keyName(String(e.key_id)) === String(x)) continue
     parts.push(`${label}: ${String(x)}`)
   }
   return parts.length === 0 ? EMPTY : html` <span class="muted">${parts.join(" · ")}</span>`

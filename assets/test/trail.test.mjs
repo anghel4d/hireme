@@ -27,8 +27,11 @@ test("a key's lifecycle names the key and the access an owner audits", () => {
   assert.equal(shown({ kind: "api_key_revoked", key_id: null, meta: { key_id: 3, name: "research agent" } }), muted("key: research agent"))
   assert.equal(shown({ kind: "key_resumed", key_id: null, meta: { key_id: 3, name: "research agent" } }), muted("key: research agent"))
   assert.equal(shown({ kind: "key_paused", key_id: null, meta: { key_id: 3, lease_id: 5 } }), muted("key: research agent"))
-  // A row whose own key tag already names the key does not name it again.
+  // A row whose own key tag already names the key does not name it again (eliza's b47b0e8 sets it on
+  // every lifecycle row); a name the key has since changed is still shown.
   assert.equal(shown({ kind: "key_paused", key_id: 3, meta: { key_id: 3 } }), "")
+  assert.equal(shown({ kind: "api_key_created", key_id: 3, meta: { key_id: 3, name: "research agent", preset: "read_write" } }), muted("access: read_write"))
+  assert.equal(shown({ kind: "api_key_revoked", key_id: 3, meta: { key_id: 3, name: "old name" } }), muted("key: old name"))
 })
 
 test("each kind reads its own labels: a count is codes, claims or ops by kind", () => {
