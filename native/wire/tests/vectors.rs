@@ -4,6 +4,8 @@
 //! through the crate's own writers, so a symmetric mistake in the writer and the
 //! reader cannot hide. Each refusal vector breaks exactly one rule.
 
+mod pack;
+
 use wire::*;
 
 const HASH: u16 = 0x5A17;
@@ -110,7 +112,7 @@ fn ops_body(ops: &[Vec<u8>]) -> Vec<u8> {
 #[test]
 fn the_documented_numbers() {
     assert_eq!(HEADER, 16);
-    assert_eq!((DEFLATE, END), (0x01, 0x02));
+    assert_eq!((ZSTD, END, LAYOUT), (0x01, 0x02, 4));
     assert_eq!(
         (NULL, U32, STR, I64, F64, SYM, LIST),
         (0, 1, 2, 3, 4, 6, 7)
@@ -348,59 +350,6 @@ fn an_op_is_the_documented_bytes() {
 }
 
 #[test]
-fn a_deflated_frame_is_the_documented_bytes() {
-    let body: Vec<u8> = (0..2048u32).flat_map(|i| (i % 7).to_le_bytes()).collect();
-    let mut w = Writer::new(BOOT, HASH, 5).end();
-    w.bytes(&body);
-    let f = w.finish_deflated(6);
-    // header: len | kind | flags DEFLATE|END | hash | rev; body: u32 raw_len | u32 deflated_len | stream | zero pad
-    assert_eq!(f[4], BOOT);
-    assert_eq!(f[5], 0x03);
-    assert_eq!(
-        u32::from_le_bytes(f[0..4].try_into().unwrap()) as usize,
-        f.len()
-    );
-    let raw_len = u32::from_le_bytes(f[16..20].try_into().unwrap()) as usize;
-    let def_len = u32::from_le_bytes(f[20..24].try_into().unwrap()) as usize;
-    assert_eq!(raw_len, body.len());
-    assert_eq!(f.len(), 16 + (8 + def_len).div_ceil(8) * 8);
-    assert!(f[24 + def_len..].iter().all(|&z| z == 0));
-    assert_eq!(
-        miniz_oxide::inflate::decompress_to_vec(&f[24..24 + def_len]).unwrap(),
-        body
-    );
-}
-
-#[test]
-fn an_incompressible_body_travels_plain_and_an_unpadded_one_is_padded() {
-    let mut x = 0x9E37_79B9_7F4A_7C15u64;
-    let noise: Vec<u8> = (0..4096)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect();
-    let mut w = Writer::new(BOOT, HASH, 1);
-    w.bytes(&noise);
-    let f = w.finish_deflated(6);
-    assert_eq!(f[5] & DEFLATE, 0, "deflate only when smaller");
-    assert_eq!(f.len(), 16 + noise.len());
-
-    let mut w = Writer::new(BOOT, HASH, 1);
-    w.u8(1).bytes(&vec![9u8; 4000]);
-    let f = w.finish_deflated(6);
-    assert_ne!(f[5] & DEFLATE, 0);
-    let body = Frame::parse(&f, HASH).unwrap().body().unwrap();
-    assert_eq!(
-        body.len() % 8,
-        0,
-        "the inflated body is 8-aligned like a plain one"
-    );
-}
-
-#[test]
 fn a_sym_dictionary_holds_each_value_once() {
     let mut w = BodyWriter::new();
     w.block(1, 4).syms(1, ["x", "x", "y", "x"].into_iter());
@@ -437,87 +386,40 @@ fn frame_length_must_match_the_buffer() {
     assert!(Header::peek(&tiny).is_err());
 }
 
-fn deflate_body(raw_len: u32, def_len: u32, stream: &[u8], tail: &[u8]) -> Vec<u8> {
-    let b = cat(&[le32(raw_len), le32(def_len), stream.to_vec(), tail.to_vec()]);
-    frame(PING, DEFLATE, 0, &b)
+fn zstd_ping(raw_len: u32, packed: &[u8], tail: &[u8]) -> Vec<u8> {
+    pack::raw(PING, ZSTD, HASH, 0, &pack::zbody(raw_len, packed, tail))
 }
 
 #[test]
-fn deflate_lengths_are_refused() {
+fn zstd_lengths_and_frames_are_refused() {
     let raw: Vec<u8> = (0..64u8).collect();
-    let stream = miniz_oxide::deflate::compress_to_vec(&raw, 6);
-    let pad = (8 - (8 + stream.len()) % 8) % 8;
-    let good = |f: Vec<u8>| Frame::parse(&f, HASH).unwrap().body().map(|b| b.len());
-    assert_eq!(
-        good(deflate_body(
-            64,
-            stream.len() as u32,
-            &stream,
-            &vec![0; pad]
-        )),
-        Ok(64)
-    );
-    // the stream inflates to 64: a stated length of 56 or 72 is refused
-    assert!(
-        good(deflate_body(
-            56,
-            stream.len() as u32,
-            &stream,
-            &vec![0; pad]
-        ))
-        .is_err()
-    );
-    assert!(
-        good(deflate_body(
-            72,
-            stream.len() as u32,
-            &stream,
-            &vec![0; pad]
-        ))
-        .is_err()
-    );
+    let z = pack::packed(&raw);
+    let pad = (8 - (8 + z.len()) % 8) % 8;
+    let good = |f: Vec<u8>| Frame::parse(&f, HASH).unwrap().body().map(|b| b.to_vec());
+    assert_eq!(good(zstd_ping(64, &z, &vec![0; pad])), Ok(raw.clone()), "a PING body is not shuffled");
+    // the frame unpacks to 64: a stated length of 56 or 72 is refused
+    assert!(good(zstd_ping(56, &z, &vec![0; pad])).is_err());
+    assert!(good(zstd_ping(72, &z, &vec![0; pad])).is_err());
     // a raw_len that is not a multiple of 8 is refused even when it is true
-    let odd = miniz_oxide::deflate::compress_to_vec(&raw[..13], 6);
-    let odd_pad = (8 - (8 + odd.len()) % 8) % 8;
-    assert!(good(deflate_body(13, odd.len() as u32, &odd, &vec![0; odd_pad])).is_err());
-    // pad bytes must be zero (this stream needs at least one)
+    let odd = pack::packed(&raw[..13]);
+    assert!(good(zstd_ping(13, &odd, &vec![0; (8 - (8 + odd.len()) % 8) % 8])).is_err());
+    // pad bytes must be zero, and as many as the 8-alignment needs
     assert!(pad > 0);
-    assert!(
-        good(deflate_body(
-            64,
-            stream.len() as u32,
-            &stream,
-            &vec![0x55; pad]
-        ))
-        .is_err()
-    );
-    // a deflated_len past the body, and a body longer than deflated_len + pad, are refused
-    assert!(good(deflate_body(64, 10_000, &stream, &vec![0; pad])).is_err());
-    assert!(
-        good(deflate_body(
-            64,
-            stream.len() as u32,
-            &stream,
-            &vec![0; pad + 8]
-        ))
-        .is_err()
-    );
+    assert!(good(zstd_ping(64, &z, &vec![0x55; pad])).is_err());
+    assert!(good(zstd_ping(64, &z, &vec![0; pad + 8])).is_err());
+    // a packed_len past the body
+    let mut long = pack::zbody(64, &z, &vec![0; pad]);
+    long[4..8].copy_from_slice(&10_000u32.to_le_bytes());
+    assert!(good(pack::raw(PING, ZSTD, HASH, 0, &long)).is_err());
     // raw_len past the reader's limit
-    let f = deflate_body(64, stream.len() as u32, &stream, &vec![0; pad]);
-    let fr = Frame::parse(&f, HASH).unwrap();
+    let fr_bytes = zstd_ping(64, &z, &vec![0; pad]);
+    let fr = Frame::parse(&fr_bytes, HASH).unwrap();
     assert_eq!(fr.body_max(64).unwrap().len(), 64);
     assert!(fr.body_max(63).is_err());
-    // a plain frame is not inflated, so no limit applies
-    assert_eq!(
-        Frame::parse(&encode_ping(PING, HASH, 1), HASH)
-            .unwrap()
-            .body_max(0)
-            .unwrap()
-            .len(),
-        8
-    );
+    // a plain frame is not unpacked, so no limit applies
+    assert_eq!(Frame::parse(&encode_ping(PING, HASH, 1), HASH).unwrap().body_max(0).unwrap().len(), 8);
     // a body of fewer than 8 bytes cannot hold the two lengths
-    assert!(good(frame(PING, DEFLATE, 0, &[0; 0])).is_err());
+    assert!(good(pack::raw(PING, ZSTD, HASH, 0, &[])).is_err());
 }
 
 // ---------------------------------------------------------------- small frames
@@ -1091,14 +993,11 @@ fn mangled_ops_blocks_and_frames_never_panic() {
     w.gone(9, &[4, 5, 6]);
     let blocks = w.finish();
 
-    let body: Vec<u8> = (0..4096u32).flat_map(|i| (i % 11).to_le_bytes()).collect();
-    let mut f = Writer::new(BOOT, HASH, 9).end();
-    f.bytes(&body);
-    let deflated = f.finish_deflated(6);
-    assert_ne!(deflated[5] & DEFLATE, 0);
+    let runs: Vec<u8> = blocks.iter().cycle().take(blocks.len() * 64).copied().collect();
+    let packed = pack::frame(PING, HASH, &runs);
 
     let frames = [
-        deflated,
+        packed,
         encode_ping(PING, HASH, 5),
         Hello {
             cred: 2,
@@ -1139,7 +1038,7 @@ fn mangled_ops_blocks_and_frames_never_panic() {
         let seed: &[u8] = match pick {
             0 => &ops,
             1 => &blocks,
-            2 => &body,
+            2 => &runs,
             n => &frames[n - 3],
         };
         let m = mangle(&mut rng, seed);
@@ -1190,11 +1089,11 @@ fn mangled_ops_blocks_and_frames_never_panic() {
                 }
             }
         }
-        // and as the body of a frame that claims DEFLATE
+        // and as the body of a frame that claims ZSTD
         let mut claimed = Writer::new(BOOT, HASH, 0);
         claimed.bytes(&m);
         let mut cf = claimed.finish();
-        cf[5] = DEFLATE;
+        cf[5] = ZSTD;
         if let Ok(fr) = Frame::parse(&cf, HASH) {
             let _ = fr.body_max(MAX_UP);
         }

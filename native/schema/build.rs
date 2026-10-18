@@ -47,6 +47,10 @@ fn main() {
 
     writeln!(o, "/// The byte layout native/wire implements; native/wire asserts its own equals it.").unwrap();
     writeln!(o, "pub const LAYOUT: u16 = {};", s.layout).unwrap();
+    for d in &s.dicts {
+        writeln!(o, "/// The {} zstd dictionary's (id, fnv), priv/wire/{}.zdict.", d.name, d.name).unwrap();
+        writeln!(o, "pub const {}_DICT: (u32, u32) = ({}, {:#010x});", d.name.to_uppercase(), d.id, d.fnv).unwrap();
+    }
     writeln!(o, "/// A day is days since 0000-01-01 (proleptic Gregorian), 0 to this (9999-12-31).").unwrap();
     writeln!(o, "pub const DAY_MAX: u32 = {};", model::DAY_MAX).unwrap();
     writeln!(o, "pub mod domain {{").unwrap();

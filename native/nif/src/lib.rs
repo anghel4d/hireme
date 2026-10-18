@@ -21,6 +21,8 @@
 //! - `board_ids(res, stage_code | nil)` → application ids in board order
 //!   (none for a code that is no stage).
 //! - `keywords_version()`.
+//! - `unpack(frame, max)` → a ZSTD frame's plain body (at most `max`
+//!   bytes) or `nil`: native/wire's reading, the one every client does.
 //!
 //! A panic in the kernel is caught here and answered `{:error, :panic}`;
 //! the sequencer then rebuilds the resource from SQLite.
@@ -170,6 +172,14 @@ fn board_ids(res: ResourceArc<Res>, stage: Option<u32>) -> Vec<u32> {
 #[rustler::nif]
 fn keywords_version() -> u32 {
     kernel::keywords::VERSION
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>> {
+    let body = wire::Frame::parse(frame.as_slice(), schema::WIRE_HASH).ok()?.body_max(max).ok()?;
+    let mut out = rustler::OwnedBinary::new(body.len())?;
+    out.as_mut_slice().copy_from_slice(&body);
+    Some(out.release(env))
 }
 
 rustler::init!("Elixir.Hireme.Kernel.Nif");

@@ -11,7 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 # Only for LAYOUT: the declaration owns the number, this crate asserts it.
 schema = { path = "../schema", default-features = false }
-miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
+ruzstd = { version = "0.9.1", default-features = false }
 
 [dev-dependencies]
 proptest = "1.12.0"
+# The tests pack frames and text cells as the server does, against the dictionaries.
+zstd = "0.14.3"

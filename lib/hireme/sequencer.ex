@@ -391,7 +391,7 @@ defmodule Hireme.Sequencer do
         else: snapshot(session.grants, state, now)
 
     kind = if resume, do: :PATCH, else: :BOOT
-    frames = [Codec.frame(kind, state.rev, body, end: true, deflate: true)]
+    frames = [Codec.frame(kind, state.rev, body, end: true, compress: true)]
     state = broadcast_leases(state, except: pid)
 
     reply = %{

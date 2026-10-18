@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 kernel = { path = "../kernel" }
+schema = { path = "../schema" }
+wire = { path = "../wire" }
 # Pinned to the Hex package's version (0.38.0), which mix compiles against;
 # the crate's 0.39 has no matching Hex release.
 rustler = "0.38.0"

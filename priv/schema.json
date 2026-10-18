@@ -1,4 +1,4 @@
-{"layout":3,"wire_hash":4648,"schema_rev":419419926,"carry":["refusal","bye","verb"],
+{"layout":4,"wire_hash":58558,"schema_rev":2932720553,"carry":["refusal","bye","verb"],
 "domains":[{"name":"world","bit":1},{"name":"desk","bit":2},{"name":"mail","bit":4},{"name":"lanes","bit":8},{"name":"corpus","bit":16},{"name":"system","bit":0}],
 "frames":[{"name":"HELLO","id":1},{"name":"WELCOME","id":2},{"name":"BOOT","id":3},{"name":"PATCH","id":4},{"name":"OPS","id":8},{"name":"ACK","id":9},{"name":"NACK","id":10},{"name":"TICK","id":11},{"name":"PING","id":13},{"name":"PONG","id":14},{"name":"BYE","id":16},{"name":"RPC","id":33},{"name":"REPLY","id":34}],
 "enums":[

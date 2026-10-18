@@ -11,9 +11,11 @@
 //! ```
 //!
 //! `len` counts the whole frame and is a multiple of 8, so a stream of
-//! frames is split by reading `len`. Flags: `DEFLATE 0x01` (the body is
-//! `u32 raw_len | u32 deflated_len | raw DEFLATE bytes | pad`; inflated it
-//! is the plain body), `END 0x02` (the last frame of a burst). `rev` is the
+//! frames is split by reading `len`. Flags: `ZSTD 0x01` (the body is
+//! `u32 raw_len | u32 packed_len | one zstd frame | pad`, the frame against
+//! the frame dictionary with its content size stated; unpacked it is the
+//! plain body, shuffled when it is table runs, see below), `END 0x02` (the
+//! last frame of a burst). `rev` is the
 //! account's rev as of the frame, 0 where it means nothing (up frames).
 //!
 //! A *field* is `u32 len | bytes | zero pad to 8`. Fixed parts are
@@ -64,6 +66,13 @@
 //!
 //! Codes 1–5 are the schema's wire types; 6 and 7 are encodings a writer
 //! may pick for a column (a str of few distinct values; a list of ids).
+//!
+//! **Shuffle.** A ZSTD body of table runs (BOOT, PATCH, TICK) is shuffled
+//! before packing: every u32 column's data becomes 4 byte planes (plane p
+//! holds byte p of each value), every i64 and f64 column's 8 planes, and a
+//! str column's offsets become wrapping deltas, then 4 planes, its
+//! bytes as they are. Block and column headers, pads and sym and list
+//! columns stay as they are, so the shuffled body walks like the plain one.
 //! A null and an empty string are the same thing: the sequencer stores a
 //! put of `""` as NULL, so the database never holds an empty string.
 //!
@@ -99,7 +108,7 @@
 //! ops, and one op at most [`MAX_OP_TEXT`] (1 MiB) of text, past which the
 //! server refuses it `too_large`. A down body inflates to at most
 //! [`MAX_INFLATED`]. [`LAYOUT`] numbers this layout; the schema's
-//! `wire_hash` folds it in.
+//! `wire_hash` folds it in, and the frame dictionary's id and hash.
 //!
 //! The crate is `no_std` + `alloc`, `unsafe`-free, and validates every
 //! length once at parse time with checked arithmetic, on 32-bit (wasm) as
@@ -112,12 +121,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::str;
+use ruzstd::decoding::{BlockDecodingStrategy, Dictionary, FrameDecoder};
 
 pub const HEADER: usize = 16;
 
 /// Bumped whenever a byte layout below changes, so the schema's `wire_hash`
 /// (which folds it in) refuses a client built against another layout.
-pub const LAYOUT: u16 = 3;
+pub const LAYOUT: u16 = 4;
 const _: () = assert!(
     LAYOUT == schema::LAYOUT,
     "a byte-layout change bumps `layout` in schema/hireme.schema too"
@@ -169,7 +179,7 @@ const KINDS: [u8; 13] = [
 ];
 
 /// Header flags.
-pub const DEFLATE: u8 = 0x01;
+pub const ZSTD: u8 = 0x01;
 pub const END: u8 = 0x02;
 
 /// HELLO credential kinds.
@@ -219,6 +229,26 @@ pub const MAX_OP_TEXT: usize = 1 << 20;
 pub const MAX_UP: usize = 16 << 20;
 /// The largest body an inflate may produce.
 pub const MAX_INFLATED: usize = 256 << 20;
+/// The zstd dictionary of ZSTD bodies, the bytes the schema's dict line names.
+pub const FRAME_DICT: &[u8] = include_bytes!("../../../priv/wire/frame.zdict");
+
+const fn fnv(b: &[u8]) -> u32 {
+    let (mut h, mut i) = (0x811C_9DC5u32, 0);
+    while i < b.len() {
+        h = (h ^ b[i] as u32).wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    h
+}
+
+const fn dict_id(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[4], b[5], b[6], b[7]])
+}
+
+const _: () = assert!(
+    dict_id(FRAME_DICT) == schema::FRAME_DICT.0 && fnv(FRAME_DICT) == schema::FRAME_DICT.1,
+    "priv/wire/frame.zdict is not the schema's dict frame line"
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -236,7 +266,7 @@ pub enum Error {
     Str,
     /// A body that is not what its kind promises (nonzero pad, bad counts, trailing bytes).
     Body,
-    /// A DEFLATE body that does not inflate to its stated length.
+    /// A ZSTD body that does not unpack to its stated length.
     Inflate,
 }
 
@@ -252,7 +282,7 @@ impl core::fmt::Display for Error {
             Error::Column => "a column or cell that does not fit its type",
             Error::Str => "string offsets or UTF-8 that do not hold",
             Error::Body => "a body that is not what its kind promises",
-            Error::Inflate => "a DEFLATE body that does not inflate to its stated length",
+            Error::Inflate => "a ZSTD body that does not unpack to its stated length",
         };
         f.write_str(what)
     }
@@ -382,7 +412,7 @@ impl<'a> Frame<'a> {
         if !KINDS.contains(&header.kind) {
             return Err(Error::Kind);
         }
-        if header.flags & !(DEFLATE | END) != 0 {
+        if header.flags & !(ZSTD | END) != 0 {
             return Err(Error::Body);
         }
         Ok(Frame { header, raw: b })
@@ -392,22 +422,22 @@ impl<'a> Frame<'a> {
         self.header.kind
     }
 
-    /// The body as sent; for a DEFLATE frame, the compressed form.
+    /// The body as sent; for a ZSTD frame, the packed form.
     pub fn raw_body(&self) -> &'a [u8] {
         &self.raw[HEADER..]
     }
 
-    /// The plain body, inflated if needed, up to [`MAX_INFLATED`].
+    /// The plain body, unpacked if needed, up to [`MAX_INFLATED`].
     pub fn body(&self) -> Result<Body<'a>> {
         self.body_max(MAX_INFLATED)
     }
 
-    /// The plain body, refusing one that would inflate past `limit` bytes.
+    /// The plain body, refusing one that would unpack past `limit` bytes.
     /// A server reading a client's frame passes [`MAX_UP`]: compression must
     /// not let a small frame cost more than a large one.
     pub fn body_max(&self, limit: usize) -> Result<Body<'a>> {
         let b = self.raw_body();
-        if self.header.flags & DEFLATE == 0 {
+        if self.header.flags & ZSTD == 0 {
             return Ok(Body::Borrowed(b));
         }
         if b.len() < 8 {
@@ -421,10 +451,9 @@ impl<'a> Frame<'a> {
         if b[end..].iter().any(|&z| z != 0) {
             return Err(Error::Body);
         }
-        let out = miniz_oxide::inflate::decompress_to_vec_with_limit(&b[8..end], raw_len)
-            .map_err(|_| Error::Inflate)?;
-        if out.len() != raw_len {
-            return Err(Error::Inflate);
+        let mut out = unzstd(&b[8..end], raw_len, FRAME_DICT)?;
+        if matches!(self.header.kind, BOOT | PATCH | TICK) {
+            unshuffle(&mut out)?;
         }
         Ok(Body::Owned(out))
     }
@@ -443,6 +472,77 @@ impl core::ops::Deref for Body<'_> {
         match self {
             Body::Borrowed(b) => b,
             Body::Owned(v) => v,
+        }
+    }
+}
+
+// ----------------------------------------------------------------- packing
+
+/// One zstd frame against `dict`, exactly `want` bytes when unpacked.
+fn unzstd(z: &[u8], want: usize, dict: &[u8]) -> Result<Vec<u8>> {
+    let mut dec = FrameDecoder::new();
+    dec.add_dict(Dictionary::decode_dict(dict).map_err(|_| Error::Inflate)?).map_err(|_| Error::Inflate)?;
+    unzstd_with(&mut dec, z, want..=want)
+}
+
+/// The frame's header must state a content size in `size` (its window no
+/// larger); a frame of another dictionary than the decoder holds is
+/// refused by the decoder.
+fn unzstd_with(dec: &mut FrameDecoder, z: &[u8], size: core::ops::RangeInclusive<usize>) -> Result<Vec<u8>> {
+    dec.set_max_window_size(*size.end() as u64);
+    let mut src = z;
+    dec.reset(&mut src).map_err(|_| Error::Inflate)?;
+    let want = usize::try_from(dec.content_size()).ok().filter(|n| *n > 0 && size.contains(n)).ok_or(Error::Inflate)?;
+    // A frame decodes in blocks of at most 128 KiB: past `want` by one is a lie.
+    dec.decode_blocks(&mut src, BlockDecodingStrategy::UptoBytes(want + 1)).map_err(|_| Error::Inflate)?;
+    let out = dec.collect().unwrap_or_default();
+    if !dec.is_finished() || !src.is_empty() || out.len() != want {
+        return Err(Error::Inflate);
+    }
+    Ok(out)
+}
+
+/// Undoes the shuffle of a table-run body in place (see the crate doc). A
+/// body that does not walk is left to [`Blocks::new`] to refuse.
+fn unshuffle(b: &mut [u8]) -> Result<()> {
+    let mut at = 0usize;
+    while at + 8 <= b.len() {
+        let (ncols, nrows) = (u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
+        at += 8;
+        for _ in 0..ncols {
+            let (ty, len) = (*b.get(at + 2).ok_or(Error::Short)?, u32_at(b.get(at..at + 8).ok_or(Error::Short)?, 4) as usize);
+            let data = b.get_mut(at + 8..(at + 8).checked_add(len).ok_or(Error::Short)?).ok_or(Error::Short)?;
+            match ty {
+                U32 => unplane(data, 4),
+                I64 | F64 => unplane(data, 8),
+                STR => {
+                    let head = nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)?;
+                    let offsets = &mut data[..head];
+                    unplane(offsets, 4);
+                    let mut sum = 0u32;
+                    for o in offsets.as_chunks_mut::<4>().0 {
+                        sum = sum.wrapping_add(u32::from_le_bytes(*o));
+                        *o = sum.to_le_bytes();
+                    }
+                }
+                _ => {}
+            }
+            at = pad8(at + 8 + len);
+        }
+    }
+    Ok(())
+}
+
+/// Planes of `w`-byte values back into values; a ragged tail is left as is.
+fn unplane(data: &mut [u8], w: usize) {
+    let n = data.len() / w;
+    if n == 0 {
+        return;
+    }
+    let planes = data[..n * w].to_vec();
+    for (i, v) in data[..n * w].chunks_exact_mut(w).enumerate() {
+        for (p, x) in v.iter_mut().enumerate() {
+            *x = planes[p * n + i];
         }
     }
 }
@@ -530,25 +630,6 @@ impl Writer {
         };
         h.write(&mut self.buf[..HEADER]);
         self.buf
-    }
-
-    /// Finishes with the body deflated when that is smaller.
-    pub fn finish_deflated(mut self, level: u8) -> Vec<u8> {
-        self.pad();
-        let body = &self.buf[HEADER..];
-        if body.len() < 256 {
-            return self.finish();
-        }
-        let packed = miniz_oxide::deflate::compress_to_vec(body, level);
-        if pad8(8 + packed.len()) >= body.len() {
-            return self.finish();
-        }
-        let mut w = Writer::new(self.kind, self.hash, self.rev);
-        w.flags = self.flags | DEFLATE;
-        w.u32(body.len() as u32)
-            .u32(packed.len() as u32)
-            .bytes(&packed);
-        w.finish()
     }
 }
 

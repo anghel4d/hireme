@@ -37,6 +37,9 @@
 !/priv/schema.json
 !/priv/db/
 !/priv/db/*.sql
+# The zstd dictionaries both wire ends embed (schema/hireme.schema's dict lines).
+!/priv/wire/
+!/priv/wire/*.zdict
 # The deployed baseline's hash: `mix hireme.schema --freeze` writes it, and
 # the cutover revision must carry it.
 !/priv/db/baseline.lock

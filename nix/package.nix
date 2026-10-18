@@ -33,10 +33,12 @@ let
         type != "symlink" && lib.any (d: within d || above d) paths && !(within "native/target");
     };
 
-  # The Rust half reads the declaration (native/schema include_str!s it).
+  # The Rust half reads the declaration (native/schema include_str!s it)
+  # and embeds the zstd dictionaries (native/wire include_bytes!s them).
   nativeSrc = only "hireme-native" [
     "native"
     "schema/hireme.schema"
+    "priv/wire"
   ];
 
   cargo = {
@@ -122,6 +124,7 @@ let
       "schema/hireme.schema"
       "priv/schema.json"
       "priv/db"
+      "priv/wire"
       "assets"
     ];
     mixEnv = "prod";

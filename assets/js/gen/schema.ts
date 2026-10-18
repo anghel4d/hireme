@@ -3,9 +3,9 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x1228;
-export const SCHEMA_REV = 0x18ffd716;
-export const LAYOUT = 3;
+export const WIRE_HASH = 0xe4be;
+export const SCHEMA_REV = 0xaecdc3a9;
+export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
 export const DOMAIN = { world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16, system: 0 } as const;

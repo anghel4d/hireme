@@ -10,6 +10,7 @@
 #   frame <NAME> <id>                wire frame kinds
 #   layout <n>                       the byte layout native/wire implements; in
 #                                    wire_hash, so a client of another refuses
+#   dict frame <id> <fnv>            the zstd dictionary of ZSTD bodies, in wire_hash
 #   enum <name> <value>...           codes are 0-based declaration order
 #   carry <enum>...                  enums the frames carry (NACK, BYE, op verbs);
 #                                    an enum enters wire_hash when a resident,
@@ -17,7 +18,7 @@
 #                                    or this line names it
 #   table <name> <domain> <residency> [append_only] [soft_delete] [global] [account_optional] [singleton]
 #       residency: resident (the kernel derives from it; on the wire)
-#                  server   (read over RPC, server-side)
+#                  server   (never leaves the server)
 #                  wire     (derived on the wire, never stored)
 #       global: no account_id (accounts, magic_links)
 #       account_optional: account_id may be null (audit before sign-in)
@@ -81,7 +82,9 @@
 
 domain world desk mail lanes corpus system
 
-layout 3
+layout 4
+# priv/wire/frame.zdict: a ZSTD body packs against it.
+dict frame 1213351506 3169144972
 
 frame HELLO 1
 frame WELCOME 2

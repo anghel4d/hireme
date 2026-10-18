@@ -78,4 +78,5 @@ defmodule Hireme.Kernel.Nif do
   def judge_dirty(_res, _op, _ctx), do: :erlang.nif_error(:nif_not_loaded)
   def board_ids(_res, _stage), do: :erlang.nif_error(:nif_not_loaded)
   def keywords_version, do: :erlang.nif_error(:nif_not_loaded)
+  def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
 end

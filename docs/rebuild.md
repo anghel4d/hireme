@@ -288,7 +288,7 @@ Gone with no successor: `claims`, squads, `scoreboard_snapshots`,
 ## Wire v2
 
 Header: `u32 len | u8 kind | u8 flags | u16 wire_hash | u64 rev`, 16
-bytes, bodies 8-aligned. Flags: `DEFLATE 0x01`, `END 0x02`.
+bytes, bodies 8-aligned. Flags: `ZSTD 0x01`, `END 0x02`.
 
 | Frame | Id | Direction | Body |
 | --- | --- | --- | --- |
@@ -328,7 +328,10 @@ changes, each with its wire type, and the server does not cast strings.
 command's params are its declared columns or typed free params. One op carries up to 1 MiB of
 text (`too_large` past it); one `OPS` frame carries up to 256 ops.
 
-Texts travel whole in BOOT/PATCH. Every read (`find`, `get`, `text`,
+Texts travel whole in BOOT/PATCH. A BOOT or PATCH body of 256 bytes or
+more is shuffled (byte planes) and packed with zstd 9 against
+`priv/wire/frame.zdict`, declared in the schema (its `dict` line), so
+retraining it moves `wire_hash`. Every read (`find`, `get`, `text`,
 `history`) is the replica's own: the browser's and hireme-mcp's kernel
 answers it locally. The RPC methods left are `account.*` (the account
 lens) and `lease.*`.
@@ -593,7 +596,7 @@ timeout written down.
 - The kernel's own vectors run native and under wasm. No Elixir oracle, no
   parity fixtures.
 - `bench/` is rewritten for v2.
-- Bounds: BOOT ≤ 2 MiB deflated at 10k applications; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
+- Bounds: BOOT ≤ 2 MiB packed (ZSTD) at 10k applications; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
   wasm at 10k, and the first derive after BOOT (which follows the snapshot's
   paint) ≤ 30 ms on the worst-case bench desk; `judge` ≤ 200 µs in the NIF; op
   round trip p50 ≤ 5 ms on loopback; 256 ops per `OPS` frame.

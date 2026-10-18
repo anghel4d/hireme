@@ -2,6 +2,8 @@
 //! unchanged; a byte stream of frames splits into the same frames at any
 //! chunking; and no input, however mangled, panics a decoder.
 
+mod pack;
+
 use proptest::prelude::*;
 use wire::*;
 
@@ -110,15 +112,13 @@ proptest! {
     }
 
     #[test]
-    fn frames_survive_deflate_and_any_chunking(
+    fn frames_survive_zstd_and_any_chunking(
         blocks in prop::collection::vec(block(), 1..4),
         rev in any::<u64>(),
         cuts in prop::collection::vec(1usize..64, 0..20),
     ) {
         let body = write_blocks(&blocks);
-        let mut w = Writer::new(BOOT, HASH, rev).end();
-        w.bytes(&body);
-        let packed = w.finish_deflated(6);
+        let packed = pack::frame(PONG, HASH, &body);
         let ping = encode_ping(PONG, HASH, rev);
         let stream: Vec<u8> = [packed.clone(), ping.clone()].concat();
 
@@ -137,9 +137,9 @@ proptest! {
             }
         }
         prop_assert_eq!(frames.len(), 2);
-        let boot = Frame::parse(&frames[0], HASH).unwrap();
-        prop_assert_eq!((boot.kind(), boot.header.rev, boot.header.flags & END), (BOOT, rev, END));
-        prop_assert_eq!(&*boot.body().unwrap(), &body[..]);
+        let packed = Frame::parse(&frames[0], HASH).unwrap();
+        prop_assert_eq!((packed.kind(), packed.header.flags), (PONG, ZSTD));
+        prop_assert_eq!(&*packed.body().unwrap(), &body[..]);
         prop_assert_eq!(&frames[1], &ping);
     }
 
@@ -269,7 +269,7 @@ proptest! {
         let mut framed = Writer::new(BOOT, HASH, 0);
         framed.bytes(body);
         let mut f = framed.finish();
-        f[5] |= DEFLATE;
+        f[5] |= ZSTD;
         if let Ok(fr) = Frame::parse(&f, HASH) { let _ = fr.body(); }
     }
 }
@@ -470,10 +470,8 @@ fn refuses_malformed_bodies() {
     .encode(HASH, 0);
     assert!(Bye::decode(Frame::parse(&bye, HASH).unwrap().raw_body()).is_err());
 
-    // A small frame that inflates past the reader's limit is refused.
-    let mut big = Writer::new(BOOT, HASH, 0);
-    big.zeros(1 << 20);
-    let packed = big.finish_deflated(6);
+    // A small frame that unpacks past the reader's limit is refused.
+    let packed = pack::frame(PING, HASH, &vec![0; 1 << 20]);
     let frame = Frame::parse(&packed, HASH).unwrap();
     assert!(packed.len() < 4096);
     assert_eq!(frame.body_max(1 << 16).unwrap_err(), Error::Inflate);

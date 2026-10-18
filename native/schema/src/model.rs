@@ -148,6 +148,16 @@ pub struct Frame {
     pub id: u8,
 }
 
+/// A zstd dictionary both ends embed (`priv/wire/<name>.zdict`): `frame`
+/// for ZSTD bodies. Its id is the one its frames name; its fnv covers its
+/// bytes, so a retrained dictionary moves wire_hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dict {
+    pub name: String,
+    pub id: u32,
+    pub fnv: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Enum {
     pub id: u16,
@@ -346,6 +356,7 @@ pub struct Schema {
     pub carry: Vec<String>,
     pub domains: Vec<Domain>,
     pub frames: Vec<Frame>,
+    pub dicts: Vec<Dict>,
     pub enums: Vec<Enum>,
     pub tables: Vec<Table>,
     pub commands: Vec<Command>,
@@ -731,6 +742,7 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
     let mut carry: Vec<String> = Vec::new();
     let mut layout: Option<u16> = None;
     let mut frames: Vec<Frame> = Vec::new();
+    let mut dicts: Vec<Dict> = Vec::new();
     let mut enums: Vec<(String, Vec<String>)> = Vec::new();
     let mut tables: Vec<RawTable> = Vec::new();
 
@@ -760,6 +772,13 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                     return fail(line, format!("frame name {fname}"));
                 }
                 frames.push(Frame { name: (*fname).to_owned(), id: int(id, line, 1, 255)? as u8 })
+            }
+            ["dict", dname @ "frame", id, fnv] => {
+                if dicts.iter().any(|d| d.name == *dname) {
+                    return fail(line, format!("dict {dname} twice"));
+                }
+                let (id, fnv) = (int(id, line, 1, u32::MAX as i128)? as u32, int(fnv, line, 0, u32::MAX as i128)? as u32);
+                dicts.push(Dict { name: (*dname).to_owned(), id, fnv });
             }
             ["enum", ename, values @ ..] if !values.is_empty() => {
                 name(ename, line)?;
@@ -849,7 +868,10 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
     }
 
     let Some(layout) = layout else { return fail(0, "no layout line".into()) };
-    resolve(layout, carry, domains, frames, enums, tables)
+    if dicts.len() != 1 {
+        return fail(0, "no dict frame line".into());
+    }
+    resolve(layout, carry, domains, frames, dicts, enums, tables)
 }
 
 fn implied(t: &RawTable) -> Vec<Column> {
@@ -924,6 +946,7 @@ fn resolve(
     carry: Vec<String>,
     domain_names: Vec<String>,
     frames: Vec<Frame>,
+    dicts: Vec<Dict>,
     raw_enums: Vec<(String, Vec<String>)>,
     raw: Vec<RawTable>,
 ) -> Result<Schema, Error> {
@@ -1025,7 +1048,7 @@ fn resolve(
         }
     }
 
-    let mut schema = Schema { layout, carry, domains, frames, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
+    let mut schema = Schema { layout, carry, domains, frames, dicts, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
     validate(&schema)?;
     schema.wire_hash = fold(fnv(canonical(&schema, Scope::Wire).as_bytes()));
     schema.schema_rev = fnv(canonical(&schema, Scope::Full).as_bytes());
@@ -1176,6 +1199,9 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
         line(format!("domain {} {}", d.name, d.bit));
     }
     line(format!("layout {}", s.layout));
+    for d in &s.dicts {
+        line(format!("dict {} {} {}", d.name, d.id, d.fnv));
+    }
     for f in &s.frames {
         line(format!("frame {} {}", f.name, f.id));
     }

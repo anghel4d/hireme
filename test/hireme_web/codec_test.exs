@@ -3,6 +3,7 @@ defmodule HiremeWeb.Wire.CodecTest do
   # the two codecs agree on table runs and gone blocks byte for byte.
   use ExUnit.Case, async: true
   import Bitwise
+  alias Hireme.Schema
   alias HiremeWeb.Wire.Codec
 
   defp hex(iodata), do: iodata |> IO.iodata_to_binary() |> Base.encode16(case: :lower)
@@ -66,18 +67,52 @@ defmodule HiremeWeb.Wire.CodecTest do
     assert {:ok, nil} = Codec.cell_to_value(%{type: :str, wire: 2}, {8, 2, ""})
   end
 
-  test "a DEFLATE body cut before its stream ends is refused" do
-    body = :binary.copy("hireme ", 400)
-    whole = Codec.frame(:BOOT, 0, body, deflate: true)
-    assert {:ok, :BOOT, _, _, ^body} = Codec.decode(whole)
-    <<head::binary-16, raw::little-32, n::little-32, stream::binary-size(n), _::binary>> = whole
-    cut = binary_part(stream, 0, n - 2)
-    m = byte_size(cut)
-    pad = rem(8 - rem(8 + m, 8), 8)
-    body2 = <<raw::little-32, m::little-32, cut::binary, 0::size(pad * 8)>>
-    <<_::32, rest::binary-12>> = head
-    frame = <<16 + byte_size(body2)::little-32, rest::binary, body2::binary>>
-    assert {:error, _} = Codec.decode(frame)
+  test "a ZSTD table run unpacks to itself, and a cut or relabelled one is refused" do
+    texts =
+      for i <- 1..300,
+          do: "Senior Rust engineer #{i}, " <> String.duplicate("kernels and GPUs. ", rem(i, 40))
+
+    t = Schema.table(:applications)
+    cols = [Schema.column(:applications, "listing_raw"), Schema.column(:applications, "stage")]
+
+    rows =
+      for {x, i} <- Enum.with_index(texts, 1), do: %{id: i, listing_raw: x, stage: :discovered}
+
+    apps =
+      IO.iodata_to_binary(Codec.rows_block(t, [Schema.column(:applications, "id") | cols], rows))
+
+    body =
+      IO.iodata_to_binary([
+        apps,
+        Codec.block(t.id, 3, [{1, 3, [-5, nil, 1 <<< 40]}, {2, 4, [1.5, nil, -0.25]}]),
+        Codec.gone_block([{t.id, 7}, {t.id, 9}])
+      ])
+
+    whole = Codec.frame(:BOOT, 0, body, compress: true)
+    assert byte_size(whole) < div(byte_size(body), 2)
+    assert {:ok, :BOOT, 1, _, ^body} = Codec.decode(whole)
+
+    model = Hireme.WireCase.ingest(%{}, :BOOT, apps)
+
+    assert get_in(model, ["applications", 300, Schema.column(:applications, "listing_raw").id]) ==
+             List.last(texts)
+
+    <<head::binary-16, raw::little-32, n::little-32, packed::binary-size(n), _::binary>> = whole
+
+    reframe = fn packed, raw ->
+      m = byte_size(packed)
+
+      body2 =
+        <<raw::little-32, m::little-32, packed::binary, 0::size(rem(8 - rem(8 + m, 8), 8) * 8)>>
+
+      <<_::32, rest::binary-12>> = head
+      <<16 + byte_size(body2)::little-32, rest::binary, body2::binary>>
+    end
+
+    assert {:ok, :BOOT, _, _, ^body} = Codec.decode(reframe.(packed, raw))
+    assert {:error, _} = Codec.decode(reframe.(binary_part(packed, 0, n - 2), raw))
+    assert {:error, _} = Codec.decode(reframe.(packed, raw + 8))
+    assert {:error, _} = Codec.decode(whole, raw - 8)
   end
 
   test "a value that does not fit its cell type is refused, never wrapped" do

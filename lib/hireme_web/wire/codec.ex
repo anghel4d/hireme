@@ -15,23 +15,35 @@ defmodule HiremeWeb.Wire.Codec do
   """
 
   import Bitwise
+  alias Hireme.Kernel.Nif
   alias Hireme.Schema
 
   @header 16
   @none32 0xFFFF_FFFF
   @min64 -0x8000_0000_0000_0000
   @nan <<0, 0, 0, 0, 0, 0, 0xF8, 0x7F>>
-  @deflate 0x01
+  @zstd 0x01
   @end_flag 0x02
   @max_up 16 <<< 20
   @max_ops 256
   @max_inflated 256 <<< 20
+  # Bodies under this many bytes travel raw.
+  @floor 256
 
   @t_null 0
   @t_u32 1
   @t_str 2
   @t_i64 3
   @t_f64 4
+
+  # The zstd dictionary both ends embed; its id and hash are in
+  # schema/hireme.schema's dict line, so wire_hash moves with it.
+  @dicts Map.new([:frame], fn k ->
+           path = Path.expand("../../../priv/wire/#{k}.zdict", __DIR__)
+           @external_resource path
+           {k, File.read!(path)}
+         end)
+  @runs [:BOOT, :PATCH, :TICK]
 
   @frames Map.new(Schema.frames(), &{String.to_atom(&1.name), &1.id})
   @frame_names Map.new(Schema.frames(), &{&1.id, String.to_atom(&1.name)})
@@ -66,12 +78,12 @@ defmodule HiremeWeb.Wire.Codec do
     flags = if opts[:end], do: @end_flag, else: 0
 
     {flags, body} =
-      if opts[:deflate] && byte_size(body) >= 256 do
-        packed = deflate(body)
+      if opts[:compress] && byte_size(body) >= @floor do
+        packed = zstd(shuffle(kind, body), 9, :frame)
 
         if pad8(8 + byte_size(packed)) < byte_size(body),
           do:
-            {flags ||| @deflate,
+            {flags ||| @zstd,
              <<byte_size(body)::little-32, byte_size(packed)::little-32, packed::binary>>},
           else: {flags, body}
       else
@@ -104,8 +116,8 @@ defmodule HiremeWeb.Wire.Codec do
 
   @doc """
   Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`. A
-  DEFLATE body may inflate to at most `max_inflated` bytes; a session
-  reading a peer's frame passes `max_up/0`.
+  ZSTD body may unpack to at most `max_inflated` bytes; a session reading
+  a peer's frame passes `max_up/0`.
   """
   def decode(frame, max_inflated \\ @max_inflated)
 
@@ -117,8 +129,8 @@ defmodule HiremeWeb.Wire.Codec do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- frame_name(kind),
          # Bits tested without bnot, which Dialyzer types as never zero.
-         :ok <- if((flags &&& (@deflate ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
-         {:ok, body} <- inflate(flags, body, max_inflated) do
+         :ok <- if((flags &&& (@zstd ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
+         {:ok, body} <- unpack(f, flags, body, max_inflated) do
       {:ok, name, flags, rev, body}
     end
   end
@@ -132,62 +144,89 @@ defmodule HiremeWeb.Wire.Codec do
     end
   end
 
-  defp inflate(flags, body, _max) when (flags &&& @deflate) == 0, do: {:ok, body}
+  defp unpack(_frame, flags, body, _max) when (flags &&& @zstd) == 0, do: {:ok, body}
 
-  defp inflate(_, <<raw::little-32, n::little-32, rest::binary>> = body, max)
-       when raw <= max and rem(raw, 8) == 0 and 8 + n <= byte_size(body) do
-    pad = byte_size(body) - 8 - n
-
-    if pad8(8 + n) == byte_size(body) and zeros?(binary_part(rest, n, pad)) do
-      try do
-        out = inflate_raw(binary_part(rest, 0, n), raw)
-        if byte_size(out) == raw, do: {:ok, out}, else: {:error, :inflate}
-      rescue
-        _ -> {:error, :inflate}
-      end
-    else
-      {:error, :inflate}
+  # native/wire unpacks and unshuffles, as every client does.
+  defp unpack(frame, _flags, _body, max) do
+    case Nif.unpack(frame, max) do
+      nil -> {:error, :inflate}
+      body -> {:ok, body}
     end
   end
 
-  defp inflate(_, _, _), do: {:error, :inflate}
+  # One zstd frame against a dictionary, its content size and the
+  # dictionary's id stated (native/wire refuses any other).
+  defp zstd(bin, level, dict) do
+    opts = %{
+      compressionLevel: level,
+      dictionary: dict(dict, level),
+      checksumFlag: false,
+      contentSizeFlag: true,
+      dictIDFlag: true
+    }
 
-  defp deflate(bin) do
-    z = :zlib.open()
+    IO.iodata_to_binary(:zstd.compress(bin, opts))
+  end
 
-    try do
-      :ok = :zlib.deflateInit(z, 6, :deflated, -15, 8, :default)
-      out = :zlib.deflate(z, bin, :finish)
-      :zlib.deflateEnd(z)
-      IO.iodata_to_binary(out)
-    after
-      :zlib.close(z)
+  # Compiled dictionaries live once per node, by kind and level.
+  defp dict(kind, level) do
+    key = {__MODULE__, kind, level}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        {:ok, d} = :zstd.dict(:compress, Map.fetch!(@dicts, kind), %{compressionLevel: level})
+        :persistent_term.put(key, d)
+        d
+
+      d ->
+        d
     end
   end
 
-  # Inflates at most `limit` bytes, so a small body cannot expand without bound.
-  defp inflate_raw(bin, limit) do
-    z = :zlib.open()
+  # A table run's fixed-width columns as byte planes (and a str column's
+  # offsets as deltas first), so like bytes sit together for zstd: headers,
+  # pads, text and sym/list columns stay as they are. native/wire undoes it.
+  defp shuffle(kind, body) when kind in @runs, do: walk(body, [])
+  defp shuffle(_kind, body), do: body
 
-    try do
-      :ok = :zlib.inflateInit(z, -15)
-      out = inflate_loop(z, :zlib.safeInflate(z, bin), [], 0, limit)
-      # Raises on a stream cut before its end marker, as native/wire refuses it.
-      :ok = :zlib.inflateEnd(z)
-      IO.iodata_to_binary(out)
-    after
-      :zlib.close(z)
-    end
+  defp walk(<<>>, acc), do: IO.iodata_to_binary(Enum.reverse(acc))
+
+  defp walk(<<head::binary-8, rest::binary>>, acc) do
+    <<_::16, ncols::little-16, nrows::little-32>> = head
+    {cols, rest} = walk_cols(rest, ncols, nrows, [])
+    walk(rest, [cols, head | acc])
   end
 
-  defp inflate_loop(z, {state, chunk}, acc, n, limit) do
-    n = n + IO.iodata_length(chunk)
-    if n > limit, do: raise("inflate over limit")
-    acc = [acc | chunk]
+  defp walk_cols(rest, 0, _n, acc), do: {Enum.reverse(acc), rest}
 
-    case state do
-      :continue -> inflate_loop(z, :zlib.safeInflate(z, []), acc, n, limit)
-      :finished -> acc
+  defp walk_cols(<<h::binary-8, rest::binary>>, k, n, acc) do
+    <<_::16, ty, 0, len::little-32>> = h
+    p = pad8(len) - len
+    <<data::binary-size(^len), pad::binary-size(^p), rest::binary>> = rest
+    walk_cols(rest, k - 1, n, [[h, column(ty, n, data), pad] | acc])
+  end
+
+  defp column(@t_u32, _n, data), do: planes(data, 4)
+  defp column(ty, _n, data) when ty in [@t_i64, @t_f64], do: planes(data, 8)
+
+  # A str column's offsets as wrapping deltas, then planes; its bytes as they are.
+  defp column(@t_str, n, data) do
+    k = (n + 1) * 4
+    <<offsets::binary-size(^k), text::binary>> = data
+
+    {d, _} =
+      for(<<v::little-32 <- offsets>>, do: v)
+      |> Enum.map_reduce(0, fn v, prev -> {<<v - prev &&& @none32::little-32>>, v} end)
+
+    [planes(IO.iodata_to_binary(d), 4), text]
+  end
+
+  defp column(_ty, _n, data), do: data
+
+  defp planes(data, w) do
+    for p <- 0..(w - 1), into: <<>> do
+      q = w - 1 - p
+      for <<_::binary-size(^p), b, _::binary-size(^q) <- data>>, into: <<>>, do: <<b>>
     end
   end
 

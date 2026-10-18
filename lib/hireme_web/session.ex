@@ -104,7 +104,7 @@ defmodule HiremeWeb.Session do
 
   @doc "Any other message the hosting process received."
   def info({:sequencer, :patch, rev, body}, %{phase: :live} = state),
-    do: {:push, [Codec.frame(:PATCH, rev, body, end: true, deflate: true)], %{state | rev: rev}}
+    do: {:push, [Codec.frame(:PATCH, rev, body, end: true, compress: true)], %{state | rev: rev}}
 
   def info({:sequencer, :verdicts, rev, acks, nacks}, %{phase: :live} = state) do
     frames =
