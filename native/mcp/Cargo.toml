@@ -1,0 +1,18 @@
+[package]
+name = "hireme-mcp"
+version = "2.0.0"
+edition.workspace = true
+publish.workspace = true
+description = "hireme's MCP server: one wire session under an API key; tools and resources from the catalog the key can see"
+
+[[bin]]
+name = "hireme-mcp"
+path = "src/main.rs"
+
+[dependencies]
+schema = { path = "../schema" }
+wire = { path = "../wire" }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
