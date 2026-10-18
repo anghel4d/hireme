@@ -132,7 +132,9 @@ defmodule HiremeWeb.Auth do
   def session_key, do: @session_key
 
   def fetch_account(conn, _opts) do
-    case Accounts.session(get_session(conn, @session_key)) do
+    token = get_session(conn, @session_key)
+
+    case Accounts.session(token) do
       {session, account} ->
         Repo.put_account(account.id)
 
@@ -143,8 +145,24 @@ defmodule HiremeWeb.Auth do
 
       nil ->
         Repo.put_account(nil)
-        conn |> assign(:account, nil) |> assign(:session, nil) |> assign(:pending, false)
+
+        conn
+        |> ended(token)
+        |> assign(:account, nil)
+        |> assign(:session, nil)
+        |> assign(:pending, false)
     end
+  end
+
+  # A cookie whose session ended elsewhere (revoked, expired, idle, the
+  # account suspended) is a sign-out the browser did not ask for: its token
+  # goes, and with it the desk the page stored, as on /sign-out.
+  defp ended(conn, nil), do: conn
+
+  defp ended(conn, _token) do
+    conn
+    |> delete_session(@session_key)
+    |> put_resp_header("clear-site-data", ~s("storage"))
   end
 
   def require_account(conn, _opts) do

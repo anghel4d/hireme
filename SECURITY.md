@@ -77,7 +77,9 @@ suspension takes effect on the next request and ends the session's wire
 sessions at once (BYE `revoked`, BYE `suspended`). The account lens lists
 sessions and revokes any of them; signing out revokes the row, so a copied
 cookie is dead on the server, and answers `Clear-Site-Data: "storage"`, so
-the desk snapshot the browser kept in IndexedDB is gone too (ASVS 7.4.1,
+the desk snapshot the browser kept in IndexedDB is gone too; a page
+request carrying a cookie whose session ended elsewhere answers the same
+(ASVS 7.4.1,
 7.4.3).
 
 A page reaches the wire with a ticket, never the cookie: a single-use,
