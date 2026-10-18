@@ -97,6 +97,20 @@ for (const kase of file.cases) {
   });
 }
 
+// The text-keyed maps' hash seed comes from the host's crypto RNG, never a
+// constant: the module cannot be instantiated without the import, and a
+// desk's derive draws from it.
+{
+  const imports = WebAssembly.Module.imports(new WebAssembly.Module(bytes));
+  if (!imports.some((i) => i.module === "host" && i.name === "random_u32" && i.kind === "function"))
+    failures.push("seed: the module does not import host.random_u32");
+  const { x, out, call, draws } = await instance(bytes);
+  const catalog = JSON.parse(out(x.catalog()));
+  call(x.ingest, bootFrame(catalog, { applications: [{ id: 1, no: 1, company: "Acme", role: "Engineer", stage: "discovered" }] }));
+  call(x.view, enc.encode("{}"));
+  if (draws.n === 0) failures.push("seed: a derive never drew from host.random_u32");
+}
+
 if (failures.length) {
   console.error(`${failures.length} vector failures:\n${failures.join("\n")}`);
   process.exit(1);

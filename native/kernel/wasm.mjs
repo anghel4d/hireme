@@ -23,8 +23,16 @@ export class Bytes {
   bytes() { return Uint8Array.from(this.a); }
 }
 
+// The host's crypto RNG, the kernel's one import: it seeds the hash of
+// text-keyed maps, which must not be predictable (lib.rs `keyed`).
+export const host = (draws = { n: 0 }) => ({
+  imports: { host: { random_u32: () => (draws.n++, crypto.getRandomValues(new Uint32Array(1))[0]) } },
+  draws,
+});
+
 export async function instance(bytes) {
-  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const h = host();
+  const { instance } = await WebAssembly.instantiate(bytes, h.imports);
   const x = instance.exports;
   const mem = () => new Uint8Array(x.memory.buffer);
   const put = (u8s) => {
@@ -39,7 +47,7 @@ export async function instance(bytes) {
     for (let i = 0; i < args.length; i += 2) x.dealloc(args[i], args[i + 1]);
     return n;
   };
-  return { x, mem, out, call };
+  return { x, mem, out, call, draws: h.draws };
 }
 
 export function enumCode(catalog, target, name) {

@@ -382,8 +382,9 @@ pub struct Index {
     today: Day,
     cfg: Config,
     seats: crate::fx::Map<u32, Seat>,
-    // Keyed by the agent-written names themselves, in seeded maps: exact,
-    // and no crafted set of names can pile into one bucket.
+    // Keyed by the agent-written names themselves, in maps seeded from the
+    // host's random source (`keyed`): exact, and a set of names crafted
+    // without the seed cannot pile into one bucket.
     by_company: crate::keyed::Map<String, Group>,
     by_vendor: crate::fx::Map<Vendor, Group>,
     by_tenant: crate::fx::Map<Vendor, crate::keyed::Map<String, Group>>,

@@ -72,9 +72,10 @@ pub(crate) mod fx {
 
 /// Hash maps keyed by text a writer controls (company names, ATS tenants,
 /// the board's distinct texts). A folded-multiply hash under a seed drawn
-/// once per process: far cheaper than SipHash, above all under
-/// WebAssembly, and a text cannot aim collisions at a seed it does not
-/// know. Nothing iterates one to produce a result.
+/// once per kernel instance from the host's random source: far cheaper
+/// than SipHash, above all under WebAssembly, and a text cannot aim
+/// collisions at a seed it does not know. Nothing iterates one to produce
+/// a result.
 pub(crate) mod keyed {
     use core::hash::{BuildHasher, Hasher};
     use std::sync::OnceLock;
@@ -86,21 +87,47 @@ pub(crate) mod keyed {
         (p as u64) ^ ((p >> 64) as u64)
     }
 
+    /// The multiplier a seed keys: mixed and odd, so no seed makes it 0
+    /// (every text alike) or 1 (the hash linear in the text).
+    fn multiplier(seed: u64) -> u64 {
+        fold(seed ^ M, 0xC2B2_AE3D_27D4_EB4F) | (1 << 63) | 1
+    }
+
     #[derive(Clone, Copy)]
     pub struct Seed(u64);
 
     impl Default for Seed {
         fn default() -> Self {
             static SEED: OnceLock<u64> = OnceLock::new();
-            Seed(*SEED.get_or_init(|| std::hash::RandomState::new().hash_one(M)))
+            Seed(*SEED.get_or_init(draw))
         }
+    }
+
+    /// Under WebAssembly std has no random source (its `RandomState` keys
+    /// are one constant there), so the module imports `host.random_u32`,
+    /// the host's crypto RNG, and cannot be instantiated without it.
+    #[cfg(target_arch = "wasm32")]
+    fn draw() -> u64 {
+        #[link(wasm_import_module = "host")]
+        unsafe extern "C" {
+            fn random_u32() -> u32;
+        }
+        // SAFETY: the import takes nothing and returns a number.
+        let (a, b) = unsafe { (random_u32(), random_u32()) };
+        ((a as u64) << 32) | b as u64
+    }
+
+    /// Natively std's hash keys come from the OS's random source.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn draw() -> u64 {
+        std::hash::RandomState::new().hash_one(M)
     }
 
     impl BuildHasher for Seed {
         type Hasher = Keyed;
 
         fn build_hasher(&self) -> Keyed {
-            Keyed { h: self.0, k: self.0 ^ M }
+            Keyed { h: self.0, k: multiplier(self.0) }
         }
     }
 
@@ -145,6 +172,42 @@ pub(crate) mod keyed {
     }
 
     pub type Map<K, V> = std::collections::HashMap<K, V, Seed>;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn hash(seed: u64, bytes: &[u8]) -> u64 {
+            let mut h = Seed(seed).build_hasher();
+            h.write(bytes);
+            h.finish()
+        }
+
+        /// Collisions take the seed. Knowing it, a writer can make any
+        /// number of texts hash alike (the second word cancels the state
+        /// the first left); under any other seed those texts spread.
+        #[test]
+        fn crafted_collisions_need_the_seed() {
+            let known = 0x0123_4567_89AB_CDEF;
+            let k = multiplier(known);
+            let crafted: Vec<[u8; 16]> = (0..10_000u64)
+                .map(|w1| {
+                    let h0 = fold(known ^ 16, k);
+                    let w2 = fold(h0 ^ w1, k);
+                    let mut b = [0u8; 16];
+                    b[..8].copy_from_slice(&w1.to_le_bytes());
+                    b[8..].copy_from_slice(&w2.to_le_bytes());
+                    b
+                })
+                .collect();
+            let distinct = |seed: u64| crafted.iter().map(|b| hash(seed, b)).collect::<std::collections::BTreeSet<_>>().len();
+            assert_eq!(distinct(known), 1, "the construction collides under its seed");
+            // Any seed, the constant the multiplier is mixed from included.
+            for other in [known ^ 1, Seed::default().0, M, 0, u64::MAX] {
+                assert_eq!(distinct(other), crafted.len(), "seed {other:#x}");
+            }
+        }
+    }
 }
 
 /// A calendar day as days since 0000-01-01 in the proleptic Gregorian
