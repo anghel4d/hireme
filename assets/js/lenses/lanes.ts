@@ -5,7 +5,7 @@
 
 import type { View } from "../app.ts"
 import { ENUMS, type TableName } from "../gen/schema.ts"
-import { failed, ids, lanes, put, today, value, type Input } from "../kernel.ts"
+import { failed, ids, lanes, put, query, today, value, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { model } from "../state.ts"
 
@@ -17,9 +17,9 @@ const settingsId = (): number => ids("settings")[0] ?? 0
 
 const options = (name: string, pick: string): Html => html`${(ENUMS[name] ?? []).map((x) => html`<option${flag("selected", x === pick)}>${x}</option>`)}`
 
-/** A resident table's rows, newest first by a day column. */
+/** A resident table's newest rows by a day column, through the kernel's order index (no per-row sort here). */
 function newest(t: TableName, by: string, n: number): number[] {
-  return [...ids(t)].sort((a, b) => str(value(t, b, by)).localeCompare(str(value(t, a, by))) || b - a).slice(0, n)
+  return query<{ rows: { id: number }[] }>("find", { table: t, order: [by, "desc"], cols: ["id"], limit: n }).rows.map((r) => Number(r.id))
 }
 
 function gym(g: Gym): Html {

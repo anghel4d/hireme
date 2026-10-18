@@ -163,7 +163,7 @@ export const model: Model = {
   rows: 0,
   account: { reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
-  deskLimit: 120,
+  deskLimit: 30,
   focus: { id: 0, listing: false, fireArmed: 0, edit: "", editRev: 0, editText: "" },
   outreach: { limit: 100, open: [], edit: "" },
 }

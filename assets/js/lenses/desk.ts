@@ -16,7 +16,7 @@ import { EMPTY, html, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
 
 const CLASSES = ["cool", "warm", "hot", "blocked"] as const
-const PAGE = 120
+const PAGE = 30
 
 const list = (k: string): string[] => (model.address.q.get(k) ?? "").split(",").filter((s) => s !== "")
 
@@ -118,9 +118,21 @@ function claims(): Map<number, string> {
 
 /** Each drawn card, value by value. Its stage and claim are also attributes (data-stage, data-leased). */
 function after(root: HTMLElement): void {
+  const more = root.querySelector<HTMLElement>("button.more")
+  grower ??= new IntersectionObserver((seen) => {
+    if (seen.some((e) => e.isIntersecting)) set({ deskLimit: model.deskLimit + PAGE })
+  }, { rootMargin: "200px 0px" })
+  grower.disconnect()
+  if (more) grower.observe(more)
   const held = claims()
   for (const el of root.querySelectorAll<HTMLElement>("article.app-card")) {
     const id = Number(el.dataset.id)
+    const by0 = held.get(id)
+    // A card is rewritten only when the rows moved, its selection flipped or its claim changed: a
+    // keystroke that moves the selection touches two cards, not every card on the board.
+    const sig = `${model.rows}|${id === model.selected ? 1 : 0}|${by0 ?? ""}`
+    if (el.dataset.sig === sig) continue
+    el.dataset.sig = sig
     const c = card(id)
     const stage = c?.stage ?? String(value("applications", id, "stage") ?? "")
     if (el.dataset.stage !== stage) el.dataset.stage = stage
@@ -188,6 +200,9 @@ function open(id: number): void {
   const no = value("applications", id, "no")
   if (no !== null) go({ lens: "focus", sub: String(no), q: new Map() })
 }
+
+// The board grows as its end scrolls into view (a page at a time), so the DOM holds about what is seen.
+let grower: IntersectionObserver | null = null
 
 const desk: View = {
   title: "Desk",
