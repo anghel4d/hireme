@@ -272,7 +272,8 @@ defmodule Hireme.Audit.Coalescer do
   @moduledoc """
   An account's activity past its trail budget, counted instead of written:
   per window, per kind and key, with the distinct addresses and user agents
-  it came from (20 of each named, the rest counted). When the window closes
+  it came from (20 of each named, the rest counted, up to 1,000 tracked a
+  window, past which the events from new ones are counted). When the window closes
   its counts become one row (`activity_coalesced`, or `revokes_coalesced`
   for lease revokes), so the trail stays bounded per account and nothing is
   ever edited.
@@ -293,6 +294,9 @@ defmodule Hireme.Audit.Coalescer do
   @table __MODULE__
   @tick :timer.seconds(30)
   @named 20
+  # Distinct addresses (and user agents) a window's group tracks; past it the
+  # events are still counted, and so are those from a value it never tracked.
+  @tracked 1000
   # Distinct addresses a key's first HELLOs are written for, per window.
   @firsts 50
   # A coalesced lease change wakes the account lens at most this often.
@@ -318,12 +322,21 @@ defmodule Hireme.Audit.Coalescer do
 
   defp seen(_, _, _, _, nil), do: :ok
 
-  defp seen(account_id, budget, w, what, value),
-    do:
-      :ets.insert_new(
-        @table,
-        {{what, account_id, budget, w, Hireme.Security.clip(value, 200)}, true}
-      )
+  defp seen(account_id, budget, w, what, value) do
+    key = {what, account_id, budget, w, Hireme.Security.clip(value, 200)}
+
+    cond do
+      :ets.member(@table, key) ->
+        true
+
+      :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
+          @tracked ->
+        :ets.insert_new(@table, {key, true})
+
+      true ->
+        :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, 1, {nil, 0})
+    end
+  end
 
   @doc """
   Whether this is the first HELLO of `key_id` from `ip`'s peer
@@ -400,6 +413,7 @@ defmodule Hireme.Audit.Coalescer do
 
     {ips, ip_total} = named(entries, :ip)
     {uas, ua_total} = named(entries, :ua)
+    untracked = for {{:untracked, _, _, _, what}, n} <- entries, into: %{}, do: {what, n}
 
     meta = %{
       from: iso(w * scale),
@@ -408,7 +422,10 @@ defmodule Hireme.Audit.Coalescer do
       addresses: ips,
       addresses_total: ip_total,
       user_agents: uas,
-      user_agents_total: ua_total
+      user_agents_total: ua_total,
+      # Events from an address or user agent past the ones tracked.
+      addresses_untracked_events: Map.get(untracked, :ip, 0),
+      user_agents_untracked_events: Map.get(untracked, :ua, 0)
     }
 
     kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced

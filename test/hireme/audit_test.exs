@@ -116,6 +116,37 @@ defmodule Hireme.AuditTest do
     assert row.meta["user_agents"] == ["agent/1"]
   end
 
+  @tag window: [:activity, :activity_node]
+  test "a window tracks at most 1,000 addresses; events from the rest are still counted" do
+    %{account: a} = sign_in()
+    for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})
+
+    for i <- 1..1_005,
+        do:
+          Audit.record(:agent_ops, %{}, %{
+            account_id: a.id,
+            key_id: 7,
+            ip: "198.51.#{div(i, 256)}.#{rem(i, 256)}",
+            user_agent: "agent/1"
+          })
+
+    Audit.Coalescer.flush(:all)
+
+    [meta] =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
+          select: e.meta
+        ),
+        skip_account: true
+      )
+
+    assert meta["counts"] == %{"agent_ops" => %{"7" => 1_005}}
+    assert meta["addresses_total"] == 1_000
+    assert meta["addresses_untracked_events"] == 5
+    assert meta["user_agents"] == ["agent/1"]
+  end
+
   @tag window: [:hellos, :activity_node]
   test "a key's first HELLOs count a /64 as one peer, and only its first 50 peers a window" do
     %{account: a} = sign_in()

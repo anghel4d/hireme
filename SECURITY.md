@@ -254,7 +254,8 @@ Past its budgets an account's activity is not written row by row: the
 window's events become one `activity_coalesced` row (or
 `revokes_coalesced` for lease revokes) when the window closes, holding the
 counts by kind and key and the distinct addresses and user agents they
-came from (20 of each named, the rest counted). A key's HELLO from a peer
+came from (20 of each named, the rest counted, up to 1,000 tracked a
+window; events from any past those are counted as such). A key's HELLO from a peer
 (an IPv6 address counts by its /64) it has not used in the window is its
 own row, for the first 50 peers of the key in the window, so which
 addresses held a key is not only a count. A lease opening or closing moves
