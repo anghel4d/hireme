@@ -1,6 +1,6 @@
 # Whitelist gitignore: everything is ignored unless named below.
 # To track something new, name it here.
-# https://rgbcu.be/blog/gitignore/
+# https://rgbcu.be/blog/.gitignore/
 *
 !.gitignore
 !/README.md
@@ -28,58 +28,64 @@
 !/lib/**/
 !/lib/**/*.ex
 
+# The one declaration every language reads.
+!/schema/
+!/schema/*.schema
+
+# Generated SQL is a checked artifact; build output is not.
+!/priv/
+!/priv/db/
+!/priv/db/*.sql
+!/priv/db/.formatter.exs
+
 !/test/
 !/test/**/
 !/test/**/*.exs
 !/test/**/*.ex
-!/test/fixtures/wire/*.bin
+!/test/fixtures/
+!/test/fixtures/**/
 
 !/bench/
 !/bench/*.exs
 !/bench/*.mjs
 !/bench/results/
+!/bench/results/*.jsonl
 !/bench/results/*.jsonl.gz
 
 !/assets/
 !/assets/css/
 !/assets/css/*.css
+!/assets/tsconfig.json
 !/assets/js/
 !/assets/js/*.ts
-!/assets/tsconfig.json
+!/assets/js/gen/
+!/assets/js/gen/*.ts
+!/assets/js/lenses/
+!/assets/js/lenses/*.ts
+!/assets/js/auth/
+!/assets/js/auth/*.ts
 
-!/priv/
-!/priv/repo/
-!/priv/repo/seeds.exs
-!/priv/repo/migrations/
-!/priv/repo/migrations/.formatter.exs
-!/priv/repo/migrations/*.exs
-!/priv/static/
-!/priv/static/favicon.ico
-!/priv/static/robots.txt
-!/priv/static/images/
-!/priv/static/images/*.svg
-!/priv/static/wasm/
-!/priv/static/wasm/*.wasm
-!/priv/wire/
-!/priv/wire/schema.txt
-
-# Rust crates: each is standalone with its own lock; build output stays out.
+# One workspace, one lockfile at the root, no build output.
 !/native/
+!/native/Cargo.toml
+!/native/Cargo.lock
 !/native/*/
 !/native/*/Cargo.toml
-!/native/*/Cargo.lock
 !/native/*/build.rs
 !/native/*/*.sh
 !/native/*/*.mjs
+!/native/*/*.patch
 !/native/*/src/
 !/native/*/src/**/
 !/native/*/src/**/*.rs
+!/native/kernel/tests/
+!/native/kernel/tests/*.rs
+!/native/*/tests/
+!/native/*/tests/*.rs
+!/native/*/benches/
+!/native/*/benches/*.rs
 !/native/*/examples/
 !/native/*/examples/*.rs
-!/native/*/*.patch
-
-!/alchemy/
-!/alchemy/*.md
 
 !/.agents/
 !/.agents/skills/
