@@ -76,10 +76,10 @@ const guarded = <T>(lens: Lens, part: Part, fn: () => T, fallback: T): T => hook
 
 const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
 
-// The desk and focus, once drawn, stay in the page when the other is current, parked under
-// content-visibility: hidden, which keeps their style and layout: going back and forth uncovers a
+// Every lens, once drawn, stays in the page when another is current, parked under
+// content-visibility: hidden, which keeps its style and layout: going back to it uncovers a
 // laid-out lens instead of building one. A parked lens is left alone by morph (data-morph="own").
-const PARKED: readonly Lens[] = ["desk", "focus"]
+const PARKED: readonly Lens[] = ["desk", "focus", "world", "atlas", "outreach", "lanes", "account"]
 const parked = new Set<Lens>()
 
 const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${

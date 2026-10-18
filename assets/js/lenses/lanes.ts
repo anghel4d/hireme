@@ -17,9 +17,11 @@ const settingsId = (): number => ids("settings")[0] ?? 0
 
 const options = (name: string, pick: string): Html => html`${(ENUMS[name] ?? []).map((x) => html`<option${flag("selected", x === pick)}>${x}</option>`)}`
 
-/** A resident table's newest rows by a day column, through the kernel's order index (no per-row sort here). */
-function newest(t: TableName, by: string, n: number): number[] {
-  return query<{ rows: { id: number }[] }>("find", { table: t, order: [by, "desc"], cols: ["id"], limit: n }).rows.map((r) => Number(r.id))
+type Row = Record<string, unknown>
+
+/** A resident table's newest rows by a day column, whole, in one read of the kernel's order index. */
+function newest(t: TableName, by: string, n: number, cols: string[]): Row[] {
+  return query<{ rows: Row[] }>("find", { table: t, order: [by, "desc"], cols: ["id", ...cols], limit: n }).rows
 }
 
 function gym(g: Gym): Html {
@@ -47,10 +49,10 @@ function gym(g: Gym): Html {
     </form>
     <section class="card" data-key="reps"><h2>Recent reps</h2>
       <div class="table-scroll"><table class="grid compact"><thead><tr><th scope="col">Day</th><th scope="col">Problem</th><th scope="col">Topic</th><th scope="col">Difficulty</th><th scope="col">Outcome</th><th scope="col">Min</th></tr></thead>
-      <tbody>${newest("gym_reps", "done_on", 60).map((id) => html`<tr data-key="r${id}"><td>${str(value("gym_reps", id, "done_on"))}</td>
-        <td>${value("gym_reps", id, "url") ? html`<a href="${href(str(value("gym_reps", id, "url")))}" rel="noopener noreferrer" target="_blank">${str(value("gym_reps", id, "title")) || str(value("gym_reps", id, "slug"))}</a>` : str(value("gym_reps", id, "title")) || str(value("gym_reps", id, "slug"))}
-          <span class="muted">${str(value("gym_reps", id, "platform"))}</span></td>
-        <td>${str(value("gym_reps", id, "topic"))}</td><td>${str(value("gym_reps", id, "difficulty"))}</td><td>${str(value("gym_reps", id, "outcome"))}</td><td>${str(value("gym_reps", id, "minutes"))}</td></tr>`)}</tbody></table></div>
+      <tbody>${newest("gym_reps", "done_on", 25, ["done_on", "url", "title", "slug", "platform", "topic", "difficulty", "outcome", "minutes"]).map((r) => html`<tr data-key="r${str(r.id)}"><td>${str(r.done_on)}</td>
+        <td>${r.url ? html`<a href="${href(str(r.url))}" rel="noopener noreferrer" target="_blank">${str(r.title) || str(r.slug)}</a>` : str(r.title) || str(r.slug)}
+          <span class="muted">${str(r.platform)}</span></td>
+        <td>${str(r.topic)}</td><td>${str(r.difficulty)}</td><td>${str(r.outcome)}</td><td>${str(r.minutes)}</td></tr>`)}</tbody></table></div>
     </section>`
 }
 
@@ -78,9 +80,9 @@ function net(n: Net): Html {
       <button class="primary">Add</button>
     </form>
     <section class="card" data-key="entries"><h2>Entries</h2>
-      <ul class="rows">${newest("net_entries", "shipped_on", 80).map((id) => html`<li data-key="e${id}"><span class="tag">${str(value("net_entries", id, "kind"))}</span>
-        ${value("net_entries", id, "url") ? html`<a href="${href(str(value("net_entries", id, "url")))}" rel="noopener noreferrer" target="_blank">${str(value("net_entries", id, "title")) || "untitled"}</a>` : str(value("net_entries", id, "title")) || "untitled"}
-        <span class="muted">${str(value("net_entries", id, "channel"))} · ${str(value("net_entries", id, "shipped_on")) || "not shipped"}</span></li>`)}</ul>
+      <ul class="rows">${newest("net_entries", "shipped_on", 25, ["kind", "url", "title", "channel", "shipped_on"]).map((r) => html`<li data-key="e${str(r.id)}"><span class="tag">${str(r.kind)}</span>
+        ${r.url ? html`<a href="${href(str(r.url))}" rel="noopener noreferrer" target="_blank">${str(r.title) || "untitled"}</a>` : str(r.title) || "untitled"}
+        <span class="muted">${str(r.channel)} · ${str(r.shipped_on) || "not shipped"}</span></li>`)}</ul>
     </section>`
 }
 
