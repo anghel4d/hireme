@@ -721,12 +721,19 @@ defmodule Hireme.Sequencer do
     internal: "the server failed on this op; it wrote nothing"
   }
 
-  @doc "`data` with a `reason`: its own, else the refusal code's."
+  @doc """
+  `data` with a `reason`: its own, else the refusal code's, marked
+  `reason_default: true` so a client can tell the two apart without
+  copying the wording.
+  """
   def reasoned(data, refusal) when is_map(data) do
     if Map.has_key?(data, :reason) or Map.has_key?(data, "reason"),
       do: data,
       else:
-        Map.put(data, :reason, @reasons[refusal] || String.replace(to_string(refusal), "_", " "))
+        Map.merge(data, %{
+          reason: @reasons[refusal] || String.replace(to_string(refusal), "_", " "),
+          reason_default: true
+        })
   end
 
   def reasoned(data, _refusal), do: data

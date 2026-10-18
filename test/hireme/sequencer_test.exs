@@ -102,6 +102,12 @@ defmodule Hireme.SequencerTest do
       reason = JSON.decode!(n.data)["reason"]
       assert is_binary(reason) and reason != "", "#{n.refusal} has no reason: #{n.data}"
     end
+
+    # A code's default reason is marked; a site's own is not.
+    assert JSON.decode!(hd(nacks).data)["reason_default"] == true
+    {[], [own]} = run(a.id, op(:put, :corporations, %{name: "No key"}, keyed: true))
+    assert JSON.decode!(own.data)["reason"] == "no natural key among the cells"
+    refute Map.has_key?(JSON.decode!(own.data), "reason_default")
   end
 
   test "settings is one row: a put without a target finds it", %{account: a} do
