@@ -58,6 +58,23 @@ export interface Model {
   /** Bumped by the kernel ingest so lenses know rows moved. */
   rows: number
   account: AccountView
+  world: WorldView
+}
+
+/** The world lens: one server-side table as a sparse grid, paged by keyset. */
+export interface WorldView {
+  /** The table, sort and search the rows were fetched for; a change refetches. */
+  key: string
+  rows: Record<string, unknown>[]
+  next: unknown
+  loading: boolean
+  /** The cell being edited, `id:column`, or "new" for a new row. */
+  edit: string
+  /** The citations of one cell. */
+  cites: { id: number; column: string; list: Record<string, unknown>[] } | null
+  /** Deferred text being read. */
+  text: { id: number; column: string; body: string; total: number } | null
+  error: string
 }
 
 /** The account lens: the server's projection, and the ceremony in progress. */
@@ -116,6 +133,7 @@ export const model: Model = {
   notices: [],
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
+  world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
 }
 
 type Render = () => void

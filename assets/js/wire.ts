@@ -15,10 +15,10 @@
 // any stream: on the socket, everything is one ordered stream and nothing
 // waits longer than it would anyway.
 
-export const KIND = {
-  HELLO: 1, WELCOME: 2, BOOT: 3, PATCH: 4, OPS: 8, ACK: 9, NACK: 10,
-  TICK: 11, PING: 13, PONG: 14, BYE: 16, RPC: 33, REPLY: 34,
-} as const
+import { FRAME, WIRE_TYPE } from "./gen/schema.ts"
+
+/** Frame kinds and cell types are the schema's: one declaration names them for every language. */
+export const KIND = FRAME
 
 export const FLAG = { DEFLATE: 0x01, END: 0x02 } as const
 export const HEADER = 16
@@ -31,7 +31,7 @@ export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as c
  * seconds) all ride as u32; str, text and json as utf8. Deferred (5) only
  * comes down, as `u32 len | 8 bytes of SHA-256`.
  */
-export const CELL = { null: 0, u32: 1, str: 2, i64: 3, f64: 4, deferred: 5 } as const
+export const CELL = WIRE_TYPE
 export const CRED = { ticket: 1, key: 2 } as const
 export const BYE_REASON = ["", "revoked", "grants", "restart", "schema", "suspended"] as const
 

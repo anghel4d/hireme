@@ -10,15 +10,16 @@
 import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
-import { dismiss, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
+import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
+import world from "./lenses/world.ts"
 
 /** What every lens is: a view of the model, and the actions its markup names. */
 export interface View {
   title: string
   view(): Html
-  /** The lens became current (or its address changed). */
+  /** The lens became current, or its address (sub or query) changed. */
   enter?(): void
   /** An element with `data-act` was used; `ev` is the click, input, change, keydown or submit. */
   act?(name: string, el: HTMLElement, ev: Event): void
@@ -26,7 +27,7 @@ export interface View {
   key?(ev: KeyboardEvent): boolean
 }
 
-const VIEWS: Partial<Record<Lens, View>> = { account }
+const VIEWS: Partial<Record<Lens, View>> = { account, world }
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
@@ -67,7 +68,7 @@ function shell(): Html {
 function render(): void {
   if (!root) return
   const v = VIEWS[model.address.lens]
-  const where = `${model.address.lens}/${model.address.sub}`
+  const where = format(model.address)
   if (where !== entered) {
     entered = where
     v?.enter?.()
