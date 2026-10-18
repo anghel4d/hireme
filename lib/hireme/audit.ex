@@ -19,6 +19,9 @@ defmodule Hireme.Audit do
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
 
+  # Kinds on the trail that are activity, not a change to the account.
+  @quiet ~w(agent_ops wire_key wire_key_refused)
+
   @type context :: %{
           optional(:account_id) => pos_integer() | nil,
           optional(:ip) => String.t(),
@@ -64,9 +67,9 @@ defmodule Hireme.Audit do
       )
     end)
 
-    # An agent's op batch is not a change to the account's security state:
-    # it wakes no parked account.watch.
-    if kind != :agent_ops, do: changed(account_id), else: :ok
+    # An agent's op batch or a key's HELLO is not a change to the account's
+    # security state: it wakes no parked account.watch and moves no cursor.
+    if Atom.to_string(kind) in @quiet, do: :ok, else: changed(account_id)
   end
 
   defp blank(nil, _), do: nil
@@ -105,14 +108,15 @@ defmodule Hireme.Audit do
 
   @doc """
   How far the account's security state has moved: the newest event that
-  announces itself (every kind but `:agent_ops`). The trail is
+  announces itself (every kind but activity: agent op batches and key
+  HELLOs). The trail is
   append-only, so it only grows; `account.watch` compares against it.
   """
   @spec rev(pos_integer()) :: non_neg_integer()
   def rev(account_id) do
     Repo.one(
       from(e in Event,
-        where: e.account_id == ^account_id and e.kind != "agent_ops",
+        where: e.account_id == ^account_id and e.kind not in @quiet,
         select: max(e.id)
       ),
       skip_account: true

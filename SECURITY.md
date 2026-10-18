@@ -241,6 +241,9 @@ through a durable outbox with bounded retries.
 | OAuth refusals recorded | 20 per peer in 10 minutes |
 | Wire tickets | 60 per peer a minute |
 | Agent ops | 600 per key per wall-clock minute |
+| Agent read RPCs | 3,000 per key per wall-clock minute |
+| Key HELLOs | 60 per key per wall-clock minute |
+| Wire sessions open per key | 16 |
 | Live keys per account | 100 |
 | Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
 

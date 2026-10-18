@@ -58,6 +58,11 @@ defmodule Hireme.Security do
   @spec api_keys_per_account() :: pos_integer()
   def api_keys_per_account, do: 100
 
+  # One key's wire sessions open at once; a connect loop or a leaked key
+  # cannot hold the node's sessions.
+  @spec key_sessions() :: pos_integer()
+  def key_sessions, do: 16
+
   ## The wire carrier
 
   # Liveness is the carrier: a PING every 15 s, and 45 s without any frame
@@ -84,7 +89,11 @@ defmodule Hireme.Security do
     api_key_peer: {:timer.minutes(1), 20},
     ticket_peer: {:timer.minutes(1), 60},
     refusal_peer: {:timer.minutes(10), 20},
-    agent_write: {:timer.minutes(1), 600}
+    agent_write: {:timer.minutes(1), 600},
+    # A key's read RPCs (find, get, history, text, schema, lease.*).
+    agent_read: {:timer.minutes(1), 3000},
+    # A key's successful HELLOs; each is a trail row.
+    key_hello: {:timer.minutes(1), 60}
   }
 
   @doc "The named limits, for SECURITY.md and the account lens."
