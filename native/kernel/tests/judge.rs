@@ -345,3 +345,28 @@ fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() 
     let fx = k.judge(&overlay(1, 0), &ctx()).unwrap();
     assert!(fx.iter().all(|r| r.table != table::CV_LINEAGES), "no second lineage: {fx:?}");
 }
+
+/// The scoreboard counts submissions: an outreach answered without one
+/// reached `reply` with `submitted` skipped, and is not counted.
+#[test]
+fn scoreboard_counts_only_submissions() {
+    let mut w = wire::BodyWriter::new();
+    let rows: [(u32, u8, &str); 3] = [(1, enums::stage::SUBMITTED, "DDDDDDDAPP"), (2, enums::stage::REPLY, "DDSSSSSSAP"), (3, enums::stage::REPLY, "DDDDDDDDAP")];
+    let mut b = w.block(table::APPLICATIONS, rows.len());
+    b.u32s(A::ID, rows.iter().map(|r| r.0))
+        .u32s(A::NO, rows.iter().map(|r| r.0))
+        .u32s(A::STAGE, rows.iter().map(|r| r.1 as u32))
+        .strs(A::PIPS, rows.iter().map(|r| r.2))
+        .strs(A::COMPANY, rows.iter().map(|_| "Co"))
+        .strs(A::ROLE, rows.iter().map(|_| "R"))
+        .u32s(A::APPLIED_ON, rows.iter().map(|r| if r.0 == 2 { wire::NONE } else { TODAY as u32 }))
+        .u32s(A::HEAT_OVERRIDE, rows.iter().map(|_| 0));
+    b.done();
+    let mut k = Kernel::new();
+    k.set_today(TODAY);
+    k.boot(&w.finish(), 1).unwrap();
+    let board = k.overview(0);
+    assert_eq!(board["scoreboard"]["submitted"], 2, "{board}");
+    assert_eq!(board["scoreboard"]["submitted_today"], 2);
+}
+

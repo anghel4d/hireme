@@ -244,6 +244,13 @@ pub fn sent(rail: &Rail) -> bool {
     [Stage::Submitted, Stage::Reply].iter().any(|s| matches!(rail[s.index()], Pip::Done | Pip::Active))
 }
 
+/// Whether the rail records a submission: its `submitted` rung was reached.
+/// The scoreboard counts these; an outreach answered without one is `sent`
+/// (heat counts it) but not submitted.
+pub fn submitted(rail: &Rail) -> bool {
+    matches!(rail[Stage::Submitted.index()], Pip::Done | Pip::Active)
+}
+
 /// What a move is judged against, besides the two stages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Facts {

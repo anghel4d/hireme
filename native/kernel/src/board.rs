@@ -80,7 +80,8 @@ pub struct Scoreboard {
     pub by_stage: [u32; 10],
     pub by_band: [u32; 8],
     pub by_class: [u32; 4],
-    /// Applications marked submitted (or past), all time and today.
+    /// Applications whose rail reached `submitted`, all time and today (an
+    /// outreach answered without a submission is not one).
     pub submitted: u32,
     pub submitted_today: u32,
     pub goal_total: Option<u32>,
@@ -255,6 +256,12 @@ fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> 
 pub fn sent(t: &Table, id: u32) -> bool {
     let Some(stage) = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)) else { return false };
     crate::pipeline::sent(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
+}
+
+/// Whether an application row was submitted (not merely answered), by its rail.
+pub fn submitted(t: &Table, id: u32) -> bool {
+    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)) else { return false };
+    crate::pipeline::submitted(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
 }
 
 /// The governor's seat for one application row. Its score is the stored
@@ -513,7 +520,7 @@ impl Board {
             s.by_stage[c.stage as usize] += 1;
             s.by_band[c.band as usize] += 1;
             s.by_class[c.class as usize] += 1;
-            if t.is_some_and(|t| sent(t, c.id)) {
+            if t.is_some_and(|t| submitted(t, c.id)) {
                 s.submitted += 1;
                 if t.and_then(|t| day(t, c.id, A::APPLIED_ON)) == Some(today) {
                     s.submitted_today += 1;
