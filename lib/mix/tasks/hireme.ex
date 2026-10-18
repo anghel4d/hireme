@@ -64,6 +64,11 @@ defmodule Mix.Tasks.Hireme.Schema do
   end
 
   defp write!(sql, ts, opts) do
+    # Ids are the wire's ABI: once a baseline is deployed they never move,
+    # so a reorder belongs before --freeze.
+    if opts[:renumber] && locked(),
+      do: Mix.raise("ids may not move once #{@lock} exists; a reorder belongs before --freeze")
+
     guard_ids!(ts, opts)
 
     case {locked(), opts[:migration]} do
@@ -200,7 +205,9 @@ defmodule Mix.Tasks.Hireme.Schema do
 
     case status do
       0 when out == "" ->
-        Mix.raise("the declaration adds nothing to the previous baseline")
+        Mix.raise(
+          "the declaration adds no table, column, index or trigger to the previous baseline"
+        )
 
       0 ->
         path = Path.join(@root, "priv/db/#{next_number()}_#{name}.sql")
