@@ -51,6 +51,7 @@ defmodule Hireme.Sequencer do
   require Logger
 
   alias Hireme.{Grants, Kernel, Lease, Provenance, Repo, Schema, Security, Store}
+  alias Hireme.Schema.Parser
   alias HiremeWeb.Wire.Codec
 
   @batch 64
@@ -1091,10 +1092,7 @@ defmodule Hireme.Sequencer do
     own = own_cells(plan, effects)
     names = for {id, _} <- own, c = col(table, id), do: c.name
 
-    if Enum.any?(names, fn n ->
-         c = col(table, n)
-         c.metric or c.prose
-       end) do
+    if Enum.any?(names, &cited?(table, &1)) do
       as_of =
         Enum.find_value(op.cells, fn
           {@as_of, _, d} -> Date.add(~D[1970-01-01], d)
@@ -1123,6 +1121,11 @@ defmodule Hireme.Sequencer do
     else
       {:ok, nil}
     end
+  end
+
+  defp cited?(table, name) do
+    c = col(table, name)
+    c.metric or c.prose
   end
 
   defp own_cells(plan, effects) do
@@ -1693,7 +1696,7 @@ defmodule Hireme.Sequencer do
               id: c.id,
               name: c.name,
               type: c.type_code,
-              flags: Hireme.Schema.Parser.flags(c),
+              flags: Parser.flags(c),
               target: c.target
             }
           end

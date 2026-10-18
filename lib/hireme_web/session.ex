@@ -367,7 +367,6 @@ defmodule HiremeWeb.Session do
 
   # --------------------------------------------------------------- RPC
 
-
   defp rpc(id, method, params, state) when method in @world do
     ctx = %{account_id: state.account_id, grants: state.session.grants}
 

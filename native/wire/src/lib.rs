@@ -325,7 +325,7 @@ impl Header {
             hash: u16_at(b, 6),
             rev: u64_at(b, 8),
         };
-        if (h.len as usize) < HEADER || h.len % 8 != 0 {
+        if (h.len as usize) < HEADER || !h.len.is_multiple_of(8) {
             return Err(Error::Len);
         }
         Ok(h)
@@ -340,10 +340,13 @@ impl Header {
     }
 }
 
+/// A whole frame split off a stream: its header, its bytes, and what follows.
+pub type Split<'a> = (Header, &'a [u8], &'a [u8]);
+
 /// Splits the first whole frame off a byte stream: `Ok(None)` while more
 /// bytes are needed, `Err` when the stream is not frames (or a frame is
 /// over `max`).
-pub fn split(buf: &[u8], max: usize) -> Result<Option<(Header, &[u8], &[u8])>> {
+pub fn split(buf: &[u8], max: usize) -> Result<Option<Split<'_>>> {
     if buf.len() < HEADER {
         return Ok(None);
     }

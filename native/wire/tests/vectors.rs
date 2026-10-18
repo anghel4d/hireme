@@ -21,7 +21,7 @@ fn cat(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.concat()
 }
 fn pad8(mut v: Vec<u8>) -> Vec<u8> {
-    while v.len() % 8 != 0 {
+    while !v.len().is_multiple_of(8) {
         v.push(0);
     }
     v
@@ -867,7 +867,10 @@ fn ops_err(ops: &[Vec<u8>]) -> bool {
 #[test]
 fn op_refusals() {
     let ok = op(PUT, KEYED, 0, &[cell(8, U32, &le32(1))]);
-    assert_eq!(Ops::new(&ops_body(&[ok.clone()])).map(|o| o.len()), Ok(1));
+    assert_eq!(
+        Ops::new(&ops_body(std::slice::from_ref(&ok))).map(|o| o.len()),
+        Ok(1)
+    );
     assert!(ops_err(&[op(0, 0, 0, &[])]), "verb 0");
     assert!(ops_err(&[op(4, 0, 0, &[])]), "verb 4");
     assert!(ops_err(&[op(PUT, 0x08, 0, &[])]), "unknown flag bit");
@@ -937,13 +940,13 @@ fn op_refusals() {
         Ops::new(&ops_body(&vec![one.clone(); 256])).map(|o| o.len()),
         Ok(256)
     );
-    let mut trailing = ops_body(&[one.clone()]);
+    let mut trailing = ops_body(std::slice::from_ref(&one));
     trailing.extend_from_slice(&[0; 8]);
     assert!(Ops::new(&trailing).is_err());
-    let mut word = ops_body(&[one.clone()]);
+    let mut word = ops_body(std::slice::from_ref(&one));
     word[4] = 1;
     assert!(Ops::new(&word).is_err());
-    let whole = ops_body(&[ok.clone()]);
+    let whole = ops_body(std::slice::from_ref(&ok));
     assert!(Ops::new(&whole[..whole.len() - 8]).is_err());
     assert!(Ops::new(&cat(&[le32(2), le32(0), one.clone()])).is_err());
     // one op alone: nothing may follow it
@@ -969,7 +972,7 @@ fn an_ops_text_is_its_str_cells() {
     assert_eq!(parsed.text_len(), 5);
     assert_eq!(parsed.ncols, 5);
     assert_eq!(parsed.raw, &o[..]);
-    assert!(parsed.has(0) == false && !parsed.has(KEYED));
+    assert!(!parsed.has(0) && !parsed.has(KEYED));
     assert_eq!(parsed.cell(10).unwrap().value(), Value::Str("de"));
     assert!(parsed.cell(99).is_none());
 }
@@ -1078,7 +1081,7 @@ fn mangle(rng: &mut Rng, seed: &[u8]) -> Vec<u8> {
                 let i = rng.below(m.len());
                 m[i] = rng.next() as u8;
             }
-            1 | 2 | 3 if m.len() >= 4 => {
+            1..=3 if m.len() >= 4 => {
                 let i = if rng.below(2) == 0 {
                     rng.below(m.len() / 4) * 4
                 } else {
@@ -1128,7 +1131,7 @@ fn mangled_ops_blocks_and_frames_never_panic() {
     let deflated = f.finish_deflated(6);
     assert_ne!(deflated[5] & DEFLATE, 0);
 
-    let frames = vec![
+    let frames = [
         deflated,
         encode_ping(PING, HASH, 5),
         Hello {
