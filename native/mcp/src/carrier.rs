@@ -70,6 +70,17 @@ struct Live {
     ops: HashMap<u64, oneshot::Sender<Verdict>>,
 }
 
+/// How long to wait before reconnect `attempt` (0-based) after a session that ended for `reason`:
+/// doubling from 0.5 s to 30 s, and at least a minute when the node said its limit lifts in one.
+pub fn backoff(attempt: u32, reason: &str, message: &str) -> Duration {
+    let doubling = Duration::from_millis((500u64 << attempt.min(6)).min(30_000));
+    if reason == "restart" && message.contains("retry in a minute") {
+        doubling.max(Duration::from_secs(60))
+    } else {
+        doubling
+    }
+}
+
 pub struct Carrier {
     hash: u16,
     /// Ends the current session at once (a frame the caller could not apply, a new session asked for);
@@ -181,21 +192,21 @@ impl Carrier {
             let failed = self.live.lock().await.take();
             drop(failed);
             let (reason, message, again) = end;
-            let _ = events.send(Event::Ended { reason: reason.clone(), message, again });
+            let _ = events.send(Event::Ended { reason: reason.clone(), message: message.clone(), again });
             if !again {
                 return;
             }
-            // A restart this process asked for is no failure: it reconnects at once, with backoff reset.
-            if reason == "restart" {
+            // A restart this process asked for (`restart()`, reason "requested") is no failure: it reconnects
+            // at once, with backoff reset. The node's own BYE restart is a request to back off and keeps it.
+            if reason == "requested" {
                 attempt = 0;
                 continue;
             }
             if started.elapsed() > Duration::from_secs(60) {
                 attempt = 0;
             }
-            let wait = Duration::from_millis((500u64 << attempt.min(6)).min(30_000));
+            tokio::time::sleep(backoff(attempt, &reason, &message)).await;
             attempt += 1;
-            tokio::time::sleep(wait).await;
         }
     }
 
@@ -253,7 +264,7 @@ impl Carrier {
                         Err(e) => break ("frame".into(), format!("{e:?}"), true),
                     }
                 }
-                _ = self.kick.notified() => break ("restart".into(), self.why.lock().map(|w| w.clone()).unwrap_or_default(), true),
+                _ = self.kick.notified() => break ("requested".into(), self.why.lock().map(|w| w.clone()).unwrap_or_default(), true),
                 _ = tick.tick() => {
                     if heard.elapsed() > SILENT {
                         break ("silent".into(), format!("no frame for {} s", SILENT.as_secs()), true);
@@ -355,5 +366,20 @@ impl Carrier {
             _ => {}
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_restart_asked_for_here_skips_the_backoff() {
+        // The node's BYE restart (a session cap, an address cap, the node restarting) backs off as any end does.
+        assert_eq!(backoff(0, "restart", "too many sessions for this key"), Duration::from_millis(500));
+        assert_eq!(backoff(3, "restart", "the node is restarting"), Duration::from_millis(4000));
+        assert_eq!(backoff(10, "socket", ""), Duration::from_secs(30));
+        // A throttled HELLO waits out the minute it was told.
+        assert_eq!(backoff(0, "restart", "rate limited; retry in a minute"), Duration::from_secs(60));
     }
 }

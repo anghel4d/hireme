@@ -139,7 +139,8 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
     }
     if let Some(obj) = data.as_object() {
         for (k, v) in obj {
-            if k == "message" || (k == "reason" && site_reason(code, data).is_none()) {
+            // reason_default says only that the reason was the code's, which is already not printed.
+            if k == "message" || k == "reason_default" || (k == "reason" && site_reason(code, data).is_none()) {
                 continue;
             }
             let shown = match (code, k.as_str()) {
@@ -489,6 +490,9 @@ mod tests {
                 data["reason"] = serde_json::json!(default);
                 let d = render(code, "op", &data);
                 assert!(d.starts_with(&format!("error[{code}]: {line}\n")) && !d.contains("= reason:"), "{d}");
+                data["reason_default"] = serde_json::json!(true);
+                let d = render(code, "op", &data);
+                assert!(d.starts_with(&format!("error[{code}]: {line}\n")) && !d.contains("reason"), "{d}");
             }
         }
         let left = render("type", "history places", &serde_json::json!({"param": "id", "got": null, "reason": "a value does not fit its column"}));
