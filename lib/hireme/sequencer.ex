@@ -58,8 +58,6 @@ defmodule Hireme.Sequencer do
   @batch 64
   @max_op_text 1 <<< 20
   @idle_ms :timer.minutes(10)
-  @as_of 0xFFF0
-  @source 0xFFF1
   @ledger_s 24 * 3600
   @purge_ms :timer.hours(1)
 
@@ -873,8 +871,7 @@ defmodule Hireme.Sequencer do
          {:ok, plan} <- shape(plan, op, sub),
          :ok <- too_large(op),
          {:ok, effects, state} <- domain(plan, op, sub, state, turn),
-         {:ok, prov} <- provenance(plan, op, effects, turn),
-         {:ok, state, turn, ack} <- write(plan, op, sub, effects, prov, state, turn) do
+         {:ok, state, turn, ack} <- write(plan, op, sub, effects, state, turn) do
       {:ok, state, turn, ack}
     else
       {:refused, refusal, data} -> {:refused, refusal, data, state}
@@ -1154,36 +1151,8 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp shape(%{table: table} = plan, op, sub) do
-    insert = plan.row == nil
-    rev = if insert, do: 0, else: plan.row.rev
-
-    with :ok <- server_written(table),
-         :ok <-
-           if(table.append_only and not insert,
-             do: {:refused, :column, %{table: table.name, reason: "append_only"}},
-             else: :ok
-           ),
-         # expect_rev, when given, is a compare-and-set on the row (0 for a new one).
-         :ok <-
-           if(op.expect_rev != nil and op.expect_rev != rev,
-             do: {:refused, :rev, %{table: table.name, rev: rev}},
-             else: :ok
-           ),
-         {:ok, values} <-
-           reduce_cells(op.cells, fn
-             {@as_of, _, _} -> :skip
-             {@source, _, _} -> :skip
-             {id, _, _} = cell -> writable(table, col(table, id), id, cell, sub)
-           end),
-         :ok <- special_cells(op.cells),
-         :ok <- required(table, values, insert),
-         :ok <- refs(table.cols, values),
-         :ok <-
-           if(table.name == "sources", do: Provenance.source_change(plan.row, values), else: :ok) do
-      {:ok, Map.put(plan, :changes, values)}
-    end
-  end
+  # A put's shape is the kernel's to judge (check 4, the one judge).
+  defp shape(plan, _op, _sub), do: {:ok, plan}
 
   # A ref names a row of this account (Repo scopes the lookup), or it is
   # refused as if no such row existed: another account's ids say nothing.
@@ -1206,30 +1175,6 @@ defmodule Hireme.Sequencer do
     end)
   end
 
-  # A table every declared column of which is readonly (citations) is the
-  # server's to write: replicated for reading, never put by an op.
-  defp server_written(table) do
-    if Enum.all?(table.cols, &(&1.implied or &1.readonly)),
-      do: {:refused, :column, %{table: table.name, reason: "the server writes this table"}},
-      else: :ok
-  end
-
-  defp writable(table, nil, id, _cell, _sub),
-    do: {:refused, :column, %{table: table.name, column: id}}
-
-  defp writable(table, col, _id, cell, sub) do
-    cond do
-      col.implied or col.readonly or col.server_only ->
-        {:refused, :column, %{table: table.name, column: col.name, reason: "readonly"}}
-
-      col.private and sub.grants.actor != :operator ->
-        {:refused, :column, %{table: table.name, column: col.name, reason: "private"}}
-
-      true ->
-        typed(col, cell, table.name)
-    end
-  end
-
   defp typed(col, cell, owner) do
     case Codec.cell_to_value(col, cell) do
       {:ok, nil} when col.required ->
@@ -1240,41 +1185,6 @@ defmodule Hireme.Sequencer do
 
       {:error, :type} ->
         {:refused, :type, %{in: owner, column: col.name, want: col.type}}
-    end
-  end
-
-  defp special_cells(cells) do
-    Enum.reduce_while(cells, :ok, fn
-      {@as_of, ty, v}, :ok ->
-        if ty == 1 and Codec.day_from_wire(v) != nil,
-          do: {:cont, :ok},
-          else: {:halt, {:refused, :type, %{column: "as_of", want: :day}}}
-
-      {@source, ty, _}, :ok when ty in [1, 2] ->
-        {:cont, :ok}
-
-      {@source, _, _}, :ok ->
-        {:halt, {:refused, :type, %{column: "source", want: "source id or URL"}}}
-
-      _, :ok ->
-        {:cont, :ok}
-    end)
-  end
-
-  defp required(_table, _values, false), do: :ok
-
-  defp required(table, values, true) do
-    case for(
-           c <- table.cols,
-           c.required,
-           not c.implied,
-           not c.readonly,
-           c.default == nil,
-           values[c.name] == nil,
-           do: c.name
-         ) do
-      [] -> :ok
-      missing -> {:refused, :column, %{table: table.name, missing: missing}}
     end
   end
 
@@ -1325,68 +1235,6 @@ defmodule Hireme.Sequencer do
     <<head::binary, verb, flags, subject::binary, target::little-32, rest::binary>>
   end
 
-  # Check 5, on the cells the effects put on the op's own row.
-  defp provenance(%{table: table} = plan, op, effects, turn) do
-    own = own_cells(plan, effects)
-    names = for {id, _} <- own, c = col(table, id), do: c.name
-
-    if Enum.any?(names, &cited?(table, &1)) do
-      as_of =
-        Enum.find_value(op.cells, fn
-          {@as_of, _, d} -> Codec.day_from_wire(d)
-          _ -> nil
-        end)
-
-      source_cell =
-        Enum.find_value(op.cells, fn
-          {@source, _, v} -> v
-          _ -> nil
-        end)
-
-      with :ok <-
-             if(as_of && Date.compare(as_of, Date.add(turn.today, 1)) == :gt,
-               do: {:refused, :freshness, %{column: "as_of", reason: "in the future"}},
-               else: :ok
-             ),
-           # Today in UTC, plus the day a writer east of it may already be in.
-           new_source =
-             is_binary(source_cell) and
-               not Repo.exists?(
-                 from(x in Hireme.Rows.Source,
-                   where: x.url == ^source_cell and is_nil(x.deleted_at)
-                 )
-               ),
-           {:ok, source} <- Provenance.source(source_cell, turn.now),
-           ctx = %{as_of: as_of, source: source, expect_rev: op.expect_rev},
-           changes = Map.new(names, &{&1, true}),
-           {:ok, changes} <- Provenance.check(table, plan.row, changes, ctx) do
-        ons = for {k, %Date{} = d} <- changes, String.ends_with?(k, "_on"), do: {k, d}
-
-        {:ok,
-         %{
-           as_of: as_of,
-           source: source,
-           ons: Map.new(ons),
-           new_source: new_source and source != nil
-         }}
-      end
-    else
-      {:ok, nil}
-    end
-  end
-
-  defp cited?(table, name) do
-    c = col(table, name)
-    c.metric or c.prose
-  end
-
-  defp own_cells(plan, effects) do
-    Enum.find_value(effects, [], fn {t, row_id, cells} ->
-      if t == plan.table.id and (row_id == plan.target or (row_id == 0 and plan.target == 0)),
-        do: cells
-    end)
-  end
-
   # Check 6 (`too_large` is taken right after shape, before the kernel spends
   # time on a text it would refuse; `rate` as ops arrive).
   defp too_large(op) do
@@ -1399,47 +1247,6 @@ defmodule Hireme.Sequencer do
     if text > @max_op_text,
       do: {:refused, :too_large, %{bytes: text, max: @max_op_text}},
       else: :ok
-  end
-
-  defp limits(plan, effects, prov, state) do
-    citations = Schema.table(:citations)
-    sources = Schema.table(:sources)
-    # Only the cells the write will cite: a restated one is not (fresh/3).
-    cited =
-      plan
-      |> own_cells(effects)
-      |> Enum.reject(&(plan.row != nil and restated?(plan.table, plan.row, &1, prov)))
-      |> Enum.count(fn {id, _} -> (c = col(plan.table, id)) && (c.metric or c.prose) end)
-
-    new_source = if prov && prov.new_source, do: [{sources, 1}], else: []
-
-    inserts =
-      effects
-      |> Enum.filter(fn {_, row_id, _} -> row_id == 0 end)
-      |> Enum.frequencies_by(&elem(&1, 0))
-      |> Enum.map(fn {id, n} -> {Schema.table(id), n} end)
-      |> Enum.filter(fn {t, _} -> t.cap end)
-
-    checks = if cited > 0, do: [{citations, cited} | inserts], else: inserts
-
-    # A source the op's citation created (provenance) is already in SQLite:
-    # a count read now holds it, a cached one does not yet.
-    state =
-      if new_source != [] and not is_map_key(state.counts, sources.id),
-        do: update_in(counted(state, sources).counts[sources.id], &(&1 - 1)),
-        else: state
-
-    checks =
-      (new_source ++ checks)
-      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-      |> Enum.map(fn {t, ns} -> {t, Enum.sum(ns)} end)
-
-    state = Enum.reduce(checks, state, fn {t, _}, st -> counted(st, t) end)
-
-    case Enum.find(checks, fn {t, n} -> state.counts[t.id] + n > t.cap end) do
-      nil -> {:ok, state}
-      {t, _} -> {:refused, :cap, %{table: t.name, cap: t.cap}, state}
-    end
   end
 
   # A capped table's row count, read from SQLite once and then moved with
@@ -1455,85 +1262,25 @@ defmodule Hireme.Sequencer do
 
   # ----------------------------------------------------------- the write
 
-  defp write(plan, %{verb: :drop} = op, sub, _effects, _prov, state, turn) do
-    with :ok <- provenance_kept(plan, sub),
-         {deltas, rev} = delete(plan.table, plan.row, turn.now),
+  defp write(plan, %{verb: :drop} = op, sub, _effects, state, turn) do
+    with {deltas, rev} = delete(plan.table, plan.row, turn.now),
          :ok <- cascade_allowed(deltas, sub, state) do
       finish(state, turn, deltas, %{op_id: op.op_id, rev: rev, id: plan.row.id})
     end
   end
 
-  defp write(plan, op, sub, effects, prov, state, turn) do
-    # Check 6 (limits) follows the shortcut: a restatement writes nothing,
-    # so a table at its cap does not refuse it.
-    if unchanged?(plan, op, effects, prov) do
-      finish(state, turn, [], %{op_id: op.op_id, rev: plan.row.rev, id: plan.row.id})
-    else
-      with {:ok, state} <- limits(plan, effects, prov, state),
-           do: write_effects(plan, op, sub, effects, prov, state, turn)
-    end
-  end
+  # The kernel judged the op (check 4, the one judge: shape, provenance,
+  # restatement, caps) and returned what to write: a new source first, the
+  # op's row with its metrics' dates, one citation per changed cited cell.
+  # No effects for a put of an existing row is a restatement: nothing written.
+  defp write(%{row: row}, %{verb: :put} = op, _sub, [], state, turn) when row != nil,
+    do: finish(state, turn, [], %{op_id: op.op_id, rev: row.rev, id: row.id})
 
-  # A put that restates its row exactly (every cell as stored, and for a
-  # cited cell the same as_of and the same source as its last citation)
-  # writes nothing: no rev, no citation, no text. The same value from a
-  # different source is a corroboration and is cited.
-  defp unchanged?(%{row: row, table: table}, %{verb: :put}, [{tid, id, cells}], prov)
-       when row != nil and tid == table.id and id == row.id do
-    Enum.all?(cells, &restated?(table, row, &1, prov))
-  end
+  defp write(plan, op, sub, effects, state, turn),
+    do: write_effects(plan, op, sub, effects, state, turn)
 
-  defp unchanged?(_plan, _op, _effects, _prov), do: false
-
-  # One cell as `row` stores it, and if cited, the same citation again.
-  defp restated?(table, row, {col_id, v}, prov) do
-    c = col(table, col_id)
-    key = c && String.to_atom(c.name)
-
-    c != nil and Codec.from_wire(c, v) == {:ok, Map.get(row, key)} and
-      (not (c.metric or c.prose) or same_citation?(table, row, c, prov))
-  end
-
-  defp same_citation?(_table, _row, _col, nil), do: false
-  defp same_citation?(_table, _row, _col, %{new_source: true}), do: false
-
-  defp same_citation?(table, row, col, prov) do
-    on = col.metric && Map.get(row, String.to_atom(col.name <> "_on"))
-
-    # The last citation's id too, so no citation is not taken for one with
-    # no source: an unsourced metric restated is the same citation.
-    last =
-      Repo.one(
-        from(x in Hireme.Rows.Citation,
-          where: x.table == ^table.name and x.row_id == ^row.id and x.column == ^col.name,
-          order_by: [desc: x.id],
-          limit: 1,
-          select: {x.id, x.source_id, x.as_of}
-        )
-      )
-
-    # A metric's date is its `_on`; prose dates only an explicit as_of.
-    source = prov.source && prov.source.id
-
-    dated =
-      cond do
-        col.metric -> on == prov.as_of
-        prov.as_of == nil -> true
-        true -> match?({_, _, d} when d == prov.as_of, last)
-      end
-
-    dated and match?({_, ^source, _}, last)
-  end
-
-  # A put that changes some cells cites only those: a cited cell it restates
-  # (same value, same citation) is not cited again.
-  defp fresh(table, cells, %{plan: %{row: row}, prov: prov}) when row != nil,
-    do: Enum.reject(cells, &restated?(table, row, &1, prov))
-
-  defp fresh(_table, cells, _ctx), do: cells
-
-  defp write_effects(plan, op, sub, effects, prov, state, turn) do
-    ctx = %{sub: sub, op: op, turn: turn, plan: plan, prov: prov}
+  defp write_effects(plan, op, sub, effects, state, turn) do
+    ctx = %{sub: sub, op: op, turn: turn, plan: plan}
 
     {result, _} =
       Enum.reduce_while(effects, {{:ok, [], %{}, nil}, []}, fn {table_id, row_id, cells},
@@ -1553,11 +1300,7 @@ defmodule Hireme.Sequencer do
             ack =
               if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
 
-            cited =
-              if own and prov, do: cite(table, row, fresh(table, cells, ctx), prov, ctx), else: []
-
-            {:cont,
-             {{:ok, deltas ++ [{:put, table, row, changed}, moved | cited], news, ack}, inserted}}
+            {:cont, {{:ok, deltas ++ [{:put, table, row, changed}, moved], news, ack}, inserted}}
 
           refused ->
             {:halt, {refused, inserted}}
@@ -1754,16 +1497,10 @@ defmodule Hireme.Sequencer do
   defp errors(cs), do: Map.new(cs.errors, fn {k, {msg, _}} -> {k, msg} end)
 
   # What the server writes and no writer may: a new application's number,
-  # a source's host, an event's author, metric dates. (The listing's hash
+  # a source's host, an event's author. (Metric dates, the listing's hash
   # and keywords are the kernel's effects.)
-  defp derived(table, values, row, ctx) do
-    values
-    |> derive(table.name, row, ctx)
-    |> hashes(table)
-    |> Map.merge(
-      if(ctx.prov && table.id == ctx.plan.table.id, do: atomize(ctx.prov.ons), else: %{})
-    )
-  end
+  defp derived(table, values, row, ctx),
+    do: values |> derive(table.name, row, ctx) |> hashes(table)
 
   # Every deferred column written gets its hex SHA-256 twin in the same
   # write, so a BOOT or PATCH stub is read from the twin, never the text.
@@ -1792,8 +1529,6 @@ defmodule Hireme.Sequencer do
     end)
   end
 
-  defp atomize(m), do: Map.new(m, fn {k, v} -> {String.to_atom(k), v} end)
-
   defp derive(values, "applications", nil, _ctx), do: Map.put(values, :no, next_no())
 
   defp derive(values, "sources", _row, _ctx) do
@@ -1820,46 +1555,6 @@ defmodule Hireme.Sequencer do
       |> Repo.update_all([inc: [next_no: 1]], skip_account: true)
 
     no
-  end
-
-  defp cite(table, row, cells, prov, ctx) do
-    {n, ids} = cite_rows(table, row, cells, prov, ctx)
-
-    source =
-      if prov.new_source,
-        do: [{:text, text_bytes(Schema.table(:sources), prov.source.id)}, :new_source],
-        else: []
-
-    [
-      {:cited, n},
-      {:text, if(ids == [], do: 0, else: text_bytes(Schema.table(:citations), ids))} | source
-    ]
-  end
-
-  defp cite_rows(table, row, cells, prov, ctx) do
-    named =
-      for {col_id, v} <- cells,
-          c = col(table, col_id),
-          c.metric or c.prose,
-          do: {c.name, elem(Codec.from_wire(c, v), 1)}
-
-    Provenance.cite(table, row.id, named, %{
-      source: prov.source,
-      as_of: prov.as_of,
-      today: ctx.turn.today,
-      actor: if(ctx.sub.key_id, do: :agent, else: :operator),
-      key_id: ctx.sub.key_id,
-      op_id: signed(ctx.op.op_id),
-      now: ctx.turn.now
-    })
-  end
-
-  # Provenance outlives what it names: only the operator drops a row a
-  # loose ref names (a cited source), and that drop is a tombstone.
-  defp provenance_kept(%{table: table, row: row}, sub) do
-    if sub.grants.actor != :operator and loosely_named?(table, row.id),
-      do: {:refused, :scope, %{table: table.name, reason: "cited; provenance outlives it"}},
-      else: :ok
   end
 
   defp loose_refs(table) do

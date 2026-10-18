@@ -61,6 +61,7 @@ defmodule Hireme.Import do
   its row's position, so one bad row costs that row alone.
   """
 
+  import Ecto.Query, only: [from: 2, where: 3]
   alias Hireme.{Grants, Schema, Sequencer}
   alias HiremeWeb.Wire.Codec
 
@@ -495,7 +496,7 @@ defmodule Hireme.Import do
   defp natural(table, values), do: Enum.find(table.naturals, &names?(&1, values))
 
   # A ref names its row by a key's columns; the key's where is the lookup's
-  # (World.get applies it), since a ref carries no other column to judge.
+  # (the lookup applies it), since a ref carries no other column to judge.
   defp ref_key(table, key) do
     Enum.find(table.naturals ++ table.uniques, &(Enum.sort(&1.cols) == Enum.sort(Map.keys(key))))
   end
@@ -533,27 +534,15 @@ defmodule Hireme.Import do
         end
       end)
 
-    grants = Grants.operator()
+    query =
+      Enum.reduce(params, from(r in Schema.row(table.name), select: %{id: r.id, rev: r.rev}), fn
+        {k, v}, q -> where(q, [r], field(r, ^String.to_atom(k)) == ^v)
+      end)
 
-    case Hireme.World.get(account_id, grants, %{
-           "table" => table.name,
-           "key" => json_key(params),
-           "cols" => ["id", "rev"]
-         }) do
-      {:ok, %{"row" => row}} -> {:ok, %{id: row["id"], rev: row["rev"]}}
-      {:error, :not_found, _} -> {:ok, nil}
-      {:error, code, data} -> {:refused, code, data}
-    end
+    query = if table.soft_delete, do: where(query, [r], is_nil(r.deleted_at)), else: query
+    {:ok, Hireme.Repo.with_account(account_id, fn -> Hireme.Repo.one(query) end)}
   catch
     {:refused, _, _} = refusal -> refusal
-  end
-
-  defp json_key(params) do
-    Map.new(params, fn
-      {k, %Date{} = d} -> {k, Date.to_iso8601(d)}
-      {k, v} when is_atom(v) and not is_nil(v) and not is_boolean(v) -> {k, Atom.to_string(v)}
-      kv -> kv
-    end)
   end
 
   # Metric cells carry as_of; prose cells a source and the row's rev.
