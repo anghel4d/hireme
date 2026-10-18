@@ -59,6 +59,21 @@ export interface Model {
   rows: number
   account: AccountView
   world: WorldView
+  outreach: OutreachView
+}
+
+/** The outreach lens: contacts, and the selected one's threads. */
+export interface OutreachView {
+  key: string
+  contacts: Record<string, unknown>[]
+  next: unknown
+  messages: Record<string, unknown>[]
+  /** Message bodies read so far, by message id. */
+  bodies: Map<number, string>
+  /** "contact" (editing the contact), "new" (a new contact), "draft" (a new message), or "". */
+  edit: string
+  loading: boolean
+  error: string
 }
 
 /** The world lens: one server-side table as a sparse grid, paged by keyset. */
@@ -134,6 +149,7 @@ export const model: Model = {
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
+  outreach: { key: "", contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 
 type Render = () => void
