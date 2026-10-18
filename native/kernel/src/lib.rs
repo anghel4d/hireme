@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod atlas;
 pub mod ats;
+pub mod cv;
 pub mod heat;
 pub mod keywords;
 pub mod lanes;
