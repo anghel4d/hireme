@@ -173,6 +173,8 @@ defmodule HiremeWeb.Wire.Codec do
     try do
       :ok = :zlib.inflateInit(z, -15)
       out = inflate_loop(z, :zlib.safeInflate(z, bin), [], 0, limit)
+      # Raises on a stream cut before its end marker, as native/wire refuses it.
+      :ok = :zlib.inflateEnd(z)
       IO.iodata_to_binary(out)
     after
       :zlib.close(z)

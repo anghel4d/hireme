@@ -28,4 +28,18 @@ defmodule HiremeWeb.Wire.CodecTest do
     assert {:error, :type} = Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, 2_932_897})
     assert {:ok, nil} = Codec.cell_to_value(%{type: :str, wire: 2}, {8, 2, ""})
   end
+
+  test "a DEFLATE body cut before its stream ends is refused" do
+    body = :binary.copy("hireme ", 400)
+    whole = Codec.frame(:BOOT, 0, body, deflate: true)
+    assert {:ok, :BOOT, _, _, ^body} = Codec.decode(whole)
+    <<head::binary-16, raw::little-32, n::little-32, stream::binary-size(n), _::binary>> = whole
+    cut = binary_part(stream, 0, n - 2)
+    m = byte_size(cut)
+    pad = rem(8 - rem(8 + m, 8), 8)
+    body2 = <<raw::little-32, m::little-32, cut::binary, 0::size(pad * 8)>>
+    <<_::32, rest::binary-12>> = head
+    frame = <<16 + byte_size(body2)::little-32, rest::binary, body2::binary>>
+    assert {:error, _} = Codec.decode(frame)
+  end
 end

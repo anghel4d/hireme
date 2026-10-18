@@ -95,7 +95,7 @@
 //! session, and the message says why in words.
 //!
 //! **Limits.** An up frame is at most [`MAX_UP`] (16 MiB), inflated as
-//! well; a client with more to send splits it across frames
+//! well (the `/wire` WebSocket carrier caps a message lower, at 2 MiB); a client with more to send splits it across frames
 //! ([`OpsWriter::is_full`]). One OPS frame holds at most [`MAX_OPS`] (256)
 //! ops, and one op at most [`MAX_OP_TEXT`] (1 MiB) of text, past which the
 //! server refuses it `too_large`. A down body inflates to at most
@@ -119,7 +119,10 @@ pub const HEADER: usize = 16;
 /// Bumped whenever a byte layout below changes, so the schema's `wire_hash`
 /// (which folds it in) refuses a client built against another layout.
 pub const LAYOUT: u16 = 2;
-const _: () = assert!(LAYOUT == schema::LAYOUT, "a byte-layout change bumps `layout` in schema/hireme.schema too");
+const _: () = assert!(
+    LAYOUT == schema::LAYOUT,
+    "a byte-layout change bumps `layout` in schema/hireme.schema too"
+);
 
 /// Frame kinds.
 pub const HELLO: u8 = 1;
@@ -135,6 +138,32 @@ pub const PONG: u8 = 14;
 pub const BYE: u8 = 16;
 pub const RPC: u8 = 33;
 pub const REPLY: u8 = 34;
+
+// The schema owns these numbers; a drift fails the build, not a client.
+const _: () = {
+    assert!(
+        HELLO == schema::frame::HELLO
+            && WELCOME == schema::frame::WELCOME
+            && BOOT == schema::frame::BOOT
+    );
+    assert!(
+        PATCH == schema::frame::PATCH && OPS == schema::frame::OPS && ACK == schema::frame::ACK
+    );
+    assert!(
+        NACK == schema::frame::NACK && TICK == schema::frame::TICK && PING == schema::frame::PING
+    );
+    assert!(PONG == schema::frame::PONG && BYE == schema::frame::BYE && RPC == schema::frame::RPC);
+    assert!(REPLY == schema::frame::REPLY);
+    assert!(NULL == schema::wire::NULL && U32 == schema::wire::U32 && STR == schema::wire::STR);
+    assert!(
+        I64 == schema::wire::I64 && F64 == schema::wire::F64 && DEFERRED == schema::wire::DEFERRED
+    );
+    assert!(SYM == schema::wire::SYM && LIST == schema::wire::LIST);
+    assert!(AS_OF == schema::AS_OF && SOURCE == schema::SOURCE_CELL);
+    assert!(BYE_REVOKED == schema::enums::bye::REVOKED && BYE_GRANTS == schema::enums::bye::GRANTS);
+    assert!(BYE_RESTART == schema::enums::bye::RESTART && BYE_SCHEMA == schema::enums::bye::SCHEMA);
+    assert!(BYE_SUSPENDED == schema::enums::bye::SUSPENDED);
+};
 
 const KINDS: [u8; 13] = [
     HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY,
@@ -1160,7 +1189,8 @@ impl<'a> Blocks<'a> {
                 return Err(Error::Body);
             }
             at += 8;
-            let mut seen = Seen::new();
+            // Fewer than two columns cannot repeat one: skip the 8 KiB bitmap.
+            let mut seen = (ncols > 1).then(Seen::new);
             for _ in 0..ncols {
                 if b.len() - at < 8 {
                     return Err(Error::Short);
@@ -1171,11 +1201,14 @@ impl<'a> Blocks<'a> {
                     b[at + 3],
                     u32_at(b, at + 4) as usize,
                 );
-                if zero != 0 || !seen.add(id) {
+                if zero != 0 || seen.as_mut().is_some_and(|s| !s.add(id)) {
                     return Err(Error::Body);
                 }
-                let end = (at + 8).checked_add(len).ok_or(Error::Short)?;
-                if end > b.len() || pad8(end) > b.len() {
+                if len > b.len() - at - 8 {
+                    return Err(Error::Short);
+                }
+                let end = at + 8 + len;
+                if pad8(end) > b.len() {
                     return Err(Error::Short);
                 }
                 if id == GONE && (ty != U32 || ncols != 1) {
@@ -1225,7 +1258,9 @@ pub struct BodyWriter {
     buf: Vec<u8>,
 }
 
-/// Builds one block's columns; dropping it without [`BlockWriter::done`] still leaves a valid block.
+/// Builds one block's columns, each of exactly `nrows` values. A block with
+/// rows needs at least one column, and its column ids must differ; the
+/// decoder refuses anything else.
 pub struct BlockWriter<'w> {
     buf: &'w mut Vec<u8>,
     head: usize,
@@ -1486,7 +1521,7 @@ impl<'a> Op<'a> {
             return Err(Error::Body);
         }
         let mut at = OP_HEAD;
-        let mut seen = Seen::new();
+        let mut seen = (ncols > 1).then(Seen::new);
         for _ in 0..ncols {
             if b.len() - at < 8 {
                 return Err(Error::Short);
@@ -1497,11 +1532,14 @@ impl<'a> Op<'a> {
                 b[at + 3],
                 u32_at(b, at + 4) as usize,
             );
-            let end = (at + 8).checked_add(len).ok_or(Error::Short)?;
-            if z != 0 || !seen.add(col) {
+            if len > b.len() - at - 8 {
+                return Err(Error::Short);
+            }
+            let end = at + 8 + len;
+            if z != 0 || seen.as_mut().is_some_and(|s| !s.add(col)) {
                 return Err(Error::Body);
             }
-            if end > b.len() || pad8(end) > b.len() {
+            if pad8(end) > b.len() {
                 return Err(Error::Short);
             }
             let ok = match ty {
@@ -1678,7 +1716,8 @@ impl OpsWriter {
     /// Whether the frame holds [`MAX_OPS`] ops, or `bytes` more would take
     /// it past [`MAX_UP`]: the caller sends it and starts another.
     pub fn is_full(&self, bytes: usize) -> bool {
-        self.n as usize >= MAX_OPS || HEADER + self.buf.len() + bytes > MAX_UP
+        self.n as usize >= MAX_OPS
+            || HEADER.saturating_add(self.buf.len()).saturating_add(bytes) > MAX_UP
     }
 
     pub fn finish(self) -> Vec<u8> {
