@@ -11,7 +11,7 @@
   lld,
   source,
   revision,
-  mixDepsHash ? "sha256-iKigeeNBGOVskAWvmpGiRIYOHyLKi5RXJ9pPnY3gR7o=",
+  mixDepsHash ? "sha256-aorRNC9G0Qr4LN+c5vNXyG/i69gqTJVOgdTEh9RIKuw=",
 }:
 let
   version = "0.2.0-${builtins.substring 0 12 revision}";

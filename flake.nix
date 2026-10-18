@@ -105,7 +105,7 @@
               ];
             };
             mixEnv = "test";
-            hash = "sha256-WKR6Jzq4NQXG01OHWPllbZ5kpAsIrjTAlXx/g56Qmyw=";
+            hash = "sha256-nsMVzNBRleZONGgv8Z934BvuqICEdEm3gHn6jF66bLU=";
           };
           nativeBuildInputs = [
             beamPackages.elixir
