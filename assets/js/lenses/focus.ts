@@ -8,7 +8,7 @@
 
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { Refused, application, command, lookup, put, rpc, type Input } from "../kernel.ts"
+import { Refused, application, command, lookup, put, query as read, wholeText, type Input } from "../kernel.ts"
 import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
@@ -31,100 +31,33 @@ const id = (): number => lookup("applications", "no", model.address.sub)
 
 const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
-/**
- * A text column as the kernel's document holds it: inline, or deferred as a
- * `{length, sha}` stub whose bytes come over RPC `text` once, on demand.
- * Answers the text, null while it is on its way, or "" when there is none.
- */
-const reading = new Set<string>()
-/** Texts whose read failed: shown as such until the operator retries, never re-asked on every render. */
-const unread = new Set<string>()
 /** An event the kernel predicted but the node has not answered yet: a temp id (or none), nothing to read. */
 const unsaved = (id: number): boolean => !Number.isFinite(id) || id <= 0 || id >= 0xc000_0000
 
-function textOf(table: string, rowId: number, column: string, v_: unknown): string | null {
+/** A text column of the replica: the text itself, or a stub read whole from the replica in this frame. */
+function textOf(table: string, rowId: number, column: string, v_: unknown): string {
   if (v_ === null || v_ === undefined) return ""
   if (typeof v_ === "string") return v_
-  const stub = v_ as { length?: number; sha?: string }
-  if (!stub.length) return ""
-  if (unsaved(rowId)) return null
-  const key = `${table}:${rowId}:${column}:${stub.sha ?? ""}`
-  const have = v().texts.get(key)
-  if (have !== undefined) return have
-  if (!reading.has(key) && !unread.has(key)) {
-    reading.add(key)
-    void readAll(table, rowId, column, stub.sha ?? "")
-      .then((t) => {
-        if (v().id === rowId || table !== "applications") patch({ texts: new Map(v().texts).set(key, t) })
-      })
-      .catch(() => {
-        unread.add(key)
-        patch({})
-      })
-      .finally(() => reading.delete(key))
+  if (unsaved(rowId)) return ""
+  try {
+    return wholeText(table, rowId, column)
+  } catch {
+    return ""
   }
-  return null
-}
-
-const failedText = (table: string, rowId: number, column: string, v_: unknown): boolean => {
-  const stub = v_ as { sha?: string } | null
-  return typeof v_ === "object" && v_ !== null && unread.has(`${table}:${rowId}:${column}:${stub?.sha ?? ""}`)
-}
-
-/**
- * Every chunk of one deferred text (prose is small; a listing has its own paged reader). A read
- * that races a write can answer the old text under the new stub, so the answer is kept only
- * when its sha is the stub's; a few short retries cover the gap until the write commits.
- */
-async function readAll(table: string, rowId: number, column: string, sha: string): Promise<string> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    let out = ""
-    let offset = 0
-    let full = ""
-    for (;;) {
-      const r = await rpc<{ text: string; total: number; sha?: string }>("text", { table, id: rowId, column, offset, length: 262_144 })
-      out += r.text
-      full = r.sha ?? ""
-      offset += new TextEncoder().encode(r.text).byteLength
-      if (r.text === "" || offset >= r.total) break
-    }
-    if (sha === "" || full === "" || full.toLowerCase().startsWith(sha.toLowerCase())) return out
-    await new Promise((res) => setTimeout(res, 150 * (attempt + 1)))
-  }
-  throw new Error("the text changed while it was being read")
 }
 
 function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
-/** Two shas of one text agree when one (the stub's 8 bytes) begins the other (the reply's whole hash). */
-const sameSha = (a: string, b: string): boolean => {
-  const [x, y] = [a.toLowerCase(), b.toLowerCase()]
-  return x !== "" && y !== "" && (x.startsWith(y) || y.startsWith(x))
-}
-
-/** The application's link to a contact or corporation as its row has it now. */
-const linkOf = (appId: number, col: "contact_id" | "corporation_id"): number => Number((application(appId) as Doc | null)?.application[col] ?? 0)
-
-/** A reply about one application lands only while that application is the one shown. */
-const mine = (appId: number, p: Partial<FocusView>) => {
-  if (v().id === appId) patch(p)
-}
-
-async function fetchAround(appId: number, a: Row): Promise<void> {
-  // Deferred text read for the last application is dropped: only this one's is wanted now.
-  patch({ id: appId, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "", texts: new Map() })
-  const jobs: Promise<void>[] = [
-    rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
-      .then((r) => mine(appId, { messages: r.rows }))
-      .catch(() => {}),
-  ]
-  const cid = Number(a.contact_id ?? 0)
-  const kid = Number(a.corporation_id ?? 0)
-  if (cid) jobs.push(rpc<{ row: Row }>("get", { table: "contacts", id: cid }).then((r) => { if (linkOf(appId, "contact_id") === cid) mine(appId, { contact: r.row }) }).catch(() => {}))
-  if (kid) jobs.push(rpc<{ row: Row }>("get", { table: "corporations", id: kid }).then((r) => { if (linkOf(appId, "corporation_id") === kid) mine(appId, { corporation: r.row }) }).catch(() => {}))
-  await Promise.all(jobs)
+/** A row of the replica by id, or null. */
+function rowOf(table: string, rowId: number): Row | null {
+  if (!rowId) return null
+  try {
+    return read<{ row: Row }>("get", { table, id: rowId }).row
+  } catch {
+    return null
+  }
 }
 
 // ------------------------------------------------------------------ view
@@ -183,14 +116,11 @@ function cv(d: Doc): Html {
 }
 
 function listing(a: Row, appId: number): Html {
-  const raw = a.listing_raw as { length?: number; sha?: string } | null
-  // A listing rewritten since it was read is read afresh: the reply's own sha names the version shown.
-  const l = v().listing && sameSha(v().listing?.sha ?? "", raw?.sha ?? "") ? v().listing : null
+  const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf("applications", appId, "listing_raw", a.listing_raw)
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open</a>` : EMPTY}</h2>
-    ${raw && raw.length ? l === null
-      ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${raw.length.toLocaleString()} bytes)</button>`
-      : html`<p class="hint">As it was captured; shown as text, never run.</p><pre class="untrusted">${l.text}</pre>
-          ${l.bytes < l.total ? html`<button type="button" data-act="listing-more" data-id="${appId}">More</button>` : EMPTY}`
+    ${text !== "" ? !v().listing
+      ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${new TextEncoder().encode(text).byteLength.toLocaleString()} bytes)</button>`
+      : html`<p class="hint">As it was captured; shown as text, never run.</p><pre class="untrusted">${text}</pre>`
       : html`<p class="hint">No listing: this application came another way${a.channel ? ` (${str(a.channel)})` : ""}.</p>`}
   </section>`
 }
@@ -198,31 +128,30 @@ function listing(a: Row, appId: number): Html {
 function prose(a: Row, appId: number): Html {
   return html`${PROSE.map((f) => {
     const t = textOf("applications", appId, f, a[f])
-    const lost = t === null && failedText("applications", appId, f, a[f])
     const moved = v().edit === f && Number(a.rev) !== v().editRev
     const title = f.replace(/_raw$/, "").replace(/_/g, " ")
-    // An edit starts from the whole text (Edit is enabled only once it is in), and stays on that text
+    // An edit starts from the whole text, and stays on that text
     // while open: an agent's write meanwhile is announced, never swapped in under the operator's typing.
     return v().edit === f
       ? html`<form class="card stack" data-submit="save-prose" data-act="save-prose" data-field="${f}" data-id="${appId}" data-key="p-${f}">
           <h2>${title}</h2>${moved ? html`<p class="notice" role="alert">This application changed after you opened it; saving will be refused rather than overwrite the change. Copy your text, cancel, and reopen.</p>` : EMPTY}
           <textarea name="value" rows="10" data-autofocus>${v().editText.startsWith("\n") ? `\n${v().editText}` : v().editText}</textarea>
           <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
-      : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}"${flag("disabled", t === null)}>Edit</button></h2>
-          ${lost ? html`<p class="hint">The text could not be read. <button type="button" class="ghost" data-act="retry-text" data-field="${f}">Try again</button></p>`
-            : t === null ? html`<p class="hint">Loading…</p>` : t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
+      : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}">Edit</button></h2>
+          ${t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">Empty.</p>`}</section>`
   })}`
 }
 
-function around(): Html {
-  const c = v().contact
-  const corp = v().corporation
+function around(a: Row, appId: number): Html {
+  const c = rowOf("contacts", Number(a.contact_id ?? 0))
+  const corp = rowOf("corporations", Number(a.corporation_id ?? 0))
+  const messages = read<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 }).rows
   return html`<section class="card" data-key="around"><h2>People and company</h2>
     ${corp ? html`<p><b>${str(corp.name)}</b> <a href="/world/corporations?q=${encodeURIComponent(str(corp.name))}" data-nav>in the world</a>
       ${corp.careers_url ? html` · <a href="${href(str(corp.careers_url))}" rel="noopener noreferrer" target="_blank">careers</a>` : EMPTY}</p>
       ${corp.headcount ? html`<p class="muted">${Number(corp.headcount).toLocaleString()} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
     ${c ? html`<p><a href="/outreach?contact=${str(c.id)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
-    ${v().messages.length > 0 ? html`<ul class="rows">${v().messages.map((m) => html`<li data-key="m${str(m.id)}"><span class="tag">${str(m.direction)}</span>
+    ${messages.length > 0 ? html`<ul class="rows">${messages.map((m) => html`<li data-key="m${str(m.id)}"><span class="tag">${str(m.direction)}</span>
       ${str(m.subject) || "(no subject)"} <span class="muted">${str(m.sent_at).slice(0, 10)} · ${str(m.status)}</span></li>`)}</ul>` : EMPTY}
   </section>`
 }
@@ -232,7 +161,7 @@ function events(d: Doc, appId: number): Html {
   return html`<section class="card" data-key="events"><h2>Events</h2>
     <form class="row" data-submit="note" data-act="note" data-id="${appId}" data-stage="${stage}"><input name="body" placeholder="Add a note to the history" aria-label="Note" required>
       <button>Add</button></form>
-    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf("events", Number(e.id), "body", e.body) ?? "…"}
+    <ol class="rows">${d.events.map((e) => html`<li data-key="e${str(e.id)}"><span class="tag">${str(e.kind)}</span> ${textOf("events", Number(e.id), "body", e.body)}
       <span class="muted">${str(e.actor)}${e.key_id ? ` · key ${str(e.key_id)}` : ""}</span></li>`)}</ol></section>`
 }
 
@@ -255,7 +184,7 @@ function view(): Html {
     ${rail(d, appId)}
     <div class="focus-grid">
       <div class="col">${score(d)}${coverage(d)}${cv(d)}${listing(a, appId)}</div>
-      <div class="col">${around()}${prose(a, appId)}${events(d, appId)}
+      <div class="col">${around(a, appId)}${prose(a, appId)}${events(d, appId)}
         <section class="card" data-key="override"><h2>Heat override</h2>
           ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row" data-submit="override" data-act="override" data-id="${appId}">
             <input name="reason" placeholder="Why this one goes over the cap" aria-label="Reason" required><button>Override</button></form>`}</section>
@@ -290,31 +219,13 @@ function act(name: string, el: HTMLElement): void {
     case "keep-score":
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":
-      return void rpc<{ text: string; total: number; sha?: string }>("text", { table: "applications", id: appId, column: "listing_raw", length: 262_144 })
-        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total, sha: r.sha ?? "" } }))
-        .catch(failed)
-    case "listing-more": {
-      const l = v().listing
-      if (!l) return
-      return void rpc<{ text: string; total: number; sha?: string }>("text", { table: "applications", id: appId, column: "listing_raw", offset: l.bytes, length: 262_144 })
-        .then((r) => {
-          // A chunk of another version is never stitched onto this one: the listing reads afresh instead.
-          if (v().listing !== l) return
-          if (!sameSha(r.sha ?? "", l.sha)) return mine(appId, { listing: null })
-          mine(appId, { listing: { ...l, text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
-        })
-        .catch(failed)
-    }
+      return patch({ listing: true })
     case "edit": {
       const d = application(appId) as Doc | null
       const field = el.dataset.field ?? ""
-      const t = d ? textOf("applications", appId, field, d.application[field]) : null
-      if (t === null) return
-      return patch({ edit: field, editRev: Number(d?.application.rev ?? 0), editText: t })
+      if (!d) return
+      return patch({ edit: field, editRev: Number(d.application.rev ?? 0), editText: textOf("applications", appId, field, d.application[field]) })
     }
-    case "retry-text":
-      unread.clear()
-      return patch({})
     case "cancel":
       return patch({ edit: "" })
     case "save-prose": {
@@ -339,39 +250,12 @@ function act(name: string, el: HTMLElement): void {
 const focus: View = {
   title: "Focus",
   view,
-  enter(fresh) {
+  enter() {
+    // Another application: its listing folds and its editor closes.
     const appId = id()
-    if (appId !== 0 && appId !== v().id) {
-      const d = application(appId) as Doc | null
-      if (d) void fetchAround(appId, d.application)
-    } else if (appId !== 0 && fresh) {
-      // Back on the same application: what an agent changed meanwhile is read again.
-      focus.refresh?.()
-    }
-  },
-  after() {
-    // The application may land after the address (a cold load straight to /focus/<no>).
-    const appId = id()
-    if (appId !== 0 && appId !== v().id) focus.enter?.(true)
+    if (appId !== v().id) patch({ id: appId, listing: false, edit: "" })
   },
   act,
-  refresh() {
-    const appId = id()
-    if (appId === 0) return
-    // A read that failed is tried again now (a server back, a reconnect), not left failed for the page's life.
-    unread.clear()
-    // The application's current links, read from its row now: a changed contact or corporation is followed.
-    const a = (application(appId) as Doc | null)?.application
-    void rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
-      .then((r) => mine(appId, { messages: r.rows }))
-      .catch(() => {})
-    const kid = Number(a?.corporation_id ?? 0)
-    const cid = Number(a?.contact_id ?? 0)
-    if (kid) void rpc<{ row: Row }>("get", { table: "corporations", id: kid }).then((r) => linkOf(appId, "corporation_id") === kid && mine(appId, { corporation: r.row })).catch(() => {})
-    else mine(appId, { corporation: null })
-    if (cid) void rpc<{ row: Row }>("get", { table: "contacts", id: cid }).then((r) => linkOf(appId, "contact_id") === cid && mine(appId, { contact: r.row })).catch(() => {})
-    else mine(appId, { contact: null })
-  },
   key(ev) {
     if (ev.key === "Escape") {
       if (v().fireArmed !== 0) patch({ fireArmed: 0 })

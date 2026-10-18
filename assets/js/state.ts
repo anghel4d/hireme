@@ -64,24 +64,18 @@ export interface Model {
 
 /** The focus lens: what one application needs beyond its resident rows. */
 export interface FocusView {
-  /** The application id these were fetched for. */
+  /** The application shown. */
   id: number
-  /** The raw listing read so far; `bytes` (not characters) is where the next chunk starts. */
-  listing: { text: string; bytes: number; total: number; sha: string } | null
+  /** Whether its raw listing is unfolded. */
+  listing: boolean
   /** The application whose open-fire button is armed (0: none); it disarms by itself after a few seconds. */
   fireArmed: number
-  messages: Record<string, unknown>[]
-  contact: Record<string, unknown> | null
-  corporation: Record<string, unknown> | null
   /** The prose field open for editing, or "". */
   edit: string
   /** The application's rev when that editor opened: the save's expect_rev, so a write since is refused, not overwritten. */
   editRev: number
   /** The text that editor opened on. It stays the editor's while open, whatever an agent writes meanwhile. */
   editText: string
-  error: string
-  /** Deferred text read so far, by `table:id:column:sha`: a changed text has a new sha, so a stale entry is never shown. */
-  texts: Map<string, string>
 }
 
 /** The outreach lens: contacts, and the selected one's threads. */
@@ -167,7 +161,7 @@ export const model: Model = {
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
   deskLimit: 120,
-  focus: { id: 0, fireArmed: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
+  focus: { id: 0, listing: false, fireArmed: 0, edit: "", editRev: 0, editText: "" },
   outreach: { limit: 100, open: [], edit: "" },
 }
 
