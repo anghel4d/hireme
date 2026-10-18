@@ -34,11 +34,10 @@ if config_env() == :dev do
     path -> config :hireme, HiremeWeb.Gate, socket: path
   end
 
-  # A dev node on another port (an e2e run) is its own origin: the HELLO's
-  # Origin check and the passkey origin follow the port it listens on.
-  case System.get_env("PORT", "") do
-    "" -> :ok
-    port -> config :hireme, HiremeWeb.Endpoint, url: [port: String.to_integer(port)]
+  # A dev node on another port (an e2e run) is its own origin: Origin checks and passkeys follow it.
+  if (port = System.get_env("PORT", "")) != "" do
+    config :hireme, HiremeWeb.Endpoint, url: [port: String.to_integer(port)]
+    config :wax_, origin: "http://localhost:#{port}"
   end
 end
 
