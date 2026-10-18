@@ -55,7 +55,8 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
     ("scope", "a keyed op reads the table", "a keyed op reads the table, and this key cannot read it", "A put by natural key looks the row up first, which needs the table's read mask too. Put by id, or ask the operator for a key that reads this domain."),
     ("scope", "the delete reaches it", "the drop reaches a row this key cannot write", "Dropping this row removes or changes rows on another table (data: table), whose domain the key does not write. Ask the operator for that domain, or leave the row."),
     ("scope", "the lease is for writing", "the lease is for writing, and this key writes nothing", "A read-only key reads without a lease: call `find` and `get` directly."),
-    ("lease_missing", "the operator revoked this session's lease; reconnect", "the operator revoked this session's lease", "A revoked lease is not claimed again in the same session: hireme-mcp opens a new one; call `lease` then."),
+    ("lease_missing", "the operator revoked this session's lease; reconnect", "the operator revoked this session's lease", "The operator paused this key: it reads, but writes nothing until they resume it in the account lens. Then call `lease` again."),
+    ("lease_missing", "paused by the operator", "the operator paused this key's writing", "Reads still work. Writes and claims wait until the operator resumes the key in the account lens; then call `lease` again."),
     ("column", "append_only", "this table is append-only", "Its rows are only ever inserted: put without id or key to add a row; an existing row is never updated or dropped."),
     ("column", "readonly", "this column is readonly", "The server or a command writes it; leave it out of `set`. `schema` with the table lists the writable columns."),
     ("column", "private", "this column is the operator's private data", "No key writes it; leave it out of `set`."),
@@ -383,7 +384,7 @@ mod tests {
         // provenance, session, lease, judge and the heat governor).
         let sent = [
             ("scope", "cited; provenance outlives it"), ("scope", "a keyed op reads the table"), ("scope", "the delete reaches it"),
-            ("scope", "the lease is for writing"), ("lease_missing", "the operator revoked this session's lease; reconnect"),
+            ("scope", "the lease is for writing"), ("lease_missing", "the operator revoked this session's lease; reconnect"), ("lease_missing", "paused by the operator"),
             ("column", "append_only"), ("column", "readonly"), ("column", "private"), ("column", "required"), ("column", "implied"),
             ("column", "a source's identity is fixed once written"), ("column", "not filterable"), ("column", "not orderable"), ("column", "not text"),
             ("type", "an http(s) URL on a real hostname"), ("type", "an http(s) URL or a source id"), ("type", "inside a character"),
