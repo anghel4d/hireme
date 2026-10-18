@@ -35,6 +35,13 @@ if config_env() == :dev do
     "" -> :ok
     path -> config :hireme, HiremeWeb.Gate, socket: path
   end
+
+  # A dev node on another port (an e2e run) is its own origin: the HELLO's
+  # Origin check and the passkey origin follow the port it listens on.
+  case System.get_env("PORT", "") do
+    "" -> :ok
+    port -> config :hireme, HiremeWeb.Endpoint, url: [port: String.to_integer(port)]
+  end
 end
 
 # HIREME_GATE=off runs the wire over the WebSocket carrier alone, with no
