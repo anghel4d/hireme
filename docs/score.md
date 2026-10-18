@@ -15,7 +15,7 @@ and the focus lens and the MCP show both.
 | --- | --- | --- |
 | 100 | `frontier` | OpenAI, Anthropic, SpaceX, Neuralink, xAI |
 | 90–99 | `labs` | Google DeepMind, Meta FAIR, Thinking Machines, SSI, Starfish, Valve |
-| 85–89 | `big_tech` | big tech with a pay signal over $200k |
+| 85–89 | `big_tech` | big tech with a pay signal of $200k or more |
 | 70–84 | `systems` | real systems, agentic, Rust/C++ seats; big tech without the pay signal (80) |
 | 55–69 | `craft` | strong craft, scaled product engineering that is not mid-curve |
 | 40–54 | `mid` | decent engineering, mixed EV |
@@ -34,10 +34,13 @@ the score a card ranks by.
    15), or an onsite-only seat away from home (15). Nothing raises a kill,
    not even a named anchor.
 2. **Named anchors win over heuristics.** A big-tech name sits at 85 only
-   with a pay figure over $200k in `comp_raw` ("$210,000", "250k",
-   "180–240k", "250 000 €", a bare "220" or "$220" read as thousands);
-   otherwise at 80. A figure with a currency sign after it is the amount
-   itself ("250 €/h", "250$" are not $250k).
+   with a pay figure of $200k or more in `comp_raw` ("$210,000", "250k",
+   "180–240k", "250 000 €", "250.000,00 €", a bare "220" or "$220" read
+   as thousands); otherwise at 80. A figure with a currency sign or code
+   after it, or a rate's unit, is the amount itself, and so is the lower
+   bound of such a range ("250 €", "250 EUR", "$250/h", "600 € per day",
+   "500-650 €" are not $250k). Three digits after a comma or a dot group
+   thousands; one or two are a fraction ("3500,00 €").
 3. **Heuristics move an unanchored seat** from a base of 48: systems,
    runtime, kernel, infrastructure, distributed or compiler work +22;
    agentic work +10; Rust, C++ or low-level +8; home or remote +5; the pay
