@@ -38,6 +38,43 @@ defmodule Hireme.SequencerTest do
            ]
   end
 
+  property "in any batch, each refusal rolls back exactly its own op", %{account: a} do
+    # Each op is valid, or refused by its own fault: a missing required
+    # column (column) or a target that names no row (not_found).
+    check all(
+            kinds <-
+              list_of(member_of([:ok, :ok, :column, :not_found]), min_length: 1, max_length: 12),
+            max_runs: 15
+          ) do
+      tag = System.unique_integer([:positive])
+      before = Repo.all(from c in Corporation, select: c.domain)
+
+      ops =
+        kinds
+        |> Enum.with_index()
+        |> Enum.map(fn
+          {:ok, i} -> op(:put, :corporations, %{domain: "#{tag}-#{i}.example", name: "N"})
+          {:column, i} -> op(:put, :corporations, %{domain: "#{tag}-#{i}.example"})
+          {:not_found, i} -> op(:put, :corporations, %{name: "#{i}"}, target: 999_999_999)
+        end)
+
+      {acks, nacks} = run(a.id, ops)
+      assert length(acks) == Enum.count(kinds, &(&1 == :ok))
+      assert Enum.map(nacks, & &1.refusal) == Enum.reject(kinds, &(&1 == :ok))
+
+      accepted = for {:ok, i} <- Enum.with_index(kinds), do: "#{tag}-#{i}.example"
+      after_ = Repo.all(from c in Corporation, select: c.domain)
+      assert Enum.sort(after_ -- before) == Enum.sort(accepted)
+    end
+  end
+
+  test "settings is one row: a put without a target finds it", %{account: a} do
+    {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
+    {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))
+    assert second.id == first.id and second.rev == first.rev + 1
+    assert [%{citizenships: "de"}] = Repo.all(Hireme.Rows.Setting)
+  end
+
   property "a resent op writes nothing and answers its first verdict", %{account: a} do
     check all(
             names <- list_of(string(:alphanumeric, min_length: 1), min_length: 1, max_length: 6),
@@ -1156,7 +1193,14 @@ defmodule Hireme.SequencerTest do
     } do
       {:ok, %{key: key}} = Hireme.Keys.mint(s, "paused", Hireme.Keys.preset(:read_write))
       {_agent, _} = key_session(a.id, key, 996)
+      :ok = Hireme.Lease.revoke(a.id, 996, %{ip: "203.0.113.9"})
+      # The pause is recorded once, when it begins, with who and from where.
       :ok = Hireme.Lease.revoke(a.id, 996, %{})
+
+      assert [%{ip: "203.0.113.9"}] =
+               Repo.all(from(e in Hireme.Rows.Audit, where: e.kind == "key_paused"),
+                 skip_account: true
+               )
 
       [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
       DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
@@ -1200,6 +1244,35 @@ defmodule Hireme.SequencerTest do
                )
 
       assert ledger.() == 1
+    end
+
+    test "at its cap an account's ledger makes room from its own oldest entries, never another's",
+         %{account: a} do
+      %{account: other} = sign_in()
+
+      gym = fn account_id, slug ->
+        run(
+          account_id,
+          op(:put, :gym_reps, %{platform: :other, slug: slug, done_on: ~D[2026-10-01]})
+        )
+      end
+
+      # The other account's entries are the node's oldest.
+      for i <- 1..3, do: {[_], []} = gym.(other.id, "o#{i}")
+      {[_], []} = gym.(a.id, "a1")
+
+      count = fn account_id ->
+        Repo.aggregate(
+          from(l in Hireme.Rows.OpLedger, where: l.account_id == ^account_id),
+          :count, skip_account: true)
+      end
+
+      [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+      t = Hireme.Schema.table("op_ledger")
+      :sys.replace_state(pid, &put_in(&1.counts[t.id], t.cap))
+
+      {[_], []} = gym.(a.id, "a2")
+      assert {count.(a.id), count.(other.id)} == {1, 3}
     end
 
     test "an insert refused at the text budget leaves no claim behind", %{

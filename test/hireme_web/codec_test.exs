@@ -17,6 +17,18 @@ defmodule HiremeWeb.Wire.CodecTest do
              "0900010002000000feff0100080000000400000005000000"
   end
 
+  test "an OPS body holds at most 256 ops; 257 is refused whole" do
+    op = {7, :put, 0, 3, 0, nil, [{8, 1, 5}]}
+
+    body = fn n ->
+      IO.iodata_to_binary([<<n::little-32, 0::32>> | List.duplicate(Codec.encode_op(op), n)])
+    end
+
+    assert {:ok, ops} = Codec.ops(body.(256))
+    assert length(ops) == 256
+    assert {:error, :body} = Codec.ops(body.(257))
+  end
+
   test "an OPS frame round-trips its cells, and a sentinel cell is refused as a value" do
     raw =
       Codec.encode_op(

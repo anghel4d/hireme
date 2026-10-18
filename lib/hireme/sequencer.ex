@@ -195,7 +195,7 @@ defmodule Hireme.Sequencer do
     state = %{
       account_id: account_id,
       rev: rev,
-      lease: paused_keys(account_id),
+      lease: %Lease{},
       lease_rows: [],
       subs: %{},
       counts: %{},
@@ -209,6 +209,8 @@ defmodule Hireme.Sequencer do
     # heard here too: its sessions stop writing the moment the sequencer
     # knows, not when their carrier closes.
     Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(account_id))
+    # Read after subscribing, so a resume in between is not lost.
+    state = %{state | lease: paused_keys(account_id)}
     purge_ledger(Store.now())
     Process.send_after(self(), :purge, @purge_ms)
     send(self(), :backfill)
@@ -719,7 +721,13 @@ defmodule Hireme.Sequencer do
     evicted =
       if state.counts[t.id] + 1 > t.cap do
         oldest =
-          from(l in Hireme.Rows.OpLedger, order_by: l.id, limit: ^div(t.cap, 100), select: l.id)
+          from(l in Hireme.Rows.OpLedger,
+            # A subquery is not scoped for us: the account's own oldest.
+            where: l.account_id == ^state.account_id,
+            order_by: l.id,
+            limit: ^div(t.cap, 100),
+            select: l.id
+          )
 
         {n, _} = Repo.delete_all(from(l in Hireme.Rows.OpLedger, where: l.id in subquery(oldest)))
         n
@@ -2107,13 +2115,20 @@ defmodule Hireme.Sequencer do
 
   defp lease_request(:list, _pid, state), do: {{:ok, Lease.list(state.lease)}, state}
 
+  # Answers whether anything was released and the key this revoke paused,
+  # if it paused one now (nil when it was paused already, or a browser's).
   defp lease_request({:revoke, lease_id}, _pid, state) do
-    state = pause(state, state.lease.sessions[lease_id])
+    {state, paused} = pause(state, state.lease.sessions[lease_id])
 
     case Lease.revoke(state.lease, lease_id) do
-      {:ok, lease, _released} -> {{:ok, true}, broadcast_leases(%{state | lease: lease}, [])}
-      {:unchanged, lease} -> {{:ok, false}, %{state | lease: lease}}
-      :error -> {{:error, :not_found}, state}
+      {:ok, lease, _released} ->
+        {{:ok, true, paused}, broadcast_leases(%{state | lease: lease}, [])}
+
+      {:unchanged, lease} ->
+        {{:ok, false, paused}, %{state | lease: lease}}
+
+      :error ->
+        {{:error, :not_found}, state}
     end
   end
 
@@ -2148,19 +2163,20 @@ defmodule Hireme.Sequencer do
   defp pause(state, %{key_id: key_id}) when key_id != nil do
     now = Store.now()
 
-    Store.write(fn ->
-      Repo.update_all(
-        from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id and is_nil(k.paused_at)),
-        set: [paused_at: now, updated_at: now],
-        inc: [rev: 1]
-      )
-    end)
+    {n, _} =
+      Store.write(fn ->
+        Repo.update_all(
+          from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id and is_nil(k.paused_at)),
+          set: [paused_at: now, updated_at: now],
+          inc: [rev: 1]
+        )
+      end)
 
     since = Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id, select: k.paused_at))
-    %{state | lease: Lease.hold(state.lease, key_id, since || now)}
+    {%{state | lease: Lease.hold(state.lease, key_id, since || now)}, if(n == 1, do: key_id)}
   end
 
-  defp pause(state, _session), do: state
+  defp pause(state, _session), do: {state, nil}
 
   defp paused_keys(account_id) do
     from(k in Hireme.Rows.ApiKey,
