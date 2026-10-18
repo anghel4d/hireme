@@ -176,7 +176,9 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
         }
         "too_large" => match (int("limit"), int("max"), text("filter"), text("param")) {
             (Some(n), Some(max), _, _) => Some((format!("a limit of {n} is over the cap of {max}"), format!("Ask for at most {max} rows and page on with `after`."))),
-            (_, Some(max), Some(f), _) => Some((format!("an `{f}` list over {max} values"), format!("Split the list into calls of at most {max} values each."))),
+            (_, Some(max), Some("in"), _) => Some((format!("an `in` list over {max} values"), format!("Split the list into calls of at most {max} values each."))),
+            // like and prefix take a pattern, bounded in bytes.
+            (_, Some(max), Some(f), _) => Some((format!("a `{f}` pattern over {max} bytes"), format!("Shorten the pattern to at most {max} bytes."))),
             (_, _, _, Some("offset")) => Some(("the offset is past any text".to_owned(), "Give an offset inside the text: below the `len` of its {len, sha} stub.".to_owned())),
             _ => None,
         },
@@ -415,6 +417,7 @@ mod tests {
             ("type", serde_json::json!({"table": "places", "need": "id or key"}), "this needs the row's id or key"),
             ("too_large", serde_json::json!({"limit": 900, "max": 500}), "a limit of 900 is over the cap of 500"),
             ("too_large", serde_json::json!({"column": "id", "filter": "in", "max": 1000}), "an `in` list over 1000 values"),
+            ("too_large", serde_json::json!({"column": "name", "filter": "prefix", "max": 1000}), "a `prefix` pattern over 1000 bytes"),
             ("too_large", serde_json::json!({"param": "offset"}), "the offset is past any text"),
             ("too_large", serde_json::json!({"bytes": 2000000, "max": 1048576}), "more than 1 MiB of text in one op"),
             ("column", serde_json::json!({"table": "corporations", "missing": ["name"]}), "a new row lacks its required columns: name"),
