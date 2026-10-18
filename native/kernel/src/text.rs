@@ -81,10 +81,17 @@ pub fn fold(s: &str) -> String {
         }
         match latin(cp) {
             Some(b) => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
-            // A capital outside the tables can lowercase into them (Ƕ → ƕ).
+            // A capital outside the tables can lowercase into them (Ƕ → ƕ),
+            // and a small letter outside them can have its capital inside
+            // (ɓ → Ɓ): either way the base letter is the table's.
             None => {
                 for l in c.to_lowercase() {
-                    match latin(l as u32) {
+                    let mut up = l.to_uppercase();
+                    let capital = match (up.next(), up.next()) {
+                        (Some(u), None) => latin(u as u32),
+                        _ => None,
+                    };
+                    match latin(l as u32).or(capital) {
                         Some(b) => out.extend(b.chars().map(|c| c.to_ascii_lowercase())),
                         None => out.push(l),
                     }
@@ -203,6 +210,7 @@ mod tests {
         assert_eq!(normalize("Timi\u{219}oara"), normalize("Timis\u{326}oara"));
         assert_eq!(normalize("Hà Nội"), "ha noi");
         assert_eq!(normalize("Ha\u{300} No\u{323}\u{302}i"), "ha noi");
+        assert_eq!(fold("\u{181}\u{253}\u{23a}\u{2c65}"), "bbaa");
         for c in ["\u{1e9e}", "\u{1f6}", "\u{24a}", "\u{212b}", "\u{2c7e}", "\u{2c7f}"] {
             assert_eq!(normalize(c), normalize(&normalize(c)), "{c}");
         }

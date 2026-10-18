@@ -236,11 +236,26 @@ pub fn rail_of(stage: Stage, pips: Option<&str>) -> Rail {
     }
 }
 
-/// Whether the rail records a submission: its `submitted` rung was
-/// reached, not jumped over. Closing a listing that died before anything
-/// went out leaves it skipped.
+/// Whether the rail records that something went out: its `submitted` or
+/// `reply` rung was reached, not jumped over (an outreach application is
+/// answered without a submission). Closing a listing that died before
+/// anything went out leaves both skipped.
 pub fn sent(rail: &Rail) -> bool {
-    matches!(rail[Stage::Submitted.index()], Pip::Done | Pip::Active)
+    [Stage::Submitted, Stage::Reply].iter().any(|s| matches!(rail[s.index()], Pip::Done | Pip::Active))
+}
+
+/// What a move is judged against, besides the two stages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    pub has_batch: bool,
+    /// The batch's `fire` flag (false with no batch).
+    pub batch_fire: bool,
+    /// Whether it ever went out ([`sent`]).
+    pub sent: bool,
+    /// Whether it goes through a person rather than a listing: a channel
+    /// other than `listing` (referral, recruiter, cold, inbound, other),
+    /// where a reply needs no submission.
+    pub outreach: bool,
 }
 
 /// Why a stage move is refused, before heat (which `heat` judges).
@@ -270,14 +285,10 @@ impl Refusal {
     }
 }
 
-/// Whether the `stage` command may move an application `from` → `to`.
-/// `batch_fire` is the application's batch's `fire` flag (false with no
-/// batch); `sent` is whether it was ever submitted; `outreach` is whether
-/// it goes through a person rather than a listing (its channel is
-/// referral, recruiter, cold, inbound or other), where a reply needs no
-/// submission: the first message went out, or came in, by hand. A move to
-/// the stage it is on is allowed and changes nothing.
-pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool, sent: bool, outreach: bool) -> Result<(), Refusal> {
+/// Whether the `stage` command may move an application `from` → `to`. A
+/// move to the stage it is on is allowed and changes nothing.
+pub fn check(from: Stage, to: Stage, f: Facts) -> Result<(), Refusal> {
+    let Facts { has_batch, batch_fire, sent, outreach } = f;
     if from == to {
         return Ok(());
     }
@@ -342,22 +353,22 @@ mod tests {
     #[test]
     fn fire_hold_and_batches() {
         use Refusal::*;
-        assert_eq!(check(Stage::Gated, Stage::InBatch, false, false, false, false), Err(NeedsBatch));
-        assert_eq!(check(Stage::Gated, Stage::InBatch, true, false, false, false), Ok(()));
-        assert_eq!(check(Stage::FireReady, Stage::OpenFire, true, true, false, false), Err(OpenFireByCommand));
-        assert_eq!(check(Stage::FireReady, Stage::Submitted, true, false, false, false), Err(FireHold));
-        assert_eq!(check(Stage::OpenFire, Stage::Submitted, true, false, false, false), Ok(()));
-        assert_eq!(check(Stage::Submitted, Stage::Gated, true, true, true, false), Err(Sent));
-        assert_eq!(check(Stage::Submitted, Stage::Closed, true, true, true, false), Ok(()));
-        assert_eq!(check(Stage::Discovered, Stage::Closed, false, false, false, false), Ok(()));
-        assert_eq!(check(Stage::Reply, Stage::Reply, false, false, true, false), Ok(()));
-        assert_eq!(check(Stage::FireReady, Stage::Reply, true, false, false, false), Err(NotSent));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, Facts { has_batch: false, batch_fire: false, sent: false, outreach: false }), Err(NeedsBatch));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, Facts { has_batch: true, batch_fire: false, sent: false, outreach: false }), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::OpenFire, Facts { has_batch: true, batch_fire: true, sent: false, outreach: false }), Err(OpenFireByCommand));
+        assert_eq!(check(Stage::FireReady, Stage::Submitted, Facts { has_batch: true, batch_fire: false, sent: false, outreach: false }), Err(FireHold));
+        assert_eq!(check(Stage::OpenFire, Stage::Submitted, Facts { has_batch: true, batch_fire: false, sent: false, outreach: false }), Ok(()));
+        assert_eq!(check(Stage::Submitted, Stage::Gated, Facts { has_batch: true, batch_fire: true, sent: true, outreach: false }), Err(Sent));
+        assert_eq!(check(Stage::Submitted, Stage::Closed, Facts { has_batch: true, batch_fire: true, sent: true, outreach: false }), Ok(()));
+        assert_eq!(check(Stage::Discovered, Stage::Closed, Facts { has_batch: false, batch_fire: false, sent: false, outreach: false }), Ok(()));
+        assert_eq!(check(Stage::Reply, Stage::Reply, Facts { has_batch: false, batch_fire: false, sent: true, outreach: false }), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::Reply, Facts { has_batch: true, batch_fire: false, sent: false, outreach: false }), Err(NotSent));
         // Cold outreach and referrals get replies without a submission.
-        assert_eq!(check(Stage::Discovered, Stage::Reply, false, false, false, true), Ok(()));
+        assert_eq!(check(Stage::Discovered, Stage::Reply, Facts { has_batch: false, batch_fire: false, sent: false, outreach: true }), Ok(()));
         // A listing closed before anything went out can be reopened.
         let closed = move_to(&initial(Stage::Gated), Stage::Closed);
         assert!(!sent(&closed));
-        assert_eq!(check(Stage::Closed, Stage::Gated, false, false, sent(&closed), false), Ok(()));
+        assert_eq!(check(Stage::Closed, Stage::Gated, Facts { has_batch: false, batch_fire: false, sent: sent(&closed), outreach: false }), Ok(()));
         assert!(sent(&move_to(&initial(Stage::Submitted), Stage::Closed)));
     }
 }

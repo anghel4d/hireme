@@ -442,7 +442,8 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 .and_then(|b| rows.table(table::BATCHES).and_then(|bt| bt.u32(b, col::batches::FIRE)))
                 == Some(enums::fire::OPEN_FIRE as u32);
             let outreach = t.u32(id, A::CHANNEL).is_some_and(|c| c != enums::app_channel::LISTING as u32);
-            if let Err(r) = pipeline::check(from, to, batch.is_some(), fire, board::sent(t, id), outreach) {
+            let facts = pipeline::Facts { has_batch: batch.is_some(), batch_fire: fire, sent: board::sent(t, id), outreach };
+            if let Err(r) = pipeline::check(from, to, facts) {
                 let code = if r == pipeline::Refusal::FireHold { refusal::FIRE_HOLD } else { refusal::STAGE };
                 return refuse(code, json!({"from": from.name(), "to": to.name(), "rule": r.name()}));
             }

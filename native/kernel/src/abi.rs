@@ -152,9 +152,12 @@ impl Kernel {
         }
     }
 
-    /// The domain verdict on one op, against the base and pending rows.
+    /// The domain verdict on one op, against the base and pending rows,
+    /// on the kernel's day (the one the board is derived on), whatever
+    /// day the caller's clock says.
     pub fn judge(&mut self, op: &[u8], ctx: &Ctx) -> judge::Verdict {
-        judge::judge(&self.rows, &mut self.board, op, ctx)
+        let ctx = Ctx { today: self.today(), ..*ctx };
+        judge::judge(&self.rows, &mut self.board, op, &ctx)
     }
 
     /// Judges one op and, if it passes, applies it as pending: the
@@ -189,7 +192,9 @@ impl Kernel {
             t.ids().iter().copied().find(|&id| t.str(id, schema::col::applications::CANONICAL_URL) == Some(u))
         });
         if let (Some(id), true) = (target, op.flags & wire::CREATE_ONLY != 0) {
-            return Err(Refusal { code: schema::refusal::NATURAL_KEY, data: json!({"table": "applications", "id": id}) });
+            // As the server answers it: the key, not the row it found.
+            let _ = id;
+            return Err(Refusal { code: schema::refusal::NATURAL_KEY, data: json!({"table": "applications", "key": {"canonical_url": url}}) });
         }
         // The op layout: flags at byte 9, target at bytes 12..16.
         out[9] &= !(wire::KEYED | wire::CREATE_ONLY);

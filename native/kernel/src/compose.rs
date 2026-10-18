@@ -183,8 +183,14 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
             use col::cv_overlays as O;
             // The lineage's overlays from the index when there is one; an
             // application with no lineage reads its own by a scan.
+            // The lineage's and the application's own, as the scan below.
             let ids: Vec<u32> = match (lines, lineage) {
-                (Some(l), Some(lid)) => l.overlays(lid).collect(),
+                (Some(l), Some(lid)) => {
+                    let mut ids: Vec<u32> = l.overlays(lid).chain(l.overlays_of(id)).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    ids
+                }
                 _ => o
                     .ids()
                     .iter()

@@ -13,13 +13,17 @@
 //! "e.g". The [`TOP`] most frequent, ties by bytes, are the keywords.
 //! They are stored in `applications.keywords` with [`VERSION`]; a change
 //! to any rule here bumps the version, and the server re-extracts.
+//!
+//! The kernel only ever holds a listing's text in the op that writes it,
+//! so a put that changes `listing_format` alone does not re-extract; the
+//! next write of `listing_raw` (or a version bump's backfill) does.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Bump on any change to what `extract` returns for some input.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// How many keywords a listing keeps.
 pub const TOP: usize = 12;
@@ -119,19 +123,38 @@ fn entity(s: &str) -> Option<usize> {
     let ok = match body {
         [b'#', b'x' | b'X', hex @ ..] => !hex.is_empty() && hex.iter().all(u8::is_ascii_hexdigit),
         [b'#', dec @ ..] => !dec.is_empty() && dec.iter().all(u8::is_ascii_digit),
-        name => ENTITIES.contains(&name),
+        name => ENTITIES.binary_search(&name).is_ok(),
     };
     ok.then_some(end + 1)
 }
 
-/// The named entities listings use; anything else between '&' and ';' is
-/// prose ("salary&bonus;").
+/// The HTML 4 named entities (sorted, for a binary search); anything
+/// else between '&' and ';' is prose ("salary&bonus;").
 const ENTITIES: &[&[u8]] = &[
-    b"amp", b"lt", b"gt", b"quot", b"apos", b"nbsp", b"ndash", b"mdash", b"hellip", b"bull", b"middot",
-    b"lsquo", b"rsquo", b"ldquo", b"rdquo", b"laquo", b"raquo", b"copy", b"reg", b"trade", b"euro", b"pound",
-    b"yen", b"cent", b"times", b"divide", b"deg", b"plusmn", b"para", b"sect", b"shy", b"zwj", b"zwnj",
-    b"aacute", b"eacute", b"iacute", b"oacute", b"uacute", b"agrave", b"egrave", b"ograve", b"auml", b"ouml",
-    b"uuml", b"ntilde", b"ccedil", b"szlig", b"Aacute", b"Eacute", b"Ouml", b"Uuml", b"Auml",
+    b"AElig", b"Aacute", b"Acirc", b"Agrave", b"Alpha", b"Aring", b"Atilde", b"Auml", b"Beta", b"Ccedil",
+    b"Chi", b"Dagger", b"Delta", b"ETH", b"Eacute", b"Ecirc", b"Egrave", b"Epsilon", b"Eta", b"Euml",
+    b"Gamma", b"Iacute", b"Icirc", b"Igrave", b"Iota", b"Iuml", b"Kappa", b"Lambda", b"Mu", b"Ntilde", b"Nu",
+    b"OElig", b"Oacute", b"Ocirc", b"Ograve", b"Omega", b"Omicron", b"Oslash", b"Otilde", b"Ouml", b"Phi",
+    b"Pi", b"Prime", b"Psi", b"Rho", b"Scaron", b"Sigma", b"THORN", b"Tau", b"Theta", b"Uacute", b"Ucirc",
+    b"Ugrave", b"Upsilon", b"Uuml", b"Xi", b"Yacute", b"Yuml", b"Zeta", b"aacute", b"acirc", b"acute",
+    b"aelig", b"agrave", b"alefsym", b"alpha", b"amp", b"and", b"ang", b"aring", b"asymp", b"atilde",
+    b"auml", b"bdquo", b"beta", b"brvbar", b"bull", b"cap", b"ccedil", b"cedil", b"cent", b"chi", b"circ",
+    b"clubs", b"cong", b"copy", b"crarr", b"cup", b"curren", b"dArr", b"dagger", b"darr", b"deg", b"delta",
+    b"diams", b"divide", b"eacute", b"ecirc", b"egrave", b"empty", b"emsp", b"ensp", b"epsilon", b"equiv",
+    b"eta", b"eth", b"euml", b"euro", b"exist", b"fnof", b"forall", b"frac12", b"frac14", b"frac34",
+    b"frasl", b"gamma", b"ge", b"gt", b"hArr", b"harr", b"hearts", b"hellip", b"iacute", b"icirc", b"iexcl",
+    b"igrave", b"image", b"infin", b"int", b"iota", b"iquest", b"isin", b"iuml", b"kappa", b"lArr",
+    b"lambda", b"lang", b"laquo", b"larr", b"lceil", b"ldquo", b"le", b"lfloor", b"lowast", b"loz", b"lrm",
+    b"lsaquo", b"lsquo", b"lt", b"macr", b"mdash", b"micro", b"middot", b"minus", b"mu", b"nabla", b"nbsp",
+    b"ndash", b"ne", b"ni", b"not", b"notin", b"nsub", b"ntilde", b"nu", b"oacute", b"ocirc", b"oelig",
+    b"ograve", b"oline", b"omega", b"omicron", b"oplus", b"or", b"ordf", b"ordm", b"oslash", b"otilde",
+    b"otimes", b"ouml", b"para", b"part", b"permil", b"perp", b"phi", b"pi", b"piv", b"plusmn", b"pound",
+    b"prime", b"prod", b"prop", b"psi", b"quot", b"rArr", b"radic", b"rang", b"raquo", b"rarr", b"rceil",
+    b"rdquo", b"real", b"reg", b"rfloor", b"rho", b"rlm", b"rsaquo", b"rsquo", b"sbquo", b"scaron", b"sdot",
+    b"sect", b"shy", b"sigma", b"sigmaf", b"sim", b"spades", b"sub", b"sube", b"sum", b"sup", b"sup1",
+    b"sup2", b"sup3", b"supe", b"szlig", b"tau", b"there4", b"theta", b"thetasym", b"thinsp", b"thorn",
+    b"tilde", b"times", b"trade", b"uArr", b"uacute", b"uarr", b"ucirc", b"ugrave", b"uml", b"upsih",
+    b"upsilon", b"uuml", b"weierp", b"xi", b"yacute", b"yen", b"yuml", b"zeta", b"zwj", b"zwnj",
 ];
 
 fn find_ci(s: &str, p: &str) -> Option<usize> {
@@ -302,6 +325,12 @@ mod tests {
         assert_eq!(html, ["kernel", "gpu"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
         assert_eq!(md, ["kernels", "apply", "see"]);
+    }
+
+    #[test]
+    fn the_lookup_tables_are_sorted() {
+        assert!(STOP.windows(2).all(|w| w[0] < w[1]));
+        assert!(ENTITIES.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

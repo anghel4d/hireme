@@ -28,6 +28,7 @@ impl Size {
     }
 }
 
+/// `Other` stays the last variant: the governor sizes its counts by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Department {
     Infra,
@@ -53,6 +54,7 @@ impl Department {
     }
 }
 
+/// `Other` stays the last variant: the governor sizes its counts by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {
     SoftwareEngineer,

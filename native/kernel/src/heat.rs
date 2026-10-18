@@ -233,8 +233,10 @@ impl Seat {
         }
     }
 
+    /// Days since `since`. A seat with no date never ages: it sits so far
+    /// in the future that no day ahead decays it, on any path.
     fn age(&self, today: Day) -> i64 {
-        self.since.map_or(0, |d| today as i64 - d as i64)
+        self.since.map_or(i64::MIN / 2, |d| today as i64 - d as i64)
     }
 }
 
@@ -385,8 +387,8 @@ struct Group {
     total: u64,
     /// Members by department and by role family (a company's group only),
     /// so the penalties read two counts instead of the members.
-    depts: [u32; 7],
-    fams: [u32; 7],
+    depts: [u32; DEPARTMENTS],
+    fams: [u32; FAMILIES],
     /// Members by age in days at the index's day: a load on any later day
     /// is one decay per distinct age, never a walk of the members.
     ages: BTreeMap<i64, u32>,
@@ -418,6 +420,10 @@ impl Group {
         }
     }
 }
+
+/// One count per variant; `Other` is each enum's last.
+const DEPARTMENTS: usize = Department::Other as usize + 1;
+const FAMILIES: usize = Family::Other as usize + 1;
 
 const COMPANY: usize = 0;
 const VENDOR: usize = 1;

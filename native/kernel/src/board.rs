@@ -125,8 +125,11 @@ pub struct Lines {
     corp_of_lineage: crate::fx::Map<u32, u32>,
     line_of_overlay: crate::fx::Map<u32, (u32, u32)>,
     overlays_on_line: crate::fx::Map<(u32, u32), u32>,
-    /// Overlay ids per lineage, for composing a CV without a scan.
+    /// Overlay ids per lineage and per application, for composing a CV
+    /// without a scan.
     overlays_of_lineage: crate::fx::Map<u32, alloc::collections::BTreeSet<u32>>,
+    overlays_of_app: crate::fx::Map<u32, alloc::collections::BTreeSet<u32>>,
+    app_of_overlay: crate::fx::Map<u32, u32>,
 }
 
 impl Lines {
@@ -136,7 +139,10 @@ impl Lines {
             t.ids().iter().for_each(|&id| l.set_lineage(id, t.u32(id, col::cv_lineages::CORPORATION_ID)));
         }
         if let Some(t) = rows.table(table::CV_OVERLAYS) {
-            t.ids().iter().for_each(|&id| l.set_overlay(id, line(t, id)));
+            t.ids().iter().for_each(|&id| {
+                l.set_overlay(id, line(t, id));
+                l.set_owner(id, t.u32(id, col::cv_overlays::APPLICATION_ID));
+            });
         }
         l
     }
@@ -176,6 +182,23 @@ impl Lines {
             self.line_of_overlay.insert(id, l);
             *self.overlays_on_line.entry(l).or_insert(0) += 1;
         }
+    }
+
+    fn set_owner(&mut self, id: u32, app: Option<u32>) {
+        if let Some(old) = self.app_of_overlay.remove(&id) {
+            if let Some(set) = self.overlays_of_app.get_mut(&old) {
+                set.remove(&id);
+            }
+        }
+        if let Some(a) = app {
+            self.app_of_overlay.insert(id, a);
+            self.overlays_of_app.entry(a).or_default().insert(id);
+        }
+    }
+
+    /// The overlay ids written for an application, ascending.
+    pub fn overlays_of(&self, application: u32) -> impl Iterator<Item = u32> + '_ {
+        self.overlays_of_app.get(&application).into_iter().flatten().copied()
     }
 
     pub fn lineage(&self, corporation: u32) -> Option<u32> {
@@ -297,7 +320,9 @@ impl Board {
             if let Some((wrote, gone)) = moved.tables.get(&table::CV_OVERLAYS) {
                 let t = rows.table(table::CV_OVERLAYS);
                 for id in wrote.iter().chain(gone) {
-                    lines.set_overlay(*id, t.filter(|t| t.has(*id)).and_then(|t| line(t, *id)));
+                    let live = t.filter(|t| t.has(*id));
+                    lines.set_overlay(*id, live.and_then(|t| line(t, *id)));
+                    lines.set_owner(*id, live.and_then(|t| t.u32(*id, col::cv_overlays::APPLICATION_ID)));
                 }
             }
         }

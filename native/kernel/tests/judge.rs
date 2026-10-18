@@ -57,6 +57,7 @@ fn kernel(apps: &[App], batches: &[(u32, u8)], lineages: &[(u32, u32, i32, bool)
         .u32s(col::cv_lineages::REWRITES_ALLOWED, lineages.iter().map(|x| x.3 as u32));
     b.done();
     let mut k = Kernel::new();
+    k.set_today(TODAY);
     k.boot(&w.finish(), 1).unwrap();
     k
 }
@@ -244,6 +245,7 @@ fn a_predicted_listing_keeps_every_other_rows_stub_and_rolls_back() {
         .deferred(A::LISTING_RAW, (0..3).map(|i| Some((100 + i, [i as u8; 8]))));
     b.done();
     let mut k = Kernel::new();
+    k.set_today(TODAY);
     k.boot(&w.finish(), 1).unwrap();
     let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
         o.str(A::LISTING_RAW, "Rust kernels");
