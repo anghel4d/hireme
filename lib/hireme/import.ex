@@ -611,19 +611,34 @@ defmodule Hireme.Import do
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 
-  # A name the pack gave that no schema declares is echoed as given when
-  # short and made only of letters, numbers, marks, punctuation, symbols
-  # and ASCII spaces; any other codepoint (a control, format, separator,
-  # private-use or unassigned one: the mix task prints the name to a
-  # terminal) is written as \\u{hex}. Longer or non-UTF-8 names are bounded.
-  defp named(name) when is_binary(name) and byte_size(name) <= 64 do
-    if String.valid?(name),
-      do:
-        Regex.replace(~r/[^\p{L}\p{N}\p{M}\p{P}\p{S} ]/u, name, fn c ->
+  # A name the pack gave that no schema declares is echoed as given where
+  # it is letters, numbers, marks, punctuation, symbols and ASCII spaces;
+  # any other codepoint (a control, format, separator, private-use or
+  # unassigned one: the mix task prints the name to a terminal), and a
+  # backslash so that an escape reads only one way, is written as \\u{hex}.
+  # Past 64 bytes it is cut and its size named; non-UTF-8 is inspected.
+  defp named(name) when is_binary(name) do
+    if String.valid?(name) do
+      head = clip(name, 64)
+
+      escaped =
+        Regex.replace(~r/[^\p{L}\p{N}\p{M}\p{P}\p{S} ]|\\/u, head, fn c ->
           "\\u{" <> Integer.to_string(hd(String.to_charlist(c)), 16) <> "}"
-        end),
-      else: brief(name)
+        end)
+
+      if head == name, do: escaped, else: "#{escaped}… (#{byte_size(name)} bytes)"
+    else
+      brief(name)
+    end
   end
 
   defp named(name), do: brief(name)
+
+  # The longest whole-codepoint prefix of at most n bytes.
+  defp clip(<<c::utf8, rest::binary>>, n) do
+    size = byte_size(<<c::utf8>>)
+    if size <= n, do: <<c::utf8>> <> clip(rest, n - size), else: ""
+  end
+
+  defp clip(_, _), do: ""
 end

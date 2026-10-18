@@ -493,7 +493,9 @@ defmodule Hireme.ImportTest do
     assert byte_size(inspect(report)) < 4_000
 
     # One sample per excluded category: Cc, Cf (a bidi override), Zs other
-    # than ASCII space, Zl, Zp, Co and Cn; and a plain name, echoed as given.
+    # than ASCII space, Zl, Zp, Co and Cn; a name that spells an escape; a
+    # long one ending in a tag, a soft hyphen and a private-use codepoint;
+    # and a plain name, echoed as given.
     plain = "Ünïcode name, punct. & symbols ★ 1"
 
     sly = [
@@ -503,7 +505,9 @@ defmodule Hireme.ImportTest do
       "ls\u2028",
       "ps\u2029",
       "pu\uE000",
-      "un\u0378"
+      "un\u0378",
+      "lit\\u{202E}",
+      String.duplicate("long ", 12) <> "\u{E0041}\u00AD\uE000"
     ]
 
     sly_body =
