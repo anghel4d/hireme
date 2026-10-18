@@ -138,6 +138,24 @@ defmodule Hireme.ProvenanceTest do
     assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
   end
 
+  test "the operator's trusted hosts stop at their declared cap", %{account: a} do
+    cap = Schema.table(:trusted_hosts).cap
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    Repo.insert_all(
+      Hireme.Rows.TrustedHost,
+      for(
+        i <- 1..(cap - 1),
+        do: %{account_id: a.id, host: "h#{i}.example", rev: 1, inserted_at: now, updated_at: now}
+      )
+    )
+
+    assert {:ok, _} = Provenance.trust("last.example", nil, %{})
+    assert {:error, :cap} = Provenance.trust("over.example", nil, %{})
+    # Re-trusting one already listed only edits its note.
+    assert {:ok, _} = Provenance.trust("last.example", "edited", %{})
+  end
+
   test "citations are in no mask: no key writes one", %{account: a} do
     key = %{
       label: "k",

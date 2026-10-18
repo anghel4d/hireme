@@ -736,7 +736,7 @@ defmodule Hireme.Sequencer do
          :ok <- too_large(op),
          {:ok, effects, state} <- domain(plan, op, sub, state, turn),
          {:ok, prov} <- provenance(plan, op, effects, turn),
-         {:ok, state} <- limits(plan, effects, state, op, turn),
+         {:ok, state} <- limits(plan, effects, state),
          {:ok, state, turn, ack} <- write(plan, op, sub, effects, prov, state, turn) do
       {:ok, state, turn, ack}
     else
@@ -1241,26 +1241,6 @@ defmodule Hireme.Sequencer do
       else: :ok
   end
 
-  defp limits(plan, effects, state, op, turn) do
-    with {:ok, state} <- limits(plan, effects, state), do: text_budget(op, state, turn)
-  end
-
-  # The account's text: what it holds, what this turn has moved, and what
-  # this op brings may not pass Security.account_text_bytes.
-  defp text_budget(op, state, turn) do
-    adds =
-      Enum.reduce(op.cells, 0, fn
-        {_, 2, v}, n -> n + byte_size(v)
-        _, n -> n
-      end)
-
-    budget = Security.account_text_bytes()
-
-    if state.text_bytes + turn.text + adds > budget,
-      do: {:refused, :cap, %{table: "account", reason: "text", cap: budget}, state},
-      else: {:ok, state}
-  end
-
   defp limits(plan, effects, state) do
     citations = Schema.table(:citations)
     cited = length(cited_cells(plan, effects))
@@ -1410,6 +1390,25 @@ defmodule Hireme.Sequencer do
 
   # The op's rows go to the kernel now, so the next op is judged on them.
   defp finish(state, turn, deltas, ack) do
+    text =
+      Enum.reduce(deltas, 0, fn
+        {:text, n}, acc -> acc + n
+        _, acc -> acc
+      end)
+
+    # The account's text budget weighs what the op changed, after minus
+    # before, so rewriting a long text shorter always lands; the refusal
+    # comes inside the op's savepoint, before the kernel takes its rows.
+    budget = Security.account_text_bytes()
+
+    if text > 0 and state.text_bytes + turn.text + text > budget do
+      {:refused, :cap, %{table: "account", reason: "text", cap: budget}, state}
+    else
+      kernel_takes(state, turn, deltas, ack, text)
+    end
+  end
+
+  defp kernel_takes(state, turn, deltas, ack, text) do
     body = IO.iodata_to_binary(resident_patch(deltas))
 
     # The kernel refusing its own rows is a bug; it is rebuilt from what the
@@ -1423,12 +1422,6 @@ defmodule Hireme.Sequencer do
         _ ->
           state
       end
-
-    text =
-      Enum.reduce(deltas, 0, fn
-        {:text, n}, acc -> acc + n
-        _, acc -> acc
-      end)
 
     {:ok, count_deltas(state, deltas),
      %{turn | deltas: turn.deltas ++ deltas, text: turn.text + text}, ack}

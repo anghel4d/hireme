@@ -252,25 +252,37 @@ defmodule Hireme.Provenance do
   def trust(host_or_url, note, meta) do
     host = host(host_or_url) || normalize(host_or_url)
 
-    if host do
-      now = Store.now()
+    cap = Hireme.Schema.table(:trusted_hosts).cap
 
-      Store.write(fn ->
-        %TrustedHost{}
-        |> TrustedHost.changeset(%{host: host, note: note})
-        |> Ecto.Changeset.change(rev: 1, inserted_at: now, updated_at: now)
-        |> Repo.insert(
-          on_conflict: {:replace, [:note, :updated_at]},
-          conflict_target: [:account_id, :host]
-        )
-      end)
-      |> tap(fn
-        {:ok, _} -> Audit.record(:host_trusted, %{host: host}, audit_ctx(meta))
-        _ -> :ok
-      end)
-    else
-      {:error, :host}
+    cond do
+      host == nil ->
+        {:error, :host}
+
+      Repo.aggregate(TrustedHost, :count) >= cap and
+          not Repo.exists?(from t in TrustedHost, where: t.host == ^host) ->
+        {:error, :cap}
+
+      true ->
+        trust_host(host, note, meta)
     end
+  end
+
+  defp trust_host(host, note, meta) do
+    now = Store.now()
+
+    Store.write(fn ->
+      %TrustedHost{}
+      |> TrustedHost.changeset(%{host: host, note: note})
+      |> Ecto.Changeset.change(rev: 1, inserted_at: now, updated_at: now)
+      |> Repo.insert(
+        on_conflict: {:replace, [:note, :updated_at]},
+        conflict_target: [:account_id, :host]
+      )
+    end)
+    |> tap(fn
+      {:ok, _} -> Audit.record(:host_trusted, %{host: host}, audit_ctx(meta))
+      _ -> :ok
+    end)
   end
 
   @doc "Stops trusting a host."
@@ -286,10 +298,9 @@ defmodule Hireme.Provenance do
 
   defp audit_ctx(meta), do: Map.put_new(meta, :account_id, Repo.account_id())
 
-  defp normalize(host) when is_binary(host) do
-    h = host |> String.trim() |> String.downcase() |> String.trim_trailing(".")
-    if h =~ ~r/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/, do: h
-  end
+  # A bare host (no scheme) the operator types: the same DNS-name rule.
+  defp normalize(host) when is_binary(host),
+    do: host |> String.trim() |> String.downcase() |> String.trim_trailing(".") |> hostname()
 
   defp normalize(_), do: nil
 end

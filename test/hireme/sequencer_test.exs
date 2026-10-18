@@ -1034,7 +1034,9 @@ defmodule Hireme.SequencerTest do
               %{rows: [[n]]} =
                 Repo.query!(
                   ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{t.name}" WHERE account_id = ?},
-                  [account_id], skip_account: true)
+                  [account_id],
+                  skip_account: true
+                )
 
               acc + n
           end
@@ -1063,7 +1065,9 @@ defmodule Hireme.SequencerTest do
               source: "https://bytes.example/a",
               headcount: 9,
               as_of: ~D[2026-10-01]
-            }, expect_rev: 0)
+            },
+            expect_rev: 0
+          )
         )
 
       {[app], []} =
@@ -1120,6 +1124,39 @@ defmodule Hireme.SequencerTest do
                run(
                  a.id,
                  op(:put, :gym_reps, %{platform: :other, slug: "s", done_on: ~D[2026-10-01]})
+               )
+    end
+
+    test "at its budget an account can still rewrite text shorter, never longer", %{account: a} do
+      {[app], []} =
+        run(
+          a.id,
+          op(:put, :applications, %{
+            company: "Full",
+            role: "R",
+            notes: String.duplicate("x", 5_000)
+          })
+        )
+
+      budget = Hireme.Security.account_text_bytes()
+
+      from(x in Hireme.Rows.Account, where: x.id == ^a.id)
+      |> Repo.update_all([set: [text_bytes: budget - 10]], skip_account: true)
+
+      # The sequencer reads the counter when it starts; a fresh one sees the full account.
+      [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+      DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+
+      assert {[_], []} =
+               run(
+                 a.id,
+                 op(:put, :applications, %{notes: String.duplicate("y", 100)}, target: app.id)
+               )
+
+      assert {[], [%{refusal: :cap}]} =
+               run(
+                 a.id,
+                 op(:put, :applications, %{notes: String.duplicate("z", 6_000)}, target: app.id)
                )
     end
 
