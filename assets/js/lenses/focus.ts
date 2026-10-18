@@ -94,11 +94,21 @@ async function fetchAround(appId: number, a: Row): Promise<void> {
 
 // ------------------------------------------------------------------ view
 
+/**
+ * The rail. Every move is the `stage` command except opening fire, which is
+ * the operator's own act: the human_only `open_fire` command, armed by one
+ * click and done by a second, and the only way to `submitted` (FIRE HOLD).
+ */
 function rail(d: Doc, appId: number): Html {
   const stage = str(d.application.stage)
-  return html`<ol class="rail" aria-label="Pipeline" data-key="rail">${d.rail.map((r) => html`<li data-key="${r.stage}" class="pip-${r.pip}${r.stage === stage ? " now" : ""}">
-    <button type="button" data-act="stage" data-stage="${r.stage}" data-id="${appId}" title="${r.hint}"${flag("disabled", r.stage === stage)}>
-      ${r.label}${r.fire_locked ? html` <span class="lock" aria-label="FIRE HOLD">⏸</span>` : EMPTY}</button></li>`)}</ol>`
+  const armed = v().edit === "fire"
+  return html`<ol class="rail" aria-label="Pipeline" data-key="rail">${d.rail.map((r) => {
+    const fire = r.stage === "open_fire"
+    return html`<li data-key="${r.stage}" class="pip-${r.pip}${r.stage === stage ? " now" : ""}">
+    <button type="button" data-act="${fire ? "fire" : "stage"}" data-stage="${r.stage}" data-id="${appId}" title="${fire ? "Open fire: you, not an agent, send this application" : r.hint}"
+      class="${fire && armed ? "danger" : ""}"${flag("disabled", r.stage === stage)}>
+      ${fire && armed ? "Open fire: click again" : r.label}${r.fire_locked ? html` <span class="lock" aria-label="FIRE HOLD">⏸</span>` : EMPTY}</button></li>`
+  })}</ol>`
 }
 
 function score(d: Doc): Html {
@@ -225,6 +235,12 @@ function act(name: string, el: HTMLElement): void {
       if (!(ENUMS.stage ?? []).includes(stage)) return
       return void command("stage", appId, { stage }).catch(failed)
     }
+    case "fire":
+      if (v().edit !== "fire") return patch({ edit: "fire" })
+      patch({ edit: "" })
+      return void command("open_fire", appId)
+        .then(() => notice("ok", "Fire is open for this application."))
+        .catch(failed)
     case "keep-score":
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":
