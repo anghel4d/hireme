@@ -311,6 +311,14 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                         extra.push(format!("{} changed: {held} -> {}", i.name, norm(&i.sql)));
                     }
                 }
+                // A foreign key the declaration no longer has (a ref made loose,
+                // a column no longer a ref) keeps acting in the database: only a
+                // rebuild removes it.
+                for (tn, cn, _) in shape.fks.iter().filter(|(tn, _, _)| *tn == t.name) {
+                    if t.col(cn).is_none_or(|c| c.ty != Type::Ref || c.loose) {
+                        extra.push(format!("column {tn}.{cn} has a foreign key in the database, not the declaration"));
+                    }
+                }
                 for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.loose) {
                     let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
                     if let Some((_, _, held)) = shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name)
