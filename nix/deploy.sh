@@ -123,8 +123,8 @@ done
 say "https://$domain answers 200"
 
 # The checkout's probe (build output, kept between deploys).
-probe="$repo/native/gate/target/release/examples/probe"
-[ -x "$probe" ] || cargo build --quiet --release --example probe --manifest-path "$repo/native/gate/Cargo.toml"
+probe="$repo/native/target/release/examples/probe"
+[ -x "$probe" ] || cargo build --quiet --release -p gate --example probe --manifest-path "$repo/native/Cargo.toml"
 "$probe" handshake "$gateUrl" --n 3 | sed 's/^/[hireme] gate: /' || die "the gate did not accept a WebTransport session"
 
 say "done: $short live on https://$domain and $gateUrl"
