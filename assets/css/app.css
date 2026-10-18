@@ -291,6 +291,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .stat b small { font-size: 13px; color: var(--muted); font-weight: 400; }
 .stat span { color: var(--muted); font-size: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.chips-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; min-width: 46px; align-self: center; }
 .chip { font-size: 12px; padding: 2px 9px; border-radius: 12px; background: var(--panel); }
 .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
 .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
@@ -321,12 +322,19 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card .role { margin: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
 .app-card .where { margin: 0; font-size: 12px; }
 .app-card footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
+.app-card .role { color: var(--muted); }
 .app-card .heat { color: var(--muted); }
-.app-card .pips { margin-left: auto; font-family: var(--mono); color: var(--muted); letter-spacing: 1px; }
-.app-card.heat-warm { border-left-color: var(--warn); }
-.app-card.heat-hot { border-left-color: var(--hot); }
-.app-card.heat-blocked { border-left-color: var(--bad); }
-.app-card.heat-blocked .heat { color: var(--bad); }
+.app-card .pips { margin-left: auto; display: flex; gap: 2px; }
+.app-card .pips i { width: 7px; height: 5px; border-radius: 2px; background: var(--line); }
+.app-card .pips i[data-p="D"] { background: var(--ok); }
+.app-card .pips i[data-p="A"] { background: var(--accent); width: 12px; }
+.app-card .pips i[data-p="S"] { background: transparent; border: 1px solid var(--line); }
+.app-card .pips i[data-p="B"] { background: var(--bad); }
+.app-card[data-heat="warm"] { border-left-color: var(--warn); }
+.app-card[data-heat="hot"] { border-left-color: var(--hot); }
+.app-card[data-heat="hot"] .heat { color: var(--hot); }
+.app-card[data-heat="blocked"] { border-left-color: var(--bad); }
+.app-card[data-heat="blocked"] .heat { color: var(--bad); }
 .more { display: block; margin: 0 auto 12px; }
 .keys { text-align: center; font-size: 12px; }
 

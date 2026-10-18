@@ -43,7 +43,9 @@ function toggle(key: string, v: string): void {
 
 function chips(key: string, all: readonly string[], counts: readonly number[] | undefined, label: string): Html {
   const on = list(key)
-  return html`<div class="chips" role="group" aria-label="${label}" data-key="chips-${key}">${all.map((x, i) => html`<button type="button"
+  const shown = all.flatMap((x, i) => ((counts?.[i] ?? 0) > 0 || on.includes(x) ? [[x, i] as const] : []))
+  if (shown.length === 0) return EMPTY
+  return html`<div class="chips" role="group" aria-label="${label}" data-key="chips-${key}"><span class="chips-label">${label}</span>${shown.map(([x, i]) => html`<button type="button"
       class="chip${on.includes(x) ? " on" : ""} chip-${x}" aria-pressed="${String(on.includes(x))}" data-act="toggle" data-k="${key}" data-v="${x}" data-key="${x}">
       ${x.replace(/_/g, " ")}${counts ? html` <span class="n">${counts[i] ?? 0}</span>` : EMPTY}</button>`)}</div>`
 }
@@ -73,7 +75,7 @@ function cardShell(id: number): Html {
     <h3 class="company"></h3>
     <p class="role"></p>
     <p class="where muted"></p>
-    <footer><span class="stage tag"></span><span class="band tag"></span><span class="heat"></span><span class="pips"></span></footer>
+    <footer><span class="stage tag"></span><span class="band tag"></span><span class="heat"></span><span class="pips" role="img"></span></footer>
     <p class="lease muted"></p>
   </article>`
 }
@@ -86,7 +88,7 @@ function view(): Html {
     <div class="toolbar" data-key="toolbar">
       <input type="search" class="search" placeholder="Search company, role, place or #no" value="${model.address.q.get("q") ?? ""}"
         data-act="search" data-on="input" data-bound aria-label="Search the board" id="desk-search">
-      <label class="inline">min score <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow"></label>
+      <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
       <span class="muted">${ids.length} shown</span>
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>
@@ -134,12 +136,30 @@ function after(root: HTMLElement): void {
     write(el.querySelector(".stage"), stage.replace(/_/g, " "))
     write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
     write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
-    write(el.querySelector(".pips"), text(value("applications", id, "pips")))
-    const cls = `app-card heat-${c?.class ?? "cool"} band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`
+    rail(el.querySelector(".pips"), text(value("applications", id, "pips")))
+    const heat = c?.class ?? "cool"
+    if (el.dataset.heat !== heat) el.dataset.heat = heat
+    const cls = `app-card band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`
     if (el.className !== cls) el.className = cls
     el.setAttribute("aria-current", id === model.selected ? "true" : "false")
     el.title = c && !c.stored ? "score is the kernel's suggestion; it never overwrites a stored score" : ""
   }
+}
+
+const PIP: Record<string, string> = { D: "done", A: "now", P: "to do", S: "skipped", B: "blocked" }
+
+/** The stage rail as one small segment per stage, named in its title. */
+function rail(el: HTMLElement | null, pips: string): void {
+  if (!el || el.dataset.pips === pips) return
+  el.dataset.pips = pips
+  el.replaceChildren(...Array.from(pips, (p, i) => {
+    const seg = document.createElement("i")
+    seg.dataset.p = p
+    seg.title = `${(STAGE[i] ?? "").replace(/_/g, " ")}: ${PIP[p] ?? p}`
+    return seg
+  }))
+  const now = pips.indexOf("A")
+  el.setAttribute("aria-label", now >= 0 ? `stage ${now + 1} of ${pips.length}` : "")
 }
 
 let typing = 0
