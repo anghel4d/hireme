@@ -138,7 +138,7 @@ defmodule Hireme.AccountsTest do
       Repo.put_account(a.id)
 
       assert Enum.any?(
-               Hireme.Audit.recent(10),
+               recent(10),
                &(&1.kind == "sign_in_refused" and &1.meta["reason"] == "suspended")
              )
     end
@@ -166,7 +166,7 @@ defmodule Hireme.AccountsTest do
       assert Accounts.room?(:email, "stranger@example.com")
       assert {:error, :cap} = Accounts.sign_in_with(:email, claim(email))
       Repo.put_account(a.id)
-      [last | _] = Hireme.Audit.recent(5)
+      [last | _] = recent(5)
       assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
       Repo.put_account(nil)
 
@@ -203,18 +203,18 @@ defmodule Hireme.AccountsTest do
 
     assert {:ok, gh} = Accounts.link(:github, %{subject: "4242", display: "octo"})
     assert {:error, :taken} = Accounts.link(:email, %{subject: other, display: other})
-    assert length(Accounts.identities()) == 2
+    assert length(identities()) == 2
 
     cap = Hireme.Schema.table(:identities).cap
     for i <- 3..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
     assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
 
     [mail] =
-      Enum.filter(Accounts.identities(), &(&1.provider == :email and &1.subject == email))
+      Enum.filter(identities(), &(&1.provider == :email and &1.subject == email))
 
     assert :ok = Accounts.unlink(mail.id)
-    for i <- Enum.drop(Accounts.identities(), 1), do: :ok = Accounts.unlink(i.id)
-    assert [%{id: last}] = Accounts.identities()
+    for i <- Enum.drop(identities(), 1), do: :ok = Accounts.unlink(i.id)
+    assert [%{id: last}] = identities()
     assert {:error, :last} = Accounts.unlink(last)
     assert {:error, :not_found} = Accounts.unlink(mail.id)
     _ = gh

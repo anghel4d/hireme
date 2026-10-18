@@ -14,7 +14,6 @@ defmodule Hireme.Audit do
   end wire sessions (`bye/2`).
   """
 
-  import Ecto.Query
   alias Hireme.Repo
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
@@ -172,10 +171,6 @@ defmodule Hireme.Audit do
   @spec bye(pos_integer(), bye()) :: :ok
   def bye(account_id, {who, reason}),
     do: Hireme.PubSub.broadcast(topic(account_id), {:bye, who, reason})
-
-  @doc "The latest events for the account on the process, newest first."
-  @spec recent(pos_integer()) :: [struct()]
-  def recent(limit \\ 50), do: Repo.all(from(e in Event, order_by: [desc: e.id], limit: ^limit))
 
   # A trail row's meta as the lens sees it: never a hash, secret, token,
   # code, password, API key or credential at any depth, even a truncated one

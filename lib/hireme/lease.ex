@@ -92,16 +92,6 @@ defmodule Hireme.Lease do
     end
   end
 
-  @doc "The account's live leases, for the account lens."
-  def leases(account_id) do
-    with true <- Sequencer.running?(account_id),
-         {:ok, rows} <- Sequencer.lease(account_id, :list) do
-      rows
-    else
-      _ -> []
-    end
-  end
-
   # ---------------------------------------------------- state machine
 
   @doc "A session joins; `operator` sessions hold the channel from the start."

@@ -208,9 +208,9 @@ defmodule Hireme.KeysTest do
   @tag window: :renames
   test "renaming to the same name records nothing; renames are rate-limited", %{session: s} do
     {:ok, %{key: key}} = read_only(s, "agent")
-    before = length(Hireme.Audit.recent(500))
+    before = length(recent(500))
     assert {:ok, _} = Keys.rename(key, "agent")
-    assert length(Hireme.Audit.recent(500)) == before
+    assert length(recent(500)) == before
 
     results = for i <- 1..31, do: Keys.rename(key, "agent #{i}")
     assert {:error, :rate_limited} = List.last(results)

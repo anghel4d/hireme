@@ -796,7 +796,7 @@ defmodule Hireme.SequencerTest do
       end
 
       assert {[], [%{refusal: :cap}]} = key_session_ops(agent, notes.(100, "x"))
-      assert [%{ids: []}] = Hireme.Lease.leases(a.id)
+      assert {:ok, [%{ids: []}]} = Sequencer.lease(a.id, :list)
       assert {[], [%{refusal: :cap}]} = run(a.id, notes.(100, "x"))
       assert {[_], []} = run(a.id, gym("s"))
 

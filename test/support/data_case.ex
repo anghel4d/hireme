@@ -6,6 +6,7 @@ defmodule Hireme.DataCase do
   """
 
   use ExUnit.CaseTemplate
+  import Ecto.Query
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -56,6 +57,13 @@ defmodule Hireme.DataCase do
     # Like the limiter, the coalescer's counts outlive a test's sandbox.
     :ets.delete_all_objects(Hireme.Audit.Coalescer)
   end
+
+  @doc "The latest trail rows on the process's account, newest first."
+  def recent(limit \\ 50),
+    do: Hireme.Repo.all(from(e in Hireme.Rows.Audit, order_by: [desc: e.id], limit: ^limit))
+
+  @doc "The account's identities on the process, oldest first."
+  def identities, do: Hireme.Repo.all(from(i in Hireme.Rows.Identity, order_by: i.id))
 
   @doc """
   A signed-in account through the same path a mailed link takes. Answers

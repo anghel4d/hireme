@@ -154,7 +154,12 @@ defmodule Hireme.ReleaseTest do
       assert %{audit: 12_002} = Purge.run(now)
 
       kinds =
-        Hireme.Repo.with_account(a.id, fn -> Enum.map(Hireme.Audit.recent(50), & &1.kind) end)
+        Hireme.Repo.with_account(a.id, fn ->
+          Hireme.Repo.all(Hireme.Rows.Audit)
+          |> Enum.sort_by(& &1.id, :desc)
+          |> Enum.take(50)
+          |> Enum.map(& &1.kind)
+        end)
 
       assert Enum.count(kinds, &(&1 == "agent_ops")) == 1
       assert Enum.count(kinds, &(&1 == "wire_key_refused")) == 1

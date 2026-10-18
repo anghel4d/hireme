@@ -506,10 +506,6 @@ defmodule Hireme.Accounts do
     end
   end
 
-  @doc "The ways into the account on this process, oldest first."
-  @spec identities() :: [Identity.t()]
-  def identities, do: Repo.all(from(i in Identity, order_by: i.id))
-
   @doc """
   Bind a proven identity to the account on this process. Binding one it
   already has is a no-op; one bound elsewhere is `:taken`. The account
