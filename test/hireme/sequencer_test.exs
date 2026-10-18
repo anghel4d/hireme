@@ -657,6 +657,39 @@ defmodule Hireme.SequencerTest do
       end
     end
 
+    test "the backfill's ops never meet an earlier run's ledger entries", %{account: a} do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      # The operator's (writer 0) entries a previous boot left, low ids included.
+      # Every id unique_integer can have reached in this VM, and more.
+      top = System.unique_integer([:positive]) + 1_000
+
+      for chunk <- Enum.chunk_every(1..top, 2_000) do
+        Repo.insert_all(Hireme.Rows.OpLedger, ledger_rows(a.id, chunk, now))
+      end
+
+      Repo.insert_all(Hireme.Rows.Application, [
+        %{
+          account_id: a.id,
+          no: 1,
+          stage: :discovered,
+          status: :open,
+          heat_override: false,
+          rev: 1,
+          listing_raw: "Rust and Elixir engineer.",
+          keywords_version: 0,
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+      _ = Sequencer.rev(a.id)
+      Process.sleep(300)
+
+      assert Repo.one!(from r in Hireme.Rows.Application, select: r.keywords_version) ==
+               Hireme.Kernel.keywords_version()
+    end
+
     test "a natural_key refusal does not name the row it found", %{account: a} do
       {[_], []} = run(a.id, op(:put, :corporations, %{domain: "nk.example", name: "N"}))
 
@@ -961,6 +994,23 @@ defmodule Hireme.SequencerTest do
 
       assert {[_], []} =
                run(a.id, op(:drop, :applications, %{}, target: app.id, expect_rev: app.rev))
+    end
+  end
+
+  defp ledger_rows(account_id, ids, now) do
+    for i <- ids do
+      %{
+        account_id: account_id,
+        op_id: i,
+        writer: 0,
+        verb: :put,
+        subject: 1,
+        row_id: 1,
+        ack_rev: 1,
+        rev: 1,
+        inserted_at: now,
+        updated_at: now
+      }
     end
   end
 end

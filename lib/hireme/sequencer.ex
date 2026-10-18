@@ -278,6 +278,8 @@ defmodule Hireme.Sequencer do
       end)
 
     if ended != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
+    held = Enum.any?(ended, fn {_, sub} -> MapSet.size(Lease.held(state.lease, sub.id)) > 0 end)
+    after_ = if held, do: rescan(after_), else: after_
     {:noreply, broadcast_leases(after_, []), @idle_ms}
   end
 
@@ -342,6 +344,13 @@ defmodule Hireme.Sequencer do
     }
 
     {:reply, {:ok, reply}, state, @idle_ms}
+  end
+
+  # The backfill's ops are the operator's (writer 0) and ledgered: their ids
+  # must not repeat across restarts as unique_integer's do.
+  defp random_op_id do
+    <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
+    id
   end
 
   defp ends?({:key, id}, %{key_id: id}) when id != nil, do: true
@@ -409,10 +418,7 @@ defmodule Hireme.Sequencer do
       ops =
         for {id, text} <- stale do
           raw =
-            Codec.encode_op(
-              {System.unique_integer([:positive]), :put, 0, t.id, id, nil,
-               [{listing.id, 2, text}]}
-            )
+            Codec.encode_op({random_op_id(), :put, 0, t.id, id, nil, [{listing.id, 2, text}]})
 
           {:ok, op, ""} = Codec.op(raw)
           op
