@@ -320,3 +320,32 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card.heat-blocked .heat { color: var(--bad); }
 .more { display: block; margin: 0 auto 12px; }
 .keys { text-align: center; font-size: 12px; }
+
+/* ---------------------------------------------------------------- focus */
+
+.focus-head { margin-bottom: 10px; }
+.focus-head h1 { margin-top: 6px; }
+.rail { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 0; margin: 0 0 12px; }
+.rail button { font-size: 12px; padding: 4px 10px; border-radius: 14px; }
+.rail .pip-done button { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); border-color: var(--ok); }
+.rail .pip-skipped button { color: var(--muted); text-decoration: line-through; }
+.rail .now button { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); opacity: 1; }
+.rail .lock { font-size: 10px; }
+.focus-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap); align-items: start; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.facts > p { flex-basis: 100%; }
+.heat-hot { color: var(--hot); }
+.heat-warm { color: var(--warn); }
+.heat-blocked { color: var(--bad); }
+.terms { display: flex; flex-wrap: wrap; gap: 4px; }
+.term { font-size: 12px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); }
+.term.hit { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); border-color: var(--ok); }
+.term.miss { color: var(--muted); border-style: dashed; }
+.cv-lines { list-style: none; margin: 0; padding: 0; }
+.cv-lines li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.cv-lines li p { margin: 2px 0 0; white-space: pre-wrap; }
+.cv-lines .mode-add { border-left: 3px solid var(--ok); padding-left: 8px; }
+.cv-lines .mode-tailor { border-left: 3px solid var(--accent); padding-left: 8px; }
+.cv-lines .mode-drop { opacity: 0.5; text-decoration: line-through; }
+.lead { font-style: italic; }
+@media (max-width: 960px) { .focus-grid { grid-template-columns: 1fr; } }

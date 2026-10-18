@@ -60,8 +60,22 @@ export interface Model {
   account: AccountView
   world: WorldView
   outreach: OutreachView
+  focus: FocusView
   /** How many board cards are drawn; grows with "more" and with keyboard movement past the end. */
   deskLimit: number
+}
+
+/** The focus lens: what one application needs beyond its resident rows. */
+export interface FocusView {
+  /** The application id these were fetched for. */
+  id: number
+  listing: { text: string; total: number } | null
+  messages: Record<string, unknown>[]
+  contact: Record<string, unknown> | null
+  corporation: Record<string, unknown> | null
+  /** The prose field open for editing, or "". */
+  edit: string
+  error: string
 }
 
 /** The outreach lens: contacts, and the selected one's threads. */
@@ -152,6 +166,7 @@ export const model: Model = {
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
   deskLimit: 120,
+  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", error: "" },
   outreach: { key: "", contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 

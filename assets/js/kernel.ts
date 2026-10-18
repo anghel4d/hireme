@@ -8,7 +8,7 @@
 
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
-import { AS_OF, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type TableDef, type TableName } from "./gen/schema.ts"
+import { AS_OF, COMMANDS, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
 
@@ -481,4 +481,43 @@ export async function put(name: TableName, set: Record<string, Input>, p: Put = 
   if (v.ok) return { id: v.id, rev: v.rev }
   const data = v.data as { message?: string } | null
   throw new Refused(refusalName(v.code), data?.message ?? refusalName(v.code), v.data)
+}
+
+/** A declared command on one row, judged locally first when its table is resident. */
+export async function command(name: CommandName, target: number, params: Record<string, Input> = {}): Promise<{ id: number; rev: bigint }> {
+  const c = COMMANDS[name]
+  const cells: Cell[] = []
+  for (const p of c.params) {
+    const raw = params[p.name]
+    if (raw === undefined) {
+      if (p.required) throw new Refused("column", `${name} needs ${p.name}`)
+      continue
+    }
+    cells.push(cell(p, raw))
+  }
+  const op: Op = { opId: opId(), verb: VERB.command, flags: 0, target: c.id, id: target, expectRev: 0, cells }
+  if (TABLES[c.table as TableName].residency === "resident") predict(op)
+  const [verdict] = send([op])
+  const v = await verdict!
+  if (v.ok) return { id: v.id, rev: v.rev }
+  const data = v.data as { message?: string } | null
+  throw new Refused(refusalName(v.code), data?.message ?? refusalName(v.code), v.data)
+}
+
+const lookups = new Map<string, { version: number; at: Map<string, number> }>()
+
+/** The id of the resident row whose `col` equals `key` (an application by its no). */
+export function lookup(name: TableName, col: string, key: string): number {
+  const k2 = `${name}.${col}`
+  let l = lookups.get(k2)
+  if (!l || l.version !== version) {
+    const at = new Map<string, number>()
+    for (const id of ids(name)) {
+      const x = value(name, id, col)
+      if (x !== null) at.set(String(x), id)
+    }
+    l = { version, at }
+    lookups.set(k2, l)
+  }
+  return l.at.get(key) ?? 0
 }
