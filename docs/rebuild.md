@@ -1,5 +1,17 @@
 # Rebuild
 
+This is the design hireme is built to. One Rust kernel holds every rule
+and runs in the browser (wasm), in `hireme-mcp` (native) and in the
+sequencer (NIF), so a prediction and its verdict are one function. One
+declaration, `schema/hireme.schema`, emits the database, the Ecto rows,
+the wire catalog, the Rust constants and the TypeScript types. Tables the
+kernel derives from are resident on the wire; the world (places,
+corporations, offices, sources, citations) and the mail (contacts,
+messages) are read server-side. Every write is a `put`, `drop` or
+`command`, judged in six checks by one sequencer per account. A lease
+opens an agent's write channel; a key's read and write masks bound it.
+v2 starts from an empty database.
+
 The nuke is the premise. A replaced file is deleted and its replacement is
 written as if the old one never existed. No compatibility paths, no dual
 readers, no "keep this until phase 3". The cutover commit is the nuke.
