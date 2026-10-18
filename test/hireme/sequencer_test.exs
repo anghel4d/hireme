@@ -1264,7 +1264,9 @@ defmodule Hireme.SequencerTest do
       count = fn account_id ->
         Repo.aggregate(
           from(l in Hireme.Rows.OpLedger, where: l.account_id == ^account_id),
-          :count, skip_account: true)
+          :count,
+          skip_account: true
+        )
       end
 
       [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
