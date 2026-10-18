@@ -188,7 +188,12 @@ function paint(el: HTMLElement, measure: boolean): void {
     if (t.style.transform !== at) t.style.transform = at
     const wpx = `${w}px`
     if (t.style.width !== wpx) t.style.width = wpx
-    tile(t, id, held.get(id))
+  }
+  // Every tile is placed before any is filled, so the board stands even if one card's numbers fail.
+  for (let i = first; i < last; i++) {
+    const id = ids[i] ?? 0
+    const t = tiles.get(id)
+    if (t) tile(t, id, held.get(id))
   }
 }
 

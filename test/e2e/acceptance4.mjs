@@ -88,7 +88,10 @@ function mcp(key) {
 const idOf = (t) => Number((t.match(/id (\d+)/) ?? [])[1]);
 
 const browser = await chromium.launch({ executablePath: CHROMIUM, headless: true, args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] });
-const ctx = await browser.newContext();
+// The desk draws only the rows in view (its board is a window of tiles), so the
+// pages are tall enough for this 20-application fixture's whole board.
+const VIEW = { viewport: { width: 1440, height: 1400 } };
+const ctx = await browser.newContext(VIEW);
 const account = await ctx.newPage();
 const watch = (label, p) => {
   p.on("pageerror", (e) => errors.push(`${label}: ${String(e).slice(0, 200)}`));
@@ -158,7 +161,7 @@ let cardId = 0, corpId = 0, officeId = 0;
 
 await step("open the desk and world lenses", pages, async () => {
   await desk.goto(`${BASE}/desk`);
-  await until(async () => (await desk.locator("article.app-card").count()) >= 20, "20 article.app-card on the desk");
+  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "20 article.app-card on the desk");
   await corps.goto(`${BASE}/world/corporations`);
   await offices.goto(`${BASE}/world/offices`);
   await until(async () => (await corps.locator("table").count()) > 0, "a table in world/corporations");
@@ -173,7 +176,7 @@ const typed = "Company";
 await step("type in the desk search", pages, async () => {
   await desk.locator("#desk-search").click();
   await desk.keyboard.type(typed);
-  await until(async () => (await desk.locator("article.app-card").count()) >= 20, "the search keeps the 20 cards");
+  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "the search keeps the 20 cards");
   for (const p of [desk, corps, offices]) await p.evaluate(() => { window.__acceptance = 1 });
   return `"${typed}"`;
 });
@@ -195,8 +198,8 @@ await step("hireme-mcp: lease 16, move one to draft_ready, add a cited corporati
 });
 
 await step("the desk shows the 16 claims and the move, without a reload", pages, async () => {
-  await until(async () => (await desk.locator("article.app-card[data-leased]").count()) === 16, "16 article.app-card[data-leased]");
-  await until(async () => (await desk.locator(`article.app-card[data-id="${cardId}"][data-stage="draft_ready"]`).count()) === 1, `article.app-card[data-id="${cardId}"][data-stage="draft_ready"]`);
+  await until(async () => (await desk.locator("#lens article.app-card[data-leased]").count()) === 16, "16 article.app-card[data-leased]");
+  await until(async () => (await desk.locator(`#lens article.app-card[data-id="${cardId}"][data-stage="draft_ready"]`).count()) === 1, `article.app-card[data-id="${cardId}"][data-stage="draft_ready"]`);
   return `16 leased, #${cardId} draft_ready`;
 });
 
@@ -250,7 +253,7 @@ await step("a reload from the snapshot paints the desk restoring before its card
     watch();
   });
   await desk.reload();
-  await until(async () => (await desk.locator("article.app-card").count()) >= 20, "20 article.app-card after the reload");
+  await until(async () => (await desk.locator("#lens article.app-card").count()) >= 20, "20 article.app-card after the reload");
   const order = await desk.evaluate(() => globalThis.__order);
   const first = (w) => order.find((x) => x.what === w)?.at;
   const [fcp, restoring, cards] = [first("first-contentful-paint"), first("restoring"), first("cards")];
@@ -303,16 +306,16 @@ await step("a view that throws after a restore shows its error line and one noti
 
 await step("focus's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => {
   // Its own signed-in context and snapshot, so nothing the other pages did is in it.
-  const own = await browser.newContext();
+  const own = await browser.newContext(VIEW);
   try {
     const p0 = await own.newPage();
     await p0.goto(`${BASE}/sign-in`);
     await p0.locator('form[action="/dev/sign-in"] button').click();
     await until(async () => !p0.url().includes("/sign-in"), "signed in");
     await p0.goto(`${BASE}/desk`);
-    await until(async () => (await p0.locator("article.app-card").count()) >= 20, "20 article.app-card");
+    await until(async () => (await p0.locator("#lens article.app-card").count()) >= 20, "20 article.app-card");
     await sleep(6000); // the snapshot is saved
-    const no = (await p0.locator("article.app-card .no").first().textContent()).replace("#", "").trim();
+    const no = (await p0.locator("#lens article.app-card .no").first().textContent()).replace("#", "").trim();
     const p = await faulted("application", { context: own, path: `/focus/${no}` });
     await until(async () => /focus lens failed to (load|draw)/.test(await notices(p)), "the focus lens's failure notice");
     await sleep(1500);
@@ -373,17 +376,17 @@ async function trapping(path, now) {
   await p.goto(`${BASE}${path}`);
   return p;
 }
-const cardNo = async () => (await desk.locator(`article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
+const cardNo = async () => (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
 
 await step("enter: from a drawn desk to focus with application trapping, focus shows its failure and the load notice", pages, async () => {
   const p = await trapping("/desk", true);
   try {
-    await until(async () => (await p.locator("article.app-card").count()) >= 20, "the desk drawn");
+    await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "the desk drawn");
     const no = await cardNo();
     await p.evaluate((no) => { history.pushState(null, "", `/focus/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
     await until(async () => /focus lens failed to load/.test(await notices(p)), '"focus lens failed to load" notice');
     const t = await lensText(p);
-    if (!/failed to draw/.test(t) || (await p.locator("article.app-card").count()) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
+    if (!/failed to draw/.test(t) || (await p.locator("#lens article.app-card").count()) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
     return `lens "${t.trim().slice(0, 40)}", load notice`;
   } finally { await p.close() }
 });
@@ -404,7 +407,7 @@ await step("after: the desk's cards failing to fill (card traps) raises the upda
   const p = await faulted("card");
   try {
     await until(async () => /desk lens failed to update/.test(await notices(p)), '"desk lens failed to update" notice');
-    const n = await p.locator("article.app-card").count();
+    const n = await p.locator("#lens article.app-card").count();
     if (n < 20) throw new Error(`${n} card shells`);
     return `${n} card shells, update notice`;
   } finally { await p.close() }
@@ -414,7 +417,7 @@ await step("the same page, unwrapped, restores and shows its cards", pages, asyn
   const p = await ctx.newPage();
   try {
     await p.goto(`${BASE}/desk`);
-    await until(async () => (await p.locator("article.app-card").count()) >= 20, "20 article.app-card");
+    await until(async () => (await p.locator("#lens article.app-card").count()) >= 20, "20 article.app-card");
     return "20 cards";
   } finally { await p.close() }
 });
