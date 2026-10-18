@@ -166,38 +166,137 @@ fn named(name: &str, set: &[&str]) -> bool {
     set.contains(&compact.as_str()) || text::words(name).any(|w| set.contains(&w))
 }
 
+/// The rung a company name anchors on, read once per name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    None,
+    Frontier,
+    Labs,
+    BigTech,
+}
+
+impl Tier {
+    /// The tier of a normalized company name.
+    pub fn of(n: &str) -> Tier {
+        if n.is_empty() {
+            Tier::None
+        } else if named(n, FRONTIER) {
+            Tier::Frontier
+        } else if text::any_word(n, LABS_PHRASES) || named(n, LABS) {
+            Tier::Labs
+        } else if named(n, BIG_TECH) {
+            Tier::BigTech
+        } else {
+            Tier::None
+        }
+    }
+
+    fn anchor(self, high_comp: bool) -> Option<u8> {
+        match self {
+            Tier::None => None,
+            Tier::Frontier => Some(100),
+            Tier::Labs => Some(90),
+            Tier::BigTech => Some(if high_comp { 85 } else { 80 }),
+        }
+    }
+}
+
 /// The anchor a company name sits on, if any.
 pub fn anchor(company: &str, high_comp: bool) -> Option<u8> {
-    let n = text::normalize(company);
-    if n.is_empty() {
-        None
-    } else if named(&n, FRONTIER) {
-        Some(100)
-    } else if text::any_word(&n, LABS_PHRASES) || named(&n, LABS) {
-        Some(90)
-    } else if named(&n, BIG_TECH) {
-        Some(if high_comp { 85 } else { 80 })
-    } else {
-        None
+    Tier::of(&text::normalize(company)).anchor(high_comp)
+}
+
+/// What the score reads off one normalized text (a company name, a role
+/// title or a location), as flags. A seat's company and role are read
+/// separately and their facts joined, so each distinct name and title is
+/// read once; a phrase straddling the two ("…body" + "shop…") is not one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Facts(u16);
+
+impl Facts {
+    const STAFFING: u16 = 1;
+    const INTERN: u16 = 2;
+    const THEATER: u16 = 4;
+    const NOT_ENGINEERING: u16 = 8;
+    const SYSTEMS: u16 = 16;
+    const AGENTIC: u16 = 32;
+    const LOW_LEVEL: u16 = 64;
+    const MID_CURVE: u16 = 128;
+    const REMOTE: u16 = 256;
+    const ONSITE_ONLY: u16 = 512;
+
+    /// The facts of an already normalized text.
+    pub fn of(n: &str) -> Facts {
+        let mut f = 0;
+        let mut set = |bit: u16, yes: bool| {
+            if yes {
+                f |= bit;
+            }
+        };
+        set(Facts::STAFFING, text::any_start(n, &["staffing", "body shop", "bodyshop", "recruit"]));
+        set(Facts::INTERN, text::any_word(n, &["intern", "internship", "new grad", "newgrad", "co op", "coop"]));
+        set(Facts::THEATER, text::any_word(n, &["prompt only", "ai theater", "chatgpt wrapper"]));
+        set(
+            Facts::NOT_ENGINEERING,
+            text::any_word(n, &["sales engineer", "business analyst", "ba", "project manager", "pm", "support engineer"]),
+        );
+        set(Facts::SYSTEMS, text::any_word(n, &["systems", "runtime", "kernel", "infra", "infrastructure", "distributed", "compiler"]));
+        set(Facts::AGENTIC, text::any_word(n, &["agentic", "agent systems", "agents"]));
+        set(Facts::LOW_LEVEL, text::any_word(n, &["rust", "c++", "low level", "lowlevel", "systems c"]));
+        set(Facts::MID_CURVE, text::any_word(n, &["crud", "full stack", "fullstack", "rails shop", "wordpress"]));
+        let says_no_remote = text::any_word(n, &["no remote", "not remote"]);
+        set(Facts::REMOTE, text::word(n, "remote") && !says_no_remote);
+        set(Facts::ONSITE_ONLY, says_no_remote || text::any_word(n, &["onsite only", "on site only"]));
+        Facts(f)
+    }
+
+    fn has(self, bit: u16) -> bool {
+        self.0 & bit != 0
+    }
+
+    fn join(self, o: Facts) -> Facts {
+        Facts(self.0 | o.0)
+    }
+}
+
+/// A seat's text read once: its company's facts and tier, its role's and
+/// its location's facts.
+#[derive(Clone, Copy, Debug)]
+pub struct Read {
+    pub company: Facts,
+    pub tier: Tier,
+    pub role: Facts,
+    pub location: Facts,
+}
+
+impl Read {
+    pub fn of(seat: &Seat) -> Read {
+        let company = text::normalize(seat.company);
+        Read {
+            company: Facts::of(&company),
+            tier: Tier::of(&company),
+            role: Facts::of(&text::normalize(seat.role)),
+            location: Facts::of(&text::normalize(seat.location)),
+        }
     }
 }
 
 /// The hard kill a seat falls under, if any.
 pub fn kill(seat: &Seat) -> Option<Kill> {
-    let blob = text::normalize(&alloc::format!("{} {}", seat.company, seat.role));
-    let loc = text::normalize(seat.location);
-    if text::any_start(&blob, &["staffing", "body shop", "bodyshop", "recruit"]) {
+    kill_read(seat, &Read::of(seat))
+}
+
+fn kill_read(seat: &Seat, r: &Read) -> Option<Kill> {
+    let t = r.company.join(r.role);
+    if t.has(Facts::STAFFING) {
         Some(Kill::Staffing)
-    } else if text::any_word(&blob, &["intern", "internship", "new grad", "newgrad", "co op", "coop"]) {
+    } else if t.has(Facts::INTERN) {
         Some(Kill::Intern)
-    } else if text::any_word(&blob, &["prompt only", "ai theater", "chatgpt wrapper"]) {
+    } else if t.has(Facts::THEATER) {
         Some(Kill::Theater)
-    } else if text::any_word(
-        &blob,
-        &["sales engineer", "business analyst", "ba", "project manager", "pm", "support engineer"],
-    ) {
+    } else if t.has(Facts::NOT_ENGINEERING) {
         Some(Kill::NotEngineering)
-    } else if onsite_away(seat, &loc) {
+    } else if onsite_away(seat, r.location) {
         Some(Kill::OnsiteAway)
     } else {
         None
@@ -206,10 +305,8 @@ pub fn kill(seat: &Seat) -> Option<Kill> {
 
 /// Onsite-only and known to be away: the place is outside home, not just
 /// unknown, and nothing says remote.
-fn onsite_away(seat: &Seat, loc: &str) -> bool {
-    let says_onsite_only = text::any_word(loc, &["onsite only", "on site only", "no remote", "not remote"]);
-    let remote_text = text::word(loc, "remote") && !text::any_word(loc, &["no remote", "not remote"]);
-    seat.home == Some(false) && !remote_text && (seat.onsite || says_onsite_only)
+fn onsite_away(seat: &Seat, loc: Facts) -> bool {
+    seat.home == Some(false) && !loc.has(Facts::REMOTE) && (seat.onsite || loc.has(Facts::ONSITE_ONLY))
 }
 
 /// Space between a figure and what qualifies it: any Unicode whitespace
@@ -364,32 +461,37 @@ pub fn high_comp(comp: &str) -> bool {
 
 /// The Life-EV suggestion for a seat.
 pub fn suggest(seat: &Seat) -> Suggestion {
+    suggest_read(seat, &Read::of(seat))
+}
+
+/// [`suggest`] with the seat's text already read (`r` must be
+/// `Read::of(seat)`; the board reads each distinct name and title once).
+pub fn suggest_read(seat: &Seat, r: &Read) -> Suggestion {
     let high = high_comp(seat.comp_raw);
-    if let Some(k) = kill(seat) {
+    if let Some(k) = kill_read(seat, r) {
         return Suggestion { score: k.score(), band: Band::Kill, kill: Some(k), anchored: false };
     }
-    if let Some(a) = anchor(seat.company, high) {
+    if let Some(a) = r.tier.anchor(high) {
         return Suggestion { score: a, band: Band::of(a), kill: None, anchored: true };
     }
-    let t = text::normalize(&alloc::format!("{} {}", seat.company, seat.role));
+    let t = r.company.join(r.role);
     let mut s: i32 = 48;
-    if text::any_word(&t, &["systems", "runtime", "kernel", "infra", "infrastructure", "distributed", "compiler"]) {
+    if t.has(Facts::SYSTEMS) {
         s += 22;
     }
-    if text::any_word(&t, &["agentic", "agent systems", "agents"]) {
+    if t.has(Facts::AGENTIC) {
         s += 10;
     }
-    if text::any_word(&t, &["rust", "c++", "low level", "lowlevel", "systems c"]) {
+    if t.has(Facts::LOW_LEVEL) {
         s += 8;
     }
-    let loc = text::normalize(seat.location);
-    if seat.home == Some(true) || text::word(&loc, "remote") {
+    if seat.home == Some(true) || r.location.has(Facts::REMOTE) {
         s += 5;
     }
     if high {
         s += 6;
     }
-    if text::any_word(&t, &["crud", "full stack", "fullstack", "rails shop", "wordpress"]) {
+    if t.has(Facts::MID_CURVE) {
         s -= 16;
     }
     // Heuristics never climb onto an anchor's rung.

@@ -51,12 +51,17 @@ fn main() {
     b.done();
     let mut k = Kernel::new();
     k.set_today(TODAY);
+    let body = w.finish();
     let t = Instant::now();
-    k.boot(&w.finish(), 1).unwrap();
+    k.boot(&body, 1).unwrap();
+    let ingest = t.elapsed();
+    let t = Instant::now();
     k.derive();
     let cold = t.elapsed();
     let mut times = Vec::new();
-    for i in 0..30u32 {
+    // PATCHES=0 measures the first derive alone (for profiling).
+    let patches: u32 = std::env::var("PATCHES").ok().and_then(|p| p.parse().ok()).unwrap_or(30);
+    for i in 0..patches {
         let mut w = wire::BodyWriter::new();
         let mut b = w.block(table::APPLICATIONS, 1);
         b.u32s(A::ID, [1 + (i * 331) % N].into_iter()).u32s(A::STAGE_ON, [(TODAY - i as i32) as u32].into_iter());
@@ -67,5 +72,10 @@ fn main() {
         times.push(t.elapsed().as_secs_f64() * 1e3);
     }
     times.sort_by(f64::total_cmp);
-    println!("hot {hot}: after boot {:.2} ms, after patch p50 {:.2} ms", cold.as_secs_f64() * 1e3, times[times.len() / 2]);
+    println!(
+        "hot {hot}: BOOT ingest {:.2} ms, first derive {:.2} ms, after patch p50 {:.2} ms",
+        ingest.as_secs_f64() * 1e3,
+        cold.as_secs_f64() * 1e3,
+        times.get(times.len() / 2).copied().unwrap_or(0.0)
+    );
 }

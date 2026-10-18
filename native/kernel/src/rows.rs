@@ -219,7 +219,7 @@ pub struct Column {
 pub struct Table {
     pub id: u16,
     ids: Vec<u32>,
-    slots: std::collections::HashMap<u32, u32>,
+    slots: crate::fx::Map<u32, u32>,
     /// Sorted by column id.
     cols: Vec<Column>,
 }
@@ -256,6 +256,11 @@ impl Table {
             Some(Data::U32(v)) => Some(v),
             _ => None,
         }
+    }
+
+    /// One row, its slot found once for every column read after.
+    pub fn row(&self, id: u32) -> Option<Row<'_>> {
+        self.slot(id).map(|slot| Row { t: self, slot })
     }
 
     pub fn column(&self, col: u16) -> Option<&Column> {
@@ -387,6 +392,29 @@ impl Table {
         self.ids.clear();
         self.slots.clear();
         self.cols.clear();
+    }
+}
+
+/// A row of a table, by slot.
+#[derive(Clone, Copy)]
+pub struct Row<'t> {
+    t: &'t Table,
+    slot: usize,
+}
+
+impl<'t> Row<'t> {
+    pub fn u32(&self, col: u16) -> Option<u32> {
+        match self.t.column(col).map(|c| &c.data) {
+            Some(Data::U32(v)) if v[self.slot] != wire::NONE => Some(v[self.slot]),
+            _ => None,
+        }
+    }
+
+    pub fn str(&self, col: u16) -> Option<&'t str> {
+        match self.t.column(col).map(|c| &c.data) {
+            Some(Data::Str(v)) if !v[self.slot].is_empty() => Some(v[self.slot].as_str()),
+            _ => None,
+        }
     }
 }
 

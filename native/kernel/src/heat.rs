@@ -170,7 +170,6 @@ pub fn decay(amount: f64, days: i64, half_life: f64) -> f64 {
 #[derive(Clone, Debug)]
 pub struct Seat {
     pub id: u32,
-    pub company: String,
     /// The company the seat counts against: its corporation when linked,
     /// else its normalized name.
     pub key: String,
@@ -214,17 +213,26 @@ pub struct SeatIn<'a> {
 
 impl Seat {
     pub fn new(f: &SeatIn) -> Seat {
+        let company = crate::text::normalize(f.company);
+        let role = crate::text::normalize(f.role);
+        let size = org::size_normalized(&company);
+        Seat::from_normalized(f, &company, size, org::department_normalized(&role), org::family_normalized(&role))
+    }
+
+    /// [`Seat::new`] from the company's normalized name and size and the
+    /// role's department and family, already read (the board reads them
+    /// once per distinct name and title).
+    pub fn from_normalized(f: &SeatIn, company: &str, size: Size, department: Department, family: Family) -> Seat {
         let sent = f.sent || f.stage == Stage::Submitted;
-        let key = f.corporation_id.map_or_else(|| org::company_key(f.company), |c| alloc::format!("\u{1}{c}"));
+        // A control character no normalized name can contain.
+        let key = f.corporation_id.map_or_else(|| String::from(company), |c| alloc::format!("\u{1}{c}"));
         let ats = ats::parse(f.url);
         Seat {
             id: f.id,
-            company: String::from(f.company.trim()),
-            // A control character no normalized name can contain.
             key,
-            size: org::size(f.company),
-            department: org::department(f.role),
-            family: org::family(f.role),
+            size,
+            department,
+            family,
             ats,
             stage: f.stage,
             hot: f.stage.queued() || (f.stage.after_send() && sent),

@@ -21,7 +21,7 @@ use schema::{col, enums, table};
 
 use crate::heat::{self, Class, Seat, SeatIn};
 use crate::pipeline::Stage;
-use crate::rows::{Moved, Rows, Table};
+use crate::rows::{Moved, Row, Rows, Table};
 use crate::score::{self, Band, Suggestion};
 use crate::{text, Day};
 
@@ -115,6 +115,30 @@ pub struct Board {
     /// The settings' citizenships, parsed once per settings change.
     citizens: Option<Vec<String>>,
     lines: Option<Lines>,
+    /// Each distinct company, title and location an application carries,
+    /// normalized and read once (a desk repeats them); dropped with the
+    /// applications on a BOOT.
+    names: std::collections::HashMap<String, Name>,
+    titles: std::collections::HashMap<String, Title>,
+    places: std::collections::HashMap<String, score::Facts>,
+}
+
+/// A company name as read once: normalized, its size, its score facts and
+/// anchor tier.
+#[derive(Clone)]
+struct Name {
+    normalized: String,
+    size: crate::org::Size,
+    facts: score::Facts,
+    tier: score::Tier,
+}
+
+/// A role title as read once.
+#[derive(Clone, Copy)]
+struct Title {
+    department: crate::org::Department,
+    family: crate::org::Family,
+    facts: score::Facts,
 }
 
 /// Which lineage tells each corporation's story and which of its lines
@@ -258,11 +282,13 @@ fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> 
 /// close's `submitted` and `reply` rungs read from the row's dates. `None`
 /// when the row has no stage.
 pub fn rail(t: &Table, id: u32) -> Option<crate::pipeline::Rail> {
-    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8))?;
-    let stored = t.str(id, A::PIPS).and_then(crate::pipeline::decode).filter(|r| crate::pipeline::current(r) == stage);
-    Some(stored.unwrap_or_else(|| {
-        crate::pipeline::rail_by_dates(stage, day(t, id, A::APPLIED_ON).is_some(), day(t, id, A::REPLIED_ON).is_some())
-    }))
+    rail_of_row(t.row(id)?)
+}
+
+fn rail_of_row(r: Row<'_>) -> Option<crate::pipeline::Rail> {
+    let stage = r.u32(A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8))?;
+    let stored = r.str(A::PIPS).and_then(crate::pipeline::decode).filter(|p| crate::pipeline::current(p) == stage);
+    Some(stored.unwrap_or_else(|| crate::pipeline::rail_by_dates(stage, r.u32(A::APPLIED_ON).is_some(), r.u32(A::REPLIED_ON).is_some())))
 }
 
 /// Whether anything went out for an application row (submitted, or an
@@ -279,23 +305,32 @@ pub fn submitted(t: &Table, id: u32) -> bool {
 /// The governor's seat for one application row. Its score is the stored
 /// one; the board's cache sets the effective score.
 pub fn seat(t: &Table, id: u32) -> Option<Seat> {
-    let stage = u8::try_from(t.u32(id, A::STAGE)?).ok().and_then(Stage::from_u8)?;
-    Some(Seat::new(&SeatIn {
+    seat_in(t, id).map(|f| Seat::new(&f))
+}
+
+fn seat_in(t: &Table, id: u32) -> Option<SeatIn<'_>> {
+    seat_of_row(t.row(id)?, id)
+}
+
+fn seat_of_row(r: Row<'_>, id: u32) -> Option<SeatIn<'_>> {
+    let stage = u8::try_from(r.u32(A::STAGE)?).ok().and_then(Stage::from_u8)?;
+    let day = |c: u16| r.u32(c).map(|d| d as Day);
+    Some(SeatIn {
         id,
-        corporation_id: t.u32(id, A::CORPORATION_ID),
-        company: t.str(id, A::COMPANY).unwrap_or(""),
-        role: t.str(id, A::ROLE).unwrap_or(""),
-        url: t.str(id, A::LISTING_URL).or_else(|| t.str(id, A::CANONICAL_URL)).unwrap_or(""),
+        corporation_id: r.u32(A::CORPORATION_ID),
+        company: r.str(A::COMPANY).unwrap_or(""),
+        role: r.str(A::ROLE).unwrap_or(""),
+        url: r.str(A::LISTING_URL).or_else(|| r.str(A::CANONICAL_URL)).unwrap_or(""),
         stage,
-        stage_on: day(t, id, A::STAGE_ON),
-        applied_on: day(t, id, A::APPLIED_ON),
-        replied_on: day(t, id, A::REPLIED_ON),
-        sent: sent(t, id),
-        score: t.u32(id, A::SCORE_100).map_or(0, |s| s.min(100) as u8),
-        batch_id: t.u32(id, A::BATCH_ID),
-        heat_override: t.u32(id, A::HEAT_OVERRIDE) == Some(1),
-        heat_override_reason: t.str(id, A::HEAT_OVERRIDE_REASON).unwrap_or(""),
-    }))
+        stage_on: day(A::STAGE_ON),
+        applied_on: day(A::APPLIED_ON),
+        replied_on: day(A::REPLIED_ON),
+        sent: rail_of_row(r).is_some_and(|rail| crate::pipeline::sent(&rail)),
+        score: r.u32(A::SCORE_100).map_or(0, |s| s.min(100) as u8),
+        batch_id: r.u32(A::BATCH_ID),
+        heat_override: r.u32(A::HEAT_OVERRIDE) == Some(1),
+        heat_override_reason: r.str(A::HEAT_OVERRIDE_REASON).unwrap_or(""),
+    })
 }
 
 /// The operator's citizenships from the settings row, read once.
@@ -306,17 +341,29 @@ pub fn citizenships(rows: &Rows) -> Vec<String> {
 /// The Life-EV suggestion for one application row; `citizenships` is
 /// [`citizenships`].
 pub fn suggestion(rows: &Rows, citizenships: &[String], t: &Table, id: u32) -> Suggestion {
-    let mode = t.u32(id, A::WORK_MODE);
+    let s = score_seat(rows, citizenships, t, id);
+    score::suggest(&s)
+}
+
+fn score_seat<'t>(rows: &Rows, citizenships: &[String], t: &'t Table, id: u32) -> score::Seat<'t> {
+    match t.row(id) {
+        Some(r) => score_seat_of_row(rows, citizenships, r),
+        None => score::Seat::default(),
+    }
+}
+
+fn score_seat_of_row<'t>(rows: &Rows, citizenships: &[String], r: Row<'t>) -> score::Seat<'t> {
+    let mode = r.u32(A::WORK_MODE);
     let remote = mode == Some(enums::work_mode::REMOTE as u32);
-    let home = t.u32(id, A::PLACE_ID).and_then(|p| home_place(rows, citizenships, p));
-    score::suggest(&score::Seat {
-        company: t.str(id, A::COMPANY).unwrap_or(""),
-        role: t.str(id, A::ROLE).unwrap_or(""),
-        location: t.str(id, A::LOCATION).unwrap_or(""),
-        comp_raw: t.str(id, A::COMP_RAW).unwrap_or(""),
+    let home = r.u32(A::PLACE_ID).and_then(|p| home_place(rows, citizenships, p));
+    score::Seat {
+        company: r.str(A::COMPANY).unwrap_or(""),
+        role: r.str(A::ROLE).unwrap_or(""),
+        location: r.str(A::LOCATION).unwrap_or(""),
+        comp_raw: r.str(A::COMP_RAW).unwrap_or(""),
         onsite: mode == Some(enums::work_mode::ONSITE as u32),
         home: if remote { Some(true) } else { home },
-    })
+    }
 }
 
 /// The heat config of the account: the defaults under `settings.heat_config`.
@@ -350,6 +397,11 @@ impl Board {
                     lines.set_owner(*id, live.and_then(|t| t.u32(*id, col::cv_overlays::APPLICATION_ID)));
                 }
             }
+        }
+        if moved.replaced.contains(&table::APPLICATIONS) {
+            self.names.clear();
+            self.titles.clear();
+            self.places.clear();
         }
         if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
             self.cache.clear();
@@ -396,19 +448,56 @@ impl Board {
 
     fn cached(&mut self, rows: &Rows, t: &Table, id: u32) -> Option<&Cached> {
         if !self.cache.contains_key(&id) {
-            let seat = seat(t, id)?;
-            let mut search = String::new();
+            let row = t.row(id)?;
+            let f = seat_of_row(row, id)?;
+            let location = row.str(A::LOCATION).unwrap_or("");
+            let name = match self.names.get(f.company) {
+                Some(n) => n.clone(),
+                None => {
+                    let n = text::normalize(f.company);
+                    let name = Name { size: crate::org::size_normalized(&n), facts: score::Facts::of(&n), tier: score::Tier::of(&n), normalized: n };
+                    self.names.insert(String::from(f.company), name.clone());
+                    name
+                }
+            };
+            let title = match self.titles.get(f.role) {
+                Some(t) => *t,
+                None => {
+                    let n = text::normalize(f.role);
+                    let title = Title {
+                        department: crate::org::department_normalized(&n),
+                        family: crate::org::family_normalized(&n),
+                        facts: score::Facts::of(&n),
+                    };
+                    self.titles.insert(String::from(f.role), title);
+                    title
+                }
+            };
+            let place = match self.places.get(location) {
+                Some(p) => *p,
+                None => {
+                    let p = score::Facts::of(&text::normalize(location));
+                    self.places.insert(String::from(location), p);
+                    p
+                }
+            };
+            let seat = Seat::from_normalized(&f, &name.normalized, name.size, title.department, title.family);
+            let read = score::Read { company: name.facts, tier: name.tier, role: title.facts, location: place };
+            let mut search = String::with_capacity(f.company.len() + f.role.len() + location.len() + 16);
             for c in [A::COMPANY, A::ROLE, A::LOCATION] {
-                if let Some(s) = t.str(id, c) {
+                if let Some(s) = row.str(c) {
                     search.push_str(&s.to_lowercase());
                     search.push('\n');
                 }
             }
-            let no = t.u32(id, A::NO).unwrap_or(0);
-            search.push_str(&alloc::format!("#{no}"));
+            let no = row.u32(A::NO).unwrap_or(0);
+            {
+                use core::fmt::Write;
+                let _ = write!(search, "#{no}");
+            }
             let citizens = self.citizens.get_or_insert_with(|| citizenships(rows));
-            let suggestion = suggestion(rows, citizens, t, id);
-            let stored = t.u32(id, A::SCORE_100).map(|s| s.min(100) as u8);
+            let suggestion = score::suggest_read(&score_seat_of_row(rows, citizens, row), &read);
+            let stored = row.u32(A::SCORE_100).map(|s| s.min(100) as u8);
             let mut seat = seat;
             seat.score = stored.unwrap_or(suggestion.score);
             let c = Cached {
@@ -458,13 +547,27 @@ impl Board {
                 verdict,
             });
         }
-        let mut keys: Vec<(core::cmp::Reverse<u8>, Class, f64, u32, u32)> =
-            self.cards.iter().map(|c| (core::cmp::Reverse(c.score), c.class, c.verdict.ratio(), c.no, c.id)).collect();
-        keys.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.total_cmp(&y.2)).then(x.3.cmp(&y.3)).then(x.4.cmp(&y.4)));
-        self.order = keys.iter().map(|k| k.4).collect();
+        // One integer per card in board order (score high to low, class,
+        // ratio, no), then the id: the same order as comparing the fields,
+        // at the cost of one compare.
         for (i, c) in self.cards.iter().enumerate() {
             self.at.insert(c.id, i);
         }
+        // Keys laid out in the last derive's order first: after a write
+        // only a few cards move, the input is nearly sorted, and the stable
+        // sort finishes in close to one pass. Keys are unique (the id is
+        // in them), so the order is the same either way.
+        let mut placed = alloc::vec![false; self.cards.len()];
+        let mut keys: Vec<(u128, u32)> = Vec::with_capacity(self.cards.len());
+        for id in core::mem::take(&mut self.order) {
+            if let Some(&i) = self.at.get(&id) {
+                placed[i] = true;
+                keys.push((order_key(&self.cards[i]), id));
+            }
+        }
+        keys.extend(self.cards.iter().enumerate().filter(|(i, _)| !placed[*i]).map(|(_, c)| (order_key(c), c.id)));
+        keys.sort();
+        self.order = keys.iter().map(|k| k.1).collect();
     }
 
     /// The lineage index, built on first use.
@@ -549,6 +652,19 @@ impl Board {
     }
 }
 
+/// A card's place in board order as one integer: `255 − score` (8 bits),
+/// the class (8), the ratio as an order-preserving u64 (64), `no` (32).
+fn order_key(c: &Card) -> u128 {
+    key_of(c.score, c.class, c.verdict.ratio(), c.no)
+}
+
+fn key_of(score: u8, class: Class, ratio: f64, no: u32) -> u128 {
+    let bits = ratio.to_bits();
+    // f64::total_cmp's order as an unsigned integer.
+    let ratio = if bits >> 63 == 1 { !bits } else { bits | 1 << 63 };
+    ((255 - score as u128) << 104) | ((class as u128) << 96) | ((ratio as u128) << 32) | no as u128
+}
+
 /// The card after `selected` in direction `dir` over `view` laid out in
 /// rows of `columns`. No selection starts at the first card; moves stop at
 /// the edges rather than wrap.
@@ -575,6 +691,25 @@ pub fn step(view: &[u32], selected: Option<u32>, dir: Dir, columns: usize) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_packed_key_orders_as_the_fields_do() {
+        let ratios = [0.0, -0.0, 0.3, 0.5, 0.8, 1.0, 1.0000001, 2.5, f64::INFINITY, f64::MIN_POSITIVE, 1e300];
+        let classes = [Class::Cool, Class::Warm, Class::Hot, Class::Blocked];
+        let mut r = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |n: u64| {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r % n
+        };
+        for _ in 0..20_000 {
+            let mut pick = || (next(101) as u8, classes[next(4) as usize], ratios[next(ratios.len() as u64) as usize], next(5) as u32);
+            let (a, b) = (pick(), pick());
+            let fields = core::cmp::Reverse(a.0).cmp(&core::cmp::Reverse(b.0)).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3));
+            assert_eq!(key_of(a.0, a.1, a.2, a.3).cmp(&key_of(b.0, b.1, b.2, b.3)), fields, "{a:?} {b:?}");
+        }
+    }
 
     #[test]
     fn keyboard_stops_at_edges() {

@@ -91,14 +91,18 @@ const MID: &[&str] = &["systems", "runtime", "infra", "lab", "labs"];
 /// The size tier of a company by name. Any word of the name, or the name
 /// with its spaces removed ("Deep Mind" → "deepmind"), can name a tier.
 pub fn size(company: &str) -> Size {
-    let n = text::normalize(company);
+    size_normalized(&text::normalize(company))
+}
+
+/// [`size`] of an already normalized name.
+pub fn size_normalized(n: &str) -> Size {
     let compact: alloc::string::String = n.chars().filter(|c| *c != ' ').collect();
-    let named = |set: &[&str]| set.contains(&compact.as_str()) || text::words(&n).any(|w| set.contains(&w));
+    let named = |set: &[&str]| set.contains(&compact.as_str()) || text::words(n).any(|w| set.contains(&w));
     if named(MEGA) {
         Size::Mega
     } else if named(LARGE) {
         Size::Large
-    } else if text::any_word(&n, MID) {
+    } else if text::any_word(n, MID) {
         Size::Mid
     } else {
         Size::Small
@@ -111,18 +115,22 @@ pub fn company_key(company: &str) -> alloc::string::String {
 
 /// The department a role title points at, first match wins.
 pub fn department(role: &str) -> Department {
-    let n = text::normalize(role);
-    if text::any_start(&n, &["research", "scientist", "machine learning", "applied sci"]) || text::word(&n, "ml") {
+    department_normalized(&text::normalize(role))
+}
+
+/// [`department`] of an already normalized title.
+pub fn department_normalized(n: &str) -> Department {
+    if text::any_start(n, &["research", "scientist", "machine learning", "applied sci"]) || text::word(n, "ml") {
         Department::Research
-    } else if text::any_start(&n, &["sre", "site reliability", "infra", "platform", "runtime", "kernel", "systems"]) {
+    } else if text::any_start(n, &["sre", "site reliability", "infra", "platform", "runtime", "kernel", "systems"]) {
         Department::Infra
-    } else if text::any_start(&n, &["security", "privacy"]) {
+    } else if text::any_start(n, &["security", "privacy"]) {
         Department::Security
-    } else if text::any_start(&n, &["data engineer", "analytics", "data platform"]) {
+    } else if text::any_start(n, &["data engineer", "analytics", "data platform"]) {
         Department::Data
-    } else if text::any_start(&n, &["frontend", "front end", "ios", "android", "mobile", "product engineer"]) {
+    } else if text::any_start(n, &["frontend", "front end", "ios", "android", "mobile", "product engineer"]) {
         Department::Product
-    } else if text::any_start(&n, &["engineer", "developer"]) || text::word(&n, "swe") {
+    } else if text::any_start(n, &["engineer", "developer"]) || text::word(n, "swe") {
         Department::Eng
     } else {
         Department::Other
@@ -137,9 +145,13 @@ const SENIORITY: &[&str] = &[
 /// The role family of a title once seniority words are stripped, so
 /// "Senior Software Engineer" and "Staff Software Engineer" are clones.
 pub fn family(role: &str) -> Family {
-    let n = text::normalize(role);
+    family_normalized(&text::normalize(role))
+}
+
+/// [`family`] of an already normalized title.
+pub fn family_normalized(n: &str) -> Family {
     let mut core = alloc::string::String::with_capacity(n.len());
-    for w in text::words(&n).filter(|w| !SENIORITY.contains(w)) {
+    for w in text::words(n).filter(|w| !SENIORITY.contains(w)) {
         if !core.is_empty() {
             core.push(' ');
         }
