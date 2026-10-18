@@ -150,6 +150,11 @@ pub fn judge(rows: &Rows, board: &mut Board, raw: &[u8], ctx: &Ctx) -> Verdict {
     let Ok(op) = Op::one(raw) else {
         return refuse(refusal::TYPE, json!({"op": "malformed"}));
     };
+    // A cell holding its type's null sentinel is refused, not read as a
+    // clear, exactly as the sequencer's shape check refuses it.
+    if let Some(c) = op.cells().find(|c| c.is_sentinel()) {
+        return refuse(refusal::TYPE, json!({"column": c.col, "sentinel": true}));
+    }
     match op.verb {
         wire::PUT => put(rows, &op, ctx),
         wire::DROP => drop(rows, &op, ctx),
@@ -215,7 +220,13 @@ fn put(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
             if let Some(EVal::Val(v)) = row.get(A::LISTING_RAW).cloned() {
                 match v {
                     Val::Str(text) => {
-                        row.set(A::KEYWORDS, s(keywords::join(&keywords::extract(&text))));
+                        // The format the op sets, else the row's.
+                        let format = match row.get(A::LISTING_FORMAT) {
+                            Some(EVal::Val(Val::U32(f))) => Some(*f),
+                            _ => apps.and_then(|t| t.u32(op.target, A::LISTING_FORMAT)),
+                        };
+                        let words = keywords::extract(&text, keywords::Format::from_code(format));
+                        row.set(A::KEYWORDS, s(keywords::join(&words)));
                         row.set(A::KEYWORDS_VERSION, u(keywords::VERSION));
                         row.set(A::LISTING_SHA, s(hex_sha256(&text)));
                     }
@@ -412,11 +423,11 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             let fire = batch
                 .and_then(|b| rows.table(table::BATCHES).and_then(|bt| bt.u32(b, col::batches::FIRE)))
                 == Some(enums::fire::OPEN_FIRE as u32);
-            if let Err(r) = pipeline::check(from, to, batch.is_some(), fire) {
+            if let Err(r) = pipeline::check(from, to, batch.is_some(), fire, board::sent(t, id)) {
                 let code = if r == pipeline::Refusal::FireHold { refusal::FIRE_HOLD } else { refusal::STAGE };
                 return refuse(code, json!({"from": from.name(), "to": to.name(), "rule": r.name()}));
             }
-            if !from.hot() && to.queued() {
+            if !from.queued() && to.queued() {
                 governor(rows, board, id, to, ctx)?;
             }
             Ok(moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx))
@@ -503,10 +514,11 @@ fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Re
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
     let Some(seat) = board::seat(t, id) else { return Ok(()) };
     let (ix, cfg) = board.governor(rows, ctx.today);
-    let v = heat::verdict(ix, &seat, &[], cfg);
+    let mut v = heat::verdict(ix, &seat, &[], cfg);
     if v.allow {
         return Ok(());
     }
+    v.cooldown_days = heat::cooldown(ix, &seat, &[], cfg);
     let mut data = v.to_json();
     data["to"] = Json::String(to.name().into());
     Err(Refusal { code: refusal::HEAT, data })

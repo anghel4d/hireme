@@ -128,10 +128,9 @@ pub struct Seat<'a> {
     pub comp_raw: &'a str,
     /// The seat is onsite-only by its `work_mode`.
     pub onsite: bool,
-    /// The seat is remote, or in a country the operator is a citizen of.
-    pub home: bool,
-    /// Whether `home` was decidable (the seat has a place or a work mode).
-    pub placed: bool,
+    /// Whether the seat is home: remote, or in a country the operator is a
+    /// citizen of; `None` when that is not known.
+    pub home: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +154,7 @@ impl Suggestion {
 }
 
 const FRONTIER: &[&str] = &["openai", "anthropic", "spacex", "neuralink", "xai", "spacexai"];
-const LABS: &[&str] = &["starfish", "valve", "gdm", "deepmind", "meta", "fair", "ssi", "mira"];
+const LABS: &[&str] = &["starfish", "valve", "gdm", "deepmind", "meta", "ssi", "mira"];
 const LABS_PHRASES: &[&str] = &["google deepmind", "thinking machines", "safe superintelligence", "meta fair"];
 const BIG_TECH: &[&str] = &[
     "google", "alphabet", "apple", "microsoft", "amazon", "nvidia", "netflix", "uber", "stripe", "databricks",
@@ -189,7 +188,7 @@ pub fn kill(seat: &Seat) -> Option<Kill> {
     let loc = text::normalize(seat.location);
     if text::any_start(&blob, &["staffing", "body shop", "bodyshop", "recruit"]) {
         Some(Kill::Staffing)
-    } else if text::any_word(&blob, &["intern", "internship", "new grad", "co op", "coop"]) {
+    } else if text::any_word(&blob, &["intern", "internship", "new grad", "newgrad", "co op", "coop"]) {
         Some(Kill::Intern)
     } else if text::any_word(&blob, &["prompt only", "ai theater", "chatgpt wrapper"]) {
         Some(Kill::Theater)
@@ -205,14 +204,16 @@ pub fn kill(seat: &Seat) -> Option<Kill> {
     }
 }
 
+/// Onsite-only and known to be away: the place is outside home, not just
+/// unknown, and nothing says remote.
 fn onsite_away(seat: &Seat, loc: &str) -> bool {
     let says_onsite_only = text::any_word(loc, &["onsite only", "on site only", "no remote", "not remote"]);
     let remote_text = text::word(loc, "remote") && !text::any_word(loc, &["no remote", "not remote"]);
-    !seat.home && !remote_text && (seat.onsite || says_onsite_only) && (seat.placed || says_onsite_only)
+    seat.home == Some(false) && !remote_text && (seat.onsite || says_onsite_only)
 }
 
 /// A pay figure over $200k anywhere in free text: "$210,000", "250k",
-/// "180-240k", "220000". Bare numbers from 200 to 999 read as
+/// "180-240k", "220000", "1.2M". Bare numbers from 200 to 999 read as
 /// thousands ("$220 base").
 pub fn high_comp(comp: &str) -> bool {
     let b = comp.as_bytes();
@@ -223,6 +224,7 @@ pub fn high_comp(comp: &str) -> bool {
             i += 1;
             continue;
         }
+        let start = i;
         let mut n = 0f64;
         let mut frac = 0f64;
         let mut scale = 0.1;
@@ -240,9 +242,22 @@ pub fn high_comp(comp: &str) -> bool {
             i += 1;
         }
         let v = n + frac;
-        let k = i < b.len() && (b[i] == b'k' || b[i] == b'K');
-        let value = if k || (200.0..1_000.0).contains(&v) { v * 1000.0 } else { v };
-        best = best.max(value);
+        // A suffix letter counts only when it ends the token: "250k", not
+        // "300km"; "401k" is a retirement plan.
+        let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
+        let suffix = if i < b.len() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
+        let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
+        let value = match suffix {
+            b'k' if v == 401.0 => 0.0,
+            b'k' => v * 1e3,
+            b'm' => v * 1e6,
+            _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
+            _ if (200.0..1_000.0).contains(&v) => v * 1e3,
+            _ => v,
+        };
+        if !after_letter {
+            best = best.max(value);
+        }
     }
     best >= 200_000.0
 }
@@ -268,7 +283,7 @@ pub fn suggest(seat: &Seat) -> Suggestion {
         s += 8;
     }
     let loc = text::normalize(seat.location);
-    if seat.home || text::word(&loc, "remote") {
+    if seat.home == Some(true) || text::word(&loc, "remote") {
         s += 5;
     }
     if high {
@@ -313,6 +328,7 @@ mod tests {
         assert_eq!(suggest(&s("Google DeepMind", "Research Engineer")).score, 90);
         assert_eq!(suggest(&s("Thinking Machines Lab", "Engineer")).score, 90);
         assert_eq!(suggest(&s("Stripe", "Engineer")).score, 80);
+        assert_eq!(suggest(&s("Fair Oaks Capital", "Engineer")).anchored, false);
         let paid = Seat { comp_raw: "$180k – $240k", ..s("Stripe", "Engineer") };
         assert_eq!(suggest(&paid).score, 85);
         assert_eq!(suggest(&paid).band, Band::BigTech);
@@ -320,7 +336,7 @@ mod tests {
 
     #[test]
     fn heuristics_stay_under_the_anchors() {
-        let top = Seat { comp_raw: "300000", home: true, ..s("Acme", "Senior Rust Distributed Systems Engineer, Agents") };
+        let top = Seat { comp_raw: "300000", home: Some(true), ..s("Acme", "Senior Rust Distributed Systems Engineer, Agents") };
         let g = suggest(&top);
         assert_eq!(g.score, 84);
         assert!(!g.anchored);
@@ -333,22 +349,24 @@ mod tests {
         assert_eq!(suggest(&s("Anthropic", "Software Engineering Intern")).kill, Some(Kill::Intern));
         assert_eq!(suggest(&s("Acme Staffing", "Rust Engineer")).score, 8);
         assert_eq!(suggest(&s("Acme", "Sales Engineer")).kill, Some(Kill::NotEngineering));
-        let away = Seat { onsite: true, placed: true, home: false, ..s("Acme", "Engineer") };
+        let away = Seat { onsite: true, home: Some(false), ..s("Acme", "Engineer") };
         assert_eq!(suggest(&away).kill, Some(Kill::OnsiteAway));
-        let home = Seat { home: true, ..away };
+        let home = Seat { home: Some(true), ..away };
         assert_eq!(suggest(&home).kill, None);
+        // Saying onsite-only is not enough while home is unknown.
         let text_only = Seat { location: "Onsite only, no remote", ..s("Acme", "Engineer") };
-        assert_eq!(suggest(&text_only).kill, Some(Kill::OnsiteAway));
-        // Unplaced and silent: not enough to kill.
+        assert_eq!(suggest(&text_only).kill, None);
+        assert_eq!(suggest(&Seat { home: Some(false), ..text_only }).kill, Some(Kill::OnsiteAway));
         assert_eq!(suggest(&Seat { onsite: true, ..s("Acme", "Engineer") }).kill, None);
+        assert_eq!(suggest(&s("Acme", "Newgrad Engineer")).kill, Some(Kill::Intern));
     }
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "CA$205.5k"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "1.2M"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6"] {
             assert!(!high_comp(no), "{no}");
         }
     }

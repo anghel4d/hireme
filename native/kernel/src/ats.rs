@@ -93,38 +93,45 @@ fn matches(host: &str, root: &Root) -> bool {
     }
 }
 
-/// Host (lowercased, no port or userinfo) and path of an absolute URL.
-fn split(url: &str) -> Option<(String, &str)> {
+/// Host (lowercased, no port, userinfo or trailing dot), path and query
+/// of a URL, the fragment cut first.
+fn split(url: &str) -> Option<(String, &str, &str)> {
     let url = url.trim();
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let url = &url[..url.find('#').unwrap_or(url.len())];
+    // A scheme is only a "://" before any path or query.
+    let rest = match url.find("://") {
+        Some(i) if !url[..i].contains(['/', '?']) => &url[i + 3..],
+        _ => url,
+    };
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
     let authority = &rest[..end];
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host.split(':').next().unwrap_or("");
+    let host = host.split(':').next().unwrap_or("").trim_end_matches('.');
     if host.is_empty() || !host.contains('.') {
         return None;
     }
-    let path = &rest[end..];
-    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
-    Some((host.to_ascii_lowercase(), path))
+    let (path, query) = rest[end..].split_once('?').unwrap_or((&rest[end..], ""));
+    Some((host.to_ascii_lowercase(), path, query))
 }
 
 pub fn parse(url: &str) -> Ats {
-    let Some((host, path)) = split(url) else { return Ats::UNKNOWN };
+    let Some((host, path, query)) = split(url) else { return Ats::UNKNOWN };
+    let param = |key: &str| param(query, key);
     let Some(&(vendor, roots)) = HOSTS.iter().find(|(_, roots)| roots.iter().any(|r| matches(&host, r))) else {
         return Ats::UNKNOWN;
     };
     let tenant = match vendor {
         // The embed form names the board in its query: /embed/job_app?for=acme.
-        Vendor::Greenhouse => query(url, "for")
-            .filter(|_| path.starts_with("/embed"))
-            .or_else(|| first_segment(path))
+        Vendor::Greenhouse => param("for")
+            .or_else(|| (!path.starts_with("/embed")).then(|| first_segment(path)).flatten())
             .or_else(|| subdomain(&host, "greenhouse.io"))
             .or_else(|| subdomain(&host, "greenhouse.net")),
-        Vendor::Lever | Vendor::Ashby | Vendor::Workable => {
+        Vendor::Lever | Vendor::Ashby => {
             let Exact(r) = roots[0] else { unreachable!() };
             first_segment(path).or_else(|| subdomain(&host, r))
         }
+        // acme.workable.com/jobs/123, or apply.workable.com/acme/j/123.
+        Vendor::Workable => subdomain(&host, "workable.com").or_else(|| first_segment(path)),
         Vendor::SmartRecruiters | Vendor::Jobvite | Vendor::Rippling | Vendor::Gem => first_segment(path),
         Vendor::Taleo | Vendor::BambooHr | Vendor::Eightfold => {
             let r = match roots[0] {
@@ -132,10 +139,14 @@ pub fn parse(url: &str) -> Ats {
             };
             subdomain(&host, r)
         }
-        // acme.wd5.myworkdayjobs.com, acme.myworkdayjobs.com, else the path.
+        // acme.wd5.myworkdayjobs.com and acme.myworkdayjobs.com name it in
+        // the host; wd3.myworkdaysite.com/en-US/recruiting/acme/x and
+        // wd5.myworkday.com/acme/x put a data center there and the tenant
+        // in the path.
         Vendor::Workday => {
             let first = host.split('.').next().unwrap_or("");
-            (first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(|| first_segment(path))
+            let data_center = first.len() > 2 && first.starts_with("wd") && first[2..].bytes().all(|b| b.is_ascii_digit());
+            (!data_center && first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(|| first_segment(path))
         }
         // careers-acme.icims.com
         Vendor::Icims => {
@@ -144,30 +155,35 @@ pub fn parse(url: &str) -> Ats {
             let left = left.rsplit('.').next().unwrap_or("");
             (!left.is_empty() && left != "www").then(|| String::from(left))
         }
-        Vendor::SuccessFactors => roots.iter().find_map(|r| match r {
-            Exact(r) | Sub(r) => host.strip_suffix(r).and_then(|l| l.strip_suffix('.')).map(String::from),
-        }),
+        // career4.successfactors.com is a shared server; the company is
+        // the `company` parameter.
+        Vendor::SuccessFactors => param("company"),
         Vendor::Unknown => None,
     };
     Ats { vendor, tenant }
 }
 
 /// One query parameter's value, lowercased.
-fn query(url: &str, key: &str) -> Option<String> {
-    let q = url.split_once('?')?.1;
-    let q = q.split('#').next()?;
-    q.split('&')
+fn param(query: &str, key: &str) -> Option<String> {
+    query
+        .split('&')
         .filter_map(|kv| kv.split_once('='))
-        .find(|(k, v)| *k == key && !v.is_empty())
-        .map(|(_, v)| v.to_ascii_lowercase())
+        .find(|(k, v)| *k == key && !v.trim().is_empty())
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
 }
 
-/// The first path segment that is not a generic jobs word.
+/// The first path segment that is not a generic jobs word, a locale
+/// ("en-US") or an id (all digits).
 fn first_segment(path: &str) -> Option<String> {
+    let locale = |s: &str| s.len() == 5 && s.as_bytes()[2] == b'-' || s.len() == 2;
     path.split('/')
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
-        .find(|s| !matches!(s.as_str(), "job" | "jobs" | "career" | "careers" | "apply" | "embed"))
+        .find(|s| {
+            !locale(s)
+                && !s.bytes().all(|b| b.is_ascii_digit())
+                && !matches!(s.as_str(), "job" | "jobs" | "career" | "careers" | "apply" | "embed" | "job_app" | "recruiting" | "j")
+        })
 }
 
 /// The label just left of `root` in `host`, unless it is a generic one.
@@ -194,7 +210,16 @@ mod tests {
         assert_eq!(t("https://jobs.ashbyhq.com/Acme"), (Vendor::Ashby, Some("acme")));
         assert_eq!(t("https://acme.wd5.myworkdayjobs.com/en-US/External"), (Vendor::Workday, Some("acme")));
         assert_eq!(t("https://careers-acme.icims.com/jobs/1/x/job"), (Vendor::Icims, Some("acme")));
-        assert_eq!(t("https://career4.successfactors.com/career?company=x"), (Vendor::SuccessFactors, Some("career4")));
+        assert_eq!(t("https://career4.successfactors.com/career?company=Acme"), (Vendor::SuccessFactors, Some("acme")));
+        assert_eq!(t("https://wd3.myworkdaysite.com/en-US/recruiting/acme/External"), (Vendor::Workday, Some("acme")));
+        assert_eq!(t("https://wd5.myworkday.com/acme/d/x"), (Vendor::Workday, Some("acme")));
+        assert_eq!(t("https://acme.workable.com/jobs/123456"), (Vendor::Workable, Some("acme")));
+        assert_eq!(t("https://apply.workable.com/acme/j/ABC"), (Vendor::Workable, Some("acme")));
+        assert_eq!(t("https://boards.greenhouse.io/embed/job_app?token=1"), (Vendor::Greenhouse, None));
+        assert_eq!(t("https://boards.greenhouse.io/embed/job_app?for=acme%0A#x?for=evil"), (Vendor::Greenhouse, Some("acme%0a")));
+        assert_eq!(t("https://jobs.lever.co./acme"), (Vendor::Lever, Some("acme")));
+        assert_eq!(t("jobs.lever.co/acme?next=https://x.y"), (Vendor::Lever, Some("acme")));
+        assert_eq!(t("https://x.successfactors.com/career"), (Vendor::SuccessFactors, None));
         assert_eq!(t("https://acme.bamboohr.com/careers/12"), (Vendor::BambooHr, Some("acme")));
         assert_eq!(t("https://ats.rippling.com/acme/jobs/1"), (Vendor::Rippling, Some("acme")));
         assert_eq!(t("https://acme.eightfold.ai/careers"), (Vendor::Eightfold, Some("acme")));

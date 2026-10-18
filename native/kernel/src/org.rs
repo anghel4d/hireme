@@ -103,7 +103,6 @@ pub fn size(company: &str) -> Size {
     }
 }
 
-/// The key two company names are the same company under: normalized.
 pub fn company_key(company: &str) -> alloc::string::String {
     text::normalize(company)
 }
@@ -121,7 +120,7 @@ pub fn department(role: &str) -> Department {
         Department::Data
     } else if text::any_start(&n, &["frontend", "front end", "ios", "android", "mobile", "product engineer"]) {
         Department::Product
-    } else if text::any_start(&n, &["engineer", "developer", "swe"]) {
+    } else if text::any_start(&n, &["engineer", "developer"]) || text::word(&n, "swe") {
         Department::Eng
     } else {
         Department::Other
@@ -149,13 +148,13 @@ pub fn family(role: &str) -> Family {
         Family::ResearchScientist
     } else if text::starts(&n, "research engineer") {
         Family::ResearchEngineer
-    } else if text::any_word(&n, &["site reliability", "sre"]) {
+    } else if text::starts(&n, "site reliability") || text::word(&n, "sre") {
         Family::Sre
     } else if text::starts(&n, "data engineer") {
         Family::DataEngineer
     } else if text::starts(&n, "security engineer") {
         Family::SecurityEngineer
-    } else if text::any_word(&n, &["software engineer", "swe", "engineer", "developer"]) {
+    } else if text::any_start(&n, &["software engineer", "engineer", "developer"]) || text::word(&n, "swe") {
         Family::SoftwareEngineer
     } else {
         Family::Other
@@ -187,5 +186,8 @@ mod tests {
         assert_eq!(family("Sr. Research Scientist"), Family::ResearchScientist);
         assert_eq!(family("SRE II"), Family::Sre);
         assert_eq!(family("Account Executive"), Family::Other);
+        assert_eq!(family("Engineering Manager"), Family::SoftwareEngineer);
+        assert_eq!(family("Senior Engineers"), Family::SoftwareEngineer);
+        assert_eq!(department("Swedish Teacher"), Department::Other);
     }
 }

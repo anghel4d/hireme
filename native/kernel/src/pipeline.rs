@@ -99,12 +99,6 @@ impl Stage {
         self as usize
     }
 
-    /// Stages that carry heat: the application is queued to go out, went
-    /// out, or came back. Earlier stages cost nothing until they queue.
-    pub fn hot(self) -> bool {
-        self >= Stage::FireReady
-    }
-
     /// The submit queue: entering it from a cold stage is what the heat
     /// governor judges.
     pub fn queued(self) -> bool {
@@ -121,8 +115,8 @@ impl Stage {
         matches!(self, Stage::OpenFire | Stage::Submitted)
     }
 
-    /// Past the point of sending: what happened stays happened.
-    pub fn sent(self) -> bool {
+    /// The stages an application stands on once sent.
+    pub fn after_send(self) -> bool {
         self >= Stage::Submitted
     }
 }
@@ -242,6 +236,13 @@ pub fn rail_of(stage: Stage, pips: Option<&str>) -> Rail {
     }
 }
 
+/// Whether the rail records a submission: its `submitted` rung was
+/// reached, not jumped over. Closing a listing that died before anything
+/// went out leaves it skipped.
+pub fn sent(rail: &Rail) -> bool {
+    matches!(rail[Stage::Submitted.index()], Pip::Done | Pip::Active)
+}
+
 /// Why a stage move is refused, before heat (which `heat` judges).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -268,12 +269,13 @@ impl Refusal {
 
 /// Whether the `stage` command may move an application `from` → `to`.
 /// `batch_fire` is the application's batch's `fire` flag (false with no
-/// batch). A move to the stage it is on is allowed and changes nothing.
-pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool) -> Result<(), Refusal> {
+/// batch); `sent` is whether it was ever submitted. A move to the stage it
+/// is on is allowed and changes nothing.
+pub fn check(from: Stage, to: Stage, has_batch: bool, batch_fire: bool, sent: bool) -> Result<(), Refusal> {
     if from == to {
         return Ok(());
     }
-    if from.sent() && !to.sent() {
+    if sent && !to.after_send() {
         return Err(Refusal::Sent);
     }
     if to == Stage::OpenFire {
@@ -331,14 +333,19 @@ mod tests {
     #[test]
     fn fire_hold_and_batches() {
         use Refusal::*;
-        assert_eq!(check(Stage::Gated, Stage::InBatch, false, false), Err(NeedsBatch));
-        assert_eq!(check(Stage::Gated, Stage::InBatch, true, false), Ok(()));
-        assert_eq!(check(Stage::FireReady, Stage::OpenFire, true, true), Err(OpenFireByCommand));
-        assert_eq!(check(Stage::FireReady, Stage::Submitted, true, false), Err(FireHold));
-        assert_eq!(check(Stage::OpenFire, Stage::Submitted, true, false), Ok(()));
-        assert_eq!(check(Stage::Submitted, Stage::Gated, true, true), Err(Sent));
-        assert_eq!(check(Stage::Submitted, Stage::Closed, true, true), Ok(()));
-        assert_eq!(check(Stage::Discovered, Stage::Closed, false, false), Ok(()));
-        assert_eq!(check(Stage::Reply, Stage::Reply, false, false), Ok(()));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, false, false, false), Err(NeedsBatch));
+        assert_eq!(check(Stage::Gated, Stage::InBatch, true, false, false), Ok(()));
+        assert_eq!(check(Stage::FireReady, Stage::OpenFire, true, true, false), Err(OpenFireByCommand));
+        assert_eq!(check(Stage::FireReady, Stage::Submitted, true, false, false), Err(FireHold));
+        assert_eq!(check(Stage::OpenFire, Stage::Submitted, true, false, false), Ok(()));
+        assert_eq!(check(Stage::Submitted, Stage::Gated, true, true, true), Err(Sent));
+        assert_eq!(check(Stage::Submitted, Stage::Closed, true, true, true), Ok(()));
+        assert_eq!(check(Stage::Discovered, Stage::Closed, false, false, false), Ok(()));
+        assert_eq!(check(Stage::Reply, Stage::Reply, false, false, true), Ok(()));
+        // A listing closed before anything went out can be reopened.
+        let closed = move_to(&initial(Stage::Gated), Stage::Closed);
+        assert!(!sent(&closed));
+        assert_eq!(check(Stage::Closed, Stage::Gated, false, false, sent(&closed)), Ok(()));
+        assert!(sent(&move_to(&initial(Stage::Submitted), Stage::Closed)));
     }
 }

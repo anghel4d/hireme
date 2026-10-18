@@ -138,17 +138,27 @@ fn home_place(rows: &Rows, citizenships: &str, place: u32) -> Option<bool> {
     Some(text::list(citizenships).any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
-/// The governor's seat for one application row.
+/// Whether an application row was ever submitted.
+pub fn sent(t: &Table, id: u32) -> bool {
+    let Some(stage) = t.u32(id, A::STAGE).and_then(|v| Stage::from_u8(v as u8)) else { return false };
+    t.u32(id, A::APPLIED_ON).is_some() || crate::pipeline::sent(&crate::pipeline::rail_of(stage, t.str(id, A::PIPS)))
+}
+
+/// The governor's seat for one application row. Its score is the stored
+/// one; the board's cache sets the effective score.
 pub fn seat(t: &Table, id: u32) -> Option<Seat> {
     let stage = Stage::from_u8(t.u32(id, A::STAGE)? as u8)?;
     Some(Seat::new(&SeatIn {
         id,
+        corporation_id: t.u32(id, A::CORPORATION_ID),
         company: t.str(id, A::COMPANY).unwrap_or(""),
         role: t.str(id, A::ROLE).unwrap_or(""),
         url: t.str(id, A::LISTING_URL).or_else(|| t.str(id, A::CANONICAL_URL)).unwrap_or(""),
         stage,
         stage_on: day(t, id, A::STAGE_ON),
-        score: t.u32(id, A::SCORE_100).map(|s| s.min(100) as u8),
+        applied_on: day(t, id, A::APPLIED_ON),
+        sent: sent(t, id),
+        score: t.u32(id, A::SCORE_100).map_or(0, |s| s.min(100) as u8),
         batch_id: t.u32(id, A::BATCH_ID),
         heat_override: t.u32(id, A::HEAT_OVERRIDE) == Some(1),
         heat_override_reason: t.str(id, A::HEAT_OVERRIDE_REASON).unwrap_or(""),
@@ -167,8 +177,7 @@ pub fn suggestion(rows: &Rows, t: &Table, id: u32) -> Suggestion {
         location: t.str(id, A::LOCATION).unwrap_or(""),
         comp_raw: t.str(id, A::COMP_RAW).unwrap_or(""),
         onsite: mode == Some(enums::work_mode::ONSITE as u32),
-        home: remote || home == Some(true),
-        placed: mode.is_some() || home.is_some(),
+        home: if remote { Some(true) } else { home },
     })
 }
 
@@ -196,7 +205,7 @@ impl Board {
                 self.cache.remove(id);
                 if let Some((_, _, ix)) = self.governor.as_mut() {
                     let now = t.filter(|t| t.has(*id)).and_then(|t| seat(t, *id));
-                    if ix.contains(*id) || now.as_ref().is_some_and(|s| s.stage.hot()) {
+                    if ix.contains(*id) || now.as_ref().is_some_and(|s| s.hot) {
                         ix.update(*id, now);
                     }
                 }
@@ -213,7 +222,7 @@ impl Board {
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
-                    if stages.get(i).and_then(|v| Stage::from_u8(*v as u8)).is_some_and(Stage::hot) {
+                    if stages.get(i).and_then(|v| Stage::from_u8(*v as u8)).is_some_and(|s| s.queued() || s.after_send()) {
                         if let Some(c) = self.cached(rows, t, id) {
                             hot.push(c.seat.clone());
                         }
@@ -239,9 +248,13 @@ impl Board {
             }
             let no = t.u32(id, A::NO).unwrap_or(0);
             search.push_str(&alloc::format!("#{no}"));
+            let suggestion = suggestion(rows, t, id);
+            let stored = t.u32(id, A::SCORE_100).map(|s| s.min(100) as u8);
+            let mut seat = seat;
+            seat.score = stored.unwrap_or(suggestion.score);
             let c = Cached {
-                suggestion: suggestion(rows, t, id),
-                stored: t.u32(id, A::SCORE_100).map(|s| s.min(100) as u8),
+                suggestion,
+                stored,
                 no,
                 search,
                 seat,
@@ -336,7 +349,7 @@ impl Board {
             s.by_stage[c.stage as usize] += 1;
             s.by_band[c.band as usize] += 1;
             s.by_class[c.class as usize] += 1;
-            if c.stage.sent() {
+            if t.is_some_and(|t| sent(t, c.id)) {
                 s.submitted += 1;
                 if t.and_then(|t| day(t, c.id, A::APPLIED_ON)) == Some(today) {
                     s.submitted_today += 1;
