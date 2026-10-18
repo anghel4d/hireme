@@ -21,7 +21,7 @@ defmodule HiremeWeb.Gate do
 
   | op | name | body |
   |---|---|---|
-  | `0x01` | OPEN | `u8 n, ip` · `u16 n, origin` ("" when absent) · `u16 n, path` |
+  | `0x01` | OPEN | `u8 n, ip` · `u16 n, origin` ("" when absent) · `u16 n, path` · `u16 n, user agent` |
   | `0x11` | DATA | control-stream bytes, chunked arbitrarily |
   | `0x30` | CLOSED | `u32 code` · reason; the socket closes next |
 
@@ -336,8 +336,8 @@ defmodule HiremeWeb.Gate do
     case :gen_tcp.recv(socket, 0, @open_wait) do
       {:ok,
        <<@open, n, ip::binary-size(n), o::16, origin::binary-size(o), p::16,
-         _path::binary-size(p)>>} ->
-        peer = %{peer_ip: ip, origin: origin, carrier: :wt}
+         _path::binary-size(p), rest::binary>>} ->
+        peer = %{peer_ip: ip, origin: origin, carrier: :wt, user_agent: user_agent(rest)}
 
         {:ok, state} = Session.open(peer)
         :ok = :gen_tcp.send(socket, <<@accept>>)
@@ -348,6 +348,10 @@ defmodule HiremeWeb.Gate do
         :gen_tcp.close(socket)
     end
   end
+
+  # The CONNECT's user agent, trailing the OPEN; "" when the gate sent none.
+  defp user_agent(<<u::16, ua::binary-size(u), _::binary>>), do: ua
+  defp user_agent(_), do: ""
 
   defp loop(%{socket: socket} = c, state) do
     receive do

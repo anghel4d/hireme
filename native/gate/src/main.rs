@@ -441,11 +441,11 @@ async fn bridge_writer(w: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Vec<u8
     }
 }
 
-fn open_body(ip: &str, origin: &str, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(5 + ip.len() + origin.len() + path.len());
+fn open_body(ip: &str, origin: &str, path: &str, user_agent: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(7 + ip.len() + origin.len() + path.len() + user_agent.len());
     b.push(ip.len() as u8);
     b.extend_from_slice(ip.as_bytes());
-    for field in [origin, path] {
+    for field in [origin, path, user_agent] {
         let f = &field.as_bytes()[..field.len().min(u16::MAX as usize)];
         b.extend_from_slice(&(f.len() as u16).to_be_bytes());
         b.extend_from_slice(f);
@@ -486,7 +486,8 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     tokio::spawn(bridge_writer(w, rx, pending.clone()));
 
     let ip = request.remote_address().ip().to_string();
-    let _ = up.send(message(OPEN, &open_body(&ip, request.origin().unwrap_or(""), request.path())));
+    let open = open_body(&ip, request.origin().unwrap_or(""), request.path(), request.user_agent().unwrap_or(""));
+    let _ = up.send(message(OPEN, &open));
 
     // The BEAM may write ahead of its ACCEPT; those messages wait here and
     // are applied the moment the session exists.
