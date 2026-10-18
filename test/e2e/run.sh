@@ -12,62 +12,76 @@
 #   CHROMIUM     the browser; else the BRIEF's pinned nix Chromium 155
 #   OUT          screenshots and the node's log; else a fresh /tmp dir
 #   SHA          the revision to print, for a checkout without .git
-# Needs mix, cargo, node 24 and npm on PATH (BRIEF.md, 'Toolchain').
+# Needs mix, cargo, node 24, npm, curl and setsid on PATH (BRIEF.md, 'Toolchain').
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHROMIUM=${CHROMIUM:-/nix/store/ini1ifgvcsvw48x4mxawrv9jvbdwn70p-chromium-155.0.8059.79/bin/chromium}
 # Playwright is installed fresh each run into a directory only this run
-# made (npm's own cache makes it quick): code is never run from a path
-# someone else could have prepared.
-for tool in mix cargo node npm curl setsid git; do
+# made (npm's own cache makes it quick), with a package.json of its own and
+# no workspace or ancestor lookup: code is never run from a path someone
+# else could have prepared.
+E2E_NODE= OUT=${OUT:-} TMP= NODE_PID= ACC_PID=
+
+cleanup() {
+  if [ -n "$ACC_PID" ]; then kill -TERM -- "-$ACC_PID" 2>/dev/null || true; wait "$ACC_PID" 2>/dev/null || true; fi
+  if [ -n "$NODE_PID" ]; then kill -TERM -- "-$NODE_PID" 2>/dev/null || true; wait "$NODE_PID" 2>/dev/null || true; fi
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  [ -z "$E2E_NODE" ] || rm -rf "$E2E_NODE"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM HUP INT
+
+for tool in mix cargo node npm curl setsid; do
   command -v "$tool" >/dev/null || { echo "FAIL setup: $tool is not on PATH (BRIEF.md, 'Toolchain')"; echo "res=1"; exit 1; }
 done
 E2E_NODE=$(mktemp -d /tmp/hireme-e2e-node.XXXXXX)
+TMP=$(mktemp -d /tmp/hireme-e2e-db.XXXXXX)
 OUT=${OUT:-$(mktemp -d /tmp/hireme-e2e.XXXXXX)}
 mkdir -p "$OUT"
-TMP=$(mktemp -d /tmp/hireme-e2e-db.XXXXXX)
-NODE_PID=
-
-cleanup() {
-  if [ -n "$NODE_PID" ]; then kill -TERM -- "-$NODE_PID" 2>/dev/null || true; wait "$NODE_PID" 2>/dev/null || true; fi
-  rm -rf "$TMP"
-  rm -rf "$E2E_NODE"
-}
-trap cleanup EXIT
 
 echo "out=$OUT sha=${SHA:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)}"
 
 if [ -z "${HIREME_MCP:-}" ]; then
   cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
-  HIREME_MCP="$ROOT/native/target/release/hireme-mcp"
+  HIREME_MCP="${CARGO_TARGET_DIR:-$ROOT/native/target}/release/hireme-mcp"
 fi
 [ -x "$HIREME_MCP" ] || { echo "FAIL setup: no hireme-mcp at $HIREME_MCP"; echo "res=1"; exit 1; }
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
-(cd "$E2E_NODE" && npm init -y >/dev/null && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --silent playwright@1.64.1)
-
-PORT=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+printf '{"private":true}\n' >"$E2E_NODE/package.json"
+(cd "$E2E_NODE" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix "$E2E_NODE" --no-workspaces \
+  --ignore-scripts --no-audit --no-fund install --silent playwright@1.64.1)
+[ -f "$E2E_NODE/node_modules/playwright/index.mjs" ] || { echo "FAIL setup: playwright did not install into $E2E_NODE"; echo "res=1"; exit 1; }
 
 cd "$ROOT"
 MIX_ENV=dev mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mix assets.build (see $OUT/build.log)"; echo "res=1"; exit 1; }
 
+# The port is picked just before the node binds it, and the node is ours
+# only if it is alive and its log names that port.
+PORT=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 # Its own process group, so teardown takes esbuild's watchers too.
 DATABASE_PATH="$TMP/e2e.db" PORT=$PORT PHX_SERVER=true HIREME_GATE=off MIX_ENV=dev \
   setsid mix phx.server >"$OUT/node.log" 2>&1 &
 NODE_PID=$!
 
 BASE="http://localhost:$PORT"
+ready=
 for _ in $(seq 1 120); do
-  curl -sf -o /dev/null "$BASE/sign-in" && break
   kill -0 "$NODE_PID" 2>/dev/null || { echo "FAIL setup: the node exited (see $OUT/node.log)"; echo "res=1"; exit 1; }
+  if grep -q ":$PORT" "$OUT/node.log" && curl -sf -o /dev/null "$BASE/sign-in"; then ready=1; break; fi
   sleep 0.5
 done
-curl -sf -o /dev/null "$BASE/sign-in" || { echo "FAIL setup: the node did not answer on $BASE (see $OUT/node.log)"; echo "res=1"; exit 1; }
+[ -n "$ready" ] && kill -0 "$NODE_PID" 2>/dev/null || { echo "FAIL setup: the node did not answer on $BASE (see $OUT/node.log)"; echo "res=1"; exit 1; }
 
-# A module resolves "playwright" from its own directory: run a copy beside it.
+# A module resolves "playwright" from its own directory: run a copy beside
+# it, in its own session, so a signal to this script takes Chromium and
+# hireme-mcp down with it.
 cp "$ROOT/test/e2e/acceptance4.mjs" "$E2E_NODE/acceptance4.mjs"
 set +e
-BASE=$BASE HIREME_MCP=$HIREME_MCP CHROMIUM=$CHROMIUM OUT=$OUT node "$E2E_NODE/acceptance4.mjs"
+BASE=$BASE HIREME_MCP=$HIREME_MCP CHROMIUM=$CHROMIUM OUT=$OUT setsid node "$E2E_NODE/acceptance4.mjs" &
+ACC_PID=$!
+wait "$ACC_PID"
 res=$?
+ACC_PID=
 exit $res
