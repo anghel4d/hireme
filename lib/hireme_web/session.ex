@@ -227,8 +227,7 @@ defmodule HiremeWeb.Session do
   defp rpc(id, method, params, state) when method in @world do
     ctx = %{account_id: state.account_id, grants: state.session.grants}
 
-    # Through apply/3 until Hireme.World lands, so the tree compiles without it.
-    case apply(Hireme.World, :call, [method, params, ctx]) do
+    case Hireme.World.call(method, params, ctx) do
       {:ok, result} -> {:push, [reply(id, true, result, state)], state}
       {:error, refusal, data} -> {:push, [reply(id, false, error(refusal, data), state)], state}
     end
