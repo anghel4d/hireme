@@ -185,6 +185,11 @@ impl Carrier {
             if !again {
                 return;
             }
+            // A restart this process asked for is no failure: it reconnects at once, with backoff reset.
+            if reason == "restart" {
+                attempt = 0;
+                continue;
+            }
             if started.elapsed() > Duration::from_secs(60) {
                 attempt = 0;
             }

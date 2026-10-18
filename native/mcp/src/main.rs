@@ -94,8 +94,11 @@ struct App {
     /// Why the session ended for good, once it has.
     dead: RwLock<Option<String>>,
     /// The operator paused this key's writing (a lease revoke): since when, as the node said. Nothing
-    /// reconnects to claim again on its own; the agent's next `lease` asks the node in a new session.
+    /// reconnects to claim again on its own; the agent's next `lease` asks the node again.
     paused: RwLock<Option<String>>,
+    /// The revoke came from a node that predates the pause, which marks the session itself revoked:
+    /// only a new session may claim there. A pausing node holds every session of the key alike.
+    revoked_session: std::sync::atomic::AtomicBool,
     legacy: RwLock<Option<String>>,
     rev: AtomicU64,
     url: String,
@@ -194,6 +197,7 @@ async fn main() {
         ready: Notify::new(),
         dead: RwLock::new(None),
         paused: RwLock::new(None),
+        revoked_session: std::sync::atomic::AtomicBool::new(false),
         legacy: RwLock::new(None),
         rev: AtomicU64::new(0),
         url,
@@ -811,14 +815,18 @@ impl App {
         if paused {
             self.lost_lease().await;
             *self.paused.write().await = Some(data.get("since").and_then(Json::as_str).unwrap_or("").to_owned());
+            let old_node = data.get("paused").is_none() && reason.contains("revoked this session's lease");
+            self.revoked_session.store(old_node, Ordering::Relaxed);
         }
         paused
     }
 
-    /// `lease`: claimed in this session, or, once the operator has paused the key, asked again from a
-    /// new session (a revoked session never claims again), which the node grants once they resume it.
+    /// `lease`: claimed in this session. The node refuses it while the key is paused and grants it once
+    /// the operator resumes; only after an older node's revoke, which ends this session's claiming for
+    /// good, is it asked from a new session.
     async fn lease(&self, args: &Json) -> Json {
-        if self.paused.write().await.take().is_some() {
+        self.paused.write().await.take();
+        if self.revoked_session.swap(false, Ordering::Relaxed) {
             let before = self.welcome.read().await.as_ref().map(|w| w.session_id);
             self.carrier.restart("the operator paused this key; asking again from a new session");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

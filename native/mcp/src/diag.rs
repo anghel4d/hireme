@@ -171,11 +171,19 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
     let list = |k: &str| data.get(k).and_then(Json::as_array).map(|a| a.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", "));
     match code {
         // A parameter the call left out, or sent as null (World echoes it as inspect(nil): "nil").
-        "type" if text("param").is_some() && data.get("reason").is_none() && data.get("got").is_none_or(|g| g.is_null() || g.as_str() == Some("nil")) => {
+        // got is present and null (an older World said "nil"); a param refused without got was given.
+        "type" if text("param").is_some() && data.get("reason").is_none() && data.get("got").is_some_and(|g| g.is_null() || g.as_str() == Some("nil")) => {
             let p = text("param")?;
             Some((format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes.")))
         }
+        // A cursor handed back changed: `after` takes only what an answer's `next` gave.
+        "type" if text("param") == Some("after") && data.get("reason").is_none() => Some((
+            "after is not a cursor this answer gave".to_owned(),
+            "Pass `after` back exactly as the previous answer's `next` gave it, or leave it out to start from the first row.".to_owned(),
+        )),
         "too_large" => match (int("limit"), int("max"), text("filter"), text("param")) {
+            // `text` reads by length from an offset; find pages rows.
+            (Some(n), Some(max), _, Some("length")) => Some((format!("a length of {n} is over the cap of {max}"), format!("Read at most {max} at a time and continue from the answer's next offset."))),
             (Some(n), Some(max), _, _) => Some((format!("a limit of {n} is over the cap of {max}"), format!("Ask for at most {max} rows and page on with `after`."))),
             (_, Some(max), Some("in"), _) => Some((format!("an `in` list over {max} values"), format!("Split the list into calls of at most {max} values each."))),
             // like and prefix take a pattern, bounded in bytes.
@@ -416,8 +424,9 @@ mod tests {
         }
         let mid = render("type", "text", &serde_json::json!({"param": "offset", "reason": "inside a character"}));
         assert!(mid.starts_with("error[type]: the offset falls inside a UTF-8 character\n"), "{mid}");
-        let absent = render("type", "history places", &serde_json::json!({"param": "id"}));
-        assert!(absent.starts_with("error[type]: id is required here\n"), "{absent}");
+        let cursor = render("type", "find places", &serde_json::json!({"param": "after"}));
+        assert!(!cursor.contains("required"), "{cursor}");
+        assert!(cursor.starts_with("error[type]: after is not a cursor this answer gave\n"), "{cursor}");
         let wrong = render("type", "history places", &serde_json::json!({"param": "id", "got": "\"x\""}));
         assert!(wrong.starts_with("error[type]: the value does not fit"), "{wrong}");
         let shaped = [
@@ -426,6 +435,7 @@ mod tests {
             ("too_large", serde_json::json!({"column": "id", "filter": "in", "max": 1000}), "an `in` list over 1000 values"),
             ("too_large", serde_json::json!({"column": "name", "filter": "prefix", "max": 1000}), "a `prefix` pattern over 1000 bytes"),
             ("too_large", serde_json::json!({"param": "offset"}), "the offset is past any text"),
+            ("too_large", serde_json::json!({"limit": 2000000, "max": 1048576, "param": "length"}), "a length of 2000000 is over the cap of 1048576"),
             ("too_large", serde_json::json!({"bytes": 2000000, "max": 1048576}), "more than 1 MiB of text in one op"),
             ("column", serde_json::json!({"table": "corporations", "missing": ["name"]}), "a new row lacks its required columns: name"),
             ("column", serde_json::json!({"command": "open_generation", "missing": ["lineage_id"]}), "open_generation needs lineage_id"),
