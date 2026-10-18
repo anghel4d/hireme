@@ -18,8 +18,11 @@ config :hireme, :oauth,
 if from = System.get_env("MAIL_FROM"), do: config(:hireme, :mail_from, {"Hireme", from})
 
 # A throwaway database for a certification run; dev defaults to ../hireme_dev.db.
-if config_env() == :dev and System.get_env("DATABASE_PATH") do
-  config :hireme, Hireme.Repo, database: System.get_env("DATABASE_PATH")
+if config_env() == :dev do
+  case System.get_env("DATABASE_PATH", "") do
+    "" -> :ok
+    path -> config :hireme, Hireme.Repo, database: path
+  end
 end
 
 # HIREME_GATE=off runs the wire over the WebSocket carrier alone, with no

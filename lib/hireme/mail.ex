@@ -49,7 +49,7 @@ defmodule Hireme.Mail do
 
   defp send_link(to, url, backoff) do
     case {post(to, "Your Hireme sign-in link", link_body(url)), backoff} do
-      {:ok, _} ->
+      {{:ok, _}, _} ->
         :ok
 
       {{:error, _}, [wait | rest]} ->
