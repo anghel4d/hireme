@@ -267,7 +267,7 @@ void (async () => {
   await hw?.ready
   wire.start(hw)
   // Without early.ts (the inline script blocked or stripped) the bundle compiles the kernel itself.
-  kernel.load(hw ?? { queue: [], helloSent: false, ready: Promise.resolve(), kernel: WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm")), snap: Promise.resolve(undefined) })
+  kernel.load(hw ?? { queue: [], helloSent: false, ready: Promise.resolve(), kernel: WebAssembly.compileStreaming(fetch(document.querySelector<HTMLLinkElement>('link[rel="preload"][as="fetch"]')?.href ?? "/wasm/kernel.wasm")), snap: Promise.resolve(undefined) })
 })()
 
 schedule()

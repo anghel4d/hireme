@@ -38,7 +38,7 @@ const WT_WAIT_MS = 3000
     queue: [],
     helloSent: false,
     ready: Promise.resolve(),
-    kernel: WebAssembly.compileStreaming(fetch("/wasm/kernel.wasm")),
+    kernel: WebAssembly.compileStreaming(fetch(document.querySelector<HTMLLinkElement>('link[rel="preload"][as="fetch"]')?.href ?? "/wasm/kernel.wasm")),
     snap: new Promise((resolve) => {
       if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
       setTimeout(() => resolve(undefined), 2000)
