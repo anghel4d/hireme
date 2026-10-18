@@ -260,3 +260,27 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 2, &[wire::Nack { op_id: 5150, code: 0, data: b"{}" }])).unwrap();
     assert_eq!(k.snapshot(), snap);
 }
+
+/// A session table (the account's live views) arrives whole each time, so
+/// a row the server no longer sends (a revoked key) goes; and the snapshot
+/// at rest never holds one.
+#[test]
+fn session_tables_are_whole_and_never_at_rest() {
+    use schema::col::acct_keys as AK;
+    let mut k = kernel();
+    let keys = |ids: &[u32]| {
+        let mut w = wire::BodyWriter::new();
+        let mut b = w.block(table::ACCT_KEYS, ids.len());
+        b.u32s(AK::ID, ids.iter().copied()).strs(AK::NAME, ids.iter().map(|_| "k"));
+        b.done();
+        w.finish()
+    };
+    k.patch(&keys(&[1, 2]), 2).unwrap();
+    k.patch(&keys(&[2]), 3).unwrap();
+    let rows = q(&k, json!({"op": "find", "table": "acct_keys"}))["rows"].clone();
+    assert_eq!(rows.as_array().map(|r| r.iter().map(|x| x["id"].clone()).collect::<Vec<_>>()), Some(vec![json!(2)]));
+    let mut again = Kernel::new();
+    again.set_grants(Grants::operator());
+    again.restore(&k.snapshot()).unwrap();
+    assert_eq!(q(&again, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
+}

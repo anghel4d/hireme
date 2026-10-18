@@ -169,7 +169,7 @@ fn readable(g: &Grants, name: Option<&Json>) -> Result<&'static TableModel, Refu
     // account's secrets) never replicate.
     match schema::TABLES.iter().find(|t| t.name == name) {
         Some(t) if t.residency != Residency::Server => {
-            let bit = if t.unmasked { 0 } else { t.domain_bit };
+            let bit = t.domain_bit;
             if bit == 0 && g.human && t.residency != Residency::Resident {
                 Ok(t)
             } else if bit == 0 {

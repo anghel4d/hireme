@@ -42,7 +42,7 @@ fn keyed(table: u16) -> bool {
 /// (`leases`, `clock`, `catalog`) is sent whole, so a row missing from it
 /// is gone.
 fn whole(table: u16) -> bool {
-    schema::table_def(table).is_some_and(|t| t.residency == schema::Residency::Wire) || !keyed(table)
+    schema::table_def(table).is_some_and(|t| t.session) || !keyed(table)
 }
 /// The row revision column.
 pub const REV: u16 = 3;
@@ -805,9 +805,10 @@ impl Rows {
         let pending = core::mem::take(&mut base.pending);
         base.unwind(&pending);
         let mut w = wire::BodyWriter::new();
-        // Wire tables (leases, clock, catalog) are the session's, not the
-        // account's: the next BOOT brings them fresh.
-        let session = |id: u16| schema::table_def(id).is_some_and(|t| t.residency == schema::Residency::Wire);
+        // Session tables (the wire tables, the account's live views, the
+        // trusted hosts) are the session's, not the account's: the next
+        // BOOT or resumed HELLO brings them fresh.
+        let session = |id: u16| schema::table_def(id).is_some_and(|t| t.session);
         for t in base.tables.values().filter(|t| !session(t.id)) {
             let n = t.len();
             let mut b = w.block(t.id, n);
