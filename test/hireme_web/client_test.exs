@@ -1,30 +1,26 @@
 defmodule HiremeWeb.ClientTest do
   @moduledoc """
-  The client's pure modules under node's test runner: every
-  `assets/test/*.test.mjs`, run with `node --experimental-transform-types
-  --test`. A gate (HIREME_MCP set) must have node and fails without it;
-  elsewhere a missing node only skips.
+  The client's pure modules under Bun's test runner: every
+  `assets/test/*.test.mjs`, run with `bun test`. A gate (HIREME_MCP set)
+  must have bun and fails without it; elsewhere a missing bun only skips.
   """
 
   use ExUnit.Case, async: true
 
-  @node System.find_executable("node")
-  if @node == nil and System.get_env("HIREME_MCP") in [nil, ""],
-    do: @moduletag(skip: "node is not on PATH (a gate, with HIREME_MCP set, fails instead)")
+  @bun System.find_executable("bun")
+  if @bun == nil and System.get_env("HIREME_MCP") in [nil, ""],
+    do: @moduletag(skip: "bun is not on PATH (a gate, with HIREME_MCP set, fails instead)")
 
-  test "the client's node:test files pass" do
-    node = @node || flunk("node is not on PATH: the gate cannot run assets/test")
+  test "the client's test files pass" do
+    bun = @bun || flunk("bun is not on PATH: the gate cannot run assets/test")
     root = Path.expand("../..", __DIR__)
-    files = Path.wildcard(Path.join(root, "assets/test/*.test.mjs"))
-    assert files != [], "no assets/test/*.test.mjs"
 
-    {out, status} =
-      System.cmd(node, ["--experimental-transform-types", "--no-warnings", "--test" | files],
-        cd: root,
-        stderr_to_stdout: true
-      )
+    assert Path.wildcard(Path.join(root, "assets/test/*.test.mjs")) != [],
+           "no assets/test/*.test.mjs"
+
+    {out, status} = System.cmd(bun, ["test", "./assets/test/"], cd: root, stderr_to_stdout: true)
 
     assert status == 0, out
-    assert out =~ ~r/# fail 0|ℹ fail 0/, out
+    assert out =~ ~r/\b0 fail\b/, out
   end
 end

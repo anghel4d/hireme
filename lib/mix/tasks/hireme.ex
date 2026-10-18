@@ -504,3 +504,48 @@ defmodule Mix.Tasks.Hireme.Import do
     if refused > 0, do: exit({:shutdown, 1})
   end
 end
+
+defmodule Mix.Tasks.Hireme.Bundle do
+  @shortdoc "Bundles the browser's scripts and stylesheet with Bun"
+  @moduledoc """
+  The browser's bundles, into priv/static/assets: `app` with its stylesheet,
+  `early` (inlined in <head> and allowed by its hash in the CSP, so always
+  minified) and `auth`, the factor page's passkey script. Arguments go to
+  every `bun build`: `--minify` for a release, `--sourcemap=inline --watch`
+  for the dev watchers. Bun is MIX_BUN_PATH, else `bun` on PATH.
+  """
+  use Mix.Task
+
+  @bundles [
+    ~w(js/app.ts css/app.css --format=esm --external=/wasm/*),
+    ~w(js/early.ts --format=iife --minify),
+    ~w(js/auth/factor.ts --format=esm)
+  ]
+
+  @impl true
+  def run(args) do
+    bun =
+      System.get_env("MIX_BUN_PATH") || System.find_executable("bun") ||
+        Mix.raise("bun is not on PATH")
+
+    out = Path.expand("priv/static/assets")
+
+    @bundles
+    |> Enum.map(fn entries ->
+      Task.async(fn ->
+        System.cmd(
+          bun,
+          ["build" | entries] ++
+            ~w(--target=browser --entry-naming=[name].[ext] --outdir=#{out}) ++ args,
+          cd: "assets",
+          into: IO.stream(),
+          stderr_to_stdout: true
+        )
+      end)
+    end)
+    |> Task.await_many(:infinity)
+    |> Enum.each(fn {_, status} ->
+      status == 0 || Mix.raise("bun build failed (exit #{status})")
+    end)
+  end
+end

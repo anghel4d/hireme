@@ -3,14 +3,14 @@
 // text, and a snapshot round trip. Passes when nothing traps and each seed
 // stays under its time bound. tests/unicode.rs is the native twin.
 //
-//   node native/kernel/fuzz.mjs <kernel.wasm>
+//   bun native/kernel/fuzz.mjs <kernel.wasm>
 
 import { readFileSync } from "node:fs";
 import { bootFrame, enc, instance, op } from "./wasm.mjs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
-  console.error("usage: node fuzz.mjs <kernel.wasm>");
+  console.error("usage: bun fuzz.mjs <kernel.wasm>");
   process.exit(2);
 }
 const bytes = readFileSync(wasmPath);

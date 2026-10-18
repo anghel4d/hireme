@@ -12,13 +12,13 @@
 #   CHROMIUM     the browser; else the BRIEF's pinned nix Chromium 155
 #   OUT          screenshots and the node's log; else a fresh /tmp dir
 #   SHA          the revision to print, for a checkout without .git
-# Needs mix, cargo, node 24, npm, curl and setsid on PATH (BRIEF.md, 'Toolchain').
+# Needs mix, cargo, bun, curl and setsid on PATH (BRIEF.md, 'Toolchain').
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHROMIUM=${CHROMIUM:-/nix/store/ini1ifgvcsvw48x4mxawrv9jvbdwn70p-chromium-155.0.8059.79/bin/chromium}
 # Playwright is installed fresh each run into a directory only this run
-# made (npm's own cache makes it quick), with a package.json of its own and
+# made (bun's own cache makes it quick), with a package.json of its own and
 # no workspace or ancestor lookup: code is never run from a path someone
 # else could have prepared.
 E2E_NODE= OUT=${OUT:-} TMP= NODE_PID= ACC_PID= BG_PID=
@@ -33,7 +33,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM HUP INT
 
-for tool in mix cargo node npm curl setsid; do
+for tool in mix cargo bun curl setsid; do
   command -v "$tool" >/dev/null || { echo "FAIL setup: $tool is not on PATH (BRIEF.md, 'Toolchain')"; echo "res=1"; exit 1; }
 done
 E2E_NODE=$(mktemp -d /tmp/hireme-e2e-node.XXXXXX)
@@ -63,8 +63,7 @@ fi
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
 printf '{"private":true}\n' >"$E2E_NODE/package.json"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bg env -C "$E2E_NODE" npm --prefix "$E2E_NODE" --no-workspaces \
-  --ignore-scripts --no-audit --no-fund install --silent playwright@1.64.1
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bg bun add --cwd "$E2E_NODE" --ignore-scripts --silent playwright@1.64.1
 [ -f "$E2E_NODE/node_modules/playwright/index.mjs" ] || { echo "FAIL setup: playwright did not install into $E2E_NODE"; echo "res=1"; exit 1; }
 
 cd "$ROOT"
@@ -72,8 +71,8 @@ MIX_ENV=dev bg mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mi
 
 # The port is picked just before the node binds it, and the node is ours
 # only if it is alive and its log names that port.
-PORT=$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
-# Its own process group, so teardown takes esbuild's watchers too.
+PORT=$(bun -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+# Its own process group, so teardown takes Bun's watchers too.
 DATABASE_PATH="$TMP/e2e.db" PORT=$PORT PHX_SERVER=true HIREME_GATE=off MIX_ENV=dev \
   setsid mix phx.server >"$OUT/node.log" 2>&1 &
 NODE_PID=$!
@@ -92,7 +91,7 @@ done
 # hireme-mcp down with it.
 cp "$ROOT/test/e2e/acceptance4.mjs" "$E2E_NODE/acceptance4.mjs"
 set +e
-BASE=$BASE HIREME_MCP=$HIREME_MCP CHROMIUM=$CHROMIUM OUT=$OUT setsid node "$E2E_NODE/acceptance4.mjs" &
+BASE=$BASE HIREME_MCP=$HIREME_MCP CHROMIUM=$CHROMIUM OUT=$OUT setsid bun "$E2E_NODE/acceptance4.mjs" &
 ACC_PID=$!
 wait "$ACC_PID"
 res=$?

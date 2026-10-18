@@ -39,7 +39,6 @@ defmodule Hireme.MixProject do
       {:swoosh, "~> 1.29"},
       {:assent, "~> 0.3.1"},
       {:req, "~> 0.7.5"},
-      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:phoenix_live_reload, "~> 1.7", only: :dev},
       {:stream_data, "~> 1.4", only: :test},
       # The acceptance suite drives the node over a real /wire WebSocket.
@@ -82,16 +81,11 @@ defmodule Hireme.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "esbuild.install --if-missing", "assets.build"],
+      setup: ["deps.get", "assets.build"],
       # The kernel as WebAssembly for the browser; Nix builds it for a release.
       "assets.wasm": &wasm/1,
-      "assets.build": ["compile", "assets.wasm", "esbuild app", "esbuild early", "esbuild auth"],
-      "assets.deploy": [
-        "esbuild app --minify",
-        "esbuild early",
-        "esbuild auth --minify",
-        "phx.digest"
-      ],
+      "assets.build": ["compile", "assets.wasm", "hireme.bundle"],
+      "assets.deploy": ["hireme.bundle --minify", "phx.digest"],
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",

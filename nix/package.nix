@@ -5,13 +5,12 @@
   lib,
   beamPackages,
   rustPlatform,
-  esbuild,
+  bun,
   sqlite,
   lld,
-  removeReferencesTo,
   source,
   revision,
-  mixDepsHash ? "sha256-wh1q2KvQYDCdk/lsD8d6eV58J/0R8TDgct9dn1eRcdE=",
+  mixDepsHash ? "sha256-iKigeeNBGOVskAWvmpGiRIYOHyLKi5RXJ9pPnY3gR7o=",
 }:
 let
   version = "0.2.0-${builtins.substring 0 12 revision}";
@@ -118,6 +117,7 @@ let
       "config"
       "lib"
       "schema/hireme.schema"
+      "priv/schema.json"
       "priv/db"
       "assets"
     ];
@@ -136,7 +136,6 @@ let
     };
 
     buildInputs = [ sqlite ];
-    nativeBuildInputs = [ removeReferencesTo ];
 
     env = {
       # The SQLite NIF against Nix's library instead of a downloaded binary.
@@ -145,9 +144,9 @@ let
       EXQLITE_SYSTEM_LDFLAGS = "-L${sqlite.out}/lib -lsqlite3";
       # The kernel NIF is built above; Rustler loads it and compiles nothing.
       HIREME_NIF_PREBUILT = "1";
-      # The pinned esbuild, without the Mix task's network installer; read at
-      # build time only, so the release does not keep it in its closure.
-      MIX_ESBUILD_PATH = lib.getExe esbuild;
+      # The pinned Bun bundles the browser's scripts; read at build time
+      # only, so the release does not keep it in its closure.
+      MIX_BUN_PATH = lib.getExe bun;
       # One scheduler, so the parallel compiler creates atoms in one order:
       # small maps order atom keys by creation, the type pass iterates them,
       # and two builds once emitted different code for one module.
@@ -169,8 +168,6 @@ let
     # One profile carries the node and its gate, so a deploy flips both.
     postInstall = ''
       install -Dm755 ${native}/bin/hireme-gate $out/bin/hireme-gate
-      # sys.config keeps the build's esbuild path; the node never runs it.
-      remove-references-to -t ${esbuild} $out/releases/*/sys.config
     '';
 
     # RELEASE_COOKIE comes at runtime, outside the public store.

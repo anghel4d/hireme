@@ -1,6 +1,6 @@
 // The lens hooks' guard (assets/js/guard.ts): a failing hook's fallback stands in, its failure latches
 // per lens and hook, is told once in a clipped notice and logged once, and lifts when the hook works.
-// node --experimental-transform-types --test assets/test/guard.test.mjs
+// bun test assets/test/guard.test.mjs
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { guard, describe, CLIP } from "../js/guard.ts"

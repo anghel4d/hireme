@@ -8,30 +8,6 @@ config :hireme, HiremeWeb.Endpoint,
   render_errors: [formats: [html: HiremeWeb.ErrorHTML, json: HiremeWeb.ErrorJSON], layout: false],
   pubsub_server: Hireme.PubSub
 
-# The browser's three bundles and its stylesheet. `early` is inlined in
-# <head> and allowed by its hash in the CSP; `auth` is the factor page's
-# passkey script.
-config :esbuild,
-  version: "0.28.2",
-  # The Nix build points this at its own esbuild; elsewhere the Mix task
-  # installs this version.
-  path: System.get_env("MIX_ESBUILD_PATH"),
-  app: [
-    args:
-      ~w(js/app.ts css/app.css --bundle --format=esm --target=es2022 --outdir=../priv/static/assets --entry-names=[name] --external:/wasm/*),
-    cd: Path.expand("../assets", __DIR__)
-  ],
-  early: [
-    args:
-      ~w(js/early.ts --bundle --format=iife --minify --target=es2022 --outdir=../priv/static/assets),
-    cd: Path.expand("../assets", __DIR__)
-  ],
-  auth: [
-    args:
-      ~w(js/auth/factor.ts --bundle --format=esm --target=es2022 --outdir=../priv/static/assets),
-    cd: Path.expand("../assets", __DIR__)
-  ]
-
 # Set by the Nix build, which compiles the kernel NIF itself and puts it at
 # priv/native/nif.so; everywhere else Rustler builds native/nif.
 config :hireme, :nif_prebuilt, System.get_env("HIREME_NIF_PREBUILT") == "1"

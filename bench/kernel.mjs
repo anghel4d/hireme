@@ -2,7 +2,7 @@
 // bounds"): at 10k applications, a derive after a change in ≤ 8 ms and
 // the first derive after BOOT in ≤ 30 ms.
 //
-//   [DISTINCT=1] node bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
+//   [DISTINCT=1] bun bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
 //
 // Seeded synthetic desk: 10k applications over 2,500 companies, a tenth
 // of them hot, half with a stored score, listing URLs across a few ATS
@@ -15,7 +15,7 @@ import { W, bootFrame, enc, instance } from "../native/kernel/wasm.mjs";
 
 const wasmPath = process.argv[2];
 if (!wasmPath) {
-  console.error("usage: node bench/kernel.mjs <kernel.wasm> [applications]");
+  console.error("usage: bun bench/kernel.mjs <kernel.wasm> [applications]");
   process.exit(2);
 }
 const N = Number(process.argv[3] ?? 10000);

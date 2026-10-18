@@ -556,7 +556,7 @@ assets/
   `hireme-gate`), `hireme-mcp`, `kernel-wasm`; `nixosModules.hireme`
   (proxy and its query-free log format, vault, gate forwarding, deploy
   script);
-  `checks.dev` (the VM) and `checks.unit` (mix test, cargo test, tsc).
+  `checks.dev` (the VM) and `checks.unit` (mix test, cargo test, bun check).
 - Baseline: `Hireme.Release` applies `priv/db/baseline.sql` to an empty
   database and records every additive file present as contained; an
   existing database runs only the files it has not recorded, in order,
@@ -646,7 +646,7 @@ of the tree.
    `Hireme.Letterbox`, `job_apps`, `kv_pairs`, `geography_*`, an oracle or
    parity module or file); Erlang's `:gen_tcp` `packet` options and the
    company Oracle in employer data are not v1 names.
-2. `mix test`, `cargo test --workspace`, the wasm vectors, `tsc`, and
+2. `mix test`, `cargo test --workspace`, the wasm vectors, `bun check`, and
    `nix flake check` (dev VM included) pass.
 3. A fresh account signs in by email link, enrolls a passkey, mints a
    read-only and a write-only key; the read-only key's put is `scope`; the

@@ -27,11 +27,7 @@ config :hireme, HiremeWeb.Endpoint,
   code_reloader: true,
   debug_errors: true,
   secret_key_base: secret_key_base,
-  watchers: [
-    app: {Esbuild, :install_and_run, [:app, ~w(--sourcemap=inline --watch)]},
-    early: {Esbuild, :install_and_run, [:early, ~w(--watch)]},
-    auth: {Esbuild, :install_and_run, [:auth, ~w(--sourcemap=inline --watch)]}
-  ],
+  watchers: [bun: {Mix.Tasks.Hireme.Bundle, :run, [~w(--sourcemap=inline --watch)]}],
   live_reload: [
     web_console_logger: true,
     patterns: [~r"priv/static/.*\.(js|css|wasm)$", ~r"lib/hireme_web/.*\.ex$"]

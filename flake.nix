@@ -16,14 +16,14 @@
       };
       lib = pkgs.lib;
 
-      # The latest esbuild; the pin ships 0.27.2 and no 0.28 attribute.
-      esbuild = pkgs.esbuild.overrideAttrs (o: {
-        version = "0.28.2";
+      # The latest Bun; the pin ships 1.4.2. It bundles, type checks and runs
+      # every script the repository has.
+      bun = pkgs.bun.overrideAttrs (o: {
+        version = "1.4.3";
         src = pkgs.fetchurl {
-          url = "https://github.com/evanw/esbuild/archive/v0.28.2.tar.gz";
-          hash = "sha256-MAFi+Jk2HZ8CYwZfhyjvkIbc/Bo9Nry8Tgq+XenFi/g=";
+          url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64-baseline.zip";
+          hash = "sha256-H8LtrIQxApCeOhvh2NmALMYHHPB05n6IIx9P/g+LOXs=";
         };
-        vendorHash = "sha256-+BfxCyg0KkDQpHt/wycy/8CTG6YBA/VJvJFhhzUnSiQ=";
       });
 
       # qemu for the dev VM, waiting for each vhost-user socket it is given.
@@ -54,7 +54,7 @@
       beamPackages = pkgs.beam.packages.erlang_28.overrideScope (_: prev: { elixir = prev.elixir_1_20; });
 
       hireme = pkgs.callPackage ./nix/package.nix {
-        inherit esbuild beamPackages;
+        inherit bun beamPackages;
         source = ./.;
         revision = self.rev or self.dirtyRev or "dirty";
       };
@@ -74,7 +74,7 @@
       checks.${system} = {
         # Every suite the repository has, offline in the sandbox: mix test
         # (its own database per run), cargo test over the workspace, the
-        # kernel's vectors under wasm, and tsc.
+        # kernel's vectors under wasm, and bun check.
         unit = pkgs.stdenv.mkDerivation {
           name = "hireme-unit";
           src = ./.;
@@ -91,7 +91,7 @@
               ];
             };
             mixEnv = "test";
-            hash = "sha256-h2/YtCpmbUZmxaBnDiG2l1ZSeONx4hXEwtjhV4SWYX4=";
+            hash = "sha256-WKR6Jzq4NQXG01OHWPllbZ5kpAsIrjTAlXx/g56Qmyw=";
           };
           nativeBuildInputs = [
             beamPackages.elixir
@@ -103,10 +103,8 @@
             pkgs.cargo
             pkgs.rustc
             pkgs.lld
-            pkgs.nodejs
             pkgs.sqlite
-            pkgs.typescript
-            esbuild
+            bun
           ];
           env = {
             MIX_ENV = "test";
@@ -124,10 +122,10 @@
             cp -r --no-preserve=mode $mixDeps deps
             (cd native && cargo test --offline --workspace --release)
             (cd native && cargo rustc --offline -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib)
-            node native/kernel/vectors.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
-            node native/kernel/fuzz.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
+            bun native/kernel/vectors.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
+            bun native/kernel/fuzz.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
             mix test
-            tsc -p assets/tsconfig.json --noEmit
+            bun check -p assets
           '';
           installPhase = "touch $out";
         };
@@ -243,12 +241,10 @@
           pkgs.cargo
           pkgs.rustc
           pkgs.clippy
-          pkgs.nodejs
           pkgs.sqlite
-          pkgs.typescript
           # Phoenix's live reload watches files through it.
           pkgs.inotify-tools
-          esbuild
+          bun
         ];
       };
 

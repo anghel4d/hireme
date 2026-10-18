@@ -2,7 +2,7 @@
 // and fit to show, each read by its kind's own label, escaped; never a hash or an internal id.
 // Fixtures are rows as the server writes them: a key's lifecycle row has key_id null at row level and
 // the key in its meta.
-// node --experimental-transform-types --test assets/test/trail.test.mjs
+// bun test assets/test/trail.test.mjs
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { detail } from "../js/lenses/trail.ts"

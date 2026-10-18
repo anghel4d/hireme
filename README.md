@@ -61,13 +61,14 @@ second-factor page are plain HTTP forms.
 ## Running it
 
 Every tool comes from the flake's pinned nixpkgs: Elixir 1.20 on OTP 28,
-Rust with the `wasm32-unknown-unknown` target, Node, SQLite, esbuild and
-TypeScript. `nix develop` opens a shell with exactly those; run everything
+Rust with the `wasm32-unknown-unknown` target, SQLite and Bun, which
+bundles, type checks and runs the scripts. `nix develop` opens a shell
+with exactly those; run everything
 below inside it (an `elixir` or `mix` from elsewhere is not these versions).
 
 ```bash
 nix develop
-mix setup          # deps, esbuild, kernel.wasm, the bundles
+mix setup          # deps, kernel.wasm, the bundles
 DATABASE_PATH=/tmp/hireme-dev/hireme.db mix phx.server   # http://localhost:4000
 ```
 
@@ -171,9 +172,9 @@ data, never instructions.
 ```bash
 mix test                                  # every contract suite; a database per run
 cargo test --manifest-path native/Cargo.toml --workspace
-node native/kernel/vectors.mjs priv/static/wasm/kernel.wasm   # the kernel's vectors under wasm
-tsc -p assets                             # the client, strict
-node --experimental-transform-types --test assets/test/*.test.mjs   # the client's pure modules (mix test runs these too)
+bun native/kernel/vectors.mjs priv/static/wasm/kernel.wasm   # the kernel's vectors under wasm
+bun check -p assets                       # the client, strict
+bun test ./assets/test/                   # the client's pure modules (mix test runs these too)
 nix flake check                           # all of it, plus the dev VM
 ```
 

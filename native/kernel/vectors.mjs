@@ -1,7 +1,7 @@
 // Runs tests/vectors.json against kernel.wasm, through the exports the
 // browser calls; tests/vectors.rs runs the same file natively.
 //
-//   node native/kernel/vectors.mjs path/to/kernel.wasm
+//   bun native/kernel/vectors.mjs path/to/kernel.wasm
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -11,7 +11,7 @@ import { W, asU32, bootFrame, enc, instance, op } from "./wasm.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath = process.argv[2];
 if (!wasmPath) {
-  console.error("usage: node vectors.mjs <kernel.wasm>");
+  console.error("usage: bun vectors.mjs <kernel.wasm>");
   process.exit(2);
 }
 const file = JSON.parse(readFileSync(join(here, "tests/vectors.json"), "utf8"));
