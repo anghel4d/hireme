@@ -25,8 +25,13 @@ export const HEADER = 16
 
 export const VERB = { put: 1, drop: 2, command: 3 } as const
 export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as const
-/** Cell wire types. A bool rides as u32 0/1, a day as u32 days since 1970-01-01, a time as u64 unix seconds. */
-export const CELL = { null: 0, u32: 1, str: 2, u64: 3, f64: 4 } as const
+/**
+ * Cell wire types, the schema's WIRE_TYPE plus null (0, length 0, clears).
+ * id, ref, bool, u8, enum codes, days (since 1970-01-01) and times (unix
+ * seconds) all ride as u32; str, text and json as utf8. Deferred (5) only
+ * comes down, as `u32 len | 8 bytes of SHA-256`.
+ */
+export const CELL = { null: 0, u32: 1, str: 2, i64: 3, f64: 4, deferred: 5 } as const
 export const CRED = { ticket: 1, key: 2 } as const
 export const BYE_REASON = ["", "revoked", "grants", "restart", "schema", "suspended"] as const
 
@@ -77,6 +82,7 @@ class Writer {
   u16(x: number): this { this.room(2); this.view.setUint16(this.at, x, true); this.at += 2; return this }
   u32(x: number): this { this.room(4); this.view.setUint32(this.at, x, true); this.at += 4; return this }
   u64(x: bigint): this { this.room(8); this.view.setBigUint64(this.at, x, true); this.at += 8; return this }
+  i64(x: bigint): this { this.room(8); this.view.setBigInt64(this.at, x, true); this.at += 8; return this }
 
   bytes(b: Uint8Array): this {
     this.room(b.byteLength)
@@ -285,8 +291,8 @@ export function encodeOp(op: Op): Bytes {
       case CELL.u32:
         w.u32(4).u32(typeof v === "boolean" ? (v ? 1 : 0) : Number(v))
         break
-      case CELL.u64:
-        w.u32(8).u64(BigInt(v as number | bigint))
+      case CELL.i64:
+        w.u32(8).i64(BigInt(v as number | bigint))
         break
       case CELL.f64: {
         const b = new Uint8Array(8)
