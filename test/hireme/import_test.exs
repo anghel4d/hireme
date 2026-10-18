@@ -498,7 +498,8 @@ defmodule Hireme.ImportTest do
       Jason.encode!(%{
         "tables" => [
           %{"table" => "corporations", "rows" => [%{"domain" => "s.example", sly => 1}]},
-          %{"table" => sly, "rows" => [%{"name" => "S"}]}
+          %{"table" => sly, "rows" => [%{"name" => "S"}]},
+          %{"table" => "a\u202Eb", "rows" => [%{"name" => "S"}]}
         ]
       })
 
@@ -508,7 +509,7 @@ defmodule Hireme.ImportTest do
     for r <- sly_report.refusals,
         name <- [r.table, r.data[:table], r.data[:column]],
         is_binary(name),
-        do: refute(name =~ ~r/[\e\r]/)
+        do: refute(name =~ ~r/[\e\r\x{202E}]/u)
 
     bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
     assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)
