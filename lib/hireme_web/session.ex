@@ -44,6 +44,16 @@ defmodule HiremeWeb.Session do
   @doc "A new session for a peer: `%{peer_ip, origin, carrier}`."
   def open(peer) when is_map(peer) do
     Process.send_after(self(), {__MODULE__, :hello_deadline}, @hello_ms)
+
+    # One address holds at most this many wire sessions, authenticated or
+    # not; the one past it is told to retry (it is never refused at open).
+    counted = Security.peer(to_string(peer[:peer_ip] || ""))
+    {:ok, _} = Registry.register(HiremeWeb.Session.Peers, counted, nil)
+
+    if Registry.count_match(HiremeWeb.Session.Peers, counted, :_) >
+         Security.wire_sessions_per_peer(),
+       do: send(self(), {__MODULE__, :too_many})
+
     Phoenix.PubSub.subscribe(Hireme.PubSub, "wire:drain")
 
     {:ok,
@@ -101,6 +111,9 @@ defmodule HiremeWeb.Session do
 
   def info({Hireme.Audit, :changed}, %{parked: id} = state) when id != nil,
     do: {:push, [reply(id, true, %{changed: true}, state)], %{state | parked: nil}}
+
+  def info({__MODULE__, :too_many}, state),
+    do: bye(:restart, "too many sessions from this address; retry later", state)
 
   def info({__MODULE__, :hello_deadline}, %{phase: :hello} = state),
     do: {:stop, :hello_deadline, [], state}
@@ -275,7 +288,11 @@ defmodule HiremeWeb.Session do
       # A failed key is audited with its peer; how many is bounded by the
       # api_key_peer limit, past which the answer is rate_limited, not audited.
       :error ->
-        Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{ip: ip})
+        # Past the global refusal budget a refused key is still refused,
+        # only no longer recorded.
+        if Security.limit(:refusal_global, :all) == :ok,
+          do: Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{ip: ip})
+
         :error
 
       refused ->

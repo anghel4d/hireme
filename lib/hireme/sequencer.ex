@@ -1923,6 +1923,8 @@ defmodule Hireme.Sequencer do
 
       Hireme.Audit.record(kind, %{lease_id: sid, label: s.label, count: held}, %{
         account_id: account_id,
+        ip: s[:ip],
+        user_agent: s[:user_agent],
         key_id: s.key_id
       })
     end
@@ -1972,6 +1974,8 @@ defmodule Hireme.Sequencer.Supervisor do
     Supervisor.init(
       [
         {Registry, keys: :unique, name: Hireme.Sequencer.Registry},
+        # Every open wire session under its peer, for the per-peer cap.
+        {Registry, keys: :duplicate, name: HiremeWeb.Session.Peers},
         {DynamicSupervisor, name: Hireme.Sequencer.Dynamic, strategy: :one_for_one}
       ],
       strategy: :rest_for_one

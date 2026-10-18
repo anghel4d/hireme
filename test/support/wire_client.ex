@@ -78,8 +78,16 @@ defmodule Hireme.WireClient do
   @impl GenServer
   def handle_call({:send, frame}, _from, s) do
     {:ok, ws, data} = Mint.WebSocket.encode(s.ws, {:binary, frame})
-    {:ok, conn} = Mint.WebSocket.stream_request_body(s.conn, s.ref, data)
-    {:reply, :ok, %{s | ws: ws, conn: conn}}
+
+    case Mint.WebSocket.stream_request_body(s.conn, s.ref, data) do
+      {:ok, conn} ->
+        {:reply, :ok, %{s | ws: ws, conn: conn}}
+
+      # The node already closed this carrier: that is the answer.
+      {:error, conn, _reason} ->
+        send(s.owner, {:wire, self(), %{kind: :CLOSE, flags: 0, rev: 0, body: ""}})
+        {:reply, {:error, :closed}, %{s | ws: ws, conn: conn}}
+    end
   end
 
   @impl GenServer

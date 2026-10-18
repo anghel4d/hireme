@@ -473,6 +473,15 @@ defmodule HiremeWeb.AgentAttackTest do
       assert_receive {:wire, ^c, %{kind: :CLOSE}}, 3_000
     end
 
+    test "one address holds a bounded number of wire sessions, even before HELLO", %{port: port} do
+      limit = Hireme.Security.wire_sessions_per_peer()
+      clients = for _ <- 1..limit, do: WireClient.connect(port)
+      extra = WireClient.connect(port)
+      {bye, _} = WireClient.await(extra, :BYE)
+      assert <<2, _::binary>> = bye.body
+      _ = clients
+    end
+
     test "one key's sessions are bounded", %{port: port, session: s} do
       {_, secret} = key(s, 31, 0)
 
@@ -483,7 +492,7 @@ defmodule HiremeWeb.AgentAttackTest do
 
           receive do
             {:wire, ^c, %{kind: :WELCOME}} -> 1
-            {:wire, ^c, %{kind: :BYE}} -> 0
+            {:wire, ^c, %{kind: k}} when k in [:BYE, :CLOSE] -> 0
           after
             3_000 -> flunk("no answer to HELLO #{i}")
           end

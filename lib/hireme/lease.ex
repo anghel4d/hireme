@@ -93,6 +93,8 @@ defmodule Hireme.Lease do
       label: label,
       key_id: key_id,
       session_id: info[:session_id],
+      ip: info[:ip],
+      user_agent: info[:user_agent],
       channel: operator,
       since: if(operator, do: now),
       held: MapSet.new()
