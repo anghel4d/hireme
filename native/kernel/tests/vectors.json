@@ -937,6 +937,87 @@
           }
         }
       ]
+    },
+    {
+      "name": "pay reads through any space, NBSP and U+202F, and thousands grouped by spaces or apostrophes: big tech anchors at 85 only on high pay",
+      "today": 20000,
+      "rows": {
+        "applications": [
+          {
+            "id": 1,
+            "no": 1,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "CHF 250’000"
+          },
+          {
+            "id": 2,
+            "no": 2,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "250 000 €"
+          },
+          {
+            "id": 3,
+            "no": 3,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "$\t1.2M"
+          },
+          {
+            "id": 4,
+            "no": 4,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "CHF 150’000"
+          },
+          {
+            "id": 5,
+            "no": 5,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "401\n(k) match"
+          },
+          {
+            "id": 6,
+            "no": 6,
+            "stage": "gated",
+            "company": "Google",
+            "role": "Engineer",
+            "comp_raw": "150 000 €"
+          }
+        ]
+      },
+      "steps": [
+        {
+          "view": {
+            "min_score": 85
+          },
+          "ids": [
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "view": {
+            "min_score": 80
+          },
+          "ids": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ]
+        }
+      ]
     }
   ]
 }

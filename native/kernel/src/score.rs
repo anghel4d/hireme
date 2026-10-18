@@ -212,11 +212,31 @@ fn onsite_away(seat: &Seat, loc: &str) -> bool {
     seat.home == Some(false) && !remote_text && (seat.onsite || says_onsite_only)
 }
 
+/// Space between a figure and what qualifies it: any Unicode whitespace
+/// (tab, newline, NBSP, U+202F) and the invisible format characters
+/// copy-paste leaves behind.
+fn blank(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}')
+}
+
+/// A sign glued to a figure that makes the figure the amount itself.
+fn sign(c: char) -> bool {
+    matches!(c, '$' | '€' | '£' | '¥' | '₹' | '₩' | '₽' | '₺' | '₪' | '₫' | '₱' | '฿' | '¢' | '°')
+}
+
+/// What separates thousands besides a comma: "250 000", "250\u{202f}000",
+/// "250’000" (Swiss), "250'000".
+fn grouping(c: char) -> bool {
+    matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\u{2009}' | '\'' | '’')
+}
+
 /// A pay figure over $200k anywhere in free text: "$210,000", "250k",
-/// "180-240k", "220000", "$1.2M". Bare numbers from 200 to 999 read as
-/// thousands ("$220 base").
+/// "180-240k", "220000", "$1.2M", "250 000 €", "CHF 250’000". Bare numbers
+/// from 200 to 999 read as thousands ("$220 base").
 pub fn high_comp(comp: &str) -> bool {
     let b = comp.as_bytes();
+    let at = |j: usize| comp[j..].chars().next();
+    let before = |j: usize| comp[..j].chars().next_back();
     let mut i = 0;
     let mut best = 0f64;
     while i < b.len() {
@@ -229,34 +249,49 @@ pub fn high_comp(comp: &str) -> bool {
         let mut frac = 0f64;
         let mut scale = 0.1;
         let mut in_frac = false;
-        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b',' || (b[i] == b'.' && !in_frac)) {
-            match b[i] {
-                b',' => {}
-                b'.' => in_frac = true,
-                d if in_frac => {
+        loop {
+            match b.get(i) {
+                Some(b',') => {}
+                Some(b'.') if !in_frac => in_frac = true,
+                Some(&d) if d.is_ascii_digit() && in_frac => {
                     frac += (d - b'0') as f64 * scale;
                     scale /= 10.0;
                 }
-                d => n = n * 10.0 + (d - b'0') as f64,
+                Some(&d) if d.is_ascii_digit() => n = n * 10.0 + (d - b'0') as f64,
+                // A separator inside the integer part, between a digit and a
+                // group of exactly three digits.
+                Some(_) if !in_frac && b[i - 1].is_ascii_digit() => match at(i) {
+                    Some(c) if grouping(c) => {
+                        let g = i + c.len_utf8();
+                        let three = g + 3 <= b.len() && b[g..g + 3].iter().all(u8::is_ascii_digit);
+                        if !three || b.get(g + 3).is_some_and(u8::is_ascii_digit) {
+                            break;
+                        }
+                        i = g;
+                        continue;
+                    }
+                    _ => break,
+                },
+                _ => break,
             }
             i += 1;
         }
         let v = n + frac;
         // A suffix letter counts only when it ends the token: "250k", not
         // "300km"; "401k" is a retirement plan. Every look around the
-        // number is a few bytes, byte-wise: no copy, no slicing.
+        // number is a few characters: no copy.
         let ends = |j: usize| j >= b.len() || !b[j].is_ascii_alphanumeric();
         let suffix = if i < b.len() && b[i].is_ascii_alphabetic() && ends(i + 1) { b[i].to_ascii_lowercase() } else { 0 };
         let after_letter = start > 0 && b[start - 1].is_ascii_alphabetic();
         let skip_spaces = |mut j: usize| {
-            while j < b.len() && b[j] == b' ' {
-                j += 1;
+            while let Some(c) = at(j).filter(|c| blank(*c)) {
+                j += c.len_utf8();
             }
             j
         };
         let back_spaces = |mut j: usize| {
-            while j > 0 && b[j - 1] == b' ' {
-                j -= 1;
+            while let Some(c) = before(j).filter(|c| blank(*c)) {
+                j -= c.len_utf8();
             }
             j
         };
@@ -270,10 +305,11 @@ pub fn high_comp(comp: &str) -> bool {
         // Millions are pay only as money ("$1.2M", "USD 1.2M", "1.2M USD"),
         // not "5M users".
         const CODES: [&[u8]; 6] = [b"usd", b"eur", b"gbp", b"cad", b"chf", b"aud"];
+        let money_sign = |c: char| sign(c) && c != '°';
         let k = back_spaces(start);
-        let sign_before = k > 0 && b[k - 1] == b'$' || b[..k].ends_with("€".as_bytes()) || b[..k].ends_with("£".as_bytes());
+        let sign_before = before(k).is_some_and(money_sign);
         let after = skip_spaces(if suffix != 0 { i + 1 } else { i });
-        let sign_after = [b"$".as_slice(), "€".as_bytes(), "£".as_bytes()].iter().any(|c| b[after..].starts_with(c));
+        let sign_after = at(after).is_some_and(money_sign);
         let money = sign_before || sign_after || CODES.iter().any(|c| word_before(k, c)) || CODES.iter().any(|c| word_at(after, c));
         // Retirement plans: 401(k), 403(b), 457(b), in any spacing.
         let paren = |letter: u8| {
@@ -289,6 +325,7 @@ pub fn high_comp(comp: &str) -> bool {
             j < b.len() && b[j] == b')'
         };
         let plan = (v == 401.0 && (suffix == b'k' || paren(b'k'))) || ((v == 403.0 || v == 457.0) && paren(b'b'));
+        let glued = at(i);
         let value = match suffix {
             _ if plan => 0.0,
             b'k' => v * 1e3,
@@ -296,7 +333,9 @@ pub fn high_comp(comp: &str) -> bool {
             b'm' => 0.0,
             _ if i < b.len() && b[i].is_ascii_alphabetic() => 0.0,
             // A sign or unit glued on ("250¥", "30°") is the amount itself.
-            _ if i < b.len() && !b[i].is_ascii() && !b[skip_spaces(i)..].starts_with("\u{a0}".as_bytes()) => v,
+            _ if glued.is_some_and(sign) => v,
+            // Any other glued character but space is a word ("250é").
+            _ if glued.is_some_and(|c| !c.is_ascii() && !blank(c)) => 0.0,
             _ if (200.0..1_000.0).contains(&v) => v * 1e3,
             _ => v,
         };
@@ -408,7 +447,7 @@ mod tests {
 
     #[test]
     fn pay_reading_never_panics_and_stays_linear() {
-        let pieces = ["1", "25", "0", "k", "K", "m", "M", "$", "€", "£", "¥", "°", "\u{a0}", " ", "(", ")", "b", "usd", ".", ",", "é", "ü", "🙂", "401", "\u{308}"];
+        let pieces = ["1", "25", "0", "000", "k", "K", "m", "M", "$", "€", "£", "¥", "°", "\u{a0}", "\u{202f}", "\t", "\n", "’", "'", " ", "(", ")", "b", "usd", ".", ",", "é", "ü", "🙂", "401", "\u{308}", "\u{200b}"];
         let mut r = 0x2545_F491_4F6C_DD1Du64;
         for _ in 0..20_000 {
             let mut t = alloc::string::String::new();
@@ -428,10 +467,10 @@ mod tests {
 
     #[test]
     fn pay_signals() {
-        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k"] {
+        for yes in ["$210,000", "250k", "180-240K", "220000", "$220 base", "US$205.5k", "$1.2M", "USD 1.2M", "1.2M USD", "€250k", "250k€", "1.2M€", "250\u{a0}k", "$\t1.2M", "USD\u{202f}1.2M", "1.2M\u{a0}€", "€\u{200b}250k", "250\u{202f}000 €", "250 000 €", "CHF 250’000", "CHF 250'000"] {
             assert!(high_comp(yes), "{yes}");
         }
-        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut"] {
+        for no in ["", "competitive", "$150,000", "199k", "120-180k", "2026", "401k match", "300km commute", "L6", "$150,000 + 401(k)", "100m radius", "5M users", "10M+ users", "401 (k)", "403(b)", "457(b) match", "1.2Mü", "2Mé", "457 ( b )", "fraud 5M", "applaud 5M users", "entrepreneur 5M", "50€/h", "45.000€", "250¥", "30°", "3000€ brut", "401\n(k)", "403\t(b)", "457\u{a0}(b)", "150\u{202f}000 €", "CHF 150’000", "5\u{a0}M users", "2 300 km", "250é"] {
             assert!(!high_comp(no), "{no}");
         }
     }
