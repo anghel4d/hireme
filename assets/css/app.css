@@ -359,6 +359,8 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .rail .now button { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); opacity: 1; }
 .rail .lock { font-size: 10px; }
 .focus-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap); align-items: start; }
+/* Each focus card lays out on its own: a new application rewrites text card by card, not the page. */
+.focus .card { contain: layout style; }
 .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; }
 .facts > p { flex-basis: 100%; }
 .heat-hot { color: var(--hot); }
