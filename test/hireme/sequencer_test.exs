@@ -234,13 +234,14 @@ defmodule Hireme.SequencerTest do
     name = Schema.column(:acct_keys, "name").id
     assert "views" in for({_, r} <- op["acct_keys"], do: r[name])
 
-    assert Enum.all?(boot.(992, Grants.key(key)), fn {t, rows} ->
-             not String.starts_with?(t, "acct_") or rows == %{}
-           end)
-
     {:ok, _} = Hireme.Keys.mint(s, "later", Hireme.Keys.preset(:read_only))
     assert_receive {:sequencer, :patch, _, body}, 2_000
     assert "later" in for({_, r} <- ingest(%{}, :PATCH, body)["acct_keys"], do: r[name])
+
+    # Last: a pid holds one subscription, and this one becomes the key's.
+    assert Enum.all?(boot.(992, Grants.key(key)), fn {t, rows} ->
+             not String.starts_with?(t, "acct_") or rows == %{}
+           end)
   end
 
   test "settings is one row: a put without a target finds it", %{account: a} do
