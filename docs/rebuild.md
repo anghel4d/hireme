@@ -158,7 +158,10 @@ both parsers refuse anything else. In outline: `domain`, `frame`,
 `projection` with `pick`, `natural`/`unique`/`index` (optionally `where`),
 a mandatory `cap` on every stored table, `col`, `metric` (implies
 `<name>_on day`), `prose` (implies citation and CAS), and `command`. `id`
-and `account_id` are implied, never declared. Types include `ref <table>`;
+and `account_id` are implied, never declared. A `day` is days since
+0000-01-01 in the proleptic Gregorian calendar (0 to 3652424, which is
+9999-12-31), so an office opened in 1897 is a plain day; a `time` is unix
+seconds. Types include `ref <table>`;
 flags include `!`, `?`, `= default`, `deferred` (implies a readonly,
 server-only `<name>_sha` twin holding the text's hex SHA-256, a trailing
 `_raw` dropped, so `listing_raw`'s twin is `listing_sha`), `private`,
