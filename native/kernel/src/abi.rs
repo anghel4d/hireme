@@ -51,6 +51,8 @@ pub struct Kernel {
     stale: bool,
     /// The session's grants, from its WELCOME: what `query` may read.
     grants: query::Grants,
+    /// The order indexes `query`'s finds walk, mended as rows move.
+    indexes: core::cell::RefCell<query::Indexes>,
 }
 
 impl Kernel {
@@ -69,7 +71,7 @@ impl Kernel {
 
     /// A read of the replica: find, get, text or history (`query`).
     pub fn query(&self, req: &Json) -> Result<Json, Refusal> {
-        query::query(&self.rows, &self.grants, req)
+        query::query(&self.rows, &self.grants, &mut self.indexes.borrow_mut(), req)
     }
 
     pub fn set_today(&mut self, today: Day) {
@@ -97,6 +99,7 @@ impl Kernel {
     }
 
     fn moved(&mut self, m: &Moved, day_before: Day) {
+        self.indexes.get_mut().moved(m, &self.rows);
         // A TICK that leaves the day as it was moves nothing derived.
         let only_clock = m.tables.keys().chain(&m.replaced).all(|t| *t == table::CLOCK);
         if m.is_empty() || (only_clock && self.today() == day_before) {
@@ -119,6 +122,7 @@ impl Kernel {
             }
             Err(_) => {
                 self.board = Board::new();
+                self.indexes.get_mut().clear();
                 self.stale = true;
                 Err(Error::Body)
             }
@@ -247,9 +251,9 @@ impl Kernel {
         if srev != schema::SCHEMA_REV || hash != schema::WIRE_HASH {
             return Err(Error::Snapshot);
         }
-        let (today, pinned) = (self.today, self.pinned);
+        let (today, pinned, grants) = (self.today, self.pinned, self.grants);
         *self = Kernel::new();
-        (self.today, self.pinned) = (today, pinned);
+        (self.today, self.pinned, self.grants) = (today, pinned, grants);
         self.boot(&snap[16..], rev).map_err(|_| Error::Snapshot)?;
         Ok(rev)
     }

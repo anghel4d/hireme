@@ -98,6 +98,51 @@ fn a_page_walk_returns_every_matching_row_in_order() {
     }
 }
 
+/// The order index a find builds is mended as rows move: after a PATCH
+/// rewrites, removes and adds rows, a walk still returns each row once, in
+/// order.
+#[test]
+fn a_find_after_a_patch_sees_the_rows_as_they_are() {
+    let mut k = kernel();
+    let walk = |k: &Kernel| -> Vec<(Option<u64>, u32)> {
+        let (mut got, mut after) = (Vec::new(), Json::Null);
+        loop {
+            let page = q(k, json!({"op": "find", "table": "places", "order": "population", "desc": true, "limit": 13, "after": after, "cols": ["population"]}));
+            got.extend(page["rows"].as_array().unwrap().iter().map(|r| (r["population"].as_u64(), r["id"].as_u64().unwrap() as u32)));
+            after = page["next"].clone();
+            if after.is_null() {
+                return got;
+            }
+        }
+    };
+    let _ = walk(&k);
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::PLACES, 4);
+    b.u32s(P::ID, [5, 6, 301, 302].into_iter())
+        .u32s(P::KIND, [enums::place_kind::CITY as u32; 4].into_iter())
+        .strs(P::NAME, ["A", "B", "C", "D"].into_iter())
+        .u32s(P::POPULATION, [999_999, wire::NONE, 1, 500].into_iter());
+    b.done();
+    w.gone(table::PLACES, &[8, 9]);
+    k.patch(&w.finish(), 2).unwrap();
+    let got = walk(&k);
+    let pop = |i: u32| match i {
+        5 => Some(999_999),
+        6 => None,
+        301 => Some(1),
+        302 => Some(500),
+        _ => (!i.is_multiple_of(7)).then_some(((i * 7919) % 1000) as u64),
+    };
+    let mut want: Vec<(Option<u64>, u32)> = (1..=N).chain([301, 302]).filter(|i| ![8, 9].contains(i)).map(|i| (pop(i), i)).collect();
+    want.sort_by(|a, b| match (a.0, b.0) {
+        (Some(x), Some(y)) => y.cmp(&x).then(b.1.cmp(&a.1)),
+        (Some(_), None) => core::cmp::Ordering::Less,
+        (None, Some(_)) => core::cmp::Ordering::Greater,
+        (None, None) => b.1.cmp(&a.1),
+    });
+    assert_eq!(got, want);
+}
+
 #[test]
 fn get_by_key_text_history_and_grants_read_as_world() {
     let mut k = kernel();

@@ -23,7 +23,7 @@ use schema::{flag, refusal, ColDef as Column, Cond, KeyDef, Residency, TableDef 
 use serde_json::{json, Map, Value as Json};
 
 use crate::judge::Refusal;
-use crate::rows::{Data, Rows, Table, Val};
+use crate::rows::{Data, Moved, Rows, Table, Val};
 
 const FIND_LIMIT: u64 = 50;
 const FIND_MAX: u64 = 500;
@@ -74,11 +74,83 @@ fn refuse(code: u16, data: Json) -> Answer {
     Err(Refusal { code, data })
 }
 
+/// Ids of one table in one column's order: the non-null by value then id,
+/// then the nulls by id. Built on a find's first use, kept as rows move.
+#[derive(Default)]
+pub struct Indexes {
+    by: alloc::collections::BTreeMap<(u16, u16), (Vec<u32>, usize)>,
+}
+
+/// Past this many rows moved in one table its indexes are rebuilt, not mended.
+const MEND_MAX: usize = 256;
+
+impl Indexes {
+    /// Mends or drops what the move touched.
+    pub fn moved(&mut self, m: &Moved, rows: &Rows) {
+        let stale: Vec<(u16, u16)> = self.by.keys().copied().filter(|(t, _)| m.touched(*t)).collect();
+        for key in stale {
+            let (tid, col) = key;
+            let moved = m.tables.get(&tid);
+            let mendable = !m.replaced.contains(&tid) && moved.is_some_and(|(w, g)| w.len() + g.len() <= MEND_MAX);
+            let (Some(t), Some(c), true) = (rows.table(tid), schema::table_def(tid).and_then(|d| d.col(col)), mendable) else {
+                self.by.remove(&key);
+                continue;
+            };
+            let Some((wrote, gone)) = moved else { continue };
+            let Some((ids, nn)) = self.by.get_mut(&key) else { continue };
+            for id in wrote.iter().chain(gone) {
+                if let Some(i) = ids.iter().position(|x| x == id) {
+                    ids.remove(i);
+                    if i < *nn {
+                        *nn -= 1;
+                    }
+                }
+            }
+            let cells = Cells::new(t, c);
+            for &id in wrote {
+                let Some(slot) = t.slot(id) else { continue };
+                let k = cells.key(slot);
+                if k.is_null() {
+                    let at = *nn + ids[*nn..].partition_point(|x| *x < id);
+                    ids.insert(at, id);
+                } else {
+                    let at = ids[..*nn].partition_point(|x| t.slot(*x).is_some_and(|s| cells.key(s).cmp(&k).then(x.cmp(&id)) == Ordering::Less));
+                    ids.insert(at, id);
+                    *nn += 1;
+                }
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.by.clear();
+    }
+
+    fn get(&mut self, t: &Table, c: &'static Column) -> &(Vec<u32>, usize) {
+        self.by.entry((t.id, c.id)).or_insert_with(|| {
+            let cells = Cells::new(t, c);
+            let (mut keyed, mut nulls): (Vec<(Key2, u32)>, Vec<u32>) = (Vec::new(), Vec::new());
+            for (s, &id) in t.ids().iter().enumerate() {
+                match cells.key(s) {
+                    Key2::Null => nulls.push(id),
+                    k => keyed.push((k, id)),
+                }
+            }
+            keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            nulls.sort_unstable();
+            let nn = keyed.len();
+            let mut ids: Vec<u32> = keyed.into_iter().map(|k| k.1).collect();
+            ids.extend(nulls);
+            (ids, nn)
+        })
+    }
+}
+
 /// One read: `{"op": "find" | "get" | "text" | "history", ...params}`.
-pub fn query(rows: &Rows, g: &Grants, req: &Json) -> Answer {
+pub fn query(rows: &Rows, g: &Grants, idx: &mut Indexes, req: &Json) -> Answer {
     let Some(p) = req.as_object() else { return refuse(refusal::TYPE, json!({"params": brief(req)})) };
     match p.get("op").and_then(Json::as_str) {
-        Some("find") => find(rows, g, p),
+        Some("find") => find(rows, g, idx, p),
         Some("get") => get(rows, g, p),
         Some("text") => text(rows, g, p),
         Some("history") => history(rows, g, p),
@@ -529,7 +601,7 @@ fn decode_cursor(c: &Column, v: Option<&Json>) -> Result<Option<(Key2<'static>, 
     k.map(|k| Some((k, id))).ok_or_else(bad)
 }
 
-fn find(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
+fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> Answer {
     let tm = readable(g, p.get("table"))?;
     let cols = columns(g, tm, p.get("cols"), false)?;
     let (order, desc) = order_param(g, tm, p)?;
@@ -550,24 +622,33 @@ fn find(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
         o.then_with(|| if desc { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) })
     };
     let past = |k: &(Key2, u32)| after.as_ref().is_none_or(|c| by(k, c) == Ordering::Greater);
-    // One pass over the slots, each column's storage resolved once.
+    // Walk the column's index in the asked order from the cursor, testing
+    // rows until the page is full: a page touches about as many rows as it
+    // shows, unless a filter rejects most of them.
     let tests: Vec<(Cells, &Test)> = fs.iter().map(|f| (Cells::new(t, f.col), &f.test)).collect();
-    let ord = Cells::new(t, order);
     let deleted = tm.col_named("deleted_at").filter(|_| tm.soft_delete).map(|c| Cells::new(t, c));
-    let mut keys: Vec<(Key2, u32)> = t
-        .ids()
-        .iter()
-        .enumerate()
-        .filter(|(s, _)| deleted.as_ref().is_none_or(|d| d.key(*s).is_null()) && tests.iter().all(|(c, x)| test(&c.key(*s), x)))
-        .map(|(s, &id)| (if order.name == "id" { Key2::Int(id as i64) } else { ord.key(s) }, id))
-        .filter(past)
-        .collect();
-    let page = keys.len().min(limit);
-    if page > 0 && page < keys.len() {
-        keys.select_nth_unstable_by(page - 1, by);
-        keys.truncate(page);
+    let ord = Cells::new(t, order);
+    let (ids, nn) = idx.get(t, order);
+    let key = |id: u32| -> (Key2, u32) { (t.slot(id).map_or(Key2::Null, |s| ord.key(s)), id) };
+    let mut keys: Vec<(Key2, u32)> = Vec::with_capacity(limit);
+    for part in [&ids[..*nn], &ids[*nn..]] {
+        let at = |j: usize| if desc { part[part.len() - 1 - j] } else { part[j] };
+        let (mut lo, mut hi) = (0, part.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if past(&key(at(mid))) { hi = mid } else { lo = mid + 1 }
+        }
+        for j in lo..part.len() {
+            if keys.len() == limit {
+                break;
+            }
+            let id = at(j);
+            let Some(s) = t.slot(id) else { continue };
+            if deleted.as_ref().is_none_or(|d| d.key(s).is_null()) && tests.iter().all(|(c, x)| test(&c.key(s), x)) {
+                keys.push(key(id));
+            }
+        }
     }
-    keys.sort_by(by);
     let next = (keys.len() == limit).then(|| keys.last().map(|k| cursor_of(t, k.1, order))).flatten();
     let rows: Vec<Json> = keys.iter().map(|k| row_out(t, k.1, &cols, false)).collect();
     Ok(json!({"rows": rows, "next": next}))
