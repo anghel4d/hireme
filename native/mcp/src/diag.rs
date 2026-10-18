@@ -85,6 +85,42 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
     ("internal", "kernel", "the kernel failed on this op", "Nothing was written. Retry once; if it repeats, tell the operator with the op_id."),
 ];
 
+/// The reason the node gives a refusal whose site named none: its code's, in the server's words
+/// (sequencer.ex `@reasons`). Such a reason says nothing the code does not, so the data's shape decides.
+const DEFAULT_REASONS: &[(&str, &str)] = &[
+    ("scope", "the key's masks do not allow this"),
+    ("human_only", "only the operator's browser session may do this"),
+    ("lease_missing", "this session holds no write lease"),
+    ("leased", "another session holds this application"),
+    ("column", "a column is unknown, not writable, or missing"),
+    ("type", "a value does not fit its column"),
+    ("not_found", "the row, or a row a ref names, does not exist"),
+    ("natural_key", "a row with this natural key already exists"),
+    ("stage", "the pipeline does not allow this move"),
+    ("fire_hold", "submitted follows only the operator's open_fire"),
+    ("heat", "the heat governor defers this move"),
+    ("lineage_busy", "the lineage is mid-generation; only new overlays"),
+    ("cooldown", "the lineage's cooldown has not passed"),
+    ("freshness", "a metric needs as_of no later than today"),
+    ("stale", "a newer value is already stored"),
+    ("rev", "the row has moved past expect_rev"),
+    ("source_missing", "this cell needs a source"),
+    ("source_trust", "this source's host is not trusted for this cell"),
+    ("too_large", "the op is over its size bound"),
+    ("rate", "over the rate limit; retry later"),
+    ("cap", "a table or the account is at its cap"),
+    ("internal", "the server failed on this op; it wrote nothing"),
+];
+
+/// The refusal's own reason: what its site said, not its code's default (flagged, or recognised).
+fn site_reason<'a>(code: &str, data: &'a Json) -> Option<&'a str> {
+    let r = data.get("reason").and_then(Json::as_str)?;
+    let defaulted = data.get("reason_default").and_then(Json::as_bool) == Some(true)
+        || DEFAULT_REASONS.iter().any(|d| d.0 == code && d.1 == r)
+        || r == code.replace('_', " ");
+    (!defaulted).then_some(r)
+}
+
 /// What a refusal's `need` asks for: (code, need, one line, what to do).
 const NEEDS: &[(&str, &str, &str, &str)] = &[
     ("heat", "reason", "a heat override needs a reason", "Set heat_override_reason to why the cap is lifted, with heat_override."),
@@ -103,7 +139,7 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
     }
     if let Some(obj) = data.as_object() {
         for (k, v) in obj {
-            if k == "message" {
+            if k == "message" || (k == "reason" && site_reason(code, data).is_none()) {
                 continue;
             }
             let shown = match (code, k.as_str()) {
@@ -126,7 +162,7 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
 
 /// The headline and the next step: the most precise thing the data says, else the code's own.
 fn advice(code: &str, data: &Json) -> (String, String) {
-    let reason = data.get("reason").and_then(Json::as_str);
+    let reason = site_reason(code, data);
     let need = data.get("need").and_then(Json::as_str);
     let (line, todo) = REFUSALS
         .iter()
@@ -172,12 +208,12 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
     match code {
         // A parameter the call left out, or sent as null (World echoes it as inspect(nil): "nil").
         // got is present and null (an older World said "nil"); a param refused without got was given.
-        "type" if text("param").is_some() && data.get("reason").is_none() && data.get("got").is_some_and(|g| g.is_null() || g.as_str() == Some("nil")) => {
+        "type" if text("param").is_some() && site_reason(code, data).is_none() && data.get("got").is_some_and(|g| g.is_null() || g.as_str() == Some("nil")) => {
             let p = text("param")?;
             Some((format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes.")))
         }
         // A cursor handed back changed: `after` takes only what an answer's `next` gave.
-        "type" if text("param") == Some("after") && data.get("reason").is_none() => Some((
+        "type" if text("param") == Some("after") && site_reason(code, data).is_none() => Some((
             "after is not a cursor this answer gave".to_owned(),
             "Pass `after` back exactly as the previous answer's `next` gave it, or leave it out to start from the first row.".to_owned(),
         )),
@@ -444,10 +480,21 @@ mod tests {
             ("not_found", serde_json::json!({"table": "corporations", "id": 4}), "no such row, table or command"),
             ("source_missing", serde_json::json!({"table": "corporations", "column": "headcount"}), "this write needs a source"),
         ];
-        for (code, data, line) in shaped {
+        for (code, mut data, line) in shaped {
             let d = render(code, "op", &data);
             assert!(d.starts_with(&format!("error[{code}]: {line}\n")), "{d}");
+            // The node fills in its code's default reason where the site gave none: it decides nothing.
+            if data.get("reason").is_none() {
+                let default = DEFAULT_REASONS.iter().find(|x| x.0 == code).unwrap().1;
+                data["reason"] = serde_json::json!(default);
+                let d = render(code, "op", &data);
+                assert!(d.starts_with(&format!("error[{code}]: {line}\n")) && !d.contains("= reason:"), "{d}");
+            }
         }
+        let left = render("type", "history places", &serde_json::json!({"param": "id", "got": null, "reason": "a value does not fit its column"}));
+        assert!(left.starts_with("error[type]: id is required here\n"), "{left}");
+        let taken = render("natural_key", "put", &serde_json::json!({"table": "t", "key": {"domain": "a"}, "reason": "a row with this natural key already exists"}));
+        assert!(taken.contains("a row with this natural key exists"), "{taken}");
         let odd = render("column", "put t", &serde_json::json!({"reason": "something new"}));
         assert!(odd.starts_with("error[column]: something new\n"), "{odd}");
     }
