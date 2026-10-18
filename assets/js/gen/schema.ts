@@ -4,7 +4,7 @@
 // nullable column as T | null.
 
 export const WIRE_HASH = 0x983a;
-export const SCHEMA_REV = 0x6c795a0c;
+export const SCHEMA_REV = 0xcc9a1de3;
 export const LAYOUT = 3;
 export const DAY_MAX = 3652424;
 

@@ -189,7 +189,7 @@ CREATE TABLE "op_ledger" (
 ) STRICT;
 CREATE INDEX "op_ledger__account_account_id" ON "op_ledger" ("account_id");
 CREATE UNIQUE INDEX "op_ledger__unique_writer_op_id" ON "op_ledger" ("account_id", "writer", "op_id");
-CREATE INDEX "op_ledger__index_inserted_at" ON "op_ledger" ("inserted_at");
+CREATE INDEX "op_ledger__index_inserted_at" ON "op_ledger" ("account_id", "inserted_at");
 
 CREATE TABLE "trusted_hosts" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

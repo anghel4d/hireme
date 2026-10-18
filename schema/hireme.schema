@@ -289,7 +289,7 @@ table op_ledger system server
   # An op_id is the writer's own: two keys, or a key and the operator, may
   # pick the same one.
   unique writer op_id
-  index inserted_at global
+  index inserted_at
   col op_id i64 !
   col key_id ref api_keys ? loose
   col verb enum verb !

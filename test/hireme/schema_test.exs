@@ -16,6 +16,14 @@ defmodule Hireme.SchemaTest do
       Mix.shell(Mix.Shell.IO)
     end
   end
+
+  test "the Rust model's last day, emitted into the TypeScript, is the node's: 9999-12-31" do
+    [_, emitted] =
+      Regex.run(~r/^export const DAY_MAX = (\d+);$/m, File.read!("assets/js/gen/schema.ts"))
+
+    assert String.to_integer(emitted) == Hireme.Schema.day_max()
+    assert Date.from_gregorian_days(Hireme.Schema.day_max()) == ~D[9999-12-31]
+  end
 end
 
 defmodule Hireme.SchemaCapTest do
