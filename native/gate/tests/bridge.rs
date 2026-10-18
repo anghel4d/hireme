@@ -55,10 +55,10 @@ async fn gate() -> Gate {
         .expect("hireme-gate");
     let hex = timeout(Duration::from_secs(10), async {
         loop {
-            if let Ok(h) = std::fs::read_to_string(&hash_file) {
-                if h.trim().len() == 64 {
-                    return h.trim().to_owned();
-                }
+            if let Ok(h) = std::fs::read_to_string(&hash_file)
+                && h.trim().len() == 64
+            {
+                return h.trim().to_owned();
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
