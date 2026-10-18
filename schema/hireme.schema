@@ -1,0 +1,635 @@
+# The one declaration. Every database table, Ecto row, wire table, Rust
+# constant and TypeScript type is read from this file; nothing else names a
+# table, column, enum, command, frame or refusal.
+#
+# Lines (a `#` starts a comment; indentation is cosmetic):
+#
+#   domain <name>...                 the first five carry mask bits 1 2 4 8 16;
+#                                    `system` carries none and is in no mask
+#   frame <NAME> <id>                wire frame kinds
+#   enum <name> <value>...           codes are 0-based declaration order
+#   table <name> <domain> <residency> [append_only] [soft_delete] [global] [account_optional] [singleton]
+#       residency: resident (the kernel derives from it; on the wire)
+#                  server   (read over RPC, server-side)
+#                  wire     (derived on the wire, never stored)
+#       global: no account_id (accounts, magic_links)
+#       account_optional: account_id may be null (audit before sign-in)
+#       singleton: one row per account
+#   projection <name> <domain> <source table> where <sql>
+#     pick <col>...                  a resident view of a server table, not stored
+#   natural <col>... [where <sql>]   the key a KEYED put names; per account
+#   unique <col>... [global] [where <sql>]   per account unless `global`
+#   index <col> [desc]... [where <sql>]      per account (account_id leads)
+#   cap <n>                          most rows per account (`cap` refusal)
+#   col <name> <type> [<target>] [! | ?] [= <default>] [flag]...
+#   metric <name> <u32|i64|f64> [flag]...   nullable; implies `<name>_on day ?`;
+#                                    a write needs `as_of` and makes a citation
+#   prose <name> [flag]...           text ?, deferred; a write needs `source` and
+#                                    `expect_rev` and makes a citation
+#   command <name> [<col> | <name>:<type>[?]]... [human_only]
+#                                    params are table columns or typed free params
+#
+# Types: id ref(<table>) enum(<enum>) bool u8 u32 i64 f64 day time str text json bytes
+# Flags: ! required (NOT NULL)   ? nullable (the default)   deferred (BOOT/PATCH carry
+#        length + hash, `RPC text` the bytes)   private (browser sessions only, never a
+#        key)   server_only (never leaves the server)   human_only (a key's write is
+#        refused `human_only`)   readonly (the server or a command writes it, never a
+#        put)   unique (per account)
+#
+# Implied on every stored table, in this order and with these column ids:
+#   1 id   2 account_id (not on `global`)   3 rev   4 inserted_at   5 updated_at
+#   6 deleted_at (only on `soft_delete`)
+# Declared columns take ids from 8 in declaration order; a metric's `_on` twin
+# takes the id after it. Tables and projections are numbered from 1, commands
+# from 1, in declaration order. A required `ref` cascades on delete; a nullable
+# one is set null.
+
+domain world desk mail lanes corpus system
+
+frame HELLO 1
+frame WELCOME 2
+frame BOOT 3
+frame PATCH 4
+frame OPS 8
+frame ACK 9
+frame NACK 10
+frame TICK 11
+frame PING 13
+frame PONG 14
+frame BYE 16
+frame RPC 33
+frame REPLY 34
+
+# ---------------------------------------------------------------- enums
+
+enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal
+
+enum verb put drop command
+enum actor operator agent system
+enum bye revoked grants restart schema suspended
+
+enum account_status active suspended
+enum provider email github x
+enum factor_kind totp webauthn
+enum challenge_kind totp_enroll webauthn_register webauthn_assert
+
+enum stage discovered freshness gated in_batch draft_ready fire_ready open_fire submitted reply closed
+enum app_status open paused hired closed
+enum freshness open thin closed blocked
+enum gate pursue maybe skip
+enum band frontier labs big_tech systems craft mid thin kill
+enum outcome offer rejected ghosted withdrawn declined
+enum work_mode onsite hybrid remote
+enum employment full_time part_time contract internship freelance
+enum app_channel listing referral recruiter cold other
+enum listing_format text markdown html
+
+enum batch_kind day_pack leftover universe_gaps linkedin
+enum batch_status draft_prep fire_ready open_fire closed
+enum fire hold open_fire
+
+enum item_kind experience project education skill timeline fact
+enum overlay_mode tailor add drop
+enum cv_accent ink signal paper
+enum cv_density cv tight narrative
+
+enum place_kind country city
+enum ownership private public subsidiary nonprofit government
+enum remote_policy onsite hybrid remote remote_first
+enum office_kind hq engineering sales regional other
+enum source_kind official filing statistics news ratings review blog other
+
+enum relation recruiter hiring_manager engineer referral founder other
+enum message_channel email linkedin x other
+enum direction outbound inbound
+enum message_status draft queued sent delivered bounced failed received
+
+enum platform leetcode codeforces other
+enum topic arrays graphs strings dp trees systems other
+enum difficulty easy medium hard unknown
+enum rep_outcome solved attempt skip
+enum net_kind observer artifact post draft
+enum net_channel broadside x other
+
+# ---------------------------------------------------------------- system
+
+table accounts system server global
+  col name str ! = ''
+  col status enum account_status ! = active
+  # Live API keys, moved in the statement that mints or revokes one.
+  col live_key_count u32 ! = 0
+  # Committed account writes, bumped by the sequencer with each one.
+  col desk_rev i64 ! = 0
+  # The next applications.no; a number is never reused.
+  col next_no u32 ! = 1
+
+table sessions system server
+  index account_id revoked_at
+  col token_hash bytes ! server_only
+  unique token_hash global
+  col authenticated_at time !
+  col mfa_at time ?
+  col last_seen_at time !
+  col expires_at time !
+  col revoked_at time ?
+  col ip str ! = ''
+  col user_agent str ! = ''
+
+table identities system server
+  unique provider subject global
+  col provider enum provider !
+  col subject str !
+  col display str ! = ''
+  col verified_at time !
+
+table magic_links system server global
+  index email expires_at
+  col email str !
+  col token_hash bytes ! server_only
+  unique token_hash global
+  col expires_at time !
+  col used_at time ?
+  col ip str ! = ''
+  col user_agent str ! = ''
+
+table api_keys system server
+  index account_id
+  unique key_id global
+  col key_id str !
+  col name str !
+  col secret_hash bytes ! server_only
+  col prefix str !
+  col read_mask u8 ! = 0
+  col write_mask u8 ! = 0
+  col may_delete bool ! = false
+  col last_used_at time ?
+  col expires_at time ?
+  col revoked_at time ?
+
+table factors system server
+  index account_id kind
+  unique credential_id global where credential_id is not null
+  col kind enum factor_kind !
+  col name str ! = ''
+  col totp_secret bytes ? server_only
+  col totp_last_step i64 ?
+  col credential_id bytes ?
+  col public_key bytes ?
+  col sign_count u32 ?
+  col aaguid bytes ?
+  col transports str ?
+  col backup_eligible bool ?
+  col backed_up bool ?
+  col verified_at time ?
+  col last_used_at time ?
+  col consecutive_failures u32 ! = 0
+  col disabled_at time ?
+
+table challenges system server
+  index session_id
+  col session_id ref sessions !
+  col kind enum challenge_kind !
+  col payload bytes ! server_only
+  col expires_at time !
+
+table recovery_codes system server
+  index account_id
+  col salt bytes ! server_only
+  col code_hash bytes ! server_only
+  col used_at time ?
+
+table audit system server append_only account_optional
+  index account_id id desc
+  col kind str !
+  col ip str ! = ''
+  col user_agent str ! = ''
+  col meta json ?
+  col key_id ref api_keys ?
+  col session_id ref sessions ?
+
+table outbox system server
+  index sent_at next_at
+  col address str !
+  col kind str !
+  col meta json ?
+  col attempts u32 ! = 0
+  col next_at time !
+  col sent_at time ?
+  col last_error str ?
+
+# A resent op_id answers its first verdict and writes nothing; rows age out
+# after 24 h.
+table op_ledger system server
+  unique op_id
+  index inserted_at
+  col op_id i64 !
+  col key_id ref api_keys ?
+  col verb enum verb !
+  # A table id for put and drop, a command id for command.
+  col subject u32 !
+  col target u32 ?
+  col row_id u32 ?
+  col rev i64 ?
+  col refusal enum refusal ?
+
+# Hosts whose pages may source `culture` and ratings. Operator-owned.
+table trusted_hosts system server
+  unique host
+  col host str !
+  col note text ?
+
+# ---------------------------------------------------------------- corpus
+
+table profiles corpus resident
+  unique slug
+  col slug str !
+  col name str !
+  col headline str ?
+  col summary text ?
+  col narrative text ?
+  col narrative_private text ? private
+
+# CV atoms; a null profile_id is shared by every profile.
+table items corpus resident
+  unique key
+  index profile_id kind
+  col profile_id ref profiles ?
+  col kind enum item_kind !
+  col key str !
+  col title str !
+  col body text ?
+  col org str ?
+  col span str ?
+  col position u32 ! = 0
+  # U+001F-joined.
+  col keywords str ?
+
+# ---------------------------------------------------------------- desk
+
+table applications desk resident
+  natural canonical_url where canonical_url is not null
+  cap 50000
+  index stage
+  index corporation_id
+  index batch_id
+  col no u32 ! unique readonly
+  col corporation_id ref corporations ?
+  col place_id ref places ?
+  col contact_id ref contacts ?
+  col profile_id ref profiles ?
+  col batch_id ref batches ?
+  col company str ?
+  col role str ?
+  col location str ?
+  col work_mode enum work_mode ?
+  col employment enum employment ?
+  col comp_raw str ?
+  col channel enum app_channel ?
+  col listing_raw text ? deferred
+  col listing_format enum listing_format ?
+  # Hex SHA-256 of listing_raw.
+  col listing_sha str ? readonly
+  col listing_url str ?
+  col canonical_url str ?
+  col listing_on day ?
+  # The kernel's extraction from listing_raw at write time, U+001F-joined.
+  col keywords str ? readonly
+  col keywords_version u32 ? readonly
+  col source_id ref sources ?
+  col stage enum stage ! = discovered readonly
+  # One char per stage, D A P S B.
+  col pips str ? readonly
+  col stage_on day ? readonly
+  col stage_notes json ?
+  col status enum app_status ! = open
+  col gate enum gate ?
+  col freshness enum freshness ?
+  col heat_override bool ! = false readonly
+  col heat_override_reason str ? readonly
+  col score_100 u8 ?
+  col applied_on day ?
+  col replied_on day ?
+  col closed_on day ?
+  col outcome enum outcome ?
+  col notes text ?
+  col battleplan text ?
+  col letter_raw text ?
+  col cv_theme json ?
+  command stage stage note:text?
+  command note stage body:text
+  command heat_override reason:str
+  command open_fire human_only
+
+table events desk resident append_only
+  index application_id id desc
+  col application_id ref applications !
+  col kind str !
+  col body text ?
+  col actor enum actor !
+  col key_id ref api_keys ?
+  col op_id i64 ?
+
+table batches desk resident
+  unique code
+  col code str !
+  col ordinal u32 !
+  col kind enum batch_kind ! = day_pack
+  col status enum batch_status ! = draft_prep
+  col fire enum fire ! = hold human_only
+  col target_size u32 ! = 55
+  col queued_on day ?
+  col note text ?
+
+table cv_lineages desk resident
+  unique corporation_id
+  col corporation_id ref corporations !
+  col generation u32 ! = 1 readonly
+  col opened_on day ! readonly
+  col rewrites_allowed bool ! = true
+  col theme json ?
+  command open_generation corporation_id
+
+table cv_overlays desk resident
+  unique application_id item_id
+  col application_id ref applications !
+  col item_id ref items !
+  col lineage_id ref cv_lineages ?
+  col mode enum overlay_mode !
+  col title str ?
+  col body text ?
+  col reason text ?
+  col generation u32 ! = 1 readonly
+
+table settings desk resident singleton
+  col gym_target u32 ?
+  col net_lane_url str ?
+  # U+001F-joined ISO 3166-1 alpha-2 and ISO 639-1 codes.
+  col citizenships str ?
+  col languages str ?
+  col field str ?
+  col w_energy f64 ?
+  col w_economy f64 ?
+  col w_liveability f64 ?
+  col w_mobility f64 ?
+  col w_language f64 ?
+  col w_tech f64 ?
+  col w_ease f64 ?
+  col goal_total u32 ?
+  col goal_on day ?
+  col goal_daily u32 ?
+  col heat_config json ?
+
+# ---------------------------------------------------------------- world
+
+table places world server
+  natural iso2 where kind = 'country'
+  natural geonames_id where kind = 'city'
+  cap 100000
+  index country_id name
+  col kind enum place_kind !
+  col country_id ref places ?
+  col iso2 str ?
+  col iso3 str ?
+  col geonames_id u32 ?
+  col name str !
+  col region str ?
+  col subregion str ?
+  col lat f64 ?
+  col lon f64 ?
+  col timezone str ?
+  col currency str ?
+  # identity and demography
+  metric population u32
+  metric area_km2 f64
+  metric density_per_km2 f64
+  metric median_age f64
+  metric urban_share f64
+  metric foreign_born_share f64
+  metric english_proficiency f64
+  # economy
+  metric gdp_usd f64
+  metric gdp_per_capita_usd f64
+  metric gdp_ppp_usd f64
+  metric gdp_per_capita_ppp_usd f64
+  metric gdp_growth f64
+  metric inflation f64
+  metric unemployment f64
+  metric median_income_usd f64
+  metric cost_of_living_index f64
+  metric rent_index f64
+  metric income_tax_top f64
+  # liveability
+  metric qol_index f64
+  metric hdi f64
+  metric safety_index f64
+  metric healthcare_index f64
+  metric pollution_index f64
+  metric climate_index f64
+  metric internet_mbps f64
+  # energy
+  metric energy_consumption_twh f64
+  metric energy_production_twh f64
+  metric energy_consumption_per_capita_kwh f64
+  metric energy_production_per_capita_kwh f64
+  metric renewable_share f64
+  metric electricity_usd_kwh f64
+  metric co2_per_capita_t f64
+  # career
+  metric swe_median_usd f64
+  metric tech_jobs u32
+  metric mobility f64
+  # U+001F-joined ISO 639-1 codes spoken.
+  col language str ?
+  metric tech f64
+  metric ease f64
+  # U+001F-joined iso2 of citizenships that need no work permit here.
+  col work_permit str ?
+  col atlas_position u32 ?
+  col atlas_labeled bool ?
+  prose liveability
+  prose notes
+
+# The places the atlas charts, with only the columns its fit reads.
+projection atlas world places where atlas_position is not null
+  pick kind country_id iso2 name atlas_position atlas_labeled gdp_per_capita_ppp_usd qol_index energy_production_per_capita_kwh energy_consumption_per_capita_kwh mobility language tech ease work_permit
+
+table corporations world server
+  natural domain
+  cap 50000
+  index name
+  col domain str !
+  col name str !
+  col legal_name str ?
+  col hq_place_id ref places ?
+  col parent_id ref corporations ?
+  col founded_year u32 ?
+  col ownership enum ownership ?
+  col ticker str ?
+  col exchange str ?
+  col industry str ?
+  col sector str ?
+  col linkedin_url str ?
+  # size
+  metric headcount u32
+  metric engineers u32
+  metric headcount_growth f64
+  # private economics
+  metric valuation_usd f64
+  metric total_raised_usd f64
+  col last_round str ?
+  col last_round_on day ?
+  # public economics
+  metric market_cap_usd f64
+  metric revenue_usd f64
+  metric revenue_growth f64
+  metric profit_margin f64
+  metric pe_ratio f64
+  # comp and reputation
+  metric comp_median_usd f64
+  metric comp_swe_median_usd f64
+  metric rating f64
+  metric rating_count u32
+  metric wlb_rating f64
+  # hiring
+  col careers_url str ?
+  col ats str ?
+  col ats_tenant str ?
+  col remote_policy enum remote_policy ?
+  # desk
+  col score_100 u8 ?
+  col freshness enum freshness ?
+  col freshness_on day ?
+  col eng_urls u32 ?
+  col note text ?
+  prose about
+  prose culture
+
+table offices world server
+  unique corporation_id place_id kind
+  index place_id
+  col corporation_id ref corporations !
+  col place_id ref places !
+  col kind enum office_kind !
+  metric headcount u32
+  col opened_on day ?
+
+table sources world server
+  natural url
+  index host
+  col url str !
+  # Derived from url by the server.
+  col host str ! readonly
+  col publisher str ?
+  col title str ?
+  col kind enum source_kind ?
+  col retrieved_at time ?
+  # A mutable page keeps only its newest doc; an immutable one keeps each.
+  col mutable bool ! = true
+  col doc text ? deferred
+
+# The only provenance authority: the newest citation for a cell is its source.
+table citations world server append_only
+  cap 5000000
+  index table row_id column id desc
+  col table str ! server_only
+  col row_id u32 ! server_only
+  col column str ! server_only
+  col source_id ref sources ? server_only
+  col value json ? server_only
+  col as_of day ! server_only
+  col actor enum actor ! server_only
+  col key_id ref api_keys ? server_only
+  col op_id i64 ? server_only
+
+# ---------------------------------------------------------------- mail
+
+table contacts mail server
+  natural email where email is not null
+  cap 50000
+  index corporation_id
+  col corporation_id ref corporations ?
+  col place_id ref places ?
+  col name str !
+  col title str ?
+  col email str ?
+  col linkedin_url str ?
+  col x_handle str ?
+  col relation enum relation ?
+  col last_touch_on day ?
+  col notes text ?
+
+table messages mail server
+  natural message_id where message_id is not null
+  cap 200000
+  index thread_key
+  index application_id
+  index contact_id
+  col channel enum message_channel !
+  col direction enum direction !
+  col from_addr str ?
+  col to_addr str ?
+  col cc_addr str ?
+  col subject str ?
+  col body text ? deferred
+  col message_id str ?
+  col thread_key str ?
+  col sent_at time ?
+  col status enum message_status ! = draft
+  col corporation_id ref corporations ?
+  col application_id ref applications ?
+  col contact_id ref contacts ?
+
+# ---------------------------------------------------------------- lanes
+
+table gym_reps lanes resident
+  index done_on
+  col platform enum platform !
+  col slug str !
+  col title str ?
+  col topic enum topic ?
+  col difficulty enum difficulty ?
+  col url str ?
+  col done_on day !
+  col minutes u32 ?
+  col outcome enum rep_outcome ! = solved
+  col note str ?
+
+table net_entries lanes resident
+  index shipped_on
+  col kind enum net_kind !
+  col channel enum net_channel ! = other
+  col title str ?
+  col url str ?
+  col body text ?
+  col shipped_on day ?
+
+# ---------------------------------------------------------------- wire
+
+# One row per wire session holding the channel; `held` is its claimed
+# application ids, U+001F-joined.
+table leases desk wire
+  col id u32 !
+  col label str !
+  col key_id u32 ?
+  col held str ?
+  col since time !
+
+table clock system wire
+  col today day !
+  col now time !
+
+# The resolved declaration, one row per entry: kind 1 table, 2 column,
+# 3 enum value, 4 command, 5 command param, 6 frame.
+table catalog system wire
+  col kind u32 !
+  col owner u32 !
+  col id u32 !
+  col name str !
+  col type u32 ?
+  col flags u32 ?
+  col target str ?
+
+# Rows a PATCH deletes.
+table gone system wire
+  col table u32 !
+  col id u32 !
