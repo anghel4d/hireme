@@ -27,6 +27,12 @@ defmodule Hireme.Provenance do
   @trusted_only ~w(culture rating rating_count wlb_rating)
 
   @doc "The host of a URL as sources store it: lowercase, no port, no trailing dot; nil for a non-web URL."
+  # A source URL is a link, not a payload: past this it is refused before
+  # any parsing (a megabyte of labels or port digits costs the writer lock).
+  @url_max 4_096
+
+  def host(url) when is_binary(url) and byte_size(url) > @url_max, do: nil
+
   def host(url) when is_binary(url) do
     # A URL a browser would read another way is refused outright: a browser
     # treats a backslash as a slash, so "https://evil.example\\@levels.fyi/"
@@ -46,6 +52,14 @@ defmodule Hireme.Provenance do
 
   # The authority's port as a browser reads it (WHATWG): absent, empty, or
   # ASCII digits up to 65535; ":99999", ":80a" or ":１" open nothing.
+  # Leading zeros are allowed (":080"); at most five digits remain to convert.
+  defp port_number?(port) do
+    digits = String.trim_leading(port, "0")
+
+    port =~ ~r/^[0-9]+$/ and byte_size(digits) <= 5 and
+      (digits == "" or String.to_integer(digits) <= 65_535)
+  end
+
   defp port_ok?(url) do
     authority =
       case String.split(url, "://", parts: 2) do
@@ -56,7 +70,7 @@ defmodule Hireme.Provenance do
     case String.split(authority, ":", parts: 2) do
       [_host] -> true
       [_host, ""] -> true
-      [_host, port] -> port =~ ~r/^[0-9]+$/ and String.to_integer(port) <= 65_535
+      [_host, port] -> port_number?(port)
     end
   end
 

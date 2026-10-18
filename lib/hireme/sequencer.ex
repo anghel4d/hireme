@@ -1383,7 +1383,13 @@ defmodule Hireme.Sequencer do
   defp limits(plan, effects, prov, state) do
     citations = Schema.table(:citations)
     sources = Schema.table(:sources)
-    cited = length(cited_cells(plan, effects))
+    # Only the cells the write will cite: a restated one is not (fresh/3).
+    cited =
+      plan
+      |> own_cells(effects)
+      |> Enum.reject(&(plan.row != nil and restated?(plan.table, plan.row, &1, prov)))
+      |> Enum.count(fn {id, _} -> (c = col(plan.table, id)) && (c.metric or c.prose) end)
+
     new_source = if prov && prov.new_source, do: [{sources, 1}], else: []
 
     inserts =
@@ -1413,10 +1419,6 @@ defmodule Hireme.Sequencer do
       nil -> {:ok, state}
       {t, _} -> {:refused, :cap, %{table: t.name, cap: t.cap}, state}
     end
-  end
-
-  defp cited_cells(%{table: table} = plan, effects) do
-    for {id, _} <- own_cells(plan, effects), c = col(table, id), c.metric or c.prose, do: c
   end
 
   # A capped table's row count, read from SQLite once and then moved with

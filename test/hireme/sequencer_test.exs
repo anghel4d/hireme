@@ -183,6 +183,26 @@ defmodule Hireme.SequencerTest do
     {[same], []} = run(a.id, cited.(5))
     assert same.rev == first.rev
     assert {[], [%{refusal: :cap}]} = run(a.id, cited.(6))
+
+    # With room for one, a put that changes one cited cell and restates
+    # another needs room only for the one it cites.
+    :sys.replace_state(pid, &put_in(&1.counts[citations.id], citations.cap - 1))
+
+    assert {[_], []} =
+             run(
+               a.id,
+               op(
+                 :put,
+                 :corporations,
+                 %{
+                   headcount: 5,
+                   revenue_usd: 9.0e6,
+                   as_of: ~D[2026-09-01],
+                   source: "https://cap.example/a"
+                 },
+                 target: corp.id
+               )
+             )
   end
 
   test "settings is one row: a put without a target finds it", %{account: a} do

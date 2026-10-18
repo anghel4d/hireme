@@ -397,5 +397,18 @@ defmodule Hireme.ProvenanceTest do
     for bad <- ~w(:65536 :99999 :80a :a :+1 :1e3 :١٢) do
       assert Provenance.host("https://a.example#{bad}/p") == nil, bad
     end
+
+    # Leading zeros are a browser's too; a URL past 4 KiB or a huge port is
+    # refused before any parsing.
+    assert Provenance.host("https://a.example:00080/p") == "a.example"
+    assert Provenance.host("https://a.example:" <> String.duplicate("9", 1_000_000)) == nil
+    assert Provenance.host("https://a.example/" <> String.duplicate("p", 4_096)) == nil
+
+    {us, nil} =
+      :timer.tc(fn ->
+        Provenance.host("https://" <> String.duplicate("a.", 500_000) <> "example/")
+      end)
+
+    assert us < 50_000
   end
 end
