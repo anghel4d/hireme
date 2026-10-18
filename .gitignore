@@ -80,6 +80,7 @@
 !/native/*/src/**/*.rs
 !/native/kernel/tests/
 !/native/kernel/tests/*.rs
+!/native/kernel/tests/*.json
 !/native/*/tests/
 !/native/*/tests/*.rs
 !/native/*/benches/

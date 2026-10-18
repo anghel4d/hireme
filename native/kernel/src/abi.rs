@@ -277,6 +277,66 @@ pub fn filter(json: &str) -> Filter {
     }
 }
 
+/// Effects as JSON: `[{table, id, cells: {column: value}}]` with names
+/// from the catalog; a value is null, a number, a string, `"own"` (the
+/// op's insert id) or `{"new": k}`.
+pub fn effects_json(rows: &[judge::Row]) -> Json {
+    let rows: Vec<Json> = rows
+        .iter()
+        .map(|r| {
+            let def = schema::table_def(r.table);
+            let cells: serde_json::Map<String, Json> = r
+                .cells
+                .iter()
+                .map(|(c, v)| {
+                    let name = def.and_then(|d| d.col(*c)).map_or_else(|| c.to_string(), |c| c.name.into());
+                    let v = match v {
+                        EVal::Own => json!("own"),
+                        EVal::New(k) => json!({"new": k}),
+                        EVal::Val(Val::None) => Json::Null,
+                        EVal::Val(Val::U32(x)) => json!(x),
+                        EVal::Val(Val::I64(x)) => json!(x),
+                        EVal::Val(Val::F64(x)) => json!(x),
+                        EVal::Val(Val::Str(x)) => json!(x),
+                        EVal::Val(Val::Deferred(n, _)) => json!(n),
+                        EVal::Val(Val::List(l)) => json!(l),
+                    };
+                    (name, v)
+                })
+                .collect();
+            json!({"table": def.map_or("", |d| d.name), "id": r.id, "cells": cells})
+        })
+        .collect();
+    Json::Array(rows)
+}
+
+/// The catalog the kernel was built against: `{wire_hash, schema_rev,
+/// tables: {name: {id, residency, cols: {name: {id, wire, type, target}}}},
+/// enums: {name: [values]}, commands: {name: {id, table, params: {name: id}}}}`.
+pub fn catalog_json() -> Json {
+    let tables: serde_json::Map<String, Json> = schema::TABLES
+        .iter()
+        .map(|t| {
+            let cols: serde_json::Map<String, Json> = t
+                .cols
+                .iter()
+                .map(|c| (c.name.into(), json!({"id": c.id, "wire": c.wire, "type": c.type_code, "target": c.target})))
+                .collect();
+            (t.name.into(), json!({"id": t.id, "residency": alloc::format!("{:?}", t.residency).to_lowercase(), "cols": cols}))
+        })
+        .collect();
+    let enums: serde_json::Map<String, Json> = schema::ENUMS.iter().map(|(n, v)| ((*n).into(), json!(v))).collect();
+    let commands: serde_json::Map<String, Json> = schema::COMMANDS
+        .iter()
+        .map(|c| {
+            let params: serde_json::Map<String, Json> =
+                c.params.iter().map(|p| (p.name.into(), json!({"id": p.id, "wire": p.wire, "type": p.type_code, "target": p.target}))).collect();
+            (c.name.into(), json!({"id": c.id, "table": c.table, "human_only": c.human_only, "params": params}))
+        })
+        .collect();
+    json!({"wire_hash": schema::WIRE_HASH, "schema_rev": schema::SCHEMA_REV, "tables": tables, "enums": enums, "commands": commands})
+}
+
 pub fn refusal_json(r: &Refusal) -> Json {
     let name = schema::refusal::NAMES.get(r.code as usize).copied().unwrap_or("internal");
     json!({"code": r.code, "refusal": name, "data": r.data})
@@ -376,6 +436,12 @@ mod exports {
         schema::SCHEMA_REV
     }
 
+    /// The catalog JSON (`catalog_json`).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn catalog() -> i32 {
+        put_json(&catalog_json())
+    }
+
     #[unsafe(no_mangle)]
     pub extern "C" fn set_today(day: i32) {
         K.with(|k| k.borrow_mut().set_today(day));
@@ -408,8 +474,8 @@ mod exports {
         })
     }
 
-    /// Only the verdict: 0 when allowed, else minus the refusal JSON's
-    /// length minus one.
+    /// Only the verdict, nothing applied: the effects JSON (returns its
+    /// length), or the refusal JSON (returns minus its length minus one).
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn judge(op: *const u8, op_len: usize, ctx: *const u8, ctx_len: usize) -> i32 {
         let (op, c) = unsafe { (input(op, op_len), input(ctx, ctx_len)) };
@@ -417,7 +483,7 @@ mod exports {
         K.with(|k| {
             let ctx = Ctx { today, now, human, key_id, held: &held };
             match k.borrow_mut().judge(op, &ctx) {
-                Ok(_) => 0,
+                Ok(rows) => put_json(&effects_json(&rows)),
                 Err(r) => -put_json(&refusal_json(&r)) - 1,
             }
         })
