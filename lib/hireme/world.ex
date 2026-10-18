@@ -326,7 +326,7 @@ defmodule Hireme.World do
          {:ok, id} <- id(params["id"]),
          {:ok, column} <- text_column(grants, table, params["column"]),
          {:ok, offset} <- non_negative(params["offset"], 0, "offset"),
-         {:ok, length} <- bound(params["length"], @chunk, @chunk),
+         {:ok, length} <- bound(params["length"], @chunk, @chunk, "length"),
          true <- offset + length + 4 <= @int64 || {:error, :too_large, %{param: "offset"}} do
       name = column.name
 
@@ -573,7 +573,14 @@ defmodule Hireme.World do
   defp bound(n, _default, max) when is_integer(n) and n > max,
     do: {:error, :too_large, %{limit: n, max: max}}
 
-  defp bound(other, _default, _max), do: {:error, :type, %{param: "limit", got: inspect(other)}}
+  defp bound(other, _default, _max), do: {:error, :type, %{param: "limit", got: brief(other)}}
+
+  defp bound(n, default, max, name) do
+    case bound(n, default, max) do
+      {:error, code, data} -> {:error, code, Map.put(data, :param, name)}
+      ok -> ok
+    end
+  end
 
   defp non_negative(nil, default, _name), do: {:ok, default}
 
@@ -616,20 +623,53 @@ defmodule Hireme.World do
     f = String.to_atom(col.name)
 
     case {op, value} do
-      {"eq", nil} -> {:ok, dynamic([r], is_nil(field(r, ^f)))}
-      {"eq", v} -> cast(col, v, &dynamic([r], field(r, ^f) == ^&1))
-      {"ne", nil} -> {:ok, dynamic([r], not is_nil(field(r, ^f)))}
-      {"ne", v} -> cast(col, v, &dynamic([r], field(r, ^f) != ^&1 or is_nil(field(r, ^f))))
-      {"lt", v} -> cast(col, v, &dynamic([r], field(r, ^f) < ^&1))
-      {"le", v} -> cast(col, v, &dynamic([r], field(r, ^f) <= ^&1))
-      {"gt", v} -> cast(col, v, &dynamic([r], field(r, ^f) > ^&1))
-      {"ge", v} -> cast(col, v, &dynamic([r], field(r, ^f) >= ^&1))
-      {"null", true} -> {:ok, dynamic([r], is_nil(field(r, ^f)))}
-      {"null", false} -> {:ok, dynamic([r], not is_nil(field(r, ^f)))}
-      {"in", vs} when is_list(vs) and length(vs) <= @find_max -> cast_list(col, vs, f)
-      {"like", s} when is_binary(s) and col.type in [:str, :text] -> {:ok, like(f, "%", s, "%")}
-      {"prefix", s} when is_binary(s) and col.type in [:str, :text] -> {:ok, like(f, "", s, "%")}
-      _ -> {:error, :type, %{column: col.name, filter: brief(test)}}
+      {"eq", nil} ->
+        {:ok, dynamic([r], is_nil(field(r, ^f)))}
+
+      {"eq", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) == ^&1))
+
+      {"ne", nil} ->
+        {:ok, dynamic([r], not is_nil(field(r, ^f)))}
+
+      {"ne", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) != ^&1 or is_nil(field(r, ^f))))
+
+      {op, nil} when op in ~w(lt le gt ge) ->
+        {:error, :type, %{column: col.name, filter: op, reason: "compares with null"}}
+
+      {"lt", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) < ^&1))
+
+      {"le", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) <= ^&1))
+
+      {"gt", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) > ^&1))
+
+      {"ge", v} ->
+        cast(col, v, &dynamic([r], field(r, ^f) >= ^&1))
+
+      {"null", true} ->
+        {:ok, dynamic([r], is_nil(field(r, ^f)))}
+
+      {"null", false} ->
+        {:ok, dynamic([r], not is_nil(field(r, ^f)))}
+
+      {"in", vs} when is_list(vs) and length(vs) <= @find_max ->
+        cast_list(col, vs, f)
+
+      {op, s} when op in ~w(like prefix) and is_binary(s) and byte_size(s) > 1000 ->
+        {:error, :too_large, %{column: col.name, filter: op, max: 1000}}
+
+      {"like", s} when is_binary(s) and col.type in [:str, :text] ->
+        {:ok, like(f, "%", s, "%")}
+
+      {"prefix", s} when is_binary(s) and col.type in [:str, :text] ->
+        {:ok, like(f, "", s, "%")}
+
+      _ ->
+        {:error, :type, %{column: col.name, filter: brief(test)}}
     end
   end
 
