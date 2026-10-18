@@ -1304,8 +1304,10 @@ defmodule Hireme.Sequencer do
     |> Enum.filter(&is_pid(&1.pid))
     |> Enum.group_by(& &1.grants)
     |> Enum.each(fn {grants, subs} ->
+      # Sent even empty: its rev tells a client that server-side rows (the
+      # world, the mail) moved, which no table run carries.
       body = IO.iodata_to_binary(patch(deltas, grants))
-      if body != "", do: Enum.each(subs, &send(&1.pid, {:sequencer, :patch, state.rev, body}))
+      Enum.each(subs, &send(&1.pid, {:sequencer, :patch, state.rev, body}))
     end)
 
     state
