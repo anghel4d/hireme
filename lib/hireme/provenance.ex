@@ -32,7 +32,7 @@ defmodule Hireme.Provenance do
     # treats a backslash as a slash, so "https://evil.example\\@levels.fyi/"
     # opens evil.example while URI.parse names levels.fyi; userinfo, spaces
     # and control characters have no place in a source's URL either.
-    case !String.match?(url, ~r/[\\\s\p{Cc}]/u) and URI.parse(url) do
+    case !String.match?(url, ~r/[\\\s\p{Cc}]/u) and port_ok?(url) and URI.parse(url) do
       %URI{scheme: s, host: h, userinfo: nil}
       when s in ["http", "https"] and is_binary(h) and h != "" ->
         h |> String.downcase() |> String.trim_trailing(".") |> hostname()
@@ -43,6 +43,22 @@ defmodule Hireme.Provenance do
   end
 
   def host(_), do: nil
+
+  # The authority's port as a browser reads it (WHATWG): absent, empty, or
+  # ASCII digits up to 65535; ":99999", ":80a" or ":１" open nothing.
+  defp port_ok?(url) do
+    authority =
+      case String.split(url, "://", parts: 2) do
+        [_, rest] -> rest |> String.split(["/", "?", "#"], parts: 2) |> hd()
+        _ -> ""
+      end
+
+    case String.split(authority, ":", parts: 2) do
+      [_host] -> true
+      [_host, ""] -> true
+      [_host, port] -> port =~ ~r/^[0-9]+$/ and String.to_integer(port) <= 65_535
+    end
+  end
 
   # Only a real hostname counts: labels of letters, digits and hyphens. A
   # host like "evil%5c.levels.fyi" must not pass as a subdomain of a trusted one.

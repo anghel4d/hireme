@@ -280,5 +280,12 @@ defmodule Hireme.ProvenanceTest do
 
     assert Provenance.host("ftp://a.example/") == nil
     assert Provenance.host("not a url") == nil
+    assert Provenance.host("https://a.example:/p") == "a.example"
+    assert Provenance.host("https://a.example:65535") == "a.example"
+
+    # A port a browser refuses: the link could never open.
+    for bad <- ~w(:65536 :99999 :80a :a :+1 :1e3 :١٢) do
+      assert Provenance.host("https://a.example#{bad}/p") == nil, bad
+    end
   end
 end
