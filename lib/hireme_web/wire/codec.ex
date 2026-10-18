@@ -379,30 +379,27 @@ defmodule HiremeWeb.Wire.Codec do
         <<op_id::little-64, verb::8, flags::8, subject::little-16, target::little-32,
           ncols::little-16, 0::16, expect::little-32, rest::binary>> = bin
       )
-      when verb in 1..3 and (flags &&& (@keyed ||| @create_only ||| @expect_rev)) == flags do
-    if (flags &&& @expect_rev) == 0 and expect != 0 do
-      :error
-    else
-      case cells(rest, ncols, [], %{}) do
-        {:ok, cells, more} ->
-          raw = binary_part(bin, 0, byte_size(bin) - byte_size(more))
+      when verb in 1..3 and (flags &&& (@keyed ||| @create_only ||| @expect_rev)) == flags and
+             ((flags &&& @expect_rev) != 0 or expect == 0) do
+    case cells(rest, ncols, [], %{}) do
+      {:ok, cells, more} ->
+        raw = binary_part(bin, 0, byte_size(bin) - byte_size(more))
 
-          {:ok,
-           %{
-             op_id: op_id,
-             verb: @verbs[verb],
-             keyed: (flags &&& @keyed) != 0,
-             create_only: (flags &&& @create_only) != 0,
-             expect_rev: if((flags &&& @expect_rev) != 0, do: expect),
-             subject: subject,
-             target: target,
-             cells: cells,
-             raw: raw
-           }, more}
+        {:ok,
+         %{
+           op_id: op_id,
+           verb: @verbs[verb],
+           keyed: (flags &&& @keyed) != 0,
+           create_only: (flags &&& @create_only) != 0,
+           expect_rev: if((flags &&& @expect_rev) != 0, do: expect),
+           subject: subject,
+           target: target,
+           cells: cells,
+           raw: raw
+         }, more}
 
-        :error ->
-          :error
-      end
+      :error ->
+        :error
     end
   end
 

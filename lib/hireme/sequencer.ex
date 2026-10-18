@@ -1067,18 +1067,10 @@ defmodule Hireme.Sequencer do
 
   # Check 3: every cell names a writable column (or a param) of its type.
   defp shape(%{table: table} = plan, %{verb: :drop} = op, _sub) do
-    cond do
-      plan.row == nil ->
-        {:refused, :not_found, %{table: table.name, id: op.target}}
-
-      op.expect_rev != nil and op.expect_rev != plan.row.rev ->
-        {:refused, :rev, %{table: table.name, rev: plan.row.rev}}
-
-      table.append_only ->
-        {:refused, :column, %{table: table.name, reason: "append_only"}}
-
-      true ->
-        {:ok, plan}
+    with :ok <- targeted(plan, op) do
+      if table.append_only,
+        do: {:refused, :column, %{table: table.name, reason: "append_only"}},
+        else: {:ok, plan}
     end
   end
 
@@ -1101,17 +1093,9 @@ defmodule Hireme.Sequencer do
              end
            end),
          [] <- for(p <- command.params, p.required, not Map.has_key?(values, p.name), do: p.name),
-         :ok <- refs(command.params, values) do
-      cond do
-        op.target > 0 and plan.row == nil ->
-          {:refused, :not_found, %{table: plan.table.name, id: op.target}}
-
-        op.expect_rev != nil and plan.row != nil and op.expect_rev != plan.row.rev ->
-          {:refused, :rev, %{table: plan.table.name, rev: plan.row.rev}}
-
-        true ->
-          {:ok, plan}
-      end
+         :ok <- refs(command.params, values),
+         :ok <- targeted(plan, op) do
+      {:ok, plan}
     else
       missing when is_list(missing) ->
         {:refused, :column, %{command: command.name, missing: missing}}
@@ -1123,6 +1107,16 @@ defmodule Hireme.Sequencer do
 
   # A put's shape is the kernel's to judge (check 4, the one judge).
   defp shape(plan, _op, _sub), do: {:ok, plan}
+
+  # The row an op names must exist, and stand at expect_rev when one is given.
+  defp targeted(%{row: nil, table: t}, %{target: target} = op)
+       when target > 0 or op.verb == :drop,
+       do: {:refused, :not_found, %{table: t.name, id: target}}
+
+  defp targeted(%{row: %{rev: rev}, table: t}, %{expect_rev: e}) when e != nil and e != rev,
+    do: {:refused, :rev, %{table: t.name, rev: rev}}
+
+  defp targeted(_plan, _op), do: :ok
 
   # A ref names a row of this account (Repo scopes the lookup), or it is
   # refused as if no such row existed: another account's ids say nothing.
@@ -1520,35 +1514,31 @@ defmodule Hireme.Sequencer do
     end
   end
 
+  # A loose ref records who or what wrote a row; it outlives its target
+  # and is never cleared or cascaded.
   defp dependents(table, id, now) do
     for t <- Schema.tables(),
         t.residency in [:resident, :server],
         c <- t.cols,
-        c.ref == table.name,
-        # A loose ref records who or what wrote a row; it outlives its
-        # target and is never cleared or cascaded.
-        not c.implied and not c.loose do
-      {t, c}
+        c.ref == table.name and not c.implied and not c.loose,
+        field = String.to_atom(c.name),
+        row <- Repo.all(from(r in Schema.row(t.name), where: field(r, ^field) == ^id)),
+        delta <- dependent(t, c, field, row, now),
+        do: delta
+  end
+
+  # A required (or cascading) ref takes its row with the target; a nullable one is cleared.
+  defp dependent(t, c, field, row, now) do
+    if c.required or Map.get(c, :cascade, false) do
+      elem(delete(t, row, now), 0)
+    else
+      {:ok, row} =
+        row
+        |> Ecto.Changeset.change([{field, nil}, rev: row.rev + 1, updated_at: now])
+        |> Repo.update()
+
+      [{:put, t, row, [field, :rev, :updated_at]}]
     end
-    |> Enum.flat_map(fn {t, c} ->
-      field = String.to_atom(c.name)
-      q = from(r in Schema.row(t.name), where: field(r, ^field) == ^id)
-
-      for r <- Repo.all(q) do
-        if c.required or Map.get(c, :cascade, false) do
-          {deltas, _} = delete(t, r, now)
-          deltas
-        else
-          {:ok, r} =
-            r
-            |> Ecto.Changeset.change([{field, nil}, rev: r.rev + 1, updated_at: now])
-            |> Repo.update()
-
-          [{:put, t, r, [field, :rev, :updated_at]}]
-        end
-      end
-      |> List.flatten()
-    end)
   end
 
   # ----------------------------------------------------------- the reads
