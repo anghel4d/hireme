@@ -612,12 +612,16 @@ defmodule Hireme.Import do
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 
   # A name the pack gave that no schema declares is echoed as given when
-  # short, UTF-8 and free of control, format and line or paragraph
-  # separator characters (the mix task prints it to a terminal, where a
-  # bidi override reorders what follows), escaped and bounded otherwise.
+  # short and made only of letters, numbers, marks, punctuation, symbols
+  # and ASCII spaces; any other codepoint (a control, format, separator,
+  # private-use or unassigned one: the mix task prints the name to a
+  # terminal) is written as \\u{hex}. Longer or non-UTF-8 names are bounded.
   defp named(name) when is_binary(name) and byte_size(name) <= 64 do
-    if String.valid?(name) and not String.match?(name, ~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u),
-      do: name,
+    if String.valid?(name),
+      do:
+        Regex.replace(~r/[^\p{L}\p{N}\p{M}\p{P}\p{S} ]/u, name, fn c ->
+          "\\u{" <> Integer.to_string(hd(String.to_charlist(c)), 16) <> "}"
+        end),
       else: brief(name)
   end
 

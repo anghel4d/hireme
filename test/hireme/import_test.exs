@@ -492,25 +492,44 @@ defmodule Hireme.ImportTest do
     assert length(refusals) == 4
     assert byte_size(inspect(report)) < 4_000
 
-    sly = "\e[2J\e[31mFAKE\e[0m\rok"
+    # One sample per excluded category: Cc, Cf (a bidi override), Zs other
+    # than ASCII space, Zl, Zp, Co and Cn; and a plain name, echoed as given.
+    plain = "Ünïcode name, punct. & symbols ★ 1"
+
+    sly = [
+      "\e[2J\e[31mFAKE\e[0m\rok",
+      "a\u202Eb",
+      "nb\u00A0sp",
+      "ls\u2028",
+      "ps\u2029",
+      "pu\uE000",
+      "un\u0378"
+    ]
 
     sly_body =
       Jason.encode!(%{
-        "tables" => [
-          %{"table" => "corporations", "rows" => [%{"domain" => "s.example", sly => 1}]},
-          %{"table" => sly, "rows" => [%{"name" => "S"}]},
-          %{"table" => "a\u202Eb", "rows" => [%{"name" => "S"}]},
-          %{"table" => "ls\u2028table", "rows" => [%{"name" => "S"}]}
-        ]
+        "tables" =>
+          [
+            %{
+              "table" => "corporations",
+              "rows" => [Map.new([{"domain", "s.example"} | Enum.map(sly, &{&1, 1})])]
+            }
+          ] ++
+            for(n <- [plain | sly], do: %{"table" => n, "rows" => [%{"name" => "S"}]})
       })
 
     {:ok, sly_report} = Import.run(a.id, sly_body, :json)
-    refute inspect(sly_report, printable_limit: :infinity) =~ "\e"
 
-    for r <- sly_report.refusals,
-        name <- [r.table, r.data[:table], r.data[:column]],
-        is_binary(name),
-        do: refute(name =~ ~r/[\e\r\x{202E}\x{2028}]/u)
+    echoed =
+      for r <- sly_report.refusals, n <- [r.data[:table], r.data[:column]], is_binary(n), do: n
+
+    assert plain in echoed
+
+    for n <- echoed,
+        <<c::utf8 <- n>>,
+        do: assert(<<c::utf8>> =~ ~r/^[\p{L}\p{N}\p{M}\p{P}\p{S} ]$/u, inspect(n))
+
+    for n <- sly, do: refute(n in echoed)
 
     bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
     assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)
