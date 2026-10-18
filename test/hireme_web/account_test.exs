@@ -89,4 +89,26 @@ defmodule HiremeWeb.AccountTest do
     {:ok, _} = Account.call("account.key.rename", %{"id" => key.id, "name" => "renamed"}, ctx)
     assert {:ok, %{changed: true}} = Account.call("account.watch", %{"since" => cursor}, ctx)
   end
+
+  test "a key taking the channel while the lens is parked moves the cursor", %{
+    session: s,
+    ctx: ctx
+  } do
+    on_exit(fn ->
+      for {pid, _} <- Registry.lookup(Hireme.Sequencer.Registry, s.account_id),
+          do: DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+    end)
+
+    {:ok, %{secret: secret}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+    {:ok, %{cursor: cursor, leases: []}} = Account.call("account.overview", %{}, ctx)
+    assert {:park, :account} = Account.call("account.watch", %{"since" => cursor}, ctx)
+
+    alias HiremeWeb.Wire.Codec
+    {:ok, wire} = HiremeWeb.Session.open(%{peer_ip: "127.0.0.1", origin: nil, carrier: :ws})
+    {:push, _, wire} = HiremeWeb.Session.frame(Codec.encode_hello(:key, secret, "agent"), wire)
+    {:push, _, _} = HiremeWeb.Session.frame(Codec.encode_rpc(1, "lease.claim", "{}"), wire)
+
+    assert {:ok, %{changed: true}} = Account.call("account.watch", %{"since" => cursor}, ctx)
+    assert {:ok, %{leases: [_]}} = Account.call("account.overview", %{}, ctx)
+  end
 end

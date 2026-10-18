@@ -115,7 +115,9 @@ defmodule Hireme.Mfa do
         uri =
           NimbleTOTP.otpauth_uri(
             "#{@issuer}:#{URI.encode(label, &URI.char_unreserved?/1)}",
-            secret, issuer: @issuer)
+            secret,
+            issuer: @issuer
+          )
 
         {:ok,
          %{
