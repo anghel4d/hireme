@@ -65,12 +65,16 @@ defmodule Hireme.Lease do
   """
   def revoke(account_id, lease_id, meta) do
     with true <- Sequencer.running?(account_id) || {:error, :not_found},
-         :ok <- Sequencer.lease(account_id, {:revoke, lease_id}) do
-      Hireme.Audit.record(
-        :lease_revoked,
-        %{lease_id: lease_id},
-        Map.put(meta, :account_id, account_id)
-      )
+         {:ok, changed} <- Sequencer.lease(account_id, {:revoke, lease_id}) do
+      # Revoking what is already revoked, or holds nothing, changes
+      # nothing and records nothing.
+      if changed,
+        do:
+          Hireme.Audit.record(
+            :lease_revoked,
+            %{lease_id: lease_id},
+            Map.put(meta, :account_id, account_id)
+          )
 
       :ok
     end
@@ -255,7 +259,10 @@ defmodule Hireme.Lease do
     |> Enum.sort_by(& &1.id)
   end
 
-  @doc "The operator's revoke: claims released, channel closed, even a browser's."
+  @doc """
+  The operator's revoke: claims released, channel closed, even a browser's.
+  `:unchanged` when no session it reaches holds the channel or a claim.
+  """
   def revoke(%__MODULE__{} = l, id) do
     case l.sessions[id] do
       nil ->
@@ -269,18 +276,24 @@ defmodule Hireme.Lease do
             do: for({sid, s} <- l.sessions, s.key_id == target.key_id, do: sid),
             else: [id]
 
-        Enum.reduce(ids, {:ok, l, []}, fn sid, {:ok, l, released} ->
-          {l, more} = drop_claims(l, sid, :all)
-
-          l =
-            update_in(
-              l.sessions[sid],
-              &Map.merge(&1, %{channel: false, since: nil, revoked: true})
-            )
-
-          {:ok, l, released ++ more}
-        end)
+        if Enum.any?(ids, &(l.sessions[&1].channel or MapSet.size(l.sessions[&1].held) > 0)),
+          do: revoke_all(l, ids),
+          else: :unchanged
     end
+  end
+
+  defp revoke_all(l, ids) do
+    Enum.reduce(ids, {:ok, l, []}, fn sid, {:ok, l, released} ->
+      {l, more} = drop_claims(l, sid, :all)
+
+      l =
+        update_in(
+          l.sessions[sid],
+          &Map.merge(&1, %{channel: false, since: nil, revoked: true})
+        )
+
+      {:ok, l, released ++ more}
+    end)
   end
 
   defp holder(l, app_id) do

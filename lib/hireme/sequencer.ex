@@ -2008,7 +2008,8 @@ defmodule Hireme.Sequencer do
 
   defp lease_request({:revoke, lease_id}, _pid, state) do
     case Lease.revoke(state.lease, lease_id) do
-      {:ok, lease, _released} -> {:ok, broadcast_leases(%{state | lease: lease}, [])}
+      {:ok, lease, _released} -> {{:ok, true}, broadcast_leases(%{state | lease: lease}, [])}
+      :unchanged -> {{:ok, false}, state}
       :error -> {{:error, :not_found}, state}
     end
   end

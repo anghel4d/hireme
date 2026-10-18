@@ -66,6 +66,9 @@ defmodule Hireme.LeaseTest do
     {:ok, l3, []} = Lease.revoke(l, 1)
     assert {:refused, :lease_missing, _} = Lease.check(l3, 1, nil)
     assert Lease.revoke(l, 77) == :error
+    # Nothing left to revoke: an already revoked session, or a key's that never claimed.
+    assert Lease.revoke(l3, 1) == :unchanged
+    assert Lease.revoke(l2, 2) == :unchanged
   end
 
   property "no application is ever held by two sessions, and check agrees with who holds it" do

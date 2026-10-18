@@ -703,6 +703,18 @@ defmodule HiremeWeb.AgentAttackTest do
       :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
       assert refused(c, "lease.claim", %{"ids" => [app.id]}) == :lease_missing
 
+      # Revoking it again changes nothing, so it records nothing: repeated
+      # revokes cannot grow the trail.
+      for _ <- 1..5, do: :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
+
+      assert Repo.aggregate(
+               from(r in Hireme.Rows.Audit,
+                 where: r.kind == "lease_revoked" and r.account_id == ^a.id
+               ),
+               :count,
+               skip_account: true
+             ) == 1
+
       assert {:nack, :lease_missing} =
                put(c, op(:put, :applications, %{role: "x"}, target: app.id))
 
