@@ -87,7 +87,9 @@ encrypted token naming the session and bound to eight bytes of its token
 hash, good for 60 seconds, minted only for a live session past its second
 factor. Spending it re-reads the session row. A wire session keeps the
 browser session's lifetime: every `account.*` call and the wire's tick
-check it, and wire activity counts as activity.
+check it, and wire activity counts as activity. A session that owes a
+second factor (one was enrolled after it signed in) holds no wire: its
+open wire ends when the factor is bound.
 
 ## Second factor
 
@@ -99,7 +101,7 @@ An account with no factor steps up by signing in again.
 
 | Factor | Standard | What is checked |
 | --- | --- | --- |
-| Authenticator app | RFC 6238; 63B-4 Sec. 3.2.9; ASVS 6.5.1, 6.5.5 | 6 digits, 30 s step, one step of grace either side; the matched step is recorded, so a code is good once. The seed is sealed at rest with the application key. |
+| Authenticator app | RFC 6238; 63B-4 Sec. 3.2.9; ASVS 6.5.1, 6.5.5 | 6 digits, 30 s step, one step of grace either side; the matched step is recorded, so a code is good once. The seed is sealed at rest with the application key; a seed that does not unseal (the key rotated, a damaged row) matches no code. |
 | Passkey or security key | WebAuthn L3; 63B-4 Sec. 3.2.5; ASVS 6.6 | User verification required at registration and every assertion. Ed25519, ES256, RS256. Origin and RP ID pinned to the host. A counter that fails to advance disables the credential as cloned (WebAuthn L3 Sec. 6.1.1). Attestation is not demanded, so syncable passkeys are accepted: AAL2, not AAL3. The user handle is an opaque per-account value, not the account id. |
 | Recovery codes | 63B-4 Sec. 3.2.4; ASVS 6.5.2, 6.5.4 | Ten 80-bit codes, salted and hashed, each spent once (atomically), issued with the first factor and replaceable behind step-up. |
 
@@ -121,7 +123,8 @@ public id, 43 base62 characters of secret (about 256 bits) and a CRC
 checksum, so a mistyped or invented key is refused before any lookup. The
 server keeps the secret's SHA-256 and shows the secret once. A key
 expires if asked to, is revocable at once, and an account holds at most
-one hundred live, unexpired ones. An agent presents its key once, in its
+one hundred live, unexpired ones. A key's name, which notices mail, holds
+no control or format character. An agent presents its key once, in its
 wire session's HELLO, never in a URL; every failure looks the same, and a
 peer is limited in failed attempts per minute (a throttled HELLO is told
 to retry later; successes never spend the budget).
