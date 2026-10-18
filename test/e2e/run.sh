@@ -10,14 +10,17 @@
 # Environment (all optional):
 #   HIREME_MCP   a built hireme-mcp; else `cargo build --release -p hireme-mcp`
 #   CHROMIUM     the browser; else the BRIEF's pinned nix Chromium 155
-#   E2E_NODE     where playwright@1.64.1 is installed; else /tmp/hireme-e2e-node
+#   E2E_NODE     where playwright@1.64.1 is installed (it must be the caller's
+#                own directory); else a fresh mktemp dir, removed on exit
 #   OUT          screenshots and the node's log; else a fresh /tmp dir
+#   SHA          the revision to print, for a checkout without .git
 # Needs mix, cargo, node 24 and npm on PATH (BRIEF.md, 'Toolchain').
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CHROMIUM=${CHROMIUM:-/nix/store/ini1ifgvcsvw48x4mxawrv9jvbdwn70p-chromium-155.0.8059.79/bin/chromium}
-E2E_NODE=${E2E_NODE:-/tmp/hireme-e2e-node}
+E2E_OWN=
+if [ -z "${E2E_NODE:-}" ]; then E2E_NODE=$(mktemp -d /tmp/hireme-e2e-node.XXXXXX); E2E_OWN=1; fi
 OUT=${OUT:-$(mktemp -d /tmp/hireme-e2e.XXXXXX)}
 TMP=$(mktemp -d /tmp/hireme-e2e-db.XXXXXX)
 NODE_PID=
@@ -25,10 +28,11 @@ NODE_PID=
 cleanup() {
   if [ -n "$NODE_PID" ]; then kill -TERM -- "-$NODE_PID" 2>/dev/null || true; wait "$NODE_PID" 2>/dev/null || true; fi
   rm -rf "$TMP"
+  if [ -n "$E2E_OWN" ]; then rm -rf "$E2E_NODE"; fi
 }
 trap cleanup EXIT
 
-echo "out=$OUT sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
+echo "out=$OUT sha=${SHA:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)}"
 
 if [ -z "${HIREME_MCP:-}" ]; then
   cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
@@ -37,6 +41,11 @@ fi
 [ -x "$HIREME_MCP" ] || { echo "FAIL setup: no hireme-mcp at $HIREME_MCP"; echo "res=1"; exit 1; }
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
+# Code runs from E2E_NODE: it must be ours, and no one else may write it.
+[ -e "$E2E_NODE" ] || mkdir -m 700 -p "$E2E_NODE"
+if [ ! -O "$E2E_NODE" ] || [ -n "$(find "$E2E_NODE" -maxdepth 0 -perm /022)" ]; then
+  echo "FAIL setup: $E2E_NODE is not the caller's own directory, or others may write it"; echo "res=1"; exit 1
+fi
 if [ ! -d "$E2E_NODE/node_modules/playwright" ]; then
   mkdir -p "$E2E_NODE"
   (cd "$E2E_NODE" && npm init -y >/dev/null && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --silent playwright@1.64.1)
