@@ -9,6 +9,7 @@
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, DAY_MAX, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
+import { describe } from "./guard.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
 
@@ -168,7 +169,8 @@ export function load(hw: Boot): void {
     })
   })().catch((e: unknown) => {
     warm = false
-    notice("error", `The kernel did not load: ${String(e)}`)
+    // The root cause of whatever fails after it: pinned, so the symptoms' notices never push it out.
+    notice("error", `The kernel did not load: ${describe(e).slice(0, 300)}`, 0, true)
   })
 }
 

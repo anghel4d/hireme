@@ -35,6 +35,8 @@ export interface Notice {
   text: string
   /** Epoch ms after which it fades; 0 stays until dismissed. */
   until: number
+  /** A root cause (the kernel did not load): newer notices never push it out. */
+  pinned?: boolean
 }
 
 export interface Model {
@@ -232,9 +234,12 @@ export function query(key: string, value: string): void {
 
 let nextNotice = 1
 
-export function notice(tone: Notice["tone"], text: string, ms = tone === "error" ? 0 : 6000): void {
+export function notice(tone: Notice["tone"], text: string, ms = tone === "error" ? 0 : 6000, pinned = false): void {
   const until = ms === 0 ? 0 : Date.now() + ms
-  set({ notices: [...model.notices.slice(-4), { id: nextNotice++, tone, text, until }] })
+  // Five at most: the oldest unpinned give way; a pinned root cause stays until dismissed.
+  const kept = model.notices.filter((n) => n.pinned)
+  const rest = model.notices.filter((n) => !n.pinned).slice(-Math.max(0, 4 - kept.length))
+  set({ notices: [...kept, ...rest, { id: nextNotice++, tone, text, until, ...(pinned ? { pinned } : {}) }] })
   if (ms !== 0) setTimeout(expire, ms + 50)
 }
 

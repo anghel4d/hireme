@@ -9,6 +9,7 @@
 
 import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
+import { guard, type Part } from "./guard.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { SCHEMA_REV } from "./gen/schema.ts"
@@ -62,30 +63,12 @@ function link(): Html {
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const waiting = (lens: Lens): boolean => DERIVES.includes(lens) && kernel.warming()
 
-/** Which lens hooks are failing ("focus:enter"): latched until that hook succeeds again, whatever its
- * error says, so a hook that keeps throwing raises one notice, not one per repaint. */
-const broken = new Set<string>()
-const VERB = { enter: "load", view: "draw", after: "update", refresh: "refresh" } as const
-
-/** A lens hook, or `fallback` when it throws: the shell around it (nav, link, notices) keeps painting.
- * The first failure is logged with its stack and told once, clipped; it latches until the hook works. */
-function guarded<T>(lens: Lens, part: keyof typeof VERB, fn: () => T, fallback: T): T {
-  const key = `${lens}:${part}`
-  try {
-    const r = fn()
-    broken.delete(key)
-    return r
-  } catch (e) {
-    if (!broken.has(key)) {
-      broken.add(key)
-      console.error(`hireme: the ${lens} lens failed to ${VERB[part]}`, e)
-      const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200)
-      // After this paint: the notice repaints, and the hook would throw again.
-      queueMicrotask(() => notice("error", `The ${lens} lens failed to ${VERB[part]} (${why}). Reload the page; if it repeats, tell the operator's maintainer.`))
-    }
-    return fallback
-  }
-}
+/** The lens hooks' guard (guard.ts): a failing hook's fallback stands in, told once, logged once. */
+const hooks = guard(
+  (text) => notice("error", text),
+  (what, e) => console.error(`hireme: ${what}`, e),
+)
+const guarded = <T>(lens: Lens, part: Part, fn: () => T, fallback: T): T => hooks.run(lens, part, fn, fallback)
 
 const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
 
@@ -124,7 +107,7 @@ function render(): void {
   morph(root, shell())
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
-  if (lens && !broken.has(`${model.address.lens}:view`)) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
+  if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
   // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
   const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
   if (want && !focusedOnce.has(want)) {
