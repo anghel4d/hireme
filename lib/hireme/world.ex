@@ -678,6 +678,9 @@ defmodule Hireme.World do
       {"in", vs} when is_list(vs) and length(vs) <= @find_max ->
         cast_list(col, vs, f)
 
+      {"in", vs} when is_list(vs) ->
+        {:error, :too_large, %{column: col.name, filter: "in", max: @find_max}}
+
       {op, s} when op in ~w(like prefix) and is_binary(s) and byte_size(s) > 1000 ->
         {:error, :too_large, %{column: col.name, filter: op, max: 1000}}
 

@@ -530,4 +530,18 @@ defmodule Hireme.WorldTest do
     assert %{"param" => "id", "got" => ~s("7")} =
              json.(World.call("history", %{"table" => "corporations", "id" => "7"}, ctx))
   end
+
+  test "an in filter over the cap's values is too_large, naming the filter and the cap", %{
+    account: a
+  } do
+    find = fn n ->
+      World.find(a.id, Grants.operator(), %{
+        "table" => "corporations",
+        "where" => %{"name" => %{"in" => Enum.map(1..n, &"c#{&1}")}}
+      })
+    end
+
+    assert {:ok, _} = find.(500)
+    assert {:error, :too_large, %{column: "name", filter: "in", max: 500}} = find.(501)
+  end
 end
