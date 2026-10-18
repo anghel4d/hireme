@@ -76,7 +76,9 @@ let
       doCheck = false;
       installPhase = ''
         runHook preInstall
-        release=$(dirname "$(find native/target -path '*/release/hireme-mcp' -type f | head -1)")
+        # buildRustPackage builds into target/<triple>/release under its own
+        # target dir, wherever that is; find the binaries rather than guess.
+        release=$(dirname "$(find . -path '*/release/hireme-mcp' -type f -not -path '*/deps/*' | head -1)")
         install -Dm755 "$release/hireme-gate" $out/bin/hireme-gate
         install -Dm755 "$release/hireme-mcp" $out/bin/hireme-mcp
         install -Dm644 "$release/libnif.so" $out/lib/libnif.so
