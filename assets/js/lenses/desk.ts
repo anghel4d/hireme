@@ -16,7 +16,6 @@ import { EMPTY, html, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
 
 const CLASSES = ["cool", "warm", "hot", "blocked"] as const
-const PAGE = 30
 
 const list = (k: string): string[] => (model.address.q.get(k) ?? "").split(",").filter((s) => s !== "")
 
@@ -38,7 +37,6 @@ function filter(): Filter {
 function toggle(key: string, v: string): void {
   const now = list(key)
   query(key, (now.includes(v) ? now.filter((x) => x !== v) : [...now, v]).join(","))
-  set({ deskLimit: PAGE })
 }
 
 function chips(key: string, all: readonly string[], counts: readonly number[] | undefined, label: string): Html {
@@ -68,21 +66,31 @@ function scores(): Html {
     ${chips("heat", CLASSES, s.by_class, "Heat")}`
 }
 
-/** A card's first landing; `after` keeps it current from then on. */
-function cardShell(id: number): Html {
-  return html`<article class="app-card" data-key="a${id}" data-id="${id}" data-morph="own" data-act="open" data-click tabindex="-1">
-    <header><span class="no"></span><span class="score"></span></header>
-    <h3 class="company"></h3>
-    <p class="role"></p>
-    <p class="where muted"></p>
-    <footer><span class="stage tag"></span><span class="band tag"></span><span class="heat"></span><span class="pips" role="img"></span></footer>
-    <p class="lease muted"></p>
-  </article>`
-}
+// The board is a window of fixed-size tiles placed by position (v1's geometry): only the rows in
+// view (and one either side) are in the page, and a tile leaving the window is reused for one
+// entering it, so search, filters and a return to the desk rewrite tiles instead of laying out a
+// new grid.
+const TILE_W = 250
+const TILE_H = 146
+const GAP = 10
+const SPARE = 1
+
+const shell = document.createElement("template")
+shell.innerHTML = `<article class="app-card" data-act="open" data-click tabindex="-1" role="listitem">
+  <header><span class="no"></span><span class="score"></span></header>
+  <h3 class="company"></h3>
+  <p class="role"></p>
+  <p class="where muted"></p>
+  <footer><span class="stage tag"></span><span class="band tag"></span><span class="heat"></span><span class="pips" role="img"></span></footer>
+  <p class="lease muted"></p>
+</article>`
+
+const tiles = new Map<number, HTMLElement>()
+const spare: HTMLElement[] = []
+let cols = 1
 
 function view(): Html {
   const ids = board(filter())
-  const shown = ids.subarray(0, model.deskLimit)
   const any = model.address.q.size > 0
   return html`<div class="desk">
     <div class="toolbar" data-key="toolbar">
@@ -93,9 +101,8 @@ function view(): Html {
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>
     ${scores()}
-    <div class="board" role="list" aria-label="Applications" data-key="board">${Array.from(shown, (id) => cardShell(id))}</div>
+    <div class="board" role="list" aria-label="Applications" data-key="board" data-morph="own"></div>
     ${ids.length === 0 ? html`<p class="empty">${any ? "Nothing matches these filters." : "No applications yet. An agent adds them through the MCP, or import a pack."}</p>` : EMPTY}
-    ${ids.length > shown.length ? html`<button type="button" data-act="more" class="more">Show ${Math.min(PAGE, ids.length - shown.length)} more of ${ids.length - shown.length}</button>` : EMPTY}
     <p class="hint keys">j/k or arrows move · Enter opens · / searches · 1–7 switch lenses</p>
   </div>`
 }
@@ -117,46 +124,120 @@ function claims(): Map<number, string> {
 }
 
 /** Each drawn card, value by value. Its stage and claim are also attributes (data-stage, data-leased). */
+// The board's width and document offset, measured where layout is already clean (a resize
+// observer's turn, a scroll) and reused in `after`, so drawing never forces a layout mid-script.
+let width = 0
+let boardTop = 0
+// window.scrollY flushes layout when the page is dirty, so the scroll is read where it is clean.
+let scrolled = 0
+let watched: HTMLElement | null = null
+const sized = new ResizeObserver(() => {
+  if (watched?.isConnected) paint(watched, true)
+})
+
 function after(root: HTMLElement): void {
-  const more = root.querySelector<HTMLElement>("button.more")
-  grower ??= new IntersectionObserver((seen) => {
-    if (seen.some((e) => e.isIntersecting)) set({ deskLimit: model.deskLimit + PAGE })
-  }, { rootMargin: "200px 0px" })
-  grower.disconnect()
-  if (more) grower.observe(more)
+  const el = root.querySelector<HTMLElement>(".board")
+  if (!el) return
+  if (watched !== el) {
+    sized.disconnect()
+    sized.observe(el)
+    watched = el
+  }
+  paint(el, width === 0)
+}
+
+/** Lays out the window of tiles for the current filter and scroll; writes each tile that changed. */
+function paint(el: HTMLElement, measure: boolean): void {
+  const ids = board(filter())
+  if (measure) {
+    scrolled = window.scrollY
+    width = el.clientWidth
+    boardTop = el.getBoundingClientRect().top + scrolled
+  }
+  cols = Math.max(1, Math.floor((width + GAP) / (TILE_W + GAP)))
+  const w = (width - GAP * (cols - 1)) / cols
+  const rows = Math.ceil(ids.length / cols)
+  const h = `${Math.max(0, rows * (TILE_H + GAP) - GAP)}px`
+  if (el.style.height !== h) el.style.height = h
+  const top = boardTop - scrolled
+  const r0 = Math.max(0, Math.floor(-top / (TILE_H + GAP)) - SPARE)
+  const r1 = Math.min(rows - 1, Math.floor((window.innerHeight - top) / (TILE_H + GAP)) + SPARE)
+  const first = r0 * cols
+  const last = Math.min(ids.length, (r1 + 1) * cols)
+  const want = new Set(ids.subarray(first, last))
+  for (const [id, t] of tiles) {
+    if (want.has(id)) continue
+    tiles.delete(id)
+    t.remove()
+    spare.push(t)
+  }
   const held = claims()
-  for (const el of root.querySelectorAll<HTMLElement>("article.app-card")) {
-    const id = Number(el.dataset.id)
-    const by0 = held.get(id)
-    // A card is rewritten only when the rows moved, its selection flipped or its claim changed: a
-    // keystroke that moves the selection touches two cards, not every card on the board.
-    const sig = `${model.rows}|${id === model.selected ? 1 : 0}|${by0 ?? ""}`
-    if (el.dataset.sig === sig) continue
-    el.dataset.sig = sig
-    const c = card(id)
-    const stage = c?.stage ?? String(value("applications", id, "stage") ?? "")
-    if (el.dataset.stage !== stage) el.dataset.stage = stage
-    const by = held.get(id)
-    if (by === undefined) delete el.dataset.leased
-    else if (el.dataset.leased !== by) el.dataset.leased = by
-    write(el.querySelector(".lease"), by === undefined ? "" : `leased by ${by || "an agent"}`)
-    write(el.querySelector(".no"), `#${text(value("applications", id, "no"))}`)
-    write(el.querySelector(".score"), c ? `${c.score_100}${c.stored ? "" : "?"}` : "")
-    write(el.querySelector(".company"), text(value("applications", id, "company")) || "(no company)")
-    write(el.querySelector(".role"), text(value("applications", id, "role")))
-    write(el.querySelector(".where"), [value("applications", id, "location"), value("applications", id, "work_mode")].filter((x) => x).map(text).join(" · "))
-    write(el.querySelector(".stage"), stage.replace(/_/g, " "))
-    write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
-    write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
-    rail(el.querySelector(".pips"), text(value("applications", id, "pips")))
-    const heat = c?.class ?? "cool"
-    if (el.dataset.heat !== heat) el.dataset.heat = heat
-    const cls = `app-card band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`
-    if (el.className !== cls) el.className = cls
-    el.setAttribute("aria-current", id === model.selected ? "true" : "false")
-    el.title = c && !c.stored ? "score is the kernel's suggestion; it never overwrites a stored score" : ""
+  for (let i = first; i < last; i++) {
+    const id = ids[i] ?? 0
+    let t = tiles.get(id)
+    // Tiles from a board that was left (another lens drew over it) are taken back into this one.
+    if (t && t.parentElement !== el) el.append(t)
+    if (!t) {
+      t = spare.pop() ?? (shell.content.firstElementChild!.cloneNode(true) as HTMLElement)
+      t.dataset.id = String(id)
+      t.dataset.sig = ""
+      tiles.set(id, t)
+      el.append(t)
+    }
+    const at = `translate(${(i % cols) * (w + GAP)}px, ${Math.floor(i / cols) * (TILE_H + GAP)}px)`
+    if (t.style.transform !== at) t.style.transform = at
+    const wpx = `${w}px`
+    if (t.style.width !== wpx) t.style.width = wpx
+    tile(t, id, held.get(id))
   }
 }
+
+/** One tile's values, rewritten only when the rows moved, its selection flipped or its claim changed. */
+function tile(el: HTMLElement, id: number, by: string | undefined): void {
+  const sig = `${id}|${model.rows}|${id === model.selected ? 1 : 0}|${by ?? ""}`
+  if (el.dataset.sig === sig) return
+  el.dataset.sig = sig
+  const c = card(id)
+  const stage = c?.stage ?? String(value("applications", id, "stage") ?? "")
+  if (el.dataset.stage !== stage) el.dataset.stage = stage
+  if (by === undefined) delete el.dataset.leased
+  else if (el.dataset.leased !== by) el.dataset.leased = by
+  write(el.querySelector(".lease"), by === undefined ? "" : `leased by ${by || "an agent"}`)
+  write(el.querySelector(".no"), `#${text(value("applications", id, "no"))}`)
+  write(el.querySelector(".score"), c ? `${c.score_100}${c.stored ? "" : "?"}` : "")
+  write(el.querySelector(".company"), text(value("applications", id, "company")) || "(no company)")
+  write(el.querySelector(".role"), text(value("applications", id, "role")))
+  write(el.querySelector(".where"), [value("applications", id, "location"), value("applications", id, "work_mode")].filter((x) => x).map(text).join(" · "))
+  write(el.querySelector(".stage"), stage.replace(/_/g, " "))
+  write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
+  write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
+  rail(el.querySelector(".pips"), text(value("applications", id, "pips")))
+  const heat = c?.class ?? "cool"
+  if (el.dataset.heat !== heat) el.dataset.heat = heat
+  const cls = `app-card band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`
+  if (el.className !== cls) el.className = cls
+  el.setAttribute("aria-current", id === model.selected ? "true" : "false")
+  el.title = c && !c.stored ? "score is the kernel's suggestion; it never overwrites a stored score" : ""
+}
+
+// Scrolling or resizing moves the window without a render: the tiles in view are re-placed.
+let queued = false
+function repaint(): void {
+  if (queued || model.address.lens !== "desk") return
+  queued = true
+  requestAnimationFrame(() => {
+    queued = false
+    const el = document.querySelector<HTMLElement>("#lens .board")
+    if (el) paint(el, true)
+  })
+}
+// A scroll event is dispatched in the frame it paints in, so the window is placed right there.
+addEventListener("scroll", () => {
+  scrolled = window.scrollY
+  const el = model.address.lens === "desk" ? document.querySelector<HTMLElement>("#lens .board") : null
+  if (el) paint(el, false)
+}, { passive: true })
+addEventListener("resize", repaint)
 
 const PIP: Record<string, string> = { D: "done", A: "now", P: "to do", S: "skipped", B: "blocked" }
 
@@ -175,34 +256,23 @@ function rail(el: HTMLElement | null, pips: string): void {
 }
 
 
-function columns(): number {
-  const cards = document.querySelectorAll<HTMLElement>("article.app-card")
-  const top = cards[0]?.offsetTop
-  let n = 0
-  for (const c of cards) {
-    if (c.offsetTop !== top) break
-    n++
-  }
-  return Math.max(1, n)
-}
-
 function move(dir: number): void {
   const f = filter()
-  const next = step(f, model.selected, dir, columns())
+  const next = step(f, model.selected, dir, cols)
   if (next === 0) return
-  const ids = board(f)
-  const at = ids.indexOf(next)
-  set({ selected: next, ...(at >= model.deskLimit ? { deskLimit: Math.ceil((at + 1) / PAGE) * PAGE } : {}) })
-  requestAnimationFrame(() => document.querySelector(`article.app-card[data-id="${next}"]`)?.scrollIntoView({ block: "nearest" }))
+  set({ selected: next })
+  // The selected tile's row is brought into view; the window follows the scroll.
+  const at = board(f).indexOf(next)
+  if (at < 0) return
+  const y = boardTop + Math.floor(at / cols) * (TILE_H + GAP)
+  if (y < scrolled + 56) window.scrollTo(0, y - 56)
+  else if (y + TILE_H > scrolled + window.innerHeight) window.scrollTo(0, y + TILE_H - window.innerHeight + GAP)
 }
 
 function open(id: number): void {
   const no = value("applications", id, "no")
   if (no !== null) go({ lens: "focus", sub: String(no), q: new Map() })
 }
-
-// The board grows as its end scrolls into view (a page at a time), so the DOM holds about what is seen.
-let grower: IntersectionObserver | null = null
 
 const desk: View = {
   title: "Desk",
@@ -214,13 +284,10 @@ const desk: View = {
         return toggle(el.dataset.k ?? "", el.dataset.v ?? "")
       case "search": {
         // The board is the kernel's, so the answer is drawn in the keystroke's frame (no debounce).
-        model.deskLimit = PAGE
         return query("q", (el as HTMLInputElement).value)
       }
       case "min":
         return query("min", (el as HTMLInputElement).value)
-      case "more":
-        return set({ deskLimit: model.deskLimit + PAGE })
       case "open": {
         const id = Number(el.dataset.id)
         if (model.selected === id) return open(id)

@@ -327,7 +327,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card header { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .app-card .score { font-weight: 700; color: var(--ink); font-size: 15px; }
 .app-card h3 { margin: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.app-card .role { margin: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+.app-card .role { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-card .where { margin: 0; font-size: 12px; }
 .app-card footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
 .app-card .role { color: var(--muted); }
