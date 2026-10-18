@@ -36,6 +36,7 @@ defmodule HiremeWeb.Session do
   alias HiremeWeb.Wire.Codec
 
   @hello_ms 10_000
+  @world ~w(schema find get history text)
   @tick_ms 60_000
 
   # --------------------------------------------------- carrier-neutral
@@ -179,7 +180,13 @@ defmodule HiremeWeb.Session do
       {:ok, id, method, json} ->
         case params(json) do
           {:ok, params} ->
-            rpc(id, method, params, state)
+            case metered(method, state) do
+              :ok ->
+                rpc(id, method, params, state)
+
+              {:error, retry_ms} ->
+                {:push, [reply(id, false, error(:rate, %{retry_ms: retry_ms}), state)], state}
+            end
 
           :error ->
             {:push,
@@ -207,6 +214,15 @@ defmodule HiremeWeb.Session do
   end
 
   defp active(state, _now), do: state
+
+  # A key's reads (and lease requests) are metered like its writes.
+  defp metered(method, %{session: %{key_id: key_id}}) when key_id != nil do
+    if method in @world or String.starts_with?(method, "lease."),
+      do: Security.hit(:agent_read, key_id, 1),
+      else: :ok
+  end
+
+  defp metered(_method, _state), do: :ok
 
   defp params(""), do: {:ok, %{}}
 
@@ -241,6 +257,8 @@ defmodule HiremeWeb.Session do
 
     case Hireme.Keys.authenticate(secret, ip) do
       {:ok, key} ->
+        # A connect loop is bounded per key, before anything is audited.
+        if Security.limit(:key_hello, key.id) != :ok, do: throw(:rate_limited)
         meta = %{key: key.key_id, label: label(label, key.name), carrier: peer[:carrier]}
 
         Hireme.Audit.record(:wire_key, meta, %{account_id: key.account_id, key_id: key.id, ip: ip})
@@ -263,6 +281,8 @@ defmodule HiremeWeb.Session do
       refused ->
         refused
     end
+  catch
+    :rate_limited -> {:error, :rate_limited}
   end
 
   defp authenticate(_, _), do: :error
@@ -279,8 +299,14 @@ defmodule HiremeWeb.Session do
   defp allowed_origin?(origin),
     do: String.trim_trailing(origin, "/") in HiremeWeb.Endpoint.origins()
 
+  # A label is shown to the operator and to other agents (leases, refusals):
+  # control characters (newlines, escapes) are dropped so it cannot pose as
+  # anything but a name.
   defp label(given, fallback) do
-    case String.slice(String.trim(given), 0, 64) do
+    case given
+         |> String.replace(~r/[\p{Cc}\p{Cf}]/u, " ")
+         |> String.trim()
+         |> String.slice(0, 64) do
       "" -> fallback
       l -> l
     end
@@ -298,8 +324,14 @@ defmodule HiremeWeb.Session do
            # A snapshot taken under another schema is no base for a PATCH.
            if(hello.schema_rev == Hireme.Schema.schema_rev(), do: hello.snapshot_rev, else: 0)
          ) do
-      {:ok, joined} -> welcome(joined, who, session, state)
-      {:error, _} -> bye(:restart, "the account is unavailable; retry", state)
+      {:ok, joined} ->
+        welcome(joined, who, session, state)
+
+      {:error, :too_many} ->
+        bye(:restart, "this key holds as many sessions as it may; retry later", state)
+
+      {:error, _} ->
+        bye(:restart, "the account is unavailable; retry", state)
     end
   end
 
@@ -335,7 +367,6 @@ defmodule HiremeWeb.Session do
 
   # --------------------------------------------------------------- RPC
 
-  @world ~w(schema find get history text)
 
   defp rpc(id, method, params, state) when method in @world do
     ctx = %{account_id: state.account_id, grants: state.session.grants}

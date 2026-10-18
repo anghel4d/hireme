@@ -186,6 +186,10 @@ defmodule Hireme.Sequencer do
       backfill_after: 0
     }
 
+    # A revoked or changed key, a revoked browser session or a suspension is
+    # heard here too: its sessions stop writing the moment the sequencer
+    # knows, not when their carrier closes.
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(account_id))
     purge_ledger(Store.now())
     Process.send_after(self(), :purge, @purge_ms)
     send(self(), :backfill)
@@ -194,37 +198,13 @@ defmodule Hireme.Sequencer do
 
   @impl GenServer
   def handle_call({:subscribe, pid, session, snapshot_rev}, _from, state) do
-    now = Store.now()
-    ref = Process.monitor(pid)
-    sub = Map.merge(session, %{ref: ref, pid: pid})
+    held =
+      Enum.count(state.subs, fn {_, s} -> session.key_id != nil and s.key_id == session.key_id end)
 
-    state = %{
-      state
-      | subs: Map.put(state.subs, pid, sub),
-        lease: Lease.join(state.lease, session, now)
-    }
-
-    # A key's masks may have changed since its snapshot, so only the
-    # operator's session resumes; a key always gets a BOOT.
-    resume = snapshot_rev == state.rev and snapshot_rev > 0 and session.key_id == nil
-
-    {state, body} =
-      if resume,
-        do: {state, wire_tables(state, session.grants, now)},
-        else: snapshot(session.grants, state, now)
-
-    kind = if resume, do: :PATCH, else: :BOOT
-    frames = [Codec.frame(kind, state.rev, body, end: true, deflate: true)]
-    state = broadcast_leases(state, except: pid)
-
-    reply = %{
-      rev: state.rev,
-      lease: Lease.channel?(state.lease, session.id),
-      frames: frames,
-      pid: self()
-    }
-
-    {:reply, {:ok, reply}, state, @idle_ms}
+    # One key holds at most this many wire sessions at once.
+    if held >= Security.key_sessions(),
+      do: {:reply, {:error, :too_many}, state, @idle_ms},
+      else: subscribe_session(pid, session, snapshot_rev, state)
   end
 
   def handle_call({:lease, pid, request}, _from, state) do
@@ -287,6 +267,19 @@ defmodule Hireme.Sequencer do
     end
   end
 
+  def handle_info({:bye, who, _reason}, state) do
+    ended = for {pid, sub} <- state.subs, ends?(who, sub), do: {pid, sub}
+
+    after_ =
+      Enum.reduce(ended, state, fn {pid, sub}, st ->
+        if sub.ref, do: Process.demonitor(sub.ref, [:flush])
+        %{st | subs: Map.delete(st.subs, pid), lease: Lease.leave(st.lease, sub.id)}
+      end)
+
+    if ended != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
+    {:noreply, broadcast_leases(after_, []), @idle_ms}
+  end
+
   def handle_info(:backfill, state) do
     {:noreply, backfill(state), @idle_ms}
   rescue
@@ -315,6 +308,45 @@ defmodule Hireme.Sequencer do
 
   def handle_info(:timeout, state), do: {:noreply, state, @idle_ms}
   def handle_info(_, state), do: {:noreply, state, @idle_ms}
+
+  defp subscribe_session(pid, session, snapshot_rev, state) do
+    now = Store.now()
+    ref = Process.monitor(pid)
+    sub = Map.merge(session, %{ref: ref, pid: pid})
+
+    state = %{
+      state
+      | subs: Map.put(state.subs, pid, sub),
+        lease: Lease.join(state.lease, session, now)
+    }
+
+    # A key's masks may have changed since its snapshot, so only the
+    # operator's session resumes; a key always gets a BOOT.
+    resume = snapshot_rev == state.rev and snapshot_rev > 0 and session.key_id == nil
+
+    {state, body} =
+      if resume,
+        do: {state, wire_tables(state, session.grants, now)},
+        else: snapshot(session.grants, state, now)
+
+    kind = if resume, do: :PATCH, else: :BOOT
+    frames = [Codec.frame(kind, state.rev, body, end: true, deflate: true)]
+    state = broadcast_leases(state, except: pid)
+
+    reply = %{
+      rev: state.rev,
+      lease: Lease.channel?(state.lease, session.id),
+      frames: frames,
+      pid: self()
+    }
+
+    {:reply, {:ok, reply}, state, @idle_ms}
+  end
+
+  defp ends?({:key, id}, %{key_id: id}) when id != nil, do: true
+  defp ends?({:session, id}, %{session_id: id}) when id != nil, do: true
+  defp ends?(:account, _sub), do: true
+  defp ends?(_who, _sub), do: false
 
   # Ops from a caller that is not a wire session, as a passing session.
   defp run_as(actor, ops, state) do
