@@ -29,8 +29,15 @@ use alloc::vec::Vec;
 
 use wire::{Blocks, Value};
 
-/// The id column every stored and leased table carries.
+/// The id column every stored table and `leases` carries.
 pub const ID: u16 = 1;
+
+/// Whether a table's rows are keyed by an `id` column. The other wire
+/// tables (`clock`, `catalog`, `gone`) number their own columns from 1,
+/// so their rows are positional: replaced whole, numbered from 1.
+fn keyed(table: u16) -> bool {
+    schema::table_def(table).is_none_or(|t| t.cols.iter().any(|c| c.id == ID && c.name == "id"))
+}
 /// The row revision column.
 pub const REV: u16 = 3;
 /// Ids a client gives rows it inserts before the server answers. Server
@@ -481,14 +488,12 @@ impl Rows {
             }
             let n = b.nrows as usize;
             let ids: Vec<u32> = match b.col(ID) {
+                _ if !keyed(tid) => (1..=n as u32).collect(),
                 Some(c) if c.ty == wire::U32 && c.nrows() == n => (0..n).map(|i| c.u32(i)).collect(),
-                Some(_) => return Err(Error::Shape),
-                // A table with no id column (`clock`, `catalog`) is
-                // positional: replaced whole, rows numbered from 1.
-                None => (1..=n as u32).collect(),
+                _ => return Err(Error::Shape),
             };
             let t = self.table_mut(tid);
-            if replace && !replaced.contains(&tid) {
+            if (replace || !keyed(tid)) && !replaced.contains(&tid) {
                 t.clear();
                 replaced.push(tid);
             }
@@ -645,9 +650,6 @@ impl Rows {
         for t in base.tables.values() {
             let n = t.len();
             let mut b = w.block(t.id, n);
-            if t.column(ID).is_none() && n > 0 {
-                b.u32s(ID, t.ids.iter().copied());
-            }
             for c in &t.cols {
                 match &c.data {
                     Data::U32(v) => b.u32s(c.id, v.iter().copied()),

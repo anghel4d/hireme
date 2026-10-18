@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub mod atlas;
 pub mod ats;
+pub mod board;
 pub mod cv;
 pub mod heat;
 pub mod keywords;
@@ -28,3 +29,24 @@ pub mod text;
 
 /// A calendar day as days since 1970-01-01, the schema's `day`.
 pub type Day = i32;
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    /// The kernel's enums are the declaration's, value for value.
+    #[test]
+    fn enums_match_the_schema() {
+        use schema::enums;
+        let stages: Vec<&str> = crate::pipeline::STAGES.iter().map(|s| s.name()).collect();
+        assert_eq!(stages, enums::stage::NAMES);
+        let bands: Vec<&str> = crate::score::BANDS.iter().map(|b| b.name()).collect();
+        assert_eq!(bands, enums::band::NAMES);
+        let modes: Vec<&str> = (0..3).map(|i| crate::cv::Mode::from_u8(i).unwrap().name()).collect();
+        assert_eq!(modes, enums::overlay_mode::NAMES);
+        let kinds: Vec<&str> = crate::lanes::NetKind::ALL.iter().map(|k| k.name()).collect();
+        assert_eq!(kinds, enums::net_kind::NAMES);
+        assert_eq!(enums::rep_outcome::SKIP, crate::lanes::RepOutcome::Skip as u8);
+        assert_eq!(enums::rep_outcome::ATTEMPT, crate::lanes::RepOutcome::Attempt as u8);
+    }
+}
