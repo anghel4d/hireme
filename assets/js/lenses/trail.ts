@@ -34,7 +34,7 @@ const SHOWN: ReadonlyMap<string, readonly (readonly [field: string, label: strin
   ["wire_key_refused", [["carrier", "over"]]],
   ["lease_opened", [["label", "label"], ["count", "claims"]]],
   ["lease_released", [["label", "label"], ["count", "claims"]]],
-  ["lease_revoked", [["label", "label"]]],
+  ["lease_revoked", [["label", "label"], ["count", "claims released"]]],
   ["agent_ops", [["count", "ops"], ["nacks", "refused"]]],
 ])
 

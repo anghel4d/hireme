@@ -35,6 +35,7 @@ test("each kind reads its own labels: a count is codes, claims or ops by kind", 
   assert.equal(shown({ kind: "recovery_codes_issued", meta: { count: 10 } }), muted("codes: 10"))
   assert.equal(shown({ kind: "recovery_code_used", meta: { left: 7 } }), muted("codes left: 7"))
   assert.equal(shown({ kind: "lease_opened", key_id: 3, meta: { lease_id: 41, label: "agent A", count: 16 } }), muted("label: agent A · claims: 16"))
+  assert.equal(shown({ kind: "lease_revoked", key_id: 3, meta: { lease_id: 41, label: "agent A", count: 4 } }), muted("label: agent A · claims released: 4"))
   assert.equal(shown({ kind: "agent_ops", key_id: 3, meta: { count: 3, acks: 2, nacks: 1 } }), muted("ops: 3 · refused: 1"))
   assert.equal(shown({ kind: "signed_in", meta: { provider: "email", identity_id: 1 } }), muted("via: email"))
   assert.equal(shown({ kind: "sign_in_refused", meta: { reason: "rate_limited", provider: "email" } }), muted("via: email · reason: rate_limited"))
