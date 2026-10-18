@@ -340,9 +340,11 @@ table applications desk resident
   col heat_override bool ! = false readonly
   col heat_override_reason str ? readonly
   col score_100 u8 ?
-  col applied_on day ?
-  col replied_on day ?
-  col closed_on day ?
+  # Set by the stage command as it moves (submitted, reply, closed); heat
+  # decays a sent application's load from applied_on.
+  col applied_on day ? readonly
+  col replied_on day ? readonly
+  col closed_on day ? readonly
   col outcome enum outcome ?
   col notes text ?
   col battleplan text ?
