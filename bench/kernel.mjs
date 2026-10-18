@@ -1,6 +1,8 @@
-// The board's bounds under WebAssembly (docs/rebuild.md "Tests, bench,
+// The kernel's bounds under WebAssembly (docs/rebuild.md "Tests, bench,
 // bounds"): at 10k applications, a derive after a change in ≤ 8 ms and
-// the first derive after BOOT in ≤ 30 ms.
+// the first derive after BOOT in ≤ 30 ms; over 50k places, every read of
+// the replica (find with a filter, a sort, a next page; get; text) in
+// ≤ 1 ms at p99, the touch budget.
 //
 //   [DISTINCT=1] bun bench/kernel.mjs <kernel.wasm> [applications=10000] [hot share=0.1]
 //
@@ -82,6 +84,37 @@ for (let run = 0; run < 7; run++) {
   }
 }
 
+// Reads of the replica: the replies the world lens and hireme-mcp draw from.
+const QUERY_BOUND_MS = 1;
+const query = {};
+{
+  const notes = "Walkable, with a strong tech scene and ".repeat(50);
+  const places = Array.from({ length: 50000 }, (_, i) => ({
+    id: i + 1, kind: i < 250 ? "country" : "city", iso2: i < 250 ? `C${i}` : null, name: `${["Lis", "Ber", "Tok"][rand(3)]}${["bon", "lin", "yo"][rand(3)]} ${i}`,
+    region: ["Europe", "Asia", "Americas"][rand(3)], population: rand(10) ? rand(10_000_000) : null, population_on: today, notes: rand(10) ? null : notes,
+  }));
+  const { x, out, call } = await instance(bytes);
+  x.set_grants(31, 31, 1, 1);
+  if (call(x.ingest, bootFrame(JSON.parse(out(x.catalog())), { places })) < 0) throw new Error("BOOT refused");
+  const ask = (q) => { const n = call(x.query, enc.encode(JSON.stringify(q))); if (n < 0) throw new Error(`refused ${JSON.stringify(q)}`); return n; };
+  const next = JSON.parse(out(ask({ op: "find", table: "places", order: ["population", "desc"], limit: 50 }))).next;
+  const noted = places.find((p) => p.notes).id;
+  const cases = {
+    find_like: { op: "find", table: "places", where: { name: { like: "berlin" } }, limit: 50 },
+    find_sorted: { op: "find", table: "places", order: ["population", "desc"], limit: 50 },
+    find_filter_sort: { op: "find", table: "places", where: { region: "Asia", kind: "city" }, order: "name", limit: 50 },
+    find_next_page: { op: "find", table: "places", order: ["population", "desc"], limit: 50, after: next },
+    get_key: { op: "get", table: "places", key: { iso2: "C7" } },
+    text: { op: "text", table: "places", id: noted, column: "notes", length: 4096 },
+  };
+  for (const [name, q] of Object.entries(cases)) {
+    for (let i = 0; i < 20; i++) ask(q);
+    const ts = [];
+    for (let i = 0; i < 200; i++) { const t = performance.now(); ask(q); ts.push(performance.now() - t); }
+    query[name] = +ts.sort((a, b) => a - b)[198].toFixed(3);
+  }
+}
+
 const report = {
   applications: N,
   hot_share: HOT,
@@ -91,7 +124,10 @@ const report = {
   filtered_view_ms: +median(filtered).toFixed(2),
   bound_ms: BOUND_MS,
   first_bound_ms: FIRST_BOUND_MS,
+  query_p99_ms: query,
+  query_bound_ms: QUERY_BOUND_MS,
   wasm_bytes: bytes.length,
 };
 console.log(JSON.stringify(report));
-process.exit(report.derive_after_patch_ms <= BOUND_MS && report.derive_after_boot_ms <= FIRST_BOUND_MS ? 0 : 1);
+const queries = Object.values(query).every((p99) => p99 <= QUERY_BOUND_MS);
+process.exit(report.derive_after_patch_ms <= BOUND_MS && report.derive_after_boot_ms <= FIRST_BOUND_MS && queries ? 0 : 1);
