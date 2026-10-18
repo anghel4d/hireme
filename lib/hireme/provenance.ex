@@ -1,30 +1,16 @@
 defmodule Hireme.Provenance do
   @moduledoc """
-  Where a figure or a text came from: `sources` (one per URL, its host
-  derived here and never taken from a writer), `citations` (append-only,
-  the only provenance authority: the newest citation of a cell is its
-  source, the rest its history) and `trusted_hosts` (the operator's list of
-  hosts whose pages may source `culture` and ratings).
-
-  Check 5 of the sequencer, `provenance`, is `check/3`:
-
-  - a metric written without `as_of` is refused `freshness`; one older than
-    the cell's stored `<metric>_on` is `stale` (an equal date is a
-    restatement and passes); the write moves `<metric>_on` to `as_of`;
-  - prose written without `expect_rev` is refused `rev`, as is one whose
-    `expect_rev` is not the row's rev (a new row's prose names 0); prose
-    without a source is `source_missing`;
-  - `culture` and the rating metrics need a source whose host is trusted
-    (`source_trust`), and so a source at all (`source_missing`).
-
-  Each metric or prose cell written gets one citation (`cite/4`).
+  Where a figure or a text came from, the server's part: a source's host
+  is derived here (`host/1`) and never taken from a writer, and
+  `trusted_hosts` is the operator's list of hosts whose pages may source
+  `culture` and the ratings (`trust/3`, `distrust/2`). The provenance
+  checks themselves (freshness, stale, rev, source_missing, source_trust)
+  and the citations are the kernel's, as the one judge of every put.
   """
 
   import Ecto.Query
   alias Hireme.{Audit, Repo, Store}
-  alias Hireme.Rows.{Citation, Source, TrustedHost}
-
-  @trusted_only ~w(culture rating rating_count wlb_rating)
+  alias Hireme.Rows.TrustedHost
 
   @doc "The host of a URL as sources store it: lowercase, no port, no trailing dot; nil for a non-web URL."
   # A source URL is a link, not a payload: past this it is refused before
@@ -86,163 +72,6 @@ defmodule Hireme.Provenance do
          tld =~ ~r/[a-z]/ and not String.starts_with?(tld, "0x"),
        do: h
   end
-
-  @doc """
-  The source an op names in its `source` cell: an existing source's id, or
-  a URL, found by its natural key or created with its host derived.
-  `{:ok, source | nil}` or `{:refused, refusal, data}`. Runs inside the
-  sequencer's transaction.
-  """
-  def source(nil, _now), do: {:ok, nil}
-
-  def source(id, _now) when is_integer(id) do
-    # A dropped source is a tombstone: citations still name it, a new one cannot.
-    case Repo.one(from s in Source, where: s.id == ^id and is_nil(s.deleted_at)) do
-      nil -> {:refused, :source_missing, %{source: id}}
-      s -> {:ok, s}
-    end
-  end
-
-  def source(url, _now) when is_binary(url) and byte_size(url) > @url_max,
-    do:
-      {:refused, :type,
-       %{column: "source", reason: "a source URL is at most #{@url_max} bytes", max: @url_max}}
-
-  def source(url, now) when is_binary(url) do
-    case host(url) do
-      nil ->
-        {:refused, :type, %{column: "source", reason: "an http(s) URL or a source id"}}
-
-      host ->
-        case Repo.one(from s in Source, where: s.url == ^url and is_nil(s.deleted_at)) do
-          nil ->
-            %Source{}
-            |> Ecto.Changeset.change(
-              url: url,
-              host: host,
-              rev: 1,
-              mutable: true,
-              inserted_at: now,
-              updated_at: now
-            )
-            |> Ecto.Changeset.put_change(:account_id, Repo.account_id!())
-            |> Repo.insert()
-            |> case do
-              {:ok, s} -> {:ok, s}
-              {:error, cs} -> {:refused, :type, %{column: "source", errors: inspect(cs.errors)}}
-            end
-
-          s ->
-            {:ok, s}
-        end
-    end
-  end
-
-  @doc """
-  Check 5 for the cells one write puts on a row of `table`. `row` is the
-  stored row (nil for an insert); `changes` maps column names (strings) to
-  values; `ctx` carries `as_of` (Date | nil), `source` (a `Source` | nil),
-  `expect_rev` (integer | nil). Returns `{:ok, changes}` with every metric's
-  `_on` moved to `as_of`, or `{:refused, refusal, data}`.
-  """
-  def check(table, row, changes, ctx) do
-    cols = Map.new(table.cols, &{&1.name, &1})
-    written = for {name, _} <- changes, c = cols[name], c.metric or c.prose, do: c
-
-    Enum.reduce_while(written, {:ok, changes}, fn col, {:ok, acc} ->
-      case check_cell(table, col, row, ctx) do
-        :ok when col.metric -> {:cont, {:ok, Map.put(acc, col.name <> "_on", ctx.as_of)}}
-        :ok -> {:cont, {:ok, acc}}
-        refused -> {:halt, refused}
-      end
-    end)
-  end
-
-  defp check_cell(table, %{metric: true, name: name} = col, row, ctx) do
-    stored = row && Map.get(row, String.to_atom(name <> "_on"))
-
-    cond do
-      ctx.as_of == nil ->
-        {:refused, :freshness, %{table: table.name, column: name}}
-
-      stored && Date.compare(ctx.as_of, stored) == :lt ->
-        {:refused, :stale, %{table: table.name, column: name, on: Date.to_iso8601(stored)}}
-
-      true ->
-        trusted_source(table, col, ctx)
-    end
-  end
-
-  defp check_cell(table, %{prose: true, name: name} = col, row, ctx) do
-    rev = if row, do: row.rev, else: 0
-
-    cond do
-      ctx.expect_rev == nil -> {:refused, :rev, %{table: table.name, column: name, rev: rev}}
-      ctx.expect_rev != rev -> {:refused, :rev, %{table: table.name, column: name, rev: rev}}
-      ctx.source == nil -> {:refused, :source_missing, %{table: table.name, column: name}}
-      true -> trusted_source(table, col, ctx)
-    end
-  end
-
-  defp trusted_source(table, %{name: name}, ctx) when name in @trusted_only do
-    cond do
-      ctx.source == nil -> {:refused, :source_missing, %{table: table.name, column: name}}
-      trusted?(ctx.source.host) -> :ok
-      true -> {:refused, :source_trust, %{table: table.name, column: name, host: ctx.source.host}}
-    end
-  end
-
-  defp trusted_source(_table, _col, _ctx), do: :ok
-
-  # A trusted host covers its subdomains: trusting levels.fyi trusts www.levels.fyi.
-  defp trusted?(host) do
-    labels = String.split(host, ".")
-    hosts = for i <- 0..max(length(labels) - 2, 0), do: labels |> Enum.drop(i) |> Enum.join(".")
-    Repo.exists?(from t in TrustedHost, where: t.host in ^hosts)
-  end
-
-  @doc """
-  One citation per metric or prose cell of a committed write. `cells` are
-  `{column_name, value}`; `ctx` carries `source`, `as_of`, `today`, `actor`,
-  `key_id`, `op_id`, `now`. Answers `{count, ids}`.
-  """
-  def cite(table, row_id, cells, ctx) do
-    cols = Map.new(table.cols, &{&1.name, &1})
-
-    rows =
-      for {name, value} <- cells, c = cols[name], c.metric or c.prose do
-        %{
-          account_id: Repo.account_id!(),
-          table: table.name,
-          row_id: row_id,
-          column: name,
-          source_id: ctx.source && ctx.source.id,
-          value: %{"v" => json_value(value)},
-          as_of: if(c.metric, do: ctx.as_of, else: ctx.as_of || ctx.today),
-          actor: ctx.actor,
-          key_id: ctx.key_id,
-          op_id: ctx.op_id,
-          rev: 1,
-          inserted_at: ctx.now,
-          updated_at: ctx.now
-        }
-      end
-
-    # The count and the new rows' ids (the sequencer weighs their text).
-    case rows do
-      [] ->
-        {0, []}
-
-      _ ->
-        {n, written} = Repo.insert_all(Citation, rows, returning: [:id])
-        {n, Enum.map(written, & &1.id)}
-    end
-  end
-
-  defp json_value(%Date{} = d), do: Date.to_iso8601(d)
-  defp json_value(v), do: v
-
-  # ------------------------------------------------------ trusted hosts
 
   @doc "The account's trusted hosts (account on the process)."
   def trusted_hosts do
