@@ -195,7 +195,7 @@ defmodule Hireme.Sequencer do
     state = %{
       account_id: account_id,
       rev: rev,
-      lease: %Lease{},
+      lease: paused_keys(account_id),
       lease_rows: [],
       subs: %{},
       counts: %{},
@@ -317,6 +317,10 @@ defmodule Hireme.Sequencer do
     after_ = if held, do: rescan(after_), else: after_
     {:noreply, broadcast_leases(after_, []), @idle_ms}
   end
+
+  # The operator resumed a paused key: its sessions may claim again.
+  def handle_info({:resume, {:key, id}}, state),
+    do: {:noreply, %{state | lease: Lease.lift(state.lease, id)}, @idle_ms}
 
   def handle_info(:backfill, state) do
     {:noreply, backfill(state), @idle_ms}
@@ -2104,6 +2108,8 @@ defmodule Hireme.Sequencer do
   defp lease_request(:list, _pid, state), do: {{:ok, Lease.list(state.lease)}, state}
 
   defp lease_request({:revoke, lease_id}, _pid, state) do
+    state = pause(state, state.lease.sessions[lease_id])
+
     case Lease.revoke(state.lease, lease_id) do
       {:ok, lease, _released} -> {{:ok, true}, broadcast_leases(%{state | lease: lease}, [])}
       {:unchanged, lease} -> {{:ok, false}, %{state | lease: lease}}
@@ -2133,6 +2139,36 @@ defmodule Hireme.Sequencer do
     {lease, released} = Lease.free(state.lease, sid, ids)
     state = if released != [], do: rescan(state), else: state
     {{:ok, %{"released" => released}}, broadcast_leases(%{state | lease: lease}, [])}
+  end
+
+  # An operator revoke of a key's session pauses the key until the operator
+  # resumes it (docs/rebuild.md, 'Lease and keys'). The hold is on the key
+  # row, so it outlives the session, the carrier and this sequencer; the
+  # lease state mirrors it, so a claim or a write never queries for it.
+  defp pause(state, %{key_id: key_id}) when key_id != nil do
+    now = Store.now()
+
+    Store.write(fn ->
+      Repo.update_all(
+        from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id and is_nil(k.paused_at)),
+        set: [paused_at: now, updated_at: now],
+        inc: [rev: 1]
+      )
+    end)
+
+    since = Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id, select: k.paused_at))
+    %{state | lease: Lease.hold(state.lease, key_id, since || now)}
+  end
+
+  defp pause(state, _session), do: state
+
+  defp paused_keys(account_id) do
+    from(k in Hireme.Rows.ApiKey,
+      where: k.account_id == ^account_id and not is_nil(k.paused_at) and is_nil(k.revoked_at),
+      select: {k.id, k.paused_at}
+    )
+    |> Repo.all(skip_account: true)
+    |> Enum.reduce(%Lease{}, fn {id, since}, l -> Lease.hold(l, id, since) end)
   end
 
   # Applications that were held may have waited for the keywords backfill;

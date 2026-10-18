@@ -718,7 +718,17 @@ defmodule HiremeWeb.AgentAttackTest do
       assert {:nack, :lease_missing} =
                put(c, op(:put, :applications, %{role: "x"}, target: app.id))
 
+      # The revoke paused the key: a new connection cannot claim either,
+      # until the operator resumes it.
       {c2, _, _} = agent(port, secret)
+
+      assert {:error, %{"code" => "lease_missing", "data" => %{"paused" => true} = data}} =
+               rpc(c2, "lease.claim", %{})
+
+      assert data["reason"] == "paused by the operator"
+      key = Repo.get!(Hireme.Rows.ApiKey, data["key"], skip_account: true)
+      assert key.paused_at
+      {:ok, _} = Hireme.Keys.resume(key)
       assert {:ok, _} = rpc(c2, "lease.claim", %{})
     end
 

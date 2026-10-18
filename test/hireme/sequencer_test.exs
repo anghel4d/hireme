@@ -1150,6 +1150,34 @@ defmodule Hireme.SequencerTest do
                )
     end
 
+    test "an operator's lease revoke pauses the key across a sequencer restart, until resumed", %{
+      account: a,
+      session: s
+    } do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "paused", Hireme.Keys.preset(:read_write))
+      {_agent, _} = key_session(a.id, key, 996)
+      :ok = Hireme.Lease.revoke(a.id, 996, %{})
+
+      [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+      DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+
+      info = %{
+        id: 995,
+        label: "again",
+        grants: Hireme.Grants.key(key),
+        key_id: key.id,
+        session_id: nil
+      }
+
+      {:ok, _} = Hireme.Sequencer.subscribe(a.id, info, 0)
+
+      assert {:refused, :lease_missing, %{paused: true, reason: "paused by the operator"}} =
+               Hireme.Lease.claim(a.id, 995, %{})
+
+      {:ok, _} = Hireme.Keys.resume(Repo.get!(Hireme.Rows.ApiKey, key.id, skip_account: true))
+      assert {:ok, _} = Hireme.Lease.claim(a.id, 995, %{})
+    end
+
     test "at its cap the ledger makes room from its oldest entries and refuses nobody", %{
       account: a
     } do

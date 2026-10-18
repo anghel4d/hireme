@@ -67,10 +67,23 @@ defmodule Hireme.LeaseTest do
     assert {:refused, :lease_missing, _} = Lease.check(l3, 1, nil)
     assert Lease.revoke(l, 77) == :error
     # Nothing left to revoke: an already revoked session, or a key's that
-    # holds nothing. Still sticky: the idle key cannot claim afterwards.
+    # holds nothing. A browser session's revoke is sticky for its life.
     assert {:unchanged, _} = Lease.revoke(l3, 1)
-    assert {:unchanged, l4} = Lease.revoke(l2, 2)
-    assert {:refused, _, _} = Lease.claim(l4, 2, %{}, @apps, @all, @now)
+
+    assert {:refused, :lease_missing, %{reason: "the operator revoked" <> _}} =
+             Lease.claim(l3, 1, %{}, @apps, @all, @now)
+
+    # A key's is held by the key instead (the sequencer's hold/3 with the revoke).
+    assert {:unchanged, _} = Lease.revoke(l2, 2)
+
+    # A held key's sessions are refused, saying so; lifted, they claim again.
+    held = Lease.hold(l2, 9, @now)
+
+    assert {:refused, :lease_missing, %{paused: true, key: 9}} =
+             Lease.claim(held, 2, %{}, @apps, @all, @now)
+
+    assert {:refused, :lease_missing, %{paused: true}} = Lease.check(held, 2, nil)
+    assert {:ok, _, _} = Lease.claim(Lease.lift(held, 9), 2, %{}, @apps, @all, @now)
   end
 
   property "no application is ever held by two sessions, and check agrees with who holds it" do

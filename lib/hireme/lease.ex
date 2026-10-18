@@ -19,8 +19,12 @@ defmodule Hireme.Lease do
   other's applications; the operator's browser session is never refused
   `leased` (the owner's write, a human act like `open_fire`, always lands,
   and the claiming agent sees it as a PATCH and has its pending ops
-  re-judged). An operator revoke is sticky: the revoked session cannot
-  claim again until it reconnects."
+  re-judged). An operator lease revoke pauses that key: none of its
+  sessions may open the channel or claim (refused, "paused by the
+  operator") until the operator resumes it from the account lens or the
+  key is revoked." A browser session's revoke holds for that session's
+  life. The sequencer keeps the hold on the key row (`api_keys.paused_at`)
+  and mirrors it here (`hold/3`, `lift/2`).
 
   This module is the state machine; the state lives in the account's
   sequencer, which runs check 2 (`lease`) against it inside each op, so a
@@ -30,7 +34,7 @@ defmodule Hireme.Lease do
 
   alias Hireme.Sequencer
 
-  defstruct sessions: %{}, holder: %{}
+  defstruct sessions: %{}, holder: %{}, paused: %{}
 
   @max_count 1_000
 
@@ -45,7 +49,8 @@ defmodule Hireme.Lease do
         }
   @type t :: %__MODULE__{
           sessions: %{pos_integer => session},
-          holder: %{pos_integer => pos_integer}
+          holder: %{pos_integer => pos_integer},
+          paused: %{pos_integer => DateTime.t()}
         }
 
   # ------------------------------------------------------------- API
@@ -131,7 +136,7 @@ defmodule Hireme.Lease do
   """
   def check(%__MODULE__{} = l, id, app_id) do
     cond do
-      not channel?(l, id) -> {:refused, :lease_missing, %{}}
+      not channel?(l, id) -> {:refused, :lease_missing, paused(l, l.sessions[id]) || %{}}
       operator?(l, id) -> :ok
       app_id && Map.get(l.holder, app_id, id) != id -> {:refused, :leased, holder(l, app_id)}
       true -> :ok
@@ -163,8 +168,13 @@ defmodule Hireme.Lease do
     end
   end
 
-  # The operator's revoke holds for the session's life: it takes the lease
-  # again only by reconnecting, as a new session.
+  # An operator revoke pauses a key until the operator resumes it, on every
+  # session it opens; a browser session's revoke holds for that session's
+  # life, which it takes again only by reconnecting.
+  defp claim_as(l, %{key_id: k} = s, _params, _ranked, _all, _now)
+       when is_map_key(l.paused, k),
+       do: {:refused, :lease_missing, paused(l, s)}
+
   defp claim_as(_l, %{revoked: true}, _params, _ranked, _all, _now),
     do:
       {:refused, :lease_missing,
@@ -260,8 +270,10 @@ defmodule Hireme.Lease do
   end
 
   @doc """
-  The operator's revoke: claims released, channel closed, even a browser's,
-  and sticky: the session cannot claim again until it reconnects. It
+  The operator's revoke: claims released, channel closed, even a browser's.
+  A browser session cannot claim again until it reconnects; a key's
+  sessions stay shut while the key is held (`hold/3`, which the sequencer
+  applies with the revoke) until the operator resumes it. It
   answers `{:unchanged, l}` (still marking the sessions revoked) when none
   it reaches held the channel or a claim, so the caller records nothing.
   """
@@ -291,12 +303,29 @@ defmodule Hireme.Lease do
       l =
         update_in(
           l.sessions[sid],
-          &Map.merge(&1, %{channel: false, since: nil, revoked: true})
+          &Map.merge(&1, %{channel: false, since: nil, revoked: &1.key_id == nil})
         )
 
       {:ok, l, released ++ more}
     end)
   end
+
+  @doc "The operator paused `key_id` at `since` (its sessions' leases revoked)."
+  def hold(%__MODULE__{} = l, key_id, since),
+    do: %{l | paused: Map.put_new(l.paused, key_id, since)}
+
+  @doc "The operator resumed `key_id`."
+  def lift(%__MODULE__{} = l, key_id), do: %{l | paused: Map.delete(l.paused, key_id)}
+
+  defp paused(l, %{key_id: k}) when is_map_key(l.paused, k),
+    do: %{
+      reason: "paused by the operator",
+      paused: true,
+      key: k,
+      since: DateTime.to_iso8601(l.paused[k])
+    }
+
+  defp paused(_l, _s), do: nil
 
   defp holder(l, app_id) do
     s = l.sessions[l.holder[app_id]]
