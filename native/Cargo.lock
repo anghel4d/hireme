@@ -397,6 +397,7 @@ name = "hireme-mcp"
 version = "2.0.0"
 dependencies = [
  "futures-util",
+ "kernel",
  "schema",
  "serde_json",
  "tokio",
@@ -1724,6 +1725,7 @@ version = "2.0.0"
 dependencies = [
  "miniz_oxide",
  "proptest",
+ "schema",
 ]
 
 [[package]]
