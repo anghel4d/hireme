@@ -44,7 +44,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; }
 /* Keyboard movement and anchors scroll a target clear of the sticky bar. */
-html { scroll-padding-top: 56px; }
+html { scroll-padding-top: 56px; scrollbar-gutter: stable; }
 body {
   background: var(--bg);
   color: var(--ink);
