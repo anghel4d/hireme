@@ -34,7 +34,8 @@ const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
 const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
 
 /** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
-const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
+// A text column is drawn as its byte count: the grid asks find for its size, never its text.
+const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).filter((c) => c.type !== "text").flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
 
 /** What find can order by: the node refuses text, json and bytes columns. */
 const sortable = (c: ColumnDef): boolean => c.type !== "text" && c.type !== "json" && c.type !== "bytes"
@@ -53,7 +54,7 @@ function order(t: TableDef): [string, string] | null {
 
 /** The first `limit` rows of the grid's table, sort and search, from the replica (pages of find's 500). */
 function rows(t: TableDef, limit: number): { rows: Row[]; more: boolean } {
-  const params: Record<string, unknown> = { table: t.name, cols: cols(t) }
+  const params: Record<string, unknown> = { table: t.name, cols: cols(t), sizes: shown(t).filter((c) => c.type === "text").map((c) => c.name) }
   const o = order(t)
   if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
@@ -85,10 +86,7 @@ const BIG = new Intl.NumberFormat(undefined, { notation: "compact", maximumFract
 
 function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
-  if (c.type === "text") {
-    const len = new TextEncoder().encode(String(x)).byteLength
-    return html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${len.toLocaleString()} bytes</button>`
-  }
+  if (c.type === "text") return x === 0 ? EMPTY : html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${Number(x).toLocaleString()} bytes</button>`
   // A plain whole-number column (a year, a count of URLs) is shown as written, not grouped like a quantity.
   if (typeof x === "number" && !c.metric && c.type !== "f64") return html`${String(x)}`
   if (typeof x === "number") {
@@ -105,7 +103,7 @@ function display(c: ColumnDef, x: unknown): Html {
 
 function editor(t: TableDef, c: ColumnDef, row: Row): Html {
   const id = Number(row.id)
-  const x = row[c.name]
+  const x = c.type === "text" ? rowOf(t, id)?.[c.name] : row[c.name]
   const value = x === null || x === undefined ? "" : typeof x === "object" ? "" : String(x)
   let field: Html
   switch (c.type) {
