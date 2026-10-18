@@ -515,4 +515,19 @@ defmodule Hireme.WorldTest do
     # The refusal goes out as JSON, as the wire carries it.
     assert %{"keys" => [_ | _]} = Jason.decode!(Jason.encode!(data))
   end
+
+  test "a left-out parameter is refused with got null, a present one with its value", %{
+    account: a
+  } do
+    ctx = %{account_id: a.id, grants: Grants.operator()}
+    json = fn {:error, :type, data} -> Jason.decode!(Jason.encode!(data)) end
+
+    assert %{"param" => "table", "got" => nil} = json.(World.call("find", %{}, ctx))
+
+    assert %{"param" => "id", "got" => nil} =
+             json.(World.call("history", %{"table" => "corporations"}, ctx))
+
+    assert %{"param" => "id", "got" => ~s("7")} =
+             json.(World.call("history", %{"table" => "corporations", "id" => "7"}, ctx))
+  end
 end

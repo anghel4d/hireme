@@ -70,7 +70,7 @@ defmodule Hireme.World do
       {:error, :internal, %{}}
   end
 
-  def call(_method, params, _ctx), do: {:error, :type, %{params: inspect(params)}}
+  def call(_method, params, _ctx), do: {:error, :type, %{params: got(params)}}
 
   # ------------------------------------------------------------------ schema
 
@@ -441,7 +441,7 @@ defmodule Hireme.World do
     end
   end
 
-  defp readable(_grants, other), do: {:error, :type, %{param: "table", got: inspect(other)}}
+  defp readable(_grants, other), do: {:error, :type, %{param: "table", got: got(other)}}
 
   defp column(grants, table, name) when is_binary(name) do
     case Schema.column(table.name, name) do
@@ -456,7 +456,7 @@ defmodule Hireme.World do
   end
 
   defp column(_grants, table, other),
-    do: {:error, :type, %{table: table.name, column: inspect(other)}}
+    do: {:error, :type, %{table: table.name, column: got(other)}}
 
   defp find_columns(grants, table, nil),
     do: {:ok, Enum.reject(Grants.columns(grants, table), &(&1.metric or &1.metric_of != nil))}
@@ -581,7 +581,7 @@ defmodule Hireme.World do
     do: dynamic([r], not is_nil(field(r, ^String.to_atom(col))))
 
   defp id(id) when is_integer(id) and id > 0 and id <= @int64, do: {:ok, id}
-  defp id(other), do: {:error, :type, %{param: "id", got: inspect(other)}}
+  defp id(other), do: {:error, :type, %{param: "id", got: got(other)}}
 
   defp optional_id(nil), do: {:ok, nil}
   defp optional_id(id), do: id(id)
@@ -592,7 +592,7 @@ defmodule Hireme.World do
   defp bound(n, _default, max) when is_integer(n) and n > max,
     do: {:error, :too_large, %{limit: n, max: max}}
 
-  defp bound(other, _default, _max), do: {:error, :type, %{param: "limit", got: brief(other)}}
+  defp bound(other, _default, _max), do: {:error, :type, %{param: "limit", got: got(other)}}
 
   defp bound(n, default, max, name) do
     case bound(n, default, max) do
@@ -607,7 +607,7 @@ defmodule Hireme.World do
     do: {:ok, n}
 
   defp non_negative(other, _default, name),
-    do: {:error, :type, %{param: name, got: inspect(other)}}
+    do: {:error, :type, %{param: name, got: got(other)}}
 
   # ------------------------------------------------------------------ filters
 
@@ -735,6 +735,10 @@ defmodule Hireme.World do
 
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
+
+  # A left-out parameter is JSON null, not the string "nil".
+  defp got(nil), do: nil
+  defp got(value), do: brief(value)
 
   defp cast_list(col, values, f) do
     values
