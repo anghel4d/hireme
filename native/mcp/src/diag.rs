@@ -66,6 +66,17 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
             out.push_str(&format!("   = {k}: {}\n", compact(v)));
         }
     }
+    // A refusal's data can say more precisely what to do than its code's general advice.
+    let todo = match (code, data.get("missing").and_then(Json::as_array)) {
+        ("column", Some(cols)) => format!(
+            "A new row needs its required columns: {}. Add them to `set`, or name an existing row by id or key.",
+            cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        _ if code == "column" && data.get("reason").and_then(Json::as_str) == Some("required") => {
+            "That column is required on a new row; set it to a value, not null.".to_owned()
+        }
+        _ => todo,
+    };
     if !todo.is_empty() {
         out.push_str(&format!("   = help: {todo}\n"));
     }
