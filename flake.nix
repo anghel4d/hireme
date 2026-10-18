@@ -189,7 +189,7 @@
             # The node applied the baseline at boot and took its first backup.
             machine.succeed("sqlite3 /var/lib/hireme/hireme.db \"select name from schema_files\" | grep -qx 0000_baseline")
             machine.succeed("sqlite3 /var/lib/hireme/hireme.db 'select count(*) from accounts'")
-            machine.wait_until_succeeds("ls /var/lib/hireme/backups/hireme-*.db")
+            machine.wait_until_succeeds("ls /var/lib/hireme/backups/hireme-v2-*.db")
 
             # The operator's and the deploy's way in: an rpc over loopback
             # distribution, with the unit's environment.

@@ -12,7 +12,7 @@ defmodule HiremeWeb.Account do
   steps up with `account.step_up.*` and retries. The rules for what
   needs it live with the owner of each change (`Hireme.Keys`,
   `Hireme.Mfa`); this module adds it only where no owner holds it
-  (unlinking a way in, trusted hosts).
+  (unlinking a way in, trusted hosts, resuming a paused key).
 
   `account.watch` parks: the session answers it when the account's topic
   announces a change, so a revoke elsewhere appears without a reload.

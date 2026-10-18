@@ -147,6 +147,29 @@ defmodule Hireme.AuditTest do
     assert meta["user_agents"] == ["agent/1"]
   end
 
+  @tag window: [:activity, :activity_node]
+  test "a coalesced row names the addresses with the most events, not the lowest-sorting" do
+    %{account: a} = sign_in()
+    ctx = fn ip -> %{account_id: a.id, key_id: 7, ip: ip, user_agent: "agent/1"} end
+    for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})
+    for i <- 1..25, do: Audit.record(:agent_ops, %{}, ctx.("10.0.0.#{i}"))
+    for _ <- 1..3, i <- 1..5, do: Audit.record(:agent_ops, %{}, ctx.("203.0.113.#{i}"))
+    Audit.Coalescer.flush(:all)
+
+    [meta] =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
+          select: e.meta
+        ),
+        skip_account: true
+      )
+
+    busiest = for i <- 1..5, do: "203.0.113.#{i}"
+    assert busiest -- meta["addresses"] == []
+    assert meta["addresses_total"] == 30
+  end
+
   @tag window: [:hellos, :activity_node]
   test "a key's first HELLOs count a /64 as one peer, and only its first 50 peers a window" do
     %{account: a} = sign_in()
@@ -161,6 +184,13 @@ defmodule Hireme.AuditTest do
     # 10.0.0.1 and 2001:db8::/64 were two of the 50.
     for i <- 1..60, do: :ok = Audit.record(:wire_key, %{}, ctx.("2001:db8:0:#{i}::1"))
     assert hellos.() == budget + 1 + 48
+
+    # Peers past the 50 leave nothing held for them.
+    for i <- 1..500,
+        do: :ok = Audit.record(:wire_key, %{}, ctx.("192.0.#{div(i, 256)}.#{rem(i, 256)}"))
+
+    marks = :ets.select_count(Audit.Coalescer, [{{{:first, :_, :_, :_, :_}, :_}, [], [true]}])
+    assert marks <= 51
   end
 
   @tag window: [:activity, :activity_node]
@@ -214,6 +244,22 @@ defmodule Hireme.AuditTest do
 
     assert wakes <= seconds + 2
     assert Audit.rev(a.id) == cursor + wakes
+  end
+
+  @tag window: [:activity, :activity_node]
+  test "a trailing wake whose message was lost does not silence the next ones" do
+    %{account: a} = sign_in()
+    for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
+    # As if its timer fired while the Coalescer was restarting: a marker long past due.
+    past = System.os_time(:millisecond) - 5_000
+    :ets.insert(Audit.Coalescer, {{:trailing, a.id}, past})
+    send(Audit.Coalescer, :flush)
+    Process.sleep(1_100)
+    cursor = Audit.rev(a.id)
+    Audit.record(:lease_opened, %{}, %{account_id: a.id})
+    Audit.record(:lease_opened, %{}, %{account_id: a.id})
+    Process.sleep(1_500)
+    assert Audit.rev(a.id) == cursor + 2
   end
 
   @tag window: [:activity, :activity_node]

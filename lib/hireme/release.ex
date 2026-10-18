@@ -355,8 +355,11 @@ defmodule Hireme.Release.Backup do
     last =
       try do
         File.mkdir_p!(s.dir)
+        File.chmod!(s.dir, 0o700)
         File.rm(tmp)
         :ok = Hireme.Store.backup(tmp)
+        # A copy holds the whole database: the service's user only, whatever the umask.
+        File.chmod!(tmp, 0o600)
         File.rename!(tmp, path)
         prune(s.dir)
         {:ok, path}

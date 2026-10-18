@@ -21,7 +21,7 @@ defmodule Hireme.Audit do
   alias Hireme.Store
 
   # Kinds on the trail that are activity, not a change to the account.
-  @quiet ~w(agent_ops wire_key wire_key_refused activity_coalesced revokes_coalesced)
+  @quiet ~w(agent_ops wire_key wire_key_refused activity_coalesced)
 
   # Kinds under a per-account budget, and the node-wide one for activity;
   # past them a row is counted, not written, and the window's counts become
@@ -50,11 +50,7 @@ defmodule Hireme.Audit do
   @doc "The kinds that are activity, not security events: what the account lens's activity view shows."
   @spec activity_kinds() :: [String.t()]
   def activity_kinds,
-    do:
-      Enum.uniq(
-        (@quiet -- ["revokes_coalesced"]) ++
-          @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"])
-      )
+    do: Enum.uniq(@quiet ++ @expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
 
   @doc """
   Announce that the account's factors changed (bound, removed, disabled):
@@ -325,13 +321,15 @@ defmodule Hireme.Audit.Coalescer do
   defp seen(account_id, budget, w, what, value) do
     key = {what, account_id, budget, w, Hireme.Security.clip(value, 200)}
 
+    # {key, events, first seen}: a row names the values with the most events.
     cond do
       :ets.member(@table, key) ->
-        true
+        :ets.update_counter(@table, key, {2, 1})
 
       :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
           @tracked ->
-        :ets.insert_new(@table, {key, true})
+        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) ||
+          :ets.update_counter(@table, key, {2, 1})
 
       true ->
         :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, 1, {nil, 0})
@@ -348,9 +346,12 @@ defmodule Hireme.Audit.Coalescer do
     w = window(:hellos, System.os_time(:millisecond))
     peer = Hireme.Security.peer(ip)
 
-    :ets.insert_new(@table, {{:first, account_id, w, key_id, peer}, true}) and
+    mark = {:first, account_id, w, key_id, peer}
+
+    # A peer past the key's first ones leaves no mark: the table stays bounded.
+    not :ets.member(@table, mark) and
       :ets.update_counter(@table, {:first, account_id, w, key_id, :peers}, 1, {nil, 0}) <=
-        @firsts
+        @firsts and :ets.insert_new(@table, {mark, true})
   rescue
     ArgumentError -> true
   end
@@ -362,17 +363,26 @@ defmodule Hireme.Audit.Coalescer do
   @spec wake(pos_integer()) :: :ok
   def wake(account_id) do
     now = System.os_time(:millisecond)
+    key = {:wake, account_id}
 
-    case :ets.lookup(@table, {:wake, account_id}) do
-      [{_, last}] when now - last < @wake ->
-        if :ets.insert_new(@table, {{:trailing, account_id}, true}),
-          do: Process.send_after(__MODULE__, {:wake, account_id}, last + @wake - now)
+    # Claimed atomically: racing changes wake the lens once, not each.
+    claimed? =
+      :ets.insert_new(@table, {key, now}) or
+        :ets.select_replace(@table, [
+          {{key, :"$1"}, [{:<, :"$1", now - @wake}], [{{{:const, key}, now}}]}
+        ]) == 1
 
-        :ok
+    if claimed? do
+      Audit.moved(account_id)
+    else
+      last = :ets.lookup_element(@table, key, 2, now)
 
-      _ ->
-        :ets.insert(@table, {{:wake, account_id}, now})
-        Audit.moved(account_id)
+      # The marker holds when its wake is due, so a lost message cannot
+      # keep it (the tick drops one long past due).
+      if :ets.insert_new(@table, {{:trailing, account_id}, last + @wake}),
+        do: Process.send_after(__MODULE__, {:wake, account_id}, max(last + @wake - now, 0))
+
+      :ok
     end
   rescue
     ArgumentError -> Audit.moved(account_id)
@@ -382,8 +392,8 @@ defmodule Hireme.Audit.Coalescer do
   @spec flush(integer() | :all) :: non_neg_integer()
   def flush(now_ms \\ System.os_time(:millisecond)) do
     :ets.tab2list(@table)
-    |> Enum.filter(fn {key, _} -> closed?(key, now_ms) end)
-    |> Enum.group_by(fn {key, _} -> group(key) end)
+    |> Enum.filter(&closed?(elem(&1, 0), now_ms))
+    |> Enum.group_by(&group(elem(&1, 0)))
     |> Enum.count(fn {group, entries} -> write_group(group, entries) end)
   rescue
     ArgumentError -> 0
@@ -399,7 +409,7 @@ defmodule Hireme.Audit.Coalescer do
 
   # The first-HELLO marks only expire; every other group becomes one row.
   defp write_group({:first, _, _}, entries) do
-    Enum.each(entries, fn {key, _} -> :ets.delete(@table, key) end)
+    Enum.each(entries, &:ets.delete(@table, elem(&1, 0)))
     false
   end
 
@@ -430,18 +440,25 @@ defmodule Hireme.Audit.Coalescer do
 
     kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced
     if counts != %{}, do: Audit.write(kind, meta, %{account_id: account_id}, account_id)
-    Enum.each(entries, fn {key, _} -> :ets.delete(@table, key) end)
+    Enum.each(entries, &:ets.delete(@table, elem(&1, 0)))
     counts != %{}
   rescue
     # A group that cannot be written stays for the next flush; the others go on.
     e ->
       Logger.error("trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}")
       false
+  catch
+    :exit, _ ->
+      Logger.error("trail coalescing for account #{account_id} failed: the write exited")
+      false
   end
 
+  # The values with the most events, the first seen first among equals, so
+  # who is named is not picked by how a value sorts.
   defp named(entries, what) do
-    values = for {{^what, _, _, _, value}, _} <- entries, do: value
-    {Enum.take(Enum.sort(values), @named), length(values)}
+    values = for {{^what, _, _, _, value}, n, first} <- entries, do: {value, n, first}
+    named = values |> Enum.sort_by(fn {_, n, first} -> {-n, first} end) |> Enum.take(@named)
+    {Enum.map(named, &elem(&1, 0)), length(values)}
   end
 
   defp iso(ms),
@@ -472,6 +489,11 @@ defmodule Hireme.Audit.Coalescer do
     flush()
     now = System.os_time(:millisecond)
     :ets.select_delete(@table, [{{{:wake, :_}, :"$1"}, [{:<, :"$1", now - @wake}], [true]}])
+
+    :ets.select_delete(@table, [
+      {{{:trailing, :_}, :"$1"}, [{:<, :"$1", now - 2 * @wake}], [true]}
+    ])
+
     {:noreply, s}
   end
 
@@ -479,7 +501,12 @@ defmodule Hireme.Audit.Coalescer do
   def handle_info({:wake, account_id}, s) do
     if :ets.take(@table, {:trailing, account_id}) != [] do
       :ets.insert(@table, {{:wake, account_id}, System.os_time(:millisecond)})
-      Audit.moved(account_id)
+
+      try do
+        Audit.moved(account_id)
+      rescue
+        e -> Logger.error("trail wake for account #{account_id} failed: #{inspect(e.__struct__)}")
+      end
     end
 
     {:noreply, s}

@@ -109,7 +109,8 @@ defmodule Hireme.ReleaseTest do
       File.write!(Path.join(dir, "hireme-v2-#{day.(1)}.db.tmp"), "")
       {:ok, pid} = Backup.start_link(name: :bench_backup, dir: dir, manual: true)
       assert {:ok, path} = Backup.run(pid)
-      assert File.exists?(path)
+      assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o600
+      assert Bitwise.band(File.stat!(dir).mode, 0o777) == 0o700
       names = File.ls!(dir)
       assert length(names -- v1) == 13
       assert v1 -- names == []

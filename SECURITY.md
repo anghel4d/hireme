@@ -236,6 +236,19 @@ secret, so a copy of the database alone yields no working credential.
 The application secret, the release cookie and the mail token come from
 the host's vault at runtime, never the store or the repository.
 
+## Backups
+
+The node copies its database once a day (`VACUUM INTO`, after the day's
+purge) to `backups/` beside it, `/var/lib/hireme/backups/` on a server, as
+`hireme-v2-<UTC stamp>.db`: the directory mode 0700 and each copy 0600,
+owned by the service's user. It keeps the newest 13 of its own and deletes
+older ones, and a copy a stop cut short. A copy holds what the database
+holds: the trail, hashed tokens and secrets, and sealed TOTP secrets
+(their key is in the environment, not the copy). v1's backups,
+`hireme-<stamp>.db` (old accounts, hashed tokens, sealed secrets), do not
+carry v2's prefix and are never pruned: they stay until the operator
+deletes them.
+
 ## The trail
 
 Append-only (`audit`), its rows never edited (they name keys and
