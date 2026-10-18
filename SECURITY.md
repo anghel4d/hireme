@@ -77,8 +77,11 @@ sessions and revokes any of them; signing out revokes the row, so a copied
 cookie is dead on the server (ASVS 7.4.1, 7.4.3).
 
 A page reaches the wire with a ticket, never the cookie: a single-use,
-encrypted token naming the session, good for 60 seconds, minted only for a
-live session past its second factor. Spending it re-reads the session row.
+encrypted token naming the session and bound to eight bytes of its token
+hash, good for 60 seconds, minted only for a live session past its second
+factor. Spending it re-reads the session row. A wire session keeps the
+browser session's lifetime: every `account.*` call and the wire's tick
+check it, and wire activity counts as activity.
 
 ## Second factor
 
@@ -95,7 +98,12 @@ An account with no factor steps up by signing in again.
 | Recovery codes | 63B-4 Sec. 3.2.4; ASVS 6.5.2, 6.5.4 | Ten 80-bit codes, salted and hashed, each spent once (atomically), issued with the first factor and replaceable behind step-up. |
 
 Factor attempts are limited per account, and a factor that fails one
-hundred times in a row is disabled (63B-4 Sec. 3.2.2; ASVS 6.6.3). Each
+hundred times in a row is disabled (63B-4 Sec. 3.2.2; ASVS 6.6.3). A
+disabled factor, worn out or cloned, still counts as the account having
+one: new sessions stay pending and only a recovery code (or another live
+factor) lets one in, so wearing a factor out is never a way past it. An
+account that has lost its factors and its codes is recovered by the
+operator, not by the desk. Each
 ceremony's challenge is sealed, bound to its session, deleted by the
 statement that takes it, and expires after five minutes. Binding, removing
 or disabling a factor and using a recovery code are audited and mailed.
@@ -107,9 +115,10 @@ public id, 43 base62 characters of secret (about 256 bits) and a CRC
 checksum, so a mistyped or invented key is refused before any lookup. The
 server keeps the secret's SHA-256 and shows the secret once. A key
 expires if asked to, is revocable at once, and an account holds at most
-one hundred live ones. An agent presents its key once, in its wire
-session's HELLO, never in a URL; every failure looks the same, and a peer
-is limited in attempts per minute.
+one hundred live, unexpired ones. An agent presents its key once, in its
+wire session's HELLO, never in a URL; every failure looks the same, and a
+peer is limited in failed attempts per minute (a throttled HELLO is told
+to retry later; successes never spend the budget).
 
 What a key may do is two masks over the five domains, world 1, desk 2,
 mail 4, lanes 8, corpus 16, and `may_delete`:
@@ -172,6 +181,11 @@ masks and lease bound what any instruction hidden in it could cause.
 
 ## Requests
 
+Behind the host's nginx every request arrives from loopback; from
+loopback only, nginx's `X-Real-IP` (which it overwrites with the
+connecting address) names the client, so per-peer limits and the trail
+see real peers. `X-Forwarded-For` is never read.
+
 Every state-changing browser request carries the page's CSRF token. Pages
 are served with a Content Security Policy: scripts from the origin plus
 the inlined early script by its hash, WebAssembly compilation but never
@@ -212,7 +226,8 @@ through a durable outbox with bounded retries.
 | Link redemptions | 20 per peer in 10 minutes |
 | Factor attempts | 10 per account in 15 minutes |
 | Consecutive failures before a factor is disabled | 100 |
-| Key attempts | 20 per peer a minute |
+| Failed key attempts | 20 per peer a minute |
+| OAuth refusals recorded | 20 per peer in 10 minutes |
 | Wire tickets | 60 per peer a minute |
 | Agent ops | 600 per key a minute |
 | Live keys per account | 100 |
