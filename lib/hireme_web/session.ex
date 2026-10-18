@@ -387,7 +387,9 @@ defmodule HiremeWeb.Session do
     welcome =
       Codec.welcome(rev, %{
         account_id: who.account_id,
-        session_id: session.id,
+        # A browser's sessions row (its account lens finds itself by it); a
+        # key has none, and names the wire session its leases are held by.
+        session_id: session.session_id || session.id,
         schema_rev: Hireme.Schema.schema_rev(),
         read_mask: who.grants.read_mask,
         write_mask: who.grants.write_mask,

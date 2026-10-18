@@ -249,12 +249,16 @@ defmodule HiremeWeb.SessionTest do
              Session.frame(Codec.encode_hello(:key, rw, "x"), open())
   end
 
-  test "a browser's ticket makes the operator's session, holding the channel", %{session: s} do
+  test "a browser's ticket makes the operator's session, holding the channel, and names its sessions row",
+       %{session: s} do
     ticket = Hireme.Accounts.ticket(s)
     origin = hd(HiremeWeb.Endpoint.origins())
     {[welcome, _boot], _state} = hello(open(%{@peer | origin: origin}), :ticket, ticket)
-    <<_::binary-24, r::little-16, w::little-16, d, lease, _::binary>> = welcome.body
-    assert {r, w, d, lease} == {31, 31, 1, 1}
+
+    <<_::binary-8, sid::little-64, _::binary-8, r::little-16, w::little-16, d, lease, _::binary>> =
+      welcome.body
+
+    assert {sid, r, w, d, lease} == {s.id, 31, 31, 1, 1}
   end
 
   defp browser(s) do
