@@ -45,15 +45,10 @@
 !/test/**/
 !/test/**/*.exs
 !/test/**/*.ex
-!/test/fixtures/
-!/test/fixtures/**/
 
 !/bench/
 !/bench/*.exs
 !/bench/*.mjs
-!/bench/results/
-!/bench/results/*.jsonl
-!/bench/results/*.jsonl.gz
 
 !/assets/
 !/assets/css/
