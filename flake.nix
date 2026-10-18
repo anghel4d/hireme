@@ -191,6 +191,8 @@
           pkgs.nodejs
           pkgs.sqlite
           pkgs.typescript
+          # Phoenix's live reload watches files through it.
+          pkgs.inotify-tools
           esbuild
         ];
       };
