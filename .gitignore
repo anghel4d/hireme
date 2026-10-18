@@ -81,6 +81,11 @@
 !/alchemy/
 !/alchemy/*.md
 
+!/.agents/
+!/.agents/skills/
+!/.agents/skills/*/
+!/.agents/skills/*/SKILL.md
+
 !/docs/
 !/docs/*.md
 
