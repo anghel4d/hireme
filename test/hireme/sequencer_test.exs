@@ -971,7 +971,8 @@ defmodule Hireme.SequencerTest do
             Process.sleep(:infinity)
           end)
 
-          assert_receive {:joined, ^sid}
+          # A subscribe under a loaded suite can take longer than the default 100 ms.
+          assert_receive {:joined, ^sid}, 5_000
           sid
         end
 
@@ -1222,6 +1223,70 @@ defmodule Hireme.SequencerTest do
 
       {[], nacks} = key_session_ops(agent, ops)
       assert Enum.all?(nacks, &(&1.refusal == :rate))
+    end
+
+    test "a source a citation creates counts against the sources cap, warm or cold, and a tombstone frees its place",
+         %{account: a} do
+      cap = Schema.table(:sources).cap
+      now = Hireme.Store.now()
+
+      for chunk <- Enum.chunk_every(1..(cap - 2), 4_000) do
+        rows =
+          for i <- chunk,
+              do: %{
+                account_id: a.id,
+                url: "https://fill.example/#{i}",
+                host: "fill.example",
+                mutable: true,
+                rev: 1,
+                inserted_at: now,
+                updated_at: now
+              }
+
+        Repo.insert_all(Hireme.Rows.Source, rows, skip_account: true)
+      end
+
+      {[%{id: corp}], []} =
+        run(a.id, op(:put, :corporations, %{domain: "cap.example", name: "C"}))
+
+      cite = fn n, url ->
+        run(
+          a.id,
+          op(
+            :put,
+            :corporations,
+            %{headcount: n, as_of: Date.add(~D[2026-01-01], n), source: url},
+            target: corp
+          )
+        )
+      end
+
+      # The first count is read cold, with the cited source already stored.
+      assert {[_], []} = cite.(1, "https://new.example/1")
+      assert {[_], []} = cite.(2, "https://new.example/2")
+      assert {[], [%{refusal: :cap, data: data}]} = cite.(3, "https://new.example/3")
+      assert data =~ ~s("table":"sources")
+
+      assert {[], [%{refusal: :cap}]} =
+               run(a.id, op(:put, :sources, %{url: "https://direct.example/1"}))
+
+      # The operator's drop of a cited source tombstones it, and the place
+      # it held is free whether the count is cached or read afresh.
+      [sid] =
+        Repo.all(
+          from(x in Hireme.Rows.Source, where: x.url == "https://new.example/2", select: x.id),
+          skip_account: true
+        )
+
+      assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: sid))
+
+      for {pid, _} <- Registry.lookup(Hireme.Sequencer.Registry, a.id),
+          do: DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+
+      assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://direct.example/2"}))
+
+      assert {[], [%{refusal: :cap}]} =
+               run(a.id, op(:put, :sources, %{url: "https://direct.example/3"}))
     end
   end
 end

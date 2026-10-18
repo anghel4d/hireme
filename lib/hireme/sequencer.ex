@@ -749,7 +749,7 @@ defmodule Hireme.Sequencer do
          :ok <- too_large(op),
          {:ok, effects, state} <- domain(plan, op, sub, state, turn),
          {:ok, prov} <- provenance(plan, op, effects, turn),
-         {:ok, state} <- limits(plan, effects, state),
+         {:ok, state} <- limits(plan, effects, prov, state),
          {:ok, state, turn, ack} <- write(plan, op, sub, effects, prov, state, turn) do
       {:ok, state, turn, ack}
     else
@@ -1268,9 +1268,11 @@ defmodule Hireme.Sequencer do
       else: :ok
   end
 
-  defp limits(plan, effects, state) do
+  defp limits(plan, effects, prov, state) do
     citations = Schema.table(:citations)
+    sources = Schema.table(:sources)
     cited = length(cited_cells(plan, effects))
+    new_source = if prov && prov.new_source, do: [{sources, 1}], else: []
 
     inserts =
       effects
@@ -1280,6 +1282,19 @@ defmodule Hireme.Sequencer do
       |> Enum.filter(fn {t, _} -> t.cap end)
 
     checks = if cited > 0, do: [{citations, cited} | inserts], else: inserts
+
+    # A source the op's citation created (provenance) is already in SQLite:
+    # a count read now holds it, a cached one does not yet.
+    state =
+      if new_source != [] and not is_map_key(state.counts, sources.id),
+        do: update_in(counted(state, sources).counts[sources.id], &(&1 - 1)),
+        else: state
+
+    checks =
+      (new_source ++ checks)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.map(fn {t, ns} -> {t, Enum.sum(ns)} end)
+
     state = Enum.reduce(checks, state, fn {t, _}, st -> counted(st, t) end)
 
     case Enum.find(checks, fn {t, n} -> state.counts[t.id] + n > t.cap end) do
@@ -1293,11 +1308,15 @@ defmodule Hireme.Sequencer do
   end
 
   # A capped table's row count, read from SQLite once and then moved with
-  # every insert and delete (count_deltas).
+  # every insert and delete (count_deltas). A tombstone is gone (its drop
+  # moves the count), so a soft-delete table counts its live rows.
   defp counted(%{counts: counts} = state, table) when is_map_key(counts, table.id), do: state
 
-  defp counted(state, table),
-    do: put_in(state.counts[table.id], Repo.aggregate(Schema.row(table.name), :count))
+  defp counted(state, table) do
+    q = Schema.row(table.name)
+    q = if table.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
+    put_in(state.counts[table.id], Repo.aggregate(q, :count))
+  end
 
   # ----------------------------------------------------------- the write
 
@@ -1409,6 +1428,7 @@ defmodule Hireme.Sequencer do
         {:put, %{cap: cap} = t, _, :all}, c when cap != nil -> bump(c, t.id, 1)
         {:gone, %{cap: cap} = t, _}, c when cap != nil -> bump(c, t.id, -1)
         {:cited, n}, c -> bump(c, Schema.table(:citations).id, n)
+        :new_source, c -> bump(c, Schema.table(:sources).id, 1)
         _, c -> c
       end)
 
@@ -1602,7 +1622,7 @@ defmodule Hireme.Sequencer do
 
     source =
       if prov.new_source,
-        do: [{:text, text_bytes(Schema.table(:sources), prov.source.id)}],
+        do: [{:text, text_bytes(Schema.table(:sources), prov.source.id)}, :new_source],
         else: []
 
     [
@@ -1645,9 +1665,9 @@ defmodule Hireme.Sequencer do
     Enum.any?(loose_refs(table), fn {t, c} ->
       field = String.to_atom(c.name)
 
-      Repo.exists?(from(r in Schema.row(t.name), where: field(r, ^field) == ^id),
-        skip_account: true
-      )
+      # Within the account: its (account_id, ref) index answers it, where
+      # every account's rows would be a scan under the writer lock.
+      Repo.exists?(from(r in Schema.row(t.name), where: field(r, ^field) == ^id))
     end)
   end
 

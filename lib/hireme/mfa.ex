@@ -104,7 +104,8 @@ defmodule Hireme.Mfa do
 
   @doc "Start enrolling an app: its otpauth URI, the secret in base32, and a QR as SVG."
   @spec begin_totp(Session.t(), String.t()) ::
-          {:ok, %{uri: String.t(), secret: String.t(), svg: String.t()}} | {:error, :step_up}
+          {:ok, %{uri: String.t(), secret: String.t(), svg: String.t()}}
+          | {:error, :step_up | :rate_limited}
   def begin_totp(%Session{} = session, label) do
     as(session, fn ->
       with :ok <- fresh(session),
@@ -223,7 +224,8 @@ defmodule Hireme.Mfa do
   ## WebAuthn
 
   @doc "Start registering a passkey or security key: the creation options for the browser."
-  @spec begin_webauthn(Session.t(), String.t()) :: {:ok, map()} | {:error, :step_up}
+  @spec begin_webauthn(Session.t(), String.t()) ::
+          {:ok, map()} | {:error, :step_up | :rate_limited}
   def begin_webauthn(%Session{} = session, label) do
     as(session, fn ->
       with :ok <- fresh(session),

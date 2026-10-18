@@ -606,6 +606,8 @@ table sources world server soft_delete
 table citations world server append_only unmasked
   cap 5000000
   index table row_id column id desc
+  # A source's drop asks whether any citation names it, under the writer lock.
+  index source_id
   col table str ! server_only
   col row_id u32 ! server_only
   col column str ! server_only

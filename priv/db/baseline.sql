@@ -654,6 +654,7 @@ CREATE TABLE "citations" (
 ) STRICT;
 CREATE INDEX "citations__account_account_id" ON "citations" ("account_id");
 CREATE INDEX "citations__index_table_row_id_column_id_desc" ON "citations" ("account_id", "table", "row_id", "column", "id" DESC);
+CREATE INDEX "citations__index_source_id" ON "citations" ("account_id", "source_id");
 
 CREATE TABLE "contacts" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
