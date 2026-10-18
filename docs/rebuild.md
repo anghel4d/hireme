@@ -592,8 +592,9 @@ timeout written down.
   parity fixtures.
 - `bench/` is rewritten for v2.
 - Bounds: BOOT ≤ 2 MiB deflated at 10k applications with `listing_raw`
-  deferred; PATCH ≤ 64 KiB per burst; full board derive ≤ 8 ms in wasm at
-  10k; `judge` ≤ 200 µs in the NIF; `find` p99 ≤ 10 ms at 50k places; op
+  deferred; PATCH ≤ 64 KiB per burst; board derive after a change ≤ 8 ms in
+  wasm at 10k, and the first derive after BOOT (which follows the snapshot's
+  paint) ≤ 30 ms on the worst-case bench desk; `judge` ≤ 200 µs in the NIF; `find` p99 ≤ 10 ms at 50k places; op
   round trip p50 ≤ 5 ms on loopback; 256 ops per `OPS` frame.
 
 ## The nuke manifest
