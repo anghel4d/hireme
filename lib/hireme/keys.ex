@@ -242,10 +242,7 @@ defmodule Hireme.Keys do
           trail(:key_resumed, key, %{}, Map.put(meta, :account_id, key.account_id))
 
           # The sequencer holds paused keys in memory; this lifts its hold.
-          Hireme.PubSub.broadcast(
-            Audit.topic(key.account_id),
-            {:resume, {:key, key.id}}
-          )
+          Hireme.PubSub.broadcast(Audit.topic(key.account_id), {:resume, {:key, key.id}})
         end
 
         {:ok, Repo.get(Key, key.id, skip_account: true)}
@@ -254,9 +251,7 @@ defmodule Hireme.Keys do
 
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment, its sessions end, and it stays listed."
   @spec revoke(Key.t(), map()) :: Key.t()
-  def revoke(key, meta \\ %{})
-
-  def revoke(%Key{} = key, meta) do
+  def revoke(%Key{} = key, meta \\ %{}) do
     now = Store.now()
 
     # Revoked only if still live: a second revoke, or one from a stale

@@ -78,15 +78,11 @@ defmodule Hireme.Audit do
     name = Atom.to_string(kind)
     Process.put({__MODULE__, :recorded}, true)
 
-    case account_id && @budgeted[name] do
-      budget when is_atom(budget) and budget != nil ->
-        if within?(budget, name, account_id, context),
-          do: write(kind, meta, context, account_id),
-          else: coalesce(budget, name, account_id, context)
+    budget = account_id && @budgeted[name]
 
-      _ ->
-        write(kind, meta, context, account_id)
-    end
+    if budget && not within?(budget, name, account_id, context),
+      do: __MODULE__.Coalescer.count(account_id, budget, name, context),
+      else: write(kind, meta, context, account_id)
   end
 
   defp within?(budget, name, account_id, context) do
@@ -118,9 +114,6 @@ defmodule Hireme.Audit do
     end
   end
 
-  defp coalesce(budget, name, account_id, context),
-    do: __MODULE__.Coalescer.count(account_id, budget, name, context)
-
   @doc false
   # Whether this process recorded an event since `recorded?(:reset)`: how an
   # account.* call knows it wrote, whatever else the account does meanwhile.
@@ -145,8 +138,8 @@ defmodule Hireme.Audit do
             %{
               account_id: account_id,
               kind: Atom.to_string(kind),
-              ip: blank(context[:ip], 64),
-              user_agent: blank(context[:user_agent], 200),
+              ip: Hireme.Security.text(context[:ip], 64),
+              user_agent: Hireme.Security.text(context[:user_agent], 200),
               meta: meta,
               key_id: Map.get(context, :key_id),
               session_id: Map.get(context, :session_id),
@@ -161,15 +154,6 @@ defmodule Hireme.Audit do
       end)
 
     :ok
-  end
-
-  defp blank(nil, _), do: nil
-
-  defp blank(value, max) do
-    case Hireme.Security.clip(value, max) do
-      "" -> nil
-      text -> text
-    end
   end
 
   @spec topic(pos_integer()) :: String.t()

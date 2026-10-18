@@ -128,22 +128,18 @@ defmodule HiremeWeb.Wire.Codec do
       )
       when byte_size(f) == len and len >= @header and rem(len, 8) == 0 do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
-         {:ok, name} <- frame_name(kind),
+         {:ok, name} <- Map.fetch(@frame_names, kind),
          # Bits tested without bnot, which Dialyzer types as never zero.
          :ok <- if((flags &&& (@zstd ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
          {:ok, body} <- unpack(f, flags, body, max_inflated) do
       {:ok, name, flags, rev, body}
+    else
+      :error -> {:error, :kind}
+      error -> error
     end
   end
 
   def decode(_, _), do: {:error, :len}
-
-  defp frame_name(kind) do
-    case Map.fetch(@frame_names, kind) do
-      :error -> {:error, :kind}
-      ok -> ok
-    end
-  end
 
   defp unpack(_frame, flags, body, _max) when (flags &&& @zstd) == 0, do: {:ok, body}
 
@@ -173,22 +169,18 @@ defmodule HiremeWeb.Wire.Codec do
   defp dict(kind, level) do
     key = {__MODULE__, kind, level}
 
-    case :persistent_term.get(key, nil) do
-      nil ->
-        {:ok, d} = :zstd.dict(:compress, Map.fetch!(@dicts, kind), %{compressionLevel: level})
-        :persistent_term.put(key, d)
-        d
-
-      d ->
-        d
-    end
+    :persistent_term.get(key, nil) ||
+      tap(
+        elem(:zstd.dict(:compress, Map.fetch!(@dicts, kind), %{compressionLevel: level}), 1),
+        &:persistent_term.put(key, &1)
+      )
   end
 
   # A table run's fixed-width columns as byte planes (and a str column's
   # offsets as deltas first), so like bytes sit together for zstd: headers,
   # pads, text and sym/list columns stay as they are. native/wire undoes it.
   defp shuffle(kind, body) when kind in @runs do
-    case Hireme.Kernel.Nif.shuffle(IO.iodata_to_binary(body)) do
+    case Nif.shuffle(IO.iodata_to_binary(body)) do
       nil -> raise ArgumentError, "a table run that does not walk"
       shuffled -> shuffled
     end
@@ -237,32 +229,24 @@ defmodule HiremeWeb.Wire.Codec do
 
   # ------------------------------------------------------- small frames
 
-  def hello(body) do
-    case body do
-      <<cred::8, 0::56, snapshot::little-64, schema_rev::little-64, rest::binary>> ->
-        with {:ok, credential, rest} <- field(rest),
-             {:ok, label, ""} <- field(rest),
-             true <- String.valid?(label) do
-          {:ok,
-           %{
-             cred: cred_name(cred),
-             snapshot_rev: snapshot,
-             schema_rev: schema_rev,
-             credential: credential,
-             label: label
-           }}
-        else
-          _ -> {:error, :body}
-        end
-
-      _ ->
-        {:error, :body}
+  def hello(<<cred::8, 0::56, snapshot::little-64, schema_rev::little-64, rest::binary>>) do
+    with {:ok, credential, rest} <- field(rest),
+         {:ok, label, ""} <- field(rest),
+         true <- String.valid?(label) do
+      {:ok,
+       %{
+         cred: Map.get(%{1 => :ticket, 2 => :key}, cred, :unknown),
+         snapshot_rev: snapshot,
+         schema_rev: schema_rev,
+         credential: credential,
+         label: label
+       }}
+    else
+      _ -> {:error, :body}
     end
   end
 
-  defp cred_name(1), do: :ticket
-  defp cred_name(2), do: :key
-  defp cred_name(_), do: :unknown
+  def hello(_), do: {:error, :body}
 
   @doc "HELLO, for tests and tools that play the client."
   def encode_hello(cred, credential, label, snapshot_rev \\ 0, schema_rev \\ 0) do
@@ -387,30 +371,27 @@ defmodule HiremeWeb.Wire.Codec do
         <<op_id::little-64, verb::8, flags::8, subject::little-16, target::little-32,
           ncols::little-16, 0::16, expect::little-32, rest::binary>> = bin
       )
-      when verb in 1..3 and (flags &&& (@keyed ||| @create_only ||| @expect_rev)) == flags do
-    if (flags &&& @expect_rev) == 0 and expect != 0 do
-      :error
-    else
-      case cells(rest, ncols, [], %{}) do
-        {:ok, cells, more} ->
-          raw = binary_part(bin, 0, byte_size(bin) - byte_size(more))
+      when verb in 1..3 and (flags &&& (@keyed ||| @create_only ||| @expect_rev)) == flags and
+             ((flags &&& @expect_rev) != 0 or expect == 0) do
+    case cells(rest, ncols, [], %{}) do
+      {:ok, cells, more} ->
+        raw = binary_part(bin, 0, byte_size(bin) - byte_size(more))
 
-          {:ok,
-           %{
-             op_id: op_id,
-             verb: @verbs[verb],
-             keyed: (flags &&& @keyed) != 0,
-             create_only: (flags &&& @create_only) != 0,
-             expect_rev: if((flags &&& @expect_rev) != 0, do: expect),
-             subject: subject,
-             target: target,
-             cells: cells,
-             raw: raw
-           }, more}
+        {:ok,
+         %{
+           op_id: op_id,
+           verb: @verbs[verb],
+           keyed: (flags &&& @keyed) != 0,
+           create_only: (flags &&& @create_only) != 0,
+           expect_rev: if((flags &&& @expect_rev) != 0, do: expect),
+           subject: subject,
+           target: target,
+           cells: cells,
+           raw: raw
+         }, more}
 
-        :error ->
-          :error
-      end
+      :error ->
+        :error
     end
   end
 
@@ -446,6 +427,16 @@ defmodule HiremeWeb.Wire.Codec do
   @doc "Encodes ops (tests, the importer's tools): `[{op_id, verb, flags, subject, target, expect_rev, [{col, type, value}]}]`."
   def encode_ops(ops) do
     frame(:OPS, 0, [<<length(ops)::little-32, 0::32>> | Enum.map(ops, &encode_op/1)])
+  end
+
+  @doc """
+  An op id for an op the server makes itself (the importer, the keywords
+  backfill): random, so it never repeats across restarts as
+  `unique_integer`'s do, and under 2^63, so SQLite's i64 keeps it as is.
+  """
+  def op_id do
+    <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
+    id
   end
 
   def encode_op({op_id, verb, flags, subject, target, expect_rev, cells}) do
@@ -547,9 +538,6 @@ defmodule HiremeWeb.Wire.Codec do
   def cell_type(%{wire: @t_zstr}), do: @t_str
   def cell_type(%{wire: w}), do: w
 
-  @doc "A column's wire type code in BOOT and PATCH."
-  def wire_type(%{wire: w}), do: w
-
   @doc "An enum value's code; `nil` for one the enum does not have."
   def enum_code(enum, value) when is_atom(value),
     do: get_in(@enum_codes, [to_string(enum), value])
@@ -595,7 +583,6 @@ defmodule HiremeWeb.Wire.Codec do
   `{:ok, value}` or `{:error, :type}`.
   """
   def from_wire(_col, nil), do: {:ok, nil}
-  def from_wire(%{type: t} = col, v) when t in [:str, :text], do: to_value(col, v)
   def from_wire(col, v), do: to_value(col, v)
 
   # -------------------------------------------------------- table runs
@@ -643,9 +630,15 @@ defmodule HiremeWeb.Wire.Codec do
       Enum.map(cols, fn c ->
         key = String.to_atom(c.name)
         wire = converter(c)
-        {c.id, wire_type(c), Enum.map(rows, &wire.(Map.get(&1, key)))}
+        {c.id, c.wire, Enum.map(rows, &wire.(Map.get(&1, key)))}
       end)
     )
+  end
+
+  @doc "The `clock` block: today and now, as the BOOT and the TICK carry them."
+  def clock(now) do
+    t = Schema.table(:clock)
+    rows_block(t, t.cols, [%{today: DateTime.to_date(now), now: now}])
   end
 
   # `to_wire/2` with the column's decisions taken once, not per cell: BOOT

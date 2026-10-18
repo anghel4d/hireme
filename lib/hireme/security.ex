@@ -164,12 +164,7 @@ defmodule Hireme.Security do
 
   @doc "Count one attempt under the named limit for `key`; refuse past its cap."
   @spec limit(atom(), term()) :: :ok | {:error, :rate_limited}
-  def limit(name, key) do
-    case hit(name, key, 1) do
-      :ok -> :ok
-      {:error, _retry_ms} -> {:error, :rate_limited}
-    end
-  end
+  def limit(name, key), do: with({:error, _} <- hit(name, key, 1), do: {:error, :rate_limited})
 
   @doc """
   Count `n` under the named limit for `key`. A refusal says how many ms
@@ -300,10 +295,8 @@ defmodule Hireme.Security do
 
   @spec unseal(binary(), String.t()) :: {:ok, term()} | :error
   def unseal(sealed, purpose) when is_binary(sealed) and is_binary(purpose) do
-    case Plug.Crypto.decrypt(key_base(), purpose, sealed, max_age: :infinity) do
-      {:ok, term} -> {:ok, term}
-      _ -> :error
-    end
+    with {:error, _} <- Plug.Crypto.decrypt(key_base(), purpose, sealed, max_age: :infinity),
+         do: :error
   end
 
   @doc """
@@ -329,6 +322,15 @@ defmodule Hireme.Security do
     bin = to_string(text)
     bin = binary_part(bin, 0, min(byte_size(bin), max))
     for <<b <- bin>>, into: "", do: if(b in 0x20..0x7E, do: <<b>>, else: "?")
+  end
+
+  @doc "`clip/2` with nothing, nil or blank, as nil: no column holds an empty string."
+  @spec text(term(), pos_integer()) :: String.t() | nil
+  def text(value, max) do
+    case clip(value, max) do
+      "" -> nil
+      text -> text
+    end
   end
 
   defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)

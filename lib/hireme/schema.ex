@@ -53,7 +53,6 @@ defmodule Hireme.Schema do
   Recompiles when the file changes.
   """
 
-  @path Path.expand("../../schema/hireme.schema", __DIR__)
   @json Path.expand("../../priv/schema.json", __DIR__)
   @external_resource @json
   @model @json |> File.read!() |> JSON.decode!() |> Hireme.Schema.Load.model()
@@ -67,9 +66,6 @@ defmodule Hireme.Schema do
   @enums Map.new(@model.enums, &{&1.name, &1})
   @refusals @enums["refusal"].values |> Enum.with_index() |> Map.new(fn {v, i} -> {v, i} end)
   @domains Map.new(@model.domains, &{&1.name, &1.bit})
-
-  @doc "The path of the declaration."
-  def path, do: @path
 
   @doc "The whole resolved declaration."
   def model, do: @model
@@ -112,11 +108,6 @@ defmodule Hireme.Schema do
   @doc "An enum's values in code order, as atoms."
   def enum(name), do: Enum.map(enum_names(name), &String.to_atom/1)
 
-  @doc "The code of an enum value (atom or string); nil when it is not one."
-  def enum_code(name, value) do
-    Enum.find_index(enum_names(name), &(&1 == to_string(value)))
-  end
-
   @doc "An enum's values in code order, as strings."
   def enum_names(name), do: Map.fetch!(@enums, to_string(name)).values
 
@@ -124,31 +115,13 @@ defmodule Hireme.Schema do
   def refusal(name), do: Map.fetch!(@refusals, to_string(name))
 
   @doc "The refusal a code names, as an atom; nil past the enum."
-  def refusal_name(code) do
-    case Enum.at(enum_names(:refusal), code) do
-      nil -> nil
-      name -> String.to_atom(name)
-    end
-  end
+  def refusal_name(code), do: Enum.at(enum(:refusal), code)
 
   @doc "A domain's mask bit; `system` has none (0)."
   def domain_bit(name), do: Map.fetch!(@domains, to_string(name))
 
   def frames, do: @model.frames
-
-  @doc "A frame's name (uppercase string) by kind id; nil when unknown."
-  def frame_name(id), do: Enum.find_value(@model.frames, &(&1.id == id && &1.name))
-
-  @doc "A frame's kind id by name (`:hello` or `\"HELLO\"`)."
-  def frame(name) do
-    name = name |> to_string() |> String.upcase()
-    Enum.find_value(@model.frames, &(&1.name == name && &1.id))
-  end
-
   def wire_hash, do: @model.wire_hash
-
-  @doc "The byte layout `native/wire` implements."
-  def layout, do: @model.layout
 
   @doc """
   The last day a `day` cell holds: 9999-12-31 as days since 0000-01-01. The
@@ -161,8 +134,7 @@ defmodule Hireme.Schema do
   @doc "The row module of a stored table."
   def row(table), do: Module.concat(Hireme.Rows, singular(table(table).name))
 
-  @doc false
-  def singular(name) do
+  defp singular(name) do
     name =
       cond do
         String.ends_with?(name, "ies") ->
@@ -238,9 +210,7 @@ defmodule Hireme.Schema.Json do
   def type, do: :string
 
   @impl true
-  def cast(value) do
-    if json?(value), do: {:ok, value}, else: :error
-  end
+  def cast(value), do: if(json?(value), do: {:ok, value}, else: :error)
 
   @impl true
   def dump(nil), do: {:ok, nil}
@@ -249,13 +219,7 @@ defmodule Hireme.Schema.Json do
   @impl true
   def load(nil), do: {:ok, nil}
 
-  def load(text) when is_binary(text) do
-    case Jason.decode(text) do
-      {:ok, value} -> {:ok, value}
-      _ -> :error
-    end
-  end
-
+  def load(text) when is_binary(text), do: with({:error, _} <- Jason.decode(text), do: :error)
   def load(_), do: :error
 
   defp json?(v) when is_map(v),

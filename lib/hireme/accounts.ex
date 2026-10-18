@@ -82,19 +82,14 @@ defmodule Hireme.Accounts do
 
   ## Sessions
 
-  @doc """
-  Open a session for `account`. Answers the token the cookie carries and
-  the row; the token is not stored and cannot be recovered.
-  """
-  @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()} | {:error, :cap}
-  def start_session(%Account{} = account, meta \\ %{}) do
-    token = Security.token(32)
+  # Opens a session for `account`: the token the cookie carries and the
+  # row. The token is not stored and cannot be recovered.
+  defp start_session(%Account{} = account, meta) do
     now = Store.now()
 
-    case Store.transaction(fn -> room_for_session(account.id, now) || Repo.rollback(:cap) end) do
-      {:ok, _} -> open_session(account, token, now, meta)
-      {:error, :cap} -> {:error, :cap}
-    end
+    with {:ok, _} <-
+           Store.transaction(fn -> room_for_session(account.id, now) || Repo.rollback(:cap) end),
+         do: open_session(account, Security.token(32), now, meta)
   end
 
   # At the declared cap, the oldest ended sessions (revoked, expired, idle)
@@ -146,8 +141,8 @@ defmodule Hireme.Accounts do
           authenticated_at: now,
           last_seen_at: now,
           expires_at: DateTime.add(now, Security.session_lifetime()),
-          ip: text(meta[:ip], 64),
-          user_agent: text(meta[:user_agent], 200),
+          ip: Security.text(meta[:ip], 64),
+          user_agent: Security.text(meta[:user_agent], 200),
           rev: 1
         })
       end)
@@ -316,12 +311,8 @@ defmodule Hireme.Accounts do
   `activity?` false it only checks, for what a client does by itself.
   """
   @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
-  def live_session(session_id) when is_integer(session_id) do
-    case read_live(session_id) do
-      {:ok, s, now} -> {:ok, touch(s, now)}
-      :error -> :error
-    end
-  end
+  def live_session(session_id) when is_integer(session_id),
+    do: with({:ok, s, now} <- read_live(session_id), do: {:ok, touch(s, now)})
 
   @doc """
   Whether browser session `session_id` may still act (live, active, and
@@ -374,8 +365,8 @@ defmodule Hireme.Accounts do
           email: email,
           token_hash: Security.hash(token),
           expires_at: DateTime.add(now, Security.magic_link_ttl()),
-          ip: text(meta[:ip], 64),
-          user_agent: text(meta[:user_agent], 200),
+          ip: Security.text(meta[:ip], 64),
+          user_agent: Security.text(meta[:user_agent], 200),
           rev: 1
         })
       end)
@@ -629,7 +620,7 @@ defmodule Hireme.Accounts do
   # loser finds the winner's.
   defp first_identity(provider, claim, meta) do
     Store.transaction(fn ->
-      account = Repo.insert!(%Account{name: text(claim.display, 200), rev: 1})
+      account = Repo.insert!(%Account{name: Security.text(claim.display, 200), rev: 1})
 
       case insert_identity(account.id, provider, claim) do
         {:ok, identity} ->
@@ -656,7 +647,7 @@ defmodule Hireme.Accounts do
       account_id: account_id,
       provider: provider,
       subject: String.slice(claim.subject, 0, 320),
-      display: text(Map.get(claim, :display), 200),
+      display: Security.text(Map.get(claim, :display), 200),
       verified_at: Store.now(),
       rev: 1
     }
@@ -675,15 +666,6 @@ defmodule Hireme.Accounts do
         ],
         skip_account: true
       )
-
-  # Blank is NULL, never '': no column holds an empty string.
-  defp text(value, max) do
-    case value && Security.clip(value, max) do
-      nil -> nil
-      "" -> nil
-      text -> text
-    end
-  end
 
   defp context(meta, account_id, session_id),
     do: meta |> Map.put(:account_id, account_id) |> Map.put(:session_id, session_id)

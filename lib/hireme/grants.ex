@@ -73,10 +73,6 @@ defmodule Hireme.Grants do
     Enum.reject(table.cols, &(&1.server_only or (&1.private and actor != :operator)))
   end
 
-  @doc "Whether a single column is visible to these grants."
-  def column?(%__MODULE__{actor: actor}, col),
-    do: not col.server_only and (not col.private or actor == :operator)
-
   @doc """
   Check 1 of the sequencer, `grant`: the write mask covers the op's domain,
   a drop has `may_delete`, a key's command or column is not `human_only`.

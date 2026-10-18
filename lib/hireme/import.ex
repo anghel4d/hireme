@@ -67,8 +67,6 @@ defmodule Hireme.Import do
 
   # The sequencer's batch.
   @batch 64
-  @as_of 0xFFF0
-  @source 0xFFF1
   @keyed 0x01
 
   @type refusal :: %{table: String.t(), row: non_neg_integer() | nil, code: atom(), data: map()}
@@ -115,8 +113,7 @@ defmodule Hireme.Import do
 
   # ------------------------------------------------------------------ parse
 
-  @doc false
-  def parse(body, :json) do
+  defp parse(body, :json) do
     case Jason.decode(String.trim_leading(body, "\uFEFF")) do
       {:ok, %{"tables" => tables} = pack} when is_list(tables) ->
         groups =
@@ -129,7 +126,7 @@ defmodule Hireme.Import do
           end)
 
         case Enum.find(groups, &match?({:bad, _}, &1)) do
-          nil -> {:ok, pack(pack["as_of"], pack["source"], groups)}
+          nil -> {:ok, %{as_of: pack["as_of"], source: pack["source"], tables: groups}}
           {:bad, g} -> {:error, {:group, brief(g)}}
         end
 
@@ -141,7 +138,7 @@ defmodule Hireme.Import do
     end
   end
 
-  def parse(body, :markdown) do
+  defp parse(body, :markdown) do
     # A byte-order mark (what some editors write first) is not text, and one
     # can open any joined file, not only the first.
     lines =
@@ -175,7 +172,7 @@ defmodule Hireme.Import do
 
     if groups == [],
       do: {:error, :no_tables},
-      else: {:ok, pack(defaults["as_of"], defaults["source"], groups)}
+      else: {:ok, %{as_of: defaults["as_of"], source: defaults["source"], tables: groups}}
   end
 
   defp finish({table, lines}) do
@@ -242,9 +239,6 @@ defmodule Hireme.Import do
     |> String.split(~r/(?<!\\)\|/)
     |> Enum.map(&(&1 |> String.replace("\\|", "|") |> String.trim()))
   end
-
-  defp pack(as_of, source, groups),
-    do: %{as_of: as_of, source: source, tables: groups}
 
   # ------------------------------------------------------------------ groups
 
@@ -338,7 +332,8 @@ defmodule Hireme.Import do
       # unique key alone updates the row that holds it.
       flags = if key, do: @keyed, else: 0
       target = if(unique && existing, do: existing.id, else: 0)
-      raw = Codec.encode_op({op_id(), :put, flags, table.id, target, expect_rev, cells ++ extra})
+      cells = cells ++ extra
+      raw = Codec.encode_op({Codec.op_id(), :put, flags, table.id, target, expect_rev, cells})
 
       case Codec.op(raw) do
         {:ok, op, ""} -> {:ok, op}
@@ -389,7 +384,7 @@ defmodule Hireme.Import do
   defp cast(%{type: :json} = col, value, :text) do
     case Jason.decode(value) do
       {:ok, v} -> {:ok, v}
-      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
+      _ -> unfit(col, value)
     end
   end
 
@@ -397,56 +392,47 @@ defmodule Hireme.Import do
     case String.downcase(value) do
       v when v in ~w(true yes 1) -> {:ok, true}
       v when v in ~w(false no 0) -> {:ok, false}
-      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
+      _ -> unfit(col, value)
     end
   end
 
   defp cast(col, value, _mode) do
     case Ecto.Type.cast(Schema.cast_type(col), value) do
-      {:ok, nil} -> {:refused, :type, %{column: col.name, value: brief(value)}}
+      {:ok, nil} -> unfit(col, value)
       {:ok, v} -> in_range(col, v, value)
-      _ -> {:refused, :type, %{column: col.name, value: brief(value)}}
+      _ -> unfit(col, value)
     end
   end
 
   # The wire's integers: a value past its column's range would be truncated
   # by the encoding, so it is refused; each type's top or bottom is null.
-  @times 0..4_294_967_294
-
+  # A day travels as days since 0000-01-01 to 9999-12-31 and a time as unix
+  # seconds, both u32 on the wire with its top for null.
   @ranges %{
     u8: 0..255,
     u32: 0..4_294_967_294,
     i64: -9_223_372_036_854_775_807..9_223_372_036_854_775_807
   }
 
-  defp in_range(%{type: t} = col, v, value) when is_map_key(@ranges, t) do
-    if v in Map.fetch!(@ranges, t),
-      do: {:ok, v},
-      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
-  end
+  defp in_range(%{type: t} = col, v, value) when is_map_key(@ranges, t),
+    do: fit(v in Map.fetch!(@ranges, t), col, v, value, "out of range")
 
-  # A day travels as days since 0000-01-01 to 9999-12-31 and a time as unix
-  # seconds, both u32 on the wire with its top for null; past either a value
-  # would not travel.
-  defp in_range(%{type: :day} = col, %Date{} = d, value) do
-    if Codec.day_to_wire(d) != nil,
-      do: {:ok, d},
-      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
-  end
+  defp in_range(%{type: :day} = col, %Date{} = d, value),
+    do: fit(Codec.day_to_wire(d) != nil, col, d, value, "out of range")
 
-  defp in_range(%{type: :time} = col, %DateTime{} = t, value) do
-    if DateTime.to_unix(t) in @times,
-      do: {:ok, t},
-      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "out of range"}}
-  end
+  defp in_range(%{type: :time} = col, %DateTime{} = t, value),
+    do: fit(DateTime.to_unix(t) in 0..4_294_967_294, col, t, value, "out of range")
 
-  defp in_range(%{type: t} = col, v, value) when t in [:str, :text] and is_binary(v) do
-    if String.valid?(v),
-      do: {:ok, v},
-      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "not UTF-8"}}
-  end
+  defp in_range(%{type: t} = col, v, value) when t in [:str, :text] and is_binary(v),
+    do: fit(String.valid?(v), col, v, value, "not UTF-8")
 
   defp in_range(_col, v, _value), do: {:ok, v}
+
+  defp fit(true, _col, v, _value, _reason), do: {:ok, v}
+  defp fit(false, col, _v, value, reason), do: unfit(col, value, %{reason: reason})
+
+  defp unfit(col, value, more \\ %{}),
+    do: {:refused, :type, Map.merge(%{column: col.name, value: brief(value)}, more)}
 
   # A ref is an id, a natural key object, or (one-column key) its value.
   defp resolve_ref(_account_id, _target, id, _mode)
@@ -557,7 +543,9 @@ defmodule Hireme.Import do
 
     with {:ok, as_of_cell} <- as_of_cell(metric?, as_of) do
       source_cell =
-        if (metric? or prose?) and is_binary(source), do: [{@source, 2, source}], else: []
+        if (metric? or prose?) and is_binary(source),
+          do: [{Codec.source_col(), 2, source}],
+          else: []
 
       expect_rev = if prose?, do: (existing && existing.rev) || 0
       {:ok, as_of_cell ++ source_cell, expect_rev}
@@ -570,18 +558,13 @@ defmodule Hireme.Import do
   defp as_of_cell(true, as_of) when is_binary(as_of) do
     with {:ok, d} <- Date.from_iso8601(as_of),
          days when days != nil <- Codec.day_to_wire(d) do
-      {:ok, [{@as_of, 1, days}]}
+      {:ok, [{Codec.as_of_col(), 1, days}]}
     else
       _ -> {:refused, :type, %{column: "as_of", value: brief(as_of)}}
     end
   end
 
   defp as_of_cell(true, as_of), do: {:refused, :type, %{column: "as_of", value: brief(as_of)}}
-
-  defp op_id do
-    <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
-    id
-  end
 
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)

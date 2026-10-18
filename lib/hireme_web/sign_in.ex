@@ -257,6 +257,7 @@ defmodule HiremeWeb.SignInController do
     "failed" => "Sign-in did not finish. Try again.",
     "suspended" => "This account is suspended."
   }
+  @cap "This account has too many open sessions; sign out of one, then try again."
 
   def index(%{assigns: %{account: %{}, pending: true}} = conn, _),
     do: redirect(conn, to: "/sign-in/factor")
@@ -335,11 +336,7 @@ defmodule HiremeWeb.SignInController do
         signed_in(conn)
 
       {:error, :cap} ->
-        methods(
-          conn,
-          409,
-          "This account has too many open sessions; sign out of one, then try again. The link still works."
-        )
+        methods(conn, 409, @cap <> " The link still works.")
 
       {:error, :rate_limited} ->
         methods(conn, 429, "Too many tries. Wait a few minutes.")
@@ -465,11 +462,7 @@ defmodule HiremeWeb.SignInController do
         methods(conn, 403, @notices["suspended"])
 
       {:error, :cap} ->
-        methods(
-          conn,
-          409,
-          "This account has too many open sessions; sign out of one, then try again."
-        )
+        methods(conn, 409, @cap)
     end
   end
 

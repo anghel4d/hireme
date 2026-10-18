@@ -152,12 +152,9 @@ defmodule Hireme.Release do
     end
   end
 
-  @doc """
-  The migration lock beside the database, named from SQLite's own name
-  for the file it opened, so the same through any symlinked path.
-  """
-  @spec lock_path(Path.t()) :: Path.t()
-  def lock_path(path) do
+  # The migration lock beside the database, named from SQLite's own name
+  # for the file it opened, so the same through any symlinked path.
+  defp lock_path(path) do
     with_conn(path, fn conn ->
       [[_, "main", file] | _] = rows(conn, "PRAGMA database_list")
       file <> ".migrate"

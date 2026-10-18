@@ -61,11 +61,9 @@ defmodule Hireme.PubSub do
     :ok
   end
 
-  def broadcast(topic, message), do: broadcast_from(nil, topic, message)
-
-  def broadcast_from(from, topic, message),
+  def broadcast(topic, message),
     do:
       Registry.dispatch(__MODULE__, topic, fn subs ->
-        for {pid, _} <- subs, pid != from, do: send(pid, message)
+        for {pid, _} <- subs, do: send(pid, message)
       end)
 end

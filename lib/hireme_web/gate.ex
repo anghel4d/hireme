@@ -124,14 +124,10 @@ defmodule HiremeWeb.Gate do
   def stats, do: command("stats")
 
   defp command(line) do
-    case Process.whereis(HiremeWeb.Gate.Binary) do
-      nil ->
-        :ok
+    with pid when pid != nil <- Process.whereis(__MODULE__.Binary),
+         do: send(pid, {:command, line})
 
-      pid ->
-        send(pid, {:command, line})
-        :ok
-    end
+    :ok
   end
 
   # ------------------------------------------------------------ listener

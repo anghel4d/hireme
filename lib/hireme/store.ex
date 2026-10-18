@@ -74,12 +74,8 @@ defmodule Hireme.Store do
   keep writing (`VACUUM INTO`). The file must not exist yet.
   """
   @spec backup(Path.t()) :: :ok | {:error, term()}
-  def backup(path) do
-    case Repo.query("VACUUM INTO ?", [path], skip_account: true) do
-      {:ok, _} -> :ok
-      {:error, error} -> {:error, error}
-    end
-  end
+  def backup(path),
+    do: with({:ok, _} <- Repo.query("VACUUM INTO ?", [path], skip_account: true), do: :ok)
 
   defp exec(sql) do
     Repo.query!(sql, [], skip_account: true)

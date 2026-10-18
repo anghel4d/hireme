@@ -259,21 +259,17 @@ defmodule Hireme.Mfa do
   @spec begin_assertion(Session.t()) :: {:ok, map()} | {:error, :rate_limited}
   def begin_assertion(%Session{} = session) do
     as(session, fn ->
-      with :ok <- begun(session), do: {:ok, assertion(session)}
-    end)
-  end
+      with :ok <- begun(session) do
+        keys = passkeys()
 
-  defp assertion(session) do
-    as(session, fn ->
-      keys = passkeys()
+        challenge =
+          WebAuthn.authentication_challenge(
+            Enum.map(keys, &WebAuthn.credential({&1.credential_id, &1.public_key}))
+          )
 
-      challenge =
-        WebAuthn.authentication_challenge(
-          Enum.map(keys, &WebAuthn.credential({&1.credential_id, &1.public_key}))
-        )
-
-      challenge!(session, :webauthn_assert, challenge)
-      WebAuthn.assertion_options(challenge, keys)
+        challenge!(session, :webauthn_assert, challenge)
+        {:ok, WebAuthn.assertion_options(challenge, keys)}
+      end
     end)
   end
 
@@ -323,17 +319,11 @@ defmodule Hireme.Mfa do
           {:ok, [String.t()]} | {:error, :step_up | :no_factor}
   def regenerate_recovery_codes(%Session{} = session, meta \\ %{}) do
     as(session, fn ->
-      cond do
-        not fresh?(session) ->
-          {:error, :step_up}
-
-        not enrolled?() ->
-          {:error, :no_factor}
-
-        true ->
-          codes = recovery_codes!(session, meta)
-          Accounts.notify(session.account_id, :recovery_codes_issued, %{})
-          {:ok, codes}
+      with :ok <- fresh(session),
+           true <- enrolled?() || {:error, :no_factor} do
+        codes = recovery_codes!(session, meta)
+        Accounts.notify(session.account_id, :recovery_codes_issued, %{})
+        {:ok, codes}
       end
     end)
   end

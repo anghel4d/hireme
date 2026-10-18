@@ -150,7 +150,7 @@ defmodule HiremeWeb.Session do
   def info({__MODULE__, :tick}, %{phase: :live} = state) do
     if credential_live?(state.session) do
       Process.send_after(self(), {__MODULE__, :tick}, @tick_ms)
-      {:push, [Codec.frame(:TICK, state.rev, clock(), end: true)], state}
+      {:push, [Codec.frame(:TICK, state.rev, Codec.clock(Hireme.Store.now()), end: true)], state}
     else
       bye(:revoked, "credential lapsed", state)
     end
@@ -208,20 +208,12 @@ defmodule HiremeWeb.Session do
   defp on_frame(:RPC, body, state) do
     case Codec.rpc(body) do
       {:ok, id, method, json} ->
-        case params(json) do
-          {:ok, params} ->
-            case metered(method, state) do
-              :ok ->
-                rpc(id, method, params, state)
-
-              {:error, retry_ms} ->
-                {:push, [reply(id, false, error(:rate, %{retry_ms: retry_ms}), state)], state}
-            end
-
-          :error ->
-            {:push,
-             [reply(id, false, error(:type, %{reason: "params are a JSON object"}), state)],
-             state}
+        with {:ok, params} <- params(json),
+             :ok <- metered(method, state) do
+          rpc(id, method, params, state)
+        else
+          :error -> refuse(id, :type, %{reason: "params are a JSON object"}, state)
+          {:error, retry_ms} -> refuse(id, :rate, %{retry_ms: retry_ms}, state)
         end
 
       {:error, _} ->
@@ -412,12 +404,11 @@ defmodule HiremeWeb.Session do
 
   # --------------------------------------------------------------- RPC
 
+  # The grants a claim needs are the sequencer's to check (it holds them).
   defp rpc(id, "lease.claim", params, state) do
-    with :ok <- claim_shape(params),
-         :ok <- claim_grants(params, state.session.grants) do
-      answer(id, Lease.claim(state.account_id, state.session.id, params), state)
-    else
-      {:refused, refusal, data} -> {:push, [reply(id, false, error(refusal, data), state)], state}
+    case claim_shape(params) do
+      :ok -> answer(id, Lease.claim(state.account_id, state.session.id, params), state)
+      {:refused, refusal, data} -> refuse(id, refusal, data, state)
     end
   end
 
@@ -426,7 +417,7 @@ defmodule HiremeWeb.Session do
 
     if ids == nil or (is_list(ids) and Enum.all?(ids, &is_integer/1)),
       do: answer(id, Lease.release(state.account_id, state.session.id, ids), state),
-      else: {:push, [reply(id, false, error(:type, %{column: "ids"}), state)], state}
+      else: refuse(id, :type, %{column: "ids"}, state)
   end
 
   defp rpc(id, "account." <> _ = method, params, state) do
@@ -444,8 +435,7 @@ defmodule HiremeWeb.Session do
     end
   end
 
-  defp rpc(id, method, _params, state),
-    do: {:push, [reply(id, false, error(:not_found, %{method: method}), state)], state}
+  defp rpc(id, method, _params, state), do: refuse(id, :not_found, %{method: method}, state)
 
   # `{count, stage?}`, `{ids}` or `{}`, each of its type.
   defp claim_shape(params) do
@@ -467,37 +457,15 @@ defmodule HiremeWeb.Session do
     if ok, do: :ok, else: {:refused, :type, %{expected: "{count, stage?} | {ids} | {}"}}
   end
 
-  # The channel is for writing: a key with no write bit may not take it, and
-  # only one that writes the desk may claim applications.
-  defp claim_grants(params, grants) do
-    claims = params["count"] not in [nil, 0] or params["ids"] not in [nil, []]
-
-    cond do
-      grants.write_mask == 0 ->
-        {:refused, :scope, %{reason: "the lease is for writing"}}
-
-      # Claiming ranks and names applications: it needs the desk both ways.
-      claims and
-          not (Grants.write?(grants, Hireme.Schema.table(:applications)) and
-                   Grants.read?(grants, Hireme.Schema.table(:applications))) ->
-        {:refused, :scope, %{table: "applications"}}
-
-      true ->
-        :ok
-    end
-  end
-
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
   defp answer(id, :ok, state), do: {:push, [reply(id, true, %{}, state)], state}
+  defp answer(id, {:refused, refusal, data}, state), do: refuse(id, refusal, data, state)
+  defp answer(id, {:error, reason}, state), do: refuse(id, reason, %{}, state)
 
-  defp answer(id, {:refused, refusal, data}, state),
-    do: {:push, [reply(id, false, error(refusal, data), state)], state}
-
-  defp answer(id, {:error, reason}, state),
-    do: {:push, [reply(id, false, error(reason, %{}), state)], state}
-
-  defp error(refusal, data),
-    do: %{code: refusal, message: to_string(refusal), data: Sequencer.reasoned(data, refusal)}
+  defp refuse(id, refusal, data, state) do
+    error = %{code: refusal, message: to_string(refusal), data: Sequencer.reasoned(data, refusal)}
+    {:push, [reply(id, false, error, state)], state}
+  end
 
   defp reply(id, ok?, result, state), do: Codec.reply(state.rev, id, ok?, JSON.encode!(result))
 
@@ -505,12 +473,6 @@ defmodule HiremeWeb.Session do
 
   defp bye(reason, message, state),
     do: {:stop, {:bye, reason}, [Codec.bye(state.rev, reason, message)], state}
-
-  defp clock do
-    t = Hireme.Schema.table(:clock)
-    now = DateTime.utc_now() |> DateTime.truncate(:second)
-    Codec.rows_block(t, t.cols, [%{today: DateTime.to_date(now), now: now}])
-  end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 
@@ -532,9 +494,6 @@ defmodule HiremeWeb.Session do
   defp ws({:ok, state}), do: {:ok, state}
   defp ws({:push, [], state}), do: {:ok, state}
   defp ws({:push, frames, state}), do: {:push, Enum.map(frames, &{:binary, &1}), state}
-
-  defp ws({:stop, {:bye, _}, frames, state}),
-    do: {:stop, :normal, 1000, Enum.map(frames, &{:binary, &1}), state}
 
   defp ws({:stop, reason, frames, state}),
     do: {:stop, :normal, close_code(reason), Enum.map(frames, &{:binary, &1}), state}

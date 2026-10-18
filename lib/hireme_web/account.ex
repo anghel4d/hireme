@@ -60,39 +60,25 @@ defmodule HiremeWeb.Account do
     guarded(method, fn -> checked(method, params, ctx) end)
   end
 
+  # The browser session's own lifetime, idle limit, revocation and the
+  # account's suspension hold here exactly as for a page.
   defp checked(method, params, ctx) do
     with nil <- ctx[:key],
          true <- ids?(params) || :invalid,
          id when is_integer(id) <- ctx[:session_id],
-         {:ok, %Session{account_id: account_id} = session} <- live(id),
+         {:ok, %Session{account_id: account_id} = session} <- Accounts.live_session(id),
          true <- account_id == ctx.account_id do
       Repo.with_account(account_id, fn -> safely(method, params, session, ctx) end)
     else
-      :session -> {:error, %{error: "session"}}
+      :error -> {:error, %{error: "session"}}
       :invalid -> {:error, %{error: "invalid"}}
       _ -> {:error, %{error: "scope"}}
     end
   end
 
-  # The browser session's own lifetime, idle limit, revocation and the
-  # account's suspension hold here exactly as for a page.
-  defp live(id) do
-    case Accounts.live_session(id) do
-      {:ok, session} -> {:ok, session}
-      :error -> :session
-    end
-  end
-
   # Every id a call names is a row id: a positive 64-bit integer.
-  defp ids?(params) do
-    Enum.all?(~w(id), fn k ->
-      case Map.get(params, k) do
-        nil -> true
-        n when is_integer(n) -> n >= 0 and n < 0x8000000000000000
-        _ -> k == "id"
-      end
-    end)
-  end
+  defp ids?(%{"id" => n}) when is_integer(n), do: n >= 0 and n < 0x8000000000000000
+  defp ids?(_params), do: true
 
   # The methods that write the trail or mail a notice, under one budget per
   # account (renames have their own); reads, ceremonies begun and step-up
@@ -183,10 +169,7 @@ defmodule HiremeWeb.Account do
         {:error, :rate_limited}
 
       true ->
-        account
-        |> Ecto.Changeset.change(name: name, rev: account.rev + 1)
-        |> then(&Hireme.Store.write(fn -> Repo.update!(&1, skip_account: true) end))
-
+        Hireme.Store.update!(account, [name: name], skip_account: true)
         Audit.record(:account_renamed, %{}, ctx(meta, s))
         :ok
     end
@@ -235,10 +218,8 @@ defmodule HiremeWeb.Account do
   end
 
   defp run("account.key.revoke", %{"id" => id}, s, meta) when is_integer(id) do
-    case Keys.get(id) do
-      nil -> {:error, :not_found}
-      key -> {:ok, %{key: key(Keys.revoke(key, ctx(meta, s)))}}
-    end
+    with %{} = key <- Keys.get(id) || {:error, :not_found},
+         do: {:ok, %{key: key(Keys.revoke(key, ctx(meta, s)))}}
   end
 
   ## Leases
@@ -339,21 +320,12 @@ defmodule HiremeWeb.Account do
 
   ## Projections
 
+  @key_fields ~w(id name paused_at read_mask write_mask may_delete last_used_at expires_at
+    revoked_at inserted_at)a
+  @factor_fields ~w(id kind name verified_at last_used_at backup_eligible backed_up transports)a
+
   defp key(k) do
-    k
-    |> Map.take([
-      :id,
-      :name,
-      :paused_at,
-      :read_mask,
-      :write_mask,
-      :may_delete,
-      :last_used_at,
-      :expires_at,
-      :revoked_at,
-      :inserted_at
-    ])
-    |> Map.merge(%{
+    Map.merge(Map.take(k, @key_fields), %{
       display: Keys.display(k),
       preset: Keys.preset_of(k),
       live: Keys.live?(k),
@@ -361,18 +333,7 @@ defmodule HiremeWeb.Account do
     })
   end
 
-  defp factor(f) do
-    Map.take(f, [
-      :id,
-      :kind,
-      :name,
-      :verified_at,
-      :last_used_at,
-      :backup_eligible,
-      :backed_up,
-      :transports
-    ])
-  end
+  defp factor(f), do: Map.take(f, @factor_fields)
 
   # Seconds the session's step-up still holds; 0 when it must step up again.
   defp fresh_for(%Session{} = s) do

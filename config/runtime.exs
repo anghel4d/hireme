@@ -35,7 +35,9 @@ if config_env() == :dev do
   end
 
   # A dev node on another port (an e2e run) is its own origin: Origin checks and passkeys follow it.
-  if (port = System.get_env("PORT", "")) != "" do
+  port = System.get_env("PORT", "")
+
+  if port != "" do
     config :hireme, HiremeWeb.Endpoint, url: [port: String.to_integer(port)]
     config :wax_, origin: "http://localhost:#{port}"
   end

@@ -22,8 +22,11 @@ defmodule Hireme.Mail do
   use Swoosh.Mailer, otp_app: :hireme
   use Supervisor
   import Swoosh.Email
+  # Swoosh's from/2 is the sender; queries name Ecto's.
+  require Ecto.Query
   require Logger
-  alias Hireme.Security
+  alias Hireme.{Repo, Security, Store}
+  alias Hireme.Rows.Outbox, as: Notice
 
   # A sign-in link's send: the wait before each retry.
   @link_backoff [2_000, 8_000]
@@ -118,7 +121,7 @@ defmodule Hireme.Mail do
   def enqueue(_account_id, [], _kind, _meta), do: :ok
 
   def enqueue(account_id, addresses, kind, meta) when is_atom(kind) and is_map(meta) do
-    now = Hireme.Store.now()
+    now = Store.now()
 
     rows =
       for address <- addresses, do: row(account_id, address, Atom.to_string(kind), meta, now, now)
@@ -132,16 +135,14 @@ defmodule Hireme.Mail do
 
       case if(room, do: budget(account_id, kind, length(addresses)), else: {:error, :cap}) do
         :ok ->
-          Hireme.Store.write(fn ->
-            Hireme.Repo.insert_all(Hireme.Rows.Outbox, rows, skip_account: true)
-          end)
+          Store.write(fn -> Repo.insert_all(Notice, rows, skip_account: true) end)
 
         {:error, _} ->
           unless room,
             do:
               Logger.warning("notice #{kind} for account #{account_id}: the outbox is at its cap")
 
-          Hireme.Store.write(fn -> Enum.each(addresses, &digest(account_id, &1, now, room)) end)
+          Store.write(fn -> Enum.each(addresses, &digest(account_id, &1, now, room)) end)
       end
 
       if pid = GenServer.whereis(__MODULE__.Outbox), do: send(pid, :drain)
@@ -192,12 +193,8 @@ defmodule Hireme.Mail do
   # digest not yet due counts as pending: one the drain has taken up, or has
   # given up on, is never added to.
   defp room(account_id) do
-    require Ecto.Query
-
     held =
-      Hireme.Repo.aggregate(
-        Ecto.Query.from(n in Hireme.Rows.Outbox, where: n.account_id == ^account_id),
-        :count,
+      Repo.aggregate(Ecto.Query.from(n in Notice, where: n.account_id == ^account_id), :count,
         skip_account: true
       )
 
@@ -205,12 +202,9 @@ defmodule Hireme.Mail do
   end
 
   defp digest(account_id, address, now, room) do
-    require Ecto.Query
-    alias Hireme.Rows.Outbox
-
     pending =
-      Hireme.Repo.one(
-        Ecto.Query.from(n in Outbox,
+      Repo.one(
+        Ecto.Query.from(n in Notice,
           where:
             n.account_id == ^account_id and n.address == ^address and n.kind == "digest" and
               is_nil(n.sent_at) and n.attempts == 0 and n.next_at > ^now,
@@ -225,33 +219,20 @@ defmodule Hireme.Mail do
 
       nil ->
         {window, _} = Security.limits()[:notices]
+        meta = %{count: 1, since: DateTime.to_iso8601(now)}
+        due = DateTime.add(now, div(window, 1000))
 
-        Hireme.Repo.insert_all(
-          Outbox,
-          [
-            row(
-              account_id,
-              address,
-              "digest",
-              %{count: 1, since: DateTime.to_iso8601(now)},
-              DateTime.add(now, div(window, 1000)),
-              now
-            )
-          ],
+        Repo.insert_all(Notice, [row(account_id, address, "digest", meta, due, now)],
           skip_account: true
         )
 
-      %Outbox{meta: meta} = row ->
+      %Notice{meta: meta} = row ->
         meta = meta || %{}
         count = Map.get(meta, "count", 0) + 1
 
-        row
-        |> Ecto.Changeset.change(
-          meta: Map.put(meta, "count", count),
-          rev: row.rev + 1,
-          updated_at: now
+        Store.update!(row, [meta: Map.put(meta, "count", count), updated_at: now],
+          skip_account: true
         )
-        |> Hireme.Repo.update!(skip_account: true)
     end
   end
 
