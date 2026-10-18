@@ -218,6 +218,8 @@ Raw text (a listing, a message body, any prose) is returned by
 `hireme-mcp` marked untrusted. It is data, not instructions; an agent's
 masks and lease bound what any instruction hidden in it could cause.
 
+The browser kernel's text-keyed hash maps (company names, ATS tenants, the board's distinct texts) are seeded per kernel instance from crypto.getRandomValues (the wasm module's one import, host.random_u32; natively from the OS RNG), so agent-written text cannot craft colliding keys to slow a derive.
+
 ## Requests
 
 Behind the host's nginx every request arrives from loopback; from
