@@ -66,7 +66,7 @@
               ];
             };
             mixEnv = "test";
-            hash = "sha256-FiUGeQyZom0bambhbhE8nusKI7pqVIU+UvnSEE3HlLg=";
+            hash = "sha256-h2/YtCpmbUZmxaBnDiG2l1ZSeONx4hXEwtjhV4SWYX4=";
           };
           nativeBuildInputs = [
             beamPackages.elixir
@@ -93,7 +93,7 @@
             cp -r --no-preserve=mode $mixDeps deps
             (cd native && cargo test --offline --workspace --release)
             (cd native && cargo rustc --offline -p kernel --lib --release --target wasm32-unknown-unknown --crate-type cdylib)
-            for v in native/kernel/*.mjs; do [ -e "$v" ] && node "$v" native/target/wasm32-unknown-unknown/release/kernel.wasm; done
+            node native/kernel/vectors.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
             mix test
             tsc -p assets/tsconfig.json --noEmit
           '';
