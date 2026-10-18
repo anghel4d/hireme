@@ -1,0 +1,17 @@
+[package]
+name = "kernel"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "hireme's one implementation of every desk rule: rows, judging and derivations, run as wasm, natively in hireme-mcp and as a NIF"
+
+[lib]
+# The wasm build adds `--crate-type cdylib`; the NIF and the MCP link the rlib.
+crate-type = ["rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Float math from one pure-Rust source on every target, so a decay or a
+# fit computed in the browser is bit-identical to the sequencer's.
+libm = "0.2.16"
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
