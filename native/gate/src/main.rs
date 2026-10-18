@@ -61,6 +61,9 @@ const MAX_QUEUED: usize = 32 << 20;
 /// Control bytes the BEAM may queue before the client opens its stream.
 const HELD_MAX: usize = 4 << 20;
 const DEADLINE: Duration = Duration::from_secs(2);
+/// The longest the gate waits for the control stream's last bytes (a BYE)
+/// to leave before it closes the connection, which would discard them.
+const FLUSH: Duration = Duration::from_secs(2);
 /// QUIC handshake plus the CONNECT. A lossy path spends seconds in probe
 /// timeouts (333 ms, doubling), and a browser given no answer waits for
 /// good, so this bound is generous.
@@ -307,17 +310,24 @@ fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
         incoming.retry();
         return;
     }
-    let Some(slot) = gate.claim(ip) else {
+    if gate.at_cap(ip) {
         c.refused_ip.fetch_add(1, Relaxed);
         incoming.refuse();
         return;
-    };
+    }
     gate.handshakes.fetch_add(1, Relaxed);
     let gate = gate.clone();
     tokio::spawn(async move {
         let request = timeout(HANDSHAKE, incoming).await;
         gate.handshakes.fetch_sub(1, Relaxed);
+        // The slot is taken once the handshake has proved the address, so
+        // spoofed Initials cannot fill a victim's slots.
         if let Ok(Ok(request)) = request {
+            let Some(slot) = gate.claim(ip) else {
+                gate.counters.refused_ip.fetch_add(1, Relaxed);
+                request.too_many_requests().await;
+                return;
+            };
             session(gate, request, slot).await;
         }
     });
@@ -388,17 +398,25 @@ async fn read_message(r: &mut OwnedReadHalf) -> Option<Vec<u8>> {
 }
 
 /// Writes queued messages to the BEAM, flushing once the queue is empty,
-/// so a burst of small DATA messages costs one syscall.
-async fn bridge_writer(w: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+/// so a burst of small DATA messages costs one syscall. `pending` counts the
+/// client's bytes not yet written, which `read_loop` holds under MAX_QUEUED.
+async fn bridge_writer(w: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Vec<u8>>, pending: Arc<AtomicUsize>) {
     let mut w = BufWriter::with_capacity(64 << 10, w);
+    let written = |m: &[u8]| {
+        if m.get(4) == Some(&DATA) {
+            pending.fetch_sub(m.len() - 5, Relaxed);
+        }
+    };
     while let Some(m) = rx.recv().await {
         if w.write_all(&m).await.is_err() {
             return;
         }
+        written(&m);
         while let Ok(m) = rx.try_recv() {
             if w.write_all(&m).await.is_err() {
                 return;
             }
+            written(&m);
         }
         if w.flush().await.is_err() {
             return;
@@ -422,6 +440,8 @@ fn open_body(ip: &str, origin: &str, path: &str) -> Vec<u8> {
 
 struct Shared {
     up: mpsc::UnboundedSender<Vec<u8>>,
+    /// Client bytes queued towards the BEAM.
+    pending: Arc<AtomicUsize>,
     queued: AtomicUsize,
     ready: AtomicBool,
     gate: Arc<Gate>,
@@ -445,7 +465,8 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     };
     let (mut down, w) = unix.into_split();
     let (up, rx) = mpsc::unbounded_channel();
-    tokio::spawn(bridge_writer(w, rx));
+    let pending = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(bridge_writer(w, rx, pending.clone()));
 
     let ip = request.remote_address().ip().to_string();
     let _ = up.send(message(OPEN, &open_body(&ip, request.origin().unwrap_or(""), request.path())));
@@ -481,7 +502,7 @@ async fn session(gate: Arc<Gate>, request: SessionRequest, _slot: IpSlot) {
     };
     let Ok(conn) = request.accept().await else { return };
     c.accepted.fetch_add(1, Relaxed);
-    let shared = Arc::new(Shared { up, queued: AtomicUsize::new(0), ready: false.into(), gate: gate.clone() });
+    let shared = Arc::new(Shared { up, pending, queued: AtomicUsize::new(0), ready: false.into(), gate: gate.clone() });
     // A select! over a partial read would lose bytes, so the BEAM's half is
     // read by its own task and arrives here as whole messages.
     let (beam_tx, beam_rx) = mpsc::channel(64);
@@ -516,6 +537,7 @@ async fn run(
     // order, up to HELD_MAX.
     let (control_tx, control_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut control_rx = Some(control_rx);
+    let mut drained: Option<tokio::task::JoinHandle<()>> = None;
     let mut held = 0;
     for m in &early {
         if m[0] == DATA {
@@ -541,7 +563,16 @@ async fn run(
                 }
                 match beam(conn, sh, &control_tx, &m) {
                     Ok(None) => {}
-                    Ok(Some(close)) => return Some(close),
+                    Ok(Some(close)) => {
+                        // A close discards unsent stream data, and the BEAM's
+                        // last frame (a BYE) is often still queued: end the
+                        // queue, let the stream finish, then close.
+                        drop(control_tx);
+                        if let Some(drain) = drained.take() {
+                            let _ = timeout(FLUSH, drain).await;
+                        }
+                        return Some(close);
+                    }
                     Err(()) => return Some((CODE_PROTOCOL, b"bridge protocol".to_vec())),
                 }
             }
@@ -557,7 +588,7 @@ async fn run(
                     drop((send, recv));
                     continue;
                 };
-                tokio::spawn(drain(sh.clone(), send, rx));
+                drained = Some(tokio::spawn(drain(sh.clone(), send, rx)));
                 tokio::spawn(read_loop(sh.clone(), recv));
             }
         }
@@ -623,13 +654,23 @@ async fn drain(sh: Arc<Shared>, mut send: SendStream, mut rx: mpsc::UnboundedRec
             return;
         }
     }
+    // The queue ended (the BEAM closed): finishing waits for the bytes to be
+    // acknowledged, so the client has them before the connection closes.
+    let _ = send.finish().await;
 }
 
 /// Forwards the control stream's bytes to the BEAM until it ends.
 async fn read_loop(sh: Arc<Shared>, mut recv: RecvStream) {
     let mut buf = vec![0u8; 64 << 10];
-    while let Ok(Some(n)) = recv.read(&mut buf).await {
+    loop {
+        // A BEAM that falls behind stops the reads, and QUIC's flow control
+        // then stops the client: the queue never outgrows MAX_QUEUED.
+        while sh.pending.load(Relaxed) > MAX_QUEUED {
+            sleep(Duration::from_millis(1)).await;
+        }
+        let Ok(Some(n)) = recv.read(&mut buf).await else { return };
         sh.gate.counters.bytes_in.fetch_add(n as u64, Relaxed);
+        sh.pending.fetch_add(n, Relaxed);
         let _ = sh.up.send(message(DATA, &buf[..n]));
     }
 }

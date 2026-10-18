@@ -11,4 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 wtransport = { version = "0.7.2", features = ["quinn"] }
-tokio = { version = "1.53.3", features = ["rt", "macros", "net", "io-util", "time", "io-std", "sync"] }
+tokio = { version = "1.53.3", features = ["rt", "macros", "net", "io-util", "time", "io-std", "sync", "process"] }
