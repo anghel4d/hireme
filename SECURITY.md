@@ -190,9 +190,12 @@ account's sequencer: grant, lease, shape, domain, provenance, limits. A
 refusal rolls back exactly its own op. Cells are typed on the wire and
 never cast from strings. Each key may write 600 ops per wall-clock minute
 (`agent_write`; a fixed window, so a burst straddling a minute boundary
-can land up to 1,200 in a moment). A resent op id answers its first verdict and writes
-nothing (24-hour ledger). Every agent op batch leaves one row on the trail
-naming its key, with its counts.
+can land up to 1,200 in a moment). The ledger keeps each writer's ACKs for
+24 hours: an ACKed op id resent, whatever it now carries, answers its first
+ACK and writes nothing; a refused op id is not kept, so resent it is judged
+afresh. Every agent op batch leaves one row on the trail naming its key,
+with its counts, until the account's activity budget is spent; past it the
+batches are counted into the window's coalesced row instead.
 
 Provenance is server-side: a metric needs `as_of` and is never older than
 the stored one; prose needs a source and the row's current revision; a

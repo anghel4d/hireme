@@ -263,6 +263,58 @@ defmodule Hireme.AuditTest do
   end
 
   @tag window: [:activity, :activity_node]
+  test "events recorded while flushes run are each a row or a count, never lost" do
+    %{account: a} = sign_in()
+    {_, budget} = Hireme.Security.limits()[:activity]
+    parent = self()
+
+    recorders =
+      for k <- 1..4 do
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          for i <- 1..3_000 do
+            Audit.record(:agent_ops, %{}, %{
+              account_id: a.id,
+              key_id: k,
+              ip: "10.0.#{k}.#{rem(i, 50)}",
+              user_agent: "agent/#{rem(i, 7)}"
+            })
+          end
+        end)
+      end
+
+    # Flushes the open window over and over until every recorder is done.
+    flusher =
+      Task.async(fn ->
+        Sandbox.allow(Repo, parent, self())
+
+        Stream.repeatedly(fn -> Audit.Coalescer.flush(:all) end)
+        |> Enum.take_while(fn _ -> Enum.any?(recorders, &Process.alive?(&1.pid)) end)
+      end)
+
+    Task.await_many(recorders, 60_000)
+    Task.await(flusher, 60_000)
+    Audit.Coalescer.flush(:all)
+
+    rows = Enum.count(kinds(a.id), &(&1 == "agent_ops"))
+
+    counted =
+      Repo.all(
+        from(e in Hireme.Rows.Audit,
+          where: e.account_id == ^a.id and e.kind == "activity_coalesced",
+          select: e.meta
+        ),
+        skip_account: true
+      )
+      |> Enum.flat_map(&Map.values(&1["counts"]["agent_ops"]))
+      |> Enum.sum()
+
+    assert rows == budget
+    assert rows + counted == 4 * 3_000
+  end
+
+  @tag window: [:activity, :activity_node]
   test "the counts outlive the coalescer's own process" do
     %{account: a} = sign_in()
     for _ <- 1..1_003, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 1})

@@ -322,18 +322,25 @@ defmodule Hireme.Audit.Coalescer do
     key = {what, account_id, budget, w, Hireme.Security.clip(value, 200)}
 
     # {key, events, first seen}: a row names the values with the most events.
+    # A flush may take the key between any two steps here; none raises for it.
     cond do
-      :ets.member(@table, key) ->
-        :ets.update_counter(@table, key, {2, 1})
+      bump(key) ->
+        true
 
       :ets.update_counter(@table, {:tracked, account_id, budget, w, what}, 1, {nil, 0}) <=
           @tracked ->
-        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) ||
-          :ets.update_counter(@table, key, {2, 1})
+        :ets.insert_new(@table, {key, 1, System.unique_integer([:monotonic])}) or bump(key)
 
       true ->
         :ets.update_counter(@table, {:untracked, account_id, budget, w, what}, 1, {nil, 0})
     end
+  end
+
+  defp bump(key) do
+    :ets.update_counter(@table, key, {2, 1})
+    true
+  rescue
+    ArgumentError -> false
   end
 
   @doc """
@@ -413,7 +420,31 @@ defmodule Hireme.Audit.Coalescer do
     false
   end
 
-  defp write_group({account_id, budget, w}, entries) do
+  # Each key is taken before the row is written, so an event counted after
+  # the take is held for the next flush, never deleted unwritten; a write
+  # that fails puts what it took back.
+  defp write_group({account_id, _, _} = group, entries) do
+    taken = Enum.flat_map(entries, &:ets.take(@table, elem(&1, 0)))
+
+    try do
+      write_taken(group, taken)
+    rescue
+      e ->
+        Logger.error(
+          "trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}"
+        )
+
+        Enum.each(taken, &put_back/1)
+        false
+    catch
+      :exit, _ ->
+        Logger.error("trail coalescing for account #{account_id} failed: the write exited")
+        Enum.each(taken, &put_back/1)
+        false
+    end
+  end
+
+  defp write_taken({account_id, budget, w}, entries) do
     {scale, _} = Hireme.Security.limits()[budget]
 
     counts =
@@ -440,17 +471,14 @@ defmodule Hireme.Audit.Coalescer do
 
     kind = if budget == :revokes, do: :revokes_coalesced, else: :activity_coalesced
     if counts != %{}, do: Audit.write(kind, meta, %{account_id: account_id}, account_id)
-    Enum.each(entries, &:ets.delete(@table, elem(&1, 0)))
     counts != %{}
-  rescue
-    # A group that cannot be written stays for the next flush; the others go on.
-    e ->
-      Logger.error("trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}")
-      false
-  catch
-    :exit, _ ->
-      Logger.error("trail coalescing for account #{account_id} failed: the write exited")
-      false
+  end
+
+  defp put_back({key, n}) when is_integer(n), do: :ets.update_counter(@table, key, n, {key, 0})
+
+  defp put_back({key, n, first}) do
+    :ets.insert_new(@table, {key, 0, first})
+    :ets.update_counter(@table, key, {2, n})
   end
 
   # The values with the most events, the first seen first among equals, so
