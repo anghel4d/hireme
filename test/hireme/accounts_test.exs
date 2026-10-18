@@ -207,4 +207,12 @@ defmodule Hireme.AccountsTest do
     assert :error = Accounts.live_session(old.id)
     assert Accounts.session_live?(owner.id)
   end
+
+  test "an account holds at most the declared number of ways in" do
+    %{account: a} = sign_in()
+    Repo.put_account(a.id)
+    cap = Hireme.Schema.table(:identities).cap
+    for i <- 2..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
+    assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
+  end
 end

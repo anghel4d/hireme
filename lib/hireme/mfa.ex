@@ -151,6 +151,7 @@ defmodule Hireme.Mfa do
     as(session, fn ->
       with :ok <- fresh(session),
            :ok <- throttle(session),
+           :ok <- room(),
            {:ok, challenge, secret} <- peek_challenge(session, :totp_enroll),
            step when is_integer(step) <-
              totp_step(secret, normalize(code), System.os_time(:second), 0) || {:error, :code},
@@ -240,6 +241,7 @@ defmodule Hireme.Mfa do
   def confirm_webauthn(%Session{} = session, params, meta \\ %{}) do
     as(session, fn ->
       with :ok <- fresh(session),
+           :ok <- room(),
            {:ok, challenge} <- take_challenge(session, :webauthn_register),
            {:ok, attrs} <- WebAuthn.register(challenge, params),
            :ok <- unused_credential(attrs.credential_id) do
@@ -464,6 +466,13 @@ defmodule Hireme.Mfa do
     })
 
     {:error, :clone}
+  end
+
+  # The declared most factors an account holds, disabled ones included.
+  defp room do
+    if Repo.aggregate(from(f in Factor), :count) < Hireme.Schema.table(:factors).cap,
+      do: :ok,
+      else: {:error, :cap}
   end
 
   defp fresh(session), do: if(fresh?(session), do: :ok, else: {:error, :step_up})

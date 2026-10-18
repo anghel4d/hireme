@@ -434,6 +434,7 @@ defmodule HiremeWeb.SignInController do
     case Accounts.link(provider, claim, meta(conn)) do
       {:ok, _} -> redirect(conn, to: "/account?" <> URI.encode_query(linked: provider))
       {:error, :taken} -> redirect(conn, to: "/account?link_error=taken")
+      {:error, :cap} -> redirect(conn, to: "/account?link_error=cap")
     end
   end
 

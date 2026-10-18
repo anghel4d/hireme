@@ -452,7 +452,8 @@ defmodule Hireme.Accounts do
   already has is a no-op; one bound elsewhere is `:taken`. The account
   hears of it on its other channel (NIST SP 800-63B-4 Sec. 4.1.2).
   """
-  @spec link(:email | :github | :x, claim(), meta()) :: {:ok, Identity.t()} | {:error, :taken}
+  @spec link(:email | :github | :x, claim(), meta()) ::
+          {:ok, Identity.t()} | {:error, :taken | :cap}
   def link(provider, %{subject: subject} = claim, meta \\ %{}) when provider in @providers do
     account_id = Repo.account_id!()
 
@@ -464,16 +465,22 @@ defmodule Hireme.Accounts do
         {:error, :taken}
 
       nil ->
-        case insert_identity(account_id, provider, claim) do
-          {:ok, identity} ->
-            about = %{provider: provider, display: identity.display, identity_id: identity.id}
-            Audit.record(:identity_linked, about, meta)
-            notify(account_id, :identity_linked, about)
-            {:ok, identity}
+        if Repo.aggregate(from(i in Identity), :count) >= Hireme.Schema.table(:identities).cap,
+          do: {:error, :cap},
+          else: bind_identity(account_id, provider, claim, meta)
+    end
+  end
 
-          {:error, _} ->
-            {:error, :taken}
-        end
+  defp bind_identity(account_id, provider, claim, meta) do
+    case insert_identity(account_id, provider, claim) do
+      {:ok, identity} ->
+        about = %{provider: provider, display: identity.display, identity_id: identity.id}
+        Audit.record(:identity_linked, about, meta)
+        notify(account_id, :identity_linked, about)
+        {:ok, identity}
+
+      {:error, _} ->
+        {:error, :taken}
     end
   end
 
