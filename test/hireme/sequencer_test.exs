@@ -604,6 +604,8 @@ defmodule Hireme.SequencerTest do
       {:ok, _} = Sequencer.subscribe(a.id, session, 0)
       {:ok, _} = Hireme.Lease.claim(a.id, 950, %{})
       {:ok, _} = Hireme.Lease.release(a.id, 950, nil)
+      # Audits are written after the reply, as the sequencer's next message.
+      _ = Sequencer.rev(a.id)
 
       kinds =
         Repo.all(
@@ -673,6 +675,131 @@ defmodule Hireme.SequencerTest do
         )
 
       refute JSON.decode!(nack.data)["id"]
+    end
+  end
+
+  describe "from the write-path review's second pass" do
+    test "a BOOT for a key that reads only some domains loads into the real kernel", %{account: a} do
+      {[_], []} =
+        run(a.id, op(:put, :gym_reps, %{platform: :leetcode, slug: "s", done_on: ~D[2026-10-01]}))
+
+      {[_], []} = run(a.id, op(:put, :applications, %{company: "K", role: "R"}))
+
+      for {read, write} <- [{8, 0}, {1, 0}, {0, 31}] do
+        g = Grants.key(%{id: 5, read_mask: read, write_mask: write, may_delete: false})
+
+        {:ok, %{frames: [f]}} =
+          Sequencer.subscribe(
+            a.id,
+            %{id: 960 + read, label: "k", grants: g, key_id: nil, session_id: nil},
+            0
+          )
+
+        {:ok, :BOOT, _, _, body} = Codec.decode(f)
+        k = Hireme.Kernel.new(body)
+        # A key that does not read the desk sees no application, even in the kernel.
+        assert Hireme.Kernel.board_ids(k, nil) == []
+      end
+    end
+
+    test "moving a child row onto an application another session holds is leased", %{
+      account: a,
+      session: s
+    } do
+      {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "move.example", name: "M"}))
+
+      {[app1], []} =
+        run(a.id, op(:put, :applications, %{company: "One", role: "R", corporation_id: corp.id}))
+
+      {[app2], []} =
+        run(a.id, op(:put, :applications, %{company: "Two", role: "R", corporation_id: corp.id}))
+
+      {[item], []} = run(a.id, op(:put, :items, %{kind: :skill, key: "rust", title: "Rust"}))
+
+      {[ov], []} =
+        run(
+          a.id,
+          op(:put, :cv_overlays, %{application_id: app1.id, item_id: item.id, mode: :tailor})
+        )
+
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+      {:ok, _} =
+        Sequencer.subscribe(
+          a.id,
+          %{id: 970, label: "holder", grants: Grants.key(key), key_id: key.id, session_id: nil},
+          0
+        )
+
+      {:ok, _} = Hireme.Lease.claim(a.id, 970, %{"ids" => [app2.id]})
+
+      assert {[], [%{refusal: :leased}]} =
+               run(a.id, op(:put, :cv_overlays, %{application_id: app2.id}, target: ov.id))
+    end
+
+    test "a key's submission past its budget is refused rate whole, before anything is judged", %{
+      account: a,
+      session: s
+    } do
+      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+
+      {:ok, _} =
+        Sequencer.subscribe(
+          a.id,
+          %{id: 980, label: "flood", grants: Grants.key(key), key_id: key.id, session_id: nil},
+          0
+        )
+
+      ops =
+        for i <- 1..601,
+            do: op(:put, :gym_reps, %{platform: :other, slug: "f#{i}", done_on: ~D[2026-10-01]})
+
+      Sequencer.submit(a.id, ops)
+      assert_receive {:sequencer, :verdicts, _, [], nacks}
+      assert length(nacks) == 601 and Enum.all?(nacks, &(Schema.refusal_name(&1.code) == :rate))
+      assert Repo.aggregate(Hireme.Rows.GymRep, :count) == 0
+    end
+
+    test "an op over 1 MiB of text is too_large", %{account: a} do
+      big = String.duplicate("x", 1_048_577)
+
+      assert {[], [%{refusal: :too_large}]} =
+               run(a.id, op(:put, :applications, %{company: "Big", listing_raw: big}))
+    end
+
+    test "a ledger entry older than a day no longer answers a resend", %{account: a} do
+      put =
+        op(:put, :gym_reps, %{platform: :other, slug: "old", done_on: ~D[2026-10-01]},
+          op_id: 4242
+        )
+
+      {[first], []} = run(a.id, put)
+      old = DateTime.add(DateTime.utc_now(), -25 * 3600) |> DateTime.truncate(:second)
+
+      from(l in Hireme.Rows.OpLedger, where: l.op_id == 4242)
+      |> Repo.update_all(set: [inserted_at: old])
+
+      {[again], []} = run(a.id, put)
+      assert again.id != first.id
+    end
+
+    test "expect_rev guards a drop and a command too", %{account: a} do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Rev", role: "R"}))
+
+      assert {[], [%{refusal: :rev}]} =
+               run(a.id, op(:drop, :applications, %{}, target: app.id, expect_rev: 99))
+
+      assert {[], [%{refusal: :rev}]} =
+               run(
+                 a.id,
+                 op(:command, :note, %{stage: :discovered, body: "n"},
+                   target: app.id,
+                   expect_rev: 99
+                 )
+               )
+
+      assert {[_], []} =
+               run(a.id, op(:drop, :applications, %{}, target: app.id, expect_rev: app.rev))
     end
   end
 end

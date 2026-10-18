@@ -118,6 +118,9 @@ defmodule HiremeWeb.Session do
 
   def info(:drain, state), do: bye(:restart, "the node is restarting", state)
 
+  def info({:sequencer, :lost}, state),
+    do: bye(:restart, "the account lost track of this session; reconnect", state)
+
   def info({:DOWN, ref, :process, _, _}, %{sequencer: ref} = state),
     do: bye(:restart, "the account restarted; reconnect", state)
 
