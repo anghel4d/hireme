@@ -15,7 +15,7 @@
 // any stream: on the socket, everything is one ordered stream and nothing
 // waits longer than it would anyway.
 
-import { FRAME, WIRE_TYPE } from "./gen/schema.ts"
+import { BYE, FRAME, WIRE_TYPE } from "./gen/schema.ts"
 
 /** Frame kinds and cell types are the schema's: one declaration names them for every language. */
 export const KIND = FRAME
@@ -33,7 +33,8 @@ export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as c
  */
 export const CELL = WIRE_TYPE
 export const CRED = { ticket: 1, key: 2 } as const
-export const BYE_REASON = ["", "revoked", "grants", "restart", "schema", "suspended"] as const
+/** BYE reasons by code: the schema's 0-based `bye` enum. */
+export const BYE_REASON = BYE
 
 /** Liveness, as SECURITY.md states it: a ping every 15 s, a session ends after 45 s of silence. */
 export const PING_MS = 15_000
