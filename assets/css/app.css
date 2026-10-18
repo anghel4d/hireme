@@ -116,17 +116,7 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 
 /* ---------------------------------------------------------------- shell */
 
-.bar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 8px 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-}
+.bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; color: var(--ink); letter-spacing: 0.02em; }
 .bar nav { display: flex; gap: 2px; overflow-x: auto; flex: 1; }
 .tab { padding: 5px 10px; border-radius: var(--radius); color: var(--muted); white-space: nowrap; }
@@ -247,7 +237,11 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 @media (max-width: 760px) {
   .split { grid-template-columns: 1fr; }
   .split .list { position: static; max-height: none; }
-  .bar { gap: 8px; padding: 8px; }
+  /* Every lens tab in view, on its own rows under the brand, the link and sign-out; not sticky, so it scrolls away. */
+  .bar { gap: 8px; padding: 8px; flex-wrap: wrap; position: static; }
+  .bar .link { margin-left: auto; }
+  .bar nav { order: 1; flex: 1 0 100%; flex-wrap: wrap; overflow: visible; }
+  .tab { padding: 5px 8px; }
   .lens { padding: 10px; }
 }
 
