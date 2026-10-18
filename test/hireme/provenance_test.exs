@@ -295,6 +295,22 @@ defmodule Hireme.ProvenanceTest do
              )
   end
 
+  test "a source URL past 2,048 bytes is refused, saying so", %{account: a} do
+    id = corp(a, "long.example")
+    long = "https://long.example/" <> String.duplicate("p", 2_048)
+
+    assert {[], [nack]} =
+             run(
+               a.id,
+               op(:put, :corporations, %{headcount: 1, as_of: ~D[2026-09-01], source: long},
+                 target: id
+               )
+             )
+
+    assert nack.refusal == :type and JSON.decode!(nack.data)["reason"] =~ "2048 bytes"
+    assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: long}))
+  end
+
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
   } do
@@ -401,14 +417,16 @@ defmodule Hireme.ProvenanceTest do
     # Leading zeros are a browser's too; a URL past 4 KiB or a huge port is
     # refused before any parsing.
     assert Provenance.host("https://a.example:00080/p") == "a.example"
-    assert Provenance.host("https://a.example:" <> String.duplicate("9", 1_000_000)) == nil
-    assert Provenance.host("https://a.example/" <> String.duplicate("p", 4_096)) == nil
 
-    {us, nil} =
-      :timer.tc(fn ->
-        Provenance.host("https://" <> String.duplicate("a.", 500_000) <> "example/")
-      end)
+    for hostile <- [
+          "https://a.example:" <> String.duplicate("9", 1_000_000),
+          "https://a.example/" <> String.duplicate("p", 1_048_576),
+          "https://" <> String.duplicate("a.", 500_000) <> "example/"
+        ] do
+      {us, nil} = :timer.tc(fn -> Provenance.host(hostile) end)
+      assert us < 1_000, "#{us} µs for #{byte_size(hostile)} bytes"
+    end
 
-    assert us < 50_000
+    assert Provenance.host("https://a.example/" <> String.duplicate("p", 2_048)) == nil
   end
 end

@@ -29,7 +29,7 @@ defmodule Hireme.Provenance do
   @doc "The host of a URL as sources store it: lowercase, no port, no trailing dot; nil for a non-web URL."
   # A source URL is a link, not a payload: past this it is refused before
   # any parsing (a megabyte of labels or port digits costs the writer lock).
-  @url_max 4_096
+  @url_max 2_048
 
   def host(url) when is_binary(url) and byte_size(url) > @url_max, do: nil
 
@@ -95,6 +95,16 @@ defmodule Hireme.Provenance do
   cited, so a later writer cannot retarget or relabel it; a new claim is a
   new source. Only its retrieval (`retrieved_at`, `doc`) moves.
   """
+  def source_change(nil, %{"url" => url}) when is_binary(url) and byte_size(url) > @url_max,
+    do:
+      {:refused, :type,
+       %{
+         table: "sources",
+         column: "url",
+         reason: "a source URL is at most #{@url_max} bytes",
+         max: @url_max
+       }}
+
   def source_change(nil, %{"url" => url}) do
     if host(url),
       do: :ok,
@@ -135,6 +145,11 @@ defmodule Hireme.Provenance do
       s -> {:ok, s}
     end
   end
+
+  def source(url, _now) when is_binary(url) and byte_size(url) > @url_max,
+    do:
+      {:refused, :type,
+       %{column: "source", reason: "a source URL is at most #{@url_max} bytes", max: @url_max}}
 
   def source(url, now) when is_binary(url) do
     case host(url) do
