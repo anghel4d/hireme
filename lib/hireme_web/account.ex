@@ -1,0 +1,324 @@
+defmodule HiremeWeb.Account do
+  @moduledoc """
+  The account lens's methods: `account.*` RPC over the wire session.
+
+  Every answer is a projection built here, never a raw system row: no
+  hash, no sealed secret, no credential bytes leaves this module. Only a
+  browser session may call these; a key is refused `scope` (a key never
+  mints keys, and `system` is in no mask).
+
+  Sensitive changes need a session that stepped up within the window
+  (`Hireme.Mfa.fresh?/1`); such a call is refused `step_up` and the lens
+  steps up with `account.step_up.*` and retries. The rules for what
+  needs it live with the owner of each change (`Hireme.Keys`,
+  `Hireme.Mfa`); this module adds it only where no owner holds it
+  (unlinking a way in, trusted hosts).
+
+  `account.watch` parks: the session answers it when the account's topic
+  announces a change, so a revoke elsewhere appears without a reload.
+
+  Methods (params -> result):
+
+  - `account.overview` {} -> everything the lens draws
+  - `account.watch` {} -> parked; {changed}
+  - `account.rename` {name}
+  - `account.session.revoke` {id}; `account.session.revoke_others` {}
+  - `account.key.mint` {name, preset | read_mask + write_mask, may_delete?, expires_in_days?} -> {key, secret}
+  - `account.key.change` {id, preset | read_mask + write_mask, may_delete?}
+  - `account.key.rename` {id, name}; `account.key.revoke` {id}
+  - `account.lease.revoke` {id}
+  - `account.identity.unlink` {id}
+  - `account.totp.begin` {label} -> {uri, secret, svg}; `account.totp.confirm` {code, name} -> {factor, recovery_codes}
+  - `account.passkey.begin` {name} -> {publicKey}; `account.passkey.finish` {name, attestationObject, clientDataJSON, transports} -> {factor, recovery_codes}
+  - `account.factor.remove` {id}; `account.recovery.regenerate` {} -> {recovery_codes}
+  - `account.step_up.passkey_options` {} -> {publicKey}; `account.step_up.passkey` {assertion fields}; `account.step_up.totp` {code}; `account.step_up.recovery` {code}
+  - `account.trusted_host.add` {host, note?}; `account.trusted_host.remove` {id}
+  - `account.audit` {limit?} -> {events}
+
+  An error answers `%{error: code}` with the code a string: `scope`,
+  `step_up`, `not_found`, `invalid`, `limit`, `rate_limited`, `last`,
+  `taken`, `challenge`, `code`, `attestation`, `assertion`, `duplicate`,
+  `clone`, `revoked`, `no_factor`, `unknown_method`.
+  """
+
+  alias Hireme.Accounts
+  alias Hireme.Audit
+  alias Hireme.Keys
+  alias Hireme.Mfa
+  alias Hireme.Repo
+  alias Hireme.Rows.Session
+
+  @type ctx :: %{
+          required(:account_id) => pos_integer(),
+          required(:session_id) => pos_integer() | nil,
+          optional(:key) => map() | nil,
+          optional(:ip) => String.t(),
+          optional(:user_agent) => String.t()
+        }
+
+  @doc "Run one method for the browser session in `ctx`."
+  @spec call(String.t(), map(), ctx()) :: {:ok, map()} | {:park, :account} | {:error, map()}
+  def call(method, params, ctx) when is_binary(method) and is_map(params) do
+    with nil <- ctx[:key],
+         id when is_integer(id) <- ctx[:session_id],
+         %Session{} = session <- Repo.get(Session, id, skip_account: true),
+         true <- session.account_id == ctx.account_id and is_nil(session.revoked_at) do
+      Repo.with_account(ctx.account_id, fn ->
+        method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+      end)
+    else
+      _ -> {:error, %{error: "scope"}}
+    end
+  end
+
+  defp answer({:park, _} = park), do: park
+  defp answer({:ok, %{} = result}), do: {:ok, result}
+  defp answer(:ok), do: {:ok, %{ok: true}}
+
+  defp answer({:error, reason}) when is_atom(reason),
+    do: {:error, %{error: Atom.to_string(reason)}}
+
+  defp answer({:error, %{} = error}), do: {:error, error}
+  defp answer({:error, _}), do: {:error, %{error: "invalid"}}
+
+  ## Reading
+
+  defp run("account.overview", _, s, _), do: {:ok, overview(s)}
+  defp run("account.watch", _, _, _), do: {:park, :account}
+
+  defp run("account.audit", p, _, _) do
+    limit =
+      p |> Map.get("limit", 50) |> then(&if(is_integer(&1), do: min(max(&1, 1), 200), else: 50))
+
+    {:ok, %{events: Enum.map(Audit.recent(limit), &event/1)}}
+  end
+
+  ## The account and its sessions
+
+  defp run("account.rename", %{"name" => name}, s, meta) when is_binary(name) do
+    name = String.trim(name)
+
+    if name != "" and String.length(name) <= 200 do
+      account = Accounts.get(s.account_id)
+
+      account
+      |> Ecto.Changeset.change(name: name, rev: account.rev + 1)
+      |> then(&Hireme.Store.write(fn -> Repo.update!(&1, skip_account: true) end))
+
+      Audit.record(:account_renamed, %{}, ctx(meta, s))
+      :ok
+    else
+      {:error, :invalid}
+    end
+  end
+
+  defp run("account.session.revoke", %{"id" => id}, s, meta) when is_integer(id),
+    do: Accounts.revoke_session(s.account_id, id, ctx(meta, s))
+
+  defp run("account.session.revoke_others", _, s, meta),
+    do: {:ok, %{revoked: Accounts.revoke_other_sessions(s, ctx(meta, s))}}
+
+  ## Keys
+
+  defp run("account.key.mint", p, s, meta) do
+    with {:ok, masks} <- masks(p),
+         {:ok, %{key: key, secret: secret}} <-
+           Keys.mint(s, p["name"], masks, days(p["expires_in_days"]), ctx(meta, s)) do
+      {:ok, %{key: key(key), secret: secret}}
+    end
+  end
+
+  defp run("account.key.change", %{"id" => id} = p, s, meta) when is_integer(id) do
+    with %{} = key <- Keys.get(id) || {:error, :not_found},
+         {:ok, masks} <- masks(p),
+         {:ok, key} <- Keys.change(s, key, masks, ctx(meta, s)) do
+      {:ok, %{key: key(key)}}
+    end
+  end
+
+  defp run("account.key.rename", %{"id" => id, "name" => name}, _s, _meta) when is_integer(id) do
+    with %{} = key <- Keys.get(id) || {:error, :not_found},
+         {:ok, key} <- Keys.rename(key, name) do
+      {:ok, %{key: key(key)}}
+    end
+  end
+
+  defp run("account.key.revoke", %{"id" => id}, s, meta) when is_integer(id) do
+    case Keys.get(id) do
+      nil -> {:error, :not_found}
+      key -> {:ok, %{key: key(Keys.revoke(key, ctx(meta, s)))}}
+    end
+  end
+
+  ## Leases
+
+  defp run("account.lease.revoke", %{"id" => id}, s, meta),
+    do: Hireme.Lease.revoke(s.account_id, id, ctx(meta, s))
+
+  ## Ways in
+
+  defp run("account.identity.unlink", %{"id" => id}, s, meta) when is_integer(id) do
+    if Mfa.fresh?(s), do: Accounts.unlink(id, ctx(meta, s)), else: {:error, :step_up}
+  end
+
+  ## Factors
+
+  defp run("account.totp.begin", p, s, _meta) do
+    with {:ok, totp} <- Mfa.begin_totp(s, label(p["label"], s)), do: {:ok, totp}
+  end
+
+  defp run("account.totp.confirm", %{"code" => code} = p, s, meta) do
+    with {:ok, factor, codes} <-
+           Mfa.confirm_totp(s, code, to_string(p["name"] || ""), ctx(meta, s)),
+         do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
+  end
+
+  defp run("account.passkey.begin", p, s, _meta) do
+    with {:ok, options} <- Mfa.begin_webauthn(s, label(p["name"], s)), do: {:ok, options}
+  end
+
+  defp run("account.passkey.finish", p, s, meta) do
+    with {:ok, factor, codes} <- Mfa.confirm_webauthn(s, p, ctx(meta, s)),
+         do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
+  end
+
+  defp run("account.factor.remove", %{"id" => id}, s, meta) when is_integer(id),
+    do: Mfa.remove(s, id, ctx(meta, s))
+
+  defp run("account.recovery.regenerate", _, s, meta) do
+    with {:ok, codes} <- Mfa.regenerate_recovery_codes(s, ctx(meta, s)),
+         do: {:ok, %{recovery_codes: codes}}
+  end
+
+  ## Step-up: a factor presented now makes the session fresh for the window.
+
+  defp run("account.step_up.passkey_options", _, s, _), do: {:ok, Mfa.begin_assertion(s)}
+
+  defp run("account.step_up.passkey", p, s, meta),
+    do: stepped(Mfa.verify_assertion(s, p, ctx(meta, s)))
+
+  defp run("account.step_up.totp", %{"code" => c}, s, meta),
+    do: stepped(Mfa.verify_totp(s, c, ctx(meta, s)))
+
+  defp run("account.step_up.recovery", %{"code" => c}, s, meta),
+    do: stepped(Mfa.verify_recovery(s, c, ctx(meta, s)))
+
+  ## Trusted hosts: operator-owned, browser plus step-up, in no key's mask.
+
+  defp run("account.trusted_host.add", %{"host" => host} = p, s, meta) when is_binary(host) do
+    if Mfa.fresh?(s),
+      do: Hireme.Provenance.trust(host, p["note"], ctx(meta, s)) |> host_answer(),
+      else: {:error, :step_up}
+  end
+
+  defp run("account.trusted_host.remove", %{"id" => id}, s, meta) when is_integer(id) do
+    if Mfa.fresh?(s), do: Hireme.Provenance.distrust(id, ctx(meta, s)), else: {:error, :step_up}
+  end
+
+  defp run(method, _params, _s, _meta) do
+    if String.starts_with?(method, "account."),
+      do: {:error, :unknown_method},
+      else: {:error, :invalid}
+  end
+
+  defp stepped({:ok, s}), do: {:ok, %{fresh_for: fresh_for(s)}}
+  defp stepped(error), do: error
+
+  defp host_answer({:ok, row}), do: {:ok, %{trusted_host: Map.take(row, [:id, :host, :note])}}
+  defp host_answer(other), do: other
+
+  ## Projections
+
+  defp overview(%Session{} = s) do
+    account = Accounts.get(s.account_id)
+
+    %{
+      account: %{id: account.id, name: account.name, status: account.status},
+      fresh_for: fresh_for(s),
+      domains: Map.new(Keys.domains()),
+      presets: Map.new([:read_only, :write_only, :read_write], &{&1, Keys.preset(&1)}),
+      identities:
+        for(i <- Accounts.identities(), do: Map.take(i, [:id, :provider, :display, :verified_at])),
+      factors: Enum.map(Mfa.factors(), &factor/1),
+      recovery_codes_left: Mfa.recovery_codes_left(),
+      sessions:
+        for(
+          x <- Accounts.sessions(s.account_id),
+          do:
+            x
+            |> Map.take([:id, :ip, :user_agent, :authenticated_at, :last_seen_at, :expires_at])
+            |> Map.put(:current, x.id == s.id)
+        ),
+      keys: Enum.map(Keys.list(), &key/1),
+      leases: Hireme.Lease.leases(s.account_id),
+      trusted_hosts:
+        for(h <- Hireme.Provenance.trusted_hosts(), do: Map.take(h, [:id, :host, :note])),
+      limits:
+        for(
+          {name, {ms, max}} <- Hireme.Security.limits(),
+          into: %{},
+          do: {name, %{window_ms: ms, max: max}}
+        )
+    }
+  end
+
+  defp key(k) do
+    k
+    |> Map.take([
+      :id,
+      :name,
+      :read_mask,
+      :write_mask,
+      :may_delete,
+      :last_used_at,
+      :expires_at,
+      :revoked_at,
+      :inserted_at
+    ])
+    |> Map.merge(%{display: Keys.display(k), preset: Keys.preset_of(k), live: Keys.live?(k)})
+  end
+
+  defp factor(f) do
+    Map.take(f, [
+      :id,
+      :kind,
+      :name,
+      :verified_at,
+      :last_used_at,
+      :backup_eligible,
+      :backed_up,
+      :transports
+    ])
+  end
+
+  defp event(e),
+    do: Map.take(e, [:id, :kind, :ip, :user_agent, :meta, :key_id, :session_id, :inserted_at])
+
+  defp fresh_for(%Session{} = s) do
+    if Mfa.fresh?(s) do
+      proof = if Mfa.enrolled?(), do: s.mfa_at, else: s.authenticated_at
+      max(Hireme.Security.step_up_window() - DateTime.diff(Hireme.Store.now(), proof), 0)
+    else
+      0
+    end
+  end
+
+  defp masks(%{"preset" => preset} = p)
+       when preset in ["read_only", "write_only", "read_write"] do
+    {:ok, %{Keys.preset(String.to_existing_atom(preset)) | may_delete: p["may_delete"] == true}}
+  end
+
+  defp masks(%{"read_mask" => r, "write_mask" => w} = p) when is_integer(r) and is_integer(w),
+    do: {:ok, %{read_mask: r, write_mask: w, may_delete: p["may_delete"] == true}}
+
+  defp masks(_), do: {:error, :masks}
+
+  defp days(n) when is_integer(n) and n > 0 and n <= 3650, do: n
+  defp days(_), do: nil
+
+  defp label(name, _s) when is_binary(name) and name != "", do: String.slice(name, 0, 100)
+  defp label(_, s), do: Accounts.get(s.account_id).name |> to_string() |> String.slice(0, 100)
+
+  defp ctx(meta, %Session{} = s),
+    do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
+end
