@@ -53,7 +53,12 @@ defmodule Hireme.Grants do
   def bit(%{unmasked: true}), do: 0
   def bit(%{domain: domain}), do: Schema.domain_bit(domain)
 
-  def bit(name) when is_atom(name) or is_integer(name), do: bit(Schema.table(name))
+  def bit(name) when is_atom(name) or is_integer(name) do
+    case Schema.table(name) do
+      nil -> 0
+      table -> bit(table)
+    end
+  end
 
   @doc "Whether the grants read this table at all."
   def read?(%__MODULE__{read_mask: m}, table), do: (m &&& bit(table)) != 0

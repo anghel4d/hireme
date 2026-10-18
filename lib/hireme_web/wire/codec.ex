@@ -421,8 +421,15 @@ defmodule HiremeWeb.Wire.Codec do
   end
 
   defp encode_cell(@t_null, _), do: ""
-  defp encode_cell(@t_u32, v), do: <<v::little-32>>
-  defp encode_cell(@t_i64, v), do: <<v::little-signed-64>>
+  # Out of range is a caller's bug: a binary segment would silently wrap it.
+  defp encode_cell(@t_u32, v) when v in 0..0xFFFF_FFFF, do: <<v::little-32>>
+
+  defp encode_cell(@t_i64, v) when v in -0x8000_0000_0000_0000..0x7FFF_FFFF_FFFF_FFFF,
+    do: <<v::little-signed-64>>
+
+  defp encode_cell(ty, v) when ty in [@t_u32, @t_i64],
+    do: raise(ArgumentError, "#{inspect(v)} does not fit wire type #{ty}")
+
   defp encode_cell(@t_f64, :nan), do: @nan
   defp encode_cell(@t_f64, v), do: <<v::little-float-64>>
   defp encode_cell(@t_str, v), do: v

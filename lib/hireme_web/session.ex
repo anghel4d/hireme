@@ -54,7 +54,8 @@ defmodule HiremeWeb.Session do
        session: nil,
        rev: 0,
        parked: nil,
-       sequencer: nil
+       sequencer: nil,
+       touched: now_ms()
      }}
   end
 
@@ -63,9 +64,17 @@ defmodule HiremeWeb.Session do
     state = %{state | last_in: now_ms()}
 
     case Codec.decode(bin, Codec.max_up()) do
-      {:ok, kind, _flags, _rev, body} -> on_frame(kind, body, state)
-      {:error, :hash} -> bye(:schema, "the wire changed; reload", state)
-      {:error, reason} -> {:stop, {:protocol, reason}, [], state}
+      {:ok, kind, _flags, _rev, body} when kind in [:OPS, :RPC] and state.phase == :live ->
+        on_frame(kind, body, active(state, state.last_in))
+
+      {:ok, kind, _flags, _rev, body} ->
+        on_frame(kind, body, state)
+
+      {:error, :hash} ->
+        bye(:schema, "the wire changed; reload", state)
+
+      {:error, reason} ->
+        {:stop, {:protocol, reason}, [], state}
     end
   end
 
@@ -186,6 +195,19 @@ defmodule HiremeWeb.Session do
   # Down frames sent up, or a kind with no meaning up.
   defp on_frame(kind, _body, state), do: {:stop, {:protocol, kind}, [], state}
 
+  # Real activity from a browser (ops, RPC) counts against its idle limit,
+  # touched at most once a minute.
+  defp active(%{session: %{key_id: nil, session_id: id}} = state, now) when is_integer(id) do
+    if now - state.touched > 60_000 do
+      Hireme.Accounts.live_session(id)
+      %{state | touched: now}
+    else
+      state
+    end
+  end
+
+  defp active(state, _now), do: state
+
   defp params(""), do: {:ok, %{}}
 
   defp params(json) do
@@ -215,8 +237,14 @@ defmodule HiremeWeb.Session do
   end
 
   defp authenticate(%{cred: :key, credential: secret, label: label}, peer) do
-    case Hireme.Keys.authenticate(secret, to_string(peer[:peer_ip] || "")) do
+    ip = to_string(peer[:peer_ip] || "")
+
+    case Hireme.Keys.authenticate(secret, ip) do
       {:ok, key} ->
+        meta = %{key: key.key_id, label: label(label, key.name), carrier: peer[:carrier]}
+
+        Hireme.Audit.record(:wire_key, meta, %{account_id: key.account_id, key_id: key.id, ip: ip})
+
         {:ok,
          %{
            account_id: key.account_id,
@@ -226,6 +254,12 @@ defmodule HiremeWeb.Session do
            label: label(label, key.name)
          }}
 
+      # A failed key is audited with its peer; how many is bounded by the
+      # api_key_peer limit, past which the answer is rate_limited, not audited.
+      :error ->
+        Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{ip: ip})
+        :error
+
       refused ->
         refused
     end
@@ -233,8 +267,9 @@ defmodule HiremeWeb.Session do
 
   defp authenticate(_, _), do: :error
 
-  defp credential_live?(%{key_id: nil, session_id: id}),
-    do: match?({:ok, _}, Hireme.Accounts.live_session(id))
+  # The tick only looks: idle time is the browser's own activity, not the
+  # session's clock (that touch is in `active/2`).
+  defp credential_live?(%{key_id: nil, session_id: id}), do: Hireme.Accounts.session_live?(id)
 
   defp credential_live?(%{key_id: key_id, account_id: account_id}),
     do: Hireme.Keys.usable?(key_id, account_id)
@@ -257,7 +292,9 @@ defmodule HiremeWeb.Session do
 
     case Sequencer.subscribe(
            who.account_id,
-           Map.take(session, [:id, :label, :grants, :key_id, :session_id]),
+           session
+           |> Map.take([:id, :label, :grants, :key_id, :session_id])
+           |> Map.merge(%{ip: state.peer[:peer_ip], user_agent: state.peer[:user_agent]}),
            hello.snapshot_rev
          ) do
       {:ok, joined} -> welcome(joined, who, session, state)

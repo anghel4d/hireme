@@ -70,4 +70,10 @@ defmodule Hireme.GrantsTest do
     assert :ok = Grants.check(key(0, 2), :command, stage, apps, [])
     assert {:refused, :scope, _} = Grants.check(key(0, 1), :command, stage, apps, [])
   end
+
+  test "an unknown table is in no mask" do
+    assert Grants.bit(:no_such_table) == 0
+    assert Grants.bit(65_000) == 0
+    refute Grants.read?(Grants.operator(), :no_such_table)
+  end
 end

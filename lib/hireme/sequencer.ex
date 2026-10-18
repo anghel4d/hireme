@@ -420,7 +420,13 @@ defmodule Hireme.Sequencer do
       Hireme.Audit.record(
         :agent_ops,
         %{count: acks + nacks, acks: acks, nacks: nacks},
-        %{account_id: state.account_id, key_id: sub.key_id, session_id: nil}
+        %{
+          account_id: state.account_id,
+          key_id: sub.key_id,
+          session_id: nil,
+          ip: sub[:ip],
+          user_agent: sub[:user_agent]
+        }
       )
     end
 

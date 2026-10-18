@@ -71,12 +71,6 @@ defmodule Hireme.Kernel.Nif do
     skip_compilation?: Application.compile_env(:hireme, :nif_prebuilt, false),
     load_from: {:hireme, "priv/native/nif"}
 
-  {:hireme,
-   if(Application.compile_env(:hireme, :nif_prebuilt, false),
-     do: "priv/native/libnif",
-     else: "priv/native/nif"
-   )}
-
   def new, do: :erlang.nif_error(:nif_not_loaded)
   def load(_res, _boot), do: :erlang.nif_error(:nif_not_loaded)
   def apply(_res, _patch), do: :erlang.nif_error(:nif_not_loaded)

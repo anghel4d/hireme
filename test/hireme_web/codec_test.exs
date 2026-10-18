@@ -2,6 +2,7 @@ defmodule HiremeWeb.Wire.CodecTest do
   # The same bytes native/wire's golden test pins (native/wire/tests/codec.rs):
   # the two codecs agree on table runs and gone blocks byte for byte.
   use ExUnit.Case, async: true
+  import Bitwise
   alias HiremeWeb.Wire.Codec
 
   defp hex(iodata), do: iodata |> IO.iodata_to_binary() |> Base.encode16(case: :lower)
@@ -41,5 +42,17 @@ defmodule HiremeWeb.Wire.CodecTest do
     <<_::32, rest::binary-12>> = head
     frame = <<16 + byte_size(body2)::little-32, rest::binary, body2::binary>>
     assert {:error, _} = Codec.decode(frame)
+  end
+
+  test "a value that does not fit its cell type is refused, never wrapped" do
+    assert_raise ArgumentError, fn ->
+      Codec.encode_op({1, :put, 0, 3, 0, nil, [{8, 1, 5_000_000_000}]})
+    end
+
+    assert_raise ArgumentError, fn -> Codec.encode_op({1, :put, 0, 3, 0, nil, [{8, 1, -1}]}) end
+
+    assert_raise ArgumentError, fn ->
+      Codec.encode_op({1, :put, 0, 3, 0, nil, [{8, 3, 1 <<< 63}]})
+    end
   end
 end

@@ -3,6 +3,7 @@ defmodule HiremeWeb.SessionTest do
   # connection does: frames in through frame/2, every message through info/2.
   use Hireme.WireCase, async: false
 
+  import Ecto.Query
   alias Hireme.Keys
   alias HiremeWeb.Session
 
@@ -89,6 +90,31 @@ defmodule HiremeWeb.SessionTest do
     ack = Enum.find(frames, &(&1.kind == :ACK))
     <<1::little-32, 0::32, _op::little-64, _rev::little-64, id::little-32, 0::32>> = ack.body
     assert id > 0
+  end
+
+  test "a key's HELLO is audited with its peer, and so is a refused key", %{
+    session: s,
+    account: a
+  } do
+    {key, rw} = key(s, :read_write)
+    {_, _} = hello(open(), :key, rw)
+    {:stop, _, _, _} = Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
+
+    rows =
+      Repo.all(
+        from(r in Hireme.Rows.Audit,
+          where: r.kind in ["wire_key", "wire_key_refused"],
+          order_by: r.id
+        ),
+        skip_account: true
+      )
+
+    assert [
+             %{kind: "wire_key", key_id: kid, account_id: aid, ip: "127.0.0.1"},
+             %{kind: "wire_key_refused", ip: "127.0.0.1"}
+           ] = rows
+
+    assert {kid, aid} == {key.id, a.id}
   end
 
   test "a bad credential, or a ticket from a foreign origin, is BYE revoked", %{session: s} do
