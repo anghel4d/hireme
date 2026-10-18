@@ -45,8 +45,8 @@ defmodule Hireme.Release do
   the file names applied, in order.
   """
   @spec migrate(Path.t()) :: [String.t()]
-  def migrate(path \\ Hireme.Repo.config()[:database]) do
-    Hireme.Store.write(fn -> locked(path, fn -> apply_files(path) end) end)
+  def migrate(path \\ Hireme.Repo.config()[:database], files \\ files()) do
+    Hireme.Store.write(fn -> locked(path, fn -> apply_files(path, files) end) end)
   end
 
   @doc "The schema files this release carries: the baseline, then the additive files in order."
@@ -66,11 +66,11 @@ defmodule Hireme.Release do
     [{@baseline, Path.join(dir, "baseline.sql")} | additive]
   end
 
-  defp apply_files(path) do
+  defp apply_files(path, files) do
     with_conn(path, fn conn ->
       :ok = Sqlite3.execute(conn, @bookkeeping)
       done = conn |> rows("SELECT name FROM schema_files") |> MapSet.new(&hd/1)
-      [{@baseline, baseline} | additive] = files()
+      [{@baseline, baseline} | additive] = files
 
       if MapSet.member?(done, @baseline) do
         for {name, file} <- additive, not MapSet.member?(done, name) do
@@ -104,8 +104,12 @@ defmodule Hireme.Release do
     :ok = Sqlite3.execute(conn, "BEGIN IMMEDIATE")
 
     try do
+      seq = high_water(conn)
+
       with {:error, reason} <- Sqlite3.execute(conn, sql),
            do: raise("schema file #{Path.basename(file)} failed: #{inspect(reason)}")
+
+      keep_high_water(conn, seq)
 
       for name <- names,
           do:
@@ -118,6 +122,33 @@ defmodule Hireme.Release do
       e ->
         Sqlite3.execute(conn, "ROLLBACK")
         reraise e, __STACKTRACE__
+    end
+  end
+
+  # Ids are never reused, and AUTOINCREMENT keeps that only through
+  # sqlite_sequence. A hand-written table rebuild (the one way SQLite
+  # changes a column's type or a foreign key) starts the new table's
+  # sequence over, so after every file no table's sequence may stand below
+  # where it stood before.
+  defp high_water(conn) do
+    if rows(conn, "SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'") == [],
+      do: [],
+      else: rows(conn, "SELECT name, seq FROM sqlite_sequence")
+  end
+
+  defp keep_high_water(conn, seq) do
+    for [name, n] <- seq do
+      exec!(conn, "UPDATE sqlite_sequence SET seq = ?2 WHERE name = ?1 AND seq < ?2", [name, n])
+
+      exec!(
+        conn,
+        """
+        INSERT INTO sqlite_sequence (name, seq) SELECT ?1, ?2
+        WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = ?1)
+          AND EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)
+        """,
+        [name, n]
+      )
     end
   end
 

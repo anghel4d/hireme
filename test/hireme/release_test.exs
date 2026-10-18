@@ -47,6 +47,41 @@ defmodule Hireme.ReleaseTest do
     refute MapSet.member?(tables(db), "accounts")
   end
 
+  defp sql(db, statement) do
+    {:ok, conn} = Sqlite3.open(db)
+    {:ok, st} = Sqlite3.prepare(conn, statement)
+    {:ok, rows} = Sqlite3.fetch_all(conn, st)
+    Sqlite3.close(conn)
+    rows
+  end
+
+  test "a table rebuilt by a schema file never hands out an id it handed out before", %{
+    db: db,
+    dir: dir
+  } do
+    base = Path.join(dir, "baseline.sql")
+    File.write!(base, "CREATE TABLE things (id INTEGER PRIMARY KEY AUTOINCREMENT, x TEXT);")
+
+    rebuild = Path.join(dir, "0001_rebuild_things.sql")
+
+    File.write!(rebuild, """
+    CREATE TABLE things_new (id INTEGER PRIMARY KEY AUTOINCREMENT, x INTEGER);
+    INSERT INTO things_new (id, x) SELECT id, x FROM things;
+    DROP TABLE things;
+    ALTER TABLE things_new RENAME TO things;
+    """)
+
+    assert ["0000_baseline"] = Release.migrate(db, [{"0000_baseline", base}])
+    for x <- 1..3, do: sql(db, "INSERT INTO things (x) VALUES (#{x})")
+    sql(db, "DELETE FROM things WHERE id = 3")
+
+    assert ["0001_rebuild_things"] =
+             Release.migrate(db, [{"0000_baseline", base}, {"0001_rebuild_things", rebuild}])
+
+    sql(db, "INSERT INTO things (x) VALUES (4)")
+    assert [[4]] = sql(db, "SELECT max(id) FROM things")
+  end
+
   test "two nodes booting on one file apply the schema once", %{db: db} do
     results =
       1..2
