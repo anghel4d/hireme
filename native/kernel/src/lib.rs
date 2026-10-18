@@ -23,6 +23,7 @@ pub mod heat;
 pub mod judge;
 pub mod keywords;
 pub mod lanes;
+pub mod lexicon;
 pub mod org;
 pub mod pipeline;
 pub mod rows;
@@ -67,6 +68,83 @@ pub(crate) mod fx {
     }
 
     pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
+}
+
+/// Hash maps keyed by text a writer controls (company names, ATS tenants,
+/// the board's distinct texts). A folded-multiply hash under a seed drawn
+/// once per process: far cheaper than SipHash, above all under
+/// WebAssembly, and a text cannot aim collisions at a seed it does not
+/// know. Nothing iterates one to produce a result.
+pub(crate) mod keyed {
+    use core::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+
+    const M: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    fn fold(a: u64, b: u64) -> u64 {
+        let p = (a as u128) * (b as u128);
+        (p as u64) ^ ((p >> 64) as u64)
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Seed(u64);
+
+    impl Default for Seed {
+        fn default() -> Self {
+            static SEED: OnceLock<u64> = OnceLock::new();
+            Seed(*SEED.get_or_init(|| std::hash::RandomState::new().hash_one(M)))
+        }
+    }
+
+    impl BuildHasher for Seed {
+        type Hasher = Keyed;
+
+        fn build_hasher(&self) -> Keyed {
+            Keyed { h: self.0, k: self.0 ^ M }
+        }
+    }
+
+    pub struct Keyed {
+        h: u64,
+        k: u64,
+    }
+
+    impl Hasher for Keyed {
+        fn finish(&self) -> u64 {
+            fold(self.h, self.k.rotate_left(29))
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.write_u64(bytes.len() as u64);
+            let (words, rest) = bytes.as_chunks::<8>();
+            for w in words {
+                self.write_u64(u64::from_le_bytes(*w));
+            }
+            if !rest.is_empty() {
+                let mut a = [0u8; 8];
+                a[..rest.len()].copy_from_slice(rest);
+                self.write_u64(u64::from_le_bytes(a));
+            }
+        }
+
+        fn write_u8(&mut self, n: u8) {
+            self.write_u64(n as u64);
+        }
+
+        fn write_u32(&mut self, n: u32) {
+            self.write_u64(n as u64);
+        }
+
+        fn write_u64(&mut self, n: u64) {
+            self.h = fold(self.h ^ n, self.k);
+        }
+
+        fn write_usize(&mut self, n: usize) {
+            self.write_u64(n as u64);
+        }
+    }
+
+    pub type Map<K, V> = std::collections::HashMap<K, V, Seed>;
 }
 
 /// A calendar day as days since 0000-01-01 in the proleptic Gregorian

@@ -7,6 +7,7 @@
 //! tiers are public company names; anything unnamed with a systems or
 //! labs word in its name is `Mid`, everything else `Small`.
 
+use crate::lexicon::{self, Hits};
 use crate::text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,14 +81,6 @@ impl Family {
     }
 }
 
-const MEGA: &[&str] = &["google", "alphabet", "amazon", "aws", "meta", "facebook", "nvidia", "microsoft"];
-const LARGE: &[&str] = &[
-    "apple", "netflix", "uber", "stripe", "databricks", "snowflake", "tesla", "adobe", "salesforce", "oracle",
-    "linkedin", "snap", "pinterest", "shopify", "openai", "anthropic", "spacex", "neuralink", "xai", "starfish",
-    "valve", "gdm", "deepmind", "ssi", "mira",
-];
-const MID: &[&str] = &["systems", "runtime", "infra", "lab", "labs"];
-
 /// The size tier of a company by name. Any word of the name, or the name
 /// with its spaces removed ("Deep Mind" → "deepmind"), can name a tier.
 pub fn size(company: &str) -> Size {
@@ -96,16 +89,21 @@ pub fn size(company: &str) -> Size {
 
 /// [`size`] of an already normalized name.
 pub fn size_normalized(n: &str) -> Size {
-    let compact: alloc::string::String = n.chars().filter(|c| *c != ' ').collect();
-    let named = |set: &[&str]| set.contains(&compact.as_str()) || text::words(n).any(|w| set.contains(&w));
-    if named(MEGA) {
-        Size::Mega
-    } else if named(LARGE) {
-        Size::Large
-    } else if text::any_word(n, MID) {
-        Size::Mid
-    } else {
-        Size::Small
+    Size::of_hits(Hits::of(n))
+}
+
+impl Size {
+    /// The size tier from a name's [`Hits`].
+    pub fn of_hits(h: Hits) -> Size {
+        if h.has(lexicon::MEGA) {
+            Size::Mega
+        } else if h.has(lexicon::LARGE) {
+            Size::Large
+        } else if h.has(lexicon::MID) {
+            Size::Mid
+        } else {
+            Size::Small
+        }
     }
 }
 
@@ -120,27 +118,25 @@ pub fn department(role: &str) -> Department {
 
 /// [`department`] of an already normalized title.
 pub fn department_normalized(n: &str) -> Department {
-    if text::any_start(n, &["research", "scientist", "machine learning", "applied sci"]) || text::word(n, "ml") {
-        Department::Research
-    } else if text::any_start(n, &["sre", "site reliability", "infra", "platform", "runtime", "kernel", "systems"]) {
-        Department::Infra
-    } else if text::any_start(n, &["security", "privacy"]) {
-        Department::Security
-    } else if text::any_start(n, &["data engineer", "analytics", "data platform"]) {
-        Department::Data
-    } else if text::any_start(n, &["frontend", "front end", "ios", "android", "mobile", "product engineer"]) {
-        Department::Product
-    } else if text::any_start(n, &["engineer", "developer"]) || text::word(n, "swe") {
-        Department::Eng
-    } else {
-        Department::Other
-    }
+    Department::of_hits(Hits::of(n))
 }
 
-const SENIORITY: &[&str] = &[
-    "staff", "senior", "sr", "principal", "distinguished", "fellow", "junior", "jr", "intern", "iii", "ii", "i",
-    "l3", "l4", "l5", "l6", "l7", "l8", "lead",
-];
+impl Department {
+    /// The department from a title's [`Hits`], first match wins.
+    pub fn of_hits(h: Hits) -> Department {
+        [
+            (lexicon::DEPT_RESEARCH, Department::Research),
+            (lexicon::DEPT_INFRA, Department::Infra),
+            (lexicon::DEPT_SECURITY, Department::Security),
+            (lexicon::DEPT_DATA, Department::Data),
+            (lexicon::DEPT_PRODUCT, Department::Product),
+            (lexicon::DEPT_ENG, Department::Eng),
+        ]
+        .into_iter()
+        .find(|(g, _)| h.has(*g))
+        .map_or(Department::Other, |(_, d)| d)
+    }
+}
 
 /// The role family of a title once seniority words are stripped, so
 /// "Senior Software Engineer" and "Staff Software Engineer" are clones.
@@ -150,28 +146,23 @@ pub fn family(role: &str) -> Family {
 
 /// [`family`] of an already normalized title.
 pub fn family_normalized(n: &str) -> Family {
-    let mut core = alloc::string::String::with_capacity(n.len());
-    for w in text::words(n).filter(|w| !SENIORITY.contains(w)) {
-        if !core.is_empty() {
-            core.push(' ');
-        }
-        core.push_str(w);
-    }
-    let n = core;
-    if text::any_start(&n, &["research scientist", "applied scientist"]) {
-        Family::ResearchScientist
-    } else if text::starts(&n, "research engineer") {
-        Family::ResearchEngineer
-    } else if text::starts(&n, "site reliability") || text::word(&n, "sre") {
-        Family::Sre
-    } else if text::starts(&n, "data engineer") {
-        Family::DataEngineer
-    } else if text::starts(&n, "security engineer") {
-        Family::SecurityEngineer
-    } else if text::any_start(&n, &["software engineer", "engineer", "developer"]) || text::word(&n, "swe") {
-        Family::SoftwareEngineer
-    } else {
-        Family::Other
+    Family::of_hits(Hits::family(n))
+}
+
+impl Family {
+    /// The family from a title's family [`Hits`], first match wins.
+    pub fn of_hits(h: Hits) -> Family {
+        [
+            (lexicon::FAM_RESEARCH_SCIENTIST, Family::ResearchScientist),
+            (lexicon::FAM_RESEARCH_ENGINEER, Family::ResearchEngineer),
+            (lexicon::FAM_SRE, Family::Sre),
+            (lexicon::FAM_DATA_ENGINEER, Family::DataEngineer),
+            (lexicon::FAM_SECURITY_ENGINEER, Family::SecurityEngineer),
+            (lexicon::FAM_SOFTWARE_ENGINEER, Family::SoftwareEngineer),
+        ]
+        .into_iter()
+        .find(|(g, _)| h.has(*g))
+        .map_or(Family::Other, |(_, f)| f)
     }
 }
 

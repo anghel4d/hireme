@@ -4,7 +4,8 @@ Every application and corporation carries `score_100`, a Life-EV number
 from 0 to 100: maximize life EV, not the number of applications. The desk
 and the MCP rank by it first. FIRE HOLD stands: a score never submits.
 
-The one implementation is `native/kernel/src/score.rs`. The kernel
+The one implementation is `native/kernel/src/score.rs`, with the phrases
+it looks for in `lexicon.rs`. The kernel
 **suggests** and never overwrites: a stored `score_100` is the operator's
 or an agent's number and wins; a card with none ranks by the suggestion,
 and the focus lens and the MCP show both.

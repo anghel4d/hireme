@@ -116,6 +116,23 @@ pub fn fold(s: &str) -> String {
 /// or `#` turned into one space, trimmed. `+` and `#` are kept as letters
 /// so "c++" and "c#" survive.
 pub fn normalize(s: &str) -> String {
+    // ASCII folds by lowercasing: one pass, no folded copy.
+    if s.is_ascii() {
+        let mut out = alloc::vec::Vec::with_capacity(s.len());
+        let mut gap = false;
+        for &b in s.as_bytes() {
+            if b.is_ascii_alphanumeric() || b == b'+' || b == b'#' {
+                if gap && !out.is_empty() {
+                    out.push(b' ');
+                }
+                gap = false;
+                out.push(b.to_ascii_lowercase());
+            } else {
+                gap = true;
+            }
+        }
+        return String::from_utf8(out).unwrap_or_default();
+    }
     let mut out = String::with_capacity(s.len());
     let mut gap = false;
     for c in fold(s).chars() {

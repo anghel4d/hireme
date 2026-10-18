@@ -384,9 +384,9 @@ pub struct Index {
     seats: crate::fx::Map<u32, Seat>,
     // Keyed by the agent-written names themselves, in seeded maps: exact,
     // and no crafted set of names can pile into one bucket.
-    by_company: std::collections::HashMap<String, Group>,
+    by_company: crate::keyed::Map<String, Group>,
     by_vendor: crate::fx::Map<Vendor, Group>,
-    by_tenant: crate::fx::Map<Vendor, std::collections::HashMap<String, Group>>,
+    by_tenant: crate::fx::Map<Vendor, crate::keyed::Map<String, Group>>,
     /// Queued members per (batch, vendor), with their vendor load: a
     /// member counts toward the batch cap while that load is live.
     by_batch_vendor: crate::fx::Map<(u32, Vendor), Group>,

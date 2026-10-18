@@ -4,8 +4,9 @@ The campaign must not snap onto one company or one applicant tracking
 system. The heat governor gates the submit queue; FIRE HOLD still owns
 submit, and nothing here sends an application.
 
-The one implementation is `native/kernel/src/heat.rs` (with `ats.rs` and
-`org.rs` for what it reads off a URL, a company and a role). The sequencer
+The one implementation is `native/kernel/src/heat.rs` (with `ats.rs`,
+`org.rs` and `lexicon.rs` for what it reads off a URL, a company and a
+role). The sequencer
 runs it through the NIF when the `stage` command moves an application
 into the queue; the browser and `hireme-mcp` run the same code to predict
 the verdict and to colour the board.

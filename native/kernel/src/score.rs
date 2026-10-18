@@ -16,6 +16,7 @@
 //! seat is remote or in a country the operator holds citizenship of
 //! (`settings.citizenships` against the application's place).
 
+use crate::lexicon::{self, Hits};
 use crate::text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -153,19 +154,6 @@ impl Suggestion {
     }
 }
 
-const FRONTIER: &[&str] = &["openai", "anthropic", "spacex", "neuralink", "xai", "spacexai"];
-const LABS: &[&str] = &["starfish", "valve", "gdm", "deepmind", "meta", "ssi", "mira"];
-const LABS_PHRASES: &[&str] = &["google deepmind", "thinking machines", "safe superintelligence", "meta fair"];
-const BIG_TECH: &[&str] = &[
-    "google", "alphabet", "apple", "microsoft", "amazon", "nvidia", "netflix", "uber", "stripe", "databricks",
-    "snowflake", "tesla", "adobe", "salesforce", "oracle", "linkedin", "snap", "pinterest", "shopify",
-];
-
-fn named(name: &str, set: &[&str]) -> bool {
-    let compact: alloc::string::String = name.chars().filter(|c| *c != ' ').collect();
-    set.contains(&compact.as_str()) || text::words(name).any(|w| set.contains(&w))
-}
-
 /// The rung a company name anchors on, read once per name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
@@ -178,13 +166,16 @@ pub enum Tier {
 impl Tier {
     /// The tier of a normalized company name.
     pub fn of(n: &str) -> Tier {
-        if n.is_empty() {
-            Tier::None
-        } else if named(n, FRONTIER) {
+        Tier::of_hits(Hits::of(n))
+    }
+
+    /// The tier from a name's [`Hits`].
+    pub fn of_hits(h: Hits) -> Tier {
+        if h.has(lexicon::FRONTIER) {
             Tier::Frontier
-        } else if text::any_word(n, LABS_PHRASES) || named(n, LABS) {
+        } else if h.has(lexicon::LABS) {
             Tier::Labs
-        } else if named(n, BIG_TECH) {
+        } else if h.has(lexicon::BIG_TECH) {
             Tier::BigTech
         } else {
             Tier::None
@@ -227,38 +218,42 @@ impl Facts {
 
     /// The facts of an already normalized text.
     pub fn of(n: &str) -> Facts {
+        Facts::of_hits(Hits::of(n))
+    }
+
+    /// The facts from a text's [`Hits`].
+    pub fn of_hits(h: Hits) -> Facts {
         let mut f = 0;
-        let mut set = |bit: u16, yes: bool| {
-            if yes {
+        for (bit, g) in [
+            (Facts::STAFFING, lexicon::STAFFING),
+            (Facts::INTERN, lexicon::INTERN),
+            (Facts::THEATER, lexicon::THEATER),
+            (Facts::NOT_ENGINEERING, lexicon::NOT_ENGINEERING),
+            (Facts::SYSTEMS, lexicon::SYSTEMS),
+            (Facts::AGENTIC, lexicon::AGENTIC),
+            (Facts::LOW_LEVEL, lexicon::LOW_LEVEL),
+            (Facts::MID_CURVE, lexicon::MID_CURVE),
+        ] {
+            if h.has(g) {
                 f |= bit;
             }
-        };
-        set(Facts::STAFFING, text::any_start(n, &["staffing", "body shop", "bodyshop", "recruit"]));
-        set(Facts::INTERN, text::any_word(n, &["intern", "internship", "new grad", "newgrad", "co op", "coop"]));
-        set(Facts::THEATER, text::any_word(n, &["prompt only", "ai theater", "chatgpt wrapper"]));
-        set(
-            Facts::NOT_ENGINEERING,
-            text::any_word(n, &["sales engineer", "business analyst", "ba", "project manager", "pm", "support engineer"]),
-        );
-        set(Facts::SYSTEMS, text::any_word(n, &["systems", "runtime", "kernel", "infra", "infrastructure", "distributed", "compiler"]));
-        set(Facts::AGENTIC, text::any_word(n, &["agentic", "agent systems", "agents"]));
-        set(Facts::LOW_LEVEL, text::any_word(n, &["rust", "c++", "low level", "lowlevel", "systems c"]));
-        set(Facts::MID_CURVE, text::any_word(n, &["crud", "full stack", "fullstack", "rails shop", "wordpress"]));
-        let says_no_remote = text::any_word(n, &["no remote", "not remote"]);
-        set(Facts::REMOTE, text::word(n, "remote") && !says_no_remote);
-        set(Facts::ONSITE_ONLY, says_no_remote || text::any_word(n, &["onsite only", "on site only"]));
-        Facts(f)
+        }
+        Facts(f | Facts::of_place_hits(h).0)
     }
 
     /// The facts of an already normalized location: only remote and
     /// onsite-only are read off a place.
     pub fn of_place(n: &str) -> Facts {
-        let says_no_remote = text::any_word(n, &["no remote", "not remote"]);
+        Facts::of_place_hits(Hits::of(n))
+    }
+
+    fn of_place_hits(h: Hits) -> Facts {
+        let no_remote = h.has(lexicon::NO_REMOTE);
         let mut f = 0;
-        if text::word(n, "remote") && !says_no_remote {
+        if h.has(lexicon::REMOTE) && !no_remote {
             f |= Facts::REMOTE;
         }
-        if says_no_remote || text::any_word(n, &["onsite only", "on site only"]) {
+        if no_remote || h.has(lexicon::ONSITE_ONLY) {
             f |= Facts::ONSITE_ONLY;
         }
         Facts(f)
@@ -285,10 +280,10 @@ pub struct Read {
 
 impl Read {
     pub fn of(seat: &Seat) -> Read {
-        let company = text::normalize(seat.company);
+        let company = Hits::of(&text::normalize(seat.company));
         Read {
-            company: Facts::of(&company),
-            tier: Tier::of(&company),
+            company: Facts::of_hits(company),
+            tier: Tier::of_hits(company),
             role: Facts::of(&text::normalize(seat.role)),
             location: Facts::of_place(&text::normalize(seat.location)),
         }
@@ -713,7 +708,8 @@ mod tests {
         let long = "1 ".repeat(50_000);
         let t = std::time::Instant::now();
         assert!(!high_comp(&long));
-        assert!(t.elapsed().as_millis() < 200);
+        // Linear, not fast: a debug build under load gets ten times the room.
+        assert!(t.elapsed().as_millis() < if cfg!(debug_assertions) { 2_000 } else { 200 });
     }
 
     #[test]

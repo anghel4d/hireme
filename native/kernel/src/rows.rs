@@ -222,6 +222,9 @@ pub struct Table {
     slots: crate::fx::Map<u32, u32>,
     /// Sorted by column id.
     cols: Vec<Column>,
+    /// Index into `cols` plus one by column id, 0 when absent: a cell
+    /// read finds its column without a search.
+    at: Vec<u16>,
 }
 
 impl Table {
@@ -264,7 +267,10 @@ impl Table {
     }
 
     pub fn column(&self, col: u16) -> Option<&Column> {
-        self.cols.binary_search_by_key(&col, |c| c.id).ok().map(|i| &self.cols[i])
+        match self.at.get(col as usize) {
+            Some(&i) if i > 0 => self.cols.get(i as usize - 1),
+            _ => None,
+        }
     }
 
     pub fn columns(&self) -> &[Column] {
@@ -288,6 +294,13 @@ impl Table {
             }
             Err(i) => {
                 self.cols.insert(i, Column { id: col, data: Data::new(kind, n) });
+                self.at.clear();
+                for (k, c) in self.cols.iter().enumerate() {
+                    if self.at.len() <= c.id as usize {
+                        self.at.resize(c.id as usize + 1, 0);
+                    }
+                    self.at[c.id as usize] = k as u16 + 1;
+                }
                 i
             }
         };
@@ -392,6 +405,7 @@ impl Table {
         self.ids.clear();
         self.slots.clear();
         self.cols.clear();
+        self.at.clear();
     }
 }
 

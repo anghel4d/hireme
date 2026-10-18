@@ -20,6 +20,8 @@ use schema::col::applications as A;
 use schema::{col, enums, table};
 
 use crate::heat::{self, Class, Seat, SeatIn};
+use crate::lexicon::Hits;
+use crate::org::{Department, Family, Size};
 use crate::pipeline::Stage;
 use crate::rows::{Moved, Row, Rows, Table};
 use crate::score::{self, Band, Suggestion};
@@ -118,9 +120,44 @@ pub struct Board {
     /// Each distinct company, title and location an application carries,
     /// normalized and read once (a desk repeats them); dropped with the
     /// applications on a BOOT.
-    names: std::collections::HashMap<String, Name>,
-    titles: std::collections::HashMap<String, Title>,
-    places: std::collections::HashMap<String, score::Facts>,
+    names: Memo<Name>,
+    titles: Memo<Title>,
+    places: Memo<score::Facts>,
+}
+
+/// Values by text. Each text is hashed once with the seeded hash a hostile
+/// text cannot aim collisions at (`keyed`), and that hash indexes a cheap
+/// map; a text whose hash another holds replaces it.
+struct Memo<V> {
+    keys: crate::keyed::Seed,
+    by: crate::fx::Map<u64, (String, V)>,
+}
+
+impl<V> Default for Memo<V> {
+    fn default() -> Self {
+        Memo { keys: crate::keyed::Seed::default(), by: crate::fx::Map::default() }
+    }
+}
+
+impl<V> Memo<V> {
+    fn get_or(&mut self, text: &str, read: impl FnOnce() -> V) -> &V {
+        use core::hash::BuildHasher;
+        use std::collections::hash_map::Entry;
+        let slot = match self.by.entry(self.keys.hash_one(text)) {
+            Entry::Occupied(mut e) => {
+                if e.get().0 != text {
+                    *e.get_mut() = (String::from(text), read());
+                }
+                e.into_mut()
+            }
+            Entry::Vacant(e) => e.insert((String::from(text), read())),
+        };
+        &slot.1
+    }
+
+    fn clear(&mut self) {
+        self.by.clear();
+    }
 }
 
 /// A company name as read once: normalized, its size, its score facts and
@@ -422,18 +459,18 @@ impl Board {
     pub fn governor(&mut self, rows: &Rows, today: Day) -> (&heat::Index, &heat::Config) {
         let cfg = config(rows);
         if !self.governor.as_ref().is_some_and(|g| g.0 == today && g.1 == cfg) {
-            let mut hot: Vec<Seat> = Vec::new();
+            let mut hot: Vec<u32> = Vec::new();
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
                     if stages.get(i).and_then(|v| u8::try_from(*v).ok().and_then(Stage::from_u8)).is_some_and(|s| s.queued() || s.after_send())
-                        && let Some(c) = self.cached(rows, t, id)
+                        && self.cached(rows, t, id).is_some()
                     {
-                        hot.push(c.seat.clone());
+                        hot.push(id);
                     }
                 }
             }
-            let ix = heat::Index::new(hot.iter(), today, &cfg);
+            let ix = heat::Index::new(hot.iter().filter_map(|id| self.cache.get(id).map(|c| &c.seat)), today, &cfg);
             self.governor = Some((today, cfg, ix));
             self.forget_reads();
         }
@@ -446,42 +483,27 @@ impl Board {
             let row = t.row(id)?;
             let f = seat_of_row(row, id)?;
             let location = row.str(A::LOCATION).unwrap_or("");
-            let name = match self.names.get(f.company) {
-                Some(n) => n.clone(),
-                None => {
-                    let n = text::normalize(f.company);
-                    let name = Name { size: crate::org::size_normalized(&n), facts: score::Facts::of(&n), tier: score::Tier::of(&n), normalized: n };
-                    self.names.insert(String::from(f.company), name.clone());
-                    name
-                }
-            };
-            let title = match self.titles.get(f.role) {
-                Some(t) => *t,
-                None => {
-                    let n = text::normalize(f.role);
-                    let title = Title {
-                        department: crate::org::department_normalized(&n),
-                        family: crate::org::family_normalized(&n),
-                        facts: score::Facts::of(&n),
-                    };
-                    self.titles.insert(String::from(f.role), title);
-                    title
-                }
-            };
-            let place = match self.places.get(location) {
-                Some(p) => *p,
-                None => {
-                    let p = score::Facts::of_place(&text::normalize(location));
-                    self.places.insert(String::from(location), p);
-                    p
-                }
-            };
+            let name = self.names.get_or(f.company, || {
+                let n = text::normalize(f.company);
+                let h = Hits::of(&n);
+                Name { size: Size::of_hits(h), facts: score::Facts::of_hits(h), tier: score::Tier::of_hits(h), normalized: n }
+            });
+            let title = *self.titles.get_or(f.role, || {
+                let n = text::normalize(f.role);
+                let (h, fam) = Hits::title(&n);
+                Title { department: Department::of_hits(h), family: Family::of_hits(fam), facts: score::Facts::of_hits(h) }
+            });
+            let place = *self.places.get_or(location, || score::Facts::of_place(&text::normalize(location)));
             let seat = Seat::from_normalized(&f, &name.normalized, name.size, title.department, title.family);
             let read = score::Read { company: name.facts, tier: name.tier, role: title.facts, location: place };
             let mut search = String::with_capacity(f.company.len() + f.role.len() + location.len() + 16);
             for c in [A::COMPANY, A::ROLE, A::LOCATION] {
                 if let Some(s) = row.str(c) {
-                    search.push_str(&s.to_lowercase());
+                    if s.is_ascii() {
+                        search.extend(s.bytes().map(|b| char::from(b.to_ascii_lowercase())));
+                    } else {
+                        search.push_str(&s.to_lowercase());
+                    }
                     search.push('\n');
                 }
             }
