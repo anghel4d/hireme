@@ -86,6 +86,9 @@
           env = {
             MIX_ENV = "test";
             MIX_REBAR3 = "${beamPackages.rebar3}/bin/rebar3";
+            # The agent-facing security suite drives the real hireme-mcp,
+            # the one this flake ships.
+            HIREME_MCP = "${hireme.native}/bin/hireme-mcp";
             EXQLITE_USE_SYSTEM = "1";
             EXQLITE_SYSTEM_CFLAGS = "-I${pkgs.sqlite.dev}/include";
             EXQLITE_SYSTEM_LDFLAGS = "-L${pkgs.sqlite.out}/lib -lsqlite3";
