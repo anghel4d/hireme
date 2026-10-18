@@ -98,16 +98,16 @@ impl Indexes {
             };
             let Some((wrote, gone)) = moved else { continue };
             let Some((ids, nn)) = self.by.get_mut(&key) else { continue };
-            for id in wrote.iter().chain(gone) {
-                if let Some(i) = ids.iter().position(|x| x == id) {
-                    ids.remove(i);
-                    if i < *nn {
-                        *nn -= 1;
-                    }
-                }
-            }
+            // A merged move (a PATCH, then a rollback) may name a row twice:
+            // every entry of a touched row goes, and each live one returns once.
+            let mut touched: Vec<u32> = wrote.iter().chain(gone).copied().collect();
+            touched.sort_unstable();
+            touched.dedup();
+            let kept_nn = ids[..*nn].iter().filter(|x| touched.binary_search(x).is_err()).count();
+            ids.retain(|x| touched.binary_search(x).is_err());
+            *nn = kept_nn;
             let cells = Cells::new(t, c);
-            for &id in wrote {
+            for &id in &touched {
                 let Some(slot) = t.slot(id) else { continue };
                 let k = cells.key(slot);
                 if k.is_null() {

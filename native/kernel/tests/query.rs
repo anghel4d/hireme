@@ -143,6 +143,30 @@ fn a_find_after_a_patch_sees_the_rows_as_they_are() {
     assert_eq!(got, want);
 }
 
+/// A row a PATCH rewrites while a predicted write to it is pending, then
+/// rolled back by its NACK, is still one row (noether's Chromium repro).
+#[test]
+fn a_rollback_after_a_patch_leaves_each_row_once() {
+    let mut k = kernel();
+    let ids = |k: &Kernel| -> Vec<u64> {
+        q(k, json!({"op": "find", "table": "places", "where": {"name": {"prefix": "Por"}}, "limit": 500}))["rows"].as_array().unwrap().iter().map(|r| r["id"].as_u64().unwrap()).collect()
+    };
+    let before = ids(&k);
+    let mut w = wire::OpsWriter::new();
+    let mut o = w.op(4242, wire::PUT, 0, table::PLACES, 2, None);
+    o.str(P::REGION, "Mine");
+    o.done();
+    let ctx = kernel::judge::Ctx { today: 739_528, now: 0, human: true, key_id: None, held: &[] };
+    k.predict(&w.finish()[8..], &ctx).unwrap();
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::PLACES, 1);
+    b.u32s(P::ID, [2].into_iter()).strs(P::NAME, ["Porto"].into_iter()).strs(P::REGION, ["Theirs"].into_iter());
+    b.done();
+    k.patch(&w.finish(), 2).unwrap();
+    k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 3, &[wire::Nack { op_id: 4242, code: 0, data: b"{}" }])).unwrap();
+    assert_eq!(ids(&k), before);
+}
+
 #[test]
 fn get_by_key_text_history_and_grants_read_as_world() {
     let mut k = kernel();
