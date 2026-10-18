@@ -191,9 +191,8 @@ impl Kernel {
             let t = self.rows.table(table::APPLICATIONS)?;
             t.ids().iter().copied().find(|&id| t.str(id, schema::col::applications::CANONICAL_URL) == Some(u))
         });
-        if let (Some(id), true) = (target, op.flags & wire::CREATE_ONLY != 0) {
+        if let (Some(_), true) = (target, op.flags & wire::CREATE_ONLY != 0) {
             // As the server answers it: the key, not the row it found.
-            let _ = id;
             return Err(Refusal { code: schema::refusal::NATURAL_KEY, data: json!({"table": "applications", "key": {"canonical_url": url}}) });
         }
         // The op layout: flags at byte 9, target at bytes 12..16.

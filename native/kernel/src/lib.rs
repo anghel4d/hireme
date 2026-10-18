@@ -29,7 +29,7 @@ pub mod rows;
 pub mod score;
 pub mod text;
 
-/// Hash maps for lookups by id or precomputed hash. Nothing iterates one
+/// Hash maps for lookups by integer id. Nothing iterates one
 /// to produce a result, so the cheap multiply hash (no per-process seed)
 /// costs no determinism.
 pub(crate) mod fx {
@@ -67,18 +67,6 @@ pub(crate) mod fx {
     }
 
     pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
-
-    /// FNV-1a over bytes: a stable 64-bit name for a string key.
-    pub fn name(parts: &[&[u8]]) -> u64 {
-        let mut h = 0xcbf2_9ce4_8422_2325u64;
-        for p in parts {
-            for b in *p {
-                h = (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            h = (h ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
-    }
 }
 
 /// A calendar day as days since 1970-01-01, the schema's `day`.
