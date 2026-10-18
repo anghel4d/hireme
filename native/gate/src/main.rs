@@ -361,12 +361,15 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
     // A self-signed certificate (no GATE_CERT) lives 14 days; it is made anew
     // each week, and its hash file with it, so a long-running node keeps
     // pinned WebTransport.
-    let mut made = std::time::Instant::now();
+    // Wall-clock, as the certificate's validity is: a machine suspended for
+    // days resumes due for a new one.
+    let mut made = SystemTime::now();
     loop {
         tokio::select! {
             _ = now.notified() => {}
             _ = sleep(Duration::from_secs(300)) => {
-                let renew = gate.settings.cert.is_none() && made.elapsed() >= SELF_SIGNED_RENEW;
+                let age = SystemTime::now().duration_since(made).unwrap_or_default();
+                let renew = gate.settings.cert.is_none() && age >= SELF_SIGNED_RENEW;
                 if !failed && !renew && cert_stamp(&gate.settings) == stamp { continue; }
             }
         }
@@ -385,7 +388,7 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
             Ok(Ok(())) => {
                 stamp = seen;
                 failed = false;
-                made = std::time::Instant::now();
+                made = SystemTime::now();
             }
             Ok(Err(e)) => {
                 eprintln!("hireme-gate: reload kept the old certificate: {e}");
