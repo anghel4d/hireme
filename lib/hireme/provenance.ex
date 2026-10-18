@@ -33,7 +33,8 @@ defmodule Hireme.Provenance do
     # opens evil.example while URI.parse names levels.fyi; userinfo, spaces
     # and control characters have no place in a source's URL either.
     case !String.match?(url, ~r/[\\\s\p{Cc}]/u) and URI.parse(url) do
-      %URI{scheme: s, host: h, userinfo: nil} when s in ["http", "https"] and is_binary(h) and h != "" ->
+      %URI{scheme: s, host: h, userinfo: nil}
+      when s in ["http", "https"] and is_binary(h) and h != "" ->
         h |> String.downcase() |> String.trim_trailing(".") |> hostname()
 
       _ ->
@@ -45,8 +46,15 @@ defmodule Hireme.Provenance do
 
   # Only a real hostname counts: labels of letters, digits and hyphens. A
   # host like "evil%5c.levels.fyi" must not pass as a subdomain of a trusted one.
+  # A DNS name, not an address: at most 253 characters, and a last label
+  # that is no number (a browser reads "127.1" and "0x7f.1" as 127.0.0.1).
   defp hostname(h) do
-    if h =~ ~r/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/, do: h
+    tld = h |> String.split(".") |> List.last()
+
+    if byte_size(h) <= 253 and
+         h =~ ~r/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/ and
+         tld =~ ~r/[a-z]/ and not String.starts_with?(tld, "0x"),
+       do: h
   end
 
   @fixed ~w(url host publisher title kind)a
@@ -58,7 +66,11 @@ defmodule Hireme.Provenance do
   new source. Only its retrieval (`retrieved_at`, `doc`) moves.
   """
   def source_change(nil, %{"url" => url}) do
-    if host(url), do: :ok, else: {:refused, :type, %{table: "sources", column: "url", reason: "an http(s) URL on a real hostname"}}
+    if host(url),
+      do: :ok,
+      else:
+        {:refused, :type,
+         %{table: "sources", column: "url", reason: "an http(s) URL on a real hostname"}}
   end
 
   def source_change(nil, _values), do: :ok
