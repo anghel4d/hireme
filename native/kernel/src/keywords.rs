@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Bump on any change to what `extract` returns for some input.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// How many keywords a listing keeps.
 pub const TOP: usize = 12;
@@ -80,7 +80,16 @@ fn prose(listing: &str, format: Format) -> String {
         } else if html && c == '<' {
             Some(through('>'))
         } else if html && c == '&' && entity(rest).is_some() {
-            entity(rest)
+            let n = entity(rest).unwrap_or(1);
+            // An entity reads as the character it stands for, so "M&uuml;ller"
+            // is one word, as "Müller" is; a symbol is a space.
+            if let Some(ch) = decoded(&rest[1..n - 1]) {
+                out.push(ch);
+                prev = ch;
+                i += n;
+                continue;
+            }
+            Some(n)
         } else if md && rest.starts_with("](") {
             Some(through(')'))
         } else if url {
@@ -128,6 +137,44 @@ fn entity(s: &str) -> Option<usize> {
     ok.then_some(end + 1)
 }
 
+/// The letter an entity's body names (`uuml`, `#252`, `#xFC`), or `None`
+/// for a symbol or punctuation, which reads as a space.
+fn decoded(body: &str) -> Option<char> {
+    let c = match body.as_bytes() {
+        [b'#', b'x' | b'X', hex @ ..] => u32::from_str_radix(core::str::from_utf8(hex).ok()?, 16).ok().and_then(char::from_u32),
+        [b'#', dec @ ..] => core::str::from_utf8(dec).ok()?.parse::<u32>().ok().and_then(char::from_u32),
+        _ => named_letter(body),
+    }?;
+    (c.is_alphanumeric() || c == '\'').then_some(c)
+}
+
+/// A named entity that is a letter: an accented Latin letter
+/// (`<letter><mark>`) or one of the few ligatures and runes HTML 4 names.
+fn named_letter(name: &str) -> Option<char> {
+    const MARKS: [(&str, &str, &str); 8] = [
+        ("grave", "AEIOUaeiou", "ÀÈÌÒÙàèìòù"),
+        ("acute", "AEIOUYaeiouy", "ÁÉÍÓÚÝáéíóúý"),
+        ("circ", "AEIOUaeiou", "ÂÊÎÔÛâêîôû"),
+        ("tilde", "ANOano", "ÃÑÕãñõ"),
+        ("uml", "AEIOUYaeiouy", "ÄËÏÖÜŸäëïöüÿ"),
+        ("ring", "Aa", "Åå"),
+        ("cedil", "Cc", "Çç"),
+        ("slash", "Oo", "Øø"),
+    ];
+    const WHOLE: [(&str, char); 12] = [
+        ("AElig", 'Æ'), ("aelig", 'æ'), ("OElig", 'Œ'), ("oelig", 'œ'), ("szlig", 'ß'), ("ETH", 'Ð'),
+        ("eth", 'ð'), ("THORN", 'Þ'), ("thorn", 'þ'), ("Scaron", 'Š'), ("scaron", 'š'), ("apos", '\''),
+    ];
+    if let Some(&(_, c)) = WHOLE.iter().find(|(n, _)| *n == name) {
+        return Some(c);
+    }
+    let mut chars = name.chars();
+    let base = chars.next()?;
+    let mark = chars.as_str();
+    let (_, bases, letters) = MARKS.iter().find(|(m, _, _)| *m == mark)?;
+    bases.chars().position(|b| b == base).and_then(|k| letters.chars().nth(k))
+}
+
 /// The HTML 4 named entities (sorted, for a binary search); anything
 /// else between '&' and ';' is prose ("salary&bonus;").
 const ENTITIES: &[&[u8]] = &[
@@ -137,7 +184,7 @@ const ENTITIES: &[&[u8]] = &[
     b"OElig", b"Oacute", b"Ocirc", b"Ograve", b"Omega", b"Omicron", b"Oslash", b"Otilde", b"Ouml", b"Phi",
     b"Pi", b"Prime", b"Psi", b"Rho", b"Scaron", b"Sigma", b"THORN", b"Tau", b"Theta", b"Uacute", b"Ucirc",
     b"Ugrave", b"Upsilon", b"Uuml", b"Xi", b"Yacute", b"Yuml", b"Zeta", b"aacute", b"acirc", b"acute",
-    b"aelig", b"agrave", b"alefsym", b"alpha", b"amp", b"and", b"ang", b"aring", b"asymp", b"atilde",
+    b"aelig", b"agrave", b"alefsym", b"alpha", b"amp", b"and", b"ang", b"apos", b"aring", b"asymp", b"atilde",
     b"auml", b"bdquo", b"beta", b"brvbar", b"bull", b"cap", b"ccedil", b"cedil", b"cent", b"chi", b"circ",
     b"clubs", b"cong", b"copy", b"crarr", b"cup", b"curren", b"dArr", b"dagger", b"darr", b"deg", b"delta",
     b"diams", b"divide", b"eacute", b"ecirc", b"egrave", b"empty", b"emsp", b"ensp", b"epsilon", b"equiv",
@@ -323,6 +370,10 @@ mod tests {
         assert_eq!(lookalike, ["kernel", "bonus", "gpu", "salary"]);
         let html = extract("<div class=\"x\"><a href=\"https://acme.example/jobs\">Kernel</a>&nbsp;kernel&amp;GPU</div>", Format::Html);
         assert_eq!(html, ["kernel", "gpu"]);
+        // An entity is the character it names: one word, folded like the
+        // letter itself; an apostrophe splits as it does in plain text.
+        let named = extract("M&uuml;ller M&#252;ller M&#xFC;ller d&eacute;veloppeur &#x6B;ernel don&apos;t &apos;quoted&apos;", Format::Html);
+        assert_eq!(named, ["muller", "developpeur", "don", "kernel", "quoted"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
         assert_eq!(md, ["kernels", "apply", "see"]);
     }
