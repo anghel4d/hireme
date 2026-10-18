@@ -22,6 +22,12 @@ fn a_server_table_metric_moves_schema_rev_alone_and_a_resident_column_moves_both
 
     let hidden = parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap();
     assert_eq!(hidden.wire_hash, base.wire_hash, "a server_only column never travels");
+    let hidden_enum = parse(&with(
+        "  col cv_theme json ?",
+        "  col probe_hidden enum probe_kind ? server_only",
+    ).replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1))
+    .unwrap();
+    assert_eq!(hidden_enum.wire_hash, base.wire_hash, "an enum only server_only columns use never travels");
 
     let resident = parse(&with("table applications desk resident", "  col probe_col str ?")).unwrap();
     assert_ne!(resident.wire_hash, base.wire_hash);

@@ -1200,7 +1200,7 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
                 .iter()
                 .filter(|t| t.residency != Residency::Server)
                 .flat_map(|t| t.cols.iter())
-                .any(|c| c.ty == Type::Enum && c.target.as_deref() == Some(name))
+                .any(|c| c.ty == Type::Enum && !c.server_only && c.target.as_deref() == Some(name))
             || s.commands.iter().flat_map(|c| c.params.iter()).any(|p| p.ty == Type::Enum && p.target.as_deref() == Some(name))
     };
     for e in &s.enums {

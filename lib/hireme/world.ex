@@ -55,7 +55,7 @@ defmodule Hireme.World do
       "get" -> get(account_id, grants, params)
       "history" -> history(account_id, grants, params)
       "text" -> text(account_id, grants, params)
-      _ -> {:error, :not_found, %{method: method}}
+      _ -> {:error, :not_found, %{method: name_echo(method)}}
     end
   rescue
     # A value the checks let through but cannot be cast (a cursor tampered
@@ -423,13 +423,13 @@ defmodule Hireme.World do
     case Schema.table(name) do
       %{residency: r} = t when r in [:resident, :server] ->
         cond do
-          Grants.bit(t) == 0 -> {:error, :not_found, %{table: name}}
-          not Grants.read?(grants, t) -> {:error, :scope, %{table: name}}
+          Grants.bit(t) == 0 -> {:error, :not_found, %{table: name_echo(name)}}
+          not Grants.read?(grants, t) -> {:error, :scope, %{table: name_echo(name)}}
           true -> {:ok, t}
         end
 
       _ ->
-        {:error, :not_found, %{table: name}}
+        {:error, :not_found, %{table: name_echo(name)}}
     end
   end
 
@@ -438,12 +438,12 @@ defmodule Hireme.World do
   defp column(grants, table, name) when is_binary(name) do
     case Schema.column(table.name, name) do
       nil ->
-        {:error, :column, %{table: table.name, column: name}}
+        {:error, :column, %{table: table.name, column: name_echo(name)}}
 
       col ->
         if Grants.column?(grants, col),
           do: {:ok, col},
-          else: {:error, :column, %{table: table.name, column: name}}
+          else: {:error, :column, %{table: table.name, column: name_echo(name)}}
     end
   end
 
@@ -473,7 +473,7 @@ defmodule Hireme.World do
   end
 
   defp columns(_grants, table, other),
-    do: {:error, :type, %{table: table.name, cols: inspect(other)}}
+    do: {:error, :type, %{table: table.name, cols: brief(other)}}
 
   defp ensure_id(cols, table) do
     if Enum.any?(cols, &(&1.name == "id")),
@@ -503,7 +503,9 @@ defmodule Hireme.World do
   defp order_column(grants, table, name) do
     with {:ok, col} <- column(grants, table, name) do
       if col.deferred or col.type in [:json, :bytes, :text],
-        do: {:error, :column, %{table: table.name, column: name, reason: "not orderable"}},
+        do:
+          {:error, :column,
+           %{table: table.name, column: name_echo(name), reason: "not orderable"}},
         else: {:ok, col}
     end
   end
@@ -512,7 +514,7 @@ defmodule Hireme.World do
     with {:ok, col} <- column(grants, table, name) do
       if col.type in [:text, :str, :json],
         do: {:ok, col},
-        else: {:error, :column, %{table: table.name, column: name, reason: "not text"}}
+        else: {:error, :column, %{table: table.name, column: name_echo(name), reason: "not text"}}
     end
   end
 
@@ -540,7 +542,7 @@ defmodule Hireme.World do
     # A partial key (places' iso2 is a country's) holds only where its where does.
     case Enum.find(keys ++ unique_cols, &(Enum.sort(&1.cols) == wanted)) do
       nil ->
-        {:error, :natural_key, %{table: table.name, key: Map.keys(key)}}
+        {:error, :natural_key, %{table: table.name, key: brief(Map.keys(key))}}
 
       k ->
         with {:ok, d} <- filters(grants, table, key),
@@ -610,7 +612,7 @@ defmodule Hireme.World do
   end
 
   defp filters(_grants, table, other),
-    do: {:error, :type, %{table: table.name, where: inspect(other)}}
+    do: {:error, :type, %{table: table.name, where: brief(other)}}
 
   defp filterable(table, col) do
     if col.deferred or col.type in [:json, :bytes],
@@ -706,6 +708,10 @@ defmodule Hireme.World do
   rescue
     _ in [ArithmeticError, ArgumentError] -> :error
   end
+
+  # A name the caller sent, as a refusal repeats it: 64 bytes at most.
+  defp name_echo(name) when is_binary(name), do: String.slice(name, 0, 64)
+  defp name_echo(name), do: brief(name)
 
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)

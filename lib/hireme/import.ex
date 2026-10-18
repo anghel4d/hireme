@@ -147,7 +147,12 @@ defmodule Hireme.Import do
   def parse(body, :markdown) do
     # A byte-order mark (what some editors write first) is not text.
     body = String.trim_leading(body, "\uFEFF")
-    lines = body |> String.split("\n") |> Enum.map(&String.trim/1)
+    # A byte-order mark can open any joined file, not only the first.
+    lines =
+      body
+      |> String.split("\n")
+      |> Enum.map(&(&1 |> String.trim() |> String.trim_leading("\uFEFF") |> String.trim()))
+
     {head, rest} = Enum.split_while(lines, &(not String.starts_with?(&1, "## ")))
 
     defaults =
@@ -181,22 +186,42 @@ defmodule Hireme.Import do
     {table, lines |> Enum.reverse() |> table_rows(), :text}
   end
 
-  # A GFM table: a header line, a delimiter row of `---` cells as many as
-  # the header's, then the rows up to the first line without a pipe. The
-  # outer pipes are optional; prose before or after is not data.
+  # GFM tables: a header line, a delimiter row of `---` cells, then the rows
+  # up to the first line without a pipe; a section may hold several. The
+  # outer pipes are optional; prose before, between or after is not data.
   defp table_rows([line, delimiter | rest]) do
     header = cells(line)
     marks = cells(delimiter)
 
-    if String.contains?(line, "|") and length(marks) == length(header) and
-         Enum.all?(marks, &(&1 =~ ~r/^:?-+:?$/)) do
-      rest |> Enum.take_while(&String.contains?(&1, "|")) |> Enum.map(&row(header, cells(&1)))
+    if pipe?(line) and delimiter?(marks) do
+      {body, after_table} = Enum.split_while(rest, &pipe?/1)
+
+      rows =
+        if length(marks) == length(header) do
+          body
+          |> Enum.map(&cells/1)
+          # A delimiter row repeated inside the body is not a row.
+          |> Enum.reject(&delimiter?/1)
+          |> Enum.map(&row(header, &1))
+        else
+          [
+            %{
+              "$shape" =>
+                "a #{length(marks)}-cell delimiter under a #{length(header)}-column header"
+            }
+          ]
+        end
+
+      rows ++ table_rows(after_table)
     else
       table_rows([delimiter | rest])
     end
   end
 
   defp table_rows(_lines), do: []
+
+  defp pipe?(line), do: String.contains?(line, "|")
+  defp delimiter?(cells), do: cells != [] and Enum.all?(cells, &(&1 =~ ~r/^:?-+:?$/))
 
   # A row with more or fewer cells than the header is refused, not trimmed.
   defp row(header, cells) when length(header) == length(cells),

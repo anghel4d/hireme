@@ -269,7 +269,8 @@ pub fn emit(s: &Schema) -> String {
         };
         w(&format!("/** `{}`: {kind}. */", t.name));
         w(&format!("export interface {} {{", singular(&t.name)));
-        for c in &t.cols {
+        // A server_only column never reaches a client, so no row has it.
+        for c in t.cols.iter().filter(|c| !c.server_only) {
             w(&format!("  {}: {};", c.name, ts_type(s, c)));
         }
         w("}");

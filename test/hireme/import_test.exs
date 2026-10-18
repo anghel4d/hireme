@@ -389,4 +389,39 @@ defmodule Hireme.ImportTest do
            ) ==
              ["One", "Two"]
   end
+
+  test "a section's every table is read, a BOM before any heading is not text, and a delimiter is never data",
+       %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+
+    markdown = """
+    ## corporations
+    | domain | name |
+    | --- | --- |
+    | t1.#{t}.example | One |
+    | --- | --- |
+
+    Between the tables.
+
+    | domain | name |
+    | --- | --- |
+    | t2.#{t}.example | Two |
+
+    \uFEFF## corporations
+    | domain | name |
+    | --- |
+    | t3.#{t}.example | Three |
+    """
+
+    {:ok, report} = Import.run(a.id, markdown, :markdown)
+    assert Enum.map(report.refusals, & &1.code) == [:type]
+
+    assert Repo.all(
+             from c in Corporation,
+               where: like(c.domain, ^"%.#{t}.example"),
+               select: c.name,
+               order_by: c.domain
+           ) ==
+             ["One", "Two"]
+  end
 end

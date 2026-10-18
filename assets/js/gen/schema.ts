@@ -181,7 +181,6 @@ export interface Session {
   rev: number;
   inserted_at: number;
   updated_at: number;
-  token_hash: Uint8Array;
   authenticated_at: number;
   mfa_at: number | null;
   last_seen_at: number;
@@ -209,7 +208,6 @@ export interface MagicLink {
   inserted_at: number;
   updated_at: number;
   email: string;
-  token_hash: Uint8Array;
   expires_at: number;
   used_at: number | null;
   ip: string | null;
@@ -224,7 +222,6 @@ export interface ApiKey {
   updated_at: number;
   key_id: string;
   name: string;
-  secret_hash: Uint8Array;
   prefix: string;
   read_mask: number;
   write_mask: number;
@@ -242,7 +239,6 @@ export interface Factor {
   updated_at: number;
   kind: FactorKind;
   name: string | null;
-  totp_secret: Uint8Array | null;
   totp_last_step: number | null;
   credential_id: Uint8Array | null;
   public_key: Uint8Array | null;
@@ -265,7 +261,6 @@ export interface Challenge {
   updated_at: number;
   session_id: number;
   kind: ChallengeKind;
-  payload: Uint8Array;
   expires_at: number;
 }
 /** `recovery_codes`: server-side. */
@@ -275,8 +270,6 @@ export interface RecoveryCode {
   rev: number;
   inserted_at: number;
   updated_at: number;
-  salt: Uint8Array;
-  code_hash: Uint8Array;
   used_at: number | null;
 }
 /** `audit`: server-side. */
@@ -347,7 +340,6 @@ export interface Profile {
   headline: string | null;
   summary: string | null;
   narrative: string | null;
-  narrative_sha: string | null;
   narrative_private: string | null;
 }
 /** `items`: resident. */
@@ -388,7 +380,6 @@ export interface Application {
   comp_raw: string | null;
   channel: AppChannel | null;
   listing_raw: string | null;
-  listing_sha: string | null;
   listing_format: ListingFormat | null;
   listing_url: string | null;
   canonical_url: string | null;
@@ -411,11 +402,8 @@ export interface Application {
   closed_on: number | null;
   outcome: Outcome | null;
   notes: string | null;
-  notes_sha: string | null;
   battleplan: string | null;
-  battleplan_sha: string | null;
   letter_raw: string | null;
-  letter_sha: string | null;
   cv_theme: unknown | null;
 }
 /** `events`: resident. */
@@ -428,7 +416,6 @@ export interface Event {
   application_id: number;
   kind: string;
   body: string | null;
-  body_sha: string | null;
   actor: Actor;
   key_id: number | null;
   op_id: number | null;
@@ -600,9 +587,7 @@ export interface Place {
   atlas_position: number | null;
   atlas_labeled: boolean | null;
   liveability: string | null;
-  liveability_sha: string | null;
   notes: string | null;
-  notes_sha: string | null;
 }
 /** `atlas`: a resident projection. */
 export interface Atlas {
@@ -684,9 +669,7 @@ export interface Corporation {
   eng_urls: number | null;
   note: string | null;
   about: string | null;
-  about_sha: string | null;
   culture: string | null;
-  culture_sha: string | null;
 }
 /** `offices`: server-side. */
 export interface Office {
@@ -717,7 +700,6 @@ export interface Source {
   retrieved_at: number | null;
   mutable: boolean;
   doc: string | null;
-  doc_sha: string | null;
 }
 /** `citations`: server-side. */
 export interface Citation {
@@ -726,15 +708,6 @@ export interface Citation {
   rev: number;
   inserted_at: number;
   updated_at: number;
-  table: string;
-  row_id: number;
-  column: string;
-  source_id: number | null;
-  value: unknown | null;
-  as_of: number;
-  actor: Actor;
-  key_id: number | null;
-  op_id: number | null;
 }
 /** `contacts`: server-side. */
 export interface Contact {
@@ -768,7 +741,6 @@ export interface Message {
   cc_addr: string | null;
   subject: string | null;
   body: string | null;
-  body_sha: string | null;
   message_id: string | null;
   thread_key: string | null;
   sent_at: number | null;

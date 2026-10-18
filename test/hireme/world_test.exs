@@ -414,4 +414,19 @@ defmodule Hireme.WorldTest do
     refute Map.has_key?(row, "ticker")
     assert Enum.all?(row, fn {_, v} -> v != nil end)
   end
+
+  test "a refusal repeats a name the caller sent at most 64 bytes long", %{account: a} do
+    long = String.duplicate("x", 100_000)
+    ctx = %{account_id: a.id, grants: Grants.operator()}
+
+    for {method, params} <- [
+          {long, %{}},
+          {"find", %{"table" => long}},
+          {"find", %{"table" => "corporations", "cols" => [long]}},
+          {"find", %{"table" => "corporations", "order" => long}}
+        ] do
+      {:error, _, data} = World.call(method, params, ctx)
+      assert byte_size(inspect(data)) < 400
+    end
+  end
 end

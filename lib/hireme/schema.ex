@@ -749,7 +749,7 @@ defmodule Hireme.Schema.Parser do
       if scope == :wire do
         used =
           MapSet.new(
-            for(t <- tables, c <- t.cols, c.type == :enum, do: c.target) ++
+            for(t <- tables, c <- t.cols, c.type == :enum, not c.server_only, do: c.target) ++
               for(c <- model.commands, p <- c.params, p.type == :enum, do: p.target) ++
               model.carry
           )
