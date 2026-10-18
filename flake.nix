@@ -26,6 +26,31 @@
         vendorHash = "sha256-+BfxCyg0KkDQpHt/wycy/8CTG6YBA/VJvJFhhzUnSiQ=";
       });
 
+      # qemu for the dev VM, waiting for each vhost-user socket it is given.
+      # The pinned qemu-vm.nix backgrounds its virtiofsd daemons and execs
+      # qemu at once, and qemu connects to a chardev socket only once, so
+      # it can lose that race and exit ("Connection refused"); the driver
+      # then hangs on a pipe the daemons keep open. Up to 10 s per socket.
+      qemuWaiting = pkgs.symlinkJoin {
+        name = "qemu-waiting-for-virtiofsd";
+        paths = [ pkgs.qemu_test ];
+        postBuild = ''
+          rm $out/bin/qemu-system-x86_64
+          cat > $out/bin/qemu-system-x86_64 <<'EOF'
+          #!${pkgs.runtimeShell}
+          for arg in "$@"; do
+            case "$arg" in
+              socket,*path=*)
+                sock=''${arg##*path=}; sock=''${sock%%,*}
+                for _ in $(seq 100); do [ -S "$sock" ] && break; sleep 0.1; done ;;
+            esac
+          done
+          exec ${pkgs.qemu_test}/bin/qemu-system-x86_64 "$@"
+          EOF
+          chmod +x $out/bin/qemu-system-x86_64
+        '';
+      };
+
       beamPackages = pkgs.beam.packages.erlang_28.overrideScope (_: prev: { elixir = prev.elixir_1_20; });
 
       hireme = pkgs.callPackage ./nix/package.nix {
@@ -115,6 +140,11 @@
           nodes.machine = {
             imports = [ self.nixosModules.hireme ];
             virtualisation.memorySize = 2048;
+            # The store as a disk image, not a virtiofs share (see qemuWaiting).
+            virtualisation.mountHostNixStore = false;
+            virtualisation.useNixStoreImage = true;
+            # The driver's own shares (xchg, shared) are virtiofs still.
+            virtualisation.qemu.package = lib.mkForce qemuWaiting;
             environment.systemPackages = [
               pkgs.sqlite
               pkgs.psmisc
@@ -168,7 +198,9 @@
                 " $(systemctl show -P ExecStart hireme | grep -o '/nix/store/[^ ]*/bin/hireme' | head -1) rpc 'IO.puts(:ok)'"
                 " | grep -qx ok"
             )
-            machine.fail("ss -Htlpn | grep -E ':4369|beam' | grep -v '127.0.0.1'")
+            listening = machine.succeed("ss -Htlpn").splitlines()
+            exposed = [l for l in listening if (":4369" in l or "beam" in l) and not ("127.0.0.1:" in l or "[::1]:" in l)]
+            assert not exposed, f"epmd or the node listens off loopback: {exposed}"
 
             # The page ships the kernel the release was built with.
             machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/wasm/kernel.wasm")
@@ -195,7 +227,7 @@
             machine.fail("pgrep hireme-gate")
             machine.succeed("systemctl start hireme")
             machine.wait_for_open_port(4000)
-            machine.succeed("test $(sqlite3 /var/lib/hireme/hireme.db 'select count(*) from schema_files where name = \"0000_baseline\"') = 1")
+            machine.wait_until_succeeds("sqlite3 /var/lib/hireme/hireme.db \"select count(*) from schema_files where name = '0000_baseline'\" | grep -qx 1")
             machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
           '';
         };
