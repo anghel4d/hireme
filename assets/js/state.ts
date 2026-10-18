@@ -86,21 +86,15 @@ export interface FocusView {
 
 /** The outreach lens: contacts, and the selected one's threads. */
 export interface OutreachView {
-  key: string
-  contacts: Record<string, unknown>[]
-  /** The selected contact when it is not on the loaded page (a link from the focus lens). */
-  picked: Record<string, unknown> | null
-  next: unknown
-  messages: Record<string, unknown>[]
-  /** Message bodies read so far, by `id:rev`: a rewritten draft has a new rev, so its old text is never shown. */
-  bodies: Map<string, string>
+  /** How many contacts the list shows; "more" raises it. */
+  limit: number
+  /** Messages whose bodies are open. */
+  open: number[]
   /** "contact" (editing the contact), "new" (a new contact), "draft" (a new message), or "". */
   edit: string
-  loading: boolean
-  error: string
 }
 
-/** The world lens: one server-side table as a sparse grid, paged by keyset. */
+/** The world lens: one table of the replica as a sparse grid. */
 export interface WorldView {
   /** How many rows the grid shows; "more" raises it. */
   limit: number
@@ -174,7 +168,7 @@ export const model: Model = {
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
   deskLimit: 120,
   focus: { id: 0, fireArmed: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
-  outreach: { key: "", picked: null, contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
+  outreach: { limit: 100, open: [], edit: "" },
 }
 
 type Render = () => void

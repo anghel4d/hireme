@@ -1,12 +1,13 @@
 // The outreach lens: contacts and their message threads, keyed to
-// corporations and applications. Both tables are server-side (the mail
-// domain), so everything is read over `find`/`get`/`text` and written with
-// `put`. A message body is deferred and arrives only when opened, marked as
-// someone else's text. The lens writes drafts; nothing here sends mail.
+// corporations and applications. Both tables are in the kernel's replica,
+// read in the frame they are drawn (`find`, `get`, `text` answered locally)
+// and written with `put`, predicted at once and confirmed or rolled back by
+// the sequencer. A message body opens on demand, marked as someone else's
+// text. The lens writes drafts; nothing here sends mail.
 
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { Refused, put, rpc, spliced, values, type Input } from "../kernel.ts"
+import { Refused, put, query as read, values, wholeText, type Input } from "../kernel.ts"
 import { EMPTY, flag, href, html, type Html } from "../morph.ts"
 import { model, notice, query, set, type OutreachView } from "../state.ts"
 
@@ -19,67 +20,38 @@ const str = (x: unknown): string => (x === null || x === undefined ? "" : String
 const writable = (): boolean => (model.writeMask & DOMAIN.mail) !== 0
 
 const selected = (): number => Number(model.address.q.get("contact") ?? 0)
-const listKey = (): string => `${model.address.q.get("q") ?? ""}|${model.address.q.get("corporation") ?? ""}`
-
 /** The contact columns the lens edits, in declaration order. */
 const CONTACT: ColumnDef[] = TABLES.contacts.cols.filter((c) => !c.implied && !c.readonly && !c.serverOnly)
 
-let fetching = 0
-
-/** The contact list's find, without its paging. */
-function listParams(limit: number): Record<string, unknown> {
+/** The first `limit` contacts of the list (search, corporation), from the replica. */
+function contacts(limit: number): { rows: Row[]; more: boolean } {
   const q = model.address.q.get("q") ?? ""
   const corp = Number(model.address.q.get("corporation") ?? 0)
   const where: Record<string, unknown> = {}
   if (q !== "") where.name = { prefix: q }
   if (corp > 0) where.corporation_id = corp
-  return { table: "contacts", order: ["last_touch_on", "desc"], limit, where }
-}
-
-async function fetchContacts(more: boolean): Promise<void> {
-  const me = ++fetching
-  const key = listKey()
-  const params = listParams(PAGE)
-  if (more && v().next !== null) params.after = v().next
-  // A refetch of the same list keeps the rows on screen until the answer replaces them.
-  patch({ loading: true, ...(more || key === v().key ? {} : { key, contacts: [], next: null }) })
-  try {
-    const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    // Only the newest fetch lands; a superseded one that is still the newest ends its "Loading…".
-    if (me !== fetching) return
-    if (listKey() !== key) return patch({ loading: false })
-    patch({ contacts: more ? [...v().contacts, ...r.rows] : r.rows, next: r.next ?? null, loading: false, error: "" })
-  } catch (e) {
-    if (me === fetching) patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
+  const out: Row[] = []
+  let after: unknown = null
+  while (out.length < limit) {
+    const r = read<{ rows: Row[]; next: unknown }>("find", { table: "contacts", order: ["last_touch_on", "desc"], where, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
+    out.push(...r.rows)
+    after = r.next ?? null
+    if (after === null) return { rows: out, more: false }
   }
+  return { rows: out, more: true }
 }
 
-/** The loaded list read again in place, as world's reread: one page of up to 500 (find's cap), so a
- * paged list keeps its length, and a longer one keeps its tail. A fetch started meanwhile wins. */
-async function reread(): Promise<void> {
-  const me = fetching
-  const key = listKey()
-  if (v().key !== key) return void fetchContacts(false)
-  const have = v().contacts.length
+/** A contact by id, from the replica. */
+function contact(id: number): Row | undefined {
+  if (id === 0) return undefined
   try {
-    const r = await rpc<{ rows: Row[]; next: unknown }>("find", listParams(Math.min(500, Math.max(PAGE, have))))
-    if (me !== fetching || listKey() !== key || v().key !== key) return
-    patch({ contacts: have > 500 ? spliced(r.rows, v().contacts) : r.rows, next: have > 500 ? v().next : r.next ?? null, error: "" })
+    return read<{ row: Row }>("get", { table: "contacts", id }).row
   } catch {
-    // The next advance tries again.
+    return undefined
   }
 }
 
-async function fetchMessages(): Promise<void> {
-  const id = selected()
-  if (id === 0) return patch({ messages: [] })
-  try {
-    const r = await rpc<{ rows: Row[] }>("find", { table: "messages", where: { contact_id: id }, order: ["sent_at", "asc"], limit: 500 })
-    if (selected() === id) patch({ messages: r.rows })
-  } catch (e) {
-    patch({ error: e instanceof Error ? e.message : String(e) })
-  }
-}
+const messages = (id: number): Row[] => read<{ rows: Row[] }>("find", { table: "messages", where: { contact_id: id }, order: ["sent_at", "asc"], limit: 500 }).rows
 
 function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
@@ -116,9 +88,9 @@ function contactCard(c: Row): Html {
   </section>`
 }
 
-function threads(): Html {
+function threads(id: number): Html {
   const by = new Map<string, Row[]>()
-  for (const m of v().messages) {
+  for (const m of messages(id)) {
     const k = str(m.thread_key) || `m${str(m.id)}`
     by.set(k, [...(by.get(k) ?? []), m])
   }
@@ -126,13 +98,13 @@ function threads(): Html {
     <h3>${str(ms[0]?.subject) || "(no subject)"} <span class="muted">${ms.length} message${ms.length === 1 ? "" : "s"}</span></h3>
     <ol class="messages">${ms.map((m) => {
       const id = Number(m.id)
-      const body = v().bodies.get(bodyKey(m))
+      const body = v().open.includes(id) ? wholeText("messages", id, "body") : undefined
       return html`<li data-key="m${id}" class="msg ${str(m.direction)}">
         <div class="meta"><b>${m.direction === "inbound" ? str(m.from_addr) || "them" : "you"}</b>
           <span class="tag">${str(m.status)}</span> <span class="muted">${str(m.sent_at).slice(0, 16).replace("T", " ")} · ${str(m.channel)}</span>
           ${m.application_id ? html`<span class="muted">application #${str(m.application_id)}</span>` : EMPTY}</div>
         ${body === undefined
-          ? m.body ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}" data-version="${bodyKey(m)}">Read</button>` : html`<p class="muted">no body</p>`
+          ? m.body ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}">Read</button>` : html`<p class="muted">no body</p>`
           : html`<pre class="untrusted">${body}</pre>`}
       </li>`
     })}</ol></section>`)}`
@@ -155,6 +127,7 @@ function view(): Html {
   const id = selected()
   const c = contact(id)
   const corp = model.address.q.get("corporation")
+  const list = contacts(v().limit)
   return html`<div class="outreach split">
     <aside class="list" data-key="list">
       <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search contacts">
@@ -163,46 +136,19 @@ function view(): Html {
       ${v().edit === "new" ? html`<form class="stack card" data-submit="create-contact" data-act="create-contact" data-key="new">
           ${CONTACT.filter((x) => x.required || x.name === "email" || x.name === "title" || x.name === "corporation_id").map((x) => field(x, x.name === "corporation_id" ? corp : null))}
           <span class="row"><button class="primary">Add</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>` : EMPTY}
-      <ul class="rows pick" role="listbox" aria-label="Contacts">${v().contacts.map((x) => html`<li data-key="c${str(x.id)}" role="option" aria-selected="${String(Number(x.id) === id)}">
+      <ul class="rows pick" role="listbox" aria-label="Contacts">${list.rows.map((x) => html`<li data-key="c${str(x.id)}" role="option" aria-selected="${String(Number(x.id) === id)}">
         <a href="/outreach?${new URLSearchParams({ ...(corp ? { corporation: corp } : {}), contact: str(x.id) }).toString()}" data-nav class="${Number(x.id) === id ? "on" : ""}">
           <b>${str(x.name)}</b> <span class="muted">${str(x.title)}</span></a></li>`)}</ul>
-      ${v().loading ? html`<p class="empty">Loading…</p>` : v().contacts.length === 0 ? html`<p class="empty">No contacts yet.</p>` : EMPTY}
-      ${v().next !== null ? html`<button type="button" data-act="more">More</button>` : EMPTY}
+      ${list.rows.length === 0 ? html`<p class="empty">No contacts yet.</p>` : EMPTY}
+      ${list.more ? html`<button type="button" data-act="more">More</button>` : EMPTY}
     </aside>
     <section class="detail" data-key="detail">
-      ${v().error !== "" ? html`<p class="error" role="alert">${v().error}</p>` : EMPTY}
-      ${c ? html`${contactCard(c)}${draft(c)}${threads()}` : html`<p class="empty">Pick a contact.</p>`}
+      ${c ? html`${contactCard(c)}${draft(c)}${threads(id)}` : html`<p class="empty">Pick a contact.</p>`}
     </section>
   </div>`
 }
 
 // ------------------------------------------------------------------ actions
-
-/** Which version of a message's body: its id and the deferred stub's sha (the rev only when there is no sha), so a
- * rewritten draft never shows its old text while a status change, which keeps the sha, keeps the body shown. */
-const bodyKey = (m: Row): string => {
-  const sha = (m.body as { sha?: string } | null)?.sha
-  return sha ? `${String(m.id)}:${sha}` : `${String(m.id)}:rev${String(m.rev ?? "")}`
-}
-
-/** A whole message body, chunk by chunk (a long thread quote runs past one 256 KiB chunk). */
-async function readBody(id: number): Promise<string> {
-  let out = ""
-  let offset = 0
-  for (;;) {
-    const r = await rpc<{ text: string; total: number }>("text", { table: "messages", id, column: "body", offset, length: 262_144 })
-    out += r.text
-    offset += new TextEncoder().encode(r.text).byteLength
-    if (r.text === "" || offset >= r.total) return out
-  }
-}
-
-/** A contact by id: on the loaded page, or the one picked by link. */
-function contact(id: number): Row | undefined {
-  return v().contacts.find((x) => Number(x.id) === id) ?? (Number(v().picked?.id) === id ? v().picked ?? undefined : undefined)
-}
-
-let typing = 0
 
 function form(el: HTMLElement): Record<string, Input> {
   const out: Record<string, Input> = {}
@@ -213,16 +159,13 @@ function form(el: HTMLElement): Record<string, Input> {
 function act(name: string, el: HTMLElement): void {
   const id = selected()
   switch (name) {
-    case "search": {
-      const value = (el as HTMLInputElement).value
-      clearTimeout(typing)
-      typing = window.setTimeout(() => query("q", value), 200)
-      return
-    }
+    case "search":
+      // The replica answers in the keystroke's frame: no wait before asking.
+      return query("q", (el as HTMLInputElement).value)
     case "all":
       return query("corporation", "")
     case "more":
-      return void fetchContacts(true)
+      return patch({ limit: v().limit + PAGE })
     case "cancel":
       return patch({ edit: "" })
     case "new-contact":
@@ -234,16 +177,11 @@ function act(name: string, el: HTMLElement): void {
     case "create-contact": {
       const f = form(el)
       const email = f.email
-      // The new contact is opened only if the operator is still on the list they created it from.
-      const from = listKey()
+      // Predicted: the form closes and the contact is listed now; a refusal rolls it back and says why.
+      patch({ edit: "" })
       return void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
-          // The form closes either way (a second submit would duplicate the contact); the new
-          // contact is opened only if the operator is still on the list it was made from.
-          patch({ edit: "" })
-          if (model.address.lens !== "outreach") return
-          if (listKey() === from) query("contact", String(r.id))
-          return reread()
+          if (model.address.lens === "outreach" && selected() === 0) query("contact", String(r.id))
         })
         .catch(failed)
     }
@@ -254,12 +192,8 @@ function act(name: string, el: HTMLElement): void {
       const changed: Record<string, Input> = {}
       for (const [k, x] of Object.entries(f)) if (str(c[k]) !== str(x)) changed[k] = x
       if (Object.keys(changed).length === 0) return patch({ edit: "" })
-      return void put("contacts", changed, { id })
-        .then(async () => {
-          const r = await rpc<{ row: Row }>("get", { table: "contacts", id })
-          patch({ edit: "", contacts: v().contacts.map((x) => (Number(x.id) === id ? r.row : x)), ...(Number(v().picked?.id) === id ? { picked: r.row } : {}) })
-        })
-        .catch(failed)
+      void put("contacts", changed, { id }).catch(failed)
+      return patch({ edit: "" })
     }
     case "save-draft": {
       const c = contact(id)
@@ -273,19 +207,11 @@ function act(name: string, el: HTMLElement): void {
         to_addr: c ? (str(c.email) || null) : null,
         contact_id: id,
         corporation_id: c && c.corporation_id ? Number(c.corporation_id) : null,
-      })
-        .then(() => {
-          patch({ edit: "" })
-          return fetchMessages()
-        })
-        .catch(failed)
+      }).catch(failed)
+      return void patch({ edit: "" })
     }
     case "open-body": {
-      const mid = Number(el.dataset.id)
-      const version = el.dataset.version ?? ""
-      return void readBody(mid)
-        .then((t) => patch({ bodies: new Map(v().bodies).set(version, t) }))
-        .catch(failed)
+      return patch({ open: [...v().open, Number(el.dataset.id)] })
     }
   }
 }
@@ -295,32 +221,14 @@ let shownContact = -1
 const outreach: View = {
   title: "Outreach",
   view,
-  enter(fresh) {
-    if (v().key !== listKey()) void fetchContacts(false)
-    // Back on the lens: contacts and threads an agent wrote meanwhile are read again. Picking a
-    // contact is only an address change, so it does not re-read (which collapsed a paged list).
-    else if (fresh && !v().loading) {
-      void reread()
-      if (selected() === shownContact) void fetchMessages()
-    }
+  enter() {
+    // Another contact: its open bodies and editors close.
     if (selected() !== shownContact) {
       shownContact = selected()
-      patch({ messages: [], bodies: new Map(), edit: "", picked: null })
-      void fetchMessages()
-      const want = selected()
-      if (want !== 0)
-        void rpc<{ row: Row }>("get", { table: "contacts", id: want })
-          .then((r) => {
-            if (selected() === want) patch({ picked: r.row })
-          })
-          .catch(() => {})
+      patch({ open: [], edit: "" })
     }
   },
   act,
-  refresh() {
-    if (v().edit === "" && !v().loading) void reread()
-    void fetchMessages()
-  },
 }
 
 export default outreach

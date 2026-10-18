@@ -44,20 +44,6 @@ export async function rpc<T = Record<string, unknown>>(method: string, params: R
   return r.result as T
 }
 
-/**
- * A re-read of a list's first rows, keeping the pages loaded past them: the
- * old tail resumes after the fresh page's last row, wherever that row now
- * sits, so a row added, moved up or removed above it is neither lost nor shown
- * twice. A fresh page whose last row the old list lacks falls back to the old
- * rows past the page, less any the page shows.
- */
-export function spliced<R extends { id?: unknown }>(fresh: R[], old: R[]): R[] {
-  const shown = new Set(fresh.map((r) => r.id))
-  const last = fresh.length ? old.findIndex((r) => r.id === fresh[fresh.length - 1]!.id) : -1
-  const tail = old.slice(last >= 0 ? last + 1 : fresh.length).filter((r) => !shown.has(r.id))
-  return [...fresh, ...tail]
-}
-
 // ------------------------------------------------------------------ rows
 
 /** The wasm exports, per native/kernel/src/abi.rs: one result buffer, read before the next call. */
