@@ -157,6 +157,9 @@ table accounts system server global
   col desk_rev i64 ! = 0
   # The next applications.no; a number is never reused.
   col next_no u32 ! = 1
+  # Announcing audit events, bumped by Audit.record in the same write: the
+  # account lens's cursor, one row read instead of a scan of the trail.
+  col audit_rev i64 ! = 0 readonly
 
 table sessions system server
   index revoked_at
