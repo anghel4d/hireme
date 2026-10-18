@@ -165,18 +165,13 @@ defmodule HiremeWeb.Auth do
     |> put_resp_header("clear-site-data", ~s("storage"))
   end
 
-  def require_account(conn, _opts) do
-    cond do
-      conn.assigns[:account] && not conn.assigns.pending -> conn
-      conn.assigns[:account] -> refuse(conn, 401, "second_factor", "/sign-in/factor")
-      true -> refuse(conn, 401, "unauthenticated", "/sign-in")
-    end
-  end
+  def require_account(conn, _opts), do: need(conn, false, 401, "second_factor", "/sign-in/factor")
+  def require_pending(conn, _opts), do: need(conn, true, 409, "signed_in", "/")
 
-  def require_pending(conn, _opts) do
+  defp need(conn, pending?, status, error, to) do
     cond do
-      conn.assigns[:account] && conn.assigns.pending -> conn
-      conn.assigns[:account] -> refuse(conn, 409, "signed_in", "/")
+      conn.assigns[:account] && conn.assigns.pending == pending? -> conn
+      conn.assigns[:account] -> refuse(conn, status, error, to)
       true -> refuse(conn, 401, "unauthenticated", "/sign-in")
     end
   end

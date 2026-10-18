@@ -7,12 +7,11 @@ defmodule Hireme.Application do
   """
 
   use Application
-  alias Hireme.Audit.Coalescer
 
   @impl true
   def start(_type, _args) do
     # The trail's coalesced counts outlive the process that flushes them.
-    Coalescer.table()
+    Hireme.Audit.Coalescer.table()
 
     children =
       [

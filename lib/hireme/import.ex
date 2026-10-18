@@ -97,23 +97,19 @@ defmodule Hireme.Import do
   end
 
   defp write(account_id, pack) do
-    begin = fn ->
-      actor = %{label: "import", grants: Grants.operator(), key_id: nil}
-      initial = %{rev: 0, groups: [], refusals: []}
+    actor = %{label: "import", grants: Grants.operator(), key_id: nil}
+    initial = %{rev: 0, groups: [], refusals: []}
 
-      report =
-        Enum.reduce(pack.tables, initial, fn group, report ->
-          run_group(account_id, actor, pack, group, report)
-        end)
+    report =
+      Enum.reduce(pack.tables, initial, fn group, report ->
+        run_group(account_id, actor, pack, group, report)
+      end)
 
-      # A bulk load moves the planner's statistics; refresh what it reads.
-      Hireme.Store.write(fn -> Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true) end)
+    # A bulk load moves the planner's statistics; refresh what it reads.
+    Hireme.Store.write(fn -> Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true) end)
 
-      {:ok,
-       %{report | groups: Enum.reverse(report.groups), refusals: Enum.reverse(report.refusals)}}
-    end
-
-    begin.()
+    {:ok,
+     %{report | groups: Enum.reverse(report.groups), refusals: Enum.reverse(report.refusals)}}
   end
 
   # ------------------------------------------------------------------ parse
@@ -145,9 +141,8 @@ defmodule Hireme.Import do
   end
 
   def parse(body, :markdown) do
-    # A byte-order mark (what some editors write first) is not text.
-    body = String.trim_leading(body, "\uFEFF")
-    # A byte-order mark can open any joined file, not only the first.
+    # A byte-order mark (what some editors write first) is not text, and one
+    # can open any joined file, not only the first.
     lines =
       body
       |> String.split("\n")
@@ -334,7 +329,7 @@ defmodule Hireme.Import do
 
   defp lower_row(account_id, table, pack, directives, values, mode) do
     with {:ok, cells} <- cells(account_id, table, values, mode),
-         {:ok, key} <- natural(table, values),
+         key = natural(table, values),
          unique = if(key, do: nil, else: unique(table, values)),
          {:ok, existing} <- existing(account_id, table, key || unique, cells),
          {:ok, extra, expect_rev} <- provenance(table, pack, directives, cells, existing) do
@@ -484,11 +479,12 @@ defmodule Hireme.Import do
 
       key ->
         with {:ok, cells} <- cells(account_id, table, key, mode),
-             {:ok, natural} when natural != nil <- ref_key(table, key),
+             natural when natural != nil <- ref_key(table, key),
              {:ok, %{id: id}} <- existing(account_id, table, natural, cells) do
           {:ok, id}
         else
           {:ok, nil} -> :none
+          nil -> :none
           _ -> :error
         end
     end
@@ -496,22 +492,12 @@ defmodule Hireme.Import do
 
   # The first natural key whose every column the row names (and whose
   # partial-index condition is the database's to decide).
-  defp natural(table, values) do
-    case Enum.find(table.naturals, &names?(&1, values)) do
-      nil -> {:ok, nil}
-      k -> {:ok, k}
-    end
-  end
+  defp natural(table, values), do: Enum.find(table.naturals, &names?(&1, values))
 
   # A ref names its row by a key's columns; the key's where is the lookup's
   # (World.get applies it), since a ref carries no other column to judge.
   defp ref_key(table, key) do
-    case Enum.find(table.naturals ++ table.uniques, fn k ->
-           Enum.sort(k.cols) == Enum.sort(Map.keys(key))
-         end) do
-      nil -> {:ok, nil}
-      k -> {:ok, k}
-    end
+    Enum.find(table.naturals ++ table.uniques, &(Enum.sort(&1.cols) == Enum.sort(Map.keys(key))))
   end
 
   # A key the row names: every column given, and its where held by the row.

@@ -113,7 +113,7 @@ defmodule Hireme.Release do
 
       for name <- names,
           do:
-            exec!(conn, "INSERT INTO schema_files (name, applied_at) VALUES (?1, ?2)", [name, now])
+            rows(conn, "INSERT INTO schema_files (name, applied_at) VALUES (?1, ?2)", [name, now])
 
       :ok = Sqlite3.execute(conn, "COMMIT")
       Logger.info("schema: applied #{Enum.join(names, ", ")}")
@@ -138,9 +138,9 @@ defmodule Hireme.Release do
 
   defp keep_high_water(conn, seq) do
     for [name, n] <- seq do
-      exec!(conn, "UPDATE sqlite_sequence SET seq = ?2 WHERE name = ?1 AND seq < ?2", [name, n])
+      rows(conn, "UPDATE sqlite_sequence SET seq = ?2 WHERE name = ?1 AND seq < ?2", [name, n])
 
-      exec!(
+      rows(
         conn,
         """
         INSERT INTO sqlite_sequence (name, seq) SELECT ?1, ?2
@@ -198,8 +198,6 @@ defmodule Hireme.Release do
       Sqlite3.release(conn, st)
     end
   end
-
-  defp exec!(conn, sql, args), do: rows(conn, sql, args)
 end
 
 defmodule Hireme.Release.Purge do

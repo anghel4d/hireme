@@ -2,8 +2,6 @@
 # environment's own file at the bottom overrides it.
 import Config
 
-config :hireme, ecto_repos: [Hireme.Repo]
-
 config :hireme, HiremeWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

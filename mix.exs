@@ -82,8 +82,7 @@ defmodule Hireme.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "assets.setup", "assets.build"],
-      "assets.setup": ["esbuild.install --if-missing"],
+      setup: ["deps.get", "esbuild.install --if-missing", "assets.build"],
       # The kernel as WebAssembly for the browser; Nix builds it for a release.
       "assets.wasm": &wasm/1,
       "assets.build": ["compile", "assets.wasm", "esbuild app", "esbuild early", "esbuild auth"],
