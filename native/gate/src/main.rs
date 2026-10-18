@@ -2,7 +2,7 @@
 //!
 //! It terminates QUIC and HTTP/3 and holds no business logic. Each
 //! WebTransport session becomes one connection to the BEAM's Unix socket,
-//! and its control stream's bytes cross that socket as `{packet,4}`
+//! and its control stream's bytes cross that socket as length-prefixed
 //! messages; authentication, the frames and everything after them are the
 //! BEAM's (`HiremeWeb.Gate` holds the bridge protocol, and this file is its
 //! gate half).
@@ -77,7 +77,7 @@ const WINDOW_BEFORE: u32 = 64 << 10;
 const WINDOW_AFTER: u32 = 16 << 20;
 const STREAM_WINDOW: u32 = 4 << 20;
 /// Congestion window before the first loss or ACK. quinn's default, ten
-/// packets, keeps a cold BOOT in slow start for several round trips; the
+/// datagrams' worth, keeps a cold BOOT in slow start for several round trips; the
 /// window is paced over the measured RTT, so it never leaves as one burst.
 const INITIAL_WINDOW: usize = 1 << 20;
 
@@ -297,7 +297,7 @@ async fn main() {
     let _ = timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
 }
 
-/// Decides, from the first packet alone, whether a handshake may begin.
+/// Decides, from the first datagram alone, whether a handshake may begin.
 fn admit(gate: &Arc<Gate>, incoming: IncomingSession) {
     let c = &gate.counters;
     c.incoming.fetch_add(1, Relaxed);

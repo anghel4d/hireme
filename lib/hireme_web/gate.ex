@@ -12,8 +12,8 @@ defmodule HiremeWeb.Gate do
 
   ## Bridge protocol, version 2
 
-  Each message is framed `{packet,4}` (a u32 big-endian length) and laid
-  out as `u8 op | body`; integers are big-endian. A session has one client
+  Each message is a u32 big-endian length, then that many bytes laid out
+  as `u8 op | body`; integers are big-endian. A session has one client
   stream, the control stream, which carries every frame in order, and any
   number of server uni streams for bulk (the BOOT), each one whole payload.
 
@@ -80,7 +80,7 @@ defmodule HiremeWeb.Gate do
   # Messages per re-arm of the socket; the kernel buffer behind it pushes
   # back on the gate when a Session falls behind.
   @burst 64
-  @max_packet 16 * 1024 * 1024
+  @max_message 16 * 1024 * 1024
   # A Session's stop reason as a WebTransport close code.
   @close_normal 0
   @close_error 0x4100
@@ -184,7 +184,7 @@ defmodule HiremeWeb.Gate do
         :binary,
         ifaddr: {:local, path},
         packet: 4,
-        packet_size: @max_packet,
+        packet_size: @max_message,
         active: false,
         backlog: 1024
       ])
