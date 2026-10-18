@@ -621,6 +621,7 @@ CREATE TABLE "sources" (
   "rev" INTEGER NOT NULL DEFAULT 1,
   "inserted_at" TEXT NOT NULL,
   "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
   "url" TEXT NOT NULL,
   "host" TEXT NOT NULL,
   "publisher" TEXT,
@@ -632,7 +633,7 @@ CREATE TABLE "sources" (
   "doc_sha" TEXT
 ) STRICT;
 CREATE INDEX "sources__account_account_id" ON "sources" ("account_id");
-CREATE UNIQUE INDEX "sources__natural_url" ON "sources" ("account_id", "url");
+CREATE UNIQUE INDEX "sources__natural_url" ON "sources" ("account_id", "url") WHERE "deleted_at" IS NULL;
 CREATE INDEX "sources__index_host" ON "sources" ("account_id", "host");
 
 CREATE TABLE "citations" (

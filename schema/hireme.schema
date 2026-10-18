@@ -23,6 +23,8 @@
 #       account_optional: account_id may be null (audit before sign-in)
 #       singleton: one row per account
 #       unmasked: in no key's mask, whatever its domain (citations)
+#       soft_delete: a drop leaves a tombstone (deleted_at set); its keys and
+#                  uniques hold over live rows only, and reads pass over it
 #   projection <name> <domain> <source table> where <sql>
 #     pick <col>...                  a resident view of a server table, not stored
 #   natural <col>... [where <w>]     the key a KEYED put names; per account. A where
@@ -585,7 +587,7 @@ table offices world server
   metric headcount u32
   col opened_on day ?
 
-table sources world server
+table sources world server soft_delete
   cap 200000
   natural url
   index host

@@ -1218,7 +1218,11 @@ defmodule Hireme.Sequencer do
            # Today in UTC, plus the day a writer east of it may already be in.
            new_source =
              is_binary(source_cell) and
-               not Repo.exists?(from(x in Hireme.Rows.Source, where: x.url == ^source_cell)),
+               not Repo.exists?(
+                 from(x in Hireme.Rows.Source,
+                   where: x.url == ^source_cell and is_nil(x.deleted_at)
+                 )
+               ),
            {:ok, source} <- Provenance.source(source_cell, turn.now),
            ctx = %{as_of: as_of, source: source, expect_rev: op.expect_rev},
            changes = Map.new(names, &{&1, true}),

@@ -447,4 +447,57 @@ defmodule Hireme.WorldTest do
 
     assert natural["corporations"] == [%{"cols" => ["domain"], "where" => nil, "reads" => []}]
   end
+
+  test "a dropped source is a tombstone: reads pass over it, its citations still name it, and its url is cited afresh",
+       %{account: a} do
+    url = "https://#{tag()}.example/s"
+
+    id =
+      corp(a.id, %{
+        domain: "#{tag()}.example",
+        name: "T",
+        headcount: 3,
+        as_of: ~D[2026-01-01],
+        source: url
+      })
+
+    cites = %{"table" => "corporations", "id" => id, "column" => "headcount"}
+
+    {:ok, %{"citations" => [%{"source" => %{"id" => sid}}]}} =
+      World.history(a.id, Grants.operator(), cites)
+
+    {[_], []} = run(a.id, op(:drop, :sources, %{}, target: sid))
+
+    assert {:error, :not_found, _} =
+             World.get(a.id, Grants.operator(), %{"table" => "sources", "id" => sid})
+
+    assert {:error, :not_found, _} =
+             World.get(a.id, Grants.operator(), %{"table" => "sources", "key" => %{"url" => url}})
+
+    {:ok, %{"rows" => rows}} = World.find(a.id, Grants.operator(), %{"table" => "sources"})
+    refute sid in ids(rows)
+
+    assert {:ok, %{"citations" => [%{"source" => %{"id" => ^sid, "url" => ^url}}]}} =
+             World.history(a.id, Grants.operator(), cites)
+
+    # A tombstone is cited by no new write; its url names a new source.
+    {[], [nack]} =
+      run(
+        a.id,
+        op(:put, :corporations, %{headcount: 4, as_of: ~D[2026-02-01], source: sid}, target: id)
+      )
+
+    assert nack.refusal == :source_missing
+
+    {[_], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{headcount: 5, as_of: ~D[2026-03-01], source: url}, target: id)
+      )
+
+    {:ok, %{"row" => %{"id" => fresh}}} =
+      World.get(a.id, Grants.operator(), %{"table" => "sources", "key" => %{"url" => url}})
+
+    assert fresh != sid
+  end
 end

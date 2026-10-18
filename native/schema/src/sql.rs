@@ -91,8 +91,13 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
             q(&t.name),
             cols.join(", ")
         );
-        if let Some(w) = where_ {
-            sql.push_str(&format!(" WHERE {w}"));
+        // A soft-deleted row is a tombstone: it holds no key, so the same
+        // key may name a live row again.
+        let live = (unique && t.soft_delete).then_some("\"deleted_at\" IS NULL");
+        match (where_, live) {
+            (Some(w), Some(l)) => sql.push_str(&format!(" WHERE {w} AND {l}")),
+            (Some(w), None) | (None, Some(w)) => sql.push_str(&format!(" WHERE {w}")),
+            (None, None) => {}
         }
         sql.push(';');
         out.push(IndexDef { name, sql });

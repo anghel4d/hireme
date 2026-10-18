@@ -193,6 +193,7 @@ defmodule Hireme.World do
 
       page_query =
         filtered
+        |> live(table)
         |> page(order, desc, cursor)
         |> order(order, desc)
         |> select([r], {r.id, field(r, ^order_field)})
@@ -237,6 +238,7 @@ defmodule Hireme.World do
          {:ok, where} <- identity(grants, table, params) do
       query =
         from(r in Schema.row(table.name), where: ^where, limit: 1)
+        |> live(table)
         |> select(^select_map(table, cols))
 
       run(account_id, fn ->
@@ -287,6 +289,11 @@ defmodule Hireme.World do
       end)
     end
   end
+
+  # A soft-deleted row is a tombstone: find, get and text pass over it, and
+  # a citation still names it (history joins it whatever its state).
+  defp live(query, %{soft_delete: true}), do: where(query, [r], is_nil(r.deleted_at))
+  defp live(query, _table), do: query
 
   defp citation(%{citation: c, source: s}) do
     %{
@@ -345,6 +352,7 @@ defmodule Hireme.World do
             whole: field(r, ^String.to_atom(name))
           }
         )
+        |> live(table)
 
       run(account_id, fn ->
         case Repo.one(query) do

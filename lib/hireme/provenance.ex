@@ -99,7 +99,8 @@ defmodule Hireme.Provenance do
   def source(nil, _now), do: {:ok, nil}
 
   def source(id, _now) when is_integer(id) do
-    case Repo.get(Source, id) do
+    # A dropped source is a tombstone: citations still name it, a new one cannot.
+    case Repo.one(from s in Source, where: s.id == ^id and is_nil(s.deleted_at)) do
       nil -> {:refused, :source_missing, %{source: id}}
       s -> {:ok, s}
     end
@@ -111,7 +112,7 @@ defmodule Hireme.Provenance do
         {:refused, :type, %{column: "source", reason: "an http(s) URL or a source id"}}
 
       host ->
-        case Repo.one(from s in Source, where: s.url == ^url) do
+        case Repo.one(from s in Source, where: s.url == ^url and is_nil(s.deleted_at)) do
           nil ->
             %Source{}
             |> Ecto.Changeset.change(
