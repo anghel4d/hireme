@@ -80,9 +80,41 @@ defmodule Hireme.WireCase do
 
   @doc "Runs ops as the operator (or `actor`): `{acks, nacks}`, NACK codes as refusal atoms."
   def run(account_id, ops, actor \\ nil) do
-    actor = actor || %{label: "test", grants: Hireme.Grants.operator(), key_id: nil}
-    {:ok, _rev, acks, nacks} = Hireme.Sequencer.call(account_id, actor, List.wrap(ops))
+    {:ok, _rev, acks, nacks} =
+      Hireme.Sequencer.call(account_id, actor || operator(), List.wrap(ops))
+
     {acks, Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))}
+  end
+
+  defp operator, do: %{label: "test", grants: Hireme.Grants.operator(), key_id: nil}
+
+  @doc "The account's committed rev, through a batch of no ops (which also starts the sequencer, or waits for it)."
+  def rev(account_id), do: elem(Hireme.Sequencer.call(account_id, operator(), []), 1)
+
+  @doc """
+  Stops the account's sequencer between messages (a stop mid-query costs the
+  sandbox its connection); the next call starts a fresh one that reads the
+  database again.
+  """
+  def stop_sequencer(account_id) do
+    for {pid, _} <- Registry.lookup(Hireme.Sequencer.Registry, account_id) do
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  @doc "Polls `f` every 50 ms, up to `tries` times; true once it answers truthy."
+  def eventually(f, tries \\ 100) do
+    cond do
+      f.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(50) && eventually(f, tries - 1)
+    end
   end
 
   @doc """

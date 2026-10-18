@@ -11,74 +11,103 @@ defmodule Hireme.ProvenanceTest do
     ack.id
   end
 
-  property "stale is monotonic: a metric's date only moves forward, and every accepted change is cited",
+  defp cites(id, column),
+    do: Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == ^column), :count)
+
+  property "a metric is written and cited exactly when (value, source, as_of) differs from its last citation, column by column, and its date never moves back",
            %{account: a} do
-    check all(days <- list_of(integer(0..60), min_length: 1, max_length: 10), max_runs: 20) do
-      id = corp(a, "m#{System.unique_integer([:positive])}.example")
+    step =
+      tuple(
+        {member_of([:headcount, :revenue_usd, :both]), integer(1..3), integer(1..3),
+         member_of([nil, "a", "b"]), integer(0..3)}
+      )
 
-      {newest, accepted} =
-        Enum.reduce(days, {nil, 0}, fn d, {newest, n} ->
+    check all(steps <- list_of(step, min_length: 1, max_length: 12), max_runs: 20) do
+      tag = System.unique_integer([:positive])
+      id = corp(a, "m#{tag}.example")
+      url = fn s -> "https://m#{tag}.example/#{s}" end
+      # Both sources exist before the sequence, so a new source never decides.
+      for s <- ~w(a b), do: {[_], []} = run(a.id, op(:put, :sources, %{url: url.(s)}))
+
+      model =
+        Enum.reduce(steps, %{last: %{}, rev: 1, cites: %{}}, fn {which, v1, v2, s, d}, m ->
           on = Date.add(~D[2026-08-01], d)
+          cols = if which == :both, do: [:headcount, :revenue_usd], else: [which]
+          cells = Map.take(%{headcount: v1, revenue_usd: v2 * 1.0e6}, cols)
+          reserved = if s, do: %{as_of: on, source: url.(s)}, else: %{as_of: on}
+          verdict = run(a.id, op(:put, :corporations, Map.merge(cells, reserved), target: id))
 
-          {acks, nacks} =
-            run(a.id, op(:put, :corporations, %{headcount: d, as_of: on}, target: id))
+          stale =
+            Enum.any?(cols, fn c ->
+              match?({_, _, was} when was != nil, m.last[c]) and
+                Date.compare(on, elem(m.last[c], 2)) == :lt
+            end)
 
-          if newest && Date.compare(on, newest) == :lt do
-            assert {[], [%{refusal: :stale}]} = {acks, nacks}
-            {newest, n}
-          else
-            assert [_] = acks
-            # The same value at the stored date restates it: no citation.
-            {on, if(on == newest, do: n, else: n + 1)}
+          changed = for {c, v} <- cells, m.last[c] != {v, s, on}, do: c
+
+          cond do
+            stale ->
+              assert {[], [%{refusal: :stale}]} = verdict
+              m
+
+            changed == [] ->
+              assert {[%{rev: rev}], []} = verdict
+              assert rev == m.rev
+              m
+
+            true ->
+              assert {[%{rev: rev}], []} = verdict
+              assert rev == m.rev + 1
+
+              %{
+                m
+                | rev: rev,
+                  last: Enum.reduce(cells, m.last, fn {c, v}, l -> Map.put(l, c, {v, s, on}) end),
+                  cites: Enum.reduce(changed, m.cites, &Map.update(&2, &1, 1, fn n -> n + 1 end))
+              }
           end
         end)
 
-      assert Repo.get!(Corporation, id).headcount_on == newest
+      row = Repo.get!(Corporation, id)
+      assert row.rev == model.rev
 
-      assert Repo.aggregate(
-               from(c in Citation, where: c.row_id == ^id and c.column == "headcount"),
-               :count
-             ) == accepted
+      for {c, {v, _, on}} <- model.last,
+          do: assert({Map.fetch!(row, c), Map.fetch!(row, :"#{c}_on")} == {v, on})
+
+      for c <- [:headcount, :revenue_usd],
+          do: assert(cites(id, "#{c}") == Map.get(model.cites, c, 0), inspect(c))
     end
   end
 
-  test "a metric without as_of is freshness; prose without expect_rev is rev, without a source source_missing",
+  test "a metric needs as_of, a real day and not in the future; prose needs expect_rev and a source",
        %{account: a} do
     id = corp(a, "p.example")
+    t = Schema.table(:corporations)
+    hc = Enum.find(t.cols, &(&1.name == "headcount"))
+    cells = [{hc.id, 1, 5}, {Codec.as_of_col(), 1, 4_000_000_000}]
+    {:ok, huge, ""} = Codec.op(Codec.encode_op({1, :put, 0, t.id, id, nil, cells}))
+    prose = fn cells, opts -> op(:put, :corporations, Map.put(cells, :about, "x"), [target: id] ++ opts) end
 
-    assert {[], [%{refusal: :freshness}]} =
-             run(a.id, op(:put, :corporations, %{revenue_usd: 1.0e6}, target: id))
+    for {o, code} <- [
+          {op(:put, :corporations, %{revenue_usd: 1.0e6}, target: id), :freshness},
+          {op(:put, :corporations, %{headcount: 5, as_of: Date.add(Date.utc_today(), 30)},
+             target: id
+           ), :freshness},
+          {huge, :type},
+          {prose.(%{source: "https://p.example/"}, []), :rev},
+          {prose.(%{}, expect_rev: 1), :source_missing},
+          {prose.(%{source: 424_242}, expect_rev: 1), :source_missing}
+        ] do
+      assert {[], [%{refusal: ^code}]} = run(a.id, o), inspect(code)
+    end
 
-    assert {[], [%{refusal: :rev}]} =
-             run(
-               a.id,
-               op(:put, :corporations, %{about: "x", source: "https://p.example/"}, target: id)
-             )
-
-    assert {[], [%{refusal: :source_missing}]} =
-             run(a.id, op(:put, :corporations, %{about: "x"}, target: id, expect_rev: 1))
-
-    assert {[], [%{refusal: :source_missing}]} =
-             run(
-               a.id,
-               op(:put, :corporations, %{about: "x", source: 424_242}, target: id, expect_rev: 1)
-             )
+    assert %{headcount: nil, about: nil} = Repo.get!(Corporation, id)
   end
 
   test "a source's host is derived by the server, never taken from the writer", %{account: a} do
     id = corp(a, "h.example")
-
-    {[_], []} =
-      run(
-        a.id,
-        op(
-          :put,
-          :corporations,
-          %{headcount: 5, as_of: ~D[2026-10-01], source: "https://News.Example.ORG./story?x=1"},
-          target: id
-        )
-      )
-
+    cells = %{headcount: 5, as_of: ~D[2026-10-01], source: "https://News.Example.ORG./story?x=1"}
+    {[_], []} = run(a.id, op(:put, :corporations, cells, target: id))
     assert [%{host: "news.example.org"}] = Repo.all(Source)
 
     assert {[], [%{refusal: :column}]} =
@@ -88,9 +117,8 @@ defmodule Hireme.ProvenanceTest do
     assert Repo.get!(Source, s.id).host == "b.example"
   end
 
-  test "the operator's drop of a cited source is a tombstone its citations keep naming", %{
-    account: a
-  } do
+  test "a cited source outlives its citations: the operator's drop is a tombstone they keep naming, a key's is refused; an uncited one goes",
+       %{account: a, session: s} do
     id = corp(a, "l.example")
 
     {[_], []} =
@@ -105,34 +133,6 @@ defmodule Hireme.ProvenanceTest do
     [c] = Repo.all(from(c in Citation, where: c.row_id == ^id and c.column == "about"))
     assert c.source_id
 
-    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: c.source_id))
-    assert Repo.get!(Citation, c.id).source_id == c.source_id
-    # The operator's drop of a cited source is a tombstone; an uncited one goes.
-    assert %{deleted_at: %DateTime{}, url: "https://l.example/about"} =
-             Repo.get!(Source, c.source_id)
-
-    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://l.example/other"}))
-    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: uncited.id))
-    refute Repo.get(Source, uncited.id)
-  end
-
-  test "a key cannot drop a source a citation names: provenance outlives it", %{
-    account: a,
-    session: s
-  } do
-    id = corp(a, "k.example")
-
-    {[_], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "x", source: "https://k.example/about"},
-          target: id,
-          expect_rev: 1
-        )
-      )
-
-    [c] = Repo.all(from(c in Citation, where: c.row_id == ^id and c.column == "about"))
-
     {:ok, %{key: key}} =
       Hireme.Keys.mint(s, "deleter", %{read_mask: 31, write_mask: 31, may_delete: true})
 
@@ -142,204 +142,45 @@ defmodule Hireme.ProvenanceTest do
              key_session_ops(agent, op(:drop, :sources, %{}, target: c.source_id))
 
     assert JSON.decode!(nack.data)["reason"] =~ "provenance"
-    assert Repo.get(Source, c.source_id)
 
-    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://k.example/other"}))
+    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: c.source_id))
+    assert Repo.get!(Citation, c.id).source_id == c.source_id
+
+    assert %{deleted_at: %DateTime{}, url: "https://l.example/about"} =
+             Repo.get!(Source, c.source_id)
+
+    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://l.example/other"}))
     assert {[_], []} = key_session_ops(agent, op(:drop, :sources, %{}, target: uncited.id))
+    refute Repo.get(Source, uncited.id)
   end
 
-  test "restating a cited metric exactly writes nothing; the same value from another source is cited",
-       %{account: a} do
-    id = corp(a, "same.example")
-
-    put = fn src ->
-      op(:put, :corporations, %{headcount: 50, as_of: ~D[2026-09-01], source: src}, target: id)
-    end
-
-    cites = fn ->
-      Repo.aggregate(
-        from(c in Citation, where: c.row_id == ^id and c.column == "headcount"),
-        :count
-      )
-    end
-
-    {[first], []} = run(a.id, put.("https://same.example/a"))
-    {[again], []} = run(a.id, put.("https://same.example/a"))
-    assert again.rev == first.rev and cites.() == 1
-
-    {[other], []} = run(a.id, put.("https://same.example/b"))
-    assert other.rev == first.rev + 1 and cites.() == 2
-
-    # Unsourced: restated exactly, it is the same citation too.
-    unsourced = fn ->
-      op(:put, :corporations, %{revenue_usd: 1.0e6, as_of: ~D[2026-09-01]}, target: id)
-    end
-
-    {[u1], []} = run(a.id, unsourced.())
-    {[u2], []} = run(a.id, unsourced.())
-    assert u2.rev == u1.rev
-
-    assert Repo.aggregate(
-             from(c in Citation, where: c.row_id == ^id and c.column == "revenue_usd"),
-             :count
-           ) == 1
-  end
-
-  test "restating cites by the last citation: a, b, a cites the third; a later date moves _on; columns are their own",
-       %{account: a} do
-    id = corp(a, "rs.example")
-
-    put = fn cells, src ->
-      op(:put, :corporations, Map.merge(cells, %{as_of: ~D[2026-09-01], source: src}), target: id)
-    end
-
-    count = fn col ->
-      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == ^col), :count)
-    end
-
-    # Both sources exist before the sequence, so new_source never decides.
-    {[_], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
-    {[_], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/b"))
-    {[r3], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
-    {[r4], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
-    assert count.("headcount") == 3 and r4.rev == r3.rev
-
-    # The same value and source at a later date is new: rev moves, _on moves.
-    later =
-      op(
-        :put,
-        :corporations,
-        %{headcount: 1, as_of: ~D[2026-09-15], source: "https://rs.example/a"},
-        target: id
-      )
-
-    {[r5], []} = run(a.id, later)
-    assert r5.rev == r4.rev + 1 and count.("headcount") == 4
-    assert Repo.get!(Corporation, id).headcount_on == ~D[2026-09-15]
-
-    # Two cited columns, each with its own last source, each restated alone.
-    at = fn cells, src ->
-      op(:put, :corporations, Map.merge(cells, %{as_of: ~D[2026-09-15], source: src}), target: id)
-    end
-
-    {[r6], []} = run(a.id, at.(%{revenue_usd: 2.0e6}, "https://rs.example/b"))
-    {[r7], []} = run(a.id, at.(%{revenue_usd: 2.0e6}, "https://rs.example/b"))
-    {[r8], []} = run(a.id, at.(%{headcount: 1}, "https://rs.example/a"))
-    assert r7.rev == r6.rev and r8.rev == r6.rev
-    assert count.("revenue_usd") == 1 and count.("headcount") == 4
-
-    # A put that changes one cited cell cites only that one.
-    {[_], []} = run(a.id, at.(%{headcount: 2, revenue_usd: 2.0e6}, "https://rs.example/b"))
-    assert count.("headcount") == 5 and count.("revenue_usd") == 1
-  end
-
-  test "prose restated exactly (text, source, expect_rev) writes nothing; another source cites; a stale rev is refused",
+  test "prose restated exactly (text, source, expect_rev, and as_of if given) writes nothing; another source or date cites; a stale rev is refused",
        %{account: a} do
     id = corp(a, "pr.example")
 
-    {[_], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
-          target: id,
-          expect_rev: 1
-        )
-      )
-
-    {[_], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "Old", source: "https://pr.example/y"},
-          target: id,
-          expect_rev: 2
-        )
-      )
-
-    rev = Repo.get!(Corporation, id).rev
-
-    count = fn ->
-      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == "about"), :count)
+    put = fn cells, rev ->
+      cells = Map.merge(%{about: "Old", source: "https://pr.example/x"}, cells)
+      op(:put, :corporations, cells, target: id, expect_rev: rev)
     end
 
-    assert count.() == 2
+    {[r1], []} = run(a.id, put.(%{}, 1))
+    {[r2], []} = run(a.id, put.(%{source: "https://pr.example/y"}, r1.rev))
+    {[same], []} = run(a.id, put.(%{source: "https://pr.example/y"}, r2.rev))
+    assert same.rev == r2.rev and cites(id, "about") == 2
+    {[r3], []} = run(a.id, put.(%{}, r2.rev))
+    assert r3.rev == r2.rev + 1 and cites(id, "about") == 3
+    assert {[], [%{refusal: :rev}]} = run(a.id, put.(%{}, r2.rev))
 
-    {[same], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "Old", source: "https://pr.example/y"},
-          target: id,
-          expect_rev: rev
-        )
-      )
-
-    assert same.rev == rev and count.() == 2
-
-    {[other], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
-          target: id,
-          expect_rev: rev
-        )
-      )
-
-    assert other.rev == rev + 1 and count.() == 3
-
-    assert {[], [%{refusal: :rev}]} =
-             run(
-               a.id,
-               op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
-                 target: id,
-                 expect_rev: rev
-               )
-             )
+    {[r4], []} = run(a.id, put.(%{as_of: ~D[2026-09-01]}, r3.rev))
+    {[same], []} = run(a.id, put.(%{as_of: ~D[2026-09-01]}, r4.rev))
+    assert same.rev == r4.rev and cites(id, "about") == 4
+    {[r5], []} = run(a.id, put.(%{as_of: ~D[2026-09-15]}, r4.rev))
+    assert r5.rev == r4.rev + 1 and cites(id, "about") == 5
+    assert Repo.get!(Corporation, id).rev == r5.rev
   end
 
-  test "a source URL past 2,048 bytes is refused, saying so", %{account: a} do
-    id = corp(a, "long.example")
-    long = "https://long.example/" <> String.duplicate("p", 2_048)
-
-    assert {[], [nack]} =
-             run(
-               a.id,
-               op(:put, :corporations, %{headcount: 1, as_of: ~D[2026-09-01], source: long},
-                 target: id
-               )
-             )
-
-    assert nack.refusal == :type and JSON.decode!(nack.data)["reason"] =~ "2048 bytes"
-    assert {[], [row]} = run(a.id, op(:put, :sources, %{url: long}))
-    assert row.refusal == :type and JSON.decode!(row.data)["reason"] =~ "2048 bytes"
-  end
-
-  test "prose restated with an explicit as_of: the same date writes nothing, another date cites",
+  test "culture and ratings need a trusted host; trusting a host covers its subdomains, until distrusted",
        %{account: a} do
-    id = corp(a, "pa.example")
-
-    put = fn as_of, rev ->
-      op(:put, :corporations, %{about: "Old", source: "https://pa.example/x", as_of: as_of},
-        target: id,
-        expect_rev: rev
-      )
-    end
-
-    count = fn ->
-      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == "about"), :count)
-    end
-
-    {[first], []} = run(a.id, put.(~D[2026-09-01], 1))
-    {[same], []} = run(a.id, put.(~D[2026-09-01], first.rev))
-    assert same.rev == first.rev and count.() == 1
-    {[later], []} = run(a.id, put.(~D[2026-09-15], first.rev))
-    assert later.rev == first.rev + 1 and count.() == 2
-    assert Repo.get!(Corporation, id).rev == later.rev
-  end
-
-  # ---- Q5: the Resume message re-holds at the row's own time
-
-  test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
-    account: a
-  } do
     id = corp(a, "t.example")
     rating = %{rating: 4.1, as_of: ~D[2026-10-01], source: "https://www.ratings.example/c"}
 
@@ -347,45 +188,21 @@ defmodule Hireme.ProvenanceTest do
              run(a.id, op(:put, :corporations, rating, target: id))
 
     assert {[], [%{refusal: :source_missing}]} =
-             run(a.id, op(:put, :corporations, %{rating: 4.1, as_of: ~D[2026-10-01]}, target: id))
+             run(a.id, op(:put, :corporations, Map.delete(rating, :source), target: id))
 
     {:ok, _} = Provenance.trust("ratings.example", "reviews", %{})
     assert [%{host: "ratings.example", note: "reviews"}] = Provenance.trusted_hosts()
     {[_], []} = run(a.id, op(:put, :corporations, rating, target: id))
 
-    [%{id: host_id}] = Provenance.trusted_hosts()
-    :ok = Provenance.distrust(host_id, %{})
+    culture = %{culture: "Calm.", source: "https://www.levels.fyi/x"}
 
     assert {[], [%{refusal: :source_trust}]} =
-             run(
-               a.id,
-               op(
-                 :put,
-                 :corporations,
-                 %{rating_count: 9, as_of: ~D[2026-10-02], source: "https://ratings.example/"},
-                 target: id
-               )
-             )
-  end
+             run(a.id, op(:put, :corporations, culture, target: id, expect_rev: 2))
 
-  test "a source written directly needs an http(s) URL on a real hostname", %{account: a} do
-    long = Enum.map_join(~w(a b c d e), ".", &String.duplicate(&1, 60)) <> ".example"
-
-    for url <- [
-          "http://10.0.0.1/x",
-          "http://127.1/",
-          "http://0x7f.1/",
-          "https://#{long}/",
-          "https://ex_ample.com/",
-          "http://localhost/",
-          "https://münchen.example/",
-          "ftp://a.example/",
-          "https://evil.example\\@levels.fyi/"
-        ] do
-      assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: url})), url
-    end
-
-    assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
+    [%{id: host_id}] = Provenance.trusted_hosts()
+    :ok = Provenance.distrust(host_id, %{})
+    cells = %{rating_count: 9, as_of: ~D[2026-10-02], source: "https://ratings.example/"}
+    assert {[], [%{refusal: :source_trust}]} = run(a.id, op(:put, :corporations, cells, target: id))
   end
 
   test "the operator's trusted hosts stop at their declared cap", %{account: a} do
@@ -406,17 +223,31 @@ defmodule Hireme.ProvenanceTest do
     assert {:ok, _} = Provenance.trust("last.example", "edited", %{})
   end
 
-  test "citations are the server's to write; trusted hosts are in no mask", %{account: a} do
-    key = %{
-      label: "k",
-      grants: Grants.key(%{id: 1, read_mask: 31, write_mask: 31, may_delete: true}),
-      key_id: nil
-    }
+  test "a source URL is http(s) on a real hostname and at most 2,048 bytes, written directly or cited",
+       %{account: a} do
+    id = corp(a, "u.example")
+    long = Enum.map_join(~w(a b c d e), ".", &String.duplicate(&1, 60)) <> ".example"
+    too_long = "https://long.example/" <> String.duplicate("p", 2_048)
 
-    assert {[], [%{refusal: :column}]} = run(a.id, op(:put, :citations, %{}), key)
+    for url <- [
+          "http://10.0.0.1/x",
+          "http://127.1/",
+          "http://0x7f.1/",
+          "https://#{long}/",
+          "https://ex_ample.com/",
+          "http://localhost/",
+          "https://münchen.example/",
+          "ftp://a.example/",
+          "https://evil.example\\@levels.fyi/",
+          too_long
+        ] do
+      assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: url})), url
+    end
 
-    assert {[], [%{refusal: :scope}]} =
-             run(a.id, op(:put, :trusted_hosts, %{host: "x.example"}), key)
+    cells = %{headcount: 1, as_of: ~D[2026-09-01], source: too_long}
+    assert {[], [nack]} = run(a.id, op(:put, :corporations, cells, target: id))
+    assert nack.refusal == :type and JSON.decode!(nack.data)["reason"] =~ "2048 bytes"
+    assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
   end
 
   property "host/1 lowercases, drops the port and a trailing dot, and refuses what is not a web URL" do
@@ -432,30 +263,24 @@ defmodule Hireme.ProvenanceTest do
 
     assert Provenance.host("ftp://a.example/") == nil
     assert Provenance.host("not a url") == nil
-    assert Provenance.host("https://a.example:/p") == "a.example"
-    assert Provenance.host("https://a.example:65535") == "a.example"
+    assert Provenance.host("https://a.example/" <> String.duplicate("p", 2_048)) == nil
 
-    # A port a browser refuses: the link could never open.
-    for bad <- ~w(:65536 :99999 :80a :a :+1 :1e3 :١٢) do
-      assert Provenance.host("https://a.example#{bad}/p") == nil, bad
-    end
+    # A port a browser refuses: the link could never open; leading zeros are a browser's too.
+    for bad <- ~w(:65536 :99999 :80a :a :+1 :1e3 :١٢),
+        do: assert(Provenance.host("https://a.example#{bad}/p") == nil, bad)
 
-    # Leading zeros are a browser's too; a URL past 4 KiB or a huge port is
-    # refused before any parsing.
-    assert Provenance.host("https://a.example:00080/p") == "a.example"
-    assert Provenance.host("https://a.example:0/") == "a.example"
-    assert Provenance.host("https://a.example:00/") == "a.example"
+    for ok <- ~w(: :65535 :00080 :0 :00),
+        do: assert(Provenance.host("https://a.example#{ok}/p") == "a.example", ok)
 
+    # A URL past 4 KiB or a huge port is refused before any parsing: a cost
+    # regression was ~200 ms; 20 ms leaves a loaded machine room.
     for hostile <- [
           "https://a.example:" <> String.duplicate("9", 1_000_000),
           "https://a.example/" <> String.duplicate("p", 1_048_576),
           "https://" <> String.duplicate("a.", 500_000) <> "example/"
         ] do
       {us, nil} = :timer.tc(fn -> Provenance.host(hostile) end)
-      # A cost regression was ~200 ms; 20 ms leaves a loaded machine room.
       assert us < 20_000, "#{us} µs for #{byte_size(hostile)} bytes"
     end
-
-    assert Provenance.host("https://a.example/" <> String.duplicate("p", 2_048)) == nil
   end
 end

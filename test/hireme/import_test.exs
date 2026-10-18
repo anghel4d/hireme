@@ -6,6 +6,8 @@ defmodule Hireme.ImportTest do
   alias Hireme.Import
   alias Hireme.Rows.{Corporation, Office, Place}
 
+  defp tag, do: "#{System.unique_integer([:positive])}"
+
   defp pack(t) do
     %{
       "as_of" => "2026-09-01",
@@ -65,11 +67,22 @@ defmodule Hireme.ImportTest do
     {corps, offices}
   end
 
-  test "a JSON pack writes through the sequencer: refs resolved by natural key, metrics cited, prose sourced",
-       %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-    {:ok, report} = Import.run(a.id, Jason.encode!(pack(t)), :json)
+  defp names(t) do
+    Repo.all(
+      from c in Corporation,
+        where: like(c.domain, ^"%.#{t}.example"),
+        select: c.name,
+        order_by: c.domain
+    )
+  end
 
+  defp corporations(rows), do: %{"tables" => [%{"table" => "corporations", "rows" => rows}]}
+
+  test "a JSON pack writes through the sequencer: refs resolved by natural key, metrics cited, prose sourced; imported again it leaves every row as it was; a row names the key its own values satisfy",
+       %{account: a} do
+    t = tag()
+    body = Jason.encode!(pack(t))
+    {:ok, report} = Import.run(a.id, body, :json)
     assert report.refusals == []
 
     assert Enum.map(report.groups, &{&1.table, &1.written}) == [
@@ -93,35 +106,35 @@ defmodule Hireme.ImportTest do
           select: {c.column, s.host}
       )
 
-    assert Enum.sort(cited) == [
-             {"about", "stats.example.org"},
-             {"headcount", "stats.example.org"}
-           ]
-  end
+    assert Enum.sort(cited) == [{"about", "stats.example.org"}, {"headcount", "stats.example.org"}]
 
-  test "importing the same pack again leaves every row a key names as it was", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-    body = Jason.encode!(pack(t))
-    {:ok, %{refusals: []}} = Import.run(a.id, body, :json)
-    first = state(t)
-
-    rows =
+    rows = fn ->
       Repo.aggregate(Corporation, :count) + Repo.aggregate(Office, :count) +
         Repo.aggregate(Place, :count)
+    end
 
-    {:ok, again} = Import.run(a.id, body, :json)
+    n = rows.()
+    {:ok, %{refusals: []}} = Import.run(a.id, body, :json)
+    assert state(t) == {corps, offices} and rows.() == n
 
-    assert again.refusals == []
-    assert state(t) == first
+    # A city sharing the country's iso2 is its own row: its values meet the city key.
+    city = %{
+      "kind" => "city",
+      "iso2" => "Q#{t}",
+      "geonames_id" => String.to_integer(t),
+      "name" => "City",
+      "notes" => "a city"
+    }
 
-    assert Repo.aggregate(Corporation, :count) + Repo.aggregate(Office, :count) +
-             Repo.aggregate(Place, :count) ==
-             rows
+    pack = %{"tables" => [%{"table" => "places", "rows" => [city]}]}
+    {:ok, %{refusals: []}} = Import.run(a.id, Jason.encode!(pack), :json)
+    kinds = Repo.all(from p in Place, where: p.iso2 == ^"Q#{t}", select: p.kind, order_by: p.id)
+    assert kinds == [:country, :city]
   end
 
   test "a markdown pack and a JSON pack of the same rows leave the same rows", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-    u = "#{System.unique_integer([:positive])}"
+    t = tag()
+    u = tag()
     {:ok, %{refusals: []}} = Import.run(a.id, Jason.encode!(pack(t)), :json)
 
     markdown = """
@@ -157,8 +170,10 @@ defmodule Hireme.ImportTest do
     assert rename.(state(t)) == rename.(state(u))
   end
 
-  test "a bad row is refused alone, by its position, and the rest are written", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
+  test "a bad cell refuses its row alone, by position: an unknown column, a wrong type, a number past its range (never wrapped), a day outside 0000-01-01..9999-12-31 (so an as_of too), an unresolvable ref, an unknown table",
+       %{account: a} do
+    t = tag()
+    corp = fn i, cells -> Map.merge(%{"domain" => "#{i}.#{t}.example", "name" => "N#{i}"}, cells) end
 
     pack = %{
       "as_of" => "2026-09-01",
@@ -166,10 +181,17 @@ defmodule Hireme.ImportTest do
         %{
           "table" => "corporations",
           "rows" => [
-            %{"domain" => "ok1.#{t}.example", "name" => "One"},
-            %{"domain" => "bad.#{t}.example", "name" => "Bad", "no_such_column" => 1},
-            %{"domain" => "ok2.#{t}.example", "name" => "Two", "headcount" => "many"},
-            %{"domain" => "ok3.#{t}.example", "name" => "Three"}
+            corp.(0, %{}),
+            corp.(1, %{"no_such_column" => 1}),
+            corp.(2, %{"headcount" => "many"}),
+            corp.(3, %{"headcount" => 5_000_000_000}),
+            corp.(4, %{"headcount" => -2}),
+            corp.(5, %{"headcount" => 4_294_967_296}),
+            corp.(6, %{"headcount" => 4_294_967_294}),
+            corp.(7, %{"last_round_on" => "-0001-12-31"}),
+            corp.(8, %{"last_round_on" => %{"year" => 10_000, "month" => 1, "day" => 1}}),
+            corp.(9, %{"last_round_on" => "0000-01-01"}),
+            corp.(10, %{"last_round_on" => "1897-01-01"})
           ]
         },
         %{
@@ -187,141 +209,87 @@ defmodule Hireme.ImportTest do
     assert Enum.map(report.refusals, &{&1.table, &1.row, &1.code}) == [
              {"corporations", 1, :column},
              {"corporations", 2, :type},
+             {"corporations", 3, :type},
+             {"corporations", 4, :type},
+             {"corporations", 5, :type},
+             {"corporations", 7, :type},
+             {"corporations", 8, :type},
              {"offices", 0, :not_found},
              {"accounts", nil, :not_found}
            ]
 
-    {corps, _} = state(t)
-    assert Enum.map(corps, &elem(&1, 1)) == ["One", "Three"]
-  end
-
-  test "a number past its column's range is refused, not wrapped", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-
-    rows =
-      for {n, i} <- Enum.with_index([5_000_000_000, -2, 4_294_967_296, 4_294_967_294]),
-          do: %{"domain" => "#{i}.#{t}.example", "name" => "N#{i}", "headcount" => n}
-
-    pack = %{"as_of" => "2026-09-01", "tables" => [%{"table" => "corporations", "rows" => rows}]}
-    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
-
-    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{0, :type}, {1, :type}, {2, :type}]
-
-    assert Repo.all(
-             from c in Corporation, where: like(c.domain, ^"%.#{t}.example"), select: c.headcount
-           ) == [4_294_967_294]
-  end
-
-  test "a parseable day outside 0000-01-01..9999-12-31 is refused (a BC date, a year 10000), as is such an as_of",
-       %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-
-    rows =
-      for {d, i} <-
-            Enum.with_index([
-              "-0001-12-31",
-              %{"year" => 10_000, "month" => 1, "day" => 1},
-              "0000-01-01",
-              "1897-01-01"
-            ]),
-          do: %{"domain" => "r#{i}.#{t}.example", "name" => "R#{i}", "last_round_on" => d}
-
-    pack = %{"tables" => [%{"table" => "corporations", "rows" => rows}]}
-    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
-
-    assert [
-             %{row: 0, code: :type, data: %{reason: "out of range", column: "last_round_on"}},
-             %{row: 1, code: :type, data: %{reason: "out of range", column: "last_round_on"}}
-           ] = report.refusals
+    for r <- report.refusals, r.row in [7, 8],
+        do: assert(r.data == %{reason: "out of range", column: "last_round_on"})
 
     assert Repo.all(
              from c in Corporation,
                where: like(c.domain, ^"%.#{t}.example"),
                order_by: c.domain,
-               select: c.last_round_on
-           ) == [~D[0000-01-01], ~D[1897-01-01]]
+               select: {c.name, c.headcount, c.last_round_on}
+           ) == [
+             {"N0", nil, nil},
+             {"N10", nil, ~D[1897-01-01]},
+             {"N6", 4_294_967_294, nil},
+             {"N9", nil, ~D[0000-01-01]}
+           ]
 
-    far = %{
-      "as_of" => "-0001-12-31",
-      "tables" => [
-        %{
-          "table" => "corporations",
-          "rows" => [%{"domain" => "far.#{t}.example", "name" => "F", "headcount" => 3}]
-        }
-      ]
-    }
-
+    far = Map.put(corporations([corp.(11, %{"headcount" => 3})]), "as_of", "-0001-12-31")
     {:ok, report} = Import.run(a.id, Jason.encode!(far), :json)
     assert [%{code: :type, data: %{column: "as_of"}}] = report.refusals
   end
 
-  test "a row names the natural key its own values satisfy", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-    iso = "Z#{rem(String.to_integer(t), 9)}"
-
-    pack = %{
-      "source" => "https://stats.example.org/#{t}",
-      "tables" => [
-        %{
-          "table" => "places",
-          "rows" => [%{"kind" => "country", "iso2" => iso, "name" => "Country"}]
-        },
-        %{
-          "table" => "places",
-          "rows" => [
-            %{
-              "kind" => "city",
-              "iso2" => iso,
-              "geonames_id" => String.to_integer(t),
-              "name" => "City",
-              "notes" => "a city"
-            }
-          ]
-        }
-      ]
-    }
-
-    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
-    assert report.refusals == []
-
-    kinds = Repo.all(from p in Place, where: p.iso2 == ^iso, select: p.kind, order_by: p.id)
-    assert kinds == [:country, :city]
-  end
-
-  test "a markdown row unlike its header is refused, and an escaped pipe stays in its cell", %{
-    account: a
-  } do
-    t = "#{System.unique_integer([:positive])}"
+  test "markdown: a BOM before a heading is not text; prose around a table, a pipe in it or not, is not data; a section's every table is read; a delimiter is never data; an escaped pipe stays in its cell; a row unlike its header or holding a Latin-1 byte is refused alone",
+       %{account: a} do
+    t = tag()
 
     markdown = """
-    ## corporations
+    ﻿## corporations
+    Notes first: the a|b form is how we quote.
+
     | domain | name |
     | --- | --- |
     | a.#{t}.example | A \\| B |
     | b.#{t}.example | B | extra |
+    c.#{t}.example | C
+    | --- | --- |
+    | d.#{t}.example | Caf\xE9 |
+
+    Between the tables. Use `a|b` when quoting.
+
+    | domain | name |
+    | --- | --- |
+    | e.#{t}.example | E |
+
+    ﻿## corporations
+    | domain | name |
+    | --- |
+    | f.#{t}.example | F |
     """
 
     {:ok, report} = Import.run(a.id, markdown, :markdown)
-    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{1, :type}]
-
-    assert Repo.one(from c in Corporation, where: c.domain == ^"a.#{t}.example", select: c.name) ==
-             "A | B"
+    assert Enum.map(report.refusals, & &1.code) == [:type, :type, :type]
+    assert names(t) == ["A | B", "C", "E"]
   end
 
-  test "an import into an account with no sequencer answers an error" do
-    assert {:error, _} =
-             Import.run(
-               987_654_321,
-               Jason.encode!(%{
-                 "tables" => [
-                   %{
-                     "table" => "corporations",
-                     "rows" => [%{"domain" => "x.example", "name" => "X"}]
-                   }
-                 ]
-               }),
-               :json
-             )
+  test "a pack is read for what it is: an upper-case .JSON file, a heading-less markdown; an account with no sequencer answers an error",
+       %{account: a} do
+    t = tag()
+    dir = Path.join(System.tmp_dir!(), "hireme-import-#{t}")
+    File.mkdir_p!(dir)
+
+    try do
+      json = Path.join(dir, "PACK.JSON")
+      File.write!(json, Jason.encode!(corporations([%{"domain" => "up.#{t}.example", "name" => "Up"}])))
+      {:ok, %{refusals: []}} = Import.file(a.id, json)
+      assert names(t) == ["Up"]
+    after
+      File.rm_rf!(dir)
+    end
+
+    assert {:error, :no_tables} = Import.run(a.id, "just some notes\n", :markdown)
+
+    body = Jason.encode!(corporations([%{"domain" => "x.example", "name" => "X"}]))
+    assert {:error, _} = Import.run(987_654_321, body, :json)
   end
 
   # Values no column should take: out-of-range dates and numbers, Latin-1
@@ -355,8 +323,7 @@ defmodule Hireme.ImportTest do
       t = Schema.table(table)
       cols = for c <- t.cols, not c.implied, not c.readonly, not c.server_only, do: c.name
       col = Enum.at(cols, rem(col_pick, length(cols)))
-      tag = "#{System.unique_integer([:positive])}"
-      good = %{"domain" => "good.#{tag}.example", "name" => "Good"}
+      good = %{"domain" => "good.#{tag()}.example", "name" => "Good"}
 
       pack = %{
         "as_of" => as_of,
@@ -372,111 +339,8 @@ defmodule Hireme.ImportTest do
     end
   end
 
-  test "a byte-order mark, an upper-case .JSON and a heading-less markdown pack are read for what they are",
+  test "a refusal echoes a bad cell, column or table bounded, however long it is, and never a name that could forge what a reader sees",
        %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "hireme-import-#{t}")
-    File.mkdir_p!(dir)
-
-    try do
-      md = "\uFEFF## corporations\n| domain | name |\n| --- | --- |\n| bom.#{t}.example | Bom |\n"
-      {:ok, %{refusals: []}} = Import.run(a.id, md, :markdown)
-      assert Repo.exists?(from c in Corporation, where: c.domain == ^"bom.#{t}.example")
-
-      json = Path.join(dir, "PACK.JSON")
-
-      File.write!(
-        json,
-        Jason.encode!(%{
-          "tables" => [
-            %{
-              "table" => "corporations",
-              "rows" => [%{"domain" => "up.#{t}.example", "name" => "Up"}]
-            }
-          ]
-        })
-      )
-
-      {:ok, %{refusals: []}} = Import.file(a.id, json)
-      assert Repo.exists?(from c in Corporation, where: c.domain == ^"up.#{t}.example")
-
-      assert {:error, :no_tables} = Import.run(a.id, "just some notes\n", :markdown)
-
-      latin1 =
-        "## corporations\n| domain | name |\n| --- | --- |\n| l1.#{t}.example | Caf" <>
-          <<0xE9>> <> " |\n| l2.#{t}.example | Fine |\n"
-
-      {:ok, report} = Import.run(a.id, latin1, :markdown)
-      assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{0, :type}]
-      assert Repo.exists?(from c in Corporation, where: c.domain == ^"l2.#{t}.example")
-    after
-      File.rm_rf!(dir)
-    end
-  end
-
-  test "prose around a markdown table, a pipe in it or not, is not data", %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-
-    markdown = """
-    ## corporations
-    Notes first: the a|b form is how we quote.
-
-    | domain | name |
-    | --- | --- |
-    | p1.#{t}.example | One |
-    p2.#{t}.example | Two
-
-    Use `a|b` when quoting.
-    """
-
-    {:ok, report} = Import.run(a.id, markdown, :markdown)
-    assert report.refusals == []
-
-    assert Repo.all(
-             from c in Corporation,
-               where: like(c.domain, ^"%.#{t}.example"),
-               select: c.name,
-               order_by: c.domain
-           ) ==
-             ["One", "Two"]
-  end
-
-  test "a section's every table is read, a BOM before any heading is not text, and a delimiter is never data",
-       %{account: a} do
-    t = "#{System.unique_integer([:positive])}"
-
-    markdown = """
-    ## corporations
-    | domain | name |
-    | --- | --- |
-    | t1.#{t}.example | One |
-    | --- | --- |
-
-    Between the tables.
-
-    | domain | name |
-    | --- | --- |
-    | t2.#{t}.example | Two |
-
-    \uFEFF## corporations
-    | domain | name |
-    | --- |
-    | t3.#{t}.example | Three |
-    """
-
-    {:ok, report} = Import.run(a.id, markdown, :markdown)
-    assert Enum.map(report.refusals, & &1.code) == [:type]
-
-    assert Repo.all(
-             from c in Corporation,
-               where: like(c.domain, ^"%.#{t}.example"),
-               select: c.name,
-               order_by: c.domain
-           ) ==
-             ["One", "Two"]
-  end
-
-  test "a refusal echoes a bad cell, column or table bounded, however long it is", %{account: a} do
     huge = String.duplicate("x", 3_000_000)
 
     body =
@@ -499,6 +363,11 @@ defmodule Hireme.ImportTest do
     {:ok, %{refusals: refusals} = report} = Import.run(a.id, body, :json)
     assert length(refusals) == 4
     assert byte_size(inspect(report)) < 4_000
+    for r <- refusals, do: assert(byte_size(inspect(r)) < 1_000, inspect(r, limit: 5))
+
+    bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
+    assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)
+    assert byte_size(inspect(error)) < 1_000
 
     # One sample per excluded category: Cc, Cf (a bidi override), Zs other
     # than ASCII space, Zl, Zp, Co and Cn; a name that spells an escape; a
@@ -508,14 +377,14 @@ defmodule Hireme.ImportTest do
 
     sly = [
       "\e[2J\e[31mFAKE\e[0m\rok",
-      "a\u202Eb",
-      "nb\u00A0sp",
-      "ls\u2028",
-      "ps\u2029",
-      "pu\uE000",
-      "un\u0378",
+      "a‮b",
+      "nb sp",
+      "ls ",
+      "ps ",
+      "pu",
+      "un͸",
       "lit\\u{202E}",
-      String.duplicate("long ", 12) <> "\u{E0041}\u00AD\uE000"
+      String.duplicate("long ", 12) <> "\u{E0041}­"
     ]
 
     sly_body =
@@ -542,10 +411,5 @@ defmodule Hireme.ImportTest do
         do: assert(<<c::utf8>> =~ ~r/^[\p{L}\p{N}\p{M}\p{P}\p{S} ]$/u, inspect(n))
 
     for n <- sly, do: refute(n in echoed)
-
-    bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
-    assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)
-    assert byte_size(inspect(error)) < 1_000
-    for r <- refusals, do: assert(byte_size(inspect(r)) < 1_000, inspect(r, limit: 5))
   end
 end

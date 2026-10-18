@@ -14,21 +14,16 @@ defmodule Hireme.LeaseTest do
     end)
   end
 
-  test "a key's session has no channel until it claims; a browser's has one from the start" do
-    l = joined([{1, nil}, {2, 9}])
+  test "a browser's session has the channel from the start, a key's once it claims; count claims the highest-ranked unclaimed, truncated when fewer exist" do
+    l = joined([{1, nil}, {2, 8}, {3, 9}])
     assert :ok = Lease.check(l, 1, nil)
     assert {:refused, :lease_missing, _} = Lease.check(l, 2, nil)
-    {:ok, l, %{"ids" => []}} = Lease.claim(l, 2, %{}, @apps, @all, @now)
-    assert :ok = Lease.check(l, 2, nil)
-  end
-
-  test "count claims the highest-ranked unclaimed, truncated when fewer exist" do
-    l = joined([{1, 8}, {2, 9}])
-    {:ok, l, %{"ids" => first}} = Lease.claim(l, 1, %{"count" => 16}, @apps, @all, @now)
+    {:ok, l, %{"ids" => first}} = Lease.claim(l, 2, %{"count" => 16}, @apps, @all, @now)
     assert first == Enum.take(@apps, 16)
-    {:ok, l, reply} = Lease.claim(l, 2, %{"count" => 30}, @apps, @all, @now)
+    assert :ok = Lease.check(l, 2, nil)
+    {:ok, l, reply} = Lease.claim(l, 3, %{"count" => 30}, @apps, @all, @now)
     assert reply == %{"ids" => Enum.drop(@apps, 16), "truncated" => true}
-    assert {:refused, :leased, %{id: 3, holder: "s1"}} = Lease.check(l, 2, 3)
+    assert {:refused, :leased, %{id: 3, holder: "s2"}} = Lease.check(l, 3, 3)
   end
 
   test "ids are granted whole or not at all, naming the holder and since" do

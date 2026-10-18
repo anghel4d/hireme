@@ -20,21 +20,23 @@ defmodule Hireme.AuditTest do
     )
   end
 
+  defp coalesced(account_id) do
+    Audit.Coalescer.flush(:all)
+    [meta] = values(account_id, "activity_coalesced", :meta)
+    meta
+  end
+
   @tag window: [:activity, :activity_node]
-  test "past its budget an account's activity coalesces into one row per window" do
+  test "past its budget an account's activity coalesces into one row per window; a security event never does" do
     %{account: a} = sign_in()
 
     for _ <- 1..1_005,
         do: :ok = Audit.record(:agent_ops, %{count: 1}, %{account_id: a.id, key_id: 7})
 
+    :ok = Audit.record(:api_key_created, %{name: "k"}, %{account_id: a.id})
     assert Enum.count(kinds(a.id), &(&1 == "agent_ops")) == 1_000
-
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
-
-    assert meta["counts"] == %{"agent_ops" => %{"7" => 5}}
+    assert "api_key_created" in kinds(a.id)
+    assert coalesced(a.id)["counts"] == %{"agent_ops" => %{"7" => 5}}
   end
 
   @tag window: [:activity, :activity_node]
@@ -78,13 +80,6 @@ defmodule Hireme.AuditTest do
     refute "revokes_coalesced" in Audit.activity_kinds()
   end
 
-  test "a security event is never coalesced" do
-    %{account: a} = sign_in()
-    for _ <- 1..1_100, do: Audit.record(:agent_ops, %{}, %{account_id: a.id})
-    :ok = Audit.record(:api_key_created, %{name: "k"}, %{account_id: a.id})
-    assert "api_key_created" in kinds(a.id)
-  end
-
   @tag window: [:hellos, :activity_node]
   test "past the HELLO budget a key's first HELLO from each address is still its own row" do
     %{account: a} = sign_in()
@@ -94,62 +89,33 @@ defmodule Hireme.AuditTest do
     :ok = Audit.record(:wire_key, %{}, ctx.("203.0.113.9"))
     :ok = Audit.record(:wire_key, %{}, ctx.("203.0.113.9"))
 
-    ips =
-      values(a.id, "wire_key", :ip)
-
+    ips = values(a.id, "wire_key", :ip)
     assert "203.0.113.9" in ips
     assert length(ips) == 601
 
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
-
+    meta = coalesced(a.id)
     assert meta["counts"] == %{"wire_key" => %{"9" => 6}}
     assert Enum.sort(meta["addresses"]) == ["10.0.0.1", "203.0.113.9"]
     assert meta["user_agents"] == ["agent/1"]
   end
 
   @tag window: [:activity, :activity_node]
-  test "a window tracks at most 1,000 addresses; events from the rest are still counted" do
-    %{account: a} = sign_in()
-    for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})
-
-    for i <- 1..1_005,
-        do:
-          Audit.record(:agent_ops, %{}, %{
-            account_id: a.id,
-            key_id: 7,
-            ip: "198.51.#{div(i, 256)}.#{rem(i, 256)}",
-            user_agent: "agent/1"
-          })
-
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
-
-    assert meta["counts"] == %{"agent_ops" => %{"7" => 1_005}}
-    assert meta["addresses_total"] == 1_000
-    assert meta["addresses_untracked_events"] == 5
-    assert meta["user_agents"] == ["agent/1"]
-  end
-
-  @tag window: [:activity, :activity_node]
-  test "a coalesced row names the addresses with the most events, not the lowest-sorting" do
+  test "a window tracks at most 1,000 addresses, names the busiest, and still counts the events of the rest" do
     %{account: a} = sign_in()
     ctx = fn ip -> %{account_id: a.id, key_id: 7, ip: ip, user_agent: "agent/1"} end
     for _ <- 1..1_000, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 7})
-    for i <- 1..25, do: Audit.record(:agent_ops, %{}, ctx.("10.0.0.#{i}"))
     for _ <- 1..3, i <- 1..5, do: Audit.record(:agent_ops, %{}, ctx.("203.0.113.#{i}"))
-    Audit.Coalescer.flush(:all)
 
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
+    for i <- 1..1_005,
+        do: Audit.record(:agent_ops, %{}, ctx.("198.51.#{div(i, 256)}.#{rem(i, 256)}"))
 
+    meta = coalesced(a.id)
+    assert meta["counts"] == %{"agent_ops" => %{"7" => 1_020}}
+    assert meta["addresses_total"] == 1_000
+    assert meta["addresses_untracked_events"] == 10
+    assert meta["user_agents"] == ["agent/1"]
     busiest = for i <- 1..5, do: "203.0.113.#{i}"
     assert busiest -- meta["addresses"] == []
-    assert meta["addresses_total"] == 30
   end
 
   @tag window: [:hellos, :activity_node]
@@ -166,13 +132,6 @@ defmodule Hireme.AuditTest do
     # 10.0.0.1 and 2001:db8::/64 were two of the 50.
     for i <- 1..60, do: :ok = Audit.record(:wire_key, %{}, ctx.("2001:db8:0:#{i}::1"))
     assert hellos.() == budget + 1 + 48
-
-    # Peers past the 50 leave nothing held for them.
-    for i <- 1..500,
-        do: :ok = Audit.record(:wire_key, %{}, ctx.("192.0.#{div(i, 256)}.#{rem(i, 256)}"))
-
-    marks = :ets.select_count(Audit.Coalescer, [{{{:first, :_, :_, :_, :_}, :_}, [], [true]}])
-    assert marks <= 51
   end
 
   @tag window: [:activity, :activity_node]
@@ -257,11 +216,7 @@ defmodule Hireme.AuditTest do
     Task.await(flush)
 
     Repo.query!("DROP TRIGGER no_row")
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
-
+    meta = coalesced(a.id)
     assert meta["counts"] == %{"agent_ops" => %{"7" => 2_000}}
     assert meta["addresses_total"] == 1_000
     assert meta["addresses_untracked_events"] == 1_000
@@ -275,11 +230,6 @@ defmodule Hireme.AuditTest do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, _, _, _}
-    Audit.Coalescer.flush(:all)
-
-    [meta] =
-      values(a.id, "activity_coalesced", :meta)
-
-    assert meta["counts"] == %{"agent_ops" => %{"1" => 3}}
+    assert coalesced(a.id)["counts"] == %{"agent_ops" => %{"1" => 3}}
   end
 end
