@@ -314,7 +314,7 @@ defmodule Hireme.Import do
   end
 
   defp cast(col, value, _mode) do
-    case Ecto.Type.cast(Schema.ecto_type(col), value) do
+    case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, nil} -> {:refused, :type, %{column: col.name, value: value}}
       {:ok, v} -> {:ok, v}
       _ -> {:refused, :type, %{column: col.name, value: value}}

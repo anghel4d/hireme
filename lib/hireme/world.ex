@@ -548,14 +548,14 @@ defmodule Hireme.World do
   end
 
   defp cast(col, value, build) do
-    case Ecto.Type.cast(Schema.ecto_type(col), value) do
+    case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, v} -> {:ok, build.(v)}
       _ -> {:error, :type, %{column: col.name, value: value}}
     end
   end
 
   defp cast_list(col, values, f) do
-    type = Schema.ecto_type(col)
+    type = Schema.cast_type(col)
 
     values
     |> Enum.reduce_while({:ok, []}, fn v, {:ok, acc} ->
@@ -622,7 +622,7 @@ defmodule Hireme.World do
       )
 
   defp cast_cursor(col, value) do
-    case Ecto.Type.cast(Schema.ecto_type(col), value) do
+    case Ecto.Type.cast(Schema.cast_type(col), value) do
       {:ok, v} -> v
       _ -> value
     end

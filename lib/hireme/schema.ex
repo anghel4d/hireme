@@ -755,6 +755,17 @@ defmodule Hireme.Schema do
     end
   end
 
+  @doc """
+  The type `Ecto.Type.cast/2` takes for a column or param: its Ecto type,
+  with an enum initialized as the parameterized `Ecto.Enum` it is.
+  """
+  def cast_type(col) do
+    case ecto_type(col) do
+      {Ecto.Enum, opts} -> Ecto.ParameterizedType.init(Ecto.Enum, opts)
+      type -> type
+    end
+  end
+
   @doc false
   def ecto_default(%{default: nil}), do: nil
 
