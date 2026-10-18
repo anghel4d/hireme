@@ -457,8 +457,9 @@ entry, and the delta to subscribers and to the sequencer's kernel.
   sessions off each other's applications; the operator's browser session
   is never refused `leased` (the owner's write, a human act like
   `open_fire`, always lands, and the claiming agent sees it as a PATCH and
-  has its pending ops re-judged). An operator revoke is sticky: the
-  revoked session cannot claim again until it reconnects.
+  has its pending ops re-judged). An operator lease revoke pauses that key: none of its sessions may open
+  the channel or claim (refused, "paused by the operator") until the operator
+  resumes it from the account lens or the key is revoked.
 - `lease.claim` answers the ids granted; a `count` larger than the
   unclaimed set grants what exists with a `truncated` warning; naming an
   id another session holds is refused `leased` with that session's label
@@ -500,12 +501,14 @@ assets/
     state.ts      model: address, lens, selection, notices
     morph.ts      escaping templates and keyed DOM morph
     lenses/desk.ts focus.ts world.ts atlas.ts outreach.ts lanes.ts account.ts
-    auth/sign_in.ts factor.ts webauthn.ts
+    auth/factor.ts webauthn.ts   (sign-in itself is plain HTML forms)
     gen/schema.ts emitted
 ```
 
-- No framework. `state.ts` is the only mutable state; every lens is model
-  in, HTML out, morphed keyed, except the board's cards, written value by
+- No framework. `state.ts` holds the model, the one shared state; the
+  transport, the kernel bindings and a lens may keep their own bookkeeping
+  (in-flight counters, the entered address), never the model. Every lens is
+  model in, HTML out, morphed keyed, except the board's cards, written value by
   value. Focus preservation is a requirement, not a nicety.
 - A write is judged and applied locally by the kernel in the input's
   frame, then settled or rolled back by ACK/NACK.
