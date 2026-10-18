@@ -174,6 +174,7 @@ mix test                                  # every contract suite; a database per
 cargo test --manifest-path native/Cargo.toml --workspace
 node native/kernel/vectors.mjs priv/static/wasm/kernel.wasm   # the kernel's vectors under wasm
 tsc -p assets                             # the client, strict
+node --experimental-transform-types --test assets/test/*.test.mjs   # the client's pure modules (mix test runs these too)
 nix flake check                           # all of it, plus the dev VM
 ```
 
