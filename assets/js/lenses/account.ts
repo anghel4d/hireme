@@ -70,12 +70,18 @@ async function load(): Promise<void> {
 let watching = false
 
 /** One parked watch at a time; it re-parks after every answer and after a reconnect. */
+/**
+ * The watch re-parks with the cursor of the overview it last drew (the
+ * newest audit event id), so a change that lands between one answer and the
+ * next park answers the next park at once instead of being lost.
+ */
 async function watch(): Promise<void> {
   if (watching) return
   watching = true
   try {
     for (;;) {
-      const r = await rpc<{ changed?: boolean }>("account.watch")
+      const since = v().overview?.cursor
+      const r = await rpc<{ changed?: boolean }>("account.watch", typeof since === "number" ? { since } : {})
       if (r.changed) await load()
       if (model.address.lens !== "account") return
     }
@@ -485,8 +491,8 @@ const view_: View = {
       query("linked", "")
       query("link_error", "")
     }
-    void load()
-    void watch()
+    // The first park waits for the first overview, so it carries that overview's cursor.
+    void load().then(watch)
   },
   act,
 }
