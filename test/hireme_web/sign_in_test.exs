@@ -105,6 +105,7 @@ defmodule HiremeWeb.SignInTest do
     token
   end
 
+  @tag window: :link_peer
   test "behind the local proxy the client is X-Real-IP; from elsewhere it is the peer", %{
     conn: conn
   } do
@@ -162,6 +163,7 @@ defmodule HiremeWeb.SignInTest do
     assert redirected_to(rec) == "/"
   end
 
+  @tag window: :ceremony_session
   test "the factor page's passkey options are bounded per browser session, and say so", %{
     conn: conn
   } do
@@ -185,6 +187,7 @@ defmodule HiremeWeb.SignInTest do
     assert conn.resp_body == "Not Found"
   end
 
+  @tag window: :link_peer
   test "a v4 client reported as ::ffff:a.b.c.d through the proxy is that v4 peer", %{
     conn: conn
   } do
@@ -224,6 +227,7 @@ defmodule HiremeWeb.SignInTest do
     assert Hireme.Security.clip(<<0xFF, 0xFE, "ok", 0xC3>>) == "??ok?"
   end
 
+  @tag window: :oauth_peer
   test "OAuth callbacks are bounded per peer", %{conn: conn} do
     old = Application.get_env(:hireme, :oauth)
     Application.put_env(:hireme, :oauth, github: [client_id: "id", client_secret: "secret"])

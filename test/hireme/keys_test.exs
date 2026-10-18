@@ -119,6 +119,7 @@ defmodule Hireme.KeysTest do
     end
   end
 
+  @tag window: :api_key_peer
   test "a throttled peer is told so, before any key is read; other peers are not", %{session: s} do
     {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     for _ <- 1..20, do: Keys.authenticate("hm_garbage", "10.1.1.1")
@@ -223,6 +224,7 @@ defmodule Hireme.KeysTest do
     assert {:ok, _} = Keys.mint(s, "after the purge", Keys.preset(:read_only))
   end
 
+  @tag window: :renames
   test "renaming to the same name records nothing; renames are rate-limited", %{session: s} do
     {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     before = length(Hireme.Audit.recent(500))

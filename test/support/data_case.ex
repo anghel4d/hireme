@@ -19,6 +19,22 @@ defmodule Hireme.DataCase do
 
   setup tags do
     setup_sandbox(tags)
+    fresh_window(tags[:window])
+    :ok
+  end
+
+  @doc """
+  A test that counts calls against a fixed-window limit (`@tag window:
+  :name`, or a list) must not straddle a window's end, or the count resets
+  under it: with less than 15 s of a window left, wait for the next.
+  """
+  def fresh_window(nil), do: :ok
+  def fresh_window(names) when is_list(names), do: Enum.each(names, &fresh_window/1)
+
+  def fresh_window(name) do
+    {scale, _} = Hireme.Security.limits()[name]
+    left = scale - rem(System.system_time(:millisecond), scale)
+    if left < 15_000, do: Process.sleep(left + 50)
     :ok
   end
 

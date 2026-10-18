@@ -10,6 +10,7 @@ defmodule Hireme.AuditTest do
     )
   end
 
+  @tag window: [:activity, :activity_node]
   test "past its budget an account's activity coalesces into one row per window" do
     %{account: a} = sign_in()
 
@@ -31,6 +32,7 @@ defmodule Hireme.AuditTest do
     assert row.meta["counts"] == %{"agent_ops" => %{"7" => 5}}
   end
 
+  @tag window: :revokes
   test "lease revokes past their budget coalesce too, and are never refused" do
     %{account: a} = sign_in()
     results = for _ <- 1..125, do: Audit.record(:lease_revoked, %{}, %{account_id: a.id})
@@ -47,6 +49,7 @@ defmodule Hireme.AuditTest do
     assert "api_key_created" in kinds(a.id)
   end
 
+  @tag window: [:hellos, :activity_node]
   test "past the HELLO budget a key's first HELLO from each address is still its own row" do
     %{account: a} = sign_in()
     ctx = fn ip -> %{account_id: a.id, key_id: 9, ip: ip, user_agent: "agent/1"} end
@@ -82,6 +85,7 @@ defmodule Hireme.AuditTest do
     assert row.meta["user_agents"] == ["agent/1"]
   end
 
+  @tag window: [:activity, :activity_node]
   test "a coalesced lease change still moves the cursor and wakes the account's watchers" do
     %{account: a} = sign_in()
     for _ <- 1..1_000, do: Audit.record(:lease_opened, %{}, %{account_id: a.id})
@@ -102,6 +106,7 @@ defmodule Hireme.AuditTest do
     assert_receive {Hireme.Audit, :changed}
   end
 
+  @tag window: [:activity, :activity_node]
   test "the counts outlive the coalescer's own process" do
     %{account: a} = sign_in()
     for _ <- 1..1_003, do: Audit.record(:agent_ops, %{}, %{account_id: a.id, key_id: 1})

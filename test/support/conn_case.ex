@@ -19,6 +19,7 @@ defmodule HiremeWeb.ConnCase do
 
   setup tags do
     Hireme.DataCase.setup_sandbox(tags)
+    Hireme.DataCase.fresh_window(tags[:window])
     {:ok, conn: Phoenix.ConnTest.build_conn(:get, "https://www.example.com/")}
   end
 

@@ -165,6 +165,7 @@ defmodule HiremeWeb.AccountTest do
              Account.call("account.rename", %{"name" => String.duplicate("é", 250)}, ctx)
   end
 
+  @tag window: :account_writes
   test "account writes are charged only when they write, and revoking is always possible", %{
     ctx: ctx
   } do
@@ -211,12 +212,14 @@ defmodule HiremeWeb.AccountTest do
     assert Hireme.Audit.rev(ctx.account_id) == cursor
   end
 
+  @tag window: :ceremony_session
   test "beginning ceremonies is bounded per session", %{ctx: ctx} do
     results = for _ <- 1..31, do: Account.call("account.totp.begin", %{}, ctx)
     assert Enum.count(results, &match?({:ok, _}, &1)) == 30
     assert {:error, %{error: "rate_limited"}} = List.last(results)
   end
 
+  @tag window: :account_writes
   test "parallel writes cannot all pass the budget, and calls that wrote nothing cost nothing", %{
     ctx: ctx
   } do

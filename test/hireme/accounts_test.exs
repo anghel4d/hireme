@@ -60,6 +60,7 @@ defmodule Hireme.AccountsTest do
       assert :ok = Accounts.request_link(known, &url_for/1)
     end
 
+    @tag window: [:link_address, :link_peer]
     test "five links per address in the window, then a refusal" do
       for _ <- 1..5,
           do:

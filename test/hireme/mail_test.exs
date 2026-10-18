@@ -75,6 +75,7 @@ defmodule Hireme.MailTest do
     assert Enum.find_index(order, &(&1 == other_email)) < 2
   end
 
+  @tag window: [:notices, :notice_rows]
   test "past the notice budget, changes coalesce into one pending digest per address" do
     %{account: a, email: email} = sign_in()
     for i <- 1..35, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
@@ -88,6 +89,7 @@ defmodule Hireme.MailTest do
     assert DateTime.compare(digest.next_at, Hireme.Store.now()) == :gt
   end
 
+  @tag window: [:notices, :critical_notices, :notice_rows]
   test "one event is one charge however many addresses hear of it; critical kinds keep their own budget" do
     %{account: a, email: email} = sign_in()
     many = for i <- 1..40, do: "addr#{i}@example.com"
@@ -110,6 +112,7 @@ defmodule Hireme.MailTest do
     assert rows.("authenticator_removed") == 1
   end
 
+  @tag window: [:notices, :notice_rows]
   test "a digest the drain has taken up or given up on is never added to" do
     %{account: a, email: email} = sign_in()
     for i <- 1..31, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
@@ -125,6 +128,7 @@ defmodule Hireme.MailTest do
              "1 security change since 2026-10-18 10:00:00 UTC"
   end
 
+  @tag window: [:notices, :critical_notices]
   test "a key's revoke notice and the critical kinds reach the owner as themselves past the general budget" do
     %{account: a, email: email} = sign_in()
     for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
@@ -139,6 +143,7 @@ defmodule Hireme.MailTest do
     assert "api_key_revoked" in kinds and "authenticator_added" in kinds
   end
 
+  @tag window: [:notices, :notice_rows]
   test "notice rows are bounded per account however many addresses an account links" do
     %{account: a} = sign_in()
     many = for i <- 1..100, do: "a#{i}@example.com"
