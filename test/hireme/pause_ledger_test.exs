@@ -119,18 +119,28 @@ defmodule Hireme.PauseLedgerTest do
     assert length(ledger_ids(b.account.id)) == window
   end
 
-  test "expired ledger entries go in chunks across messages, live ones stay", %{account: a} do
+  test "expired ledger entries go in chunks across messages, live ones stay, another account's are its own",
+       %{account: a} do
     old = DateTime.add(Hireme.Store.now(), -25 * 3600)
-    expired = for r <- ledger_rows(a.id, 1, 12_000), do: %{r | inserted_at: old, updated_at: old}
-    insert_ledger(expired ++ ledger_rows(a.id, 20_000, 1))
+    expire = fn rows -> for r <- rows, do: %{r | inserted_at: old, updated_at: old} end
+    b = Hireme.DataCase.sign_in()
+    insert_ledger(expire.(ledger_rows(b.account.id, 1, 5_001)))
+    insert_ledger(expire.(ledger_rows(a.id, 10_000, 12_000)) ++ ledger_rows(a.id, 30_000, 1))
 
     # The sequencer's start purges them as messages between batches, never
     # one statement; its first op does not wait for them all.
     {[_], []} = run(a.id, gym("after"))
-    _ = :sys.get_state(seq(a.id))
-    Process.sleep(200)
-    _ = :sys.get_state(seq(a.id))
-    assert length(ledger_ids(a.id)) == 2
+    assert eventually(fn -> length(ledger_ids(a.id)) == 2 end)
+    # Another account's expired entries are its own sequencer's to purge.
+    assert length(ledger_ids(b.account.id)) == 5_001
+  end
+
+  defp eventually(f, tries \\ 100) do
+    cond do
+      f.() -> true
+      tries == 0 -> false
+      true -> Process.sleep(50) && eventually(f, tries - 1)
+    end
   end
 
   # ---------------------------------------------------------- the pause

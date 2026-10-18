@@ -185,6 +185,116 @@ defmodule Hireme.ProvenanceTest do
            ) == 1
   end
 
+  test "restating cites by the last citation: a, b, a cites the third; a later date moves _on; columns are their own",
+       %{account: a} do
+    id = corp(a, "rs.example")
+
+    put = fn cells, src ->
+      op(:put, :corporations, Map.merge(cells, %{as_of: ~D[2026-09-01], source: src}), target: id)
+    end
+
+    count = fn col ->
+      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == ^col), :count)
+    end
+
+    # Both sources exist before the sequence, so new_source never decides.
+    {[_], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
+    {[_], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/b"))
+    {[r3], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
+    {[r4], []} = run(a.id, put.(%{headcount: 1}, "https://rs.example/a"))
+    assert count.("headcount") == 3 and r4.rev == r3.rev
+
+    # The same value and source at a later date is new: rev moves, _on moves.
+    later =
+      op(
+        :put,
+        :corporations,
+        %{headcount: 1, as_of: ~D[2026-09-15], source: "https://rs.example/a"},
+        target: id
+      )
+
+    {[r5], []} = run(a.id, later)
+    assert r5.rev == r4.rev + 1 and count.("headcount") == 4
+    assert Repo.get!(Corporation, id).headcount_on == ~D[2026-09-15]
+
+    # Two cited columns, each with its own last source, each restated alone.
+    at = fn cells, src ->
+      op(:put, :corporations, Map.merge(cells, %{as_of: ~D[2026-09-15], source: src}), target: id)
+    end
+
+    {[r6], []} = run(a.id, at.(%{revenue_usd: 2.0e6}, "https://rs.example/b"))
+    {[r7], []} = run(a.id, at.(%{revenue_usd: 2.0e6}, "https://rs.example/b"))
+    {[r8], []} = run(a.id, at.(%{headcount: 1}, "https://rs.example/a"))
+    assert r7.rev == r6.rev and r8.rev == r6.rev
+    assert count.("revenue_usd") == 1 and count.("headcount") == 4
+
+    # A put that changes one cited cell cites only that one.
+    {[_], []} = run(a.id, at.(%{headcount: 2, revenue_usd: 2.0e6}, "https://rs.example/b"))
+    assert count.("headcount") == 5 and count.("revenue_usd") == 1
+  end
+
+  test "prose restated exactly (text, source, expect_rev) writes nothing; another source cites; a stale rev is refused",
+       %{account: a} do
+    id = corp(a, "pr.example")
+
+    {[_], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
+          target: id,
+          expect_rev: 1
+        )
+      )
+
+    {[_], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "Old", source: "https://pr.example/y"},
+          target: id,
+          expect_rev: 2
+        )
+      )
+
+    rev = Repo.get!(Corporation, id).rev
+
+    count = fn ->
+      Repo.aggregate(from(c in Citation, where: c.row_id == ^id and c.column == "about"), :count)
+    end
+
+    assert count.() == 2
+
+    {[same], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "Old", source: "https://pr.example/y"},
+          target: id,
+          expect_rev: rev
+        )
+      )
+
+    assert same.rev == rev and count.() == 2
+
+    {[other], []} =
+      run(
+        a.id,
+        op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
+          target: id,
+          expect_rev: rev
+        )
+      )
+
+    assert other.rev == rev + 1 and count.() == 3
+
+    assert {[], [%{refusal: :rev}]} =
+             run(
+               a.id,
+               op(:put, :corporations, %{about: "Old", source: "https://pr.example/x"},
+                 target: id,
+                 expect_rev: rev
+               )
+             )
+  end
+
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
   } do

@@ -156,6 +156,33 @@ defmodule Hireme.SequencerTest do
            )
   end
 
+  test "a new application's stage_on is today, on the 0000-01-01 epoch end to end", %{account: a} do
+    {[app], []} = run(a.id, op(:put, :applications, %{company: "Today", role: "R"}))
+    assert Repo.get!(Hireme.Rows.Application, app.id).stage_on == Date.utc_today()
+  end
+
+  test "at the citations cap a restatement still ACKs (it writes nothing); a change is refused cap",
+       %{account: a} do
+    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "cap.example", name: "C"}))
+
+    cited = fn n ->
+      op(
+        :put,
+        :corporations,
+        %{headcount: n, as_of: ~D[2026-09-01], source: "https://cap.example/a"}, target: corp.id)
+    end
+
+    {[first], []} = run(a.id, cited.(5))
+
+    citations = Schema.table(:citations)
+    [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+    :sys.replace_state(pid, &put_in(&1.counts[citations.id], citations.cap))
+
+    {[same], []} = run(a.id, cited.(5))
+    assert same.rev == first.rev
+    assert {[], [%{refusal: :cap}]} = run(a.id, cited.(6))
+  end
+
   test "settings is one row: a put without a target finds it", %{account: a} do
     {[first], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
     {[second], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))

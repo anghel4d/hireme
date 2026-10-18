@@ -204,6 +204,38 @@ defmodule Hireme.ImportTest do
            ) == [4_294_967_294]
   end
 
+  test "a day before 1970 imports; a day or as_of past 9999-12-31 is refused", %{account: a} do
+    t = "#{System.unique_integer([:positive])}"
+
+    rows =
+      for {d, i} <- Enum.with_index(["1897-01-01", "+10000-01-01", "0000-01-01"]),
+          do: %{"domain" => "d#{i}.#{t}.example", "name" => "D#{i}", "last_round_on" => d}
+
+    pack = %{"tables" => [%{"table" => "corporations", "rows" => rows}]}
+    {:ok, report} = Import.run(a.id, Jason.encode!(pack), :json)
+    assert Enum.map(report.refusals, &{&1.row, &1.code}) == [{1, :type}]
+
+    assert Repo.all(
+             from c in Corporation,
+               where: like(c.domain, ^"%.#{t}.example"),
+               order_by: c.domain,
+               select: c.last_round_on
+           ) == [~D[1897-01-01], ~D[0000-01-01]]
+
+    far = %{
+      "as_of" => "+10000-01-01",
+      "tables" => [
+        %{
+          "table" => "corporations",
+          "rows" => [%{"domain" => "far.#{t}.example", "name" => "F", "headcount" => 3}]
+        }
+      ]
+    }
+
+    {:ok, report} = Import.run(a.id, Jason.encode!(far), :json)
+    assert [%{code: :type}] = report.refusals
+  end
+
   test "a row names the natural key its own values satisfy", %{account: a} do
     t = "#{System.unique_integer([:positive])}"
     iso = "Z#{rem(String.to_integer(t), 9)}"

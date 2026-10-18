@@ -61,7 +61,6 @@ defmodule Hireme.Sequencer do
   @as_of 0xFFF0
   @source 0xFFF1
   @ledger_s 24 * 3600
-  # 9999-12-31, the last day SQLite and Ecto read back.
   @purge_ms :timer.hours(1)
 
   # ---------------------------------------------------------------- API
@@ -326,7 +325,7 @@ defmodule Hireme.Sequencer do
     lease =
       case Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^id, select: k.paused_at)) do
         nil -> Lease.lift(state.lease, id)
-        since -> Lease.hold(state.lease, id, since)
+        since -> state.lease |> Lease.lift(id) |> Lease.hold(id, since)
       end
 
     {:noreply, %{state | lease: lease}, @idle_ms}
@@ -863,7 +862,6 @@ defmodule Hireme.Sequencer do
          :ok <- too_large(op),
          {:ok, effects, state} <- domain(plan, op, sub, state, turn),
          {:ok, prov} <- provenance(plan, op, effects, turn),
-         {:ok, state} <- limits(plan, effects, prov, state),
          {:ok, state, turn, ack} <- write(plan, op, sub, effects, prov, state, turn) do
       {:ok, state, turn, ack}
     else
@@ -1443,9 +1441,14 @@ defmodule Hireme.Sequencer do
   end
 
   defp write(plan, op, sub, effects, prov, state, turn) do
-    if unchanged?(plan, op, effects, prov),
-      do: finish(state, turn, [], %{op_id: op.op_id, rev: plan.row.rev, id: plan.row.id}),
-      else: write_effects(plan, op, sub, effects, prov, state, turn)
+    # Check 6 (limits) follows the shortcut: a restatement writes nothing,
+    # so a table at its cap does not refuse it.
+    if unchanged?(plan, op, effects, prov) do
+      finish(state, turn, [], %{op_id: op.op_id, rev: plan.row.rev, id: plan.row.id})
+    else
+      with {:ok, state} <- limits(plan, effects, prov, state),
+           do: write_effects(plan, op, sub, effects, prov, state, turn)
+    end
   end
 
   # A put that restates its row exactly (every cell as stored, and for a
@@ -1454,16 +1457,19 @@ defmodule Hireme.Sequencer do
   # different source is a corroboration and is cited.
   defp unchanged?(%{row: row, table: table}, %{verb: :put}, [{tid, id, cells}], prov)
        when row != nil and tid == table.id and id == row.id do
-    Enum.all?(cells, fn {col_id, v} ->
-      c = col(table, col_id)
-      key = c && String.to_atom(c.name)
-
-      c != nil and Codec.from_wire(c, v) == {:ok, Map.get(row, key)} and
-        (not (c.metric or c.prose) or same_citation?(table, row, c, prov))
-    end)
+    Enum.all?(cells, &restated?(table, row, &1, prov))
   end
 
   defp unchanged?(_plan, _op, _effects, _prov), do: false
+
+  # One cell as `row` stores it, and if cited, the same citation again.
+  defp restated?(table, row, {col_id, v}, prov) do
+    c = col(table, col_id)
+    key = c && String.to_atom(c.name)
+
+    c != nil and Codec.from_wire(c, v) == {:ok, Map.get(row, key)} and
+      (not (c.metric or c.prose) or same_citation?(table, row, c, prov))
+  end
 
   defp same_citation?(_table, _row, _col, nil), do: false
   defp same_citation?(_table, _row, _col, %{new_source: true}), do: false
@@ -1479,13 +1485,29 @@ defmodule Hireme.Sequencer do
           where: x.table == ^table.name and x.row_id == ^row.id and x.column == ^col.name,
           order_by: [desc: x.id],
           limit: 1,
-          select: {x.id, x.source_id}
+          select: {x.id, x.source_id, x.as_of}
         )
       )
 
+    # A metric's date is its `_on`; prose dates only an explicit as_of.
     source = prov.source && prov.source.id
-    (not col.metric or on == prov.as_of) and match?({_, ^source}, last)
+
+    dated =
+      cond do
+        col.metric -> on == prov.as_of
+        prov.as_of == nil -> true
+        true -> match?({_, _, d} when d == prov.as_of, last)
+      end
+
+    dated and match?({_, ^source, _}, last)
   end
+
+  # A put that changes some cells cites only those: a cited cell it restates
+  # (same value, same citation) is not cited again.
+  defp fresh(table, cells, %{plan: %{row: row}, prov: prov}) when row != nil,
+    do: Enum.reject(cells, &restated?(table, row, &1, prov))
+
+  defp fresh(_table, cells, _ctx), do: cells
 
   defp write_effects(plan, op, sub, effects, prov, state, turn) do
     ctx = %{sub: sub, op: op, turn: turn, plan: plan, prov: prov}
@@ -1508,7 +1530,8 @@ defmodule Hireme.Sequencer do
             ack =
               if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
 
-            cited = if own and prov, do: cite(table, row, cells, prov, ctx), else: []
+            cited =
+              if own and prov, do: cite(table, row, fresh(table, cells, ctx), prov, ctx), else: []
 
             {:cont,
              {{:ok, deltas ++ [{:put, table, row, changed}, moved | cited], news, ack}, inserted}}
@@ -2304,7 +2327,9 @@ defmodule Hireme.Sequencer do
       end)
 
     since = Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id, select: k.paused_at))
-    {%{state | lease: Lease.hold(state.lease, key_id, since || now)}, if(n == 1, do: key_id)}
+    # A revoked key is never held (its row is not paused).
+    lease = if since, do: Lease.hold(state.lease, key_id, since), else: state.lease
+    {%{state | lease: lease}, if(n == 1, do: key_id)}
   end
 
   defp pause(state, _session), do: {state, nil}
