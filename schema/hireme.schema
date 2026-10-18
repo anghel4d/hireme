@@ -19,7 +19,7 @@
 #     pick <col>...                  a resident view of a server table, not stored
 #   natural <col>... [where <sql>]   the key a KEYED put names; per account
 #   unique <col>... [global] [where <sql>]   per account unless `global`
-#   index <col> [desc]... [where <sql>]      per account (account_id leads)
+#   index <col> [desc]... [global] [where <sql>]   per account (account_id leads) unless `global`
 #   cap <n>                          most rows per account (`cap` refusal)
 #   col <name> <type> [<target>] [! | ?] [= <default>] [flag]...
 #   metric <name> <u32|i64|f64> [flag]...   nullable; implies `<name>_on day ?`;
@@ -208,7 +208,8 @@ table audit system server append_only account_optional
   col session_id ref sessions ?
 
 table outbox system server
-  index sent_at next_at
+  # The drain reads due notices across every account.
+  index next_at global where sent_at is null
   col address str !
   col kind str !
   col meta json ?
@@ -221,7 +222,7 @@ table outbox system server
 # after 24 h.
 table op_ledger system server
   unique op_id
-  index inserted_at
+  index inserted_at global
   col op_id i64 !
   col key_id ref api_keys ?
   col verb enum verb !
