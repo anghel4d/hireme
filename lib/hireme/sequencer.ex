@@ -590,9 +590,21 @@ defmodule Hireme.Sequencer do
 
           {:refused, refusal, data, state} ->
             :ok = Store.savepoint(:undo)
-            {state, turn, {:nack, nack(op, refusal, data)}}
+            {state, turn, {:nack, nack(op, refusal, redact(data, op, sub))}}
         end
     end
+  end
+
+  # A refusal says why in its data (a stage, a rev, a stored date); a key
+  # that may not read the table gets only the refusal, never its rows' state.
+  defp redact(data, op, sub) do
+    table =
+      case op.verb do
+        :command -> (c = Schema.command(op.subject)) && Schema.table(c.table)
+        _ -> Schema.table(op.subject)
+      end
+
+    if table == nil or Grants.read?(sub.grants, table), do: data, else: %{}
   end
 
   defp constraint(%Ecto.ChangeError{message: msg}), do: {:type, %{reason: msg}}
@@ -950,7 +962,9 @@ defmodule Hireme.Sequencer do
            end),
          :ok <- special_cells(op.cells),
          :ok <- required(table, values, insert),
-         :ok <- refs(table.cols, values) do
+         :ok <- refs(table.cols, values),
+         :ok <-
+           if(table.name == "sources", do: Provenance.source_change(plan.row, values), else: :ok) do
       {:ok, Map.put(plan, :changes, values)}
     end
   end
@@ -1856,7 +1870,9 @@ defmodule Hireme.Sequencer do
       g.write_mask == 0 ->
         {:refused, :scope, %{reason: "the lease is for writing"}}
 
-      claims and not Grants.write?(g, Schema.table(:applications)) ->
+      claims and
+          not (Grants.write?(g, Schema.table(:applications)) and
+                   Grants.read?(g, Schema.table(:applications))) ->
         {:refused, :scope, %{table: "applications"}}
 
       true ->

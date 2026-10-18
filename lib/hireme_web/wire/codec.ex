@@ -470,13 +470,21 @@ defmodule HiremeWeb.Wire.Codec do
   defp to_value(%{type: t}, v) when t in [:str, :text] and is_binary(v), do: {:ok, v}
 
   defp to_value(%{type: :json}, v) when is_binary(v) do
-    case JSON.decode(v) do
-      {:ok, j} -> {:ok, j}
+    with {:ok, j} <- JSON.decode(v), true <- bounded?(j) do
+      {:ok, j}
+    else
       _ -> {:error, :type}
     end
   end
 
   defp to_value(_, _), do: {:error, :type}
+
+  # A JSON integer is an i64: a million-digit one decodes fast but costs
+  # seconds to encode again under the node's single write lock.
+  defp bounded?(i) when is_integer(i), do: i in -0x8000_0000_0000_0000..0x7FFF_FFFF_FFFF_FFFF
+  defp bounded?(l) when is_list(l), do: Enum.all?(l, &bounded?/1)
+  defp bounded?(m) when is_map(m), do: Enum.all?(m, fn {_, v} -> bounded?(v) end)
+  defp bounded?(_), do: true
 
   @doc "The type an op cell for this column must carry: its wire type, but a deferred text travels whole, as str."
   def cell_type(%{deferred: true}), do: @t_str

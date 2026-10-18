@@ -596,4 +596,190 @@ defmodule HiremeWeb.AgentAttackTest do
              end)
     end
   end
+
+  describe "from the adversarial review" do
+    test "FIRE HOLD: no batch, fired or not, lets a key submit an application", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[batch], []} =
+        run(a.id, op(:put, :batches, %{code: "FIRED", ordinal: 1, fire: :open_fire}))
+
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Never vetted", role: "R"}))
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{"ids" => [app.id]})
+      assert {:ack, _} = put(c, op(:put, :applications, %{batch_id: batch.id}, target: app.id))
+      assert {:nack, refusal} = put(c, op(:command, :stage, %{stage: :submitted}, target: app.id))
+      assert refusal in [:fire_hold, :stage]
+      assert Repo.get!(Hireme.Rows.Application, app.id).stage != :submitted
+    end
+
+    test "a source's identity is fixed: no later writer retargets or relabels what a citation said",
+         %{port: port, session: s, account: a} do
+      {[corp], []} =
+        run(
+          a.id,
+          op(:put, :corporations, %{
+            domain: "src.example",
+            name: "S",
+            headcount: 5,
+            as_of: ~D[2026-10-01],
+            source: "https://news.example/a"
+          })
+        )
+
+      source = Repo.one!(from(x in Hireme.Rows.Source, select: x.id))
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{})
+
+      assert {:nack, :column} =
+               put(c, op(:put, :sources, %{publisher: "Bureau of Statistics"}, target: source))
+
+      assert {:nack, :column} =
+               put(c, op(:put, :sources, %{url: "https://levels.fyi/x"}, target: source))
+
+      assert {:nack, :column} = put(c, op(:put, :sources, %{kind: :official}, target: source))
+
+      {:ok, %{"citations" => [cite]}} =
+        rpc(c, "history", %{"table" => "corporations", "id" => corp.id, "column" => "headcount"})
+
+      assert cite["source"]["host"] == "news.example"
+    end
+
+    test "only real hostnames can be trusted: an escaped label is not a subdomain", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "host.example", name: "H"}))
+      {:ok, _} = Hireme.Provenance.trust("levels.fyi", nil, %{})
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{})
+
+      for url <- [
+            "https://evil.example%5c.levels.fyi/x",
+            "https://evil.example%2f.levels.fyi/",
+            "https://ev_il.levels.fyi/"
+          ] do
+        assert {:nack, refusal} =
+                 put(
+                   c,
+                   op(:put, :corporations, %{rating: 5.0, as_of: ~D[2026-10-01], source: url},
+                     target: corp.id
+                   )
+                 )
+
+        assert refusal in [:type, :source_trust], url
+      end
+
+      assert {:ack, _} =
+               put(
+                 c,
+                 op(
+                   :put,
+                   :corporations,
+                   %{rating: 4.0, as_of: ~D[2026-10-01], source: "https://www.levels.fyi/c"},
+                   target: corp.id
+                 )
+               )
+    end
+
+    test "an agent's claim never refuses the operator, and an operator revoke holds until the agent reconnects",
+         %{port: port, session: s, account: a} do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Mine", role: "R"}))
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, %{"ids" => [_]}} = rpc(c, "lease.claim", %{"ids" => [app.id]})
+
+      assert {[_], []} =
+               run(a.id, op(:put, :applications, %{role: "Operator's edit"}, target: app.id))
+
+      [lease] = Hireme.Lease.leases(a.id)
+      :ok = Hireme.Lease.revoke(a.id, lease.id, %{})
+      assert refused(c, "lease.claim", %{"ids" => [app.id]}) == :lease_missing
+
+      assert {:nack, :lease_missing} =
+               put(c, op(:put, :applications, %{role: "x"}, target: app.id))
+
+      {c2, _, _} = agent(port, secret)
+      assert {:ok, _} = rpc(c2, "lease.claim", %{})
+    end
+
+    test "a JSON cell's integers fit an i64: a bignum cannot hold the writer lock for seconds", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "J", role: "R"}))
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      {:ok, _} = rpc(c, "lease.claim", %{"ids" => [app.id]})
+      t = Schema.table(:applications)
+      notes = Enum.find(t.cols, &(&1.name == "stage_notes"))
+      big = String.duplicate("9", 200_000)
+
+      {:ok, bad, ""} =
+        Codec.op(
+          Codec.encode_op({1, :put, 0, t.id, app.id, nil, [{notes.id, 2, ~s({"n": #{big}})}]})
+        )
+
+      {time, verdict} = :timer.tc(fn -> put(c, bad) end)
+      assert verdict == {:nack, :type}
+      assert time < 1_000_000
+    end
+
+    test "a key that does not read the desk cannot rank, list or probe it", %{
+      port: port,
+      session: s,
+      account: a
+    } do
+      {[app], []} = run(a.id, op(:put, :applications, %{company: "Secret", role: "R"}))
+
+      {[corp], []} =
+        run(
+          a.id,
+          op(:put, :corporations, %{
+            domain: "probe.example",
+            name: "P",
+            headcount: 9,
+            as_of: ~D[2026-10-05]
+          })
+        )
+
+      {_, secret} = key(s, 0, 31, true)
+      {c, _, _} = agent(port, secret)
+      assert refused(c, "lease.claim", %{"count" => 10}) == :scope
+      assert refused(c, "lease.claim", %{"stage" => "discovered", "count" => 1}) == :scope
+      assert {:ok, _} = rpc(c, "lease.claim", %{})
+      # A refusal names no state of a table the key cannot read.
+      WireClient.send_frame(
+        c,
+        Codec.frame(:OPS, 0, [
+          <<1::little-32, 0::32>>,
+          op(:put, :corporations, %{headcount: 1, as_of: ~D[2026-10-01]}, target: corp.id).raw
+        ])
+      )
+
+      {nack, _} = WireClient.await(c, :NACK)
+      refute nack.body =~ "2026-10-05"
+
+      assert {:nack, :stale} =
+               put(
+                 c,
+                 op(:put, :corporations, %{headcount: 1, as_of: ~D[2026-10-01]}, target: corp.id)
+               )
+
+      _ = app
+    end
+
+    test "a claim names at most 1,000 ids", %{port: port, session: s} do
+      {_, secret} = key(s, 31, 31)
+      {c, _, _} = agent(port, secret)
+      assert refused(c, "lease.claim", %{"ids" => Enum.to_list(1..1_001)}) == :type
+    end
+  end
 end

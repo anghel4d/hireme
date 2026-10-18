@@ -455,26 +455,21 @@ defmodule Hireme.SequencerTest do
       assert Repo.get!(Corporation, c.id).headcount == nil
     end
 
-    test "an insert naming an application another session holds is leased", %{
-      account: a,
-      session: s
-    } do
+    test "an insert naming an application another session holds is leased, but the operator's lands",
+         %{account: a, session: s} do
+      mint = fn name ->
+        elem(Hireme.Keys.mint(s, name, Hireme.Keys.preset(:read_write)), 1).key
+      end
+
       {[app], []} = run(a.id, op(:put, :applications, %{company: "Held", role: "R"}))
-      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
-
-      holder = %{
-        id: 910,
-        label: "holder",
-        grants: Grants.key(key),
-        key_id: key.id,
-        session_id: nil
-      }
-
-      {:ok, _} = Sequencer.subscribe(a.id, holder, 0)
-      {:ok, %{"ids" => [_]}} = Hireme.Lease.claim(a.id, 910, %{"ids" => [app.id]})
+      {_, %{"ids" => [_]}} = key_session(a.id, mint.("holder"), 910, %{"ids" => [app.id]})
+      {writer, _} = key_session(a.id, mint.("writer"), 911)
 
       assert {[], [%{refusal: :leased}]} =
-               run(a.id, op(:put, :events, %{application_id: app.id, kind: "note"}))
+               key_session_ops(writer, op(:put, :events, %{application_id: app.id, kind: "note"}))
+
+      # docs/rebuild.md: "the operator's browser session is never refused leased"
+      assert {[_], []} = run(a.id, op(:put, :events, %{application_id: app.id, kind: "note"}))
     end
 
     test "a delete may not reach rows outside the write mask", %{account: a} do
@@ -706,6 +701,10 @@ defmodule Hireme.SequencerTest do
       account: a,
       session: s
     } do
+      mint = fn name ->
+        elem(Hireme.Keys.mint(s, name, Hireme.Keys.preset(:read_write)), 1).key
+      end
+
       {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "move.example", name: "M"}))
 
       {[app1], []} =
@@ -722,19 +721,14 @@ defmodule Hireme.SequencerTest do
           op(:put, :cv_overlays, %{application_id: app1.id, item_id: item.id, mode: :tailor})
         )
 
-      {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
-
-      {:ok, _} =
-        Sequencer.subscribe(
-          a.id,
-          %{id: 970, label: "holder", grants: Grants.key(key), key_id: key.id, session_id: nil},
-          0
-        )
-
-      {:ok, _} = Hireme.Lease.claim(a.id, 970, %{"ids" => [app2.id]})
+      {_, %{"ids" => [_]}} = key_session(a.id, mint.("holder"), 970, %{"ids" => [app2.id]})
+      {mover, _} = key_session(a.id, mint.("mover"), 971)
 
       assert {[], [%{refusal: :leased}]} =
-               run(a.id, op(:put, :cv_overlays, %{application_id: app2.id}, target: ov.id))
+               key_session_ops(
+                 mover,
+                 op(:put, :cv_overlays, %{application_id: app2.id}, target: ov.id)
+               )
     end
 
     test "a key's submission past its budget is refused rate whole, before anything is judged", %{

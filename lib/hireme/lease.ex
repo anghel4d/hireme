@@ -15,6 +15,13 @@ defmodule Hireme.Lease do
   holder's label and `since` when another session holds one. An
   application a session creates is claimed by it.
 
+  docs/rebuild.md, 'Lease and keys': "Claims keep agent sessions off each
+  other's applications; the operator's browser session is never refused
+  `leased` (the owner's write, a human act like `open_fire`, always lands,
+  and the claiming agent sees it as a PATCH and has its pending ops
+  re-judged). An operator revoke is sticky: the revoked session cannot
+  claim again until it reconnects."
+
   This module is the state machine; the state lives in the account's
   sequencer, which runs check 2 (`lease`) against it inside each op, so a
   claim and a write can never interleave. The functions taking an
@@ -121,10 +128,14 @@ defmodule Hireme.Lease do
   def check(%__MODULE__{} = l, id, app_id) do
     cond do
       not channel?(l, id) -> {:refused, :lease_missing, %{}}
+      operator?(l, id) -> :ok
       app_id && Map.get(l.holder, app_id, id) != id -> {:refused, :leased, holder(l, app_id)}
       true -> :ok
     end
   end
+
+  # The operator's own sessions (a browser, the importer): no key.
+  defp operator?(l, id), do: match?(%{key_id: nil}, l.sessions[id])
 
   @doc "Claims an application the session just created."
   def adopt(%__MODULE__{} = l, id, app_id) do
@@ -147,6 +158,13 @@ defmodule Hireme.Lease do
       s -> claim_as(l, s, params, ranked, all, now)
     end
   end
+
+  # The operator's revoke holds for the session's life: it takes the lease
+  # again only by reconnecting, as a new session.
+  defp claim_as(_l, %{revoked: true}, _params, _ranked, _all, _now),
+    do:
+      {:refused, :lease_missing,
+       %{reason: "the operator revoked this session's lease; reconnect"}}
 
   defp claim_as(l, s, params, ranked, all, now) do
     id = s.id
@@ -245,7 +263,10 @@ defmodule Hireme.Lease do
 
       _ ->
         {l, released} = drop_claims(l, id, :all)
-        {:ok, update_in(l.sessions[id], &%{&1 | channel: false, since: nil}), released}
+
+        {:ok,
+         update_in(l.sessions[id], &Map.merge(&1, %{channel: false, since: nil, revoked: true})),
+         released}
     end
   end
 

@@ -30,7 +30,7 @@ defmodule Hireme.Provenance do
   def host(url) when is_binary(url) do
     case URI.parse(url) do
       %URI{scheme: s, host: h} when s in ["http", "https"] and is_binary(h) and h != "" ->
-        h |> String.downcase() |> String.trim_trailing(".")
+        h |> String.downcase() |> String.trim_trailing(".") |> hostname()
 
       _ ->
         nil
@@ -38,6 +38,37 @@ defmodule Hireme.Provenance do
   end
 
   def host(_), do: nil
+
+  # Only a real hostname counts: labels of letters, digits and hyphens. A
+  # host like "evil%5c.levels.fyi" must not pass as a subdomain of a trusted one.
+  defp hostname(h) do
+    if h =~ ~r/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/, do: h
+  end
+
+  @fixed ~w(url host publisher title kind)a
+
+  @doc """
+  A source's identity is fixed once written: its URL (and so its host),
+  publisher, title and kind. Every citation of it says what it said when
+  cited, so a later writer cannot retarget or relabel it; a new claim is a
+  new source. Only its retrieval (`retrieved_at`, `doc`) moves.
+  """
+  def source_change(nil, _values), do: :ok
+
+  def source_change(row, values) do
+    case Enum.find(
+           @fixed,
+           &(Map.has_key?(values, Atom.to_string(&1)) and
+               values[Atom.to_string(&1)] != Map.get(row, &1))
+         ) do
+      nil ->
+        :ok
+
+      col ->
+        {:refused, :column,
+         %{table: "sources", column: col, reason: "a source's identity is fixed once written"}}
+    end
+  end
 
   @doc """
   The source an op names in its `source` cell: an existing source's id, or

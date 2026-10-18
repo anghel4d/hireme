@@ -433,10 +433,17 @@ defmodule HiremeWeb.Session do
   defp claim_shape(params) do
     ok =
       Enum.all?(params, fn
-        {"count", n} -> is_integer(n) and n >= 0
-        {"ids", ids} -> is_list(ids) and Enum.all?(ids, &(is_integer(&1) and &1 > 0))
-        {"stage", st} -> is_binary(st) and Codec.enum_code("stage", st) != nil
-        _ -> false
+        {"count", n} ->
+          is_integer(n) and n >= 0
+
+        {"ids", ids} ->
+          is_list(ids) and length(ids) <= 1_000 and Enum.all?(ids, &(is_integer(&1) and &1 > 0))
+
+        {"stage", st} ->
+          is_binary(st) and Codec.enum_code("stage", st) != nil
+
+        _ ->
+          false
       end)
 
     if ok, do: :ok, else: {:refused, :type, %{expected: "{count, stage?} | {ids} | {}"}}
@@ -451,7 +458,10 @@ defmodule HiremeWeb.Session do
       grants.write_mask == 0 ->
         {:refused, :scope, %{reason: "the lease is for writing"}}
 
-      claims and not Grants.write?(grants, Hireme.Schema.table(:applications)) ->
+      # Claiming ranks and names applications: it needs the desk both ways.
+      claims and
+          not (Grants.write?(grants, Hireme.Schema.table(:applications)) and
+                   Grants.read?(grants, Hireme.Schema.table(:applications))) ->
         {:refused, :scope, %{table: "applications"}}
 
       true ->

@@ -108,7 +108,8 @@ defmodule Hireme.LeaseTest do
             _ -> nil
           end)
 
-        assert Lease.check(l, s, a) == :ok == holder in [nil, s]
+        # Session 1 is the operator's: never refused leased.
+        assert Lease.check(l, s, a) == :ok == (s == 1 or holder in [nil, s])
       end
     end
   end

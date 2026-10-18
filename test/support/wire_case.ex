@@ -84,6 +84,63 @@ defmodule Hireme.WireCase do
     {acks, Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))}
   end
 
+  @doc """
+  A key's wire session in its own process, holding the lease (and `claims`):
+  `key_session_ops(agent, ops)` submits through it and answers `{acks, nacks}`.
+  """
+  def key_session(account_id, key, sid, claims \\ %{}) do
+    me = self()
+
+    pid =
+      spawn_link(fn ->
+        info = %{
+          id: sid,
+          label: "agent#{sid}",
+          grants: Hireme.Grants.key(key),
+          key_id: key.id,
+          session_id: nil
+        }
+
+        {:ok, _} = Hireme.Sequencer.subscribe(account_id, info, 0)
+        {:ok, reply} = Hireme.Lease.claim(account_id, sid, claims)
+        send(me, {:agent_ready, self(), reply})
+        agent_loop(account_id)
+      end)
+
+    receive do
+      {:agent_ready, ^pid, reply} -> {pid, reply}
+    end
+  end
+
+  defp agent_loop(account_id) do
+    receive do
+      {:ops, from, ops} ->
+        Hireme.Sequencer.submit(account_id, ops)
+
+        verdicts =
+          receive do
+            {:sequencer, :verdicts, _, acks, nacks} ->
+              {acks, Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))}
+          end
+
+        send(from, {:verdicts, self(), verdicts})
+        agent_loop(account_id)
+
+      _ ->
+        agent_loop(account_id)
+    end
+  end
+
+  def key_session_ops(agent, ops) do
+    send(agent, {:ops, self(), List.wrap(ops)})
+
+    receive do
+      {:verdicts, ^agent, v} -> v
+    after
+      3_000 -> raise "no verdicts from the agent"
+    end
+  end
+
   @doc "The table ids and row counts of a table-run body (BOOT, PATCH)."
   def tables(<<>>), do: []
 
