@@ -584,7 +584,6 @@ dependencies = [
  "libm",
  "schema",
  "serde_json",
- "sha2",
  "wire",
 ]
 

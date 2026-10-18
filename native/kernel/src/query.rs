@@ -11,10 +11,9 @@
 //! As World: an enum orders and compares by its value's name; `find`
 //! orders by one column then `id`, nulls last both ways, and pages by an
 //! opaque keyset cursor; `like` and `prefix` are ASCII-case-insensitive,
-//! as SQLite's LIKE; a deferred text comes back as `{len, sha}` (its byte
-//! length and the first 8 bytes of its SHA-256, hex) in `find` and `get`,
-//! whole through `text`; a soft-deleted row is passed over by every read
-//! but `history`, whose citations still name it.
+//! as SQLite's LIKE; texts are whole in the replica, so `find` and `get`
+//! return them as any str and `text` chunks one; a soft-deleted row is
+//! passed over by every read but `history`, whose citations still name it.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -244,17 +243,8 @@ fn is_live(t: &Table, tm: &TableModel, id: u32) -> bool {
     !tm.soft_delete || tm.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none() && t.i64(id, c.id).is_none())
 }
 
-fn sha8(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let d = Sha256::digest(text.as_bytes());
-    d[..8].iter().map(|b| alloc::format!("{b:02x}")).collect()
-}
-
 /// A cell as World's JSON shows it.
 fn out(t: &Table, id: u32, c: &Column) -> Json {
-    if has(c, flag::DEFERRED) {
-        return t.str(id, c.id).map_or(Json::Null, |s| json!({"len": s.len(), "sha": sha8(s)}));
-    }
     value_json(c, &t.get(id, c.id))
 }
 
@@ -644,7 +634,7 @@ fn text(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
         return refuse(refusal::NOT_FOUND, json!({"table": tm.name, "id": id}));
     };
     let Some(whole) = t.str(id, c.id) else {
-        return Ok(json!({"text": null, "offset": offset, "next": null, "total": 0, "sha": null, "untrusted": true}));
+        return Ok(json!({"text": null, "offset": offset, "next": null, "total": 0, "untrusted": true}));
     };
     let b = whole.as_bytes();
     let total = b.len() as u64;
@@ -666,7 +656,7 @@ fn text(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     let stop = (start + chunk.len()) as u64;
     Ok(json!({
         "text": chunk, "offset": offset, "next": (stop < total).then_some(stop),
-        "total": total, "sha": sha8(whole), "untrusted": true,
+        "total": total, "untrusted": true,
     }))
 }
 

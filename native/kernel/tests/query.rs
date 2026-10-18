@@ -119,9 +119,8 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     }
     assert_eq!(whole, "é".repeat(200_000));
     assert_eq!(refused(&k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": 1})), schema::refusal::TYPE);
-    let stub = &q(&k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"][0]["doc"];
-    assert_eq!(stub["len"], 400_000);
-    assert_eq!(stub["sha"].as_str().unwrap().len(), 16);
+    // The replica holds texts whole: find returns them as any str.
+    assert_eq!(q(&k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"][0]["doc"].as_str().map(str::len), Some(400_000));
     // A key reads its mask's domains only, never a private column.
     k.set_grants(Grants { human: false, read_mask: 0b10, write_mask: 0, may_delete: false });
     assert_eq!(refused(&k, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
