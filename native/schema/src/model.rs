@@ -345,11 +345,8 @@ pub struct Error {
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.line == 0 {
-            write!(f, "schema/hireme.schema: {}", self.message)
-        } else {
-            write!(f, "schema/hireme.schema:{}: {}", self.line, self.message)
-        }
+        // The caller names the file it read.
+        if self.line == 0 { write!(f, "{}", self.message) } else { write!(f, "{}: {}", self.line, self.message) }
     }
 }
 
@@ -637,6 +634,10 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 let Some(t) = tables.last_mut() else {
                     return fail(line, format!("{kind} outside a table"));
                 };
+                // A projection only picks its source's columns; a table never picks.
+                if (t.residency == Residency::Projection) != (*kind == "pick") {
+                    return fail(line, format!("{kind} in {} {}", if *kind == "pick" { "table" } else { "projection" }, t.name));
+                }
                 table_line(t, &tokens, where_, line)?;
             }
             _ => return fail(line, format!("unreadable line: {text}")),

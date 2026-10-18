@@ -144,6 +144,13 @@ defmodule Hireme.Schema.Parser do
 
       [kind | _] when kind in ~w(col metric prose natural unique index cap command pick) ->
         if state.table == nil, do: fail(n, "#{kind} outside a table")
+
+        # A projection only picks its source's columns; a table never picks.
+        if state.table.residency == :projection != (kind == "pick") do
+          where = if kind == "pick", do: "table", else: "projection"
+          fail(n, "#{kind} in #{where} #{state.table.name}")
+        end
+
         %{state | table: table_line(tokens, where, n, state.table, state)}
 
       _ ->

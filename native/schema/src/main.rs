@@ -16,21 +16,21 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let source = match args.iter().position(|a| a == "--schema") {
+    let (path, source) = match args.iter().position(|a| a == "--schema") {
         Some(i) if i + 1 < args.len() => {
             let path = args.remove(i + 1);
             args.remove(i);
             match std::fs::read_to_string(&path) {
-                Ok(s) => s,
+                Ok(s) => (path, s),
                 Err(e) => return fail(&format!("{path}: {e}")),
             }
         }
         Some(_) => return fail("--schema needs a path"),
-        None => schema::SOURCE.to_owned(),
+        None => ("schema/hireme.schema (compiled in)".to_owned(), schema::SOURCE.to_owned()),
     };
     let model = match schema::parse(&source) {
         Ok(m) => m,
-        Err(e) => return fail(&e.to_string()),
+        Err(e) => return fail(&format!("{path}:{e}")),
     };
 
     let out = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {

@@ -27,7 +27,7 @@ fn opt(v: Option<&str>) -> String {
 fn main() {
     println!("cargo:rerun-if-changed={SCHEMA}");
     let source = std::fs::read_to_string(SCHEMA).expect("read schema/hireme.schema");
-    let s = model::parse(&source).unwrap_or_else(|e| panic!("{e}"));
+    let s = model::parse(&source).unwrap_or_else(|e| panic!("schema/hireme.schema:{e}"));
     let mut o = String::new();
 
     writeln!(o, "/// Frame layouts, enums, commands and the resident tables.").unwrap();
