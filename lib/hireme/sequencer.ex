@@ -198,6 +198,7 @@ defmodule Hireme.Sequencer do
       counts: %{},
       kernel: nil,
       rows: nil,
+      blocks: nil,
       backfill_after: 0,
       text_bytes: text_bytes
     }
@@ -582,7 +583,7 @@ defmodule Hireme.Sequencer do
 
     case result do
       {:ok, {state, turn, verdicts}} ->
-        state = if turn.acked > 0, do: %{state | rows: nil}, else: state
+        state = if turn.acked > 0, do: %{state | rows: nil, blocks: nil}, else: state
         state = publish(turn.deltas, forget_gone(state, turn.deltas))
         deliver(verdicts, state.rev)
         {state, verdicts}
@@ -1590,7 +1591,7 @@ defmodule Hireme.Sequencer do
   @doc false
   def rebuild(state) do
     # Inside a batch the rows read are uncommitted, so they are not kept.
-    {read, body} = snapshot(nil, %{state | rows: nil}, Store.now())
+    {read, body} = snapshot(nil, %{state | rows: nil, blocks: nil}, Store.now())
     rows = if Repo.in_transaction?(), do: nil, else: read.rows
     %{state | kernel: Kernel.new(body), counts: %{}, rows: rows, account: read.account}
   end
@@ -1598,7 +1599,7 @@ defmodule Hireme.Sequencer do
   # Every resident table and projection the grants read (all of them, for
   # the kernel when `grants` is nil), plus the wire tables.
   defp snapshot(grants, state, now) do
-    {state, rows} = resident_rows(state)
+    {state, blocks} = resident_blocks(state, grants)
 
     # A table the grants do not read goes as an empty block, so a BOOT clears
     # whatever a client kept of it from wider grants.
@@ -1610,7 +1611,7 @@ defmodule Hireme.Sequencer do
           grants != nil and not Grants.read?(grants, t) -> Codec.block(t.id, 0, [{1, 1, []}])
           account?(t) and grants == nil -> Codec.block(t.id, 0, [{1, 1, []}])
           live?(t) -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
-          true -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))
+          true -> Map.fetch!(blocks, t.id)
         end
       end
 
@@ -1629,6 +1630,22 @@ defmodule Hireme.Sequencer do
           do: Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
 
     {state, [blocks | wire_tables(state, grants, now)]}
+  end
+
+  # The resident tables' encoded blocks as of the account's rev, per grants:
+  # sessions joining between two writes (a reload, a second tab, an agent
+  # reconnecting) share one encoding instead of re-encoding the desk each.
+  defp resident_blocks(%{blocks: {rev, grants, blocks}, rev: rev} = state, grants), do: {state, blocks}
+
+  defp resident_blocks(state, grants) do
+    {state, rows} = resident_rows(state)
+
+    blocks =
+      for t <- Schema.tables(), t.residency in [:resident, :projection], not live?(t), Map.has_key?(rows, t.id), into: %{} do
+        {t.id, Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))}
+      end
+
+    {%{state | blocks: {state.rev, grants, blocks}}, blocks}
   end
 
   # The resident rows as of the account's rev, read once per rev: the
