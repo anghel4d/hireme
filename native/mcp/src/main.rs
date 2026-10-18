@@ -76,6 +76,9 @@ struct Watch {
     subs: HashSet<Option<String>>,
 }
 
+/// What an agent is told once the operator has paused its key.
+const PAUSED_NOTE: &str = "   = note: the operator paused this key's writing; nothing reconnects to claim on its own. Reads still work. When the operator resumes the key in the account lens, call `lease` again\n";
+
 struct App {
     carrier: Arc<Carrier>,
     /// The account's resident rows, fed every BOOT, PATCH and TICK: the same kernel the sequencer judges with.
@@ -90,6 +93,9 @@ struct App {
     ready: Notify,
     /// Why the session ended for good, once it has.
     dead: RwLock<Option<String>>,
+    /// The operator paused this key's writing (a lease revoke): since when, as the node said. Nothing
+    /// reconnects to claim again on its own; the agent's next `lease` asks the node in a new session.
+    paused: RwLock<Option<String>>,
     legacy: RwLock<Option<String>>,
     rev: AtomicU64,
     url: String,
@@ -187,6 +193,7 @@ async fn main() {
         catalog: RwLock::new(None),
         ready: Notify::new(),
         dead: RwLock::new(None),
+        paused: RwLock::new(None),
         legacy: RwLock::new(None),
         rev: AtomicU64::new(0),
         url,
@@ -215,6 +222,14 @@ async fn main() {
         // A batch (an array) is answered, not dropped: no revision this server speaks has them.
         if msg.is_array() {
             app.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON-RPC batches are not supported; send one message per line"}}));
+            continue;
+        }
+        // Anything else that is not a request, a notification or a response object (a bare number, a
+        // string, null, {} or an id with no method) is an invalid request, answered as one.
+        let message = msg.as_object().is_some_and(|o| o.get("method").is_some_and(Json::is_string) || o.contains_key("result") || o.contains_key("error"));
+        if !message {
+            let id = msg.get("id").filter(|i| i.is_string() || i.is_number()).cloned().unwrap_or(Json::Null);
+            app.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"not a JSON-RPC request: an object with a string method is needed"}}));
             continue;
         }
         // A cancel written right behind its request must find it: requests register and cancels
@@ -288,7 +303,7 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                     // The kernel no longer matches the node: off with judging, and a fresh session boots it whole.
                     eprintln!("hireme-mcp: a row frame did not apply; restarting the session for a whole BOOT");
                     app.trained.store(false, Ordering::Relaxed);
-                    app.carrier.restart();
+                    app.carrier.restart("a row frame did not apply");
                     continue;
                 }
                 // Only a BOOT's END is the train: a later PATCH or TICK flagged END says nothing about the base rows.
@@ -617,7 +632,7 @@ impl App {
             },
             "find" | "get" | "history" => self.passthrough(name, &args, false).await,
             "text" => self.passthrough("text", &args, true).await,
-            "lease" => self.passthrough_as("lease", "lease.claim", &args).await,
+            "lease" => self.lease(&args).await,
             "release" => self.passthrough_as("release", "lease.release", &args).await,
             "put" => self.put(&cat, &args).await,
             "drop" => self.drop_row(&cat, &args).await,
@@ -635,15 +650,28 @@ impl App {
                 None => text_result(format!("error[usage]: no refusal {code}\n   = known: {}\n", diag::names().collect::<Vec<_>>().join(" ")), None, true),
             };
         }
-        let w = self.welcome.read().await.clone().unwrap_or_default();
+        let mut w = self.welcome.read().await.clone().unwrap_or_default();
         let welcomed = self.welcome.read().await.is_some();
         let connected = welcomed && self.carrier.connected().await;
+        let paused = self.paused.read().await.clone();
+        // The node broadcasts every live lease (a row per session holding its channel or claims) to a key
+        // that reads desk: the lease as the node has it now, not as of this session's last refusal.
+        let live = self.lease_row(w.session_id);
+        if let Some(row) = &live {
+            w.leased = row.is_some();
+            *self.held.lock().await = row.clone().unwrap_or_default();
+        }
+        if paused.is_some() {
+            w.leased = false;
+        }
         let next = if self.dead.read().await.is_some() {
             "The session has ended; nothing can be read or written until the operator restores the key (or hireme-mcp is rebuilt for the node)."
         } else if !welcomed {
             "Not connected yet: check HIREME_URL and the key; hireme-mcp keeps retrying."
         } else if !connected {
             "Disconnected for the moment; hireme-mcp is reconnecting. What follows is as of the last session."
+        } else if paused.is_some() {
+            "The operator paused this key's writing. Reads work as before; when they resume it in the account lens, call `lease` again."
         } else if m.write == 0 {
             "This key reads only. `schema`, then `find` and `get`; `text` for raw listings and prose."
         } else if !w.leased {
@@ -659,6 +687,7 @@ impl App {
             "write": tools::domains(m.write),
             "may_delete": m.may_delete,
             "leased": w.leased,
+            "paused": paused.as_ref().map(|since| if since.is_empty() { json!(true) } else { json!(since) }),
             "rev": self.rev.load(Ordering::Relaxed),
             "schema_rev": cat.schema_rev,
             "fire_hold": "Nothing submits an application; open_fire is the operator's.",
@@ -674,7 +703,7 @@ impl App {
             join_or(tools::domains(m.read), "nothing"),
             join_or(tools::domains(m.write), "nothing"),
             if m.may_delete { " (may delete)" } else { "" },
-            if w.leased { "held" } else { "none" },
+            if paused.is_some() { "paused by the operator" } else if w.leased { "held" } else { "none" },
         );
         text_result(text, Some(overview), false)
     }
@@ -749,18 +778,62 @@ impl App {
                 let code = e.get("code").and_then(Json::as_str).unwrap_or("internal").to_owned();
                 let data = e.get("data").cloned().unwrap_or(json!({"message": e.get("message")}));
                 let mut text = diag::render(&code, &format!("{tool} {}", compact_args(args)), &data);
-                // The operator revoked this session's lease: it may claim again only as a new session
-                // (lease.ex), so the lease is gone here too and hireme-mcp starts one.
-                let revoked = data.get("reason").and_then(Json::as_str).is_some_and(|r| r.contains("revoked this session's lease"));
-                if revoked {
-                    self.lost_lease().await;
-                    self.carrier.restart();
-                    text.push_str("   = note: hireme-mcp is opening a new session; call `lease` again in a moment\n");
+                if self.pause_from(&data).await {
+                    text.push_str(PAUSED_NOTE);
                 }
                 text_result(text, None, true)
             }
             Err(lost) => text_result(format!("error[session]: {}\n   = help: a read is safe to call again; hireme-mcp reconnects on its own\n", lost.0), None, true),
         }
+    }
+
+    /// This session's row among the node's live leases: Some(Some(claims)) while it holds the channel or
+    /// claims, Some(None) once the node no longer lists it, None where the rows are not here to say
+    /// (a key that does not read desk, or before this session's BOOT).
+    fn lease_row(&self, session: u64) -> Option<Option<Vec<u32>>> {
+        if !self.trained.load(Ordering::Relaxed) {
+            return None;
+        }
+        let k = self.kernel.lock().ok()?;
+        let t = k.rows().table(schema::table::LEASES)?;
+        let id = u32::try_from(session).ok()?;
+        Some(t.has(id).then(|| t.str(id, schema::col::leases::HELD).unwrap_or("").split('\u{1f}').filter_map(|x| x.parse().ok()).collect()))
+    }
+
+    /// Whether a refusal says the operator paused this key (or revoked this session's lease, from a node
+    /// that predates the pause): then the lease is gone and the pause is noted. Nothing reconnects to
+    /// claim again: the agent's next `lease` asks the node from a new session, and the node decides.
+    async fn pause_from(&self, data: &Json) -> bool {
+        let reason = data.get("reason").and_then(Json::as_str).unwrap_or("");
+        let paused = data.get("paused").and_then(Json::as_bool) == Some(true)
+            || reason.contains("paused by the operator")
+            || reason.contains("revoked this session's lease");
+        if paused {
+            self.lost_lease().await;
+            *self.paused.write().await = Some(data.get("since").and_then(Json::as_str).unwrap_or("").to_owned());
+        }
+        paused
+    }
+
+    /// `lease`: claimed in this session, or, once the operator has paused the key, asked again from a
+    /// new session (a revoked session never claims again), which the node grants once they resume it.
+    async fn lease(&self, args: &Json) -> Json {
+        if self.paused.write().await.take().is_some() {
+            let before = self.welcome.read().await.as_ref().map(|w| w.session_id);
+            self.carrier.restart("the operator paused this key; asking again from a new session");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let now = self.welcome.read().await.as_ref().map(|w| w.session_id);
+                if now.is_some() && now != before && self.carrier.connected().await {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return text_result("error[session]: no new session within 10 s\n   = help: hireme-mcp keeps reconnecting; call `lease` again in a moment\n".to_owned(), None, true);
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(100), self.ready.notified()).await;
+            }
+        }
+        self.passthrough_as("lease", "lease.claim", args).await
     }
 
     /// The session no longer holds the lease (refused lease_missing, or revoked by the operator).
@@ -990,6 +1063,9 @@ impl App {
                         self.lost_lease().await;
                     }
                     text.push_str(&diag::render(&name, &op.label, data));
+                    if self.pause_from(data).await {
+                        text.push_str(PAUSED_NOTE);
+                    }
                     rows.push(json!({"op_id": op.op_id, "ok": false, "refusal": name, "data": data}));
                 }
                 None => {}

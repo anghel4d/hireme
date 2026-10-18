@@ -183,6 +183,8 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .grid tr.dead { color: var(--muted); }
 .grid td.actions { white-space: nowrap; text-align: right; }
 
+/* A key the operator paused by revoking its lease. */
+.tag.paused { color: var(--warn); border-color: var(--warn); }
 /* A table wider than a phone scrolls inside its card, never the page. */
 .table-scroll { overflow-x: auto; max-width: 100%; }
 .grid-wrap { overflow: auto; max-height: calc(100vh - 180px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }

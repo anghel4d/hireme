@@ -367,11 +367,12 @@ function keys(): Html {
     <tbody>${rows.map((k) => {
       const id = num(k.id)
       const live = k.live === true
+      const paused = live && str(k.paused_at) !== ""
       return html`<tr data-key="k${id}" class="${live ? "" : "dead"}">
         <td>${str(k.name)}</td><td><code>${str(k.display)}</code></td>
         <td>${maskNames(num(k.read_mask))}</td><td>${maskNames(num(k.write_mask))}${k.may_delete === true ? html` <span class="tag">delete</span>` : EMPTY}</td>
-        <td>${str(k.last_used_at) === "" ? html`<span class="muted">never</span>` : time(k.last_used_at)}${str(k.revoked_at) !== "" ? html` <span class="tag">revoked</span>` : EMPTY}</td>
-        <td class="actions">${live ? html`<button type="button" class="ghost" data-act="open" data-form="change:${id}">Change</button>
+        <td>${str(k.last_used_at) === "" ? html`<span class="muted">never</span>` : time(k.last_used_at)}${str(k.revoked_at) !== "" ? html` <span class="tag">revoked</span>` : EMPTY}${paused ? html` <span class="tag paused" title="You revoked its lease: it reads, but writes nothing until you resume it">paused since ${time(k.paused_at)}</span>` : EMPTY}</td>
+        <td class="actions">${paused ? html`<button type="button" class="primary" data-act="key-resume" data-id="${id}">Resume</button>` : EMPTY}${live ? html`<button type="button" class="ghost" data-act="open" data-form="change:${id}">Change</button>
           ${confirmButton(`k${id}`, "Revoke", "key-revoke", { id })}` : EMPTY}</td></tr>
         ${open === `change:${id}` ? html`<tr data-key="k${id}-change"><td colspan="6">
           <form class="stack" data-submit="key-change" data-act="key-change" data-id="${id}">
@@ -393,7 +394,7 @@ function keys(): Html {
 function leases(): Html {
   const rows = list("leases")
   return html`<section class="card" data-key="leases"><h2>Live leases</h2>
-    ${rows.length === 0 ? html`<p class="hint">No agent holds the write channel.</p>` : EMPTY}
+    ${rows.length === 0 ? html`<p class="hint">No agent holds the write channel.</p>` : html`<p class="hint">Revoking an agent's lease pauses its key: it keeps reading but writes nothing until you resume it under API keys. Revoking the key stops it for good.</p>`}
     <ul class="rows">${rows.map((l) => {
       const ids = Array.isArray(l.ids) ? l.ids.length : 0
       return html`<li data-key="l${num(l.id)}"><b>${str(l.label)}</b>
@@ -532,6 +533,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return void rename.then(() =>
         changed ? call("account.key.change", { id, ...masksFrom(d) }, () => patch({ open: "", masks: null })) : patch({ open: "", masks: null }))
     }
+    case "key-resume":
+      return void call("account.key.resume", { id })
     case "key-revoke":
       return void call("account.key.revoke", { id }, () => patch({ open: "" }))
     case "lease-revoke":

@@ -72,8 +72,10 @@ struct Live {
 
 pub struct Carrier {
     hash: u16,
-    /// Ends the current session at once (a frame the caller could not apply); the usual reconnect follows.
+    /// Ends the current session at once (a frame the caller could not apply, a new session asked for);
+    /// the usual reconnect follows, and `why` is the reason its end is logged with.
     kick: tokio::sync::Notify,
+    why: std::sync::Mutex<String>,
     live: Mutex<Option<Live>>,
     next_rpc: AtomicU32,
     next_op: AtomicU64,
@@ -89,7 +91,7 @@ impl Carrier {
         // An op id is unique per key for the ledger's 24 h: the start time in
         // the high bits, a counter in the low 20 (a million ops per process start).
         let base = (now.as_millis() as u64) << 20;
-        let carrier = Arc::new(Carrier { hash, kick: tokio::sync::Notify::new(), live: Mutex::new(None), next_rpc: AtomicU32::new(1), next_op: AtomicU64::new(base) });
+        let carrier = Arc::new(Carrier { hash, kick: tokio::sync::Notify::new(), why: std::sync::Mutex::new(String::new()), live: Mutex::new(None), next_rpc: AtomicU32::new(1), next_op: AtomicU64::new(base) });
         let (events, rx) = mpsc::unbounded_channel();
         let c = carrier.clone();
         let watch = events.clone();
@@ -108,8 +110,11 @@ impl Carrier {
         self.live.lock().await.is_some()
     }
 
-    /// Drops the session; the next one boots whole.
-    pub fn restart(&self) {
+    /// Drops the session for `why`; the next one boots whole.
+    pub fn restart(&self, why: &str) {
+        if let Ok(mut w) = self.why.lock() {
+            why.clone_into(&mut w);
+        }
         self.kick.notify_one();
     }
 
@@ -243,7 +248,7 @@ impl Carrier {
                         Err(e) => break ("frame".into(), format!("{e:?}"), true),
                     }
                 }
-                _ = self.kick.notified() => break ("restart".into(), "a row frame did not apply".into(), true),
+                _ = self.kick.notified() => break ("restart".into(), self.why.lock().map(|w| w.clone()).unwrap_or_default(), true),
                 _ = tick.tick() => {
                     if heard.elapsed() > SILENT {
                         break ("silent".into(), format!("no frame for {} s", SILENT.as_secs()), true);

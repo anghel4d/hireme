@@ -156,6 +156,10 @@ the key's masks forbid is not listed. Writes need a lease: `lease {}` opens
 the channel, `lease {"count": 16}` also claims the 16 best-ranked unclaimed
 applications.
 
+Stopping an agent, from the account lens: revoking its lease pauses that
+key until you resume it (it still reads, but writes nothing, and a new
+session does not lift the pause); revoking the key stops it for good.
+
 Rows are resources (`hireme://applications/<no>`,
 `hireme://corporations/<domain>`, `hireme://places/<iso2>`) and can be
 subscribed to. A refusal comes back as a diagnostic naming its code, the

@@ -189,6 +189,12 @@ fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
                 None => (format!("a new row lacks its required columns: {missing}"), format!("Add {missing} to `set`, or name an existing row by id or key.")),
             })
         }
+        // A ref cell naming a row that does not exist (the sequencer's {column, id}; a missing row of the
+        // op's own table says {table, id}).
+        "not_found" if text("column").is_some() && int("id").is_some() && data.get("table").is_none() => {
+            let (c, id) = (text("column")?, int("id")?);
+            Some((format!("{c} {id} names no row"), format!("{c} must name an existing row this key can see; `find` it first, or put that row and use its id.")))
+        }
         // A source named by an id that is no live source (dropped: a tombstone is never cited again).
         "source_missing" if int("source").is_some() => {
             let id = int("source")?;
@@ -423,6 +429,8 @@ mod tests {
             ("column", serde_json::json!({"table": "corporations", "missing": ["name"]}), "a new row lacks its required columns: name"),
             ("column", serde_json::json!({"command": "open_generation", "missing": ["lineage_id"]}), "open_generation needs lineage_id"),
             ("source_missing", serde_json::json!({"source": 7}), "no live source has id 7"),
+            ("not_found", serde_json::json!({"column": "corporation_id", "id": 999999}), "corporation_id 999999 names no row"),
+            ("not_found", serde_json::json!({"table": "corporations", "id": 4}), "no such row, table or command"),
             ("source_missing", serde_json::json!({"table": "corporations", "column": "headcount"}), "this write needs a source"),
         ];
         for (code, data, line) in shaped {
