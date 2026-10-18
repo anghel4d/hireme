@@ -142,12 +142,13 @@ export function load(hw: Boot): void {
       ? undefined
       : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
     k = x
+    let restored = false
     if (snap) {
       const rev = withBytes(snap.bytes, (p, n) => x.restore(p, n))
       if (rev >= 0n) {
         rowsRev = rev
         booted = true
-        warm = true
+        restored = true
       } else if (wire) {
         // HELLO named a snapshot the kernel refused: only a whole BOOT puts the rows right.
         rowsRev = 0n
@@ -156,14 +157,19 @@ export function load(hw: Boot): void {
       }
     }
     for (const f of early.splice(0)) if (!ingest(f)) break
-    moved()
     // The snapshot paints first; the cold derive (the board, a card) runs once that paint is on
-    // screen, so first paint never waits on it.
+    // screen, so first paint never waits on it. Warm is set only together with what ends it, so a
+    // load that fails before here never leaves the lenses waiting.
+    warm = restored
+    moved()
     if (warm) afterPaint(() => {
       warm = false
       moved()
     })
-  })().catch((e: unknown) => notice("error", `The kernel did not load: ${String(e)}`))
+  })().catch((e: unknown) => {
+    warm = false
+    notice("error", `The kernel did not load: ${String(e)}`)
+  })
 }
 
 /** Restored rows whose first derive has not run yet: the lenses that derive wait one paint. */

@@ -62,6 +62,27 @@ function link(): Html {
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const waiting = (lens: Lens): boolean => DERIVES.includes(lens) && kernel.warming()
 
+let failedView = ""
+let failedAfter = ""
+
+/** A lens's view, or, when it throws, a line saying so (and one notice per failure): the shell around
+ * it, nav, link and notices, keeps painting. */
+function lensView(lens: Lens, v: View): Html {
+  try {
+    const h = v.view()
+    failedView = ""
+    return h
+  } catch (e) {
+    const why = `${lens}: ${e instanceof Error ? e.message : String(e)}`
+    // Raised after this paint, and once: the notice repaints, and the view would throw again.
+    if (why !== failedView) {
+      failedView = why
+      queueMicrotask(() => notice("error", `This view failed to draw (${why}). Reload the page; if it repeats, tell the operator's maintainer.`))
+    }
+    return html`<p class="error" role="alert">This view failed to draw.</p>`
+  }
+}
+
 function shell(): Html {
   const lens = model.address.lens
   const v = waiting(lens) ? undefined : VIEWS[lens]
@@ -75,7 +96,7 @@ function shell(): Html {
         <button class="ghost">Sign out</button>
       </form>
     </header>
-    <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? v.view() : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>
+    <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? lensView(lens, v) : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>
     <aside class="notices" aria-live="polite">${model.notices.map((n) => html`<div class="notice notice-${n.tone}" data-key="n${n.id}">
       <span>${n.text}</span><button type="button" class="ghost" data-act="dismiss" data-id="${n.id}" aria-label="Dismiss">×</button></div>`)}</aside>`
 }
@@ -95,7 +116,20 @@ function render(): void {
   }
   morph(root, shell())
   const lens = document.getElementById("lens")
-  if (lens) v?.after?.(lens)
+  // A lens whose view failed has nothing of its own on the page to keep current.
+  if (lens && failedView === "") {
+    try {
+      v?.after?.(lens)
+      failedAfter = ""
+    } catch (e) {
+      const why = `${model.address.lens}: ${e instanceof Error ? e.message : String(e)}`
+      // Once per failure: the notice repaints, and the hook would throw again.
+      if (why !== failedAfter) {
+        failedAfter = why
+        queueMicrotask(() => notice("error", `This view failed to update (${why}).`))
+      }
+    }
+  }
   // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
   const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
   if (want && !focusedOnce.has(want)) {
@@ -230,7 +264,8 @@ function refresh(): void {
   clearTimeout(trailing)
   if (now - lastRefresh >= 400) {
     lastRefresh = now
-    VIEWS[model.address.lens]?.refresh?.()
+    // A lens still waiting for the first derive reads everything when it enters.
+    if (!waiting(model.address.lens)) VIEWS[model.address.lens]?.refresh?.()
   } else {
     trailing = window.setTimeout(refresh, 400 - (now - lastRefresh))
   }
