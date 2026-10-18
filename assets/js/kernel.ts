@@ -128,7 +128,9 @@ export function snapshotRev(): bigint {
 export function load(hw: Boot): void {
   void (async () => {
     const module = await hw.kernel
-    const inst = await WebAssembly.instantiate(module, {})
+    // The kernel's one import: the host's crypto RNG seeds its text-keyed hash maps,
+    // which agent-written names must not be able to aim collisions at.
+    const inst = await WebAssembly.instantiate(module, { host: { random_u32: () => crypto.getRandomValues(new Uint32Array(1))[0] } })
     const x = inst.exports as unknown as Exports
     if (x.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
     x.set_today(todayDay())
