@@ -188,6 +188,10 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     }
     assert_eq!(whole, "é".repeat(200_000));
     assert_eq!(refused(&k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": 1})), schema::refusal::TYPE);
+    // `sizes` answers a text column as its byte length, not its text.
+    let r = q(&k, json!({"op": "find", "table": "sources", "cols": ["url"], "sizes": ["doc"]}));
+    assert_eq!((r["rows"][0]["doc"].clone(), r["rows"][0]["url"].as_str()), (json!(400_000), Some("https://a.example/1")));
+    assert_eq!(refused(&k, json!({"op": "find", "table": "sources", "sizes": ["id"]})), schema::refusal::COLUMN);
     // The replica holds texts whole: find returns them as any str.
     assert_eq!(q(&k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"][0]["doc"].as_str().map(str::len), Some(400_000));
     // A key reads its mask's domains only, never a private column.

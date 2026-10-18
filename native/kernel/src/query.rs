@@ -603,7 +603,18 @@ fn decode_cursor(c: &Column, v: Option<&Json>) -> Result<Option<(Key2<'static>, 
 
 fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> Answer {
     let tm = readable(g, p.get("table"))?;
-    let cols = columns(g, tm, p.get("cols"), false)?;
+    let mut cols = columns(g, tm, p.get("cols"), false)?;
+    // `sizes`: text columns answered as their byte length, never their text
+    // (a grid shows a size; the reader asks get for the text).
+    let sizes = match p.get("sizes") {
+        None | Some(Json::Null) => Vec::new(),
+        Some(Json::Array(names)) => names.iter().map(|n| column(g, tm, Some(n))).collect::<Result<Vec<_>, _>>()?,
+        Some(other) => return refuse(refusal::TYPE, json!({"table": tm.name, "sizes": brief(other)})),
+    };
+    if let Some(c) = sizes.iter().find(|c| !matches!(ty(c), Type::Str | Type::Text | Type::Json)) {
+        return refuse(refusal::COLUMN, json!({"table": tm.name, "column": c.name, "reason": "not text"}));
+    }
+    cols.retain(|x| !sizes.iter().any(|c| c.id == x.id));
     let (order, desc) = order_param(g, tm, p)?;
     let limit = bound(p.get("limit"), FIND_LIMIT, FIND_MAX, "limit")? as usize;
     let fs = filters(g, tm, p.get("where"))?;
@@ -650,7 +661,16 @@ fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> An
         }
     }
     let next = (keys.len() == limit).then(|| keys.last().map(|k| cursor_of(t, k.1, order))).flatten();
-    let rows: Vec<Json> = keys.iter().map(|k| row_out(t, k.1, &cols, false)).collect();
+    let rows: Vec<Json> = keys
+        .iter()
+        .map(|k| {
+            let mut r = row_out(t, k.1, &cols, false);
+            for c in &sizes {
+                r[c.name] = t.str(k.1, c.id).map_or(Json::Null, |s| s.len().into());
+            }
+            r
+        })
+        .collect();
     Ok(json!({"rows": rows, "next": next}))
 }
 
