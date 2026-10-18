@@ -10,7 +10,7 @@
 import type { View } from "../app.ts"
 import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
 import { Refused, failed, put, query as read, table, today, values, type Input } from "../kernel.ts"
-import { EMPTY, flag, href, html, type Html } from "../morph.ts"
+import { EMPTY, flag, href, html, unicodeHost, type Html } from "../morph.ts"
 import { go, model, query, set, type WorldView } from "../state.ts"
 
 type Row = Record<string, unknown>
@@ -47,40 +47,6 @@ const WORDS: Record<string, string> = {
 export function label(name: string): string {
   const words = name.split("_").map((w) => WORDS[w] ?? w).filter((w) => w !== "").join(" ")
   return words.charAt(0).toUpperCase() + words.slice(1)
-}
-
-/** A host as people read it: each punycode label (xn--) decoded (RFC 3492), so xn--mller-kva.example is müller.example. */
-export function unicodeHost(host: string): string {
-  return host.split(".").map((l) => (l.startsWith("xn--") ? puny(l.slice(4)) ?? l : l)).join(".")
-}
-function puny(s: string): string | null {
-  const out: number[] = []
-  const dash = s.lastIndexOf("-")
-  for (const ch of dash > 0 ? s.slice(0, dash) : "") out.push(ch.charCodeAt(0))
-  let n = 128, i = 0, bias = 72, p = dash > 0 ? dash + 1 : 0
-  while (p < s.length) {
-    const old = i
-    for (let w = 1, k = 36; ; k += 36) {
-      if (p >= s.length) return null
-      const c = s.charCodeAt(p++)
-      const d = c >= 48 && c <= 57 ? c - 22 : c >= 97 && c <= 122 ? c - 97 : c >= 65 && c <= 90 ? c - 65 : -1
-      if (d < 0) return null
-      i += d * w
-      const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias
-      if (d < t) break
-      w *= 36 - t
-    }
-    const len = out.length + 1
-    let delta = old === 0 ? Math.floor((i - old) / 700) : (i - old) >> 1
-    delta += Math.floor(delta / len)
-    let k = 0
-    for (; delta > 455; k += 36) delta = Math.floor(delta / 35)
-    bias = k + Math.floor((36 * delta) / (delta + 38))
-    n += Math.floor(i / len)
-    i %= len
-    out.splice(i++, 0, n)
-  }
-  return String.fromCodePoint(...out)
 }
 
 /**
@@ -276,19 +242,24 @@ function adder(t: TableDef): Html {
 
 function view(): Html {
   const t = current()
-  const cols = drawn(t)
+  const all = drawn(t)
   const g = groups(t)
   const pick = model.address.q.get("cols") ?? g[0]
   const sort = model.address.q.get("sort") ?? ""
   const search = SEARCH[t.name as Shown]
-  const got = rows(t, cols, v().limit)
+  const got = rows(t, all, v().limit)
+  // A column empty on every row drawn is left out, said and undoable: the grid shows what there is.
+  const showEmpty = model.address.q.get("empty") === "show"
+  const blank = all.filter((c) => c.name !== search && got.rows.length > 0 && got.rows.every((r) => r[c.name] === null || r[c.name] === undefined || r[c.name] === ""))
+  const cols = showEmpty ? all : all.filter((c) => !blank.includes(c))
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
       <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
       ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
       <span class="muted">${got.rows.length}${got.more ? "+" : ""} rows</span>
     </div>
-    ${g.length < 2 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${[...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}</div>`}
+    ${g.length < 2 && blank.length === 0 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${g.length < 2 ? EMPTY : [...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}
+      ${blank.length === 0 ? EMPTY : html`<button type="button" class="ghost" data-act="empty" data-key="empty" title="${blank.map((c) => label(c.name)).join(", ")}">${showEmpty ? `Hide the ${blank.length} empty column${blank.length === 1 ? "" : "s"}` : `${blank.length} empty column${blank.length === 1 ? "" : "s"} hidden · show`}</button>`}</div>`}
     ${adder(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
@@ -314,6 +285,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   switch (name) {
     case "cols":
       return query("cols", el.dataset.v ?? "")
+    case "empty":
+      return query("empty", model.address.q.get("empty") === "show" ? "" : "show")
     case "sort": {
       const s = model.address.q.get("sort") ?? ""
       return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)

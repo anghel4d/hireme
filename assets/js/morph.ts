@@ -64,6 +64,47 @@ export const EMPTY = new Html("")
 /** A boolean attribute, present or absent. */
 export const flag = (name: string, on: boolean): Html => new Html(on ? ` ${name}` : "")
 
+/** A host as people read it: each punycode label (xn--) decoded (RFC 3492), so xn--mller-kva.example is müller.example. */
+export function unicodeHost(host: string): string {
+  const u = host.split(".").map((l) => (l.startsWith("xn--") ? punyDecode(l.slice(4)) ?? l : l)).join(".")
+  // In doubt (a decode the browser's own URL parser would not give back as this host), the xn-- form stands.
+  try {
+    return u === host || new URL(`http://${u}/`).hostname === host.toLowerCase() ? u : host
+  } catch {
+    return host
+  }
+}
+/** One punycode label's Unicode (RFC 3492 decode, its xn-- prefix already off), or null when it is not punycode. */
+export function punyDecode(s: string): string | null {
+  const out: number[] = []
+  const dash = s.lastIndexOf("-")
+  for (const ch of dash > 0 ? s.slice(0, dash) : "") out.push(ch.charCodeAt(0))
+  let n = 128, i = 0, bias = 72, p = dash > 0 ? dash + 1 : 0
+  while (p < s.length) {
+    const old = i
+    for (let w = 1, k = 36; ; k += 36) {
+      if (p >= s.length) return null
+      const c = s.charCodeAt(p++)
+      const d = c >= 48 && c <= 57 ? c - 22 : c >= 97 && c <= 122 ? c - 97 : c >= 65 && c <= 90 ? c - 65 : -1
+      if (d < 0) return null
+      i += d * w
+      const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias
+      if (d < t) break
+      w *= 36 - t
+    }
+    const len = out.length + 1
+    let delta = old === 0 ? Math.floor((i - old) / 700) : (i - old) >> 1
+    delta += Math.floor(delta / len)
+    let k = 0
+    for (; delta > 455; k += 36) delta = Math.floor(delta / 35)
+    bias = k + Math.floor((36 * delta) / (delta + 38))
+    n += Math.floor(i / len)
+    i %= len
+    out.splice(i++, 0, n)
+  }
+  return String.fromCodePoint(...out)
+}
+
 /** An href for a value someone else wrote: http(s), mailto and same-origin paths only. */
 export function href(url: string | null | undefined): string {
   if (url === null || url === undefined || url === "") return "#"
