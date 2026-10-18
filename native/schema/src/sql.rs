@@ -321,10 +321,18 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                 }
                 for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.loose) {
                     let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
-                    if let Some((_, _, held)) = shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name)
-                        && held != want
-                    {
-                        extra.push(format!("column {}.{} changed: ON DELETE {held} -> ON DELETE {want}", t.name, c.name));
+                    match shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name) {
+                        Some((_, _, held)) if held != want => extra.push(format!(
+                            "column {}.{} changed: ON DELETE {held} -> ON DELETE {want}",
+                            t.name, c.name
+                        )),
+                        // An existing column that has to become a foreign key: no
+                        // ALTER adds one, so only a rebuild does.
+                        None if have.iter().any(|h| h.name == c.name) => extra.push(format!(
+                            "column {}.{} has no foreign key in the database; the declaration's needs a rebuild",
+                            t.name, c.name
+                        )),
+                        _ => {}
                     }
                 }
             }

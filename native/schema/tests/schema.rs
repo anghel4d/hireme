@@ -103,3 +103,19 @@ fn the_compiled_constants_are_the_parsed_declaration() {
         assert_eq!(ids, want, "{}", t.name);
     }
 }
+
+#[test]
+fn a_frozen_database_whose_foreign_keys_disagree_with_the_declaration_needs_a_rebuild() {
+    use schema::sql::{Shape, additive};
+    let s = parse(SOURCE).unwrap();
+
+    // audit.key_id is loose: a foreign key the database still holds is the hand's to remove.
+    let held = Shape::read("col audit key_id INTEGER 0 -\nfk audit key_id SET NULL\n").unwrap();
+    let diff = additive(&s, &held).unwrap();
+    assert!(diff.extra.iter().any(|x| x.contains("audit.key_id has a foreign key")), "{:?}", diff.extra);
+
+    // applications.corporation_id is a ref: an existing column without its foreign key needs a rebuild.
+    let missing = Shape::read("col applications corporation_id INTEGER 0 -\n").unwrap();
+    let diff = additive(&s, &missing).unwrap();
+    assert!(diff.extra.iter().any(|x| x.contains("applications.corporation_id has no foreign key")), "{:?}", diff.extra);
+}
