@@ -21,9 +21,10 @@ CHROMIUM=${CHROMIUM:-/nix/store/ini1ifgvcsvw48x4mxawrv9jvbdwn70p-chromium-155.0.
 # made (npm's own cache makes it quick), with a package.json of its own and
 # no workspace or ancestor lookup: code is never run from a path someone
 # else could have prepared.
-E2E_NODE= OUT=${OUT:-} TMP= NODE_PID= ACC_PID=
+E2E_NODE= OUT=${OUT:-} TMP= NODE_PID= ACC_PID= BG_PID=
 
 cleanup() {
+  if [ -n "$BG_PID" ]; then kill -TERM -- "-$BG_PID" 2>/dev/null || true; wait "$BG_PID" 2>/dev/null || true; fi
   if [ -n "$ACC_PID" ]; then kill -TERM -- "-$ACC_PID" 2>/dev/null || true; wait "$ACC_PID" 2>/dev/null || true; fi
   if [ -n "$NODE_PID" ]; then kill -TERM -- "-$NODE_PID" 2>/dev/null || true; wait "$NODE_PID" 2>/dev/null || true; fi
   [ -z "$TMP" ] || rm -rf "$TMP"
@@ -42,9 +43,17 @@ mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
 
 echo "out=$OUT sha=${SHA:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)}"
 
-# Long steps run in the background and are waited for, so a signal to this
-# script is acted on at once, not when the step ends.
-bg() { "$@" & wait $!; }
+# Long steps run in their own session in the background and are waited for,
+# so a signal to this script is acted on at once and teardown takes the step
+# (and its children) down too.
+bg() {
+  setsid "$@" &
+  BG_PID=$!
+  local rc=0
+  wait "$BG_PID" || rc=$?
+  BG_PID=
+  return $rc
+}
 
 if [ -z "${HIREME_MCP:-}" ]; then
   bg cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
@@ -54,8 +63,8 @@ fi
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
 printf '{"private":true}\n' >"$E2E_NODE/package.json"
-(cd "$E2E_NODE" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bg npm --prefix "$E2E_NODE" --no-workspaces \
-  --ignore-scripts --no-audit --no-fund install --silent playwright@1.64.1)
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bg env -C "$E2E_NODE" npm --prefix "$E2E_NODE" --no-workspaces \
+  --ignore-scripts --no-audit --no-fund install --silent playwright@1.64.1
 [ -f "$E2E_NODE/node_modules/playwright/index.mjs" ] || { echo "FAIL setup: playwright did not install into $E2E_NODE"; echo "res=1"; exit 1; }
 
 cd "$ROOT"
