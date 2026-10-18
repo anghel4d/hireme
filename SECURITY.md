@@ -343,6 +343,7 @@ writer for long.
 | Refused key HELLOs recorded | 600 a minute in all |
 | Live keys per account | 100 |
 | Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
+| Source URL | 2,048 bytes, refused before any parsing (as a cited put's source and as a `sources` row); a port, when one is written, is ASCII digits up to 65535 (leading zeros allowed), else the URL names no host and is refused |
 
 ## Limits
 
