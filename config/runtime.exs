@@ -22,6 +22,10 @@ if config_env() == :dev and System.get_env("DATABASE_PATH") do
   config :hireme, Hireme.Repo, database: System.get_env("DATABASE_PATH")
 end
 
+# HIREME_GATE=off runs the wire over the WebSocket carrier alone, with no
+# gate to build (certification runs, a machine without the Rust toolchain).
+if System.get_env("HIREME_GATE") == "off", do: config(:hireme, :gate, false)
+
 if config_env() == :prod do
   database =
     System.get_env("DATABASE_PATH") ||

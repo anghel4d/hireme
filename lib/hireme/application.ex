@@ -10,23 +10,30 @@ defmodule Hireme.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      Hireme.Repo,
-      Hireme.Store,
-      {Phoenix.PubSub, name: Hireme.PubSub},
-      Hireme.RateLimit,
-      Hireme.Accounts.Tickets,
-      Hireme.Sequencer.Supervisor,
-      # Applies the baseline and pending additive files before any request,
-      # then keeps the daily backup.
-      Hireme.Release,
-      Hireme.Mail,
-      HiremeWeb.Endpoint,
-      {HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])},
-      HiremeWeb.Session.Drain
-    ]
+    children =
+      [
+        Hireme.Repo,
+        Hireme.Store,
+        {Phoenix.PubSub, name: Hireme.PubSub},
+        Hireme.RateLimit,
+        Hireme.Accounts.Tickets,
+        Hireme.Sequencer.Supervisor,
+        # Applies the baseline and pending additive files before any request,
+        # then keeps the daily backup.
+        Hireme.Release,
+        Hireme.Mail,
+        HiremeWeb.Endpoint
+      ] ++
+        gate() ++
+        [HiremeWeb.Session.Drain]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Hireme.Supervisor)
+  end
+
+  defp gate do
+    if Application.get_env(:hireme, :gate, true),
+      do: [{HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])}],
+      else: []
   end
 
   @impl true
