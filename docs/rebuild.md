@@ -474,7 +474,10 @@ is judged again), and the delta to subscribers and to the sequencer's
 kernel. A put that restates its row exactly (every cell as stored and, for
 a cited cell, the same `as_of` and the same source as its last citation)
 is acknowledged at the row's current `rev` and writes nothing; the same
-value from another source is cited, as corroboration.
+value from another source is cited, as corroboration. The rule is per
+cell: a put that changes some cells cites only the cells it changes or
+corroborates. A restatement is decided before the limits check, so at a
+cap it is still acknowledged.
 
 ## Lease and keys
 
