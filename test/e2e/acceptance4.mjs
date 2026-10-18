@@ -2,7 +2,8 @@
 // acceptance'): with the desk and world lenses open, a real hireme-mcp on a
 // key minted in the account lens leases 16, moves one application to
 // draft_ready and adds a corporation with a cited headcount and an office;
-// the browser shows all three without a reload. Run by test/e2e/run.sh,
+// the browser shows all three without a reload; then a reload from the
+// snapshot paints the desk restoring before its cards. Run by test/e2e/run.sh,
 // which boots the node; this script needs BASE, HIREME_MCP, CHROMIUM, OUT.
 
 import { chromium } from "playwright";
@@ -225,6 +226,36 @@ await step("no reload and no page error", pages, async () => {
   if (reloaded.length) throw new Error(`reloaded: ${reloaded.join(", ")}`);
   if (errors.length) throw new Error(errors.join(" | "));
   return "none";
+});
+
+// After a reload that resumes from the IndexedDB snapshot, the desk paints
+// before its first board derive: "Restoring the desk…" shows first, the
+// cards after it, and the first contentful paint does not wait for them.
+await step("a reload from the snapshot paints the desk restoring before its cards", pages, async () => {
+  await until(async () => (await desk.evaluate(async () => (await indexedDB.databases()).map((d) => d.name))).includes("hireme"), "the snapshot database (saved a few seconds after rows move)");
+  await sleep(6000);
+  await desk.addInitScript(() => {
+    const t = (globalThis.__order = []);
+    new PerformanceObserver((l) => { for (const e of l.getEntries()) t.push({ at: e.startTime, what: e.name }) }).observe({ type: "paint", buffered: true });
+    const watch = () => {
+      const lens = document.getElementById("lens");
+      if (!lens) return void requestAnimationFrame(watch);
+      const note = () => t.push({ at: performance.now(), what: lens.querySelector("article.app-card") ? "cards" : lens.textContent.includes("Restoring the desk") ? "restoring" : "other" });
+      note();
+      new MutationObserver(note).observe(lens, { childList: true, subtree: true, characterData: true });
+    };
+    watch();
+  });
+  await desk.reload();
+  await until(async () => (await desk.locator("article.app-card").count()) >= 20, "20 article.app-card after the reload");
+  const order = await desk.evaluate(() => globalThis.__order);
+  const first = (w) => order.find((x) => x.what === w)?.at;
+  const [fcp, restoring, cards] = [first("first-contentful-paint"), first("restoring"), first("cards")];
+  if (restoring === undefined) throw new Error(`never painted "Restoring the desk…": ${JSON.stringify(order.slice(0, 8))}`);
+  if (!(cards > restoring)) throw new Error(`restoring at ${restoring} is not before the cards at ${cards}`);
+  if (!(fcp < cards)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards}`);
+  if (errors.length) throw new Error(errors.join(" | "));
+  return `restoring ${restoring.toFixed(1)} ms, first contentful paint ${fcp.toFixed(1)} ms, cards ${cards.toFixed(1)} ms`;
 });
 
 agent?.stop();
