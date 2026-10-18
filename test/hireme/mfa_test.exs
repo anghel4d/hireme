@@ -153,4 +153,25 @@ defmodule Hireme.MfaTest do
     {:ok, %{uri: uri}} = Mfa.begin_totp(s, "me@example.com")
     assert URI.decode(URI.parse(uri).path) == "/Hireme:me@example.com"
   end
+
+  test "a seed that no longer unseals matches no code, the empty key's least of all", %{
+    session: s,
+    email: email
+  } do
+    {:ok, %{secret: secret}} = Mfa.begin_totp(s, "me")
+    {:ok, _, _} = Mfa.confirm_totp(s, code(secret), "phone")
+    {:ok, _, pending} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+
+    old = Application.fetch_env!(:hireme, :secret_key_base)
+    Application.put_env(:hireme, :secret_key_base, "rotated+" <> String.duplicate("x", 64))
+    on_exit(fn -> Application.put_env(:hireme, :secret_key_base, old) end)
+
+    later = System.os_time(:second) + 30
+
+    assert {:error, :code} =
+             Mfa.verify_totp(pending, NimbleTOTP.verification_code(<<>>, time: later))
+
+    assert {:error, :code} = Mfa.verify_totp(pending, code(secret, later))
+    assert Mfa.required?(pending)
+  end
 end

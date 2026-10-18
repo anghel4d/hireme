@@ -101,7 +101,7 @@ defmodule Hireme.Keys do
     name = name |> to_string() |> String.trim()
 
     with :ok <- fresh(session),
-         :ok <- if(name != "" and String.length(name) <= 100, do: :ok, else: {:error, :name}),
+         :ok <- if(name?(name), do: :ok, else: {:error, :name}),
          {:ok, masks} <- masks(masks) do
       key_id = Security.base62(12)
       secret = Security.base62(43)
@@ -183,6 +183,13 @@ defmodule Hireme.Keys do
     end
   end
 
+  # A key's name is mailed in notices to the account's addresses: no
+  # control or format character (a newline would write the mail's next line).
+  defp name?(name),
+    do:
+      name != "" and String.length(name) <= 100 and
+        not String.match?(name, ~r/[\p{Cc}\p{Cf}\x{2028}\x{2029}]/u)
+
   @doc "Whether `new` grants anything `old` did not."
   @spec widens?(masks() | Key.t(), masks()) :: boolean()
   def widens?(old, new) do
@@ -195,7 +202,7 @@ defmodule Hireme.Keys do
   def rename(%Key{} = key, name, meta \\ %{}) do
     name = name |> to_string() |> String.trim()
 
-    if name != "" and String.length(name) <= 100 do
+    if name?(name) do
       key =
         key
         |> Ecto.Changeset.change(name: name, rev: key.rev + 1)

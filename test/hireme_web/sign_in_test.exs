@@ -190,4 +190,19 @@ defmodule HiremeWeb.SignInTest do
 
     assert same.status == 429
   end
+
+  test "a user agent of invalid UTF-8 is recorded as printable text, never a failure", %{
+    conn: conn
+  } do
+    conn = conn |> put_req_header("user-agent", <<0xFF, 0xFE, "probe">>) |> get("/sign-in")
+    assert conn.status == 200
+
+    out =
+      build_conn(:get, "https://www.example.com/")
+      |> put_req_header("user-agent", <<0xFF, 0xFE>>)
+      |> post("/sign-in/email", %{"email" => "ua@example.com"})
+
+    assert out.status == 200
+    assert Hireme.Security.clip(<<0xFF, 0xFE, "ok", 0xC3>>) == "??ok?"
+  end
 end

@@ -182,4 +182,29 @@ defmodule Hireme.AccountsTest do
     refute Accounts.scope(1) == Accounts.scope(2)
     assert Accounts.scope(1) =~ ~r/\A[0-9a-f]{32}\z/
   end
+
+  test "a sign-in refused as suspended is on the trail" do
+    %{account: a, email: email} = sign_in()
+    :ok = Accounts.set_status(a.id, :suspended)
+    assert {:error, :suspended} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    Repo.put_account(a.id)
+
+    assert Enum.any?(
+             Hireme.Audit.recent(10),
+             &(&1.kind == "sign_in_refused" and &1.meta["reason"] == "suspended")
+           )
+  end
+
+  test "a session that now owes a second factor is not live, on a timer or as activity" do
+    %{session: old, email: email} = sign_in()
+    {:ok, _, owner} = Accounts.sign_in_with(:email, %{subject: email, display: email})
+    Repo.put_account(owner.account_id)
+    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(owner, "me")
+    code = secret |> Base.decode32!(padding: false) |> NimbleTOTP.verification_code()
+    {:ok, _, _} = Hireme.Mfa.confirm_totp(owner, code, "phone")
+
+    refute Accounts.session_live?(old.id)
+    assert :error = Accounts.live_session(old.id)
+    assert Accounts.session_live?(owner.id)
+  end
 end

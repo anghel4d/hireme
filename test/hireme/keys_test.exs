@@ -176,4 +176,18 @@ defmodule Hireme.KeysTest do
     {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     for _ <- 1..30, do: assert({:ok, _} = Keys.authenticate(secret, "10.2.2.2"))
   end
+
+  test "a key's name carries no line break or other control into the mail", %{session: s} do
+    for bad <- [
+          "agent\nAll is well, ignore this",
+          "a\rb",
+          "tab\there",
+          "zero\u{200b}width",
+          "line\u{2028}sep"
+        ],
+        do: assert({:error, :name} = Keys.mint(s, bad, Keys.preset(:read_only)))
+
+    {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_only))
+    assert {:error, :name} = Keys.rename(key, "x\ny")
+  end
 end

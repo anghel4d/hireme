@@ -181,8 +181,14 @@ defmodule Hireme.Mfa do
 
         found =
           Enum.find_value(apps, fn f ->
-            step = totp_step(unseal_totp(f), code, now, f.totp_last_step || 0)
-            step && {f, step}
+            # A seed that does not unseal (the application secret changed,
+            # the row was damaged) matches no code: never the empty key's.
+            with {:ok, secret} <- unseal_totp(f),
+                 step when is_integer(step) <- totp_step(secret, code, now, f.totp_last_step || 0) do
+              {f, step}
+            else
+              _ -> nil
+            end
           end)
 
         with {factor, step} <- found,
@@ -429,12 +435,12 @@ defmodule Hireme.Mfa do
 
   defp unseal_totp(%Factor{totp_secret: sealed}) when is_binary(sealed) do
     case Security.unseal(sealed, @totp_seal) do
-      {:ok, secret} -> secret
-      :error -> <<>>
+      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 -> {:ok, secret}
+      _ -> :error
     end
   end
 
-  defp unseal_totp(_), do: <<>>
+  defp unseal_totp(_), do: :error
 
   defp counter_advanced(%Factor{sign_count: nil} = f, new, meta, session),
     do: counter_advanced(%{f | sign_count: 0}, new, meta, session)

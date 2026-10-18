@@ -274,7 +274,8 @@ defmodule Hireme.Accounts do
   end
 
   @doc """
-  Whether browser session `session_id` may still act, without counting as
+  Whether browser session `session_id` may still act (live, active, and
+  past any second factor the account now has), without counting as
   activity: for a timer (the wire's tick), which must let an abandoned tab
   idle out.
   """
@@ -294,7 +295,10 @@ defmodule Hireme.Accounts do
              ),
              skip_account: true
            ),
-         true <- live?(s, now) and active?(a) do
+         true <- live?(s, now) and active?(a),
+         # A session that owes its second factor (one was enrolled since it
+         # signed in) may hold no wire, as it may mint no ticket.
+         false <- Hireme.Mfa.required?(s) do
       {:ok, s, now}
     else
       _ -> :error
@@ -429,6 +433,12 @@ defmodule Hireme.Accounts do
       {token, session} = start_session(account, meta)
       {:ok, token, session}
     else
+      Audit.record(
+        :sign_in_refused,
+        %{provider: provider, identity_id: identity.id, reason: :suspended},
+        Map.put(meta, :account_id, identity.account_id)
+      )
+
       {:error, :suspended}
     end
   end

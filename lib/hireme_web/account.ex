@@ -66,6 +66,10 @@ defmodule HiremeWeb.Account do
   @doc "Run one method for the browser session in `ctx`."
   @spec call(String.t(), map(), ctx()) :: {:ok, map()} | {:park, :account} | {:error, map()}
   def call(method, params, ctx) when is_binary(method) and is_map(params) do
+    guarded(method, fn -> checked(method, params, ctx) end)
+  end
+
+  defp checked(method, params, ctx) do
     with nil <- ctx[:key],
          id when is_integer(id) <- ctx[:session_id],
          {:ok, %Session{account_id: account_id} = session} <- live(id, activity?(method, params)),
@@ -93,13 +97,30 @@ defmodule HiremeWeb.Account do
   defp activity?(_, %{"passive" => true}), do: false
   defp activity?(_, _), do: true
 
-  # A malformed call answers `invalid` and the wire session lives on.
-  defp safely(method, params, session, ctx) do
-    method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+  defp safely(method, params, session, ctx),
+    do: method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
+
+  # Whatever raises in a call (a malformed param, the database) answers
+  # `invalid` and the wire session lives on. Logged with the stack only:
+  # the params may carry codes, names or a key's secret, and the context
+  # the session.
+  # A frame may carry its call's arguments; the log keeps only the arity.
+  defp arities(stack),
+    do:
+      Enum.map(stack, fn
+        {m, f, a, l} when is_list(a) -> {m, f, length(a), l}
+        frame -> frame
+      end)
+
+  defp guarded(method, fun) do
+    fun.()
   rescue
-    # Logged without the params, which may carry codes or names.
     e ->
-      Logger.error("account.* #{method} raised: " <> Exception.format(:error, e, __STACKTRACE__))
+      Logger.error(
+        "account.* #{method} raised #{inspect(e.__struct__)}: " <>
+          Exception.format_stacktrace(arities(__STACKTRACE__))
+      )
+
       {:error, %{error: "invalid"}}
   end
 

@@ -242,10 +242,17 @@ defmodule Hireme.Security do
     end
   end
 
-  @doc "A clipped, printable copy of request metadata for the trail."
+  @doc """
+  A clipped, printable copy of request metadata for the trail: byte-wise,
+  every byte outside printable ASCII becomes `?`, so any input (a header of
+  invalid UTF-8 included) gives a valid string and never raises.
+  """
   @spec clip(term(), pos_integer()) :: String.t()
-  def clip(text, max \\ 200),
-    do: text |> to_string() |> String.replace(~r/[^\x20-\x7e]/u, "?") |> String.slice(0, max)
+  def clip(text, max \\ 200) do
+    bin = to_string(text)
+    bin = binary_part(bin, 0, min(byte_size(bin), max))
+    for <<b <- bin>>, into: "", do: if(b in 0x20..0x7E, do: <<b>>, else: "?")
+  end
 
   defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)
 end
