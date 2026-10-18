@@ -306,6 +306,9 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Off-screen cards skip layout and paint until they scroll near: the board stays cheap as it grows. */
+  content-visibility: auto;
+  contain-intrinsic-size: 250px 146px;
 }
 .app-card:hover { border-color: var(--muted); }
 /* Which agent's lease claims the card; empty when none does. */
