@@ -103,6 +103,11 @@ impl Carrier {
         (carrier, rx)
     }
 
+    /// Whether a session is up right now (between connect and close).
+    pub async fn connected(&self) -> bool {
+        self.live.lock().await.is_some()
+    }
+
     /// Drops the session; the next one boots whole.
     pub fn restart(&self) {
         self.kick.notify_one();

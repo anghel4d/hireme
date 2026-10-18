@@ -98,6 +98,12 @@ function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
+/** The sha of the listing the application's row names now. */
+const listingSha = (appId: number): string => {
+  const raw = (application(appId) as Doc | null)?.application.listing_raw as { sha?: string } | null | undefined
+  return raw?.sha ?? ""
+}
+
 /** A reply about one application lands only while that application is the one shown. */
 const mine = (appId: number, p: Partial<FocusView>) => {
   if (v().id === appId) patch(p)
@@ -125,7 +131,7 @@ async function fetchAround(appId: number, a: Row): Promise<void> {
  */
 function rail(d: Doc, appId: number): Html {
   const stage = str(d.application.stage)
-  const armed = v().edit === "fire"
+  const armed = v().fireArmed === appId
   return html`<ol class="rail" aria-label="Pipeline" data-key="rail">${d.rail.map((r) => {
     const fire = r.stage === "open_fire"
     return html`<li data-key="${r.stage}" class="pip-${r.pip}${r.stage === stage ? " now" : ""}">
@@ -172,8 +178,9 @@ function cv(d: Doc): Html {
 }
 
 function listing(a: Row, appId: number): Html {
-  const l = v().listing
-  const raw = a.listing_raw as { length?: number } | null
+  const raw = a.listing_raw as { length?: number; sha?: string } | null
+  // A listing rewritten since it was read is read afresh: its sha names the version shown.
+  const l = v().listing && v().listing?.sha === (raw?.sha ?? "") ? v().listing : null
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open</a>` : EMPTY}</h2>
     ${raw && raw.length ? l === null
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${raw.length.toLocaleString()} bytes)</button>`
@@ -265,8 +272,13 @@ function act(name: string, el: HTMLElement): void {
       return void command("stage", appId, { stage }).catch(failed)
     }
     case "fire":
-      if (v().edit !== "fire") return patch({ edit: "fire" })
-      patch({ edit: "" })
+      // Arming has its own slot (an open prose editor stays open) and lapses if the second click does not come.
+      if (v().fireArmed !== appId) {
+        patch({ fireArmed: appId })
+        setTimeout(() => v().fireArmed === appId && patch({ fireArmed: 0 }), 6000)
+        return
+      }
+      patch({ fireArmed: 0 })
       return void command("open_fire", appId)
         .then(() => notice("ok", "Fire is open for this application."))
         .catch(failed)
@@ -274,14 +286,14 @@ function act(name: string, el: HTMLElement): void {
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":
       return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", length: 262_144 })
-        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total } }))
+        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total, sha: listingSha(appId) } }))
         .catch(failed)
     case "listing-more": {
       const l = v().listing
       if (!l) return
       return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", offset: l.bytes, length: 262_144 })
         .then((r) => {
-          if (v().listing === l) mine(appId, { listing: { text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
+          if (v().listing === l && l.sha === listingSha(appId)) mine(appId, { listing: { ...l, text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
         })
         .catch(failed)
     }
@@ -336,15 +348,20 @@ const focus: View = {
   refresh() {
     const appId = id()
     if (appId === 0) return
+    // The application's current links, read from its row now: a changed contact or corporation is followed.
+    const a = (application(appId) as Doc | null)?.application
     void rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
-      .then((r) => patch({ messages: r.rows }))
+      .then((r) => mine(appId, { messages: r.rows }))
       .catch(() => {})
-    const corp = v().corporation
-    if (corp) void rpc<{ row: Row }>("get", { table: "corporations", id: Number(corp.id) }).then((r) => patch({ corporation: r.row })).catch(() => {})
+    if (a?.corporation_id) void rpc<{ row: Row }>("get", { table: "corporations", id: Number(a.corporation_id) }).then((r) => mine(appId, { corporation: r.row })).catch(() => {})
+    else mine(appId, { corporation: null })
+    if (a?.contact_id) void rpc<{ row: Row }>("get", { table: "contacts", id: Number(a.contact_id) }).then((r) => mine(appId, { contact: r.row })).catch(() => {})
+    else mine(appId, { contact: null })
   },
   key(ev) {
     if (ev.key === "Escape") {
-      if (v().edit !== "") patch({ edit: "" })
+      if (v().fireArmed !== 0) patch({ fireArmed: 0 })
+      else if (v().edit !== "") patch({ edit: "" })
       else go({ lens: "desk", sub: "" })
       return true
     }

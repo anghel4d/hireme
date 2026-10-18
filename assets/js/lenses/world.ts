@@ -69,7 +69,10 @@ async function reread(): Promise<void> {
   }
 }
 
+let fetching = 0
+
 async function fetchRows(more: boolean): Promise<void> {
+  const me = ++fetching
   const t = current()
   const key = fetchKey()
   const q = model.address.q.get("q") ?? ""
@@ -82,10 +85,12 @@ async function fetchRows(more: boolean): Promise<void> {
   patch({ loading: true, ...(more ? {} : { key, rows: [], next: null, edit: "", cites: null, text: null }) })
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    if (fetchKey() !== key) return
+    // Only the newest fetch lands; a superseded one that is still the newest ends its "Loading…".
+    if (me !== fetching) return
+    if (fetchKey() !== key) return patch({ loading: false })
     patch({ rows: more ? [...v().rows, ...r.rows] : r.rows, next: r.next ?? null, loading: false, error: "" })
   } catch (e) {
-    patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
+    if (me === fetching) patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
   }
 }
 

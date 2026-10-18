@@ -115,6 +115,7 @@ const MESSAGES: Record<string, string> = {
   clone: "That authenticator looks cloned; it was refused.",
   revoked: "That was already revoked.",
   no_factor: "Enroll a factor first.",
+  cap: "That is past the limit of 100; remove one first.",
 }
 
 /** Run an account method; a `step_up` refusal parks it until the session is fresh. */
@@ -145,6 +146,9 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
   patch({ stepUp: null })
   // Linking a way in is HTTP, not an account.* method: it is retried as itself.
   if (waiting?.method === "link") await link(String(waiting.params.provider ?? ""), typeof waiting.params.email === "string" ? waiting.params.email : undefined)
+  // Ceremonies retry as themselves: their answers (a QR code, passkey options) are what the next step needs.
+  else if (waiting?.method === "account.totp.begin") totpBegin()
+  else if (waiting?.method === "account.passkey.begin") await enroll(String(waiting.params.name ?? ""))
   else if (waiting) await call(waiting.method, waiting.params, (r) => reveal(waiting.method, r as Row))
   else await load()
 }
@@ -370,7 +374,7 @@ function keys(): Html {
         <label>Name <input name="name" required maxlength="100" placeholder="research agent"></label>
         ${maskPicker("mint", 0, 0, "read_only", false)}
         <label>Expires after <select name="expires_in_days"><option value="">never</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">a year</option></select></label>
-        <div class="row"><button class="primary">Mint key</button><button type="button" class="ghost" data-act="close">Cancel</button></div>
+        <div class="row"><button class="primary"${flag("disabled", v().minting)}>${v().minting ? "Minting…" : "Mint key"}</button><button type="button" class="ghost" data-act="close">Cancel</button></div>
       </form>` : html`<button type="button" class="primary" data-act="open" data-form="mint">Mint a key</button>`}
   </section>`
 }
@@ -458,13 +462,14 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "session-others":
       return void call("account.session.revoke_others")
     case "mint": {
-      if (!form) return
+      if (!form || v().minting) return
       const days = Number(f.expires_in_days)
       const params = { name: f.name ?? "", ...masksFrom(draft("mint", 0, 0, "read_only", false)), ...(days > 0 ? { expires_in_days: days } : {}) }
+      patch({ minting: true })
       return void call("account.key.mint", params, (r) => {
         patch({ masks: null })
         reveal("account.key.mint", r)
-      })
+      }).finally(() => patch({ minting: false }))
     }
     case "key-change": {
       if (!form) return
@@ -486,9 +491,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "recovery":
       return void call("account.recovery.regenerate", {}, (r) => reveal("account.recovery.regenerate", r))
     case "totp-begin":
-      return void rpc<{ uri: string; secret: string; svg: string }>("account.totp.begin", {})
-        .then((t) => patch({ totp: t, error: "" }))
-        .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? patch({ stepUp: { method: "account.totp.begin", params: {} } }) : patch({ error: String(e) })))
+      return totpBegin()
     case "totp-cancel":
       return patch({ totp: null })
     case "totp-confirm":
@@ -527,6 +530,12 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   void ev
 }
 
+function totpBegin(): void {
+  void rpc<{ uri: string; secret: string; svg: string }>("account.totp.begin", {})
+    .then((t) => patch({ totp: t, error: "" }))
+    .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? patch({ stepUp: { method: "account.totp.begin", params: {} } }) : patch({ error: String(e) })))
+}
+
 async function enroll(name: string): Promise<void> {
   try {
     const { publicKey } = await rpc<{ publicKey: Record<string, unknown> }>("account.passkey.begin", { name })
@@ -546,7 +555,7 @@ const view_: View = {
     const linked = q.get("linked")
     const failed = q.get("link_error")
     if (linked) notice("ok", `${linked} is linked.`)
-    if (failed) notice("error", failed === "taken" ? MESSAGES.taken ?? "" : failed === "denied" ? "Linking was cancelled." : "Linking failed.")
+    if (failed) notice("error", failed === "taken" ? MESSAGES.taken ?? "" : failed === "cap" ? "This account already has the most ways in it may hold (100)." : failed === "denied" ? "Linking was cancelled." : "Linking failed.")
     if (linked || failed) {
       query("linked", "")
       query("link_error", "")

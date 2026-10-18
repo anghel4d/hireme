@@ -65,7 +65,9 @@ export interface FocusView {
   /** The application id these were fetched for. */
   id: number
   /** The raw listing read so far; `bytes` (not characters) is where the next chunk starts. */
-  listing: { text: string; bytes: number; total: number } | null
+  listing: { text: string; bytes: number; total: number; sha: string } | null
+  /** The application whose open-fire button is armed (0: none); it disarms by itself after a few seconds. */
+  fireArmed: number
   messages: Record<string, unknown>[]
   contact: Record<string, unknown> | null
   corporation: Record<string, unknown> | null
@@ -131,6 +133,8 @@ export interface AccountView {
   audit: Record<string, unknown>[] | null
   /** The access being chosen in the open key form ("mint" or "k<id>"), so a redraw never resets it. */
   masks: { form: string; preset: string; read: number; write: number; mayDelete: boolean } | null
+  /** A mint in flight: a second click must not mint a second key whose secret is never shown. */
+  minting: boolean
 }
 
 /** The shell answers /world/:table and /lanes/:lane only, so those lenses always name one. */
@@ -168,10 +172,10 @@ export const model: Model = {
   pending: 0,
   notices: [],
   rows: 0,
-  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null },
+  account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
   world: { key: "", rows: [], next: null, loading: false, edit: "", editRev: 0, cites: null, text: null, error: "" },
   deskLimit: 120,
-  focus: { id: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
+  focus: { id: 0, fireArmed: 0, listing: null, messages: [], contact: null, corporation: null, edit: "", editRev: 0, editText: "", error: "", texts: new Map() },
   outreach: { key: "", picked: null, contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 

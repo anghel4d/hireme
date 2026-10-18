@@ -174,6 +174,7 @@ function patch(old: Node, next: Node): void {
     b.hasAttribute("data-bound") ? false
     : a instanceof HTMLInputElement ? (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)
     : a instanceof HTMLTextAreaElement ? a.value !== a.defaultValue
+    : a instanceof HTMLSelectElement ? a.value !== defaultChoice(a)
     : false
   attributes(a, b)
   if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || a instanceof HTMLSelectElement) {
@@ -199,14 +200,25 @@ function attributes(a: Element, b: Element): void {
 // The value attribute is only the default; the live value is a property.
 // A control the user is in, or has typed into and left, is theirs: a redraw
 // (a PATCH, the minute's TICK) moves its default, never what they typed.
+/** What a select shows on a fresh page: its option marked selected, else its first. An option's value is its text when it has no value attribute. */
+function defaultChoice(a: HTMLSelectElement): string {
+  return (Array.from(a.options).find((o) => o.defaultSelected) ?? a.options[0])?.value ?? ""
+}
+
 function control(a: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, b: Element, edited: boolean): void {
   const value = b instanceof HTMLTextAreaElement ? b.value : b.getAttribute("value") ?? ""
   if (a instanceof HTMLSelectElement) {
+    // The user's choice, read before the options are matched (matching moves the selected attributes).
+    const theirs = a.value
     children(a, b)
-    // An option's value is its text when it has no value attribute.
+    // A select the user changed (or is in) keeps their choice, like an edited input: a redraw
+    // must not turn "Expires after: 30 days" back into "never".
+    if (a === focused || edited) {
+      if (Array.from(a.options).some((o) => o.value === theirs)) a.value = theirs
+      return
+    }
     // With no option marked selected, a fresh page shows the first: so does a redraw.
-    const chosen = (b.querySelector("option[selected]") ?? b.querySelector("option"))?.getAttribute("value") ?? (b.querySelector("option[selected]") ?? b.querySelector("option"))?.textContent ?? undefined
-    if (chosen !== undefined && chosen !== null && a !== focused) a.value = chosen
+    a.value = defaultChoice(a)
     return
   }
   if (a instanceof HTMLTextAreaElement) a.defaultValue = value

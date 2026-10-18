@@ -56,7 +56,7 @@ function view(): Html {
     </section>
     <section class="card" data-key="weights"><h2>Weights</h2>
       <div class="row">
-        <label>Preset <select data-act="preset" data-on="change"><option value="">your weights</option>
+        <label>Preset <select data-act="preset" data-on="change" data-bound><option value="">your weights</option>
           ${Object.keys(d.presets).map((p) => html`<option${flag("selected", p === preset)}>${p}</option>`)}</select></label>
         ${preset !== "" ? html`<button type="button" data-act="adopt" data-preset="${preset}">Use ${preset} as mine</button>` : EMPTY}
       </div>

@@ -62,7 +62,7 @@ function shell(): Html {
   const v = VIEWS[lens]
   return html`<header class="bar">
       <a class="brand" href="/desk" data-nav>hireme</a>
-      <nav aria-label="Lenses">${NAV.map((n) => html`<a href="/${n.lens}" data-nav data-key="${n.lens}"
+      <nav aria-label="Lenses">${NAV.map((n) => html`<a href="${format({ lens: n.lens, sub: "", q: new Map() })}" data-nav data-key="${n.lens}"
         class="tab${n.lens === lens ? " on" : ""}"${n.lens === lens ? html` aria-current="page"` : EMPTY} title="${n.label} (${n.key})">${n.label}</a>`)}</nav>
       ${link()}
       <form method="post" action="/sign-out" data-submit="sign-out" class="sign-out">

@@ -24,7 +24,10 @@ const listKey = (): string => `${model.address.q.get("q") ?? ""}|${model.address
 /** The contact columns the lens edits, in declaration order. */
 const CONTACT: ColumnDef[] = TABLES.contacts.cols.filter((c) => !c.implied && !c.readonly && !c.serverOnly)
 
+let fetching = 0
+
 async function fetchContacts(more: boolean): Promise<void> {
+  const me = ++fetching
   const key = listKey()
   const q = model.address.q.get("q") ?? ""
   const corp = Number(model.address.q.get("corporation") ?? 0)
@@ -37,10 +40,12 @@ async function fetchContacts(more: boolean): Promise<void> {
   patch({ loading: true, ...(more || key === v().key ? {} : { key, contacts: [], next: null }) })
   try {
     const r = await rpc<{ rows: Row[]; next: unknown }>("find", params)
-    if (listKey() !== key) return
+    // Only the newest fetch lands; a superseded one that is still the newest ends its "Loading…".
+    if (me !== fetching) return
+    if (listKey() !== key) return patch({ loading: false })
     patch({ contacts: more ? [...v().contacts, ...r.rows] : r.rows, next: r.next ?? null, loading: false, error: "" })
   } catch (e) {
-    patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
+    if (me === fetching) patch({ loading: false, error: e instanceof Error ? e.message : String(e) })
   }
 }
 

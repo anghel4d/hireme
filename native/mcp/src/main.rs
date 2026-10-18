@@ -83,6 +83,8 @@ struct App {
     held: Mutex<Vec<u32>>,
     out: mpsc::UnboundedSender<String>,
     welcome: RwLock<Option<Welcome>>,
+    /// The masks and schema_rev the catalog was fetched under; set only when that fetch succeeded.
+    catalog_for: RwLock<Option<(u16, u16, bool, u64)>>,
     catalog: RwLock<Option<Catalog>>,
     ready: Notify,
     /// Why the session ended for good, once it has.
@@ -180,6 +182,7 @@ async fn main() {
         held: Mutex::new(Vec::new()),
         out,
         welcome: RwLock::new(None),
+        catalog_for: RwLock::new(None),
         catalog: RwLock::new(None),
         ready: Notify::new(),
         dead: RwLock::new(None),
@@ -245,20 +248,24 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 if !w.leased {
                     app.held.lock().await.clear();
                 }
-                let before = app.welcome.read().await.as_ref().map(|o| (o.read_mask, o.write_mask, o.may_delete, o.schema_rev));
+                let had = app.catalog_for.read().await.is_some();
                 app.rev.store(w.rev, Ordering::Relaxed);
                 let now = (w.read_mask, w.write_mask, w.may_delete, w.schema_rev);
                 *app.welcome.write().await = Some(w);
-                let fresh = app.catalog.read().await.is_none() || before != Some(now);
+                // Refetched until a fetch under these very masks succeeds: one failed call after a
+                // widening must not leave the narrow catalog in place for the life of the process.
+                let fresh = *app.catalog_for.read().await != Some(now);
                 if fresh {
+                    let before = had;
                     match app.carrier.rpc("schema", &json!({})).await {
                         Ok(Ok(v)) => {
                             *app.catalog.write().await = Some(Catalog::from_json(&v));
+                            *app.catalog_for.write().await = Some(now);
                         }
                         Ok(Err(e)) => eprintln!("hireme-mcp: schema refused: {e}"),
                         Err(e) => eprintln!("hireme-mcp: schema: {}", e.0),
                     }
-                    if before.is_some() || app.listed_early.swap(false, Ordering::Relaxed) {
+                    if before || app.listed_early.swap(false, Ordering::Relaxed) {
                         app.tools_changed().await;
                     }
                 }
@@ -301,6 +308,8 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                 eprintln!("hireme-mcp: session ended: {reason} {message}");
                 // New masks or a new schema can change which rows this key sees: the next BOOT is whole.
                 if reason == "grants" || reason == "schema" {
+                    // Empty now, so nothing may be judged against it until the next BOOT is in.
+                    app.trained.store(false, Ordering::Relaxed);
                     if let Ok(mut k) = app.kernel.lock() {
                         *k = Kernel::new();
                         k.set_today(today());
@@ -312,7 +321,10 @@ async fn follow(app: Arc<App>, mut events: mpsc::UnboundedReceiver<Event>) {
                     app.ready.notify_waiters();
                     app.tools_changed().await;
                     // The server ended every stream: each listen gets its graceful closing answer.
+                    // The server ends each stream: notifications/cancelled (the Cancellation page's MUST) and
+                    // the graceful result (the Subscriptions page's SHOULD), both naming the listen.
                     for (_, (id, _)) in app.reqs.lock().await.listens.drain() {
+                        app.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id,"reason":"the hireme session ended","_meta":{META_SUB: id}}}));
                         app.send(json!({"jsonrpc":"2.0","id":id,"result":{"resultType":"complete","_meta":{META_SUB: id}}}));
                     }
                     app.watches.lock().await.clear();
@@ -412,20 +424,20 @@ impl App {
             return self.notification(&method, &params).await;
         };
         if !(id.is_string() || id.is_i64() || id.is_u64()) {
-            return self.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"a request id is a string or an integer, never null"}}));
+            return self.refuse(&id, json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"a request id is a string or an integer, never null"}})).await;
         }
         let meta = params.get("_meta");
         let modern = meta.and_then(|m| m.get(META_VERSION)).is_some();
         if modern {
             let m = meta.unwrap_or(&Json::Null);
             let Some(v) = m.get(META_VERSION).and_then(Json::as_str) else {
-                return self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"_meta protocolVersion must be a string"}}));
+                return self.refuse(&id, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"_meta protocolVersion must be a string"}})).await;
             };
             if v != MODERN {
-                return self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":supported(),"requested":v}}}));
+                return self.refuse(&id, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":supported(),"requested":v}}})).await;
             }
             if !m.get("io.modelcontextprotocol/clientCapabilities").is_some_and(Json::is_object) {
-                return self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"_meta io.modelcontextprotocol/clientCapabilities is required"}}));
+                return self.refuse(&id, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"_meta io.modelcontextprotocol/clientCapabilities is required"}})).await;
             }
         }
         let key = id.to_string();
@@ -462,6 +474,12 @@ impl App {
             Ok(r) => self.send(json!({"jsonrpc":"2.0","id":id,"result":result_type(modern, r)})),
             Err(e) => self.send(json!({"jsonrpc":"2.0","id":id,"error":e})),
         }
+    }
+
+    /// An answer before the request was taken up: its id leaves the in-flight set with it, so a later cancel finds nothing to mark.
+    async fn refuse(&self, id: &Json, answer: Json) {
+        self.reqs.lock().await.inflight.remove(&id.to_string());
+        self.send(answer);
     }
 
     async fn notification(&self, method: &str, params: &Json) {
@@ -844,7 +862,8 @@ impl App {
         // wait a little for the train, and send unjudged if it has not come.
         if ops.iter().any(|o| o.resident) {
             let deadline = tokio::time::Instant::now() + READY_WAIT;
-            while !self.trained.load(Ordering::Relaxed) && tokio::time::Instant::now() < deadline {
+            // No carrier at all (a reconnect gap): waiting buys nothing, the send below says "not connected".
+            while !self.trained.load(Ordering::Relaxed) && tokio::time::Instant::now() < deadline && self.carrier.connected().await {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
