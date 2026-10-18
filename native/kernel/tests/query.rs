@@ -125,6 +125,13 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     k.set_grants(Grants { human: false, read_mask: 0b10, write_mask: 0, may_delete: false });
     assert_eq!(refused(&k, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
     assert_eq!(refused(&k, json!({"op": "find", "table": "op_ledger"})), schema::refusal::NOT_FOUND);
+    // A declared table with no rows reads empty; the account's views are
+    // the operator's, its secrets nobody's.
+    let op = kernel();
+    assert_eq!(q(&op, json!({"op": "find", "table": "trusted"}))["rows"], json!([]));
+    assert_eq!(q(&op, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
+    assert_eq!(refused(&k, json!({"op": "find", "table": "acct_keys"})), schema::refusal::NOT_FOUND);
+    assert_eq!(refused(&op, json!({"op": "find", "table": "accounts"})), schema::refusal::NOT_FOUND);
     // Until its WELCOME, a kernel reads nothing.
     assert_eq!(refused(&kernel_with(Grants::default()), json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
     // Hostile values refuse, never trap: an offset split inside a character.

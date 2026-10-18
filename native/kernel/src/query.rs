@@ -92,10 +92,15 @@ fn readable(g: &Grants, name: Option<&Json>) -> Result<&'static TableModel, Refu
     let Some(name) = name.and_then(Json::as_str) else {
         return Err(Refusal { code: refusal::TYPE, data: json!({"param": "table", "got": got(name)}) });
     };
+    // A replicated table reads whether or not any row arrived. The system
+    // domain's views (acct_*) are the operator's alone; server tables (the
+    // account's secrets) never replicate.
     match schema::TABLES.iter().find(|t| t.name == name) {
-        Some(t) if matches!(t.residency, Residency::Resident | Residency::Server) => {
+        Some(t) if t.residency != Residency::Server => {
             let bit = if t.unmasked { 0 } else { t.domain_bit };
-            if bit == 0 {
+            if bit == 0 && g.human && t.residency != Residency::Resident {
+                Ok(t)
+            } else if bit == 0 {
                 Err(Refusal { code: refusal::NOT_FOUND, data: json!({"table": echo(name)}) })
             } else if g.read_mask & bit == 0 {
                 Err(Refusal { code: refusal::SCOPE, data: json!({"table": echo(name)}) })
