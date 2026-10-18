@@ -33,9 +33,10 @@ defmodule Hireme.Sequencer do
   submitting sessions get their ACK and NACK frames: an op's PATCH never
   follows its ACK.
 
-  The ledger answers a resent `op_id` with its first verdict and writes
-  nothing. `rate` and `internal` refusals are not recorded, since the
-  same op is expected to succeed when retried.
+  The ledger keeps each writer's ACKs for 24 h: a resent `op_id` that was
+  ACKed answers its first ACK and writes nothing. A refused op wrote
+  nothing and is not recorded, so its resend is judged again against the
+  state it now meets.
 
   A deleted row takes its dependents with it: rows whose required ref
   names it are deleted, nullable refs are cleared, each as a write of its
@@ -700,9 +701,7 @@ defmodule Hireme.Sequencer do
 
     q =
       from(l in Hireme.Rows.OpLedger,
-        where:
-          l.writer == ^(key_id || 0) and l.op_id == ^signed(op_id) and l.inserted_at > ^since and
-            is_nil(l.refusal)
+        where: l.writer == ^(key_id || 0) and l.op_id == ^signed(op_id) and l.inserted_at > ^since
       )
 
     case Repo.one(q) do
