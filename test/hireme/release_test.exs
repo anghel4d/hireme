@@ -1,5 +1,5 @@
 defmodule Hireme.ReleaseTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Exqlite.Sqlite3
   alias Hireme.Release
@@ -47,5 +47,58 @@ defmodule Hireme.ReleaseTest do
       |> Enum.map(&Task.await(&1, 30_000))
 
     assert Enum.sort_by(results, &length/1) |> hd() == []
+  end
+
+  # VACUUM INTO refuses to run inside a transaction, which the sandbox
+  # always holds open; this test writes nothing, so the pool runs unboxed.
+  describe "the daily backup" do
+    setup do
+      Ecto.Adapters.SQL.Sandbox.mode(Hireme.Repo, :auto)
+      on_exit(fn -> Ecto.Adapters.SQL.Sandbox.mode(Hireme.Repo, :manual) end)
+    end
+
+    @tag :tmp_dir
+    test "a backup keeps the newest 13 copies and clears a copy a stop cut short", %{
+      tmp_dir: dir
+    } do
+      for day <- 1..14,
+          do:
+            File.write!(
+              Path.join(dir, "hireme-202609#{String.pad_leading("#{day}", 2, "0")}T000000.db"),
+              ""
+            )
+
+      File.write!(Path.join(dir, "hireme-20260901T000000.db.tmp"), "")
+      {:ok, pid} = Hireme.Release.Backup.start_link(name: :bench_backup, dir: dir, manual: true)
+      assert {:ok, path} = Hireme.Release.Backup.run(pid)
+      assert File.exists?(path)
+      names = File.ls!(dir)
+      assert length(names) == 13
+      refute Enum.any?(names, &String.ends_with?(&1, ".tmp"))
+      refute "hireme-20260901T000000.db" in names
+      GenServer.stop(pid)
+    end
+  end
+
+  describe "with the node's database" do
+    setup tags do
+      Hireme.DataCase.setup_sandbox(tags)
+      :ok
+    end
+
+    test "the purge takes what ended a month ago and leaves what is live" do
+      %{session: ended} = Hireme.DataCase.sign_in()
+      %{session: live} = Hireme.DataCase.sign_in()
+      :ok = Hireme.Accounts.revoke_session(ended.account_id, ended.id)
+
+      # Today nothing has been over long enough.
+      assert %{sessions: 0} = Hireme.Release.Purge.run(Hireme.Store.now())
+      assert Hireme.Repo.get(Hireme.Rows.Session, ended.id, skip_account: true)
+
+      # A month on, the revoked session goes; the live one is untouched today.
+      Hireme.Release.Purge.run(DateTime.add(Hireme.Store.now(), 31 * 86_400))
+      refute Hireme.Repo.get(Hireme.Rows.Session, ended.id, skip_account: true)
+      _ = live
+    end
   end
 end

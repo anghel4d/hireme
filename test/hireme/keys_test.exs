@@ -89,7 +89,7 @@ defmodule Hireme.KeysTest do
     assert Keys.domains() == [world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16]
   end
 
-  property "widening is exactly granting a bit or delete that was not held" do
+  property "widening is exactly granting some domain or delete that was not held" do
     check all(
             r1 <- integer(0..31),
             w1 <- integer(0..31),
@@ -100,12 +100,15 @@ defmodule Hireme.KeysTest do
           ) do
       old = %{read_mask: r1, write_mask: w1, may_delete: d1}
       new = %{read_mask: r2, write_mask: w2, may_delete: d2}
+      has? = fn mask, bit -> rem(div(mask, bit), 2) == 1 end
 
-      grants? =
-        Bitwise.band(r2, Bitwise.bnot(r1)) > 0 or Bitwise.band(w2, Bitwise.bnot(w1)) > 0 or
-          (d2 and not d1)
+      gained =
+        for {_domain, bit} <- Keys.domains(),
+            {a, b} <- [{r1, r2}, {w1, w2}],
+            has?.(b, bit) and not has?.(a, bit),
+            do: bit
 
-      assert Keys.widens?(old, new) == grants?
+      assert Keys.widens?(old, new) == (gained != [] or (d2 and not d1))
     end
   end
 

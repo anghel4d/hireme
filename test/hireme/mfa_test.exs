@@ -147,4 +147,9 @@ defmodule Hireme.MfaTest do
     assert svg =~ ~s(fill="#000)
     assert URI.decode_query(URI.parse(uri).query)["secret"] == secret
   end
+
+  test "an authenticator shows the account's own label, an address included", %{session: s} do
+    {:ok, %{uri: uri}} = Mfa.begin_totp(s, "me@example.com")
+    assert URI.decode(URI.parse(uri).path) == "/Hireme:me@example.com"
+  end
 end

@@ -127,4 +127,36 @@ defmodule HiremeWeb.SignInTest do
     for _ <- 1..20, do: post(spoofed, "/sign-in/email", %{"email" => "c@example.com"})
     assert post(spoofed, "/sign-in/email", %{"email" => "d@example.com"}).status == 429
   end
+
+  test "signing out ends the session on the server", %{conn: conn} do
+    %{token: token} = sign_in()
+    out = conn |> signed_in(token) |> post("/sign-out")
+    assert redirected_to(out) == "/sign-in"
+    assert Hireme.Accounts.session(token) == nil
+  end
+
+  test "the factor page takes an app code or a recovery code, and refuses a wrong one", %{
+    conn: conn
+  } do
+    %{session: s, email: email} = sign_in()
+    Hireme.Repo.put_account(s.account_id)
+    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(s, "me")
+    raw = Base.decode32!(secret, padding: false)
+
+    {:ok, _, [recovery | _]} =
+      Hireme.Mfa.confirm_totp(s, NimbleTOTP.verification_code(raw), "phone")
+
+    {:ok, pending, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+    wrong = conn |> signed_in(pending) |> post("/sign-in/factor/totp", %{"code" => "000000"})
+    assert redirected_to(wrong) =~ "/sign-in/factor?error="
+
+    code = NimbleTOTP.verification_code(raw, time: System.os_time(:second) + 30)
+    ok = conn |> signed_in(pending) |> post("/sign-in/factor/totp", %{"code" => code})
+    assert redirected_to(ok) == "/"
+    assert html_response(conn |> signed_in(pending) |> get("/desk"), 200)
+
+    {:ok, other, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+    rec = conn |> signed_in(other) |> post("/sign-in/factor/recovery", %{"code" => recovery})
+    assert redirected_to(rec) == "/"
+  end
 end

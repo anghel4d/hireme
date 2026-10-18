@@ -171,10 +171,57 @@ defmodule Hireme.Release do
   defp exec!(conn, sql, args), do: rows(conn, sql, args)
 end
 
+defmodule Hireme.Release.Purge do
+  @moduledoc """
+  What nothing needs any longer, deleted once a day before the backup:
+  spent or expired sign-in links and ceremonies a day on, sessions a
+  month after they ended, and notices a month after they were sent or
+  given up. The trail is never purged. SQL only, by the writer lock.
+  """
+
+  import Ecto.Query
+  alias Hireme.Repo
+  alias Hireme.Rows.{Challenge, MagicLink, Outbox, Session}
+
+  @day 86_400
+  @month 30 * @day
+
+  @doc "Purge as of `now`; answers how many rows of each went."
+  @spec run(DateTime.t()) :: %{atom() => non_neg_integer()}
+  def run(now \\ Hireme.Store.now()) do
+    day = DateTime.add(now, -@day)
+    month = DateTime.add(now, -@month)
+
+    Hireme.Store.write(fn ->
+      %{
+        magic_links: delete(from(l in MagicLink, where: l.expires_at < ^day)),
+        challenges: delete(from(c in Challenge, where: c.expires_at < ^day)),
+        sessions:
+          delete(
+            from(s in Session,
+              where: (not is_nil(s.revoked_at) or s.expires_at < ^now) and s.updated_at < ^month
+            )
+          ),
+        outbox:
+          delete(
+            from(n in Outbox,
+              where: (not is_nil(n.sent_at) and n.sent_at < ^month) or n.next_at < ^month
+            )
+          )
+      }
+    end)
+  end
+
+  defp delete(query) do
+    {n, _} = Repo.delete_all(query, skip_account: true)
+    n
+  end
+end
+
 defmodule Hireme.Release.Backup do
   @moduledoc """
   A daily online copy of the database beside it, in `backups/`, keeping
-  13. `Hireme.Store.backup/1` is SQLite's `VACUUM INTO`, a consistent
+  13, after the day's purge (`Hireme.Release.Purge`). `Hireme.Store.backup/1` is SQLite's `VACUUM INTO`, a consistent
   copy of the live database, WAL included, that only reads it. A missed
   day (the node was down) is caught up at start; a failure is logged and
   kept in `status/0`, and a scheduled one is retried within the hour.
@@ -224,6 +271,12 @@ defmodule Hireme.Release.Backup do
   end
 
   defp backup(s) do
+    try do
+      Hireme.Release.Purge.run()
+    rescue
+      e -> Logger.error("purge failed: #{Exception.message(e)}")
+    end
+
     stamp = DateTime.utc_now() |> Calendar.strftime("%Y%m%dT%H%M%S")
     path = Path.join(s.dir, "hireme-#{stamp}.db")
     tmp = path <> ".tmp"
