@@ -116,6 +116,7 @@ defmodule HiremeWeb.PageController do
   import Plug.Conn
   import HiremeWeb, only: [json: 2]
   alias HiremeWeb.Auth
+  alias HiremeWeb.Wire.Codec
 
   def shell(conn, _params) do
     %{account: account, session: session} = conn.assigns
@@ -127,6 +128,7 @@ defmodule HiremeWeb.PageController do
     <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
     <meta name="hireme-wire" content="#{wire_hash()}" />
     <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
+    <meta name="hireme-warm" content="#{Auth.static("/assets/warm.js")}" data-boot="#{Base.encode64(Codec.warm())}" />
     <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
     <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
     #{for c <- Auth.chunks(), do: ~s(<link rel="modulepreload" href="/assets/#{c}" />)}

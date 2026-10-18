@@ -82,6 +82,19 @@ const WT_WAIT_MS = 3000
     }),
   }
   hw.kernel.catch(() => {})
+  // The kernel warms in a worker while the page waits on the socket (warm.ts), started now so it is
+  // up when the module has compiled. Without workers or the node's BOOT the page compiles as it goes.
+  const warm = document.querySelector<HTMLMetaElement>('meta[name="hireme-warm"]')
+  if (warm?.content && warm.dataset.boot && "Worker" in window) {
+    try {
+      const w = new Worker(warm.content)
+      const boot = Uint8Array.from(atob(warm.dataset.boot), (c) => c.charCodeAt(0))
+      // Today as the kernel counts days (kernel.ts todayDay).
+      hw.kernel.then((module) => w.postMessage({ module, boot, today: Math.floor(Date.now() / 86_400_000) + 719_528 }), () => w.terminate())
+    } catch {
+      // A worker refused (CSP, a sandbox): the page compiles as it goes.
+    }
+  }
   let settle = () => {}
   hw.ready = new Promise((r) => (settle = r))
 
