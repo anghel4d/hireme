@@ -88,6 +88,7 @@ const REASONS: &[(&str, &str, &str, &str)] = &[
 const NEEDS: &[(&str, &str, &str, &str)] = &[
     ("heat", "reason", "a heat override needs a reason", "Set heat_override_reason to why the cap is lifted, with heat_override."),
     ("cooldown", "open_generation", "this lineage's window has passed: open a new generation", "Call `open_generation` for the lineage (data: lineage_id), then write to the new generation."),
+    ("type", "id or key", "this needs the row's id or key", "Give `id`, or `key` with one of the table's keys (`schema` with the table lists them)."),
     ("not_found", "application_id", "this needs an application", "Give the application (its id, or `no` where the tool takes one)."),
     ("not_found", "corporation_id", "the application has no corporation", "Set the application's corporation_id first, then retry."),
 ];
@@ -144,19 +145,8 @@ fn advice(code: &str, data: &Json) -> (String, String) {
         let help = if keys.is_empty() { "This table declares no key; name the row by id.".to_owned() } else { format!("Name the row by id, or by exactly one of the table's keys: {list}.") };
         return ("no declared key is made of exactly these columns".to_owned(), help);
     }
-    // A parameter the call left out (or sent as null): {param, got: null}.
-    if code == "type"
-        && data.get("got").is_some_and(Json::is_null)
-        && let Some(p) = data.get("param").and_then(Json::as_str)
-    {
-        return (format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes."));
-    }
-    // A column refusal that lists what a new row lacks.
-    if code == "column"
-        && let Some(cols) = data.get("missing").and_then(Json::as_array)
-    {
-        let cols = cols.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", ");
-        return (line, format!("A new row needs its required columns: {cols}. Add them to `set`, or name an existing row by id or key."));
+    if let Some(d) = shaped(code, data) {
+        return d;
     }
     if let Some(r) = reason {
         return match REASONS.iter().find(|x| x.0 == code && x.1 == r) {
@@ -171,6 +161,39 @@ fn advice(code: &str, data: &Json) -> (String, String) {
         return (x.2.to_owned(), x.3.to_owned());
     }
     (line, todo)
+}
+
+/// Refusals whose meaning is in the shape of their data, not a reason: which fields it carries.
+fn shaped(code: &str, data: &Json) -> Option<(String, String)> {
+    let text = |k: &str| data.get(k).and_then(Json::as_str);
+    let int = |k: &str| data.get(k).and_then(Json::as_u64);
+    let list = |k: &str| data.get(k).and_then(Json::as_array).map(|a| a.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", "));
+    match code {
+        // A parameter the call left out, or sent as null (World echoes it as inspect(nil): "nil").
+        "type" if text("param").is_some() && data.get("reason").is_none() && data.get("got").is_none_or(|g| g.is_null() || g.as_str() == Some("nil")) => {
+            let p = text("param")?;
+            Some((format!("{p} is required here"), format!("Give {p}; the tool's input schema lists what it takes.")))
+        }
+        "too_large" => match (int("limit"), int("max"), text("filter"), text("param")) {
+            (Some(n), Some(max), _, _) => Some((format!("a limit of {n} is over the cap of {max}"), format!("Ask for at most {max} rows and page on with `after`."))),
+            (_, Some(max), Some(f), _) => Some((format!("an `{f}` list over {max} values"), format!("Split the list into calls of at most {max} values each."))),
+            (_, _, _, Some("offset")) => Some(("the offset is past any text".to_owned(), "Give an offset inside the text: below the `len` of its {len, sha} stub.".to_owned())),
+            _ => None,
+        },
+        "column" => {
+            let missing = list("missing")?;
+            Some(match text("command") {
+                Some(c) => (format!("{c} needs {missing}"), format!("Give {missing} in the command's params.")),
+                None => (format!("a new row lacks its required columns: {missing}"), format!("Add {missing} to `set`, or name an existing row by id or key.")),
+            })
+        }
+        // A source named by an id that is no live source (dropped: a tombstone is never cited again).
+        "source_missing" if int("source").is_some() => {
+            let id = int("source")?;
+            Some((format!("no live source has id {id}"), "That source was dropped or never existed. Cite by URL (\"source\": \"https://...\"), which finds or makes a source, or by a live source's id from `find`.".to_owned()))
+        }
+        _ => None,
+    }
 }
 
 /// Every (code, reason) and (code, need) the diagnostics describe, for tests.
@@ -361,7 +384,7 @@ mod tests {
             ("natural_key", "a unique column already holds this value"), ("heat", "company_cap"), ("heat", "ats_vendor_cap"),
             ("heat", "ats_tenant_cap"), ("heat", "ats_batch_cap"), ("internal", "kernel"),
             ("natural_key", "no declared key is made of exactly these columns"),
-            ("heat", "reason"), ("cooldown", "open_generation"), ("not_found", "application_id"), ("not_found", "corporation_id"),
+            ("heat", "reason"), ("cooldown", "open_generation"), ("not_found", "application_id"), ("not_found", "corporation_id"), ("type", "id or key"),
         ];
         let known: Vec<_> = described().collect();
         for (code, r) in sent {
@@ -378,8 +401,31 @@ mod tests {
         let budget = render("cap", "put t", &serde_json::json!({"table": "account", "reason": "text", "cap": 1}));
         assert!(budget.contains("text budget") && !budget.contains("the table is full"), "{budget}");
         // A reason this table does not know leads in the node's own words.
-        let left_out = render("type", "history places", &serde_json::json!({"param": "id", "got": null}));
-        assert!(left_out.starts_with("error[type]: id is required here\n"), "{left_out}");
+        for got in [serde_json::json!(null), serde_json::json!("nil")] {
+            let left_out = render("type", "history places", &serde_json::json!({"param": "id", "got": got}));
+            assert!(left_out.starts_with("error[type]: id is required here\n"), "{left_out}");
+        }
+        let mid = render("type", "text", &serde_json::json!({"param": "offset", "reason": "inside a character"}));
+        assert!(mid.starts_with("error[type]: the offset falls inside a UTF-8 character\n"), "{mid}");
+        let absent = render("type", "history places", &serde_json::json!({"param": "id"}));
+        assert!(absent.starts_with("error[type]: id is required here\n"), "{absent}");
+        let wrong = render("type", "history places", &serde_json::json!({"param": "id", "got": "\"x\""}));
+        assert!(wrong.starts_with("error[type]: the value does not fit"), "{wrong}");
+        let shaped = [
+            ("type", serde_json::json!({"table": "places", "need": "id or key"}), "this needs the row's id or key"),
+            ("too_large", serde_json::json!({"limit": 900, "max": 500}), "a limit of 900 is over the cap of 500"),
+            ("too_large", serde_json::json!({"column": "id", "filter": "in", "max": 1000}), "an `in` list over 1000 values"),
+            ("too_large", serde_json::json!({"param": "offset"}), "the offset is past any text"),
+            ("too_large", serde_json::json!({"bytes": 2000000, "max": 1048576}), "more than 1 MiB of text in one op"),
+            ("column", serde_json::json!({"table": "corporations", "missing": ["name"]}), "a new row lacks its required columns: name"),
+            ("column", serde_json::json!({"command": "open_generation", "missing": ["lineage_id"]}), "open_generation needs lineage_id"),
+            ("source_missing", serde_json::json!({"source": 7}), "no live source has id 7"),
+            ("source_missing", serde_json::json!({"table": "corporations", "column": "headcount"}), "this write needs a source"),
+        ];
+        for (code, data, line) in shaped {
+            let d = render(code, "op", &data);
+            assert!(d.starts_with(&format!("error[{code}]: {line}\n")), "{d}");
+        }
         let odd = render("column", "put t", &serde_json::json!({"reason": "something new"}));
         assert!(odd.starts_with("error[column]: something new\n"), "{odd}");
     }
