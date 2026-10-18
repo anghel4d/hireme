@@ -14,7 +14,7 @@ config :hireme, HiremeWeb.Endpoint,
 # <head> and allowed by its hash in the CSP; `auth` is the factor page's
 # passkey script.
 config :esbuild,
-  version: "0.25.4",
+  version: "0.28.2",
   app: [
     args:
       ~w(js/app.ts css/app.css --bundle --format=esm --target=es2022 --outdir=../priv/static/assets --entry-names=[name] --external:/wasm/*),

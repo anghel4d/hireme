@@ -26,22 +26,22 @@ defmodule Hireme.MixProject do
 
   defp deps do
     [
-      {:phoenix, "~> 1.8.1"},
-      {:ecto_sql, "~> 3.13"},
-      {:ecto_sqlite3, "~> 0.22"},
+      {:phoenix, "~> 1.8.15"},
+      {:ecto_sql, "~> 3.14"},
+      {:ecto_sqlite3, "~> 0.25"},
       {:jason, "~> 1.4"},
-      {:bandit, "~> 1.8"},
-      {:rustler, "~> 0.37", runtime: false},
+      {:bandit, "~> 1.13"},
+      {:rustler, "~> 0.38", runtime: false},
       {:nimble_totp, "~> 1.0"},
       {:wax_, "~> 0.7.0"},
-      {:hammer, "~> 7.1"},
+      {:hammer, "~> 7.5"},
       {:eqrcode, "~> 0.2.1"},
-      {:swoosh, "~> 1.19"},
-      {:assent, "~> 0.3"},
-      {:req, "~> 0.5"},
+      {:swoosh, "~> 1.29"},
+      {:assent, "~> 0.3.1"},
+      {:req, "~> 0.7.5"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
-      {:phoenix_live_reload, "~> 1.6", only: :dev},
-      {:stream_data, "~> 1.2", only: :test},
+      {:phoenix_live_reload, "~> 1.7", only: :dev},
+      {:stream_data, "~> 1.4", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
