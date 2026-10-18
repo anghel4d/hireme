@@ -151,7 +151,7 @@ let
       # The pinned esbuild, without the Mix task's network installer.
       substituteInPlace config/config.exs \
         --replace-fail 'version: "0.28.2",' 'version: "${lib.getVersion esbuild}", path: "${lib.getExe esbuild}",'
-      install -Dm644 ${native}/lib/libnif.so priv/native/libnif.so
+      install -Dm644 ${native}/lib/libnif.so priv/native/nif.so
       install -Dm644 ${kernel-wasm}/kernel.wasm priv/static/wasm/kernel.wasm
     '';
 
