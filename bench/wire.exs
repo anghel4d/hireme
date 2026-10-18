@@ -371,7 +371,7 @@ watcher = Bench.watcher(Accounts.ticket(session))
       {t, {_frames, op}} =
         Bench.us(fn -> Bench.send_ops(op, Codec.encode_ops(ops), length(ops)) end)
 
-      {op, [Enum.sum(Bench.patches(watcher, 20)) | sizes], [t | times]}
+      {op, [Bench.patches(watcher, 20) | sizes], [t | times]}
     end)
   end)
 
@@ -668,10 +668,13 @@ lines = [
   }),
   Bench.line(
     "patch_bytes_per_256_op_seed_frame_max",
-    Enum.max(patch_sizes),
+    patch_sizes |> Enum.map(&Enum.sum/1) |> Enum.max(),
     64 * 1024,
     "bytes",
-    %{note: "a 256-application insert burst with listing_raw deferred"}
+    %{
+      note: "a 256-application insert frame, summed over the PATCH frames it causes",
+      largest_patch_frame: patch_sizes |> List.flatten() |> Enum.max(fn -> 0 end)
+    }
   ),
   Bench.line(
     # The bound holds only if every shape's p99 holds, not the pool's.
