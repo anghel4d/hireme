@@ -60,6 +60,11 @@ let
     // {
       pname = "hireme-native";
       inherit version;
+      # The gate's fixes to the latest wtransport: 0.5-RTT SETTINGS, and
+      # closing handshakes a client abandons.
+      postPatch = ''
+        patch -d "$cargoDepsCopy"/wtransport-0.7.2 -p1 < native/gate/wtransport.patch
+      '';
       cargoBuildFlags = [
         "-p"
         "gate"

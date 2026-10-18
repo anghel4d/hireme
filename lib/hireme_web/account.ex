@@ -163,9 +163,7 @@ defmodule HiremeWeb.Account do
 
   ## Factors
 
-  defp run("account.totp.begin", p, s, _meta) do
-    with {:ok, totp} <- Mfa.begin_totp(s, label(p["label"], s)), do: {:ok, totp}
-  end
+  defp run("account.totp.begin", p, s, _meta), do: Mfa.begin_totp(s, label(p["label"], s))
 
   defp run("account.totp.confirm", %{"code" => code} = p, s, meta) do
     with {:ok, factor, codes} <-
@@ -173,9 +171,7 @@ defmodule HiremeWeb.Account do
          do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
   end
 
-  defp run("account.passkey.begin", p, s, _meta) do
-    with {:ok, options} <- Mfa.begin_webauthn(s, label(p["name"], s)), do: {:ok, options}
-  end
+  defp run("account.passkey.begin", p, s, _meta), do: Mfa.begin_webauthn(s, label(p["name"], s))
 
   defp run("account.passkey.finish", p, s, meta) do
     with {:ok, factor, codes} <- Mfa.confirm_webauthn(s, p, ctx(meta, s)),
