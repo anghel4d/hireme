@@ -339,7 +339,8 @@ pub struct Index {
 
 #[derive(Default)]
 struct Group {
-    members: alloc::collections::BTreeSet<u32>,
+    /// Member id → its load at this group's half-life.
+    members: BTreeMap<u32, f64>,
     /// The sum over every member, in id order.
     total: f64,
 }
@@ -413,13 +414,13 @@ impl Index {
         let l = loads(&s, self.today, &self.cfg);
         self.seats.insert(id, (s, l));
         if let Some(c) = &k.0 {
-            self.by_company.entry(c.clone()).or_default().members.insert(id);
+            self.by_company.entry(c.clone()).or_default().members.insert(id, l[COMPANY]);
         }
         if let Some(v) = k.1 {
-            self.by_vendor.entry(v).or_default().members.insert(id);
+            self.by_vendor.entry(v).or_default().members.insert(id, l[VENDOR]);
         }
         if let Some(t) = &k.2 {
-            self.by_tenant.entry(t.clone()).or_default().members.insert(id);
+            self.by_tenant.entry(t.clone()).or_default().members.insert(id, l[TENANT]);
         }
         if let Some(bv) = k.3 {
             *self.by_batch_vendor.entry(bv).or_default() += 1;
@@ -448,11 +449,11 @@ impl Index {
         Some(k)
     }
 
-    fn sum(seats: &BTreeMap<u32, (Seat, [f64; 3])>, g: &Group, k: usize, skip: u32) -> f64 {
+    fn sum(g: &Group, skip: u32) -> f64 {
         let mut s = 0.0;
-        for m in &g.members {
+        for (m, l) in &g.members {
             if *m != skip {
-                s += seats.get(m).map_or(0.0, |e| e.1[k]);
+                s += l;
             }
         }
         s
@@ -460,21 +461,21 @@ impl Index {
 
     fn resum_company(&mut self, c: &str) {
         if let Some(g) = self.by_company.get(c) {
-            let t = Index::sum(&self.seats, g, COMPANY, u32::MAX);
+            let t = Index::sum(g, u32::MAX);
             self.by_company.get_mut(c).map(|g| g.total = t);
         }
     }
 
     fn resum_vendor(&mut self, v: Vendor) {
         if let Some(g) = self.by_vendor.get(&v) {
-            let t = Index::sum(&self.seats, g, VENDOR, u32::MAX);
+            let t = Index::sum(g, u32::MAX);
             self.by_vendor.get_mut(&v).map(|g| g.total = t);
         }
     }
 
     fn resum_tenant(&mut self, k: &(Vendor, String)) {
         if let Some(g) = self.by_tenant.get(k) {
-            let t = Index::sum(&self.seats, g, TENANT, u32::MAX);
+            let t = Index::sum(g, u32::MAX);
             self.by_tenant.get_mut(k).map(|g| g.total = t);
         }
     }
@@ -493,8 +494,8 @@ impl Index {
     fn load(&self, g: Option<&Group>, k: usize, seat: &Seat, kept: &[(&Seat, [f64; 3])], same: impl Fn(&Seat) -> bool) -> f64 {
         let mut sum = match g {
             None => 0.0,
-            Some(g) if !g.members.contains(&seat.id) => g.total,
-            Some(g) => Index::sum(&self.seats, g, k, seat.id),
+            Some(g) if !g.members.contains_key(&seat.id) => g.total,
+            Some(g) => Index::sum(g, seat.id),
         };
         for (p, l) in kept {
             if p.id != seat.id && same(p) {
@@ -521,7 +522,7 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat], cfg: &Config) -> Verdict
     let kept: Vec<(&Seat, [f64; 3])> = kept.iter().map(|p| (*p, loads(p, ix.today, cfg))).collect();
     let others = |g: Option<&Group>| -> Vec<&Seat> {
         let mut v: Vec<&Seat> = g
-            .map(|g| g.members.iter().filter(|&&m| m != seat.id).filter_map(|m| ix.seats.get(m).map(|e| &e.0)).collect())
+            .map(|g| g.members.keys().filter(|&&m| m != seat.id).filter_map(|m| ix.seats.get(m).map(|e| &e.0)).collect())
             .unwrap_or_default();
         v.extend(kept.iter().map(|k| k.0).filter(|p| p.id != seat.id && p.key == seat.key));
         v
