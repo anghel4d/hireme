@@ -231,27 +231,32 @@ defmodule HiremeWeb.Auth do
     script =
       if s = opts[:script], do: ~s(<script type="module" src="#{static(s)}"></script>), else: ""
 
+    document(conn, status, "#{esc(title)} · Hireme", script, """
+    <body class="auth"><main class="auth-card"><h1>HIREME</h1>
+    #{body}
+    </main></body>
+    """)
+  end
+
+  @doc "A whole page, never cached: the CSRF token, `head`, then the stylesheet."
+  @spec document(Plug.Conn.t(), pos_integer(), String.t(), iodata(), iodata()) :: Plug.Conn.t()
+  def document(conn, status, title, head, body) do
     conn
     |> put_resp_content_type("text/html")
     |> put_resp_header("cache-control", "no-store")
     |> send_resp(status, """
     <!DOCTYPE html>
     <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="data:," />
-        <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
-        <title>#{esc(title)} · Hireme</title>
-        <link rel="stylesheet" href="#{static("/assets/app.css")}" />
-        #{script}
-      </head>
-      <body class="auth">
-        <main class="auth-card">
-          <h1>HIREME</h1>
-          #{body}
-        </main>
-      </body>
+    <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
+    <title>#{title}</title>
+    #{head}
+    <link rel="stylesheet" href="#{static("/assets/app.css")}" />
+    </head>
+    #{body}
     </html>
     """)
   end

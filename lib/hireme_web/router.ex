@@ -120,34 +120,19 @@ defmodule HiremeWeb.PageController do
     %{account: account, session: session} = conn.assigns
     gate = Auth.wire_gate()
 
-    conn
-    |> put_resp_content_type("text/html")
-    |> put_resp_header("cache-control", "no-store")
-    |> send_resp(200, """
-    <!DOCTYPE html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="data:," />
-        <title>Hireme</title>
-        <meta name="csrf-token" content="#{Plug.CSRFProtection.get_csrf_token()}" />
-        <meta name="hireme-ticket" content="#{Hireme.Accounts.ticket(session)}" />
-        <meta name="hireme-gate" content="#{Auth.esc(gate || "")}" />
-        <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
-        <meta name="hireme-wire" content="#{wire_hash()}" />
-        <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
-        <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
-        <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
-        #{Auth.early_script()}
-        <link rel="stylesheet" href="#{Auth.static("/assets/app.css")}" />
-        <script type="module" src="#{Auth.static("/assets/app.js")}"></script>
-      </head>
-      <body>
-        <div id="app"></div>
-      </body>
-    </html>
-    """)
+    head = """
+    <meta name="hireme-ticket" content="#{Hireme.Accounts.ticket(session)}" />
+    <meta name="hireme-gate" content="#{Auth.esc(gate || "")}" />
+    <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
+    <meta name="hireme-wire" content="#{wire_hash()}" />
+    <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
+    <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
+    <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
+    #{Auth.early_script()}
+    <script type="module" src="#{Auth.static("/assets/app.js")}"></script>
+    """
+
+    Auth.document(conn, 200, "Hireme", head, ~s(<body><div id="app"></div></body>))
   end
 
   def ticket(conn, _params) do
