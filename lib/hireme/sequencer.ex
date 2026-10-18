@@ -1443,6 +1443,49 @@ defmodule Hireme.Sequencer do
   end
 
   defp write(plan, op, sub, effects, prov, state, turn) do
+    if unchanged?(plan, op, effects, prov),
+      do: finish(state, turn, [], %{op_id: op.op_id, rev: plan.row.rev, id: plan.row.id}),
+      else: write_effects(plan, op, sub, effects, prov, state, turn)
+  end
+
+  # A put that restates its row exactly (every cell as stored, and for a
+  # cited cell the same as_of and the same source as its last citation)
+  # writes nothing: no rev, no citation, no text. The same value from a
+  # different source is a corroboration and is cited.
+  defp unchanged?(%{row: row, table: table}, %{verb: :put}, [{tid, id, cells}], prov)
+       when row != nil and tid == table.id and id == row.id do
+    Enum.all?(cells, fn {col_id, v} ->
+      c = col(table, col_id)
+      key = c && String.to_atom(c.name)
+
+      c != nil and Codec.from_wire(c, v) == {:ok, Map.get(row, key)} and
+        (not (c.metric or c.prose) or same_citation?(table, row, c, prov))
+    end)
+  end
+
+  defp unchanged?(_plan, _op, _effects, _prov), do: false
+
+  defp same_citation?(_table, _row, _col, nil), do: false
+  defp same_citation?(_table, _row, _col, %{new_source: true}), do: false
+
+  defp same_citation?(table, row, col, prov) do
+    on = col.metric && Map.get(row, String.to_atom(col.name <> "_on"))
+
+    last =
+      Repo.one(
+        from(x in Hireme.Rows.Citation,
+          where: x.table == ^table.name and x.row_id == ^row.id and x.column == ^col.name,
+          order_by: [desc: x.id],
+          limit: 1,
+          select: x.source_id
+        )
+      )
+
+    (not col.metric or on == prov.as_of) and last != nil and
+      last == (prov.source && prov.source.id)
+  end
+
+  defp write_effects(plan, op, sub, effects, prov, state, turn) do
     ctx = %{sub: sub, op: op, turn: turn, plan: plan, prov: prov}
 
     {result, _} =

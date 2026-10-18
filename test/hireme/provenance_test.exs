@@ -147,6 +147,29 @@ defmodule Hireme.ProvenanceTest do
     assert {[_], []} = key_session_ops(agent, op(:drop, :sources, %{}, target: uncited.id))
   end
 
+  test "restating a cited metric exactly writes nothing; the same value from another source is cited",
+       %{account: a} do
+    id = corp(a, "same.example")
+
+    put = fn src ->
+      op(:put, :corporations, %{headcount: 50, as_of: ~D[2026-09-01], source: src}, target: id)
+    end
+
+    cites = fn ->
+      Repo.aggregate(
+        from(c in Citation, where: c.row_id == ^id and c.column == "headcount"),
+        :count
+      )
+    end
+
+    {[first], []} = run(a.id, put.("https://same.example/a"))
+    {[again], []} = run(a.id, put.("https://same.example/a"))
+    assert again.rev == first.rev and cites.() == 1
+
+    {[other], []} = run(a.id, put.("https://same.example/b"))
+    assert other.rev == first.rev + 1 and cites.() == 2
+  end
+
   test "culture and ratings need a trusted host; trusting a host covers its subdomains", %{
     account: a
   } do
