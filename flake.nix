@@ -26,20 +26,6 @@
         };
       });
 
-      # The latest binaryen (version_133; the pin ships 129), for its
-      # wasm-opt: -O3 makes kernel.wasm a fifth smaller, as fast.
-      binaryen = pkgs.stdenvNoCC.mkDerivation {
-        pname = "binaryen";
-        version = "133";
-        src = pkgs.fetchurl {
-          url = "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz";
-          hash = "sha256-LcnHgT9TdduT2W6tS3giL8w+Jne7uDIpevR5d4KjdIk=";
-        };
-        # Static-pie: nothing to patch or strip.
-        dontFixup = true;
-        installPhase = "install -Dm755 bin/wasm-opt $out/bin/wasm-opt";
-      };
-
       # qemu for the dev VM, waiting for each vhost-user socket it is given.
       # The pinned qemu-vm.nix backgrounds its virtiofsd daemons and execs
       # qemu at once, and qemu connects to a chardev socket only once, so
@@ -68,7 +54,7 @@
       beamPackages = pkgs.beam.packages.erlang_28.overrideScope (_: prev: { elixir = prev.elixir_1_20; });
 
       hireme = pkgs.callPackage ./nix/package.nix {
-        inherit bun beamPackages binaryen;
+        inherit bun beamPackages;
         source = ./.;
         revision = self.rev or self.dirtyRev or "dirty";
       };
@@ -257,7 +243,6 @@
           pkgs.clippy
           pkgs.sqlite
           bun
-          binaryen
         ];
       };
 

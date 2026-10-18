@@ -6,7 +6,6 @@
   beamPackages,
   rustPlatform,
   bun,
-  binaryen,
   sqlite,
   lld,
   source,
@@ -95,8 +94,10 @@ let
     // {
       pname = "kernel-wasm";
       inherit version;
-      # rustc links wasm32 with lld; binaryen's wasm-opt shrinks the result.
-      nativeBuildInputs = [ lld binaryen ];
+      # rustc links wasm32 with lld. No wasm-opt pass: -O3's inlining made the
+      # first call of a write's judge ~3 ms slower in Chromium (a fresh page's
+      # heat override 7.1 -> 10.3 ms, A/B x2) for a fifth fewer bytes.
+      nativeBuildInputs = [ lld ];
       buildPhase = ''
         runHook preBuild
         cd native
@@ -106,9 +107,7 @@ let
       '';
       doCheck = false;
       installPhase = ''
-        wasm-opt -O3 --enable-bulk-memory --enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types \
-          target/wasm32-unknown-unknown/release/kernel.wasm -o kernel.wasm
-        install -Dm644 kernel.wasm $out/kernel.wasm
+        install -Dm644 target/wasm32-unknown-unknown/release/kernel.wasm $out/kernel.wasm
       '';
     }
   );
