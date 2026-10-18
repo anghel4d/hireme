@@ -13,13 +13,13 @@ defmodule HiremeWeb.ClientTest do
     do: @moduletag(skip: "node is not on PATH (a gate, with HIREME_MCP set, fails instead)")
 
   test "the client's node:test files pass" do
-    assert @node, "node is not on PATH: the gate cannot run assets/test"
+    node = @node || flunk("node is not on PATH: the gate cannot run assets/test")
     root = Path.expand("../..", __DIR__)
     files = Path.wildcard(Path.join(root, "assets/test/*.test.mjs"))
     assert files != [], "no assets/test/*.test.mjs"
 
     {out, status} =
-      System.cmd(@node, ["--experimental-transform-types", "--no-warnings", "--test" | files],
+      System.cmd(node, ["--experimental-transform-types", "--no-warnings", "--test" | files],
         cd: root,
         stderr_to_stdout: true
       )
