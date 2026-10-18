@@ -252,6 +252,9 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
   .bar .link { margin-left: auto; }
   .bar nav { order: 1; flex: 1 0 100%; flex-wrap: wrap; overflow: visible; }
   .tab { padding: 5px 8px; }
+  /* World on a phone: no # column; the name column alone holds the left edge. */
+  .grid.sparse th.id { display: none; }
+  .grid.sparse:has(th.anchor) tr > :nth-child(2) { left: 0; }
   .lens { padding: 10px; }
 }
 
