@@ -3,7 +3,8 @@
 // key minted in the account lens leases 16, moves one application to
 // draft_ready and adds a corporation with a cited headcount and an office;
 // the browser shows all three without a reload; then a reload from the
-// snapshot paints the desk restoring before its cards. Run by test/e2e/run.sh,
+// snapshot paints the desk restoring before its cards, and a kernel that
+// traps never leaves it restoring. Run by test/e2e/run.sh,
 // which boots the node; this script needs BASE, HIREME_MCP, CHROMIUM, OUT.
 
 import { chromium } from "playwright";
@@ -256,6 +257,62 @@ await step("a reload from the snapshot paints the desk restoring before its card
   if (!(fcp < cards)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards}`);
   if (errors.length) throw new Error(errors.join(" | "));
   return `restoring ${restoring.toFixed(1)} ms, first contentful paint ${fcp.toFixed(1)} ms, cards ${cards.toFixed(1)} ms`;
+});
+
+// No path leaves the desk on "Restoring the desk…": a fresh page in the same
+// context (the same IndexedDB snapshot) with one of the kernel module's
+// exports made to trap, injected before the page instantiates it.
+async function faulted(fault) {
+  const p = await ctx.newPage();
+  await p.addInitScript((fault) => {
+    const real = WebAssembly.instantiate.bind(WebAssembly);
+    WebAssembly.instantiate = async (m, imports) => {
+      if (fault === "ingest") await new Promise((r) => setTimeout(r, 1500)); // frames queue meanwhile
+      const out = await real(m, imports);
+      const inst = out.instance ?? out;
+      const exports = new Proxy(inst.exports, {
+        get: (t, k) => (k === fault ? () => { throw new WebAssembly.RuntimeError(`unreachable (injected in ${fault})`) } : t[k]),
+      });
+      return out.instance ? { module: out.module, instance: { exports } } : { exports };
+    };
+  }, fault);
+  await p.goto(`${BASE}/desk`);
+  return p;
+}
+const lensText = async (p) => (await p.locator("#lens").innerText()).replace(/\s+/g, " ");
+const notices = (p) => p.locator(".notices").innerText();
+
+await step("a view that throws after a restore shows its error line and one notice, never restoring", pages, async () => {
+  const p = await faulted("view");
+  try {
+    const t = await until(async () => { const x = await lensText(p); return /failed to draw/.test(x) ? x : ""; }, "the lens's error line");
+    await sleep(1500);
+    if (/Restoring the desk/.test(await lensText(p))) throw new Error("still restoring");
+    const n = await p.locator(".notices .notice", { hasText: "failed to draw" }).count();
+    if (n !== 1) throw new Error(`${n} "failed to draw" notices, not one`);
+    if ((await p.locator('nav a[href="/world/corporations"]').count()) !== 1) throw new Error("the nav did not paint");
+    return `lens "${t.trim().slice(0, 60)}", one notice, nav painted`;
+  } finally { await p.close() }
+});
+
+await step("a trap in ingest while loading says the kernel did not load, never restoring", pages, async () => {
+  const p = await faulted("ingest");
+  try {
+    await until(async () => /did not load/.test(await notices(p)), '"The kernel did not load" notice');
+    await sleep(1500);
+    const t = await lensText(p);
+    if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
+    return `lens "${t.trim().slice(0, 60)}"`;
+  } finally { await p.close() }
+});
+
+await step("the same page, unwrapped, restores and shows its cards", pages, async () => {
+  const p = await ctx.newPage();
+  try {
+    await p.goto(`${BASE}/desk`);
+    await until(async () => (await p.locator("article.app-card").count()) >= 20, "20 article.app-card");
+    return "20 cards";
+  } finally { await p.close() }
 });
 
 agent?.stop();

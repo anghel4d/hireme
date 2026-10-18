@@ -59,8 +59,7 @@ printf '{"private":true}\n' >"$E2E_NODE/package.json"
 [ -f "$E2E_NODE/node_modules/playwright/index.mjs" ] || { echo "FAIL setup: playwright did not install into $E2E_NODE"; echo "res=1"; exit 1; }
 
 cd "$ROOT"
-# mix.exs copies kernel.wasm from native/target, so the build lands there.
-CARGO_TARGET_DIR="$ROOT/native/target" MIX_ENV=dev bg mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mix assets.build (see $OUT/build.log)"; echo "res=1"; exit 1; }
+MIX_ENV=dev bg mix assets.build >"$OUT/build.log" 2>&1 || { echo "FAIL setup: mix assets.build (see $OUT/build.log)"; echo "res=1"; exit 1; }
 
 # The port is picked just before the node binds it, and the node is ours
 # only if it is alive and its log names that port.
