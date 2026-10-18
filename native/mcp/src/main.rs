@@ -312,13 +312,13 @@ impl App {
         let modern = requested.is_some();
         if let Some(v) = &requested {
             if v != MODERN {
-                return self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":[MODERN],"requested":v}}}));
+                return self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":supported(),"requested":v}}}));
             }
         }
         let answer = match method.as_str() {
             "initialize" => Ok(self.initialize(&params).await),
             "server/discover" => Ok(json!({
-                "supportedVersions": [MODERN],
+                "supportedVersions": supported(),
                 "capabilities": capabilities(),
                 "_meta": {"io.modelcontextprotocol/serverInfo": server_info()},
                 "instructions": INSTRUCTIONS,
@@ -406,6 +406,11 @@ impl App {
                 return text_result(format!("error[session]: {why}\n   = help: the key may be revoked or the account suspended; ask the operator\n"), None, true);
             }
         }
+        if name == "hireme" {
+            // An explain is local text: it never waits for the session.
+            let cat = if args.get("explain").is_some() { Catalog::default() } else { self.catalog().await.unwrap_or_default() };
+            return self.hireme(&cat, self.masks().await, &args).await;
+        }
         let Some(cat) = self.catalog().await else {
             return text_result(format!("error[session]: not connected to {}\n   = help: check HIREME_URL and that the node is up; hireme-mcp keeps retrying\n", url()), None, true);
         };
@@ -452,7 +457,10 @@ impl App {
             };
         }
         let w = self.welcome.read().await.clone().unwrap_or_default();
-        let next = if self.dead.read().await.is_some() {
+        let connected = self.welcome.read().await.is_some();
+        let next = if !connected {
+            "Not connected yet: check HIREME_URL and the key; hireme-mcp keeps retrying."
+        } else if self.dead.read().await.is_some() {
             "The session has ended; nothing can be read or written until the operator restores the key."
         } else if m.write == 0 {
             "This key reads only. `schema`, then `find` and `get`; `text` for raw listings and prose."
@@ -900,6 +908,11 @@ fn today() -> i32 {
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Every revision served: the current one, then the handshake-era ones `initialize` negotiates.
+fn supported() -> Json {
+    json!(std::iter::once(MODERN).chain(LEGACY.iter().copied()).collect::<Vec<_>>())
 }
 
 fn capabilities() -> Json {
