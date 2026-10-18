@@ -256,8 +256,8 @@ defmodule Mix.Tasks.Hireme.Schema do
       {_, []} ->
         Mix.raise(
           "the declaration changes the database in a way no added step can; " <>
-            "write priv/db/#{next_number()}_#{name}.sql by hand and run --migration #{name} again:\n" <>
-            out
+            "write priv/db/#{next_number()}_#{name}.sql by hand and run --migration #{name} again " <>
+            "(a table rebuild runs between PRAGMA legacy_alter_table = ON and OFF):\n" <> out
         )
     end
   end
