@@ -310,6 +310,8 @@ pub struct Command {
 
 #[derive(Clone, Debug)]
 pub struct Schema {
+    /// The byte layout native/wire implements.
+    pub layout: u16,
     pub domains: Vec<Domain>,
     pub frames: Vec<Frame>,
     pub enums: Vec<Enum>,
@@ -563,6 +565,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
 /// Parse and resolve a declaration.
 pub fn parse(source: &str) -> Result<Schema, Error> {
     let mut domains: Vec<String> = Vec::new();
+    let mut layout: Option<u16> = None;
     let mut frames: Vec<Frame> = Vec::new();
     let mut enums: Vec<(String, Vec<String>)> = Vec::new();
     let mut tables: Vec<RawTable> = Vec::new();
@@ -576,6 +579,7 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
         let (tokens, where_) = split_where(text);
         match tokens.as_slice() {
             ["domain", names @ ..] => domains.extend(names.iter().map(|n| n.to_string())),
+            ["layout", n] => layout = Some(int(n, line)? as u16),
             ["frame", name, id] => frames.push(Frame { name: (*name).to_owned(), id: int(id, line)? as u8 }),
             ["enum", name, values @ ..] if !values.is_empty() => {
                 enums.push(((*name).to_owned(), values.iter().map(|v| v.to_string()).collect()))
@@ -644,7 +648,8 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
         }
     }
 
-    resolve(domains, frames, enums, tables)
+    let Some(layout) = layout else { return fail(0, "no layout line".into()) };
+    resolve(layout, domains, frames, enums, tables)
 }
 
 fn implied(t: &RawTable) -> Vec<Column> {
@@ -712,6 +717,7 @@ fn resolve_cols(t: &RawTable, all: &[RawTable]) -> Result<Vec<Column>, Error> {
 }
 
 fn resolve(
+    layout: u16,
     domain_names: Vec<String>,
     frames: Vec<Frame>,
     raw_enums: Vec<(String, Vec<String>)>,
@@ -797,7 +803,7 @@ fn resolve(
         }
     }
 
-    let mut schema = Schema { domains, frames, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
+    let mut schema = Schema { layout, domains, frames, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
     validate(&schema)?;
     schema.wire_hash = fold(fnv(canonical(&schema, Scope::Wire).as_bytes()));
     schema.schema_rev = fnv(canonical(&schema, Scope::Full).as_bytes());
@@ -897,6 +903,7 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
     for d in &s.domains {
         line(format!("domain {} {}", d.name, d.bit));
     }
+    line(format!("layout {}", s.layout));
     for f in &s.frames {
         line(format!("frame {} {}", f.name, f.id));
     }

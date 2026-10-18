@@ -35,6 +35,8 @@ fn main() {
     writeln!(o, "/// The whole declaration.").unwrap();
     writeln!(o, "pub const SCHEMA_REV: u32 = {:#010x};", s.schema_rev).unwrap();
 
+    writeln!(o, "/// The byte layout native/wire implements; native/wire asserts its own equals it.").unwrap();
+    writeln!(o, "pub const LAYOUT: u16 = {};", s.layout).unwrap();
     writeln!(o, "pub mod domain {{").unwrap();
     for d in &s.domains {
         writeln!(o, "    pub const {}: u8 = {};", upper(&d.name), d.bit).unwrap();

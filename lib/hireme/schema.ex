@@ -52,7 +52,15 @@ defmodule Hireme.Schema.Parser do
 
   @doc "The resolved declaration of `source`; raises naming the line on any error."
   def parse!(source) do
-    state = %{domains: [], frames: [], enums: [], tables: [], commands: [], table: nil}
+    state = %{
+      domains: [],
+      layout: nil,
+      frames: [],
+      enums: [],
+      tables: [],
+      commands: [],
+      table: nil
+    }
 
     state =
       source
@@ -87,11 +95,15 @@ defmodule Hireme.Schema.Parser do
   end
 
   defp line(text, n, state) do
+    line_no = n
     {tokens, where} = split_where(text)
 
     case tokens do
       ["domain" | names] ->
         %{state | domains: state.domains ++ names}
+
+      ["layout", n] ->
+        %{state | layout: int!(n, line_no)}
 
       ["frame", name, id] ->
         %{state | frames: state.frames ++ [{name, int!(id, n)}]}
@@ -365,7 +377,10 @@ defmodule Hireme.Schema.Parser do
         %{id: id, name: c.name, table: c.table, params: params, human_only: c.human_only}
       end)
 
+    unless state.layout, do: raise(ArgumentError, "schema/hireme.schema: no layout line")
+
     model = %{
+      layout: state.layout,
       domains: domains,
       frames: frames,
       enums: enums,
@@ -517,6 +532,7 @@ defmodule Hireme.Schema.Parser do
 
     lines =
       Enum.map(model.domains, &"domain #{&1.name} #{&1.bit}") ++
+        ["layout #{model.layout}"] ++
         Enum.map(model.frames, &"frame #{&1.name} #{&1.id}") ++
         Enum.map(model.enums, &"enum #{&1.id} #{&1.name} #{Enum.join(&1.values, " ")}") ++
         Enum.flat_map(tables, &table_lines(&1, scope)) ++
@@ -716,6 +732,9 @@ defmodule Hireme.Schema do
   end
 
   def wire_hash, do: @model.wire_hash
+
+  @doc "The byte layout `native/wire` implements."
+  def layout, do: @model.layout
   def schema_rev, do: @model.schema_rev
 
   @doc "The canonical dump the hashes cover (`:wire` or `:full`)."

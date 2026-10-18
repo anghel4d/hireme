@@ -132,6 +132,7 @@ pub fn emit(s: &Schema) -> String {
     w("");
     w(&format!("export const WIRE_HASH = {:#06x};", s.wire_hash));
     w(&format!("export const SCHEMA_REV = {:#010x};", s.schema_rev));
+    w(&format!("export const LAYOUT = {};", s.layout));
     w("");
 
     let domains: Vec<String> = s.domains.iter().map(|d| format!("{}: {}", d.name, d.bit)).collect();

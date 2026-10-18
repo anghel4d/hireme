@@ -7,6 +7,8 @@
 #   domain <name>...                 the first five carry mask bits 1 2 4 8 16;
 #                                    `system` carries none and is in no mask
 #   frame <NAME> <id>                wire frame kinds
+#   layout <n>                       the byte layout native/wire implements; in
+#                                    wire_hash, so a client of another refuses
 #   enum <name> <value>...           codes are 0-based declaration order
 #   table <name> <domain> <residency> [append_only] [soft_delete] [global] [account_optional] [singleton]
 #       residency: resident (the kernel derives from it; on the wire)
@@ -46,6 +48,8 @@
 # day = days since 1970-01-01, time = unix seconds), 2 str (str text json),
 # 3 i64, 4 f64, 5 deferred (u32 length + 8 bytes of SHA-256); the codec may
 # also run a column as 6 sym (a dictionary of strs) or 7 list (u32 ids).
+# A PATCH deletes rows with a block of their own table whose only column is
+# 0xFFFE (u32 ids). A BYE's reason is its `bye` enum code.
 #
 # Implied on every stored table, in this order and with these column ids:
 #   1 id   2 account_id (not on `global`)   3 rev   4 inserted_at   5 updated_at
@@ -56,6 +60,8 @@
 # one is set null.
 
 domain world desk mail lanes corpus system
+
+layout 2
 
 frame HELLO 1
 frame WELCOME 2
@@ -640,8 +646,3 @@ table catalog system wire
   col type u32 ?
   col flags u32 ?
   col target str ?
-
-# Rows a PATCH deletes.
-table gone system wire
-  col table u32 !
-  col id u32 !
