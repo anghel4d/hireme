@@ -7,6 +7,7 @@
   rustPlatform,
   esbuild,
   sqlite,
+  lld,
   source,
   revision,
   mixDepsHash ? "sha256-wh1q2KvQYDCdk/lsD8d6eV58J/0R8TDgct9dn1eRcdE=",
@@ -84,6 +85,8 @@ let
     // {
       pname = "kernel-wasm";
       inherit version;
+      # rustc links wasm32 with lld.
+      nativeBuildInputs = [ lld ];
       buildPhase = ''
         runHook preBuild
         cd native

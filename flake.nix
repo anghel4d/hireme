@@ -75,6 +75,7 @@
             pkgs.rustPlatform.cargoSetupHook
             pkgs.cargo
             pkgs.rustc
+            pkgs.lld
             pkgs.nodejs
             pkgs.sqlite
             pkgs.typescript

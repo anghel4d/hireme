@@ -13,8 +13,10 @@ import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
+import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
 import focus from "./lenses/focus.ts"
+import lanes from "./lenses/lanes.ts"
 import outreach from "./lenses/outreach.ts"
 import world from "./lenses/world.ts"
 
@@ -32,7 +34,7 @@ export interface View {
   key?(ev: KeyboardEvent): boolean
 }
 
-const VIEWS: Partial<Record<Lens, View>> = { account, desk, focus, outreach, world }
+const VIEWS: Partial<Record<Lens, View>> = { account, atlas, desk, focus, lanes, outreach, world }
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },

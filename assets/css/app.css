@@ -349,3 +349,11 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .cv-lines .mode-drop { opacity: 0.5; text-decoration: line-through; }
 .lead { font-style: italic; }
 @media (max-width: 960px) { .focus-grid { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------------- atlas and lanes */
+
+.weights { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
+.weights input[type="range"] { width: 120px; }
+.atlas-grid meter { width: 72px; height: 10px; vertical-align: middle; }
+.atlas-grid tr.route-citizen th { font-weight: 700; }
+.atlas-grid tr.route-unknown { color: var(--muted); }
