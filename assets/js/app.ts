@@ -89,7 +89,21 @@ function link(): Html {
  */
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "account"]
-const waiting = (lens: Lens): boolean => !VIEWS[lens] || (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !kernel.loaded())
+const waiting = (lens: Lens): boolean => !VIEWS[lens] || (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
+
+/** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */
+let framed = false
+const rowsIn = (): boolean => kernel.loaded() && (framed || kernel.snapshotRev() > 0n)
+
+// The first paint waits for the rows, up to HOLD_MS from navigation: a fast load paints the desk
+// itself rather than "Restoring…" a frame before it, and its main thread is free for the BOOT.
+const HOLD_MS = 100
+let holding = true
+function held(): boolean {
+  if (holding && !rowsIn() && !kernel.broken() && performance.now() < HOLD_MS) return true
+  holding = false
+  return false
+}
 
 /** The lens hooks' guard (guard.ts): a failing hook's fallback stands in, told once, logged once. */
 const hooks = guard(
@@ -140,7 +154,7 @@ function shell(): Html {
 }
 
 function render(): void {
-  if (!root) return
+  if (!root || held()) return
   fetchLens(model.address.lens)
   const hold = waiting(model.address.lens)
   const v = hold ? undefined : VIEWS[model.address.lens]
@@ -265,6 +279,7 @@ function frame(f: Bytes, h: Header): void {
       return
     }
     default:
+      if (h.kind === KIND.BOOT || h.kind === KIND.PATCH) framed = true
       kernel.frame(f, h)
   }
 }
@@ -296,6 +311,7 @@ void (async () => {
 })()
 
 schedule()
+setTimeout(schedule, Math.max(0, HOLD_MS - performance.now()))
 // The other lenses load in the page's idle time from the start (waiting on the socket, the BOOT), so
 // even a click the moment the desk appears finds its lens loaded, and the cold path is not slowed.
 preload()
