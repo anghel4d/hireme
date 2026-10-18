@@ -60,6 +60,8 @@ export interface Model {
   account: AccountView
   world: WorldView
   outreach: OutreachView
+  /** How many board cards are drawn; grows with "more" and with keyboard movement past the end. */
+  deskLimit: number
 }
 
 /** The outreach lens: contacts, and the selected one's threads. */
@@ -149,6 +151,7 @@ export const model: Model = {
   rows: 0,
   account: { overview: null, loading: false, reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null },
   world: { key: "", rows: [], next: null, loading: false, edit: "", cites: null, text: null, error: "" },
+  deskLimit: 120,
   outreach: { key: "", contacts: [], next: null, messages: [], bodies: new Map(), edit: "", loading: false, error: "" },
 }
 

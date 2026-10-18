@@ -13,6 +13,7 @@ import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
+import desk from "./lenses/desk.ts"
 import outreach from "./lenses/outreach.ts"
 import world from "./lenses/world.ts"
 
@@ -24,11 +25,13 @@ export interface View {
   enter?(): void
   /** An element with `data-act` was used; `ev` is the click, input, change, keydown or submit. */
   act?(name: string, el: HTMLElement, ev: Event): void
+  /** After every morph: a lens that owns subtrees (the board's cards) writes them here. */
+  after?(root: HTMLElement): void
   /** A key with no focused field; true when handled. */
   key?(ev: KeyboardEvent): boolean
 }
 
-const VIEWS: Partial<Record<Lens, View>> = { account, outreach, world }
+const VIEWS: Partial<Record<Lens, View>> = { account, desk, outreach, world }
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
@@ -76,6 +79,8 @@ function render(): void {
     document.title = `${v?.title ?? "hireme"} · hireme`
   }
   morph(root, shell())
+  const lens = document.getElementById("lens")
+  if (lens) v?.after?.(lens)
 }
 
 onRender(render)
