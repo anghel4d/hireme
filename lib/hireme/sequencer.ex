@@ -176,7 +176,8 @@ defmodule Hireme.Sequencer do
       lease_rows: [],
       subs: %{},
       counts: %{},
-      kernel: nil
+      kernel: nil,
+      rows: nil
     }
 
     {:ok, rebuild(state), @idle_ms}
@@ -194,9 +195,9 @@ defmodule Hireme.Sequencer do
         lease: Lease.join(state.lease, session, now)
     }
 
-    body =
+    {state, body} =
       if snapshot_rev == state.rev and snapshot_rev > 0,
-        do: wire_tables(state, session.grants, now),
+        do: {state, wire_tables(state, session.grants, now)},
         else: snapshot(session.grants, state, now)
 
     kind = if snapshot_rev == state.rev and snapshot_rev > 0, do: :PATCH, else: :BOOT
@@ -1142,24 +1143,40 @@ defmodule Hireme.Sequencer do
 
   @doc false
   def rebuild(state) do
-    now = Store.now()
-    kernel = Kernel.new(snapshot(nil, state, now))
-    counts = %{}
-    %{state | kernel: kernel, counts: counts}
+    # Inside a batch the rows read are uncommitted, so they are not kept.
+    {read, body} = snapshot(nil, %{state | rows: nil}, Store.now())
+    rows = if Repo.in_transaction?(), do: nil, else: read.rows
+    %{state | kernel: Kernel.new(body), counts: %{}, rows: rows}
   end
 
   # Every resident table and projection the grants read (all of them, for
   # the kernel when `grants` is nil), plus the wire tables.
   defp snapshot(grants, state, now) do
+    {state, rows} = resident_rows(state)
+
     tables =
       for t <- Schema.tables(),
           t.residency in [:resident, :projection],
           grants == nil or Grants.read?(grants, t) do
-        cols = wire_cols(t, grants)
-        Codec.rows_block(t, cols, rows(t))
+        Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(rows, t.id))
       end
 
-    [tables | if(grants, do: wire_tables(state, grants, now), else: [clock(now)])]
+    {state, [tables | if(grants, do: wire_tables(state, grants, now), else: [clock(now)])]}
+  end
+
+  # The resident rows as of the account's rev, read once per rev: the
+  # kernel's snapshot and the BOOTs of sessions joining before the next
+  # write share one read.
+  defp resident_rows(%{rows: {rev, rows}, rev: rev} = state), do: {state, rows}
+
+  defp resident_rows(state) do
+    rows =
+      for t <- Schema.tables(),
+          t.residency in [:resident, :projection],
+          into: %{},
+          do: {t.id, rows(t)}
+
+    {%{state | rows: {state.rev, rows}}, rows}
   end
 
   defp wire_cols(t, nil), do: Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil))
@@ -1174,10 +1191,53 @@ defmodule Hireme.Sequencer do
     Repo.all(from(r in Schema.row(source), where: not is_nil(field(r, ^col)), order_by: r.id))
   end
 
+  # Rows as maps of their wire columns. A deferred text is never loaded: its
+  # length comes from SQLite and its hash from the hex SHA-256 the table
+  # keeps beside it (`listing_raw` beside `listing_sha`).
   defp rows(t) do
-    q = from(r in Schema.row(t.name), order_by: r.id)
+    deferred = for c <- t.cols, c.deferred, do: c
+    fields = for c <- t.cols, not c.deferred, c.wire != nil, do: String.to_atom(c.name)
+    q = from(r in Schema.row(t.name), order_by: r.id, select: map(r, ^fields))
     q = if t.soft_delete, do: where(q, [r], is_nil(r.deleted_at)), else: q
-    Repo.all(q)
+    Enum.reduce(deferred, Repo.all(q), &stubs(t, &1, &2))
+  end
+
+  defp stubs(t, col, rows) do
+    name = String.to_atom(col.name)
+    sha_name = String.replace_suffix(col.name, "_raw", "_sha")
+
+    sha =
+      if sha_name != col.name and Enum.any?(t.cols, &(&1.name == sha_name)),
+        do: String.to_atom(sha_name)
+
+    lens =
+      from(r in Schema.row(t.name),
+        where: not is_nil(field(r, ^name)),
+        select: {r.id, fragment("length(CAST(? AS BLOB))", field(r, ^name))}
+      )
+      |> Repo.all()
+      |> Map.new()
+
+    texts =
+      if sha,
+        do: %{},
+        else: Map.new(Repo.all(from(r in Schema.row(t.name), select: {r.id, field(r, ^name)})))
+
+    Enum.map(rows, fn row ->
+      stub =
+        case lens[row.id] do
+          nil ->
+            nil
+
+          len when sha != nil ->
+            {len, row |> Map.fetch!(sha) |> Base.decode16!(case: :lower) |> binary_part(0, 8)}
+
+          _ ->
+            Codec.deferred_stub(texts[row.id])
+        end
+
+      Map.put(row, name, stub)
+    end)
   end
 
   defp projected?(row, where) do

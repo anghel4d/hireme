@@ -494,6 +494,10 @@ defmodule HiremeWeb.Wire.Codec do
   def to_wire(%{type: :enum, enum: e}, v), do: enum_code(e, v)
   def to_wire(%{type: :json}, v), do: JSON.encode!(v)
   def to_wire(%{deferred: true}, v) when is_binary(v), do: deferred_stub(v)
+
+  def to_wire(%{deferred: true}, {len, sha} = stub) when is_integer(len) and byte_size(sha) == 8,
+    do: stub
+
   def to_wire(_col, v), do: v
 
   @doc """
@@ -524,8 +528,8 @@ defmodule HiremeWeb.Wire.Codec do
     [<<id::little-16, ty::8, 0::8, n::little-32>>, data, :binary.copy(<<0>>, pad8(n) - n)]
   end
 
-  defp col_data(@t_u32, vs), do: Enum.map(vs, &<<&1 || @none32::little-32>>)
-  defp col_data(@t_i64, vs), do: Enum.map(vs, &<<&1 || @min64::little-signed-64>>)
+  defp col_data(@t_u32, vs), do: for(v <- vs, into: <<>>, do: <<v || @none32::little-32>>)
+  defp col_data(@t_i64, vs), do: for(v <- vs, into: <<>>, do: <<v || @min64::little-signed-64>>)
 
   defp col_data(@t_f64, vs),
     do: Enum.map(vs, &if(&1, do: <<&1 * 1.0::little-float-64>>, else: @nan))
@@ -556,10 +560,29 @@ defmodule HiremeWeb.Wire.Codec do
       table.id,
       length(rows),
       Enum.map(cols, fn c ->
-        {c.id, wire_type(c), Enum.map(rows, &to_wire(c, Map.get(&1, String.to_atom(c.name))))}
+        key = String.to_atom(c.name)
+        wire = converter(c)
+        {c.id, wire_type(c), Enum.map(rows, &wire.(Map.get(&1, key)))}
       end)
     )
   end
+
+  # `to_wire/2` with the column's decisions taken once, not per cell: BOOT
+  # encodes every cell of every resident row.
+  defp converter(%{type: :enum, enum: e}) do
+    codes = Map.fetch!(@enum_codes, e)
+
+    fn
+      nil -> nil
+      v -> Map.get(codes, v)
+    end
+  end
+
+  defp converter(%{type: t, deferred: false})
+       when t in [:id, :ref, :u8, :u32, :i64, :f64, :str, :text],
+       do: &Function.identity/1
+
+  defp converter(col), do: &to_wire(col, &1)
 
   @doc "The gone blocks deleting `[{table_id, id}]`."
   def gone_block([]), do: []
