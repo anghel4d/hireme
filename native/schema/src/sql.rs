@@ -4,7 +4,7 @@
 //! Tables are `STRICT`; ids are `AUTOINCREMENT`, so an id is never reused.
 //! A required ref cascades on delete and a nullable one is set null. Keys
 //! and indexes lead with `account_id` unless the table or the key is
-//! `global`. Enum values are stored by name, without a CHECK, so adding a
+//! `global`, and every account's table has `<table>__account (account_id)`. Enum values are stored by name, without a CHECK, so adding a
 //! value is never a table rebuild.
 
 use crate::model::{Column, Schema, Table, Type};
@@ -98,8 +98,13 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
         out.push(IndexDef { name, sql });
     };
 
+    // (account_id) alone gives every account's rows in rowid order, which
+    // a keyset page by id walks without a sort; a singleton's unique key is
+    // that index already.
     if t.singleton {
         add("single", true, false, Vec::new(), None);
+    } else if scoped {
+        add("account", false, false, Vec::new(), None);
     }
     let plain = |cols: &[String]| cols.iter().map(|c| (c.clone(), false)).collect::<Vec<_>>();
     for k in &t.naturals {

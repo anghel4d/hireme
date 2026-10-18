@@ -140,28 +140,51 @@ defmodule Hireme.World do
   `desc`; `limit` (default #{@find_limit}, at most #{@find_max}); `after`, a
   previous answer's `next`.
 
+  Metrics and their `_on` twins come back only when named in `cols`; the
+  default is every other visible column.
+
   Answers `%{"rows" => [...], "next" => cursor | nil}`.
   """
   @spec find(pos_integer(), Grants.t(), map()) :: answer()
   def find(account_id, %Grants{} = grants, params) do
     with {:ok, table} <- readable(grants, params["table"]),
-         {:ok, cols} <- columns(grants, table, params["cols"]),
+         {:ok, cols} <- find_columns(grants, table, params["cols"]),
          {:ok, order, desc} <- order_param(grants, table, params),
          {:ok, limit} <- bound(params["limit"], @find_limit, @find_max),
          {:ok, where} <- filters(grants, table, params["where"] || %{}),
          {:ok, cursor} <- decode_cursor(params["after"]) do
       row = Schema.row(table.name)
+      order_field = String.to_atom(order.name)
 
-      query =
+      # The page's ids first, narrow, then its rows by id: a sort carries
+      # two columns, not every one the page shows.
+      page_query =
         from(r in row, limit: ^limit)
         |> where(^where)
         |> page(order, desc, cursor)
         |> order(order, desc)
-        |> select(^select_map(cols, :length))
+        |> select([r], {r.id, field(r, ^order_field)})
 
       run(account_id, fn ->
-        rows = Repo.all(query)
-        next = if length(rows) == limit, do: cursor_after(List.last(rows), order, cols)
+        keys = Repo.all(page_query)
+        ids = Enum.map(keys, &elem(&1, 0))
+
+        by_id =
+          from(r in row, where: r.id in ^ids, select: ^select_map(cols, :length))
+          |> Repo.all()
+          |> Map.new(&{&1.id, &1})
+
+        rows = Enum.map(ids, &Map.fetch!(by_id, &1))
+
+        next =
+          case List.last(keys) do
+            {id, value} when length(keys) == limit ->
+              cursor_after(%{:id => id, order_field => value}, order, cols)
+
+            _ ->
+              nil
+          end
+
         {:ok, %{"rows" => Enum.map(rows, &out(&1, cols)), "next" => next}}
       end)
     end
@@ -393,6 +416,11 @@ defmodule Hireme.World do
 
   defp column(_grants, table, other),
     do: {:error, :type, %{table: table.name, column: inspect(other)}}
+
+  defp find_columns(grants, table, nil),
+    do: {:ok, Enum.reject(Grants.columns(grants, table), &(&1.metric or &1.metric_of != nil))}
+
+  defp find_columns(grants, table, names), do: columns(grants, table, names)
 
   defp columns(grants, table, nil), do: {:ok, Grants.columns(grants, table)}
 

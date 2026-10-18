@@ -93,6 +93,9 @@ defmodule Hireme.Import do
           run_group(account_id, actor, pack, group, report)
         end)
 
+      # A bulk load moves the planner's statistics; refresh what it reads.
+      Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true)
+
       {:ok,
        %{report | groups: Enum.reverse(report.groups), refusals: Enum.reverse(report.refusals)}}
     end

@@ -28,6 +28,7 @@ CREATE TABLE "sessions" (
   "ip" TEXT,
   "user_agent" TEXT
 ) STRICT;
+CREATE INDEX "sessions__account_account_id" ON "sessions" ("account_id");
 CREATE UNIQUE INDEX "sessions__unique_token_hash" ON "sessions" ("token_hash");
 CREATE INDEX "sessions__index_account_id_revoked_at" ON "sessions" ("account_id", "account_id", "revoked_at");
 
@@ -42,6 +43,7 @@ CREATE TABLE "identities" (
   "display" TEXT,
   "verified_at" TEXT NOT NULL
 ) STRICT;
+CREATE INDEX "identities__account_account_id" ON "identities" ("account_id");
 CREATE UNIQUE INDEX "identities__unique_provider_subject" ON "identities" ("provider", "subject");
 
 CREATE TABLE "magic_links" (
@@ -76,6 +78,7 @@ CREATE TABLE "api_keys" (
   "expires_at" TEXT,
   "revoked_at" TEXT
 ) STRICT;
+CREATE INDEX "api_keys__account_account_id" ON "api_keys" ("account_id");
 CREATE UNIQUE INDEX "api_keys__unique_key_id" ON "api_keys" ("key_id");
 CREATE INDEX "api_keys__index_account_id" ON "api_keys" ("account_id", "account_id");
 
@@ -101,6 +104,7 @@ CREATE TABLE "factors" (
   "consecutive_failures" INTEGER NOT NULL DEFAULT 0,
   "disabled_at" TEXT
 ) STRICT;
+CREATE INDEX "factors__account_account_id" ON "factors" ("account_id");
 CREATE UNIQUE INDEX "factors__unique_credential_id" ON "factors" ("credential_id") WHERE credential_id is not null;
 CREATE INDEX "factors__index_account_id_kind" ON "factors" ("account_id", "account_id", "kind");
 
@@ -115,6 +119,7 @@ CREATE TABLE "challenges" (
   "payload" BLOB NOT NULL,
   "expires_at" TEXT NOT NULL
 ) STRICT;
+CREATE INDEX "challenges__account_account_id" ON "challenges" ("account_id");
 CREATE INDEX "challenges__index_session_id" ON "challenges" ("account_id", "session_id");
 
 CREATE TABLE "recovery_codes" (
@@ -127,6 +132,7 @@ CREATE TABLE "recovery_codes" (
   "code_hash" BLOB NOT NULL,
   "used_at" TEXT
 ) STRICT;
+CREATE INDEX "recovery_codes__account_account_id" ON "recovery_codes" ("account_id");
 CREATE INDEX "recovery_codes__index_account_id" ON "recovery_codes" ("account_id", "account_id");
 
 CREATE TABLE "audit" (
@@ -142,6 +148,7 @@ CREATE TABLE "audit" (
   "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
   "session_id" INTEGER REFERENCES "sessions"("id") ON DELETE SET NULL
 ) STRICT;
+CREATE INDEX "audit__account_account_id" ON "audit" ("account_id");
 CREATE INDEX "audit__index_account_id_id_desc" ON "audit" ("account_id", "account_id", "id" DESC);
 
 CREATE TABLE "outbox" (
@@ -158,6 +165,7 @@ CREATE TABLE "outbox" (
   "sent_at" TEXT,
   "last_error" TEXT
 ) STRICT;
+CREATE INDEX "outbox__account_account_id" ON "outbox" ("account_id");
 CREATE INDEX "outbox__index_next_at" ON "outbox" ("next_at") WHERE sent_at is null;
 
 CREATE TABLE "op_ledger" (
@@ -175,6 +183,7 @@ CREATE TABLE "op_ledger" (
   "ack_rev" INTEGER,
   "refusal" TEXT
 ) STRICT;
+CREATE INDEX "op_ledger__account_account_id" ON "op_ledger" ("account_id");
 CREATE UNIQUE INDEX "op_ledger__unique_op_id" ON "op_ledger" ("account_id", "op_id");
 CREATE INDEX "op_ledger__index_inserted_at" ON "op_ledger" ("inserted_at");
 
@@ -187,6 +196,7 @@ CREATE TABLE "trusted_hosts" (
   "host" TEXT NOT NULL,
   "note" TEXT
 ) STRICT;
+CREATE INDEX "trusted_hosts__account_account_id" ON "trusted_hosts" ("account_id");
 CREATE UNIQUE INDEX "trusted_hosts__unique_host" ON "trusted_hosts" ("account_id", "host");
 
 CREATE TABLE "profiles" (
@@ -202,6 +212,7 @@ CREATE TABLE "profiles" (
   "narrative" TEXT,
   "narrative_private" TEXT
 ) STRICT;
+CREATE INDEX "profiles__account_account_id" ON "profiles" ("account_id");
 CREATE UNIQUE INDEX "profiles__unique_slug" ON "profiles" ("account_id", "slug");
 
 CREATE TABLE "items" (
@@ -220,6 +231,7 @@ CREATE TABLE "items" (
   "position" INTEGER NOT NULL DEFAULT 0,
   "keywords" TEXT
 ) STRICT;
+CREATE INDEX "items__account_account_id" ON "items" ("account_id");
 CREATE UNIQUE INDEX "items__unique_key" ON "items" ("account_id", "key");
 CREATE INDEX "items__index_profile_id_kind" ON "items" ("account_id", "profile_id", "kind");
 
@@ -270,6 +282,7 @@ CREATE TABLE "applications" (
   "letter_raw" TEXT,
   "cv_theme" TEXT
 ) STRICT;
+CREATE INDEX "applications__account_account_id" ON "applications" ("account_id");
 CREATE UNIQUE INDEX "applications__natural_canonical_url" ON "applications" ("account_id", "canonical_url") WHERE canonical_url is not null;
 CREATE UNIQUE INDEX "applications__unique_no" ON "applications" ("account_id", "no");
 CREATE INDEX "applications__index_stage" ON "applications" ("account_id", "stage");
@@ -289,6 +302,7 @@ CREATE TABLE "events" (
   "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
   "op_id" INTEGER
 ) STRICT;
+CREATE INDEX "events__account_account_id" ON "events" ("account_id");
 CREATE INDEX "events__index_application_id_id_desc" ON "events" ("account_id", "application_id", "id" DESC);
 
 CREATE TABLE "batches" (
@@ -306,6 +320,7 @@ CREATE TABLE "batches" (
   "queued_on" TEXT,
   "note" TEXT
 ) STRICT;
+CREATE INDEX "batches__account_account_id" ON "batches" ("account_id");
 CREATE UNIQUE INDEX "batches__unique_code" ON "batches" ("account_id", "code");
 
 CREATE TABLE "cv_lineages" (
@@ -320,6 +335,7 @@ CREATE TABLE "cv_lineages" (
   "rewrites_allowed" INTEGER NOT NULL DEFAULT 1,
   "theme" TEXT
 ) STRICT;
+CREATE INDEX "cv_lineages__account_account_id" ON "cv_lineages" ("account_id");
 CREATE UNIQUE INDEX "cv_lineages__unique_corporation_id" ON "cv_lineages" ("account_id", "corporation_id");
 
 CREATE TABLE "cv_overlays" (
@@ -337,6 +353,7 @@ CREATE TABLE "cv_overlays" (
   "reason" TEXT,
   "generation" INTEGER NOT NULL DEFAULT 1
 ) STRICT;
+CREATE INDEX "cv_overlays__account_account_id" ON "cv_overlays" ("account_id");
 CREATE UNIQUE INDEX "cv_overlays__unique_application_id_item_id" ON "cv_overlays" ("account_id", "application_id", "item_id");
 
 CREATE TABLE "settings" (
@@ -463,6 +480,7 @@ CREATE TABLE "places" (
   "liveability" TEXT,
   "notes" TEXT
 ) STRICT;
+CREATE INDEX "places__account_account_id" ON "places" ("account_id");
 CREATE UNIQUE INDEX "places__natural_iso2" ON "places" ("account_id", "iso2") WHERE kind = 'country';
 CREATE UNIQUE INDEX "places__natural_geonames_id" ON "places" ("account_id", "geonames_id") WHERE kind = 'city';
 CREATE INDEX "places__index_country_id_name" ON "places" ("account_id", "country_id", "name");
@@ -529,6 +547,7 @@ CREATE TABLE "corporations" (
   "about" TEXT,
   "culture" TEXT
 ) STRICT;
+CREATE INDEX "corporations__account_account_id" ON "corporations" ("account_id");
 CREATE UNIQUE INDEX "corporations__natural_domain" ON "corporations" ("account_id", "domain");
 CREATE INDEX "corporations__index_name" ON "corporations" ("account_id", "name");
 
@@ -545,6 +564,7 @@ CREATE TABLE "offices" (
   "headcount_on" TEXT,
   "opened_on" TEXT
 ) STRICT;
+CREATE INDEX "offices__account_account_id" ON "offices" ("account_id");
 CREATE UNIQUE INDEX "offices__unique_corporation_id_place_id_kind" ON "offices" ("account_id", "corporation_id", "place_id", "kind");
 CREATE INDEX "offices__index_place_id" ON "offices" ("account_id", "place_id");
 
@@ -563,6 +583,7 @@ CREATE TABLE "sources" (
   "mutable" INTEGER NOT NULL DEFAULT 1,
   "doc" TEXT
 ) STRICT;
+CREATE INDEX "sources__account_account_id" ON "sources" ("account_id");
 CREATE UNIQUE INDEX "sources__natural_url" ON "sources" ("account_id", "url");
 CREATE INDEX "sources__index_host" ON "sources" ("account_id", "host");
 
@@ -582,6 +603,7 @@ CREATE TABLE "citations" (
   "key_id" INTEGER REFERENCES "api_keys"("id") ON DELETE SET NULL,
   "op_id" INTEGER
 ) STRICT;
+CREATE INDEX "citations__account_account_id" ON "citations" ("account_id");
 CREATE INDEX "citations__index_table_row_id_column_id_desc" ON "citations" ("account_id", "table", "row_id", "column", "id" DESC);
 
 CREATE TABLE "contacts" (
@@ -601,6 +623,7 @@ CREATE TABLE "contacts" (
   "last_touch_on" TEXT,
   "notes" TEXT
 ) STRICT;
+CREATE INDEX "contacts__account_account_id" ON "contacts" ("account_id");
 CREATE UNIQUE INDEX "contacts__natural_email" ON "contacts" ("account_id", "email") WHERE email is not null;
 CREATE INDEX "contacts__index_corporation_id" ON "contacts" ("account_id", "corporation_id");
 
@@ -625,6 +648,7 @@ CREATE TABLE "messages" (
   "application_id" INTEGER REFERENCES "applications"("id") ON DELETE SET NULL,
   "contact_id" INTEGER REFERENCES "contacts"("id") ON DELETE SET NULL
 ) STRICT;
+CREATE INDEX "messages__account_account_id" ON "messages" ("account_id");
 CREATE UNIQUE INDEX "messages__natural_message_id" ON "messages" ("account_id", "message_id") WHERE message_id is not null;
 CREATE INDEX "messages__index_thread_key" ON "messages" ("account_id", "thread_key");
 CREATE INDEX "messages__index_application_id" ON "messages" ("account_id", "application_id");
@@ -647,6 +671,7 @@ CREATE TABLE "gym_reps" (
   "outcome" TEXT NOT NULL DEFAULT 'solved',
   "note" TEXT
 ) STRICT;
+CREATE INDEX "gym_reps__account_account_id" ON "gym_reps" ("account_id");
 CREATE INDEX "gym_reps__index_done_on" ON "gym_reps" ("account_id", "done_on");
 
 CREATE TABLE "net_entries" (
@@ -662,4 +687,5 @@ CREATE TABLE "net_entries" (
   "body" TEXT,
   "shipped_on" TEXT
 ) STRICT;
+CREATE INDEX "net_entries__account_account_id" ON "net_entries" ("account_id");
 CREATE INDEX "net_entries__index_shipped_on" ON "net_entries" ("account_id", "shipped_on");
