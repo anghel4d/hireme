@@ -64,6 +64,8 @@ const DEADLINE: Duration = Duration::from_secs(2);
 /// The longest the gate waits for the control stream's last bytes (a BYE)
 /// to leave before it closes the connection, which would discard them.
 const FLUSH: Duration = Duration::from_secs(2);
+/// How often a self-signed certificate (valid 14 days) is made anew.
+const SELF_SIGNED_RENEW: Duration = Duration::from_secs(7 * 24 * 3600);
 /// QUIC handshake plus the CONNECT. A lossy path spends seconds in probe
 /// timeouts (333 ms, doubling), and a browser given no answer waits for
 /// good, so this bound is generous.
@@ -356,11 +358,16 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
     // a renewal caught half-written must not leave the old certificate to
     // expire.
     let mut failed = false;
+    // A self-signed certificate (no GATE_CERT) lives 14 days; it is made anew
+    // each week, and its hash file with it, so a long-running node keeps
+    // pinned WebTransport.
+    let mut made = std::time::Instant::now();
     loop {
         tokio::select! {
             _ = now.notified() => {}
             _ = sleep(Duration::from_secs(300)) => {
-                if !failed && cert_stamp(&gate.settings) == stamp { continue; }
+                let renew = gate.settings.cert.is_none() && made.elapsed() >= SELF_SIGNED_RENEW;
+                if !failed && !renew && cert_stamp(&gate.settings) == stamp { continue; }
             }
         }
         // A renewal may still be writing the pair.
@@ -378,6 +385,7 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
             Ok(Ok(())) => {
                 stamp = seen;
                 failed = false;
+                made = std::time::Instant::now();
             }
             Ok(Err(e)) => {
                 eprintln!("hireme-gate: reload kept the old certificate: {e}");

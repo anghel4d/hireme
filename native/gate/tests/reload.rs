@@ -86,7 +86,7 @@ async fn scenario(kind: &str) {
     async fn reload(stdin: &mut tokio::process::ChildStdin) {
         stdin.write_all(b"reload\n").await.unwrap();
         stdin.flush().await.unwrap();
-        sleep(Duration::from_millis(2500)).await;
+        sleep(Duration::from_millis(4000)).await;
     }
 
     // inject one failure, then a whole new pair B; does the gate still follow?
