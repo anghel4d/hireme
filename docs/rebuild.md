@@ -471,7 +471,10 @@ in this order:
 Then the write, one citation per metric/prose cell, `rev + 1`, the ledger
 entry (acknowledged ops only; a resend is answered from it, a refused op
 is judged again), and the delta to subscribers and to the sequencer's
-kernel.
+kernel. A put that restates its row exactly (every cell as stored and, for
+a cited cell, the same `as_of` and the same source as its last citation)
+is acknowledged at the row's current `rev` and writes nothing; the same
+value from another source is cited, as corroboration.
 
 ## Lease and keys
 
