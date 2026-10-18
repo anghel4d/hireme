@@ -256,7 +256,7 @@ function view(): Html {
     <div class="toolbar" data-key="toolbar">
       <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
       ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
-      <span class="muted">${got.rows.length}${got.more ? "+" : ""} rows</span>
+      <span class="muted">${got.rows.length}${got.more ? "+" : ""} row${got.rows.length === 1 && !got.more ? "" : "s"}</span>
     </div>
     ${g.length < 2 && blank.length === 0 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${g.length < 2 ? EMPTY : [...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}
       ${blank.length === 0 ? EMPTY : html`<button type="button" class="ghost" data-act="empty" data-key="empty" title="${blank.map((c) => label(c.name)).join(", ")}">${showEmpty ? `Hide the ${blank.length} empty column${blank.length === 1 ? "" : "s"}` : `${blank.length} empty column${blank.length === 1 ? "" : "s"} hidden · show`}</button>`}</div>`}
