@@ -167,6 +167,15 @@ defmodule HiremeWeb.Gate do
   @impl Supervisor
   def init(opts) do
     path = opts |> Keyword.fetch!(:socket) |> to_string()
+
+    # sun_path holds 108 bytes with its NUL; past that listen/1 says only badarg.
+    if byte_size(path) > 107,
+      do:
+        raise(
+          ArgumentError,
+          "gate socket path is #{byte_size(path)} bytes, past the 107 a Unix socket allows: #{path}"
+        )
+
     _ = File.rm(path)
     File.mkdir_p!(Path.dirname(path))
 
