@@ -43,6 +43,8 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
+/* Keyboard movement and anchors scroll a target clear of the sticky bar. */
+html { scroll-padding-top: 56px; }
 body {
   background: var(--bg);
   color: var(--ink);
@@ -181,6 +183,8 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .grid tr.dead { color: var(--muted); }
 .grid td.actions { white-space: nowrap; text-align: right; }
 
+/* A table wider than a phone scrolls inside its card, never the page. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
 .grid-wrap { overflow: auto; max-height: calc(100vh - 180px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .grid.sparse { width: max-content; min-width: 100%; }
 .grid.sparse thead th { position: sticky; top: 0; background: var(--panel); z-index: 2; padding: 2px 4px; }

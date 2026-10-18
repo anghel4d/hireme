@@ -50,11 +50,11 @@ function gym(g: Gym): Html {
       <button class="primary">Log</button>
     </form>
     <section class="card" data-key="reps"><h2>Recent reps</h2>
-      <table class="grid compact"><thead><tr><th scope="col">Day</th><th scope="col">Problem</th><th scope="col">Topic</th><th scope="col">Difficulty</th><th scope="col">Outcome</th><th scope="col">Min</th></tr></thead>
+      <div class="table-scroll"><table class="grid compact"><thead><tr><th scope="col">Day</th><th scope="col">Problem</th><th scope="col">Topic</th><th scope="col">Difficulty</th><th scope="col">Outcome</th><th scope="col">Min</th></tr></thead>
       <tbody>${newest("gym_reps", "done_on", 60).map((id) => html`<tr data-key="r${id}"><td>${str(value("gym_reps", id, "done_on"))}</td>
         <td>${value("gym_reps", id, "url") ? html`<a href="${href(str(value("gym_reps", id, "url")))}" rel="noopener noreferrer" target="_blank">${str(value("gym_reps", id, "title")) || str(value("gym_reps", id, "slug"))}</a>` : str(value("gym_reps", id, "title")) || str(value("gym_reps", id, "slug"))}
           <span class="muted">${str(value("gym_reps", id, "platform"))}</span></td>
-        <td>${str(value("gym_reps", id, "topic"))}</td><td>${str(value("gym_reps", id, "difficulty"))}</td><td>${str(value("gym_reps", id, "outcome"))}</td><td>${str(value("gym_reps", id, "minutes"))}</td></tr>`)}</tbody></table>
+        <td>${str(value("gym_reps", id, "topic"))}</td><td>${str(value("gym_reps", id, "difficulty"))}</td><td>${str(value("gym_reps", id, "outcome"))}</td><td>${str(value("gym_reps", id, "minutes"))}</td></tr>`)}</tbody></table></div>
     </section>`
 }
 

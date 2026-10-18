@@ -121,6 +121,10 @@ const MESSAGES: Record<string, string> = {
 /** What a failed call says to the operator: a refusal by its code, a ceremony by why(). */
 const said = (e: unknown): string => (e instanceof Refused ? MESSAGES[e.code] ?? e.message : e instanceof Error ? why(e) : String(e))
 
+/** What the call parked behind a step-up does with its answer (closing its form, revealing a secret),
+ * so its retry finishes the same way. Kept beside the parked call, not in the model: it is a function. */
+let parked: ((r: Row) => void) | undefined
+
 /** Run an account method; a `step_up` refusal parks it until the session is fresh. */
 async function call<T = Row>(method: string, params: Record<string, unknown> = {}, done?: (r: T) => void): Promise<void> {
   try {
@@ -130,6 +134,7 @@ async function call<T = Row>(method: string, params: Record<string, unknown> = {
     await load()
   } catch (e) {
     if (e instanceof Refused && e.code === "step_up") {
+      parked = done as ((r: Row) => void) | undefined
       patch({ stepUp: { method, params }, error: "" })
       return
     }
@@ -151,7 +156,11 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
   // Ceremonies retry as themselves: their answers (a QR code, passkey options) are what the next step needs.
   else if (waiting?.method === "account.totp.begin") totpBegin()
   else if (waiting?.method === "account.passkey.begin") await enroll(String(waiting.params.name ?? ""))
-  else if (waiting) await call(waiting.method, waiting.params, (r) => reveal(waiting.method, r as Row))
+  else if (waiting) {
+    const then = parked
+    parked = undefined
+    await call(waiting.method, waiting.params, then ?? ((r) => reveal(waiting.method, r)))
+  }
   else await load()
 }
 
@@ -354,7 +363,7 @@ function keys(): Html {
   const open = v().open
   return html`<section class="card" data-key="keys"><h2>API keys</h2>
     <p class="hint">A key opens one agent session over the MCP. Its read and write masks bound every row it sees and every write it makes.</p>
-    <table class="grid"><thead><tr><th scope="col">Name</th><th scope="col">Key</th><th scope="col">Reads</th><th scope="col">Writes</th><th scope="col">Used</th><th scope="col"></th></tr></thead>
+    <div class="table-scroll"><table class="grid"><thead><tr><th scope="col">Name</th><th scope="col">Key</th><th scope="col">Reads</th><th scope="col">Writes</th><th scope="col">Used</th><th scope="col"></th></tr></thead>
     <tbody>${rows.map((k) => {
       const id = num(k.id)
       const live = k.live === true
@@ -371,7 +380,7 @@ function keys(): Html {
             <p class="hint">Widening a key or allowing deletes needs a fresh factor. The agent's session restarts with the new masks.</p>
             <div class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="close">Cancel</button></div>
           </form></td></tr>` : EMPTY}`
-    })}</tbody></table>
+    })}</tbody></table></div>
     ${open === "mint" ? html`<form class="stack" data-submit="mint" data-act="mint" data-key="mint">
         <label>Name <input name="name" required maxlength="100" placeholder="research agent"></label>
         ${maskPicker("mint", 0, 0, "read_only", false)}
@@ -442,14 +451,14 @@ function audit(): Html {
     ${a === null ? html`<button type="button" data-act="audit" data-view="security">Show security events</button>` : html`
       <div class="chips" role="group" aria-label="Which events">${tab("security", "Security")}${tab("activity", "Activity")}</div>
       <p class="hint">${a.view === "security" ? "Sign-ins, factors, keys, sessions and revokes: kept for good." : "Agent writes, leases and connections, counted per window once busy; it expires."}</p>
-      ${a.events.length === 0 && !a.loading ? html`<p class="empty">No events.</p>` : html`<table class="grid compact">
+      ${a.events.length === 0 && !a.loading ? html`<p class="empty">No events.</p>` : html`<div class="table-scroll"><table class="grid compact">
       <thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">From</th></tr></thead>
       <tbody>${a.events.map((e) => {
         const kind = str(e.kind)
         const many = kind === "activity_coalesced" || kind === "revokes_coalesced"
         return html`<tr data-key="e${num(e.id)}"><td>${time(e.inserted_at)}</td><td>${kind.replace(/_/g, " ")}${e.key_id ? html` <span class="tag">${keyName(String(e.key_id))}</span>` : EMPTY}${many ? coalesced(e) : EMPTY}</td>
         <td class="muted">${str(e.ip)}</td></tr>`
-      })}</tbody></table>`}
+      })}</tbody></table></div>`}
       ${a.loading ? html`<p class="muted">Loading…</p>` : a.next !== null ? html`<button type="button" class="more" data-act="audit-more">Older events</button>` : EMPTY}`}
   </section>`
 }
@@ -567,6 +576,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "step-recovery":
       return void stepped("account.step_up.recovery", { code: (f.code ?? "").trim() })
     case "step-cancel":
+      parked = undefined
       return patch({ stepUp: null })
     case "copy":
       return void navigator.clipboard?.writeText(v().reveal?.lines.join("\n") ?? "").then(() => notice("ok", "Copied."))
