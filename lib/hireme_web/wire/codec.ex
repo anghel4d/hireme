@@ -187,49 +187,14 @@ defmodule HiremeWeb.Wire.Codec do
   # A table run's fixed-width columns as byte planes (and a str column's
   # offsets as deltas first), so like bytes sit together for zstd: headers,
   # pads, text and sym/list columns stay as they are. native/wire undoes it.
-  defp shuffle(kind, body) when kind in @runs, do: walk(body, [])
-  defp shuffle(_kind, body), do: body
-
-  defp walk(<<>>, acc), do: IO.iodata_to_binary(Enum.reverse(acc))
-
-  defp walk(<<head::binary-8, rest::binary>>, acc) do
-    <<_::16, ncols::little-16, nrows::little-32>> = head
-    {cols, rest} = walk_cols(rest, ncols, nrows, [])
-    walk(rest, [cols, head | acc])
-  end
-
-  defp walk_cols(rest, 0, _n, acc), do: {Enum.reverse(acc), rest}
-
-  defp walk_cols(<<h::binary-8, rest::binary>>, k, n, acc) do
-    <<_::16, ty, 0, len::little-32>> = h
-    p = pad8(len) - len
-    <<data::binary-size(^len), pad::binary-size(^p), rest::binary>> = rest
-    walk_cols(rest, k - 1, n, [[h, column(ty, n, data), pad] | acc])
-  end
-
-  defp column(@t_u32, _n, data), do: planes(data, 4)
-  defp column(ty, _n, data) when ty in [@t_i64, @t_f64], do: planes(data, 8)
-
-  # A str column's offsets as wrapping deltas, then planes; its bytes as they are.
-  defp column(ty, n, data) when ty in [@t_str, @t_zstr] do
-    k = (n + 1) * 4
-    <<offsets::binary-size(^k), text::binary>> = data
-
-    {d, _} =
-      for(<<v::little-32 <- offsets>>, do: v)
-      |> Enum.map_reduce(0, fn v, prev -> {<<v - prev &&& @none32::little-32>>, v} end)
-
-    [planes(IO.iodata_to_binary(d), 4), text]
-  end
-
-  defp column(_ty, _n, data), do: data
-
-  defp planes(data, w) do
-    for p <- 0..(w - 1), into: <<>> do
-      q = w - 1 - p
-      for <<_::binary-size(^p), b, _::binary-size(^q) <- data>>, into: <<>>, do: <<b>>
+  defp shuffle(kind, body) when kind in @runs do
+    case Hireme.Kernel.Nif.shuffle(IO.iodata_to_binary(body)) do
+      nil -> raise ArgumentError, "a table run that does not walk"
+      shuffled -> shuffled
     end
   end
+
+  defp shuffle(_kind, body), do: body
 
   # A text cell as it travels: raw under the floor or when packing does not
   # pay, else zstd 19 against the text dictionary, packed once per content.

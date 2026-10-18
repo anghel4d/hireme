@@ -184,6 +184,15 @@ fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>>
     Some(out.release(env))
 }
 
+/// A table-run body shuffled for packing (wire::shuffle); None when it does not walk.
+#[rustler::nif]
+fn shuffle<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
+    let mut out = rustler::OwnedBinary::new(body.len())?;
+    out.as_mut_slice().copy_from_slice(body.as_slice());
+    wire::shuffle(out.as_mut_slice()).ok()?;
+    Some(out.release(env))
+}
+
 #[rustler::nif]
 fn text(cell: Binary) -> Option<String> {
     wire::text_cell(cell.as_slice()).ok().map(|s| s.into_owned())

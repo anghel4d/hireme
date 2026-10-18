@@ -546,6 +546,54 @@ fn unshuffle(b: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// Shuffles a table-run body in place before packing: the inverse of
+/// `unshuffle` (u32 columns into 4 byte planes, i64 and f64 into 8, a str or
+/// zstr column's offsets into wrapping deltas then 4 planes). The node packs
+/// BOOTs through it, so the walk over a whole desk is native, not Elixir's.
+pub fn shuffle(b: &mut [u8]) -> Result<()> {
+    let mut at = 0usize;
+    while at + 8 <= b.len() {
+        let (ncols, nrows) = (u16_at(b, at + 2) as usize, u32_at(b, at + 4) as usize);
+        at += 8;
+        for _ in 0..ncols {
+            let (ty, len) = (*b.get(at + 2).ok_or(Error::Short)?, u32_at(b.get(at..at + 8).ok_or(Error::Short)?, 4) as usize);
+            let data = b.get_mut(at + 8..(at + 8).checked_add(len).ok_or(Error::Short)?).ok_or(Error::Short)?;
+            match ty {
+                U32 => plane(data, 4),
+                I64 | F64 => plane(data, 8),
+                STR | ZSTR => {
+                    let head = nrows.checked_add(1).and_then(|n| n.checked_mul(4)).filter(|&h| h <= len).ok_or(Error::Column)?;
+                    let offsets = &mut data[..head];
+                    let mut prev = 0u32;
+                    for o in offsets.as_chunks_mut::<4>().0 {
+                        let v = u32::from_le_bytes(*o);
+                        *o = v.wrapping_sub(prev).to_le_bytes();
+                        prev = v;
+                    }
+                    plane(offsets, 4);
+                }
+                _ => {}
+            }
+            at = pad8(at + 8 + len);
+        }
+    }
+    Ok(())
+}
+
+/// `w`-byte values into planes (plane p holds byte p of each); a ragged tail is left as is.
+fn plane(data: &mut [u8], w: usize) {
+    let n = data.len() / w;
+    if n == 0 {
+        return;
+    }
+    let values = data[..n * w].to_vec();
+    for (i, v) in values.chunks_exact(w).enumerate() {
+        for (p, x) in v.iter().enumerate() {
+            data[p * n + i] = *x;
+        }
+    }
+}
+
 /// Planes of `w`-byte values back into values; a ragged tail is left as is.
 fn unplane(data: &mut [u8], w: usize) {
     let n = data.len() / w;

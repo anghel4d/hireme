@@ -80,4 +80,5 @@ defmodule Hireme.Kernel.Nif do
   def keywords_version, do: :erlang.nif_error(:nif_not_loaded)
   def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
   def text(_cell), do: :erlang.nif_error(:nif_not_loaded)
+  def shuffle(_body), do: :erlang.nif_error(:nif_not_loaded)
 end
