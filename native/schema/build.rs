@@ -156,7 +156,7 @@ fn main() {
                 c.name,
                 c.ty.code(),
                 c.wire(),
-                c.flags(),
+                c.flags,
                 opt(c.target.as_deref()),
                 opt(c.default.as_deref())
             )

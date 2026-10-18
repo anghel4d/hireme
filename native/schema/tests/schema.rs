@@ -1,6 +1,6 @@
 //! The declaration's contract: what each hash covers, and the lines it refuses.
 
-use schema::{SOURCE, parse};
+use schema::{SOURCE, Schema, parse};
 
 fn with(after: &str, line: &str) -> String {
     let at = SOURCE.find(after).expect("anchor in the declaration") + after.len();
@@ -10,35 +10,27 @@ fn with(after: &str, line: &str) -> String {
 }
 
 #[test]
-fn a_server_table_metric_moves_schema_rev_alone_and_a_resident_column_moves_both() {
+fn wire_hash_covers_what_a_client_is_compiled_against_and_schema_rev_everything() {
     let base = parse(SOURCE).unwrap();
-
+    let server_side = |s: Schema, why: &str| {
+        assert_eq!(s.wire_hash, base.wire_hash, "{why}");
+        assert_ne!(s.schema_rev, base.schema_rev, "{why}");
+        s
+    };
     // Appended, as a new column must be: one inserted earlier renumbers the
     // columns after it. A server table (api_keys) never travels.
-    let server = parse(&with("  col paused_at time ? readonly", "  metric probe_metric u32")).unwrap();
-    assert_eq!(server.wire_hash, base.wire_hash);
-    assert_ne!(server.schema_rev, base.schema_rev);
+    let server = server_side(parse(&with("  col paused_at time ? readonly", "  metric probe_metric u32")).unwrap(), "a server table's metric");
     assert!(server.table("api_keys").unwrap().col("probe_metric_on").is_some());
-
-    let hidden = parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap();
-    assert_eq!(hidden.wire_hash, base.wire_hash, "a server_only column never travels");
-    let hidden_enum = parse(&with(
-        "  col cv_theme json ?",
-        "  col probe_hidden enum probe_kind ? server_only",
-    ).replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1))
-    .unwrap();
-    assert_eq!(hidden_enum.wire_hash, base.wire_hash, "an enum only server_only columns use never travels");
+    server_side(parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap(), "a server_only column never travels");
+    let hidden_enum = with("  col cv_theme json ?", "  col probe_hidden enum probe_kind ? server_only").replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1);
+    server_side(parse(&hidden_enum).unwrap(), "an enum only server_only columns use never travels");
+    server_side(parse(&SOURCE.replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1)).unwrap(), "an enum no wire table uses, inserted anywhere");
 
     let resident = parse(&with("table applications desk resident", "  col probe_col str ?")).unwrap();
     assert_ne!(resident.wire_hash, base.wire_hash);
     assert_ne!(resident.schema_rev, base.schema_rev);
-}
-
-#[test]
-fn the_layout_line_is_part_of_what_a_client_is_compiled_against() {
-    let base = parse(SOURCE).unwrap();
     let bumped = parse(&SOURCE.replacen(&format!("layout {}", base.layout), &format!("layout {}", base.layout + 1), 1)).unwrap();
-    assert_ne!(bumped.wire_hash, base.wire_hash);
+    assert_ne!(bumped.wire_hash, base.wire_hash, "the layout line is part of what a client is compiled against");
 }
 
 #[test]
@@ -79,14 +71,6 @@ fn malformed_lines_are_refused_with_their_line_number() {
     let err = parse(&with("table places world resident", "  col nope widget ?")).unwrap_err();
     let line = SOURCE[..SOURCE.find("table places world resident").unwrap()].matches('\n').count() + 2;
     assert_eq!(err.line, line);
-}
-
-#[test]
-fn a_server_enum_inserted_anywhere_leaves_the_wire_alone() {
-    let base = parse(SOURCE).unwrap();
-    let inserted = parse(&SOURCE.replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1)).unwrap();
-    assert_eq!(inserted.wire_hash, base.wire_hash);
-    assert_ne!(inserted.schema_rev, base.schema_rev);
 }
 
 #[test]

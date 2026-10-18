@@ -389,17 +389,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_restart_asked_for_here_skips_the_backoff() {
+    fn reconnects_back_off_unless_a_fresh_session_was_asked_for_here() {
         // The node's BYE restart (a session cap, an address cap, the node restarting) backs off as any end does.
         assert_eq!(backoff(0, "restart", "too many sessions for this key"), Duration::from_millis(500));
         assert_eq!(backoff(3, "restart", "the node is restarting"), Duration::from_millis(4000));
         assert_eq!(backoff(10, "socket", ""), Duration::from_secs(30));
         // A throttled HELLO waits out the minute it was told.
         assert_eq!(backoff(0, "restart", "rate limited; retry in a minute"), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn a_failure_never_reconnects_at_once() {
         let long = Duration::from_secs(30);
         assert!(skip_backoff("requested", long, "restart"));
         // A frame the kernel cannot apply ends every session the same way: it backs off.

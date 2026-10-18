@@ -2,7 +2,7 @@
 //! line, for `Hireme.Schema`, which loads it at compile time instead of
 //! parsing the file a second time. Keys are the Elixir model's.
 
-use crate::model::{Column, Index, Key, Param, Schema, Table, Type, Where};
+use crate::model::{Column, Index, Key, Param, Schema, Table, Type, Where, flag};
 use crate::ts::{json_str, opt_str};
 use alloc::format;
 use alloc::string::String;
@@ -105,26 +105,31 @@ fn typed(ty: Type, target: Option<&str>) -> String {
 }
 
 fn column(c: &Column) -> String {
+    let bits: String = [
+        ("private", flag::PRIVATE),
+        ("server_only", flag::SERVER_ONLY),
+        ("human_only", flag::HUMAN_ONLY),
+        ("readonly", flag::READONLY),
+        ("unique", flag::UNIQUE),
+        ("cascade", flag::CASCADE),
+        ("loose", flag::LOOSE),
+        ("natural", flag::NATURAL),
+        ("metric", flag::METRIC),
+    ]
+    .iter()
+    .map(|(k, b)| format!("\"{k}\":{},", c.has(*b)))
+    .collect();
     format!(
-        "{{\"id\":{},\"name\":{},{},\"required\":{},\"default\":{},\"private\":{},\"server_only\":{},\"human_only\":{},\"readonly\":{},\"unique\":{},\"cascade\":{},\"loose\":{},\"natural\":{},\"metric\":{},\"metric_of\":{},\"prose\":{},\"implied\":{},\"flags\":{}}}",
+        "{{\"id\":{},\"name\":{},{},\"required\":{},\"default\":{},{bits}\"metric_of\":{},\"prose\":{},\"implied\":{},\"flags\":{}}}",
         c.id,
         json_str(&c.name),
         typed(c.ty, c.target.as_deref()),
-        c.required,
+        c.has(flag::REQUIRED),
         opt_str(c.default.as_deref()),
-        c.private,
-        c.server_only,
-        c.human_only,
-        c.readonly,
-        c.unique,
-        c.cascade,
-        c.loose,
-        c.natural,
-        c.metric,
         opt_str(c.metric_of.as_deref()),
-        c.prose,
-        c.implied,
-        c.flags()
+        c.has(flag::PROSE),
+        c.has(flag::IMPLIED),
+        c.flags
     )
 }
 

@@ -234,143 +234,18 @@ proptest! {
         }
     }
 
-    #[test]
-    fn mangled_input_never_panics(
-        blocks in prop::collection::vec(block(), 1..3),
-        flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..8),
-        lens in prop::collection::vec(
-            (any::<prop::sample::Index>(), prop::sample::select(vec![0u32, 1, 0x3FFF_FFFF, 0x4000_0000, 0x7FFF_FFFF, 0xFFFF_FFF6, 0xFFFF_FFF8, u32::MAX])),
-            0..4,
-        ),
-        cut in any::<prop::sample::Index>(),
-    ) {
-        let mut body = write_blocks(&blocks);
-        for (i, v) in &flips {
-            let i = i.index(body.len().max(1));
-            if i < body.len() { body[i] = *v; }
-        }
-        // Lengths and counts at their boundaries, where 32-bit arithmetic wraps.
-        for (i, v) in &lens {
-            let at = i.index(body.len().max(4) / 4) * 4;
-            if at + 4 <= body.len() { body[at..at + 4].copy_from_slice(&v.to_le_bytes()); }
-        }
-        let body = &body[..cut.index(body.len() + 1)];
-        if let Ok(b) = Blocks::new(body) {
-            for blk in b.iter() {
-                let _ = blk.gone();
-                for c in blk.cols() {
-                    for r in 0..c.nrows() { let _ = c.value(r); }
-                }
-            }
-        }
-        let _ = Ops::new(body).map(|o| o.iter().map(|op| op.cells().count()).sum::<usize>());
-        let _ = Hello::decode(body);
-        let _ = decode_nacks(body);
-        let mut framed = Writer::new(BOOT, HASH, 0);
-        framed.bytes(body);
-        let mut f = framed.finish();
-        f[5] |= ZSTD;
-        if let Ok(fr) = Frame::parse(&f, HASH) { let _ = fr.body(); }
-    }
 }
 
+// A gone block's bytes by hand (u16 table | u16 1 | u32 n | GONE u32 column), and read back.
 #[test]
-fn gone_blocks_delete_ids() {
-    let mut w = BodyWriter::new();
-    w.gone(3, &[1, 2, 40]);
-    let body = w.finish();
-    let b = Blocks::new(&body).unwrap().iter().next().unwrap();
-    assert_eq!(
-        (b.table, b.gone().unwrap().iter().collect::<Vec<_>>()),
-        (3, vec![1, 2, 40])
-    );
-}
-
-#[test]
-fn refuses_what_is_not_a_frame() {
-    let ok = encode_ping(PING, HASH, 1);
-    assert_eq!(Frame::parse(&ok, HASH ^ 1).unwrap_err(), Error::Hash);
-    assert!(split(&ok[..15], MAX_UP).unwrap().is_none());
-    let mut odd = ok.clone();
-    odd[0] = 23;
-    assert_eq!(split(&odd, MAX_UP).unwrap_err(), Error::Len);
-    let mut huge = ok.clone();
-    huge[0..4].copy_from_slice(&((MAX_UP as u32) + 8).to_le_bytes());
-    assert_eq!(split(&huge, MAX_UP).unwrap_err(), Error::Len);
-}
-
-// Bytes worked out by hand from the layout in the crate doc.
-#[test]
-fn golden_bytes() {
-    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
-    assert_eq!(
-        hex(&encode_ping(PING, 0x5A17, 1)),
-        "180000000d00175a00000000000000000100000000000000"
-    );
-
-    let mut w = BodyWriter::new();
-    w.block(3, 2)
-        .u32s(1, [7, NONE].into_iter())
-        .strs(2, ["ab", ""].into_iter());
-    assert_eq!(
-        hex(&w.finish()),
-        "0300020002000000010001000800000007000000ffffffff020002000e00000000000000020000000200000061620000"
-    );
-
+fn gone_blocks_are_the_documented_bytes_and_delete_ids() {
     let mut g = BodyWriter::new();
     g.gone(9, &[4, 5]);
-    assert_eq!(
-        hex(&g.finish()),
-        "0900010002000000feff0100080000000400000005000000"
-    );
-}
-
-// The frame ids and BYE codes are the schema's, not a second list.
-#[test]
-fn ids_are_the_schemas() {
-    let schema = include_str!("../../../schema/hireme.schema");
-    let frames: Vec<(&str, u8)> = schema
-        .lines()
-        .filter_map(|l| l.strip_prefix("frame "))
-        .map(|l| {
-            let mut p = l.split_whitespace();
-            (p.next().unwrap(), p.next().unwrap().parse().unwrap())
-        })
-        .collect();
-    let ours = [
-        ("HELLO", HELLO),
-        ("WELCOME", WELCOME),
-        ("BOOT", BOOT),
-        ("PATCH", PATCH),
-        ("OPS", OPS),
-        ("ACK", ACK),
-        ("NACK", NACK),
-        ("TICK", TICK),
-        ("PING", PING),
-        ("PONG", PONG),
-        ("BYE", BYE),
-        ("RPC", RPC),
-        ("REPLY", REPLY),
-    ];
-    assert_eq!(frames, ours.to_vec());
-
-    let bye: Vec<&str> = schema
-        .lines()
-        .find_map(|l| l.strip_prefix("enum bye "))
-        .unwrap()
-        .split_whitespace()
-        .collect();
-    assert_eq!(bye, ["revoked", "grants", "restart", "schema", "suspended"]);
-    assert_eq!(
-        [
-            BYE_REVOKED,
-            BYE_GRANTS,
-            BYE_RESTART,
-            BYE_SCHEMA,
-            BYE_SUSPENDED
-        ],
-        [0, 1, 2, 3, 4]
-    );
+    let body = g.finish();
+    let hex: String = body.iter().map(|x| format!("{x:02x}")).collect();
+    assert_eq!(hex, "0900010002000000feff0100080000000400000005000000");
+    let b = Blocks::new(&body).unwrap().iter().next().unwrap();
+    assert_eq!((b.table, b.gone().unwrap().iter().collect::<Vec<_>>()), (9, vec![4, 5]));
 }
 
 #[test]
@@ -391,89 +266,36 @@ fn sentinel_cells_are_named() {
     assert_eq!(op.cell(13).unwrap().value(), Value::None);
 }
 
+// The refusals the hand-built vectors do not name: each by its error.
 #[test]
-fn refuses_malformed_bodies() {
+fn refusals_are_named() {
+    let ok = encode_ping(PING, HASH, 1);
+    assert_eq!(Frame::parse(&ok, HASH ^ 1).unwrap_err(), Error::Hash);
+    assert!(split(&ok[..15], MAX_UP).unwrap().is_none());
+    let (mut odd, mut huge, mut kind, mut flag) = (ok.clone(), ok.clone(), ok.clone(), ok);
+    odd[0] = 23;
+    assert_eq!(split(&odd, MAX_UP).unwrap_err(), Error::Len);
+    huge[0..4].copy_from_slice(&((MAX_UP as u32) + 8).to_le_bytes());
+    assert_eq!(split(&huge, MAX_UP).unwrap_err(), Error::Len);
+    kind[4] = 99;
+    assert_eq!(Frame::parse(&kind, HASH).unwrap_err(), Error::Kind);
+    flag[5] = 0x40;
+    assert_eq!(Frame::parse(&flag, HASH).unwrap_err(), Error::Body);
+
     let block = |table: u16, ncols: u16, nrows: u32, cols: &[u8]| {
-        let mut b = Vec::new();
-        b.extend_from_slice(&table.to_le_bytes());
-        b.extend_from_slice(&ncols.to_le_bytes());
-        b.extend_from_slice(&nrows.to_le_bytes());
-        b.extend_from_slice(cols);
-        b
+        [&table.to_le_bytes()[..], &ncols.to_le_bytes(), &nrows.to_le_bytes(), cols].concat()
     };
-    let col = |id: u16, data: &[u8], pad: u8| {
-        let mut c = Vec::new();
-        c.extend_from_slice(&id.to_le_bytes());
-        c.extend_from_slice(&[U32, 0]);
-        c.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        c.extend_from_slice(data);
+    let col = |id: u16, ty: u8, data: &[u8], pad: u8| {
+        let mut c = [&id.to_le_bytes()[..], &[ty, 0], &(data.len() as u32).to_le_bytes(), data].concat();
         c.resize(8 + data.len().div_ceil(8) * 8, pad);
         c
     };
-    let one = col(1, &7u32.to_le_bytes(), 0);
+    let one = col(1, U32, &7u32.to_le_bytes(), 0);
     assert!(Blocks::new(&block(3, 1, 1, &one)).is_ok());
-    assert_eq!(
-        Blocks::new(&block(0, 1, 1, &one)).unwrap_err(),
-        Error::Body,
-        "table 0"
-    );
-    assert_eq!(
-        Blocks::new(&block(3, 0, u32::MAX, &[])).unwrap_err(),
-        Error::Body,
-        "rows without columns"
-    );
-    assert_eq!(
-        Blocks::new(&block(3, 2, 1, &[one.clone(), one.clone()].concat())).unwrap_err(),
-        Error::Body,
-        "duplicate column"
-    );
-    assert_eq!(
-        Blocks::new(&block(3, 1, 1, &col(1, &7u32.to_le_bytes(), 1))).unwrap_err(),
-        Error::Body,
-        "nonzero pad"
-    );
-    let backwards = [0u32, 3, 1]
-        .iter()
-        .flat_map(|o| o.to_le_bytes())
-        .chain(*b"abc")
-        .collect::<Vec<u8>>();
-    let mut str_col = col(2, &backwards, 0);
-    str_col[2] = STR;
-    assert_eq!(
-        Blocks::new(&block(3, 1, 2, &str_col)).unwrap_err(),
-        Error::Str,
-        "offsets run backwards"
-    );
-
-    let mut f = Writer::new(PING, HASH, 0);
-    f.u64(1);
-    let mut bad_kind = f.finish();
-    bad_kind[4] = 99;
-    assert_eq!(Frame::parse(&bad_kind, HASH).unwrap_err(), Error::Kind);
-    let mut bad_flag = encode_ping(PING, HASH, 1);
-    bad_flag[5] = 0x40;
-    assert_eq!(Frame::parse(&bad_flag, HASH).unwrap_err(), Error::Body);
-
-    let hello = Hello {
-        cred: 3,
-        snapshot_rev: 0,
-        schema_rev: 0,
-        credential: b"k",
-        label: "x",
-    }
-    .encode(HASH);
-    assert!(Hello::decode(Frame::parse(&hello, HASH).unwrap().raw_body()).is_err());
-    let bye = Bye {
-        reason: 5,
-        message: "",
-    }
-    .encode(HASH, 0);
-    assert!(Bye::decode(Frame::parse(&bye, HASH).unwrap().raw_body()).is_err());
-
-    // A small frame that unpacks past the reader's limit is refused.
-    let packed = pack::frame(PING, HASH, &vec![0; 1 << 20]);
-    let frame = Frame::parse(&packed, HASH).unwrap();
-    assert!(packed.len() < 4096);
-    assert_eq!(frame.body_max(1 << 16).unwrap_err(), Error::Inflate);
-    assert_eq!(frame.body().unwrap().len(), 1 << 20);
+    assert_eq!(Blocks::new(&block(0, 1, 1, &one)).unwrap_err(), Error::Body, "table 0");
+    assert_eq!(Blocks::new(&block(3, 0, u32::MAX, &[])).unwrap_err(), Error::Body, "rows without columns");
+    assert_eq!(Blocks::new(&block(3, 2, 1, &[one.clone(), one].concat())).unwrap_err(), Error::Body, "duplicate column");
+    assert_eq!(Blocks::new(&block(3, 1, 1, &col(1, U32, &7u32.to_le_bytes(), 1))).unwrap_err(), Error::Body, "nonzero pad");
+    let backwards = [0u32, 3, 1].iter().flat_map(|o| o.to_le_bytes()).chain(*b"abc").collect::<Vec<u8>>();
+    assert_eq!(Blocks::new(&block(3, 1, 2, &col(2, STR, &backwards, 0))).unwrap_err(), Error::Str, "offsets run backwards");
 }

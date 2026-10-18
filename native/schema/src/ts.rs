@@ -9,7 +9,7 @@
 
 use crate::model::{Column, Residency, Schema, Table, Type, flag, wire, AS_OF, DAY_MAX, FREE_PARAM, SOURCE_CELL, TYPES};
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// A table name as a singular CamelCase type name: `api_keys` is `ApiKey`.
@@ -35,23 +35,11 @@ fn camel(name: &str) -> String {
         .map(|p| {
             let mut c = p.chars();
             match c.next() {
-                Some(f) => f.to_ascii_uppercase().to_string_lossless() + c.as_str(),
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
                 None => String::new(),
             }
         })
         .collect()
-}
-
-trait Lossless {
-    fn to_string_lossless(self) -> String;
-}
-
-impl Lossless for char {
-    fn to_string_lossless(self) -> String {
-        let mut s = String::new();
-        s.push(self);
-        s
-    }
 }
 
 pub(crate) fn json_str(s: &str) -> String {
@@ -80,7 +68,7 @@ fn upper(name: &str) -> String {
     name.to_ascii_uppercase()
 }
 
-fn ts_type(s: &Schema, c: &Column) -> String {
+fn ts_type(c: &Column) -> String {
     let base = match c.ty {
         Type::Enum => camel(c.target.as_deref().unwrap_or("")),
         Type::Bool => String::from("boolean"),
@@ -89,8 +77,7 @@ fn ts_type(s: &Schema, c: &Column) -> String {
         Type::Bytes => String::from("Uint8Array"),
         _ => String::from("number"),
     };
-    let _ = s;
-    if c.required { base } else { format!("{base} | null") }
+    if c.has(flag::REQUIRED) { base } else { format!("{base} | null") }
 }
 
 /// A column as the client ships it: `[name, id, type, flags, target, default, metricOf, group]`,
@@ -100,7 +87,7 @@ fn column_tuple(c: &Column) -> String {
     while tail.last().is_some_and(|x| x == "null") {
         tail.pop();
     }
-    let head = [json_str(&c.name), format!("{}", c.id), json_str(c.ty.name()), format!("{}", c.flags())];
+    let head = [json_str(&c.name), format!("{}", c.id), json_str(c.ty.name()), format!("{}", c.flags)];
     format!("[{}]", head.into_iter().chain(tail).collect::<Vec<_>>().join(","))
 }
 
@@ -271,8 +258,8 @@ pub fn emit(s: &Schema) -> String {
         w(&format!("/** `{}`: {kind}. */", t.name));
         w(&format!("export interface {} {{", singular(&t.name)));
         // A server_only column never reaches a client, so no row has it.
-        for c in t.cols.iter().filter(|c| !c.server_only) {
-            w(&format!("  {}: {};", c.name, ts_type(s, c)));
+        for c in t.cols.iter().filter(|c| !c.has(flag::SERVER_ONLY)) {
+            w(&format!("  {}: {};", c.name, ts_type(c)));
         }
         w("}");
     }

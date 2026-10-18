@@ -7,7 +7,7 @@
 //! `global`, and every account's table has `<table>__account (account_id)`. Enum values are stored by name, without a CHECK, so adding a
 //! value is never a table rebuild.
 
-use crate::model::{Column, Schema, Table, Type};
+use crate::model::{Column, Schema, Table, Type, flag};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -42,20 +42,25 @@ pub fn column(col: &Column) -> String {
         return format!("{} INTEGER PRIMARY KEY AUTOINCREMENT", q(&col.name));
     }
     let mut s = format!("{} {}", q(&col.name), sql_type(col.ty));
-    if col.required {
+    if col.has(flag::REQUIRED) {
         s.push_str(" NOT NULL");
     }
     if let Some(d) = &col.default {
         s.push_str(&format!(" DEFAULT {}", literal(col, d)));
     }
-    if col.ty == Type::Ref && !col.loose {
-        let on_delete = if col.required || col.cascade { "CASCADE" } else { "SET NULL" };
+    if col.ty == Type::Ref && !col.has(flag::LOOSE) {
+        let on_delete = on_delete(col);
         s.push_str(&format!(
             " REFERENCES {}(\"id\") ON DELETE {on_delete}",
             q(col.target.as_deref().unwrap_or(""))
         ));
     }
     s
+}
+
+/// A required ref cascades on delete and a nullable one is set null, unless it says `cascade`.
+fn on_delete(col: &Column) -> &'static str {
+    if col.has(flag::REQUIRED | flag::CASCADE) { "CASCADE" } else { "SET NULL" }
 }
 
 /// A named index of a table: its name and its `CREATE` statement.
@@ -118,7 +123,7 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
     for k in &t.uniques {
         add("unique", true, k.global, plain(&k.cols), k.where_.as_deref());
     }
-    for c in t.cols.iter().filter(|c| c.unique) {
+    for c in t.cols.iter().filter(|c| c.has(flag::UNIQUE)) {
         add("unique", true, false, alloc::vec![(c.name.clone(), false)], None);
     }
     for i in &t.indexes {
@@ -136,7 +141,7 @@ pub fn triggers(s: &Schema, t: &Table) -> Vec<IndexDef> {
     if t.global {
         return out;
     }
-    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.implied && !c.loose) {
+    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.has(flag::IMPLIED | flag::LOOSE)) {
         let target = c.target.as_deref().unwrap_or("");
         if s.table(target).is_none_or(|p| p.global) {
             continue;
@@ -279,7 +284,7 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                             None => String::from("-"),
                         };
                         let ty = if c.ty == Type::Id { "INTEGER" } else { sql_type(c.ty) };
-                        let not_null = c.required && c.ty != Type::Id;
+                        let not_null = c.has(flag::REQUIRED) && c.ty != Type::Id;
                         if h.sql_type != ty || h.not_null != not_null || h.default != default {
                             extra.push(format!(
                                 "column {}.{} changed: {} {} {} -> {ty} {} {default}",
@@ -293,7 +298,7 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                         }
                         continue;
                     }
-                    if c.required && c.default.is_none() {
+                    if c.has(flag::REQUIRED) && c.default.is_none() {
                         return Err(format!(
                             "{}.{} is new, required and has no default; write that migration by hand",
                             t.name, c.name
@@ -320,12 +325,12 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                 // a column no longer a ref) keeps acting in the database: only a
                 // rebuild removes it.
                 for (tn, cn, _) in shape.fks.iter().filter(|(tn, _, _)| *tn == t.name) {
-                    if t.col(cn).is_none_or(|c| c.ty != Type::Ref || c.loose) {
+                    if t.col(cn).is_none_or(|c| c.ty != Type::Ref || c.has(flag::LOOSE)) {
                         extra.push(format!("column {tn}.{cn} has a foreign key in the database, not the declaration"));
                     }
                 }
-                for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.loose) {
-                    let want = if c.required || c.cascade { "CASCADE" } else { "SET NULL" };
+                for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.has(flag::LOOSE)) {
+                    let want = on_delete(c);
                     match shape.fks.iter().find(|(tn, cn, _)| *tn == t.name && *cn == c.name) {
                         Some((_, _, held)) if held != want => extra.push(format!(
                             "column {}.{} changed: ON DELETE {held} -> ON DELETE {want}",
