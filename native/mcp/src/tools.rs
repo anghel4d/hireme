@@ -80,7 +80,8 @@ pub struct Table {
     pub domain: String,
     pub residency: String,
     pub cols: Vec<Col>,
-    pub natural: Vec<Vec<String>>,
+    /// Each natural key as `{cols, where, reads}`: `where` is the condition a key holds under (null when none).
+    pub natural: Vec<Json>,
 }
 
 impl Table {
@@ -171,7 +172,7 @@ impl Catalog {
                     natural: t
                         .get("natural")
                         .and_then(Json::as_array)
-                        .map(|n| n.iter().filter_map(Json::as_array).map(|cols| cols.iter().filter_map(Json::as_str).map(str::to_owned).collect()).collect())
+                        .map(|n| n.iter().filter_map(crate::diag::natural_key).collect())
                         .unwrap_or_default(),
                 })
             })
@@ -351,7 +352,7 @@ pub fn list(cat: &Catalog, m: Masks) -> Vec<Json> {
         let one = json!({"type":"object","required":["table","set"],"properties":{
             "table":{"type":"string","enum":tables.clone()},
             "id":{"type":"integer","minimum":1,"description":"update this row"},
-            "key":{"type":"object","description":"upsert by natural key, e.g. {\"domain\":\"example.com\"}"},
+            "key":{"type":"object","description":"upsert by natural key, e.g. {\"domain\":\"example.com\"}; a key with a condition (`schema` shows its where) also names the columns it reads, e.g. places {\"iso2\":\"DE\",\"kind\":\"country\"}"},
             "set":{"type":"object","description":"column: value; null clears. Days 'YYYY-MM-DD', times ISO-8601 UTC, enums by name"},
             "as_of":{"type":"string","format":"date","description":"required when a metric is set: the day the figures are true as of"},
             "source":{"type":["string","integer"],"description":"a URL (or sources.id) the metrics and prose come from"},
