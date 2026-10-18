@@ -460,6 +460,15 @@ defmodule HiremeWeb.Wire.Codec do
   def to_wire(%{deferred: true}, v) when is_binary(v), do: deferred_stub(v)
   def to_wire(_col, v), do: v
 
+  @doc """
+  A wire value (the kernel's effects: integers for days, times, enum codes
+  and bools; binaries for text and JSON) as the column's Elixir value.
+  `{:ok, value}` or `{:error, :type}`.
+  """
+  def from_wire(_col, nil), do: {:ok, nil}
+  def from_wire(%{type: t} = col, v) when t in [:str, :text], do: to_value(col, v)
+  def from_wire(col, v), do: to_value(col, v)
+
   @doc "The `{len, sha8}` a deferred text travels as."
   def deferred_stub(text), do: {byte_size(text), binary_part(:crypto.hash(:sha256, text), 0, 8)}
 
@@ -513,7 +522,7 @@ defmodule HiremeWeb.Wire.Codec do
 
   def gone_block(pairs) do
     t = Schema.table(:gone)
-    [tc, ic] = Enum.map([:table, :id], &Schema.column(t, &1))
+    [tc, ic] = Enum.map([:table, :id], &Schema.column(:gone, &1))
     block(t.id, length(pairs), [{tc.id, @t_u32, Enum.map(pairs, &elem(&1, 0))}, {ic.id, @t_u32, Enum.map(pairs, &elem(&1, 1))}])
   end
 
