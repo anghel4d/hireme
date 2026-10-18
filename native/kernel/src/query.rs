@@ -52,12 +52,18 @@ pub struct Grants {
 }
 
 impl Default for Grants {
+    /// Nothing, until the session's WELCOME says otherwise.
     fn default() -> Self {
-        Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true }
+        Grants { human: false, read_mask: 0, write_mask: 0, may_delete: false }
     }
 }
 
 impl Grants {
+    /// A browser session's: every domain both ways.
+    pub fn operator() -> Grants {
+        Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true }
+    }
+
     pub fn visible(&self, c: &Column) -> bool {
         !has(c, flag::SERVER_ONLY) && (!has(c, flag::PRIVATE) || self.human)
     }
@@ -140,8 +146,13 @@ fn bound(v: Option<&Json>, default: u64, max: u64, name: &str) -> Result<u64, Re
     match v {
         None | Some(Json::Null) => Ok(default),
         Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > 0 && n <= max) => Ok(n.as_u64().unwrap_or(default)),
-        Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > max) => {
-            Err(Refusal { code: refusal::TOO_LARGE, data: json!({"limit": n, "max": max, "param": name}) })
+        // Past u64 a number reads as a float: still a too-large integer.
+        Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > max) || n.as_f64().is_some_and(|f| f >= u64::MAX as f64 && f.fract() == 0.0) => {
+            let mut d = json!({"limit": n, "max": max});
+            if name != "limit" {
+                d["param"] = name.into();
+            }
+            Err(Refusal { code: refusal::TOO_LARGE, data: d })
         }
         Some(other) => Err(Refusal { code: refusal::TYPE, data: json!({"param": name, "got": brief(other)}) }),
     }
@@ -291,10 +302,10 @@ fn cast(c: &Column, v: &Json) -> Option<Key2<'static>> {
     match ty(c) {
         Type::Id | Type::Ref | Type::U32 => int(v).filter(|n| (0..=u32::MAX as i64).contains(n)).map(Key2::Int),
         Type::U8 => int(v).filter(|n| (0..=255).contains(n)).map(Key2::Int),
-        Type::I64 => int(v).map(Key2::Int),
+        Type::I64 => int(v).filter(|n| *n != i64::MIN).map(Key2::Int),
         Type::F64 => match v {
             Json::Number(n) => n.as_f64().map(Key2::Float),
-            Json::String(s) => s.parse::<f64>().ok().filter(|f| f.is_finite()).map(Key2::Float),
+            Json::String(s) if decimal(s) => s.parse::<f64>().ok().filter(|f| f.is_finite()).map(Key2::Float),
             _ => None,
         },
         Type::Bool => match v {
@@ -303,12 +314,41 @@ fn cast(c: &Column, v: &Json) -> Option<Key2<'static>> {
             Json::String(s) if s == "false" || s == "0" => Some(Key2::Int(0)),
             _ => None,
         },
-        Type::Day => v.as_str().and_then(crate::iso_day).map(|d| Key2::Int(d as i64)),
+        // As Ecto casts a date: an extended year's sign, or a datetime's date.
+        Type::Day => v.as_str().map(|s| s.strip_prefix('+').unwrap_or(s)).and_then(|s| match s.len() {
+            10 => crate::iso_day(s),
+            _ => crate::iso_time(s).and_then(|_| crate::iso_day(s.get(..10)?)),
+        }).map(|d| Key2::Int(d as i64)),
         Type::Time => v.as_str().and_then(crate::iso_time).map(Key2::Int),
         Type::Enum => v.as_str().filter(|s| enum_values(c).contains(s)).map(|s| Key2::Str(Cow::Owned(s.into()))),
         Type::Str | Type::Text => v.as_str().map(|s| Key2::Str(Cow::Owned(s.into()))),
         _ => None,
     }
+}
+
+/// A float as Elixir's Float.parse reads the whole of it: a sign, digits,
+/// a fraction with digits, an exponent.
+fn decimal(s: &str) -> bool {
+    let b = s.strip_prefix(['+', '-']).unwrap_or(s).as_bytes();
+    let digits = |b: &[u8]| b.iter().take_while(|c| c.is_ascii_digit()).count();
+    let n = digits(b);
+    let mut rest = &b[n..];
+    if let [b'.', f @ ..] = rest {
+        let m = digits(f);
+        if m == 0 {
+            return false;
+        }
+        rest = &f[m..];
+    }
+    if let [b'e' | b'E', e @ ..] = rest {
+        let e = e.strip_prefix(b"+").or_else(|| e.strip_prefix(b"-")).unwrap_or(e);
+        let m = digits(e);
+        if m == 0 {
+            return false;
+        }
+        rest = &e[m..];
+    }
+    n > 0 && rest.is_empty()
 }
 
 // ------------------------------------------------------------------ filters
@@ -358,7 +398,7 @@ fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
             let (op, v) = m.iter().next().unwrap_or_else(|| unreachable!());
             (op.as_str(), v)
         }
-        Json::Object(_) | Json::Array(_) => return Err(Refusal { code: refusal::TYPE, data: json!({"column": c.name, "filter": brief(test)}) }),
+        Json::Object(_) => return Err(Refusal { code: refusal::TYPE, data: json!({"column": c.name, "filter": brief(test)}) }),
         v => ("eq", v),
     };
     let text = matches!(ty(c), Type::Str | Type::Text);
@@ -376,7 +416,8 @@ fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
         ("ge", v) => Test::Ge(one(v)?),
         ("null", Json::Bool(true)) => Test::IsNull,
         ("null", Json::Bool(false)) => Test::NotNull,
-        ("in", Json::Array(vs)) if vs.len() as u64 <= FIND_MAX => Test::In(vs.iter().map(one).collect::<Result<_, _>>()?),
+        // A null in the list matches nothing, as SQL's IN reads it.
+        ("in", Json::Array(vs)) if vs.len() as u64 <= FIND_MAX => Test::In(vs.iter().filter(|v| !v.is_null()).map(one).collect::<Result<_, _>>()?),
         ("in", Json::Array(_)) => {
             return Err(Refusal { code: refusal::TOO_LARGE, data: json!({"column": c.name, "filter": "in", "max": FIND_MAX}) });
         }
@@ -650,14 +691,17 @@ fn history(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     let cc = |n: &str| cm.col_named(n).unwrap_or_else(|| unreachable!("citations.{n}"));
     let (c_table, c_row, c_col) = (cc("table"), cc("row_id"), cc("column"));
     let visible: Vec<&str> = tm.cols.iter().filter(|c| g.visible(c)).map(|c| c.name).collect();
+    // The row id first, by slot: a scan of one u32 column, then the few rows it keeps.
+    let row_ids = ct.u32s(c_row.id).unwrap_or(&[]);
     let mut ids: Vec<u32> = ct
         .ids()
         .iter()
-        .copied()
+        .zip(row_ids)
+        .filter(|(_, r)| **r == id)
+        .map(|(cid, _)| *cid)
         .filter(|&cid| {
             before.is_none_or(|b| cid < b)
                 && ct.str(cid, c_table.id) == Some(tm.name)
-                && ct.u32(cid, c_row.id) == Some(id)
                 && ct.str(cid, c_col.id).is_some_and(|n| visible.contains(&n) && only.is_none_or(|o| o.name == n))
         })
         .collect();

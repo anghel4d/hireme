@@ -273,16 +273,30 @@ pub fn iso_time(s: &str) -> Option<i64> {
     if rest.as_bytes().get(2) != Some(&b':') || rest.as_bytes().get(5) != Some(&b':') || h > 23 || mi > 59 || sec > 59 {
         return None;
     }
-    let mut tail = &rest[8..];
-    if let Some(f) = tail.strip_prefix('.') {
-        let n = f.bytes().take_while(u8::is_ascii_digit).count();
+    let mut tail = rest.get(8..)?.as_bytes();
+    if let [b'.' | b',', f @ ..] = tail {
+        let n = f.iter().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return None;
+        }
         tail = &f[n..];
     }
+    // As Elixir reads an offset: Z, or ±HH[[:]MM] within a day; -00:00 is
+    // "unknown", not UTC.
+    let two = |b: &[u8]| (b.len() == 2 && b.iter().all(u8::is_ascii_digit)).then(|| ((b[0] - b'0') * 10 + (b[1] - b'0')) as i64);
     let offset = match tail {
-        "" | "Z" => 0,
-        t if t.len() == 6 && (t.starts_with('+') || t.starts_with('-')) && &t[3..4] == ":" => {
-            let o = num(&t[1..3])? * 3600 + num(&t[4..6])? * 60;
-            if t.starts_with('-') { -o } else { o }
+        [] | [b'Z'] => 0,
+        [sign @ (b'+' | b'-'), o @ ..] => {
+            let (oh, om) = match o {
+                [h1, h2] => (two(&[*h1, *h2])?, 0),
+                [h1, h2, m1, m2] | [h1, h2, b':', m1, m2] => (two(&[*h1, *h2])?, two(&[*m1, *m2])?),
+                _ => return None,
+            };
+            if oh > 23 || om > 59 || (*sign == b'-' && oh == 0 && om == 0) {
+                return None;
+            }
+            let o = oh * 3600 + om * 60;
+            if *sign == b'-' { -o } else { o }
         }
         _ => return None,
     };

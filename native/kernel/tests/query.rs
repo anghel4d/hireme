@@ -39,6 +39,7 @@ fn kernel() -> Kernel {
         .u32s(C::AS_OF, [739_000, 739_100, 739_100].into_iter());
     b.done();
     let mut k = Kernel::new();
+    k.set_grants(Grants::operator());
     k.boot(&w.finish(), 1).unwrap();
     k
 }
@@ -125,4 +126,17 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     k.set_grants(Grants { human: false, read_mask: 0b10, write_mask: 0, may_delete: false });
     assert_eq!(refused(&k, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
     assert_eq!(refused(&k, json!({"op": "find", "table": "op_ledger"})), schema::refusal::NOT_FOUND);
+    // Until its WELCOME, a kernel reads nothing.
+    assert_eq!(refused(&kernel_with(Grants::default()), json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
+    // Hostile values refuse, never trap: an offset split inside a character.
+    let k = kernel();
+    for w in [json!({"retrieved_at": {"ge": "2023-11-14T22:13:20+0é:0"}}), json!({"id": [1, 2]}), json!({"url": {"in": [null]}})] {
+        let _ = k.query(&json!({"op": "find", "table": "sources", "where": w}));
+    }
+}
+
+fn kernel_with(g: Grants) -> Kernel {
+    let mut k = kernel();
+    k.set_grants(g);
+    k
 }
