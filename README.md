@@ -72,9 +72,9 @@ mix setup          # deps, esbuild, kernel.wasm, the bundles
 DATABASE_PATH=/tmp/hireme-dev/hireme.db mix phx.server   # http://localhost:4000
 ```
 
-`DATABASE_PATH` picks the SQLite file; its directory must exist, and a new
-file gets the baseline schema on first boot (`schema: applied
-0000_baseline`). Without it, development writes `../hireme_dev.db`.
+`DATABASE_PATH` picks the SQLite file (its directory is created if
+missing), and a new file gets the baseline schema on first boot (`schema:
+applied 0000_baseline`). Without it, development writes `../hireme_dev.db`.
 `HIREME_GATE=off` runs the wire over the WebSocket alone (with the gate on,
 the header shows `live (WT)`); `PORT` moves the listener. A new database
 starts empty; there is no older data to bring.
