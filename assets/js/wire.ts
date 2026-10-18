@@ -514,6 +514,13 @@ export class Wire {
     })
   }
 
+  /** Drops the current carrier; the usual reconnect follows, with whatever HELLO now names. */
+  restart(): void {
+    const close = this.close_
+    this.down("restart", this.serial)
+    close?.()
+  }
+
   /** The session is over for good (BYE revoked, suspended): no reconnect. */
   end(): void {
     this.ended = true
@@ -638,7 +645,8 @@ export class Wire {
 
   private framer(me: number): Framer {
     return new Framer((f, h) => {
-      if (me === this.serial) this.deliver(f, h)
+      // An attempt that has ended (restart, silence) hears nothing more, even while its carrier closes.
+      if (me === this.serial && this.downed !== me) this.deliver(f, h)
     }, (why) => {
       this.hooks.lost(why, 0)
       this.close_?.()

@@ -9,7 +9,7 @@
 import type { Boot } from "./early.ts"
 import type { Reply, Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
-import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
+import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
 
 let wire: Wire | null = null
@@ -116,7 +116,7 @@ export function load(hw: Boot): void {
       const rev = withBytes(snap.bytes, (p, n) => k!.restore(p, n))
       if (rev >= 0n) rowsRev = rev
     }
-    for (const f of early.splice(0)) ingest(f)
+    for (const f of early.splice(0)) if (!ingest(f)) break
     moved()
   })().catch((e: unknown) => notice("error", `The kernel did not load: ${String(e)}`))
 }
@@ -131,8 +131,23 @@ function moved(): void {
   saveSoon()
 }
 
-function ingest(f: Uint8Array): void {
-  if (withBytes(f, (p, n) => k!.ingest(p, n)) < 0) notice("error", "A frame did not apply; reconnecting will resync.")
+/**
+ * One frame into the kernel. The rows' rev moves only once the frame has
+ * applied: on a failure the kernel has already dropped its derived state, so
+ * the rev goes to 0 and the session restarts, and HELLO asks for a whole BOOT
+ * instead of resuming from a frame that never landed.
+ */
+function ingest(f: Uint8Array): boolean {
+  if (withBytes(f, (p, n) => k!.ingest(p, n)) < 0) {
+    rowsRev = 0n
+    early.length = 0
+    notice("warn", "The desk fell out of step with the server; reloading it.")
+    wire?.restart()
+    return false
+  }
+  const h = header(f as Bytes)
+  if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
+  return true
 }
 
 let advanced: () => void = () => {}
@@ -145,14 +160,12 @@ export function onAdvance(fn: () => void): void {
 /** Every frame the shell does not handle itself. */
 export function frame(f: Bytes, h: Header): void {
   if (h.kind === KIND.PATCH && h.rev > rowsRev && rowsRev !== 0n) advanced()
-  if ((h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK) && h.rev > rowsRev) rowsRev = h.rev
   if (h.kind === KIND.ACK) for (const a of acks(f)) settle(a.opId, { ok: true, id: a.id, rev: a.rev })
   if (h.kind === KIND.NACK) for (const n of nacks(f)) settle(n.opId, { ok: false, code: n.code, data: n.data })
   // The kernel takes the whole frame: rows, and the settle or rollback of pending writes.
   if (h.kind === KIND.BOOT || h.kind === KIND.PATCH || h.kind === KIND.TICK || h.kind === KIND.ACK || h.kind === KIND.NACK) {
     if (k) {
-      ingest(f)
-      moved()
+      if (ingest(f)) moved()
     } else {
       early.push(f.slice())
     }
@@ -260,7 +273,8 @@ export const DIR = { next: 0, prev: 1, up: 2, down: 3, first: 4, last: 5 } as co
 /** The card after `selected` in a direction, over the filtered board; 0 for none. */
 export function step(f: Filter, selected: number, dir: number, columns: number): number {
   if (!k) return 0
-  return withBytes(ENC.encode(JSON.stringify(f)), (p, n) => k!.step(p, n, selected, dir, columns))
+  // An id comes back through an i32: read it unsigned, or a temp id past 2^31 turns negative.
+  return withBytes(ENC.encode(JSON.stringify(f)), (p, n) => k!.step(p, n, selected, dir, columns)) >>> 0
 }
 
 export interface Card {
