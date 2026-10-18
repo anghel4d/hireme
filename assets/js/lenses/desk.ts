@@ -11,7 +11,7 @@
 
 import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
-import { DIR, board, card, ids, scoreboard, step, value, type Filter } from "../kernel.ts"
+import { DIR, board, card, ids, query as read, scoreboard, step, value, type Filter } from "../kernel.ts"
 import { EMPTY, html, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
 
@@ -190,33 +190,43 @@ function paint(el: HTMLElement, measure: boolean): void {
     if (t.style.width !== wpx) t.style.width = wpx
   }
   // Every tile is placed before any is filled, so the board stands even if one card's numbers fail.
+  // The tiles that changed read their rows in one find, not a kernel call per field.
+  const stale: number[] = []
   for (let i = first; i < last; i++) {
     const id = ids[i] ?? 0
+    if (tiles.get(id)?.dataset.sig !== sig(id, held.get(id))) stale.push(id)
+  }
+  if (stale.length === 0) return
+  const found = new Map<number, Row>()
+  for (const r of read<{ rows: Row[] }>("find", { table: "applications", where: { id: { in: stale } }, cols: COLS, limit: stale.length }).rows) found.set(Number(r.id), r)
+  for (const id of stale) {
     const t = tiles.get(id)
-    if (t) tile(t, id, held.get(id))
+    if (t) tile(t, id, held.get(id), found.get(id) ?? {})
   }
 }
 
+type Row = Record<string, unknown>
+const COLS = ["id", "no", "company", "role", "location", "work_mode", "pips", "stage"]
+const sig = (id: number, by: string | undefined): string => `${id}|${model.rows}|${id === model.selected ? 1 : 0}|${by ?? ""}`
+
 /** One tile's values, rewritten only when the rows moved, its selection flipped or its claim changed. */
-function tile(el: HTMLElement, id: number, by: string | undefined): void {
-  const sig = `${id}|${model.rows}|${id === model.selected ? 1 : 0}|${by ?? ""}`
-  if (el.dataset.sig === sig) return
-  el.dataset.sig = sig
+function tile(el: HTMLElement, id: number, by: string | undefined, r: Row): void {
+  el.dataset.sig = sig(id, by)
   const c = card(id)
-  const stage = c?.stage ?? String(value("applications", id, "stage") ?? "")
+  const stage = c?.stage ?? text(r.stage)
   if (el.dataset.stage !== stage) el.dataset.stage = stage
   if (by === undefined) delete el.dataset.leased
   else if (el.dataset.leased !== by) el.dataset.leased = by
   write(el.querySelector(".lease"), by === undefined ? "" : `leased by ${by || "an agent"}`)
-  write(el.querySelector(".no"), `#${text(value("applications", id, "no"))}`)
+  write(el.querySelector(".no"), `#${text(r.no)}`)
   write(el.querySelector(".score"), c ? `${c.score_100}${c.stored ? "" : "?"}` : "")
-  write(el.querySelector(".company"), text(value("applications", id, "company")) || "(no company)")
-  write(el.querySelector(".role"), text(value("applications", id, "role")))
-  write(el.querySelector(".where"), [value("applications", id, "location"), value("applications", id, "work_mode")].filter((x) => x).map(text).join(" · "))
+  write(el.querySelector(".company"), text(r.company) || "(no company)")
+  write(el.querySelector(".role"), text(r.role))
+  write(el.querySelector(".where"), [r.location, r.work_mode].filter((x) => x).map(text).join(" · "))
   write(el.querySelector(".stage"), stage.replace(/_/g, " "))
   write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
   write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
-  rail(el.querySelector(".pips"), text(value("applications", id, "pips")))
+  rail(el.querySelector(".pips"), text(r.pips))
   const heat = c?.class ?? "cool"
   if (el.dataset.heat !== heat) el.dataset.heat = heat
   const cls = `app-card band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`
