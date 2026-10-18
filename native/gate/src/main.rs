@@ -368,8 +368,10 @@ async fn reload(gate: Arc<Gate>, endpoint: Arc<Endpoint<wtransport::endpoint::en
         tokio::select! {
             _ = now.notified() => {}
             _ = sleep(Duration::from_secs(300)) => {
-                let age = SystemTime::now().duration_since(made).unwrap_or_default();
-                let renew = gate.settings.cert.is_none() && age >= SELF_SIGNED_RENEW;
+                // A clock that went back (a restored snapshot) may leave the
+                // certificate not yet valid: renew then too.
+                let due = SystemTime::now().duration_since(made).map_or(true, |age| age >= SELF_SIGNED_RENEW);
+                let renew = gate.settings.cert.is_none() && due;
                 if !failed && !renew && cert_stamp(&gate.settings) == stamp { continue; }
             }
         }
