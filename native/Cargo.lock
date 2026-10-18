@@ -591,6 +591,7 @@ dependencies = [
  "schema",
  "serde_json",
  "wire",
+ "zstd",
 ]
 
 [[package]]

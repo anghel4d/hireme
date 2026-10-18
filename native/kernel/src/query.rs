@@ -328,6 +328,7 @@ impl<'a> Cells<'a> {
             (_, Some(Data::I64(v))) => if v[slot] == wire::NONE64 { Key2::Null } else { Key2::Int(v[slot]) },
             (_, Some(Data::F64(v))) => if v[slot].is_nan() { Key2::Null } else { Key2::Float(v[slot]) },
             (_, Some(Data::Str(v))) => if v[slot].is_empty() { Key2::Null } else { Key2::Str(Cow::Borrowed(v[slot].as_str())) },
+            (_, Some(Data::Packed(v))) => crate::rows::unpack(&v[slot]).map_or(Key2::Null, Key2::Str),
             _ => Key2::Null,
         }
     }
@@ -361,6 +362,7 @@ pub(crate) fn value_json(c: &Column, v: &Val) -> Json {
         (_, Val::F64(x)) => serde_json::Number::from_f64(*x).map_or(Json::Null, Json::Number),
         (_, Val::Str(s)) => Json::String(s.clone()),
         (_, Val::List(l)) => Json::from(l.clone()),
+        (_, Val::Packed(p)) => crate::rows::unpack(p).map_or(Json::Null, |t| Json::String(t.into_owned())),
     }
 }
 
@@ -666,7 +668,7 @@ fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> An
         .map(|k| {
             let mut r = row_out(t, k.1, &cols, false);
             for c in &sizes {
-                r[c.name] = t.str(k.1, c.id).map_or(Json::Null, |s| s.len().into());
+                r[c.name] = t.text_len(k.1, c.id).map_or(Json::Null, Json::from);
             }
             r
         })
@@ -762,7 +764,7 @@ fn text(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     let Some(t) = rows.table(tm.id).filter(|t| t.has(id) && is_live(t, tm, id)) else {
         return refuse(refusal::NOT_FOUND, json!({"table": tm.name, "id": id}));
     };
-    let Some(whole) = t.str(id, c.id) else {
+    let Some(whole) = t.text(id, c.id) else {
         return Ok(json!({"text": null, "offset": offset, "next": null, "total": 0, "untrusted": true}));
     };
     let b = whole.as_bytes();

@@ -59,6 +59,9 @@ pub enum Val {
     F64(f64),
     Str(String),
     List(Vec<u32>),
+    /// A text cell as the wire packs it (tag byte, then raw UTF-8 or a
+    /// zstd frame): held as it came, read on touch.
+    Packed(Box<[u8]>),
 }
 
 impl Val {
@@ -73,8 +76,8 @@ impl Val {
             Value::F64(x) => Val::F64(x),
             Value::Str("") => Val::None,
             Value::Str(s) => Val::Str(String::from(s)),
-            // Unpacked on arrival for now; a cell that does not unpack reads as none.
-            Value::ZStr(c) => wire::text_cell(c).map_or(Val::None, |s| Val::Str(s.into_owned())),
+            Value::ZStr([]) => Val::None,
+            Value::ZStr(c) => Val::Packed(c.into()),
             Value::List(l) if l.is_empty() => Val::None,
             Value::List(l) => Val::List(l.iter().collect()),
             #[allow(unreachable_patterns)]
@@ -95,6 +98,50 @@ pub enum Data {
     F64(Vec<f64>),
     Str(Vec<String>),
     List(Vec<Vec<u32>>),
+    /// Text cells packed at rest; an empty cell is null.
+    Packed(Vec<Box<[u8]>>),
+}
+
+std::thread_local! {
+    /// One reader of packed text, its dictionary decoded once.
+    static TEXTS: core::cell::RefCell<wire::Texts> = core::cell::RefCell::new(wire::Texts::default());
+}
+
+/// A packed cell's text; `None` for an empty cell or one that will not read.
+pub fn unpack(cell: &[u8]) -> Option<alloc::borrow::Cow<'_, str>> {
+    match cell {
+        [] => None,
+        [0, s @ ..] => core::str::from_utf8(s).ok().map(alloc::borrow::Cow::Borrowed),
+        _ => TEXTS.with(|t| t.borrow_mut().cell(cell).ok().map(|c| alloc::borrow::Cow::Owned(c.into_owned()))),
+    }
+}
+
+/// A packed cell's length in bytes, unread: a raw cell's, or the content
+/// size its zstd frame states.
+pub fn packed_len(cell: &[u8]) -> Option<usize> {
+    match cell {
+        [] => None,
+        [0, s @ ..] => Some(s.len()),
+        [1, 0x28, 0xB5, 0x2F, 0xFD, fhd, rest @ ..] => {
+            let single = fhd & 0x20 != 0;
+            let dict = [0, 1, 2, 4][(fhd & 3) as usize];
+            let fcs = match fhd >> 6 {
+                0 if single => 1,
+                0 => return unpack(cell).map(|t| t.len()),
+                1 => 2,
+                2 => 4,
+                _ => 8,
+            };
+            let at = usize::from(!single) + dict;
+            let b = rest.get(at..at + fcs)?;
+            let mut v = 0u64;
+            for (i, x) in b.iter().enumerate() {
+                v |= (*x as u64) << (8 * i);
+            }
+            Some(if fcs == 2 { v as usize + 256 } else { v as usize })
+        }
+        _ => unpack(cell).map(|t| t.len()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +151,7 @@ enum Kind {
     F64,
     Str,
     List,
+    Packed,
 }
 
 fn kind_of_wire(ty: u8) -> Option<Kind> {
@@ -111,7 +159,8 @@ fn kind_of_wire(ty: u8) -> Option<Kind> {
         wire::U32 => Kind::U32,
         wire::I64 => Kind::I64,
         wire::F64 => Kind::F64,
-        wire::STR | wire::ZSTR | wire::SYM => Kind::Str,
+        wire::STR | wire::SYM => Kind::Str,
+        wire::ZSTR => Kind::Packed,
         wire::LIST => Kind::List,
         _ => return None,
     })
@@ -125,6 +174,7 @@ fn kind_of_val(v: &Val) -> Option<Kind> {
         Val::F64(_) => Kind::F64,
         Val::Str(_) => Kind::Str,
         Val::List(_) => Kind::List,
+        Val::Packed(_) => Kind::Packed,
     })
 }
 
@@ -136,6 +186,7 @@ impl Data {
             Kind::F64 => Data::F64(alloc::vec![f64::NAN; n]),
             Kind::Str => Data::Str(alloc::vec![String::new(); n]),
             Kind::List => Data::List(alloc::vec![Vec::new(); n]),
+            Kind::Packed => Data::Packed(alloc::vec![Box::default(); n]),
         }
     }
 
@@ -146,6 +197,7 @@ impl Data {
             Data::F64(_) => Kind::F64,
             Data::Str(_) => Kind::Str,
             Data::List(_) => Kind::List,
+            Data::Packed(_) => Kind::Packed,
         }
     }
 
@@ -156,6 +208,7 @@ impl Data {
             Data::F64(v) => v.push(f64::NAN),
             Data::Str(v) => v.push(String::new()),
             Data::List(v) => v.push(Vec::new()),
+            Data::Packed(v) => v.push(Box::default()),
         }
     }
 
@@ -166,6 +219,7 @@ impl Data {
             Data::F64(v) => drop(v.swap_remove(slot)),
             Data::Str(v) => drop(v.swap_remove(slot)),
             Data::List(v) => drop(v.swap_remove(slot)),
+            Data::Packed(v) => drop(v.swap_remove(slot)),
         }
     }
 
@@ -176,6 +230,16 @@ impl Data {
             Data::F64(v) => Val::from_wire(Value::F64(v[slot])),
             Data::Str(v) => if v[slot].is_empty() { Val::None } else { Val::Str(v[slot].clone()) },
             Data::List(v) => if v[slot].is_empty() { Val::None } else { Val::List(v[slot].clone()) },
+            Data::Packed(v) => unpack(&v[slot]).map_or(Val::None, |t| Val::Str(t.into_owned())),
+        }
+    }
+
+    /// The cell as stored: a packed one unread, for the undo log.
+    fn raw(&self, slot: usize) -> Val {
+        match self {
+            Data::Packed(v) if v[slot].is_empty() => Val::None,
+            Data::Packed(v) => Val::Packed(v[slot].clone()),
+            _ => self.get(slot),
         }
     }
 
@@ -188,11 +252,15 @@ impl Data {
             (Data::F64(d), Val::F64(x)) => d[slot] = *x,
             (Data::Str(d), Val::Str(x)) => d[slot].clone_from(x),
             (Data::List(d), Val::List(x)) => d[slot].clone_from(x),
+            (Data::Packed(d), Val::Packed(x)) => d[slot] = x.clone(),
+            // A text written here (a prediction) is kept raw, tag 0.
+            (Data::Packed(d), Val::Str(x)) => d[slot] = [&[0u8], x.as_bytes()].concat().into(),
             (Data::U32(d), _) => d[slot] = wire::NONE,
             (Data::I64(d), _) => d[slot] = wire::NONE64,
             (Data::F64(d), _) => d[slot] = f64::NAN,
             (Data::Str(d), _) => d[slot].clear(),
             (Data::List(d), _) => d[slot].clear(),
+            (Data::Packed(d), _) => d[slot] = Box::default(),
         }
     }
 }
@@ -325,9 +393,33 @@ impl Table {
         }
     }
 
+    /// A str cell, or a packed text cell sent raw; [`Table::text`] reads
+    /// any text.
     pub fn str(&self, id: u32, col: u16) -> Option<&str> {
         match (self.slot(id), self.column(col).map(|c| &c.data)) {
             (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(v[s].as_str()),
+            (Some(s), Some(Data::Packed(v))) => match &*v[s] {
+                [0, t @ ..] => core::str::from_utf8(t).ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A text cell, packed or not, read now.
+    pub fn text(&self, id: u32, col: u16) -> Option<alloc::borrow::Cow<'_, str>> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(alloc::borrow::Cow::Borrowed(v[s].as_str())),
+            (Some(s), Some(Data::Packed(v))) => unpack(&v[s]),
+            _ => None,
+        }
+    }
+
+    /// A text cell's length in bytes, unread when it is packed.
+    pub fn text_len(&self, id: u32, col: u16) -> Option<usize> {
+        match (self.slot(id), self.column(col).map(|c| &c.data)) {
+            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(v[s].len()),
+            (Some(s), Some(Data::Packed(v))) => packed_len(&v[s]),
             _ => None,
         }
     }
@@ -358,7 +450,7 @@ impl Table {
     /// Removes a row, returning its values (by column) for an undo.
     pub fn remove(&mut self, id: u32) -> Option<Vec<(u16, Val)>> {
         let s = self.slot(id)?;
-        let old = self.cols.iter().map(|c| (c.id, c.data.get(s))).collect();
+        let old = self.cols.iter().map(|c| (c.id, c.data.raw(s))).collect();
         self.slots.remove(&id);
         let last = self.ids.len() - 1;
         self.ids.swap_remove(s);
@@ -374,8 +466,10 @@ impl Table {
     /// Writes one cell of an existing row; returns the old value.
     pub fn set(&mut self, id: u32, col: u16, v: &Val) -> Option<Val> {
         let s = self.slot(id)?;
-        let old = self.column(col).map_or(Val::None, |c| c.data.get(s));
-        match kind_of_val(v) {
+        let old = self.column(col).map_or(Val::None, |c| c.data.raw(s));
+        // A text written to a packed column is packed raw, not refused.
+        let packed = self.column(col).is_some_and(|c| c.data.kind() == Kind::Packed);
+        match kind_of_val(v).map(|k| if packed && k == Kind::Str { Kind::Packed } else { k }) {
             Some(k) => {
                 if let Some(c) = self.column_mut(col, k, false) {
                     c.data.set(s, v);
@@ -724,6 +818,7 @@ impl Rows {
                     Data::F64(v) => b.f64s(c.id, v.iter().copied()),
                     Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
                     Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
+                    Data::Packed(v) => b.zstrs(c.id, v.iter().map(|c| &c[..])),
                 };
             }
             b.done();

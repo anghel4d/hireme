@@ -208,6 +208,7 @@ fn boot_of(k: &Kernel) -> Vec<u8> {
                 Data::F64(v) => b.f64s(c.id, v.iter().copied()),
                 Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
                 Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
+                Data::Packed(v) => b.zstrs(c.id, v.iter().map(|c| &c[..])),
             };
         }
         b.done();

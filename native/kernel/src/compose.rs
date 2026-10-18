@@ -131,7 +131,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
                     kind: it.u32(x, I::KIND).unwrap_or(0) as u8,
                     key: it.str(x, I::KEY).unwrap_or(""),
                     title: it.str(x, I::TITLE).unwrap_or(""),
-                    body: it.str(x, I::BODY),
+                    body: it.text(x, I::BODY),
                     org: it.str(x, I::ORG),
                     span: it.str(x, I::SPAN),
                     position: it.u32(x, I::POSITION).unwrap_or(0),
@@ -175,8 +175,8 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
                         item_id: o.u32(x, O::ITEM_ID)?,
                         mode: u8::try_from(o.u32(x, O::MODE)?).ok().and_then(cv::Mode::from_u8)?,
                         title: o.str(x, O::TITLE),
-                        body: o.str(x, O::BODY),
-                        reason: o.str(x, O::REASON),
+                        body: o.text(x, O::BODY),
+                        reason: o.text(x, O::REASON),
                     })
                 })
                 .collect()

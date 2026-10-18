@@ -219,3 +219,44 @@ fn kernel_with(g: Grants) -> Kernel {
     k.set_grants(g);
     k
 }
+
+/// Texts the server packs stay packed in the replica and its snapshot and
+/// read on touch; a size reads without unpacking; a rolled-back write
+/// leaves the packed cell exactly as it was.
+#[test]
+fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
+    let doc = "Senior Rust engineer. About the team: kernels, schedulers and GPU runtimes. ".repeat(40);
+    let mut z = zstd::bulk::Compressor::with_dictionary(19, wire::TEXT_DICT).unwrap();
+    z.include_checksum(false).unwrap();
+    z.include_contentsize(true).unwrap();
+    let packed = [&[1u8][..], &z.compress(doc.as_bytes()).unwrap()].concat();
+    let raw = [&[0u8][..], b"short note"].concat();
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::SOURCES, 2);
+    b.u32s(S::ID, [1, 2].into_iter()).strs(S::URL, ["https://a.example/1", "https://b.example/2"].into_iter()).zstrs(S::DOC, [&packed[..], &raw[..]].into_iter());
+    b.done();
+    let mut k = Kernel::new();
+    k.set_grants(Grants::operator());
+    k.boot(&w.finish(), 1).unwrap();
+    let docs = |k: &Kernel| q(k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"].clone();
+    assert_eq!(docs(&k), json!([{"id": 1, "doc": doc}, {"id": 2, "doc": "short note"}]));
+    let sized = q(&k, json!({"op": "find", "table": "sources", "sizes": ["doc"]}))["rows"].clone();
+    assert_eq!((sized[0]["doc"].clone(), sized[1]["doc"].clone()), (json!(doc.len()), json!(10)));
+    // The snapshot holds the cell as packed, and restores it.
+    let snap = k.snapshot();
+    assert!(snap.len() < doc.len() / 4, "snapshot {} B for a {} B text", snap.len(), doc.len());
+    let mut again = Kernel::new();
+    again.set_grants(Grants::operator());
+    again.restore(&snap).unwrap();
+    assert_eq!(docs(&again), docs(&k));
+    // A predicted write, then its NACK: the packed cell comes back as it was.
+    let mut ops = wire::OpsWriter::new();
+    let mut o = ops.op(5150, wire::PUT, 0, table::SOURCES, 1, None);
+    o.str(S::DOC, "mine");
+    o.done();
+    let ctx = kernel::judge::Ctx { today: 739_528, now: 0, human: true, key_id: None, held: &[] };
+    k.predict(&ops.finish()[8..], &ctx).unwrap();
+    assert_eq!(docs(&k)[0]["doc"], "mine");
+    k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 2, &[wire::Nack { op_id: 5150, code: 0, data: b"{}" }])).unwrap();
+    assert_eq!(k.snapshot(), snap);
+}

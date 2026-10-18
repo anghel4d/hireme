@@ -17,6 +17,7 @@
 //! overlay writes wait until `open_generation` opens the next one, which
 //! is itself refused until the window has passed.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -175,7 +176,8 @@ pub struct Item<'a> {
     pub kind: u8,
     pub key: &'a str,
     pub title: &'a str,
-    pub body: Option<&'a str>,
+    /// A text column: packed at rest, so read into a Cow.
+    pub body: Option<Cow<'a, str>>,
     pub org: Option<&'a str>,
     pub span: Option<&'a str>,
     pub position: u32,
@@ -191,8 +193,8 @@ pub struct Overlay<'a> {
     pub item_id: u32,
     pub mode: Mode,
     pub title: Option<&'a str>,
-    pub body: Option<&'a str>,
-    pub reason: Option<&'a str>,
+    pub body: Option<Cow<'a, str>>,
+    pub reason: Option<Cow<'a, str>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,13 +203,13 @@ pub struct Line<'a> {
     pub kind: u8,
     pub key: &'a str,
     pub title: &'a str,
-    pub body: Option<&'a str>,
+    pub body: Option<Cow<'a, str>>,
     pub org: Option<&'a str>,
     pub span: Option<&'a str>,
     /// The overlay that shaped this line, if any (never `Drop`: dropped
     /// lines are not in the CV).
     pub mode: Option<Mode>,
-    pub reason: Option<&'a str>,
+    pub reason: Option<Cow<'a, str>>,
 }
 
 /// The composed CV: the profile's items and the shared ones, ordered by
@@ -233,11 +235,11 @@ pub fn compose<'a>(profile_id: Option<u32>, items: &[Item<'a>], overlays: &[Over
             kind: it.kind,
             key: it.key,
             title: o.and_then(|o| o.title).filter(|t| !t.trim().is_empty()).unwrap_or(it.title),
-            body: o.and_then(|o| o.body).filter(|b| !b.trim().is_empty()).or(it.body),
+            body: o.and_then(|o| o.body.clone()).filter(|b| !b.trim().is_empty()).or_else(|| it.body.clone()),
             org: it.org,
             span: it.span,
             mode: o.map(|o| o.mode),
-            reason: o.and_then(|o| o.reason),
+            reason: o.and_then(|o| o.reason.clone()),
         };
         out.push((it.kind, it.position, it.id, line));
     }
@@ -260,7 +262,7 @@ pub fn visible(lines: &[Line], theme: &Theme) -> String {
         if let Some(o) = l.org {
             put(o);
         }
-        if let Some(b) = l.body {
+        if let Some(b) = &l.body {
             put(b);
         }
     }
@@ -279,15 +281,15 @@ mod tests {
     fn overlays_shape_the_profile() {
         let items = [item(1, None, 2, "shared"), item(2, Some(7), 1, "mine"), item(3, Some(8), 0, "theirs"), item(4, Some(7), 3, "old")];
         let overlays = [
-            Overlay { id: 1, own: true, item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits") },
+            Overlay { id: 1, own: true, item_id: 3, mode: Mode::Add, title: None, body: None, reason: Some("fits".into()) },
             Overlay { id: 2, own: true, item_id: 4, mode: Mode::Drop, title: None, body: None, reason: None },
-            Overlay { id: 3, own: true, item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b"), reason: None },
+            Overlay { id: 3, own: true, item_id: 2, mode: Mode::Tailor, title: Some("mine, tailored"), body: Some("b".into()), reason: None },
             Overlay { id: 4, own: true, item_id: 99, mode: Mode::Add, title: None, body: None, reason: None },
         ];
         let cv = compose(Some(7), &items, &overlays);
         let titles: Vec<&str> = cv.iter().map(|l| l.title).collect();
         assert_eq!(titles, ["theirs", "mine, tailored", "shared"]);
-        assert_eq!(cv[1].body, Some("b"));
+        assert_eq!(cv[1].body.as_deref(), Some("b"));
         assert_eq!(cv[0].mode, Some(Mode::Add));
         // Another application's earlier wording of a line is the story; the
         // application's own wording of it wins.

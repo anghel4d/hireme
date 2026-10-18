@@ -122,6 +122,7 @@ fn value<'a>(env: Env<'a>, v: &EVal) -> Term<'a> {
             Val::F64(x) => x.encode(env),
             Val::Str(s) => s.as_str().encode(env),
             Val::List(l) => l.encode(env),
+            Val::Packed(p) => kernel::rows::unpack(p).map(|t| t.into_owned()).encode(env),
         },
     }
 }

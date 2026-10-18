@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "board"
 harness = false
+
+[dev-dependencies]
+# Packs text cells as the server does, against the dictionary.
+zstd = "0.14.3"

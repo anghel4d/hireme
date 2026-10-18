@@ -343,6 +343,7 @@ pub fn effects_json(rows: &[judge::Row]) -> Json {
                         EVal::Val(Val::F64(x)) => json!(x),
                         EVal::Val(Val::Str(x)) => json!(x),
                         EVal::Val(Val::List(l)) => json!(l),
+                        EVal::Val(Val::Packed(p)) => crate::rows::unpack(p).map_or(Json::Null, |t| json!(t)),
                     };
                     (name, v)
                 })
@@ -406,6 +407,9 @@ mod exports {
     std::thread_local! {
         static K: RefCell<Kernel> = RefCell::new(Kernel::new());
         static OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        /// The packed text cell `str_len` last read, `(table, col, id)` and
+        /// its text, so the `str_ptr` that follows points into it.
+        static TEXT: RefCell<Option<((u32, u32, u32), String)>> = const { RefCell::new(None) };
     }
 
     fn put(bytes: Vec<u8>) -> i32 {
@@ -494,6 +498,7 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn ingest(ptr: *const u8, len: usize) -> i32 {
         let f = unsafe { input(ptr, len) };
+        TEXT.with(|t| *t.borrow_mut() = None);
         K.with(|k| match k.borrow_mut().ingest(f) {
             Ok(m) => put_json(&moved_json(&m)),
             Err(_) => -1,
@@ -507,6 +512,7 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn predict(op: *const u8, op_len: usize, ctx: *const u8, ctx_len: usize) -> i32 {
         let (op, c) = unsafe { (input(op, op_len), input(ctx, ctx_len)) };
+        TEXT.with(|t| *t.borrow_mut() = None);
         let (today, now, human, key_id, held) = ctx_json(c);
         K.with(|k| {
             let ctx = Ctx { today, now, human, key_id, held: &held };
@@ -626,6 +632,7 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn restore(ptr: *const u8, len: usize) -> i64 {
         let s = unsafe { input(ptr, len) };
+        TEXT.with(|t| *t.borrow_mut() = None);
         K.with(|k| k.borrow_mut().restore(s).map_or(-1, |rev| rev as i64))
     }
 
@@ -668,6 +675,8 @@ mod exports {
                 Some(Data::I64(_)) => 3,
                 Some(Data::F64(_)) => 4,
                 Some(Data::List(_)) => 7,
+                // Packed text reads as str: str_len and str_ptr unpack it.
+                Some(Data::Packed(_)) => 2,
                 None => 0,
             }
         })
@@ -677,12 +686,31 @@ mod exports {
     /// `str_len`. Empty (null) is length 0.
     #[unsafe(no_mangle)]
     pub extern "C" fn str_ptr(t: u32, c: u32, id: u32) -> *const u8 {
-        K.with(|k| k.borrow().rows.table(t as u16).and_then(|t| t.str(id, c as u16)).map_or(core::ptr::null(), |s| s.as_ptr()))
+        cell(t, c, id, |s| s.as_ptr()).unwrap_or(core::ptr::null())
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn str_len(t: u32, c: u32, id: u32) -> u32 {
-        K.with(|k| k.borrow().rows.table(t as u16).and_then(|t| t.str(id, c as u16)).map_or(0, |s| s.len() as u32))
+        cell(t, c, id, |s| s.len() as u32).unwrap_or(0)
+    }
+
+    /// A str cell in place, or a packed one unpacked into TEXT (kept for the
+    /// call after it): what `str_len` and `str_ptr` read.
+    fn cell<R>(t: u32, c: u32, id: u32, f: impl Fn(&str) -> R) -> Option<R> {
+        K.with(|k| {
+            let k = k.borrow();
+            let table = k.rows.table(t as u16)?;
+            if let Some(s) = table.str(id, c as u16) {
+                return Some(f(s));
+            }
+            TEXT.with(|text| {
+                let mut text = text.borrow_mut();
+                if text.as_ref().is_none_or(|(key, _)| *key != (t, c, id)) {
+                    *text = table.text(id, c as u16).map(|s| ((t, c, id), s.into_owned()));
+                }
+                text.as_ref().map(|(_, s)| f(s))
+            })
+        })
     }
 
     /// The slot of a row id in its table's column views; `u32::MAX` if absent.
