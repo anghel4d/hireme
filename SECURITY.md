@@ -169,6 +169,11 @@ a revoked key, a mask change, a suspended account, or the operator's revoke
 in the account lens, which is sticky (the revoked session cannot claim
 again until it reconnects). There is no TTL.
 
+An operator lease revoke pauses that key: until you resume it from the
+account lens, none of its sessions may open the channel or claim
+(refused, "paused by the operator"), however often the agent reconnects.
+A key revoke stops it for good.
+
 ## Carrier
 
 Liveness is the carrier. Each side sends PING every **15 seconds**; a

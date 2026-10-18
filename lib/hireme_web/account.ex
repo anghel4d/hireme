@@ -32,6 +32,8 @@ defmodule HiremeWeb.Account do
   - `account.key.mint` {name, preset | read_mask + write_mask, may_delete?, expires_in_days?} -> {key, secret}
   - `account.key.change` {id, preset | read_mask + write_mask, may_delete?}
   - `account.key.rename` {id, name}; `account.key.revoke` {id}
+  - `account.key.resume` {id} -> {key}: lifts the pause an operator lease
+    revoke put on the key; not_found for an unknown or revoked key
   - `account.lease.revoke` {id}
   - `account.identity.unlink` {id}
   - `account.totp.begin` {label} -> {uri, secret, svg}; `account.totp.confirm` {code, name} -> {factor, recovery_codes}
@@ -119,7 +121,7 @@ defmodule HiremeWeb.Account do
   # leaked key or a thief's session. A call that wrote nothing (refused, or
   # a no-op) is given its charge back, so a stale cookie cannot spend the
   # owner's budget.
-  @writes ~w(account.key.mint account.key.change account.identity.unlink
+  @writes ~w(account.key.mint account.key.change account.key.resume account.identity.unlink
     account.totp.confirm account.passkey.finish account.factor.remove
     account.recovery.regenerate account.trusted_host.add account.trusted_host.remove)
 
@@ -264,6 +266,14 @@ defmodule HiremeWeb.Account do
        when is_integer(id) and is_binary(name) do
     with %{} = key <- Keys.get(id) || {:error, :not_found},
          {:ok, key} <- Keys.rename(key, name, ctx(meta, s)) do
+      {:ok, %{key: key(key)}}
+    end
+  end
+
+  # An operator lease revoke paused the key; this lifts it.
+  defp run("account.key.resume", %{"id" => id}, s, meta) when is_integer(id) do
+    with %{} = key <- Keys.get(id) || {:error, :not_found},
+         {:ok, key} <- Keys.resume(key, ctx(meta, s)) do
       {:ok, %{key: key(key)}}
     end
   end
@@ -415,6 +425,7 @@ defmodule HiremeWeb.Account do
     |> Map.take([
       :id,
       :name,
+      :paused_at,
       :read_mask,
       :write_mask,
       :may_delete,
@@ -423,7 +434,12 @@ defmodule HiremeWeb.Account do
       :revoked_at,
       :inserted_at
     ])
-    |> Map.merge(%{display: Keys.display(k), preset: Keys.preset_of(k), live: Keys.live?(k)})
+    |> Map.merge(%{
+      display: Keys.display(k),
+      preset: Keys.preset_of(k),
+      live: Keys.live?(k),
+      paused: k.paused_at != nil
+    })
   end
 
   defp factor(f) do

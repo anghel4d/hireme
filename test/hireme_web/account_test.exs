@@ -279,4 +279,51 @@ defmodule HiremeWeb.AccountTest do
     assert {:ok, _} =
              Account.call("account.key.mint", %{"name" => "k", "preset" => "read_only"}, ctx)
   end
+
+  test "a paused key is shown paused until resumed; resuming records it and tells the account", %{
+    session: s,
+    ctx: ctx
+  } do
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "agent", Hireme.Keys.preset(:read_write))
+    {:ok, %{key: other}} = Hireme.Keys.mint(s, "other", Hireme.Keys.preset(:read_only))
+
+    pause = fn k ->
+      k
+      |> Ecto.Changeset.change(paused_at: Hireme.Store.now())
+      |> Repo.update!(skip_account: true)
+    end
+
+    pause.(key)
+
+    {:ok, %{keys: keys}} = Account.call("account.overview", %{}, ctx)
+    assert %{paused: true, paused_at: %DateTime{}} = Enum.find(keys, &(&1.id == key.id))
+
+    # A mask change does not lift it; only resume (or revoke) does.
+    {:ok, _} = Account.call("account.key.change", %{"id" => key.id, "preset" => "read_only"}, ctx)
+    assert Repo.get(Hireme.Rows.ApiKey, key.id, skip_account: true).paused_at
+
+    Phoenix.PubSub.subscribe(Hireme.PubSub, Hireme.Audit.topic(s.account_id))
+
+    assert {:ok, %{key: %{paused: false, paused_at: nil}}} =
+             Account.call("account.key.resume", %{"id" => key.id}, ctx)
+
+    assert_receive {:resume, {:key, id}} when id == key.id
+    assert Enum.any?(Hireme.Audit.recent(5), &(&1.kind == "key_resumed"))
+
+    # Resuming a key that is not paused records nothing.
+    cursor = Hireme.Audit.rev(s.account_id)
+
+    assert {:ok, %{key: %{paused: false}}} =
+             Account.call("account.key.resume", %{"id" => other.id}, ctx)
+
+    assert Hireme.Audit.rev(s.account_id) == cursor
+
+    # A revoked key cannot be resumed, and its revoke cleared the pause.
+    pause.(Repo.get(Hireme.Rows.ApiKey, other.id, skip_account: true))
+    {:ok, _} = Account.call("account.key.revoke", %{"id" => other.id}, ctx)
+    refute Repo.get(Hireme.Rows.ApiKey, other.id, skip_account: true).paused_at
+
+    assert {:error, %{error: "not_found"}} =
+             Account.call("account.key.resume", %{"id" => other.id}, ctx)
+  end
 end

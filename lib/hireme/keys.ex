@@ -231,6 +231,49 @@ defmodule Hireme.Keys do
     {:ok, key}
   end
 
+  @doc """
+  Lift the operator's pause on a live key (set when the operator revoked
+  one of its leases): its sessions may open the channel and claim again.
+  A key that is not paused is left as it is and nothing is recorded.
+  """
+  @spec resume(Key.t(), map()) :: {:ok, Key.t()} | {:error, :not_found}
+  def resume(%Key{} = key, meta \\ %{}) do
+    cond do
+      not live?(key) ->
+        {:error, :not_found}
+
+      is_nil(key.paused_at) ->
+        {:ok, key}
+
+      true ->
+        {n, _} =
+          Store.write(fn ->
+            Repo.update_all(
+              from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
+              [set: [paused_at: nil, updated_at: Store.now()], inc: [rev: 1]],
+              skip_account: true
+            )
+          end)
+
+        if n == 1 do
+          Audit.record(
+            :key_resumed,
+            %{key_id: key.id, name: key.name},
+            Map.put(meta, :account_id, key.account_id)
+          )
+
+          # The sequencer holds paused keys in memory; this lifts its hold.
+          Phoenix.PubSub.broadcast(
+            Hireme.PubSub,
+            Audit.topic(key.account_id),
+            {:resume, {:key, key.id}}
+          )
+        end
+
+        {:ok, Repo.get(Key, key.id, skip_account: true)}
+    end
+  end
+
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment, its sessions end, and it stays listed."
   @spec revoke(Key.t(), map()) :: Key.t()
   def revoke(key, meta \\ %{})
@@ -244,7 +287,7 @@ defmodule Hireme.Keys do
       Store.write(fn ->
         Repo.update_all(
           from(k in Key, where: k.id == ^key.id and is_nil(k.revoked_at)),
-          [set: [revoked_at: now, updated_at: now], inc: [rev: 1]],
+          [set: [revoked_at: now, paused_at: nil, updated_at: now], inc: [rev: 1]],
           skip_account: true
         )
       end)
