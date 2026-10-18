@@ -329,7 +329,7 @@ defmodule Hireme.Import do
     e -> {:refused, :type, %{row: "unreadable", reason: Exception.message(e)}}
   end
 
-  defp lower(_account_id, _table, _pack, row, _mode), do: {:refused, :type, %{row: inspect(row)}}
+  defp lower(_account_id, _table, _pack, row, _mode), do: {:refused, :type, %{row: brief(row)}}
 
   defp lower_row(account_id, table, pack, directives, values, mode) do
     with {:ok, cells} <- cells(account_id, table, values, mode),
@@ -446,7 +446,7 @@ defmodule Hireme.Import do
   defp in_range(%{type: t} = col, v, value) when t in [:str, :text] and is_binary(v) do
     if String.valid?(v),
       do: {:ok, v},
-      else: {:refused, :type, %{column: col.name, value: inspect(value), reason: "not UTF-8"}}
+      else: {:refused, :type, %{column: col.name, value: brief(value), reason: "not UTF-8"}}
   end
 
   defp in_range(_col, v, _value), do: {:ok, v}
@@ -601,10 +601,13 @@ defmodule Hireme.Import do
     end
   end
 
-  defp as_of_cell(true, as_of), do: {:refused, :type, %{column: "as_of", value: inspect(as_of)}}
+  defp as_of_cell(true, as_of), do: {:refused, :type, %{column: "as_of", value: brief(as_of)}}
 
   defp op_id do
     <<id::unsigned-63, _::1>> = :crypto.strong_rand_bytes(8)
     id
   end
+
+  # A refusal names the value it refused, bounded.
+  defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)
 end

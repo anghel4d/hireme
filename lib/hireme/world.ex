@@ -313,7 +313,9 @@ defmodule Hireme.World do
             "host" => s.host,
             "publisher" => s.publisher,
             "title" => s.title,
-            "kind" => s.kind
+            "kind" => s.kind,
+            # Dropped by the operator: named here, cited by no new write.
+            "dropped" => s.deleted_at != nil
           }
     }
   end

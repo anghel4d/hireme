@@ -477,7 +477,8 @@ defmodule Hireme.WorldTest do
     {:ok, %{"rows" => rows}} = World.find(a.id, Grants.operator(), %{"table" => "sources"})
     refute sid in ids(rows)
 
-    assert {:ok, %{"citations" => [%{"source" => %{"id" => ^sid, "url" => ^url}}]}} =
+    assert {:ok,
+            %{"citations" => [%{"source" => %{"id" => ^sid, "url" => ^url, "dropped" => true}}]}} =
              World.history(a.id, Grants.operator(), cites)
 
     # A tombstone is cited by no new write; its url names a new source.
