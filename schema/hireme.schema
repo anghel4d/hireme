@@ -36,6 +36,17 @@
 #        refused `human_only`)   readonly (the server or a command writes it, never a
 #        put)   unique (per account)
 #
+# Null (the codec's rule, native/wire): in BOOT/PATCH a u32 run carries null as
+# 0xFFFFFFFF (so an id, ref, day, time or enum code never takes it; bool is 0, 1
+# or null), str as the empty string, i64 as i64::MIN, f64 as NaN, deferred as
+# length 0xFFFFFFFF. NULL and '' are one value: a put of '' or of zero-length
+# text is stored as NULL, so no column holds ''. In OPS a cell of type 0 with
+# length 0 clears its column; a u32 0xFFFFFFFF, an i64::MIN or a NaN cell is
+# refused `type`. Wire type codes: 1 u32 (id ref bool u8 u32 day time enum;
+# day = days since 1970-01-01, time = unix seconds), 2 str (str text json),
+# 3 i64, 4 f64, 5 deferred (u32 length + 8 bytes of SHA-256); the codec may
+# also run a column as 6 sym (a dictionary of strs) or 7 list (u32 ids).
+#
 # Implied on every stored table, in this order and with these column ids:
 #   1 id   2 account_id (not on `global`)   3 rev   4 inserted_at   5 updated_at
 #   6 deleted_at (only on `soft_delete`)
@@ -65,7 +76,7 @@ frame REPLY 34
 enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal
 
 enum verb put drop command
-enum actor operator agent system
+enum actor operator agent system mail
 enum bye revoked grants restart schema suspended
 
 enum account_status active suspended
@@ -81,7 +92,7 @@ enum band frontier labs big_tech systems craft mid thin kill
 enum outcome offer rejected ghosted withdrawn declined
 enum work_mode onsite hybrid remote
 enum employment full_time part_time contract internship freelance
-enum app_channel listing referral recruiter cold other
+enum app_channel listing referral recruiter cold other inbound
 enum listing_format text markdown html
 
 enum batch_kind day_pack leftover universe_gaps linkedin
@@ -114,7 +125,7 @@ enum net_channel broadside x other
 # ---------------------------------------------------------------- system
 
 table accounts system server global
-  col name str ! = ''
+  col name str ?
   col status enum account_status ! = active
   # Live API keys, moved in the statement that mints or revokes one.
   col live_key_count u32 ! = 0
@@ -132,14 +143,14 @@ table sessions system server
   col last_seen_at time !
   col expires_at time !
   col revoked_at time ?
-  col ip str ! = ''
-  col user_agent str ! = ''
+  col ip str ?
+  col user_agent str ?
 
 table identities system server
   unique provider subject global
   col provider enum provider !
   col subject str !
-  col display str ! = ''
+  col display str ?
   col verified_at time !
 
 table magic_links system server global
@@ -149,8 +160,8 @@ table magic_links system server global
   unique token_hash global
   col expires_at time !
   col used_at time ?
-  col ip str ! = ''
-  col user_agent str ! = ''
+  col ip str ?
+  col user_agent str ?
 
 table api_keys system server
   index account_id
@@ -170,7 +181,7 @@ table factors system server
   index account_id kind
   unique credential_id global where credential_id is not null
   col kind enum factor_kind !
-  col name str ! = ''
+  col name str ?
   col totp_secret bytes ? server_only
   col totp_last_step i64 ?
   col credential_id bytes ?
@@ -201,8 +212,8 @@ table recovery_codes system server
 table audit system server append_only account_optional
   index account_id id desc
   col kind str !
-  col ip str ! = ''
-  col user_agent str ! = ''
+  col ip str ?
+  col user_agent str ?
   col meta json ?
   col key_id ref api_keys ?
   col session_id ref sessions ?
@@ -230,7 +241,7 @@ table op_ledger system server
   col subject u32 !
   col target u32 ?
   col row_id u32 ?
-  col rev i64 ?
+  col ack_rev i64 ?
   col refusal enum refusal ?
 
 # Hosts whose pages may source `culture` and ratings. Operator-owned.
