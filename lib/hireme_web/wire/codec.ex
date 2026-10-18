@@ -27,6 +27,7 @@ defmodule HiremeWeb.Wire.Codec do
   @max_ops 256
   @max_inflated 256 <<< 20
   @epoch ~D[1970-01-01]
+  @last_day 2_932_896
 
   @t_null 0
   @t_u32 1
@@ -444,7 +445,10 @@ defmodule HiremeWeb.Wire.Codec do
   defp to_value(%{type: :u8}, v) when v in 0..255, do: {:ok, v}
   defp to_value(%{type: :bool}, 0), do: {:ok, false}
   defp to_value(%{type: :bool}, 1), do: {:ok, true}
-  defp to_value(%{type: :day}, v) when is_integer(v), do: {:ok, Date.add(@epoch, v)}
+  # Days run to 9999-12-31, the last date SQLite and Ecto read back.
+  defp to_value(%{type: :day}, v) when is_integer(v) and v <= @last_day,
+    do: {:ok, Date.add(@epoch, v)}
+
   defp to_value(%{type: :time}, v) when is_integer(v), do: {:ok, DateTime.from_unix!(v)}
 
   defp to_value(%{type: :enum, enum: e}, v) when is_integer(v) do

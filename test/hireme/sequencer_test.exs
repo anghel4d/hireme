@@ -114,6 +114,46 @@ defmodule Hireme.SequencerTest do
     assert {[], [%{refusal: :type}]} = run(a.id, op)
   end
 
+  test "a day past 9999-12-31 is refused type, so no row is stored that cannot be read back", %{
+    account: a
+  } do
+    t = Schema.table(:gym_reps)
+    col = &Enum.find(t.cols, fn c -> c.name == &1 end)
+
+    cells = [
+      {col.("platform").id, 1, 0},
+      {col.("slug").id, 2, "far"},
+      {col.("done_on").id, 1, 2_932_897}
+    ]
+
+    {:ok, op, ""} = Codec.op(Codec.encode_op({1, :put, 0, t.id, 0, nil, cells}))
+    assert {[], [%{refusal: :type}]} = run(a.id, op)
+    assert Repo.aggregate(Hireme.Rows.GymRep, :count) == 0
+  end
+
+  test "a ref to another account's row is refused as if it did not exist", %{account: a} do
+    other = sign_in()
+
+    {[theirs], []} =
+      Repo.with_account(other.account.id, fn ->
+        run(other.account.id, op(:put, :corporations, %{domain: "theirs.example", name: "T"}))
+      end)
+
+    {[place], []} = run(a.id, op(:put, :places, %{kind: :country, name: "Mine", iso2: "MN"}))
+
+    assert {[], [%{refusal: :not_found}]} =
+             run(
+               a.id,
+               op(:put, :offices, %{corporation_id: theirs.id, place_id: place.id, kind: :hq})
+             )
+
+    assert {[], [%{refusal: :not_found}]} =
+             run(
+               a.id,
+               op(:put, :offices, %{corporation_id: 9_999_999, place_id: place.id, kind: :hq})
+             )
+  end
+
   test "a metric needs as_of, is never older than stored, and leaves a citation", %{account: a} do
     base = %{domain: "metric.example", name: "M"}
 

@@ -378,7 +378,7 @@ defmodule Hireme.Sequencer do
           try do
             judge(op, sub, state, turn)
           rescue
-            e in [Ecto.ConstraintError, Exqlite.Error] ->
+            e in [Ecto.ConstraintError, Ecto.ChangeError, Exqlite.Error] ->
               {refusal, data} = constraint(e)
               {:refused, refusal, data, state}
           end
@@ -397,8 +397,14 @@ defmodule Hireme.Sequencer do
     end
   end
 
+  defp constraint(%Ecto.ChangeError{message: msg}), do: {:type, %{reason: msg}}
+
   defp constraint(%{message: msg}) do
     cond do
+      # The schema's triggers refuse a ref to another account's row.
+      msg =~ ~r/\bref \w+\.\w+/ ->
+        {:not_found, %{reason: "a ref names no row"}}
+
       msg =~ "UNIQUE" or msg =~ "unique" ->
         {:natural_key, %{reason: "a unique column already holds this value"}}
 
@@ -627,7 +633,8 @@ defmodule Hireme.Sequencer do
                p -> typed(p, cell, command.name)
              end
            end),
-         [] <- for(p <- command.params, p.required, not Map.has_key?(values, p.name), do: p.name) do
+         [] <- for(p <- command.params, p.required, not Map.has_key?(values, p.name), do: p.name),
+         :ok <- refs(command.params, values) do
       if op.target > 0 and plan.row == nil,
         do: {:refused, :not_found, %{table: plan.table.name, id: op.target}},
         else: {:ok, Map.put(plan, :changes, values)}
@@ -655,9 +662,21 @@ defmodule Hireme.Sequencer do
              {id, _, _} = cell -> writable(table, col(table, id), id, cell, sub)
            end),
          :ok <- special_cells(op.cells),
-         :ok <- required(table, values, insert) do
+         :ok <- required(table, values, insert),
+         :ok <- refs(table.cols, values) do
       {:ok, Map.put(plan, :changes, values)}
     end
+  end
+
+  # A ref names a row of this account (Repo scopes the lookup), or it is
+  # refused as if no such row existed: another account's ids say nothing.
+  defp refs(cols, values) do
+    Enum.find_value(cols, :ok, fn c ->
+      id = c.type == :ref and not Map.get(c, :implied, false) and values[c.name]
+
+      if is_integer(id) and not Repo.exists?(from(r in Schema.row(c.ref), where: r.id == ^id)),
+        do: {:refused, :not_found, %{column: c.name, id: id}}
+    end)
   end
 
   defp reduce_cells(cells, fun) do
@@ -1123,7 +1142,7 @@ defmodule Hireme.Sequencer do
       q = from(r in Schema.row(t.name), where: field(r, ^field) == ^id)
 
       for r <- Repo.all(q) do
-        if c.required do
+        if c.required or Map.get(c, :cascade, false) do
           {deltas, _} = delete(t, r, now)
           deltas
         else
