@@ -181,11 +181,18 @@ defmodule HiremeWeb.Auth do
     conn |> configure_session(renew: true) |> put_session(@session_key, token)
   end
 
-  @doc "Revoke this session's row, which ends its wire sessions, and drop the cookie."
+  @doc """
+  Revoke this session's row, which ends its wire sessions, drop the cookie,
+  and have the browser clear the desk's stored snapshot (Clear-Site-Data,
+  ASVS 7.4.1): the snapshot holds the account's rows.
+  """
   @spec sign_out(Plug.Conn.t()) :: Plug.Conn.t()
   def sign_out(conn) do
     if s = conn.assigns[:session], do: Accounts.revoke_session(s.account_id, s.id, meta(conn))
-    configure_session(conn, drop: true)
+
+    conn
+    |> configure_session(drop: true)
+    |> put_resp_header("clear-site-data", ~s("storage"))
   end
 
   @doc "Where a request came from, for the trail."

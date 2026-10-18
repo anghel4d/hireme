@@ -133,6 +133,7 @@ defmodule HiremeWeb.SignInTest do
     out = conn |> signed_in(token) |> post("/sign-out")
     assert redirected_to(out) == "/sign-in"
     assert Hireme.Accounts.session(token) == nil
+    assert get_resp_header(out, "clear-site-data") == [~s("storage")]
   end
 
   test "the factor page takes an app code or a recovery code, and refuses a wrong one", %{

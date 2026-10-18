@@ -76,7 +76,9 @@ ends after 24 hours, or one hour idle (63B-4 AAL2 reauthentication; ASVS
 suspension takes effect on the next request and ends the session's wire
 sessions at once (BYE `revoked`, BYE `suspended`). The account lens lists
 sessions and revokes any of them; signing out revokes the row, so a copied
-cookie is dead on the server (ASVS 7.4.1, 7.4.3).
+cookie is dead on the server, and answers `Clear-Site-Data: "storage"`, so
+the desk snapshot the browser kept in IndexedDB is gone too (ASVS 7.4.1,
+7.4.3).
 
 A page reaches the wire with a ticket, never the cookie: a single-use,
 encrypted token naming the session and bound to eight bytes of its token
@@ -149,12 +151,16 @@ mail 4, lanes 8, corpus 16, and `may_delete`:
 A wire session writes only while it holds the lease: taking it opens the
 write channel for the domains in its key's write mask (a browser session
 holds one implicitly, with every domain), and a write without it is
-refused `lease_missing`. Claims are explicit application ids, so two
-agents do not work one application at once: a write to an application
-another session holds is refused `leased`, with that session's label. A lease lives exactly as long
-as its session: release, disconnect, a revoked key, a mask change, a
-suspended account, or the operator's revoke in the account lens. There is
-no TTL.
+refused `lease_missing`. Claims are explicit application ids, at most
+1,000 per request, and taking one needs both read and write on the desk,
+so two agents do not work one application at once: an agent's write to an
+application another session holds is refused `leased`, with that
+session's label. The operator's browser session is never refused
+`leased`: the owner's write lands, and the claiming agent receives it as a
+PATCH. A lease lives exactly as long as its session: release, disconnect,
+a revoked key, a mask change, a suspended account, or the operator's revoke
+in the account lens, which is sticky (the revoked session cannot claim
+again until it reconnects). There is no TTL.
 
 ## Carrier
 
@@ -179,9 +185,13 @@ naming its key, with its counts.
 
 Provenance is server-side: a metric needs `as_of` and is never older than
 the stored one; prose needs a source and the row's current revision; a
-source's host is derived by the server from its URL, never taken from the
-writer; culture and ratings need a host on the operator's trusted list,
-which only the operator edits, from a browser, stepped up.
+source's host is derived by the server from its URL, which must name a
+real hostname, never taken from the writer; a source's identity (URL,
+publisher, title, kind) is fixed once written, so no later write can
+rewrite the citations that name it; culture and ratings need a host on the
+operator's trusted list, which only the operator edits, from a browser,
+stepped up. A JSON value's integers must fit in 64 bits. A refusal never
+carries a stored value from a table the key cannot read.
 
 ## Text an agent reads
 
