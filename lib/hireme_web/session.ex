@@ -295,7 +295,8 @@ defmodule HiremeWeb.Session do
            session
            |> Map.take([:id, :label, :grants, :key_id, :session_id])
            |> Map.merge(%{ip: state.peer[:peer_ip], user_agent: state.peer[:user_agent]}),
-           hello.snapshot_rev
+           # A snapshot taken under another schema is no base for a PATCH.
+           if(hello.schema_rev == Hireme.Schema.schema_rev(), do: hello.snapshot_rev, else: 0)
          ) do
       {:ok, joined} -> welcome(joined, who, session, state)
       {:error, _} -> bye(:restart, "the account is unavailable; retry", state)
@@ -362,11 +363,6 @@ defmodule HiremeWeb.Session do
       else: {:push, [reply(id, false, error(:type, %{column: "ids"}), state)], state}
   end
 
-  defp rpc(id, "account.watch", _params, %{session: %{key_id: nil}} = state) do
-    old = if state.parked, do: [reply(state.parked, true, %{changed: false}, state)], else: []
-    {:push, old, %{state | parked: id}}
-  end
-
   defp rpc(id, "account." <> _ = method, params, state) do
     ctx = %{
       account_id: state.account_id,
@@ -379,7 +375,7 @@ defmodule HiremeWeb.Session do
     case HiremeWeb.Account.call(method, params, ctx) do
       {:ok, result} -> {:push, [reply(id, true, result, state)], state}
       {:error, err} -> {:push, [reply(id, false, err, state)], state}
-      {:park, :account} -> rpc(id, "account.watch", params, state)
+      {:park, :account} -> park(id, state)
     end
   end
 
@@ -415,6 +411,16 @@ defmodule HiremeWeb.Session do
         :ok
     end
   end
+
+  # account.watch goes through HiremeWeb.Account first (it answers at once
+  # when the audit cursor has moved past `since`); only then is it parked.
+  # One parked watch per browser session: a new one answers the old.
+  defp park(id, %{session: %{key_id: nil}} = state) do
+    old = if state.parked, do: [reply(state.parked, true, %{changed: false}, state)], else: []
+    {:push, old, %{state | parked: id}}
+  end
+
+  defp park(id, state), do: {:push, [reply(id, false, error(:scope, %{}), state)], state}
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
   defp answer(id, :ok, state), do: {:push, [reply(id, true, %{}, state)], state}

@@ -158,6 +158,58 @@ defmodule HiremeWeb.SessionTest do
     assert {r, w, d, lease} == {31, 31, 1, 1}
   end
 
+  defp browser(s) do
+    origin = hd(HiremeWeb.Endpoint.origins())
+
+    open(%{@peer | origin: origin})
+    |> then(&Session.frame(Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b"), &1))
+  end
+
+  test "account.watch asks the account lens first: a cursor already passed answers at once", %{
+    session: s
+  } do
+    {:push, _, state} = browser(s)
+
+    {:push, [frame], state} =
+      Session.frame(Codec.encode_rpc(1, "account.watch", JSON.encode!(%{since: 0})), state)
+
+    assert %{kind: :REPLY, body: <<1::little-32, 1, _::binary>>} = decode(frame)
+    {:ok, %{"cursor" => cursor}} = rpc_ok(state, "account.overview", %{})
+    # At the current cursor it parks: no reply until the account moves.
+    assert {:push, [], _} =
+             Session.frame(
+               Codec.encode_rpc(2, "account.watch", JSON.encode!(%{since: cursor})),
+               state
+             )
+  end
+
+  test "a snapshot under another schema_rev is answered with a full BOOT", %{
+    session: s,
+    account: a
+  } do
+    origin = hd(HiremeWeb.Endpoint.origins())
+
+    {[_], []} =
+      run(a.id, op(:put, :gym_reps, %{platform: :other, slug: "s", done_on: ~D[2026-10-01]}))
+
+    {:push, [w, _], _} = browser(s)
+    {:ok, :WELCOME, _, rev, _} = Codec.decode(w)
+
+    hello = fn schema_rev ->
+      Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b", rev, schema_rev)
+    end
+
+    {:push, [_, resumed], _} =
+      Session.frame(hello.(Hireme.Schema.schema_rev()), open(%{@peer | origin: origin}))
+
+    assert decode(resumed).kind == :PATCH
+
+    {:push, [_, train], _} =
+      Session.frame(hello.(Hireme.Schema.schema_rev() + 1), open(%{@peer | origin: origin}))
+
+    assert decode(train).kind == :BOOT
+  end
+
   test "a current snapshot gets a PATCH, flagged END, instead of a BOOT", %{session: s} do
     {_, rw} = key(s, :read_write)
     {[welcome, _], _} = hello(open(), :key, rw)
