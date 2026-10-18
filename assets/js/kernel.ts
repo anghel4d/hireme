@@ -145,6 +145,7 @@ export function load(hw: Boot): void {
       if (rev >= 0n) {
         rowsRev = rev
         booted = true
+        warm = true
       } else if (wire) {
         // HELLO named a snapshot the kernel refused: only a whole BOOT puts the rows right.
         rowsRev = 0n
@@ -154,7 +155,30 @@ export function load(hw: Boot): void {
     }
     for (const f of early.splice(0)) if (!ingest(f)) break
     moved()
+    // The snapshot paints first; the cold derive (the board, a card) runs once that paint is on
+    // screen, so first paint never waits on it.
+    if (warm) afterPaint(() => {
+      warm = false
+      moved()
+    })
   })().catch((e: unknown) => notice("error", `The kernel did not load: ${String(e)}`))
+}
+
+/** Restored rows whose first derive has not run yet: the lenses that derive wait one paint. */
+let warm = false
+export const warming = (): boolean => warm
+
+/** `fn` once the next frame has painted (a frame, then a task), or after 250 ms where frames do not
+ * come (a background tab). */
+function afterPaint(fn: () => void): void {
+  let done = false
+  const go = () => {
+    if (done) return
+    done = true
+    fn()
+  }
+  requestAnimationFrame(() => setTimeout(go, 0))
+  setTimeout(go, 250)
 }
 
 /** Bumped whenever rows move; derived views are cached against it. */

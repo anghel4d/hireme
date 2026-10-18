@@ -58,9 +58,13 @@ function link(): Html {
   return html`<span class="link link-${model.link}" role="status" title="account rev ${model.rev.toString()} at connect">${label}${model.pending > 0 ? html` · ${model.pending} pending` : EMPTY}</span>`
 }
 
+/** The lenses that read the board derive: after a snapshot restore they wait for it, one paint later. */
+const DERIVES: readonly Lens[] = ["desk", "focus"]
+const waiting = (lens: Lens): boolean => DERIVES.includes(lens) && kernel.warming()
+
 function shell(): Html {
   const lens = model.address.lens
-  const v = VIEWS[lens]
+  const v = waiting(lens) ? undefined : VIEWS[lens]
   return html`<header class="bar">
       <a class="brand" href="/desk" data-nav>hireme</a>
       <nav aria-label="Lenses">${NAV.map((n) => html`<a href="${format({ lens: n.lens, sub: "", q: new Map() })}" data-nav data-key="${n.lens}"
@@ -71,16 +75,18 @@ function shell(): Html {
         <button class="ghost">Sign out</button>
       </form>
     </header>
-    <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? v.view() : html`<p class="empty">Loading…</p>`}</main>
+    <main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${v ? v.view() : html`<p class="empty">${waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>
     <aside class="notices" aria-live="polite">${model.notices.map((n) => html`<div class="notice notice-${n.tone}" data-key="n${n.id}">
       <span>${n.text}</span><button type="button" class="ghost" data-act="dismiss" data-id="${n.id}" aria-label="Dismiss">×</button></div>`)}</aside>`
 }
 
 function render(): void {
   if (!root) return
-  const v = VIEWS[model.address.lens]
+  const hold = waiting(model.address.lens)
+  const v = hold ? undefined : VIEWS[model.address.lens]
   const where = format(model.address)
-  if (where !== entered) {
+  // A lens that waits for the first derive is entered once it has run, not before.
+  if (where !== entered && !hold) {
     entered = where
     const fresh = model.address.lens !== enteredLens
     enteredLens = model.address.lens
