@@ -1334,8 +1334,37 @@ defmodule Hireme.Sequencer do
   defp derived(table, values, row, ctx) do
     values
     |> derive(table.name, row, ctx)
+    |> hashes(table)
     |> Map.merge(
       if(ctx.prov && table.id == ctx.plan.table.id, do: atomize(ctx.prov.ons), else: %{})
+    )
+  end
+
+  # Every deferred column written gets its hex SHA-256 twin in the same
+  # write, so a BOOT or PATCH stub is read from the twin, never the text.
+  defp hashes(values, table) do
+    Enum.reduce(table.cols, values, fn c, acc ->
+      key = String.to_atom(c.name)
+      twin = c.deferred && sha_twin(table, c)
+
+      case twin && Map.fetch(acc, key) do
+        {:ok, text} when is_binary(text) ->
+          Map.put(acc, twin, Base.encode16(:crypto.hash(:sha256, text), case: :lower))
+
+        {:ok, nil} ->
+          Map.put(acc, twin, nil)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  # A deferred column's twin: `<col>_sha`, or for listing_raw its listing_sha.
+  defp sha_twin(table, col) do
+    Enum.find_value(
+      [col.name <> "_sha", String.replace_suffix(col.name, "_raw", "_sha")],
+      fn name -> (name != col.name and col(table, name)) && String.to_atom(name) end
     )
   end
 
@@ -1500,11 +1529,7 @@ defmodule Hireme.Sequencer do
 
   defp stubs(t, col, rows) do
     name = String.to_atom(col.name)
-    sha_name = String.replace_suffix(col.name, "_raw", "_sha")
-
-    sha =
-      if sha_name != col.name and Enum.any?(t.cols, &(&1.name == sha_name)),
-        do: String.to_atom(sha_name)
+    sha = sha_twin(t, col)
 
     lens =
       from(r in Schema.row(t.name),

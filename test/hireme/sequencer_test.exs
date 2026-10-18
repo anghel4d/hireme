@@ -825,6 +825,33 @@ defmodule Hireme.SequencerTest do
       assert Repo.aggregate(Hireme.Rows.GymRep, :count) == 2
     end
 
+    test "a deferred column's hash twin is written with it, and the stubs read the twin", %{
+      account: a
+    } do
+      text = "Staff engineer, Rust. " |> String.duplicate(20)
+
+      {[app], []} =
+        run(a.id, op(:put, :applications, %{company: "S", role: "R", listing_raw: text}))
+
+      sha = :crypto.hash(:sha256, text)
+
+      assert Repo.get!(Hireme.Rows.Application, app.id).listing_sha ==
+               Base.encode16(sha, case: :lower)
+
+      {:ok, %{frames: [boot]}} =
+        Sequencer.subscribe(
+          a.id,
+          %{id: 995, label: "o", grants: Grants.operator(), key_id: nil, session_id: nil},
+          0
+        )
+
+      {:ok, :BOOT, _, _, body} = Codec.decode(boot)
+      listing = Schema.column(:applications, "listing_raw").id
+
+      assert get_in(ingest(%{}, :BOOT, body), ["applications", app.id, listing]) ==
+               {byte_size(text), binary_part(sha, 0, 8)}
+    end
+
     test "expect_rev guards a drop and a command too", %{account: a} do
       {[app], []} = run(a.id, op(:put, :applications, %{company: "Rev", role: "R"}))
 
