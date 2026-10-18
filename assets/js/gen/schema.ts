@@ -3,7 +3,7 @@
 // 1970-01-01, a time as unix seconds, and a nullable column as T | null.
 
 export const WIRE_HASH = 0xec8b;
-export const SCHEMA_REV = 0x46a9ec6f;
+export const SCHEMA_REV = 0x28e5432e;
 export const LAYOUT = 2;
 
 export const DOMAIN = { world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16, system: 0 } as const;

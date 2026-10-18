@@ -158,9 +158,20 @@ defmodule Hireme.World do
 
       # The page's ids first, narrow, then its rows by id: a sort carries
       # two columns, not every one the page shows.
+      # A substring test reads every row it tests; through a subquery it
+      # reads the narrowest index that holds the column instead of the rows.
+      filtered =
+        if scans?(params["where"]),
+          do:
+            where(
+              from(r in row, limit: ^limit),
+              [r],
+              r.id in subquery(from(s in row, select: s.id) |> where(^where))
+            ),
+          else: from(r in row, limit: ^limit) |> where(^where)
+
       page_query =
-        from(r in row, limit: ^limit)
-        |> where(^where)
+        filtered
         |> page(order, desc, cursor)
         |> order(order, desc)
         |> select([r], {r.id, field(r, ^order_field)})
@@ -523,6 +534,11 @@ defmodule Hireme.World do
     do: {:error, :type, %{param: name, got: inspect(other)}}
 
   # ------------------------------------------------------------------ filters
+
+  defp scans?(where) when is_map(where),
+    do: Enum.any?(where, fn {_, test} -> is_map(test) and Map.has_key?(test, "like") end)
+
+  defp scans?(_), do: false
 
   defp filters(grants, table, where) when is_map(where) do
     Enum.reduce_while(where, {:ok, dynamic(true)}, fn {name, test}, {:ok, acc} ->

@@ -404,6 +404,9 @@ table places world server
   natural geonames_id where kind = 'city'
   cap 100000
   index country_id name
+  # The world lens and agents look places up by name and filter by region.
+  index name
+  index region
   col kind enum place_kind !
   col country_id ref places ?
   col iso2 str ?

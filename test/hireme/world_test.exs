@@ -105,6 +105,7 @@ defmodule Hireme.WorldTest do
       World.find(a.id, Grants.operator(), %{
         "table" => "corporations",
         "where" => %{"domain" => %{"like" => t}},
+        "cols" => ["id", "headcount"],
         "limit" => 500
       })
 
