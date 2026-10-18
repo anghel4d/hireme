@@ -7,6 +7,7 @@ defmodule Hireme.WireCase do
   """
 
   use ExUnit.CaseTemplate
+  alias Hireme.Kernel.Nif
   alias Hireme.Schema
   alias HiremeWeb.Wire.Codec
 
@@ -213,7 +214,7 @@ defmodule Hireme.WireCase do
 
   defp values(5, n, data) do
     # native/wire reads a packed cell, as every client does.
-    for cell <- values(2, n, data), do: cell && Hireme.Kernel.Nif.text(cell)
+    for cell <- values(2, n, data), do: cell && Nif.text(cell)
   end
 
   defp float(<<v::little-float-64>>), do: v

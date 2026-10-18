@@ -29,9 +29,10 @@ defmodule HiremeWeb.Router do
   @impl true
   # The local mail adapter's inbox, where a development sign-in link lands.
   if @dev do
+    alias Plug.Swoosh.MailboxPreview
+
     def call(%{path_info: ["dev", "mailbox" | rest]} = conn, _opts),
-      do:
-        Plug.forward(conn, rest, Plug.Swoosh.MailboxPreview, Plug.Swoosh.MailboxPreview.init([]))
+      do: Plug.forward(conn, rest, MailboxPreview, MailboxPreview.init([]))
   end
 
   def call(conn, _opts) do
