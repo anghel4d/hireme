@@ -484,7 +484,9 @@ kernel.
   `open_fire`, always lands, and the claiming agent sees it as a PATCH and
   has its pending ops judged at their turn as usual). An operator lease revoke pauses that key: none of its sessions may open
   the channel or claim (refused, "paused by the operator") until the operator
-  resumes it from the account lens or the key is revoked.
+  resumes it from the account lens or the key is revoked. The revoke ends
+  each of that key's sessions with the reason "paused by the operator" and
+  `paused: true`, never advice to reconnect.
 - `lease.claim` needs desk read and write, takes at most 1,000 ids per
   request, and answers the ids granted; a `count` larger than the
   unclaimed set grants what exists with a `truncated` warning; naming an
