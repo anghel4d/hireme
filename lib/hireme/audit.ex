@@ -23,6 +23,23 @@ defmodule Hireme.Audit do
   # Kinds on the trail that are activity, not a change to the account.
   @quiet ~w(agent_ops wire_key wire_key_refused)
 
+  # Activity that expires (`Hireme.Release.Purge`, after
+  # `Security.activity_retention_days/0`); every other kind is kept forever.
+  @expiring ~w(agent_ops wire_key wire_key_refused lease_opened lease_released)
+
+  @doc "The trail's kinds that expire; every other kind is a security event, kept forever."
+  @spec expiring_kinds() :: [String.t()]
+  def expiring_kinds, do: @expiring
+
+  @doc """
+  Announce that the account's factors changed (bound, removed, disabled):
+  a wire session re-checks at once whether its browser session now owes
+  one, or is freed.
+  """
+  @spec factors(pos_integer()) :: :ok
+  def factors(account_id),
+    do: Phoenix.PubSub.broadcast(Hireme.PubSub, topic(account_id), {__MODULE__, :factors})
+
   @type context :: %{
           optional(:account_id) => pos_integer() | nil,
           optional(:ip) => String.t(),

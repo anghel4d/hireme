@@ -133,4 +133,34 @@ defmodule HiremeWeb.AccountTest do
     refute Repo.get(Hireme.Rows.Session, s.id, skip_account: true).last_seen_at ==
              stale.last_seen_at
   end
+
+  test "an expiry that is present but not 1..3650 days is refused, never read as never", %{
+    ctx: ctx
+  } do
+    for bad <- [0, -1, 3651, "30", 1.5, %{}] do
+      assert {:error, %{error: "invalid"}} =
+               Account.call(
+                 "account.key.mint",
+                 %{"name" => "a", "preset" => "read_only", "expires_in_days" => bad},
+                 ctx
+               )
+    end
+
+    assert {:ok, %{key: %{expires_at: %DateTime{}}}} =
+             Account.call(
+               "account.key.mint",
+               %{"name" => "a", "preset" => "read_only", "expires_in_days" => 30},
+               ctx
+             )
+  end
+
+  test "an account renamed to its own name records nothing", %{session: s, ctx: ctx} do
+    {:ok, _} = Account.call("account.rename", %{"name" => "First"}, ctx)
+    before = Hireme.Audit.rev(s.account_id)
+    {:ok, _} = Account.call("account.rename", %{"name" => "First"}, ctx)
+    assert Hireme.Audit.rev(s.account_id) == before
+
+    assert {:error, %{error: "invalid"}} =
+             Account.call("account.rename", %{"name" => String.duplicate("é", 250)}, ctx)
+  end
 end

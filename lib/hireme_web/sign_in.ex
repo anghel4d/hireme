@@ -355,6 +355,20 @@ defmodule HiremeWeb.SignInController do
   end
 
   def callback(conn, %{"provider" => name} = params) do
+    ip = meta(conn).ip
+
+    # A callback calls the provider and may sign someone in, write a session
+    # and the trail: bounded per peer and in all, like the mailed link.
+    with :ok <- Hireme.Security.limit(:oauth_peer, ip),
+         :ok <- Hireme.Security.limit(:oauth_global, :all) do
+      oauth_callback(conn, name, params)
+    else
+      {:error, :rate_limited} ->
+        methods(conn, 429, "Too many sign-ins. Wait a few minutes, then try again.")
+    end
+  end
+
+  defp oauth_callback(conn, name, params) do
     case SignIn.parse(name) do
       {:ok, provider} ->
         case SignIn.finish(conn, provider, params) do
@@ -425,8 +439,18 @@ defmodule HiremeWeb.SignInController do
 
   defp enter(conn, provider, claim) do
     case Accounts.sign_in_with(provider, claim, meta(conn)) do
-      {:ok, token, _session} -> conn |> Auth.sign_in(token) |> redirect(to: "/")
-      {:error, :suspended} -> methods(conn, 403, @notices["suspended"])
+      {:ok, token, _session} ->
+        conn |> Auth.sign_in(token) |> redirect(to: "/")
+
+      {:error, :suspended} ->
+        methods(conn, 403, @notices["suspended"])
+
+      {:error, :cap} ->
+        methods(
+          conn,
+          409,
+          "This account has too many open sessions; sign out of one, then try again."
+        )
     end
   end
 

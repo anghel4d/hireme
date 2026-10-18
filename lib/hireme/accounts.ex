@@ -87,11 +87,53 @@ defmodule Hireme.Accounts do
   Open a session for `account`. Answers the token the cookie carries and
   the row; the token is not stored and cannot be recovered.
   """
-  @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()}
+  @spec start_session(Account.t(), meta()) :: {String.t(), Session.t()} | {:error, :cap}
   def start_session(%Account{} = account, meta \\ %{}) do
     token = Security.token(32)
     now = Store.now()
 
+    case Store.transaction(fn -> room_for_session(account.id, now) || Repo.rollback(:cap) end) do
+      {:ok, _} -> open_session(account, token, now, meta)
+      {:error, :cap} -> {:error, :cap}
+    end
+  end
+
+  # At the declared cap, the oldest ended sessions (revoked, expired, idle)
+  # go to make room; only an account whose every session is live is refused.
+  defp room_for_session(account_id, now) do
+    cap = Hireme.Schema.table(:sessions).cap
+
+    count =
+      Repo.aggregate(from(s in Session, where: s.account_id == ^account_id), :count,
+        skip_account: true
+      )
+
+    if count < cap do
+      true
+    else
+      idle = DateTime.add(now, -Security.session_idle())
+
+      ended =
+        Repo.all(
+          from(s in Session,
+            where:
+              s.account_id == ^account_id and
+                (not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle),
+            order_by: [asc: s.last_seen_at],
+            limit: ^(count - cap + 1),
+            select: s.id
+          ),
+          skip_account: true
+        )
+
+      if length(ended) == count - cap + 1 do
+        Repo.delete_all(from(s in Session, where: s.id in ^ended), skip_account: true)
+        true
+      end
+    end
+  end
+
+  defp open_session(account, token, now, meta) do
     session =
       Store.write(fn ->
         Repo.insert!(%Session{
@@ -414,7 +456,7 @@ defmodule Hireme.Accounts do
   they are new. Answers the cookie's token and the session.
   """
   @spec sign_in_with(:email | :github | :x, claim(), meta()) ::
-          {:ok, String.t(), Session.t()} | {:error, :suspended}
+          {:ok, String.t(), Session.t()} | {:error, :suspended | :cap}
   def sign_in_with(provider, %{subject: subject} = claim, meta \\ %{})
       when provider in @providers do
     identity = find_identity(provider, subject) || first_identity(provider, claim, meta)
@@ -430,14 +472,19 @@ defmodule Hireme.Accounts do
         Map.put(meta, :account_id, account.id)
       )
 
-      {token, session} = start_session(account, meta)
-      {:ok, token, session}
+      case start_session(account, meta) do
+        {:error, :cap} -> {:error, :cap}
+        {token, session} -> {:ok, token, session}
+      end
     else
-      Audit.record(
-        :sign_in_refused,
-        %{provider: provider, identity_id: identity.id, reason: :suspended},
-        Map.put(meta, :account_id, identity.account_id)
-      )
+      # A refusal anyone can cause is recorded under the refusal budget.
+      if Security.limit(:refusal_peer, Map.get(meta, :ip, "")) == :ok do
+        Audit.record(
+          :sign_in_refused,
+          %{provider: provider, identity_id: identity.id, reason: :suspended},
+          Map.put(meta, :account_id, identity.account_id)
+        )
+      end
 
       {:error, :suspended}
     end

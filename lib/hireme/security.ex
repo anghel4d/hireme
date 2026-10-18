@@ -69,6 +69,11 @@ defmodule Hireme.Security do
   @spec account_text_bytes() :: pos_integer()
   def account_text_bytes, do: 1024 * 1024 * 1024
 
+  # Days the trail keeps activity rows (an agent's op batches, its HELLOs,
+  # its leases opening and closing); security events are kept forever.
+  @spec activity_retention_days() :: pos_integer()
+  def activity_retention_days, do: 90
+
   # One key's wire sessions open at once; a connect loop or a leaked key
   # cannot hold the node's sessions.
   @spec key_sessions() :: pos_integer()
@@ -107,6 +112,11 @@ defmodule Hireme.Security do
     # they are still refused, just not recorded.
     refusal_global: {:timer.minutes(1), 600},
     refusal_peer: {:timer.minutes(10), 20},
+    # OAuth callbacks that reach the provider and may sign someone in.
+    oauth_peer: {:timer.minutes(10), 20},
+    oauth_global: {:timer.minutes(10), 300},
+    # Renames of an account or its keys, each a trail row.
+    renames: {:timer.minutes(10), 30},
     agent_write: {:timer.minutes(1), 600},
     # The text bytes a key's ops may write in a minute, beside their count.
     agent_write_bytes: {:timer.minutes(1), 64 * 1024 * 1024},
@@ -248,6 +258,19 @@ defmodule Hireme.Security do
       {:ok, term} -> {:ok, term}
       _ -> :error
     end
+  end
+
+  @doc """
+  Whether `name` may name something the account sees and mail repeats:
+  non-empty, at most `chars` characters and `bytes` bytes (a letter with
+  a million combining marks is one character), no control or format
+  character, and no run of more than four combining marks.
+  """
+  @spec name?(term(), pos_integer(), pos_integer()) :: boolean()
+  def name?(name, chars, bytes) do
+    is_binary(name) and name != "" and byte_size(name) <= bytes and String.valid?(name) and
+      String.length(name) <= chars and
+      not String.match?(name, ~r/[\p{Cc}\p{Cf}\x{2028}\x{2029}]|\p{M}{5,}/u)
   end
 
   @doc """

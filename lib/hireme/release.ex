@@ -205,14 +205,17 @@ end
 defmodule Hireme.Release.Purge do
   @moduledoc """
   What nothing needs any longer, deleted once a day before the backup:
-  spent or expired sign-in links and ceremonies a day on, sessions a
-  month after they ended, and notices a month after they were sent or
-  given up. The trail is never purged. SQL only, by the writer lock.
+  spent or expired sign-in links and ceremonies a day on, sessions and
+  revoked keys a month after they ended, notices a month after they were
+  sent or given up, and the trail's activity rows
+  (`Hireme.Audit.expiring_kinds/0`) after
+  `Hireme.Security.activity_retention_days/0`; every security event on
+  the trail is kept. Rows are deleted, never edited. SQL only, by the writer lock.
   """
 
   import Ecto.Query
   alias Hireme.Repo
-  alias Hireme.Rows.{Challenge, MagicLink, Outbox, Session}
+  alias Hireme.Rows.{ApiKey, Audit, Challenge, MagicLink, Outbox, Session}
 
   @day 86_400
   @month 30 * @day
@@ -222,6 +225,8 @@ defmodule Hireme.Release.Purge do
   def run(now \\ Hireme.Store.now()) do
     day = DateTime.add(now, -@day)
     month = DateTime.add(now, -@month)
+    kept = DateTime.add(now, -Hireme.Security.activity_retention_days() * @day)
+    expiring = Hireme.Audit.expiring_kinds()
 
     Hireme.Store.write(fn ->
       %{
@@ -233,6 +238,11 @@ defmodule Hireme.Release.Purge do
               where: (not is_nil(s.revoked_at) or s.expires_at < ^now) and s.updated_at < ^month
             )
           ),
+        # A revoked key a month on: it counts toward the table's cap until then.
+        api_keys:
+          delete(from(k in ApiKey, where: not is_nil(k.revoked_at) and k.revoked_at < ^month)),
+        # Activity rows past their retention; security events stay.
+        audit: delete(from(e in Audit, where: e.kind in ^expiring and e.inserted_at < ^kept)),
         outbox:
           delete(
             from(n in Outbox,

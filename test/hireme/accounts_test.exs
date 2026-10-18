@@ -215,4 +215,32 @@ defmodule Hireme.AccountsTest do
     for i <- 2..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
     assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
   end
+
+  test "at the session cap the oldest ended sessions make room; only all-live sessions refuse" do
+    %{account: a, session: first, email: email} = sign_in()
+    cap = Hireme.Schema.table(:sessions).cap
+    now = Hireme.Store.now()
+
+    rows =
+      for i <- 1..(cap - 1),
+          do: %{
+            account_id: a.id,
+            token_hash: :crypto.hash(:sha256, "t#{i}"),
+            authenticated_at: now,
+            last_seen_at: now,
+            expires_at: DateTime.add(now, 3600),
+            rev: 1,
+            inserted_at: now,
+            updated_at: now
+          }
+
+    for chunk <- Enum.chunk_every(rows, 500),
+        do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
+
+    claim = %{subject: email, display: email}
+    assert {:error, :cap} = Accounts.sign_in_with(:email, claim)
+    :ok = Accounts.revoke_session(a.id, first.id)
+    assert {:ok, _, _} = Accounts.sign_in_with(:email, claim)
+    refute Repo.get(Hireme.Rows.Session, first.id, skip_account: true)
+  end
 end

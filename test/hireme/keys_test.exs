@@ -190,4 +190,56 @@ defmodule Hireme.KeysTest do
     {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_only))
     assert {:error, :name} = Keys.rename(key, "x\ny")
   end
+
+  test "revoked keys count toward the key table's cap until the purge removes them", %{session: s} do
+    cap = Hireme.Schema.table(:api_keys).cap
+    now = Hireme.Store.now()
+    old = DateTime.add(now, -31 * 86_400)
+
+    rows =
+      for i <- 1..(cap - 1),
+          do: %{
+            account_id: s.account_id,
+            key_id: "k#{String.pad_leading("#{i}", 11, "0")}",
+            name: "old #{i}",
+            secret_hash: :crypto.hash(:sha256, "#{i}"),
+            prefix: "abcd",
+            read_mask: 31,
+            write_mask: 0,
+            may_delete: false,
+            revoked_at: old,
+            rev: 1,
+            inserted_at: old,
+            updated_at: old
+          }
+
+    for chunk <- Enum.chunk_every(rows, 500),
+        do: Repo.insert_all(Hireme.Rows.ApiKey, chunk, skip_account: true)
+
+    assert {:ok, _} = Keys.mint(s, "last", Keys.preset(:read_only))
+    assert {:error, :limit} = Keys.mint(s, "past the cap", Keys.preset(:read_only))
+    Hireme.Release.Purge.run(now)
+    assert {:ok, _} = Keys.mint(s, "after the purge", Keys.preset(:read_only))
+  end
+
+  test "renaming to the same name records nothing; renames are rate-limited", %{session: s} do
+    {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_only))
+    before = length(Hireme.Audit.recent(500))
+    assert {:ok, _} = Keys.rename(key, "agent")
+    assert length(Hireme.Audit.recent(500)) == before
+
+    results = for i <- 1..31, do: Keys.rename(key, "agent #{i}")
+    assert {:error, :rate_limited} = List.last(results)
+  end
+
+  test "a name is bounded in bytes and in combining marks, not only characters", %{session: s} do
+    for bad <- [
+          "a" <> String.duplicate("\u{301}", 2_000),
+          String.duplicate("é", 150),
+          "x\u{301}\u{302}\u{303}\u{304}\u{305}"
+        ],
+        do: assert({:error, :name} = Keys.mint(s, bad, Keys.preset(:read_only)))
+
+    assert {:ok, _} = Keys.mint(s, "Zürich agent", Keys.preset(:read_only))
+  end
 end

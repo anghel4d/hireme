@@ -410,6 +410,7 @@ defmodule Hireme.Mfa do
 
         about = %{kind: factor.kind, name: factor.name}
         Audit.record(:factor_removed, Map.put(about, :factor_id, factor.id), ctx(meta, session))
+        Audit.factors(session.account_id)
         Accounts.notify(session.account_id, :authenticator_removed, about)
         :ok
       end
@@ -452,6 +453,7 @@ defmodule Hireme.Mfa do
 
   defp counter_advanced(%Factor{} = factor, new, meta, session) do
     update!(factor, disabled_at: Store.now())
+    Audit.factors(factor.account_id)
 
     Audit.record(
       :factor_clone_suspected,
@@ -504,6 +506,8 @@ defmodule Hireme.Mfa do
         end)
 
       if n == 1 do
+        Audit.factors(factor.account_id)
+
         Audit.record(
           :factor_locked,
           %{factor_id: factor.id, kind: factor.kind},
@@ -546,6 +550,7 @@ defmodule Hireme.Mfa do
       end)
 
     Accounts.mark_mfa(session)
+    Audit.factors(session.account_id)
 
     Audit.record(
       :factor_added,

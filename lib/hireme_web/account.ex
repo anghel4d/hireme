@@ -160,18 +160,25 @@ defmodule HiremeWeb.Account do
 
   defp run("account.rename", %{"name" => name}, s, meta) when is_binary(name) do
     name = String.trim(name)
+    account = Accounts.get(s.account_id)
 
-    if name != "" and String.length(name) <= 200 do
-      account = Accounts.get(s.account_id)
+    cond do
+      not Hireme.Security.name?(name, 200, 400) ->
+        {:error, :invalid}
 
-      account
-      |> Ecto.Changeset.change(name: name, rev: account.rev + 1)
-      |> then(&Hireme.Store.write(fn -> Repo.update!(&1, skip_account: true) end))
+      name == account.name ->
+        :ok
 
-      Audit.record(:account_renamed, %{}, ctx(meta, s))
-      :ok
-    else
-      {:error, :invalid}
+      Hireme.Security.limit(:renames, s.account_id) != :ok ->
+        {:error, :rate_limited}
+
+      true ->
+        account
+        |> Ecto.Changeset.change(name: name, rev: account.rev + 1)
+        |> then(&Hireme.Store.write(fn -> Repo.update!(&1, skip_account: true) end))
+
+        Audit.record(:account_renamed, %{}, ctx(meta, s))
+        :ok
     end
   end
 
@@ -185,8 +192,9 @@ defmodule HiremeWeb.Account do
 
   defp run("account.key.mint", p, s, meta) do
     with {:ok, masks} <- masks(p),
+         {:ok, days} <- days(p["expires_in_days"]),
          {:ok, %{key: key, secret: secret}} <-
-           Keys.mint(s, text(p["name"]), masks, days(p["expires_in_days"]), ctx(meta, s)) do
+           Keys.mint(s, text(p["name"]), masks, days, ctx(meta, s)) do
       {:ok, %{key: key(key), secret: secret}}
     end
   end
@@ -380,11 +388,21 @@ defmodule HiremeWeb.Account do
   defp text(value) when is_binary(value), do: value
   defp text(_), do: ""
 
-  defp days(n) when is_integer(n) and n > 0 and n <= 3650, do: n
-  defp days(_), do: nil
+  # Absent is never; present must be a whole number of days, 1 to 3650.
+  # Anything else is refused, never read as "never expires".
+  defp days(nil), do: {:ok, nil}
+  defp days(n) when is_integer(n) and n in 1..3650, do: {:ok, n}
+  defp days(_), do: {:error, :invalid}
 
-  defp label(name, _s) when is_binary(name) and name != "", do: String.slice(name, 0, 100)
-  defp label(_, s), do: Accounts.get(s.account_id).name |> to_string() |> String.slice(0, 100)
+  # An authenticator shows the label; at most 100 characters and 200 bytes.
+  defp label(name, s) do
+    name =
+      if is_binary(name) and name != "",
+        do: name,
+        else: to_string(Accounts.get(s.account_id).name)
+
+    if Hireme.Security.name?(name, 100, 200), do: name, else: "Hireme account"
+  end
 
   defp ctx(meta, %Session{} = s),
     do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)

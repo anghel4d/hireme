@@ -232,7 +232,7 @@ the host's vault at runtime, never the store or the repository.
 
 ## The trail
 
-Append-only (`audit`): every sign-in, refusal, session, factor, key,
+Append-only (`audit`): rows are never edited. every sign-in, refusal, session, factor, key,
 identity and lease event, every key HELLO, and one row per agent op
 batch, each with its time, kind, key or session, and the address and
 user agent of the request or wire connection that caused it, where one
@@ -241,6 +241,13 @@ address. A
 sign-in link request is recorded by a hash of the address and its domain,
 since the asker may be a stranger. Notices go to the account's addresses
 through a durable outbox with bounded retries.
+
+Security events are kept forever: sign-ins and their refusals, sessions,
+factors, identities, keys, mask changes, lease revokes, suspension and
+step-up. Activity is kept 90 days (`Security.activity_retention_days/0`)
+and then deleted by the daily purge: an agent's op batches (`agent_ops`),
+its HELLOs (`wire_key`, `wire_key_refused`) and its leases opening and
+closing (`lease_opened`, `lease_released`).
 
 ## Policy numbers
 
@@ -262,7 +269,11 @@ through a durable outbox with bounded retries.
 | Agent read RPCs | 3,000 per key per wall-clock minute |
 | Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
-| Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes, and identities and factors for theirs; sessions, ceremonies and notices are bounded by rates and the daily purge, keys by the 100-live cap and step-up; the trail is not capped (see Limits) |
+| Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies and notices are bounded by the daily purge |
+| OAuth callbacks | 20 per peer and 300 in all in 10 minutes |
+| Renames (account and keys) | 30 per account in 10 minutes; renaming to the same name records nothing |
+| Names | key: 100 characters and 200 bytes; account: 200 and 400; no control or format characters, no run of over four combining marks |
+| Trail activity rows | expire after 90 days |
 | Key HELLOs | 60 per key per wall-clock minute |
 | Wire sessions open per key / per peer | 16 / 16 |
 | /wire upgrades | 300 per peer a minute |
@@ -284,9 +295,6 @@ through a durable outbox with bounded retries.
 - Rate limits and spent wire tickets are per node, in memory. A
   multi-node deployment needs a shared backend before they hold across
   nodes.
-- The trail is append-only and never purged, and an agent's activity
-  writes to it (a row per op batch and per HELLO, under the agent's rate
-  limits), so it grows with agent use; its declared cap is not enforced.
 - Development offers a one-click local sign-in, compiled into the
   development environment only.
 

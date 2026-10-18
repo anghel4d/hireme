@@ -128,6 +128,30 @@ defmodule Hireme.ReleaseTest do
       :ok
     end
 
+    test "activity rows expire after the retention; security events stay forever" do
+      %{account: a} = DataCase.sign_in()
+      now = Store.now()
+
+      row = fn kind, days ->
+        t = DateTime.add(now, -days * 86_400)
+        %{account_id: a.id, kind: kind, rev: 1, inserted_at: t, updated_at: t}
+      end
+
+      Hireme.Repo.insert_all(
+        Hireme.Rows.Audit,
+        [row.("agent_ops", 91), row.("agent_ops", 1), row.("factor_added", 5 * 365)],
+        skip_account: true
+      )
+
+      Purge.run(now)
+
+      kinds =
+        Hireme.Repo.with_account(a.id, fn -> Enum.map(Hireme.Audit.recent(50), & &1.kind) end)
+
+      assert Enum.count(kinds, &(&1 == "agent_ops")) == 1
+      assert "factor_added" in kinds
+    end
+
     test "the purge takes what ended a month ago and leaves what is live" do
       %{session: ended} = DataCase.sign_in()
       %{session: live} = DataCase.sign_in()

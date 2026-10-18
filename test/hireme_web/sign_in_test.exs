@@ -57,7 +57,8 @@ defmodule HiremeWeb.SignInTest do
        %{conn: conn} do
     %{token: token} = sign_in()
 
-    for path <- ~w(/ /desk /focus /focus/12 /world /world/places /atlas /outreach /lanes /lanes/gym /account) do
+    for path <-
+          ~w(/ /desk /focus /focus/12 /world /world/places /atlas /outreach /lanes /lanes/gym /account) do
       assert html_response(conn |> signed_in(token) |> get(path), 200) =~ "hireme-wire"
       assert redirected_to(get(build_conn(:get, "https://www.example.com/"), path)) == "/sign-in"
     end
@@ -204,5 +205,18 @@ defmodule HiremeWeb.SignInTest do
 
     assert out.status == 200
     assert Hireme.Security.clip(<<0xFF, 0xFE, "ok", 0xC3>>) == "??ok?"
+  end
+
+  test "OAuth callbacks are bounded per peer", %{conn: conn} do
+    old = Application.get_env(:hireme, :oauth)
+    Application.put_env(:hireme, :oauth, github: [client_id: "id", client_secret: "secret"])
+    on_exit(fn -> Application.put_env(:hireme, :oauth, old) end)
+
+    for _ <- 1..20 do
+      refused = get(conn, "/auth/github/callback", %{"code" => "c", "state" => "s"})
+      assert refused.status == 302
+    end
+
+    assert get(conn, "/auth/github/callback", %{"code" => "c", "state" => "s"}).status == 429
   end
 end

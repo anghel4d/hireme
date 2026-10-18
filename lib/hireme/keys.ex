@@ -144,6 +144,15 @@ defmodule Hireme.Keys do
         )
 
       if live >= Security.api_keys_per_account(), do: Repo.rollback(:limit)
+
+      # Revoked keys count toward the table's cap until the purge removes
+      # them, a month after their revoke.
+      all =
+        Repo.aggregate(from(k in Key, where: k.account_id == ^account_id), :count,
+          skip_account: true
+        )
+
+      if all >= Hireme.Schema.table(:api_keys).cap, do: Repo.rollback(:limit)
       Repo.insert!(struct(Key, Map.put(row, :rev, 1)), skip_account: true)
     end)
   end
@@ -185,10 +194,7 @@ defmodule Hireme.Keys do
 
   # A key's name is mailed in notices to the account's addresses: no
   # control or format character (a newline would write the mail's next line).
-  defp name?(name),
-    do:
-      name != "" and String.length(name) <= 100 and
-        not String.match?(name, ~r/[\p{Cc}\p{Cf}\x{2028}\x{2029}]/u)
+  defp name?(name), do: Security.name?(name, 100, 200)
 
   @doc "Whether `new` grants anything `old` did not."
   @spec widens?(masks() | Key.t(), masks()) :: boolean()
@@ -202,22 +208,27 @@ defmodule Hireme.Keys do
   def rename(%Key{} = key, name, meta \\ %{}) do
     name = name |> to_string() |> String.trim()
 
-    if name?(name) do
-      key =
-        key
-        |> Ecto.Changeset.change(name: name, rev: key.rev + 1)
-        |> then(&Store.write(fn -> Repo.update!(&1) end))
-
-      Audit.record(
-        :api_key_renamed,
-        %{key_id: key.id, name: name},
-        Map.put(meta, :account_id, key.account_id)
-      )
-
-      {:ok, key}
-    else
-      {:error, :name}
+    cond do
+      not name?(name) -> {:error, :name}
+      name == key.name -> {:ok, key}
+      Security.limit(:renames, key.account_id) != :ok -> {:error, :rate_limited}
+      true -> rename!(key, name, meta)
     end
+  end
+
+  defp rename!(key, name, meta) do
+    key =
+      key
+      |> Ecto.Changeset.change(name: name, rev: key.rev + 1)
+      |> then(&Store.write(fn -> Repo.update!(&1) end))
+
+    Audit.record(
+      :api_key_renamed,
+      %{key_id: key.id, name: name},
+      Map.put(meta, :account_id, key.account_id)
+    )
+
+    {:ok, key}
   end
 
   @doc "Revoke now. A revoked key fails `authenticate/2` from this moment, its sessions end, and it stays listed."
