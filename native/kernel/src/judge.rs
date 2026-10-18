@@ -29,7 +29,7 @@
 //! | `fire_hold` | `{from, to, rule: "fire_hold"}` |
 //! | `heat` | the governor's verdict plus `to`; or `{need: "reason"}` for a blank override |
 //! | `lineage_busy` | `{lineage_id, generation}`: rewrites are off, only new overlays |
-//! | `cooldown` | `{lineage_id, opened_on, days_left}` (open_generation too early), or `{lineage_id, opened_on, need: "open_generation"}` (the window has passed) |
+//! | `cooldown` | `{lineage_id, opened_on, days_left}` (open_generation too early), or `{lineage_id, opened_on, need: "open_generation"}` (the window has passed); `opened_on` is the date, `YYYY-MM-DD` |
 //! | `not_found` | `{table, id}` or `{need}` |
 
 use alloc::string::String;
@@ -295,7 +295,7 @@ fn overlay(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx, row: &mut Row, ex
                 Err(cv::Refusal::Cooldown) => {
                     return Err(Refusal {
                         code: refusal::COOLDOWN,
-                        data: json!({"lineage_id": lid, "opened_on": opened, "need": "open_generation"}),
+                        data: json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "need": "open_generation"}),
                     });
                 }
                 Err(cv::Refusal::Additive) => {
@@ -346,7 +346,7 @@ fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
             match cv::check(cv::phase(opened, rewrites, ctx.today), false) {
                 Ok(()) => {}
                 Err(cv::Refusal::Cooldown) => {
-                    return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": opened, "need": "open_generation"}));
+                    return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "need": "open_generation"}));
                 }
                 Err(cv::Refusal::Additive) => {
                     let generation = l.u32(lid, col::cv_lineages::GENERATION);
@@ -514,7 +514,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             let opened = t.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
             let left = cv::days_to_open(opened, ctx.today);
             if left > 0 {
-                return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": opened, "days_left": left}));
+                return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "days_left": left}));
             }
             let generation = t.u32(lid, col::cv_lineages::GENERATION).unwrap_or(1);
             Ok(alloc::vec![Row {

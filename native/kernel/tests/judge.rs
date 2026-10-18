@@ -252,13 +252,14 @@ fn lineage_windows() {
         o.u32(param::open_generation::CORPORATION_ID, 40);
     });
     let r = k.judge(&open, &ctx()).unwrap_err();
-    assert_eq!((r.code, r.data["days_left"].as_i64()), (refusal::COOLDOWN, Some(80)));
+    assert_eq!((r.code, r.data["days_left"].as_i64(), r.data["opened_on"].as_str()), (refusal::COOLDOWN, Some(80), Some("2024-09-24")));
 
     // Past the window: writes wait, the next generation opens additive.
     let mut a = app(1, S::DRAFT_READY, "Acme");
     a.corp = Some(40);
     let mut late = kernel(&[a], &[], &[(7, 40, TODAY - 90, true)]);
-    assert_eq!(code(late.judge(&overlay(1, 0), &ctx())), refusal::COOLDOWN);
+    let r = late.judge(&overlay(1, 0), &ctx()).unwrap_err();
+    assert_eq!((r.code, r.data["opened_on"].as_str(), r.data["need"].as_str()), (refusal::COOLDOWN, Some("2024-07-06"), Some("open_generation")));
     let fx = late.judge(&open, &ctx()).unwrap();
     assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::GENERATION), Some(&EVal::Val(Val::U32(2))));
     assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::REWRITES_ALLOWED), Some(&EVal::Val(Val::U32(0))));

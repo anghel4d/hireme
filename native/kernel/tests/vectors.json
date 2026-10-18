@@ -652,7 +652,8 @@
           "refusal": "cooldown",
           "data": {
             "lineage_id": 7,
-            "need": "open_generation"
+            "need": "open_generation",
+            "opened_on": "2024-06-26"
           }
         },
         {
