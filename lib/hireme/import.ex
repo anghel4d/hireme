@@ -133,7 +133,7 @@ defmodule Hireme.Import do
 
         case Enum.find(groups, &match?({:bad, _}, &1)) do
           nil -> {:ok, pack(pack["as_of"], pack["source"], groups)}
-          {:bad, g} -> {:error, {:group, g}}
+          {:bad, g} -> {:error, {:group, brief(g)}}
         end
 
       {:ok, _} ->

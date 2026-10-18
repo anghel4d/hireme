@@ -480,6 +480,10 @@ defmodule Hireme.ImportTest do
     {:ok, %{refusals: refusals} = report} = Import.run(a.id, body, :json)
     assert length(refusals) == 4
     assert byte_size(inspect(report)) < 4_000
+
+    bad = Jason.encode!(%{"tables" => [%{"table" => "corporations", "rows" => huge}]})
+    assert {:error, {:group, _}} = error = Import.run(a.id, bad, :json)
+    assert byte_size(inspect(error)) < 1_000
     for r <- refusals, do: assert(byte_size(inspect(r)) < 1_000, inspect(r, limit: 5))
   end
 end
