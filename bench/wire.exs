@@ -159,7 +159,7 @@ defmodule Bench do
 
     encoded =
       Enum.map(cells, fn
-        {:as_of, %Date{} = d} -> {Codec.as_of_col(), 1, Date.diff(d, ~D[1970-01-01])}
+        {:as_of, %Date{} = d} -> {Codec.as_of_col(), 1, Codec.day_to_wire(d)}
         {name, v} -> cell(Map.fetch!(cols, to_string(name)), v)
       end)
 
@@ -576,7 +576,7 @@ judge_shapes = %{
           ctx = %{
             actor: :human,
             key_id: nil,
-            now_day: Date.diff(DateTime.to_date(now), ~D[1970-01-01]),
+            now_day: Codec.day_to_wire(DateTime.to_date(now)),
             now_s: DateTime.to_unix(now),
             session_label: "bench",
             held_ids: [],
