@@ -285,12 +285,12 @@ pub fn list(cat: &Catalog, m: Masks) -> Vec<Json> {
         out.push(tool(
             "find",
             "Find rows",
-            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|prefix|null: value}}. Deferred text comes as {len, sha}; read it with `text`.".into(),
+            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|null|prefix|like: value}}. Without cols a row carries its non-metric columns; name metrics (and their _on days) in cols to get them, or `get` one row for everything. Deferred text comes as {len}; read it with `text`.".into(),
             json!({"type":"object","required":["table"],"properties":{
                 "table":{"type":"string","enum":tables.clone()},
                 "where":{"type":"object"},
                 "order":{"type":"array","items":{"type":"string"},"description":"[column, 'asc'|'desc']"},
-                "cols":{"type":"array","items":{"type":"string"}},
+                "cols":{"type":"array","items":{"type":"string"},"description":"the columns to return; metrics only come back when named here"},
                 "after":{"description":"the previous page's next cursor"},
                 "limit":{"type":"integer","minimum":1,"maximum":500}
             },"additionalProperties":false}),

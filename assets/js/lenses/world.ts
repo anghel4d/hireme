@@ -33,6 +33,9 @@ const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
 /** The columns a grid shows: declared, not secret, and not a metric's `_on` twin (shown inside its metric). */
 const shown = (t: TableDef): ColumnDef[] => t.cols.filter((c) => !c.implied && !c.serverOnly && !c.private && c.metricOf === null)
 
+/** What `find` must name: its default leaves metrics out, and the grid draws each metric with its `_on`. */
+const cols = (t: TableDef): string[] => ["id", "rev", ...shown(t).flatMap((c) => (c.metric ? [c.name, `${c.name}_on`] : [c.name]))]
+
 const editable = (c: ColumnDef): boolean => writable() && !c.readonly && !c.implied && c.type !== "bytes"
 
 const fetchKey = (): string => `${current().name}|${model.address.q.get("sort") ?? ""}|${model.address.q.get("q") ?? ""}`
@@ -47,7 +50,7 @@ function order(t: TableDef): [string, string] | null {
 async function reread(): Promise<void> {
   const t = current()
   const key = fetchKey()
-  const params: Record<string, unknown> = { table: t.name, limit: Math.max(PAGE, Math.min(500, v().rows.length)) }
+  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: Math.max(PAGE, Math.min(500, v().rows.length)) }
   const o = order(t)
   if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
@@ -66,7 +69,7 @@ async function fetchRows(more: boolean): Promise<void> {
   const key = fetchKey()
   const q = model.address.q.get("q") ?? ""
   const search = SEARCH[t.name as Shown]
-  const params: Record<string, unknown> = { table: t.name, limit: PAGE }
+  const params: Record<string, unknown> = { table: t.name, cols: cols(t), limit: PAGE }
   const o = order(t)
   if (o) params.order = o
   if (q !== "" && search) params.where = { [search]: { prefix: q } }
