@@ -28,7 +28,9 @@ and raises on a query with none; the few lookups that must run before the
 account is known (a session or key resolved by its secret, a magic link)
 say `skip_account: true` on purpose. A session or key yields exactly one
 account, and no request path sets the account from user input. One
-sequencer per account is the only writer of its rows.
+sequencer per account is the only writer of the account's desk, world,
+mail, lanes and corpus rows; its `system` rows are written by the modules
+that own them (accounts, keys, factors, the trail, the outbox).
 
 ## Sign-in
 
@@ -130,7 +132,9 @@ mail 4, lanes 8, corpus 16, and `may_delete`:
   custom. A write-only key's BOOT carries no table.
 - `system` tables (accounts, sessions, identities, keys, factors, the
   trail, the outbox, the ledger), `citations` and `trusted_hosts` are in
-  no mask. A key reaches none of them, by any method.
+  no mask: no key reads or writes them as tables. A cell's citation
+  history is the one view of `citations`, through the `history` read,
+  under the read bit of the table it cites.
 - A key never mints, widens or revokes keys: only a browser session can
   call `account.*`, and minting, widening a mask and granting
   `may_delete` need that session stepped up. Narrowing does not.
@@ -157,16 +161,19 @@ no TTL.
 Liveness is the carrier. Each side sends PING every **15 seconds**; a
 session that hears no frame for **45 seconds** ends, and its lease with it.
 The same holds over WebTransport through the gate and over the `/wire`
-WebSocket. Frames are length-prefixed and bounded: one op carries at most
-1 MiB of text (`too_large`), one OPS frame at most 256 ops.
+WebSocket. Frames are length-prefixed and bounded: one frame is at most
+16 MiB (larger closes the carrier), one OPS frame at most 256 ops, and one
+op at most 1 MiB of text (`too_large`); a client fills frames by bytes as
+well as by count.
 
 ## Writes
 
 Every write is a `put`, `drop` or `command`, judged in order by the
 account's sequencer: grant, lease, shape, domain, provenance, limits. A
 refusal rolls back exactly its own op. Cells are typed on the wire and
-never cast from strings. Each key may write 600 ops a minute
-(`agent_write`). A resent op id answers its first verdict and writes
+never cast from strings. Each key may write 600 ops per wall-clock minute
+(`agent_write`; a fixed window, so a burst straddling a minute boundary
+can land up to 1,200 in a moment). A resent op id answers its first verdict and writes
 nothing (24-hour ledger). Every agent op batch leaves one row on the trail
 naming its key, with its counts.
 
@@ -187,7 +194,8 @@ masks and lease bound what any instruction hidden in it could cause.
 Behind the host's nginx every request arrives from loopback; from
 loopback only, nginx's `X-Real-IP` (which it overwrites with the
 connecting address) names the client, so per-peer limits and the trail
-see real peers. `X-Forwarded-For` is never read.
+see real peers. `X-Forwarded-For` is never read. A per-peer limit counts
+an IPv6 peer by its /64, since one host holds a whole /64.
 
 Every state-changing browser request carries the page's CSRF token. Pages
 are served with a Content Security Policy: scripts from the origin plus
@@ -225,16 +233,16 @@ through a durable outbox with bounded retries.
 | Ceremony challenge / magic link / wire ticket | 5 minutes / 10 minutes / 60 seconds |
 | OAuth round trip, and an address waiting to be added | 10 minutes |
 | Carrier PING / timeout | 15 seconds / 45 seconds |
-| Sign-in links | 5 per address and 20 per peer in 10 minutes |
+| Sign-in links | 5 per address, 20 per peer and 300 in all in 10 minutes |
 | Link redemptions | 20 per peer in 10 minutes |
 | Factor attempts | 10 per account in 15 minutes |
 | Consecutive failures before a factor is disabled | 100 |
 | Failed key attempts | 20 per peer a minute |
 | OAuth refusals recorded | 20 per peer in 10 minutes |
 | Wire tickets | 60 per peer a minute |
-| Agent ops | 600 per key a minute |
+| Agent ops | 600 per key per wall-clock minute |
 | Live keys per account | 100 |
-| Text per op / ops per frame | 1 MiB / 256 |
+| Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
 
 ## Limits
 

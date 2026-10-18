@@ -81,7 +81,7 @@ defmodule Hireme.Mail do
     """)
   end
 
-  @doc "The notice kinds and their one line each; the account lens shows the same words."
+  @doc "The notice kinds and their one line each."
   @spec line(atom(), map()) :: String.t()
   def line(:api_key_created, m), do: ~s(an API key named "#{m[:name]}" was created)
   def line(:api_key_revoked, m), do: ~s(the API key named "#{m[:name]}" was revoked)
