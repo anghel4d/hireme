@@ -95,8 +95,10 @@ async function fetchRows(more: boolean): Promise<void> {
 }
 
 async function refresh(id: number): Promise<void> {
-  const r = await rpc<{ row: Row }>("get", { table: current().name, id })
-  patch({ rows: v().rows.map((x) => (Number(x.id) === id ? r.row : x)) })
+  const table = current().name
+  const r = await rpc<{ row: Row }>("get", { table, id })
+  // Only into the grid it was read for: another table's grid has rows with the same ids.
+  if (current().name === table) patch({ rows: v().rows.map((x) => (Number(x.id) === id ? r.row : x)) })
 }
 
 // ------------------------------------------------------------------ cells
@@ -186,12 +188,22 @@ function cites(): Html {
   </section>`
 }
 
+/** Whether the row's deferred stub now names another version than the one the reader holds. */
+function changed(t: NonNullable<WorldView["text"]>): boolean {
+  const stub = v().rows.find((r) => Number(r.id) === t.id)?.[t.column] as { sha?: string } | null | undefined
+  const a = (stub?.sha ?? "").toLowerCase()
+  const b = t.sha.toLowerCase()
+  return a !== "" && b !== "" && !a.startsWith(b) && !b.startsWith(a)
+}
+
 function reader(): Html {
   const t = v().text
   if (!t || v().edit !== "") return EMPTY
   return html`<section class="card panel" data-key="text" aria-labelledby="text-h">
     <h2 id="text-h">${current().name} #${t.id} · ${t.column}</h2>
     <p class="hint">Written by a person or an agent; shown as text, never run.</p>
+    ${changed(t) ? html`<p class="notice" role="alert">This text has changed since it was read.
+      <button type="button" class="ghost" data-act="read" data-id="${t.id}" data-col="${t.column}">Read it again</button></p>` : EMPTY}
     <pre class="untrusted">${t.body}</pre>
     ${t.bytes < t.total ? html`<button type="button" data-act="read-more">Read more (${(t.total - t.bytes).toLocaleString()} bytes left)</button>` : EMPTY}
     <button type="button" class="ghost" data-act="close-panel">Close</button>
@@ -258,20 +270,29 @@ function failed(e: unknown): void {
 const BYTES = new TextEncoder()
 
 /** One chunk of a deferred text, from `offset` bytes; `bytes` is where the next chunk starts. */
-async function readText(table: string, id: number, column: string, offset: number): Promise<{ body: string; bytes: number; total: number }> {
-  const r = await rpc<{ text: string; total: number }>("text", { table, id, column, offset, length: 262_144 })
-  return { body: r.text, bytes: offset + BYTES.encode(r.text).byteLength, total: r.total }
+async function readText(table: string, id: number, column: string, offset: number): Promise<{ body: string; bytes: number; total: number; sha: string }> {
+  const r = await rpc<{ text: string; total: number; sha?: string }>("text", { table, id, column, offset, length: 262_144 })
+  return { body: r.text, bytes: offset + BYTES.encode(r.text).byteLength, total: r.total, sha: r.sha ?? "" }
 }
 
 /** All of it, for an editor: saving a cell rewrites the whole text, so it must start from the whole text. */
-async function readWhole(table: string, id: number, column: string): Promise<{ body: string; bytes: number; total: number }> {
-  let r = await readText(table, id, column, 0)
-  while (r.bytes < r.total) {
-    const next = await readText(table, id, column, r.bytes)
-    if (next.body === "") break
-    r = { body: r.body + next.body, bytes: next.bytes, total: next.total }
+async function readWhole(table: string, id: number, column: string): Promise<{ body: string; bytes: number; total: number; sha: string }> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let r = await readText(table, id, column, 0)
+    let torn = false
+    while (r.bytes < r.total) {
+      const next = await readText(table, id, column, r.bytes)
+      // The text was rewritten between chunks: start over rather than stitch two versions.
+      if (next.sha !== r.sha) {
+        torn = true
+        break
+      }
+      if (next.body === "") break
+      r = { ...r, body: r.body + next.body, bytes: next.bytes, total: next.total }
+    }
+    if (!torn) return r
   }
-  return r
+  throw new Error("the text kept changing while it was read; try again")
 }
 
 /** A reply is shown only if the grid still shows the table it was asked for. */
@@ -352,7 +373,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "cites":
       ev.stopPropagation()
       return void rpc<{ citations: Row[] }>("history", { table: t.name, id, column: col, limit: 50 })
-        .then((r) => patch({ cites: { id, column: col, list: r.citations } }))
+        .then((r) => still(t.name) && patch({ cites: { id, column: col, list: r.citations } }))
         .catch(failed)
     case "read":
       ev.stopPropagation()
@@ -364,8 +385,10 @@ function act(name: string, el: HTMLElement, ev: Event): void {
         .then((r) => {
           // Only if the reader still shows this text: a late chunk never lands in another.
           const now = v().text
-          if (now && now.table === cur.table && now.id === cur.id && now.column === cur.column && now.bytes === cur.bytes)
-            patch({ text: { ...now, body: now.body + r.body, bytes: r.bytes, total: r.total } })
+          if (!now || now.table !== cur.table || now.id !== cur.id || now.column !== cur.column || now.bytes !== cur.bytes) return
+          // A chunk of a rewritten text is not appended at the old text's offset: the reader starts over.
+          if (r.sha !== now.sha) return void readText(cur.table, cur.id, cur.column, 0).then((f) => still(cur.table) && patch({ text: { ...now, ...f } }))
+          patch({ text: { ...now, body: now.body + r.body, bytes: r.bytes, total: r.total } })
         })
         .catch(failed)
     }

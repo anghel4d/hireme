@@ -90,8 +90,8 @@ export interface OutreachView {
   picked: Record<string, unknown> | null
   next: unknown
   messages: Record<string, unknown>[]
-  /** Message bodies read so far, by message id. */
-  bodies: Map<number, string>
+  /** Message bodies read so far, by `id:rev`: a rewritten draft has a new rev, so its old text is never shown. */
+  bodies: Map<string, string>
   /** "contact" (editing the contact), "new" (a new contact), "draft" (a new message), or "". */
   edit: string
   loading: boolean
@@ -113,7 +113,7 @@ export interface WorldView {
   cites: { id: number; column: string; list: Record<string, unknown>[] } | null
   /** Deferred text being read. */
   /** `bytes` is how much of `total` (bytes, not characters) has arrived. */
-  text: { table: string; id: number; column: string; body: string; bytes: number; total: number } | null
+  text: { table: string; id: number; column: string; body: string; bytes: number; total: number; sha: string } | null
   error: string
 }
 

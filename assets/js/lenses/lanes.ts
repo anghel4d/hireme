@@ -6,7 +6,7 @@
 import type { View } from "../app.ts"
 import { ENUMS, type TableName } from "../gen/schema.ts"
 import { Refused, ids, lanes, put, today, value, type Input } from "../kernel.ts"
-import { EMPTY, flag, href, html, type Html } from "../morph.ts"
+import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { model, notice } from "../state.ts"
 
 type Gym = { today: number; streak: number; week: number; target: number | null; pace: number | null; owed: number | null }
@@ -114,9 +114,9 @@ const lanesLens: View = {
   act(name, el) {
     switch (name) {
       case "rep":
-        return void put("gym_reps", fields(el)).then(() => (el as HTMLFormElement).reset()).catch(failed)
+        return void (() => { const before = entries(el as HTMLFormElement); return put("gym_reps", fields(el)).then(() => resetIfUnchanged(el as HTMLFormElement, before)) })().catch(failed)
       case "entry":
-        return void put("net_entries", fields(el)).then(() => (el as HTMLFormElement).reset()).catch(failed)
+        return void (() => { const before = entries(el as HTMLFormElement); return put("net_entries", fields(el)).then(() => resetIfUnchanged(el as HTMLFormElement, before)) })().catch(failed)
       case "target":
         return setting({ gym_target: fields(el).gym_target ?? null })
       case "net-url":

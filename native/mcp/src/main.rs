@@ -394,25 +394,36 @@ impl App {
     }
 
     /// The catalog, waiting briefly for the first one.
+    /// The catalog fetched under the session's current masks, never one fetched under older ones.
+    /// A fetch WELCOME's handler could not complete (dropped or refused) is retried here, lazily;
+    /// the call waits for it a bounded time. A Notify wakes only who is already waiting, and
+    /// WELCOME can land between the check and the wait, so the wait also ticks.
     async fn catalog(&self) -> Option<Catalog> {
-        if let Some(c) = self.catalog.read().await.clone() {
-            return Some(c);
-        }
-        // A Notify wakes only who is already waiting, and WELCOME can land between the check and the wait:
-        // so the wait re-checks on every wake and on a short tick until the deadline.
         let deadline = tokio::time::Instant::now() + READY_WAIT;
         loop {
             if self.dead.read().await.is_some() {
                 return None;
             }
-            if self.welcome.read().await.is_some()
-                && let Some(c) = self.catalog.read().await.clone() {
-                    return Some(c);
+            let masks = self.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete, w.schema_rev));
+            if let Some(m) = masks {
+                if *self.catalog_for.read().await == Some(m) {
+                    return self.catalog.read().await.clone();
                 }
-            if tokio::time::Instant::now() >= deadline {
-                return self.catalog.read().await.clone();
+                if let Ok(Ok(v)) = self.carrier.rpc("schema", &json!({})).await {
+                    let still = self.welcome.read().await.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete, w.schema_rev)) == Some(m);
+                    if still {
+                        let cat = Catalog::from_json(&v);
+                        *self.catalog.write().await = Some(cat.clone());
+                        *self.catalog_for.write().await = Some(m);
+                        return Some(cat);
+                    }
+                }
             }
-            let _ = tokio::time::timeout(Duration::from_millis(50), self.ready.notified()).await;
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            let pause = if masks.is_some() { 500 } else { 50 };
+            let _ = tokio::time::timeout(Duration::from_millis(pause), self.ready.notified()).await;
         }
     }
 
@@ -478,7 +489,10 @@ impl App {
 
     /// An answer before the request was taken up: its id leaves the in-flight set with it, so a later cancel finds nothing to mark.
     async fn refuse(&self, id: &Json, answer: Json) {
-        self.reqs.lock().await.inflight.remove(&id.to_string());
+        let mut reqs = self.reqs.lock().await;
+        reqs.inflight.remove(&id.to_string());
+        // A cancel that landed before this answer must not outlive it and swallow a later reuse of the id.
+        reqs.cancelled.remove(&id.to_string());
         self.send(answer);
     }
 
@@ -733,11 +747,19 @@ impl App {
     }
 
     /// Resolves `no` to an application id, for commands.
-    async fn application_id(&self, no: u64) -> Result<u32, String> {
+    /// The id of application `no`, or the tool result that says why there is none: a missing row is
+    /// not_found, a refusal keeps its own code (a write-only key's scope), a lost call is the session's.
+    async fn application_id(&self, no: u64, what: &str) -> Result<u32, Json> {
         match self.carrier.rpc("get", &json!({"table":"applications","key":{"no":no}})).await {
-            Ok(Ok(v)) => v.get("row").and_then(|r| r.get("id")).and_then(Json::as_u64).map(|i| i as u32).ok_or_else(|| format!("no application {no}")),
-            Ok(Err(e)) => Err(e.get("message").and_then(Json::as_str).unwrap_or("not_found").to_owned()),
-            Err(l) => Err(l.0),
+            Ok(Ok(v)) => v.get("row").and_then(|r| r.get("id")).and_then(Json::as_u64).map(|i| i as u32).ok_or_else(|| {
+                text_result(diag::render("not_found", what, &json!({"message": format!("no application {no}")})), None, true)
+            }),
+            Ok(Err(e)) => {
+                let code = e.get("code").and_then(Json::as_str).unwrap_or("internal").to_owned();
+                let data = e.get("data").cloned().filter(|d| !d.is_null()).unwrap_or_else(|| json!({"message": e.get("message")}));
+                Err(text_result(diag::render(&code, what, &data), None, true))
+            }
+            Err(l) => Err(text_result(format!("error[session]: {}\n   = note: nothing was sent\n   = help: hireme-mcp reconnects on its own; call again\n", l.0), None, true)),
         }
     }
 
@@ -819,9 +841,9 @@ impl App {
         let target = match (row_id(args), no) {
             (Err(e), _) => return text_result(diag::usage(&c.name, &e, &command_shape(c)), None, true),
             (Ok(Some(id)), _) => id,
-            (Ok(None), Some(no)) => match self.application_id(no).await {
+            (Ok(None), Some(no)) => match self.application_id(no, &format!("{} no={no}", c.name)).await {
                 Ok(id) => id,
-                Err(e) => return text_result(diag::render("not_found", &format!("{} no={no}", c.name), &json!({"message": e})), None, true),
+                Err(answer) => return answer,
             },
             // A command whose params name its row (open_generation by corporation_id) carries no target.
             (Ok(None), None) if args.as_object().is_some_and(|o| !o.is_empty()) => 0,

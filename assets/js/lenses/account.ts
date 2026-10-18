@@ -12,7 +12,7 @@
 import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
 import { Refused, rpc } from "../kernel.ts"
-import { EMPTY, flag, html, trusted, type Html } from "../morph.ts"
+import { EMPTY, entries, flag, html, resetIfUnchanged, trusted, type Html } from "../morph.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
 
 type Row = Record<string, unknown>
@@ -502,7 +502,10 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "passkey":
       return void enroll(f.name ?? "")
     case "host-add":
-      return void call("account.trusted_host.add", { host: (f.host ?? "").trim().toLowerCase(), ...(f.note ? { note: f.note } : {}) }, () => form?.reset())
+      {
+        const before = form ? entries(form) : ""
+        return void call("account.trusted_host.add", { host: (f.host ?? "").trim().toLowerCase(), ...(f.note ? { note: f.note } : {}) }, () => form && resetIfUnchanged(form, before))
+      }
     case "host-remove":
       return void call("account.trusted_host.remove", { id })
     case "audit":

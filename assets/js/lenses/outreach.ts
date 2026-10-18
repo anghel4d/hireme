@@ -104,13 +104,13 @@ function threads(): Html {
     <h3>${str(ms[0]?.subject) || "(no subject)"} <span class="muted">${ms.length} message${ms.length === 1 ? "" : "s"}</span></h3>
     <ol class="messages">${ms.map((m) => {
       const id = Number(m.id)
-      const body = v().bodies.get(id)
+      const body = v().bodies.get(bodyKey(m))
       return html`<li data-key="m${id}" class="msg ${str(m.direction)}">
         <div class="meta"><b>${m.direction === "inbound" ? str(m.from_addr) || "them" : "you"}</b>
           <span class="tag">${str(m.status)}</span> <span class="muted">${str(m.sent_at).slice(0, 16).replace("T", " ")} · ${str(m.channel)}</span>
           ${m.application_id ? html`<span class="muted">application #${str(m.application_id)}</span>` : EMPTY}</div>
         ${body === undefined
-          ? m.body ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}">Read</button>` : html`<p class="muted">no body</p>`
+          ? m.body ? html`<button type="button" class="ghost" data-act="open-body" data-id="${id}" data-version="${bodyKey(m)}">Read</button>` : html`<p class="muted">no body</p>`
           : html`<pre class="untrusted">${body}</pre>`}
       </li>`
     })}</ol></section>`)}`
@@ -155,6 +155,9 @@ function view(): Html {
 }
 
 // ------------------------------------------------------------------ actions
+
+/** Which version of a message's body: its id, rev and the deferred stub's sha, so a rewritten draft never shows its old text. */
+const bodyKey = (m: Row): string => `${String(m.id)}:${String(m.rev ?? "")}:${String((m.body as { sha?: string } | null)?.sha ?? "")}`
 
 /** A whole message body, chunk by chunk (a long thread quote runs past one 256 KiB chunk). */
 async function readBody(id: number): Promise<string> {
@@ -205,8 +208,11 @@ function act(name: string, el: HTMLElement): void {
     case "create-contact": {
       const f = form(el)
       const email = f.email
+      // The new contact is opened only if the operator is still on the list they created it from.
+      const from = listKey()
       return void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
+          if (model.address.lens !== "outreach" || listKey() !== from) return
           patch({ edit: "" })
           query("contact", String(r.id))
           return fetchContacts(false)
@@ -248,8 +254,9 @@ function act(name: string, el: HTMLElement): void {
     }
     case "open-body": {
       const mid = Number(el.dataset.id)
+      const version = el.dataset.version ?? ""
       return void readBody(mid)
-        .then((t) => patch({ bodies: new Map(v().bodies).set(mid, t) }))
+        .then((t) => patch({ bodies: new Map(v().bodies).set(version, t) }))
         .catch(failed)
     }
   }

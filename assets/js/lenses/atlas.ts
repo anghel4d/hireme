@@ -6,7 +6,7 @@
 
 import type { View } from "../app.ts"
 import { Refused, atlas, ids, put, value, type Input } from "../kernel.ts"
-import { EMPTY, flag, html, type Html } from "../morph.ts"
+import { EMPTY, entries, flag, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { model, notice, query } from "../state.ts"
 
 /** A place's fit; `fit` is null for a place with no part the kernel can score, and a part may be null too. */
@@ -28,7 +28,8 @@ function failed(e: unknown): void {
 function save(set: Record<string, Input>, form?: HTMLFormElement): void {
   const id = settingsId()
   // The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them.
-  void put("settings", set, id === 0 ? {} : { id }).then(() => form?.reset()).catch(failed)
+  const before = form ? entries(form) : ""
+  void put("settings", set, id === 0 ? {} : { id }).then(() => form && resetIfUnchanged(form, before)).catch(failed)
 }
 
 const scale = (xs: (number | null)[]): number => (xs.some((x) => x !== null && x > 1) ? 100 : 1)

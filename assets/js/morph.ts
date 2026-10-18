@@ -45,6 +45,16 @@ export function html(strings: TemplateStringsArray, ...parts: readonly Part[]): 
   return new Html(out)
 }
 
+/** A form's entries as they stand, to compare with later. */
+export function entries(form: HTMLFormElement): string {
+  return JSON.stringify([...new FormData(form)].map(([k, x]) => [k, String(x)]))
+}
+
+/** Clears a form after its write is answered, unless it left the page or someone typed the next entry meanwhile. */
+export function resetIfUnchanged(form: HTMLFormElement, before: string): void {
+  if (form.isConnected && entries(form) === before) form.reset()
+}
+
 /** Markup from this codebase's own constants. Never a value from a row. */
 export const trusted = (s: string): Html => new Html(s)
 

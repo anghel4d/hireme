@@ -9,7 +9,7 @@
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
 import { Refused, application, command, lookup, put, rpc, type Input } from "../kernel.ts"
-import { EMPTY, flag, href, html, type Html } from "../morph.ts"
+import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
 type Row = Record<string, unknown>
@@ -98,11 +98,14 @@ function failed(e: unknown): void {
   notice("error", e instanceof Refused ? `${e.code}: ${e.message}` : e instanceof Error ? e.message : String(e))
 }
 
-/** The sha of the listing the application's row names now. */
-const listingSha = (appId: number): string => {
-  const raw = (application(appId) as Doc | null)?.application.listing_raw as { sha?: string } | null | undefined
-  return raw?.sha ?? ""
+/** Two shas of one text agree when one (the stub's 8 bytes) begins the other (the reply's whole hash). */
+const sameSha = (a: string, b: string): boolean => {
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()]
+  return x !== "" && y !== "" && (x.startsWith(y) || y.startsWith(x))
 }
+
+/** The application's link to a contact or corporation as its row has it now. */
+const linkOf = (appId: number, col: "contact_id" | "corporation_id"): number => Number((application(appId) as Doc | null)?.application[col] ?? 0)
 
 /** A reply about one application lands only while that application is the one shown. */
 const mine = (appId: number, p: Partial<FocusView>) => {
@@ -117,8 +120,10 @@ async function fetchAround(appId: number, a: Row): Promise<void> {
       .then((r) => mine(appId, { messages: r.rows }))
       .catch(() => {}),
   ]
-  if (a.contact_id) jobs.push(rpc<{ row: Row }>("get", { table: "contacts", id: Number(a.contact_id) }).then((r) => mine(appId, { contact: r.row })).catch(() => {}))
-  if (a.corporation_id) jobs.push(rpc<{ row: Row }>("get", { table: "corporations", id: Number(a.corporation_id) }).then((r) => mine(appId, { corporation: r.row })).catch(() => {}))
+  const cid = Number(a.contact_id ?? 0)
+  const kid = Number(a.corporation_id ?? 0)
+  if (cid) jobs.push(rpc<{ row: Row }>("get", { table: "contacts", id: cid }).then((r) => { if (linkOf(appId, "contact_id") === cid) mine(appId, { contact: r.row }) }).catch(() => {}))
+  if (kid) jobs.push(rpc<{ row: Row }>("get", { table: "corporations", id: kid }).then((r) => { if (linkOf(appId, "corporation_id") === kid) mine(appId, { corporation: r.row }) }).catch(() => {}))
   await Promise.all(jobs)
 }
 
@@ -179,8 +184,8 @@ function cv(d: Doc): Html {
 
 function listing(a: Row, appId: number): Html {
   const raw = a.listing_raw as { length?: number; sha?: string } | null
-  // A listing rewritten since it was read is read afresh: its sha names the version shown.
-  const l = v().listing && v().listing?.sha === (raw?.sha ?? "") ? v().listing : null
+  // A listing rewritten since it was read is read afresh: the reply's own sha names the version shown.
+  const l = v().listing && sameSha(v().listing?.sha ?? "", raw?.sha ?? "") ? v().listing : null
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open</a>` : EMPTY}</h2>
     ${raw && raw.length ? l === null
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${raw.length.toLocaleString()} bytes)</button>`
@@ -285,15 +290,18 @@ function act(name: string, el: HTMLElement): void {
     case "keep-score":
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":
-      return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", length: 262_144 })
-        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total, sha: listingSha(appId) } }))
+      return void rpc<{ text: string; total: number; sha?: string }>("text", { table: "applications", id: appId, column: "listing_raw", length: 262_144 })
+        .then((r) => mine(appId, { listing: { text: r.text, bytes: new TextEncoder().encode(r.text).byteLength, total: r.total, sha: r.sha ?? "" } }))
         .catch(failed)
     case "listing-more": {
       const l = v().listing
       if (!l) return
-      return void rpc<{ text: string; total: number }>("text", { table: "applications", id: appId, column: "listing_raw", offset: l.bytes, length: 262_144 })
+      return void rpc<{ text: string; total: number; sha?: string }>("text", { table: "applications", id: appId, column: "listing_raw", offset: l.bytes, length: 262_144 })
         .then((r) => {
-          if (v().listing === l && l.sha === listingSha(appId)) mine(appId, { listing: { ...l, text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
+          // A chunk of another version is never stitched onto this one: the listing reads afresh instead.
+          if (v().listing !== l) return
+          if (!sameSha(r.sha ?? "", l.sha)) return mine(appId, { listing: null })
+          mine(appId, { listing: { ...l, text: l.text + r.text, bytes: l.bytes + new TextEncoder().encode(r.text).byteLength, total: r.total } })
         })
         .catch(failed)
     }
@@ -317,10 +325,12 @@ function act(name: string, el: HTMLElement): void {
         .then(() => patch({ edit: "" }))
         .catch(failed)
     }
-    case "note":
+    case "note": {
+      const before = entries(el as HTMLFormElement)
       return void command("note", appId, { stage: el.dataset.stage ?? "", body: form(el).body ?? "" })
-        .then(() => (el as HTMLFormElement).reset())
+        .then(() => resetIfUnchanged(el as HTMLFormElement, before))
         .catch(failed)
+    }
     case "override":
       return void command("heat_override", appId, { reason: form(el).reason ?? "" }).catch(failed)
   }
@@ -353,9 +363,11 @@ const focus: View = {
     void rpc<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 })
       .then((r) => mine(appId, { messages: r.rows }))
       .catch(() => {})
-    if (a?.corporation_id) void rpc<{ row: Row }>("get", { table: "corporations", id: Number(a.corporation_id) }).then((r) => mine(appId, { corporation: r.row })).catch(() => {})
+    const kid = Number(a?.corporation_id ?? 0)
+    const cid = Number(a?.contact_id ?? 0)
+    if (kid) void rpc<{ row: Row }>("get", { table: "corporations", id: kid }).then((r) => linkOf(appId, "corporation_id") === kid && mine(appId, { corporation: r.row })).catch(() => {})
     else mine(appId, { corporation: null })
-    if (a?.contact_id) void rpc<{ row: Row }>("get", { table: "contacts", id: Number(a.contact_id) }).then((r) => mine(appId, { contact: r.row })).catch(() => {})
+    if (cid) void rpc<{ row: Row }>("get", { table: "contacts", id: cid }).then((r) => linkOf(appId, "contact_id") === cid && mine(appId, { contact: r.row })).catch(() => {})
     else mine(appId, { contact: null })
   },
   key(ev) {
