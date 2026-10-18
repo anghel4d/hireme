@@ -101,6 +101,7 @@ pub mod flag {
     pub const IMPLIED: u32 = 512;
     pub const METRIC_ON: u32 = 1024;
     pub const NATURAL: u32 = 2048;
+    pub const CASCADE: u32 = 4096;
 }
 
 /// Reserved cell ids in an op.
@@ -153,11 +154,29 @@ pub struct Enum {
     pub values: Vec<String>,
 }
 
+/// The where of a key, an index or a projection, in the only shapes a
+/// reader of the declaration applies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Where {
+    Eq(String, String),
+    Null(String),
+    NotNull(String),
+}
+
+impl Where {
+    pub fn col(&self) -> &str {
+        match self {
+            Where::Eq(c, _) | Where::Null(c) | Where::NotNull(c) => c,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Key {
     pub cols: Vec<String>,
     pub global: bool,
     pub where_: Option<String>,
+    pub term: Option<Where>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +185,7 @@ pub struct Index {
     pub cols: Vec<(String, bool)>,
     pub global: bool,
     pub where_: Option<String>,
+    pub term: Option<Where>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +204,8 @@ pub struct Column {
     pub human_only: bool,
     pub readonly: bool,
     pub unique: bool,
+    /// A nullable ref whose row goes with the row it names.
+    pub cascade: bool,
     pub natural: bool,
     pub metric: bool,
     /// On a metric's `_on` twin: the metric it dates.
@@ -207,6 +229,7 @@ impl Column {
             human_only: false,
             readonly: false,
             unique: false,
+            cascade: false,
             natural: false,
             metric: false,
             metric_of: None,
@@ -234,6 +257,7 @@ impl Column {
             (self.implied, flag::IMPLIED),
             (self.metric_of.is_some(), flag::METRIC_ON),
             (self.natural, flag::NATURAL),
+            (self.cascade, flag::CASCADE),
         ] {
             if on {
                 f |= bit;
@@ -265,6 +289,8 @@ pub struct Table {
     pub global: bool,
     pub account_optional: bool,
     pub singleton: bool,
+    /// In no key's mask whatever its domain (citations).
+    pub unmasked: bool,
     pub naturals: Vec<Key>,
     pub uniques: Vec<Key>,
     pub indexes: Vec<Index>,
@@ -273,6 +299,7 @@ pub struct Table {
     /// A projection's source table and filter.
     pub source: Option<String>,
     pub source_where: Option<String>,
+    pub source_term: Option<Where>,
 }
 
 impl Table {
@@ -312,6 +339,8 @@ pub struct Command {
 pub struct Schema {
     /// The byte layout native/wire implements.
     pub layout: u16,
+    /// Enums the frames carry (NACK codes, BYE reasons, op verbs).
+    pub carry: Vec<String>,
     pub domains: Vec<Domain>,
     pub frames: Vec<Frame>,
     pub enums: Vec<Enum>,
@@ -358,8 +387,81 @@ fn fail<T>(line: usize, message: String) -> Result<T, Error> {
 
 // ------------------------------------------------------------------ parse
 
-const FLAGS: [&str; 6] = ["deferred", "private", "server_only", "human_only", "readonly", "unique"];
-const TABLE_MODS: [&str; 5] = ["append_only", "soft_delete", "global", "account_optional", "singleton"];
+const TABLE_MODS: [&str; 6] = ["append_only", "soft_delete", "global", "account_optional", "singleton", "unmasked"];
+
+/// Names: lowercase words for everything but frames, which are uppercase.
+fn is_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty() && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+fn is_frame_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty() && b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+fn name(s: &str, line: usize) -> Result<(), Error> {
+    if is_name(s) { Ok(()) } else { fail(line, format!("name {s}")) }
+}
+
+// Only ASCII space and tab separate tokens, in both parsers.
+fn sep(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
+fn trim(s: &str) -> &str {
+    s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r')
+}
+
+fn tokens(s: &str) -> Vec<&str> {
+    s.split(sep).filter(|t| !t.is_empty()).collect()
+}
+
+fn where_term(where_: &Option<String>, line: usize) -> Result<Option<Where>, Error> {
+    let Some(w) = where_ else { return Ok(None) };
+    if let Some((col, rest)) = w.split_once(" = ") {
+        if is_name(col) && rest.len() >= 2 && rest.starts_with('\'') && rest.ends_with('\'') && !rest[1..rest.len() - 1].contains('\'') {
+            return Ok(Some(Where::Eq(col.to_owned(), rest[1..rest.len() - 1].to_owned())));
+        }
+    }
+    if let Some(col) = w.strip_suffix(" is not null") {
+        if is_name(col) {
+            return Ok(Some(Where::NotNull(col.to_owned())));
+        }
+    }
+    if let Some(col) = w.strip_suffix(" is null") {
+        if is_name(col) {
+            return Ok(Some(Where::Null(col.to_owned())));
+        }
+    }
+    fail(line, format!("where takes col = 'value', col is null or col is not null: {w}"))
+}
+
+fn int_in(text: &str, lo: i128, hi: i128) -> bool {
+    text.parse::<i128>().is_ok_and(|v| v >= lo && v <= hi)
+}
+
+// A default must be a value of its column's type.
+fn default_ok(col: &Column, line: usize) -> Result<(), Error> {
+    let Some(d) = &col.default else { return Ok(()) };
+    let ok = match col.ty {
+        Type::Bool => d == "true" || d == "false",
+        Type::U8 => int_in(d, 0, 255),
+        Type::U32 => int_in(d, 0, 4_294_967_295),
+        Type::I64 => int_in(d, i64::MIN as i128, i64::MAX as i128),
+        Type::F64 => {
+            let digits = d.strip_prefix('-').unwrap_or(d);
+            let (whole, frac) = digits.split_once('.').map_or((digits, None), |(w, f)| (w, Some(f)));
+            !whole.is_empty()
+                && whole.bytes().all(|b| b.is_ascii_digit())
+                && frac.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+        }
+        Type::Str | Type::Text => d.len() >= 2 && d.starts_with('\'') && d.ends_with('\'') && !d[1..d.len() - 1].contains('\''),
+        Type::Enum => true,
+        _ => false,
+    };
+    if ok { Ok(()) } else { fail(line, format!("default {d} is not a {}", col.ty.name())) }
+}
 
 struct RawParam {
     name: String,
@@ -387,6 +489,7 @@ struct RawTable {
     picks: Vec<String>,
     source: Option<String>,
     source_where: Option<String>,
+    source_term: Option<Where>,
     commands: Vec<RawCommand>,
     line: usize,
 }
@@ -402,27 +505,30 @@ fn strip_comment(line: &str) -> &str {
 // trimmed text after it.
 fn split_where(text: &str) -> (Vec<&str>, Option<String>) {
     let bytes = text.as_bytes();
+    let gap = |b: u8| b == b' ' || b == b'\t';
     let mut i = 0;
     while i + 7 <= bytes.len() {
-        if bytes[i].is_ascii_whitespace()
-            && &bytes[i + 1..i + 6] == b"where"
-            && bytes[i + 6].is_ascii_whitespace()
-        {
-            let head = text[..i].split_whitespace().collect();
-            return (head, Some(text[i + 7..].trim().to_owned()));
+        if gap(bytes[i]) && &bytes[i + 1..i + 6] == b"where" && gap(bytes[i + 6]) {
+            return (tokens(&text[..i]), Some(trim(&text[i + 7..]).to_owned()));
         }
         i += 1;
     }
-    (text.split_whitespace().collect(), None)
+    (tokens(text), None)
 }
 
-fn int(text: &str, line: usize) -> Result<u32, Error> {
-    text.parse().or_else(|_| fail(line, format!("not a number: {text}")))
+fn int(text: &str, line: usize, lo: i128, hi: i128) -> Result<i128, Error> {
+    match text.parse::<i128>() {
+        Ok(v) if v >= lo && v <= hi => Ok(v),
+        Ok(v) => fail(line, format!("{v} is out of {lo}..{hi}")),
+        Err(_) => fail(line, format!("not a number: {text}")),
+    }
 }
 
-fn global(cols: &[&str]) -> (bool, Vec<String>) {
-    let g = cols.contains(&"global");
-    (g, cols.iter().filter(|c| **c != "global").map(|c| c.to_string()).collect())
+fn global(cols: &[&str], line: usize) -> Result<(bool, Vec<String>), Error> {
+    match cols.iter().filter(|c| **c == "global").count() {
+        0 | 1 => Ok((cols.contains(&"global"), cols.iter().filter(|c| **c != "global").map(|c| c.to_string()).collect())),
+        _ => fail(line, "global twice".into()),
+    }
 }
 
 fn desc(cols: &[&str]) -> Vec<(String, bool)> {
@@ -459,11 +565,15 @@ fn walk(rest: &[&str], mut col: Column, line: usize) -> Result<Column, Error> {
             "human_only" => col.human_only = true,
             "readonly" => col.readonly = true,
             "unique" => col.unique = true,
+            "cascade" => col.cascade = true,
             other => return fail(line, format!("flag {other}")),
         }
         i += 1;
     }
-    debug_assert!(FLAGS.len() == 6);
+    if col.cascade && col.ty != Type::Ref {
+        return fail(line, "cascade is a ref's".into());
+    }
+    default_ok(&col, line)?;
     Ok(col)
 }
 
@@ -472,69 +582,105 @@ fn param(token: &str, line: usize) -> Result<RawParam, Error> {
         Some(t) => (t, false),
         None => (token, true),
     };
+    if token.ends_with('?') {
+        return fail(line, format!("param {token}?"));
+    }
     match token.split_once(':') {
-        Some((name, ty)) => match Type::parse(ty) {
-            Some(t) if !matches!(t, Type::Id | Type::Ref | Type::Enum) => {
-                Ok(RawParam { name: name.to_owned(), ty: Some(t), required })
+        Some((pname, ty)) => {
+            name(pname, line)?;
+            match Type::parse(ty) {
+                Some(t) if !matches!(t, Type::Id | Type::Ref | Type::Enum) => {
+                    Ok(RawParam { name: pname.to_owned(), ty: Some(t), required })
+                }
+                _ => fail(line, format!("param type {ty}")),
             }
-            _ => fail(line, format!("param type {ty}")),
-        },
-        None => Ok(RawParam { name: token.to_owned(), ty: None, required }),
+        }
+        None => {
+            name(token, line)?;
+            Ok(RawParam { name: token.to_owned(), ty: None, required })
+        }
     }
 }
 
 fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: usize) -> Result<(), Error> {
     match tokens {
-        ["pick", cols @ ..] => t.picks.extend(cols.iter().map(|c| c.to_string())),
-        ["cap", n] => t.cap = Some(int(n, line)?),
-        ["natural", cols @ ..] => t.naturals.push(Key {
-            cols: cols.iter().map(|c| c.to_string()).collect(),
-            global: false,
-            where_,
-        }),
+        ["pick", cols @ ..] => {
+            for c in cols {
+                name(c, line)?;
+            }
+            t.picks.extend(cols.iter().map(|c| c.to_string()))
+        }
+        ["cap", n] => t.cap = Some(int(n, line, 1, 4_294_967_295)? as u32),
+        ["natural", cols @ ..] => {
+            if cols.is_empty() {
+                return fail(line, "a key names its columns".into());
+            }
+            let term = where_term(&where_, line)?;
+            t.naturals.push(Key { cols: cols.iter().map(|c| c.to_string()).collect(), global: false, where_, term })
+        }
         ["unique", cols @ ..] => {
-            let (global, cols) = global(cols);
-            t.uniques.push(Key { cols, global, where_ });
+            let (global, cols) = global(cols, line)?;
+            if cols.is_empty() {
+                return fail(line, "a key names its columns".into());
+            }
+            let term = where_term(&where_, line)?;
+            t.uniques.push(Key { cols, global, where_, term });
         }
         ["index", cols @ ..] => {
-            let (global, cols) = global(cols);
+            let (global, cols) = global(cols, line)?;
+            if cols.is_empty() {
+                return fail(line, "an index names its columns".into());
+            }
+            let term = where_term(&where_, line)?;
             let cols: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-            t.indexes.push(Index { cols: desc(&cols), global, where_ });
+            t.indexes.push(Index { cols: desc(&cols), global, where_, term });
         }
-        ["col", name, ty, rest @ ..] => {
+        ["col", cname, ty, rest @ ..] => {
+            name(cname, line)?;
             let Some(ty) = Type::parse(ty) else {
                 return fail(line, format!("type {ty}"));
             };
             let (target, rest) = if matches!(ty, Type::Ref | Type::Enum) {
                 match rest {
-                    [target, rest @ ..] => (Some((*target).to_owned()), rest),
+                    [target, rest @ ..] => {
+                        name(target, line)?;
+                        (Some((*target).to_owned()), rest)
+                    }
                     [] => return fail(line, format!("{} needs a target", ty.name())),
                 }
             } else {
                 (None, rest)
             };
-            let mut col = Column::blank(name, ty);
+            let mut col = Column::blank(cname, ty);
             col.target = target;
             t.cols.push(walk(rest, col, line)?);
         }
-        ["metric", name, ty, rest @ ..] => {
+        ["metric", mname, ty, rest @ ..] => {
+            name(mname, line)?;
             let ty = match *ty {
                 "u32" => Type::U32,
                 "i64" => Type::I64,
                 "f64" => Type::F64,
                 other => return fail(line, format!("metric type {other}")),
             };
-            let mut col = walk(rest, Column::blank(name, ty), line)?;
+            let mut col = walk(rest, Column::blank(mname, ty), line)?;
             if col.required {
                 return fail(line, "a metric is nullable".into());
             }
             col.metric = true;
-            let mut twin = Column::blank(&format!("{name}_on"), Type::Day);
-            twin.metric_of = Some((*name).to_owned());
+            // The twin is the metric's own date: written with it, never
+            // alone, and seen by whoever sees the metric.
+            let mut twin = Column::blank(&format!("{mname}_on"), Type::Day);
+            twin.metric_of = Some((*mname).to_owned());
+            twin.readonly = true;
+            twin.private = col.private;
+            twin.server_only = col.server_only;
+            twin.human_only = col.human_only;
             t.cols.push(col);
             t.cols.push(twin);
         }
-        ["prose", name, rest @ ..] => {
+        ["prose", pname, rest @ ..] => {
+            name(pname, line)?;
             let rest = match rest {
                 ["text", r @ ..] => r,
                 r => r,
@@ -543,19 +689,24 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
                 ["?", r @ ..] => r,
                 r => r,
             };
-            let mut col = walk(rest, Column::blank(name, Type::Text), line)?;
+            let mut col = walk(rest, Column::blank(pname, Type::Text), line)?;
             col.prose = true;
             col.deferred = true;
             t.cols.push(col);
         }
-        ["command", name, rest @ ..] => {
-            let human_only = rest.contains(&"human_only");
+        ["command", cname, rest @ ..] => {
+            name(cname, line)?;
+            let human_only = match rest.iter().filter(|p| **p == "human_only").count() {
+                0 => false,
+                1 => true,
+                _ => return fail(line, "human_only twice".into()),
+            };
             let params = rest
                 .iter()
                 .filter(|p| **p != "human_only")
                 .map(|p| param(p, line))
                 .collect::<Result<Vec<_>, _>>()?;
-            t.commands.push(RawCommand { name: (*name).to_owned(), params, human_only, line });
+            t.commands.push(RawCommand { name: (*cname).to_owned(), params, human_only, line });
         }
         _ => return fail(line, format!("unreadable: {}", tokens.join(" "))),
     }
@@ -565,6 +716,7 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
 /// Parse and resolve a declaration.
 pub fn parse(source: &str) -> Result<Schema, Error> {
     let mut domains: Vec<String> = Vec::new();
+    let mut carry: Vec<String> = Vec::new();
     let mut layout: Option<u16> = None;
     let mut frames: Vec<Frame> = Vec::new();
     let mut enums: Vec<(String, Vec<String>)> = Vec::new();
@@ -572,32 +724,59 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
 
     for (i, raw) in source.split('\n').enumerate() {
         let line = i + 1;
-        let text = strip_comment(raw).trim();
+        let text = trim(strip_comment(raw));
         if text.is_empty() {
             continue;
         }
         let (tokens, where_) = split_where(text);
         match tokens.as_slice() {
-            ["domain", names @ ..] => domains.extend(names.iter().map(|n| n.to_string())),
-            ["layout", n] => layout = Some(int(n, line)? as u16),
-            ["frame", name, id] => frames.push(Frame { name: (*name).to_owned(), id: int(id, line)? as u8 }),
-            ["enum", name, values @ ..] if !values.is_empty() => {
-                enums.push(((*name).to_owned(), values.iter().map(|v| v.to_string()).collect()))
+            ["domain", names @ ..] => {
+                for n in names {
+                    name(n, line)?;
+                }
+                domains.extend(names.iter().map(|n| n.to_string()))
             }
-            ["table", name, domain, residency, mods @ ..] => {
+            ["carry", names @ ..] => {
+                for n in names {
+                    name(n, line)?;
+                }
+                carry.extend(names.iter().map(|n| n.to_string()))
+            }
+            ["layout", n] => layout = Some(int(n, line, 0, 65_535)? as u16),
+            ["frame", fname, id] => {
+                if !is_frame_name(fname) {
+                    return fail(line, format!("frame name {fname}"));
+                }
+                frames.push(Frame { name: (*fname).to_owned(), id: int(id, line, 1, 255)? as u8 })
+            }
+            ["enum", ename, values @ ..] if !values.is_empty() => {
+                name(ename, line)?;
+                for v in values {
+                    name(v, line)?;
+                }
+                enums.push(((*ename).to_owned(), values.iter().map(|v| v.to_string()).collect()))
+            }
+            ["table", tname, domain, residency, mods @ ..] => {
+                name(tname, line)?;
                 let residency = match *residency {
                     "resident" => Residency::Resident,
                     "server" => Residency::Server,
                     "wire" => Residency::Wire,
                     other => return fail(line, format!("residency {other}")),
                 };
-                for m in mods {
+                for (i, m) in mods.iter().enumerate() {
                     if !TABLE_MODS.contains(m) {
                         return fail(line, format!("table modifier {m}"));
                     }
+                    if mods[..i].contains(m) {
+                        return fail(line, "a table modifier twice".into());
+                    }
+                }
+                if mods.contains(&"global") && mods.contains(&"singleton") {
+                    return fail(line, "a global table has no account to be one row of".into());
                 }
                 tables.push(RawTable {
-                    name: (*name).to_owned(),
+                    name: (*tname).to_owned(),
                     domain: (*domain).to_owned(),
                     residency,
                     mods: mods.iter().map(|m| m.to_string()).collect(),
@@ -609,12 +788,19 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                     picks: vec![],
                     source: None,
                     source_where: None,
+                    source_term: None,
                     commands: vec![],
                     line,
                 });
             }
-            ["projection", name, domain, source] => tables.push(RawTable {
-                name: (*name).to_owned(),
+            ["projection", pname, domain, source] => {
+                name(pname, line)?;
+                if where_.is_none() {
+                    return fail(line, "a projection needs a where".into());
+                }
+                let source_term = where_term(&where_, line)?;
+                tables.push(RawTable {
+                name: (*pname).to_owned(),
                 domain: (*domain).to_owned(),
                 residency: Residency::Projection,
                 mods: vec![],
@@ -626,9 +812,11 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 picks: vec![],
                 source: Some((*source).to_owned()),
                 source_where: where_.clone(),
+                source_term,
                 commands: vec![],
                 line,
-            }),
+            })
+            }
             [kind, ..]
                 if matches!(
                     *kind,
@@ -649,7 +837,7 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
     }
 
     let Some(layout) = layout else { return fail(0, "no layout line".into()) };
-    resolve(layout, domains, frames, enums, tables)
+    resolve(layout, carry, domains, frames, enums, tables)
 }
 
 fn implied(t: &RawTable) -> Vec<Column> {
@@ -696,6 +884,9 @@ fn resolve_cols(t: &RawTable, all: &[RawTable]) -> Result<Vec<Column>, Error> {
         let Some(src) = all.iter().find(|s| s.name == src_name) else {
             return fail(t.line, format!("projection of {src_name}"));
         };
+        if !src.residency.stored() {
+            return fail(t.line, format!("a projection's source is a stored table, not {src_name}"));
+        }
         let src_cols = resolve_cols(src, all)?;
         let mut out = Vec::new();
         for name in core::iter::once("id").chain(t.picks.iter().map(|s| s.as_str())) {
@@ -718,11 +909,28 @@ fn resolve_cols(t: &RawTable, all: &[RawTable]) -> Result<Vec<Column>, Error> {
 
 fn resolve(
     layout: u16,
+    carry: Vec<String>,
     domain_names: Vec<String>,
     frames: Vec<Frame>,
     raw_enums: Vec<(String, Vec<String>)>,
     raw: Vec<RawTable>,
 ) -> Result<Schema, Error> {
+    dupes(domain_names.iter().map(String::as_str), "domain")?;
+    for (i, n) in domain_names.iter().enumerate() {
+        if n != "system" && i >= 8 {
+            return fail(0, format!("domain {n}: a mask has eight bits"));
+        }
+    }
+    for (n, values) in &raw_enums {
+        dupes(values.iter().map(String::as_str), &format!("{n} value"))?;
+    }
+    let ids: Vec<String> = frames.iter().map(|f| f.id.to_string()).collect();
+    dupes(ids.iter().map(String::as_str), "frame id")?;
+    for c in &carry {
+        if !raw_enums.iter().any(|(n, _)| n == c) {
+            return fail(0, format!("carry names no enum {c}"));
+        }
+    }
     let domains = domain_names
         .iter()
         .enumerate()
@@ -753,6 +961,7 @@ fn resolve(
             global: has("global"),
             account_optional: has("account_optional"),
             singleton: has("singleton"),
+            unmasked: has("unmasked"),
             naturals: t.naturals.clone(),
             uniques: t.uniques.clone(),
             indexes: t.indexes.clone(),
@@ -760,6 +969,7 @@ fn resolve(
             cols,
             source: t.source.clone(),
             source_where: t.source_where.clone(),
+            source_term: t.source_term.clone(),
         });
     }
 
@@ -803,7 +1013,7 @@ fn resolve(
         }
     }
 
-    let mut schema = Schema { layout, domains, frames, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
+    let mut schema = Schema { layout, carry, domains, frames, enums, tables, commands, wire_hash: 0, schema_rev: 0 };
     validate(&schema)?;
     schema.wire_hash = fold(fnv(canonical(&schema, Scope::Wire).as_bytes()));
     schema.schema_rev = fnv(canonical(&schema, Scope::Full).as_bytes());
@@ -870,12 +1080,27 @@ fn validate(s: &Schema) -> Result<(), Error> {
                 }
             }
         }
+        let where_cols: Vec<String> = t
+            .naturals
+            .iter()
+            .chain(t.uniques.iter())
+            .filter_map(|k| k.term.as_ref())
+            .chain(t.indexes.iter().filter_map(|i| i.term.as_ref()))
+            .map(|w| w.col().to_owned())
+            .collect();
+        if let (Some(src), Some(term)) = (&t.source, &t.source_term) {
+            let source = s.table(src).unwrap();
+            if source.col(term.col()).is_none() {
+                return fail(0, format!("{}: its where names no {src} column {}", t.name, term.col()));
+            }
+        }
         let keys = t
             .naturals
             .iter()
             .chain(t.uniques.iter())
             .flat_map(|k| k.cols.iter())
-            .chain(t.indexes.iter().flat_map(|i| i.cols.iter().map(|(c, _)| c)));
+            .chain(t.indexes.iter().flat_map(|i| i.cols.iter().map(|(c, _)| c)))
+            .chain(where_cols.iter());
         for k in keys {
             if t.col(k).is_none() {
                 return fail(0, format!("{}: key or index names no column {k}", t.name));
@@ -921,8 +1146,21 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
     for f in &s.frames {
         line(format!("frame {} {}", f.name, f.id));
     }
+    // The wire's enums: those its tables' columns and its commands' params
+    // name, and those the frames carry. An enum only server tables use is not.
+    let wire_enum = |name: &str| {
+        s.carry.iter().any(|c| c == name)
+            || s.tables
+                .iter()
+                .filter(|t| t.residency != Residency::Server)
+                .flat_map(|t| t.cols.iter())
+                .any(|c| c.ty == Type::Enum && c.target.as_deref() == Some(name))
+            || s.commands.iter().flat_map(|c| c.params.iter()).any(|p| p.ty == Type::Enum && p.target.as_deref() == Some(name))
+    };
     for e in &s.enums {
-        line(format!("enum {} {} {}", e.id, e.name, e.values.join(" ")));
+        if scope == Scope::Full || wire_enum(&e.name) {
+            line(format!("enum {} {} {}", e.id, e.name, e.values.join(" ")));
+        }
     }
     for t in &s.tables {
         if scope == Scope::Wire && t.residency == Residency::Server {
@@ -934,6 +1172,7 @@ pub fn canonical(s: &Schema, scope: Scope) -> String {
             (t.global, "global"),
             (t.account_optional, "account_optional"),
             (t.singleton, "singleton"),
+            (t.unmasked, "unmasked"),
         ]
         .iter()
         .filter(|(on, _)| *on)

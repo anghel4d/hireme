@@ -7,8 +7,12 @@ defmodule Hireme.Schema.Parser do
   so the rules below and the crate's cannot drift unnoticed.
   """
 
-  @flags ~w(deferred private server_only human_only readonly unique)
-  @table_mods ~w(append_only soft_delete global account_optional singleton)
+  @flags ~w(deferred private server_only human_only readonly unique cascade)
+  @table_mods ~w(append_only soft_delete global account_optional singleton unmasked)
+
+  # Names: lowercase words for everything but frames, which are uppercase.
+  @name ~r/^[a-z][a-z0-9_]*$/
+  @frame_name ~r/^[A-Z][A-Z0-9_]*$/
   @types ~w(id ref enum bool u8 u32 i64 f64 day time str text json bytes)
 
   # The catalog's type codes: position in @types, from 1.
@@ -47,13 +51,15 @@ defmodule Hireme.Schema.Parser do
     prose: 256,
     implied: 512,
     metric_on: 1024,
-    natural: 2048
+    natural: 2048,
+    cascade: 4096
   }
 
   @doc "The resolved declaration of `source`; raises naming the line on any error."
   def parse!(source) do
     state = %{
       domains: [],
+      carry: [],
       layout: nil,
       frames: [],
       enums: [],
@@ -67,7 +73,7 @@ defmodule Hireme.Schema.Parser do
       |> String.split("\n")
       |> Enum.with_index(1)
       |> Enum.reduce(state, fn {line, n}, state ->
-        case line |> strip_comment() |> String.trim() do
+        case line |> strip_comment() |> trim() do
           "" -> state
           text -> line(text, n, state)
         end
@@ -87,10 +93,14 @@ defmodule Hireme.Schema.Parser do
     end
   end
 
+  # Only ASCII space and tab separate tokens, in both parsers.
+  defp trim(text), do: String.replace(text, ~r/^[ \t\r]+|[ \t\r]+$/, "")
+  defp tokens(text), do: String.split(text, [" ", "\t"], trim: true)
+
   defp split_where(text) do
-    case String.split(text, ~r/\swhere\s/, parts: 2) do
-      [head, where] -> {String.split(head), String.trim(where)}
-      [head] -> {String.split(head), nil}
+    case String.split(text, ~r/[ \t]where[ \t]/, parts: 2) do
+      [head, where] -> {tokens(head), trim(where)}
+      [head] -> {tokens(head), nil}
     end
   end
 
@@ -100,20 +110,32 @@ defmodule Hireme.Schema.Parser do
 
     case tokens do
       ["domain" | names] ->
+        Enum.each(names, &name!(&1, line_no))
         %{state | domains: state.domains ++ names}
 
+      ["carry" | names] ->
+        Enum.each(names, &name!(&1, line_no))
+        %{state | carry: state.carry ++ names}
+
       ["layout", n] ->
-        %{state | layout: int!(n, line_no)}
+        %{state | layout: int!(n, line_no, 0..65_535)}
 
       ["frame", name, id] ->
-        %{state | frames: state.frames ++ [{name, int!(id, n)}]}
+        unless name =~ @frame_name, do: fail(n, "frame name #{name}")
+        %{state | frames: state.frames ++ [{name, int!(id, n, 1..255)}]}
 
       ["enum", name | values] when values != [] ->
+        Enum.each([name | values], &name!(&1, line_no))
         %{state | enums: state.enums ++ [{name, values}]}
 
       ["table", name, domain, residency | mods] ->
+        name!(name, n)
         unless residency in ~w(resident server wire), do: fail(n, "residency #{residency}")
         Enum.each(mods, &unless(&1 in @table_mods, do: fail(n, "table modifier #{&1}")))
+        if mods != Enum.uniq(mods), do: fail(n, "a table modifier twice")
+
+        if "global" in mods and "singleton" in mods,
+          do: fail(n, "a global table has no account to be one row of")
 
         state
         |> close_table()
@@ -135,6 +157,9 @@ defmodule Hireme.Schema.Parser do
         })
 
       ["projection", name, domain, source] ->
+        name!(name, n)
+        if where == nil, do: fail(n, "a projection needs a where")
+
         state
         |> close_table()
         |> Map.put(:table, %{
@@ -150,6 +175,7 @@ defmodule Hireme.Schema.Parser do
           picks: [],
           source: source,
           source_where: where,
+          source_term: where_term!(where, n),
           commands: [],
           line: n
         })
@@ -170,20 +196,34 @@ defmodule Hireme.Schema.Parser do
     end
   end
 
-  defp table_line(["pick" | cols], _where, _n, t, _state), do: %{t | picks: t.picks ++ cols}
-  defp table_line(["cap", n], _where, line, t, _), do: %{t | cap: int!(n, line)}
-
-  defp table_line(["natural" | cols], where, _n, t, _),
-    do: %{t | naturals: t.naturals ++ [%{cols: cols, where: where}]}
-
-  defp table_line(["unique" | cols], where, _n, t, _) do
-    {global, cols} = global(cols)
-    %{t | uniques: t.uniques ++ [%{cols: cols, global: global, where: where}]}
+  defp table_line(["pick" | cols], _where, n, t, _state) do
+    Enum.each(cols, &name!(&1, n))
+    %{t | picks: t.picks ++ cols}
   end
 
-  defp table_line(["index" | cols], where, _n, t, _) do
-    {global, cols} = global(cols)
-    %{t | indexes: t.indexes ++ [%{cols: desc(cols), global: global, where: where}]}
+  defp table_line(["cap", n], _where, line, t, _), do: %{t | cap: int!(n, line, 1..4_294_967_295)}
+
+  defp table_line(["natural" | cols], where, n, t, _) do
+    if cols == [], do: fail(n, "a key names its columns")
+
+    %{
+      t
+      | naturals: t.naturals ++ [%{cols: cols, where: where, where_term: where_term!(where, n)}]
+    }
+  end
+
+  defp table_line(["unique" | cols], where, n, t, _) do
+    {global, cols} = global(cols, n)
+    if cols == [], do: fail(n, "a key names its columns")
+    key = %{cols: cols, global: global, where: where, where_term: where_term!(where, n)}
+    %{t | uniques: t.uniques ++ [key]}
+  end
+
+  defp table_line(["index" | cols], where, n, t, _) do
+    {global, cols} = global(cols, n)
+    if cols == [], do: fail(n, "an index names its columns")
+    index = %{cols: desc(cols), global: global, where: where, where_term: where_term!(where, n)}
+    %{t | indexes: t.indexes ++ [index]}
   end
 
   defp table_line(["col", name, type | rest], _where, n, t, _) do
@@ -197,7 +237,17 @@ defmodule Hireme.Schema.Parser do
 
     if col.required, do: fail(n, "a metric is nullable")
 
-    twin = %{blank(name <> "_on", :day) | metric_of: name}
+    # The twin is the metric's own date: written with it, never alone, and
+    # seen by whoever sees the metric.
+    twin = %{
+      blank(name <> "_on", :day)
+      | metric_of: name,
+        readonly: true,
+        private: col.private,
+        server_only: col.server_only,
+        human_only: col.human_only
+    }
+
     %{t | cols: t.cols ++ [%{col | metric: true}, twin]}
   end
 
@@ -208,8 +258,14 @@ defmodule Hireme.Schema.Parser do
   end
 
   defp table_line(["command", name | rest], _where, n, t, _state) do
+    name!(name, n)
+
     {human_only, rest} =
-      if "human_only" in rest, do: {true, rest -- ["human_only"]}, else: {false, rest}
+      case Enum.count(rest, &(&1 == "human_only")) do
+        0 -> {false, rest}
+        1 -> {true, rest -- ["human_only"]}
+        _ -> fail(n, "human_only twice")
+      end
 
     params = Enum.map(rest, &param(&1, n))
 
@@ -222,7 +278,36 @@ defmodule Hireme.Schema.Parser do
   defp drop_prefix([p | rest], [p]), do: rest
   defp drop_prefix(rest, _), do: rest
 
-  defp global(cols), do: if("global" in cols, do: {true, cols -- ["global"]}, else: {false, cols})
+  defp global(cols, n) do
+    case Enum.count(cols, &(&1 == "global")) do
+      0 -> {false, cols}
+      1 -> {true, cols -- ["global"]}
+      _ -> fail(n, "global twice")
+    end
+  end
+
+  # The where of a key, an index or a projection: `col = 'value'`,
+  # `col is null` or `col is not null`, the only shapes a reader of the
+  # declaration (the sequencer, World) can apply.
+  defp where_term!(nil, _n), do: nil
+
+  defp where_term!(where, n) do
+    cond do
+      m = Regex.run(~r/^([a-z][a-z0-9_]*) = '([^']*)'$/, where) ->
+        {:eq, Enum.at(m, 1), Enum.at(m, 2)}
+
+      m = Regex.run(~r/^([a-z][a-z0-9_]*) is not null$/, where) ->
+        {:not_null, Enum.at(m, 1)}
+
+      m = Regex.run(~r/^([a-z][a-z0-9_]*) is null$/, where) ->
+        {:null, Enum.at(m, 1)}
+
+      true ->
+        fail(n, "where takes col = 'value', col is null or col is not null: #{where}")
+    end
+  end
+
+  defp name!(name, n), do: unless(name =~ @name, do: fail(n, "name #{name}"))
 
   defp desc([col, "desc" | rest]), do: [{col, true} | desc(rest)]
   defp desc([col | rest]), do: [{col, false} | desc(rest)]
@@ -231,15 +316,19 @@ defmodule Hireme.Schema.Parser do
   defp param(token, n) do
     {token, required} =
       if String.ends_with?(token, "?"),
-        do: {String.trim_trailing(token, "?"), false},
+        do: {binary_part(token, 0, byte_size(token) - 1), false},
         else: {token, true}
+
+    if String.ends_with?(token, "?"), do: fail(n, "param #{token}?")
 
     case String.split(token, ":", parts: 2) do
       [name, type] ->
+        name!(name, n)
         unless type in @types and type not in ~w(id ref enum), do: fail(n, "param type #{type}")
         %{name: name, type: String.to_atom(type), target: nil, required: required, column: false}
 
       [name] ->
+        name!(name, n)
         %{name: name, type: nil, target: nil, required: required, column: true}
     end
   end
@@ -273,6 +362,7 @@ defmodule Hireme.Schema.Parser do
       human_only: false,
       readonly: false,
       unique: false,
+      cascade: false,
       metric: false,
       metric_of: nil,
       prose: false,
@@ -282,7 +372,38 @@ defmodule Hireme.Schema.Parser do
   end
 
   defp column(name, type, target, rest, n) do
-    walk(rest, %{blank(name, type) | target: target}, n)
+    name!(name, n)
+    if target, do: name!(target, n)
+    col = walk(rest, %{blank(name, type) | target: target}, n)
+    if col.cascade and type != :ref, do: fail(n, "cascade is a ref's")
+    default!(col, n)
+    col
+  end
+
+  # A default must be a value of its column's type.
+  defp default!(%{default: nil}, _n), do: :ok
+
+  defp default!(%{default: d, type: type}, n) do
+    ok =
+      case type do
+        :bool -> d in ~w(true false)
+        :u8 -> int_in?(d, 0..255)
+        :u32 -> int_in?(d, 0..4_294_967_295)
+        :i64 -> int_in?(d, -9_223_372_036_854_775_808..9_223_372_036_854_775_807)
+        :f64 -> d =~ ~r/^-?[0-9]+(\.[0-9]+)?$/
+        t when t in [:str, :text] -> d =~ ~r/^'[^']*'$/
+        :enum -> true
+        _ -> false
+      end
+
+    unless ok, do: fail(n, "default #{d} is not a #{type}")
+  end
+
+  defp int_in?(text, range) do
+    case Integer.parse(text) do
+      {v, ""} -> v in range
+      _ -> false
+    end
   end
 
   defp walk([], col, _n), do: col
@@ -305,13 +426,19 @@ defmodule Hireme.Schema.Parser do
   # ---------------------------------------------------------------- resolve
 
   defp resolve(state) do
+    dupes(state.domains, "domain")
+
     domains =
       state.domains
       |> Enum.with_index()
       |> Enum.map(fn
         {"system", _} -> %{name: "system", bit: 0}
-        {name, i} -> %{name: name, bit: Bitwise.bsl(1, i)}
+        {name, i} when i < 8 -> %{name: name, bit: Bitwise.bsl(1, i)}
+        {name, _} -> raise(ArgumentError, "domain #{name}: a mask has eight bits")
       end)
+
+    for {name, values} <- state.enums, do: dupes(values, "#{name} value")
+    dupes(Enum.map(state.frames, &elem(&1, 1)), "frame id")
 
     enums =
       state.enums
@@ -345,7 +472,8 @@ defmodule Hireme.Schema.Parser do
           soft_delete: :soft_delete in t.mods,
           global: :global in t.mods,
           account_optional: :account_optional in t.mods,
-          singleton: :singleton in t.mods
+          singleton: :singleton in t.mods,
+          unmasked: :unmasked in t.mods
         })
         |> Map.delete(:mods)
       end)
@@ -379,8 +507,15 @@ defmodule Hireme.Schema.Parser do
 
     unless state.layout, do: raise(ArgumentError, "schema/hireme.schema: no layout line")
 
+    enum_names = MapSet.new(enums, & &1.name)
+
+    for c <- state.carry,
+        not MapSet.member?(enum_names, c),
+        do: raise(ArgumentError, "carry names no enum #{c}")
+
     model = %{
       layout: state.layout,
+      carry: state.carry,
       domains: domains,
       frames: frames,
       enums: enums,
@@ -440,6 +575,10 @@ defmodule Hireme.Schema.Parser do
 
   defp resolve_cols(%{residency: :projection} = t, by_name) do
     {source, _} = Map.get(by_name, t.source) || fail(t.line, "projection of #{t.source}")
+
+    unless source.residency in [:resident, :server],
+      do: fail(t.line, "a projection's source is a stored table, not #{t.source}")
+
     source_cols = resolve_cols(source, by_name)
 
     picked =
@@ -517,9 +656,20 @@ defmodule Hireme.Schema.Parser do
             "#{t.name}: account_id already leads every per-account key and index"
           )
 
+      where_cols =
+        for k <- t.naturals ++ t.uniques ++ t.indexes, k.where_term, do: elem(k.where_term, 1)
+
       keys =
         Enum.flat_map(t.naturals ++ t.uniques, & &1.cols) ++
-          Enum.flat_map(t.indexes, fn i -> Enum.map(i.cols, &elem(&1, 0)) end)
+          Enum.flat_map(t.indexes, fn i -> Enum.map(i.cols, &elem(&1, 0)) end) ++ where_cols
+
+      if t.residency == :projection do
+        source = Map.fetch!(tables, t.source)
+        col = elem(t.source_term, 1)
+
+        unless Enum.any?(source.cols, &(&1.name == col)),
+          do: raise(ArgumentError, "#{t.name}: its where names no #{t.source} column #{col}")
+      end
 
       for c <- keys,
           not MapSet.member?(names, c),
@@ -549,11 +699,27 @@ defmodule Hireme.Schema.Parser do
         do: Enum.filter(model.tables, &(&1.residency in [:resident, :wire, :projection])),
         else: model.tables
 
+    # The wire's enums: those its tables' columns and its commands' params
+    # name, and those the frames carry. An enum only server tables use is not.
+    enums =
+      if scope == :wire do
+        used =
+          MapSet.new(
+            for(t <- tables, c <- t.cols, c.type == :enum, do: c.target) ++
+              for(c <- model.commands, p <- c.params, p.type == :enum, do: p.target) ++
+              model.carry
+          )
+
+        Enum.filter(model.enums, &MapSet.member?(used, &1.name))
+      else
+        model.enums
+      end
+
     lines =
       Enum.map(model.domains, &"domain #{&1.name} #{&1.bit}") ++
         ["layout #{model.layout}"] ++
         Enum.map(model.frames, &"frame #{&1.name} #{&1.id}") ++
-        Enum.map(model.enums, &"enum #{&1.id} #{&1.name} #{Enum.join(&1.values, " ")}") ++
+        Enum.map(enums, &"enum #{&1.id} #{&1.name} #{Enum.join(&1.values, " ")}") ++
         Enum.flat_map(tables, &table_lines(&1, scope)) ++
         Enum.map(model.commands, &command_line/1)
 
@@ -562,7 +728,7 @@ defmodule Hireme.Schema.Parser do
 
   defp table_lines(t, scope) do
     mods =
-      [:append_only, :soft_delete, :global, :account_optional, :singleton]
+      [:append_only, :soft_delete, :global, :account_optional, :singleton, :unmasked]
       |> Enum.filter(&Map.fetch!(t, &1))
       |> Enum.map_join(",", &Atom.to_string/1)
 
@@ -620,7 +786,8 @@ defmodule Hireme.Schema.Parser do
       prose: c.prose,
       implied: c.implied,
       metric_on: c.metric_of != nil,
-      natural: Map.get(c, :natural, false)
+      natural: Map.get(c, :natural, false),
+      cascade: Map.get(c, :cascade, false)
     ]
     |> Enum.reduce(0, fn {k, on}, acc -> if on, do: Bitwise.bor(acc, @flag_bits[k]), else: acc end)
   end
@@ -642,9 +809,9 @@ defmodule Hireme.Schema.Parser do
   @doc "A 32-bit hash folded to the header's 16 bits."
   def fold(h), do: Bitwise.bxor(Bitwise.bsr(h, 16), Bitwise.band(h, 0xFFFF))
 
-  defp int!(text, n) do
+  defp int!(text, n, range) do
     case Integer.parse(text) do
-      {v, ""} -> v
+      {v, ""} -> if v in range, do: v, else: fail(n, "#{v} is out of #{inspect(range)}")
       _ -> fail(n, "not a number: #{text}")
     end
   end
@@ -794,7 +961,7 @@ defmodule Hireme.Schema do
       :day -> :date
       :time -> :utc_datetime
       t when t in [:str, :text] -> :string
-      :json -> :map
+      :json -> Hireme.Schema.Json
       :bytes -> :binary
       :enum -> {Ecto.Enum, values: enum(col.target)}
     end
@@ -825,6 +992,48 @@ defmodule Hireme.Schema do
   end
 end
 
+defmodule Hireme.Schema.Json do
+  @moduledoc """
+  A `json` column: any JSON value (object, array, string, number, boolean),
+  stored as its text; atom keys and values are written as their names and
+  read back as strings. Ecto's `:map` takes objects only, and a JSON array in
+  a `json` cell is as valid as an object.
+  """
+
+  use Ecto.Type
+
+  @impl true
+  def type, do: :string
+
+  @impl true
+  def cast(value) do
+    if json?(value), do: {:ok, value}, else: :error
+  end
+
+  @impl true
+  def dump(nil), do: {:ok, nil}
+  def dump(value), do: if(json?(value), do: {:ok, Jason.encode!(value)}, else: :error)
+
+  @impl true
+  def load(nil), do: {:ok, nil}
+
+  def load(text) when is_binary(text) do
+    case Jason.decode(text) do
+      {:ok, value} -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  def load(_), do: :error
+
+  defp json?(v) when is_map(v),
+    do: Enum.all?(v, fn {k, x} -> (is_binary(k) or is_atom(k)) and json?(x) end)
+
+  defp json?(v) when is_list(v), do: Enum.all?(v, &json?/1)
+  # An atom is written as its name, as Jason writes it.
+  defp json?(v), do: is_binary(v) or is_number(v) or is_atom(v)
+end
+
 defmodule Hireme.Rows do
   @moduledoc """
   One Ecto row module per stored table, generated from the declaration:
@@ -842,7 +1051,7 @@ defmodule Hireme.Rows do
     declared = for c <- table.cols, not c.implied, do: String.to_atom(c.name)
 
     required =
-      for c <- table.cols, not c.implied, c.required, c.default == nil, do: String.to_atom(c.name)
+      for c <- table.cols, not c.implied, c.required, do: String.to_atom(c.name)
 
     row
     |> cast(attrs, declared)

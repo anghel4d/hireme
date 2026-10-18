@@ -49,7 +49,7 @@ pub fn column(col: &Column) -> String {
         s.push_str(&format!(" DEFAULT {}", literal(col, d)));
     }
     if col.ty == Type::Ref {
-        let on_delete = if col.required { "CASCADE" } else { "SET NULL" };
+        let on_delete = if col.required || col.cascade { "CASCADE" } else { "SET NULL" };
         s.push_str(&format!(
             " REFERENCES {}(\"id\") ON DELETE {on_delete}",
             q(col.target.as_deref().unwrap_or(""))
@@ -122,6 +122,36 @@ pub fn indexes(t: &Table) -> Vec<IndexDef> {
     out
 }
 
+/// The triggers that hold a ref to its own account: a row may name only a
+/// row of an account-owned table that has the same account_id, so no
+/// account reads another's ids through a ref or loses rows to another's
+/// delete. The abort names `ref <table>.<col>`.
+pub fn triggers(s: &Schema, t: &Table) -> Vec<IndexDef> {
+    let mut out = Vec::new();
+    if t.global {
+        return out;
+    }
+    for c in t.cols.iter().filter(|c| c.ty == Type::Ref && !c.implied) {
+        let target = c.target.as_deref().unwrap_or("");
+        if s.table(target).is_none_or(|p| p.global) {
+            continue;
+        }
+        let check = format!(
+            "WHEN NEW.{col} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {p} WHERE \"id\" = NEW.{col} AND \"account_id\" IS NEW.\"account_id\") BEGIN SELECT RAISE(ABORT, 'ref {t}.{c}'); END;",
+            col = q(&c.name),
+            p = q(target),
+            t = t.name,
+            c = c.name
+        );
+        for (when, on) in [("insert", "INSERT".to_string()), ("update", format!("UPDATE OF {}, \"account_id\"", q(&c.name)))] {
+            let name = format!("{}__ref_{}_{when}", t.name, c.name);
+            let sql = format!("CREATE TRIGGER {} BEFORE {on} ON {} {check}", q(&name), q(&t.name));
+            out.push(IndexDef { name, sql });
+        }
+    }
+    out
+}
+
 fn create_table(t: &Table) -> String {
     let cols: Vec<String> = t.cols.iter().map(|c| format!("  {}", column(c))).collect();
     format!("CREATE TABLE {} (\n{}\n) STRICT;\n", q(&t.name), cols.join(",\n"))
@@ -141,7 +171,7 @@ pub fn baseline(s: &Schema) -> String {
     for t in stored(s) {
         out.push('\n');
         out.push_str(&create_table(t));
-        for i in indexes(t) {
+        for i in indexes(t).into_iter().chain(triggers(s, t)) {
             out.push_str(&i.sql);
             out.push('\n');
         }
@@ -155,6 +185,7 @@ pub struct Shape {
     /// Table name and its column names.
     pub tables: Vec<(String, Vec<String>)>,
     pub indexes: Vec<String>,
+    pub triggers: Vec<String>,
 }
 
 impl Shape {
@@ -170,6 +201,7 @@ impl Shape {
                     None => shape.tables.push((table.to_string(), alloc::vec![name.to_string()])),
                 },
                 ["index", name] => shape.indexes.push(name.to_string()),
+                ["trigger", name] => shape.triggers.push(name.to_string()),
                 _ => return Err(format!("unreadable shape line: {line}")),
             }
         }
@@ -196,7 +228,7 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
         match shape.tables.iter().find(|(n, _)| *n == t.name) {
             None => {
                 sql.push_str(&create_table(t));
-                for i in indexes(t) {
+                for i in indexes(t).into_iter().chain(triggers(s, t)) {
                     sql.push_str(&i.sql);
                     sql.push('\n');
                 }
@@ -225,6 +257,12 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
                         sql.push('\n');
                     }
                 }
+                for i in triggers(s, t) {
+                    if !shape.triggers.contains(&i.name) {
+                        sql.push_str(&i.sql);
+                        sql.push('\n');
+                    }
+                }
             }
         }
     }
@@ -237,6 +275,12 @@ pub fn additive(s: &Schema, shape: &Shape) -> Result<Diff, String> {
     for i in &shape.indexes {
         if !declared.contains(i) {
             extra.push(format!("index {i}"));
+        }
+    }
+    let declared: Vec<String> = stored(s).flat_map(|t| triggers(s, t).into_iter().map(|i| i.name)).collect();
+    for i in &shape.triggers {
+        if !declared.contains(i) {
+            extra.push(format!("trigger {i}"));
         }
     }
     Ok(Diff { sql, extra })

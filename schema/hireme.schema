@@ -5,11 +5,16 @@
 # Lines (a `#` starts a comment; indentation is cosmetic):
 #
 #   domain <name>...                 the first five carry mask bits 1 2 4 8 16;
-#                                    `system` carries none and is in no mask
+#                                    `system` carries none and is in no mask. A
+#                                    bit is stored in api_keys masks: append only.
 #   frame <NAME> <id>                wire frame kinds
 #   layout <n>                       the byte layout native/wire implements; in
 #                                    wire_hash, so a client of another refuses
 #   enum <name> <value>...           codes are 0-based declaration order
+#   carry <enum>...                  enums the frames carry (NACK, BYE, op verbs);
+#                                    an enum enters wire_hash when a resident,
+#                                    wire or projection column, a command param
+#                                    or this line names it
 #   table <name> <domain> <residency> [append_only] [soft_delete] [global] [account_optional] [singleton]
 #       residency: resident (the kernel derives from it; on the wire)
 #                  server   (read over RPC, server-side)
@@ -17,11 +22,15 @@
 #       global: no account_id (accounts, magic_links)
 #       account_optional: account_id may be null (audit before sign-in)
 #       singleton: one row per account
+#       unmasked: in no key's mask, whatever its domain (citations)
 #   projection <name> <domain> <source table> where <sql>
 #     pick <col>...                  a resident view of a server table, not stored
-#   natural <col>... [where <sql>]   the key a KEYED put names; per account
-#   unique <col>... [global] [where <sql>]   per account unless `global`
-#   index <col> [desc]... [global] [where <sql>]   per account (account_id leads) unless `global`
+#   natural <col>... [where <w>]     the key a KEYED put names; per account. A where
+#                                    (keys, indexes, projections) is one of
+#                                    col = 'value', col is null, col is not null
+#   unique <col>... [global] [where <w>]   per account unless `global`
+#   index <col> [desc]... [global] [where <w>]   per account (account_id leads,
+#                                    so a key never names it) unless `global`
 #   cap <n>                          most rows per account (`cap` refusal)
 #   col <name> <type> [<target>] [! | ?] [= <default>] [flag]...
 #   metric <name> <u32|i64|f64> [flag]...   nullable; implies `<name>_on day ?`;
@@ -36,7 +45,12 @@
 #        length + hash, `RPC text` the bytes)   private (browser sessions only, never a
 #        key)   server_only (never leaves the server)   human_only (a key's write is
 #        refused `human_only`)   readonly (the server or a command writes it, never a
-#        put)   unique (per account)
+#        put)   unique (per account)   cascade (a nullable ref whose row is deleted
+#        with the row it names; without it a nullable ref is set null)
+# Names are lowercase words ([a-z][a-z0-9_]*), frames uppercase; tokens are
+# separated by spaces and tabs. A default is a value of its column's type
+# (true/false, an integer in range, a decimal, a 'quoted' text, an enum value).
+# A metric's _on twin is readonly and as visible as its metric.
 #
 # Null (the codec's rule, native/wire): in BOOT/PATCH a u32 run carries null as
 # 0xFFFFFFFF (so an id, ref, day, time or enum code never takes it; bool is 0, 1
@@ -45,11 +59,13 @@
 # text is stored as NULL, so no column holds ''. In OPS a cell of type 0 with
 # length 0 clears its column; a u32 0xFFFFFFFF, an i64::MIN or a NaN cell is
 # refused `type`. Wire type codes: 1 u32 (id ref bool u8 u32 day time enum;
-# day = days since 1970-01-01, time = unix seconds), 2 str (str text json),
+# day = days since 1970-01-01, at most 2932896 = 9999-12-31, past which a cell
+# is refused `type`; time = unix seconds), 2 str (str text json, json any JSON value),
 # 3 i64, 4 f64, 5 deferred (u32 length + 8 bytes of SHA-256); the codec may
 # also run a column as 6 sym (a dictionary of strs) or 7 list (u32 ids).
 # A PATCH deletes rows with a block of their own table whose only column is
-# 0xFFFE (u32 ids). A BYE's reason is its `bye` enum code.
+# 0xFFFE (u32 ids). A BYE's reason is its `bye` enum code; an op's verb byte
+# is its `verb` code + 1 (put 1, drop 2, command 3).
 #
 # Implied on every stored table, in this order and with these column ids:
 #   1 id   2 account_id (not on `global`)   3 rev   4 inserted_at   5 updated_at
@@ -80,6 +96,8 @@ frame REPLY 34
 # ---------------------------------------------------------------- enums
 
 enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal
+
+carry refusal bye verb
 
 enum verb put drop command
 enum actor operator agent system mail
@@ -267,7 +285,8 @@ table profiles corpus resident
 table items corpus resident
   unique key
   index profile_id kind
-  col profile_id ref profiles ?
+  # A profile's own items go with it; a shared item has no profile.
+  col profile_id ref profiles ? cascade
   col kind enum item_kind !
   col key str !
   col title str !
@@ -339,9 +358,9 @@ table events desk resident append_only
   col application_id ref applications !
   col kind str !
   col body text ?
-  col actor enum actor !
-  col key_id ref api_keys ?
-  col op_id i64 ?
+  col actor enum actor ! readonly
+  col key_id ref api_keys ? readonly
+  col op_id i64 ? readonly
 
 table batches desk resident
   unique code
@@ -545,7 +564,7 @@ table sources world server
   col doc text ? deferred
 
 # The only provenance authority: the newest citation for a cell is its source.
-table citations world server append_only
+table citations world server append_only unmasked
   cap 5000000
   index table row_id column id desc
   col table str ! server_only

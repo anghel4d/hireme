@@ -500,18 +500,35 @@ defmodule Hireme.World do
 
   defp identity(grants, table, %{"key" => key}) when is_map(key) and map_size(key) > 0 do
     keys = table.naturals ++ table.uniques
-    unique_cols = for c <- table.cols, c.unique, do: %{cols: [c.name]}
+    unique_cols = for c <- table.cols, c.unique, do: %{cols: [c.name], where_term: nil}
     wanted = Enum.sort(Map.keys(key))
 
-    if Enum.any?(keys ++ unique_cols, &(Enum.sort(&1.cols) == wanted)) do
-      filters(grants, table, key)
-    else
-      {:error, :natural_key, %{table: table.name, key: Map.keys(key)}}
+    # A partial key (places' iso2 is a country's) holds only where its where does.
+    case Enum.find(keys ++ unique_cols, &(Enum.sort(&1.cols) == wanted)) do
+      nil ->
+        {:error, :natural_key, %{table: table.name, key: Map.keys(key)}}
+
+      k ->
+        with {:ok, d} <- filters(grants, table, key),
+             do: {:ok, dynamic(^d and ^term(table, k.where_term))}
     end
   end
 
   defp identity(_grants, table, _params),
     do: {:error, :type, %{table: table.name, need: "id or key"}}
+
+  defp term(_table, nil), do: dynamic(true)
+
+  defp term(table, {:eq, col, value}) do
+    f = String.to_atom(col)
+    {:ok, v} = Ecto.Type.cast(Schema.cast_type(Schema.column(table.name, col)), value)
+    dynamic([r], field(r, ^f) == ^v)
+  end
+
+  defp term(_table, {:null, col}), do: dynamic([r], is_nil(field(r, ^String.to_atom(col))))
+
+  defp term(_table, {:not_null, col}),
+    do: dynamic([r], not is_nil(field(r, ^String.to_atom(col))))
 
   defp id(id) when is_integer(id) and id > 0, do: {:ok, id}
   defp id(other), do: {:error, :type, %{param: "id", got: inspect(other)}}

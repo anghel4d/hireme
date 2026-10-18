@@ -94,7 +94,7 @@ defmodule Hireme.Import do
         end)
 
       # A bulk load moves the planner's statistics; refresh what it reads.
-      Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true)
+      Hireme.Store.write(fn -> Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true) end)
 
       {:ok,
        %{report | groups: Enum.reverse(report.groups), refusals: Enum.reverse(report.refusals)}}

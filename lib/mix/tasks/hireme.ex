@@ -31,18 +31,22 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   @impl Mix.Task
   def run(argv) do
-    {opts, _, _} =
+    {opts, rest, invalid} =
       OptionParser.parse(argv, strict: [check: :boolean, migration: :string, renumber: :boolean])
+
+    # A mistyped --check must not turn into a write.
+    if invalid != [] or rest != [],
+      do:
+        Mix.raise(
+          "unknown arguments #{inspect(Enum.map(invalid, &elem(&1, 0)) ++ rest)}; see mix help hireme.schema"
+        )
 
     Mix.Task.run("compile")
 
     sql = emit!(["sql"])
     ts = emit!(["ts"])
 
-    cond do
-      opts[:check] -> check!(sql, ts, opts)
-      true -> write!(sql, ts, opts)
-    end
+    if opts[:check], do: check!(sql, ts, opts), else: write!(sql, ts, opts)
   end
 
   defp write!(sql, ts, opts) do
@@ -171,11 +175,13 @@ defmodule Mix.Tasks.Hireme.Schema do
         "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name"
       )
 
+    triggers = query(db, "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
     tables = cols |> Enum.map(&hd/1) |> Enum.uniq()
 
     Enum.map_join(tables, "", &"table #{&1}\n") <>
       Enum.map_join(cols, "", fn [t, c] -> "col #{t} #{c}\n" end) <>
-      Enum.map_join(indexes, "", fn [i] -> "index #{i}\n" end)
+      Enum.map_join(indexes, "", fn [i] -> "index #{i}\n" end) <>
+      Enum.map_join(triggers, "", fn [i] -> "trigger #{i}\n" end)
   end
 
   defp query(db, sql) do
@@ -228,11 +234,27 @@ defmodule Mix.Tasks.Hireme.Schema do
   end
 
   defp ids(ts) do
-    for {block, kind} <- [{"TABLES", :table}, {"COMMANDS", :command}],
-        line <- block_lines(ts, block),
-        entry <- entry_ids(line, kind),
-        into: %{},
-        do: entry
+    entries =
+      for {block, kind} <- [{"TABLES", :table}, {"COMMANDS", :command}],
+          line <- block_lines(ts, block),
+          entry <- entry_ids(line, kind),
+          into: %{},
+          do: entry
+
+    # A domain's bit is stored in every key's masks.
+    domains =
+      case Regex.run(~r/^export const DOMAIN = \{ (.*) \} as const;$/m, ts) do
+        [_, body] ->
+          for pair <- String.split(body, ", "),
+              [name, bit] = String.split(pair, ": "),
+              into: %{},
+              do: {"domain #{name}", String.to_integer(bit)}
+
+        _ ->
+          %{}
+      end
+
+    Map.merge(entries, domains)
   end
 
   defp block_lines(ts, name) do
@@ -311,10 +333,17 @@ defmodule Mix.Tasks.Hireme.Import do
 
   @impl Mix.Task
   def run(argv) do
-    {opts, paths, _} = OptionParser.parse(argv, strict: [account: :integer])
+    {opts, paths, invalid} = OptionParser.parse(argv, strict: [account: :integer])
+
+    if invalid != [],
+      do: Mix.raise("unknown arguments #{inspect(Enum.map(invalid, &elem(&1, 0)))}")
+
     account = opts[:account] || Mix.raise("--account ID is required")
     if paths == [], do: Mix.raise("name at least one pack")
 
+    # An import needs the database and the sequencer, not the gate; and it
+    # is for a node that is stopped (a running one imports over its RPC).
+    Application.put_env(:hireme, :gate, false)
     Mix.Task.run("app.start")
 
     refused =

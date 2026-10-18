@@ -145,9 +145,9 @@ pub fn emit(s: &Schema) -> String {
     let codes: Vec<String> = TYPES.iter().map(|(n, t)| format!("{n}: {}", t.code())).collect();
     w(&format!("export const TYPE_CODE = {{ {} }} as const;", codes.join(", ")));
     w(&format!(
-        "export const FLAG = {{ required: {}, deferred: {}, private: {}, serverOnly: {}, humanOnly: {}, readonly: {}, unique: {}, metric: {}, prose: {}, implied: {}, metricOn: {}, natural: {} }} as const;",
+        "export const FLAG = {{ required: {}, deferred: {}, private: {}, serverOnly: {}, humanOnly: {}, readonly: {}, unique: {}, metric: {}, prose: {}, implied: {}, metricOn: {}, natural: {}, cascade: {} }} as const;",
         flag::REQUIRED, flag::DEFERRED, flag::PRIVATE, flag::SERVER_ONLY, flag::HUMAN_ONLY, flag::READONLY,
-        flag::UNIQUE, flag::METRIC, flag::PROSE, flag::IMPLIED, flag::METRIC_ON, flag::NATURAL
+        flag::UNIQUE, flag::METRIC, flag::PROSE, flag::IMPLIED, flag::METRIC_ON, flag::NATURAL, flag::CASCADE
     ));
     let frames: Vec<String> = s.frames.iter().map(|f| format!("{}: {}", f.name, f.id)).collect();
     w(&format!("export const FRAME = {{ {} }} as const;", frames.join(", ")));
