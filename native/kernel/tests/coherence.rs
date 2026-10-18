@@ -8,7 +8,6 @@ use kernel::abi::Kernel;
 use kernel::board;
 use kernel::judge::Ctx;
 use kernel::pipeline::{self, Stage};
-use kernel::rows::Data;
 use schema::col::applications as A;
 use schema::{col, command, enums, param, table};
 
@@ -45,7 +44,7 @@ const TEXTS: &[&str] = &[
 ];
 
 fn pips(stage: u32, moved: bool) -> String {
-    let s = Stage::from_u8(stage as u8).unwrap();
+    let s = Stage::from_u32(stage).unwrap();
     let rail = if moved { pipeline::move_to(&pipeline::initial(Stage::Discovered), s) } else { pipeline::initial(s) };
     String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
 }
@@ -195,23 +194,8 @@ fn patch(r: &mut Rng) -> Vec<u8> {
 /// A BOOT of the rows a kernel holds now, pending effects included.
 fn boot_of(k: &Kernel) -> Vec<u8> {
     let mut w = wire::BodyWriter::new();
-    for t in k.rows().tables() {
-        if schema::table_def(t.id).is_some_and(|d| d.residency == schema::Residency::Wire) {
-            continue;
-        }
-        let mut b = w.block(t.id, t.len());
-        b.u32s(1, t.ids().iter().copied());
-        for c in t.columns().iter().filter(|c| c.id != 1) {
-            match &c.data {
-                Data::U32(v) => b.u32s(c.id, v.iter().copied()),
-                Data::I64(v) => b.i64s(c.id, v.iter().copied()),
-                Data::F64(v) => b.f64s(c.id, v.iter().copied()),
-                Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
-                Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
-                Data::Packed(v) => b.zstrs(c.id, v.iter().map(|c| &c[..])),
-            };
-        }
-        b.done();
+    for t in k.rows().tables().filter(|t| schema::table_def(t.id).is_none_or(|d| d.residency != schema::Residency::Wire)) {
+        t.block(&mut w);
     }
     w.finish()
 }

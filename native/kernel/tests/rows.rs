@@ -201,7 +201,7 @@ fn pending_writes_ride_on_any_base_and_roll_back_clean() {
         // Refusals in any order leave exactly the base.
         while !ops.is_empty() {
             let op = ops.remove(rng.below(ops.len() as u64) as usize);
-            rows.rollback(op);
+            rows.resolve(op);
         }
         assert_eq!(read(&rows), full(&model), "seed {seed}: rollback");
     }
@@ -221,9 +221,8 @@ fn a_settled_write_stays_through_its_patch() {
     block(&mut w, 5, &[(7, vec![(U, Val::U32(2))])], &[U]);
     let moved = rows.patch(&w.finish(), 2).unwrap();
     assert!(moved.touched(5));
-    rows.settle(42);
+    rows.resolve(42);
     assert_eq!(rows.table(5).unwrap().u32(7, U), Some(2));
-    assert_eq!(rows.pending_ops().count(), 0);
     assert_eq!(rows.rev, 2);
 }
 

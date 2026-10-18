@@ -22,6 +22,7 @@
 //! the still-unanswered writes on top, and the server's sequencer, which
 //! has no pending ops, holds exactly the base.
 
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -89,6 +90,21 @@ impl Val {
     pub fn is_none(&self) -> bool {
         *self == Val::None
     }
+
+    /// The value as plain JSON: a number, a string (a packed text read),
+    /// a list; null for none. A column's typed reading is `query::value_json`.
+    pub fn json(&self) -> serde_json::Value {
+        use serde_json::{json, Value};
+        match self {
+            Val::None => Value::Null,
+            Val::U32(x) => json!(x),
+            Val::I64(x) => json!(x),
+            Val::F64(x) => json!(x),
+            Val::Str(x) => json!(x),
+            Val::List(l) => json!(l),
+            Val::Packed(p) => unpack(p).map_or(Value::Null, |t| json!(t)),
+        }
+    }
 }
 
 /// A column's storage.
@@ -109,11 +125,11 @@ std::thread_local! {
 }
 
 /// A packed cell's text; `None` for an empty cell or one that will not read.
-pub fn unpack(cell: &[u8]) -> Option<alloc::borrow::Cow<'_, str>> {
+pub fn unpack(cell: &[u8]) -> Option<Cow<'_, str>> {
     match cell {
         [] => None,
-        [0, s @ ..] => core::str::from_utf8(s).ok().map(alloc::borrow::Cow::Borrowed),
-        _ => TEXTS.with(|t| t.borrow_mut().cell(cell).ok().map(|c| alloc::borrow::Cow::Owned(c.into_owned()))),
+        [0, s @ ..] => core::str::from_utf8(s).ok().map(Cow::Borrowed),
+        _ => TEXTS.with(|t| t.borrow_mut().cell(cell).ok().map(|c| Cow::Owned(c.into_owned()))),
     }
 }
 
@@ -145,61 +161,47 @@ pub fn packed_len(cell: &[u8]) -> Option<usize> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    U32,
-    I64,
-    F64,
-    Str,
-    List,
-    Packed,
-}
-
-fn kind_of_wire(ty: u8) -> Option<Kind> {
+/// An empty column of a wire type's kind; `None` for a type no column holds.
+fn column_of_wire(ty: u8) -> Option<Data> {
     Some(match ty {
-        wire::U32 => Kind::U32,
-        wire::I64 => Kind::I64,
-        wire::F64 => Kind::F64,
-        wire::STR | wire::SYM => Kind::Str,
-        wire::ZSTR => Kind::Packed,
-        wire::LIST => Kind::List,
+        wire::U32 => Data::U32(Vec::new()),
+        wire::I64 => Data::I64(Vec::new()),
+        wire::F64 => Data::F64(Vec::new()),
+        wire::STR | wire::SYM => Data::Str(Vec::new()),
+        wire::ZSTR => Data::Packed(Vec::new()),
+        wire::LIST => Data::List(Vec::new()),
         _ => return None,
     })
 }
 
-fn kind_of_val(v: &Val) -> Option<Kind> {
+/// An empty column of a value's kind; `None` for a null.
+fn column_of_val(v: &Val) -> Option<Data> {
     Some(match v {
         Val::None => return None,
-        Val::U32(_) => Kind::U32,
-        Val::I64(_) => Kind::I64,
-        Val::F64(_) => Kind::F64,
-        Val::Str(_) => Kind::Str,
-        Val::List(_) => Kind::List,
-        Val::Packed(_) => Kind::Packed,
+        Val::U32(_) => Data::U32(Vec::new()),
+        Val::I64(_) => Data::I64(Vec::new()),
+        Val::F64(_) => Data::F64(Vec::new()),
+        Val::Str(_) => Data::Str(Vec::new()),
+        Val::List(_) => Data::List(Vec::new()),
+        Val::Packed(_) => Data::Packed(Vec::new()),
     })
 }
 
 impl Data {
-    fn new(kind: Kind, n: usize) -> Data {
-        match kind {
-            Kind::U32 => Data::U32(alloc::vec![wire::NONE; n]),
-            Kind::I64 => Data::I64(alloc::vec![wire::NONE64; n]),
-            Kind::F64 => Data::F64(alloc::vec![f64::NAN; n]),
-            Kind::Str => Data::Str(alloc::vec![String::new(); n]),
-            Kind::List => Data::List(alloc::vec![Vec::new(); n]),
-            Kind::Packed => Data::Packed(alloc::vec![Box::default(); n]),
+    /// `n` null cells of this column's kind.
+    fn nulls(&self, n: usize) -> Data {
+        match self {
+            Data::U32(_) => Data::U32(alloc::vec![wire::NONE; n]),
+            Data::I64(_) => Data::I64(alloc::vec![wire::NONE64; n]),
+            Data::F64(_) => Data::F64(alloc::vec![f64::NAN; n]),
+            Data::Str(_) => Data::Str(alloc::vec![String::new(); n]),
+            Data::List(_) => Data::List(alloc::vec![Vec::new(); n]),
+            Data::Packed(_) => Data::Packed(alloc::vec![Box::default(); n]),
         }
     }
 
-    fn kind(&self) -> Kind {
-        match self {
-            Data::U32(_) => Kind::U32,
-            Data::I64(_) => Kind::I64,
-            Data::F64(_) => Kind::F64,
-            Data::Str(_) => Kind::Str,
-            Data::List(_) => Kind::List,
-            Data::Packed(_) => Kind::Packed,
-        }
+    fn same_kind(&self, o: &Data) -> bool {
+        core::mem::discriminant(self) == core::mem::discriminant(o)
     }
 
     fn push_none(&mut self) {
@@ -244,10 +246,9 @@ impl Data {
         }
     }
 
-    /// Writes `v` at `slot`; a value of another kind than the column's is
-    /// written as null.
-    /// A cell written by moving its value in: a frame's string, list or packed text is copied
-    /// once (decoding it), not twice. Anything else is `set`.
+    /// A cell written by moving its value in: a frame's string, list or
+    /// packed text is copied once (decoding it), not twice. Anything else
+    /// is `set`.
     fn put(&mut self, slot: usize, v: Val) {
         match (self, v) {
             (Data::Str(d), Val::Str(x)) => d[slot] = x,
@@ -257,6 +258,8 @@ impl Data {
         }
     }
 
+    /// Writes `v` at `slot`; a value of another kind than the column's is
+    /// written as null.
     fn set(&mut self, slot: usize, v: &Val) {
         match (self, v) {
             (Data::U32(d), Val::U32(x)) => d[slot] = *x,
@@ -342,27 +345,23 @@ impl Table {
         }
     }
 
-    pub fn columns(&self) -> &[Column] {
-        &self.cols
-    }
-
     /// The column, created when absent. A frame from the server may
     /// change a column's kind (`replace`); a local write of another kind
     /// gets `None` and changes nothing.
-    fn column_mut(&mut self, col: u16, kind: Kind, replace: bool) -> Option<&mut Column> {
+    fn column_mut(&mut self, col: u16, kind: &Data, replace: bool) -> Option<&mut Column> {
         let n = self.ids.len();
         let i = match self.cols.binary_search_by_key(&col, |c| c.id) {
             Ok(i) => {
-                if self.cols[i].data.kind() != kind {
+                if !self.cols[i].data.same_kind(kind) {
                     if !replace {
                         return None;
                     }
-                    self.cols[i].data = Data::new(kind, n);
+                    self.cols[i].data = kind.nulls(n);
                 }
                 i
             }
             Err(i) => {
-                self.cols.insert(i, Column { id: col, data: Data::new(kind, n) });
+                self.cols.insert(i, Column { id: col, data: kind.nulls(n) });
                 self.at.clear();
                 for (k, c) in self.cols.iter().enumerate() {
                     if self.at.len() <= c.id as usize {
@@ -385,55 +384,31 @@ impl Table {
     }
 
     pub fn u32(&self, id: u32, col: u16) -> Option<u32> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::U32(v))) if v[s] != wire::NONE => Some(v[s]),
-            _ => None,
-        }
+        self.row(id)?.u32(col)
     }
 
     pub fn i64(&self, id: u32, col: u16) -> Option<i64> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::I64(v))) if v[s] != wire::NONE64 => Some(v[s]),
-            _ => None,
-        }
+        self.row(id)?.i64(col)
     }
 
     pub fn f64(&self, id: u32, col: u16) -> Option<f64> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::F64(v))) if !v[s].is_nan() => Some(v[s]),
-            _ => None,
-        }
+        self.row(id)?.f64(col)
     }
 
     /// A str cell, or a packed text cell sent raw; [`Table::text`] reads
     /// any text.
     pub fn str(&self, id: u32, col: u16) -> Option<&str> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(v[s].as_str()),
-            (Some(s), Some(Data::Packed(v))) => match &*v[s] {
-                [0, t @ ..] => core::str::from_utf8(t).ok(),
-                _ => None,
-            },
-            _ => None,
-        }
+        self.row(id)?.str(col)
     }
 
     /// A text cell, packed or not, read now.
-    pub fn text(&self, id: u32, col: u16) -> Option<alloc::borrow::Cow<'_, str>> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(alloc::borrow::Cow::Borrowed(v[s].as_str())),
-            (Some(s), Some(Data::Packed(v))) => unpack(&v[s]),
-            _ => None,
-        }
+    pub fn text(&self, id: u32, col: u16) -> Option<Cow<'_, str>> {
+        self.row(id)?.text(col)
     }
 
     /// A text cell's length in bytes, unread when it is packed.
     pub fn text_len(&self, id: u32, col: u16) -> Option<usize> {
-        match (self.slot(id), self.column(col).map(|c| &c.data)) {
-            (Some(s), Some(Data::Str(v))) if !v[s].is_empty() => Some(v[s].len()),
-            (Some(s), Some(Data::Packed(v))) => packed_len(&v[s]),
-            _ => None,
-        }
+        self.row(id)?.text_len(col)
     }
 
     /// Adds an empty row (every column null) and returns its slot; an
@@ -452,7 +427,7 @@ impl Table {
         // first row is one the client inserted itself, so every reader of
         // the row sees its id.
         if keyed(self.id)
-            && let Some(c) = self.column_mut(ID, Kind::U32, false)
+            && let Some(c) = self.column_mut(ID, &Data::U32(Vec::new()), false)
         {
             c.data.set(s, &Val::U32(id));
         }
@@ -480,16 +455,17 @@ impl Table {
         let s = self.slot(id)?;
         let old = self.column(col).map_or(Val::None, |c| c.data.raw(s));
         // A text written to a packed column is packed raw, not refused.
-        let packed = self.column(col).is_some_and(|c| c.data.kind() == Kind::Packed);
-        match kind_of_val(v).map(|k| if packed && k == Kind::Str { Kind::Packed } else { k }) {
+        let packed = self.column(col).is_some_and(|c| matches!(c.data, Data::Packed(_)));
+        match column_of_val(v) {
             Some(k) => {
-                if let Some(c) = self.column_mut(col, k, false) {
+                let k = if packed && matches!(k, Data::Str(_)) { Data::Packed(Vec::new()) } else { k };
+                if let Some(c) = self.column_mut(col, &k, false) {
                     c.data.set(s, v);
                 }
             }
             None => {
-                if let Some(i) = self.cols.iter().position(|c| c.id == col) {
-                    self.cols[i].data.set(s, &Val::None);
+                if let Some(c) = self.cols.iter_mut().find(|c| c.id == col) {
+                    c.data.set(s, &Val::None);
                 }
             }
         }
@@ -502,6 +478,22 @@ impl Table {
         self.cols.clear();
         self.at.clear();
     }
+
+    /// The table as one block of a body, every column as stored.
+    pub fn block(&self, w: &mut wire::BodyWriter) {
+        let mut b = w.block(self.id, self.len());
+        for c in &self.cols {
+            match &c.data {
+                Data::U32(v) => b.u32s(c.id, v.iter().copied()),
+                Data::I64(v) => b.i64s(c.id, v.iter().copied()),
+                Data::F64(v) => b.f64s(c.id, v.iter().copied()),
+                Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
+                Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
+                Data::Packed(v) => b.zstrs(c.id, v.iter().map(|c| &c[..])),
+            };
+        }
+        b.done();
+    }
 }
 
 /// A row of a table, by slot.
@@ -512,16 +504,57 @@ pub struct Row<'t> {
 }
 
 impl<'t> Row<'t> {
+    fn data(&self, col: u16) -> Option<&'t Data> {
+        self.t.column(col).map(|c| &c.data)
+    }
+
     pub fn u32(&self, col: u16) -> Option<u32> {
-        match self.t.column(col).map(|c| &c.data) {
-            Some(Data::U32(v)) if v[self.slot] != wire::NONE => Some(v[self.slot]),
+        match self.data(col)? {
+            Data::U32(v) if v[self.slot] != wire::NONE => Some(v[self.slot]),
             _ => None,
         }
     }
 
+    pub fn i64(&self, col: u16) -> Option<i64> {
+        match self.data(col)? {
+            Data::I64(v) if v[self.slot] != wire::NONE64 => Some(v[self.slot]),
+            _ => None,
+        }
+    }
+
+    pub fn f64(&self, col: u16) -> Option<f64> {
+        match self.data(col)? {
+            Data::F64(v) if !v[self.slot].is_nan() => Some(v[self.slot]),
+            _ => None,
+        }
+    }
+
+    /// A str cell, or a packed text cell sent raw; [`Row::text`] reads any text.
     pub fn str(&self, col: u16) -> Option<&'t str> {
-        match self.t.column(col).map(|c| &c.data) {
-            Some(Data::Str(v)) if !v[self.slot].is_empty() => Some(v[self.slot].as_str()),
+        match self.data(col)? {
+            Data::Str(v) if !v[self.slot].is_empty() => Some(v[self.slot].as_str()),
+            Data::Packed(v) => match &*v[self.slot] {
+                [0, t @ ..] => core::str::from_utf8(t).ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A text cell, packed or not, read now.
+    pub fn text(&self, col: u16) -> Option<Cow<'t, str>> {
+        match self.data(col)? {
+            Data::Str(v) if !v[self.slot].is_empty() => Some(Cow::Borrowed(v[self.slot].as_str())),
+            Data::Packed(v) => unpack(&v[self.slot]),
+            _ => None,
+        }
+    }
+
+    /// A text cell's length in bytes, unread when it is packed.
+    pub fn text_len(&self, col: u16) -> Option<usize> {
+        match self.data(col)? {
+            Data::Str(v) if !v[self.slot].is_empty() => Some(v[self.slot].len()),
+            Data::Packed(v) => packed_len(&v[self.slot]),
             _ => None,
         }
     }
@@ -612,6 +645,12 @@ impl Rows {
         self.tables.values()
     }
 
+    /// Every row of a table as `(table, id)`, in slot order; none when the
+    /// table is absent.
+    pub fn each(&self, id: u16) -> impl Iterator<Item = (&Table, u32)> {
+        self.table(id).into_iter().flat_map(|t| t.ids().iter().map(move |&id| (t, id)))
+    }
+
     fn table_mut(&mut self, id: u16) -> &mut Table {
         self.tables.entry(id).or_insert_with(|| Table::new(id))
     }
@@ -675,8 +714,8 @@ impl Rows {
                 if c.nrows() != n {
                     return Err(Error::Shape);
                 }
-                let Some(kind) = kind_of_wire(c.ty) else { continue };
-                let Some(col) = t.column_mut(c.id, kind, true) else { continue };
+                let Some(kind) = column_of_wire(c.ty) else { continue };
+                let Some(col) = t.column_mut(c.id, &kind, true) else { continue };
                 for (i, &s) in slots.iter().enumerate() {
                     col.data.put(s, Val::from_wire(c.value(i)));
                 }
@@ -767,29 +806,9 @@ impl Rows {
         moved
     }
 
-    /// Applies writes to the base directly (the sequencer's own cache,
-    /// which has no pending ops).
-    pub fn apply(&mut self, writes: &[Write]) -> Moved {
-        let mut moved = Moved::default();
-        let mut undo = Vec::new();
-        for w in writes {
-            self.apply_write(w, &mut undo);
-            note(&mut moved, w);
-        }
-        moved
-    }
-
-    /// The server took op `op_id`: its PATCH already carried the write.
-    pub fn settle(&mut self, op_id: u64) -> Moved {
-        self.drop_pending(op_id)
-    }
-
-    /// The server refused op `op_id`: its writes are taken back.
-    pub fn rollback(&mut self, op_id: u64) -> Moved {
-        self.drop_pending(op_id)
-    }
-
-    fn drop_pending(&mut self, op_id: u64) -> Moved {
+    /// The server answered op `op_id`: its pending writes go. An ACK's
+    /// PATCH already carried them into the base; a NACK's never will.
+    pub fn resolve(&mut self, op_id: u64) -> Moved {
         let mut moved = Moved::default();
         let Some(i) = self.pending.iter().position(|p| p.op_id == op_id) else { return moved };
         let pending = core::mem::take(&mut self.pending);
@@ -801,10 +820,6 @@ impl Rows {
         self.pending.remove(i);
         self.rewind(&mut moved);
         moved
-    }
-
-    pub fn pending_ops(&self) -> impl Iterator<Item = u64> + '_ {
-        self.pending.iter().map(|p| p.op_id)
     }
 
     /// A fresh id for a row inserted before the server names it.
@@ -825,19 +840,7 @@ impl Rows {
         // BOOT or resumed HELLO brings them fresh.
         let session = |id: u16| schema::table_def(id).is_some_and(|t| t.session);
         for t in base.tables.values().filter(|t| !session(t.id)) {
-            let n = t.len();
-            let mut b = w.block(t.id, n);
-            for c in &t.cols {
-                match &c.data {
-                    Data::U32(v) => b.u32s(c.id, v.iter().copied()),
-                    Data::I64(v) => b.i64s(c.id, v.iter().copied()),
-                    Data::F64(v) => b.f64s(c.id, v.iter().copied()),
-                    Data::Str(v) => b.strs(c.id, v.iter().map(String::as_str)),
-                    Data::List(v) => b.lists(c.id, v.iter().map(Vec::as_slice)),
-                    Data::Packed(v) => b.zstrs(c.id, v.iter().map(|c| &c[..])),
-                };
-            }
-            b.done();
+            t.block(&mut w);
         }
         w.finish()
     }

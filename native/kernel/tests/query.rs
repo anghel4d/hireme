@@ -10,6 +10,8 @@ use serde_json::{json, Value as Json};
 
 const N: u32 = 300;
 const REGIONS: [&str; 4] = ["Europe", "Asia", "", "Americas"];
+/// A browser session's grants: every domain both ways.
+const OPERATOR: Grants = Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true };
 
 fn kernel() -> Kernel {
     let mut w = wire::BodyWriter::new();
@@ -39,7 +41,7 @@ fn kernel() -> Kernel {
         .u32s(C::AS_OF, [739_000, 739_100, 739_100].into_iter());
     b.done();
     let mut k = Kernel::new();
-    k.set_grants(Grants::operator());
+    k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
     k
 }
@@ -206,18 +208,14 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     assert_eq!(refused(&k, json!({"op": "find", "table": "acct_keys"})), schema::refusal::NOT_FOUND);
     assert_eq!(refused(&op, json!({"op": "find", "table": "accounts"})), schema::refusal::NOT_FOUND);
     // Until its WELCOME, a kernel reads nothing.
-    assert_eq!(refused(&kernel_with(Grants::default()), json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
+    let mut blank = kernel();
+    blank.set_grants(Grants::default());
+    assert_eq!(refused(&blank, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
     // Hostile values refuse, never trap: an offset split inside a character.
     let k = kernel();
     for w in [json!({"retrieved_at": {"ge": "2023-11-14T22:13:20+0é:0"}}), json!({"id": [1, 2]}), json!({"url": {"in": [null]}})] {
         let _ = k.query(&json!({"op": "find", "table": "sources", "where": w}));
     }
-}
-
-fn kernel_with(g: Grants) -> Kernel {
-    let mut k = kernel();
-    k.set_grants(g);
-    k
 }
 
 /// Texts the server packs stay packed in the replica and its snapshot and
@@ -236,7 +234,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     b.u32s(S::ID, [1, 2].into_iter()).strs(S::URL, ["https://a.example/1", "https://b.example/2"].into_iter()).zstrs(S::DOC, [&packed[..], &raw[..]].into_iter());
     b.done();
     let mut k = Kernel::new();
-    k.set_grants(Grants::operator());
+    k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
     let docs = |k: &Kernel| q(k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"].clone();
     assert_eq!(docs(&k), json!([{"id": 1, "doc": doc}, {"id": 2, "doc": "short note"}]));
@@ -246,7 +244,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     let snap = k.snapshot();
     assert!(snap.len() < doc.len() / 4, "snapshot {} B for a {} B text", snap.len(), doc.len());
     let mut again = Kernel::new();
-    again.set_grants(Grants::operator());
+    again.set_grants(OPERATOR);
     again.restore(&snap).unwrap();
     assert_eq!(docs(&again), docs(&k));
     // A predicted write, then its NACK: the packed cell comes back as it was.
@@ -296,7 +294,7 @@ fn live_views_take_deltas_and_a_resume_empties_them_first() {
     k.patch(&w.finish(), 5).unwrap();
     assert_eq!(ids(&k), vec![json!(1)]);
     let mut again = Kernel::new();
-    again.set_grants(Grants::operator());
+    again.set_grants(OPERATOR);
     again.restore(&k.snapshot()).unwrap();
     assert_eq!(q(&again, json!({"op": "find", "table": "acct_factors"}))["rows"], json!([]));
 }

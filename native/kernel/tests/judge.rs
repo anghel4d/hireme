@@ -30,6 +30,16 @@ fn app(id: u32, stage: u8, company: &'static str) -> App {
     App { id, stage, company, role: "Software Engineer", batch: None, corp: None, stage_on: TODAY }
 }
 
+impl App {
+    fn batch(self, b: u32) -> App {
+        App { batch: Some(b), ..self }
+    }
+
+    fn corp(self, c: u32) -> App {
+        App { corp: Some(c), ..self }
+    }
+}
+
 /// A kernel booted with these applications, batches `(id, fire)` and
 /// lineages `(id, corporation, opened_on, rewrites)`.
 fn kernel(apps: &[App], batches: &[(u32, u8)], lineages: &[(u32, u32, i32, bool)]) -> Kernel {
@@ -127,9 +137,7 @@ fn a_move_writes_stage_pips_day_and_an_event() {
 
 #[test]
 fn batches_and_fire_hold() {
-    let mut a = app(2, S::FIRE_READY, "Acme");
-    a.batch = Some(9);
-    let mut k = kernel(&[app(1, S::GATED, "Acme"), a], &[(9, enums::fire::HOLD)], &[]);
+    let mut k = kernel(&[app(1, S::GATED, "Acme"), app(2, S::FIRE_READY, "Acme").batch(9)], &[(9, enums::fire::HOLD)], &[]);
     assert_eq!(code(k.judge(&stage_cmd(1, S::IN_BATCH), &ctx())), refusal::STAGE);
     assert_eq!(code(k.judge(&stage_cmd(2, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
     // open_fire is named only by its own command.
@@ -139,11 +147,9 @@ fn batches_and_fire_hold() {
     assert_eq!(cell(&fx, table::APPLICATIONS, A::STAGE), Some(&EVal::Val(Val::U32(S::OPEN_FIRE as u32))));
     assert_eq!(code(k.judge(&op(wire::COMMAND, command::OPEN_FIRE, 1, |_| {}), &ctx())), refusal::STAGE);
 
-    let mut a = app(2, S::FIRE_READY, "Acme");
-    a.batch = Some(9);
     // A batch the operator already fired opens nothing for an application
     // an agent moves into it: submitted only follows open_fire.
-    let mut opened = kernel(&[a, app(3, S::DISCOVERED, "Acme")], &[(9, enums::fire::OPEN_FIRE)], &[]);
+    let mut opened = kernel(&[app(2, S::FIRE_READY, "Acme").batch(9), app(3, S::DISCOVERED, "Acme")], &[(9, enums::fire::OPEN_FIRE)], &[]);
     assert_eq!(code(opened.judge(&stage_cmd(2, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
     let join = op(wire::PUT, table::APPLICATIONS, 3, |o| {
         o.u32(A::BATCH_ID, 9);
@@ -154,11 +160,7 @@ fn batches_and_fire_hold() {
 
 #[test]
 fn heat_defers_a_second_seat_until_overridden() {
-    let mut hot = app(1, S::SUBMITTED, "Acme");
-    hot.batch = Some(9);
-    let mut next = app(2, S::DRAFT_READY, "ACME");
-    next.batch = Some(9);
-    let mut k = kernel(&[hot, next], &[(9, enums::fire::HOLD)], &[]);
+    let mut k = kernel(&[app(1, S::SUBMITTED, "Acme").batch(9), app(2, S::DRAFT_READY, "ACME").batch(9)], &[(9, enums::fire::HOLD)], &[]);
     let r = k.judge(&stage_cmd(2, S::FIRE_READY), &ctx()).unwrap_err();
     assert_eq!(r.code, refusal::HEAT);
     assert_eq!(r.data["reason"], "company_cap");
@@ -183,7 +185,7 @@ fn heat_defers_a_second_seat_until_overridden() {
     k.predict(&reason, &ctx()).unwrap();
     assert!(k.judge(&stage_cmd(2, S::FIRE_READY), &ctx()).is_ok());
     // A different, unloaded company is never held.
-    let mut other = kernel(&[app(1, S::SUBMITTED, "Acme"), { let mut a = app(3, S::DRAFT_READY, "Other"); a.batch = Some(9); a }], &[(9, 0)], &[]);
+    let mut other = kernel(&[app(1, S::SUBMITTED, "Acme"), app(3, S::DRAFT_READY, "Other").batch(9)], &[(9, 0)], &[]);
     assert!(other.judge(&stage_cmd(3, S::FIRE_READY), &ctx()).is_ok());
 }
 
@@ -214,9 +216,7 @@ fn overlay(app: u32, target: u32) -> Vec<u8> {
 
 #[test]
 fn a_first_overlay_opens_the_corporations_lineage() {
-    let mut a = app(1, S::DRAFT_READY, "Acme");
-    a.corp = Some(40);
-    let mut k = kernel(&[a, app(2, S::GATED, "Nobody")], &[], &[]);
+    let mut k = kernel(&[app(1, S::DRAFT_READY, "Acme").corp(40), app(2, S::GATED, "Nobody")], &[], &[]);
     let fx = k.judge(&overlay(1, 0), &ctx()).unwrap();
     assert_eq!(fx[0].table, table::CV_LINEAGES);
     assert_eq!(fx[0].id, 0);
@@ -234,19 +234,16 @@ fn a_first_overlay_opens_the_corporations_lineage() {
 
 #[test]
 fn lineage_windows() {
-    let mut a = app(1, S::DRAFT_READY, "Acme");
-    a.corp = Some(40);
+    let acme = || app(1, S::DRAFT_READY, "Acme").corp(40);
     // Rewrites off: adding is fine, rewriting an existing overlay is not.
-    let mut k = kernel(&[a], &[], &[(7, 40, TODAY - 10, false)]);
+    let mut k = kernel(&[acme()], &[], &[(7, 40, TODAY - 10, false)]);
     assert!(k.judge(&overlay(1, 0), &ctx()).is_ok());
     k.predict(&overlay(1, 0), &ctx()).unwrap();
     let existing = k.rows().table(table::CV_OVERLAYS).unwrap().ids()[0];
     assert_eq!(code(k.judge(&overlay(1, existing), &ctx())), refusal::LINEAGE_BUSY);
     assert_eq!(code(k.judge(&op(wire::DROP, table::CV_OVERLAYS, existing, |_| {}), &ctx())), refusal::LINEAGE_BUSY);
     // Another application of the same company may not overlay that line again.
-    let mut other = app(2, S::DRAFT_READY, "Acme");
-    other.corp = Some(40);
-    let mut k2 = kernel(&[{ let mut a = app(1, S::DRAFT_READY, "Acme"); a.corp = Some(40); a }, other], &[], &[(7, 40, TODAY - 10, false)]);
+    let mut k2 = kernel(&[acme(), app(2, S::DRAFT_READY, "Acme").corp(40)], &[], &[(7, 40, TODAY - 10, false)]);
     k2.predict(&overlay(1, 0), &ctx()).unwrap();
     assert_eq!(code(k2.judge(&overlay(2, 0), &ctx())), refusal::LINEAGE_BUSY);
     // Too early for the next generation.
@@ -257,15 +254,11 @@ fn lineage_windows() {
     assert_eq!((r.code, r.data["days_left"].as_i64(), r.data["opened_on"].as_str()), (refusal::COOLDOWN, Some(80), Some("2024-09-24")));
 
     // Past the window: writes wait, the next generation opens additive.
-    let mut a = app(1, S::DRAFT_READY, "Acme");
-    a.corp = Some(40);
-    let mut late = kernel(&[a], &[], &[(7, 40, TODAY - 90, true)]);
+    let mut late = kernel(&[acme()], &[], &[(7, 40, TODAY - 90, true)]);
     let r = late.judge(&overlay(1, 0), &ctx()).unwrap_err();
     assert_eq!((r.code, r.data["opened_on"].as_str(), r.data["need"].as_str()), (refusal::COOLDOWN, Some("2024-07-06"), Some("open_generation")));
     // Dropping an overlay once the window has passed waits too.
-    let mut a = app(1, S::DRAFT_READY, "Acme");
-    a.corp = Some(40);
-    let mut aged = kernel(&[a], &[], &[(7, 40, TODAY - 10, true)]);
+    let mut aged = kernel(&[acme()], &[], &[(7, 40, TODAY - 10, true)]);
     aged.predict(&overlay(1, 0), &ctx()).unwrap();
     let existing = aged.rows().table(table::CV_OVERLAYS).unwrap().ids()[0];
     aged.pin_today(TODAY + 80);
@@ -323,9 +316,7 @@ fn a_sentinel_cell_is_refused_as_the_server_refuses_it() {
 
 #[test]
 fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() {
-    let mut a = app(1, S::DRAFT_READY, "Acme");
-    a.corp = Some(40);
-    let mut k = kernel(&[a], &[], &[]);
+    let mut k = kernel(&[app(1, S::DRAFT_READY, "Acme").corp(40)], &[], &[]);
     // A note's event is the events table's first row, inserted by the client.
     let note = op(wire::COMMAND, command::NOTE, 1, |o| {
         o.u32(param::note::STAGE, S::GATED as u32).str(param::note::BODY, "called");
@@ -386,7 +377,6 @@ fn scoreboard_counts_only_submissions() {
     assert_eq!(board["scoreboard"]["submitted"], 3, "{board}");
     assert_eq!(board["scoreboard"]["submitted_today"], 3);
 }
-
 
 /// The atlas lens lists presets in the document's key order: the order they
 /// are declared in on every build, which needs serde_json's preserve_order

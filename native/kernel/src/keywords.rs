@@ -328,34 +328,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_by_count_then_bytes() {
+    fn extracts_by_count_then_bytes_and_keeps_the_top() {
         let listing = "We build Rust systems. Rust, C++ and Node.js; rust again! GPU kernels for the GPU team. \
                        2026 and 3.14 are numbers. The the the.";
         let k = extract(listing, Format::Text);
-        assert_eq!(k[0], "rust");
-        assert_eq!(k[1], "gpu");
-        assert!(k.contains(&String::from("c++")));
-        assert!(k.contains(&String::from("node.js")));
-        assert!(k.contains(&String::from("systems")));
+        assert_eq!(&k[..2], ["rust", "gpu"]);
+        for w in ["c++", "node.js", "systems"] {
+            assert!(k.contains(&String::from(w)), "{w}");
+        }
         assert!(!k.iter().any(|w| w == "the" || w == "2026" || w == "3.14" || w.ends_with('.')));
-        let tail: Vec<&String> = k.iter().skip(2).collect();
-        let mut sorted = tail.clone();
-        sorted.sort();
-        assert_eq!(tail, sorted);
-    }
-
-    #[test]
-    fn keeps_the_top_only_and_joins() {
+        assert!(k[2..].windows(2).all(|w| w[0] < w[1]), "ties by bytes: {k:?}");
         let many: String = (0..40).map(|i| alloc::format!("word{i:02} ")).collect();
         let k = extract(&many, Format::Text);
-        assert_eq!(k.len(), TOP);
-        assert_eq!(k[0], "word00");
-        assert_eq!(join(&k[..2]), "word00\u{1f}word01");
+        assert_eq!((k.len(), k[0].as_str(), join(&k[..2]).as_str()), (TOP, "word00", "word00\u{1f}word01"));
         assert!(extract("", Format::Text).is_empty());
     }
 
     #[test]
     fn letters_markup_and_abbreviations() {
+        // The binary searches below need their tables sorted.
+        assert!(STOP.windows(2).all(|w| w[0] < w[1]));
+        assert!(ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
         let k = extract("Zürich Zu\u{308}rich Müller développeur C# C# F# ### +++ A+ a+ e.g. e.g. i.e. u.s. go go ai ai", Format::Text);
         assert_eq!(k, ["c#", "zurich", "developpeur", "f#", "muller"]);
         let style = extract("<style>.a{color:red}</style><SCRIPT>var foo = bar;</script><!-- a > comment --><p>kernel kernel</p>", Format::Html);
@@ -384,12 +377,6 @@ mod tests {
         assert_eq!(named, ["muller", "developpeur", "don", "kernel", "quoted"]);
         let md = extract("### Kernels\n[apply here](https://acme.example/apply) or see www.acme.example; kernels", Format::Markdown);
         assert_eq!(md, ["kernels", "apply", "see"]);
-    }
-
-    #[test]
-    fn the_lookup_tables_are_sorted() {
-        assert!(STOP.windows(2).all(|w| w[0] < w[1]));
-        assert!(ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

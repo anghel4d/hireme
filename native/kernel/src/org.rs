@@ -1,6 +1,7 @@
 //! What the heat governor reads off a company name and a role title:
 //! the size tier (org breadth, not Life-EV), the department, and the
-//! role family with seniority stripped.
+//! role family with seniority stripped. Every reader takes the text
+//! normalized (`text::normalize`).
 //!
 //! Size is breadth: a mega employer can take a few roles across
 //! departments, a small shop takes one, maybe two after decay. The named
@@ -8,7 +9,6 @@
 //! labs word in its name is `Mid`, everything else `Small`.
 
 use crate::lexicon::{self, Hits};
-use crate::text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Size {
@@ -20,12 +20,12 @@ pub enum Size {
 
 impl Size {
     pub fn name(self) -> &'static str {
-        match self {
-            Size::Mega => "mega",
-            Size::Large => "large",
-            Size::Mid => "mid",
-            Size::Small => "small",
-        }
+        ["mega", "large", "mid", "small"][self as usize]
+    }
+
+    /// The size tier from a name's [`Hits`], the largest first.
+    pub fn of_hits(h: Hits) -> Size {
+        [(lexicon::MEGA, Size::Mega), (lexicon::LARGE, Size::Large), (lexicon::MID, Size::Mid)].into_iter().find(|(g, _)| h.has(*g)).map_or(Size::Small, |(_, s)| s)
     }
 }
 
@@ -43,15 +43,22 @@ pub enum Department {
 
 impl Department {
     pub fn name(self) -> &'static str {
-        match self {
-            Department::Infra => "infra",
-            Department::Research => "research",
-            Department::Security => "security",
-            Department::Data => "data",
-            Department::Product => "product",
-            Department::Eng => "eng",
-            Department::Other => "other",
-        }
+        ["infra", "research", "security", "data", "product", "eng", "other"][self as usize]
+    }
+
+    /// The department from a title's [`Hits`], first match wins.
+    pub fn of_hits(h: Hits) -> Department {
+        [
+            (lexicon::DEPT_RESEARCH, Department::Research),
+            (lexicon::DEPT_INFRA, Department::Infra),
+            (lexicon::DEPT_SECURITY, Department::Security),
+            (lexicon::DEPT_DATA, Department::Data),
+            (lexicon::DEPT_PRODUCT, Department::Product),
+            (lexicon::DEPT_ENG, Department::Eng),
+        ]
+        .into_iter()
+        .find(|(g, _)| h.has(*g))
+        .map_or(Department::Other, |(_, d)| d)
     }
 }
 
@@ -69,87 +76,9 @@ pub enum Family {
 
 impl Family {
     pub fn name(self) -> &'static str {
-        match self {
-            Family::SoftwareEngineer => "software_engineer",
-            Family::ResearchEngineer => "research_engineer",
-            Family::ResearchScientist => "research_scientist",
-            Family::Sre => "sre",
-            Family::DataEngineer => "data_engineer",
-            Family::SecurityEngineer => "security_engineer",
-            Family::Other => "other",
-        }
+        ["software_engineer", "research_engineer", "research_scientist", "sre", "data_engineer", "security_engineer", "other"][self as usize]
     }
-}
 
-/// The size tier of a company by name. Any word of the name, or the name
-/// with its spaces removed ("Deep Mind" → "deepmind"), can name a tier.
-pub fn size(company: &str) -> Size {
-    size_normalized(&text::normalize(company))
-}
-
-/// [`size`] of an already normalized name.
-pub fn size_normalized(n: &str) -> Size {
-    Size::of_hits(Hits::of(n))
-}
-
-impl Size {
-    /// The size tier from a name's [`Hits`].
-    pub fn of_hits(h: Hits) -> Size {
-        if h.has(lexicon::MEGA) {
-            Size::Mega
-        } else if h.has(lexicon::LARGE) {
-            Size::Large
-        } else if h.has(lexicon::MID) {
-            Size::Mid
-        } else {
-            Size::Small
-        }
-    }
-}
-
-pub fn company_key(company: &str) -> alloc::string::String {
-    text::normalize(company)
-}
-
-/// The department a role title points at, first match wins.
-pub fn department(role: &str) -> Department {
-    department_normalized(&text::normalize(role))
-}
-
-/// [`department`] of an already normalized title.
-pub fn department_normalized(n: &str) -> Department {
-    Department::of_hits(Hits::of(n))
-}
-
-impl Department {
-    /// The department from a title's [`Hits`], first match wins.
-    pub fn of_hits(h: Hits) -> Department {
-        [
-            (lexicon::DEPT_RESEARCH, Department::Research),
-            (lexicon::DEPT_INFRA, Department::Infra),
-            (lexicon::DEPT_SECURITY, Department::Security),
-            (lexicon::DEPT_DATA, Department::Data),
-            (lexicon::DEPT_PRODUCT, Department::Product),
-            (lexicon::DEPT_ENG, Department::Eng),
-        ]
-        .into_iter()
-        .find(|(g, _)| h.has(*g))
-        .map_or(Department::Other, |(_, d)| d)
-    }
-}
-
-/// The role family of a title once seniority words are stripped, so
-/// "Senior Software Engineer" and "Staff Software Engineer" are clones.
-pub fn family(role: &str) -> Family {
-    family_normalized(&text::normalize(role))
-}
-
-/// [`family`] of an already normalized title.
-pub fn family_normalized(n: &str) -> Family {
-    Family::of_hits(Hits::family(n))
-}
-
-impl Family {
     /// The family from a title's family [`Hits`], first match wins.
     pub fn of_hits(h: Hits) -> Family {
         [
@@ -166,33 +95,54 @@ impl Family {
     }
 }
 
+/// The size tier of a company by its normalized name. Any word of the
+/// name, or the name with its spaces removed ("Deep Mind" → "deepmind"),
+/// can name a tier.
+pub fn size(n: &str) -> Size {
+    Size::of_hits(Hits::of(n))
+}
+
+/// The department a normalized role title points at, first match wins.
+pub fn department(n: &str) -> Department {
+    Department::of_hits(Hits::of(n))
+}
+
+/// The role family of a normalized title once seniority words are
+/// stripped, so "Senior Software Engineer" and "Staff Software Engineer"
+/// are clones.
+pub fn family(n: &str) -> Family {
+    Family::of_hits(Hits::family(n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::normalize as n;
 
     #[test]
-    fn sizes() {
-        assert_eq!(size("Google DeepMind"), Size::Mega);
-        assert_eq!(size("Deep Mind"), Size::Large);
-        assert_eq!(size("Anthropic"), Size::Large);
-        assert_eq!(size("Acme Systems"), Size::Mid);
-        assert_eq!(size("Acme"), Size::Small);
-        assert_eq!(size(""), Size::Small);
-    }
-
-    #[test]
-    fn departments_and_families() {
-        assert_eq!(department("Research Engineer, Interpretability"), Department::Research);
-        assert_eq!(department("Infrastructure Engineer"), Department::Infra);
-        assert_eq!(department("iOS Engineer"), Department::Product);
-        assert_eq!(department("Software Engineer"), Department::Eng);
-        assert_eq!(department("Recruiter"), Department::Other);
-        assert_eq!(family("Senior Software Engineer"), family("Staff Software Engineer, L6"));
-        assert_eq!(family("Sr. Research Scientist"), Family::ResearchScientist);
-        assert_eq!(family("SRE II"), Family::Sre);
-        assert_eq!(family("Account Executive"), Family::Other);
-        assert_eq!(family("Engineering Manager"), Family::SoftwareEngineer);
-        assert_eq!(family("Senior Engineers"), Family::SoftwareEngineer);
-        assert_eq!(department("Swedish Teacher"), Department::Other);
+    fn sizes_departments_and_families() {
+        for (name, want) in [("Google DeepMind", Size::Mega), ("Deep Mind", Size::Large), ("Anthropic", Size::Large), ("Acme Systems", Size::Mid), ("Acme", Size::Small), ("", Size::Small)] {
+            assert_eq!(size(&n(name)), want, "{name}");
+        }
+        for (title, want) in [
+            ("Research Engineer, Interpretability", Department::Research),
+            ("Infrastructure Engineer", Department::Infra),
+            ("iOS Engineer", Department::Product),
+            ("Software Engineer", Department::Eng),
+            ("Recruiter", Department::Other),
+            ("Swedish Teacher", Department::Other),
+        ] {
+            assert_eq!(department(&n(title)), want, "{title}");
+        }
+        for (title, want) in [
+            ("Sr. Research Scientist", Family::ResearchScientist),
+            ("SRE II", Family::Sre),
+            ("Account Executive", Family::Other),
+            ("Engineering Manager", Family::SoftwareEngineer),
+            ("Senior Engineers", Family::SoftwareEngineer),
+        ] {
+            assert_eq!(family(&n(title)), want, "{title}");
+        }
+        assert_eq!(family(&n("Senior Software Engineer")), family(&n("Staff Software Engineer, L6")));
     }
 }

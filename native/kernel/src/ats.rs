@@ -26,23 +26,10 @@ pub enum Vendor {
 
 impl Vendor {
     pub fn name(self) -> &'static str {
-        match self {
-            Vendor::Greenhouse => "greenhouse",
-            Vendor::Lever => "lever",
-            Vendor::Ashby => "ashby",
-            Vendor::Workday => "workday",
-            Vendor::Icims => "icims",
-            Vendor::SmartRecruiters => "smartrecruiters",
-            Vendor::Workable => "workable",
-            Vendor::Jobvite => "jobvite",
-            Vendor::Taleo => "taleo",
-            Vendor::SuccessFactors => "successfactors",
-            Vendor::BambooHr => "bamboohr",
-            Vendor::Rippling => "rippling",
-            Vendor::Eightfold => "eightfold",
-            Vendor::Gem => "gem",
-            Vendor::Unknown => "unknown",
-        }
+        [
+            "greenhouse", "lever", "ashby", "workday", "icims", "smartrecruiters", "workable", "jobvite", "taleo", "successfactors",
+            "bamboohr", "rippling", "eightfold", "gem", "unknown",
+        ][self as usize]
     }
 }
 
@@ -232,14 +219,9 @@ mod tests {
         assert_eq!(t("https://acme.eightfold.ai/careers"), (Vendor::Eightfold, Some("acme")));
         assert_eq!(t("https://www.gem.com/acme"), (Vendor::Gem, Some("acme")));
         assert_eq!(t("https://user@JOBS.LEVER.CO:443/Acme?x=1#y"), (Vendor::Lever, Some("acme")));
-    }
-
-    #[test]
-    fn unknown_hosts_and_lookalikes() {
-        assert_eq!(parse("https://acme.com/careers"), Ats::UNKNOWN);
-        assert_eq!(parse("https://notlever.co/acme"), Ats::UNKNOWN);
-        assert_eq!(parse("https://rippling.com/careers").vendor, Vendor::Unknown);
-        assert_eq!(parse(""), Ats::UNKNOWN);
-        assert_eq!(parse("not a url"), Ats::UNKNOWN);
+        // Unknown hosts and lookalikes carry no vendor and no tenant.
+        for unknown in ["https://acme.com/careers", "https://notlever.co/acme", "https://rippling.com/careers", "", "not a url"] {
+            assert_eq!(parse(unknown), Ats::UNKNOWN, "{unknown}");
+        }
     }
 }

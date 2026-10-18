@@ -76,10 +76,11 @@ fn every_text_reader_survives_any_text() {
         bounded("text", seed, limit, || {
             let n = text::normalize(&a);
             assert_eq!(text::normalize(&n), n, "normalize is idempotent (seed {seed})");
-            let _ = (text::fold(&a), text::codes(&b), text::word(&n, "rust"), text::starts(&n, "eng"));
+            let _ = (text::fold(&a), text::codes(&b));
         });
         bounded("org/ats", seed, limit, || {
-            let _ = (org::size(&a), org::department(&b), org::family(&b), org::company_key(&a));
+            let (company, role) = (text::normalize(&a), text::normalize(&b));
+            let _ = (org::size(&company), org::department(&role), org::family(&role));
             let _ = (ats::parse(&c), ats::parse(&format!("https://{c}/{d}?for={a}")));
         });
         bounded("score", seed, limit, || {
@@ -127,7 +128,7 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             .map(|i| match i % 3 {
                 0 => texts[i][8].clone(),
                 k => {
-                    let s = Stage::from_u8((i % 10) as u8).unwrap();
+                    let s = Stage::from_u32((i % 10) as u32).unwrap();
                     let rail = if k == 1 { pipeline::initial(s) } else { pipeline::move_to(&pipeline::initial(Stage::Discovered), s) };
                     String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
                 }

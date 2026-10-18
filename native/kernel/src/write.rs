@@ -19,8 +19,8 @@ use schema::{flag, refusal, table, ColDef, Cond, TableDef, Type};
 use serde_json::{json, Value as Json};
 use wire::{Op, Value};
 
-use crate::judge::{Ctx, EVal, Refusal, Row};
-use crate::query::{enum_values, has, ty, value_json};
+use crate::judge::{cell_val, no, Ctx, EVal, Refusal, Row};
+use crate::query::{cond_holds, enum_values, has, key_doc, live, ty, value_json};
 use crate::rows::{Rows, Table, Val};
 use crate::Day;
 
@@ -31,47 +31,34 @@ const TRUSTED_ONLY: [&str; 4] = ["culture", "rating", "rating_count", "wlb_ratin
 /// A source's identity, fixed once written.
 const FIXED: [&str; 5] = ["url", "host", "publisher", "title", "kind"];
 
-fn no(code: u16, data: Json) -> Refusal {
-    Refusal { code, data }
-}
-
 /// Where a put lands: its table, and the row (0 for an insert).
 pub(crate) struct Plan {
     pub td: &'static TableDef,
     pub target: u32,
 }
 
-fn live(t: &Table, td: &TableDef, id: u32) -> bool {
-    t.has(id) && (!td.soft_delete || td.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none()))
+/// A table an op may put to or drop from: replicated, or the server's.
+fn writable_table(id: u16) -> Result<&'static TableDef, Refusal> {
+    schema::table_def(id)
+        .filter(|t| matches!(t.residency, schema::Residency::Resident | schema::Residency::Server))
+        .ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": id})))
 }
 
-fn cond_holds(td: &TableDef, value: &dyn Fn(&ColDef) -> Val, c: &Cond) -> bool {
-    let (Cond::Eq(n, _) | Cond::Null(n) | Cond::NotNull(n)) = c;
-    let Some(col) = td.col_named(n) else { return false };
-    let v = value(col);
-    match c {
-        Cond::Null(_) => v.is_none(),
-        Cond::NotNull(_) => !v.is_none(),
-        Cond::Eq(_, want) => match (ty(col), &v) {
-            (Type::Enum, Val::U32(x)) => enum_values(col).get(*x as usize) == Some(want),
-            (_, Val::Str(s)) => s == want,
-            (_, Val::U32(x)) => want.parse() == Ok(*x),
-            _ => false,
-        },
-    }
+/// An op carrying EXPECT_REV names the row's rev.
+fn expect_rev(op: &Op, td: &TableDef, rev: i64) -> Result<(), Refusal> {
+    if op.flags & wire::EXPECT_REV != 0 && op.expect_rev as i64 != rev { Err(no(refusal::REV, json!({"table": td.name, "rev": rev}))) } else { Ok(()) }
 }
 
-fn cell_val(op: &Op, col: u16) -> Option<Val> {
-    op.cell(col).map(|c| Val::from_wire(c.value()))
+/// A metric's `_on` twin, the day its figure is as of.
+fn twin<'t>(td: &'t TableDef, c: &ColDef) -> Option<&'t ColDef> {
+    td.cols.iter().find(|x| has(x, flag::METRIC_ON) && x.name.strip_suffix("_on") == Some(c.name))
 }
 
 // ------------------------------------------------------------------ locate
 
 /// Check 1 and 2: where the put lands and whether each cell may be written.
 pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal> {
-    let td = schema::table_def(op.table)
-        .filter(|t| t.residency == schema::Residency::Resident || t.residency == schema::Residency::Server)
-        .ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": op.table})))?;
+    let td = writable_table(op.table)?;
     // A table no op writes a column of (citations) is the server's alone.
     if td.cols.iter().all(|c| has(c, flag::IMPLIED | flag::READONLY | flag::SERVER_ONLY)) {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "the server writes this table"})));
@@ -93,10 +80,7 @@ pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal>
     if td.append_only && !insert {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "append_only"})));
     }
-    let rev = if insert { 0 } else { t.and_then(|t| t.i64(target, 3)).unwrap_or(0) };
-    if op.flags & wire::EXPECT_REV != 0 && op.expect_rev as i64 != rev {
-        return Err(no(refusal::REV, json!({"table": td.name, "rev": rev})));
-    }
+    expect_rev(op, td, if insert { 0 } else { t.and_then(|t| t.i64(target, 3)).unwrap_or(0) })?;
     for cell in op.cells().filter(|c| c.col != schema::AS_OF && c.col != schema::SOURCE_CELL) {
         writable(td, td.col(cell.col), cell.col, &cell, ctx)?;
     }
@@ -223,12 +207,11 @@ fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
     let key = naturals().find(|k| {
         k.cols.iter().all(|n| td.col_named(n).is_some_and(|c| !given(c).is_none())) && k.cond.as_ref().is_none_or(|w| cond_holds(td, &given, w))
     });
-    let doc = |k: &schema::KeyDef| crate::query::key_doc(k);
     let Some(key) = key else {
         let unmet: Vec<Json> = naturals()
             .filter(|k| k.cols.iter().all(|n| td.col_named(n).is_some_and(|c| !given(c).is_none())))
             .map(|k| {
-                let mut d = doc(k);
+                let mut d = key_doc(k);
                 let reads: Vec<Json> = d["reads"].as_array().cloned().unwrap_or_default();
                 let missing: Vec<Json> = reads.into_iter().filter(|r| r.as_str().and_then(|n| td.col_named(n)).is_none_or(|c| op.cell(c.id).is_none())).collect();
                 d["missing"] = Json::Array(missing);
@@ -237,7 +220,7 @@ fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
             .collect();
         return Err(no(
             refusal::NATURAL_KEY,
-            json!({"table": td.name, "reason": "no natural key among the cells", "keys": naturals().map(doc).collect::<Vec<_>>(), "unmet": unmet}),
+            json!({"table": td.name, "reason": "no natural key among the cells", "keys": naturals().map(key_doc).collect::<Vec<_>>(), "unmet": unmet}),
         ));
     };
     let found = t.and_then(|t| {
@@ -320,13 +303,6 @@ pub fn host(url: &str) -> Option<String> {
 
 // ------------------------------------------------------------------ provenance
 
-fn day_of(op: &Op, col: u16) -> Option<Day> {
-    match cell_val(op, col) {
-        Some(Val::U32(d)) => Some(d as Day),
-        _ => None,
-    }
-}
-
 /// The op's source: an existing live source's id, or a URL found by its
 /// natural key or to be created (`Err(url, host)` until then).
 type Source = Option<Result<u32, (String, String)>>;
@@ -386,7 +362,10 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
         }
         return Ok(());
     }
-    let as_of = day_of(op, schema::AS_OF);
+    let as_of = match cell_val(op, schema::AS_OF) {
+        Some(Val::U32(d)) => Some(d as Day),
+        _ => None,
+    };
     if as_of.is_some_and(|d| d > ctx.today + 1) {
         return Err(no(refusal::FRESHNESS, json!({"column": "as_of", "reason": "in the future"})));
     }
@@ -402,8 +381,7 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
     for c in &cited {
         if has(c, flag::METRIC) {
             let Some(on) = as_of else { return Err(no(refusal::FRESHNESS, json!({"table": td.name, "column": c.name}))) };
-            let twin = td.cols.iter().find(|x| has(x, flag::METRIC_ON) && x.name.strip_suffix("_on") == Some(c.name));
-            if let Some(Val::U32(was)) = twin.map(&stored)
+            if let Some(Val::U32(was)) = twin(td, c).map(&stored)
                 && on < was as Day
             {
                 return Err(no(refusal::STALE, json!({"table": td.name, "column": c.name, "on": crate::day_iso(was as Day)})));
@@ -428,13 +406,13 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
         return Ok(());
     }
     for c in cited.iter().filter(|c| has(c, flag::METRIC)) {
-        if let (Some(on), Some(twin)) = (as_of, td.cols.iter().find(|x| has(x, flag::METRIC_ON) && x.name.strip_suffix("_on") == Some(c.name))) {
+        if let (Some(on), Some(twin)) = (as_of, twin(td, c)) {
             effects[own].cells.push((twin.id, EVal::Val(Val::U32(on as u32))));
         }
     }
-    let new_source = matches!(src, Some(Err(_)));
-    if new_source {
-        // Its id is the first insert's: every New(k) before moves up one.
+    if let Some(Err((url, h))) = &src {
+        // A new source's id is the first insert's: every New(k) before
+        // moves up one.
         for r in effects.iter_mut() {
             for (_, v) in r.cells.iter_mut() {
                 if let EVal::New(k) = v {
@@ -442,7 +420,6 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
                 }
             }
         }
-        let Some(Err((url, h))) = &src else { unreachable!() };
         let sd = schema::table_def(table::SOURCES).unwrap_or_else(|| unreachable!());
         let set = |n: &str, v: Val| sd.col_named(n).map(|c| (c.id, EVal::Val(v)));
         let cells = [set("url", Val::Str(url.clone())), set("host", Val::Str(h.clone())), set("mutable", Val::U32(1))].into_iter().flatten().collect();
@@ -509,8 +486,7 @@ fn same_citation(rows: &Rows, td: &TableDef, id: u32, col: &ColDef, src: &Source
         .max();
     let Some(last) = last else { return false };
     let dated = if has(col, flag::METRIC) {
-        let twin = td.cols.iter().find(|x| has(x, flag::METRIC_ON) && x.name.strip_suffix("_on") == Some(col.name));
-        twin.and_then(|tw| rows.table(td.id)?.u32(id, tw.id)).map(|d| d as Day) == as_of
+        twin(td, col).and_then(|tw| rows.table(td.id)?.u32(id, tw.id)).map(|d| d as Day) == as_of
     } else {
         as_of.is_none_or(|d| ct.u32(last, c("as_of")) == Some(d as u32))
     };
@@ -522,7 +498,8 @@ fn same_citation(rows: &Rows, td: &TableDef, id: u32, col: &ColDef, src: &Source
 /// Check 6: no table passes its cap, and no live row of the table already
 /// holds a unique key the write makes.
 pub(crate) fn limits(rows: &Rows, effects: &[Row]) -> Result<(), Refusal> {
-    // The cap first, then the keys, as the sequencer met them.
+    // The cap first, then the keys, as the sequencer met them; tables in
+    // write order.
     let mut inserts: Vec<(u16, usize)> = Vec::new();
     for r in effects.iter().filter(|r| r.id == 0) {
         match inserts.iter_mut().find(|x| x.0 == r.table) {
@@ -582,16 +559,11 @@ pub(crate) fn limits(rows: &Rows, effects: &[Row]) -> Result<(), Refusal> {
 /// loose ref names (a cited source: provenance outlives it). The server
 /// sends any drop as gone, a tombstone too, so the replica removes it.
 pub(crate) fn drop_checks(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<(), Refusal> {
-    let Some(td) = schema::table_def(op.table).filter(|t| t.residency == schema::Residency::Resident || t.residency == schema::Residency::Server) else {
-        return Err(no(refusal::NOT_FOUND, json!({"table": op.table})));
-    };
+    let td = writable_table(op.table)?;
     let Some(t) = rows.table(op.table).filter(|t| live(t, td, op.target)) else {
         return Err(no(refusal::NOT_FOUND, json!({"table": td.name, "id": op.target})));
     };
-    let rev = t.i64(op.target, 3).unwrap_or(0);
-    if op.flags & wire::EXPECT_REV != 0 && op.expect_rev as i64 != rev {
-        return Err(no(refusal::REV, json!({"table": td.name, "rev": rev})));
-    }
+    expect_rev(op, td, t.i64(op.target, 3).unwrap_or(0))?;
     if td.append_only {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "append_only"})));
     }

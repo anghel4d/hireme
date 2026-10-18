@@ -108,13 +108,17 @@ pub struct Refusal {
 
 pub type Verdict = Result<Vec<Row>, Refusal>;
 
-fn refuse(code: u16, data: Json) -> Verdict {
-    Err(Refusal { code, data })
+pub(crate) fn no(code: u16, data: Json) -> Refusal {
+    Refusal { code, data }
 }
 
-fn not_found(t: u16, id: u32) -> Verdict {
-    let name = schema::table_def(t).map_or("", |d| d.name);
-    refuse(refusal::NOT_FOUND, json!({"table": name, "id": id}))
+fn refuse(code: u16, data: Json) -> Verdict {
+    Err(no(code, data))
+}
+
+/// The application a command targets.
+fn app(rows: &Rows, id: u32) -> Result<&Table, Refusal> {
+    rows.table(table::APPLICATIONS).filter(|t| t.has(id)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "applications", "id": id})))
 }
 
 fn u(v: u32) -> Val {
@@ -136,13 +140,25 @@ fn cells(op: &Op) -> Vec<(u16, Val)> {
     op.cells().filter(|c| c.col < schema::FREE_PARAM).map(|c| (c.col, Val::from_wire(c.value()))).collect()
 }
 
+/// One cell of the op, if it carries the column.
+pub(crate) fn cell_val(op: &Op, col: u16) -> Option<Val> {
+    op.cell(col).map(|c| Val::from_wire(c.value()))
+}
+
 fn param_val(op: &Op, id: u16) -> Val {
-    op.cell(id).map_or(Val::None, |c| Val::from_wire(c.value()))
+    cell_val(op, id).unwrap_or(Val::None)
 }
 
 fn param_str(op: &Op, id: u16) -> Option<String> {
     match param_val(op, id) {
         Val::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn param_stage(op: &Op, id: u16) -> Option<Stage> {
+    match param_val(op, id) {
+        Val::U32(v) => Stage::from_u32(v),
         _ => None,
     }
 }
@@ -212,7 +228,7 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             } else if let Some(t) = apps {
                 // A batched stage keeps its batch.
                 if row.get(A::BATCH_ID) == Some(&EVal::Val(Val::None)) {
-                    let stage = t.u32(op.target, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8));
+                    let stage = t.u32(op.target, A::STAGE).and_then(Stage::from_u32);
                     if let Some(st) = stage.filter(|s| s.batched()) {
                         return refuse(refusal::STAGE, json!({"from": st.name(), "to": st.name(), "rule": "needs_batch"}));
                     }
@@ -270,47 +286,27 @@ fn overlay(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx, row: &mut Row, ex
     let existing = rows.table(table::CV_OVERLAYS);
     let inserting = op.target == 0;
     if !inserting && !existing.is_some_and(|t| t.has(op.target)) {
-        return Err(Refusal { code: refusal::NOT_FOUND, data: json!({"table": "cv_overlays", "id": op.target}) });
+        return Err(no(refusal::NOT_FOUND, json!({"table": "cv_overlays", "id": op.target})));
     }
-    let app = match row.get(O::APPLICATION_ID) {
-        Some(EVal::Val(Val::U32(a))) => Some(*a),
-        _ => existing.and_then(|t| t.u32(op.target, O::APPLICATION_ID)),
+    // A cell the op sets, else the row's.
+    let given = |c: u16| match row.get(c) {
+        Some(EVal::Val(Val::U32(v))) => Some(*v),
+        _ => existing.and_then(|t| t.u32(op.target, c)),
     };
-    let Some(app) = app else {
-        return Err(Refusal { code: refusal::NOT_FOUND, data: json!({"need": "application_id"}) });
+    let Some(app) = given(O::APPLICATION_ID) else {
+        return Err(no(refusal::NOT_FOUND, json!({"need": "application_id"})));
     };
     let Some(corp) = rows.table(table::APPLICATIONS).and_then(|t| t.u32(app, A::CORPORATION_ID)) else {
-        return Err(Refusal { code: refusal::NOT_FOUND, data: json!({"need": "corporation_id", "application_id": app}) });
+        return Err(no(refusal::NOT_FOUND, json!({"need": "corporation_id", "application_id": app})));
     };
-    match lineage_of(rows, board, corp) {
+    let generation = match lineage_of(rows, board, corp) {
         Some((t, lid)) => {
-            let opened = t.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
-            let rewrites = t.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
-            let generation = t.u32(lid, col::cv_lineages::GENERATION).unwrap_or(1);
             // Creating means a line no application of the lineage has
             // overlaid yet; overlaying it again is a rewrite.
-            let item = match row.get(O::ITEM_ID) {
-                Some(EVal::Val(Val::U32(i))) => Some(*i),
-                _ => existing.and_then(|t| t.u32(op.target, O::ITEM_ID)),
-            };
-            let told = item.is_some_and(|i| board.lines(rows).told(lid, i, op.target));
-            let creates = inserting && !told;
-            match cv::check(cv::phase(opened, rewrites, ctx.today), creates) {
-                Ok(()) => {}
-                Err(cv::Refusal::Cooldown) => {
-                    return Err(Refusal {
-                        code: refusal::COOLDOWN,
-                        data: json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "need": "open_generation"}),
-                    });
-                }
-                Err(cv::Refusal::Additive) => {
-                    return Err(Refusal { code: refusal::LINEAGE_BUSY, data: json!({"lineage_id": lid, "generation": generation}) });
-                }
-            }
+            let told = given(O::ITEM_ID).is_some_and(|i| board.lines(rows).told(lid, i, op.target));
+            lineage_gate(t, lid, ctx.today, inserting && !told)?;
             row.set(O::LINEAGE_ID, u(lid));
-            if inserting {
-                row.set(O::GENERATION, u(generation));
-            }
+            t.u32(lid, col::cv_lineages::GENERATION).unwrap_or(1)
         }
         None => {
             extra.push(Row {
@@ -325,10 +321,11 @@ fn overlay(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx, row: &mut Row, ex
             });
             // The lineage row is written first: insert 0.
             row.set(O::LINEAGE_ID, EVal::New(0));
-            if inserting {
-                row.set(O::GENERATION, u(1));
-            }
+            1
         }
+    };
+    if inserting {
+        row.set(O::GENERATION, u(generation));
     }
     Ok(())
 }
@@ -338,31 +335,35 @@ fn lineage_of<'r>(rows: &'r Rows, board: &mut Board, corporation: u32) -> Option
     rows.table(table::CV_LINEAGES).filter(|t| t.has(id)).map(|t| (t, id))
 }
 
-fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
-    if op.table == table::CV_OVERLAYS {
-        // write::drop_checks found the row.
-        if let Some(lid) = rows.table(table::CV_OVERLAYS).and_then(|t| t.u32(op.target, col::cv_overlays::LINEAGE_ID))
-            && let Some(l) = rows.table(table::CV_LINEAGES).filter(|l| l.has(lid))
-        {
-            let opened = l.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
-            let rewrites = l.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
-            match cv::check(cv::phase(opened, rewrites, ctx.today), false) {
-                Ok(()) => {}
-                Err(cv::Refusal::Cooldown) => {
-                    return refuse(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "need": "open_generation"}));
-                }
-                Err(cv::Refusal::Additive) => {
-                    let generation = l.u32(lid, col::cv_lineages::GENERATION);
-                    return refuse(refusal::LINEAGE_BUSY, json!({"lineage_id": lid, "generation": generation}));
-                }
-            }
+/// Whether lineage `lid` takes an overlay write today (`cv::check`;
+/// `creates` as there), as the write's refusal.
+fn lineage_gate(l: &Table, lid: u32, today: Day, creates: bool) -> Result<(), Refusal> {
+    let opened = l.u32(lid, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
+    let rewrites = l.u32(lid, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
+    match cv::check(cv::phase(opened, rewrites, today), creates) {
+        Ok(()) => Ok(()),
+        Err(cv::Refusal::Cooldown) => {
+            Err(no(refusal::COOLDOWN, json!({"lineage_id": lid, "opened_on": crate::day_iso(opened), "need": "open_generation"})))
         }
+        Err(cv::Refusal::Additive) => {
+            Err(no(refusal::LINEAGE_BUSY, json!({"lineage_id": lid, "generation": l.u32(lid, col::cv_lineages::GENERATION).unwrap_or(1)})))
+        }
+    }
+}
+
+fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
+    // write::drop_checks found the row; an overlay's lineage gates its drop.
+    if op.table == table::CV_OVERLAYS
+        && let Some(lid) = rows.table(table::CV_OVERLAYS).and_then(|t| t.u32(op.target, col::cv_overlays::LINEAGE_ID))
+        && let Some(l) = rows.table(table::CV_LINEAGES).filter(|l| l.has(lid))
+    {
+        lineage_gate(l, lid, ctx.today, false)?;
     }
     Ok(Vec::new())
 }
 
 fn app_stage(t: &Table, id: u32) -> Stage {
-    t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered)
+    t.u32(id, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered)
 }
 
 /// The cells a move to `to` writes on the application, and its event.
@@ -373,15 +374,11 @@ fn moved(t: &Table, id: u32, from: Stage, to: Stage, note: Option<String>, op: &
         row.set(A::STAGE, u(to as u32));
         row.set(A::PIPS, s(core::str::from_utf8(&pipeline::encode(&rail)).unwrap_or("")));
         row.set(A::STAGE_ON, day_val(ctx.today));
-        let first = |c: u16| t.u32(id, c).is_none();
-        if to == Stage::Submitted && first(A::APPLIED_ON) {
-            row.set(A::APPLIED_ON, day_val(ctx.today));
-        }
-        if to == Stage::Reply && first(A::REPLIED_ON) {
-            row.set(A::REPLIED_ON, day_val(ctx.today));
-        }
-        if to == Stage::Closed && first(A::CLOSED_ON) {
-            row.set(A::CLOSED_ON, day_val(ctx.today));
+        // The first arrival at a dated stage stamps its day.
+        for (stage, on) in [(Stage::Submitted, A::APPLIED_ON), (Stage::Reply, A::REPLIED_ON), (Stage::Closed, A::CLOSED_ON)] {
+            if to == stage && t.u32(id, on).is_none() {
+                row.set(on, day_val(ctx.today));
+            }
         }
         // Reopened: it is no longer closed. What was sent and replied to
         // stays recorded.
@@ -434,15 +431,8 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     }
     match op.table {
         command::STAGE => {
-            let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(op.target)) else {
-                return not_found(table::APPLICATIONS, op.target);
-            };
-            let Some(to) = (match param_val(op, param::stage::STAGE) {
-                Val::U32(v) => u8::try_from(v).ok().and_then(Stage::from_u8),
-                _ => None,
-            }) else {
-                return refuse(refusal::TYPE, json!({"param": "stage"}));
-            };
+            let t = app(rows, op.target)?;
+            let Some(to) = param_stage(op, param::stage::STAGE) else { return refuse(refusal::TYPE, json!({"param": "stage"})) };
             let id = op.target;
             let from = app_stage(t, id);
             let batch = t.u32(id, A::BATCH_ID);
@@ -458,15 +448,8 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             Ok(moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx))
         }
         command::NOTE => {
-            let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(op.target)) else {
-                return not_found(table::APPLICATIONS, op.target);
-            };
-            let Some(stage) = (match param_val(op, param::note::STAGE) {
-                Val::U32(v) => u8::try_from(v).ok().and_then(Stage::from_u8),
-                _ => None,
-            }) else {
-                return refuse(refusal::TYPE, json!({"param": "stage"}));
-            };
+            let t = app(rows, op.target)?;
+            let Some(stage) = param_stage(op, param::note::STAGE) else { return refuse(refusal::TYPE, json!({"param": "stage"})) };
             let body = param_str(op, param::note::BODY).unwrap_or_default();
             let mut row = Row { table: table::APPLICATIONS, id: op.target, cells: Vec::new() };
             row.set(A::STAGE_NOTES, s(with_note(t.str(op.target, A::STAGE_NOTES), stage, body.trim())));
@@ -474,9 +457,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             Ok(alloc::vec![row, ev])
         }
         command::HEAT_OVERRIDE => {
-            if !rows.table(table::APPLICATIONS).is_some_and(|t| t.has(op.target)) {
-                return not_found(table::APPLICATIONS, op.target);
-            }
+            app(rows, op.target)?;
             let reason = param_str(op, param::heat_override::REASON).unwrap_or_default();
             let reason = reason.trim();
             if reason.is_empty() {
@@ -490,9 +471,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             Ok(alloc::vec![row, event(u(op.target).into(), "heat", alloc::format!("HEAT OVERRIDE · {reason}"), op, ctx)])
         }
         command::OPEN_FIRE => {
-            let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(op.target)) else {
-                return not_found(table::APPLICATIONS, op.target);
-            };
+            let t = app(rows, op.target)?;
             let from = app_stage(t, op.target);
             if !pipeline::opens(from) {
                 return refuse(
@@ -546,5 +525,5 @@ fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Re
     v.cooldown_days = heat::cooldown(ix, &seat, &[]);
     let mut data = v.to_json(&seat);
     data["to"] = Json::String(to.name().into());
-    Err(Refusal { code: refusal::HEAT, data })
+    Err(no(refusal::HEAT, data))
 }

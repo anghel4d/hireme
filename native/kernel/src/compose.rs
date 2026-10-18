@@ -33,6 +33,13 @@ pub fn row(t: &Table, id: u32) -> Json {
     crate::query::row_out(t, id, &cols, false)
 }
 
+/// The lineage telling a corporation's story: the `cv_lineages` row naming it.
+fn lineage_of(rows: &Rows, corporation: Option<u32>) -> Option<(&Table, u32)> {
+    let c = corporation?;
+    let lt = rows.table(table::CV_LINEAGES)?;
+    lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c)).map(|l| (lt, l))
+}
+
 /// One application: its row, card, rail, heat, suggestion, coverage, CV,
 /// events, batch and lineage.
 pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Json> {
@@ -40,7 +47,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
     if !t.has(id) {
         return None;
     }
-    let stage = t.u32(id, A::STAGE).and_then(|v| u8::try_from(v).ok().and_then(Stage::from_u8)).unwrap_or(Stage::Discovered);
+    let stage = t.u32(id, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered);
     let rail = board::rail(t, id).unwrap_or_else(|| pipeline::initial(stage));
     let rail: Vec<Json> = STAGES
         .iter()
@@ -65,35 +72,24 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         })
         .collect();
 
-    let events: Vec<Json> = rows
-        .table(table::EVENTS)
-        .map(|e| {
-            let mut ids: Vec<u32> = e.ids().iter().copied().filter(|&x| e.u32(x, col::events::APPLICATION_ID) == Some(id)).collect();
-            ids.sort_unstable_by(|a, b| b.cmp(a));
-            ids.into_iter().map(|x| row(e, x)).collect()
-        })
-        .unwrap_or_default();
+    let mut event_ids: Vec<u32> = rows.each(table::EVENTS).filter(|(e, x)| e.u32(*x, col::events::APPLICATION_ID) == Some(id)).map(|(_, x)| x).collect();
+    event_ids.sort_unstable_by(|a, b| b.cmp(a));
+    let events: Vec<Json> = rows.table(table::EVENTS).map(|e| event_ids.iter().map(|&x| row(e, x)).collect()).unwrap_or_default();
 
     let batch = t.u32(id, A::BATCH_ID).and_then(|b| rows.table(table::BATCHES).filter(|bt| bt.has(b)).map(|bt| row(bt, b)));
-    let lineage = t
-        .u32(id, A::CORPORATION_ID)
-        .and_then(|c| {
-            let lt = rows.table(table::CV_LINEAGES)?;
-            lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c)).map(|l| (lt, l))
-        })
-        .map(|(lt, l)| {
-            let opened = lt.u32(l, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
-            let rewrites = lt.u32(l, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
-            let phase = match cv::phase(opened, rewrites, today) {
-                cv::Phase::Tailor => "tailor",
-                cv::Phase::Additive => "additive",
-                cv::Phase::Ready => "ready",
-            };
-            let mut j = row(lt, l);
-            j["phase"] = phase.into();
-            j["days_to_open"] = cv::days_to_open(opened, today).into();
-            j
-        });
+    let lineage = lineage_of(rows, t.u32(id, A::CORPORATION_ID)).map(|(lt, l)| {
+        let opened = lt.u32(l, col::cv_lineages::OPENED_ON).unwrap_or(0) as Day;
+        let rewrites = lt.u32(l, col::cv_lineages::REWRITES_ALLOWED) == Some(1);
+        let phase = match cv::phase(opened, rewrites, today) {
+            cv::Phase::Tailor => "tailor",
+            cv::Phase::Additive => "additive",
+            cv::Phase::Ready => "ready",
+        };
+        let mut j = row(lt, l);
+        j["phase"] = phase.into();
+        j["days_to_open"] = cv::days_to_open(opened, today).into();
+        j
+    });
 
     let card = board.card(id).zip(board.seat(id)).map(|(c, seat)| {
         let mut heat = c.verdict.to_json(seat);
@@ -121,30 +117,23 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
     use col::items as I;
     let profile = t.u32(id, A::PROFILE_ID);
     let items: Vec<Item> = rows
-        .table(table::ITEMS)
-        .map(|it| {
-            it.ids()
-                .iter()
-                .map(|&x| Item {
-                    id: x,
-                    profile_id: it.u32(x, I::PROFILE_ID),
-                    kind: it.u32(x, I::KIND).unwrap_or(0) as u8,
-                    key: it.str(x, I::KEY).unwrap_or(""),
-                    title: it.str(x, I::TITLE).unwrap_or(""),
-                    body: it.text(x, I::BODY),
-                    org: it.str(x, I::ORG),
-                    span: it.str(x, I::SPAN),
-                    position: it.u32(x, I::POSITION).unwrap_or(0),
-                })
-                .collect()
+        .each(table::ITEMS)
+        .map(|(it, x)| Item {
+            id: x,
+            profile_id: it.u32(x, I::PROFILE_ID),
+            kind: it.u32(x, I::KIND).unwrap_or(0) as u8,
+            key: it.str(x, I::KEY).unwrap_or(""),
+            title: it.str(x, I::TITLE).unwrap_or(""),
+            body: it.text(x, I::BODY),
+            org: it.str(x, I::ORG),
+            span: it.str(x, I::SPAN),
+            position: it.u32(x, I::POSITION).unwrap_or(0),
         })
-        .unwrap_or_default();
+        .collect();
     // The lineage's overlays, from every application to the corporation:
     // one story per company.
-    let lineage = t.u32(id, A::CORPORATION_ID).and_then(|c| {
-        let lt = rows.table(table::CV_LINEAGES)?;
-        lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c))
-    });
+    let lin = lineage_of(rows, t.u32(id, A::CORPORATION_ID));
+    let lineage = lin.map(|(_, l)| l);
     let overlays: Vec<Overlay> = rows
         .table(table::CV_OVERLAYS)
         .map(|o| {
@@ -173,7 +162,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
                         id: x,
                         own: o.u32(x, O::APPLICATION_ID) == Some(id),
                         item_id: o.u32(x, O::ITEM_ID)?,
-                        mode: u8::try_from(o.u32(x, O::MODE)?).ok().and_then(cv::Mode::from_u8)?,
+                        mode: cv::Mode::from_u32(o.u32(x, O::MODE)?)?,
                         title: o.str(x, O::TITLE),
                         body: o.text(x, O::BODY),
                         reason: o.text(x, O::REASON),
@@ -182,14 +171,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
                 .collect()
         })
         .unwrap_or_default();
-    let lineage_theme = t
-        .u32(id, A::CORPORATION_ID)
-        .and_then(|c| {
-            let lt = rows.table(table::CV_LINEAGES)?;
-            let l = lt.ids().iter().copied().find(|&l| lt.u32(l, col::cv_lineages::CORPORATION_ID) == Some(c))?;
-            Some(Theme::parse(lt.str(l, col::cv_lineages::THEME)))
-        })
-        .unwrap_or_default();
+    let lineage_theme = lin.map(|(lt, l)| Theme::parse(lt.str(l, col::cv_lineages::THEME))).unwrap_or_default();
     let theme = Theme::parse(t.str(id, A::CV_THEME)).over(lineage_theme);
     (cv::compose(profile, &items, &overlays), theme)
 }
@@ -222,40 +204,21 @@ pub fn overview(rows: &Rows, board: &Board, today: Day, top: usize) -> Json {
 pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
     let target = board::settings(rows).and_then(|(t, id)| t.u32(id, col::settings::GYM_TARGET));
     let reps: Vec<(Day, RepOutcome)> = rows
-        .table(table::GYM_REPS)
-        .map(|t| {
-            t.ids()
-                .iter()
-                .filter_map(|&id| {
-                    let d = t.u32(id, col::gym_reps::DONE_ON)? as Day;
-                    let o = u8::try_from(t.u32(id, col::gym_reps::OUTCOME).unwrap_or(0)).ok().and_then(RepOutcome::from_u8)?;
-                    Some((d, o))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .each(table::GYM_REPS)
+        .filter_map(|(t, id)| Some((t.u32(id, col::gym_reps::DONE_ON)? as Day, RepOutcome::from_u32(t.u32(id, col::gym_reps::OUTCOME).unwrap_or(0))?)))
+        .collect();
     let entries: Vec<(NetKind, Option<Day>)> = rows
-        .table(table::NET_ENTRIES)
-        .map(|t| {
-            t.ids()
-                .iter()
-                .filter_map(|&id| {
-                    let k = u8::try_from(t.u32(id, col::net_entries::KIND)?).ok().and_then(NetKind::from_u8)?;
-                    Some((k, t.u32(id, col::net_entries::SHIPPED_ON).map(|d| d as Day)))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .each(table::NET_ENTRIES)
+        .filter_map(|(t, id)| Some((NetKind::from_u32(t.u32(id, col::net_entries::KIND)?)?, t.u32(id, col::net_entries::SHIPPED_ON).map(|d| d as Day))))
+        .collect();
     json!({"gym": lanes::gym(reps, target, today).to_json(), "net": lanes::net(entries, today).to_json()})
 }
 
 /// The atlas places as the fit reads them.
 pub fn places(rows: &Rows) -> Vec<Place<'_>> {
     use col::atlas as P;
-    let Some(t) = rows.table(table::ATLAS) else { return Vec::new() };
-    t.ids()
-        .iter()
-        .map(|&id| Place {
+    rows.each(table::ATLAS)
+        .map(|(t, id)| Place {
             id,
             city: t.u32(id, P::KIND) == Some(enums::place_kind::CITY as u32),
             country_id: t.u32(id, P::COUNTRY_ID),

@@ -35,57 +35,25 @@ pub enum Band {
 pub const BANDS: [Band; 8] =
     [Band::Frontier, Band::Labs, Band::BigTech, Band::Systems, Band::Craft, Band::Mid, Band::Thin, Band::Kill];
 
-impl Band {
-    pub fn from_u8(v: u8) -> Option<Band> {
-        BANDS.get(v as usize).copied()
-    }
+/// Each rung's name (the schema's) and lowest score, top down.
+const RUNGS: [(&str, u8); 8] = [("frontier", 100), ("labs", 90), ("big_tech", 85), ("systems", 70), ("craft", 55), ("mid", 40), ("thin", 20), ("kill", 0)];
 
+impl Band {
     pub fn parse(s: &str) -> Option<Band> {
         BANDS.into_iter().find(|b| b.name() == s)
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Band::Frontier => "frontier",
-            Band::Labs => "labs",
-            Band::BigTech => "big_tech",
-            Band::Systems => "systems",
-            Band::Craft => "craft",
-            Band::Mid => "mid",
-            Band::Thin => "thin",
-            Band::Kill => "kill",
-        }
+        RUNGS[self as usize].0
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Band::Frontier => "Frontier",
-            Band::Labs => "Tier-2 labs",
-            Band::BigTech => "Big tech",
-            Band::Systems => "Systems",
-            Band::Craft => "Craft",
-            Band::Mid => "Mid",
-            Band::Thin => "Thin",
-            Band::Kill => "Kill",
-        }
-    }
-
-    /// The lowest and highest score on this rung.
-    pub fn range(self) -> (u8, u8) {
-        match self {
-            Band::Frontier => (100, 100),
-            Band::Labs => (90, 99),
-            Band::BigTech => (85, 89),
-            Band::Systems => (70, 84),
-            Band::Craft => (55, 69),
-            Band::Mid => (40, 54),
-            Band::Thin => (20, 39),
-            Band::Kill => (0, 19),
-        }
+    /// The lowest score on this rung.
+    pub fn floor(self) -> u8 {
+        RUNGS[self as usize].1
     }
 
     pub fn of(score: u8) -> Band {
-        BANDS.into_iter().find(|b| score >= b.range().0).unwrap_or(Band::Kill)
+        BANDS.into_iter().find(|b| score >= b.floor()).unwrap_or(Band::Kill)
     }
 }
 
@@ -101,22 +69,12 @@ pub enum Kill {
 
 impl Kill {
     pub fn name(self) -> &'static str {
-        match self {
-            Kill::Staffing => "staffing",
-            Kill::Intern => "intern",
-            Kill::Theater => "theater",
-            Kill::NotEngineering => "not_engineering",
-            Kill::OnsiteAway => "onsite_away",
-        }
+        ["staffing", "intern", "theater", "not_engineering", "onsite_away"][self as usize]
     }
 
+    /// The score a kill pins the seat at.
     fn score(self) -> u8 {
-        match self {
-            Kill::Staffing => 8,
-            Kill::Theater => 10,
-            Kill::Intern => 12,
-            Kill::NotEngineering | Kill::OnsiteAway => 15,
-        }
+        [8, 12, 10, 15, 15][self as usize]
     }
 }
 
@@ -164,22 +122,10 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// The tier of a normalized company name.
-    pub fn of(n: &str) -> Tier {
-        Tier::of_hits(Hits::of(n))
-    }
-
-    /// The tier from a name's [`Hits`].
+    /// The tier from a name's [`Hits`], the highest first.
     pub fn of_hits(h: Hits) -> Tier {
-        if h.has(lexicon::FRONTIER) {
-            Tier::Frontier
-        } else if h.has(lexicon::LABS) {
-            Tier::Labs
-        } else if h.has(lexicon::BIG_TECH) {
-            Tier::BigTech
-        } else {
-            Tier::None
-        }
+        let tiers = [(lexicon::FRONTIER, Tier::Frontier), (lexicon::LABS, Tier::Labs), (lexicon::BIG_TECH, Tier::BigTech)];
+        tiers.into_iter().find(|(g, _)| h.has(*g)).map_or(Tier::None, |(_, t)| t)
     }
 
     fn anchor(self, high_comp: bool) -> Option<u8> {
@@ -190,11 +136,6 @@ impl Tier {
             Tier::BigTech => Some(if high_comp { 85 } else { 80 }),
         }
     }
-}
-
-/// The anchor a company name sits on, if any.
-pub fn anchor(company: &str, high_comp: bool) -> Option<u8> {
-    Tier::of(&text::normalize(company)).anchor(high_comp)
 }
 
 /// What the score reads off one normalized text (a company name, a role
@@ -291,25 +232,10 @@ impl Read {
 }
 
 /// The hard kill a seat falls under, if any.
-pub fn kill(seat: &Seat) -> Option<Kill> {
-    kill_read(seat, &Read::of(seat))
-}
-
 fn kill_read(seat: &Seat, r: &Read) -> Option<Kill> {
     let t = r.company.join(r.role);
-    if t.has(Facts::STAFFING) {
-        Some(Kill::Staffing)
-    } else if t.has(Facts::INTERN) {
-        Some(Kill::Intern)
-    } else if t.has(Facts::THEATER) {
-        Some(Kill::Theater)
-    } else if t.has(Facts::NOT_ENGINEERING) {
-        Some(Kill::NotEngineering)
-    } else if onsite_away(seat, r.location) {
-        Some(Kill::OnsiteAway)
-    } else {
-        None
-    }
+    let by_text = [(Facts::STAFFING, Kill::Staffing), (Facts::INTERN, Kill::Intern), (Facts::THEATER, Kill::Theater), (Facts::NOT_ENGINEERING, Kill::NotEngineering)];
+    by_text.into_iter().find(|(f, _)| t.has(*f)).map(|(_, k)| k).or_else(|| onsite_away(seat, r.location).then_some(Kill::OnsiteAway))
 }
 
 /// Onsite-only and known to be away: the place is outside home, not just
@@ -597,25 +523,11 @@ pub fn suggest_read(seat: &Seat, r: &Read) -> Suggestion {
         return Suggestion { score: a, band: Band::of(a), kill: None, anchored: true };
     }
     let t = r.company.join(r.role);
-    let mut s: i32 = 48;
-    if t.has(Facts::SYSTEMS) {
-        s += 22;
-    }
-    if t.has(Facts::AGENTIC) {
-        s += 10;
-    }
-    if t.has(Facts::LOW_LEVEL) {
-        s += 8;
-    }
-    if seat.home == Some(true) || r.location.has(Facts::REMOTE) {
-        s += 5;
-    }
-    if high {
-        s += 6;
-    }
-    if t.has(Facts::MID_CURVE) {
-        s -= 16;
-    }
+    let facts = [(Facts::SYSTEMS, 22), (Facts::AGENTIC, 10), (Facts::LOW_LEVEL, 8), (Facts::MID_CURVE, -16)];
+    let s: i32 = 48
+        + facts.iter().filter(|(f, _)| t.has(*f)).map(|(_, d)| d).sum::<i32>()
+        + if seat.home == Some(true) || r.location.has(Facts::REMOTE) { 5 } else { 0 }
+        + if high { 6 } else { 0 };
     // Heuristics never climb onto an anchor's rung.
     let score = s.clamp(0, 84) as u8;
     Suggestion { score, band: Band::of(score), kill: None, anchored: false }
@@ -631,14 +543,12 @@ mod tests {
 
     #[test]
     fn bands_cover_0_to_100() {
+        // Each rung runs from its floor up to the one above it.
         for n in 0..=100u8 {
             let b = Band::of(n);
-            let (lo, hi) = b.range();
-            assert!(lo <= n && n <= hi, "{n} {b:?}");
+            assert!(b.floor() <= n && (b as usize).checked_sub(1).is_none_or(|i| n < BANDS[i].floor()), "{n} {b:?}");
         }
-        assert_eq!(Band::of(100), Band::Frontier);
-        assert_eq!(Band::of(84), Band::Systems);
-        assert_eq!(Band::of(19), Band::Kill);
+        assert_eq!((Band::of(100), Band::of(84), Band::of(19)), (Band::Frontier, Band::Systems, Band::Kill));
     }
 
     #[test]

@@ -34,16 +34,12 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn from_u8(v: u8) -> Option<Mode> {
+    pub fn from_u32(v: u32) -> Option<Mode> {
         [Mode::Tailor, Mode::Add, Mode::Drop].get(v as usize).copied()
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Mode::Tailor => "tailor",
-            Mode::Add => "add",
-            Mode::Drop => "drop",
-        }
+        ["tailor", "add", "drop"][self as usize]
     }
 }
 

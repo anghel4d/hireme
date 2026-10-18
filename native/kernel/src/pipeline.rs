@@ -41,8 +41,23 @@ pub const STAGES: [Stage; 10] = [
     Stage::Closed,
 ];
 
+/// Each stage's name (the schema's), label and hint, in stage order.
+const STAGE_TEXT: [(&str, &str, &str); 10] = [
+    ("discovered", "Discovered", "Listing captured"),
+    ("freshness", "Freshness", "Open, thin, closed, or blocked"),
+    ("gated", "Gated", "Pursue, maybe, or skip"),
+    ("in_batch", "In batch", "Named batch"),
+    ("draft_ready", "Draft ready", "Tailored CV drafted"),
+    ("fire_ready", "Fire ready", "Packed. Submit stays locked."),
+    ("open_fire", "Open fire", "Batch named. Submit is allowed."),
+    ("submitted", "Submitted", "Sent by hand. This desk does not submit."),
+    ("reply", "Reply", "Reply or interview"),
+    ("closed", "Closed", "Done"),
+];
+
 impl Stage {
-    pub fn from_u8(v: u8) -> Option<Stage> {
+    /// From a row's `stage` cell or a param.
+    pub fn from_u32(v: u32) -> Option<Stage> {
         STAGES.get(v as usize).copied()
     }
 
@@ -51,48 +66,15 @@ impl Stage {
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Stage::Discovered => "discovered",
-            Stage::Freshness => "freshness",
-            Stage::Gated => "gated",
-            Stage::InBatch => "in_batch",
-            Stage::DraftReady => "draft_ready",
-            Stage::FireReady => "fire_ready",
-            Stage::OpenFire => "open_fire",
-            Stage::Submitted => "submitted",
-            Stage::Reply => "reply",
-            Stage::Closed => "closed",
-        }
+        STAGE_TEXT[self as usize].0
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Stage::Discovered => "Discovered",
-            Stage::Freshness => "Freshness",
-            Stage::Gated => "Gated",
-            Stage::InBatch => "In batch",
-            Stage::DraftReady => "Draft ready",
-            Stage::FireReady => "Fire ready",
-            Stage::OpenFire => "Open fire",
-            Stage::Submitted => "Submitted",
-            Stage::Reply => "Reply",
-            Stage::Closed => "Closed",
-        }
+        STAGE_TEXT[self as usize].1
     }
 
     pub fn hint(self) -> &'static str {
-        match self {
-            Stage::Discovered => "Listing captured",
-            Stage::Freshness => "Open, thin, closed, or blocked",
-            Stage::Gated => "Pursue, maybe, or skip",
-            Stage::InBatch => "Named batch",
-            Stage::DraftReady => "Tailored CV drafted",
-            Stage::FireReady => "Packed. Submit stays locked.",
-            Stage::OpenFire => "Batch named. Submit is allowed.",
-            Stage::Submitted => "Sent by hand. This desk does not submit.",
-            Stage::Reply => "Reply or interview",
-            Stage::Closed => "Done",
-        }
+        STAGE_TEXT[self as usize].2
     }
 
     pub fn index(self) -> usize {
@@ -130,36 +112,17 @@ pub enum Pip {
     Blocked,
 }
 
-impl Pip {
-    pub fn char(self) -> char {
-        match self {
-            Pip::Done => 'D',
-            Pip::Active => 'A',
-            Pip::Pending => 'P',
-            Pip::Skipped => 'S',
-            Pip::Blocked => 'B',
-        }
-    }
+/// Each pip's stored character and name, in `Pip` order.
+const PIPS: [(Pip, u8, &str); 5] =
+    [(Pip::Done, b'D', "done"), (Pip::Active, b'A', "active"), (Pip::Pending, b'P', "pending"), (Pip::Skipped, b'S', "skipped"), (Pip::Blocked, b'B', "blocked")];
 
-    pub fn from_char(c: char) -> Option<Pip> {
-        Some(match c {
-            'D' => Pip::Done,
-            'A' => Pip::Active,
-            'P' => Pip::Pending,
-            'S' => Pip::Skipped,
-            'B' => Pip::Blocked,
-            _ => return None,
-        })
+impl Pip {
+    pub fn from_char(c: u8) -> Option<Pip> {
+        PIPS.iter().find(|p| p.1 == c).map(|p| p.0)
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Pip::Done => "done",
-            Pip::Active => "active",
-            Pip::Pending => "pending",
-            Pip::Skipped => "skipped",
-            Pip::Blocked => "blocked",
-        }
+        PIPS[self as usize].2
     }
 }
 
@@ -211,18 +174,15 @@ pub fn current(rail: &Rail) -> Stage {
 }
 
 pub fn encode(rail: &Rail) -> [u8; 10] {
-    rail.map(|p| p.char() as u8)
+    rail.map(|p| PIPS[p as usize].1)
 }
 
 /// A rail from its ten characters; anything else is `None`.
 pub fn decode(pips: &str) -> Option<Rail> {
-    let b = pips.as_bytes();
-    if b.len() != 10 {
-        return None;
-    }
+    let b: [u8; 10] = pips.as_bytes().try_into().ok()?;
     let mut rail = [Pip::Pending; 10];
-    for (slot, &c) in rail.iter_mut().zip(b) {
-        *slot = Pip::from_char(c as char)?;
+    for (slot, c) in rail.iter_mut().zip(b) {
+        *slot = Pip::from_char(c)?;
     }
     Some(rail)
 }
@@ -286,13 +246,7 @@ pub enum Refusal {
 
 impl Refusal {
     pub fn name(self) -> &'static str {
-        match self {
-            Refusal::NeedsBatch => "needs_batch",
-            Refusal::OpenFireByCommand => "open_fire_by_command",
-            Refusal::FireHold => "fire_hold",
-            Refusal::Sent => "sent",
-            Refusal::NotSent => "not_sent",
-        }
+        ["needs_batch", "open_fire_by_command", "fire_hold", "sent", "not_sent"][self as usize]
     }
 }
 

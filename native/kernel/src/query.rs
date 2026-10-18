@@ -22,7 +22,7 @@ use core::cmp::Ordering;
 use schema::{flag, refusal, ColDef as Column, Cond, KeyDef, Residency, TableDef as TableModel, Type, TYPES};
 use serde_json::{json, Map, Value as Json};
 
-use crate::judge::Refusal;
+use crate::judge::{no, Refusal};
 use crate::rows::{Data, Moved, Rows, Table, Val};
 
 const FIND_LIMIT: u64 = 50;
@@ -58,11 +58,6 @@ impl Default for Grants {
 }
 
 impl Grants {
-    /// A browser session's: every domain both ways.
-    pub fn operator() -> Grants {
-        Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true }
-    }
-
     pub fn visible(&self, c: &Column) -> bool {
         !has(c, flag::SERVER_ONLY) && (!has(c, flag::PRIVATE) || self.human)
     }
@@ -71,7 +66,7 @@ impl Grants {
 type Answer = Result<Json, Refusal>;
 
 fn refuse(code: u16, data: Json) -> Answer {
-    Err(Refusal { code, data })
+    Err(no(code, data))
 }
 
 /// Ids of one table in one column's order: the non-null by value then id,
@@ -162,35 +157,28 @@ pub fn query(rows: &Rows, g: &Grants, idx: &mut Indexes, req: &Json) -> Answer {
 
 fn readable(g: &Grants, name: Option<&Json>) -> Result<&'static TableModel, Refusal> {
     let Some(name) = name.and_then(Json::as_str) else {
-        return Err(Refusal { code: refusal::TYPE, data: json!({"param": "table", "got": got(name)}) });
+        return Err(no(refusal::TYPE, json!({"param": "table", "got": got(name)})));
     };
     // A replicated table reads whether or not any row arrived. The system
     // domain's views (acct_*) are the operator's alone; server tables (the
     // account's secrets) never replicate.
-    match schema::TABLES.iter().find(|t| t.name == name) {
-        Some(t) if t.residency != Residency::Server => {
-            let bit = t.domain_bit;
-            if bit == 0 && g.human && t.residency != Residency::Resident {
-                Ok(t)
-            } else if bit == 0 {
-                Err(Refusal { code: refusal::NOT_FOUND, data: json!({"table": echo(name)}) })
-            } else if g.read_mask & bit == 0 {
-                Err(Refusal { code: refusal::SCOPE, data: json!({"table": echo(name)}) })
-            } else {
-                Ok(t)
-            }
-        }
-        _ => Err(Refusal { code: refusal::NOT_FOUND, data: json!({"table": echo(name)}) }),
+    let known = |t: &&TableModel| t.residency != Residency::Server && (t.domain_bit != 0 || (g.human && t.residency != Residency::Resident));
+    let Some(t) = schema::TABLES.iter().find(|t| t.name == name).filter(known) else {
+        return Err(no(refusal::NOT_FOUND, json!({"table": echo(name)})));
+    };
+    if t.domain_bit != 0 && g.read_mask & t.domain_bit == 0 {
+        return Err(no(refusal::SCOPE, json!({"table": echo(name)})));
     }
+    Ok(t)
 }
 
 fn column(g: &Grants, t: &TableModel, name: Option<&Json>) -> Result<&'static Column, Refusal> {
     let Some(name) = name.and_then(Json::as_str) else {
-        return Err(Refusal { code: refusal::TYPE, data: json!({"table": t.name, "column": got(name)}) });
+        return Err(no(refusal::TYPE, json!({"table": t.name, "column": got(name)})));
     };
     match t.col_named(name) {
         Some(c) if g.visible(c) => Ok(c),
-        _ => Err(Refusal { code: refusal::COLUMN, data: json!({"table": t.name, "column": echo(name)}) }),
+        _ => Err(no(refusal::COLUMN, json!({"table": t.name, "column": echo(name)}))),
     }
 }
 
@@ -214,7 +202,7 @@ fn columns(g: &Grants, t: &TableModel, names: Option<&Json>, default_metrics: bo
             }
             Ok(out)
         }
-        Some(other) => Err(Refusal { code: refusal::TYPE, data: json!({"table": t.name, "cols": brief(other)}) }),
+        Some(other) => Err(no(refusal::TYPE, json!({"table": t.name, "cols": brief(other)}))),
     }
 }
 
@@ -228,16 +216,16 @@ fn bound(v: Option<&Json>, default: u64, max: u64, name: &str) -> Result<u64, Re
             if name != "limit" {
                 d["param"] = name.into();
             }
-            Err(Refusal { code: refusal::TOO_LARGE, data: d })
+            Err(no(refusal::TOO_LARGE, d))
         }
-        Some(other) => Err(Refusal { code: refusal::TYPE, data: json!({"param": name, "got": brief(other)}) }),
+        Some(other) => Err(no(refusal::TYPE, json!({"param": name, "got": brief(other)}))),
     }
 }
 
 fn id_param(v: Option<&Json>) -> Result<u32, Refusal> {
     match v.and_then(Json::as_u64) {
         Some(n) if n > 0 && n <= INT64 => Ok(u32::try_from(n).unwrap_or(u32::MAX)),
-        _ => Err(Refusal { code: refusal::TYPE, data: json!({"param": "id", "got": got(v)}) }),
+        _ => Err(no(refusal::TYPE, json!({"param": "id", "got": got(v)}))),
     }
 }
 
@@ -338,8 +326,9 @@ fn key_of<'a>(t: &'a Table, id: u32, c: &'static Column) -> Key2<'a> {
     t.slot(id).map_or(Key2::Null, |s| Cells::new(t, c).key(s))
 }
 
-fn is_live(t: &Table, tm: &TableModel, id: u32) -> bool {
-    !tm.soft_delete || tm.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none() && t.i64(id, c.id).is_none())
+/// Whether row `id` is in `t` and not a tombstone (`deleted_at` set).
+pub(crate) fn live(t: &Table, tm: &TableModel, id: u32) -> bool {
+    t.has(id) && (!tm.soft_delete || tm.col_named("deleted_at").is_none_or(|c| t.u32(id, c.id).is_none()))
 }
 
 /// A cell as World's JSON shows it.
@@ -357,12 +346,7 @@ pub(crate) fn value_json(c: &Column, v: &Val) -> Json {
         (Type::Time, Val::U32(s)) => crate::time_iso(*s as i64).into(),
         (Type::Time, Val::I64(s)) => crate::time_iso(*s).into(),
         (Type::Json, Val::Str(s)) => serde_json::from_str(s).unwrap_or_else(|_| Json::String(s.clone())),
-        (_, Val::U32(x)) => Json::from(*x),
-        (_, Val::I64(x)) => Json::from(*x),
-        (_, Val::F64(x)) => serde_json::Number::from_f64(*x).map_or(Json::Null, Json::Number),
-        (_, Val::Str(s)) => Json::String(s.clone()),
-        (_, Val::List(l)) => Json::from(l.clone()),
-        (_, Val::Packed(p)) => crate::rows::unpack(p).map_or(Json::Null, |t| Json::String(t.into_owned())),
+        _ => v.json(),
     }
 }
 
@@ -467,13 +451,13 @@ fn filters(g: &Grants, t: &TableModel, w: Option<&Json>) -> Result<Vec<Filter<'s
     let w = match w {
         None | Some(Json::Null) => return Ok(Vec::new()),
         Some(Json::Object(w)) => w,
-        Some(other) => return Err(Refusal { code: refusal::TYPE, data: json!({"table": t.name, "where": brief(other)}) }),
+        Some(other) => return Err(no(refusal::TYPE, json!({"table": t.name, "where": brief(other)}))),
     };
     let mut out = Vec::new();
     for (name, test) in w {
         let c = column(g, t, Some(&Json::String(name.clone())))?;
         if matches!(ty(c), Type::Json | Type::Bytes) {
-            return Err(Refusal { code: refusal::COLUMN, data: json!({"table": t.name, "column": c.name, "reason": "not filterable"}) });
+            return Err(no(refusal::COLUMN, json!({"table": t.name, "column": c.name, "reason": "not filterable"})));
         }
         out.push(Filter { col: c, test: filter(c, test)? });
     }
@@ -481,14 +465,14 @@ fn filters(g: &Grants, t: &TableModel, w: Option<&Json>) -> Result<Vec<Filter<'s
 }
 
 fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
-    let bad = |v: &Json| Refusal { code: refusal::TYPE, data: json!({"column": c.name, "value": brief(v)}) };
+    let bad = |v: &Json| no(refusal::TYPE, json!({"column": c.name, "value": brief(v)}));
     let one = |v: &Json| cast(c, v).ok_or_else(|| bad(v));
     let (op, v) = match test {
         Json::Object(m) if m.len() == 1 => {
             let (op, v) = m.iter().next().unwrap_or_else(|| unreachable!());
             (op.as_str(), v)
         }
-        Json::Object(_) => return Err(Refusal { code: refusal::TYPE, data: json!({"column": c.name, "filter": brief(test)}) }),
+        Json::Object(_) => return Err(no(refusal::TYPE, json!({"column": c.name, "filter": brief(test)}))),
         v => ("eq", v),
     };
     let text = matches!(ty(c), Type::Str | Type::Text);
@@ -498,7 +482,7 @@ fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
         ("ne", Json::Null) => Test::NotNull,
         ("ne", v) => Test::Ne(one(v)?),
         ("lt" | "le" | "gt" | "ge", Json::Null) => {
-            return Err(Refusal { code: refusal::TYPE, data: json!({"column": c.name, "filter": op, "reason": "compares with null"}) });
+            return Err(no(refusal::TYPE, json!({"column": c.name, "filter": op, "reason": "compares with null"})));
         }
         ("lt", v) => Test::Lt(one(v)?),
         ("le", v) => Test::Le(one(v)?),
@@ -509,14 +493,14 @@ fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
         // A null in the list matches nothing, as SQL's IN reads it.
         ("in", Json::Array(vs)) if vs.len() as u64 <= FIND_MAX => Test::In(vs.iter().filter(|v| !v.is_null()).map(one).collect::<Result<_, _>>()?),
         ("in", Json::Array(_)) => {
-            return Err(Refusal { code: refusal::TOO_LARGE, data: json!({"column": c.name, "filter": "in", "max": FIND_MAX}) });
+            return Err(no(refusal::TOO_LARGE, json!({"column": c.name, "filter": "in", "max": FIND_MAX})));
         }
         ("like" | "prefix", Json::String(s)) if s.len() > 1000 => {
-            return Err(Refusal { code: refusal::TOO_LARGE, data: json!({"column": c.name, "filter": op, "max": 1000}) });
+            return Err(no(refusal::TOO_LARGE, json!({"column": c.name, "filter": op, "max": 1000})));
         }
         ("like", Json::String(s)) if text => Test::Like(s.to_ascii_lowercase()),
         ("prefix", Json::String(s)) if text => Test::Prefix(s.to_ascii_lowercase()),
-        _ => return Err(Refusal { code: refusal::TYPE, data: json!({"column": c.name, "filter": brief(test)}) }),
+        _ => return Err(no(refusal::TYPE, json!({"column": c.name, "filter": brief(test)}))),
     })
 }
 
@@ -546,14 +530,20 @@ fn test(k: &Key2, t: &Test) -> bool {
     }
 }
 
-fn cond_holds(tm: &TableModel, t: &Table, id: u32, w: &Cond) -> bool {
-    let (Cond::Eq(c, _) | Cond::Null(c) | Cond::NotNull(c)) = w;
-    let Some(c) = tm.col_named(c) else { return false };
-    let k = key_of(t, id, c);
-    match w {
-        Cond::Null(_) => k.is_null(),
-        Cond::NotNull(_) => !k.is_null(),
-        Cond::Eq(_, v) => cast(c, &Json::String((*v).into())).is_some_and(|v| !k.is_null() && k.cmp(&v) == Ordering::Equal),
+/// Whether a key's where holds on a row read through `value`.
+pub(crate) fn cond_holds(td: &TableModel, value: &dyn Fn(&Column) -> Val, c: &Cond) -> bool {
+    let (Cond::Eq(n, _) | Cond::Null(n) | Cond::NotNull(n)) = c;
+    let Some(col) = td.col_named(n) else { return false };
+    let v = value(col);
+    match c {
+        Cond::Null(_) => v.is_none(),
+        Cond::NotNull(_) => !v.is_none(),
+        Cond::Eq(_, want) => match (ty(col), &v) {
+            (Type::Enum, Val::U32(x)) => enum_values(col).get(*x as usize) == Some(want),
+            (_, Val::Str(s)) => s == want,
+            (_, Val::U32(x)) => want.parse() == Ok(*x),
+            _ => false,
+        },
     }
 }
 
@@ -570,7 +560,7 @@ fn order_param(g: &Grants, t: &TableModel, p: &Map<String, Json>) -> Result<(&'s
     };
     let c = column(g, t, name.as_ref())?;
     if matches!(ty(c), Type::Json | Type::Bytes | Type::Text) {
-        return Err(Refusal { code: refusal::COLUMN, data: json!({"table": t.name, "column": c.name, "reason": "not orderable"}) });
+        return Err(no(refusal::COLUMN, json!({"table": t.name, "column": c.name, "reason": "not orderable"})));
     }
     Ok((c, desc))
 }
@@ -582,7 +572,7 @@ fn cursor_of(t: &Table, id: u32, c: &Column) -> String {
 }
 
 fn decode_cursor(c: &Column, v: Option<&Json>) -> Result<Option<(Key2<'static>, u32)>, Refusal> {
-    let bad = || Refusal { code: refusal::TYPE, data: json!({"param": "after"}) };
+    let bad = || no(refusal::TYPE, json!({"param": "after"}));
     let s = match v {
         None | Some(Json::Null) => return Ok(None),
         Some(Json::String(s)) => s,
@@ -684,7 +674,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     let found = match (p.get("id"), p.get("key")) {
         (Some(id), _) => {
             let id = id_param(Some(id))?;
-            rows.table(tm.id).filter(|t| t.has(id) && is_live(t, tm, id)).map(|t| (t, id))
+            rows.table(tm.id).filter(|t| live(t, tm, id)).map(|t| (t, id))
         }
         (None, Some(Json::Object(key))) if !key.is_empty() => {
             if key.values().any(|v| v.is_object() || v.is_array()) {
@@ -696,7 +686,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
                 t.ids()
                     .iter()
                     .copied()
-                    .find(|&id| is_live(t, tm, id) && fs.iter().all(|f| holds(t, id, f)) && k.1.is_none_or(|w| cond_holds(tm, t, id, w)))
+                    .find(|&id| live(t, tm, id) && fs.iter().all(|f| holds(t, id, f)) && k.1.is_none_or(|w| cond_holds(tm, &|c| t.get(id, c.id), w)))
                     .map(|id| (t, id))
             })
         }
@@ -733,14 +723,9 @@ fn key_of_names<'a>(tm: &TableModel, names: impl Iterator<Item = &'a String>) ->
             c == wanted
         })
         .cloned()
-        .ok_or_else(|| Refusal {
-            code: refusal::NATURAL_KEY,
-            data: json!({
-                "table": tm.name,
-                "key": brief(&json!(wanted)),
-                "reason": "no declared key is made of exactly these columns",
-                "keys": tm.keys.iter().map(key_doc).collect::<Vec<_>>(),
-            }),
+        .ok_or_else(|| {
+            let keys: Vec<Json> = tm.keys.iter().map(key_doc).collect();
+            no(refusal::NATURAL_KEY, json!({"table": tm.name, "key": brief(&json!(wanted)), "reason": "no declared key is made of exactly these columns", "keys": keys}))
         })
 }
 
@@ -755,13 +740,13 @@ fn text(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
     }
     let offset = match p.get("offset") {
         None | Some(Json::Null) => 0,
-        Some(v) => v.as_u64().filter(|n| *n <= INT64).ok_or_else(|| Refusal { code: refusal::TYPE, data: json!({"param": "offset", "got": brief(v)}) })?,
+        Some(v) => v.as_u64().filter(|n| *n <= INT64).ok_or_else(|| no(refusal::TYPE, json!({"param": "offset", "got": brief(v)})))?,
     };
     let length = bound(p.get("length"), CHUNK, CHUNK, "length")?;
     if offset + length + 4 > INT64 {
         return refuse(refusal::TOO_LARGE, json!({"param": "offset"}));
     }
-    let Some(t) = rows.table(tm.id).filter(|t| t.has(id) && is_live(t, tm, id)) else {
+    let Some(t) = rows.table(tm.id).filter(|t| live(t, tm, id)) else {
         return refuse(refusal::NOT_FOUND, json!({"table": tm.name, "id": id}));
     };
     let Some(whole) = t.text(id, c.id) else {
@@ -838,7 +823,7 @@ fn history(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
                 let sf = |n: &str| sm.col_named(n).map_or(Json::Null, |c| out(s, sid, c));
                 Some(json!({
                     "id": sid, "url": sf("url"), "host": sf("host"), "publisher": sf("publisher"),
-                    "title": sf("title"), "kind": sf("kind"), "dropped": !is_live(s, sm, sid),
+                    "title": sf("title"), "kind": sf("kind"), "dropped": !live(s, sm, sid),
                 }))
             });
             json!({

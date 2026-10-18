@@ -19,7 +19,7 @@ pub enum RepOutcome {
 }
 
 impl RepOutcome {
-    pub fn from_u8(v: u8) -> Option<RepOutcome> {
+    pub fn from_u32(v: u32) -> Option<RepOutcome> {
         [RepOutcome::Solved, RepOutcome::Attempt, RepOutcome::Skip].get(v as usize).copied()
     }
 }
@@ -88,17 +88,12 @@ pub enum NetKind {
 impl NetKind {
     pub const ALL: [NetKind; 4] = [NetKind::Observer, NetKind::Artifact, NetKind::Post, NetKind::Draft];
 
-    pub fn from_u8(v: u8) -> Option<NetKind> {
+    pub fn from_u32(v: u32) -> Option<NetKind> {
         NetKind::ALL.get(v as usize).copied()
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            NetKind::Observer => "observer",
-            NetKind::Artifact => "artifact",
-            NetKind::Post => "post",
-            NetKind::Draft => "draft",
-        }
+        ["observer", "artifact", "post", "draft"][self as usize]
     }
 }
 
@@ -163,15 +158,7 @@ mod tests {
         let sunday = 740_272;
         let g = gym([(sunday, Solved), (sunday - 6, Solved), (sunday - 7, Solved)], None, sunday);
         assert_eq!((g.week, g.streak), (2, 1));
-        let n = net([(NetKind::Post, Some(sunday - 6)), (NetKind::Post, Some(sunday - 7))], sunday);
-        assert_eq!(n.week, [0, 0, 1, 0]);
-    }
-
-    #[test]
-    fn net_counts() {
-        let n = net([(NetKind::Post, Some(10)), (NetKind::Post, Some(3)), (NetKind::Draft, None)], 10);
-        assert_eq!(n.total, [0, 0, 2, 1]);
-        assert_eq!(n.week, [0, 0, 1, 0]);
-        assert_eq!(n.unshipped, 1);
+        let n = net([(NetKind::Post, Some(sunday - 6)), (NetKind::Post, Some(sunday - 7)), (NetKind::Draft, None)], sunday);
+        assert_eq!((n.total, n.week, n.unshipped), ([0, 0, 2, 1], [0, 0, 1, 0], 1));
     }
 }

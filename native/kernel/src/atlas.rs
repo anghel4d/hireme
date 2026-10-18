@@ -112,12 +112,7 @@ pub enum Route {
 
 impl Route {
     pub fn name(self) -> &'static str {
-        match self {
-            Route::Citizen => "citizen",
-            Route::Free => "free",
-            Route::Permit => "permit",
-            Route::Unknown => "unknown",
-        }
+        ["citizen", "free", "permit", "unknown"][self as usize]
     }
 }
 
@@ -311,11 +306,12 @@ mod tests {
     fn weights_and_presets() {
         assert_eq!(Weights::from_settings([None, Some(2.0), Some(-1.0), Some(f64::NAN), None, None, None]).0, [1.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
         assert!(preset("career").is_some() && preset("nope").is_none());
-        let places = [country(1, "AA", 10.0, "", "xx"), country(2, "BB", 30.0, "", "yy")];
+        // Economy alone, mid-ranked: 10 → 0, and the two 30s share 0.75.
+        let places = [country(1, "AA", 10.0, "", "xx"), country(2, "BB", 30.0, "", "yy"), country(3, "CC", 30.0, "", "zz")];
         let econ_only = Me { citizenships: "", languages: "", weights: Weights([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]) };
         let f = fit(&places, &econ_only);
-        assert_eq!((f[0].fit, f[1].fit), (Some(0), Some(100)));
-        assert_eq!(order(&f), [2, 1]);
+        assert_eq!((f[0].fit, f[1].fit, f[2].fit), (Some(0), Some(75), Some(75)));
+        assert_eq!(order(&f), [2, 3, 1]);
     }
 
     #[test]
@@ -332,13 +328,5 @@ mod tests {
         assert_eq!(order(&f[1..]), [2, 3]);
         let huge = Weights::from_settings([Some(1.7e308), Some(1.7e308), None, None, None, None, None]);
         assert!(fit(&ps, &Me { weights: huge, ..me }).iter().all(|x| x.fit.is_some_and(|v| v <= 100)));
-    }
-
-    #[test]
-    fn ties_share_a_mid_rank() {
-        let r = ranks(&[(0, 5.0), (1, 5.0), (2, 1.0)]);
-        assert_eq!(r[&2], 0.0);
-        assert_eq!(r[&0], 0.75);
-        assert_eq!(r[&1], 0.75);
     }
 }

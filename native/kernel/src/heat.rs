@@ -93,11 +93,10 @@ impl Config {
         let Some(Ok(serde_json::Value::Object(m))) = json.map(serde_json::from_str::<serde_json::Value>) else {
             return c;
         };
-        for (k, v) in m.iter() {
-            let zero_ok = matches!(k.as_str(), "same_department_penalty" | "clone_penalty");
+        for (k, slot) in c.fields() {
+            let zero_ok = matches!(k, "same_department_penalty" | "clone_penalty");
             let in_range = |x: f64| (x > 0.0 || (zero_ok && x == 0.0)) && (k != "application_load" || x <= 16.0);
-            let Some(x) = v.as_f64().filter(|x| x.is_finite() && in_range(*x)) else { continue };
-            if let Some(slot) = c.field(k) {
+            if let Some(x) = m.get(k).and_then(serde_json::Value::as_f64).filter(|x| x.is_finite() && in_range(*x)) {
                 *slot = x;
             }
         }
@@ -108,26 +107,26 @@ impl Config {
         c
     }
 
-    fn field(&mut self, name: &str) -> Option<&mut f64> {
-        Some(match name {
-            "company_half_life" => &mut self.company_half_life,
-            "ats_vendor_half_life" => &mut self.ats_vendor_half_life,
-            "ats_tenant_half_life" => &mut self.ats_tenant_half_life,
-            "application_load" => &mut self.application_load,
-            "same_department_penalty" => &mut self.same_department_penalty,
-            "clone_penalty" => &mut self.clone_penalty,
-            "mega_cap" => &mut self.mega_cap,
-            "large_cap" => &mut self.large_cap,
-            "mid_cap" => &mut self.mid_cap,
-            "small_cap" => &mut self.small_cap,
-            "ats_vendor_cap" => &mut self.ats_vendor_cap,
-            "ats_tenant_cap" => &mut self.ats_tenant_cap,
-            "ats_batch_cap" => &mut self.ats_batch_cap,
-            "cool_ratio" => &mut self.cool_ratio,
-            "hot_ratio" => &mut self.hot_ratio,
-            "load_floor" => &mut self.load_floor,
-            _ => return None,
-        })
+    /// Every setting under its `heat_config` key.
+    fn fields(&mut self) -> [(&'static str, &mut f64); 16] {
+        [
+            ("company_half_life", &mut self.company_half_life),
+            ("ats_vendor_half_life", &mut self.ats_vendor_half_life),
+            ("ats_tenant_half_life", &mut self.ats_tenant_half_life),
+            ("application_load", &mut self.application_load),
+            ("same_department_penalty", &mut self.same_department_penalty),
+            ("clone_penalty", &mut self.clone_penalty),
+            ("mega_cap", &mut self.mega_cap),
+            ("large_cap", &mut self.large_cap),
+            ("mid_cap", &mut self.mid_cap),
+            ("small_cap", &mut self.small_cap),
+            ("ats_vendor_cap", &mut self.ats_vendor_cap),
+            ("ats_tenant_cap", &mut self.ats_tenant_cap),
+            ("ats_batch_cap", &mut self.ats_batch_cap),
+            ("cool_ratio", &mut self.cool_ratio),
+            ("hot_ratio", &mut self.hot_ratio),
+            ("load_floor", &mut self.load_floor),
+        ]
     }
 
     pub fn cap(&self, size: Size) -> f64 {
@@ -137,27 +136,6 @@ impl Config {
             Size::Mid => self.mid_cap,
             Size::Small => self.small_cap,
         }
-    }
-
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "company_half_life": self.company_half_life,
-            "ats_vendor_half_life": self.ats_vendor_half_life,
-            "ats_tenant_half_life": self.ats_tenant_half_life,
-            "application_load": self.application_load,
-            "same_department_penalty": self.same_department_penalty,
-            "clone_penalty": self.clone_penalty,
-            "mega_cap": self.mega_cap,
-            "large_cap": self.large_cap,
-            "mid_cap": self.mid_cap,
-            "small_cap": self.small_cap,
-            "ats_vendor_cap": self.ats_vendor_cap,
-            "ats_tenant_cap": self.ats_tenant_cap,
-            "ats_batch_cap": self.ats_batch_cap,
-            "cool_ratio": self.cool_ratio,
-            "hot_ratio": self.hot_ratio,
-            "load_floor": self.load_floor,
-        })
     }
 }
 
@@ -215,8 +193,7 @@ impl Seat {
     pub fn new(f: &SeatIn) -> Seat {
         let company = crate::text::normalize(f.company);
         let role = crate::text::normalize(f.role);
-        let size = org::size_normalized(&company);
-        Seat::from_normalized(f, &company, size, org::department_normalized(&role), org::family_normalized(&role))
+        Seat::from_normalized(f, &company, org::size(&company), org::department(&role), org::family(&role))
     }
 
     /// [`Seat::new`] from the company's normalized name and size and the
@@ -264,14 +241,7 @@ pub enum Reason {
 
 impl Reason {
     pub fn name(self) -> &'static str {
-        match self {
-            Reason::Ok => "ok",
-            Reason::Override => "override",
-            Reason::CompanyCap => "company_cap",
-            Reason::VendorCap => "ats_vendor_cap",
-            Reason::TenantCap => "ats_tenant_cap",
-            Reason::BatchCap => "ats_batch_cap",
-        }
+        ["ok", "override", "company_cap", "ats_vendor_cap", "ats_tenant_cap", "ats_batch_cap"][self as usize]
     }
 }
 
@@ -333,12 +303,7 @@ pub enum Class {
 
 impl Class {
     pub fn name(self) -> &'static str {
-        match self {
-            Class::Cool => "cool",
-            Class::Warm => "warm",
-            Class::Hot => "hot",
-            Class::Blocked => "blocked",
-        }
+        ["cool", "warm", "hot", "blocked"][self as usize]
     }
 
     pub fn parse(s: &str) -> Option<Class> {
@@ -464,10 +429,6 @@ fn load_at(age: i64, k: usize, cfg: &Config) -> u64 {
     if l >= cfg.load_floor { fp(l) } else { 0 }
 }
 
-fn loads_at(age: i64, cfg: &Config) -> [u64; 3] {
-    [load_at(age, COMPANY, cfg), load_at(age, VENDOR, cfg), load_at(age, TENANT, cfg)]
-}
-
 impl Index {
     /// Indexes (a copy of) the hot seats; the rest carry no load.
     pub fn new<'s>(seats: impl IntoIterator<Item = &'s Seat>, today: Day, cfg: &Config) -> Index {
@@ -498,7 +459,7 @@ impl Index {
     fn join(&mut self, s: Seat) {
         let (c, v, t, bv) = keys(&s);
         let age = s.age(self.today);
-        let l = loads_at(age, &self.cfg);
+        let l: [u64; 3] = core::array::from_fn(|k| load_at(age, k, &self.cfg));
         let id = s.id;
         // A member whose load is already under the floor today adds
         // nothing to any group on any later day, so it is left out.
@@ -544,14 +505,6 @@ impl Index {
     /// Whether a seat (by id) is one of the indexed hot seats.
     pub fn contains(&self, id: u32) -> bool {
         self.seats.contains_key(&id)
-    }
-
-    pub fn today(&self) -> Day {
-        self.today
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.cfg
     }
 
     /// The age of `seat` if it is a member of `g` (and so its own share
@@ -603,25 +556,23 @@ impl At {
     }
 }
 
-/// The governor's check on one day.
-struct Check {
-    reason: Reason,
-    company_load: f64,
-    increment: f64,
-    vendor_load: f64,
-    tenant_load: f64,
-    batch_vendor: u32,
-}
-
 /// One of the governor's four conditions, each monotone in time (loads,
 /// live peers and live batch members only shrink), so each has its own
-/// first passing day.
+/// first passing day. Checked in this order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cond {
     Batch,
     Vendor,
     Tenant,
     Company,
+}
+
+impl Cond {
+    const ALL: [Cond; 4] = [Cond::Batch, Cond::Vendor, Cond::Tenant, Cond::Company];
+
+    fn reason(self) -> Reason {
+        [Reason::BatchCap, Reason::VendorCap, Reason::TenantCap, Reason::CompanyCap][self as usize]
+    }
 }
 
 /// What the checks share: the seat's kept peers, admitted in this pass
@@ -713,18 +664,31 @@ impl<'a> Probe<'a> {
         live + fresh
     }
 
-    fn passes(&self, c: Cond, at: At) -> bool {
+    /// A condition's measure on a day: the batch's live members, a
+    /// vendor's or tenant's load, or the company's load and increment.
+    fn measure(&self, c: Cond, at: At) -> (f64, f64) {
+        match c {
+            Cond::Batch => (self.batch(at) as f64, 0.0),
+            Cond::Vendor => (self.vendor(at), 0.0),
+            Cond::Tenant => (self.tenant(at), 0.0),
+            Cond::Company => self.company(at),
+        }
+    }
+
+    /// Whether a condition holds at its measure.
+    fn holds(&self, c: Cond, (load, inc): (f64, f64)) -> bool {
         let cfg = &self.ix.cfg;
         let known = self.seat.ats.vendor != Vendor::Unknown;
         match c {
-            Cond::Batch => !known || (self.batch(at) as f64) < cfg.ats_batch_cap,
-            Cond::Vendor => !known || self.vendor(at) + cfg.application_load <= cfg.ats_vendor_cap,
-            Cond::Tenant => self.seat.ats.tenant.is_none() || !known || self.tenant(at) + cfg.application_load <= cfg.ats_tenant_cap,
-            Cond::Company => {
-                let (load, inc) = self.company(at);
-                load + inc <= cfg.cap(self.seat.size)
-            }
+            Cond::Batch => !known || load < cfg.ats_batch_cap,
+            Cond::Vendor => !known || load + cfg.application_load <= cfg.ats_vendor_cap,
+            Cond::Tenant => self.seat.ats.tenant.is_none() || !known || load + cfg.application_load <= cfg.ats_tenant_cap,
+            Cond::Company => load + inc <= cfg.cap(self.seat.size),
         }
+    }
+
+    fn passes(&self, c: Cond, at: At) -> bool {
+        self.holds(c, self.measure(c, at))
     }
 
     /// The first day `c` passes, by bisection over exact loads; `None`
@@ -745,54 +709,34 @@ impl<'a> Probe<'a> {
     }
 }
 
-fn check(ix: &Index, seat: &Seat, kept: &[&Seat], at: At) -> Check {
-    let p = Probe::new(ix, seat, kept);
-    let cfg = &ix.cfg;
-    let known = seat.ats.vendor != Vendor::Unknown;
-    let (company_load, increment) = p.company(at);
-    let vendor_load = p.vendor(at);
-    let tenant_load = p.tenant(at);
-    let batch_vendor = p.batch(at);
-    let reason = if known && batch_vendor as f64 >= cfg.ats_batch_cap {
-        Reason::BatchCap
-    } else if known && vendor_load + cfg.application_load > cfg.ats_vendor_cap {
-        Reason::VendorCap
-    } else if seat.ats.tenant.is_some() && known && tenant_load + cfg.application_load > cfg.ats_tenant_cap {
-        Reason::TenantCap
-    } else if company_load + increment > cfg.cap(seat.size) {
-        Reason::CompanyCap
-    } else {
-        Reason::Ok
-    };
-    Check { reason, company_load, increment, vendor_load, tenant_load, batch_vendor }
-}
-
 /// The governor's verdict on `seat` entering the queue on the index's
 /// day, under the index's config, against the indexed hot seats plus
 /// `kept` (seats already admitted in the same pass). The seat itself is
 /// never its own peer. `cooldown_days` is left for [`cooldown`] to fill:
 /// `Some(0)` when allowed, else `None`.
 pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Verdict {
-    let cfg = &ix.cfg;
-    let c = check(ix, seat, kept, At::Today);
-    let (allow, reason) = match c.reason {
-        Reason::Ok => (true, Reason::Ok),
-        _ if seat.overridden => (true, Reason::Override),
-        r => (false, r),
+    let (cfg, p) = (&ix.cfg, Probe::new(ix, seat, kept));
+    let measures = Cond::ALL.map(|c| p.measure(c, At::Today));
+    let held = Cond::ALL.into_iter().zip(measures).find(|(c, m)| !p.holds(*c, *m)).map(|(c, _)| c.reason());
+    let (allow, reason) = match held {
+        None => (true, Reason::Ok),
+        Some(_) if seat.overridden => (true, Reason::Override),
+        Some(r) => (false, r),
     };
+    let [(batch_vendor, _), (vendor_load, _), (tenant_load, _), (company_load, increment)] = measures;
     Verdict {
         allow,
         reason,
-        company_load: c.company_load,
+        company_load,
         company_cap: cfg.cap(seat.size),
-        increment: c.increment,
+        increment,
         size: seat.size,
         vendor: seat.ats.vendor,
-        vendor_load: c.vendor_load,
+        vendor_load,
         vendor_cap: cfg.ats_vendor_cap,
-        tenant_load: c.tenant_load,
+        tenant_load,
         tenant_cap: cfg.ats_tenant_cap,
-        batch_vendor: c.batch_vendor,
+        batch_vendor: batch_vendor as u32,
         cooldown_days: allow.then_some(0),
     }
 }
@@ -811,7 +755,7 @@ pub fn cooldown(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Option<u32> {
     }
     let p = Probe::new(ix, seat, kept);
     let mut day = 0;
-    for c in [Cond::Batch, Cond::Vendor, Cond::Tenant, Cond::Company] {
+    for c in Cond::ALL {
         day = day.max(p.first_day(c)?);
     }
     Some(day as u32)
@@ -848,15 +792,10 @@ mod tests {
     }
 
     #[test]
-    fn decay_halves_at_the_half_life() {
-        assert_eq!(decay(1.0, 0, 35.0), 1.0);
-        assert_eq!(decay(1.0, -3, 35.0), 1.0);
-        assert!((decay(1.0, 35, 35.0) - 0.5).abs() < 1e-12);
-        assert!((decay(2.0, 70, 35.0) - 0.5).abs() < 1e-12);
-    }
-
-    #[test]
     fn small_company_takes_one_then_cools() {
+        // Load halves each half-life and never grows on a future day.
+        assert_eq!((decay(1.0, 0, 35.0), decay(1.0, -3, 35.0)), (1.0, 1.0));
+        assert!((decay(1.0, 35, 35.0) - 0.5).abs() < 1e-12 && (decay(2.0, 70, 35.0) - 0.5).abs() < 1e-12);
         let cfg = Config::default();
         let day = 20_000;
         let hot = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, day)];
@@ -866,6 +805,13 @@ mod tests {
         assert!(!v.allow);
         assert_eq!(v.reason, Reason::CompanyCap);
         assert_eq!(v.increment, 1.0);
+        // An override needs a written reason; with one, the verdict says so.
+        let mut s = next.clone();
+        s.overridden = Seat::new(&SeatIn { heat_override: true, heat_override_reason: "  ", ..seat_in() }).overridden;
+        assert!(!verdict(&ix, &s, &[]).allow);
+        s.overridden = true;
+        let o = verdict(&ix, &s, &[]);
+        assert!(o.allow && o.reason == Reason::Override);
         // The increment fills the cap, so the wait is until the one peer
         // falls under the floor: 35 · log2(1 / 0.05) = 151.3 → 152 days.
         assert_eq!(cooldown(&ix, &next, &[]), Some(152));
@@ -887,20 +833,6 @@ mod tests {
         assert_eq!(v2.company_load, 3.0);
         // load 3.0, room 4.0 − 2.2 = 1.8: 35 · log2(3 / 1.8) = 25.8 → 26 days.
         assert_eq!(cooldown(&ix, &next, &[&fresh[0], &fresh[1]]), Some(26));
-    }
-
-    #[test]
-    fn override_needs_a_reason_and_is_reported() {
-        let cfg = Config::default();
-        let hot = [seat(1, "Acme", "Engineer", "", Stage::Submitted, 0)];
-        let ix = Index::new(&hot, 0, &cfg);
-        let mut s = seat(2, "Acme", "Engineer", "", Stage::Gated, 0);
-        s.overridden = Seat::new(&SeatIn { heat_override: true, heat_override_reason: "  ", ..seat_in() }).overridden;
-        assert!(!verdict(&ix, &s, &[]).allow);
-        s.overridden = true;
-        let v = verdict(&ix, &s, &[]);
-        assert!(v.allow);
-        assert_eq!(v.reason, Reason::Override);
     }
 
     fn seat_in() -> SeatIn<'static> {

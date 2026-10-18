@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(stages, enums::stage::NAMES);
         let bands: Vec<&str> = crate::score::BANDS.iter().map(|b| b.name()).collect();
         assert_eq!(bands, enums::band::NAMES);
-        let modes: Vec<&str> = (0..3).map(|i| crate::cv::Mode::from_u8(i).unwrap().name()).collect();
+        let modes: Vec<&str> = (0..3).map(|i| crate::cv::Mode::from_u32(i).unwrap().name()).collect();
         assert_eq!(modes, enums::overlay_mode::NAMES);
         let kinds: Vec<&str> = crate::lanes::NetKind::ALL.iter().map(|k| k.name()).collect();
         assert_eq!(kinds, enums::net_kind::NAMES);
