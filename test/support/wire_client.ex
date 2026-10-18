@@ -1,0 +1,118 @@
+defmodule Hireme.WireClient do
+  @moduledoc """
+  A wire client over a real `/wire` WebSocket, as an agent or a browser
+  tab speaks to the node: it sends frames and delivers every frame it
+  receives to its owner as `{:wire, client, %{kind, flags, rev, body}}`.
+  """
+
+  use GenServer
+  alias HiremeWeb.Wire.Codec
+
+  def connect(port, origin \\ nil) do
+    {:ok, pid} = GenServer.start_link(__MODULE__, {self(), port, origin})
+    pid
+  end
+
+  def send_frame(client, frame), do: GenServer.call(client, {:send, frame})
+
+  def close(client), do: GenServer.stop(client)
+
+  @doc "Waits for the next frame of `kind` from `client`; frames of other kinds before it are returned too."
+  def await(client, kind, timeout \\ 3_000, seen \\ []) do
+    receive do
+      {:wire, ^client, %{kind: ^kind} = f} -> {f, Enum.reverse(seen)}
+      {:wire, ^client, f} -> await(client, kind, timeout, [f | seen])
+    after
+      timeout ->
+        raise "no #{kind} within #{timeout} ms; saw #{inspect(Enum.map(seen, & &1.kind))}"
+    end
+  end
+
+  @doc "Sends an RPC and waits for its REPLY: `{:ok, result}` or `{:error, error}`."
+  def rpc(client, id, method, params) do
+    send_frame(client, Codec.encode_rpc(id, method, JSON.encode!(params)))
+    reply(client, id)
+  end
+
+  defp reply(client, id) do
+    {%{body: body}, _} = await(client, :REPLY)
+
+    case body do
+      <<^id::little-32, ok, 0::24, n::little-32, json::binary-size(n), _::binary>> ->
+        if ok == 1, do: {:ok, JSON.decode!(json)}, else: {:error, JSON.decode!(json)}
+
+      _ ->
+        reply(client, id)
+    end
+  end
+
+  @impl GenServer
+  def init({owner, port, origin}) do
+    {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
+    headers = if origin, do: [{"origin", origin}], else: []
+    {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/wire", headers)
+    {conn, status, resp_headers} = upgrade_response(conn, ref, nil, [])
+    {:ok, conn, ws} = Mint.WebSocket.new(conn, ref, status, resp_headers)
+    {:ok, %{owner: owner, conn: conn, ref: ref, ws: ws}}
+  end
+
+  defp upgrade_response(conn, ref, status, headers) do
+    receive do
+      msg ->
+        {:ok, conn, responses} = Mint.WebSocket.stream(conn, msg)
+
+        {status, headers, done} =
+          Enum.reduce(responses, {status, headers, false}, fn
+            {:status, ^ref, s}, {_, h, d} -> {s, h, d}
+            {:headers, ^ref, h}, {s, _, d} -> {s, h, d}
+            {:done, ^ref}, {s, h, _} -> {s, h, true}
+            _, acc -> acc
+          end)
+
+        if done, do: {conn, status, headers}, else: upgrade_response(conn, ref, status, headers)
+    after
+      3_000 -> raise "no WebSocket upgrade"
+    end
+  end
+
+  @impl GenServer
+  def handle_call({:send, frame}, _from, s) do
+    {:ok, ws, data} = Mint.WebSocket.encode(s.ws, {:binary, frame})
+    {:ok, conn} = Mint.WebSocket.stream_request_body(s.conn, s.ref, data)
+    {:reply, :ok, %{s | ws: ws, conn: conn}}
+  end
+
+  @impl GenServer
+  def handle_info(msg, s) do
+    case Mint.WebSocket.stream(s.conn, msg) do
+      {:ok, conn, responses} ->
+        s = %{s | conn: conn}
+
+        s =
+          Enum.reduce(responses, s, fn
+            {:data, ref, data}, s when ref == s.ref ->
+              {:ok, ws, messages} = Mint.WebSocket.decode(s.ws, data)
+              Enum.each(messages, &deliver(&1, s))
+              %{s | ws: ws}
+
+            _, s ->
+              s
+          end)
+
+        {:noreply, s}
+
+      _ ->
+        {:noreply, s}
+    end
+  end
+
+  defp deliver({:binary, frame}, s) do
+    {:ok, kind, flags, rev, body} = Codec.decode(frame)
+    send(s.owner, {:wire, self(), %{kind: kind, flags: flags, rev: rev, body: body}})
+  end
+
+  defp deliver({:close, code, reason}, s),
+    do: send(s.owner, {:wire, self(), %{kind: :CLOSE, flags: 0, rev: code, body: reason}})
+
+  defp deliver(_other, _s), do: :ok
+end

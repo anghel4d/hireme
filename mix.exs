@@ -42,6 +42,8 @@ defmodule Hireme.MixProject do
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:phoenix_live_reload, "~> 1.7", only: :dev},
       {:stream_data, "~> 1.4", only: :test},
+      # The acceptance suite drives the node over a real /wire WebSocket.
+      {:mint_web_socket, "~> 1.0", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
