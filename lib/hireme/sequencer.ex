@@ -338,7 +338,9 @@ defmodule Hireme.Sequencer do
   def handle_info(:purge, state) do
     purge_ledger(Store.now())
     Process.send_after(self(), :purge, @purge_ms)
-    {:noreply, state, @idle_ms}
+    # The purge moved the ledger's count; the next write reads it afresh.
+    ledger = Schema.table("op_ledger").id
+    {:noreply, %{state | counts: Map.delete(state.counts, ledger)}, @idle_ms}
   end
 
   def handle_info(:timeout, %{subs: subs} = state) when map_size(subs) == 0,
@@ -625,7 +627,7 @@ defmodule Hireme.Sequencer do
         case verdict do
           {:ok, state, after_, ack} ->
             :ok = Store.savepoint(:keep)
-            record(op, sub, ack, after_.now)
+            state = record(op, sub, ack, after_.now, state)
             # The account's rev counts writes: an op that wrote nothing (a stage
             # move to where the application stands) moves no rev, or a client's
             # snapshot would lag a PATCH that never came.
@@ -703,7 +705,24 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp record(op, sub, ack, now) do
+  # The ledger is bounded by its cap without refusing anyone: at the cap the
+  # account's oldest entries (1% of it) make room, so a flood of keys costs
+  # only its own oldest retries their memory, never the operator a write.
+  defp record(op, sub, ack, now, state) do
+    t = Schema.table("op_ledger")
+    state = counted(state, t)
+
+    evicted =
+      if state.counts[t.id] + 1 > t.cap do
+        oldest =
+          from(l in Hireme.Rows.OpLedger, order_by: l.id, limit: ^div(t.cap, 100), select: l.id)
+
+        {n, _} = Repo.delete_all(from(l in Hireme.Rows.OpLedger, where: l.id in subquery(oldest)))
+        n
+      else
+        0
+      end
+
     Repo.insert_all(
       Hireme.Rows.OpLedger,
       [
@@ -726,6 +745,8 @@ defmodule Hireme.Sequencer do
       on_conflict: {:replace_all_except, [:id]},
       conflict_target: [:account_id, :writer, :op_id]
     )
+
+    update_in(state.counts[t.id], &(&1 - evicted + 1))
   end
 
   defp purge_ledger(now) do

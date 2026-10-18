@@ -1150,6 +1150,30 @@ defmodule Hireme.SequencerTest do
                )
     end
 
+    test "at its cap the ledger makes room from its oldest entries and refuses nobody", %{
+      account: a
+    } do
+      {[_], []} =
+        run(a.id, op(:put, :gym_reps, %{platform: :other, slug: "a", done_on: ~D[2026-10-01]}))
+
+      ledger = fn -> Repo.aggregate(Hireme.Rows.OpLedger, :count, skip_account: true) end
+      assert ledger.() == 1
+
+      # The cached count says the ledger is full.
+      [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
+      cap = Hireme.Schema.table("op_ledger").cap
+      id = Hireme.Schema.table("op_ledger").id
+      :sys.replace_state(pid, &put_in(&1.counts[id], cap))
+
+      assert {[_], []} =
+               run(
+                 a.id,
+                 op(:put, :gym_reps, %{platform: :other, slug: "b", done_on: ~D[2026-10-01]})
+               )
+
+      assert ledger.() == 1
+    end
+
     test "an insert refused at the text budget leaves no claim behind", %{
       account: a,
       session: s
