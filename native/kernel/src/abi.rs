@@ -17,6 +17,7 @@
 //! the next call that writes rows. Strings are `(str_ptr, str_len)` per
 //! cell. JSON documents are UTF-8.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -53,6 +54,9 @@ pub struct Kernel {
     grants: query::Grants,
     /// The order indexes `query`'s finds walk, mended as rows move.
     indexes: core::cell::RefCell<query::Indexes>,
+    /// Each application's CV part (`compose::cv_part`) by what it read of
+    /// the row; dropped whenever items, overlays or lineages move.
+    cvs: BTreeMap<u32, (compose::CvKey, (Json, Json))>,
 }
 
 impl Kernel {
@@ -105,6 +109,9 @@ impl Kernel {
         if m.is_empty() || (only_clock && self.today() == day_before) {
             return;
         }
+        if [table::ITEMS, table::CV_OVERLAYS, table::CV_LINEAGES].iter().any(|&t| m.touched(t)) {
+            self.cvs.clear();
+        }
         self.board.forget(m, &self.rows);
         self.stale = true;
     }
@@ -123,6 +130,7 @@ impl Kernel {
             Err(_) => {
                 self.board = Board::default();
                 self.indexes.get_mut().clear();
+                self.cvs.clear();
                 self.stale = true;
                 Err(Error::Body)
             }
@@ -209,7 +217,20 @@ impl Kernel {
 
     pub fn application(&mut self, id: u32) -> Option<Json> {
         self.derive();
-        compose::application(&self.rows, &self.board, id, self.today())
+        let t = self.rows.table(table::APPLICATIONS)?;
+        let key = compose::cv_key(t, id);
+        let cv = match self.cvs.get(&id) {
+            Some((k, cv)) if *k == key => cv.clone(),
+            _ => {
+                let cv = compose::cv_part(&self.rows, &self.board, t, id);
+                if self.cvs.len() >= 64 {
+                    self.cvs.clear();
+                }
+                self.cvs.insert(id, (key, cv.clone()));
+                cv
+            }
+        };
+        compose::application(&self.rows, &self.board, id, self.today(), cv)
     }
 
     pub fn overview(&mut self, top: usize) -> Json {

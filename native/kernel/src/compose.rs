@@ -41,8 +41,9 @@ fn lineage_of(rows: &Rows, corporation: Option<u32>) -> Option<(&Table, u32)> {
 }
 
 /// One application: its row, card, rail, heat, suggestion, coverage, CV,
-/// events, batch and lineage.
-pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Json> {
+/// events, batch and lineage. `cv` is its `cv_part`, which the caller may
+/// keep across writes that leave what it reads alone.
+pub fn application(rows: &Rows, board: &Board, id: u32, today: Day, cv: (Json, Json)) -> Option<Json> {
     let t = rows.table(table::APPLICATIONS)?;
     if !t.has(id) {
         return None;
@@ -52,24 +53,6 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
     let rail: Vec<Json> = STAGES
         .iter()
         .map(|s| json!({"stage": s.name(), "label": s.label(), "hint": s.hint(), "pip": rail[s.index()].name(), "fire_locked": s.fire_locked()}))
-        .collect();
-
-    let (lines, theme) = cv_of(rows, board.lines_built(), t, id);
-    let cv_text = cv::visible(&lines, &theme);
-    let listing_words: Vec<&str> = t.str(id, A::KEYWORDS).map(|k| crate::text::list(k).collect()).unwrap_or_default();
-    let coverage = keywords::coverage(
-        listing_words.iter().copied().chain(theme.targets.iter().map(String::as_str)),
-        &keywords::Text::new(&cv_text),
-    );
-    let cv_lines: Vec<Json> = lines
-        .iter()
-        .map(|l| {
-            json!({
-                "item_id": l.item_id, "kind": enum_name(schema::enums::item_kind::NAMES, Some(l.kind as u32)),
-                "key": l.key, "title": l.title, "body": l.body, "org": l.org, "span": l.span,
-                "mode": l.mode.map(cv::Mode::name), "reason": l.reason,
-            })
-        })
         .collect();
 
     let mut event_ids: Vec<u32> = rows.each(table::EVENTS).filter(|(e, x)| e.u32(*x, col::events::APPLICATION_ID) == Some(id)).map(|(_, x)| x).collect();
@@ -104,12 +87,44 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day) -> Option<Js
         "application": row(t, id),
         "card": card,
         "rail": rail,
-        "coverage": coverage.to_json(),
-        "cv": {"theme": theme.to_json(), "lines": cv_lines},
+        "coverage": cv.0,
+        "cv": cv.1,
         "events": events,
         "batch": batch,
         "lineage": lineage,
     }))
+}
+
+/// What `cv_part` reads of the application's own row (profile,
+/// corporation, theme, listing keywords); the rest is the items, overlays
+/// and lineages tables.
+pub type CvKey = (Option<u32>, Option<u32>, String);
+pub fn cv_key(t: &Table, id: u32) -> CvKey {
+    let text = |c| t.str(id, c).unwrap_or("");
+    (t.u32(id, A::PROFILE_ID), t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
+}
+
+/// One application's keyword coverage and composed CV (theme and lines).
+pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32) -> (Json, Json) {
+    let (lines, theme) = cv_of(rows, board.lines_built(), t, id);
+    let cv_text = cv::visible(&lines, &theme);
+    let listing_words: Vec<&str> = t.str(id, A::KEYWORDS).map(|k| crate::text::list(k).collect()).unwrap_or_default();
+    let coverage = keywords::coverage(
+        listing_words.iter().copied().chain(theme.targets.iter().map(String::as_str)),
+        &keywords::Text::new(&cv_text),
+    );
+    let cv_lines: Vec<Json> = lines
+        .iter()
+        .map(|l| {
+            json!({
+                "item_id": l.item_id, "kind": enum_name(schema::enums::item_kind::NAMES, Some(l.kind as u32)),
+                "key": l.key, "title": l.title, "body": l.body, "org": l.org, "span": l.span,
+                "mode": l.mode.map(cv::Mode::name), "reason": l.reason,
+            })
+        })
+        .collect();
+
+    (coverage.to_json(), json!({"theme": theme.to_json(), "lines": cv_lines}))
 }
 
 /// The CV lines and theme for one application.
