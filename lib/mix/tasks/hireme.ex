@@ -73,11 +73,12 @@ defmodule Mix.Tasks.Hireme.Schema do
     ts = emit!(["ts"])
     json = emit!(["json"])
 
-    cond do
-      opts[:freeze] -> freeze!(sql, ts, json, opts)
-      opts[:check] -> check!(sql, ts, json, opts)
-      true -> write!(sql, ts, json, opts)
-    end
+    if opts[:check] || opts[:freeze],
+      do: check!(sql, ts, json, opts),
+      else: write!(sql, ts, json, opts)
+
+    # The cutover's one step: lock the baseline every deployed database starts from.
+    if opts[:freeze], do: put!(@lock, lock_text(sql))
   end
 
   defp write!(sql, ts, json, opts) do
@@ -96,12 +97,10 @@ defmodule Mix.Tasks.Hireme.Schema do
         migration!(name)
 
       {hash, nil} ->
-        if sha(sql) != hash,
-          do:
-            Mix.raise(
-              "#{@baseline} is frozen: deployed databases hold it. " <>
-                "Ship this change as mix hireme.schema --migration NAME"
-            )
+        sha(sql) == hash ||
+          Mix.raise(
+            "#{@baseline} is frozen: deployed databases hold it; ship it as --migration NAME"
+          )
 
       {_hash, name} ->
         migration!(name)
@@ -113,16 +112,17 @@ defmodule Mix.Tasks.Hireme.Schema do
     put!(@json, json)
   end
 
-  # The cutover's one step: lock the baseline every deployed database starts from.
-  defp freeze!(sql, ts, json, opts) do
-    check!(sql, ts, json, opts)
-    put!(@lock, lock_text(sql))
-  end
-
+  # A lock that names no digest fails closed: nil means "not frozen" to every guard.
   defp locked do
     case File.read(Path.join(@root, @lock)) do
-      {:ok, text} -> text |> String.split("\n") |> Enum.find(&(&1 =~ ~r/^[0-9a-f]{64}$/))
-      {:error, _} -> nil
+      {:ok, text} ->
+        case Regex.run(~r/^([0-9a-f]{64})\r?$/m, text) do
+          [_, hash] -> hash
+          nil -> Mix.raise("#{@lock} names no SHA-256 (a line of 64 lowercase hex digits)")
+        end
+
+      {:error, _} ->
+        nil
     end
   end
 
@@ -132,15 +132,12 @@ defmodule Mix.Tasks.Hireme.Schema do
   defp sha(text), do: :crypto.hash(:sha256, text) |> Base.encode16(case: :lower)
 
   defp lock_problem do
-    case {locked(), File.read(Path.join(@root, @baseline))} do
-      {nil, _} ->
-        nil
-
-      {hash, {:ok, sql}} ->
-        if sha(sql) != hash, do: "#{@baseline} is not the baseline #{@lock} names"
-
-      {_, {:error, _}} ->
-        nil
+    with hash when is_binary(hash) <- locked(),
+         {:ok, sql} <- File.read(Path.join(@root, @baseline)),
+         false <- sha(sql) == hash do
+      "#{@baseline} is not the baseline #{@lock} names"
+    else
+      _ -> nil
     end
   end
 
