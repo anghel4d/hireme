@@ -28,6 +28,36 @@ defmodule Hireme.WireClient do
     end
   end
 
+  @doc "Sends one put in its own OPS frame and waits for its verdict: `{:ack, id}` or `{:nack, refusal}`."
+  def put(client, op) do
+    send_frame(client, HiremeWeb.Wire.Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw]))
+
+    receive do
+      {:wire, ^client,
+       %{
+         kind: :ACK,
+         body: <<1::little-32, 0::32, _::little-64, _::little-64, id::little-32, _::32>>
+       }} ->
+        {:ack, id}
+
+      {:wire, ^client,
+       %{kind: :NACK, body: <<1::little-32, 0::32, _::little-64, code::little-16, _::binary>>}} ->
+        {:nack, Hireme.Schema.refusal_name(code)}
+    after
+      3_000 -> ExUnit.Assertions.flunk("no verdict")
+    end
+  end
+
+  @doc "The PATCHes `client` receives until it has been quiet for `quiet_ms`."
+  def patches(client, quiet_ms, acc \\ []) do
+    receive do
+      {:wire, ^client, %{kind: :PATCH} = f} -> patches(client, quiet_ms, [f | acc])
+      {:wire, ^client, _} -> patches(client, quiet_ms, acc)
+    after
+      quiet_ms -> Enum.reverse(acc)
+    end
+  end
+
   @doc "Sends an RPC and waits for its REPLY: `{:ok, result}` or `{:error, error}`."
   def rpc(client, id, method, params) do
     send_frame(client, Codec.encode_rpc(id, method, JSON.encode!(params)))

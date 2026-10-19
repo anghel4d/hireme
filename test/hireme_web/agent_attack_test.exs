@@ -56,41 +56,12 @@ defmodule HiremeWeb.AgentAttackTest do
 
   defp ops_frame(op), do: Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw])
 
-  defp put(c, op) do
-    WireClient.send_frame(c, ops_frame(op))
-
-    receive do
-      {:wire, ^c,
-       %{
-         kind: :ACK,
-         body: <<1::little-32, 0::32, _::little-64, _::little-64, id::little-32, _::32>>
-       }} ->
-        {:ack, id}
-
-      {:wire, ^c,
-       %{kind: :NACK, body: <<1::little-32, 0::32, _::little-64, code::little-16, _::binary>>}} ->
-        {:nack, Schema.refusal_name(code)}
-    after
-      3_000 -> flunk("no verdict")
-    end
-  end
-
   defp rpc(c, method, params),
     do: WireClient.rpc(c, System.unique_integer([:positive]), method, params)
 
   defp refused(c, method, params) do
     assert {:error, %{"code" => code}} = rpc(c, method, params)
     String.to_atom(code)
-  end
-
-  # Every PATCH `c` receives until it has been quiet for `quiet_ms`.
-  defp patches(c, quiet_ms, acc \\ []) do
-    receive do
-      {:wire, ^c, %{kind: :PATCH} = f} -> patches(c, quiet_ms, [f | acc])
-      {:wire, ^c, _} -> patches(c, quiet_ms, acc)
-    after
-      quiet_ms -> Enum.reverse(acc)
-    end
   end
 
   # A cited corporation, an application and a profile with a private narrative.
@@ -162,12 +133,12 @@ defmodule HiremeWeb.AgentAttackTest do
     {[_], []} = run(a.id, op(:put, :applications, %{role: "R2"}, target: ids.app))
     grants = Hireme.Grants.key(%{id: 0, read_mask: 2, write_mask: 0, may_delete: false})
 
-    for p <- patches(d, 500),
+    for p <- WireClient.patches(d, 500),
         {name, rows} <- tables(p.body),
         rows > 0,
         do: assert(Hireme.Grants.read?(grants, Schema.table(name)), "#{name} to a desk-only key")
 
-    model = Enum.reduce(patches(c, 500), model, &ingest(&2, :PATCH, &1.body))
+    model = Enum.reduce(WireClient.patches(c, 500), model, &ingest(&2, :PATCH, &1.body))
     assert model["applications"][ids.app][Schema.column(:applications, "role").id] == "R2"
     clean!(model)
 
@@ -203,10 +174,13 @@ defmodule HiremeWeb.AgentAttackTest do
     gym =
       op(:put, :gym_reps, %{platform: :other, slug: "m", done_on: ~D[2026-10-01]}, op_id: 31_337)
 
-    assert {:ack, _} = put(c, gym)
+    assert {:ack, _} = WireClient.put(c, gym)
 
     assert {:ack, mine} =
-             put(c, op(:put, :corporations, %{domain: "seed.example", name: "Mine"}, keyed: true))
+             WireClient.put(
+               c,
+               op(:put, :corporations, %{domain: "seed.example", name: "Mine"}, keyed: true)
+             )
 
     assert mine != theirs.corp
 
@@ -224,7 +198,7 @@ defmodule HiremeWeb.AgentAttackTest do
            ), :source_missing},
           {op(:drop, :corporations, %{}, target: theirs.corp), :not_found}
         ],
-        do: assert(put(c, op) == {:nack, refusal})
+        do: assert(WireClient.put(c, op) == {:nack, refusal})
   end
 
   test "a key writes neither authorship, a source's identity nor a derived column, performs no human act, and no batch lets it submit",
@@ -246,11 +220,12 @@ defmodule HiremeWeb.AgentAttackTest do
           {:citations, %{}, 0, :column},
           {:batches, %{code: "B", ordinal: 1, fire: :open_fire}, 0, :human_only}
         ] do
-      assert put(c, op(:put, table, cells, target: target)) == {:nack, refusal},
+      assert WireClient.put(c, op(:put, table, cells, target: target)) == {:nack, refusal},
              "#{table} #{inspect(cells)}"
     end
 
-    assert {:nack, :human_only} = put(c, op(:command, :open_fire, %{}, target: ids.app))
+    assert {:nack, :human_only} =
+             WireClient.put(c, op(:command, :open_fire, %{}, target: ids.app))
 
     assert Repo.all(
              from(x in Hireme.Rows.Citation,
@@ -264,8 +239,13 @@ defmodule HiremeWeb.AgentAttackTest do
     # FIRE HOLD: a batch, fired by the operator or not, is no leave to submit.
     {[batch], []} = run(a.id, op(:put, :batches, %{code: "FIRED", ordinal: 1, fire: :open_fire}))
     {:ok, %{"ids" => [_]}} = rpc(c, "lease.claim", %{"ids" => [ids.app]})
-    assert {:ack, _} = put(c, op(:put, :applications, %{batch_id: batch.id}, target: ids.app))
-    assert {:nack, refusal} = put(c, op(:command, :stage, %{stage: :submitted}, target: ids.app))
+
+    assert {:ack, _} =
+             WireClient.put(c, op(:put, :applications, %{batch_id: batch.id}, target: ids.app))
+
+    assert {:nack, refusal} =
+             WireClient.put(c, op(:command, :stage, %{stage: :submitted}, target: ids.app))
+
     assert refusal in [:fire_hold, :stage]
     assert Repo.get!(Hireme.Rows.Application, ids.app).stage != :submitted
   end
@@ -289,20 +269,23 @@ defmodule HiremeWeb.AgentAttackTest do
     assert refused(c, "lease.claim", %{"stage" => "discovered", "count" => 1}) == :scope
     assert {:ok, _} = rpc(c, "lease.claim", %{})
     keyed = op(:put, :corporations, %{domain: "seed.example", name: "Overwritten"}, keyed: true)
-    assert {:nack, :scope} = put(c, keyed)
-    assert {:ack, _} = put(c, op(:put, :corporations, %{domain: "fresh.example", name: "New"}))
+    assert {:nack, :scope} = WireClient.put(c, keyed)
+
+    assert {:ack, _} =
+             WireClient.put(c, op(:put, :corporations, %{domain: "fresh.example", name: "New"}))
+
     stale = op(:put, :corporations, %{headcount: 1, as_of: ~D[2025-01-01]}, target: ids.corp)
     WireClient.send_frame(c, ops_frame(stale))
     {nack, _} = WireClient.await(c, :NACK)
     refute nack.body =~ "2026-10-01"
-    assert {:nack, :stale} = put(c, stale)
+    assert {:nack, :stale} = WireClient.put(c, stale)
 
     {_, holder} = key(s, 31, 31)
     {h, _, _} = agent(port, holder, "holder")
     {_, secret} = key(s, 31, 31)
     {c, _, _} = agent(port, secret)
     before = op(:put, :applications, %{notes: "x"}, target: ids.app, expect_rev: 1)
-    assert {:nack, :lease_missing} = put(c, before)
+    assert {:nack, :lease_missing} = WireClient.put(c, before)
     {:ok, %{"ids" => [_]}} = rpc(h, "lease.claim", %{"ids" => [ids.app]})
     {:ok, _} = rpc(c, "lease.claim", %{})
 
@@ -311,7 +294,7 @@ defmodule HiremeWeb.AgentAttackTest do
           op(:put, :events, %{application_id: ids.app, kind: "x"}),
           op(:command, :stage, %{stage: :freshness}, target: ids.app)
         ],
-        do: assert(put(c, op) == {:nack, :leased})
+        do: assert(WireClient.put(c, op) == {:nack, :leased})
 
     assert refused(c, "lease.claim", %{"ids" => [ids.app]}) == :leased
     assert refused(c, "lease.claim", %{"ids" => Enum.to_list(1..1_001)}) == :type
@@ -335,11 +318,11 @@ defmodule HiremeWeb.AgentAttackTest do
           "https://evil.example:80\\@levels.fyi/",
           "https://user@levels.fyi/"
         ] do
-      assert {:nack, refusal} = put(c, rate.(url))
+      assert {:nack, refusal} = WireClient.put(c, rate.(url))
       assert refusal in [:type, :source_trust], url
     end
 
-    assert {:ack, _} = put(c, rate.("https://www.levels.fyi/c"))
+    assert {:ack, _} = WireClient.put(c, rate.("https://www.levels.fyi/c"))
   end
 
   test "a frame past the carrier's size, or a deflate bomb, closes only that carrier",
@@ -474,7 +457,7 @@ defmodule HiremeWeb.AgentAttackTest do
       assert refused(c, "lease.claim", %{"ids" => [ids.app]}) == :lease_missing
 
       assert {:nack, :lease_missing} =
-               put(c, op(:put, :applications, %{role: "x"}, target: ids.app))
+               WireClient.put(c, op(:put, :applications, %{role: "x"}, target: ids.app))
     end
 
     {c3, welcome, _} = agent(port, secret)
@@ -510,7 +493,7 @@ defmodule HiremeWeb.AgentAttackTest do
     {:ok, bad, ""} =
       Codec.op(Codec.encode_op({1, :put, 0, t.id, app.id, nil, [{notes.id, 2, json}]}))
 
-    {time, verdict} = :timer.tc(fn -> put(c, bad) end)
+    {time, verdict} = :timer.tc(fn -> WireClient.put(c, bad) end)
     assert verdict == {:nack, :type} and time < 1_000_000
   end
 end

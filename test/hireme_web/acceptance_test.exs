@@ -57,36 +57,6 @@ defmodule HiremeWeb.AcceptanceTest do
     {client, welcome, boot}
   end
 
-  # The one put and its verdict: `{:ack, id}` or `{:nack, refusal}`.
-  defp write(client, op) do
-    WireClient.send_frame(client, Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw]))
-
-    receive do
-      {:wire, ^client,
-       %{
-         kind: :ACK,
-         body: <<1::little-32, 0::32, _::little-64, _::little-64, id::little-32, _::32>>
-       }} ->
-        {:ack, id}
-
-      {:wire, ^client,
-       %{kind: :NACK, body: <<1::little-32, 0::32, _::little-64, code::little-16, _::binary>>}} ->
-        {:nack, Schema.refusal_name(code)}
-    after
-      3_000 -> flunk("no verdict")
-    end
-  end
-
-  # The PATCHes `client` receives until it has been quiet for `quiet_ms`.
-  defp patches(client, quiet_ms, acc \\ []) do
-    receive do
-      {:wire, ^client, %{kind: :PATCH} = f} -> patches(client, quiet_ms, [f | acc])
-      {:wire, ^client, _} -> patches(client, quiet_ms, acc)
-    after
-      quiet_ms -> Enum.reverse(acc)
-    end
-  end
-
   # A virtual authenticator: a P-256 key, attestation "none", user present and verified.
   defp attest(options, origin) do
     {<<4, x::binary-32, y::binary-32>>, _priv} = :crypto.generate_key(:ecdh, :prime256v1)
@@ -126,7 +96,7 @@ defmodule HiremeWeb.AcceptanceTest do
     assert {:error, %{"code" => "scope"}} = rpc(reader, "lease.claim", %{})
 
     assert {:nack, :scope} =
-             write(reader, op(:put, :corporations, %{domain: "ro.example", name: "RO"}))
+             WireClient.put(reader, op(:put, :corporations, %{domain: "ro.example", name: "RO"}))
 
     {writer, _, boot} = hello(port, :key, mint(browser, "writer", "write_only"))
 
@@ -137,7 +107,7 @@ defmodule HiremeWeb.AcceptanceTest do
     {:ok, _} = rpc(writer, "lease.claim", %{})
 
     assert {:ack, id} =
-             write(writer, op(:put, :corporations, %{domain: "wo.example", name: "WO"}))
+             WireClient.put(writer, op(:put, :corporations, %{domain: "wo.example", name: "WO"}))
 
     assert id > 0
   end
@@ -148,20 +118,23 @@ defmodule HiremeWeb.AcceptanceTest do
 
     for i <- 1..20 do
       {:ack, _} =
-        write(browser, op(:put, :applications, %{company: "Company #{i}", role: "Engineer"}))
+        WireClient.put(
+          browser,
+          op(:put, :applications, %{company: "Company #{i}", role: "Engineer"})
+        )
     end
 
     rw = mint(browser, "agent", "read_write")
-    patches(browser, 100)
+    WireClient.patches(browser, 100)
 
     {agent, _, _} = hello(port, :key, rw)
     {:ok, %{"ids" => ids}} = rpc(agent, "lease.claim", %{"count" => 16})
     assert length(ids) == 16
     app = hd(ids)
 
-    {:ack, batch} = write(agent, op(:put, :batches, %{code: "B-1", ordinal: 1}))
-    {:ack, _} = write(agent, op(:put, :applications, %{batch_id: batch}, target: app))
-    {:ack, _} = write(agent, op(:command, :stage, %{stage: :draft_ready}, target: app))
+    {:ack, batch} = WireClient.put(agent, op(:put, :batches, %{code: "B-1", ordinal: 1}))
+    {:ack, _} = WireClient.put(agent, op(:put, :applications, %{batch_id: batch}, target: app))
+    {:ack, _} = WireClient.put(agent, op(:command, :stage, %{stage: :draft_ready}, target: app))
 
     acme = %{
       domain: "acme.example",
@@ -171,14 +144,14 @@ defmodule HiremeWeb.AcceptanceTest do
       source: "https://acme.example/about"
     }
 
-    {:ack, corp} = write(agent, op(:put, :corporations, acme, keyed: true))
+    {:ack, corp} = WireClient.put(agent, op(:put, :corporations, acme, keyed: true))
     place = op(:put, :places, %{kind: :country, iso2: "AC", name: "Acmeland"}, keyed: true)
-    {:ack, place} = write(agent, place)
+    {:ack, place} = WireClient.put(agent, place)
     office = op(:put, :offices, %{corporation_id: corp, place_id: place, kind: :hq})
-    {:ack, office} = write(agent, office)
+    {:ack, office} = WireClient.put(agent, office)
 
     # Every move arrives as rows of the replica; the browser reads them locally.
-    model = Enum.reduce(patches(browser, 600), %{}, &ingest(&2, :PATCH, &1.body))
+    model = Enum.reduce(WireClient.patches(browser, 600), %{}, &ingest(&2, :PATCH, &1.body))
     cell = fn table, id, col -> get_in(model, [table, id, Schema.column(table, col).id]) end
     assert cell.("applications", app, "stage") == Codec.enum_code("stage", :draft_ready)
     assert cell.("corporations", corp, "headcount") == 120
