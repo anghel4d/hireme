@@ -100,6 +100,7 @@
 !/.agents/skills/
 !/.agents/skills/*/
 !/.agents/skills/*/SKILL.md
+!AGENTS.md
 
 !/docs/
 !/docs/*.md
