@@ -167,12 +167,6 @@ defmodule Hireme.Sequencer do
   @doc "Whether the account's sequencer is running (it is not started)."
   def running?(account_id), do: Registry.lookup(Hireme.Sequencer.Registry, account_id) != []
 
-  @doc "The account's committed rev."
-  def rev(account_id), do: with_pid(account_id, &GenServer.call(&1, :rev))
-
-  @doc "Rebuilds the kernel resource from SQLite."
-  def resync(account_id), do: with_pid(account_id, &GenServer.call(&1, :resync, 60_000))
-
   # ------------------------------------------------------------ server
 
   @impl GenServer
@@ -248,9 +242,6 @@ defmodule Hireme.Sequencer do
     {state, acks, nacks} = run_as(actor, ops, state)
     {:reply, {:ok, state.rev, acks, nacks}, state, @idle_ms}
   end
-
-  def handle_call(:rev, _from, state), do: {:reply, state.rev, state, @idle_ms}
-  def handle_call(:resync, _from, state), do: {:reply, :ok, rebuild(state), @idle_ms}
 
   @impl GenServer
   def handle_cast({:ops, pid, ops}, state) do
