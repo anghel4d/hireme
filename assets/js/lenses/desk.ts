@@ -11,8 +11,8 @@
 
 import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
-import { DIR, board, card, ids, query as read, scoreboard, step, value, type Filter } from "../kernel.ts"
-import { EMPTY, html, type Html } from "../morph.ts"
+import { DIR, board, card, ids, query as read, scoreboard, step, value, type Filter, type Row } from "../kernel.ts"
+import { EMPTY, html, str, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
 
 const CLASSES = ["cool", "warm", "hot", "blocked"] as const
@@ -106,8 +106,6 @@ function view(): Html {
     <p class="hint keys">j/k or arrows move · Enter opens · / searches · 1–7 switch lenses</p>
   </div>`
 }
-
-const text = (x: unknown): string => (x === null || x === undefined ? "" : x instanceof Date ? x.toISOString().slice(0, 10) : String(x))
 
 function write(el: Element | null, s: string): void {
   if (el && el.textContent !== s) el.textContent = s
@@ -218,7 +216,6 @@ function paint(el: HTMLElement, measure: boolean): void {
   }
 }
 
-type Row = Record<string, unknown>
 const COLS = ["id", "no", "company", "role", "location", "work_mode", "pips", "stage"]
 const sig = (id: number, by: string | undefined): string => `${id}|${model.rows}|${id === model.selected ? 1 : 0}|${by ?? ""}`
 
@@ -226,20 +223,20 @@ const sig = (id: number, by: string | undefined): string => `${id}|${model.rows}
 function tile(el: HTMLElement, id: number, by: string | undefined, r: Row): void {
   el.dataset.sig = sig(id, by)
   const c = card(id)
-  const stage = c?.stage ?? text(r.stage)
+  const stage = c?.stage ?? str(r.stage)
   if (el.dataset.stage !== stage) el.dataset.stage = stage
   if (by === undefined) delete el.dataset.leased
   else if (el.dataset.leased !== by) el.dataset.leased = by
   write(el.querySelector(".lease"), by === undefined ? "" : `leased by ${by || "an agent"}`)
-  write(el.querySelector(".no"), `#${text(r.no)}`)
+  write(el.querySelector(".no"), `#${str(r.no)}`)
   write(el.querySelector(".score"), c ? `${c.score_100}${c.stored ? "" : "?"}` : "")
-  write(el.querySelector(".company"), text(r.company) || "(no company)")
-  write(el.querySelector(".role"), text(r.role))
-  write(el.querySelector(".where"), [r.location, r.work_mode].filter((x) => x).map(text).join(" · "))
+  write(el.querySelector(".company"), str(r.company) || "(no company)")
+  write(el.querySelector(".role"), str(r.role))
+  write(el.querySelector(".where"), [r.location, r.work_mode].filter((x) => x).map(str).join(" · "))
   write(el.querySelector(".stage"), stage.replace(/_/g, " "))
   write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
   write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
-  rail(el.querySelector(".pips"), text(r.pips))
+  rail(el.querySelector(".pips"), str(r.pips))
   const heat = c?.class ?? "cool"
   if (el.dataset.heat !== heat) el.dataset.heat = heat
   const cls = `app-card band-${c?.band ?? "mid"}${id === model.selected ? " selected" : ""}`

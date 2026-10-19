@@ -7,26 +7,12 @@
 // the main thread while the desk waits. Then it closes; nothing it holds
 // is read by the page.
 
+import type { Exports } from "./kernel.ts"
+
 interface Warm {
   module: WebAssembly.Module
   boot: Uint8Array
   today: number
-}
-
-interface Exports {
-  memory: WebAssembly.Memory
-  alloc(len: number): number
-  result_ptr(): number
-  set_today(day: number): void
-  set_grants(readMask: number, writeMask: number, mayDelete: number, human: number): void
-  ingest(ptr: number, len: number): number
-  view(ptr: number, len: number): number
-  step(ptr: number, len: number, selected: number, dir: number, columns: number): number
-  card(id: number): number
-  scoreboard(): number
-  application(id: number, listing: number): number
-  query(ptr: number, len: number): number
-  lanes(): number
 }
 
 onmessage = async ({ data }: MessageEvent<Warm>) => {
@@ -48,7 +34,7 @@ onmessage = async ({ data }: MessageEvent<Warm>) => {
     x.scoreboard()
     x.query(...json({ op: "find", table: "applications", where: { id: { in: ids } }, cols: ["id", "no", "company", "role", "location", "work_mode", "pips", "stage"], limit: ids.length }))
     x.step(...json({}), ids[0] ?? 0, 0, 5)
-    if (ids[0] !== undefined) x.application(ids[0], 0)
+    if (ids[0] !== undefined) x.application(ids[0])
     x.lanes()
   } finally {
     close()

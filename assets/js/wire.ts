@@ -19,8 +19,8 @@ import { BYE, FRAME, WIRE_TYPE } from "./gen/schema.ts"
 /** Frame kinds and cell types are the schema's: one declaration names them for every language. */
 export const KIND = FRAME
 
-export const FLAG = { ZSTD: 0x01, END: 0x02 } as const
-export const HEADER = 16
+const FLAG = { ZSTD: 0x01, END: 0x02 } as const
+const HEADER = 16
 
 export const VERB = { put: 1, drop: 2, command: 3 } as const
 export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as const
@@ -31,12 +31,10 @@ export const OP_FLAG = { KEYED: 0x01, CREATE_ONLY: 0x02, EXPECT_REV: 0x04 } as c
  */
 export const CELL = WIRE_TYPE
 export const CRED = { ticket: 1, key: 2 } as const
-/** BYE reasons by code: the schema's 0-based `bye` enum. */
-export const BYE_REASON = BYE
 
 /** Liveness, as SECURITY.md states it: a ping every 15 s, a session ends after 45 s of silence. */
-export const PING_MS = 15_000
-export const SILENT_MS = 45_000
+const PING_MS = 15_000
+const SILENT_MS = 45_000
 
 /** One op carries up to 1 MiB of text; one OPS frame up to 256 ops. */
 export const OP_TEXT_MAX = 1 << 20
@@ -226,11 +224,11 @@ export interface RpcError {
 
 export type Reply = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: RpcError }
 
-export function rpc(hash: number, id: number, method: string, params: unknown): Bytes {
+function rpc(hash: number, id: number, method: string, params: unknown): Bytes {
   return new Writer().u32(id).u32(0).field(method).field(JSON.stringify(params ?? {})).done(KIND.RPC, hash)
 }
 
-export function reply(f: Bytes): Reply {
+function reply(f: Bytes): Reply {
   const r = new Reader(f)
   const id = r.u32()
   const ok = r.u8() === 1
@@ -249,15 +247,8 @@ export function bye(f: Bytes): { reason: string; message: string } {
   const r = new Reader(f)
   const code = r.u8()
   r.skip(7)
-  return { reason: BYE_REASON[code] ?? `bye ${code}`, message: r.text() }
-}
-
-export function ping(hash: number, nonce: bigint): Bytes {
-  return new Writer().u64(nonce).done(KIND.PING, hash)
-}
-
-export function pong(f: Bytes): bigint {
-  return new Reader(f).u64()
+  // BYE reasons by code: the schema's 0-based `bye` enum.
+  return { reason: BYE[code] ?? `bye ${code}`, message: r.text() }
 }
 
 export type CellValue = null | number | bigint | string | boolean
@@ -332,7 +323,7 @@ export function opsFrame(hash: number, ops: readonly Bytes[]): Bytes {
 export type Sink = (f: Bytes, h: Header) => void
 
 /** Cuts a byte stream into frames, in one staging buffer that grows to the largest frame. */
-export class Framer {
+class Framer {
   private buf = new Uint8Array(64 * 1024)
   private filled = 0
 
@@ -341,18 +332,9 @@ export class Framer {
   push(bytes: Uint8Array): void {
     if (this.filled === 0 && bytes.byteOffset % 8 === 0 && bytes.buffer instanceof ArrayBuffer) {
       // Whole frames, parsed in place.
-      let at = 0
-      const whole = bytes as Bytes
-      while (whole.byteLength - at >= HEADER) {
-        const len = new DataView(whole.buffer, whole.byteOffset + at, 4).getUint32(0, true)
-        if (len < HEADER || len % 8 !== 0) return this.fail(len)
-        if (len > whole.byteLength - at) break
-        const f = whole.subarray(at, at + len)
-        at += len
-        this.emit(f)
-      }
-      if (at === whole.byteLength) return
-      bytes = whole.subarray(at)
+      const at = this.cut(bytes, bytes.byteLength)
+      if (at < 0 || at === bytes.byteLength) return
+      bytes = bytes.subarray(at)
     }
     if (this.buf.byteLength - this.filled < bytes.byteLength) {
       const next = new Uint8Array(Math.max(this.buf.byteLength * 2, this.filled + bytes.byteLength))
@@ -361,33 +343,35 @@ export class Framer {
     }
     this.buf.set(bytes, this.filled)
     this.filled += bytes.byteLength
-    let at = 0
-    while (this.filled - at >= HEADER) {
-      const len = new DataView(this.buf.buffer, at, 4).getUint32(0, true)
-      if (len < HEADER || len % 8 !== 0) return this.fail(len)
-      if (this.filled - at < len) break
-      const f = this.buf.subarray(at, at + len)
-      at += len
-      this.emit(f)
-    }
+    const at = this.cut(this.buf, this.filled)
+    if (at < 0) return
     this.buf.copyWithin(0, at, this.filled)
     this.filled -= at
   }
 
-  // A sink that throws must not make the framer hand the same frame over again: it is reported, and cutting goes on.
-  private emit(f: Bytes): void {
-    try {
-      this.sink(f, header(f))
-    } catch (e) {
-      queueMicrotask(() => {
-        throw e
-      })
+  /** Emits the whole frames at the front of `b[0, end)`: the offset past them, or -1 on a bad length (the stream is dropped). */
+  private cut(b: Uint8Array, end: number): number {
+    let at = 0
+    while (end - at >= HEADER) {
+      const len = new DataView(b.buffer, b.byteOffset + at, 4).getUint32(0, true)
+      if (len < HEADER || len % 8 !== 0) {
+        this.filled = 0
+        this.broken(`bad frame length ${len}`)
+        return -1
+      }
+      if (len > end - at) break
+      const f = b.subarray(at, at + len) as Bytes
+      at += len
+      // A sink that throws must not make the framer hand the same frame over again: it is reported, and cutting goes on.
+      try {
+        this.sink(f, header(f))
+      } catch (e) {
+        queueMicrotask(() => {
+          throw e
+        })
+      }
     }
-  }
-
-  private fail(len: number): void {
-    this.filled = 0
-    this.broken(`bad frame length ${len}`)
+    return at
   }
 }
 
@@ -433,8 +417,35 @@ export function meta(): Meta {
   }
 }
 
-/** How long a WebTransport handshake may take before the socket is used instead. */
+/** How long a WebTransport handshake may take before the socket is used instead (UDP blocked fails slowly, not at once). */
 const WT_WAIT_MS = 3000
+
+/** A WebTransport session on the gate with its control stream; a refusal, or WT_WAIT_MS without a handshake, throws with the transport closed. */
+export async function transport(gate: string, hashes: Meta["hashes"]): Promise<{ wt: WebTransport; stream: WebTransportBidirectionalStream }> {
+  const wt = new WebTransport(gate, hashes.length > 0 ? { serverCertificateHashes: hashes } : {})
+  wt.closed.catch(() => {})
+  let timer = 0
+  try {
+    await Promise.race([wt.ready, new Promise((_, no) => (timer = window.setTimeout(() => no(new Error("slow")), WT_WAIT_MS)))])
+    return { wt, stream: await wt.createBidirectionalStream() }
+  } catch (e) {
+    try {
+      wt.close()
+    } catch {
+      // Already closed.
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The socket carrier, at /wire on the page's host. */
+export function webSocket(): WebSocket {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire`)
+  ws.binaryType = "arraybuffer"
+  return ws
+}
 
 type CarrierKind = "webtransport" | "websocket"
 
@@ -527,9 +538,7 @@ export class Wire {
 
   /** Drops the current carrier; the usual reconnect follows, with whatever HELLO now names. */
   restart(): void {
-    const close = this.close_
-    this.down("restart", this.serial)
-    close?.()
+    this.drop("restart", this.serial)
   }
 
   /** The session is over for good (BYE revoked, suspended): no reconnect. */
@@ -568,29 +577,16 @@ export class Wire {
       }
     }
     if (this.gate !== "" && "WebTransport" in window && !this.wtBroken) {
-      let wt: WebTransport | null = null
       try {
-        wt = new WebTransport(this.gate, this.hashes.length > 0 ? { serverCertificateHashes: this.hashes } : {})
-        wt.closed.catch(() => {})
-        let timer = 0
-        await Promise.race([wt.ready, new Promise((_, no) => (timer = window.setTimeout(() => no(new Error("slow")), WT_WAIT_MS)))])
-        clearTimeout(timer)
-        const stream = await wt.createBidirectionalStream()
+        const { wt, stream } = await transport(this.gate, this.hashes)
         this.adoptTransport(wt, stream.writable.getWriter(), stream.readable, [], false)
         return
       } catch {
-        // UDP blocked, the gate down or slow: close what was opened and use the socket from now on.
-        try {
-          wt?.close()
-        } catch {
-          // Already closed.
-        }
+        // UDP blocked, the gate down or slow: the socket from now on.
         this.wtBroken = true
       }
     }
-    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire`)
-    ws.binaryType = "arraybuffer"
-    this.adoptSocket(ws, [], false)
+    this.adoptSocket(webSocket(), [], false)
   }
 
   /** A new attempt: its serial, and the hold (WebTransport only) armed before anything is delivered. */
@@ -670,14 +666,9 @@ export class Wire {
     this.heard = Date.now()
     clearInterval(this.pinger)
     this.pinger = window.setInterval(() => {
-      if (Date.now() - this.heard > SILENT_MS) {
-        // A half-open link may never finish closing: the attempt ends now, the close is best effort.
-        const close = this.close_
-        this.down(`no frame for ${SILENT_MS / 1000} s`, me)
-        close?.()
-        return
-      }
-      this.send(ping(this.hash, ++this.nonce))
+      // A half-open link may never finish closing: the attempt ends now, the close is best effort.
+      if (Date.now() - this.heard > SILENT_MS) return this.drop(`no frame for ${SILENT_MS / 1000} s`, me)
+      this.send(new Writer().u64(++this.nonce).done(KIND.PING, this.hash))
     }, PING_MS)
     this.hooks.open(this.carrierKind ?? "websocket")
   }
@@ -700,7 +691,8 @@ export class Wire {
       return
     }
     if (h.kind === KIND.PING) {
-      this.send(new Writer().u64(pong(f)).done(KIND.PONG, this.hash))
+      // The PONG carries the PING's nonce back.
+      this.send(new Writer().u64(new Reader(f).u64()).done(KIND.PONG, this.hash))
       return
     }
     if (h.kind === KIND.WELCOME) {
@@ -743,6 +735,13 @@ export class Wire {
     const held = this.held
     this.held = null
     for (const g of held ?? []) this.hooks.frame(g, header(g))
+  }
+
+  /** Ends the attempt first, then closes its carrier: the close's own events then belong to a finished attempt. */
+  private drop(why: string, me: number): void {
+    const close = this.close_
+    this.down(why, me)
+    close?.()
   }
 
   private down(why: string, me: number): void {

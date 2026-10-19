@@ -5,19 +5,14 @@
 
 import type { View } from "../app.ts"
 import { ENUMS, type TableName } from "../gen/schema.ts"
-import { failed, ids, lanes, put, query, today, value, type Input } from "../kernel.ts"
-import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
+import { failed, lanes, put, putSettings, query, settingsId, today, value, type Input, type Row } from "../kernel.ts"
+import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { model } from "../state.ts"
 
 type Gym = { today: number; streak: number; week: number; target: number | null; pace: number | null; owed: number | null }
 type Net = Record<string, { total: number; week: number } | number>
 
-const str = (x: unknown): string => (x === null || x === undefined ? "" : x instanceof Date ? x.toISOString().slice(0, 10) : String(x))
-const settingsId = (): number => ids("settings")[0] ?? 0
-
 const options = (name: string, pick: string): Html => html`${(ENUMS[name] ?? []).map((x) => html`<option${flag("selected", x === pick)}>${x}</option>`)}`
-
-type Row = Record<string, unknown>
 
 /** A resident table's newest rows by a day column, whole, in one read of the kernel's order index. */
 function newest(t: TableName, by: string, n: number, cols: string[]): Row[] {
@@ -95,16 +90,8 @@ function view(): Html {
   </div>`
 }
 
-function fields(el: HTMLElement): Record<string, Input> {
-  const out: Record<string, Input> = {}
-  for (const [k, x] of new FormData(el as HTMLFormElement)) if (String(x) !== "") out[k] = String(x)
-  return out
-}
-
-function setting(set: Record<string, Input>): void {
-  const id = settingsId()
-  void put("settings", set, id === 0 ? {} : { id }).catch(failed)
-}
+/** The form's filled fields: an empty one is left out, so the row's default stands. */
+const filled = (el: HTMLElement): Record<string, Input> => Object.fromEntries(Object.entries(fields(el as HTMLFormElement)).filter(([, x]) => x !== ""))
 
 const lanesLens: View = {
   title: "Lanes",
@@ -112,13 +99,13 @@ const lanesLens: View = {
   act(name, el) {
     switch (name) {
       case "rep":
-        return void (() => { const before = entries(el as HTMLFormElement); return put("gym_reps", fields(el)).then(() => resetIfUnchanged(el as HTMLFormElement, before)) })().catch(failed)
+        return void resetAfter(el as HTMLFormElement, () => put("gym_reps", filled(el))).catch(failed)
       case "entry":
-        return void (() => { const before = entries(el as HTMLFormElement); return put("net_entries", fields(el)).then(() => resetIfUnchanged(el as HTMLFormElement, before)) })().catch(failed)
+        return void resetAfter(el as HTMLFormElement, () => put("net_entries", filled(el))).catch(failed)
       case "target":
-        return setting({ gym_target: fields(el).gym_target ?? null })
+        return void putSettings({ gym_target: filled(el).gym_target ?? null }).catch(failed)
       case "net-url":
-        return setting({ net_lane_url: fields(el).net_lane_url ?? null })
+        return void putSettings({ net_lane_url: filled(el).net_lane_url ?? null }).catch(failed)
     }
   },
 }

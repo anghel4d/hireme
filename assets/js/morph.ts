@@ -56,6 +56,18 @@ export function resetIfUnchanged(form: HTMLFormElement, before: string): void {
   if (form.isConnected && entries(form) === before) form.reset()
 }
 
+/** `write` from the form's entries, and the form cleared once it settles (resetIfUnchanged). */
+export function resetAfter<T>(form: HTMLFormElement, write: () => Promise<T>): Promise<T> {
+  const before = entries(form)
+  return write().then((r) => (resetIfUnchanged(form, before), r))
+}
+
+/** A form's fields by name, as text. */
+export const fields = (form: HTMLFormElement): Record<string, string> => Object.fromEntries([...new FormData(form)].map(([k, x]) => [k, String(x)]))
+
+/** A value as text: "" for null and undefined, a Date as its day. */
+export const str = (x: unknown): string => (x === null || x === undefined ? "" : x instanceof Date ? x.toISOString().slice(0, 10) : String(x))
+
 /** Markup from this codebase's own constants. Never a value from a row. */
 export const trusted = (s: string): Html => new Html(s)
 

@@ -9,7 +9,7 @@
 // queue. It imports only frame builders, which the bundler tree-shakes down.
 
 import { SCHEMA_REV } from "./gen/schema.ts"
-import { CRED, hello, meta, type Early } from "./wire.ts"
+import { CRED, hello, meta, transport, webSocket, type Early } from "./wire.ts"
 
 /** What the bundle finds on `window.__hw`. */
 export interface Boot extends Early {
@@ -28,8 +28,6 @@ export interface Snapshot {
 }
 
 const SNAP_WAIT_MS = 120
-/** WebTransport's head start before the socket is used instead (UDP blocked fails slowly, not at once). */
-const WT_WAIT_MS = 3000
 
 {
   const m = meta()
@@ -114,8 +112,7 @@ const WT_WAIT_MS = 3000
 
   if (m.ticket !== "" && Number.isFinite(m.hash)) {
     const socket = () => {
-      const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/wire`)
-      ws.binaryType = "arraybuffer"
+      const ws = webSocket()
       ws.onmessage = (e) => hw.queue.push(e.data as ArrayBuffer)
       ws.onopen = () => void first().then((f) => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -133,18 +130,16 @@ const WT_WAIT_MS = 3000
       let spent = false
       let wt: WebTransport | null = null
       void (async () => {
-        wt = new WebTransport(m.gate, m.hashes.length > 0 ? { serverCertificateHashes: m.hashes } : {})
-        wt.closed.catch(() => {})
-        await Promise.race([wt.ready, new Promise((_, no) => setTimeout(() => no(new Error("slow")), WT_WAIT_MS))])
-        const stream = await wt.createBidirectionalStream()
-        const writer = stream.writable.getWriter()
+        const t = await transport(m.gate, m.hashes)
+        wt = t.wt
+        const writer = t.stream.writable.getWriter()
         const f = await first()
         spent = true
         await writer.write(f)
         // The bundle drains the streams; until then, nothing reads them, and the transport buffers.
-        hw.wt = wt
+        hw.wt = t.wt
         hw.writer = writer
-        hw.control = stream.readable
+        hw.control = t.stream.readable
         hw.helloSent = true
         settle()
       })().catch(() => {

@@ -13,12 +13,10 @@
 import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
 import { DOMAIN } from "../gen/schema.ts"
-import { Refused, ids, query as read, rpc, value } from "../kernel.ts"
-import { EMPTY, entries, flag, html, resetIfUnchanged, trusted, type Html } from "../morph.ts"
+import { Refused, ids, page, rpc, value, type Row } from "../kernel.ts"
+import { EMPTY, entries, fields, flag, html, resetIfUnchanged, str, trusted, type Html } from "../morph.ts"
 import { detail } from "./trail.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
-
-type Row = Record<string, unknown>
 
 const DOMAINS = ["world", "desk", "mail", "lanes", "corpus"] as const
 const PRESETS = [
@@ -30,14 +28,11 @@ const PRESETS = [
 
 const v = (): AccountView => model.account
 const patch = (p: Partial<AccountView>) => set({ account: { ...model.account, ...p } })
-const list = (k: string): Row[] => (Array.isArray(overview()?.[k]) ? (overview()?.[k] as Row[]) : [])
-const str = (x: unknown): string => (x === null || x === undefined ? "" : String(x))
+const list = (k: string): Row[] => (overview()?.[k] as Row[] | undefined) ?? []
 const num = (x: unknown): number => (typeof x === "number" ? x : Number(x ?? 0))
 
-const BITS: Record<string, number> = { world: DOMAIN.world, desk: DOMAIN.desk, mail: DOMAIN.mail, lanes: DOMAIN.lanes, corpus: DOMAIN.corpus }
-
 const maskNames = (mask: number): string => {
-  const on = DOMAINS.filter((d) => (mask & (BITS[d] ?? 0)) !== 0)
+  const on = DOMAINS.filter((d) => (mask & DOMAIN[d]) !== 0)
   return on.length === 0 ? "none" : on.length === DOMAINS.length ? "all" : on.join(", ")
 }
 
@@ -63,16 +58,7 @@ const ALL = DOMAIN.world | DOMAIN.desk | DOMAIN.mail | DOMAIN.lanes | DOMAIN.cor
 /** Each preset's masks (Grants.preset). */
 const PRESET_MASKS: Record<string, { read: number; write: number }> = { read_only: { read: ALL, write: 0 }, write_only: { read: 0, write: ALL }, read_write: { read: ALL, write: ALL } }
 /** Up to `limit` rows of a replica view, in find's pages of 500. */
-function rowsOf(table: string, params: Record<string, unknown> = {}, limit = 500): Row[] {
-  const out: Row[] = []
-  let after: unknown = null
-  do {
-    const r = read<{ rows: Row[]; next: unknown }>("find", { table, ...params, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
-    out.push(...r.rows)
-    after = r.next ?? null
-  } while (after !== null && out.length < limit)
-  return out
-}
+const rowsOf = (table: string, params: Record<string, unknown> = {}, limit = 500): Row[] => page({ table, ...params }, limit).rows
 /** A session lapses a day after sign-in or an hour idle (Security's session_ttl and session_idle). */
 const IDLE_S = 3600
 const later = (x: unknown): boolean => str(x) !== "" && Date.parse(str(x)) > Date.now()
@@ -191,8 +177,6 @@ function reveal(method: string, r: Row): void {
   }
 }
 
-const fields = (form: HTMLFormElement): Record<string, string> => Object.fromEntries([...new FormData(form)].map(([k, x]) => [k, String(x)]))
-
 type Draft = NonNullable<AccountView["masks"]>
 
 const presetMasks = (preset: string): { read: number; write: number } => PRESET_MASKS[preset] ?? { read: 0, write: 0 }
@@ -219,8 +203,8 @@ function redraft(form: HTMLFormElement, prev: Draft): Draft {
   let read = 0
   let write = 0
   for (const d of DOMAINS) {
-    if (start ? (start.read & (BITS[d] ?? 0)) !== 0 : (form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= BITS[d] ?? 0
-    if (start ? (start.write & (BITS[d] ?? 0)) !== 0 : (form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= BITS[d] ?? 0
+    if (start ? (start.read & DOMAIN[d]) !== 0 : (form.elements.namedItem(`r_${d}`) as HTMLInputElement | null)?.checked) read |= DOMAIN[d]
+    if (start ? (start.write & DOMAIN[d]) !== 0 : (form.elements.namedItem(`w_${d}`) as HTMLInputElement | null)?.checked) write |= DOMAIN[d]
   }
   return { ...prev, preset, read, write, mayDelete }
 }
@@ -259,8 +243,8 @@ function maskPicker(prefix: string, read: number, write: number, preset: string,
       <legend>${custom ? "Choose per domain" : "What this preset grants"}</legend>
       <table class="grid compact"><thead><tr><th></th>${DOMAINS.map((x) => html`<th scope="col">${x}</th>`)}</tr></thead>
       <tbody>
-        <tr><th scope="row">read</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="r_${x}" aria-label="read ${x}"${flag("checked", (g.read & (BITS[x] ?? 0)) !== 0)}></td>`)}</tr>
-        <tr><th scope="row">write</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="w_${x}" aria-label="write ${x}"${flag("checked", (g.write & (BITS[x] ?? 0)) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">read</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="r_${x}" aria-label="read ${x}"${flag("checked", (g.read & DOMAIN[x]) !== 0)}></td>`)}</tr>
+        <tr><th scope="row">write</th>${DOMAINS.map((x) => html`<td><input type="checkbox" name="w_${x}" aria-label="write ${x}"${flag("checked", (g.write & DOMAIN[x]) !== 0)}></td>`)}</tr>
       </tbody></table>
     </fieldset>
     <label class="check"><input type="checkbox" name="may_delete"${flag("checked", d.mayDelete)}> may delete rows</label>

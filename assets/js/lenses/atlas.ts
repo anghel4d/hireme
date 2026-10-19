@@ -5,8 +5,8 @@
 // `settings` row. No passport or language is in source: they are rows.
 
 import type { View } from "../app.ts"
-import { failed, atlas, ids, put, value, type Input } from "../kernel.ts"
-import { EMPTY, entries, flag, html, resetIfUnchanged, type Html } from "../morph.ts"
+import { failed, atlas, putSettings, settingsId, value, type Input } from "../kernel.ts"
+import { EMPTY, flag, html, resetAfter, type Html } from "../morph.ts"
 import { model, notice, query } from "../state.ts"
 
 /** A place's fit; `fit` is null for a place with no part the kernel can score, and a part may be null too. */
@@ -14,19 +14,14 @@ type Fit = { id: number; name: string; iso2: string | null; kind: string; route:
 type Doc = { parts: string[]; weights: number[]; presets: Record<string, number[]>; places: Fit[] }
 
 const SEP = "\u001f"
-const settingsId = (): number => ids("settings")[0] ?? 0
 const setting = (col: string): string => {
   const id = settingsId()
   const x = id === 0 ? null : value("settings", id, col)
   return x === null ? "" : String(x)
 }
 
-function save(set: Record<string, Input>, form?: HTMLFormElement): void {
-  const id = settingsId()
-  // The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them.
-  const before = form ? entries(form) : ""
-  void put("settings", set, id === 0 ? {} : { id }).then(() => form && resetIfUnchanged(form, before)).catch(failed)
-}
+/** The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them. */
+const save = (set: Record<string, Input>, form?: HTMLFormElement): void => void (form ? resetAfter(form, () => putSettings(set)) : putSettings(set)).catch(failed)
 
 /** What a route means for you, from your citizenships and the place's work-permit list (kernel atlas.rs). */
 const ROUTE: Record<string, [string, string]> = {
@@ -35,7 +30,6 @@ const ROUTE: Record<string, [string, string]> = {
   permit: ["needs a permit", "None of your citizenships is on this place's no-permit list"],
   unknown: ["visa unknown", "No citizenship or work-permit figures for this place yet"],
 }
-
 
 function meter(x: number | null, max: number): Html {
   if (x === null) return html`<span class="muted" title="No figure for this place yet">—</span>`

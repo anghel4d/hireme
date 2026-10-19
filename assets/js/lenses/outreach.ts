@@ -7,16 +7,13 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { failed, put, query as read, values, type Input } from "../kernel.ts"
-import { EMPTY, flag, href, html, type Html } from "../morph.ts"
+import { failed, page, put, query as read, row, values, type Input, type Row } from "../kernel.ts"
+import { EMPTY, fields, flag, href, html, str, type Html } from "../morph.ts"
 import { model, query, set, type OutreachView } from "../state.ts"
-
-type Row = Record<string, unknown>
 
 const PAGE = 100
 const v = (): OutreachView => model.outreach
 const patch = (p: Partial<OutreachView>) => set({ outreach: { ...model.outreach, ...p } })
-const str = (x: unknown): string => (x === null || x === undefined ? "" : String(x))
 const writable = (): boolean => (model.writeMask & DOMAIN.mail) !== 0
 
 const selected = (): number => Number(model.address.q.get("contact") ?? 0)
@@ -30,25 +27,7 @@ function contacts(limit: number): { rows: Row[]; more: boolean } {
   const where: Record<string, unknown> = {}
   if (q !== "") where.name = { prefix: q }
   if (corp > 0) where.corporation_id = corp
-  const out: Row[] = []
-  let after: unknown = null
-  while (out.length < limit) {
-    const r = read<{ rows: Row[]; next: unknown }>("find", { table: "contacts", order: ["last_touch_on", "desc"], where, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
-    out.push(...r.rows)
-    after = r.next ?? null
-    if (after === null) return { rows: out, more: false }
-  }
-  return { rows: out, more: true }
-}
-
-/** A contact by id, from the replica. */
-function contact(id: number): Row | undefined {
-  if (id === 0) return undefined
-  try {
-    return read<{ row: Row }>("get", { table: "contacts", id }).row
-  } catch {
-    return undefined
-  }
+  return page({ table: "contacts", order: ["last_touch_on", "desc"], where }, limit)
 }
 
 // A body comes as its byte count here: its opening is a text chunk, its whole a get, each read when drawn.
@@ -59,16 +38,9 @@ function opening(id: number): { text: string; more: boolean } {
   const lines = (r.text ?? "").split("\n").filter((l) => l.trim() !== "")
   return { text: lines.slice(0, 3).join("\n"), more: r.next !== null || lines.length > 3 }
 }
-/** A corporation's name from the replica, or "" when it is not there. */
-function corpName(id: unknown): string {
-  try {
-    return str(read<{ row: Row }>("get", { table: "corporations", id: Number(id) }).row.name)
-  } catch {
-    return ""
-  }
-}
+/** A corporation by its name in the replica, or by number when it is not there. */
 const corpLink = (id: unknown): Html => {
-  const name = corpName(id)
+  const name = str(row("corporations", Number(id))?.name)
   return name === "" ? html`corporation #${str(id)}` : html`<a href="/world/corporations?q=${encodeURIComponent(name)}" data-nav>${name}</a>`
 }
 
@@ -141,7 +113,7 @@ function draft(c: Row): Html {
 
 function view(): Html {
   const id = selected()
-  const c = contact(id)
+  const c = row("contacts", id)
   const corp = model.address.q.get("corporation")
   const list = contacts(v().limit)
   return html`<div class="outreach split">
@@ -166,11 +138,8 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
-function form(el: HTMLElement): Record<string, Input> {
-  const out: Record<string, Input> = {}
-  for (const [k, x] of new FormData(el as HTMLFormElement)) out[k] = String(x) === "" ? null : String(x)
-  return out
-}
+/** The form's fields, an empty one as null (the cell clears). */
+const form = (el: HTMLElement): Record<string, Input> => Object.fromEntries(Object.entries(fields(el as HTMLFormElement)).map(([k, x]) => [k, x === "" ? null : x]))
 
 function act(name: string, el: HTMLElement): void {
   const id = selected()
@@ -203,17 +172,16 @@ function act(name: string, el: HTMLElement): void {
       return patch({ edit: "" })
     }
     case "save-contact": {
-      const c = contact(id)
+      const c = row("contacts", id)
       if (!c) return
-      const f = form(el)
       const changed: Record<string, Input> = {}
-      for (const [k, x] of Object.entries(f)) if (str(c[k]) !== str(x)) changed[k] = x
+      for (const [k, x] of Object.entries(form(el))) if (str(c[k]) !== str(x)) changed[k] = x
       if (Object.keys(changed).length === 0) return patch({ edit: "" })
       void put("contacts", changed, { id }).catch(failed)
       return patch({ edit: "" })
     }
     case "save-draft": {
-      const c = contact(id)
+      const c = row("contacts", id)
       const f = form(el)
       void put("messages", {
         channel: f.channel ?? "email",

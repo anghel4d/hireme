@@ -1,17 +1,20 @@
 // The kernel's bindings, and the page's one way to read and write.
 //
 // Resident rows live in the wasm kernel (the same crate the sequencer
-// judges with); server-side tables (the world, the mail) and the account
-// are read over RPC. A lens reads through this file and writes through
-// it: a write is judged and applied locally in the input's frame, sent as
-// an op, and settled or rolled back by its ACK or NACK.
+// judges with); every lens reads them here, in the frame it draws. The
+// account is changed over RPC. A write is judged and applied locally in the
+// input's frame, sent as an op, and settled or rolled back by its ACK or
+// NACK.
 
 import type { Boot } from "./early.ts"
-import type { Reply, Wire } from "./wire.ts"
+import type { Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, DAY_MAX, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
 import { describe } from "./guard.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
 import { notice, set } from "./state.ts"
+
+/** A row as the kernel answers it: a column name to its value. */
+export type Row = Record<string, unknown>
 
 let wire: Wire | null = null
 
@@ -50,27 +53,22 @@ function said(e: Refused): string {
   return lead ?? e.message.charAt(0).toUpperCase() + e.message.slice(1)
 }
 
-function refusal(r: Reply & { ok: false }): Refused {
+/** One RPC: its result, or a `Refused`. A dropped carrier rejects with a plain Error. */
+export async function rpc<T = Row>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  if (!wire) throw new Error("not connected")
+  const r = await wire.call(method, params)
+  if (r.ok) return r.result as T
   // Sequencer and world refusals say {code, message, data}; account.* says {error}.
   const e = r.error as { code?: string; error?: string; message?: string; data?: unknown } | null
   const code = e?.code ?? e?.error ?? "internal"
   // The node's message is often the code again; the data says what decided it.
-  const message = e?.message && e.message !== code ? e.message : refusalText(code, e?.data ?? null)
-  return new Refused(code, message, e?.data ?? null)
-}
-
-/** One RPC: its result, or a `Refused`. A dropped carrier rejects with a plain Error. */
-export async function rpc<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-  if (!wire) throw new Error("not connected")
-  const r = await wire.call(method, params)
-  if (!r.ok) throw refusal(r)
-  return r.result as T
+  throw new Refused(code, e?.message && e.message !== code ? e.message : refusalText(code, e?.data ?? null), e?.data ?? null)
 }
 
 // ------------------------------------------------------------------ rows
 
 /** The wasm exports, per native/kernel/src/abi.rs: one result buffer, read before the next call. */
-interface Exports {
+export interface Exports {
   memory: WebAssembly.Memory
   alloc(len: number): number
   dealloc(ptr: number, len: number): void
@@ -123,12 +121,15 @@ function withBytes<T>(bytes: Uint8Array, fn: (ptr: number, len: number) => T): T
 
 const result = (len: number): Uint8Array => new Uint8Array(k!.memory.buffer, k!.result_ptr(), len)
 const resultJson = <T>(len: number): T | null => (len < 0 ? null : (JSON.parse(DEC.decode(result(len))) as T))
-
-export const ready = (): boolean => k !== null
+/** The kernel's refusal in its result buffer (a negative return, -n - 1 its length). */
+function refused(r: number): Refused {
+  const e = JSON.parse(DEC.decode(result(-r - 1))) as { refusal?: string; code?: unknown; data?: unknown }
+  const code = typeof e.refusal === "string" ? e.refusal : String(e.code ?? "internal")
+  return new Refused(code, refusalText(code, e.data ?? null), e.data ?? null)
+}
 
 /** The rev the rows stand at: from BOOT, PATCH and TICK headers and the snapshot, never from WELCOME. */
 let rowsRev = 0n
-/** A BOOT (or a snapshot) is in, so a PATCH after it is news, whatever the rev (a fresh account's is 0). */
 
 /** What HELLO names on a reconnect, so the server sends only what moved since. */
 export function snapshotRev(): bigint {
@@ -145,10 +146,9 @@ export function load(hw: Boot): void {
     const x = inst.exports as unknown as Exports
     if (x.wire_hash() !== WIRE_HASH) throw new Error("kernel.wasm was built against another schema")
     x.set_today(todayDay())
-    // The snapshot goes in before any frame: frames wait in `early` until `k` is set, so a
-    // BOOT that beat a slow snapshot read is never replaced by the older snapshot.
-    // A BOOT already queued replaces every table anyway: go live now rather than wait on the read.
-    // A BOOT replaces every table anyway: if one is queued, or arrives before the read answers, go live without the snapshot.
+    // Frames wait in `early` until `k` is set, so a BOOT that beat a slow snapshot read is never
+    // replaced by the older snapshot; and a BOOT replaces every table anyway, so if one is queued, or
+    // arrives before the read answers, the kernel goes live without the snapshot.
     const snap = early.some((f) => header(f).kind === KIND.BOOT)
       ? undefined
       : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
@@ -203,34 +203,6 @@ export const broken = (): boolean => broke
 /** Whether the replica is in: before it is, its lenses wait rather than draw nothing. */
 export const loaded = (): boolean => k !== null
 
-/** Answers of the replica's reads, per version: a view drawn twice in a frame asks once. */
-const answers = new Map<string, unknown>()
-let answered = -1
-
-/**
- * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
- * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
- */
-export function query<T = Record<string, unknown>>(op: "find" | "get" | "text" | "history", params: Record<string, unknown>): T {
-  if (!k) throw new Error("the desk is still loading")
-  if (answered !== version) {
-    answers.clear()
-    answered = version
-  }
-  const req = JSON.stringify({ op, ...params })
-  const hit = answers.get(req)
-  if (hit !== undefined) return hit as T
-  const n = withBytes(ENC.encode(req), (p, len) => k!.query(p, len))
-  if (n < 0) {
-    const e = JSON.parse(DEC.decode(result(-n - 1))) as { refusal?: string; code?: unknown; data?: unknown }
-    const code = typeof e.refusal === "string" ? e.refusal : String(e.code ?? "internal")
-    throw new Refused(code, refusalText(code, e.data ?? null), e.data ?? null)
-  }
-  const answer = JSON.parse(DEC.decode(result(n))) as T
-  answers.set(req, answer)
-  return answer
-}
-
 /** Restored rows whose first derive has not run yet: the lenses that derive wait one paint. */
 let warm = false
 export const warming = (): boolean => warm
@@ -250,7 +222,6 @@ function afterPaint(fn: () => void): void {
 
 /** Bumped whenever rows move; derived views are cached against it. */
 let version = 0
-const slots = new Map<number, { version: number; at: Map<number, number> }>()
 
 function moved(): void {
   version++
@@ -294,25 +265,87 @@ export function frame(f: Bytes, h: Header): void {
 
 // ------------------------------------------------------------------ reading rows
 
-/** A resident table's ids in slot order. */
-export function ids(name: TableName): Uint32Array {
-  if (!k) return new Uint32Array(0)
-  const t = TABLES[name].id
-  const n = k.rows(t)
-  return n === 0 ? new Uint32Array(0) : new Uint32Array(k.memory.buffer, k.ids_ptr(t), n).slice()
+/**
+ * Answers of the replica's reads and documents, per version: a view drawn twice in a frame asks once,
+ * and drawn again with no row moved (a filter chip, a subtab, a fold, a form opening) it is not
+ * composed and parsed again. Lenses only read them.
+ */
+const answers = new Map<string, unknown>()
+let answered = -1
+function memo<T>(key: string, make: () => T): T {
+  if (answered !== version) {
+    answers.clear()
+    answered = version
+  }
+  if (answers.has(key)) return answers.get(key) as T
+  const doc = make()
+  answers.set(key, doc)
+  return doc
 }
 
-function slot(t: number, id: number): number {
-  let s = slots.get(t)
+/** An index over the rows, built once per version. */
+function indexed<K, V>(store: Map<K, { version: number; at: V }>, key: K, build: () => V): V {
+  let s = store.get(key)
   if (!s || s.version !== version) {
-    const at = new Map<number, number>()
-    const n = k!.rows(t)
-    const view = new Uint32Array(k!.memory.buffer, k!.ids_ptr(t), n)
-    for (let i = 0; i < n; i++) at.set(view[i]!, i)
-    s = { version, at }
-    slots.set(t, s)
+    s = { version, at: build() }
+    store.set(key, s)
   }
-  return s.at.get(id) ?? -1
+  return s.at
+}
+
+/**
+ * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
+ * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
+ */
+export function query<T = Row>(op: "find" | "get" | "text" | "history", params: Record<string, unknown>): T {
+  if (!k) throw new Error("the desk is still loading")
+  const req = JSON.stringify({ op, ...params })
+  return memo(req, () => {
+    const n = withBytes(ENC.encode(req), (p, len) => k!.query(p, len))
+    if (n < 0) throw refused(n)
+    return JSON.parse(DEC.decode(result(n))) as T
+  })
+}
+
+/** A row of the replica by id, or null when there is none (or no id). */
+export function row(table: string, id: number): Row | null {
+  if (!id) return null
+  try {
+    return query<{ row: Row }>("get", { table, id }).row
+  } catch {
+    return null
+  }
+}
+
+/** The first `limit` rows a find names (its table, cols, where, order), in pages of find's 500; `more` when the table goes on. */
+export function page(params: Record<string, unknown>, limit: number): { rows: Row[]; more: boolean } {
+  const rows: Row[] = []
+  let after: unknown = null
+  while (rows.length < limit) {
+    const r = query<{ rows: Row[]; next: unknown }>("find", { ...params, limit: Math.min(500, limit - rows.length), ...(after === null ? {} : { after }) })
+    rows.push(...r.rows)
+    after = r.next ?? null
+    if (after === null) return { rows, more: false }
+  }
+  return { rows, more: true }
+}
+
+/** A table's ids in slot order, as a view of the kernel's memory (good until the next call). */
+function idsOf(t: number): Uint32Array {
+  const n = k!.rows(t)
+  return n === 0 ? new Uint32Array(0) : new Uint32Array(k!.memory.buffer, k!.ids_ptr(t), n)
+}
+
+/** A resident table's ids in slot order. */
+export const ids = (name: TableName): Uint32Array => (k ? idsOf(TABLES[name].id).slice() : new Uint32Array(0))
+
+const slots = new Map<number, { version: number; at: Map<number, number> }>()
+function slot(t: number, id: number): number {
+  return indexed(slots, t, () => {
+    const at = new Map<number, number>()
+    idsOf(t).forEach((x, i) => at.set(x, i))
+    return at
+  }).get(id) ?? -1
 }
 
 /** One decoded value of a resident row: enum by name, day as YYYY-MM-DD, time as a Date; null when empty. */
@@ -356,6 +389,29 @@ export function value(name: TableName, id: number, col: string): string | number
   return null
 }
 
+const lookups = new Map<string, { version: number; at: Map<string, number> }>()
+
+/** The id of the resident row whose `col` equals `key` (an application by its no). */
+export function lookup(name: TableName, col: string, key: string): number {
+  const k2 = `${name}.${col}`
+  // A write seldom moves the key: an id found before is checked alone, and the map rebuilt only
+  // when it no longer answers (a unique key, like an application's no).
+  const l = lookups.get(k2)
+  const was = l?.at.get(key)
+  if (l && l.version !== version && was !== undefined && String(value(name, was, col)) === key) return was
+  return indexed(lookups, k2, () => {
+    const at = new Map<string, number>()
+    for (const id of ids(name)) {
+      const x = value(name, id, col)
+      if (x !== null) at.set(String(x), id)
+    }
+    return at
+  }).get(key) ?? 0
+}
+
+/** The one settings row's id, 0 before the rows are in. */
+export const settingsId = (): number => ids("settings")[0] ?? 0
+
 // ------------------------------------------------------------------ derived documents
 
 export interface Filter {
@@ -366,19 +422,14 @@ export interface Filter {
   search?: string
 }
 
-const views = new Map<string, { version: number; ids: Uint32Array }>()
-
 /** Application ids the filter keeps, in board order (score, then heat). */
 export function board(f: Filter): Uint32Array {
   if (!k) return new Uint32Array(0)
   const key = JSON.stringify(f)
-  const hit = views.get(key)
-  if (hit && hit.version === version) return hit.ids
-  const len = withBytes(ENC.encode(key), (p, n) => k!.view(p, n))
-  const out = len <= 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
-  if (views.size > 16) views.clear()
-  views.set(key, { version, ids: out })
-  return out
+  return memo(`board:${key}`, () => {
+    const len = withBytes(ENC.encode(key), (p, n) => k!.view(p, n))
+    return len <= 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
+  })
 }
 
 export const DIR = { next: 0, prev: 1, up: 2, down: 3, first: 4, last: 5 } as const
@@ -400,42 +451,21 @@ export interface Card {
   reason: string
 }
 
-/**
- * A kernel document, per version, beside the reads: drawn again with no row moved (a filter chip, a
- * subtab, a fold, a form opening) it is not composed and parsed again. Lenses only read it.
- */
-function memo<T>(key: string, make: () => T): T {
-  if (answered !== version) {
-    answers.clear()
-    answered = version
-  }
-  if (answers.has(key)) return answers.get(key) as T
-  const doc = make()
-  answers.set(key, doc)
-  return doc
-}
 export const card = (id: number): Card | null => (k ? memo(`card:${id}`, () => resultJson<Card>(k!.card(id))) : null)
-export const scoreboard = (): Record<string, unknown> | null => (k ? memo("scoreboard", () => resultJson(k!.scoreboard())) : null)
-export const application = (id: number): Record<string, unknown> | null => (k ? memo(`application:${id}`, () => resultJson(k!.application(id))) : null)
-export const lanes = (): Record<string, unknown> | null => (k ? memo("lanes", () => resultJson(k!.lanes())) : null)
-export const atlas = (preset: string): Record<string, unknown> | null =>
+export const scoreboard = (): Row | null => (k ? memo("scoreboard", () => resultJson(k!.scoreboard())) : null)
+export const application = (id: number): Row | null => (k ? memo(`application:${id}`, () => resultJson(k!.application(id))) : null)
+export const lanes = (): Row | null => (k ? memo("lanes", () => resultJson(k!.lanes())) : null)
+export const atlas = (preset: string): Row | null =>
   k ? memo(`atlas:${preset}`, () => resultJson(withBytes(ENC.encode(preset), (p, n) => k!.atlas(p, n)))) : null
-
-/** The ctx the kernel judges a browser write in: the operator, today. */
-function ctx(): Uint8Array {
-  return ENC.encode(JSON.stringify({ today: todayDay(), now: Math.floor(Date.now() / 1000), human: true, key_id: null, held: [] }))
-}
 
 /** Judges an op on the local rows and applies it as pending; a refusal is the kernel's own verdict. */
 function predict(op: Op): void {
   if (!k) return
   const bytes = encodeOp(op)
-  const c = ctx()
+  // The ctx the kernel judges a browser write in: the operator, today.
+  const c = ENC.encode(JSON.stringify({ today: todayDay(), now: Math.floor(Date.now() / 1000), human: true, key_id: null, held: [] }))
   const r = withBytes(bytes, (p, n) => withBytes(c, (q, m) => k!.predict(p, n, q, m)))
-  if (r < 0) {
-    const refusal = JSON.parse(DEC.decode(result(-r - 1))) as { refusal: string; data: unknown }
-    throw new Refused(refusal.refusal, refusalText(refusal.refusal, refusal.data), refusal.data)
-  }
+  if (r < 0) throw refused(r)
   moved()
 }
 
@@ -519,8 +549,6 @@ const RESENDS = 3
 // Unique per session for the ledger's 24 h: the page's start in the high bits, a counter below.
 let nextOp = (BigInt(Date.now()) << 20n) | BigInt(crypto.getRandomValues(new Uint16Array(1))[0] ?? 0)
 
-export const opId = (): bigint => nextOp++
-
 function settle(id: bigint, v: Verdict): void {
   const done = pending.get(id)
   if (!done) return
@@ -529,44 +557,23 @@ function settle(id: bigint, v: Verdict): void {
   done.done(v)
 }
 
-/** What send() would refuse, checked before a prediction is applied. */
-function sendable(op: Op): void {
-  if (!wire) throw new Error("not connected")
-  // Refused before the prediction is applied, so the page never shows a write that will not be sent.
-  if (wire.ended) throw new Refused("session", "This session has ended; sign in again to write.")
-  if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
-}
-
-/** Sends ops in OPS frames (at most OPS_MAX each, under the frame limit); each resolves with its own verdict. */
-export function send(ops: readonly Op[]): Promise<Verdict>[] {
-  if (!wire) throw new Error("not connected")
-  if (ops.length === 0 || ops.length > OPS_MAX) throw new Error(`1..${OPS_MAX} ops per frame`)
-  for (const op of ops) sendable(op)
-  const bytes = ops.map(encodeOp)
-  const out = ops.map((op, i) => new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes: bytes[i]!, resent: 0 })))
-  set({ pending: pending.size })
-  // Offline, the ops wait: the reconnect resends them, and the ledger answers a resent op once.
-  for (const f of frames(bytes)) wire.send(opsFrame(wire.hash, f))
-  return out
-}
-
-/** The node takes WebSocket frames up to 2 MiB: ops go in as many OPS frames as that needs. */
+/** The node takes WebSocket frames up to 2 MiB: ops go in as many OPS frames as that needs, at most OPS_MAX each. */
 const FRAME_BYTES = 1_900_000
 
-function frames(ops: readonly Bytes[]): Bytes[][] {
-  const out: Bytes[][] = []
+function sendAll(ops: readonly Bytes[]): void {
+  const frames: Bytes[][] = []
   let size = 0
   for (const op of ops) {
-    const last = out[out.length - 1]
+    const last = frames[frames.length - 1]
     if (!last || last.length >= OPS_MAX || size + op.byteLength > FRAME_BYTES) {
-      out.push([op])
+      frames.push([op])
       size = 24 + op.byteLength
     } else {
       last.push(op)
       size += op.byteLength
     }
   }
-  return out
+  for (const f of frames) wire!.send(opsFrame(wire!.hash, f))
 }
 
 /** app.ts, when a session opens: every unanswered op again, as it was. */
@@ -581,8 +588,30 @@ export function resend(): void {
     settle(id, { ok: false, code: REFUSAL.indexOf("internal"), data: { message: "the server never answered this write; check whether it landed before writing it again" } })
     moved()
   }
-  if (pending.size === 0) return
-  for (const f of frames([...pending.values()].map((p) => p.bytes))) wire.send(opsFrame(wire.hash, f))
+  if (pending.size > 0) sendAll([...pending.values()].map((p) => p.bytes))
+}
+
+/**
+ * One op: judged by the replica first (its refusal throws here, in the caller's frame, so a form can
+ * stay open with its input), applied as pending when its table is resident, and sent; the
+ * sequencer's verdict is the promise, a refusal named from the catalog. Offline, the op waits: the
+ * reconnect resends it, and the ledger answers a resent op once.
+ */
+function write(op: Op, resident: boolean): Promise<{ id: number; rev: bigint }> {
+  if (!wire) throw new Error("not connected")
+  // Refused before the prediction is applied, so the page never shows a write that will not be sent.
+  if (wire.ended) throw new Refused("session", "This session has ended; sign in again to write.")
+  if (opText(op) > OP_TEXT_MAX) throw new Refused("too_large", "More than 1 MiB of text in one write.")
+  if (resident) predict(op)
+  const bytes = encodeOp(op)
+  const verdict = new Promise<Verdict>((resolve) => pending.set(op.opId, { done: resolve, bytes, resent: 0 }))
+  set({ pending: pending.size })
+  sendAll([bytes])
+  return verdict.then((v) => {
+    if (v.ok) return { id: v.id, rev: v.rev }
+    const code = REFUSAL[v.code] ?? (v.code < 0 ? "session" : `refusal ${v.code}`)
+    throw new Refused(code, refusalText(code, v.data), v.data)
+  })
 }
 
 // ------------------------------------------------------------------ typed puts
@@ -590,9 +619,7 @@ export function resend(): void {
 /** What a field holds before it is a cell: an input's text, a checkbox, a number, or null to clear. */
 export type Input = string | number | boolean | null
 
-export const table = (name: TableName): TableDef => TABLES[name]
-
-export function column(t: TableDef, name: string): ColumnDef {
+function column(t: TableDef, name: string): ColumnDef {
   const c = t.cols.find((x) => x.name === name)
   if (!c) throw new Refused("column", `${t.name} has no column ${name}`)
   return c
@@ -601,10 +628,8 @@ export function column(t: TableDef, name: string): ColumnDef {
 /** An enum's values by its declared name (`stage` → STAGE). */
 export const values = (name: string | null): readonly string[] => (name === null ? [] : ENUMS[name] ?? [])
 
-export const refusalName = (code: number): string => REFUSAL[code] ?? (code < 0 ? "session" : `refusal ${code}`)
-
 /** A refusal's words: its message if it has one, else the data that decided it ("gated → submitted: needs_batch"). */
-export function refusalText(code: string, data: unknown): string {
+function refusalText(code: string, data: unknown): string {
   const d = (data ?? {}) as Record<string, unknown>
   if (typeof d.message === "string" && d.message !== "") return d.message
   // The reason leads in its own words (the node gives every refusal one, its code's if the site named
@@ -628,7 +653,7 @@ const DAY_MS = 86_400_000
 const EPOCH_DAYS = 719_528
 
 /** A 'YYYY-MM-DD' day as the wire's day number, or null when malformed. */
-export function day(s: string): number | null {
+function day(s: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null
   const t = Date.parse(`${s}T00:00:00Z`)
   if (Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== s) return null
@@ -637,15 +662,14 @@ export function day(s: string): number | null {
 }
 
 /** A wire day number as 'YYYY-MM-DD'. */
-export const dayText = (d: number): string => new Date((d - EPOCH_DAYS) * DAY_MS).toISOString().slice(0, 10)
+const dayText = (d: number): string => new Date((d - EPOCH_DAYS) * DAY_MS).toISOString().slice(0, 10)
 
-/** Today by this browser's clock, as the wire's day number. */
-export const todayDay = (): number => Math.floor(Date.now() / DAY_MS) + EPOCH_DAYS
-
-export const today = (): string => new Date().toISOString().slice(0, 10)
+/** Today by this browser's clock, as the wire's day number, and as 'YYYY-MM-DD'. */
+const todayDay = (): number => Math.floor(Date.now() / DAY_MS) + EPOCH_DAYS
+export const today = (): string => dayText(todayDay())
 
 /** A typed cell for one column; the server never casts, so the type is decided here. */
-export function cell(c: { id: number; name: string; type: ColumnDef["type"]; enum: string | null }, raw: Input): Cell {
+function cell(c: { id: number; name: string; type: ColumnDef["type"]; enum: string | null }, raw: Input): Cell {
   const bad = (what: string): never => {
     throw new Refused("type", `${c.name} needs ${what}`)
   }
@@ -713,8 +737,9 @@ export interface Put {
   createOnly?: boolean
 }
 
-export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}): Op {
-  const t = table(name)
+/** One put, predicted into the replica now and sent (see `write`). */
+export function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
+  const t = TABLES[name]
   const cells: Cell[] = []
   let flags = 0
   if (p.key) {
@@ -733,26 +758,11 @@ export function putOp(name: TableName, set: Record<string, Input>, p: Put = {}):
   if (p.source !== undefined && p.source !== "") cells.push({ col: SOURCE, type: typeof p.source === "number" ? CELL.u32 : CELL.str, value: p.source })
   if (p.expectRev !== undefined) flags |= OP_FLAG.EXPECT_REV
   if (p.createOnly) flags |= OP_FLAG.CREATE_ONLY
-  return { opId: opId(), verb: VERB.put, flags, target: t.id, id: p.key ? 0 : p.id ?? 0, expectRev: p.expectRev ?? 0, cells }
+  return write({ opId: nextOp++, verb: VERB.put, flags, target: t.id, id: p.key ? 0 : p.id ?? 0, expectRev: p.expectRev ?? 0, cells }, t.residency === "resident")
 }
 
-/** The sequencer's verdict on a sent op: the new rev and id, or a `Refused` named from the catalog. */
-const settled = (verdict: Promise<Verdict>): Promise<{ id: number; rev: bigint }> =>
-  verdict.then((v) => {
-    if (v.ok) return { id: v.id, rev: v.rev }
-    throw new Refused(refusalName(v.code), refusalText(refusalName(v.code), v.data), v.data)
-  })
-
-/**
- * One put: predicted into the replica now, and sent. The replica's own refusal throws here, in the
- * caller's frame (so a form can stay open with its input); the sequencer's verdict is the promise.
- */
-export function put(name: TableName, set: Record<string, Input>, p: Put = {}): Promise<{ id: number; rev: bigint }> {
-  const op = putOp(name, set, p)
-  sendable(op)
-  if (TABLES[name].residency === "resident") predict(op)
-  return settled(send([op])[0]!)
-}
+/** A put to the one settings row (atlas, lanes), created when there is none yet. */
+export const putSettings = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("settings", set, settingsId() === 0 ? {} : { id: settingsId() })
 
 /** A declared command on one row, judged locally first (a refusal throws here), its verdict the promise. */
 export function command(name: CommandName, target: number, params: Record<string, Input> = {}): Promise<{ id: number; rev: bigint }> {
@@ -766,30 +776,5 @@ export function command(name: CommandName, target: number, params: Record<string
     }
     cells.push(cell(p, raw))
   }
-  const op: Op = { opId: opId(), verb: VERB.command, flags: 0, target: c.id, id: target, expectRev: 0, cells }
-  sendable(op)
-  if (TABLES[c.table as TableName].residency === "resident") predict(op)
-  return settled(send([op])[0]!)
-}
-
-const lookups = new Map<string, { version: number; at: Map<string, number> }>()
-
-/** The id of the resident row whose `col` equals `key` (an application by its no). */
-export function lookup(name: TableName, col: string, key: string): number {
-  const k2 = `${name}.${col}`
-  let l = lookups.get(k2)
-  // A write seldom moves the key: an id found before is checked alone, and the map rebuilt only
-  // when it no longer answers (a unique key, like an application's no).
-  const was = l?.at.get(key)
-  if (l && l.version !== version && was !== undefined && String(value(name, was, col)) === key) return was
-  if (!l || l.version !== version) {
-    const at = new Map<string, number>()
-    for (const id of ids(name)) {
-      const x = value(name, id, col)
-      if (x !== null) at.set(String(x), id)
-    }
-    l = { version, at }
-    lookups.set(k2, l)
-  }
-  return l.at.get(key) ?? 0
+  return write({ opId: nextOp++, verb: VERB.command, flags: 0, target: c.id, id: target, expectRev: 0, cells }, TABLES[c.table as TableName].residency === "resident")
 }

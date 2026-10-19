@@ -8,12 +8,10 @@
 // row's rev) and the sequencer's verdict confirms it or rolls it back.
 
 import type { View } from "../app.ts"
-import { DOMAIN, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
-import { Refused, failed, put, query as read, table, today, values, type Input } from "../kernel.ts"
+import { DOMAIN, TABLES, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
+import { Refused, failed, page, put, query as read, row, today, values, type Input, type Row } from "../kernel.ts"
 import { EMPTY, flag, href, html, unicodeHost, type Html } from "../morph.ts"
 import { go, model, query, set, type WorldView } from "../state.ts"
-
-type Row = Record<string, unknown>
 
 const TABLES_SHOWN = ["corporations", "places", "offices", "sources"] as const satisfies readonly TableName[]
 type Shown = (typeof TABLES_SHOWN)[number]
@@ -25,7 +23,7 @@ const patch = (p: Partial<WorldView>) => set({ world: { ...model.world, ...p } }
 
 function current(): TableDef {
   const sub = model.address.sub as Shown
-  return table(TABLES_SHOWN.includes(sub) ? sub : "corporations")
+  return TABLES[TABLES_SHOWN.includes(sub) ? sub : "corporations"]
 }
 
 const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
@@ -88,23 +86,7 @@ function rows(t: TableDef, cs: ColumnDef[], limit: number): { rows: Row[]; more:
   const q = model.address.q.get("q") ?? ""
   const search = SEARCH[t.name as Shown]
   if (q !== "" && search) params.where = { [search]: { prefix: q } }
-  const out: Row[] = []
-  let after: unknown = null
-  while (out.length < limit) {
-    const r = read<{ rows: Row[]; next: unknown }>("find", { ...params, limit: Math.min(500, limit - out.length), ...(after === null ? {} : { after }) })
-    out.push(...r.rows)
-    after = r.next ?? null
-    if (after === null) return { rows: out, more: false }
-  }
-  return { rows: out, more: true }
-}
-
-const rowOf = (t: TableDef, id: number): Row | null => {
-  try {
-    return read<{ row: Row }>("get", { table: t.name, id }).row
-  } catch {
-    return null
-  }
+  return page(params, limit)
 }
 
 // ------------------------------------------------------------------ cells
@@ -118,7 +100,7 @@ function display(c: ColumnDef, x: unknown): Html {
   if (c.ref !== null) {
     // A ref is the row it names, by its name, from the replica; a world table's row is a link to it there.
     const to = TABLES_SHOWN.find((n) => n === c.ref)
-    const named = to ? rowOf(table(to), Number(x)) : null
+    const named = to ? row(to, Number(x)) : null
     const name = named ? String(named[SEARCH[to!] ?? "id"] ?? "") : ""
     if (!to || name === "") return html`<span class="ref">#${String(x)}</span>`
     return html`<a class="ref" href="/world/${to}?q=${encodeURIComponent(name)}" data-nav title="${to} #${String(x)}">${to === "sources" ? unicodeHost(name.replace(/^https?:\/\//, "")) : name}</a>`
@@ -140,9 +122,9 @@ function display(c: ColumnDef, x: unknown): Html {
   return html`${s.length > 80 ? `${s.slice(0, 80)}…` : s}`
 }
 
-function editor(t: TableDef, c: ColumnDef, row: Row): Html {
-  const id = Number(row.id)
-  const x = c.type === "text" ? rowOf(t, id)?.[c.name] : row[c.name]
+function editor(t: TableDef, c: ColumnDef, r: Row): Html {
+  const id = Number(r.id)
+  const x = c.type === "text" ? row(t.name, id)?.[c.name] : r[c.name]
   const value = x === null || x === undefined ? "" : typeof x === "object" ? "" : String(x)
   let field: Html
   switch (c.type) {
@@ -215,7 +197,7 @@ function reader(t: TableDef): Html {
   return html`<section class="card panel" data-key="text" aria-labelledby="text-h">
     <h2 id="text-h">${t.name} #${x.id} · ${x.column}</h2>
     <p class="hint">Written by a person or an agent; shown as text, never run.</p>
-    <pre class="untrusted">${String(rowOf(t, x.id)?.[x.column] ?? "")}</pre>
+    <pre class="untrusted">${String(row(t.name, x.id)?.[x.column] ?? "")}</pre>
     <button type="button" class="ghost" data-act="close-panel">Close</button>
   </section>`
 }
@@ -300,14 +282,14 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       const c = t.cols.find((x) => x.name === col)
       if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
       // A text cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
-      return patch({ edit: `${id}:${col}`, editRev: Number(rowOf(t, id)?.rev ?? 0) })
+      return patch({ edit: `${id}:${col}`, editRev: Number(row(t.name, id)?.rev ?? 0) })
     }
     case "cancel":
       return patch({ edit: "" })
     case "save": {
       const form = el as HTMLFormElement
       const c = t.cols.find((x) => x.name === col)
-      if (!c || !rowOf(t, id)) return
+      if (!c || !row(t.name, id)) return
       const data = new FormData(form)
       const raw = String(data.get("value") ?? "")
       const source = String(data.get("source") ?? "")

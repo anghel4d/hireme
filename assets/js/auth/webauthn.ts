@@ -29,32 +29,19 @@ interface Parsers {
 
 const PKC = (typeof PublicKeyCredential === "undefined" ? {} : PublicKeyCredential) as Parsers
 
-const ids = (list: unknown): PublicKeyCredentialDescriptor[] | undefined =>
-  Array.isArray(list)
-    ? list.map((c: Json) => ({ ...(c as object), type: "public-key", id: b64u.decode(String(c.id)) }) as PublicKeyCredentialDescriptor)
-    : undefined
-
-function creation(o: Json): PublicKeyCredentialCreationOptions {
-  if (PKC.parseCreationOptionsFromJSON) return PKC.parseCreationOptionsFromJSON(o)
-  const user = o.user as Json
-  const exclude = ids(o.excludeCredentials)
-  return {
-    ...(o as object),
-    challenge: b64u.decode(String(o.challenge)),
-    user: { ...(user as object), id: b64u.decode(String(user.id)) } as unknown as PublicKeyCredentialUserEntity,
-    ...(exclude ? { excludeCredentials: exclude } : {}),
-  } as unknown as PublicKeyCredentialCreationOptions
+/** The options with their binary fields decoded: the challenge, the user's id and the credentials of the lists named. */
+function binary(o: Json, list: string): Json {
+  const out: Json = { ...o, challenge: b64u.decode(String(o.challenge)) }
+  if (o.user) out.user = { ...(o.user as Json), id: b64u.decode(String((o.user as Json).id)) }
+  if (Array.isArray(o[list])) out[list] = (o[list] as Json[]).map((c) => ({ ...c, type: "public-key", id: b64u.decode(String(c.id)) }))
+  return out
 }
 
-function request(o: Json): PublicKeyCredentialRequestOptions {
-  if (PKC.parseRequestOptionsFromJSON) return PKC.parseRequestOptionsFromJSON(o)
-  const allow = ids(o.allowCredentials)
-  return {
-    ...(o as object),
-    challenge: b64u.decode(String(o.challenge)),
-    ...(allow ? { allowCredentials: allow } : {}),
-  } as unknown as PublicKeyCredentialRequestOptions
-}
+const creation = (o: Json): PublicKeyCredentialCreationOptions =>
+  PKC.parseCreationOptionsFromJSON?.(o) ?? (binary(o, "excludeCredentials") as unknown as PublicKeyCredentialCreationOptions)
+
+const request = (o: Json): PublicKeyCredentialRequestOptions =>
+  PKC.parseRequestOptionsFromJSON?.(o) ?? (binary(o, "allowCredentials") as unknown as PublicKeyCredentialRequestOptions)
 
 export const supported = (): boolean => typeof PublicKeyCredential !== "undefined" && !!navigator.credentials
 

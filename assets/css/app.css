@@ -331,12 +331,10 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card.selected { outline: 2px solid var(--focus); outline-offset: 1px; }
 .app-card header { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .app-card .score { font-weight: 700; color: var(--ink); font-size: 15px; }
-.app-card h3 { margin: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.app-card .role { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-card h3, .app-card .role { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-card .where { margin: 0; font-size: 12px; }
 .app-card footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
-.app-card .role { color: var(--muted); }
-.app-card .heat { color: var(--muted); }
+.app-card .role, .app-card .heat { color: var(--muted); }
 .app-card .pips { margin-left: auto; position: relative; height: 5px; }
 /* One 7×5 segment left of the rail; desk.ts draws every segment as a shadow of it (--rail). */
 .app-card .pips::before { content: ""; position: absolute; left: -9px; top: 0; width: 7px; height: 5px; border-radius: 2px; box-shadow: var(--rail); pointer-events: none; }
