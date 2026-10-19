@@ -94,8 +94,8 @@ function view(): Html {
   const any = model.address.q.size > 0
   return html`<div class="desk">
     <div class="toolbar" data-key="toolbar">
-      <input type="search" class="search" placeholder="Search company, role, place or #no" value="${model.address.q.get("q") ?? ""}"
-        data-act="search" data-on="input" data-bound aria-label="Search the board" id="desk-search">
+      <input type="search" class="search" placeholder="Search company, role, place or #no"
+        data-act="search" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
       <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
       <span class="muted">${ids.length} shown</span>
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
@@ -136,6 +136,11 @@ const sized = new ResizeObserver(() => {
 })
 
 function after(root: HTMLElement): void {
+  // The search box is owned: its value is written here, so a keystroke leaves the desk's markup as it
+  // was and the shell's morph is skipped. The box being typed in keeps what is in it.
+  const q = root.querySelector<HTMLInputElement>("#desk-search")
+  const want = model.address.q.get("q") ?? ""
+  if (q && q !== document.activeElement && q.value !== want) q.value = want
   const el = root.querySelector<HTMLElement>(".board")
   if (!el) return
   if (watched !== el) {

@@ -168,7 +168,12 @@ function render(): void {
     guarded(model.address.lens, "enter", () => v?.enter?.(fresh), undefined)
     document.title = `${v?.title ?? "hireme"} · hireme`
   }
-  morph(root, shell())
+  // Markup is a function of the model, so the same markup as the last morph is the same page: skipped.
+  const next = shell()
+  if (next.text !== drawn) {
+    morph(root, next)
+    drawn = next.text
+  }
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
   if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
@@ -181,6 +186,7 @@ function render(): void {
 }
 
 const focusedOnce = new WeakSet<Element>()
+let drawn = ""
 
 onRender(render)
 

@@ -203,12 +203,30 @@ export function go(next: Partial<Address>, replace = false): void {
   // no address change at all, and a view that enters on "" sees what format() prints.
   if (address.sub === "") address.sub = DEFAULT_SUB[address.lens] ?? ""
   const url = format(address)
-  if (url !== `${location.pathname}${location.search}`) {
-    if (replace) history.replaceState(null, "", url)
-    else history.pushState(null, "", url)
+  if (replace && address.lens === model.address.lens && address.sub === model.address.sub) {
+    // A filter change writes the address when input pauses (v1's way): replaceState costs ~0.3 ms, off
+    // the frame that answers the keystroke. Any other move writes what was owed first.
+    owed = url
+    clearTimeout(owing)
+    owing = window.setTimeout(settle, ADDRESS_MS)
+  } else {
+    settle()
+    if (url !== here()) history[replace ? "replaceState" : "pushState"](null, "", url)
   }
   set({ address })
 }
+
+const ADDRESS_MS = 150
+let owed = ""
+let owing = 0
+const here = (): string => `${location.pathname}${location.search}`
+function settle(): void {
+  clearTimeout(owing)
+  if (owed !== "" && owed !== here()) history.replaceState(null, "", owed)
+  owed = ""
+}
+// A page left mid-search keeps its address for reload and back.
+addEventListener("pagehide", settle)
 
 /** One query parameter of the address, set or cleared in place. */
 export function query(key: string, value: string): void {
@@ -246,4 +264,9 @@ function expire(): void {
   if (left.length !== model.notices.length) set({ notices: left })
 }
 
-addEventListener("popstate", () => set({ address: parse(location.pathname, location.search) }))
+addEventListener("popstate", () => {
+  // Back or forward leaves the entry an owed filter belonged to: it is not written over the new one.
+  clearTimeout(owing)
+  owed = ""
+  set({ address: parse(location.pathname, location.search) })
+})
