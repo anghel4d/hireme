@@ -33,6 +33,21 @@ const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
 /** A text column of the replica: its text, "" when there is none. */
 const textOf = (v_: unknown): string => (typeof v_ === "string" ? v_ : "")
+// One formatter: toLocaleString builds a new one per call.
+const NUM = new Intl.NumberFormat()
+/** UTF-8 bytes of a string, counted without encoding it. */
+function utf8(s: string): number {
+  let n = s.length
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) continue
+    // A surrogate pair is 4 bytes (2 units + 2); a lone surrogate is encoded as U+FFFD, 3.
+    const pair = c >= 0xd800 && c <= 0xdbff && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00
+    n += c < 0x800 ? 1 : 2
+    if (pair) i++
+  }
+  return n
+}
 
 /** A row of the replica by id, or null. */
 function rowOf(table: string, rowId: number): Row | null {
@@ -104,7 +119,7 @@ function listing(a: Row, appId: number): Html {
   const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf(a.listing_raw)
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open the posting ↗</a>` : EMPTY}</h2>
     ${text !== "" ? !v().listing
-      ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${new TextEncoder().encode(text).byteLength.toLocaleString()} bytes)</button>`
+      ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${NUM.format(utf8(text))} bytes)</button>`
       : html`<p class="hint">As it was captured; shown as text, never run.</p><pre class="untrusted">${text}</pre>`
       : html`<p class="hint">No listing: this application came another way${a.channel ? ` (${str(a.channel)})` : ""}.</p>`}
   </section>`
@@ -134,7 +149,7 @@ function around(a: Row, appId: number): Html {
   return html`<section class="card" data-key="around"><h2>People and company</h2>
     ${corp ? html`<p><b>${str(corp.name)}</b> <a href="/world/corporations?q=${encodeURIComponent(str(corp.name))}" data-nav>in the world</a>
       ${corp.careers_url ? html` · <a href="${href(str(corp.careers_url))}" rel="noopener noreferrer" target="_blank">careers</a>` : EMPTY}</p>
-      ${corp.headcount ? html`<p class="muted">${Number(corp.headcount).toLocaleString()} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
+      ${corp.headcount ? html`<p class="muted">${NUM.format(Number(corp.headcount))} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
     ${c ? html`<p><a href="/outreach?contact=${str(c.id)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
     ${messages.length > 0 ? html`<ul class="rows">${messages.map((m) => html`<li data-key="m${str(m.id)}"><span class="tag">${str(m.direction)}</span>
       ${str(m.subject) || "(no subject)"} <span class="muted">${str(m.sent_at).slice(0, 10)} · ${str(m.status)}</span></li>`)}</ul>` : EMPTY}
