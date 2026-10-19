@@ -45,12 +45,7 @@ defmodule HiremeWeb.Auth do
 
   @doc "The development gate's self-signed certificate hashes, hex, space-separated."
   @spec wire_hashes() :: String.t()
-  def wire_hashes,
-    do:
-      if(gate?(),
-        do: HiremeWeb.Gate.cert_hash() |> List.wrap() |> Enum.reject(&is_nil/1) |> Enum.join(" "),
-        else: ""
-      )
+  def wire_hashes, do: (gate?() && HiremeWeb.Gate.cert_hash()) || ""
 
   defp gate?,
     do: Application.get_env(:hireme, :gate, true) and Code.ensure_loaded?(HiremeWeb.Gate)
@@ -70,23 +65,26 @@ defmodule HiremeWeb.Auth do
 
   # Read once per node: the script and its hash are a release's constants.
   defp early do
-    case :persistent_term.get({__MODULE__, :early}, :unread) do
+    memo(:early, fn ->
+      with {:ok, js} <- File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
+        js = String.trim_trailing(js)
+        {js, Base.encode64(:crypto.hash(:sha256, js))}
+      else
+        _ -> nil
+      end
+    end)
+  end
+
+  # A release constant read from priv once; nothing is kept before the first asset build.
+  defp memo(key, read) do
+    case :persistent_term.get({__MODULE__, key}, :unread) do
       :unread ->
-        early =
-          case File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
-            {:ok, js} ->
-              js = String.trim_trailing(js)
-              {js, Base.encode64(:crypto.hash(:sha256, js))}
+        value = read.()
+        if value, do: :persistent_term.put({__MODULE__, key}, value)
+        value
 
-            _ ->
-              nil
-          end
-
-        if early, do: :persistent_term.put({__MODULE__, :early}, early)
-        early
-
-      early ->
-        early
+      value ->
+        value
     end
   end
 
@@ -97,25 +95,15 @@ defmodule HiremeWeb.Auth do
   """
   @spec chunks() :: [String.t()]
   def chunks do
-    case :persistent_term.get({__MODULE__, :chunks}, :unread) do
-      :unread ->
-        found =
-          case File.read(Application.app_dir(:hireme, "priv/static/assets/app.js")) do
-            {:ok, js} ->
-              Regex.scan(~r/from\s*"\.\/([\w.-]+\.js)"/, js, capture: :all_but_first)
-              |> List.flatten()
-              |> Enum.uniq()
-
-            _ ->
-              nil
-          end
-
-        if found, do: :persistent_term.put({__MODULE__, :chunks}, found)
-        found || []
-
-      found ->
-        found
-    end
+    memo(:chunks, fn ->
+      with {:ok, js} <- File.read(Application.app_dir(:hireme, "priv/static/assets/app.js")) do
+        Regex.scan(~r/from\s*"\.\/([\w.-]+\.js)"/, js, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.uniq()
+      else
+        _ -> nil
+      end
+    end) || []
   end
 
   @doc "The Content-Security-Policy header value."
