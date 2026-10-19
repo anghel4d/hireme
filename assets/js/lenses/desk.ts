@@ -269,19 +269,47 @@ addEventListener("resize", repaint)
 
 const PIP: Record<string, string> = { D: "done", A: "now", P: "to do", S: "skipped", B: "blocked" }
 
-/** The stage rail as one small segment per stage, named in its title. */
+const HUE: Record<string, string> = { D: "var(--ok)", A: "var(--accent)", B: "var(--bad)" }
+const wide = (p: string | undefined): number => (p === "A" ? 12 : 7)
+
+// The stage rail is one element: each segment is a shadow of a 7×5 box parked left of the rail
+// (`.pips::before`), so a new tile's rail is one style write, not nine elements to style and lay
+// out. A 12 px segment is three overlapping shadows; a skipped one is a ring (a panel-coloured
+// shadow 1 px smaller over a line-coloured one).
+const RAILS = new Map<string, string>()
+function look(pips: string): string {
+  let css = RAILS.get(pips)
+  if (css !== undefined) return css
+  const shadows: string[] = []
+  let x = 9
+  for (const p of pips) {
+    if (p === "S") shadows.push(`${x}px 0 0 -1px var(--panel)`, `${x}px 0 var(--line)`)
+    else for (const dx of p === "A" ? [0, 2.5, 5] : [0]) shadows.push(`${x + dx}px 0 ${HUE[p] ?? "var(--line)"}`)
+    x += wide(p) + 2
+  }
+  css = `width: ${Math.max(0, x - 11)}px; --rail: ${shadows.join(", ") || "none"}`
+  RAILS.set(pips, css)
+  return css
+}
+
+/** The stage rail as one small segment per stage; the segment under the pointer names itself in the title. */
 function rail(el: HTMLElement | null, pips: string): void {
   if (!el || el.dataset.pips === pips) return
   el.dataset.pips = pips
-  el.replaceChildren(...Array.from(pips, (p, i) => {
-    const seg = document.createElement("i")
-    seg.dataset.p = p
-    seg.title = `${(STAGE[i] ?? "").replace(/_/g, " ")}: ${PIP[p] ?? p}`
-    return seg
-  }))
+  el.style.cssText = look(pips)
   const now = pips.indexOf("A")
   el.setAttribute("aria-label", now >= 0 ? `stage ${now + 1} of ${pips.length}` : "")
 }
+
+addEventListener("mousemove", (ev) => {
+  const el = ev.target as HTMLElement
+  if (!el.classList?.contains("pips")) return
+  const pips = el.dataset.pips ?? ""
+  let i = 0
+  for (let x = 0; i < pips.length - 1; i++) if (ev.offsetX < (x += wide(pips[i]) + 2) - 1) break
+  const t = pips === "" ? "" : `${(STAGE[i] ?? "").replace(/_/g, " ")}: ${PIP[pips[i] ?? ""] ?? pips[i]}`
+  if (el.title !== t) el.title = t
+}, { passive: true })
 
 
 function move(dir: number): void {

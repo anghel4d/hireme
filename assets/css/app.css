@@ -337,12 +337,9 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
 .app-card .role { color: var(--muted); }
 .app-card .heat { color: var(--muted); }
-.app-card .pips { margin-left: auto; display: flex; gap: 2px; }
-.app-card .pips i { width: 7px; height: 5px; border-radius: 2px; background: var(--line); }
-.app-card .pips i[data-p="D"] { background: var(--ok); }
-.app-card .pips i[data-p="A"] { background: var(--accent); width: 12px; }
-.app-card .pips i[data-p="S"] { background: transparent; border: 1px solid var(--line); }
-.app-card .pips i[data-p="B"] { background: var(--bad); }
+.app-card .pips { margin-left: auto; position: relative; height: 5px; }
+/* One 7×5 segment left of the rail; desk.ts draws every segment as a shadow of it (--rail). */
+.app-card .pips::before { content: ""; position: absolute; left: -9px; top: 0; width: 7px; height: 5px; border-radius: 2px; box-shadow: var(--rail); pointer-events: none; }
 .app-card[data-heat="warm"] { border-left-color: var(--warn); }
 .app-card[data-heat="hot"] { border-left-color: var(--hot); }
 .app-card[data-heat="hot"] .heat { color: var(--hot); }
