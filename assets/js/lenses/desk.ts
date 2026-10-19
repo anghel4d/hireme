@@ -233,7 +233,7 @@ function tile(el: HTMLElement, id: number, by: string | undefined, r: Row): void
   write(el.querySelector(".company"), str(r.company) || "(no company)")
   write(el.querySelector(".role"), str(r.role))
   write(el.querySelector(".where"), [r.location, r.work_mode].filter((x) => x).map(str).join(" · "))
-  write(el.querySelector(".stage"), stage.replace(/_/g, " "))
+  write(el.querySelector(".stage"), `${stage === "fire_ready" || stage === "open_fire" ? "draft · " : ""}${stage.replace(/_/g, " ")}`)
   write(el.querySelector(".band"), c?.band.replace(/_/g, " ") ?? "")
   write(el.querySelector(".heat"), c ? `${c.class}${c.reason !== "ok" ? ` · ${c.reason.replace(/_/g, " ")}` : ""}` : "")
   rail(el.querySelector(".pips"), str(r.pips))

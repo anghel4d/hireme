@@ -309,7 +309,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--line);
+  border-left: 4px solid var(--heat, var(--line));
   border-radius: var(--radius);
   padding: 10px 12px;
   cursor: pointer;
@@ -339,10 +339,10 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 /* One 7×5 segment left of the rail; desk.ts draws every segment as a shadow of it (--rail). */
 .app-card .pips::before { content: ""; position: absolute; left: -9px; top: 0; width: 7px; height: 5px; border-radius: 2px; box-shadow: var(--rail); pointer-events: none; }
 .app-card[data-heat="warm"] { border-left-color: var(--warn); }
-.app-card[data-heat="hot"] { border-left-color: var(--hot); }
-.app-card[data-heat="hot"] .heat { color: var(--hot); }
-.app-card[data-heat="blocked"] { border-left-color: var(--bad); }
-.app-card[data-heat="blocked"] .heat { color: var(--bad); }
+.app-card[data-heat="hot"] { --heat: var(--hot); }
+.app-card[data-heat="blocked"] { --heat: var(--bad); }
+.app-card[data-heat] .heat { color: var(--heat, var(--muted)); }
+.app-card:is([data-stage="fire_ready"], [data-stage="open_fire"]) { border-style: dashed; }
 .more { display: block; margin: 0 auto 12px; }
 .keys { text-align: center; font-size: 12px; }
 
