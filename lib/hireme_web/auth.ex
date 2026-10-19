@@ -32,7 +32,7 @@ defmodule HiremeWeb.Auth do
     "style-src 'self'",
     "img-src 'self' data:",
     "font-src 'self'",
-    "worker-src 'self'",
+    "worker-src 'none'",
     "frame-ancestors 'none'",
     "base-uri 'none'",
     "object-src 'none'",
@@ -259,12 +259,15 @@ defmodule HiremeWeb.Auth do
   end
 
   @doc "A whole page, never cached: the CSRF token, `head`, then the stylesheet."
-  @spec document(Plug.Conn.t(), pos_integer(), String.t(), iodata(), iodata()) :: Plug.Conn.t()
+  @spec document(Plug.Conn.t(), pos_integer(), String.t(), iodata(), iodata() | (-> iodata())) ::
+          Plug.Conn.t()
   def document(conn, status, title, head, body) do
-    conn
-    |> put_resp_content_type("text/html")
-    |> put_resp_header("cache-control", "no-store")
-    |> send_resp(status, """
+    conn =
+      conn
+      |> put_resp_content_type("text/html")
+      |> put_resp_header("cache-control", "no-store")
+
+    top = """
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -276,9 +279,19 @@ defmodule HiremeWeb.Auth do
     #{head}
     <link rel="stylesheet" href="#{static("/assets/app.css")}" />
     </head>
-    #{body}
-    </html>
-    """)
+    """
+
+    # A body made by a function follows the head, sent first so the page's fetches start meanwhile.
+    if is_function(body, 0) do
+      conn = send_chunked(conn, status)
+
+      with {:ok, conn} <- chunk(conn, top),
+           {:ok, conn} <- chunk(conn, [body.(), "\n</html>\n"]),
+           do: conn,
+           else: (_ -> conn)
+    else
+      send_resp(conn, status, [top, body, "\n</html>\n"])
+    end
   end
 
   @doc "A form's hidden CSRF field."

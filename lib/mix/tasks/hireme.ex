@@ -479,7 +479,7 @@ defmodule Mix.Tasks.Hireme.Bundle do
   @moduledoc """
   The browser's bundles, into priv/static/assets: `app` with its stylesheet,
   `early` (inlined in <head> and allowed by its hash in the CSP, so always
-  minified), `warm` (the worker it starts) and `auth`, the factor page's passkey script. Arguments go to
+  minified) and `auth`, the factor page's passkey script. Arguments go to
   every `bun build`: `--minify` for a release, `--sourcemap=inline --watch`
   for the dev watchers. Bun is MIX_BUN_PATH, else `bun` on PATH.
   """
@@ -489,8 +489,6 @@ defmodule Mix.Tasks.Hireme.Bundle do
     # Each lens but the desk is a chunk app.ts imports on demand, named by its content.
     ~w(js/app.ts css/app.css --format=esm --external=/wasm/* --splitting --chunk-naming=[name]-[hash].[ext]),
     ~w(js/early.ts --format=iife --minify),
-    # The worker early.ts warms the kernel in (see warm.ts).
-    ~w(js/warm.ts --format=iife --minify),
     ~w(js/auth/factor.ts --format=esm)
   ]
 

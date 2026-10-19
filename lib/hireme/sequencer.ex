@@ -132,6 +132,9 @@ defmodule Hireme.Sequencer do
         &GenServer.call(&1, {:subscribe, self(), session, snapshot_rev}, 30_000)
       )
 
+  @doc "The operator's BOOT as of now, for the page to carry (its HELLO then resumes from it)."
+  def boot(account_id), do: with_pid(account_id, &GenServer.call(&1, :boot, 30_000))
+
   @doc """
   Submits decoded ops (`HiremeWeb.Wire.Codec.ops/1`) for the calling
   session. When the sequencer cannot run, every op is answered `internal`.
@@ -218,6 +221,13 @@ defmodule Hireme.Sequencer do
     if held >= Security.key_sessions(),
       do: {:reply, {:error, :too_many}, state, @idle_ms},
       else: subscribe_session(pid, session, snapshot_rev, state)
+  end
+
+  def handle_call(:boot, _from, state) do
+    {state, body} = snapshot(Grants.operator(), state, Store.now())
+
+    {:reply, {:ok, Codec.frame(:BOOT, state.rev, body, end: true, compress: true)}, state,
+     @idle_ms}
   end
 
   def handle_call({:lease, pid, request}, _from, state) do

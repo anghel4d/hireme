@@ -4,17 +4,21 @@
 // the read of the last snapshot from IndexedDB. HELLO goes when the
 // carrier is up and the snapshot has answered, or after SNAP_WAIT_MS
 // without it: naming the snapshot's rev turns a full BOOT into a few
-// PATCHes, which is worth a short wait but not a long one. The bundle
+// PATCHes, which is worth a short wait but not a long one. Without a stored
+// snapshot the page's own BOOT, which ends its body, plays that part, so the
+// first cards wait on no round trip. The bundle
 // adopts all of it from `window.__hw`; frames that land first wait in a
 // queue. It imports only frame builders, which the bundler tree-shakes down.
 
 import { SCHEMA_REV } from "./gen/schema.ts"
-import { CRED, hello, meta, transport, webSocket, type Early } from "./wire.ts"
+import { CRED, header, hello, meta, transport, webSocket, type Bytes, type Early } from "./wire.ts"
 
 /** What the bundle finds on `window.__hw`. */
 export interface Boot extends Early {
   kernel: Promise<WebAssembly.Module>
   snap: Promise<Snapshot | undefined>
+  /** The page's own BOOT, once the body holding it is parsed, when no snapshot is stored: the kernel ingests it first and HELLO resumes from its rev. */
+  boot(): Bytes | undefined
   /** Settles when early's carrier attempt has an outcome: adopt it then, never beside it. */
   ready: Promise<void>
 }
@@ -29,26 +33,39 @@ export interface Snapshot {
 
 const SNAP_WAIT_MS = 120
 
+/** A base64 attribute's bytes (a loop: `Uint8Array.from` with a mapper calls back per character). */
+function bytes(b64: string): Bytes {
+  const s = atob(b64)
+  const u = new Uint8Array(s.length)
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i)
+  return u
+}
+
 {
   const m = meta()
   const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
+  // Only a scope whose snapshot was written (kernel.ts sets the flag then) reads IndexedDB; any
+  // other takes the page's BOOT and sends HELLO the moment the socket opens, never waiting on storage.
+  let stored = false
+  try {
+    stored = scope !== "" && localStorage.getItem(`hireme-snap:${scope}`) !== null
+  } catch {
+    // Blocked storage: no snapshot either.
+  }
+  let boot: Bytes | undefined
   const hw: Boot = {
     queue: [],
     helloSent: false,
     ready: Promise.resolve(),
+    boot: () => {
+      const b = boot || stored ? "" : (document.querySelector<HTMLMetaElement>('meta[name="hireme-boot"]')?.content ?? "")
+      if (b !== "") boot = bytes(b)
+      return boot
+    },
     kernel: WebAssembly.compileStreaming(fetch(document.querySelector<HTMLLinkElement>('link[rel="preload"][as="fetch"]')?.href ?? "/wasm/kernel.wasm")),
     snap: new Promise((resolve) => {
-      if (scope === "" || !("indexedDB" in window)) return resolve(undefined)
+      if (!stored || !("indexedDB" in window)) return resolve(undefined)
       setTimeout(() => resolve(undefined), 2000)
-      // Only a scope whose snapshot was written (kernel.ts sets the flag then) reads IndexedDB; any
-      // other sends HELLO the moment the socket opens, never waiting on storage.
-      let stored = false
-      try {
-        stored = localStorage.getItem(`hireme-snap:${scope}`) !== null
-      } catch {
-        // Blocked storage: no snapshot either.
-      }
-      if (!stored) return resolve(undefined)
       let open: IDBOpenDBRequest
       try {
         // Blocked storage throws here rather than failing the request.
@@ -80,19 +97,6 @@ const SNAP_WAIT_MS = 120
     }),
   }
   hw.kernel.catch(() => {})
-  // The kernel warms in a worker while the page waits on the socket (warm.ts), started now so it is
-  // up when the module has compiled. Without workers or the node's BOOT the page compiles as it goes.
-  const warm = document.querySelector<HTMLMetaElement>('meta[name="hireme-warm"]')
-  if (warm?.content && warm.dataset.boot && "Worker" in window) {
-    try {
-      const w = new Worker(warm.content)
-      const boot = Uint8Array.from(atob(warm.dataset.boot), (c) => c.charCodeAt(0))
-      // Today as the kernel counts days (kernel.ts todayDay).
-      hw.kernel.then((module) => w.postMessage({ module, boot, today: Math.floor(Date.now() / 86_400_000) + 719_528 }), () => w.terminate())
-    } catch {
-      // A worker refused (CSP, a sandbox): the page compiles as it goes.
-    }
-  }
   let settle = () => {}
   hw.ready = new Promise((r) => (settle = r))
 
@@ -100,12 +104,13 @@ const SNAP_WAIT_MS = 120
   const named = Promise.race([hw.snap, new Promise<undefined>((r) => setTimeout(r, SNAP_WAIT_MS))]).catch(() => undefined)
   const first = async (): Promise<Uint8Array<ArrayBuffer>> => {
     const s = await named
+    const b = hw.boot()
     const ticket = m.ticket
     return hello(m.hash, {
       cred: CRED.ticket,
       credential: ticket,
-      snapshotRev: s?.rev ?? 0n,
-      schemaRev: s?.schemaRev ?? 0n,
+      snapshotRev: s?.rev ?? (b ? header(b).rev : 0n),
+      schemaRev: s?.schemaRev ?? (b ? BigInt(SCHEMA_REV) : 0n),
       label: navigator.userAgent.slice(0, 120),
     })
   }

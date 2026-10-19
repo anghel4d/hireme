@@ -152,6 +152,8 @@ export function load(hw: Boot): void {
     const snap = early.some((f) => header(f).kind === KIND.BOOT)
       ? undefined
       : await Promise.race([hw.snap.catch(() => undefined), bootQueued.then(() => undefined)])
+    // The page's BOOT goes ahead of the socket's train, which resumes from it.
+    const boot = snap ? undefined : hw.boot()
     k = x
     x.set_grants(...grants, 1)
     let restored = false
@@ -167,6 +169,7 @@ export function load(hw: Boot): void {
         wire.restart()
       }
     }
+    if (boot) early.unshift(boot)
     for (const f of early.splice(0)) if (!ingest(f)) break
     // The snapshot paints first; the cold derive (the board, a card) runs once that paint is on
     // screen, so first paint never waits on it. Warm is set only together with what ends it, so a

@@ -679,65 +679,6 @@ defmodule HiremeWeb.Wire.Codec do
     |> Enum.map(fn {table_id, ids} -> block(table_id, length(ids), [{@gone, @t_u32, ids}]) end)
   end
 
-  @warm_rows 8
-  @warm_text [
-    "Senior Software Engineer",
-    "Berlin, Germany",
-    "remote",
-    "Acme GmbH",
-    "Rust Elixir TypeScript Kubernetes",
-    "Staff Platform Engineer",
-    "hybrid",
-    "https://example.com/jobs/1",
-    "Lisbon",
-    "onsite",
-    "Data Engineer (Python, SQL)"
-  ]
-
-  @doc """
-  A BOOT of made-up rows in every resident table, built once per node, for
-  the page to run its kernel over in a worker while it waits on the real
-  one: wasm compiles each function the first time it is called, and a
-  worker's calls compile them for the page's instance too, so the page's
-  first ingest and derive run compiled code.
-  """
-  def warm do
-    with nil <- :persistent_term.get({__MODULE__, :warm}, nil) do
-      body =
-        for t <- Schema.tables(), t.residency in [:resident, :projection] do
-          cols =
-            Enum.reject(t.cols, &(&1.name == "account_id" or &1.wire == nil or &1.server_only))
-
-          rows_block(
-            t,
-            cols,
-            for(i <- 1..@warm_rows, do: Map.new(cols, &{String.to_atom(&1.name), warm(&1, i)}))
-          )
-        end
-
-      f = frame(:BOOT, 1, body, end: true, compress: true)
-      :persistent_term.put({__MODULE__, :warm}, f)
-      f
-    end
-  end
-
-  defp warm(%{type: :id}, i), do: i
-  defp warm(%{type: :ref}, i), do: rem(i, @warm_rows) + 1
-
-  defp warm(%{type: :enum, enum: e}, i),
-    do: elem(@enum_atoms[e], rem(i, tuple_size(@enum_atoms[e])))
-
-  defp warm(%{type: :bool}, i), do: rem(i, 2) == 0
-  defp warm(%{type: :day}, i), do: Date.add(Date.utc_today(), -3 * i)
-  defp warm(%{type: :time}, i), do: DateTime.add(DateTime.utc_now(), -3600 * i)
-  defp warm(%{type: :json}, _i), do: %{}
-  defp warm(%{type: :f64}, i), do: i * 0.75
-
-  defp warm(%{type: t, id: c}, i) when t in [:str, :text],
-    do: Enum.at(@warm_text, rem(i * 3 + c, length(@warm_text)))
-
-  defp warm(%{id: c}, i), do: rem(i * 37 + c, 100)
-
   # Arithmetic, not a bit mask, so the type checker sees a non-negative size.
   defp pad8(n), do: n + rem(8 - rem(n, 8), 8)
   defp pad(bin), do: <<bin::binary, 0::size((pad8(byte_size(bin)) - byte_size(bin)) * 8)>>

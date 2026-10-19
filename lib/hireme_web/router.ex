@@ -116,7 +116,6 @@ defmodule HiremeWeb.PageController do
   import Plug.Conn
   import HiremeWeb, only: [json: 2]
   alias HiremeWeb.Auth
-  alias HiremeWeb.Wire.Codec
 
   def shell(conn, _params) do
     %{account: account, session: session} = conn.assigns
@@ -128,7 +127,6 @@ defmodule HiremeWeb.PageController do
     <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
     <meta name="hireme-wire" content="#{wire_hash()}" />
     <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
-    <meta name="hireme-warm" content="#{Auth.static("/assets/warm.js")}" data-boot="#{Base.encode64(Codec.warm())}" />
     <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
     <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
     #{for c <- Auth.chunks(), do: ~s(<link rel="modulepreload" href="/assets/#{c}" />)}
@@ -136,7 +134,10 @@ defmodule HiremeWeb.PageController do
     <script type="module" src="#{Auth.static("/assets/app.js")}"></script>
     """
 
-    Auth.document(conn, 200, "Hireme", head, ~s(<body><div id="app"></div></body>))
+    # The BOOT ends the body: the head is sent while it is made.
+    Auth.document(conn, 200, "Hireme", head, fn ->
+      ~s(<body><div id="app"></div><meta name="hireme-boot" content="#{boot(account.id)}" /></body>)
+    end)
   end
 
   def ticket(conn, _params) do
@@ -146,6 +147,14 @@ defmodule HiremeWeb.PageController do
 
       {:error, :rate_limited} ->
         conn |> put_status(429) |> json(%{error: "rate_limited"})
+    end
+  end
+
+  # The rows as of now, so the first cards need no round trip (v1's wire-board).
+  defp boot(account_id) do
+    case Hireme.Sequencer.boot(account_id) do
+      {:ok, frame} -> Base.encode64(frame)
+      _ -> ""
     end
   end
 
