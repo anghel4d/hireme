@@ -40,7 +40,7 @@ defmodule HiremeWeb.Wire.CodecTest do
     assert {:error, :body} = Codec.ops(body.(257))
   end
 
-  test "a ZSTD table run unpacks to itself, and a cut or relabelled one is refused" do
+  test "a ZSTD table run unpacks to itself; a cut, relabelled or peer-sent one is refused" do
     texts =
       for i <- 1..300,
           do: "Senior Rust engineer #{i}, " <> String.duplicate("kernels and GPUs. ", rem(i, 40))
@@ -85,6 +85,7 @@ defmodule HiremeWeb.Wire.CodecTest do
     assert {:ok, :BOOT, _, _, ^body} = Codec.decode(reframe.(packed, raw))
     assert {:error, _} = Codec.decode(reframe.(binary_part(packed, 0, n - 2), raw))
     assert {:error, _} = Codec.decode(reframe.(packed, raw + 8))
-    assert {:error, _} = Codec.decode(whole, raw - 8)
+    # A peer never sends a packed frame: one is refused unread.
+    assert {:error, :body} = Codec.decode(whole, :up)
   end
 end

@@ -85,7 +85,7 @@ defmodule HiremeWeb.Session do
   defp handle_frame(bin, state) do
     state = %{state | last_in: now_ms()}
 
-    case Codec.decode(bin, Codec.max_up()) do
+    case Codec.decode(bin, :up) do
       {:ok, kind, _flags, _rev, body} when kind in [:OPS, :RPC] and state.phase == :live ->
         on_frame(kind, body, active(state, state.last_in))
 

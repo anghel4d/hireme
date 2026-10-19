@@ -117,21 +117,23 @@ defmodule HiremeWeb.Wire.Codec do
 
   @doc """
   Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`. A
-  ZSTD body may unpack to at most `max_inflated` bytes; a session reading
-  a peer's frame passes `max_up/0`.
+  peer's frame (`:up`) never comes packed (no client compresses), so a
+  ZSTD flag on one is refused unread; a `:down` body unpacks to at most
+  256 MiB.
   """
-  def decode(frame, max_inflated \\ @max_inflated)
+  def decode(frame, dir \\ :down)
 
   def decode(
         <<len::little-32, kind::8, flags::8, hash::little-16, rev::little-64, body::binary>> = f,
-        max_inflated
+        dir
       )
       when byte_size(f) == len and len >= @header and rem(len, 8) == 0 do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- Map.fetch(@frame_names, kind),
          # Bits tested without bnot, which Dialyzer types as never zero.
          :ok <- if((flags &&& (@zstd ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
-         {:ok, body} <- unpack(f, flags, body, max_inflated) do
+         :ok <- if(dir == :up and (flags &&& @zstd) != 0, do: {:error, :body}, else: :ok),
+         {:ok, body} <- unpack(f, flags, body, @max_inflated) do
       {:ok, name, flags, rev, body}
     else
       :error -> {:error, :kind}
@@ -188,10 +190,12 @@ defmodule HiremeWeb.Wire.Codec do
 
   defp shuffle(_kind, body), do: body
 
-  # A text cell as it travels: raw under the floor or when packing does not
-  # pay, else zstd 19 against the text dictionary, packed once per content.
+  # A text cell as it travels: raw under the floor, past what a client
+  # unpacks (native/wire's MAX_TEXT) or when packing does not pay, else zstd
+  # 19 against the text dictionary, packed once per content. A text packing
+  # does not shrink is remembered as :raw, not copied.
   defp zcell(s) when s in [nil, ""], do: ""
-  defp zcell(s) when byte_size(s) < @floor, do: <<0, s::binary>>
+  defp zcell(s) when byte_size(s) < @floor or byte_size(s) > 16 <<< 20, do: <<0, s::binary>>
 
   defp zcell(s) do
     key = :crypto.hash(:sha256, s)
@@ -199,9 +203,12 @@ defmodule HiremeWeb.Wire.Codec do
     case lookup(key) do
       nil ->
         z = zstd(s, 19, :text)
-        cell = if byte_size(z) < byte_size(s), do: <<1, z::binary>>, else: <<0, s::binary>>
+        cell = if byte_size(z) < byte_size(s), do: <<1, z::binary>>, else: :raw
         remember(key, cell)
-        cell
+        if cell == :raw, do: <<0, s::binary>>, else: cell
+
+      :raw ->
+        <<0, s::binary>>
 
       cell ->
         cell
@@ -209,7 +216,8 @@ defmodule HiremeWeb.Wire.Codec do
   end
 
   @ztext :hireme_ztext
-  @ztext_max 200_000
+  # Past this much memory the cache starts over.
+  @ztext_bytes 256 <<< 20
 
   @doc "The packed-text cache's table: one per node, owned by its caller (the sequencers' supervisor)."
   def ztext_table,
@@ -223,7 +231,9 @@ defmodule HiremeWeb.Wire.Codec do
   end
 
   defp remember(key, cell) do
-    if :ets.info(@ztext, :size) >= @ztext_max, do: :ets.delete_all_objects(@ztext)
+    if :ets.info(@ztext, :memory) * :erlang.system_info(:wordsize) >= @ztext_bytes,
+      do: :ets.delete_all_objects(@ztext)
+
     :ets.insert(@ztext, {key, cell})
   end
 
