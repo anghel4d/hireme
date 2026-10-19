@@ -39,7 +39,6 @@ pub struct TableDef {
     pub cap: Option<u32>,
     pub append_only: bool,
     pub soft_delete: bool,
-    pub unmasked: bool,
     pub singleton: bool,
     /// The session's, not the account's: a wire table, or a view of a table
     /// the sequencer does not write (`acct_*`, `trusted`). Sent whole with

@@ -106,8 +106,8 @@ fn main() {
         let keys = t.naturals.iter().map(|k| key_def(k, true)).chain(t.uniques.iter().map(|k| key_def(k, false))).collect::<Vec<_>>().join(", ");
         writeln!(
             o,
-            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {:?}, append_only: {}, soft_delete: {}, unmasked: {}, singleton: {}, session: {session}, keys: &[{keys}], cols: &[",
-            t.id, t.name, t.domain, s.domain_bit(&t.domain), t.residency, t.cap, t.append_only, t.soft_delete, t.unmasked, t.singleton
+            "    TableDef {{ id: {}, name: {:?}, domain: {:?}, domain_bit: {}, residency: Residency::{:?}, cap: {:?}, append_only: {}, soft_delete: {}, singleton: {}, session: {session}, keys: &[{keys}], cols: &[",
+            t.id, t.name, t.domain, s.domain_bit(&t.domain), t.residency, t.cap, t.append_only, t.soft_delete, t.singleton
         )
         .unwrap();
         for c in &t.cols {

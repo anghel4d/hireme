@@ -116,7 +116,7 @@ fn a_table_def_names_its_keys_and_their_wheres() {
     let naturals: Vec<_> = places.keys.iter().filter(|k| k.natural).map(|k| (k.cols, &k.cond)).collect();
     assert_eq!(naturals, [(&["iso2"][..], &Some(Cond::Eq("kind", "country"))), (&["geonames_id"][..], &Some(Cond::Eq("kind", "city")))]);
     let sources = table_def(table::SOURCES).unwrap();
-    assert!(sources.soft_delete && !sources.singleton && !sources.unmasked);
+    assert!(sources.soft_delete && !sources.singleton);
     assert!(table_def(table::SETTINGS).unwrap().singleton);
     assert!(table_def(table::EVENTS).unwrap().append_only);
     let session: Vec<_> = schema::TABLES.iter().filter(|t| t.session).map(|t| t.name).collect();
