@@ -250,7 +250,9 @@ function attributes(a: Element, b: Element): void {
     const name = a.attributes[i]?.name
     if (name !== undefined && name !== theirs && !b.hasAttribute(name)) a.removeAttribute(name)
   }
-  for (const { name, value } of Array.from(b.attributes)) {
+  const next = b.attributes
+  for (let i = 0; i < next.length; i++) {
+    const { name, value } = next[i]!
     if (name !== theirs && a.getAttribute(name) !== value) a.setAttribute(name, value)
   }
 }
