@@ -153,15 +153,45 @@ function editor(t: TableDef, c: ColumnDef, r: Row): Html {
   </form>`
 }
 
-function cellOf(t: TableDef, c: ColumnDef, row: Row): Html {
-  const id = Number(row.id)
-  if (v().edit === `${id}:${c.name}`) return html`<td class="editing" data-key="${c.name}">${editor(t, c, row)}</td>`
-  const on = c.metric ? row[`${c.name}_on`] : null
-  const can = editable(c)
-  return html`<td data-key="${c.name}" class="${c.metric ? "metric" : ""}${can ? " can" : ""}"${can ? html` data-act="edit" data-click data-on="keydown" data-id="${id}" data-col="${c.name}" tabindex="0"` : EMPTY}>${display(c, row[c.name])}${
+/** A value with its as-of date (which opens its citations) or, for prose, its sources. */
+function cited(c: ColumnDef, r: Row, x: unknown): Html {
+  const id = Number(r.id)
+  const on = c.metric ? r[`${c.name}_on`] : null
+  return html`${display(c, x)}${
     on ? html`<button type="button" class="on" data-act="cites" data-id="${id}" data-col="${c.name}" title="as of ${String(on)}; citations">${String(on)}</button>`
-      : c.prose && row[c.name] ? html`<button type="button" class="on cite" data-act="cites" data-id="${id}" data-col="${c.name}" title="Sources: where this text came from" aria-label="Sources for ${label(c.name)}">❝</button>` : EMPTY
-  }</td>`
+      : c.prose && x ? html`<button type="button" class="on cite" data-act="cites" data-id="${id}" data-col="${c.name}" title="Sources: where this text came from" aria-label="Sources for ${label(c.name)}">❝</button>` : EMPTY
+  }`
+}
+
+const cellOf = (c: ColumnDef, r: Row): Html => html`<td data-key="${c.name}" class="${c.metric ? "metric" : ""}">${cited(c, r, r[c.name])}</td>`
+
+const blankValue = (x: unknown): boolean => x === null || x === undefined || x === ""
+
+/** One row's whole record, opened by clicking it in the grid: its fields by group, each with its date and sources; Edit is per field. */
+function record(t: TableDef): Html {
+  const id = Number(model.address.q.get("row") ?? 0)
+  const r = id > 0 ? row(t.name, id) : null
+  if (!r) return EMPTY
+  const lead = SEARCH[t.name as Shown]
+  const all = shown(t).filter((c) => c.name !== lead)
+  const field = (c: ColumnDef): Html => {
+    // A text column is read in the reader panel: the record shows its size.
+    const x = c.type === "text" && typeof r[c.name] === "string" ? (r[c.name] as string).length : r[c.name]
+    return html`<div class="field" data-key="${c.name}"><dt>${label(c.name)}</dt><dd>${v().edit === `${id}:${c.name}` ? editor(t, c, r) : html`${cited(c, r, x)}${
+      editable(c) ? html` <button type="button" class="ghost edit" data-act="edit" data-id="${id}" data-col="${c.name}" aria-label="Edit ${label(c.name)}">Edit</button>` : EMPTY}`}</dd></div>`
+  }
+  const empty = all.filter((c) => blankValue(r[c.name]) && v().edit !== `${id}:${c.name}`)
+  const sections = [...groups(t), null].map((g) => [g, all.filter((c) => c.group === g && !empty.includes(c))] as const).filter(([, cs]) => cs.length > 0)
+  // A country lists its cities, largest first, each opening its own record.
+  const cities = t.name === "places" && r.kind === "country"
+    ? read<{ rows: Row[] }>("find", { table: "places", where: { country_id: id }, cols: ["id", "name", "population"], order: ["population", "desc"], limit: 100 }).rows : []
+  return html`<section class="card panel record" data-key="record" aria-labelledby="record-h">
+    <h2 id="record-h">${String(r[lead ?? "id"] ?? `#${id}`)} <span class="muted">${t.name.replace(/s$/, "")} #${id}</span></h2>
+    ${sections.map(([g, cs]) => html`<h3 data-key="g-${g ?? ""}">${g === null ? "Other" : g.charAt(0).toUpperCase() + g.slice(1)}</h3><dl data-key="d-${g ?? ""}">${cs.map(field)}</dl>`)}
+    ${cities.length === 0 ? EMPTY : html`<h3 data-key="cities">Cities</h3><p data-key="city-list">${cities.map((x, i) => html`${i > 0 ? ", " : ""}<button type="button" class="ghost" data-act="open" data-id="${String(x.id)}">${String(x.name)}</button>`)}</p>`}
+    ${empty.length === 0 ? EMPTY : html`<details data-key="empty"><summary>${empty.length} empty field${empty.length === 1 ? "" : "s"}</summary><dl>${empty.map(field)}</dl></details>`}
+    <button type="button" class="ghost" data-act="close-record">Close</button>
+  </section>`
 }
 
 // ------------------------------------------------------------------ panels
@@ -242,7 +272,7 @@ function view(): Html {
     </div>
     ${g.length < 2 && blank.length === 0 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${g.length < 2 ? EMPTY : [...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}
       ${blank.length === 0 ? EMPTY : html`<button type="button" class="ghost" data-act="empty" data-key="empty" title="${blank.map((c) => label(c.name)).join(", ")}">${showEmpty ? `Hide the ${blank.length} empty column${blank.length === 1 ? "" : "s"}` : `${blank.length} empty column${blank.length === 1 ? "" : "s"} hidden · show`}</button>`}</div>`}
-    ${adder(t)}${cites(t)}${reader(t)}
+    ${adder(t)}${record(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
         <thead><tr><th scope="col" class="id">#</th>${cols.map((c, n) => {
@@ -250,7 +280,8 @@ function view(): Html {
           return html`<th scope="col" data-key="${c.name}"${n === 0 && search ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
             ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
         })}</tr></thead>
-        <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(t, c, r))}</tr>`)}</tbody>
+        <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}" class="${String(r.id) === model.address.q.get("row") ? "open" : ""}"
+          data-act="open" data-click data-on="keydown" tabindex="0"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(c, r))}</tr>`)}</tbody>
       </table>
     </div>
     ${got.rows.length === 0 ? html`<p class="empty">No ${t.name} yet. Agents add them through the MCP; you can add one above.</p>` : EMPTY}
@@ -278,9 +309,17 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return query("q", (el as HTMLInputElement).value)
     case "more":
       return patch({ limit: v().limit + PAGE })
+    case "open": {
+      if (ev instanceof KeyboardEvent && ev.key !== "Enter") return
+      // A record has its own address, so Back closes it.
+      const q = new Map(model.address.q).set("row", String(id))
+      return go({ q })
+    }
+    case "close-record":
+      return query("row", "")
     case "edit": {
       const c = t.cols.find((x) => x.name === col)
-      if (!c || (ev instanceof KeyboardEvent && ev.key !== "Enter")) return
+      if (!c) return
       // A text cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
       return patch({ edit: `${id}:${col}`, editRev: Number(row(t.name, id)?.rev ?? 0) })
     }
@@ -335,6 +374,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
 
 let shownTable = ""
 let rescroll = false
+let opened = ""
 
 const world: View = {
   title: "World",
@@ -353,10 +393,18 @@ const world: View = {
     // A new table, sort or search starts at the grid's left edge, not where the last one was scrolled.
     if (rescroll) root.querySelector(".grid-wrap")?.scrollTo({ left: 0 })
     rescroll = false
+    // A record opened from far down the grid is brought into view.
+    const r = model.address.q.get("row") ?? ""
+    if (r !== opened && r !== "") root.querySelector(".record")?.scrollIntoView({ block: "nearest" })
+    opened = r
   },
   key(ev) {
     if (ev.key === "Escape" && (v().edit !== "" || v().cites || v().text)) {
       patch({ edit: "", cites: null, text: null })
+      return true
+    }
+    if (ev.key === "Escape" && model.address.q.has("row")) {
+      query("row", "")
       return true
     }
     return false

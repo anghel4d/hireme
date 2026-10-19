@@ -187,12 +187,16 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 /* A sortable header (a button) and a fixed one (a span) sit on the same line as their cells. */
 .grid.sparse thead th > * { display: inline-block; padding: 4px 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
 /* # and the column a row is known by stay in view while the grid scrolls sideways. */
-.grid.sparse th.id { position: sticky; left: 0; width: 3.5em; min-width: 3.5em; background: var(--panel); z-index: 1; color: var(--muted); font-weight: 400; }
-.grid.sparse:has(th.anchor) tr > :nth-child(2) { position: sticky; left: 3.5em; background: var(--panel); z-index: 1; box-shadow: 1px 0 0 var(--line); }
+.grid.sparse th.id { position: sticky; left: 0; width: 3.5em; min-width: 3.5em; background: var(--row-bg, var(--panel)); z-index: 1; color: var(--muted); font-weight: 400; }
+.grid.sparse:has(th.anchor) tr > :nth-child(2) { position: sticky; left: 3.5em; background: var(--row-bg, var(--panel)); z-index: 1; box-shadow: 1px 0 0 var(--line); }
 .grid.sparse thead th.id, .grid.sparse:has(th.anchor) thead th.anchor { z-index: 3; }
 .grid.sparse td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.grid.sparse td.can { cursor: text; }
-.grid.sparse td.can:hover { background: var(--sunk); }
+.grid.sparse tbody tr { cursor: pointer; }
+.grid.sparse tbody tr:is(:hover, .open) { --row-bg: var(--sunk); background: var(--sunk); }
+.record dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0 0 10px; }
+.record .field { display: contents; }
+.record dt { color: var(--muted); }
+.record dd { margin: 0; }
 .grid.sparse td.metric { text-align: right; }
 .grid.sparse td.editing { white-space: normal; max-width: none; background: var(--sunk); }
 .grid button.on { font-size: 10px; color: var(--muted); padding: 0 3px; margin-left: 4px; vertical-align: super; background: transparent; border: 0; }
