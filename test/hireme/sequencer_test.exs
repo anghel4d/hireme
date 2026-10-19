@@ -842,24 +842,26 @@ defmodule Hireme.SequencerTest do
                )
     end
 
-    test "a key's submission past its op budget is refused rate whole, before anything is judged; its text per minute is bounded too",
+    test "a key past its circuit breaker is refused rate whole, before anything is judged; a bulk contract's writes are outside the breaker, up to its count",
          %{account: a, session: s} do
       key = mint(s, "flood")
-      {:ok, _} = Sequencer.subscribe(a.id, sub(980, Grants.key(key), key.id), 0)
-      Sequencer.submit(a.id, for(i <- 1..601, do: gym("f#{i}")))
-      assert_receive {:sequencer, :verdicts, _, [], nacks}
-      assert length(nacks) == 601 and Enum.all?(nacks, &(Schema.refusal_name(&1.code) == :rate))
+      {agent, _} = key_session(a.id, key, 980)
+      {bulk, %{"bulk" => %{"writes" => 3}}} = key_session(a.id, key, 981, %{"bulk" => 3})
+      {_, breaker} = Hireme.Security.limits()[:agent_write]
+
+      Enum.reduce_while(1..breaker, nil, fn _, _ ->
+        if Hireme.Security.hit(:agent_write, key.id, 1) == :ok,
+          do: {:cont, nil},
+          else: {:halt, nil}
+      end)
+
+      {[], nacks} = key_session_ops(agent, [gym("f1"), gym("f2")])
+      assert Enum.all?(nacks, &(&1.refusal == :rate))
       assert count(GymRep) == 0
 
-      {bulk, _} = key_session(a.id, mint(s, "bulk"), 999)
-      {_, budget} = Hireme.Security.limits()[:agent_write_bytes]
-      mib = String.duplicate("x", 1_048_000)
-
-      ops =
-        for i <- 1..(div(budget, 1_048_000) + 1),
-            do: op(:put, :net_entries, %{kind: :draft, body: mib, title: "#{i}"})
-
-      {[], nacks} = key_session_ops(bulk, ops)
+      {acks, []} = key_session_ops(bulk, [gym("b1"), gym("b2"), gym("b3")])
+      assert length(acks) == 3 and count(GymRep) == 3
+      {[], nacks} = key_session_ops(bulk, gym("b4"))
       assert Enum.all?(nacks, &(&1.refusal == :rate))
     end
 

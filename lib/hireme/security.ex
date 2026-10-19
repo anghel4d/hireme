@@ -97,8 +97,9 @@ defmodule Hireme.Security do
   ## Named limits
 
   # The window in ms and how many fit in it. ASVS 6.3.1, 6.6.3: brute force
-  # on any factor or credential stops here. `agent_write` is the sequencer's
-  # per-key op budget (docs/rebuild.md, "The sequencer's checks", 6).
+  # on any factor or credential stops here. `agent_write` is a circuit
+  # breaker on a key's writes for clear abuse, not a pace: work goes as fast
+  # as the node does, and a bulk contract (`agent_bulk`) is outside it.
   @limits %{
     link_address: {:timer.minutes(10), 5},
     link_peer: {:timer.minutes(10), 20},
@@ -149,9 +150,9 @@ defmodule Hireme.Security do
     # Security notices queued per account, every address together; past
     # it they coalesce into one digest per address.
     notices: {:timer.minutes(10), 30},
-    agent_write: {:timer.minutes(1), 600},
-    # The text bytes a key's ops may write in a minute, beside their count.
-    agent_write_bytes: {:timer.minutes(1), 64 * 1024 * 1024},
+    agent_write: {:timer.minutes(1), 100_000},
+    # The writes a key's bulk contracts (lease `bulk`) may reserve in an hour.
+    agent_bulk: {:timer.hours(1), 5_000_000},
     # A key's lease requests (lease.*).
     agent_read: {:timer.minutes(1), 3000},
     # A key's successful HELLOs; each is a trail row.

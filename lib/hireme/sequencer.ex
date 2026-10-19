@@ -23,7 +23,8 @@ defmodule Hireme.Sequencer do
      never older than what is stored; prose needs `expect_rev` and a source;
      culture and ratings need a trusted host.
   6. **limits**: `too_large` (1 MiB of text per op), `rate` (a key's
-     `:agent_write` budget), `cap` (rows per account per table).
+     `:agent_write` circuit breaker, for clear abuse; a write inside a bulk
+     contract skips it), `cap` (rows per account per table).
 
   Then the effects are written (`rev + 1` on every row written, one
   citation per metric or prose cell), the ledger records the verdict, and
@@ -172,6 +173,9 @@ defmodule Hireme.Sequencer do
 
   # ------------------------------------------------------------ server
 
+  # How long a bulk contract (lease `bulk`) holds once granted.
+  @bulk_ms :timer.minutes(10)
+
   @impl GenServer
   def init(account_id) do
     Repo.put_account(account_id)
@@ -197,7 +201,9 @@ defmodule Hireme.Sequencer do
       rows: nil,
       blocks: nil,
       backfill_after: 0,
-      text_bytes: text_bytes
+      text_bytes: text_bytes,
+      # Bulk contracts by session pid: writes left and when it lapses (monotonic ms).
+      bulk: %{}
     }
 
     # A revoked or changed key, a revoked browser session or a suspension is
@@ -255,29 +261,51 @@ defmodule Hireme.Sequencer do
 
   @impl GenServer
   def handle_cast({:ops, pid, ops}, state) do
-    submissions = [{pid, ops}] |> take_more(length(ops)) |> Enum.filter(&within_rate(&1, state))
+    {submissions, state} =
+      [{pid, ops}] |> take_more(length(ops)) |> Enum.flat_map_reduce(state, &within_rate/2)
+
     {state, _} = run(submissions, state)
     {:noreply, state, @idle_ms}
   end
 
-  # A key's budget per minute: ops (:agent_write) and their text bytes
-  # (:agent_write_bytes); either one spent refuses the whole submission.
-  defp spend(key_id, n, bytes) do
-    with :ok <- Security.hit(:agent_write, key_id, max(n, 1)) do
-      if bytes > 0, do: Security.hit(:agent_write_bytes, key_id, bytes), else: :ok
+  # Check 6's `rate` is taken as ops arrive, for every op a key sends,
+  # refused ones too: a flood of cheap refusals still trips the breaker. A
+  # submission its session's bulk contract covers draws on the contract.
+  defp within_rate({pid, ops} = sub, state) do
+    n = length(ops)
+
+    case state.subs[pid] do
+      %{key_id: key_id} when key_id != nil ->
+        case contract(state, pid, n) do
+          {:ok, state} ->
+            {[sub], state}
+
+          :none ->
+            case Security.hit(:agent_write, key_id, max(n, 1)) do
+              :ok ->
+                {[sub], state}
+
+              {:error, retry_ms} ->
+                nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
+                send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
+                {[], state}
+            end
+        end
+
+      _ ->
+        {[sub], state}
     end
   end
 
-  # Check 6's `rate` is taken as ops arrive, for every op a key sends,
-  # refused ones too: a flood of cheap refusals still spends the budget.
-  defp within_rate({pid, ops}, state) do
-    with %{key_id: key_id} when key_id != nil <- state.subs[pid],
-         {:error, retry_ms} <- spend(key_id, length(ops), Enum.sum_by(ops, &text_of/1)) do
-      nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
-      send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
-      false
-    else
-      _ -> true
+  defp contract(state, pid, n) do
+    case state.bulk do
+      %{^pid => {left, until}} when left >= n ->
+        if System.monotonic_time(:millisecond) < until,
+          do: {:ok, put_in(state.bulk[pid], {left - n, until})},
+          else: :none
+
+      _ ->
+        :none
     end
   end
 
@@ -392,7 +420,13 @@ defmodule Hireme.Sequencer do
     after_ =
       Enum.reduce(gone, state, fn {pid, sub}, st ->
         if sub.ref, do: Process.demonitor(sub.ref, [:flush])
-        %{st | subs: Map.delete(st.subs, pid), lease: Lease.leave(st.lease, sub.id)}
+
+        %{
+          st
+          | subs: Map.delete(st.subs, pid),
+            lease: Lease.leave(st.lease, sub.id),
+            bulk: Map.delete(st.bulk, pid)
+        }
       end)
 
     if gone != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
@@ -1931,6 +1965,27 @@ defmodule Hireme.Sequencer do
 
       :error ->
         {{:error, :not_found}, state}
+    end
+  end
+
+  defp lease_request({:claim, sid, %{"bulk" => n} = params}, pid, state) do
+    key_id = state.subs[pid][:key_id]
+
+    with :ok <- if(key_id, do: Security.hit(:agent_bulk, key_id, n), else: :ok),
+         {{:ok, reply}, state} <-
+           lease_request({:claim, sid, Map.delete(params, "bulk")}, pid, state) do
+      until = System.monotonic_time(:millisecond) + @bulk_ms
+
+      lapses =
+        DateTime.add(DateTime.utc_now(), @bulk_ms, :millisecond) |> DateTime.truncate(:second)
+
+      state = put_in(state.bulk[pid], {n, until})
+
+      {{:ok, Map.put(reply, "bulk", %{"writes" => n, "until" => DateTime.to_iso8601(lapses)})},
+       state}
+    else
+      {:error, retry_ms} -> {{:refused, :rate, %{retry_ms: retry_ms}}, state}
+      refused -> refused
     end
   end
 

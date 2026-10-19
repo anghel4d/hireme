@@ -432,8 +432,9 @@ runs SQL, not domain code.
 
 ### The sequencer's checks
 
-Per submission, before any op: the `rate` limits (`:agent_write` ops and
-`:agent_write_bytes` text per key). Then, per op and inside its savepoint,
+Per submission, before any op: a key's `:agent_write` circuit breaker (clear
+abuse only, not a pace), which a lease's bulk contract stands outside of up
+to its count. Then, per op and inside its savepoint,
 in this order:
 
 1. **grant** — write mask covers the domain (`scope`); drop needs
@@ -692,7 +693,7 @@ reader for the v1 database.
 
 - BOOT at 10k applications with keywords stored: if it exceeds 2 MiB, the next lever is a projection, not a
   compat path.
-- The `:agent_write` cap (600/min) and the 64-op batch, against the bench;
+- The `:agent_write` breaker (100,000/min) and the 64-op batch, against the bench;
   the 15 s/45 s liveness, against a silent session in the final
   certification.
 - Whether the gate earns its keep against `wire.ws`; the bench answers,

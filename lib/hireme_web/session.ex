@@ -450,11 +450,18 @@ defmodule HiremeWeb.Session do
         {"stage", st} ->
           is_binary(st) and Codec.enum_code("stage", st) != nil
 
+        {"bulk", n} ->
+          is_integer(n) and n in 1..1_000_000
+
         _ ->
           false
       end)
 
-    if ok, do: :ok, else: {:refused, :type, %{expected: "{count, stage?} | {ids} | {}"}}
+    if ok,
+      do: :ok,
+      else:
+        {:refused, :type,
+         %{expected: "{count, stage?} | {ids} | {}, each with bulk? (1..1000000)"}}
   end
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
