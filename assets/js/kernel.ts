@@ -778,6 +778,10 @@ const lookups = new Map<string, { version: number; at: Map<string, number> }>()
 export function lookup(name: TableName, col: string, key: string): number {
   const k2 = `${name}.${col}`
   let l = lookups.get(k2)
+  // A write seldom moves the key: an id found before is checked alone, and the map rebuilt only
+  // when it no longer answers (a unique key, like an application's no).
+  const was = l?.at.get(key)
+  if (l && l.version !== version && was !== undefined && String(value(name, was, col)) === key) return was
   if (!l || l.version !== version) {
     const at = new Map<string, number>()
     for (const id of ids(name)) {
