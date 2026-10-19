@@ -32,7 +32,7 @@ export interface View {
 
 /**
  * The desk is in the entry; every other lens is its own chunk, fetched the first time it is wanted and
- * all of them in the page's idle time from the start, so a first visit finds it loaded.
+ * all of them in idle time once the first rows are drawn (not while the BOOT is landing), so a first visit finds it loaded.
  */
 const VIEWS: Partial<Record<Lens, View>> = { desk }
 const LAZY: Partial<Record<Lens, () => Promise<{ default: View }>>> = {
@@ -168,6 +168,10 @@ function render(): void {
     morph(root, next)
     drawn = next.text
   }
+  if (!preloaded && rowsIn()) {
+    preloaded = true
+    preload()
+  }
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
   if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
@@ -180,6 +184,7 @@ function render(): void {
 }
 
 const focusedOnce = new WeakSet<Element>()
+let preloaded = false
 let drawn = ""
 
 onRender(render)
@@ -312,6 +317,3 @@ void (async () => {
 
 schedule()
 setTimeout(schedule, Math.max(0, HOLD_MS - performance.now()))
-// The other lenses load in the page's idle time from the start (waiting on the socket, the BOOT), so
-// even a click the moment the desk appears finds its lens loaded, and the cold path is not slowed.
-preload()
