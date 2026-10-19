@@ -126,12 +126,8 @@ const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" c
       <p><a class="button" href="${format(model.address)}">Reload</a> If it keeps failing, sign out and sign in again.</p></div>`
   : html`<p class="empty">${VIEWS[lens] && waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
 
-// The first time a lens parks, its own markup is passed (an empty one would morph it away); after that it is left alone.
-const parkedMain = (l: Lens): Html => {
-  const view = VIEWS[l]
-  const first = !document.querySelector(`main.lens-${l}.parked`) && view !== undefined
-  return html`<main class="lens lens-${l} parked" data-key="lens-${l}" data-morph="own" inert aria-hidden="true">${first ? lensView(l, view) : EMPTY}</main>`
-}
+// A parking lens keeps the children it has (morph leaves an owned subtree's children alone), so it is never redrawn to park.
+const parkedMain = (l: Lens): Html => html`<main class="lens lens-${l} parked" data-key="lens-${l}" data-morph="own" inert aria-hidden="true"></main>`
 
 function shell(): Html {
   const lens = model.address.lens
