@@ -180,7 +180,8 @@ The same holds over WebTransport through the gate and over the `/wire`
 WebSocket. Frames are length-prefixed and bounded: one frame is at most
 16 MiB (larger closes the carrier), one OPS frame at most 256 ops, and one
 op at most 1 MiB of text (`too_large`); a client fills frames by bytes as
-well as by count.
+well as by count. An MCP request body is at most 64 MiB (inflated, when
+gzip-encoded); a burst inside it is not bound by the frame's op count.
 
 ## Writes
 
@@ -188,9 +189,12 @@ Every write is a `put`, `drop` or `command`, judged in order by the
 account's sequencer: grant, lease, shape, domain, provenance, limits. A
 refusal rolls back exactly its own op. Cells are typed on the wire and
 never cast from strings; a day counts from 0000-01-01 (0 to 3,652,424,
-9999-12-31) and one outside that range is refused `type`. Each key may write 600 ops per wall-clock minute
-(`agent_write`; a fixed window, so a burst straddling a minute boundary
-can land up to 1,200 in a moment). The ledger keeps each writer's ACKs for
+9999-12-31) and one outside that range is refused `type`. Writes are not paced: a key
+past 100,000 ops in a wall-clock minute trips a circuit breaker
+(`agent_write`), a stop for clear abuse. A lease's bulk contract (up to
+1,000,000 writes for 10 minutes, from 5,000,000 a key may reserve in an
+hour) stands outside the breaker, and a put under it is one atomic burst:
+a refusal of any op rolls the whole of it back. The ledger keeps each writer's ACKs for
 24 hours: an ACKed op id resent, whatever it now carries, answers its first
 ACK and writes nothing; a refused op id is not kept, so resent it is judged
 afresh. Every agent op batch leaves one row on the trail naming its key,
@@ -211,10 +215,29 @@ operator's trusted list, which only the operator edits, from a browser,
 stepped up. A JSON value's integers must fit in 64 bits. A refusal never
 carries a stored value from a table the key cannot read.
 
+## MCP
+
+Agents reach the node only at `/mcp`, with an API key as the bearer token.
+The key is checked before the request's body is read: a malformed key is
+refused by its shape and checksum with no lookup, a well-formed one by an
+indexed lookup and a constant-time SHA-256 compare. A key carries 256
+random bits, so a guess succeeds with probability 2^-256.
+
+Every request without a valid key (none, malformed or wrong), and every
+failed key at a wire HELLO, is a strike against its address (an IPv6
+address counted by its /64). Past **five strikes in an hour** the address
+is **banned for good**: every request from it, on any path and either
+carrier, is refused with an empty 403 before anything of it is read,
+logged or routed, at the cost of one ETS lookup. Bans are kept beside the
+database, so they outlive a restart; `Hireme.Security.unban/1` lifts one.
+Loopback is never banned (it is the host's own proxy). The proxy believes
+`CF-Connecting-IP` only from Cloudflare's networks, so an address is the
+visitor's, never Cloudflare's edge.
+
 ## Text an agent reads
 
 Raw text (a listing, a message body, any prose) is returned by
-`hireme-mcp` marked untrusted. It is data, not instructions; an agent's
+MCP marked untrusted. It is data, not instructions; an agent's
 masks and lease bound what any instruction hidden in it could cause.
 
 The browser kernel's text-keyed hash maps (company names, ATS tenants, the board's distinct texts) are seeded per kernel instance from crypto.getRandomValues (the wasm module's one import, host.random_u32; natively from the OS RNG), so agent-written text cannot craft colliding keys to slow a derive.
@@ -340,6 +363,8 @@ writer for long.
 | Refused key HELLOs recorded | 600 a minute in all |
 | Live keys per account | 100 |
 | Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
+| MCP request body | 64 MiB, inflated |
+| Strikes before a ban | 5 per address in an hour (a request without a valid key, a failed key HELLO); the ban is for good |
 | Source URL | 2,048 bytes, refused before any parsing (as a cited put's source and as a `sources` row); a port, when one is written, is ASCII digits up to 65535 (leading zeros allowed), else the URL names no host and is refused |
 
 ## Limits

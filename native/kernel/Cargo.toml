@@ -3,7 +3,7 @@ name = "kernel"
 version = "0.2.0"
 edition = "2024"
 publish = false
-description = "hireme's one implementation of every desk rule: rows, judging and derivations, run as wasm, natively in hireme-mcp and as a NIF"
+description = "hireme's one implementation of every desk rule: rows, judging and derivations, run as wasm and as a NIF"
 
 [lib]
 # The wasm build adds `--crate-type cdylib`; the NIF and the MCP link the rlib.
@@ -20,7 +20,7 @@ wire = { path = "../wire" }
 # Float math from one pure-Rust source on every target, so a decay or a
 # fit computed in the browser is bit-identical to the sequencer's.
 libm = "0.2.16"
-# preserve_order on every build: hireme-mcp turns it on, and feature
+# preserve_order on every build: the MCP surface turns it on, and feature
 # unification would otherwise make a refusal's key order depend on which
 # crates a build links.
 serde_json = { version = "1.0.154", default-features = false, features = ["alloc", "preserve_order"] }

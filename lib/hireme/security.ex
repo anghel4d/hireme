@@ -21,6 +21,8 @@ defmodule Hireme.Security do
   secrets that must be read back (a TOTP seed, a ceremony in flight).
   """
 
+  alias Hireme.Security.Bans
+
   @base62 "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
   ## Sessions and ceremonies
@@ -151,6 +153,9 @@ defmodule Hireme.Security do
     # it they coalesce into one digest per address.
     notices: {:timer.minutes(10), 30},
     agent_write: {:timer.minutes(1), 100_000},
+    # Attempts at a key (none, malformed or wrong) from one peer; past them
+    # the peer is banned for good (`strike/1`).
+    auth_strike_peer: {:timer.hours(1), 5},
     # The writes a key's bulk contracts (lease `bulk`) may reserve in an hour.
     agent_bulk: {:timer.hours(1), 5_000_000},
     # A key's lease requests (lease.*).
@@ -222,6 +227,53 @@ defmodule Hireme.Security do
       do: "#{name}:#{peer(key)}",
       else: "#{name}:#{key}"
   end
+
+  ## Bans
+
+  @doc """
+  Whether `ip`'s peer is banned. A banned peer's requests are refused
+  before anything of them is read, on every door (the endpoint, the wire
+  session over either carrier): one ETS lookup.
+  """
+  @spec banned?(term()) :: boolean()
+  def banned?(ip), do: Bans.banned?(peer(ip))
+
+  @doc """
+  One attempt at a key from `ip` that failed: no key, a malformed one, or
+  a wrong one. Past `auth_strike_peer` in its window the peer is banned
+  for good. A key is 256 random bits, so a guess succeeds with
+  probability 2^-256, and a peer gets five before it is shut out.
+  """
+  @spec strike(term()) :: :ok | :banned
+  def strike(ip) do
+    # Loopback is the host's own proxy (or a request it forwarded without
+    # naming the client): banning it would shut out every visitor.
+    if loopback?(ip), do: :ok, else: strike_peer(ip)
+  end
+
+  defp strike_peer(ip) do
+    case hit(:auth_strike_peer, ip, 1) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        Bans.ban(peer(ip))
+        :banned
+    end
+  end
+
+  defp loopback?(ip) do
+    case :inet.parse_strict_address(String.to_charlist(to_string(ip))) do
+      {:ok, {127, _, _, _}} -> true
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
+      {:ok, {0, 0, 0, 0, 0, 0xFFFF, hi, _}} -> Bitwise.bsr(hi, 8) == 127
+      _ -> false
+    end
+  end
+
+  @doc "Lifts a ban (the operator's, from `bin/hireme rpc`)."
+  @spec unban(term()) :: :ok
+  def unban(ip), do: Bans.unban(peer(ip))
 
   @doc "The peer a limit counts: an IPv4 address as is, an IPv6 one by its /64."
   @spec peer(term()) :: String.t()
@@ -335,4 +387,70 @@ defmodule Hireme.Security do
   end
 
   defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)
+end
+
+defmodule Hireme.Security.Bans do
+  @moduledoc false
+  # The banned peers (`Hireme.Security.banned?/1`): an ETS set any process
+  # reads, written by this process, which keeps a copy beside the database
+  # so a ban outlives a restart.
+
+  use GenServer
+  require Logger
+
+  @table __MODULE__
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  def banned?(peer), do: :ets.member(@table, peer)
+
+  def ban(peer), do: GenServer.call(__MODULE__, {:ban, peer})
+  def unban(peer), do: GenServer.call(__MODULE__, {:unban, peer})
+
+  @impl GenServer
+  def init(:ok) do
+    :ets.new(@table, [:set, :named_table, :protected, read_concurrency: true])
+
+    with path when path != nil <- file(),
+         {:ok, bin} <- File.read(path),
+         peers when is_list(peers) <- :erlang.binary_to_term(bin, [:safe]) do
+      :ets.insert(@table, for(p <- peers, is_binary(p), do: {p}))
+    end
+
+    {:ok, nil}
+  end
+
+  @impl GenServer
+  def handle_call({:ban, peer}, _from, state) do
+    if :ets.insert_new(@table, {peer}), do: Logger.warning("security: banned #{peer}")
+    {:reply, save(), state}
+  end
+
+  def handle_call({:unban, peer}, _from, state) do
+    :ets.delete(@table, peer)
+    {:reply, save(), state}
+  end
+
+  # Written whole and renamed into place, so a crash never leaves half a list.
+  defp save do
+    with path when path != nil <- file() do
+      tmp = path <> ".tmp"
+      File.write!(tmp, :erlang.term_to_binary(for {p} <- :ets.tab2list(@table), do: p))
+      File.chmod!(tmp, 0o600)
+      File.rename!(tmp, path)
+    end
+
+    :ok
+  end
+
+  # Beside the database, unless configured off (tests).
+  defp file do
+    with true <- Application.get_env(:hireme, __MODULE__, [])[:persist] != false,
+         db when is_binary(db) and db != ":memory:" <-
+           Application.get_env(:hireme, Hireme.Repo, [])[:database] do
+      Path.join(Path.dirname(db), "bans")
+    else
+      _ -> nil
+    end
+  end
 end

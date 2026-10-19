@@ -153,6 +153,31 @@ defmodule Hireme.Sequencer do
   end
 
   @doc """
+  Runs `fun` on the account's kernel and lease inside the sequencer, so a
+  read sees every write acknowledged before it: `{:ok, result}`, or
+  `{:error, :unavailable}` when the account cannot run.
+  """
+  def read(account_id, fun) when is_function(fun, 2),
+    do: with_pid(account_id, &GenServer.call(&1, {:read, fun}, 30_000))
+
+  @doc """
+  Submits a burst of ops for the calling session that lands whole or not at
+  all, drawn on its bulk contract (lease `bulk`); verdicts arrive as for
+  `submit/2`.
+  """
+  def submit_atomic(account_id, ops) do
+    case whereis(account_id) do
+      nil ->
+        send(self(), {:sequencer, :verdicts, 0, [], Enum.map(ops, &nack(&1, :internal, %{}))})
+
+      pid ->
+        GenServer.cast(pid, {:atomic, self(), ops})
+    end
+
+    :ok
+  end
+
+  @doc """
   Runs ops for a caller that is not a wire session (the importer), as
   `actor` (`%{label, grants, key_id}`), and answers their verdicts:
   `{:ok, rev, acks, nacks}`. Subscribers get the PATCH as usual.
@@ -229,6 +254,9 @@ defmodule Hireme.Sequencer do
       else: subscribe_session(pid, session, snapshot_rev, state)
   end
 
+  def handle_call({:read, fun}, _from, state),
+    do: {:reply, {:ok, fun.(state.kernel, state.lease)}, state, @idle_ms}
+
   def handle_call(:boot, _from, state) do
     {state, body} = snapshot(Grants.operator(), state, Store.now())
 
@@ -266,6 +294,23 @@ defmodule Hireme.Sequencer do
 
     {state, _} = run(submissions, state)
     {:noreply, state, @idle_ms}
+  end
+
+  # A bulk contract's burst: one transaction, every op of it or none. Only
+  # a contract that covers the whole of it takes one.
+  def handle_cast({:atomic, pid, ops}, state) do
+    case contract(state, pid, length(ops)) do
+      {:ok, state} ->
+        {:noreply, atomic(pid, ops, state), @idle_ms}
+
+      :none ->
+        data = %{
+          reason: "an atomic burst needs a bulk contract that covers it: lease {\"bulk\": n}"
+        }
+
+        deliver(for(op <- ops, do: {pid, {:nack, nack(op, :lease_missing, data)}}), state.rev)
+        {:noreply, state, @idle_ms}
+    end
   end
 
   # Check 6's `rate` is taken as ops arrive, for every op a key sends,
@@ -610,6 +655,73 @@ defmodule Hireme.Sequencer do
     end
   end
 
+  # An atomic burst: its ops are judged in order in one transaction, so a
+  # later op sees an earlier one's row; one refusal rolls the whole of it
+  # back, the refused keep their reasons and the rest are refused `burst`.
+  defp atomic(pid, ops, state) do
+    now = Store.now()
+    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0, text: 0}
+
+    result =
+      try do
+        Store.transaction(fn ->
+          {state, turn, verdicts} =
+            Enum.reduce(ops, {state, turn, []}, fn op, {state, turn, vs} ->
+              {state, turn, verdict} = one(pid, op, state, turn)
+              {state, turn, [{pid, verdict} | vs]}
+            end)
+
+          verdicts = Enum.reverse(verdicts)
+
+          if Enum.any?(verdicts, &match?({_, {:nack, _}}, &1)),
+            do: Repo.rollback({:refused, verdicts})
+
+          rev = state.rev + turn.acked
+
+          if turn.acked > 0 or turn.text != 0 do
+            from(a in Hireme.Rows.Account, where: a.id == ^state.account_id)
+            |> Repo.update_all([set: [desk_rev: rev], inc: [text_bytes: turn.text]],
+              skip_account: true
+            )
+          end
+
+          {%{state | rev: rev, text_bytes: state.text_bytes + turn.text}, turn, verdicts}
+        end)
+      rescue
+        e ->
+          Logger.error(
+            "sequencer #{state.account_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
+          )
+
+          {:error, :raised}
+      end
+
+    case result do
+      {:ok, {state, turn, verdicts}} ->
+        state = if turn.acked > 0, do: %{state | rows: nil, blocks: nil}, else: state
+        state = state |> forget_gone(turn.deltas) |> then(&publish(turn.deltas, &1))
+        deliver(verdicts, state.rev)
+        broadcast_leases(state, [])
+
+      {:error, {:refused, verdicts}} ->
+        refused =
+          for {{p, v}, op} <- Enum.zip(verdicts, ops) do
+            case v do
+              {:nack, _} -> {p, v}
+              {:ack, _} -> {p, {:nack, nack(op, :burst, %{})}}
+            end
+          end
+
+        deliver(refused, state.rev)
+        # The kernel saw the rolled-back rows as they were judged: it is read again.
+        rebuild(state)
+
+      {:error, _} ->
+        deliver(for(op <- ops, do: {pid, {:nack, nack(op, :internal, %{})}}), state.rev)
+        rebuild(state)
+    end
+  end
+
   # Deleted applications leave the claims that held them.
   # (Released ones may have waited for the backfill; see backfill/1.)
   defp forget_gone(state, deltas) do
@@ -749,9 +861,10 @@ defmodule Hireme.Sequencer do
     source_missing: "this cell needs a source",
     source_trust: "this source's host is not trusted for this cell",
     too_large: "the op is over its size bound",
-    rate: "over the rate limit; retry later",
+    rate: "the key tripped its circuit breaker; retry later",
     cap: "a table or the account is at its cap",
-    internal: "the server failed on this op; it wrote nothing"
+    internal: "the server failed on this op; it wrote nothing",
+    burst: "another op of this atomic burst was refused, so none of it was written"
   }
 
   @doc """

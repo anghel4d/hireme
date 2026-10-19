@@ -1,22 +1,15 @@
 [package]
-name = "hireme-mcp"
-version = "2.0.0"
+name = "mcp"
+version = "2.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "hireme's MCP server: one wire session under an API key, the resident rows in the native kernel, tools and resources from the catalog the key can see"
+description = "hireme's MCP surface, served by the node over HTTP through the NIF: tools and resources from the catalog a key can see, diagnostics, writes encoded as ops"
 
-[[bin]]
-name = "hireme-mcp"
-path = "src/main.rs"
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 kernel = { path = "../kernel" }
 schema = { path = "../schema" }
 wire = { path = "../wire" }
-futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-# TLS needs a crypto provider chosen once; ring builds without cmake. 0.23.46 is the newest
-# stable rustls (0.24 is a pre-release), and the one tokio-tungstenite 0.30 is built against.
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }

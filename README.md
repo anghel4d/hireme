@@ -1,9 +1,9 @@
 # hireme
 
 A personal job-campaign desk for one operator and the AI agents they lease
-to. The operator works in one web page; an agent works through
-`hireme-mcp` with an API key whose read and write masks bound everything it
-sees and does. Both write the same rows, judged by the same rules.
+to. The operator works in one web page; an agent works through MCP at the
+node's `/mcp`, with an API key whose read and write masks bound everything
+it sees and does. Both write the same rows, judged by the same rules.
 
 FIRE HOLD stands: nothing here submits an application. Opening fire is a
 human act.
@@ -23,9 +23,9 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   checked-in output is stale.
 - **One kernel, three places.** `native/kernel` holds every desk rule
   (pipeline, heat, score, keywords, CV, board, atlas, lanes) and judges every
-  domain write. The browser runs it as WebAssembly, `hireme-mcp` links it
-  natively, and the server's sequencer calls it as a NIF, so a client's
-  prediction and the server's verdict are one function.
+  domain write. The browser runs it as WebAssembly and the server's
+  sequencer calls it as a NIF (which also answers MCP's reads), so a
+  client's prediction and the server's verdict are one function.
 - **One write path.** Every write is a `put`, `drop` or `command` op in an
   `OPS` frame, judged in six checks (grant, lease, shape, domain,
   provenance, limits) by one sequencer per account, and answered with
@@ -105,11 +105,12 @@ A pack is JSON or markdown lowered to keyed puts through the sequencer
 (`lib/hireme/import.ex` documents the format), so it meets every check a
 wire write meets.
 
-## Agents: hireme-mcp
+## Agents: MCP over HTTP
 
-`hireme-mcp` is an MCP server on stdio. It holds one wire session under an
-API key, keeps the key's resident rows in the native kernel, and builds its
-tools from the catalog the key can see.
+The node serves MCP at `https://your-node.example/mcp` (the Streamable HTTP
+transport). There is nothing to install: an agent points at the URL with an
+API key as its bearer token, and each MCP session is a wire session the node
+holds for it.
 
 1. In the account lens, **Mint a key**. Its **Access** choice is *Read
    only* (the default: it reads every domain and writes none, so an agent
@@ -121,24 +122,17 @@ tools from the catalog the key can see.
    lens asks for one (passkey, authenticator code or a recovery code) when
    it is due. The form states what the key will read, write and delete
    before you mint it. The secret is shown once; save it to a file.
-2. Build it (`nix build .#hireme-mcp`, or `cargo build -p hireme-mcp
-   --release` in `native/`) and point your MCP client at the binary:
+2. Add the server to your MCP client. For Claude Code:
 
-```json
-{
-  "mcpServers": {
-    "hireme": {
-      "command": "hireme-mcp",
-      "env": { "HIREME_URL": "https://your-node.example", "HIREME_KEY_FILE": "/path/to/key" }
-    }
-  }
-}
+```bash
+claude mcp add --transport http hireme https://your-node.example/mcp \
+  --header "Authorization: Bearer $(cat /path/to/key)"
 ```
 
-The key is read from `HIREME_KEY` or `HIREME_KEY_FILE`, never from the
-command line. `HIREME_URL` is required; plain `http://` is accepted only for
-`localhost`, since the key would otherwise cross the network unencrypted.
-`HIREME_LABEL` sets the name a lease shows for this agent.
+The key is the only credential, checked before a request's body is read. A
+request without a valid one is a strike against its address; past five in
+an hour the address is banned for good, and every request from it is
+refused before it is read (`Hireme.Security.unban/1` lifts one).
 
 The server speaks both eras of MCP. A current client (MCP 2026-07-28, as
 Claude Code is) sends the version in every request's `_meta` and never
@@ -154,7 +148,10 @@ step; `{"explain": "<code>"}` explains any refusal), `schema`, `find`, `get`,
 `heat_override`, `open_generation`; `open_fire` is never offered). A tool
 the key's masks forbid is not listed. Writes need a lease: `lease {}` opens
 the channel, `lease {"count": 16}` also claims the 16 best-ranked unclaimed
-applications.
+applications, and `lease {"bulk": n}` grants a contract for n writes: a
+`put` under it may carry the whole burst in one call, and lands atomically,
+all of it or none. Writes are not paced; a key past 100,000 ops a minute is
+stopped as abuse.
 
 Stopping an agent, from the account lens: revoking its lease pauses that
 key until you resume it (it still reads, but writes nothing, and a new
@@ -183,8 +180,8 @@ nix flake check                           # all of it, plus the dev VM
 ```
 schema/hireme.schema   the declaration
 lib/hireme/            the node: sequencer, kernel NIF, grants, lease, world, provenance, import, accounts, keys, mfa, mail, release
-lib/hireme_web/        endpoint, router, sign-in, factor page, the wire session, account RPC, codec
-native/                one Cargo workspace: schema, wire, kernel, nif, gate, mcp
+lib/hireme_web/        endpoint, router, sign-in, factor page, the wire session, MCP over HTTP, account RPC, codec
+native/                one Cargo workspace: schema, wire, kernel, nif, gate, mcp (the MCP surface the NIF serves)
 assets/js/             early (inline), app, wire, kernel bindings, state, morph, lenses/, auth/, gen/schema.ts
 priv/db/               the baseline and additive migrations
 nix/                   the package and the NixOS module

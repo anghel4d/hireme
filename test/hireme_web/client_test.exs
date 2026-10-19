@@ -1,11 +1,12 @@
 defmodule HiremeWeb.ClientTest do
   # The client's pure modules under Bun's test runner (assets/test/*.test.mjs).
-  # A gate (HIREME_MCP set) must have bun; elsewhere a missing bun only skips.
+  # A gate (HIREME_GATE_STRICT set) must have bun; elsewhere a missing bun only skips.
   use ExUnit.Case, async: true
 
   @bun System.find_executable("bun")
-  if @bun == nil and System.get_env("HIREME_MCP") in [nil, ""],
-    do: @moduletag(skip: "bun is not on PATH (a gate, with HIREME_MCP set, fails instead)")
+  if @bun == nil and System.get_env("HIREME_GATE_STRICT") in [nil, ""],
+    do:
+      @moduletag(skip: "bun is not on PATH (a gate, with HIREME_GATE_STRICT set, fails instead)")
 
   test "the client's test files pass" do
     bun = @bun || flunk("bun is not on PATH: the gate cannot run assets/test")

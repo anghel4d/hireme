@@ -1,8 +1,8 @@
 # Rebuild
 
 This is the design hireme is built to. One Rust kernel holds every rule
-and runs in the browser (wasm), in `hireme-mcp` (native) and in the
-sequencer (NIF), so a prediction and its verdict are one function. One
+and runs in the browser (wasm) and in the sequencer (NIF, which also
+answers MCP), so a prediction and its verdict are one function. One
 declaration, `schema/hireme.schema`, emits the database, the Ecto rows,
 the wire catalog, the Rust constants and the TypeScript types. Tables the
 kernel derives from are resident on the wire; the world (places,
@@ -78,7 +78,6 @@ implementation: the Rust kernel judges every domain write on the server
 too, linked into the BEAM as a NIF.
 
 - the browser runs `kernel` as WebAssembly;
-- `hireme-mcp` links `kernel` natively;
 - the sequencer calls `kernel` through `native/nif`.
 
 Same rows, same function, same verdict. The oracle and the parity suite
@@ -189,7 +188,7 @@ Two hashes, because two different things can change:
 - `wire_hash` — frame layouts plus the **resident** tables the kernel is
   compiled against. A change forces a client rebuild.
 - `schema_rev` — the whole catalog, server-side tables included. A new
-  `places` metric bumps it; `hireme-mcp` and the wasm kernel need no
+  `places` metric bumps it; the wasm kernel needs no
   rebuild; the browser's checked-in `gen/schema.ts` is re-emitted.
 
 Rules:
@@ -335,8 +334,9 @@ BOOT or PATCH body of 256 bytes or more is shuffled (byte planes) and
 packed with zstd 9 against `priv/wire/frame.zdict`. Both dictionaries
 are declared in the schema (`dict` lines), so retraining one moves
 `wire_hash`. Every read (`find`, `get`, `text`,
-`history`) is the replica's own: the browser's and hireme-mcp's kernel
-answers it locally. The RPC methods left are `account.*` (the account
+`history`) is the replica's own: the browser's kernel answers it
+locally, and MCP's is answered from the sequencer's kernel under the key's
+grants. The RPC methods left are `account.*` (the account
 lens) and `lease.*`.
 
 ## Kernel and NIF
@@ -350,7 +350,7 @@ One Cargo workspace, `native/Cargo.toml`, one lockfile:
 | `native/kernel` | rows, derivations, judging; core is embeddable, `wasm32` and native targets |
 | `native/nif` | Rustler wrapper of `kernel` for the sequencer |
 | `native/gate` | WebTransport front door |
-| `native/mcp` | `hireme-mcp` |
+| `native/mcp` | the MCP surface, linked into the NIF and served at `/mcp` |
 
 Kernel modules, one owner each:
 
@@ -509,8 +509,15 @@ cap it is still acknowledged.
 
 ## The MCP
 
-`hireme-mcp` (stdio, `native/mcp`) holds one wire session with the key, the
-resident rows in the native kernel, and the catalog. Tools: `hireme`
+The node serves MCP over HTTP at `/mcp` (`HiremeWeb.Mcp`): the API key is
+the bearer token, checked before the body is read, and each MCP session is
+a wire session the node holds for the key, so grants, lease, revocation and
+verdicts are a carrier's. A request without a valid key is a strike against
+its address; past five in an hour the address is banned for good and
+refused before anything of a request is read. Reads answer from the
+sequencer's kernel under the key's grants; writes are encoded by the NIF
+(`native/mcp`). A lease with `bulk: n` grants a contract for n writes, and
+a put under it is one atomic burst. Tools: `hireme`
 (overview, masks, lease, next step), `schema`, `find`, `get`, `text`,
 `history`, `put`, `drop`, `lease`, `release`, and one tool per declared
 command (generated from the catalog; a `human_only` command is never
@@ -557,7 +564,7 @@ assets/
 ## Release, edge, nix
 
 - `flake.nix`: packages `hireme` (OTP release with the NIF and
-  `hireme-gate`), `hireme-mcp`, `kernel-wasm`; `nixosModules.hireme`
+  `hireme-gate`), `kernel-wasm`; `nixosModules.hireme`
   (proxy and its query-free log format, vault, gate forwarding, deploy
   script);
   `checks.dev` (the VM) and `checks.unit` (mix test, cargo test, bun check).
@@ -635,7 +642,7 @@ behind. A v2 file may carry text quarried from v1, as the operator allowed:
 | `config/*.exs`, `mix.exs`, `.formatter.exs`, `.credo.exs` | re-derived for the new tree |
 | `bench/*`, `docs/checklist.md`, `docs/performance.md`, `README.md`, `SECURITY.md`, `alchemy/*` | re-authored as `bench/`, `docs/heat.md`, `docs/score.md`, new README and SECURITY |
 | `flake.nix` (app half) | re-derived with the NIF and wasm packages |
-| `nix/package.nix` | rewritten: release with the NIF, `kernel-wasm`, `hireme-mcp` |
+| `nix/package.nix` | rewritten: release with the NIF, `kernel-wasm` |
 
 Kept: `nix/module.nix`, `nix/deploy.sh`, `secrets/`, `LICENSE`,
 `flake.lock` (the nixpkgs pin), `.gitignore` (the allowlist) and `.agents/`

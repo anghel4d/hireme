@@ -509,6 +509,8 @@ CREATE TABLE "places" (
 CREATE INDEX "places__account_account_id" ON "places" ("account_id");
 CREATE UNIQUE INDEX "places__natural_iso2" ON "places" ("account_id", "iso2") WHERE kind = 'country';
 CREATE UNIQUE INDEX "places__natural_geonames_id" ON "places" ("account_id", "geonames_id") WHERE kind = 'city';
+CREATE UNIQUE INDEX "places__natural_geonames_id_2" ON "places" ("account_id", "geonames_id") WHERE kind = 'state';
+CREATE UNIQUE INDEX "places__natural_geonames_id_3" ON "places" ("account_id", "geonames_id") WHERE kind = 'province';
 CREATE INDEX "places__index_country_id_name" ON "places" ("account_id", "country_id", "name");
 CREATE INDEX "places__index_name" ON "places" ("account_id", "name");
 CREATE INDEX "places__index_region_population" ON "places" ("account_id", "region", "population");

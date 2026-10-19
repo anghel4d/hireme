@@ -114,7 +114,12 @@ fn a_table_def_names_its_keys_and_their_wheres() {
     use schema::{Cond, table_def, table};
     let places = table_def(table::PLACES).unwrap();
     let naturals: Vec<_> = places.keys.iter().filter(|k| k.natural).map(|k| (k.cols, &k.cond)).collect();
-    assert_eq!(naturals, [(&["iso2"][..], &Some(Cond::Eq("kind", "country"))), (&["geonames_id"][..], &Some(Cond::Eq("kind", "city")))]);
+    assert_eq!(naturals, [
+        (&["iso2"][..], &Some(Cond::Eq("kind", "country"))),
+        (&["geonames_id"][..], &Some(Cond::Eq("kind", "city"))),
+        (&["geonames_id"][..], &Some(Cond::Eq("kind", "state"))),
+        (&["geonames_id"][..], &Some(Cond::Eq("kind", "province"))),
+    ]);
     let sources = table_def(table::SOURCES).unwrap();
     assert!(sources.soft_delete && !sources.singleton);
     assert!(table_def(table::SETTINGS).unwrap().singleton);

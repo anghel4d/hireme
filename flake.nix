@@ -1,5 +1,5 @@
 {
-  description = "Hireme: the release, hireme-mcp, kernel.wasm, the NixOS module, and the checks that prove them";
+  description = "Hireme: the release (MCP served over HTTP inside it), kernel.wasm, the NixOS module, and the checks that prove them";
 
   # A host imports nixosModules.hireme with `inputs.hireme.inputs.nixpkgs.follows
   # = "nixpkgs"` and names its addresses; everything builds from this lock.
@@ -63,9 +63,6 @@
       packages.${system} = {
         inherit hireme;
         default = hireme;
-        hireme-mcp = pkgs.runCommand "hireme-mcp-${hireme.version}" { meta.mainProgram = "hireme-mcp"; } ''
-          install -Dm755 ${hireme.native}/bin/hireme-mcp $out/bin/hireme-mcp
-        '';
         kernel-wasm = hireme.kernel-wasm;
       };
 
@@ -109,9 +106,8 @@
           env = {
             MIX_ENV = "test";
             MIX_REBAR3 = "${beamPackages.rebar3}/bin/rebar3";
-            # The agent-facing security suite drives the real hireme-mcp,
-            # the one this flake ships.
-            HIREME_MCP = "${hireme.native}/bin/hireme-mcp";
+            # A gate run: bun is required, not skipped.
+            HIREME_GATE_STRICT = "1";
             EXQLITE_USE_SYSTEM = "1";
             EXQLITE_SYSTEM_CFLAGS = "-I${pkgs.sqlite.dev}/include";
             EXQLITE_SYSTEM_LDFLAGS = "-L${pkgs.sqlite.out}/lib -lsqlite3";

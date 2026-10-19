@@ -53,6 +53,7 @@ defmodule HiremeWeb.Session do
        do: send(self(), {__MODULE__, :too_many})
 
     Hireme.PubSub.subscribe("wire:drain")
+    if Security.banned?(peer[:peer_ip] || ""), do: send(self(), {__MODULE__, :banned})
 
     {:ok,
      %{
@@ -131,6 +132,8 @@ defmodule HiremeWeb.Session do
 
   def info({__MODULE__, :too_many}, state),
     do: bye(:restart, "too many sessions from this address; retry later", state)
+
+  def info({__MODULE__, :banned}, state), do: {:stop, :banned, [], state}
 
   def info({__MODULE__, :hello_deadline}, %{phase: :hello} = state),
     do: {:stop, :hello_deadline, [], state}
@@ -301,7 +304,10 @@ defmodule HiremeWeb.Session do
 
       # A failed key is audited with its peer; how many is bounded by the
       # api_key_peer limit, past which the answer is rate_limited, not audited.
+      # Each is a strike against the peer too (`Security.strike/1`).
       :error ->
+        Security.strike(ip)
+
         # Past the global refusal budget a refused key is still refused,
         # only no longer recorded.
         if Security.limit(:refusal_global, :all) == :ok,

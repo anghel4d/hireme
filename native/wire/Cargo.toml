@@ -3,7 +3,7 @@ name = "wire"
 version = "2.0.0"
 edition.workspace = true
 publish = false
-description = "hireme's frame codec: the header, every frame body, columnar table runs and op cells; no_std, shared by the kernel (wasm and NIF), hireme-mcp and the gate's tests"
+description = "hireme's frame codec: the header, every frame body, columnar table runs and op cells; no_std, shared by the kernel (wasm and NIF), the MCP surface and the gate's tests"
 
 [lib]
 path = "src/lib.rs"

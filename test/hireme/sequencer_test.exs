@@ -201,9 +201,9 @@ defmodule Hireme.SequencerTest do
     end
 
     country = %{"cols" => ["iso2"], "where" => "kind = 'country'", "reads" => ["kind"]}
-    city = %{"cols" => ["geonames_id"], "where" => "kind = 'city'", "reads" => ["kind"]}
+    by_geonames = &%{"cols" => ["geonames_id"], "where" => "kind = '#{&1}'", "reads" => ["kind"]}
     data = refused.(%{iso2: "DE", name: "Germany"})
-    assert data["keys"] == [country, city]
+    assert data["keys"] == [country | Enum.map(~w(city state province), by_geonames)]
     assert data["unmet"] == [Map.put(country, "missing", ["kind"])]
     # The condition column given, with a value the condition refuses.
     assert refused.(%{iso2: "DE", kind: :city, name: "Germany"})["unmet"] ==

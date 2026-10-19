@@ -232,7 +232,9 @@ pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
 /// The atlas places as the fit reads them.
 pub fn places(rows: &Rows) -> Vec<Place<'_>> {
     use col::atlas as P;
+    // Countries rank among countries and cities among cities; a state or province is not charted yet.
     rows.each(table::ATLAS)
+        .filter(|(t, id)| matches!(t.u32(*id, P::KIND), Some(k) if k == enums::place_kind::COUNTRY as u32 || k == enums::place_kind::CITY as u32))
         .map(|(t, id)| Place {
             id,
             city: t.u32(id, P::KIND) == Some(enums::place_kind::CITY as u32),

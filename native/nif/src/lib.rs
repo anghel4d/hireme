@@ -199,3 +199,116 @@ fn text(cell: Binary) -> Option<String> {
 }
 
 rustler::init!("Elixir.Hireme.Kernel.Nif");
+
+// ------------------------------------------------------------------ MCP
+
+fn masks(read: u16, write: u16, may_delete: bool) -> mcp::tools::Masks {
+    mcp::tools::Masks { read, write, may_delete }
+}
+
+fn json_in(s: &str) -> NifResult<serde_json::Value> {
+    serde_json::from_str(s).map_err(|_| rustler::Error::BadArg)
+}
+
+#[rustler::nif]
+fn mcp_tools(read: u16, write: u16, may_delete: bool) -> String {
+    serde_json::Value::from(mcp::tools::list(masks(read, write, may_delete))).to_string()
+}
+
+/// `schema`: one table's description (nil when the key sees no such table), or the overview.
+#[rustler::nif]
+fn mcp_schema(table: Option<String>, read: u16, write: u16, may_delete: bool) -> Option<String> {
+    let m = masks(read, write, may_delete);
+    match table {
+        Some(t) => mcp::tools::table_named(&t).map(|t| mcp::tools::describe(t, m).to_string()),
+        None => Some(mcp::overview(m).to_string()),
+    }
+}
+
+#[rustler::nif]
+fn mcp_templates(read: u16, write: u16, may_delete: bool) -> String {
+    mcp::templates(masks(read, write, may_delete)).to_string()
+}
+
+#[rustler::nif]
+fn mcp_locate(uri: String) -> Option<String> {
+    mcp::locate(&uri).map(|v| v.to_string())
+}
+
+#[rustler::nif]
+fn mcp_render(code: String, what: String, data: String) -> NifResult<String> {
+    Ok(mcp::diag::render(&code, &what, &json_in(&data)?))
+}
+
+#[rustler::nif]
+fn mcp_explain(code: String) -> Option<String> {
+    mcp::diag::explain(&code)
+}
+
+#[rustler::nif]
+fn mcp_refusals() -> Vec<String> {
+    mcp::diag::names().map(str::to_owned).collect()
+}
+
+#[rustler::nif]
+fn mcp_usage(tool: String, problem: String) -> String {
+    mcp::usage(&tool, &problem)
+}
+
+#[rustler::nif]
+fn mcp_shape(tool: String) -> Option<String> {
+    mcp::shape(&tool)
+}
+
+/// A call's writes as `{op_id, label, op_bytes}` numbered from `first`, or the usage text that says why not.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mcp_encode<'a>(env: Env<'a>, tool: String, input: String, first: u64, target: Option<u32>) -> NifResult<Term<'a>> {
+    let input = json_in(&input)?;
+    Ok(match mcp::encode(&tool, &input, first, target) {
+        Ok(ops) => {
+            let mut out = Vec::with_capacity(ops.len());
+            for (id, label, bytes) in ops {
+                let mut b = rustler::OwnedBinary::new(bytes.len()).ok_or(rustler::Error::BadArg)?;
+                b.as_mut_slice().copy_from_slice(&bytes);
+                out.push((id, label, b.release(env)).encode(env));
+            }
+            (atoms::ok(), out).encode(env)
+        }
+        Err(text) => (atoms::error(), text).encode(env),
+    })
+}
+
+/// The (table, id) rows a PATCH body wrote or deleted.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mcp_moved(body: Binary) -> Vec<(u16, u32)> {
+    mcp::moved(body.as_slice())
+}
+
+/// A read (find, get, text, history) under a key's grants: `{:ok, json}` or `{:refused, code, data_json}`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn query<'a>(env: Env<'a>, res: ResourceArc<Res>, req: String, read: u8, write: u8, may_delete: bool) -> NifResult<Term<'a>> {
+    let req = json_in(&req)?;
+    let g = kernel::query::Grants { human: false, read_mask: read, write_mask: write, may_delete };
+    Ok(match with(&res, |k| k.query_as(&g, &req)) {
+        Some(Ok(v)) => (atoms::ok(), v.to_string()).encode(env),
+        Some(Err(r)) => (atoms::refused(), mcp::tools::refusal(r.code), r.data.to_string()).encode(env),
+        None => (atoms::error(), atoms::panic()).encode(env),
+    })
+}
+
+/// The desk at a glance for `hireme`: the top `n` cards and the scoreboard.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn overview(res: ResourceArc<Res>, n: usize) -> Option<String> {
+    with(&res, |k| k.overview(n).to_string())
+}
+
+/// Application `no`'s document (row, card, rail, coverage, CV, events), the focus lens's own.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn application(res: ResourceArc<Res>, no: u32) -> Option<String> {
+    with(&res, |k| {
+        let t = k.rows().table(schema::table::APPLICATIONS)?;
+        let id = t.ids().iter().copied().find(|&id| t.u32(id, schema::col::applications::NO) == Some(no))?;
+        k.application(id).map(|v| v.to_string())
+    })
+    .flatten()
+}

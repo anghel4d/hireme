@@ -8,7 +8,7 @@ The one implementation is `native/kernel/src/heat.rs` (with `ats.rs`,
 `org.rs` and `lexicon.rs` for what it reads off a URL, a company and a
 role). The sequencer
 runs it through the NIF when the `stage` command moves an application
-into the queue; the browser and `hireme-mcp` run the same code to predict
+into the queue; the browser and the server run the same code to predict
 the verdict and to colour the board.
 
 ## What carries heat

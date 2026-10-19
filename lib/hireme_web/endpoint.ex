@@ -113,12 +113,14 @@ defmodule HiremeWeb.Endpoint do
   end
 
   if @ssl, do: plug(Plug.SSL, @ssl)
+  plug :peer
+  plug :banned
   plug :secret
   plug Plug.Static, at: "/", from: :hireme, gzip: true, only: HiremeWeb.static_paths()
-  plug :peer
   plug Plug.RequestId
   plug Plug.Logger
   plug :wire
+  plug :mcp
 
   # Pages post forms (urlencoded, carrying `_csrf_token`); scripts post JSON.
   plug Plug.Parsers,
@@ -155,6 +157,23 @@ defmodule HiremeWeb.Endpoint do
       _ -> %{conn | remote_ip: canonical(conn.remote_ip)}
     end
   end
+
+  # A banned peer (`Hireme.Security.strike/1`) is answered before anything
+  # of its request is read, logged or routed: an empty 403, and the
+  # connection closed.
+  defp banned(conn, _opts) do
+    if Hireme.Security.banned?(conn.remote_ip |> :inet.ntoa() |> to_string()),
+      do: conn |> put_resp_header("connection", "close") |> send_resp(403, "") |> halt(),
+      else: conn
+  end
+
+  # MCP over HTTP (`HiremeWeb.Mcp`), ahead of the cookie and the body
+  # parsers: an API key is its only credential, checked before the body
+  # is read.
+  defp mcp(%Plug.Conn{path_info: ["mcp"]} = conn, _opts),
+    do: conn |> HiremeWeb.Mcp.call() |> halt()
+
+  defp mcp(conn, _opts), do: conn
 
   # A v4 client a dual-stack socket reports as ::ffff:a.b.c.d is that v4
   # address, to the limits and on the trail.

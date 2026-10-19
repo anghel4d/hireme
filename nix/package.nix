@@ -1,5 +1,5 @@
-# The three things Hireme ships, from one source tree and one Cargo lock:
-# the OTP release (with the kernel NIF and the gate inside it), hireme-mcp,
+# The two things Hireme ships, from one source tree and one Cargo lock:
+# the OTP release (with the kernel NIF and the gate inside it; MCP is served by the node),
 # and kernel.wasm. Nothing they build is committed to the repository.
 {
   lib,
@@ -56,7 +56,7 @@ let
     '';
   };
 
-  # The gate, hireme-mcp and the NIF share one dependency build.
+  # The gate and the NIF (with the MCP surface inside it) share one dependency build.
   native = rustPlatform.buildRustPackage (
     cargo
     // {
@@ -71,8 +71,6 @@ let
         "-p"
         "gate"
         "-p"
-        "hireme-mcp"
-        "-p"
         "nif"
       ];
       doCheck = false;
@@ -80,9 +78,8 @@ let
         runHook preInstall
         # buildRustPackage builds into target/<triple>/release under its own
         # target dir, wherever that is; find the binaries rather than guess.
-        release=$(dirname "$(find . -path '*/release/hireme-mcp' -type f -not -path '*/deps/*' | head -1)")
+        release=$(dirname "$(find . -path '*/release/hireme-gate' -type f -not -path '*/deps/*' | head -1)")
         install -Dm755 "$release/hireme-gate" $out/bin/hireme-gate
-        install -Dm755 "$release/hireme-mcp" $out/bin/hireme-mcp
         install -Dm644 "$release/libnif.so" $out/lib/libnif.so
         runHook postInstall
       '';

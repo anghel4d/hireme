@@ -28,3 +28,6 @@ config :hireme, :gate, false
 config :hireme, :mail_outbox, false
 
 config :logger, level: :warning
+
+# Bans live in ETS only: a test's ban never reaches a file.
+config :hireme, Hireme.Security.Bans, persist: false

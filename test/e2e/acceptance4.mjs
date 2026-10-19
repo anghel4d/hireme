@@ -1,16 +1,16 @@
 // Cutover acceptance 4, the browser half (docs/rebuild.md, 'Cutover
-// acceptance'): with the desk and world lenses open, a real hireme-mcp on a
+// acceptance'): with the desk and world lenses open, an MCP agent (HTTP, /mcp) on a
 // key minted in the account lens leases 16, moves one application to
 // draft_ready and adds a corporation with a cited headcount and an office;
 // the browser shows all three without a reload; then a reload from the
 // snapshot paints the desk restoring before its cards, and a kernel that
 // traps never leaves it restoring. Run by test/e2e/run.sh,
-// which boots the node; this script needs BASE, HIREME_MCP, CHROMIUM, OUT.
+// which boots the node; this script needs BASE, CHROMIUM, OUT.
 
 import { createHmac } from "node:crypto";
 import { chromium } from "playwright";
 
-const { BASE, HIREME_MCP, CHROMIUM, OUT } = process.env;
+const { BASE, CHROMIUM, OUT } = process.env;
 const STEP_MS = 20_000;
 let failed = 0;
 const errors = [];
@@ -42,38 +42,22 @@ async function step(name, pages, fn) {
   }
 }
 
-/** An MCP client over stdio: `call(tool, args)` answers the tool's text. */
+/** An MCP client over HTTP (the node's /mcp): `call(tool, args)` answers the tool's text. */
 function mcp(key) {
-  const p = Bun.spawn([HIREME_MCP], { env: { ...process.env, HIREME_KEY: key, HIREME_URL: BASE }, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
-  const waiting = new Map();
-  let buf = "", next = 1;
-  const write = (line) => { p.stdin.write(line); p.stdin.flush() };
-  (async () => {
-    for await (const d of p.stdout.pipeThrough(new TextDecoderStream())) {
-      buf += d;
-      for (let i; (i = buf.indexOf("\n")) >= 0; ) {
-        const line = buf.slice(0, i).trim();
-        buf = buf.slice(i + 1);
-        if (!line) continue;
-        try {
-          const j = JSON.parse(line);
-          if (j.id && waiting.has(j.id)) { waiting.get(j.id)(j); waiting.delete(j.id) }
-        } catch {}
-      }
-    }
-  })();
-  const ask = (method, params) => new Promise((resolve, reject) => {
-    const id = next++;
-    const timer = setTimeout(() => reject(new Error(`no MCP answer to ${method}`)), STEP_MS);
-    waiting.set(id, (j) => { clearTimeout(timer); resolve(j) });
-    write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  });
+  let sid = null, next = 1;
+  const post = async (msg) => {
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${key}` };
+    if (sid) headers["mcp-session-id"] = sid;
+    const r = await fetch(`${BASE}/mcp`, { method: "POST", headers, body: JSON.stringify(msg), signal: AbortSignal.timeout(STEP_MS) });
+    sid = r.headers.get("mcp-session-id") ?? sid;
+    return r.status === 200 ? r.json() : { error: { status: r.status } };
+  };
+  const ask = (method, params) => post({ jsonrpc: "2.0", id: next++, method, params });
   const text = (j) => (j.result?.content ?? []).map((c) => c.text ?? "").join("\n") || JSON.stringify(j.error ?? j);
   return {
     async start() {
       await ask("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "acceptance4", version: "1" } });
-      write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
-      await until(async () => !/not connected|error\[session\]/.test(text(await ask("tools/call", { name: "hireme", arguments: {} }))), "hireme-mcp connected");
+      await post({ jsonrpc: "2.0", method: "notifications/initialized" });
     },
     async call(name, args) {
       const j = await ask("tools/call", { name, arguments: args });
@@ -81,7 +65,7 @@ function mcp(key) {
       if (j.error || j.result?.isError) throw new Error(`${name} ${JSON.stringify(args)}: ${t.slice(0, 300)}`);
       return { text: t, data: j.result?.structuredContent };
     },
-    stop() { p.kill() },
+    stop() { if (sid) void fetch(`${BASE}/mcp`, { method: "DELETE", headers: { authorization: `Bearer ${key}`, "mcp-session-id": sid } }).catch(() => {}) },
   };
 }
 
@@ -134,7 +118,7 @@ await step("mint a read_write key in the account lens", pages, async () => {
   return `${secret.slice(0, 6)}…`;
 });
 
-await step("seed 20 applications through hireme-mcp", pages, async () => {
+await step("seed 20 applications through MCP", pages, async () => {
   const seeder = mcp(secret);
   try {
     await seeder.start();
@@ -186,7 +170,7 @@ await step("type in the desk search", pages, async () => {
   return `"${typed}"`;
 });
 
-await step("hireme-mcp: lease 16, move one to draft_ready, add a cited corporation and an office", pages, async () => {
+await step("MCP: lease 16, move one to draft_ready, add a cited corporation and an office", pages, async () => {
   agent = mcp(secret);
   await agent.start();
   const lease = await agent.call("lease", { count: 16 });

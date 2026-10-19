@@ -78,6 +78,11 @@ impl Kernel {
         query::query(&self.rows, &self.grants, &mut self.indexes.borrow_mut(), req)
     }
 
+    /// The same read under another session's grants: the node's kernel answers each MCP session as its key may see.
+    pub fn query_as(&self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
+        query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req)
+    }
+
     pub fn set_today(&mut self, today: Day) {
         if self.today != today {
             self.today = today;

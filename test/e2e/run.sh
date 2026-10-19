@@ -8,7 +8,6 @@
 #   test/e2e/run.sh
 #
 # Environment (all optional):
-#   HIREME_MCP   a built hireme-mcp; else `cargo build --release -p hireme-mcp`
 #   CHROMIUM     the browser; else the BRIEF's pinned nix Chromium 155
 #   OUT          screenshots and the node's log; else a fresh /tmp dir
 #   SHA          the revision to print, for a checkout without .git
@@ -55,11 +54,6 @@ bg() {
   return $rc
 }
 
-if [ -z "${HIREME_MCP:-}" ]; then
-  bg cargo build --quiet --release --manifest-path "$ROOT/native/Cargo.toml" -p hireme-mcp
-  HIREME_MCP="${CARGO_TARGET_DIR:-$ROOT/native/target}/release/hireme-mcp"
-fi
-[ -x "$HIREME_MCP" ] || { echo "FAIL setup: no hireme-mcp at $HIREME_MCP"; echo "res=1"; exit 1; }
 [ -x "$CHROMIUM" ] || { echo "FAIL setup: no Chromium at $CHROMIUM"; echo "res=1"; exit 1; }
 
 printf '{"private":true}\n' >"$E2E_NODE/package.json"
@@ -87,11 +81,11 @@ done
 [ -n "$ready" ] && kill -0 "$NODE_PID" 2>/dev/null || { echo "FAIL setup: the node did not answer on $BASE (see $OUT/node.log)"; echo "res=1"; exit 1; }
 
 # A module resolves "playwright" from its own directory: run a copy beside
-# it, in its own session, so a signal to this script takes Chromium and
-# hireme-mcp down with it.
+# it, in its own session, so a signal to this script takes Chromium down
+# with it.
 cp "$ROOT/test/e2e/acceptance4.mjs" "$E2E_NODE/acceptance4.mjs"
 set +e
-BASE=$BASE HIREME_MCP=$HIREME_MCP CHROMIUM=$CHROMIUM OUT=$OUT setsid bun "$E2E_NODE/acceptance4.mjs" &
+BASE=$BASE CHROMIUM=$CHROMIUM OUT=$OUT setsid bun "$E2E_NODE/acceptance4.mjs" &
 ACC_PID=$!
 wait "$ACC_PID"
 res=$?

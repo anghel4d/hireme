@@ -1,8 +1,9 @@
 defmodule Hireme.McpCase do
   @moduledoc """
-  Tests through the real `hireme-mcp` binary, speaking MCP over stdio to a
-  running endpoint. They need the binary (`cargo build -p hireme-mcp`):
-  `HIREME_MCP=<path> mix test test/hireme_web/mcp_test.exs`.
+  Tests of MCP over HTTP (`HiremeWeb.Mcp`): requests to a running
+  endpoint's `/mcp` under a fresh key, as an agent and as an attacker. A
+  client is `%{url, secret, sid}`; its session's event stream is read by a
+  linked process that forwards resource updates to the test.
   """
 
   use ExUnit.CaseTemplate
@@ -14,108 +15,127 @@ defmodule Hireme.McpCase do
       use Hireme.WireCase, async: false
       import Hireme.McpCase
       alias Hireme.Keys
-
-      @moduletag :mcp
-      if System.get_env("HIREME_MCP") in [nil, ""],
-        do: @moduletag(skip: "set HIREME_MCP to a built hireme-mcp to run the MCP tests")
     end
   end
 
   setup do
+    {:ok, _} = Application.ensure_all_started(:inets)
+
     {:ok, server} =
       Bandit.start_link(plug: HiremeWeb.Endpoint, ip: :loopback, port: 0, startup_log: false)
 
     {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
-    {:ok, bin: System.get_env("HIREME_MCP"), port: port}
+    {:ok, url: "http://localhost:#{port}/mcp"}
   end
 
-  @doc "A connected `hireme-mcp` on a fresh key with `masks`, as a port."
-  def mcp(%{bin: bin, port: port, session: s}, masks \\ Keys.preset(:read_write)) do
+  @doc "An initialized MCP session on a fresh key with `masks`, its event stream open."
+  def mcp(%{url: url, session: s}, masks \\ Keys.preset(:read_write)) do
     {:ok, %{secret: secret}} = Keys.mint(s, "mcp", masks)
+    p = %{url: url, secret: secret, sid: nil, peer: nil}
 
-    p =
-      Port.open({:spawn_executable, bin}, [
-        :binary,
-        :exit_status,
-        {:line, 1_000_000},
-        env: [
-          {~c"HIREME_KEY", String.to_charlist(secret)},
-          {~c"HIREME_URL", String.to_charlist("http://localhost:#{port}")}
-        ]
-      ])
+    {200, headers, _} =
+      post(p, %{
+        jsonrpc: "2.0",
+        id: 0,
+        method: "initialize",
+        params: %{
+          protocolVersion: "2025-06-18",
+          capabilities: %{},
+          clientInfo: %{name: "test", version: "0"}
+        }
+      })
 
-    call(p, "initialize", %{
-      protocolVersion: "2025-06-18",
-      capabilities: %{},
-      clientInfo: %{name: "test", version: "0"}
-    })
-
-    line(p, %{jsonrpc: "2.0", method: "notifications/initialized"})
-    # Until the wire session is up, the tools say so; wait for it.
-    wait_connected(p, 50)
+    p = %{p | sid: header(headers, "mcp-session-id")}
+    {202, _, _} = post(p, %{jsonrpc: "2.0", method: "notifications/initialized"})
+    listen(p)
     p
   end
 
-  def line(p, msg), do: send(p, {self(), {:command, JSON.encode!(msg) <> "\n"}})
+  @doc "One message POSTed: `{status, headers, body}`."
+  def post(p, msg, extra \\ []) do
+    request = {to_charlist(p.url), headers(p) ++ extra, ~c"application/json", JSON.encode!(msg)}
 
-  defp wait_connected(p, 0),
-    do: flunk("hireme-mcp never connected: #{inspect(tool(p, "hireme", %{}))}")
+    {:ok, {{_, status, _}, headers, body}} =
+      :httpc.request(:post, request, [timeout: 120_000], body_format: :binary)
 
-  defp wait_connected(p, n) do
-    if text_of(tool(p, "hireme", %{})) =~ "not connected" do
-      Process.sleep(100)
-      wait_connected(p, n - 1)
-    else
-      :ok
-    end
+    {status, headers, body}
   end
 
+  defp headers(p) do
+    auth = if p.secret, do: [{~c"authorization", ~c"Bearer " ++ to_charlist(p.secret)}], else: []
+    sid = if p.sid, do: [{~c"mcp-session-id", to_charlist(p.sid)}], else: []
+    peer = if p[:peer], do: [{~c"x-real-ip", to_charlist(p.peer)}], else: []
+    [{~c"accept", ~c"application/json, text/event-stream"}] ++ auth ++ sid ++ peer
+  end
+
+  def header(headers, name),
+    do: Enum.find_value(headers, fn {k, v} -> if to_string(k) == name, do: to_string(v) end)
+
+  @doc "A request's decoded answer."
   def call(p, method, params) do
     id = System.unique_integer([:positive])
-    line(p, %{jsonrpc: "2.0", id: id, method: method, params: params})
-    lines = lines_until(p, id)
-    # Notifications that arrive while waiting for a reply are kept for `updated/3`.
-    for %{"method" => "notifications/resources/updated", "params" => %{"uri" => uri}} <- lines,
-        do: send(self(), {:updated, uri})
-
-    List.last(lines)
+    {status, _, body} = post(p, %{jsonrpc: "2.0", id: id, method: method, params: params})
+    assert status == 200, "#{method}: HTTP #{status} #{body}"
+    JSON.decode!(body)
   end
 
-  # The next JSON line from the port within `ms`, or `:timeout`.
-  defp next_line(p, ms) do
+  # The session's event stream, read by a linked process; it says when it is
+  # open, so nothing written after `mcp/2` returns goes unheard.
+  defp listen(p) do
+    me = self()
+
+    spawn_link(fn ->
+      # Its own profile, so no request queues behind the open stream on one connection.
+      profile = :"mcp_stream_#{System.unique_integer([:positive])}"
+      {:ok, _} = :inets.start(:httpc, profile: profile)
+
+      {:ok, ref} =
+        :httpc.request(
+          :get,
+          {to_charlist(p.url), headers(p)},
+          [],
+          [sync: false, stream: :self],
+          profile
+        )
+
+      sse(ref, me, "")
+    end)
+
     receive do
-      {^p, {:data, {:eol, l}}} -> JSON.decode(l)
+      :listening -> :ok
     after
-      ms -> :timeout
+      5_000 -> flunk("the event stream did not open")
     end
   end
 
-  @doc "Every line up to and including the reply to `id`, decoded."
-  def lines_until(p, id, acc \\ []) do
-    case next_line(p, 10_000) do
-      {:ok, %{"id" => ^id} = r} -> Enum.reverse([r | acc])
-      {:ok, m} -> lines_until(p, id, [m | acc])
-      :timeout -> flunk("no MCP reply to #{id}")
-      _ -> lines_until(p, id, acc)
+  defp sse(ref, to, buf) do
+    receive do
+      {:http, {^ref, :stream_start, _}} ->
+        send(to, :listening)
+        sse(ref, to, buf)
+
+      {:http, {^ref, :stream, chunk}} ->
+        [rest | events] = String.split(buf <> chunk, "\n\n") |> Enum.reverse()
+
+        for e <- Enum.reverse(events),
+            "data: " <> data <- String.split(e, "\n"),
+            {:ok, %{"method" => "notifications/resources/updated", "params" => %{"uri" => uri}}} <-
+              [JSON.decode(data)],
+            do: send(to, {:updated, uri})
+
+        sse(ref, to, rest)
+
+      {:http, {^ref, _}} ->
+        :ok
     end
   end
 
-  @doc "Whether `uri` was announced within `ms`, reading any lines still on the port."
-  def updated(p, uri, ms \\ 5_000) do
+  @doc "Whether `uri` was announced within `ms`."
+  def updated(_p, uri, ms \\ 5_000) do
     receive do
       {:updated, ^uri} -> true
     after
-      0 ->
-        case next_line(p, ms) do
-          {:ok, %{"method" => "notifications/resources/updated", "params" => %{"uri" => ^uri}}} ->
-            true
-
-          :timeout ->
-            false
-
-          _ ->
-            updated(p, uri, ms)
-        end
+      ms -> false
     end
   end
 

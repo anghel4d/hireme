@@ -1,12 +1,11 @@
 defmodule HiremeWeb.McpTest do
   @moduledoc """
-  `hireme-mcp` end to end: the real binary, speaking MCP over stdio to a
-  running endpoint, as an agent and as the attacker of
-  `agent_attack_test.exs`. Needs the binary (`cargo build -p hireme-mcp`):
-  `HIREME_MCP=<path> mix test test/hireme_web/mcp_test.exs`.
+  MCP over HTTP end to end: an agent's requests to a running endpoint's
+  `/mcp`, as an agent and as the attacker of `agent_attack_test.exs`.
   """
 
   use Hireme.McpCase
+  alias Hireme.Security
 
   defp put(p, args), do: ok!(tool(p, "put", args))
 
@@ -37,17 +36,17 @@ defmodule HiremeWeb.McpTest do
              call(p, "resources/subscribe", %{uri: "hireme://corporations/none.test"})
   end
 
-  test "a JSON-RPC response from the client is not answered; requests around it are", ctx do
+  test "a JSON-RPC response from the client is taken and not answered; a request is answered; an object with an id that is neither is an invalid request",
+       ctx do
     p = mcp(ctx)
-    line(p, %{jsonrpc: "2.0", id: 4242, result: %{}})
-    line(p, %{jsonrpc: "2.0", id: 4243, error: %{code: -32_000, message: "client side"}})
-    line(p, %{jsonrpc: "2.0", id: 4244, method: "ping"})
-    seen = lines_until(p, 4244)
-    assert %{"result" => %{}} = List.last(seen)
-    refute Enum.any?(seen, &(&1["id"] in [4242, 4243])), inspect(seen)
-    # An object that is neither a request nor a response is still an invalid request.
-    line(p, %{jsonrpc: "2.0", id: 4245})
-    assert %{"error" => %{"code" => -32_600}} = List.last(lines_until(p, 4245))
+    assert {202, _, ""} = post(p, %{jsonrpc: "2.0", id: 4242, result: %{}})
+
+    assert {202, _, ""} =
+             post(p, %{jsonrpc: "2.0", id: 4243, error: %{code: -32_000, message: "client side"}})
+
+    assert %{"result" => %{}} = call(p, "ping", %{})
+    {_, _, body} = post(p, %{jsonrpc: "2.0", id: 4245})
+    assert %{"error" => %{"code" => -32_600}} = JSON.decode!(body)
   end
 
   test "a key is offered only the tools its masks allow and never a human_only command; a write it calls anyway is refused",
@@ -86,5 +85,106 @@ defmodule HiremeWeb.McpTest do
     r = tool(p, "text", %{table: "applications", id: app.id, column: "notes"})
     out = text_of(r) <> inspect(r["result"])
     assert out =~ injected and out =~ ~r/untrusted/i
+  end
+
+  test "a bulk contract's put is one atomic burst: one refused op leaves none of it written; a whole burst lands in one call",
+       ctx do
+    p = mcp(ctx)
+    lease = ok!(tool(p, "lease", %{bulk: 600}))
+    assert lease["result"]["structuredContent"]["bulk"]["writes"] == 600
+    put(p, %{table: "corporations", key: %{domain: "taken.test"}, set: %{name: "Taken"}})
+
+    refused =
+      tool(p, "put", %{
+        puts: [
+          %{table: "corporations", key: %{domain: "fresh.test"}, set: %{name: "Fresh"}},
+          %{
+            table: "corporations",
+            key: %{domain: "taken.test"},
+            set: %{name: "Again"},
+            create_only: true
+          }
+        ]
+      })
+
+    assert error?(refused)
+
+    assert [%{"refusal" => "burst"}, %{"refusal" => "natural_key"}] =
+             refused["result"]["structuredContent"]["ops"]
+
+    assert error?(tool(p, "get", %{table: "corporations", key: %{domain: "fresh.test"}}))
+
+    burst =
+      for i <- 1..500,
+          do: %{table: "corporations", key: %{domain: "bulk#{i}.test"}, set: %{name: "Bulk #{i}"}}
+
+    done = put(p, %{puts: burst})
+    assert text_of(done) =~ "500 of 500 written (one atomic burst)"
+
+    found =
+      ok!(
+        tool(p, "find", %{table: "corporations", where: %{domain: %{prefix: "bulk"}}, limit: 500})
+      )
+
+    assert length(found["result"]["structuredContent"]["rows"]) == 500
+  end
+
+  test "without a session id a key's requests share its default session, lease included; a deleted session is gone",
+       ctx do
+    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "default", Keys.preset(:read_write))
+    p = %{url: ctx.url, secret: secret, sid: nil, peer: nil}
+    ok!(call(p, "tools/call", %{name: "lease", arguments: %{}}))
+    assert text_of(call(p, "tools/call", %{name: "hireme", arguments: %{}})) =~ "lease: held"
+
+    q = mcp(ctx)
+
+    {:ok, {{_, 204, _}, _, _}} =
+      :httpc.request(
+        :delete,
+        {to_charlist(q.url),
+         [
+           {~c"authorization", ~c"Bearer " ++ to_charlist(q.secret)},
+           {~c"mcp-session-id", to_charlist(q.sid)}
+         ]},
+        [],
+        []
+      )
+
+    assert {404, _, _} = post(q, %{jsonrpc: "2.0", id: 1, method: "ping"})
+  end
+
+  test "a peer that keeps asking without a valid key is banned for good: every request from it is refused before it is read, whoever's key it carries; others are not",
+       ctx do
+    bad = "203.0.113.7"
+    on_exit(fn -> Security.unban(bad) end)
+    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "ban", Keys.preset(:read_write))
+    ping = %{jsonrpc: "2.0", id: 1, method: "ping"}
+    anon = %{url: ctx.url, secret: nil, sid: nil, peer: bad}
+
+    # Five strikes are answered; the sixth bans (a malformed key and a wrong one count alike).
+    for _ <- 1..4, do: assert({401, _, _} = post(anon, ping))
+    assert {401, _, _} = post(%{anon | secret: "hm_notakey"}, ping)
+    assert {401, _, _} = post(%{anon | secret: String.replace(secret, ~r/.$/, "0")}, ping)
+    assert Security.banned?(bad)
+
+    assert {403, _, ""} = post(%{anon | secret: secret}, ping)
+    assert {403, _, ""} = post(anon, ping)
+    {:ok, wire} = HiremeWeb.Session.open(%{peer_ip: bad, origin: nil, carrier: :ws})
+    assert_receive {HiremeWeb.Session, :banned}
+    assert {:stop, :banned, [], _} = HiremeWeb.Session.info({HiremeWeb.Session, :banned}, wire)
+
+    other = %{anon | peer: "203.0.113.8", secret: secret}
+
+    assert {200, _, _} =
+             post(
+               other,
+               %{ping | id: 2}
+               |> Map.put(:method, "initialize")
+               |> Map.put(:params, %{
+                 protocolVersion: "2025-06-18",
+                 capabilities: %{},
+                 clientInfo: %{name: "t", version: "0"}
+               })
+             )
   end
 end

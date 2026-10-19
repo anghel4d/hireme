@@ -84,7 +84,7 @@ for (let run = 0; run < 7; run++) {
   }
 }
 
-// Reads of the replica: the replies the world lens and hireme-mcp draw from.
+// Reads of the replica: the replies the world lens and MCP draw from.
 const QUERY_BOUND_MS = 1;
 const query = {};
 {

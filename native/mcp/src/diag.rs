@@ -31,9 +31,10 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("source_missing", "provenance", "this write needs a source", "Prose cites where it came from: put {..., \"source\":\"https://...\"} with its expect_rev (the server derives the host). A metric may cite one too, and its as_of is what it needs."),
     ("source_trust", "provenance", "this source's host is not trusted for this", "Culture and ratings come only from hosts the operator trusts (levels.fyi and the like). Cite one of those, or leave the cell."),
     ("too_large", "limits", "more than 1 MiB of text in one op", "Split the text, or store the raw listing once and refer to it."),
-    ("rate", "limits", "over the agent write rate", "600 ops a minute per key. Nothing of the refused op was written: wait the data's retry_ms, then call again."),
+    ("rate", "limits", "the key tripped its circuit breaker", "Writes are not paced, but a key past 100,000 ops a minute, or past its hourly bulk contracts, is stopped as abuse. Nothing of the refused op was written: wait the data's retry_ms. For a big burst, ask `lease` for {\"bulk\": n} first."),
     ("cap", "limits", "the table is full for this account", "The table's row cap is reached (data: cap). Drop rows that no longer matter, or ask the operator."),
     ("internal", "limits", "the server failed", "Nothing was written. Retry once; if it repeats, tell the operator with the op_id."),
+    ("burst", "limits", "another op of this atomic burst was refused", "A bulk contract's burst lands whole or not at all: nothing of it was written. Fix the ops refused for their own reasons and send the burst again."),
 ];
 
 pub fn names() -> impl Iterator<Item = &'static str> {

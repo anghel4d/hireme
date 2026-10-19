@@ -8,6 +8,7 @@ defmodule Hireme.Application do
 
   use Application
   alias Hireme.Audit.Coalescer
+  alias HiremeWeb.Mcp.Session, as: McpSession
 
   @impl true
   def start(_type, _args) do
@@ -20,15 +21,19 @@ defmodule Hireme.Application do
         Hireme.Store,
         Hireme.PubSub,
         Hireme.RateLimit,
+        Hireme.Security.Bans,
         Hireme.Accounts.Tickets,
         Coalescer,
         Hireme.Sequencer.Supervisor,
         # Applies the baseline and pending additive files before any request,
         # then keeps the daily backup.
         Hireme.Release,
-        Hireme.Mail,
-        HiremeWeb.Endpoint
+        Hireme.Mail
       ] ++
+        McpSession.children() ++
+        [
+          HiremeWeb.Endpoint
+        ] ++
         gate() ++
         [HiremeWeb.Session.Drain]
 
