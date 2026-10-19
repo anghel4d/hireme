@@ -568,11 +568,11 @@ defmodule HiremeWeb.Wire.Codec do
     if n >= 0 and n <= Schema.day_max(), do: n
   end
 
-  @doc "A wire `day` as a date; nil outside 0..`Schema.day_max/0`."
-  def day_from_wire(n) when is_integer(n) and n >= 0,
+  # A wire `day` as a date; nil outside 0..`Schema.day_max/0`.
+  defp day_from_wire(n) when is_integer(n) and n >= 0,
     do: if(n <= Schema.day_max(), do: Date.from_gregorian_days(n))
 
-  def day_from_wire(_), do: nil
+  defp day_from_wire(_), do: nil
 
   @doc "A column's Elixir value as its wire value (the kernel's and BOOT's form)."
   def to_wire(_col, nil), do: nil

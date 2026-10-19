@@ -27,7 +27,7 @@ defmodule Hireme.GrantsTest do
     end
   end
 
-  test "the presets are what their names say; an unknown table is in no mask" do
+  test "the presets are what their names say" do
     assert Grants.preset(:read_only) == {31, 0}
     assert Grants.preset(:write_only) == {0, 31}
     assert Grants.preset(:read_write) == {31, 31}
@@ -37,10 +37,6 @@ defmodule Hireme.GrantsTest do
              @stored,
              &(Grants.read?(op, &1) == (&1.domain != "system" and &1.name not in @outside))
            )
-
-    assert Grants.bit(:no_such_table) == 0
-    assert Grants.bit(65_000) == 0
-    refute Grants.read?(op, :no_such_table)
   end
 
   test "a key never sees a server_only or private column; the operator sees private ones" do

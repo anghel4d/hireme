@@ -10,8 +10,8 @@ defmodule Hireme.Keys do
   row keeps its SHA-256 and four characters for display. A random secret
   this long needs no slow hash.
 
-  What a key may do is two masks over the domains (`domains/0`: world 1,
-  desk 2, mail 4, lanes 8, corpus 16) and `may_delete`: `read_mask`
+  What a key may do is two masks over the domains (world 1, desk 2,
+  mail 4, lanes 8, corpus 16) and `may_delete`: `read_mask`
   bounds BOOT, PATCH and every read RPC; `write_mask` bounds every op;
   `drop` also needs `may_delete`. `system` tables, `citations` and
   `trusted_hosts` are in no mask. The presets are read only, write only
@@ -43,7 +43,6 @@ defmodule Hireme.Keys do
 
   @prefix "hm_"
   @shape ~r/\Ahm_([0-9A-Za-z]{12})_([0-9A-Za-z]{43})([0-9A-Za-z]{6})\z/
-  @domains [:world, :desk, :mail, :lanes, :corpus]
 
   @type masks :: %{read_mask: 0..31, write_mask: 0..31, may_delete: boolean()}
   @type authenticated :: %{
@@ -55,10 +54,6 @@ defmodule Hireme.Keys do
           write_mask: 0..31,
           may_delete: boolean()
         }
-
-  @doc "The masked domains and their bits, in bit order."
-  @spec domains() :: [{atom(), pos_integer()}]
-  def domains, do: for(d <- @domains, do: {d, Hireme.Schema.domain_bit(d)})
 
   @doc "A preset's masks (`Hireme.Grants` owns them). `may_delete` is never part of a preset; it is granted on its own."
   @spec preset(:read_only | :write_only | :read_write) :: masks()
@@ -187,9 +182,8 @@ defmodule Hireme.Keys do
   # control or format character (a newline would write the mail's next line).
   defp name?(name), do: Security.name?(name, 100, 200)
 
-  @doc "Whether `new` grants anything `old` did not."
-  @spec widens?(masks() | Key.t(), masks()) :: boolean()
-  def widens?(old, new) do
+  # Whether `new` grants anything `old` did not.
+  defp widens?(old, new) do
     # Bits in new and not in old, without bnot: Dialyzer types `x band bnot(y)`
     # as never zero, which made the `or` below unreachable to it.
     Bitwise.band(new.read_mask, old.read_mask) != new.read_mask or

@@ -86,7 +86,7 @@ defmodule Mix.Tasks.Hireme.Schema do
     if opts[:renumber] && locked(),
       do: Mix.raise("ids may not move once #{@lock} exists; a reorder belongs before --freeze")
 
-    guard_ids!(ts, opts)
+    guard_ids!(json, opts)
 
     case {locked(), opts[:migration]} do
       {nil, nil} ->
@@ -153,7 +153,7 @@ defmodule Mix.Tasks.Hireme.Schema do
         apply_problem(sql),
         lock_problem()
       ] ++
-        id_problems(ts, opts)
+        id_problems(json, opts)
 
     case Enum.reject(problems, &is_nil/1) do
       [] ->
@@ -339,8 +339,8 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   # ------------------------------------------------------------ id stability
 
-  defp guard_ids!(ts, opts) do
-    case id_problems(ts, opts) do
+  defp guard_ids!(json, opts) do
+    case id_problems(json, opts) do
       [] ->
         :ok
 
@@ -350,14 +350,13 @@ defmodule Mix.Tasks.Hireme.Schema do
   end
 
   # An id a client already compiled against must not move: compare the
-  # checked-in gen/schema.ts with the fresh one, name by name.
+  # checked-in priv/schema.json with the fresh one, name by name.
   defp id_problems(fresh, opts) do
     with false <- opts[:renumber] || false,
-         {:ok, old} <- File.read(Path.join(@root, @ts)) do
-      old_ids = ids(old)
+         {:ok, old} <- File.read(Path.join(@root, @json)) do
       new_ids = ids(fresh)
 
-      for {key, id} <- old_ids, (new = Map.get(new_ids, key)) != nil, new != id do
+      for {key, id} <- ids(old), (new = new_ids[key]) != nil, new != id do
         "#{key} moved from id #{id} to #{new}"
       end
     else
@@ -365,59 +364,26 @@ defmodule Mix.Tasks.Hireme.Schema do
     end
   end
 
-  defp ids(ts) do
-    entries =
-      for {block, kind} <- [{"const PACKED:", :table}, {"export const COMMANDS:", :command}],
-          line <- block_lines(ts, block),
-          entry <- entry_ids(line, kind),
-          into: %{},
-          do: entry
+  # Every table, column, command and param by name with its id, and every
+  # domain with its bit (stored in every key's masks).
+  defp ids(json) do
+    m = Jason.decode!(json)
 
-    # A domain's bit is stored in every key's masks.
-    domains =
-      case Regex.run(~r/^export const DOMAIN = \{ (.*) \} as const;$/m, ts) do
-        [_, body] ->
-          for pair <- String.split(body, ", "),
-              [name, bit] = String.split(pair, ": "),
-              into: %{},
-              do: {"domain #{name}", String.to_integer(bit)}
-
-        _ ->
-          %{}
-      end
-
-    Map.merge(entries, domains)
-  end
-
-  defp block_lines(ts, name) do
-    ts
-    |> String.split("\n")
-    |> Enum.drop_while(&(not String.starts_with?(&1, name)))
-    |> Enum.drop(1)
-    |> Enum.take_while(&(&1 != "};"))
-  end
-
-  defp entry_ids(line, kind) do
-    case Regex.run(~r/^\s*"[^"]+":\s*(\{.*\}),$/, line) do
-      [_, json] ->
-        entry = Jason.decode!(json)
-
-        case kind do
-          :table ->
-            # A column is packed: [name, id, ...].
-            [{"table #{entry["name"]}", entry["id"]}] ++
-              Enum.map(entry["cols"], fn [name, id | _] ->
-                {"column #{entry["name"]}.#{name}", id}
-              end)
-
-          :command ->
-            [{"command #{entry["name"]}", entry["id"]}] ++
-              Enum.map(entry["params"], &{"param #{entry["name"]}.#{&1["name"]}", &1["id"]})
-        end
-
-      _ ->
-        []
-    end
+    Map.new(
+      Enum.map(m["domains"], &{"domain #{&1["name"]}", &1["bit"]}) ++
+        Enum.flat_map(m["tables"], fn t ->
+          [
+            {"table #{t["name"]}", t["id"]}
+            | Enum.map(t["cols"], &{"column #{t["name"]}.#{&1["name"]}", &1["id"]})
+          ]
+        end) ++
+        Enum.flat_map(m["commands"], fn c ->
+          [
+            {"command #{c["name"]}", c["id"]}
+            | Enum.map(c["params"], &{"param #{c["name"]}.#{&1["name"]}", &1["id"]})
+          ]
+        end)
+    )
   end
 
   # ------------------------------------------------------------ the binary

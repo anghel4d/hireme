@@ -95,7 +95,6 @@ defmodule Hireme.KeysTest do
 
     assert Keys.preset_of(%{read_mask: 2, write_mask: 2, may_delete: false}) == :custom
     assert Keys.preset_of(%{Keys.preset(:read_write) | may_delete: true}) == :custom
-    assert Keys.domains() == [world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16]
 
     for bad <- [
           %{read_mask: 32, write_mask: 0},
@@ -104,29 +103,6 @@ defmodule Hireme.KeysTest do
           %{}
         ],
         do: assert({:error, :masks} = Keys.mint(s, "x", bad))
-  end
-
-  property "widening is exactly granting some domain or delete that was not held" do
-    check all(
-            r1 <- integer(0..31),
-            w1 <- integer(0..31),
-            d1 <- boolean(),
-            r2 <- integer(0..31),
-            w2 <- integer(0..31),
-            d2 <- boolean()
-          ) do
-      old = %{read_mask: r1, write_mask: w1, may_delete: d1}
-      new = %{read_mask: r2, write_mask: w2, may_delete: d2}
-      has? = fn mask, bit -> rem(div(mask, bit), 2) == 1 end
-
-      gained =
-        for {_domain, bit} <- Keys.domains(),
-            {a, b} <- [{r1, r2}, {w1, w2}],
-            has?.(b, bit) and not has?.(a, bit),
-            do: bit
-
-      assert Keys.widens?(old, new) == (gained != [] or (d2 and not d1))
-    end
   end
 
   @tag window: :api_key_peer

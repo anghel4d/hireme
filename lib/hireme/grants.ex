@@ -51,13 +51,6 @@ defmodule Hireme.Grants do
   def bit(%{unmasked: true}), do: 0
   def bit(%{domain: domain}), do: Schema.domain_bit(domain)
 
-  def bit(name) when is_atom(name) or is_integer(name) do
-    case Schema.table(name) do
-      nil -> 0
-      table -> bit(table)
-    end
-  end
-
   @doc "Whether the grants read this table at all. An account view is the operator's alone."
   def read?(%__MODULE__{actor: actor}, %{name: "acct_" <> _}), do: actor == :operator
   def read?(%__MODULE__{read_mask: m}, table), do: (m &&& bit(table)) != 0
