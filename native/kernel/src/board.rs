@@ -489,11 +489,7 @@ impl Board {
             let mut search = String::with_capacity(f.company.len() + f.role.len() + location.len() + 16);
             for c in [A::COMPANY, A::ROLE, A::LOCATION] {
                 if let Some(s) = row.str(c) {
-                    if s.is_ascii() {
-                        search.extend(s.bytes().map(|b| char::from(b.to_ascii_lowercase())));
-                    } else {
-                        search.push_str(&s.to_lowercase());
-                    }
+                    search.push_str(&if s.is_ascii() { s.to_ascii_lowercase() } else { s.to_lowercase() });
                     search.push('\n');
                 }
             }

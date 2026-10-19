@@ -84,13 +84,12 @@ fn matches(host: &str, root: &Root) -> bool {
 /// of a URL, the fragment cut first.
 fn split(url: &str) -> Option<(String, &str, &str)> {
     let url = url.trim();
-    let url = &url[..url.find('#').unwrap_or(url.len())];
+    let url = url.split_once('#').map_or(url, |(u, _)| u);
+    let stop = |s: &str| s.bytes().position(|b| b == b'/' || b == b'?').unwrap_or(s.len());
     // A scheme is only a "://" before any path or query.
-    let rest = match url.find("://") {
-        Some(i) if !url[..i].contains(['/', '?']) => &url[i + 3..],
-        _ => url,
-    };
-    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let at = stop(url);
+    let rest = if at > 0 && url.as_bytes()[at - 1..].starts_with(b"://") { &url[at + 2..] } else { url };
+    let end = stop(rest);
     let authority = &rest[..end];
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let host = host.split(':').next().unwrap_or("").trim_end_matches('.');
@@ -163,18 +162,18 @@ fn param(query: &str, key: &str) -> Option<String> {
 /// The first path segment that is not a generic jobs word or an id (all
 /// digits).
 fn first_segment(path: &str) -> Option<String> {
-    segments(path).find(|s| !matches!(s.as_str(), "job" | "jobs" | "career" | "careers" | "apply" | "embed" | "job_app" | "j"))
+    segment(path, |s| !["job", "jobs", "career", "careers", "apply", "embed", "job_app", "j"].iter().any(|g| s.eq_ignore_ascii_case(g)))
 }
 
 /// Workday's path tenant, after an optional locale ("en-US") and
 /// `recruiting`.
 fn workday_segment(path: &str) -> Option<String> {
     let locale = |s: &str| s.len() == 5 && s.as_bytes()[2] == b'-';
-    segments(path).find(|s| !locale(s) && s != "recruiting")
+    segment(path, |s| !locale(s) && !s.eq_ignore_ascii_case("recruiting"))
 }
 
-fn segments(path: &str) -> impl Iterator<Item = String> + '_ {
-    path.split('/').filter(|s| !s.is_empty() && !s.bytes().all(|b| b.is_ascii_digit())).map(str::to_ascii_lowercase)
+fn segment(path: &str, keep: impl Fn(&str) -> bool) -> Option<String> {
+    path.split('/').find(|s| !s.is_empty() && !s.bytes().all(|b| b.is_ascii_digit()) && keep(s)).map(str::to_ascii_lowercase)
 }
 
 /// The label just left of `root` in `host`, unless it is a generic one.
