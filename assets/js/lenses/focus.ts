@@ -8,11 +8,10 @@
 
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { failed, application, command, lookup, put, query as read, type Input } from "../kernel.ts"
-import { EMPTY, entries, flag, href, html, resetIfUnchanged, type Html } from "../morph.ts"
+import { failed, application, command, lookup, put, query as read, row, type Input, type Row } from "../kernel.ts"
+import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
-type Row = Record<string, unknown>
 type Doc = {
   application: Row
   card: { score_100: number; stored: boolean; band: string; class: string; suggestion: Row; heat: Row } | null
@@ -26,7 +25,6 @@ type Doc = {
 
 const v = (): FocusView => model.focus
 const patch = (p: Partial<FocusView>) => set({ focus: { ...model.focus, ...p } })
-const str = (x: unknown): string => (x === null || x === undefined ? "" : String(x))
 const id = (): number => lookup("applications", "no", model.address.sub)
 
 const PROSE = ["notes", "battleplan", "letter_raw"] as const
@@ -47,16 +45,6 @@ function utf8(s: string): number {
     if (pair) i++
   }
   return n
-}
-
-/** A row of the replica by id, or null. */
-function rowOf(table: string, rowId: number): Row | null {
-  if (!rowId) return null
-  try {
-    return read<{ row: Row }>("get", { table, id: rowId }).row
-  } catch {
-    return null
-  }
 }
 
 // ------------------------------------------------------------------ view
@@ -116,7 +104,7 @@ function cv(d: Doc): Html {
 }
 
 function listing(a: Row, appId: number): Html {
-  const text = a.listing_raw === null || a.listing_raw === undefined ? "" : textOf(a.listing_raw)
+  const text = textOf(a.listing_raw)
   return html`<section class="card" data-key="listing"><h2>Listing ${a.listing_url ? html`<a href="${href(str(a.listing_url))}" rel="noopener noreferrer" target="_blank">open the posting ↗</a>` : EMPTY}</h2>
     ${text !== "" ? !v().listing
       ? html`<button type="button" data-act="listing" data-id="${appId}">Show the raw listing (${NUM.format(utf8(text))} bytes)</button>`
@@ -143,8 +131,8 @@ function prose(a: Row, appId: number): Html {
 }
 
 function around(a: Row, appId: number): Html {
-  const c = rowOf("contacts", Number(a.contact_id ?? 0))
-  const corp = rowOf("corporations", Number(a.corporation_id ?? 0))
+  const c = row("contacts", Number(a.contact_id ?? 0))
+  const corp = row("corporations", Number(a.corporation_id ?? 0))
   const messages = read<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 }).rows
   return html`<section class="card" data-key="around"><h2>People and company</h2>
     ${corp ? html`<p><b>${str(corp.name)}</b> <a href="/world/corporations?q=${encodeURIComponent(str(corp.name))}" data-nav>in the world</a>
@@ -195,10 +183,9 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
-const form = (el: HTMLElement): Record<string, string> => Object.fromEntries([...new FormData(el as HTMLFormElement)].map(([k, x]) => [k, String(x)]))
-
 function act(name: string, el: HTMLElement): void {
   const appId = Number(el.dataset.id ?? id())
+  const f = el instanceof HTMLFormElement ? fields(el) : {}
   switch (name) {
     case "stage": {
       const stage = el.dataset.stage ?? ""
@@ -229,21 +216,16 @@ function act(name: string, el: HTMLElement): void {
     case "cancel":
       return patch({ edit: "" })
     case "save-prose": {
-      const f = form(el)
       const field = el.dataset.field ?? ""
       // The edit was made against the row's rev when the form opened; a write since then is refused, not overwritten.
       return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId, expectRev: v().editRev })
         .then(() => patch({ edit: "" }))
         .catch(failed)
     }
-    case "note": {
-      const before = entries(el as HTMLFormElement)
-      return void command("note", appId, { stage: el.dataset.stage ?? "", body: form(el).body ?? "" })
-        .then(() => resetIfUnchanged(el as HTMLFormElement, before))
-        .catch(failed)
-    }
+    case "note":
+      return void resetAfter(el as HTMLFormElement, () => command("note", appId, { stage: el.dataset.stage ?? "", body: f.body ?? "" })).catch(failed)
     case "override":
-      return void command("heat_override", appId, { reason: form(el).reason ?? "" }).catch(failed)
+      return void command("heat_override", appId, { reason: f.reason ?? "" }).catch(failed)
   }
 }
 
