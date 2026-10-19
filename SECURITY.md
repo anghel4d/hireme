@@ -30,7 +30,11 @@ say `skip_account: true` on purpose. A session or key yields exactly one
 account, and no request path sets the account from user input. One
 sequencer per account is the only writer of the account's desk, world,
 mail, lanes and corpus rows; its `system` rows are written by the modules
-that own them (accounts, keys, factors, the trail, the outbox).
+that own them (accounts, keys, factors, the trail, the outbox). A key's
+replica and sequencer are its account's, and an MCP session id is good only
+under the key that opened it, so another account's ids, natural keys,
+resource URIs and session ids resolve to nothing (pinned on the wire by
+`agent_attack_test` and on `/mcp` by `mcp_test`).
 
 ## Sign-in
 

@@ -187,4 +187,78 @@ defmodule HiremeWeb.McpTest do
                })
              )
   end
+
+  test "another account's rows, ids, natural keys, uris and session are nothing to a key over /mcp, and its own writes move nothing of theirs",
+       ctx do
+    a = ctx.account.id
+    {[app], []} = run(a, op(:put, :applications, %{company: "Alpha", role: "R"}))
+    {[corp], []} = run(a, op(:put, :corporations, %{domain: "alpha.example", name: "Alpha"}))
+
+    {[_], []} =
+      run(
+        a,
+        op(
+          :put,
+          :corporations,
+          %{revenue_usd: 1.0, as_of: ~D[2026-10-01], source: "https://alpha.example/r"},
+          target: corp.id
+        )
+      )
+
+    no = Repo.get!(Hireme.Rows.Application, app.id).no
+    corp_uri = "hireme://corporations/alpha.example"
+    pa = mcp(ctx)
+    assert %{"result" => %{}} = call(pa, "resources/subscribe", %{uri: corp_uri})
+    rev_a = rev(a)
+
+    other = sign_in()
+    pb = mcp(%{ctx | session: other.session})
+    ok!(tool(pb, "lease", %{count: 16}))
+
+    for t <- ~w(applications corporations sources events),
+        do: assert(tool(pb, "find", %{table: t})["result"]["structuredContent"]["rows"] == [], t)
+
+    for {name, args} <- [
+          {"get", %{table: "applications", id: app.id}},
+          {"get", %{table: "corporations", key: %{domain: "alpha.example"}}},
+          {"text", %{table: "applications", id: app.id, column: "notes"}},
+          {"put", %{table: "applications", id: app.id, set: %{role: "Theirs"}}},
+          {"drop", %{table: "corporations", id: corp.id}},
+          {"stage", %{id: app.id, stage: "draft_ready"}},
+          {"lease", %{ids: [app.id]}}
+        ],
+        do:
+          assert(error?(tool(pb, name, args)), "#{name} #{inspect(args)} reached another account")
+
+    for uri <- ["hireme://applications/#{no}", corp_uri],
+        method <- ~w(resources/read resources/subscribe),
+        do: assert(%{"error" => _} = call(pb, method, %{uri: uri}), "#{method} #{uri}")
+
+    cited = %{table: "corporations", id: corp.id, column: "revenue_usd"}
+    assert [_] = tool(pa, "history", cited)["result"]["structuredContent"]["citations"]
+    assert tool(pb, "history", cited)["result"]["structuredContent"]["citations"] == []
+
+    ping = %{jsonrpc: "2.0", id: 1, method: "ping", params: %{}}
+    assert {404, _, _} = post(%{pb | sid: pa.sid}, ping)
+
+    # The same natural key makes this key's own row; theirs stands, unmoved and unannounced.
+    mine =
+      ok!(
+        tool(pb, "put", %{
+          table: "corporations",
+          key: %{domain: "alpha.example"},
+          set: %{name: "Beta"}
+        })
+      )
+
+    [_, id] = Regex.run(~r/-> id (\d+)/, text_of(mine))
+    assert String.to_integer(id) != corp.id
+
+    assert Repo.with_account(a, fn -> Repo.get!(Hireme.Rows.Corporation, corp.id).name end) ==
+             "Alpha"
+
+    assert rev(a) == rev_a
+    refute updated(pa, corp_uri, 1_500)
+    assert error?(tool(pa, "get", %{table: "corporations", id: String.to_integer(id)}))
+  end
 end
