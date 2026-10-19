@@ -9,12 +9,18 @@
 
 import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
-import { describe, guard, type Part } from "./guard.ts"
+import { guard, type Part } from "./guard.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { LENSES, dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { SCHEMA_REV } from "./gen/schema.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
+import account from "./lenses/account.ts"
+import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
+import focus from "./lenses/focus.ts"
+import lanes from "./lenses/lanes.ts"
+import outreach from "./lenses/outreach.ts"
+import world from "./lenses/world.ts"
 
 /** What every lens is: a view of the model, and the actions its markup names. */
 export interface View {
@@ -30,39 +36,8 @@ export interface View {
   key?(ev: KeyboardEvent): boolean
 }
 
-/**
- * The desk is in the entry; every other lens is its own chunk, fetched the first time it is wanted and
- * all of them in idle time once the first rows are drawn (not while the BOOT is landing), so a first visit finds it loaded.
- */
-const VIEWS: Partial<Record<Lens, View>> = { desk }
-const LAZY: Partial<Record<Lens, () => Promise<{ default: View }>>> = {
-  focus: () => import("./lenses/focus.ts"),
-  world: () => import("./lenses/world.ts"),
-  atlas: () => import("./lenses/atlas.ts"),
-  outreach: () => import("./lenses/outreach.ts"),
-  lanes: () => import("./lenses/lanes.ts"),
-  account: () => import("./lenses/account.ts"),
-}
-const asked = new Set<Lens>()
-function fetchLens(lens: Lens): void {
-  const load = LAZY[lens]
-  if (VIEWS[lens] || !load || asked.has(lens)) return
-  asked.add(lens)
-  load().then(
-    (m) => {
-      VIEWS[lens] = m.default
-      if (model.address.lens === lens) schedule()
-    },
-    (e: unknown) => {
-      asked.delete(lens)
-      notice("error", `The ${lens} lens did not load: ${describe(e).slice(0, 200)}. Reload the page.`)
-    },
-  )
-}
-function preload(): void {
-  const idle = (fn: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(() => fn()) : setTimeout(fn, 50))
-  for (const l of Object.keys(LAZY) as Lens[]) idle(() => fetchLens(l))
-}
+/** Every lens, in the one bundle: a chunk per lens was a request per lens on every load. */
+const VIEWS: Record<Lens, View> = { desk, focus, world, atlas, outreach, lanes, account }
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
@@ -89,7 +64,7 @@ function link(): Html {
  */
 const DERIVES: readonly Lens[] = ["desk", "focus"]
 const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "account"]
-const waiting = (lens: Lens): boolean => !VIEWS[lens] || (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
+const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
 
 /** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */
 let framed = false
@@ -123,7 +98,7 @@ const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" c
   v ? lensView(lens, v)
   : kernel.broken() ? html`<div class="empty"><p class="error" role="alert">This page could not load its data: the kernel did not load.</p>
       <p><a class="button" href="${format(model.address)}">Reload</a> If it keeps failing, sign out and sign in again.</p></div>`
-  : html`<p class="empty">${VIEWS[lens] && waiting(lens) ? "Restoring the desk…" : "Loading…"}</p>`}</main>`
+  : html`<p class="empty">Restoring the desk…</p>`}</main>`
 
 // A parking lens keeps the children it has (morph leaves an owned subtree's children alone), so it is never redrawn to park.
 const parkedMain = (l: Lens): Html => html`<main class="lens lens-${l} parked" data-key="lens-${l}" data-morph="own" inert aria-hidden="true"></main>`
@@ -149,7 +124,6 @@ function shell(): Html {
 
 function render(): void {
   if (!root || held()) return
-  fetchLens(model.address.lens)
   const hold = waiting(model.address.lens)
   const v = hold ? undefined : VIEWS[model.address.lens]
   const where = format(model.address)
@@ -168,10 +142,6 @@ function render(): void {
     morph(root, next)
     drawn = next.text
   }
-  if (!preloaded && rowsIn()) {
-    preloaded = true
-    preload()
-  }
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
   if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
@@ -184,7 +154,6 @@ function render(): void {
 }
 
 const focusedOnce = new WeakSet<Element>()
-let preloaded = false
 let drawn = ""
 
 onRender(render)

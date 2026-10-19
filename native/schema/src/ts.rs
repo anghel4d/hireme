@@ -202,7 +202,8 @@ pub fn emit(s: &Schema) -> String {
         ));
     }
     w("};");
-    w("export const TABLES = Object.fromEntries(Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };");
+    // Both calls pure, so a bundle that never reads TABLES (the inlined early script) drops the catalog.
+    w("export const TABLES = /* @__PURE__ */ Object.fromEntries(/* @__PURE__ */ Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };");
     w("");
 
     w("export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {");

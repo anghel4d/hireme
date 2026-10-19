@@ -127,9 +127,8 @@ defmodule HiremeWeb.PageController do
     <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
     <meta name="hireme-wire" content="#{wire_hash()}" />
     <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
-    <link rel="preload" href="/wasm/kernel.wasm" as="fetch" crossorigin />
+    <link rel="preload" href="#{Auth.static("/wasm/kernel.wasm")}" as="fetch" crossorigin />
     <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
-    #{for c <- Auth.chunks(), do: ~s(<link rel="modulepreload" href="/assets/#{c}" />)}
     #{Auth.early_script()}
     <script type="module" src="#{Auth.static("/assets/app.js")}"></script>
     """

@@ -483,8 +483,8 @@ defmodule Mix.Tasks.Hireme.Bundle do
   use Mix.Task
 
   @bundles [
-    # Each lens but the desk is a chunk app.ts imports on demand, named by its content.
-    ~w(js/app.ts css/app.css --format=esm --external=/wasm/* --splitting --chunk-naming=[name]-[hash].[ext]),
+    # One file: a chunk per lens was a request per lens on every load.
+    ~w(js/app.ts css/app.css --format=esm --external=/wasm/*),
     ~w(js/early.ts --format=iife --minify),
     ~w(js/auth/factor.ts --format=esm)
   ]

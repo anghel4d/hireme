@@ -161,7 +161,7 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "acct_audit": {"id":39,"name":"acct_audit","domain":"system","residency":"projection","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":"audit","cols":[["id",1,"id",545],["kind",8,"str",1],["ip",9,"str",0],["user_agent",10,"str",0],["meta",11,"json",0],["key_id",12,"ref",16384,"api_keys"],["session_id",13,"ref",16384,"sessions"],["security",14,"bool",33,null,"true"],["inserted_at",4,"time",545]]},
   "acct_info": {"id":40,"name":"acct_info","domain":"system","residency":"wire","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["name",1,"str",0],["status",2,"enum",1,"account_status"],["recovery_codes_left",3,"u32",1]]},
 };
-export const TABLES = Object.fromEntries(Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };
+export const TABLES = /* @__PURE__ */ Object.fromEntries(/* @__PURE__ */ Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };
 
 export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {
   "stage": {"id":1,"name":"stage","table":"applications","humanOnly":false,"params":[{"name":"stage","id":29,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"stage"},{"name":"note","id":65025,"type":"text","typeCode":12,"wire":2,"required":false,"column":false,"ref":null,"enum":null}]},
