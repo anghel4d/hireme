@@ -442,7 +442,9 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 let code = if r == pipeline::Refusal::FireHold { refusal::FIRE_HOLD } else { refusal::STAGE };
                 return refuse(code, json!({"from": from.name(), "to": to.name(), "rule": r.name()}));
             }
-            if !from.queued() && to.queued() {
+            // On entering the queue, and again on going out: drafts carry no
+            // heat, so two queued at one company are each judged as they send.
+            if (!from.queued() && to.queued()) || (to == Stage::Submitted && from != Stage::Submitted) {
                 governor(rows, board, id, to, ctx)?;
             }
             Ok(moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx))
@@ -513,10 +515,10 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     }
 }
 
-/// The heat governor on an application entering the queue.
+/// The heat governor on an application entering the queue or going out.
 fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Result<(), Refusal> {
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
-    let Some(seat) = board::seat(t, id) else { return Ok(()) };
+    let Some(seat) = board::seat(rows, t, id) else { return Ok(()) };
     let (ix, _) = board.governor(rows, ctx.today);
     let mut v = heat::verdict(ix, &seat, &[]);
     if v.allow {

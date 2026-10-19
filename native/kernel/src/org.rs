@@ -95,6 +95,18 @@ impl Family {
     }
 }
 
+/// A department by its discriminant (the governor's per-cell loads); past the last is `Other`.
+pub fn department_of(i: usize) -> Department {
+    use Department::*;
+    [Infra, Research, Security, Data, Product, Eng].get(i).copied().unwrap_or(Other)
+}
+
+/// A family by its discriminant; past the last is `Other`.
+pub fn family_of(i: usize) -> Family {
+    use Family::*;
+    [SoftwareEngineer, ResearchEngineer, ResearchScientist, Sre, DataEngineer, SecurityEngineer].get(i).copied().unwrap_or(Other)
+}
+
 /// The size tier of a company by its normalized name. Any word of the
 /// name, or the name with its spaces removed ("Deep Mind" → "deepmind"),
 /// can name a tier.

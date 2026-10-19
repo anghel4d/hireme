@@ -1,20 +1,33 @@
 //! The heat governor: the campaign must not snap onto one company or one
-//! applicant tracking system. Heat gates the submit queue; FIRE HOLD
-//! still owns submit, and nothing here sends anything.
+//! applicant tracking system. Heat gates the move into the queue and the
+//! submission itself; FIRE HOLD still owns submit, and nothing here sends
+//! anything.
 //!
-//! Every hot application (queued, or replied or closed after being sent)
-//! puts a load of `application_load` on its company, its ATS vendor and
-//! its ATS tenant, decaying from the latest of its submission and its
-//! reply that exists (else the day it entered its stage) with each one's
-//! half-life: `load · 0.5^(days / half_life)`, and counting for nothing
-//! once under `load_floor`. A company's cap scales with its size tier. An
-//! application entering the queue adds its increment: the base load, plus
-//! `same_department_penalty` if a hot peer at that company shares its
-//! department, plus `clone_penalty` if one shares its role family (live
-//! peers only). The move is deferred when the company would pass its cap,
-//! the vendor or tenant would pass theirs, or its batch already holds
-//! `ats_batch_cap` of that vendor. A heat override with a written reason
-//! lets one application past, and the verdict says so.
+//! Only what went out carries heat: a submitted application, or one in
+//! `reply`/`closed` after something was sent. A draft (`fire_ready`,
+//! `open_fire`) carries none. Each sent application weighs what the
+//! other side has seen of it: submitted and unanswered `application_load`,
+//! in conversation `conversation_weight`, rejected `rejected_weight`,
+//! ghosted `ghosted_weight`, withdrawn or declined `closed_weight`, each
+//! decaying from its last contact (`weight · 0.5^(days / half_life)`; a
+//! rejection at `rejected_half_life`), and counting for nothing under
+//! `load_floor`.
+//!
+//! A company's load on one application is its peers' loads weighted by
+//! how close each is to that role: the same family `similar_family`, the
+//! same department (two roles the lexicon cannot place count as one)
+//! `similar_department`, any other team `similar_other`. Its capacity is
+//! `1 + log2(headcount / headcount_base)` in [`cap_min`, `cap_max`] when its
+//! corporation's headcount is known, else its size tier's cap. An ATS
+//! tenant or vendor sees volume, not teams: their loads are unweighted.
+//!
+//! A move into the queue (and the submission) is deferred when the
+//! company would pass its capacity, the vendor or tenant theirs, its batch
+//! already holds `ats_batch_cap` sent on that vendor, the company made an
+//! offer, or it rejected the same role family under `reapply_days` ago. A
+//! heat override with a written reason lets one application past. The
+//! board's class is the load already there over the capacity: an
+//! untouched company is cool.
 //!
 //! The defaults are the standing order (`docs/heat.md`); an account's
 //! `settings.heat_config` overrides any of them by name.
@@ -22,6 +35,8 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use schema::enums;
 
 use crate::ats::{self, Ats, Vendor};
 use crate::org::{self, Department, Family, Size};
@@ -31,15 +46,25 @@ use crate::Day;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub company_half_life: f64,
+    pub rejected_half_life: f64,
     pub ats_vendor_half_life: f64,
     pub ats_tenant_half_life: f64,
     pub application_load: f64,
-    pub same_department_penalty: f64,
-    pub clone_penalty: f64,
+    pub conversation_weight: f64,
+    pub rejected_weight: f64,
+    pub ghosted_weight: f64,
+    pub closed_weight: f64,
+    pub similar_family: f64,
+    pub similar_department: f64,
+    pub similar_other: f64,
+    pub reapply_days: f64,
     pub mega_cap: f64,
     pub large_cap: f64,
     pub mid_cap: f64,
     pub small_cap: f64,
+    pub headcount_base: f64,
+    pub cap_min: f64,
+    pub cap_max: f64,
     pub ats_vendor_cap: f64,
     pub ats_tenant_cap: f64,
     pub ats_batch_cap: f64,
@@ -54,21 +79,37 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            // A company's load halves in about a month (the 30–45 day window).
-            company_half_life: 35.0,
+            // A company's memory of an application halves in a month.
+            company_half_life: 30.0,
+            // A no is remembered longer: reapplying soon after one reads badly.
+            rejected_half_life: 90.0,
             // Vendor-level profiling across companies forgets faster.
             ats_vendor_half_life: 14.0,
             // One tenant is usually one employer.
             ats_tenant_half_life: 21.0,
+            // Submitted, no answer yet: the ATS has it.
             application_load: 1.0,
-            same_department_penalty: 0.6,
-            clone_penalty: 0.6,
+            // An active process: another application there now competes with it.
+            conversation_weight: 2.0,
+            rejected_weight: 1.5,
+            // Nobody looked.
+            ghosted_weight: 0.7,
+            // Withdrawn or declined: they saw the candidate leave.
+            closed_weight: 1.0,
+            similar_family: 1.0,
+            similar_department: 0.6,
+            similar_other: 0.25,
+            reapply_days: 90.0,
             // A few roles across different orgs.
             mega_cap: 4.0,
             large_cap: 2.5,
             mid_cap: 1.5,
-            // One seat, maybe two after decay.
-            small_cap: 1.0,
+            // Small is what the lexicon cannot place: unknown, not tiny.
+            small_cap: 1.5,
+            // 1 + log2(headcount / 100): ~1 at 100 people, ~4 at 1,000, ~7.6 at 10,000.
+            headcount_base: 100.0,
+            cap_min: 1.0,
+            cap_max: 8.0,
             // So one vendor is never the whole campaign.
             ats_vendor_cap: 40.0,
             ats_tenant_cap: 3.0,
@@ -76,7 +117,7 @@ impl Default for Config {
             ats_batch_cap: 20.0,
             cool_ratio: 0.5,
             hot_ratio: 0.8,
-            // At a 35-day half-life a seat stops counting after 152 days.
+            // At a 30-day half-life a plain submission stops counting after 130 days.
             load_floor: 0.05,
         }
     }
@@ -85,41 +126,57 @@ impl Default for Config {
 impl Config {
     /// The defaults with every recognized key of a JSON object applied.
     /// A key that is unknown, not a finite number, or out of its range is
-    /// ignored (the two penalties may be 0, everything else must be
-    /// positive, `application_load` at most 16), and a cool ratio above the hot ratio drops both, so a bad
-    /// setting can loosen nothing by accident.
+    /// ignored (the similarities may be 0 and are at most 1, `reapply_days`
+    /// may be 0, a weight is at most 16, everything else must be
+    /// positive), and a cool ratio above the hot ratio, or a `cap_min`
+    /// above `cap_max`, drops both, so a bad setting can loosen nothing by accident.
     pub fn from_json(json: Option<&str>) -> Config {
         let mut c = Config::default();
         let Some(Ok(serde_json::Value::Object(m))) = json.map(serde_json::from_str::<serde_json::Value>) else {
             return c;
         };
         for (k, slot) in c.fields() {
-            let zero_ok = matches!(k, "same_department_penalty" | "clone_penalty");
-            let in_range = |x: f64| (x > 0.0 || (zero_ok && x == 0.0)) && (k != "application_load" || x <= 16.0);
+            let similar = k.starts_with("similar_");
+            let zero_ok = similar || k == "reapply_days";
+            let weight = k == "application_load" || k.ends_with("_weight");
+            let in_range = |x: f64| (x > 0.0 || (zero_ok && x == 0.0)) && (!weight || x <= 16.0) && (!similar || x <= 1.0);
             if let Some(x) = m.get(k).and_then(serde_json::Value::as_f64).filter(|x| x.is_finite() && in_range(*x)) {
                 *slot = x;
             }
         }
+        let d = Config::default();
         if c.cool_ratio > c.hot_ratio {
-            let d = Config::default();
             (c.cool_ratio, c.hot_ratio) = (d.cool_ratio, d.hot_ratio);
+        }
+        if c.cap_min > c.cap_max {
+            (c.cap_min, c.cap_max) = (d.cap_min, d.cap_max);
         }
         c
     }
 
     /// Every setting under its `heat_config` key.
-    fn fields(&mut self) -> [(&'static str, &mut f64); 16] {
+    fn fields(&mut self) -> [(&'static str, &mut f64); 26] {
         [
             ("company_half_life", &mut self.company_half_life),
+            ("rejected_half_life", &mut self.rejected_half_life),
             ("ats_vendor_half_life", &mut self.ats_vendor_half_life),
             ("ats_tenant_half_life", &mut self.ats_tenant_half_life),
             ("application_load", &mut self.application_load),
-            ("same_department_penalty", &mut self.same_department_penalty),
-            ("clone_penalty", &mut self.clone_penalty),
+            ("conversation_weight", &mut self.conversation_weight),
+            ("rejected_weight", &mut self.rejected_weight),
+            ("ghosted_weight", &mut self.ghosted_weight),
+            ("closed_weight", &mut self.closed_weight),
+            ("similar_family", &mut self.similar_family),
+            ("similar_department", &mut self.similar_department),
+            ("similar_other", &mut self.similar_other),
+            ("reapply_days", &mut self.reapply_days),
             ("mega_cap", &mut self.mega_cap),
             ("large_cap", &mut self.large_cap),
             ("mid_cap", &mut self.mid_cap),
             ("small_cap", &mut self.small_cap),
+            ("headcount_base", &mut self.headcount_base),
+            ("cap_min", &mut self.cap_min),
+            ("cap_max", &mut self.cap_max),
             ("ats_vendor_cap", &mut self.ats_vendor_cap),
             ("ats_tenant_cap", &mut self.ats_tenant_cap),
             ("ats_batch_cap", &mut self.ats_batch_cap),
@@ -129,7 +186,8 @@ impl Config {
         ]
     }
 
-    pub fn cap(&self, size: Size) -> f64 {
+    /// A size tier's capacity.
+    pub fn tier_cap(&self, size: Size) -> f64 {
         match size {
             Size::Mega => self.mega_cap,
             Size::Large => self.large_cap,
@@ -137,11 +195,43 @@ impl Config {
             Size::Small => self.small_cap,
         }
     }
+
+    /// A company's capacity: from its headcount when known, else its tier.
+    pub fn cap(&self, seat: &Seat) -> f64 {
+        match seat.headcount.filter(|h| *h > 0) {
+            Some(h) => (1.0 + libm::log2(h as f64 / self.headcount_base)).clamp(self.cap_min, self.cap_max),
+            None => self.tier_cap(seat.size),
+        }
+    }
+
+    /// How close a peer's role is to the role being judged.
+    fn similarity(&self, dept: Department, fam: Family, to: &Seat) -> f64 {
+        if fam == to.family && fam != Family::Other {
+            self.similar_family
+        } else if dept == to.department {
+            self.similar_department
+        } else {
+            self.similar_other
+        }
+    }
 }
 
 /// `amount` after `days` of decay at `half_life`. Future days do not grow it.
 pub fn decay(amount: f64, days: i64, half_life: f64) -> f64 {
     if days <= 0 { amount } else { amount * libm::pow(0.5, days as f64 / half_life) }
+}
+
+/// What the other side has seen of a sent application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Not sent: no heat.
+    Unsent,
+    Submitted,
+    Conversation,
+    Rejected,
+    Ghosted,
+    Closed,
+    Offer,
 }
 
 /// What the governor reads of one application, parsed once.
@@ -152,13 +242,15 @@ pub struct Seat {
     /// else its normalized name.
     pub key: String,
     pub size: Size,
+    /// Its corporation's headcount, when cited.
+    pub headcount: Option<u32>,
     pub department: Department,
     pub family: Family,
     pub ats: Ats,
     pub stage: Stage,
-    /// Carries load: queued (`fire_ready`, `open_fire`, `submitted`), or in
-    /// `reply`/`closed` after having been sent. A listing closed before
-    /// anything went out costs nothing.
+    pub status: Status,
+    /// Carries load: something went out (submitted, or replied or closed
+    /// after a submission). A draft costs nothing.
     pub hot: bool,
     /// The day its load decays from: the latest of its submission and its
     /// reply that exists, else the day it entered its stage.
@@ -174,6 +266,7 @@ pub struct Seat {
 pub struct SeatIn<'a> {
     pub id: u32,
     pub corporation_id: Option<u32>,
+    pub headcount: Option<u32>,
     pub company: &'a str,
     pub role: &'a str,
     pub url: &'a str,
@@ -181,6 +274,8 @@ pub struct SeatIn<'a> {
     pub stage_on: Option<Day>,
     pub applied_on: Option<Day>,
     pub replied_on: Option<Day>,
+    /// `applications.outcome`'s code, when set.
+    pub outcome: Option<u32>,
     /// Whether anything went out (its rail's `submitted` or `reply` rung reached).
     pub sent: bool,
     pub score: u8,
@@ -200,19 +295,31 @@ impl Seat {
     /// role's department and family, already read (the board reads them
     /// once per distinct name and title).
     pub fn from_normalized(f: &SeatIn, company: &str, size: Size, department: Department, family: Family) -> Seat {
-        let sent = f.sent || f.stage == Stage::Submitted;
+        let sent = (f.sent || f.stage == Stage::Submitted) && f.stage.after_send();
         // A control character no normalized name can contain.
         let key = f.corporation_id.map_or_else(|| String::from(company), |c| alloc::format!("\u{1}{c}"));
-        let ats = ats::parse(f.url);
+        let status = match f.outcome {
+            _ if !sent => Status::Unsent,
+            Some(o) if o == enums::outcome::OFFER as u32 => Status::Offer,
+            Some(o) if o == enums::outcome::REJECTED as u32 => Status::Rejected,
+            Some(o) if o == enums::outcome::GHOSTED as u32 => Status::Ghosted,
+            Some(_) => Status::Closed,
+            // Closing ends the process: it weighs as a withdrawal, whatever was said.
+            None if f.stage == Stage::Closed => Status::Closed,
+            None if f.replied_on.is_some() || f.stage == Stage::Reply => Status::Conversation,
+            None => Status::Submitted,
+        };
         Seat {
             id: f.id,
             key,
             size,
+            headcount: f.headcount,
             department,
             family,
-            ats,
+            ats: ats::parse(f.url),
             stage: f.stage,
-            hot: f.stage.queued() || (f.stage.after_send() && sent),
+            status,
+            hot: sent,
             // The last contact with the company, else the stage's day: closing
             // an answered application is no new contact and must not re-warm it.
             since: f.applied_on.max(f.replied_on).or(f.stage_on),
@@ -227,6 +334,18 @@ impl Seat {
     fn age(&self, today: Day) -> i64 {
         self.since.map_or(i64::MIN / 2, |d| today as i64 - d as i64)
     }
+
+    /// Its weight before decay, and the half-life its company remembers it by.
+    fn weight(&self, cfg: &Config) -> (f64, f64) {
+        match self.status {
+            Status::Unsent => (0.0, cfg.company_half_life),
+            Status::Submitted | Status::Offer => (cfg.application_load, cfg.company_half_life),
+            Status::Conversation => (cfg.conversation_weight, cfg.company_half_life),
+            Status::Rejected => (cfg.rejected_weight, cfg.rejected_half_life),
+            Status::Ghosted => (cfg.ghosted_weight, cfg.company_half_life),
+            Status::Closed => (cfg.closed_weight, cfg.company_half_life),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,11 +356,13 @@ pub enum Reason {
     VendorCap,
     TenantCap,
     BatchCap,
+    Offer,
+    Reapply,
 }
 
 impl Reason {
     pub fn name(self) -> &'static str {
-        ["ok", "override", "company_cap", "ats_vendor_cap", "ats_tenant_cap", "ats_batch_cap"][self as usize]
+        ["ok", "override", "company_cap", "ats_vendor_cap", "ats_tenant_cap", "ats_batch_cap", "offer", "reapply"][self as usize]
     }
 }
 
@@ -249,6 +370,8 @@ impl Reason {
 pub struct Verdict {
     pub allow: bool,
     pub reason: Reason,
+    /// The company's load on this role: its sent peers, weighted by what
+    /// happened to each and how close each role is, decayed.
     pub company_load: f64,
     pub company_cap: f64,
     pub increment: f64,
@@ -265,9 +388,10 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    /// The company's projected load over its cap.
+    /// The company's load already there over its capacity: how crowded
+    /// the company is around this role, without the role itself.
     pub fn ratio(&self) -> f64 {
-        if self.company_cap > 0.0 { (self.company_load + self.increment) / self.company_cap } else { f64::INFINITY }
+        if self.company_cap > 0.0 { self.company_load / self.company_cap } else { f64::INFINITY }
     }
 
     /// The verdict as JSON, with the seat's ATS tenant.
@@ -280,6 +404,7 @@ impl Verdict {
             "company_cap": self.company_cap,
             "increment": self.increment,
             "size": self.size.name(),
+            "headcount": seat.headcount,
             "ats_vendor": self.vendor.name(),
             "vendor_load": self.vendor_load,
             "vendor_cap": self.vendor_cap,
@@ -327,7 +452,7 @@ impl Class {
 /// Loads are kept in fixed point, 2^-44 each, so a group's total is an
 /// exact integer sum: the same in any order, and a member's own share
 /// comes out of it exactly. 2^20 whole loads fit: 50k applications at the
-/// largest `application_load` (16).
+/// largest weight (16).
 const SCALE: f64 = 17_592_186_044_416.0;
 
 fn fp(x: f64) -> u64 {
@@ -338,11 +463,28 @@ fn real(x: u64) -> f64 {
     x as f64 / SCALE
 }
 
+/// One count per variant; `Other` is each enum's last.
+const DEPARTMENTS: usize = Department::Other as usize + 1;
+const FAMILIES: usize = Family::Other as usize + 1;
+
+const COMPANY: usize = 0;
+const VENDOR: usize = 1;
+const TENANT: usize = 2;
+
+/// A seat's load at group kind `k` (company, vendor, tenant) `age` days
+/// on, 0 under the floor. A vendor and a tenant keep their own half-lives
+/// whatever happened; a company remembers a rejection longer.
+fn load_of(s: &Seat, age: i64, k: usize, cfg: &Config) -> u64 {
+    let (w, company) = s.weight(cfg);
+    let half = [company, cfg.ats_vendor_half_life, cfg.ats_tenant_half_life][k];
+    let l = decay(w, age, half);
+    if l >= cfg.load_floor { fp(l) } else { 0 }
+}
+
 /// The hot seats of an account on one day, each seat's decayed loads
 /// computed once and grouped by company, vendor, tenant and batch, so a
-/// verdict reads only its groups and a group total is one lookup.
-/// [`Index::update`] moves one seat between groups; an index kept current
-/// that way answers exactly as a fresh one.
+/// verdict reads only its groups. [`Index::update`] moves one seat between
+/// groups; an index kept current that way answers exactly as a fresh one.
 pub struct Index {
     today: Day,
     cfg: Config,
@@ -353,8 +495,8 @@ pub struct Index {
     by_company: crate::keyed::Map<String, Group>,
     by_vendor: crate::fx::Map<Vendor, Group>,
     by_tenant: crate::fx::Map<Vendor, crate::keyed::Map<String, Group>>,
-    /// Queued members per (batch, vendor), with their vendor load: a
-    /// member counts toward the batch cap while that load is live.
+    /// Sent members per (batch, vendor), with their vendor load: a member
+    /// counts toward the batch cap while that load is live.
     by_batch_vendor: crate::fx::Map<(u32, Vendor), Group>,
 }
 
@@ -363,70 +505,42 @@ struct Group {
     /// Member id → its load at this group's half-life today, 0 under the floor.
     members: BTreeMap<u32, u64>,
     total: u64,
-    /// Members by department and by role family (a company's group only),
-    /// so the penalties read two counts instead of the members.
-    depts: [u32; DEPARTMENTS],
-    fams: [u32; FAMILIES],
-    /// Members by age in days at the index's day: a load on any later day
-    /// is one decay per distinct age, never a walk of the members.
-    ages: BTreeMap<i64, u32>,
+    /// A company group's loads by (department, family), so a role's
+    /// similarity-weighted load reads one cell per pair, not the members.
+    joint: Vec<u64>,
 }
 
 impl Group {
-    fn put(&mut self, id: u32, l: u64, age: i64) {
+    fn put(&mut self, id: u32, l: u64) {
         self.total = self.total.saturating_add(l);
         if let Some(old) = self.members.insert(id, l) {
             self.total = self.total.saturating_sub(old);
-        } else {
-            *self.ages.entry(age).or_insert(0) += 1;
         }
     }
 
-    fn take(&mut self, id: u32, age: i64) -> bool {
-        match self.members.remove(&id) {
-            Some(old) => {
-                self.total = self.total.saturating_sub(old);
-                if let Some(n) = self.ages.get_mut(&age) {
-                    *n -= 1;
-                    if *n == 0 {
-                        self.ages.remove(&age);
-                    }
-                }
-                true
-            }
-            None => false,
-        }
+    fn take(&mut self, id: u32) -> Option<u64> {
+        let old = self.members.remove(&id)?;
+        self.total = self.total.saturating_sub(old);
+        Some(old)
     }
 }
 
-/// One count per variant; `Other` is each enum's last.
-const DEPARTMENTS: usize = Department::Other as usize + 1;
-const FAMILIES: usize = Family::Other as usize + 1;
-
-const COMPANY: usize = 0;
-const VENDOR: usize = 1;
-const TENANT: usize = 2;
+fn cell(d: Department, f: Family) -> usize {
+    d as usize * FAMILIES + f as usize
+}
 
 #[allow(clippy::type_complexity)]
 type Keys = (Option<String>, Option<Vendor>, Option<(Vendor, String)>, Option<(u32, Vendor)>);
 
-/// The group keys a seat belongs to; a batch counts only queued seats.
+/// The group keys a seat belongs to.
 fn keys(s: &Seat) -> Keys {
     let known = s.ats.vendor != Vendor::Unknown;
     (
         (!s.key.is_empty()).then(|| s.key.clone()),
         known.then_some(s.ats.vendor),
         s.ats.tenant.clone().filter(|_| known).map(|t| (s.ats.vendor, t)),
-        s.batch_id.filter(|_| known && s.stage.queued()).map(|b| (b, s.ats.vendor)),
+        s.batch_id.filter(|_| known).map(|b| (b, s.ats.vendor)),
     )
-}
-
-/// A seat's load at half-life `k` (company, vendor, tenant) `age` days
-/// on, 0 under the floor.
-fn load_at(age: i64, k: usize, cfg: &Config) -> u64 {
-    let half = [cfg.company_half_life, cfg.ats_vendor_half_life, cfg.ats_tenant_half_life][k];
-    let l = decay(cfg.application_load, age, half);
-    if l >= cfg.load_floor { fp(l) } else { 0 }
 }
 
 impl Index {
@@ -459,24 +573,28 @@ impl Index {
     fn join(&mut self, s: Seat) {
         let (c, v, t, bv) = keys(&s);
         let age = s.age(self.today);
-        let l: [u64; 3] = core::array::from_fn(|k| load_at(age, k, &self.cfg));
+        let l: [u64; 3] = core::array::from_fn(|k| load_of(&s, age, k, &self.cfg));
         let id = s.id;
-        // A member whose load is already under the floor today adds
-        // nothing to any group on any later day, so it is left out.
-        if let Some(c) = c.filter(|_| l[COMPANY] > 0) {
+        // A company keeps an offer or a rejection that still matters even
+        // once its load is under the floor: the reapply window and the offer
+        // read the members, not the load.
+        if let Some(c) = c {
             let g = self.by_company.entry(c).or_default();
-            g.put(id, l[COMPANY], age);
-            g.depts[s.department as usize] += 1;
-            g.fams[s.family as usize] += 1;
+            if g.joint.is_empty() {
+                g.joint = alloc::vec![0; DEPARTMENTS * FAMILIES];
+            }
+            g.put(id, l[COMPANY]);
+            let j = &mut g.joint[cell(s.department, s.family)];
+            *j = j.saturating_add(l[COMPANY]);
         }
         if let Some(v) = v.filter(|_| l[VENDOR] > 0) {
-            self.by_vendor.entry(v).or_default().put(id, l[VENDOR], age);
+            self.by_vendor.entry(v).or_default().put(id, l[VENDOR]);
         }
         if let Some((v, t)) = t.filter(|_| l[TENANT] > 0) {
-            self.by_tenant.entry(v).or_default().entry(t).or_default().put(id, l[TENANT], age);
+            self.by_tenant.entry(v).or_default().entry(t).or_default().put(id, l[TENANT]);
         }
         if let Some(bv) = bv.filter(|_| l[VENDOR] > 0) {
-            self.by_batch_vendor.entry(bv).or_default().put(id, l[VENDOR], age);
+            self.by_batch_vendor.entry(bv).or_default().put(id, l[VENDOR]);
         }
         self.seats.insert(id, s);
     }
@@ -484,21 +602,20 @@ impl Index {
     fn leave(&mut self, id: u32) {
         let Some(s) = self.seats.remove(&id) else { return };
         let (c, v, t, bv) = keys(&s);
-        let age = s.age(self.today);
         if let Some(g) = c.and_then(|c| self.by_company.get_mut(&c))
-            && g.take(id, age)
+            && let Some(old) = g.take(id)
         {
-            g.depts[s.department as usize] -= 1;
-            g.fams[s.family as usize] -= 1;
+            let j = &mut g.joint[cell(s.department, s.family)];
+            *j = j.saturating_sub(old);
         }
         if let Some(g) = v.and_then(|v| self.by_vendor.get_mut(&v)) {
-            g.take(id, age);
+            g.take(id);
         }
         if let Some(g) = t.and_then(|(v, t)| self.by_tenant.get_mut(&v)?.get_mut(&t)) {
-            g.take(id, age);
+            g.take(id);
         }
         if let Some(g) = bv.and_then(|bv| self.by_batch_vendor.get_mut(&bv)) {
-            g.take(id, age);
+            g.take(id);
         }
     }
 
@@ -507,35 +624,62 @@ impl Index {
         self.seats.contains_key(&id)
     }
 
-    /// The age of `seat` if it is a member of `g` (and so its own share
-    /// comes out of `g`'s load).
-    fn own_age(&self, g: &Group, seat: &Seat) -> Option<i64> {
-        g.members.contains_key(&seat.id).then(|| self.seats.get(&seat.id).map(|s| s.age(self.today))).flatten()
+    /// The members of `g` other than `seat`, with their seats.
+    fn peers<'g>(&'g self, g: &'g Group, seat: &'g Seat) -> impl Iterator<Item = &'g Seat> + 'g {
+        g.members.keys().filter(move |m| **m != seat.id).filter_map(|m| self.seats.get(m))
     }
 
-    /// Members of `g` other than `seat`, by age, with their load `dt`
-    /// days on at half-life `k`: one decay per distinct age.
-    fn by_age<'g>(&'g self, g: &'g Group, k: usize, seat: &Seat, dt: i64) -> impl Iterator<Item = (u32, u64)> + 'g {
-        let own = self.own_age(g, seat);
-        g.ages.iter().map(move |(age, n)| (n - (own == Some(*age)) as u32, load_at(age + dt, k, &self.cfg)))
-    }
-
-    /// A group's load for `seat`: the total less its own share today, the
-    /// members by age on a later day.
+    /// An unweighted group's load for `seat`: today its total less its own
+    /// share, on a later day its other members' loads then.
     fn load(&self, g: Option<&Group>, k: usize, seat: &Seat, at: At) -> u64 {
         match (g, at) {
             (None, _) => 0,
             (Some(g), At::Today) => g.total.saturating_sub(g.members.get(&seat.id).copied().unwrap_or(0)),
-            (Some(g), At::Day(dt)) => self.by_age(g, k, seat, dt).fold(0u64, |a, (n, l)| a.saturating_add(l.saturating_mul(n as u64))),
+            (Some(g), At::Day(dt)) => {
+                self.peers(g, seat).fold(0u64, |a, p| a.saturating_add(load_of(p, p.age(self.today) + dt, k, &self.cfg)))
+            }
         }
     }
 
-    /// How many members of `g` other than `seat` still carry load at
-    /// half-life `k` on a day.
-    fn live(&self, g: &Group, k: usize, seat: &Seat, at: At) -> u32 {
+    /// A company's load on `seat`'s role: each (department, family) cell
+    /// at its similarity, its own share out.
+    fn company_load(&self, g: &Group, seat: &Seat, at: At) -> f64 {
+        let cfg = &self.cfg;
+        let mut joint;
+        let cells: &[u64] = match at {
+            At::Today => &g.joint,
+            At::Day(dt) => {
+                joint = alloc::vec![0u64; DEPARTMENTS * FAMILIES];
+                for p in self.peers(g, seat) {
+                    let j = &mut joint[cell(p.department, p.family)];
+                    *j = j.saturating_add(load_of(p, p.age(self.today) + dt, COMPANY, cfg));
+                }
+                &joint
+            }
+        };
+        let own = match (at, g.members.get(&seat.id), self.seats.get(&seat.id)) {
+            (At::Today, Some(l), Some(o)) => Some((cell(o.department, o.family), *l)),
+            _ => None,
+        };
+        let mut load = 0.0;
+        for (i, &x) in cells.iter().enumerate() {
+            let x = match own {
+                Some((c, l)) if c == i => x.saturating_sub(l),
+                _ => x,
+            };
+            if x > 0 {
+                let (d, f) = (i / FAMILIES, i % FAMILIES);
+                load += real(x) * cfg.similarity(org::department_of(d), org::family_of(f), seat);
+            }
+        }
+        load
+    }
+
+    /// How many members of `g` other than `seat` still carry vendor load on a day.
+    fn live(&self, g: &Group, seat: &Seat, at: At) -> u32 {
         match at {
             At::Today => g.members.iter().filter(|(m, l)| **m != seat.id && **l > 0).count() as u32,
-            At::Day(dt) => self.by_age(g, k, seat, dt).filter(|(_, l)| *l > 0).map(|(n, _)| n).sum(),
+            At::Day(dt) => self.peers(g, seat).filter(|p| load_of(p, p.age(self.today) + dt, VENDOR, &self.cfg) > 0).count() as u32,
         }
     }
 }
@@ -556,11 +700,13 @@ impl At {
     }
 }
 
-/// One of the governor's four conditions, each monotone in time (loads,
-/// live peers and live batch members only shrink), so each has its own
-/// first passing day. Checked in this order.
+/// One of the governor's conditions, each monotone in time (loads and
+/// live peers only shrink, an offer and a reapply window only lapse), so
+/// each has its own first passing day. Checked in this order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cond {
+    Offer,
+    Reapply,
     Batch,
     Vendor,
     Tenant,
@@ -568,15 +714,15 @@ enum Cond {
 }
 
 impl Cond {
-    const ALL: [Cond; 4] = [Cond::Batch, Cond::Vendor, Cond::Tenant, Cond::Company];
+    const ALL: [Cond; 6] = [Cond::Offer, Cond::Reapply, Cond::Batch, Cond::Vendor, Cond::Tenant, Cond::Company];
 
     fn reason(self) -> Reason {
-        [Reason::BatchCap, Reason::VendorCap, Reason::TenantCap, Reason::CompanyCap][self as usize]
+        [Reason::Offer, Reason::Reapply, Reason::BatchCap, Reason::VendorCap, Reason::TenantCap, Reason::CompanyCap][self as usize]
     }
 }
 
 /// What the checks share: the seat's kept peers, admitted in this pass
-/// (fresh load, never one the index already counts).
+/// (they will go out together, so each counts as a fresh submission).
 struct Probe<'a> {
     ix: &'a Index,
     seat: &'a Seat,
@@ -589,55 +735,32 @@ impl<'a> Probe<'a> {
         Probe { ix, seat, kept }
     }
 
-    fn fresh(&self, at: At, k: usize) -> u64 {
-        if self.kept.is_empty() { 0 } else { load_at(at.dt(), k, &self.ix.cfg) }
-    }
-
-    fn kept_load(&self, at: At, k: usize, same: impl Fn(&Seat) -> bool) -> u64 {
-        let f = self.fresh(at, k);
-        self.kept.iter().filter(|p| same(p)).fold(0u64, |a, _| a.saturating_add(f))
+    /// A kept peer's load at group kind `k` on a day: a fresh submission's.
+    fn fresh(&self, at: At, k: usize) -> f64 {
+        let cfg = &self.ix.cfg;
+        let half = [cfg.company_half_life, cfg.ats_vendor_half_life, cfg.ats_tenant_half_life][k];
+        let l = decay(cfg.application_load, at.dt(), half);
+        if l >= cfg.load_floor { real(fp(l)) } else { 0.0 }
     }
 
     fn company_group(&self) -> Option<&'a Group> {
         if self.seat.key.is_empty() { None } else { self.ix.by_company.get(self.seat.key.as_str()) }
     }
 
+    /// The company's peers other than the seat, live or not (an offer and a
+    /// rejection count by their dates, not their load).
+    fn company_peers(&self) -> impl Iterator<Item = &'a Seat> + '_ {
+        self.company_group().into_iter().flat_map(move |g| self.ix.peers(g, self.seat))
+    }
+
     fn company(&self, at: At) -> (f64, f64) {
         let (ix, seat, cfg) = (self.ix, self.seat, &self.ix.cfg);
-        let g = self.company_group();
-        let same = |p: &Seat| !seat.key.is_empty() && p.key == seat.key;
-        let load = real(ix.load(g, COMPANY, seat, at).saturating_add(self.kept_load(at, COMPANY, same)));
-        // Penalties come from live peers only: a peer under the floor no
-        // longer counts for anything.
-        let (mut dept, mut fam) = (false, false);
-        if let Some(g) = g {
-            match at {
-                At::Today => {
-                    let own = ix.seats.get(&seat.id).filter(|_| g.members.contains_key(&seat.id));
-                    let less = |n: u32, mine: bool| n > mine as u32;
-                    dept = less(g.depts[seat.department as usize], own.is_some_and(|o| o.department == seat.department));
-                    fam = less(g.fams[seat.family as usize], own.is_some_and(|o| o.family == seat.family));
-                }
-                At::Day(dt) => {
-                    for m in g.members.keys().filter(|m| **m != seat.id) {
-                        if let Some(p) = ix.seats.get(m).filter(|p| load_at(p.age(ix.today) + dt, COMPANY, cfg) > 0) {
-                            dept |= p.department == seat.department;
-                            fam |= p.family == seat.family;
-                        }
-                    }
-                }
-            }
+        let mut load = self.company_group().map_or(0.0, |g| ix.company_load(g, seat, at));
+        let fresh = self.fresh(at, COMPANY);
+        for p in self.kept.iter().filter(|p| !seat.key.is_empty() && p.key == seat.key) {
+            load += fresh * cfg.similarity(p.department, p.family, seat);
         }
-        if self.fresh(at, COMPANY) > 0 {
-            for p in self.kept.iter().filter(|p| same(p)) {
-                dept |= p.department == seat.department;
-                fam |= p.family == seat.family;
-            }
-        }
-        let increment = cfg.application_load
-            + if dept { cfg.same_department_penalty } else { 0.0 }
-            + if fam { cfg.clone_penalty } else { 0.0 };
-        (load, increment)
+        (load, cfg.application_load)
     }
 
     fn vendor(&self, at: At) -> f64 {
@@ -645,29 +768,46 @@ impl<'a> Probe<'a> {
         if v == Vendor::Unknown {
             return 0.0;
         }
-        real(self.ix.load(self.ix.by_vendor.get(&v), VENDOR, self.seat, at).saturating_add(self.kept_load(at, VENDOR, |p| p.ats.vendor == v)))
+        let kept = self.kept.iter().filter(|p| p.ats.vendor == v).count() as f64;
+        real(self.ix.load(self.ix.by_vendor.get(&v), VENDOR, self.seat, at)) + kept * self.fresh(at, VENDOR)
     }
 
     fn tenant(&self, at: At) -> f64 {
         let v = self.seat.ats.vendor;
         let Some(t) = self.seat.ats.tenant.as_ref().filter(|_| v != Vendor::Unknown) else { return 0.0 };
         let g = self.ix.by_tenant.get(&v).and_then(|m| m.get(t.as_str()));
-        let same = |p: &Seat| p.ats.vendor == v && p.ats.tenant.as_ref() == Some(t);
-        real(self.ix.load(g, TENANT, self.seat, at).saturating_add(self.kept_load(at, TENANT, same)))
+        let kept = self.kept.iter().filter(|p| p.ats.vendor == v && p.ats.tenant.as_ref() == Some(t)).count() as f64;
+        real(self.ix.load(g, TENANT, self.seat, at)) + kept * self.fresh(at, TENANT)
     }
 
     fn batch(&self, at: At) -> u32 {
         let (seat, v) = (self.seat, self.seat.ats.vendor);
         let Some(b) = seat.batch_id.filter(|_| v != Vendor::Unknown) else { return 0 };
-        let live = self.ix.by_batch_vendor.get(&(b, v)).map_or(0, |g| self.ix.live(g, VENDOR, seat, at));
-        let fresh = if self.fresh(at, VENDOR) > 0 { self.kept.iter().filter(|p| p.batch_id == Some(b) && p.ats.vendor == v).count() as u32 } else { 0 };
+        let live = self.ix.by_batch_vendor.get(&(b, v)).map_or(0, |g| self.ix.live(g, seat, at));
+        let fresh = if self.fresh(at, VENDOR) > 0.0 { self.kept.iter().filter(|p| p.batch_id == Some(b) && p.ats.vendor == v).count() as u32 } else { 0 };
         live + fresh
     }
 
-    /// A condition's measure on a day: the batch's live members, a
-    /// vendor's or tenant's load, or the company's load and increment.
+    /// Whether the company made an offer that still stands on a day: one
+    /// is remembered as long as a rejection.
+    fn offer(&self, at: At) -> bool {
+        let cfg = &self.ix.cfg;
+        self.company_peers().any(|p| p.status == Status::Offer && decay(1.0, p.age(self.ix.today) + at.dt(), cfg.rejected_half_life) >= cfg.load_floor)
+    }
+
+    /// Whether the company rejected the same role family under `reapply_days` before a day.
+    fn reapply(&self, at: At) -> bool {
+        let (seat, cfg) = (self.seat, &self.ix.cfg);
+        seat.family != Family::Other
+            && self.company_peers().any(|p| p.status == Status::Rejected && p.family == seat.family && ((p.age(self.ix.today) + at.dt()) as f64) < cfg.reapply_days)
+    }
+
+    /// A condition's measure on a day: a flag as 0 or 1, the batch's live
+    /// members, a vendor's or tenant's load, or the company's load and increment.
     fn measure(&self, c: Cond, at: At) -> (f64, f64) {
         match c {
+            Cond::Offer => (self.offer(at) as u8 as f64, 0.0),
+            Cond::Reapply => (self.reapply(at) as u8 as f64, 0.0),
             Cond::Batch => (self.batch(at) as f64, 0.0),
             Cond::Vendor => (self.vendor(at), 0.0),
             Cond::Tenant => (self.tenant(at), 0.0),
@@ -680,10 +820,11 @@ impl<'a> Probe<'a> {
         let cfg = &self.ix.cfg;
         let known = self.seat.ats.vendor != Vendor::Unknown;
         match c {
+            Cond::Offer | Cond::Reapply => load == 0.0,
             Cond::Batch => !known || load < cfg.ats_batch_cap,
             Cond::Vendor => !known || load + cfg.application_load <= cfg.ats_vendor_cap,
             Cond::Tenant => self.seat.ats.tenant.is_none() || !known || load + cfg.application_load <= cfg.ats_tenant_cap,
-            Cond::Company => load + inc <= cfg.cap(self.seat.size),
+            Cond::Company => load + inc <= cfg.cap(self.seat),
         }
     }
 
@@ -709,11 +850,11 @@ impl<'a> Probe<'a> {
     }
 }
 
-/// The governor's verdict on `seat` entering the queue on the index's
-/// day, under the index's config, against the indexed hot seats plus
-/// `kept` (seats already admitted in the same pass). The seat itself is
-/// never its own peer. `cooldown_days` is left for [`cooldown`] to fill:
-/// `Some(0)` when allowed, else `None`.
+/// The governor's verdict on `seat` entering the queue (or going out) on
+/// the index's day, under the index's config, against the indexed hot
+/// seats plus `kept` (seats already admitted in the same pass). The seat
+/// itself is never its own peer. `cooldown_days` is left for [`cooldown`]
+/// to fill: `Some(0)` when allowed, else `None`.
 pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Verdict {
     let (cfg, p) = (&ix.cfg, Probe::new(ix, seat, kept));
     let measures = Cond::ALL.map(|c| p.measure(c, At::Today));
@@ -723,12 +864,12 @@ pub fn verdict(ix: &Index, seat: &Seat, kept: &[&Seat]) -> Verdict {
         Some(_) if seat.overridden => (true, Reason::Override),
         Some(r) => (false, r),
     };
-    let [(batch_vendor, _), (vendor_load, _), (tenant_load, _), (company_load, increment)] = measures;
+    let [_, _, (batch_vendor, _), (vendor_load, _), (tenant_load, _), (company_load, increment)] = measures;
     Verdict {
         allow,
         reason,
         company_load,
-        company_cap: cfg.cap(seat.size),
+        company_cap: cfg.cap(seat),
         increment,
         size: seat.size,
         vendor: seat.ats.vendor,
@@ -787,58 +928,13 @@ pub fn mix(candidates: &[Seat], ix: &Index) -> (Vec<u32>, Vec<(u32, Verdict)>) {
 mod tests {
     use super::*;
 
-    fn seat(id: u32, company: &str, role: &str, url: &str, stage: Stage, on: Day) -> Seat {
-        Seat::new(&SeatIn { id, company, role, url, stage, stage_on: Some(on), ..seat_in() })
-    }
-
-    #[test]
-    fn small_company_takes_one_then_cools() {
-        // Load halves each half-life and never grows on a future day.
-        assert_eq!((decay(1.0, 0, 35.0), decay(1.0, -3, 35.0)), (1.0, 1.0));
-        assert!((decay(1.0, 35, 35.0) - 0.5).abs() < 1e-12 && (decay(2.0, 70, 35.0) - 0.5).abs() < 1e-12);
-        let cfg = Config::default();
-        let day = 20_000;
-        let hot = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, day)];
-        let ix = Index::new(&hot, day, &cfg);
-        let next = seat(2, "ACME", "Data Engineer", "", Stage::Gated, day);
-        let v = verdict(&ix, &next, &[]);
-        assert!(!v.allow);
-        assert_eq!(v.reason, Reason::CompanyCap);
-        assert_eq!(v.increment, 1.0);
-        // An override needs a written reason; with one, the verdict says so.
-        let mut s = next.clone();
-        s.overridden = Seat::new(&SeatIn { heat_override: true, heat_override_reason: "  ", ..seat_in() }).overridden;
-        assert!(!verdict(&ix, &s, &[]).allow);
-        s.overridden = true;
-        let o = verdict(&ix, &s, &[]);
-        assert!(o.allow && o.reason == Reason::Override);
-        // The increment fills the cap, so the wait is until the one peer
-        // falls under the floor: 35 · log2(1 / 0.05) = 151.3 → 152 days.
-        assert_eq!(cooldown(&ix, &next, &[]), Some(152));
-        assert!(verdict(&Index::new(&hot, day + 152, &cfg), &next, &[]).allow);
-        assert!(!verdict(&Index::new(&hot, day + 151, &cfg), &next, &[]).allow);
-        let mega = [seat(1, "Google", "Software Engineer", "", Stage::Submitted, day)];
-        let ix = Index::new(&mega, day, &cfg);
-        let v = verdict(&ix, &seat(2, "Google", "Software Engineer", "", Stage::Gated, day), &[]);
-        // 1.0 load + 1.0 + 0.6 dept + 0.6 clone = 3.2 ≤ 4.0
-        assert!(v.allow);
-        assert!((v.increment - 2.2).abs() < 1e-12);
-        // Two more admitted in the same pass count fresh; the indexed seat
-        // passed as kept is not counted twice.
-        let fresh = [seat(3, "Google", "SRE", "", Stage::FireReady, day - 90), seat(4, "Google", "SRE", "", Stage::FireReady, day)];
-        let next = seat(2, "Google", "Software Engineer", "", Stage::Gated, day);
-        let v2 = verdict(&ix, &next, &[&mega[0], &fresh[0], &fresh[1]]);
-        assert!(!v2.allow);
-        assert_eq!(v2.reason, Reason::CompanyCap);
-        assert_eq!(v2.company_load, 3.0);
-        // load 3.0, room 4.0 − 2.2 = 1.8: 35 · log2(3 / 1.8) = 25.8 → 26 days.
-        assert_eq!(cooldown(&ix, &next, &[&fresh[0], &fresh[1]]), Some(26));
-    }
+    const DAY: Day = 20_000;
 
     fn seat_in() -> SeatIn<'static> {
         SeatIn {
             id: 9,
             corporation_id: None,
+            headcount: None,
             company: "",
             role: "",
             url: "",
@@ -846,6 +942,7 @@ mod tests {
             stage_on: None,
             applied_on: None,
             replied_on: None,
+            outcome: None,
             sent: false,
             score: 50,
             batch_id: None,
@@ -854,20 +951,38 @@ mod tests {
         }
     }
 
+    fn seat(id: u32, company: &str, role: &str, url: &str, stage: Stage, on: Day) -> Seat {
+        Seat::new(&SeatIn { id, company, role, url, stage, stage_on: Some(on), applied_on: (stage >= Stage::Submitted).then_some(on), sent: stage >= Stage::Submitted, ..seat_in() })
+    }
+
+    fn with(mut s: Seat, status: Status) -> Seat {
+        s.status = status;
+        s
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
     #[test]
-    fn expired_peers_cost_nothing_and_unsent_closes_carry_no_heat() {
+    fn only_what_went_out_carries_heat_and_an_untouched_company_is_cool() {
         let cfg = Config::default();
-        let old = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, 0)];
-        let next = seat(2, "Acme", "Software Engineer", "", Stage::Gated, 3650);
-        let v = verdict(&Index::new(&old, 3650, &cfg), &next, &[]);
-        assert!(v.allow);
-        assert_eq!(v.increment, 1.0);
-        // Dead listings closed without sending do not load the company.
-        let dead: Vec<Seat> = (1..=12).map(|i| seat(i, "Google", "Engineer", "", Stage::Closed, 100)).collect();
+        let drafts = [seat(1, "Acme", "Software Engineer", "", Stage::FireReady, DAY), seat(2, "Acme", "Software Engineer", "", Stage::OpenFire, DAY)];
+        assert!(drafts.iter().all(|s| !s.hot && s.status == Status::Unsent));
+        let next = seat(3, "Acme", "Software Engineer", "", Stage::DraftReady, DAY);
+        let v = verdict(&Index::new(&drafts, DAY, &cfg), &next, &[]);
+        assert!(v.allow && v.company_load == 0.0);
+        assert_eq!(Class::of(&v, &cfg), Class::Cool);
+        // One submission at an unknown (small) company: 1.0 of 1.5, hot, and a
+        // same-role second would pass the capacity.
+        let sent = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, DAY)];
+        let v = verdict(&Index::new(&sent, DAY, &cfg), &next, &[]);
+        assert!(!v.allow && v.reason == Reason::CompanyCap && close(v.company_load, 1.0) && v.company_cap == 1.5);
+        // Closed without sending costs nothing; closed after sending does.
+        let dead: Vec<Seat> = (1..=12).map(|i| Seat::new(&SeatIn { id: i, company: "Google", stage: Stage::Closed, stage_on: Some(100), ..seat_in() })).collect();
         assert!(dead.iter().all(|s| !s.hot));
-        let sent = Seat::new(&SeatIn { id: 13, company: "Google", stage: Stage::Closed, stage_on: Some(100), applied_on: Some(40), sent: true, ..seat_in() });
-        assert!(sent.hot);
-        assert_eq!(sent.since, Some(40));
+        let after = Seat::new(&SeatIn { id: 13, company: "Google", stage: Stage::Closed, stage_on: Some(100), applied_on: Some(40), sent: true, ..seat_in() });
+        assert!(after.hot && after.since == Some(40));
         // A linked corporation is one company whatever its name.
         let a = Seat::new(&SeatIn { id: 14, corporation_id: Some(7), company: "Acme, Inc.", ..seat_in() });
         let b = Seat::new(&SeatIn { id: 15, corporation_id: Some(7), company: "ACME", ..seat_in() });
@@ -875,11 +990,105 @@ mod tests {
     }
 
     #[test]
+    fn what_happened_weighs_and_a_rejection_is_remembered_longer() {
+        let cfg = Config::default();
+        let base = seat(1, "Globex", "Data Scientist", "", Stage::Closed, DAY - 30);
+        let out = |o: u32, replied: bool| {
+            Seat::new(&SeatIn { id: 1, company: "Globex", role: "Data Scientist", stage: Stage::Closed, stage_on: Some(DAY - 30), applied_on: Some(DAY - 30), replied_on: replied.then_some(DAY - 30), outcome: Some(o), sent: true, ..seat_in() })
+        };
+        assert_eq!(out(enums::outcome::REJECTED as u32, true).status, Status::Rejected);
+        assert_eq!(out(enums::outcome::GHOSTED as u32, false).status, Status::Ghosted);
+        assert_eq!(out(enums::outcome::WITHDRAWN as u32, false).status, Status::Closed);
+        assert_eq!(out(enums::outcome::OFFER as u32, true).status, Status::Offer);
+        let talking = Seat::new(&SeatIn { id: 1, company: "Globex", role: "Data Scientist", stage: Stage::Reply, stage_on: Some(DAY - 30), applied_on: Some(DAY - 40), replied_on: Some(DAY - 30), sent: true, ..seat_in() });
+        assert_eq!(talking.status, Status::Conversation);
+        // Each weighs its own, a month on (one company half-life).
+        let probe = seat(2, "Globex", "Analyst", "", Stage::Gated, DAY);
+        let load = |s: Seat| verdict(&Index::new(&[s], DAY, &cfg), &probe, &[]).company_load;
+        let other = cfg.similarity(base.department, base.family, &probe);
+        assert!(close(load(with(base.clone(), Status::Submitted)), 0.5 * other));
+        assert!(close(load(with(base.clone(), Status::Conversation)), 2.0 * 0.5 * other));
+        assert!(close(load(with(base.clone(), Status::Ghosted)), 0.7 * 0.5 * other));
+        assert!(close(load(with(base, Status::Rejected)), 1.5 * libm::pow(0.5, 30.0 / 90.0) * other));
+    }
+
+    #[test]
+    fn a_company_weighs_its_peers_by_how_close_each_role_is() {
+        let cfg = Config::default();
+        let ix = Index::new(
+            &[
+                seat(1, "Google", "Software Engineer", "", Stage::Submitted, DAY),
+                seat(2, "Google", "Senior Data Engineer", "", Stage::Submitted, DAY),
+                seat(3, "Google", "Security Engineer", "", Stage::Submitted, DAY),
+            ],
+            DAY,
+            &cfg,
+        );
+        let swe = seat(9, "Google", "Staff Software Engineer", "", Stage::Gated, DAY);
+        let (d, f) = (swe.department, swe.family);
+        let expect: f64 = [(1u32, 1.0)].iter().map(|x| x.1).sum::<f64>();
+        let v = verdict(&ix, &swe, &[]);
+        // The clone counts whole; each other team by its department's closeness.
+        let others: f64 = [2u32, 3].iter().map(|id| ix.seats[id].clone()).map(|p| cfg.similarity(p.department, p.family, &swe)).sum();
+        assert!(close(v.company_load, expect + others), "{} vs {}", v.company_load, expect + others);
+        assert!(v.allow && v.company_cap == 4.0 && (d, f) == (swe.department, swe.family));
+        // Its own share never counts against itself.
+        assert!(close(verdict(&ix, &ix.seats[&1].clone(), &[]).company_load, others));
+    }
+
+    #[test]
+    fn capacity_follows_headcount_when_known() {
+        let cfg = Config::default();
+        let at = |h: Option<u32>| cfg.cap(&Seat::new(&SeatIn { headcount: h, company: "Initech", ..seat_in() }));
+        assert!(close(at(Some(1_000)), 1.0 + libm::log2(10.0)));
+        assert_eq!((at(Some(40)), at(Some(10_000_000)), at(None), at(Some(0))), (1.0, 8.0, 1.5, 1.5));
+    }
+
+    #[test]
+    fn an_offer_blocks_and_a_rejection_holds_its_family_for_the_reapply_window() {
+        let cfg = Config::default();
+        let rejected = with(seat(1, "Hooli", "Software Engineer", "", Stage::Closed, DAY - 30), Status::Rejected);
+        let ix = Index::new(core::slice::from_ref(&rejected), DAY, &cfg);
+        let same = seat(2, "Hooli", "Senior Software Engineer", "", Stage::Gated, DAY);
+        let v = verdict(&ix, &same, &[]);
+        assert_eq!((v.allow, v.reason), (false, Reason::Reapply));
+        // The window closes in 60 days, but the rejection (1.5, remembered at 90 days)
+        // still fills the capacity until 1.5 · 0.5^(age / 90) + 1 fits 1.5: age 143.
+        assert_eq!(cooldown(&ix, &same, &[]), Some(113));
+        // Another family is judged by load alone.
+        let infra = seat(3, "Hooli", "Site Reliability Engineer", "", Stage::Gated, DAY);
+        assert_ne!(verdict(&ix, &infra, &[]).reason, Reason::Reapply);
+        let offer = Index::new(&[with(rejected, Status::Offer)], DAY, &cfg);
+        assert_eq!(verdict(&offer, &infra, &[]).reason, Reason::Offer);
+        // An override with a written reason lets one past, and says so.
+        let mut o = infra.clone();
+        o.overridden = Seat::new(&SeatIn { heat_override: true, heat_override_reason: "  ", ..seat_in() }).overridden;
+        assert!(!verdict(&offer, &o, &[]).allow);
+        o.overridden = true;
+        let v = verdict(&offer, &o, &[]);
+        assert!(v.allow && v.reason == Reason::Override);
+    }
+
+    #[test]
+    fn a_full_company_waits_until_its_peers_decay() {
+        let cfg = Config::default();
+        let hot = [seat(1, "Acme", "Software Engineer", "", Stage::Submitted, DAY)];
+        let next = seat(2, "Acme", "Software Engineer", "", Stage::Gated, DAY);
+        // 1.0 + 1.0 > 1.5 until the peer is under 0.5: one half-life.
+        assert_eq!(cooldown(&Index::new(&hot, DAY, &cfg), &next, &[]), Some(30));
+        assert!(verdict(&Index::new(&hot, DAY + 30, &cfg), &next, &[]).allow);
+        assert!(!verdict(&Index::new(&hot, DAY + 29, &cfg), &next, &[]).allow);
+        // Peers admitted in the same pass count as fresh submissions.
+        let empty: [Seat; 0] = [];
+        let fresh = seat(3, "Acme", "Software Engineer", "", Stage::FireReady, DAY);
+        assert!(!verdict(&Index::new(&empty, DAY, &cfg), &next, &[&fresh]).allow);
+    }
+
+    #[test]
     fn tenant_and_batch_caps() {
         let cfg = Config::default();
         let url = "https://boards.greenhouse.io/acme/jobs/1";
-        let hot: Vec<Seat> =
-            (1..=3).map(|i| seat(i, &alloc::format!("Corp{i}"), "Engineer", url, Stage::Submitted, 0)).collect();
+        let hot: Vec<Seat> = (1..=3).map(|i| seat(i, &alloc::format!("Corp{i}"), "Engineer", url, Stage::Submitted, 0)).collect();
         let ix = Index::new(&hot, 0, &cfg);
         let v = verdict(&ix, &seat(10, "Other", "Engineer", url, Stage::Gated, 0), &[]);
         assert_eq!(v.reason, Reason::TenantCap);
@@ -908,14 +1117,18 @@ mod tests {
             r ^= r << 17;
             r % n
         };
-        let mk = |id: u32, c: u64, stage: u64, on: u64, url: u64, batch: u64| {
+        let statuses = [Status::Submitted, Status::Conversation, Status::Rejected, Status::Ghosted, Status::Closed, Status::Offer];
+        let mk = |id: u32, c: u64, stage: u64, on: u64, url: u64, batch: u64, st: u64| {
             let u = alloc::format!("https://jobs.lever.co/t{url}/1");
-            let mut s = seat(id, &alloc::format!("Co{c}"), ["Engineer", "Research Engineer", "SRE"][(c % 3) as usize], &u, crate::pipeline::STAGES[stage as usize], 1000 - on as Day);
+            let mut s = seat(id, &alloc::format!("Co{c}"), ["Software Engineer", "Research Engineer", "SRE", "Analyst"][(c % 4) as usize], &u, crate::pipeline::STAGES[stage as usize], 1000 - on as Day);
             s.batch_id = (batch > 0).then_some(batch as u32);
+            if s.hot {
+                s.status = statuses[st as usize];
+            }
             s
         };
         for round in 0..40 {
-            let mut seats: Vec<Seat> = (1..=60).map(|id| mk(id, next(6), next(10), next(200), next(4), next(3))).collect();
+            let mut seats: Vec<Seat> = (1..=60).map(|id| mk(id, next(6), next(10), next(200), next(4), next(3), next(6))).collect();
             let mut ix = Index::new(&seats, 1000, &cfg);
             for _ in 0..80 {
                 let i = next(60) as usize;
@@ -923,11 +1136,11 @@ mod tests {
                     ix.update(seats[i].id, None);
                     seats[i].hot = false;
                 } else {
-                    seats[i] = mk(seats[i].id, next(6), next(10), next(200), next(4), next(3));
+                    seats[i] = mk(seats[i].id, next(6), next(10), next(200), next(4), next(3), next(6));
                     ix.update(seats[i].id, Some(seats[i].clone()));
                 }
                 let fresh = Index::new(&seats, 1000, &cfg);
-                let probe = mk(999, next(6), 3, 0, next(4), next(3));
+                let probe = mk(999, next(6), 3, 0, next(4), next(3), 0);
                 for s in seats.iter().chain([&probe]) {
                     assert_eq!(verdict(&ix, s, &[]), verdict(&fresh, s, &[]), "round {round} seat {}", s.id);
                 }
@@ -938,12 +1151,10 @@ mod tests {
     #[test]
     fn config_from_json_ignores_garbage() {
         let c = Config::from_json(Some(r#"{"small_cap": 2, "mega_cap": -1, "nope": 3, "mid_cap": "x"}"#));
-        assert_eq!(c.small_cap, 2.0);
-        assert_eq!(c.mega_cap, 4.0);
-        assert_eq!(c.mid_cap, 1.5);
+        assert_eq!((c.small_cap, c.mega_cap, c.mid_cap), (2.0, 4.0, 1.5));
         assert_eq!(Config::from_json(Some("[")), Config::default());
-        let z = Config::from_json(Some(r#"{"clone_penalty": 0, "load_floor": 0, "cool_ratio": 0.9}"#));
-        assert_eq!((z.clone_penalty, z.load_floor, z.cool_ratio, z.hot_ratio), (0.0, 0.05, 0.5, 0.8));
+        let z = Config::from_json(Some(r#"{"similar_other": 0, "similar_family": 2, "load_floor": 0, "cool_ratio": 0.9, "cap_min": 9, "rejected_weight": 20}"#));
+        assert_eq!((z.similar_other, z.similar_family, z.load_floor, z.cool_ratio, z.hot_ratio, z.cap_min, z.rejected_weight), (0.0, 1.0, 0.05, 0.5, 0.8, 1.0, 1.5));
         assert_eq!(Config::from_json(None), Config::default());
     }
 }

@@ -33,6 +33,7 @@ const PROSE = ["notes", "battleplan", "letter_raw"] as const
 const textOf = (v_: unknown): string => (typeof v_ === "string" ? v_ : "")
 // One formatter: toLocaleString builds a new one per call.
 const NUM = new Intl.NumberFormat()
+const LOAD = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 })
 /** UTF-8 bytes of a string, counted without encoding it. */
 function utf8(s: string): number {
   let n = s.length
@@ -74,7 +75,7 @@ function score(d: Doc): Html {
   return html`<section class="card facts" data-key="score">
     <div class="stat"><b>${c.score_100}</b><span>${c.stored ? "score" : "suggested score"}</span></div>
     <div class="stat"><b>${c.band.replace(/_/g, " ")}</b><span>band</span></div>
-    <div class="stat"><b class="heat-${c.class}">${c.class}</b><span title="Applications in flight at this company, against the heat cap">heat · ${str(h.company_load ?? 0)}${h.company_cap ? ` of ${h.company_cap}` : ""} at this company</span></div>
+    <div class="stat"><b class="heat-${c.class}">${c.class}</b><span title="Sent applications at this company, weighted by what happened to each and how close each role is to this one, against the company's capacity">heat · ${LOAD.format(h.company_load ?? 0)}${h.company_cap ? ` of ${LOAD.format(h.company_cap)}` : ""} at this company${h.allow === false && h.reason ? ` · ${h.reason.replace(/_/g, " ")}` : ""}</span></div>
     ${s.kill ? html`<p class="error">Hard kill: ${s.kill.replace(/_/g, " ")}</p>` : EMPTY}
     ${!c.stored ? html`<p class="hint">The kernel suggests ${str(s.score_100)} (${str(s.band)}). It never overwrites a stored score.
       <button type="button" data-act="keep-score" data-score="${str(s.score_100)}">Keep it</button></p>` : EMPTY}

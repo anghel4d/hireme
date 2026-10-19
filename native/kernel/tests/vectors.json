@@ -456,9 +456,9 @@
             "reason": "company_cap",
             "size": "mega",
             "company_cap": 4.0,
-            "company_load": 2.820335356007638,
-            "increment": 2.2,
-            "cooldown_days": 23,
+            "company_load": 3.587401051968186,
+            "increment": 1.0,
+            "cooldown_days": 8,
             "to": "fire_ready",
             "allow": false
           }
@@ -1112,6 +1112,15 @@
             "role": "Senior Software Engineer",
             "batch_id": 9,
             "stage_on": 739528
+          },
+          {
+            "id": 5,
+            "no": 5,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 739528,
+            "applied_on": 739528
           }
         ]
       },
@@ -1125,7 +1134,7 @@
           "refusal": "heat",
           "data": {
             "reason": "company_cap",
-            "company_load": 2.3047534135511114,
+            "company_load": 3.5,
             "to": "fire_ready",
             "allow": false
           }
@@ -1162,7 +1171,7 @@
           "refusal": "heat",
           "data": {
             "reason": "company_cap",
-            "company_load": 2.3047534135511114,
+            "company_load": 3.25,
             "to": "fire_ready",
             "allow": false
           }
@@ -1219,6 +1228,15 @@
             "role": "Senior Software Engineer",
             "batch_id": 9,
             "stage_on": 739528
+          },
+          {
+            "id": 5,
+            "no": 5,
+            "stage": "submitted",
+            "company": "Google",
+            "role": "Software Engineer",
+            "stage_on": 739528,
+            "applied_on": 739528
           }
         ]
       },
@@ -1232,7 +1250,7 @@
           "refusal": "heat",
           "data": {
             "reason": "company_cap",
-            "company_load": 2.8203353560076607,
+            "company_load": 4.587401051968186,
             "to": "fire_ready",
             "allow": false
           }
@@ -1269,7 +1287,7 @@
           "refusal": "heat",
           "data": {
             "reason": "company_cap",
-            "company_load": 2.8203353560076607,
+            "company_load": 3.793700525984093,
             "to": "fire_ready",
             "allow": false
           }

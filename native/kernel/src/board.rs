@@ -339,16 +339,22 @@ pub fn submitted(t: &Table, id: u32) -> bool {
 
 /// The governor's seat for one application row. Its score is the stored
 /// one; the board's cache sets the effective score.
-pub fn seat(t: &Table, id: u32) -> Option<Seat> {
-    seat_of_row(t.row(id)?, id).map(|f| Seat::new(&f))
+pub fn seat(rows: &Rows, t: &Table, id: u32) -> Option<Seat> {
+    seat_of_row(rows, t.row(id)?, id).map(|f| Seat::new(&f))
 }
 
-fn seat_of_row(r: Row<'_>, id: u32) -> Option<SeatIn<'_>> {
+/// A corporation's cited headcount, when the application is linked to one.
+fn headcount(rows: &Rows, corporation: Option<u32>) -> Option<u32> {
+    rows.table(table::CORPORATIONS)?.u32(corporation?, col::corporations::HEADCOUNT)
+}
+
+fn seat_of_row<'r>(rows: &Rows, r: Row<'r>, id: u32) -> Option<SeatIn<'r>> {
     let stage = r.u32(A::STAGE).and_then(Stage::from_u32)?;
     let day = |c: u16| r.u32(c).map(|d| d as Day);
     Some(SeatIn {
         id,
         corporation_id: r.u32(A::CORPORATION_ID),
+        headcount: headcount(rows, r.u32(A::CORPORATION_ID)),
         company: r.str(A::COMPANY).unwrap_or(""),
         role: r.str(A::ROLE).unwrap_or(""),
         url: r.str(A::LISTING_URL).or_else(|| r.str(A::CANONICAL_URL)).unwrap_or(""),
@@ -356,6 +362,7 @@ fn seat_of_row(r: Row<'_>, id: u32) -> Option<SeatIn<'_>> {
         stage_on: day(A::STAGE_ON),
         applied_on: day(A::APPLIED_ON),
         replied_on: day(A::REPLIED_ON),
+        outcome: r.u32(A::OUTCOME),
         sent: rail_of_row(r).is_some_and(|rail| crate::pipeline::sent(&rail)),
         score: r.u32(A::SCORE_100).map_or(0, |s| s.min(100) as u8),
         batch_id: r.u32(A::BATCH_ID),
@@ -424,7 +431,12 @@ impl Board {
                 }
             }
         }
-        if moved.touched(table::SETTINGS) || moved.touched(table::ATLAS) || moved.replaced.contains(&table::APPLICATIONS) {
+        // A corporation's headcount is its applications' capacity.
+        if moved.touched(table::SETTINGS)
+            || moved.touched(table::ATLAS)
+            || moved.touched(table::CORPORATIONS)
+            || moved.replaced.contains(&table::APPLICATIONS)
+        {
             self.cache.clear();
             self.citizens = None;
             self.governor = None;
@@ -435,7 +447,7 @@ impl Board {
             for id in wrote.iter().chain(gone) {
                 self.cache.remove(id);
                 if let Some((_, _, ix)) = self.governor.as_mut() {
-                    let now = t.filter(|t| t.has(*id)).and_then(|t| seat(t, *id));
+                    let now = t.filter(|t| t.has(*id)).and_then(|t| seat(rows, t, *id));
                     if ix.contains(*id) || now.as_ref().is_some_and(|s| s.hot) {
                         ix.update(*id, now);
                     }
@@ -453,7 +465,7 @@ impl Board {
             if let Some(t) = rows.table(table::APPLICATIONS) {
                 let stages = t.u32s(A::STAGE).unwrap_or(&[]);
                 for (i, &id) in t.ids().iter().enumerate() {
-                    if stages.get(i).and_then(|v| Stage::from_u32(*v)).is_some_and(|s| s.queued() || s.after_send())
+                    if stages.get(i).and_then(|v| Stage::from_u32(*v)).is_some_and(Stage::after_send)
                         && self.cached(rows, t, id).is_some()
                     {
                         hot.push(id);
@@ -471,7 +483,7 @@ impl Board {
     fn cached(&mut self, rows: &Rows, t: &Table, id: u32) -> Option<&Cached> {
         if !self.cache.contains_key(&id) {
             let row = t.row(id)?;
-            let f = seat_of_row(row, id)?;
+            let f = seat_of_row(rows, row, id)?;
             let location = row.str(A::LOCATION).unwrap_or("");
             let name = self.names.get_or(f.company, || {
                 let n = text::normalize(f.company);
