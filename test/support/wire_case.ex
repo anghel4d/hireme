@@ -113,9 +113,15 @@ defmodule Hireme.WireCase do
   @doc "Polls `f` every 50 ms, up to `tries` times; true once it answers truthy."
   def eventually(f, tries \\ 100) do
     cond do
-      f.() -> true
-      tries == 0 -> false
-      true -> Process.sleep(50) && eventually(f, tries - 1)
+      f.() ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        Process.sleep(50)
+        eventually(f, tries - 1)
     end
   end
 
