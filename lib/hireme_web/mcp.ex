@@ -463,14 +463,7 @@ defmodule HiremeWeb.Mcp.Session do
   @impl GenServer
   def handle_call(:id, _from, s), do: {:reply, s.id, s}
 
-  def handle_call({:request, msg}, from, s) do
-    s = %{s | used: now()}
-
-    case handle(msg, from, s) do
-      {:reply, answer, s} -> {:reply, answer, s}
-      {:noreply, s} -> {:noreply, s}
-    end
-  end
+  def handle_call({:request, msg}, from, s), do: handle(msg, from, %{s | used: now()})
 
   def handle_call({:listen, stream, :legacy}, _from, s),
     do: {:reply, :ok, watch_stream(s, stream, :legacy)}
@@ -489,13 +482,9 @@ defmodule HiremeWeb.Mcp.Session do
       end)
 
     ack =
-      %{}
-      |> then(&if(tools, do: Map.put(&1, "toolsListChanged", true), else: &1))
-      |> then(
-        &if(agreed != [],
-          do: Map.put(&1, "resourceSubscriptions", Enum.reverse(agreed)),
-          else: &1
-        )
+      Map.reject(
+        %{"toolsListChanged" => tools, "resourceSubscriptions" => Enum.reverse(agreed)},
+        fn {_, v} -> v in [false, []] end
       )
 
     s = watch_stream(s, stream, {:modern, id, key})
@@ -531,19 +520,7 @@ defmodule HiremeWeb.Mcp.Session do
         {:noreply, s}
 
       {call, calls} ->
-        GenServer.reply(
-          call.from,
-          answer(
-            call.msg,
-            call.modern,
-            {:ok,
-             text(
-               "error[session]: no verdict within #{div(call.wait, 1000)} s\n   = help: `find` or `get` before calling again, so an insert does not land twice\n",
-               nil,
-               true
-             )}
-          )
-        )
+        fail(call, "no verdict within #{div(call.wait, 1000)} s")
 
         {:noreply,
          %{s | calls: calls, pending: Map.drop(s.pending, Enum.map(call.ops, &elem(&1, 0)))}}
@@ -551,26 +528,18 @@ defmodule HiremeWeb.Mcp.Session do
   end
 
   def handle_info(:idle, s) do
-    if now() - s.used >= @idle_ms,
-      do: {:stop, :normal, s},
-      else:
-        (
-          Process.send_after(self(), :idle, @idle_ms - (now() - s.used))
-          {:noreply, s}
-        )
+    left = @idle_ms - (now() - s.used)
+    if left > 0, do: Process.send_after(self(), :idle, left)
+    if left > 0, do: {:noreply, s}, else: {:stop, :normal, s}
   end
 
   def handle_info({:DOWN, ref, :process, _, _}, s) when is_map_key(s.streams, ref) do
     {{_, kind}, streams} = Map.pop(s.streams, ref)
-    s = %{s | streams: streams}
 
-    s =
-      case kind do
-        {:modern, _id, key} -> drop_subs(s, key)
-        :legacy -> s
-      end
-
-    {:noreply, s}
+    case kind do
+      {:modern, _id, key} -> {:noreply, drop_subs(%{s | streams: streams}, key)}
+      :legacy -> {:noreply, %{s | streams: streams}}
+    end
   end
 
   def handle_info(msg, s), do: wire(msg, s)
@@ -611,24 +580,15 @@ defmodule HiremeWeb.Mcp.Session do
   @impl GenServer
   def terminate(_reason, s) do
     for {_, {pid, _}} <- s.streams, do: send(pid, {:mcp_end})
-
-    for {_, call} <- s.calls,
-        do:
-          GenServer.reply(
-            call.from,
-            answer(
-              call.msg,
-              call.modern,
-              {:ok,
-               text(
-                 "error[session]: the session ended before every verdict came\n   = help: `find` or `get` before calling again, so an insert does not land twice\n",
-                 nil,
-                 true
-               )}
-            )
-          )
-
+    for {_, call} <- s.calls, do: fail(call, "the session ended before every verdict came")
     :ok
+  end
+
+  # A call answered without its verdicts: why, and how to go on without writing twice.
+  defp fail(call, why) do
+    help = "   = help: `find` or `get` before calling again, so an insert does not land twice\n"
+    reply = text("error[session]: #{why}\n" <> help, nil, true)
+    GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, reply}))
   end
 
   # ------------------------------------------------------------------ JSON-RPC
@@ -710,14 +670,7 @@ defmodule HiremeWeb.Mcp.Session do
   defp method("ping", _params, _msg, _modern, _from, s), do: {{:ok, %{}}, s}
 
   defp method("tools/list", _params, _msg, modern, _from, s),
-    do:
-      {{:ok,
-        cached(
-          modern,
-          %{"tools" => JSON.decode!(apply(Nif, :mcp_tools, masks(s)))},
-          60_000,
-          "private"
-        )}, s}
+    do: {{:ok, cached(modern, %{"tools" => tools(s)}, 60_000, "private")}, s}
 
   defp method("tools/call", params, msg, modern, from, s) do
     case params["name"] do
@@ -755,7 +708,7 @@ defmodule HiremeWeb.Mcp.Session do
   @fixed ~w(hireme schema find get history text lease release put drop)
 
   defp tool(name, args, msg, modern, from, s) when is_map(args) do
-    listed = Enum.any?(JSON.decode!(apply(Nif, :mcp_tools, masks(s))), &(&1["name"] == name))
+    listed = Enum.any?(tools(s), &(&1["name"] == name))
 
     cond do
       name == "hireme" ->
@@ -1082,8 +1035,7 @@ defmodule HiremeWeb.Mcp.Session do
     text(t, overview, false)
   end
 
-  @domains [world: 1, desk: 2, mail: 4, lanes: 8, corpus: 16]
-  defp domains(mask), do: for({name, bit} <- @domains, (mask &&& bit) != 0, do: name)
+  defp domains(mask), do: for(d <- Schema.model().domains, (mask &&& d.bit) != 0, do: d.name)
   defp join_or([]), do: "nothing"
   defp join_or(list), do: Enum.join(list, ", ")
 
@@ -1268,6 +1220,7 @@ defmodule HiremeWeb.Mcp.Session do
   end
 
   defp masks(s), do: Tuple.to_list(s.masks)
+  defp tools(s), do: JSON.decode!(apply(Nif, :mcp_tools, masks(s)))
 
   defp cached(true, v, ttl, scope), do: Map.merge(v, %{"ttlMs" => ttl, "cacheScope" => scope})
   defp cached(false, v, _ttl, _scope), do: v
