@@ -74,7 +74,7 @@
       checks.${system} = {
         # Every suite the repository has, offline in the sandbox: mix test
         # (its own database per run), cargo test over the workspace, the
-        # kernel's vectors under wasm, and bun check.
+        # kernel's vectors under wasm, bun check, and bun test over assets/test.
         unit = pkgs.stdenv.mkDerivation {
           name = "hireme-unit";
           src = ./.;
@@ -125,7 +125,7 @@
             bun native/kernel/vectors.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
             bun native/kernel/fuzz.mjs native/target/wasm32-unknown-unknown/release/kernel.wasm
             mix test
-            bun check -p assets
+            bun check -p assets; bun test ./assets/test
           '';
           installPhase = "touch $out";
         };
