@@ -23,8 +23,8 @@ defmodule HiremeWeb.Auth do
   import Plug.Conn
   import HiremeWeb, only: [json: 2, redirect: 2]
 
-  alias Hireme.Accounts
-  alias Hireme.Repo
+  alias Hireme.{Accounts, Repo}
+  alias HiremeWeb.Gate
 
   @session_key "hireme_session"
 
@@ -41,14 +41,14 @@ defmodule HiremeWeb.Auth do
 
   @doc "The WebTransport URL a page connects to, or nil when no gate runs."
   @spec wire_gate() :: String.t() | nil
-  def wire_gate, do: if(gate?(), do: HiremeWeb.Gate.url())
+  def wire_gate, do: if(gate?(), do: Gate.url())
 
   @doc "The development gate's self-signed certificate hashes, hex, space-separated."
   @spec wire_hashes() :: String.t()
-  def wire_hashes, do: (gate?() && HiremeWeb.Gate.cert_hash()) || ""
+  def wire_hashes, do: (gate?() && Gate.cert_hash()) || ""
 
   defp gate?,
-    do: Application.get_env(:hireme, :gate, true) and Code.ensure_loaded?(HiremeWeb.Gate)
+    do: Application.get_env(:hireme, :gate, true) and Code.ensure_loaded?(Gate)
 
   @doc "A static path through the digest manifest in production."
   @spec static(String.t()) :: String.t()
@@ -66,11 +66,13 @@ defmodule HiremeWeb.Auth do
   # Read once per node: the script and its hash are a release's constants.
   defp early do
     memo(:early, fn ->
-      with {:ok, js} <- File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
-        js = String.trim_trailing(js)
-        {js, Base.encode64(:crypto.hash(:sha256, js))}
-      else
-        _ -> nil
+      case File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
+        {:ok, js} ->
+          js = String.trim_trailing(js)
+          {js, Base.encode64(:crypto.hash(:sha256, js))}
+
+        _ ->
+          nil
       end
     end)
   end
@@ -96,12 +98,14 @@ defmodule HiremeWeb.Auth do
   @spec chunks() :: [String.t()]
   def chunks do
     memo(:chunks, fn ->
-      with {:ok, js} <- File.read(Application.app_dir(:hireme, "priv/static/assets/app.js")) do
-        Regex.scan(~r/from\s*"\.\/([\w.-]+\.js)"/, js, capture: :all_but_first)
-        |> List.flatten()
-        |> Enum.uniq()
-      else
-        _ -> nil
+      case File.read(Application.app_dir(:hireme, "priv/static/assets/app.js")) do
+        {:ok, js} ->
+          Regex.scan(~r/from\s*"\.\/([\w.-]+\.js)"/, js, capture: :all_but_first)
+          |> List.flatten()
+          |> Enum.uniq()
+
+        _ ->
+          nil
       end
     end) || []
   end

@@ -30,7 +30,7 @@ defmodule Hireme.WireClient do
 
   @doc "Sends one put in its own OPS frame and waits for its verdict: `{:ack, id}` or `{:nack, refusal}`."
   def put(client, op) do
-    send_frame(client, HiremeWeb.Wire.Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw]))
+    send_frame(client, Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw]))
 
     receive do
       {:wire, ^client,
