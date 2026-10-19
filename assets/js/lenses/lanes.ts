@@ -6,7 +6,7 @@
 import type { View } from "../app.ts"
 import { ENUMS, type TableName } from "../gen/schema.ts"
 import { failed, lanes, put, putSettings, query, settingsId, today, value, type Input, type Row } from "../kernel.ts"
-import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
+import { EMPTY, fields, flag, href, html, morph, resetAfter, str, type Html } from "../morph.ts"
 import { model } from "../state.ts"
 
 type Gym = { today: number; streak: number; week: number; target: number | null; pace: number | null; owed: number | null }
@@ -86,8 +86,36 @@ function view(): Html {
   const d = lanes() as { gym: Gym; net: Net } | null
   return html`<div class="lanes">
     <div class="toolbar"><nav class="subtabs" aria-label="Lanes">${["gym", "net"].map((l) => html`<a href="/lanes/${l}" data-nav data-key="${l}" class="${l === lane ? "on" : ""}"${l === lane ? html` aria-current="page"` : EMPTY}>${l}</a>`)}</nav></div>
-    ${!d ? html`<p class="empty">Loading…</p>` : lane === "gym" ? gym(d.gym) : net(d.net)}
+    ${!d ? html`<p class="empty">Loading…</p>` : html`<div data-key="panes" data-morph="own"></div>`}
   </div>`
+}
+
+// Each lane draws into a pane of its own, kept while the other is shown, so switching back to a lane whose
+// markup has not moved is one compare and an attribute, not a parse and a new subtree.
+const drawn = new WeakMap<Element, string>()
+function after(root: HTMLElement): void {
+  const panes = root.querySelector<HTMLElement>('.lanes [data-key="panes"]')
+  const d = lanes() as { gym: Gym; net: Net } | null
+  if (!panes || !d) return
+  const lane = model.address.sub === "net" ? "net" : "gym"
+  for (const l of ["gym", "net"]) {
+    let pane = panes.querySelector<HTMLElement>(`:scope > [data-lane="${l}"]`)
+    if (l !== lane) {
+      if (pane) pane.hidden = true
+      continue
+    }
+    if (!pane) {
+      pane = document.createElement("div")
+      pane.dataset.lane = l
+      panes.append(pane)
+    }
+    const h = l === "gym" ? gym(d.gym) : net(d.net)
+    if (drawn.get(pane) !== h.text) {
+      morph(pane, h)
+      drawn.set(pane, h.text)
+    }
+    pane.hidden = false
+  }
 }
 
 /** The form's filled fields: an empty one is left out, so the row's default stands. */
@@ -96,6 +124,7 @@ const filled = (el: HTMLElement): Record<string, Input> => Object.fromEntries(Ob
 const lanesLens: View = {
   title: "Lanes",
   view,
+  after,
   act(name, el) {
     switch (name) {
       case "rep":
