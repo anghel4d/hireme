@@ -7,6 +7,8 @@ defmodule Hireme.WireClient do
 
   use GenServer
   alias HiremeWeb.Wire.Codec
+  # Dialyzer reads Mint.WebSocket.new/4 (1.0.6) as never returning :ok.
+  @dialyzer {:nowarn_function, init: 1}
 
   def connect(port, origin \\ nil) do
     {:ok, pid} = GenServer.start_link(__MODULE__, {self(), port, origin})
