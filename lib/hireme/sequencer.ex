@@ -1796,7 +1796,8 @@ defmodule Hireme.Sequencer do
   end
 
   # Rows of resident tables (and the atlas projection of places) that moved,
-  # each block carrying the union of the moved columns, then the gone rows.
+  # a block per table and set of moved columns (one edited note among renames
+  # ships one note), then the gone rows.
   defp patch(deltas, grants) do
     visible = fn t -> grants == nil or Grants.read?(grants, t) end
 
@@ -1808,26 +1809,29 @@ defmodule Hireme.Sequencer do
         _ -> []
       end)
       |> Enum.filter(fn {t, _, _} -> visible.(t) end)
-      |> Enum.group_by(fn {t, _, _} -> t.id end)
-      |> Enum.map(fn {_, [{t, _, _} | _] = group} ->
-        rows =
-          group
-          |> Enum.map(&elem(&1, 1))
-          |> Enum.reverse()
-          |> Enum.uniq_by(& &1.id)
-          |> Enum.reverse()
+      # A row written twice in a turn: its last state, the union of its moves.
+      |> Enum.reduce({[], %{}}, fn {t, row, changed}, {order, rows} ->
+        key = {t.id, row.id}
+        moved = if changed == :all, do: :all, else: MapSet.new(changed, &to_string/1)
 
-        changed = Enum.map(group, &elem(&1, 2))
-
+        case rows do
+          %{^key => {_, _, was}} -> {order, Map.put(rows, key, {t, row, moves(was, moved)})}
+          _ -> {[key | order], Map.put(rows, key, {t, row, moved})}
+        end
+      end)
+      |> then(fn {order, rows} -> order |> Enum.reverse() |> Enum.map(&rows[&1]) end)
+      |> Enum.group_by(fn {t, _, moved} -> {t.id, moved} end)
+      |> Enum.map(fn {_, [{t, _, moved} | _] = group} ->
         cols =
-          if :all in changed do
-            wire_cols(t, grants)
-          else
-            names = changed |> List.flatten() |> MapSet.new(&to_string/1) |> MapSet.put("id")
-            Enum.filter(wire_cols(t, grants), &MapSet.member?(names, &1.name))
-          end
+          if moved == :all,
+            do: wire_cols(t, grants),
+            else:
+              Enum.filter(
+                wire_cols(t, grants),
+                &(&1.name == "id" or MapSet.member?(moved, &1.name))
+              )
 
-        Codec.rows_block(t, cols, rows)
+        Codec.rows_block(t, cols, Enum.map(group, &elem(&1, 1)))
       end)
 
     gone =
@@ -1843,6 +1847,9 @@ defmodule Hireme.Sequencer do
 
     [puts, Codec.gone_block(gone)]
   end
+
+  defp moves(a, b) when a == :all or b == :all, do: :all
+  defp moves(a, b), do: MapSet.union(a, b)
 
   # A place whose chart column was just cleared leaves the projection.
   defp atlas_gone(row, changed) do

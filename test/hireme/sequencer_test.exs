@@ -420,6 +420,35 @@ defmodule Hireme.SequencerTest do
            end)
   end
 
+  test "a PATCH ships each row the columns it moved: one listing edited among renames carries one listing",
+       %{account: a} do
+    listing = String.duplicate("Rust, kernels and GPUs. ", 40)
+
+    apps =
+      for i <- 1..3 do
+        {[app], []} =
+          run(a.id, op(:put, :applications, %{company: "C#{i}", role: "R", listing_raw: listing}))
+
+        app
+      end
+
+    {_, _} = boot(a.id, 995)
+    [one, two, three] = apps
+
+    {_, []} =
+      run(a.id, [
+        op(:put, :applications, %{listing_raw: listing <> " Edited."}, target: one.id),
+        op(:put, :applications, %{role: "Staff"}, target: two.id),
+        op(:put, :applications, %{role: "Staff"}, target: three.id)
+      ])
+
+    assert_receive {:sequencer, :patch, _, body}, 2_000
+    rows = ingest(%{}, :PATCH, body)["applications"]
+    col = Schema.column(:applications, "listing_raw").id
+    assert Map.has_key?(rows[one.id], col)
+    refute Map.has_key?(rows[two.id], col) or Map.has_key?(rows[three.id], col)
+  end
+
   property "a subscriber's BOOT plus its PATCHes is a fresh BOOT; a mask never lets a row through, and a reader outside the written domain still learns the rev moved",
            %{account: a} do
     word = string(:alphanumeric, min_length: 1, max_length: 6)
