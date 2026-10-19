@@ -319,9 +319,8 @@ writer for long.
 | Failed key attempts | 20 per peer a minute |
 | OAuth refusals recorded | 20 per peer in 10 minutes |
 | Wire tickets | 60 per peer a minute |
-| Agent ops | 600 per key per wall-clock minute |
+| Agent ops | 100,000 per key per wall-clock minute, a circuit breaker for clear abuse, not pacing; a lease's `bulk` contract (1 to 1,000,000 writes for 10 minutes) is outside it, drawn from 5,000,000 per key an hour |
 | Agent lease RPCs | 3,000 per key per wall-clock minute |
-| Agent write bytes | 64 MiB per key per wall-clock minute |
 | Text an account holds | 1 GiB (`accounts.text_bytes`; past it a write is refused `cap`) |
 | Rows per table | every stored account table declares a cap; the sequencer enforces it for every table it writes; identities and factors refuse past theirs, keys past theirs (revoked keys count until purged a month on), and sessions make room by dropping the oldest ended ones (refused only when all are live); ceremonies by the daily purge; the outbox holds at most its declared 100,000 rows per account, past which only a digest already pending is counted up (the event stays on the trail); the trail's declared 10M is not enforced: its activity rows expire (refused HELLOs after 7 days, the rest after 90), and its security events, kept forever, grow only as fast as the rate-limited actions that write them |
 | Account writes | every account.* call that writes the trail or mails a notice: 60 per account in 10 minutes, charged only when the call wrote (renames have their own 30); revoking a key, a session or a lease is outside it, so the owner can always revoke |
