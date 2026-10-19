@@ -1067,8 +1067,10 @@ defmodule Hireme.Sequencer do
         0
 
       parts ->
-        q = ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{table.name}" WHERE id = ?}
-        %{rows: [[n]]} = Repo.query!(q, [id], skip_account: true)
+        q =
+          ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{table.name}" WHERE id = ? AND account_id = ?}
+
+        %{rows: [[n]]} = Repo.query!(q, [id, Repo.account_id!()], skip_account: true)
         n
     end
   end
