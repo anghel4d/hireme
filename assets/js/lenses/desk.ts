@@ -94,7 +94,7 @@ const HAND: [string, string, string, 1 | -1][] = [
   ["dupes", "duplicates", "possible duplicates", -1], ["added", "added", "day added", -1],
 ]
 /** A field the kernel reads of every application: the CV rules' catalog, so the desk and the rules share one set of names. */
-type Field = { path: string; label: string; type: string; values?: string[] }
+type Field = { path: string; label: string; type: string; values?: string[]; desc?: boolean }
 // The person's own fields (me.*) read the same on every card, lists have no one order, and the hand keys read these their own way.
 const OWN = new Set(["no", "score", "band", "company", "location", "place", "keywords"])
 let catalog: Field[] | null = null
@@ -108,7 +108,8 @@ function catalogFields(): Field[] {
   }
   return catalog
 }
-const allKeys = (): [string, string, string, 1 | -1][] => [...HAND, ...catalogFields().map((f): [string, string, string, 1 | -1] => [f.path, f.label, f.label, f.type === "day" ? -1 : 1])]
+// A field the catalog marks desc (the counts: how many applications name the same company) reads high first, as days do.
+const allKeys = (): [string, string, string, 1 | -1][] => [...HAND, ...catalogFields().map((f): [string, string, string, 1 | -1] => [f.path, f.label, f.label, f.desc || f.type === "day" ? -1 : 1])]
 const sorts = (): [string, string][] => allKeys().map(([k, l]) => [k, l])
 const groups = (): [string, string][] => [["", "nothing"], ...allKeys().map(([k, , g]): [string, string] => [k, g])]
 const firstDir = (k: string): 1 | -1 => allKeys().find(([x]) => x === k)?.[3] ?? 1
@@ -199,8 +200,10 @@ function keyOf(name: string, by: Map<number, Row>, dupes: Map<number, number[]>,
     case "enum":
       return listedKey(f.values ?? [], (id) => str(get(id)))
     case "num":
-      // An id groups by hundreds; any other figure by its order of magnitude.
-      return f.path === "id" ? rangedKey(num, 100, (lo) => `${Math.max(1, lo)}–${lo + 99}`) : {
+      // An id groups by hundreds, a count by its value (3 at one company is not 7), any other figure by its order of magnitude.
+      if (f.path === "id") return rangedKey(num, 100, (lo) => `${Math.max(1, lo)}–${lo + 99}`)
+      if (f.desc) return { value: num, group: (id) => (num(id) === null ? ["", "(none)"] : [String(num(id)), `${num(id)} application${num(id) === 1 ? "" : "s"}`]) }
+      return {
         value: num,
         group: (id) => {
           const v = num(id)
