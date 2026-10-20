@@ -257,10 +257,23 @@ impl Kernel {
             self.cvs.clear();
         }
         let pick_tables = [table::APPLICATIONS, table::PLACES, table::CORPORATIONS, table::CV_RULES, table::CV_MASKS, table::CV_ROOTS, table::ME, table::LANGUAGES];
+        // Applications written in place and nothing else a column reads: the
+        // typed columns mend those rows instead of being built again.
+        let in_place = m.replaced.is_empty()
+            && pick_tables[1..].iter().all(|&t| !m.touched(t))
+            && !m.touched(table::OFFICES)
+            && m.tables.get(&table::APPLICATIONS).is_some_and(|(_, gone)| gone.is_empty());
+        if in_place {
+            let written = m.tables[&table::APPLICATIONS].0.clone();
+            let rows = &self.rows;
+            self.cols.get_mut().retain(|k, c| crate::arrange::mend(rows, k, c, &written));
+        }
         if pick_tables.iter().any(|&t| m.touched(t)) || !m.replaced.is_empty() {
             *self.picks.get_mut() = None;
             self.columns.get_mut().clear();
-            self.cols.get_mut().clear();
+            if !in_place {
+                self.cols.get_mut().clear();
+            }
         } else if m.touched(table::OFFICES) || m.touched(table::LEASES) {
             self.columns.get_mut().clear();
             self.cols.get_mut().clear();

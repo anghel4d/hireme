@@ -473,7 +473,8 @@ pub fn arrange(rows: &Rows, ids: &[u32], ask: &Ask, keep: &dyn Fn(u32) -> (u32, 
             let b = values[gi as usize];
             let key = match (b, &col.col) {
                 (None, _) => String::from("none"),
-                (Some(b), Col::Sym { .. }) => alloc::format!("s{}", b as u32),
+                // The value itself, case aside: the same group under any build of the column.
+                (Some(b), Col::Sym { dict, .. }) => alloc::format!("s:{}", dict[b as usize].to_lowercase()),
                 (Some(b), Col::Num(_)) => alloc::format!("n{b}"),
             };
             Group { key, label: col.label(b), start: start[gi as usize], count: counts[gi as usize], keep: keeper.get(gi as usize).copied().flatten().map(|k| k.0) }
@@ -606,4 +607,64 @@ pub fn desk(rows: &Rows, board: &crate::board::Board, key: &str) -> Option<Colum
         "place" => Column::of(linked(A::PLACE_ID, schema::table::PLACES, schema::col::places::NAME, A::LOCATION), Bucket::Sym),
         _ => return None,
     })
+}
+
+/// Brings a catalog field's column up to date after the applications `ids`
+/// were written in place (no row added or gone): each written slot read
+/// again, a new text interned and the ranks redone. False when it cannot
+/// (a count, which reads every row; a country code, which reads names;
+/// rows added or gone): the caller rebuilds it then.
+pub fn mend(rows: &Rows, key: &str, column: &mut Column, ids: &[u32]) -> bool {
+    let Some(f) = mask::field(key) else { return false };
+    let Some(t) = rows.table(schema::table::APPLICATIONS) else { return false };
+    let path = mask::FIELDS[f].path;
+    let len = match &column.col {
+        Col::Num(v) => v.len(),
+        Col::Sym { ids, .. } => ids.len(),
+    };
+    if DESK.contains(&key) || path.ends_with(".applications") || mask::FIELDS[f].ty == Ty::Code || len != t.len() {
+        return false;
+    }
+    let counts = Counts::default();
+    let mut grew = false;
+    for &id in ids {
+        let Some(slot) = t.slot(id) else { return false };
+        let v = AppFacts::new(rows, t, id, &counts).read(f).map(Val::into_owned);
+        match &mut column.col {
+            Col::Num(nums) => {
+                nums[slot] = match v {
+                    Some(Val::Num(n)) => n,
+                    Some(Val::Day(d)) => d as f64,
+                    Some(Val::Bool(b)) => f64::from(u8::from(b)),
+                    _ => f64::NAN,
+                }
+            }
+            Col::Sym { ids: syms, dict, .. } => {
+                syms[slot] = match v {
+                    Some(Val::Enum(i)) => i,
+                    Some(Val::Text(s)) if !s.is_empty() => {
+                        let fold = s.to_lowercase();
+                        match dict.iter().position(|d| d.to_lowercase() == fold) {
+                            Some(i) => i as u32,
+                            None => {
+                                dict.push(s.into_owned());
+                                grew = true;
+                                dict.len() as u32 - 1
+                            }
+                        }
+                    }
+                    _ => NONE,
+                }
+            }
+        }
+    }
+    if grew && let Col::Sym { dict, rank, .. } = &mut column.col {
+        let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+        order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
+        *rank = alloc::vec![0; dict.len()];
+        for (r, s) in order.into_iter().enumerate() {
+            rank[s as usize] = r as u32;
+        }
+    }
+    true
 }

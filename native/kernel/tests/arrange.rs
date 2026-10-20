@@ -104,3 +104,55 @@ fn filters_narrow_and_the_chips_count_the_modes_and_the_unlinked() {
     assert_eq!(ids, [2, 4]);
     assert!(k.arrange(&json!({"sort": ["nope", "asc"]})).is_err());
 }
+
+#[test]
+fn a_mended_column_arranges_as_one_built_from_the_rows() {
+    // Seeded writes in place (company text, a link, a score, a role), each
+    // arranged by the mended kernel and by a fresh one restored from its rows.
+    let mut k = kernel();
+    let asks = [
+        json!({"sort": ["company.name", "asc"], "group": "field"}),
+        json!({"sort": ["no", "desc"], "group": "company.name", "largest": true}),
+        json!({"sort": ["role", "asc"], "group": "seniority"}),
+        json!({"group": "work_mode"}),
+    ];
+    for a in &asks {
+        arrange(&mut k, a.clone());
+    }
+    let mut seed = 0x2545_f491_u32;
+    let mut next = |n: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed % n
+    };
+    let roles = ["Staff Engineer", "Research Scientist", "Intern, ML", "senior sre"];
+    for step in 0..40 {
+        let id = 1 + next(6);
+        let mut w = wire::BodyWriter::new();
+        let mut b = w.block(table::APPLICATIONS, 1);
+        b.u32s(A::ID, [id].into_iter());
+        match next(4) {
+            0 => {
+                b.strs(A::ROLE, [roles[next(4) as usize]].into_iter());
+            }
+            1 => {
+                b.u32s(A::CORPORATION_ID, [[10, 11, wire::NONE][next(3) as usize]].into_iter());
+            }
+            2 => {
+                b.u32s(A::SCORE_100, [next(101)].into_iter());
+            }
+            _ => {
+                b.u32s(A::WORK_MODE, [[enums::work_mode::REMOTE as u32, enums::work_mode::ONSITE as u32, wire::NONE][next(3) as usize]].into_iter());
+            }
+        }
+        b.done();
+        k.patch(&w.finish(), 2 + step).unwrap();
+        let mut fresh = Kernel::new();
+        fresh.set_today(739_528);
+        fresh.restore(&k.snapshot()).unwrap();
+        for a in &asks {
+            assert_eq!(arrange(&mut k, a.clone()), arrange(&mut fresh, a.clone()), "step {step}: {a}");
+        }
+    }
+}
