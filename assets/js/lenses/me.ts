@@ -151,7 +151,7 @@ function verdict(text: string, position?: number): Html {
   if (!c) return EMPTY
   if (c.error) return html`<span class="bad">${c.error.msg}</span> ${marked(text, c.error.pos, c.error.len)}`
   if (c.never_matches) return html`<span class="muted">matches no application yet</span>`
-  if (c.shadowed.length > 0) return html`<span class="warn">never wins: ${c.shadowed.map((a) => `#${a}`).join(", ")} take every application it matches</span>`
+  if (c.shadowed.length > 0) return html`<span class="warn">never wins: ${c.shadowed.map((a) => `#${a}`).join(", ")} ${c.shadowed.length === 1 ? "takes" : "take"} every application it matches</span>`
   return html`<span class="ok">ok</span>`
 }
 
@@ -171,7 +171,7 @@ function cv(): Html {
       })}</tbody></table>`}
       <form class="row" data-submit="root" data-act="root">
         <label>Name <input name="name" required placeholder="Research, DACH"></label>
-        <label>Slug <input name="slug" placeholder="research-dach" pattern="[a-z0-9-]+" class="narrow"></label>
+        <label>Slug <input name="slug" placeholder="research-dach" pattern="[a-z0-9\\-]+" class="narrow"></label>
         <label>Format <select name="format">${(ENUMS.cv_format ?? []).filter((x) => x !== "composed").map((x) => html`<option>${x}</option>`)}</select></label>
         <button>Add CV</button>
       </form>
@@ -279,7 +279,7 @@ function rulesView(): Html {
           <output class="verdict">${verdict(pattern, i)}</output></form></li>`
       })}</ol>
       ${ids("cv_roots").length === 0 ? html`<p class="empty">Add a CV first: a rule names the CV it gives.</p>` : html`<form class="row" data-submit="newrule" data-act="newrule" data-key="newrule">
-        <label class="grow">When <input name="pattern" required data-act="check" data-on="input" data-position="${rs.length}" placeholder="country in [DE, AT, CH] &amp; role.field = :research" spellcheck="false" autocomplete="off" class="mono"></label>
+        <label class="grow">When <input name="pattern" required data-act="check" data-on="input" data-position="${rs.length}" placeholder="country in [DE, AT, CH] &amp; field = :research" spellcheck="false" autocomplete="off" class="mono"></label>
         <label>use <select name="root_id">${rootOptions(null)}</select></label>
         <label>Name <input name="name" class="narrow"></label>
         <button class="primary">Add rule</button>
@@ -287,7 +287,7 @@ function rulesView(): Html {
       ${fs.length > 0 ? builder(fs) : EMPTY}
     </section>
     <section class="card" data-key="masks"><h2>Named masks</h2>
-      <p class="hint">A mask is a pattern with a name; a rule names it like a field: <code>dach &amp; role.field = :research</code>.</p>
+      <p class="hint">A mask is a pattern with a name; a rule names it like a field: <code>dach &amp; field = :research</code>.</p>
       <ul class="rows">${masks.map((id) => html`<li data-key="m${id}"><form class="row" data-submit="mask" data-act="mask" data-id="${id}">
         <b>${str(value("cv_masks", id, "name"))}</b>
         <label class="grow">= <input name="pattern" required value="${str(value("cv_masks", id, "pattern"))}" data-act="check" data-on="input" spellcheck="false" class="mono"></label>
@@ -301,15 +301,20 @@ function rulesView(): Html {
         <output class="verdict"></output></form>
     </section>
     <section class="card" data-key="multi"><h2>Taken by more than one rule</h2>
-      ${multi.length === 0 && broken.length === 0 ? html`<p class="empty">Every application's CV is settled: no unpinned application matches a second rule.</p>` : EMPTY}
-      <ul class="rows">${[...broken, ...multi].map((p) => {
-        const no = value("applications", p.application, "no")
-        return html`<li data-key="a${p.application}"><a href="/focus/${str(no)}" data-nav>#${str(no)} ${str(value("applications", p.application, "role"))}</a>
-          ${p.state === "stale" ? html`<span class="tag bad">pinned to a deleted CV</span>` : p.state === "empty" ? html`<span class="tag warn">${rootName(p.root)} has no versions</span>` : html`gets <b>${rootName(p.root)}</b> by #${String(p.arm)}; also matched`}
+      ${multi.length === 0 ? html`<p class="empty">No unpinned application matches a second rule.</p>` : html`<ul class="rows">${multi.map((p) => html`<li data-key="a${p.application}">${appLink(p.application)}
+          gets <b>${rootName(p.root)}</b> by #${String(p.arm)}; also matched
           ${[...new Set(p.also.map((a) => Number(value("cv_rules", a, "root_id") ?? 0)))].filter((r) => r && r !== p.root).map((r) => html`<button type="button" data-act="pin" data-app="${p.application}" data-root="${r}">${rootName(r)}</button>`)}
-          ${p.root && p.state === "matched" ? html`<button type="button" data-act="pin" data-app="${p.application}" data-root="${p.root}">Keep ${rootName(p.root)}</button>` : EMPTY}</li>`
-      })}</ul>
-    </section>`
+          ${p.root ? html`<button type="button" data-act="pin" data-app="${p.application}" data-root="${p.root}">Keep ${rootName(p.root)}</button>` : EMPTY}</li>`)}</ul>`}
+    </section>
+    ${broken.length === 0 ? EMPTY : html`<section class="card" data-key="broken"><h2>Needs a CV</h2>
+      <ul class="rows">${broken.map((p) => html`<li data-key="b${p.application}">${appLink(p.application)}
+        ${p.state === "stale" ? html`<span class="tag bad">pinned to a deleted CV</span>` : html`gets <a href="/me/cv?root=${String(p.root)}" data-nav>${rootName(p.root)}</a><span class="tag warn">no versions yet</span>`}</li>`)}</ul>
+    </section>`}`
+}
+
+const appLink = (id: number): Html => {
+  const no = str(value("applications", id, "no"))
+  return html`<a href="/focus/${no}" data-nav>#${no} ${str(value("applications", id, "company"))} ${str(value("applications", id, "role"))}</a>`
 }
 
 /** The rules renumbered 10, 20, … with `id` moved `by` places, so an order of equal positions settles. */

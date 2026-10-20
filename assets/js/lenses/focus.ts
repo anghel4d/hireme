@@ -17,7 +17,7 @@ type Doc = {
   card: { score_100: number; stored: boolean; band: string; class: string; suggestion: Row; heat: Row } | null
   rail: { stage: string; label: string; hint: string; pip: string; fire_locked: boolean }[]
   coverage: { hits: number; total: number; percent: number; terms: { term: string; hit: boolean }[] }
-  cv: { theme: Row; lines: Row[] }
+  cv: { theme: Row; lines: Row[]; file: { format: string; version_id: number; n: number; text: string } | null }
   events: Row[]
   batch: Row | null
   lineage: Row | null
@@ -66,7 +66,7 @@ function rail(d: Doc, appId: number): Html {
     return html`<li data-key="${r.stage}" class="pip-${r.pip}${r.stage === stage ? " now" : ""}">
     <button type="button" data-act="${fire ? "fire" : "stage"}" data-stage="${r.stage}" data-id="${appId}" title="${fire ? "Open fire: you, not an agent, send this application" : r.hint}"
       class="${fire && armed ? "danger" : ""}"${flag("disabled", r.stage === stage)}>
-      ${fire && armed ? "Open fire: click again" : r.label}${r.fire_locked ? html` <span class="lock" aria-label="FIRE HOLD">⏸</span>` : EMPTY}</button></li>`
+      ${fire && armed ? "Open fire: click again" : r.label}${r.fire_locked ? html` <span class="lock" aria-label="FIRE HOLD">‖</span>` : EMPTY}</button></li>`
   })}</ol>`
 }
 
@@ -109,25 +109,32 @@ function pick(d: Doc, appId: number): Html {
   if (!p) return EMPTY
   const rootName = (id: number): string => str(value("cv_roots", id, "name")) || `#${id}`
   const sent = Number(d.application.cv_version_id ?? 0)
-  return html`<form class="row pick" data-submit="pick" data-act="pick" data-id="${appId}" data-key="pick">
+  return html`<form class="row cv-pick" data-submit="pick" data-act="pick" data-id="${appId}" data-key="pick">
     <label>Goes out as <select name="root">${p.root === null ? html`<option value="">none</option>` : EMPTY}${[...ids("cv_roots")].map((r) => html`<option value="${r}"${flag("selected", r === p.root)}>${rootName(r)}</option>`)}</select></label>
     <button>Pin</button>${p.state === "pinned" ? html`<button type="button" class="ghost" data-act="unpin" data-id="${appId}">Unpin</button>` : EMPTY}
-    <span class="muted">${WHY[p.state]?.(p) ?? p.state}${sent ? ` · sent v${str(value("cv_versions", sent, "n"))}` : ""}</span>
-    <a href="/me/rules" data-nav class="ghost">rules</a></form>`
+    <a href="/me/rules" data-nav class="muted" title="The rules that pick a CV">${WHY[p.state]?.(p) ?? p.state}${sent ? ` · sent v${str(value("cv_versions", sent, "n"))}` : ""}</a></form>`
+}
+
+/** A file root's newest version: its text as written or extracted (what coverage reads), and the file itself. */
+function file(f: NonNullable<Doc["cv"]["file"]>): Html {
+  const sha = str(value("cv_versions", f.version_id, "blob_sha"))
+  const name = str(value("cv_versions", f.version_id, "blob_name"))
+  return html`<p class="muted">v${f.n} · ${f.format}${sha ? html` · <a href="/blobs/${sha}?name=${encodeURIComponent(name)}" target="_blank" rel="noopener">${name || "the file"} ↗</a>` : EMPTY}</p>
+    ${f.text ? html`<pre class="untrusted">${f.text}</pre>` : html`<p class="hint">No text could be read from this file.</p>`}`
 }
 
 function cv(d: Doc, appId: number): Html {
   const theme = d.cv.theme as { lead?: string | null; accent?: string; density?: string }
   return html`<section class="card cv cv-${str(theme.accent)} cv-${str(theme.density)}" data-key="cv">
-    <h2>CV for this application${d.lineage ? html` <span class="muted">version ${str(d.lineage.generation)}</span>` : EMPTY}
-      <span class="muted" title="CV layout and lineage phase">${str(theme.density)} · ${str(theme.accent)}${d.lineage ? ` · ${str(d.lineage.phase)}` : ""}</span></h2>
+    <h2>CV for this application${!d.cv.file && d.lineage ? html` <span class="muted">version ${str(d.lineage.generation)}</span>` : EMPTY}
+      ${d.cv.file ? EMPTY : html`<span class="muted" title="CV layout and lineage phase">${str(theme.density)} · ${str(theme.accent)}${d.lineage ? ` · ${str(d.lineage.phase)}` : ""}</span>`}</h2>
     ${pick(d, appId)}
-    ${theme.lead ? html`<p class="lead">${theme.lead}</p>` : EMPTY}
+    ${d.cv.file ? file(d.cv.file) : html`${theme.lead ? html`<p class="lead">${theme.lead}</p>` : EMPTY}
     ${d.cv.lines.length === 0 ? html`<p class="hint">No CV items yet. Agents add them to the corpus (profiles and items).</p>` : EMPTY}
     <ul class="cv-lines">${d.cv.lines.map((l) => html`<li data-key="i${str(l.item_id)}" class="kind-${str(l.kind)}${l.mode ? ` mode-${str(l.mode)}` : ""}">
       <b>${str(l.title)}</b>${l.org ? html` <span class="muted">${str(l.org)}</span>` : EMPTY}${l.span ? html` <span class="muted">${str(l.span)}</span>` : EMPTY}
       ${l.mode ? html`<span class="tag" title="${str(l.reason)}">${str(l.mode)}</span>` : EMPTY}
-      ${l.body ? html`<p>${str(l.body)}</p>` : EMPTY}</li>`)}</ul>
+      ${l.body ? html`<p>${str(l.body)}</p>` : EMPTY}</li>`)}</ul>`}
   </section>`
 }
 
