@@ -12,7 +12,7 @@ use serde_json::{Value as Json, json};
 
 /// (name, which check, one line, what to do).
 const REFUSALS: &[(&str, &str, &str, &str)] = &[
-    ("scope", "grant", "the key's masks do not cover this", "A key's write mask names the domains it may write (world 1, desk 2, mail 4, lanes 8, corpus 16) and a drop needs may_delete. Ask the operator for a key with the domain; a key never widens itself."),
+    ("scope", "grant", "the key's masks do not cover this", "A key's write mask names the domains it may write (world 1, desk 2, mail 4, corpus 8) and a drop needs may_delete. Ask the operator for a key with the domain; a key never widens itself."),
     ("human_only", "grant", "only the operator may do this", "Commands and columns marked human_only (open_fire, batches.fire) are refused to every key. Leave it for the operator; FIRE HOLD stands."),
     ("lease_missing", "lease", "this session holds no lease", "Writes need the channel open. Call `lease` ({} opens it without claims, {\"count\":16} claims the 16 best unclaimed applications), then retry."),
     ("leased", "lease", "another session holds this application", "The data names the holder's label and since. Work on another application, or ask the operator to revoke that lease."),

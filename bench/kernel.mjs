@@ -104,7 +104,7 @@ const query = {};
     region: ["Europe", "Asia", "Americas"][rand(3)], population: rand(10) ? rand(10_000_000) : null, population_on: today, notes: rand(10) ? null : pack(note()),
   }));
   const { x, out, call } = await instance(bytes);
-  x.set_grants(31, 31, 1, 1);
+  x.set_grants(15, 15, 1, 1);
   if (call(x.ingest, bootFrame(JSON.parse(out(x.catalog())), { places })) < 0) throw new Error("BOOT refused");
   const ask = (q) => { const n = call(x.query, enc.encode(JSON.stringify(q))); if (n < 0) throw new Error(`refused ${JSON.stringify(q)}`); return n; };
   const next = JSON.parse(out(ask({ op: "find", table: "places", order: ["population", "desc"], limit: 50 }))).next;

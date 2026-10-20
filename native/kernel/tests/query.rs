@@ -11,7 +11,7 @@ use serde_json::{json, Value as Json};
 const N: u32 = 300;
 const REGIONS: [&str; 4] = ["Europe", "Asia", "", "Americas"];
 /// A browser session's grants: every domain both ways.
-const OPERATOR: Grants = Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true };
+const OPERATOR: Grants = Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true };
 
 fn kernel() -> Kernel {
     let mut w = wire::BodyWriter::new();

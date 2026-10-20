@@ -16,11 +16,10 @@ use schema::{ColDef, CommandDef, Cond, ParamDef, TableDef, Type, flag};
 use serde_json::{Map, Value as Json, json};
 
 /// The domains a mask names, in bit order.
-const DOMAINS: [(&str, u8); 5] = [
+const DOMAINS: [(&str, u8); 4] = [
     ("world", schema::domain::WORLD),
     ("desk", schema::domain::DESK),
     ("mail", schema::domain::MAIL),
-    ("lanes", schema::domain::LANES),
     ("corpus", schema::domain::CORPUS),
 ];
 

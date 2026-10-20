@@ -83,7 +83,7 @@ fn kernel() -> Kernel {
     b.done();
     let mut k = Kernel::new();
     k.set_today(TODAY);
-    k.set_grants(Grants { human: true, read_mask: 0b1_1111, write_mask: 0b1_1111, may_delete: true });
+    k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
     k.boot(&w.finish(), 1).unwrap();
     k
 }

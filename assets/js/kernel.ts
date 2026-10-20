@@ -85,7 +85,6 @@ export interface Exports {
   application(id: number): number
   overview(top: number): number
   atlas(): number
-  lanes(): number
   snapshot(): number
   restore(ptr: number, len: number): bigint
   set_grants(readMask: number, writeMask: number, mayDelete: number, human: number): void
@@ -457,7 +456,6 @@ export interface Card {
 export const card = (id: number): Card | null => (k ? memo(`card:${id}`, () => resultJson<Card>(k!.card(id))) : null)
 export const scoreboard = (): Row | null => (k ? memo("scoreboard", () => resultJson(k!.scoreboard())) : null)
 export const application = (id: number): Row | null => (k ? memo(`application:${id}`, () => resultJson(k!.application(id))) : null)
-export const lanes = (): Row | null => (k ? memo("lanes", () => resultJson(k!.lanes())) : null)
 export const atlas = (): Row | null => (k ? memo("atlas", () => resultJson(k!.atlas())) : null)
 
 /** Judges an op on the local rows and applies it as pending; a refusal is the kernel's own verdict. */
