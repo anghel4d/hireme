@@ -23,7 +23,7 @@ defmodule Hireme.DayTest do
 
       # Resident: the kernel judges the cell before it lands.
       {[%{id: app}], []} =
-        run(a.id, op(:put, :applications, %{company: "C#{i}", role: "R", listing_on: d}))
+        run(a.id, app(%{company: "C#{i}", role: "R", listing_on: d}))
 
       assert read(a, "applications", app, :listing_on) == d
 

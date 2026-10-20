@@ -23,6 +23,9 @@ pub fn shape(tool: &str) -> Option<String> {
         "history" => r#"{"table":"places","id":7,"column":"population"}"#.into(),
         "put" => r#"{"table":"corporations","key":{"domain":"example.com"},"set":{"name":"Example","headcount":1200},"as_of":"2026-10-01","source":"https://example.com/about"}  or  {"puts":[...]}"#.into(),
         "drop" => r#"{"table":"offices","id":31}"#.into(),
+        "unlinked" => r#"{}  or  {"limit":20,"after":<the last application id shown>}"#.into(),
+        "cv" => r#"{}  or  {"application":<no>}  or  {"check":"<pattern>","position":<n>}  or  {"fields":true}"#.into(),
+        "cv_upload" => r#"{"root_id":<cv_roots id>,"name":"cv.pdf","base64":"<the file>","note":"<what changed>"}"#.into(),
         other => return tools::command_named(other).map(command_shape),
     })
 }

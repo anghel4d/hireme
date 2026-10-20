@@ -208,6 +208,19 @@ pub fn list(m: Masks) -> Vec<Json> {
             false,
         ));
     }
+    if table_named("applications").is_some_and(|t| m.reads(t)) {
+        out.push(tool(
+            "unlinked",
+            "Applications to link",
+            "The applications that link to no corporation in the world, or to no place while not remote: the to-do list for links. Each comes as the refusal a put of it gets: the company and location it was written with, the world rows it most likely means (did you mean) and the calls that fix it (try). Confirm a candidate with `find`, then put the application again with corporation_id (and place_id). When no candidate is the company, research it and put it in corporations, with its domain and a source, first; a link is never guessed. {} gives the first 20; {\"after\":<the last application id shown>} pages on.".into(),
+            json!({"type":"object","properties":{
+                "limit":{"type":"integer","minimum":1,"maximum":200,"description":"how many to show (20 by default)"},
+                "after":{"type":"integer","minimum":0,"description":"the last application id the previous page showed"}
+            },"additionalProperties":false}),
+            true,
+            false,
+        ));
+    }
     if table_named("cv_rules").is_some_and(|t| m.reads(t)) {
         out.push(tool(
             "cv",

@@ -41,7 +41,7 @@ defmodule Hireme.SequencerTest do
     listing = String.duplicate("Rust systems, kernels and GPU runtimes. ", 400)
 
     {[app], []} =
-      run(a.id, op(:put, :applications, %{company: "L", role: "R", listing_raw: listing}))
+      run(a.id, app(%{company: "L", role: "R", listing_raw: listing}))
 
     # The kernel derives stage_on: today, on the 0000-01-01 epoch, end to end.
     assert Repo.get!(Application, app.id).stage_on == Date.utc_today()
@@ -87,7 +87,7 @@ defmodule Hireme.SequencerTest do
   test "every refusal is its op's own fault, named by code and reason (a default one marked); a hostile op costs only itself",
        %{account: a, session: s} do
     {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "r.example", name: "R"}))
-    {[app], []} = run(a.id, op(:put, :applications, %{company: "R", role: "R"}))
+    {[app], []} = run(a.id, app(%{company: "R", role: "R"}))
     t = Schema.table(:corporations)
     domain = Enum.find(t.cols, &(&1.name == "domain"))
     # A keyed put whose domain cell is an integer: whatever it raises inside.
@@ -179,11 +179,11 @@ defmodule Hireme.SequencerTest do
     ]
 
     {[app], []} =
-      run(a.id, op(:put, :applications, %{company: "Acme", role: "SRE", listing_url: hd(links)}))
+      run(a.id, app(%{company: "Acme", role: "SRE", listing_url: hd(links)}))
 
     for link <- tl(links) do
       {[], [nack]} =
-        run(a.id, op(:put, :applications, %{company: "Acme", role: "SRE", listing_url: link}))
+        run(a.id, app(%{company: "Acme", role: "SRE", listing_url: link}))
 
       assert nack.refusal == :natural_key
 
@@ -197,7 +197,7 @@ defmodule Hireme.SequencerTest do
     {[other], []} =
       run(
         a.id,
-        op(:put, :applications, %{
+        app(%{
           company: "Acme",
           role: "SRE",
           listing_url: "https://boards.greenhouse.io/acme/jobs/7?gh_jid=8"
@@ -248,8 +248,8 @@ defmodule Hireme.SequencerTest do
     assert refused.(%{name: "Germany"})["unmet"] == []
   end
 
-  test "a ref resolves in the account alone; a drop takes the rows whose required ref names it, within the writer's write mask; a dropped application is no longer claimable",
-       %{account: a} do
+  test "a ref resolves in the account alone; a drop takes the rows whose required ref names it, within the writer's write mask, and never leaves an application unlinked; a dropped application is no longer claimable",
+       %{account: a, corp: home} do
     {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "drop.example", name: "D"}))
     {[place], []} = run(a.id, op(:put, :places, %{kind: :country, name: "Nowhere", iso2: "NW"}))
 
@@ -267,13 +267,28 @@ defmodule Hireme.SequencerTest do
     assert {[], [%{refusal: :not_found}]} = run(a.id, office.(theirs.id))
     assert {[], [%{refusal: :not_found}]} = run(a.id, office.(9_999_999))
 
-    {[keep], []} = run(a.id, op(:put, :applications, %{company: "Keep", role: "R"}))
-    {[gone], []} = run(a.id, op(:put, :applications, %{company: "Gone", role: "R"}))
+    {[keep], []} = run(a.id, app(%{company: "Keep", role: "R"}))
+    {[gone], []} = run(a.id, app(%{company: "Gone", role: "R"}))
 
-    {[_], []} =
-      run(a.id, op(:put, :applications, %{company: "R", role: "R", corporation_id: corp.id}))
+    {[named], []} = run(a.id, app(%{company: "R", role: "R", corporation_id: corp.id}))
+    {[contact], []} = run(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
 
-    # The delete reaches the application: a world-only key may not take it.
+    # Every application links a corporation, and a place unless remote; a
+    # place an on-site application names stays.
+    bare = op(:put, :applications, %{company: "Bare", role: "R"})
+    assert {[], [%{refusal: :unlinked}]} = run(a.id, bare)
+    onsite = %{company: "On", role: "R", work_mode: :onsite}
+    assert {[], [%{refusal: :unlinked}]} = run(a.id, app(onsite))
+    {[_], []} = run(a.id, app(Map.put(onsite, :place_id, place.id)))
+    assert {[], [%{refusal: :unlinked}]} = run(a.id, op(:drop, :places, %{}, target: place.id))
+
+    # An application naming the corporation keeps it, whoever asks, until it links another.
+    assert {[], [%{refusal: :unlinked}]} =
+             run(a.id, op(:drop, :corporations, %{}, target: corp.id))
+
+    {[_], []} = run(a.id, op(:put, :applications, %{corporation_id: home}, target: named.id))
+
+    # The delete reaches the contact (mail): a world-only key may not take it.
     world_only = %{
       label: "w",
       grants: Grants.key(%{id: 1, read_mask: 1, write_mask: 1, may_delete: true}),
@@ -295,6 +310,7 @@ defmodule Hireme.SequencerTest do
 
     {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
     assert count(Office) == 0 and Repo.get(Place, place.id)
+    assert Repo.get(Hireme.Rows.Contact, contact.id).corporation_id == nil
   end
 
   test "a key writes only with the lease; a refused op resent after the state changed is judged again; the ledger is per writer, so one op_id is each writer's own",
@@ -324,7 +340,7 @@ defmodule Hireme.SequencerTest do
   test "a child row inserted or moved onto an application another session holds is leased; the operator's lands",
        %{account: a, session: s} do
     {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "move.example", name: "M"}))
-    app = fn n -> op(:put, :applications, %{company: n, role: "R", corporation_id: corp.id}) end
+    app = fn n -> app(%{company: n, role: "R", corporation_id: corp.id}) end
     {[app1], []} = run(a.id, app.("One"))
     {[app2], []} = run(a.id, app.("Two"))
     {[item], []} = run(a.id, op(:put, :items, %{kind: :skill, key: "rust", title: "Rust"}))
@@ -353,7 +369,7 @@ defmodule Hireme.SequencerTest do
   test "a BOOT for a key that reads only some domains loads into the real kernel, and a key reconnecting at the current rev still gets a BOOT",
        %{account: a} do
     {[_], []} = run(a.id, skill("s"))
-    {[_], []} = run(a.id, op(:put, :applications, %{company: "K", role: "R"}))
+    {[_], []} = run(a.id, app(%{company: "K", role: "R"}))
 
     for {read, write} <- [{8, 0}, {1, 0}, {0, 15}] do
       g = Grants.key(%{id: 5, read_mask: read, write_mask: write, may_delete: false})
@@ -371,7 +387,7 @@ defmodule Hireme.SequencerTest do
     text = String.duplicate("Staff engineer, Rust. ", 20)
 
     {[app], []} =
-      run(a.id, op(:put, :applications, %{company: "S", role: "R", listing_raw: text}))
+      run(a.id, app(%{company: "S", role: "R", listing_raw: text}))
 
     {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "w.example", name: "W"}))
     {[contact], []} = run(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
@@ -493,7 +509,7 @@ defmodule Hireme.SequencerTest do
     assert url.(dup) == nil and url.(odd) == nil
 
     again =
-      op(:put, :applications, %{company: "X", listing_url: "https://example.com/jobs/1?ref=hn"})
+      app(%{company: "X", listing_url: "https://example.com/jobs/1?ref=hn"})
 
     assert {[], [%{refusal: :natural_key}]} = run(a.id, again)
   end
@@ -505,7 +521,7 @@ defmodule Hireme.SequencerTest do
     apps =
       for i <- 1..3 do
         {[app], []} =
-          run(a.id, op(:put, :applications, %{company: "C#{i}", role: "R", listing_raw: listing}))
+          run(a.id, app(%{company: "C#{i}", role: "R", listing_raw: listing}))
 
         app
       end
@@ -576,7 +592,7 @@ defmodule Hireme.SequencerTest do
             op(:put, :items, %{kind: :skill, key: "r-#{slug}", title: slug})
 
           {:app, role} ->
-            op(:put, :applications, %{company: "Co", role: role})
+            app(%{company: "Co", role: role})
 
           {:note, i, text} ->
             op(:put, :items, %{body: text}, target: id.("items", i))
@@ -844,7 +860,7 @@ defmodule Hireme.SequencerTest do
       {[app], []} =
         run(
           a.id,
-          op(:put, :applications, %{
+          app(%{
             company: "Bytes",
             role: "R",
             corporation_id: corp.id,
@@ -867,9 +883,9 @@ defmodule Hireme.SequencerTest do
           })
         )
 
-      {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
-      assert counter(a.id) == recount(a.id)
       {[_], []} = run(a.id, op(:drop, :applications, %{}, target: app.id))
+      assert counter(a.id) == recount(a.id)
+      {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
       assert counter(a.id) == recount(a.id)
     end
 
@@ -878,7 +894,7 @@ defmodule Hireme.SequencerTest do
       {[app], []} =
         run(
           a.id,
-          op(:put, :applications, %{
+          app(%{
             company: "Full",
             role: "R",
             notes: String.duplicate("x", 5_000)
@@ -891,7 +907,7 @@ defmodule Hireme.SequencerTest do
       {agent, _} = key_session(a.id, mint(s, "near"), 998)
 
       notes = fn n, c ->
-        op(:put, :applications, %{company: "C", role: "R", notes: String.duplicate(c, n)})
+        app(%{company: "C", role: "R", notes: String.duplicate(c, n)})
       end
 
       assert {[], [%{refusal: :cap}]} = key_session_ops(agent, notes.(100, "x"))

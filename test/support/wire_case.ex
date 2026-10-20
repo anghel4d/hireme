@@ -24,6 +24,7 @@ defmodule Hireme.WireCase do
     Hireme.DataCase.setup_sandbox(tags)
     signed = Hireme.DataCase.sign_in()
     Hireme.Repo.put_account(signed.account.id)
+    corp = corporation(signed.account.id)
 
     on_exit(fn ->
       case Registry.lookup(Hireme.Sequencer.Registry, signed.account.id) do
@@ -32,7 +33,50 @@ defmodule Hireme.WireCase do
       end
     end)
 
-    {:ok, signed}
+    {:ok, Map.put(signed, :corp, corp)}
+  end
+
+  @doc """
+  A world corporation for `account_id`, as the database holds one before
+  its sequencer starts (its text counted in the account's, as the
+  sequencer counts it): every application links one. `app/2` links the
+  test account's.
+  """
+  def corporation(account_id, domain \\ "test-corp.example") do
+    import Ecto.Query
+    now = Hireme.Store.now()
+    name = "Test Corp"
+
+    corp =
+      Hireme.Repo.insert!(
+        %Hireme.Rows.Corporation{
+          account_id: account_id,
+          domain: domain,
+          name: name,
+          rev: 1,
+          inserted_at: now,
+          updated_at: now
+        },
+        skip_account: true
+      )
+
+    from(a in Hireme.Rows.Account, where: a.id == ^account_id)
+    |> Hireme.Repo.update_all([inc: [text_bytes: byte_size(domain) + byte_size(name)]],
+      skip_account: true
+    )
+
+    if Hireme.Repo.account_id() == account_id, do: Process.put({__MODULE__, :corp}, corp.id)
+    corp.id
+  end
+
+  @doc """
+  A new application, linked as every application is: to the test
+  account's corporation, and remote, so it needs no place. `cells` add to
+  or override that.
+  """
+  def app(cells \\ %{}, opts \\ []) do
+    linked = %{corporation_id: Process.get({__MODULE__, :corp}), work_mode: :remote}
+    op(:put, :applications, Map.merge(linked, Map.new(cells)), opts)
   end
 
   @doc """
