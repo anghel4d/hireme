@@ -327,7 +327,7 @@ defmodule Hireme.ImportTest do
   property "whatever a row holds, an import answers a report and every other row is written", %{
     account: a
   } do
-    tables = ~w(corporations offices places sources contacts gym_reps items cv_lineages batches)
+    tables = ~w(corporations offices places sources contacts items cv_lineages batches)
 
     check all(
             table <- member_of(tables),

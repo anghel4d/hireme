@@ -138,7 +138,7 @@ defmodule Hireme.ProvenanceTest do
     assert c.source_id
 
     {:ok, %{key: key}} =
-      Hireme.Keys.mint(s, "deleter", %{read_mask: 31, write_mask: 31, may_delete: true})
+      Hireme.Keys.mint(s, "deleter", %{read_mask: 15, write_mask: 15, may_delete: true})
 
     {agent, _} = key_session(a.id, key, 997)
 

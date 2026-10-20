@@ -71,8 +71,8 @@ defmodule Hireme.PauseLedgerTest do
         do: Repo.insert_all(OpLedger, chunk, skip_account: true)
   end
 
-  defp gym(slug, opts \\ []),
-    do: op(:put, :gym_reps, %{platform: :other, slug: slug, done_on: ~D[2026-10-01]}, opts)
+  defp skill(slug, opts \\ []),
+    do: op(:put, :items, %{kind: :skill, key: "s-#{slug}", title: slug}, opts)
 
   # ------------------------------------------------------------ the ledger
 
@@ -86,12 +86,12 @@ defmodule Hireme.PauseLedgerTest do
     # B's rows are the node's oldest ids, as many as an eviction takes.
     insert_ledger(ledger_rows(b.account.id, 1, window))
     insert_ledger(ledger_rows(a.id, base + 1, window + 1))
-    {[_], []} = run(a.id, gym("one"))
+    {[_], []} = run(a.id, skill("one"))
     assert length(ledger_ids(a.id)) == window + 2
 
     # The cached count says the ledger is full.
     :sys.replace_state(seq(a.id), &put_in(&1.counts[t.id], t.cap))
-    {[_], []} = run(a.id, gym("two"))
+    {[_], []} = run(a.id, skill("two"))
 
     # The oldest `window` went; the newest of the old rows, the first op's
     # entry and this op's entry stay.
@@ -109,7 +109,7 @@ defmodule Hireme.PauseLedgerTest do
     insert_ledger(expire.(ledger_rows(b.account.id, 1, 5_001)))
     insert_ledger(expire.(ledger_rows(a.id, 10_000, 12_000)) ++ ledger_rows(a.id, 30_000, 1))
 
-    {[_], []} = run(a.id, gym("after"))
+    {[_], []} = run(a.id, skill("after"))
     assert eventually(fn -> length(ledger_ids(a.id)) == 2 end)
 
     # And it is over: an idle sequencer, not one re-selecting rows it cannot delete.
@@ -122,7 +122,8 @@ defmodule Hireme.PauseLedgerTest do
   end
 
   test "a ledger entry older than a day no longer answers a resend", %{account: a} do
-    put = gym("old", op_id: 4242)
+    # A contact with no address has no key, so the resend makes a second row.
+    put = op(:put, :contacts, %{name: "old"}, op_id: 4242)
     {[first], []} = run(a.id, put)
     old = DateTime.add(DateTime.utc_now(), -25 * 3600) |> DateTime.truncate(:second)
     Repo.update_all(from(l in OpLedger, where: l.op_id == 4242), set: [inserted_at: old])

@@ -392,8 +392,6 @@ CREATE TABLE "settings" (
   "rev" INTEGER NOT NULL DEFAULT 1,
   "inserted_at" TEXT NOT NULL,
   "updated_at" TEXT NOT NULL,
-  "gym_target" INTEGER,
-  "net_lane_url" TEXT,
   "goal_total" INTEGER,
   "goal_on" TEXT,
   "goal_daily" INTEGER,
@@ -697,42 +695,6 @@ CREATE TRIGGER "messages__ref_application_id_insert" BEFORE INSERT ON "messages"
 CREATE TRIGGER "messages__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "messages" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.application_id'); END;
 CREATE TRIGGER "messages__ref_contact_id_insert" BEFORE INSERT ON "messages" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.contact_id'); END;
 CREATE TRIGGER "messages__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "messages" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.contact_id'); END;
-
-CREATE TABLE "gym_reps" (
-  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
-  "rev" INTEGER NOT NULL DEFAULT 1,
-  "inserted_at" TEXT NOT NULL,
-  "updated_at" TEXT NOT NULL,
-  "platform" TEXT NOT NULL,
-  "slug" TEXT NOT NULL,
-  "title" TEXT,
-  "topic" TEXT,
-  "difficulty" TEXT,
-  "url" TEXT,
-  "done_on" TEXT NOT NULL,
-  "minutes" INTEGER,
-  "outcome" TEXT NOT NULL DEFAULT 'solved',
-  "note" TEXT
-) STRICT;
-CREATE INDEX "gym_reps__account_account_id" ON "gym_reps" ("account_id");
-CREATE INDEX "gym_reps__index_done_on" ON "gym_reps" ("account_id", "done_on");
-
-CREATE TABLE "net_entries" (
-  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
-  "rev" INTEGER NOT NULL DEFAULT 1,
-  "inserted_at" TEXT NOT NULL,
-  "updated_at" TEXT NOT NULL,
-  "kind" TEXT NOT NULL,
-  "channel" TEXT NOT NULL DEFAULT 'other',
-  "title" TEXT,
-  "url" TEXT,
-  "body" TEXT,
-  "shipped_on" TEXT
-) STRICT;
-CREATE INDEX "net_entries__account_account_id" ON "net_entries" ("account_id");
-CREATE INDEX "net_entries__index_shipped_on" ON "net_entries" ("account_id", "shipped_on");
 
 CREATE TABLE "me" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

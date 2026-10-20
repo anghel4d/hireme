@@ -3,8 +3,8 @@ defmodule Hireme.Grants do
   What a wire session may read and write: its masks, the domain of a table
   or command, and the first of the sequencer's six checks.
 
-  A key carries a `read_mask` and a `write_mask` over the five domains
-  (world 1, desk 2, mail 4, lanes 8, corpus 16) and `may_delete`. A browser
+  A key carries a `read_mask` and a `write_mask` over the four domains
+  (world 1, desk 2, mail 4, corpus 8) and `may_delete`. A browser
   session is the operator: every domain both ways and `may_delete`. Tables of
   the `system` domain (`trusted_hosts` among them) are in no mask: nothing
   reads or writes them through a mask.
@@ -13,7 +13,7 @@ defmodule Hireme.Grants do
   import Bitwise
   alias Hireme.Schema
 
-  @all 0b11111
+  @all Schema.domain_mask()
 
   defstruct actor: :key, key_id: nil, read_mask: 0, write_mask: 0, may_delete: false
 

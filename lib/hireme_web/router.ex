@@ -18,8 +18,8 @@ defmodule HiremeWeb.Router do
     step_up: &Auth.require_step_up/2
   }
   # The one page, under every lens's address (a view, then an item); the lens is the
-  # client's to read. focus, atlas and lanes are old addresses the client rewrites.
-  @lenses ~w(desk world outreach me account focus atlas lanes)
+  # client's to read. focus and atlas are old addresses the client rewrites.
+  @lenses ~w(desk world outreach me account focus atlas)
 
   @impl true
   def init(opts), do: opts

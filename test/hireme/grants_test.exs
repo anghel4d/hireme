@@ -4,14 +4,14 @@ defmodule Hireme.GrantsTest do
 
   alias Hireme.{Grants, Schema}
 
-  @domains ~w(world desk mail lanes corpus)
+  @domains ~w(world desk mail corpus)
   @outside ~w(trusted_hosts)
   @stored for t <- Schema.tables(), t.residency in [:resident, :server], do: t
 
   defp key(r, w, d \\ false), do: Grants.key(%{id: 7, read_mask: r, write_mask: w, may_delete: d})
 
   property "a mask reads and writes exactly the tables of its domains, never system or trusted hosts" do
-    check all(r <- integer(0..31), w <- integer(0..31), max_runs: 64) do
+    check all(r <- integer(0..15), w <- integer(0..15), max_runs: 64) do
       g = key(r, w)
 
       for t <- @stored do
@@ -28,9 +28,9 @@ defmodule Hireme.GrantsTest do
   end
 
   test "the presets are what their names say" do
-    assert Grants.preset(:read_only) == {31, 0}
-    assert Grants.preset(:write_only) == {0, 31}
-    assert Grants.preset(:read_write) == {31, 31}
+    assert Grants.preset(:read_only) == {15, 0}
+    assert Grants.preset(:write_only) == {0, 15}
+    assert Grants.preset(:read_write) == {15, 15}
     op = Grants.operator()
 
     assert Enum.all?(
@@ -40,7 +40,7 @@ defmodule Hireme.GrantsTest do
   end
 
   test "a key never sees a server_only or private column; the operator sees private ones" do
-    k = key(31, 31)
+    k = key(15, 15)
     op = Grants.operator()
 
     for t <- Schema.tables() do
@@ -59,7 +59,7 @@ defmodule Hireme.GrantsTest do
     open_fire = Schema.command(:open_fire)
     stage = Schema.command(:stage)
 
-    assert {:refused, :scope, _} = Grants.check(key(31, 0), :put, nil, apps, [])
+    assert {:refused, :scope, _} = Grants.check(key(15, 0), :put, nil, apps, [])
     assert :ok = Grants.check(key(0, 2), :put, nil, apps, [])
     assert {:refused, :scope, _} = Grants.check(key(0, 2), :drop, nil, apps, [])
     assert :ok = Grants.check(key(0, 2, true), :drop, nil, apps, [])

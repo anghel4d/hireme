@@ -4,9 +4,11 @@
 #
 # Lines (a `#` starts a comment; indentation is cosmetic):
 #
-#   domain <name>...                 the first five carry mask bits 1 2 4 8 16;
-#                                    `system` carries none and is in no mask. A
-#                                    bit is stored in api_keys masks: append only.
+#   domain <name>...                 each before `system` carries the next mask
+#                                    bit (1 2 4 8); `system` carries none and is
+#                                    in no mask. A bit is stored in api_keys
+#                                    masks: a migration dropping a domain
+#                                    rewrites them.
 #   frame <NAME> <id>                wire frame kinds
 #   layout <n>                       the byte layout native/wire implements; in
 #                                    wire_hash, so a client of another refuses
@@ -86,7 +88,7 @@
 # from 1, in declaration order. A required `ref` cascades on delete; a nullable
 # one is set null.
 
-domain world desk mail lanes corpus system
+domain world desk mail corpus system
 
 layout 4
 # priv/wire/<name>.zdict: a text cell of 256 bytes or more packs against
@@ -154,12 +156,6 @@ enum message_channel email linkedin x other
 enum direction outbound inbound
 enum message_status draft queued sent delivered bounced failed received
 
-enum platform leetcode codeforces other
-enum topic arrays graphs strings dp trees systems other
-enum difficulty easy medium hard unknown
-enum rep_outcome solved attempt skip
-enum net_kind observer artifact post draft
-enum net_channel broadside x other
 enum cv_format markdown pdf docx composed
 enum language_level a1 a2 b1 b2 c1 c2 native
 
@@ -453,8 +449,8 @@ table cv_overlays desk resident
 
 table settings desk resident singleton
   cap 1
-  col gym_target u32 ?
-  col net_lane_url str ?
+  # gym_target and net_lane_url, the lanes' own.
+  retired col 2
   col goal_total u32 ?
   col goal_on day ?
   col goal_daily u32 ?
@@ -674,31 +670,8 @@ table messages mail resident
   col application_id ref applications ?
   col contact_id ref contacts ?
 
-# ---------------------------------------------------------------- lanes
-
-table gym_reps lanes resident
-  cap 100000
-  index done_on
-  col platform enum platform !
-  col slug str !
-  col title str ?
-  col topic enum topic ?
-  col difficulty enum difficulty ?
-  col url str ?
-  col done_on day !
-  col minutes u32 ?
-  col outcome enum rep_outcome ! = solved
-  col note str ?
-
-table net_entries lanes resident
-  cap 100000
-  index shipped_on
-  col kind enum net_kind !
-  col channel enum net_channel ! = other
-  col title str ?
-  col url str ?
-  col body text ?
-  col shipped_on day ?
+# The lanes (gym_reps, net_entries), cut with their lens.
+retired table 2
 
 # ---------------------------------------------------------------- wire
 

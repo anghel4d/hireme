@@ -424,7 +424,7 @@ prose_burst = watcher |> Bench.patches(100) |> Enum.sum()
 
 ## 256 ops per OPS frame: a full frame is taken whole; one more is not a frame.
 
-full = for i <- 1..256, do: Bench.put(:net_entries, %{kind: :post, title: "post #{i}"})
+full = for i <- 1..256, do: Bench.put(:items, %{kind: :skill, key: "post #{i}", title: "post"})
 {frames, op} = Bench.send_ops(op, Codec.encode_ops(full), 256)
 
 acked =
@@ -436,7 +436,7 @@ acked =
 
 over =
   Codec.encode_ops(
-    for i <- 1..257, do: Bench.put(:net_entries, %{kind: :post, title: "over #{i}"})
+    for i <- 1..257, do: Bench.put(:items, %{kind: :skill, key: "over #{i}", title: "over"})
   )
 
 over_answer = Session.frame(over, op)
@@ -524,7 +524,9 @@ roundtrips =
 
     {times, _} =
       Enum.map_reduce(1..300, state, fn i, {buf, pending} ->
-        frame = Codec.encode_ops([Bench.put(:net_entries, %{kind: :draft, title: "rt #{i}"})])
+        frame =
+          Codec.encode_ops([Bench.put(:items, %{kind: :skill, key: "rt #{i}", title: "rt"})])
+
         t0 = System.monotonic_time(:microsecond)
         :ok = Bench.WS.send_bin(sock, frame)
         {_, state} = Bench.WS.until(sock, buf, :ACK, pending)
@@ -632,7 +634,10 @@ Process.sleep(60_000 - rem(System.os_time(:millisecond), 60_000) + 200)
 
 {agent_results, _} =
   Enum.map_reduce(1..12, agent, fn b, agent ->
-    batch = for i <- 1..64, do: Bench.put(:net_entries, %{kind: :draft, title: "agent #{b}.#{i}"})
+    batch =
+      for i <- 1..64,
+          do: Bench.put(:items, %{kind: :skill, key: "agent #{b}.#{i}", title: "agent"})
+
     {frames, agent} = Bench.send_ops(agent, Codec.encode_ops(batch), 64)
     decoded = Enum.map(frames, &Bench.decode/1)
 

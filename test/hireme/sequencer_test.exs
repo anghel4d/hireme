@@ -3,7 +3,7 @@ defmodule Hireme.SequencerTest do
   use ExUnitProperties
 
   import Ecto.Query
-  alias Hireme.Rows.{Application, Corporation, GymRep, Office, OpLedger, Place}
+  alias Hireme.Rows.{Application, Corporation, Item, Office, OpLedger, Place}
 
   defp sub(id, grants \\ Grants.operator(), key_id \\ nil),
     do: %{id: id, label: "s#{id}", grants: grants, key_id: key_id, session_id: nil}
@@ -20,8 +20,7 @@ defmodule Hireme.SequencerTest do
   # A fresh BOOT from another pid, so this pid keeps its live subscription.
   defp fresh(account_id, id), do: Task.async(fn -> boot(account_id, id) end) |> Task.await()
 
-  defp gym(slug),
-    do: op(:put, :gym_reps, %{platform: :other, slug: slug, done_on: ~D[2026-10-01]})
+  defp skill(slug), do: op(:put, :items, %{kind: :skill, key: "s-#{slug}", title: slug})
 
   defp count(queryable), do: Repo.aggregate(queryable, :count)
 
@@ -316,10 +315,10 @@ defmodule Hireme.SequencerTest do
 
   test "a BOOT for a key that reads only some domains loads into the real kernel, and a key reconnecting at the current rev still gets a BOOT",
        %{account: a} do
-    {[_], []} = run(a.id, gym("s"))
+    {[_], []} = run(a.id, skill("s"))
     {[_], []} = run(a.id, op(:put, :applications, %{company: "K", role: "R"}))
 
-    for {read, write} <- [{8, 0}, {1, 0}, {0, 31}] do
+    for {read, write} <- [{8, 0}, {1, 0}, {0, 15}] do
       g = Grants.key(%{id: 5, read_mask: read, write_mask: write, may_delete: false})
       {:ok, %{frames: [f], rev: rev}} = Sequencer.subscribe(a.id, sub(960 + read, g, 5), 0)
       {:ok, :BOOT, _, _, body} = Codec.decode(f)
@@ -465,7 +464,6 @@ defmodule Hireme.SequencerTest do
         tuple({constant(:profile), word}),
         tuple({constant(:item), word}),
         tuple({constant(:batch), word}),
-        tuple({constant(:net), word}),
         tuple({constant(:me), member_of(["pt", "de", "pt\u001fde", ""])}),
         tuple({constant(:place), word}),
         tuple({constant(:rename), at, word}),
@@ -478,12 +476,12 @@ defmodule Hireme.SequencerTest do
 
     check all(actions <- list_of(gen_action, min_length: 1, max_length: 12), max_runs: 12) do
       me = self()
-      lanes_only = Grants.key(%{id: 3, read_mask: 8, write_mask: 0, may_delete: false})
+      corpus_only = Grants.key(%{id: 3, read_mask: 8, write_mask: 0, may_delete: false})
 
       watcher =
         spawn_link(fn ->
           {:ok, _} =
-            Sequencer.subscribe(a.id, sub(System.unique_integer([:positive]), lanes_only), 0)
+            Sequencer.subscribe(a.id, sub(System.unique_integer([:positive]), corpus_only), 0)
 
           send(me, :watching)
           watch(me)
@@ -496,16 +494,16 @@ defmodule Hireme.SequencerTest do
       ops =
         Enum.map(actions, fn
           {:rep, slug} ->
-            op(:put, :gym_reps, %{platform: :leetcode, slug: slug, done_on: ~D[2026-10-18]})
+            op(:put, :items, %{kind: :skill, key: "r-#{slug}", title: slug})
 
           {:app, role} ->
             op(:put, :applications, %{company: "Co", role: role})
 
           {:note, i, text} ->
-            op(:put, :gym_reps, %{note: text}, target: id.("gym_reps", i))
+            op(:put, :items, %{body: text}, target: id.("items", i))
 
           {:drop, i} ->
-            op(:drop, :gym_reps, %{}, target: id.("gym_reps", i))
+            op(:drop, :items, %{}, target: id.("items", i))
 
           {:profile, s} ->
             op(:put, :profiles, %{slug: "p-#{s}", name: s})
@@ -515,9 +513,6 @@ defmodule Hireme.SequencerTest do
 
           {:batch, s} ->
             op(:put, :batches, %{code: "b-#{s}", ordinal: 1})
-
-          {:net, s} ->
-            op(:put, :net_entries, %{kind: :post, title: s})
 
           {:me, c} ->
             op(:put, :me, %{citizenships: c})
@@ -558,10 +553,12 @@ defmodule Hireme.SequencerTest do
       send(watcher, {:done, me})
       assert_receive {:watched, frames}
 
+      corpus = for t <- Schema.tables(), t.domain == "corpus", do: t.name
+
       for {_, tables} <- frames,
           do:
             assert(
-              Enum.all?(tables, &(&1 in ~w(gym_reps net_entries gone leases))),
+              Enum.all?(tables, &(&1 in corpus or &1 in ~w(gone leases))),
               inspect(tables)
             )
 
@@ -821,7 +818,7 @@ defmodule Hireme.SequencerTest do
       assert {[], [%{refusal: :cap}]} = key_session_ops(agent, notes.(100, "x"))
       assert {:ok, [%{ids: []}]} = Sequencer.lease(a.id, :list)
       assert {[], [%{refusal: :cap}]} = run(a.id, notes.(100, "x"))
-      assert {[_], []} = run(a.id, gym("s"))
+      assert {[_], []} = run(a.id, skill("s"))
 
       assert {[_], []} =
                run(
@@ -849,13 +846,13 @@ defmodule Hireme.SequencerTest do
           else: {:halt, nil}
       end)
 
-      {[], nacks} = key_session_ops(agent, [gym("f1"), gym("f2")])
+      {[], nacks} = key_session_ops(agent, [skill("f1"), skill("f2")])
       assert Enum.all?(nacks, &(&1.refusal == :rate))
-      assert count(GymRep) == 0
+      assert count(Item) == 0
 
-      {acks, []} = key_session_ops(bulk, [gym("b1"), gym("b2"), gym("b3")])
-      assert length(acks) == 3 and count(GymRep) == 3
-      {[], nacks} = key_session_ops(bulk, gym("b4"))
+      {acks, []} = key_session_ops(bulk, [skill("b1"), skill("b2"), skill("b3")])
+      assert length(acks) == 3 and count(Item) == 3
+      {[], nacks} = key_session_ops(bulk, skill("b4"))
       assert Enum.all?(nacks, &(&1.refusal == :rate))
     end
 

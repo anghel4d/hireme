@@ -18,7 +18,7 @@ import { EMPTY, entries, fields, flag, html, resetIfUnchanged, str, trusted, typ
 import { detail } from "./trail.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
 
-const DOMAINS = ["world", "desk", "mail", "lanes", "corpus"] as const
+const DOMAINS = ["world", "desk", "mail", "corpus"] as const
 const PRESETS = [
   ["read_only", "Read only"],
   ["write_only", "Write only"],
@@ -54,7 +54,7 @@ const time = (x: unknown): Html => (str(x) === "" ? EMPTY : html`<time datetime=
 
 /** A step-up proof's life (Security's step_up_window): sensitive changes need one this fresh. */
 const STEP_UP_S = 300
-const ALL = DOMAIN.world | DOMAIN.desk | DOMAIN.mail | DOMAIN.lanes | DOMAIN.corpus
+const ALL = DOMAIN.world | DOMAIN.desk | DOMAIN.mail | DOMAIN.corpus
 /** Each preset's masks (Grants.preset). */
 const PRESET_MASKS: Record<string, { read: number; write: number }> = { read_only: { read: ALL, write: 0 }, write_only: { read: 0, write: ALL }, read_write: { read: ALL, write: ALL } }
 /** Up to `limit` rows of a replica view, in find's pages of 500. */

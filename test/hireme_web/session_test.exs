@@ -146,7 +146,7 @@ defmodule HiremeWeb.SessionTest do
   test "a browser's ticket makes the operator's session, holding the channel; a snapshot at the current rev resumes with a PATCH flagged END, one under another schema_rev gets a BOOT",
        %{session: s, account: a} do
     {[_], []} =
-      run(a.id, op(:put, :gym_reps, %{platform: :other, slug: "s", done_on: ~D[2026-10-01]}))
+      run(a.id, op(:put, :items, %{kind: :skill, key: "s", title: "s"}))
 
     {:push, [welcome, boot], _} = browser(s)
     welcome = decode(welcome)
@@ -154,7 +154,7 @@ defmodule HiremeWeb.SessionTest do
     <<_::binary-8, sid::little-64, _::binary-8, r::little-16, w::little-16, d, lease, _::binary>> =
       welcome.body
 
-    assert {sid, r, w, d, lease} == {s.id, 31, 31, 1, 1}
+    assert {sid, r, w, d, lease} == {s.id, 15, 15, 1, 1}
     assert decode(boot).kind == :BOOT
 
     {:push, [_, resumed], _} = browser(s, welcome.rev, Hireme.Schema.schema_rev())

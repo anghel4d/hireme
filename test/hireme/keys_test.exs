@@ -84,11 +84,11 @@ defmodule Hireme.KeysTest do
     assert {:error, :step_up} = Keys.change(s, narrowed, Keys.preset(:read_write))
   end
 
-  test "the presets are what they say, every other mask pair is custom, and masks outside the five domains or granting nothing are refused",
+  test "the presets are what they say, every other mask pair is custom, and masks outside the four domains or granting nothing are refused",
        %{session: s} do
-    assert Keys.preset(:read_only) == %{read_mask: 31, write_mask: 0, may_delete: false}
-    assert Keys.preset(:write_only) == %{read_mask: 0, write_mask: 31, may_delete: false}
-    assert Keys.preset(:read_write) == %{read_mask: 31, write_mask: 31, may_delete: false}
+    assert Keys.preset(:read_only) == %{read_mask: 15, write_mask: 0, may_delete: false}
+    assert Keys.preset(:write_only) == %{read_mask: 0, write_mask: 15, may_delete: false}
+    assert Keys.preset(:read_write) == %{read_mask: 15, write_mask: 15, may_delete: false}
 
     for p <- [:read_only, :write_only, :read_write],
         do: assert(Keys.preset_of(Keys.preset(p)) == p)
@@ -97,7 +97,7 @@ defmodule Hireme.KeysTest do
     assert Keys.preset_of(%{Keys.preset(:read_write) | may_delete: true}) == :custom
 
     for bad <- [
-          %{read_mask: 32, write_mask: 0},
+          %{read_mask: 16, write_mask: 0},
           %{read_mask: 0, write_mask: 0},
           %{read_mask: -1, write_mask: 1},
           %{}
@@ -144,7 +144,7 @@ defmodule Hireme.KeysTest do
             name: "old #{i}",
             secret_hash: :crypto.hash(:sha256, "#{i}"),
             prefix: "abcd",
-            read_mask: 31,
+            read_mask: 15,
             write_mask: 0,
             may_delete: false,
             revoked_at: old,

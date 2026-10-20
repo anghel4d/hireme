@@ -43,7 +43,7 @@ defmodule HiremeWeb.SignInTest do
     %{token: token} = sign_in()
 
     for path <-
-          ~w(/ /desk /desk/pro /desk/pro/12-acme /desk/12-acme-rust /world /world/places /world/places/3-berlin /world/atlas /outreach /outreach/5-ada /me /me/cv /account /focus/12 /atlas /lanes/gym) do
+          ~w(/ /desk /desk/pro /desk/pro/12-acme /desk/12-acme-rust /world /world/places /world/places/3-berlin /world/atlas /outreach /outreach/5-ada /me /me/cv /account /focus/12 /atlas) do
       assert html_response(conn |> signed_in(token) |> get(path), 200) =~ "hireme-wire"
       assert redirected_to(get(build_conn(), path)) == "/sign-in"
     end

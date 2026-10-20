@@ -120,6 +120,9 @@ defmodule Hireme.Schema do
   @doc "A domain's mask bit; `system` has none (0)."
   def domain_bit(name), do: Map.fetch!(@domains, to_string(name))
 
+  @doc "Every domain's mask bit together: what a key granted everything holds."
+  def domain_mask, do: @domains |> Map.values() |> Enum.reduce(0, &Bitwise.bor/2)
+
   def frames, do: @model.frames
   def wire_hash, do: @model.wire_hash
 

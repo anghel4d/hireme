@@ -11,7 +11,7 @@ defmodule Hireme.Keys do
   this long needs no slow hash.
 
   What a key may do is two masks over the domains (world 1, desk 2,
-  mail 4, lanes 8, corpus 16) and `may_delete`: `read_mask`
+  mail 4, corpus 8) and `may_delete`: `read_mask`
   bounds BOOT, PATCH and every read RPC; `write_mask` bounds every op;
   `drop` also needs `may_delete`. `system` tables, `citations` and
   `trusted_hosts` are in no mask. The presets are read only, write only
@@ -44,14 +44,14 @@ defmodule Hireme.Keys do
   @prefix "hm_"
   @shape ~r/\Ahm_([0-9A-Za-z]{12})_([0-9A-Za-z]{43})([0-9A-Za-z]{6})\z/
 
-  @type masks :: %{read_mask: 0..31, write_mask: 0..31, may_delete: boolean()}
+  @type masks :: %{read_mask: 0..15, write_mask: 0..15, may_delete: boolean()}
   @type authenticated :: %{
           id: pos_integer(),
           key_id: String.t(),
           account_id: pos_integer(),
           name: String.t(),
-          read_mask: 0..31,
-          write_mask: 0..31,
+          read_mask: 0..15,
+          write_mask: 0..15,
           may_delete: boolean()
         }
 
@@ -319,7 +319,7 @@ defmodule Hireme.Keys do
   def live?(%Key{revoked_at: revoked, expires_at: expires}),
     do: is_nil(revoked) and (is_nil(expires) or DateTime.compare(Store.now(), expires) == :lt)
 
-  defp masks(%{read_mask: r, write_mask: w} = m) when r in 0..31 and w in 0..31 do
+  defp masks(%{read_mask: r, write_mask: w} = m) when is_integer(r) and is_integer(w) do
     all = Hireme.Grants.all()
     d = Map.get(m, :may_delete, false)
 
