@@ -232,6 +232,34 @@ defmodule Hireme.Security do
       else: "#{name}:#{key}"
   end
 
+  @doc """
+  `bin` inflated (zlib; gzip with `window` 31), or nil when it is no such
+  stream or would pass `max` bytes: nothing a peer sends inflates unbounded.
+  """
+  @spec inflate(binary(), pos_integer(), pos_integer()) :: binary() | nil
+  def inflate(bin, max, window \\ 15) do
+    z = :zlib.open()
+
+    try do
+      :ok = :zlib.inflateInit(z, window)
+      inflating(z, :zlib.safeInflate(z, bin), max, [], 0)
+    rescue
+      _ -> nil
+    after
+      :zlib.close(z)
+    end
+  end
+
+  defp inflating(z, {status, out}, max, acc, n) do
+    n = n + IO.iodata_length(out)
+
+    cond do
+      n > max -> nil
+      status == :finished -> IO.iodata_to_binary([acc | out])
+      true -> inflating(z, :zlib.safeInflate(z, []), max, [acc | out], n)
+    end
+  end
+
   ## Bans
 
   @doc """

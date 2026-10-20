@@ -10,7 +10,7 @@ defmodule Hireme.Blobs do
   """
   import Bitwise
   import Ecto.Query
-  alias Hireme.{Repo, Schema, Store}
+  alias Hireme.{Repo, Schema, Security, Store}
   alias Hireme.Rows.{Blob, CvVersion}
 
   @max 10 <<< 20
@@ -195,7 +195,8 @@ defmodule Hireme.Blobs do
             {budget, acc}
 
           dict =~ "/FlateDecode" ->
-            with(s <- inflate(body, @inflated - budget), do: {budget + byte_size(s), [s | acc]})
+            s = Security.inflate(body, @inflated - budget) || ""
+            {budget + byte_size(s), [s | acc]}
 
           dict =~ "/Filter" ->
             {budget, acc}
@@ -207,29 +208,6 @@ defmodule Hireme.Blobs do
 
     Enum.reverse(out)
   end
-
-  defp inflate(body, room) do
-    z = :zlib.open()
-
-    try do
-      :ok = :zlib.inflateInit(z)
-      inflating(z, :zlib.safeInflate(z, body), room, [])
-    rescue
-      _ -> ""
-    after
-      :zlib.close(z)
-    end
-  end
-
-  defp inflating(z, {:continue, out}, room, acc) do
-    acc = [acc | out]
-
-    if IO.iodata_length(acc) > room,
-      do: "",
-      else: inflating(z, :zlib.safeInflate(z, []), room, acc)
-  end
-
-  defp inflating(_z, {:finished, out}, _room, acc), do: IO.iodata_to_binary([acc | out])
 
   # A ToUnicode map's codes, merged over every font: bfchar pairs and bfranges.
   defp cmap(s, map) do

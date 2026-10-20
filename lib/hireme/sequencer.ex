@@ -607,43 +607,9 @@ defmodule Hireme.Sequencer do
   defp tally({pid, {:nack, _}}, t), do: Map.update(t, pid, {0, 1}, fn {a, n} -> {a, n + 1} end)
 
   defp batch(chunk, state) do
-    now = Store.now()
-    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0, text: 0}
-
-    result =
-      try do
-        Store.transaction(fn ->
-          {state, turn, verdicts} =
-            Enum.reduce(chunk, {state, turn, []}, fn {pid, op}, {state, turn, vs} ->
-              {state, turn, verdict} = one(pid, op, state, turn)
-              {state, turn, [{pid, verdict} | vs]}
-            end)
-
-          rev = state.rev + turn.acked
-
-          if turn.acked > 0 or turn.text != 0 do
-            from(a in Hireme.Rows.Account, where: a.id == ^state.account_id)
-            |> Repo.update_all([set: [desk_rev: rev], inc: [text_bytes: turn.text]],
-              skip_account: true
-            )
-          end
-
-          {%{state | rev: rev, text_bytes: state.text_bytes + turn.text}, turn,
-           Enum.reverse(verdicts)}
-        end)
-      rescue
-        e ->
-          Logger.error(
-            "sequencer #{state.account_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
-          )
-
-          {:error, :raised}
-      end
-
-    case result do
+    case transact(chunk, state, false) do
       {:ok, {state, turn, verdicts}} ->
-        state = if turn.acked > 0, do: %{state | rows: nil, blocks: nil}, else: state
-        state = publish(turn.deltas, forget_gone(state, turn.deltas))
+        state = publish(turn.deltas, forget_gone(settled(state, turn), turn.deltas))
         deliver(verdicts, state.rev)
         {state, verdicts}
 
@@ -655,51 +621,12 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  # An atomic burst: its ops are judged in order in one transaction, so a
-  # later op sees an earlier one's row; one refusal rolls the whole of it
-  # back, the refused keep their reasons and the rest are refused `burst`.
+  # An atomic burst: one refusal rolls the whole of it back, the refused
+  # keep their reasons and the rest are refused `burst`.
   defp atomic(pid, ops, state) do
-    now = Store.now()
-    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0, text: 0}
-
-    result =
-      try do
-        Store.transaction(fn ->
-          {state, turn, verdicts} =
-            Enum.reduce(ops, {state, turn, []}, fn op, {state, turn, vs} ->
-              {state, turn, verdict} = one(pid, op, state, turn)
-              {state, turn, [{pid, verdict} | vs]}
-            end)
-
-          verdicts = Enum.reverse(verdicts)
-
-          if Enum.any?(verdicts, &match?({_, {:nack, _}}, &1)),
-            do: Repo.rollback({:refused, verdicts})
-
-          rev = state.rev + turn.acked
-
-          if turn.acked > 0 or turn.text != 0 do
-            from(a in Hireme.Rows.Account, where: a.id == ^state.account_id)
-            |> Repo.update_all([set: [desk_rev: rev], inc: [text_bytes: turn.text]],
-              skip_account: true
-            )
-          end
-
-          {%{state | rev: rev, text_bytes: state.text_bytes + turn.text}, turn, verdicts}
-        end)
-      rescue
-        e ->
-          Logger.error(
-            "sequencer #{state.account_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
-          )
-
-          {:error, :raised}
-      end
-
-    case result do
+    case transact(Enum.map(ops, &{pid, &1}), state, true) do
       {:ok, {state, turn, verdicts}} ->
-        state = if turn.acked > 0, do: %{state | rows: nil, blocks: nil}, else: state
-        state = state |> forget_gone(turn.deltas) |> then(&publish(turn.deltas, &1))
+        state = publish(turn.deltas, forget_gone(settled(state, turn), turn.deltas))
         deliver(verdicts, state.rev)
         broadcast_leases(state, [])
 
@@ -721,6 +648,49 @@ defmodule Hireme.Sequencer do
         rebuild(state)
     end
   end
+
+  # The ops judged in order in one transaction, so a later op sees an
+  # earlier one's row, and the account's rev and text moved by what landed;
+  # `whole` rolls everything back on one refusal.
+  defp transact(pid_ops, state, whole) do
+    now = Store.now()
+    turn = %{now: now, today: DateTime.to_date(now), deltas: [], acked: 0, text: 0}
+
+    Store.transaction(fn ->
+      {state, turn, verdicts} =
+        Enum.reduce(pid_ops, {state, turn, []}, fn {pid, op}, {state, turn, vs} ->
+          {state, turn, verdict} = one(pid, op, state, turn)
+          {state, turn, [{pid, verdict} | vs]}
+        end)
+
+      verdicts = Enum.reverse(verdicts)
+
+      if whole and Enum.any?(verdicts, &match?({_, {:nack, _}}, &1)),
+        do: Repo.rollback({:refused, verdicts})
+
+      rev = state.rev + turn.acked
+
+      if turn.acked > 0 or turn.text != 0 do
+        from(a in Hireme.Rows.Account, where: a.id == ^state.account_id)
+        |> Repo.update_all([set: [desk_rev: rev], inc: [text_bytes: turn.text]],
+          skip_account: true
+        )
+      end
+
+      {%{state | rev: rev, text_bytes: state.text_bytes + turn.text}, turn, verdicts}
+    end)
+  rescue
+    e ->
+      Logger.error(
+        "sequencer #{state.account_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
+      )
+
+      {:error, :raised}
+  end
+
+  # A write landed: the resident rows and blocks are read again at the new rev.
+  defp settled(state, %{acked: acked}) when acked > 0, do: %{state | rows: nil, blocks: nil}
+  defp settled(state, _turn), do: state
 
   # Deleted applications leave the claims that held them.
   # (Released ones may have waited for the backfill; see backfill/1.)
