@@ -95,13 +95,13 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day, cv: (Json, J
     }))
 }
 
-/// What `cv_part` reads of the application's own row (profile,
-/// corporation, theme, listing keywords); the rest is the items, overlays
-/// and lineages tables.
+/// What `cv_part` reads for one application: the picked root, the
+/// corporation, theme and listing keywords; the rest is the items,
+/// overlays, lineages, roots and versions tables.
 pub type CvKey = (Option<u32>, Option<u32>, String);
-pub fn cv_key(rows: &Rows, t: &Table, id: u32, root: Option<u32>) -> CvKey {
+pub fn cv_key(t: &Table, id: u32, root: Option<u32>) -> CvKey {
     let text = |c| t.str(id, c).unwrap_or("");
-    (cv_profile(rows, root), t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
+    (root, t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
 }
 
 /// The profile a picked root composes, when it is a live composition.
@@ -112,7 +112,17 @@ pub fn cv_profile(rows: &Rows, root: Option<u32>) -> Option<u32> {
 /// One application's keyword coverage and composed CV (theme and lines).
 pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32, root: Option<u32>) -> (Json, Json) {
     let (lines, theme) = cv_of(rows, board.lines_built(), t, id, root);
-    let cv_text = cv::visible(&lines, &theme);
+    // A file root (markdown, pdf, docx) goes out as its newest version: its
+    // text is what the listing's words are found in.
+    let file = root.and_then(|r| {
+        let rt = rows.table(table::CV_ROOTS)?;
+        let format = rt.u32(r, col::cv_roots::FORMAT).filter(|f| *f != schema::enums::cv_format::COMPOSED as u32)?;
+        let v = rt.u32(r, col::cv_roots::VERSION_ID)?;
+        let vt = rows.table(table::CV_VERSIONS)?;
+        let text = vt.text(v, col::cv_versions::TEXT).or_else(|| vt.text(v, col::cv_versions::BODY)).unwrap_or_default().into_owned();
+        Some((format, v, vt.u32(v, col::cv_versions::N), text))
+    });
+    let cv_text = file.as_ref().map_or_else(|| cv::visible(&lines, &theme), |f| f.3.clone());
     let listing_words: Vec<&str> = t.str(id, A::KEYWORDS).map(|k| crate::text::list(k).collect()).unwrap_or_default();
     let coverage = keywords::coverage(
         listing_words.iter().copied().chain(theme.targets.iter().map(String::as_str)),
@@ -129,7 +139,10 @@ pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32, root: Option<u32>
         })
         .collect();
 
-    (coverage.to_json(), json!({"theme": theme.to_json(), "lines": cv_lines}))
+    let file = file.map(|(format, v, n, text)| {
+        json!({"format": enum_name(schema::enums::cv_format::NAMES, Some(format)), "version_id": v, "n": n, "text": text})
+    });
+    (coverage.to_json(), json!({"theme": theme.to_json(), "lines": cv_lines, "file": file}))
 }
 
 /// The CV lines and theme for one application.
