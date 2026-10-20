@@ -1069,7 +1069,7 @@ defmodule Hireme.Sequencer do
 
   # A posting's URL keys as derive/4 stores it, however the writer linked it.
   defp keyed("applications", %{"canonical_url" => url} = values) when is_binary(url),
-    do: Map.put(values, "canonical_url", Hireme.Provenance.canonical(url) || url)
+    do: Map.put(values, "canonical_url", Kernel.canonical(url) || url)
 
   defp keyed(_table, values), do: values
 
@@ -1575,15 +1575,12 @@ defmodule Hireme.Sequencer do
   # An application is numbered, and its posting named one way however it was
   # linked, so the natural key refuses the same posting twice.
   defp derive(values, "applications", nil, _ctx) do
-    url =
-      Hireme.Provenance.canonical(values[:canonical_url]) ||
-        Hireme.Provenance.canonical(values[:listing_url])
-
+    url = Kernel.canonical(values[:canonical_url]) || Kernel.canonical(values[:listing_url])
     values |> Map.put(:no, next_no()) |> Map.put(:canonical_url, url)
   end
 
   defp derive(%{canonical_url: url} = values, "applications", _row, _ctx),
-    do: Map.put(values, :canonical_url, Hireme.Provenance.canonical(url))
+    do: Map.put(values, :canonical_url, Kernel.canonical(url))
 
   defp derive(values, "sources", _row, _ctx) do
     case values do

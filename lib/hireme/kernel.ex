@@ -62,6 +62,7 @@ defmodule Hireme.Kernel do
   @doc "One posting's URL however it was linked: the kernel's normalization, the only copy; nil for no web URL."
   @spec canonical(String.t()) :: String.t() | nil
   def canonical(url) when is_binary(url), do: Nif.canonical(url)
+  def canonical(_), do: nil
 end
 
 defmodule Hireme.Kernel.Nif do
