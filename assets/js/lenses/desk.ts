@@ -13,7 +13,7 @@ import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
 import { DIR, board, card, ids, lookup, query as read, scoreboard, step, value, type Filter, type Row } from "../kernel.ts"
 import { EMPTY, html, str, type Html } from "../morph.ts"
-import { go, model, query, set } from "../state.ts"
+import { format, go, model, query, set } from "../state.ts"
 import { act as focusAct, body } from "./focus.ts"
 
 /** The dense view: the board beside the selected card's whole application. */
@@ -118,13 +118,9 @@ function view(): Html {
   </div>`
 }
 
-/** The desk's address with its view set (and the card a link named dropped). */
-function viewHref(view: string): string {
-  const q = new URLSearchParams([...model.address.q].filter(([k]) => k !== "view" && k !== "card"))
-  if (view !== "") q.set("view", view)
-  const s = q.toString()
-  return s === "" ? "/desk" : `/desk?${s}`
-}
+/** The desk's query with its view set (and the card a link named dropped). */
+const viewQ = (view: string): Map<string, string> => new Map([...[...model.address.q].filter(([k]) => k !== "view" && k !== "card"), ...(view === "" ? [] : [["view", view] as [string, string]])])
+const viewHref = (view: string): string => format({ lens: "desk", sub: "", q: viewQ(view) })
 
 function write(el: Element | null, s: string): void {
   if (el && el.textContent !== s) el.textContent = s
@@ -393,7 +389,7 @@ const desk: View = {
     else if (k === "h" || k === "ArrowLeft") move(DIR.prev)
     else if (k === "j" || k === "ArrowDown") move(DIR.down)
     else if (k === "k" || k === "ArrowUp") move(DIR.up)
-    else if (k === "v") go({ q: new Map(new URLSearchParams(viewHref(dense() ? "" : "dense").split("?")[1] ?? "")) }, true)
+    else if (k === "v") go({ q: viewQ(dense() ? "" : "dense") }, true)
     else if (k === "Escape" && dense() && (model.focus.edit !== "" || model.focus.fireArmed !== 0)) set({ focus: { ...model.focus, edit: "", fireArmed: 0 } })
     else if (k === "g" || k === "Home") move(DIR.first)
     else if (k === "G" || k === "End") move(DIR.last)

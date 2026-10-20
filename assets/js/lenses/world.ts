@@ -122,6 +122,11 @@ function display(c: ColumnDef, x: unknown): Html {
   return html`${s.length > 80 ? `${s.slice(0, 80)}…` : s}`
 }
 
+/** An enum or bool column's select with an empty first option; `value` marks the chosen one. */
+const select = (c: ColumnDef, name: string, value: string, attrs: Html): Html => html`<select name="${name}"${attrs}><option value=""></option>${
+  c.type === "bool" ? html`<option value="true"${flag("selected", value === "true")}>yes</option><option value="false"${flag("selected", value === "false")}>no</option>`
+  : values(c.enum).map((e) => html`<option${flag("selected", e === value)}>${e}</option>`)}</select>`
+
 function editor(t: TableDef, c: ColumnDef, r: Row): Html {
   const id = Number(r.id)
   const x = c.type === "text" ? row(t.name, id)?.[c.name] : r[c.name]
@@ -129,10 +134,8 @@ function editor(t: TableDef, c: ColumnDef, r: Row): Html {
   let field: Html
   switch (c.type) {
     case "enum":
-      field = html`<select name="value" data-autofocus><option value=""></option>${values(c.enum).map((e) => html`<option${flag("selected", e === value)}>${e}</option>`)}</select>`
-      break
     case "bool":
-      field = html`<select name="value" data-autofocus><option value=""></option><option value="true"${flag("selected", value === "true")}>yes</option><option value="false"${flag("selected", value === "false")}>no</option></select>`
+      field = select(c, "value", value, html` data-autofocus`)
       break
     case "day":
       field = html`<input type="date" name="value" value="${value}" data-autofocus>`
@@ -241,11 +244,9 @@ function adder(t: TableDef): Html {
   const cols = t.cols.filter((c) => !c.implied && !c.readonly && (c.required || key.has(c.name)) && c.metricOf === null)
   return html`<form class="stack card" data-submit="create" data-act="create" data-key="new">
     <h2>New ${t.name.replace(/s$/, "")}</h2>
-    ${cols.map((c) => html`<label>${c.name}${c.type === "enum"
-      ? html`<select name="${c.name}"${flag("required", c.required)}><option value=""></option>${values(c.enum).map((e) => html`<option>${e}</option>`)}</select>`
-      : c.type === "bool"
-        ? html`<select name="${c.name}"${flag("required", c.required)}><option value=""></option><option value="true">yes</option><option value="false">no</option></select>`
-        : html`<input name="${c.name}"${flag("required", needed(c))}>`}</label>`)}
+    ${cols.map((c) => html`<label>${c.name}${c.type === "enum" || c.type === "bool"
+      ? select(c, c.name, "", flag("required", c.required))
+      : html`<input name="${c.name}"${flag("required", needed(c))}>`}</label>`)}
     <span class="row"><button class="primary">Create</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span>
   </form>`
 }
@@ -399,15 +400,11 @@ const world: View = {
     opened = r
   },
   key(ev) {
-    if (ev.key === "Escape" && (v().edit !== "" || v().cites || v().text)) {
-      patch({ edit: "", cites: null, text: null })
-      return true
-    }
-    if (ev.key === "Escape" && model.address.q.has("row")) {
-      query("row", "")
-      return true
-    }
-    return false
+    if (ev.key !== "Escape") return false
+    if (v().edit !== "" || v().cites || v().text) patch({ edit: "", cites: null, text: null })
+    else if (model.address.q.has("row")) query("row", "")
+    else return false
+    return true
   },
 }
 

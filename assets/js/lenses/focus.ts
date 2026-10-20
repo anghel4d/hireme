@@ -243,29 +243,13 @@ export function markdown(appId: number): string {
   return [`# #${str(a.no)} ${md(a.company) || "(no company)"} — ${md(a.role)}`, "", ...meta, ...prose, ...history, ...listingText, ""].join("\n")
 }
 
-/** Copies `text`, falling back to a hidden field where the clipboard API is refused; the button says how it went. */
+/** Copies `text` (the page is a secure context, so the clipboard API is there); the button says how it went. */
 function copy(button: HTMLElement, text: string): void {
   const done = (ok: boolean) => {
     button.dataset.copied = String(ok)
     setTimeout(() => delete button.dataset.copied, 1200)
   }
-  const fallback = (): boolean => {
-    const f = document.createElement("textarea")
-    f.value = text
-    f.style.cssText = "position:fixed;left:-9999px"
-    document.body.append(f)
-    f.select()
-    let ok = false
-    try {
-      ok = document.execCommand("copy")
-    } catch {
-      ok = false
-    }
-    f.remove()
-    return ok
-  }
-  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => done(true), () => done(fallback()))
-  else done(fallback())
+  navigator.clipboard.writeText(text).then(() => done(true), () => done(false))
 }
 
 // ------------------------------------------------------------------ actions
