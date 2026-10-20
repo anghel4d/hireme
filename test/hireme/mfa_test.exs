@@ -49,11 +49,11 @@ defmodule Hireme.MfaTest do
     assert Mfa.recovery_codes_left() == 9
   end
 
-  test "enrolling and removing need a fresh session and tell the account's wire sessions at once; removing the last factor drops the codes",
+  test "the first factor binds on any signed-in session; another, or a removal, needs a fresh factor; the wire sessions hear at once; removing the last drops the codes",
        %{session: s} do
     Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
     stale = age(s, :authenticated_at, Hireme.Security.step_up_window() + 1)
-    assert {:error, :step_up} = Mfa.begin_totp(stale, "me")
+    assert {:ok, _} = Mfa.begin_totp(stale, "me")
 
     {_secret, factor, _codes} = enroll(s)
     assert_receive {Hireme.Audit, :factors}
@@ -62,6 +62,7 @@ defmodule Hireme.MfaTest do
 
     stale = age(s, :mfa_at, Hireme.Security.step_up_window() + 1)
     refute Mfa.fresh?(stale)
+    assert {:error, :step_up} = Mfa.begin_totp(stale, "me")
     assert {:error, :step_up} = Mfa.remove(stale, factor.id)
 
     assert :ok = Mfa.remove(s, factor.id)

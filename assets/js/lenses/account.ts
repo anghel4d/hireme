@@ -266,8 +266,8 @@ function stepUp(): Html {
     ${totp ? html`<form data-submit="step-totp" data-act="step-totp" class="row"><label>Authenticator code
       <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,8}" required></label>
       <button class="primary">Confirm</button></form>` : EMPTY}
-    <form data-submit="step-recovery" data-act="step-recovery" class="row"><label>Or a recovery code
-      <input name="code" autocomplete="off" required></label><button>Use code</button></form>
+    ${num(overview()?.recovery_codes_left) > 0 ? html`<form data-submit="step-recovery" data-act="step-recovery" class="row"><label>Or a recovery code
+      <input name="code" autocomplete="off" required></label><button>Use code</button></form>` : EMPTY}
     ${!passkey && !totp ? html`<p class="hint">No factor is enrolled, so a fresh sign-in counts: sign out and back in, then retry.</p>` : EMPTY}
     <button type="button" class="ghost" data-act="step-cancel">Cancel</button>
   </section>`

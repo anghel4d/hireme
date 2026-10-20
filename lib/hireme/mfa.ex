@@ -27,7 +27,8 @@ defmodule Hireme.Mfa do
     Wearing a factor out is never a way past it.
   - Binding or removing a factor needs a fresh second factor, and the
     account hears of it on another channel (63B-4 Sec. 4.1.2; ASVS
-    6.3.7, 7.5.1).
+    6.3.7, 7.5.1). The first factor binds on the signed-in session: an
+    account with none has nothing fresher to show.
 
   Every function taking a session runs as that session's account,
   whatever account the calling process names.
@@ -108,7 +109,7 @@ defmodule Hireme.Mfa do
           | {:error, :step_up | :rate_limited}
   def begin_totp(%Session{} = session, label) do
     as(session, fn ->
-      with :ok <- fresh(session),
+      with :ok <- bindable(session),
            :ok <- begun(session) do
         secret = NimbleTOTP.secret()
         challenge!(session, :totp_enroll, secret)
@@ -151,7 +152,7 @@ defmodule Hireme.Mfa do
           | {:error, :step_up | :challenge | :code | :rate_limited}
   def confirm_totp(%Session{} = session, code, name, meta \\ %{}) do
     as(session, fn ->
-      with :ok <- fresh(session),
+      with :ok <- bindable(session),
            :ok <- throttle(session),
            :ok <- room(),
            {:ok, challenge, secret} <- peek_challenge(session, :totp_enroll),
@@ -228,7 +229,7 @@ defmodule Hireme.Mfa do
           {:ok, map()} | {:error, :step_up | :rate_limited}
   def begin_webauthn(%Session{} = session, label) do
     as(session, fn ->
-      with :ok <- fresh(session),
+      with :ok <- bindable(session),
            :ok <- begun(session) do
         challenge = WebAuthn.registration_challenge()
         challenge!(session, :webauthn_register, challenge)
@@ -244,7 +245,7 @@ defmodule Hireme.Mfa do
           | {:error, :step_up | :challenge | :attestation | :duplicate}
   def confirm_webauthn(%Session{} = session, params, meta \\ %{}) do
     as(session, fn ->
-      with :ok <- fresh(session),
+      with :ok <- bindable(session),
            :ok <- room(),
            {:ok, challenge} <- take_challenge(session, :webauthn_register),
            {:ok, attrs} <- WebAuthn.register(challenge, params),
@@ -488,6 +489,7 @@ defmodule Hireme.Mfa do
   defp begun(%Session{id: id}), do: Security.limit(:ceremony_session, id)
 
   defp fresh(session), do: if(fresh?(session), do: :ok, else: {:error, :step_up})
+  defp bindable(session), do: if(enrolled?(), do: fresh(session), else: :ok)
 
   defp throttle(%Session{account_id: id}), do: Security.limit(:mfa_account, id)
 
