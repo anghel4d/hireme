@@ -498,6 +498,8 @@ defmodule Mix.Tasks.Hireme.Bundle do
         Mix.raise("bun is not on PATH")
 
     out = Path.expand("priv/static/assets")
+    # A digest's gzipped copies would be served over these builds (Plug.Static prefers a .gz).
+    for f <- Path.wildcard("priv/static/{assets,wasm}/*.gz"), do: File.rm!(f)
 
     @bundles
     |> Enum.map(fn entries ->
