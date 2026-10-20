@@ -237,6 +237,8 @@
           pkgs.cargo
           pkgs.rustc
           pkgs.clippy
+          # rustc links the wasm32 kernel with lld; the check and the release do too.
+          pkgs.lld
           pkgs.sqlite
           bun
         ];
