@@ -1794,14 +1794,6 @@ defmodule Hireme.Sequencer do
     |> Repo.all()
   end
 
-  defp projected?(row, term) do
-    holds?(
-      Schema.table(:places),
-      term,
-      Map.new(Map.from_struct(row), fn {k, v} -> {Atom.to_string(k), v} end)
-    )
-  end
-
   defp wire_tables(state, grants, now) do
     [
       catalog(grants),
@@ -1975,16 +1967,14 @@ defmodule Hireme.Sequencer do
     state
   end
 
-  # Rows of resident tables (and the atlas projection of places) that moved,
-  # a block per table and set of moved columns (one edited note among renames
-  # ships one note), then the gone rows.
+  # Rows of resident tables that moved, a block per table and set of moved
+  # columns (one edited note among renames ships one note), then the gone rows.
   defp patch(deltas, grants) do
     visible = fn t -> grants == nil or Grants.read?(grants, t) end
 
     puts =
       deltas
       |> Enum.flat_map(fn
-        {:put, %{name: "places"} = t, row, changed} -> [{t, row, changed} | atlas_put(row)]
         {:put, %{residency: :resident} = t, row, changed} -> [{t, row, changed}]
         _ -> []
       end)
@@ -2017,9 +2007,7 @@ defmodule Hireme.Sequencer do
     gone =
       deltas
       |> Enum.flat_map(fn
-        {:gone, %{name: "places"} = t, id} -> [{t, id}, {Schema.table(:atlas), id}]
         {:gone, %{residency: :resident} = t, id} -> [{t, id}]
-        {:put, %{name: "places"}, row, changed} -> atlas_gone(row, changed)
         _ -> []
       end)
       |> Enum.filter(fn {t, _} -> visible.(t) end)
@@ -2030,18 +2018,6 @@ defmodule Hireme.Sequencer do
 
   defp moves(a, b) when a == :all or b == :all, do: :all
   defp moves(a, b), do: MapSet.union(a, b)
-
-  # A place whose chart column was just cleared leaves the projection.
-  defp atlas_gone(row, changed) do
-    atlas = Schema.table(:atlas)
-    moved = changed == :all or Enum.member?(changed, :atlas_position)
-    if moved and not projected?(row, atlas.source_term), do: [{atlas, row.id}], else: []
-  end
-
-  defp atlas_put(row) do
-    atlas = Schema.table(:atlas)
-    if projected?(row, atlas.source_term), do: [{atlas, row, :all}], else: []
-  end
 
   # ------------------------------------------------------------- leases
 

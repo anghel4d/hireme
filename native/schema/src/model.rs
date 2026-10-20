@@ -679,6 +679,8 @@ fn table_line(t: &mut RawTable, tokens: &[&str], where_: Option<String>, line: u
             col.flags |= flag::PROSE;
             t.cols.push(col);
         }
+        // Ids are append-only: columns dropped from the middle of a table leave their ids behind.
+        ["retired", "col", n] => t.cols.extend((0..int(n, line, 1, 1000)?).map(|_| Column::blank("", Type::U32))),
         ["command", cname, rest @ ..] => {
             name(cname, line)?;
             let human_only = match rest.iter().filter(|p| **p == "human_only").count() {
@@ -783,13 +785,17 @@ pub fn parse(source: &str) -> Result<Schema, Error> {
                 let (name, domain, source) = ((*pname).to_owned(), (*domain).to_owned(), Some((*source).to_owned()));
                 tables.push(RawTable { name, domain, residency: Residency::Projection, source, source_where: where_, source_term, line, ..RawTable::default() });
             }
+            // A table or projection dropped keeps its number: the ids after it never move.
+            ["retired", "table", n] => {
+                tables.extend((0..int(n, line, 1, 1000)?).map(|_| RawTable { residency: Residency::Projection, line, ..RawTable::default() }))
+            }
             [kind, ..]
                 if matches!(
                     *kind,
-                    "col" | "metric" | "prose" | "group" | "natural" | "unique" | "index" | "cap" | "command" | "pick"
+                    "col" | "metric" | "prose" | "group" | "natural" | "unique" | "index" | "cap" | "command" | "pick" | "retired"
                 ) =>
             {
-                let Some(t) = tables.last_mut() else {
+                let Some(t) = tables.last_mut().filter(|t| !t.name.is_empty()) else {
                     return fail(line, format!("{kind} outside a table"));
                 };
                 // A projection only picks its source's columns; a table never picks.
@@ -858,7 +864,7 @@ fn resolve_cols(t: &RawTable, all: &[RawTable]) -> Result<Vec<Column>, Error> {
     }
     let first: u16 = if t.residency == Residency::Wire { 1 } else { 8 };
     let mut cols = implied(t);
-    for (i, c) in t.cols.iter().enumerate() {
+    for (i, c) in t.cols.iter().enumerate().filter(|(_, c)| !c.name.is_empty()) {
         let mut c = c.clone();
         c.id = first + i as u16;
         cols.push(c);
@@ -904,7 +910,7 @@ fn resolve(
         .collect();
 
     let mut tables = Vec::new();
-    for (i, t) in raw.iter().enumerate() {
+    for (i, t) in raw.iter().enumerate().filter(|(_, t)| !t.name.is_empty()) {
         let natural: Vec<&String> = t.naturals.iter().flat_map(|k| k.cols.iter()).collect();
         let mut cols = resolve_cols(t, &raw)?;
         for c in cols.iter_mut().filter(|c| natural.contains(&&c.name)) {
@@ -934,7 +940,7 @@ fn resolve(
     }
 
     let mut commands = Vec::new();
-    for t in &raw {
+    for t in raw.iter().filter(|t| !t.name.is_empty()) {
         let table = tables.iter().find(|x| x.name == t.name).unwrap();
         for c in &t.commands {
             let mut params = Vec::new();

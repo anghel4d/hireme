@@ -58,15 +58,15 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       applications,
       items: applications.map((a) => ({ id: a.id, key: text(4), title: text(8), body: text(12) })),
       settings: [{ id: 1, heat_config: text(6) }],
-      me: [{ id: 1, citizenships: text(6) }],
+      me: [{ id: 1, citizenships: text(6), work_permits: text(3), prefer: text(3), avoid: text(3), weights: text(8) }],
       languages: [{ id: 1, code: text(6), level: "b2" }],
-      atlas: [{ id: 1, kind: "country", atlas_position: 1, iso2: text(3), name: text(6), language: text(6), work_permit: text(6) }],
+      places: [{ id: 1, kind: "country", iso2: text(3), name: text(6), language: text(6), work_permit: text(6) }],
     };
     if (call(x.ingest, bootFrame(catalog, rows)) < 0) throw new Error("BOOT refused");
     call(x.view, enc.encode(JSON.stringify({ search: text(4) })));
     for (let id = 1; id <= n; id++) x.application(id);
     x.overview(10);
-    call(x.atlas, enc.encode(""));
+    x.atlas();
     x.lanes();
     const ctx = enc.encode(JSON.stringify({ today: TODAY, now: 0, human: false, key_id: 1, held: [] }));
     for (let id = 1; id <= 4; id++) {

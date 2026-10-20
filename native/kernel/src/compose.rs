@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 
 use schema::col::applications as A;
 use schema::{col, enums, table};
-use serde_json::{json, Map, Value as Json};
+use serde_json::{json, Value as Json};
 
-use crate::atlas::{self, Me, Place, Weights};
+use crate::atlas::{self, Me, Place};
 use crate::board::{self, Board};
 use crate::cv::{self, Item, Overlay, Theme};
 use crate::lanes::{self, NetKind, RepOutcome};
@@ -234,11 +234,47 @@ pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
     json!({"gym": lanes::gym(reps, target, today).to_json(), "net": lanes::net(entries, today).to_json()})
 }
 
-/// The atlas places as the fit reads them.
-pub fn places(rows: &Rows) -> Vec<Place<'_>> {
-    use col::atlas as P;
-    // Countries rank among countries and cities among cities; a state or province is not charted yet.
-    rows.each(table::ATLAS)
+/// The person's side of the fit: their lists (the languages from their
+/// rows), and their weights (`{"<places metric>": w, "route": w,
+/// "language": w}`) resolved against the declaration. Also the metric
+/// column ids in `Me::metrics` order, and the names that are no numeric
+/// figure of places.
+pub fn recipe(rows: &Rows) -> (Me<'_>, Vec<u16>, Vec<String>) {
+    use col::me as M;
+    let p = board::me(rows);
+    let get = |c: u16| p.and_then(|(t, id)| t.str(id, c)).unwrap_or("");
+    let mut me = Me { citizenships: get(M::CITIZENSHIPS), work_permits: get(M::WORK_PERMITS), languages: board::languages(rows).into(), prefer: get(M::PREFER), avoid: get(M::AVOID), ..Me::default() };
+    let (mut cols, mut unknown) = (Vec::new(), Vec::new());
+    let places = schema::table_def(table::PLACES);
+    // The weights as stored, or as an agent may put them: a JSON string holding the JSON (one unwrap).
+    let weights = serde_json::from_str::<Json>(get(M::WEIGHTS)).ok().and_then(|v| match v {
+        Json::String(s) => serde_json::from_str::<Json>(&s).ok(),
+        v => Some(v),
+    });
+    for (name, v) in weights.and_then(|v| v.as_object().cloned()).unwrap_or_default() {
+        // A weight that is no number, not finite or zero leaves its figure out; the rest are bounded so a sum stays finite.
+        let Some(w) = v.as_f64().filter(|w| w.is_finite() && *w != 0.0).map(|w| w.clamp(-1e6, 1e6)) else { continue };
+        match name.as_str() {
+            "route" => me.route = w,
+            "language" => me.language = w,
+            _ => match places.and_then(|t| t.col_named(&name)).filter(|c| c.flags & schema::flag::METRIC != 0) {
+                Some(c) => {
+                    cols.push(c.id);
+                    me.metrics.push(w);
+                }
+                None => unknown.push(name),
+            },
+        }
+    }
+    (me, cols, unknown)
+}
+
+/// Every country and city as the fit reads them, each with the recipe's figures (`cols`) in order.
+pub fn places<'r>(rows: &'r Rows, cols: &[u16]) -> Vec<Place<'r>> {
+    use col::places as P;
+    // A metric is f64, u32 (population) or i64 by declaration; the fit reads any as a number.
+    let num = |t: &Table, id: u32, c: u16| t.f64(id, c).or_else(|| t.u32(id, c).map(f64::from)).or_else(|| t.i64(id, c).map(|v| v as f64));
+    rows.each(table::PLACES)
         .filter(|(t, id)| matches!(t.u32(*id, P::KIND), Some(k) if k == enums::place_kind::COUNTRY as u32 || k == enums::place_kind::CITY as u32))
         .map(|(t, id)| Place {
             id,
@@ -246,56 +282,45 @@ pub fn places(rows: &Rows) -> Vec<Place<'_>> {
             country_id: t.u32(id, P::COUNTRY_ID),
             iso2: t.str(id, P::ISO2),
             name: t.str(id, P::NAME).unwrap_or(""),
-            position: t.u32(id, P::ATLAS_POSITION).unwrap_or(u32::MAX),
-            labeled: t.u32(id, P::ATLAS_LABELED) == Some(1),
-            gdp_per_capita_ppp_usd: t.f64(id, P::GDP_PER_CAPITA_PPP_USD),
-            qol_index: t.f64(id, P::QOL_INDEX),
-            energy_production_per_capita_kwh: t.f64(id, P::ENERGY_PRODUCTION_PER_CAPITA_KWH),
-            energy_consumption_per_capita_kwh: t.f64(id, P::ENERGY_CONSUMPTION_PER_CAPITA_KWH),
-            mobility: t.f64(id, P::MOBILITY),
             language: t.str(id, P::LANGUAGE),
-            tech: t.f64(id, P::TECH),
-            ease: t.f64(id, P::EASE),
             work_permit: t.str(id, P::WORK_PERMIT),
+            figures: cols.iter().map(|&c| num(t, id, c)).collect(),
         })
         .collect()
 }
 
-/// The operator's side of the fit: the `me` row, or a preset's weights.
-pub fn me<'r>(rows: &'r Rows, preset: Option<&str>) -> Me<'r> {
-    use col::me as M;
-    let row = board::me(rows);
-    let get = |c: u16| row.and_then(|(t, id)| t.f64(id, c));
-    let weights = preset.and_then(atlas::preset).unwrap_or_else(|| {
-        Weights::from_settings([M::W_ENERGY, M::W_ECONOMY, M::W_LIVEABILITY, M::W_MOBILITY, M::W_LANGUAGE, M::W_TECH, M::W_EASE].map(get))
-    });
-    Me {
-        citizenships: row.and_then(|(t, id)| t.str(id, M::CITIZENSHIPS)).unwrap_or(""),
-        languages: board::languages(rows).into(),
-        weights,
-    }
-}
-
-/// Every charted place with its fit, best first, and the presets.
-pub fn atlas_doc(rows: &Rows, preset: Option<&str>) -> Json {
-    let ps = places(rows);
-    let me = me(rows, preset);
+/// Every country and city in atlas order, each with its route, language
+/// match, flags and fit; the recipe as resolved; the names in it that are
+/// no figure of places; whether anything is known about the person.
+pub fn atlas_doc(rows: &Rows) -> Json {
+    let (me, cols, unknown) = recipe(rows);
+    let ps = places(rows, &cols);
     let fits = atlas::fit(&ps, &me);
-    let order = atlas::order(&fits);
     let by_id: alloc::collections::BTreeMap<u32, usize> = ps.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
-    let places: Vec<Json> = order
-        .iter()
-        .filter_map(|id| by_id.get(id))
-        .map(|&i| {
+    fn langs<'a>(p: &Place<'a>) -> Option<&'a str> {
+        p.language.filter(|s| !s.trim().is_empty())
+    }
+    let places: Vec<Json> = atlas::order(&ps, &fits)
+        .into_iter()
+        .map(|i| {
+            let p = &ps[i];
+            let country = p.country_id.and_then(|c| by_id.get(&c)).map(|&c| &ps[c]);
             let mut j = fits[i].to_json();
-            j["name"] = ps[i].name.into();
-            j["iso2"] = ps[i].iso2.into();
-            j["kind"] = if ps[i].city { "city" } else { "country" }.into();
-            j["position"] = ps[i].position.into();
-            j["labeled"] = ps[i].labeled.into();
+            j["kind"] = if p.city { "city" } else { "country" }.into();
+            j["name"] = p.name.into();
+            j["iso2"] = p.iso2.into();
+            j["country"] = country.map(|c| c.name).into();
+            // What the place speaks, a city through its country, as the fit read it.
+            j["languages"] = langs(p).or_else(|| country.and_then(langs)).into();
             j
         })
         .collect();
-    let presets: Map<String, Json> = atlas::PRESETS.iter().map(|(n, w)| ((*n).into(), json!(w))).collect();
-    json!({"parts": atlas::PARTS, "weights": me.weights.0, "presets": presets, "places": places})
+    let def = schema::table_def(table::PLACES);
+    let recipe: Vec<Json> = cols
+        .iter()
+        .zip(&me.metrics)
+        .filter_map(|(c, w)| Some(json!({"key": def?.col(*c)?.name, "weight": w})))
+        .chain([("route", me.route), ("language", me.language)].into_iter().filter(|(_, w)| *w != 0.0).map(|(k, w)| json!({"key": k, "weight": w})))
+        .collect();
+    json!({"known": !me.citizenships.is_empty() || !me.work_permits.is_empty(), "recipe": recipe, "unknown": unknown, "places": places})
 }

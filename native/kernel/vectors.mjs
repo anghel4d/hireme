@@ -68,7 +68,7 @@ for (const kase of file.cases) {
       err = holds(step.ids, ids, at);
     } else if (step.doc) {
       let n;
-      if (step.doc === "atlas") n = call(x.atlas, enc.encode(step.arg ?? ""));
+      if (step.doc === "atlas") n = x.atlas();
       else if (step.doc === "lanes") n = x.lanes();
       else if (step.doc === "overview") n = x.overview(10);
       else if (step.doc === "application") n = x.application(step.arg);

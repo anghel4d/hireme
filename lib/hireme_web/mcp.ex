@@ -1019,15 +1019,18 @@ defmodule HiremeWeb.Mcp.Session do
     {r, w, d} = s.masks
     sid = s.wire.session.id
 
-    {desk, leased, paused} =
+    {desk, leased, paused, known} =
       case Sequencer.read(s.account_id, fn k, lease ->
              session = lease.sessions[sid]
 
              {Nif.overview(k.res, 8), session != nil and session.channel,
-              is_map_key(lease.paused, s.key_id)}
+              is_map_key(lease.paused, s.key_id), person_known?(k.res, s.masks)}
            end) do
-        {:ok, {desk, leased, paused}} -> {desk && JSON.decode!(desk), leased, paused}
-        _ -> {nil, false, false}
+        {:ok, {desk, leased, paused, known}} ->
+          {desk && JSON.decode!(desk), leased, paused, known}
+
+        _ ->
+          {nil, false, false, true}
       end
 
     next =
@@ -1040,6 +1043,9 @@ defmodule HiremeWeb.Mcp.Session do
 
         not leased ->
           "Open the write channel with `lease` ({} or {\"count\":16}; {\"bulk\":n} for a burst of n writes), then `put` rows; `schema` with a table lists its writable columns."
+
+        not known and (w &&& Schema.domain_bit("corpus")) != 0 ->
+          "Nothing is known about the operator yet: ask them for their citizenships, the countries where they hold a work permit, their languages, field and the countries they want or never want, then `put` the one `me` row ({\"table\":\"person\",\"set\":{\"citizenships\":\"DE FR\",\"languages\":\"en de\",...}}; ISO 3166-1 alpha-2 and ISO 639-1 codes, space-separated; `weights` is JSON over places metrics plus route and language). The atlas orders places by it."
 
         true ->
           "The lease is open: `put` rows (metrics need as_of, prose needs source and expect_rev) and run commands on your claimed applications."
@@ -1081,6 +1087,20 @@ defmodule HiremeWeb.Mcp.Session do
         end}\n\nnext: #{next}\n"
 
     text(t, overview, false)
+  end
+
+  # Whether the person row names a citizenship or a permit; a key that cannot read it is not told.
+  defp person_known?(res, {r, w, d}) do
+    req =
+      JSON.encode!(%{op: "find", table: "me", cols: ["citizenships", "work_permits"], limit: 1})
+
+    case Nif.query(res, req, r, w, d) do
+      {:ok, json} ->
+        Enum.any?(JSON.decode!(json)["rows"] || [], &(&1["citizenships"] || &1["work_permits"]))
+
+      _ ->
+        true
+    end
   end
 
   defp domains(mask), do: for(d <- Schema.model().domains, (mask &&& d.bit) != 0, do: d.name)

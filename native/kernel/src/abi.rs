@@ -295,8 +295,8 @@ impl Kernel {
         compose::overview(&self.rows, &self.board, self.today(), top)
     }
 
-    pub fn atlas(&self, preset: Option<&str>) -> Json {
-        compose::atlas_doc(&self.rows, preset)
+    pub fn atlas(&self) -> Json {
+        compose::atlas_doc(&self.rows)
     }
 
     pub fn lanes(&self) -> Json {
@@ -677,11 +677,10 @@ mod exports {
         K.with(|k| put_json(&k.borrow_mut().overview(top as usize)))
     }
 
-    /// The atlas under the settings' weights, or a named preset.
+    /// Every country and city in the person's order.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn atlas(ptr: *const u8, len: usize) -> i32 {
-        let preset = core::str::from_utf8(unsafe { input(ptr, len) }).ok().filter(|s| !s.is_empty());
-        K.with(|k| put_json(&k.borrow().atlas(preset)))
+    pub extern "C" fn atlas() -> i32 {
+        K.with(|k| put_json(&k.borrow().atlas()))
     }
 
     #[unsafe(no_mangle)]

@@ -10,8 +10,8 @@
 //!
 //! What each card derives from its own row (its governor seat and its
 //! suggestion) is kept between derives and recomputed only for the rows a
-//! frame or a write moved; the settings row or the atlas moving
-//! recomputes all of them, since "home" is read from both.
+//! frame or a write moved; the me row or a place moving recomputes
+//! all of them, since "home" is read from both.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -297,18 +297,15 @@ pub fn settings(rows: &Rows) -> Option<(&Table, u32)> {
     t.ids().first().map(|id| (t, *id))
 }
 
-/// Whether a place is "home": in a country the operator is a citizen of,
-/// read from the atlas projection (a city through its country). With no
-/// citizenships set, every place is unknown: nothing is away.
+/// Whether a place is "home": in a country the operator is a citizen of
+/// (a city through its country). With no citizenships set, or a place
+/// whose country is not known, it is unknown: nothing is away.
 fn home_place(rows: &Rows, citizenships: &[String], place: u32) -> Option<bool> {
-    let at = rows.table(table::ATLAS)?;
-    if citizenships.is_empty() || !at.has(place) {
+    if citizenships.is_empty() {
         return None;
     }
-    let iso2 = at.str(place, col::atlas::ISO2).or_else(|| {
-        let country = at.u32(place, col::atlas::COUNTRY_ID)?;
-        at.str(country, col::atlas::ISO2)
-    })?;
+    let pt = rows.table(table::PLACES)?;
+    let iso2 = pt.str(place, col::places::ISO2).or_else(|| pt.str(pt.u32(place, col::places::COUNTRY_ID)?, col::places::ISO2))?;
     Some(citizenships.iter().any(|c| c.eq_ignore_ascii_case(iso2)))
 }
 
@@ -445,7 +442,8 @@ impl Board {
         }
         // A corporation's headcount is its applications' capacity.
         if moved.touched(table::SETTINGS)
-            || moved.touched(table::ATLAS)
+            || moved.touched(table::ME)
+            || moved.touched(table::PLACES)
             || moved.touched(table::CORPORATIONS)
             || moved.replaced.contains(&table::APPLICATIONS)
         {

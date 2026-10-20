@@ -763,13 +763,16 @@
       ]
     },
     {
-      "name": "the atlas fit: routes from citizenship and permits, ranks within kind, the weighted mean",
+      "name": "the atlas: routes from citizenship, a permit held and no-permit lists; ranks within kind under the person's weights, a negative one reversed; wanted first, never last",
       "today": 739528,
       "rows": {
         "me": [
           {
             "id": 1,
-            "citizenships": "aa"
+            "citizenships": "aa",
+            "work_permits": "ee",
+            "avoid": "bb",
+            "weights": "{\"gdp_per_capita_ppp_usd\": 2, \"cost_of_living_index\": -1, \"route\": 1, \"language\": 1, \"nope\": 1}"
           }
         ],
         "languages": [
@@ -779,14 +782,14 @@
             "level": "native"
           }
         ],
-        "atlas": [
+        "places": [
           {
             "id": 1,
             "kind": "country",
             "iso2": "AA",
             "name": "Aland",
-            "atlas_position": 1,
             "gdp_per_capita_ppp_usd": 10.0,
+            "cost_of_living_index": 50.0,
             "work_permit": "",
             "language": "xx"
           },
@@ -795,8 +798,8 @@
             "kind": "country",
             "iso2": "BB",
             "name": "Bland",
-            "atlas_position": 2,
             "gdp_per_capita_ppp_usd": 30.0,
+            "cost_of_living_index": 90.0,
             "work_permit": "AA\u001fCC",
             "language": "yy"
           },
@@ -805,9 +808,20 @@
             "kind": "country",
             "iso2": "DD",
             "name": "Dland",
-            "atlas_position": 3,
             "gdp_per_capita_ppp_usd": 20.0,
             "language": "zz\u001fxx"
+          },
+          {
+            "id": 4,
+            "kind": "country",
+            "iso2": "EE",
+            "name": "Eland"
+          },
+          {
+            "id": 5,
+            "kind": "city",
+            "country_id": 2,
+            "name": "Bcity"
           }
         ]
       },
@@ -815,52 +829,63 @@
         {
           "doc": "atlas",
           "expect": {
+            "known": true,
+            "unknown": [
+              "nope"
+            ],
+            "recipe": [
+              {
+                "key": "gdp_per_capita_ppp_usd",
+                "weight": 2.0
+              },
+              {
+                "key": "cost_of_living_index",
+                "weight": -1.0
+              },
+              {
+                "key": "route",
+                "weight": 1.0
+              },
+              {
+                "key": "language",
+                "weight": 1.0
+              }
+            ],
             "places": [
               {
-                "iso2": "AA",
-                "fit": 67,
+                "id": 4,
+                "route": "permit_held",
+                "speaks": null,
+                "fit": 1.0
+              },
+              {
+                "id": 1,
                 "route": "citizen",
                 "speaks": true,
-                "parts": {
-                  "economy": 0.0,
-                  "mobility": 1.0,
-                  "language": 1.0
-                }
+                "fit": 0.6
               },
               {
-                "iso2": "BB",
-                "fit": 63,
+                "id": 3,
+                "route": "needs_permit",
+                "speaks": true,
+                "fit": 0.575
+              },
+              {
+                "id": 5,
+                "kind": "city",
+                "country": "Bland",
+                "languages": "yy",
                 "route": "free",
                 "speaks": false,
-                "parts": {
-                  "economy": 1.0,
-                  "mobility": 0.9
-                }
+                "avoided": true,
+                "fit": 0.58
               },
               {
-                "iso2": "DD",
-                "fit": 50,
-                "route": "permit",
-                "parts": {
-                  "economy": 0.5,
-                  "mobility": 0.0
-                }
+                "id": 2,
+                "route": "free",
+                "avoided": true,
+                "fit": 0.58
               }
-            ]
-          }
-        },
-        {
-          "doc": "atlas",
-          "arg": "career",
-          "expect": {
-            "weights": [
-              0.0,
-              2.0,
-              1.0,
-              3.0,
-              1.0,
-              3.0,
-              1.0
             ]
           }
         }
@@ -1034,16 +1059,15 @@
       ]
     },
     {
-      "name": "with no citizenships set, a charted place is unknown, not away: an onsite seat there is never killed for location",
+      "name": "with no citizenships set, a place is unknown, not away: an onsite seat there is never killed for location, and the atlas has no route or fit for it",
       "today": 739528,
       "rows": {
-        "atlas": [
+        "places": [
           {
             "id": 1,
             "kind": "country",
             "iso2": "PT",
-            "name": "Portugal",
-            "atlas_position": 1
+            "name": "Portugal"
           }
         ],
         "applications": [
@@ -1066,6 +1090,19 @@
           "ids": [
             1
           ]
+        },
+        {
+          "doc": "atlas",
+          "expect": {
+            "known": false,
+            "places": [
+              {
+                "id": 1,
+                "route": "unknown",
+                "fit": null
+              }
+            ]
+          }
         }
       ]
     },

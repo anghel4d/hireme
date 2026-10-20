@@ -377,12 +377,3 @@ fn scoreboard_counts_only_submissions() {
     assert_eq!(board["scoreboard"]["submitted"], 3, "{board}");
     assert_eq!(board["scoreboard"]["submitted_today"], 3);
 }
-
-/// The atlas lens lists presets in the document's key order: the order they
-/// are declared in on every build, which needs serde_json's preserve_order
-/// in the kernel itself, not left to whatever else a build links.
-#[test]
-fn the_atlas_presets_come_in_the_order_they_are_declared() {
-    let names: Vec<String> = Kernel::new().atlas(None)["presets"].as_object().unwrap().keys().cloned().collect();
-    assert_eq!(names, ["balanced", "career", "life", "energy"]);
-}

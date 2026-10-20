@@ -495,8 +495,6 @@ CREATE TABLE "places" (
   "ease" REAL,
   "ease_on" TEXT,
   "work_permit" TEXT,
-  "atlas_position" INTEGER,
-  "atlas_labeled" INTEGER,
   "liveability" TEXT,
   "notes" TEXT
 ) STRICT;
@@ -755,13 +753,11 @@ CREATE TABLE "me" (
   "pay_currency" TEXT,
   "available_on" TEXT,
   "notice_days" INTEGER,
-  "w_energy" REAL,
-  "w_economy" REAL,
-  "w_liveability" REAL,
-  "w_mobility" REAL,
-  "w_language" REAL,
-  "w_tech" REAL,
-  "w_ease" REAL
+  "work_permits" TEXT,
+  "prefer" TEXT,
+  "avoid" TEXT,
+  "notes" TEXT,
+  "weights" TEXT
 ) STRICT;
 CREATE UNIQUE INDEX "me__single_account_id" ON "me" ("account_id");
 CREATE TRIGGER "me__ref_residence_id_insert" BEFORE INSERT ON "me" WHEN NEW."residence_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."residence_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref me.residence_id'); END;

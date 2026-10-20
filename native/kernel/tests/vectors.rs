@@ -167,7 +167,7 @@ fn vectors() {
                 holds(&step["ids"], &serde_json::json!(ids), &at)
             } else if let Some(doc) = step["doc"].as_str() {
                 let got = match doc {
-                    "atlas" => k.atlas(step["arg"].as_str()),
+                    "atlas" => k.atlas(),
                     "lanes" => k.lanes(),
                     "overview" => k.overview(10),
                     "application" => k.application(step["arg"].as_u64().unwrap() as u32).unwrap_or(J::Null),

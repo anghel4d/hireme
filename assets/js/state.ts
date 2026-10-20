@@ -11,7 +11,7 @@
 //     /desk?band=a&stage=draft_ready&heat=hot&q=rust
 //     /focus/<no>
 //     /world/<table>?sort=-headcount&q=berlin
-//     /atlas?preset=<name>
+//     /atlas?kind=city&cols=economy&sort=-population&q=ber
 //     /outreach?contact=<id>
 //     /lanes/<gym|net>
 //     /me

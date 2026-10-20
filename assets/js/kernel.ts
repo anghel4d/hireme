@@ -84,7 +84,7 @@ export interface Exports {
   scoreboard(): number
   application(id: number): number
   overview(top: number): number
-  atlas(ptr: number, len: number): number
+  atlas(): number
   lanes(): number
   snapshot(): number
   restore(ptr: number, len: number): bigint
@@ -460,8 +460,7 @@ export const card = (id: number): Card | null => (k ? memo(`card:${id}`, () => r
 export const scoreboard = (): Row | null => (k ? memo("scoreboard", () => resultJson(k!.scoreboard())) : null)
 export const application = (id: number): Row | null => (k ? memo(`application:${id}`, () => resultJson(k!.application(id))) : null)
 export const lanes = (): Row | null => (k ? memo("lanes", () => resultJson(k!.lanes())) : null)
-export const atlas = (preset: string): Row | null =>
-  k ? memo(`atlas:${preset}`, () => resultJson(withBytes(ENC.encode(preset), (p, n) => k!.atlas(p, n)))) : null
+export const atlas = (): Row | null => (k ? memo("atlas", () => resultJson(k!.atlas())) : null)
 
 /** Judges an op on the local rows and applies it as pending; a refusal is the kernel's own verdict. */
 function predict(op: Op): void {
@@ -769,7 +768,7 @@ export function put(name: TableName, set: Record<string, Input>, p: Put = {}): P
 /** A put to the one settings row (lanes), created when there is none yet. */
 export const putSettings = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("settings", set, settingsId() === 0 ? {} : { id: settingsId() })
 
-/** A put to the one me row (Me, the atlas's presets), created when there is none yet. */
+/** A put to the one me row (Me), created when there is none yet. */
 export const putMe = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("me", set, meId() === 0 ? {} : { id: meId() })
 
 /** A row dropped (soft-deleted where its table keeps them), predicted like a put. */

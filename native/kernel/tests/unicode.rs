@@ -100,9 +100,9 @@ fn every_text_reader_survives_any_text() {
             let _ = cv::Theme::parse(Some(&json)).over(cv::Theme::parse(Some(&d)));
         });
         bounded("atlas", seed, limit, || {
-            let places = [atlas::Place { id: 1, iso2: Some(&a), name: &b, language: Some(&c), work_permit: Some(&d), ..Default::default() }];
-            let me = atlas::Me { citizenships: &d, languages: c.as_str().into(), weights: atlas::Weights::default() };
-            let _ = atlas::order(&atlas::fit(&places, &me));
+            let places = [atlas::Place { id: 1, iso2: Some(&a), name: &b, language: Some(&c), work_permit: Some(&d), figures: vec![Some(1.0)], ..Default::default() }];
+            let me = atlas::Me { citizenships: &d, work_permits: &a, languages: c.as_str().into(), prefer: &b, avoid: &c, metrics: vec![1.0], route: 1.0, language: 1.0 };
+            let _ = atlas::order(&places, &atlas::fit(&places, &me));
         });
     }
 }
@@ -186,14 +186,13 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
         let mut b = w.block(table::LANGUAGES, 1);
         b.u32s(col::languages::ID, [1].into_iter()).strs(col::languages::CODE, [texts[1][2].as_str()].into_iter());
         b.done();
-        let mut b = w.block(table::ATLAS, 1);
-        b.u32s(col::atlas::ID, [1].into_iter())
-            .u32s(col::atlas::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
-            .u32s(col::atlas::ATLAS_POSITION, [1].into_iter())
-            .strs(col::atlas::ISO2, [texts[3][0].as_str()].into_iter())
-            .strs(col::atlas::NAME, [texts[3][1].as_str()].into_iter())
-            .strs(col::atlas::LANGUAGE, [texts[3][2].as_str()].into_iter())
-            .strs(col::atlas::WORK_PERMIT, [texts[3][3].as_str()].into_iter());
+        let mut b = w.block(table::PLACES, 1);
+        b.u32s(col::places::ID, [1].into_iter())
+            .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
+            .strs(col::places::ISO2, [texts[3][0].as_str()].into_iter())
+            .strs(col::places::NAME, [texts[3][1].as_str()].into_iter())
+            .strs(col::places::LANGUAGE, [texts[3][2].as_str()].into_iter())
+            .strs(col::places::WORK_PERMIT, [texts[3][3].as_str()].into_iter());
         b.done();
         bounded("desk", seed, limit, || {
             let mut k = Kernel::new();
@@ -204,7 +203,7 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             for id in 1..=n as u32 {
                 let _ = k.application(id);
             }
-            let _ = (k.overview(10), k.atlas(None), k.lanes(), k.board_ids(None));
+            let _ = (k.overview(10), k.atlas(), k.lanes(), k.board_ids(None));
             let ctx = Ctx { today: TODAY, now: 0, human: false, key_id: Some(1), held: &[] };
             for id in 1..=4u32 {
                 let mut ow = wire::OpsWriter::new();

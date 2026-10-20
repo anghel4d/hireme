@@ -453,11 +453,9 @@ defmodule Hireme.SequencerTest do
            %{account: a} do
     word = string(:alphanumeric, min_length: 1, max_length: 6)
     at = integer(0..20)
-    chart = one_of([constant(nil), integer(1..9)])
 
-    # Writes to every resident table and to places, whose atlas projection
-    # follows a rename, a move onto or off the chart and a drop, with drops
-    # that cascade.
+    # Writes to every resident table, places among them (a rename, a drop),
+    # with drops that cascade.
     gen_action =
       one_of([
         tuple({constant(:rep), word}),
@@ -468,9 +466,8 @@ defmodule Hireme.SequencerTest do
         tuple({constant(:item), word}),
         tuple({constant(:batch), word}),
         tuple({constant(:net), word}),
-        tuple({constant(:settings), member_of(["pt", "de", "pt\u001fde", ""])}),
-        tuple({constant(:place), word, chart}),
-        tuple({constant(:chart), at, chart}),
+        tuple({constant(:me), member_of(["pt", "de", "pt\u001fde", ""])}),
+        tuple({constant(:place), word}),
         tuple({constant(:rename), at, word}),
         tuple({constant(:drop_place), at}),
         tuple({constant(:event), at, word}),
@@ -522,14 +519,11 @@ defmodule Hireme.SequencerTest do
           {:net, s} ->
             op(:put, :net_entries, %{kind: :post, title: s})
 
-          {:settings, c} ->
+          {:me, c} ->
             op(:put, :me, %{citizenships: c})
 
-          {:place, s, pos} ->
-            op(:put, :places, %{kind: :city, name: s, atlas_position: pos})
-
-          {:chart, i, pos} ->
-            op(:put, :places, %{atlas_position: pos}, target: id.("places", i))
+          {:place, s} ->
+            op(:put, :places, %{kind: :city, name: s})
 
           {:rename, i, s} ->
             op(:put, :places, %{name: s}, target: id.("places", i))

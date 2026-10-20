@@ -1,5 +1,5 @@
 //! A kernel kept current must equal a fresh one: after any run of PATCHes
-//! (applications, settings, atlas, lineages, gone rows), BOOTs, predicted
+//! (applications, settings, me, places, lineages, gone rows), BOOTs, predicted
 //! ops, their ACKs and NACKs, TICKs and day pins, a kernel booted from the
 //! same rows derives the same board, documents and verdicts. The board's cache
 //! and the governor's index are maintained incrementally; this is their law.
@@ -133,8 +133,8 @@ fn op(r: &mut Rng, op_id: u64) -> Vec<u8> {
     w.finish()[8..].to_vec()
 }
 
-/// A server PATCH: application cells, or the settings, atlas or lineages
-/// the derivations read, sometimes with gone rows.
+/// A server PATCH: application cells, or the settings, me, places or
+/// lineages the derivations read, sometimes with gone rows.
 fn patch(r: &mut Rng) -> Vec<u8> {
     let mut w = wire::BodyWriter::new();
     match r.below(6) {
@@ -174,11 +174,10 @@ fn patch(r: &mut Rng) -> Vec<u8> {
         }
         4 => {
             let id = 1 + r.below(3) as u32;
-            let mut b = w.block(table::ATLAS, 1);
-            b.u32s(col::atlas::ID, [id].into_iter())
-                .u32s(col::atlas::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
-                .u32s(col::atlas::ATLAS_POSITION, [id].into_iter())
-                .strs(col::atlas::ISO2, [*r.pick(&["pt", "us", "de"])].into_iter());
+            let mut b = w.block(table::PLACES, 1);
+            b.u32s(col::places::ID, [id].into_iter())
+                .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
+                .strs(col::places::ISO2, [*r.pick(&["pt", "us", "de"])].into_iter());
             b.done();
         }
         _ => {
@@ -205,7 +204,7 @@ fn boot_of(k: &Kernel) -> Vec<u8> {
 
 /// Everything derived that a reader sees, and the verdicts on `probes`.
 fn derived(k: &mut Kernel, probes: &[Vec<u8>], ctx: &Ctx) -> Vec<String> {
-    let mut out = vec![format!("{:?}", k.board_ids(None)), k.overview(100).to_string(), k.atlas(None).to_string()];
+    let mut out = vec![format!("{:?}", k.board_ids(None)), k.overview(100).to_string(), k.atlas().to_string()];
     out.extend((1..=N + 2).map(|id| format!("{id}: {:?}", k.application(id))));
     out.extend(probes.iter().map(|p| format!("{:?}", k.judge(p, ctx))));
     out

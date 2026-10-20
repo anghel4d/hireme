@@ -147,6 +147,9 @@ mail 4, lanes 8, corpus 16, and `may_delete`:
   trail, the outbox, the ledger) and `trusted_hosts` are in no mask: no
   key reads or writes them. `citations` replicates under the world read
   bit, and only the server writes it.
+- The operator's own facts (`me`: citizenships, permits, languages,
+  where they want to live) are corpus, like their CV: a key reads or
+  writes them only with that bit, never under desk or world.
 - A key never mints, widens or revokes keys: only a browser session can
   call `account.*`, and minting, widening a mask and granting
   `may_delete` need that session stepped up. Narrowing does not.

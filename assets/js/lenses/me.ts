@@ -1,6 +1,7 @@
 // Me: everything that is the operator's own rather than a listing's.
 //
-//   /me        passports, residence, regions, work modes, pay, languages, the place weights
+//   /me        passports, permits, residence, regions, the countries wanted or never, work modes, pay,
+//              languages, notes for agents, and the weights the atlas orders places by
 //   /me/cv     the CV roots: files (markdown, pdf, docx) or compositions, each a line of versions
 //   /me/rules  the ordered match that gives each application its root, the named masks, and
 //              the applications more than one arm takes, to pin
@@ -10,18 +11,33 @@
 // draws what they answer and writes rows. The bytes of a pdf or docx go to /blobs by hash first.
 
 import type { View } from "../app.ts"
-import { ENUMS } from "../gen/schema.ts"
-import { command, drop, failed, atlas, ids, meId, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
+import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
+import { command, drop, failed, ids, meId, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
 import { go, model, notice } from "../state.ts"
+import { label } from "./world.ts"
 
 const SEP = "\u001f"
-const mine = (col: string): string => {
+export const mine = (col: string): string => {
   const id = meId()
   const x = id === 0 ? null : value("me", id, col)
   return x === null ? "" : str(x)
 }
-const list = (col: string): string[] => mine(col).split(SEP).filter((x) => x !== "")
+export const list = (col: string): string[] => mine(col).split(SEP).filter((x) => x !== "")
+
+/** The figures a weight may name: every metric of places, plus the two personal parts. */
+export const FIGURES: ColumnDef[] = TABLES.places.cols.filter((c) => c.metric)
+const PARTS: [string, string][] = [["route", "Citizen or permit held 1, no permit needed 0.9, needs a permit 0.3"], ["language", "Speaks one of your languages"]]
+export const figureName = (key: string): string => (key === "route" ? "Route" : key === "language" ? "Speaks your language" : label(key))
+/** The weights as saved: `{"<places metric>": w, "route": w, "language": w}`. */
+const weights = (): Record<string, unknown> => {
+  try {
+    const w: unknown = JSON.parse(mine("weights") || "{}")
+    return typeof w === "object" && w !== null ? (w as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
 
 /** The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them. */
 const save = (set: Record<string, Input>, form?: HTMLFormElement): void => void (form ? resetAfter(form, () => putMe(set)) : putMe(set)).catch(failed)
@@ -41,8 +57,11 @@ const bits = (col: string, name: string): Html => {
 // ------------------------------------------------------------------ you
 
 function you(): Html {
-  const d = atlas("") as { parts: string[]; weights: number[] } | null
   const res = Number(mine("residence_id") || 0)
+  const w = weights()
+  const groups = [...new Set(FIGURES.map((c) => c.group ?? "other"))]
+  const weightField = (key: string, text: string, title: string): Html =>
+    html`<label title="${title}">${text} <input type="number" name="${key}" step="0.5" min="-10" max="10" value="${String(w[key] ?? "")}" class="narrow"></label>`
   const langs = [...ids("languages")].map((id) => ({ id, code: str(value("languages", id, "code")), level: str(value("languages", id, "level")) })).sort((a, b) => a.code.localeCompare(b.code))
   return html`<section class="card" data-key="me"><h2>You</h2>
       <form class="stack" data-submit="me" data-act="me">
@@ -51,6 +70,11 @@ function you(): Html {
           <label>Residence (ISO alpha-2) <input name="residence" value="${res ? str(value("places", res, "iso2")) : ""}" placeholder="e.g. NL" autocomplete="off" class="narrow"></label>
           <label>Regions (ISO 3166) <input name="regions" value="${list("regions").join(" ")}" placeholder="e.g. DE NL GB-ENG" autocomplete="off"></label>
           <label><input type="checkbox" name="relocate"${flag("checked", mine("relocate") === "true")}> will relocate</label>
+        </div>
+        <div class="row">
+          <label>Work permits or residence held (ISO alpha-2) <input name="work_permits" value="${list("work_permits").join(" ")}" placeholder="e.g. US" autocomplete="off"></label>
+          <label>Countries wanted (first in the atlas) <input name="prefer" value="${list("prefer").join(" ")}" placeholder="e.g. CH NO" autocomplete="off"></label>
+          <label>Countries never (last, never hidden) <input name="avoid" value="${list("avoid").join(" ")}" placeholder="e.g. RU" autocomplete="off"></label>
         </div>
         <div class="row">
           <label>Field <input name="field" value="${mine("field")}" placeholder="software"></label>
@@ -64,8 +88,10 @@ function you(): Html {
           <label>Available on <input type="date" name="available_on" value="${mine("available_on")}"></label>
           <label>Notice (days) <input type="number" name="notice_days" min="0" value="${mine("notice_days")}" class="narrow"></label>
         </div>
+        <label>Notes for your agents <textarea name="notes" rows="3" placeholder="e.g. partner needs a hospital job; no winters below −10 °C">${str(value("me", meId(), "notes"))}</textarea></label>
         <button>Save</button>
       </form>
+      <p class="hint">Your agents fill this too: <code>put</code> the <code>me</code> row through the MCP, with a key that writes corpus.</p>
     </section>
     <section class="card" data-key="languages"><h2>Languages</h2>
       <ul class="rows">${langs.map((l) => html`<li data-key="l${l.id}"><b>${l.code}</b>
@@ -77,12 +103,14 @@ function you(): Html {
         <button>Add</button>
       </form>
     </section>
-    ${d ? html`<section class="card" data-key="weights"><h2>Place weights</h2>
-      <form class="weights" data-submit="weights" data-act="weights">${d.parts.map((p, i) => html`<label>${p} <output>${String(d.weights[i] ?? 1)}</output>
-          <input type="range" name="w_${p}" min="0" max="5" step="0.5" value="${String(d.weights[i] ?? 1)}" data-act="weight" data-on="input"></label>`)}
-        <button>Save weights</button></form>
-      <p class="hint">The atlas scores every charted place with these; its presets can be adopted there.</p>
-    </section>` : EMPTY}`
+    <section class="card" data-key="recipe"><h2>What matters</h2>
+      <p class="hint">A weight per figure orders the atlas; blank or 0 leaves a figure out, a negative weight ranks a lower figure higher (cost of living, rent, pollution). Every figure stays in the atlas's table either way.</p>
+      <form data-submit="weights" data-act="weights">
+        <div class="weights" data-key="parts">${PARTS.map(([k, title]) => weightField(k, figureName(k), title))}</div>
+        ${groups.map((g) => html`<h3 data-key="h-${g}">${g.charAt(0).toUpperCase() + g.slice(1)}</h3><div class="weights" data-key="g-${g}">${FIGURES.filter((c) => (c.group ?? "other") === g).map((c) => weightField(c.name, label(c.name), c.name))}</div>`)}
+        <button class="primary">Save weights</button>
+      </form>
+    </section>`
 }
 
 // ------------------------------------------------------------------ the kernel's answers
@@ -316,9 +344,6 @@ const meLens: View = {
     const id = Number(el.dataset.id ?? 0)
     const form = el as HTMLFormElement
     switch (name) {
-      case "weight":
-        // The number beside a slider follows it as it moves; Save weights stores them.
-        return void (el.previousElementSibling as HTMLOutputElement | null)?.replaceChildren((el as HTMLInputElement).value)
       case "me": {
         const f = new FormData(form)
         const x = fields(form)
@@ -327,6 +352,10 @@ const meLens: View = {
         if (iso !== "" && !place) return notice("warn", `No country ${iso} in the world tables yet.`)
         return save({
           citizenships: codes(x.citizenships ?? "", true),
+          work_permits: codes(x.work_permits ?? "", true),
+          prefer: codes(x.prefer ?? "", true),
+          avoid: codes(x.avoid ?? "", true),
+          notes: x.notes || null,
           residence_id: place ? Number(place.id) : null,
           regions: codes(x.regions ?? "", true, /^[A-Za-z]{2}(-[A-Za-z0-9]{1,3})?$/),
           relocate: f.has("relocate"),
@@ -341,12 +370,12 @@ const meLens: View = {
         }, form)
       }
       case "weights": {
-        const f = new FormData(form)
-        const set: Record<string, Input> = {}
-        for (const [k, x] of f) set[k] = Number(x)
-        // Every weight at zero scores nothing at all.
-        if (Object.values(set).every((x) => x === 0)) return notice("warn", "Give at least one part a weight above zero.")
-        return save(set)
+        const w: Record<string, number> = {}
+        for (const [k, x] of new FormData(form)) {
+          const n = Number(x)
+          if (x !== "" && Number.isFinite(n) && n !== 0) w[k] = n
+        }
+        return save({ weights: Object.keys(w).length === 0 ? null : JSON.stringify(w) })
       }
       case "lang": {
         const x = fields(form)

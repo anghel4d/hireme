@@ -94,7 +94,7 @@ function rows(t: TableDef, cs: ColumnDef[], limit: number): { rows: Row[]; more:
 const NUM = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 })
 const BIG = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 2 })
 
-function display(c: ColumnDef, x: unknown): Html {
+export function display(c: ColumnDef, x: unknown): Html {
   if (x === null || x === undefined || x === "") return EMPTY
   if (c.type === "text") return x === 0 ? EMPTY : html`<button type="button" class="ghost text-ref" data-act="read" data-col="${c.name}">${Number(x).toLocaleString()} bytes</button>`
   if (c.ref !== null) {
@@ -157,7 +157,7 @@ function editor(t: TableDef, c: ColumnDef, r: Row): Html {
 }
 
 /** A value with its as-of date (which opens its citations) or, for prose, its sources. */
-function cited(c: ColumnDef, r: Row, x: unknown): Html {
+export function cited(c: ColumnDef, r: Row, x: unknown): Html {
   const id = Number(r.id)
   const on = c.metric ? r[`${c.name}_on`] : null
   return html`${display(c, x)}${
@@ -199,8 +199,8 @@ function record(t: TableDef): Html {
 
 // ------------------------------------------------------------------ panels
 
-function cites(t: TableDef): Html {
-  const c = v().cites
+/** The citations panel of one cell: this lens's open cell, or the one the atlas names. */
+export function cites(t: TableDef, c = v().cites): Html {
   if (!c) return EMPTY
   let list: Row[]
   try {

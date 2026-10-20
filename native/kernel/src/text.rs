@@ -155,11 +155,13 @@ pub fn words(text: &str) -> impl Iterator<Item = &str> {
 /// Most codes a settings list is read for.
 pub const MAX_CODES: usize = 64;
 
-/// A U+001F-joined list of codes (ISO 3166 or 639), lowercased, deduped,
-/// the first [`MAX_CODES`] kept: read once, then matched by lookup.
+/// A list of codes (ISO 3166 or 639), U+001F-joined as stored or written
+/// with spaces, commas or semicolons as an agent types them, lowercased,
+/// deduped, the first [`MAX_CODES`] kept: read once, then matched by lookup.
 pub fn codes(joined: &str) -> alloc::vec::Vec<String> {
     let mut out: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-    for c in list(joined).map(str::to_ascii_lowercase) {
+    let split = |s: &'_ str| s.split([',', ';', ' ', '\t']).filter(|c| !c.is_empty()).map(str::to_ascii_lowercase).collect::<alloc::vec::Vec<_>>();
+    for c in list(joined).flat_map(split) {
         if out.len() == MAX_CODES {
             break;
         }

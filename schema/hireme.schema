@@ -41,6 +41,10 @@
 #                                    a write needs `as_of` and makes a citation
 #   prose <name> [flag]...           text ?; a write needs `source` and
 #                                    `expect_rev` and makes a citation
+#   retired table <n>                ids are append-only: <n> tables or projections
+#                                    once declared here keep their numbers
+#   retired col <n>                  inside a table: <n> columns once declared here
+#                                    keep their ids (dropped by a hand-written step)
 #   group <words>                    the columns after it fall under it (World's
 #                                    column groups); presentation only, in no hash
 #   command <name> [<col> | <name>:<type>[?]]... [human_only]
@@ -528,16 +532,14 @@ table places world resident
   metric ease f64
   # U+001F-joined iso2 of citizenships that need no work permit here.
   col work_permit str ?
-  group atlas
-  col atlas_position u32 ?
-  col atlas_labeled bool ?
+  # atlas_position and atlas_labeled: the atlas reads every place now (0003_atlas).
+  retired col 2
   group prose
   prose liveability
   prose notes
 
-# The places the atlas charts, with only the columns its fit reads.
-projection atlas world places where atlas_position is not null
-  pick kind country_id iso2 name atlas_position atlas_labeled gdp_per_capita_ppp_usd qol_index energy_production_per_capita_kwh energy_consumption_per_capita_kwh mobility language tech ease work_permit
+# The atlas projection of places: every place is in the atlas now (0003_atlas).
+retired table 1
 
 table corporations world resident
   natural domain
@@ -773,13 +775,19 @@ table me corpus resident singleton
   col pay_currency str ?
   col available_on day ?
   col notice_days u32 ?
-  col w_energy f64 ?
-  col w_economy f64 ?
-  col w_liveability f64 ?
-  col w_mobility f64 ?
-  col w_language f64 ?
-  col w_tech f64 ?
-  col w_ease f64 ?
+  # The seven fixed atlas weights: replaced by `weights` (0003_atlas).
+  retired col 7
+  # U+001F-joined ISO 3166-1 alpha-2: countries where a work permit or a
+  # residence right is already held; countries wanted (the atlas orders
+  # them first) and never wanted (last, never hidden).
+  col work_permits str ?
+  col prefer str ?
+  col avoid str ?
+  # What an agent drafting for the person should know.
+  col notes text ?
+  # The atlas's order: {"<places metric>": weight, "route": weight,
+  # "language": weight}. A negative weight ranks a lower figure higher.
+  col weights json ?
 
 # The languages the person speaks, a row each (ISO 639-1).
 table languages corpus resident

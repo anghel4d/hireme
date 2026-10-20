@@ -216,6 +216,21 @@ await step("world shows the office, without a reload", pages, async () => {
   return `row ${officeId}`;
 });
 
+// The `me` row is the agent's to fill: the atlas re-routes the place it
+// just added the moment the row lands, with no reload.
+const atlasPage = watch("atlas", await ctx.newPage());
+pages.atlas = atlasPage;
+await step("MCP: put the person row; the atlas routes Acmeland as citizen, without a reload", pages, async () => {
+  await atlasPage.goto(`${BASE}/atlas`);
+  const row = atlasPage.locator("tbody tr", { hasText: "Acmeland" });
+  await until(async () => (await row.count()) === 1, "Acmeland in the atlas");
+  await until(async () => /unknown/.test(await row.innerText()), "its route reads unknown before the person row is set");
+  await agent.call("put", { table: "languages", key: { code: "en" }, set: { level: "native" } });
+  await agent.call("put", { table: "me", set: { citizenships: "AC", weights: { route: 1, population: 1 } } });
+  await until(async () => /citizen/.test(await row.innerText()), "the route reads citizen once the person row lands");
+  return "unknown → citizen";
+});
+
 await step("no reload and no page error", pages, async () => {
   const reloaded = await marked();
   if (reloaded.length) throw new Error(`reloaded: ${reloaded.join(", ")}`);

@@ -1,78 +1,148 @@
-// The atlas: the charted places scored against the operator's own
-// passports, languages and weights. The fit (route, language, seven parts,
-// the weighted sum, presets) is the kernel's only copy (`atlas`); this
-// lens draws it; the inputs (passports, languages, weights) are the
-// operator's own and are set in Me. No passport or language is in source.
+// The atlas: every country and city in the world's places, ordered for the
+// person behind the account and shown as the figures themselves. Who that
+// person is and which figures matter to them are the one `me` row (the Me
+// lens, or an agent through the MCP); the route, the language match and
+// the order are the kernel's (`atlas`). Nothing personal is in source. A
+// figure is the place's own metric with its as-of day and citations, as in
+// World, and the order only sorts: it never hides a number.
 
 import type { View } from "../app.ts"
-import { failed, atlas, putMe, type Input } from "../kernel.ts"
-import { EMPTY, flag, html, type Html } from "../morph.ts"
+import { TABLES } from "../gen/schema.ts"
+import { atlas, ids, meId, page, row, value } from "../kernel.ts"
+import { EMPTY, html, type Html } from "../morph.ts"
 import { model, query } from "../state.ts"
+import { FIGURES, figureName, list } from "./me.ts"
+import { cited, cites, label } from "./world.ts"
 
-/** A place's fit; `fit` is null for a place with no part the kernel can score, and a part may be null too. */
-type Fit = { id: number; name: string; iso2: string | null; kind: string; route: string; speaks: boolean; fit: number | null; parts: Record<string, number | null>; labeled: boolean | null }
-type Doc = { parts: string[]; weights: number[]; presets: Record<string, number[]>; places: Fit[] }
+type Fit = { id: number; kind: string; name: string; iso2: string | null; country: string | null; languages: string | null; route: string; speaks: boolean | null; preferred: boolean; avoided: boolean; fit: number | null }
+type Doc = { known: boolean; recipe: { key: string; weight: number }[]; unknown: string[]; places: Fit[] }
 
-/** What a route means for you, from your citizenships and the place's work-permit list (kernel atlas.rs). */
+const PLACES = TABLES.places
+const PAGE = 100
+/** The facts of the me row the summary names, in order. */
+const FACTS: [string, string][] = [["citizenships", "Citizenships"], ["work_permits", "Work permits or residence held"], ["field", "Field"], ["prefer", "Countries wanted"], ["avoid", "Countries never"]]
+/** What a route means, from the person's citizenships and permits and the place's no-permit list (kernel atlas.rs). */
 const ROUTE: Record<string, [string, string]> = {
   citizen: ["citizen", "You hold this country's citizenship"],
+  permit_held: ["permit held", "You already hold a work permit or a residence right here"],
   free: ["no permit needed", "One of your citizenships needs no work permit here"],
-  permit: ["needs a permit", "None of your citizenships is on this place's no-permit list"],
-  unknown: ["visa unknown", "No citizenship or work-permit figures for this place yet"],
+  needs_permit: ["needs a permit", "None of your citizenships is on this place's no-permit list"],
+  unknown: ["unknown", "Set your citizenships in Me; or this place's country and no-permit list are not known yet"],
 }
 
-function meter(x: number | null, max: number): Html {
-  if (x === null) return html`<span class="muted" title="No figure for this place yet">—</span>`
-  // A figure is its bar and its number (a zero is a figure, not a gap: its bar is empty, its number 0).
-  return html`<meter min="0" max="${max}" value="${x}"></meter> ${Math.round(max === 1 ? x * 100 : x)}`
+function you(d: Doc): Html {
+  if (!d.known)
+    return html`<section class="card" data-key="me"><h2>You</h2>
+      <p class="warn" data-key="none">Nothing about you yet: every route below reads unknown until your citizenships are set. <a href="/me" data-nav>Fill in Me</a>, or ask an agent to (<code>put me</code> over the MCP, with a key that writes corpus).</p>
+    </section>`
+  const notes = String(row("me", meId())?.notes ?? "")
+  const langs = [...ids("languages")].map((id) => String(value("languages", id, "code") ?? "")).sort().join(" ")
+  return html`<section class="card" data-key="me"><h2>You <a class="ghost" href="/me" data-nav>Edit in Me</a></h2>
+    <p class="facts">${FACTS.map(([col, text]) => (list(col).length > 0 ? html`<span data-key="${col}"><span class="muted">${text}</span> ${list(col).join(" ")}</span>` : EMPTY))}${langs ? html`<span data-key="languages"><span class="muted">Languages</span> ${langs}</span>` : EMPTY}</p>
+    ${notes ? html`<p class="notes muted" data-key="notes">${notes}</p>` : EMPTY}
+  </section>`
+}
+
+function recipe(d: Doc): Html {
+  return html`<section class="card" data-key="recipe"><h2>What matters <a class="ghost" href="/me" data-nav>Edit in Me</a></h2>
+    ${d.recipe.length === 0
+      ? html`<p class="hint">No weights yet: places are in route order, wanted first and never last. Pick the figures that matter to you in Me and weight them; a negative weight ranks a lower figure higher.</p>`
+      : html`<p class="terms">${d.recipe.map((r) => html`<span class="term" data-key="${r.key}" title="${r.key}">${figureName(r.key)} <b>×${String(r.weight)}</b></span>`)}</p>`}
+    ${d.unknown.length === 0 ? EMPTY : html`<p class="hint">Not a figure of places, so ignored: ${d.unknown.join(", ")}</p>`}
+  </section>`
 }
 
 function view(): Html {
-  const preset = model.address.q.get("preset") ?? ""
-  const d = atlas(preset) as Doc | null
+  const d = atlas() as Doc | null
   if (!d) return html`<p class="empty">Loading…</p>`
-  const kind = model.address.q.get("kind") ?? ""
-  const places = kind === "" ? d.places : d.places.filter((p) => p.kind === kind)
+  const q = model.address.q
+  const kind = q.get("kind") ?? ""
+  const search = (q.get("q") ?? "").toLowerCase()
+  const sort = q.get("sort") ?? ""
+  const limit = PAGE * Number(q.get("more") ?? 1)
+  const weighted = d.recipe.flatMap((r) => FIGURES.filter((c) => c.name === r.key))
+  // The figure columns: the weighted ones, a declared group, or all; with nothing weighted, the economy.
+  const pick = q.get("cols") ?? (weighted.length > 0 ? "weighted" : "economy")
+  const figures = pick === "all" ? FIGURES : pick === "weighted" ? weighted : FIGURES.filter((c) => c.group === pick)
+  const groups = [...new Set(FIGURES.flatMap((c) => (c.group === null ? [] : [c.group])))]
+  // The kernel's order, or the replica's by one figure; the rank is always the kernel's.
+  const rank = new Map(d.places.map((f, i) => [f.id, i + 1]))
+  const byId = new Map(d.places.map((f) => [f.id, f]))
+  const ordered = sort === "" ? d.places : page({ table: "places", cols: ["id"], order: [sort.replace(/^-/, ""), sort.startsWith("-") ? "desc" : "asc"] }, 100_000).rows.flatMap((r) => byId.get(Number(r.id)) ?? [])
+  const kept = ordered.filter((f) => (kind === "" || f.kind === kind) && (search === "" || f.name.toLowerCase().startsWith(search)))
+  const shown = kept.slice(0, limit)
+  const cols = ["id", "rev", "name", ...figures.flatMap((c) => [c.name, `${c.name}_on`])]
+  // The page's rows, a hundred ids a find (its `in` is bounded).
+  const rows = new Map(Array.from({ length: Math.ceil(shown.length / PAGE) }, (_, i) => shown.slice(i * PAGE, (i + 1) * PAGE)).flatMap((part) =>
+    page({ table: "places", cols, where: { id: { in: part.map((f) => f.id) } } }, part.length).rows.map((r) => [Number(r.id), r] as const)))
+  const c = (q.get("cites") ?? "").split(":")
+  const tab = (k: string, text: string): Html =>
+    html`<a href="/atlas${k === "" ? "" : `?kind=${k}`}" data-nav data-key="k${k}" class="${kind === k ? "on" : ""}"${kind === k ? html` aria-current="page"` : EMPTY}>${text}</a>`
+  const header = (col: string, text: string, title: string): Html => {
+    const dir = sort === col ? "asc" : sort === `-${col}` ? "desc" : ""
+    return html`<th scope="col" data-key="${col}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
+      <button type="button" class="ghost" data-act="sort" data-col="${col}" title="${title}">${text}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button></th>`
+  }
   return html`<div class="atlas">
-    <section class="card" data-key="weights"><h2>Weights</h2>
-      <div class="row">
-        <label>Preset <select data-act="preset" data-on="change" data-bound><option value="">your weights</option>
-          ${Object.keys(d.presets).map((p) => html`<option${flag("selected", p === preset)}>${p}</option>`)}</select></label>
-        ${preset !== "" ? html`<button type="button" data-act="adopt" data-preset="${preset}">Use ${preset} as mine</button>` : EMPTY}
-      </div>
-      <p class="muted">${d.parts.map((p, i) => `${p} ${(preset === "" ? d.weights : d.presets[preset])?.[i] ?? 1}`).join(" · ")}${preset === "" ? html` · <a href="/me" data-nav>set in Me</a>` : EMPTY}</p>
-    </section>
-    <div class="toolbar"><nav class="subtabs">${[["", "all"], ["country", "countries"], ["city", "cities"]].map(([k, l]) => html`<a href="/atlas?${new URLSearchParams({ ...(preset ? { preset } : {}), ...(k ? { kind: k! } : {}) }).toString()}" data-nav class="${kind === k ? "on" : ""}" data-key="k${k}">${l}</a>`)}</nav>
-      <span class="muted">${places.length} charted</span></div>
-    ${places.length === 0 ? html`<p class="empty">No charted places. A place is charted when its atlas_position is set; agents fill places through the MCP.</p>` : html`<div class="grid-wrap"><table class="grid atlas-grid">
-      <thead><tr><th scope="col">Place</th><th scope="col">Route</th><th scope="col">Fit</th>${d.parts.map((p) => html`<th scope="col">${p}</th>`)}</tr></thead>
-      <tbody>${places.map((p) => html`<tr data-key="p${p.id}" class="route-${p.route}">
-        <th scope="row">${p.name} <span class="muted">${p.iso2 ?? ""}</span></th>
-        <td><span class="tag" title="${ROUTE[p.route]?.[1] ?? ""}">${ROUTE[p.route]?.[0] ?? p.route}</span>${p.speaks ? html` <span class="tag" title="You speak a language spoken here">speaks your language</span>` : EMPTY}</td>
-        <td>${meter(p.fit, 100)}</td>
-        ${d.parts.map((part) => html`<td>${meter(p.parts[part] ?? null, 1)}</td>`)}</tr>`)}</tbody></table></div>
-      <p class="hint">— no figure for that place yet. Each part is 0–100 among the places charted; fit is the weighted mean of the parts a place has.</p>`}
+    ${you(d)}${recipe(d)}
+    <div class="toolbar" data-key="toolbar">
+      <nav class="subtabs" aria-label="Which places">${tab("", "all")}${tab("country", "countries")}${tab("city", "cities")}</nav>
+      <input type="search" class="search" placeholder="name starts with…" value="${q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search places">
+      <span class="muted">${kept.length} place${kept.length === 1 ? "" : "s"}</span>
+    </div>
+    <div class="chips" role="group" aria-label="Which figures" data-key="groups">${[["weighted", "Weighted"], ...groups.map((g) => [g, g.charAt(0).toUpperCase() + g.slice(1)]), ["all", "All figures"]].map(([x, text]) =>
+      html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${text}</button>`)}</div>
+    ${c.length === 2 ? cites(PLACES, { id: Number(c[0]), column: c[1]! }) : EMPTY}
+    ${d.places.length === 0 ? html`<p class="empty">No places yet. Agents add countries and cities through the MCP (<code>put places</code>); you can add one in World.</p>` : html`<div class="grid-wrap" data-key="grid">
+      <table class="grid sparse">
+        <thead><tr><th scope="col" class="id" title="Your order: wanted first, never last, then by what matters">#</th><th scope="col" class="anchor" data-key="name"><span title="name">Place</span></th>
+          <th scope="col" data-key="route"><span title="From your citizenships and permits and the place's no-permit list">Route</span></th>
+          <th scope="col" data-key="language"><span title="What the place speaks (a city, its country's); ✓ when one of them is yours">Languages</span></th>
+          ${figures.map((f) => header(f.name, label(f.name), `${f.name}: sort`))}</tr></thead>
+        <tbody>${shown.map((f) => {
+          const r = rows.get(f.id)
+          return html`<tr data-key="p${f.id}" data-id="${f.id}" class="${f.avoided ? "avoided" : ""}">
+            <th scope="row" class="id">${String(rank.get(f.id) ?? "")}</th>
+            <td data-key="name"><a href="/world/places?row=${f.id}" data-nav title="Open in World">${f.name}</a> <span class="muted">${f.kind === "city" ? f.country ?? "" : f.iso2 ?? ""}</span>${
+              f.preferred ? html` <span class="tag" title="A country you want: ordered first">wanted</span>` : EMPTY}${f.avoided ? html` <span class="tag" title="A country you never want: ordered last">never</span>` : EMPTY}</td>
+            <td data-key="route"><span class="tag route-${f.route}" title="${ROUTE[f.route]?.[1] ?? ""}">${ROUTE[f.route]?.[0] ?? f.route}</span></td>
+            <td data-key="language">${(f.languages ?? "").split("\u001f").join(", ")}${f.speaks ? html` <span title="Speaks one of your languages">✓</span>` : EMPTY}</td>
+            ${figures.map((col) => html`<td data-key="${col.name}" class="metric">${r ? cited(col, r, r[col.name]) : EMPTY}</td>`)}</tr>`
+        })}</tbody>
+      </table>
+    </div>
+    ${kept.length > shown.length ? html`<button type="button" data-act="more">Show ${PAGE} more</button>` : EMPTY}`}
   </div>`
 }
 
-const atlasLens: View = {
+const lens: View = {
   title: "Atlas",
   view,
-  act(name, el) {
+  act(name, el, ev) {
     switch (name) {
-      case "preset":
-        return query("preset", (el as HTMLSelectElement).value)
-      case "adopt": {
-        const d = atlas(el.dataset.preset ?? "") as Doc | null
-        const w = d?.presets[el.dataset.preset ?? ""]
-        if (!d || !w) return
-        const set: Record<string, Input> = {}
-        d.parts.forEach((p, i) => (set[`w_${p}`] = w[i] ?? 1))
-        putMe(set).catch(failed)
-        return query("preset", "")
+      case "cols":
+        return query("cols", el.dataset.v ?? "")
+      case "sort": {
+        const col = el.dataset.col ?? ""
+        const s = model.address.q.get("sort") ?? ""
+        return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
       }
+      case "search":
+        return query("q", (el as HTMLInputElement).value)
+      case "more":
+        return query("more", String(Number(model.address.q.get("more") ?? 1) + 1))
+      case "cites":
+        ev.stopPropagation()
+        return query("cites", `${el.dataset.id ?? ""}:${el.dataset.col ?? ""}`)
+      case "close-panel":
+        return query("cites", "")
     }
+  },
+  key(ev) {
+    if (ev.key !== "Escape" || !model.address.q.has("cites")) return false
+    query("cites", "")
+    return true
   },
 }
 
-export default atlasLens
+export default lens

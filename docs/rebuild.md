@@ -58,7 +58,7 @@ It repeals every decision made only to avoid churn. Names are re-chosen:
 | `cv_variants` | `applications.cv_theme` | a theme, not a table |
 | `gym_problems` | fat `gym_reps` | a problem is a `(platform, slug)` |
 | `claims`, squads, snapshots | gone | campaign scaffolding with no reader |
-| `atlas_weights` command | `put` on `settings` | weights are a row |
+| `atlas_weights` command | `put` on `me` | weights are a row |
 | 13 positional op kinds | `put`, `drop`, `command` | one op grammar |
 | buddy-allocated number blocks | explicit application id sets | blocks were a v1 artefact |
 
@@ -97,7 +97,7 @@ One page, one wire session, lenses in the address:
 | `desk` | the board: applications ranked by `score_100`, then heat, filtered by band, stage, heat and search; keyboard movement; the scoreboard |
 | `focus` | one application: the raw listing, the composed CV through its overlays, the rail, events, its messages and contact, its corporation |
 | `world` | corporations and places as sortable sparse grids; every cell shows its `_on` and opens its citations; edits write through `put` |
-| `atlas` | places scored against the operator's own passports, languages and weights |
+| `atlas` | every country and city ordered for the person behind the account (`me`: citizenships, permits held, languages, the countries wanted or never wanted, weights over any figure of `places`); each figure shown as itself with its `_on` and citations; the order only sorts |
 | `outreach` | contacts and message threads, tied to corporations and applications |
 | `lanes` | gym (reps, target, streak) and net (observer runs, artifacts, posts, drafts) |
 | `account` | identities, factors, sessions, keys with masks, live leases with revoke, trusted hosts |
@@ -230,7 +230,14 @@ carry `deleted_at`. Ids and `applications.no` are never reused.
 ### `corpus` — resident
 
 `profiles` (`slug`, `name`, `headline`, `summary`, `narrative`,
-`narrative_private`), `items` (CV atoms; `profile_id` null = shared).
+`narrative_private`), `items` (CV atoms; `profile_id` null = shared),
+`me` (one row, the person's own: `citizenships`, `field`, `subfields`,
+`residence_id`, `regions`, `relocate`, work modes and employments, pay,
+availability, and the atlas's side, `work_permits`, `prefer`, `avoid`,
+`notes`, `weights` json over any figure of places; what the atlas orders
+by and what an agent drafting for the operator should know, in no key's
+hands without the corpus bit), `languages` (a row per ISO 639-1 code with
+its level).
 
 ### `desk` — resident
 
@@ -241,22 +248,21 @@ carry `deleted_at`. Ids and `applications.no` are never reused.
 | `batches` | `code`, `ordinal`, `kind`, `status`, `fire`, `target_size`, `queued_on`, `note` |
 | `cv_lineages` | per corporation: `corporation_id`, `generation`, `opened_on`, `rewrites_allowed`, `theme` |
 | `cv_overlays` | `application_id`, `item_id`, `lineage_id`, `mode`, `title`, `body`, `reason`, `generation` |
-| `settings` | one fat typed row per account: `gym_target`, `net_lane_url`, `citizenships`, `languages`, `field`, `w_energy`…`w_ease`, `goal_total`, `goal_on`, `goal_daily`, `heat_config` (json) |
+| `settings` | one fat typed row per account: `gym_target`, `net_lane_url`, `goal_total`, `goal_on`, `goal_daily`, `heat_config` (json) |
 
 No parsed listing columns. `keywords` is the kernel's extraction from
 `listing_raw`, written once at write time and versioned, and it is what
 the CV and coverage derivations read.
 
-### `world` — server-side; one resident projection
+### `world` — resident
 
 | Table | Notes |
 | --- | --- |
-| `places` | countries and cities, `kind` + self `country_id`; identity, demography, economy, liveability, energy, career (`mobility`, `language`, `tech`, `ease`, `work_permit`, `atlas_position` (u32, null = not charted), `atlas_labeled`); every figure a `metric`; prose `liveability`, `notes`; partial uniques for `iso2` and `geonames_id` |
+| `places` | countries and cities, `kind` + self `country_id`; identity, demography, economy, liveability, energy, career (`mobility`, `language`, `tech`, `ease`, `work_permit`); every figure a `metric`; prose `liveability`, `notes`; partial uniques for `iso2` and `geonames_id` |
 | `corporations` | `domain` natural key; identity, size, private and public economics, comp and reputation, hiring (`careers_url`, `ats`, `ats_tenant`, `remote_policy`), desk columns (`score_100`, `freshness`, `freshness_on`, `eng_urls`, `note`), prose `about`, `culture` |
 | `offices` | `corporation_id`, `place_id`, `kind`, `headcount` (metric), `opened_on`; unique triple |
 | `sources` | soft-delete; `url` natural key over live rows, at most 2,048 bytes (refused `type`, "a source URL is at most 2048 bytes", with `max`, before any parsing), its port absent, empty or ASCII digits up to 65535 (WHATWG); `host` server-derived, `publisher`, `title`, `kind`, `retrieved_at`, `doc` (long text); identity fixed once written; a cited source is tombstoned, never deleted |
 | `citations` | append-only, `server_only`: `table`, `row_id`, `column`, loose `source_id`, `value`, `as_of`, `actor`, loose `key_id`, `op_id`; indexes `(account_id, table, row_id, column, id desc)` and `(account_id, source_id)` |
-| `atlas` | **resident projection**, not stored: places rows with `atlas_position` set, only the columns the fit reads |
 
 `citations` is the only provenance authority. The newest citation for a
 cell is the source; the rest are history, series and undo. `trusted_hosts`
@@ -365,7 +371,7 @@ Kernel modules, one owner each:
 | `keywords.rs` | target words from `listing_raw`, and coverage by the composed CV |
 | `cv.rs` | a CV composed from items through the lineage's overlays |
 | `board.rs` | order, filter, select, search, keyboard geometry |
-| `atlas.rs` | route, language fit, seven parts, weighted fit, presets — the only copy |
+| `atlas.rs` | route, language match, the person's weighted figures ranked within kind, the order — the only copy |
 | `lanes.rs` | gym streak, pace, today; net counts |
 | `text.rs` | Unicode-safe normalising and folding every text reader shares |
 | `compose.rs` | the documents the focus lens and the MCP read |

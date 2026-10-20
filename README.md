@@ -49,7 +49,7 @@ One page, one wire session, the lens in the address:
 | desk | `/desk` | the board ranked by score, then heat; band, stage and heat filters; search; the scoreboard |
 | focus | `/focus/<no>` | one application: rail, score, coverage, the composed CV, the raw listing, events, messages, contact, corporation |
 | world | `/world/<table>` | corporations, places, offices and sources as sparse grids; each cell shows its as-of day and opens its citations |
-| atlas | `/atlas` | charted places scored against your passports, languages and weights |
+| atlas | `/atlas` | every country and city ordered for you (the `me` row: citizenships, permits, languages, the countries you want or never want, weights over any figure), shown as the figures themselves with their as-of days and citations |
 | outreach | `/outreach` | contacts and their threads; drafts only |
 | lanes | `/lanes/gym`, `/lanes/net` | practice reps and shipped work |
 | account | `/account` | ways in, factors, sessions, API keys with masks, live leases, trusted hosts, audit |

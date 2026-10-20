@@ -413,12 +413,10 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 
 /* ---------------------------------------------------------------- atlas and lanes */
 
-.weights { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
-.weights input[type="range"] { width: 120px; }
-.weights output { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
-.atlas-grid meter { width: 72px; height: 10px; vertical-align: middle; }
-.atlas-grid tr.route-citizen th { font-weight: 700; }
-.atlas-grid tr.route-unknown { color: var(--muted); }
+.weights { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; margin-bottom: 8px; }
+.atlas tr.avoided { color: var(--muted); }
+.atlas .tag.route-citizen, .atlas .tag.route-permit_held { color: var(--ok); border-color: var(--ok); }
+.atlas .tag.route-needs_permit { color: var(--warn); border-color: var(--warn); }
 
 .mask-picker { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .mask-picker fieldset[disabled] { opacity: 0.75; }
