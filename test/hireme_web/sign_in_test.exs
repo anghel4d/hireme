@@ -40,7 +40,10 @@ defmodule HiremeWeb.SignInTest do
 
   test "a remembered device outlives an hour idle and keeps its desk when it runs out; a plain sign-in ends at an hour, and a revoke always clears",
        %{conn: conn} do
-    newest = fn -> Enum.max_by(Hireme.Repo.all(Hireme.Rows.Session, skip_account: true), & &1.id) end
+    newest = fn ->
+      Enum.max_by(Hireme.Repo.all(Hireme.Rows.Session, skip_account: true), & &1.id)
+    end
+
     cleared? = &(get_resp_header(&1, "clear-site-data") != [])
 
     {kept, _} = email_sign_in(conn, "kept@example.com", %{"remember" => "1"})
