@@ -16,7 +16,9 @@ defmodule Mix.Tasks.Hireme.Schema do
     * `--migration NAME`: also write `priv/db/NNNN_NAME.sql`, the
       declaration minus the previous baseline (additive only; a destructive
       change is refused and written by hand as `NNNN_drop_<what>.sql`)
-    * `--renumber`: allow existing ids to move (before the cutover only)
+    * `--renumber`: allow existing ids to move: before the cutover, or with
+      `--migration` after it (wire_hash moves, so every client refreshes;
+      no stored row holds a column id)
     * `--freeze`: write `priv/db/baseline.lock`, the SHA-256 of the
       checked-in baseline. The cutover runs it once: from then on deployed
       databases hold that baseline, so a plain emit that would change it is
@@ -82,10 +84,10 @@ defmodule Mix.Tasks.Hireme.Schema do
   end
 
   defp write!(sql, ts, json, opts) do
-    # Ids are the wire's ABI: once a baseline is deployed they never move,
-    # so a reorder belongs before --freeze.
-    if opts[:renumber] && locked(),
-      do: Mix.raise("ids may not move once #{@lock} exists; a reorder belongs before --freeze")
+    # Ids are the wire's ABI: once a baseline is deployed they move only with
+    # the migration that ships the change.
+    if opts[:renumber] && locked() && !opts[:migration],
+      do: Mix.raise("ids may move once #{@lock} exists only with --migration NAME")
 
     guard_ids!(json, opts)
 

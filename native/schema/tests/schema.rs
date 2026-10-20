@@ -21,8 +21,8 @@ fn wire_hash_covers_what_a_client_is_compiled_against_and_schema_rev_everything(
     // columns after it. A server table (api_keys) never travels.
     let server = server_side(parse(&with("  col paused_at time ? readonly", "  metric probe_metric u32")).unwrap(), "a server table's metric");
     assert!(server.table("api_keys").unwrap().col("probe_metric_on").is_some());
-    server_side(parse(&with("  col cv_theme json ?", "  col probe_hidden str ? server_only")).unwrap(), "a server_only column never travels");
-    let hidden_enum = with("  col cv_theme json ?", "  col probe_hidden enum probe_kind ? server_only").replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1);
+    server_side(parse(&with("  col cv_version_id ref cv_versions ? readonly", "  col probe_hidden str ? server_only")).unwrap(), "a server_only column never travels");
+    let hidden_enum = with("  col cv_version_id ref cv_versions ? readonly", "  col probe_hidden enum probe_kind ? server_only").replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1);
     server_side(parse(&hidden_enum).unwrap(), "an enum only server_only columns use never travels");
     server_side(parse(&SOURCE.replacen("enum place_kind", "enum probe_kind a b\nenum place_kind", 1)).unwrap(), "an enum no wire table uses, inserted anywhere");
 

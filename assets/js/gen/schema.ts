@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x26fd;
-export const SCHEMA_REV = 0x933dcf36;
+export const WIRE_HASH = 0xc4e1;
+export const SCHEMA_REV = 0xfefcb339;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -19,7 +19,7 @@ export const AS_OF = 0xfff0;
 export const SOURCE = 0xfff1;
 export const FREE_PARAM = 0xfe00;
 
-export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst"] as const;
+export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst", "rule", "blob_missing"] as const;
 export type Refusal = (typeof REFUSAL)[number];
 export const VERB = ["put", "drop", "command"] as const;
 export type Verb = (typeof VERB)[number];
@@ -99,11 +99,15 @@ export const NET_KIND = ["observer", "artifact", "post", "draft"] as const;
 export type NetKind = (typeof NET_KIND)[number];
 export const NET_CHANNEL = ["broadside", "x", "other"] as const;
 export type NetChannel = (typeof NET_CHANNEL)[number];
-export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, message_channel: MESSAGE_CHANNEL, direction: DIRECTION, message_status: MESSAGE_STATUS, platform: PLATFORM, topic: TOPIC, difficulty: DIFFICULTY, rep_outcome: REP_OUTCOME, net_kind: NET_KIND, net_channel: NET_CHANNEL };
+export const CV_FORMAT = ["markdown", "pdf", "docx", "composed"] as const;
+export type CvFormat = (typeof CV_FORMAT)[number];
+export const LANGUAGE_LEVEL = ["a1", "a2", "b1", "b2", "c1", "c2", "native"] as const;
+export type LanguageLevel = (typeof LANGUAGE_LEVEL)[number];
+export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, message_channel: MESSAGE_CHANNEL, direction: DIRECTION, message_status: MESSAGE_STATUS, platform: PLATFORM, topic: TOPIC, difficulty: DIFFICULTY, rep_outcome: REP_OUTCOME, net_kind: NET_KIND, net_channel: NET_CHANNEL, cv_format: CV_FORMAT, language_level: LANGUAGE_LEVEL };
 
-export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, atlas: 22, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, gym_reps: 29, net_entries: 30, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40 } as const;
+export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, atlas: 22, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, gym_reps: 29, net_entries: 30, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47 } as const;
 export type TableName = keyof typeof TABLE_ID;
-export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, open_generation: 5 } as const;
+export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7 } as const;
 export type CommandName = keyof typeof COMMAND_ID;
 
 export interface ColumnDef {
@@ -134,12 +138,12 @@ const col = ([name, id, type, flags, target = null, def = null, metricOf = null,
 const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: readonly Packed[] } } = {
   "profiles": {"id":13,"name":"profiles","domain":"corpus","residency":"resident","cap":100,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["slug",8,"str",1],["name",9,"str",1],["headline",10,"str",0],["summary",11,"text",0],["narrative",12,"text",0],["narrative_private",13,"text",4]]},
   "items": {"id":14,"name":"items","domain":"corpus","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["profile_id",8,"ref",4096,"profiles"],["kind",9,"enum",1,"item_kind"],["key",10,"str",1],["title",11,"str",1],["body",12,"text",0],["org",13,"str",0],["span",14,"str",0],["position",15,"u32",1,null,"0"],["keywords",16,"str",0]]},
-  "applications": {"id":15,"name":"applications","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["canonical_url"],"global":false,"where":"canonical_url is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["no",8,"u32",97],["corporation_id",9,"ref",0,"corporations"],["place_id",10,"ref",0,"places"],["contact_id",11,"ref",0,"contacts"],["profile_id",12,"ref",0,"profiles"],["batch_id",13,"ref",0,"batches"],["company",14,"str",0],["role",15,"str",0],["location",16,"str",0],["work_mode",17,"enum",0,"work_mode"],["employment",18,"enum",0,"employment"],["comp_raw",19,"str",0],["channel",20,"enum",0,"app_channel"],["listing_raw",21,"text",0],["listing_format",22,"enum",0,"listing_format"],["listing_url",23,"str",0],["canonical_url",24,"str",2048],["listing_on",25,"day",0],["keywords",26,"str",32],["keywords_version",27,"u32",32],["source_id",28,"ref",0,"sources"],["stage",29,"enum",33,"stage","discovered"],["pips",30,"str",32],["stage_on",31,"day",32],["stage_notes",32,"json",0],["status",33,"enum",1,"app_status","open"],["gate",34,"enum",0,"gate"],["freshness",35,"enum",0,"freshness"],["heat_override",36,"bool",33,null,"false"],["heat_override_reason",37,"str",32],["score_100",38,"u8",0],["applied_on",39,"day",32],["replied_on",40,"day",32],["closed_on",41,"day",32],["outcome",42,"enum",0,"outcome"],["notes",43,"text",0],["battleplan",44,"text",0],["letter_raw",45,"text",0],["cv_theme",46,"json",0]]},
+  "applications": {"id":15,"name":"applications","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["canonical_url"],"global":false,"where":"canonical_url is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["no",8,"u32",97],["corporation_id",9,"ref",0,"corporations"],["place_id",10,"ref",0,"places"],["contact_id",11,"ref",0,"contacts"],["batch_id",12,"ref",0,"batches"],["company",13,"str",0],["role",14,"str",0],["location",15,"str",0],["work_mode",16,"enum",0,"work_mode"],["employment",17,"enum",0,"employment"],["comp_raw",18,"str",0],["channel",19,"enum",0,"app_channel"],["listing_raw",20,"text",0],["listing_format",21,"enum",0,"listing_format"],["listing_url",22,"str",0],["canonical_url",23,"str",2048],["listing_on",24,"day",0],["keywords",25,"str",32],["keywords_version",26,"u32",32],["source_id",27,"ref",0,"sources"],["stage",28,"enum",33,"stage","discovered"],["pips",29,"str",32],["stage_on",30,"day",32],["stage_notes",31,"json",0],["status",32,"enum",1,"app_status","open"],["gate",33,"enum",0,"gate"],["freshness",34,"enum",0,"freshness"],["heat_override",35,"bool",33,null,"false"],["heat_override_reason",36,"str",32],["score_100",37,"u8",0],["applied_on",38,"day",32],["replied_on",39,"day",32],["closed_on",40,"day",32],["outcome",41,"enum",0,"outcome"],["notes",42,"text",0],["battleplan",43,"text",0],["letter_raw",44,"text",0],["cv_theme",45,"json",0],["cv_root_id",46,"ref",32,"cv_roots"],["cv_pinned_by",47,"enum",32,"actor"],["cv_version_id",48,"ref",32,"cv_versions"]]},
   "events": {"id":16,"name":"events","domain":"desk","residency":"resident","cap":1000000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"str",1],["body",10,"text",0],["actor",11,"enum",33,"actor"],["key_id",12,"ref",16416,"api_keys"],["op_id",13,"i64",32]]},
   "batches": {"id":17,"name":"batches","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["code",8,"str",1],["ordinal",9,"u32",1],["kind",10,"enum",1,"batch_kind","day_pack"],["status",11,"enum",1,"batch_status","draft_prep"],["fire",12,"enum",17,"fire","hold"],["target_size",13,"u32",1,null,"55"],["queued_on",14,"day",0],["note",15,"text",0]]},
   "cv_lineages": {"id":18,"name":"cv_lineages","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["corporation_id",8,"ref",1,"corporations"],["generation",9,"u32",33,null,"1"],["opened_on",10,"day",33],["rewrites_allowed",11,"bool",1,null,"true"],["theme",12,"json",0]]},
   "cv_overlays": {"id":19,"name":"cv_overlays","domain":"desk","residency":"resident","cap":500000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["item_id",9,"ref",1,"items"],["lineage_id",10,"ref",0,"cv_lineages"],["mode",11,"enum",1,"overlay_mode"],["title",12,"str",0],["body",13,"text",0],["reason",14,"text",0],["generation",15,"u32",33,null,"1"]]},
-  "settings": {"id":20,"name":"settings","domain":"desk","residency":"resident","cap":1,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":true,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["gym_target",8,"u32",0],["net_lane_url",9,"str",0],["citizenships",10,"str",0],["languages",11,"str",0],["field",12,"str",0],["w_energy",13,"f64",0],["w_economy",14,"f64",0],["w_liveability",15,"f64",0],["w_mobility",16,"f64",0],["w_language",17,"f64",0],["w_tech",18,"f64",0],["w_ease",19,"f64",0],["goal_total",20,"u32",0],["goal_on",21,"day",0],["goal_daily",22,"u32",0],["heat_config",23,"json",0]]},
+  "settings": {"id":20,"name":"settings","domain":"desk","residency":"resident","cap":1,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":true,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["gym_target",8,"u32",0],["net_lane_url",9,"str",0],["goal_total",10,"u32",0],["goal_on",11,"day",0],["goal_daily",12,"u32",0],["heat_config",13,"json",0]]},
   "places": {"id":21,"name":"places","domain":"world","residency":"resident","cap":100000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["iso2"],"global":false,"where":"kind = 'country'"},{"cols":["geonames_id"],"global":false,"where":"kind = 'city'"},{"cols":["geonames_id"],"global":false,"where":"kind = 'state'"},{"cols":["geonames_id"],"global":false,"where":"kind = 'province'"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["kind",8,"enum",1,"place_kind",null,null,"identity"],["country_id",9,"ref",0,"places",null,null,"identity"],["iso2",10,"str",2048,null,null,null,"identity"],["iso3",11,"str",0,null,null,null,"identity"],["geonames_id",12,"u32",2048,null,null,null,"identity"],["name",13,"str",1,null,null,null,"identity"],["region",14,"str",0,null,null,null,"identity"],["subregion",15,"str",0,null,null,null,"identity"],["lat",16,"f64",0,null,null,null,"identity"],["lon",17,"f64",0,null,null,null,"identity"],["timezone",18,"str",0,null,null,null,"identity"],["currency",19,"str",0,null,null,null,"identity"],["population",20,"u32",128,null,null,null,"demography"],["population_on",21,"day",1056,null,null,"population","demography"],["area_km2",22,"f64",128,null,null,null,"demography"],["area_km2_on",23,"day",1056,null,null,"area_km2","demography"],["density_per_km2",24,"f64",128,null,null,null,"demography"],["density_per_km2_on",25,"day",1056,null,null,"density_per_km2","demography"],["median_age",26,"f64",128,null,null,null,"demography"],["median_age_on",27,"day",1056,null,null,"median_age","demography"],["urban_share",28,"f64",128,null,null,null,"demography"],["urban_share_on",29,"day",1056,null,null,"urban_share","demography"],["foreign_born_share",30,"f64",128,null,null,null,"demography"],["foreign_born_share_on",31,"day",1056,null,null,"foreign_born_share","demography"],["english_proficiency",32,"f64",128,null,null,null,"demography"],["english_proficiency_on",33,"day",1056,null,null,"english_proficiency","demography"],["gdp_usd",34,"f64",128,null,null,null,"economy"],["gdp_usd_on",35,"day",1056,null,null,"gdp_usd","economy"],["gdp_per_capita_usd",36,"f64",128,null,null,null,"economy"],["gdp_per_capita_usd_on",37,"day",1056,null,null,"gdp_per_capita_usd","economy"],["gdp_ppp_usd",38,"f64",128,null,null,null,"economy"],["gdp_ppp_usd_on",39,"day",1056,null,null,"gdp_ppp_usd","economy"],["gdp_per_capita_ppp_usd",40,"f64",128,null,null,null,"economy"],["gdp_per_capita_ppp_usd_on",41,"day",1056,null,null,"gdp_per_capita_ppp_usd","economy"],["gdp_growth",42,"f64",128,null,null,null,"economy"],["gdp_growth_on",43,"day",1056,null,null,"gdp_growth","economy"],["inflation",44,"f64",128,null,null,null,"economy"],["inflation_on",45,"day",1056,null,null,"inflation","economy"],["unemployment",46,"f64",128,null,null,null,"economy"],["unemployment_on",47,"day",1056,null,null,"unemployment","economy"],["median_income_usd",48,"f64",128,null,null,null,"economy"],["median_income_usd_on",49,"day",1056,null,null,"median_income_usd","economy"],["cost_of_living_index",50,"f64",128,null,null,null,"economy"],["cost_of_living_index_on",51,"day",1056,null,null,"cost_of_living_index","economy"],["rent_index",52,"f64",128,null,null,null,"economy"],["rent_index_on",53,"day",1056,null,null,"rent_index","economy"],["income_tax_top",54,"f64",128,null,null,null,"economy"],["income_tax_top_on",55,"day",1056,null,null,"income_tax_top","economy"],["qol_index",56,"f64",128,null,null,null,"liveability"],["qol_index_on",57,"day",1056,null,null,"qol_index","liveability"],["hdi",58,"f64",128,null,null,null,"liveability"],["hdi_on",59,"day",1056,null,null,"hdi","liveability"],["safety_index",60,"f64",128,null,null,null,"liveability"],["safety_index_on",61,"day",1056,null,null,"safety_index","liveability"],["healthcare_index",62,"f64",128,null,null,null,"liveability"],["healthcare_index_on",63,"day",1056,null,null,"healthcare_index","liveability"],["pollution_index",64,"f64",128,null,null,null,"liveability"],["pollution_index_on",65,"day",1056,null,null,"pollution_index","liveability"],["climate_index",66,"f64",128,null,null,null,"liveability"],["climate_index_on",67,"day",1056,null,null,"climate_index","liveability"],["internet_mbps",68,"f64",128,null,null,null,"liveability"],["internet_mbps_on",69,"day",1056,null,null,"internet_mbps","liveability"],["energy_consumption_twh",70,"f64",128,null,null,null,"energy"],["energy_consumption_twh_on",71,"day",1056,null,null,"energy_consumption_twh","energy"],["energy_production_twh",72,"f64",128,null,null,null,"energy"],["energy_production_twh_on",73,"day",1056,null,null,"energy_production_twh","energy"],["energy_consumption_per_capita_kwh",74,"f64",128,null,null,null,"energy"],["energy_consumption_per_capita_kwh_on",75,"day",1056,null,null,"energy_consumption_per_capita_kwh","energy"],["energy_production_per_capita_kwh",76,"f64",128,null,null,null,"energy"],["energy_production_per_capita_kwh_on",77,"day",1056,null,null,"energy_production_per_capita_kwh","energy"],["renewable_share",78,"f64",128,null,null,null,"energy"],["renewable_share_on",79,"day",1056,null,null,"renewable_share","energy"],["electricity_usd_kwh",80,"f64",128,null,null,null,"energy"],["electricity_usd_kwh_on",81,"day",1056,null,null,"electricity_usd_kwh","energy"],["co2_per_capita_t",82,"f64",128,null,null,null,"energy"],["co2_per_capita_t_on",83,"day",1056,null,null,"co2_per_capita_t","energy"],["swe_median_usd",84,"f64",128,null,null,null,"career"],["swe_median_usd_on",85,"day",1056,null,null,"swe_median_usd","career"],["tech_jobs",86,"u32",128,null,null,null,"career"],["tech_jobs_on",87,"day",1056,null,null,"tech_jobs","career"],["mobility",88,"f64",128,null,null,null,"career"],["mobility_on",89,"day",1056,null,null,"mobility","career"],["language",90,"str",0,null,null,null,"fit"],["tech",91,"f64",128,null,null,null,"fit"],["tech_on",92,"day",1056,null,null,"tech","fit"],["ease",93,"f64",128,null,null,null,"fit"],["ease_on",94,"day",1056,null,null,"ease","fit"],["work_permit",95,"str",0,null,null,null,"fit"],["atlas_position",96,"u32",0,null,null,null,"atlas"],["atlas_labeled",97,"bool",0,null,null,null,"atlas"],["liveability",98,"text",256,null,null,null,"prose"],["notes",99,"text",256,null,null,null,"prose"]]},
   "atlas": {"id":22,"name":"atlas","domain":"world","residency":"projection","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":"places","cols":[["id",1,"id",545],["kind",8,"enum",1,"place_kind",null,null,"identity"],["country_id",9,"ref",0,"places",null,null,"identity"],["iso2",10,"str",0,null,null,null,"identity"],["name",13,"str",1,null,null,null,"identity"],["atlas_position",96,"u32",0,null,null,null,"atlas"],["atlas_labeled",97,"bool",0,null,null,null,"atlas"],["gdp_per_capita_ppp_usd",40,"f64",128,null,null,null,"economy"],["qol_index",56,"f64",128,null,null,null,"liveability"],["energy_production_per_capita_kwh",76,"f64",128,null,null,null,"energy"],["energy_consumption_per_capita_kwh",74,"f64",128,null,null,null,"energy"],["mobility",88,"f64",128,null,null,null,"career"],["language",90,"str",0,null,null,null,"fit"],["tech",91,"f64",128,null,null,null,"fit"],["ease",93,"f64",128,null,null,null,"fit"],["work_permit",95,"str",0,null,null,null,"fit"]]},
   "corporations": {"id":23,"name":"corporations","domain":"world","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["domain"],"global":false,"where":null}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["domain",8,"str",2049,null,null,null,"identity"],["name",9,"str",1,null,null,null,"identity"],["legal_name",10,"str",0,null,null,null,"identity"],["hq_place_id",11,"ref",0,"places",null,null,"identity"],["parent_id",12,"ref",0,"corporations",null,null,"identity"],["founded_year",13,"u32",0,null,null,null,"identity"],["ownership",14,"enum",0,"ownership",null,null,"identity"],["ticker",15,"str",0,null,null,null,"identity"],["exchange",16,"str",0,null,null,null,"identity"],["industry",17,"str",0,null,null,null,"identity"],["sector",18,"str",0,null,null,null,"identity"],["linkedin_url",19,"str",0,null,null,null,"identity"],["headcount",20,"u32",128,null,null,null,"size"],["headcount_on",21,"day",1056,null,null,"headcount","size"],["engineers",22,"u32",128,null,null,null,"size"],["engineers_on",23,"day",1056,null,null,"engineers","size"],["headcount_growth",24,"f64",128,null,null,null,"size"],["headcount_growth_on",25,"day",1056,null,null,"headcount_growth","size"],["valuation_usd",26,"f64",128,null,null,null,"private economics"],["valuation_usd_on",27,"day",1056,null,null,"valuation_usd","private economics"],["total_raised_usd",28,"f64",128,null,null,null,"private economics"],["total_raised_usd_on",29,"day",1056,null,null,"total_raised_usd","private economics"],["last_round",30,"str",0,null,null,null,"private economics"],["last_round_on",31,"day",0,null,null,null,"private economics"],["market_cap_usd",32,"f64",128,null,null,null,"public economics"],["market_cap_usd_on",33,"day",1056,null,null,"market_cap_usd","public economics"],["revenue_usd",34,"f64",128,null,null,null,"public economics"],["revenue_usd_on",35,"day",1056,null,null,"revenue_usd","public economics"],["revenue_growth",36,"f64",128,null,null,null,"public economics"],["revenue_growth_on",37,"day",1056,null,null,"revenue_growth","public economics"],["profit_margin",38,"f64",128,null,null,null,"public economics"],["profit_margin_on",39,"day",1056,null,null,"profit_margin","public economics"],["pe_ratio",40,"f64",128,null,null,null,"public economics"],["pe_ratio_on",41,"day",1056,null,null,"pe_ratio","public economics"],["comp_median_usd",42,"f64",128,null,null,null,"comp and reputation"],["comp_median_usd_on",43,"day",1056,null,null,"comp_median_usd","comp and reputation"],["comp_swe_median_usd",44,"f64",128,null,null,null,"comp and reputation"],["comp_swe_median_usd_on",45,"day",1056,null,null,"comp_swe_median_usd","comp and reputation"],["rating",46,"f64",128,null,null,null,"comp and reputation"],["rating_on",47,"day",1056,null,null,"rating","comp and reputation"],["rating_count",48,"u32",128,null,null,null,"comp and reputation"],["rating_count_on",49,"day",1056,null,null,"rating_count","comp and reputation"],["wlb_rating",50,"f64",128,null,null,null,"comp and reputation"],["wlb_rating_on",51,"day",1056,null,null,"wlb_rating","comp and reputation"],["careers_url",52,"str",0,null,null,null,"hiring"],["ats",53,"str",0,null,null,null,"hiring"],["ats_tenant",54,"str",0,null,null,null,"hiring"],["remote_policy",55,"enum",0,"remote_policy",null,null,"hiring"],["score_100",56,"u8",0,null,null,null,"desk"],["freshness",57,"enum",0,"freshness",null,null,"desk"],["freshness_on",58,"day",0,null,null,null,"desk"],["eng_urls",59,"u32",0,null,null,null,"desk"],["note",60,"text",0,null,null,null,"desk"],["about",61,"text",256,null,null,null,"prose"],["culture",62,"text",256,null,null,null,"prose"]]},
@@ -160,15 +164,23 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "acct_factors": {"id":38,"name":"acct_factors","domain":"system","residency":"projection","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":"factors","cols":[["id",1,"id",545],["kind",8,"enum",1,"factor_kind"],["name",9,"str",0],["transports",16,"str",0],["backup_eligible",17,"bool",0],["backed_up",18,"bool",0],["verified_at",19,"time",0],["last_used_at",20,"time",0]]},
   "acct_audit": {"id":39,"name":"acct_audit","domain":"system","residency":"projection","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":"audit","cols":[["id",1,"id",545],["kind",8,"str",1],["ip",9,"str",0],["user_agent",10,"str",0],["meta",11,"json",0],["key_id",12,"ref",16384,"api_keys"],["session_id",13,"ref",16384,"sessions"],["security",14,"bool",33,null,"true"],["inserted_at",4,"time",545]]},
   "acct_info": {"id":40,"name":"acct_info","domain":"system","residency":"wire","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["name",1,"str",0],["status",2,"enum",1,"account_status"],["recovery_codes_left",3,"u32",1]]},
+  "me": {"id":41,"name":"me","domain":"corpus","residency":"resident","cap":1,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":true,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["citizenships",8,"str",0],["field",9,"str",0],["subfields",10,"str",0],["residence_id",11,"ref",0,"places"],["regions",12,"str",0],["relocate",13,"bool",0],["cv_default_root_id",14,"ref",0,"cv_roots"],["work_modes",15,"u32",0],["employments",16,"u32",0],["pay_floor",17,"u32",0],["pay_currency",18,"str",0],["available_on",19,"day",0],["notice_days",20,"u32",0],["w_energy",21,"f64",0],["w_economy",22,"f64",0],["w_liveability",23,"f64",0],["w_mobility",24,"f64",0],["w_language",25,"f64",0],["w_tech",26,"f64",0],["w_ease",27,"f64",0]]},
+  "languages": {"id":42,"name":"languages","domain":"corpus","residency":"resident","cap":200,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["code"],"global":false,"where":null}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["code",8,"str",2049],["level",9,"enum",1,"language_level"]]},
+  "cv_roots": {"id":43,"name":"cv_roots","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":true,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["deleted_at",6,"time",544],["slug",8,"str",1],["name",9,"str",1],["format",10,"enum",1,"cv_format"],["profile_id",11,"ref",0,"profiles"],["notes",12,"text",0],["version_id",13,"ref",32,"cv_versions"]]},
+  "cv_versions": {"id":44,"name":"cv_versions","domain":"corpus","residency":"resident","cap":100000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["root_id",8,"ref",1,"cv_roots"],["n",9,"u32",33],["body",10,"text",0],["blob_sha",11,"str",0],["blob_name",12,"str",0],["blob_type",13,"str",32],["blob_bytes",14,"u32",32],["text",15,"text",32],["note",16,"str",0],["actor",17,"enum",33,"actor"],["key_id",18,"ref",16416,"api_keys"]]},
+  "cv_masks": {"id":46,"name":"cv_masks","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["name",8,"str",1],["pattern",9,"text",1],["note",10,"str",0]]},
+  "cv_rules": {"id":47,"name":"cv_rules","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["position",8,"u32",1,null,"0"],["root_id",9,"ref",1,"cv_roots"],["name",10,"str",0],["pattern",11,"text",1],["enabled",12,"bool",1,null,"true"]]},
 };
 export const TABLES = /* @__PURE__ */ Object.fromEntries(/* @__PURE__ */ Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };
 
 export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {
-  "stage": {"id":1,"name":"stage","table":"applications","humanOnly":false,"params":[{"name":"stage","id":29,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"stage"},{"name":"note","id":65025,"type":"text","typeCode":12,"wire":2,"required":false,"column":false,"ref":null,"enum":null}]},
-  "note": {"id":2,"name":"note","table":"applications","humanOnly":false,"params":[{"name":"stage","id":29,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"stage"},{"name":"body","id":65025,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
+  "stage": {"id":1,"name":"stage","table":"applications","humanOnly":false,"params":[{"name":"stage","id":28,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"stage"},{"name":"note","id":65025,"type":"text","typeCode":12,"wire":2,"required":false,"column":false,"ref":null,"enum":null}]},
+  "note": {"id":2,"name":"note","table":"applications","humanOnly":false,"params":[{"name":"stage","id":28,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"stage"},{"name":"body","id":65025,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
   "heat_override": {"id":3,"name":"heat_override","table":"applications","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
   "open_fire": {"id":4,"name":"open_fire","table":"applications","humanOnly":true,"params":[]},
-  "open_generation": {"id":5,"name":"open_generation","table":"cv_lineages","humanOnly":false,"params":[{"name":"corporation_id","id":8,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"corporations","enum":null}]},
+  "pick_cv": {"id":5,"name":"pick_cv","table":"applications","humanOnly":false,"params":[{"name":"cv_root_id","id":46,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"cv_roots","enum":null}]},
+  "unpin_cv": {"id":6,"name":"unpin_cv","table":"applications","humanOnly":false,"params":[]},
+  "open_generation": {"id":7,"name":"open_generation","table":"cv_lineages","humanOnly":false,"params":[{"name":"corporation_id","id":8,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"corporations","enum":null}]},
 };
 
 /** `accounts`: server-side. */
@@ -380,7 +392,6 @@ export interface Application {
   corporation_id: number | null;
   place_id: number | null;
   contact_id: number | null;
-  profile_id: number | null;
   batch_id: number | null;
   company: string | null;
   role: string | null;
@@ -415,6 +426,9 @@ export interface Application {
   battleplan: string | null;
   letter_raw: string | null;
   cv_theme: unknown | null;
+  cv_root_id: number | null;
+  cv_pinned_by: Actor | null;
+  cv_version_id: number | null;
 }
 /** `events`: resident. */
 export interface Event {
@@ -484,16 +498,6 @@ export interface Setting {
   updated_at: number;
   gym_target: number | null;
   net_lane_url: string | null;
-  citizenships: string | null;
-  languages: string | null;
-  field: string | null;
-  w_energy: number | null;
-  w_economy: number | null;
-  w_liveability: number | null;
-  w_mobility: number | null;
-  w_language: number | null;
-  w_tech: number | null;
-  w_ease: number | null;
   goal_total: number | null;
   goal_on: number | null;
   goal_daily: number | null;
@@ -890,4 +894,111 @@ export interface AcctInfo {
   name: string | null;
   status: AccountStatus;
   recovery_codes_left: number;
+}
+/** `me`: resident. */
+export interface Me {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  citizenships: string | null;
+  field: string | null;
+  subfields: string | null;
+  residence_id: number | null;
+  regions: string | null;
+  relocate: boolean | null;
+  cv_default_root_id: number | null;
+  work_modes: number | null;
+  employments: number | null;
+  pay_floor: number | null;
+  pay_currency: string | null;
+  available_on: number | null;
+  notice_days: number | null;
+  w_energy: number | null;
+  w_economy: number | null;
+  w_liveability: number | null;
+  w_mobility: number | null;
+  w_language: number | null;
+  w_tech: number | null;
+  w_ease: number | null;
+}
+/** `languages`: resident. */
+export interface Language {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  code: string;
+  level: LanguageLevel;
+}
+/** `cv_roots`: resident. */
+export interface CvRoot {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  deleted_at: number | null;
+  slug: string;
+  name: string;
+  format: CvFormat;
+  profile_id: number | null;
+  notes: string | null;
+  version_id: number | null;
+}
+/** `cv_versions`: resident. */
+export interface CvVersion {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  root_id: number;
+  n: number;
+  body: string | null;
+  blob_sha: string | null;
+  blob_name: string | null;
+  blob_type: string | null;
+  blob_bytes: number | null;
+  text: string | null;
+  note: string | null;
+  actor: Actor;
+  key_id: number | null;
+}
+/** `blobs`: server-side. */
+export interface Blob {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  sha: string;
+  type: string;
+  bytes: number;
+}
+/** `cv_masks`: resident. */
+export interface CvMask {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  name: string;
+  pattern: string;
+  note: string | null;
+}
+/** `cv_rules`: resident. */
+export interface CvRule {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  position: number;
+  root_id: number;
+  name: string | null;
+  pattern: string;
+  enabled: boolean;
 }

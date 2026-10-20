@@ -25,7 +25,7 @@ defmodule Hireme.SequencerTest do
 
   defp count(queryable), do: Repo.aggregate(queryable, :count)
 
-  test "ACKs: an insert is rev 1, an update rev 2, the account rev counts both; settings is one row; a restatement or a no-op command moves no rev; a resend is answered from the ledger",
+  test "ACKs: an insert is rev 1, an update rev 2, the account rev counts both; a singleton (me) is one row; a restatement or a no-op command moves no rev; a resend is answered from the ledger",
        %{account: a} do
     {[ack], []} = run(a.id, op(:put, :corporations, %{domain: "example.com", name: "Example"}))
     assert ack.rev == 1 and ack.id > 0
@@ -34,10 +34,10 @@ defmodule Hireme.SequencerTest do
     assert Repo.get!(Corporation, ack.id).name == "Example Inc"
     assert rev(a.id) == a.desk_rev + 2
 
-    {[s1], []} = run(a.id, op(:put, :settings, %{citizenships: "pt"}))
-    {[s2], []} = run(a.id, op(:put, :settings, %{citizenships: "de"}))
+    {[s1], []} = run(a.id, op(:put, :me, %{citizenships: "pt"}))
+    {[s2], []} = run(a.id, op(:put, :me, %{citizenships: "de"}))
     assert s2.id == s1.id and s2.rev == s1.rev + 1
-    assert [%{citizenships: "de"}] = Repo.all(Hireme.Rows.Setting)
+    assert [%{citizenships: "de"}] = Repo.all(Hireme.Rows.Me)
 
     listing = String.duplicate("Rust systems, kernels and GPU runtimes. ", 400)
 
@@ -523,7 +523,7 @@ defmodule Hireme.SequencerTest do
             op(:put, :net_entries, %{kind: :post, title: s})
 
           {:settings, c} ->
-            op(:put, :settings, %{citizenships: c})
+            op(:put, :me, %{citizenships: c})
 
           {:place, s, pos} ->
             op(:put, :places, %{kind: :city, name: s, atlas_position: pos})

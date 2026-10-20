@@ -250,7 +250,6 @@ CREATE TABLE "applications" (
   "corporation_id" INTEGER REFERENCES "corporations"("id") ON DELETE SET NULL,
   "place_id" INTEGER REFERENCES "places"("id") ON DELETE SET NULL,
   "contact_id" INTEGER REFERENCES "contacts"("id") ON DELETE SET NULL,
-  "profile_id" INTEGER REFERENCES "profiles"("id") ON DELETE SET NULL,
   "batch_id" INTEGER REFERENCES "batches"("id") ON DELETE SET NULL,
   "company" TEXT,
   "role" TEXT,
@@ -284,7 +283,10 @@ CREATE TABLE "applications" (
   "notes" TEXT,
   "battleplan" TEXT,
   "letter_raw" TEXT,
-  "cv_theme" TEXT
+  "cv_theme" TEXT,
+  "cv_root_id" INTEGER REFERENCES "cv_roots"("id") ON DELETE SET NULL,
+  "cv_pinned_by" TEXT,
+  "cv_version_id" INTEGER REFERENCES "cv_versions"("id") ON DELETE SET NULL
 ) STRICT;
 CREATE INDEX "applications__account_account_id" ON "applications" ("account_id");
 CREATE UNIQUE INDEX "applications__natural_canonical_url" ON "applications" ("account_id", "canonical_url") WHERE canonical_url is not null;
@@ -298,12 +300,14 @@ CREATE TRIGGER "applications__ref_place_id_insert" BEFORE INSERT ON "application
 CREATE TRIGGER "applications__ref_place_id_update" BEFORE UPDATE OF "place_id", "account_id" ON "applications" WHEN NEW."place_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."place_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.place_id'); END;
 CREATE TRIGGER "applications__ref_contact_id_insert" BEFORE INSERT ON "applications" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.contact_id'); END;
 CREATE TRIGGER "applications__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "applications" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.contact_id'); END;
-CREATE TRIGGER "applications__ref_profile_id_insert" BEFORE INSERT ON "applications" WHEN NEW."profile_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "profiles" WHERE "id" = NEW."profile_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.profile_id'); END;
-CREATE TRIGGER "applications__ref_profile_id_update" BEFORE UPDATE OF "profile_id", "account_id" ON "applications" WHEN NEW."profile_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "profiles" WHERE "id" = NEW."profile_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.profile_id'); END;
 CREATE TRIGGER "applications__ref_batch_id_insert" BEFORE INSERT ON "applications" WHEN NEW."batch_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "batches" WHERE "id" = NEW."batch_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.batch_id'); END;
 CREATE TRIGGER "applications__ref_batch_id_update" BEFORE UPDATE OF "batch_id", "account_id" ON "applications" WHEN NEW."batch_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "batches" WHERE "id" = NEW."batch_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.batch_id'); END;
 CREATE TRIGGER "applications__ref_source_id_insert" BEFORE INSERT ON "applications" WHEN NEW."source_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sources" WHERE "id" = NEW."source_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.source_id'); END;
 CREATE TRIGGER "applications__ref_source_id_update" BEFORE UPDATE OF "source_id", "account_id" ON "applications" WHEN NEW."source_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "sources" WHERE "id" = NEW."source_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.source_id'); END;
+CREATE TRIGGER "applications__ref_cv_root_id_insert" BEFORE INSERT ON "applications" WHEN NEW."cv_root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."cv_root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.cv_root_id'); END;
+CREATE TRIGGER "applications__ref_cv_root_id_update" BEFORE UPDATE OF "cv_root_id", "account_id" ON "applications" WHEN NEW."cv_root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."cv_root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.cv_root_id'); END;
+CREATE TRIGGER "applications__ref_cv_version_id_insert" BEFORE INSERT ON "applications" WHEN NEW."cv_version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."cv_version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.cv_version_id'); END;
+CREATE TRIGGER "applications__ref_cv_version_id_update" BEFORE UPDATE OF "cv_version_id", "account_id" ON "applications" WHEN NEW."cv_version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."cv_version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref applications.cv_version_id'); END;
 
 CREATE TABLE "events" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,16 +394,6 @@ CREATE TABLE "settings" (
   "updated_at" TEXT NOT NULL,
   "gym_target" INTEGER,
   "net_lane_url" TEXT,
-  "citizenships" TEXT,
-  "languages" TEXT,
-  "field" TEXT,
-  "w_energy" REAL,
-  "w_economy" REAL,
-  "w_liveability" REAL,
-  "w_mobility" REAL,
-  "w_language" REAL,
-  "w_tech" REAL,
-  "w_ease" REAL,
   "goal_total" INTEGER,
   "goal_on" TEXT,
   "goal_daily" INTEGER,
@@ -741,3 +735,137 @@ CREATE TABLE "net_entries" (
 ) STRICT;
 CREATE INDEX "net_entries__account_account_id" ON "net_entries" ("account_id");
 CREATE INDEX "net_entries__index_shipped_on" ON "net_entries" ("account_id", "shipped_on");
+
+CREATE TABLE "me" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "citizenships" TEXT,
+  "field" TEXT,
+  "subfields" TEXT,
+  "residence_id" INTEGER REFERENCES "places"("id") ON DELETE SET NULL,
+  "regions" TEXT,
+  "relocate" INTEGER,
+  "cv_default_root_id" INTEGER REFERENCES "cv_roots"("id") ON DELETE SET NULL,
+  "work_modes" INTEGER,
+  "employments" INTEGER,
+  "pay_floor" INTEGER,
+  "pay_currency" TEXT,
+  "available_on" TEXT,
+  "notice_days" INTEGER,
+  "w_energy" REAL,
+  "w_economy" REAL,
+  "w_liveability" REAL,
+  "w_mobility" REAL,
+  "w_language" REAL,
+  "w_tech" REAL,
+  "w_ease" REAL
+) STRICT;
+CREATE UNIQUE INDEX "me__single_account_id" ON "me" ("account_id");
+CREATE TRIGGER "me__ref_residence_id_insert" BEFORE INSERT ON "me" WHEN NEW."residence_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."residence_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref me.residence_id'); END;
+CREATE TRIGGER "me__ref_residence_id_update" BEFORE UPDATE OF "residence_id", "account_id" ON "me" WHEN NEW."residence_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."residence_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref me.residence_id'); END;
+CREATE TRIGGER "me__ref_cv_default_root_id_insert" BEFORE INSERT ON "me" WHEN NEW."cv_default_root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."cv_default_root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref me.cv_default_root_id'); END;
+CREATE TRIGGER "me__ref_cv_default_root_id_update" BEFORE UPDATE OF "cv_default_root_id", "account_id" ON "me" WHEN NEW."cv_default_root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."cv_default_root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref me.cv_default_root_id'); END;
+
+CREATE TABLE "languages" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "code" TEXT NOT NULL,
+  "level" TEXT NOT NULL
+) STRICT;
+CREATE INDEX "languages__account_account_id" ON "languages" ("account_id");
+CREATE UNIQUE INDEX "languages__natural_code" ON "languages" ("account_id", "code");
+
+CREATE TABLE "cv_roots" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  "slug" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "format" TEXT NOT NULL,
+  "profile_id" INTEGER REFERENCES "profiles"("id") ON DELETE SET NULL,
+  "notes" TEXT,
+  "version_id" INTEGER REFERENCES "cv_versions"("id") ON DELETE SET NULL
+) STRICT;
+CREATE INDEX "cv_roots__account_account_id" ON "cv_roots" ("account_id");
+CREATE UNIQUE INDEX "cv_roots__unique_slug" ON "cv_roots" ("account_id", "slug") WHERE "deleted_at" IS NULL;
+CREATE TRIGGER "cv_roots__ref_profile_id_insert" BEFORE INSERT ON "cv_roots" WHEN NEW."profile_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "profiles" WHERE "id" = NEW."profile_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_roots.profile_id'); END;
+CREATE TRIGGER "cv_roots__ref_profile_id_update" BEFORE UPDATE OF "profile_id", "account_id" ON "cv_roots" WHEN NEW."profile_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "profiles" WHERE "id" = NEW."profile_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_roots.profile_id'); END;
+CREATE TRIGGER "cv_roots__ref_version_id_insert" BEFORE INSERT ON "cv_roots" WHEN NEW."version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_roots.version_id'); END;
+CREATE TRIGGER "cv_roots__ref_version_id_update" BEFORE UPDATE OF "version_id", "account_id" ON "cv_roots" WHEN NEW."version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_roots.version_id'); END;
+
+CREATE TABLE "cv_versions" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "root_id" INTEGER NOT NULL REFERENCES "cv_roots"("id") ON DELETE CASCADE,
+  "n" INTEGER NOT NULL,
+  "body" TEXT,
+  "blob_sha" TEXT,
+  "blob_name" TEXT,
+  "blob_type" TEXT,
+  "blob_bytes" INTEGER,
+  "text" TEXT,
+  "note" TEXT,
+  "actor" TEXT NOT NULL,
+  "key_id" INTEGER
+) STRICT;
+CREATE INDEX "cv_versions__account_account_id" ON "cv_versions" ("account_id");
+CREATE INDEX "cv_versions__index_root_id_id_desc" ON "cv_versions" ("account_id", "root_id", "id" DESC);
+CREATE TRIGGER "cv_versions__ref_root_id_insert" BEFORE INSERT ON "cv_versions" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_versions.root_id'); END;
+CREATE TRIGGER "cv_versions__ref_root_id_update" BEFORE UPDATE OF "root_id", "account_id" ON "cv_versions" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_versions.root_id'); END;
+
+CREATE TABLE "blobs" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "sha" TEXT NOT NULL,
+  "type" TEXT NOT NULL,
+  "bytes" INTEGER NOT NULL,
+  "data" BLOB NOT NULL,
+  "text" TEXT
+) STRICT;
+CREATE INDEX "blobs__account_account_id" ON "blobs" ("account_id");
+CREATE UNIQUE INDEX "blobs__unique_sha" ON "blobs" ("account_id", "sha");
+
+CREATE TABLE "cv_masks" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "pattern" TEXT NOT NULL,
+  "note" TEXT
+) STRICT;
+CREATE INDEX "cv_masks__account_account_id" ON "cv_masks" ("account_id");
+CREATE UNIQUE INDEX "cv_masks__unique_name" ON "cv_masks" ("account_id", "name");
+
+CREATE TABLE "cv_rules" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "position" INTEGER NOT NULL DEFAULT 0,
+  "root_id" INTEGER NOT NULL REFERENCES "cv_roots"("id") ON DELETE CASCADE,
+  "name" TEXT,
+  "pattern" TEXT NOT NULL,
+  "enabled" INTEGER NOT NULL DEFAULT 1
+) STRICT;
+CREATE INDEX "cv_rules__account_account_id" ON "cv_rules" ("account_id");
+CREATE INDEX "cv_rules__index_position" ON "cv_rules" ("account_id", "position");
+CREATE TRIGGER "cv_rules__ref_root_id_insert" BEFORE INSERT ON "cv_rules" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_rules.root_id'); END;
+CREATE TRIGGER "cv_rules__ref_root_id_update" BEFORE UPDATE OF "root_id", "account_id" ON "cv_rules" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_rules.root_id'); END;

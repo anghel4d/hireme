@@ -35,6 +35,8 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("cap", "limits", "the table is full for this account", "The table's row cap is reached (data: cap). Drop rows that no longer matter, or ask the operator."),
     ("internal", "limits", "the server failed", "Nothing was written. Retry once; if it repeats, tell the operator with the op_id."),
     ("burst", "limits", "another op of this atomic burst was refused", "A bulk contract's burst lands whole or not at all: nothing of it was written. Fix the ops refused for their own reasons and send the burst again."),
+    ("rule", "domain", "the CV pattern does not parse or check", "The data names the byte offset (at) and what is wrong there. Fix the pattern at that offset; a named mask must exist and may not form a cycle."),
+    ("blob_missing", "domain", "no file with this hash", "Upload the file first (cv_upload), then put the version with the blob_sha it answered."),
 ];
 
 pub fn names() -> impl Iterator<Item = &'static str> {

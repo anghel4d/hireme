@@ -106,7 +106,7 @@ frame REPLY 34
 
 # ---------------------------------------------------------------- enums
 
-enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal burst
+enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal burst rule blob_missing
 
 carry refusal bye verb
 
@@ -156,6 +156,8 @@ enum difficulty easy medium hard unknown
 enum rep_outcome solved attempt skip
 enum net_kind observer artifact post draft
 enum net_channel broadside x other
+enum cv_format markdown pdf docx composed
+enum language_level a1 a2 b1 b2 c1 c2 native
 
 # ---------------------------------------------------------------- system
 
@@ -351,7 +353,6 @@ table applications desk resident
   col corporation_id ref corporations ?
   col place_id ref places ?
   col contact_id ref contacts ?
-  col profile_id ref profiles ?
   col batch_id ref batches ?
   col company str ?
   col role str ?
@@ -394,6 +395,13 @@ table applications desk resident
   command note stage body:text
   command heat_override reason:str
   command open_fire human_only
+  # The CV it goes out with: a pin by the operator or an agent (pick_cv) over
+  # the rules' pick, and the version frozen as it is submitted.
+  col cv_root_id ref cv_roots ? readonly
+  col cv_pinned_by enum actor ? readonly
+  col cv_version_id ref cv_versions ? readonly
+  command pick_cv cv_root_id
+  command unpin_cv
 
 table events desk resident append_only
   cap 1000000
@@ -443,17 +451,6 @@ table settings desk resident singleton
   cap 1
   col gym_target u32 ?
   col net_lane_url str ?
-  # U+001F-joined ISO 3166-1 alpha-2 and ISO 639-1 codes.
-  col citizenships str ?
-  col languages str ?
-  col field str ?
-  col w_energy f64 ?
-  col w_economy f64 ?
-  col w_liveability f64 ?
-  col w_mobility f64 ?
-  col w_language f64 ?
-  col w_tech f64 ?
-  col w_ease f64 ?
   col goal_total u32 ?
   col goal_on day ?
   col goal_daily u32 ?
@@ -750,3 +747,103 @@ table acct_info system wire
   col name str ?
   col status enum account_status !
   col recovery_codes_left u32 !
+
+# ---------------------------------------------------------------- me and CVs
+
+# The person, one row: everything person-specific (settings keeps the app's own knobs).
+table me corpus resident singleton
+  cap 1
+  # U+001F-joined ISO 3166-1 alpha-2.
+  col citizenships str ?
+  col field str ?
+  # U+001F-joined words under field.
+  col subfields str ?
+  # Where the person lives; a pattern reads me.residence, the place's ISO2.
+  col residence_id ref places ?
+  # U+001F-joined ISO 3166-1 alpha-2 or ISO 3166-2 codes.
+  col regions str ?
+  col relocate bool ?
+  # The root an application gets when no rule matches.
+  col cv_default_root_id ref cv_roots ?
+  # Sets: bit 1 << code per work_mode, per employment.
+  col work_modes u32 ?
+  col employments u32 ?
+  # A year's pay, in pay_currency (ISO 4217).
+  col pay_floor u32 ?
+  col pay_currency str ?
+  col available_on day ?
+  col notice_days u32 ?
+  col w_energy f64 ?
+  col w_economy f64 ?
+  col w_liveability f64 ?
+  col w_mobility f64 ?
+  col w_language f64 ?
+  col w_tech f64 ?
+  col w_ease f64 ?
+
+# The languages the person speaks, a row each (ISO 639-1).
+table languages corpus resident
+  natural code
+  cap 200
+  col code str !
+  col level enum language_level !
+
+# A CV the operator keeps: a file lineage (markdown, pdf, docx) or a profile's
+# items composed.
+table cv_roots corpus resident soft_delete
+  cap 1000
+  unique slug
+  col slug str !
+  col name str !
+  col format enum cv_format !
+  col profile_id ref profiles ?
+  col notes text ?
+  # Its newest version, set by the server as one lands; null while it has none.
+  col version_id ref cv_versions ? readonly
+
+# Each edit or upload of a root, never changed: markdown in body, a file by its
+# blob's SHA-256 (hex); text is what the server read from it.
+table cv_versions corpus resident append_only
+  cap 100000
+  index root_id id desc
+  col root_id ref cv_roots !
+  col n u32 ! readonly
+  col body text ?
+  col blob_sha str ?
+  col blob_name str ?
+  col blob_type str ? readonly
+  col blob_bytes u32 ? readonly
+  col text text ? readonly
+  col note str ?
+  col actor enum actor ! readonly
+  col key_id ref api_keys ? readonly loose
+
+# A file's bytes by SHA-256, served over HTTP (/blobs/<sha>), never on the wire.
+table blobs corpus server
+  cap 1000
+  unique sha
+  col sha str !
+  col type str !
+  col bytes u32 !
+  col data bytes ! server_only
+  # What extraction read from it, once, at upload.
+  col text text ? server_only
+
+# Named patterns a rule (or another mask) names.
+table cv_masks corpus resident
+  cap 1000
+  unique name
+  col name str !
+  col pattern text !
+  col note str ?
+
+# One ordered match by (position, id): the first enabled rule whose pattern
+# holds picks its root.
+table cv_rules corpus resident
+  cap 1000
+  index position
+  col position u32 ! = 0
+  col root_id ref cv_roots !
+  col name str ?
+  col pattern text !
+  col enabled bool ! = true
