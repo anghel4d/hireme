@@ -1,6 +1,6 @@
 //! The documents the focus lens and the MCP read, as JSON: one
-//! application with everything derived about it, the desk overview, the
-//! atlas and the lanes. A document is a pure function of the resident
+//! application with everything derived about it, the desk overview and
+//! the atlas. A document is a pure function of the resident
 //! rows and `today`; the browser and `hireme-mcp` render the same one.
 //!
 //! Text the operator or an agent wrote is returned as written, whole;
@@ -16,7 +16,6 @@ use serde_json::{json, Value as Json};
 use crate::atlas::{self, Me, Place};
 use crate::board::{self, Board};
 use crate::cv::{self, Item, Overlay, Theme};
-use crate::lanes::{self, NetKind, RepOutcome};
 use crate::pipeline::{self, Stage, STAGES};
 use crate::rows::{Rows, Table};
 use crate::{keywords, Day};
@@ -209,7 +208,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
     (cv::compose(profile, &items, &overlays), theme)
 }
 
-/// The desk at a glance: the scoreboard, the lanes, the top of the board.
+/// The desk at a glance: the scoreboard and the top of the board.
 pub fn overview(rows: &Rows, board: &Board, today: Day, top: usize) -> Json {
     let apps = rows.table(table::APPLICATIONS);
     let head: Vec<Json> = board
@@ -228,23 +227,8 @@ pub fn overview(rows: &Rows, board: &Board, today: Day, top: usize) -> Json {
     json!({
         "today": crate::day_iso(today),
         "scoreboard": board.scoreboard(rows, today).to_json(),
-        "lanes": lanes_doc(rows, today),
         "top": head,
     })
-}
-
-/// The gym and net lanes.
-pub fn lanes_doc(rows: &Rows, today: Day) -> Json {
-    let target = board::settings(rows).and_then(|(t, id)| t.u32(id, col::settings::GYM_TARGET));
-    let reps: Vec<(Day, RepOutcome)> = rows
-        .each(table::GYM_REPS)
-        .filter_map(|(t, id)| Some((t.u32(id, col::gym_reps::DONE_ON)? as Day, RepOutcome::from_u32(t.u32(id, col::gym_reps::OUTCOME).unwrap_or(0))?)))
-        .collect();
-    let entries: Vec<(NetKind, Option<Day>)> = rows
-        .each(table::NET_ENTRIES)
-        .filter_map(|(t, id)| Some((NetKind::from_u32(t.u32(id, col::net_entries::KIND)?)?, t.u32(id, col::net_entries::SHIPPED_ON).map(|d| d as Day))))
-        .collect();
-    json!({"gym": lanes::gym(reps, target, today).to_json(), "net": lanes::net(entries, today).to_json()})
 }
 
 /// The person's side of the fit: their lists (the languages from their

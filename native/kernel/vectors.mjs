@@ -69,7 +69,6 @@ for (const kase of file.cases) {
     } else if (step.doc) {
       let n;
       if (step.doc === "atlas") n = x.atlas();
-      else if (step.doc === "lanes") n = x.lanes();
       else if (step.doc === "overview") n = x.overview(10);
       else if (step.doc === "application") n = x.application(step.arg);
       err = n < 0 ? `${at}: no document` : holds(step.expect, JSON.parse(out(n)), at);

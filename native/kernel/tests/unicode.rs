@@ -203,7 +203,7 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
             for id in 1..=n as u32 {
                 let _ = k.application(id);
             }
-            let _ = (k.overview(10), k.atlas(), k.lanes(), k.board_ids(None));
+            let _ = (k.overview(10), k.atlas(), k.board_ids(None));
             let ctx = Ctx { today: TODAY, now: 0, human: false, key_id: Some(1), held: &[] };
             for id in 1..=4u32 {
                 let mut ow = wire::OpsWriter::new();

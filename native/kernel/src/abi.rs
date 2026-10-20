@@ -299,10 +299,6 @@ impl Kernel {
         compose::atlas_doc(&self.rows)
     }
 
-    pub fn lanes(&self) -> Json {
-        compose::lanes_doc(&self.rows, self.today())
-    }
-
     /// The base rows for a cold start: `u64 rev | u32 schema_rev | u16
     /// wire_hash | u16 0 | BOOT body`.
     pub fn snapshot(&self) -> Vec<u8> {
@@ -681,11 +677,6 @@ mod exports {
     #[unsafe(no_mangle)]
     pub extern "C" fn atlas() -> i32 {
         K.with(|k| put_json(&k.borrow().atlas()))
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn lanes() -> i32 {
-        K.with(|k| put_json(&k.borrow().lanes()))
     }
 
     #[unsafe(no_mangle)]

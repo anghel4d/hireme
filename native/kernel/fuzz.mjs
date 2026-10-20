@@ -67,7 +67,6 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     for (let id = 1; id <= n; id++) x.application(id);
     x.overview(10);
     x.atlas();
-    x.lanes();
     const ctx = enc.encode(JSON.stringify({ today: TODAY, now: 0, human: false, key_id: 1, held: [] }));
     for (let id = 1; id <= 4; id++) {
       const put = op(catalog, { put: "applications", target: id, cells: { listing_raw: text(40), comp_raw: text(6), company: text(6) } }, BigInt(id));

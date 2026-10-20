@@ -22,7 +22,6 @@ pub mod cv;
 pub mod heat;
 pub mod judge;
 pub mod keywords;
-pub mod lanes;
 pub mod lexicon;
 pub mod mask;
 pub mod org;
@@ -360,9 +359,5 @@ mod tests {
         assert_eq!(bands, enums::band::NAMES);
         let modes: Vec<&str> = (0..3).map(|i| crate::cv::Mode::from_u32(i).unwrap().name()).collect();
         assert_eq!(modes, enums::overlay_mode::NAMES);
-        let kinds: Vec<&str> = crate::lanes::NetKind::ALL.iter().map(|k| k.name()).collect();
-        assert_eq!(kinds, enums::net_kind::NAMES);
-        assert_eq!(enums::rep_outcome::SKIP, crate::lanes::RepOutcome::Skip as u8);
-        assert_eq!(enums::rep_outcome::ATTEMPT, crate::lanes::RepOutcome::Attempt as u8);
     }
 }
