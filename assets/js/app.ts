@@ -244,8 +244,13 @@ function rows(lens: HTMLElement): HTMLElement[] {
 const keyOf = (r: HTMLElement, i: number): string => r.dataset.key ?? `#${i}`
 
 function mark(lens: HTMLElement): void {
-  const want = cursor.get(model.address.lens)
   const all = rows(lens)
+  // The first row is the cursor until a key moves it (or the row it was on is gone).
+  let want = cursor.get(model.address.lens)
+  if (all.length > 0 && !all.some((r, i) => keyOf(r, i) === want)) {
+    want = keyOf(all[0]!, 0)
+    cursor.set(model.address.lens, want)
+  }
   all.forEach((r, i) => r.classList.toggle("cursor", want !== undefined && keyOf(r, i) === want))
 }
 

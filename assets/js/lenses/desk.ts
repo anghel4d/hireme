@@ -115,7 +115,7 @@ function view(): Html {
       <div class="board" role="list" aria-label="Applications" data-key="board" data-morph="own"></div>
       ${dense() ? html`<aside class="desk-detail" data-key="detail" aria-label="The selected application">${model.selected !== 0
         ? body(model.selected, true)
-        : html`<p class="empty">Move to a card (h j k l or the arrows) and it opens here.</p>`}</aside>` : EMPTY}
+        : html`<p class="empty">No application matches these filters.</p>`}</aside>` : EMPTY}
     </div>
     ${ids.length === 0 ? html`<p class="empty">${any ? "Nothing matches these filters." : "No applications yet. An agent adds them through the MCP, or import a pack."}</p>` : EMPTY}
     <p class="hint keys">h j k l or arrows move · Enter opens · v pro view · / searches · 1–7 switch lenses</p>
@@ -156,6 +156,10 @@ const sized = new ResizeObserver(() => {
 let linked = ""
 
 function after(root: HTMLElement): void {
+  // Something is always selected: the first card in view, whenever none is or the filter hid it.
+  const order = board(filter())
+  const first = order[0]
+  if (first !== undefined && !order.includes(model.selected) && !model.address.q.has("card")) set({ selected: first })
   const no = model.address.q.get("card") ?? ""
   if (no !== linked) {
     const id = no === "" ? 0 : lookup("applications", "no", no)
