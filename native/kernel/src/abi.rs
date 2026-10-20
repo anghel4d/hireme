@@ -269,7 +269,15 @@ impl Kernel {
             self.cols.get_mut().retain(|k, c| crate::arrange::mend(rows, k, c, &written));
         }
         if pick_tables.iter().any(|&t| m.touched(t)) || !m.replaced.is_empty() {
-            *self.picks.get_mut() = None;
+            // In place, the picks of the written applications are all that can move.
+            let mended = in_place && {
+                let rows = &self.rows;
+                let written = &m.tables[&table::APPLICATIONS].0;
+                self.picks.get_mut().as_mut().is_some_and(|p| p.mend(rows, written))
+            };
+            if !mended {
+                *self.picks.get_mut() = None;
+            }
             self.columns.get_mut().clear();
             if !in_place {
                 self.cols.get_mut().clear();

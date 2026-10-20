@@ -86,6 +86,10 @@ fn the_desk_keys_group_by_link_mark_the_unlinked_and_keep_one_duplicate() {
     assert_eq!(g["groups"][0]["keep"], 5, "the furthest along is kept");
     let (_, g) = arrange(&mut k, json!({"group": "country"}));
     assert_eq!(labels(&g), ["Germany (DE)", "(none)"]);
+    let (_, g) = arrange(&mut k, json!({"group": "company.applications"}));
+    assert_eq!(labels(&g), ["3 applications", "2 applications", "(none)"]);
+    let (_, g) = arrange(&mut k, json!({"group": "country.applications"}));
+    assert_eq!(labels(&g)[0], "4 applications");
     let (_, g) = arrange(&mut k, json!({"group": "score"}));
     assert_eq!(labels(&g)[0], "90–100", "the score groups by tens, high first");
 }

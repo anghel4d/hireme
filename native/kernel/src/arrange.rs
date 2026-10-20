@@ -233,8 +233,8 @@ pub enum Bucket {
     Hundreds,
     /// 0, 1, 2-9, 10-99, ...
     Magnitude,
-    /// One group per value: "3 applications".
-    Exact(&'static str),
+    /// One group per value, its unit one and many: "1 application", "3 applications".
+    Exact(&'static str, &'static str),
     Day,
     Month,
 }
@@ -299,7 +299,7 @@ impl Column {
             (_, Bucket::Hundreds) => alloc::format!("#{}–{}", b.max(1.0), b + 99.0),
             (_, Bucket::Magnitude) if b < 2.0 => alloc::format!("{b}"),
             (_, Bucket::Magnitude) => alloc::format!("{b}–{}", if b == 2.0 { 9.0 } else { b * 10.0 - 1.0 }),
-            (_, Bucket::Exact(unit)) => alloc::format!("{b}{unit}"),
+            (_, Bucket::Exact(one, many)) => alloc::format!("{b}{}", if b == 1.0 { one } else { many }),
             (_, Bucket::Day) => crate::day_iso(b as crate::Day),
             (_, Bucket::Month) => alloc::format!("{}-{:02}", libm::floor((b - 1.0) / 12.0), (b - 1.0) % 12.0 + 1.0),
             (_, Bucket::Sym) => alloc::format!("{b}"),
@@ -313,7 +313,7 @@ pub fn field(rows: &Rows, f: usize) -> Column {
     let col = build(rows, f);
     let bucket = match (mask::FIELDS[f].ty, path) {
         (_, "id" | "no") => Bucket::Hundreds,
-        (_, p) if p.ends_with(".applications") => Bucket::Exact(" applications"),
+        (_, p) if p.ends_with(".applications") => Bucket::Exact(" application", " applications"),
         (Ty::Day, _) => Bucket::Month,
         (Ty::Num, _) => Bucket::Magnitude,
         _ => Bucket::Sym,

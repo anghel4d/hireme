@@ -279,3 +279,40 @@ fn the_application_shows_the_picked_file_version_and_reads_its_words() {
     // The default, a composition, has no file.
     assert_eq!(k.application(4).unwrap()["cv"]["file"], Json::Null);
 }
+
+#[test]
+fn mended_picks_are_the_picks_of_the_rows() {
+    let mut k = kernel();
+    picks(&k);
+    let mut seed = 0x9e37_79b9_u32;
+    let mut next = |n: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed % n
+    };
+    for step in 0..40 {
+        let id = 1 + next(5);
+        let mut w = wire::BodyWriter::new();
+        let mut b = w.block(table::APPLICATIONS, 1);
+        b.u32s(A::ID, [id].into_iter());
+        match next(3) {
+            0 => {
+                b.u32s(A::CORPORATION_ID, [[10, 11, wire::NONE][next(3) as usize]].into_iter());
+            }
+            1 => {
+                b.u32s(A::PLACE_ID, [[2, 3, wire::NONE][next(3) as usize]].into_iter());
+            }
+            _ => {
+                b.u32s(A::CV_ROOT_ID, [[20, 21, wire::NONE][next(3) as usize]].into_iter());
+            }
+        }
+        b.done();
+        k.patch(&w.finish(), 2 + step).unwrap();
+        let mut fresh = Kernel::new();
+        fresh.set_today(TODAY);
+        fresh.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
+        fresh.restore(&k.snapshot()).unwrap();
+        assert_eq!(picks(&k), picks(&fresh), "step {step}");
+    }
+}

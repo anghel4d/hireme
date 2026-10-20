@@ -340,6 +340,21 @@ pub struct Picks {
 }
 
 impl Picks {
+    /// Brings the picks of the applications `ids` up to date after they were
+    /// written in place. False when a rule reads a count (which every
+    /// application moves): the caller computes them all again.
+    pub fn mend(&mut self, rows: &Rows, ids: &[u32]) -> bool {
+        let counted = self.arms.iter().filter_map(|a| a.expr.as_ref()).any(|e| e.fields().iter().any(|&f| mask::FIELDS[f].path.ends_with(".applications")));
+        if counted {
+            return false;
+        }
+        let counts = Counts::default();
+        for &id in ids {
+            self.by.insert(id, pick(rows, &self.arms, &counts, id));
+        }
+        true
+    }
+
     pub fn of(rows: &Rows) -> Picks {
         let arms = arms(rows);
         let counts = Counts::of(rows);
