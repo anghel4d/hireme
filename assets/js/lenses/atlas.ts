@@ -1,27 +1,17 @@
 // The atlas: the charted places scored against the operator's own
 // passports, languages and weights. The fit (route, language, seven parts,
 // the weighted sum, presets) is the kernel's only copy (`atlas`); this
-// lens draws it and writes the inputs, which are columns of the one
-// `settings` row. No passport or language is in source: they are rows.
+// lens draws it; the inputs (passports, languages, weights) are the
+// operator's own and are set in Me. No passport or language is in source.
 
 import type { View } from "../app.ts"
-import { failed, atlas, putSettings, settingsId, value, type Input } from "../kernel.ts"
-import { EMPTY, flag, html, resetAfter, type Html } from "../morph.ts"
-import { model, notice, query } from "../state.ts"
+import { failed, atlas, putSettings, type Input } from "../kernel.ts"
+import { EMPTY, flag, html, type Html } from "../morph.ts"
+import { model, query } from "../state.ts"
 
 /** A place's fit; `fit` is null for a place with no part the kernel can score, and a part may be null too. */
 type Fit = { id: number; name: string; iso2: string | null; kind: string; route: string; speaks: boolean; fit: number | null; parts: Record<string, number | null>; labeled: boolean | null }
 type Doc = { parts: string[]; weights: number[]; presets: Record<string, number[]>; places: Fit[] }
-
-const SEP = "\u001f"
-const setting = (col: string): string => {
-  const id = settingsId()
-  const x = id === 0 ? null : value("settings", id, col)
-  return x === null ? "" : String(x)
-}
-
-/** The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them. */
-const save = (set: Record<string, Input>, form?: HTMLFormElement): void => void (form ? resetAfter(form, () => putSettings(set)) : putSettings(set)).catch(failed)
 
 /** What a route means for you, from your citizenships and the place's work-permit list (kernel atlas.rs). */
 const ROUTE: Record<string, [string, string]> = {
@@ -44,23 +34,13 @@ function view(): Html {
   const kind = model.address.q.get("kind") ?? ""
   const places = kind === "" ? d.places : d.places.filter((p) => p.kind === kind)
   return html`<div class="atlas">
-    <section class="card" data-key="me"><h2>You</h2>
-      <form class="row" data-submit="me" data-act="me">
-        <label>Citizenships (ISO alpha-2) <input name="citizenships" value="${setting("citizenships").split(SEP).join(" ")}" placeholder="e.g. DE FR" autocomplete="off"></label>
-        <label>Languages (ISO 639-1) <input name="languages" value="${setting("languages").split(SEP).join(" ")}" placeholder="e.g. en de" autocomplete="off"></label>
-        <label>Field <input name="field" value="${setting("field")}" placeholder="software"></label>
-        <button>Save</button>
-      </form>
-    </section>
     <section class="card" data-key="weights"><h2>Weights</h2>
       <div class="row">
         <label>Preset <select data-act="preset" data-on="change" data-bound><option value="">your weights</option>
           ${Object.keys(d.presets).map((p) => html`<option${flag("selected", p === preset)}>${p}</option>`)}</select></label>
         ${preset !== "" ? html`<button type="button" data-act="adopt" data-preset="${preset}">Use ${preset} as mine</button>` : EMPTY}
       </div>
-      ${preset === "" ? html`<form class="weights" data-submit="weights" data-act="weights">${d.parts.map((p, i) => html`<label>${p} <output>${String(d.weights[i] ?? 1)}</output>
-          <input type="range" name="w_${p}" min="0" max="5" step="0.5" value="${String(d.weights[i] ?? 1)}" data-act="weight" data-on="input"></label>`)}
-          <button>Save weights</button></form>` : html`<p class="muted">${d.parts.map((p, i) => `${p} ${d.presets[preset]?.[i] ?? 1}`).join(" · ")}</p>`}
+      <p class="muted">${d.parts.map((p, i) => `${p} ${(preset === "" ? d.weights : d.presets[preset])?.[i] ?? 1}`).join(" · ")}${preset === "" ? html` · <a href="/me" data-nav>set in Me</a>` : EMPTY}</p>
     </section>
     <div class="toolbar"><nav class="subtabs">${[["", "all"], ["country", "countries"], ["city", "cities"]].map(([k, l]) => html`<a href="/atlas?${new URLSearchParams({ ...(preset ? { preset } : {}), ...(k ? { kind: k! } : {}) }).toString()}" data-nav class="${kind === k ? "on" : ""}" data-key="k${k}">${l}</a>`)}</nav>
       <span class="muted">${places.length} charted</span></div>
@@ -75,40 +55,20 @@ function view(): Html {
   </div>`
 }
 
-const codes = (s: string, upper: boolean): string | null => {
-  const list = s.split(/[\s,;]+/).map((x) => (upper ? x.toUpperCase() : x.toLowerCase())).filter((x) => /^[a-zA-Z]{2}$/.test(x))
-  return list.length === 0 ? null : list.join(SEP)
-}
-
 const atlasLens: View = {
   title: "Atlas",
   view,
   act(name, el) {
     switch (name) {
-      case "weight":
-        // The number beside a slider follows it as it moves; Save weights stores them.
-        return void ((el.previousElementSibling as HTMLOutputElement | null)?.replaceChildren((el as HTMLInputElement).value))
       case "preset":
         return query("preset", (el as HTMLSelectElement).value)
-      case "me": {
-        const f = new FormData(el as HTMLFormElement)
-        return save({ citizenships: codes(String(f.get("citizenships") ?? ""), true), languages: codes(String(f.get("languages") ?? ""), false), field: String(f.get("field") ?? "") || null }, el as HTMLFormElement)
-      }
-      case "weights": {
-        const f = new FormData(el as HTMLFormElement)
-        const set: Record<string, Input> = {}
-        for (const [k, x] of f) set[k] = Number(x)
-        // Every weight at zero scores nothing at all.
-        if (Object.values(set).every((x) => x === 0)) return notice("warn", "Give at least one part a weight above zero.")
-        return save(set)
-      }
       case "adopt": {
         const d = atlas(el.dataset.preset ?? "") as Doc | null
         const w = d?.presets[el.dataset.preset ?? ""]
         if (!d || !w) return
         const set: Record<string, Input> = {}
         d.parts.forEach((p, i) => (set[`w_${p}`] = w[i] ?? 1))
-        save(set)
+        putSettings(set).catch(failed)
         return query("preset", "")
       }
     }

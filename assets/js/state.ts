@@ -14,9 +14,10 @@
 //     /atlas?preset=<name>
 //     /outreach?contact=<id>
 //     /lanes/<gym|net>
+//     /me
 //     /account
 
-export const LENSES = ["desk", "focus", "world", "atlas", "outreach", "lanes", "account"] as const
+export const LENSES = ["desk", "focus", "world", "atlas", "outreach", "lanes", "me", "account"] as const
 export type Lens = (typeof LENSES)[number]
 
 export interface Address {

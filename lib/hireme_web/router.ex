@@ -18,7 +18,7 @@ defmodule HiremeWeb.Router do
     step_up: &Auth.require_step_up/2
   }
   # The one page, under every lens's address; the lens is the client's to read.
-  @lenses ~w(desk focus world atlas outreach lanes account)
+  @lenses ~w(desk focus world atlas outreach lanes me account)
   @lens_params ~w(focus world lanes)
 
   @impl true

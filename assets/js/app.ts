@@ -19,6 +19,7 @@ import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
 import focus from "./lenses/focus.ts"
 import lanes from "./lenses/lanes.ts"
+import me from "./lenses/me.ts"
 import outreach from "./lenses/outreach.ts"
 import world from "./lenses/world.ts"
 
@@ -37,7 +38,7 @@ export interface View {
 }
 
 /** Every lens, in the one bundle: a chunk per lens was a request per lens on every load. */
-const VIEWS: Record<Lens, View> = { desk, focus, world, atlas, outreach, lanes, account }
+const VIEWS: Record<Lens, View> = { desk, focus, world, atlas, outreach, lanes, me, account }
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
@@ -46,7 +47,8 @@ const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "atlas", label: "Atlas", key: "4" },
   { lens: "outreach", label: "Outreach", key: "5" },
   { lens: "lanes", label: "Lanes", key: "6" },
-  { lens: "account", label: "Account", key: "7" },
+  { lens: "me", label: "Me", key: "7" },
+  { lens: "account", label: "Account", key: "8" },
 ]
 
 const root = document.getElementById("app")
@@ -63,7 +65,7 @@ function link(): Html {
  * lens that reads the replica waits for the kernel to load.
  */
 const DERIVES: readonly Lens[] = ["desk", "focus"]
-const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "account"]
+const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "me", "account"]
 const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
 
 /** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */
