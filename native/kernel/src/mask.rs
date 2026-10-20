@@ -169,6 +169,21 @@ pub enum Val<'a> {
     List(Vec<Val<'a>>),
 }
 
+impl Val<'_> {
+    /// The value with its text owned.
+    pub fn into_owned(self) -> Val<'static> {
+        match self {
+            Val::Bool(b) => Val::Bool(b),
+            Val::Text(s) => Val::Text(Cow::Owned(s.into_owned())),
+            Val::Num(n) => Val::Num(n),
+            Val::Day(d) => Val::Day(d),
+            Val::Code(s) => Val::Code(Cow::Owned(s.into_owned())),
+            Val::Enum(i) => Val::Enum(i),
+            Val::List(xs) => Val::List(xs.into_iter().map(Val::into_owned).collect()),
+        }
+    }
+}
+
 /// What a mask reads: one application's value of each field, by id; none when absent.
 pub trait Facts {
     fn read(&self, field: usize) -> Option<Val<'_>>;

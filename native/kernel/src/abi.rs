@@ -63,6 +63,8 @@ pub struct Kernel {
     picks: core::cell::RefCell<Option<pick::Picks>>,
     /// The desk's `columns`, per field, dropped with the picks and when offices move.
     columns: core::cell::RefCell<BTreeMap<usize, Vec<Json>>>,
+    /// The typed columns `arrange` sorts and groups on, kept as `columns` is.
+    cols: core::cell::RefCell<BTreeMap<usize, crate::arrange::Col>>,
 }
 
 impl Kernel {
@@ -152,6 +154,27 @@ impl Kernel {
         Ok(json!({"ids": ids, "cols": cols}))
     }
 
+    /// The board's filtered order sorted on one field and grouped on another
+    /// (`arrange`): the desk's select-by-sort, over typed columns.
+    pub fn arrange(&mut self, req: &Json) -> Result<(Vec<u32>, Vec<crate::arrange::Group>), Refusal> {
+        let field = |v: &Json| -> Result<Option<usize>, Refusal> {
+            match v.as_str() {
+                None | Some("") => Ok(None),
+                Some(p) => crate::mask::field(p).map(Some).ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "field", "unknown": p}))),
+            }
+        };
+        let sort = field(&req["sort"][0])?.map(|f| (f, if req["sort"][1] == "desc" { -1 } else { 1 }));
+        let group = field(&req["group"])?;
+        let ids = self.view(&filter(&req["filter"].to_string()));
+        let rows = &self.rows;
+        let mut cols = self.cols.borrow_mut();
+        for f in sort.map(|s| s.0).into_iter().chain(group) {
+            cols.entry(f).or_insert_with(|| crate::arrange::build(rows, f));
+        }
+        let ask = crate::arrange::Ask { sort, group, largest: req["largest"] == true, cols: &cols };
+        Ok(crate::arrange::arrange(rows, &ids, &ask))
+    }
+
     /// Application `id`'s CV pick.
     pub fn pick(&self, id: u32) -> Option<pick::Pick> {
         self.picks.borrow_mut().get_or_insert_with(|| pick::Picks::of(&self.rows)).by.get(&id).cloned()
@@ -195,8 +218,10 @@ impl Kernel {
         if pick_tables.iter().any(|&t| m.touched(t)) || !m.replaced.is_empty() {
             *self.picks.get_mut() = None;
             self.columns.get_mut().clear();
+            self.cols.get_mut().clear();
         } else if m.touched(table::OFFICES) {
             self.columns.get_mut().clear();
+            self.cols.get_mut().clear();
         }
         self.board.forget(m, &self.rows);
         self.stale = true;
@@ -650,6 +675,29 @@ mod exports {
             Ok(j) => put_json(&j),
             Err(r) => refused(&r),
         })
+    }
+
+    thread_local! {
+        static GROUPS: RefCell<Json> = const { RefCell::new(Json::Null) };
+    }
+
+    /// The board's filtered order sorted and grouped: the ids land as u32s
+    /// like `view`'s; `arrange_groups` answers their groups.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn arrange(ptr: *const u8, len: usize) -> i32 {
+        let req: Json = serde_json::from_slice(unsafe { input(ptr, len) }).unwrap_or(Json::Null);
+        K.with(|k| match k.borrow_mut().arrange(&req) {
+            Ok((ids, groups)) => {
+                GROUPS.with(|g| *g.borrow_mut() = crate::arrange::groups_json(&groups));
+                put_ids(&ids)
+            }
+            Err(r) => refused(&r),
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn arrange_groups() -> i32 {
+        GROUPS.with(|g| put_json(&g.borrow()))
     }
 
     /// Board ids (u32 LE) a JSON filter keeps, in order.

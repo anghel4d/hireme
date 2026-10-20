@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod abi;
+pub mod arrange;
 pub mod atlas;
 pub mod ats;
 pub mod board;
