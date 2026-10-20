@@ -39,7 +39,9 @@ defmodule HiremeWeb.Endpoint do
   # The one cookie. `__Host-` pins it to this origin, path `/`, over https
   # (localhost counts). Encrypted and signed with keys derived from the
   # application secret; it holds the session token, the CSRF token, and an
-  # OAuth trip or an address being added while one is in flight.
+  # OAuth trip or an address being added while one is in flight. It lives as
+  # long as the longest session (a remembered one's 90 days); the session
+  # row, not the cookie, decides when a sign-in ends.
   @session_options [
     store: :cookie,
     key: "__Host-hireme",
@@ -48,7 +50,7 @@ defmodule HiremeWeb.Endpoint do
     same_site: "Lax",
     secure: true,
     http_only: true,
-    max_age: 24 * 60 * 60
+    max_age: 90 * 24 * 60 * 60
   ]
 
   @ssl Application.compile_env(:hireme, [__MODULE__, :force_ssl])

@@ -4,7 +4,7 @@
 // nullable column as T | null.
 
 export const WIRE_HASH = 0x8d6f;
-export const SCHEMA_REV = 0x3271063e;
+export const SCHEMA_REV = 0x8aede3a9;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -194,6 +194,7 @@ export interface Session {
   revoked_at: number | null;
   ip: string | null;
   user_agent: string | null;
+  remember: boolean | null;
 }
 /** `identities`: server-side. */
 export interface Identity {

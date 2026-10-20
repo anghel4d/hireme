@@ -187,6 +187,8 @@ table sessions system server
   col revoked_at time ?
   col ip str ?
   col user_agent str ?
+  # Signed in with "Remember this device": the remembered lifetimes (Security).
+  col remember bool ?
 
 table identities system server
   cap 100

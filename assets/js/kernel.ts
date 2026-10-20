@@ -11,7 +11,7 @@ import type { Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, DAY_MAX, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
 import { describe } from "./guard.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
-import { notice, set } from "./state.ts"
+import { DRAFT, notice, set } from "./state.ts"
 
 /** A row as the kernel answers it: a column name to its value. */
 export type Row = Record<string, unknown>
@@ -483,14 +483,15 @@ let savedRev = -1n
 
 /**
  * The session ended for good (signed out, revoked, suspended): the desk's
- * snapshot leaves this browser's storage with it, and nothing more is saved.
+ * snapshot and the unsaved drafts leave this browser's storage with it, and
+ * nothing more is saved.
  */
 export function forget(): void {
   clearTimeout(saving)
   savedRev = -2n
   try {
     indexedDB.deleteDatabase("hireme")
-    for (const key of Object.keys(localStorage)) if (key.startsWith(SNAP_FLAG)) localStorage.removeItem(key)
+    for (const key of Object.keys(localStorage)) if (key.startsWith(SNAP_FLAG) || key.startsWith(DRAFT)) localStorage.removeItem(key)
   } catch {
     // Storage is blocked: there is nothing stored to delete.
   }

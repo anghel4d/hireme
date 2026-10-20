@@ -119,6 +119,7 @@ defmodule Hireme.Accounts do
   # the count under it: how many must go, and the query of those that may.
   defp need(account_id, now) do
     idle = DateTime.add(now, -Security.session_idle())
+    long = DateTime.add(now, -Security.session_idle(true))
     all = from(s in Session, where: s.account_id == ^account_id)
 
     need =
@@ -126,7 +127,9 @@ defmodule Hireme.Accounts do
 
     ended =
       from(s in all,
-        where: not is_nil(s.revoked_at) or s.expires_at <= ^now or s.last_seen_at <= ^idle
+        where:
+          not is_nil(s.revoked_at) or s.expires_at <= ^now or
+            s.last_seen_at <= ^long or (s.remember != true and s.last_seen_at <= ^idle)
       )
 
     {need, ended}
@@ -140,7 +143,8 @@ defmodule Hireme.Accounts do
           token_hash: Security.hash(token),
           authenticated_at: now,
           last_seen_at: now,
-          expires_at: DateTime.add(now, Security.session_lifetime()),
+          expires_at: DateTime.add(now, Security.session_lifetime(meta[:remember] == true)),
+          remember: meta[:remember] == true,
           ip: Security.text(meta[:ip], 64),
           user_agent: Security.text(meta[:user_agent], 200),
           rev: 1
@@ -188,7 +192,24 @@ defmodule Hireme.Accounts do
 
   defp live?(%Session{} = s, now) do
     is_nil(s.revoked_at) and DateTime.compare(now, s.expires_at) == :lt and
-      DateTime.diff(now, s.last_seen_at) < Security.session_idle()
+      DateTime.diff(now, s.last_seen_at) < Security.session_idle(s.remember == true)
+  end
+
+  @doc """
+  Whether the browser holding an ended session's cookie keeps the desk it
+  stored: a remembered session that only ran out of time, on an active
+  account. A revoked session, a suspended account or an unknown token does
+  not (ASVS 7.4.1: the snapshot holds the account's rows).
+  """
+  @spec keeps_desk?(term()) :: boolean()
+  def keeps_desk?(token) do
+    with {:ok, raw} <- Security.decode(token),
+         {%Session{remember: true, revoked_at: nil}, %Account{} = account} <-
+           by_token(Security.hash(raw)) do
+      active?(account)
+    else
+      _ -> false
+    end
   end
 
   defp touch(%Session{} = s, now) do

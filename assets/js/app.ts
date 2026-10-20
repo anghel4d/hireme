@@ -332,10 +332,9 @@ const wire = new Wire({
   open: (carrier) => set({ carrier, link: model.link === "open" ? "open" : "connecting" }),
   lost: (why, retry) => {
     set({ link: retry === 0 ? "ended" : "lost" })
-    if (retry === 0 && why === "signed out") {
-      kernel.forget()
-      location.assign("/sign-in")
-    }
+    // The ticket's refusal came through the server's sign-in check, which clears this browser's storage
+    // unless the session was remembered and only ran out of time: what it keeps is for the next sign-in.
+    if (retry === 0 && why === "signed out") location.assign("/sign-in")
   },
   // The node resumes from a snapshot rev only when the schema it was taken under is its own.
   hello: () => {

@@ -14,7 +14,7 @@ import type { View } from "../app.ts"
 import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
 import { command, drop, failed, ids, meId, page, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
-import { model, notice, query as setQuery, schedule, slug } from "../state.ts"
+import { drafts, model, notice, query as setQuery, schedule, slug } from "../state.ts"
 import { appItem } from "./focus.ts"
 import { label } from "./world.ts"
 
@@ -81,7 +81,8 @@ const words = (s: string): string[] => [...new Set(s.toLowerCase().split(/[\s,;]
 
 /** The form as typed (or as saved): what the list beside it reads and what a save writes. */
 type Draft = { text: Record<string, string>; work_modes: number; employments: number; relocate: boolean }
-let draft: Draft | null = null
+/** The form as typed and not saved, kept in this browser (state.ts drafts) until saved or discarded. */
+let draft: Draft | null = drafts.get<Draft>("me")
 const fromForm = (form: HTMLFormElement): Draft => {
   const f = new FormData(form)
   return { text: fields(form), work_modes: bitsOf(f, "work_modes"), employments: bitsOf(f, "employments"), relocate: f.has("relocate") }
@@ -125,7 +126,7 @@ function understood(d: Draft): Html {
 // ------------------------------------------------------------------ you
 
 function you(): Html {
-  const d = saved()
+  const d = draft ?? saved()
   const t = d.text
   const w = weights()
   const groups = [...new Set(FIGURES.map((c) => c.group ?? "other"))]
@@ -160,9 +161,9 @@ function you(): Html {
           <label>Notice (days) <input type="number" name="notice_days" min="0" value="${t.notice_days}" class="narrow"></label>
         </div>
         <label>Notes for your agents: what to keep in mind, what bumps priority <textarea name="notes" rows="4" placeholder="e.g. partner works in hospitals, so cities with a big one rank up; mild winters are a plus">${t.notes}</textarea></label>
-        <button>Save</button>
+        <span class="row"><button>Save</button>${draft ? html`<button type="button" class="ghost" data-act="me-discard">Discard changes</button>` : EMPTY}</span>
       </form>
-      ${understood(draft ?? d)}
+      ${understood(d)}
       </div>
       <p class="hint">Your agents fill this too: <code>put</code> the <code>me</code> row through the MCP, with a key that writes corpus.</p>
     </section>
@@ -293,7 +294,7 @@ function addendum(id: number, format: string, head: number, isDefault: boolean):
       <button type="button" class="danger" data-act="unroot" data-id="${id}">Delete…</button>
     </div>
     ${format === "composed" ? html`<p class="hint">Composed from ${profile ? html`the <b>${str(value("profiles", profile, "name"))}</b> profile's items` : "a profile"}: the kernel builds it for each application.</p>`
-      : html`<pre class="cv-text${ed ? " editing" : ""}" data-act="edit-text" data-on="dblclick" data-id="${id}" data-empty="Nothing yet: double-click to write."${ed ? html` contenteditable="plaintext-only" data-morph="own" data-autofocus` : EMPTY}>${head ? str(value("cv_versions", head, format === "markdown" ? "body" : "text")) : ""}</pre>
+      : html`<pre class="cv-text${ed ? " editing" : ""}" data-act="edit-text" data-on="dblclick" data-id="${id}" data-empty="Nothing yet: double-click to write."${ed ? html` contenteditable="plaintext-only" data-morph="own" data-autofocus` : EMPTY}>${drafts.get<string>(`cv:${id}`) ?? (head ? str(value("cv_versions", head, format === "markdown" ? "body" : "text")) : "")}</pre>
       ${ed ? html`<div class="row"><button type="button" class="primary" data-act="save-text" data-id="${id}">Save</button><button type="button" class="ghost" data-act="cancel-text" data-id="${id}">Cancel</button>
         <span class="hint">Ctrl+S saves.${format === "markdown" ? "" : " The file stays as it is; this is its text as the rules, coverage and your agents read it."}</span></div>` : EMPTY}`}
     ${versions.length === 0 ? EMPTY : html`<details data-key="versions"><summary>${versions.length} version${versions.length === 1 ? "" : "s"}</summary><ol class="rows">${versions.map((x) => html`<li data-key="v${str(x.id)}">
@@ -350,11 +351,24 @@ function saveText(id: number): void {
   const text = el.innerText.replace(/\n$/, "")
   const was = head ? str(value("cv_versions", head, markdown ? "body" : "text")) : ""
   editing.delete(id)
+  drafts.drop(`cv:${id}`)
   if (text === was) return schedule()
   void put("cv_versions", markdown || !head ? { root_id: id, body: text, note: "edited here" }
     : { root_id: id, body: text, blob_sha: str(value("cv_versions", head, "blob_sha")), blob_name: str(value("cv_versions", head, "blob_name")) || null, note: "text edited here" })
     .then(() => notice("ok", `${rootName(id)} saved as its next version.`), failed)
   schedule()
+}
+
+// A text being edited is kept as it is typed; a CV with one kept opens back into editing it.
+addEventListener("input", (ev) => {
+  const el = (ev.target as Element | null)?.closest?.<HTMLElement>(".cv-text.editing")
+  if (el) drafts.set(`cv:${el.dataset.id}`, el.innerText.replace(/\n$/, ""))
+})
+function resume(): void {
+  const kept = [...ids("cv_roots")].filter((id) => !editing.has(id) && drafts.get(`cv:${id}`) !== null)
+  if (kept.length === 0) return
+  for (const id of kept) editing.add(id)
+  setQuery("open", [...new Set([...opened(), ...kept])].join(","))
 }
 
 // A file dragged anywhere over the CVs page lands where it is let go: on a CV, or as a new one.
@@ -504,6 +518,9 @@ const bitsOf = (f: FormData, col: string): number => f.getAll(col).reduce<number
 
 const meLens: View = {
   title: "Me",
+  enter() {
+    if (model.address.sub === "cv") resume()
+  },
   view,
   act(name, el, ev) {
     const id = Number(el.dataset.id ?? 0)
@@ -511,7 +528,14 @@ const meLens: View = {
     switch (name) {
       case "me-draft":
         draft = fromForm(form)
+        drafts.set("me", draft)
         return schedule()
+      case "me-discard":
+        draft = null
+        drafts.drop("me")
+        schedule()
+        // After the redraw puts the saved values back as the fields' defaults.
+        return void requestAnimationFrame(() => el.closest("form")?.reset())
       case "me": {
         const d = fromForm(form)
         const x = d.text
@@ -519,6 +543,7 @@ const meLens: View = {
         const place = iso === "" ? null : ask<{ rows: Row[] }>("find", { table: "places", where: { iso2: iso, kind: "country" }, cols: ["id"], limit: 1 })?.rows[0]
         if (iso !== "" && !place) return notice("warn", `No country ${iso} in the world tables yet.`)
         draft = null
+        drafts.drop("me")
         const codes = (k: string, regions = false): string | null => joined(countriesIn(x[k] ?? "", regions).codes)
         return save({
           citizenships: codes("citizenships"),
@@ -590,6 +615,7 @@ const meLens: View = {
         return saveText(id)
       case "cancel-text":
         editing.delete(id)
+        drafts.drop(`cv:${id}`)
         el.closest(".cv-card")?.querySelector(".cv-text")?.removeAttribute("contenteditable")
         return schedule()
       case "check": {

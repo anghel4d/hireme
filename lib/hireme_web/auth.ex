@@ -158,13 +158,17 @@ defmodule HiremeWeb.Auth do
 
   # A cookie whose session ended elsewhere (revoked, expired, idle, the
   # account suspended) is a sign-out the browser did not ask for: its token
-  # goes, and with it the desk the page stored, as on /sign-out.
+  # goes, and with it the desk the page stored, as on /sign-out; but a
+  # remembered session that only ran out of time keeps it for the next
+  # sign-in (Accounts.keeps_desk?/1).
   defp ended(conn, nil), do: conn
 
-  defp ended(conn, _token) do
-    conn
-    |> delete_session(@session_key)
-    |> put_resp_header("clear-site-data", ~s("storage"))
+  defp ended(conn, token) do
+    conn = delete_session(conn, @session_key)
+
+    if Accounts.keeps_desk?(token),
+      do: conn,
+      else: put_resp_header(conn, "clear-site-data", ~s("storage"))
   end
 
   def require_account(conn, _opts), do: need(conn, false, 401, "second_factor", "/sign-in/factor")

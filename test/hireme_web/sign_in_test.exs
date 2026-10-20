@@ -38,6 +38,29 @@ defmodule HiremeWeb.SignInTest do
     assert html =~ ~s(<div id="app"></div>)
   end
 
+  test "a remembered device outlives an hour idle and keeps its desk when it runs out; a plain sign-in ends at an hour, and a revoke always clears",
+       %{conn: conn} do
+    newest = fn -> Enum.max_by(Hireme.Repo.all(Hireme.Rows.Session, skip_account: true), & &1.id) end
+    cleared? = &(get_resp_header(&1, "clear-site-data") != [])
+
+    {kept, _} = email_sign_in(conn, "kept@example.com", %{"remember" => "1"})
+    s = age(newest.(), :last_seen_at, Hireme.Security.session_idle() + 60)
+    assert html_response(kept |> recycle() |> get("/desk"), 200)
+    age(s, :last_seen_at, Hireme.Security.session_idle(true) + 60)
+    out = kept |> recycle() |> get("/desk")
+    assert redirected_to(out) == "/sign-in" and not cleared?.(out)
+
+    {plain, _} = email_sign_in(build_conn(), "plain@example.com")
+    age(newest.(), :last_seen_at, Hireme.Security.session_idle() + 60)
+    out = plain |> recycle() |> get("/desk")
+    assert redirected_to(out) == "/sign-in" and cleared?.(out)
+
+    {revoked, _} = email_sign_in(build_conn(), "revoked@example.com", %{"remember" => "1"})
+    s = newest.()
+    :ok = Hireme.Accounts.revoke_session(s.account_id, s.id)
+    assert cleared?.(revoked |> recycle() |> get("/desk"))
+  end
+
   test "every lens address serves the page to a signed-in browser and sends a visitor to sign in; the ticket endpoint wants the CSRF token; signing out ends the session on the server",
        %{conn: conn} do
     %{token: token} = sign_in()

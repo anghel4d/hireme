@@ -25,7 +25,8 @@ CREATE TABLE "sessions" (
   "expires_at" TEXT NOT NULL,
   "revoked_at" TEXT,
   "ip" TEXT,
-  "user_agent" TEXT
+  "user_agent" TEXT,
+  "remember" INTEGER
 ) STRICT;
 CREATE INDEX "sessions__account_account_id" ON "sessions" ("account_id");
 CREATE UNIQUE INDEX "sessions__unique_token_hash" ON "sessions" ("token_hash");

@@ -26,12 +26,15 @@ defmodule Hireme.Security do
   ## Sessions and ceremonies
 
   # NIST SP 800-63B-4 Sec. 2.2.3 (AAL2): reauthenticate at least every 24 h
-  # and after at most 1 h of inactivity. ASVS 7.3.1, 7.3.2.
-  @spec session_lifetime() :: pos_integer()
-  def session_lifetime, do: 24 * 60 * 60
+  # and after at most 1 h of inactivity. ASVS 7.3.1, 7.3.2. A session signed
+  # in with "Remember this device" is the operator's documented exception
+  # (ASVS 7.3 lets the risk analysis set them): 30 days from its last use,
+  # never past 90 days from sign-in; sensitive changes still step up.
+  @spec session_lifetime(boolean()) :: pos_integer()
+  def session_lifetime(remember \\ false), do: if(remember, do: 90, else: 1) * 24 * 60 * 60
 
-  @spec session_idle() :: pos_integer()
-  def session_idle, do: 60 * 60
+  @spec session_idle(boolean()) :: pos_integer()
+  def session_idle(remember \\ false), do: if(remember, do: 30 * 24 * 60 * 60, else: 60 * 60)
 
   # ASVS 7.5.1, 7.5.3: re-authenticate before a sensitive change; a second
   # factor presented within this window counts.

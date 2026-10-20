@@ -78,15 +78,19 @@ A browser holds one cookie, `__Host-hireme`: Secure, HttpOnly,
 SameSite=Lax, path `/`, no Domain, encrypted and signed, carrying a 256-bit
 token whose SHA-256 names the session row (ASVS 7.2.1, 3.3.1). A session
 ends after 24 hours, or one hour idle (63B-4 AAL2 reauthentication; ASVS
-7.3). The row is read with its account on every request, so a revoke or a
+7.3). A sign-in with "Remember this device" ticked (the default) is the
+operator's documented exception: it ends 30 days after its last use and
+never more than 90 days after it began, its cookie lives as long, and a
+sensitive change still asks for a fresh factor (step-up, below). The row is read with its account on every request, so a revoke or a
 suspension takes effect on the next request and ends the session's wire
 sessions at once (BYE `revoked`, BYE `suspended`). The account lens lists
 sessions and revokes any of them; signing out revokes the row, so a copied
 cookie is dead on the server, and answers `Clear-Site-Data: "storage"`, so
 the desk snapshot the browser kept in IndexedDB is gone too; a page
-request carrying a cookie whose session ended elsewhere answers the same
-(ASVS 7.4.1,
-7.4.3).
+request carrying a cookie whose session ended elsewhere answers the same,
+except a remembered session that only ran out of time, whose browser keeps
+its snapshot (and unsaved drafts) for the next sign-in to the same account
+(ASVS 7.4.1, 7.4.3).
 
 A page reaches the wire with a ticket, never the cookie: a single-use,
 encrypted token naming the session and bound to eight bytes of its token

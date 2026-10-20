@@ -286,6 +286,40 @@ export function query(key: string, value: string): void {
   go({ q }, true)
 }
 
+/** This browser's per-account key prefix: the shell's opaque account scope (the snapshot's too). */
+const SCOPE = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
+export const DRAFT = "hireme-draft:"
+
+/**
+ * Unsaved edits, kept in this browser until saved or discarded, so a reload, a deploy or a fresh
+ * sign-in finds them where they were; a sign-out or a revoke takes them (kernel.forget). Storage
+ * may be blocked or full: then there is simply no draft.
+ */
+export const drafts = {
+  get<T>(key: string): T | null {
+    try {
+      const s = SCOPE === "" ? null : localStorage.getItem(`${DRAFT}${SCOPE}:${key}`)
+      return s === null ? null : (JSON.parse(s) as T)
+    } catch {
+      return null
+    }
+  },
+  set(key: string, value: unknown): void {
+    try {
+      if (SCOPE !== "") localStorage.setItem(`${DRAFT}${SCOPE}:${key}`, JSON.stringify(value))
+    } catch {
+      // Blocked or full: the edit stays on the page only.
+    }
+  },
+  drop(key: string): void {
+    try {
+      localStorage.removeItem(`${DRAFT}${SCOPE}:${key}`)
+    } catch {
+      // Blocked: nothing was kept.
+    }
+  },
+}
+
 let nextNotice = 1
 
 export function notice(tone: Notice["tone"], text: string, ms = tone === "error" ? 0 : 6000, pinned = false): void {

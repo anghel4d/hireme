@@ -56,7 +56,7 @@ defmodule HiremeWeb.SignIn do
   """
   @spec begin(Plug.Conn.t(), provider(), :sign_in | :link) ::
           {:ok, Plug.Conn.t(), String.t()} | {:error, term()}
-  def begin(conn, provider, mode) do
+  def begin(conn, provider, mode, remember \\ false) do
     with {:ok, config} <- config(provider),
          {:ok, %{url: url, session_params: params}} <- @strategies[provider].authorize_url(config) do
       account = conn.assigns[:account]
@@ -66,6 +66,7 @@ defmodule HiremeWeb.SignIn do
         params: params,
         mode: mode,
         account_id: account && account.id,
+        remember: remember,
         at: System.system_time(:second)
       }
 
@@ -304,6 +305,7 @@ defmodule HiremeWeb.SignInController do
       <form method="post" action="/sign-in/email/confirm" class="method">
         #{csrf_field()}
         <input type="hidden" name="token" value="#{esc(token)}" />
+        #{if mode == :sign_in, do: remember_box()}
         <button type="submit" class="primary">#{button}</button>
       </form>
       <p class="lede">Did not ask for this? Close the page; nothing happens.</p>
@@ -316,7 +318,7 @@ defmodule HiremeWeb.SignInController do
 
   def confirm_email(conn, _), do: redirect(conn, to: "/sign-in")
 
-  def redeem_email(conn, %{"token" => token}) when is_binary(token) do
+  def redeem_email(conn, %{"token" => token} = params) when is_binary(token) do
     with {:ok, email} <- Accounts.peek_link(token),
          {:ok, mode} <- mode(conn, email),
          :ok <-
@@ -329,7 +331,7 @@ defmodule HiremeWeb.SignInController do
 
       case mode do
         :add -> conn |> SignIn.forget_email() |> add(:email, claim)
-        :sign_in -> enter(conn, :email, claim)
+        :sign_in -> enter(conn, :email, claim, params["remember"] == "1")
       end
     else
       {:error, :signed_in} ->
@@ -358,9 +360,9 @@ defmodule HiremeWeb.SignInController do
 
   def authorize(%{assigns: %{account: %{}}} = conn, _), do: redirect(conn, to: "/")
 
-  def authorize(conn, %{"provider" => name}) do
+  def authorize(conn, %{"provider" => name} = params) do
     with {:ok, provider} <- SignIn.parse(name),
-         {:ok, conn, url} <- SignIn.begin(conn, provider, :sign_in) do
+         {:ok, conn, url} <- SignIn.begin(conn, provider, :sign_in, params["remember"] == "1") do
       redirect(conn, external: url)
     else
       :error -> send_resp(conn, 404, "Not Found")
@@ -394,8 +396,8 @@ defmodule HiremeWeb.SignInController do
           {conn, {:ok, %{mode: :sign_in}, _claim}} when conn.assigns.account != nil ->
             redirect(conn, to: "/")
 
-          {conn, {:ok, %{mode: :sign_in}, claim}} ->
-            enter(conn, provider, claim)
+          {conn, {:ok, %{mode: :sign_in} = trip, claim}} ->
+            enter(conn, provider, claim, trip[:remember] == true)
 
           {conn, {:error, reason}} ->
             refuse(conn, provider, reason)
@@ -442,7 +444,7 @@ defmodule HiremeWeb.SignInController do
         Accounts.sign_in_with(
           :email,
           %{subject: "dev@localhost", display: "dev@localhost"},
-          meta(conn)
+          Map.put(meta(conn), :remember, true)
         )
 
       conn |> Auth.sign_in(token) |> redirect(to: "/")
@@ -453,8 +455,8 @@ defmodule HiremeWeb.SignInController do
   defp here?(conn, account_id),
     do: match?(%{id: ^account_id}, conn.assigns.account) and not conn.assigns.pending
 
-  defp enter(conn, provider, claim) do
-    case Accounts.sign_in_with(provider, claim, meta(conn)) do
+  defp enter(conn, provider, claim, remember) do
+    case Accounts.sign_in_with(provider, claim, Map.put(meta(conn), :remember, remember)) do
       {:ok, token, _session} ->
         conn |> Auth.sign_in(token) |> redirect(to: "/")
 
@@ -517,10 +519,16 @@ defmodule HiremeWeb.SignInController do
       <button type="submit" class="primary">Send a sign-in link</button>
     </form>
     #{if providers != [], do: ~s(<p class="or">or</p>)}
-    #{Enum.map_join(providers, "\n", &~s(<a class="ghost method" href="/auth/#{&1}">Continue with #{SignIn.label(&1)}</a>))}
+    #{if providers != [], do: ~s(<form method="get" class="method">#{remember_box()}#{Enum.map_join(providers, "\n", &~s(<button type="submit" class="ghost method" formaction="/auth/#{&1}">Continue with #{SignIn.label(&1)}</button>))}</form>)}
     #{dev_sign_in()}
     """)
   end
+
+  # Ticked unless untouched: this browser stays signed in for 30 days from
+  # its last use, at most 90 (Hireme.Security.session_idle/1).
+  defp remember_box,
+    do:
+      ~s(<label class="check"><input type="checkbox" name="remember" value="1" checked /> Remember this device for 30 days</label>)
 
   defp sentence([one]), do: one
   defp sentence([one, two]), do: "#{one} or #{two}"

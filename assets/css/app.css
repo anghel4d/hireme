@@ -318,8 +318,10 @@ main.auth-card form.method { display: flex; flex-direction: column; gap: 10px; m
 main.auth-card form.method label { width: 100%; }
 main.auth-card form.method input { width: 100%; }
 main.auth-card button.primary { width: 100%; padding: 8px 12px; }
-main.auth-card a.ghost.method {
+main.auth-card .ghost.method {
   display: block;
+  width: 100%;
+  font-size: 14px;
   text-align: center;
   padding: 8px 12px;
   margin: 0 0 8px;
@@ -327,7 +329,7 @@ main.auth-card a.ghost.method {
   border-radius: var(--radius);
   color: var(--ink);
 }
-main.auth-card a.ghost.method:hover { background: var(--sunk); text-decoration: none; }
+main.auth-card .ghost.method:hover { background: var(--sunk); text-decoration: none; }
 main.auth-card p.or { text-align: center; color: var(--muted); font-size: 12px; margin: 12px 0; }
 main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); background: var(--sunk); border-left: 3px solid var(--warn); }
 #factor-error:empty { display: none; }

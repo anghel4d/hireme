@@ -9,7 +9,7 @@
 import { ENUMS } from "../gen/schema.ts"
 import { failed, application, command, ids, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
-import { item, model, notice, set, type FocusView } from "../state.ts"
+import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
 import { rowHref } from "./world.ts"
 
 type Doc = {
@@ -164,6 +164,8 @@ function prose(a: Row, appId: number): Html {
           <textarea name="value" rows="10" data-autofocus>${v().editText.startsWith("\n") ? `\n${v().editText}` : v().editText}</textarea>
           <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
       : html`<section class="card" data-key="p-${f}"><h2>${title} <button type="button" class="ghost" data-act="edit" data-field="${f}">${t !== "" ? "Edit" : "Write"}</button></h2>
+          ${drafts.get(`app:${appId}:${f}`) ? html`<p class="notice" data-key="kept">An unsaved edit of this is kept in this browser.
+            <button type="button" data-act="edit" data-field="${f}" data-kept>Resume it</button> <button type="button" class="ghost" data-act="drop-kept" data-field="${f}">Discard</button></p>` : EMPTY}
           ${t !== "" ? html`<p class="notes">${t}</p>` : html`<p class="hint">No ${title} yet.</p>`}</section>`
   })}`
 }
@@ -276,6 +278,13 @@ function copy(button: HTMLElement, text: string): void {
   navigator.clipboard.writeText(text).then(() => done(true), () => done(false))
 }
 
+// A prose edit is kept as it is typed, with the rev it was begun on, until saved or discarded.
+addEventListener("input", (ev) => {
+  const form = (ev.target as Element | null)?.closest?.<HTMLFormElement>('form[data-act="save-prose"]')
+  const text = form?.querySelector("textarea")?.value
+  if (form && text !== undefined) drafts.set(`app:${form.dataset.id}:${form.dataset.field}`, { text, rev: v().editRev })
+})
+
 // ------------------------------------------------------------------ actions
 
 /** An application's actions, on application `appId` unless the control names its own. */
@@ -311,15 +320,21 @@ export function act(name: string, el: HTMLElement, appId_: number): void {
       const d = application(appId) as Doc | null
       const field = el.dataset.field ?? ""
       if (!d) return
-      return patch({ id: appId, edit: field, editRev: Number(d.application.rev ?? 0), editText: textOf(d.application[field]) })
+      // A kept edit resumes against the rev it was begun on, so a write since is still refused, not overwritten.
+      const kept = el.dataset.kept !== undefined ? drafts.get<{ text: string; rev: number }>(`app:${appId}:${field}`) : null
+      return patch({ id: appId, edit: field, editRev: kept?.rev ?? Number(d.application.rev ?? 0), editText: kept?.text ?? textOf(d.application[field]) })
     }
+    case "drop-kept":
+      drafts.drop(`app:${appId}:${el.dataset.field ?? ""}`)
+      return patch({})
     case "cancel":
+      drafts.drop(`app:${appId}:${v().edit}`)
       return patch({ edit: "" })
     case "save-prose": {
       const field = el.dataset.field ?? ""
       // The edit was made against the row's rev when the form opened; a write since then is refused, not overwritten.
       return void put("applications", { [field]: (f.value ?? "") === "" ? null : (f.value as Input) }, { id: appId, expectRev: v().editRev })
-        .then(() => patch({ edit: "" }))
+        .then(() => (drafts.drop(`app:${appId}:${field}`), patch({ edit: "" })))
         .catch(failed)
     }
     case "note":

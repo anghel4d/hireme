@@ -19,6 +19,13 @@ defmodule HiremeWeb.ConnCase do
 
   setup tags do
     Hireme.DataCase.setup_sandbox(tags)
+    # A page load boots its account's sequencer, which outlives the test; the
+    # next test's account takes the same id, so each goes before its sandbox.
+    ExUnit.Callbacks.on_exit(fn ->
+      for {_, pid, _, _} <- DynamicSupervisor.which_children(Hireme.Sequencer.Dynamic),
+          do: DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
+    end)
+
     Hireme.DataCase.fresh_window(tags[:window])
     {:ok, conn: build_conn()}
   end
@@ -63,9 +70,10 @@ defmodule HiremeWeb.ConnCase do
 
   @doc """
   The mailed-link ceremony for `email`: the link asked for, its GET shown,
-  only its POST spent. Answers the signed-in conn and the token, now spent.
+  only its POST spent (with `confirm`'s fields, e.g. remember). Answers the
+  signed-in conn and the token, now spent.
   """
-  def email_sign_in(conn, email) do
+  def email_sign_in(conn, email, confirm \\ %{}) do
     page = get(conn, "/sign-in")
     ask = %{"email" => email, "_csrf_token" => csrf(page)}
     assert html_response(page |> recycle() |> post("/sign-in/email", ask), 200) =~ "on its way"
@@ -74,7 +82,7 @@ defmodule HiremeWeb.ConnCase do
     token = URI.decode_www_form(token)
     shown = get(build_conn(), "/sign-in/email", %{"token" => token})
     assert html_response(shown, 200) =~ "Sign in as #{email}?"
-    confirm = %{"token" => token, "_csrf_token" => csrf(shown)}
+    confirm = Map.merge(confirm, %{"token" => token, "_csrf_token" => csrf(shown)})
     signed = shown |> recycle() |> post("/sign-in/email/confirm", confirm)
     assert redirected_to(signed) == "/"
     {signed, token}
