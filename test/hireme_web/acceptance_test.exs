@@ -116,11 +116,16 @@ defmodule HiremeWeb.AcceptanceTest do
        %{conn: conn, port: port} do
     browser = browser(conn, port)
 
+    {:ack, corp} =
+      WireClient.put(browser, op(:put, :corporations, %{domain: "co.example", name: "Co"}))
+
+    linked = %{corporation_id: corp, work_mode: :remote}
+
     for i <- 1..20 do
       {:ack, _} =
         WireClient.put(
           browser,
-          op(:put, :applications, %{company: "Company #{i}", role: "Engineer"})
+          op(:put, :applications, Map.merge(linked, %{company: "Company #{i}", role: "Engineer"}))
         )
     end
 

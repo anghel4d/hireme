@@ -348,6 +348,24 @@ IO.puts(:stderr, "bench: account #{account_id} on #{database}, seed #{seed}")
 # are what a burst costs a subscriber.
 watcher = Bench.watcher(Accounts.ticket(session))
 
+## Seed 1,000 corporations: every application links one.
+
+op =
+  1..1_000
+  |> Enum.chunk_every(256)
+  |> Enum.reduce(op, fn chunk, op ->
+    ops =
+      for k <- chunk,
+          do: Bench.put(:corporations, %{domain: "c#{k}.example", name: "Company #{k}"})
+
+    {_frames, op} = Bench.send_ops(op, Codec.encode_ops(ops), length(ops))
+    op
+  end)
+
+corp_ids =
+  Hireme.Repo.all(from(c in Hireme.Rows.Corporation, select: c.id, order_by: c.id))
+  |> List.to_tuple()
+
 ## Seed 10k applications, 256 ops per OPS frame, each with its raw listing.
 
 {seed_us, {op, patch_sizes, frame_us}} =
@@ -359,6 +377,8 @@ watcher = Bench.watcher(Accounts.ticket(session))
         for i <- chunk do
           Bench.put(:applications, %{
             company: "Company #{rem(i * 7919, 9973)}",
+            corporation_id: elem(corp_ids, rem(i * 7919, tuple_size(corp_ids))),
+            work_mode: :remote,
             role:
               "#{Enum.random(~w(Staff Senior Principal Lead))} #{Enum.random(~w(Platform Systems Runtime Infra Data))} Engineer #{i}",
             location:

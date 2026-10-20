@@ -79,7 +79,10 @@ defmodule HiremeWeb.AgentAttackTest do
       )
 
     {[app], []} =
-      run(a.id, op(:put, :applications, %{company: "Seed", role: "R", notes: "operator notes"}))
+      run(
+        a.id,
+        app(%{company: "Seed", role: "R", notes: "operator notes", corporation_id: corp.id})
+      )
 
     {[profile], []} =
       run(
@@ -482,7 +485,7 @@ defmodule HiremeWeb.AgentAttackTest do
 
   test "a JSON cell's integers fit an i64: a bignum cannot hold the writer for seconds",
        %{port: port, session: s, account: a} do
-    {[app], []} = run(a.id, op(:put, :applications, %{company: "J", role: "R"}))
+    {[app], []} = run(a.id, app(%{company: "J", role: "R"}))
     c = leased(port, s)
     t = Schema.table(:applications)
     notes = Enum.find(t.cols, &(&1.name == "stage_notes"))
