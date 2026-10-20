@@ -372,6 +372,9 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .app-card:hover { border-color: var(--muted); }
 /* How many applications look like this posting (desk.ts duplicates). */
 .app-card .dupes { color: var(--warn); font-weight: 600; margin: 0 auto 0 8px; }
+/* No world corporation (or place, unless remote) links to this application yet: the judge's unlinked rule. */
+.app-card .unlinked { color: var(--bad); font-size: 11px; font-weight: 600; margin-right: 8px; }
+.toolbar button.on { color: var(--accent); border-color: var(--accent); }
 /* A group-by's band across the board: the group, its count, and for duplicates the one click that cleans up. */
 .group-head { position: absolute; top: 0; left: 0; height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .group-head button { margin-left: auto; font-size: 12px; color: var(--warn); border-color: var(--warn); }
