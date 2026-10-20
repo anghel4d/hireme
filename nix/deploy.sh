@@ -4,7 +4,10 @@
 #
 # The workstation builds the release from this flake at a pushed revision,
 # read from this checkout (the repository is private, so nothing fetches
-# from GitHub), copies the closures over the YubiKey SSH master, and on
+# from GitHub), runs its dev check (checks.dev: a VM, and the /mcp outage
+# of 2026-10-20 replayed through the module's nginx; a revision that fails
+# it never ships, and there is no flag to skip it: an emergency is a profile
+# rollback), copies the closures over the YubiKey SSH master, and on
 # the host: takes an online SQLite backup, flips
 # /nix/var/nix/profiles/hireme, switches the system when asked, and restarts
 # hireme (the node migrates at boot, drains its sessions on the way down and
@@ -71,7 +74,7 @@ short=${rev:0:12}
 say "revision $short"
 flake="git+file://$repo?rev=$rev"
 
-# 2. Build the release here, and the host when switching.
+# 2. Build the release here, and the host when switching; check the revision.
 nix build -o "$outLink" "$flake#hireme"
 release=$(readlink -f "$outLink")
 test -x "$release/bin/hireme" -a -x "$release/bin/hireme-gate" || die "$release lacks bin/hireme or bin/hireme-gate"
@@ -80,6 +83,8 @@ if ((switch)); then
   system=$(nix build --no-link --print-out-paths --override-input hireme "$flake" "$server#nixosConfigurations.$hostAttr.config.system.build.toplevel")
   say "system $system"
 fi
+nix build --no-link "$flake#checks.x86_64-linux.dev" || die "the dev check failed at $short; nix log names why"
+say "dev check passed"
 
 if ((buildOnly)); then
   say "built only; nothing shipped"

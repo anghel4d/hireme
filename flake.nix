@@ -128,7 +128,9 @@
 
         # The dev profile: the module on a VM with generated secrets and a
         # self-signed gate; the node applies its schema at boot, backs up,
-        # supervises the gate, and keeps its data across a restart.
+        # supervises the gate, and keeps its data across a restart. Behind
+        # the public host's nginx (plain HTTP here), /mcp outlives the
+        # morning that took it down on 2026-10-20 (nix/mcp-replay.py).
         dev = pkgs.testers.runNixOSTest {
           name = "hireme-dev";
           nodes.machine = {
@@ -145,10 +147,21 @@
             environment.systemPackages = [
               pkgs.sqlite
               pkgs.psmisc
+              pkgs.python3
             ];
+            environment.etc."hireme/mcp-replay.py".source = ./nix/mcp-replay.py;
+            services.nginx.virtualHosts.localhost = {
+              enableACME = lib.mkForce false;
+              forceSSL = lib.mkForce false;
+            };
             services.hireme = {
               enable = true;
               domain = "localhost";
+              release = "${hireme}";
+              public = {
+                enable = true;
+                acmeEmail = "hireme@localhost";
+              };
               environmentFile = "/var/lib/hireme-dev/env";
               gate = {
                 enable = true;
@@ -175,58 +188,86 @@
               '';
             };
           };
-          testScript = ''
-            machine.wait_for_unit("hireme.service")
-            machine.wait_for_open_port(4000)
-            machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/sign-in")
+          testScript =
+            { nodes, ... }:
+            ''
+              import re
 
-            # The node applied the baseline at boot and took its first backup.
-            machine.succeed("sqlite3 /var/lib/hireme/hireme.db \"select name from schema_files\" | grep -qx 0000_baseline")
-            machine.succeed("sqlite3 /var/lib/hireme/hireme.db 'select count(*) from accounts'")
-            machine.wait_until_succeeds("ls /var/lib/hireme/backups/hireme-v2-*.db")
+              machine.wait_for_unit("hireme.service")
+              machine.wait_for_open_port(4000)
+              machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/sign-in")
 
-            # The operator's and the deploy's way in: an rpc over loopback
-            # distribution, with the unit's environment.
-            machine.succeed(
-                "systemd-run --quiet --wait --pipe --uid=hireme --gid=hireme"
-                " -p EnvironmentFile=/var/lib/hireme-dev/env"
-                " -E HOME=/var/lib/hireme -E RELEASE_TMP=/var/lib/hireme/tmp"
-                " -E ERL_EPMD_ADDRESS=127.0.0.1 -E RELEASE_DISTRIBUTION=name -E RELEASE_NODE=hireme@127.0.0.1"
-                " $(systemctl show -P ExecStart hireme | grep -o '/nix/store/[^ ]*/bin/hireme' | head -1) rpc 'IO.puts(:ok)'"
-                " | grep -qx ok"
-            )
-            listening = machine.succeed("ss -Htlpn").splitlines()
-            exposed = [l for l in listening if (":4369" in l or "beam" in l) and not ("127.0.0.1:" in l or "[::1]:" in l)]
-            assert not exposed, f"epmd or the node listens off loopback: {exposed}"
+              # The node applied the baseline at boot and took its first backup.
+              machine.succeed("sqlite3 /var/lib/hireme/hireme.db \"select name from schema_files\" | grep -qx 0000_baseline")
+              machine.succeed("sqlite3 /var/lib/hireme/hireme.db 'select count(*) from accounts'")
+              machine.wait_until_succeeds("ls /var/lib/hireme/backups/hireme-v2-*.db")
 
-            # The page ships the kernel the release was built with.
-            machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/wasm/kernel.wasm")
+              # The operator's and the deploy's way in: an rpc over loopback
+              # distribution, with the unit's environment.
+              def rpc(expr):
+                  return machine.succeed(
+                      "systemd-run --quiet --wait --pipe --uid=hireme --gid=hireme"
+                      " -p EnvironmentFile=/var/lib/hireme-dev/env"
+                      " -E HOME=/var/lib/hireme -E RELEASE_TMP=/var/lib/hireme/tmp"
+                      " -E ERL_EPMD_ADDRESS=127.0.0.1 -E RELEASE_DISTRIBUTION=name -E RELEASE_NODE=hireme@127.0.0.1"
+                      f" $(systemctl show -P ExecStart hireme | grep -o '/nix/store/[^ ]*/bin/hireme' | head -1) rpc '{expr}'"
+                  ).strip()
 
-            # The gate is the node's child, on a high port, as the node's user,
-            # with no capability, pinned by hash.
-            machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
-            gate = machine.succeed("ps -o user= -p $(pgrep hireme-gate)").split()
-            node = machine.succeed("systemctl show -P MainPID hireme").strip()
-            assert gate[0] == "hireme", f"the gate runs as {gate[0]}"
-            caps = machine.succeed("grep CapEff /proc/$(pgrep hireme-gate)/status").split()[1]
-            assert int(caps, 16) == 0, f"the gate holds capabilities {caps}"
-            machine.succeed(f"pstree -p {node} | grep -q hireme-gate")
-            machine.succeed("grep -Eq '^[0-9a-f]{64}$' /run/hireme/gate.hash")
+              assert rpc("IO.puts(:ok)") == "ok"
+              listening = machine.succeed("ss -Htlpn").splitlines()
+              exposed = [l for l in listening if (":4369" in l or "beam" in l) and not ("127.0.0.1:" in l or "[::1]:" in l)]
+              assert not exposed, f"epmd or the node listens off loopback: {exposed}"
 
-            # A gate that dies is started again by the node.
-            old = machine.succeed("pgrep hireme-gate").strip()
-            machine.succeed(f"kill -9 {old}")
-            machine.wait_until_succeeds(f"pgrep hireme-gate | grep -vx {old}")
+              # The page ships the kernel the release was built with.
+              machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/wasm/kernel.wasm")
 
-            # Stopping the node stops the gate; restarting keeps the data and
-            # applies nothing twice.
-            machine.succeed("systemctl stop hireme")
-            machine.fail("pgrep hireme-gate")
-            machine.succeed("systemctl start hireme")
-            machine.wait_for_open_port(4000)
-            machine.wait_until_succeeds("sqlite3 /var/lib/hireme/hireme.db \"select count(*) from schema_files where name = '0000_baseline'\" | grep -qx 1")
-            machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
-          '';
+              # The gate is the node's child, on a high port, as the node's user,
+              # with no capability, pinned by hash.
+              machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
+              gate = machine.succeed("ps -o user= -p $(pgrep hireme-gate)").split()
+              node = machine.succeed("systemctl show -P MainPID hireme").strip()
+              assert gate[0] == "hireme", f"the gate runs as {gate[0]}"
+              caps = machine.succeed("grep CapEff /proc/$(pgrep hireme-gate)/status").split()[1]
+              assert int(caps, 16) == 0, f"the gate holds capabilities {caps}"
+              machine.succeed(f"pstree -p {node} | grep -q hireme-gate")
+              machine.succeed("grep -Eq '^[0-9a-f]{64}$' /run/hireme/gate.hash")
+
+              # A gate that dies is started again by the node.
+              old = machine.succeed("pgrep hireme-gate").strip()
+              machine.succeed(f"kill -9 {old}")
+              machine.wait_until_succeeds(f"pgrep hireme-gate | grep -vx {old}")
+
+              # Stopping the node stops the gate; restarting keeps the data and
+              # applies nothing twice.
+              machine.succeed("systemctl stop hireme")
+              machine.fail("pgrep hireme-gate")
+              machine.succeed("systemctl start hireme")
+              machine.wait_for_open_port(4000)
+              machine.wait_until_succeeds("sqlite3 /var/lib/hireme/hireme.db \"select count(*) from schema_files where name = '0000_baseline'\" | grep -qx 1")
+              machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
+
+              # The public host's location, as fsn1-2 runs it: a CV file's body
+              # (the node reads 64 MiB), answers under Cloudflare's 100 s (the
+              # node's wait is 90 s), event streams unbuffered.
+              conf = machine.succeed("cat $(systemctl show -P ExecStart nginx | grep -o \"/nix/store/[^ ']*nginx.conf\" | head -1)")
+              [location] = re.findall(r"location / \{(.*?)\n\s*\}", conf, re.S)
+              timeouts = [int(t) for t in re.findall(r"proxy_read_timeout (\d+)s;", location)]
+              assert "client_max_body_size 64m;" in location and "proxy_buffering off;" in location, location
+              assert timeouts and min(timeouts) >= 90, location
+
+              # The /mcp outage of 2026-10-20, through that nginx from the
+              # machine's own address: the node sees a visitor, not its proxy.
+              key = rpc(
+                  '{:ok, _, s} = Hireme.Accounts.sign_in_with(:email, %{subject: "replay@localhost", display: "replay@localhost"}, %{ip: "127.0.0.1"});'
+                  " m = Hireme.Grants.all();"
+                  ' {:ok, %{secret: k}} = Hireme.Keys.mint(s, "replay", %{read_mask: m, write_mask: m, may_delete: true});'
+                  " IO.puts(k)"
+              )
+              machine.wait_for_open_port(80)
+              status, replay = machine.execute(f"python3 /etc/hireme/mcp-replay.py ${nodes.machine.networking.primaryIPAddress} {key}")
+              assert status == 0, replay
+              print(replay)
+            '';
         };
       };
 
