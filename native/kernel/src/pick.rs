@@ -253,6 +253,22 @@ impl Facts for AppFacts<'_> {
         let me_s = |c: u16| self.me().and_then(|(m, x)| m.str(x, c));
         let me_u = |c: u16| self.me().and_then(|(m, x)| m.u32(x, c));
         match mask::FIELDS.get(field)?.path {
+            "id" => Some(Val::Num(id as f64)),
+            "no" => t.u32(id, A::NO).map(|v| Val::Num(v as f64)),
+            "place" => self.place().and_then(|(pt, p)| pt.str(p, col::places::NAME)).map(|v| Val::Text(Cow::Borrowed(v))),
+            "company.parent" => {
+                let (ct, c) = self.corp()?;
+                let parent = ct.u32(c, col::corporations::PARENT_ID).filter(|p| ct.has(*p))?;
+                ct.str(parent, col::corporations::NAME).map(|v| Val::Text(Cow::Borrowed(v)))
+            }
+            "office" => {
+                let (corp, place) = (t.u32(id, A::CORPORATION_ID)?, t.u32(id, A::PLACE_ID)?);
+                self.rows
+                    .each(table::OFFICES)
+                    .find(|(ot, o)| ot.u32(*o, col::offices::CORPORATION_ID) == Some(corp) && ot.u32(*o, col::offices::PLACE_ID) == Some(place))
+                    .and_then(|(ot, o)| ot.u32(o, col::offices::KIND))
+                    .map(Val::Enum)
+            }
             "company" => s(A::COMPANY),
             "role" => s(A::ROLE),
             "location" => s(A::LOCATION),
@@ -320,4 +336,53 @@ impl Picks {
         let by = rows.table(table::APPLICATIONS).map_or_else(BTreeMap::new, |t| t.ids().iter().map(|&id| (id, pick(rows, &arms, id))).collect());
         Picks { arms, by }
     }
+}
+
+/// A field's value as JSON: enums by name, days as dates, lists as arrays.
+fn json_of(v: &Val<'_>, ty: mask::Ty) -> Json {
+    match v {
+        Val::Bool(b) => json!(b),
+        Val::Text(s) | Val::Code(s) => json!(s),
+        Val::Num(n) => json!(n),
+        Val::Day(d) => json!(crate::day_iso(*d)),
+        Val::Enum(i) => {
+            let e = match ty {
+                mask::Ty::Enum(e) | mask::Ty::Enums(e) => e,
+                _ => "",
+            };
+            mask::values(e).get(*i as usize).map_or(Json::Null, |n| json!(n))
+        }
+        Val::List(xs) => Json::Array(xs.iter().map(|x| json_of(x, ty)).collect()),
+    }
+}
+
+/// Every application's value of each field (ids in application order),
+/// columnar: one array per field, aligned with the ids.
+pub fn columns(rows: &Rows, fields: &[usize]) -> (Vec<u32>, Vec<Vec<Json>>) {
+    let Some(t) = rows.table(table::APPLICATIONS) else { return (Vec::new(), fields.iter().map(|_| Vec::new()).collect()) };
+    // The office at an application's place, by (corporation, place): one pass, not one per application.
+    let offices: BTreeMap<(u32, u32), u32> = if fields.iter().any(|&f| mask::FIELDS[f].path == "office") {
+        rows.each(table::OFFICES)
+            .filter_map(|(ot, o)| Some(((ot.u32(o, col::offices::CORPORATION_ID)?, ot.u32(o, col::offices::PLACE_ID)?), ot.u32(o, col::offices::KIND)?)))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let ids = t.ids().to_vec();
+    let cols = fields
+        .iter()
+        .map(|&f| {
+            let ty = mask::FIELDS[f].ty;
+            ids.iter()
+                .map(|&id| {
+                    if mask::FIELDS[f].path == "office" {
+                        let key = t.u32(id, A::CORPORATION_ID).zip(t.u32(id, A::PLACE_ID));
+                        return key.and_then(|k| offices.get(&k)).map_or(Json::Null, |&k| json_of(&Val::Enum(k), ty));
+                    }
+                    AppFacts::new(rows, t, id).read(f).map_or(Json::Null, |v| json_of(&v, ty))
+                })
+                .collect()
+        })
+        .collect();
+    (ids, cols)
 }

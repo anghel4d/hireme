@@ -23,6 +23,7 @@ pub mod heat;
 pub mod judge;
 pub mod keywords;
 pub mod lexicon;
+pub mod link;
 pub mod mask;
 pub mod org;
 pub mod pick;

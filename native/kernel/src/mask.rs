@@ -98,6 +98,8 @@ pub fn values(name: &str) -> &'static [&'static str] {
 
 /// Every field, in a fixed order: a field's index is its id in [`Facts::read`].
 pub const FIELDS: &[Field] = &[
+    Field { path: "id", ty: Ty::Num },
+    Field { path: "no", ty: Ty::Num },
     Field { path: "company", ty: Ty::Text },
     Field { path: "role", ty: Ty::Text },
     Field { path: "location", ty: Ty::Text },
@@ -111,12 +113,15 @@ pub const FIELDS: &[Field] = &[
     Field { path: "score", ty: Ty::Num },
     Field { path: "keywords", ty: Ty::Texts },
     Field { path: "listing_on", ty: Ty::Day },
+    Field { path: "place", ty: Ty::Text },
     Field { path: "country", ty: Ty::Code },
     Field { path: "city", ty: Ty::Text },
     Field { path: "region", ty: Ty::Text },
     Field { path: "subregion", ty: Ty::Text },
     Field { path: "company.domain", ty: Ty::Text },
     Field { path: "company.name", ty: Ty::Text },
+    Field { path: "company.parent", ty: Ty::Text },
+    Field { path: "office", ty: Ty::Enum("office_kind") },
     Field { path: "company.industry", ty: Ty::Text },
     Field { path: "company.sector", ty: Ty::Text },
     Field { path: "company.size", ty: Ty::Enum("size") },
@@ -779,7 +784,7 @@ pub fn catalog() -> &'static str {
         let fields: Vec<serde_json::Value> = FIELDS
             .iter()
             .map(|f| {
-                let mut o = serde_json::json!({"path": f.path, "type": f.ty.name()});
+                let mut o = serde_json::json!({"path": f.path, "label": f.path.replace(['.', '_'], " "), "type": f.ty.name()});
                 if let Some(e) = f.ty.elem() {
                     o["list_of"] = e.name().into();
                 }
