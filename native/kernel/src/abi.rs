@@ -273,7 +273,7 @@ impl Kernel {
         let t = self.rows.table(table::APPLICATIONS)?;
         let picked = self.pick(id);
         let root = picked.as_ref().and_then(|p| p.root);
-        let key = compose::cv_key(&self.rows, t, id, root);
+        let key = compose::cv_key(t, id, root);
         let cv = match self.cvs.get(&id) {
             Some((k, cv)) if *k == key => cv.clone(),
             _ => {

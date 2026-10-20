@@ -47,7 +47,10 @@ fn kernel() -> Kernel {
         .u32s(col::cv_roots::VERSION_ID, [30, 31, none, none].into_iter());
     b.done();
     let mut b = w.block(table::CV_VERSIONS, 2);
-    b.u32s(col::cv_versions::ID, [30, 31].into_iter()).u32s(col::cv_versions::ROOT_ID, [20, 21].into_iter()).u32s(col::cv_versions::N, [1, 1].into_iter());
+    b.u32s(col::cv_versions::ID, [30, 31].into_iter())
+        .u32s(col::cv_versions::ROOT_ID, [20, 21].into_iter())
+        .u32s(col::cv_versions::N, [1, 1].into_iter())
+        .strs(col::cv_versions::TEXT, ["# Ana\nRust, inference kernels.", "Payments infrastructure."].into_iter());
     b.done();
     let mut b = w.block(table::CV_MASKS, 1);
     b.u32s(col::cv_masks::ID, [50].into_iter()).strs(col::cv_masks::NAME, ["dach"].into_iter()).strs(col::cv_masks::PATTERN, ["[country in [DE, AT, CH]]"].into_iter());
@@ -258,4 +261,19 @@ fn a_key_without_the_cv_tables_in_its_mask_reads_no_picks() {
     let mut k = kernel();
     k.set_grants(Grants { human: false, read_mask: 0, write_mask: 0, may_delete: false });
     assert_eq!(k.query(&json!({"op": "cv_picks"})).unwrap_err().code, refusal::SCOPE);
+}
+
+#[test]
+fn the_application_shows_the_picked_file_version_and_reads_its_words() {
+    let mut k = kernel();
+    let doc = k.application(2).unwrap();
+    let file = &doc["cv"]["file"];
+    assert_eq!((&file["format"], &file["version_id"], &file["n"]), (&json!("markdown"), &json!(30), &json!(1)));
+    assert_eq!(file["text"], "# Ana\nRust, inference kernels.");
+    assert_eq!(doc["cv_pick"]["root"], 20);
+    // Pinned elsewhere, it shows that root's version instead.
+    k.predict(&pick_cv(2, 21), &ctx(true)).unwrap();
+    assert_eq!(k.application(2).unwrap()["cv"]["file"]["text"], "Payments infrastructure.");
+    // The default, a composition, has no file.
+    assert_eq!(k.application(4).unwrap()["cv"]["file"], Json::Null);
 }
