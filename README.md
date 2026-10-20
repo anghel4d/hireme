@@ -22,7 +22,7 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   (`assets/js/gen/schema.ts`). `mix hireme.schema --check` fails when a
   checked-in output is stale.
 - **One kernel, three places.** `native/kernel` holds every desk rule
-  (pipeline, heat, score, keywords, CV, board, atlas, lanes) and judges every
+  (pipeline, heat, score, keywords, CV, board, atlas) and judges every
   domain write. The browser runs it as WebAssembly and the server's
   sequencer calls it as a NIF (which also answers MCP's reads), so a
   client's prediction and the server's verdict are one function.
@@ -33,7 +33,7 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   enum.
 - **One wire.** Binary frames over WebTransport (the gate) or a WebSocket at
   `/wire`. Tables the kernel derives from (applications, events, batches,
-  the CV corpus, settings, the lanes, the world and the mail) are resident:
+  the CV corpus, settings, the world and the mail) are resident:
   `BOOT` sends them whole, `PATCH` keeps them current, and every read is
   the client's own replica.
 - **Provenance.** Every metric carries the day it is true as of, every prose
@@ -114,7 +114,7 @@ holds for it.
    only* (the default: it reads every domain and writes none, so an agent
    with it cannot `put`; an agent that adds or changes data needs *Read and
    write*), *Write only*, *Read and write*, or *Custom*, which
-   shows a read and a write checkbox for each of world, desk, mail, lanes
+   shows a read and a write checkbox for each of world, desk, mail
    and corpus. *may delete rows* is a separate permission. Minting, widening
    a key and allowing deletes need a factor from the last few minutes: the
    lens asks for one (passkey, authenticator code or a recovery code) when

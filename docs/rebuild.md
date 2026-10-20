@@ -56,7 +56,7 @@ It repeals every decision made only to avoid churn. Names are re-chosen:
 | `kv_pairs` | `settings` | one typed row, not a key/value soup |
 | `narratives` | `profiles.narrative` | one holder, one profile |
 | `cv_variants` | `applications.cv_theme` | a theme, not a table |
-| `gym_problems` | fat `gym_reps` | a problem is a `(platform, slug)` |
+| `gym_problems`, `gym_reps`, `net_entries` | gone | the lanes went with their lens |
 | `claims`, squads, snapshots | gone | campaign scaffolding with no reader |
 | `atlas_weights` command | `put` on `me` | weights are a row |
 | 13 positional op kinds | `put`, `drop`, `command` | one op grammar |
@@ -99,7 +99,6 @@ One page, one wire session, lenses in the address:
 | `world` | corporations and places as sortable sparse grids; every cell shows its `_on` and opens its citations; edits write through `put` |
 | `atlas` | every country and city ordered for the person behind the account (`me`: citizenships, permits held, languages, the countries wanted or never wanted, weights over any figure of `places`); each figure shown as itself with its `_on` and citations; the order only sorts |
 | `outreach` | contacts and message threads, tied to corporations and applications |
-| `lanes` | gym (reps, target, streak) and net (observer runs, artifacts, posts, drafts) |
 | `account` | identities, factors, sessions, keys with masks, live leases with revoke, trusted hosts |
 
 HTTP-only ceremonies: sign-in (email link, GitHub, X) and the factor
@@ -117,7 +116,7 @@ that can name them without a language owning them.
 `priv/wire/schema.txt`:
 
 ```
-domain world desk mail lanes corpus system
+domain world desk mail corpus system
 
 table places world server
   natural iso2 where kind = 'country'
@@ -248,7 +247,7 @@ its level).
 | `batches` | `code`, `ordinal`, `kind`, `status`, `fire`, `target_size`, `queued_on`, `note` |
 | `cv_lineages` | per corporation: `corporation_id`, `generation`, `opened_on`, `rewrites_allowed`, `theme` |
 | `cv_overlays` | `application_id`, `item_id`, `lineage_id`, `mode`, `title`, `body`, `reason`, `generation` |
-| `settings` | one fat typed row per account: `gym_target`, `net_lane_url`, `goal_total`, `goal_on`, `goal_daily`, `heat_config` (json) |
+| `settings` | one fat typed row per account: `goal_total`, `goal_on`, `goal_daily`, `heat_config` (json) |
 
 No parsed listing columns. `keywords` is the kernel's extraction from
 `listing_raw`, written once at write time and versioned, and it is what
@@ -276,18 +275,12 @@ is operator-owned, browser plus step-up, in no key's mask.
 `message_id` natural key, `thread_key`, `sent_at`, `status`,
 links to corporation, application, contact). No tracking pixels.
 
-### `lanes` — resident
-
-`gym_reps` (fat: platform, slug, title, topic, difficulty, url, done_on,
-minutes, outcome, note) and `net_entries` (kind, channel, title, url,
-body, shipped_on).
-
 Derived on the wire, never stored: `leases` (session label, key, held
 application ids, since), `clock`, `catalog`.
 
 Gone with no successor: `claims`, squads, `scoreboard_snapshots`,
-`application_event`. Folded into a successor (see the rename table):
-`kv_pairs`, `cv_variants`, `narratives`, `gym_problems`, `employers`,
+`application_event`, the lanes. Folded into a successor (see the rename table):
+`kv_pairs`, `cv_variants`, `narratives`, `employers`,
 `geography_*`, `freshness_verdicts`.
 
 ## Wire v2
@@ -372,7 +365,6 @@ Kernel modules, one owner each:
 | `cv.rs` | a CV composed from items through the lineage's overlays |
 | `board.rs` | order, filter, select, search, keyboard geometry |
 | `atlas.rs` | route, language match, the person's weighted figures ranked within kind, the order — the only copy |
-| `lanes.rs` | gym streak, pace, today; net counts |
 | `text.rs` | Unicode-safe normalising and folding every text reader shares |
 | `compose.rs` | the documents the focus lens and the MCP read |
 | `abi.rs` | wasm exports; native facade for the NIF and MCP |
@@ -508,7 +500,7 @@ cap it is still acknowledged.
   liveness is the carrier and PING/PONG (15 s / 45 s, stated in
   `SECURITY.md`).
 - **Keys**: `read_mask`, `write_mask` over world 1, desk 2, mail 4,
-  lanes 8, corpus 16; `may_delete`. Presets: read only, write only,
+  corpus 8; `may_delete`. Presets: read only, write only,
   read/write, custom. Mint, widen and `may_delete` need step-up; a change
   sends `BYE grants`. `system` tables, `citations` and `trusted_hosts` are
   in no mask. A key never mints keys.
@@ -546,7 +538,7 @@ assets/
     kernel.ts     wasm bindings over gen/schema.ts
     state.ts      model: address, lens, selection, notices
     morph.ts      escaping templates and keyed DOM morph
-    lenses/desk.ts focus.ts world.ts atlas.ts outreach.ts lanes.ts account.ts
+    lenses/desk.ts focus.ts world.ts atlas.ts outreach.ts me.ts trail.ts account.ts
     auth/factor.ts webauthn.ts   (sign-in itself is plain HTML forms)
     gen/schema.ts emitted
 ```
@@ -631,7 +623,7 @@ behind. A v2 file may carry text quarried from v1, as the operator allowed:
 | `lib/hireme/letterbox.ex` | `lease.ex` |
 | `lib/hireme/api_keys.ex` | `keys.ex` |
 | `lib/hireme/cv.ex` | `native/kernel/src/cv.rs` + puts on `profiles`/`items` |
-| `lib/hireme/gym.ex`, `net.ex` | puts on `gym_reps`/`net_entries` + `kernel/lanes.rs` |
+| `lib/hireme/gym.ex`, `net.ex` | gone with the lanes |
 | `lib/hireme/import.ex` | `import.ex` (rewritten over put) |
 | `lib/hireme/mailer.ex`, `cloudflare_mail.ex` | `mail.ex` |
 | `lib/hireme/{accounts,security,audit,release}.ex`, `mfa/*` | same roles, rewritten |

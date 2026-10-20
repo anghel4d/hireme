@@ -10,7 +10,7 @@ call site names the policy it applies, never a number.
 
 ## Threat model
 
-Assets: an account's rows (applications, CVs, lanes, the world and mail it
+Assets: an account's rows (applications, CVs, the world and mail it
 has gathered), its sessions, factors and keys. Actors: a browser signed in
 to the account; an agent holding one of its API keys, possibly confused or
 prompt-injected by the text it reads; and everyone else. Answered here: a
@@ -29,7 +29,7 @@ account is known (a session or key resolved by its secret, a magic link)
 say `skip_account: true` on purpose. A session or key yields exactly one
 account, and no request path sets the account from user input. One
 sequencer per account is the only writer of the account's desk, world,
-mail, lanes and corpus rows; its `system` rows are written by the modules
+mail and corpus rows; its `system` rows are written by the modules
 that own them (accounts, keys, factors, the trail, the outbox). A key's
 replica and sequencer are its account's, and an MCP session id is good only
 under the key that opened it, so another account's ids, natural keys,
@@ -135,8 +135,8 @@ wire session's HELLO, never in a URL; every failure looks the same, and a
 peer is limited in failed attempts per minute (a throttled HELLO is told
 to retry later; successes never spend the budget).
 
-What a key may do is two masks over the five domains, world 1, desk 2,
-mail 4, lanes 8, corpus 16, and `may_delete`:
+What a key may do is two masks over the four domains, world 1, desk 2,
+mail 4, corpus 8, and `may_delete`:
 
 - `read_mask` bounds BOOT and PATCH: a table outside it is never sent,
   and every read is the client's own replica of what was sent.
