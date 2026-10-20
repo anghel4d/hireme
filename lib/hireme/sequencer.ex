@@ -1533,18 +1533,28 @@ defmodule Hireme.Sequencer do
   defp insert(table, values, ctx) do
     now = ctx.turn.now
 
-    values =
-      values
-      |> derive(table.name, nil, ctx)
-      |> Map.merge(%{rev: 1, inserted_at: now, updated_at: now})
+    with {:ok, values} <- filed(table.name, derive(values, table.name, nil, ctx)) do
+      values = Map.merge(values, %{rev: 1, inserted_at: now, updated_at: now})
+      values = if table.global, do: values, else: Map.put(values, :account_id, Repo.account_id!())
 
-    values = if table.global, do: values, else: Map.put(values, :account_id, Repo.account_id!())
-
-    struct(Schema.row(table.name))
-    |> Ecto.Changeset.change(values)
-    |> Repo.insert()
-    |> landed(table, :all)
+      struct(Schema.row(table.name))
+      |> Ecto.Changeset.change(values)
+      |> Repo.insert()
+      |> landed(table, :all)
+    end
   end
+
+  # A CV version reads its text from its body, or from the file it names,
+  # which the account must hold (`Hireme.Blobs`).
+  defp filed("cv_versions", %{blob_sha: sha} = values) when is_binary(sha) do
+    case Hireme.Blobs.about(sha) do
+      nil -> {:refused, :blob_missing, %{table: "cv_versions", column: "blob_sha"}}
+      b -> {:ok, Map.merge(values, %{blob_type: b.type, blob_bytes: b.bytes, text: b.text})}
+    end
+  end
+
+  defp filed("cv_versions", values), do: {:ok, Map.put(values, :text, values[:body])}
+  defp filed(_table, values), do: {:ok, values}
 
   defp update(table, id, values, ctx) do
     row =
@@ -1575,7 +1585,7 @@ defmodule Hireme.Sequencer do
        %{table: table.name, errors: Map.new(cs.errors, fn {k, {msg, _}} -> {k, msg} end)}}
 
   # What the server writes and no writer may: a new application's number,
-  # a source's host, an event's author. (Metric dates and keywords are the
+  # a source's host, an event's or a CV version's author. (Metric dates and keywords are the
   # kernel's effects.)
   defp derive(values, "applications", nil, _ctx), do: Map.put(values, :no, next_no())
 
@@ -1591,6 +1601,17 @@ defmodule Hireme.Sequencer do
     |> Map.put(:actor, if(ctx.sub.key_id, do: :agent, else: :operator))
     |> Map.put(:key_id, ctx.sub.key_id)
     |> Map.put(:op_id, signed(ctx.op.op_id))
+  end
+
+  # A version is its root's next, by whom.
+  defp derive(%{root_id: root} = values, "cv_versions", nil, ctx) do
+    n = Repo.one(from(v in Hireme.Rows.CvVersion, where: v.root_id == ^root, select: max(v.n)))
+
+    Map.merge(values, %{
+      n: (n || 0) + 1,
+      actor: if(ctx.sub.key_id, do: :agent, else: :operator),
+      key_id: ctx.sub.key_id
+    })
   end
 
   defp derive(values, _table, _row, _ctx), do: values

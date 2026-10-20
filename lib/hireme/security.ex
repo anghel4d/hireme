@@ -127,6 +127,8 @@ defmodule Hireme.Security do
     oauth_global: {:timer.minutes(10), 300},
     # Renames of an account or its keys, each a trail row.
     renames: {:timer.minutes(10), 30},
+    # CV files stored per account (`HiremeWeb.Blobs`), each up to 10 MiB.
+    blob_writes: {:timer.minutes(10), 120},
     # Every other account.* call that writes the trail or mails a notice.
     account_writes: {:timer.minutes(10), 60},
     # Trail rows for an account's activity (agent op batches, key HELLOs,

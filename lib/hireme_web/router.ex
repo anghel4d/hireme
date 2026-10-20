@@ -78,6 +78,8 @@ defmodule HiremeWeb.Router do
        do: {:html, [:account], &PageController.shell/2}
 
   defp route("POST", ["api", "wire", "ticket"]), do: {:json, [:account], &PageController.ticket/2}
+  defp route("PUT", ["blobs"]), do: {:json, [:account], &HiremeWeb.Blobs.serve/2}
+  defp route("GET", ["blobs", _sha]), do: {:json, [:account], &HiremeWeb.Blobs.serve/2}
 
   # Adding a way in stays HTTP: it keeps its OAuth trip or the address it
   # expects in the cookie. Everything else on the account rides the wire.
@@ -163,4 +165,104 @@ defmodule HiremeWeb.PageController do
       |> Integer.to_string(16)
       |> String.pad_leading(4, "0")
       |> String.downcase()
+end
+
+defmodule HiremeWeb.Blobs do
+  @moduledoc """
+  A CV's files over HTTP (`Hireme.Blobs`). `PUT /blobs` takes the raw body
+  (pdf, docx or markdown by its Content-Type, at most 10 MiB) and answers
+  `{sha, bytes, type}`, 201 when new and 200 when the account held it;
+  `GET /blobs/<sha>` serves it back, named by `?name=` or the newest
+  version naming it, inline when a PDF. A browser comes through the router
+  (its session and CSRF token); a key comes first (`keyed/1`) and needs
+  the corpus bit, write to put and read to get.
+  """
+  import Bitwise
+  import Plug.Conn
+  import HiremeWeb, only: [json: 2]
+  alias Hireme.{Blobs, Grants, Schema, Security}
+
+  @doc "A request carrying a key, answered before the cookie and the body parsers."
+  def keyed(conn) do
+    ip = conn.remote_ip |> :inet.ntoa() |> to_string()
+    ["Bearer " <> secret | _] = get_req_header(conn, "authorization")
+
+    case Hireme.Keys.authenticate(String.trim(secret), ip) do
+      {:ok, key} ->
+        Hireme.Repo.put_account(key.account_id)
+        grants = Grants.key(key)
+        may? = if conn.method == "GET", do: &Grants.read?/2, else: &Grants.write?/2
+
+        if may?.(grants, Schema.table(:blobs)),
+          do: answer(conn, key.account_id),
+          else: conn |> put_status(403) |> json(%{error: "scope"})
+
+      {:error, :rate_limited} ->
+        send_resp(conn, 429, "")
+
+      :error ->
+        Security.strike(ip)
+
+        conn
+        |> put_resp_header("www-authenticate", ~s(Bearer realm="hireme"))
+        |> send_resp(401, "")
+    end
+  end
+
+  @doc "A browser's request, its session checked by the router."
+  def serve(conn, _params), do: answer(conn, conn.assigns.account.id)
+
+  defp answer(%{method: "PUT", path_info: ["blobs"]} = conn, account_id) do
+    type = conn |> get_req_header("content-type") |> List.first("") |> String.split(";") |> hd()
+
+    with :ok <- Security.limit(:blob_writes, account_id),
+         {:ok, bytes, conn} <- read_body(conn, length: Blobs.max(), read_length: 1 <<< 20),
+         {:ok, b} <- Blobs.put(account_id, bytes, type |> String.trim() |> String.downcase()) do
+      conn |> put_status(if(b.new, do: 201, else: 200)) |> json(Map.delete(b, :new))
+    else
+      {:error, :rate_limited} ->
+        conn |> put_status(429) |> json(%{error: "rate"})
+
+      {:more, _, conn} ->
+        conn |> put_status(413) |> json(%{error: "too_large"})
+
+      {:error, e} when e in [:type, :too_large, :cap] ->
+        conn |> put_status(status(e)) |> json(%{error: e})
+
+      {:error, _} ->
+        send_resp(conn, 400, "")
+    end
+  end
+
+  defp answer(%{method: "GET", path_info: ["blobs", sha]} = conn, account_id) do
+    conn = fetch_query_params(conn)
+
+    case Hireme.Repo.with_account(account_id, fn ->
+           {Blobs.about(sha, [:data]), Blobs.name(sha)}
+         end) do
+      {nil, _} ->
+        send_resp(conn, 404, "")
+
+      {b, newest} ->
+        name = conn.query_params["name"] || newest || sha
+        how = if b.type == "application/pdf", do: "inline", else: "attachment"
+        plain = String.replace(name, ~r/[^ -~]|["\\]/, "_")
+
+        conn
+        |> put_resp_content_type(b.type, nil)
+        |> put_resp_header(
+          "content-disposition",
+          ~s(#{how}; filename="#{plain}"; filename*=UTF-8''#{URI.encode(name, &URI.char_unreserved?/1)})
+        )
+        |> put_resp_header("x-content-type-options", "nosniff")
+        |> put_resp_header("cache-control", "private, max-age=31536000, immutable")
+        |> send_resp(200, b.data)
+    end
+  end
+
+  defp answer(conn, _account_id), do: send_resp(conn, 404, "")
+
+  defp status(:type), do: 415
+  defp status(:too_large), do: 413
+  defp status(:cap), do: 409
 end

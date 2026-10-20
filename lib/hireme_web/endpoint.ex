@@ -121,6 +121,7 @@ defmodule HiremeWeb.Endpoint do
   plug Plug.Logger
   plug :wire
   plug :mcp
+  plug :blobs
 
   # Pages post forms (urlencoded, carrying `_csrf_token`); scripts post JSON.
   plug Plug.Parsers,
@@ -174,6 +175,17 @@ defmodule HiremeWeb.Endpoint do
     do: conn |> HiremeWeb.Mcp.call() |> halt()
 
   defp mcp(conn, _opts), do: conn
+
+  # A CV file asked for with a key, like /mcp ahead of the cookie and the
+  # body parsers; a browser's goes on to the router.
+  defp blobs(%Plug.Conn{path_info: ["blobs" | _]} = conn, _opts) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      ["Bearer " <> _ | _] -> conn |> HiremeWeb.Blobs.keyed() |> halt()
+      _ -> conn
+    end
+  end
+
+  defp blobs(conn, _opts), do: conn
 
   # A v4 client a dual-stack socket reports as ::ffff:a.b.c.d is that v4
   # address, to the limits and on the trail.
