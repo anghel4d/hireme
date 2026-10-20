@@ -12,9 +12,9 @@
 
 import type { View } from "../app.ts"
 import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { command, drop, failed, ids, meId, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
+import { command, drop, failed, ids, meId, page, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
-import { go, model, notice } from "../state.ts"
+import { go, model, notice, schedule } from "../state.ts"
 import { appItem } from "./focus.ts"
 import { label } from "./world.ts"
 
@@ -43,55 +43,127 @@ const weights = (): Record<string, unknown> => {
 /** The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them. */
 const save = (set: Record<string, Input>, form?: HTMLFormElement): void => void (form ? resetAfter(form, () => putMe(set)) : putMe(set)).catch(failed)
 
-/** Codes out of free text: "de, fr" is DE␟FR; `len` 2 for ISO alpha-2, 0 for any word. */
-const codes = (s: string, upper: boolean, re = /^[a-zA-Z]{2}$/): string | null => {
-  const xs = s.split(/[\s,;]+/).map((x) => (upper ? x.toUpperCase() : x.toLowerCase())).filter((x) => re.test(x))
-  return xs.length === 0 ? null : xs.join(SEP)
+/** The world's countries by ISO alpha-2 and by name, any case, read again when rows move. */
+let countries: { rows: number; by: Map<string, { iso2: string; name: string }> } | null = null
+function country(t: string): { iso2: string; name: string } | null {
+  if (countries?.rows !== model.rows) {
+    const by = new Map<string, { iso2: string; name: string }>()
+    for (const r of page({ table: "places", where: { kind: "country" }, cols: ["iso2", "name"] }, 500).rows) {
+      const c = { iso2: str(r.iso2).toUpperCase(), name: str(r.name) }
+      if (c.iso2 !== "") by.set(c.iso2.toLowerCase(), c).set(c.name.toLowerCase(), c)
+    }
+    countries = { rows: model.rows, by }
+  }
+  return countries.by.get(t.toLowerCase()) ?? null
+}
+
+type Parsed = { codes: string[]; names: (string | null)[]; missed: string[] }
+/**
+ * Countries out of free text, by code or by name ("ca, Romania" is CA␟RO; the longest run of words
+ * that names a country is taken). A two-letter code the world does not know yet is kept, a region
+ * (GB-ENG) where `regions`; anything else is missed, and the lens says so.
+ */
+function countriesIn(s: string, regions = false): Parsed {
+  const out: Parsed = { codes: [], names: [], missed: [] }
+  const ts = s.split(/[\s,;]+/).filter((t) => t !== "")
+  for (let i = 0, j = ts.length; i < ts.length; i = j, j = ts.length) {
+    while (j > i + 1 && !country(ts.slice(i, j).join(" "))) j--
+    const t = ts.slice(i, j).join(" ")
+    const c = country(t) ?? (regions && /^[a-z]{2}-[a-z0-9]{1,3}$/i.test(t) ? { iso2: t.toUpperCase(), name: `in ${country(t.slice(0, 2))?.name ?? t.slice(0, 2).toUpperCase()}` } : null)
+    const code = c?.iso2 ?? (/^[a-z]{2}$/i.test(t) ? t.toUpperCase() : null)
+    if (code === null) out.missed.push(t)
+    else if (!out.codes.includes(code)) out.codes.push(code), out.names.push(c?.name ?? null)
+  }
+  return out
+}
+const joined = (xs: string[]): string | null => (xs.length === 0 ? null : xs.join(SEP))
+const words = (s: string): string[] => [...new Set(s.toLowerCase().split(/[\s,;]+/).filter((x) => x !== ""))]
+
+/** The form as typed (or as saved): what the list beside it reads and what a save writes. */
+type Draft = { text: Record<string, string>; work_modes: number; employments: number; relocate: boolean }
+let draft: Draft | null = null
+const fromForm = (form: HTMLFormElement): Draft => {
+  const f = new FormData(form)
+  return { text: fields(form), work_modes: bitsOf(f, "work_modes"), employments: bitsOf(f, "employments"), relocate: f.has("relocate") }
+}
+function saved(): Draft {
+  const res = Number(mine("residence_id") || 0)
+  const text: Record<string, string> = { residence: res ? str(value("places", res, "iso2")) : "", notes: str(value("me", meId(), "notes")) }
+  for (const c of ["citizenships", "regions", "work_permits", "prefer", "avoid", "subfields"]) text[c] = list(c).join(" ")
+  for (const c of ["field", "pay_floor", "pay_currency", "available_on", "notice_days"]) text[c] = mine(c)
+  return { text, work_modes: Number(mine("work_modes") || 0), employments: Number(mine("employments") || 0), relocate: mine("relocate") === "true" }
 }
 
 /** A work_modes / employments set: bit (1 << code) per enum value. */
-const bits = (col: string, name: string): Html => {
-  const set = Number(mine(col) || 0)
-  return html`<fieldset class="row"><legend>${col.replace("_", " ")}</legend>${(ENUMS[name] ?? []).map((x, i) => html`<label><input type="checkbox" name="${col}" value="${i}"${flag("checked", (set & (1 << i)) !== 0)}> ${x.replace("_", " ")}</label>`)}</fieldset>`
+const bits = (col: string, name: string, legend: string, set: number): Html =>
+  html`<fieldset class="row"><legend>${legend}</legend>${(ENUMS[name] ?? []).map((x, i) => html`<label><input type="checkbox" name="${col}" value="${i}"${flag("checked", (set & (1 << i)) !== 0)}> ${x.replace("_", " ")}</label>`)}</fieldset>`
+const named = (name: string, set: number): string => (ENUMS[name] ?? []).filter((_, i) => (set & (1 << i)) !== 0).map((x) => x.replace("_", " ")).join(", ")
+
+/** What the form says, read back: every code with its country, every word that was not understood marked. */
+function understood(d: Draft): Html {
+  const t = d.text
+  const chips = (p: Parsed): Html => html`${p.codes.map((c, i) => html`<span class="term ${p.names[i] ? "hit" : "warn"}" data-key="${c}"${p.names[i] ? EMPTY : html` title="Kept, but no country the world tables know has this code"`}><b>${c}</b> ${p.names[i] ?? "unknown code"}</span>`)}${p.missed.map((m) => html`<span class="term bad" data-key="x${m}" title="Not a country code or name">${m}?</span>`)}`
+  const row = (k: string, title: string, body: Html | string): Html => html`<dt data-key="t${k}">${title}</dt><dd data-key="d${k}">${body === "" ? html`<span class="muted">nothing yet</span>` : body}</dd>`
+  const codes = (k: string, title: string, regions = false): Html => {
+    const p = countriesIn(t[k] ?? "", regions)
+    return row(k, title, p.codes.length + p.missed.length === 0 ? "" : chips(p))
+  }
+  const pay = Number(t.pay_floor || 0)
+  const cur = (t.pay_currency ?? "").trim().toUpperCase()
+  return html`<aside class="understood" data-key="understood" aria-label="What this says"><h3>Understood${draft ? html` <span class="muted">(not saved yet)</span>` : EMPTY}</h3><dl>
+    ${codes("citizenships", "Citizen of")}${codes("residence", "Lives in")}${codes("work_permits", "May already work in")}
+    ${codes("prefer", "Ranked first")}${codes("avoid", "Ranked last, still shown")}${codes("regions", "Regions", true)}
+    ${row("relocate", "Relocation", d.relocate ? "open to it" : "")}
+    ${row("field", "Field", [t.field?.trim() ?? "", ...words(t.subfields ?? "")].filter((x) => x !== "").join(" · "))}
+    ${row("modes", "Favours", [named("work_mode", d.work_modes), named("employment", d.employments)].filter((x) => x !== "").join(" · "))}
+    ${row("pay", "Priority up from", pay > 0 ? html`${pay.toLocaleString()} ${/^[A-Z]{3}$/.test(cur) ? cur : html`<span class="term bad">${cur || "no currency"}?</span>`} a year` : "")}
+    ${row("when", "Available", [t.available_on ? `from ${t.available_on}` : "", t.notice_days ? `${t.notice_days} days' notice` : ""].filter((x) => x !== "").join(" · "))}
+    ${row("notes", "Notes", t.notes?.trim() ? `${words(t.notes).length} words for your agents` : "")}
+  </dl></aside>`
 }
 
 // ------------------------------------------------------------------ you
 
 function you(): Html {
-  const res = Number(mine("residence_id") || 0)
+  const d = saved()
+  const t = d.text
   const w = weights()
   const groups = [...new Set(FIGURES.map((c) => c.group ?? "other"))]
   const weightField = (key: string, text: string, title: string): Html =>
     html`<label title="${title}">${text} <input type="number" name="${key}" step="0.5" min="-10" max="10" value="${String(w[key] ?? "")}" class="narrow"></label>`
   const langs = [...ids("languages")].map((id) => ({ id, code: str(value("languages", id, "code")), level: str(value("languages", id, "level")) })).sort((a, b) => a.code.localeCompare(b.code))
   return html`<section class="card" data-key="me"><h2>You</h2>
-      <form class="stack" data-submit="me" data-act="me">
+      <p class="hint">Nothing here filters or hides anything. It is what your agents keep in mind and what bumps an option up: the atlas orders places by it, your CV rules can read it, and everything stays in view. Countries by code or name, any separator.</p>
+      <div class="you-grid">
+      <form class="stack" data-submit="me" data-act="me-draft" data-on="input">
         <div class="row">
-          <label>Citizenships (ISO alpha-2) <input name="citizenships" value="${list("citizenships").join(" ")}" placeholder="e.g. DE FR" autocomplete="off"></label>
-          <label>Residence (ISO alpha-2) <input name="residence" value="${res ? str(value("places", res, "iso2")) : ""}" placeholder="e.g. NL" autocomplete="off" class="narrow"></label>
-          <label>Regions (ISO 3166) <input name="regions" value="${list("regions").join(" ")}" placeholder="e.g. DE NL GB-ENG" autocomplete="off"></label>
-          <label><input type="checkbox" name="relocate"${flag("checked", mine("relocate") === "true")}> will relocate</label>
+          <label>Citizenships <input name="citizenships" value="${t.citizenships}" placeholder="e.g. DE France" autocomplete="off"></label>
+          <label>Lives in <input name="residence" value="${t.residence}" placeholder="e.g. NL" autocomplete="off" class="narrow"></label>
+          <label>Regions <input name="regions" value="${t.regions}" placeholder="e.g. DE NL GB-ENG" autocomplete="off"></label>
+          <label class="check"><input type="checkbox" name="relocate"${flag("checked", d.relocate)}> open to relocating</label>
         </div>
         <div class="row">
-          <label>Work permits or residence held (ISO alpha-2) <input name="work_permits" value="${list("work_permits").join(" ")}" placeholder="e.g. US" autocomplete="off"></label>
-          <label>Countries wanted (first in the atlas) <input name="prefer" value="${list("prefer").join(" ")}" placeholder="e.g. CH NO" autocomplete="off"></label>
-          <label>Countries never (last, never hidden) <input name="avoid" value="${list("avoid").join(" ")}" placeholder="e.g. RU" autocomplete="off"></label>
+          <label>Work permits or residence held <input name="work_permits" value="${t.work_permits}" placeholder="e.g. US" autocomplete="off"></label>
+          <label>Countries to rank first <input name="prefer" value="${t.prefer}" placeholder="e.g. CH Norway" autocomplete="off"></label>
+          <label>Countries to rank last (still shown) <input name="avoid" value="${t.avoid}" placeholder="e.g. RU" autocomplete="off"></label>
         </div>
         <div class="row">
-          <label>Field <input name="field" value="${mine("field")}" placeholder="software"></label>
-          <label>Subfields <input name="subfields" value="${list("subfields").join(" ")}" placeholder="e.g. infra compilers"></label>
+          <label>Field <input name="field" value="${t.field}" placeholder="software"></label>
+          <label>Subfields <input name="subfields" value="${t.subfields}" placeholder="e.g. infra compilers"></label>
         </div>
-        ${bits("work_modes", "work_mode")}
-        ${bits("employments", "employment")}
+        ${bits("work_modes", "work_mode", "Work modes to favour", d.work_modes)}
+        ${bits("employments", "employment", "Employment to favour", d.employments)}
         <div class="row">
-          <label>Pay floor (a year) <input type="number" name="pay_floor" min="0" step="1000" value="${mine("pay_floor")}"></label>
-          <label>Currency (ISO 4217) <input name="pay_currency" value="${mine("pay_currency")}" placeholder="EUR" class="narrow"></label>
-          <label>Available on <input type="date" name="available_on" value="${mine("available_on")}"></label>
-          <label>Notice (days) <input type="number" name="notice_days" min="0" value="${mine("notice_days")}" class="narrow"></label>
+          <label>Pay that bumps priority (a year) <input type="number" name="pay_floor" min="0" step="1000" value="${t.pay_floor}"></label>
+          <label>Currency <input name="pay_currency" value="${t.pay_currency}" placeholder="EUR" class="narrow"></label>
+          <label>Available from <input type="date" name="available_on" value="${t.available_on}"></label>
+          <label>Notice (days) <input type="number" name="notice_days" min="0" value="${t.notice_days}" class="narrow"></label>
         </div>
-        <label>Notes for your agents <textarea name="notes" rows="3" placeholder="e.g. partner needs a hospital job; no winters below −10 °C">${str(value("me", meId(), "notes"))}</textarea></label>
+        <label>Notes for your agents: what to keep in mind, what bumps priority <textarea name="notes" rows="4" placeholder="e.g. partner works in hospitals, so cities with a big one rank up; mild winters are a plus">${t.notes}</textarea></label>
         <button>Save</button>
       </form>
+      ${understood(draft ?? d)}
+      </div>
       <p class="hint">Your agents fill this too: <code>put</code> the <code>me</code> row through the MCP, with a key that writes corpus.</p>
     </section>
     <section class="card" data-key="languages"><h2>Languages</h2>
@@ -350,25 +422,30 @@ const meLens: View = {
     const id = Number(el.dataset.id ?? 0)
     const form = el as HTMLFormElement
     switch (name) {
+      case "me-draft":
+        draft = fromForm(form)
+        return schedule()
       case "me": {
-        const f = new FormData(form)
-        const x = fields(form)
-        const iso = (x.residence ?? "").trim().toUpperCase()
+        const d = fromForm(form)
+        const x = d.text
+        const iso = countriesIn(x.residence ?? "").codes[0] ?? ""
         const place = iso === "" ? null : ask<{ rows: Row[] }>("find", { table: "places", where: { iso2: iso, kind: "country" }, cols: ["id"], limit: 1 })?.rows[0]
         if (iso !== "" && !place) return notice("warn", `No country ${iso} in the world tables yet.`)
+        draft = null
+        const codes = (k: string, regions = false): string | null => joined(countriesIn(x[k] ?? "", regions).codes)
         return save({
-          citizenships: codes(x.citizenships ?? "", true),
-          work_permits: codes(x.work_permits ?? "", true),
-          prefer: codes(x.prefer ?? "", true),
-          avoid: codes(x.avoid ?? "", true),
+          citizenships: codes("citizenships"),
+          work_permits: codes("work_permits"),
+          prefer: codes("prefer"),
+          avoid: codes("avoid"),
           notes: x.notes || null,
           residence_id: place ? Number(place.id) : null,
-          regions: codes(x.regions ?? "", true, /^[A-Za-z]{2}(-[A-Za-z0-9]{1,3})?$/),
-          relocate: f.has("relocate"),
-          field: x.field || null,
-          subfields: codes(x.subfields ?? "", false, /^[a-z0-9_-]+$/),
-          work_modes: bitsOf(f, "work_modes"),
-          employments: bitsOf(f, "employments"),
+          regions: codes("regions", true),
+          relocate: d.relocate,
+          field: x.field?.trim() || null,
+          subfields: joined(words(x.subfields ?? "")),
+          work_modes: d.work_modes,
+          employments: d.employments,
           pay_floor: num(x.pay_floor),
           pay_currency: (x.pay_currency ?? "").trim().toUpperCase() || null,
           available_on: x.available_on || null,

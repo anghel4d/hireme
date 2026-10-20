@@ -466,6 +466,15 @@ tr.cursor > *, li.cursor { background: var(--sunk); }
 tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 
 /* Me: the CV rules read as one ordered list; a pattern is code, and the kernel's verdict sits under it. */
+/* Me's form and, beside it, what it was understood to say. */
+.me .you-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 24rem); gap: var(--gap); align-items: start; }
+.me .understood { position: sticky; top: 64px; background: var(--sunk); border-radius: var(--radius); padding: 10px 14px; }
+.me .understood dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 0; }
+.me .understood dt { color: var(--muted); font-size: 12px; padding-top: 2px; }
+.me .understood dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.term.bad { color: var(--bad); border-color: var(--bad); border-style: dashed; }
+.term.warn { color: var(--warn); border-color: var(--warn); }
+@media (width <= 980px) { .me .you-grid { grid-template-columns: 1fr; } .me .understood { position: static; } }
 .me .rules { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
 .me label.grow { flex: 1 1 22em; display: flex; flex-direction: column; }
 .me .mono { font-family: var(--mono); }
