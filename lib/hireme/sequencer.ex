@@ -1515,11 +1515,12 @@ defmodule Hireme.Sequencer do
   end
 
   # A CV version reads its text from its body, or from the file it names,
-  # which the account must hold (`Hireme.Blobs`).
+  # which the account must hold (`Hireme.Blobs`); a body beside a file is
+  # that file's text as corrected, and is what the version reads.
   defp filed("cv_versions", %{blob_sha: sha} = values) when is_binary(sha) do
     case Hireme.Blobs.about(sha) do
       nil -> {:refused, :blob_missing, %{table: "cv_versions", column: "blob_sha"}}
-      b -> {:ok, Map.merge(values, %{blob_type: b.type, blob_bytes: b.bytes, text: b.text})}
+      b -> {:ok, Map.merge(values, %{blob_type: b.type, blob_bytes: b.bytes, text: values[:body] || b.text})}
     end
   end
 

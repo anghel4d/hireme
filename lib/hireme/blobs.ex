@@ -3,7 +3,7 @@ defmodule Hireme.Blobs do
   A CV's files by SHA-256, each account's own, in `blobs` (never on the
   wire; `HiremeWeb.Blobs` serves them over HTTP). `put/3` keeps the bytes
   once and reads their text then, for the rules and the agents: markdown as
-  it is, a docx's paragraphs, a PDF's shown strings through its fonts'
+  it is, a docx's paragraphs, a Word 97-2003 doc's pieces, a PDF's shown strings through its fonts'
   ToUnicode maps (a font without one reads as Latin-1). A file whose text
   cannot be read is still kept, with none. Reading runs in its own process
   under a deadline, and nothing it inflates may pass `@inflated`.
@@ -17,6 +17,7 @@ defmodule Hireme.Blobs do
   @types %{
     "application/pdf" => :pdf,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => :docx,
+    "application/msword" => :doc,
     "text/markdown" => :markdown
   }
   @deadline 5_000
@@ -115,6 +116,7 @@ defmodule Hireme.Blobs do
   defp read(:markdown, data), do: if(String.valid?(data), do: data)
   defp read(:docx, data), do: docx(data)
   defp read(:pdf, data), do: pdf(data)
+  defp read(:doc, data), do: doc(data)
 
   defp clip(text) do
     text =
@@ -166,6 +168,111 @@ defmodule Hireme.Blobs do
     [_, n] = Regex.run(~r/&#x?([0-9a-fA-F]+);/, m)
     c = String.to_integer(n, base)
     if c in 0..0x10FFFF and c not in 0xD800..0xDFFF, do: <<c::utf8>>, else: ""
+  end
+
+  # ------------------------------------------------------------------- doc
+
+  # A Word 97-2003 file: a compound file (CFB) whose WordDocument stream holds
+  # the text and whose table stream (0Table or 1Table, by the FIB's flags)
+  # holds the piece table mapping the characters onto that stream, each piece
+  # 8-bit cp1252 or UTF-16LE. A field keeps its shown result, not its code.
+  defp doc(<<0xD0CF11E0A1B11AE1::64, _::binary>> = data) do
+    files = cfb(data)
+    word = files["WordDocument"]
+    <<_::binary-size(10), flags::little-16, _::binary>> = word
+    <<_::binary-size(0x1A2), fc::little-32, lcb::little-32, _::binary>> = word
+    table = if (flags &&& 0x0200) != 0, do: files["1Table"], else: files["0Table"]
+
+    table
+    |> binary_part(fc, lcb)
+    |> pieces()
+    |> Enum.map_join(fn
+      {len, at, true} ->
+        :unicode.characters_to_binary(binary_part(word, at, len), :latin1)
+
+      {len, at, false} ->
+        :unicode.characters_to_binary(binary_part(word, at, 2 * len), {:utf16, :little})
+    end)
+    |> String.replace(~r/\x13[^\x14\x15]*\x14?|\x15/u, "")
+    |> String.replace(~r/[\r\x07\x0b\x0c]/u, "\n")
+  rescue
+    _ -> nil
+  end
+
+  defp doc(_), do: nil
+
+  # The Clx: property runs (0x01) skipped, then the piece table (0x02):
+  # n + 1 character positions and n descriptors of 8 bytes.
+  defp pieces(<<1, n::little-16, _::binary-size(n), rest::binary>>), do: pieces(rest)
+
+  defp pieces(<<2, lcb::little-32, plc::binary-size(lcb), _::binary>>) do
+    n = div(lcb - 4, 12)
+    {c, d} = {4 * (n + 1), 8 * n}
+    <<cps::binary-size(^c), pcds::binary-size(^d), _::binary>> = plc
+    cps = for <<cp::little-32 <- cps>>, do: cp
+    fcs = for <<_::16, fc::little-32, _::16 <- pcds>>, do: fc
+
+    for {{a, b}, fc} <- Enum.zip(Enum.zip(cps, tl(cps)), fcs) do
+      narrow = (fc &&& 0x40000000) != 0
+      at = fc &&& 0x3FFFFFFF
+      {b - a, if(narrow, do: div(at, 2), else: at), narrow}
+    end
+  end
+
+  # A compound file's streams by name: sectors chained through the FAT (its
+  # sectors listed in the header's DIFAT and the DIFAT's own chain), the
+  # directory, and the streams under the cutoff in the mini stream.
+  defp cfb(data) do
+    <<_::binary-size(0x1E), shift::little-16, mshift::little-16, _::binary-size(14),
+      dir::little-32, _::binary-size(4), cutoff::little-32, minifat::little-32, _::binary-size(4),
+      difat::little-32, _::binary-size(4), head::binary-size(436), _::binary>> = data
+
+    size = 1 <<< shift
+    sector = &binary_part(data, (&1 + 1) * size, size)
+
+    fat =
+      List.to_tuple(
+        for s <- ids(head) ++ difat(difat, sector, size), <<x::little-32 <- sector.(s)>>, do: x
+      )
+
+    read = &Enum.map_join(chain(&1, fat), sector)
+    entries = for <<e::binary-size(128) <- read.(dir)>>, do: e
+    <<_::binary-size(116), root::little-32, _::binary>> = hd(entries)
+    mini = read.(root)
+    minifat = List.to_tuple(if minifat < 0xFFFFFFFA, do: for(<<x::little-32 <- read.(minifat)>>, do: x), else: [])
+    msize = 1 <<< mshift
+
+    for <<name::binary-size(64), len::little-16, 2, _::binary-size(49), start::little-32,
+          bytes::little-32, _::binary-size(4) <- Enum.join(entries)>>,
+        into: %{} do
+      body =
+        if bytes < cutoff,
+          do: Enum.map_join(chain(start, minifat), &binary_part(mini, &1 * msize, msize)),
+          else: read.(start)
+
+      {:unicode.characters_to_binary(binary_part(name, 0, max(len - 2, 0)), {:utf16, :little}),
+       binary_part(body, 0, bytes)}
+    end
+  end
+
+  # Sector ids, the free and end markers left out.
+  defp ids(bin), do: for(<<x::little-32 <- bin>>, x < 0xFFFFFFFA, do: x)
+
+  # The DIFAT's own sectors: ids, the last word of each the next one.
+  defp difat(n, sector, size, seen \\ 0)
+  defp difat(n, _sector, _size, seen) when n >= 0xFFFFFFFA or seen > 1024, do: []
+
+  defp difat(n, sector, size, seen) do
+    words = size - 4
+    <<list::binary-size(^words), next::little-32>> = sector.(n)
+    ids(list) ++ difat(next, sector, size, seen + 1)
+  end
+
+  # A stream's sectors from its first, through the table; bounded by the table's length.
+  defp chain(start, table) do
+    start
+    |> Stream.unfold(&if(&1 < tuple_size(table), do: {&1, elem(table, &1)}))
+    |> Enum.take(tuple_size(table))
   end
 
   # ------------------------------------------------------------------- pdf

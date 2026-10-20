@@ -14,7 +14,7 @@ import type { View } from "../app.ts"
 import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
 import { command, drop, failed, ids, meId, page, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
-import { go, model, notice, schedule } from "../state.ts"
+import { model, notice, query as setQuery, schedule, slug } from "../state.ts"
 import { appItem } from "./focus.ts"
 import { label } from "./world.ts"
 
@@ -230,71 +230,158 @@ function verdict(text: string, position?: number): Html {
 
 // ------------------------------------------------------------------ cv roots
 
+/** A file's format and type by its name; null for a file no CV can be. */
+const FORMATS: [RegExp, string, string][] = [
+  [/\.(md|markdown|txt)$/i, "markdown", "text/markdown"],
+  [/\.pdf$/i, "pdf", "application/pdf"],
+  [/\.docx$/i, "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  [/\.doc$/i, "doc", "application/msword"],
+]
+const formatOf = (f: File): [string, string] | null => FORMATS.flatMap(([re, fmt, type]) => (re.test(f.name) ? [[fmt, type] as [string, string]] : []))[0] ?? null
+const BLOB_MAX = 10 * 1024 * 1024
+
+/** The open CVs (in the address, so a link opens them) and those whose text is being edited in place. */
+const opened = (): number[] => (model.address.q.get("open") ?? "").split(",").map(Number).filter((n) => n > 0)
+const editing = new Set<number>()
+/** What a file dragged over the page would land on: a CV's id, 0 for a new CV, -1 for no drag. */
+let over = -1
+
 function cv(): Html {
-  const sel = Number(model.address.q.get("root") ?? 0)
   const count = new Map<number, number>()
   for (const p of picks()) if (p.root) count.set(p.root, (count.get(p.root) ?? 0) + 1)
   const def = Number(mine("cv_default_root_id") || 0)
-  return html`<section class="card" data-key="roots"><h2>CVs</h2>
-      ${ids("cv_roots").length === 0 ? html`<p class="empty">No CVs yet. Add one below, or let an agent add one over the MCP.</p>` : html`<table class="grid compact"><thead><tr><th scope="col">CV</th><th scope="col">Format</th><th scope="col">Newest</th><th scope="col">Applications</th></tr></thead>
-      <tbody>${roots().map((id) => {
-        const v = Number(value("cv_roots", id, "version_id") ?? 0)
-        return html`<tr data-key="r${id}"${flag("aria-selected", id === sel)}><th scope="row"><a href="/me/cv?root=${id}" data-nav>${rootName(id)}</a>${id === def ? html` <span class="tag">default</span>` : EMPTY}</th>
-          <td><span class="tag">${str(value("cv_roots", id, "format"))}</span></td><td>${v ? `v${str(value("cv_versions", v, "n"))}` : html`<span class="muted">no versions</span>`}</td><td>${count.get(id) ?? 0}</td></tr>`
-      })}</tbody></table>`}
-      <form class="row" data-submit="root" data-act="root">
-        <label>Name <input name="name" required placeholder="Research, DACH"></label>
-        <label>Slug <input name="slug" placeholder="research-dach" pattern="[a-z0-9\\-]+" class="narrow"></label>
-        <label>Format <select name="format">${(ENUMS.cv_format ?? []).filter((x) => x !== "composed").map((x) => html`<option>${x}</option>`)}</select></label>
-        <button>Add CV</button>
-      </form>
-    </section>
-    ${sel && value("cv_roots", sel, "name") !== null ? root(sel, sel === def) : EMPTY}`
-}
-
-function root(id: number, isDefault: boolean): Html {
-  const format = str(value("cv_roots", id, "format"))
-  const head = Number(value("cv_roots", id, "version_id") ?? 0)
-  const versions = ask<{ rows: Row[] }>("find", { table: "cv_versions", where: { root_id: id }, order: ["id", "desc"], cols: ["id", "n", "note", "actor", "blob_sha", "blob_name", "blob_bytes", "inserted_at"], limit: 50 })?.rows ?? []
-  const profile = Number(value("cv_roots", id, "profile_id") ?? 0)
-  return html`<section class="card stack" data-key="root${id}"><h2>${rootName(id)} <span class="tag">${format}</span></h2>
-      <form class="row" data-submit="rename" data-act="rename" data-id="${id}">
-        <label>Name <input name="name" required value="${rootName(id)}"></label>
-        <label>Notes <input name="notes" value="${str(value("cv_roots", id, "notes"))}"></label>
-        <button>Save</button>
-        ${isDefault ? html`<span class="tag">the default</span>` : html`<button type="button" data-act="default" data-id="${id}">Make default</button>`}
-        <button type="button" class="danger" data-act="unroot" data-id="${id}">Delete…</button>
-      </form>
-      ${format === "composed" ? html`<p class="hint">Composed from ${profile ? html`the <b>${str(value("profiles", profile, "name"))}</b> profile's items` : "a profile"}: the kernel builds it for each application.</p>` : EMPTY}
-      ${format === "markdown" ? html`<form class="stack" data-submit="body" data-act="body" data-id="${id}">
-        <label>Markdown <textarea name="body" rows="18" spellcheck="true">${head ? str(value("cv_versions", head, "body")) : ""}</textarea></label>
-        <div class="row"><label>Note <input name="note" placeholder="what changed"></label><button class="primary">Save as v${versions.length + 1}</button>
-          <label>or upload a .md <input type="file" name="file" accept=".md,.markdown,text/markdown" data-act="file" data-on="change" data-id="${id}"></label></div>
-      </form>` : EMPTY}
-      ${format === "pdf" || format === "docx" ? html`<form class="row" data-submit="upload" data-act="upload" data-id="${id}">
-        <label>${format === "pdf" ? "PDF" : "Word document"} <input type="file" name="file" required accept="${format === "pdf" ? ".pdf,application/pdf" : ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"}"></label>
-        <label>Note <input name="note" placeholder="what changed"></label><button class="primary">Upload v${versions.length + 1}</button>
-      </form>` : EMPTY}
-      ${versions.length === 0 ? EMPTY : html`<table class="grid compact"><thead><tr><th scope="col">Version</th><th scope="col">Day</th><th scope="col">By</th><th scope="col">Note</th><th scope="col">File</th></tr></thead>
-      <tbody>${versions.map((v) => html`<tr data-key="v${str(v.id)}"><th scope="row">v${str(v.n)}</th><td>${str(v.inserted_at).slice(0, 10)}</td><td>${str(v.actor)}</td><td>${str(v.note)}</td>
-        <td>${v.blob_sha ? html`<a href="/blobs/${str(v.blob_sha)}?name=${encodeURIComponent(str(v.blob_name))}" target="_blank" rel="noopener">${str(v.blob_name) || "file"}</a> <span class="muted">${Math.ceil(Number(v.blob_bytes ?? 0) / 1024)} KiB</span>` : html`<span class="muted">text</span>`}</td></tr>`)}</tbody></table>`}
-      ${head && format !== "markdown" && value("cv_versions", head, "text") ? html`<details><summary>What rules and agents read of v${str(value("cv_versions", head, "n"))}</summary><pre class="prose">${str(value("cv_versions", head, "text"))}</pre></details>` : EMPTY}
+  // In the order they were made: a rename never moves a strip from under the pointer.
+  const rs = [...ids("cv_roots")].sort((a, b) => a - b)
+  return html`<section class="card cv-roots${over === 0 ? " over" : ""}" data-key="roots"><h2>CVs</h2>
+      <p class="hint">Drop CVs anywhere here: markdown, PDF or Word (.docx, .doc), the format read from the file. Dropped on a CV, a file is its next version. Click a CV to open it; double-click its text to edit right where you click, and Ctrl+S or Save keeps it.</p>
+      <div class="row"><label class="button">Choose files<input type="file" multiple class="sr" accept=".md,.markdown,.txt,.pdf,.docx,.doc" data-act="files" data-on="change"></label>
+        <button type="button" data-act="write">Write one</button></div>
+      ${rs.length === 0 ? html`<p class="empty">No CVs yet. Drop one here, or let an agent add one over the MCP.</p>`
+        : html`<div class="cv-list">${rs.map((id) => card(id, id === def, count.get(id) ?? 0))}</div>`}
     </section>`
 }
 
-const TYPES: Record<string, string> = { pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", markdown: "text/markdown" }
-const BLOB_MAX = 10 * 1024 * 1024
-
-/** The bytes to /blobs (content-addressed; the same file again is the same sha), then a version naming them. */
-async function upload(root: number, file: File, note: string): Promise<unknown> {
-  const format = str(value("cv_roots", root, "format"))
-  if (file.size > BLOB_MAX) throw new Error("A CV file is at most 10 MiB.")
-  const csrf = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""
-  const res = await fetch("/blobs", { method: "PUT", headers: { "content-type": TYPES[format] ?? file.type, "x-csrf-token": csrf }, body: file, credentials: "same-origin" })
-  if (!res.ok) throw new Error(`The upload was refused (${res.status}).`)
-  const b = (await res.json()) as { sha: string }
-  return put("cv_versions", { root_id: root, blob_sha: b.sha, blob_name: file.name, note: note || null })
+/** One CV as a strip: its name editable in place, its facts; open, its addendum below. */
+function card(id: number, isDefault: boolean, apps: number): Html {
+  const format = str(value("cv_roots", id, "format"))
+  const head = Number(value("cv_roots", id, "version_id") ?? 0)
+  const v = (c: string): string => (head ? str(value("cv_versions", head, c)) : "")
+  const open = opened().includes(id)
+  return html`<article class="cv-card${open ? " open" : ""}${over === id ? " over" : ""}" data-key="c${id}" data-root="${id}">
+    <header data-act="toggle" data-click data-id="${id}" aria-expanded="${String(open)}">
+      <span class="chev" aria-hidden="true"></span>
+      <input class="cv-name" value="${rootName(id)}" data-act="meta" data-col="name" data-on="change" data-id="${id}" aria-label="Name" spellcheck="false" autocomplete="off">
+      <span class="tag">${format}</span>
+      <span class="muted">${head ? `v${v("n")} · ${v("inserted_at").slice(0, 10)}` : "no versions yet"}</span>
+      <span class="muted">${apps} application${apps === 1 ? "" : "s"}</span>
+      ${isDefault ? html`<span class="tag">default</span>` : EMPTY}
+      ${v("blob_sha") ? html`<a href="/blobs/${v("blob_sha")}?name=${encodeURIComponent(v("blob_name"))}" target="_blank" rel="noopener" class="ghost">${v("blob_name") || "the file"} ↗</a>` : EMPTY}
+    </header>
+    ${open ? addendum(id, format, head, isDefault) : EMPTY}
+  </article>`
 }
+
+function addendum(id: number, format: string, head: number, isDefault: boolean): Html {
+  const ed = editing.has(id)
+  const profile = Number(value("cv_roots", id, "profile_id") ?? 0)
+  const versions = ask<{ rows: Row[] }>("find", { table: "cv_versions", where: { root_id: id }, order: ["id", "desc"], cols: ["id", "n", "note", "actor", "blob_name", "inserted_at"], limit: 50 })?.rows ?? []
+  return html`<div class="addendum" data-key="a${id}">
+    <div class="row">
+      <label>Slug <input value="${str(value("cv_roots", id, "slug"))}" data-act="meta" data-col="slug" data-on="change" data-id="${id}" class="mono narrow" spellcheck="false"></label>
+      <label class="grow">Notes <input value="${str(value("cv_roots", id, "notes"))}" data-act="meta" data-col="notes" data-on="change" data-id="${id}"></label>
+      ${isDefault ? html`<span class="tag">the default</span>` : html`<button type="button" data-act="default" data-id="${id}">Make default</button>`}
+      <button type="button" class="danger" data-act="unroot" data-id="${id}">Delete…</button>
+    </div>
+    ${format === "composed" ? html`<p class="hint">Composed from ${profile ? html`the <b>${str(value("profiles", profile, "name"))}</b> profile's items` : "a profile"}: the kernel builds it for each application.</p>`
+      : html`<pre class="cv-text${ed ? " editing" : ""}" data-act="edit-text" data-on="dblclick" data-id="${id}" data-empty="Nothing yet: double-click to write."${ed ? html` contenteditable="plaintext-only" data-morph="own" data-autofocus` : EMPTY}>${head ? str(value("cv_versions", head, format === "markdown" ? "body" : "text")) : ""}</pre>
+      ${ed ? html`<div class="row"><button type="button" class="primary" data-act="save-text" data-id="${id}">Save</button><button type="button" class="ghost" data-act="cancel-text" data-id="${id}">Cancel</button>
+        <span class="hint">Ctrl+S saves.${format === "markdown" ? "" : " The file stays as it is; this is its text as the rules, coverage and your agents read it."}</span></div>` : EMPTY}`}
+    ${versions.length === 0 ? EMPTY : html`<details data-key="versions"><summary>${versions.length} version${versions.length === 1 ? "" : "s"}</summary><ol class="rows">${versions.map((x) => html`<li data-key="v${str(x.id)}">
+      <b>v${str(x.n)}</b> <span class="muted">${str(x.inserted_at).slice(0, 10)} · ${str(x.actor)}</span>${x.blob_name ? html` <span>${str(x.blob_name)}</span>` : EMPTY}${x.note ? html` <span class="muted">${str(x.note)}</span>` : EMPTY}</li>`)}</ol></details>`}
+  </div>`
+}
+
+/** Files to CVs: each a new CV named after it, or, dropped on a CV, that CV's next version (its format following the file). */
+async function take(files: File[], onto: number): Promise<void> {
+  for (const file of files) {
+    const f = formatOf(file)
+    if (!f) {
+      notice("warn", `${file.name} is not a CV this can read: markdown, PDF, .docx or .doc.`)
+      continue
+    }
+    if (file.size > BLOB_MAX) {
+      notice("warn", `${file.name} is over 10 MiB.`)
+      continue
+    }
+    let root = onto
+    if (root === 0) root = await newRoot(file.name.replace(/\.[^.]+$/, ""), f[0])
+    else if (str(value("cv_roots", root, "format")) !== f[0]) await put("cv_roots", { format: f[0] }, { id: root })
+    if (f[0] === "markdown") await put("cv_versions", { root_id: root, body: await file.text(), blob_name: file.name })
+    else await put("cv_versions", { root_id: root, blob_sha: await blob(file, f[1]), blob_name: file.name })
+    if (!opened().includes(root)) setQuery("open", [...opened(), root].join(","))
+  }
+}
+
+/** A new CV of `format`, its slug from its name and free; opened. */
+async function newRoot(name: string, format: string): Promise<number> {
+  const taken = new Set([...ids("cv_roots")].map((r) => str(value("cv_roots", r, "slug"))))
+  const base = slug(name) || "cv"
+  let s = base
+  for (let n = 2; taken.has(s); n++) s = `${base}-${n}`
+  const id = (await put("cv_roots", { name, slug: s, format })).id
+  setQuery("open", [...opened(), id].join(","))
+  return id
+}
+
+/** The bytes to /blobs (content-addressed: the same file again is the same sha); its sha. */
+async function blob(file: File, type: string): Promise<string> {
+  const csrf = document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""
+  const res = await fetch("/blobs", { method: "PUT", headers: { "content-type": type, "x-csrf-token": csrf }, body: file, credentials: "same-origin" })
+  if (!res.ok) throw new Error(res.status === 415 ? `${file.name}: the server does not take this kind of file.` : `The upload was refused (${res.status}).`)
+  return ((await res.json()) as { sha: string }).sha
+}
+
+/** An edited text as the CV's next version: a markdown CV's body, or a file's text corrected beside the same file. */
+function saveText(id: number): void {
+  const el = document.querySelector<HTMLElement>(`.cv-card[data-root="${id}"] .cv-text`)
+  if (!el) return
+  const head = Number(value("cv_roots", id, "version_id") ?? 0)
+  const markdown = str(value("cv_roots", id, "format")) === "markdown"
+  const text = el.innerText.replace(/\n$/, "")
+  const was = head ? str(value("cv_versions", head, markdown ? "body" : "text")) : ""
+  editing.delete(id)
+  if (text === was) return schedule()
+  void put("cv_versions", markdown || !head ? { root_id: id, body: text, note: "edited here" }
+    : { root_id: id, body: text, blob_sha: str(value("cv_versions", head, "blob_sha")), blob_name: str(value("cv_versions", head, "blob_name")) || null, note: "text edited here" })
+    .then(() => notice("ok", `${rootName(id)} saved as its next version.`), failed)
+  schedule()
+}
+
+// A file dragged anywhere over the CVs page lands where it is let go: on a CV, or as a new one.
+const onCvs = (): boolean => model.address.lens === "me" && model.address.sub === "cv"
+const target = (ev: DragEvent): number => Number((ev.target as Element | null)?.closest?.<HTMLElement>(".cv-card")?.dataset.root ?? 0)
+addEventListener("dragover", (ev) => {
+  if (!onCvs() || !ev.dataTransfer?.types.includes("Files")) return
+  ev.preventDefault()
+  ev.dataTransfer.dropEffect = "copy"
+  if (over !== target(ev)) (over = target(ev)), schedule()
+})
+addEventListener("dragleave", (ev) => {
+  if (onCvs() && ev.relatedTarget === null) (over = -1), schedule()
+})
+addEventListener("drop", (ev) => {
+  if (!onCvs() || !ev.dataTransfer?.files.length) return
+  ev.preventDefault()
+  over = -1
+  schedule()
+  void take([...ev.dataTransfer.files], target(ev)).catch(failed)
+})
+// Ctrl+S keeps every text being edited; the browser's save page is not what it means here.
+addEventListener("keydown", (ev) => {
+  if (!onCvs() || !(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== "s") return
+  ev.preventDefault()
+  for (const id of [...editing]) saveText(id)
+}, { capture: true })
 
 // ------------------------------------------------------------------ rules and masks
 
@@ -381,7 +468,7 @@ function rulesView(): Html {
     </section>
     ${broken.length === 0 ? EMPTY : html`<section class="card" data-key="broken"><h2>Needs a CV</h2>
       <ul class="rows">${broken.map((p) => html`<li data-key="b${p.application}">${appLink(p.application)}
-        ${p.state === "stale" ? html`<span class="tag bad">pinned to a deleted CV</span>` : html`gets <a href="/me/cv?root=${String(p.root)}" data-nav>${rootName(p.root)}</a><span class="tag warn">no versions yet</span>`}</li>`)}</ul>
+        ${p.state === "stale" ? html`<span class="tag bad">pinned to a deleted CV</span>` : html`gets <a href="/me/cv?open=${String(p.root)}" data-nav>${rootName(p.root)}</a><span class="tag warn">no versions yet</span>`}</li>`)}</ul>
     </section>`}`
 }
 
@@ -418,7 +505,7 @@ const bitsOf = (f: FormData, col: string): number => f.getAll(col).reduce<number
 const meLens: View = {
   title: "Me",
   view,
-  act(name, el) {
+  act(name, el, ev) {
     const id = Number(el.dataset.id ?? 0)
     const form = el as HTMLFormElement
     switch (name) {
@@ -468,39 +555,43 @@ const meLens: View = {
         return void put("languages", { level: (el as HTMLSelectElement).value }, { id }).catch(failed)
       case "unlang":
         return void drop("languages", id).catch(failed)
-      case "root": {
-        const x = fields(form)
-        const slug = x.slug || (x.name ?? "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-        return void resetAfter(form, () => put("cv_roots", { name: x.name ?? "", slug, format: x.format ?? "markdown" }))
-          .then((r) => go({ lens: "me", sub: "cv", q: new Map([["root", String(r.id)]]) }))
-          .catch(failed)
+      case "toggle": {
+        const open = opened().includes(id) ? opened().filter((x) => x !== id) : [...opened(), id]
+        return setQuery("open", open.join(","))
       }
-      case "rename": {
-        const x = fields(form)
-        return void put("cv_roots", { name: x.name ?? "", notes: x.notes || null }, { id }).catch(failed)
+      case "meta": {
+        const col = el.dataset.col ?? ""
+        const x = (el as HTMLInputElement).value.trim()
+        if (col === "name" && x === "") return schedule()
+        return void put("cv_roots", { [col]: col === "slug" ? slug(x) : x || null }, { id }).catch(failed)
       }
       case "default":
         return save({ cv_default_root_id: id })
       case "unroot":
         if (!confirm(`Delete the CV ${rootName(id)}? Its versions stay on record; rules that name it stop matching.`)) return
-        return void drop("cv_roots", id).then(() => go({ lens: "me", sub: "cv", q: new Map() })).catch(failed)
-      case "body": {
-        const x = fields(form)
-        return void put("cv_versions", { root_id: id, body: x.body ?? "", note: x.note || null }).catch(failed)
+        return void drop("cv_roots", id).catch(failed)
+      case "files":
+        return void take([...((el as HTMLInputElement).files ?? [])], 0).then(() => ((el as HTMLInputElement).value = "")).catch(failed)
+      case "write":
+        // A new markdown CV, open and being written: its first Save is its first version.
+        return void newRoot("Untitled CV", "markdown").then((r) => (editing.add(r), schedule())).catch(failed)
+      case "edit-text": {
+        // Editable where it stands, the caret where the double-click landed.
+        if (editing.has(id)) return
+        editing.add(id)
+        const e = ev as MouseEvent
+        const at = document.caretPositionFromPoint?.(e.clientX, e.clientY)
+        el.setAttribute("contenteditable", "plaintext-only")
+        el.focus()
+        if (at) getSelection()?.collapse(at.offsetNode, at.offset)
+        return schedule()
       }
-      case "file": {
-        // A .md file fills the editor; Save makes it the next version.
-        const file = (el as HTMLInputElement).files?.[0]
-        const area = el.closest("form")?.querySelector<HTMLTextAreaElement>("textarea[name=body]")
-        if (file && area) void file.text().then((t) => (area.value = t))
-        return
-      }
-      case "upload": {
-        const file = (form.elements.namedItem("file") as HTMLInputElement | null)?.files?.[0]
-        if (!file) return
-        const note = fields(form).note ?? ""
-        return void resetAfter(form, () => upload(id, file, note)).catch(failed)
-      }
+      case "save-text":
+        return saveText(id)
+      case "cancel-text":
+        editing.delete(id)
+        el.closest(".cv-card")?.querySelector(".cv-text")?.removeAttribute("contenteditable")
+        return schedule()
       case "check": {
         // The kernel's verdict follows the pattern as it is typed.
         const input = el as HTMLInputElement

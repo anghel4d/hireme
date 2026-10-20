@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x08ea;
-export const SCHEMA_REV = 0x2423091c;
+export const WIRE_HASH = 0x8d6f;
+export const SCHEMA_REV = 0x3271063e;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -87,7 +87,7 @@ export const DIRECTION = ["outbound", "inbound"] as const;
 export type Direction = (typeof DIRECTION)[number];
 export const MESSAGE_STATUS = ["draft", "queued", "sent", "delivered", "bounced", "failed", "received"] as const;
 export type MessageStatus = (typeof MESSAGE_STATUS)[number];
-export const CV_FORMAT = ["markdown", "pdf", "docx", "composed"] as const;
+export const CV_FORMAT = ["markdown", "pdf", "docx", "composed", "doc"] as const;
 export type CvFormat = (typeof CV_FORMAT)[number];
 export const LANGUAGE_LEVEL = ["a1", "a2", "b1", "b2", "c1", "c2", "native"] as const;
 export type LanguageLevel = (typeof LANGUAGE_LEVEL)[number];

@@ -170,7 +170,7 @@ end
 defmodule HiremeWeb.Blobs do
   @moduledoc """
   A CV's files over HTTP (`Hireme.Blobs`). `PUT /blobs` takes the raw body
-  (pdf, docx or markdown by its Content-Type, at most 10 MiB) and answers
+  (pdf, docx, doc or markdown by its Content-Type, at most 10 MiB) and answers
   `{sha, bytes, type}`, 201 when new and 200 when the account held it;
   `GET /blobs/<sha>` serves it back, named by `?name=` or the newest
   version naming it, inline when a PDF. A browser comes through the router

@@ -202,7 +202,7 @@ function actOn(ev: Event): void {
 }
 
 if (root) {
-  for (const type of ["click", "input", "change", "submit", "keydown"]) root.addEventListener(type, actOn)
+  for (const type of ["click", "dblclick", "input", "change", "submit", "keydown"]) root.addEventListener(type, actOn)
 }
 
 const typing = (t: EventTarget | null) =>

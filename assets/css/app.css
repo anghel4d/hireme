@@ -466,6 +466,22 @@ tr.cursor > *, li.cursor { background: var(--sunk); }
 tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 
 /* Me: the CV rules read as one ordered list; a pattern is code, and the kernel's verdict sits under it. */
+/* Me's CVs: a strip each, opened into an addendum (SCP's collapsible), and the whole card a drop target. */
+.cv-roots.over, .cv-card.over { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.cv-list { display: flex; flex-direction: column; gap: 6px; margin-top: var(--gap); }
+.cv-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.cv-card > header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; cursor: pointer; }
+.cv-card > header:hover { background: var(--sunk); }
+.cv-card .chev::before { content: "▸"; display: inline-block; width: 1em; color: var(--muted); transition: transform 0.12s; }
+.cv-card.open .chev::before { transform: rotate(90deg); }
+.addendum input.mono { field-sizing: content; min-width: 12ch; }
+.cv-name { font-weight: 600; border-color: transparent; background: transparent; padding: 3px 6px; min-width: 10ch; field-sizing: content; }
+.cv-name:hover, .cv-name:focus { border-color: var(--line); background: var(--panel); }
+.addendum { margin: 0 10px 10px 22px; padding: 10px 14px; border-left: 3px solid var(--line); background: var(--sunk); border-radius: 0 var(--radius) var(--radius) 0; display: flex; flex-direction: column; gap: 10px; }
+.cv-text { white-space: pre-wrap; word-break: break-word; margin: 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); max-height: 70vh; overflow: auto; font-size: 13px; cursor: text; }
+.cv-text:empty::before { content: attr(data-empty); color: var(--muted); }
+.cv-text.editing { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+
 /* Me's form and, beside it, what it was understood to say. */
 .me .you-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 24rem); gap: var(--gap); align-items: start; }
 .me .understood { position: sticky; top: 64px; background: var(--sunk); border-radius: var(--radius); padding: 10px 14px; }

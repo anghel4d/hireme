@@ -1109,7 +1109,7 @@ defmodule HiremeWeb.Mcp.Session do
   defp unsettled?(%{"state" => "matched", "also" => [_ | _]}), do: true
   defp unsettled?(_), do: false
 
-  # Markdown is the version's body (the judge refuses a blob on a markdown root); a pdf or docx is a blob.
+  # Markdown is the version's body (the judge refuses a blob on a markdown root); a pdf, docx or doc is a blob.
   defp cv_file(_account, "text/markdown", bytes, _name) do
     if String.valid?(bytes), do: {:ok, %{"body" => bytes}}, else: {:error, :type}
   end
@@ -1123,13 +1123,14 @@ defmodule HiremeWeb.Mcp.Session do
     case name |> Path.extname() |> String.downcase() do
       ".pdf" -> "application/pdf"
       ".docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ".doc" -> "application/msword"
       ext when ext in [".md", ".markdown"] -> "text/markdown"
       _ -> "application/octet-stream"
     end
   end
 
   defp upload_refusal(:too_large), do: "a CV file is at most 10 MiB"
-  defp upload_refusal(:type), do: "name the file .pdf, .docx or .md (markdown in UTF-8)"
+  defp upload_refusal(:type), do: "name the file .pdf, .docx, .doc or .md (markdown in UTF-8)"
   defp upload_refusal(:cap), do: "the account already holds 1000 CV files"
   defp upload_refusal(other), do: "the upload failed (#{inspect(other)})"
 

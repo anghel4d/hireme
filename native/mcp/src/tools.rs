@@ -240,7 +240,7 @@ pub fn list(m: Masks) -> Vec<Json> {
             out.push(tool(
                 "cv_upload",
                 "Upload a CV file",
-                "A pdf, docx or markdown file as the next version of a CV root: the bytes are stored by their SHA-256 (the same file again is the same blob), their text extracted once, and a cv_versions row names them. base64 is the file, at most 10 MiB. A .md file becomes the version's body, as a put with body would.".into(),
+                "A pdf, docx, doc or markdown file as the next version of a CV root: the bytes are stored by their SHA-256 (the same file again is the same blob), their text extracted once, and a cv_versions row names them. base64 is the file, at most 10 MiB. A .md file becomes the version's body, as a put with body would.".into(),
                 json!({"type":"object","required":["root_id","name","base64"],"properties":{
                     "root_id":{"type":"integer","minimum":1},
                     "name":{"type":"string","description":"the file name, e.g. cv-research.pdf"},

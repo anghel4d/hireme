@@ -156,7 +156,7 @@ enum message_channel email linkedin x other
 enum direction outbound inbound
 enum message_status draft queued sent delivered bounced failed received
 
-enum cv_format markdown pdf docx composed
+enum cv_format markdown pdf docx composed doc
 enum language_level a1 a2 b1 b2 c1 c2 native
 
 # ---------------------------------------------------------------- system
