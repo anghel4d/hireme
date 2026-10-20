@@ -255,9 +255,12 @@ in
                 proxyPass = "http://127.0.0.1:${toString cfg.port}";
                 proxyWebsockets = true;
                 # Recommended proxy headers include Host and X-Forwarded-Proto $scheme.
+                # A body may be a CV file for /blobs (10 MiB, base64 on the MCP) or a
+                # bulk put (the node reads 64 MiB): nginx's 1 MiB default answered 413.
                 extraConfig = ''
                   proxy_buffering off;
                   proxy_read_timeout 300s;
+                  client_max_body_size 64m;
                 '';
               };
             };
