@@ -229,8 +229,8 @@ function view(): Html {
       ${pick("sort", "Sort by")}<button type="button" class="ghost dir" data-act="dir" data-key="dir" aria-label="Sort direction" title="${sortDir() > 0 ? "Rising; click for falling" : "Falling; click for rising"}">${sortDir() > 0 ? "↑" : "↓"}</button>${pick("group", "Group by")}${L.grouped ? html`<button type="button" class="ghost${model.address.q.get("gsize") === "1" ? " on" : ""}" data-act="gsize" data-key="gsize" aria-pressed="${String(model.address.q.get("gsize") === "1")}" title="Order the groups by how many they hold">largest first</button>` : EMPTY}
       <span class="muted">${ids.length} shown</span>
       ${sets > 0 && model.address.q.get("group") !== "dupes" ? html`<button type="button" class="ghost dupes-link" data-act="group-dupes">${sets} possible duplicate${sets === 1 ? "" : "s"}</button>` : EMPTY}
-      <nav class="subtabs views" aria-label="Desk view">${["", "pro"].map((k) => html`<a href="${viewHref(k, model.address.q)}" data-nav data-key="v${k}" class="${model.address.sub === k ? "on" : ""}${k === "pro" ? " pro" : ""}">${k || "noob"}</a>`)}</nav>
-      ${any ? html`<a href="${viewHref(model.address.sub, new Map())}" data-nav class="ghost">clear filters</a>` : EMPTY}
+      <span class="toolbar-end" data-key="end"><nav class="subtabs views" aria-label="Desk view">${["", "pro"].map((k) => html`<a href="${viewHref(k, model.address.q)}" data-nav data-key="v${k}" class="${model.address.sub === k ? "on" : ""}${k === "pro" ? " pro" : ""}">${k || "noob"}</a>`)}</nav>
+      ${any ? html`<a href="${viewHref(model.address.sub, new Map())}" data-nav class="ghost">clear filters</a>` : EMPTY}</span>
     </div>
     ${scores()}
     </div>
