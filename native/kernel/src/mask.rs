@@ -791,6 +791,10 @@ pub fn catalog() -> &'static str {
                 if let Some(e) = f.ty.elem() {
                     o["list_of"] = e.name().into();
                 }
+                // A count reads largest first.
+                if f.path.ends_with(".applications") {
+                    o["desc"] = true.into();
+                }
                 if let Ty::Enum(e) | Ty::Enums(e) = f.ty {
                     o["values"] = values(e).into();
                 }

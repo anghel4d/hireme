@@ -128,3 +128,16 @@ fn a_column_follows_the_rows_it_reads() {
     k.patch(&w.finish(), 2).unwrap();
     assert_eq!(q(&k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, "engineering"]));
 }
+
+#[test]
+fn a_company_country_or_group_carries_how_many_applications_name_it() {
+    let k = kernel();
+    let c = q(&k, json!({"op": "columns", "fields": ["company.applications", "company.parent.applications", "country.applications"]}));
+    // Stripe (under Alphabet) has one linked application, Helsing one; Germany one (Berlin).
+    assert_eq!(c["cols"]["company.applications"], json!([1.0, null, null, 1.0]));
+    assert_eq!(c["cols"]["company.parent.applications"], json!([1.0, null, null, 1.0]));
+    assert_eq!(c["cols"]["country.applications"], json!([1.0, null, null, null]));
+    let fields = q(&k, json!({"op": "mask_fields"}))["fields"].clone();
+    let count = fields.as_array().unwrap().iter().find(|f| f["path"] == "company.applications").unwrap();
+    assert_eq!(count["desc"], true);
+}
