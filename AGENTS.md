@@ -13,6 +13,7 @@ Always fully quote the user's design decisions/explanations without paraphrasing
 
 Documentation, including WIP, todo, research notes, etc:
 {this-repo}/docs/{subfolder}/*.md
+Do not put spaces in directory or filenames. Use underscore or - as appropriate depending on the filetype and the dominant language style conventions.
 
 ~/workspace/{this-repo}: is where this repo usually lives in dev env.
 
