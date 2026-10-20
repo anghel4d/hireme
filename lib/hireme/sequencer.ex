@@ -1519,8 +1519,16 @@ defmodule Hireme.Sequencer do
   # that file's text as corrected, and is what the version reads.
   defp filed("cv_versions", %{blob_sha: sha} = values) when is_binary(sha) do
     case Hireme.Blobs.about(sha) do
-      nil -> {:refused, :blob_missing, %{table: "cv_versions", column: "blob_sha"}}
-      b -> {:ok, Map.merge(values, %{blob_type: b.type, blob_bytes: b.bytes, text: values[:body] || b.text})}
+      nil ->
+        {:refused, :blob_missing, %{table: "cv_versions", column: "blob_sha"}}
+
+      b ->
+        {:ok,
+         Map.merge(values, %{
+           blob_type: b.type,
+           blob_bytes: b.bytes,
+           text: values[:body] || b.text
+         })}
     end
   end
 

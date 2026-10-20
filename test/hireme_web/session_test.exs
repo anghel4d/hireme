@@ -107,7 +107,7 @@ defmodule HiremeWeb.SessionTest do
     refute log =~ public
   end
 
-  test "a refused HELLO says why: BYE revoked for a bad credential or a foreign origin, BYE restart when throttled; a frame before HELLO is a protocol error",
+  test "a refused HELLO says why: BYE revoked for a bad credential or a foreign origin, BYE restart for one past its address's failures, while a valid key from it is welcomed; a frame before HELLO is a protocol error",
        %{session: s} do
     assert {:stop, {:protocol, :hello_first}, [], _} = Session.frame(Codec.ping(:PING, 1), open())
 
@@ -139,8 +139,7 @@ defmodule HiremeWeb.SessionTest do
 
     assert Enum.any?(1..200, fn _ -> bad.() == :restart end)
 
-    assert {:stop, {:bye, :restart}, _, _} =
-             Session.frame(Codec.encode_hello(:key, rw, "x"), open())
+    assert {:push, _, %{phase: :live}} = Session.frame(Codec.encode_hello(:key, rw, "x"), open())
   end
 
   test "a browser's ticket makes the operator's session, holding the channel; a snapshot at the current rev resumes with a PATCH flagged END, one under another schema_rev gets a BOOT",

@@ -277,25 +277,27 @@ defmodule Hireme.Keys do
   end
 
   @doc """
-  The live key a presented secret names, or `:error`. `peer` throttles
-  failed attempts per address, twenty a minute; a throttled attempt is
+  The live key a presented secret names, or `:error`. A live key is never
+  refused, wherever it comes from. Failures are counted per address
+  (`api_key_peer`, twenty a minute); one past them is answered
   `{:error, :rate_limited}`, said apart so a client retries later instead
-  of giving the key up. It is decided before the key is read, so it says
-  nothing about the key.
+  of giving the key up.
   """
   @spec authenticate(term(), String.t()) ::
           {:ok, authenticated()} | :error | {:error, :rate_limited}
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
-    if Security.blocked?(:api_key_peer, peer),
-      do: {:error, :rate_limited},
-      else: check(presented, peer)
+    with :error <- check(presented) do
+      throttled = Security.blocked?(:api_key_peer, peer)
+      Security.failed(:api_key_peer, peer)
+      if throttled, do: {:error, :rate_limited}, else: :error
+    end
   end
 
   def authenticate(_, _), do: :error
 
-  defp check(presented, peer) do
+  defp check(presented) do
     with {:ok, key_id, secret} <- parse(presented),
          {%Key{} = key, account} <- with_account(dynamic([k], k.key_id == ^key_id)),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
@@ -305,9 +307,7 @@ defmodule Hireme.Keys do
       {:ok,
        Map.take(key, [:id, :key_id, :account_id, :name, :read_mask, :write_mask, :may_delete])}
     else
-      _ ->
-        Security.failed(:api_key_peer, peer)
-        :error
+      _ -> :error
     end
   end
 

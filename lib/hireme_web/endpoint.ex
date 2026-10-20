@@ -114,7 +114,6 @@ defmodule HiremeWeb.Endpoint do
 
   if @ssl, do: plug(Plug.SSL, @ssl)
   plug :peer
-  plug :banned
   plug :secret
   plug Plug.Static, at: "/", from: :hireme, gzip: true, only: HiremeWeb.static_paths()
   plug Plug.RequestId
@@ -157,15 +156,6 @@ defmodule HiremeWeb.Endpoint do
     else
       _ -> %{conn | remote_ip: canonical(conn.remote_ip)}
     end
-  end
-
-  # A banned peer (`Hireme.Security.strike/1`) is answered before anything
-  # of its request is read, logged or routed: an empty 403, and the
-  # connection closed.
-  defp banned(conn, _opts) do
-    if Hireme.Security.banned?(conn.remote_ip |> :inet.ntoa() |> to_string()),
-      do: conn |> put_resp_header("connection", "close") |> send_resp(403, "") |> halt(),
-      else: conn
   end
 
   # MCP over HTTP (`HiremeWeb.Mcp`), ahead of the cookie and the body

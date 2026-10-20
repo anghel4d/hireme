@@ -21,7 +21,6 @@ defmodule Hireme.Application do
         Hireme.Store,
         Hireme.PubSub,
         Hireme.RateLimit,
-        Hireme.Security.Bans,
         Hireme.Accounts.Tickets,
         Coalescer,
         Hireme.Sequencer.Supervisor,

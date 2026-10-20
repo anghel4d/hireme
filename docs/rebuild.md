@@ -510,9 +510,9 @@ cap it is still acknowledged.
 The node serves MCP over HTTP at `/mcp` (`HiremeWeb.Mcp`): the API key is
 the bearer token, checked before the body is read, and each MCP session is
 a wire session the node holds for the key, so grants, lease, revocation and
-verdicts are a carrier's. A request without a valid key is a strike against
-its address; past five in an hour the address is banned for good and
-refused before anything of a request is read. Reads answer from the
+verdicts are a carrier's. A request without a valid key is answered 401,
+and a valid key is never refused; a request naming a session the node no
+longer holds is served by a new one under its id. Reads answer from the
 sequencer's kernel under the key's grants; writes are encoded by the NIF
 (`native/mcp`). A lease with `bulk: n` grants a contract for n writes, and
 a put under it is one atomic burst. Tools: `hireme`

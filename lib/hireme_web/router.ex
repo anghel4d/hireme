@@ -180,7 +180,7 @@ defmodule HiremeWeb.Blobs do
   import Bitwise
   import Plug.Conn
   import HiremeWeb, only: [json: 2]
-  alias Hireme.{Blobs, Grants, Schema, Security}
+  alias Hireme.{Blobs, Grants, Schema}
 
   @doc "A request carrying a key, answered before the cookie and the body parsers."
   def keyed(conn) do
@@ -201,8 +201,6 @@ defmodule HiremeWeb.Blobs do
         send_resp(conn, 429, "")
 
       :error ->
-        Security.strike(ip)
-
         conn
         |> put_resp_header("www-authenticate", ~s(Bearer realm="hireme"))
         |> send_resp(401, "")
@@ -215,14 +213,10 @@ defmodule HiremeWeb.Blobs do
   defp answer(%{method: "PUT", path_info: ["blobs"]} = conn, account_id) do
     type = conn |> get_req_header("content-type") |> List.first("") |> String.split(";") |> hd()
 
-    with :ok <- Security.limit(:blob_writes, account_id),
-         {:ok, bytes, conn} <- read_body(conn, length: Blobs.max(), read_length: 1 <<< 20),
+    with {:ok, bytes, conn} <- read_body(conn, length: Blobs.max(), read_length: 1 <<< 20),
          {:ok, b} <- Blobs.put(account_id, bytes, type |> String.trim() |> String.downcase()) do
       conn |> put_status(if(b.new, do: 201, else: 200)) |> json(Map.delete(b, :new))
     else
-      {:error, :rate_limited} ->
-        conn |> put_status(429) |> json(%{error: "rate"})
-
       {:more, _, conn} ->
         conn |> put_status(413) |> json(%{error: "too_large"})
 

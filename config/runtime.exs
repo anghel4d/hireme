@@ -47,6 +47,10 @@ end
 # gate to build (certification runs, a machine without the Rust toolchain).
 if System.get_env("HIREME_GATE") == "off", do: config(:hireme, :gate, false)
 
+# HIREME_SIGNUPS=off: no new accounts. Every existing one still signs in and
+# adds ways in; a mailed link goes only to an address an account has.
+if System.get_env("HIREME_SIGNUPS") == "off", do: config(:hireme, :signups, false)
+
 if config_env() == :prod do
   database =
     System.get_env("DATABASE_PATH") ||

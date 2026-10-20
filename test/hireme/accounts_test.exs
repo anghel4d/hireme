@@ -59,6 +59,29 @@ defmodule Hireme.AccountsTest do
       assert again.account_id == session.account_id
     end
 
+    test "with sign-ups closed every account still signs in and nobody new gets one; a stranger's address is answered alike and mailed nothing" do
+      {:ok, _, known} = Accounts.sign_in_with(:email, claim("known@example.com"))
+      Application.put_env(:hireme, :signups, false)
+      on_exit(fn -> Application.delete_env(:hireme, :signups) end)
+      accounts = fn -> Repo.aggregate(Hireme.Rows.Account, :count, skip_account: true) end
+      before = accounts.()
+
+      assert {:ok, _, again} = Accounts.sign_in_with(:email, claim("known@example.com"))
+      assert again.account_id == known.account_id
+      assert {:error, :closed} = Accounts.sign_in_with(:email, claim("new@example.com"))
+      assert {:error, :closed} = Accounts.sign_in_with(:github, %{subject: "42", display: "o"})
+      assert accounts.() == before
+
+      meta = %{ip: "10.0.0.3"}
+      assert :ok = Accounts.request_visitor_link("new@example.com", &url_for/1, meta)
+      refute_receive {:email, _}, 300
+      assert :ok = Accounts.request_visitor_link("Known@Example.com", &url_for/1, meta)
+      assert_receive {:email, %{to: [{_, "known@example.com"}]}}, 1_000
+
+      assert {:error, :invalid} =
+               Accounts.request_visitor_link("not an address", &url_for/1, meta)
+    end
+
     test "a link raced by many redeemers is spent by exactly one" do
       token = mailed_token("race@example.com")
       parent = self()

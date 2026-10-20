@@ -8,26 +8,30 @@ defmodule HiremeWeb.Mcp do
   URL.
 
   The key is the only credential, checked before the body is read. A
-  request without a valid one is a strike against its peer, and a peer
-  past `auth_strike_peer` is banned for good (`Hireme.Security.strike/1`);
-  the endpoint refuses a banned peer before it reads anything.
+  request without a valid one is answered 401 (past `api_key_peer`'s
+  failures from its address, 429); a valid key is never refused.
 
   POST carries one JSON-RPC message: a request is answered as JSON (or, for
   `subscriptions/listen`, as an event stream), a notification with 202.
   GET opens the event stream of a session (`Mcp-Session-Id`) for the
   handshake revisions' notifications; DELETE ends a session. A session
   without an id is the key's default one, kept across requests, so a
-  stateless client still holds its lease.
+  stateless client still holds its lease. A request naming a session the
+  node no longer holds (idle past its limit, or a restart) is served by a
+  new session under the same id, so a client never has to notice.
   """
 
   import Plug.Conn
+  require Logger
   alias Hireme.Security
   alias HiremeWeb.Mcp.Session
 
   # A burst of puts is one request: room for a big one, never unbounded.
   @max_body 64 * 1024 * 1024
-  # How long a request waits for its answer (a burst's verdicts included).
-  @wait 300_000
+  # How long a request waits for its answer: under the 100 s a proxy in
+  # front of the node allows (Cloudflare). A write answers by its own
+  # deadline, before this, with what landed so far (`Session`).
+  @wait 90_000
   @keepalive 15_000
 
   @doc "Answers one request to `/mcp`."
@@ -36,8 +40,8 @@ defmodule HiremeWeb.Mcp do
 
     case origin(conn) do
       :ok -> authenticated(conn, ip)
-      # A browser page on another origin (DNS rebinding): refused, not a strike.
-      :refused -> send_resp(conn, 403, "")
+      # A browser page on another origin (DNS rebinding) is refused.
+      :refused -> refuse(conn, 403, "a page on another origin may not call this node")
     end
   end
 
@@ -47,10 +51,11 @@ defmodule HiremeWeb.Mcp do
         serve(conn, key, secret, ip)
 
       :limited ->
-        send_resp(conn, 429, "")
+        conn
+        |> put_resp_header("retry-after", "60")
+        |> refuse(429, "too many wrong keys from this address; a valid key is still served")
 
       :error ->
-        Security.strike(ip)
         refused(ip, conn)
 
         conn
@@ -97,11 +102,11 @@ defmodule HiremeWeb.Mcp do
          {:ok, %{"jsonrpc" => "2.0"} = msg} <- JSON.decode(body) do
       case session(conn, key, secret, ip, msg) do
         {:ok, pid, sid} -> post(conn, pid, sid, msg)
-        {:error, status} -> send_resp(conn, status, "")
+        {:error, why} -> unavailable(conn, msg, why)
       end
     else
       {:too_large, conn} ->
-        send_resp(conn, 413, "")
+        refuse(conn, 413, "the body is over #{div(@max_body, 1024 * 1024)} MiB")
 
       {:ok, _} ->
         rpc_error(
@@ -116,14 +121,12 @@ defmodule HiremeWeb.Mcp do
     end
   end
 
-  defp serve(%{method: "GET"} = conn, key, _secret, _ip) do
-    case existing(conn, key) do
-      {:ok, pid, sid} ->
-        :ok = Session.listen(pid, self(), :legacy)
-        stream(conn, pid, sid, [])
-
-      _ ->
-        send_resp(conn, 404, "")
+  defp serve(%{method: "GET"} = conn, key, secret, ip) do
+    with {:ok, pid, sid} <- session(conn, key, secret, ip, %{}),
+         :ok <- Session.listen(pid, self(), :legacy) do
+      stream(conn, pid, sid, [])
+    else
+      {:error, why} -> unavailable(conn, %{}, why)
     end
   end
 
@@ -134,12 +137,15 @@ defmodule HiremeWeb.Mcp do
         send_resp(conn, 204, "")
 
       _ ->
-        send_resp(conn, 404, "")
+        refuse(conn, 404, "no such session")
     end
   end
 
   defp serve(conn, _key, _secret, _ip),
-    do: conn |> put_resp_header("allow", "GET, POST, DELETE") |> send_resp(405, "")
+    do:
+      conn
+      |> put_resp_header("allow", "GET, POST, DELETE")
+      |> refuse(405, "MCP takes GET, POST and DELETE")
 
   defp post(conn, pid, sid, %{"method" => "subscriptions/listen", "id" => _} = msg) do
     case Session.subscribe_stream(pid, self(), msg) do
@@ -150,8 +156,16 @@ defmodule HiremeWeb.Mcp do
 
   defp post(conn, pid, sid, %{"id" => id, "method" => _} = msg) when id != nil do
     case Session.request(pid, msg, @wait) do
-      {:ok, answer} -> reply(conn, sid, answer)
-      {:error, :gone} -> send_resp(conn, 404, "")
+      {:ok, answer} ->
+        reply(conn, sid, answer)
+
+      # The session went while answering (a crash, the node stopping): the
+      # next request names it and is served by a new one.
+      {:error, :gone} ->
+        reply(conn, sid, failure(id, -32_603, "the session ended before it answered"))
+
+      {:error, :timeout} ->
+        reply(conn, sid, failure(id, -32_001, "no answer within #{div(@wait, 1000)} s"))
     end
   end
 
@@ -179,6 +193,52 @@ defmodule HiremeWeb.Mcp do
     |> send_resp(200, JSON.encode_to_iodata!(answer))
   end
 
+  # A request the session could not finish: if it was a write, some of it
+  # may have landed, so the agent reads before sending it again.
+  defp failure(id, code, why) do
+    %{
+      jsonrpc: "2.0",
+      id: id,
+      error: %{
+        code: code,
+        message: why <> "; it may still have written: find or get before calling it again"
+      }
+    }
+  end
+
+  # No session for a valid key: why, when to retry, and a line in the log.
+  defp unavailable(conn, msg, why) do
+    {status, text} =
+      case why do
+        :not_found -> {404, "that session id is another key's"}
+        :key_sessions -> {429, "this key holds 64 sessions, none of them idle; retry shortly"}
+        {:bye, :revoked} -> {401, "the key was revoked or paused while the session opened"}
+        _ -> {503, "the session could not open (#{inspect(why)}); retry shortly"}
+      end
+
+    if status != 404, do: Logger.warning("mcp: no session for a key: #{inspect(why)}")
+    error = %{code: -32_000, message: text}
+
+    conn
+    |> put_resp_header("retry-after", "5")
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, JSON.encode_to_iodata!(%{jsonrpc: "2.0", id: msg["id"], error: error}))
+  end
+
+  # Every refusal carries what went wrong, as a JSON-RPC error.
+  defp refuse(conn, status, message) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(
+      status,
+      JSON.encode_to_iodata!(%{
+        jsonrpc: "2.0",
+        id: nil,
+        error: %{code: -32_000, message: message}
+      })
+    )
+  end
+
   defp rpc_error(conn, id, code, message) do
     conn
     |> put_resp_content_type("application/json")
@@ -188,24 +248,20 @@ defmodule HiremeWeb.Mcp do
     )
   end
 
-  # The session a request names, the one `initialize` starts, or the key's default.
+  # The session a request names (resumed under its id when the node no
+  # longer holds it), the one `initialize` starts, or the key's default.
   defp session(conn, key, secret, ip, msg) do
-    case get_req_header(conn, "mcp-session-id") do
-      [_ | _] ->
-        with :error <- existing(conn, key), do: {:error, 404}
+    ua = conn |> get_req_header("user-agent") |> List.first()
+    peer = %{ip: ip, user_agent: ua && Security.clip(ua)}
+    label = get_in(msg, ["params", "clientInfo", "name"])
 
-      [] ->
-        ua = conn |> get_req_header("user-agent") |> List.first()
-        peer = %{ip: ip, user_agent: ua && Security.clip(ua)}
-        fresh = msg["method"] == "initialize"
-        label = get_in(msg, ["params", "clientInfo", "name"])
+    mode =
+      case get_req_header(conn, "mcp-session-id") do
+        [sid | _] -> {:resume, sid}
+        [] -> if msg["method"] == "initialize", do: :fresh, else: :default
+      end
 
-        case Session.start(key, secret, peer, label, fresh) do
-          {:ok, pid, sid} -> {:ok, pid, sid}
-          {:error, :too_many} -> {:error, 429}
-          {:error, _} -> {:error, 503}
-        end
-    end
+    Session.start(key, secret, peer, label, mode)
   end
 
   defp existing(conn, key) do
@@ -303,18 +359,23 @@ defmodule HiremeWeb.Mcp.Session do
   with `bulk`) is one atomic burst: it lands whole or not at all.
 
   A session that has served no request for `@idle_ms` ends, and its lease
-  with it.
+  with it; a request naming it later is served by a new one under its id.
+  A key holds at most `Hireme.Security.key_sessions/0` sessions: a new one
+  past that ends the key's longest-idle one (one with an open event stream
+  last), so a new session always fits.
   """
 
   use GenServer
   import Bitwise, only: [&&&: 2]
   alias Hireme.Kernel.Nif
-  alias Hireme.{Lease, Schema, Sequencer}
+  alias Hireme.{Lease, Schema, Security, Sequencer}
   alias HiremeWeb.Wire.Codec
 
   @registry HiremeWeb.Mcp.Registry
   @supervisor HiremeWeb.Mcp.Sessions
   @idle_ms :timer.minutes(30)
+  # A write's call answers by then with what landed, under `HiremeWeb.Mcp`'s wait.
+  @deadline 80_000
   @modern "2026-07-28"
   @legacy ["2025-11-25", "2025-06-18", "2024-11-05"]
   @meta_version "io.modelcontextprotocol/protocolVersion"
@@ -337,34 +398,86 @@ defmodule HiremeWeb.Mcp.Session do
   # ------------------------------------------------------------------ API
 
   @doc """
-  The key's session: a new one (`fresh`, an `initialize`), or the key's
-  default, started on its first request. `{:ok, pid, session_id}`.
+  The key's session for a request: `:fresh` (an `initialize`) starts one,
+  `:default` is the key's own, kept across requests, and `{:resume, sid}`
+  is `sid`, or a new session under that id when the node no longer holds
+  it. `{:ok, pid, session_id}`, or `{:error, why}`.
   """
-  def start(key, secret, peer, label, fresh) do
-    with false <- fresh,
-         [{pid, _}] <- Registry.lookup(@registry, {:default, key.id}) do
-      {:ok, pid, GenServer.call(pid, :id)}
-    else
-      _ ->
-        args = %{key: key, secret: secret, peer: peer, label: label, default: not fresh}
-
-        case DynamicSupervisor.start_child(@supervisor, %{
-               id: __MODULE__,
-               start: {GenServer, :start_link, [__MODULE__, args]},
-               restart: :temporary
-             }) do
-          {:ok, pid} -> {:ok, pid, GenServer.call(pid, :id)}
-          # Two first requests of one key raced for the default: take the winner's.
-          {:error, {:already, pid}} -> {:ok, pid, GenServer.call(pid, :id)}
-          {:error, reason} -> {:error, reason}
-        end
+  def start(key, secret, peer, label, mode) do
+    case held(key.id, mode) do
+      :none -> open(%{key: key, secret: secret, peer: peer, label: label, mode: mode}, 3)
+      found -> found
     end
+  end
+
+  defp held(key_id, :default) do
+    case Registry.lookup(@registry, {:default, key_id}) do
+      [{pid, _}] -> named(pid)
+      [] -> :none
+    end
+  end
+
+  defp held(key_id, {:resume, sid}) do
+    case Registry.lookup(@registry, {:id, sid}) do
+      [{pid, {^key_id, _, _}}] -> {:ok, pid, sid}
+      [_] -> {:error, :not_found}
+      [] -> if sid =~ ~r/^[A-Za-z0-9_-]{16,128}$/, do: :none, else: {:error, :not_found}
+    end
+  end
+
+  defp held(_key_id, :fresh), do: :none
+
+  defp open(args, tries) do
+    make_room(args.key.id)
+
+    case DynamicSupervisor.start_child(@supervisor, %{
+           id: __MODULE__,
+           start: {GenServer, :start_link, [__MODULE__, args]},
+           restart: :temporary
+         }) do
+      {:ok, pid} -> named(pid)
+      # Two requests raced for the key's default or for one resumed id: the winner's.
+      {:error, {:already, pid}} -> named(pid)
+      # The key's sessions on other carriers fill its cap too; room again, then retry.
+      {:error, :key_sessions} when tries > 1 -> open(args, tries - 1)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp named(pid) do
+    {:ok, pid, GenServer.call(pid, :id)}
+  catch
+    :exit, _ -> {:error, :gone}
+  end
+
+  # Past the key's cap its longest-idle sessions end, ones with an open
+  # event stream last, so the next one fits.
+  defp make_room(key_id) do
+    mine =
+      Registry.select(@registry, [
+        {{{:id, :_}, :"$1", {key_id, :"$2", :"$3"}}, [], [{{:"$1", :"$2", :"$3"}}]}
+      ])
+
+    over = length(mine) - Security.key_sessions() + 1
+
+    if over > 0 do
+      mine
+      |> Enum.sort_by(fn {_pid, used, streams} -> {streams > 0, used} end)
+      |> Enum.take(over)
+      |> Enum.each(fn {pid, _, _} -> stop(pid) end)
+    end
+  end
+
+  defp stop(pid) do
+    GenServer.stop(pid, :normal, 5_000)
+  catch
+    :exit, _ -> :ok
   end
 
   @doc "A session by id, if it is `key_id`'s."
   def whereis(sid, key_id) do
     case Registry.lookup(@registry, {:id, sid}) do
-      [{pid, ^key_id}] -> {:ok, pid}
+      [{pid, {^key_id, _, _}}] -> {:ok, pid}
       _ -> :error
     end
   end
@@ -372,14 +485,26 @@ defmodule HiremeWeb.Mcp.Session do
   def request(pid, msg, wait) do
     {:ok, GenServer.call(pid, {:request, msg}, wait)}
   catch
+    :exit, {:timeout, _} -> {:error, :timeout}
     :exit, _ -> {:error, :gone}
   end
 
   def notify(pid, msg), do: GenServer.cast(pid, {:notify, msg})
-  def listen(pid, stream, kind), do: GenServer.call(pid, {:listen, stream, kind})
 
-  def subscribe_stream(pid, stream, msg),
-    do: GenServer.call(pid, {:subscribe_stream, stream, msg}, 30_000)
+  def listen(pid, stream, kind) do
+    GenServer.call(pid, {:listen, stream, kind})
+  catch
+    :exit, _ -> {:error, :gone}
+  end
+
+  def subscribe_stream(pid, stream, msg) do
+    GenServer.call(pid, {:subscribe_stream, stream, msg}, 30_000)
+  catch
+    :exit, _ -> {:error, failure(msg["id"])}
+  end
+
+  defp failure(id),
+    do: error(id, -32_603, "the session ended before it answered; send the request again")
 
   def close(pid), do: GenServer.cast(pid, :close)
 
@@ -387,14 +512,19 @@ defmodule HiremeWeb.Mcp.Session do
 
   @impl GenServer
   def init(args) do
-    with true <- args.default,
-         {:error, {:already_registered, pid}} <-
-           Registry.register(@registry, {:default, args.key.id}, nil) do
-      {:stop, {:already, pid}}
-    else
+    # The name first, so a race for the key's default or a resumed id has one winner.
+    case claim_name(args.mode, args.key.id) do
+      {:error, {:already_registered, pid}} -> {:stop, {:already, pid}}
       _ -> hello(args)
     end
   end
+
+  defp claim_name(:default, key_id), do: Registry.register(@registry, {:default, key_id}, nil)
+
+  defp claim_name({:resume, sid}, key_id),
+    do: Registry.register(@registry, {:id, sid}, {key_id, now(), 0})
+
+  defp claim_name(:fresh, _key_id), do: :ok
 
   defp hello(args) do
     peer = %{peer_ip: args.peer.ip, origin: nil, carrier: :mcp, user_agent: args.peer.user_agent}
@@ -403,8 +533,17 @@ defmodule HiremeWeb.Mcp.Session do
 
     case HiremeWeb.Session.frame(Codec.encode_hello(:key, args.secret, label), wire) do
       {:push, _welcome_and_train, %{phase: :live} = wire} ->
-        sid = Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
-        {:ok, _} = Registry.register(@registry, {:id, sid}, args.key.id)
+        sid =
+          case args.mode do
+            {:resume, sid} ->
+              sid
+
+            _ ->
+              sid = Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+              {:ok, _} = Registry.register(@registry, {:id, sid}, {args.key.id, now(), 0})
+              sid
+          end
+
         g = wire.session.grants
         <<base::unsigned-64>> = :crypto.strong_rand_bytes(8)
         Process.send_after(self(), :idle, @idle_ms)
@@ -439,10 +578,10 @@ defmodule HiremeWeb.Mcp.Session do
   @impl GenServer
   def handle_call(:id, _from, s), do: {:reply, s.id, s}
 
-  def handle_call({:request, msg}, from, s), do: handle(msg, from, %{s | used: now()})
+  def handle_call({:request, msg}, from, s), do: handle(msg, from, used(s))
 
   def handle_call({:listen, stream, :legacy}, _from, s),
-    do: {:reply, :ok, watch_stream(s, stream, :legacy)}
+    do: {:reply, :ok, watch_stream(used(s), stream, :legacy)}
 
   def handle_call({:subscribe_stream, stream, %{"id" => id} = msg}, _from, s) do
     n = get_in(msg, ["params", "notifications"]) || %{}
@@ -475,7 +614,7 @@ defmodule HiremeWeb.Mcp.Session do
   end
 
   @impl GenServer
-  def handle_cast({:notify, _msg}, s), do: {:noreply, %{s | used: now()}}
+  def handle_cast({:notify, _msg}, s), do: {:noreply, used(s)}
   def handle_cast(:close, s), do: {:stop, :normal, s}
 
   @impl GenServer
@@ -490,13 +629,15 @@ defmodule HiremeWeb.Mcp.Session do
     wire(msg, s)
   end
 
+  # A call past its deadline answers what landed and what is still pending.
   def handle_info({:call_timeout, ref}, s) do
     case Map.pop(s.calls, ref) do
       {nil, _} ->
         {:noreply, s}
 
       {call, calls} ->
-        fail(call, "no verdict within #{div(call.wait, 1000)} s")
+        {s, result} = settled(call, s)
+        GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, result}))
 
         {:noreply,
          %{s | calls: calls, pending: Map.drop(s.pending, Enum.map(call.ops, &elem(&1, 0)))}}
@@ -511,6 +652,7 @@ defmodule HiremeWeb.Mcp.Session do
 
   def handle_info({:DOWN, ref, :process, _, _}, s) when is_map_key(s.streams, ref) do
     {{_, kind}, streams} = Map.pop(s.streams, ref)
+    streaming(s.id, -1)
 
     case kind do
       {:modern, _id, key} -> {:noreply, drop_subs(%{s | streams: streams}, key)}
@@ -877,8 +1019,7 @@ defmodule HiremeWeb.Mcp.Session do
       else: Sequencer.submit(s.account_id, ops_only)
 
     ref = make_ref()
-    wait = 120_000 + n * 10
-    Process.send_after(self(), {:call_timeout, ref}, wait)
+    Process.send_after(self(), {:call_timeout, ref}, @deadline)
 
     call = %{
       from: from,
@@ -886,8 +1027,7 @@ defmodule HiremeWeb.Mcp.Session do
       modern: modern,
       ops: Enum.map(ops, fn {id, label, _} -> {id, label} end),
       verdicts: %{},
-      atomic: atomic,
-      wait: wait
+      atomic: atomic
     }
 
     pending = Enum.reduce(ops, s.pending, fn {id, _, _}, p -> Map.put(p, id, ref) end)
@@ -915,13 +1055,20 @@ defmodule HiremeWeb.Mcp.Session do
   end
 
   # Every verdict of a call, in order: a line per op (up to @listed, then a
-  # count and the refusals), and the whole list as structured content.
+  # count and the refusals), and the whole list as structured content. At
+  # the deadline an op still unjudged is listed as pending.
   defp settled(call, s) do
     long = length(call.ops) > @listed
 
     {lines, rows, refused, s} =
       Enum.reduce(call.ops, {[], [], 0, s}, fn {id, label}, {lines, rows, refused, s} ->
         case call.verdicts[id] do
+          nil ->
+            line =
+              "pending: #{label}: no verdict within #{div(@deadline, 1000)} s; it may still land, so find or get before sending it again\n"
+
+            {[line | lines], [%{op_id: id, ok: nil, pending: true} | rows], refused + 1, s}
+
           {:ack, a} ->
             line = if long, do: [], else: ["ok: #{label} -> id #{a.id}, rev #{a.rev}\n"]
             {[line | lines], [%{op_id: id, ok: true, id: a.id, rev: a.rev} | rows], refused, s}
@@ -943,10 +1090,13 @@ defmodule HiremeWeb.Mcp.Session do
         end
       end)
 
+    pending = length(call.ops) - map_size(call.verdicts)
+    written = length(call.ops) - refused
+
     head =
-      if long,
+      if long or pending > 0,
         do:
-          "#{length(call.ops) - refused} of #{length(call.ops)} written#{if call.atomic, do: " (one atomic burst)", else: ""}\n",
+          "#{written} of #{length(call.ops)} written#{if pending > 0, do: ", #{pending} pending", else: ""}#{if call.atomic, do: " (one atomic burst)", else: ""}\n",
         else: ""
 
     {s,
@@ -1256,8 +1406,20 @@ defmodule HiremeWeb.Mcp.Session do
 
   defp watch_stream(s, stream, kind) do
     ref = Process.monitor(stream)
+    streaming(s.id, 1)
     %{s | streams: Map.put(s.streams, ref, {stream, kind})}
   end
+
+  # What eviction reads (`make_room/1`): when the session last served, and
+  # how many event streams it has open.
+  defp used(s) do
+    t = now()
+    Registry.update_value(@registry, {:id, s.id}, fn {k, _, n} -> {k, t, n} end)
+    %{s | used: t}
+  end
+
+  defp streaming(sid, d),
+    do: Registry.update_value(@registry, {:id, sid}, fn {k, t, n} -> {k, t, n + d} end)
 
   # The watched rows a PATCH moved: each watcher's streams hear it.
   defp announce(s, moved) do

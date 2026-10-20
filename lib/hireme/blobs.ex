@@ -239,7 +239,12 @@ defmodule Hireme.Blobs do
     entries = for <<e::binary-size(128) <- read.(dir)>>, do: e
     <<_::binary-size(116), root::little-32, _::binary>> = hd(entries)
     mini = read.(root)
-    minifat = List.to_tuple(if minifat < 0xFFFFFFFA, do: for(<<x::little-32 <- read.(minifat)>>, do: x), else: [])
+
+    minifat =
+      List.to_tuple(
+        if minifat < 0xFFFFFFFA, do: for(<<x::little-32 <- read.(minifat)>>, do: x), else: []
+      )
+
     msize = 1 <<< mshift
 
     for <<name::binary-size(64), len::little-16, 2, _::binary-size(49), start::little-32,

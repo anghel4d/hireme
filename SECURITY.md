@@ -230,16 +230,24 @@ refused by its shape and checksum with no lookup, a well-formed one by an
 indexed lookup and a constant-time SHA-256 compare. A key carries 256
 random bits, so a guess succeeds with probability 2^-256.
 
-Every request without a valid key (none, malformed or wrong), and every
-failed key at a wire HELLO, is a strike against its address (an IPv6
-address counted by its /64). Past **five strikes in an hour** the address
-is **banned for good**: every request from it, on any path and either
-carrier, is refused with an empty 403 before anything of it is read,
-logged or routed, at the cost of one ETS lookup. Bans are kept beside the
-database, so they outlive a restart; `Hireme.Security.unban/1` lifts one.
-Loopback is never banned (it is the host's own proxy). The proxy believes
-`CF-Connecting-IP` only from Cloudflare's networks, so an address is the
-visitor's, never Cloudflare's edge.
+A request without a valid key (none, malformed or wrong) is answered 401,
+and nothing else happens to its address: nothing bans it, and **a valid
+key is never refused**, wherever it comes from. Wrong keys are counted per
+address (an IPv6 address by its /64); past twenty a minute a wrong one is
+answered 429 with Retry-After, which costs a valid key nothing. The proxy
+believes `CF-Connecting-IP` only from Cloudflare's networks, so an address
+is the visitor's, never Cloudflare's edge.
+
+An MCP session ends after 30 minutes without a request, and its lease with
+it; a request naming it later, or naming one a restart lost, is served by
+a new session under the same id. A key holds at most 64 wire sessions; a
+new MCP session past that ends the key's longest-idle one, so it always
+opens. MCP sessions take no room from their address's 16.
+
+`HIREME_SIGNUPS=off` in the node's environment closes sign-ups: every
+existing account still signs in and adds ways in, nobody new gets an
+account, and a sign-in link goes only to an address an account has (a
+stranger's request is answered the same, and mailed nothing).
 
 ## Text an agent reads
 
@@ -364,8 +372,7 @@ writer for long.
 | Renames (account and keys) | 30 per account in 10 minutes; renaming to the same name records nothing |
 | Names | key: 100 characters and 200 bytes; account: 200 and 400; no control or format characters, no run of over four combining marks |
 | Trail activity rows | expire after 90 days |
-| Key HELLOs | 60 per key per wall-clock minute |
-| Wire sessions open per key / per peer | 16 / 16 |
+| Wire sessions open per key / per peer | 64 (an MCP session ends the key's longest-idle one) / 16 (MCP sessions not counted) |
 | /wire upgrades | 300 per peer a minute |
 | Refused key HELLOs recorded | 600 a minute in all |
 | Live keys per account | 100 |

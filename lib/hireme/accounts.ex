@@ -340,6 +340,27 @@ defmodule Hireme.Accounts do
   ## Sign-in methods
 
   @doc """
+  Whether a new person may make an account; `HIREME_SIGNUPS=off` (read at
+  boot) says no. Existing accounts sign in either way.
+  """
+  @spec signups?() :: boolean()
+  def signups?, do: Application.get_env(:hireme, :signups, true)
+
+  @doc """
+  `request_link/3` for a visitor: while sign-ups are closed, an address no
+  account has is sent nothing, and is answered as if it were.
+  """
+  @spec request_visitor_link(String.t(), (String.t() -> String.t()), meta()) ::
+          :ok | {:error, :invalid | :rate_limited}
+  def request_visitor_link(email, url_for, meta) do
+    with {:ok, address} <- normalize_email(email) do
+      if signups?() or find_identity(:email, address),
+        do: request_link(address, url_for, meta),
+        else: :ok
+    end
+  end
+
+  @doc """
   Mail a one-time sign-in link to `email`. `url_for` turns the token into
   the URL the mail carries, so the path stays with the router. A
   well-formed address gets `:ok` whether or not it has an account; the
@@ -441,13 +462,20 @@ defmodule Hireme.Accounts do
 
   @doc """
   Sign in as the account a proven identity belongs to, creating both when
-  they are new. Answers the cookie's token and the session.
+  they are new and sign-ups are open (else `{:error, :closed}`). Answers
+  the cookie's token and the session.
   """
   @spec sign_in_with(:email | :github | :x, claim(), meta()) ::
-          {:ok, String.t(), Session.t()} | {:error, :suspended | :cap}
+          {:ok, String.t(), Session.t()} | {:error, :suspended | :cap | :closed}
   def sign_in_with(provider, %{subject: subject} = claim, meta \\ %{})
       when provider in @providers do
-    identity = find_identity(provider, subject) || first_identity(provider, claim, meta)
+    case find_identity(provider, subject) || (signups?() && first_identity(provider, claim, meta)) do
+      %Identity{} = identity -> enter(provider, identity, claim, meta)
+      _ -> {:error, :closed}
+    end
+  end
+
+  defp enter(provider, identity, claim, meta) do
     account = get(identity.account_id)
 
     if active?(account) do

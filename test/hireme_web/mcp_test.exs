@@ -5,7 +5,6 @@ defmodule HiremeWeb.McpTest do
   """
 
   use Hireme.McpCase
-  alias Hireme.Security
 
   defp put(p, args), do: ok!(tool(p, "put", args))
 
@@ -129,7 +128,7 @@ defmodule HiremeWeb.McpTest do
     assert length(found["result"]["structuredContent"]["rows"]) == 500
   end
 
-  test "without a session id a key's requests share its default session, lease included; a deleted session is gone",
+  test "without a session id a key's requests share its default session, lease included; a session deleted or lost is served anew under its id, its lease gone",
        ctx do
     {:ok, %{secret: secret}} = Keys.mint(ctx.session, "default", Keys.preset(:read_write))
     p = %{url: ctx.url, secret: secret, sid: nil, peer: nil}
@@ -137,6 +136,9 @@ defmodule HiremeWeb.McpTest do
     assert text_of(call(p, "tools/call", %{name: "hireme", arguments: %{}})) =~ "lease: held"
 
     q = mcp(ctx)
+    ok!(call(q, "tools/call", %{name: "lease", arguments: %{}}))
+    overview = fn -> text_of(call(q, "tools/call", %{name: "hireme", arguments: %{}})) end
+    assert overview.() =~ "lease: held"
 
     {:ok, {{_, 204, _}, _, _}} =
       :httpc.request(
@@ -150,42 +152,60 @@ defmodule HiremeWeb.McpTest do
         []
       )
 
-    assert {404, _, _} = post(q, %{jsonrpc: "2.0", id: 1, method: "ping"})
+    {200, headers, _} = post(q, %{jsonrpc: "2.0", id: 1, method: "ping"})
+    assert header(headers, "mcp-session-id") == q.sid
+    assert overview.() =~ "lease: none"
+
+    # Lost as a node loses one (idle past its limit, a restart): the same.
+    ok!(call(q, "tools/call", %{name: "lease", arguments: %{}}))
+    [{pid, _}] = Registry.lookup(HiremeWeb.Mcp.Registry, {:id, q.sid})
+    GenServer.stop(pid)
+    assert overview.() =~ "lease: none"
   end
 
-  test "a peer that keeps asking without a valid key is banned for good: every request from it is refused before it is read, whoever's key it carries; others are not",
+  test "a key's sessions past its cap end its longest-idle ones, so a new one always opens; they take no room from their address",
        ctx do
-    bad = "203.0.113.7"
-    on_exit(fn -> Security.unban(bad) end)
-    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "ban", Keys.preset(:read_write))
+    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "many", Keys.preset(:read_only))
+    p = %{url: ctx.url, secret: secret, sid: nil, peer: nil}
+
+    init = %{
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: %{protocolVersion: "2025-06-18", capabilities: %{}, clientInfo: %{name: "n"}}
+    }
+
+    sids =
+      for _ <- 1..(Hireme.Security.key_sessions() + 2) do
+        {200, headers, _} = post(p, init)
+        header(headers, "mcp-session-id")
+      end
+
+    live? = &(Registry.lookup(HiremeWeb.Mcp.Registry, {:id, &1}) != [])
+    [first, second | rest] = sids
+    refute live?.(first) or live?.(second)
+    assert Enum.all?(rest, live?)
+
+    # Every one of them is from this address; a browser's session from it still opens.
+    {:ok, _} = HiremeWeb.Session.open(%{peer_ip: "127.0.0.1", origin: nil, carrier: :ws})
+    refute_receive {HiremeWeb.Session, :too_many}, 200
+  end
+
+  @tag window: :api_key_peer
+  test "a request without a valid key is refused however often, and never shuts out its address: a valid key from it is served",
+       ctx do
+    peer = "203.0.113.7"
+    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "agent", Keys.preset(:read_write))
     ping = %{jsonrpc: "2.0", id: 1, method: "ping"}
-    anon = %{url: ctx.url, secret: nil, sid: nil, peer: bad}
+    anon = %{url: ctx.url, secret: nil, sid: nil, peer: peer}
 
-    # Five strikes are answered; the sixth bans (a malformed key and a wrong one count alike).
-    for _ <- 1..4, do: assert({401, _, _} = post(anon, ping))
-    assert {401, _, _} = post(%{anon | secret: "hm_notakey"}, ping)
-    assert {401, _, _} = post(%{anon | secret: String.replace(secret, ~r/.$/, "0")}, ping)
-    assert Security.banned?(bad)
+    keyless = for _ <- 1..10, do: elem(post(anon, ping), 0)
+    wrong = for _ <- 1..25, do: elem(post(%{anon | secret: "hm_notakey"}, ping), 0)
+    assert Enum.uniq(keyless) == [401]
+    # Past api_key_peer's failures a wrong key is told to wait, not shut out.
+    assert Enum.take(wrong, 20) |> Enum.uniq() == [401] and 429 in wrong
 
-    assert {403, _, ""} = post(%{anon | secret: secret}, ping)
-    assert {403, _, ""} = post(anon, ping)
-    {:ok, wire} = HiremeWeb.Session.open(%{peer_ip: bad, origin: nil, carrier: :ws})
-    assert_receive {HiremeWeb.Session, :banned}
-    assert {:stop, :banned, [], _} = HiremeWeb.Session.info({HiremeWeb.Session, :banned}, wire)
-
-    other = %{anon | peer: "203.0.113.8", secret: secret}
-
-    assert {200, _, _} =
-             post(
-               other,
-               %{ping | id: 2}
-               |> Map.put(:method, "initialize")
-               |> Map.put(:params, %{
-                 protocolVersion: "2025-06-18",
-                 capabilities: %{},
-                 clientInfo: %{name: "t", version: "0"}
-               })
-             )
+    assert {200, _, _} = post(%{anon | secret: secret}, ping)
   end
 
   test "another account's rows, ids, natural keys, uris and session are nothing to a key over /mcp, and its own writes move nothing of theirs",

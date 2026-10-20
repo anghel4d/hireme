@@ -128,9 +128,10 @@ claude mcp add --transport http hireme https://your-node.example/mcp \
 ```
 
 The key is the only credential, checked before a request's body is read. A
-request without a valid one is a strike against its address; past five in
-an hour the address is banned for good, and every request from it is
-refused before it is read (`Hireme.Security.unban/1` lifts one).
+request without a valid one is answered 401 (429 past twenty wrong keys a
+minute from one address); a valid key is never refused. Sessions survive
+the node: a request naming one the node no longer holds (idle 30 minutes,
+a restart) is served by a new one under the same id.
 
 The server speaks both eras of MCP. A current client (MCP 2026-07-28, as
 Claude Code is) sends the version in every request's `_meta` and never

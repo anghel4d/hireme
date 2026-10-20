@@ -270,7 +270,7 @@ defmodule HiremeWeb.SignInController do
   def request_email(conn, params) do
     email = if is_binary(params["email"]), do: params["email"], else: ""
 
-    case Accounts.request_link(email, &SignIn.link_url/1, meta(conn)) do
+    case Accounts.request_visitor_link(email, &SignIn.link_url/1, meta(conn)) do
       :ok ->
         {:ok, address} = Accounts.normalize_email(email)
         minutes = div(Hireme.Security.magic_link_ttl(), 60)
@@ -463,6 +463,9 @@ defmodule HiremeWeb.SignInController do
 
       {:error, :cap} ->
         methods(conn, 409, @cap)
+
+      {:error, :closed} ->
+        methods(conn, 403, "This site takes no new accounts right now.")
     end
   end
 

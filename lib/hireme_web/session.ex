@@ -45,15 +45,11 @@ defmodule HiremeWeb.Session do
 
     # One address holds at most this many wire sessions, authenticated or
     # not; the one past it is told to retry (it is never refused at open).
-    counted = Security.peer(to_string(peer[:peer_ip] || ""))
-    {:ok, _} = Registry.register(HiremeWeb.Session.Peers, counted, nil)
-
-    if Registry.count_match(HiremeWeb.Session.Peers, counted, :_) >
-         Security.wire_sessions_per_peer(),
-       do: send(self(), {__MODULE__, :too_many})
+    # An MCP session is not counted: its key was checked before it opened,
+    # and the key's own cap bounds it (`HiremeWeb.Mcp.Session`).
+    if peer[:carrier] != :mcp, do: count_peer(peer)
 
     Hireme.PubSub.subscribe("wire:drain")
-    if Security.banned?(peer[:peer_ip] || ""), do: send(self(), {__MODULE__, :banned})
 
     {:ok,
      %{
@@ -66,6 +62,15 @@ defmodule HiremeWeb.Session do
        sequencer: nil,
        touched: now_ms()
      }}
+  end
+
+  defp count_peer(peer) do
+    counted = Security.peer(to_string(peer[:peer_ip] || ""))
+    {:ok, _} = Registry.register(HiremeWeb.Session.Peers, counted, nil)
+
+    if Registry.count_match(HiremeWeb.Session.Peers, counted, :_) >
+         Security.wire_sessions_per_peer(),
+       do: send(self(), {__MODULE__, :too_many})
   end
 
   @doc "One whole frame from the peer."
@@ -132,8 +137,6 @@ defmodule HiremeWeb.Session do
 
   def info({__MODULE__, :too_many}, state),
     do: bye(:restart, "too many sessions from this address; retry later", state)
-
-  def info({__MODULE__, :banned}, state), do: {:stop, :banned, [], state}
 
   def info({__MODULE__, :hello_deadline}, %{phase: :hello} = state),
     do: {:stop, :hello_deadline, [], state}
@@ -281,9 +284,9 @@ defmodule HiremeWeb.Session do
     ip = to_string(peer[:peer_ip] || "")
 
     case Hireme.Keys.authenticate(secret, ip) do
+      # Each HELLO is a trail row; the trail coalesces a connect loop's
+      # (`Hireme.Audit`, the `hellos` budget), so none is refused for it.
       {:ok, key} ->
-        # A connect loop is bounded per key, before anything is audited.
-        if Security.limit(:key_hello, key.id) != :ok, do: throw(:rate_limited)
         meta = %{key: key.key_id, label: label(label, key.name), carrier: peer[:carrier]}
 
         Hireme.Audit.record(:wire_key, meta, %{
@@ -304,10 +307,7 @@ defmodule HiremeWeb.Session do
 
       # A failed key is audited with its peer; how many is bounded by the
       # api_key_peer limit, past which the answer is rate_limited, not audited.
-      # Each is a strike against the peer too (`Security.strike/1`).
       :error ->
-        Security.strike(ip)
-
         # Past the global refusal budget a refused key is still refused,
         # only no longer recorded.
         if Security.limit(:refusal_global, :all) == :ok,
@@ -322,8 +322,6 @@ defmodule HiremeWeb.Session do
       refused ->
         refused
     end
-  catch
-    :rate_limited -> {:error, :rate_limited}
   end
 
   defp authenticate(_, _), do: :error
@@ -368,8 +366,12 @@ defmodule HiremeWeb.Session do
       {:ok, joined} ->
         welcome(joined, who, session, state)
 
+      # Said apart from other refusals: an MCP session makes room and retries.
       {:error, :too_many} ->
-        bye(:restart, "this key holds as many sessions as it may; retry later", state)
+        {:stop, _, frames, state} =
+          bye(:restart, "this key holds as many sessions as it may; retry later", state)
+
+        {:stop, :key_sessions, frames, state}
 
       {:error, _} ->
         bye(:restart, "the account is unavailable; retry", state)

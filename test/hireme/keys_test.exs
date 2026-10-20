@@ -106,14 +106,14 @@ defmodule Hireme.KeysTest do
   end
 
   @tag window: :api_key_peer
-  test "a throttled peer is told so, before any key is read; other peers are not, and successes never spend a peer's budget",
+  test "a peer past its failures is told so for its failures only: a live key from it is never refused, and successes spend nothing",
        %{session: s} do
     {:ok, %{secret: secret}} = read_only(s, "agent")
     for _ <- 1..30, do: assert({:ok, _} = Keys.authenticate(secret, "10.2.2.2"))
-    for _ <- 1..20, do: Keys.authenticate("hm_garbage", "10.1.1.1")
-    assert {:error, :rate_limited} = Keys.authenticate(secret, "10.1.1.1")
+    for _ <- 1..20, do: assert(:error = Keys.authenticate("hm_garbage", "10.1.1.1"))
     assert {:error, :rate_limited} = Keys.authenticate("hm_garbage", "10.1.1.1")
-    assert {:ok, _} = Keys.authenticate(secret, "10.1.1.2")
+    assert {:ok, _} = Keys.authenticate(secret, "10.1.1.1")
+    assert :error = Keys.authenticate("hm_garbage", "10.1.1.2")
   end
 
   test "the per-account limit holds; a revoke frees room once, however often repeated", %{
