@@ -11,9 +11,13 @@
 
 import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
-import { DIR, board, card, ids, query as read, scoreboard, step, value, type Filter, type Row } from "../kernel.ts"
+import { DIR, board, card, ids, lookup, query as read, scoreboard, step, value, type Filter, type Row } from "../kernel.ts"
 import { EMPTY, html, str, type Html } from "../morph.ts"
 import { go, model, query, set } from "../state.ts"
+import { act as focusAct, body } from "./focus.ts"
+
+/** The dense view: the board beside the selected card's whole application. */
+const dense = (): boolean => model.address.q.get("view") === "dense"
 
 const CLASSES = ["cool", "warm", "hot", "blocked"] as const
 
@@ -91,20 +95,35 @@ let cols = 1
 
 function view(): Html {
   const ids = board(filter())
-  const any = model.address.q.size > 0
+  // The view and a linked card are not filters.
+  const any = [...model.address.q.keys()].some((k) => k !== "view" && k !== "card")
   return html`<div class="desk">
     <div class="toolbar" data-key="toolbar">
       <input type="search" class="search" placeholder="Search company, role, place or #no"
         data-act="search" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
       <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
       <span class="muted">${ids.length} shown</span>
+      <nav class="subtabs views" aria-label="Desk view">${[["", "Cards"], ["dense", "Dense"]].map(([k, l]) => html`<a href="${viewHref(k!)}" data-nav data-key="v${k}" class="${(model.address.q.get("view") ?? "") === k ? "on" : ""}">${l}</a>`)}</nav>
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>
     ${scores()}
-    <div class="board" role="list" aria-label="Applications" data-key="board" data-morph="own"></div>
+    <div class="desk-split${dense() ? " dense" : ""}" data-key="split">
+      <div class="board" role="list" aria-label="Applications" data-key="board" data-morph="own"></div>
+      ${dense() ? html`<aside class="desk-detail" data-key="detail" aria-label="The selected application">${model.selected !== 0
+        ? body(model.selected, true)
+        : html`<p class="empty">Move to a card (h j k l or the arrows) and it opens here.</p>`}</aside>` : EMPTY}
+    </div>
     ${ids.length === 0 ? html`<p class="empty">${any ? "Nothing matches these filters." : "No applications yet. An agent adds them through the MCP, or import a pack."}</p>` : EMPTY}
-    <p class="hint keys">j/k or arrows move · Enter opens · / searches · 1–7 switch lenses</p>
+    <p class="hint keys">h j k l or arrows move · Enter opens · v dense view · / searches · 1–7 switch lenses</p>
   </div>`
+}
+
+/** The desk's address with its view set (and the card a link named dropped). */
+function viewHref(view: string): string {
+  const q = new URLSearchParams([...model.address.q].filter(([k]) => k !== "view" && k !== "card"))
+  if (view !== "") q.set("view", view)
+  const s = q.toString()
+  return s === "" ? "/desk" : `/desk?${s}`
 }
 
 function write(el: Element | null, s: string): void {
@@ -133,7 +152,19 @@ const sized = new ResizeObserver(() => {
   if (watched?.isConnected) paint(watched, true)
 })
 
+// A link to a card (`?card=<no>`) selects it once the rows are in, once per link.
+let linked = ""
+
 function after(root: HTMLElement): void {
+  const no = model.address.q.get("card") ?? ""
+  if (no !== linked) {
+    const id = no === "" ? 0 : lookup("applications", "no", no)
+    if (no === "" || id !== 0) linked = no
+    if (id !== 0 && model.selected !== id) {
+      set({ selected: id })
+      queueMicrotask(() => reveal(id))
+    }
+  }
   // The search box is owned: its value is written here, so a keystroke leaves the desk's markup as it
   // was and the shell's morph is skipped. The box being typed in keeps what is in it.
   const q = root.querySelector<HTMLInputElement>("#desk-search")
@@ -314,8 +345,12 @@ function move(dir: number): void {
   const next = step(f, model.selected, dir, cols)
   if (next === 0) return
   set({ selected: next })
-  // The selected tile's row is brought into view; the window follows the scroll.
-  const at = board(f).indexOf(next)
+  reveal(next)
+}
+
+/** Brings a card's row into view; the window follows the scroll. */
+function reveal(id: number): void {
+  const at = board(filter()).indexOf(id)
   if (at < 0) return
   const y = boardTop + Math.floor(at / cols) * (TILE_H + GAP)
   if (y < scrolled + 56) window.scrollTo(0, y - 56)
@@ -346,14 +381,20 @@ const desk: View = {
         if (model.selected === id) return open(id)
         return set({ selected: id })
       }
+      // The dense pane is the focus lens's own markup: its controls are its actions.
+      default:
+        if (model.selected !== 0) focusAct(name, el, model.selected)
     }
   },
   key(ev) {
     const k = ev.key
-    if (k === "j" || k === "ArrowRight") move(DIR.next)
-    else if (k === "k" || k === "ArrowLeft") move(DIR.prev)
-    else if (k === "ArrowDown") move(DIR.down)
-    else if (k === "ArrowUp") move(DIR.up)
+    // Vim's grid: h left, j down, k up, l right; the arrows the same.
+    if (k === "l" || k === "ArrowRight") move(DIR.next)
+    else if (k === "h" || k === "ArrowLeft") move(DIR.prev)
+    else if (k === "j" || k === "ArrowDown") move(DIR.down)
+    else if (k === "k" || k === "ArrowUp") move(DIR.up)
+    else if (k === "v") go({ q: new Map(new URLSearchParams(viewHref(dense() ? "" : "dense").split("?")[1] ?? "")) }, true)
+    else if (k === "Escape" && dense() && (model.focus.edit !== "" || model.focus.fireArmed !== 0)) set({ focus: { ...model.focus, edit: "", fireArmed: 0 } })
     else if (k === "g" || k === "Home") move(DIR.first)
     else if (k === "G" || k === "End") move(DIR.last)
     else if ((k === "Enter" || k === "o") && model.selected !== 0) open(model.selected)

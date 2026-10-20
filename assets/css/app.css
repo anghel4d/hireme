@@ -253,6 +253,9 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 .notes { white-space: pre-wrap; }
 
 @media (max-width: 760px) {
+  /* A phone has no room beside the board: the pane goes, and Enter opens the application's page. */
+  .desk-split.dense { display: block; }
+  .desk-detail { display: none; }
   .split { grid-template-columns: 1fr; }
   .split .list { position: static; max-height: none; }
   /* Every lens tab in view, on its own rows under the brand, the link and sign-out; not sticky, so it scrolls away. */
@@ -359,6 +362,20 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 
 .focus-head { margin-bottom: 10px; }
 .focus-head h1 { margin-top: 6px; }
+.title-row { display: flex; align-items: flex-start; gap: 8px; }
+.title-row h1 { flex: 1 1 auto; min-width: 0; }
+.detail-actions { display: flex; gap: 4px; margin-top: 6px; }
+.detail-action { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--muted); }
+.detail-action:hover, .detail-action[data-copied="true"] { color: var(--ink); }
+.detail-action[data-copied="true"] { border-color: var(--good, var(--accent)); }
+.detail-action[data-copied="false"] { border-color: var(--bad); }
+.detail-action svg { display: block; }
+/* The desk's dense view: the board beside the selected card's whole application, each scrolling on its own. */
+.desk-split.dense { display: grid; grid-template-columns: minmax(0, 1fr) minmax(24rem, 40%); gap: var(--gap); align-items: start; }
+.desk-detail { position: sticky; top: 56px; max-height: calc(100vh - 64px); overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.desk-detail .focus-grid { grid-template-columns: minmax(0, 1fr); }
+.desk-detail .focus-head h1 { font-size: 17px; }
+.toolbar .views { margin-left: auto; }
 .rail { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 0; margin: 0 0 12px; }
 .rail button { font-size: 12px; padding: 4px 10px; border-radius: 14px; }
 .rail .pip-done button { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); border-color: var(--ok); }
@@ -403,3 +420,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .coalesced .counts { margin: 2px 0; padding-left: 1.1em; }
 .coalesced p { margin: 2px 0; }
 p.warn { color: var(--warn); font-weight: 600; }
+
+/* The keyboard's row (app.ts): j/k move it on every page. */
+tr.cursor > *, li.cursor { background: var(--sunk); }
+tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }

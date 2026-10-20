@@ -146,6 +146,7 @@ function render(): void {
   // A lens whose view failed has nothing of its own on the page to keep current.
   if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
   // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
+  if (lens) mark(lens)
   const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
   if (want && !focusedOnce.has(want)) {
     focusedOnce.add(want)
@@ -221,8 +222,63 @@ addEventListener("keydown", (ev) => {
     go({ lens: n.lens, sub: "" })
     return
   }
-  if (VIEWS[model.address.lens]?.key?.(ev)) ev.preventDefault()
+  if (VIEWS[model.address.lens]?.key?.(ev) || rowKey(ev.key)) ev.preventDefault()
 })
+
+// ------------------------------------------------------------------ rows
+
+// Every lens's rows answer the same keys (vim's and the arrows'), unless the lens
+// takes the key itself: j/k move a cursor through its table rows and listed items, g/G
+// jump to the ends, Enter or o opens the row (its own action, else its first link or
+// button), and h/l step through the lens's tabs. The cursor is the row's data-key, per
+// lens, so it survives a redraw.
+const ROWS = "tbody tr, ul.rows > li, ol.rows > li"
+const cursor = new Map<Lens, string>()
+
+function rows(lens: HTMLElement): HTMLElement[] {
+  return [...lens.querySelectorAll<HTMLElement>(ROWS)].filter((r) => r.offsetParent !== null)
+}
+
+const keyOf = (r: HTMLElement, i: number): string => r.dataset.key ?? `#${i}`
+
+function mark(lens: HTMLElement): void {
+  const want = cursor.get(model.address.lens)
+  const all = rows(lens)
+  all.forEach((r, i) => r.classList.toggle("cursor", want !== undefined && keyOf(r, i) === want))
+}
+
+function rowKey(k: string): boolean {
+  const lens = document.getElementById("lens")
+  if (!lens) return false
+  if (k === "h" || k === "ArrowLeft" || k === "l" || k === "ArrowRight") {
+    const tabs = [...lens.querySelectorAll<HTMLAnchorElement>(".subtabs a")]
+    if (tabs.length < 2) return false
+    const at = Math.max(0, tabs.findIndex((t) => t.classList.contains("on")))
+    const next = tabs[(at + (k === "h" || k === "ArrowLeft" ? tabs.length - 1 : 1)) % tabs.length]
+    next?.click()
+    return true
+  }
+  const all = rows(lens)
+  if (all.length === 0) return false
+  const want = cursor.get(model.address.lens)
+  const at = all.findIndex((r, i) => keyOf(r, i) === want)
+  let i: number
+  if (k === "j" || k === "ArrowDown") i = at < 0 ? 0 : Math.min(all.length - 1, at + 1)
+  else if (k === "k" || k === "ArrowUp") i = at < 0 ? 0 : Math.max(0, at - 1)
+  else if (k === "g" || k === "Home") i = 0
+  else if (k === "G" || k === "End") i = all.length - 1
+  else if ((k === "Enter" || k === "o") && at >= 0) {
+    const r = all[at]!
+    const target = r.dataset.act ? r : r.querySelector<HTMLElement>("a[href], button")
+    target?.click()
+    return target !== null
+  } else return false
+  const r = all[i]!
+  cursor.set(model.address.lens, keyOf(r, i))
+  mark(lens)
+  r.scrollIntoView({ block: "nearest" })
+  return true
+}
 
 // ------------------------------------------------------------------ wire
 
