@@ -138,6 +138,11 @@ pub fn places(rows: &Rows, location: &str) -> Vec<Candidate> {
     out
 }
 
+/// Whether an application is short of a link (`missing` is not empty), without building the list.
+pub fn short(corporation: Option<u32>, place: Option<u32>, work_mode: Option<u32>) -> bool {
+    corporation.is_none() || (place.is_none() && work_mode != Some(enums::work_mode::REMOTE as u32))
+}
+
 /// What an application must still link: `corporation_id`, then `place_id`
 /// unless it is remote.
 pub fn missing(corporation: Option<u32>, place: Option<u32>, work_mode: Option<u32>) -> Vec<&'static str> {

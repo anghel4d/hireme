@@ -222,140 +222,221 @@ fn collate(a: &str, b: &str) -> Ordering {
     }
 }
 
-impl Col {
+/// How a column's values fall into groups, and what a group is called.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bucket {
+    /// One group per symbol, labelled as written.
+    Sym,
+    /// 0-9, ..., 90-100 (a score).
+    Tens,
+    /// #1-99, #100-199, ... (a number or id).
+    Hundreds,
+    /// 0, 1, 2-9, 10-99, ...
+    Magnitude,
+    /// One group per value: "3 applications".
+    Exact(&'static str),
+    Day,
+    Month,
+}
+
+/// A column with how it groups: high first by default (`desc`), the
+/// absent left out of a grouping (`drop_absent`, duplicates), and what the
+/// absent group is called.
+pub struct Column {
+    pub col: Col,
+    pub bucket: Bucket,
+    pub desc: bool,
+    pub drop_absent: bool,
+    pub none: &'static str,
+}
+
+impl Column {
+    pub fn of(col: Col, bucket: Bucket) -> Column {
+        Column { col, bucket, desc: false, drop_absent: false, none: "(none)" }
+    }
+
     /// A slot's sort key: absent is None (last either way).
     fn key(&self, slot: usize) -> Option<f64> {
-        match self {
+        match &self.col {
             Col::Num(v) => Some(v[slot]).filter(|n| !n.is_nan()),
             Col::Sym { ids, rank, .. } => Some(ids[slot]).filter(|s| *s != NONE).map(|s| rank[s as usize] as f64),
         }
     }
 
-    /// A slot's group: a key that orders the groups, and its label.
-    fn group(&self, slot: usize, path: &str) -> (Option<f64>, String) {
-        match self {
-            Col::Sym { ids, dict, rank } => match ids[slot] {
-                NONE => (None, String::from("(none)")),
-                s => (Some(rank[s as usize] as f64), dict[s as usize].replace('_', " ")),
-            },
-            Col::Num(v) => {
-                let n = v[slot];
-                if n.is_nan() {
-                    return (None, String::from("(none)"));
-                }
-                // A score reads in tens, a day as itself, a count or a number by its order of magnitude.
-                if path == "score" {
-                    let lo = libm::floor(n / 10.0) * 10.0;
-                    let lo = lo.min(90.0);
-                    return (Some(lo), alloc::format!("{lo}–{}", if lo >= 90.0 { 100.0 } else { lo + 9.0 }));
-                }
-                if mask::field(path).is_some_and(|f| mask::FIELDS[f].ty == Ty::Day) {
-                    return (Some(n), crate::day_iso(n as crate::Day));
-                }
-                if n < 2.0 {
-                    return (Some(n), alloc::format!("{n}"));
-                }
-                let lo = libm::pow(10.0, libm::floor(libm::log10(n)));
-                let lo = if lo < 2.0 { 2.0 } else { lo };
-                let hi = if lo == 2.0 { 9.0 } else { lo * 10.0 - 1.0 };
-                (Some(lo), alloc::format!("{lo}–{hi}"))
+    /// A slot's group: its bucket (None absent), ordered by the bucket's value.
+    fn bucket(&self, slot: usize) -> Option<f64> {
+        let n = match &self.col {
+            Col::Sym { ids, .. } => return Some(ids[slot]).filter(|s| *s != NONE).map(f64::from),
+            Col::Num(v) => Some(v[slot]).filter(|n| !n.is_nan())?,
+        };
+        Some(match self.bucket {
+            Bucket::Tens => (libm::floor(n / 10.0) * 10.0).min(90.0),
+            Bucket::Hundreds => libm::floor(n / 100.0) * 100.0,
+            Bucket::Magnitude if n < 2.0 => n,
+            Bucket::Magnitude => libm::pow(10.0, libm::floor(libm::log10(n))).max(2.0),
+            Bucket::Month => {
+                let iso = crate::day_iso(n as crate::Day);
+                let (y, m) = (iso[..4].parse::<f64>().unwrap_or(0.0), iso[5..7].parse::<f64>().unwrap_or(0.0));
+                y * 12.0 + m
             }
+            _ => n,
+        })
+    }
+
+    /// The order a bucket stands in: a symbol by its rank, a number by itself.
+    fn order(&self, b: f64) -> f64 {
+        match &self.col {
+            Col::Sym { rank, .. } => rank[b as usize] as f64,
+            Col::Num(_) => b,
+        }
+    }
+
+    fn label(&self, b: Option<f64>) -> String {
+        let Some(b) = b else { return self.none.into() };
+        match (&self.col, self.bucket) {
+            (Col::Sym { dict, .. }, _) => dict[b as usize].replace('_', " "),
+            (_, Bucket::Tens) => alloc::format!("{b}–{}", if b >= 90.0 { 100.0 } else { b + 9.0 }),
+            (_, Bucket::Hundreds) => alloc::format!("#{}–{}", b.max(1.0), b + 99.0),
+            (_, Bucket::Magnitude) if b < 2.0 => alloc::format!("{b}"),
+            (_, Bucket::Magnitude) => alloc::format!("{b}–{}", if b == 2.0 { 9.0 } else { b * 10.0 - 1.0 }),
+            (_, Bucket::Exact(unit)) => alloc::format!("{b}{unit}"),
+            (_, Bucket::Day) => crate::day_iso(b as crate::Day),
+            (_, Bucket::Month) => alloc::format!("{}-{:02}", libm::floor((b - 1.0) / 12.0), (b - 1.0) % 12.0 + 1.0),
+            (_, Bucket::Sym) => alloc::format!("{b}"),
         }
     }
 }
 
-/// How to arrange: a sort column and direction (1 rising, -1 falling), a
-/// group column, and the groups by size rather than by key.
-pub struct Ask<'a> {
-    pub sort: Option<(usize, i8)>,
-    pub group: Option<usize>,
-    pub largest: bool,
-    /// The columns asked for, built (`build`).
-    pub cols: &'a BTreeMap<usize, Col>,
+/// A catalog field as a column, grouped as its type reads.
+pub fn field(rows: &Rows, f: usize) -> Column {
+    let path = mask::FIELDS[f].path;
+    let col = build(rows, f);
+    let bucket = match (mask::FIELDS[f].ty, path) {
+        (_, "id" | "no") => Bucket::Hundreds,
+        (_, p) if p.ends_with(".applications") => Bucket::Exact(" applications"),
+        (Ty::Day, _) => Bucket::Month,
+        (Ty::Num, _) => Bucket::Magnitude,
+        _ => Bucket::Sym,
+    };
+    // A country code reads as its place: "Germany (DE)", ordered by the name.
+    let col = if mask::FIELDS[f].ty == Ty::Code { named_codes(rows, col) } else { col };
+    Column { desc: path.ends_with(".applications"), ..Column::of(col, bucket) }
 }
 
-/// One group: its label, where it starts in the order, and how many.
+/// Code symbols relabelled "<name> (<code>)" from the places, one name per
+/// code, and ranked by the label.
+fn named_codes(rows: &Rows, col: Col) -> Col {
+    let Col::Sym { ids, dict, .. } = col else { return col };
+    let mut names: crate::keyed::Map<String, &str> = crate::keyed::Map::default();
+    for (pt, p) in rows.each(schema::table::PLACES) {
+        if pt.u32(p, schema::col::places::KIND) == Some(schema::enums::place_kind::COUNTRY as u32)
+            && let (Some(code), Some(name)) = (pt.str(p, schema::col::places::ISO2), pt.str(p, schema::col::places::NAME))
+        {
+            names.entry(code.to_ascii_uppercase()).or_insert(name);
+        }
+    }
+    let dict: Vec<String> = dict.into_iter().map(|c| names.get(&c.to_ascii_uppercase()).map_or(c.clone(), |n| alloc::format!("{n} ({c})"))).collect();
+    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+    order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
+    let mut rank = alloc::vec![0; dict.len()];
+    for (r, s) in order.into_iter().enumerate() {
+        rank[s as usize] = r as u32;
+    }
+    Col::Sym { ids, dict, rank }
+}
+
+/// How to arrange: a sort column and direction (1 rising, -1 falling; none
+/// keeps the board's order), a group column, and groups by size rather than key.
+pub struct Ask<'a> {
+    pub sort: Option<(&'a str, i8)>,
+    pub group: Option<&'a str>,
+    pub largest: bool,
+    /// The columns asked for, by key.
+    pub cols: &'a BTreeMap<String, Column>,
+}
+
+/// One group: a stable key, its label, where it starts in the order, how
+/// many, and (duplicates) the one to keep.
 #[derive(Debug, PartialEq)]
 pub struct Group {
+    pub key: String,
     pub label: String,
     pub start: u32,
     pub count: u32,
+    pub keep: Option<u32>,
 }
 
 /// `ids` (the board's filtered order) sorted and grouped as asked. A sort
-/// is stable over the board's own order; groups keep the sort inside them.
-/// Columnar throughout: one key vector per pass, buckets by symbol or
-/// bucket value, a label made once per group.
-pub fn arrange(rows: &Rows, ids: &[u32], ask: &Ask) -> (Vec<u32>, Vec<Group>) {
+/// is stable over the board's own order; groups keep the sort inside them
+/// and stand in the key's order (high first for a desc column), or largest
+/// first. `keep` names a duplicate group's keeper by `rank` (higher wins).
+pub fn arrange(rows: &Rows, ids: &[u32], ask: &Ask, keep: &dyn Fn(u32) -> (u32, i64)) -> (Vec<u32>, Vec<Group>) {
     let Some(t) = rows.table(schema::table::APPLICATIONS) else { return (Vec::new(), Vec::new()) };
     let mut order: Vec<(u32, usize)> = ids.iter().filter_map(|&id| t.slot(id).map(|s| (id, s))).collect();
-    if let Some((f, dir)) = ask.sort {
-        let col = &ask.cols[&f];
-        // Decorate once: absent sorts last whichever way.
+    if let Some((k, dir)) = ask.sort {
+        let col = &ask.cols[k];
         let mut keyed: Vec<(f64, u32, usize)> = order
             .iter()
-            .map(|&(id, slot)| {
-                let k = col.key(slot).map_or(f64::INFINITY, |k| if dir < 0 { -k } else { k });
-                (k, id, slot)
-            })
+            .map(|&(id, slot)| (col.key(slot).map_or(f64::INFINITY, |v| if dir < 0 { -v } else { v }), id, slot))
             .collect();
         keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
         order = keyed.into_iter().map(|(_, id, slot)| (id, slot)).collect();
     }
     let Some(g) = ask.group else {
         let n = order.len() as u32;
-        return (order.into_iter().map(|x| x.0).collect(), alloc::vec![Group { label: String::new(), start: 0, count: n }]);
+        return (order.into_iter().map(|x| x.0).collect(), alloc::vec![Group { key: String::new(), label: String::new(), start: 0, count: n, keep: None }]);
     };
-    let col = &ask.cols[&g];
-    let path = mask::FIELDS[g].path;
-    // A slot's bucket as bits: a symbol id, or a number's bucket value; absent its own.
-    const ABSENT: u64 = u64::MAX;
-    let bucket = |slot: usize| -> u64 {
-        match col {
-            Col::Sym { ids, .. } => match ids[slot] {
-                NONE => ABSENT,
-                s => u64::from(s),
-            },
-            Col::Num(_) => col.group(slot, path).0.map_or(ABSENT, f64::to_bits),
-        }
-    };
-    let mut buckets: Vec<(u64, usize, Vec<u32>)> = Vec::new();
-    // A symbol column buckets through an array by symbol id; numbers through a map.
-    let mut by_sym: Vec<u32> = match col {
-        Col::Sym { dict, .. } => alloc::vec![u32::MAX; dict.len() + 1],
+    let col = &ask.cols[g];
+    // A counting sort: one bucket index per row, a count per bucket, then
+    // the rows placed at their bucket's offset. No vector per group.
+    let absent = u32::MAX;
+    let mut index: Vec<u32> = Vec::with_capacity(order.len());
+    let mut values: Vec<Option<f64>> = Vec::new();
+    let mut by_sym: Vec<u32> = match &col.col {
+        Col::Sym { dict, .. } => alloc::vec![absent; dict.len() + 1],
         Col::Num(_) => Vec::new(),
     };
-    let mut at: BTreeMap<u64, usize> = BTreeMap::new();
-    for &(id, slot) in &order {
-        let b = bucket(slot);
-        let i = if by_sym.is_empty() {
-            *at.entry(b).or_insert_with(|| {
-                buckets.push((b, slot, Vec::new()));
-                buckets.len() - 1
-            })
-        } else {
-            let s = if b == ABSENT { by_sym.len() - 1 } else { b as usize };
-            if by_sym[s] == u32::MAX {
-                by_sym[s] = buckets.len() as u32;
-                buckets.push((b, slot, Vec::new()));
+    let mut by_num: crate::fx::Map<u64, u32> = crate::fx::Map::default();
+    let mut counts: Vec<u32> = Vec::new();
+    for &(_, slot) in &order {
+        let b = col.bucket(slot);
+        if b.is_none() && col.drop_absent {
+            index.push(absent);
+            continue;
+        }
+        let at = match (&col.col, b) {
+            (Col::Sym { dict, .. }, b) => {
+                let s = b.map_or(dict.len(), |b| b as usize);
+                if by_sym[s] == absent {
+                    by_sym[s] = values.len() as u32;
+                    values.push(b);
+                    counts.push(0);
+                }
+                by_sym[s]
             }
-            by_sym[s] as usize
+            (Col::Num(_), b) => *by_num.entry(b.map_or(u64::MAX, f64::to_bits)).or_insert_with(|| {
+                values.push(b);
+                counts.push(0);
+                values.len() as u32 - 1
+            }),
         };
-        buckets[i].2.push(id);
+        counts[at as usize] += 1;
+        index.push(at);
     }
     let dir = match ask.sort {
-        Some((f, d)) if f == g => d,
+        Some((k, d)) if k == g => d,
+        _ if col.desc => -1,
         _ => 1,
     };
-    // Groups by size, else by key in the sort's direction when sorting the same field, absent last.
-    let key = |b: &(u64, usize, Vec<u32>)| if b.0 == ABSENT { None } else { col.group(b.1, path).0 };
-    buckets.sort_by(|a, b| {
+    // The groups in first-seen order, then sorted: by size, or by key with the absent last.
+    let mut groups_at: Vec<u32> = (0..values.len() as u32).collect();
+    groups_at.sort_by(|&a, &b| {
         if ask.largest {
-            return b.2.len().cmp(&a.2.len());
+            return counts[b as usize].cmp(&counts[a as usize]);
         }
-        match (key(a), key(b)) {
+        match (values[a as usize], values[b as usize]) {
             (Some(x), Some(y)) => {
-                let o = x.total_cmp(&y);
+                let o = col.order(x).total_cmp(&col.order(y));
                 if dir < 0 { o.reverse() } else { o }
             }
             (None, None) => Ordering::Equal,
@@ -363,16 +444,166 @@ pub fn arrange(rows: &Rows, ids: &[u32], ask: &Ask) -> (Vec<u32>, Vec<Group>) {
             (_, None) => Ordering::Less,
         }
     });
-    let mut out = Vec::with_capacity(order.len());
-    let mut groups = Vec::with_capacity(buckets.len());
-    for (_, slot, members) in buckets {
-        groups.push(Group { label: col.group(slot, path).1, start: out.len() as u32, count: members.len() as u32 });
-        out.extend(members);
+    let mut start = alloc::vec![0u32; values.len()];
+    let mut total = 0;
+    for &gi in &groups_at {
+        start[gi as usize] = total;
+        total += counts[gi as usize];
     }
+    let mut out = alloc::vec![0u32; total as usize];
+    let mut cursor = start.clone();
+    let mut keeper: Vec<Option<(u32, (u32, i64))>> = if col.drop_absent { alloc::vec![None; values.len()] } else { Vec::new() };
+    for (&(id, _), &at) in order.iter().zip(&index) {
+        if at == absent {
+            continue;
+        }
+        out[cursor[at as usize] as usize] = id;
+        cursor[at as usize] += 1;
+        if col.drop_absent {
+            let rank = keep(id);
+            let k = &mut keeper[at as usize];
+            if k.is_none_or(|(_, r)| rank > r) {
+                *k = Some((id, rank));
+            }
+        }
+    }
+    let groups = groups_at
+        .iter()
+        .map(|&gi| {
+            let b = values[gi as usize];
+            let key = match (b, &col.col) {
+                (None, _) => String::from("none"),
+                (Some(b), Col::Sym { .. }) => alloc::format!("s{}", b as u32),
+                (Some(b), Col::Num(_)) => alloc::format!("n{b}"),
+            };
+            Group { key, label: col.label(b), start: start[gi as usize], count: counts[gi as usize], keep: keeper.get(gi as usize).copied().flatten().map(|k| k.0) }
+        })
+        .collect();
     (out, groups)
 }
 
 /// The groups as the page reads them.
 pub fn groups_json(groups: &[Group]) -> Json {
-    Json::Array(groups.iter().map(|g| json!({"label": g.label, "start": g.start, "count": g.count})).collect())
+    Json::Array(
+        groups
+            .iter()
+            .map(|g| {
+                let mut o = json!({"key": g.key, "label": g.label, "start": g.start, "count": g.count});
+                if let Some(k) = g.keep {
+                    o["keep"] = json!(k);
+                }
+                o
+            })
+            .collect(),
+    )
+}
+
+/// Symbols from text per slot: interned, ranked in reading order.
+fn texts(per_slot: impl Iterator<Item = Option<String>>) -> Col {
+    let mut names = Interner::new();
+    let ids = per_slot.map(|t| t.map_or(NONE, |t| names.sym(&t))).collect();
+    let dict = names.dict;
+    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+    order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
+    let mut rank = alloc::vec![0; dict.len()];
+    for (r, s) in order.into_iter().enumerate() {
+        rank[s as usize] = r as u32;
+    }
+    Col::Sym { ids, dict, rank }
+}
+
+/// Symbols from a fixed list in its order (an enum read as the desk reads it).
+fn listed(names: &[&str], per_slot: impl Iterator<Item = Option<usize>>) -> Col {
+    Col::Sym {
+        ids: per_slot.map(|i| i.map_or(NONE, |i| i as u32)).collect(),
+        dict: names.iter().map(|s| String::from(*s)).collect(),
+        rank: (0..names.len() as u32).collect(),
+    }
+}
+
+/// The desk's own keys.
+pub const DESK: &[&str] = &["score", "band", "heat", "why", "lease", "added", "dupes", "company", "place"];
+
+/// The desk's own keys, which read the board's cards or several columns
+/// at once; None for a key that is a catalog field.
+pub fn desk(rows: &Rows, board: &crate::board::Board, key: &str) -> Option<Column> {
+    use schema::col::applications as A;
+    let t = rows.table(schema::table::APPLICATIONS)?;
+    let ids = t.ids();
+    let card = |id: u32| board.card(id);
+    let linked = |c: u16, table: u16, name: u16, written: u16| {
+        let rt = rows.table(table);
+        texts(ids.iter().map(|&id| {
+            match t.u32(id, c).and_then(|r| rt.filter(|rt| rt.has(r)).and_then(|rt| rt.str(r, name))) {
+                Some(n) => Some(n.into()),
+                None => {
+                    let own = t.str(id, written).unwrap_or("");
+                    let need = crate::link::missing(t.u32(id, A::CORPORATION_ID), t.u32(id, A::PLACE_ID), t.u32(id, A::WORK_MODE));
+                    let short = need.contains(&if table == schema::table::CORPORATIONS { "corporation_id" } else { "place_id" });
+                    (!own.is_empty()).then(|| if short { alloc::format!("{own} · unlinked") } else { own.into() })
+                }
+            }
+        }))
+    };
+    Some(match key {
+        "score" => Column { desc: true, ..Column::of(Col::Num(ids.iter().map(|&id| card(id).map_or(f64::NAN, |c| f64::from(c.score))).collect()), Bucket::Tens) },
+        "band" => {
+            let names: Vec<&str> = crate::score::BANDS.iter().map(|b| b.name()).collect();
+            Column::of(listed(&names, ids.iter().map(|&id| card(id).map(|c| c.band as usize))), Bucket::Sym)
+        }
+        "heat" => {
+            const ORDER: [&str; 4] = ["hot", "warm", "cool", "blocked"];
+            Column::of(listed(&ORDER, ids.iter().map(|&id| card(id).and_then(|c| ORDER.iter().position(|n| *n == c.class.name())))), Bucket::Sym)
+        }
+        "why" => Column::of(
+            texts(ids.iter().map(|&id| card(id).map(|c| c.verdict.reason.name()).filter(|r| *r != "ok").map(String::from))),
+            Bucket::Sym,
+        ),
+        "lease" => {
+            let mut by: crate::fx::Map<u32, String> = crate::fx::Map::default();
+            for (lt, l) in rows.each(schema::table::LEASES) {
+                let label = lt.str(l, schema::col::leases::LABEL).unwrap_or("");
+                for held in crate::text::list(lt.str(l, schema::col::leases::HELD).unwrap_or("")) {
+                    if let Ok(a) = held.parse::<u32>() {
+                        by.insert(a, alloc::format!("leased by {}", if label.is_empty() { "an agent" } else { label }));
+                    }
+                }
+            }
+            Column { none: "not leased", ..Column::of(texts(ids.iter().map(|id| by.get(id).cloned())), Bucket::Sym) }
+        }
+        "added" => Column::of(
+            Col::Num(ids.iter().map(|&id| match t.get(id, A::INSERTED_AT) {
+                crate::rows::Val::I64(s) => (crate::UNIX_EPOCH_DAY as i64 + s.div_euclid(86_400)) as f64,
+                crate::rows::Val::U32(s) => (crate::UNIX_EPOCH_DAY as i64 + i64::from(s) / 86_400) as f64,
+                _ => f64::NAN,
+            }).collect()),
+            Bucket::Day,
+        ),
+        "dupes" => {
+            // The same posting (its canonical URL), else the same company, role and place by link or by text.
+            let norm = |s: &str| crate::text::normalize(s);
+            let key = |id: u32| -> String {
+                if let Some(u) = t.str(id, A::CANONICAL_URL).filter(|u| !u.is_empty()) {
+                    return alloc::format!("u{u}");
+                }
+                let corp = t.u32(id, A::CORPORATION_ID).map_or_else(|| norm(t.str(id, A::COMPANY).unwrap_or("")), |c| alloc::format!("#{c}"));
+                let place = t.u32(id, A::PLACE_ID).map_or_else(|| norm(t.str(id, A::LOCATION).unwrap_or("")), |p| alloc::format!("#{p}"));
+                alloc::format!("{corp}|{}|{place}", norm(t.str(id, A::ROLE).unwrap_or("")))
+            };
+            let keys: Vec<String> = ids.iter().map(|&id| key(id)).collect();
+            let mut seen: crate::keyed::Map<&str, u32> = crate::keyed::Map::default();
+            for k in &keys {
+                *seen.entry(k.as_str()).or_default() += 1;
+            }
+            let label = |id: u32| alloc::format!("{} · {}", t.str(id, A::COMPANY).filter(|c| !c.is_empty()).unwrap_or("(no company)"), t.str(id, A::ROLE).unwrap_or(""));
+            // One symbol per duplicate set, labelled by its first member.
+            let mut set: crate::keyed::Map<&str, String> = crate::keyed::Map::default();
+            let per = ids.iter().zip(&keys).map(|(&id, k)| (seen[k.as_str()] > 1).then(|| set.entry(k.as_str()).or_insert_with(|| label(id)).clone()));
+            let per: Vec<Option<String>> = per.collect();
+            Column { drop_absent: true, ..Column::of(texts(per.into_iter()), Bucket::Sym) }
+        }
+        "company" => Column::of(linked(A::CORPORATION_ID, schema::table::CORPORATIONS, schema::col::corporations::NAME, A::COMPANY), Bucket::Sym),
+        "place" => Column::of(linked(A::PLACE_ID, schema::table::PLACES, schema::col::places::NAME, A::LOCATION), Bucket::Sym),
+        _ => return None,
+    })
 }

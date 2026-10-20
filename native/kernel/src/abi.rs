@@ -64,7 +64,7 @@ pub struct Kernel {
     /// The desk's `columns`, per field, dropped with the picks and when offices move.
     columns: core::cell::RefCell<BTreeMap<usize, Vec<Json>>>,
     /// The typed columns `arrange` sorts and groups on, kept as `columns` is.
-    cols: core::cell::RefCell<BTreeMap<usize, crate::arrange::Col>>,
+    cols: core::cell::RefCell<BTreeMap<String, crate::arrange::Column>>,
 }
 
 impl Kernel {
@@ -154,25 +154,67 @@ impl Kernel {
         Ok(json!({"ids": ids, "cols": cols}))
     }
 
-    /// The board's filtered order sorted on one field and grouped on another
-    /// (`arrange`): the desk's select-by-sort, over typed columns.
-    pub fn arrange(&mut self, req: &Json) -> Result<(Vec<u32>, Vec<crate::arrange::Group>), Refusal> {
-        let field = |v: &Json| -> Result<Option<usize>, Refusal> {
-            match v.as_str() {
-                None | Some("") => Ok(None),
-                Some(p) => crate::mask::field(p).map(Some).ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "field", "unknown": p}))),
-            }
-        };
-        let sort = field(&req["sort"][0])?.map(|f| (f, if req["sort"][1] == "desc" { -1 } else { 1 }));
-        let group = field(&req["group"])?;
+    /// The board's filtered order, narrowed by work mode and to the
+    /// unlinked, sorted on one key and grouped on another (`arrange`): the
+    /// desk's select-by-sort over typed columns. Keys are the desk's own
+    /// (`arrange::desk`) or catalog fields. Also answers the chips' counts:
+    /// work modes over the filtered board, unlinked over the whole desk.
+    pub fn arrange(&mut self, req: &Json) -> Result<(Vec<u32>, Json), Refusal> {
         let ids = self.view(&filter(&req["filter"].to_string()));
         let rows = &self.rows;
-        let mut cols = self.cols.borrow_mut();
-        for f in sort.map(|s| s.0).into_iter().chain(group) {
-            cols.entry(f).or_insert_with(|| crate::arrange::build(rows, f));
+        let Some(t) = rows.table(table::APPLICATIONS) else { return Ok((Vec::new(), json!({"groups": [], "modes": {}, "unlinked": 0}))) };
+        use schema::col::applications as A;
+        let modes = schema::enums::work_mode::NAMES;
+        // The columns read straight, by slot: no lookup per row.
+        let column = |c: u16| match t.column(c).map(|c| &c.data) {
+            Some(crate::rows::Data::U32(v)) => Some(v.as_slice()),
+            _ => None,
+        };
+        let some = |v: u32| (v != wire::NONE).then_some(v);
+        let (wm, corp, place) = (column(A::WORK_MODE), column(A::CORPORATION_ID), column(A::PLACE_ID));
+        let at = |v: Option<&[u32]>, slot: usize| v.and_then(|v| some(v[slot]));
+        let mode = |slot: usize| at(wm, slot).map_or(modes.len(), |m| (m as usize).min(modes.len()));
+        let short = |slot: usize| crate::link::short(at(corp, slot), at(place, slot), at(wm, slot));
+        let slots: Vec<(u32, usize)> = ids.iter().filter_map(|&id| t.slot(id).map(|s| (id, s))).collect();
+        let mut counts = alloc::vec![0u32; modes.len() + 1];
+        for &(_, slot) in &slots {
+            counts[mode(slot)] += 1;
         }
-        let ask = crate::arrange::Ask { sort, group, largest: req["largest"] == true, cols: &cols };
-        Ok(crate::arrange::arrange(rows, &ids, &ask))
+        let picked: Vec<usize> = req["modes"].as_array().map(|a| a.iter().filter_map(Json::as_str).map(|m| modes.iter().position(|n| *n == m).unwrap_or(modes.len())).collect()).unwrap_or_default();
+        let only = req["unlinked"] == true;
+        let ids: Vec<u32> = slots.iter().filter(|&&(_, slot)| (picked.is_empty() || picked.contains(&mode(slot))) && (!only || short(slot))).map(|x| x.0).collect();
+        let unlinked = (0..t.len()).filter(|&slot| short(slot)).count();
+        let key = |v: &Json| -> Result<Option<String>, Refusal> {
+            match v.as_str() {
+                None | Some("") => Ok(None),
+                Some("mode") => Ok(Some("work_mode".into())),
+                Some(k) if crate::arrange::DESK.contains(&k) || crate::mask::field(k).is_some() => Ok(Some(k.into())),
+                Some(k) => Err(judge::no(refusal::TYPE, json!({"param": "key", "unknown": k}))),
+            }
+        };
+        let sort = key(&req["sort"][0])?;
+        let group = key(&req["group"])?;
+        let mut cols = self.cols.borrow_mut();
+        for k in sort.iter().chain(group.iter()) {
+            if !cols.contains_key(k) {
+                let c = crate::arrange::desk(rows, &self.board, k).unwrap_or_else(|| crate::arrange::field(rows, crate::mask::field(k).unwrap_or(0)));
+                cols.insert(k.clone(), c);
+            }
+        }
+        let dir = match req["sort"][1].as_str() {
+            Some("desc") => -1,
+            Some("asc") => 1,
+            _ => sort.as_ref().map_or(1, |k| if cols[k].desc { -1 } else { 1 }),
+        };
+        let ask = crate::arrange::Ask { sort: sort.as_deref().map(|k| (k, dir)), group: group.as_deref(), largest: req["largest"] == true, cols: &cols };
+        // A duplicate set keeps its furthest along, then its lowest number.
+        let keep = |id: u32| (t.u32(id, A::STAGE).unwrap_or(0), -i64::from(t.u32(id, A::NO).unwrap_or(u32::MAX)));
+        let (order, groups) = crate::arrange::arrange(rows, &ids, &ask, &keep);
+        let mut by_mode = serde_json::Map::new();
+        for (i, n) in counts.iter().enumerate() {
+            by_mode.insert(modes.get(i).copied().unwrap_or("none").into(), json!(n));
+        }
+        Ok((order, json!({"groups": crate::arrange::groups_json(&groups), "modes": by_mode, "unlinked": unlinked})))
     }
 
     /// Application `id`'s CV pick.
@@ -219,7 +261,7 @@ impl Kernel {
             *self.picks.get_mut() = None;
             self.columns.get_mut().clear();
             self.cols.get_mut().clear();
-        } else if m.touched(table::OFFICES) {
+        } else if m.touched(table::OFFICES) || m.touched(table::LEASES) {
             self.columns.get_mut().clear();
             self.cols.get_mut().clear();
         }
@@ -309,6 +351,8 @@ impl Kernel {
             let today = self.today();
             self.board.derive(&self.rows, today);
             self.stale = false;
+            // The desk's card keys (score, band, heat, why) read the board.
+            self.cols.get_mut().retain(|k, _| !crate::arrange::DESK.contains(&k.as_str()) || matches!(k.as_str(), "company" | "place" | "dupes" | "added"));
         }
     }
 
@@ -688,7 +732,7 @@ mod exports {
         let req: Json = serde_json::from_slice(unsafe { input(ptr, len) }).unwrap_or(Json::Null);
         K.with(|k| match k.borrow_mut().arrange(&req) {
             Ok((ids, groups)) => {
-                GROUPS.with(|g| *g.borrow_mut() = crate::arrange::groups_json(&groups));
+                GROUPS.with(|g| *g.borrow_mut() = groups);
                 put_ids(&ids)
             }
             Err(r) => refused(&r),
