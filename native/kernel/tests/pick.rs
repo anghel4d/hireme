@@ -223,6 +223,8 @@ fn a_version_carries_what_its_root_format_takes_and_becomes_the_root_head() {
     };
     assert_eq!(refusal_of(k.judge(&version(23, None, Some("ab12")), &ctx(true))).code, refusal::TYPE);
     assert_eq!(refusal_of(k.judge(&version(21, Some("# CV"), None), &ctx(true))).code, refusal::TYPE);
+    // A file keeps its blob when the operator edits its text.
+    assert!(k.judge(&version(21, Some("Payments infra, edited"), Some("ab12")), &ctx(true)).is_ok());
     assert_eq!(refusal_of(k.judge(&version(99, Some("# CV"), None), &ctx(true))).code, refusal::NOT_FOUND);
     let fx = k.judge(&version(23, Some("# Ana\nRust, kernels"), None), &ctx(true)).unwrap();
     let head = fx.iter().find(|r| r.table == table::CV_ROOTS).expect("the root moves");

@@ -600,8 +600,10 @@ fn check_cv(rows: &Rows, change: Option<(u32, String, String)>, dropped: Option<
     Ok(())
 }
 
-/// A new version of a root: the content its root's format takes, and the
-/// root's newest version moved to it.
+/// A new version of a root: the content its root's format takes (markdown
+/// a body; a composition either; a file format its blob, with an edited
+/// body as its text if the operator gave one), and the root's newest
+/// version moved to it.
 fn version(rows: &Rows, op: &Op, row: Row) -> Verdict {
     use col::cv_versions as V;
     let Some(Val::U32(root)) = cell_val(op, V::ROOT_ID) else { return refuse(refusal::NOT_FOUND, json!({"need": "root_id"})) };
@@ -611,18 +613,13 @@ fn version(rows: &Rows, op: &Op, row: Row) -> Verdict {
     let format = roots.u32(root, col::cv_roots::FORMAT).unwrap_or(0);
     let set = |c: u16| matches!(cell_val(op, c), Some(Val::Str(v)) if !v.trim().is_empty());
     let (body, blob) = (set(V::BODY), set(V::BLOB_SHA));
-    let ok = match format as u8 {
-        enums::cv_format::MARKDOWN => body && !blob,
-        enums::cv_format::PDF | enums::cv_format::DOCX => blob && !body,
-        _ => body || blob,
+    let (ok, need) = match format as u8 {
+        enums::cv_format::MARKDOWN => (body && !blob, "body"),
+        enums::cv_format::COMPOSED => (body || blob, "body or blob_sha"),
+        _ => (blob, "blob_sha"),
     };
     if !ok {
         let name = enums::cv_format::NAMES.get(format as usize).copied().unwrap_or("");
-        let need = match format as u8 {
-            enums::cv_format::MARKDOWN => "body",
-            enums::cv_format::PDF | enums::cv_format::DOCX => "blob_sha",
-            _ => "body or blob_sha",
-        };
         return refuse(refusal::TYPE, json!({"table": "cv_versions", "format": name, "need": need}));
     }
     let head = Row { table: table::CV_ROOTS, id: root, cells: alloc::vec![(col::cv_roots::VERSION_ID, EVal::New(0))] };
