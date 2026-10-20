@@ -238,6 +238,9 @@ fn a_rule_text_is_checked_explained_and_its_fields_listed() {
     assert_eq!((&c["ok"], &c["shadowed"], &c["never_matches"]), (&json!(true), &json!([40, 41]), &json!(false)));
     assert_eq!(check("country = DE", Some(0))["shadowed"], json!([]));
     assert_eq!(check("country = JP", None)["never_matches"], true);
+    // "Research Engineer" names no level: mid.
+    assert_eq!(check("seniority = :mid", Some(0))["never_matches"], false);
+    assert_eq!(check("seniority >= :senior", None)["never_matches"], true);
     let bad = check("country = ", None);
     assert_eq!((&bad["ok"], &bad["error"]["pos"]), (&json!(false), &json!(10)));
 

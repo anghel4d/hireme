@@ -62,6 +62,37 @@ impl Department {
     }
 }
 
+/// A title's level: the highest its words name; a title naming none is mid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Seniority {
+    Intern,
+    Junior,
+    Mid,
+    Senior,
+    Lead,
+    Staff,
+    Principal,
+}
+
+impl Seniority {
+    pub const NAMES: &[&str] = &["intern", "junior", "mid", "senior", "lead", "staff", "principal"];
+
+    /// The level of a normalized title.
+    pub fn of(normalized: &str) -> Seniority {
+        use Seniority::*;
+        let level = |w: &str| match w {
+            "intern" | "internship" => Intern,
+            "junior" | "jr" | "grad" | "i" | "l3" => Junior,
+            "senior" | "sr" | "iii" | "l5" => Senior,
+            "lead" => Lead,
+            "staff" | "l6" => Staff,
+            "principal" | "distinguished" | "fellow" | "l7" | "l8" => Principal,
+            _ => Mid,
+        };
+        crate::text::words(normalized).map(level).max().unwrap_or(Mid)
+    }
+}
+
 /// `Other` stays the last variant: the governor sizes its counts by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {

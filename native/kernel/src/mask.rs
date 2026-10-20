@@ -90,6 +90,7 @@ pub fn values(name: &str) -> &'static [&'static str] {
         "tier" => TIERS,
         "department" => DEPARTMENTS,
         "family" => FAMILIES,
+        "seniority" => crate::org::Seniority::NAMES,
         "vendor" => VENDORS,
         other => schema::enum_names(other).unwrap_or(&[]),
     }
@@ -127,6 +128,7 @@ pub const FIELDS: &[Field] = &[
     Field { path: "company.hq", ty: Ty::Code },
     Field { path: "field", ty: Ty::Enum("department") },
     Field { path: "subfield", ty: Ty::Enum("family") },
+    Field { path: "seniority", ty: Ty::Enum("seniority") },
     Field { path: "me.citizenships", ty: Ty::Codes },
     Field { path: "me.field", ty: Ty::Text },
     Field { path: "me.subfields", ty: Ty::Texts },

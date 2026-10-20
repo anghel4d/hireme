@@ -19,7 +19,7 @@ use schema::{col, enums, table};
 use serde_json::{Value as Json, json};
 
 use crate::mask::{self, Expr, Facts, Val};
-use crate::org::{Department, Family, Size};
+use crate::org::{Department, Family, Seniority, Size};
 use crate::rows::{Rows, Table};
 use crate::score::{self, Tier};
 use crate::{ats, board, lexicon, text};
@@ -180,7 +180,7 @@ pub struct AppFacts<'r> {
     t: &'r Table,
     id: u32,
     name: OnceCell<lexicon::Hits>,
-    title: OnceCell<(Department, Family)>,
+    title: OnceCell<(Department, Family, Seniority)>,
 }
 
 impl<'r> AppFacts<'r> {
@@ -223,10 +223,11 @@ impl<'r> AppFacts<'r> {
         })
     }
 
-    fn role(&self) -> (Department, Family) {
+    fn role(&self) -> (Department, Family, Seniority) {
         *self.title.get_or_init(|| {
-            let (h, fam) = lexicon::Hits::title(&text::normalize(self.t.str(self.id, A::ROLE).unwrap_or("")));
-            (Department::of_hits(h), Family::of_hits(fam))
+            let n = text::normalize(self.t.str(self.id, A::ROLE).unwrap_or(""));
+            let (h, fam) = lexicon::Hits::title(&n);
+            (Department::of_hits(h), Family::of_hits(fam), Seniority::of(&n))
         })
     }
 }
@@ -285,6 +286,7 @@ impl Facts for AppFacts<'_> {
             "company.hq" => self.iso2(self.corp().and_then(|(ct, x)| ct.u32(x, col::corporations::HQ_PLACE_ID))),
             "field" => Some(Val::Enum(self.role().0 as u32)),
             "subfield" => Some(Val::Enum(self.role().1 as u32)),
+            "seniority" => Some(Val::Enum(self.role().2 as u32)),
             "me.citizenships" => me_s(col::me::CITIZENSHIPS).map(codes),
             "me.field" => me_s(col::me::FIELD).map(|v| Val::Text(Cow::Borrowed(v))),
             "me.subfields" => me_s(col::me::SUBFIELDS).map(texts),
