@@ -1,8 +1,8 @@
-{"layout":4,"wire_hash":36207,"schema_rev":2330846121,"carry":["refusal","bye","verb"],
+{"layout":4,"wire_hash":444,"schema_rev":2437991301,"carry":["refusal","bye","verb"],
 "domains":[{"name":"world","bit":1},{"name":"desk","bit":2},{"name":"mail","bit":4},{"name":"corpus","bit":8},{"name":"system","bit":0}],
 "frames":[{"name":"HELLO","id":1},{"name":"WELCOME","id":2},{"name":"BOOT","id":3},{"name":"PATCH","id":4},{"name":"OPS","id":8},{"name":"ACK","id":9},{"name":"NACK","id":10},{"name":"TICK","id":11},{"name":"PING","id":13},{"name":"PONG","id":14},{"name":"BYE","id":16},{"name":"RPC","id":33},{"name":"REPLY","id":34}],
 "enums":[
-{"id":1,"name":"refusal","values":["scope","human_only","lease_missing","leased","column","type","not_found","natural_key","stage","fire_hold","heat","lineage_busy","cooldown","freshness","stale","rev","source_missing","source_trust","too_large","rate","cap","internal","burst","rule","blob_missing"]},
+{"id":1,"name":"refusal","values":["scope","human_only","lease_missing","leased","column","type","not_found","natural_key","stage","fire_hold","heat","lineage_busy","cooldown","freshness","stale","rev","source_missing","source_trust","too_large","rate","cap","internal","burst","rule","blob_missing","unlinked"]},
 {"id":2,"name":"verb","values":["put","drop","command"]},
 {"id":3,"name":"actor","values":["operator","agent","system","mail"]},
 {"id":4,"name":"bye","values":["revoked","grants","restart","schema","suspended"]},

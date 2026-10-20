@@ -37,6 +37,7 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("burst", "limits", "another op of this atomic burst was refused", "A bulk contract's burst lands whole or not at all: nothing of it was written. Fix the ops refused for their own reasons and send the burst again."),
     ("rule", "domain", "the CV pattern does not parse or check", "The data names the byte offset (at) and what is wrong there. Fix the pattern at that offset; a named mask must exist and may not form a cycle."),
     ("blob_missing", "domain", "no file with this hash", "Upload the file first (cv_upload), then put the version with the blob_sha it answered."),
+    ("unlinked", "domain", "an application must link a world corporation, and a place unless remote", "Find the corporation (and the place) in the world, then put the application again with corporation_id (and place_id). The refusal lists the likeliest matches and the calls to run; create a corporation in the world first only when none exists."),
 ];
 
 pub fn names() -> impl Iterator<Item = &'static str> {

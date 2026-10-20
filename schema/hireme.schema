@@ -112,7 +112,7 @@ frame REPLY 34
 
 # ---------------------------------------------------------------- enums
 
-enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal burst rule blob_missing
+enum refusal scope human_only lease_missing leased column type not_found natural_key stage fire_hold heat lineage_busy cooldown freshness stale rev source_missing source_trust too_large rate cap internal burst rule blob_missing unlinked
 
 carry refusal bye verb
 

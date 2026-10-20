@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x8d6f;
-export const SCHEMA_REV = 0x8aede3a9;
+export const WIRE_HASH = 0x01bc;
+export const SCHEMA_REV = 0x9150cb85;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -19,7 +19,7 @@ export const AS_OF = 0xfff0;
 export const SOURCE = 0xfff1;
 export const FREE_PARAM = 0xfe00;
 
-export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst", "rule", "blob_missing"] as const;
+export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst", "rule", "blob_missing", "unlinked"] as const;
 export type Refusal = (typeof REFUSAL)[number];
 export const VERB = ["put", "drop", "command"] as const;
 export type Verb = (typeof VERB)[number];
