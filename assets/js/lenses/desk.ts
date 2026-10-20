@@ -216,6 +216,24 @@ function keyOf(name: string, by: Map<number, Row>, dupes: Map<number, number[]>,
       return { value: (id) => str(get(id)) || null, group: (id) => [str(get(id)).slice(0, 7), str(get(id)).slice(0, 7) || "(none)"] }
     case "bool":
       return { value: (id) => (get(id) === null ? null : get(id) ? 1 : 0), group: (id) => (get(id) === null ? ["", "(none)"] : get(id) ? ["1", "yes"] : ["0", "no"]) }
+    case "code": {
+      // A country code reads as the world's name for it, "Germany (DE)", and sorts by the name; one name read per code.
+      const names = new Map<string, string>()
+      const name = (c: string): string => {
+        if (!names.has(c)) {
+          const p = c === "" ? 0 : lookup("places", "iso2", c)
+          names.set(c, p ? str(value("places", p, "name")) : "")
+        }
+        return names.get(c)!
+      }
+      return {
+        value: (id) => norm(name(str(get(id))) || get(id)) || null,
+        group: (id) => {
+          const c = str(get(id))
+          return [c, c === "" ? "(none)" : name(c) ? `${name(c)} (${c})` : c]
+        },
+      }
+    }
     default:
       return textKey(get)
   }
