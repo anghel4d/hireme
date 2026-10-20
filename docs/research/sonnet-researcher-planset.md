@@ -4,7 +4,7 @@ This replaces the first planset (commit 4fdcf48, still in git history). It was w
 
 ## How this was gathered
 
-- **Observer MCP** (https://observer.anoptic.io/mcp, one stream, one call about every 30 s after a Cloudflare 1015 early on): 47 `query_seeds` queries and 12 `get_seed` calls at the time of writing, plus about 35 early queries before the rate limit. Its multi-word queries mostly return nothing, so most card reading was from the same catalog's `cards.json` (2,360 cards). `get_seed` returns the card's original markdown; `cards.json` is its parse.
+- **Observer MCP** (https://observer.anoptic.io/mcp, one stream, one call about every 30 s after a Cloudflare 1015 early on): 63 `query_seeds` queries and 20 `get_seed` calls in the final stream (no rate-limit errors in it), plus about 35 early queries before the Cloudflare 1015. Its multi-word queries mostly return nothing, so most card reading was from the same catalog's `cards.json` (2,360 cards). `get_seed` returns the card's original markdown; `cards.json` is its parse.
 - **Papers**: full text from arXiv HTML (or `pdftotext` for 2605.05257), then read by section or searched with grep; the list is at the end.
 - **Code**: every "gap" below cites a file and line in the shared working tree on 2026-10-20 (HEAD 4fdcf48 plus other lanes' uncommitted edits, so line numbers drift).
 - **Experiments** (listed under "What I measured"): the scripts live in the session scratchpad, not in the repo.
@@ -54,6 +54,8 @@ The conclusion for fit: what the listing's keywords should be is a small, named 
 
 ## The five, revised and ranked
 
+Ranked by leverage on the product; the build order differs and is under Order.
+
 ### 1. Skill-aware fit in the kernel (lexicon first, models only if measured)
 
 **What it replaces:** keywords-by-frequency and whole-term coverage (`keywords.rs`, `coverage` at `:309`). This is a deterministic kernel function, not agent RAG: no LLM sits on that path. Today coverage is read only by the focus lens (`focus.ts:91`) and the MCP document; `score.rs`, `heat.rs` and `board.rs` do not read keywords, so the gain is in CV tailoring and fit judgment, and whether fit should ever move the Life-EV score is the operator's call (the ladder is deliberately not a fit score).
@@ -85,15 +87,16 @@ The conclusion for fit: what the listing's keywords should be is a small, named 
 **Evidence.**
 - Limbo, "Where Does Exactly-Once Live?" (2609.29095): 25,930 episodes; when a write is still in flight or delivered twice the contract explains 81% of the variance and frontier models duplicate in 56% and 74% of episodes; an idempotency key on every write lowered the duplicate rate from 28% to 4% because agents use keys when they exist.
 - The Limbo discussion (read in full) argues for a standard idempotency-key argument on non-idempotent tools, a declared read-back with documented visibility, and one key pinned per intent so a model cannot defeat the key by regenerating it on a retry; a read-back that cannot see in-flight effects was worse than none. Hireme's reads answer from the sequencer's kernel at the new rev, so read-your-writes holds by construction.
-- PlanFence (2609.03340, see correction 1): the missing-evidence result: with the validator fixed, supplying inherited input versions turned 0/30 detected conflicts into 30/30; the paper does not ask the model what it depended on.
+- PlanFence (2609.03340, see correction 1), Table 1(a): session read tracking detected all 30 changes after same-session planning but missed all 30 inherited conflicts after a handoff to a session that had not read the old inputs; supplying the inherited versions fixed it (30/30). It does not ask the model what it depended on, and it notes that derivation currency does not imply semantic correctness (28 of 30 recorded decisions were correct on unchanged inputs).
 - S-Bus (2605.17076): a server-side log of delivered reads reconstructs an approximate read set (26.1% of single-step references on one workload; correction 8). Taming Cognitive Transactions, TCT (2609.20261): typed dependency tokens separate content integrity from applicability; mean commit overhead 3.22 ms in the paper's prototype; a falsification suite prevented all injected anomalies. CoAgent (2606.15376): let the agent judge whether a conflicting write invalidates its plan and repair it; within 5% of serial correctness at 1.4x speedup on its ten workloads.
+- Atomix (2602.14849), discussion section: adapter metadata (scopes, idempotency keys, compensation handlers) is safety-critical; a too-narrow declared scope let 66 of 200 invariant violations commit, and a wrong effect class leaked 17 of 200 irreversible actions. So the dependency frontier should be derived from what the judge actually reads for that command, never declared by the agent alone.
 - MasuGate (2608.02764) names stale authorization; hireme's single sequencer already judges policy (heat, fire hold) against current state at commit, so that part is satisfied by construction. The remaining gap is the derivation of content writes.
 - ECT (2608.23623): 0/288 unsafe completions against 252/288 for a termination critic, on 48 synthetic tasks, single author. Supporting only.
 
 **Design.**
 1. **Optional client key** on every write tool (no server-derived default, because two identical `note`s in one session can be intentional; the tool description tells the agent to pin one key per intent and reuse it on retry): `op_id = hash(key_id, key)` into the existing `(writer, op_id)` ledger so a retry across sessions is answered from it with `replayed: true`. This is the cheapest change in this planset and the best supported.
-2. **Reads stamp, the server logs.** `find`, `get`, `text` return `(table, id, rev)` stamps and the MCP session keeps what it delivered. A write may carry `deps`; the judge also treats the session's delivered stamps as implicit deps for the cells that command's verdict reads (the action-specific frontier). A moved dep is refused `stale_plan` with `{table, id, col, was, now, source}` so one repair turn suffices (CoAgent's advisory repair). The browser runs the same function on operator edits.
-3. **Stale drafts.** Agent-written prose may carry `basis` cell references (a json cell, per the fat-table rule); a reverse index in the kernel marks the draft stale when a basis cell is superseded; the `hireme` overview lists stale drafts as the next step.
+2. **Reads stamp, the server logs, and stored plans carry their inputs.** `find`, `get`, `text` return `(table, id, rev)` stamps and the MCP session keeps what it delivered. A write may carry `deps`; the judge also treats the session's delivered stamps as implicit deps for the cells that command's verdict reads (the action-specific frontier). Session-delivered stamps cover only the session that did the reading; a draft or plan another session picks up later needs its `basis` revs stored with it (item 3), which is the handoff case PlanFence measured. A moved dep is refused `stale_plan` with `{table, id, col, was, now, source}` so one repair turn suffices (CoAgent's advisory repair). The browser runs the same function on operator edits.
+3. **Stale drafts.** Agent-written prose may carry a `basis` of `(table, id, col, rev)` references, the revs the agent read (a json cell, per the fat-table rule); a reverse index in the kernel marks the draft stale when a basis cell is superseded; the `hireme` overview lists stale drafts as the next step.
 4. **Completion receipts.** `release {report}` checks each claim that names a row against `op_ledger` and the citations; unbacked claims are flagged in the audit trail.
 
 **Gates.** Extend `agent_attack_test` and `session_test`: a retried `note` writes one event; a stale dep never lands; dep validation microseconds at 10k rows.
@@ -102,7 +105,7 @@ The conclusion for fit: what the listing's keywords should be is a small, named 
 
 ### 3. Delta-resume sync: BOOT is the delta from nothing
 
-**Evidence.** Gaffer's State Synchronization (card 331): snapshots delta-compressed against an acknowledged baseline and prioritized. Quake III (Observer card 412, via `get_seed`): deltas against the last acknowledged snapshot, and a base that is too old or missing is discarded in favour of a full snapshot. Viewstamped Replication Revisited (card 862): recovery by log suffix or full state transfer. Electric and Replicache cursor-and-must-refetch practice (search snippets, secondary). The record from sync-engine practice: tombstones bound the window, and a timestamp delta misses joined-field changes (derived values here are client-derived, so only base rows need deltas).
+**Evidence.** Gaffer's State Synchronization (card 331): snapshots delta-compressed against an acknowledged baseline and prioritized. Quake III (Observer card 412, via `get_seed`): deltas against the last acknowledged snapshot, and a snapshot whose delta base is too old or missing is discarded rather than applied corrupt. Viewstamped Replication Revisited (card 862): recovery by log suffix or full state transfer. Electric and Replicache cursor-and-must-refetch practice (search snippets, secondary). The record from sync-engine practice: tombstones bound the window, and a timestamp delta misses joined-field changes (derived values here are client-derived, so only base rows need deltas).
 
 **Design.**
 1. A persisted change log, written in the sequencer's own transaction: `(account, rev_end, table, row_id, gone)`, bounded by the schema's `cap` rule. In memory is not enough: a deploy restarts the BEAM, which is the case this plan must cover. `op_ledger` is the seed but misses cascades and server-side writes (keywords backfill, purge).
@@ -158,19 +161,23 @@ Then #2 (cheapest, best supported; its stamps feed #4 and #5). #3 and #1 can run
 - **No research found for the heat governor's premise** (that mass applying degrades response): I found no peer-reviewed measurement; the figures I met were unsourced industry claims.
 - **Proposals as a reviewable branch** (card 1581; Git4Data 2609.02106, search snippet only): FIRE HOLD already covers most of it.
 
+## Convergence with the parallel SOTA research
+
+After finishing the plans above I looked, and only looked, at the section headings of the parallel run's notes in this directory and at its idempotency passage, to keep the two plansets independent. It reached the same finding on idempotency from the other direction: its agent and MCP security note says `put` has no client-supplied idempotency field and proposes an optional client key mapped to `op_id` through the existing 24-hour ledger, and adds that under MCP 2026-07-28 broken streams are re-issued as new requests, so a retry is a new request (I did not verify that claim). Its headings also show sections on replacing exact-token coverage with skill and requirement extraction, on learning one person's preferences from small data, on ghost and duplicate listings, on incremental derivation, and on columnar encoding of the replica: the same questions as my #1, #5, the ghost-listing item, #4 and the codec item. Where the two disagree, trust whichever cites a primary source for the specific claim; I did not read their bodies.
+
 ## Feedback for the Observer catalog
 
 My text search of the 2,360 cards found 2 mentioning BM25, 2 reranking, 0 learning-to-rank, 0 inverted-index and 1 dense retrieval. `radar/topics.yaml` is anchored on the Anoptic engine, `ano` and agents, which explains it. Retrieval and ranking, replication and sync, and columnar or string compression are the three topics that would have changed this research most.
 
 ## What I read, exactly
 
-**Observer, opened with `get_seed` (the card's full markdown):** 1579, 2312, 1367, 1233, 092, 064, 1489, 412, 858, 1581, 859, 2287.
-**Observer, sections from `cards.json` (takeaway, why, ideas, caveats; each cut at 900 to 1600 characters):** 2257, 1767, 1626, 1581 (also via `get_seed`), 2235, 171, 1606, 1826, 065, 1803, 1018, 1449, 1541, 862, 868, 265, 276, 210, 2314, 1366, 1853, 219, 1466, 331.
-**Observer, takeaway line only:** 053, 860, 042, 1790, 197, 269.
+**Observer, opened with `get_seed` (the card's full markdown):** 1579, 2312, 1367, 1233, 092, 064, 1489, 412, 858, 1581, 859, 2287, 2314, 1853, 331, 1466, 053, 860, 1790, 042.
+**Observer, sections from `cards.json` (takeaway, why, ideas, caveats; each cut at 900 to 1600 characters):** 2257, 1767, 1626, 1581 (also via `get_seed`), 2235, 171, 1606, 1826, 065, 1803, 1018, 1449, 1541, 862, 868, 265, 276, 210, 2314, 1366, 1853, 219, 1466, 331 (2314, 1853, 331 and 1466 were later opened with `get_seed` too).
+**Observer, takeaway line only:** 197, 269.
 
-**Papers, read past the abstract (arXiv HTML, or PDF text for 2605.05257), by section or grep rather than line by line:** 2609.03340, 2610.03112, 2605.05257, 2212.13567, 2405.19504, 2603.17386, 2609.29095 (discussion), 2605.15184 (results), 2608.06370 (limitations), 2606.15376 (setup), 2605.17076 (results table), 2609.20261 (definitions, overhead), 2610.15093, 2602.15945 (results sentences), 2605.09760 (tables), 2608.26537 (scope, limitations), 2608.23623, 2610.20927.
-**Papers, abstract only (full text downloaded, not read):** 2602.14849, 2608.13900, 2608.18092, 2608.02764, 2609.11999, 2603.19820.
-**Not read, search snippet or fetched summary only:** 2508.18048 (HyST), 2603.09933, the potion and Model2Vec size figures, Zero, Electric and Replicache practice, the ESCO skill papers, Git4Data, FSST and ALP, TigerBeetle, MoQT, 2410.21771, 2610.21063 (card only), Maystre 2017, Eg-walker.
+**Papers, read past the abstract (arXiv HTML, or PDF text for 2605.05257), by section or grep rather than line by line:** 2609.03340, 2610.03112, 2605.05257, 2212.13567, 2405.19504, 2603.17386, 2609.29095 (discussion), 2605.15184 (results), 2608.06370 (limitations), 2606.15376 (setup), 2605.17076 (results table), 2602.14849 (discussion), 2609.20261 (definitions, overhead), 2610.15093, 2602.15945 (results sentences), 2605.09760 (tables), 2610.21063 (abstract), 2608.26537 (scope, limitations), 2608.23623, 2610.20927.
+**Papers, abstract only (full text downloaded, not read):** 2608.13900, 2608.18092, 2608.02764, 2609.11999, 2603.19820.
+**Not read, search snippet or fetched summary only:** 2508.18048 (HyST), 2603.09933, the potion and Model2Vec size figures, Zero, Electric and Replicache practice, the ESCO skill papers, Git4Data, FSST and ALP, TigerBeetle, MoQT, 2410.21771, Maystre 2017, Eg-walker.
 
 My first report to opus-noether listed papers as "read as arXiv HTML full text, searched and sectioned"; for the "abstract only" group above that was an overstatement, and this section replaces it.
 
