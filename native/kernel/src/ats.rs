@@ -4,6 +4,7 @@
 //! with no tenant and never trips vendor heat.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Vendor {
@@ -148,6 +149,44 @@ pub fn parse(url: &str) -> Ats {
         Vendor::Unknown => None,
     };
     Ats { vendor, tenant }
+}
+
+/// The address that names one posting however it was linked: https,
+/// the host lowercased without `www.` or a default port, the fragment and
+/// tracking parameters cut, the rest sorted, a trailing slash trimmed.
+/// None for what is no http(s) URL with a dotted host.
+pub fn canonical(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let rest = rest.split_once('#').map_or(rest, |(r, _)| r);
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = hostport.split_once(':').unwrap_or((hostport, ""));
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    if !host.contains('.') {
+        return None;
+    }
+    let port = if matches!((scheme.as_str(), port), (_, "") | ("https", "443") | ("http", "80")) { String::new() } else { alloc::format!(":{port}") };
+    let (path, query) = rest[end..].split_once('?').unwrap_or((&rest[end..], ""));
+    let mut params: Vec<&str> = query.split('&').filter(|p| !p.is_empty() && !tracking(p.split('=').next().unwrap_or(""))).collect();
+    params.sort_unstable();
+    let mut out = alloc::format!("https://{host}{port}{}", path.trim_end_matches('/'));
+    if !params.is_empty() {
+        out.push('?');
+        out.push_str(&params.join("&"));
+    }
+    Some(out)
+}
+
+/// A query parameter that says where a click came from, not what it opens.
+fn tracking(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.starts_with("utm_") || matches!(k.as_str(), "gclid" | "fbclid" | "gh_src" | "lever-source" | "lever-origin" | "ref" | "referrer" | "source" | "src" | "trk" | "refid")
 }
 
 /// One query parameter's value, lowercased.

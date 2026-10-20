@@ -377,3 +377,33 @@ fn scoreboard_counts_only_submissions() {
     assert_eq!(board["scoreboard"]["submitted"], 3, "{board}");
     assert_eq!(board["scoreboard"]["submitted_today"], 3);
 }
+
+#[test]
+fn one_posting_is_one_application_however_it_was_linked() {
+    let canon = kernel::ats::canonical;
+    let posting = Some("https://jobs.lever.co/acme/1234?gh_jid=9".to_string());
+    for link in [
+        "https://jobs.lever.co/acme/1234?gh_jid=9",
+        "http://www.Jobs.Lever.co:80/acme/1234/?utm_source=x&gh_jid=9#apply",
+        "HTTPS://jobs.lever.co/acme/1234?lever-source=LinkedIn&gh_jid=9&ref=feed",
+    ] {
+        assert_eq!(canon(link), posting, "{link}");
+        assert_eq!(canon(posting.as_deref().unwrap()), posting, "canonical of canonical");
+    }
+    assert_eq!(canon("https://jobs.lever.co/acme/1235"), Some("https://jobs.lever.co/acme/1235".into()));
+    for not_one in ["mailto:jobs@acme.com", "acme careers page", "https://localhost/x", ""] {
+        assert_eq!(canon(not_one), None, "{not_one}");
+    }
+
+    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
+    let put = |url: &'static str| {
+        op(wire::PUT, table::APPLICATIONS, 0, move |o| {
+            o.str(A::COMPANY, "Acme").str(A::LISTING_URL, url);
+        })
+    };
+    let fx = k.judge(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
+    assert_eq!(cell(&fx, table::APPLICATIONS, A::CANONICAL_URL), Some(&EVal::Val(Val::Str("https://jobs.lever.co/acme/1234".into()))));
+    k.predict(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
+    assert_eq!(code(k.judge(&put("http://www.jobs.lever.co/acme/1234/#top"), &ctx())), refusal::NATURAL_KEY);
+    assert!(k.judge(&put("https://jobs.lever.co/acme/5678"), &ctx()).is_ok());
+}
