@@ -19,7 +19,7 @@
 
 import type { View } from "../app.ts"
 import { BAND, ENUMS, STAGE } from "../gen/schema.ts"
-import { board, card, drop, failed, ids, lookup, page as rowsOf, query as read, scoreboard, value, type Filter, type Row } from "../kernel.ts"
+import { arrange, board, card, drop, failed, ids, lookup, query as read, scoreboard, value, type Arranged, type Filter, type Row } from "../kernel.ts"
 import { EMPTY, html, str, type Html } from "../morph.ts"
 import { format, go, itemNo, model, query, set } from "../state.ts"
 import { act as focusAct, appItem, body } from "./focus.ts"
@@ -86,7 +86,6 @@ function scores(): Html {
 // ------------------------------------------------------------------ order and groups
 
 const MODES = ENUMS.work_mode ?? []
-const HEAT_ORDER = ["hot", "warm", "cool", "blocked"]
 /** The keys the card reads its own way, and when it was added: its name in Sort by, in Group by, and the direction it reads in first (1 rising). */
 const HAND: [string, string, string, 1 | -1][] = [
   ["score", "score", "score, by tens", -1], ["no", "#", "#, by hundreds", 1], ["company", "company", "company", 1], ["place", "place", "place", 1],
@@ -117,19 +116,28 @@ const firstDir = (k: string): 1 | -1 => allKeys().find(([x]) => x === k)?.[3] ??
 const sortKey = (): string => model.address.q.get("sort") ?? "score"
 const sortDir = (): number => ({ asc: 1, desc: -1 })[model.address.q.get("dir") ?? ""] ?? firstDir(sortKey())
 
-/** Every application's sorting and grouping fields, and its duplicates, worked out once per change of the rows. */
-let fields: { rows: number; by: Map<number, Row>; dupes: Map<number, number[]>; sets: number; mode: Map<number, number>; modes: boolean; unlinked: Set<number> } | null = null
-function rowsById(): Map<number, Row> {
-  if (fields?.rows !== model.rows) {
-    const cols = ["id", "no", "company", "role", "location", "work_mode", "stage", "inserted_at", "canonical_url", "corporation_id", "place_id"]
-    const by = new Map(rowsOf({ table: "applications", cols }, 100_000).rows.map((r) => [Number(r.id), r]))
-    const mode = new Map([...by].map(([id, r]) => [id, MODES.indexOf(str(r.work_mode))]))
-    const dupes = duplicates(by)
-    // The judge's rule, read the same way: a corporation always, a place unless the role is remote.
-    const unlinked = new Set([...by].filter(([, r]) => !r.corporation_id || (!r.place_id && str(r.work_mode) !== "remote")).map(([id]) => id))
-    fields = { rows: model.rows, by, dupes, sets: new Set(dupes.values()).size, mode, modes: [...mode.values()].some((i) => i >= 0), unlinked }
+/**
+ * The desk's duplicates, once per change of the rows: the kernel's sets (one posting by its canonical
+ * URL, else the same company, role and place by link), for the ×N on each card and the toolbar's count.
+ */
+let twins: { rows: number; of: Map<number, number[]>; sets: number } | null = null
+function duplicates(): { of: Map<number, number[]>; sets: number } {
+  if (twins?.rows !== model.rows) {
+    const of = new Map<number, number[]>()
+    let sets = 0
+    try {
+      const a = arrange({ filter: {}, group: "dupes" })
+      for (const g of a.groups) {
+        const set = [...a.ids.subarray(g.start, g.start + g.count)]
+        sets++
+        for (const id of set) of.set(id, set)
+      }
+    } catch {
+      // A kernel still loading answers no duplicates.
+    }
+    twins = { rows: model.rows, of, sets }
   }
-  return fields.by
+  return twins
 }
 
 /** A linked row's name: the application's corporation or place, null while it links none. */
@@ -138,228 +146,33 @@ function linkName(r: Row | undefined, col: "corporation_id" | "place_id"): strin
   return x ? str(value(col === "place_id" ? "places" : "corporations", x, "name")) || null : null
 }
 
-/** Text as compared: case, accents, punctuation and a company's legal form left out. */
-const norm = (x: unknown): string => str(x).toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
-  .replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(inc|llc|ltd|gmbh|ag|sa|bv|plc|corp|corporation|co|limited|the)\b/g, "").replace(/\s+/g, " ").trim()
-/** Sets of applications that look like one posting: the same URL, or the same company, role and place. */
-function duplicates(by: Map<number, Row>): Map<number, number[]> {
-  const parent = new Map<number, number>()
-  const root = (id: number): number => {
-    let r = id
-    while (parent.get(r) !== undefined && parent.get(r) !== r) r = parent.get(r)!
-    return r
-  }
-  const seen = new Map<string, number>()
-  for (const [id, r] of by) {
-    // A link names the company and the place better than any spelling of them.
-    const who = r.corporation_id ? `#${str(r.corporation_id)}` : norm(r.company)
-    const where = r.place_id ? `#${str(r.place_id)}` : norm(r.location)
-    const keys = [str(r.canonical_url), who && norm(r.role) ? `${who}|${norm(r.role)}|${where}` : ""]
-    for (const k of keys) {
-      if (k === "") continue
-      const other = seen.get(k)
-      if (other === undefined) seen.set(k, id)
-      else parent.set(root(id), root(other))
-    }
-  }
-  const sets = new Map<number, number[]>()
-  for (const id of by.keys()) {
-    const r = root(id)
-    sets.set(r, [...(sets.get(r) ?? []), id])
-  }
-  const of = new Map<number, number[]>()
-  for (const set of sets.values()) if (set.length > 1) for (const id of set) of.set(id, set)
-  return of
-}
-
 type Group = { key: string; label: string; ids: Uint32Array | number[]; keep?: number | undefined }
 type Layout = { key: string; groups: Group[]; order: Uint32Array | number[]; dupes: Map<number, number[]>; grouped: boolean; modes: number[]; sets: number; unlinked: number }
 let laid: Layout | null = null
 
-type Val = string | number | null
-/** A key's value on a card (null when the card has none: last whichever way), and its group: a key and a label; null leaves the card out. */
-type Key = { value: (id: number) => Val; group: (id: number) => [string, string] | null }
-
-/** The key named `name`: a card key read its own way, else a catalog field read for every application in one columnar call (the kernel caches it). */
-function keyOf(name: string, by: Map<number, Row>, dupes: Map<number, number[]>, held: Map<number, string>): Key | undefined {
-  const own = keys(by, dupes, held)[name]
-  if (own) return own
-  const f = catalogFields().find((x) => x.path === name)
-  if (!f) return undefined
-  let at: Map<number, unknown>
-  try {
-    const r = read<{ ids: number[]; cols: Record<string, unknown[]> }>("columns", { fields: [f.path] })
-    const col = r.cols[f.path] ?? []
-    at = new Map(r.ids.map((id, i) => [id, col[i] ?? null]))
-  } catch {
-    return undefined
-  }
-  const get = (id: number): unknown => at.get(id) ?? null
-  const num = (id: number): number | null => (get(id) === null ? null : Number(get(id)))
-  switch (f.type) {
-    case "enum":
-      return listedKey(f.values ?? [], (id) => str(get(id)))
-    case "num":
-      // An id groups by hundreds, a count by its value (3 at one company is not 7), any other figure by its order of magnitude.
-      if (f.path === "id") return rangedKey(num, 100, (lo) => `${Math.max(1, lo)}–${lo + 99}`)
-      if (f.desc) return { value: num, group: (id) => (num(id) === null ? ["", "(none)"] : [String(num(id)), `${num(id)} application${num(id) === 1 ? "" : "s"}`]) }
-      return {
-        value: num,
-        group: (id) => {
-          const v = num(id)
-          if (v === null) return ["", "(none)"]
-          const lo = v < 10 ? 0 : 10 ** Math.floor(Math.log10(v))
-          return [String(lo), lo === 0 ? "under 10" : `${NUM.format(lo)}–${NUM.format(lo * 10 - 1)}`]
-        },
-      }
-    case "day":
-      return { value: (id) => str(get(id)) || null, group: (id) => [str(get(id)).slice(0, 7), str(get(id)).slice(0, 7) || "(none)"] }
-    case "bool":
-      return { value: (id) => (get(id) === null ? null : get(id) ? 1 : 0), group: (id) => (get(id) === null ? ["", "(none)"] : get(id) ? ["1", "yes"] : ["0", "no"]) }
-    case "code": {
-      // A country code reads as the world's name for it, "Germany (DE)", and sorts by the name; one name read per code.
-      const names = new Map<string, string>()
-      const name = (c: string): string => {
-        if (!names.has(c)) {
-          const p = c === "" ? 0 : lookup("places", "iso2", c)
-          names.set(c, p ? str(value("places", p, "name")) : "")
-        }
-        return names.get(c)!
-      }
-      return {
-        value: (id) => norm(name(str(get(id))) || get(id)) || null,
-        group: (id) => {
-          const c = str(get(id))
-          return [c, c === "" ? "(none)" : name(c) ? `${name(c)} (${c})` : c]
-        },
-      }
-    }
-    default:
-      return textKey(get)
-  }
-}
-
-const NUM = new Intl.NumberFormat()
-const textKey = (get: (id: number) => unknown): Key => ({
-  value: (id) => norm(get(id)) || null,
-  group: (id) => [norm(get(id)), str(get(id)) || "(none)"],
-})
-// An enum reads in its declared order (the pipeline's, the bands', hot to blocked).
-const listedKey = (all: readonly string[], get: (id: number) => string): Key => ({
-  value: (id) => (all.indexOf(get(id)) < 0 ? null : all.indexOf(get(id))),
-  group: (id) => [get(id), get(id).replace(/_/g, " ") || "(none)"],
-})
-// A number groups by ranges of `size`, the last one from `top` up.
-const rangedKey = (get: (id: number) => number | null, size: number, show: (lo: number) => string, top = Infinity): Key => ({
-  value: get,
-  group: (id) => {
-    const v = get(id)
-    if (v === null) return ["", "(none)"]
-    const lo = Math.min(top, Math.floor(v / size) * size)
-    return [String(lo), show(lo)]
-  },
-})
-
-function keys(by: Map<number, Row>, dupes: Map<number, number[]>, held: Map<number, string>): Record<string, Key> {
-  const row = (id: number): Row => by.get(id) ?? {}
-  // The company and the place by their link, so every spelling of one company is one group; one not
-  // linked yet sorts and groups by the listing's own text, marked unlinked.
-  const link = (col: "corporation_id" | "place_id", written: string): Key => ({
-    value: (id) => norm(linkName(row(id), col) ?? row(id)[written]) || null,
-    group: (id) => {
-      const name = linkName(row(id), col)
-      return name !== null ? [`#${str(row(id)[col])}`, name] : [`?${norm(row(id)[written])}`, `${str(row(id)[written]) || "(none)"} · unlinked`]
-    },
-  })
-  const score = (id: number): number | null => card(id)?.score_100 ?? null
-  const reason = (id: number): string => (card(id)?.reason ?? "ok") === "ok" ? "" : card(id)!.reason
-  return {
-    score: rangedKey(score, 10, (lo) => `${lo}–${lo === 90 ? 100 : lo + 9}`, 90),
-    no: rangedKey((id) => Number(row(id).no ?? 0) || null, 100, (lo) => `#${Math.max(1, lo)}–${lo + 99}`),
-    company: link("corporation_id", "company"),
-    place: link("place_id", "location"),
-    band: listedKey(BAND, (id) => card(id)?.band ?? ""),
-    heat: listedKey(HEAT_ORDER, (id) => card(id)?.class ?? ""),
-    why: { value: (id) => reason(id) || null, group: (id) => [reason(id), reason(id).replace(/_/g, " ") || "(none)"] },
-    lease: { value: (id) => held.get(id) ?? null, group: (id) => (held.has(id) ? [`l${held.get(id)}`, `leased by ${held.get(id) || "an agent"}`] : ["", "not leased"]) },
-    dupes: {
-      value: (id) => dupes.get(id)?.length ?? null,
-      group: (id) => (dupes.has(id) ? [String(Math.min(...dupes.get(id)!)), `${str(row(id).company) || "(no company)"} · ${str(row(id).role)}`] : null),
-    },
-    added: { value: (id) => str(row(id).inserted_at) || null, group: (id) => [str(row(id).inserted_at).slice(0, 10), str(row(id).inserted_at).slice(0, 10) || "(none)"] },
-  }
-}
-
-/** Text as people order it: "Company 2" before "Company 10". */
-const COLLATE = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
-
-/** Two values in `dir` (1 rising), a missing one last either way. */
-function compare(a: Val, b: Val, dir: number): number {
-  if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1
-  return dir * (typeof a === "number" && typeof b === "number" ? a - b : COLLATE.compare(String(a), String(b)))
-}
-
-/** The board as drawn: the kernel's filtered order, narrowed by work mode, sorted by any key a card shows, and grouped by any. */
+/**
+ * The board as drawn, in one kernel call (arrange.rs, over typed columns): the filters, the work modes
+ * and the unlinked narrowing, the sort and the group, each group a slice of the order. The desk only draws it.
+ */
 function layout(): Layout {
   const q = model.address.q
   const key = `${model.rows}|${[...q].map(([k, v]) => `${k}=${v}`).join("&")}`
   if (laid?.key === key) return laid
-  const by = rowsById()
-  const dupes = fields!.dupes
-  const modes = list("mode")
-  const only = list("link").includes("unlinked")
-  const base = board(filter())
-  // One pass: the work modes' counts over the filtered board, and the board narrowed to what is picked.
-  // The unlinked chip counts the whole desk (what the agents still owe), so a keystroke pays no pass for it.
-  const counts = MODES.map(() => 0)
-  const unlinked = fields!.unlinked.size
-  const kept: number[] = []
-  const picked = modes.map((m) => MODES.indexOf(m))
-  const narrowed = picked.length > 0 || only
-  if (fields!.modes || narrowed)
-    for (const id of base) {
-      const i = fields!.mode.get(id) ?? -1
-      if (i >= 0) counts[i]!++
-      if (narrowed && (picked.length === 0 || picked.includes(i)) && (!only || fields!.unlinked.has(id))) kept.push(id)
-    }
-  const sets = fields!.sets
+  const d = duplicates()
   const sk = sortKey()
+  const dir = q.get("dir")
   const gk = q.get("group") ?? ""
-  // The common case, the kernel's order as it is (score, then heat): no copy, no sort, one group.
-  if (!narrowed && sk === "score" && sortDir() === -1 && gk === "") {
-    laid = { key, groups: [{ key: "", label: "", ids: base }], order: base, dupes, grouped: false, modes: counts, sets, unlinked }
-    return laid
+  const base = { filter: filter(), modes: list("mode"), unlinked: list("link").includes("unlinked") }
+  const sort: [string] | [string, "asc" | "desc"] = dir === "asc" || dir === "desc" ? [sk, dir] : [sk]
+  let a: Arranged
+  try {
+    a = arrange({ ...base, ...(sk === "score" && !dir ? {} : { sort }), ...(gk === "" ? {} : { group: gk, largest: q.get("gsize") === "1" }) })
+  } catch {
+    // A key an old link names that the kernel does not know: the board as it is.
+    a = arrange(base)
   }
-  const held = claims()
-  let order = narrowed ? kept : [...base]
-  // Sorted on each card's value read once; equal values keep the kernel's order.
-  const S = keyOf(sk, by, dupes, held)
-  if (S && !(sk === "score" && sortDir() === -1)) {
-    const v = new Map(order.map((id) => [id, S.value(id)]))
-    order = order.map((id, i) => [id, i] as const).sort((x, y) => compare(v.get(x[0])!, v.get(y[0])!, sortDir()) || x[1] - y[1]).map(([id]) => id)
-  }
-  const G = gk === "" ? undefined : keyOf(gk, by, dupes, held)
-  let groups: Group[] = [{ key: "", label: "", ids: order }]
-  if (G) {
-    // Groups keep the sort inside them, and stand in their key's order: the sort's own way when it is the same key.
-    const at = new Map<string, Group & { v: Val }>()
-    for (const id of order) {
-      const g = G.group(id)
-      if (!g) continue
-      if (!at.has(g[0])) at.set(g[0], { key: g[0], label: g[1], ids: [], v: G.value(id) })
-      ;(at.get(g[0])!.ids as number[]).push(id)
-    }
-    const dir = gk === sk ? sortDir() : firstDir(gk)
-    groups = [...at.values()].sort((a, b) => compare(a.v, b.v, dir))
-    // Largest first: too many at one company stands at the top (the sort is stable, so equal sizes keep the key's order).
-    if (q.get("gsize") === "1") groups.sort((a, b) => b.ids.length - a.ids.length)
-  }
-  // Of each set of duplicates, the one furthest along (then the first made) is the one to keep.
-  if (gk === "dupes") {
-    const stageAt = (id: number): number => (STAGE as readonly string[]).indexOf(str(by.get(id)?.stage))
-    for (const x of groups) x.keep = [...x.ids].sort((a, b) => stageAt(b) - stageAt(a) || Number(by.get(a)?.no) - Number(by.get(b)?.no))[0]
-  }
-  laid = { key, groups, order: groups.flatMap((x) => [...x.ids]), dupes, grouped: Boolean(G), modes: counts, sets, unlinked }
+  const groups: Group[] = gk === "" ? [{ key: "", label: "", ids: a.ids }] : a.groups.map((g) => ({ key: g.key, label: g.label, ids: a.ids.subarray(g.start, g.start + g.count), keep: g.keep }))
+  laid = { key, groups, order: gk === "" ? a.ids : groups.flatMap((g) => [...g.ids]), dupes: d.of, grouped: gk !== "", modes: MODES.map((m) => a.modes[m] ?? 0), sets: d.sets, unlinked: a.unlinked }
   return laid
 }
 
@@ -590,7 +403,7 @@ function paint(el: HTMLElement, measure: boolean): void {
         if (id !== undefined) at.set(id, `translate(${c * (w + GAP)}px, ${p.rowsTop + r * step}px)`)
       }
   }
-  headers(el, L, heads, width)
+  headers(el, heads, width)
   // A tile leaving the window is hidden in place, not removed: taking it back is a write, not an insert.
   for (const [id, t] of tiles) {
     if (at.has(id)) continue
@@ -629,7 +442,7 @@ function paint(el: HTMLElement, measure: boolean): void {
 
 /** The group headers in view: a band across the board naming the group and its count; a set of duplicates offers to keep one. */
 const heads = new Map<string, HTMLElement>()
-function headers(el: HTMLElement, L: Layout, want: Set<string>, w: number): void {
+function headers(el: HTMLElement, want: Set<string>, w: number): void {
   for (const [k, h] of heads) if (!want.has(k) || h.parentElement !== el) (h.remove(), heads.delete(k))
   for (const p of placed) {
     if (!want.has(p.g.key)) continue
@@ -653,7 +466,7 @@ function headers(el: HTMLElement, L: Layout, want: Set<string>, w: number): void
       h.replaceChildren(b, n)
       if (p.g.keep !== undefined) {
         const keep = p.g.keep
-        const others = L.dupes.get(keep)?.filter((x) => x !== keep) ?? []
+        const others = [...p.g.ids].filter((x) => x !== keep)
         const btn = document.createElement("button")
         btn.type = "button"
         btn.className = "ghost"
@@ -690,7 +503,8 @@ function tile(el: HTMLElement, id: number, by: string | undefined, r: Row): void
   // The linked rows' names; the listing's own words stand until a link does, and the card says so.
   const corp = linkName(r, "corporation_id")
   const place = linkName(r, "place_id")
-  const loose = fields?.unlinked.has(id) ?? false
+  // The judge's rule, read off the row: a corporation always, a place unless the role is remote.
+  const loose = !r.corporation_id || (!r.place_id && str(r.work_mode) !== "remote")
   const mark = el.querySelector<HTMLElement>(".unlinked")
   const who = el.querySelector<HTMLElement>(".company")
   write(mark, loose ? "unlinked" : "")

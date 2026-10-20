@@ -79,6 +79,8 @@ export interface Exports {
   predict(op: number, opLen: number, ctx: number, ctxLen: number): number
   judge(op: number, opLen: number, ctx: number, ctxLen: number): number
   view(ptr: number, len: number): number
+  arrange(ptr: number, len: number): number
+  arrange_groups(): number
   step(ptr: number, len: number, selected: number, dir: number, columns: number): number
   card(id: number): number
   scoreboard(): number
@@ -431,6 +433,26 @@ export function board(f: Filter): Uint32Array {
   return memo(`board:${key}`, () => {
     const len = withBytes(ENC.encode(key), (p, n) => k!.view(p, n))
     return len <= 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
+  })
+}
+
+/** One group of an arranged board: its slice of the order, and for duplicates the one to keep. */
+export type Band = { key: string; label: string; start: number; count: number; keep?: number }
+export type Arranged = { ids: Uint32Array; groups: Band[]; modes: Record<string, number>; unlinked: number }
+/**
+ * The board as the desk draws it, in one kernel call (arrange.rs): view()'s filter, narrowed by work
+ * modes and to the unlinked, sorted on one key and grouped on another, over typed columns. A key the
+ * kernel does not know is a `Refused`.
+ */
+export function arrange(req: { filter: Filter; modes?: string[]; unlinked?: boolean; sort?: [string] | [string, "asc" | "desc"]; group?: string; largest?: boolean }): Arranged {
+  if (!k) return { ids: new Uint32Array(0), groups: [], modes: {}, unlinked: 0 }
+  const key = JSON.stringify(req)
+  return memo(`arrange:${key}`, () => {
+    const len = withBytes(ENC.encode(key), (p, n) => k!.arrange(p, n))
+    if (len < 0) throw refused(len)
+    const ids = len === 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
+    const g = resultJson<Omit<Arranged, "ids">>(k!.arrange_groups())
+    return { ids, groups: g?.groups ?? [], modes: g?.modes ?? {}, unlinked: g?.unlinked ?? 0 }
   })
 }
 
