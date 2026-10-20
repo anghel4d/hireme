@@ -234,6 +234,72 @@ fn a_version_carries_what_its_root_format_takes_and_becomes_the_root_head() {
     assert_eq!(q(&k, json!({"op": "cv_pick", "application": 3}))["state"], "matched");
 }
 
+/// A cell as the node sends a long text: zstd against the text dictionary.
+fn packed(text: &str) -> Vec<u8> {
+    let mut z = zstd::bulk::Compressor::with_dictionary(19, wire::TEXT_DICT).unwrap();
+    z.include_checksum(false).unwrap();
+    z.include_contentsize(true).unwrap();
+    [&[1u8][..], &z.compress(text.as_bytes()).unwrap()].concat()
+}
+
+/// A rule and a mask long enough to arrive packed are the rule and mask
+/// their text says: the rule explains, a put that only enables it lands and
+/// it picks, and a mask written beside them still finds both compiling.
+#[test]
+fn a_long_rule_or_mask_arrives_packed_and_reads_as_its_text() {
+    let pad = (0..40).map(|i| format!("location ~ \"Nowhere {i}\"")).collect::<Vec<_>>().join(" | ");
+    let (mask, rule) = (packed(&format!("[country in [DE, AT, CH]] | {pad}")), packed(&format!("dach | {pad}")));
+    let none = wire::NONE;
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::PLACES, 2);
+    b.u32s(col::places::ID, [1, 2].into_iter())
+        .u32s(col::places::KIND, [enums::place_kind::COUNTRY, enums::place_kind::CITY].map(u32::from).into_iter())
+        .u32s(col::places::COUNTRY_ID, [none, 1].into_iter())
+        .strs(col::places::ISO2, ["DE", ""].into_iter())
+        .strs(col::places::NAME, ["Germany", "Berlin"].into_iter());
+    b.done();
+    let mut b = w.block(table::CV_ROOTS, 1);
+    b.u32s(col::cv_roots::ID, [20].into_iter())
+        .strs(col::cv_roots::SLUG, ["dach"].into_iter())
+        .strs(col::cv_roots::NAME, ["DACH"].into_iter())
+        .u32s(col::cv_roots::FORMAT, [enums::cv_format::COMPOSED as u32].into_iter());
+    b.done();
+    let mut b = w.block(table::CV_MASKS, 1);
+    b.u32s(col::cv_masks::ID, [50].into_iter()).strs(col::cv_masks::NAME, ["dach"].into_iter()).zstrs(col::cv_masks::PATTERN, [&mask[..]].into_iter());
+    b.done();
+    let mut b = w.block(table::CV_RULES, 1);
+    b.u32s(col::cv_rules::ID, [40].into_iter())
+        .u32s(col::cv_rules::POSITION, [0].into_iter())
+        .u32s(col::cv_rules::ROOT_ID, [20].into_iter())
+        .u32s(col::cv_rules::ENABLED, [0].into_iter())
+        .zstrs(col::cv_rules::PATTERN, [&rule[..]].into_iter());
+    b.done();
+    let mut b = w.block(table::APPLICATIONS, 2);
+    b.u32s(A::ID, 1..=2)
+        .u32s(A::NO, 1..=2)
+        .strs(A::COMPANY, ["Acme", "Acme"].into_iter())
+        .strs(A::ROLE, ["Engineer", "Engineer"].into_iter())
+        .u32s(A::PLACE_ID, [2, none].into_iter());
+    b.done();
+    let mut k = Kernel::new();
+    k.set_today(TODAY);
+    k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
+    k.boot(&w.finish(), 1).unwrap();
+
+    let matched = |k: &Kernel, app: u32| q(k, json!({"op": "cv_explain", "application": app}))[0]["matched"].clone();
+    assert_eq!((matched(&k, 1), matched(&k, 2)), (json!(true), json!(false)));
+    let enable = op(wire::PUT, table::CV_RULES, 40, |o| {
+        o.u32(col::cv_rules::ENABLED, 1);
+    });
+    k.predict(&enable, &ctx(true)).unwrap();
+    let p = q(&k, json!({"op": "cv_pick", "application": 1}));
+    assert_eq!((&p["state"], &p["root"], &p["arm"]), (&json!("matched"), &json!(20), &json!(40)));
+    let nordics = op(wire::PUT, table::CV_MASKS, 0, |o| {
+        o.str(col::cv_masks::NAME, "nordics").str(col::cv_masks::PATTERN, "country in [SE, NO]");
+    });
+    assert!(k.judge(&nordics, &ctx(true)).is_ok());
+}
+
 #[test]
 fn a_rule_text_is_checked_explained_and_its_fields_listed() {
     let k = kernel();

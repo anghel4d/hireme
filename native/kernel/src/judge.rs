@@ -592,14 +592,15 @@ fn text_after(rows: &Rows, op: &Op, c: u16) -> String {
     match cell_val(op, c) {
         Some(Val::Str(v)) => v,
         Some(_) => String::new(),
-        None => rows.table(op.table).and_then(|t| t.str(op.target, c)).unwrap_or("").into(),
+        // The stored text, unpacked: a long one arrives packed, and `str` reads that as empty.
+        None => rows.table(op.table).and_then(|t| t.text(op.target, c)).unwrap_or_default().into_owned(),
     }
 }
 
 /// The CV masks as rows: id, name, text.
 fn mask_rows(rows: &Rows) -> Vec<(u32, String, String)> {
     rows.each(table::CV_MASKS)
-        .map(|(t, id)| (id, t.str(id, col::cv_masks::NAME).unwrap_or("").into(), t.str(id, col::cv_masks::PATTERN).unwrap_or("").into()))
+        .map(|(t, id)| (id, t.str(id, col::cv_masks::NAME).unwrap_or("").into(), t.text(id, col::cv_masks::PATTERN).unwrap_or_default().into_owned()))
         .collect()
 }
 
@@ -631,7 +632,7 @@ fn check_cv(rows: &Rows, change: Option<(u32, String, String)>, dropped: Option<
         mask::compile(&m.2, &lookup).map_err(|e| rule_no(&e, json!({"mask": m.0})))?;
     }
     for (t, id) in rows.each(table::CV_RULES) {
-        mask::compile(t.str(id, col::cv_rules::PATTERN).unwrap_or(""), &lookup).map_err(|e| rule_no(&e, json!({"rule": id})))?;
+        mask::compile(&t.text(id, col::cv_rules::PATTERN).unwrap_or_default(), &lookup).map_err(|e| rule_no(&e, json!({"rule": id})))?;
     }
     Ok(())
 }

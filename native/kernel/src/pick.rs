@@ -37,7 +37,7 @@ pub struct Arm {
 pub fn arms(rows: &Rows) -> Vec<Arm> {
     let Some(t) = rows.table(table::CV_RULES) else { return Vec::new() };
     let masks = masks(rows);
-    let lookup = |n: &str| masks.iter().find(|(k, _)| *k == n).map(|(_, v)| *v);
+    let lookup = |n: &str| masks.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_ref());
     let mut out: Vec<(u32, Arm)> = t
         .ids()
         .iter()
@@ -46,7 +46,7 @@ pub fn arms(rows: &Rows) -> Vec<Arm> {
                 id,
                 root: t.u32(id, col::cv_rules::ROOT_ID).unwrap_or(0),
                 enabled: t.u32(id, col::cv_rules::ENABLED) != Some(0),
-                expr: mask::compile(t.str(id, col::cv_rules::PATTERN).unwrap_or(""), &lookup).ok(),
+                expr: mask::compile(&t.text(id, col::cv_rules::PATTERN).unwrap_or_default(), &lookup).ok(),
             };
             (t.u32(id, col::cv_rules::POSITION).unwrap_or(0), arm)
         })
@@ -55,10 +55,11 @@ pub fn arms(rows: &Rows) -> Vec<Arm> {
     out.into_iter().map(|(_, a)| a).collect()
 }
 
-/// The named masks, name to text.
-pub fn masks(rows: &Rows) -> Vec<(&str, &str)> {
+/// The named masks, name to text. A long text arrives packed, so it is
+/// read with `text`, which unpacks; `str` would read it as empty.
+pub fn masks(rows: &Rows) -> Vec<(&str, Cow<'_, str>)> {
     rows.each(table::CV_MASKS)
-        .filter_map(|(t, id)| Some((t.str(id, col::cv_masks::NAME)?, t.str(id, col::cv_masks::PATTERN).unwrap_or(""))))
+        .filter_map(|(t, id)| Some((t.str(id, col::cv_masks::NAME)?, t.text(id, col::cv_masks::PATTERN).unwrap_or_default())))
         .collect()
 }
 
@@ -147,7 +148,7 @@ pub fn explain(rows: &Rows, arms: &[Arm], id: u32) -> Json {
 /// and whether it matches any at all.
 pub fn check(rows: &Rows, arms: &[Arm], text: &str, position: Option<usize>) -> Json {
     let masks = masks(rows);
-    let lookup = |n: &str| masks.iter().find(|(k, _)| *k == n).map(|(_, v)| *v);
+    let lookup = |n: &str| masks.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_ref());
     let e = match mask::compile(text, &lookup) {
         Ok(e) => e,
         Err(err) => return json!({"ok": false, "error": {"pos": err.span.at, "len": err.span.len, "msg": err.msg}, "shadowed": []}),
