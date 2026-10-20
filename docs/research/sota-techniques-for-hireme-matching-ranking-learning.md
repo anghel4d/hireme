@@ -38,8 +38,8 @@ The 2024-2026 state of the art is hybrid and modular. Systems retrieve with dens
 - About 1% of roughly 200K real resumes on hireEZ contained hidden prompt injections, and the share grew over the prior one to two years. Over 90% of the injections used no explicit instructions — [arXiv 2605.28999](https://arxiv.org/pdf/2605.28999); defence benchmark: [ResumeShield, arXiv 2609.20188](https://arxiv.org/pdf/2609.20188)
 
 **hireme baseline**
-- Life-EV is a hand-built ladder: "Named anchors win over heuristics". Heuristics start "from a base of 48: systems... +22; agentic work +10; Rust, C++ or low-level +8; home or remote +5; the pay signal +6; CRUD... −16", and "The kernel **suggests** and never overwrites: a stored `score_100` is the operator's or an agent's number and wins" — [docs/score.md](/home/pyrus/workspace/hireme/docs/score.md)
-- The board orders by "`score_100` high to low (a stored number, else the Life-EV suggestion), then heat cool to blocked, then the projected company load" — [native/kernel/src/board.rs](/home/pyrus/workspace/hireme/native/kernel/src/board.rs)
+- Life-EV is a hand-built ladder: "Named anchors win over heuristics". Heuristics start "from a base of 48: systems... +22; agentic work +10; Rust, C++ or low-level +8; home or remote +5; the pay signal +6; CRUD... −16", and "The kernel **suggests** and never overwrites: a stored `score_100` is the operator's or an agent's number and wins" — [docs/score.md](../score.md)
+- The board orders by "`score_100` high to low (a stored number, else the Life-EV suggestion), then heat cool to blocked, then the projected company load" — [native/kernel/src/board.rs](../../native/kernel/src/board.rs)
 
 ### Inferences
 - **What does not transfer.** ConFit-style training, GIRL/LGIR-style generators, GNN recommenders and 360Brew all need large numbers of labelled two-sided interactions. One operator produces tens to hundreds of outcomes. These methods are platform tools.
@@ -109,8 +109,8 @@ The literal-token coverage stays as a secondary readout.
 - hireme baseline:
   - Keywords are extracted once at write time from the listing's prose. "The [`TOP`] most frequent, ties by bytes, are the keywords" with `TOP = 12`, and "a change to any rule here bumps the version, and the server re-extracts".
   - Coverage is a whole-term hit on the CV's folded text (`Text::hit`), up to `MAX_TARGETS = 64`.
-  - Source: [native/kernel/src/keywords.rs](/home/pyrus/workspace/hireme/native/kernel/src/keywords.rs)
-  - Role family and seniority come from lexicon hits (org.rs `Seniority`, `Family`, `Department`) — [native/kernel/src/org.rs](/home/pyrus/workspace/hireme/native/kernel/src/org.rs)
+  - Source: [native/kernel/src/keywords.rs](../../native/kernel/src/keywords.rs)
+  - Role family and seniority come from lexicon hits (org.rs `Seniority`, `Family`, `Department`) — [native/kernel/src/org.rs](../../native/kernel/src/org.rs)
 
 ### Inferences
 - **What exact-token coverage misses today** (from reading keywords.rs):
@@ -134,7 +134,7 @@ The literal-token coverage stays as a secondary readout.
      - Output must-coverage, nice-coverage and the missing-must list. The list feeds `compose.rs` tailor/add overlays ("which item covers Kubernetes?") and can become `mask.rs` facts for CV rules (for example, a `requires` fact).
      - All of this is hash lookups and small loops: microseconds per card in WebAssembly (estimate).
 - **Keep literal coverage as a second readout.** Literal words still matter wherever a reader or a screening system matches strings. That ATS keyword filters are literal is an assumption; I found no source on how common they are.
-- **Title normalisation (optional).** JobBERT-v3 (MIT, 0.3B, multilingual, 64-token inputs) could run on the server at ingest to map titles to ESCO occupations. This would improve heat's family and department similarity (`similar_family` 1.0, `similar_department` 0.6 in [docs/heat.md](/home/pyrus/workspace/hireme/docs/heat.md)) beyond the lexicon, and would cover German, Spanish and Chinese titles. Static-embedding nearest neighbours in the kernel are a cheaper alternative (section 3).
+- **Title normalisation (optional).** JobBERT-v3 (MIT, 0.3B, multilingual, 64-token inputs) could run on the server at ingest to map titles to ESCO occupations. This would improve heat's family and department similarity (`similar_family` 1.0, `similar_department` 0.6 in [docs/heat.md](../heat.md)) beyond the lexicon, and would cover German, Spanish and Chinese titles. Static-embedding nearest neighbours in the kernel are a cheaper alternative (section 3).
 - **Cost and risk.**
   - New schema: a requirements table or JSON column, and a concepts table.
   - A span verifier and an alias matcher reusing `Text::hit`; coverage replaces `keywords::coverage`, and `extract` remains the fallback when no agent extraction exists.
@@ -188,7 +188,7 @@ Static (lookup-table) embeddings fit hireme's interactive path: Model2Vec "potio
   - Sources: [arXiv 2411.04403](https://arxiv.org/html/2411.04403v2); [arXiv 2505.01452](https://arxiv.org/pdf/2505.01452)
 - Reciprocal rank fusion scores Σ 1/(k + rank) with k = 60. It "consistently yields better results than any individual system, and better results than the standard method Condorcet Fuse" — [Cormack, Clarke & Büttcher, SIGIR 2009](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
 - TalentCLEF 2026 top systems used BM25 as a hybrid component and fused rankings with RRF or geometric-mean rank fusion — [TalentCLEF 2026](https://arxiv.org/html/2606.31692v1)
-- hireme has no embedding, vector or near-duplicate code: a grep of lib/, native/ and assets/ for embedding, vector, bm25, minhash and simhash matched only build artefacts. The board caches per-row derivations: "recomputed only for the rows a frame or a write moved" — [board.rs](/home/pyrus/workspace/hireme/native/kernel/src/board.rs)
+- hireme has no embedding, vector or near-duplicate code: a grep of lib/, native/ and assets/ for embedding, vector, bm25, minhash and simhash matched only build artefacts. The board caches per-row derivations: "recomputed only for the rows a frame or a write moved" — [board.rs](../../native/kernel/src/board.rs)
 
 ### Inferences
 - **Budget arithmetic (estimates).**
@@ -254,8 +254,8 @@ With tens to hundreds of labels, the methods that work are low-dimensional Bayes
   - `applied_on`, `replied_on` and `closed_on` (day, set by the stage command), `score_100`, `notes`;
   - an append-only `events` table with `kind`, `body`, `actor` and `op_id`;
   - `enum batch_kind day_pack leftover universe_gaps linkedin`.
-  - Source: [schema/hireme.schema](/home/pyrus/workspace/hireme/schema/hireme.schema)
-- Heat already hand-sets outcome weights. Ghosted is 0.7 with a 30-day half-life, rejected 1.5 with 90 days, and in conversation 2.0 with 30 days. Load decays as "`weight · 0.5^(days / half_life)`" — [docs/heat.md](/home/pyrus/workspace/hireme/docs/heat.md)
+  - Source: [schema/hireme.schema](../../schema/hireme.schema)
+- Heat already hand-sets outcome weights. Ghosted is 0.7 with a 30-day half-life, rejected 1.5 with 90 days, and in conversation 2.0 with 30 days. Load decays as "`weight · 0.5^(days / half_life)`" — [docs/heat.md](../heat.md)
 
 ### Inferences
 **A. Utility model U: what the operator wants.**
@@ -343,9 +343,9 @@ Near-duplicate detection is a solved, cheap problem: 64-bit SimHash or MinHash w
   - An LLM plus deception-theory framework (SMU, 2026) — [SMU](https://ink.library.smu.edu.sg/sis_research/11168)
 - Hidden-text injection: most resume injections hide as white or low-contrast text — [arXiv 2605.28999](https://arxiv.org/pdf/2605.28999); [Duke Pratt](https://pratt.duke.edu/news/thwarting-prompt-injection/)
 - hireme baseline:
-  - `applications` deduplicates exactly, with the natural key `canonical_url`, and has `freshness` (open, thin, closed, blocked) and `listing_on` — [schema](/home/pyrus/workspace/hireme/schema/hireme.schema)
-  - The listing parser already blanks tags, `<style>` and `<script>` bodies, link targets and URLs before extracting words — [keywords.rs](/home/pyrus/workspace/hireme/native/kernel/src/keywords.rs)
-  - Hard kills exist for staffing (8), AI theatre (10), internship tier (12), non-engineering roles (15) and onsite away from home (15) — [docs/score.md](/home/pyrus/workspace/hireme/docs/score.md)
+  - `applications` deduplicates exactly, with the natural key `canonical_url`, and has `freshness` (open, thin, closed, blocked) and `listing_on` — [schema](../../schema/hireme.schema)
+  - The listing parser already blanks tags, `<style>` and `<script>` bodies, link targets and URLs before extracting words — [keywords.rs](../../native/kernel/src/keywords.rs)
+  - Hard kills exist for staffing (8), AI theatre (10), internship tier (12), non-engineering roles (15) and onsite away from home (15) — [docs/score.md](../score.md)
 
 ### Inferences
 - **Near-duplicates at write time.**
@@ -397,8 +397,8 @@ hireme's score is already additive rules with clamps, so exact attributions are 
 - SHAP (Lundberg & Lee, NeurIPS 2017) includes the linear-model case, where the attribution is the weight times the feature's deviation from its mean. The identifier is from prior knowledge — [arXiv 1705.07874](https://arxiv.org/abs/1705.07874)
 - Counterfactual explanations: Wachter, Mittelstadt & Russell 2017 ([arXiv 1711.00399](https://arxiv.org/abs/1711.00399)); DiCE, Mothilal, Sharma & Tan, FAT* 2020 ([arXiv 1905.07697](https://arxiv.org/abs/1905.07697)). Both identifiers are from prior knowledge.
 - Chain-of-thought explanations can be unfaithful to the model's actual reasons (Turpin et al., NeurIPS 2023; identifier from prior knowledge) — [arXiv 2305.04388](https://arxiv.org/abs/2305.04388)
-- hireme's score suggestion already carries the rules it read: score.rs has a "What a suggestion reads" struct with `to_json`, and "the focus lens and the MCP show both" (the stored and suggested scores) — [score.rs](/home/pyrus/workspace/hireme/native/kernel/src/score.rs); [docs/score.md](/home/pyrus/workspace/hireme/docs/score.md)
-- Heat refusals already return "the verdict as data, including `cooldown_days`" — [docs/heat.md](/home/pyrus/workspace/hireme/docs/heat.md)
+- hireme's score suggestion already carries the rules it read: score.rs has a "What a suggestion reads" struct with `to_json`, and "the focus lens and the MCP show both" (the stored and suggested scores) — [score.rs](../../native/kernel/src/score.rs); [docs/score.md](../score.md)
+- Heat refusals already return "the verdict as data, including `cooldown_days`" — [docs/heat.md](../heat.md)
 
 ### Inferences
 - **One explanation shape for every kernel number.** Use a list `why: [{factor, contribution, evidence}]`, where evidence is a span in the listing, a citation, or a count of similar outcomes:
@@ -445,8 +445,8 @@ The best return for hireme comes from small Bayesian models over data hireme alr
 - Platform foundation models are 150B parameters trained on first-party platform data — [360Brew](https://export.arxiv.org/pdf/2501.16450)
 - Tailored applications lost their signal premium after LLMs — [arXiv 2511.08785](https://arxiv.org/html/2511.08785v1)
 - Hybrid modular pipelines won TalentCLEF 2026 — [overview](https://arxiv.org/html/2606.31692v1)
-- hireme's operating rules: "FIRE HOLD stands: a score never submits." and "maximize life EV, not the number of applications" — [docs/score.md](/home/pyrus/workspace/hireme/docs/score.md)
-- Heat: "nothing here sends an application" — [docs/heat.md](/home/pyrus/workspace/hireme/docs/heat.md)
+- hireme's operating rules: "FIRE HOLD stands: a score never submits." and "maximize life EV, not the number of applications" — [docs/score.md](../score.md)
+- Heat: "nothing here sends an application" — [docs/heat.md](../heat.md)
 
 ### Inferences
 #### Scorecard (I / F / N; replaces → plug-in point; cost; risk)
