@@ -238,18 +238,21 @@ in
             # live token in the query, and the access log must not.
             commonHttpConfig = ''
               log_format hireme '$remote_addr - [$time_local] "$request_method $uri $server_protocol" '
-                                '$status $body_bytes_sent "$http_user_agent"';
-              access_log /var/log/nginx/access.log hireme;
+                                '$status $body_bytes_sent $request_time "$http_user_agent"';
             '';
             virtualHosts.${cfg.domain} = {
               enableACME = true;
               forceSSL = true;
               # The node's per-peer limits and bans count the visitor, never Cloudflare's edge:
               # CF-Connecting-IP is believed only from Cloudflare's own networks.
+              # The log is this host's own line, not the http block's: an `access_log off`
+              # that ends the http block (another site's) outranked the format there, and
+              # the file stayed empty from 2026-10-09 to the /mcp outage of 2026-10-20.
               extraConfig = ''
                 ${lib.concatMapStringsSep "\n" (n: "set_real_ip_from ${n};") cloudflareNetworks}
                 real_ip_header CF-Connecting-IP;
                 real_ip_recursive off;
+                access_log /var/log/nginx/access.log hireme;
               '';
               locations."/" = {
                 proxyPass = "http://127.0.0.1:${toString cfg.port}";
