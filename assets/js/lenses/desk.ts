@@ -100,7 +100,7 @@ const sortDir = (): number => ({ asc: 1, desc: -1 })[model.address.q.get("dir") 
 let fields: { rows: number; by: Map<number, Row>; dupes: Map<number, number[]>; sets: number; mode: Map<number, number>; modes: boolean } | null = null
 function rowsById(): Map<number, Row> {
   if (fields?.rows !== model.rows) {
-    const cols = ["id", "no", "company", "role", "location", "work_mode", "stage", "inserted_at", "listing_url", "canonical_url"]
+    const cols = ["id", "no", "company", "role", "location", "work_mode", "stage", "inserted_at", "canonical_url"]
     const by = new Map(rowsOf({ table: "applications", cols }, 100_000).rows.map((r) => [Number(r.id), r]))
     const mode = new Map([...by].map(([id, r]) => [id, MODES.indexOf(str(r.work_mode))]))
     const dupes = duplicates(by)
@@ -112,17 +112,6 @@ function rowsById(): Map<number, Row> {
 /** Text as compared: case, accents, punctuation and a company's legal form left out. */
 const norm = (x: unknown): string => str(x).toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
   .replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\b(inc|llc|ltd|gmbh|ag|sa|bv|plc|corp|corporation|co|limited|the)\b/g, "").replace(/\s+/g, " ").trim()
-/** A posting's URL as the server keys it (Provenance.canonical): host without www, no fragment or tracking, sorted query. */
-function posting(x: unknown): string {
-  try {
-    const u = new URL(str(x))
-    const q = [...u.searchParams].filter(([k]) => !/^(utm_.*|gclid|fbclid|msclkid|mc_cid|mc_eid|ref|ref_src|refid|trk|trkinfo|trackingid|src|source|origin|from|lever-source|lever-origin|gh_src|sid|share_?id|campaign|medium)$/i.test(k)).sort()
-    return `${u.host.toLowerCase().replace(/^www\./, "")}${u.pathname.replace(/\/+$/, "")}?${new URLSearchParams(q)}`
-  } catch {
-    return ""
-  }
-}
-
 /** Sets of applications that look like one posting: the same URL, or the same company, role and place. */
 function duplicates(by: Map<number, Row>): Map<number, number[]> {
   const parent = new Map<number, number>()
@@ -133,9 +122,9 @@ function duplicates(by: Map<number, Row>): Map<number, number[]> {
   }
   const seen = new Map<string, number>()
   for (const [id, r] of by) {
-    const keys = [posting(r.canonical_url || r.listing_url), norm(r.company) && norm(r.role) ? `${norm(r.company)}|${norm(r.role)}|${norm(r.location)}` : ""]
+    const keys = [str(r.canonical_url), norm(r.company) && norm(r.role) ? `${norm(r.company)}|${norm(r.role)}|${norm(r.location)}` : ""]
     for (const k of keys) {
-      if (k === "" || k === "?") continue
+      if (k === "") continue
       const other = seen.get(k)
       if (other === undefined) seen.set(k, id)
       else parent.set(root(id), root(other))
