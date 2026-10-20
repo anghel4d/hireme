@@ -31,6 +31,7 @@
 //! | `lineage_busy` | `{lineage_id, generation}`: rewrites are off, only new overlays |
 //! | `cooldown` | `{lineage_id, opened_on, days_left}` (open_generation too early), or `{lineage_id, opened_on, need: "open_generation"}` (the window has passed); `opened_on` is the date, `YYYY-MM-DD` |
 //! | `not_found` | `{table, id}` or `{need}` |
+//! | `unlinked` | an application short of `corporation_id`, or of `place_id` when not remote: `{need, given, did_you_mean, try}` (`link::diagnosis`); a drop of a corporation or place applications name: `{table, id, applications, try}` |
 //! | `rule` | `{at, len, error}` and the `rule` or `mask` id whose text it is: a CV rule or mask that does not compile, or one a mask change breaks |
 
 use alloc::string::String;
@@ -235,6 +236,25 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                     }
                 }
             }
+            // Every application names its company and, unless remote, its
+            // place in the world: a write that leaves one out is refused with
+            // what it most likely meant (link.rs), never linked on its own.
+            let after = |c: u16| match row.get(c) {
+                Some(EVal::Val(Val::U32(v))) => Some(*v),
+                Some(_) => None,
+                None => apps.and_then(|t| t.u32(op.target, c)),
+            };
+            let need = crate::link::missing(after(A::CORPORATION_ID), after(A::PLACE_ID), after(A::WORK_MODE));
+            let touched = [A::CORPORATION_ID, A::PLACE_ID, A::WORK_MODE].iter().any(|c| row.get(*c).is_some());
+            if !need.is_empty() && (op.target == 0 || touched) {
+                let text = |c: u16| match row.get(c) {
+                    Some(EVal::Val(Val::Str(v))) => v.clone(),
+                    _ => apps.and_then(|t| t.str(op.target, c)).unwrap_or("").into(),
+                };
+                let url = text(A::LISTING_URL);
+                let data = crate::link::diagnosis(rows, op.target, &need, &text(A::COMPANY), &text(A::LOCATION), Some(url.as_str()).filter(|u| !u.is_empty()));
+                return refuse(refusal::UNLINKED, data);
+            }
             // One posting is one application, however it was linked: the
             // canonical URL (the one given, else the listing's) is the
             // natural key `limits` refuses twice.
@@ -372,6 +392,11 @@ fn lineage_gate(l: &Table, lid: u32, today: Day, creates: bool) -> Result<(), Re
 }
 
 fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
+    // A company or place an application names stays until they are relinked:
+    // the database would set their links null and leave them unlinked.
+    if let Some(data) = crate::link::named_by(rows, op.table, op.target) {
+        return refuse(refusal::UNLINKED, data);
+    }
     // A mask a rule or another mask still names stays.
     if op.table == table::CV_MASKS {
         check_cv(rows, None, Some(op.target))?;

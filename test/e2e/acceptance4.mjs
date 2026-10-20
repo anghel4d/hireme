@@ -123,8 +123,12 @@ await step("seed 20 applications through MCP", pages, async () => {
   try {
     await seeder.start();
     await seeder.call("lease", {});
+    // Every application names its company and place in the world.
+    const corporation_id = idOf((await seeder.call("put", { table: "corporations", key: { domain: "seed.example" }, set: { name: "Seed Co" } })).text);
+    const place_id = idOf((await seeder.call("put", { table: "places", key: { iso2: "SD", kind: "country" }, set: { name: "Seedland" } })).text);
+    if (!corporation_id || !place_id) throw new Error(`the seed's company or place was not made: ${corporation_id} ${place_id}`);
     for (let i = 1; i <= 20; i++) {
-      const r = await seeder.call("put", { table: "applications", set: { company: `Company ${i}`, role: "Engineer" } });
+      const r = await seeder.call("put", { table: "applications", set: { company: `Company ${i}`, role: "Engineer", corporation_id, place_id } });
       seeded.push(idOf(r.text));
     }
   } finally { seeder.stop() }

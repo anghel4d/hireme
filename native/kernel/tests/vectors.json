@@ -534,6 +534,21 @@
             "stage": "discovered",
             "company": "Acme"
           }
+        ],
+        "corporations": [
+          {
+            "id": 1,
+            "domain": "newco.example",
+            "name": "Newco"
+          }
+        ],
+        "places": [
+          {
+            "id": 1,
+            "kind": "country",
+            "iso2": "DE",
+            "name": "Germany"
+          }
         ]
       },
       "steps": [
@@ -559,7 +574,9 @@
           "put": "applications",
           "target": 0,
           "cells": {
-            "company": "Newco"
+            "company": "Newco",
+            "corporation_id": 1,
+            "place_id": 1
           },
           "effects": [
             {

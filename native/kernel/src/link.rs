@@ -211,3 +211,34 @@ pub fn unlinked(rows: &Rows) -> Json {
 fn s(t: &Table, id: u32, c: u16) -> &str {
     t.str(id, c).unwrap_or("")
 }
+
+/// Why row `id` of `table` may not be dropped: the applications that name
+/// it (a corporation, or a place a non-remote one is in), with the relink
+/// that comes first. None when nothing names it.
+pub fn named_by(rows: &Rows, table: u16, id: u32) -> Option<Json> {
+    let (c, name) = match table {
+        table::CORPORATIONS => (A::CORPORATION_ID, "corporations"),
+        table::PLACES => (A::PLACE_ID, "places"),
+        _ => return None,
+    };
+    let t = rows.table(table::APPLICATIONS)?;
+    let remote = Some(enums::work_mode::REMOTE as u32);
+    let nos: Vec<u32> = t
+        .ids()
+        .iter()
+        .filter(|&&a| t.u32(a, c) == Some(id) && (table == table::CORPORATIONS || t.u32(a, A::WORK_MODE) != remote))
+        .map(|&a| t.u32(a, A::NO).unwrap_or(a))
+        .collect();
+    if nos.is_empty() {
+        return None;
+    }
+    let col = if table == table::CORPORATIONS { "corporation_id" } else { "place_id" };
+    Some(json!({
+        "table": name, "id": id, "applications": nos,
+        "try": [
+            {"tool": "find", "args": {"table": "applications", "where": {col: {"eq": id}}}},
+            {"tool": "put", "note": "each of them, to the row that replaces this one", "args": {"table": "applications", "id": "<each application>", "set": {col: "<the replacing id>"}}},
+            {"tool": "drop", "args": {"table": name, "id": id}},
+        ],
+    }))
+}

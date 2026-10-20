@@ -66,6 +66,16 @@ fn kernel(apps: &[App], batches: &[(u32, u8)], lineages: &[(u32, u32, i32, bool)
         .u32s(col::cv_lineages::GENERATION, lineages.iter().map(|_| 1))
         .u32s(col::cv_lineages::REWRITES_ALLOWED, lineages.iter().map(|x| x.3 as u32));
     b.done();
+    // The company and place a new application must name.
+    let mut b = w.block(table::CORPORATIONS, 1);
+    b.u32s(col::corporations::ID, [1].into_iter()).strs(col::corporations::DOMAIN, ["acme.example"].into_iter()).strs(col::corporations::NAME, ["Acme"].into_iter());
+    b.done();
+    let mut b = w.block(table::PLACES, 1);
+    b.u32s(col::places::ID, [1].into_iter())
+        .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
+        .strs(col::places::ISO2, ["DE"].into_iter())
+        .strs(col::places::NAME, ["Germany"].into_iter());
+    b.done();
     // The item the overlays name: a ref must name a row.
     let mut b = w.block(table::ITEMS, 2);
     b.u32s(col::items::ID, [5, 6].into_iter()).strs(col::items::KEY, ["k", "j"].into_iter()).strs(col::items::TITLE, ["Kernel work", "Wire work"].into_iter());
@@ -200,7 +210,7 @@ fn listing_text_is_read_once_at_write_time() {
     assert_eq!(cell(&fx, table::APPLICATIONS, A::KEYWORDS_VERSION), Some(&EVal::Val(Val::U32(kernel::keywords::VERSION))));
     // A new application starts discovered, on today.
     let new = op(wire::PUT, table::APPLICATIONS, 0, |o| {
-        o.str(A::COMPANY, "Acme");
+        o.str(A::COMPANY, "Acme").u32(A::CORPORATION_ID, 1).u32(A::PLACE_ID, 1);
     });
     let fx = k.judge(&new, &ctx()).unwrap();
     assert_eq!(fx[0].id, 0);
@@ -399,7 +409,7 @@ fn one_posting_is_one_application_however_it_was_linked() {
     let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
     let put = |url: &'static str| {
         op(wire::PUT, table::APPLICATIONS, 0, move |o| {
-            o.str(A::COMPANY, "Acme").str(A::LISTING_URL, url);
+            o.str(A::COMPANY, "Acme").str(A::LISTING_URL, url).u32(A::CORPORATION_ID, 1).u32(A::PLACE_ID, 1);
         })
     };
     let fx = k.judge(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
@@ -416,4 +426,24 @@ fn one_posting_is_one_application_however_it_was_linked() {
     let fx = k.judge(&w.finish()[8..], &ctx()).unwrap();
     let own = fx.iter().find(|r| r.table == table::APPLICATIONS).unwrap();
     assert_ne!(own.id, 0, "found the posting, not a new row");
+}
+
+#[test]
+fn an_application_names_its_company_and_place_or_is_told_which_it_means() {
+    let mut k = kernel(&[app(1, S::GATED, "Acme").corp(1)], &[], &[]);
+    let put = |cells: fn(&mut wire::OpWriter)| op(wire::PUT, table::APPLICATIONS, 0, cells);
+    let r = k.judge(&put(|o| { o.str(A::COMPANY, "ACME Inc").str(A::LOCATION, "Germany"); }), &ctx()).unwrap_err();
+    assert_eq!(r.code, refusal::UNLINKED);
+    assert_eq!(r.data["need"], serde_json::json!(["corporation_id", "place_id"]));
+    assert_eq!((&r.data["did_you_mean"][0]["table"], &r.data["did_you_mean"][0]["id"]), (&serde_json::json!("corporations"), &serde_json::json!(1)));
+    assert_eq!(r.data["did_you_mean"][1]["table"], "places");
+    // Remote work needs no place; a company it still needs.
+    let remote = |o: &mut wire::OpWriter| { o.str(A::COMPANY, "Acme").u32(A::CORPORATION_ID, 1).u32(A::WORK_MODE, enums::work_mode::REMOTE as u32); };
+    assert!(k.judge(&put(remote), &ctx()).is_ok());
+    // An application already short of a link may still be worked on; clearing a link may not.
+    assert!(k.judge(&op(wire::PUT, table::APPLICATIONS, 1, |o| { o.str(A::ROLE, "Kernel Engineer"); }), &ctx()).is_ok());
+    assert_eq!(code(k.judge(&op(wire::PUT, table::APPLICATIONS, 1, |o| { o.null(A::CORPORATION_ID); }), &ctx())), refusal::UNLINKED);
+    // The company an application names is not dropped from under it.
+    let r = k.judge(&op(wire::DROP, table::CORPORATIONS, 1, |_| {}), &ctx()).unwrap_err();
+    assert_eq!((r.code, &r.data["applications"]), (refusal::UNLINKED, &serde_json::json!([1])));
 }
