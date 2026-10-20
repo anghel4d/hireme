@@ -151,31 +151,23 @@ pub fn parse(url: &str) -> Ats {
     Ats { vendor, tenant }
 }
 
-/// The address that names one posting however it was linked: https,
-/// the host lowercased without `www.` or a default port, the fragment and
-/// tracking parameters cut, the rest sorted, a trailing slash trimmed.
-/// None for what is no http(s) URL with a dotted host.
+/// The address that names one posting however it was linked: https, the
+/// host as [`crate::write::host`] reads it without `www.` or a port, no
+/// fragment, no tracking parameters (`utm_*` and the like; an id such as
+/// Greenhouse's `gh_jid` stays), the rest sorted, no trailing slash. None
+/// for anything that is not a web URL. The one copy: the server reaches
+/// it through the NIF.
 pub fn canonical(url: &str) -> Option<String> {
-    let (scheme, rest) = url.trim().split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return None;
-    }
+    let url = url.trim();
+    let host = crate::write::host(url)?;
+    let rest = url.split_once("://")?.1;
     let rest = rest.split_once('#').map_or(rest, |(r, _)| r);
     let end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let authority = &rest[..end];
-    let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let (host, port) = hostport.split_once(':').unwrap_or((hostport, ""));
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    let host = host.strip_prefix("www.").unwrap_or(&host);
-    if !host.contains('.') {
-        return None;
-    }
-    let port = if matches!((scheme.as_str(), port), (_, "") | ("https", "443") | ("http", "80")) { String::new() } else { alloc::format!(":{port}") };
     let (path, query) = rest[end..].split_once('?').unwrap_or((&rest[end..], ""));
     let mut params: Vec<&str> = query.split('&').filter(|p| !p.is_empty() && !tracking(p.split('=').next().unwrap_or(""))).collect();
     params.sort_unstable();
-    let mut out = alloc::format!("https://{host}{port}{}", path.trim_end_matches('/'));
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let mut out = alloc::format!("https://{host}{}", path.trim_end_matches('/'));
     if !params.is_empty() {
         out.push('?');
         out.push_str(&params.join("&"));
@@ -185,8 +177,12 @@ pub fn canonical(url: &str) -> Option<String> {
 
 /// A query parameter that says where a click came from, not what it opens.
 fn tracking(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "ref", "ref_src", "refid", "trk", "trkinfo", "trackingid", "src", "source", "origin",
+        "from", "lever-source", "lever-origin", "gh_src", "sid", "share_id", "shareid", "campaign", "medium",
+    ];
     let k = key.to_ascii_lowercase();
-    k.starts_with("utm_") || matches!(k.as_str(), "gclid" | "fbclid" | "gh_src" | "lever-source" | "lever-origin" | "ref" | "referrer" | "source" | "src" | "trk" | "refid")
+    k.starts_with("utm_") || KEYS.contains(&k.as_str())
 }
 
 /// One query parameter's value, lowercased.

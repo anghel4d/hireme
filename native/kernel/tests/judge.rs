@@ -391,7 +391,8 @@ fn one_posting_is_one_application_however_it_was_linked() {
         assert_eq!(canon(posting.as_deref().unwrap()), posting, "canonical of canonical");
     }
     assert_eq!(canon("https://jobs.lever.co/acme/1235"), Some("https://jobs.lever.co/acme/1235".into()));
-    for not_one in ["mailto:jobs@acme.com", "acme careers page", "https://localhost/x", ""] {
+    assert_eq!(canon("https://jobs.lever.co:8443/acme/1234?source=x"), Some("https://jobs.lever.co/acme/1234".into()));
+    for not_one in ["mailto:jobs@acme.com", "acme careers page", "https://localhost/x", "https://127.0.0.1/x", ""] {
         assert_eq!(canon(not_one), None, "{not_one}");
     }
 
@@ -406,4 +407,13 @@ fn one_posting_is_one_application_however_it_was_linked() {
     k.predict(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
     assert_eq!(code(k.judge(&put("http://www.jobs.lever.co/acme/1234/#top"), &ctx())), refusal::NATURAL_KEY);
     assert!(k.judge(&put("https://jobs.lever.co/acme/5678"), &ctx()).is_ok());
+
+    // A keyed put names the posting any way it was linked and lands on its row.
+    let mut w = wire::OpsWriter::new();
+    let mut o = w.op(78, wire::PUT, wire::KEYED, table::APPLICATIONS, 0, None);
+    o.str(A::CANONICAL_URL, "http://www.jobs.lever.co/acme/1234/?gh_src=feed").str(A::ROLE, "Kernel Engineer");
+    o.done();
+    let fx = k.judge(&w.finish()[8..], &ctx()).unwrap();
+    let own = fx.iter().find(|r| r.table == table::APPLICATIONS).unwrap();
+    assert_ne!(own.id, 0, "found the posting, not a new row");
 }

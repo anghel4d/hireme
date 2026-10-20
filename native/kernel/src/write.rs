@@ -202,7 +202,11 @@ fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
             return Err(no(refusal::TYPE, json!({"table": td.name, "column": c.name})));
         }
     }
-    let given = |c: &ColDef| cell_val(op, c.id).unwrap_or(Val::None);
+    // A posting's URL keys as the judge stores it, however it was linked.
+    let given = |c: &ColDef| match cell_val(op, c.id) {
+        Some(Val::Str(u)) if td.id == schema::table::APPLICATIONS && c.name == "canonical_url" => Val::Str(crate::ats::canonical(&u).unwrap_or(u)),
+        v => v.unwrap_or(Val::None),
+    };
     let naturals = || td.keys.iter().filter(|k| k.natural);
     let key = naturals().find(|k| {
         k.cols.iter().all(|n| td.col_named(n).is_some_and(|c| !given(c).is_none())) && k.cond.as_ref().is_none_or(|w| cond_holds(td, &given, w))

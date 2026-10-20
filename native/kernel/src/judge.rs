@@ -236,11 +236,14 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 }
             }
             // One posting is one application, however it was linked: the
-            // canonical URL is the natural key `limits` refuses twice.
-            if let Some(EVal::Val(v)) = row.get(A::LISTING_URL).cloned()
-                && row.get(A::CANONICAL_URL).is_none()
-            {
-                let c = if let Val::Str(u) = v { crate::ats::canonical(&u) } else { None };
+            // canonical URL (the one given, else the listing's) is the
+            // natural key `limits` refuses twice.
+            let url = |c: u16| match row.get(c) {
+                Some(EVal::Val(Val::Str(u))) => Some(crate::ats::canonical(u)),
+                Some(_) => Some(None),
+                None => None,
+            };
+            if let Some(c) = url(A::CANONICAL_URL).or_else(|| url(A::LISTING_URL)) {
                 row.set(A::CANONICAL_URL, c.map_or(Val::None, s));
             }
             if let Some(EVal::Val(v)) = row.get(A::LISTING_RAW).cloned() {

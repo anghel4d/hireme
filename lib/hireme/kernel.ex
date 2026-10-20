@@ -58,6 +58,10 @@ defmodule Hireme.Kernel do
 
   @doc "The keyword extraction's version; a stored row with another one is re-extracted."
   def keywords_version, do: Nif.keywords_version()
+
+  @doc "One posting's URL however it was linked: the kernel's normalization, the only copy; nil for no web URL."
+  @spec canonical(String.t()) :: String.t() | nil
+  def canonical(url) when is_binary(url), do: Nif.canonical(url)
 end
 
 defmodule Hireme.Kernel.Nif do
@@ -78,6 +82,7 @@ defmodule Hireme.Kernel.Nif do
   def judge_dirty(_res, _op, _ctx), do: :erlang.nif_error(:nif_not_loaded)
   def board_ids(_res, _stage), do: :erlang.nif_error(:nif_not_loaded)
   def keywords_version, do: :erlang.nif_error(:nif_not_loaded)
+  def canonical(_url), do: :erlang.nif_error(:nif_not_loaded)
   def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
   def text(_cell), do: :erlang.nif_error(:nif_not_loaded)
   def shuffle(_body), do: :erlang.nif_error(:nif_not_loaded)

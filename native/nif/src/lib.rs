@@ -176,6 +176,12 @@ fn keywords_version() -> u32 {
     kernel::keywords::VERSION
 }
 
+/// One posting's URL however it was linked (kernel::ats::canonical); nil for no web URL.
+#[rustler::nif]
+fn canonical(url: &str) -> Option<String> {
+    kernel::ats::canonical(url)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>> {
     let body = wire::Frame::parse(frame.as_slice(), schema::WIRE_HASH).ok()?.body_max(max).ok()?;
