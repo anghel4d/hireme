@@ -57,7 +57,9 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     const rows = {
       applications,
       items: applications.map((a) => ({ id: a.id, key: text(4), title: text(8), body: text(12) })),
-      settings: [{ id: 1, citizenships: text(6), languages: text(6), heat_config: text(6) }],
+      settings: [{ id: 1, heat_config: text(6) }],
+      me: [{ id: 1, citizenships: text(6) }],
+      languages: [{ id: 1, code: text(6), level: "b2" }],
       atlas: [{ id: 1, kind: "country", atlas_position: 1, iso2: text(3), name: text(6), language: text(6), work_permit: text(6) }],
     };
     if (call(x.ingest, bootFrame(catalog, rows)) < 0) throw new Error("BOOT refused");

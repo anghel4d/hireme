@@ -21,14 +21,14 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use schema::{col, table};
+use schema::{col, refusal, table};
 use serde_json::{json, Value as Json};
 
 use crate::board::{Board, Dir, Filter};
 use crate::judge::{self, Ctx, EVal, Refusal};
 use crate::pipeline::Stage;
 use crate::rows::{Moved, Rows, Val, Write};
-use crate::{compose, query, Day};
+use crate::{compose, pick, query, Day};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -57,6 +57,10 @@ pub struct Kernel {
     /// Each application's CV part (`compose::cv_part`) by what it read of
     /// the row; dropped whenever items, overlays or lineages move.
     cvs: BTreeMap<u32, (compose::CvKey, (Json, Json))>,
+    /// Every application's CV pick under the compiled rules; dropped when
+    /// an application, a place, a company, the rules, masks, roots or the
+    /// operator's own rows move.
+    picks: core::cell::RefCell<Option<pick::Picks>>,
 }
 
 impl Kernel {
@@ -75,12 +79,52 @@ impl Kernel {
 
     /// A read of the replica: find, get, text or history (`query`).
     pub fn query(&self, req: &Json) -> Result<Json, Refusal> {
-        query::query(&self.rows, &self.grants, &mut self.indexes.borrow_mut(), req)
+        self.query_as(&self.grants, req)
     }
 
     /// The same read under another session's grants: the node's kernel answers each MCP session as its key may see.
     pub fn query_as(&self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
-        query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req)
+        match req.get("op").and_then(Json::as_str) {
+            Some(op @ ("cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields")) => self.cv_query(grants, op, req),
+            _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req),
+        }
+    }
+
+    /// The CV reads: picks, a rule's check and explanation, the field
+    /// catalog. They read the rules and, but for the catalog, the applications.
+    fn cv_query(&self, g: &query::Grants, op: &str, req: &Json) -> Result<Json, Refusal> {
+        query::readable(g, Some(&json!("cv_rules")))?;
+        if op == "mask_fields" {
+            return Ok(json!({"fields": serde_json::from_str::<Json>(crate::mask::catalog()).unwrap_or_default()}));
+        }
+        query::readable(g, Some(&json!("applications")))?;
+        let mut cache = self.picks.borrow_mut();
+        let p = cache.get_or_insert_with(|| pick::Picks::of(&self.rows));
+        let app = || {
+            req.get("application").and_then(Json::as_u64).and_then(|v| u32::try_from(v).ok()).ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "application"})))
+        };
+        match op {
+            "mask_check" => {
+                let text = req.get("text").and_then(Json::as_str).ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "text"})))?;
+                let at = req.get("position").and_then(Json::as_u64).map(|v| v as usize);
+                Ok(pick::check(&self.rows, &p.arms, text, at))
+            }
+            "cv_explain" => Ok(pick::explain(&self.rows, &p.arms, app()?)),
+            "cv_pick" => {
+                let id = app()?;
+                p.by.get(&id).map(|k| k.to_json(id)).ok_or_else(|| judge::no(refusal::NOT_FOUND, json!({"table": "applications", "id": id})))
+            }
+            _ => {
+                let state = req.pointer("/where/state").and_then(Json::as_str);
+                let picks: Vec<Json> = p.by.iter().filter(|(_, k)| state.is_none_or(|s| k.state.name() == s)).map(|(id, k)| k.to_json(*id)).collect();
+                Ok(json!({"picks": picks}))
+            }
+        }
+    }
+
+    /// Application `id`'s CV pick.
+    pub fn pick(&self, id: u32) -> Option<pick::Pick> {
+        self.picks.borrow_mut().get_or_insert_with(|| pick::Picks::of(&self.rows)).by.get(&id).cloned()
     }
 
     pub fn set_today(&mut self, today: Day) {
@@ -114,8 +158,12 @@ impl Kernel {
         if m.is_empty() || (only_clock && self.today() == day_before) {
             return;
         }
-        if [table::ITEMS, table::CV_OVERLAYS, table::CV_LINEAGES].iter().any(|&t| m.touched(t)) {
+        if [table::ITEMS, table::CV_OVERLAYS, table::CV_LINEAGES, table::CV_ROOTS, table::ME].iter().any(|&t| m.touched(t)) {
             self.cvs.clear();
+        }
+        let pick_tables = [table::APPLICATIONS, table::PLACES, table::CORPORATIONS, table::CV_RULES, table::CV_MASKS, table::CV_ROOTS, table::ME, table::LANGUAGES];
+        if pick_tables.iter().any(|&t| m.touched(t)) || !m.replaced.is_empty() {
+            *self.picks.get_mut() = None;
         }
         self.board.forget(m, &self.rows);
         self.stale = true;
@@ -223,11 +271,13 @@ impl Kernel {
     pub fn application(&mut self, id: u32) -> Option<Json> {
         self.derive();
         let t = self.rows.table(table::APPLICATIONS)?;
-        let key = compose::cv_key(t, id);
+        let picked = self.pick(id);
+        let root = picked.as_ref().and_then(|p| p.root);
+        let key = compose::cv_key(&self.rows, t, id, root);
         let cv = match self.cvs.get(&id) {
             Some((k, cv)) if *k == key => cv.clone(),
             _ => {
-                let cv = compose::cv_part(&self.rows, &self.board, t, id);
+                let cv = compose::cv_part(&self.rows, &self.board, t, id, root);
                 if self.cvs.len() >= 64 {
                     self.cvs.clear();
                 }
@@ -235,7 +285,9 @@ impl Kernel {
                 cv
             }
         };
-        compose::application(&self.rows, &self.board, id, self.today(), cv)
+        let mut doc = compose::application(&self.rows, &self.board, id, self.today(), cv)?;
+        doc["cv_pick"] = picked.map_or(Json::Null, |p| p.to_json(id));
+        Some(doc)
     }
 
     pub fn overview(&mut self, top: usize) -> Json {

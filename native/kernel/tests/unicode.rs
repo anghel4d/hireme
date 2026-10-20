@@ -101,7 +101,7 @@ fn every_text_reader_survives_any_text() {
         });
         bounded("atlas", seed, limit, || {
             let places = [atlas::Place { id: 1, iso2: Some(&a), name: &b, language: Some(&c), work_permit: Some(&d), ..Default::default() }];
-            let me = atlas::Me { citizenships: &d, languages: &c, weights: atlas::Weights::default() };
+            let me = atlas::Me { citizenships: &d, languages: c.as_str().into(), weights: atlas::Weights::default() };
             let _ = atlas::order(&atlas::fit(&places, &me));
         });
     }
@@ -178,10 +178,13 @@ fn a_desk_of_any_text_derives_judges_and_composes() {
         b.u32s(col::items::ID, 1..=n as u32).strs(col::items::TITLE, col(1)).strs(col::items::BODY, col(5)).strs(col::items::KEY, col(0));
         b.done();
         let mut b = w.block(table::SETTINGS, 1);
-        b.u32s(col::settings::ID, [1].into_iter())
-            .strs(col::settings::CITIZENSHIPS, [texts[0][2].as_str()].into_iter())
-            .strs(col::settings::LANGUAGES, [texts[1][2].as_str()].into_iter())
-            .strs(col::settings::HEAT_CONFIG, [texts[2][6].as_str()].into_iter());
+        b.u32s(col::settings::ID, [1].into_iter()).strs(col::settings::HEAT_CONFIG, [texts[2][6].as_str()].into_iter());
+        b.done();
+        let mut b = w.block(table::ME, 1);
+        b.u32s(col::me::ID, [1].into_iter()).strs(col::me::CITIZENSHIPS, [texts[0][2].as_str()].into_iter());
+        b.done();
+        let mut b = w.block(table::LANGUAGES, 1);
+        b.u32s(col::languages::ID, [1].into_iter()).strs(col::languages::CODE, [texts[1][2].as_str()].into_iter());
         b.done();
         let mut b = w.block(table::ATLAS, 1);
         b.u32s(col::atlas::ID, [1].into_iter())

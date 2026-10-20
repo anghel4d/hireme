@@ -99,14 +99,19 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day, cv: (Json, J
 /// corporation, theme, listing keywords); the rest is the items, overlays
 /// and lineages tables.
 pub type CvKey = (Option<u32>, Option<u32>, String);
-pub fn cv_key(t: &Table, id: u32) -> CvKey {
+pub fn cv_key(rows: &Rows, t: &Table, id: u32, root: Option<u32>) -> CvKey {
     let text = |c| t.str(id, c).unwrap_or("");
-    (t.u32(id, A::PROFILE_ID), t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
+    (cv_profile(rows, root), t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
+}
+
+/// The profile a picked root composes, when it is a live composition.
+pub fn cv_profile(rows: &Rows, root: Option<u32>) -> Option<u32> {
+    rows.table(table::CV_ROOTS)?.u32(root?, col::cv_roots::PROFILE_ID)
 }
 
 /// One application's keyword coverage and composed CV (theme and lines).
-pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32) -> (Json, Json) {
-    let (lines, theme) = cv_of(rows, board.lines_built(), t, id);
+pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32, root: Option<u32>) -> (Json, Json) {
+    let (lines, theme) = cv_of(rows, board.lines_built(), t, id, root);
     let cv_text = cv::visible(&lines, &theme);
     let listing_words: Vec<&str> = t.str(id, A::KEYWORDS).map(|k| crate::text::list(k).collect()).unwrap_or_default();
     let coverage = keywords::coverage(
@@ -128,9 +133,9 @@ pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32) -> (Json, Json) {
 }
 
 /// The CV lines and theme for one application.
-pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Table, id: u32) -> (Vec<cv::Line<'r>>, Theme) {
+pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Table, id: u32, root: Option<u32>) -> (Vec<cv::Line<'r>>, Theme) {
     use col::items as I;
-    let profile = t.u32(id, A::PROFILE_ID);
+    let profile = cv_profile(rows, root);
     let items: Vec<Item> = rows
         .each(table::ITEMS)
         .map(|(it, x)| Item {
@@ -256,17 +261,17 @@ pub fn places(rows: &Rows) -> Vec<Place<'_>> {
         .collect()
 }
 
-/// The operator's side of the fit: settings, or a preset's weights.
+/// The operator's side of the fit: the `me` row, or a preset's weights.
 pub fn me<'r>(rows: &'r Rows, preset: Option<&str>) -> Me<'r> {
-    use col::settings as S;
-    let st = board::settings(rows);
-    let get = |c: u16| st.and_then(|(t, id)| t.f64(id, c));
+    use col::me as M;
+    let row = board::me(rows);
+    let get = |c: u16| row.and_then(|(t, id)| t.f64(id, c));
     let weights = preset.and_then(atlas::preset).unwrap_or_else(|| {
-        Weights::from_settings([S::W_ENERGY, S::W_ECONOMY, S::W_LIVEABILITY, S::W_MOBILITY, S::W_LANGUAGE, S::W_TECH, S::W_EASE].map(get))
+        Weights::from_settings([M::W_ENERGY, M::W_ECONOMY, M::W_LIVEABILITY, M::W_MOBILITY, M::W_LANGUAGE, M::W_TECH, M::W_EASE].map(get))
     });
     Me {
-        citizenships: st.and_then(|(t, id)| t.str(id, S::CITIZENSHIPS)).unwrap_or(""),
-        languages: st.and_then(|(t, id)| t.str(id, S::LANGUAGES)).unwrap_or(""),
+        citizenships: row.and_then(|(t, id)| t.str(id, M::CITIZENSHIPS)).unwrap_or(""),
+        languages: board::languages(rows).into(),
         weights,
     }
 }

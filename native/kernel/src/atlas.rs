@@ -2,9 +2,9 @@
 //! the operator's own citizenships, languages and weights. This is the
 //! only copy of the fit; the lens and the MCP read it from here.
 //!
-//! It reads exactly the `atlas` projection's columns and the settings
+//! It reads exactly the `atlas` projection's columns and the `me`
 //! row, and nothing personal lives in source: whose passports and which
-//! languages are `settings.citizenships` and `settings.languages`, and
+//! languages are `me.citizenships` and the `languages` rows, and
 //! which citizenships need no permit where is each place's `work_permit`.
 //!
 //! A place gets a route and seven parts, each in 0..=1 or absent:
@@ -58,7 +58,7 @@ pub struct Place<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct Me<'a> {
     pub citizenships: &'a str,
-    pub languages: &'a str,
+    pub languages: alloc::borrow::Cow<'a, str>,
     pub weights: Weights,
 }
 
@@ -167,7 +167,7 @@ fn names_any(list: &str, mine: &[String]) -> bool {
 
 /// Every place's fit, in input order.
 pub fn fit<'a>(places: &[Place<'a>], me: &Me) -> Vec<Fit> {
-    let (citizen, spoken) = (text::codes(me.citizenships), text::codes(me.languages));
+    let (citizen, spoken) = (text::codes(me.citizenships), text::codes(&me.languages));
     let by_id: BTreeMap<u32, usize> = places.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
     let country = |p: &Place| -> Option<usize> {
         if p.city { p.country_id.and_then(|c| by_id.get(&c).copied()).filter(|&c| !places[c].city) } else { None }
@@ -289,7 +289,7 @@ mod tests {
             Place { id: 4, city: true, country_id: Some(2), name: "b-city", position: 9, ..Place::default() },
             Place { id: 5, city: true, country_id: Some(99), name: "lost", position: 10, ..Place::default() },
         ];
-        let me = Me { citizenships: "aa", languages: "XX", weights: Weights::default() };
+        let me = Me { citizenships: "aa", languages: "XX".into(), weights: Weights::default() };
         let f = fit(&places, &me);
         assert_eq!(f.iter().map(|x| x.route).collect::<Vec<_>>(), [Route::Citizen, Route::Free, Route::Permit, Route::Free, Route::Unknown]);
         assert_eq!(f.iter().map(|x| x.speaks).collect::<Vec<_>>(), [Some(true), Some(false), Some(true), Some(false), None]);
@@ -308,7 +308,7 @@ mod tests {
         assert!(preset("career").is_some() && preset("nope").is_none());
         // Economy alone, mid-ranked: 10 → 0, and the two 30s share 0.75.
         let places = [country(1, "AA", 10.0, "", "xx"), country(2, "BB", 30.0, "", "yy"), country(3, "CC", 30.0, "", "zz")];
-        let econ_only = Me { citizenships: "", languages: "", weights: Weights([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]) };
+        let econ_only = Me { citizenships: "", languages: "".into(), weights: Weights([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]) };
         let f = fit(&places, &econ_only);
         assert_eq!((f[0].fit, f[1].fit, f[2].fit), (Some(0), Some(75), Some(75)));
         assert_eq!(order(&f), [2, 3, 1]);
@@ -322,7 +322,7 @@ mod tests {
             Place { id: 2, city: true, country_id: Some(1), name: "b", position: 5, ..Place::default() },
         ];
         ps[0].work_permit = Some("BB");
-        let me = Me { citizenships: "bb", languages: "xx", weights: Weights::default() };
+        let me = Me { citizenships: "bb", languages: "xx".into(), weights: Weights::default() };
         let f = fit(&ps, &me);
         assert_eq!((f[1].route, f[1].speaks), (Route::Free, Some(true)));
         assert_eq!(order(&f[1..]), [2, 3]);

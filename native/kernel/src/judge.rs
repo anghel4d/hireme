@@ -31,6 +31,7 @@
 //! | `lineage_busy` | `{lineage_id, generation}`: rewrites are off, only new overlays |
 //! | `cooldown` | `{lineage_id, opened_on, days_left}` (open_generation too early), or `{lineage_id, opened_on, need: "open_generation"}` (the window has passed); `opened_on` is the date, `YYYY-MM-DD` |
 //! | `not_found` | `{table, id}` or `{need}` |
+//! | `rule` | `{at, len, error}` and the `rule` or `mask` id whose text it is: a CV rule or mask that does not compile, or one a mask change breaks |
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,7 +45,7 @@ use crate::board::{self, Board};
 use crate::heat;
 use crate::pipeline::{self, Stage};
 use crate::rows::{Rows, Table, Val};
-use crate::{cv, keywords, write, Day};
+use crate::{cv, keywords, mask, pick, write, Day};
 
 /// Who is writing and when.
 #[derive(Clone, Copy, Debug)]
@@ -254,6 +255,14 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             }
         }
         table::CV_OVERLAYS => overlay(rows, board, op, ctx, &mut row, &mut extra)?,
+        table::CV_RULES => {
+            let text = text_after(rows, op, col::cv_rules::PATTERN);
+            let masks = mask_rows(rows);
+            let lookup = |n: &str| masks.iter().find(|m| m.1 == n).map(|m| m.2.as_str());
+            mask::compile(&text, &lookup).map_err(|e| rule_no(&e, json!({"rule": op.target})))?;
+        }
+        table::CV_MASKS => check_cv(rows, Some((op.target, text_after(rows, op, col::cv_masks::NAME), text_after(rows, op, col::cv_masks::PATTERN))), None)?,
+        table::CV_VERSIONS => return version(rows, op, row),
         table::CV_LINEAGES => {
             let t = rows.table(table::CV_LINEAGES);
             if op.target == 0 {
@@ -352,6 +361,10 @@ fn lineage_gate(l: &Table, lid: u32, today: Day, creates: bool) -> Result<(), Re
 }
 
 fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
+    // A mask a rule or another mask still names stays.
+    if op.table == table::CV_MASKS {
+        check_cv(rows, None, Some(op.target))?;
+    }
     // write::drop_checks found the row; an overlay's lineage gates its drop.
     if op.table == table::CV_OVERLAYS
         && let Some(lid) = rows.table(table::CV_OVERLAYS).and_then(|t| t.u32(op.target, col::cv_overlays::LINEAGE_ID))
@@ -447,7 +460,15 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             if (!from.queued() && to.queued()) || (to == Stage::Submitted && from != Stage::Submitted) {
                 governor(rows, board, id, to, ctx)?;
             }
-            Ok(moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx))
+            let mut out = moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx);
+            // Going out freezes the CV version that went: the pick's.
+            if to == Stage::Submitted && from != Stage::Submitted
+                && let Some(row) = out.first_mut()
+            {
+                let version = pick::pick(rows, &pick::arms(rows), id).version;
+                row.set(A::CV_VERSION_ID, version.map_or(Val::None, u));
+            }
+            Ok(out)
         }
         command::NOTE => {
             let t = app(rows, op.target)?;
@@ -511,8 +532,101 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 ],
             }])
         }
+        command::PICK_CV => {
+            app(rows, op.target)?;
+            let Val::U32(root) = param_val(op, param::pick_cv::CV_ROOT_ID) else { return refuse(refusal::TYPE, json!({"param": "cv_root_id"})) };
+            let Some(name) = rows.table(table::CV_ROOTS).filter(|t| t.has(root)).map(|t| t.str(root, col::cv_roots::NAME).unwrap_or("")) else {
+                return refuse(refusal::NOT_FOUND, json!({"table": "cv_roots", "id": root}));
+            };
+            let by = if ctx.human { enums::actor::OPERATOR } else { enums::actor::AGENT };
+            let row = Row { table: table::APPLICATIONS, id: op.target, cells: alloc::vec![(A::CV_ROOT_ID, u(root).into()), (A::CV_PINNED_BY, u(by as u32).into())] };
+            Ok(alloc::vec![row, event(u(op.target).into(), "cv", alloc::format!("CV pinned · {name}"), op, ctx)])
+        }
+        command::UNPIN_CV => {
+            app(rows, op.target)?;
+            let row = Row { table: table::APPLICATIONS, id: op.target, cells: alloc::vec![(A::CV_ROOT_ID, Val::None.into()), (A::CV_PINNED_BY, Val::None.into())] };
+            Ok(alloc::vec![row, event(u(op.target).into(), "cv", "CV unpinned".into(), op, ctx)])
+        }
         other => refuse(refusal::NOT_FOUND, json!({"command": other})),
     }
+}
+
+/// A text cell as it stands after `op`: the op's value, a clear, or the row's.
+fn text_after(rows: &Rows, op: &Op, c: u16) -> String {
+    match cell_val(op, c) {
+        Some(Val::Str(v)) => v,
+        Some(_) => String::new(),
+        None => rows.table(op.table).and_then(|t| t.str(op.target, c)).unwrap_or("").into(),
+    }
+}
+
+/// The CV masks as rows: id, name, text.
+fn mask_rows(rows: &Rows) -> Vec<(u32, String, String)> {
+    rows.each(table::CV_MASKS)
+        .map(|(t, id)| (id, t.str(id, col::cv_masks::NAME).unwrap_or("").into(), t.str(id, col::cv_masks::PATTERN).unwrap_or("").into()))
+        .collect()
+}
+
+fn rule_no(e: &mask::Error, whose: Json) -> Refusal {
+    let mut data = json!({"at": e.span.at, "len": e.span.len, "error": e.msg});
+    if let (Json::Object(d), Json::Object(w)) = (&mut data, whose) {
+        d.extend(w);
+    }
+    no(refusal::RULE, data)
+}
+
+/// Every mask and rule still compiles once mask `change` (id, name, text;
+/// id 0 a new one) is written or mask `dropped` is gone.
+fn check_cv(rows: &Rows, change: Option<(u32, String, String)>, dropped: Option<u32>) -> Result<(), Refusal> {
+    let gone = |id: u32| Some(id) == dropped || change.as_ref().is_some_and(|c| c.0 == id && id != 0);
+    let mut masks: Vec<(u32, String, String)> = mask_rows(rows).into_iter().filter(|m| !gone(m.0)).collect();
+    if let Some(c) = change {
+        let ident = c.1.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+            && c.1.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            && !["in", "true", "false"].contains(&c.1.as_str());
+        if !ident || mask::field(&c.1).is_some() {
+            let why = if ident { "a field has that name" } else { "a mask name is lowercase letters, digits and _" };
+            return Err(no(refusal::RULE, json!({"mask": c.0, "at": 0, "len": 0, "error": why, "name": c.1})));
+        }
+        masks.push(c);
+    }
+    let lookup = |n: &str| masks.iter().find(|m| m.1 == n).map(|m| m.2.as_str());
+    for m in &masks {
+        mask::compile(&m.2, &lookup).map_err(|e| rule_no(&e, json!({"mask": m.0})))?;
+    }
+    for (t, id) in rows.each(table::CV_RULES) {
+        mask::compile(t.str(id, col::cv_rules::PATTERN).unwrap_or(""), &lookup).map_err(|e| rule_no(&e, json!({"rule": id})))?;
+    }
+    Ok(())
+}
+
+/// A new version of a root: the content its root's format takes, and the
+/// root's newest version moved to it.
+fn version(rows: &Rows, op: &Op, row: Row) -> Verdict {
+    use col::cv_versions as V;
+    let Some(Val::U32(root)) = cell_val(op, V::ROOT_ID) else { return refuse(refusal::NOT_FOUND, json!({"need": "root_id"})) };
+    let Some(roots) = rows.table(table::CV_ROOTS).filter(|t| t.has(root)) else {
+        return refuse(refusal::NOT_FOUND, json!({"table": "cv_roots", "id": root}));
+    };
+    let format = roots.u32(root, col::cv_roots::FORMAT).unwrap_or(0);
+    let set = |c: u16| matches!(cell_val(op, c), Some(Val::Str(v)) if !v.trim().is_empty());
+    let (body, blob) = (set(V::BODY), set(V::BLOB_SHA));
+    let ok = match format as u8 {
+        enums::cv_format::MARKDOWN => body && !blob,
+        enums::cv_format::PDF | enums::cv_format::DOCX => blob && !body,
+        _ => body || blob,
+    };
+    if !ok {
+        let name = enums::cv_format::NAMES.get(format as usize).copied().unwrap_or("");
+        let need = match format as u8 {
+            enums::cv_format::MARKDOWN => "body",
+            enums::cv_format::PDF | enums::cv_format::DOCX => "blob_sha",
+            _ => "body or blob_sha",
+        };
+        return refuse(refusal::TYPE, json!({"table": "cv_versions", "format": name, "need": need}));
+    }
+    let head = Row { table: table::CV_ROOTS, id: root, cells: alloc::vec![(col::cv_roots::VERSION_ID, EVal::New(0))] };
+    Ok(alloc::vec![row, head])
 }
 
 /// The heat governor on an application entering the queue or going out.

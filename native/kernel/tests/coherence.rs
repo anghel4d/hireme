@@ -84,8 +84,8 @@ fn desk(r: &mut Rng) -> Vec<u8> {
     let mut b = w.block(table::ITEMS, 6);
     b.u32s(col::items::ID, 1..=6).strs(col::items::TITLE, (0..6).map(|_| "Item")).strs(col::items::KEY, (0..6).map(|_| "k"));
     b.done();
-    let mut b = w.block(table::SETTINGS, 1);
-    b.u32s(col::settings::ID, [1].into_iter()).strs(col::settings::CITIZENSHIPS, ["pt"].into_iter());
+    let mut b = w.block(table::ME, 1);
+    b.u32s(col::me::ID, [1].into_iter()).strs(col::me::CITIZENSHIPS, ["pt"].into_iter());
     b.done();
     w.finish()
 }
@@ -160,14 +160,17 @@ fn patch(r: &mut Rng) -> Vec<u8> {
             }
         }
         3 => {
-            let mut b = w.block(table::SETTINGS, 1);
-            b.u32s(col::settings::ID, [1].into_iter());
             if r.below(2) == 0 {
+                let mut b = w.block(table::SETTINGS, 1);
+                b.u32s(col::settings::ID, [1].into_iter());
                 b.strs(col::settings::HEAT_CONFIG, [*r.pick(&["", "{\"small_cap\": 2}", "{\"company_half_life\": 5}", "garbage"])].into_iter());
+                b.done();
             } else {
-                b.strs(col::settings::CITIZENSHIPS, [*r.pick(&["", "pt", "us", "pt\u{1f}us"])].into_iter());
+                let mut b = w.block(table::ME, 1);
+                b.u32s(col::me::ID, [1].into_iter());
+                b.strs(col::me::CITIZENSHIPS, [*r.pick(&["", "pt", "us", "pt\u{1f}us"])].into_iter());
+                b.done();
             }
-            b.done();
         }
         4 => {
             let id = 1 + r.below(3) as u32;

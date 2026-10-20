@@ -14,7 +14,7 @@
 //!
 //! "Home" is not a place named in source: the caller says whether the
 //! seat is remote or in a country the operator holds citizenship of
-//! (`settings.citizenships` against the application's place).
+//! (`me.citizenships` against the application's place).
 
 use crate::lexicon::{self, Hits};
 use crate::text;

@@ -371,9 +371,21 @@ fn seat_of_row<'r>(rows: &Rows, r: Row<'r>, id: u32) -> Option<SeatIn<'r>> {
     })
 }
 
-/// The operator's citizenships from the settings row, read once.
+/// The one `me` row: the person the desk is for.
+pub fn me(rows: &Rows) -> Option<(&Table, u32)> {
+    let t = rows.table(table::ME)?;
+    t.ids().first().map(|id| (t, *id))
+}
+
+/// The operator's citizenships from the `me` row, read once.
 pub fn citizenships(rows: &Rows) -> Vec<String> {
-    text::codes(settings(rows).and_then(|(s, sid)| s.str(sid, col::settings::CITIZENSHIPS)).unwrap_or(""))
+    text::codes(me(rows).and_then(|(m, id)| m.str(id, col::me::CITIZENSHIPS)).unwrap_or(""))
+}
+
+/// The languages the operator speaks, U+001F-joined ISO 639-1 codes.
+pub fn languages(rows: &Rows) -> String {
+    let codes: Vec<&str> = rows.each(table::LANGUAGES).filter_map(|(t, id)| t.str(id, col::languages::CODE)).collect();
+    codes.join("\u{1f}")
 }
 
 /// The Life-EV suggestion for one application row, read without the

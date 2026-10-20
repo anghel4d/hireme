@@ -155,7 +155,7 @@ pub fn query(rows: &Rows, g: &Grants, idx: &mut Indexes, req: &Json) -> Answer {
 
 // ------------------------------------------------------------------ checks
 
-fn readable(g: &Grants, name: Option<&Json>) -> Result<&'static TableModel, Refusal> {
+pub(crate) fn readable(g: &Grants, name: Option<&Json>) -> Result<&'static TableModel, Refusal> {
     let Some(name) = name.and_then(Json::as_str) else {
         return Err(no(refusal::TYPE, json!({"param": "table", "got": got(name)})));
     };

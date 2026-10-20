@@ -766,11 +766,17 @@
       "name": "the atlas fit: routes from citizenship and permits, ranks within kind, the weighted mean",
       "today": 739528,
       "rows": {
-        "settings": [
+        "me": [
           {
             "id": 1,
-            "citizenships": "aa",
-            "languages": "XX"
+            "citizenships": "aa"
+          }
+        ],
+        "languages": [
+          {
+            "id": 1,
+            "code": "XX",
+            "level": "native"
           }
         ],
         "atlas": [
