@@ -15,6 +15,7 @@ import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
 import { command, drop, failed, ids, meId, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
 import { go, model, notice } from "../state.ts"
+import { appItem } from "./focus.ts"
 import { label } from "./world.ts"
 
 const SEP = "\u001f"
@@ -314,7 +315,7 @@ function rulesView(): Html {
 
 const appLink = (id: number): Html => {
   const no = str(value("applications", id, "no"))
-  return html`<a href="/focus/${no}" data-nav>#${no} ${str(value("applications", id, "company"))} ${str(value("applications", id, "role"))}</a>`
+  return html`<a href="/desk/${appItem(id)}" data-nav>#${no} ${str(value("applications", id, "company"))} ${str(value("applications", id, "role"))}</a>`
 }
 
 /** The rules renumbered 10, 20, … with `id` moved `by` places, so an order of equal positions settles. */

@@ -412,8 +412,6 @@ export function lookup(name: TableName, col: string, key: string): number {
   }).get(key) ?? 0
 }
 
-/** The one settings row's id, 0 before the rows are in. */
-export const settingsId = (): number => ids("settings")[0] ?? 0
 /** The one me row's id, 0 before the operator has saved anything about themself. */
 export const meId = (): number => ids("me")[0] ?? 0
 
@@ -765,8 +763,6 @@ export function put(name: TableName, set: Record<string, Input>, p: Put = {}): P
   return write({ opId: nextOp++, verb: VERB.put, flags, target: t.id, id: p.key ? 0 : p.id ?? 0, expectRev: p.expectRev ?? 0, cells }, t.residency === "resident")
 }
 
-/** A put to the one settings row (lanes), created when there is none yet. */
-export const putSettings = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("settings", set, settingsId() === 0 ? {} : { id: settingsId() })
 
 /** A put to the one me row (Me), created when there is none yet. */
 export const putMe = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("me", set, meId() === 0 ? {} : { id: meId() })
