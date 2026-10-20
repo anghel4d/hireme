@@ -105,6 +105,9 @@
 
 !/docs/
 !/docs/*.md
+# AGENTS.md: documentation, research notes and WIP go in docs/{subfolder}/*.md.
+!/docs/*/
+!/docs/*/*.md
 
 # The last word. A secret is never committed, whitelist or not.
 /.env
