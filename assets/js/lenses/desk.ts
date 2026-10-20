@@ -75,7 +75,11 @@ function scores(): Html {
 // entering it, so search, filters and a return to the desk rewrite tiles instead of laying out a
 // new grid.
 const TILE_W = 250
+/** The dense view packs narrower tiles: more of the board in view beside the application. */
+const TILE_W_DENSE = 200
 const TILE_H = 146
+/** A narrow dense tile wraps its footer onto a second line: it is this much taller (app.css matches). */
+const tileH = (): number => (dense() ? 166 : TILE_H)
 const GAP = 10
 const SPARE = 1
 
@@ -190,14 +194,14 @@ function paint(el: HTMLElement, measure: boolean): void {
     width = el.clientWidth
     boardTop = el.getBoundingClientRect().top + scrolled
   }
-  cols = Math.max(1, Math.floor((width + GAP) / (TILE_W + GAP)))
+  cols = Math.max(1, Math.floor((width + GAP) / ((dense() ? TILE_W_DENSE : TILE_W) + GAP)))
   const w = (width - GAP * (cols - 1)) / cols
   const rows = Math.ceil(ids.length / cols)
-  const h = `${Math.max(0, rows * (TILE_H + GAP) - GAP)}px`
+  const h = `${Math.max(0, rows * (tileH() + GAP) - GAP)}px`
   if (el.style.height !== h) el.style.height = h
   const top = boardTop - scrolled
-  const r0 = Math.max(0, Math.floor(-top / (TILE_H + GAP)) - SPARE)
-  const r1 = Math.min(rows - 1, Math.floor((window.innerHeight - top) / (TILE_H + GAP)) + SPARE)
+  const r0 = Math.max(0, Math.floor(-top / (tileH() + GAP)) - SPARE)
+  const r1 = Math.min(rows - 1, Math.floor((window.innerHeight - top) / (tileH() + GAP)) + SPARE)
   const first = r0 * cols
   const last = Math.min(ids.length, (r1 + 1) * cols)
   const want = new Set(ids.subarray(first, last))
@@ -222,7 +226,7 @@ function paint(el: HTMLElement, measure: boolean): void {
       tiles.set(id, t)
       if (t.parentElement !== el) el.append(t)
     }
-    const at = `translate(${(i % cols) * (w + GAP)}px, ${Math.floor(i / cols) * (TILE_H + GAP)}px)`
+    const at = `translate(${(i % cols) * (w + GAP)}px, ${Math.floor(i / cols) * (tileH() + GAP)}px)`
     if (t.style.transform !== at) t.style.transform = at
     const wpx = `${w}px`
     if (t.style.width !== wpx) t.style.width = wpx
@@ -348,9 +352,9 @@ function move(dir: number): void {
 function reveal(id: number): void {
   const at = board(filter()).indexOf(id)
   if (at < 0) return
-  const y = boardTop + Math.floor(at / cols) * (TILE_H + GAP)
+  const y = boardTop + Math.floor(at / cols) * (tileH() + GAP)
   if (y < scrolled + 56) window.scrollTo(0, y - 56)
-  else if (y + TILE_H > scrolled + window.innerHeight) window.scrollTo(0, y + TILE_H - window.innerHeight + GAP)
+  else if (y + tileH() > scrolled + window.innerHeight) window.scrollTo(0, y + tileH() - window.innerHeight + GAP)
 }
 
 function open(id: number): void {

@@ -370,9 +370,16 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .detail-action[data-copied="true"] { border-color: var(--good, var(--accent)); }
 .detail-action[data-copied="false"] { border-color: var(--bad); }
 .detail-action svg { display: block; }
-/* The desk's dense view: the board beside the selected card's whole application, each scrolling on its own. */
-.desk-split.dense { display: grid; grid-template-columns: minmax(0, 1fr) minmax(24rem, 40%); gap: var(--gap); align-items: start; }
-.desk-detail { position: sticky; top: 56px; max-height: calc(100vh - 64px); overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+/* The desk's dense view, the pro mode: the whole screen, no side margins (observer's workspace).
+   The board runs edge to edge; the selected card's whole application is a full-height column
+   flush against the right edge, scrolling on its own. */
+.lens:has(.desk-split.dense) { max-width: none; padding: 8px 0 0 8px; }
+.desk-split.dense { display: grid; grid-template-columns: minmax(0, 1fr) minmax(26rem, 38%); gap: 8px; align-items: start; }
+.desk-split.dense .board { margin: 0; }
+.desk-split.dense .app-card { height: 166px; }
+/* A card's lines keep their height; a wrapped footer takes the room the dense tile adds. */
+.app-card > * { flex-shrink: 0; }
+.desk-detail { position: sticky; top: 50px; height: calc(100vh - 50px); overflow-y: auto; overscroll-behavior: contain; padding: 12px 16px; background: var(--panel); border-left: 1px solid var(--line); }
 .desk-detail .focus-grid { grid-template-columns: minmax(0, 1fr); }
 .desk-detail .focus-head h1 { font-size: 17px; }
 .toolbar .views { margin-left: auto; }
