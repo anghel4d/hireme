@@ -9,6 +9,17 @@
 
 Always fully quote the user's design decisions/explanations without paraphrasing.
 
+# Workspace and where things go
+
+Documentation, including WIP, todo, research notes, etc:
+{this-repo}/docs/{subfolder}/*.md
+
+~/workspace/{this-repo}: is where this repo usually lives in dev env.
+
+~/workspace/{other-repos}: my other projects.
+
+~/workspace/ is not a dumping ground for worktrees, or loose notes, or anything else. It is for full clones of my projects.
+
 
 # Big Workflows
 
