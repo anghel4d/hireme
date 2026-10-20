@@ -240,6 +240,7 @@ defmodule Hireme.Sequencer do
     # The first purge, and every hour's, runs as messages between batches.
     send(self(), :purge)
     send(self(), :backfill)
+    send(self(), :canonical)
     {:ok, rebuild(state), @idle_ms}
   end
 
@@ -389,6 +390,14 @@ defmodule Hireme.Sequencer do
   rescue
     e ->
       Logger.error("sequencer #{state.account_id}: keywords backfill: #{Exception.message(e)}")
+      {:noreply, state, @idle_ms}
+  end
+
+  def handle_info(:canonical, state) do
+    {:noreply, canonical(state), @idle_ms}
+  rescue
+    e ->
+      Logger.error("sequencer #{state.account_id}: canonical backfill: #{Exception.message(e)}")
       {:noreply, state, @idle_ms}
   end
 
@@ -557,6 +566,63 @@ defmodule Hireme.Sequencer do
 
       %{state | backfill_after: stale |> List.last() |> elem(0)}
     end
+  end
+
+  # A posting's URL is its natural key in the kernel's canonical form (the
+  # URL given, else the listing's), which the judge writes on every put
+  # that names either. A row written before that, or straight to the
+  # database, gets it here once: the oldest row of a posting keeps it, a
+  # later duplicate stays without (the desk shows it beside the first), a
+  # held application waits for the next start, and a URL the kernel cannot
+  # read is left as it is.
+  defp canonical(state) do
+    held = MapSet.new(Map.keys(state.lease.holder))
+
+    rows =
+      Repo.all(
+        from(r in Hireme.Rows.Application,
+          where: not is_nil(r.listing_url) or not is_nil(r.canonical_url),
+          select: {r.id, r.listing_url, r.canonical_url},
+          order_by: r.id
+        )
+      )
+
+    taken = MapSet.new(for {_, _, c} <- rows, c != nil, do: c)
+
+    {puts, _} =
+      Enum.reduce(rows, {[], taken}, fn {id, listing, stored}, {puts, taken} ->
+        want = Kernel.canonical(stored || listing)
+
+        if want == nil or want == stored or id in held or MapSet.member?(taken, want),
+          do: {puts, taken},
+          else: {[{id, want} | puts], MapSet.put(taken, want)}
+      end)
+
+    t = Schema.table(:applications)
+    url = col(t, "canonical_url")
+
+    puts
+    |> Enum.reverse()
+    |> Enum.chunk_every(@batch)
+    |> Enum.reduce(state, fn chunk, state ->
+      ops =
+        for {id, want} <- chunk do
+          raw = Codec.encode_op({Codec.op_id(), :put, 0, t.id, id, nil, [{url.id, 2, want}]})
+          {:ok, op, ""} = Codec.op(raw)
+          op
+        end
+
+      {state, _acks, nacks} =
+        run_as(%{label: "canonical", grants: Grants.operator(), key_id: nil}, ops, state)
+
+      if nacks != [],
+        do:
+          Logger.warning(
+            "sequencer #{state.account_id}: canonical backfill refused #{length(nacks)}"
+          )
+
+      state
+    end)
   end
 
   # Ops already waiting join this turn's batches, in arrival order.
@@ -1067,7 +1133,8 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  # A posting's URL keys as derive/4 stores it, however the writer linked it.
+  # A posting's URL keys in the kernel's canonical form, as the judge stores
+  # it, however the writer linked it.
   defp keyed("applications", %{"canonical_url" => url} = values) when is_binary(url),
     do: Map.put(values, "canonical_url", Kernel.canonical(url) || url)
 

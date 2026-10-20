@@ -456,6 +456,48 @@ defmodule Hireme.SequencerTest do
            end)
   end
 
+  test "rows written before the canonical URL get it once: the oldest of a posting keeps it, a later duplicate stays without, a non-URL stays as it was; the same posting is then refused",
+       %{account: a} do
+    stop_sequencer(a.id)
+    now = Hireme.Store.now()
+
+    row = fn no, listing, canonical ->
+      Repo.insert!(%Application{
+        account_id: a.id,
+        no: no,
+        company: "C#{no}",
+        listing_url: listing,
+        canonical_url: canonical,
+        stage: :discovered,
+        status: :open,
+        heat_override: false,
+        rev: 1,
+        inserted_at: now,
+        updated_at: now
+      })
+    end
+
+    first = row.(9001, "http://www.Example.com/jobs/1/?utm_source=x#top", nil)
+    dup = row.(9002, "https://example.com/jobs/1", nil)
+    linked = row.(9003, nil, "https://www.boards.greenhouse.io/acme/jobs/9?gh_src=a&gh_jid=9")
+    odd = row.(9004, "not a url", nil)
+
+    _ = rev(a.id)
+    url = fn r -> Repo.get!(Application, r.id).canonical_url end
+    assert eventually(fn -> url.(first) == "https://example.com/jobs/1" end)
+
+    assert eventually(fn ->
+             url.(linked) == "https://boards.greenhouse.io/acme/jobs/9?gh_jid=9"
+           end)
+
+    assert url.(dup) == nil and url.(odd) == nil
+
+    again =
+      op(:put, :applications, %{company: "X", listing_url: "https://example.com/jobs/1?ref=hn"})
+
+    assert {[], [%{refusal: :natural_key}]} = run(a.id, again)
+  end
+
   test "a PATCH ships each row the columns it moved: one listing edited among renames carries one listing",
        %{account: a} do
     listing = String.duplicate("Rust, kernels and GPUs. ", 40)
