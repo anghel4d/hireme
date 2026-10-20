@@ -222,6 +222,8 @@ pub fn templates(m: Masks) -> Json {
         ("applications", "no", "An application by its number"),
         ("corporations", "domain", "A corporation by its domain"),
         ("places", "iso2", "A country by its ISO 3166-1 alpha-2 code"),
+        ("cv_roots", "slug", "A CV root by its slug"),
+        ("cv_versions", "id", "A CV version: its text, and blob_url for a pdf or docx (GET it with this key)"),
     ] {
         if tools::table_named(table).is_some_and(|t| m.reads(t)) {
             out.push(json!({"uriTemplate": format!("hireme://{table}/{{{key}}}"), "name": table, "title": title, "mimeType": "application/json"}));
@@ -239,6 +241,8 @@ pub fn locate(uri: &str) -> Option<Json> {
         "applications" => json!({"table":"applications","key":{"no": key.parse::<u64>().ok()?}}),
         "corporations" => json!({"table":"corporations","key":{"domain": key}}),
         "places" => json!({"table":"places","key":{"iso2": key.to_uppercase()}}),
+        "cv_roots" => json!({"table":"cv_roots","key":{"slug": key}}),
+        "cv_versions" => json!({"table":"cv_versions","id": key.parse::<u32>().ok().filter(|n| *n > 0)?}),
         _ => return None,
     })
 }

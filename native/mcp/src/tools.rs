@@ -209,6 +209,21 @@ pub fn list(m: Masks) -> Vec<Json> {
             false,
         ));
     }
+    if table_named("cv_rules").is_some_and(|t| m.reads(t)) {
+        out.push(tool(
+            "cv",
+            "Which CV an application gets",
+            "The ordered match of cv_rules (position, then id; the first enabled rule that matches wins; a pin from pick_cv beats every rule; none matching is me.cv_default_root_id). {} lists the applications whose CV is unsettled: matched by more than one rule, pinned to a deleted CV, or given a CV with no versions. {\"application\": no} explains one: its pick, then every rule in order with whether it matched and the first test that failed and the value it read. {\"check\": pattern, \"position\": n} judges a pattern as it would stand at that place (its error with a byte span, the earlier rules that leave it nothing). {\"fields\": true} lists what a pattern can test, with types and enum values. Write rules and masks with put (cv_rules, cv_masks); pin with pick_cv.".into(),
+            json!({"type":"object","properties":{
+                "application":{"type":"integer","minimum":1,"description":"the application's number (no)"},
+                "check":{"type":"string","description":"a mask pattern, e.g. country in [DE, AT, CH] & role.field = :research"},
+                "position":{"type":"integer","minimum":0,"description":"with check: the 0-based place among the rules; the count of rules for a new one"},
+                "fields":{"type":"boolean"}
+            },"additionalProperties":false}),
+            true,
+            false,
+        ));
+    }
     if m.write != 0 {
         out.push(tool(
             "lease",
@@ -222,6 +237,21 @@ pub fn list(m: Masks) -> Vec<Json> {
             false,
             false,
         ));
+        if table_named("cv_versions").is_some_and(|t| m.writes(t)) {
+            out.push(tool(
+                "cv_upload",
+                "Upload a CV file",
+                "A pdf, docx or markdown file as the next version of a CV root: the bytes are stored by their SHA-256 (the same file again is the same blob), their text extracted once, and a cv_versions row names them. base64 is the file, at most 10 MiB. A .md file becomes the version's body, as a put with body would.".into(),
+                json!({"type":"object","required":["root_id","name","base64"],"properties":{
+                    "root_id":{"type":"integer","minimum":1},
+                    "name":{"type":"string","description":"the file name, e.g. cv-research.pdf"},
+                    "base64":{"type":"string"},
+                    "note":{"type":"string","description":"what changed"}
+                },"additionalProperties":false}),
+                false,
+                false,
+            ));
+        }
         out.push(tool(
             "release",
             "Release claims",

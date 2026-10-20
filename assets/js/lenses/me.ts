@@ -59,7 +59,7 @@ function you(): Html {
         ${bits("work_modes", "work_mode")}
         ${bits("employments", "employment")}
         <div class="row">
-          <label>Pay floor (a year) <input type="number" name="pay_floor" min="0" value="${mine("pay_floor")}" class="narrow"></label>
+          <label>Pay floor (a year) <input type="number" name="pay_floor" min="0" step="1000" value="${mine("pay_floor")}"></label>
           <label>Currency (ISO 4217) <input name="pay_currency" value="${mine("pay_currency")}" placeholder="EUR" class="narrow"></label>
           <label>Available on <input type="date" name="available_on" value="${mine("available_on")}"></label>
           <label>Notice (days) <input type="number" name="notice_days" min="0" value="${mine("notice_days")}" class="narrow"></label>
