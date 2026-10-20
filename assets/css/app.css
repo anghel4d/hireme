@@ -432,3 +432,15 @@ p.warn { color: var(--warn); font-weight: 600; }
 /* The keyboard's row (app.ts): j/k move it on every page. */
 tr.cursor > *, li.cursor { background: var(--sunk); }
 tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
+
+/* Me: the CV rules read as one ordered list; a pattern is code, and the kernel's verdict sits under it. */
+.me .rules { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+.me label.grow { flex: 1 1 22em; display: flex; flex-direction: column; }
+.me .mono { font-family: var(--mono); }
+.me output.verdict { flex-basis: 100%; font-size: 13px; }
+.me output.verdict .bad { color: var(--bad); font-weight: 600; }
+.me output.verdict .warn { color: var(--warn); }
+.me output.verdict .ok { color: var(--ok); }
+.me output.verdict mark { background: var(--bad); color: var(--panel); border-radius: 2px; }
+.me tr[aria-selected] th { font-weight: 700; }
+.me pre.prose { white-space: pre-wrap; max-height: 40vh; overflow: auto; font-size: 13px; }

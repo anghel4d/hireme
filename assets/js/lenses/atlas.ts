@@ -5,7 +5,7 @@
 // operator's own and are set in Me. No passport or language is in source.
 
 import type { View } from "../app.ts"
-import { failed, atlas, putSettings, type Input } from "../kernel.ts"
+import { failed, atlas, putMe, type Input } from "../kernel.ts"
 import { EMPTY, flag, html, type Html } from "../morph.ts"
 import { model, query } from "../state.ts"
 
@@ -68,7 +68,7 @@ const atlasLens: View = {
         if (!d || !w) return
         const set: Record<string, Input> = {}
         d.parts.forEach((p, i) => (set[`w_${p}`] = w[i] ?? 1))
-        putSettings(set).catch(failed)
+        putMe(set).catch(failed)
         return query("preset", "")
       }
     }

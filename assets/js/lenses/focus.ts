@@ -8,7 +8,7 @@
 
 import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { board, failed, application, command, lookup, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
+import { board, failed, application, command, ids, lookup, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { go, model, notice, set, type FocusView } from "../state.ts"
 
@@ -21,6 +21,7 @@ type Doc = {
   events: Row[]
   batch: Row | null
   lineage: Row | null
+  cv_pick: { state: string; root: number | null; arm: number | null; by: string | null; also: number[]; version_id: number | null } | null
 }
 
 const v = (): FocusView => model.focus
@@ -92,11 +93,35 @@ function coverage(d: Doc): Html {
     <div class="terms">${c.terms.map((t) => html`<span class="term ${t.hit ? "hit" : "miss"}" data-key="${t.term}">${t.term}</span>`)}</div></section>`
 }
 
-function cv(d: Doc): Html {
+/** Why the kernel gives this application its CV root, in words. */
+const WHY: Record<string, (p: NonNullable<Doc["cv_pick"]>) => string> = {
+  pinned: (p) => `pinned by the ${p.by ?? "operator"}`,
+  matched: (p) => `rule #${p.arm}${p.also.length > 0 ? `; #${p.also.join(", #")} matched too` : ""}`,
+  default: () => "no rule matches: the default",
+  none: () => "no rule matches and there is no default",
+  stale: () => "pinned to a deleted CV",
+  empty: () => "that CV has no versions yet",
+}
+
+/** The root this application goes out with: the ordered match's pick, or a pin over it. */
+function pick(d: Doc, appId: number): Html {
+  const p = d.cv_pick
+  if (!p) return EMPTY
+  const rootName = (id: number): string => str(value("cv_roots", id, "name")) || `#${id}`
+  const sent = Number(d.application.cv_version_id ?? 0)
+  return html`<form class="row pick" data-submit="pick" data-act="pick" data-id="${appId}" data-key="pick">
+    <label>Goes out as <select name="root">${p.root === null ? html`<option value="">none</option>` : EMPTY}${[...ids("cv_roots")].map((r) => html`<option value="${r}"${flag("selected", r === p.root)}>${rootName(r)}</option>`)}</select></label>
+    <button>Pin</button>${p.state === "pinned" ? html`<button type="button" class="ghost" data-act="unpin" data-id="${appId}">Unpin</button>` : EMPTY}
+    <span class="muted">${WHY[p.state]?.(p) ?? p.state}${sent ? ` · sent v${str(value("cv_versions", sent, "n"))}` : ""}</span>
+    <a href="/me/rules" data-nav class="ghost">rules</a></form>`
+}
+
+function cv(d: Doc, appId: number): Html {
   const theme = d.cv.theme as { lead?: string | null; accent?: string; density?: string }
   return html`<section class="card cv cv-${str(theme.accent)} cv-${str(theme.density)}" data-key="cv">
     <h2>CV for this application${d.lineage ? html` <span class="muted">version ${str(d.lineage.generation)}</span>` : EMPTY}
       <span class="muted" title="CV layout and lineage phase">${str(theme.density)} · ${str(theme.accent)}${d.lineage ? ` · ${str(d.lineage.phase)}` : ""}</span></h2>
+    ${pick(d, appId)}
     ${theme.lead ? html`<p class="lead">${theme.lead}</p>` : EMPTY}
     ${d.cv.lines.length === 0 ? html`<p class="hint">No CV items yet. Agents add them to the corpus (profiles and items).</p>` : EMPTY}
     <ul class="cv-lines">${d.cv.lines.map((l) => html`<li data-key="i${str(l.item_id)}" class="kind-${str(l.kind)}${l.mode ? ` mode-${str(l.mode)}` : ""}">
@@ -193,7 +218,7 @@ export function body(appId: number, embedded: boolean): Html {
     </header>
     ${rail(d, appId)}
     <div class="focus-grid">
-      <div class="col">${score(d)}${coverage(d)}${cv(d)}${listing(a, appId)}</div>
+      <div class="col">${score(d)}${coverage(d)}${cv(d, appId)}${listing(a, appId)}</div>
       <div class="col">${around(a, appId)}${prose(a, appId)}${events(d, appId)}
         <section class="card" data-key="override"><h2>Heat override</h2>
           ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row grow" data-submit="override" data-act="override" data-id="${appId}">
@@ -302,6 +327,10 @@ export function act(name: string, el: HTMLElement, appId_: number = id()): void 
       return void resetAfter(el as HTMLFormElement, () => command("note", appId, { stage: el.dataset.stage ?? "", body: f.body ?? "" })).catch(failed)
     case "override":
       return void command("heat_override", appId, { reason: f.reason ?? "" }).catch(failed)
+    case "pick":
+      return void (f.root ? command("pick_cv", appId, { cv_root_id: Number(f.root) }) : command("unpin_cv", appId)).catch(failed)
+    case "unpin":
+      return void command("unpin_cv", appId).catch(failed)
   }
 }
 

@@ -300,7 +300,7 @@ function indexed<K, V>(store: Map<K, { version: number; at: V }>, key: K, build:
  * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
  * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
  */
-export function query<T = Row>(op: "find" | "get" | "text" | "history", params: Record<string, unknown>): T {
+export function query<T = Row>(op: "find" | "get" | "text" | "history" | "cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields", params: Record<string, unknown>): T {
   if (!k) throw new Error("the desk is still loading")
   const req = JSON.stringify({ op, ...params })
   return memo(req, () => {
@@ -414,6 +414,8 @@ export function lookup(name: TableName, col: string, key: string): number {
 
 /** The one settings row's id, 0 before the rows are in. */
 export const settingsId = (): number => ids("settings")[0] ?? 0
+/** The one me row's id, 0 before the operator has saved anything about themself. */
+export const meId = (): number => ids("me")[0] ?? 0
 
 // ------------------------------------------------------------------ derived documents
 
@@ -764,8 +766,17 @@ export function put(name: TableName, set: Record<string, Input>, p: Put = {}): P
   return write({ opId: nextOp++, verb: VERB.put, flags, target: t.id, id: p.key ? 0 : p.id ?? 0, expectRev: p.expectRev ?? 0, cells }, t.residency === "resident")
 }
 
-/** A put to the one settings row (atlas, lanes), created when there is none yet. */
+/** A put to the one settings row (lanes), created when there is none yet. */
 export const putSettings = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("settings", set, settingsId() === 0 ? {} : { id: settingsId() })
+
+/** A put to the one me row (Me, the atlas's presets), created when there is none yet. */
+export const putMe = (set: Record<string, Input>): Promise<{ id: number; rev: bigint }> => put("me", set, meId() === 0 ? {} : { id: meId() })
+
+/** A row dropped (soft-deleted where its table keeps them), predicted like a put. */
+export function drop(name: TableName, id: number): Promise<{ id: number; rev: bigint }> {
+  const t = TABLES[name]
+  return write({ opId: nextOp++, verb: VERB.drop, flags: 0, target: t.id, id, expectRev: 0, cells: [] }, t.residency === "resident")
+}
 
 /** A declared command on one row, judged locally first (a refusal throws here), its verdict the promise. */
 export function command(name: CommandName, target: number, params: Record<string, Input> = {}): Promise<{ id: number; rev: bigint }> {

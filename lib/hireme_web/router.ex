@@ -19,7 +19,7 @@ defmodule HiremeWeb.Router do
   }
   # The one page, under every lens's address; the lens is the client's to read.
   @lenses ~w(desk focus world atlas outreach lanes me account)
-  @lens_params ~w(focus world lanes)
+  @lens_params ~w(focus world lanes me)
 
   @impl true
   def init(opts), do: opts
