@@ -367,8 +367,10 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .detail-actions { display: flex; gap: 4px; margin-top: 6px; }
 .detail-action { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--muted); }
 .detail-action:hover, .detail-action[data-copied="true"] { color: var(--ink); }
-.detail-action[data-copied="true"] { border-color: var(--good, var(--accent)); }
-.detail-action[data-copied="false"] { border-color: var(--bad); }
+/* A copy says how it went where the icon was: a check, or a cross (observer's flash). */
+.detail-action[data-copied] svg { display: none; }
+.detail-action[data-copied="true"]::after { content: "✓"; font-weight: 700; }
+.detail-action[data-copied="false"]::after { content: "✕"; color: var(--bad); }
 .detail-action svg { display: block; }
 /* The desk's dense view, the pro mode: the whole screen, no side margins (observer's workspace).
    The board runs edge to edge; the selected card's whole application is a full-height column

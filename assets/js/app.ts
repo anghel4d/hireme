@@ -236,9 +236,14 @@ addEventListener("keydown", (ev) => {
 // lens, so it survives a redraw.
 const ROWS = "tbody tr, ul.rows > li, ol.rows > li"
 const cursor = new Map<Lens, string>()
+/** Lenses whose j/k are their own (the desk's grid, focus's next application): no row cursor there. */
+const OWN_ROWS: ReadonlySet<Lens> = new Set<Lens>(["desk", "focus"])
 
+// Rows in view, read without layout (offsetParent would flush it on every draw): a row inside
+// something hidden or a folded <details> is not one.
 function rows(lens: HTMLElement): HTMLElement[] {
-  return [...lens.querySelectorAll<HTMLElement>(ROWS)].filter((r) => r.offsetParent !== null)
+  if (OWN_ROWS.has(model.address.lens)) return []
+  return [...lens.querySelectorAll<HTMLElement>(ROWS)].filter((r) => r.closest("[hidden], details:not([open])") === null)
 }
 
 const keyOf = (r: HTMLElement, i: number): string => r.dataset.key ?? `#${i}`
