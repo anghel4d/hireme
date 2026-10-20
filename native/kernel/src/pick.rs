@@ -99,11 +99,11 @@ impl Pick {
 }
 
 /// Application `id`'s pick.
-pub fn pick(rows: &Rows, arms: &[Arm], id: u32) -> Pick {
+pub fn pick(rows: &Rows, arms: &[Arm], counts: &Counts, id: u32) -> Pick {
     let Some(t) = rows.table(table::APPLICATIONS) else { return none() };
     let roots = rows.table(table::CV_ROOTS);
     let alive = |r: u32| roots.is_some_and(|rt| rt.has(r));
-    let facts = AppFacts::new(rows, t, id);
+    let facts = AppFacts::new(rows, t, id, counts);
     let hits: Vec<&Arm> = arms.iter().filter(|a| a.enabled && alive(a.root) && a.expr.as_ref().is_some_and(|e| e.matches(&facts))).collect();
     let (state, root, arm, by) = if let Some(r) = t.u32(id, A::CV_ROOT_ID) {
         (if alive(r) { State::Pinned } else { State::Stale }, Some(r), None, t.u32(id, A::CV_PINNED_BY))
@@ -127,8 +127,9 @@ fn none() -> Pick {
 
 /// Per arm, whether application `id` matches it, else the test that failed.
 pub fn explain(rows: &Rows, arms: &[Arm], id: u32) -> Json {
+    let counts = Counts::of(rows);
     let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(id)) else { return Json::Array(Vec::new()) };
-    let facts = AppFacts::new(rows, t, id);
+    let facts = AppFacts::new(rows, t, id, &counts);
     arms.iter()
         .map(|a| match &a.expr {
             None => json!({"arm": a.id, "matched": false, "error": "the rule does not compile"}),
@@ -156,8 +157,9 @@ pub fn check(rows: &Rows, arms: &[Arm], text: &str, position: Option<usize>) -> 
     let mut taken = 0usize;
     let mut by: Vec<u32> = Vec::new();
     if let Some(t) = rows.table(table::APPLICATIONS) {
+        let counts = Counts::of(rows);
         for &id in t.ids() {
-            let facts = AppFacts::new(rows, t, id);
+            let facts = AppFacts::new(rows, t, id, &counts);
             if !e.matches(&facts) {
                 continue;
             }
@@ -179,13 +181,14 @@ pub struct AppFacts<'r> {
     rows: &'r Rows,
     t: &'r Table,
     id: u32,
+    counts: &'r Counts,
     name: OnceCell<lexicon::Hits>,
     title: OnceCell<(Department, Family, Seniority)>,
 }
 
 impl<'r> AppFacts<'r> {
-    pub fn new(rows: &'r Rows, t: &'r Table, id: u32) -> AppFacts<'r> {
-        AppFacts { rows, t, id, name: OnceCell::new(), title: OnceCell::new() }
+    pub fn new(rows: &'r Rows, t: &'r Table, id: u32, counts: &'r Counts) -> AppFacts<'r> {
+        AppFacts { rows, t, id, counts, name: OnceCell::new(), title: OnceCell::new() }
     }
 
     fn place(&self) -> Option<(&'r Table, u32)> {
@@ -269,6 +272,12 @@ impl Facts for AppFacts<'_> {
                     .and_then(|(ot, o)| ot.u32(o, col::offices::KIND))
                     .map(Val::Enum)
             }
+            "company.applications" => self.counts.corp.get(&t.u32(id, A::CORPORATION_ID)?).map(|n| Val::Num(*n as f64)),
+            "company.parent.applications" => {
+                let (ct, c) = self.corp()?;
+                self.counts.group.get(&group_of(ct, c)).map(|n| Val::Num(*n as f64))
+            }
+            "country.applications" => self.counts.country.get(&self.country()?.1).map(|n| Val::Num(*n as f64)),
             "company" => s(A::COMPANY),
             "role" => s(A::ROLE),
             "location" => s(A::LOCATION),
@@ -333,7 +342,8 @@ pub struct Picks {
 impl Picks {
     pub fn of(rows: &Rows) -> Picks {
         let arms = arms(rows);
-        let by = rows.table(table::APPLICATIONS).map_or_else(BTreeMap::new, |t| t.ids().iter().map(|&id| (id, pick(rows, &arms, id))).collect());
+        let counts = Counts::of(rows);
+        let by = rows.table(table::APPLICATIONS).map_or_else(BTreeMap::new, |t| t.ids().iter().map(|&id| (id, pick(rows, &arms, &counts, id))).collect());
         Picks { arms, by }
     }
 }
@@ -369,6 +379,7 @@ pub fn columns(rows: &Rows, fields: &[usize]) -> (Vec<u32>, Vec<Vec<Json>>) {
         BTreeMap::new()
     };
     let ids = t.ids().to_vec();
+    let counts = Counts::of(rows);
     let cols = fields
         .iter()
         .map(|&f| {
@@ -379,10 +390,59 @@ pub fn columns(rows: &Rows, fields: &[usize]) -> (Vec<u32>, Vec<Vec<Json>>) {
                         let key = t.u32(id, A::CORPORATION_ID).zip(t.u32(id, A::PLACE_ID));
                         return key.and_then(|k| offices.get(&k)).map_or(Json::Null, |&k| json_of(&Val::Enum(k), ty));
                     }
-                    AppFacts::new(rows, t, id).read(f).map_or(Json::Null, |v| json_of(&v, ty))
+                    AppFacts::new(rows, t, id, &counts).read(f).map_or(Json::Null, |v| json_of(&v, ty))
                 })
                 .collect()
         })
         .collect();
     (ids, cols)
+}
+
+/// How many applications name each corporation, each corporation group (a
+/// parent and its children) and each country: the `*.applications`
+/// fields, tallied once per read of the rows.
+#[derive(Default)]
+pub struct Counts {
+    corp: BTreeMap<u32, u32>,
+    group: BTreeMap<u32, u32>,
+    country: BTreeMap<u32, u32>,
+}
+
+impl Counts {
+    pub fn of(rows: &Rows) -> Counts {
+        let mut c = Counts::default();
+        let Some(t) = rows.table(table::APPLICATIONS) else { return c };
+        let corps = rows.table(table::CORPORATIONS);
+        let places = rows.table(table::PLACES);
+        for &id in t.ids() {
+            if let Some(corp) = t.u32(id, A::CORPORATION_ID) {
+                *c.corp.entry(corp).or_default() += 1;
+                if let Some(ct) = corps.filter(|ct| ct.has(corp)) {
+                    *c.group.entry(group_of(ct, corp)).or_default() += 1;
+                }
+            }
+            if let (Some(pt), Some(p)) = (places, t.u32(id, A::PLACE_ID))
+                && let Some(country) = country_of(pt, p)
+            {
+                *c.country.entry(country).or_default() += 1;
+            }
+        }
+        c
+    }
+}
+
+/// A corporation's group: its parent when it has a live one, else itself.
+fn group_of(corps: &Table, c: u32) -> u32 {
+    corps.u32(c, col::corporations::PARENT_ID).filter(|p| corps.has(*p)).unwrap_or(c)
+}
+
+/// A place's country: itself when it is one, else the country it is in.
+fn country_of(places: &Table, p: u32) -> Option<u32> {
+    if !places.has(p) {
+        return None;
+    }
+    if places.u32(p, col::places::KIND) == Some(enums::place_kind::COUNTRY as u32) {
+        return Some(p);
+    }
+    places.u32(p, col::places::COUNTRY_ID).filter(|c| places.has(*c))
 }

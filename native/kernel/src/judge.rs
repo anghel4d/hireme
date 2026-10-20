@@ -501,7 +501,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             if to == Stage::Submitted && from != Stage::Submitted
                 && let Some(row) = out.first_mut()
             {
-                let version = pick::pick(rows, &pick::arms(rows), id).version;
+                let version = pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), id).version;
                 row.set(A::CV_VERSION_ID, version.map_or(Val::None, u));
             }
             Ok(out)
