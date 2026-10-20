@@ -70,6 +70,12 @@ in
       description = "`KEY=value` lines (SECRET_KEY_BASE, RELEASE_COOKIE, the mail credentials); an agenix path on a host, never a store path.";
     };
 
+    signups = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Whether a new person may make an account (HIREME_SIGNUPS). Off, every existing account still signs in; nothing names an address.";
+    };
+
     public = {
       enable = lib.mkEnableOption "the public host: nginx with ACME on `domain`, the vault's secrets, and the release profile the deploy flips";
       acmeEmail = mkOption {
@@ -138,6 +144,7 @@ in
             environment = {
               HIREME_SERVER = "true";
               HIREME_HOST = cfg.domain;
+              HIREME_SIGNUPS = if cfg.signups then "on" else "off";
               PORT = toString cfg.port;
               DATABASE_PATH = "/var/lib/hireme/hireme.db";
               HOME = "/var/lib/hireme";
