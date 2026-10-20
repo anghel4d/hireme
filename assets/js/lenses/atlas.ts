@@ -12,7 +12,7 @@ import { atlas, ids, meId, page, row, value } from "../kernel.ts"
 import { EMPTY, html, type Html } from "../morph.ts"
 import { model, query } from "../state.ts"
 import { FIGURES, figureName, list } from "./me.ts"
-import { cited, cites, label } from "./world.ts"
+import { cited, cites, label, rowHref, views } from "./world.ts"
 
 type Fit = { id: number; kind: string; name: string; iso2: string | null; country: string | null; languages: string | null; route: string; speaks: boolean | null; preferred: boolean; avoided: boolean; fit: number | null }
 type Doc = { known: boolean; recipe: { key: string; weight: number }[]; unknown: string[]; places: Fit[] }
@@ -77,16 +77,17 @@ function view(): Html {
     page({ table: "places", cols, where: { id: { in: part.map((f) => f.id) } } }, part.length).rows.map((r) => [Number(r.id), r] as const)))
   const c = (q.get("cites") ?? "").split(":")
   const tab = (k: string, text: string): Html =>
-    html`<a href="/atlas${k === "" ? "" : `?kind=${k}`}" data-nav data-key="k${k}" class="${kind === k ? "on" : ""}"${kind === k ? html` aria-current="page"` : EMPTY}>${text}</a>`
+    html`<a href="/world/atlas${k === "" ? "" : `?kind=${k}`}" data-nav data-key="k${k}" class="${kind === k ? "on" : ""}"${kind === k ? html` aria-current="page"` : EMPTY}>${text}</a>`
   const header = (col: string, text: string, title: string): Html => {
     const dir = sort === col ? "asc" : sort === `-${col}` ? "desc" : ""
     return html`<th scope="col" data-key="${col}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
       <button type="button" class="ghost" data-act="sort" data-col="${col}" title="${title}">${text}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button></th>`
   }
   return html`<div class="atlas">
+    <div class="toolbar" data-key="views">${views()}</div>
     ${you(d)}${recipe(d)}
     <div class="toolbar" data-key="toolbar">
-      <nav class="subtabs" aria-label="Which places">${tab("", "all")}${tab("country", "countries")}${tab("city", "cities")}</nav>
+      <nav class="kinds" aria-label="Which places">${tab("", "all")}${tab("country", "countries")}${tab("city", "cities")}</nav>
       <input type="search" class="search" placeholder="name starts with…" value="${q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search places">
       <span class="muted">${kept.length} place${kept.length === 1 ? "" : "s"}</span>
     </div>
@@ -103,7 +104,7 @@ function view(): Html {
           const r = rows.get(f.id)
           return html`<tr data-key="p${f.id}" data-id="${f.id}" class="${f.avoided ? "avoided" : ""}">
             <th scope="row" class="id">${String(rank.get(f.id) ?? "")}</th>
-            <td data-key="name"><a href="/world/places?row=${f.id}" data-nav title="Open in World">${f.name}</a> <span class="muted">${f.kind === "city" ? f.country ?? "" : f.iso2 ?? ""}</span>${
+            <td data-key="name"><a href="${rowHref("places", f.id, { name: f.name })}" data-nav title="Open in World">${f.name}</a> <span class="muted">${f.kind === "city" ? f.country ?? "" : f.iso2 ?? ""}</span>${
               f.preferred ? html` <span class="tag" title="A country you want: ordered first">wanted</span>` : EMPTY}${f.avoided ? html` <span class="tag" title="A country you never want: ordered last">never</span>` : EMPTY}</td>
             <td data-key="route"><span class="tag route-${f.route}" title="${ROUTE[f.route]?.[1] ?? ""}">${ROUTE[f.route]?.[0] ?? f.route}</span></td>
             <td data-key="language">${(f.languages ?? "").split("\u001f").join(", ")}${f.speaks ? html` <span title="Speaks one of your languages">✓</span>` : EMPTY}</td>

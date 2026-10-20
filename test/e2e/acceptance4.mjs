@@ -221,7 +221,7 @@ await step("world shows the office, without a reload", pages, async () => {
 const atlasPage = watch("atlas", await ctx.newPage());
 pages.atlas = atlasPage;
 await step("MCP: put the person row; the atlas routes Acmeland as citizen, without a reload", pages, async () => {
-  await atlasPage.goto(`${BASE}/atlas`);
+  await atlasPage.goto(`${BASE}/world/atlas`);
   const row = atlasPage.locator("tbody tr", { hasText: "Acmeland" });
   await until(async () => (await row.count()) === 1, "Acmeland in the atlas");
   await until(async () => /unknown/.test(await row.innerText()), "its route reads unknown before the person row is set");
@@ -315,7 +315,7 @@ await step("a view that throws after a restore shows its error line and one noti
   } finally { await p.close() }
 });
 
-await step("focus's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => {
+await step("an opened application's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => {
   // Its own signed-in context and snapshot, so nothing the other pages did is in it.
   const own = await browser.newContext(VIEW);
   try {
@@ -325,14 +325,14 @@ await step("focus's derive trapping after a restore paints its failure with one 
     await until(async () => (await cards(p0)) >= 20, "20 article.app-card");
     await sleep(6000); // the snapshot is saved
     const no = (await p0.locator("#lens article.app-card .no").first().textContent()).replace("#", "").trim();
-    const p = await faulted("application", { context: own, path: `/focus/${no}` });
-    await until(async () => /focus lens failed to (load|draw)/.test(await notices(p)), "the focus lens's failure notice");
+    const p = await faulted("application", { context: own, path: `/desk/${no}` });
+    await until(async () => /desk lens failed to (load|draw)/.test(await notices(p)), "the desk lens's failure notice");
     await sleep(1500);
     const t = await lensText(p);
     if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
-    const n = await noticeCount(p, "focus lens failed");
-    if (n !== 1) throw new Error(`${n} focus failure notices, not one`);
-    if (!p.consoleErrors.some((x) => x.includes("focus lens failed"))) throw new Error("not logged to the console");
+    const n = await noticeCount(p, "desk lens failed");
+    if (n !== 1) throw new Error(`${n} desk failure notices, not one`);
+    if (!p.consoleErrors.some((x) => x.includes("desk lens failed"))) throw new Error("not logged to the console");
     return `one notice, logged, lens "${t.trim().slice(0, 60)}"`;
   } finally { await own.close() }
 });
@@ -366,17 +366,17 @@ await step("a view throwing a new long message each time raises one clipped noti
 });
 
 // Each lens hook (enter, view, after) that runs a trapping export must fail
-// into its notice, not out of the frame. Focus's enter resolves its
+// into its notice, not out of the frame. The desk's enter resolves an opened
 // application by number in the replica (kernel lookup, over the ids_ptr
 // export), so that is the export its enter runs: trapped once the desk is drawn.
-await step("enter: from a drawn desk to focus with the replica's ids trapping, focus shows its failure and the load notice", pages, async () => {
+await step("enter: from a drawn desk to an opened application with the replica's ids trapping, it shows its failure and the load notice", pages, async () => {
   const p = await faulted("ids_ptr", { gated: true });
   try {
     await until(async () => (await cards(p)) >= 20, "the desk drawn");
     const no = (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
     await p.evaluate(() => { window.__trap = true });
-    await p.evaluate((no) => { history.pushState(null, "", `/focus/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
-    await until(async () => /focus lens failed to load/.test(await notices(p)), '"focus lens failed to load" notice');
+    await p.evaluate((no) => { history.pushState(null, "", `/desk/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
+    await until(async () => /desk lens failed to load/.test(await notices(p)), '"desk lens failed to load" notice');
     const t = await lensText(p);
     if (!/failed to draw/.test(t) || (await cards(p)) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
     return `lens "${t.trim().slice(0, 40)}", load notice`;

@@ -46,16 +46,14 @@ One page, one wire session, the lens in the address:
 
 | Lens | Address | What it is |
 | --- | --- | --- |
-| desk | `/desk` | the board ranked by score, then heat; band, stage and heat filters; search; the scoreboard |
-| focus | `/focus/<no>` | one application: rail, score, coverage, the composed CV, the raw listing, events, messages, contact, corporation |
-| world | `/world/<table>` | corporations, places, offices and sources as sparse grids; each cell shows its as-of day and opens its citations |
-| atlas | `/atlas` | every country and city ordered for you (the `me` row: citizenships, permits, languages, the countries you want or never want, weights over any figure), shown as the figures themselves with their as-of days and citations |
-| outreach | `/outreach` | contacts and their threads; drafts only |
-| lanes | `/lanes/gym`, `/lanes/net` | practice reps and shipped work |
+| desk | `/desk`, `/desk/pro/<no>-<slug>`, `/desk/<no>-<slug>` | the board ranked by score, then heat; band, stage and heat filters; search; the scoreboard. pro puts the selected application beside the board; an application opened (`Enter`, a second click) is rail, score, coverage, the composed CV, the raw listing, events, messages, contact, corporation, and `Esc` backs out |
+| world | `/world/<table>/<id>-<slug>`, `/world/atlas` | corporations, places, offices and sources as sparse grids, each cell with its as-of day and citations; the atlas orders every country and city for you (the `me` row) and shows the figures themselves |
+| outreach | `/outreach/<id>-<slug>` | contacts and their threads; drafts only |
 | account | `/account` | ways in, factors, sessions, API keys with masks, live leases, trusted hosts, audit |
 
-Keys: `1`–`7` switch lenses; on the desk `j`/`k` or the arrows move, `Enter`
-opens, `/` searches, `Esc` clears. Sign-in (email link, GitHub, X) and the
+An item's slug follows its title, and an old one is rewritten to the current
+one. Keys: `1`–`5` switch lenses; `h`/`j`/`k`/`l` or the arrows move, `Enter`
+opens, `/` searches, `Esc` backs out. Sign-in (email link, GitHub, X) and the
 second-factor page are plain HTTP forms.
 
 ## Running it

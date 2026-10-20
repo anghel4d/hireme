@@ -1,4 +1,4 @@
-// The focus lens: one application. Everything derived about it (the rail,
+// One application, opened on the desk or beside its board. Everything derived about it (the rail,
 // the score and its suggestion, heat, keyword coverage, the CV composed
 // through its lineage's overlays, events) is the kernel's one document,
 // the same the MCP reads. The raw listing is in the replica and unfolded only when
@@ -6,11 +6,11 @@
 // the replica too, read in the frame they are drawn. Moves along the rail are the `stage`
 // command, judged by the kernel here before the sequencer judges it again.
 
-import type { View } from "../app.ts"
 import { ENUMS } from "../gen/schema.ts"
-import { board, failed, application, command, ids, lookup, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
+import { failed, application, command, ids, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
-import { go, model, notice, set, type FocusView } from "../state.ts"
+import { item, model, notice, set, type FocusView } from "../state.ts"
+import { rowHref } from "./world.ts"
 
 type Doc = {
   application: Row
@@ -28,7 +28,9 @@ const v = (): FocusView => model.focus
 /** The fold and the editor belong to the application they were opened on. */
 const mine = (appId: number): boolean => v().id === appId
 const patch = (p: Partial<FocusView>) => set({ focus: { ...model.focus, ...p } })
-const id = (): number => lookup("applications", "no", model.address.sub)
+
+/** An application's item segment: its number, then its company and role. */
+export const appItem = (appId: number): string => item(value("applications", appId, "no"), value("applications", appId, "company"), value("applications", appId, "role"))
 
 const PROSE = ["notes", "battleplan", "letter_raw"] as const
 
@@ -171,10 +173,10 @@ function around(a: Row, appId: number): Html {
   const corp = row("corporations", Number(a.corporation_id ?? 0))
   const messages = read<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 }).rows
   return html`<section class="card" data-key="around"><h2>People and company</h2>
-    ${corp ? html`<p><b>${str(corp.name)}</b> <a href="/world/corporations?q=${encodeURIComponent(str(corp.name))}" data-nav>in the world</a>
+    ${corp ? html`<p><b>${str(corp.name)}</b> <a href="${rowHref("corporations", Number(corp.id), corp)}" data-nav>in the world</a>
       ${corp.careers_url ? html` · <a href="${href(str(corp.careers_url))}" rel="noopener noreferrer" target="_blank">careers</a>` : EMPTY}</p>
       ${corp.headcount ? html`<p class="muted">${NUM.format(Number(corp.headcount))} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
-    ${c ? html`<p><a href="/outreach?contact=${str(c.id)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
+    ${c ? html`<p><a href="/outreach/${item(c.id, c.name)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
     ${messages.length > 0 ? html`<ul class="rows">${messages.map((m) => html`<li data-key="m${str(m.id)}"><span class="tag">${str(m.direction)}</span>
       ${str(m.subject) || "(no subject)"} <span class="muted">${str(m.sent_at).slice(0, 10)} · ${str(m.status)}</span></li>`)}</ul>` : EMPTY}
   </section>`
@@ -189,23 +191,13 @@ function events(d: Doc, appId: number): Html {
       <span class="muted">${str(e.actor)}${e.key_id ? ` · key ${str(e.key_id)}` : ""}</span></li>`)}</ol></section>`
 }
 
-function view(): Html {
-  const appId = id()
-  if (appId === 0) {
-    return model.address.sub === ""
-      ? html`<p class="empty">Pick an application on the <a href="/desk" data-nav>desk</a>.</p>`
-      : html`<p class="empty">No application #${model.address.sub} on this desk${model.rows === 0 ? " yet" : ""}.</p>`
-  }
-  return body(appId, false)
-}
-
 const LINK = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`
 const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`
 
 /**
- * One application whole: the focus lens's page, and the desk's dense pane
+ * One application whole: opened on the desk, and the pro view's pane
  * (`embedded`), where the way back is the board beside it and the way on is
- * the application's own page.
+ * opening it.
  */
 export function body(appId: number, embedded: boolean): Html {
   const d = application(appId) as Doc | null
@@ -213,7 +205,7 @@ export function body(appId: number, embedded: boolean): Html {
   const a = d.application
   return html`<div class="focus${embedded ? " embedded" : ""}">
     <header class="focus-head" data-key="head">
-      ${embedded ? html`<a href="/focus/${str(a.no)}" data-nav class="ghost">Open its page →</a>` : html`<a href="/desk" data-nav class="ghost">← desk</a>`}
+      ${embedded ? html`<a href="/desk/${appItem(appId)}" data-act="open-app" data-id="${appId}" class="ghost">Open it →</a>` : html`<a href="/desk" data-act="back" class="ghost">← desk</a>`}
       <div class="title-row">
         <h1>#${str(a.no)} ${str(a.company) || "(no company)"} <span class="muted">${str(a.role)}</span></h1>
         <span class="detail-actions">
@@ -235,8 +227,8 @@ export function body(appId: number, embedded: boolean): Html {
   </div>`
 }
 
-/** A card's link: the desk's dense view with it selected. */
-export const link = (no: unknown): string => `${location.origin}/desk?view=dense&card=${encodeURIComponent(str(no))}`
+/** A card's link: the application opened on the desk. */
+export const link = (appId: number): string => `${location.origin}/desk/${encodeURIComponent(appItem(appId))}`
 
 /** Markdown that a person or an agent's text could break is escaped; prose is kept as written. */
 const md = (x: unknown): string => str(x).replace(/([\\*_~`|[\]#<>])/g, "\\$1")
@@ -266,7 +258,7 @@ export function markdown(appId: number): string {
     corp ? `**Corporation:** ${md(corp.name)}${corp.domain ? ` (${str(corp.domain)})` : ""}` : null,
     contact ? `**Contact:** ${md(contact.name)}${contact.title ? `, ${md(contact.title)}` : ""}` : null,
     d.coverage.total > 0 ? `**Keywords:** ${d.coverage.hits} of ${d.coverage.total}${d.coverage.terms.some((t) => !t.hit) ? ` · missing ${d.coverage.terms.filter((t) => !t.hit).map((t) => md(t.term)).join(", ")}` : ""}` : null,
-    `**Link:** ${link(a.no)}`,
+    `**Link:** ${link(appId)}`,
   ].filter((x): x is string => x !== null)
   const prose = PROSE.flatMap((f) => (textOf(a[f]) === "" ? [] : ["", `**${f.replace(/_raw$/, "").replace(/_/g, " ").replace(/^./, (x) => x.toUpperCase())}**`, "", textOf(a[f])]))
   const history = d.events.length === 0 ? [] : ["", "**History**", ...d.events.map((e) => `- ${str(e.kind)}: ${md(str(e.kind) === "stage" ? textOf(e.body).replace(/_/g, " ") : textOf(e.body)).replace(/\n/g, " ")}`)]
@@ -286,8 +278,8 @@ function copy(button: HTMLElement, text: string): void {
 
 // ------------------------------------------------------------------ actions
 
-/** The focus lens's actions, on application `appId` unless the control names its own. */
-export function act(name: string, el: HTMLElement, appId_: number = id()): void {
+/** An application's actions, on application `appId` unless the control names its own. */
+export function act(name: string, el: HTMLElement, appId_: number): void {
   const appId = Number(el.dataset.id ?? appId_)
   const f = el instanceof HTMLFormElement ? fields(el) : {}
   switch (name) {
@@ -312,7 +304,7 @@ export function act(name: string, el: HTMLElement, appId_: number = id()): void 
     case "listing":
       return patch({ id: appId, listing: true, edit: "" })
     case "copy-link":
-      return copy(el, link(value("applications", appId, "no")))
+      return copy(el, link(appId))
     case "copy-md":
       return copy(el, markdown(appId))
     case "edit": {
@@ -340,36 +332,3 @@ export function act(name: string, el: HTMLElement, appId_: number = id()): void 
       return void command("unpin_cv", appId).catch(failed)
   }
 }
-
-const focus: View = {
-  title: "Focus",
-  view,
-  enter() {
-    // Another application: its listing folds and its editor closes.
-    const appId = id()
-    if (appId !== v().id) patch({ id: appId, listing: false, edit: "" })
-  },
-  act: (name, el) => act(name, el),
-  key(ev) {
-    // The next and previous application, in board order.
-    if (["j", "k", "ArrowDown", "ArrowUp"].includes(ev.key)) {
-      const order = board({})
-      const at = order.indexOf(id())
-      const next = order[at < 0 ? 0 : at + (ev.key === "j" || ev.key === "ArrowDown" ? 1 : -1)]
-      if (next !== undefined) {
-        const no = value("applications", next, "no")
-        if (no !== null) go({ lens: "focus", sub: String(no), q: new Map() })
-      }
-      return true
-    }
-    if (ev.key === "Escape") {
-      if (v().fireArmed !== 0) patch({ fireArmed: 0 })
-      else if (v().edit !== "") patch({ edit: "" })
-      else go({ lens: "desk", sub: "" })
-      return true
-    }
-    return false
-  },
-}
-
-export default focus

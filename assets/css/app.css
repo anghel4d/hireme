@@ -121,10 +121,24 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; color: var(--ink); letter-spacing: 0.02em; }
 .bar nav { display: flex; gap: 2px; overflow-x: auto; flex: 1; }
-.tab { padding: 5px 10px; border-radius: var(--radius); color: var(--muted); white-space: nowrap; }
+.tab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--radius); color: var(--muted); white-space: nowrap; }
+/* Each lens's mark, strokes on a 24 grid: the desk a board of cards, the world a globe, outreach a sent letter, Me a
+   person, the account a key. A mask takes the text's colour and keeps the header (redrawn on every change) a name per tab. */
+.tab::before, .sign-out button::before, .menu-toggle::before { content: ""; flex: none; width: 18px; height: 18px; background: currentColor; mask: var(--icon) center / 18px no-repeat; }
+.tab[data-key="desk"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3.5' width='7.5' height='10' rx='1.6'/%3E%3Crect x='13.5' y='3.5' width='7.5' height='6' rx='1.6'/%3E%3Crect x='3' y='16.5' width='7.5' height='4' rx='1.6'/%3E%3Crect x='13.5' y='12.5' width='7.5' height='8' rx='1.6'/%3E%3C/svg%3E"); }
+.tab[data-key="world"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.8'/%3E%3Cpath d='M3.2 12h17.6'/%3E%3Cpath d='M12 3.2c2.5 2.4 3.7 5.3 3.7 8.8s-1.2 6.4-3.7 8.8c-2.5-2.4-3.7-5.3-3.7-8.8S9.5 5.6 12 3.2z'/%3E%3Cpath d='M5 6.8c2 .9 4.4 1.3 7 1.3s5-.4 7-1.3M5 17.2c2-.9 4.4-1.3 7-1.3s5 .4 7 1.3'/%3E%3C/svg%3E"); }
+.tab[data-key="outreach"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20.8 3.2 10.6 13.4'/%3E%3Cpath d='M20.8 3.2 14.3 20.6l-3.7-7.2-7.2-3.7z'/%3E%3C/svg%3E"); }
+.tab[data-key="me"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4.2'/%3E%3Cpath d='M4 20.6c.9-3.9 4.1-6.3 8-6.3s7.1 2.4 8 6.3'/%3E%3C/svg%3E"); }
+.tab[data-key="account"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='15.5' r='4.5'/%3E%3Cpath d='m11.3 12.2 9-9'/%3E%3Cpath d='m17.3 6.2 2.6 2.6'/%3E%3Cpath d='m14.8 8.7 2 2'/%3E%3C/svg%3E"); }
+.sign-out button { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 4h4.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H14'/%3E%3Cpath d='M10 16.5 5.5 12 10 7.5'/%3E%3Cpath d='M5.5 12H15'/%3E%3C/svg%3E"); }
+.menu-toggle { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5h16M4 12h16M4 17.5h16'/%3E%3C/svg%3E"); }
+.menu-toggle[aria-expanded="true"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 6l12 12M18 6 6 18'/%3E%3C/svg%3E"); }
 .tab:hover { background: var(--sunk); color: var(--ink); text-decoration: none; }
 .tab.on { background: var(--sunk); color: var(--ink); font-weight: 600; }
 .sign-out { margin: 0; }
+.sign-out button { display: inline-flex; align-items: center; gap: 6px; }
+/* The phone's menu button (observer's): shown only where the lenses fold away. */
+.menu-toggle { display: none; padding: 4px; color: var(--ink); }
 .link { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .link::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
 .link-open::before { background: var(--ok); }
@@ -159,9 +173,11 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 }
 .panel { border-color: var(--accent); }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: var(--gap); }
-.subtabs { display: flex; gap: 2px; }
-.subtabs a { padding: 4px 10px; border-radius: var(--radius); color: var(--muted); }
-.subtabs a.on { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+.subtabs, .kinds { display: flex; flex-wrap: wrap; gap: 2px; }
+:is(.subtabs, .kinds) a { padding: 4px 10px; border-radius: var(--radius); color: var(--muted); }
+:is(.subtabs, .kinds) a.on { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+/* The atlas is a view of the world's places, set apart from the tables. */
+.subtabs a.atlas-tab { margin-left: 10px; }
 .search { width: min(320px, 100%); }
 
 /* ---------------------------------------------------------------- lists and grids */
@@ -252,22 +268,37 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 .msg .opening { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .notes { white-space: pre-wrap; }
 
-@media (max-width: 760px) {
-  /* A phone has no room beside the board: the pane goes, and Enter opens the application's page. */
-  .desk-split.dense { display: block; }
+/* Compact (observer's 980): no room beside the board, so the pane goes and a second tap or Enter opens the application. */
+@media (width <= 980px) {
+  .desk .desk-split.dense { display: block; padding: 0 8px; }
   .desk-detail { display: none; }
+  .focus .focus-grid { grid-template-columns: 1fr; }
+}
+
+/* Narrow: the lens tabs are their marks alone. */
+@media (width <= 760px) {
+  .bar nav .tab > span, .sign-out span { display: none; }
   .split { grid-template-columns: 1fr; }
   .split .list { position: static; max-height: none; }
-  /* Every lens tab in view, on its own rows under the brand, the link and sign-out; not sticky, so it scrolls away. */
-  .bar { gap: 8px; padding: 8px; flex-wrap: wrap; position: static; }
-  .account .alerts { top: 8px; }
-  .bar .link { margin-left: auto; }
-  .bar nav { order: 1; flex: 1 0 100%; flex-wrap: wrap; overflow: visible; }
-  .tab { padding: 5px 8px; }
+  .bar { gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+  .tab { padding: 6px 8px; }
   /* World on a phone: no # column; the name column alone holds the left edge. */
   .grid.sparse th.id { display: none; }
   .grid.sparse:has(th.anchor) tr > :nth-child(2) { left: 0; }
   .lens { padding: 10px; }
+}
+
+/* Phone (observer's 560): the lenses and sign-out fold under the menu button, a column of named tabs when open. */
+@media (width <= 560px) {
+  .bar .link { order: 1; margin-left: auto; }
+  .menu-toggle { display: inline-flex; order: 2; }
+  .bar nav, .bar .sign-out { display: none; }
+  .bar.menu-open nav { display: flex; order: 3; flex: 1 0 100%; flex-direction: column; gap: 2px; overflow: visible; }
+  .bar.menu-open .sign-out { display: block; order: 4; flex: 1 0 100%; border-top: 1px solid var(--line); padding-top: 6px; }
+  .bar.menu-open nav .tab > span, .bar.menu-open .sign-out span { display: inline; }
+  .bar.menu-open .tab { padding: 10px 8px; font-size: 15px; }
+  .bar.menu-open .sign-out button { width: 100%; padding: 10px 8px; font-size: 15px; }
+  .search { width: 100%; }
 }
 
 /* ---------------------------------------------------------------- auth pages (HTTP) */
@@ -372,11 +403,13 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .detail-action[data-copied="true"]::after { content: "✓"; font-weight: 700; }
 .detail-action[data-copied="false"]::after { content: "✕"; color: var(--bad); }
 .detail-action svg { display: block; }
-/* The desk's dense view, the pro mode: the whole screen, no side margins (observer's workspace).
-   The board runs edge to edge; the selected card's whole application is a full-height column
-   flush against the right edge, scrolling on its own. */
-.lens:has(.desk-split.dense) { max-width: none; padding: 8px 0 0 8px; }
-.desk-split.dense { display: grid; grid-template-columns: minmax(0, 1fr) minmax(26rem, 38%); gap: 8px; align-items: start; }
+/* The desk's pro view: the top keeps the page's margins; the cards run edge to edge, and the
+   selected card's whole application is a full-height column flush against the right edge,
+   scrolling on its own (observer's workspace). */
+.lens:has(.desk.pro) { max-width: none; padding: 0; }
+.desk.pro > :not(.desk-split) { max-width: 1400px; margin-inline: auto; padding: 16px 16px 0; }
+.desk.pro > .hint { padding-bottom: 16px; }
+.desk-split.dense { padding-left: 8px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(26rem, 38%); gap: 8px; align-items: start; }
 .desk-split.dense .board { margin: 0; }
 .desk-split.dense .app-card { height: 166px; }
 /* A card's lines keep their height; a wrapped footer takes the room the dense tile adds. */
@@ -411,7 +444,6 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .cv-lines .mode-tailor { border-left: 3px solid var(--accent); padding-left: 8px; }
 .cv-lines .mode-drop { opacity: 0.5; text-decoration: line-through; }
 .lead { font-style: italic; }
-@media (max-width: 960px) { .focus-grid { grid-template-columns: 1fr; } }
 
 /* ---------------------------------------------------------------- atlas and lanes */
 

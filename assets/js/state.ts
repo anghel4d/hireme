@@ -6,24 +6,28 @@
 // `set`, which schedules one render on the next frame; lenses read
 // `model` and return markup, they never write it.
 //
-// The address is the URL path, one lens per first segment:
+// The address is the URL path: the lens, then a view, then an item, its
+// number first and a slug of its title after (heijo's way), so a renamed
+// item's old link still lands and is rewritten to the new slug:
 //
 //     /desk?band=a&stage=draft_ready&heat=hot&q=rust
-//     /focus/<no>
-//     /world/<table>?sort=-headcount&q=berlin
-//     /atlas?kind=city&cols=economy&sort=-population&q=ber
-//     /outreach?contact=<id>
-//     /lanes/<gym|net>
-//     /me
+//     /desk/pro/<no>-<company>-<role>     the board beside one application
+//     /desk/<no>-<company>-<role>         one application, opened
+//     /world/<table>/<id>-<name>?sort=-headcount&q=berlin
+//     /world/atlas?kind=city&cols=economy&sort=-population&q=ber
+//     /outreach/<id>-<name>
+//     /me/<rules|cv>
 //     /account
 
-export const LENSES = ["desk", "focus", "world", "atlas", "outreach", "lanes", "me", "account"] as const
+export const LENSES = ["desk", "world", "outreach", "me", "account"] as const
 export type Lens = (typeof LENSES)[number]
 
 export interface Address {
   lens: Lens
-  /** The second path segment: an application's `no`, a world table, a lane. */
+  /** The view segment: pro on the desk, a world table or the atlas, a Me page. */
   sub: string
+  /** The item segment, `<number>-<slug>`: an application's `no`, a world row's or a contact's id. */
+  item: string
   /** Filters, sort and search, in the order they were set. */
   q: ReadonlyMap<string, string>
 }
@@ -65,6 +69,8 @@ export interface Model {
   focus: FocusView
   /** How many board cards are drawn; grows with "more" and with keyboard movement past the end. */
   deskLimit: number
+  /** The phone's menu (the lenses and sign-out) is open. */
+  menu: boolean
 }
 
 /** The focus lens: what one application needs beyond its resident rows. */
@@ -126,25 +132,57 @@ export interface AccountView {
   minting: boolean
 }
 
-/** The shell answers /world/:table and /lanes/:lane only, so those lenses always name one. */
-const DEFAULT_SUB: Partial<Record<Lens, string>> = { world: "corporations", lanes: "gym" }
+/** The world always names a table (or the atlas). */
+const DEFAULT_SUB: Partial<Record<Lens, string>> = { world: "corporations" }
+
+/** A title as a path segment (heijo's titleSlug): letters and digits of any script, runs of the rest one hyphen. */
+export function slug(title: string): string {
+  return title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/, "")
+}
+
+/** An item segment: its number, then the slug of its title when it has one. */
+export const item = (n: unknown, ...title: unknown[]): string => {
+  const s = slug(title.filter((t) => t !== null && t !== undefined && t !== "").join(" "))
+  return s === "" ? String(n) : `${String(n)}-${s}`
+}
+
+/** The number an item segment leads with, 0 for none. */
+export const itemNo = (segment: string = model.address.item): number => Number(/^\d+/.exec(segment)?.[0] ?? 0)
+
+const isItem = (s: string): boolean => /^\d/.test(s)
 
 export function parse(path: string, search: string): Address {
-  const parts = path.split("/").filter((s) => s !== "")
+  let parts: string[]
+  try {
+    parts = path.split("/").filter((s) => s !== "").map(decodeURIComponent)
+  } catch {
+    // A malformed escape is no address at all.
+    parts = []
+  }
+  const q = new Map(new URLSearchParams(search))
+  // The addresses before the desk opened applications in place: each is the address it became.
+  const take = (k: string): string => [q.get(k) ?? "", q.delete(k)][0] as string
+  if (parts[0] === "focus") parts = ["desk", ...parts.slice(1, 2)]
+  else if (parts[0] === "atlas") parts = ["world", "atlas"]
+  else if (parts[0] === "lanes") parts = ["desk"]
+  if (parts[0] === "desk" && (q.has("view") || q.has("card"))) {
+    const dense = take("view") === "dense"
+    const card = take("card")
+    if (parts.length === 1 && (dense || card !== "")) parts = ["desk", "pro", ...(card !== "" ? [card] : [])]
+  } else if (parts[0] === "world" && q.has("row") && parts.length === 2) parts.push(take("row"))
+  else if (parts[0] === "outreach" && q.has("contact") && parts.length === 1) parts.push(take("contact"))
   const first = parts[0] ?? "desk"
   const lens = (LENSES as readonly string[]).includes(first) ? (first as Lens) : "desk"
-  let sub = ""
-  try {
-    sub = decodeURIComponent(parts[1] ?? "")
-  } catch {
-    // A malformed escape is no sub at all.
-  }
-  return { lens, sub: sub === "" ? DEFAULT_SUB[lens] ?? "" : sub, q: new Map(new URLSearchParams(search)) }
+  const rest = parts.slice(1)
+  const sub = rest[0] !== undefined && !isItem(rest[0]) ? rest.shift()! : ""
+  const it = rest[0] !== undefined && isItem(rest[0]) ? rest[0] : ""
+  return { lens, sub: sub === "" ? DEFAULT_SUB[lens] ?? "" : sub, item: it, q }
 }
 
 export function format(a: Address): string {
   const sub = a.sub === "" ? DEFAULT_SUB[a.lens] ?? "" : a.sub
-  const path = sub === "" ? `/${a.lens}` : `/${a.lens}/${encodeURIComponent(sub)}`
+  const path = `/${[a.lens, sub, a.item].filter((s) => s !== "").map((s, i) => (i === 0 ? s : encodeURIComponent(s))).join("/")}`
   const q = new URLSearchParams()
   for (const [k, v] of a.q) if (v !== "") q.set(k, v)
   const s = q.toString()
@@ -153,6 +191,7 @@ export function format(a: Address): string {
 
 export const model: Model = {
   address: parse(location.pathname, location.search),
+  menu: false,
   selected: 0,
   link: "connecting",
   carrier: null,
@@ -200,6 +239,8 @@ export function go(next: Partial<Address>, replace = false): void {
     if (next.q === undefined) address.q = new Map()
     if (next.sub === undefined) address.sub = ""
   }
+  // Another view's item is not this one's.
+  if (next.item === undefined && address.sub !== model.address.sub && (next.lens !== undefined || next.sub !== undefined)) address.item = ""
   // The address holds its canonical sub, as parse() gives it: a lens's redirect to its default is then
   // no address change at all, and a view that enters on "" sees what format() prints.
   if (address.sub === "") address.sub = DEFAULT_SUB[address.lens] ?? ""
@@ -214,7 +255,15 @@ export function go(next: Partial<Address>, replace = false): void {
     settle()
     if (url !== here()) history[replace ? "replaceState" : "pushState"](null, "", url)
   }
-  set({ address })
+  set({ address, menu: false })
+}
+
+/** The address as the page holds it, rewritten in place when a redirect or a stale slug left it otherwise. */
+function adopt(): void {
+  const a = parse(location.pathname, location.search)
+  const url = format(a)
+  if (url !== here()) history.replaceState(null, "", url)
+  set({ address: a, menu: false })
 }
 
 const ADDRESS_MS = 150
@@ -269,5 +318,6 @@ addEventListener("popstate", () => {
   // Back or forward leaves the entry an owed filter belonged to: it is not written over the new one.
   clearTimeout(owing)
   owed = ""
-  set({ address: parse(location.pathname, location.search) })
+  adopt()
 })
+adopt()

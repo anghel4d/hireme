@@ -17,8 +17,6 @@ import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
 import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
-import focus from "./lenses/focus.ts"
-import lanes from "./lenses/lanes.ts"
 import me from "./lenses/me.ts"
 import outreach from "./lenses/outreach.ts"
 import world from "./lenses/world.ts"
@@ -38,17 +36,16 @@ export interface View {
 }
 
 /** Every lens, in the one bundle: a chunk per lens was a request per lens on every load. */
-const VIEWS: Record<Lens, View> = { desk, focus, world, atlas, outreach, lanes, me, account }
+const VIEWS: Record<Lens, View> = { desk, world, outreach, me, account }
+/** The current view of a lens: the atlas is the world's view of its places. */
+const viewOf = (lens: Lens): View => (lens === "world" && model.address.sub === "atlas" ? atlas : VIEWS[lens])
 
 const NAV: { lens: Lens; label: string; key: string }[] = [
   { lens: "desk", label: "Desk", key: "1" },
-  { lens: "focus", label: "Focus", key: "2" },
-  { lens: "world", label: "World", key: "3" },
-  { lens: "atlas", label: "Atlas", key: "4" },
-  { lens: "outreach", label: "Outreach", key: "5" },
-  { lens: "lanes", label: "Lanes", key: "6" },
-  { lens: "me", label: "Me", key: "7" },
-  { lens: "account", label: "Account", key: "8" },
+  { lens: "world", label: "World", key: "2" },
+  { lens: "outreach", label: "Outreach", key: "3" },
+  { lens: "me", label: "Me", key: "4" },
+  { lens: "account", label: "Account", key: "5" },
 ]
 
 const root = document.getElementById("app")
@@ -64,8 +61,8 @@ function link(): Html {
  * The lenses that read the board derive wait for it after a snapshot restore, one paint later; every
  * lens that reads the replica waits for the kernel to load.
  */
-const DERIVES: readonly Lens[] = ["desk", "focus"]
-const REPLICA: readonly Lens[] = ["desk", "focus", "world", "outreach", "me", "account"]
+const DERIVES: readonly Lens[] = ["desk"]
+const REPLICA: readonly Lens[] = ["desk", "world", "outreach", "me", "account"]
 const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
 
 /** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */
@@ -107,16 +104,17 @@ const parkedMain = (l: Lens): Html => html`<main class="lens lens-${l} parked" d
 
 function shell(): Html {
   const lens = model.address.lens
-  const v = waiting(lens) ? undefined : VIEWS[lens]
+  const v = waiting(lens) ? undefined : viewOf(lens)
   if (v) parked.add(lens)
-  return html`<header class="bar">
+  return html`<header class="bar${model.menu ? " menu-open" : ""}">
       <a class="brand" href="/desk" data-nav>hireme</a>
-      <nav aria-label="Lenses">${NAV.map((n) => html`<a href="${format({ lens: n.lens, sub: "", q: new Map() })}" data-nav data-key="${n.lens}"
-        class="tab${n.lens === lens ? " on" : ""}"${n.lens === lens ? html` aria-current="page"` : EMPTY} title="${n.label} (${n.key})">${n.label}</a>`)}</nav>
+      <button type="button" class="ghost menu-toggle" data-act="menu" aria-expanded="${String(model.menu)}" aria-controls="lenses" aria-label="Menu"></button>
+      <nav id="lenses" aria-label="Lenses">${NAV.map((n) => html`<a href="${format({ lens: n.lens, sub: "", item: "", q: new Map() })}" data-nav data-key="${n.lens}"
+        class="tab${n.lens === lens ? " on" : ""}"${n.lens === lens ? html` aria-current="page"` : EMPTY} title="${n.label} (${n.key})"><span>${n.label}</span></a>`)}</nav>
       ${link()}
       <form method="post" action="/sign-out" data-submit="sign-out" class="sign-out">
         <input type="hidden" name="_csrf_token" value="${document.querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? ""}">
-        <button class="ghost">Sign out</button>
+        <button class="ghost" title="Sign out"><span>Sign out</span></button>
       </form>
     </header>
     ${LENSES.filter((l) => l === lens || parked.has(l)).map((l) => (l === lens ? active(lens, v) : parkedMain(l)))}
@@ -127,7 +125,7 @@ function shell(): Html {
 function render(): void {
   if (!root || held()) return
   const hold = waiting(model.address.lens)
-  const v = hold ? undefined : VIEWS[model.address.lens]
+  const v = hold ? undefined : viewOf(model.address.lens)
   const where = format(model.address)
   // A lens that waits for the first derive is entered once it has run, not before.
   if (where !== entered && !hold) {
@@ -188,6 +186,7 @@ function actOn(ev: Event): void {
   if (ev.type !== "click" && ev.type !== "submit" && el.dataset.on !== ev.type) return
   if (ev.type === "submit" || el instanceof HTMLAnchorElement) ev.preventDefault()
   if (name === "dismiss") return dismiss(Number(el.dataset.id))
+  if (name === "menu") return set({ menu: !model.menu })
   // Signing out takes the desk's snapshot out of this browser before the form goes.
   if (name === "sign-out") {
     kernel.forget()
@@ -195,7 +194,7 @@ function actOn(ev: Event): void {
   }
   // A write the replica refuses throws here, in the input's frame: told, and the form it came from stays open.
   try {
-    VIEWS[model.address.lens]?.act?.(name, el, ev)
+    viewOf(model.address.lens).act?.(name, el, ev)
   } catch (e) {
     if (!(e instanceof kernel.Refused)) console.error("hireme: an action failed", e)
     kernel.failed(e)
@@ -210,6 +209,7 @@ const typing = (t: EventTarget | null) =>
   t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLElement && t.isContentEditable)
 
 addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && model.menu) return set({ menu: false })
   // Escape leaves a field (a search box clears itself first), so the lens's keys work again at once.
   if (ev.key === "Escape" && typing(ev.target) && ev.target instanceof HTMLElement) {
     ev.target.blur()
@@ -221,10 +221,10 @@ addEventListener("keydown", (ev) => {
   const n = NAV.find((x) => x.key === ev.key)
   if (n) {
     ev.preventDefault()
-    go({ lens: n.lens, sub: "" })
+    go({ lens: n.lens, sub: "", item: "" })
     return
   }
-  if (VIEWS[model.address.lens]?.key?.(ev) || rowKey(ev.key)) ev.preventDefault()
+  if (viewOf(model.address.lens).key?.(ev) || rowKey(ev.key)) ev.preventDefault()
 })
 
 // ------------------------------------------------------------------ rows
@@ -236,8 +236,8 @@ addEventListener("keydown", (ev) => {
 // lens, so it survives a redraw.
 const ROWS = "tbody tr, ul.rows > li, ol.rows > li"
 const cursor = new Map<Lens, string>()
-/** Lenses whose j/k are their own (the desk's grid, focus's next application): no row cursor there. */
-const OWN_ROWS: ReadonlySet<Lens> = new Set<Lens>(["desk", "focus"])
+/** Lenses whose j/k are their own (the desk's grid, an opened application's next): no row cursor there. */
+const OWN_ROWS: ReadonlySet<Lens> = new Set<Lens>(["desk"])
 
 // Rows in view, read without layout (offsetParent would flush it on every draw): a row inside
 // something hidden or a folded <details> is not one.
@@ -328,7 +328,8 @@ function frame(f: Bytes, h: Header): void {
 
 const wire = new Wire({
   frame,
-  open: (carrier) => set({ carrier, link: "connecting" }),
+  // The early socket's queued frames (WELCOME among them) reach the kernel before the carrier is up: an open link stays open.
+  open: (carrier) => set({ carrier, link: model.link === "open" ? "open" : "connecting" }),
   lost: (why, retry) => {
     set({ link: retry === 0 ? "ended" : "lost" })
     if (retry === 0 && why === "signed out") {

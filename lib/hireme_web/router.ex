@@ -17,9 +17,9 @@ defmodule HiremeWeb.Router do
     pending: &Auth.require_pending/2,
     step_up: &Auth.require_step_up/2
   }
-  # The one page, under every lens's address; the lens is the client's to read.
-  @lenses ~w(desk focus world atlas outreach lanes me account)
-  @lens_params ~w(focus world lanes me)
+  # The one page, under every lens's address (a view, then an item); the lens is the
+  # client's to read. focus, atlas and lanes are old addresses the client rewrites.
+  @lenses ~w(desk world outreach me account focus atlas lanes)
 
   @impl true
   def init(opts), do: opts
@@ -74,7 +74,7 @@ defmodule HiremeWeb.Router do
   defp route("GET", []), do: {:html, [:account], &PageController.shell/2}
 
   defp route("GET", [lens | rest])
-       when lens in @lenses and (rest == [] or (lens in @lens_params and length(rest) == 1)),
+       when lens in @lenses and length(rest) <= 2,
        do: {:html, [:account], &PageController.shell/2}
 
   defp route("POST", ["api", "wire", "ticket"]), do: {:json, [:account], &PageController.ticket/2}

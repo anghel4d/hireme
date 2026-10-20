@@ -9,14 +9,14 @@ import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef } from "../gen/schema.ts"
 import { failed, page, put, query as read, row, values, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, str, type Html } from "../morph.ts"
-import { model, query, set, type OutreachView } from "../state.ts"
+import { go, item, itemNo, model, query, set, type OutreachView } from "../state.ts"
 
 const PAGE = 100
 const v = (): OutreachView => model.outreach
 const patch = (p: Partial<OutreachView>) => set({ outreach: { ...model.outreach, ...p } })
 const writable = (): boolean => (model.writeMask & DOMAIN.mail) !== 0
 
-const selected = (): number => Number(model.address.q.get("contact") ?? 0)
+const selected = (): number => itemNo()
 /** The contact columns the lens edits, in declaration order. */
 const CONTACT: ColumnDef[] = TABLES.contacts.cols.filter((c) => !c.implied && !c.readonly && !c.serverOnly)
 
@@ -41,7 +41,7 @@ function opening(id: number): { text: string; more: boolean } {
 /** A corporation by its name in the replica, or by number when it is not there. */
 const corpLink = (id: unknown): Html => {
   const name = str(row("corporations", Number(id))?.name)
-  return name === "" ? html`corporation #${str(id)}` : html`<a href="/world/corporations?q=${encodeURIComponent(name)}" data-nav>${name}</a>`
+  return name === "" ? html`corporation #${str(id)}` : html`<a href="/world/corporations/${item(id, name)}" data-nav>${name}</a>`
 }
 
 // ------------------------------------------------------------------ view
@@ -125,13 +125,13 @@ function view(): Html {
           ${CONTACT.filter((x) => x.required || x.name === "email" || x.name === "title" || x.name === "corporation_id").map((x) => field(x, x.name === "corporation_id" ? corp : null))}
           <span class="row"><button class="primary">Add</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>` : EMPTY}
       <ul class="rows pick" role="listbox" aria-label="Contacts">${list.rows.map((x) => html`<li data-key="c${str(x.id)}" role="option" aria-selected="${String(Number(x.id) === id)}">
-        <a href="/outreach?${new URLSearchParams({ ...(corp ? { corporation: corp } : {}), contact: str(x.id) }).toString()}" data-nav class="${Number(x.id) === id ? "on" : ""}">
+        <a href="/outreach/${item(x.id, x.name)}${corp ? `?corporation=${encodeURIComponent(corp)}` : ""}" data-nav class="${Number(x.id) === id ? "on" : ""}">
           <b>${str(x.name)}</b> <span class="muted">${str(x.title)}</span></a></li>`)}</ul>
       ${list.rows.length === 0 ? html`<p class="empty">No contacts yet.</p>` : EMPTY}
       ${list.more ? html`<button type="button" data-act="more">More</button>` : EMPTY}
     </aside>
     <section class="detail" data-key="detail">
-      ${c ? html`${contactCard(c)}${draft(c)}${threads(id)}` : html`<p class="empty">Pick a contact.</p>`}
+      ${c ? html`${contactCard(c)}${draft(c)}${threads(id)}` : html`<p class="empty">${id > 0 && model.rows > 0 ? `No contact #${id}: it was deleted, or the link is from another account.` : "Pick a contact."}</p>`}
     </section>
   </div>`
 }
@@ -166,7 +166,7 @@ function act(name: string, el: HTMLElement): void {
       // open); the sequencer's refusal rolls it back and says why. Opened unless a contact is open by then.
       void put("contacts", f, email ? { key: { email }, createOnly: true } : {})
         .then((r) => {
-          if (model.address.lens === "outreach" && selected() === 0) query("contact", String(r.id))
+          if (model.address.lens === "outreach" && selected() === 0) go({ item: item(r.id, f.name) }, true)
         })
         .catch(failed)
       return patch({ edit: "" })
@@ -212,6 +212,11 @@ const outreach: View = {
       shownContact = selected()
       patch({ open: [], edit: "" })
     }
+  },
+  after() {
+    // The item's slug follows the contact's name: an old link is rewritten to the current one.
+    const c = row("contacts", selected())
+    if (c && item(c.id, c.name) !== model.address.item) go({ item: item(c.id, c.name) }, true)
   },
   act,
 }

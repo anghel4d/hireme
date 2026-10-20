@@ -1,6 +1,7 @@
 // The desk: the board of applications ranked by score_100, then heat,
 // narrowed by band, stage, heat and search (all in the address), with the
-// scoreboard above it and keyboard movement across it.
+// scoreboard above it and keyboard movement across it: /desk, /desk/pro/<item> (the board beside the
+// selected application whole), /desk/<item> (one application opened in place; Escape backs out).
 //
 // Order, filter, selection geometry and every card's numbers are the
 // kernel's (`board`, `step`, `card`, `scoreboard`); this file only lays
@@ -13,11 +14,14 @@ import type { View } from "../app.ts"
 import { BAND, STAGE } from "../gen/schema.ts"
 import { DIR, board, card, ids, lookup, query as read, scoreboard, step, value, type Filter, type Row } from "../kernel.ts"
 import { EMPTY, html, str, type Html } from "../morph.ts"
-import { format, go, model, query, set } from "../state.ts"
-import { act as focusAct, body } from "./focus.ts"
+import { format, go, itemNo, model, query, set } from "../state.ts"
+import { act as focusAct, appItem, body } from "./focus.ts"
 
-/** The dense view: the board beside the selected card's whole application. */
-const dense = (): boolean => model.address.q.get("view") === "dense"
+/** The pro view: the board beside the selected card's whole application. */
+const dense = (): boolean => model.address.sub === "pro"
+/** One application opened in place of the board. */
+const opened = (): boolean => !dense() && model.address.item !== ""
+const openedId = (): number => lookup("applications", "no", String(itemNo()))
 
 const CLASSES = ["cool", "warm", "hot", "blocked"] as const
 
@@ -97,20 +101,30 @@ const tiles = new Map<number, HTMLElement>()
 const spare: HTMLElement[] = []
 let cols = 1
 
+/** An opened application, or the page saying it is gone. */
+function page(): Html {
+  const id = openedId()
+  if (id === 0) return html`<div class="empty" data-key="gone"><p>${model.rows === 0 ? "Loading…" : `No application #${itemNo()} on this desk: it was deleted, or the link is from another account.`}</p>
+    <p><a href="/desk" data-act="back" class="button">Back to the desk</a></p></div>`
+  return html`${body(id, false)}<p class="hint keys">j k next and previous · Esc back to the desk · 1–5 switch lenses</p>`
+}
+
 function view(): Html {
+  if (opened()) return page()
   const ids = board(filter())
-  // The view and a linked card are not filters.
-  const any = [...model.address.q.keys()].some((k) => k !== "view" && k !== "card")
-  return html`<div class="desk">
+  const any = model.address.q.size > 0
+  return html`<div class="desk${dense() ? " pro" : ""}">
+    <div class="desk-top" data-key="top">
     <div class="toolbar" data-key="toolbar">
       <input type="search" class="search" placeholder="Search company, role, place or #no"
         data-act="search" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
       <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
       <span class="muted">${ids.length} shown</span>
-      <nav class="subtabs views" aria-label="Desk view">${[["", "noob"], ["dense", "pro"]].map(([k, l]) => html`<a href="${viewHref(k!)}" data-nav data-key="v${k}" class="${(model.address.q.get("view") ?? "") === k ? "on" : ""}${k === "dense" ? " pro" : ""}">${l}</a>`)}</nav>
-      ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
+      <nav class="subtabs views" aria-label="Desk view">${["", "pro"].map((k) => html`<a href="${viewHref(k, model.address.q)}" data-nav data-key="v${k}" class="${model.address.sub === k ? "on" : ""}${k === "pro" ? " pro" : ""}">${k || "noob"}</a>`)}</nav>
+      ${any ? html`<a href="${viewHref(model.address.sub, new Map())}" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>
     ${scores()}
+    </div>
     <div class="desk-split${dense() ? " dense" : ""}" data-key="split">
       <div class="board" role="list" aria-label="Applications" data-key="board" data-morph="own"></div>
       ${dense() ? html`<aside class="desk-detail" data-key="detail" aria-label="The selected application">${model.selected !== 0
@@ -118,13 +132,11 @@ function view(): Html {
         : html`<p class="empty">No application matches these filters.</p>`}</aside>` : EMPTY}
     </div>
     ${ids.length === 0 ? html`<p class="empty">${any ? "Nothing matches these filters." : "No applications yet. An agent adds them through the MCP, or import a pack."}</p>` : EMPTY}
-    <p class="hint keys">h j k l or arrows move · Enter opens · v pro view · / searches · 1–7 switch lenses</p>
+    <p class="hint keys">h j k l or arrows move · Enter or a second click opens · v pro view · / searches · 1–5 switch lenses</p>
   </div>`
 }
 
-/** The desk's query with its view set (and the card a link named dropped). */
-const viewQ = (view: string): Map<string, string> => new Map([...[...model.address.q].filter(([k]) => k !== "view" && k !== "card"), ...(view === "" ? [] : [["view", view] as [string, string]])])
-const viewHref = (view: string): string => format({ lens: "desk", sub: "", q: viewQ(view) })
+const viewHref = (sub: string, q: ReadonlyMap<string, string>): string => format({ lens: "desk", sub, item: "", q })
 
 function write(el: Element | null, s: string): void {
   if (el && el.textContent !== s) el.textContent = s
@@ -152,21 +164,39 @@ const sized = new ResizeObserver(() => {
   if (watched?.isConnected) paint(watched, true)
 })
 
-// A link to a card (`?card=<no>`) selects it once the rows are in, once per link.
-let linked = ""
+// The pro view's item selects its card once the rows are in, once per address.
+let linked = 0
+/** The open application came from the board (history's entry before it), and where the board was scrolled. */
+let fromBoard = false
+let returnY = -1
 
 function after(root: HTMLElement): void {
-  // Something is always selected: the first card in view, whenever none is or the filter hid it.
-  const order = board(filter())
-  const first = order[0]
-  if (first !== undefined && !order.includes(model.selected) && !model.address.q.has("card")) set({ selected: first })
-  const no = model.address.q.get("card") ?? ""
+  if (opened()) {
+    // The item's slug follows the application's company and role: an old link is rewritten to the current one.
+    const id = openedId()
+    if (id !== 0 && model.selected !== id) set({ selected: id })
+    if (id !== 0 && appItem(id) !== model.address.item) go({ item: appItem(id) }, true)
+    return
+  }
+  const no = dense() ? itemNo() : 0
   if (no !== linked) {
-    const id = no === "" ? 0 : lookup("applications", "no", no)
-    if (no === "" || id !== 0) linked = no
+    const id = no === 0 ? 0 : lookup("applications", "no", String(no))
+    if (no === 0 || id !== 0) linked = no
     if (id !== 0 && model.selected !== id) {
       set({ selected: id })
       queueMicrotask(() => reveal(id))
+    }
+  }
+  // Something is always selected: the first card in view, whenever none is or the filter hid it.
+  const order = board(filter())
+  const first = order[0]
+  if (first !== undefined && !order.includes(model.selected)) set({ selected: first })
+  // The pro view's address names the selected card, rewritten in place as the selection moves.
+  if (dense() && model.selected !== 0) {
+    const want = appItem(model.selected)
+    if (want !== model.address.item) {
+      linked = itemNo(want)
+      go({ item: want }, true)
     }
   }
   // The search box is owned: its value is written here, so a keystroke leaves the desk's markup as it
@@ -188,6 +218,10 @@ function after(root: HTMLElement): void {
     boardTop = 0
   }
   paint(el, false)
+  if (returnY >= 0) {
+    window.scrollTo(0, returnY)
+    returnY = -1
+  }
 }
 
 /** Lays out the window of tiles for the current filter and scroll; writes each tile that changed. */
@@ -361,17 +395,55 @@ function reveal(id: number): void {
   else if (y + tileH() > scrolled + window.innerHeight) window.scrollTo(0, y + tileH() - window.innerHeight + GAP)
 }
 
+/** Opens an application in place of the board; the board's address and scroll are kept to come back to. */
 function open(id: number): void {
-  const no = value("applications", id, "no")
-  if (no !== null) go({ lens: "focus", sub: String(no), q: new Map() })
+  if (value("applications", id, "no") === null) return
+  fromBoard = true
+  returnY = scrolled
+  set({ selected: id })
+  go({ sub: "", item: appItem(id), q: new Map() })
+  window.scrollTo(0, 0)
 }
 
+/** Back to the board the application was opened from, else to the board. */
+function back(): void {
+  if (fromBoard) history.back()
+  else go({ sub: "", item: "", q: new Map() })
+  fromBoard = false
+}
+
+/** The next or previous application in board order, opened in the same place. */
+function next(dir: 1 | -1): void {
+  const order = board({})
+  const at = order.indexOf(openedId())
+  const id = order[at < 0 ? 0 : at + dir]
+  if (id === undefined) return
+  set({ selected: id })
+  go({ item: appItem(id) }, true)
+  window.scrollTo(0, 0)
+}
+
+let enteredItem = ""
+
 const desk: View = {
-  title: "Desk",
+  get title() {
+    return opened() && openedId() !== 0 ? `#${itemNo()} ${String(value("applications", openedId(), "company") ?? "")}` : "Desk"
+  },
   view,
   after,
+  enter(fresh) {
+    // Another application: its listing folds and its editors close. Coming from another lens is not coming from the board.
+    const it = opened() ? model.address.item : ""
+    if (itemNo(it) !== itemNo(enteredItem)) set({ focus: { ...model.focus, id: openedId(), listing: false, edit: "", fireArmed: 0 } })
+    enteredItem = it
+    if (fresh) fromBoard = false
+  },
   act(name, el) {
     switch (name) {
+      case "back":
+        return back()
+      case "open-app":
+        return open(Number(el.dataset.id))
       case "toggle":
         return toggle(el.dataset.k ?? "", el.dataset.v ?? "")
       case "search": {
@@ -385,19 +457,29 @@ const desk: View = {
         if (model.selected === id) return open(id)
         return set({ selected: id })
       }
-      // The dense pane is the focus lens's own markup: its controls are its actions.
-      default:
-        if (model.selected !== 0) focusAct(name, el, model.selected)
+      // The pane and the opened page are one application's markup: its controls are its actions.
+      default: {
+        const id = opened() ? openedId() : model.selected
+        if (id !== 0) focusAct(name, el, id)
+      }
     }
   },
   key(ev) {
     const k = ev.key
+    if (opened()) {
+      if (k === "j" || k === "ArrowDown") next(1)
+      else if (k === "k" || k === "ArrowUp") next(-1)
+      else if (k === "Escape" && (model.focus.edit !== "" || model.focus.fireArmed !== 0)) set({ focus: { ...model.focus, edit: "", fireArmed: 0 } })
+      else if (k === "Escape" || k === "Backspace") back()
+      else return false
+      return true
+    }
     // Vim's grid: h left, j down, k up, l right; the arrows the same.
     if (k === "l" || k === "ArrowRight") move(DIR.next)
     else if (k === "h" || k === "ArrowLeft") move(DIR.prev)
     else if (k === "j" || k === "ArrowDown") move(DIR.down)
     else if (k === "k" || k === "ArrowUp") move(DIR.up)
-    else if (k === "v") go({ q: viewQ(dense() ? "" : "dense") }, true)
+    else if (k === "v") go({ sub: dense() ? "" : "pro", item: "" })
     else if (k === "Escape" && dense() && (model.focus.edit !== "" || model.focus.fireArmed !== 0)) set({ focus: { ...model.focus, edit: "", fireArmed: 0 } })
     else if (k === "g" || k === "Home") move(DIR.first)
     else if (k === "G" || k === "End") move(DIR.last)

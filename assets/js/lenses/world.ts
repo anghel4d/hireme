@@ -11,7 +11,7 @@ import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
 import { Refused, failed, page, put, query as read, row, today, values, type Input, type Row } from "../kernel.ts"
 import { EMPTY, flag, href, html, unicodeHost, type Html } from "../morph.ts"
-import { go, model, query, set, type WorldView } from "../state.ts"
+import { go, item, itemNo, model, query, set, type WorldView } from "../state.ts"
 
 const TABLES_SHOWN = ["corporations", "places", "offices", "sources"] as const satisfies readonly TableName[]
 type Shown = (typeof TABLES_SHOWN)[number]
@@ -27,6 +27,15 @@ function current(): TableDef {
 }
 
 const writable = (): boolean => (model.writeMask & DOMAIN.world) !== 0
+
+/** What a row is called in its address: its name, a source by its host. */
+const nameOf = (table: string, r: Row | null): unknown => (r === null ? "" : table === "sources" ? r.host ?? r.title : r[SEARCH[table as Shown] ?? ""])
+/** A world row's address: its table, then its id and name. */
+export const rowHref = (table: string, id: number, r: Row | null = row(table as TableName, id)): string => `/world/${table}/${item(id, nameOf(table, r))}`
+
+/** The world's views: its tables, and the atlas of its places. h and l step through them. */
+export const views = (): Html => html`<nav class="subtabs" aria-label="World views">${[...TABLES_SHOWN, "atlas"].map((n) => html`<a href="/world/${n}" data-nav data-key="${n}"
+  class="${n === model.address.sub ? "on" : ""}${n === "atlas" ? " atlas-tab" : ""}"${n === model.address.sub ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>`
 
 /** The columns a grid shows: declared, not secret, and no twin (a metric's `_on` shows inside its metric). */
 const shown = (t: TableDef): ColumnDef[] => {
@@ -103,7 +112,7 @@ export function display(c: ColumnDef, x: unknown): Html {
     const named = to ? row(to, Number(x)) : null
     const name = named ? String(named[SEARCH[to!] ?? "id"] ?? "") : ""
     if (!to || name === "") return html`<span class="ref">#${String(x)}</span>`
-    return html`<a class="ref" href="/world/${to}?q=${encodeURIComponent(name)}" data-nav title="${to} #${String(x)}">${to === "sources" ? unicodeHost(name.replace(/^https?:\/\//, "")) : name}</a>`
+    return html`<a class="ref" href="${rowHref(to, Number(x), named)}" data-nav title="${to} #${String(x)}">${to === "sources" ? unicodeHost(name.replace(/^https?:\/\//, "")) : name}</a>`
   }
   // A plain whole-number column (a year, a count of URLs) is shown as written, not grouped like a quantity.
   if (typeof x === "number" && !c.metric && c.type !== "f64") return html`${String(x)}`
@@ -172,8 +181,10 @@ const blankValue = (x: unknown): boolean => x === null || x === undefined || x =
 
 /** One row's whole record, opened by clicking it in the grid: its fields by group, each with its date and sources; Edit is per field. */
 function record(t: TableDef): Html {
-  const id = Number(model.address.q.get("row") ?? 0)
+  const id = itemNo()
   const r = id > 0 ? row(t.name, id) : null
+  if (id > 0 && !r) return html`<section class="card panel record" data-key="record"><p>No ${t.name.replace(/s$/, "")} #${id}: it was deleted, or the link is from another account.</p>
+    <button type="button" class="ghost" data-act="close-record">Close</button></section>`
   if (!r) return EMPTY
   const lead = SEARCH[t.name as Shown]
   const all = shown(t).filter((c) => c.name !== lead)
@@ -267,7 +278,7 @@ function view(): Html {
   const cols = showEmpty ? all : all.filter((c) => !blank.includes(c))
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
-      <nav class="subtabs" aria-label="World tables">${TABLES_SHOWN.map((n) => html`<a href="/world/${n}" data-nav data-key="${n}" class="${n === t.name ? "on" : ""}"${n === t.name ? html` aria-current="page"` : EMPTY}>${n}</a>`)}</nav>
+      ${views()}
       ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
       <span class="muted">${got.rows.length}${got.more ? "+" : ""} row${got.rows.length === 1 && !got.more ? "" : "s"}</span>
     </div>
@@ -281,7 +292,7 @@ function view(): Html {
           return html`<th scope="col" data-key="${c.name}"${n === 0 && search ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
             ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
         })}</tr></thead>
-        <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}" class="${String(r.id) === model.address.q.get("row") ? "open" : ""}"
+        <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}" class="${Number(r.id) === itemNo() ? "open" : ""}"
           data-act="open" data-click data-on="keydown" tabindex="0"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(c, r))}</tr>`)}</tbody>
       </table>
     </div>
@@ -313,11 +324,10 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "open": {
       if (ev instanceof KeyboardEvent && ev.key !== "Enter") return
       // A record has its own address, so Back closes it.
-      const q = new Map(model.address.q).set("row", String(id))
-      return go({ q })
+      return go({ item: item(id, nameOf(t.name, row(t.name as TableName, id))) })
     }
     case "close-record":
-      return query("row", "")
+      return go({ item: "" })
     case "edit": {
       const c = t.cols.find((x) => x.name === col)
       if (!c) return
@@ -395,14 +405,17 @@ const world: View = {
     if (rescroll) root.querySelector(".grid-wrap")?.scrollTo({ left: 0 })
     rescroll = false
     // A record opened from far down the grid is brought into view.
-    const r = model.address.q.get("row") ?? ""
+    const r = model.address.item
     if (r !== opened && r !== "") root.querySelector(".record")?.scrollIntoView({ block: "nearest" })
     opened = r
+    // The item's slug follows the row's name: an old link is rewritten to the current one.
+    const named = row(current().name, itemNo())
+    if (named && item(itemNo(), nameOf(current().name, named)) !== model.address.item) go({ item: item(itemNo(), nameOf(current().name, named)) }, true)
   },
   key(ev) {
     if (ev.key !== "Escape") return false
     if (v().edit !== "" || v().cites || v().text) patch({ edit: "", cites: null, text: null })
-    else if (model.address.q.has("row")) query("row", "")
+    else if (model.address.item !== "") go({ item: "" })
     else return false
     return true
   },
