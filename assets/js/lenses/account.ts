@@ -470,8 +470,8 @@ function view(): Html {
         : html`<h1>${str(account.name) || "Account"} <button type="button" class="ghost" data-act="open" data-form="rename">Rename</button></h1>`}
       <p class="muted">${fresh > 0 ? `Recently verified: sensitive changes go through for ${Math.ceil(fresh / 60)} more min.` : "Sensitive changes will ask for a second factor first."}</p>
     </section>
-    ${v().error !== "" ? html`<p class="error" role="alert" data-key="err">${v().error}</p>` : EMPTY}
-    ${stepUp()}${revealed()}${identities()}${factors()}${keys()}${leases()}${sessions()}${hosts()}${audit()}
+    <div class="alerts" data-key="alerts">${v().error !== "" ? html`<p class="error" role="alert" data-key="err">${v().error}</p>` : EMPTY}${stepUp()}</div>
+    ${revealed()}${identities()}${factors()}${keys()}${leases()}${sessions()}${hosts()}${audit()}
   </div>`
 }
 

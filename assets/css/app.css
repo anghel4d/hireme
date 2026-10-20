@@ -223,7 +223,11 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 /* ---------------------------------------------------------------- account */
 
 .account { display: grid; gap: 0 var(--gap); grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); align-items: start; }
-.account .head, .account .reveal, .account .step-up, .account > .error, .account [data-key="keys"] { grid-column: 1 / -1; }
+.account .head, .account .reveal, .account .alerts, .account [data-key="keys"] { grid-column: 1 / -1; }
+/* A refusal or a step-up shows where the operator is (the hosts card is far down), under the bar. */
+.account .alerts { position: sticky; top: 64px; z-index: 5; }
+.alerts .error { background: var(--panel); border: 1px solid var(--bad); border-radius: var(--radius); padding: 8px 16px; margin: 0 0 var(--gap); }
+.alerts > * { box-shadow: 0 4px 16px rgb(0 0 0 / 0.15); }
 .step-up { border-color: var(--warn); }
 .step-up form { margin: 8px 0; }
 .reveal { border-color: var(--ok); }
@@ -253,6 +257,7 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
   .split .list { position: static; max-height: none; }
   /* Every lens tab in view, on its own rows under the brand, the link and sign-out; not sticky, so it scrolls away. */
   .bar { gap: 8px; padding: 8px; flex-wrap: wrap; position: static; }
+  .account .alerts { top: 8px; }
   .bar .link { margin-left: auto; }
   .bar nav { order: 1; flex: 1 0 100%; flex-wrap: wrap; overflow: visible; }
   .tab { padding: 5px 8px; }
