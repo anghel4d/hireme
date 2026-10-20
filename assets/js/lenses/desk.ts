@@ -107,7 +107,7 @@ function view(): Html {
         data-act="search" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
       <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
       <span class="muted">${ids.length} shown</span>
-      <nav class="subtabs views" aria-label="Desk view">${[["", "Cards"], ["dense", "Dense"]].map(([k, l]) => html`<a href="${viewHref(k!)}" data-nav data-key="v${k}" class="${(model.address.q.get("view") ?? "") === k ? "on" : ""}">${l}</a>`)}</nav>
+      <nav class="subtabs views" aria-label="Desk view">${[["", "noob"], ["dense", "pro"]].map(([k, l]) => html`<a href="${viewHref(k!)}" data-nav data-key="v${k}" class="${(model.address.q.get("view") ?? "") === k ? "on" : ""}${k === "dense" ? " pro" : ""}">${l}</a>`)}</nav>
       ${any ? html`<a href="/desk" data-nav class="ghost">clear filters</a>` : EMPTY}
     </div>
     ${scores()}
@@ -118,7 +118,7 @@ function view(): Html {
         : html`<p class="empty">Move to a card (h j k l or the arrows) and it opens here.</p>`}</aside>` : EMPTY}
     </div>
     ${ids.length === 0 ? html`<p class="empty">${any ? "Nothing matches these filters." : "No applications yet. An agent adds them through the MCP, or import a pack."}</p>` : EMPTY}
-    <p class="hint keys">h j k l or arrows move · Enter opens · v dense view · / searches · 1–7 switch lenses</p>
+    <p class="hint keys">h j k l or arrows move · Enter opens · v pro view · / searches · 1–7 switch lenses</p>
   </div>`
 }
 

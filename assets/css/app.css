@@ -383,6 +383,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .desk-detail .focus-grid { grid-template-columns: minmax(0, 1fr); }
 .desk-detail .focus-head h1 { font-size: 17px; }
 .toolbar .views { margin-left: auto; }
+.views a.pro { color: var(--bad); font-weight: 700; }
 .rail { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 0; margin: 0 0 12px; }
 .rail button { font-size: 12px; padding: 4px 10px; border-radius: 14px; }
 .rail .pip-done button { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); border-color: var(--ok); }
