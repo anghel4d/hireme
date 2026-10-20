@@ -1063,9 +1063,15 @@ defmodule Hireme.Sequencer do
 
     case Enum.find(typed, &match?({_, {:error, _}}, &1)) do
       {name, _} -> {:refused, :type, %{table: table.name, column: name}}
-      nil -> natural(plan, op, Map.new(typed, fn {k, {:ok, v}} -> {k, v} end))
+      nil -> natural(plan, op, keyed(table.name, Map.new(typed, fn {k, {:ok, v}} -> {k, v} end)))
     end
   end
+
+  # A posting's URL keys as derive/4 stores it, however the writer linked it.
+  defp keyed("applications", %{"canonical_url" => url} = values) when is_binary(url),
+    do: Map.put(values, "canonical_url", Hireme.Provenance.canonical(url) || url)
+
+  defp keyed(_table, values), do: values
 
   defp natural(%{table: table} = plan, op, values) do
     case Enum.find(table.naturals, fn n ->
@@ -1566,7 +1572,18 @@ defmodule Hireme.Sequencer do
   # What the server writes and no writer may: a new application's number,
   # a source's host, an event's or a CV version's author. (Metric dates and keywords are the
   # kernel's effects.)
-  defp derive(values, "applications", nil, _ctx), do: Map.put(values, :no, next_no())
+  # An application is numbered, and its posting named one way however it was
+  # linked, so the natural key refuses the same posting twice.
+  defp derive(values, "applications", nil, _ctx) do
+    url =
+      Hireme.Provenance.canonical(values[:canonical_url]) ||
+        Hireme.Provenance.canonical(values[:listing_url])
+
+    values |> Map.put(:no, next_no()) |> Map.put(:canonical_url, url)
+  end
+
+  defp derive(%{canonical_url: url} = values, "applications", _row, _ctx),
+    do: Map.put(values, :canonical_url, Hireme.Provenance.canonical(url))
 
   defp derive(values, "sources", _row, _ctx) do
     case values do

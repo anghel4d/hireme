@@ -36,6 +36,40 @@ defmodule Hireme.Provenance do
 
   def host(_), do: nil
 
+  # Query parameters that say how a visitor arrived, never which posting it is.
+  @tracking ~w(gclid fbclid msclkid mc_cid mc_eid ref ref_src refid trk trkinfo trackingid src source
+               origin from lever-source lever-origin gh_src sid share_id shareid campaign medium)
+
+  @doc """
+  One posting's URL however it was linked: http(s) only, the host lowercase
+  without `www.`, no fragment, no tracking parameters (utm_* and the like;
+  an id such as Greenhouse's gh_jid stays), the rest sorted, no trailing
+  slash. nil for anything that is not a web URL.
+  """
+  def canonical(url) when is_binary(url) do
+    with h when is_binary(h) <- host(url),
+         %URI{} = u <- URI.parse(String.trim(url)) do
+      query =
+        URI.query_decoder(u.query || "")
+        |> Enum.reject(fn {k, _} ->
+          String.downcase(k) in @tracking or String.starts_with?(String.downcase(k), "utm_")
+        end)
+        |> Enum.sort()
+
+      path = String.trim_trailing(u.path || "", "/")
+      q = if query == [], do: nil, else: URI.encode_query(query)
+
+      URI.to_string(%URI{
+        scheme: "https",
+        host: String.replace_prefix(h, "www.", ""),
+        path: path,
+        query: q
+      })
+    end
+  end
+
+  def canonical(_), do: nil
+
   # The authority's port as a browser reads it (WHATWG): absent, empty, or
   # ASCII digits up to 65535; ":99999", ":80a" or ":１" open nothing.
   # Leading zeros are allowed (":080"); at most five digits remain to convert.

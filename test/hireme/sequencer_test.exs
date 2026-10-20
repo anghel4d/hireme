@@ -170,6 +170,43 @@ defmodule Hireme.SequencerTest do
     end
   end
 
+  test "one posting is one application however it was linked: a second insert is refused, and a keyed put by any of its links finds it",
+       %{account: a} do
+    links = [
+      "https://www.boards.greenhouse.io/acme/jobs/7?gh_jid=7&utm_source=linkedin#apply",
+      "http://boards.greenhouse.io/acme/jobs/7/?gh_src=x&gh_jid=7",
+      "https://BOARDS.greenhouse.io/acme/jobs/7?gh_jid=7"
+    ]
+
+    {[app], []} =
+      run(a.id, op(:put, :applications, %{company: "Acme", role: "SRE", listing_url: hd(links)}))
+
+    for link <- tl(links) do
+      {[], [nack]} =
+        run(a.id, op(:put, :applications, %{company: "Acme", role: "SRE", listing_url: link}))
+
+      assert nack.refusal == :natural_key
+
+      {[found], []} =
+        run(a.id, op(:put, :applications, %{canonical_url: link, notes: link}, keyed: true))
+
+      assert found.id == app.id
+    end
+
+    # Another posting at the same board is another application.
+    {[other], []} =
+      run(
+        a.id,
+        op(:put, :applications, %{
+          company: "Acme",
+          role: "SRE",
+          listing_url: "https://boards.greenhouse.io/acme/jobs/7?gh_jid=8"
+        })
+      )
+
+    assert other.id != app.id
+  end
+
   test "a keyed put finds its row by the key whose condition its cells meet; create_only refuses an existing row without naming it; a missed condition is explained",
        %{account: a} do
     keyed = fn cells, opts -> op(:put, :corporations, cells, [keyed: true] ++ opts) end
