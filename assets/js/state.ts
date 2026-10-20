@@ -113,7 +113,7 @@ export interface AccountView {
   /** TOTP enrollment between begin and confirm. */
   totp: { uri: string; secret: string; svg: string } | null
   /** The action waiting on a step-up, retried once the session is fresh. */
-  stepUp: { method: string; params: Record<string, unknown> } | null
+  stepUp: { method: string; params: Record<string, unknown>; mailed?: boolean } | null
   /** Which form is open: "mint", "rename", "trust", "change:<key id>". */
   open: string
   error: string

@@ -43,21 +43,35 @@ defmodule Hireme.Mail do
 
   @doc "Send a sign-in link from a supervised task; the caller does not wait on the provider."
   @spec sign_in_link(String.t(), String.t()) :: :ok
-  def sign_in_link(to, url) do
+  def sign_in_link(to, url), do: send_soon(to, "Your Hireme sign-in link", link_body(url))
+
+  @doc "Send a step-up code the same way: from a task, never written down."
+  @spec step_up_code(String.t(), String.t()) :: :ok
+  def step_up_code(to, code) do
+    send_soon(to, "Your Hireme code: #{code}", """
+    Enter #{code} to confirm it is you. It works once, for #{div(Security.challenge_ttl(), 60)} minutes.
+
+    If you did not ask for it, someone is signed in as you: end your other sessions from the account lens.
+    """)
+  end
+
+  defp send_soon(to, subject, body) do
     {:ok, _} =
-      Task.Supervisor.start_child(__MODULE__.Tasks, fn -> send_link(to, url, @link_backoff) end)
+      Task.Supervisor.start_child(__MODULE__.Tasks, fn ->
+        retrying(to, subject, body, @link_backoff)
+      end)
 
     :ok
   end
 
-  defp send_link(to, url, backoff) do
-    case {post(to, "Your Hireme sign-in link", link_body(url)), backoff} do
+  defp retrying(to, subject, body, backoff) do
+    case {post(to, subject, body), backoff} do
       {{:ok, _}, _} ->
         :ok
 
       {{:error, _}, [wait | rest]} ->
         Process.sleep(wait)
-        send_link(to, url, rest)
+        retrying(to, subject, body, rest)
 
       {{:error, _}, []} ->
         :error

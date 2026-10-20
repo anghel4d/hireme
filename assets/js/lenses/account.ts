@@ -121,6 +121,8 @@ const MESSAGES: Record<string, string> = {
   clone: "That authenticator looks cloned; it was refused.",
   revoked: "That was already revoked.",
   no_factor: "Enroll a factor first.",
+  no_email: "Add an email under Ways in first, or sign out and back in.",
+  factor: "Confirm with your second factor.",
   cap: "That is past the limit of 100; remove one first.",
 }
 
@@ -259,6 +261,17 @@ function stepUp(): Html {
   const factors = list("factors")
   const passkey = factors.some((f) => f.kind === "webauthn") && supported()
   const totp = factors.some((f) => f.kind === "totp")
+  // No factor: a code mailed to the account's addresses renews the sign-in.
+  if (factors.length === 0)
+    return html`<section class="card step-up" role="dialog" aria-labelledby="step-up-h" data-key="step-up">
+    <h2 id="step-up-h">Confirm it is you</h2>
+    ${s.mailed
+      ? html`<form data-submit="step-mail-code" data-act="step-mail-code" class="row"><label>The code we emailed you
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required></label>
+      <button class="primary">Confirm</button></form>`
+      : html`<p class="lede">We'll email you a code.</p><button type="button" class="primary" data-act="step-mail">Email me a code</button>`}
+    <button type="button" class="ghost" data-act="step-cancel">Cancel</button>
+  </section>`
   return html`<section class="card step-up" role="dialog" aria-labelledby="step-up-h" data-key="step-up">
     <h2 id="step-up-h">Confirm it is you</h2>
     <p class="lede">That change needs a factor from the last few minutes.</p>
@@ -268,7 +281,6 @@ function stepUp(): Html {
       <button class="primary">Confirm</button></form>` : EMPTY}
     ${num(overview()?.recovery_codes_left) > 0 ? html`<form data-submit="step-recovery" data-act="step-recovery" class="row"><label>Or a recovery code
       <input name="code" autocomplete="off" required></label><button>Use code</button></form>` : EMPTY}
-    ${!passkey && !totp ? html`<p class="hint">No factor is enrolled, so a fresh sign-in counts: sign out and back in, then retry.</p>` : EMPTY}
     <button type="button" class="ghost" data-act="step-cancel">Cancel</button>
   </section>`
 }
@@ -572,6 +584,13 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return void stepped("account.step_up.totp", { code: (f.code ?? "").replace(/\s/g, "") })
     case "step-recovery":
       return void stepped("account.step_up.recovery", { code: (f.code ?? "").trim() })
+    case "step-mail":
+      return void rpc("account.step_up.mail").then(
+        () => patch({ stepUp: v().stepUp && { ...v().stepUp!, mailed: true }, error: "" }),
+        (e: unknown) => patch({ error: said(e) }),
+      )
+    case "step-mail-code":
+      return void stepped("account.step_up.mail_code", { code: (f.code ?? "").replace(/\s/g, "") })
     case "step-cancel":
       parked = undefined
       return patch({ stepUp: null })

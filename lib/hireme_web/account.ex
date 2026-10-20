@@ -30,12 +30,13 @@ defmodule HiremeWeb.Account do
   - `account.passkey.begin` {name} -> {publicKey}; `account.passkey.finish` {name, attestationObject, clientDataJSON, transports} -> {factor, recovery_codes}
   - `account.factor.remove` {id}; `account.recovery.regenerate` {} -> {recovery_codes}
   - `account.step_up.passkey_options` {} -> {publicKey}; `account.step_up.passkey` {assertion fields}; `account.step_up.totp` {code}; `account.step_up.recovery` {code}
+  - `account.step_up.mail` {} mails a code; `account.step_up.mail_code` {code}: an account with no factor
   - `account.trusted_host.add` {host, note?}; `account.trusted_host.remove` {id}
 
   An error answers `%{error: code}` with the code a string: `scope`,
   `step_up`, `not_found`, `invalid`, `limit`, `rate_limited`, `last`,
   `taken`, `challenge`, `code`, `attestation`, `assertion`, `duplicate`,
-  `clone`, `revoked`, `no_factor`, `unknown_method`.
+  `clone`, `revoked`, `no_factor`, `factor`, `no_email`, `unknown_method`.
   """
 
   require Logger
@@ -270,6 +271,11 @@ defmodule HiremeWeb.Account do
 
   defp run("account.step_up.recovery", %{"code" => c}, s, meta) when is_binary(c),
     do: stepped(Mfa.verify_recovery(s, c, ctx(meta, s)))
+
+  defp run("account.step_up.mail", _, s, meta), do: Mfa.mail_code(s, ctx(meta, s))
+
+  defp run("account.step_up.mail_code", %{"code" => c}, s, meta) when is_binary(c),
+    do: stepped(Mfa.verify_mail_code(s, c, ctx(meta, s)))
 
   ## Trusted hosts: operator-owned, browser plus step-up, in no key's mask.
 

@@ -79,7 +79,7 @@ defmodule HiremeWeb.AccountTest do
     methods =
       ~w(account.rename account.key.mint account.key.change account.key.rename account.key.resume
          account.key.revoke account.session.revoke account.identity.unlink account.totp.confirm
-         account.step_up.totp account.trusted_host.add account.trusted_host.remove
+         account.step_up.totp account.step_up.mail_code account.trusted_host.add account.trusted_host.remove
          account.lease.revoke account.factor.remove)
 
     junk =

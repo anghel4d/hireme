@@ -1,4 +1,4 @@
-{"layout":4,"wire_hash":9981,"schema_rev":2318770475,"carry":["refusal","bye","verb"],
+{"layout":4,"wire_hash":9981,"schema_rev":2470301494,"carry":["refusal","bye","verb"],
 "domains":[{"name":"world","bit":1},{"name":"desk","bit":2},{"name":"mail","bit":4},{"name":"lanes","bit":8},{"name":"corpus","bit":16},{"name":"system","bit":0}],
 "frames":[{"name":"HELLO","id":1},{"name":"WELCOME","id":2},{"name":"BOOT","id":3},{"name":"PATCH","id":4},{"name":"OPS","id":8},{"name":"ACK","id":9},{"name":"NACK","id":10},{"name":"TICK","id":11},{"name":"PING","id":13},{"name":"PONG","id":14},{"name":"BYE","id":16},{"name":"RPC","id":33},{"name":"REPLY","id":34}],
 "enums":[
@@ -9,7 +9,7 @@
 {"id":5,"name":"account_status","values":["active","suspended"]},
 {"id":6,"name":"provider","values":["email","github","x"]},
 {"id":7,"name":"factor_kind","values":["totp","webauthn"]},
-{"id":8,"name":"challenge_kind","values":["totp_enroll","webauthn_register","webauthn_assert"]},
+{"id":8,"name":"challenge_kind","values":["totp_enroll","webauthn_register","webauthn_assert","email_step_up"]},
 {"id":9,"name":"stage","values":["discovered","freshness","gated","in_batch","draft_ready","fire_ready","open_fire","submitted","reply","closed"]},
 {"id":10,"name":"app_status","values":["open","paused","hired","closed"]},
 {"id":11,"name":"freshness","values":["open","thin","closed","blocked"]},

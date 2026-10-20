@@ -71,6 +71,25 @@ defmodule Hireme.MfaTest do
     assert Mfa.recovery_codes_left() == 0
   end
 
+  test "with no factor, a mailed code renews the sign-in once; with one, the factor is asked instead",
+       %{session: s} do
+    stale = age(s, :authenticated_at, Hireme.Security.step_up_window() + 1)
+    refute Mfa.fresh?(stale)
+    assert :ok = Mfa.mail_code(stale)
+    assert_receive {:email, mail}, 1_000
+    [_, code] = Regex.run(~r/Enter (\d{6})/, mail.text_body)
+
+    wrong = code |> String.to_integer() |> Kernel.+(1) |> rem(1_000_000)
+    assert {:error, :code} = Mfa.verify_mail_code(stale, String.pad_leading("#{wrong}", 6, "0"))
+    assert {:ok, renewed} = Mfa.verify_mail_code(stale, code)
+    assert Mfa.fresh?(renewed)
+    assert {:error, :code} = Mfa.verify_mail_code(renewed, code)
+
+    enroll(s)
+    assert {:error, :factor} = Mfa.mail_code(s)
+    assert {:error, :factor} = Mfa.verify_mail_code(s, code)
+  end
+
   test "a wrong code counts against the account's throttle", %{session: s} do
     enroll(s)
     results = for _ <- 1..11, do: Mfa.verify_totp(s, "000000")

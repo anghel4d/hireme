@@ -583,17 +583,19 @@ defmodule Hireme.Accounts do
   linked address gets a notice through the outbox.
   """
   @spec notify(pos_integer(), atom(), map()) :: :ok
-  def notify(account_id, kind, meta \\ %{}) when is_integer(account_id) and is_atom(kind) do
-    addresses =
-      Repo.all(
-        from(i in Identity,
-          where: i.account_id == ^account_id and i.provider == :email,
-          select: i.subject
-        ),
-        skip_account: true
-      )
+  def notify(account_id, kind, meta \\ %{}) when is_integer(account_id) and is_atom(kind),
+    do: Mail.enqueue(account_id, addresses(account_id), kind, meta)
 
-    Mail.enqueue(account_id, addresses, kind, meta)
+  @doc "The account's linked email addresses."
+  @spec addresses(pos_integer()) :: [String.t()]
+  def addresses(account_id) do
+    Repo.all(
+      from(i in Identity,
+        where: i.account_id == ^account_id and i.provider == :email,
+        select: i.subject
+      ),
+      skip_account: true
+    )
   end
 
   @doc "The one spelling of an address: trimmed, lowercased, shaped like one."

@@ -117,7 +117,7 @@ enum bye revoked grants restart schema suspended
 enum account_status active suspended
 enum provider email github x
 enum factor_kind totp webauthn
-enum challenge_kind totp_enroll webauthn_register webauthn_assert
+enum challenge_kind totp_enroll webauthn_register webauthn_assert email_step_up
 
 enum stage discovered freshness gated in_batch draft_ready fire_ready open_fire submitted reply closed
 enum app_status open paused hired closed

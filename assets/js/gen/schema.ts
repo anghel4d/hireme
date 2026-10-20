@@ -4,7 +4,7 @@
 // nullable column as T | null.
 
 export const WIRE_HASH = 0x26fd;
-export const SCHEMA_REV = 0x8a35a12b;
+export const SCHEMA_REV = 0x933dcf36;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -33,7 +33,7 @@ export const PROVIDER = ["email", "github", "x"] as const;
 export type Provider = (typeof PROVIDER)[number];
 export const FACTOR_KIND = ["totp", "webauthn"] as const;
 export type FactorKind = (typeof FACTOR_KIND)[number];
-export const CHALLENGE_KIND = ["totp_enroll", "webauthn_register", "webauthn_assert"] as const;
+export const CHALLENGE_KIND = ["totp_enroll", "webauthn_register", "webauthn_assert", "email_step_up"] as const;
 export type ChallengeKind = (typeof CHALLENGE_KIND)[number];
 export const STAGE = ["discovered", "freshness", "gated", "in_batch", "draft_ready", "fire_ready", "open_fire", "submitted", "reply", "closed"] as const;
 export type Stage = (typeof STAGE)[number];

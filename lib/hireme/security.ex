@@ -109,6 +109,8 @@ defmodule Hireme.Security do
     # reputation is the node's, and peers are cheap.
     link_global: {:timer.minutes(10), 300},
     redeem_peer: {:timer.minutes(10), 20},
+    # Step-up codes mailed per account (`Hireme.Mfa.mail_code/2`), like a link.
+    step_up_mail: {:timer.minutes(10), 5},
     mfa_account: {:timer.minutes(15), 10},
     api_key_peer: {:timer.minutes(1), 20},
     ticket_peer: {:timer.minutes(1), 60},

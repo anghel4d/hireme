@@ -4,7 +4,8 @@ defmodule Hireme.Mfa do
   credential (a passkey or a security key; WebAuthn Level 3), both rows
   of the one `factors` table, and the recovery codes that stand in when
   both are out of reach. Never SMS, never email: NIST SP 800-63B-4
-  restricts the one and does not allow the other.
+  restricts the one and does not allow the other. A mailed code only
+  renews the sign-in of an account with no factor (`mail_code/2`).
 
   Where the standards are answered:
 
@@ -380,6 +381,50 @@ defmodule Hireme.Mfa do
             Audit.record(:recovery_failed, %{}, ctx(meta, session))
             {:error, :code}
         end
+      end
+    end)
+  end
+
+  @doc """
+  Mail a six-digit code to the account's addresses: the step-up of an
+  account with no factor, as a mailed sign-in link would be. It renews
+  the sign-in (`fresh?/1`), never a factor: an account with one is
+  refused `factor`, and one with no address `no_email`.
+  """
+  @spec mail_code(Session.t(), map()) :: :ok | {:error, :factor | :no_email | :rate_limited}
+  def mail_code(%Session{} = session, meta \\ %{}) do
+    as(session, fn ->
+      addresses = Accounts.addresses(session.account_id)
+
+      with true <- not enrolled?() || {:error, :factor},
+           true <- addresses != [] || {:error, :no_email},
+           :ok <- Security.limit(:step_up_mail, session.account_id),
+           :ok <- Security.limit(:link_global, :all) do
+        <<n::32>> = :crypto.strong_rand_bytes(4)
+        code = n |> rem(1_000_000) |> Integer.to_string() |> String.pad_leading(6, "0")
+        challenge!(session, :email_step_up, code)
+        Enum.each(addresses, &Hireme.Mail.step_up_code(&1, code))
+        Audit.record(:step_up_mailed, %{}, ctx(meta, session))
+        :ok
+      end
+    end)
+  end
+
+  @doc "Spend a mailed code: the session counts as freshly signed in."
+  @spec verify_mail_code(Session.t(), term(), map()) ::
+          {:ok, Session.t()} | {:error, :factor | :code | :rate_limited}
+  def verify_mail_code(%Session{} = session, code, meta \\ %{}) do
+    as(session, fn ->
+      with true <- not enrolled?() || {:error, :factor},
+           :ok <- throttle(session),
+           {:ok, challenge, sent} <- peek_challenge(session, :email_step_up),
+           true <- Security.equal?(normalize(code), sent) || {:error, :code},
+           :ok <- spend_challenge(challenge) do
+        Audit.record(:step_up_verified, %{}, ctx(meta, session))
+        {:ok, Store.update!(session, [authenticated_at: Store.now()], skip_account: true)}
+      else
+        {:error, :challenge} -> {:error, :code}
+        error -> error
       end
     end)
   end
