@@ -17,7 +17,10 @@ defmodule Hireme.FireTest do
   # A read of the account's kernel, as the MCP makes one, with every domain.
   defp read(account_id, op, args) do
     req = JSON.encode!(Map.put(args, "op", op))
-    {:ok, {:ok, json}} = Hireme.Sequencer.read(account_id, fn k, _ -> Nif.query(k.res, req, 0xFF, 0xFF, true) end)
+
+    {:ok, {:ok, json}} =
+      Hireme.Sequencer.read(account_id, fn k, _ -> Nif.query(k.res, req, 0xFF, 0xFF, true) end)
+
     JSON.decode!(json)
   end
 
@@ -51,24 +54,43 @@ defmodule Hireme.FireTest do
     review = read(a.id, "fire_review", %{"missions" => ask})
     assert [%{"eligible" => true, "hash" => hash}] = review["missions"]
 
-    {[_], []} =
-      run(a.id, op(:command, :create_fire_key, %{missions: review["scope"], digest: review["digest"], usable_by: key_id}))
+    # Only the operator's browser session, stepped up, creates one.
+    page = %{label: "page", grants: Hireme.Grants.operator(), key_id: nil, session_id: s.id}
+
+    create =
+      op(:command, :create_fire_key, %{
+        missions: review["scope"],
+        digest: review["digest"],
+        usable_by: key_id
+      })
+
+    assert {[], [%{refusal: :step_up}]} = run(a.id, create)
+    {[_], []} = run(a.id, create, page)
 
     [key] = Repo.all(Rows.FireKey)
     assert {key.scope, key.usable_by, key.first_used_at} == {ask, key_id, nil}
-    assert [%Rows.FireShot{mission_id: mid, hash: ^hash, burned_at: nil}] = Repo.all(Rows.FireShot)
+
+    assert [%Rows.FireShot{mission_id: mid, hash: ^hash, burned_at: nil}] =
+             Repo.all(Rows.FireShot)
+
     assert mid == m.id
 
     # The agent fires: in flight, the key's 24 hours started.
     {[_], []} = key_session_ops(agent, op(:command, :fire, %{}, target: m.id))
-    assert %Rows.Mission{state: :in_flight, fire_key_id: kid, fired_with: ^key_id} = Repo.get!(Rows.Mission, m.id)
+
+    assert %Rows.Mission{state: :in_flight, fire_key_id: kid, fired_with: ^key_id} =
+             Repo.get!(Rows.Mission, m.id)
+
     assert kid == key.id
     used = Repo.get!(Rows.FireKey, key.id)
     assert DateTime.diff(used.expires_at, used.first_used_at) == 86_400
 
     # It lands: fired and provisional, the shot burned, the application submitted.
     {[_], []} = key_session_ops(agent, op(:command, :landed, %{}, target: m.id))
-    assert %Rows.Mission{state: :fired, confirmation: :provisional} = Repo.get!(Rows.Mission, m.id)
+
+    assert %Rows.Mission{state: :fired, confirmation: :provisional} =
+             Repo.get!(Rows.Mission, m.id)
+
     assert %Rows.FireShot{burned_at: %DateTime{}} = Repo.one!(Rows.FireShot)
     assert Repo.get!(Rows.Application, app.id).stage == :submitted
 
