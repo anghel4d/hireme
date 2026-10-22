@@ -100,8 +100,13 @@ defmodule Hireme.Gmail.MimeTest do
           {"Wed, 21 Oct 2026 10:00:00 UT", ~U[2026-10-21 10:00:00Z]},
           {"Wed, 21 Oct 2026 10:00:00 Z", ~U[2026-10-21 10:00:00Z]},
           {"Wed, 21 Oct 2026 10:00:00 Q", ~U[2026-10-21 10:00:00Z]},
-          {"(sent) Fri, 21 Oct 049 10:00:00 +0000", ~U[1949-10-21 10:00:00Z]},
+          {"(sent) Mon, 21 Oct 085 10:00:00 +0000", ~U[1985-10-21 10:00:00Z]},
           {"31 Feb 2026 10:00:00 +0000", nil},
+          # Outside 1970..2200 is no date: DateTime.from_unix! would raise on 9999 (hopper's review, M2).
+          {"Fri, 31 Dec 9999 23:59:59 -0100", nil},
+          {"Wed, 31 Dec 1969 23:59:59 +0000", nil},
+          {"Mon, 31 Dec 2200 23:59:59 +0000", ~U[2200-12-31 23:59:59Z]},
+          {"Thu, 01 Jan 1970 00:30:00 +0100", nil},
           {"21 Oct 2026", nil},
           {"yesterday", nil}
         ] do

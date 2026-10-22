@@ -66,6 +66,9 @@ defmodule Hireme.Gmail.Mime do
   # Parameters read from one header (a long name's RFC 2231 sections included).
   @params 64
   @epoch_days 719_528
+  # A date read outside 1970..2200 is none: a far year is a broken header,
+  # and what reads the seconds (DateTime.from_unix!) raises past 9999.
+  @date_max (:calendar.date_to_gregorian_days(2201, 1, 1) - @epoch_days) * 86_400 - 1
   @bad <<0xFFFD::utf8>>
   @nbsp <<0xA0::utf8>>
 
@@ -450,7 +453,7 @@ defmodule Hireme.Gmail.Mime do
 
   `message_id`, `in_reply_to` and `refs` are canonical ids: angle brackets
   and whitespace stripped, case kept. Addresses are lowercased, display names
-  decoded. `date` is unix seconds. `text` is the plain text of the inline
+  decoded. `date` is unix seconds, nil outside 1970..2200. `text` is the plain text of the inline
   text parts (HTML converted, a link kept as `text (url)`). `report` reads a
   delivery status notification (RFC 3464), else nil.
   """
@@ -463,9 +466,13 @@ defmodule Hireme.Gmail.Mime do
     # Every rule here is total; should one still raise, the mail is kept as
     # an opaque one rather than taking its mailbox's sync down with it.
     e ->
+      # The frame's module, function, arity and line only: its argument
+      # list (a FunctionClauseError carries one) would hold the mail's own
+      # text, which no log may carry.
       at =
         case __STACKTRACE__ do
-          [frame | _] -> Exception.format_stacktrace_entry(frame)
+          [{m, f, a, loc} | _] -> Exception.format_mfa(m, f, arity(a)) <> where(loc)
+          [{fun, a, loc} | _] -> "#{inspect(fun)}/#{arity(a)}" <> where(loc)
           [] -> "?"
         end
 
@@ -522,6 +529,11 @@ defmodule Hireme.Gmail.Mime do
       report: report
     }
   end
+
+  defp arity(args) when is_list(args), do: length(args)
+  defp arity(n), do: n
+
+  defp where(loc), do: " #{loc[:file]}:#{loc[:line]}"
 
   defp sha_key(parts) do
     digest = :crypto.hash(:sha256, Enum.intersperse(parts, "\n"))
@@ -1001,7 +1013,8 @@ defmodule Hireme.Gmail.Mime do
          {h, mi, s} <- d.time,
          true <- :calendar.valid_date(year, month, day) do
       days = :calendar.date_to_gregorian_days(year, month, day) - @epoch_days
-      days * 86_400 + h * 3600 + mi * 60 + s - (d.zone || 0) * 60
+      secs = days * 86_400 + h * 3600 + mi * 60 + s - (d.zone || 0) * 60
+      if secs in 0..@date_max, do: secs
     else
       _ -> nil
     end
