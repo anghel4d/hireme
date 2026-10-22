@@ -93,6 +93,13 @@ impl Kernel {
                 query::readable(grants, Some(&json!("applications")))?;
                 Ok(crate::link::unlinked(&self.rows))
             }
+            // The node's question before it stores a mail: where it belongs, if anywhere.
+            Some("mail_match") => {
+                for t in ["missions", "applications", "contacts"] {
+                    query::readable(grants, Some(&json!(t)))?;
+                }
+                Ok(crate::filer::match_json(&self.rows, &crate::filer::NoStore, req))
+            }
             Some(op) if crate::fire::OPS.contains(&op) => {
                 for t in crate::fire::reads(op) {
                     query::readable(grants, Some(&json!(t)))?;

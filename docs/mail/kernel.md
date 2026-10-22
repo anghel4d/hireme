@@ -251,9 +251,13 @@ canonical form (no brackets or spaces, lowercased); they are stored as given.
 | an application's role words (that corporation's) | 20 | |
 | an ATS sender with no known tenant | 10 | |
 
-Filed on certain evidence, or when one corporation's evidence reaches 50 and
-it has exactly one application in flight (submitted, reply) or a mission in
-flight; else unfiled with the candidates ranked. Relevant: any evidence that
+Filed on certain evidence that agrees (certain evidence naming two
+applications files nothing), or when one corporation's evidence reaches 50
+ahead of every other and it has exactly one application in play
+(submitted, reply, or a mission in flight or fired), or the application's
+role words pick one by a clear margin (2 words or more, ahead of the rest);
+a known contact at a corporation with no application files to the contact.
+Else unfiled with the candidates ranked. Relevant: any evidence that
 reaches the desk (a thread the account holds, a contact, an ATS sender, or a
 corporation with an application). A filed bounce marks its message bounced
 and fails its mission (rule 2); a filed confirmation mail confirms a
