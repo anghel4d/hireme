@@ -240,7 +240,7 @@ pub fn list(m: Masks) -> Vec<Json> {
             json!({"type":"object","properties":{
                 "application":{"type":"integer","minimum":1,"description":"an application id"},
                 "state":{"type":"string","enum":schema::enum_names("mission_state").unwrap_or(&[])},
-                "kind":{"type":"string","enum":schema::enum_names("mission_kind").unwrap_or(&[])}
+                "kind":{"type":"string","enum":schema::enum_names("outreach_kind").unwrap_or(&[]).iter().filter(|k| **k != "note").collect::<Vec<_>>()}
             },"additionalProperties":false}),
             true,
             false,
