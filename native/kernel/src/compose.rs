@@ -208,29 +208,6 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
     (cv::compose(profile, &items, &overlays), theme)
 }
 
-/// The desk at a glance: the scoreboard and the top of the board.
-pub fn overview(rows: &Rows, board: &Board, today: Day, top: usize) -> Json {
-    let apps = rows.table(table::APPLICATIONS);
-    let head: Vec<Json> = board
-        .order()
-        .iter()
-        .take(top)
-        .filter_map(|&id| {
-            let c = board.card(id)?;
-            let t = apps?;
-            Some(json!({
-                "id": id, "no": c.no, "company": t.str(id, A::COMPANY), "role": t.str(id, A::ROLE),
-                "stage": c.stage.name(), "score_100": c.score, "band": c.band.name(), "class": c.class.name(),
-            }))
-        })
-        .collect();
-    json!({
-        "today": crate::day_iso(today),
-        "scoreboard": board.scoreboard(rows, today).to_json(),
-        "top": head,
-    })
-}
-
 /// The person's side of the fit: their lists (the languages from their
 /// rows), and their weights (`{"<places metric>": w, "route": w,
 /// "language": w}`) resolved against the declaration. Also the metric

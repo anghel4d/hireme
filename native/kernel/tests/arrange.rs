@@ -160,3 +160,53 @@ fn a_mended_column_arranges_as_one_built_from_the_rows() {
         }
     }
 }
+
+/// `find` on applications is the desk's query: the board grouped by company
+/// unless told otherwise, each row with its card's score, band and class,
+/// the page's groups with absolute starts, a grouped listing; `where`,
+/// the filters and `sort` narrow and order before the groups form and
+/// `after` is the row offset; `order` names the plain keyset find; an
+/// unknown key is refused with the known ones; a key that reads no desk
+/// is refused, and the overview under it has no board.
+#[test]
+fn a_find_on_applications_is_the_desk_grouped_by_company() {
+    use kernel::query::Grants;
+    let mut k = kernel();
+    k.set_grants(Grants { human: true, read_mask: 0b11111, write_mask: 0, may_delete: false });
+    let find = |k: &mut Kernel, req: Json| k.query(&json!({"op": "find", "table": "applications"}).as_object().unwrap().iter().chain(req.as_object().unwrap()).map(|(a, b)| (a.clone(), b.clone())).collect::<Json>()).unwrap_or_else(|r| panic!("{req}: {r:?}"));
+    let page = find(&mut k, json!({}));
+    assert_eq!((page["total"].as_u64(), page["unlinked"].as_u64(), page["modes"]["remote"].as_u64()), (Some(6), Some(2), Some(2)));
+    assert_eq!(page["next"], Json::Null);
+    let labels: Vec<(&str, u64)> = page["groups"].as_array().unwrap().iter().map(|g| (g["label"].as_str().unwrap(), g["count"].as_u64().unwrap())).collect();
+    assert_eq!(labels, [("company 2 · unlinked", 1), ("Helsing", 2), ("Stripe", 3)]);
+    // Rows stand in their groups' order, each a find row with its card.
+    let nos: Vec<u64> = page["rows"].as_array().unwrap().iter().map(|r| r["no"].as_u64().unwrap()).collect();
+    assert_eq!(&nos[..1], [4]);
+    assert_eq!(nos[1..3].iter().copied().collect::<std::collections::BTreeSet<_>>(), [2, 6].into());
+    let stripe = &page["rows"][3];
+    assert!(stripe["score"].is_number() && stripe["band"].is_string() && stripe["class"].is_string() && stripe["company"].is_string());
+    let listing = page["listing"].as_str().unwrap();
+    assert!(listing.starts_with("6 applications in board order (score, then heat), grouped by company; rows 1-6\n"), "{listing}");
+    assert!(listing.contains("\nStripe (3)\n") && listing.contains("\nHelsing (2)\n") && listing.contains("  #4  company 2"), "{listing}");
+    // where narrows before the groups form; sort and after page the order; "" groups nothing.
+    let stripe = find(&mut k, json!({"where": {"corporation_id": 10}}));
+    assert_eq!((stripe["total"].as_u64(), stripe["groups"].as_array().unwrap().len()), (Some(3), 1));
+    let second = find(&mut k, json!({"sort": ["no", "desc"], "group": "", "after": 1, "limit": 1}));
+    assert_eq!((second["rows"][0]["no"].as_u64(), second["next"].as_u64(), second["groups"].as_array().unwrap().len()), (Some(5), Some(2), 0));
+    assert!(second["listing"].as_str().unwrap().ends_with("next: {\"after\": 2}\n"), "{}", second["listing"]);
+    let remote = find(&mut k, json!({"modes": ["remote"], "search": "company"}));
+    assert_eq!(remote["total"], 2);
+    // The plain find is the keyset walk, ungrouped.
+    let plain = k.query(&json!({"op": "find", "table": "applications", "order": ["id"], "limit": 2})).unwrap();
+    assert!(plain.get("groups").is_none() && plain["next"].is_string() && plain["rows"][0]["band"].is_null(), "{plain}");
+    let r = k.query(&json!({"op": "find", "table": "applications", "sort": "nope"})).unwrap_err();
+    assert_eq!((r.code, r.data["unknown"].as_str()), (schema::refusal::TYPE, Some("nope")));
+    assert!(r.data["known"].as_array().unwrap().iter().any(|x| x == "company.name"));
+    // A key reading only the world sees no desk: the find is refused and the overview has no board.
+    let world = Grants { human: false, read_mask: 0b1, write_mask: 0, may_delete: false };
+    assert_eq!(k.query_as(&world, &json!({"op": "find", "table": "applications"})).unwrap_err().code, schema::refusal::SCOPE);
+    assert!(k.overview_as(&world, 8).get("top").is_none());
+    let top = k.overview(2);
+    assert_eq!((top["top"]["total"].as_u64(), top["top"]["rows"].as_array().unwrap().len(), top["top"]["groups"][0]["label"].as_str()), (Some(6), 2, Some("company 2 · unlinked")));
+    assert!(top["scoreboard"].is_object());
+}

@@ -859,6 +859,10 @@ defmodule HiremeWeb.Mcp.Session do
         {:ok, v} when name == "text" ->
           fenced(args, v)
 
+        # A desk page comes with its listing: the rows under their group headings.
+        {:ok, %{"listing" => shown} = v} when is_binary(shown) ->
+          text(note <> shown, Map.delete(v, "listing"), false)
+
         {:ok, v} ->
           text(note <> pretty(v), v, false)
 
@@ -1132,20 +1136,21 @@ defmodule HiremeWeb.Mcp.Session do
     {r, w, d} = s.masks
     sid = s.wire.session.id
 
-    {desk, leased, paused, known, unlinked} =
+    {desk, leased, paused, known} =
       case Sequencer.read(s.account_id, fn k, lease ->
              session = lease.sessions[sid]
 
-             {Nif.overview(k.res, 8), session != nil and session.channel,
-              is_map_key(lease.paused, s.key_id), person_known?(k.res, s.masks),
-              unlinked_count(k.res, s.masks)}
+             {Nif.overview(k.res, 8, r, w, d), session != nil and session.channel,
+              is_map_key(lease.paused, s.key_id), person_known?(k.res, s.masks)}
            end) do
-        {:ok, {desk, leased, paused, known, unlinked}} ->
-          {desk && JSON.decode!(desk), leased, paused, known, unlinked}
+        {:ok, {desk, leased, paused, known}} ->
+          {desk && JSON.decode!(desk), leased, paused, known}
 
         _ ->
-          {nil, false, false, true, nil}
+          {nil, false, false, true}
       end
+
+    unlinked = desk && desk["top"]["unlinked"]
 
     next =
       cond do
@@ -1202,10 +1207,14 @@ defmodule HiremeWeb.Mcp.Session do
           paused -> "paused by the operator"
           leased -> "held"
           true -> "none"
-        end}\n\nnext: #{next}\n"
+        end}\n\nnext: #{next}\n" <> listing(desk)
 
     text(t, overview, false)
   end
+
+  # The board's first eight, grouped by company, under the overview.
+  defp listing(%{"top" => %{"listing" => l}}) when is_binary(l), do: "\n" <> l
+  defp listing(_), do: ""
 
   # Whether the person row names a citizenship or a permit; a key that cannot read it is not told.
   defp person_known?(res, {r, w, d}) do
@@ -1328,22 +1337,6 @@ defmodule HiremeWeb.Mcp.Session do
       %{"unlinked" => length(apps)},
       false
     )
-  end
-
-  # How many applications lack a link: the desk's own columns, cached in the kernel, so the
-  # overview never ranks candidates. nil when the key cannot read the desk.
-  defp unlinked_count(res, {r, w, d}) do
-    req = JSON.encode!(%{op: "columns", fields: ["company.name", "place", "work_mode"]})
-
-    with {:ok, json} <- Nif.query(res, req, r, w, d),
-         %{"cols" => %{"company.name" => corp, "place" => place, "work_mode" => mode}} <-
-           JSON.decode!(json) do
-      [corp, place, mode]
-      |> Enum.zip()
-      |> Enum.count(fn {c, p, m} -> c == nil or (p == nil and m != "remote") end)
-    else
-      _ -> nil
-    end
   end
 
   # Text a person or an agent wrote, between fences it cannot have guessed.

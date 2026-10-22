@@ -89,7 +89,7 @@ defmodule Hireme.Kernel.Nif do
   def shuffle(_body), do: :erlang.nif_error(:nif_not_loaded)
   # The MCP surface (native/mcp) and the reads it answers from a sequencer's kernel.
   def query(_res, _req, _read, _write, _may_delete), do: :erlang.nif_error(:nif_not_loaded)
-  def overview(_res, _n), do: :erlang.nif_error(:nif_not_loaded)
+  def overview(_res, _n, _read, _write, _may_delete), do: :erlang.nif_error(:nif_not_loaded)
   def application(_res, _no), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_tools(_read, _write, _may_delete), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_schema(_table, _read, _write, _may_delete), do: :erlang.nif_error(:nif_not_loaded)

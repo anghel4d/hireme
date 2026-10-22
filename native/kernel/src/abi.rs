@@ -82,12 +82,13 @@ impl Kernel {
     }
 
     /// A read of the replica: find, get, text or history (`query`).
-    pub fn query(&self, req: &Json) -> Result<Json, Refusal> {
-        self.query_as(&self.grants, req)
+    pub fn query(&mut self, req: &Json) -> Result<Json, Refusal> {
+        let g = self.grants;
+        self.query_as(&g, req)
     }
 
     /// The same read under another session's grants: the node's kernel answers each MCP session as its key may see.
-    pub fn query_as(&self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
+    pub fn query_as(&mut self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
         match req.get("op").and_then(Json::as_str) {
             Some(op @ ("cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields")) => self.cv_query(grants, op, req),
             Some("columns") => self.columns(grants, req),
@@ -95,6 +96,8 @@ impl Kernel {
                 query::readable(grants, Some(&json!("applications")))?;
                 Ok(crate::link::unlinked(&self.rows))
             }
+            // Applications without an order column are found as the page finds them: the desk's query.
+            Some("find") if req["table"] == "applications" && req["order"].is_null() => self.desk(grants, req),
             _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req, self.today()),
         }
     }
@@ -160,7 +163,13 @@ impl Kernel {
     /// (`arrange::desk`) or catalog fields. Also answers the chips' counts:
     /// work modes over the filtered board, unlinked over the whole desk.
     pub fn arrange(&mut self, req: &Json) -> Result<(Vec<u32>, Json), Refusal> {
-        let ids = self.view(&filter(&req["filter"].to_string()));
+        self.derive();
+        self.arranged(req, &|_| true)
+    }
+
+    /// `arrange` over the derived board, keeping only the ids `also` takes (`desk`'s where).
+    fn arranged(&self, req: &Json, also: &dyn Fn(u32) -> bool) -> Result<(Vec<u32>, Json), Refusal> {
+        let ids = self.board.view(&filter(&req["filter"].to_string()));
         let rows = &self.rows;
         let Some(t) = rows.table(table::APPLICATIONS) else { return Ok((Vec::new(), json!({"groups": [], "modes": {}, "unlinked": 0}))) };
         use schema::col::applications as A;
@@ -182,14 +191,14 @@ impl Kernel {
         }
         let picked: Vec<usize> = req["modes"].as_array().map(|a| a.iter().filter_map(Json::as_str).map(|m| modes.iter().position(|n| *n == m).unwrap_or(modes.len())).collect()).unwrap_or_default();
         let only = req["unlinked"] == true;
-        let ids: Vec<u32> = slots.iter().filter(|&&(_, slot)| (picked.is_empty() || picked.contains(&mode(slot))) && (!only || short(slot))).map(|x| x.0).collect();
+        let ids: Vec<u32> = slots.iter().filter(|&&(id, slot)| (picked.is_empty() || picked.contains(&mode(slot))) && (!only || short(slot)) && also(id)).map(|x| x.0).collect();
         let unlinked = (0..t.len()).filter(|&slot| short(slot)).count();
         let key = |v: &Json| -> Result<Option<String>, Refusal> {
             match v.as_str() {
                 None | Some("") => Ok(None),
                 Some("mode") => Ok(Some("work_mode".into())),
                 Some(k) if crate::arrange::DESK.contains(&k) || crate::mask::field(k).is_some() => Ok(Some(k.into())),
-                Some(k) => Err(judge::no(refusal::TYPE, json!({"param": "key", "unknown": k}))),
+                Some(k) => Err(judge::no(refusal::TYPE, json!({"param": "key", "unknown": k, "known": keys()}))),
             }
         };
         let sort = key(&req["sort"][0])?;
@@ -215,6 +224,71 @@ impl Kernel {
             by_mode.insert(modes.get(i).copied().unwrap_or("none").into(), json!(n));
         }
         Ok((order, json!({"groups": crate::arrange::groups_json(&groups), "modes": by_mode, "unlinked": unlinked})))
+    }
+
+    /// `find` on applications as the page runs it, one `arrange` for both:
+    /// the board's filter (`search`, `min_score`, `bands`, `stages`,
+    /// `classes`), `modes`, `unlinked`, and `where` over the columns
+    /// narrow; `sort` (a desk key or catalog field, `[key, dir]` or the
+    /// key) orders, `group` (another key; company unless told otherwise,
+    /// "" for none) buckets, `largest` puts the biggest group first.
+    /// `after` is the row offset. Each row is find's with its card's
+    /// stage, score (the ranking score, stored or suggested), band and class; `groups` are the page's, with absolute
+    /// starts; `modes` and `unlinked` are the chips' counts; `listing` is
+    /// the page as text, under its group headings.
+    fn desk(&mut self, g: &query::Grants, req: &Json) -> Result<Json, Refusal> {
+        let tm = query::readable(g, req.get("table"))?;
+        let cols = query::columns(g, tm, req.get("cols"), false)?;
+        let pass = query::sieve(g, tm, req.get("where"))?;
+        let limit = query::bound(req.get("limit"), query::FIND_LIMIT, query::FIND_MAX, "limit")? as usize;
+        let after = match req.get("after") {
+            None | Some(Json::Null) => 0,
+            Some(v) => v.as_u64().ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "after", "need": "the row offset the previous page answered as next"})))? as usize,
+        };
+        let sort = match req.get("sort") {
+            Some(Json::String(k)) => json!([k]),
+            Some(v) => v.clone(),
+            None => Json::Null,
+        };
+        let ask = json!({
+            "filter": {"bands": req["bands"], "stages": req["stages"], "classes": req["classes"], "min_score": req["min_score"], "search": req["search"]},
+            "modes": req["modes"], "unlinked": req["unlinked"], "sort": sort, "group": req.get("group").cloned().unwrap_or_else(|| json!("company")), "largest": req["largest"],
+        });
+        self.derive();
+        let today = self.today();
+        let Some(t) = self.rows.table(table::APPLICATIONS) else {
+            return Ok(json!({"rows": [], "groups": [], "total": 0, "next": null, "modes": {}, "unlinked": 0, "listing": "no applications\n"}));
+        };
+        let (order, meta) = self.arranged(&ask, &|id| pass(t, id))?;
+        let end = (after + limit).min(order.len());
+        let page = &order[after.min(end)..end];
+        let grouped = ask["group"].as_str().is_some_and(|g| !g.is_empty());
+        let groups: Vec<Json> = meta["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|g| {
+                let (s, n) = (g["start"].as_u64().unwrap_or(0) as usize, g["count"].as_u64().unwrap_or(0) as usize);
+                grouped && s < end && s + n > after
+            })
+            .cloned()
+            .collect();
+        let rows: Vec<Json> = page
+            .iter()
+            .map(|&id| {
+                let mut r = query::stamped(t, id, &cols, false, today);
+                if let Some(c) = self.board.card(id) {
+                    r["stage"] = json!(c.stage.name());
+                    r["score"] = json!(c.score);
+                    r["band"] = json!(c.band.name());
+                    r["class"] = json!(c.class.name());
+                }
+                r
+            })
+            .collect();
+        let listing = listing(t, page, &rows, &groups, order.len(), after, &ask);
+        let next = (end < order.len()).then_some(end);
+        Ok(json!({"rows": rows, "groups": groups, "total": order.len(), "next": next, "modes": meta["modes"], "unlinked": meta["unlinked"], "listing": listing}))
     }
 
     /// Application `id`'s CV pick.
@@ -413,9 +487,22 @@ impl Kernel {
         Some(doc)
     }
 
+    /// The desk at a glance of this replica: today, the scoreboard and the
+    /// board's first `top` applications grouped by company (`desk`).
     pub fn overview(&mut self, top: usize) -> Json {
+        self.overview_as(&query::Grants { human: true, read_mask: u8::MAX, write_mask: 0, may_delete: false }, top)
+    }
+
+    /// The same under a key's grants, for the node's kernel, which holds the
+    /// whole account: a key that reads no desk gets today alone.
+    pub fn overview_as(&mut self, g: &query::Grants, top: usize) -> Json {
         self.derive();
-        compose::overview(&self.rows, &self.board, self.today(), top)
+        let mut doc = json!({"today": crate::day_iso(self.today())});
+        if query::readable(g, Some(&json!("applications"))).is_ok() {
+            doc["scoreboard"] = self.board.scoreboard(&self.rows, self.today()).to_json();
+            doc["top"] = self.desk(g, &json!({"table": "applications", "limit": top})).unwrap_or(Json::Null);
+        }
+        doc
     }
 
     pub fn atlas(&self) -> Json {
@@ -514,6 +601,50 @@ pub fn filter(json: &str) -> Filter {
         min_score: v["min_score"].as_u64().unwrap_or(0).min(100) as u8,
         search: v["search"].as_str().map(String::from).unwrap_or_default(),
     }
+}
+
+/// The keys `arrange` sorts and groups on: the desk's own, then the catalog's fields.
+fn keys() -> Vec<&'static str> {
+    crate::arrange::DESK.iter().copied().chain(crate::mask::FIELDS.iter().map(|f| f.path)).collect()
+}
+
+/// A desk page as an agent reads it: how it stands, a heading per group,
+/// a line per application, and the offset of the page after it.
+fn listing(t: &crate::rows::Table, page: &[u32], rows: &[Json], groups: &[Json], total: usize, after: usize, ask: &Json) -> String {
+    use core::fmt::Write;
+    use schema::col::applications as A;
+    let mut s = String::new();
+    let how = match ask["sort"][0].as_str() {
+        Some(k) => alloc::format!("sorted by {k}{}", ask["sort"][1].as_str().map_or(String::new(), |d| alloc::format!(" {d}"))),
+        None => "in board order (score, then heat)".into(),
+    };
+    let by = ask["group"].as_str().filter(|g| !g.is_empty()).map_or(String::new(), |g| alloc::format!(", grouped by {g}"));
+    let shown = if page.is_empty() { "none".into() } else { alloc::format!("{}-{}", after + 1, after + page.len()) };
+    let _ = writeln!(s, "{total} applications {how}{by}; rows {shown}");
+    let mut heading: Option<&Json> = None;
+    for (i, (&id, r)) in page.iter().zip(rows).enumerate() {
+        let at = (after + i) as u64;
+        let g = groups.iter().find(|g| g["start"].as_u64().is_some_and(|st| st <= at && at < st + g["count"].as_u64().unwrap_or(0)));
+        if g.is_some() && g.map(|g| &g["key"]) != heading.map(|g| &g["key"]) {
+            heading = g;
+            let _ = writeln!(s, "\n{} ({})", g.map_or("", |g| g["label"].as_str().unwrap_or("")), g.map_or(0, |g| g["count"].as_u64().unwrap_or(0)));
+        }
+        let text = |c: u16| t.str(id, c).unwrap_or("");
+        let parts: Vec<&str> = [text(A::COMPANY), text(A::ROLE), text(A::LOCATION)].into_iter().filter(|p| !p.is_empty()).collect();
+        let mut tail: Vec<String> = parts.iter().map(|p| String::from(*p)).collect();
+        tail.extend(r["stage"].as_str().map(String::from));
+        if let (Some(class), Some(score)) = (r["class"].as_str(), r["score"].as_u64()) {
+            tail.push(alloc::format!("{class} {score}"));
+        }
+        if r["stale"] == true {
+            tail.push("stale".into());
+        }
+        let _ = writeln!(s, "  #{}  {}", t.u32(id, A::NO).unwrap_or(id), tail.join(" · "));
+    }
+    if after + page.len() < total {
+        let _ = writeln!(s, "\nnext: {{\"after\": {}}}", after + page.len());
+    }
+    s
 }
 
 /// Effects as JSON: `[{table, id, cells: {column: value}}]` with names
@@ -736,7 +867,7 @@ mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn query(ptr: *const u8, len: usize) -> i32 {
         let req = serde_json::from_slice(unsafe { input(ptr, len) }).unwrap_or(Json::Null);
-        K.with(|k| match k.borrow().query(&req) {
+        K.with(|k| match k.borrow_mut().query(&req) {
             Ok(j) => put_json(&j),
             Err(r) => refused(&r),
         })

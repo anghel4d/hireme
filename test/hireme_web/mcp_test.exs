@@ -18,7 +18,12 @@ defmodule HiremeWeb.McpTest do
     created = put(p, %{table: "applications", set: Map.put(set, :work_mode, "remote")})
     [_, id] = Regex.run(~r/-> id (\d+)/, text_of(created))
     found = tool(p, "find", %{table: "applications", cols: ["no"]})
-    [_, no] = Regex.run(~r/"no": (\d+)/, text_of(found))
+    [%{"no" => no, "class" => _}] = found["result"]["structuredContent"]["rows"]
+    # The desk's query: the page grouped by company, the listing under its heading.
+    assert text_of(found) =~
+             "1 applications in board order (score, then heat), grouped by company"
+
+    assert text_of(found) =~ "\nAcme (1)\n  ##{no}  Acme · Engineer · discovered · cool "
     app = "hireme://applications/#{no}"
     corp = "hireme://corporations/acme.test"
     assert %{"result" => %{}} = call(p, "resources/subscribe", %{uri: app})

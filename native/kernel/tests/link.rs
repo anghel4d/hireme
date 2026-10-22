@@ -56,14 +56,14 @@ fn kernel() -> Kernel {
     k
 }
 
-fn q(k: &Kernel, req: Json) -> Json {
+fn q(k: &mut Kernel, req: Json) -> Json {
     k.query(&req).unwrap_or_else(|r| panic!("{req}: {r:?}"))
 }
 
 #[test]
 fn an_unlinked_application_is_told_what_it_most_likely_means_and_how_to_link_it() {
-    let k = kernel();
-    let list = q(&k, json!({"op": "unlinked"}))["applications"].as_array().unwrap().clone();
+    let mut k = kernel();
+    let list = q(&mut k, json!({"op": "unlinked"}))["applications"].as_array().unwrap().clone();
     // The remote one needs no place, and the linked one is not listed.
     assert_eq!(list.iter().map(|a| a["application"].as_u64().unwrap()).collect::<Vec<_>>(), [2, 3]);
 
@@ -96,8 +96,8 @@ fn a_company_nothing_resembles_is_not_guessed() {
 
 #[test]
 fn the_desk_reads_any_field_of_every_application_joins_included() {
-    let k = kernel();
-    let c = q(&k, json!({"op": "columns", "fields": ["company.name", "company.parent", "country", "region", "place", "office", "no", "field"]}));
+    let mut k = kernel();
+    let c = q(&mut k, json!({"op": "columns", "fields": ["company.name", "company.parent", "country", "region", "place", "office", "no", "field"]}));
     assert_eq!(c["ids"], json!([1, 2, 3, 4]));
     let col = |p: &str| c["cols"][p].clone();
     assert_eq!(col("company.name"), json!(["Stripe", null, null, "Helsing"]));
@@ -111,7 +111,7 @@ fn the_desk_reads_any_field_of_every_application_joins_included() {
     assert_eq!(col("field"), json!(["other", "other", "other", "other"]));
     assert_eq!(k.query(&json!({"op": "columns", "fields": ["nope"]})).unwrap_err().code, schema::refusal::TYPE);
 
-    let fields: Vec<Json> = serde_json::from_value(q(&k, json!({"op": "mask_fields"}))["fields"].clone()).unwrap();
+    let fields: Vec<Json> = serde_json::from_value(q(&mut k, json!({"op": "mask_fields"}))["fields"].clone()).unwrap();
     let office = fields.iter().find(|f| f["path"] == "office").unwrap();
     assert_eq!((&office["label"], &office["type"]), (&json!("office"), &json!("enum")));
 }
@@ -119,25 +119,25 @@ fn the_desk_reads_any_field_of_every_application_joins_included() {
 #[test]
 fn a_column_follows_the_rows_it_reads() {
     let mut k = kernel();
-    assert_eq!(q(&k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, null]));
+    assert_eq!(q(&mut k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, null]));
     // Helsing's application 4 moves to Berlin, where Helsing has an engineering office.
     let mut w = wire::BodyWriter::new();
     let mut b = w.block(table::APPLICATIONS, 1);
     b.u32s(A::ID, [4].into_iter()).u32s(A::PLACE_ID, [2].into_iter());
     b.done();
     k.patch(&w.finish(), 2).unwrap();
-    assert_eq!(q(&k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, "engineering"]));
+    assert_eq!(q(&mut k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, "engineering"]));
 }
 
 #[test]
 fn a_company_country_or_group_carries_how_many_applications_name_it() {
-    let k = kernel();
-    let c = q(&k, json!({"op": "columns", "fields": ["company.applications", "company.parent.applications", "country.applications"]}));
+    let mut k = kernel();
+    let c = q(&mut k, json!({"op": "columns", "fields": ["company.applications", "company.parent.applications", "country.applications"]}));
     // Stripe (under Alphabet) has one linked application, Helsing one; Germany one (Berlin).
     assert_eq!(c["cols"]["company.applications"], json!([1.0, null, null, 1.0]));
     assert_eq!(c["cols"]["company.parent.applications"], json!([1.0, null, null, 1.0]));
     assert_eq!(c["cols"]["country.applications"], json!([1.0, null, null, null]));
-    let fields = q(&k, json!({"op": "mask_fields"}))["fields"].clone();
+    let fields = q(&mut k, json!({"op": "mask_fields"}))["fields"].clone();
     let count = fields.as_array().unwrap().iter().find(|f| f["path"] == "company.applications").unwrap();
     assert_eq!(count["desc"], true);
 }

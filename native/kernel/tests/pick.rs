@@ -88,11 +88,11 @@ fn kernel() -> Kernel {
     k
 }
 
-fn q(k: &Kernel, req: Json) -> Json {
+fn q(k: &mut Kernel, req: Json) -> Json {
     k.query(&req).unwrap_or_else(|r| panic!("{req}: {r:?}"))
 }
 
-fn picks(k: &Kernel) -> Vec<Json> {
+fn picks(k: &mut Kernel) -> Vec<Json> {
     q(k, json!({"op": "cv_picks"}))["picks"].as_array().unwrap().clone()
 }
 
@@ -116,8 +116,8 @@ fn refusal_of(r: Result<Vec<Row>, kernel::judge::Refusal>) -> kernel::judge::Ref
 
 #[test]
 fn the_first_enabled_arm_wins_a_pin_wins_over_it_and_the_default_takes_the_rest() {
-    let k = kernel();
-    let p = picks(&k);
+    let mut k = kernel();
+    let p = picks(&mut k);
     let row = |i: usize| (&p[i]["state"], &p[i]["root"], &p[i]["arm"], &p[i]["also"], &p[i]["version_id"], &p[i]["by"]);
     // Stripe in Berlin: the Stripe arm comes before dach, which also matches.
     assert_eq!(row(0), (&json!("matched"), &json!(21), &json!(40), &json!([41]), &json!(31), &json!(null)));
@@ -128,8 +128,8 @@ fn the_first_enabled_arm_wins_a_pin_wins_over_it_and_the_default_takes_the_rest(
     assert_eq!(row(3), (&json!("default"), &json!(22), &json!(null), &json!([]), &json!(null), &json!(null)));
     assert_eq!(row(4), (&json!("pinned"), &json!(21), &json!(null), &json!([41]), &json!(31), &json!("agent")));
 
-    assert_eq!(q(&k, json!({"op": "cv_picks", "where": {"state": "matched"}}))["picks"].as_array().unwrap().len(), 2);
-    assert_eq!(q(&k, json!({"op": "cv_pick", "application": 2}))["root"], 20);
+    assert_eq!(q(&mut k, json!({"op": "cv_picks", "where": {"state": "matched"}}))["picks"].as_array().unwrap().len(), 2);
+    assert_eq!(q(&mut k, json!({"op": "cv_pick", "application": 2}))["root"], 20);
     assert_eq!(k.query(&json!({"op": "cv_pick", "application": 99})).unwrap_err().code, refusal::NOT_FOUND);
 }
 
@@ -137,11 +137,11 @@ fn the_first_enabled_arm_wins_a_pin_wins_over_it_and_the_default_takes_the_rest(
 fn a_pin_by_the_operator_or_an_agent_moves_the_pick_and_unpinning_gives_it_back() {
     let mut k = kernel();
     k.predict(&pick_cv(2, 23), &ctx(true)).unwrap();
-    let p = q(&k, json!({"op": "cv_pick", "application": 2}));
+    let p = q(&mut k, json!({"op": "cv_pick", "application": 2}));
     assert_eq!((&p["state"], &p["root"], &p["by"]), (&json!("empty"), &json!(23), &json!("operator")));
 
     k.predict(&op(wire::COMMAND, command::UNPIN_CV, 2, |_| {}), &ctx(false)).unwrap();
-    assert_eq!(q(&k, json!({"op": "cv_pick", "application": 2}))["state"], "matched");
+    assert_eq!(q(&mut k, json!({"op": "cv_pick", "application": 2}))["state"], "matched");
 
     assert_eq!(refusal_of(k.judge(&pick_cv(2, 99), &ctx(false))).code, refusal::NOT_FOUND);
     let fx = k.judge(&pick_cv(2, 21), &ctx(false)).unwrap();
@@ -154,7 +154,7 @@ fn a_dropped_root_turns_its_pin_stale() {
     let mut w = wire::BodyWriter::new();
     w.gone(table::CV_ROOTS, &[21]);
     k.patch(&w.finish(), 2).unwrap();
-    let p = picks(&k);
+    let p = picks(&mut k);
     assert_eq!((&p[4]["state"], &p[4]["root"]), (&json!("stale"), &json!(21)));
     // Its arm is gone with it: Stripe falls through to dach.
     assert_eq!((&p[0]["arm"], &p[0]["root"]), (&json!(41), &json!(20)));
@@ -231,7 +231,7 @@ fn a_version_carries_what_its_root_format_takes_and_becomes_the_root_head() {
     assert_eq!((head.id, &head.cells), (23, &vec![(col::cv_roots::VERSION_ID, EVal::New(0))]));
 
     k.predict(&version(23, Some("# Ana"), None), &ctx(true)).unwrap();
-    assert_eq!(q(&k, json!({"op": "cv_pick", "application": 3}))["state"], "matched");
+    assert_eq!(q(&mut k, json!({"op": "cv_pick", "application": 3}))["state"], "matched");
 }
 
 /// A cell as the node sends a long text: zstd against the text dictionary.
@@ -286,13 +286,13 @@ fn a_long_rule_or_mask_arrives_packed_and_reads_as_its_text() {
     k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
     k.boot(&w.finish(), 1).unwrap();
 
-    let matched = |k: &Kernel, app: u32| q(k, json!({"op": "cv_explain", "application": app}))[0]["matched"].clone();
-    assert_eq!((matched(&k, 1), matched(&k, 2)), (json!(true), json!(false)));
+    let matched = |k: &mut Kernel, app: u32| q(k, json!({"op": "cv_explain", "application": app}))[0]["matched"].clone();
+    assert_eq!((matched(&mut k, 1), matched(&mut k, 2)), (json!(true), json!(false)));
     let enable = op(wire::PUT, table::CV_RULES, 40, |o| {
         o.u32(col::cv_rules::ENABLED, 1);
     });
     k.predict(&enable, &ctx(true)).unwrap();
-    let p = q(&k, json!({"op": "cv_pick", "application": 1}));
+    let p = q(&mut k, json!({"op": "cv_pick", "application": 1}));
     assert_eq!((&p["state"], &p["root"], &p["arm"]), (&json!("matched"), &json!(20), &json!(40)));
     let nordics = op(wire::PUT, table::CV_MASKS, 0, |o| {
         o.str(col::cv_masks::NAME, "nordics").str(col::cv_masks::PATTERN, "country in [SE, NO]");
@@ -302,8 +302,8 @@ fn a_long_rule_or_mask_arrives_packed_and_reads_as_its_text() {
 
 #[test]
 fn a_rule_text_is_checked_explained_and_its_fields_listed() {
-    let k = kernel();
-    let check = |text: &str, at: Option<usize>| q(&k, json!({"op": "mask_check", "text": text, "position": at}));
+    let mut k = kernel();
+    let mut check = |text: &str, at: Option<usize>| q(&mut k, json!({"op": "mask_check", "text": text, "position": at}));
     // Every application in Germany is already taken by Stripe's arm or dach's.
     let c = check("country = DE", None);
     assert_eq!((&c["ok"], &c["shadowed"], &c["never_matches"]), (&json!(true), &json!([40, 41]), &json!(false)));
@@ -315,12 +315,12 @@ fn a_rule_text_is_checked_explained_and_its_fields_listed() {
     let bad = check("country = ", None);
     assert_eq!((&bad["ok"], &bad["error"]["pos"]), (&json!(false), &json!(10)));
 
-    let why = q(&k, json!({"op": "cv_explain", "application": 3}));
+    let why = q(&mut k, json!({"op": "cv_explain", "application": 3}));
     let arm40 = why.as_array().unwrap().iter().find(|a| a["arm"] == 40).unwrap();
     assert_eq!((&arm40["matched"], &arm40["failed"]["read"]), (&json!(false), &json!("\"acme.com\"")));
     assert_eq!(why.as_array().unwrap().iter().find(|a| a["arm"] == 42).unwrap()["matched"], true);
 
-    let fields = q(&k, json!({"op": "mask_fields"}))["fields"].as_array().unwrap().len();
+    let fields = q(&mut k, json!({"op": "mask_fields"}))["fields"].as_array().unwrap().len();
     assert_eq!(fields, kernel::mask::FIELDS.len());
 }
 
@@ -349,7 +349,7 @@ fn the_application_shows_the_picked_file_version_and_reads_its_words() {
 #[test]
 fn mended_picks_are_the_picks_of_the_rows() {
     let mut k = kernel();
-    picks(&k);
+    picks(&mut k);
     let mut seed = 0x9e37_79b9_u32;
     let mut next = |n: u32| {
         seed ^= seed << 13;
@@ -379,6 +379,6 @@ fn mended_picks_are_the_picks_of_the_rows() {
         fresh.set_today(TODAY);
         fresh.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
         fresh.restore(&k.snapshot()).unwrap();
-        assert_eq!(picks(&k), picks(&fresh), "step {step}");
+        assert_eq!(picks(&mut k), picks(&mut fresh), "step {step}");
     }
 }

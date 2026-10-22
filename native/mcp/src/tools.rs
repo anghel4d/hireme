@@ -155,14 +155,24 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "find",
             "Find rows",
-            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|null|prefix|like: value}}. Without cols a row carries its non-metric columns; name metrics (and their _on days) in cols to get them, or `get` one row for everything. Every row carries updated_at, its last write; one not written for six months also carries stale: true, a flag to re-check it, never a filter.".into(),
+            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|null|prefix|like: value}}. Without cols a row carries its non-metric columns; name metrics (and their _on days) in cols to get them, or `get` one row for everything. Every row carries updated_at, its last write; one not written for six months also carries stale: true, a flag to re-check it, never a filter. Applications without order are the desk's own query, the page's: search (words in company, role, location or #no), min_score, bands, stages, classes (heat), modes, unlinked narrow it; sort orders on a desk key (score, no, company, place, band, heat, why, lease, dupes, added) or any catalog field (`cv {\"fields\":true}` lists them; company.name, country, role.field, ...); group buckets on another, company unless told otherwise, \"\" for none; largest puts the biggest group first. The answer is grouped: each row with its card's stage, score (the ranking score, stored or suggested), band and class, the page's groups (key, label, start, count), total, modes (how many per work mode) and unlinked (how many short of a link) over the filtered board, and after is the row offset.".into(),
             json!({"type":"object","required":["table"],"properties":{
                 "table":{"type":"string","enum":tables.clone()},
                 "where":{"type":"object"},
-                "order":{"type":"array","items":{"type":"string"},"description":"[column, 'asc'|'desc']"},
+                "order":{"type":"array","items":{"type":"string"},"description":"[column, 'asc'|'desc']; keyset-paged by that column (applications: the plain row order, no desk grouping)"},
                 "cols":{"type":"array","items":{"type":"string"},"description":"the columns to return; metrics only come back when named here"},
-                "after":{"description":"the previous page's next cursor"},
-                "limit":{"type":"integer","minimum":1,"maximum":500}
+                "after":{"description":"the previous page's next (a cursor; the row offset for an applications desk page)"},
+                "limit":{"type":"integer","minimum":1,"maximum":500},
+                "search":{"type":"string","description":"applications: words that must all occur in the company, role, location or #no"},
+                "min_score":{"type":"integer","minimum":0,"maximum":100,"description":"applications: score at least"},
+                "bands":{"type":"array","items":{"type":"string","enum":["frontier","labs","big_tech","systems","craft","mid","thin","kill"]},"description":"applications: only these bands"},
+                "stages":{"type":"array","items":{"type":"string","enum":schema::enum_names("stage").unwrap_or(&[])},"description":"applications: only these stages"},
+                "classes":{"type":"array","items":{"type":"string","enum":["hot","warm","cool","blocked"]},"description":"applications: only these heat classes"},
+                "modes":{"type":"array","items":{"type":"string","enum":schema::enum_names("work_mode").unwrap_or(&[])},"description":"applications: only these work modes"},
+                "unlinked":{"type":"boolean","description":"applications: only those short of a corporation or place link"},
+                "sort":{"description":"applications: a desk key or catalog field, or [key, 'asc'|'desc']; the board's order (score, then heat) without it"},
+                "group":{"type":"string","description":"applications: the key to group by; company unless given, \"\" for none"},
+                "largest":{"type":"boolean","description":"applications: groups by size, biggest first"}
             },"additionalProperties":false}),
             true,
             false,

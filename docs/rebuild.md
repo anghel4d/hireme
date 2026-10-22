@@ -338,7 +338,11 @@ are declared in the schema (`dict` lines), so retraining one moves
 `wire_hash`. Every read (`find`, `get`, `text`,
 `history`) is the replica's own: the browser's kernel answers it
 locally, and MCP's is answered from the sequencer's kernel under the key's
-grants. Every row a `find` or `get` answers carries `updated_at`, its last
+grants. A `find` on `applications` without `order` is the desk's query
+(`Kernel::desk`): the board's filter, work modes, `where`, a sort key and a
+group key (company by default) through the one `arrange` the page's
+toolbar uses, answered with the page's groups and a grouped listing.
+Every row a `find` or `get` answers carries `updated_at`, its last
 write, and `stale: true` when that write is over 183 days old by the
 kernel's day: a flag to re-check the record, never a filter. The RPC
 methods left are `account.*` (the account lens) and `lease.*`.

@@ -47,11 +47,11 @@ fn kernel() -> Kernel {
     k
 }
 
-fn q(k: &Kernel, req: Json) -> Json {
+fn q(k: &mut Kernel, req: Json) -> Json {
     k.query(&req).unwrap_or_else(|r| panic!("{req}: refused {} {}", r.code, r.data))
 }
 
-fn refused(k: &Kernel, req: Json) -> u16 {
+fn refused(k: &mut Kernel, req: Json) -> u16 {
     k.query(&req).map(|j| panic!("{req}: answered {j}")).unwrap_err().code
 }
 
@@ -59,7 +59,7 @@ fn refused(k: &Kernel, req: Json) -> u16 {
 /// none other, ordered by the column (nulls last) then id.
 #[test]
 fn a_page_walk_returns_every_matching_row_in_order() {
-    let k = kernel();
+    let mut k = kernel();
     let pop = |i: u32| (!i.is_multiple_of(7)).then_some((i * 7919) % 1000);
     let filters: [(Json, &dyn Fn(u32) -> bool); 6] = [
         (json!({}), &|_| true),
@@ -74,7 +74,7 @@ fn a_page_walk_returns_every_matching_row_in_order() {
             for limit in [1, 7, 500] {
                 let (mut got, mut after) = (Vec::new(), Json::Null);
                 loop {
-                    let page = q(&k, json!({"op": "find", "table": "places", "where": w, "order": order, "desc": desc, "limit": limit, "after": after, "cols": [order]}));
+                    let page = q(&mut k, json!({"op": "find", "table": "places", "where": w, "order": order, "desc": desc, "limit": limit, "after": after, "cols": [order]}));
                     got.extend(page["rows"].as_array().unwrap().iter().map(|r| (r[order].clone(), r["id"].as_u64().unwrap() as u32)));
                     after = page["next"].clone();
                     if after.is_null() {
@@ -107,7 +107,7 @@ fn a_page_walk_returns_every_matching_row_in_order() {
 #[test]
 fn a_find_after_a_patch_sees_the_rows_as_they_are() {
     let mut k = kernel();
-    let walk = |k: &Kernel| -> Vec<(Option<u64>, u32)> {
+    let walk = |k: &mut Kernel| -> Vec<(Option<u64>, u32)> {
         let (mut got, mut after) = (Vec::new(), Json::Null);
         loop {
             let page = q(k, json!({"op": "find", "table": "places", "order": "population", "desc": true, "limit": 13, "after": after, "cols": ["population"]}));
@@ -118,7 +118,7 @@ fn a_find_after_a_patch_sees_the_rows_as_they_are() {
             }
         }
     };
-    let _ = walk(&k);
+    let _ = walk(&mut k);
     let mut w = wire::BodyWriter::new();
     let mut b = w.block(table::PLACES, 4);
     b.u32s(P::ID, [5, 6, 301, 302].into_iter())
@@ -128,7 +128,7 @@ fn a_find_after_a_patch_sees_the_rows_as_they_are() {
     b.done();
     w.gone(table::PLACES, &[8, 9]);
     k.patch(&w.finish(), 2).unwrap();
-    let got = walk(&k);
+    let got = walk(&mut k);
     let pop = |i: u32| match i {
         5 => Some(999_999),
         6 => None,
@@ -151,10 +151,10 @@ fn a_find_after_a_patch_sees_the_rows_as_they_are() {
 #[test]
 fn a_rollback_after_a_patch_leaves_each_row_once() {
     let mut k = kernel();
-    let ids = |k: &Kernel| -> Vec<u64> {
+    let ids = |k: &mut Kernel| -> Vec<u64> {
         q(k, json!({"op": "find", "table": "places", "where": {"name": {"prefix": "Por"}}, "limit": 500}))["rows"].as_array().unwrap().iter().map(|r| r["id"].as_u64().unwrap()).collect()
     };
-    let before = ids(&k);
+    let before = ids(&mut k);
     let mut w = wire::OpsWriter::new();
     let mut o = w.op(4242, wire::PUT, 0, table::PLACES, 2, None);
     o.str(P::REGION, "Mine");
@@ -167,57 +167,57 @@ fn a_rollback_after_a_patch_leaves_each_row_once() {
     b.done();
     k.patch(&w.finish(), 2).unwrap();
     k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 3, &[wire::Nack { op_id: 4242, code: 0, data: b"{}" }])).unwrap();
-    assert_eq!(ids(&k), before);
+    assert_eq!(ids(&mut k), before);
 }
 
 #[test]
 fn get_by_key_text_history_and_grants_read_as_world() {
     let mut k = kernel();
     // A natural key holds only where its where does: iso2 is a country's.
-    assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE"}}))["row"]["id"], 3);
+    assert_eq!(q(&mut k, json!({"op": "get", "table": "places", "key": {"iso2": "DE"}}))["row"]["id"], 3);
     // Named as a put names it, the key's where column is one more filter.
-    assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "country"}}))["row"]["id"], 3);
-    assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"geonames_id": 1001, "kind": "city"}}))["row"]["id"], 1);
-    assert_eq!(refused(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "city"}})), schema::refusal::NOT_FOUND);
-    assert_eq!(refused(&k, json!({"op": "get", "table": "places", "key": {"name": "Porto"}})), schema::refusal::NATURAL_KEY);
-    assert_eq!(refused(&k, json!({"op": "get", "table": "places", "id": 9999})), schema::refusal::NOT_FOUND);
+    assert_eq!(q(&mut k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "country"}}))["row"]["id"], 3);
+    assert_eq!(q(&mut k, json!({"op": "get", "table": "places", "key": {"geonames_id": 1001, "kind": "city"}}))["row"]["id"], 1);
+    assert_eq!(refused(&mut k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "city"}})), schema::refusal::NOT_FOUND);
+    assert_eq!(refused(&mut k, json!({"op": "get", "table": "places", "key": {"name": "Porto"}})), schema::refusal::NATURAL_KEY);
+    assert_eq!(refused(&mut k, json!({"op": "get", "table": "places", "id": 9999})), schema::refusal::NOT_FOUND);
     // A dropped source is passed over, and history still names it.
-    assert_eq!(refused(&k, json!({"op": "get", "table": "sources", "id": 2})), schema::refusal::NOT_FOUND);
-    let h = q(&k, json!({"op": "history", "table": "places", "id": 5}));
+    assert_eq!(refused(&mut k, json!({"op": "get", "table": "sources", "id": 2})), schema::refusal::NOT_FOUND);
+    let h = q(&mut k, json!({"op": "history", "table": "places", "id": 5}));
     assert_eq!((h["citations"][0]["id"].clone(), h["citations"][0]["source"]["dropped"].clone(), h["citations"][1]["value"].clone()), (json!(2), json!(true), json!(10)));
     assert_eq!(h["citations"][0]["as_of"], "2023-08-03");
     // Text reads whole in chunks that end on a character boundary.
     let (mut whole, mut at) = (String::new(), json!(0));
     while !at.is_null() {
-        let c = q(&k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": at, "length": 99_999}));
+        let c = q(&mut k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": at, "length": 99_999}));
         whole.push_str(c["text"].as_str().unwrap());
         at = c["next"].clone();
     }
     assert_eq!(whole, "é".repeat(200_000));
-    assert_eq!(refused(&k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": 1})), schema::refusal::TYPE);
+    assert_eq!(refused(&mut k, json!({"op": "text", "table": "sources", "id": 1, "column": "doc", "offset": 1})), schema::refusal::TYPE);
     // `sizes` answers a text column as its byte length, not its text.
-    let r = q(&k, json!({"op": "find", "table": "sources", "cols": ["url"], "sizes": ["doc"]}));
+    let r = q(&mut k, json!({"op": "find", "table": "sources", "cols": ["url"], "sizes": ["doc"]}));
     assert_eq!((r["rows"][0]["doc"].clone(), r["rows"][0]["url"].as_str()), (json!(400_000), Some("https://a.example/1")));
-    assert_eq!(refused(&k, json!({"op": "find", "table": "sources", "sizes": ["id"]})), schema::refusal::COLUMN);
+    assert_eq!(refused(&mut k, json!({"op": "find", "table": "sources", "sizes": ["id"]})), schema::refusal::COLUMN);
     // The replica holds texts whole: find returns them as any str.
-    assert_eq!(q(&k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"][0]["doc"].as_str().map(str::len), Some(400_000));
+    assert_eq!(q(&mut k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"][0]["doc"].as_str().map(str::len), Some(400_000));
     // A key reads its mask's domains only, never a private column.
     k.set_grants(Grants { human: false, read_mask: 0b10, write_mask: 0, may_delete: false });
-    assert_eq!(refused(&k, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
-    assert_eq!(refused(&k, json!({"op": "find", "table": "op_ledger"})), schema::refusal::NOT_FOUND);
+    assert_eq!(refused(&mut k, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
+    assert_eq!(refused(&mut k, json!({"op": "find", "table": "op_ledger"})), schema::refusal::NOT_FOUND);
     // A declared table with no rows reads empty; the account's views are
     // the operator's, its secrets nobody's.
-    let op = kernel();
-    assert_eq!(q(&op, json!({"op": "find", "table": "trusted"}))["rows"], json!([]));
-    assert_eq!(q(&op, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
-    assert_eq!(refused(&k, json!({"op": "find", "table": "acct_keys"})), schema::refusal::NOT_FOUND);
-    assert_eq!(refused(&op, json!({"op": "find", "table": "accounts"})), schema::refusal::NOT_FOUND);
+    let mut op = kernel();
+    assert_eq!(q(&mut op, json!({"op": "find", "table": "trusted"}))["rows"], json!([]));
+    assert_eq!(q(&mut op, json!({"op": "find", "table": "acct_keys"}))["rows"], json!([]));
+    assert_eq!(refused(&mut k, json!({"op": "find", "table": "acct_keys"})), schema::refusal::NOT_FOUND);
+    assert_eq!(refused(&mut op, json!({"op": "find", "table": "accounts"})), schema::refusal::NOT_FOUND);
     // Until its WELCOME, a kernel reads nothing.
     let mut blank = kernel();
     blank.set_grants(Grants::default());
-    assert_eq!(refused(&blank, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
+    assert_eq!(refused(&mut blank, json!({"op": "find", "table": "places"})), schema::refusal::SCOPE);
     // Hostile values refuse, never trap: an offset split inside a character.
-    let k = kernel();
+    let mut k = kernel();
     for w in [json!({"retrieved_at": {"ge": "2023-11-14T22:13:20+0é:0"}}), json!({"id": [1, 2]}), json!({"url": {"in": [null]}})] {
         let _ = k.query(&json!({"op": "find", "table": "sources", "where": w}));
     }
@@ -239,13 +239,13 @@ fn every_row_carries_its_last_write_and_an_old_one_is_flagged_stale() {
     k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
     k.set_today(kernel::iso_day("2026-10-22").unwrap());
-    let rows = q(&k, json!({"op": "find", "table": "places", "cols": ["name"]}))["rows"].clone();
+    let rows = q(&mut k, json!({"op": "find", "table": "places", "cols": ["name"]}))["rows"].clone();
     assert_eq!(rows, json!([{"id": 1, "name": "Old", "updated_at": "2026-04-01T12:00:00Z", "stale": true}, {"id": 2, "name": "Fresh", "updated_at": "2026-10-01T12:00:00Z"}]));
-    let one = q(&k, json!({"op": "get", "table": "places", "id": 1}))["row"].clone();
+    let one = q(&mut k, json!({"op": "get", "table": "places", "id": 1}))["row"].clone();
     assert_eq!((one["stale"].clone(), one["updated_at"].clone()), (json!(true), json!("2026-04-01T12:00:00Z")));
     // The day moves the line, never the row: on 2026-09-30 the old write is 182 days old and not yet stale.
     k.set_today(kernel::iso_day("2026-09-30").unwrap());
-    assert!(q(&k, json!({"op": "get", "table": "places", "id": 1}))["row"]["stale"].is_null());
+    assert!(q(&mut k, json!({"op": "get", "table": "places", "id": 1}))["row"]["stale"].is_null());
 }
 
 /// Texts the server packs stay packed in the replica and its snapshot and
@@ -266,9 +266,9 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     let mut k = Kernel::new();
     k.set_grants(OPERATOR);
     k.boot(&w.finish(), 1).unwrap();
-    let docs = |k: &Kernel| q(k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"].clone();
-    assert_eq!(docs(&k), json!([{"id": 1, "doc": doc}, {"id": 2, "doc": "short note"}]));
-    let sized = q(&k, json!({"op": "find", "table": "sources", "sizes": ["doc"]}))["rows"].clone();
+    let docs = |k: &mut Kernel| q(k, json!({"op": "find", "table": "sources", "cols": ["doc"]}))["rows"].clone();
+    assert_eq!(docs(&mut k), json!([{"id": 1, "doc": doc}, {"id": 2, "doc": "short note"}]));
+    let sized = q(&mut k, json!({"op": "find", "table": "sources", "sizes": ["doc"]}))["rows"].clone();
     assert_eq!((sized[0]["doc"].clone(), sized[1]["doc"].clone()), (json!(doc.len()), json!(10)));
     // The snapshot holds the cell as packed, and restores it.
     let snap = k.snapshot();
@@ -276,7 +276,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     let mut again = Kernel::new();
     again.set_grants(OPERATOR);
     again.restore(&snap).unwrap();
-    assert_eq!(docs(&again), docs(&k));
+    assert_eq!(docs(&mut again), docs(&mut k));
     // A predicted write, then its NACK: the packed cell comes back as it was.
     let mut ops = wire::OpsWriter::new();
     let mut o = ops.op(5150, wire::PUT, 0, table::SOURCES, 1, None);
@@ -284,7 +284,7 @@ fn packed_texts_read_on_touch_and_survive_snapshot_and_rollback() {
     o.done();
     let ctx = kernel::judge::Ctx { today: 739_528, now: 0, human: true, key_id: None, held: &[] };
     k.predict(&ops.finish()[8..], &ctx).unwrap();
-    assert_eq!(docs(&k)[0]["doc"], "mine");
+    assert_eq!(docs(&mut k)[0]["doc"], "mine");
     k.ingest(&wire::encode_nacks(schema::WIRE_HASH, 2, &[wire::Nack { op_id: 5150, code: 0, data: b"{}" }])).unwrap();
     assert_eq!(k.snapshot(), snap);
 }
@@ -301,7 +301,7 @@ fn live_views_take_deltas_and_a_resume_empties_them_first() {
         b.u32s(AF::ID, rows.iter().map(|r| r.0)).strs(AF::NAME, rows.iter().map(|r| r.1));
         b.done();
     };
-    let ids = |k: &Kernel| q(k, json!({"op": "find", "table": "acct_factors"}))["rows"].as_array().unwrap().iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
+    let ids = |k: &mut Kernel| q(k, json!({"op": "find", "table": "acct_factors"}))["rows"].as_array().unwrap().iter().map(|r| r["id"].clone()).collect::<Vec<_>>();
     let mut w = wire::BodyWriter::new();
     factors(&mut w, &[(1, "Phone"), (2, "Laptop")]);
     k.patch(&w.finish(), 2).unwrap();
@@ -309,22 +309,22 @@ fn live_views_take_deltas_and_a_resume_empties_them_first() {
     let mut w = wire::BodyWriter::new();
     factors(&mut w, &[(3, "Key A")]);
     k.patch(&w.finish(), 3).unwrap();
-    assert_eq!(ids(&k), vec![json!(1), json!(2), json!(3)]);
+    assert_eq!(ids(&mut k), vec![json!(1), json!(2), json!(3)]);
     // Gone by a gone block, like any table: the others stay.
     let mut w = wire::BodyWriter::new();
     let mut b = w.block(table::ACCT_FACTORS, 1);
     b.u32s(wire::GONE, [3].into_iter());
     b.done();
     k.patch(&w.finish(), 4).unwrap();
-    assert_eq!(ids(&k), vec![json!(1), json!(2)]);
+    assert_eq!(ids(&mut k), vec![json!(1), json!(2)]);
     // A resume: the view empty, then whole. Factor 2 was removed while this page was away.
     let mut w = wire::BodyWriter::new();
     w.block(table::ACCT_FACTORS, 0).done();
     factors(&mut w, &[(1, "Phone")]);
     k.patch(&w.finish(), 5).unwrap();
-    assert_eq!(ids(&k), vec![json!(1)]);
+    assert_eq!(ids(&mut k), vec![json!(1)]);
     let mut again = Kernel::new();
     again.set_grants(OPERATOR);
     again.restore(&k.snapshot()).unwrap();
-    assert_eq!(q(&again, json!({"op": "find", "table": "acct_factors"}))["rows"], json!([]));
+    assert_eq!(q(&mut again, json!({"op": "find", "table": "acct_factors"}))["rows"], json!([]));
 }

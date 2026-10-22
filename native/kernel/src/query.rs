@@ -25,8 +25,8 @@ use serde_json::{json, Map, Value as Json};
 use crate::judge::{no, Refusal};
 use crate::rows::{Data, Moved, Rows, Table, Val};
 
-const FIND_LIMIT: u64 = 50;
-const FIND_MAX: u64 = 500;
+pub(crate) const FIND_LIMIT: u64 = 50;
+pub(crate) const FIND_MAX: u64 = 500;
 const HISTORY_LIMIT: u64 = 50;
 const HISTORY_MAX: u64 = 200;
 const CHUNK: u64 = 256 * 1024;
@@ -184,7 +184,7 @@ fn column(g: &Grants, t: &TableModel, name: Option<&Json>) -> Result<&'static Co
     }
 }
 
-fn columns(g: &Grants, t: &TableModel, names: Option<&Json>, default_metrics: bool) -> Result<Vec<&'static Column>, Refusal> {
+pub(crate) fn columns(g: &Grants, t: &TableModel, names: Option<&Json>, default_metrics: bool) -> Result<Vec<&'static Column>, Refusal> {
     match names {
         None | Some(Json::Null) => {
             Ok(t.cols.iter().filter(|c| g.visible(c) && (default_metrics || !has(c, flag::METRIC | flag::METRIC_ON))).collect())
@@ -208,7 +208,7 @@ fn columns(g: &Grants, t: &TableModel, names: Option<&Json>, default_metrics: bo
     }
 }
 
-fn bound(v: Option<&Json>, default: u64, max: u64, name: &str) -> Result<u64, Refusal> {
+pub(crate) fn bound(v: Option<&Json>, default: u64, max: u64, name: &str) -> Result<u64, Refusal> {
     match v {
         None | Some(Json::Null) => Ok(default),
         Some(Json::Number(n)) if n.as_u64().is_some_and(|n| n > 0 && n <= max) => Ok(n.as_u64().unwrap_or(default)),
@@ -367,7 +367,7 @@ pub(crate) fn row_out(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool) ->
 /// whether or not it was named, and `stale: true` when that write is
 /// over `STALE_DAYS` old by the kernel's day: a flag to re-check the
 /// record, never a filter.
-fn stamped(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool, today: crate::Day) -> Json {
+pub(crate) fn stamped(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool, today: crate::Day) -> Json {
     let mut r = row_out(t, id, cols, drop_nulls);
     let Some(c) = schema::table_def(t.id).and_then(|d| d.col_named("updated_at")) else { return r };
     let at = t.get(id, c.id);
@@ -469,6 +469,12 @@ enum Test {
 struct Filter<'t> {
     col: &'t Column,
     test: Test,
+}
+
+/// `where` as one test over rows: every filter it names must hold (`desk`'s narrowing).
+pub(crate) fn sieve(g: &Grants, t: &TableModel, w: Option<&Json>) -> Result<impl Fn(&Table, u32) -> bool, Refusal> {
+    let fs = filters(g, t, w)?;
+    Ok(move |t: &Table, id: u32| fs.iter().all(|f| holds(t, id, f)))
 }
 
 fn filters(g: &Grants, t: &TableModel, w: Option<&Json>) -> Result<Vec<Filter<'static>>, Refusal> {

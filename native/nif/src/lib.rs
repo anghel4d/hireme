@@ -304,8 +304,9 @@ fn query<'a>(env: Env<'a>, res: ResourceArc<Res>, req: String, read: u8, write: 
 
 /// The desk at a glance for `hireme`: the top `n` cards and the scoreboard.
 #[rustler::nif(schedule = "DirtyCpu")]
-fn overview(res: ResourceArc<Res>, n: usize) -> Option<String> {
-    with(&res, |k| k.overview(n).to_string())
+fn overview(res: ResourceArc<Res>, n: usize, read: u8, write: u8, may_delete: bool) -> Option<String> {
+    let g = kernel::query::Grants { human: false, read_mask: read, write_mask: write, may_delete };
+    with(&res, |k| k.overview_as(&g, n).to_string())
 }
 
 /// Application `no`'s document (row, card, rail, coverage, CV, events), the focus lens's own.

@@ -17,7 +17,7 @@ use tools::{Field, Masks};
 /// What a blank call prints: the call's shape.
 pub fn shape(tool: &str) -> Option<String> {
     Some(match tool {
-        "find" => r#"{"table":"corporations","where":{"name":{"prefix":"Acme"}},"order":["headcount","desc"],"limit":20}"#.into(),
+        "find" => r#"{"table":"corporations","where":{"name":{"prefix":"Acme"}},"order":["headcount","desc"],"limit":20}  or  {"table":"applications","search":"berlin","min_score":60,"sort":["score","desc"],"group":"company","limit":20}"#.into(),
         "get" => r#"{"table":"corporations","key":{"domain":"example.com"}}  or  {"table":"applications","id":12}"#.into(),
         "text" => r#"{"table":"applications","id":12,"column":"listing_raw","offset":0,"length":65536}"#.into(),
         "history" => r#"{"table":"places","id":7,"column":"population"}"#.into(),

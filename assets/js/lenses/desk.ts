@@ -433,7 +433,7 @@ function paint(el: HTMLElement, measure: boolean): void {
   const stale = [...at.keys()].filter((id) => tiles.get(id)?.dataset.sig !== sig(id, held.get(id)))
   if (stale.length === 0) return
   const found = new Map<number, Row>()
-  for (const r of read<{ rows: Row[] }>("find", { table: "applications", where: { id: { in: stale } }, cols: COLS, limit: stale.length }).rows) found.set(Number(r.id), r)
+  for (const r of read<{ rows: Row[] }>("find", { table: "applications", where: { id: { in: stale } }, order: ["id"], cols: COLS, limit: stale.length }).rows) found.set(Number(r.id), r)
   for (const id of stale) {
     const t = tiles.get(id)
     if (t) tile(t, id, held.get(id), found.get(id) ?? {})

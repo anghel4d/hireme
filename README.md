@@ -145,7 +145,14 @@ step; `{"explain": "<code>"}` explains any refusal), `schema`, `find`, `get`,
 `text`, `history`, `put`, `drop` (only with the delete permission), `lease`,
 `release`, and one tool per declared command (`stage`, `note`,
 `heat_override`, `open_generation`; `open_fire` is never offered). A tool
-the key's masks forbid is not listed. Writes need a lease: `lease {}` opens
+the key's masks forbid is not listed. A `find` on `applications` without
+`order` is the desk's own query, the one the page's toolbar runs:
+`search`, `min_score`, `bands`, `stages`, `classes`, `modes`, `unlinked`
+narrow it, `sort` orders on any desk key or catalog field, `group` buckets
+on another (company unless told otherwise, `""` for none), and the answer
+is the page: rows with their score, band and class, the groups, and a
+listing under group headings. `hireme` opens with the board's first eight
+the same way. Writes need a lease: `lease {}` opens
 the channel, `lease {"count": 16}` also claims the 16 best-ranked unclaimed
 applications, and `lease {"bulk": n}` grants a contract for n writes: a
 `put` under it may carry the whole burst in one call, and lands atomically,
