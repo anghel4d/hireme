@@ -524,3 +524,16 @@ tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 .fire dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
 .fire dl.mail dt { color: var(--muted); }
 .fire dl.mail dd { margin: 0; word-break: break-word; }
+
+/* Outreach items: one collapsible row each, drawn by kind; an unread reply stands out. */
+.items { display: flex; flex-direction: column; gap: 4px; }
+details.item { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 6px 10px; }
+details.item.inbound { border-left: 3px solid var(--accent); }
+details.item.unseen summary .subject { font-weight: 700; }
+details.item summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; cursor: pointer; }
+details.item summary .subject { flex: 1 1 12rem; overflow-wrap: anywhere; }
+details.item summary time { margin-left: auto; font-size: 12px; }
+details.item[open] summary { margin-bottom: 8px; }
+details.item dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
+details.item dl.mail dt { color: var(--muted); }
+details.item dl.mail dd { margin: 0; overflow-wrap: anywhere; }

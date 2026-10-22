@@ -11,6 +11,7 @@ import { failed, application, command, ids, put, query as read, Refused, row, va
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
 import { WHY as HOLD } from "./fire.ts"
+import { itemAct, itemList, outreachQuery } from "./outreach.ts"
 import { rowHref } from "./world.ts"
 
 type Doc = {
@@ -175,15 +176,14 @@ function prose(a: Row, appId: number): Html {
 function around(a: Row, appId: number): Html {
   const c = row("contacts", Number(a.contact_id ?? 0))
   const corp = row("corporations", Number(a.corporation_id ?? 0))
-  const messages = read<{ rows: Row[] }>("find", { table: "messages", where: { application_id: appId }, order: ["sent_at", "asc"], limit: 200 }).rows
+  const said = outreachQuery({ where: { application_id: appId }, sort: ["at", "desc"], group: "", limit: 100 })
   return html`<section class="card" data-key="around"><h2>People and company</h2>
     ${corp ? html`<p><b>${str(corp.name)}</b> <a href="${rowHref("corporations", Number(corp.id), corp)}" data-nav>in the world</a>
       ${corp.careers_url ? html` · <a href="${href(str(corp.careers_url))}" rel="noopener noreferrer" target="_blank">careers</a>` : EMPTY}</p>
       ${corp.headcount ? html`<p class="muted">${NUM.format(Number(corp.headcount))} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
     ${c ? html`<p><a href="/outreach/${item(c.id, c.name)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
-    ${messages.length > 0 ? html`<ul class="rows">${messages.map((m) => html`<li data-key="m${str(m.id)}"><span class="tag">${str(m.direction)}</span>
-      ${str(m.subject) || "(no subject)"} <span class="muted">${str(m.sent_at).slice(0, 10)} · ${str(m.status)}</span></li>`)}</ul>` : EMPTY}
-  </section>`
+  </section>
+  ${said && said.rows.length > 0 ? html`<section class="card" data-key="said"><h2>Outreach <span class="muted">${said.total}</span></h2>${itemList(said)}</section>` : EMPTY}`
 }
 
 function events(d: Doc, appId: number): Html {
@@ -200,7 +200,7 @@ const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 
 // ------------------------------------------------------------------ missions: the routes it goes out by
 
-type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; hold: string | null }
+type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; cv_version_id: number | null; covered_by: number[]; hold: string | null }
 const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
 const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
   try {
@@ -264,7 +264,7 @@ function missions(d: Doc, appId: number): Html {
       ${first && cv ? html`<p class="muted">The picked CV: v${cv.n} · ${cv.format}</p>` : EMPTY}
       ${m.hold && staged && m.hold !== "not_ready" ? html`<p class="warn">Cannot fire: ${HOLD[m.hold] ?? m.hold}.</p>` : EMPTY}
       ${m.confirmation === "provisional" ? html`<span class="tag warn" title="Self-reported: it counts once a confirmation mail arrives">provisional</span>` : EMPTY}
-      ${m.fired_at ? html`<p class="muted">Fired ${new Date(m.fired_at).toLocaleString()} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}.</p>` : EMPTY}
+      ${m.fired_at ? html`<p class="muted">Fired ${new Date(m.fired_at).toLocaleString()} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}${m.cv_version_id ? `, carrying CV version ${m.cv_version_id}` : ""}.</p>` : EMPTY}
       ${m.last_error ? html`<p class="warn">Last shot failed: ${m.last_error}</p>` : EMPTY}
       ${ready ? html`<div class="actions">
         <button type="button" class="danger" data-act="mission-fire" data-mission="${m.id}" data-kind="${m.kind}"${flag("disabled", !covered)} title="${covered ? `Under key #${m.covered_by[0]}` : "No live fire key covers this mission"}">${email ? "Send" : "Fire"}</button>
@@ -276,7 +276,7 @@ function missions(d: Doc, appId: number): Html {
       ${m.state === "in_flight" && email ? html`<p class="muted">Sending since ${m.in_flight_at ?? ""}…</p>` : EMPTY}</li>`
   })}</ul>
     <form class="row grow" data-submit="mission-add" data-act="mission-add" data-id="${appId}">
-      <select name="kind" aria-label="Route">${(ENUMS.mission_kind ?? []).map((k) => html`<option value="${k}">${ROUTE[k] ?? k}</option>`)}</select>
+      <select name="kind" aria-label="Route">${(ENUMS.outreach_kind ?? []).filter((k) => k !== "note").map((k) => html`<option value="${k}">${ROUTE[k] ?? k}</option>`)}</select>
       <input name="target" placeholder="Address, URL or handle" aria-label="Target"><button>Add route</button></form></section>`
 }
 
@@ -373,6 +373,7 @@ addEventListener("input", (ev) => {
 
 /** An application's actions, on application `appId` unless the control names its own. */
 export function act(name: string, el: HTMLElement, appId_: number): void {
+  if (itemAct(name, el)) return
   const appId = Number(el.dataset.id ?? appId_)
   const f = el instanceof HTMLFormElement ? fields(el) : {}
   switch (name) {

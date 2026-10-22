@@ -15,6 +15,8 @@
 //     /desk/<no>-<company>-<role>         one application, opened
 //     /world/<table>/<id>-<name>?sort=-headcount&q=berlin
 //     /world/atlas?kind=city&cols=economy&sort=-population&q=ber
+//     /outreach?q=interview&kind=email&group=day   everything said, searched and grouped
+//     /outreach/unfiled                    what the filer could not place
 //     /outreach/<id>-<name>
 //     /me/<rules|cv>
 //     /account
@@ -93,9 +95,9 @@ export interface FocusView {
 export interface OutreachView {
   /** How many contacts the list shows; "more" raises it. */
   limit: number
-  /** Messages whose bodies are open. */
-  open: number[]
-  /** "contact" (editing the contact), "new" (a new contact), "draft" (a new message), or "". */
+  /** How many items the hub shows; "more" raises it. */
+  items: number
+  /** "contact" (editing the contact), "new" (a new contact), "record" (a manual item), or "". */
   edit: string
 }
 
@@ -205,7 +207,7 @@ export const model: Model = {
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
   deskLimit: 30,
   focus: { id: 0, listing: false, fireArmed: 0, edit: "", editRev: 0, editText: "" },
-  outreach: { limit: 100, open: [], edit: "" },
+  outreach: { limit: 100, items: 100, edit: "" },
 }
 
 type Render = () => void

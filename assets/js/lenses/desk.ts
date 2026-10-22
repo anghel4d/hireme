@@ -703,7 +703,7 @@ const desk: View = {
         const keep = Number(el.dataset.keep)
         const gone = (el.dataset.drop ?? "").split(",").map(Number).filter((x) => x > 0)
         const name = (x: number): string => `#${str(value("applications", x, "no"))} (${str(value("applications", x, "stage")).replace(/_/g, " ")})`
-        if (!confirm(`Keep ${name(keep)} and delete ${gone.map(name).join(", ")}?\n\nEach deleted one takes its events and CV overlays with it; its messages stay, no longer linked to it.`)) return
+        if (!confirm(`Keep ${name(keep)} and delete ${gone.map(name).join(", ")}?\n\nEach deleted one takes its events and CV overlays with it; its outreach stays, no longer linked to it.`)) return
         for (const x of gone) void drop("applications", x).catch(failed)
         return
       }
