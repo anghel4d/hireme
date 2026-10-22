@@ -205,6 +205,19 @@ fn a_shot_needs_a_key_goes_once_and_the_commander_answers_the_rest() {
     let m = mission(&mut k, 10);
     assert_eq!((m["state"].as_str(), m["confirmation"].as_str()), (Some("fired"), Some("provisional")));
     assert_eq!(stage(&mut k, 1), "submitted");
+    // Its report is owed until an outreach item names the mission.
+    let due = |k: &mut Kernel| q(k, json!({"op": "missions", "application": 1}))["missions"][0]["report_due"].as_bool();
+    assert_eq!(due(&mut k), Some(true));
+    let report = op(wire::PUT, table::OUTREACH, 0, |o| {
+        o.u32(col::outreach::KIND, enums::outreach_kind::CAREERS_PAGE as u32)
+            .u32(col::outreach::DIRECTION, enums::direction::OUTBOUND as u32)
+            .u32(col::outreach::MISSION_ID, 10)
+            .str(col::outreach::LINK, "https://job-boards.greenhouse.io/acme/jobs/1")
+            .str(col::outreach::REFERENCE, "APP-4012")
+            .str(col::outreach::REPORT, "Submitted the form; the page showed APP-4012.");
+    });
+    k.predict(&report, &agent(3, NOON + 2 * HOUR)).unwrap();
+    assert_eq!(due(&mut k), Some(false));
     // The card carries its missions as they stand.
     let card = k.application(1).unwrap();
     let on_card: Vec<(u64, &str)> = card["missions"].as_array().unwrap().iter().map(|m| (m["id"].as_u64().unwrap(), m["state"].as_str().unwrap())).collect();

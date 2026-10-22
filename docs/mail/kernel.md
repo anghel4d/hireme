@@ -194,8 +194,12 @@ answer, never an error:
 
 - `ranges {ids: [...]}` or `{text: "..."}`: `{text, count, ids}` canonical.
 - `missions {application?, state?, kind?}`: rows plus `hash`, `covered_by`
-  (the live keys whose unburned shot covers it) and `hold` (why it cannot
-  fire whoever asks, or null). `report_due` follows with the outreach type.
+  (the live keys whose unburned shot covers it), `hold` (why it cannot
+  fire whoever asks, or null) and `report_due` (a fired shot hireme could
+  not watch, anything but an email, that no outreach item names yet). An
+  untracked shot is closed by the agent in two writes: `landed` (or
+  `failed`) on the mission, then the outreach item its kind's brief
+  describes, naming the mission.
 - `mission_brief {mission}`: kind, target, application, company, contact,
   state, what the shot produces and must be reported, its live keys.
 - `fire_review {request} | {missions}`: every mission's draft and target in

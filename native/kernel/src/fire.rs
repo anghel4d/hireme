@@ -1082,7 +1082,18 @@ fn mission_json(rows: &Rows, cvs: &Cvs, t: &Table, id: u32, now: i64) -> Json {
         .collect();
     j["covered_by"] = json!(covered);
     j["hold"] = json!(hold(rows, cvs, id));
+    j["report_due"] = json!(report_due(rows, t, id));
     j
+}
+
+/// A fired shot hireme could not watch (anything but an email) with no
+/// outreach item naming it yet: the agent's report is owed.
+pub fn report_due(rows: &Rows, t: &Table, id: u32) -> bool {
+    if is_email(t, id) || state(t, id) != enums::mission_state::FIRED {
+        return false;
+    }
+    let Some(o) = rows.table(table::OUTREACH) else { return true };
+    !o.ids().iter().any(|&i| crate::outreach::Item::read(o, i).is_some_and(|item| item.core.refs.mission_id == Some(id)))
 }
 
 /// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
@@ -1133,7 +1144,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
                 "kind": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::name),
                 "brief": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::brief),
                 "produces": if email { "an email sent through the linked mailbox, and its replies, filed by the mail" } else { "nothing hireme can see: the shot is yours to perform" },
-                "report": if email { "none: the node reports the send (landed or failed)" } else { "landed or failed on the mission once done, and an outreach report of what was sent or submitted" },
+                "report": if email { "none: the node reports the send (landed or failed)" } else { "once done: landed on the mission (failed, with the reason, if it did not go), then the outreach item its brief describes, naming the mission" },
                 "track": if email { "replies arrive on the mission's thread" } else { "a confirmation mail confirms the shot (it stays provisional until one is filed)" },
                 "quota": if email { let (cap, used, resets) = quota(rows, now); json!({"cap": cap, "used": used, "resets_at": crate::time_iso(resets)}) } else { Json::Null },
             }))
