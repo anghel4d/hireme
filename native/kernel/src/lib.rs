@@ -29,6 +29,7 @@ pub mod lexicon;
 pub mod link;
 pub mod mask;
 pub mod org;
+pub mod outreach;
 pub mod pick;
 pub mod pipeline;
 pub mod query;

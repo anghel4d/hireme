@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x751f;
-export const SCHEMA_REV = 0x4c15fb85;
+export const WIRE_HASH = 0x48e1;
+export const SCHEMA_REV = 0x88858089;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -81,12 +81,16 @@ export const SOURCE_KIND = ["official", "filing", "statistics", "news", "ratings
 export type SourceKind = (typeof SOURCE_KIND)[number];
 export const RELATION = ["recruiter", "hiring_manager", "engineer", "referral", "founder", "other"] as const;
 export type Relation = (typeof RELATION)[number];
-export const MESSAGE_CHANNEL = ["email", "linkedin", "x", "other"] as const;
-export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
+export const OUTREACH_KIND = ["email", "careers_page", "linkedin", "x_dm", "discord", "other", "note"] as const;
+export type OutreachKind = (typeof OUTREACH_KIND)[number];
 export const DIRECTION = ["outbound", "inbound"] as const;
 export type Direction = (typeof DIRECTION)[number];
-export const MESSAGE_STATUS = ["draft", "queued", "sent", "delivered", "bounced", "failed", "received"] as const;
-export type MessageStatus = (typeof MESSAGE_STATUS)[number];
+export const FILING = ["filed", "unfiled", "ignored"] as const;
+export type Filing = (typeof FILING)[number];
+export const FILER = ["matcher", "operator", "agent", "mail"] as const;
+export type Filer = (typeof FILER)[number];
+export const MAIL_PIPE = ["gmail", "domain", "hireme"] as const;
+export type MailPipe = (typeof MAIL_PIPE)[number];
 export const CV_FORMAT = ["markdown", "pdf", "docx", "composed", "doc"] as const;
 export type CvFormat = (typeof CV_FORMAT)[number];
 export const LANGUAGE_LEVEL = ["a1", "a2", "b1", "b2", "c1", "c2", "native"] as const;
@@ -105,11 +109,11 @@ export const MAIL_PROVIDER = ["gmail"] as const;
 export type MailProvider = (typeof MAIL_PROVIDER)[number];
 export const MAILBOX_STATUS = ["linking", "live", "auth_failed", "error", "unlinked"] as const;
 export type MailboxStatus = (typeof MAILBOX_STATUS)[number];
-export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, message_channel: MESSAGE_CHANNEL, direction: DIRECTION, message_status: MESSAGE_STATUS, cv_format: CV_FORMAT, language_level: LANGUAGE_LEVEL, mission_kind: MISSION_KIND, mission_state: MISSION_STATE, confirmation: CONFIRMATION, request_status: REQUEST_STATUS, prior_send: PRIOR_SEND, mail_provider: MAIL_PROVIDER, mailbox_status: MAILBOX_STATUS };
+export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, outreach_kind: OUTREACH_KIND, direction: DIRECTION, filing: FILING, filer: FILER, mail_pipe: MAIL_PIPE, cv_format: CV_FORMAT, language_level: LANGUAGE_LEVEL, mission_kind: MISSION_KIND, mission_state: MISSION_STATE, confirmation: CONFIRMATION, request_status: REQUEST_STATUS, prior_send: PRIOR_SEND, mail_provider: MAIL_PROVIDER, mailbox_status: MAILBOX_STATUS };
 
-export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47, missions: 48, fire_requests: 49, fire_keys: 50, fire_shots: 51, mailboxes: 52 } as const;
+export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, outreach: 28, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47, missions: 48, fire_requests: 49, fire_keys: 50, fire_shots: 51, mailboxes: 52 } as const;
 export type TableName = keyof typeof TABLE_ID;
-export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7, fire: 8, stamp: 9, landed: 10, failed: 11, decline: 12, create_fire_key: 13, revoke_fire_key: 14, mailbox_state: 15, unlink_mail: 16 } as const;
+export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7, file: 8, ignore: 9, fire: 10, stamp: 11, landed: 12, failed: 13, decline: 14, create_fire_key: 15, revoke_fire_key: 16, mailbox_state: 17, unlink_mail: 18 } as const;
 export type CommandName = keyof typeof COMMAND_ID;
 
 export interface ColumnDef {
@@ -152,7 +156,7 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "sources": {"id":25,"name":"sources","domain":"world","residency":"resident","cap":200000,"appendOnly":false,"softDelete":true,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["url"],"global":false,"where":null}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["deleted_at",6,"time",544],["url",8,"str",2049],["host",9,"str",33],["publisher",10,"str",0],["title",11,"str",0],["kind",12,"enum",0,"source_kind"],["retrieved_at",13,"time",0],["mutable",14,"bool",1,null,"true"],["doc",15,"text",0]]},
   "citations": {"id":26,"name":"citations","domain":"world","residency":"resident","cap":5000000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["table",8,"str",33],["row_id",9,"u32",33],["column",10,"str",33],["source_id",11,"ref",16416,"sources"],["value",12,"json",32],["as_of",13,"day",33],["actor",14,"enum",33,"actor"],["key_id",15,"ref",16416,"api_keys"],["op_id",16,"i64",32]]},
   "contacts": {"id":27,"name":"contacts","domain":"mail","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["email"],"global":false,"where":"email is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["corporation_id",8,"ref",0,"corporations"],["place_id",9,"ref",0,"places"],["name",10,"str",1],["title",11,"str",0],["email",12,"str",2048],["linkedin_url",13,"str",0],["x_handle",14,"str",0],["relation",15,"enum",0,"relation"],["last_touch_on",16,"day",0],["notes",17,"text",0]]},
-  "messages": {"id":28,"name":"messages","domain":"mail","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["message_id"],"global":false,"where":"message_id is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["channel",8,"enum",1,"message_channel"],["direction",9,"enum",1,"direction"],["from_addr",10,"str",0],["to_addr",11,"str",0],["cc_addr",12,"str",0],["subject",13,"str",0],["body",14,"text",0],["message_id",15,"str",2048],["thread_key",16,"str",0],["sent_at",17,"time",0],["status",18,"enum",1,"message_status","draft"],["corporation_id",19,"ref",0,"corporations"],["application_id",20,"ref",0,"applications"],["contact_id",21,"ref",0,"contacts"]]},
+  "outreach": {"id":28,"name":"outreach","domain":"mail","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["message_id"],"global":false,"where":"message_id is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["kind",8,"enum",1,"outreach_kind"],["direction",9,"enum",0,"direction"],["from_addr",10,"str",0],["to_addr",11,"str",0],["cc_addr",12,"str",0],["subject",13,"str",0],["body",14,"text",0],["message_id",15,"str",2048],["thread_key",16,"str",32],["at",17,"time",0],["corporation_id",19,"ref",0,"corporations"],["application_id",20,"ref",0,"applications"],["contact_id",21,"ref",0,"contacts"],["mission_id",22,"ref",0,"missions"],["link",23,"str",0],["report",24,"text",0],["actor",25,"enum",33,"actor","system"],["filing",26,"enum",33,"filing","unfiled"],["filed_by",27,"enum",32,"filer"],["evidence",28,"json",32],["seen",29,"bool",1,null,"false"],["bounced_at",30,"time",32],["reply_to",31,"str",0],["in_reply_to",32,"str",0],["refs",33,"text",0],["gmail_msgid",34,"i64",0],["gmail_thrid",35,"i64",0],["labels",36,"str",0],["headers",37,"json",0],["pipe",38,"enum",0,"mail_pipe"],["handle",39,"str",0],["fields",40,"json",0],["reference",41,"str",0],["channel",42,"str",0]]},
   "leases": {"id":31,"name":"leases","domain":"desk","residency":"wire","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"u32",1],["label",2,"str",1],["key_id",3,"u32",0],["held",4,"str",0],["since",5,"time",1]]},
   "clock": {"id":32,"name":"clock","domain":"system","residency":"wire","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["today",1,"day",1],["now",2,"time",1]]},
   "catalog": {"id":33,"name":"catalog","domain":"system","residency":"wire","cap":null,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["kind",1,"u32",1],["owner",2,"u32",1],["id",3,"u32",1],["name",4,"str",1],["type",5,"u32",0],["flags",6,"u32",0],["target",7,"str",0]]},
@@ -185,15 +189,17 @@ export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {
   "pick_cv": {"id":5,"name":"pick_cv","table":"applications","humanOnly":false,"params":[{"name":"cv_root_id","id":46,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"cv_roots","enum":null}]},
   "unpin_cv": {"id":6,"name":"unpin_cv","table":"applications","humanOnly":false,"params":[]},
   "open_generation": {"id":7,"name":"open_generation","table":"cv_lineages","humanOnly":false,"params":[{"name":"corporation_id","id":8,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"corporations","enum":null}]},
-  "fire": {"id":8,"name":"fire","table":"missions","humanOnly":false,"params":[{"name":"key","id":65024,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
-  "stamp": {"id":9,"name":"stamp","table":"missions","humanOnly":false,"params":[{"name":"message_id","id":26,"type":"str","typeCode":11,"wire":2,"required":true,"column":true,"ref":null,"enum":null}]},
-  "landed": {"id":10,"name":"landed","table":"missions","humanOnly":false,"params":[{"name":"gmail_msgid","id":65024,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null},{"name":"gmail_thrid","id":65025,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null}]},
-  "failed": {"id":11,"name":"failed","table":"missions","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
-  "decline": {"id":12,"name":"decline","table":"fire_requests","humanOnly":true,"params":[]},
-  "create_fire_key": {"id":13,"name":"create_fire_key","table":"fire_keys","humanOnly":true,"params":[{"name":"missions","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"digest","id":65025,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"usable_by","id":65026,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null},{"name":"request","id":65027,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
-  "revoke_fire_key": {"id":14,"name":"revoke_fire_key","table":"fire_keys","humanOnly":true,"params":[]},
-  "mailbox_state": {"id":15,"name":"mailbox_state","table":"mailboxes","humanOnly":false,"params":[{"name":"status","id":10,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"mailbox_status"},{"name":"last_error","id":12,"type":"text","typeCode":12,"wire":2,"required":false,"column":true,"ref":null,"enum":null},{"name":"last_sync_at","id":11,"type":"time","typeCode":10,"wire":1,"required":false,"column":true,"ref":null,"enum":null}]},
-  "unlink_mail": {"id":16,"name":"unlink_mail","table":"mailboxes","humanOnly":true,"params":[]},
+  "file": {"id":8,"name":"file","table":"outreach","humanOnly":false,"params":[{"name":"application_id","id":20,"type":"ref","typeCode":2,"wire":1,"required":false,"column":true,"ref":"applications","enum":null},{"name":"mission_id","id":22,"type":"ref","typeCode":2,"wire":1,"required":false,"column":true,"ref":"missions","enum":null},{"name":"contact_id","id":21,"type":"ref","typeCode":2,"wire":1,"required":false,"column":true,"ref":"contacts","enum":null},{"name":"corporation_id","id":19,"type":"ref","typeCode":2,"wire":1,"required":false,"column":true,"ref":"corporations","enum":null}]},
+  "ignore": {"id":9,"name":"ignore","table":"outreach","humanOnly":false,"params":[]},
+  "fire": {"id":10,"name":"fire","table":"missions","humanOnly":false,"params":[{"name":"key","id":65024,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
+  "stamp": {"id":11,"name":"stamp","table":"missions","humanOnly":false,"params":[{"name":"message_id","id":26,"type":"str","typeCode":11,"wire":2,"required":true,"column":true,"ref":null,"enum":null}]},
+  "landed": {"id":12,"name":"landed","table":"missions","humanOnly":false,"params":[{"name":"gmail_msgid","id":65024,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null},{"name":"gmail_thrid","id":65025,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null}]},
+  "failed": {"id":13,"name":"failed","table":"missions","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
+  "decline": {"id":14,"name":"decline","table":"fire_requests","humanOnly":true,"params":[]},
+  "create_fire_key": {"id":15,"name":"create_fire_key","table":"fire_keys","humanOnly":true,"params":[{"name":"missions","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"digest","id":65025,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"usable_by","id":65026,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null},{"name":"request","id":65027,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
+  "revoke_fire_key": {"id":16,"name":"revoke_fire_key","table":"fire_keys","humanOnly":true,"params":[]},
+  "mailbox_state": {"id":17,"name":"mailbox_state","table":"mailboxes","humanOnly":false,"params":[{"name":"status","id":10,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"mailbox_status"},{"name":"last_error","id":12,"type":"text","typeCode":12,"wire":2,"required":false,"column":true,"ref":null,"enum":null},{"name":"last_sync_at","id":11,"type":"time","typeCode":10,"wire":1,"required":false,"column":true,"ref":null,"enum":null}]},
+  "unlink_mail": {"id":18,"name":"unlink_mail","table":"mailboxes","humanOnly":true,"params":[]},
 };
 
 /** `accounts`: server-side. */
@@ -743,15 +749,15 @@ export interface Contact {
   last_touch_on: number | null;
   notes: string | null;
 }
-/** `messages`: resident. */
-export interface Message {
+/** `outreach`: resident. */
+export interface Outreach {
   id: number;
   account_id: number;
   rev: number;
   inserted_at: number;
   updated_at: number;
-  channel: MessageChannel;
-  direction: Direction;
+  kind: OutreachKind;
+  direction: Direction | null;
   from_addr: string | null;
   to_addr: string | null;
   cc_addr: string | null;
@@ -759,11 +765,31 @@ export interface Message {
   body: string | null;
   message_id: string | null;
   thread_key: string | null;
-  sent_at: number | null;
-  status: MessageStatus;
+  at: number | null;
   corporation_id: number | null;
   application_id: number | null;
   contact_id: number | null;
+  mission_id: number | null;
+  link: string | null;
+  report: string | null;
+  actor: Actor;
+  filing: Filing;
+  filed_by: Filer | null;
+  evidence: unknown | null;
+  seen: boolean;
+  bounced_at: number | null;
+  reply_to: string | null;
+  in_reply_to: string | null;
+  refs: string | null;
+  gmail_msgid: number | null;
+  gmail_thrid: number | null;
+  labels: string | null;
+  headers: unknown | null;
+  pipe: MailPipe | null;
+  handle: string | null;
+  fields: unknown | null;
+  reference: string | null;
+  channel: string | null;
 }
 /** `leases`: derived on the wire. */
 export interface Lease {

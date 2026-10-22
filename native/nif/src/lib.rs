@@ -182,6 +182,12 @@ fn canonical(url: &str) -> Option<String> {
     kernel::ats::canonical(url)
 }
 
+/// A mail's Message-ID as the outreach judge stores it (kernel::outreach::message_id_form); "" for none.
+#[rustler::nif]
+fn message_id(id: &str) -> String {
+    kernel::outreach::message_id_form(id)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>> {
     let body = wire::Frame::parse(frame.as_slice(), schema::WIRE_HASH).ok()?.body_max(max).ok()?;

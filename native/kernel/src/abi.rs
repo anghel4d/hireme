@@ -88,6 +88,7 @@ impl Kernel {
     /// The same read under another session's grants: the node's kernel answers each MCP session as its key may see.
     pub fn query_as(&mut self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
         match req.get("op").and_then(Json::as_str) {
+            Some("outreach") => crate::outreach::query(&self.rows, grants, req, self.today()),
             Some(op @ ("cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields")) => self.cv_query(grants, op, req),
             Some("unlinked") => {
                 query::readable(grants, Some(&json!("applications")))?;
@@ -98,7 +99,7 @@ impl Kernel {
                 for t in ["missions", "applications", "contacts"] {
                     query::readable(grants, Some(&json!(t)))?;
                 }
-                Ok(crate::filer::match_json(&self.rows, &crate::filer::NoStore, req))
+                Ok(crate::filer::match_json(&self.rows, &crate::outreach::Stored(&self.rows), req))
             }
             Some(op) if crate::fire::OPS.contains(&op) => {
                 for t in crate::fire::reads(op) {
@@ -205,7 +206,7 @@ impl Kernel {
         let ask = crate::arrange::Ask { sort: sort.as_deref().map(|k| (k, dir)), group: group.as_deref(), largest: req["largest"] == true, cols: &cols };
         // A duplicate set keeps its furthest along, then its lowest number.
         let keep = |id: u32| (t.u32(id, A::STAGE).unwrap_or(0), -i64::from(t.u32(id, A::NO).unwrap_or(u32::MAX)));
-        let (order, groups) = crate::arrange::arrange(rows, &ids, &ask, &keep);
+        let (order, groups) = crate::arrange::arrange(t, &ids, &ask, &keep);
         let mut by_mode = serde_json::Map::new();
         for (i, n) in counts.iter().enumerate() {
             by_mode.insert(modes.get(i).copied().unwrap_or("none").into(), json!(n));

@@ -63,6 +63,11 @@ defmodule Hireme.Kernel do
   @spec canonical(String.t()) :: String.t() | nil
   def canonical(url) when is_binary(url), do: Nif.canonical(url)
   def canonical(_), do: nil
+
+  @doc "A mail's Message-ID as the outreach judge stores it: trimmed, in one pair of angle brackets; nil for none."
+  @spec message_id(String.t()) :: String.t() | nil
+  def message_id(id) when is_binary(id), do: with("" <- Nif.message_id(id), do: nil)
+  def message_id(_), do: nil
 end
 
 defmodule Hireme.Kernel.Nif do
@@ -84,6 +89,7 @@ defmodule Hireme.Kernel.Nif do
   def board_ids(_res, _stage), do: :erlang.nif_error(:nif_not_loaded)
   def keywords_version, do: :erlang.nif_error(:nif_not_loaded)
   def canonical(_url), do: :erlang.nif_error(:nif_not_loaded)
+  def message_id(_id), do: :erlang.nif_error(:nif_not_loaded)
   def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
   def text(_cell), do: :erlang.nif_error(:nif_not_loaded)
   def shuffle(_body), do: :erlang.nif_error(:nif_not_loaded)

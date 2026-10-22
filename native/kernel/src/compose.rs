@@ -91,6 +91,7 @@ pub fn application(rows: &Rows, board: &Board, id: u32, today: Day, cv: (Json, J
         "events": events,
         "batch": batch,
         "lineage": lineage,
+        "outreach": crate::outreach::summary(rows, id),
     }))
 }
 

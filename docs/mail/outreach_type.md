@@ -143,11 +143,16 @@ written, space-separated.
 **Filing.** An item is `filed` when it names any of its four refs, `unfiled`
 when it names none, `ignored` when the operator or an agent dismissed it
 (`ignore`: the refs cleared). On an inbound insert that names no ref the
-judge runs the filer (kernel.md): `filed` with `filed_by: matcher` and the
-evidence, or `unfiled` with the candidates in `evidence`. A put that sets a
-ref files the item by its actor (`filed_by: operator | agent | mail`); the
-`file` command is the same write under a name. A filed item stays filed
-until `ignore` or a put that clears every ref.
+judge runs the filer (kernel.md's `filer::file`, reading the item as its
+`Input` and the stored mail through the type's `Stored`): `filed` with
+`filed_by: matcher`, or `unfiled`, either way with `evidence` holding
+`{"evidence": [...], "candidates": [...]}`. A bounce the filer recognizes
+marks the returned mail `bounced_at` and fails its mission (`fire::failed`,
+rule 2); a confirmation mail confirms a provisional mission (rule 3). A put
+that sets a ref files the item by the op's writer (`filed_by: operator |
+agent | mail`); the `file` command is the same write under a name and must
+name at least one ref. A filed item stays filed until `ignore` or a put
+that clears every ref.
 
 **Status** is derived, never stored: `received` for an inbound item, `sent`
 for an outbound one, `bounced` for an outbound email whose `bounced_at` is
@@ -159,7 +164,7 @@ set; a note has none. A careers-page or other self-reported item is
 
 | kind | own fields | invariants |
 | --- | --- | --- |
-| `email` (OutreachEmail) | from_addr, to_addr, cc_addr, reply_to, message_id, in_reply_to, refs, thread_key, gmail_msgid, gmail_thrid, labels, headers, pipe, bounced_at | inbound needs `from_addr`; outbound needs `to_addr`. `to_addr` and `cc_addr` hold 1 to 10 and 0 to 10 addresses (`local@domain`, `Name <local@domain>` accepted and stored bare). `message_id` is the natural key (a second pipe's copy of the same mail updates the row); it is fixed once written. `thread_key` is the filer's, else the root of `refs`, else `in_reply_to`, else `message_id` |
+| `email` (OutreachEmail) | from_addr, to_addr, cc_addr, reply_to, message_id, in_reply_to, refs, thread_key, gmail_msgid, gmail_thrid, labels, headers, pipe, bounced_at | inbound needs `from_addr`; outbound needs `to_addr`. `to_addr` and `cc_addr` hold 1 to 10 and 0 to 10 addresses (`local@domain`; `Name <local@domain>` accepted, stored bare; so are `from_addr` and `reply_to`). `message_id` is stored in one form (trimmed, one pair of angle brackets, case kept) and is the natural key, compared in that form on the node too (`Hireme.Kernel.message_id/1`), so a second pipe's copy of the same mail updates the row however it spells the id; it is fixed once written. `thread_key` is the filer's, else the root of `refs`, else `in_reply_to`, else `message_id` |
 | `careers_page` (OutreachCareersPage) | fields (json: the fields as submitted), reference (the confirmation or application number the page showed) | outbound only; `link` (the form) required |
 | `linkedin` (OutreachLinkedIn) | handle (the profile's vanity name) | direction required |
 | `x_dm` (OutreachTwitterDm) | handle (`@name`, stored without `@`) | direction required |
@@ -194,7 +199,7 @@ variant.
            "message_id": "<a1@acme.example>", "in_reply_to": "<hm.7f3a@gmail.com>", "refs": ["<hm.7f3a@gmail.com>"],
            "thread_key": "<hm.7f3a@gmail.com>", "gmail_msgid": 1234, "gmail_thrid": 1200, "labels": ["hireme"],
            "pipe": "gmail", "bounced_at": null},
- "evidence": [{"token": "<hm.7f3a@gmail.com>", "kind": "in_reply_to", "weight": 100, "table": "outreach", "id": 40}],
+ "evidence": {"evidence": [{"kind": "in_reply_to", "token": "hm.7f3a@gmail.com", "weight": 100, "table": "outreach", "id": 40}], "candidates": []},
  "rev": 2, "inserted_at": "2026-10-22T09:40:13Z", "updated_at": "2026-10-22T09:40:13Z"}
 ```
 
@@ -258,14 +263,14 @@ impl Kind {
 }
 pub enum Direction { Outbound, Inbound }
 pub enum Filing { Filed, Unfiled, Ignored }
-pub enum Filer { Matcher, Operator, Agent, Mail }
+pub enum FiledBy { Matcher, Operator, Agent, Mail }
 pub enum Actor { Operator, Agent, System, Mail }
 pub enum Pipe { Gmail, Domain, Hireme }
 pub enum Status { Sent, Received, Bounced }
 
 pub struct Refs { pub corporation_id: Option<u32>, pub application_id: Option<u32>, pub contact_id: Option<u32>, pub mission_id: Option<u32> }
 pub struct Core { pub id: u32, pub kind: Kind, pub direction: Option<Direction>, pub at: i64, pub subject: Option<String>, pub body: Option<String>,
-                  pub link: Option<String>, pub report: Option<String>, pub actor: Actor, pub filing: Filing, pub filed_by: Option<Filer>,
+                  pub link: Option<String>, pub report: Option<String>, pub actor: Actor, pub filing: Filing, pub filed_by: Option<FiledBy>,
                   pub evidence: Option<Json>, pub seen: bool, pub refs: Refs, pub rev: i64, pub inserted_at: i64, pub updated_at: i64 }
 
 pub struct Email { pub from: Option<String>, pub to: Vec<String>, pub cc: Vec<String>, pub reply_to: Option<String>, pub message_id: Option<String>,
@@ -277,7 +282,7 @@ pub struct XDm { pub handle: Option<String> }
 pub struct Discord { pub handle: Option<String> }
 pub struct Other { pub channel: Option<String>, pub handle: Option<String> }
 pub struct Note;
-pub enum Body { Email(Email), CareersPage(CareersPage), LinkedIn(LinkedIn), XDm(XDm), Discord(Discord), Other(Other), Note(Note) }
+pub enum Body { Email(Box<Email>), CareersPage(CareersPage), LinkedIn(LinkedIn), XDm(XDm), Discord(Discord), Other(Other), Note(Note) }
 
 pub struct Item<B = Body> { pub core: Core, pub body: B }
 pub type OutreachItem = Item<Body>;
@@ -290,27 +295,24 @@ impl Item<Body> {
     pub fn kind(&self) -> Kind;
     pub fn narrow<B: Variant>(self) -> Result<Item<B>, Item<Body>>;  // the guard: OutreachEmail from an OutreachItem
     pub fn status(&self) -> Option<Status>;
-    pub fn facets(&self) -> Facets<'_>;                              // what the filer's lexer reads
+    pub fn input(&self) -> filer::Input<'_>;                         // what the filer's lexer reads: texts and headers, never the type
     pub fn json(&self, rows: &Rows) -> Json;                         // the item as JSON above
     pub fn cells(&self) -> Vec<(u16, Val)>;                          // the writable cells of a put
 }
 impl<B: Variant> From<Item<B>> for Item<Body>;                       // widening, free
 
+pub fn addr(text: &str) -> Option<String>;                           // one address, bare
 pub fn addrs(text: &str) -> Result<Vec<String>, Invariant>;          // 1 to 10 addresses, comma or U+001F separated; what to_addr and a mission's target must hold
+pub fn message_id_form(id: &str) -> String;                          // the stored form of a Message-ID
+pub fn canon(id: &str) -> String;                                    // a Message-ID as it compares: no brackets or spaces, lowercase
 pub fn thread_root(refs: &[String], in_reply_to: Option<&str>, message_id: Option<&str>) -> Option<String>;
 
-// The filer's seam (kernel.md): the kernel's judge calls it on an inbound insert that names no ref.
-pub struct Facets<'a> { pub kind: Kind, pub direction: Option<Direction>, pub at: i64, pub subject: Option<&'a str>, pub body: Option<&'a str>,
-    pub report: Option<&'a str>, pub from: Option<&'a str>, pub to: &'a [String], pub cc: &'a [String], pub reply_to: Option<&'a str>,
-    pub message_id: Option<&'a str>, pub in_reply_to: Option<&'a str>, pub refs: &'a [String], pub gmail_thrid: Option<i64>,
-    pub headers: Option<&'a Json>, pub link: Option<&'a str>, pub handle: Option<&'a str>, pub reference: Option<&'a str>, pub refs_known: Refs }
-pub struct Verdict { pub refs: Refs, pub filed: bool, pub thread_key: Option<String>, pub evidence: Option<Json>,
-                     pub bounce_of: Option<u32>, pub extra: Vec<judge::Row> }
-pub trait Filer { fn file(&self, rows: &Rows, facets: &Facets<'_>) -> Verdict; }
-pub struct Unfiled;                                                   // files nothing: the seam until the filer lands
+// The stored mail the filer asks about (filer::Store): the outreach table answers it. mail_match reads it too.
+pub struct Stored<'a>(pub &'a Rows);
+impl filer::Store for Stored<'_> { fn by_message_id(&self, id: &str) -> Option<filer::Known>; fn by_thread(&self, gmail_thrid: i64) -> Option<filer::Known>; }
 
 // The judge's hooks (one line each in judge.rs and abi.rs, the kernel's):
-pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut judge::Row, extra: &mut Vec<judge::Row>, filer: &dyn Filer) -> Result<(), Refusal>;
+pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut judge::Row, extra: &mut Vec<judge::Row>) -> Result<(), Refusal>;
 pub fn command(rows: &Rows, op: &Op, ctx: &Ctx) -> judge::Verdict;  // file, ignore
 pub fn query(rows: &Rows, g: &Grants, req: &Json, today: Day) -> Result<Json, Refusal>;
 pub fn summary(rows: &Rows, application_id: u32) -> Json;
@@ -325,10 +327,12 @@ pub fn by_message_id(rows: &Rows, message_id: &str) -> Option<u32>; // canonical
 
 `put` builds the item as the row would stand after the op (the row's cells
 under the op's), checks every invariant, fills what is derived (`at`,
-`actor`, the implied refs, `thread_key`, `filing`, `filed_by`), runs the
-filer for an inbound insert that names no ref, marks `bounce_of`'s row
-bounced and appends the filer's `extra` rows. Nothing else in the kernel
-reads an outreach cell by column id: every reader goes through `Item`.
+`actor`, the implied refs, `thread_key`, `filing`, `filed_by`), and runs
+the filer for an inbound insert that names no ref: its refs, thread and
+evidence land on the row, a bounce marks the returned mail and fails its
+mission, a confirmation confirms a provisional one. Nothing else in the
+kernel reads an outreach cell by column id: every reader goes through
+`Item` (the filer's `Stored` included).
 
 ## The Elixir API (`lib/hireme/outreach.ex`)
 
@@ -366,13 +370,15 @@ construction is refused there, never checked twice.
 
 **opus-lovelace (missions, the filer).** `missions.kind` becomes `enum
 outreach_kind`; `Kind::fireable` says which values a mission may take. The
-filer implements `outreach::Filer` over `Facets` and never matches on the
-type; its `Verdict::extra` carries the mission rows a bounce or a
-confirmation moves. `landed` on an email mission appends
-`outreach::sent_record(rows, &shot, now)` to its effects (an insert, or an
-update of the row Gmail's Sent copy made first). `outreach::addrs` is the
-one reading of a mission's `target` for email. `by_message_id` finds the
-account's sent mail a bounce or a reply names.
+filer reads an item as its `Input` (`Item::input`) and the stored mail
+through `outreach::Stored` (its `Store`), and never matches on the type;
+the judge applies its `Filing` to the row, fails the mission a bounce
+returns (`fire::failed`) and confirms the mission a confirmation names.
+`landed` on an email mission appends `outreach::sent_record(rows, &shot,
+now)` to its effects (an insert, or an update of the row Gmail's Sent copy
+made first). `outreach::addrs` is the one reading of a mission's `target`
+for email. `by_message_id` finds the account's sent mail a bounce or a reply
+names.
 
 **opus-hopper (the node).** An inbound mail is `Email.inbound(parsed)`,
 written as the mail actor (`%Hireme.Grants{actor: :key, key_id: nil}` with

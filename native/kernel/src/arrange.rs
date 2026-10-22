@@ -365,12 +365,11 @@ pub struct Group {
     pub keep: Option<u32>,
 }
 
-/// `ids` (the board's filtered order) sorted and grouped as asked. A sort
+/// `ids` (rows of `t`, in the caller's order) sorted and grouped as asked. A sort
 /// is stable over the board's own order; groups keep the sort inside them
 /// and stand in the key's order (high first for a desc column), or largest
 /// first. `keep` names a duplicate group's keeper by `rank` (higher wins).
-pub fn arrange(rows: &Rows, ids: &[u32], ask: &Ask, keep: &dyn Fn(u32) -> (u32, i64)) -> (Vec<u32>, Vec<Group>) {
-    let Some(t) = rows.table(schema::table::APPLICATIONS) else { return (Vec::new(), Vec::new()) };
+pub fn arrange(t: &crate::rows::Table, ids: &[u32], ask: &Ask, keep: &dyn Fn(u32) -> (u32, i64)) -> (Vec<u32>, Vec<Group>) {
     let mut order: Vec<(u32, usize)> = ids.iter().filter_map(|&id| t.slot(id).map(|s| (id, s))).collect();
     if let Some((k, dir)) = ask.sort {
         let col = &ask.cols[k];
@@ -499,14 +498,14 @@ pub fn groups_json(groups: &[Group]) -> Json {
 }
 
 /// Symbols from text per slot: interned, ranked in reading order.
-fn texts(per_slot: impl Iterator<Item = Option<String>>) -> Col {
+pub(crate) fn texts(per_slot: impl Iterator<Item = Option<String>>) -> Col {
     let mut names = Interner::new();
     let ids = per_slot.map(|t| t.map_or(NONE, |t| names.sym(&t))).collect();
     symbols(ids, names.dict)
 }
 
 /// Symbols from a fixed list in its order (an enum read as the desk reads it).
-fn listed(names: &[&str], per_slot: impl Iterator<Item = Option<usize>>) -> Col {
+pub(crate) fn listed(names: &[&str], per_slot: impl Iterator<Item = Option<usize>>) -> Col {
     Col::Sym {
         ids: per_slot.map(|i| i.map_or(NONE, |i| i as u32)).collect(),
         dict: names.iter().map(|s| String::from(*s)).collect(),

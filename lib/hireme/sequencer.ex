@@ -1136,6 +1136,10 @@ defmodule Hireme.Sequencer do
   defp keyed("applications", %{"canonical_url" => url} = values) when is_binary(url),
     do: Map.put(values, "canonical_url", Kernel.canonical(url) || url)
 
+  # A mail keys by its Message-ID in the kernel's stored form, however a pipe spells it.
+  defp keyed("outreach", %{"message_id" => id} = values) when is_binary(id),
+    do: Map.put(values, "message_id", Kernel.message_id(id) || id)
+
   defp keyed(_table, values), do: values
 
   defp natural(%{table: table} = plan, op, values) do

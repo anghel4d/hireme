@@ -665,14 +665,14 @@ CREATE TRIGGER "contacts__ref_corporation_id_update" BEFORE UPDATE OF "corporati
 CREATE TRIGGER "contacts__ref_place_id_insert" BEFORE INSERT ON "contacts" WHEN NEW."place_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."place_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref contacts.place_id'); END;
 CREATE TRIGGER "contacts__ref_place_id_update" BEFORE UPDATE OF "place_id", "account_id" ON "contacts" WHEN NEW."place_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "places" WHERE "id" = NEW."place_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref contacts.place_id'); END;
 
-CREATE TABLE "messages" (
+CREATE TABLE "outreach" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,
   "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
   "rev" INTEGER NOT NULL DEFAULT 1,
   "inserted_at" TEXT NOT NULL,
   "updated_at" TEXT NOT NULL,
-  "channel" TEXT NOT NULL,
-  "direction" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "direction" TEXT,
   "from_addr" TEXT,
   "to_addr" TEXT,
   "cc_addr" TEXT,
@@ -680,23 +680,47 @@ CREATE TABLE "messages" (
   "body" TEXT,
   "message_id" TEXT,
   "thread_key" TEXT,
-  "sent_at" TEXT,
-  "status" TEXT NOT NULL DEFAULT 'draft',
+  "at" TEXT,
   "corporation_id" INTEGER REFERENCES "corporations"("id") ON DELETE SET NULL,
   "application_id" INTEGER REFERENCES "applications"("id") ON DELETE SET NULL,
-  "contact_id" INTEGER REFERENCES "contacts"("id") ON DELETE SET NULL
+  "contact_id" INTEGER REFERENCES "contacts"("id") ON DELETE SET NULL,
+  "mission_id" INTEGER REFERENCES "missions"("id") ON DELETE SET NULL,
+  "link" TEXT,
+  "report" TEXT,
+  "actor" TEXT NOT NULL DEFAULT 'system',
+  "filing" TEXT NOT NULL DEFAULT 'unfiled',
+  "filed_by" TEXT,
+  "evidence" TEXT,
+  "seen" INTEGER NOT NULL DEFAULT 0,
+  "bounced_at" TEXT,
+  "reply_to" TEXT,
+  "in_reply_to" TEXT,
+  "refs" TEXT,
+  "gmail_msgid" INTEGER,
+  "gmail_thrid" INTEGER,
+  "labels" TEXT,
+  "headers" TEXT,
+  "pipe" TEXT,
+  "handle" TEXT,
+  "fields" TEXT,
+  "reference" TEXT,
+  "channel" TEXT
 ) STRICT;
-CREATE INDEX "messages__account_account_id" ON "messages" ("account_id");
-CREATE UNIQUE INDEX "messages__natural_message_id" ON "messages" ("account_id", "message_id") WHERE message_id is not null;
-CREATE INDEX "messages__index_thread_key" ON "messages" ("account_id", "thread_key");
-CREATE INDEX "messages__index_application_id" ON "messages" ("account_id", "application_id");
-CREATE INDEX "messages__index_contact_id" ON "messages" ("account_id", "contact_id");
-CREATE TRIGGER "messages__ref_corporation_id_insert" BEFORE INSERT ON "messages" WHEN NEW."corporation_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "corporations" WHERE "id" = NEW."corporation_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.corporation_id'); END;
-CREATE TRIGGER "messages__ref_corporation_id_update" BEFORE UPDATE OF "corporation_id", "account_id" ON "messages" WHEN NEW."corporation_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "corporations" WHERE "id" = NEW."corporation_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.corporation_id'); END;
-CREATE TRIGGER "messages__ref_application_id_insert" BEFORE INSERT ON "messages" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.application_id'); END;
-CREATE TRIGGER "messages__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "messages" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.application_id'); END;
-CREATE TRIGGER "messages__ref_contact_id_insert" BEFORE INSERT ON "messages" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.contact_id'); END;
-CREATE TRIGGER "messages__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "messages" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref messages.contact_id'); END;
+CREATE INDEX "outreach__account_account_id" ON "outreach" ("account_id");
+CREATE UNIQUE INDEX "outreach__natural_message_id" ON "outreach" ("account_id", "message_id") WHERE message_id is not null;
+CREATE INDEX "outreach__index_thread_key" ON "outreach" ("account_id", "thread_key");
+CREATE INDEX "outreach__index_application_id" ON "outreach" ("account_id", "application_id");
+CREATE INDEX "outreach__index_contact_id" ON "outreach" ("account_id", "contact_id");
+CREATE INDEX "outreach__index_mission_id" ON "outreach" ("account_id", "mission_id");
+CREATE INDEX "outreach__index_at_desc" ON "outreach" ("account_id", "at" DESC);
+CREATE TRIGGER "outreach__ref_corporation_id_insert" BEFORE INSERT ON "outreach" WHEN NEW."corporation_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "corporations" WHERE "id" = NEW."corporation_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.corporation_id'); END;
+CREATE TRIGGER "outreach__ref_corporation_id_update" BEFORE UPDATE OF "corporation_id", "account_id" ON "outreach" WHEN NEW."corporation_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "corporations" WHERE "id" = NEW."corporation_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.corporation_id'); END;
+CREATE TRIGGER "outreach__ref_application_id_insert" BEFORE INSERT ON "outreach" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.application_id'); END;
+CREATE TRIGGER "outreach__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "outreach" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.application_id'); END;
+CREATE TRIGGER "outreach__ref_contact_id_insert" BEFORE INSERT ON "outreach" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.contact_id'); END;
+CREATE TRIGGER "outreach__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "outreach" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.contact_id'); END;
+CREATE TRIGGER "outreach__ref_mission_id_insert" BEFORE INSERT ON "outreach" WHEN NEW."mission_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "missions" WHERE "id" = NEW."mission_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.mission_id'); END;
+CREATE TRIGGER "outreach__ref_mission_id_update" BEFORE UPDATE OF "mission_id", "account_id" ON "outreach" WHEN NEW."mission_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "missions" WHERE "id" = NEW."mission_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref outreach.mission_id'); END;
 
 CREATE TABLE "me" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

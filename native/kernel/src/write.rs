@@ -205,6 +205,8 @@ fn natural(t: Option<&Table>, td: &TableDef, op: &Op) -> Result<u32, Refusal> {
     // A posting's URL keys as the judge stores it, however it was linked.
     let given = |c: &ColDef| match cell_val(op, c.id) {
         Some(Val::Str(u)) if td.id == schema::table::APPLICATIONS && c.name == "canonical_url" => Val::Str(crate::ats::canonical(&u).unwrap_or(u)),
+        // A mail keys by its Message-ID as the judge stores it.
+        Some(Val::Str(m)) if td.id == schema::table::OUTREACH && c.name == "message_id" => Val::Str(crate::outreach::message_id_form(&m)),
         v => v.unwrap_or(Val::None),
     };
     let naturals = || td.keys.iter().filter(|k| k.natural);

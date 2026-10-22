@@ -226,6 +226,7 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
     let mut row = own(op, c);
     let mut extra = Vec::new();
     match op.table {
+        table::OUTREACH => crate::outreach::put(rows, op, ctx, &mut row, &mut extra)?,
         table::APPLICATIONS => {
             let apps = rows.table(table::APPLICATIONS);
             if op.target == 0 {
@@ -487,6 +488,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
         }
     }
     match op.table {
+        command::FILE | command::IGNORE => crate::outreach::command(rows, op, ctx),
         command::STAGE => {
             let t = app(rows, op.target)?;
             let Some(to) = param_stage(op, param::stage::STAGE) else { return refuse(refusal::TYPE, json!({"param": "stage"})) };

@@ -152,9 +152,13 @@ enum office_kind hq engineering sales regional other
 enum source_kind official filing statistics news ratings review blog other
 
 enum relation recruiter hiring_manager engineer referral founder other
-enum message_channel email linkedin x other
+# The OutreachItem's variant: what a mission produces and what an outreach
+# row is. A channel that earns rows of its own is appended here.
+enum outreach_kind email careers_page linkedin x_dm discord other note
 enum direction outbound inbound
-enum message_status draft queued sent delivered bounced failed received
+enum filing filed unfiled ignored
+enum filer matcher operator agent mail
+enum mail_pipe gmail domain hireme
 
 enum cv_format markdown pdf docx composed doc
 enum language_level a1 a2 b1 b2 c1 c2 native
@@ -663,26 +667,83 @@ table contacts mail resident
   col last_touch_on day ?
   col notes text ?
 
-table messages mail resident
+# The OutreachItem (docs/mail/outreach_type.md): one row per thing said or
+# done on any channel, a mail, a LinkedIn message, an X DM, a Discord
+# message, a careers-page submission, a note. `kind` is the variant; the
+# core comes first, then each variant's own columns, sparse. Items are the
+# record of what happened: a draft is its mission's. The kernel's
+# `outreach` module is the one reading of a row, and the one judge of a
+# put: what each kind requires, what is fixed once written, what is
+# derived (at, actor, the implied refs, thread_key, filing) and the
+# filer's filing of an inbound item. The messages table, renamed in place
+# (0008_outreach): its number and surviving column ids stay.
+table outreach mail resident
   natural message_id where message_id is not null
   cap 200000
   index thread_key
   index application_id
   index contact_id
-  col channel enum message_channel !
-  col direction enum direction !
+  index mission_id
+  index at desc
+  col kind enum outreach_kind !
+  # Null for a note; a careers-page item is outbound.
+  col direction enum direction ?
+  # A mail's sender and recipients (to and cc U+001F-joined, 1 to 10 and 0 to 10).
   col from_addr str ?
   col to_addr str ?
   col cc_addr str ?
+  # A mail's subject; a one-line title for anything else.
   col subject str ?
+  # The text that was said: plain text, markdown for a note.
   col body text ?
+  # A mail's Message-ID as given; the natural key (a second pipe's copy updates the row).
   col message_id str ?
-  col thread_key str ?
-  col sent_at time ?
-  col status enum message_status ! = draft
+  # The filer's, else the root of refs, else in_reply_to, else message_id.
+  col thread_key str ? readonly
+  # The item's instant: sent, received, submitted, written. Now when a put leaves it out.
+  col at time ?
+  # status, derived now (sent, received, bounced), never stored.
+  retired col 1
   col corporation_id ref corporations ?
   col application_id ref applications ?
   col contact_id ref contacts ?
+  col mission_id ref missions ?
+  # The conversation or page: an http(s) URL.
+  col link str ?
+  # An agent's write-up of a self-reported act, markdown: required of an
+  # agent's outbound item on an untracked channel.
+  col report text ?
+  # Who wrote the item: the operator, a key, the mail actor (the node, no key).
+  col actor enum actor ! = system readonly
+  # Filed when any ref is set, unfiled when none, ignored by the command.
+  col filing enum filing ! = unfiled readonly
+  col filed_by enum filer ? readonly
+  # The filer's tokens and candidates.
+  col evidence json ? readonly
+  # The reply marker on an inbound item.
+  col seen bool ! = false
+  # email
+  col bounced_at time ? readonly
+  col reply_to str ?
+  col in_reply_to str ?
+  # The References header as written, space-separated.
+  col refs text ?
+  col gmail_msgid i64 ?
+  col gmail_thrid i64 ?
+  # X-GM-LABELS, U+001F-joined.
+  col labels str ?
+  # The few headers the filer reads (lowercased names) and a bounce's report.
+  col headers json ?
+  col pipe enum mail_pipe ?
+  # linkedin, x_dm, discord, other: the counterpart's name on that channel.
+  col handle str ?
+  # careers_page: the fields as submitted, and the reference the page showed.
+  col fields json ?
+  col reference str ?
+  # other: the channel's name (slack, phone, meetup).
+  col channel str ?
+  command file application_id? mission_id? contact_id? corporation_id?
+  command ignore
 
 # The lanes (gym_reps, net_entries), cut with their lens.
 retired table 2
