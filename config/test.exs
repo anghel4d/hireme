@@ -28,3 +28,9 @@ config :hireme, :gate, false
 config :hireme, :mail_outbox, false
 
 config :logger, level: :warning
+
+# A machine without a CA store at the paths OTP walks (the Nix sandbox):
+# the bundle OTP's loader takes instead, for httpc and the connector's
+# :system cacerts.
+if path = System.get_env("HIREME_CACERTS"),
+  do: config(:public_key, cacerts_path: String.to_charlist(path))

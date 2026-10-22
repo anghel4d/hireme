@@ -126,6 +126,11 @@
             EXQLITE_SYSTEM_CFLAGS = "-I${pkgs.sqlite.dev}/include";
             EXQLITE_SYSTEM_LDFLAGS = "-L${pkgs.sqlite.out}/lib -lsqlite3";
             LANG = "C.UTF-8";
+            # The sandbox has no CA store at the paths OTP's loader walks,
+            # and OTP 28's httpc and the connector's :system cacerts read one
+            # (pubkey_os_cacerts) even for localhost: twelve tests fail
+            # without one. config/test.exs hands this bundle to public_key.
+            HIREME_CACERTS = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           };
           buildPhase = ''
             export HOME=$TMPDIR MIX_HOME=$TMPDIR/mix HEX_HOME=$TMPDIR/hex HEX_OFFLINE=1
