@@ -780,10 +780,7 @@ defmodule Hireme.Sequencer do
     end)
   rescue
     e ->
-      Logger.error(
-        "sequencer #{state.account_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
-      )
-
+      Logger.error("sequencer #{state.account_id}: " <> Security.trace(e, __STACKTRACE__))
       {:error, :raised}
   end
 
@@ -832,10 +829,12 @@ defmodule Hireme.Sequencer do
               {:refused, refusal, data, state}
 
             # Anything else is a bug, but it costs only this op: the kernel
-            # takes an op's rows only once it has been written whole.
+            # takes an op's rows only once it has been written whole. Logged
+            # without a message or an argument: an op may carry a mail.
             e ->
               Logger.error(
-                "sequencer #{state.account_id}: op #{op.op_id}: #{Exception.format(:error, e, __STACKTRACE__)}"
+                "sequencer #{state.account_id}: op #{op.op_id}: " <>
+                  Security.trace(e, __STACKTRACE__)
               )
 
               {:refused, :internal, %{}, state}

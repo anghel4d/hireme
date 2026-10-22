@@ -233,16 +233,7 @@ defmodule Hireme.Gmail.Session do
   end
 
   defp crashed(s, kind, stack) do
-    place =
-      case stack do
-        [{m, f, a, info} | _] ->
-          "#{Exception.format_mfa(m, f, if(is_list(a), do: length(a), else: a))} #{info[:file]}:#{info[:line]}"
-
-        _ ->
-          "?"
-      end
-
-    Logger.error("gmail #{s.account_id}: cycle #{inspect(kind)} at #{place}")
+    Logger.error("gmail #{s.account_id}: cycle raised " <> Security.trace(kind, stack))
     trouble(drop(s), {:crash, kind})
   end
 
@@ -552,20 +543,12 @@ defmodule Hireme.Gmail.Session do
   # Shots go first in a cycle: no catch-up holds one back.
   defp shoot_all(s) do
     s.account_id
-    |> in_flight()
+    |> Gmail.in_flight()
     |> Enum.reduce_while({:ok, s}, fn m, {:ok, s} ->
       case shoot(s, m) do
         {:ok, s} -> {:cont, {:ok, s}}
         error -> {:halt, error}
       end
-    end)
-  end
-
-  defp in_flight(account_id) do
-    Repo.with_account(account_id, fn ->
-      Repo.all(
-        from(m in Mission, where: m.kind == :email and m.state == :in_flight, order_by: m.id)
-      )
     end)
   end
 
@@ -736,7 +719,7 @@ defmodule Hireme.Gmail.Session do
   # process) stays in flight until All Mail can be asked.
   defp fail_all(s, reason) do
     s.account_id
-    |> in_flight()
+    |> Gmail.in_flight()
     |> Enum.filter(
       &(&1.message_id == nil or
           (Map.has_key?(s.attempts, &1.id) and not Map.has_key?(s.tried, &1.id)))

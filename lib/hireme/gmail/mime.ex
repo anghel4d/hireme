@@ -20,6 +20,8 @@ defmodule Hireme.Gmail.Mime do
   import Bitwise
   require Logger
 
+  alias Hireme.Security
+
   @type address :: %{name: String.t() | nil, addr: String.t()}
   @type attachment :: %{name: String.t() | nil, type: String.t(), size: non_neg_integer()}
   @type report :: %{
@@ -466,18 +468,10 @@ defmodule Hireme.Gmail.Mime do
     # Every rule here is total; should one still raise, the mail is kept as
     # an opaque one rather than taking its mailbox's sync down with it.
     e ->
-      # The frame's module, function, arity and line only: its argument
-      # list (a FunctionClauseError carries one) would hold the mail's own
-      # text, which no log may carry.
-      at =
-        case __STACKTRACE__ do
-          [{m, f, a, loc} | _] -> Exception.format_mfa(m, f, arity(a)) <> where(loc)
-          [{fun, a, loc} | _] -> "#{inspect(fun)}/#{arity(a)}" <> where(loc)
-          [] -> "?"
-        end
-
+      # Logged without a message or an argument (`Security.trace/2`): either
+      # may hold the mail's own text.
       Logger.error(
-        "a mail read as opaque: the MIME parser raised #{inspect(e.__struct__)} at #{at}"
+        "a mail read as opaque: the MIME parser raised " <> Security.trace(e, __STACKTRACE__)
       )
 
       {:ok, opaque(raw)}
@@ -529,11 +523,6 @@ defmodule Hireme.Gmail.Mime do
       report: report
     }
   end
-
-  defp arity(args) when is_list(args), do: length(args)
-  defp arity(n), do: n
-
-  defp where(loc), do: " #{loc[:file]}:#{loc[:line]}"
 
   defp sha_key(parts) do
     digest = :crypto.hash(:sha256, Enum.intersperse(parts, "\n"))

@@ -382,6 +382,26 @@ defmodule Hireme.Security do
   end
 
   @doc """
+  An error as a log may carry it: the exception's module (or the kind of a
+  caught exit), never its message, and the stack with each frame's arity
+  in place of its arguments. A message or an argument may quote what was
+  in play (a mail's subject, body or address, a secret, a param), which no
+  log may carry.
+  """
+  @spec trace(Exception.t() | atom(), Exception.stacktrace()) :: String.t()
+  def trace(e, stack) do
+    kind = if is_exception(e), do: e.__struct__, else: e
+
+    frames =
+      Enum.map(stack, fn
+        {m, f, a, l} when is_list(a) -> {m, f, length(a), l}
+        frame -> frame
+      end)
+
+    "#{inspect(kind)}\n" <> Exception.format_stacktrace(frames)
+  end
+
+  @doc """
   A clipped, printable copy of request metadata for the trail: byte-wise,
   every byte outside printable ASCII becomes `?`, so any input (a header of
   invalid UTF-8 included) gives a valid string and never raises.

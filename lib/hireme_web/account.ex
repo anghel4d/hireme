@@ -129,22 +129,11 @@ defmodule HiremeWeb.Account do
   # `invalid` and the wire session lives on. Logged with the stack only:
   # the params may carry codes, names or a key's secret, and the context
   # the session.
-  # A frame may carry its call's arguments; the log keeps only the arity.
-  defp arities(stack),
-    do:
-      Enum.map(stack, fn
-        {m, f, a, l} when is_list(a) -> {m, f, length(a), l}
-        frame -> frame
-      end)
-
   defp guarded(method, fun) do
     fun.()
   rescue
     e ->
-      Logger.error(
-        "account.* #{method} raised #{inspect(e.__struct__)}: " <>
-          Exception.format_stacktrace(arities(__STACKTRACE__))
-      )
+      Logger.error("account.* #{method} raised " <> Hireme.Security.trace(e, __STACKTRACE__))
 
       {:error, %{error: "invalid"}}
   end

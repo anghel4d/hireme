@@ -267,9 +267,16 @@ defmodule Hireme.Gmail do
     |> Enum.each(&forget/1)
   end
 
-  defp in_flight(account_id) do
+  @doc "The account's email missions in flight, by id: the session's to send."
+  @spec in_flight(pos_integer) :: [Hireme.Rows.Mission.t()]
+  def in_flight(account_id) do
     Repo.with_account(account_id, fn ->
-      Repo.all(from(m in Hireme.Rows.Mission, where: m.kind == :email and m.state == :in_flight))
+      Repo.all(
+        from(m in Hireme.Rows.Mission,
+          where: m.kind == :email and m.state == :in_flight,
+          order_by: m.id
+        )
+      )
     end)
   end
 
