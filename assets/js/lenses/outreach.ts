@@ -46,7 +46,7 @@ export type Item = {
   link: string | null; report: string | null; actor: string; filing: string; filed_by: string | null; seen: boolean
   corporation_id: number | null; application_id: number | null; contact_id: number | null; mission_id: number | null
   company: string | null; contact: string | null; application: string | null; confirmation: string | null
-  email?: { from: string | null; to: string[]; cc: string[]; reply_to: string | null; message_id: string | null; in_reply_to: string | null; pipe: string | null; bounced_at: string | null }
+  email?: { from: string | null; to: string[]; cc: string[]; reply_to: string | null; message_id: string | null; in_reply_to: string | null; pipe: string | null; bounced_at: string | null; labels: string[] }
   careers_page?: { fields: unknown; reference: string | null }
   linkedin?: { handle: string | null }; x_dm?: { handle: string | null }; discord?: { handle: string | null }
   other?: { channel: string | null; handle: string | null }
@@ -101,6 +101,10 @@ function tray(i: Item): Html {
     <button type="button" class="ghost" data-act="ignore" data-id="${i.id}">Not about the search</button></div>`
 }
 
+/** A mail the node found in Gmail's Spam (its \\Spam label, as Gmail reports it): hireme never moves mail, so the operator rescues it there. */
+export const inSpam = (i: Item): boolean => (i.email?.labels ?? []).some((l) => /^\\(spam|junk)$/i.test(l))
+export const SPAM = html`<span class="tag bad" title="Gmail filed this as spam. hireme never moves mail: open Spam in Gmail and mark it Not spam.">in Gmail Spam: rescue it there</span>`
+
 /** One item, collapsed to a line; opened, its whole text and its own fields. Opening an unseen reply marks it seen. */
 export function itemRow(i: Item): Html {
   const unseen = i.direction === "inbound" && !i.seen
@@ -110,6 +114,7 @@ export function itemRow(i: Item): Html {
       <span class="who">${i.direction === "inbound" ? "←" : i.direction === "outbound" ? "→" : ""} ${who(i)}</span>
       <span class="subject">${i.subject ?? ""}</span>
       ${i.company || i.application ? html`<span class="muted">${i.application ?? i.company}</span>` : EMPTY}
+      ${inSpam(i) ? SPAM : EMPTY}
       ${i.status === "bounced" ? html`<span class="tag warn">bounced</span>` : EMPTY}
       ${i.confirmation === "provisional" ? html`<span class="tag warn">provisional</span>` : EMPTY}
       ${i.filing === "unfiled" ? html`<span class="tag">unfiled</span>` : EMPTY}

@@ -11,7 +11,7 @@ import { failed, application, command, ids, put, query as read, Refused, row, va
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
 import { WHY as HOLD } from "./fire.ts"
-import { itemAct, itemList, outreachQuery } from "./outreach.ts"
+import { inSpam, itemAct, itemList, outreachQuery, SPAM } from "./outreach.ts"
 import { rowHref } from "./world.ts"
 
 type Doc = {
@@ -183,7 +183,7 @@ function around(a: Row, appId: number): Html {
       ${corp.headcount ? html`<p class="muted">${NUM.format(Number(corp.headcount))} people${corp.headcount_on ? ` as of ${str(corp.headcount_on)}` : ""}</p>` : EMPTY}` : html`<p class="hint">No corporation linked.</p>`}
     ${c ? html`<p><a href="/outreach/${item(c.id, c.name)}" data-nav><b>${str(c.name)}</b></a> ${str(c.title)}</p>` : EMPTY}
   </section>
-  ${said && said.rows.length > 0 ? html`<section class="card" data-key="said"><h2>Outreach <span class="muted">${said.total}</span></h2>${itemList(said)}</section>` : EMPTY}`
+  ${said && said.rows.length > 0 ? html`<section class="card" data-key="said"><h2>Outreach <span class="muted">${said.total}</span> ${said.rows.some(inSpam) ? SPAM : EMPTY}</h2>${itemList(said)}</section>` : EMPTY}`
 }
 
 function events(d: Doc, appId: number): Html {
