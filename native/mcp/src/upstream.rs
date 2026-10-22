@@ -25,7 +25,8 @@ use serde_json::{Value as Json, json};
 use tokio::sync::{Notify, Semaphore, broadcast, oneshot};
 
 use crate::link::{self, Carrier, Dial, Inbound};
-use mcp::tools::{self, Masks};
+use mcp::tools::Masks;
+pub use mcp::session::{Event, Submitted, Verdict};
 
 const PING: Duration = Duration::from_secs(15);
 const SILENT: Duration = Duration::from_secs(45);
@@ -56,31 +57,12 @@ impl Welcome {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum Verdict {
-    Ack { rev: u64, id: u32 },
-    Nack { code: u16, data: Json },
-}
-
 /// An RPC's answer as the node sent it: `Ok(result)` or `Err(error)`.
 pub type Answer = Result<Json, Json>;
 
 /// The carrier dropped (or never came) before the answer did.
 #[derive(Clone, Debug)]
 pub struct Lost(pub String);
-
-/// What agents with open streams hear.
-#[derive(Clone, Debug)]
-pub enum Event {
-    /// The (table, id) rows a PATCH wrote or deleted.
-    Moved(Arc<HashSet<(u16, u32)>>),
-    /// A BOOT replaced the replica: every watched row may have moved.
-    Booted,
-    /// A WELCOME brought masks: the first ones (`true`), or others than before (the tools offered changed).
-    Masks(bool),
-    /// The session ended for good (key revoked, account suspended, a node on another wire).
-    Ended(String),
-}
 
 /// What one agent holds: its claimed applications and its share of the bulk contract.
 #[derive(Default)]
@@ -145,13 +127,6 @@ struct State {
     last_end: String,
 }
 
-/// How a write call went: each op's verdict in order (`None`: none came by the deadline), and why
-/// the rest never will when the carrier dropped mid-call.
-pub struct Submitted {
-    pub verdicts: Vec<Option<Verdict>>,
-    pub lost: Option<String>,
-    pub atomic: bool,
-}
 
 /// Replicas of the rows, each fed every frame; a read borrows a free one.
 struct Replicas {
@@ -275,7 +250,16 @@ impl Upstream {
 
     /// Waits until the replica holds its train (READY_WAIT at most).
     pub async fn trained(&self) -> Result<(), String> {
-        self.wait(|up| up.is_trained().then_some(())).await.ok_or_else(|| match self.dead() {
+        self.wait(|up| up.is_trained().then_some(())).await;
+        self.untrained().map_or(Ok(()), Err)
+    }
+
+    /// Why the replica cannot be read yet, or `None` once it holds its train.
+    pub fn untrained(&self) -> Option<String> {
+        if self.is_trained() {
+            return None;
+        }
+        Some(match self.dead() {
             Some(why) => why,
             None => format!("not connected yet: the replica has not booted ({})", lock(&self.state).last_end),
         })
@@ -300,14 +284,6 @@ impl Upstream {
     /// Reads a replica (any free one). A kernel panic is an error, never the daemon's end.
     pub async fn read<R>(&self, f: impl FnOnce(&mut Kernel) -> R) -> Result<R, String> {
         self.replicas.with(f).await
-    }
-
-    /// A kernel query under the key's grants, once the train is in: `Ok(Ok(v))`, `Ok(Err((refusal, data)))`.
-    pub async fn query(&self, op: &str, args: &Json) -> Result<Result<Json, (String, Json)>, String> {
-        self.trained().await?;
-        let mut req = args.clone();
-        req["op"] = json!(op);
-        self.read(|k| k.query(&req).map_err(|r| (tools::refusal(r.code), r.data))).await
     }
 
     /// The replica no longer matches the node: emptied, and a fresh session boots it whole.

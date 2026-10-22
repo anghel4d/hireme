@@ -7,6 +7,7 @@
 
 pub mod diag;
 pub mod mission;
+pub mod session;
 pub mod tools;
 
 use std::collections::HashSet;
