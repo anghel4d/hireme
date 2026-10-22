@@ -20,7 +20,7 @@ defmodule Hireme.GmailTest do
   defp imap(fake) do
     {:ok, conn} = Imap.connect("localhost", fake.imap_port, fake.cacerts)
     {:ok, conn} = Imap.login(conn, @user, @password)
-    {:ok, folder, conn} = Imap.all_mail(conn)
+    {:ok, %{all: folder}, conn} = Imap.folders(conn)
     {:ok, info, conn} = Imap.select(conn, folder)
     {conn, folder, info}
   end
@@ -317,12 +317,31 @@ defmodule Hireme.GmailSessionTest do
     assert {:error, :auth} = Gmail.link(a.id, @user, "wrong password here")
     assert read_box(a) == nil
 
+    # Mail older than the backfill's window is never read; the session idles past it.
+    old = DateTime.add(DateTime.utc_now(), -200 * 86_400)
+
+    FakeGmail.deliver(
+      fake,
+      "From: x@acme.example\r\nSubject: Old\r\nMessage-ID: <old@acme.example>\r\n\r\nOld.\r\n",
+      ["\\Inbox"],
+      date: old
+    )
+
     assert {:ok, %{status: "linking"}} = Gmail.link(a.id, @user, @password)
     box = read_box(a)
     assert box.address == @user and is_binary(box.secret)
     refute box.secret =~ "abcdefghijklmnop"
     assert eventually(fn -> read_box(a).status == :live end)
     assert [%{ok: false}, %{ok: true}, %{ok: true} | _] = FakeGmail.logins(fake)
+
+    [{pid, _}] = Registry.lookup(Hireme.Gmail.Registry, a.id)
+
+    assert eventually(fn ->
+             match?(%{imap: %{idle: tag}} when tag != nil, :sys.get_state(pid))
+           end)
+
+    assert %{last_uid: 1} = :sys.get_state(pid)
+    assert Repo.with_account(a.id, fn -> Repo.all(Outreach) end) == []
   end
 
   defp read_box(a), do: Repo.with_account(a.id, fn -> Repo.one(Mailbox) end)
@@ -442,5 +461,40 @@ defmodule Hireme.GmailSessionTest do
              Enum.filter(items(a), &id?(&1, "r2@acme.example"))
 
     assert m == mission.id
+  end
+
+  defp labels(%{labels: nil}), do: []
+  defp labels(%{labels: l}), do: String.split(l, <<0x1F>>)
+
+  test "a reply Gmail filed as spam is kept, marked and labelled, never moved; rescued, the mark goes",
+       %{account: a, fake: fake, operator: operator} do
+    {mission, fake} = fired(a, fake, operator)
+    raw = reply(mission.message_id, 3)
+
+    FakeGmail.deliver(fake, raw, ["\\Spam"])
+    # Gmail pushes nothing for Spam to an IDLE on All Mail; the next cycle reads it.
+    [{pid, _}] = Registry.lookup(Hireme.Gmail.Registry, a.id)
+    send(pid, :wake)
+
+    assert eventually(fn -> Enum.any?(items(a), &id?(&1, "r3@acme.example")) end)
+    row = Enum.find(items(a), &id?(&1, "r3@acme.example"))
+    assert "\\Spam" in labels(row) and row.mission_id == mission.id
+
+    in_gmail = fn ->
+      Enum.find(FakeGmail.messages(fake), &(&1.message_id == "r3@acme.example"))
+    end
+
+    assert eventually(fn -> "hireme" in in_gmail.().labels end)
+    assert "\\Spam" in in_gmail.().labels
+
+    # The operator rescues it in Gmail: it reaches All Mail, and the mark goes.
+    FakeGmail.deliver(fake, raw)
+
+    assert eventually(fn ->
+             row = Enum.find(items(a), &id?(&1, "r3@acme.example"))
+             "\\Spam" not in labels(row)
+           end)
+
+    assert [_] = Enum.filter(items(a), &id?(&1, "r3@acme.example"))
   end
 end

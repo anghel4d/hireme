@@ -121,18 +121,25 @@ defmodule Hireme.Gmail.Imap do
   end
 
   @doc """
-  All Mail's name, found by its `\\All` flag. `:no_all_mail` means the
-  operator hid it from IMAP in Gmail's label settings.
+  The folders the link reads, found by their SPECIAL-USE flags (the names
+  are localized): All Mail (`\\All`) and Spam (`\\Junk`, nil when Gmail
+  shows none). `:no_all_mail` means the operator hid All Mail from IMAP in
+  Gmail's label settings.
   """
-  @spec all_mail(t) :: {:ok, String.t(), t} | {:error, error}
-  def all_mail(conn) do
+  @spec folders(t) :: {:ok, %{all: String.t(), junk: String.t() | nil}, t} | {:error, error}
+  def folders(conn) do
     case command(conn, ~s(LIST "" "*")) do
       {:ok, {:ok, _, untagged}, conn} ->
-        all = for {:list, flags, name} <- untagged, "\\all" in flags, do: name
+        flagged = fn flag ->
+          Enum.find_value(untagged, fn
+            {:list, flags, name} -> flag in flags and name
+            _ -> nil
+          end)
+        end
 
-        case all do
-          [name | _] -> {:ok, name, conn}
-          [] -> fail(conn, :no_all_mail)
+        case flagged.("\\all") do
+          nil -> fail(conn, :no_all_mail)
+          all -> {:ok, %{all: all, junk: flagged.("\\junk")}, conn}
         end
 
       other ->

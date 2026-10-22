@@ -48,15 +48,25 @@ defmodule Hireme.Gmail.Session do
   defstruct [
     :account_id,
     :imap,
+    :folder,
+    :junk,
+    :junk_validity,
     :address,
     :status,
     :daily_cap,
     :last_uid,
+    # The highest All Mail UID the last sync listed, kept or held, and the
+    # next UID All Mail had when it was selected.
+    :listed,
+    :uidnext,
     :noted,
     :renew,
     :retry,
     :started,
     locked: nil,
+    # Spam's UIDs read this session: Gmail empties Spam after 30 days, so
+    # it is read whole once a session and then only what is new.
+    junk_seen: MapSet.new(),
     tries: 0,
     attempts: %{},
     tried: %{}
@@ -173,6 +183,7 @@ defmodule Hireme.Gmail.Session do
   defp cycle(s) do
     with {:ok, s} <- connected(s),
          {:ok, s} <- sync(s),
+         {:ok, s} <- spam(s),
          {:ok, s} <- shoot_all(s),
          {:ok, s} <- idle(s) do
       {:noreply, %{s | tries: 0}}
@@ -205,9 +216,18 @@ defmodule Hireme.Gmail.Session do
         with {:ok, password} <- unsealed(s),
              {:ok, conn} <- Imap.connect(host, port, Gmail.cacerts()),
              {:ok, conn} <- Imap.login(conn, box.address, password),
-             {:ok, folder, conn} <- Imap.all_mail(conn),
+             {:ok, %{all: folder, junk: junk}, conn} <- Imap.folders(conn),
              {:ok, info, conn} <- Imap.select(conn, folder) do
-          s = %{s | imap: conn, address: box.address, status: status, daily_cap: box.daily_cap}
+          s = %{
+            s
+            | imap: conn,
+              folder: folder,
+              junk: junk,
+              address: box.address,
+              status: status,
+              daily_cap: box.daily_cap
+          }
+
           {:ok, cursor(s, box, folder, info)}
         else
           {:error, why} -> {:error, why, %{s | imap: nil}}
@@ -229,12 +249,16 @@ defmodule Hireme.Gmail.Session do
 
   # All Mail named again, or its UIDs renumbered: the walk starts afresh
   # (Message-IDs keep what is already held from coming twice).
-  defp cursor(s, box, folder, %{uidvalidity: validity}) do
+  defp cursor(s, box, folder, %{uidvalidity: validity, uidnext: next}) do
+    cursor(%{s | uidnext: next}, box, folder, validity)
+  end
+
+  defp cursor(s, box, folder, validity) do
     if box.folder == folder and box.uidvalidity == validity do
-      %{s | last_uid: box.last_uid}
+      %{s | last_uid: box.last_uid, listed: box.last_uid}
     else
       server(s, %{folder: folder, uidvalidity: validity, last_uid: nil})
-      %{s | last_uid: nil}
+      %{s | last_uid: nil, listed: nil}
     end
   end
 
@@ -249,10 +273,18 @@ defmodule Hireme.Gmail.Session do
         else: Imap.since_date(s.imap, Date.add(Date.utc_today(), -Security.mail_backfill_days()))
 
     case found do
-      {:ok, uids, imap} -> walk(%{s | imap: imap}, uids)
-      {:error, why} -> {:error, why, %{s | imap: nil}}
+      {:ok, uids, imap} ->
+        walk(%{s | imap: imap, listed: Enum.max(uids, fn -> s.listed end)}, uids)
+
+      {:error, why} ->
+        {:error, why, %{s | imap: nil}}
     end
   end
+
+  # A first sync that found nothing in its window starts after what All Mail
+  # held: what came before it is older than the backfill reads.
+  defp walk(%{last_uid: nil, uidnext: next} = s, []) when is_integer(next) and next > 1,
+    do: walk(%{advance(s, next - 1) | listed: max(s.listed || 0, next - 1)}, [])
 
   defp walk(s, []), do: {:ok, noted(s)}
 
@@ -326,6 +358,61 @@ defmodule Hireme.Gmail.Session do
 
       {:error, _} = e ->
         e
+    end
+  end
+
+  # Spam, under the same rules as All Mail: the filer's candidates kept and
+  # labelled, marked with Gmail's own \\Spam label (the page's "rescue it
+  # there" badge), nothing moved; then All Mail is selected again, which
+  # the searches and the IDLE read.
+  defp spam(%{junk: nil} = s), do: {:ok, s}
+
+  defp spam(s) do
+    with {:ok, info, imap} <- Imap.select(s.imap, s.junk),
+         s = junk_validity(%{s | imap: imap}, info.uidvalidity),
+         {:ok, uids, imap} <- Imap.since_uid(s.imap, 1),
+         {:ok, s} <-
+           spam_walk(%{s | imap: imap}, Enum.reject(uids, &MapSet.member?(s.junk_seen, &1))),
+         {:ok, _info, imap} <- Imap.select(s.imap, s.folder) do
+      {:ok, %{s | imap: imap}}
+    else
+      {:error, why} -> {:error, why, %{s | imap: nil}}
+    end
+  end
+
+  defp junk_validity(%{junk_validity: v} = s, v), do: s
+  defp junk_validity(s, v), do: %{s | junk_validity: v, junk_seen: MapSet.new()}
+
+  defp spam_walk(s, []), do: {:ok, s}
+
+  defp spam_walk(s, uids) do
+    {batch, rest} = Enum.split(uids, @batch)
+
+    with {:ok, envelopes, imap} <- Imap.envelopes(s.imap, batch) do
+      {kept, seen, held, imap} =
+        envelopes
+        |> Enum.sort_by(& &1.uid)
+        |> Enum.reduce_while({[], s.junk_seen, false, imap}, fn env, {kept, seen, _, imap} ->
+          env = Map.update(env, :labels, ["\\Spam"], &Enum.uniq(&1 ++ ["\\Spam"]))
+
+          case take(%{s | imap: imap}, env) do
+            {:kept, imap} -> {:cont, {[env.uid | kept], MapSet.put(seen, env.uid), false, imap}}
+            {:dropped, imap} -> {:cont, {kept, MapSet.put(seen, env.uid), false, imap}}
+            {:wait, imap} -> {:halt, {kept, seen, true, imap}}
+            {:error, why} -> {:halt, {kept, seen, {:error, why}, nil}}
+          end
+        end)
+
+      case held do
+        {:error, why} ->
+          {:error, why}
+
+        _ ->
+          with {:ok, imap} <- Imap.label(imap, kept, "hireme") do
+            s = %{s | imap: imap, junk_seen: seen}
+            if held, do: {:ok, s}, else: spam_walk(s, rest)
+          end
+      end
     end
   end
 
@@ -626,7 +713,22 @@ defmodule Hireme.Gmail.Session do
 
   # ---------------------------------------------------------------- time
 
+  # Mail that came while other commands ran was counted in their answers,
+  # never pushed to an IDLE: one look past what the sync listed first.
   defp idle(s) do
+    case Imap.since_uid(s.imap, (s.listed || 0) + 1) do
+      {:ok, [], imap} -> really_idle(%{s | imap: imap})
+      {:ok, _new, imap} -> cycle_again(%{s | imap: imap})
+      {:error, why} -> {:error, why, %{s | imap: nil}}
+    end
+  end
+
+  defp cycle_again(s) do
+    send(self(), :wake)
+    {:ok, s}
+  end
+
+  defp really_idle(s) do
     case Imap.idle(s.imap) do
       {:ok, pushed, imap} ->
         if Enum.any?(pushed, &match?({:exists, _}, &1)), do: send(self(), :wake)

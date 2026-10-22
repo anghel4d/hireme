@@ -136,7 +136,7 @@ defmodule Hireme.Gmail do
 
     with {:ok, conn} <- Imap.connect(host, port, cacerts()) |> link_error(),
          {:ok, conn} <- Imap.login(conn, address, password) |> link_error(),
-         {:ok, _folder, conn} <- Imap.all_mail(conn) |> link_error() do
+         {:ok, _folders, conn} <- Imap.folders(conn) |> link_error() do
       Imap.logout(conn)
     end
   end
@@ -328,10 +328,13 @@ defmodule Hireme.Gmail do
   # else of a row moves, and its filing never.
   defp keep(account_id, mail, pipe, meta) do
     case held(account_id, mail.key) do
+      # A copy from Gmail adds the ids it lacked, and says whether the mail
+      # now sits in Spam or was rescued from it.
       %{"id" => id} = row ->
-        if pipe == :gmail and row["gmail_msgid"] == nil and meta[:msgid] != nil,
-          do: duplicate(write(account_id, id, gmail(meta))),
-          else: {:ok, :duplicate}
+        if pipe == :gmail and meta[:msgid] != nil and
+             (row["gmail_msgid"] == nil or spam?(row["labels"]) != spam?(meta[:labels])),
+           do: duplicate(write(account_id, id, gmail(meta))),
+           else: {:ok, :duplicate}
 
       _ ->
         item = Email.inbound(inbound(mail, pipe, meta))
@@ -354,6 +357,13 @@ defmodule Hireme.Gmail do
       _ -> nil
     end
   end
+
+  defp spam?(labels),
+    do:
+      labels
+      |> List.wrap()
+      |> Enum.flat_map(&String.split(&1, <<0x1F>>))
+      |> Enum.member?("\\Spam")
 
   defp duplicate({:ok, _}), do: {:ok, :duplicate}
   defp duplicate({:refused, code, data}), do: {:error, {code, data}}
