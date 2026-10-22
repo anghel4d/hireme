@@ -152,15 +152,16 @@ checks of 0e5443b) and read-only against production through the gate.
 
 ## Landings
 
-1. `native/mcp/src/session.rs` extracted from `agent.rs`; the daemon drives
+1. (1a5afe0) `native/mcp/src/session.rs` extracted from `agent.rs`; the daemon drives
    it; no node change; net near zero. Gates: cargo test -p mcp (client),
    clippy over the workspace, the bench-node checks, a read-only run against
    production.
-2. The node drives the same machine through the NIF; the Elixir tool layer
+2. (3477b96) The node drives the same machine through the NIF; the Elixir tool layer
    deleted; mcp.ex at its plumbing. Gates: the two Elixir suites unchanged,
    mix test whole, the acceptance (test/e2e/run.sh), the daemon's checks
    again (the crate changed under it). Net about -1,000.
-3. fable-overwatch's pass: simplification over both, the ledger.
+3. fable-overwatch's pass: simplification over both (one failure type for a
+   read, one JSON-RPC error builder on the node, the dead ends), the ledger.
 
 Rules as ever: explicit-path commits, no amend, push to main, each sha in
 the team log; the lane names the files it is in before it writes them.

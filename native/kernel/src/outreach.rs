@@ -125,11 +125,6 @@ impl Kind {
         !matches!(self, Kind::Email | Kind::Note)
     }
 
-    /// The kind has a direction (a note has none).
-    pub fn directed(self) -> bool {
-        self != Kind::Note
-    }
-
     /// How a body reads: markdown for a note, plain text otherwise.
     pub fn body_format(self) -> &'static str {
         if self == Kind::Note { "markdown" } else { "text" }

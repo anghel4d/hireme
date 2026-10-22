@@ -33,6 +33,7 @@ defmodule HiremeWeb.Mcp do
   # deadline, before this, with what landed so far (`Session`).
   @wait 90_000
   @keepalive 15_000
+  @unsure "; it may still have written: find or get before calling it again"
 
   @doc "Answers one request to `/mcp`."
   def call(conn) do
@@ -199,18 +200,15 @@ defmodule HiremeWeb.Mcp do
     |> send_resp(200, JSON.encode_to_iodata!(answer))
   end
 
+  @doc false
+  # One JSON-RPC error, the plug's and the session's.
+  def error(id, code, message),
+    do: %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}}
+
+  @doc false
   # A request the session could not finish: if it was a write, some of it
   # may have landed, so the agent reads before sending it again.
-  defp failure(id, code, why),
-    do:
-      rpc_failure(
-        id,
-        code,
-        why <> "; it may still have written: find or get before calling it again"
-      )
-
-  defp rpc_failure(id, code, message),
-    do: %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}}
+  def failure(id, code, why), do: error(id, code, why <> @unsure)
 
   # No session for a valid key: why, when to retry, and a line in the log.
   defp unavailable(conn, msg, why) do
@@ -232,7 +230,7 @@ defmodule HiremeWeb.Mcp do
   defp rpc_error(conn, status, id, code, message) do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(status, JSON.encode_to_iodata!(rpc_failure(id, code, message)))
+    |> send_resp(status, JSON.encode_to_iodata!(error(id, code, message)))
   end
 
   # The session a request names (resumed under its id when the node no
@@ -359,6 +357,7 @@ defmodule HiremeWeb.Mcp.Session do
   import Bitwise, only: [&&&: 2]
   alias Hireme.Kernel.Nif
   alias Hireme.{Lease, Security, Sequencer}
+  alias HiremeWeb.Mcp
   alias HiremeWeb.Wire.Codec
 
   @registry HiremeWeb.Mcp.Registry
@@ -485,14 +484,7 @@ defmodule HiremeWeb.Mcp.Session do
   end
 
   defp failure(id),
-    do: %{
-      jsonrpc: "2.0",
-      id: id,
-      error: %{
-        code: -32_603,
-        message: "the session ended before it answered; send the request again"
-      }
-    }
+    do: Mcp.error(id, -32_603, "the session ended before it answered; send the request again")
 
   def close(pid), do: GenServer.cast(pid, :close)
 
@@ -675,16 +667,8 @@ defmodule HiremeWeb.Mcp.Session do
     :ok
   end
 
-  # A call answered without its verdicts: why, and how to go on without writing twice.
-  defp fail(call, why) do
-    help = "; find or get before calling again, so an insert does not land twice"
-
-    reply(call.to, %{
-      jsonrpc: "2.0",
-      id: call.to.id,
-      error: %{code: -32_603, message: why <> help}
-    })
-  end
+  # A call answered without its verdicts: it may have written.
+  defp fail(call, why), do: reply(call.to, Mcp.failure(call.to.id, -32_603, why))
 
   # ------------------------------------------------------------------ the machine
 
@@ -707,8 +691,7 @@ defmodule HiremeWeb.Mcp.Session do
     end
   end
 
-  defp next(s, {:answer, nil}, to), do: tap(s, fn _ -> reply(to, nil) end)
-  defp next(s, {:answer, json}, to), do: tap(s, fn _ -> reply(to, JSON.decode!(json)) end)
+  defp next(s, {:answer, json}, to), do: tap(s, fn _ -> reply(to, json && JSON.decode!(json)) end)
   defp next(s, {:pending, ticket, effect}, to), do: effect(s, ticket, effect, to)
 
   defp resume(s, ticket, outcome, to),
@@ -833,11 +816,9 @@ defmodule HiremeWeb.Mcp.Session do
   defp reply(%{listen: true} = to, answer), do: GenServer.reply(to.from, {:ok, answer})
   defp reply(to, answer), do: GenServer.reply(to.from, answer)
 
-  defp rpc_error(to, message),
-    do: %{jsonrpc: "2.0", id: to.id, error: %{code: -32_603, message: message}}
+  defp rpc_error(to, message), do: Mcp.error(to.id, -32_603, message)
 
   defp upload_refusal(:too_large), do: "a CV file is at most 10 MiB"
-  defp upload_refusal(:type), do: "name the file .pdf, .docx, .doc or .md (markdown in UTF-8)"
   defp upload_refusal(:cap), do: "the account already holds 1000 CV files"
   defp upload_refusal(other), do: "the upload failed (#{inspect(other)})"
 

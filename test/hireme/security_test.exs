@@ -8,7 +8,7 @@ defmodule Hireme.SecurityTest do
   test "a crash log names the kind and the frames' arities, never a message or an argument" do
     line =
       try do
-        only("Subject: the secret subject", "ada@example.com")
+        apply(&only/2, ["Subject: the secret subject", "ada@example.com"])
       rescue
         e -> Security.trace(e, __STACKTRACE__)
       end

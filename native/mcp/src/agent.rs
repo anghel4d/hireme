@@ -98,20 +98,15 @@ impl Agent {
     /// Steps a request to its answer: each step on a free replica, each effect on the upstream between them.
     async fn drive(&self, first: impl FnOnce(&mut Session, &mut kernel::abi::Kernel, &dyn Host) -> Step) -> Option<Json> {
         let host = Facts { up: &self.up, agent: self.id };
-        let mut step = match self.up.read(|k| first(&mut lock(&self.session), k, &host)).await {
-            Ok(step) => step,
-            Err(why) => return Some(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":why}})),
-        };
+        let mut step = self.up.read(|k| first(&mut lock(&self.session), k, &host)).await;
         loop {
             let (ticket, effect) = match step {
-                Step::Answer(answer) => return answer,
-                Step::Pending(ticket, effect) => (ticket, effect),
-            };
-            let outcome = self.perform(effect).await;
-            step = match self.up.read(|k| lock(&self.session).resume(k, &host, ticket, outcome)).await {
-                Ok(step) => step,
+                Ok(Step::Answer(answer)) => return answer,
+                Ok(Step::Pending(ticket, effect)) => (ticket, effect),
                 Err(why) => return Some(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":why}})),
             };
+            let outcome = self.perform(effect).await;
+            step = self.up.read(|k| lock(&self.session).resume(k, &host, ticket, outcome)).await;
         }
     }
 

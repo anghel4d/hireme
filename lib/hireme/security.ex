@@ -54,19 +54,9 @@ defmodule Hireme.Security do
   @spec mail_backfill_days() :: pos_integer()
   def mail_backfill_days, do: 180
 
-  # Inbound mail's bounds: one message, its parts, multipart nesting, one
-  # header's decoded value.
+  # Inbound mail's bound: one message.
   @spec mail_max_bytes() :: pos_integer()
   def mail_max_bytes, do: 25 * 1024 * 1024
-
-  @spec mail_max_parts() :: pos_integer()
-  def mail_max_parts, do: 200
-
-  @spec mail_max_depth() :: pos_integer()
-  def mail_max_depth, do: 10
-
-  @spec mail_max_header() :: pos_integer()
-  def mail_max_header, do: 8 * 1024
 
   # A linked mailbox's credential, once Gmail refused it, is tried again at
   # most this often: Google locks out an account that keeps failing.
