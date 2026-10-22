@@ -609,7 +609,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 return Err(crate::fire::answer(rows, ctx, why, id, named.or(last)));
             }
             let (key, _) = crate::fire::authority(rows, ctx, id, named)?;
-            let email = rows.table(table::MISSIONS).and_then(|t| t.u32(id, col::missions::KIND)) == Some(u32::from(enums::mission_kind::EMAIL));
+            let email = rows.table(table::MISSIONS).and_then(|t| t.u32(id, col::missions::KIND)) == Some(u32::from(enums::outreach_kind::EMAIL));
             if email {
                 crate::fire::mail_gate(rows, ctx, id, key)?;
             }
@@ -632,16 +632,16 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             let id = op.target;
             crate::fire::may_report(rows, ctx, id)?;
             let gmail = (param_val(op, param::landed::GMAIL_MSGID), param_val(op, param::landed::GMAIL_THRID));
-            let mut out = crate::fire::landed(rows, ctx, id, gmail);
+            let mut out = crate::fire::landed(rows, ctx, id, gmail)?;
             let app = crate::fire::application(rows, id).unwrap_or(0);
             // A landed shot is the application going out: submitted, its CV
-            // version frozen, unless it had already gone.
+            // version frozen as the shot carried it, unless it had already gone.
             if let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(app)) {
                 let from = app_stage(t, app);
                 if from < Stage::Submitted {
                     let mut went = moved(t, app, from, Stage::Submitted, None, op, ctx);
                     if let Some(row) = went.first_mut() {
-                        let version = pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), app).version;
+                        let version = crate::fire::carried_cv(rows, id).or_else(|| pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), app).version);
                         row.set(A::CV_VERSION_ID, version.map_or(Val::None, u));
                     }
                     out.extend(went);

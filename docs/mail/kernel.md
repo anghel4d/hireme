@@ -29,14 +29,15 @@ One per route of an application; the unit of fire.
 | column | type | notes |
 | --- | --- | --- |
 | application_id | ref applications ! | |
-| kind | enum `mission_kind`: email, careers_page, linkedin, x_dm, discord, other ! | |
-| target | str ? | the route: a URL or a handle; an email's To, up to 10 addresses, comma-separated |
+| kind | enum `outreach_kind` ! | the outreach it produces: any kind but `note` (turing's `Kind::fireable`) |
+| target | str ? | the route: a URL or a handle; an email's To, up to 10 addresses, read by `outreach::addrs` and stored bare, comma-separated |
 | contact_id | ref contacts ? | |
 | draft | text ? | markdown: a form's fields, a DM's text; an email's body |
 | cc, subject | str ? | an email's |
 | in_reply_to, refs | str ?, text ? | an email follow-up's, as the thread holds them |
 | message_id | str ? readonly | the Message-ID the node minted, stamped before SMTP |
 | gmail_msgid, gmail_thrid | i64 ? readonly | set by `landed` |
+| cv_version_id | ref cv_versions ? readonly | the CV the shot carries, recorded by `fire`: the version the key's hash covered; the node attaches it, and `landed` freezes it on the application |
 | state | enum `mission_state`: draft, draft_ready, fire_ready, in_flight, fired, cancelled ! = draft | |
 | last_error | text ? readonly | the last failed shot's reason (rule 2) |
 | fired_at | time ? readonly | when the shot landed |
@@ -64,8 +65,10 @@ Commands:
   mail actor only (the node, after SMTP accepted it; also after a crash, when
   Gmail's Sent holds the Message-ID). Other kinds: the API key that fired, or
   the operator (the agent's report: rule 3 makes it provisional). One op: the
-  mission fired (fired_at, the Gmail ids), its shot burned, the application
-  moved to submitted (from fire_ready or open_fire; later
+  mission fired (fired_at, the Gmail ids), its shot burned, an email's sent
+  record written (`outreach::sent_record`: an outbound outreach row filed to
+  the mission, or Gmail's copy of it updated; an unstamped email is refused
+  `stage`, rule `unstamped`), the application moved to submitted (from fire_ready or open_fire; later
   stages stay) with its CV version frozen, and a `fire` event.
 - `failed reason:text`: the shot failed (SMTP error; a form that refused).
   Same authority as `landed`. The mission back to fire_ready with last_error,

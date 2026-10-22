@@ -880,7 +880,8 @@ CREATE TABLE "missions" (
   "refs" TEXT,
   "message_id" TEXT,
   "gmail_msgid" INTEGER,
-  "gmail_thrid" INTEGER
+  "gmail_thrid" INTEGER,
+  "cv_version_id" INTEGER REFERENCES "cv_versions"("id") ON DELETE SET NULL
 ) STRICT;
 CREATE INDEX "missions__account_account_id" ON "missions" ("account_id");
 CREATE INDEX "missions__index_application_id" ON "missions" ("account_id", "application_id");
@@ -888,6 +889,8 @@ CREATE TRIGGER "missions__ref_application_id_insert" BEFORE INSERT ON "missions"
 CREATE TRIGGER "missions__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "missions" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.application_id'); END;
 CREATE TRIGGER "missions__ref_contact_id_insert" BEFORE INSERT ON "missions" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.contact_id'); END;
 CREATE TRIGGER "missions__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "missions" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.contact_id'); END;
+CREATE TRIGGER "missions__ref_cv_version_id_insert" BEFORE INSERT ON "missions" WHEN NEW."cv_version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."cv_version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.cv_version_id'); END;
+CREATE TRIGGER "missions__ref_cv_version_id_update" BEFORE UPDATE OF "cv_version_id", "account_id" ON "missions" WHEN NEW."cv_version_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_versions" WHERE "id" = NEW."cv_version_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.cv_version_id'); END;
 
 CREATE TABLE "fire_requests" (
   "id" INTEGER PRIMARY KEY AUTOINCREMENT,

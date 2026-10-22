@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x48e1;
-export const SCHEMA_REV = 0x88858089;
+export const WIRE_HASH = 0x9f8f;
+export const SCHEMA_REV = 0xf79935a7;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -173,7 +173,7 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "cv_versions": {"id":44,"name":"cv_versions","domain":"corpus","residency":"resident","cap":100000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["root_id",8,"ref",1,"cv_roots"],["n",9,"u32",33],["body",10,"text",0],["blob_sha",11,"str",0],["blob_name",12,"str",0],["blob_type",13,"str",32],["blob_bytes",14,"u32",32],["text",15,"text",32],["note",16,"str",0],["actor",17,"enum",33,"actor"],["key_id",18,"ref",16416,"api_keys"]]},
   "cv_masks": {"id":46,"name":"cv_masks","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["name",8,"str",1],["pattern",9,"text",1],["note",10,"str",0]]},
   "cv_rules": {"id":47,"name":"cv_rules","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["position",8,"u32",1,null,"0"],["root_id",9,"ref",1,"cv_roots"],["name",10,"str",0],["pattern",11,"text",1],["enabled",12,"bool",1,null,"true"]]},
-  "missions": {"id":48,"name":"missions","domain":"desk","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"enum",1,"mission_kind"],["target",10,"str",0],["contact_id",11,"ref",0,"contacts"],["draft",12,"text",0],["state",13,"enum",1,"mission_state","draft"],["last_error",14,"text",32],["fired_at",15,"time",32],["fired_by",16,"enum",32,"actor"],["fire_key_id",17,"ref",16416,"fire_keys"],["fired_with",18,"ref",16416,"api_keys"],["in_flight_at",19,"time",32],["confirmation",20,"enum",32,"confirmation"],["note",21,"text",0],["cc",22,"str",0],["subject",23,"str",0],["in_reply_to",24,"str",0],["refs",25,"text",0],["message_id",26,"str",32],["gmail_msgid",27,"i64",32],["gmail_thrid",28,"i64",32]]},
+  "missions": {"id":48,"name":"missions","domain":"desk","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"enum",1,"outreach_kind"],["target",10,"str",0],["contact_id",11,"ref",0,"contacts"],["draft",12,"text",0],["state",13,"enum",1,"mission_state","draft"],["last_error",14,"text",32],["fired_at",15,"time",32],["fired_by",16,"enum",32,"actor"],["fire_key_id",17,"ref",16416,"fire_keys"],["fired_with",18,"ref",16416,"api_keys"],["in_flight_at",19,"time",32],["confirmation",20,"enum",32,"confirmation"],["note",21,"text",0],["cc",22,"str",0],["subject",23,"str",0],["in_reply_to",24,"str",0],["refs",25,"text",0],["message_id",26,"str",32],["gmail_msgid",27,"i64",32],["gmail_thrid",28,"i64",32],["cv_version_id",29,"ref",32,"cv_versions"]]},
   "fire_requests": {"id":49,"name":"fire_requests","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["missions",8,"str",1],["reason",9,"str",0],["requested_by",10,"ref",16416,"api_keys"],["status",11,"enum",33,"request_status","open"],["fire_key_id",12,"ref",16416,"fire_keys"]]},
   "fire_keys": {"id":50,"name":"fire_keys","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["scope",8,"str",33],["usable_by",9,"ref",16416,"api_keys"],["request_id",10,"ref",16416,"fire_requests"],["first_used_at",11,"time",32],["expires_at",12,"time",33],["revoked_at",13,"time",32]]},
   "fire_shots": {"id":51,"name":"fire_shots","domain":"desk","residency":"resident","cap":1000000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["fire_key_id",8,"ref",33,"fire_keys"],["mission_id",9,"ref",33,"missions"],["hash",10,"str",33],["burned_at",11,"time",32]]},
@@ -994,7 +994,7 @@ export interface Mission {
   inserted_at: number;
   updated_at: number;
   application_id: number;
-  kind: MissionKind;
+  kind: OutreachKind;
   target: string | null;
   contact_id: number | null;
   draft: string | null;
@@ -1014,6 +1014,7 @@ export interface Mission {
   message_id: string | null;
   gmail_msgid: number | null;
   gmail_thrid: number | null;
+  cv_version_id: number | null;
 }
 /** `fire_requests`: resident. */
 export interface FireRequest {

@@ -42,7 +42,7 @@ fn rows() -> Kernel {
     let mut b = w.block(table::MISSIONS, 2);
     b.u32s(M::ID, [20, 21].into_iter())
         .u32s(M::APPLICATION_ID, [1, 2].into_iter())
-        .u32s(M::KIND, [enums::mission_kind::CAREERS_PAGE as u32, enums::mission_kind::EMAIL as u32].into_iter())
+        .u32s(M::KIND, [enums::outreach_kind::CAREERS_PAGE as u32, enums::outreach_kind::EMAIL as u32].into_iter())
         .u32s(M::STATE, [enums::mission_state::FIRED as u32; 2].into_iter())
         .u32s(M::CONFIRMATION, [enums::confirmation::PROVISIONAL as u32, none].into_iter())
         .strs(M::MESSAGE_ID, ["", "hm.Sent1@example.com"].into_iter())

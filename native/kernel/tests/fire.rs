@@ -66,7 +66,7 @@ fn kernel_with(cap: u32, cv_blob: &str) -> Kernel {
     b.done();
     let k = |k: u8| k as u32;
     let s = |s: u8| s as u32;
-    use enums::{mission_kind as K, mission_state as St};
+    use enums::{mission_state as St, outreach_kind as K};
     let mut b = w.block(table::MISSIONS, 4);
     b.u32s(M::ID, [10, 11, 12, 13].into_iter())
         .u32s(M::APPLICATION_ID, [1, 1, 2, 1].into_iter())
@@ -324,7 +324,14 @@ fn an_email_shot_is_the_mail_actors_to_report_under_the_daily_cap() {
     k.predict(&stamp("hm.x1@example.com"), &mail(NOON)).unwrap();
     assert_eq!(k.predict(&stamp("hm.other@example.com"), &mail(NOON)).expect_err("stamped once").code, refusal::STAGE);
     assert_eq!(k.predict(&landed(11), &agent(3, NOON)).expect_err("mail only").code, refusal::SCOPE);
+    // The shot carries the CV its key covered, recorded as it was fired.
+    assert_eq!(mission(&mut k, 11)["cv_version_id"], 5);
     k.predict(&landed(11), &mail(NOON)).unwrap();
+    // The sent mail is on the record, filed to its mission.
+    let sent = q(&mut k, json!({"op": "outreach", "where": {"mission_id": 11}}));
+    let item = &sent["rows"][0];
+    assert_eq!((item["kind"].as_str(), item["direction"].as_str(), item["filing"].as_str()), (Some("email"), Some("outbound"), Some("filed")));
+    assert_eq!((item["application_id"].as_u64(), item["email"]["message_id"].as_str()), (Some(1), Some("<hm.x1@example.com>")));
     let m = mission(&mut k, 11);
     assert_eq!((m["state"].as_str(), m["message_id"].as_str(), m["confirmation"].clone()), (Some("fired"), Some("hm.x1@example.com"), Json::Null));
     assert_eq!(m["gmail_thrid"], 1_800_000_000_000_000_000_i64);
@@ -333,7 +340,7 @@ fn an_email_shot_is_the_mail_actors_to_report_under_the_daily_cap() {
     // reset, which the answer names.
     let draft = op(wire::PUT, table::MISSIONS, 0, |o| {
         o.u32(M::APPLICATION_ID, 1)
-            .u32(M::KIND, enums::mission_kind::EMAIL as u32)
+            .u32(M::KIND, enums::outreach_kind::EMAIL as u32)
             .str(M::TARGET, "cto@acme.example")
             .str(M::SUBJECT, "Following up")
             .str(M::DRAFT, "Hello again")
@@ -346,6 +353,9 @@ fn an_email_shot_is_the_mail_actors_to_report_under_the_daily_cap() {
     assert_eq!((a["why"].as_str(), a["used"].as_u64(), a["resets_at"].as_str()), (Some("cap"), Some(1), Some(kernel::time_iso(NOON - 43_200 + 86_400).as_str())));
     assert_eq!(q(&mut k, json!({"op": "mail_quota", "now": NOON})), json!({"cap": 1, "used": 1, "left": 0, "resets_at": kernel::time_iso(NOON + 43_200)}));
     k.predict(&fire(id, None), &agent(3, NOON + 43_200)).unwrap();
+    // The node lands a mail only once it has stamped its Message-ID.
+    let r = k.predict(&landed(id), &mail(NOON + 43_200)).expect_err("unstamped");
+    assert_eq!((r.code, r.data["rule"].as_str()), (refusal::STAGE, Some("unstamped")));
 }
 
 #[test]
@@ -403,11 +413,22 @@ fn the_record_stays() {
     k.predict(&fire(10, None), &agent(3, NOON)).unwrap();
     k.predict(&landed(10), &agent(3, NOON)).unwrap();
     assert_eq!(k.predict(&op(wire::DROP, table::MISSIONS, 10, |_| {}), &operator(NOON)).expect_err("fired").code, refusal::STAGE);
-    // An email mission's To is bare addresses, ten at most.
+    // An email mission's To is read as the outreach type reads it and kept
+    // bare (what the hash covers is what goes out); a non-address is refused.
+    k.predict(&op(wire::PUT, table::MISSIONS, 11, |o| {
+        o.str(M::TARGET, "Acme Jobs <Jobs@ACME.example>, cto@acme.example");
+    }), &agent(3, NOON))
+    .unwrap();
+    assert_eq!(mission(&mut k, 11)["target"], "Jobs@acme.example, cto@acme.example");
     let r = k.predict(&op(wire::PUT, table::MISSIONS, 11, |o| {
-        o.str(M::TARGET, "Acme Jobs <jobs@acme.example>");
+        o.str(M::TARGET, "the hiring team");
     }), &agent(3, NOON));
     assert_eq!(r.expect_err("not an address list").code, refusal::TYPE);
+    // A mission is any outreach kind but a note.
+    let r = k.predict(&op(wire::PUT, table::MISSIONS, 13, |o| {
+        o.u32(M::KIND, enums::outreach_kind::NOTE as u32);
+    }), &agent(3, NOON));
+    assert_eq!(r.expect_err("never a note").code, refusal::TYPE);
     // The mailbox is the mail actor's (its address) and the operator's (its cap).
     let r = k.predict(&op(wire::PUT, table::MAILBOXES, 1, |o| {
         o.str(col::mailboxes::ADDRESS, "other@example.com");
@@ -431,7 +452,7 @@ fn a_first_email_goes_with_the_cv_as_a_file() {
         let reply = reply.to_string();
         op(wire::PUT, table::MISSIONS, 0, move |o| {
             o.u32(M::APPLICATION_ID, 1)
-                .u32(M::KIND, enums::mission_kind::EMAIL as u32)
+                .u32(M::KIND, enums::outreach_kind::EMAIL as u32)
                 .str(M::TARGET, "cto@acme.example")
                 .str(M::SUBJECT, "Re: Staff Engineer")
                 .str(M::DRAFT, "Thanks, Tuesday works.")

@@ -34,8 +34,6 @@ pub const UNUSED_LIFE: i64 = 7 * 86_400;
 pub const USED_LIFE: i64 = 86_400;
 /// A request's reason, in characters.
 pub const REASON_MAX: usize = 280;
-/// An email's To.
-pub const TO_MAX: usize = 10;
 
 const STATE: [&str; 6] = ["draft", "draft_ready", "fire_ready", "in_flight", "fired", "cancelled"];
 /// The states a put moves a mission among.
@@ -221,7 +219,7 @@ fn state(t: &Table, id: u32) -> u8 {
 }
 
 fn is_email(t: &Table, id: u32) -> bool {
-    t.u32(id, M::KIND) == Some(u32::from(enums::mission_kind::EMAIL))
+    t.u32(id, M::KIND) == Some(u32::from(enums::outreach_kind::EMAIL))
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -315,25 +313,6 @@ fn unsettled(apps: &Table, app: u32) -> bool {
     serde_json::from_str::<Json>(&notes).ok().is_some_and(|j| j.pointer("/sync/applied_on").is_some_and(|v| !v.is_null()))
 }
 
-/// The addresses of an email's To or cc: each `local@domain.tld`, nothing
-/// around it; `None` when one is not.
-pub fn addresses(list: &str) -> Option<Vec<&str>> {
-    let mut out = Vec::new();
-    for a in list.split(',').map(str::trim).filter(|a| !a.is_empty()) {
-        let (local, domain) = a.split_once('@')?;
-        let ok_local = !local.is_empty() && local.len() <= 64 && local.bytes().all(|c| c.is_ascii_graphic() && !b"<>()[]\\,;:@\"".contains(&c));
-        let labels: Vec<&str> = domain.split('.').collect();
-        let ok_domain = labels.len() >= 2
-            && domain.len() <= 253
-            && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') && !l.starts_with('-') && !l.ends_with('-'));
-        if !ok_local || !ok_domain {
-            return None;
-        }
-        out.push(a);
-    }
-    Some(out)
-}
-
 /// Why mission `id` cannot fire whoever asks, before any key: its own state,
 /// an email's mail and CV file, its application's links, stage and prior send.
 pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
@@ -345,9 +324,8 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
         _ => return Some("not_ready"),
     }
     if is_email(t, id) {
-        let to = text(t, id, M::TARGET);
-        let to_ok = addresses(&to).is_some_and(|a| !a.is_empty() && a.len() <= TO_MAX);
-        let cc_ok = addresses(&text(t, id, M::CC)).is_some();
+        let to_ok = crate::outreach::addrs(&text(t, id, M::TARGET)).is_ok_and(|a| !a.is_empty());
+        let cc_ok = crate::outreach::addrs(&text(t, id, M::CC)).is_ok();
         if !to_ok || !cc_ok || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
             return Some("incomplete");
         }
@@ -626,6 +604,10 @@ pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<()
 /// whom, under which key; the key's 24 hours start at its first use.
 pub fn going(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Vec<Row> {
     let mut m = row(table::MISSIONS, mission);
+    // The CV the shot carries is the one the key's hash covered: the node
+    // attaches this version, whatever the pick names later.
+    let app = application(rows, mission).unwrap_or(0);
+    cell(&mut m, M::CV_VERSION_ID, opt(Cvs::of(rows).version(rows, app)));
     cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::IN_FLIGHT)));
     cell(&mut m, M::IN_FLIGHT_AT, now_u32(ctx.now));
     cell(&mut m, M::FIRE_KEY_ID, Val::U32(key_id));
@@ -661,13 +643,47 @@ pub fn may_report(rows: &Rows, ctx: &Ctx, mission: u32) -> Result<(), Refusal> {
 }
 
 /// A landed shot's rows on its mission and its key's shot: fired, burned,
-/// provisional unless it is a mail the node watched go out.
-pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Vec<Row> {
+/// provisional unless it is a mail the node watched go out, which also
+/// leaves the sent mail's record (an outreach row filed to the mission). An
+/// email lands only once the node has stamped its Message-ID.
+pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result<Vec<Row>, Refusal> {
     let t = missions(rows).filter(|t| t.has(mission));
     let mut m = row(table::MISSIONS, mission);
     cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::FIRED)));
     cell(&mut m, M::FIRED_AT, now_u32(ctx.now));
-    if t.is_some_and(|t| is_email(t, mission)) {
+    let mut record = None;
+    if let Some(t) = t.filter(|t| is_email(t, mission)) {
+        let Some(message_id) = t.str(mission, M::MESSAGE_ID).filter(|v| !v.is_empty()) else {
+            return Err(no(refusal::STAGE, json!({"table": "missions", "id": mission, "rule": "unstamped", "need": "stamp {message_id} before the mail goes"})));
+        };
+        let num = |v: &Val| match v {
+            Val::I64(n) => Some(*n),
+            Val::U32(n) => Some(i64::from(*n)),
+            _ => None,
+        };
+        let app = t.u32(mission, M::APPLICATION_ID).unwrap_or(0);
+        let to = crate::outreach::addrs(&text(t, mission, M::TARGET)).unwrap_or_default();
+        let cc = crate::outreach::addrs(&text(t, mission, M::CC)).unwrap_or_default();
+        let refs: Vec<String> = text(t, mission, M::REFS).split_whitespace().map(String::from).collect();
+        let body = text(t, mission, M::DRAFT).into_owned();
+        let from = mailbox(rows).and_then(|(mb, id)| mb.str(id, MB::ADDRESS)).unwrap_or("");
+        let shot = crate::outreach::Shot {
+            mission_id: mission,
+            application_id: app,
+            contact_id: t.u32(mission, M::CONTACT_ID),
+            corporation_id: rows.table(table::APPLICATIONS).and_then(|a| a.u32(app, A::CORPORATION_ID)),
+            from,
+            to: &to,
+            cc: &cc,
+            subject: t.str(mission, M::SUBJECT),
+            body: Some(body.as_str()).filter(|b| !b.is_empty()),
+            in_reply_to: t.str(mission, M::IN_REPLY_TO),
+            refs: &refs,
+            message_id,
+            gmail_msgid: num(&gmail.0),
+            gmail_thrid: num(&gmail.1),
+        };
+        record = Some(crate::outreach::sent_record(rows, &shot, ctx.now));
         cell(&mut m, M::GMAIL_MSGID, gmail.0);
         cell(&mut m, M::GMAIL_THRID, gmail.1);
     } else {
@@ -680,7 +696,13 @@ pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Vec<Ro
         cell(&mut r, S::BURNED_AT, now_u32(ctx.now));
         out.push(r);
     }
-    out
+    out.extend(record);
+    Ok(out)
+}
+
+/// The CV version a landed shot carried: the one recorded as it was fired.
+pub fn carried_cv(rows: &Rows, mission: u32) -> Option<u32> {
+    missions(rows).and_then(|t| t.u32(mission, M::CV_VERSION_ID))
 }
 
 /// A failed shot: the mission back to fire_ready with the reason, its shot
@@ -712,7 +734,7 @@ pub fn application(rows: &Rows, mission: u32) -> Option<u32> {
 /// A line for the application's events.
 pub fn describe(rows: &Rows, mission: u32) -> String {
     let Some(t) = missions(rows).filter(|t| t.has(mission)) else { return alloc::format!("mission #{mission}") };
-    let kind = t.u32(mission, M::KIND).and_then(|k| enums::mission_kind::NAMES.get(k as usize).copied()).unwrap_or("mission");
+    let kind = t.u32(mission, M::KIND).and_then(|k| enums::outreach_kind::NAMES.get(k as usize).copied()).unwrap_or("mission");
     let target = text(t, mission, M::TARGET);
     if target.is_empty() { alloc::format!("mission #{mission} ({kind})") } else { alloc::format!("mission #{mission} ({kind}) → {target}") }
 }
@@ -749,7 +771,7 @@ pub fn review(rows: &Rows, scope: &Ranges) -> Json {
             };
             out.push(json!({
                 "id": id,
-                "kind": t.u32(id, M::KIND).and_then(|k| enums::mission_kind::NAMES.get(k as usize).copied()),
+                "kind": t.u32(id, M::KIND).and_then(|k| enums::outreach_kind::NAMES.get(k as usize).copied()),
                 "target": t.str(id, M::TARGET),
                 "state": state_name(u32::from(state(t, id))),
                 "application": a.map_or(Json::Null, |a| json!({
@@ -935,7 +957,7 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             // A first-contact email reaches fire_ready only with a CV file to
             // carry (the pick's version a PDF or DOCX upload).
             let to_ready = matches!(given(row, M::STATE), Some(EVal::Val(Val::U32(s))) if s == u32::from(enums::mission_state::FIRE_READY));
-            if to_ready && kind == Some(u32::from(enums::mission_kind::EMAIL)) {
+            if to_ready && kind == Some(u32::from(enums::outreach_kind::EMAIL)) {
                 let reply = match given(row, M::IN_REPLY_TO) {
                     Some(EVal::Val(Val::Str(v))) => !v.is_empty(),
                     Some(_) => false,
@@ -949,13 +971,17 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
                     return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "to": "fire_ready", "rule": "cv_file", "need": "the application's CV as a PDF or DOCX version: pick one (pick_cv) or upload one"})));
                 }
             }
-            if kind == Some(u32::from(enums::mission_kind::EMAIL)) {
-                for (c, max, name) in [(M::TARGET, TO_MAX, "target"), (M::CC, 50, "cc")] {
+            if kind.and_then(crate::outreach::Kind::from_code).is_some_and(|k| !k.fireable()) {
+                return Err(no(refusal::TYPE, json!({"table": "missions", "column": "kind", "reason": "a mission is never a note"})));
+            }
+            if kind == Some(u32::from(enums::outreach_kind::EMAIL)) {
+                // An email's To and cc as the outreach type reads them, stored
+                // bare: what the hash covers is what goes out.
+                for (c, name) in [(M::TARGET, "target"), (M::CC, "cc")] {
                     if let Some(EVal::Val(Val::Str(list))) = given(row, c) {
-                        match addresses(&list) {
-                            Some(a) if a.len() <= max => {}
-                            _ => return Err(no(refusal::TYPE, json!({"table": "missions", "column": name, "need": alloc::format!("up to {max} addresses, comma-separated")}))),
-                        }
+                        let a = crate::outreach::addrs(&list)
+                            .map_err(|_| no(refusal::TYPE, json!({"table": "missions", "column": name, "need": "up to 10 addresses, comma-separated"})))?;
+                        cell(row, c, if a.is_empty() { Val::None } else { Val::Str(a.join(", ")) });
                     }
                 }
             }
@@ -1083,7 +1109,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
                     .copied()
                     .filter(|&id| app.is_none_or(|a| t.u32(id, M::APPLICATION_ID).map(u64::from) == Some(a)))
                     .filter(|&id| st.is_none_or(|s| state_name(u32::from(state(t, id))) == s))
-                    .filter(|&id| kind.is_none_or(|k| t.u32(id, M::KIND).and_then(|v| enums::mission_kind::NAMES.get(v as usize).copied()) == Some(k)))
+                    .filter(|&id| kind.is_none_or(|k| t.u32(id, M::KIND).and_then(|v| enums::outreach_kind::NAMES.get(v as usize).copied()) == Some(k)))
                     .map(|id| mission_json(rows, &cvs, t, id, now))
                     .collect()
             });
@@ -1104,6 +1130,8 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
                 "application": apps.map_or(Json::Null, |a| json!({"id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
                     "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": corp, "corporation": corp_name})),
                 "contact_id": contact,
+                "kind": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::name),
+                "brief": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::brief),
                 "produces": if email { "an email sent through the linked mailbox, and its replies, filed by the mail" } else { "nothing hireme can see: the shot is yours to perform" },
                 "report": if email { "none: the node reports the send (landed or failed)" } else { "landed or failed on the mission once done, and an outreach report of what was sent or submitted" },
                 "track": if email { "replies arrive on the mission's thread" } else { "a confirmation mail confirms the shot (it stays provisional until one is filed)" },
@@ -1211,12 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn an_email_list_is_bare_addresses() {
-        assert_eq!(addresses("a@b.co, jobs@acme.example").map(|a| a.len()), Some(2));
-        assert_eq!(addresses("").map(|a| a.len()), Some(0));
-        for bad in ["Acme <jobs@acme.example>", "jobs@acme", "@acme.example", "jobs@-acme.example", "a b@c.de"] {
-            assert!(addresses(bad).is_none(), "{bad:?}");
-        }
+    fn times_left_read_as_hours_minutes_seconds() {
         assert_eq!(hms(85_267), "23:41:07");
         assert_eq!(hms(7 * 86_400), "168:00:00");
     }

@@ -163,6 +163,9 @@ enum mail_pipe gmail domain hireme
 enum cv_format markdown pdf docx composed doc
 enum language_level a1 a2 b1 b2 c1 c2 native
 
+# Retired: a mission's kind is outreach_kind (the outreach it produces is
+# its kind); kept declared while the MCP's tool schema and the page's route
+# select still name it.
 enum mission_kind email careers_page linkedin x_dm discord other
 enum mission_state draft draft_ready fire_ready in_flight fired cancelled
 enum confirmation provisional confirmed
@@ -916,7 +919,8 @@ table missions desk resident
   cap 200000
   index application_id
   col application_id ref applications !
-  col kind enum mission_kind !
+  # Any outreach kind but note.
+  col kind enum outreach_kind !
   # An address, a URL or a handle.
   col target str ?
   col contact_id ref contacts ?
@@ -939,6 +943,9 @@ table missions desk resident
   col message_id str ? readonly
   col gmail_msgid i64 ? readonly
   col gmail_thrid i64 ? readonly
+  # The CV version the shot carries, as the application's pick named it
+  # when it was fired: the one the key's hash covered.
+  col cv_version_id ref cv_versions ? readonly
   # Starts a shot, under a live key covering the mission.
   command fire key:u32?
   command stamp message_id
