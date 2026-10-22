@@ -1810,19 +1810,20 @@ defmodule Hireme.Sequencer do
     do: {state, blocks}
 
   defp resident_blocks(state, grants) do
-    {state, rows} = resident_rows(state)
+    {state, tables} = resident_rows(state)
 
     blocks =
-      for {id, rs} <- rows, t = Schema.table(id), into: %{} do
-        {id, Codec.rows_block(t, wire_cols(t, grants), rs)}
+      for {id, {n, values}} <- tables, t = Schema.table(id), into: %{} do
+        cols = for c <- wire_cols(t, grants), do: {c.id, c.wire, Map.fetch!(values, c.id)}
+        {id, Codec.block(id, n, cols)}
       end
 
     {%{state | blocks: {state.rev, grants, blocks}}, blocks}
   end
 
-  # The resident rows as of the account's rev, read once per rev: the
-  # kernel's snapshot and the BOOTs of sessions joining before the next
-  # write share one read.
+  # The resident tables as of the account's rev, as columns of wire values,
+  # read once per rev: the kernel's snapshot and the BOOTs of sessions
+  # joining before the next write share one read.
   defp resident_rows(%{rows: {rev, rows}, rev: rev} = state), do: {state, rows}
 
   defp resident_rows(state) do
@@ -1831,7 +1832,7 @@ defmodule Hireme.Sequencer do
           t.residency in [:resident, :projection],
           not live?(t),
           into: %{},
-          do: {t.id, rows(t)}
+          do: {t.id, columns(t)}
 
     {%{state | rows: {state.rev, rows}}, rows}
   end
@@ -1842,6 +1843,33 @@ defmodule Hireme.Sequencer do
 
   defp wire_cols(t, grants),
     do: Enum.reject(Grants.columns(grants, t), &(&1.name == "account_id" or &1.wire == nil))
+
+  # A resident table read straight from SQLite as columns (no row structs,
+  # no loaders), each already the wire's, ordered by id: `{rows, %{col_id
+  # => values}}`. A projection is read as rows, then turned.
+  defp columns(%{residency: :projection} = t) do
+    rs = rows(t)
+
+    {length(rs),
+     Map.new(wire_cols(t, nil), fn c ->
+       key = String.to_atom(c.name)
+       {c.id, Enum.map(rs, &Codec.to_wire(c, Map.get(&1, key)))}
+     end)}
+  end
+
+  defp columns(t) do
+    cols = wire_cols(t, nil)
+    names = Enum.map_join(cols, ", ", &~s{"#{&1.name}"})
+    alive = if t.soft_delete, do: " AND deleted_at IS NULL", else: ""
+    sql = ~s{SELECT #{names} FROM "#{t.name}" WHERE account_id = ?#{alive} ORDER BY id}
+    %{rows: rows} = Repo.query!(sql, [Repo.account_id!()], skip_account: true)
+    values = if rows == [], do: Enum.map(cols, fn _ -> [] end), else: Enum.zip_with(rows, & &1)
+
+    {length(rows),
+     Map.new(Enum.zip(cols, values), fn {c, vs} ->
+       {c.id, Enum.map(vs, Codec.stored_to_wire(c))}
+     end)}
+  end
 
   defp rows(%{residency: :projection, source: source, source_term: term}) do
     from(r in Schema.row(source), order_by: r.id)
