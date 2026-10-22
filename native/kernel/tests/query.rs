@@ -223,6 +223,31 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     }
 }
 
+/// Every row a find or get answers carries its last write, named or not,
+/// and one over six months old by the kernel's day is flagged stale.
+#[test]
+fn every_row_carries_its_last_write_and_an_old_one_is_flagged_stale() {
+    let (old, fresh) = (kernel::iso_time("2026-04-01T12:00:00Z").unwrap() as u32, kernel::iso_time("2026-10-01T12:00:00Z").unwrap() as u32);
+    let mut w = wire::BodyWriter::new();
+    let mut b = w.block(table::PLACES, 2);
+    b.u32s(P::ID, [1, 2].into_iter())
+        .u32s(P::KIND, [enums::place_kind::CITY as u32; 2].into_iter())
+        .strs(P::NAME, ["Old", "Fresh"].into_iter())
+        .u32s(P::UPDATED_AT, [old, fresh].into_iter());
+    b.done();
+    let mut k = Kernel::new();
+    k.set_grants(OPERATOR);
+    k.boot(&w.finish(), 1).unwrap();
+    k.set_today(kernel::iso_day("2026-10-22").unwrap());
+    let rows = q(&k, json!({"op": "find", "table": "places", "cols": ["name"]}))["rows"].clone();
+    assert_eq!(rows, json!([{"id": 1, "name": "Old", "updated_at": "2026-04-01T12:00:00Z", "stale": true}, {"id": 2, "name": "Fresh", "updated_at": "2026-10-01T12:00:00Z"}]));
+    let one = q(&k, json!({"op": "get", "table": "places", "id": 1}))["row"].clone();
+    assert_eq!((one["stale"].clone(), one["updated_at"].clone()), (json!(true), json!("2026-04-01T12:00:00Z")));
+    // The day moves the line, never the row: on 2026-09-30 the old write is 182 days old and not yet stale.
+    k.set_today(kernel::iso_day("2026-09-30").unwrap());
+    assert!(q(&k, json!({"op": "get", "table": "places", "id": 1}))["row"]["stale"].is_null());
+}
+
 /// Texts the server packs stay packed in the replica and its snapshot and
 /// read on touch; a size reads without unpacking; a rolled-back write
 /// leaves the packed cell exactly as it was.

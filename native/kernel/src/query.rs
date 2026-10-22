@@ -31,6 +31,8 @@ const HISTORY_LIMIT: u64 = 50;
 const HISTORY_MAX: u64 = 200;
 const CHUNK: u64 = 256 * 1024;
 const INT64: u64 = i64::MAX as u64;
+/// A row not written for this many days is answered with `stale: true`.
+const STALE_DAYS: crate::Day = 183;
 
 pub(crate) fn has(c: &Column, f: u32) -> bool {
     c.flags & f != 0
@@ -142,11 +144,11 @@ impl Indexes {
 }
 
 /// One read: `{"op": "find" | "get" | "text" | "history", ...params}`.
-pub fn query(rows: &Rows, g: &Grants, idx: &mut Indexes, req: &Json) -> Answer {
+pub fn query(rows: &Rows, g: &Grants, idx: &mut Indexes, req: &Json, today: crate::Day) -> Answer {
     let Some(p) = req.as_object() else { return refuse(refusal::TYPE, json!({"params": brief(req)})) };
     match p.get("op").and_then(Json::as_str) {
-        Some("find") => find(rows, g, idx, p),
-        Some("get") => get(rows, g, p),
+        Some("find") => find(rows, g, idx, p, today),
+        Some("get") => get(rows, g, p, today),
         Some("text") => text(rows, g, p),
         Some("history") => history(rows, g, p),
         other => refuse(refusal::NOT_FOUND, json!({"method": other.map(echo)})),
@@ -359,6 +361,28 @@ pub(crate) fn row_out(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool) ->
         }
     }
     Json::Object(m)
+}
+
+/// A row as `find` and `get` answer it: its `updated_at` (the last write)
+/// whether or not it was named, and `stale: true` when that write is
+/// over `STALE_DAYS` old by the kernel's day: a flag to re-check the
+/// record, never a filter.
+fn stamped(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool, today: crate::Day) -> Json {
+    let mut r = row_out(t, id, cols, drop_nulls);
+    let Some(c) = schema::table_def(t.id).and_then(|d| d.col_named("updated_at")) else { return r };
+    let at = t.get(id, c.id);
+    let secs = match at {
+        Val::U32(s) => Some(i64::from(s)),
+        Val::I64(s) => Some(s),
+        _ => None,
+    };
+    if let Some(s) = secs {
+        r["updated_at"] = value_json(c, &at);
+        if (s.div_euclid(86_400) as crate::Day + crate::UNIX_EPOCH_DAY) + STALE_DAYS < today {
+            r["stale"] = Json::Bool(true);
+        }
+    }
+    r
 }
 
 // ------------------------------------------------------------------ casts
@@ -593,7 +617,7 @@ fn decode_cursor(c: &Column, v: Option<&Json>) -> Result<Option<(Key2<'static>, 
     k.map(|k| Some((k, id))).ok_or_else(bad)
 }
 
-fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> Answer {
+fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>, today: crate::Day) -> Answer {
     let tm = readable(g, p.get("table"))?;
     let mut cols = columns(g, tm, p.get("cols"), false)?;
     // `sizes`: text columns answered as their byte length, never their text
@@ -656,7 +680,7 @@ fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> An
     let rows: Vec<Json> = keys
         .iter()
         .map(|k| {
-            let mut r = row_out(t, k.1, &cols, false);
+            let mut r = stamped(t, k.1, &cols, false, today);
             for c in &sizes {
                 r[c.name] = t.text_len(k.1, c.id).map_or(Json::Null, Json::from);
             }
@@ -668,7 +692,7 @@ fn find(rows: &Rows, g: &Grants, idx: &mut Indexes, p: &Map<String, Json>) -> An
 
 // ------------------------------------------------------------------ get
 
-fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
+fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>, today: crate::Day) -> Answer {
     let tm = readable(g, p.get("table"))?;
     let cols = columns(g, tm, p.get("cols"), true)?;
     let found = match (p.get("id"), p.get("key")) {
@@ -693,7 +717,7 @@ fn get(rows: &Rows, g: &Grants, p: &Map<String, Json>) -> Answer {
         _ => return refuse(refusal::TYPE, json!({"table": tm.name, "need": "id or key"})),
     };
     match found {
-        Some((t, id)) => Ok(json!({"row": row_out(t, id, &cols, true)})),
+        Some((t, id)) => Ok(json!({"row": stamped(t, id, &cols, true, today)})),
         None => refuse(refusal::NOT_FOUND, json!({"table": tm.name})),
     }
 }

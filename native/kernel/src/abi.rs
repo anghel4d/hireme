@@ -95,7 +95,7 @@ impl Kernel {
                 query::readable(grants, Some(&json!("applications")))?;
                 Ok(crate::link::unlinked(&self.rows))
             }
-            _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req),
+            _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req, self.today()),
         }
     }
 

@@ -155,7 +155,7 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "find",
             "Find rows",
-            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|null|prefix|like: value}}. Without cols a row carries its non-metric columns; name metrics (and their _on days) in cols to get them, or `get` one row for everything.".into(),
+            "Rows of one table, filtered and ordered, keyset-paged. where: {col: value | {eq|ne|lt|le|gt|ge|in|null|prefix|like: value}}. Without cols a row carries its non-metric columns; name metrics (and their _on days) in cols to get them, or `get` one row for everything. Every row carries updated_at, its last write; one not written for six months also carries stale: true, a flag to re-check it, never a filter.".into(),
             json!({"type":"object","required":["table"],"properties":{
                 "table":{"type":"string","enum":tables.clone()},
                 "where":{"type":"object"},
@@ -170,7 +170,7 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "get",
             "Get one row",
-            "One row by id or by a natural/unique key (applications by no, corporations by domain, places by iso2, sources by url), with each metric's _on.".into(),
+            "One row by id or by a natural/unique key (applications by no, corporations by domain, places by iso2, sources by url), with each metric's _on; updated_at is its last write, and stale: true marks one over six months old.".into(),
             json!({"type":"object","required":["table"],"properties":{
                 "table":{"type":"string","enum":tables.clone()},
                 "id":{"type":"integer","minimum":1},

@@ -338,8 +338,10 @@ are declared in the schema (`dict` lines), so retraining one moves
 `wire_hash`. Every read (`find`, `get`, `text`,
 `history`) is the replica's own: the browser's kernel answers it
 locally, and MCP's is answered from the sequencer's kernel under the key's
-grants. The RPC methods left are `account.*` (the account
-lens) and `lease.*`.
+grants. Every row a `find` or `get` answers carries `updated_at`, its last
+write, and `stale: true` when that write is over 183 days old by the
+kernel's day: a flag to re-check the record, never a filter. The RPC
+methods left are `account.*` (the account lens) and `lease.*`.
 
 ## Kernel and NIF
 
