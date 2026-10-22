@@ -467,6 +467,20 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
     let line = words(&alloc::format!("{} {}", input.subject, input.body));
     let subject_line = words(input.subject);
 
+    // A sender whose domain's DMARC failed is not who it says it is: nothing
+    // drawn from the sender counts, and nothing files on its own.
+    let forged = input.email
+        && input.inbound
+        && input.headers.and_then(|h| h.get("authentication-results")).is_some_and(|v| {
+            let text = match v {
+                Json::Array(a) => a.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(" "),
+                _ => v.as_str().unwrap_or("").into(),
+            };
+            has_phrase(&words(&text), "dmarc fail")
+        });
+    if forged {
+        f.evidence.push(Evidence { kind: "dmarc_fail", token: address(input.from).unwrap_or_default(), weight: 0, table: "", id: 0 });
+    }
     // Gmail's copy of a mail hireme sent carries the id the mission stamped.
     if !input.message_id.trim().is_empty()
         && let Some(m) = mission_by_message_id(rows, input.message_id)
@@ -542,7 +556,9 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
     };
     // The people on the other end: a mail's sender (or its recipients when
     // it went out), a message's handle.
-    let parties: Vec<String> = if input.inbound {
+    let parties: Vec<String> = if forged {
+        Vec::new()
+    } else if input.inbound {
         [input.from, input.reply_to].iter().filter_map(|a| address(a)).collect()
     } else {
         input.to.iter().chain(input.cc).filter_map(|a| address(a)).collect()
@@ -625,6 +641,19 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
 
     // The decision. Certain evidence that agrees files; certain evidence
     // that disagrees files nothing.
+    // A forged sender files nothing: its evidence and what it named stay for
+    // the operator's tray.
+    if forged {
+        let mut named: Vec<u32> = certain.iter().filter_map(|k| k.application_id).collect();
+        named.sort_unstable();
+        named.dedup();
+        if let Some(at) = apps {
+            f.candidates = named.iter().map(|&a| Candidate { table: "applications", id: a, label: app_label(at, a), score: THREAD }).collect();
+        }
+        f.bounce = None;
+        f.relevant = true;
+        return f;
+    }
     let mut apps_named: Vec<u32> = certain.iter().filter_map(|k| k.application_id).collect();
     apps_named.sort_unstable();
     apps_named.dedup();

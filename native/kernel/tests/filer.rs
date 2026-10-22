@@ -143,6 +143,20 @@ fn a_bounce_names_the_mission_it_returns() {
 }
 
 #[test]
+fn a_forged_sender_files_nothing() {
+    let k = rows();
+    let auth = serde_json::json!({"authentication-results": "mx.google.com; spf=fail smtp.mailfrom=acme.example; dmarc=fail (p=REJECT) header.from=acme.example"});
+    let input = Input { headers: Some(&auth), in_reply_to: "<hm.sent1@example.com>", ..mail("riley@acme.example", "Staff Engineer, Search: offer", "Sign here: https://evil.example") };
+    let f = filer::file(k.rows(), &NoStore, &input);
+    assert!(f.relevant && !f.filed && f.bounce.is_none() && f.confirms.is_none());
+    assert_eq!(kinds(&f)[0], "dmarc_fail");
+    assert!(!kinds(&f).contains(&"sender_domain"));
+    // Nor does a forged bounce fail the mission it names.
+    let bounce = Input { headers: Some(&auth), ..mail("mailer-daemon@acme.example", "Delivery Status Notification (Failure)", "Message-ID: <hm.Sent1@example.com>") };
+    assert!(filer::file(k.rows(), &NoStore, &bounce).bounce.is_none());
+}
+
+#[test]
 fn a_known_person_files_to_them() {
     let k = rows();
     let f = filer::file(k.rows(), &NoStore, &mail("dana@globex.example", "Coffee next week?", "Hi!"));

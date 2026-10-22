@@ -53,6 +53,10 @@ themselves; in_flight and fired only by the commands below. A mission in
 flight or fired takes no edit to kind, target, draft, application or its
 email draft.
 
+The record stays: a mission in flight or fired is never dropped, nor the
+application one of its missions is in flight or fired for (`stage`, rule
+`record`); a fire key and its shots are never dropped (revoke a key).
+
 Commands:
 
 - `fire key:u32?`: any actor but mail. Judged below. The mission goes in
@@ -159,11 +163,16 @@ null cannot fire (`unsettled`); the operator settles it by setting prior_send.
 answer (`fire`, data below):
 
 1. m exists and is fire_ready (`not_ready`, `in_flight`, `fired`). An
-   email: its To (1 to 10 bare addresses), subject and body set
-   (`incomplete`), and for a first contact (no in_reply_to) the CV the
-   application's pick sends is a file, a PDF or DOCX version (`cv_file`);
-   a reply inside a thread goes without one. A put that would make such a
-   mission fire_ready is refused the same (`stage`, rule `cv_file`).
+   email: at most 10 recipients in To and Cc together (`recipients`; a put
+   over it is refused `type`), its To (1 or more bare addresses), subject
+   and body set (`incomplete`), and for a first contact the CV the
+   application's pick sends is a file, a PDF or DOCX version (`cv_file`).
+   A reply is a mission whose in_reply_to names a mail the account holds
+   (an outreach row, or a mission's stamped Message-ID); it goes without a
+   CV, and `fire` records no cv_version_id for it, so the node attaches a
+   file exactly when cv_version_id is set. Any other in_reply_to makes a
+   first contact. A put that would make a first contact fire_ready without
+   a CV file is refused (`stage`, rule `cv_file`).
 2. Its application: linked (`unlinked`), at fire_ready, open_fire or later
    but not closed (`app_stage`), its prior send settled (`unsettled`).
 3. Authority, the same for every actor: a shot of m under a key that is
@@ -262,6 +271,11 @@ canonical form (no brackets or spaces, lowercased); they are stored as given.
 | a corporation's name in the subject | 20 | |
 | an application's role words (that corporation's) | 20 | |
 | an ATS sender with no known tenant | 10 | |
+
+A sender whose domain's DMARC failed (the node passes Authentication-Results
+in `headers`) is forged: nothing drawn from the sender counts, nothing files
+on its own (it goes to the tray, relevant, with a `dmarc_fail` evidence
+line), and a forged bounce fails nothing.
 
 Filed on certain evidence that agrees (certain evidence naming two
 applications files nothing), or when one corporation's evidence reaches 50

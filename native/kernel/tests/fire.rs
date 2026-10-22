@@ -477,9 +477,45 @@ fn a_first_email_goes_with_the_cv_as_a_file() {
     };
     let r = k.predict(&draft(""), &agent(3, NOON)).expect_err("no CV file");
     assert_eq!((r.code, r.data["rule"].as_str()), (refusal::STAGE, Some("cv_file")));
-    // A reply inside a thread needs none, and fires.
-    k.predict(&draft("abc.123@mail.acme.example"), &agent(3, NOON)).unwrap();
+    // An In-Reply-To naming no mail the account holds makes no reply.
+    let r = k.predict(&draft("<abc.123@mail.acme.example>"), &agent(3, NOON)).expect_err("a junk reply is a first contact");
+    assert_eq!(r.data["rule"], "cv_file");
+    // A reply to a mail the account holds needs none, fires, and carries no CV.
+    let inbound = op(wire::PUT, table::OUTREACH, 0, |o| {
+        o.u32(col::outreach::KIND, enums::outreach_kind::EMAIL as u32)
+            .u32(col::outreach::DIRECTION, enums::direction::INBOUND as u32)
+            .str(col::outreach::FROM_ADDR, "cto@acme.example")
+            .str(col::outreach::SUBJECT, "Staff Engineer")
+            .str(col::outreach::MESSAGE_ID, "<abc.123@mail.acme.example>")
+            .str(col::outreach::BODY, "Are you free Tuesday?");
+    });
+    k.predict(&inbound, &mail(NOON)).unwrap();
+    k.predict(&draft("<abc.123@mail.acme.example>"), &agent(3, NOON)).unwrap();
     let id = q(&mut k, json!({"op": "missions", "kind": "email", "state": "fire_ready"}))["missions"].as_array().unwrap().iter().map(|m| m["id"].as_u64().unwrap()).find(|&id| id != 11).unwrap();
     create(&mut k, &id.to_string(), None, NOON);
     k.predict(&fire(id as u32, None), &agent(3, NOON)).unwrap();
+    assert_eq!(mission(&mut k, id as u32)["cv_version_id"], Json::Null);
+    // And the application it fires for stays while the shot is in flight.
+    let r = k.predict(&op(wire::DROP, table::APPLICATIONS, 1, |_| {}), &operator(NOON)).expect_err("in flight");
+    assert_eq!((r.code, r.data["rule"].as_str()), (refusal::STAGE, Some("record")));
+}
+
+#[test]
+fn an_email_goes_to_ten_recipients_at_most() {
+    let mut k = kernel(25);
+    let list = |n: usize, at: &str| (0..n).map(|i| format!("p{i}@{at}")).collect::<Vec<_>>().join(", ");
+    let (to, cc) = (list(6, "acme.example"), list(5, "initech.example"));
+    k.predict(&op(wire::PUT, table::MISSIONS, 11, |o| {
+        o.str(M::TARGET, &to);
+    }), &agent(3, NOON))
+    .unwrap();
+    let r = k.predict(&op(wire::PUT, table::MISSIONS, 11, |o| {
+        o.str(M::CC, &cc);
+    }), &agent(3, NOON));
+    assert_eq!(r.expect_err("eleven recipients").code, refusal::TYPE);
+    k.predict(&op(wire::PUT, table::MISSIONS, 11, |o| {
+        o.str(M::CC, &list(4, "initech.example"));
+    }), &agent(3, NOON))
+    .unwrap();
+    assert_eq!(q(&mut k, json!({"op": "fire_review", "missions": "11"}))["missions"][0]["eligible"], true);
 }

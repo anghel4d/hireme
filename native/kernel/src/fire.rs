@@ -34,6 +34,8 @@ pub const UNUSED_LIFE: i64 = 7 * 86_400;
 pub const USED_LIFE: i64 = 86_400;
 /// A request's reason, in characters.
 pub const REASON_MAX: usize = 280;
+/// An email's recipients, To and Cc together: what the connector sends to.
+pub const RECIPIENTS_MAX: usize = 10;
 
 const STATE: [&str; 6] = ["draft", "draft_ready", "fire_ready", "in_flight", "fired", "cancelled"];
 /// The states a put moves a mission among.
@@ -271,10 +273,25 @@ impl Cvs {
     }
 }
 
-/// A first-contact email (no in_reply_to) goes with the application's CV as
-/// a file; a reply inside a thread needs none.
+/// Whether an In-Reply-To names a mail the account holds: an outreach row,
+/// or the Message-ID a mission stamped. Any other value answers nothing.
+fn answers(rows: &Rows, in_reply_to: &str) -> bool {
+    let want = crate::filer::canonical_id(in_reply_to);
+    !want.is_empty()
+        && (crate::outreach::by_message_id(rows, in_reply_to).is_some()
+            || missions(rows).is_some_and(|t| t.ids().iter().any(|&m| t.str(m, M::MESSAGE_ID).is_some_and(|x| crate::filer::canonical_id(x) == want))))
+}
+
+/// Whether an email mission is a reply inside a thread the account holds;
+/// anything else it sends is a first contact.
+fn replies(rows: &Rows, t: &Table, id: u32) -> bool {
+    t.str(id, M::IN_REPLY_TO).is_some_and(|irt| answers(rows, irt))
+}
+
+/// A first-contact email goes with the application's CV as a file; a reply
+/// inside a thread the account holds needs none.
 fn cv_missing(rows: &Rows, cvs: &Cvs, t: &Table, id: u32) -> bool {
-    is_email(t, id) && t.str(id, M::IN_REPLY_TO).is_none_or(str::is_empty) && !t.u32(id, M::APPLICATION_ID).is_some_and(|a| cvs.file(rows, a))
+    is_email(t, id) && !replies(rows, t, id) && !t.u32(id, M::APPLICATION_ID).is_some_and(|a| cvs.file(rows, a))
 }
 
 /// The SHA-256 (hex) of everything mission `id` sends: its kind, target,
@@ -338,8 +355,13 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
         _ => return Some("not_ready"),
     }
     if is_email(t, id) {
-        let to_ok = crate::outreach::addrs(&text(t, id, M::TARGET)).is_ok_and(|a| !a.is_empty());
-        let cc_ok = crate::outreach::addrs(&text(t, id, M::CC)).is_ok();
+        let to = crate::outreach::addrs(&text(t, id, M::TARGET));
+        let cc = crate::outreach::addrs(&text(t, id, M::CC));
+        if to.as_ref().map_or(0, Vec::len) + cc.as_ref().map_or(0, Vec::len) > RECIPIENTS_MAX {
+            return Some("recipients");
+        }
+        let to_ok = to.is_ok_and(|a| !a.is_empty());
+        let cc_ok = cc.is_ok();
         if !to_ok || !cc_ok || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
             return Some("incomplete");
         }
@@ -619,9 +641,11 @@ pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<()
 pub fn going(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Vec<Row> {
     let mut m = row(table::MISSIONS, mission);
     // The CV the shot carries is the one the key's hash covered: the node
-    // attaches this version, whatever the pick names later.
+    // attaches this version, whatever the pick names later, and attaches
+    // nothing when it is null (a reply inside a thread the account holds).
     let app = application(rows, mission).unwrap_or(0);
-    m.set(M::CV_VERSION_ID, opt(Cvs::of(rows).version(rows, app)));
+    let reply = missions(rows).is_some_and(|t| is_email(t, mission) && replies(rows, t, mission));
+    m.set(M::CV_VERSION_ID, if reply { Val::None } else { opt(Cvs::of(rows).version(rows, app)) });
     m.set(M::STATE, Val::U32(u32::from(enums::mission_state::IN_FLIGHT)));
     m.set(M::IN_FLIGHT_AT, now_u32(ctx.now));
     m.set(M::FIRE_KEY_ID, Val::U32(key_id));
@@ -957,9 +981,9 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             let to_ready = matches!(given(row, M::STATE), Some(EVal::Val(Val::U32(s))) if s == u32::from(enums::mission_state::FIRE_READY));
             if to_ready && kind == Some(u32::from(enums::outreach_kind::EMAIL)) {
                 let reply = match given(row, M::IN_REPLY_TO) {
-                    Some(EVal::Val(Val::Str(v))) => !v.is_empty(),
+                    Some(EVal::Val(Val::Str(v))) => answers(rows, &v),
                     Some(_) => false,
-                    None => t.and_then(|t| t.str(target, M::IN_REPLY_TO)).is_some_and(|v| !v.is_empty()),
+                    None => t.and_then(|t| t.str(target, M::IN_REPLY_TO)).is_some_and(|v| answers(rows, v)),
                 };
                 let app = match given(row, M::APPLICATION_ID) {
                     Some(EVal::Val(Val::U32(a))) => Some(a),
@@ -975,12 +999,22 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             if kind == Some(u32::from(enums::outreach_kind::EMAIL)) {
                 // An email's To and cc as the outreach type reads them, stored
                 // bare: what the hash covers is what goes out.
+                let mut count = 0;
                 for (c, name) in [(M::TARGET, "target"), (M::CC, "cc")] {
-                    if let Some(EVal::Val(Val::Str(list))) = given(row, c) {
-                        let a = crate::outreach::addrs(&list)
-                            .map_err(|_| no(refusal::TYPE, json!({"table": "missions", "column": name, "need": "up to 10 addresses, comma-separated"})))?;
-                        row.set(c, if a.is_empty() { Val::None } else { Val::Str(a.join(", ")) });
-                    }
+                    let a = match given(row, c) {
+                        Some(EVal::Val(Val::Str(list))) => {
+                            let a = crate::outreach::addrs(&list)
+                                .map_err(|_| no(refusal::TYPE, json!({"table": "missions", "column": name, "need": "up to 10 addresses, comma-separated"})))?;
+                            row.set(c, if a.is_empty() { Val::None } else { Val::Str(a.join(", ")) });
+                            a
+                        }
+                        Some(_) => Vec::new(),
+                        None => t.map(|t| crate::outreach::addrs(&text(t, target, c)).unwrap_or_default()).unwrap_or_default(),
+                    };
+                    count += a.len();
+                }
+                if count > RECIPIENTS_MAX {
+                    return Err(no(refusal::TYPE, json!({"table": "missions", "column": "cc", "need": alloc::format!("at most {RECIPIENTS_MAX} recipients in To and Cc together")})));
                 }
             }
             Ok(())
@@ -1049,6 +1083,17 @@ pub fn drop(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32) -> Result<(), Re
             Ok(())
         }
         table::MAILBOXES if !ctx.human => Err(no(refusal::SCOPE, json!({"need": "operator", "table": "mailboxes"}))),
+        // Its missions would go with it: one in flight (a mail mid-SMTP) or
+        // fired (the record of a send) keeps the application.
+        table::APPLICATIONS => {
+            let held = missions(rows).and_then(|t| {
+                t.ids().iter().copied().find(|&m| t.u32(m, M::APPLICATION_ID) == Some(target) && [enums::mission_state::IN_FLIGHT, enums::mission_state::FIRED].contains(&state(t, m)))
+            });
+            match held {
+                Some(m) => Err(no(refusal::STAGE, json!({"table": "applications", "id": target, "rule": "record", "mission": m, "need": "an application a mission has fired, or is firing, for stays"}))),
+                None => Ok(()),
+            }
+        }
         _ => Ok(()),
     }
 }
