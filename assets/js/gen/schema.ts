@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x01bc;
-export const SCHEMA_REV = 0x9150cb85;
+export const WIRE_HASH = 0x3240;
+export const SCHEMA_REV = 0xd39e0b4d;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -19,7 +19,7 @@ export const AS_OF = 0xfff0;
 export const SOURCE = 0xfff1;
 export const FREE_PARAM = 0xfe00;
 
-export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst", "rule", "blob_missing", "unlinked"] as const;
+export const REFUSAL = ["scope", "human_only", "lease_missing", "leased", "column", "type", "not_found", "natural_key", "stage", "fire_hold", "heat", "lineage_busy", "cooldown", "freshness", "stale", "rev", "source_missing", "source_trust", "too_large", "rate", "cap", "internal", "burst", "rule", "blob_missing", "unlinked", "fire", "step_up"] as const;
 export type Refusal = (typeof REFUSAL)[number];
 export const VERB = ["put", "drop", "command"] as const;
 export type Verb = (typeof VERB)[number];
@@ -91,11 +91,25 @@ export const CV_FORMAT = ["markdown", "pdf", "docx", "composed", "doc"] as const
 export type CvFormat = (typeof CV_FORMAT)[number];
 export const LANGUAGE_LEVEL = ["a1", "a2", "b1", "b2", "c1", "c2", "native"] as const;
 export type LanguageLevel = (typeof LANGUAGE_LEVEL)[number];
-export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, message_channel: MESSAGE_CHANNEL, direction: DIRECTION, message_status: MESSAGE_STATUS, cv_format: CV_FORMAT, language_level: LANGUAGE_LEVEL };
+export const MISSION_KIND = ["email", "careers_page", "linkedin", "x_dm", "discord", "other"] as const;
+export type MissionKind = (typeof MISSION_KIND)[number];
+export const MISSION_STATE = ["draft", "draft_ready", "fire_ready", "in_flight", "fired", "cancelled"] as const;
+export type MissionState = (typeof MISSION_STATE)[number];
+export const CONFIRMATION = ["provisional", "confirmed"] as const;
+export type Confirmation = (typeof CONFIRMATION)[number];
+export const REQUEST_STATUS = ["open", "granted", "declined"] as const;
+export type RequestStatus = (typeof REQUEST_STATUS)[number];
+export const PRIOR_SEND = ["applied", "not_applied"] as const;
+export type PriorSend = (typeof PRIOR_SEND)[number];
+export const MAIL_PROVIDER = ["gmail"] as const;
+export type MailProvider = (typeof MAIL_PROVIDER)[number];
+export const MAILBOX_STATUS = ["linking", "live", "auth_failed", "error", "unlinked"] as const;
+export type MailboxStatus = (typeof MAILBOX_STATUS)[number];
+export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: REFUSAL, verb: VERB, actor: ACTOR, bye: BYE, account_status: ACCOUNT_STATUS, provider: PROVIDER, factor_kind: FACTOR_KIND, challenge_kind: CHALLENGE_KIND, stage: STAGE, app_status: APP_STATUS, freshness: FRESHNESS, gate: GATE, band: BAND, outcome: OUTCOME, work_mode: WORK_MODE, employment: EMPLOYMENT, app_channel: APP_CHANNEL, listing_format: LISTING_FORMAT, batch_kind: BATCH_KIND, batch_status: BATCH_STATUS, fire: FIRE, item_kind: ITEM_KIND, overlay_mode: OVERLAY_MODE, cv_accent: CV_ACCENT, cv_density: CV_DENSITY, place_kind: PLACE_KIND, ownership: OWNERSHIP, remote_policy: REMOTE_POLICY, office_kind: OFFICE_KIND, source_kind: SOURCE_KIND, relation: RELATION, message_channel: MESSAGE_CHANNEL, direction: DIRECTION, message_status: MESSAGE_STATUS, cv_format: CV_FORMAT, language_level: LANGUAGE_LEVEL, mission_kind: MISSION_KIND, mission_state: MISSION_STATE, confirmation: CONFIRMATION, request_status: REQUEST_STATUS, prior_send: PRIOR_SEND, mail_provider: MAIL_PROVIDER, mailbox_status: MAILBOX_STATUS };
 
-export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47 } as const;
+export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47, missions: 48, fire_requests: 49, fire_keys: 50, fire_shots: 51, mailboxes: 52 } as const;
 export type TableName = keyof typeof TABLE_ID;
-export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7 } as const;
+export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7, fire: 8, landed: 9, failed: 10, decline: 11, create_fire_key: 12, revoke_fire_key: 13, mailbox_state: 14, unlink_mail: 15 } as const;
 export type CommandName = keyof typeof COMMAND_ID;
 
 export interface ColumnDef {
@@ -126,7 +140,7 @@ const col = ([name, id, type, flags, target = null, def = null, metricOf = null,
 const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: readonly Packed[] } } = {
   "profiles": {"id":13,"name":"profiles","domain":"corpus","residency":"resident","cap":100,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["slug",8,"str",1],["name",9,"str",1],["headline",10,"str",0],["summary",11,"text",0],["narrative",12,"text",0],["narrative_private",13,"text",4]]},
   "items": {"id":14,"name":"items","domain":"corpus","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["profile_id",8,"ref",4096,"profiles"],["kind",9,"enum",1,"item_kind"],["key",10,"str",1],["title",11,"str",1],["body",12,"text",0],["org",13,"str",0],["span",14,"str",0],["position",15,"u32",1,null,"0"],["keywords",16,"str",0]]},
-  "applications": {"id":15,"name":"applications","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["canonical_url"],"global":false,"where":"canonical_url is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["no",8,"u32",97],["corporation_id",9,"ref",0,"corporations"],["place_id",10,"ref",0,"places"],["contact_id",11,"ref",0,"contacts"],["batch_id",12,"ref",0,"batches"],["company",13,"str",0],["role",14,"str",0],["location",15,"str",0],["work_mode",16,"enum",0,"work_mode"],["employment",17,"enum",0,"employment"],["comp_raw",18,"str",0],["channel",19,"enum",0,"app_channel"],["listing_raw",20,"text",0],["listing_format",21,"enum",0,"listing_format"],["listing_url",22,"str",0],["canonical_url",23,"str",2048],["listing_on",24,"day",0],["keywords",25,"str",32],["keywords_version",26,"u32",32],["source_id",27,"ref",0,"sources"],["stage",28,"enum",33,"stage","discovered"],["pips",29,"str",32],["stage_on",30,"day",32],["stage_notes",31,"json",0],["status",32,"enum",1,"app_status","open"],["gate",33,"enum",0,"gate"],["freshness",34,"enum",0,"freshness"],["heat_override",35,"bool",33,null,"false"],["heat_override_reason",36,"str",32],["score_100",37,"u8",0],["applied_on",38,"day",32],["replied_on",39,"day",32],["closed_on",40,"day",32],["outcome",41,"enum",0,"outcome"],["notes",42,"text",0],["battleplan",43,"text",0],["letter_raw",44,"text",0],["cv_theme",45,"json",0],["cv_root_id",46,"ref",32,"cv_roots"],["cv_pinned_by",47,"enum",32,"actor"],["cv_version_id",48,"ref",32,"cv_versions"]]},
+  "applications": {"id":15,"name":"applications","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[{"cols":["canonical_url"],"global":false,"where":"canonical_url is not null"}],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["no",8,"u32",97],["corporation_id",9,"ref",0,"corporations"],["place_id",10,"ref",0,"places"],["contact_id",11,"ref",0,"contacts"],["batch_id",12,"ref",0,"batches"],["company",13,"str",0],["role",14,"str",0],["location",15,"str",0],["work_mode",16,"enum",0,"work_mode"],["employment",17,"enum",0,"employment"],["comp_raw",18,"str",0],["channel",19,"enum",0,"app_channel"],["listing_raw",20,"text",0],["listing_format",21,"enum",0,"listing_format"],["listing_url",22,"str",0],["canonical_url",23,"str",2048],["listing_on",24,"day",0],["keywords",25,"str",32],["keywords_version",26,"u32",32],["source_id",27,"ref",0,"sources"],["stage",28,"enum",33,"stage","discovered"],["pips",29,"str",32],["stage_on",30,"day",32],["stage_notes",31,"json",0],["status",32,"enum",1,"app_status","open"],["gate",33,"enum",0,"gate"],["freshness",34,"enum",0,"freshness"],["heat_override",35,"bool",33,null,"false"],["heat_override_reason",36,"str",32],["score_100",37,"u8",0],["applied_on",38,"day",32],["replied_on",39,"day",32],["closed_on",40,"day",32],["outcome",41,"enum",0,"outcome"],["notes",42,"text",0],["battleplan",43,"text",0],["letter_raw",44,"text",0],["cv_theme",45,"json",0],["cv_root_id",46,"ref",32,"cv_roots"],["cv_pinned_by",47,"enum",32,"actor"],["cv_version_id",48,"ref",32,"cv_versions"],["prior_send",49,"enum",16,"prior_send"]]},
   "events": {"id":16,"name":"events","domain":"desk","residency":"resident","cap":1000000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"str",1],["body",10,"text",0],["actor",11,"enum",33,"actor"],["key_id",12,"ref",16416,"api_keys"],["op_id",13,"i64",32]]},
   "batches": {"id":17,"name":"batches","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["code",8,"str",1],["ordinal",9,"u32",1],["kind",10,"enum",1,"batch_kind","day_pack"],["status",11,"enum",1,"batch_status","draft_prep"],["fire",12,"enum",17,"fire","hold"],["target_size",13,"u32",1,null,"55"],["queued_on",14,"day",0],["note",15,"text",0]]},
   "cv_lineages": {"id":18,"name":"cv_lineages","domain":"desk","residency":"resident","cap":50000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["corporation_id",8,"ref",1,"corporations"],["generation",9,"u32",33,null,"1"],["opened_on",10,"day",33],["rewrites_allowed",11,"bool",1,null,"true"],["theme",12,"json",0]]},
@@ -155,6 +169,11 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "cv_versions": {"id":44,"name":"cv_versions","domain":"corpus","residency":"resident","cap":100000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["root_id",8,"ref",1,"cv_roots"],["n",9,"u32",33],["body",10,"text",0],["blob_sha",11,"str",0],["blob_name",12,"str",0],["blob_type",13,"str",32],["blob_bytes",14,"u32",32],["text",15,"text",32],["note",16,"str",0],["actor",17,"enum",33,"actor"],["key_id",18,"ref",16416,"api_keys"]]},
   "cv_masks": {"id":46,"name":"cv_masks","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["name",8,"str",1],["pattern",9,"text",1],["note",10,"str",0]]},
   "cv_rules": {"id":47,"name":"cv_rules","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["position",8,"u32",1,null,"0"],["root_id",9,"ref",1,"cv_roots"],["name",10,"str",0],["pattern",11,"text",1],["enabled",12,"bool",1,null,"true"]]},
+  "missions": {"id":48,"name":"missions","domain":"desk","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"enum",1,"mission_kind"],["target",10,"str",0],["contact_id",11,"ref",0,"contacts"],["draft",12,"text",0],["state",13,"enum",1,"mission_state","draft"],["last_error",14,"text",32],["fired_at",15,"time",32],["fired_by",16,"enum",32,"actor"],["fire_key_id",17,"ref",16416,"fire_keys"],["fired_with",18,"ref",16416,"api_keys"],["in_flight_at",19,"time",32],["confirmation",20,"enum",32,"confirmation"],["note",21,"text",0]]},
+  "fire_requests": {"id":49,"name":"fire_requests","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["missions",8,"str",1],["reason",9,"str",0],["requested_by",10,"ref",16416,"api_keys"],["status",11,"enum",33,"request_status","open"],["fire_key_id",12,"ref",16416,"fire_keys"]]},
+  "fire_keys": {"id":50,"name":"fire_keys","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["scope",8,"str",33],["usable_by",9,"ref",16416,"api_keys"],["request_id",10,"ref",16416,"fire_requests"],["first_used_at",11,"time",32],["expires_at",12,"time",33],["revoked_at",13,"time",32]]},
+  "fire_shots": {"id":51,"name":"fire_shots","domain":"desk","residency":"resident","cap":1000000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["fire_key_id",8,"ref",33,"fire_keys"],["mission_id",9,"ref",33,"missions"],["hash",10,"str",33],["burned_at",11,"time",32]]},
+  "mailboxes": {"id":52,"name":"mailboxes","domain":"mail","residency":"resident","cap":1,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":true,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["provider",8,"enum",1,"mail_provider","gmail"],["address",9,"str",1],["status",10,"enum",33,"mailbox_status","linking"],["last_sync_at",11,"time",32],["last_error",12,"text",32],["daily_cap",13,"u32",17,null,"25"],["pipe_id",14,"str",8],["secret",15,"bytes",8],["pipe_secret",16,"bytes",8],["folder",17,"str",8],["uidvalidity",18,"u32",8],["last_uid",19,"u32",8]]},
 };
 export const TABLES = /* @__PURE__ */ Object.fromEntries(/* @__PURE__ */ Object.entries(PACKED).map(([n, t]) => [n, { ...t, cols: t.cols.map(col) }])) as unknown as { readonly [T in TableName]: TableDef };
 
@@ -166,6 +185,14 @@ export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {
   "pick_cv": {"id":5,"name":"pick_cv","table":"applications","humanOnly":false,"params":[{"name":"cv_root_id","id":46,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"cv_roots","enum":null}]},
   "unpin_cv": {"id":6,"name":"unpin_cv","table":"applications","humanOnly":false,"params":[]},
   "open_generation": {"id":7,"name":"open_generation","table":"cv_lineages","humanOnly":false,"params":[{"name":"corporation_id","id":8,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"corporations","enum":null}]},
+  "fire": {"id":8,"name":"fire","table":"missions","humanOnly":false,"params":[{"name":"key","id":65024,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
+  "landed": {"id":9,"name":"landed","table":"missions","humanOnly":false,"params":[{"name":"gmail_msgid","id":65024,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null},{"name":"gmail_thrid","id":65025,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null}]},
+  "failed": {"id":10,"name":"failed","table":"missions","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
+  "decline": {"id":11,"name":"decline","table":"fire_requests","humanOnly":true,"params":[]},
+  "create_fire_key": {"id":12,"name":"create_fire_key","table":"fire_keys","humanOnly":true,"params":[{"name":"missions","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"digest","id":65025,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"usable_by","id":65026,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null},{"name":"request","id":65027,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
+  "revoke_fire_key": {"id":13,"name":"revoke_fire_key","table":"fire_keys","humanOnly":true,"params":[]},
+  "mailbox_state": {"id":14,"name":"mailbox_state","table":"mailboxes","humanOnly":false,"params":[{"name":"status","id":10,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"mailbox_status"},{"name":"last_error","id":12,"type":"text","typeCode":12,"wire":2,"required":false,"column":true,"ref":null,"enum":null},{"name":"last_sync_at","id":11,"type":"time","typeCode":10,"wire":1,"required":false,"column":true,"ref":null,"enum":null}]},
+  "unlink_mail": {"id":15,"name":"unlink_mail","table":"mailboxes","humanOnly":true,"params":[]},
 };
 
 /** `accounts`: server-side. */
@@ -415,6 +442,7 @@ export interface Application {
   cv_root_id: number | null;
   cv_pinned_by: Actor | null;
   cv_version_id: number | null;
+  prior_send: PriorSend | null;
 }
 /** `events`: resident. */
 export interface Event {
@@ -930,4 +958,79 @@ export interface CvRule {
   name: string | null;
   pattern: string;
   enabled: boolean;
+}
+/** `missions`: resident. */
+export interface Mission {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  application_id: number;
+  kind: MissionKind;
+  target: string | null;
+  contact_id: number | null;
+  draft: string | null;
+  state: MissionState;
+  last_error: string | null;
+  fired_at: number | null;
+  fired_by: Actor | null;
+  fire_key_id: number | null;
+  fired_with: number | null;
+  in_flight_at: number | null;
+  confirmation: Confirmation | null;
+  note: string | null;
+}
+/** `fire_requests`: resident. */
+export interface FireRequest {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  missions: string;
+  reason: string | null;
+  requested_by: number | null;
+  status: RequestStatus;
+  fire_key_id: number | null;
+}
+/** `fire_keys`: resident. */
+export interface FireKey {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  scope: string;
+  usable_by: number | null;
+  request_id: number | null;
+  first_used_at: number | null;
+  expires_at: number;
+  revoked_at: number | null;
+}
+/** `fire_shots`: resident. */
+export interface FireShot {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  fire_key_id: number;
+  mission_id: number;
+  hash: string;
+  burned_at: number | null;
+}
+/** `mailboxes`: resident. */
+export interface Mailbox {
+  id: number;
+  account_id: number;
+  rev: number;
+  inserted_at: number;
+  updated_at: number;
+  provider: MailProvider;
+  address: string;
+  status: MailboxStatus;
+  last_sync_at: number | null;
+  last_error: string | null;
+  daily_cap: number;
 }

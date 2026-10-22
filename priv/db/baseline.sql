@@ -287,7 +287,8 @@ CREATE TABLE "applications" (
   "cv_theme" TEXT,
   "cv_root_id" INTEGER REFERENCES "cv_roots"("id") ON DELETE SET NULL,
   "cv_pinned_by" TEXT,
-  "cv_version_id" INTEGER REFERENCES "cv_versions"("id") ON DELETE SET NULL
+  "cv_version_id" INTEGER REFERENCES "cv_versions"("id") ON DELETE SET NULL,
+  "prior_send" TEXT
 ) STRICT;
 CREATE INDEX "applications__account_account_id" ON "applications" ("account_id");
 CREATE UNIQUE INDEX "applications__natural_canonical_url" ON "applications" ("account_id", "canonical_url") WHERE canonical_url is not null;
@@ -828,3 +829,101 @@ CREATE INDEX "cv_rules__account_account_id" ON "cv_rules" ("account_id");
 CREATE INDEX "cv_rules__index_position" ON "cv_rules" ("account_id", "position");
 CREATE TRIGGER "cv_rules__ref_root_id_insert" BEFORE INSERT ON "cv_rules" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_rules.root_id'); END;
 CREATE TRIGGER "cv_rules__ref_root_id_update" BEFORE UPDATE OF "root_id", "account_id" ON "cv_rules" WHEN NEW."root_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "cv_roots" WHERE "id" = NEW."root_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref cv_rules.root_id'); END;
+
+CREATE TABLE "missions" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "application_id" INTEGER NOT NULL REFERENCES "applications"("id") ON DELETE CASCADE,
+  "kind" TEXT NOT NULL,
+  "target" TEXT,
+  "contact_id" INTEGER REFERENCES "contacts"("id") ON DELETE SET NULL,
+  "draft" TEXT,
+  "state" TEXT NOT NULL DEFAULT 'draft',
+  "last_error" TEXT,
+  "fired_at" TEXT,
+  "fired_by" TEXT,
+  "fire_key_id" INTEGER,
+  "fired_with" INTEGER,
+  "in_flight_at" TEXT,
+  "confirmation" TEXT,
+  "note" TEXT
+) STRICT;
+CREATE INDEX "missions__account_account_id" ON "missions" ("account_id");
+CREATE INDEX "missions__index_application_id" ON "missions" ("account_id", "application_id");
+CREATE TRIGGER "missions__ref_application_id_insert" BEFORE INSERT ON "missions" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.application_id'); END;
+CREATE TRIGGER "missions__ref_application_id_update" BEFORE UPDATE OF "application_id", "account_id" ON "missions" WHEN NEW."application_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "applications" WHERE "id" = NEW."application_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.application_id'); END;
+CREATE TRIGGER "missions__ref_contact_id_insert" BEFORE INSERT ON "missions" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.contact_id'); END;
+CREATE TRIGGER "missions__ref_contact_id_update" BEFORE UPDATE OF "contact_id", "account_id" ON "missions" WHEN NEW."contact_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "contacts" WHERE "id" = NEW."contact_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref missions.contact_id'); END;
+
+CREATE TABLE "fire_requests" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "missions" TEXT NOT NULL,
+  "reason" TEXT,
+  "requested_by" INTEGER,
+  "status" TEXT NOT NULL DEFAULT 'open',
+  "fire_key_id" INTEGER
+) STRICT;
+CREATE INDEX "fire_requests__account_account_id" ON "fire_requests" ("account_id");
+
+CREATE TABLE "fire_keys" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "scope" TEXT NOT NULL,
+  "usable_by" INTEGER,
+  "request_id" INTEGER,
+  "first_used_at" TEXT,
+  "expires_at" TEXT NOT NULL,
+  "revoked_at" TEXT
+) STRICT;
+CREATE INDEX "fire_keys__account_account_id" ON "fire_keys" ("account_id");
+
+CREATE TABLE "fire_shots" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "fire_key_id" INTEGER NOT NULL REFERENCES "fire_keys"("id") ON DELETE CASCADE,
+  "mission_id" INTEGER NOT NULL REFERENCES "missions"("id") ON DELETE CASCADE,
+  "hash" TEXT NOT NULL,
+  "burned_at" TEXT
+) STRICT;
+CREATE INDEX "fire_shots__account_account_id" ON "fire_shots" ("account_id");
+CREATE UNIQUE INDEX "fire_shots__unique_fire_key_id_mission_id" ON "fire_shots" ("account_id", "fire_key_id", "mission_id");
+CREATE INDEX "fire_shots__index_mission_id" ON "fire_shots" ("account_id", "mission_id");
+CREATE TRIGGER "fire_shots__ref_fire_key_id_insert" BEFORE INSERT ON "fire_shots" WHEN NEW."fire_key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "fire_keys" WHERE "id" = NEW."fire_key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref fire_shots.fire_key_id'); END;
+CREATE TRIGGER "fire_shots__ref_fire_key_id_update" BEFORE UPDATE OF "fire_key_id", "account_id" ON "fire_shots" WHEN NEW."fire_key_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "fire_keys" WHERE "id" = NEW."fire_key_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref fire_shots.fire_key_id'); END;
+CREATE TRIGGER "fire_shots__ref_mission_id_insert" BEFORE INSERT ON "fire_shots" WHEN NEW."mission_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "missions" WHERE "id" = NEW."mission_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref fire_shots.mission_id'); END;
+CREATE TRIGGER "fire_shots__ref_mission_id_update" BEFORE UPDATE OF "mission_id", "account_id" ON "fire_shots" WHEN NEW."mission_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "missions" WHERE "id" = NEW."mission_id" AND "account_id" IS NEW."account_id") BEGIN SELECT RAISE(ABORT, 'ref fire_shots.mission_id'); END;
+
+CREATE TABLE "mailboxes" (
+  "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+  "account_id" INTEGER NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+  "rev" INTEGER NOT NULL DEFAULT 1,
+  "inserted_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "provider" TEXT NOT NULL DEFAULT 'gmail',
+  "address" TEXT NOT NULL,
+  "status" TEXT NOT NULL DEFAULT 'linking',
+  "last_sync_at" TEXT,
+  "last_error" TEXT,
+  "daily_cap" INTEGER NOT NULL DEFAULT 25,
+  "pipe_id" TEXT,
+  "secret" BLOB,
+  "pipe_secret" BLOB,
+  "folder" TEXT,
+  "uidvalidity" INTEGER,
+  "last_uid" INTEGER
+) STRICT;
+CREATE UNIQUE INDEX "mailboxes__single_account_id" ON "mailboxes" ("account_id");
+CREATE UNIQUE INDEX "mailboxes__unique_pipe_id" ON "mailboxes" ("pipe_id") WHERE pipe_id is not null;
