@@ -274,7 +274,7 @@ impl Kernel {
                 r
             })
             .collect();
-        let listing = listing(t, page, &rows, &groups, order.len(), after, &ask);
+        let listing = desk_listing(t, page, &rows, &groups, order.len(), after, &ask);
         let next = (end < order.len()).then_some(end);
         Ok(json!({"rows": rows, "groups": groups, "total": order.len(), "next": next, "modes": meta["modes"], "unlinked": meta["unlinked"], "listing": listing}))
     }
@@ -596,30 +596,18 @@ fn keys() -> Vec<&'static str> {
     crate::arrange::DESK.iter().copied().chain(crate::mask::FIELDS.iter().map(|f| f.path)).collect()
 }
 
-/// A desk page as an agent reads it: how it stands, a heading per group,
-/// a line per application, and the offset of the page after it.
-fn listing(t: &crate::rows::Table, page: &[u32], rows: &[Json], groups: &[Json], total: usize, after: usize, ask: &Json) -> String {
-    use core::fmt::Write;
+/// The desk page as an agent reads it (`arrange::listing`): how it stands, then each application's line.
+fn desk_listing(t: &crate::rows::Table, page: &[u32], rows: &[Json], groups: &[Json], total: usize, after: usize, ask: &Json) -> String {
     use schema::col::applications as A;
-    let mut s = String::new();
     let how = match ask["sort"][0].as_str() {
         Some(k) => alloc::format!("sorted by {k}{}", ask["sort"][1].as_str().map_or(String::new(), |d| alloc::format!(" {d}"))),
         None => "in board order (score, then heat)".into(),
     };
     let by = ask["group"].as_str().filter(|g| !g.is_empty()).map_or(String::new(), |g| alloc::format!(", grouped by {g}"));
-    let shown = if page.is_empty() { "none".into() } else { alloc::format!("{}-{}", after + 1, after + page.len()) };
-    let _ = writeln!(s, "{total} applications {how}{by}; rows {shown}");
-    let mut heading: Option<&Json> = None;
-    for (i, (&id, r)) in page.iter().zip(rows).enumerate() {
-        let at = (after + i) as u64;
-        let g = groups.iter().find(|g| g["start"].as_u64().is_some_and(|st| st <= at && at < st + g["count"].as_u64().unwrap_or(0)));
-        if g.is_some() && g.map(|g| &g["key"]) != heading.map(|g| &g["key"]) {
-            heading = g;
-            let _ = writeln!(s, "\n{} ({})", g.map_or("", |g| g["label"].as_str().unwrap_or("")), g.map_or(0, |g| g["count"].as_u64().unwrap_or(0)));
-        }
+    crate::arrange::listing("applications", &alloc::format!(" {how}{by}"), rows, groups, total, after, |i, r| {
+        let id = page[i];
         let text = |c: u16| t.str(id, c).unwrap_or("");
-        let parts: Vec<&str> = [text(A::COMPANY), text(A::ROLE), text(A::LOCATION)].into_iter().filter(|p| !p.is_empty()).collect();
-        let mut tail: Vec<String> = parts.iter().map(|p| String::from(*p)).collect();
+        let mut tail: Vec<String> = [text(A::COMPANY), text(A::ROLE), text(A::LOCATION)].into_iter().filter(|p| !p.is_empty()).map(String::from).collect();
         tail.extend(r["stage"].as_str().map(String::from));
         if let (Some(class), Some(score)) = (r["class"].as_str(), r["score"].as_u64()) {
             tail.push(alloc::format!("{class} {score}"));
@@ -627,12 +615,8 @@ fn listing(t: &crate::rows::Table, page: &[u32], rows: &[Json], groups: &[Json],
         if r["stale"] == true {
             tail.push("stale".into());
         }
-        let _ = writeln!(s, "  #{}  {}", t.u32(id, A::NO).unwrap_or(id), tail.join(" · "));
-    }
-    if after + page.len() < total {
-        let _ = writeln!(s, "\nnext: {{\"after\": {}}}", after + page.len());
-    }
-    s
+        alloc::format!("#{}  {}", t.u32(id, A::NO).unwrap_or(id), tail.join(" · "))
+    })
 }
 
 /// Effects as JSON: `[{table, id, cells: {column: value}}]` with names

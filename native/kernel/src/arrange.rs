@@ -647,3 +647,27 @@ pub fn mend(rows: &Rows, key: &str, column: &mut Column, ids: &[u32]) -> bool {
     }
     true
 }
+
+/// A page as an agent reads it: `total` `noun` and `how` they stand, a
+/// heading per group the page crosses, `line` per row, and the offset of
+/// the page after it.
+pub fn listing(noun: &str, how: &str, rows: &[Json], groups: &[Json], total: usize, after: usize, line: impl Fn(usize, &Json) -> String) -> String {
+    use core::fmt::Write;
+    let mut s = String::new();
+    let shown = if rows.is_empty() { "none".into() } else { alloc::format!("{}-{}", after + 1, after + rows.len()) };
+    let _ = writeln!(s, "{total} {noun}{how}; rows {shown}");
+    let mut heading: Option<&Json> = None;
+    for (i, r) in rows.iter().enumerate() {
+        let at = (after + i) as u64;
+        let g = groups.iter().find(|g| g["start"].as_u64().is_some_and(|st| st <= at && at < st + g["count"].as_u64().unwrap_or(0)));
+        if g.is_some() && g.map(|g| &g["key"]) != heading.map(|g| &g["key"]) {
+            heading = g;
+            let _ = writeln!(s, "\n{} ({})", g.map_or("", |g| g["label"].as_str().unwrap_or("")), g.map_or(0, |g| g["count"].as_u64().unwrap_or(0)));
+        }
+        let _ = writeln!(s, "  {}", line(i, r));
+    }
+    if after + rows.len() < total {
+        let _ = writeln!(s, "\nnext: {{\"after\": {}}}", after + rows.len());
+    }
+    s
+}

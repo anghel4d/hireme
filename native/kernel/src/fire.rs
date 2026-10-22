@@ -193,14 +193,6 @@ fn text<'t>(t: &'t Table, id: u32, c: u16) -> Cow<'t, str> {
     t.text(id, c).unwrap_or(Cow::Borrowed(""))
 }
 
-fn cell(r: &mut Row, col: u16, v: impl Into<EVal>) {
-    let v = v.into();
-    match r.cells.iter_mut().find(|c| c.0 == col) {
-        Some(c) => c.1 = v,
-        None => r.cells.push((col, v)),
-    }
-}
-
 fn row(table: u16, id: u32) -> Row {
     Row { table, id, cells: Vec::new() }
 }
@@ -211,6 +203,28 @@ fn state_name(s: u32) -> &'static str {
 
 fn missions(rows: &Rows) -> Option<&Table> {
     rows.table(table::MISSIONS)
+}
+
+/// Mission `id`'s table, or not found.
+fn mission_of(rows: &Rows, id: u32) -> Result<&Table, Refusal> {
+    missions(rows).filter(|t| t.has(id)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "missions", "id": id})))
+}
+
+/// Request `id`'s table while it is open: else not found, or not_open.
+fn open_request(rows: &Rows, id: u32) -> Result<&Table, Refusal> {
+    let t = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(id)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": id})))?;
+    if t.u32(id, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
+        return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": id, "rule": "not_open"})));
+    }
+    Ok(t)
+}
+
+/// An application as a mission's review and brief show it.
+fn app_json(a: &Table, app: u32) -> Json {
+    json!({
+        "id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
+        "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": a.u32(app, A::CORPORATION_ID),
+    })
 }
 
 /// A mission's state, kind and application.
@@ -607,19 +621,19 @@ pub fn going(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Vec<Row> {
     // The CV the shot carries is the one the key's hash covered: the node
     // attaches this version, whatever the pick names later.
     let app = application(rows, mission).unwrap_or(0);
-    cell(&mut m, M::CV_VERSION_ID, opt(Cvs::of(rows).version(rows, app)));
-    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::IN_FLIGHT)));
-    cell(&mut m, M::IN_FLIGHT_AT, now_u32(ctx.now));
-    cell(&mut m, M::FIRE_KEY_ID, Val::U32(key_id));
-    cell(&mut m, M::FIRED_WITH, opt(ctx.key_id));
+    m.set(M::CV_VERSION_ID, opt(Cvs::of(rows).version(rows, app)));
+    m.set(M::STATE, Val::U32(u32::from(enums::mission_state::IN_FLIGHT)));
+    m.set(M::IN_FLIGHT_AT, now_u32(ctx.now));
+    m.set(M::FIRE_KEY_ID, Val::U32(key_id));
+    m.set(M::FIRED_WITH, opt(ctx.key_id));
     let actor = if ctx.human { enums::actor::OPERATOR } else { enums::actor::AGENT };
-    cell(&mut m, M::FIRED_BY, Val::U32(u32::from(actor)));
-    cell(&mut m, M::LAST_ERROR, Val::None);
+    m.set(M::FIRED_BY, Val::U32(u32::from(actor)));
+    m.set(M::LAST_ERROR, Val::None);
     let mut out = alloc::vec![m];
     if key(rows, key_id).is_some_and(|k| k.first_used.is_none()) {
         let mut k = row(table::FIRE_KEYS, key_id);
-        cell(&mut k, K::FIRST_USED_AT, now_u32(ctx.now));
-        cell(&mut k, K::EXPIRES_AT, now_u32(ctx.now + USED_LIFE));
+        k.set(K::FIRST_USED_AT, now_u32(ctx.now));
+        k.set(K::EXPIRES_AT, now_u32(ctx.now + USED_LIFE));
         out.push(k);
     }
     out
@@ -628,9 +642,7 @@ pub fn going(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Vec<Row> {
 /// Who may report a shot's outcome: an email's, the mail actor; another's,
 /// the API key that fired it or the operator.
 pub fn may_report(rows: &Rows, ctx: &Ctx, mission: u32) -> Result<(), Refusal> {
-    let Some(t) = missions(rows).filter(|t| t.has(mission)) else {
-        return Err(no(refusal::NOT_FOUND, json!({"table": "missions", "id": mission})));
-    };
+    let t = mission_of(rows, mission)?;
     let mail = !ctx.human && ctx.key_id.is_none();
     let ok = if is_email(t, mission) { mail } else { ctx.human || (ctx.key_id.is_some() && t.u32(mission, M::FIRED_WITH) == ctx.key_id) };
     if !ok {
@@ -649,8 +661,8 @@ pub fn may_report(rows: &Rows, ctx: &Ctx, mission: u32) -> Result<(), Refusal> {
 pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result<Vec<Row>, Refusal> {
     let t = missions(rows).filter(|t| t.has(mission));
     let mut m = row(table::MISSIONS, mission);
-    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::FIRED)));
-    cell(&mut m, M::FIRED_AT, now_u32(ctx.now));
+    m.set(M::STATE, Val::U32(u32::from(enums::mission_state::FIRED)));
+    m.set(M::FIRED_AT, now_u32(ctx.now));
     let mut record = None;
     if let Some(t) = t.filter(|t| is_email(t, mission)) {
         let Some(message_id) = t.str(mission, M::MESSAGE_ID).filter(|v| !v.is_empty()) else {
@@ -684,16 +696,16 @@ pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result
             gmail_thrid: num(&gmail.1),
         };
         record = Some(crate::outreach::sent_record(rows, &shot, ctx.now));
-        cell(&mut m, M::GMAIL_MSGID, gmail.0);
-        cell(&mut m, M::GMAIL_THRID, gmail.1);
+        m.set(M::GMAIL_MSGID, gmail.0);
+        m.set(M::GMAIL_THRID, gmail.1);
     } else {
-        cell(&mut m, M::CONFIRMATION, Val::U32(u32::from(enums::confirmation::PROVISIONAL)));
+        m.set(M::CONFIRMATION, Val::U32(u32::from(enums::confirmation::PROVISIONAL)));
     }
     let mut out = alloc::vec![m];
     let k = t.and_then(|t| t.u32(mission, M::FIRE_KEY_ID));
     if let Some(s) = shots(rows).find(|s| s.mission == mission && Some(s.key) == k) {
         let mut r = row(table::FIRE_SHOTS, s.id);
-        cell(&mut r, S::BURNED_AT, now_u32(ctx.now));
+        r.set(S::BURNED_AT, now_u32(ctx.now));
         out.push(r);
     }
     out.extend(record);
@@ -709,13 +721,13 @@ pub fn carried_cv(rows: &Rows, mission: u32) -> Option<u32> {
 /// unburned (still covered).
 pub fn failed(rows: &Rows, mission: u32, reason: &str) -> Vec<Row> {
     let mut m = row(table::MISSIONS, mission);
-    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::FIRE_READY)));
-    cell(&mut m, M::LAST_ERROR, if reason.trim().is_empty() { Val::Str("failed".into()) } else { Val::Str(reason.trim().into()) });
+    m.set(M::STATE, Val::U32(u32::from(enums::mission_state::FIRE_READY)));
+    m.set(M::LAST_ERROR, if reason.trim().is_empty() { Val::Str("failed".into()) } else { Val::Str(reason.trim().into()) });
     let mut out = alloc::vec![m];
     let k = missions(rows).and_then(|t| t.u32(mission, M::FIRE_KEY_ID));
     if let Some(s) = shots(rows).find(|s| s.mission == mission && Some(s.key) == k && s.burned.is_some()) {
         let mut r = row(table::FIRE_SHOTS, s.id);
-        cell(&mut r, S::BURNED_AT, Val::None);
+        r.set(S::BURNED_AT, Val::None);
         out.push(r);
     }
     out
@@ -774,10 +786,7 @@ pub fn review(rows: &Rows, scope: &Ranges) -> Json {
                 "kind": t.u32(id, M::KIND).and_then(|k| enums::outreach_kind::NAMES.get(k as usize).copied()),
                 "target": t.str(id, M::TARGET),
                 "state": state_name(u32::from(state(t, id))),
-                "application": a.map_or(Json::Null, |a| json!({
-                    "id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
-                    "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": a.u32(app, A::CORPORATION_ID),
-                })),
+                "application": a.map_or(Json::Null, |a| app_json(a, app)),
                 "draft": draft,
                 "cv_version_id": cvs.version(rows, app),
                 "hash": h,
@@ -821,31 +830,25 @@ pub fn create(rows: &Rows, ctx: &Ctx, missions_text: &str, digest_given: &str, u
     }
     let mut bound = usable_by;
     if let Some(r) = request {
-        let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(r)) else {
-            return Err(no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": r})));
-        };
-        if t.u32(r, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
-            return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": r, "rule": "not_open"})));
-        }
-        bound = bound.or(t.u32(r, R::REQUESTED_BY));
+        bound = bound.or(open_request(rows, r)?.u32(r, R::REQUESTED_BY));
     }
     let mut k = row(table::FIRE_KEYS, 0);
-    cell(&mut k, K::SCOPE, Val::Str(Ranges::of(eligible.iter().map(|e| e.0)).text()));
-    cell(&mut k, K::USABLE_BY, opt(bound));
-    cell(&mut k, K::REQUEST_ID, opt(request));
-    cell(&mut k, K::EXPIRES_AT, now_u32(ctx.now + UNUSED_LIFE));
+    k.set(K::SCOPE, Val::Str(Ranges::of(eligible.iter().map(|e| e.0)).text()));
+    k.set(K::USABLE_BY, opt(bound));
+    k.set(K::REQUEST_ID, opt(request));
+    k.set(K::EXPIRES_AT, now_u32(ctx.now + UNUSED_LIFE));
     let mut out = alloc::vec![k];
     for (id, h) in eligible {
         let mut s = row(table::FIRE_SHOTS, 0);
-        cell(&mut s, S::FIRE_KEY_ID, EVal::New(0));
-        cell(&mut s, S::MISSION_ID, Val::U32(id));
-        cell(&mut s, S::HASH, Val::Str(h));
+        s.set(S::FIRE_KEY_ID, EVal::New(0));
+        s.set(S::MISSION_ID, Val::U32(id));
+        s.set(S::HASH, Val::Str(h));
         out.push(s);
     }
     if let Some(r) = request {
         let mut q = row(table::FIRE_REQUESTS, r);
-        cell(&mut q, R::STATUS, Val::U32(u32::from(enums::request_status::GRANTED)));
-        cell(&mut q, R::FIRE_KEY_ID, EVal::New(0));
+        q.set(R::STATUS, Val::U32(u32::from(enums::request_status::GRANTED)));
+        q.set(R::FIRE_KEY_ID, EVal::New(0));
         out.push(q);
     }
     Ok(out)
@@ -860,21 +863,16 @@ pub fn revoke(rows: &Rows, ctx: &Ctx, id: u32) -> Result<Vec<Row>, Refusal> {
         return Ok(Vec::new());
     }
     let mut r = row(table::FIRE_KEYS, id);
-    cell(&mut r, K::REVOKED_AT, now_u32(ctx.now));
+    r.set(K::REVOKED_AT, now_u32(ctx.now));
     Ok(alloc::vec![r])
 }
 
 /// `decline`: an open request closed without a key.
 pub fn decline(rows: &Rows, ctx: &Ctx, id: u32) -> Result<Vec<Row>, Refusal> {
     need_human(ctx, "decline")?;
-    let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(id)) else {
-        return Err(no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": id})));
-    };
-    if t.u32(id, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
-        return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": id, "rule": "not_open"})));
-    }
+    open_request(rows, id)?;
     let mut r = row(table::FIRE_REQUESTS, id);
-    cell(&mut r, R::STATUS, Val::U32(u32::from(enums::request_status::DECLINED)));
+    r.set(R::STATUS, Val::U32(u32::from(enums::request_status::DECLINED)));
     Ok(alloc::vec![r])
 }
 
@@ -882,7 +880,7 @@ pub fn decline(rows: &Rows, ctx: &Ctx, id: u32) -> Result<Vec<Row>, Refusal> {
 pub fn stamp(rows: &Rows, ctx: &Ctx, mission: u32, message_id: &str) -> Result<Vec<Row>, Refusal> {
     need_mail(ctx, "stamp")?;
     may_report(rows, ctx, mission)?;
-    let t = missions(rows).filter(|t| t.has(mission)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "missions", "id": mission})))?;
+    let t = mission_of(rows, mission)?;
     let id = message_id.trim();
     if id.is_empty() || id.len() > 998 || id.bytes().any(|c| c.is_ascii_whitespace() || c.is_ascii_control()) {
         return Err(no(refusal::TYPE, json!({"param": "message_id"})));
@@ -892,7 +890,7 @@ pub fn stamp(rows: &Rows, ctx: &Ctx, mission: u32, message_id: &str) -> Result<V
         Some(_) => Err(no(refusal::STAGE, json!({"table": "missions", "id": mission, "rule": "stamped"}))),
         None => {
             let mut r = row(table::MISSIONS, mission);
-            cell(&mut r, M::MESSAGE_ID, Val::Str(id.into()));
+            r.set(M::MESSAGE_ID, Val::Str(id.into()));
             Ok(alloc::vec![r])
         }
     }
@@ -903,10 +901,10 @@ pub fn mailbox_state(rows: &Rows, ctx: &Ctx, status: Val, error: Val, synced: Va
     need_mail(ctx, "mailbox_state")?;
     let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
     let mut r = row(table::MAILBOXES, id);
-    cell(&mut r, MB::STATUS, status);
-    cell(&mut r, MB::LAST_ERROR, error);
+    r.set(MB::STATUS, status);
+    r.set(MB::LAST_ERROR, error);
     if !synced.is_none() {
-        cell(&mut r, MB::LAST_SYNC_AT, synced);
+        r.set(MB::LAST_SYNC_AT, synced);
     }
     Ok(alloc::vec![r])
 }
@@ -917,7 +915,7 @@ pub fn unlink(rows: &Rows, ctx: &Ctx) -> Result<Vec<Row>, Refusal> {
     need_human(ctx, "unlink_mail")?;
     let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
     let mut r = row(table::MAILBOXES, id);
-    cell(&mut r, MB::STATUS, Val::U32(u32::from(enums::mailbox_status::UNLINKED)));
+    r.set(MB::STATUS, Val::U32(u32::from(enums::mailbox_status::UNLINKED)));
     Ok(alloc::vec![r])
 }
 
@@ -929,7 +927,7 @@ pub fn unlink(rows: &Rows, ctx: &Ctx) -> Result<Vec<Row>, Refusal> {
 /// its requester stamped.
 pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) -> Result<(), Refusal> {
     let mail = !ctx.human && ctx.key_id.is_none();
-    let given = |row: &Row, c: u16| row.cells.iter().find(|x| x.0 == c).map(|x| x.1.clone());
+    let given = |row: &Row, c: u16| row.get(c).cloned();
     match op_table {
         table::MISSIONS => {
             if mail {
@@ -938,7 +936,7 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             let t = missions(rows).filter(|t| target > 0 && t.has(target));
             let from = t.map(|t| state(t, target));
             if t.is_none() && given(row, M::STATE).is_none() {
-                cell(row, M::STATE, Val::U32(u32::from(enums::mission_state::DRAFT)));
+                row.set(M::STATE, Val::U32(u32::from(enums::mission_state::DRAFT)));
             }
             if let Some(f) = from.filter(|f| [enums::mission_state::IN_FLIGHT, enums::mission_state::FIRED].contains(f))
                 && row.cells.iter().any(|c| c.0 != M::NOTE)
@@ -981,7 +979,7 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
                     if let Some(EVal::Val(Val::Str(list))) = given(row, c) {
                         let a = crate::outreach::addrs(&list)
                             .map_err(|_| no(refusal::TYPE, json!({"table": "missions", "column": name, "need": "up to 10 addresses, comma-separated"})))?;
-                        cell(row, c, if a.is_empty() { Val::None } else { Val::Str(a.join(", ")) });
+                        row.set(c, if a.is_empty() { Val::None } else { Val::Str(a.join(", ")) });
                     }
                 }
             }
@@ -992,24 +990,22 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
                 return Err(no(refusal::SCOPE, json!({"need": "operator or agent", "table": "fire_requests"})));
             }
             if let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| target > 0 && t.has(target)) {
-                if t.u32(target, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
-                    return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": target, "rule": "not_open"})));
-                }
+                open_request(rows, target)?;
                 if !ctx.human && t.u32(target, R::REQUESTED_BY) != ctx.key_id {
                     return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": target})));
                 }
             } else {
-                cell(row, R::REQUESTED_BY, opt(ctx.key_id));
+                row.set(R::REQUESTED_BY, opt(ctx.key_id));
                 // The default, written as the database will, so a prediction
                 // reads the row it will be.
-                cell(row, R::STATUS, Val::U32(u32::from(enums::request_status::OPEN)));
+                row.set(R::STATUS, Val::U32(u32::from(enums::request_status::OPEN)));
             }
             if let Some(EVal::Val(Val::Str(m))) = given(row, R::MISSIONS) {
                 let r = Ranges::parse(&m).map_err(|at| no(refusal::TYPE, json!({"table": "fire_requests", "column": "missions", "at": at})))?;
                 if r.is_empty() {
                     return Err(no(refusal::TYPE, json!({"table": "fire_requests", "column": "missions", "need": "ranges of mission ids"})));
                 }
-                cell(row, R::MISSIONS, Val::Str(r.text()));
+                row.set(R::MISSIONS, Val::Str(r.text()));
             }
             if let Some(EVal::Val(Val::Str(why))) = given(row, R::REASON)
                 && why.chars().count() > REASON_MAX
@@ -1128,7 +1124,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
         }
         "mission_brief" => {
             let id = id_arg(req, "mission")?;
-            let t = missions(rows).filter(|t| t.has(id)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "missions", "id": id})))?;
+            let t = mission_of(rows, id)?;
             let cvs = Cvs::of(rows);
             let email = is_email(t, id);
             let app = t.u32(id, M::APPLICATION_ID).unwrap_or(0);
@@ -1138,8 +1134,11 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
             let contact = t.u32(id, M::CONTACT_ID);
             Ok(json!({
                 "mission": mission_json(rows, &cvs, t, id, now),
-                "application": apps.map_or(Json::Null, |a| json!({"id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
-                    "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": corp, "corporation": corp_name})),
+                "application": apps.map_or(Json::Null, |a| {
+                    let mut j = app_json(a, app);
+                    j["corporation"] = json!(corp_name);
+                    j
+                }),
                 "contact_id": contact,
                 "kind": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::name),
                 "brief": t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code).map(crate::outreach::Kind::brief),

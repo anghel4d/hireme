@@ -89,7 +89,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn set(&mut self, col: u16, v: impl Into<EVal>) {
+    pub(crate) fn set(&mut self, col: u16, v: impl Into<EVal>) {
         let v = v.into();
         match self.cells.iter_mut().find(|c| c.0 == col) {
             Some(c) => c.1 = v,
@@ -97,7 +97,7 @@ impl Row {
         }
     }
 
-    fn get(&self, col: u16) -> Option<&EVal> {
+    pub(crate) fn get(&self, col: u16) -> Option<&EVal> {
         self.cells.iter().find(|c| c.0 == col).map(|c| &c.1)
     }
 }

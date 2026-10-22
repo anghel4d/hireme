@@ -805,13 +805,6 @@ impl crate::filer::Store for Stored<'_> {
 
 // ------------------------------------------------------------------ the judge
 
-fn set(row: &mut Row, c: u16, v: Val) {
-    match row.cells.iter_mut().find(|x| x.0 == c) {
-        Some(x) => x.1 = EVal::Val(v),
-        None => row.cells.push((c, EVal::Val(v))),
-    }
-}
-
 fn actor_of(ctx: &Ctx) -> Actor {
     if ctx.human {
         Actor::Operator
@@ -861,14 +854,14 @@ fn resolve(rows: &Rows, given: Refs) -> Result<Refs, Invariant> {
 fn write_refs(row: &mut Row, before: Refs, after: Refs) {
     for ((c, b), (_, a)) in before.cells().into_iter().zip(after.cells()) {
         if a != b {
-            set(row, c, a.map_or(Val::None, Val::U32));
+            row.set(c, a.map_or(Val::None, Val::U32));
         }
     }
 }
 
 fn write_filing(row: &mut Row, filing: Filing, by: Option<FiledBy>) {
-    set(row, O::FILING, Val::U32(filing.code()));
-    set(row, O::FILED_BY, by.map_or(Val::None, |f| Val::U32(f.code())));
+    row.set(O::FILING, Val::U32(filing.code()));
+    row.set(O::FILED_BY, by.map_or(Val::None, |f| Val::U32(f.code())));
 }
 
 /// The outreach table's domain rule on a put: the item as the row would
@@ -927,7 +920,7 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
         (_, d) => d,
     };
     for (c, v) in derived {
-        set(row, c, v);
+        row.set(c, v);
     }
     // The item as it stands now, after what was set above.
     let snapshot = row.cells.clone();
@@ -940,7 +933,7 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
             && let Some(m) = e.message_id.as_deref()
         {
             let form = message_id_form(m);
-            set(row, O::MESSAGE_ID, s(Some(form.clone())));
+            row.set(O::MESSAGE_ID, s(Some(form.clone())));
             e.message_id = Some(form);
         }
         // Addresses stored bare: `Name <a@b>` reads as `a@b`.
@@ -949,14 +942,14 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
                 && let Some(given) = one.as_deref()
             {
                 let bare = addr(given).ok_or_else(|| bad(if c == O::REPLY_TO { "reply_to" } else { "from_addr" }, "an address").refusal())?;
-                set(row, c, s(Some(bare.clone())));
+                row.set(c, s(Some(bare.clone())));
                 *one = Some(bare);
             }
         }
         for (c, list) in [(O::TO_ADDR, &mut e.to), (O::CC_ADDR, &mut e.cc)] {
             if view.given(c) {
                 *list = addrs(&view.str(c).unwrap_or_default()).map_err(|i| Invariant { column: if c == O::CC_ADDR { "cc_addr" } else { "to_addr" }, ..i }.refusal())?;
-                set(row, c, s(join(list)));
+                row.set(c, s(join(list)));
             }
         }
         if direction == Some(Direction::Outbound) && e.to.is_empty() {
@@ -967,7 +960,7 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
         && let Some(h) = x.handle.as_deref().and_then(|h| h.strip_prefix('@'))
     {
         let h = h.to_string();
-        set(row, O::HANDLE, s(Some(h.clone())));
+        row.set(O::HANDLE, s(Some(h.clone())));
         x.handle = Some(h);
     }
     // Where it belongs: what the writer gave, with what that implies.
@@ -994,7 +987,7 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
             }
             if !f.evidence.is_empty() || !f.candidates.is_empty() {
                 let ev = json!({"evidence": f.evidence.iter().map(crate::filer::Evidence::json).collect::<Vec<_>>(), "candidates": f.candidates.iter().map(crate::filer::Candidate::json).collect::<Vec<_>>()});
-                set(row, O::EVIDENCE, Val::Str(ev.to_string()));
+                row.set(O::EVIDENCE, Val::Str(ev.to_string()));
             }
             if f.thread_key.is_some() {
                 thread_key = f.thread_key;
@@ -1029,7 +1022,7 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
 fn finish(row: &mut Row, kind: Kind, was: Refs, refs: Refs, thread_key: Option<String>, key_moves: bool) -> Result<(), Refusal> {
     write_refs(row, was, refs);
     if kind == Kind::Email && key_moves {
-        set(row, O::THREAD_KEY, s(thread_key));
+        row.set(O::THREAD_KEY, s(thread_key));
     }
     Ok(())
 }
@@ -1191,27 +1184,27 @@ pub fn sent_record(rows: &Rows, shot: &Shot<'_>, now: i64) -> Row {
     let mut row = Row { table: table::OUTREACH, id: existing.unwrap_or(0), cells: Vec::new() };
     let before = existing.and_then(|id| rows.table(table::OUTREACH).and_then(|t| Item::read(t, id)));
     if before.is_none() {
-        set(&mut row, O::KIND, Val::U32(Kind::Email.code()));
-        set(&mut row, O::DIRECTION, Val::U32(Direction::Outbound.code()));
-        set(&mut row, O::AT, Val::U32(now as u32));
-        set(&mut row, O::ACTOR, Val::U32(Actor::Mail.code()));
-        set(&mut row, O::PIPE, Val::U32(Pipe::Hireme.code()));
-        set(&mut row, O::MESSAGE_ID, s(Some(message_id_form(shot.message_id))));
+        row.set(O::KIND, Val::U32(Kind::Email.code()));
+        row.set(O::DIRECTION, Val::U32(Direction::Outbound.code()));
+        row.set(O::AT, Val::U32(now as u32));
+        row.set(O::ACTOR, Val::U32(Actor::Mail.code()));
+        row.set(O::PIPE, Val::U32(Pipe::Hireme.code()));
+        row.set(O::MESSAGE_ID, s(Some(message_id_form(shot.message_id))));
     }
-    set(&mut row, O::FROM_ADDR, s(Some(shot.from.into())));
-    set(&mut row, O::TO_ADDR, s(join(shot.to)));
-    set(&mut row, O::CC_ADDR, s(join(shot.cc)));
-    set(&mut row, O::SUBJECT, s(shot.subject.map(String::from)));
-    set(&mut row, O::BODY, s(shot.body.map(String::from)));
-    set(&mut row, O::IN_REPLY_TO, s(shot.in_reply_to.map(String::from)));
-    set(&mut row, O::REFS, s(Some(shot.refs.join(" "))));
+    row.set(O::FROM_ADDR, s(Some(shot.from.into())));
+    row.set(O::TO_ADDR, s(join(shot.to)));
+    row.set(O::CC_ADDR, s(join(shot.cc)));
+    row.set(O::SUBJECT, s(shot.subject.map(String::from)));
+    row.set(O::BODY, s(shot.body.map(String::from)));
+    row.set(O::IN_REPLY_TO, s(shot.in_reply_to.map(String::from)));
+    row.set(O::REFS, s(Some(shot.refs.join(" "))));
     if let Some(m) = shot.gmail_msgid {
-        set(&mut row, O::GMAIL_MSGID, Val::I64(m));
+        row.set(O::GMAIL_MSGID, Val::I64(m));
     }
     if let Some(t) = shot.gmail_thrid {
-        set(&mut row, O::GMAIL_THRID, Val::I64(t));
+        row.set(O::GMAIL_THRID, Val::I64(t));
     }
-    set(&mut row, O::THREAD_KEY, s(thread_root(shot.refs, shot.in_reply_to, Some(shot.message_id))));
+    row.set(O::THREAD_KEY, s(thread_root(shot.refs, shot.in_reply_to, Some(shot.message_id))));
     write_refs(&mut row, before.as_ref().map_or(Refs::default(), |b| b.core.refs), refs);
     write_filing(&mut row, Filing::Filed, Some(FiledBy::Mail));
     row
@@ -1372,22 +1365,11 @@ pub fn query(rows: &Rows, g: &Grants, req: &Json, _today: Day) -> Result<Json, R
     Ok(json!({"rows": out, "groups": groups, "total": order.len(), "next": next, "counts": {"unfiled": unfiled, "unseen": unseen}, "listing": listing}))
 }
 
-/// The page as an agent reads it: how it stands, a heading per group, a line per item.
+/// The hub page as an agent reads it (`arrange::listing`): how it stands, then each item's line.
 fn listing(rows: &[Json], groups: &[Json], total: usize, after: usize, sort: &str, dir: i8, group: &str) -> String {
-    use core::fmt::Write;
-    let mut s = String::new();
     let how = if sort.is_empty() { String::new() } else { alloc::format!(" sorted by {sort} {}", if dir < 0 { "desc" } else { "asc" }) };
     let by = if group.is_empty() { String::new() } else { alloc::format!(", grouped by {group}") };
-    let shown = if rows.is_empty() { "none".into() } else { alloc::format!("{}-{}", after + 1, after + rows.len()) };
-    let _ = writeln!(s, "{total} outreach items{how}{by}; rows {shown}");
-    let mut heading: Option<&Json> = None;
-    for (i, r) in rows.iter().enumerate() {
-        let at = (after + i) as u64;
-        let g = groups.iter().find(|g| g["start"].as_u64().is_some_and(|st| st <= at && at < st + g["count"].as_u64().unwrap_or(0)));
-        if g.is_some() && g.map(|g| &g["key"]) != heading.map(|g| &g["key"]) {
-            heading = g;
-            let _ = writeln!(s, "\n{} ({})", g.map_or("", |g| g["label"].as_str().unwrap_or("")), g.map_or(0, |g| g["count"].as_u64().unwrap_or(0)));
-        }
+    arrange::listing("outreach items", &alloc::format!("{how}{by}"), rows, groups, total, after, |_, r| {
         let text = |k: &str| r[k].as_str().unwrap_or("").to_string();
         let who = match r["kind"].as_str() {
             Some("email") => r["email"]["from"].as_str().map(String::from).or_else(|| r["email"]["to"].as_array().map(|a| a.iter().filter_map(Json::as_str).collect::<Vec<_>>().join(", "))).unwrap_or_default(),
@@ -1395,12 +1377,8 @@ fn listing(rows: &[Json], groups: &[Json], total: usize, after: usize, sort: &st
             None => String::new(),
         };
         let parts: Vec<String> = [text("kind"), text("direction"), text("at"), who, text("subject"), text("company"), text("filing")].into_iter().filter(|p| !p.is_empty()).collect();
-        let _ = writeln!(s, "  #{}  {}", r["id"].as_u64().unwrap_or(0), parts.join(" · "));
-    }
-    if after + rows.len() < total {
-        let _ = writeln!(s, "\nnext: {{\"after\": {}}}", after + rows.len());
-    }
-    s
+        alloc::format!("#{}  {}", r["id"].as_u64().unwrap_or(0), parts.join(" · "))
+    })
 }
 
 /// What the desk card shows of an application's outreach at a glance.
