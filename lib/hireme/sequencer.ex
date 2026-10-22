@@ -1866,10 +1866,12 @@ defmodule Hireme.Sequencer do
     values = if rows == [], do: Enum.map(cols, fn _ -> [] end), else: Enum.zip_with(rows, & &1)
 
     {length(rows),
-     Map.new(Enum.zip(cols, values), fn {c, vs} ->
-       {c.id, Enum.map(vs, Codec.stored_to_wire(c))}
-     end)}
+     Map.new(Enum.zip(cols, values), fn {c, vs} -> {c.id, column(vs, Codec.stored_to_wire(c))} end)}
   end
+
+  # Most columns are already the wire's and are taken as they are.
+  defp column(values, nil), do: values
+  defp column(values, wire), do: Enum.map(values, wire)
 
   defp rows(%{residency: :projection, source: source, source_term: term}) do
     from(r in Schema.row(source), order_by: r.id)

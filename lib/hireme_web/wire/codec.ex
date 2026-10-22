@@ -681,9 +681,10 @@ defmodule HiremeWeb.Wire.Codec do
   defp converter(col), do: &to_wire(col, &1)
 
   @doc """
-  A column's values as SQLite stores them (rows of `Repo.query`: integers,
-  floats, text, nil) made the wire's, decisions taken once per column: a
-  BOOT reads its tables this way, never loading a row.
+  How a column's values as SQLite stores them (integers, floats, text, nil)
+  become the wire's, decided once per column: a function for each value, or
+  nil when they already are. A BOOT reads its tables this way, never
+  loading a row.
   """
   def stored_to_wire(%{type: :enum, enum: e}) do
     codes = Map.new(Map.fetch!(@enum_codes, e), fn {k, v} -> {Atom.to_string(k), v} end)
@@ -694,8 +695,9 @@ defmodule HiremeWeb.Wire.Codec do
   def stored_to_wire(%{type: :time}), do: &(&1 && stored_time(&1))
   # Stored as the encoder wrote it; read and written again, as a row's would be.
   def stored_to_wire(%{type: :json}), do: &(&1 && JSON.encode!(JSON.decode!(&1)))
-  # Integers (ids, refs, counts, a bool's 0 or 1), floats and text as they are.
-  def stored_to_wire(_col), do: &Function.identity/1
+  # Integers (ids, refs, counts, a bool's 0 or 1), floats and text as they
+  # are: nil, no conversion to run per cell.
+  def stored_to_wire(_col), do: nil
 
   defp stored_time(text) do
     case DateTime.from_iso8601(text) do
