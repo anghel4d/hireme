@@ -193,6 +193,7 @@ const MAIL_ERR: Record<string, string> = {
   unreachable: "Gmail could not be reached. Try again in a minute.",
   address: "Only a gmail.com or googlemail.com address can be linked for now.",
   limit: "Too many link attempts: wait ten minutes, then try again.",
+  all_mail_hidden: "All Mail is hidden from IMAP in this Gmail account: in Gmail's settings, Labels, tick Show in IMAP for All Mail, then link again.",
 }
 /** The address a link parked behind a step-up, to fill the form again (never the password). */
 let mailAddress = ""
@@ -220,7 +221,7 @@ function mail(): Html {
     ${linked
       ? html`<p><b>${str(m!.address)}</b> ${tag}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
         ${status === "auth_failed" ? html`<p class="error">${str(m!.last_error) || MAIL_ERR.auth} Link it again with a new app password.</p>` : status === "error" && m!.last_error ? html`<p class="muted">${MAIL_ERR[str(m!.last_error)] ?? str(m!.last_error)}; retrying.</p>` : EMPTY}
-        <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
+        <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" class="ghost" data-act="mail-pipe">Domain pipe secret</button><button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
       : html`<p class="muted">Link your Gmail: replies to your applications file themselves here, and mail sent from hireme sits in Gmail's Sent. hireme reads only the job search's mail, labels it hireme, and never moves, archives or deletes anything.</p>`}
     ${v().open === "mail" ? form : linked ? EMPTY : html`<button type="button" data-act="open" data-form="mail">Link Gmail</button>`}
   </section>`
@@ -264,6 +265,10 @@ export function stepAct(name: string, el: HTMLElement, ev: Event): boolean {
 function reveal(method: string, r: Row): void {
   if (method === "account.key.mint" && typeof r.secret === "string") {
     patch({ reveal: { title: "The new key. It is shown once; store it now.", lines: [r.secret] }, open: "" })
+  } else if (method === "account.mail.pipe" && typeof r.secret === "string") {
+    // The domain pipe's two Worker secrets, set with wrangler in a real terminal (docs/mail/domain_pipe.md).
+    const url = `${location.origin}/mail/inbound/${str(r.pipe_id)}`
+    patch({ reveal: { title: "The domain pipe. Set these as the mail Worker's PIPE_URL and PIPE_SECRET; the secret is shown once, and a new one replaces it.", lines: [url, str(r.secret)] }, open: "" })
   } else if (Array.isArray(r.recovery_codes) && r.recovery_codes.length > 0) {
     patch({ reveal: { title: "Recovery codes. Each works once; they are shown once.", lines: r.recovery_codes.map(String) }, totp: null, open: "" })
   }
@@ -612,6 +617,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       if (box) box.value = ""
       return void linkMail((f.address ?? "").trim(), password)
     }
+    case "mail-pipe":
+      return void call("account.mail.pipe", {}, (r) => reveal("account.mail.pipe", r))
     case "mail-unlink":
       return void call("account.mail.unlink", {}, () => notice("ok", "Gmail unlinked: hireme stopped reading it and forgot the password."))
     case "session-revoke":
