@@ -81,6 +81,8 @@ pub trait Host {
     fn carrier(&self) -> Option<&'static str>;
     /// The node's https origin, for blob URLs and review links.
     fn origin(&self) -> String;
+    /// The server's name and version, as `initialize` and `server/discover` say them.
+    fn server(&self) -> (String, String);
     /// Which agent holds an application here, and its label (another agent of this key).
     fn holder(&self, application: u32) -> Option<(u64, String)>;
     /// Spends `n` of this agent's contract for an atomic burst: false when it does not cover them.
@@ -242,6 +244,11 @@ impl Session {
 
     pub fn label(&self) -> &str {
         &self.state.label
+    }
+
+    /// Whether a moved row could be announced: a resource is watched.
+    pub fn watching(&self) -> bool {
+        !self.state.watches.is_empty()
     }
 
     /// The agent's end: each listen gets its closing answer, and the legacy streams are forgotten.
@@ -412,11 +419,17 @@ async fn trained() -> Result<(), String> {
 }
 
 /// A kernel query under the key's grants, once the rows are in: `Ok(Ok(v))`, `Ok(Err((refusal, data)))`.
+/// The grants matter on the node, whose kernel holds every row of the account; the daemon's holds the key's.
 async fn query(op: &str, args: &Json) -> Result<Result<Json, (String, Json)>, String> {
     trained().await?;
     let mut req = args.clone();
     req["op"] = json!(op);
-    read(|k| k.query(&req).map_err(|r| (tools::refusal(r.code), r.data)))
+    let g = grants(host(|h| h.masks()).unwrap_or_default());
+    read(|k| k.query_as(&g, &req).map_err(|r| (tools::refusal(r.code), r.data)))
+}
+
+fn grants(m: Masks) -> kernel::query::Grants {
+    kernel::query::Grants { human: false, read_mask: m.read as u8, write_mask: m.write as u8, may_delete: m.may_delete }
 }
 
 // ------------------------------------------------------------ messages
@@ -579,10 +592,10 @@ async fn hireme(args: &Json) -> Json {
     let (leased, held) = host(|h| h.held());
     let paused = host(|h| h.paused());
     let trained = trained().await.is_ok();
-    let g = kernel::query::Grants { human: false, read_mask: m.read as u8, write_mask: m.write as u8, may_delete: m.may_delete };
+    let g = grants(m);
     let desk = if trained { read(move |k| k.overview_as(&g, 8)).unwrap_or(Json::Null) } else { Json::Null };
     let unlinked = desk["top"]["unlinked"].as_u64();
-    let known = !trained || person_known();
+    let known = !trained || person_known(m);
     let next = if let Some(why) = host(|h| h.dead()) {
         format!("The session has ended ({why}); nothing can be read or written until the operator restores the key.")
     } else if welcome.is_none() {
@@ -638,9 +651,11 @@ async fn hireme(args: &Json) -> Json {
     text(t, Some(overview), false)
 }
 
-fn person_known() -> bool {
+/// Whether the person row names a citizenship or a permit; a key that cannot read it is not told.
+fn person_known(m: Masks) -> bool {
     let req = json!({"op":"find","table":"me","cols":["citizenships","work_permits"],"limit":1});
-    match read(|k| k.query(&req)) {
+    let g = grants(m);
+    match read(|k| k.query_as(&g, &req)) {
         Ok(Ok(v)) => v["rows"].as_array().is_some_and(|rows| rows.iter().any(|r| !r["citizenships"].is_null() || !r["work_permits"].is_null())),
         _ => true,
     }
@@ -1192,7 +1207,8 @@ fn capabilities() -> Json {
 }
 
 fn server_info() -> Json {
-    json!({"name":"hireme-mcp","title":"hireme","version":env!("CARGO_PKG_VERSION")})
+    let (name, version) = host(|h| h.server());
+    json!({"name": name, "title": "hireme", "version": version})
 }
 
 fn pretty(v: &Json) -> String {

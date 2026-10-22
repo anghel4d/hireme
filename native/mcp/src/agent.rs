@@ -220,6 +220,9 @@ impl Host for Facts<'_> {
     fn origin(&self) -> String {
         self.up.origin.clone()
     }
+    fn server(&self) -> (String, String) {
+        ("hireme-mcp".into(), env!("CARGO_PKG_VERSION").into())
+    }
     fn holder(&self, application: u32) -> Option<(u64, String)> {
         self.up.holder(application)
     }

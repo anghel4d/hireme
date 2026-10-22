@@ -33,17 +33,21 @@
 #[cfg(panic = "abort")]
 compile_error!("the NIF catches kernel panics: build it with panic=unwind");
 
+use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use kernel::abi::Kernel;
 use kernel::judge::{Ctx, EVal, Row};
 use kernel::pipeline::Stage;
 use kernel::rows::Val;
+use mcp::session::{Effect, Event, Host, Outcome, Session, Step, Submitted, Verdict};
+use mcp::tools::Masks;
 use rustler::{Atom, Binary, Encoder, Env, NifResult, ResourceArc, Term};
+use serde_json::Value as Json;
 
 mod atoms {
-    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids }
+    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids, answer, pending, wait, submit, claim, release, blob, lost, none }
 }
 
 pub struct Res(Mutex<Kernel>);
@@ -214,102 +218,240 @@ rustler::init!("Elixir.Hireme.Kernel.Nif");
 
 // ------------------------------------------------------------------ MCP
 
-fn masks(read: u16, write: u16, may_delete: bool) -> mcp::tools::Masks {
-    mcp::tools::Masks { read, write, may_delete }
-}
+/// One MCP session (`mcp::session`, the daemon's too), held by `HiremeWeb.Mcp.Session`.
+pub struct Mcp(Mutex<Session>);
 
-fn json_in(s: &str) -> NifResult<serde_json::Value> {
+#[rustler::resource_impl]
+impl rustler::Resource for Mcp {}
+
+fn json_in(s: &str) -> NifResult<Json> {
     serde_json::from_str(s).map_err(|_| rustler::Error::BadArg)
 }
 
-#[rustler::nif]
-fn mcp_tools(read: u16, write: u16, may_delete: bool) -> String {
-    serde_json::Value::from(mcp::tools::list(masks(read, write, may_delete))).to_string()
+/// What the Elixir session knows, as of this step (`facts`, JSON), and what the step changed of it.
+struct Node {
+    masks: Masks,
+    account: u64,
+    session: u64,
+    leased: bool,
+    held: Vec<u32>,
+    paused: Option<String>,
+    bulk: Option<(u64, u64)>,
+    rev: u64,
+    origin: String,
+    server: (String, String),
+    next_op: u64,
+    ledger: RefCell<Ledger>,
 }
 
-/// `schema`: one table's description (nil when the key sees no such table), or the overview.
-#[rustler::nif]
-fn mcp_schema(table: Option<String>, read: u16, write: u16, may_delete: bool) -> Option<String> {
-    let m = masks(read, write, may_delete);
-    match table {
-        Some(t) => mcp::tools::table_named(&t).map(|t| mcp::tools::describe(t, m).to_string()),
-        None => Some(mcp::overview(m).to_string()),
-    }
+/// What a step did to what the Elixir session owns: op ids taken, contract writes drawn, the lease lost.
+#[derive(Default)]
+struct Ledger {
+    ops: u64,
+    drawn: u64,
+    lost: Option<Option<String>>,
 }
 
-#[rustler::nif]
-fn mcp_templates(read: u16, write: u16, may_delete: bool) -> String {
-    mcp::templates(masks(read, write, may_delete)).to_string()
-}
-
-#[rustler::nif]
-fn mcp_locate(uri: String) -> Option<String> {
-    mcp::locate(&uri).map(|v| v.to_string())
-}
-
-#[rustler::nif]
-fn mcp_render(code: String, what: String, data: String) -> NifResult<String> {
-    Ok(mcp::diag::render(&code, &what, &json_in(&data)?))
-}
-
-#[rustler::nif]
-fn mcp_explain(code: String) -> Option<String> {
-    mcp::diag::explain(&code)
-}
-
-#[rustler::nif]
-fn mcp_refusals() -> Vec<String> {
-    mcp::diag::names().map(str::to_owned).collect()
-}
-
-#[rustler::nif]
-fn mcp_usage(tool: String, problem: String) -> String {
-    mcp::usage(&tool, &problem)
-}
-
-#[rustler::nif]
-fn mcp_shape(tool: String) -> Option<String> {
-    mcp::shape(&tool)
-}
-
-/// What `report` writes for a mission row: `{"ok": plan}` or `{"usage": text}`.
-#[rustler::nif]
-fn mcp_report(input: String, mission: String) -> NifResult<String> {
-    Ok(match mcp::mission::report(&json_in(&input)?, &json_in(&mission)?) {
-        Ok(plan) => serde_json::json!({"ok": plan}),
-        Err(problem) => serde_json::json!({"usage": mcp::usage("report", &problem)}),
-    }
-    .to_string())
-}
-
-/// A mission view (`list`, `brief`, `keys`, `requested`) of a kernel answer, as the daemon renders it.
-#[rustler::nif]
-fn mcp_mission(view: String, data: String) -> NifResult<Option<String>> {
-    Ok(mcp::mission::view(&view, &json_in(&data)?))
-}
-
-/// A call's writes as `{op_id, label, op_bytes}` numbered from `first`, or the usage text that says why not.
-#[rustler::nif(schedule = "DirtyCpu")]
-fn mcp_encode<'a>(env: Env<'a>, tool: String, input: String, first: u64, target: Option<u32>) -> NifResult<Term<'a>> {
-    let input = json_in(&input)?;
-    Ok(match mcp::encode(&tool, &input, first, target) {
-        Ok(ops) => {
-            let mut out = Vec::with_capacity(ops.len());
-            for (id, label, bytes) in ops {
-                let mut b = rustler::OwnedBinary::new(bytes.len()).ok_or(rustler::Error::BadArg)?;
-                b.as_mut_slice().copy_from_slice(&bytes);
-                out.push((id, label, b.release(env)).encode(env));
-            }
-            (atoms::ok(), out).encode(env)
-        }
-        Err(text) => (atoms::error(), text).encode(env),
+fn node(facts: &str) -> NifResult<Node> {
+    let f = json_in(facts)?;
+    let n = |k: &str| f[k].as_u64().ok_or(rustler::Error::BadArg);
+    let m = &f["masks"];
+    Ok(Node {
+        masks: Masks { read: m[0].as_u64().unwrap_or(0) as u16, write: m[1].as_u64().unwrap_or(0) as u16, may_delete: m[2] == true },
+        account: n("account")?,
+        session: n("session")?,
+        leased: f["leased"] == true,
+        held: f["held"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64().map(|i| i as u32)).collect()).unwrap_or_default(),
+        paused: f["paused"].as_str().map(str::to_owned),
+        bulk: f["bulk"].as_array().and_then(|b| Some((b.first()?.as_u64()?, b.get(1)?.as_u64()?))),
+        rev: n("rev")?,
+        origin: f["origin"].as_str().unwrap_or("").to_owned(),
+        server: (f["server"][0].as_str().unwrap_or("hireme").to_owned(), f["server"][1].as_str().unwrap_or("").to_owned()),
+        next_op: n("next_op")?,
+        ledger: RefCell::default(),
     })
 }
 
-/// The (table, id) rows a PATCH body wrote or deleted.
+// The node is always connected and trained, and a session is one agent: no co-agent holds anything here.
+impl Host for Node {
+    fn agent(&self) -> u64 {
+        0
+    }
+    fn masks(&self) -> Option<Masks> {
+        Some(self.masks)
+    }
+    fn welcome(&self) -> Option<(u64, u64)> {
+        Some((self.account, self.session))
+    }
+    fn dead(&self) -> Option<String> {
+        None
+    }
+    fn untrained(&self) -> Option<String> {
+        None
+    }
+    fn held(&self) -> (bool, Vec<u32>) {
+        (self.leased, self.held.clone())
+    }
+    fn paused(&self) -> Option<String> {
+        self.paused.clone()
+    }
+    fn bulk(&self) -> Option<(u64, u64)> {
+        self.bulk
+    }
+    fn rev(&self) -> u64 {
+        self.rev
+    }
+    fn carrier(&self) -> Option<&'static str> {
+        None
+    }
+    fn origin(&self) -> String {
+        self.origin.clone()
+    }
+    fn server(&self) -> (String, String) {
+        self.server.clone()
+    }
+    fn holder(&self, _application: u32) -> Option<(u64, String)> {
+        None
+    }
+    fn draw(&self, n: u64) -> bool {
+        let mut l = self.ledger.borrow_mut();
+        match self.bulk {
+            Some((left, _)) if left >= l.drawn + n => {
+                l.drawn += n;
+                true
+            }
+            _ => false,
+        }
+    }
+    fn op_ids(&self, n: usize) -> u64 {
+        let mut l = self.ledger.borrow_mut();
+        let first = self.next_op + l.ops;
+        l.ops += n as u64;
+        first
+    }
+    fn adopt(&self, _application: u32) {}
+    fn lost_lease(&self, paused: Option<String>) {
+        self.ledger.borrow_mut().lost = Some(paused);
+    }
+}
+
+/// A step under the session's lock and the kernel's: `{step, ledger}` (`step` as `step_term` says), or `{:error, :panic}`.
+fn mcp_step<'a>(env: Env<'a>, m: &Mcp, res: &Res, facts: &str, f: impl FnOnce(&mut Session, &mut Kernel, &Node) -> Step) -> NifResult<Term<'a>> {
+    let host = node(facts)?;
+    let Ok(mut session) = m.0.lock() else { return Ok((atoms::error(), atoms::panic()).encode(env)) };
+    let Some(step) = with(res, |k| f(&mut session, k, &host)) else { return Ok((atoms::error(), atoms::panic()).encode(env)) };
+    let l = host.ledger.into_inner();
+    let lost = match l.lost {
+        None => atoms::none().encode(env),
+        Some(since) => (atoms::lost(), since).encode(env),
+    };
+    Ok((step_term(env, step)?, (l.ops, l.drawn, lost)).encode(env))
+}
+
+/// `{:answer, json | nil}`, or `{:pending, ticket, effect}` with the effect as `:wait`,
+/// `{:submit, [{op_id, label, op_bytes}], atomic}`, `{:claim, label, args_json}`,
+/// `{:release, ids | nil}` or `{:blob, type, bytes}`.
+fn step_term<'a>(env: Env<'a>, step: Step) -> NifResult<Term<'a>> {
+    let bin = |bytes: &[u8]| -> NifResult<Term<'a>> {
+        let mut b = rustler::OwnedBinary::new(bytes.len()).ok_or(rustler::Error::BadArg)?;
+        b.as_mut_slice().copy_from_slice(bytes);
+        Ok(b.release(env).encode(env))
+    };
+    Ok(match step {
+        Step::Answer(a) => (atoms::answer(), a.map(|j| j.to_string())).encode(env),
+        Step::Pending(t, effect) => {
+            let e = match effect {
+                Effect::Wait(_) => atoms::wait().encode(env),
+                Effect::Submit { ops, atomic } => {
+                    let ops = ops.iter().map(|(id, label, bytes)| Ok((*id, label.as_str(), bin(bytes)?).encode(env))).collect::<NifResult<Vec<Term>>>()?;
+                    (atoms::submit(), ops, atomic).encode(env)
+                }
+                Effect::Claim { label, args } => (atoms::claim(), label, args.to_string()).encode(env),
+                Effect::Release(ids) => (atoms::release(), ids).encode(env),
+                Effect::Blob { ty, bytes } => (atoms::blob(), ty, bin(&bytes)?).encode(env),
+            };
+            (atoms::pending(), t, e).encode(env)
+        }
+    })
+}
+
+/// An effect's outcome as the Elixir session reports it (JSON): `{"waited": true}`,
+/// `{"submitted": {"verdicts": [{"ack": [rev, id]} | {"nack": [code, data]} | null], "atomic": bool}}`,
+/// `{"claimed" | "released": {"ok": reply} | {"error": error}}` or `{"blob": {"ok": sha} | {"error": why}}`.
+fn outcome(o: &Json) -> NifResult<Outcome> {
+    let rpc = |v: &Json| match (v.get("ok"), v.get("error")) {
+        (Some(ok), _) => Ok(Ok(ok.clone())),
+        (_, Some(e)) => Ok(Err(e.clone())),
+        _ => Err(v["lost"].as_str().unwrap_or("no answer").to_owned()),
+    };
+    if let Some(s) = o.get("submitted") {
+        let verdicts = s["verdicts"]
+            .as_array()
+            .ok_or(rustler::Error::BadArg)?
+            .iter()
+            .map(|v| match (v.get("ack"), v.get("nack")) {
+                (Some(a), _) => Some(Verdict::Ack { rev: a[0].as_u64().unwrap_or(0), id: a[1].as_u64().unwrap_or(0) as u32 }),
+                (_, Some(n)) => Some(Verdict::Nack { code: n[0].as_u64().unwrap_or(0) as u16, data: n[1].clone() }),
+                _ => None,
+            })
+            .collect();
+        return Ok(Outcome::Submitted(Submitted { verdicts, lost: None, atomic: s["atomic"] == true }));
+    }
+    Ok(match (o.get("claimed"), o.get("released"), o.get("blob")) {
+        (Some(c), _, _) => Outcome::Claimed(rpc(c)),
+        (_, Some(r), _) => Outcome::Released(rpc(r)),
+        (_, _, Some(b)) => Outcome::Blob(match (b["ok"].as_str(), b["error"].as_str()) {
+            (Some(sha), _) => Ok(sha.to_owned()),
+            (_, why) => Err(why.unwrap_or("the upload failed").to_owned()),
+        }),
+        _ => Outcome::Waited,
+    })
+}
+
+#[rustler::nif]
+fn mcp_open(label: String) -> ResourceArc<Mcp> {
+    ResourceArc::new(Mcp(Mutex::new(Session::new(label))))
+}
+
+/// One JSON-RPC message (`msg`, JSON) on the account's kernel.
 #[rustler::nif(schedule = "DirtyCpu")]
-fn mcp_moved(body: Binary) -> Vec<(u16, u32)> {
-    mcp::moved(body.as_slice())
+fn mcp_request<'a>(env: Env<'a>, m: ResourceArc<Mcp>, res: ResourceArc<Res>, facts: String, msg: String) -> NifResult<Term<'a>> {
+    let msg = json_in(&msg)?;
+    mcp_step(env, &m, &res, &facts, |s, k, h| s.request(k, h, msg))
+}
+
+/// `subscriptions/listen` on the stream `sink`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mcp_listen<'a>(env: Env<'a>, m: ResourceArc<Mcp>, res: ResourceArc<Res>, facts: String, msg: String, sink: u64) -> NifResult<Term<'a>> {
+    let msg = json_in(&msg)?;
+    mcp_step(env, &m, &res, &facts, |s, k, h| s.listen(k, h, msg, sink))
+}
+
+/// The effect request `ticket` stopped on is done (`outcome`, JSON).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mcp_resume<'a>(env: Env<'a>, m: ResourceArc<Mcp>, res: ResourceArc<Res>, facts: String, ticket: u64, outcome_json: String) -> NifResult<Term<'a>> {
+    let o = outcome(&json_in(&outcome_json)?)?;
+    mcp_step(env, &m, &res, &facts, |s, k, h| s.resume(k, h, ticket, o))
+}
+
+/// The notifications a PATCH body makes, as `[{sink, json}]`; nothing to decode while no row is watched.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn mcp_patch(m: ResourceArc<Mcp>, body: Binary) -> Vec<(u64, String)> {
+    let Ok(mut s) = m.0.lock() else { return Vec::new() };
+    if !s.watching() {
+        return Vec::new();
+    }
+    let moved = Event::Moved(Arc::new(mcp::moved(body.as_slice()).into_iter().collect()));
+    s.event(&moved).into_iter().map(|(sink, j)| (sink, j.to_string())).collect()
+}
+
+/// A legacy event stream opened (`true`), or a stream went (`false`).
+#[rustler::nif]
+fn mcp_stream(m: ResourceArc<Mcp>, sink: u64, open: bool) -> Atom {
+    if let Ok(mut s) = m.0.lock() {
+        if open { s.attach(sink) } else { s.detach(sink) }
+    }
+    atoms::ok()
 }
 
 /// A read (find, get, text, history) under a key's grants: `{:ok, json}` or `{:refused, code, data_json}`.
@@ -322,22 +464,4 @@ fn query<'a>(env: Env<'a>, res: ResourceArc<Res>, req: String, read: u8, write: 
         Some(Err(r)) => (atoms::refused(), mcp::tools::refusal(r.code), r.data.to_string()).encode(env),
         None => (atoms::error(), atoms::panic()).encode(env),
     })
-}
-
-/// The desk at a glance for `hireme`: the top `n` cards and the scoreboard.
-#[rustler::nif(schedule = "DirtyCpu")]
-fn overview(res: ResourceArc<Res>, n: usize, read: u8, write: u8, may_delete: bool) -> Option<String> {
-    let g = kernel::query::Grants { human: false, read_mask: read, write_mask: write, may_delete };
-    with(&res, |k| k.overview_as(&g, n).to_string())
-}
-
-/// Application `no`'s document (row, card, rail, coverage, CV, events), the focus lens's own.
-#[rustler::nif(schedule = "DirtyCpu")]
-fn application(res: ResourceArc<Res>, no: u32) -> Option<String> {
-    with(&res, |k| {
-        let t = k.rows().table(schema::table::APPLICATIONS)?;
-        let id = t.ids().iter().copied().find(|&id| t.u32(id, schema::col::applications::NO) == Some(no))?;
-        k.application(id).map(|v| v.to_string())
-    })
-    .flatten()
 }
