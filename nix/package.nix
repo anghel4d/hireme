@@ -1,6 +1,7 @@
-# The two things Hireme ships, from one source tree and one Cargo lock:
-# the OTP release (with the kernel NIF and the gate inside it; MCP is served by the node),
-# and kernel.wasm. Nothing they build is committed to the repository.
+# What Hireme ships, from one source tree and one Cargo lock: the OTP
+# release (with the kernel NIF and the gate inside it; MCP is served by the
+# node), kernel.wasm, and hireme-mcp, the local daemon an operator's agents
+# reach the node through. Nothing they build is committed to the repository.
 {
   lib,
   beamPackages,
@@ -83,6 +84,31 @@ let
         install -Dm644 "$release/libnif.so" $out/lib/libnif.so
         runHook postInstall
       '';
+    }
+  );
+
+  # The daemon builds on its own: in the release's cargo run its `client` feature would unify into
+  # the NIF's mcp crate and compile an async runtime into the node for nothing.
+  mcp-client = rustPlatform.buildRustPackage (
+    cargo
+    // {
+      pname = "hireme-mcp";
+      inherit version;
+      cargoBuildFlags = [
+        "-p"
+        "mcp"
+        "--features"
+        "client"
+        "--bin"
+        "hireme-mcp"
+      ];
+      doCheck = false;
+      installPhase = ''
+        runHook preInstall
+        install -Dm755 "$(find . -path '*/release/hireme-mcp' -type f -not -path '*/deps/*' | head -1)" $out/bin/hireme-mcp
+        runHook postInstall
+      '';
+      meta.mainProgram = "hireme-mcp";
     }
   );
 
@@ -172,7 +198,7 @@ let
     # RELEASE_COOKIE comes at runtime, outside the public store.
     removeCookie = true;
 
-    passthru = { inherit native kernel-wasm; };
+    passthru = { inherit native kernel-wasm mcp-client; };
 
     meta = {
       description = "Account-isolated job campaign desk";

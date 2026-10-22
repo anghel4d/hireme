@@ -64,6 +64,7 @@
         inherit hireme;
         default = hireme;
         kernel-wasm = hireme.kernel-wasm;
+        hireme-mcp = hireme.mcp-client;
       };
 
       nixosModules.hireme = import ./nix/module.nix { inherit self; };

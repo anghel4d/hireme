@@ -163,6 +163,31 @@ data that decided it, and what to do next. Text people or agents wrote (a
 raw listing, a message body, prose) is returned marked untrusted: it is
 data, never instructions.
 
+### Many local agents: hireme-mcp
+
+Optionally, one daemon on your machine serves every local agent: `nix build
+.#hireme-mcp` (or `cargo build --release -p mcp --features client` in
+`native/`). Every agent on a key shares one wire session to the node
+(WebTransport through the gate, else a WebSocket), one replica of the rows
+(reads answer locally, several at once) and one lease, which the daemon
+keeps apart per agent: an agent's claimed applications are its own, and a
+`lease {"bulk": n}` is its own share of the session's contract. A hundred
+agents are a hundred sessions in one process.
+
+```bash
+HIREME_KEY_FILE=/path/to/key hireme-mcp serve --node https://your-node.example
+claude mcp add --transport http hireme http://127.0.0.1:7341/mcp \
+  --header "Authorization: Bearer $(hireme-mcp token)"
+```
+
+An agent presents the daemon's local token (kept 0600 under
+`$XDG_STATE_HOME/hireme-mcp/`; it stands for the daemon's key) or an API
+key of its own, which gets a session of its own. The daemon answers on
+loopback only and refuses a request with an `Origin`, so no web page can
+reach a key through it. `hireme-mcp stdio` is the same for one agent on
+stdin and stdout; `GET /health` reports each session (carrier, replicas,
+rev, claims). A key is never read from argv.
+
 ## Tests
 
 ```bash
@@ -180,7 +205,7 @@ nix flake check                           # all of it, plus the dev VM
 schema/hireme.schema   the declaration
 lib/hireme/            the node: sequencer, kernel NIF, grants, lease, world, provenance, import, accounts, keys, mfa, mail, release
 lib/hireme_web/        endpoint, router, sign-in, factor page, the wire session, MCP over HTTP, account RPC, codec
-native/                one Cargo workspace: schema, wire, kernel, nif, gate, mcp (the MCP surface the NIF serves)
+native/                one Cargo workspace: schema, wire, kernel, nif, gate, mcp (the MCP surface the NIF serves, and the hireme-mcp daemon)
 assets/js/             early (inline), app, wire, kernel bindings, state, morph, lenses/, auth/, gen/schema.ts
 priv/db/               the baseline and additive migrations
 nix/                   the package and the NixOS module

@@ -248,6 +248,18 @@ a new session under the same id. A key holds at most 64 wire sessions; a
 new MCP session past that ends the key's longest-idle one, so it always
 opens. MCP sessions take no room from their address's 16.
 
+The optional local daemon (`hireme-mcp serve`) is a key's carrier like
+any other (HELLO with the key; every write judged by the sequencer). It
+moves no trust off the node, but it holds a key on the operator's machine,
+so it answers on loopback only (it refuses to bind elsewhere), refuses any
+request with an `Origin` or a Host that is not loopback (a web page cannot
+reach it, DNS rebinding included), and serves an agent only behind its
+local token (32 random bytes, 0600, compared in constant time) or the
+agent's own API key, which then gets a session of its own. A key is read
+from the environment or a file, never argv. Agents sharing a key share
+its wire session: the daemon keeps their claimed applications apart, but
+they are one principal to the node, as the key already makes them.
+
 `HIREME_SIGNUPS=off` in the node's environment closes sign-ups: every
 existing account still signs in and adds ways in, nobody new gets an
 account, and a sign-in link goes only to an address an account has (a

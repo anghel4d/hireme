@@ -39,8 +39,9 @@ defmodule HiremeWeb.Gate do
   Before anything reaches here the gate has applied QUIC Retry under load,
   a per-IP session cap, the path prefix and the `Origin` allow-list (an
   absent Origin is a native agent, whose HELLO must then carry a key).
-  ACCEPT or REFUSE is due within 2 s of OPEN and READY within 2 s of the
-  accept. Control bytes written before the client opens its stream wait in
+  ACCEPT or REFUSE is due within 2 s of OPEN and READY within 10 s of the
+  accept (WELCOME waits for the account's train, and a cold sequencer loads
+  every row first). Control bytes written before the client opens its stream wait in
   the gate, in order, up to 4 MiB.
 
   READY is sent with the Session's WELCOME, the frame that says HELLO

@@ -19,7 +19,9 @@
 //! - a path prefix and an `Origin` allow-list (no Origin is a native agent,
 //!   forwarded as "", and the BEAM then insists on an API key);
 //! - the BEAM must ACCEPT within 2 s and declare READY (HELLO verified)
-//!   within 2 s after that, or the session closes;
+//!   within 10 s after that, or the session closes (READY rides with
+//!   WELCOME, which waits for the account's train: a cold sequencer loads
+//!   every row first, so 10 s, the node's own HELLO deadline);
 //! - until READY, a 64 KiB connection receive window.
 //!
 //! The BEAM runs the gate as a Port and talks to it on stdin, one command
@@ -61,6 +63,8 @@ const MAX_QUEUED: usize = 32 << 20;
 /// Control bytes the BEAM may queue before the client opens its stream.
 const HELD_MAX: usize = 4 << 20;
 const DEADLINE: Duration = Duration::from_secs(2);
+/// How long after ACCEPT a session may take to be READY (the node's `@hello_ms`).
+const READY_WAIT: Duration = Duration::from_secs(10);
 /// The longest the gate waits for the control stream's last bytes (a BYE)
 /// to leave before it closes the connection, which would discard them.
 const FLUSH: Duration = Duration::from_secs(2);
@@ -572,7 +576,7 @@ async fn run(
             Err(()) => return Some((CODE_PROTOCOL, b"bridge protocol".to_vec())),
         }
     }
-    let deadline = sleep(DEADLINE);
+    let deadline = sleep(READY_WAIT);
     tokio::pin!(deadline);
     let c = &sh.gate.counters;
     loop {
