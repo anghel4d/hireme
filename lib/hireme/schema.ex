@@ -47,7 +47,8 @@ end
 defmodule Hireme.Schema do
   @moduledoc """
   The declaration, read at compile time from `priv/schema.json` (the
-  resolved model `native/schema` emits; `mix hireme.schema` writes it):
+  resolved model `native/schema` emits; the schema compiler writes it at
+  every build, before this module compiles):
   every table, column, enum, command, frame and refusal by name or id, the
   two hashes, and the row module of each stored table (`Hireme.Rows.*`).
   Recompiles when the file changes.

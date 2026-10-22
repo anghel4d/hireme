@@ -3,8 +3,8 @@ defmodule Hireme.Release do
   What the node does to its own database, so systemd only starts it: the
   schema applied as the first boot step, and the daily backup.
 
-  A database is `priv/db/baseline.sql` (the whole declaration, emitted by
-  `mix hireme.schema`) plus the additive files `priv/db/NNNN_<name>.sql`
+  A database is `priv/db/baseline.sql` (the whole declaration, emitted at
+  build by the schema compiler) plus the additive files `priv/db/NNNN_<name>.sql`
   emitted after it, applied in name order. `schema_files` records each
   file once applied; it is bookkeeping, not declared, and has no row
   module. Because the baseline is always a fresh emit of the declaration,

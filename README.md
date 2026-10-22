@@ -19,8 +19,9 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   enum, command, frame and refusal. It emits the database baseline
   (`priv/db/baseline.sql`), the Ecto rows (at compile time), the Rust
   constants (`native/schema`) and the TypeScript types
-  (`assets/js/gen/schema.ts`). `mix hireme.schema --check` fails when a
-  checked-in output is stale.
+  (`assets/js/gen/schema.ts`), all three generated at every build and never
+  checked in; `mix hireme.schema --check` (and `mix test`) fails when the
+  baseline left the frozen one without a migration or an id moved.
 - **One kernel, three places.** `native/kernel` holds every desk rule
   (pipeline, heat, score, keywords, CV, board, atlas) and judges every
   domain write. The browser runs it as WebAssembly and the server's

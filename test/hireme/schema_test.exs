@@ -1,11 +1,11 @@
 defmodule Hireme.SchemaTest do
-  # docs/rebuild.md: "`mix test` fails when a checked-in output differs from
-  # a fresh emit".
+  # docs/rebuild.md: `mix test` fails when the declaration's baseline does
+  # not apply, left the frozen one without a migration, or moved an id.
   use ExUnit.Case, async: false
 
   alias Mix.Tasks.Hireme.Schema, as: SchemaTask
 
-  test "the checked-in baseline, TypeScript and model JSON are a fresh emit" do
+  test "the declaration's outputs apply, match the frozen baseline and keep every id" do
     Mix.shell(Mix.Shell.Process)
 
     try do

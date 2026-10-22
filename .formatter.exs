@@ -1,4 +1,4 @@
 [
   import_deps: [:ecto, :ecto_sql, :plug],
-  inputs: ["*.{ex,exs}", "{config,lib,test,bench}/**/*.{ex,exs}"]
+  inputs: ["schema/*.exs", "*.{ex,exs}", "{config,lib,test,bench}/**/*.{ex,exs}"]
 ]

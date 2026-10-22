@@ -31,15 +31,17 @@
 !/lib/**/
 !/lib/**/*.ex
 
-# The one declaration every language reads.
+# The one declaration every language reads, and the compiler that emits
+# its outputs at every build (priv/schema.json, priv/db/baseline.sql,
+# assets/js/gen/schema.ts: generated, never checked in).
 !/schema/
 !/schema/*.schema
+!/schema/build.exs
 
-# Generated SQL is a checked artifact; build output is not.
+# The database's steps are checked in; the baseline is generated.
 !/priv/
-!/priv/schema.json
 !/priv/db/
-!/priv/db/*.sql
+!/priv/db/[0-9]*.sql
 # The zstd dictionaries both wire ends embed (schema/hireme.schema's dict lines).
 !/priv/wire/
 !/priv/wire/*.zdict
@@ -76,8 +78,6 @@
 !/assets/test/*.mjs
 !/assets/js/
 !/assets/js/*.ts
-!/assets/js/gen/
-!/assets/js/gen/*.ts
 !/assets/js/lenses/
 !/assets/js/lenses/*.ts
 !/assets/js/auth/

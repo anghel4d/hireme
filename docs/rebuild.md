@@ -166,21 +166,26 @@ flags include `!`, `?`, `= default`, `private`,
 with no foreign key, for references from append-only tables that a purge
 must never rewrite).
 
-Emitters (`mix hireme.schema`). `--check`, and `mix test`, fail when a
-checked-in output differs from a fresh emit, when the baseline does not
-apply, when an existing id moved, or when a frozen baseline no longer matches `priv/db/baseline.lock`.
-`--migration NAME` writes an additive step, `--renumber` allows an id move
-before the freeze, and `--freeze` locks the deployed baseline at cutover:
+Emitters. The schema compiler (`schema/build.exs`, the first of
+`mix compile`'s compilers) emits the model JSON, the baseline and the
+TypeScript from the declaration at every build, so nothing of theirs is
+checked in or can drift. `mix hireme.schema --check`, and `mix test`, fail
+when the baseline does not apply, when an existing id moved since the last
+commit, or when a frozen baseline is not the one `priv/db/baseline.lock`
+names. `--migration NAME` writes an additive step (the declaration minus
+the frozen baseline, emitted from the committed declaration the lock
+names), `--renumber` allows an id move before the freeze, and `--freeze`
+locks the deployed baseline at cutover:
 
 | Emitter | Output | Checked in? |
 | --- | --- | --- |
-| model JSON | `priv/schema.json`, the resolved declaration `Hireme.Schema` and its Ecto row macros compile from | yes |
-| baseline SQL | `priv/db/baseline.sql` | yes |
+| model JSON | `priv/schema.json`, the resolved declaration `Hireme.Schema` and its Ecto row macros compile from | no, generated at build |
+| baseline SQL | `priv/db/baseline.sql` | no, generated at build |
 | additive SQL | `priv/db/NNNN_<name>.sql`, declaration minus `PRAGMA table_info` | yes |
 | wire catalog | the `catalog` table in every BOOT, built at runtime | no |
 | JSON schema | `schema` / `find` / `get` / `put` argument shapes, built at runtime | no |
 | Rust constants | `native/schema` crate (its own `build.rs`), a dependency of every crate | no |
-| TypeScript | `assets/js/gen/schema.ts` (ids, enums, row interfaces) | yes |
+| TypeScript | `assets/js/gen/schema.ts` (ids, enums, row interfaces) | no, generated at build |
 
 Two hashes, because two different things can change:
 
@@ -188,14 +193,15 @@ Two hashes, because two different things can change:
   compiled against. A change forces a client rebuild.
 - `schema_rev` — the whole catalog, server-side tables included. A new
   `places` metric bumps it; the wasm kernel needs no
-  rebuild; the browser's checked-in `gen/schema.ts` is re-emitted.
+  rebuild; the browser's `gen/schema.ts` is re-emitted at the next build.
 
 Rules:
 
 - **Same-language generation is compile-time** (Ecto macros, Rust
-  constants); **cross-language output is a checked artifact** (SQL,
-  TypeScript). The wire catalog and JSON schema are runtime reads of the
-  parsed declaration, so they cannot drift.
+  constants); **cross-language output is generated at build** (SQL,
+  TypeScript, the model JSON), by the schema compiler, never checked in.
+  The wire catalog and JSON schema are runtime reads of the parsed
+  declaration. None of them can drift.
 - **Adding a metric is one line.** Resident tables change `wire_hash`;
   server tables change only `schema_rev`.
 - **Migrations are generated additively.** A diff cannot tell a rename

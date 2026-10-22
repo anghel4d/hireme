@@ -1,7 +1,9 @@
 # What Hireme ships, from one source tree and one Cargo lock: the OTP
 # release (with the kernel NIF and the gate inside it; MCP is served by the
 # node), kernel.wasm, and hireme-mcp, the local daemon an operator's agents
-# reach the node through. Nothing they build is committed to the repository.
+# reach the node through. Nothing they build is committed to the repository,
+# nor are the declaration's outputs (schema/build.exs emits them in the
+# release build from the hireme-schema binary built here).
 {
   lib,
   beamPackages,
@@ -57,7 +59,8 @@ let
     '';
   };
 
-  # The gate and the NIF (with the MCP surface inside it) share one dependency build.
+  # The gate, the NIF (with the MCP surface inside it) and the schema
+  # emitter share one dependency build.
   native = rustPlatform.buildRustPackage (
     cargo
     // {
@@ -73,6 +76,8 @@ let
         "gate"
         "-p"
         "nif"
+        "-p"
+        "schema"
       ];
       doCheck = false;
       installPhase = ''
@@ -81,6 +86,7 @@ let
         # target dir, wherever that is; find the binaries rather than guess.
         release=$(dirname "$(find . -path '*/release/hireme-gate' -type f -not -path '*/deps/*' | head -1)")
         install -Dm755 "$release/hireme-gate" $out/bin/hireme-gate
+        install -Dm755 "$release/hireme-schema" $out/bin/hireme-schema
         install -Dm644 "$release/libnif.so" $out/lib/libnif.so
         runHook postInstall
       '';
@@ -144,7 +150,7 @@ let
       "config"
       "lib"
       "schema/hireme.schema"
-      "priv/schema.json"
+      "schema/build.exs"
       "priv/db"
       "priv/wire"
       "assets"
@@ -172,6 +178,8 @@ let
       EXQLITE_SYSTEM_LDFLAGS = "-L${sqlite.out}/lib -lsqlite3";
       # The kernel NIF is built above; Rustler loads it and compiles nothing.
       HIREME_NIF_PREBUILT = "1";
+      # The declaration's outputs are emitted by the binary built above, not cargo.
+      HIREME_SCHEMA_BIN = "${native}/bin/hireme-schema";
       # The pinned Bun bundles the browser's scripts; read at build time
       # only, so the release does not keep it in its closure.
       MIX_BUN_PATH = lib.getExe bun;
@@ -186,8 +194,10 @@ let
       install -Dm644 ${kernel-wasm}/kernel.wasm priv/static/wasm/kernel.wasm
     '';
 
+    # The check refuses a declaration whose baseline left the frozen one
+    # without a migration; then the bundle, from the generated schema.ts.
     postBuild = ''
-      mix do deps.loadpaths --no-deps-check + assets.deploy
+      mix do deps.loadpaths --no-deps-check + hireme.schema --check + assets.deploy
     '';
 
     # One profile carries the node and its gate, so a deploy flips both.

@@ -1,31 +1,34 @@
 defmodule Mix.Tasks.Hireme.Schema do
-  @shortdoc "Emit the database baseline and the TypeScript types from schema/hireme.schema"
+  @shortdoc "Check, migrate or freeze the outputs of schema/hireme.schema"
   @moduledoc """
-  The cross-language outputs of `schema/hireme.schema`, emitted by
-  `native/schema`'s `hireme-schema` binary:
+  The cross-language outputs of `schema/hireme.schema` are generated at
+  every build by the schema compiler (`schema/build.exs`, run before
+  Elixir's), never checked in:
 
     * `priv/db/baseline.sql`: the whole declaration on an empty database
     * `assets/js/gen/schema.ts`: ids, enums, the catalog and row interfaces
     * `priv/schema.json`: the resolved model `Hireme.Schema` compiles from
 
-  Options:
+  A plain run emits them now and refuses an id move (an id a client
+  compiled against is read from the last committed declaration). Options:
 
-    * `--check`: write nothing; fail when a checked-in output differs from
-      a fresh emit, when the baseline does not apply to an empty database, or when an
-      existing table, column or command changed its id
+    * `--check`: write nothing; fail when the baseline does not apply to an
+      empty database, when a frozen baseline is not the one
+      `priv/db/baseline.lock` names, or when an existing table, column,
+      command or param moved its id since the last commit
     * `--migration NAME`: also write `priv/db/NNNN_NAME.sql`, the
-      declaration minus the previous baseline (additive only; a destructive
-      change is refused and written by hand as `NNNN_drop_<what>.sql`)
-    * `--renumber`: allow existing ids to move: before the cutover, or with
+      declaration minus the frozen baseline (emitted from the committed
+      declaration the lock names; additive only, a destructive change is
+      refused and written by hand as `NNNN_drop_<what>.sql`), and lock the
+      new baseline
+    * `--renumber`: allow existing ids to move: before the freeze, or with
       `--migration` after it (wire_hash moves, so every client refreshes;
       no stored row holds a column id)
     * `--freeze`: write `priv/db/baseline.lock`, the SHA-256 of the
-      checked-in baseline. The cutover runs it once: from then on deployed
-      databases hold that baseline, so a plain emit that would change it is
-      refused (a change ships as `--migration NAME`, which writes its
-      `NNNN` step and locks the new baseline), and `--check` fails on a
-      baseline the lock does not name. Before the freeze, an emit rewrites
-      the baseline freely.
+      baseline. The cutover runs it once: from then on deployed databases
+      hold that baseline, so a build whose baseline differs warns and
+      `--check` (the tests, the release) fails, until `--migration NAME`
+      ships the change.
 
   A step written by hand that rebuilds a table (the only way SQLite changes
   a column's type, nullability or ON DELETE) runs between
@@ -49,12 +52,10 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   use Mix.Task
 
-  @root Path.expand("../../..", __DIR__)
-  @baseline "priv/db/baseline.sql"
-  @lock "priv/db/baseline.lock"
-  @ts "assets/js/gen/schema.ts"
-  @json "priv/schema.json"
-  @schema "schema/hireme.schema"
+  alias Mix.Tasks.Compile.Schema, as: Build
+
+  @schema Build.schema()
+  @lock Build.lock()
 
   @impl Mix.Task
   def run(argv) do
@@ -70,128 +71,73 @@ defmodule Mix.Tasks.Hireme.Schema do
           "unknown arguments #{inspect(Enum.map(invalid, &elem(&1, 0)) ++ rest)}; see mix help hireme.schema"
         )
 
-    # The emits need no compiled app, and the app compiles from the json.
-    sql = emit!(["sql"])
-    ts = emit!(["ts"])
-    json = emit!(["json"])
+    sql = Build.emit!(["sql"])
+    json = Build.emit!(["json"])
 
     if opts[:check] || opts[:freeze],
-      do: check!(sql, ts, json, opts),
-      else: write!(sql, ts, json, opts)
+      do: check!(sql, json, opts),
+      else: write!(sql, json, opts)
 
     # The cutover's one step: lock the baseline every deployed database starts from.
-    if opts[:freeze], do: put!(@lock, lock_text(sql))
+    if opts[:freeze], do: Build.put!(@lock, Build.lock_text(sql))
   end
 
-  defp write!(sql, ts, json, opts) do
+  defp write!(sql, json, opts) do
     # Ids are the wire's ABI: once a baseline is deployed they move only with
     # the migration that ships the change.
-    if opts[:renumber] && locked() && !opts[:migration],
+    if opts[:renumber] && Build.locked() && !opts[:migration],
       do: Mix.raise("ids may move once #{@lock} exists only with --migration NAME")
 
-    guard_ids!(json, opts)
+    case id_problems(json, opts) do
+      [] ->
+        :ok
 
-    case {locked(), opts[:migration]} do
+      moved ->
+        Mix.raise(Enum.join(moved, "\n") <> "\nappend new entries at the end, or pass --renumber")
+    end
+
+    case {Build.locked(), opts[:migration]} do
       {nil, nil} ->
         :ok
 
       {nil, name} ->
         migration!(name)
 
-      {hash, nil} ->
-        sha(sql) == hash ||
-          Mix.raise(
-            "#{@baseline} is frozen: deployed databases hold it; ship it as --migration NAME"
-          )
+      {_, nil} ->
+        if problem = Build.lock_problem(sql),
+          do: Mix.raise("#{problem}: deployed databases hold it; ship it as --migration NAME")
 
-      {_hash, name} ->
+      {_, name} ->
         migration!(name)
-        put!(@lock, lock_text(sql))
+        Build.put!(@lock, Build.lock_text(sql))
     end
 
-    put!(@baseline, sql)
-    put!(@ts, ts)
-    put!(@json, json)
+    Build.generate!()
   end
 
-  # A lock that names no digest fails closed: nil means "not frozen" to every guard.
-  defp locked do
-    case File.read(Path.join(@root, @lock)) do
-      {:ok, text} ->
-        case Regex.run(~r/^([0-9a-f]{64})\r?$/m, text) do
-          [_, hash] -> hash
-          nil -> Mix.raise("#{@lock} names no SHA-256 (a line of 64 lowercase hex digits)")
-        end
-
-      {:error, _} ->
-        nil
-    end
-  end
-
-  defp lock_text(sql),
-    do: "# The deployed baseline's SHA-256; see mix help hireme.schema (--freeze).\n#{sha(sql)}\n"
-
-  defp sha(text), do: :crypto.hash(:sha256, text) |> Base.encode16(case: :lower)
-
-  defp lock_problem do
-    with hash when is_binary(hash) <- locked(),
-         {:ok, sql} <- File.read(Path.join(@root, @baseline)),
-         false <- sha(sql) == hash do
-      "#{@baseline} is not the baseline #{@lock} names"
-    else
-      _ -> nil
-    end
-  end
-
-  defp check!(sql, ts, json, opts) do
+  defp check!(sql, json, opts) do
     problems =
-      [
-        differs(@baseline, sql),
-        differs(@ts, ts),
-        differs(@json, json),
-        apply_problem(sql),
-        lock_problem()
-      ] ++
-        id_problems(json, opts)
+      Enum.reject(
+        [Build.apply_problem(sql), Build.lock_problem(sql) | id_problems(json, opts)],
+        &is_nil/1
+      )
 
-    case Enum.reject(problems, &is_nil/1) do
+    case problems do
       [] ->
-        Mix.shell().info("schema: #{@baseline}, #{@ts} and #{@json} match #{@schema}")
+        Mix.shell().info(
+          "schema: the outputs of #{@schema} apply, match #{@lock} and keep every id"
+        )
 
       problems ->
-        Mix.raise(
-          "schema --check:\n  " <> Enum.join(problems, "\n  ") <> "\nrun `mix hireme.schema`"
-        )
+        Mix.raise("schema --check:\n  " <> Enum.join(problems, "\n  "))
     end
-  end
-
-  defp differs(path, fresh) do
-    case File.read(Path.join(@root, path)) do
-      {:ok, ^fresh} -> nil
-      {:ok, _} -> "#{path} differs from a fresh emit"
-      {:error, _} -> "#{path} is missing"
-    end
-  end
-
-  defp apply_problem(sql) do
-    with_db(fn db ->
-      case Exqlite.Sqlite3.execute(db, sql) do
-        :ok -> nil
-        {:error, reason} -> "#{@baseline} does not apply to an empty database: #{inspect(reason)}"
-      end
-    end)
   end
 
   defp migration!(name) do
     unless name =~ ~r/^[a-z0-9_]+$/, do: Mix.raise("--migration takes a snake_case name")
 
-    previous =
-      case File.read(Path.join(@root, @baseline)) do
-        {:ok, sql} -> sql
-        {:error, _} -> Mix.raise("no #{@baseline} to diff against")
-      end
-
-    written = Path.wildcard(Path.join(@root, "priv/db/[0-9][0-9][0-9][0-9]_#{name}.sql"))
+    previous = previous_baseline!()
+    written = Path.wildcard(Build.path("priv/db/[0-9][0-9][0-9][0-9]_#{name}.sql"))
 
     # A step written by hand (a destructive change) is taken once it brings
     # the previous baseline exactly to the declaration.
@@ -203,7 +149,7 @@ defmodule Mix.Tasks.Hireme.Schema do
       end
 
     shape =
-      with_db(fn db ->
+      Build.with_db(fn db ->
         :ok = Exqlite.Sqlite3.execute(db, previous)
 
         for step <- steps do
@@ -226,7 +172,7 @@ defmodule Mix.Tasks.Hireme.Schema do
 
     {out, status} =
       try do
-        cargo(["diff", shape_file])
+        Build.run_emitter(["diff", shape_file])
       after
         File.rm(shape_file)
       end
@@ -234,12 +180,12 @@ defmodule Mix.Tasks.Hireme.Schema do
     case {status, written} do
       {0, [path]} when out == "" ->
         Mix.shell().info(
-          "#{Path.relative_to(path, @root)} brings the previous baseline to the declaration"
+          "#{Path.relative_to(path, Build.path("."))} brings the previous baseline to the declaration"
         )
 
       {_, [path]} ->
         Mix.raise(
-          "#{Path.relative_to(path, @root)} does not bring the previous baseline to the declaration:\n" <>
+          "#{Path.relative_to(path, Build.path("."))} does not bring the previous baseline to the declaration:\n" <>
             out
         )
 
@@ -250,9 +196,14 @@ defmodule Mix.Tasks.Hireme.Schema do
         )
 
       {0, []} ->
-        path = Path.join(@root, "priv/db/#{next_number()}_#{name}.sql")
-        File.write!(path, "-- #{name}: generated by `mix hireme.schema --migration`.\n" <> out)
-        Mix.shell().info("wrote #{Path.relative_to(path, @root)}")
+        rel = "priv/db/#{next_number()}_#{name}.sql"
+
+        File.write!(
+          Build.path(rel),
+          "-- #{name}: generated by `mix hireme.schema --migration`.\n" <> out
+        )
+
+        Mix.shell().info("wrote #{rel}")
 
       {_, []} ->
         Mix.raise(
@@ -263,9 +214,52 @@ defmodule Mix.Tasks.Hireme.Schema do
     end
   end
 
+  # The baseline deployed databases hold: emitted from the committed
+  # declaration the lock names, the newest of the last fifty that touched it.
+  defp previous_baseline! do
+    case Build.locked() do
+      nil ->
+        emit_at!("HEAD", "sql")
+
+      hash ->
+        git!(["log", "--format=%H", "-n", "50", "--", @schema])
+        |> String.split("\n", trim: true)
+        |> Enum.find_value(fn rev ->
+          sql = emit_at!(rev, "sql")
+          if Build.sha(sql) == hash, do: sql
+        end)
+        |> Kernel.||(
+          Mix.raise(
+            "no committed #{@schema} in the last 50 revisions emits the baseline #{@lock} names"
+          )
+        )
+    end
+  end
+
+  # An output emitted from the declaration as committed at `rev`.
+  defp emit_at!(rev, kind) do
+    tmp =
+      Path.join(System.tmp_dir!(), "hireme-schema-#{System.unique_integer([:positive])}.schema")
+
+    File.write!(tmp, git!(["show", "#{rev}:#{@schema}"]))
+
+    try do
+      Build.emit!([kind], schema: tmp)
+    after
+      File.rm(tmp)
+    end
+  end
+
+  defp git!(args) do
+    case System.cmd("git", args, cd: Build.path("."), stderr_to_stdout: true) do
+      {out, 0} -> out
+      {out, _} -> Mix.raise("git #{Enum.join(args, " ")}:\n" <> out)
+    end
+  end
+
   defp next_number do
     n =
-      Path.join(@root, "priv/db/[0-9][0-9][0-9][0-9]_*.sql")
+      Build.path("priv/db/[0-9][0-9][0-9][0-9]_*.sql")
       |> Path.wildcard()
       |> Enum.map(&(&1 |> Path.basename() |> binary_part(0, 4) |> String.to_integer()))
       |> Enum.max(fn -> 0 end)
@@ -326,42 +320,24 @@ defmodule Mix.Tasks.Hireme.Schema do
     end
   end
 
-  defp with_db(fun) do
-    {:ok, db} = Exqlite.Sqlite3.open(":memory:")
-
-    try do
-      fun.(db)
-    after
-      Exqlite.Sqlite3.close(db)
-    end
-  end
-
   # ------------------------------------------------------------ id stability
 
-  defp guard_ids!(json, opts) do
-    case id_problems(json, opts) do
-      [] ->
-        :ok
-
-      moved ->
-        Mix.raise(Enum.join(moved, "\n") <> "\nappend new entries at the end, or pass --renumber")
-    end
-  end
-
-  # An id a client already compiled against must not move: compare the
-  # checked-in priv/schema.json with the fresh one, name by name.
+  # An id a client already compiled against must not move: the fresh model
+  # against the one the last committed declaration emits. Without a
+  # repository to ask (a release build) nothing is compared.
   defp id_problems(fresh, opts) do
-    with false <- opts[:renumber] || false,
-         {:ok, old} <- File.read(Path.join(@root, @json)) do
+    if opts[:renumber] || !git?() do
+      []
+    else
       new_ids = ids(fresh)
 
-      for {key, id} <- ids(old), (new = new_ids[key]) != nil, new != id do
+      for {key, id} <- ids(emit_at!("HEAD", "json")), (new = new_ids[key]) != nil, new != id do
         "#{key} moved from id #{id} to #{new}"
       end
-    else
-      _ -> []
     end
   end
+
+  defp git?, do: System.find_executable("git") != nil and File.exists?(Build.path(".git"))
 
   # Every table, column, command and param by name with its id, and every
   # domain with its bit (stored in every key's masks).
@@ -383,39 +359,6 @@ defmodule Mix.Tasks.Hireme.Schema do
           ]
         end)
     )
-  end
-
-  # ------------------------------------------------------------ the binary
-
-  defp emit!(args) do
-    case cargo(args) do
-      {out, 0} -> out
-      {out, _} -> Mix.raise("hireme-schema #{Enum.join(args, " ")}:\n" <> out)
-    end
-  end
-
-  defp cargo(args) do
-    System.cmd(
-      "cargo",
-      ~w(run --quiet --manifest-path native/Cargo.toml -p schema --bin hireme-schema --) ++
-        ["--schema", Path.join(@root, @schema)] ++ args,
-      # Warnings and diagnostics go to the terminal; stdout is the output.
-      cd: @root
-    )
-  end
-
-  defp put!(path, content) do
-    full = Path.join(@root, path)
-    File.mkdir_p!(Path.dirname(full))
-
-    case File.read(full) do
-      {:ok, ^content} ->
-        :ok
-
-      _ ->
-        File.write!(full, content)
-        Mix.shell().info("wrote #{path}")
-    end
   end
 end
 
