@@ -160,8 +160,9 @@ mail 4, corpus 8, and `may_delete`:
 - Any change to a live key's masks ends its wire sessions with BYE
   `grants`, so the next HELLO carries the new masks; a revoke ends them
   with BYE `revoked`. Minting, widening and revoking are mailed.
-- A `human_only` command (naming open fire) and `human_only` columns are
-  refused to any key (`human_only`): FIRE HOLD is a human act.
+- A `human_only` command and `human_only` columns are refused to any key
+  (`human_only`). Firing is not one of them: a key fires a mission only
+  under a fire key the operator created (see Missions and fire keys).
 
 ## Leases
 
@@ -272,6 +273,77 @@ MCP marked untrusted. It is data, not instructions; an agent's
 masks and lease bound what any instruction hidden in it could cause.
 
 The browser kernel's text-keyed hash maps (company names, ATS tenants, the board's distinct texts) are seeded per kernel instance from crypto.getRandomValues (the wasm module's one import, host.random_u32; natively from the OS RNG), so agent-written text cannot craft colliding keys to slow a derive.
+
+## Mail
+
+An account may link its Gmail so hireme sends and reads its job-search
+mail as a passthrough: what it sends sits in Gmail's Sent, replies land in
+the Gmail inbox, and hireme files a copy.
+
+- **The app password** is entered only in the account lens, stepped up,
+  over the browser's wire RPC (`account.mail.link`): never through MCP,
+  the daemon, a URL, argv or a log. The node verifies it by one IMAP
+  LOGIN before storing anything, then seals it with the application
+  secret under its own purpose in a server-only column that no key or
+  replica carries. Unlinking erases it and the sync cursor at once.
+  Linking and unlinking are audited and mailed.
+- **Reading.** The connector reads envelopes and stores only what the
+  matcher takes as the search's (filed, or the unfiled tray), adding the
+  Gmail label `hireme`; anything else is read and dropped, never stored
+  or labelled. The backfill reaches 180 days back. The node never moves,
+  archives, deletes or marks mail read. Logs name the mailbox and the
+  server's response code, never a subject, body or address.
+- **Transport.** TLS 1.2 or 1.3, peer-verified against the system CAs,
+  with SNI and a hostname check, to `imap.gmail.com:993` and
+  `smtp.gmail.com:465` only; the linked address is `@gmail.com` or
+  `@googlemail.com` for now. An authentication failure stops that
+  mailbox (`auth_failed`), tells the operator, and retries the credential
+  at most once an hour; network failures back off from one minute to 30.
+- **Inbound text** is someone else's: parsed within bounds (25 MiB, 200
+  parts, depth 10, 8 KiB a header), kept as plain text, no remote
+  content, no attachments, and returned to agents marked untrusted. The
+  filer's lexer is a finite automaton, linear in its input.
+- **The domain pipe.** A Cloudflare Email Worker forwards the domain's
+  mail to Gmail as before and posts a signed copy to
+  `/mail/inbound/<pipe id>`: HMAC-SHA256 over the timestamp and the
+  body's SHA-256, accepted within 300 seconds, compared in constant
+  time, under a per-pipe secret the node mints when the operator enables
+  the pipe (stepped up), stores sealed on the mailbox row, shows once and
+  rotates on request. Bodies are bounded and rate-limited per pipe, and a
+  replay is deduped by Message-ID. Nothing for it lives in the host's
+  environment.
+
+## Missions and fire keys
+
+An application's outreach is one mission per route (careers page, an
+email, a LinkedIn message, ...). A key with write access prepares
+missions up to fire ready and stops there. Firing needs a fire key:
+
+- Only a signed-in browser session, stepped up, creates one. An agent may
+  request one; the request answers a link that pre-fills the review page
+  with the missions it names. Opening the link creates nothing: the page
+  shows every mission's target and full draft, and creating the key is a
+  POST behind the page's CSRF token and step-up.
+- A fire key is a grant with a public id, not a secret. It names missions
+  by id ranges and freezes each one's target and draft by hash. It lives
+  one week unused and 24 hours from its first shot, and the operator can
+  revoke it at once.
+- The sequencer judges each shot: the key unrevoked and in its window,
+  the mission in scope, unburned, and still hashing to what was frozen,
+  and the account's daily sends not spent. A mission edited after the key
+  was created falls out of scope, so a shot fires exactly what the
+  operator read. A shot moves the mission to in-flight (no second shot,
+  no edit), burns it on success only, and returns it to fire ready on
+  failure; the node looks for the Message-ID it minted in Gmail before
+  any resend, so a crash never sends twice. Mail goes only to the
+  mission's own target, from the linked address.
+- A shot the judge refuses is not an error to the agent: it is told what
+  happened, what the key still covers and for how long, and how firing
+  works. Firing a mission moves its application to submitted.
+- A careers-page or other untracked mission counts on the agent's
+  report, provisionally, until the job board's confirmation mail is filed
+  against it. An application whose earlier send is unresolved cannot be
+  fired until the operator settles it.
 
 ## Requests
 
@@ -395,6 +467,12 @@ writer for long.
 | Frame / ops per frame / text per op | 16 MiB / 256 / 1 MiB |
 | MCP request body | 64 MiB, inflated |
 | Strikes before a ban | 5 per address in an hour (a request without a valid key, a failed key HELLO); the ban is for good |
+| Mailbox link attempts | 5 per account in 10 minutes (each one is a login to Google) |
+| A linked mailbox's credential after an authentication failure | retried at most once an hour |
+| Mail read back on linking | 180 days of envelopes; only the search's are kept |
+| Inbound mail | 25 MiB, 200 parts, depth 10, 8 KiB a header; a signed post within 300 seconds; 600 per pipe in 10 minutes |
+| Sends | 25 per account a day, across every fire key and the operator's own |
+| Fire key | one week unused, 24 hours from its first shot; one shot per mission |
 | Source URL | 2,048 bytes, refused before any parsing (as a cited put's source and as a `sources` row); a port, when one is written, is ASCII digits up to 65535 (leading zeros allowed), else the URL names no host and is refused |
 
 ## Limits
@@ -411,6 +489,12 @@ writer for long.
 - Rate limits and spent wire tickets are per node, in memory. A
   multi-node deployment needs a shared backend before they hold across
   nodes.
+- The Gmail link rests on Google's app passwords (which need 2-Step
+  Verification); if Google withdraws them, reading falls back to the
+  domain pipe and sending stops until the link moves to another method.
+- A careers-page or LinkedIn submission happens in an agent's browser,
+  where hireme cannot see it: it is the agent's report until a
+  confirmation mail corroborates it.
 - Development offers a one-click local sign-in, compiled into the
   development environment only.
 
