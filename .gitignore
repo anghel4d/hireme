@@ -65,10 +65,6 @@
 !/workers/mail/test/
 !/workers/mail/test/*.ts
 
-!/bench/
-!/bench/*.exs
-!/bench/*.mjs
-!/bench/*.sh
 
 !/assets/
 !/assets/css/
