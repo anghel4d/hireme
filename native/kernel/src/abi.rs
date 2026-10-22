@@ -93,6 +93,12 @@ impl Kernel {
                 query::readable(grants, Some(&json!("applications")))?;
                 Ok(crate::link::unlinked(&self.rows))
             }
+            Some(op) if crate::fire::OPS.contains(&op) => {
+                for t in crate::fire::reads(op) {
+                    query::readable(grants, Some(&json!(t)))?;
+                }
+                crate::fire::query(&self.rows, op, req, self.today())
+            }
             // Applications without an order column are found as the page finds them: the desk's query.
             Some("find") if req["table"] == "applications" && req["order"].is_null() => self.desk(grants, req),
             _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req, self.today()),

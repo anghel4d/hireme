@@ -20,6 +20,7 @@ pub mod ats;
 pub mod board;
 pub mod compose;
 pub mod cv;
+pub mod fire;
 pub mod heat;
 pub mod judge;
 pub mod keywords;

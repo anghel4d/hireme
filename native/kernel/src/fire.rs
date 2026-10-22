@@ -1,0 +1,1218 @@
+//! Missions and fire keys: the unit of fire, the operator's authority over
+//! it, and the commander who answers a shot.
+//!
+//! A mission is one route of an application. Write access stages it up to
+//! fire_ready; only a shot under a live fire key moves it on. A key is made
+//! by the operator's command alone, names its missions by ranges of ids and
+//! freezes each one's SHA-256 (`hash`: everything the shot sends), so a
+//! mission edited afterwards no longer fires under it. One shot per mission:
+//! the shot burns when it lands (`landed`), and a failed one leaves the
+//! mission covered. A key lives a week unused and 24 hours from its first
+//! use. A shot that cannot go is answered, not errored: the `fire` refusal
+//! carries the commander's answer (`answer`), what the key has burned, what
+//! it still covers and the time it has left.
+//!
+//! The three writers, as the judge's context tells them apart: the operator
+//! (`human`), an agent (a `key_id`), and the mail actor (neither: the
+//! node's connector and the domain pipe, which record facts).
+
+use alloc::borrow::Cow;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use schema::col::{applications as A, fire_keys as K, fire_requests as R, fire_shots as S, mailboxes as MB, missions as M};
+use schema::{enums, refusal, table};
+use serde_json::{json, Value as Json};
+use sha2::{Digest, Sha256};
+
+use crate::judge::{no, Ctx, EVal, Refusal, Row};
+use crate::pipeline::Stage;
+use crate::rows::{Rows, Table, Val};
+
+/// An unused key's life, and a used key's from its first use (seconds).
+pub const UNUSED_LIFE: i64 = 7 * 86_400;
+pub const USED_LIFE: i64 = 86_400;
+/// A request's reason, in characters.
+pub const REASON_MAX: usize = 280;
+/// An email's To.
+pub const TO_MAX: usize = 10;
+
+const STATE: [&str; 6] = ["draft", "draft_ready", "fire_ready", "in_flight", "fired", "cancelled"];
+/// The states a put moves a mission among.
+const STAGED: [u8; 4] = [enums::mission_state::DRAFT, enums::mission_state::DRAFT_READY, enums::mission_state::FIRE_READY, enums::mission_state::CANCELLED];
+
+// ------------------------------------------------------------------ ranges
+
+/// A set of ids as sorted, disjoint, non-adjacent inclusive runs: how a key
+/// names its missions ("1-44,56-213,444,4413").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ranges(Vec<(u32, u32)>);
+
+impl Ranges {
+    /// Ranges from their text: ids and `a-b` runs (a ≤ b, ids from 1)
+    /// separated by commas, spaces anywhere between tokens. One pass of a
+    /// small automaton; the error is the byte offset it stopped at.
+    pub fn parse(text: &str) -> Result<Ranges, usize> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum St {
+            Start,
+            Lo,
+            Dash,
+            Hi,
+            AfterNum,
+        }
+        let mut runs = Vec::new();
+        let (mut st, mut lo, mut n): (St, u64, u64) = (St::Start, 0, 0);
+        let b = text.as_bytes();
+        let close = |lo: u64, hi: u64, at: usize, runs: &mut Vec<(u32, u32)>| -> Result<(), usize> {
+            if lo == 0 || lo > hi || hi > u64::from(u32::MAX) {
+                return Err(at);
+            }
+            runs.push((lo as u32, hi as u32));
+            Ok(())
+        };
+        for (i, &c) in b.iter().enumerate() {
+            st = match (st, c) {
+                (_, b' ' | b'\t') if st != St::Lo && st != St::Hi => st,
+                (St::Lo, b' ' | b'\t') => {
+                    lo = n;
+                    St::AfterNum
+                }
+                (St::Hi, b' ' | b'\t') => {
+                    close(lo, n, i, &mut runs)?;
+                    lo = 0;
+                    St::AfterNum
+                }
+                (St::Start, b'0'..=b'9') | (St::Dash, b'0'..=b'9') => {
+                    if st == St::Start {
+                        lo = 0;
+                    }
+                    n = u64::from(c - b'0');
+                    if st == St::Start { St::Lo } else { St::Hi }
+                }
+                (St::Lo | St::Hi, b'0'..=b'9') => {
+                    n = n * 10 + u64::from(c - b'0');
+                    if n > u64::from(u32::MAX) {
+                        return Err(i);
+                    }
+                    st
+                }
+                (St::Lo, b'-') => {
+                    lo = n;
+                    St::Dash
+                }
+                (St::AfterNum, b'-') if lo > 0 => St::Dash,
+                (St::Lo, b',') => {
+                    close(n, n, i, &mut runs)?;
+                    St::Start
+                }
+                (St::Hi, b',') => {
+                    close(lo, n, i, &mut runs)?;
+                    St::Start
+                }
+                (St::AfterNum, b',') => {
+                    if lo > 0 {
+                        close(lo, lo, i, &mut runs)?;
+                    }
+                    lo = 0;
+                    St::Start
+                }
+                _ => return Err(i),
+            };
+        }
+        if st == St::Start && text.trim_end().ends_with(',') {
+            return Err(b.len());
+        }
+        match st {
+            St::Lo => close(n, n, b.len(), &mut runs)?,
+            St::Hi => close(lo, n, b.len(), &mut runs)?,
+            St::AfterNum if lo > 0 => close(lo, lo, b.len(), &mut runs)?,
+            St::Dash => return Err(b.len()),
+            _ => {}
+        }
+        Ok(Ranges::normal(runs))
+    }
+
+    /// Ranges holding exactly `ids`.
+    pub fn of(ids: impl IntoIterator<Item = u32>) -> Ranges {
+        Ranges::normal(ids.into_iter().filter(|&i| i > 0).map(|i| (i, i)).collect())
+    }
+
+    fn normal(mut runs: Vec<(u32, u32)>) -> Ranges {
+        runs.sort_unstable();
+        let mut out: Vec<(u32, u32)> = Vec::with_capacity(runs.len());
+        for (lo, hi) in runs {
+            match out.last_mut() {
+                Some(last) if u64::from(lo) <= u64::from(last.1) + 1 => last.1 = last.1.max(hi),
+                _ => out.push((lo, hi)),
+            }
+        }
+        Ranges(out)
+    }
+
+    pub fn contains(&self, id: u32) -> bool {
+        let i = self.0.partition_point(|r| r.1 < id);
+        self.0.get(i).is_some_and(|r| r.0 <= id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many ids it holds.
+    pub fn count(&self) -> u64 {
+        self.0.iter().map(|r| u64::from(r.1 - r.0) + 1).sum()
+    }
+
+    /// The canonical text: runs joined by commas, a run of one as its id.
+    pub fn text(&self) -> String {
+        let mut s = String::new();
+        for (i, (lo, hi)) in self.0.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            if lo == hi {
+                s.push_str(&alloc::format!("{lo}"));
+            } else {
+                s.push_str(&alloc::format!("{lo}-{hi}"));
+            }
+        }
+        s
+    }
+}
+
+// ------------------------------------------------------------------ cells
+
+fn now_u32(now: i64) -> Val {
+    Val::U32(u32::try_from(now.max(0)).unwrap_or(u32::MAX))
+}
+
+fn opt(v: Option<u32>) -> Val {
+    v.map_or(Val::None, Val::U32)
+}
+
+fn text<'t>(t: &'t Table, id: u32, c: u16) -> Cow<'t, str> {
+    t.text(id, c).unwrap_or(Cow::Borrowed(""))
+}
+
+fn cell(r: &mut Row, col: u16, v: impl Into<EVal>) {
+    let v = v.into();
+    match r.cells.iter_mut().find(|c| c.0 == col) {
+        Some(c) => c.1 = v,
+        None => r.cells.push((col, v)),
+    }
+}
+
+fn row(table: u16, id: u32) -> Row {
+    Row { table, id, cells: Vec::new() }
+}
+
+fn state_name(s: u32) -> &'static str {
+    STATE.get(s as usize).copied().unwrap_or("draft")
+}
+
+fn missions(rows: &Rows) -> Option<&Table> {
+    rows.table(table::MISSIONS)
+}
+
+/// A mission's state, kind and application.
+fn state(t: &Table, id: u32) -> u8 {
+    t.u32(id, M::STATE).map_or(enums::mission_state::DRAFT, |v| v as u8)
+}
+
+fn is_email(t: &Table, id: u32) -> bool {
+    t.u32(id, M::KIND) == Some(u32::from(enums::mission_kind::EMAIL))
+}
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const D: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(D[(b >> 4) as usize] as char);
+        s.push(D[(b & 15) as usize] as char);
+    }
+    s
+}
+
+// ------------------------------------------------------------------ the hash
+
+/// The CV version each application's pick sends, computed once per judgment.
+pub struct Cvs {
+    arms: Vec<crate::pick::Arm>,
+    counts: crate::pick::Counts,
+}
+
+impl Cvs {
+    pub fn of(rows: &Rows) -> Cvs {
+        Cvs { arms: crate::pick::arms(rows), counts: crate::pick::Counts::of(rows) }
+    }
+
+    fn version(&self, rows: &Rows, app: u32) -> Option<u32> {
+        crate::pick::pick(rows, &self.arms, &self.counts, app).version
+    }
+
+    /// Whether the version an application's pick sends is a file the mail
+    /// can carry (a PDF or DOCX upload): a markdown or composed one is not.
+    fn file(&self, rows: &Rows, app: u32) -> bool {
+        let v = self.version(rows, app);
+        v.is_some_and(|v| rows.table(table::CV_VERSIONS).and_then(|t| t.str(v, schema::col::cv_versions::BLOB_SHA)).is_some_and(|s| !s.is_empty()))
+    }
+}
+
+/// A first-contact email (no in_reply_to) goes with the application's CV as
+/// a file; a reply inside a thread needs none.
+fn cv_missing(rows: &Rows, cvs: &Cvs, t: &Table, id: u32) -> bool {
+    is_email(t, id) && t.str(id, M::IN_REPLY_TO).is_none_or(str::is_empty) && !t.u32(id, M::APPLICATION_ID).is_some_and(|a| cvs.file(rows, a))
+}
+
+/// The SHA-256 (hex) of everything mission `id` sends: its kind, target,
+/// draft, cc, subject, in_reply_to and refs, its application, and the CV
+/// version that application's pick sends. Each field is length-prefixed,
+/// so no two missions encode alike.
+pub fn hash(rows: &Rows, cvs: &Cvs, id: u32) -> Option<String> {
+    let t = missions(rows).filter(|t| t.has(id))?;
+    let app = t.u32(id, M::APPLICATION_ID).unwrap_or(0);
+    let mut h = Sha256::new();
+    h.update(b"hireme mission v1");
+    let mut field = |tag: u8, bytes: &[u8]| {
+        h.update([tag]);
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    };
+    field(1, &t.u32(id, M::KIND).unwrap_or(0).to_le_bytes());
+    field(2, text(t, id, M::TARGET).as_bytes());
+    field(3, text(t, id, M::DRAFT).as_bytes());
+    field(4, text(t, id, M::CC).as_bytes());
+    field(5, text(t, id, M::SUBJECT).as_bytes());
+    field(6, text(t, id, M::IN_REPLY_TO).as_bytes());
+    field(7, text(t, id, M::REFS).as_bytes());
+    field(8, &app.to_le_bytes());
+    field(9, &cvs.version(rows, app).unwrap_or(0).to_le_bytes());
+    Some(hex(&h.finalize()))
+}
+
+/// What `create_fire_key` echoes from the review: the SHA-256 of the
+/// eligible missions' ids and hashes, in id order.
+pub fn digest(shots: &[(u32, String)]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"hireme fire digest v1");
+    for (id, hash) in shots {
+        h.update(id.to_le_bytes());
+        h.update(hash.as_bytes());
+    }
+    hex(&h.finalize())
+}
+
+// ------------------------------------------------------------------ eligibility
+
+/// Whether an application's prior send (the crucible ledger's
+/// `sync.applied_on`) is still unsettled: rule 5's block.
+fn unsettled(apps: &Table, app: u32) -> bool {
+    if apps.u32(app, A::PRIOR_SEND).is_some() {
+        return false;
+    }
+    let notes = text(apps, app, A::STAGE_NOTES);
+    serde_json::from_str::<Json>(&notes).ok().is_some_and(|j| j.pointer("/sync/applied_on").is_some_and(|v| !v.is_null()))
+}
+
+/// The addresses of an email's To or cc: each `local@domain.tld`, nothing
+/// around it; `None` when one is not.
+pub fn addresses(list: &str) -> Option<Vec<&str>> {
+    let mut out = Vec::new();
+    for a in list.split(',').map(str::trim).filter(|a| !a.is_empty()) {
+        let (local, domain) = a.split_once('@')?;
+        let ok_local = !local.is_empty() && local.len() <= 64 && local.bytes().all(|c| c.is_ascii_graphic() && !b"<>()[]\\,;:@\"".contains(&c));
+        let labels: Vec<&str> = domain.split('.').collect();
+        let ok_domain = labels.len() >= 2
+            && domain.len() <= 253
+            && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') && !l.starts_with('-') && !l.ends_with('-'));
+        if !ok_local || !ok_domain {
+            return None;
+        }
+        out.push(a);
+    }
+    Some(out)
+}
+
+/// Why mission `id` cannot fire whoever asks, before any key: its own state,
+/// an email's mail and CV file, its application's links, stage and prior send.
+pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
+    let Some(t) = missions(rows).filter(|t| t.has(id)) else { return Some("not_found") };
+    match state(t, id) {
+        enums::mission_state::FIRE_READY => {}
+        enums::mission_state::IN_FLIGHT => return Some("in_flight"),
+        enums::mission_state::FIRED => return Some("fired"),
+        _ => return Some("not_ready"),
+    }
+    if is_email(t, id) {
+        let to = text(t, id, M::TARGET);
+        let to_ok = addresses(&to).is_some_and(|a| !a.is_empty() && a.len() <= TO_MAX);
+        let cc_ok = addresses(&text(t, id, M::CC)).is_some();
+        if !to_ok || !cc_ok || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
+            return Some("incomplete");
+        }
+        if cv_missing(rows, cvs, t, id) {
+            return Some("cv_file");
+        }
+    }
+    let Some(apps) = rows.table(table::APPLICATIONS) else { return Some("unlinked") };
+    let Some(app) = t.u32(id, M::APPLICATION_ID).filter(|a| apps.has(*a)) else { return Some("unlinked") };
+    if !crate::link::missing(apps.u32(app, A::CORPORATION_ID), apps.u32(app, A::PLACE_ID), apps.u32(app, A::WORK_MODE)).is_empty() {
+        return Some("unlinked");
+    }
+    let stage = apps.u32(app, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered);
+    if stage < Stage::FireReady || stage == Stage::Closed {
+        return Some("app_stage");
+    }
+    if unsettled(apps, app) {
+        return Some("unsettled");
+    }
+    None
+}
+
+// ------------------------------------------------------------------ keys
+
+/// A fire key's cells.
+#[derive(Clone, Copy, Debug)]
+pub struct Key<'r> {
+    pub id: u32,
+    pub scope: &'r str,
+    pub usable_by: Option<u32>,
+    pub request: Option<u32>,
+    pub created: Option<u32>,
+    pub first_used: Option<u32>,
+    pub expires: u32,
+    pub revoked: Option<u32>,
+}
+
+pub fn key(rows: &Rows, id: u32) -> Option<Key<'_>> {
+    let t = rows.table(table::FIRE_KEYS).filter(|t| t.has(id))?;
+    Some(Key {
+        id,
+        scope: t.str(id, K::SCOPE).unwrap_or(""),
+        usable_by: t.u32(id, K::USABLE_BY),
+        request: t.u32(id, K::REQUEST_ID),
+        created: t.u32(id, 4),
+        first_used: t.u32(id, K::FIRST_USED_AT),
+        expires: t.u32(id, K::EXPIRES_AT).unwrap_or(0),
+        revoked: t.u32(id, K::REVOKED_AT),
+    })
+}
+
+impl Key<'_> {
+    /// Why it grants nothing at `now`, if it does not.
+    pub fn dead(&self, now: i64) -> Option<&'static str> {
+        if self.revoked.is_some() {
+            Some("revoked")
+        } else if now >= i64::from(self.expires) {
+            Some("expired")
+        } else {
+            None
+        }
+    }
+
+    /// The operator's session may use any key; an agent one bound to its
+    /// own API key or to none; the mail actor never fires.
+    pub fn usable(&self, ctx: &Ctx) -> bool {
+        ctx.human || (ctx.key_id.is_some() && self.usable_by.is_none_or(|k| Some(k) == ctx.key_id))
+    }
+}
+
+/// One shot: a key's cover of one mission.
+#[derive(Clone, Copy, Debug)]
+pub struct Shot<'r> {
+    pub id: u32,
+    pub key: u32,
+    pub mission: u32,
+    pub hash: &'r str,
+    pub burned: Option<u32>,
+}
+
+fn shot(t: &Table, id: u32) -> Shot<'_> {
+    Shot {
+        id,
+        key: t.u32(id, S::FIRE_KEY_ID).unwrap_or(0),
+        mission: t.u32(id, S::MISSION_ID).unwrap_or(0),
+        hash: t.str(id, S::HASH).unwrap_or(""),
+        burned: t.u32(id, S::BURNED_AT),
+    }
+}
+
+/// Every shot, in id order.
+pub fn shots(rows: &Rows) -> impl Iterator<Item = Shot<'_>> {
+    rows.each(table::FIRE_SHOTS).map(|(t, id)| shot(t, id))
+}
+
+/// A key's shots split four ways: burned, in flight under it, changed since
+/// it was made, and what it still covers.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub burned: Vec<u32>,
+    pub in_flight: Vec<u32>,
+    pub changed: Vec<u32>,
+    pub remaining: Vec<u32>,
+}
+
+pub fn parts(rows: &Rows, cvs: &Cvs, key: u32) -> Parts {
+    let mut p = Parts::default();
+    let ms = missions(rows);
+    for s in shots(rows).filter(|s| s.key == key) {
+        let Some(t) = ms.filter(|t| t.has(s.mission)) else { continue };
+        if s.burned.is_some() {
+            p.burned.push(s.mission);
+        } else if state(t, s.mission) == enums::mission_state::IN_FLIGHT && t.u32(s.mission, M::FIRE_KEY_ID) == Some(key) {
+            p.in_flight.push(s.mission);
+        } else if hash(rows, cvs, s.mission).as_deref() != Some(s.hash) {
+            p.changed.push(s.mission);
+        } else {
+            p.remaining.push(s.mission);
+        }
+    }
+    p
+}
+
+/// Seconds as `HH:MM:SS` (hours past 99 kept whole).
+pub fn hms(secs: i64) -> String {
+    let s = secs.max(0);
+    alloc::format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+fn key_json(rows: &Rows, cvs: &Cvs, k: &Key, now: i64) -> Json {
+    let p = parts(rows, cvs, k.id);
+    let live = k.dead(now).is_none();
+    let left = i64::from(k.expires) - now;
+    json!({
+        "id": k.id, "scope": k.scope, "usable_by": k.usable_by, "request_id": k.request,
+        "created_at": k.created.map(|c| crate::time_iso(i64::from(c))),
+        "first_used_at": k.first_used.map(|c| crate::time_iso(i64::from(c))),
+        "expires_at": crate::time_iso(i64::from(k.expires)),
+        "expires_in_s": if live { Json::from(left) } else { Json::Null },
+        "expires_in": if live { Json::from(hms(left)) } else { Json::Null },
+        "revoked_at": k.revoked.map(|c| crate::time_iso(i64::from(c))),
+        "burned": Ranges::of(p.burned).text(), "remaining": Ranges::of(p.remaining).text(),
+        "in_flight": Ranges::of(p.in_flight).text(), "changed": Ranges::of(p.changed).text(),
+    })
+}
+
+/// Every key, newest first, live ones only unless `all`.
+fn key_list<'r>(rows: &'r Rows, now: i64, all: bool) -> Vec<Key<'r>> {
+    let mut ks: Vec<Key> = rows.each(table::FIRE_KEYS).filter_map(|(_, id)| key(rows, id)).filter(|k| all || k.dead(now).is_none()).collect();
+    ks.sort_by_key(|k| core::cmp::Reverse(k.id));
+    ks
+}
+
+// ------------------------------------------------------------------ the commander
+
+/// The commander's answer to a shot that does not go: why, the mission,
+/// the key it was judged under (its burned, in-flight, changed and
+/// remaining sets and the time it has left), the live keys the caller may
+/// use, and for `no_key` what a request for this mission would carry.
+pub fn answer(rows: &Rows, ctx: &Ctx, why: &str, mission: u32, key_id: Option<u32>) -> Refusal {
+    let cvs = Cvs::of(rows);
+    let mut data = json!({
+        "why": why, "mission": mission, "key": key_id,
+        "burned": "", "remaining": "", "in_flight": "", "changed": "",
+        "expires_at": null, "expires_in": null,
+    });
+    if let Some(k) = key_id.and_then(|k| key(rows, k)) {
+        let kj = key_json(rows, &cvs, &k, ctx.now);
+        for f in ["burned", "remaining", "in_flight", "changed", "expires_at", "expires_in", "expires_in_s", "revoked_at", "scope"] {
+            data[f] = kj[f].clone();
+        }
+    }
+    let live: Vec<Json> = key_list(rows, ctx.now, false)
+        .iter()
+        .filter(|k| k.usable(ctx))
+        .map(|k| {
+            let p = parts(rows, &cvs, k.id);
+            json!({"id": k.id, "scope": k.scope, "remaining": Ranges::of(p.remaining).text(), "expires_in": hms(i64::from(k.expires) - ctx.now)})
+        })
+        .collect();
+    data["live_keys"] = Json::Array(live);
+    if why == "no_key" {
+        data["ask"] = json!({"missions": Ranges::of([mission]).text()});
+    }
+    no(refusal::FIRE, data)
+}
+
+/// The key a shot of `mission` goes under, or the commander's answer: the
+/// first live key (by id) the caller may use whose shot of it is unburned
+/// and unchanged; `named` narrows to one key. Every actor needs one.
+pub fn authority(rows: &Rows, ctx: &Ctx, mission: u32, named: Option<u32>) -> Result<(u32, u32), Refusal> {
+    if !ctx.human && ctx.key_id.is_none() {
+        return Err(no(refusal::SCOPE, json!({"need": "operator or agent", "command": "fire"})));
+    }
+    let cvs = Cvs::of(rows);
+    let now_hash = hash(rows, &cvs, mission);
+    let mut cands: Vec<Shot> = shots(rows).filter(|s| s.mission == mission && named.is_none_or(|k| k == s.key)).collect();
+    cands.sort_by_key(|s| s.key);
+    if cands.is_empty() {
+        return Err(answer(rows, ctx, if named.is_some() { "out_of_scope" } else { "no_key" }, mission, named));
+    }
+    // The most telling reason among the shots that do not serve.
+    let rank = |w: &str| ["revoked", "expired", "not_yours", "burned", "changed"].iter().position(|x| *x == w).unwrap_or(0);
+    let mut best: Option<(&'static str, u32)> = None;
+    for s in &cands {
+        let Some(k) = key(rows, s.key) else { continue };
+        let why = if let Some(d) = k.dead(ctx.now) {
+            d
+        } else if !k.usable(ctx) {
+            "not_yours"
+        } else if s.burned.is_some() {
+            "burned"
+        } else if now_hash.as_deref() != Some(s.hash) {
+            "changed"
+        } else {
+            return Ok((s.key, s.id));
+        };
+        if best.is_none_or(|b| rank(why) > rank(b.0)) {
+            best = Some((why, s.key));
+        }
+    }
+    let (why, k) = best.unwrap_or(("no_key", 0));
+    Err(answer(rows, ctx, why, mission, Some(k).filter(|k| *k > 0)))
+}
+
+// ------------------------------------------------------------------ the mailbox and the cap
+
+fn mailbox(rows: &Rows) -> Option<(&Table, u32)> {
+    rows.table(table::MAILBOXES).and_then(|t| t.ids().first().map(|&id| (t, id)))
+}
+
+/// The UTC day of unix seconds.
+fn day_of(secs: i64) -> i64 {
+    secs.div_euclid(86_400)
+}
+
+/// The day's send cap, how many email shots went or are going today (UTC),
+/// and when the count resets.
+pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
+    let cap = mailbox(rows).and_then(|(t, id)| t.u32(id, MB::DAILY_CAP)).unwrap_or(25);
+    let today = day_of(now);
+    let used = missions(rows).map_or(0, |t| {
+        t.ids()
+            .iter()
+            .filter(|&&id| is_email(t, id))
+            .filter(|&&id| match state(t, id) {
+                enums::mission_state::IN_FLIGHT => t.u32(id, M::IN_FLIGHT_AT).is_some_and(|s| day_of(i64::from(s)) == today),
+                enums::mission_state::FIRED => t.u32(id, M::FIRED_AT).is_some_and(|s| day_of(i64::from(s)) == today),
+                _ => false,
+            })
+            .count() as u32
+    });
+    (cap, used, (today + 1) * 86_400)
+}
+
+/// An email shot's own gates: a live mailbox and room under the cap.
+pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<(), Refusal> {
+    let live = mailbox(rows).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)));
+    if !live {
+        return Err(answer(rows, ctx, "mailbox", mission, Some(key_id)));
+    }
+    let (cap, used, resets) = quota(rows, ctx.now);
+    if used >= cap {
+        let mut r = answer(rows, ctx, "cap", mission, Some(key_id));
+        r.data["cap"] = json!(cap);
+        r.data["used"] = json!(used);
+        r.data["resets_at"] = json!(crate::time_iso(resets));
+        return Err(r);
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ the shot's rows
+
+/// What a shot that goes writes on its mission and its key: in flight, by
+/// whom, under which key; the key's 24 hours start at its first use.
+pub fn going(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Vec<Row> {
+    let mut m = row(table::MISSIONS, mission);
+    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::IN_FLIGHT)));
+    cell(&mut m, M::IN_FLIGHT_AT, now_u32(ctx.now));
+    cell(&mut m, M::FIRE_KEY_ID, Val::U32(key_id));
+    cell(&mut m, M::FIRED_WITH, opt(ctx.key_id));
+    let actor = if ctx.human { enums::actor::OPERATOR } else { enums::actor::AGENT };
+    cell(&mut m, M::FIRED_BY, Val::U32(u32::from(actor)));
+    cell(&mut m, M::LAST_ERROR, Val::None);
+    let mut out = alloc::vec![m];
+    if key(rows, key_id).is_some_and(|k| k.first_used.is_none()) {
+        let mut k = row(table::FIRE_KEYS, key_id);
+        cell(&mut k, K::FIRST_USED_AT, now_u32(ctx.now));
+        cell(&mut k, K::EXPIRES_AT, now_u32(ctx.now + USED_LIFE));
+        out.push(k);
+    }
+    out
+}
+
+/// Who may report a shot's outcome: an email's, the mail actor; another's,
+/// the API key that fired it or the operator.
+pub fn may_report(rows: &Rows, ctx: &Ctx, mission: u32) -> Result<(), Refusal> {
+    let Some(t) = missions(rows).filter(|t| t.has(mission)) else {
+        return Err(no(refusal::NOT_FOUND, json!({"table": "missions", "id": mission})));
+    };
+    let mail = !ctx.human && ctx.key_id.is_none();
+    let ok = if is_email(t, mission) { mail } else { ctx.human || (ctx.key_id.is_some() && t.u32(mission, M::FIRED_WITH) == ctx.key_id) };
+    if !ok {
+        return Err(no(refusal::SCOPE, json!({"need": if is_email(t, mission) { "mail" } else { "the key that fired it, or the operator" }, "mission": mission})));
+    }
+    if state(t, mission) != enums::mission_state::IN_FLIGHT {
+        return Err(no(refusal::STAGE, json!({"table": "missions", "id": mission, "from": state_name(u32::from(state(t, mission))), "rule": "not_in_flight"})));
+    }
+    Ok(())
+}
+
+/// A landed shot's rows on its mission and its key's shot: fired, burned,
+/// provisional unless it is a mail the node watched go out.
+pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Vec<Row> {
+    let t = missions(rows).filter(|t| t.has(mission));
+    let mut m = row(table::MISSIONS, mission);
+    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::FIRED)));
+    cell(&mut m, M::FIRED_AT, now_u32(ctx.now));
+    if t.is_some_and(|t| is_email(t, mission)) {
+        cell(&mut m, M::GMAIL_MSGID, gmail.0);
+        cell(&mut m, M::GMAIL_THRID, gmail.1);
+    } else {
+        cell(&mut m, M::CONFIRMATION, Val::U32(u32::from(enums::confirmation::PROVISIONAL)));
+    }
+    let mut out = alloc::vec![m];
+    let k = t.and_then(|t| t.u32(mission, M::FIRE_KEY_ID));
+    if let Some(s) = shots(rows).find(|s| s.mission == mission && Some(s.key) == k) {
+        let mut r = row(table::FIRE_SHOTS, s.id);
+        cell(&mut r, S::BURNED_AT, now_u32(ctx.now));
+        out.push(r);
+    }
+    out
+}
+
+/// A failed shot: the mission back to fire_ready with the reason, its shot
+/// unburned (still covered).
+pub fn failed(rows: &Rows, mission: u32, reason: &str) -> Vec<Row> {
+    let mut m = row(table::MISSIONS, mission);
+    cell(&mut m, M::STATE, Val::U32(u32::from(enums::mission_state::FIRE_READY)));
+    cell(&mut m, M::LAST_ERROR, if reason.trim().is_empty() { Val::Str("failed".into()) } else { Val::Str(reason.trim().into()) });
+    let mut out = alloc::vec![m];
+    let k = missions(rows).and_then(|t| t.u32(mission, M::FIRE_KEY_ID));
+    if let Some(s) = shots(rows).find(|s| s.mission == mission && Some(s.key) == k && s.burned.is_some()) {
+        let mut r = row(table::FIRE_SHOTS, s.id);
+        cell(&mut r, S::BURNED_AT, Val::None);
+        out.push(r);
+    }
+    out
+}
+
+/// The application a mission belongs to.
+pub fn application(rows: &Rows, mission: u32) -> Option<u32> {
+    missions(rows).and_then(|t| t.u32(mission, M::APPLICATION_ID))
+}
+
+/// A line for the application's events.
+pub fn describe(rows: &Rows, mission: u32) -> String {
+    let Some(t) = missions(rows).filter(|t| t.has(mission)) else { return alloc::format!("mission #{mission}") };
+    let kind = t.u32(mission, M::KIND).and_then(|k| enums::mission_kind::NAMES.get(k as usize).copied()).unwrap_or("mission");
+    let target = text(t, mission, M::TARGET);
+    if target.is_empty() { alloc::format!("mission #{mission} ({kind})") } else { alloc::format!("mission #{mission} ({kind}) → {target}") }
+}
+
+// ------------------------------------------------------------------ the operator's commands
+
+fn need_human(ctx: &Ctx, command: &str) -> Result<(), Refusal> {
+    if ctx.human { Ok(()) } else { Err(no(refusal::HUMAN_ONLY, json!({"command": command}))) }
+}
+
+fn need_mail(ctx: &Ctx, command: &str) -> Result<(), Refusal> {
+    if !ctx.human && ctx.key_id.is_none() { Ok(()) } else { Err(no(refusal::SCOPE, json!({"need": "mail", "command": command}))) }
+}
+
+/// The review of a set of missions (rule 4): each one's draft and target in
+/// full, its application, CV version and hash, and why it would not fire;
+/// the eligible ones' canonical scope and their digest.
+pub fn review(rows: &Rows, scope: &Ranges) -> Json {
+    let cvs = Cvs::of(rows);
+    let apps = rows.table(table::APPLICATIONS);
+    let mut out = Vec::new();
+    let mut eligible: Vec<(u32, String)> = Vec::new();
+    if let Some(t) = missions(rows) {
+        for &id in t.ids().iter().filter(|&&id| scope.contains(id)) {
+            let why = hold(rows, &cvs, id);
+            let h = hash(rows, &cvs, id).unwrap_or_default();
+            let app = t.u32(id, M::APPLICATION_ID).unwrap_or(0);
+            let a = apps.filter(|a| a.has(app));
+            let draft = if is_email(t, id) {
+                json!({"to": t.str(id, M::TARGET), "cc": t.str(id, M::CC), "subject": t.str(id, M::SUBJECT), "body": t.text(id, M::DRAFT),
+                       "in_reply_to": t.str(id, M::IN_REPLY_TO), "refs": t.text(id, M::REFS)})
+            } else {
+                json!({"markdown": t.text(id, M::DRAFT)})
+            };
+            out.push(json!({
+                "id": id,
+                "kind": t.u32(id, M::KIND).and_then(|k| enums::mission_kind::NAMES.get(k as usize).copied()),
+                "target": t.str(id, M::TARGET),
+                "state": state_name(u32::from(state(t, id))),
+                "application": a.map_or(Json::Null, |a| json!({
+                    "id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
+                    "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": a.u32(app, A::CORPORATION_ID),
+                })),
+                "draft": draft,
+                "cv_version_id": cvs.version(rows, app),
+                "hash": h,
+                "eligible": why.is_none(),
+                "why": why,
+            }));
+            if why.is_none() {
+                eligible.push((id, h));
+            }
+        }
+    }
+    let scope = Ranges::of(eligible.iter().map(|e| e.0));
+    json!({"missions": out, "scope": scope.text(), "count": eligible.len(), "digest": digest(&eligible)})
+}
+
+/// `create_fire_key`: the operator's key over exactly the reviewed missions.
+/// The eligible missions of `missions` must be all of them that exist, and
+/// their digest the review's; a request it answers turns granted.
+pub fn create(rows: &Rows, ctx: &Ctx, missions_text: &str, digest_given: &str, usable_by: Option<u32>, request: Option<u32>) -> Result<Vec<Row>, Refusal> {
+    need_human(ctx, "create_fire_key")?;
+    let scope = Ranges::parse(missions_text).map_err(|at| no(refusal::TYPE, json!({"param": "missions", "at": at})))?;
+    let cvs = Cvs::of(rows);
+    let mut eligible: Vec<(u32, String)> = Vec::new();
+    let mut held: Vec<u32> = Vec::new();
+    if let Some(t) = missions(rows) {
+        for &id in t.ids().iter().filter(|&&id| scope.contains(id)) {
+            match hold(rows, &cvs, id) {
+                None => eligible.push((id, hash(rows, &cvs, id).unwrap_or_default())),
+                Some(_) => held.push(id),
+            }
+        }
+    }
+    if eligible.is_empty() && held.is_empty() {
+        return Err(no(refusal::FIRE, json!({"why": "empty", "missions": scope.text()})));
+    }
+    if !held.is_empty() {
+        return Err(no(refusal::FIRE, json!({"why": "ineligible", "missions": Ranges::of(held).text(), "review": review(rows, &scope)})));
+    }
+    if digest(&eligible) != digest_given.trim() {
+        return Err(no(refusal::FIRE, json!({"why": "changed", "review": review(rows, &scope)})));
+    }
+    let mut bound = usable_by;
+    if let Some(r) = request {
+        let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(r)) else {
+            return Err(no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": r})));
+        };
+        if t.u32(r, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
+            return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": r, "rule": "not_open"})));
+        }
+        bound = bound.or(t.u32(r, R::REQUESTED_BY));
+    }
+    let mut k = row(table::FIRE_KEYS, 0);
+    cell(&mut k, K::SCOPE, Val::Str(Ranges::of(eligible.iter().map(|e| e.0)).text()));
+    cell(&mut k, K::USABLE_BY, opt(bound));
+    cell(&mut k, K::REQUEST_ID, opt(request));
+    cell(&mut k, K::EXPIRES_AT, now_u32(ctx.now + UNUSED_LIFE));
+    let mut out = alloc::vec![k];
+    for (id, h) in eligible {
+        let mut s = row(table::FIRE_SHOTS, 0);
+        cell(&mut s, S::FIRE_KEY_ID, EVal::New(0));
+        cell(&mut s, S::MISSION_ID, Val::U32(id));
+        cell(&mut s, S::HASH, Val::Str(h));
+        out.push(s);
+    }
+    if let Some(r) = request {
+        let mut q = row(table::FIRE_REQUESTS, r);
+        cell(&mut q, R::STATUS, Val::U32(u32::from(enums::request_status::GRANTED)));
+        cell(&mut q, R::FIRE_KEY_ID, EVal::New(0));
+        out.push(q);
+    }
+    Ok(out)
+}
+
+/// `revoke_fire_key`: the key grants nothing from now; a shot in flight
+/// under it still reports its outcome.
+pub fn revoke(rows: &Rows, ctx: &Ctx, id: u32) -> Result<Vec<Row>, Refusal> {
+    need_human(ctx, "revoke_fire_key")?;
+    let Some(k) = key(rows, id) else { return Err(no(refusal::NOT_FOUND, json!({"table": "fire_keys", "id": id}))) };
+    if k.revoked.is_some() {
+        return Ok(Vec::new());
+    }
+    let mut r = row(table::FIRE_KEYS, id);
+    cell(&mut r, K::REVOKED_AT, now_u32(ctx.now));
+    Ok(alloc::vec![r])
+}
+
+/// `decline`: an open request closed without a key.
+pub fn decline(rows: &Rows, ctx: &Ctx, id: u32) -> Result<Vec<Row>, Refusal> {
+    need_human(ctx, "decline")?;
+    let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(id)) else {
+        return Err(no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": id})));
+    };
+    if t.u32(id, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
+        return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": id, "rule": "not_open"})));
+    }
+    let mut r = row(table::FIRE_REQUESTS, id);
+    cell(&mut r, R::STATUS, Val::U32(u32::from(enums::request_status::DECLINED)));
+    Ok(alloc::vec![r])
+}
+
+/// `stamp`: the Message-ID the node minted for an email shot, once.
+pub fn stamp(rows: &Rows, ctx: &Ctx, mission: u32, message_id: &str) -> Result<Vec<Row>, Refusal> {
+    need_mail(ctx, "stamp")?;
+    may_report(rows, ctx, mission)?;
+    let t = missions(rows).filter(|t| t.has(mission)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "missions", "id": mission})))?;
+    let id = message_id.trim();
+    if id.is_empty() || id.len() > 998 || id.bytes().any(|c| c.is_ascii_whitespace() || c.is_ascii_control()) {
+        return Err(no(refusal::TYPE, json!({"param": "message_id"})));
+    }
+    match t.str(mission, M::MESSAGE_ID) {
+        Some(had) if had == id => Ok(Vec::new()),
+        Some(_) => Err(no(refusal::STAGE, json!({"table": "missions", "id": mission, "rule": "stamped"}))),
+        None => {
+            let mut r = row(table::MISSIONS, mission);
+            cell(&mut r, M::MESSAGE_ID, Val::Str(id.into()));
+            Ok(alloc::vec![r])
+        }
+    }
+}
+
+/// `mailbox_state`: what the connector saw of the mailbox.
+pub fn mailbox_state(rows: &Rows, ctx: &Ctx, status: Val, error: Val, synced: Val) -> Result<Vec<Row>, Refusal> {
+    need_mail(ctx, "mailbox_state")?;
+    let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    let mut r = row(table::MAILBOXES, id);
+    cell(&mut r, MB::STATUS, status);
+    cell(&mut r, MB::LAST_ERROR, error);
+    if !synced.is_none() {
+        cell(&mut r, MB::LAST_SYNC_AT, synced);
+    }
+    Ok(alloc::vec![r])
+}
+
+/// `unlink_mail`: the operator unlinks the mailbox (the node clears the
+/// secrets and the cursor when it reads the status).
+pub fn unlink(rows: &Rows, ctx: &Ctx) -> Result<Vec<Row>, Refusal> {
+    need_human(ctx, "unlink_mail")?;
+    let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    let mut r = row(table::MAILBOXES, id);
+    cell(&mut r, MB::STATUS, Val::U32(u32::from(enums::mailbox_status::UNLINKED)));
+    Ok(alloc::vec![r])
+}
+
+// ------------------------------------------------------------------ puts and drops
+
+/// The domain rules of a put on the mission, request and mailbox tables:
+/// who writes what, the states a put may move a mission among, a mission in
+/// flight or fired kept as it went, a request's ranges made canonical and
+/// its requester stamped.
+pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) -> Result<(), Refusal> {
+    let mail = !ctx.human && ctx.key_id.is_none();
+    let given = |row: &Row, c: u16| row.cells.iter().find(|x| x.0 == c).map(|x| x.1.clone());
+    match op_table {
+        table::MISSIONS => {
+            if mail {
+                return Err(no(refusal::SCOPE, json!({"need": "operator or agent", "table": "missions"})));
+            }
+            let t = missions(rows).filter(|t| target > 0 && t.has(target));
+            let from = t.map(|t| state(t, target));
+            if t.is_none() && given(row, M::STATE).is_none() {
+                cell(row, M::STATE, Val::U32(u32::from(enums::mission_state::DRAFT)));
+            }
+            if let Some(f) = from.filter(|f| [enums::mission_state::IN_FLIGHT, enums::mission_state::FIRED].contains(f))
+                && row.cells.iter().any(|c| c.0 != M::NOTE)
+            {
+                return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "from": state_name(u32::from(f)), "rule": "record"})));
+            }
+            if let Some(EVal::Val(Val::U32(to))) = given(row, M::STATE)
+                && (!STAGED.contains(&(to as u8)) || from.is_some_and(|f| !STAGED.contains(&f)))
+            {
+                return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "from": from.map(|f| state_name(u32::from(f))), "to": state_name(to), "rule": "by_command"})));
+            }
+            let kind = match given(row, M::KIND) {
+                Some(EVal::Val(Val::U32(k))) => Some(k),
+                _ => t.and_then(|t| t.u32(target, M::KIND)),
+            };
+            // A first-contact email reaches fire_ready only with a CV file to
+            // carry (the pick's version a PDF or DOCX upload).
+            let to_ready = matches!(given(row, M::STATE), Some(EVal::Val(Val::U32(s))) if s == u32::from(enums::mission_state::FIRE_READY));
+            if to_ready && kind == Some(u32::from(enums::mission_kind::EMAIL)) {
+                let reply = match given(row, M::IN_REPLY_TO) {
+                    Some(EVal::Val(Val::Str(v))) => !v.is_empty(),
+                    Some(_) => false,
+                    None => t.and_then(|t| t.str(target, M::IN_REPLY_TO)).is_some_and(|v| !v.is_empty()),
+                };
+                let app = match given(row, M::APPLICATION_ID) {
+                    Some(EVal::Val(Val::U32(a))) => Some(a),
+                    _ => t.and_then(|t| t.u32(target, M::APPLICATION_ID)),
+                };
+                if !reply && !app.is_some_and(|a| Cvs::of(rows).file(rows, a)) {
+                    return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "to": "fire_ready", "rule": "cv_file", "need": "the application's CV as a PDF or DOCX version: pick one (pick_cv) or upload one"})));
+                }
+            }
+            if kind == Some(u32::from(enums::mission_kind::EMAIL)) {
+                for (c, max, name) in [(M::TARGET, TO_MAX, "target"), (M::CC, 50, "cc")] {
+                    if let Some(EVal::Val(Val::Str(list))) = given(row, c) {
+                        match addresses(&list) {
+                            Some(a) if a.len() <= max => {}
+                            _ => return Err(no(refusal::TYPE, json!({"table": "missions", "column": name, "need": alloc::format!("up to {max} addresses, comma-separated")}))),
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        table::FIRE_REQUESTS => {
+            if mail {
+                return Err(no(refusal::SCOPE, json!({"need": "operator or agent", "table": "fire_requests"})));
+            }
+            if let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| target > 0 && t.has(target)) {
+                if t.u32(target, R::STATUS) != Some(u32::from(enums::request_status::OPEN)) {
+                    return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": target, "rule": "not_open"})));
+                }
+                if !ctx.human && t.u32(target, R::REQUESTED_BY) != ctx.key_id {
+                    return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": target})));
+                }
+            } else {
+                cell(row, R::REQUESTED_BY, opt(ctx.key_id));
+                // The default, written as the database will, so a prediction
+                // reads the row it will be.
+                cell(row, R::STATUS, Val::U32(u32::from(enums::request_status::OPEN)));
+            }
+            if let Some(EVal::Val(Val::Str(m))) = given(row, R::MISSIONS) {
+                let r = Ranges::parse(&m).map_err(|at| no(refusal::TYPE, json!({"table": "fire_requests", "column": "missions", "at": at})))?;
+                if r.is_empty() {
+                    return Err(no(refusal::TYPE, json!({"table": "fire_requests", "column": "missions", "need": "ranges of mission ids"})));
+                }
+                cell(row, R::MISSIONS, Val::Str(r.text()));
+            }
+            if let Some(EVal::Val(Val::Str(why))) = given(row, R::REASON)
+                && why.chars().count() > REASON_MAX
+            {
+                return Err(no(refusal::TOO_LARGE, json!({"table": "fire_requests", "column": "reason", "max": REASON_MAX})));
+            }
+            Ok(())
+        }
+        table::MAILBOXES => {
+            let only = |cols: &[u16]| row.cells.iter().all(|c| cols.contains(&c.0));
+            let ok = if mail { only(&[MB::PROVIDER, MB::ADDRESS]) } else { ctx.human && only(&[MB::DAILY_CAP]) };
+            if !ok {
+                return Err(no(refusal::SCOPE, json!({"need": if ctx.human { "mail" } else { "operator or mail" }, "table": "mailboxes"})));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The domain rules of a drop: a key and its shots are the record (revoke
+/// a key, never drop it); a mission in flight or fired stays; a request
+/// once answered stays; the mailbox is the operator's to drop.
+pub fn drop(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32) -> Result<(), Refusal> {
+    match op_table {
+        table::FIRE_KEYS | table::FIRE_SHOTS => Err(no(refusal::SCOPE, json!({"table": if op_table == table::FIRE_KEYS { "fire_keys" } else { "fire_shots" }, "reason": "the record of what was authorized: revoke a key, never drop it"}))),
+        table::MISSIONS => match missions(rows).map(|t| state(t, target)) {
+            Some(s) if s == enums::mission_state::IN_FLIGHT || s == enums::mission_state::FIRED => {
+                Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "from": state_name(u32::from(s)), "rule": "record"})))
+            }
+            _ => Ok(()),
+        },
+        table::FIRE_REQUESTS => {
+            let t = rows.table(table::FIRE_REQUESTS);
+            if t.is_some_and(|t| t.u32(target, R::STATUS) != Some(u32::from(enums::request_status::OPEN))) {
+                return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": target, "rule": "not_open"})));
+            }
+            if !ctx.human && t.and_then(|t| t.u32(target, R::REQUESTED_BY)) != ctx.key_id {
+                return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": target})));
+            }
+            Ok(())
+        }
+        table::MAILBOXES if !ctx.human => Err(no(refusal::SCOPE, json!({"need": "operator", "table": "mailboxes"}))),
+        _ => Ok(()),
+    }
+}
+
+// ------------------------------------------------------------------ queries
+
+/// The clock the queries read: the server's `now` when the replica holds
+/// it, else the caller's, else the start of the kernel's day.
+fn now_of(rows: &Rows, req: &Json, today: crate::Day) -> i64 {
+    let clock = rows.table(table::CLOCK).and_then(|t| t.ids().first().and_then(|&id| t.u32(id, schema::col::clock::NOW)));
+    clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400)
+}
+
+fn id_arg(req: &Json, name: &str) -> Result<u32, Refusal> {
+    req.get(name).and_then(Json::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0).ok_or_else(|| no(refusal::TYPE, json!({"param": name})))
+}
+
+fn mission_json(rows: &Rows, cvs: &Cvs, t: &Table, id: u32, now: i64) -> Json {
+    let cols: Vec<&'static schema::ColDef> = schema::table_def(table::MISSIONS).map(|d| d.cols.iter().filter(|c| c.id >= 8).collect()).unwrap_or_default();
+    let mut j = crate::query::row_out(t, id, &cols, false);
+    j["id"] = json!(id);
+    j["hash"] = json!(hash(rows, cvs, id));
+    let covered: Vec<u32> = shots(rows)
+        .filter(|s| s.mission == id && s.burned.is_none())
+        .filter(|s| key(rows, s.key).is_some_and(|k| k.dead(now).is_none()))
+        .map(|s| s.key)
+        .collect();
+    j["covered_by"] = json!(covered);
+    j["hold"] = json!(hold(rows, cvs, id));
+    j
+}
+
+/// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
+/// `fire_review`, `live_keys`, `mail_quota`.
+pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Json, Refusal> {
+    let now = now_of(rows, req, today);
+    match op {
+        "ranges" => {
+            let r = match (req.get("text").and_then(Json::as_str), req.get("ids").and_then(Json::as_array)) {
+                (Some(t), _) => Ranges::parse(t).map_err(|at| no(refusal::TYPE, json!({"param": "text", "at": at})))?,
+                (None, Some(ids)) => Ranges::of(ids.iter().filter_map(Json::as_u64).filter_map(|v| u32::try_from(v).ok())),
+                _ => return Err(no(refusal::TYPE, json!({"param": "text or ids"}))),
+            };
+            Ok(json!({"text": r.text(), "count": r.count()}))
+        }
+        "missions" => {
+            let cvs = Cvs::of(rows);
+            let app = req.get("application").and_then(Json::as_u64);
+            let st = req.get("state").and_then(Json::as_str);
+            let kind = req.get("kind").and_then(Json::as_str);
+            let list: Vec<Json> = missions(rows).map_or_else(Vec::new, |t| {
+                t.ids()
+                    .iter()
+                    .copied()
+                    .filter(|&id| app.is_none_or(|a| t.u32(id, M::APPLICATION_ID).map(u64::from) == Some(a)))
+                    .filter(|&id| st.is_none_or(|s| state_name(u32::from(state(t, id))) == s))
+                    .filter(|&id| kind.is_none_or(|k| t.u32(id, M::KIND).and_then(|v| enums::mission_kind::NAMES.get(v as usize).copied()) == Some(k)))
+                    .map(|id| mission_json(rows, &cvs, t, id, now))
+                    .collect()
+            });
+            Ok(json!({"missions": list}))
+        }
+        "mission_brief" => {
+            let id = id_arg(req, "mission")?;
+            let t = missions(rows).filter(|t| t.has(id)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "missions", "id": id})))?;
+            let cvs = Cvs::of(rows);
+            let email = is_email(t, id);
+            let app = t.u32(id, M::APPLICATION_ID).unwrap_or(0);
+            let apps = rows.table(table::APPLICATIONS).filter(|a| a.has(app));
+            let corp = apps.and_then(|a| a.u32(app, A::CORPORATION_ID));
+            let corp_name = corp.and_then(|c| rows.table(table::CORPORATIONS).and_then(|t| t.str(c, schema::col::corporations::NAME)));
+            let contact = t.u32(id, M::CONTACT_ID);
+            Ok(json!({
+                "mission": mission_json(rows, &cvs, t, id, now),
+                "application": apps.map_or(Json::Null, |a| json!({"id": app, "no": a.u32(app, A::NO), "company": a.str(app, A::COMPANY), "role": a.str(app, A::ROLE),
+                    "stage": a.u32(app, A::STAGE).and_then(Stage::from_u32).map(Stage::name), "corporation_id": corp, "corporation": corp_name})),
+                "contact_id": contact,
+                "produces": if email { "an email sent through the linked mailbox, and its replies, filed by the mail" } else { "nothing hireme can see: the shot is yours to perform" },
+                "report": if email { "none: the node reports the send (landed or failed)" } else { "landed or failed on the mission once done, and an outreach report of what was sent or submitted" },
+                "track": if email { "replies arrive on the mission's thread" } else { "a confirmation mail confirms the shot (it stays provisional until one is filed)" },
+                "quota": if email { let (cap, used, resets) = quota(rows, now); json!({"cap": cap, "used": used, "resets_at": crate::time_iso(resets)}) } else { Json::Null },
+            }))
+        }
+        "fire_review" => {
+            let (scope, request) = match req.get("request").and_then(Json::as_u64) {
+                Some(r) => {
+                    let r = u32::try_from(r).unwrap_or(0);
+                    let t = rows.table(table::FIRE_REQUESTS).filter(|t| t.has(r)).ok_or_else(|| no(refusal::NOT_FOUND, json!({"table": "fire_requests", "id": r})))?;
+                    let scope = Ranges::parse(t.str(r, R::MISSIONS).unwrap_or("")).unwrap_or_default();
+                    let status = t.u32(r, R::STATUS).and_then(|s| enums::request_status::NAMES.get(s as usize).copied());
+                    (scope, json!({"id": r, "missions": t.str(r, R::MISSIONS), "reason": t.str(r, R::REASON), "requested_by": t.u32(r, R::REQUESTED_BY), "status": status}))
+                }
+                None => {
+                    let m = req.get("missions").and_then(Json::as_str).ok_or_else(|| no(refusal::TYPE, json!({"param": "request or missions"})))?;
+                    (Ranges::parse(m).map_err(|at| no(refusal::TYPE, json!({"param": "missions", "at": at})))?, Json::Null)
+                }
+            };
+            let mut r = review(rows, &scope);
+            r["request"] = request;
+            Ok(r)
+        }
+        "live_keys" => {
+            let cvs = Cvs::of(rows);
+            let all = req.get("all").and_then(Json::as_bool).unwrap_or(false);
+            let keys: Vec<Json> = key_list(rows, now, all).iter().map(|k| key_json(rows, &cvs, k, now)).collect();
+            Ok(json!({"keys": keys}))
+        }
+        "mail_quota" => {
+            let (cap, used, resets) = quota(rows, now);
+            Ok(json!({"cap": cap, "used": used, "left": cap.saturating_sub(used), "resets_at": crate::time_iso(resets)}))
+        }
+        other => Err(no(refusal::NOT_FOUND, json!({"method": other}))),
+    }
+}
+
+/// The tables each read needs.
+pub fn reads(op: &str) -> &'static [&'static str] {
+    match op {
+        "ranges" => &[],
+        "mail_quota" => &["missions", "mailboxes"],
+        "mission_brief" | "fire_review" => &["missions", "applications"],
+        "live_keys" => &["fire_keys", "missions"],
+        _ => &["missions"],
+    }
+}
+
+pub const OPS: [&str; 6] = ["ranges", "missions", "mission_brief", "fire_review", "live_keys", "mail_quota"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges_read_canonically_and_refuse_what_they_are_not() {
+        for (text, canon) in [
+            ("1-44,56-213,444,4413", "1-44,56-213,444,4413"),
+            (" 444 , 56-213,1 - 44,4413 ", "1-44,56-213,444,4413"),
+            ("3,1,2", "1-3"),
+            ("5-9,7-12,13", "5-13"),
+            ("7", "7"),
+            ("", ""),
+        ] {
+            assert_eq!(Ranges::parse(text).map(|r| r.text()), Ok(canon.into()), "{text:?}");
+        }
+        for bad in ["0", "5-3", "1,,2", "a", "1-", "-4", "1 2", "4294967296", "1-2-3", "1,", ","] {
+            assert!(Ranges::parse(bad).is_err(), "{bad:?}");
+        }
+        let r = Ranges::parse("1-44,56-213,444,4413").unwrap();
+        for (id, inside) in [(1, true), (44, true), (45, false), (55, false), (56, true), (213, true), (444, true), (445, false), (4413, true), (0, false)] {
+            assert_eq!(r.contains(id), inside, "{id}");
+        }
+        assert_eq!(r.count(), 44 + 158 + 2);
+        assert_eq!(Ranges::of([4413, 1, 2, 3, 444]).text(), "1-3,444,4413");
+        // The largest id is a range of its own.
+        assert_eq!(Ranges::parse("4294967295").unwrap().count(), 1);
+    }
+
+    /// Any set of ids: its ranges hold exactly it, and their text reads back
+    /// as the same ranges (seeded; the seed and the set on a failure).
+    #[test]
+    fn ranges_hold_exactly_their_ids_and_round_trip() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for case in 0..500 {
+            let span = 1 + next(300);
+            let ids: Vec<u32> = (0..next(40)).map(|_| 1 + next(span)).collect();
+            let r = Ranges::of(ids.iter().copied());
+            for id in 0..=span + 1 {
+                assert_eq!(r.contains(id), ids.contains(&id), "case {case}: {ids:?} at {id}");
+            }
+            let mut distinct = ids.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(r.count(), distinct.len() as u64, "case {case}: {ids:?}");
+            assert_eq!(Ranges::parse(&r.text()), Ok(r.clone()), "case {case}: {ids:?} as {}", r.text());
+        }
+    }
+
+    #[test]
+    fn an_email_list_is_bare_addresses() {
+        assert_eq!(addresses("a@b.co, jobs@acme.example").map(|a| a.len()), Some(2));
+        assert_eq!(addresses("").map(|a| a.len()), Some(0));
+        for bad in ["Acme <jobs@acme.example>", "jobs@acme", "@acme.example", "jobs@-acme.example", "a b@c.de"] {
+            assert!(addresses(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(hms(85_267), "23:41:07");
+        assert_eq!(hms(7 * 86_400), "168:00:00");
+    }
+}

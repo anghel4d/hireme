@@ -155,7 +155,12 @@ null cannot fire (`unsettled`); the operator settles it by setting prior_send.
 `fire` on mission m by actor a, in order; the first that fails is the
 answer (`fire`, data below):
 
-1. m exists and is fire_ready (`not_ready`, `in_flight`, `fired`).
+1. m exists and is fire_ready (`not_ready`, `in_flight`, `fired`). An
+   email: its To (1 to 10 bare addresses), subject and body set
+   (`incomplete`), and for a first contact (no in_reply_to) the CV the
+   application's pick sends is a file, a PDF or DOCX version (`cv_file`);
+   a reply inside a thread goes without one. A put that would make such a
+   mission fire_ready is refused the same (`stage`, rule `cv_file`).
 2. Its application: linked (`unlinked`), at fire_ready, open_fire or later
    but not closed (`app_stage`), its prior send settled (`unsettled`).
 3. Authority, the same for every actor: a shot of m under a key that is
@@ -185,8 +190,9 @@ answer, never an error:
 ## Queries (`Kernel::query` ops; the node's /mcp, the daemon and the page alike)
 
 - `ranges {ids: [...]}` or `{text: "..."}`: `{text, count, ids}` canonical.
-- `missions {application?, state?, kind?}`: rows plus `covered_by` (live keys
-  covering each) and `report_due` (fired, not email, no report yet).
+- `missions {application?, state?, kind?}`: rows plus `hash`, `covered_by`
+  (the live keys whose unburned shot covers it) and `hold` (why it cannot
+  fire whoever asks, or null). `report_due` follows with the outreach type.
 - `mission_brief {mission}`: kind, target, application, company, contact,
   state, what the shot produces and must be reported, its live keys.
 - `fire_review {request} | {missions}`: every mission's draft and target in
@@ -276,8 +282,8 @@ mission held by an unsettled prior send):
  "scope": "33", "count": 1, "digest": "5be1..."}
 ```
 
-`why` is one of the fire judge's reasons (`not_ready`, `in_flight`, `fired`,
-`unlinked`, `app_stage`, `unsettled`, `mailbox`); `digest` is the SHA-256 of
+`why` is one of the fire judge's holds (`not_ready`, `in_flight`, `fired`,
+`incomplete`, `cv_file`, `unlinked`, `app_stage`, `unsettled`); `digest` is the SHA-256 of
 the eligible missions' ids and hashes, which `create_fire_key` echoes.
 
 `missions {application: 120}`:
@@ -288,7 +294,7 @@ the eligible missions' ids and hashes, which `create_fire_key` echoes.
    "state": "fire_ready", "draft": "Hello ...", "cc": null, "subject": "Staff Engineer application",
    "in_reply_to": null, "refs": null, "message_id": null, "last_error": null,
    "fired_at": null, "fired_by": null, "fire_key_id": null, "in_flight_at": null, "confirmation": null, "note": null,
-   "hash": "9f2c...", "covered_by": [7], "report_due": false}
+   "gmail_msgid": null, "gmail_thrid": null, "hash": "9f2c...", "covered_by": [7], "hold": null}
 ]}
 ```
 

@@ -1,10 +1,13 @@
 //! The battleplan: ten stages, the rail of pips one application carries
 //! through them, the moves the desk allows, and FIRE HOLD.
 //!
-//! The desk never submits. `open_fire` is named by a human through its
-//! own command (the schema declares it `human_only`), and `submitted`
-//! records a submission the operator made by hand, so it is reachable
-//! only from `open_fire`: an application a human has opened fire on.
+//! The `stage` command never submits. `open_fire` is named by a human
+//! through its own command (the schema declares it `human_only`), and a
+//! move to `submitted` records a submission the operator made by hand, so
+//! it is reachable only from `open_fire`: an application a human has opened
+//! fire on. The other way out is a mission's shot landing under a fire key
+//! the operator made (`fire`), which moves its application to `submitted`
+//! from fire_ready or open_fire.
 //!
 //! A rail is one pip per stage in stage order, stored as ten characters
 //! (`D` done, `A` active, `P` pending, `S` skipped, `B` blocked) in

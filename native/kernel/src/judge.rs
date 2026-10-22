@@ -200,7 +200,13 @@ fn own(op: &Op, cells: Vec<(u16, Val)>) -> Row {
 }
 
 fn event(application: EVal, kind: &str, body: String, op: &Op, ctx: &Ctx) -> Row {
-    let actor = if ctx.human { enums::actor::OPERATOR } else { enums::actor::AGENT };
+    let actor = if ctx.human {
+        enums::actor::OPERATOR
+    } else if ctx.key_id.is_some() {
+        enums::actor::AGENT
+    } else {
+        enums::actor::MAIL
+    };
     Row {
         table: table::EVENTS,
         id: 0,
@@ -285,6 +291,7 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 }
             }
         }
+        table::MISSIONS | table::FIRE_REQUESTS | table::MAILBOXES => crate::fire::put(rows, ctx, op.table, op.target, &mut row)?,
         table::CV_OVERLAYS => overlay(rows, board, op, ctx, &mut row, &mut extra)?,
         table::CV_RULES => {
             let text = text_after(rows, op, col::cv_rules::PATTERN);
@@ -392,6 +399,7 @@ fn lineage_gate(l: &Table, lid: u32, today: Day, creates: bool) -> Result<(), Re
 }
 
 fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
+    crate::fire::drop(rows, ctx, op.table, op.target)?;
     // A company or place an application names stays until they are relinked:
     // the database would set their links null and leave them unlinked.
     if let Some(data) = crate::link::named_by(rows, op.table, op.target) {
@@ -583,6 +591,88 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             let row = Row { table: table::APPLICATIONS, id: op.target, cells: alloc::vec![(A::CV_ROOT_ID, Val::None.into()), (A::CV_PINNED_BY, Val::None.into())] };
             Ok(alloc::vec![row, event(u(op.target).into(), "cv", "CV unpinned".into(), op, ctx)])
         }
+        command::FIRE => {
+            let id = op.target;
+            let named = match param_val(op, param::fire::KEY) {
+                Val::U32(k) => Some(k),
+                _ => None,
+            };
+            // A mission that cannot go whoever asks is answered under the key
+            // named, else the one it last went under.
+            if let Some(why) = crate::fire::hold(rows, &crate::fire::Cvs::of(rows), id) {
+                let last = rows.table(table::MISSIONS).and_then(|t| t.u32(id, col::missions::FIRE_KEY_ID));
+                return Err(crate::fire::answer(rows, ctx, why, id, named.or(last)));
+            }
+            let (key, _) = crate::fire::authority(rows, ctx, id, named)?;
+            let email = rows.table(table::MISSIONS).and_then(|t| t.u32(id, col::missions::KIND)) == Some(u32::from(enums::mission_kind::EMAIL));
+            if email {
+                crate::fire::mail_gate(rows, ctx, id, key)?;
+            }
+            let app = crate::fire::application(rows, id).unwrap_or(0);
+            // Heat judges an application's first shot, as it judges going out.
+            if let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(app))
+                && !board::sent(t, app)
+            {
+                governor(rows, board, app, Stage::Submitted, ctx)?;
+            }
+            let mut out = crate::fire::going(rows, ctx, id, key);
+            out.push(event(u(app).into(), "fire", alloc::format!("fire · {} · key #{key}", crate::fire::describe(rows, id)), op, ctx));
+            Ok(out)
+        }
+        command::STAMP => {
+            let id = param_str(op, param::stamp::MESSAGE_ID).unwrap_or_default();
+            crate::fire::stamp(rows, ctx, op.target, &id)
+        }
+        command::LANDED => {
+            let id = op.target;
+            crate::fire::may_report(rows, ctx, id)?;
+            let gmail = (param_val(op, param::landed::GMAIL_MSGID), param_val(op, param::landed::GMAIL_THRID));
+            let mut out = crate::fire::landed(rows, ctx, id, gmail);
+            let app = crate::fire::application(rows, id).unwrap_or(0);
+            // A landed shot is the application going out: submitted, its CV
+            // version frozen, unless it had already gone.
+            if let Some(t) = rows.table(table::APPLICATIONS).filter(|t| t.has(app)) {
+                let from = app_stage(t, app);
+                if from < Stage::Submitted {
+                    let mut went = moved(t, app, from, Stage::Submitted, None, op, ctx);
+                    if let Some(row) = went.first_mut() {
+                        let version = pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), app).version;
+                        row.set(A::CV_VERSION_ID, version.map_or(Val::None, u));
+                    }
+                    out.extend(went);
+                }
+            }
+            out.push(event(u(app).into(), "landed", alloc::format!("landed · {}", crate::fire::describe(rows, id)), op, ctx));
+            Ok(out)
+        }
+        command::FAILED => {
+            let id = op.target;
+            crate::fire::may_report(rows, ctx, id)?;
+            let reason = param_str(op, param::failed::REASON).unwrap_or_default();
+            let mut out = crate::fire::failed(rows, id, &reason);
+            let app = crate::fire::application(rows, id).unwrap_or(0);
+            out.push(event(u(app).into(), "failed", alloc::format!("failed · {} · {}", crate::fire::describe(rows, id), reason.trim()), op, ctx));
+            Ok(out)
+        }
+        command::CREATE_FIRE_KEY => {
+            let id = |p: u16| match param_val(op, p) {
+                Val::U32(v) => Some(v),
+                _ => None,
+            };
+            let missions = param_str(op, param::create_fire_key::MISSIONS).unwrap_or_default();
+            let digest = param_str(op, param::create_fire_key::DIGEST).unwrap_or_default();
+            crate::fire::create(rows, ctx, &missions, &digest, id(param::create_fire_key::USABLE_BY), id(param::create_fire_key::REQUEST))
+        }
+        command::REVOKE_FIRE_KEY => crate::fire::revoke(rows, ctx, op.target),
+        command::DECLINE => crate::fire::decline(rows, ctx, op.target),
+        command::MAILBOX_STATE => crate::fire::mailbox_state(
+            rows,
+            ctx,
+            param_val(op, param::mailbox_state::STATUS),
+            param_val(op, param::mailbox_state::LAST_ERROR),
+            param_val(op, param::mailbox_state::LAST_SYNC_AT),
+        ),
+        command::UNLINK_MAIL => crate::fire::unlink(rows, ctx),
         other => refuse(refusal::NOT_FOUND, json!({"command": other})),
     }
 }
