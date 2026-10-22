@@ -53,6 +53,14 @@
 !/test/e2e/run.sh
 !/test/e2e/*.mjs
 
+!/workers/
+!/workers/mail/
+!/workers/mail/wrangler.jsonc
+!/workers/mail/src/
+!/workers/mail/src/*.ts
+!/workers/mail/test/
+!/workers/mail/test/*.ts
+
 !/bench/
 !/bench/*.exs
 !/bench/*.mjs

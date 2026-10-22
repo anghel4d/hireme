@@ -160,7 +160,9 @@ defmodule Hireme.Security do
     # The writes a key's bulk contracts (lease `bulk`) may reserve in an hour.
     agent_bulk: {:timer.hours(1), 5_000_000},
     # A key's lease requests (lease.*).
-    agent_read: {:timer.minutes(1), 3000}
+    agent_read: {:timer.minutes(1), 3000},
+    # Signed messages one domain pipe posts (`HiremeWeb.MailInbound`), per pipe.
+    mail_inbound: {:timer.minutes(10), 600}
   }
 
   @doc "The named limits, for SECURITY.md and the account lens."
