@@ -46,23 +46,25 @@ defmodule Hireme.Gmail do
 
   @impl Supervisor
   def init(_arg) do
-    # Every linked mailbox's session, once the node is up; a test's
-    # sandboxed database starts its own.
-    resume =
-      if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
-        do: [],
-        else: [Supervisor.child_spec({Task, &resume/0}, id: :resume, restart: :temporary)]
+    # Every linked mailbox's session, kept running (`Hireme.Gmail.Keeper`);
+    # a test's sandboxed database starts its own.
+    keeper =
+      if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox, do: [], else: [Hireme.Gmail.Keeper]
 
     children =
       [
         {Registry, keys: :unique, name: Hireme.Gmail.Registry},
-        {DynamicSupervisor, name: Hireme.Gmail.Sessions, strategy: :one_for_one}
-      ] ++ resume
+        # A session that falls over is started again; a burst of falls
+        # waits for the keeper, never takes the node's supervisors with it.
+        {DynamicSupervisor,
+         name: Hireme.Gmail.Sessions, strategy: :one_for_one, max_restarts: 30, max_seconds: 60}
+      ] ++ keeper
 
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  defp resume do
+  @doc false
+  def resume do
     Repo.all(
       from(m in Mailbox,
         where: m.status != :unlinked and not is_nil(m.secret),
@@ -134,7 +136,8 @@ defmodule Hireme.Gmail do
   defp verify(address, password) do
     {host, port} = endpoint(:imap)
 
-    with {:ok, conn} <- Imap.connect(host, port, cacerts()) |> link_error(),
+    # Three steps of at most ten seconds each, inside the page's wait.
+    with {:ok, conn} <- Imap.connect(host, port, cacerts(), 10_000) |> link_error(),
          {:ok, conn} <- Imap.login(conn, address, password) |> link_error(),
          {:ok, _folders, conn} <- Imap.folders(conn) |> link_error() do
       Imap.logout(conn)
@@ -201,6 +204,15 @@ defmodule Hireme.Gmail do
   def forget(account_id) do
     Session.stop(account_id)
 
+    # Its shots in flight go back to fire ready under their keys; their
+    # Message-IDs stay, so a refire after a relink looks in Sent first.
+    for %{id: id} <- in_flight(account_id) do
+      command(account_id, "failed", id, %{
+        reason:
+          "the mailbox was unlinked before this shot was confirmed; look in Gmail's Sent before firing it again"
+      })
+    end
+
     Sequencer.server_write(account_id, "mailboxes", nil, %{
       secret: nil,
       pipe_id: nil,
@@ -212,6 +224,12 @@ defmodule Hireme.Gmail do
 
     Audit.record(:mailbox_unlinked, %{}, %{account_id: account_id})
     Accounts.notify(account_id, :mailbox_unlinked, %{})
+  end
+
+  defp in_flight(account_id) do
+    Repo.with_account(account_id, fn ->
+      Repo.all(from(m in Hireme.Rows.Mission, where: m.kind == :email and m.state == :in_flight))
+    end)
   end
 
   defp restart(account_id) do
@@ -285,7 +303,9 @@ defmodule Hireme.Gmail do
   labels and internal date) or `:domain`. Answers `{:ok, :stored}`,
   `{:ok, :duplicate}` (a copy already held: Gmail's copy fills in its
   Gmail ids, nothing else moves), `{:ok, :ignored}` (not the search's:
-  nothing kept), or `{:error, why}`.
+  nothing kept), or `{:error, why}`: a refusal's code alone (its data may
+  quote the mail), `:too_large`, or `:not_ready` and `:unavailable`, which
+  pass and are worth another try.
   """
   @spec ingest(pos_integer, binary, :gmail | :domain, map) ::
           {:ok, :stored | :duplicate | :ignored} | {:error, term}
@@ -339,13 +359,64 @@ defmodule Hireme.Gmail do
       _ ->
         item = Email.inbound(inbound(mail, pipe, meta))
         item = if meta[:direction] == :outbound, do: %{item | direction: :outbound}, else: item
-
-        case run(account_id, Outreach.op(item)) do
-          {:ok, _} -> {:ok, :stored}
-          {:refused, code, data} -> {:error, {code, data}}
-          {:error, _} = e -> e
-        end
+        put_new(account_id, item, senders(mail), 4)
     end
+  end
+
+  # The kernel holds an inbound mail's addresses to the type's shape; one
+  # it refuses costs that field, never the mail: To, Cc or Reply-To go
+  # empty (the text keeps what was said), From falls back to Sender,
+  # Reply-To or Return-Path.
+  defp put_new(account_id, item, senders, left) do
+    case run(account_id, Outreach.op(item)) do
+      {:ok, _} ->
+        {:ok, :stored}
+
+      {:refused, :type, data} when left > 0 ->
+        case {column(data), item, senders} do
+          {"from_addr", _, [next | rest]} ->
+            put_new(account_id, %{item | from: next}, rest, left - 1)
+
+          {"to_addr", %{direction: :inbound}, _} ->
+            put_new(account_id, %{item | to: []}, senders, left - 1)
+
+          {"cc_addr", _, _} ->
+            put_new(account_id, %{item | cc: []}, senders, left - 1)
+
+          {"reply_to", _, _} ->
+            put_new(account_id, %{item | reply_to: nil}, senders, left - 1)
+
+          _ ->
+            {:error, :type}
+        end
+
+      {:refused, code, _} ->
+        {:error, code}
+
+      {:error, _} = e ->
+        e
+    end
+  end
+
+  defp column(data) when is_binary(data),
+    do: data |> JSON.decode() |> then(&with({:ok, m} <- &1, do: column(m)))
+
+  defp column(%{"column" => c}), do: c
+  defp column(_), do: nil
+
+  defp senders(mail) do
+    [
+      mail.sender && mail.sender.addr,
+      Enum.find_value(mail.reply_to, & &1.addr),
+      with(
+        rp when is_binary(rp) <- mail.headers["return-path"],
+        [_, a] <- Regex.run(~r/<([^<>\s]+@[^<>\s]+)>/, rp),
+        do: String.downcase(a),
+        else: (_ -> nil)
+      )
+    ]
+    |> Enum.reject(&(is_nil(&1) or (mail.from && &1 == mail.from.addr)))
+    |> Enum.uniq()
   end
 
   # The row a Message-ID names, however its brackets were written.
@@ -366,7 +437,7 @@ defmodule Hireme.Gmail do
       |> Enum.member?("\\Spam")
 
   defp duplicate({:ok, _}), do: {:ok, :duplicate}
-  defp duplicate({:refused, code, data}), do: {:error, {code, data}}
+  defp duplicate({:refused, code, _data}), do: {:error, code}
   defp duplicate(other), do: other
 
   defp write(account_id, id, values) do
@@ -380,8 +451,9 @@ defmodule Hireme.Gmail do
       in_reply_to: mail.in_reply_to,
       refs: mail.refs,
       from: mail.from && mail.from.addr,
-      to: Enum.map(mail.to, & &1.addr),
-      cc: Enum.map(mail.cc, & &1.addr),
+      # The type holds at most ten of each; the text keeps the rest.
+      to: mail.to |> Enum.map(& &1.addr) |> Enum.take(10),
+      cc: mail.cc |> Enum.map(& &1.addr) |> Enum.take(10),
       reply_to: Enum.find_value(mail.reply_to, & &1.addr),
       subject: mail.subject,
       text: mail.text,
@@ -515,4 +587,34 @@ defmodule Hireme.Gmail do
 
   @doc false
   def cacerts, do: Keyword.get(Application.get_env(:hireme, __MODULE__, []), :cacerts, :system)
+end
+
+defmodule Hireme.Gmail.Keeper do
+  @moduledoc """
+  Keeps a session running for every linked mailbox: at start, and every
+  ten minutes after, so one lost to a crash (or to its supervisor giving
+  up on a burst of them) comes back.
+  """
+
+  use GenServer
+
+  @every :timer.minutes(10)
+
+  @doc false
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
+
+  @impl GenServer
+  def init(nil), do: {:ok, nil, {:continue, :resume}}
+
+  @impl GenServer
+  def handle_continue(:resume, state), do: resume(state)
+
+  @impl GenServer
+  def handle_info(:resume, state), do: resume(state)
+
+  defp resume(state) do
+    Hireme.Gmail.resume()
+    Process.send_after(self(), :resume, @every)
+    {:noreply, state}
+  end
 end

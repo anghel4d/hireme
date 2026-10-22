@@ -98,7 +98,8 @@ defmodule HiremeWeb.Account do
   # owner's budget.
   @writes ~w(account.key.mint account.key.change account.key.resume account.identity.unlink
     account.totp.confirm account.passkey.finish account.factor.remove
-    account.recovery.regenerate account.trusted_host.add account.trusted_host.remove)
+    account.recovery.regenerate account.trusted_host.add account.trusted_host.remove
+    account.mail.link account.mail.unlink account.mail.pipe)
 
   defp safely(method, params, %Session{account_id: id} = session, ctx)
        when method in @writes do

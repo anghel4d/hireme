@@ -70,7 +70,7 @@ defmodule Hireme.Gmail.Mime do
   @nbsp <<0xA0::utf8>>
 
   @kept ~w(list-id list-unsubscribe auto-submitted precedence return-path x-autoreply
-           x-auto-response-suppress x-failed-recipients)
+           x-auto-response-suppress x-failed-recipients authentication-results)
   @status ~w(message/delivery-status message/global-delivery-status)
   @original ~w(message/rfc822 text/rfc822-headers message/global message/global-headers)
 
@@ -92,6 +92,25 @@ defmodule Hireme.Gmail.Mime do
                     ~w(windows-1252 cp1252 x-cp1252 win-1252 cp-1252 windows1252 iso-8859-1 iso8859-1
                         iso_8859-1 iso_8859-1:1987 latin1 latin-1 l1 cp819 ibm819 iso-ir-100 csisolatin1),
                   latin9: ~w(iso-8859-15 iso8859-15 iso_8859-15 latin9 latin-9 l9 csisolatin9),
+                  windows_1250: ~w(windows-1250 cp1250 x-cp1250),
+                  windows_1251: ~w(windows-1251 cp1251 x-cp1251),
+                  windows_1253: ~w(windows-1253 cp1253),
+                  windows_1254: ~w(windows-1254 cp1254 iso-8859-9 iso8859-9 iso_8859-9 latin5 l5),
+                  windows_1257: ~w(windows-1257 cp1257),
+                  iso_8859_2: ~w(iso-8859-2 iso8859-2 iso_8859-2 latin2 l2),
+                  iso_8859_5: ~w(iso-8859-5 iso8859-5 iso_8859-5 cyrillic),
+                  iso_8859_7: ~w(iso-8859-7 iso8859-7 iso_8859-7 greek),
+                  iso_8859_13: ~w(iso-8859-13 iso8859-13 latin7),
+                  koi8_r: ~w(koi8-r koi8r),
+                  koi8_u: ~w(koi8-u koi8u),
+                  # Double-byte charsets read without their tables (below).
+                  sjis: ~w(shift_jis shift-jis sjis x-sjis ms_kanji csshiftjis windows-31j cp932),
+                  eucjp: ~w(euc-jp eucjp x-euc-jp),
+                  gbk: ~w(gb2312 gbk gb18030 x-gbk cp936 csgb2312 euc-cn),
+                  big5: ~w(big5 big5-hkscs csbig5 x-x-big5 cn-big5),
+                  euckr:
+                    ~w(euc-kr euckr ks_c_5601-1987 cp949 x-windows-949 ksc5601 csksc56011987),
+                  iso2022jp: ~w(iso-2022-jp csiso2022jp iso-2022-jp-2),
                   utf16: ~w(utf-16 utf16),
                   utf16le: ~w(utf-16le utf16le),
                   utf16be: ~w(utf-16be utf16be)
@@ -141,6 +160,129 @@ defmodule Hireme.Gmail.Mime do
     0xBD => 0x0153,
     0xBE => 0x0178
   }
+  # The single-byte charsets past Latin-1: what bytes 0x80-0xFF read, as the
+  # WHATWG Encoding Standard maps them (an unassigned byte is U+FFFD;
+  # iso-8859-9 reads as windows-1254, as there).
+  @single %{
+    windows_1250: ~w(
+      20AC FFFD 201A FFFD 201E 2026 2020 2021 FFFD 2030 0160 2039 015A 0164 017D 0179
+      FFFD 2018 2019 201C 201D 2022 2013 2014 FFFD 2122 0161 203A 015B 0165 017E 017A
+      00A0 02C7 02D8 0141 00A4 0104 00A6 00A7 00A8 00A9 015E 00AB 00AC 00AD 00AE 017B
+      00B0 00B1 02DB 0142 00B4 00B5 00B6 00B7 00B8 0105 015F 00BB 013D 02DD 013E 017C
+      0154 00C1 00C2 0102 00C4 0139 0106 00C7 010C 00C9 0118 00CB 011A 00CD 00CE 010E
+      0110 0143 0147 00D3 00D4 0150 00D6 00D7 0158 016E 00DA 0170 00DC 00DD 0162 00DF
+      0155 00E1 00E2 0103 00E4 013A 0107 00E7 010D 00E9 0119 00EB 011B 00ED 00EE 010F
+      0111 0144 0148 00F3 00F4 0151 00F6 00F7 0159 016F 00FA 0171 00FC 00FD 0163 02D9
+    ),
+    windows_1251: ~w(
+      0402 0403 201A 0453 201E 2026 2020 2021 20AC 2030 0409 2039 040A 040C 040B 040F
+      0452 2018 2019 201C 201D 2022 2013 2014 FFFD 2122 0459 203A 045A 045C 045B 045F
+      00A0 040E 045E 0408 00A4 0490 00A6 00A7 0401 00A9 0404 00AB 00AC 00AD 00AE 0407
+      00B0 00B1 0406 0456 0491 00B5 00B6 00B7 0451 2116 0454 00BB 0458 0405 0455 0457
+      0410 0411 0412 0413 0414 0415 0416 0417 0418 0419 041A 041B 041C 041D 041E 041F
+      0420 0421 0422 0423 0424 0425 0426 0427 0428 0429 042A 042B 042C 042D 042E 042F
+      0430 0431 0432 0433 0434 0435 0436 0437 0438 0439 043A 043B 043C 043D 043E 043F
+      0440 0441 0442 0443 0444 0445 0446 0447 0448 0449 044A 044B 044C 044D 044E 044F
+    ),
+    windows_1253: ~w(
+      20AC FFFD 201A 0192 201E 2026 2020 2021 FFFD 2030 FFFD 2039 FFFD FFFD FFFD FFFD
+      FFFD 2018 2019 201C 201D 2022 2013 2014 FFFD 2122 FFFD 203A FFFD FFFD FFFD FFFD
+      00A0 0385 0386 00A3 00A4 00A5 00A6 00A7 00A8 00A9 FFFD 00AB 00AC 00AD 00AE 2015
+      00B0 00B1 00B2 00B3 0384 00B5 00B6 00B7 0388 0389 038A 00BB 038C 00BD 038E 038F
+      0390 0391 0392 0393 0394 0395 0396 0397 0398 0399 039A 039B 039C 039D 039E 039F
+      03A0 03A1 FFFD 03A3 03A4 03A5 03A6 03A7 03A8 03A9 03AA 03AB 03AC 03AD 03AE 03AF
+      03B0 03B1 03B2 03B3 03B4 03B5 03B6 03B7 03B8 03B9 03BA 03BB 03BC 03BD 03BE 03BF
+      03C0 03C1 03C2 03C3 03C4 03C5 03C6 03C7 03C8 03C9 03CA 03CB 03CC 03CD 03CE FFFD
+    ),
+    windows_1254: ~w(
+      20AC FFFD 201A 0192 201E 2026 2020 2021 02C6 2030 0160 2039 0152 FFFD FFFD FFFD
+      FFFD 2018 2019 201C 201D 2022 2013 2014 02DC 2122 0161 203A 0153 FFFD FFFD 0178
+      00A0 00A1 00A2 00A3 00A4 00A5 00A6 00A7 00A8 00A9 00AA 00AB 00AC 00AD 00AE 00AF
+      00B0 00B1 00B2 00B3 00B4 00B5 00B6 00B7 00B8 00B9 00BA 00BB 00BC 00BD 00BE 00BF
+      00C0 00C1 00C2 00C3 00C4 00C5 00C6 00C7 00C8 00C9 00CA 00CB 00CC 00CD 00CE 00CF
+      011E 00D1 00D2 00D3 00D4 00D5 00D6 00D7 00D8 00D9 00DA 00DB 00DC 0130 015E 00DF
+      00E0 00E1 00E2 00E3 00E4 00E5 00E6 00E7 00E8 00E9 00EA 00EB 00EC 00ED 00EE 00EF
+      011F 00F1 00F2 00F3 00F4 00F5 00F6 00F7 00F8 00F9 00FA 00FB 00FC 0131 015F 00FF
+    ),
+    windows_1257: ~w(
+      20AC FFFD 201A FFFD 201E 2026 2020 2021 FFFD 2030 FFFD 2039 FFFD 00A8 02C7 00B8
+      FFFD 2018 2019 201C 201D 2022 2013 2014 FFFD 2122 FFFD 203A FFFD 00AF 02DB FFFD
+      00A0 FFFD 00A2 00A3 00A4 FFFD 00A6 00A7 00D8 00A9 0156 00AB 00AC 00AD 00AE 00C6
+      00B0 00B1 00B2 00B3 00B4 00B5 00B6 00B7 00F8 00B9 0157 00BB 00BC 00BD 00BE 00E6
+      0104 012E 0100 0106 00C4 00C5 0118 0112 010C 00C9 0179 0116 0122 0136 012A 013B
+      0160 0143 0145 00D3 014C 00D5 00D6 00D7 0172 0141 015A 016A 00DC 017B 017D 00DF
+      0105 012F 0101 0107 00E4 00E5 0119 0113 010D 00E9 017A 0117 0123 0137 012B 013C
+      0161 0144 0146 00F3 014D 00F5 00F6 00F7 0173 0142 015B 016B 00FC 017C 017E 02D9
+    ),
+    iso_8859_2: ~w(
+      0080 0081 0082 0083 0084 0085 0086 0087 0088 0089 008A 008B 008C 008D 008E 008F
+      0090 0091 0092 0093 0094 0095 0096 0097 0098 0099 009A 009B 009C 009D 009E 009F
+      00A0 0104 02D8 0141 00A4 013D 015A 00A7 00A8 0160 015E 0164 0179 00AD 017D 017B
+      00B0 0105 02DB 0142 00B4 013E 015B 02C7 00B8 0161 015F 0165 017A 02DD 017E 017C
+      0154 00C1 00C2 0102 00C4 0139 0106 00C7 010C 00C9 0118 00CB 011A 00CD 00CE 010E
+      0110 0143 0147 00D3 00D4 0150 00D6 00D7 0158 016E 00DA 0170 00DC 00DD 0162 00DF
+      0155 00E1 00E2 0103 00E4 013A 0107 00E7 010D 00E9 0119 00EB 011B 00ED 00EE 010F
+      0111 0144 0148 00F3 00F4 0151 00F6 00F7 0159 016F 00FA 0171 00FC 00FD 0163 02D9
+    ),
+    iso_8859_5: ~w(
+      0080 0081 0082 0083 0084 0085 0086 0087 0088 0089 008A 008B 008C 008D 008E 008F
+      0090 0091 0092 0093 0094 0095 0096 0097 0098 0099 009A 009B 009C 009D 009E 009F
+      00A0 0401 0402 0403 0404 0405 0406 0407 0408 0409 040A 040B 040C 00AD 040E 040F
+      0410 0411 0412 0413 0414 0415 0416 0417 0418 0419 041A 041B 041C 041D 041E 041F
+      0420 0421 0422 0423 0424 0425 0426 0427 0428 0429 042A 042B 042C 042D 042E 042F
+      0430 0431 0432 0433 0434 0435 0436 0437 0438 0439 043A 043B 043C 043D 043E 043F
+      0440 0441 0442 0443 0444 0445 0446 0447 0448 0449 044A 044B 044C 044D 044E 044F
+      2116 0451 0452 0453 0454 0455 0456 0457 0458 0459 045A 045B 045C 00A7 045E 045F
+    ),
+    iso_8859_7: ~w(
+      0080 0081 0082 0083 0084 0085 0086 0087 0088 0089 008A 008B 008C 008D 008E 008F
+      0090 0091 0092 0093 0094 0095 0096 0097 0098 0099 009A 009B 009C 009D 009E 009F
+      00A0 2018 2019 00A3 20AC 20AF 00A6 00A7 00A8 00A9 037A 00AB 00AC 00AD FFFD 2015
+      00B0 00B1 00B2 00B3 0384 0385 0386 00B7 0388 0389 038A 00BB 038C 00BD 038E 038F
+      0390 0391 0392 0393 0394 0395 0396 0397 0398 0399 039A 039B 039C 039D 039E 039F
+      03A0 03A1 FFFD 03A3 03A4 03A5 03A6 03A7 03A8 03A9 03AA 03AB 03AC 03AD 03AE 03AF
+      03B0 03B1 03B2 03B3 03B4 03B5 03B6 03B7 03B8 03B9 03BA 03BB 03BC 03BD 03BE 03BF
+      03C0 03C1 03C2 03C3 03C4 03C5 03C6 03C7 03C8 03C9 03CA 03CB 03CC 03CD 03CE FFFD
+    ),
+    iso_8859_13: ~w(
+      0080 0081 0082 0083 0084 0085 0086 0087 0088 0089 008A 008B 008C 008D 008E 008F
+      0090 0091 0092 0093 0094 0095 0096 0097 0098 0099 009A 009B 009C 009D 009E 009F
+      00A0 201D 00A2 00A3 00A4 201E 00A6 00A7 00D8 00A9 0156 00AB 00AC 00AD 00AE 00C6
+      00B0 00B1 00B2 00B3 201C 00B5 00B6 00B7 00F8 00B9 0157 00BB 00BC 00BD 00BE 00E6
+      0104 012E 0100 0106 00C4 00C5 0118 0112 010C 00C9 0179 0116 0122 0136 012A 013B
+      0160 0143 0145 00D3 014C 00D5 00D6 00D7 0172 0141 015A 016A 00DC 017B 017D 00DF
+      0105 012F 0101 0107 00E4 00E5 0119 0113 010D 00E9 017A 0117 0123 0137 012B 013C
+      0161 0144 0146 00F3 014D 00F5 00F6 00F7 0173 0142 015B 016B 00FC 017C 017E 2019
+    ),
+    koi8_r: ~w(
+      2500 2502 250C 2510 2514 2518 251C 2524 252C 2534 253C 2580 2584 2588 258C 2590
+      2591 2592 2593 2320 25A0 2219 221A 2248 2264 2265 00A0 2321 00B0 00B2 00B7 00F7
+      2550 2551 2552 0451 2553 2554 2555 2556 2557 2558 2559 255A 255B 255C 255D 255E
+      255F 2560 2561 0401 2562 2563 2564 2565 2566 2567 2568 2569 256A 256B 256C 00A9
+      044E 0430 0431 0446 0434 0435 0444 0433 0445 0438 0439 043A 043B 043C 043D 043E
+      043F 044F 0440 0441 0442 0443 0436 0432 044C 044B 0437 0448 044D 0449 0447 044A
+      042E 0410 0411 0426 0414 0415 0424 0413 0425 0418 0419 041A 041B 041C 041D 041E
+      041F 042F 0420 0421 0422 0423 0416 0412 042C 042B 0417 0428 042D 0429 0427 042A
+    ),
+    koi8_u: ~w(
+      2500 2502 250C 2510 2514 2518 251C 2524 252C 2534 253C 2580 2584 2588 258C 2590
+      2591 2592 2593 2320 25A0 2219 221A 2248 2264 2265 00A0 2321 00B0 00B2 00B7 00F7
+      2550 2551 2552 0451 0454 2554 0456 0457 2557 2558 2559 255A 255B 0491 255D 255E
+      255F 2560 2561 0401 0404 2563 0406 0407 2566 2567 2568 2569 256A 0490 256C 00A9
+      044E 0430 0431 0446 0434 0435 0444 0433 0445 0438 0439 043A 043B 043C 043D 043E
+      043F 044F 0440 0441 0442 0443 0436 0432 044C 044B 0437 0448 044D 0449 0447 044A
+      042E 0410 0411 0426 0414 0415 0424 0413 0425 0418 0419 041A 041B 041C 041D 041E
+      041F 042F 0420 0421 0422 0423 0416 0412 042C 042B 0417 0428 042D 0429 0427 042A
+    )
+  }
+  @single_bytes Map.new(@single, fn {cs, high} ->
+                  {cs,
+                   List.to_tuple(
+                     for(b <- 0..127, do: <<b>>) ++
+                       Enum.map(high, &<<String.to_integer(&1, 16)::utf8>>)
+                   )}
+                end)
+
   @cp1252_bytes List.to_tuple(for b <- 0..255, do: <<Map.get(@cp1252, b, b)::utf8>>)
   @latin9_bytes List.to_tuple(for b <- 0..255, do: <<Map.get(@latin9, b, b)::utf8>>)
 
@@ -1639,6 +1781,12 @@ defmodule Hireme.Gmail.Mime do
   defp decode(b, :ascii), do: utf8(b)
   defp decode(b, :cp1252), do: for(<<c <- b>>, into: "", do: elem(@cp1252_bytes, c))
   defp decode(b, :latin9), do: for(<<c <- b>>, into: "", do: elem(@latin9_bytes, c))
+
+  defp decode(b, cs) when is_map_key(@single_bytes, cs),
+    do: for(<<c <- b>>, into: "", do: elem(Map.fetch!(@single_bytes, cs), c))
+
+  defp decode(b, cs) when cs in [:sjis, :eucjp, :gbk, :big5, :euckr], do: dbcs(b, cs, [])
+  defp decode(b, :iso2022jp), do: jis(b, :ascii, [])
   defp decode(b, :utf16), do: utf16(b, nil)
   defp decode(b, :utf16le), do: utf16(b, :little)
   defp decode(b, :utf16be), do: utf16(b, :big)
@@ -1648,6 +1796,38 @@ defmodule Hireme.Gmail.Mime do
       do: b,
       else: for(<<c <- b>>, into: "", do: if(c < 0x80, do: <<c>>, else: @bad))
   end
+
+  # The double-byte charsets this parser holds no tables for keep their
+  # ASCII (the addresses, links and ids the filer reads); every other
+  # character is one U+FFFD, never a run of bytes read as Latin.
+  defp dbcs(<<>>, _cs, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp dbcs(<<c, rest::binary>>, cs, acc) when c < 0x80, do: dbcs(rest, cs, [c | acc])
+
+  defp dbcs(<<c, rest::binary>>, :sjis, acc) when c in 0xA1..0xDF,
+    do: dbcs(rest, :sjis, [@bad | acc])
+
+  defp dbcs(<<0x8F, _, _, rest::binary>>, :eucjp, acc), do: dbcs(rest, :eucjp, [@bad | acc])
+
+  defp dbcs(<<c1, c2, _, _, rest::binary>>, :gbk, acc) when c1 in 0x81..0xFE and c2 in 0x30..0x39,
+    do: dbcs(rest, :gbk, [@bad | acc])
+
+  defp dbcs(<<_, t, rest::binary>>, cs, acc) when t >= 0x40, do: dbcs(rest, cs, [@bad | acc])
+  defp dbcs(<<_, rest::binary>>, cs, acc), do: dbcs(rest, cs, [@bad | acc])
+
+  # ISO-2022-JP: its escapes switch sets; ASCII and JIS-Roman read as
+  # ASCII, a kana or kanji one U+FFFD each, the escapes themselves gone.
+  defp jis(<<>>, _mode, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp jis(<<0x1B, ?(, c, rest::binary>>, _, acc) when c in [?B, ?J], do: jis(rest, :ascii, acc)
+  defp jis(<<0x1B, ?(, ?I, rest::binary>>, _, acc), do: jis(rest, :kana, acc)
+  defp jis(<<0x1B, ?$, c, rest::binary>>, _, acc) when c in [?@, ?B], do: jis(rest, :double, acc)
+
+  defp jis(<<0x1B, ?$, ?(, c, rest::binary>>, _, acc) when c in [?D, ?O, ?P, ?Q],
+    do: jis(rest, :double, acc)
+
+  defp jis(<<c, rest::binary>>, mode, acc) when c in [?\r, ?\n], do: jis(rest, mode, [c | acc])
+  defp jis(<<c, rest::binary>>, :ascii, acc) when c < 0x80, do: jis(rest, :ascii, [c | acc])
+  defp jis(<<_, _, rest::binary>>, :double, acc), do: jis(rest, :double, [@bad | acc])
+  defp jis(<<_, rest::binary>>, mode, acc), do: jis(rest, mode, [@bad | acc])
 
   # Header text as RFC 6532 has it: UTF-8 when it is, else windows-1252.
   defp utf8(b), do: if(String.valid?(b), do: b, else: decode(b, :cp1252))

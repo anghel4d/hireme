@@ -5,22 +5,28 @@ defmodule Hireme.Gmail.Session do
   sends the email missions fired under a key.
 
   A cycle: connect (the app password is unsealed here and nowhere else),
-  read every UID past the cursor (the first time, 180 days of envelopes),
-  keep what the filer takes and label it `hireme`, send what is in flight,
-  then IDLE until Gmail pushes new mail, a mission is fired, or 25 minutes
-  pass (Gmail ends an IDLE at 29).
+  send what is in flight, read every UID past the cursor (the first time,
+  180 days of envelopes) and then Spam's, keep what the filer takes and
+  label it `hireme`, then IDLE until Gmail pushes new mail, a mission is
+  fired, or 25 minutes pass (Gmail ends an IDLE at 29).
 
-  Sending is the operator's rule 2 with no double send: a shot's
-  Message-ID is minted and stamped on the mission before SMTP, a stamped
-  mission is looked for in All Mail before it is ever sent again (after a
-  restart, once Gmail has had 90 seconds to show it), `landed` burns the
-  shot, `failed` hands the mission back to fire ready under the same key.
-  A first-contact mail goes with the application's CV file or not at all.
+  Sending is the operator's rule 2 with no double send. A shot's
+  Message-ID is minted and stamped on the mission before SMTP, and a
+  stamped mission is looked for in All Mail (Gmail's index, and the
+  headers of what is newer than the cursor) before it is ever sent again,
+  never sooner than 90 seconds after its last attempt in this process (or
+  after the process started). A shot that may have reached Gmail (the
+  connection lost after the message's last dot) is never handed back
+  until All Mail has been asked. `landed` burns the shot; `failed` hands
+  the mission back to fire ready under the same key, its Message-ID kept,
+  so a refire is looked for again first. A first-contact mail goes with
+  the CV the key covered, or not at all; Gmail drafts are never read as
+  mail.
 
   Trouble: a refused app password stops the mailbox (`auth_failed`, the
   trail, a notice) and is tried again at most once an hour; network
   trouble backs off from one minute to 30, and after five failures in a
-  row the missions in flight are handed back.
+  row the shots known not to have gone out are handed back.
   """
 
   use GenServer, restart: :transient
@@ -53,7 +59,6 @@ defmodule Hireme.Gmail.Session do
     :junk_validity,
     :address,
     :status,
-    :daily_cap,
     :last_uid,
     # The highest All Mail UID the last sync listed, kept or held, and the
     # next UID All Mail had when it was selected.
@@ -68,6 +73,10 @@ defmodule Hireme.Gmail.Session do
     # it is read whole once a session and then only what is new.
     junk_seen: MapSet.new(),
     tries: 0,
+    # Per mission: the sends Gmail answered with a no (or that never reached
+    # it whole), and the time of an attempt that may have reached Gmail,
+    # kept until All Mail settles it: its settle clock outlives a failed
+    # shot and a refire.
     attempts: %{},
     tried: %{}
   ]
@@ -140,7 +149,7 @@ defmodule Hireme.Gmail.Session do
 
         cond do
           # Gmail ends an IDLE it has held too long; a new connection follows at once.
-          Enum.any?(pushed, &match?({:bye, _}, &1)) -> cycle(drop(s))
+          Enum.any?(pushed, &match?({:bye, _}, &1)) -> wake(drop(s))
           Enum.any?(pushed, &match?({:exists, _}, &1)) -> wake(s)
           true -> {:noreply, s}
         end
@@ -182,9 +191,9 @@ defmodule Hireme.Gmail.Session do
 
   defp cycle(s) do
     with {:ok, s} <- connected(s),
+         {:ok, s} <- shoot_all(s),
          {:ok, s} <- sync(s),
          {:ok, s} <- spam(s),
-         {:ok, s} <- shoot_all(s),
          {:ok, s} <- idle(s) do
       {:noreply, %{s | tries: 0}}
     else
@@ -218,15 +227,7 @@ defmodule Hireme.Gmail.Session do
              {:ok, conn} <- Imap.login(conn, box.address, password),
              {:ok, %{all: folder, junk: junk}, conn} <- Imap.folders(conn),
              {:ok, info, conn} <- Imap.select(conn, folder) do
-          s = %{
-            s
-            | imap: conn,
-              folder: folder,
-              junk: junk,
-              address: box.address,
-              status: status,
-              daily_cap: box.daily_cap
-          }
+          s = %{s | imap: conn, folder: folder, junk: junk, address: box.address, status: status}
 
           {:ok, cursor(s, box, folder, info)}
         else
@@ -324,7 +325,14 @@ defmodule Hireme.Gmail.Session do
     end
   end
 
-  defp take(s, env) do
+  # A Gmail draft is no mail: every autosave is a new message.
+  defp take(s, %{labels: labels} = env) when is_list(labels) and labels != [] do
+    if "\\Draft" in labels, do: {:dropped, s.imap}, else: take_mail(s, env)
+  end
+
+  defp take(s, env), do: take_mail(s, env)
+
+  defp take_mail(s, env) do
     with {:ok, envelope} <- Mime.parse(Map.get(env, :header, "")),
          env = Map.put(env, :direction, direction(envelope, s.address)),
          {:ok, %{"relevant" => true}} <-
@@ -339,9 +347,24 @@ defmodule Hireme.Gmail.Session do
     end
   end
 
-  # Mail from the linked address is mail hireme or the operator sent.
-  defp direction(%{from: %{addr: addr}}, addr) when is_binary(addr), do: :outbound
+  # Mail from the linked address (as Gmail reads it: dots and a +tag in the
+  # name ignored, googlemail.com as gmail.com) is mail the operator sent.
+  defp direction(%{from: %{addr: from}}, address) when is_binary(from) and is_binary(address) do
+    if gmail_name(from) == gmail_name(address), do: :outbound, else: :inbound
+  end
+
   defp direction(_mail, _address), do: :inbound
+
+  defp gmail_name(addr) do
+    case String.split(String.downcase(addr), "@") do
+      [local, domain] when domain in ["gmail.com", "googlemail.com"] ->
+        [name | _] = String.split(local, "+")
+        String.replace(name, ".", "") <> "@gmail.com"
+
+      _ ->
+        String.downcase(addr)
+    end
+  end
 
   defp fetch(s, env) do
     case Imap.message(s.imap, env.uid) do
@@ -349,7 +372,7 @@ defmodule Hireme.Gmail.Session do
         case Gmail.ingest(s.account_id, raw, :gmail, env) do
           {:ok, outcome} when outcome in [:stored, :duplicate] -> {:kept, imap}
           {:ok, :ignored} -> {:dropped, imap}
-          {:error, :not_ready} -> {:wait, imap}
+          {:error, why} when why in [:not_ready, :unavailable] -> {:wait, imap}
           {:error, why} -> refused(s, env, why, imap)
         end
 
@@ -416,10 +439,9 @@ defmodule Hireme.Gmail.Session do
     end
   end
 
-  # The judge refused it: logged by UID and refusal code only (its data may
-  # quote the mail), and passed over.
-  defp refused(s, env, why, imap) do
-    code = with {code, _data} <- why, do: code
+  # The judge refused it for good: logged by UID and refusal code only, and
+  # passed over.
+  defp refused(s, env, code, imap) do
     Logger.error("gmail #{s.account_id}: uid #{env.uid} not kept: #{inspect(code)}")
     {:dropped, imap}
   end
@@ -452,6 +474,7 @@ defmodule Hireme.Gmail.Session do
 
   # ---------------------------------------------------------------- send
 
+  # Shots go first in a cycle: no catch-up holds one back.
   defp shoot_all(s) do
     s.account_id
     |> in_flight()
@@ -471,25 +494,30 @@ defmodule Hireme.Gmail.Session do
     end)
   end
 
-  # Unstamped: mint, stamp, send. Stamped: a shot that may have left, so
-  # All Mail is asked first.
+  # Unstamped: mint, stamp, send. Stamped: a shot that may have left before
+  # (a restart, a lost connection, a refire), so All Mail is asked first,
+  # and only once Gmail has had time to show it.
   defp shoot(s, %{message_id: nil} = m) do
     id = mint(s.address)
 
     case Gmail.command(s.account_id, "stamp", m.id, %{message_id: id}) do
       {:ok, _} -> transmit(s, %{m | message_id: id})
-      _ -> {:ok, s}
+      other -> {:ok, said(s, m, "stamp", other)}
     end
   end
 
   defp shoot(s, m) do
-    case Imap.message_id(s.imap, m.message_id) do
+    case Imap.message_id(s.imap, m.message_id, s.listed || 0) do
       {:ok, [uid | _], imap} ->
         landed(%{s | imap: imap}, m, uid)
 
+      # Never sent again without a look that can find it.
+      {:ok, :unsearchable, imap} ->
+        {:ok, said(%{s | imap: imap}, m, "search", :unsearchable)}
+
       {:ok, [], imap} ->
         s = %{s | imap: imap}
-        wait = @settle_ms - (now() - Map.get(s.tried, m.id, s.started))
+        wait = settle() - (now() - Map.get(s.tried, m.id, s.started))
         if wait > 0, do: {:ok, later(s, wait)}, else: transmit(s, m)
 
       {:error, why} ->
@@ -508,20 +536,27 @@ defmodule Hireme.Gmail.Session do
     with :ok <- under_cap(s),
          {:ok, rcpts, mail} <- compose(s, m),
          {:ok, password} <- unsealed(s) do
-      s = %{
-        s
-        | tried: Map.put(s.tried, m.id, now()),
-          attempts: Map.update(s.attempts, m.id, 1, &(&1 + 1))
-      }
-
+      # From here the mail may reach Gmail.
+      s = %{s | tried: Map.put(s.tried, m.id, now())}
       {host, port} = Gmail.endpoint(:smtp)
       at = %{host: host, port: port, cacerts: Gmail.cacerts()}
 
       case Smtp.deliver(at, s.address, password, s.address, rcpts, Smtp.compose(mail)) do
-        {:ok, _} -> located(s, m, 5)
-        {:error, :auth} -> {:error, :auth, s}
-        {:error, {:permanent, reply}} -> {:ok, failed(s, m, reply)}
-        {:error, other} -> again(s, m, other)
+        {:ok, _} ->
+          located(s, m, 5)
+
+        {:error, :auth} ->
+          {:error, :auth, unsent(s, m)}
+
+        {:error, {:permanent, reply}} ->
+          {:ok, failed(unsent(s, m), m, reply)}
+
+        # Gmail may hold it: only All Mail, asked after the settle, says.
+        {:error, {:unknown, _}} ->
+          {:ok, later(s, settle())}
+
+        {:error, why} ->
+          again(unsent(s, m), m, why)
       end
     else
       {:refuse, why} -> {:ok, failed(s, m, why)}
@@ -529,21 +564,24 @@ defmodule Hireme.Gmail.Session do
     end
   end
 
-  # Gmail accepted it: its ids, once All Mail shows it (a few seconds at
-  # most); the next sync fills them in otherwise.
-  defp located(s, m, 0), do: done(s, m, %{})
-
+  # Gmail took it: its ids, once All Mail shows it (the headers past the
+  # cursor show it at once); landed without them otherwise, the next sync's
+  # copy filling them in.
   defp located(s, m, n) do
-    case Imap.message_id(s.imap, m.message_id) do
+    case Imap.message_id(s.imap, m.message_id, s.listed || 0) do
       {:ok, [uid | _], imap} ->
         landed(%{s | imap: imap}, m, uid)
 
-      {:ok, [], imap} ->
+      {:ok, [], imap} when n > 0 ->
         Process.sleep(2_000)
         located(%{s | imap: imap}, m, n - 1)
 
-      {:error, _} ->
-        done(%{s | imap: nil}, m, %{})
+      {:ok, _, imap} ->
+        done(%{s | imap: imap}, m, %{})
+
+      {:error, why} ->
+        {:ok, s} = done(%{s | imap: nil}, m, %{})
+        {:error, why, s}
     end
   end
 
@@ -559,31 +597,71 @@ defmodule Hireme.Gmail.Session do
         done(%{s | imap: imap}, m, %{})
 
       {:error, why} ->
-        {:error, why, %{s | imap: nil}}
+        {:ok, s} = done(%{s | imap: nil}, m, %{})
+        {:error, why, s}
     end
   end
 
+  # A landed the judge refuses leaves the shot in flight, its settle clock
+  # kept: the next cycle finds it in All Mail again and tries once more.
   defp done(s, m, ids) do
-    Gmail.command(s.account_id, "landed", m.id, ids)
-    {:ok, forget(s, m)}
+    case Gmail.command(s.account_id, "landed", m.id, ids) do
+      {:ok, _} -> {:ok, forget(s, m)}
+      other -> {:ok, said(s, m, "landed", other)}
+    end
   end
 
+  # Gmail said no (or could not be reached before the message was whole):
+  # tried again, and after three such answers handed back.
   defp again(s, m, why) do
-    if Map.get(s.attempts, m.id, 0) >= @attempts,
+    tries = Map.get(s.attempts, m.id, 0) + 1
+    s = %{s | attempts: Map.put(s.attempts, m.id, tries)}
+
+    if tries >= @attempts,
       do: {:ok, failed(s, m, describe(why))},
-      else: {:ok, later(s, Security.mail_backoff(Map.get(s.attempts, m.id, 0)))}
+      else: {:ok, later(s, Security.mail_backoff(tries))}
   end
 
   defp failed(s, m, reason) do
-    Gmail.command(s.account_id, "failed", m.id, %{reason: Security.clip(reason)})
-    forget(s, m)
+    case Gmail.command(s.account_id, "failed", m.id, %{reason: Security.clip(reason)}) do
+      {:ok, _} -> %{s | attempts: Map.delete(s.attempts, m.id)}
+      other -> said(s, m, "failed", other)
+    end
   end
+
+  # Gmail answered, or never had the whole of it: it did not take this one.
+  defp unsent(s, m), do: %{s | tried: Map.delete(s.tried, m.id)}
 
   defp forget(s, m),
     do: %{s | tried: Map.delete(s.tried, m.id), attempts: Map.delete(s.attempts, m.id)}
 
+  # Handed back: only the shots known not to have reached Gmail (never
+  # stamped, or last answered with a no in this process). One that may
+  # have (its last attempt lost after the last dot, or stamped before this
+  # process) stays in flight until All Mail can be asked.
   defp fail_all(s, reason) do
-    s.account_id |> in_flight() |> Enum.reduce(s, &failed(&2, &1, reason))
+    s.account_id
+    |> in_flight()
+    |> Enum.filter(
+      &(&1.message_id == nil or
+          (Map.has_key?(s.attempts, &1.id) and not Map.has_key?(s.tried, &1.id)))
+    )
+    |> Enum.reduce(s, &failed(&2, &1, reason))
+  end
+
+  # How long Gmail may take to show a mail it took in All Mail.
+  defp settle,
+    do: Keyword.get(Application.get_env(:hireme, Gmail, []), :settle_ms, @settle_ms)
+
+  # A command the judge refused, logged by mission and refusal code.
+  defp said(s, m, what, {:refused, code, _data}) do
+    Logger.error("gmail #{s.account_id}: mission #{m.id}: #{what} refused #{code}")
+    s
+  end
+
+  defp said(s, m, what, other) do
+    Logger.error("gmail #{s.account_id}: mission #{m.id}: #{what}: #{inspect(other)}")
+    s
   end
 
   # The judge counted the shot against the cap when it fired; the node
@@ -601,9 +679,11 @@ defmodule Hireme.Gmail.Session do
         )
       end)
 
-    if landed < (s.daily_cap || 0),
+    cap = with %{daily_cap: cap} <- Gmail.mailbox(s.account_id), do: cap
+
+    if is_integer(cap) and landed < cap,
       do: :ok,
-      else: {:refuse, "the daily cap of #{s.daily_cap} sends is spent; it resets at midnight UTC"}
+      else: {:refuse, "the daily cap of #{cap} sends is spent; it resets at midnight UTC"}
   end
 
   # What goes out is the mission as the key froze it (`Email.shot/2`), from
@@ -715,6 +795,8 @@ defmodule Hireme.Gmail.Session do
 
   # Mail that came while other commands ran was counted in their answers,
   # never pushed to an IDLE: one look past what the sync listed first.
+  defp idle(%{imap: nil} = s), do: {:error, {:network, :closed}, s}
+
   defp idle(s) do
     case Imap.since_uid(s.imap, (s.listed || 0) + 1) do
       {:ok, [], imap} -> really_idle(%{s | imap: imap})

@@ -196,7 +196,7 @@ defmodule Hireme.Sequencer do
   `{:error, :column}` (a column that is not server_only).
   """
   def server_write(account_id, table, id, cells) when is_map(cells),
-    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells}))
+    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells}, 30_000))
 
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request) do
@@ -657,7 +657,7 @@ defmodule Hireme.Sequencer do
       q = from(r in Schema.row(table.name))
       q = if id, do: where(q, [r], r.id == ^id), else: q
 
-      case Repo.update_all(q, set: Enum.to_list(cells)) do
+      case Store.write(fn -> Repo.update_all(q, set: Enum.to_list(cells)) end) do
         {0, _} -> {:error, :not_found}
         {_, _} -> :ok
       end
@@ -2089,8 +2089,13 @@ defmodule Hireme.Sequencer do
   defp publish([], state), do: state
 
   defp publish(deltas, state) do
-    # The mail the batch put in flight goes out now that it is committed.
-    Hireme.Gmail.moved(state.account_id, deltas)
+    # The mail the batch put in flight goes out now that it is committed;
+    # nothing there may cost the subscribers their PATCH.
+    try do
+      Hireme.Gmail.moved(state.account_id, deltas)
+    rescue
+      e -> Logger.error("sequencer #{state.account_id}: mail hand-off: #{Exception.message(e)}")
+    end
 
     state
     |> live_subs()

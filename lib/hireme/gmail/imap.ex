@@ -37,7 +37,7 @@ defmodule Hireme.Gmail.Imap do
   # from everything else without reading a body.
   @envelope ~w(FROM TO CC REPLY-TO SENDER SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES
                LIST-ID LIST-UNSUBSCRIBE AUTO-SUBMITTED PRECEDENCE RETURN-PATH X-AUTOREPLY
-               X-AUTO-RESPONSE-SUPPRESS X-FAILED-RECIPIENTS CONTENT-TYPE)
+               X-AUTO-RESPONSE-SUPPRESS X-FAILED-RECIPIENTS CONTENT-TYPE AUTHENTICATION-RESULTS)
 
   @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
 
@@ -111,11 +111,14 @@ defmodule Hireme.Gmail.Imap do
     end
   end
 
+  # Gmail's words for a password it will not take: wrong or revoked, a
+  # plain account password where an app password is needed, or an account
+  # that wants a browser sign-in first.
   defp refused(text) do
     cond do
       text =~ "AUTHENTICATIONFAILED" -> :auth
       text =~ ~r/not enabled for IMAP/i -> :imap_disabled
-      text =~ ~r/web ?browser|WEBALERT/i -> :auth
+      text =~ ~r/application-specific password|web ?browser|WEBALERT/i -> :auth
       true -> {:no, text}
     end
   end
@@ -152,7 +155,7 @@ defmodule Hireme.Gmail.Imap do
           {:ok, %{uidvalidity: integer | nil, uidnext: integer | nil, exists: integer}, t}
           | {:error, error}
   def select(conn, name) do
-    with {:ok, name} <- quoted(name) |> or_bad("folder") do
+    with {:ok, name} <- quoted(name) |> or_bad(conn, "folder") do
       case command(conn, ["SELECT ", name]) do
         {:ok, {:ok, _, untagged}, conn} ->
           {:ok, Enum.reduce(untagged, %{uidvalidity: nil, uidnext: nil, exists: 0}, &selected/2),
@@ -182,15 +185,46 @@ defmodule Hireme.Gmail.Imap do
     do: search(conn, "SINCE #{d.day}-#{Enum.at(@months, d.month - 1)}-#{d.year}")
 
   @doc """
-  UIDs of the mail whose Message-ID is `id` (as stored: no brackets). An id
-  Gmail's search syntax cannot carry finds nothing.
+  UIDs of the mail whose Message-ID is `id` (brackets or not). Gmail's
+  search reads its index, which may lag a mail it has just taken, so the
+  headers of the UIDs after `after_uid` are read too: a mail newer than
+  that is found the moment it is in All Mail. An id Gmail's search syntax
+  cannot carry answers `:unsearchable`, never "none".
   """
-  @spec message_id(t, String.t()) :: {:ok, [pos_integer], t} | {:error, error}
-  def message_id(conn, id) do
+  @spec message_id(t, String.t(), non_neg_integer) ::
+          {:ok, [pos_integer] | :unsearchable, t} | {:error, error}
+  def message_id(conn, id, after_uid \\ 0) do
+    id = id |> String.trim() |> String.trim("<") |> String.trim(">")
+
     if id =~ ~r/\A[[:graph:]]+@[[:graph:]]+\z/ and
-         not String.contains?(id, ["\"", "\\", "(", ")"]),
-       do: search(conn, ~s(X-GM-RAW "rfc822msgid:#{id}")),
-       else: {:ok, [], conn}
+         not String.contains?(id, ["\"", "\\", "(", ")"]) do
+      with {:ok, indexed, conn} <- search(conn, ~s(X-GM-RAW "rfc822msgid:#{id}")),
+           {:ok, recent, conn} <- recent_ids(conn, after_uid) do
+        fresh = for {uid, mid} <- recent, String.downcase(mid) == String.downcase(id), do: uid
+        {:ok, Enum.sort(Enum.uniq(indexed ++ fresh)), conn}
+      end
+    else
+      {:ok, :unsearchable, conn}
+    end
+  end
+
+  # The Message-IDs of the mail after `after_uid`, read off its headers.
+  defp recent_ids(conn, after_uid) do
+    with {:ok, uids, conn} <- since_uid(conn, after_uid + 1),
+         {:ok, found, conn} <-
+           fetch(
+             conn,
+             Enum.take(uids, -200),
+             "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+             conn.timeout
+           ) do
+      {:ok,
+       for(
+         %{uid: uid, header: h} <- found,
+         [_, mid] <- [Regex.run(~r/<([^<>\s]+)>/, h)],
+         do: {uid, mid}
+       ), conn}
+    end
   end
 
   defp search(conn, criteria) do
@@ -245,7 +279,7 @@ defmodule Hireme.Gmail.Imap do
   def label(conn, [], _label), do: {:ok, conn}
 
   def label(conn, uids, label) do
-    with {:ok, label} <- quoted(label) |> or_bad("label") do
+    with {:ok, label} <- quoted(label) |> or_bad(conn, "label") do
       case command(conn, ["UID STORE ", set(uids), " +X-GM-LABELS (", label, ")"]) do
         {:ok, {:ok, _, _}, conn} -> {:ok, conn}
         other -> answer(other)
@@ -383,8 +417,8 @@ defmodule Hireme.Gmail.Imap do
   defp net(:ok), do: :ok
   defp net({:error, reason}), do: {:error, {:network, reason}}
 
-  defp or_bad({:ok, _} = ok, _what), do: ok
-  defp or_bad(:error, what), do: {:error, {:bad, what}}
+  defp or_bad({:ok, _} = ok, _conn, _what), do: ok
+  defp or_bad(:error, conn, what), do: fail(conn, {:bad, what})
 
   # A quoted string: no CR, LF or NUL can be in one.
   defp quoted(s) when is_binary(s) do
@@ -425,7 +459,9 @@ defmodule Hireme.Gmail.Imap do
 
   defp logical(conn, parts, lits, timeout) do
     with {:ok, line, conn} <- line(conn, timeout) do
-      case literal(line) do
+      found = if parts == [] and status_line?(line), do: nil, else: literal(line)
+
+      case found do
         nil ->
           {:ok, IO.iodata_to_binary(Enum.reverse([line | parts])), lits, conn}
 
@@ -444,6 +480,10 @@ defmodule Hireme.Gmail.Imap do
       end
     end
   end
+
+  # A status response's text is free text: a `{n}` at its end is no literal.
+  defp status_line?(line),
+    do: line =~ ~r/\A(\*|[A-Za-z0-9.]+) (OK|NO|BAD|BYE|PREAUTH)( |\z)/i
 
   defp literal(line) do
     case Regex.run(~r/\{(\d{1,10})\+?\}\z/, line, return: :index) do
@@ -700,13 +740,19 @@ defmodule Hireme.Gmail.Imap do
   defp atom(text, i, depth) when i < byte_size(text) do
     case :binary.at(text, i) do
       c when depth == 0 and c in [?\s, ?(, ?), 0] -> split_at(text, i)
-      ?[ -> atom(text, i + 1, depth + 1)
+      ?[ when depth > 0 -> atom(text, i + 1, depth + 1)
+      ?[ -> atom(text, i + 1, if(section?(binary_part(text, 0, i)), do: 1, else: 0))
       ?] when depth > 0 -> atom(text, i + 1, depth - 1)
       _ -> atom(text, i + 1, depth)
     end
   end
 
   defp atom(text, i, _depth), do: split_at(text, i)
+
+  # Only a fetch item's section (BODY[...]) holds spaces and parentheses
+  # inside brackets; a label like [Archive is a plain atom.
+  defp section?(prefix),
+    do: String.upcase(prefix) in ["BODY", "BODY.PEEK", "BINARY", "BINARY.PEEK", "BINARY.SIZE"]
 
   defp split_at(text, i), do: {binary_part(text, 0, i), binary_part(text, i, byte_size(text) - i)}
 end

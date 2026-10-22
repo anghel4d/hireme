@@ -197,6 +197,21 @@ defmodule Hireme.Gmail.MimeTest do
           {"Content-Type: text/plain", <<"caf", 0xE9>>, "café"},
           {type.("x-unknown"), "naïve", "naïve"},
           {type.("x-unknown"), <<"na", 0xEF, "ve">>, "na#{@bad}ve"},
+          # Past Latin-1: Cyrillic, Central European, Greek, Turkish (iso-8859-9 as windows-1254).
+          {type.("windows-1251"), <<0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2>>, "Привет"},
+          {type.("koi8-r"), <<0xF0, 0xD2, 0xC9, 0xD7, 0xC5, 0xD4>>, "Привет"},
+          {type.("ISO-8859-2"), <<"Pozdrawiam, ", 0xA3, "ukasz">>, "Pozdrawiam, Łukasz"},
+          {type.("windows-1250"), <<0x8A, "kola">>, "Škola"},
+          {type.("iso-8859-7"), <<0xE3, 0xE5, 0xE9, 0xDC>>, "γειά"},
+          {type.("iso-8859-9"), <<0xDE, "irket">>, "Şirket"},
+          # Double-byte charsets without tables: the ASCII kept, one U+FFFD a character.
+          {type.("shift_jis"), <<"Tokyo ", 0x93, 0x8C, 0x8B, 0x9E, " x@acme.example">>,
+           "Tokyo #{@bad}#{@bad} x@acme.example"},
+          {type.("euc-kr"), <<0xC7, 0xD1, "a">>, "#{@bad}a"},
+          {type.("gb18030"), <<0x81, 0x30, 0x81, 0x30, "b">>, "#{@bad}b"},
+          {type.("iso-2022-jp"),
+           <<"See ", 0x1B, "$B", 0x46, 0x7C, 0x4B, 0x5C, 0x1B, "(B",
+             " https://acme.example/jobs">>, "See #{@bad}#{@bad} https://acme.example/jobs"},
           {type.("utf-8"), "a\r\nb\rc\x00d", "a\nb\ncd"}
         ] do
       assert text(head, body) == want, inspect({head, body})

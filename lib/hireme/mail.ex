@@ -95,7 +95,18 @@ defmodule Hireme.Mail do
 
   @doc "Send one notice now; the outbox worker is the caller."
   @spec notice(String.t(), atom(), map()) :: {:ok, term()} | {:error, term()}
-  def notice(to, kind, meta \\ %{}) do
+  def notice(to, kind, meta \\ %{})
+
+  # Not a change someone made: what happened, and what to do about it.
+  def notice(to, :mailbox_auth_failed = kind, meta) do
+    post(to, "Hireme: #{line(kind, meta)}", """
+    #{line(kind, meta)}.
+
+    Hireme stopped reading and sending through it. Create a new app password in your Google account and link Gmail again from the account lens; the mail filed so far stays.
+    """)
+  end
+
+  def notice(to, kind, meta) do
     post(to, "Hireme: #{line(kind, meta)}", """
     #{line(kind, meta)}
 

@@ -16,7 +16,12 @@ defmodule Hireme.Gmail.Smtp do
 
   alias Hireme.Gmail.Imap
 
-  @type error :: :auth | {:temporary, String.t()} | {:permanent, String.t()} | {:network, term}
+  @type error ::
+          :auth
+          | {:temporary, String.t()}
+          | {:permanent, String.t()}
+          | {:network, term}
+          | {:unknown, term}
 
   # Gmail's own cap on one submission's recipients is far higher; the link's is 10.
   @max_rcpts 10
@@ -25,9 +30,11 @@ defmodule Hireme.Gmail.Smtp do
   Sends `data` (a composed message) from `from` to `rcpts`, logging in as
   `user`. Answers Gmail's acceptance line, or why it was not accepted:
   `:auth` (the app password was refused), `{:temporary, reply}` (4xx: try
-  again later), `{:permanent, reply}` (5xx), `{:network, reason}`. A
-  network error after DATA leaves it unknown whether Gmail took the
-  message; the caller looks in Sent before it sends again.
+  again later), `{:permanent, reply}` (5xx), `{:network, reason}` (before
+  the message was complete, so Gmail cannot have taken it). Only
+  `{:unknown, reason}` (the connection lost once the message's final dot
+  was written, before Gmail's answer) leaves it open whether Gmail took
+  it; the caller looks in Sent before it sends again.
   """
   @spec deliver(map, String.t(), String.t(), String.t(), [String.t()], iodata) ::
           {:ok, String.t()} | {:error, error}
@@ -62,9 +69,19 @@ defmodule Hireme.Gmail.Smtp do
          {:ok, _, s} <- expect(s, ["MAIL FROM:<", from, ">"], 250),
          {:ok, s} <- recipients(s, rcpts),
          {:ok, _, s} <- expect(s, "DATA", 354),
-         {:ok, accepted, s} <- expect(s, [stuffed(data), "\r\n."], 250) do
+         :ok <- put(s, [stuffed(data), "\r\n."]),
+         {:ok, accepted, s} <- answer(s) do
       expect(s, "QUIT", 221)
       {:ok, accepted}
+    end
+  end
+
+  # Gmail's answer to a complete message: a lost connection now may have
+  # come after Gmail took it.
+  defp answer(s) do
+    case expect(s, nil, 250) do
+      {:error, {:network, why}} -> {:error, {:unknown, why}}
+      other -> other
     end
   end
 
@@ -171,7 +188,7 @@ defmodule Hireme.Gmail.Smtp do
         {"Cc", Enum.join(Map.get(mail, :cc, []), ",\r\n ")},
         {"Subject", encoded(Map.get(mail, :subject, ""))},
         {"Date", date(mail.date)},
-        {"Message-ID", "<#{mail.message_id}>"},
+        {"Message-ID", ids([mail.message_id])},
         {"In-Reply-To", ids([Map.get(mail, :in_reply_to)])},
         {"References", ids(Map.get(mail, :refs, []))},
         {"MIME-Version", "1.0"}
@@ -208,22 +225,31 @@ defmodule Hireme.Gmail.Smtp do
     [
       "Content-Type: ",
       if(type =~ ~r/\A[a-z0-9.+-]+\/[a-z0-9.+-]+\z/i, do: type, else: "application/octet-stream"),
-      "; ",
+      ";\r\n ",
       param("name", name),
-      "\r\nContent-Disposition: attachment; ",
+      "\r\nContent-Disposition: attachment;\r\n ",
       param("filename", name),
       "\r\nContent-Transfer-Encoding: base64\r\n\r\n",
       data |> Base.encode64() |> lines(76)
     ]
   end
 
-  # An ASCII name quoted; any other as RFC 2231 says.
+  # A short plain ASCII name quoted; any other as RFC 2231 says, cut in
+  # continuations of at most 60 encoded bytes so no line runs long.
   defp param(key, name) do
     name = clean(name)
 
-    if ascii?(name),
-      do: [key, ~s(="), String.replace(name, ~r/["\\]/, "\\\\\\0"), ?"],
-      else: [key, "*=utf-8''", URI.encode(name, &URI.char_unreserved?/1)]
+    if plain?(name) and byte_size(name) <= 60 do
+      [key, ~s(="), String.replace(name, ~r/["\\]/, "\\\\\\0"), ?"]
+    else
+      name
+      |> chunks(20, [], [])
+      |> Enum.with_index()
+      |> Enum.map_join(";\r\n ", fn {part, i} ->
+        lead = if i == 0, do: "utf-8''", else: ""
+        "#{key}*#{i}*=#{lead}#{URI.encode(part, &URI.char_unreserved?/1)}"
+      end)
+    end
   end
 
   defp lines(b64, n) when byte_size(b64) <= n, do: [b64, "\r\n"]
@@ -240,29 +266,43 @@ defmodule Hireme.Gmail.Smtp do
     name = clean(name)
 
     cond do
-      not ascii?(name) -> "#{encoded(name)} <#{addr}>"
-      name =~ ~r/\A[A-Za-z0-9!#$%&'*+\-\/=?^_`{|}~ ]+\z/ -> "#{name} <#{addr}>"
+      not plain?(name) -> "#{encoded(name)} <#{addr}>"
+      name =~ ~r/\A[A-Za-z0-9!#$%&'*+\-\/=?^_`{|}~ ]+\z/ -> "#{encoded(name)} <#{addr}>"
+      # A long name that needs quoting goes as encoded words, which fold.
+      byte_size(name) > 70 -> "#{words(name)} <#{addr}>"
       true -> ~s("#{String.replace(name, ~r/["\\]/, "\\\\\\0")}" <#{addr}>)
     end
   end
 
+  # Ids as the thread holds them, bracketed once whether or not they came so.
   defp ids(ids) do
-    case for(id <- ids, is_binary(id) and id != "", do: "<#{clean(id)}>") do
+    ids
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&(&1 |> clean() |> String.trim() |> String.trim("<") |> String.trim(">")))
+    |> Enum.reject(&(&1 == ""))
+    |> case do
       [] -> nil
-      ids -> Enum.join(ids, "\r\n ")
+      ids -> Enum.map_join(ids, "\r\n ", &"<#{&1}>")
     end
   end
 
-  # Header text: ASCII folded at spaces, anything else as encoded words of
-  # at most 45 bytes each (75 characters encoded), split between characters.
+  # Header text: plain ASCII folded at spaces; anything else (other
+  # characters, a word too long to fold under 998, text a reader would take
+  # for an encoded word) as encoded words of at most 45 bytes each (75
+  # characters encoded), split between characters.
   defp encoded(text) do
     text = clean(text)
 
-    if ascii?(text),
-      do: fold(String.split(text, " "), [], 0),
-      else:
-        text |> chunks(45, [], []) |> Enum.map_join("\r\n ", &"=?UTF-8?B?#{Base.encode64(&1)}?=")
+    if plain?(text), do: fold(String.split(text, " "), [], 0), else: words(text)
   end
+
+  defp words(text),
+    do: text |> chunks(45, [], []) |> Enum.map_join("\r\n ", &"=?UTF-8?B?#{Base.encode64(&1)}?=")
+
+  defp plain?(text),
+    do:
+      ascii?(text) and not String.contains?(text, "=?") and
+        Enum.all?(String.split(text, " "), &(byte_size(&1) <= 70))
 
   defp fold([], acc, _), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
   defp fold([w | rest], [], _), do: fold(rest, [w], byte_size(w))

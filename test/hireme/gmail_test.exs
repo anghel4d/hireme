@@ -66,8 +66,8 @@ defmodule Hireme.GmailTest do
     refute Enum.any?(FakeGmail.messages(fake), &("\\Seen" in Map.get(&1, :flags, [])))
 
     assert {:ok, [^second], conn} = Imap.message_id(conn, "m2@acme.example")
-    # An id Gmail's search syntax cannot carry finds nothing, asked nothing.
-    assert {:ok, [], conn} = Imap.message_id(conn, ~s(a" OR "b@x))
+    # An id Gmail's search syntax cannot carry is said so, never "none".
+    assert {:ok, :unsearchable, conn} = Imap.message_id(conn, ~s(a" OR "b@x))
     Imap.logout(conn)
   end
 
@@ -176,6 +176,48 @@ defmodule Hireme.GmailTest do
 
   defp lines(text), do: text |> String.replace("\r\n", "\n") |> String.trim()
 
+  test "what is composed threads with ids however they were bracketed, and no header line runs past 998" do
+    long = String.duplicate("x", 5000)
+
+    raw =
+      Smtp.compose(%{
+        from: @user,
+        from_name: String.duplicate("Ada ", 400),
+        to: ["jobs@acme.example"],
+        subject: "#{long} and =?utf-8?B?QQ==?= said plainly",
+        body: "B",
+        message_id: "<hm.b@gmail.com>",
+        in_reply_to: "<m1@acme.example>",
+        refs: ["<m0@acme.example>", "m1@acme.example"],
+        date: 1_792_000_000,
+        attachments: [
+          %{name: String.duplicate("cv-", 400) <> "é.pdf", type: "application/pdf", data: "%PDF"}
+        ]
+      })
+
+    assert raw =~ "\r\nIn-Reply-To: <m1@acme.example>\r\n"
+    assert raw =~ "References: <m0@acme.example>\r\n <m1@acme.example>\r\n"
+    refute raw =~ "<<"
+    assert raw |> String.split("\r\n") |> Enum.all?(&(byte_size(&1) <= 998))
+
+    {:ok, got} = Mime.parse(raw)
+    assert got.subject == "#{long} and =?utf-8?B?QQ==?= said plainly"
+    assert got.from.name == String.trim(String.duplicate("Ada ", 400))
+    assert [%{name: name}] = got.attachments
+    assert name == String.duplicate("cv-", 400) <> "é.pdf"
+
+    assert got.message_id == "hm.b@gmail.com" and
+             got.refs == ["m0@acme.example", "m1@acme.example"]
+  end
+
+  test "a label that opens a bracket it never closes is a label, and the mail after it still reads",
+       %{fake: fake} do
+    uid = FakeGmail.deliver(fake, mail(5), ["\\Inbox", "[Archive"])
+    {conn, _folder, _info} = imap(fake)
+    assert {:ok, [%{uid: ^uid, labels: labels}], _} = Imap.envelopes(conn, [uid])
+    assert "[Archive" in labels
+  end
+
   test "a delivery that fails says how, and one cut off after DATA may still be in Sent", %{
     fake: fake
   } do
@@ -209,9 +251,10 @@ defmodule Hireme.GmailTest do
     FakeGmail.fail(fake, {:smtp_reply, "550 5.4.5 Daily user sending limit exceeded."})
     assert {:error, {:permanent, "550 " <> _}} = send.()
 
+    # Cut off after the last dot: Gmail may hold it, so it is unknown, not failed.
     FakeGmail.heal(fake)
     FakeGmail.fail(fake, :smtp_drop_after_data)
-    assert {:error, {:network, _}} = send.()
+    assert {:error, {:unknown, _}} = send.()
     assert Enum.any?(FakeGmail.messages(fake), &(&1.message_id == "hm.f@gmail.com"))
 
     FakeGmail.heal(fake)
@@ -254,7 +297,8 @@ defmodule Hireme.GmailSessionTest do
     Application.put_env(:hireme, Gmail,
       imap: {"localhost", fake.imap_port},
       smtp: {"localhost", fake.smtp_port},
-      cacerts: fake.cacerts
+      cacerts: fake.cacerts,
+      settle_ms: 300
     )
 
     on_exit(fn ->
@@ -496,5 +540,89 @@ defmodule Hireme.GmailSessionTest do
            end)
 
     assert [_] = Enum.filter(items(a), &id?(&1, "r3@acme.example"))
+  end
+
+  defp poke(a) do
+    [{pid, _}] = Registry.lookup(Hireme.Gmail.Registry, a.id)
+    send(pid, :retry)
+  end
+
+  defp mission(id), do: read(fn -> Repo.get(Mission, id) end)
+
+  test "two refusals then a send cut off after its last dot: never handed back, found in Sent, landed once",
+       %{account: a, fake: fake, operator: operator} do
+    {:ok, _} = Gmail.link(a.id, @user, @password)
+    assert eventually(fn -> read_box(a).status == :live end)
+    {_app, m, key} = armed(a, operator)
+
+    FakeGmail.fail(fake, {:smtp_reply, "421 4.7.0 Try again later, closing connection."})
+    {[_], []} = run(a.id, op(:command, :fire, %{key: key}, target: m), operator)
+    assert eventually(fn -> mission(m).message_id != nil end)
+    Process.sleep(200)
+    poke(a)
+    Process.sleep(300)
+
+    # The third attempt reaches Gmail, but the answer is lost.
+    FakeGmail.heal(fake)
+    FakeGmail.fail(fake, :smtp_drop_after_data)
+    poke(a)
+    assert eventually(fn -> Enum.any?(FakeGmail.messages(fake), &("\\Sent" in &1.labels)) end)
+    Process.sleep(200)
+    assert mission(m).state == :in_flight
+
+    FakeGmail.heal(fake)
+    poke(a)
+    assert eventually(fn -> mission(m).state == :fired end)
+    assert Enum.count(FakeGmail.messages(fake), &("\\Sent" in &1.labels)) == 1
+  end
+
+  test "a Gmail draft is never read as mail", %{account: a, fake: fake, operator: operator} do
+    {mission, fake} = fired(a, fake, operator)
+
+    draft =
+      String.replace(
+        reply(mission.message_id, 4),
+        "From: Dana Reyes <dana@acme.example>",
+        "From: #{@user}"
+      )
+
+    FakeGmail.deliver(fake, draft, ["\\Draft"])
+    FakeGmail.deliver(fake, reply(mission.message_id, 5))
+    assert eventually(fn -> Enum.any?(items(a), &id?(&1, "r5@acme.example")) end)
+    refute Enum.any?(items(a), &id?(&1, "r4@acme.example"))
+  end
+
+  test "unlinking hands the shots in flight back, their Message-IDs kept",
+       %{account: a, fake: fake, operator: operator} do
+    {:ok, _} = Gmail.link(a.id, @user, @password)
+    assert eventually(fn -> read_box(a).status == :live end)
+    {_app, m, key} = armed(a, operator)
+
+    FakeGmail.fail(fake, {:smtp_reply, "421 4.7.0 Try again later, closing connection."})
+    {[_], []} = run(a.id, op(:command, :fire, %{key: key}, target: m), operator)
+    assert eventually(fn -> mission(m).message_id != nil end)
+
+    :ok = Gmail.unlink(a.id)
+    assert eventually(fn -> mission(m).state == :fire_ready end)
+    assert mission(m).last_error =~ "unlinked" and mission(m).message_id != nil
+    assert eventually(fn -> read_box(a).secret == nil end)
+    assert FakeGmail.sent(fake) == []
+  end
+
+  test "an inbound mail keeps what the type can hold: ten of each list, a refused address dropped, a refused sender replaced",
+       %{account: a, fake: fake, operator: operator} do
+    {mission, _fake} = fired(a, fake, operator)
+    many = Enum.map_join(1..12, ", ", &"p#{&1}@acme.example")
+
+    raw =
+      "From: bad sender <hr@host.example.>\r\nSender: hr@acme.example\r\nTo: #{many}\r\nCc: root@localhost\r\n" <>
+        "Subject: Re: Staff Engineer\r\nMessage-ID: <r6@acme.example>\r\nIn-Reply-To: <#{mission.message_id}>\r\n\r\nHello.\r\n"
+
+    assert {:ok, :stored} = Gmail.ingest(a.id, raw, :domain)
+    row = Enum.find(items(a), &id?(&1, "r6@acme.example"))
+    assert row.from_addr == "hr@acme.example"
+    assert length(String.split(row.to_addr, <<0x1F>>)) == 10
+    assert row.cc_addr in [nil, ""]
+    assert row.mission_id == mission.id
   end
 end
