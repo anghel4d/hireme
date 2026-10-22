@@ -716,12 +716,12 @@ defmodule Hireme.Gmail.Session do
     }
   end
 
-  # A first contact carries the CV the fire key's hash covered (the
-  # mission keeps its version from the shot); a reply in a thread goes
-  # without (shannon's ruling).
-  defp cv(_s, %{in_reply_to: irt}) when irt not in [nil, ""], do: {:ok, []}
+  # The CV goes with a shot exactly when the judge recorded one at fire (a
+  # first contact; a reply in a thread the account holds carries none):
+  # that version's file, which the key's hash covered, or no mail at all.
+  defp cv(_s, %{cv_version_id: nil}), do: {:ok, []}
 
-  defp cv(s, %{cv_version_id: version}) when is_integer(version) do
+  defp cv(s, %{cv_version_id: version}) do
     with %{blob_sha: sha} = v when is_binary(sha) <-
            Repo.with_account(s.account_id, fn -> Repo.get(CvVersion, version) end),
          %{data: data, type: type} <-
@@ -731,8 +731,6 @@ defmodule Hireme.Gmail.Session do
       _ -> {:refuse, "cv_file: the CV the key covered has no file to attach"}
     end
   end
-
-  defp cv(_s, _m), do: {:refuse, "cv_file: the mission names no CV version"}
 
   defp from_name(account_id) do
     Repo.one(

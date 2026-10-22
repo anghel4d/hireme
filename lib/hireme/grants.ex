@@ -32,9 +32,15 @@ defmodule Hireme.Grants do
   @doc """
   The mail actor's grants: the node's Gmail connector and the domain pipe,
   which record facts (mail that arrived, a shot's outcome, the mailbox's
-  state). The kernel tells it apart as neither human nor a key.
+  state). It writes the mail domain and, for a shot's outcome, the desk's
+  missions; the kernel tells it apart as neither human nor a key.
   """
-  def mail, do: %__MODULE__{actor: :mail, read_mask: @all, write_mask: @all}
+  def mail,
+    do: %__MODULE__{
+      actor: :mail,
+      read_mask: @all,
+      write_mask: Schema.domain_bit(:mail) ||| Schema.domain_bit(:desk)
+    }
 
   @doc "A key's grants, from `Hireme.Keys.authenticate/2`."
   def key(%{id: id, read_mask: r, write_mask: w, may_delete: d}),

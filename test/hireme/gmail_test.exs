@@ -317,30 +317,12 @@ defmodule Hireme.GmailSessionTest do
 
   defp read(fun), do: Repo.with_account(Process.get(:account), fun)
 
-  # An application at fire_ready with one email follow-up mission (a reply
-  # in a thread goes without a CV file), and a key covering it.
-  defp armed(a, operator) do
+  # An application at fire_ready, its CV a PDF file, with one email
+  # mission to it (a first contact unless `reply_to` names a mail the
+  # account holds), and a key covering the mission.
+  defp armed(a, operator, reply_to \\ nil) do
     Process.put(:account, a.id)
-    {[%{id: batch}], []} = run(a.id, op(:put, :batches, %{code: "b1", ordinal: 1}))
-
-    {[%{id: app}], []} =
-      run(a.id, app(%{company: "Acme", role: "Staff Engineer", batch_id: batch}))
-
-    {[_], []} = run(a.id, op(:command, :stage, %{stage: :fire_ready}, target: app))
-
-    {[%{id: mission}], []} =
-      run(
-        a.id,
-        op(:put, :missions, %{
-          application_id: app,
-          kind: :email,
-          target: "jobs@acme.example",
-          subject: "Re: Staff Engineer",
-          draft: "Thank you, Thursday works.\n.\nBest",
-          in_reply_to: "m0@acme.example",
-          state: :fire_ready
-        })
-      )
+    {app, mission} = staged(a, reply_to)
 
     {:ok, review} = Gmail.query(a.id, "fire_review", %{"missions" => "#{mission}"})
     assert review["scope"] == "#{mission}", inspect(review)
@@ -353,6 +335,51 @@ defmodule Hireme.GmailSessionTest do
       )
 
     {app, mission, key}
+  end
+
+  defp staged(a, nil) do
+    {:ok, %{sha: sha}} =
+      Hireme.Blobs.put(a.id, "%PDF-1.4\n" <> String.duplicate("cv ", 200), "application/pdf")
+
+    {[%{id: root}], []} =
+      run(a.id, op(:put, :cv_roots, %{slug: "main", name: "Main", format: :pdf}))
+
+    {[_], []} =
+      run(a.id, op(:put, :cv_versions, %{root_id: root, blob_sha: sha, blob_name: "ana-cv.pdf"}))
+
+    {[%{id: batch}], []} = run(a.id, op(:put, :batches, %{code: "b1", ordinal: 1}))
+
+    {[%{id: app}], []} =
+      run(a.id, app(%{company: "Acme", role: "Staff Engineer", batch_id: batch}))
+
+    {[_], []} = run(a.id, op(:command, :pick_cv, %{cv_root_id: root}, target: app))
+    {[_], []} = run(a.id, op(:command, :stage, %{stage: :fire_ready}, target: app))
+
+    {app,
+     email(a, app, %{subject: "Staff Engineer", draft: "Hello Acme,\nmy CV is attached.\n.\nAna"})}
+  end
+
+  # A follow-up to a mail the account holds, on the application that mail is filed to.
+  defp staged(a, %{message_id: held, application_id: app}),
+    do:
+      {app,
+       email(a, app, %{subject: "Re: Staff Engineer", draft: "Thursday works.", in_reply_to: held})}
+
+  defp email(a, app, mail) do
+    {[%{id: mission}], []} =
+      run(
+        a.id,
+        op(
+          :put,
+          :missions,
+          Map.merge(
+            %{application_id: app, kind: :email, target: "jobs@acme.example", state: :fire_ready},
+            mail
+          )
+        )
+      )
+
+    mission
   end
 
   test "linking checks the password with one login, seals it, and the first sync makes the mailbox live",
@@ -411,8 +438,32 @@ defmodule Hireme.GmailSessionTest do
     assert [sent] = FakeGmail.sent(fake)
     assert sent.from == @user and sent.rcpts == ["jobs@acme.example"]
     {:ok, mail} = Mime.parse(sent.raw)
-    assert mail.message_id == landed.message_id and mail.in_reply_to == "m0@acme.example"
-    assert mail.text =~ "Thursday works" and mail.attachments == []
+    assert mail.message_id == landed.message_id and mail.in_reply_to == nil
+    assert mail.text =~ "my CV is attached"
+    # A first contact goes with the CV the key covered.
+    assert [%{name: "ana-cv.pdf", type: "application/pdf"}] = mail.attachments
+    assert landed.cv_version_id != nil
+  end
+
+  test "a follow-up in a thread the account holds goes without a CV", %{
+    account: a,
+    fake: fake,
+    operator: operator
+  } do
+    {first, fake} = fired(a, fake, operator)
+    FakeGmail.deliver(fake, reply(first.message_id, 7))
+    assert eventually(fn -> Enum.any?(items(a), &id?(&1, "r7@acme.example")) end)
+    held = Enum.find(items(a), &id?(&1, "r7@acme.example"))
+
+    {_app, m, key} = armed(a, operator, held)
+    {[_], []} = run(a.id, op(:command, :fire, %{key: key}, target: m), operator)
+    assert eventually(fn -> mission(m).state == :fired end)
+    assert mission(m).cv_version_id == nil
+
+    sent = List.last(FakeGmail.sent(fake))
+    {:ok, mail} = Mime.parse(sent.raw)
+    assert mail.in_reply_to == "r7@acme.example" and mail.attachments == []
+    assert mail.text =~ "Thursday works"
   end
 
   test "a send cut off after Gmail took it is found in All Mail and never sent twice",
