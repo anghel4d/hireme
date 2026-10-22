@@ -24,6 +24,7 @@ defmodule HiremeWeb.MailInboundTest do
   def pipe(_), do: :error
 
   def ingest(_account, "not ready" <> _, :domain), do: {:error, :not_ready}
+  def ingest(_account, "unavailable" <> _, :domain), do: {:error, :unavailable}
 
   def ingest(account, raw, source) do
     send(:persistent_term.get({__MODULE__, :test}), {:ingest, account, raw, source})
@@ -83,8 +84,8 @@ defmodule HiremeWeb.MailInboundTest do
     refused?(deliver(big, signed(big)), 413)
   end
 
-  test "while ingestion is not ready the node answers 503, which the Worker retries" do
-    refused?(deliver("not ready\r\n", signed("not ready\r\n")), 503)
+  test "while ingestion is not ready or the account is unavailable the node answers 503, which the Worker retries" do
+    for raw <- ["not ready\r\n", "unavailable\r\n"], do: refused?(deliver(raw, signed(raw)), 503)
   end
 
   test "a GET is not answered" do

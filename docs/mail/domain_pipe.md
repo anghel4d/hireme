@@ -45,7 +45,7 @@ A pipe belongs to one account: the operator enables it in the account lens
 | 413 | a body over 25 MiB (read under that bound first) |
 | 415 | not `message/rfc822` |
 | 401 | a missing or wrong signature, or a timestamp more than 300 s off |
-| 503 | ingestion is not ready yet (`{:error, :not_ready}`); the Worker retries |
+| 503 | ingestion is not ready yet or the account is unavailable (`{:error, :not_ready}` or `{:error, :unavailable}`); the Worker retries |
 | 422 | ingestion refused the message |
 
 There is no nonce store: a replay inside the window is a duplicate by Message-ID. Nothing here strikes or bans an address, since every request comes from Cloudflare's Worker egress.
