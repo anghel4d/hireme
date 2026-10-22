@@ -198,7 +198,7 @@ const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 
 // ------------------------------------------------------------------ missions: the routes it goes out by
 
-type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; report_due: boolean }
+type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; report_due: boolean }
 const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
 const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
   try {
@@ -241,7 +241,8 @@ function compose(m: Mission, appId: number): Html {
     <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
 }
 
-function missions(appId: number): Html {
+function missions(d: Doc, appId: number): Html {
+  const cv = d.cv.file
   // The rows are the replica's; covered_by (the live keys over each) is the kernel's answer once it gives one.
   const known = new Map((ask<{ missions: Mission[] }>("missions", { application: appId })?.missions ?? []).map((m) => [m.id, m]))
   const ms = page({ table: "missions", where: { application_id: appId }, order: ["id", "asc"] }, 50).rows.map((r): Mission => ({
@@ -255,11 +256,14 @@ function missions(appId: number): Html {
     const covered = m.covered_by.length > 0
     const email = m.kind === "email"
     const staged = STAGED.includes(m.state)
+    // A first email carries the picked CV as a file; a reply inside a thread goes without one (the judge's cv_file).
+    const first = email && !m.in_reply_to
     if (mine(appId) && v().edit === `m${m.id}`) return html`<li data-key="mi${m.id}"><strong>${ROUTE[m.kind] ?? m.kind}</strong> #${m.id}${compose(m, appId)}</li>`
     return html`<li data-key="mi${m.id}"><strong>${ROUTE[m.kind] ?? m.kind}</strong> <code>${m.target ?? ""}</code>
       ${staged ? html`<select data-act="mission-state" data-on="change" data-mission="${m.id}" aria-label="State">${STAGED.map((x) => html`<option value="${x}"${flag("selected", x === m.state)}>${x.replace("_", " ")}</option>`)}</select>
         <button type="button" class="ghost" data-act="mission-edit" data-mission="${m.id}">Edit</button>` : html`<span class="tag">${m.state.replace("_", " ")}</span>`}
       ${email && m.subject ? html`<p>${m.subject}</p>` : EMPTY}
+      ${first ? (cv ? html`<p class="muted">The picked CV: v${cv.n} · ${cv.format}</p>` : html`<p class="warn">A first email carries the CV as a file: pick a PDF or DOCX version for this application.</p>`) : EMPTY}
       ${m.confirmation === "provisional" ? html`<span class="tag warn" title="Self-reported: it counts once a confirmation mail arrives">provisional</span>` : EMPTY}
       ${m.fired_at ? html`<p class="muted">Fired ${m.fired_at} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}.</p>` : EMPTY}
       ${m.last_error ? html`<p class="warn">Last shot failed: ${m.last_error}</p>` : EMPTY}
@@ -301,7 +305,7 @@ export function body(appId: number, embedded: boolean): Html {
     ${rail(d, appId)}
     <div class="focus-grid">
       <div class="col">${score(d)}${coverage(d)}${cv(d, appId)}${listing(a, appId)}</div>
-      <div class="col">${missions(appId)}${around(a, appId)}${prose(a, appId)}${events(d, appId)}
+      <div class="col">${missions(d, appId)}${around(a, appId)}${prose(a, appId)}${events(d, appId)}
         <section class="card" data-key="override"><h2>Heat override</h2>
           ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row grow" data-submit="override" data-act="override" data-id="${appId}">
             <input name="reason" placeholder="Why this one goes over the cap" aria-label="Reason" required><button>Override</button></form>`}</section>

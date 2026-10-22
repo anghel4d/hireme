@@ -10,7 +10,7 @@
 // echoing the review's digest so the key fires exactly what was read. Nothing on this page sends.
 
 import type { View } from "../app.ts"
-import { command, failed, page, query, Refused, type Row } from "../kernel.ts"
+import { command, failed, page, query, Refused, row, type Row } from "../kernel.ts"
 import { EMPTY, flag, html, str, type Html } from "../morph.ts"
 import { go, model, notice, schedule } from "../state.ts"
 import { askStepUp, stepAct, stepUpPanel } from "./account.ts"
@@ -93,6 +93,7 @@ const WHY: Record<string, string> = {
   app_stage: "its application is not at fire ready (or is closed)",
   unsettled: "an earlier send for this application is unresolved: settle it first",
   mailbox: "no live Gmail link to send from",
+  cv_file: "a first email carries the CV as a file: pick a PDF or DOCX version for its application",
 }
 const KIND: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
 
@@ -124,16 +125,25 @@ function draft(m: Mission): Html {
     <dt>Subject</dt><dd>${d.subject ?? ""}</dd></dl>${text(d.body)}`
 }
 
+/** What a first email attaches: the CV version's file. Whether it may go without one is the judge's `cv_file`. */
+function attachment(m: Mission): Html {
+  if (m.kind !== "email" || m.draft?.in_reply_to) return EMPTY
+  const v = m.cv_version_id ? row("cv_versions", m.cv_version_id) : null
+  return v && str(v.blob_sha) !== ""
+    ? html`<p>Attachment: <code>${str(v.blob_name) || "the CV"}</code> <span class="muted">CV version ${m.cv_version_id}, ${str(v.blob_type)}</span></p>`
+    : html`<p class="muted">No file attached.</p>`
+}
+
 function mission(m: Mission): Html {
   const on = m.eligible && !unticked.has(m.id)
   return html`<article class="card mission${m.eligible ? "" : " held"}" data-key="m${m.id}">
     <header><label class="check"><input type="checkbox" data-act="tick" data-on="change" data-id="${m.id}"${flag("checked", on)}${flag("disabled", !m.eligible)}>
       <strong>#${m.id} ${KIND[m.kind] ?? m.kind}</strong></label>
       <a href="/desk/${m.application.no}" data-nav>${m.application.company}: ${m.application.role}</a>
-      ${m.cv_version_id ? html`<span class="muted">CV version ${m.cv_version_id}</span>` : EMPTY}</header>
+</header>
     <p>Target: <code>${m.target}</code></p>
     ${m.eligible ? EMPTY : html`<p class="warn">Cannot go under a key: ${WHY[m.why ?? ""] ?? m.why}.</p>`}
-    ${draft(m)}
+    ${attachment(m)}${draft(m)}
   </article>`
 }
 
