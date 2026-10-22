@@ -77,6 +77,10 @@ fn a_reply_to_a_sent_mission_files_to_it_by_the_thread() {
     assert_eq!((f.mission_id, f.application_id, f.corporation_id), (Some(21), Some(2), Some(1)));
     assert_eq!(f.thread_key.as_deref(), Some("hm.sent1@example.com"));
     assert_eq!(kinds(&f)[..2], ["in_reply_to", "refs"]);
+    // Gmail's copy of the sent mail itself is the mission's by its own id.
+    let to = vec!["jobs@acme.example".to_string()];
+    let f = filer::file(k.rows(), &NoStore, &Input { inbound: false, message_id: "<hm.sent1@example.com>", to: &to, ..mail("ana@example.com", "Platform Engineer", "Hello") });
+    assert_eq!((f.filed, f.mission_id, kinds(&f)[0]), (true, Some(21), "sent"));
     // Gmail's thread files it as surely.
     let f = filer::file(k.rows(), &NoStore, &Input { gmail_thrid: Some(900), ..mail("x@gmail.com", "", "") });
     assert_eq!((f.filed, f.mission_id), (true, Some(21)));

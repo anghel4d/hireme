@@ -467,6 +467,13 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
     let line = words(&alloc::format!("{} {}", input.subject, input.body));
     let subject_line = words(input.subject);
 
+    // Gmail's copy of a mail hireme sent carries the id the mission stamped.
+    if !input.message_id.trim().is_empty()
+        && let Some(m) = mission_by_message_id(rows, input.message_id)
+    {
+        f.evidence.push(Evidence { kind: "sent", token: canonical_id(input.message_id), weight: THREAD, table: "missions", id: m });
+        certain.push(mission_target(rows, m));
+    }
     // The thread: a reply names the mail it answers.
     let mut thread: Vec<(&'static str, String)> = ids(input.in_reply_to).into_iter().map(|i| ("in_reply_to", i)).collect();
     if thread.is_empty() && !input.in_reply_to.trim().is_empty() {

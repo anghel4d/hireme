@@ -251,6 +251,7 @@ canonical form (no brackets or spaces, lowercased); they are stored as given.
 
 | evidence | weight | certain |
 | --- | --- | --- |
+| its own Message-ID is one a mission stamped (Gmail's copy of a sent mail) | 100 | yes |
 | in_reply_to or refs names a message the account holds | 100 | yes |
 | a bounce report naming a message the account sent | 100 | yes |
 | the Gmail thread of a filed message | 100 | yes |
