@@ -1272,7 +1272,7 @@ defmodule Hireme.Gmail.Mime do
 
   defp attachment?(c) do
     c.disposition == "attachment" or c.type not in ["text/plain", "text/html"] or
-      get(c.dparams, "filename") != nil or get(c.params, "name") != nil
+      List.keymember?(c.dparams, "filename", 0) or List.keymember?(c.params, "name", 0)
   end
 
   defp file(c, body, st) do
