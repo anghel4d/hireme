@@ -187,6 +187,17 @@ defmodule Hireme.Sequencer do
   def call(account_id, actor, ops),
     do: with_pid(account_id, &GenServer.call(&1, {:call, actor, ops}, :infinity))
 
+  @doc """
+  Writes `cells` (column atoms to values) into `table`'s row `id`, or the
+  account's one row of a singleton when `id` is nil: `server_only` columns
+  only. Neither the wire nor the kernel holds them, so no rev moves and
+  no PATCH goes out; the write is still the sequencer's, in turn with the
+  account's others. Answers `:ok`, `{:error, :not_found}` or
+  `{:error, :column}` (a column that is not server_only).
+  """
+  def server_write(account_id, table, id, cells) when is_map(cells),
+    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells}))
+
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request) do
     case with_pid(account_id, &GenServer.call(&1, {:lease, self(), request})) do
@@ -286,6 +297,9 @@ defmodule Hireme.Sequencer do
 
       {:reply, {:refused, :internal, %{}}, state, @idle_ms}
   end
+
+  def handle_call({:server_write, table, id, cells}, _from, state),
+    do: {:reply, server_cells(Schema.table(table), id, cells), state, @idle_ms}
 
   def handle_call({:call, actor, ops}, _from, state) do
     {state, acks, nacks} = run_as(actor, ops, state)
@@ -631,6 +645,24 @@ defmodule Hireme.Sequencer do
       {:"$gen_cast", {:ops, pid, ops}} -> take_more([{pid, ops} | acc], n + length(ops))
     after
       0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp server_cells(nil, _id, _cells), do: {:error, :not_found}
+
+  defp server_cells(table, id, cells) do
+    only = for c <- table.cols, c.server_only, into: %{}, do: {String.to_atom(c.name), c}
+
+    if cells != %{} and Enum.all?(Map.keys(cells), &Map.has_key?(only, &1)) do
+      q = from(r in Schema.row(table.name))
+      q = if id, do: where(q, [r], r.id == ^id), else: q
+
+      case Repo.update_all(q, set: Enum.to_list(cells)) do
+        {0, _} -> {:error, :not_found}
+        {_, _} -> :ok
+      end
+    else
+      {:error, :column}
     end
   end
 
@@ -1019,6 +1051,7 @@ defmodule Hireme.Sequencer do
   defp judge(op, sub, state, turn) do
     with {:ok, plan} <- resolve(op),
          :ok <- Grants.check(sub.grants, op.verb, plan.command, plan.table, plan.known),
+         :ok <- stepped_up(plan, sub),
          :ok <- keyed_read(op, plan, sub),
          :ok <- Lease.check(state.lease, sub.id, nil),
          {:ok, plan} <- locate(plan, op),
@@ -1065,6 +1098,19 @@ defmodule Hireme.Sequencer do
         %{table: table, command: nil, params: nil, known: [], row: nil, target: op.target},
         Map.new(more)
       )
+
+  # A fire key is the operator's authority to send: only a browser session
+  # that proved a factor inside the step-up window creates one, as the
+  # account RPCs ask (docs/mail/kernel.md). Revoking one asks nothing.
+  defp stepped_up(%{command: %{name: "create_fire_key"}}, sub) do
+    session = sub.session_id && Repo.get(Hireme.Rows.Session, sub.session_id)
+
+    if session && Hireme.Mfa.fresh?(session),
+      do: :ok,
+      else: {:refused, :step_up, %{need: "factor", window_s: Security.step_up_window()}}
+  end
+
+  defp stepped_up(_plan, _sub), do: :ok
 
   # Finds the op's target row: by id, by natural key for a keyed op, or the
   # account's one row of a singleton table.
@@ -1660,7 +1706,7 @@ defmodule Hireme.Sequencer do
 
   defp derive(values, "events", nil, ctx) do
     values
-    |> Map.put(:actor, if(ctx.sub.key_id, do: :agent, else: :operator))
+    |> Map.put(:actor, actor(ctx.sub))
     |> Map.put(:key_id, ctx.sub.key_id)
     |> Map.put(:op_id, signed(ctx.op.op_id))
   end
@@ -1671,12 +1717,16 @@ defmodule Hireme.Sequencer do
 
     Map.merge(values, %{
       n: (n || 0) + 1,
-      actor: if(ctx.sub.key_id, do: :agent, else: :operator),
+      actor: actor(ctx.sub),
       key_id: ctx.sub.key_id
     })
   end
 
   defp derive(values, _table, _row, _ctx), do: values
+
+  defp actor(%{grants: %{actor: :mail}}), do: :mail
+  defp actor(%{key_id: key_id}) when key_id != nil, do: :agent
+  defp actor(_sub), do: :operator
 
   defp next_no do
     id = Repo.account_id!()
@@ -2039,6 +2089,9 @@ defmodule Hireme.Sequencer do
   defp publish([], state), do: state
 
   defp publish(deltas, state) do
+    # The mail the batch put in flight goes out now that it is committed.
+    Hireme.Gmail.moved(state.account_id, deltas)
+
     state
     |> live_subs()
     |> Enum.group_by(& &1.grants)

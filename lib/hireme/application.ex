@@ -27,7 +27,10 @@ defmodule Hireme.Application do
         # Applies the baseline and pending additive files before any request,
         # then keeps the daily backup.
         Hireme.Release,
-        Hireme.Mail
+        Hireme.Mail,
+        # The linked mailboxes' sessions, once the schema is applied; they
+        # write through the sequencers.
+        Hireme.Gmail
       ] ++
         McpSession.children() ++
         [

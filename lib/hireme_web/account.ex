@@ -32,11 +32,17 @@ defmodule HiremeWeb.Account do
   - `account.step_up.passkey_options` {} -> {publicKey}; `account.step_up.passkey` {assertion fields}; `account.step_up.totp` {code}; `account.step_up.recovery` {code}
   - `account.step_up.mail` {} mails a code; `account.step_up.mail_code` {code}: an account with no factor
   - `account.trusted_host.add` {host, note?}; `account.trusted_host.remove` {id}
+  - `account.mail.link` {address, app_password} -> {status} (needs a
+    step-up; the password goes no further than `Hireme.Gmail`);
+    `account.mail.unlink` {}; `account.mail.pipe` {} -> {pipe_id, secret},
+    the domain pipe's id and a new secret, shown this once (needs a step-up)
 
   An error answers `%{error: code}` with the code a string: `scope`,
   `step_up`, `not_found`, `invalid`, `limit`, `rate_limited`, `last`,
   `taken`, `challenge`, `code`, `attestation`, `assertion`, `duplicate`,
-  `clone`, `revoked`, `no_factor`, `factor`, `no_email`, `unknown_method`.
+  `clone`, `revoked`, `no_factor`, `factor`, `no_email`, `unknown_method`,
+  and the Gmail link's `address`, `auth`, `imap_disabled`,
+  `all_mail_hidden`, `unreachable`, `no_mailbox`.
   """
 
   require Logger
@@ -302,6 +308,20 @@ defmodule HiremeWeb.Account do
 
   defp run("account.trusted_host.remove", %{"id" => id}, s, meta) when is_integer(id) do
     if Mfa.fresh?(s), do: Hireme.Provenance.distrust(id, ctx(meta, s)), else: {:error, :step_up}
+  end
+
+  ## The Gmail link: browser plus step-up to hand over the app password or
+  ## mint the pipe's secret; unlinking only takes access away.
+
+  defp run("account.mail.link", %{"address" => a, "app_password" => p}, s, _meta)
+       when is_binary(a) and is_binary(p) do
+    if Mfa.fresh?(s), do: Hireme.Gmail.link(s.account_id, a, p), else: {:error, :step_up}
+  end
+
+  defp run("account.mail.unlink", _params, s, _meta), do: Hireme.Gmail.unlink(s.account_id)
+
+  defp run("account.mail.pipe", _params, s, _meta) do
+    if Mfa.fresh?(s), do: Hireme.Gmail.enable_pipe(s.account_id), else: {:error, :step_up}
   end
 
   defp run(method, _params, _s, _meta) do

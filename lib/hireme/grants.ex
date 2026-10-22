@@ -18,7 +18,7 @@ defmodule Hireme.Grants do
   defstruct actor: :key, key_id: nil, read_mask: 0, write_mask: 0, may_delete: false
 
   @type t :: %__MODULE__{
-          actor: :operator | :key,
+          actor: :operator | :key | :mail,
           key_id: pos_integer | nil,
           read_mask: non_neg_integer,
           write_mask: non_neg_integer,
@@ -28,6 +28,13 @@ defmodule Hireme.Grants do
   @doc "The operator's grants, held by every browser session."
   def operator,
     do: %__MODULE__{actor: :operator, read_mask: @all, write_mask: @all, may_delete: true}
+
+  @doc """
+  The mail actor's grants: the node's Gmail connector and the domain pipe,
+  which record facts (mail that arrived, a shot's outcome, the mailbox's
+  state). The kernel tells it apart as neither human nor a key.
+  """
+  def mail, do: %__MODULE__{actor: :mail, read_mask: @all, write_mask: @all}
 
   @doc "A key's grants, from `Hireme.Keys.authenticate/2`."
   def key(%{id: id, read_mask: r, write_mask: w, may_delete: d}),

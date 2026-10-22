@@ -124,6 +124,12 @@ defmodule Hireme.Mail do
 
   def line(:identity_linked, m), do: "#{m[:provider]} sign-in #{m[:display]} was linked"
   def line(:identity_unlinked, m), do: "#{m[:provider]} sign-in #{m[:display]} was unlinked"
+  def line(:mailbox_linked, m), do: "Gmail #{m[:address]} was linked"
+  def line(:mailbox_unlinked, _), do: "the linked Gmail was unlinked and its app password erased"
+
+  def line(:mailbox_auth_failed, _),
+    do: "Gmail refused the linked mailbox's app password; link it again with a new one"
+
   def line(kind, _), do: kind |> Atom.to_string() |> String.replace("_", " ")
 
   @doc """
@@ -180,6 +186,9 @@ defmodule Hireme.Mail do
     authenticator_added: :factor_notices,
     identity_linked: :factor_notices,
     identity_unlinked: :factor_notices,
+    mailbox_linked: :factor_notices,
+    mailbox_unlinked: :factor_notices,
+    mailbox_auth_failed: :factor_notices,
     recovery_codes_issued: :factor_notices,
     recovery_code_used: :factor_notices,
     api_key_widened: :key_notices,
