@@ -56,6 +56,8 @@ defmodule Hireme.Sequencer do
   alias HiremeWeb.Wire.Codec
 
   @batch 64
+  # How long a woken account's chores (purge, backfills) wait for its first caller.
+  @chores_ms 1_000
   @max_op_text 1 <<< 20
   @idle_ms :timer.minutes(10)
   @ledger_s 24 * 3600
@@ -237,10 +239,12 @@ defmodule Hireme.Sequencer do
     Hireme.PubSub.subscribe(Hireme.Audit.topic(account_id))
     # Read after subscribing, so a resume in between is not lost.
     state = %{state | lease: paused_keys(account_id)}
-    # The first purge, and every hour's, runs as messages between batches.
-    send(self(), :purge)
-    send(self(), :backfill)
-    send(self(), :canonical)
+    # The first purge, and every hour's, runs as messages between batches;
+    # the first of them, and the backfills, after the call that woke the
+    # account (a browser's or an agent's subscribe) has its answer.
+    for chore <- [:purge, :backfill, :canonical],
+        do: Process.send_after(self(), chore, @chores_ms)
+
     {:ok, rebuild(state), @idle_ms}
   end
 
