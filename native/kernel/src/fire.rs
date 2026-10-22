@@ -757,6 +757,15 @@ pub fn failed(rows: &Rows, mission: u32, reason: &str) -> Vec<Row> {
     out
 }
 
+/// A bounce of the mail a mission sent: the shot failed after all, so the
+/// mission goes back to fire_ready, still covered (rule 2). Only a fired
+/// mission moves; one already firing again keeps its shot, whose outcome
+/// the node reports.
+pub fn bounced(rows: &Rows, mission: u32) -> Vec<Row> {
+    let fired = missions(rows).is_some_and(|t| t.has(mission) && state(t, mission) == enums::mission_state::FIRED);
+    if fired { failed(rows, mission, "bounced") } else { Vec::new() }
+}
+
 /// Whether any of an application's missions is in flight.
 pub fn in_flight(rows: &Rows, app: u32) -> bool {
     missions(rows).is_some_and(|t| t.ids().iter().any(|&m| t.u32(m, M::APPLICATION_ID) == Some(app) && state(t, m) == enums::mission_state::IN_FLIGHT))
