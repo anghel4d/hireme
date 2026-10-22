@@ -107,6 +107,7 @@ defmodule Hireme.Kernel.Nif do
   def mcp_usage(_tool, _problem), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_shape(_tool), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_mission(_view, _data), do: :erlang.nif_error(:nif_not_loaded)
+  def mcp_report(_args, _mission), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_encode(_tool, _args, _first, _target), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_moved(_body), do: :erlang.nif_error(:nif_not_loaded)
 end

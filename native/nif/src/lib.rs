@@ -272,6 +272,16 @@ fn mcp_shape(tool: String) -> Option<String> {
     mcp::shape(&tool)
 }
 
+/// What `report` writes for a mission row: `{"ok": plan}` or `{"usage": text}`.
+#[rustler::nif]
+fn mcp_report(input: String, mission: String) -> NifResult<String> {
+    Ok(match mcp::mission::report(&json_in(&input)?, &json_in(&mission)?) {
+        Ok(plan) => serde_json::json!({"ok": plan}),
+        Err(problem) => serde_json::json!({"usage": mcp::usage("report", &problem)}),
+    }
+    .to_string())
+}
+
 /// A mission view (`list`, `brief`, `keys`, `requested`) of a kernel answer, as the daemon renders it.
 #[rustler::nif]
 fn mcp_mission(view: String, data: String) -> NifResult<Option<String>> {

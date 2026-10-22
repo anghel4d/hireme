@@ -6,6 +6,8 @@ defmodule HiremeWeb.McpTest do
 
   use Hireme.McpCase
 
+  alias Hireme.Kernel.Nif
+
   defp put(p, args), do: ok!(tool(p, "put", args))
 
   test "a subscribed application (resident) and corporation (server-side) are announced when written, silent once unsubscribed; a row that does not exist cannot be subscribed to",
@@ -84,6 +86,84 @@ defmodule HiremeWeb.McpTest do
     assert text_of(tool(p, "get", %{})) =~ ~s("table")
 
     assert "request_fire_key" in tools(mcp(ctx, Keys.preset(:read_write)))
+  end
+
+  test "a self-reported shot: refused without a key with the commander's answer (not an error), then fired under the operator's key and closed by report in its two writes",
+       ctx do
+    id = ctx.account.id
+    {[batch], []} = run(id, op(:put, :batches, %{code: "B1", ordinal: 1}))
+    {[a], []} = run(id, app(%{company: "Acme", role: "Platform Engineer", batch_id: batch.id}))
+    {[_], []} = run(id, op(:command, :stage, %{stage: :fire_ready}, target: a.id))
+
+    mission = %{
+      application_id: a.id,
+      kind: :careers_page,
+      target: "https://acme.example/apply",
+      draft: "## Name\nAna",
+      state: :fire_ready
+    }
+
+    {[m, bare], []} = run(id, [op(:put, :missions, mission), op(:put, :missions, mission)])
+    p = mcp(ctx)
+    ok!(tool(p, "lease", %{ids: [a.id]}))
+
+    held = tool(p, "fire", %{id: bare.id})
+    refute error?(held)
+    assert text_of(held) =~ "commander: HOLD" and text_of(held) =~ "request_fire_key"
+
+    {:ok, {:ok, review}} =
+      Hireme.Sequencer.read(id, fn k, _ ->
+        Nif.query(
+          k.res,
+          JSON.encode!(%{op: "fire_review", missions: "#{m.id}"}),
+          15,
+          15,
+          true
+        )
+      end)
+
+    %{"scope" => scope, "digest" => digest} = JSON.decode!(review)
+    # The operator's browser session, stepped up as the key's creation asks.
+    page = %{
+      label: "page",
+      grants: Hireme.Grants.operator(),
+      key_id: nil,
+      session_id: ctx.session.id
+    }
+
+    {[_key], []} =
+      run(id, op(:command, :create_fire_key, %{missions: scope, digest: digest}), page)
+
+    ok!(tool(p, "fire", %{id: m.id}))
+    assert error?(tool(p, "report", %{mission: m.id}))
+
+    reported =
+      ok!(
+        tool(p, "report", %{
+          mission: m.id,
+          report: "Submitted the form.",
+          reference: "APP-1",
+          link: "https://acme.example/apply"
+        })
+      )
+
+    assert text_of(reported) =~ "ok:"
+    assert text_of(tool(p, "get", %{table: "missions", id: m.id})) =~ ~s("state": "fired")
+
+    items = text_of(tool(p, "outreach", %{where: %{mission_id: m.id}}))
+    assert items =~ "1 outreach items" and items =~ "careers_page · outbound"
+
+    row =
+      text_of(
+        tool(p, "find", %{
+          table: "outreach",
+          where: %{mission_id: m.id},
+          cols: ["reference", "report"]
+        })
+      )
+
+    assert row =~ "APP-1" and row =~ "Submitted the form."
+    assert text_of(tool(p, "missions", %{application: a.id})) =~ "mission #{m.id}"
   end
 
   test "a desk-only key cannot read the world through tools or resources; text an agent reads comes back marked untrusted",

@@ -252,7 +252,8 @@ impl Agent {
                 },
                 None => structured(mcp::overview(m)),
             },
-            "find" | "get" | "history" | "text" | "cv" => self.read_tool(name, &args).await,
+            "find" | "get" | "history" | "text" | "cv" | "outreach" => self.read_tool(name, &args).await,
+            "report" => self.report(&args).await,
             "unlinked" => self.unlinked(&args).await,
             "missions" | "mission" | "fire_keys" => self.missions(name, &args).await,
             "request_fire_key" => self.request_fire_key(&args).await,
@@ -463,6 +464,33 @@ impl Agent {
             }
             _ => put,
         }
+    }
+
+    /// `report`: the mission read, then its writes in order (mission::report), stopping at a refusal.
+    async fn report(&self, args: &Json) -> Json {
+        let mission = match self.up.query("get", &json!({"table": "missions", "id": args["mission"]})).await {
+            Ok(Ok(v)) => v["row"].clone(),
+            Ok(Err((code, data))) => return text(diag::render(&code, &format!("report {}", compact(args)), &data), None, true),
+            Err(why) => return text(format!("error[session]: {why}\n   = note: nothing was written\n"), None, true),
+        };
+        let plan = match mcp::mission::report(args, &mission) {
+            Ok(plan) => plan,
+            Err(problem) => return text(mcp::usage("report", &problem), None, true),
+        };
+        if let Some(a) = plan["answer"].as_str() {
+            return text(a.to_owned(), None, false);
+        }
+        let mut said = String::new();
+        let mut last = text(String::new(), None, false);
+        for w in plan["writes"].as_array().into_iter().flatten() {
+            last = self.write(w[0].as_str().unwrap_or(""), &w[1]).await;
+            said.push_str(last["content"][0]["text"].as_str().unwrap_or(""));
+            if last["isError"] != false {
+                break;
+            }
+        }
+        last["content"][0]["text"] = json!(said);
+        last
     }
 
     async fn lease(&self, args: &Json) -> Json {

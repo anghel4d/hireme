@@ -619,11 +619,8 @@ defmodule HiremeWeb.Mcp.Session do
         {:noreply, s}
 
       {call, calls} ->
-        {s, result} = settled(call, s)
-        GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, result}))
-
-        {:noreply,
-         %{s | calls: calls, pending: Map.drop(s.pending, Enum.map(call.ops, &elem(&1, 0)))}}
+        s = %{s | calls: calls, pending: Map.drop(s.pending, Enum.map(call.ops, &elem(&1, 0)))}
+        {:noreply, finish(call, s)}
     end
   end
 
@@ -807,7 +804,7 @@ defmodule HiremeWeb.Mcp.Session do
   # ------------------------------------------------------------------ tools
 
   @fixed ~w(hireme schema find get history text lease release put drop cv cv_upload unlinked
-            missions mission fire_keys request_fire_key)
+            missions mission fire_keys request_fire_key outreach report)
 
   defp tool(name, args, msg, modern, from, s) when is_map(args) do
     listed = Enum.any?(tools(s), &(&1["name"] == name))
@@ -846,7 +843,8 @@ defmodule HiremeWeb.Mcp.Session do
     end
   end
 
-  defp run(name, args, _msg, _modern, _from, s) when name in ~w(find get history text cv) do
+  defp run(name, args, _msg, _modern, _from, s)
+       when name in ~w(find get history text cv outreach) do
     {answer, note, tag} =
       if name == "cv",
         do:
@@ -1013,14 +1011,64 @@ defmodule HiremeWeb.Mcp.Session do
     end
   end
 
-  defp run(name, args, msg, modern, from, s) do
+  # `report`: the mission read, then its writes in order (the plan is mission::report's),
+  # each starting when the one before it lands, stopping at a refusal.
+  defp run("report", args, msg, modern, from, s) do
+    with {:ok, mission} <- report_mission(args, s),
+         {:ok, plan} <- report_plan(args, mission) do
+      case plan do
+        %{"answer" => a} -> {{:ok, text(a, nil, false)}, s}
+        %{"writes" => writes} -> chain(writes, "", msg, modern, from, s)
+      end
+    else
+      {:answer, result} -> {{:ok, result}, s}
+    end
+  end
+
+  defp run(name, args, msg, modern, from, s), do: write(name, args, msg, modern, from, s, & &1)
+
+  defp write(name, args, msg, modern, from, s, then) do
     with {:ok, target} <- target(name, args, s),
          {:ok, encoded} <- encode(name, args, s.next_op, target) do
       ops = for {op_id, label, bytes} <- encoded, do: {op_id, label, decode_op(bytes)}
       s = %{s | next_op: s.next_op + length(ops)}
-      submit(ops, name, msg, modern, from, s)
+      submit(ops, name, msg, modern, from, s, then)
     else
       {:answer, result} -> {{:ok, result}, s}
+    end
+  end
+
+  defp chain([[name, args] | rest], said, msg, modern, from, s) do
+    write(name, args, msg, modern, from, s, fn result ->
+      [%{"text" => t}] = result["content"]
+      result = put_in(result, ["content"], [%{"type" => "text", "text" => said <> t}])
+
+      if rest == [] or result["isError"],
+        do: result,
+        else: {:then, &chain(rest, said <> t, &1, &2, &3, &4)}
+    end)
+  end
+
+  defp report_mission(args, s) do
+    case query("get", %{"table" => "missions", "id" => args["mission"]}, s) do
+      {:ok, %{"row" => row}} ->
+        {:ok, row}
+
+      {:ok, _} ->
+        {:ok, nil}
+
+      {:refused, code, data} ->
+        {:answer, text(render(code, "report #{compact(args)}", data, s), nil, true)}
+
+      {:error, why} ->
+        {:answer, text("error[session]: #{why}\n   = note: nothing was written\n", nil, true)}
+    end
+  end
+
+  defp report_plan(args, mission) do
+    case JSON.decode!(Nif.mcp_report(JSON.encode!(args), JSON.encode!(mission))) do
+      %{"ok" => plan} -> {:ok, plan}
+      %{"usage" => usage} -> {:answer, text(usage, nil, true)}
     end
   end
 
@@ -1088,7 +1136,7 @@ defmodule HiremeWeb.Mcp.Session do
 
   # A put under a live bulk contract that covers it is one atomic burst;
   # anything else goes as ops each judged alone.
-  defp submit(ops, name, msg, modern, from, s, then \\ & &1) do
+  defp submit(ops, name, msg, modern, from, s, then) do
     n = length(ops)
 
     {atomic, s} =
@@ -1135,13 +1183,31 @@ defmodule HiremeWeb.Mcp.Session do
         call = %{call | verdicts: Map.put(call.verdicts, op_id, v)}
         s = %{s | pending: pending}
 
-        if map_size(call.verdicts) == length(call.ops) do
-          {s, result} = settled(call, s)
-          GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, result}))
-          %{s | calls: Map.delete(s.calls, ref)}
-        else
-          %{s | calls: Map.put(s.calls, ref, call)}
+        if map_size(call.verdicts) == length(call.ops),
+          do: finish(call, %{s | calls: Map.delete(s.calls, ref)}),
+          else: %{s | calls: Map.put(s.calls, ref, call)}
+    end
+  end
+
+  # A settled call is answered, unless its `then` starts the next write of a chain (`report`),
+  # which answers in its turn.
+  defp finish(call, s) do
+    {s, result} = settled(call, s)
+
+    case call.then.(result) do
+      {:then, next} ->
+        case next.(call.msg, call.modern, call.from, s) do
+          {:deferred, s} ->
+            s
+
+          {{:ok, r}, s} ->
+            GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, r}))
+            s
         end
+
+      result ->
+        GenServer.reply(call.from, answer(call.msg, call.modern, {:ok, result}))
+        s
     end
   end
 
@@ -1192,12 +1258,10 @@ defmodule HiremeWeb.Mcp.Session do
         else: ""
 
     {s,
-     call.then.(
-       text(
-         IO.iodata_to_binary([head | Enum.reverse(lines)]),
-         %{ops: Enum.reverse(rows), atomic: call.atomic},
-         refused > 0
-       )
+     text(
+       IO.iodata_to_binary([head | Enum.reverse(lines)]),
+       %{ops: Enum.reverse(rows), atomic: call.atomic},
+       refused > 0
      )}
   end
 
