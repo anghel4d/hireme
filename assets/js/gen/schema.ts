@@ -3,8 +3,8 @@
 // 0000-01-01 (proleptic Gregorian, 0..DAY_MAX), a time as unix seconds, and a
 // nullable column as T | null.
 
-export const WIRE_HASH = 0x3240;
-export const SCHEMA_REV = 0xd39e0b4d;
+export const WIRE_HASH = 0x751f;
+export const SCHEMA_REV = 0x4c15fb85;
 export const LAYOUT = 4;
 export const DAY_MAX = 3652424;
 
@@ -109,7 +109,7 @@ export const ENUMS: { readonly [name: string]: readonly string[] } = { refusal: 
 
 export const TABLE_ID = { profiles: 13, items: 14, applications: 15, events: 16, batches: 17, cv_lineages: 18, cv_overlays: 19, settings: 20, places: 21, corporations: 23, offices: 24, sources: 25, citations: 26, contacts: 27, messages: 28, leases: 31, clock: 32, catalog: 33, trusted: 34, acct_keys: 35, acct_sessions: 36, acct_identities: 37, acct_factors: 38, acct_audit: 39, acct_info: 40, me: 41, languages: 42, cv_roots: 43, cv_versions: 44, cv_masks: 46, cv_rules: 47, missions: 48, fire_requests: 49, fire_keys: 50, fire_shots: 51, mailboxes: 52 } as const;
 export type TableName = keyof typeof TABLE_ID;
-export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7, fire: 8, landed: 9, failed: 10, decline: 11, create_fire_key: 12, revoke_fire_key: 13, mailbox_state: 14, unlink_mail: 15 } as const;
+export const COMMAND_ID = { stage: 1, note: 2, heat_override: 3, open_fire: 4, pick_cv: 5, unpin_cv: 6, open_generation: 7, fire: 8, stamp: 9, landed: 10, failed: 11, decline: 12, create_fire_key: 13, revoke_fire_key: 14, mailbox_state: 15, unlink_mail: 16 } as const;
 export type CommandName = keyof typeof COMMAND_ID;
 
 export interface ColumnDef {
@@ -169,7 +169,7 @@ const PACKED: { readonly [T in TableName]: Omit<TableDef, "cols"> & { cols: read
   "cv_versions": {"id":44,"name":"cv_versions","domain":"corpus","residency":"resident","cap":100000,"appendOnly":true,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["root_id",8,"ref",1,"cv_roots"],["n",9,"u32",33],["body",10,"text",0],["blob_sha",11,"str",0],["blob_name",12,"str",0],["blob_type",13,"str",32],["blob_bytes",14,"u32",32],["text",15,"text",32],["note",16,"str",0],["actor",17,"enum",33,"actor"],["key_id",18,"ref",16416,"api_keys"]]},
   "cv_masks": {"id":46,"name":"cv_masks","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["name",8,"str",1],["pattern",9,"text",1],["note",10,"str",0]]},
   "cv_rules": {"id":47,"name":"cv_rules","domain":"corpus","residency":"resident","cap":1000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["position",8,"u32",1,null,"0"],["root_id",9,"ref",1,"cv_roots"],["name",10,"str",0],["pattern",11,"text",1],["enabled",12,"bool",1,null,"true"]]},
-  "missions": {"id":48,"name":"missions","domain":"desk","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"enum",1,"mission_kind"],["target",10,"str",0],["contact_id",11,"ref",0,"contacts"],["draft",12,"text",0],["state",13,"enum",1,"mission_state","draft"],["last_error",14,"text",32],["fired_at",15,"time",32],["fired_by",16,"enum",32,"actor"],["fire_key_id",17,"ref",16416,"fire_keys"],["fired_with",18,"ref",16416,"api_keys"],["in_flight_at",19,"time",32],["confirmation",20,"enum",32,"confirmation"],["note",21,"text",0]]},
+  "missions": {"id":48,"name":"missions","domain":"desk","residency":"resident","cap":200000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["application_id",8,"ref",1,"applications"],["kind",9,"enum",1,"mission_kind"],["target",10,"str",0],["contact_id",11,"ref",0,"contacts"],["draft",12,"text",0],["state",13,"enum",1,"mission_state","draft"],["last_error",14,"text",32],["fired_at",15,"time",32],["fired_by",16,"enum",32,"actor"],["fire_key_id",17,"ref",16416,"fire_keys"],["fired_with",18,"ref",16416,"api_keys"],["in_flight_at",19,"time",32],["confirmation",20,"enum",32,"confirmation"],["note",21,"text",0],["cc",22,"str",0],["subject",23,"str",0],["in_reply_to",24,"str",0],["refs",25,"text",0],["message_id",26,"str",32],["gmail_msgid",27,"i64",32],["gmail_thrid",28,"i64",32]]},
   "fire_requests": {"id":49,"name":"fire_requests","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["missions",8,"str",1],["reason",9,"str",0],["requested_by",10,"ref",16416,"api_keys"],["status",11,"enum",33,"request_status","open"],["fire_key_id",12,"ref",16416,"fire_keys"]]},
   "fire_keys": {"id":50,"name":"fire_keys","domain":"desk","residency":"resident","cap":10000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["scope",8,"str",33],["usable_by",9,"ref",16416,"api_keys"],["request_id",10,"ref",16416,"fire_requests"],["first_used_at",11,"time",32],["expires_at",12,"time",33],["revoked_at",13,"time",32]]},
   "fire_shots": {"id":51,"name":"fire_shots","domain":"desk","residency":"resident","cap":1000000,"appendOnly":false,"softDelete":false,"global":false,"accountOptional":false,"singleton":false,"natural":[],"source":null,"cols":[["id",1,"id",545],["account_id",2,"ref",545,"accounts"],["rev",3,"i64",545,null,"1"],["inserted_at",4,"time",545],["updated_at",5,"time",545],["fire_key_id",8,"ref",33,"fire_keys"],["mission_id",9,"ref",33,"missions"],["hash",10,"str",33],["burned_at",11,"time",32]]},
@@ -186,13 +186,14 @@ export const COMMANDS: { readonly [C in CommandName]: CommandDef } = {
   "unpin_cv": {"id":6,"name":"unpin_cv","table":"applications","humanOnly":false,"params":[]},
   "open_generation": {"id":7,"name":"open_generation","table":"cv_lineages","humanOnly":false,"params":[{"name":"corporation_id","id":8,"type":"ref","typeCode":2,"wire":1,"required":true,"column":true,"ref":"corporations","enum":null}]},
   "fire": {"id":8,"name":"fire","table":"missions","humanOnly":false,"params":[{"name":"key","id":65024,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
-  "landed": {"id":9,"name":"landed","table":"missions","humanOnly":false,"params":[{"name":"gmail_msgid","id":65024,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null},{"name":"gmail_thrid","id":65025,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null}]},
-  "failed": {"id":10,"name":"failed","table":"missions","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
-  "decline": {"id":11,"name":"decline","table":"fire_requests","humanOnly":true,"params":[]},
-  "create_fire_key": {"id":12,"name":"create_fire_key","table":"fire_keys","humanOnly":true,"params":[{"name":"missions","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"digest","id":65025,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"usable_by","id":65026,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null},{"name":"request","id":65027,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
-  "revoke_fire_key": {"id":13,"name":"revoke_fire_key","table":"fire_keys","humanOnly":true,"params":[]},
-  "mailbox_state": {"id":14,"name":"mailbox_state","table":"mailboxes","humanOnly":false,"params":[{"name":"status","id":10,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"mailbox_status"},{"name":"last_error","id":12,"type":"text","typeCode":12,"wire":2,"required":false,"column":true,"ref":null,"enum":null},{"name":"last_sync_at","id":11,"type":"time","typeCode":10,"wire":1,"required":false,"column":true,"ref":null,"enum":null}]},
-  "unlink_mail": {"id":15,"name":"unlink_mail","table":"mailboxes","humanOnly":true,"params":[]},
+  "stamp": {"id":9,"name":"stamp","table":"missions","humanOnly":false,"params":[{"name":"message_id","id":26,"type":"str","typeCode":11,"wire":2,"required":true,"column":true,"ref":null,"enum":null}]},
+  "landed": {"id":10,"name":"landed","table":"missions","humanOnly":false,"params":[{"name":"gmail_msgid","id":65024,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null},{"name":"gmail_thrid","id":65025,"type":"i64","typeCode":7,"wire":3,"required":false,"column":false,"ref":null,"enum":null}]},
+  "failed": {"id":11,"name":"failed","table":"missions","humanOnly":false,"params":[{"name":"reason","id":65024,"type":"text","typeCode":12,"wire":2,"required":true,"column":false,"ref":null,"enum":null}]},
+  "decline": {"id":12,"name":"decline","table":"fire_requests","humanOnly":true,"params":[]},
+  "create_fire_key": {"id":13,"name":"create_fire_key","table":"fire_keys","humanOnly":true,"params":[{"name":"missions","id":65024,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"digest","id":65025,"type":"str","typeCode":11,"wire":2,"required":true,"column":false,"ref":null,"enum":null},{"name":"usable_by","id":65026,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null},{"name":"request","id":65027,"type":"u32","typeCode":6,"wire":1,"required":false,"column":false,"ref":null,"enum":null}]},
+  "revoke_fire_key": {"id":14,"name":"revoke_fire_key","table":"fire_keys","humanOnly":true,"params":[]},
+  "mailbox_state": {"id":15,"name":"mailbox_state","table":"mailboxes","humanOnly":false,"params":[{"name":"status","id":10,"type":"enum","typeCode":3,"wire":1,"required":true,"column":true,"ref":null,"enum":"mailbox_status"},{"name":"last_error","id":12,"type":"text","typeCode":12,"wire":2,"required":false,"column":true,"ref":null,"enum":null},{"name":"last_sync_at","id":11,"type":"time","typeCode":10,"wire":1,"required":false,"column":true,"ref":null,"enum":null}]},
+  "unlink_mail": {"id":16,"name":"unlink_mail","table":"mailboxes","humanOnly":true,"params":[]},
 };
 
 /** `accounts`: server-side. */
@@ -980,6 +981,13 @@ export interface Mission {
   in_flight_at: number | null;
   confirmation: Confirmation | null;
   note: string | null;
+  cc: string | null;
+  subject: string | null;
+  in_reply_to: string | null;
+  refs: string | null;
+  message_id: string | null;
+  gmail_msgid: number | null;
+  gmail_thrid: number | null;
 }
 /** `fire_requests`: resident. */
 export interface FireRequest {

@@ -30,9 +30,13 @@ One per route of an application; the unit of fire.
 | --- | --- | --- |
 | application_id | ref applications ! | |
 | kind | enum `mission_kind`: email, careers_page, linkedin, x_dm, discord, other ! | |
-| target | str ? | the route: an address, a URL or a handle |
+| target | str ? | the route: a URL or a handle; an email's To, up to 10 addresses, comma-separated |
 | contact_id | ref contacts ? | |
-| draft | text ? | markdown: a form's fields, a DM's text. An email mission's draft is its outbound outreach row (below) |
+| draft | text ? | markdown: a form's fields, a DM's text; an email's body |
+| cc, subject | str ? | an email's |
+| in_reply_to, refs | str ?, text ? | an email follow-up's, as the thread holds them |
+| message_id | str ? readonly | the Message-ID the node minted, stamped before SMTP |
+| gmail_msgid, gmail_thrid | i64 ? readonly | set by `landed` |
 | state | enum `mission_state`: draft, draft_ready, fire_ready, in_flight, fired, cancelled ! = draft | |
 | last_error | text ? readonly | the last failed shot's reason (rule 2) |
 | fired_at | time ? readonly | when the shot landed |
@@ -51,18 +55,25 @@ email draft.
 Commands:
 
 - `fire key:u32?`: any actor but mail. Judged below. The mission goes in
-  flight; an email mission's outbound row goes queued (the node mints its
-  Message-ID). A refusal is `fire` with the commander's answer.
+  flight. A refusal is `fire` with the commander's answer.
+- `stamp message_id`: the mail actor, once, while in flight: the Message-ID
+  the node minted (`<hm.{random}@{the address's domain}>`), recorded before
+  it sends, so after a crash the node finds it in Gmail's Sent and writes
+  `landed` instead of sending twice.
 - `landed gmail_msgid:i64? gmail_thrid:i64?`: the shot landed. Email: the
   mail actor only (the node, after SMTP accepted it; also after a crash, when
   Gmail's Sent holds the Message-ID). Other kinds: the API key that fired, or
   the operator (the agent's report: rule 3 makes it provisional). One op: the
-  mission fired, its shot burned, the outbound row sent (sent_at, Gmail ids),
-  the application moved to submitted (from fire_ready or open_fire; later
+  mission fired (fired_at, the Gmail ids), its shot burned, the application
+  moved to submitted (from fire_ready or open_fire; later
   stages stay) with its CV version frozen, and a `fire` event.
 - `failed reason:text`: the shot failed (SMTP error; a form that refused).
   Same authority as `landed`. The mission back to fire_ready with last_error,
-  the shot unburned and still covered; the outbound row failed.
+  the shot unburned and still covered.
+
+An email mission's sent mail and every reply are outreach rows (turing's
+type): records of what happened, filed to the mission by its message_id
+(Gmail's copy of the sent mail is ingested like any other).
 
 ### `fire_requests` (desk, resident)
 
@@ -108,9 +119,9 @@ The frozen scope (rule 1): one row per mission a key covers.
 | hash | str ! | SHA-256 (hex) of what the mission fires, at the key's creation |
 | burned_at | time ? | set by `landed`, cleared by a bounce |
 
-The hash covers the mission's kind, target and draft, its application, the
-CV version the application's pick sends, and an email mission's outbound
-row: to, cc, subject, body, in_reply_to, refs. A mission edited after the key
+The hash covers the mission's kind, target, draft, cc, subject, in_reply_to
+and refs, its application, and the CV version the application's pick sends:
+everything that goes out. A mission edited after the key
 was made no longer matches its shot: `fire` answers `changed`.
 
 ### `mailboxes` (mail, resident, singleton)
@@ -255,7 +266,7 @@ mission held by an unsettled prior send):
  "missions": [
   {"id": 33, "kind": "email", "target": "jobs@acme.example", "state": "fire_ready",
    "application": {"id": 120, "no": 120, "company": "Acme", "role": "Staff Engineer", "stage": "fire_ready", "corporation_id": 3},
-   "draft": {"outreach_id": 501, "to": "jobs@acme.example", "cc": null, "subject": "Staff Engineer application", "body": "Hello ...", "in_reply_to": null, "refs": null},
+   "draft": {"to": "jobs@acme.example", "cc": null, "subject": "Staff Engineer application", "body": "Hello ...", "in_reply_to": null, "refs": null},
    "cv_version_id": 88, "hash": "9f2c...", "eligible": true, "why": null},
   {"id": 34, "kind": "careers_page", "target": "https://job-boards.greenhouse.io/acme/jobs/4012", "state": "fire_ready",
    "application": {"id": 121, "no": 121, "company": "Acme", "role": "Platform Engineer", "stage": "fire_ready", "corporation_id": 3},
@@ -274,7 +285,8 @@ the eligible missions' ids and hashes, which `create_fire_key` echoes.
 ```json
 {"missions": [
   {"id": 33, "application_id": 120, "kind": "email", "target": "jobs@acme.example", "contact_id": null,
-   "state": "fire_ready", "draft": null, "outreach_id": 501, "last_error": null,
+   "state": "fire_ready", "draft": "Hello ...", "cc": null, "subject": "Staff Engineer application",
+   "in_reply_to": null, "refs": null, "message_id": null, "last_error": null,
    "fired_at": null, "fired_by": null, "fire_key_id": null, "in_flight_at": null, "confirmation": null, "note": null,
    "hash": "9f2c...", "covered_by": [7], "report_due": false}
 ]}

@@ -846,9 +846,11 @@ table cv_rules corpus resident
 # ---------------------------------------------------------------- missions and fire
 
 # One route of an application (a careers page, the hiring address, a
-# LinkedIn message, ...): the unit of fire. An email mission's draft is its
-# outbound outreach row; the others' is `draft`. in_flight and fired are the
-# commands' alone, and a mission in flight or fired takes no edit.
+# LinkedIn message, ...): the unit of fire. Its draft is markdown (a form's
+# fields, a message's text); an email mission's is the mail itself: target
+# its To (up to 10 addresses), cc, subject, draft its body, in_reply_to and
+# refs for a follow-up. in_flight and fired are the commands' alone, and a
+# mission in flight or fired takes no edit.
 table missions desk resident
   cap 200000
   index application_id
@@ -867,8 +869,18 @@ table missions desk resident
   col in_flight_at time ? readonly
   col confirmation enum confirmation ? readonly
   col note text ?
-  # Starts a shot: an agent's needs a live key covering the mission.
+  col cc str ?
+  col subject str ?
+  col in_reply_to str ?
+  col refs text ?
+  # The Message-ID the node minted for the shot, stamped before it sends;
+  # the Gmail ids once it landed.
+  col message_id str ? readonly
+  col gmail_msgid i64 ? readonly
+  col gmail_thrid i64 ? readonly
+  # Starts a shot, under a live key covering the mission.
   command fire key:u32?
+  command stamp message_id
   # The shot's outcome: an email's from the mail actor, another's from the
   # key that fired it or the operator.
   command landed gmail_msgid:i64? gmail_thrid:i64?

@@ -849,7 +849,14 @@ CREATE TABLE "missions" (
   "fired_with" INTEGER,
   "in_flight_at" TEXT,
   "confirmation" TEXT,
-  "note" TEXT
+  "note" TEXT,
+  "cc" TEXT,
+  "subject" TEXT,
+  "in_reply_to" TEXT,
+  "refs" TEXT,
+  "message_id" TEXT,
+  "gmail_msgid" INTEGER,
+  "gmail_thrid" INTEGER
 ) STRICT;
 CREATE INDEX "missions__account_account_id" ON "missions" ("account_id");
 CREATE INDEX "missions__index_application_id" ON "missions" ("account_id", "application_id");
