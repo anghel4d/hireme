@@ -7,7 +7,7 @@
 // command, judged by the kernel here before the sequencer judges it again.
 
 import { ENUMS } from "../gen/schema.ts"
-import { failed, application, command, ids, put, query as read, row, value, type Input, type Row } from "../kernel.ts"
+import { failed, application, command, ids, page, put, query as read, Refused, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
 import { rowHref } from "./world.ts"
@@ -196,6 +196,87 @@ function events(d: Doc, appId: number): Html {
 const LINK = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`
 const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`
 
+// ------------------------------------------------------------------ missions: the routes it goes out by
+
+type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; report_due: boolean }
+const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
+const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
+  try {
+    return read<T>(op as Parameters<typeof read>[0], params)
+  } catch {
+    return null
+  }
+}
+
+/** The commander's answer to a refused shot, as a sentence: why, and what the key still holds. */
+export function commander(d: Row): string {
+  const why: Record<string, string> = {
+    no_key: "no live fire key covers it: authorize it first",
+    burned: `its shot under key #${str(d.key)} is spent`,
+    changed: `it was edited after key #${str(d.key)} was made, so that key no longer covers it`,
+    expired: `key #${str(d.key)} has expired`,
+    revoked: `key #${str(d.key)} was revoked`,
+    out_of_scope: `key #${str(d.key)} does not cover it`,
+    not_yours: `key #${str(d.key)} is for another API key`,
+    cap: "today's send cap is reached",
+    mailbox: "Gmail is not linked and live",
+  }
+  const left = d.key ? ` Key #${str(d.key)} has ${str(d.remaining) || "nothing"} left${d.expires_in ? `, ${str(d.expires_in)} to go` : ""}.` : ""
+  return `Mission ${str(d.mission)} did not fire: ${why[str(d.why)] ?? str(d.why)}.${left}`
+}
+
+/** The states a put moves a mission among; in flight and fired are the commands'. */
+const STAGED = ["draft", "draft_ready", "fire_ready", "cancelled"]
+
+/** A mission's compose: an email's To, Cc, subject and body are the mission itself, as its key's hash freezes them. */
+function compose(m: Mission, appId: number): Html {
+  const email = m.kind === "email"
+  const moved = Number(row("missions", m.id)?.rev ?? 0) !== v().editRev
+  return html`<form class="stack" data-submit="save-mission" data-act="save-mission" data-mission="${m.id}" data-id="${appId}">
+    ${m.covered_by.length > 0 ? html`<p class="warn">Key #${m.covered_by[0]} covers this mission as it reads now: a saved edit takes it out of that key.</p>` : EMPTY}
+    ${moved ? html`<p class="notice" role="alert">This mission changed after you opened it; saving will be refused rather than overwrite the change.</p>` : EMPTY}
+    <label>${email ? "To (up to 10, comma-separated)" : "Target (a URL or a handle)"} <input name="target" value="${m.target ?? ""}"${flag("required", email)}></label>
+    ${email ? html`<label>Cc <input name="cc" value="${m.cc ?? ""}"></label><label>Subject <input name="subject" value="${m.subject ?? ""}" required></label>` : EMPTY}
+    <label>${email ? "Body" : "Draft (markdown: a form's fields, a message's text)"} <textarea name="draft" rows="12" data-autofocus>${m.draft ?? ""}</textarea></label>
+    <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
+}
+
+function missions(appId: number): Html {
+  // The rows are the replica's; covered_by (the live keys over each) is the kernel's answer once it gives one.
+  const known = new Map((ask<{ missions: Mission[] }>("missions", { application: appId })?.missions ?? []).map((m) => [m.id, m]))
+  const ms = page({ table: "missions", where: { application_id: appId }, order: ["id", "asc"] }, 50).rows.map((r): Mission => ({
+    // An added route reads its state before the node's default comes back.
+    ...(r as unknown as Mission), state: str(r.state) || "draft", covered_by: known.get(Number(r.id))?.covered_by ?? [], report_due: known.get(Number(r.id))?.report_due ?? false }))
+  const quota = ask<{ cap: number; left: number }>("mail_quota", {})
+  return html`<section class="card" data-key="missions"><h2>Missions</h2>
+    ${ms.length === 0 ? html`<p class="hint">No route yet: add one below (the hiring address, the careers page, a message).</p>` : EMPTY}
+    <ul class="rows">${ms.map((m) => {
+    const ready = m.state === "fire_ready"
+    const covered = m.covered_by.length > 0
+    const email = m.kind === "email"
+    const staged = STAGED.includes(m.state)
+    if (mine(appId) && v().edit === `m${m.id}`) return html`<li data-key="mi${m.id}"><strong>${ROUTE[m.kind] ?? m.kind}</strong> #${m.id}${compose(m, appId)}</li>`
+    return html`<li data-key="mi${m.id}"><strong>${ROUTE[m.kind] ?? m.kind}</strong> <code>${m.target ?? ""}</code>
+      ${staged ? html`<select data-act="mission-state" data-on="change" data-mission="${m.id}" aria-label="State">${STAGED.map((x) => html`<option value="${x}"${flag("selected", x === m.state)}>${x.replace("_", " ")}</option>`)}</select>
+        <button type="button" class="ghost" data-act="mission-edit" data-mission="${m.id}">Edit</button>` : html`<span class="tag">${m.state.replace("_", " ")}</span>`}
+      ${email && m.subject ? html`<p>${m.subject}</p>` : EMPTY}
+      ${m.confirmation === "provisional" ? html`<span class="tag warn" title="Self-reported: it counts once a confirmation mail arrives">provisional</span>` : EMPTY}
+      ${m.fired_at ? html`<p class="muted">Fired ${m.fired_at} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}.</p>` : EMPTY}
+      ${m.last_error ? html`<p class="warn">Last shot failed: ${m.last_error}</p>` : EMPTY}
+      ${ready ? html`<div class="actions">
+        <button type="button" class="danger" data-act="mission-fire" data-mission="${m.id}"${flag("disabled", !covered)} title="${covered ? `Under key #${m.covered_by[0]}` : "No live fire key covers this mission"}">${email ? "Send" : "Fire"}</button>
+        ${covered ? EMPTY : html`<a class="ghost" href="/fire?missions=${m.id}" data-nav>Authorize</a>`}
+        ${email && quota ? html`<span class="muted">${quota.left} of ${quota.cap} left today</span>` : EMPTY}</div>` : EMPTY}
+      ${m.state === "in_flight" && !email ? html`<div class="actions"><span class="muted">Submitted by hand? Report it.</span>
+        <button type="button" data-act="mission-landed" data-mission="${m.id}">It went out</button>
+        <form class="row grow" data-submit="mission-failed" data-mission="${m.id}"><input name="reason" placeholder="Or what refused it" aria-label="Why it failed" required><button class="ghost">It failed</button></form></div>` : EMPTY}
+      ${m.state === "in_flight" && email ? html`<p class="muted">Sending since ${m.in_flight_at ?? ""}…</p>` : EMPTY}</li>`
+  })}</ul>
+    <form class="row grow" data-submit="mission-add" data-act="mission-add" data-id="${appId}">
+      <select name="kind" aria-label="Route">${(ENUMS.mission_kind ?? []).map((k) => html`<option value="${k}">${ROUTE[k] ?? k}</option>`)}</select>
+      <input name="target" placeholder="Address, URL or handle" aria-label="Target"><button>Add route</button></form></section>`
+}
+
 /**
  * One application whole: opened on the desk, and the pro view's pane
  * (`embedded`), where the way back is the board beside it and the way on is
@@ -220,7 +301,7 @@ export function body(appId: number, embedded: boolean): Html {
     ${rail(d, appId)}
     <div class="focus-grid">
       <div class="col">${score(d)}${coverage(d)}${cv(d, appId)}${listing(a, appId)}</div>
-      <div class="col">${around(a, appId)}${prose(a, appId)}${events(d, appId)}
+      <div class="col">${missions(appId)}${around(a, appId)}${prose(a, appId)}${events(d, appId)}
         <section class="card" data-key="override"><h2>Heat override</h2>
           ${a.heat_override ? html`<p>Overridden: ${str(a.heat_override_reason)}</p>` : html`<form class="row grow" data-submit="override" data-act="override" data-id="${appId}">
             <input name="reason" placeholder="Why this one goes over the cap" aria-label="Reason" required><button>Override</button></form>`}</section>
@@ -308,6 +389,28 @@ export function act(name: string, el: HTMLElement, appId_: number): void {
       return void command("open_fire", appId)
         .then(() => notice("ok", "Fire is open for this application."))
         .catch(failed)
+    case "mission-fire":
+      return void command("fire", Number(el.dataset.mission))
+        .then(() => notice("ok", "Sent off: it shows here once it lands."))
+        .catch((e) => (e instanceof Refused && e.code === "fire" && e.data ? notice("error", commander(e.data as Row)) : failed(e)))
+    case "mission-edit": {
+      const id = Number(el.dataset.mission)
+      return patch({ id: appId, edit: `m${id}`, editRev: Number(row("missions", id)?.rev ?? 0), editText: "" })
+    }
+    case "save-mission": {
+      const blank = (x: unknown): Input => (str(x).trim() === "" ? null : str(x).trim())
+      const set: Record<string, Input> = { target: blank(f.target), draft: (f.draft ?? "") === "" ? null : (f.draft as Input) }
+      if ("subject" in f) Object.assign(set, { cc: blank(f.cc), subject: blank(f.subject) })
+      return void put("missions", set, { id: Number(el.dataset.mission), expectRev: v().editRev }).then(() => patch({ edit: "" })).catch(failed)
+    }
+    case "mission-state":
+      return void put("missions", { state: (el as HTMLSelectElement).value }, { id: Number(el.dataset.mission) }).catch(failed)
+    case "mission-add":
+      return void resetAfter(el as HTMLFormElement, () => put("missions", { application_id: appId, kind: str(f.kind), target: str(f.target).trim() === "" ? null : str(f.target).trim() })).catch(failed)
+    case "mission-landed":
+      return void command("landed", Number(el.dataset.mission)).catch(failed)
+    case "mission-failed":
+      return void command("failed", Number(el.dataset.mission), { reason: str(f.reason).trim() }).catch(failed)
     case "keep-score":
       return void put("applications", { score_100: Number(el.dataset.score) }, { id: appId }).catch(failed)
     case "listing":

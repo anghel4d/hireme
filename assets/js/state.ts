@@ -19,7 +19,7 @@
 //     /me/<rules|cv>
 //     /account
 
-export const LENSES = ["desk", "world", "outreach", "me", "account"] as const
+export const LENSES = ["desk", "world", "outreach", "me", "account", "fire"] as const
 export type Lens = (typeof LENSES)[number]
 
 export interface Address {

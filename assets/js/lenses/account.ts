@@ -6,6 +6,9 @@
 // (lib/hireme_web/account.ex lists them). Linking a provider is the one
 // HTTP step: it leaves the page.
 //
+// Mail: the account's Gmail is linked here with an app password (account.mail.link), and its state
+// (linked, retrying, password refused, last sync) is the replica's one `mailboxes` row.
+//
 // A change that needs a fresh session is refused `step_up`; the lens keeps
 // the action, asks for a factor (passkey, TOTP or a recovery code), and
 // retries it once the session is fresh.
@@ -163,11 +166,98 @@ async function stepped(method: string, params: Record<string, unknown>): Promise
   // Ceremonies retry as themselves: their answers (a QR code, passkey options) are what the next step needs.
   else if (waiting?.method === "account.totp.begin") totpBegin()
   else if (waiting?.method === "account.passkey.begin") await enroll(String(waiting.params.name ?? ""))
+  // Another lens's action parked behind the factor (creating a fire key) resumes there.
+  else if (waiting && resumes.has(waiting.method)) {
+    const go = resumes.get(waiting.method)!
+    resumes.delete(waiting.method)
+    go()
+  }
+  // Linking mail parked only its address: the password is typed again, never kept while a factor is asked for.
+  else if (waiting?.method === "mail-link") {
+    patch({ open: "mail" })
+    notice("info", "Verified. Enter the app password again to link.")
+  }
   else if (waiting) {
     const then = parked
     parked = undefined
     await call(waiting.method, waiting.params, then ?? ((r) => reveal(waiting.method, r)))
   }
+}
+
+// ------------------------------------------------------------------ mail: the linked Gmail
+
+/** What the node answers a link that failed (nothing was stored), in the operator's terms. */
+const MAIL_ERR: Record<string, string> = {
+  auth: "Gmail refused this app password. Make a new one and link again.",
+  imap_disabled: "IMAP is off for this Gmail account: turn it on in Gmail's settings (Forwarding and POP/IMAP), then link again.",
+  unreachable: "Gmail could not be reached. Try again in a minute.",
+  address: "Only a gmail.com or googlemail.com address can be linked for now.",
+  limit: "Too many link attempts: wait ten minutes, then try again.",
+}
+/** The address a link parked behind a step-up, to fill the form again (never the password). */
+let mailAddress = ""
+
+/** The account's one mailbox row, null before any link. */
+function mailbox(): Row | null {
+  try {
+    return page({ table: "mailboxes" }, 1).rows[0] ?? null
+  } catch {
+    return null
+  }
+}
+
+function mail(): Html {
+  const m = mailbox()
+  const status = str(m?.status) || "unlinked"
+  const linked = m !== null && status !== "unlinked"
+  const tag = { live: html`<span class="tag ok">linked</span>`, linking: html`<span class="tag">linking…</span>`, auth_failed: html`<span class="tag bad">password refused</span>`, error: html`<span class="tag warn">retrying</span>` }[status] ?? EMPTY
+  const form = html`<form class="stack" data-submit="mail-link" data-act="mail-link" data-key="mail-form">
+      <label>Gmail address <input name="address" type="email" required autocomplete="email" value="${mailAddress || str(m?.address)}"></label>
+      <label>App password <input name="app_password" type="password" required autocomplete="off" spellcheck="false" minlength="16" maxlength="24"></label>
+      <p class="hint">An app password, not your Google password: Google Account, Security, 2-Step Verification, App passwords. Sixteen letters, with or without spaces. hireme checks it with one sign-in, keeps it sealed, and never shows it again.</p>
+      <span class="row"><button class="primary">Link</button><button type="button" class="ghost" data-act="close">Cancel</button></span></form>`
+  return html`<section class="card" data-key="mail"><h2>Mail</h2>
+    ${linked
+      ? html`<p><b>${str(m!.address)}</b> ${tag}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
+        ${status === "auth_failed" ? html`<p class="error">${str(m!.last_error) || MAIL_ERR.auth} Link it again with a new app password.</p>` : status === "error" && m!.last_error ? html`<p class="muted">${MAIL_ERR[str(m!.last_error)] ?? str(m!.last_error)}; retrying.</p>` : EMPTY}
+        <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
+      : html`<p class="muted">Link your Gmail: replies to your applications file themselves here, and mail sent from hireme sits in Gmail's Sent. hireme reads only the job search's mail, labels it hireme, and never moves, archives or deletes anything.</p>`}
+    ${v().open === "mail" ? form : linked ? EMPTY : html`<button type="button" data-act="open" data-form="mail">Link Gmail</button>`}
+  </section>`
+}
+
+async function linkMail(address: string, password: string): Promise<void> {
+  try {
+    const r = await rpc<{ ok?: boolean; error?: string }>("account.mail.link", { address, app_password: password })
+    if (r.error) return patch({ error: MAIL_ERR[r.error] ?? r.error })
+    mailAddress = ""
+    patch({ open: "", error: "" })
+    notice("ok", `Gmail linked: ${address}.`)
+  } catch (e) {
+    // A step-up parks the address only; the password is asked for again once the session is fresh.
+    if (e instanceof Refused && e.code === "step_up") {
+      mailAddress = address
+      return patch({ stepUp: { method: "mail-link", params: {} }, error: "", open: "" })
+    }
+    patch({ error: e instanceof Refused && MAIL_ERR[e.code] !== undefined ? MAIL_ERR[e.code]! : said(e) })
+  }
+}
+
+// ------------------------------------------------------------------ the step-up, for other lenses
+
+const resumes = new Map<string, () => void>()
+/** Ask for a fresh factor before `method` (a name of the caller's), and run `resume` once it is given. */
+export function askStepUp(method: string, resume: () => void): void {
+  resumes.set(method, resume)
+  patch({ stepUp: { method, params: {} }, error: "" })
+}
+/** The factor dialog and the last error, as the account lens draws them, for a lens that asked. */
+export const stepUpPanel = (): Html => html`${v().error !== "" ? html`<p class="error" role="alert" data-key="step-err">${v().error}</p>` : EMPTY}${stepUp()}`
+/** The dialog's own actions (passkey, codes, cancel), run for a lens that drew it; false for any other. */
+export function stepAct(name: string, el: HTMLElement, ev: Event): boolean {
+  if (!name.startsWith("step-")) return false
+  act(name, el, ev)
+  return true
 }
 
 /** What a call returned that is shown once: a key's secret, recovery codes. */
@@ -483,7 +573,7 @@ function view(): Html {
       <p class="muted">${fresh > 0 ? `Recently verified: sensitive changes go through for ${Math.ceil(fresh / 60)} more min.` : "Sensitive changes will ask for a second factor first."}</p>
     </section>
     <div class="alerts" data-key="alerts">${v().error !== "" ? html`<p class="error" role="alert" data-key="err">${v().error}</p>` : EMPTY}${stepUp()}</div>
-    ${revealed()}${identities()}${factors()}${keys()}${leases()}${sessions()}${hosts()}${audit()}
+    ${revealed()}${identities()}${mail()}${factors()}${keys()}${leases()}${sessions()}${hosts()}${audit()}
   </div>`
 }
 
@@ -514,6 +604,16 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return void link("email", f.email ?? "").then(() => patch({ open: "" }))
     case "unlink":
       return void call("account.identity.unlink", { id })
+    case "mail-link": {
+      if (!form) return
+      const password = (f.app_password ?? "").replace(/\s/g, "")
+      // The password leaves the field before the call: nothing on the page holds it once it is sent.
+      const box = form.elements.namedItem("app_password") as HTMLInputElement | null
+      if (box) box.value = ""
+      return void linkMail((f.address ?? "").trim(), password)
+    }
+    case "mail-unlink":
+      return void call("account.mail.unlink", {}, () => notice("ok", "Gmail unlinked: hireme stopped reading it and forgot the password."))
     case "session-revoke":
       return void call("account.session.revoke", { id })
     case "session-others":
@@ -593,6 +693,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return void stepped("account.step_up.mail_code", { code: (f.code ?? "").replace(/\s/g, "") })
     case "step-cancel":
       parked = undefined
+      if (v().stepUp) resumes.delete(v().stepUp!.method)
       return patch({ stepUp: null })
     case "copy":
       return void navigator.clipboard?.writeText(v().reveal?.lines.join("\n") ?? "").then(() => notice("ok", "Copied."))

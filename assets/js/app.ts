@@ -15,6 +15,7 @@ import { LENSES, dismiss, format, go, model, notice, onRender, parse, schedule, 
 import { SCHEMA_REV } from "./gen/schema.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
+import fire from "./lenses/fire.ts"
 import atlas from "./lenses/atlas.ts"
 import desk from "./lenses/desk.ts"
 import me from "./lenses/me.ts"
@@ -36,7 +37,7 @@ export interface View {
 }
 
 /** Every lens, in the one bundle: a chunk per lens was a request per lens on every load. */
-const VIEWS: Record<Lens, View> = { desk, world, outreach, me, account }
+const VIEWS: Record<Lens, View> = { desk, world, outreach, me, account, fire }
 /** The current view of a lens: the atlas is the world's view of its places. */
 const viewOf = (lens: Lens): View => (lens === "world" && model.address.sub === "atlas" ? atlas : VIEWS[lens])
 
@@ -62,7 +63,7 @@ function link(): Html {
  * lens that reads the replica waits for the kernel to load.
  */
 const DERIVES: readonly Lens[] = ["desk"]
-const REPLICA: readonly Lens[] = ["desk", "world", "outreach", "me", "account"]
+const REPLICA: readonly Lens[] = ["desk", "world", "outreach", "me", "account", "fire"]
 const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
 
 /** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */

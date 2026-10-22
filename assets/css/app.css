@@ -76,6 +76,7 @@ button, .button {
 button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 button.danger { background: var(--bad); border-color: var(--bad); color: var(--panel); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.ghost, a.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 3px 6px; }
 button.ghost:hover { color: var(--ink); border-color: var(--line); }
 button[aria-busy="true"] { opacity: 0.6; cursor: progress; }
@@ -516,3 +517,10 @@ tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 .me output.verdict mark { background: var(--bad); color: var(--panel); border-radius: 2px; }
 .me tr[aria-selected] th { font-weight: 700; }
 .me pre.prose { white-space: pre-wrap; max-height: 40vh; overflow: auto; font-size: 13px; }
+
+/* Fire: a review is read in full; a mission that cannot fire stays visible, dimmed. */
+.fire .mission header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+.fire .mission.held { opacity: 0.75; }
+.fire dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
+.fire dl.mail dt { color: var(--muted); }
+.fire dl.mail dd { margin: 0; word-break: break-word; }

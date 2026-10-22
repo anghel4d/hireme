@@ -19,7 +19,7 @@ defmodule HiremeWeb.Router do
   }
   # The one page, under every lens's address (a view, then an item); the lens is the
   # client's to read. focus and atlas are old addresses the client rewrites.
-  @lenses ~w(desk world outreach me account focus atlas)
+  @lenses ~w(desk world outreach me account focus atlas fire)
 
   @impl true
   def init(opts), do: opts
