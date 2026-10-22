@@ -6,6 +6,7 @@
 //! what the protocol says, so it is the one copy of it.
 
 pub mod diag;
+pub mod mission;
 pub mod tools;
 
 use std::collections::HashSet;
@@ -25,6 +26,10 @@ pub fn shape(tool: &str) -> Option<String> {
         "drop" => r#"{"table":"offices","id":31}"#.into(),
         "unlinked" => r#"{}  or  {"limit":20,"after":<the last application id shown>}"#.into(),
         "cv" => r#"{}  or  {"application":<no>}  or  {"check":"<pattern>","position":<n>}  or  {"fields":true}"#.into(),
+        "missions" => r#"{}  or  {"application":<id>,"state":"fire_ready","kind":"email"}"#.into(),
+        "mission" => r#"{"id":<mission id>}"#.into(),
+        "fire_keys" => "{}".into(),
+        "request_fire_key" => r#"{"missions":"33-34,56","reason":"<why these shots, at most 280 chars>"}"#.into(),
         "cv_upload" => r#"{"root_id":<cv_roots id>,"name":"cv.pdf","base64":"<the file>","note":"<what changed>"}"#.into(),
         other => return tools::command_named(other).map(command_shape),
     })

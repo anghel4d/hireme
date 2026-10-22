@@ -231,6 +231,50 @@ pub fn list(m: Masks) -> Vec<Json> {
             false,
         ));
     }
+    // Missions and fire keys (docs/mail/kernel.md): listed once the schema has them.
+    if table_named("missions").is_some_and(|t| m.reads(t)) {
+        out.push(tool(
+            "missions",
+            "Missions",
+            "The missions (one route of an application each: an email, a careers page, a LinkedIn, X or Discord message; the unit of fire), filtered by application id, state or kind: each with its state, the live fire keys covering it and whether a report is due. Then `mission {\"id\":n}` for one mission's brief.".into(),
+            json!({"type":"object","properties":{
+                "application":{"type":"integer","minimum":1,"description":"an application id"},
+                "state":{"type":"string","enum":schema::enum_names("mission_state").unwrap_or(&[])},
+                "kind":{"type":"string","enum":schema::enum_names("mission_kind").unwrap_or(&[])}
+            },"additionalProperties":false}),
+            true,
+            false,
+        ));
+        out.push(tool(
+            "mission",
+            "A mission's brief",
+            "One mission's orders: its target, application and company, what the shot produces, what to stage, how it fires and what you report after. Read it before staging or firing.".into(),
+            json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1}},"additionalProperties":false}),
+            true,
+            false,
+        ));
+        out.push(tool(
+            "fire_keys",
+            "Live fire keys",
+            "The account's live fire keys: each key's missions (scope), what remains, what is burned, in flight or changed since approval, who may use it and when it expires; and today's mail quota. Every shot needs one; only the operator creates them.".into(),
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            true,
+            false,
+        ));
+    }
+    if table_named("fire_requests").is_some_and(|t| m.writes(t)) {
+        out.push(tool(
+            "request_fire_key",
+            "Ask the operator for a fire key",
+            "Asks the operator to authorize missions to fire: missions as id ranges (\"1-44,56-213,444\"), with a reason of at most 280 characters. Answers a link to give the operator: their review page, predialed, with every draft and target in full. Opening it creates nothing; the operator creates the key there, under step-up.".into(),
+            json!({"type":"object","required":["missions","reason"],"properties":{
+                "missions":{"type":"string","description":"mission ids as ranges, e.g. 1-44,56-213,444"},
+                "reason":{"type":"string","maxLength":280}
+            },"additionalProperties":false}),
+            false,
+            false,
+        ));
+    }
     if table_named("cv_rules").is_some_and(|t| m.reads(t)) {
         out.push(tool(
             "cv",

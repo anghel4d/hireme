@@ -238,8 +238,9 @@ impl Agent {
         if !tools::list(m).iter().any(|t| t["name"] == name) {
             return Err(json!({"code":-32602,"message":format!("Unknown tool: {name}")}));
         }
+        // {} answers the tool's shape, unless the shape says {} is itself a call (`unlinked {}`).
         if args.as_object().is_some_and(|o| o.is_empty())
-            && let Some(shape) = mcp::shape(name)
+            && let Some(shape) = mcp::shape(name).filter(|s| !s.starts_with("{}"))
         {
             return Ok(text(format!("{name} {shape}\n"), None, false));
         }
@@ -253,6 +254,8 @@ impl Agent {
             },
             "find" | "get" | "history" | "text" | "cv" => self.read_tool(name, &args).await,
             "unlinked" => self.unlinked(&args).await,
+            "missions" | "mission" | "fire_keys" => self.missions(name, &args).await,
+            "request_fire_key" => self.request_fire_key(&args).await,
             "lease" => self.lease(&args).await,
             "release" => self.release(&args).await,
             "cv_upload" => self.cv_upload(&args).await,
@@ -424,6 +427,44 @@ impl Agent {
         )
     }
 
+    /// The mission reads, each a kernel query (docs/mail/kernel.md) rendered as the node renders it.
+    async fn missions(&self, name: &str, args: &Json) -> Json {
+        let what = format!("{name} {}", compact(args));
+        let ask = |op: &'static str, a: Json| async move { self.up.query(op, &a).await };
+        let answer = match name {
+            "mission" => ask("mission_brief", json!({"mission": args["id"]})).await.map(|r| r.map(|v| ("brief", v))),
+            "fire_keys" => match (ask("live_keys", json!({})).await, ask("mail_quota", json!({})).await) {
+                (Ok(Ok(live)), Ok(quota)) => Ok(Ok(("keys", json!({"live": live, "quota": quota.ok()})))),
+                (Ok(Err(refused)), _) => Ok(Err(refused)),
+                (Err(why), _) | (_, Err(why)) => Err(why),
+            },
+            _ => ask("missions", args.clone()).await.map(|r| r.map(|v| ("list", v))),
+        };
+        match answer {
+            Ok(Ok((view, v))) => text(mcp::mission::view(view, &v).unwrap_or_default(), Some(v), false),
+            Ok(Err((code, data))) => text(diag::render(&code, &what, &data), None, true),
+            Err(why) => text(format!("error[session]: {why}\n   = help: a read is safe to call again\n"), None, true),
+        }
+    }
+
+    /// The request is a plain put of fire_requests (the kernel sets requested_by from this key) of
+    /// the canonical ranges; the answer is the operator's review link for it.
+    async fn request_fire_key(&self, args: &Json) -> Json {
+        let ranges = match self.up.query("ranges", &json!({"text": args["missions"]})).await {
+            Ok(Ok(v)) => v,
+            Ok(Err((code, data))) => return text(diag::render(&code, &format!("request_fire_key {}", compact(args)), &data), None, true),
+            Err(why) => return text(format!("error[session]: {why}\n   = note: nothing was requested\n"), None, true),
+        };
+        let put = self.write("put", &json!({"table": "fire_requests", "set": {"missions": ranges["text"], "reason": args["reason"]}})).await;
+        match put["structuredContent"]["ops"][0]["id"].as_u64() {
+            Some(id) if put["isError"] == false => {
+                let v = json!({"id": id, "missions": ranges["text"], "count": ranges["count"], "origin": self.up.origin});
+                text(mcp::mission::requested(&v), Some(v), false)
+            }
+            _ => put,
+        }
+    }
+
     async fn lease(&self, args: &Json) -> Json {
         let label = lock(&self.label).clone();
         match self.up.claim(self.id, &label, args).await {
@@ -565,7 +606,8 @@ impl Agent {
             return text("error[session]: not connected to the node\n   = note: nothing was sent\n   = help: hireme-mcp reconnects on its own; call again\n".into(), None, true);
         }
         let long = ops.len() > LISTED;
-        let (mut lines, mut rows, mut refused, mut pending) = (Vec::new(), Vec::new(), 0usize, 0usize);
+        // A refused shot is the commander's answer (`fire`): an answer, never an error.
+        let (mut lines, mut rows, mut refused, mut pending, mut answered) = (Vec::new(), Vec::new(), 0usize, 0usize, 0usize);
         for (op_id, label, _) in &ops {
             if let Some(data) = local.get(op_id) {
                 refused += 1;
@@ -586,6 +628,7 @@ impl Agent {
                 Some(Verdict::Nack { code, data }) => {
                     refused += 1;
                     let refusal = tools::refusal(code);
+                    answered += usize::from(refusal == "fire");
                     let mut line = diag::render(&refusal, label, &data);
                     if self.pause_from(&data) {
                         line.push_str(PAUSED_NOTE);
@@ -615,7 +658,7 @@ impl Agent {
         } else {
             String::new()
         };
-        text(format!("{head}{}", lines.concat()), Some(json!({"ops": rows, "atomic": atomic})), refused > 0)
+        text(format!("{head}{}", lines.concat()), Some(json!({"ops": rows, "atomic": atomic})), refused > answered)
     }
 
     // ------------------------------------------------------------ resources

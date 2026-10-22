@@ -806,7 +806,8 @@ defmodule HiremeWeb.Mcp.Session do
 
   # ------------------------------------------------------------------ tools
 
-  @fixed ~w(hireme schema find get history text lease release put drop cv cv_upload unlinked)
+  @fixed ~w(hireme schema find get history text lease release put drop cv cv_upload unlinked
+            missions mission fire_keys request_fire_key)
 
   defp tool(name, args, msg, modern, from, s) when is_map(args) do
     listed = Enum.any?(tools(s), &(&1["name"] == name))
@@ -818,7 +819,8 @@ defmodule HiremeWeb.Mcp.Session do
       not listed or (name not in @fixed and Schema.command(name) == nil) ->
         {{:error, %{code: -32602, message: "Unknown tool: #{name}"}}, s}
 
-      args == %{} and Nif.mcp_shape(name) != nil ->
+      # {} answers the tool's shape, unless the shape says {} is itself a call (`unlinked {}`).
+      args == %{} and shape_only?(Nif.mcp_shape(name)) ->
         {{:ok, text("#{name} #{Nif.mcp_shape(name)}\n", nil, false)}, s}
 
       true ->
@@ -828,6 +830,8 @@ defmodule HiremeWeb.Mcp.Session do
 
   defp tool(name, _args, _msg, _modern, _from, s),
     do: {{:ok, text(Nif.mcp_usage(name, "arguments are a JSON object"), nil, true)}, s}
+
+  defp shape_only?(shape), do: is_binary(shape) and not String.starts_with?(shape, "{}")
 
   defp run("schema", args, _msg, _modern, _from, s) do
     {r, w, d} = s.masks
@@ -920,6 +924,62 @@ defmodule HiremeWeb.Mcp.Session do
       end}, s}
   end
 
+  # The mission reads, each a kernel query (docs/mail/kernel.md), rendered as the daemon renders them.
+  defp run(name, args, _msg, _modern, _from, s) when name in ~w(missions mission fire_keys) do
+    answer =
+      case name do
+        "mission" ->
+          with {:ok, v} <- query("mission_brief", %{"mission" => args["id"]}, s),
+               do: {:ok, "brief", v}
+
+        "fire_keys" ->
+          with {:ok, live} <- query("live_keys", %{}, s) do
+            quota =
+              case query("mail_quota", %{}, s) do
+                {:ok, q} -> q
+                _ -> nil
+              end
+
+            {:ok, "keys", %{"live" => live, "quota" => quota}}
+          end
+
+        "missions" ->
+          with {:ok, v} <- query("missions", args, s), do: {:ok, "list", v}
+      end
+
+    {{:ok,
+      case answer do
+        {:ok, view, v} ->
+          text(Nif.mcp_mission(view, JSON.encode!(v)) || "", v, false)
+
+        {:refused, code, data} ->
+          text(render(code, "#{name} #{compact(args)}", data, s), nil, true)
+
+        {:error, why} ->
+          text("error[session]: #{why}\n   = help: a read is safe to call again\n", nil, true)
+      end}, s}
+  end
+
+  # The request is a plain put of fire_requests (the kernel sets requested_by from this key) of
+  # the canonical ranges; once it lands, the answer is the operator's review link for it.
+  defp run("request_fire_key", args, msg, modern, from, s) do
+    put = fn r ->
+      %{
+        "table" => "fire_requests",
+        "set" => %{"missions" => r["text"], "reason" => args["reason"]}
+      }
+    end
+
+    with {:ok, r} <- ranges(args, s),
+         {:ok, encoded} <- encode("put", put.(r), s.next_op, nil) do
+      ops = for {op_id, label, bytes} <- encoded, do: {op_id, label, decode_op(bytes)}
+      s = %{s | next_op: s.next_op + length(ops)}
+      submit(ops, "put", msg, modern, from, s, &requested(&1, r))
+    else
+      {:answer, result} -> {{:ok, result}, s}
+    end
+  end
+
   defp run("lease", args, _msg, _modern, _from, s) do
     case Lease.claim(s.account_id, s.wire.session.id, args) do
       {:ok, reply} ->
@@ -964,6 +1024,32 @@ defmodule HiremeWeb.Mcp.Session do
     end
   end
 
+  defp ranges(args, s) do
+    case query("ranges", %{"text" => args["missions"]}, s) do
+      {:ok, r} ->
+        {:ok, r}
+
+      {:refused, code, data} ->
+        {:answer, text(render(code, "request_fire_key #{compact(args)}", data, s), nil, true)}
+
+      {:error, why} ->
+        {:answer, text("error[session]: #{why}\n   = note: nothing was requested\n", nil, true)}
+    end
+  end
+
+  defp requested(%{"isError" => false, "structuredContent" => %{ops: [%{id: id}]}}, r) do
+    v = %{
+      "id" => id,
+      "missions" => r["text"],
+      "count" => r["count"],
+      "origin" => HiremeWeb.Endpoint.url()
+    }
+
+    text(Nif.mcp_mission("requested", JSON.encode!(v)), v, false)
+  end
+
+  defp requested(result, _r), do: result
+
   # A command on an application named by `no`: its id, read first.
   defp target(name, %{"no" => no}, s) when name not in ~w(put drop) do
     case query("get", %{"table" => "applications", "key" => %{"no" => no}}, s) do
@@ -1002,7 +1088,7 @@ defmodule HiremeWeb.Mcp.Session do
 
   # A put under a live bulk contract that covers it is one atomic burst;
   # anything else goes as ops each judged alone.
-  defp submit(ops, name, msg, modern, from, s) do
+  defp submit(ops, name, msg, modern, from, s, then \\ & &1) do
     n = length(ops)
 
     {atomic, s} =
@@ -1031,7 +1117,8 @@ defmodule HiremeWeb.Mcp.Session do
       modern: modern,
       ops: Enum.map(ops, fn {id, label, _} -> {id, label} end),
       verdicts: %{},
-      atomic: atomic
+      atomic: atomic,
+      then: then
     }
 
     pending = Enum.reduce(ops, s.pending, fn {id, _, _}, p -> Map.put(p, id, ref) end)
@@ -1089,8 +1176,9 @@ defmodule HiremeWeb.Mcp.Session do
             note = if data["paused"] == true, do: @paused_note, else: ""
             line = [render(name, label, data, s), note]
 
+            # A refused shot is the commander's answer (`fire`): an answer, never an error.
             {[line | lines], [%{op_id: id, ok: false, refusal: name, data: data} | rows],
-             refused + 1, s}
+             refused + if(name == "fire", do: 0, else: 1), s}
         end
       end)
 
@@ -1104,10 +1192,12 @@ defmodule HiremeWeb.Mcp.Session do
         else: ""
 
     {s,
-     text(
-       IO.iodata_to_binary([head | Enum.reverse(lines)]),
-       %{ops: Enum.reverse(rows), atomic: call.atomic},
-       refused > 0
+     call.then.(
+       text(
+         IO.iodata_to_binary([head | Enum.reverse(lines)]),
+         %{ops: Enum.reverse(rows), atomic: call.atomic},
+         refused > 0
+       )
      )}
   end
 

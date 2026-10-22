@@ -266,6 +266,12 @@ fn mcp_shape(tool: String) -> Option<String> {
     mcp::shape(&tool)
 }
 
+/// A mission view (`list`, `brief`, `keys`, `requested`) of a kernel answer, as the daemon renders it.
+#[rustler::nif]
+fn mcp_mission(view: String, data: String) -> NifResult<Option<String>> {
+    Ok(mcp::mission::view(&view, &json_in(&data)?))
+}
+
 /// A call's writes as `{op_id, label, op_bytes}` numbered from `first`, or the usage text that says why not.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn mcp_encode<'a>(env: Env<'a>, tool: String, input: String, first: u64, target: Option<u32>) -> NifResult<Term<'a>> {

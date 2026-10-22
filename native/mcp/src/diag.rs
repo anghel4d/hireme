@@ -38,6 +38,8 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("rule", "domain", "the CV pattern does not parse or check", "The data names the byte offset (at) and what is wrong there. Fix the pattern at that offset; a named mask must exist and may not form a cycle."),
     ("blob_missing", "domain", "no file with this hash", "Upload the file first (cv_upload), then put the version with the blob_sha it answered."),
     ("unlinked", "domain", "the application links to no corporation or place in the world", "Every application names its corporation (corporation_id) and, unless its work_mode is remote, its place (place_id); company and location stay the listing's own text. The refusal ranks the world's closest rows (did you mean) and gives the calls that fix it (try): confirm a candidate with `find`, then put the application again with its id. When no candidate is the company, research it and put it in corporations, with its domain and a source, before the application; a link is never guessed. `unlinked` lists the applications still missing one, with the same suggestions."),
+    ("fire", "domain", "the shot did not go", "The commander's answer, not an error: why (no_key, burned, changed, out_of_scope, expired, revoked, not_yours, not_ready, in_flight, fired, unlinked, app_stage, unsettled, mailbox, cap, heat), what the key has burned and has left, when it expires, and the next call. Nothing was sent. Without a covering key, `request_fire_key` asks the operator."),
+    ("step_up", "grant", "this needs the operator's fresh step-up", "Only the operator's browser, within minutes of a second-factor check, may do this (linking Gmail, creating a fire key). No key can; leave it for the operator."),
 ];
 
 pub fn names() -> impl Iterator<Item = &'static str> {
@@ -136,6 +138,9 @@ const NEEDS: &[(&str, &str, &str, &str)] = &[
 
 /// A refusal of `what` (e.g. `put corporations domain=example.com`) as a diagnostic.
 pub fn render(code: &str, what: &str, data: &Json) -> String {
+    if code == "fire" {
+        return commander(data);
+    }
     let (line, todo) = advice(code, data);
     let mut out = format!("error[{code}]: {line}\n  --> {what}\n");
     if code == "unlinked" {
@@ -479,6 +484,62 @@ fn compact(v: &Json) -> String {
     }
 }
 
+/// The fire judge's refusal is the commander's answer, never an error: the shot did not go, why, what
+/// the agent's keys still cover and for how long, and the one next call. Its data is the kernel's
+/// (docs/mail/kernel.md): why, mission, key, burned, remaining, in_flight, changed, expires_at,
+/// expires_in, live_keys, ask (what a request for the mission would carry), and for a cap resets_at.
+pub fn commander(data: &Json) -> String {
+    let text = |k: &str| data.get(k).and_then(Json::as_str).filter(|s| !s.is_empty());
+    let why = text("why").unwrap_or("refused");
+    let m = data.get("mission").map(compact).unwrap_or_else(|| "?".into());
+    let key = data.get("key").filter(|k| !k.is_null()).map(compact);
+    let under = key.as_ref().map(|k| format!(" under key {k}")).unwrap_or_default();
+    let ask = data.pointer("/ask/missions").and_then(Json::as_str).map(str::to_owned).unwrap_or_else(|| m.clone());
+    let request = format!("request_fire_key {{\"missions\":\"{ask}\",\"reason\":\"<why this shot, at most 280 chars>\"}}");
+    let (head, next) = match why {
+        "no_key" => (
+            format!("HOLD. Mission {m} is staged; firing it takes a fire key, and none of yours covers it. Nothing was sent."),
+            format!("Only the operator creates fire keys. Ask for one: {request}. It answers a link to the operator's review page with exactly this mission predialed. Keep staging other missions meanwhile; `fire_keys` shows your live keys once the operator acts."),
+        ),
+        "burned" => (format!("ALREADY FIRED. Mission {m}'s one shot{under} is spent. Nothing was sent again."), "Do not retry it: one shot per mission. Fire a mission still listed under remaining, or report on this one if its kind needs a report.".to_owned()),
+        "out_of_scope" => (format!("NOT COVERED. Key {} does not name mission {m}. Nothing was sent.", key.clone().unwrap_or_else(|| "?".into())), format!("Fire only what a key names (remaining below), or ask for this one: {request}.")),
+        "expired" => (format!("EXPIRED. The key{under} lapsed (a key lives 7 days unused, 24 h from its first shot). Nothing was sent."), format!("Ask for a new key for what remains: {request}.")),
+        "revoked" => (format!("REVOKED. The operator revoked the key{under}. Nothing was sent."), "Stand down on its missions: a revoked key is the operator's decision. Do not request it again unless the operator asks.".to_owned()),
+        "not_yours" => (format!("NOT YOURS. The key{under} is bound to another API key. Nothing was sent."), format!("Fire only under keys your own API key holds (`fire_keys`), or ask for your own: {request}.")),
+        "changed" => (
+            format!("CHANGED SINCE APPROVAL. Mission {m}'s target or draft is not what the operator approved{under}: the shot is frozen by hash at the key's creation. Nothing was sent."),
+            format!("Put the approved target and draft back exactly, or ask for a key for the edited mission: {request}. The operator reviews the draft as it is now."),
+        ),
+        "not_ready" => (format!("NOT STAGED. Mission {m} is not at fire_ready. Nothing was sent."), "Finish it first by put on missions: target and draft (an email's To, cc, subject and body), then state fire_ready.".to_owned()),
+        "in_flight" => (format!("IN FLIGHT. Mission {m}'s shot is already going. Nothing was sent again."), "Wait for it: `missions` shows it fired or back at fire_ready with last_error.".to_owned()),
+        "fired" => (format!("ALREADY FIRED. Mission {m} has fired. Nothing was sent again."), "Report on it if its kind needs a report; an email mission is tracked by its mail.".to_owned()),
+        "unlinked" => (format!("UNLINKED. Mission {m}'s application has no corporation in the world. Nothing was sent."), "Link it first (`unlinked` lists it with candidates), then fire again.".to_owned()),
+        "app_stage" => (format!("WRONG STAGE. Mission {m}'s application is not at fire_ready or past it, or is closed. Nothing was sent."), "Stage the application to fire_ready (or leave it if it is closed).".to_owned()),
+        "unsettled" => (format!("UNSETTLED. Mission {m}'s application may already have been sent once (an imported ledger says applied). Nothing was sent."), "Only the operator settles that (prior_send); leave this mission and say so in your report to the operator.".to_owned()),
+        "mailbox" => (format!("NO MAILBOX. The account's Gmail link is not live, so mission {m} cannot send. Nothing was sent."), "The operator relinks Gmail in the account lens; retry after.".to_owned()),
+        "cap" => (format!("DAILY CAP. Today's sends are used up. Mission {m} waits. Nothing was sent."), format!("Fire it after the cap resets{}; the key still covers it.", text("resets_at").map(|r| format!(" ({r})")).unwrap_or_default())),
+        "heat" => (format!("HEAT. Too many recent applications at this company or vendor. Mission {m} waits. Nothing was sent."), "Wait for the heat to fall, or leave it to the operator.".to_owned()),
+        other => (format!("REFUSED ({other}). Mission {m} did not fire. Nothing was sent."), String::new()),
+    };
+    let mut out = format!("commander: {head}\n");
+    for (label, k) in [("burned", "burned"), ("in flight", "in_flight"), ("still good for", "remaining"), ("changed since approval", "changed")] {
+        if let Some(v) = text(k) {
+            out.push_str(&format!("  {label}: {v}\n"));
+        }
+    }
+    if let (Some(left), at) = (text("expires_in"), text("expires_at")) {
+        out.push_str(&format!("  expires in {left}{}\n", at.map(|a| format!(" (at {a})")).unwrap_or_default()));
+    }
+    if let Some(keys) = data.get("live_keys").and_then(Json::as_array).filter(|k| !k.is_empty()) {
+        let listed: Vec<String> = keys.iter().map(|k| format!("{} covers {}", compact(&k["id"]), k["remaining"].as_str().unwrap_or("?"))).collect();
+        out.push_str(&format!("  your live keys: {}\n", listed.join("; ")));
+    }
+    if !next.is_empty() {
+        out.push_str(&format!("  next: {next}\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +554,10 @@ mod tests {
     fn every_refusal_the_schema_declares_renders_and_is_explained_and_no_other() {
         assert_eq!(names().collect::<Vec<_>>(), schema::refusal::NAMES.to_vec());
         for name in names() {
+            assert!(explain(name).is_some());
+            if name == "fire" {
+                continue; // the commander's answer, never an error (its own test below)
+            }
             let d = render(name, "put corporations domain=example.com", &json!({"cap": 50000}));
             assert!(d.starts_with(&format!("error[{name}]")) && d.contains(&format!("hireme {{\"explain\":\"{name}\"}}")), "{d}");
             assert!(explain(name).is_some());
@@ -676,5 +741,25 @@ mod tests {
         // The to-do list's own fields are shown in the header, never again as raw data.
         let listed = render("unlinked", "application #1 (id 1)", &json!({"application": 1, "no": 1, "need": ["corporation_id"], "given": {"company": "Acme"}}));
         assert!(!listed.contains("= application:") && !listed.contains("= no:"), "{listed}");
+    }
+
+    #[test]
+    fn the_commander_answers_every_judge_reason_with_what_went_what_remains_and_the_next_call() {
+        let example = json!({"why": "burned", "mission": 33, "key": 7, "burned": "33-34,56-213,4413", "remaining": "1-32,35-44,444", "changed": "",
+            "expires_at": "2026-10-23T14:02:11Z", "expires_in": "23:41:07", "live_keys": [{"id": 7, "scope": "1-44,56-213,444,4413", "remaining": "1-32,35-44,444"}]});
+        let a = commander(&example);
+        assert!(a.starts_with("commander: ALREADY FIRED. Mission 33's one shot under key 7 is spent. Nothing was sent again.\n"), "{a}");
+        assert!(a.contains("  burned: 33-34,56-213,4413\n  still good for: 1-32,35-44,444\n  expires in 23:41:07 (at 2026-10-23T14:02:11Z)\n"), "{a}");
+        assert!(a.contains("your live keys: 7 covers 1-32,35-44,444") && !a.contains("changed since approval") && !a.contains("error["), "{a}");
+        let hold = commander(&json!({"why": "no_key", "mission": 12, "key": null}));
+        assert!(hold.starts_with("commander: HOLD. Mission 12 is staged") && hold.contains(r#"request_fire_key {"missions":"12""#) && !hold.contains("under key"), "{hold}");
+        let asked = commander(&json!({"why": "no_key", "mission": 12, "key": null, "in_flight": "", "ask": {"missions": "12-13"}}));
+        assert!(asked.contains(r#"request_fire_key {"missions":"12-13""#) && !asked.contains("in flight:"), "{asked}");
+        for why in ["burned", "out_of_scope", "expired", "revoked", "not_yours", "changed", "not_ready", "in_flight", "fired", "unlinked", "app_stage", "unsettled", "mailbox", "cap", "heat", "no_key"] {
+            let a = commander(&json!({"why": why, "mission": 1, "key": 2}));
+            assert!(a.starts_with("commander: ") && a.contains("Nothing was sent") && a.contains("  next: "), "{why}: {a}");
+        }
+        assert!(commander(&json!({"why": "cap", "mission": 1, "resets_at": "2026-10-23T00:00:00Z"})).contains("after the cap resets (2026-10-23T00:00:00Z)"));
+        assert_eq!(render("fire", "fire id=1", &example), a);
     }
 }

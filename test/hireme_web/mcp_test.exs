@@ -72,6 +72,20 @@ defmodule HiremeWeb.McpTest do
     refute "open_fire" in names
   end
 
+  test "{} is a call where a tool says so (unlinked, missions, fire_keys) and the shape elsewhere; only a writer may ask for a fire key",
+       ctx do
+    p = mcp(ctx, Keys.preset(:read_only))
+    names = tools(p)
+    assert Enum.all?(~w(missions mission fire_keys), &(&1 in names))
+    refute "request_fire_key" in names
+
+    unlinked = text_of(tool(p, "unlinked", %{}))
+    assert unlinked =~ "Every application links" and not (unlinked =~ ~s("after"))
+    assert text_of(tool(p, "get", %{})) =~ ~s("table")
+
+    assert "request_fire_key" in tools(mcp(ctx, Keys.preset(:read_write)))
+  end
+
   test "a desk-only key cannot read the world through tools or resources; text an agent reads comes back marked untrusted",
        ctx do
     {[c], []} =
