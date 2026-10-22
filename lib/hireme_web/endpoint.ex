@@ -122,6 +122,7 @@ defmodule HiremeWeb.Endpoint do
   plug Plug.Logger
   plug :wire
   plug :mcp
+  plug :mail_inbound
   plug :blobs
 
   # Pages post forms (urlencoded, carrying `_csrf_token`); scripts post JSON.
@@ -167,6 +168,14 @@ defmodule HiremeWeb.Endpoint do
     do: conn |> HiremeWeb.Mcp.call() |> halt()
 
   defp mcp(conn, _opts), do: conn
+
+  # The domain pipe's signed copies of inbound mail (`HiremeWeb.MailInbound`),
+  # ahead of the cookie and the body parsers: the signature is the only
+  # credential, and the body is the raw message.
+  defp mail_inbound(%Plug.Conn{path_info: ["mail", "inbound" | _]} = conn, _opts),
+    do: conn |> HiremeWeb.MailInbound.call() |> halt()
+
+  defp mail_inbound(conn, _opts), do: conn
 
   # A CV file asked for with a key, like /mcp ahead of the cookie and the
   # body parsers; a browser's goes on to the router.

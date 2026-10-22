@@ -1,0 +1,9 @@
+// The anghel4d.com Email Worker (docs/mail/domain_pipe.md). No routes: an Email
+// Routing rule sends the domain's mail here. Secrets, never in this file:
+// FORWARD_TO, PIPE_URL, PIPE_SECRET (wrangler secret put, in a real terminal).
+{
+  "name": "anghel4d-mail",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true }
+}
