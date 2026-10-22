@@ -205,6 +205,10 @@ fn a_shot_needs_a_key_goes_once_and_the_commander_answers_the_rest() {
     let m = mission(&mut k, 10);
     assert_eq!((m["state"].as_str(), m["confirmation"].as_str()), (Some("fired"), Some("provisional")));
     assert_eq!(stage(&mut k, 1), "submitted");
+    // The card carries its missions as they stand.
+    let card = k.application(1).unwrap();
+    let on_card: Vec<(u64, &str)> = card["missions"].as_array().unwrap().iter().map(|m| (m["id"].as_u64().unwrap(), m["state"].as_str().unwrap())).collect();
+    assert_eq!(on_card, [(10, "fired"), (11, "fire_ready"), (13, "draft")]);
     // Trying it again: already done, with what is burned, what the key still
     // covers and the time it has left.
     let a = answer(k.predict(&fire(10, Some(key)), &agent(3, NOON + 3 * HOUR)));

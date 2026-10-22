@@ -469,6 +469,8 @@ impl Kernel {
         };
         let mut doc = compose::application(&self.rows, &self.board, id, self.today(), cv)?;
         doc["cv_pick"] = picked.map_or(Json::Null, |p| p.to_json(id));
+        // The card is the whole application: its missions, as `missions` reads them.
+        doc["missions"] = crate::fire::query(&self.rows, "missions", &json!({"application": id}), self.today()).map_or(Json::Null, |m| m["missions"].clone());
         Some(doc)
     }
 
