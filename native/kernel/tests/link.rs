@@ -94,49 +94,58 @@ fn a_company_nothing_resembles_is_not_guessed() {
     assert_eq!(d["try"][2]["args"]["set"]["corporation_id"], "<the id find answered>");
 }
 
+/// A catalog field over every application as the desk's columns read it (`arrange::build`): null where absent.
+fn column(k: &Kernel, path: &str) -> Json {
+    use kernel::arrange::{Col, NONE, build};
+    Json::Array(match build(k.rows(), kernel::mask::field(path).unwrap_or_else(|| panic!("no field {path}"))) {
+        Col::Num(v) => v.iter().map(|n| if n.is_nan() { Json::Null } else { json!(n) }).collect(),
+        Col::Sym { ids, dict, .. } => ids.iter().map(|&s| if s == NONE { Json::Null } else { json!(dict[s as usize]) }).collect(),
+    })
+}
+
 #[test]
 fn the_desk_reads_any_field_of_every_application_joins_included() {
     let mut k = kernel();
-    let c = q(&mut k, json!({"op": "columns", "fields": ["company.name", "company.parent", "country", "region", "place", "office", "no", "field"]}));
-    assert_eq!(c["ids"], json!([1, 2, 3, 4]));
-    let col = |p: &str| c["cols"][p].clone();
-    assert_eq!(col("company.name"), json!(["Stripe", null, null, "Helsing"]));
-    assert_eq!(col("company.parent"), json!(["Alphabet", null, null, null]));
-    assert_eq!(col("country"), json!(["DE", null, null, null]));
-    assert_eq!(col("region"), json!(["Europe", null, null, null]));
-    assert_eq!(col("place"), json!(["Berlin", null, null, null]));
-    assert_eq!(col("office"), json!([null, null, null, null]));
-    assert_eq!(col("no"), json!([1.0, 2.0, 3.0, 4.0]));
+    assert_eq!(column(&k, "company.name"), json!(["Stripe", null, null, "Helsing"]));
+    assert_eq!(column(&k, "company.parent"), json!(["Alphabet", null, null, null]));
+    assert_eq!(column(&k, "country"), json!(["DE", null, null, null]));
+    assert_eq!(column(&k, "region"), json!(["Europe", null, null, null]));
+    assert_eq!(column(&k, "place"), json!(["Berlin", null, null, null]));
+    assert_eq!(column(&k, "office"), json!([null, null, null, null]));
+    assert_eq!(column(&k, "no"), json!([1.0, 2.0, 3.0, 4.0]));
     // No role written: the department is "other".
-    assert_eq!(col("field"), json!(["other", "other", "other", "other"]));
-    assert_eq!(k.query(&json!({"op": "columns", "fields": ["nope"]})).unwrap_err().code, schema::refusal::TYPE);
+    assert_eq!(column(&k, "field"), json!(["other", "other", "other", "other"]));
+    assert!(kernel::mask::field("nope").is_none());
 
     let fields: Vec<Json> = serde_json::from_value(q(&mut k, json!({"op": "mask_fields"}))["fields"].clone()).unwrap();
     let office = fields.iter().find(|f| f["path"] == "office").unwrap();
     assert_eq!((&office["label"], &office["type"]), (&json!("office"), &json!("enum")));
 }
 
+/// The kernel keeps a column it arranged on until a table it reads moves.
 #[test]
-fn a_column_follows_the_rows_it_reads() {
+fn an_arranged_column_follows_the_rows_it_reads() {
     let mut k = kernel();
-    assert_eq!(q(&mut k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, null]));
+    let offices = |k: &mut Kernel| -> Vec<String> {
+        k.arrange(&json!({"group": "office"})).unwrap().1["groups"].as_array().unwrap().iter().map(|g| g["label"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(offices(&mut k), ["(none)"]);
     // Helsing's application 4 moves to Berlin, where Helsing has an engineering office.
     let mut w = wire::BodyWriter::new();
     let mut b = w.block(table::APPLICATIONS, 1);
     b.u32s(A::ID, [4].into_iter()).u32s(A::PLACE_ID, [2].into_iter());
     b.done();
     k.patch(&w.finish(), 2).unwrap();
-    assert_eq!(q(&mut k, json!({"op": "columns", "fields": ["office"]}))["cols"]["office"], json!([null, null, null, "engineering"]));
+    assert_eq!(offices(&mut k), ["engineering", "(none)"]);
 }
 
 #[test]
 fn a_company_country_or_group_carries_how_many_applications_name_it() {
     let mut k = kernel();
-    let c = q(&mut k, json!({"op": "columns", "fields": ["company.applications", "company.parent.applications", "country.applications"]}));
     // Stripe (under Alphabet) has one linked application, Helsing one; Germany one (Berlin).
-    assert_eq!(c["cols"]["company.applications"], json!([1.0, null, null, 1.0]));
-    assert_eq!(c["cols"]["company.parent.applications"], json!([1.0, null, null, 1.0]));
-    assert_eq!(c["cols"]["country.applications"], json!([1.0, null, null, null]));
+    assert_eq!(column(&k, "company.applications"), json!([1.0, null, null, 1.0]));
+    assert_eq!(column(&k, "company.parent.applications"), json!([1.0, null, null, 1.0]));
+    assert_eq!(column(&k, "country.applications"), json!([1.0, null, null, null]));
     let fields = q(&mut k, json!({"op": "mask_fields"}))["fields"].clone();
     let count = fields.as_array().unwrap().iter().find(|f| f["path"] == "company.applications").unwrap();
     assert_eq!(count["desc"], true);

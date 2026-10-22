@@ -61,9 +61,7 @@ pub struct Kernel {
     /// an application, a place, a company, the rules, masks, roots or the
     /// operator's own rows move.
     picks: core::cell::RefCell<Option<pick::Picks>>,
-    /// The desk's `columns`, per field, dropped with the picks and when offices move.
-    columns: core::cell::RefCell<BTreeMap<usize, Vec<Json>>>,
-    /// The typed columns `arrange` sorts and groups on, kept as `columns` is.
+    /// The typed columns `arrange` sorts and groups on, dropped with the picks and when offices move.
     cols: core::cell::RefCell<BTreeMap<String, crate::arrange::Column>>,
 }
 
@@ -91,7 +89,6 @@ impl Kernel {
     pub fn query_as(&mut self, grants: &query::Grants, req: &Json) -> Result<Json, Refusal> {
         match req.get("op").and_then(Json::as_str) {
             Some(op @ ("cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields")) => self.cv_query(grants, op, req),
-            Some("columns") => self.columns(grants, req),
             Some("unlinked") => {
                 query::readable(grants, Some(&json!("applications")))?;
                 Ok(crate::link::unlinked(&self.rows))
@@ -132,29 +129,6 @@ impl Kernel {
                 Ok(json!({"picks": picks}))
             }
         }
-    }
-
-    /// Any fields of every application, columnar (`pick::columns`), each
-    /// field kept until a table it may read moves: the desk's sort and group keys.
-    fn columns(&self, g: &query::Grants, req: &Json) -> Result<Json, Refusal> {
-        query::readable(g, Some(&json!("applications")))?;
-        let asked: Vec<&str> = req.get("fields").and_then(Json::as_array).map(|a| a.iter().filter_map(Json::as_str).collect()).unwrap_or_default();
-        let mut fields = Vec::new();
-        for p in &asked {
-            let f = crate::mask::field(p).ok_or_else(|| judge::no(refusal::TYPE, json!({"param": "fields", "unknown": p})))?;
-            fields.push(f);
-        }
-        let mut cache = self.columns.borrow_mut();
-        let missing: Vec<usize> = fields.iter().copied().filter(|f| !cache.contains_key(f)).collect();
-        if !missing.is_empty() {
-            let (_, cols) = pick::columns(&self.rows, &missing);
-            for (f, c) in missing.into_iter().zip(cols) {
-                cache.insert(f, c);
-            }
-        }
-        let ids: Vec<u32> = self.rows.table(table::APPLICATIONS).map_or_else(Vec::new, |t| t.ids().to_vec());
-        let cols: serde_json::Map<String, Json> = fields.iter().zip(&asked).map(|(f, p)| ((*p).to_string(), Json::Array(cache[f].clone()))).collect();
-        Ok(json!({"ids": ids, "cols": cols}))
     }
 
     /// The board's filtered order, narrowed by work mode and to the
@@ -352,12 +326,10 @@ impl Kernel {
             if !mended {
                 *self.picks.get_mut() = None;
             }
-            self.columns.get_mut().clear();
             if !in_place {
                 self.cols.get_mut().clear();
             }
         } else if m.touched(table::OFFICES) || m.touched(table::LEASES) {
-            self.columns.get_mut().clear();
             self.cols.get_mut().clear();
         }
         self.board.forget(m, &self.rows);

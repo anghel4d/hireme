@@ -301,7 +301,7 @@ function indexed<K, V>(store: Map<K, { version: number; at: V }>, key: K, build:
  * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
  * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
  */
-export function query<T = Row>(op: "find" | "get" | "text" | "history" | "cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields" | "columns" | "unlinked", params: Record<string, unknown>): T {
+export function query<T = Row>(op: "find" | "get" | "text" | "history" | "cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields" | "unlinked", params: Record<string, unknown>): T {
   if (!k) throw new Error("the desk is still loading")
   const req = JSON.stringify({ op, ...params })
   return memo(req, () => {
