@@ -7,9 +7,10 @@
 // command, judged by the kernel here before the sequencer judges it again.
 
 import { ENUMS } from "../gen/schema.ts"
-import { failed, application, command, ids, page, put, query as read, Refused, row, value, type Input, type Row } from "../kernel.ts"
+import { failed, application, command, ids, put, query as read, Refused, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
+import { WHY as HOLD } from "./fire.ts"
 import { rowHref } from "./world.ts"
 
 type Doc = {
@@ -21,6 +22,7 @@ type Doc = {
   events: Row[]
   batch: Row | null
   lineage: Row | null
+  missions: Mission[]
   cv_pick: { state: string; root: number | null; arm: number | null; by: string | null; also: number[]; version_id: number | null } | null
 }
 
@@ -198,7 +200,7 @@ const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 
 // ------------------------------------------------------------------ missions: the routes it goes out by
 
-type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; report_due: boolean }
+type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; covered_by: number[]; hold: string | null }
 const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
 const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
   try {
@@ -243,11 +245,7 @@ function compose(m: Mission, appId: number): Html {
 
 function missions(d: Doc, appId: number): Html {
   const cv = d.cv.file
-  // The rows are the replica's; covered_by (the live keys over each) is the kernel's answer once it gives one.
-  const known = new Map((ask<{ missions: Mission[] }>("missions", { application: appId })?.missions ?? []).map((m) => [m.id, m]))
-  const ms = page({ table: "missions", where: { application_id: appId }, order: ["id", "asc"] }, 50).rows.map((r): Mission => ({
-    // An added route reads its state before the node's default comes back.
-    ...(r as unknown as Mission), state: str(r.state) || "draft", covered_by: known.get(Number(r.id))?.covered_by ?? [], report_due: known.get(Number(r.id))?.report_due ?? false }))
+  const ms = d.missions ?? []
   const quota = ask<{ cap: number; left: number }>("mail_quota", {})
   return html`<section class="card" data-key="missions"><h2>Missions</h2>
     ${ms.length === 0 ? html`<p class="hint">No route yet: add one below (the hiring address, the careers page, a message).</p>` : EMPTY}
@@ -263,12 +261,13 @@ function missions(d: Doc, appId: number): Html {
       ${staged ? html`<select data-act="mission-state" data-on="change" data-mission="${m.id}" aria-label="State">${STAGED.map((x) => html`<option value="${x}"${flag("selected", x === m.state)}>${x.replace("_", " ")}</option>`)}</select>
         <button type="button" class="ghost" data-act="mission-edit" data-mission="${m.id}">Edit</button>` : html`<span class="tag">${m.state.replace("_", " ")}</span>`}
       ${email && m.subject ? html`<p>${m.subject}</p>` : EMPTY}
-      ${first ? (cv ? html`<p class="muted">The picked CV: v${cv.n} · ${cv.format}</p>` : html`<p class="warn">A first email carries the CV as a file: pick a PDF or DOCX version for this application.</p>`) : EMPTY}
+      ${first && cv ? html`<p class="muted">The picked CV: v${cv.n} · ${cv.format}</p>` : EMPTY}
+      ${m.hold && staged && m.hold !== "not_ready" ? html`<p class="warn">Cannot fire: ${HOLD[m.hold] ?? m.hold}.</p>` : EMPTY}
       ${m.confirmation === "provisional" ? html`<span class="tag warn" title="Self-reported: it counts once a confirmation mail arrives">provisional</span>` : EMPTY}
-      ${m.fired_at ? html`<p class="muted">Fired ${m.fired_at} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}.</p>` : EMPTY}
+      ${m.fired_at ? html`<p class="muted">Fired ${new Date(m.fired_at).toLocaleString()} by ${m.fired_by ?? "?"}${m.fire_key_id ? ` under key #${m.fire_key_id}` : ""}.</p>` : EMPTY}
       ${m.last_error ? html`<p class="warn">Last shot failed: ${m.last_error}</p>` : EMPTY}
       ${ready ? html`<div class="actions">
-        <button type="button" class="danger" data-act="mission-fire" data-mission="${m.id}"${flag("disabled", !covered)} title="${covered ? `Under key #${m.covered_by[0]}` : "No live fire key covers this mission"}">${email ? "Send" : "Fire"}</button>
+        <button type="button" class="danger" data-act="mission-fire" data-mission="${m.id}" data-kind="${m.kind}"${flag("disabled", !covered)} title="${covered ? `Under key #${m.covered_by[0]}` : "No live fire key covers this mission"}">${email ? "Send" : "Fire"}</button>
         ${covered ? EMPTY : html`<a class="ghost" href="/fire?missions=${m.id}" data-nav>Authorize</a>`}
         ${email && quota ? html`<span class="muted">${quota.left} of ${quota.cap} left today</span>` : EMPTY}</div>` : EMPTY}
       ${m.state === "in_flight" && !email ? html`<div class="actions"><span class="muted">Submitted by hand? Report it.</span>
@@ -395,7 +394,7 @@ export function act(name: string, el: HTMLElement, appId_: number): void {
         .catch(failed)
     case "mission-fire":
       return void command("fire", Number(el.dataset.mission))
-        .then(() => notice("ok", "Sent off: it shows here once it lands."))
+        .then(() => notice("ok", el.dataset.kind === "email" ? "Sent off: it shows here once it lands." : "In flight: submit it by hand, then report here whether it went out."))
         .catch((e) => (e instanceof Refused && e.code === "fire" && e.data ? notice("error", commander(e.data as Row)) : failed(e)))
     case "mission-edit": {
       const id = Number(el.dataset.mission)
@@ -407,8 +406,18 @@ export function act(name: string, el: HTMLElement, appId_: number): void {
       if ("subject" in f) Object.assign(set, { cc: blank(f.cc), subject: blank(f.subject) })
       return void put("missions", set, { id: Number(el.dataset.mission), expectRev: v().editRev }).then(() => patch({ edit: "" })).catch(failed)
     }
-    case "mission-state":
-      return void put("missions", { state: (el as HTMLSelectElement).value }, { id: Number(el.dataset.mission) }).catch(failed)
+    case "mission-state": {
+      // The select acts at once; a refused move puts it back, since the morph keeps a select the user changed.
+      const select = el as HTMLSelectElement
+      const was = Array.from(select.options).find((o) => o.defaultSelected)?.value ?? "draft"
+      const back = (e: unknown) => ((select.value = was), failed(e))
+      // The replica's judge refuses in this frame; the node's, later.
+      try {
+        return void put("missions", { state: select.value }, { id: Number(el.dataset.mission) }).catch(back)
+      } catch (e) {
+        return back(e)
+      }
+    }
     case "mission-add":
       return void resetAfter(el as HTMLFormElement, () => put("missions", { application_id: appId, kind: str(f.kind), target: str(f.target).trim() === "" ? null : str(f.target).trim() })).catch(failed)
     case "mission-landed":

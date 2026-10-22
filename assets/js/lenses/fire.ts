@@ -84,9 +84,10 @@ function requests(): Html {
 
 // ------------------------------------------------------------------ the review
 
-/** Why a mission cannot go under a key now, in the operator's terms (the fire judge's reasons). */
-const WHY: Record<string, string> = {
+/** Why a mission cannot go under a key now, in the operator's terms (the fire judge's holds). */
+export const WHY: Record<string, string> = {
   not_ready: "not fire ready: its draft is not finished",
+  incomplete: "the email is not complete: it needs a To (up to 10 addresses), a subject and a body",
   in_flight: "in flight: a shot is being sent",
   fired: "already fired",
   unlinked: "its application has no company",
