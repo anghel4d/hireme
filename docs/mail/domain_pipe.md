@@ -7,7 +7,7 @@ Cloudflare Email Worker posts each message, signed, to the node. If Google ever
 stops app passwords, the domain's mail still reaches hireme. The node keeps one
 copy per Message-ID (`Hireme.Gmail.ingest/3`, rules agreed with the connector):
 
-- **The key:** the Message-ID, lowercased, without brackets. With none, a SHA-256 over From, Date, Subject and the first 4 KiB of the decoded body, the same through both pipes (the raw bytes differ: Gmail adds its own headers).
+- **The key:** the Message-ID, stored as given (brackets and case kept); ingest finds it in either form, and the filer lowercases only to compare. Both pipes see the same header bytes, so the two copies carry the same value. With none, a SHA-256 over From, Date, Subject and the first 4 KiB of the decoded body, the same through both pipes (the raw bytes differ: Gmail adds its own headers).
 - **Gmail copy after the domain copy:** it fills in what only Gmail knows (thread and message ids, labels, UID), and the message gets the `hireme` label. The domain copy after the Gmail copy is a no-op.
 - **Filing:** it happens once, on the first copy. A later copy never refiles a message or moves its links.
 
