@@ -1,6 +1,6 @@
 // The kernel's wasm exports from JavaScript: instantiate, build BOOT and
 // PATCH frames from rows named by the catalog, encode one op. Shared by
-// vectors.mjs and bench/kernel.mjs; run directly it does nothing.
+// vectors.mjs and fuzz.mjs; run directly it does nothing.
 
 export const NONE = 0xffffffff;
 export const enc = new TextEncoder();

@@ -5,7 +5,7 @@
     %{
       name: "default",
       strict: true,
-      files: %{included: ["lib/", "test/", "config/", "bench/"]},
+      files: %{included: ["lib/", "test/", "config/"]},
       checks: %{
         extra: [
           {Credo.Check.Readability.LargeNumbers, only_greater_than: 99_999}
