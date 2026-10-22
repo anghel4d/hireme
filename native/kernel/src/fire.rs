@@ -812,7 +812,7 @@ pub fn review(rows: &Rows, scope: &Ranges) -> Json {
                 "state": state_name(u32::from(state(t, id))),
                 "application": a.map_or(Json::Null, |a| app_json(a, app)),
                 "draft": draft,
-                "cv_version_id": cvs.version(rows, app),
+                "cv_version_id": if is_email(t, id) && replies(rows, t, id) { None } else { cvs.version(rows, app) },
                 "hash": h,
                 "eligible": why.is_none(),
                 "why": why,
@@ -1111,30 +1111,41 @@ fn id_arg(req: &Json, name: &str) -> Result<u32, Refusal> {
     req.get(name).and_then(Json::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0).ok_or_else(|| no(refusal::TYPE, json!({"param": name})))
 }
 
-fn mission_json(rows: &Rows, cvs: &Cvs, t: &Table, id: u32, now: i64) -> Json {
+/// What a page of missions reads once rather than per mission: the live
+/// keys covering each (unburned shots) and the missions an outreach item
+/// names.
+struct Seen {
+    covered: alloc::collections::BTreeMap<u32, Vec<u32>>,
+    reported: alloc::collections::BTreeSet<u32>,
+}
+
+impl Seen {
+    fn of(rows: &Rows, now: i64) -> Seen {
+        let mut covered: alloc::collections::BTreeMap<u32, Vec<u32>> = alloc::collections::BTreeMap::new();
+        for s in shots(rows).filter(|s| s.burned.is_none()) {
+            if key(rows, s.key).is_some_and(|k| k.dead(now).is_none()) {
+                covered.entry(s.mission).or_default().push(s.key);
+            }
+        }
+        let reported = rows
+            .table(table::OUTREACH)
+            .map(|o| o.ids().iter().filter_map(|&i| crate::outreach::Item::read(o, i).and_then(|item| item.core.refs.mission_id)).collect())
+            .unwrap_or_default();
+        Seen { covered, reported }
+    }
+}
+
+fn mission_json(rows: &Rows, cvs: &Cvs, seen: &Seen, t: &Table, id: u32) -> Json {
     let cols: Vec<&'static schema::ColDef> = schema::table_def(table::MISSIONS).map(|d| d.cols.iter().filter(|c| c.id >= 8).collect()).unwrap_or_default();
     let mut j = crate::query::row_out(t, id, &cols, false);
     j["id"] = json!(id);
     j["hash"] = json!(hash(rows, cvs, id));
-    let covered: Vec<u32> = shots(rows)
-        .filter(|s| s.mission == id && s.burned.is_none())
-        .filter(|s| key(rows, s.key).is_some_and(|k| k.dead(now).is_none()))
-        .map(|s| s.key)
-        .collect();
-    j["covered_by"] = json!(covered);
+    j["covered_by"] = json!(seen.covered.get(&id).cloned().unwrap_or_default());
     j["hold"] = json!(hold(rows, cvs, id));
-    j["report_due"] = json!(report_due(rows, t, id));
+    // A fired shot hireme could not watch (anything but an email) owes its
+    // report until an outreach item names the mission.
+    j["report_due"] = json!(!is_email(t, id) && state(t, id) == enums::mission_state::FIRED && !seen.reported.contains(&id));
     j
-}
-
-/// A fired shot hireme could not watch (anything but an email) with no
-/// outreach item naming it yet: the agent's report is owed.
-pub fn report_due(rows: &Rows, t: &Table, id: u32) -> bool {
-    if is_email(t, id) || state(t, id) != enums::mission_state::FIRED {
-        return false;
-    }
-    let Some(o) = rows.table(table::OUTREACH) else { return true };
-    !o.ids().iter().any(|&i| crate::outreach::Item::read(o, i).is_some_and(|item| item.core.refs.mission_id == Some(id)))
 }
 
 /// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
@@ -1152,6 +1163,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
         }
         "missions" => {
             let cvs = Cvs::of(rows);
+            let seen = Seen::of(rows, now);
             let app = req.get("application").and_then(Json::as_u64);
             let st = req.get("state").and_then(Json::as_str);
             let kind = req.get("kind").and_then(Json::as_str);
@@ -1162,7 +1174,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
                     .filter(|&id| app.is_none_or(|a| t.u32(id, M::APPLICATION_ID).map(u64::from) == Some(a)))
                     .filter(|&id| st.is_none_or(|s| state_name(u32::from(state(t, id))) == s))
                     .filter(|&id| kind.is_none_or(|k| t.u32(id, M::KIND).and_then(|v| enums::outreach_kind::NAMES.get(v as usize).copied()) == Some(k)))
-                    .map(|id| mission_json(rows, &cvs, t, id, now))
+                    .map(|id| mission_json(rows, &cvs, &seen, t, id))
                     .collect()
             });
             Ok(json!({"missions": list}))
@@ -1178,7 +1190,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
             let corp_name = corp.and_then(|c| rows.table(table::CORPORATIONS).and_then(|t| t.str(c, schema::col::corporations::NAME)));
             let contact = t.u32(id, M::CONTACT_ID);
             Ok(json!({
-                "mission": mission_json(rows, &cvs, t, id, now),
+                "mission": mission_json(rows, &cvs, &Seen::of(rows, now), t, id),
                 "application": apps.map_or(Json::Null, |a| {
                     let mut j = app_json(a, app);
                     j["corporation"] = json!(corp_name);
