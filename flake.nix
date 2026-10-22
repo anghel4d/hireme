@@ -53,6 +53,19 @@
 
       beamPackages = pkgs.beam.packages.erlang_28.overrideScope (_: prev: { elixir = prev.elixir_1_20; });
 
+      # A throwaway CA and one certificate for Gmail's two hosts, made at
+      # build time, so the dev check's VM can stand a fake Gmail behind the
+      # names the release pins and verify it like the real one.
+      mailTestCerts = pkgs.runCommand "hireme-mail-test-certs" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+        mkdir -p $out
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+          -subj /CN=hireme-dev-mail-ca -keyout ca.key -out $out/ca.pem
+        openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+          -subj /CN=imap.gmail.com -keyout $out/gmail.key -out gmail.csr
+        printf 'subjectAltName=DNS:imap.gmail.com,DNS:smtp.gmail.com\nextendedKeyUsage=serverAuth\n' > ext
+        openssl x509 -req -in gmail.csr -CA $out/ca.pem -CAkey ca.key -CAcreateserial -days 3650 \
+          -extfile ext -out $out/gmail.pem
+      '';
       hireme = pkgs.callPackage ./nix/package.nix {
         inherit bun beamPackages;
         source = ./.;
@@ -151,6 +164,27 @@
               pkgs.python3
             ];
             environment.etc."hireme/mcp-replay.py".source = ./nix/mcp-replay.py;
+            environment.etc."hireme/mail-check.py".source = ./nix/mail-check.py;
+            environment.etc."hireme/mail-check.exs".source = ./nix/mail-check.exs;
+            # A fake Gmail (IMAP 993, SMTP 465, Gmail's X-GM extensions) driven
+            # through its spool: test/support/fake_gmail.ex, standalone.
+            systemd.services.fake-gmail = {
+              wantedBy = [ "multi-user.target" ];
+              before = [ "hireme.service" ];
+              environment.HOME = "/var/lib/fake-gmail";
+              serviceConfig.StateDirectory = "fake-gmail";
+              script = ''
+                exec ${beamPackages.elixir}/bin/elixir -r ${./test/support/fake_gmail.ex} \
+                  -e 'Hireme.FakeGmail.main(System.argv())' -- \
+                  --imap-port 993 --smtp-port 465 --ip 127.0.0.1 \
+                  --cert ${mailTestCerts}/gmail.pem --key ${mailTestCerts}/gmail.key \
+                  --user check@gmail.com --password abcdefghijklmnop --spool /var/lib/fake-gmail
+              '';
+            };
+            # Gmail's hosts, as the release pins them, answered by the fake
+            # below under a certificate from the check's own CA.
+            networking.hosts."127.0.0.1" = [ "imap.gmail.com" "smtp.gmail.com" ];
+            security.pki.certificateFiles = [ "${mailTestCerts}/ca.pem" ];
             services.nginx.virtualHosts.localhost = {
               enableACME = lib.mkForce false;
               forceSSL = lib.mkForce false;
@@ -268,6 +302,79 @@
               status, replay = machine.execute(f"python3 /etc/hireme/mcp-replay.py ${nodes.machine.networking.primaryIPAddress} {key}")
               assert status == 0, replay
               print(replay)
+
+              # Mail, missions and fire keys (docs/mail/passthrough.md), end to
+              # end against a fake Gmail behind the names the release pins: the
+              # operator's half inside the release (nix/mail-check.exs), the
+              # agent's over /mcp with a read/write key (nix/mail-check.py).
+              import json
+
+              def op(step):
+                  return json.loads(rpc(f'Code.require_file("/etc/hireme/mail-check.exs"); MailCheck.{step}').splitlines()[-1])
+
+              def agent(*args):
+                  return json.loads(machine.succeed("python3 /etc/hireme/mail-check.py " + " ".join(str(a) for a in args)).splitlines()[-1])
+
+              machine.wait_for_unit("fake-gmail.service")
+              machine.wait_for_open_port(993)
+              machine.wait_for_open_port(465)
+
+              seed = op("seed()")
+              key, reply, changed, unsettled, app, other = seed["agent_key"], seed["reply"], seed["changed"], seed["unsettled"], seed["app"], seed["other"]
+              assert seed["first_without_cv"] != "accepted", seed
+
+              linked = op("link()")
+              assert linked["linked"], linked
+
+              # Without a key: answered, not an error, and nothing goes out.
+              nokey = agent("fire", key, reply, app)
+              assert not nokey["is_error"] and nokey["sent"] == 0, nokey
+              # An earlier send the operator has not settled cannot fire.
+              blocked = agent("fire", key, unsettled, other)
+              assert blocked["sent"] == 0 and "unsettled" in blocked["text"].lower(), blocked
+
+              # The request answers the predialed link; opening it creates nothing.
+              asked = agent("request", key, f"{reply},{changed}", app)
+              assert "/fire/" in asked["link"], asked
+              assert op("state()")["keys"] == 0
+
+              # The fresh session creates the key; one past the step-up window cannot.
+              made = op(f'create_key("{reply},{changed}")')
+              assert made["key"] and made["refused"] == [] and made["stale_session"] == ["step_up"], made
+
+              # One shot: exactly one mail, to the mission's own target; the application submitted.
+              shot = agent("fire", key, reply, app, made["key"])
+              assert not shot["is_error"] and shot["sent"] == 1, shot
+              assert shot["envelopes"][-1]["rcpts"] == ["jobs@acme.example"], shot
+              after = op("state()")
+              assert after["missions"][str(reply)]["state"] == "fired" and after["app_stage"] == "submitted", after
+
+              # Again: the commander answers, and nothing more goes out.
+              again = agent("fire", key, reply, app, made["key"])
+              assert not again["is_error"] and again["sent"] == 0, again
+
+              # A mission edited after the key was made fires nothing.
+              agent("edit", key, changed, app)
+              edited = agent("fire", key, changed, app, made["key"])
+              assert edited["sent"] == 0 and "changed" in edited["text"].lower(), edited
+
+              # A recruiter's reply is filed to the application and labelled in Gmail.
+              mid = after["missions"][str(reply)]["message_id"].strip("<>")
+              agent("reply", key, mid)
+              def filed(_):
+                  rows = op("state()")["outreach"]
+                  return any(r["direction"] == "inbound" and r["filing"] == "filed" and r["application_id"] == seed["app"] for r in rows)
+              retry(filed, timeout_seconds=60)
+              labels = agent("labels", key)
+              assert any("hireme" in m["labels"] and "\\Inbox" in m["labels"] for m in labels), labels
+
+              # The domain pipe: a forged post refused, a signed one taken once.
+              pipe = op("pipe()")
+              posted = agent("pipe", key, pipe["pipe_id"], pipe["secret"])
+              assert posted["forged"] == 401 and posted["signed"] in (200, 202) and posted["replayed"] in (200, 202), posted
+              rows = [r for r in op("state()")["outreach"] if r["message_id"] and "pipe-1@acme.example" in r["message_id"]]
+              assert len(rows) == 1, rows
+              print("mail check passed")
             '';
         };
       };

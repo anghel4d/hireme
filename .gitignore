@@ -17,6 +17,8 @@
 !/nix/*.nix
 !/nix/deploy.sh
 !/nix/mcp-replay.py
+!/nix/mail-check.py
+!/nix/mail-check.exs
 
 !/secrets/
 !/secrets/master/
