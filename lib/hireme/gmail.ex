@@ -37,6 +37,8 @@ defmodule Hireme.Gmail do
   alias HiremeWeb.Wire.Codec
 
   @password "hireme mail app password"
+  # The sender of an inbound mail whose every sender address the type refuses.
+  @unknown "unknown@unknown.invalid"
   @pipe "hireme mail pipe secret"
 
   # ------------------------------------------------------------ supervisor
@@ -156,6 +158,15 @@ defmodule Hireme.Gmail do
   defp store(account_id, address, password) do
     before = mailbox(account_id)
 
+    # Another address takes over: what the old one may have sent is not the
+    # new one's to find, so its shots in flight go back first.
+    if before && before.address != address,
+      do:
+        hand_back(
+          account_id,
+          "the mailbox was linked to another address before this shot was confirmed; look in the old Gmail's Sent before firing it again"
+        )
+
     with {:ok, _} <- put(account_id, "mailboxes", %{provider: :gmail, address: address}),
          {:ok, _} <-
            command(account_id, "mailbox_state", 0, %{status: :linking, last_error: nil}),
@@ -202,28 +213,58 @@ defmodule Hireme.Gmail do
   """
   @spec forget(pos_integer) :: :ok
   def forget(account_id) do
+    # The secrets first, and only from a row still unlinked: a relink that
+    # came in between keeps its new password.
+    Sequencer.server_write(
+      account_id,
+      "mailboxes",
+      nil,
+      %{
+        secret: nil,
+        pipe_id: nil,
+        pipe_secret: nil,
+        folder: nil,
+        uidvalidity: nil,
+        last_uid: nil
+      },
+      %{status: :unlinked}
+    )
+
     Session.stop(account_id)
 
-    # Its shots in flight go back to fire ready under their keys; their
-    # Message-IDs stay, so a refire after a relink looks in Sent first.
-    for %{id: id} <- in_flight(account_id) do
-      command(account_id, "failed", id, %{
-        reason:
-          "the mailbox was unlinked before this shot was confirmed; look in Gmail's Sent before firing it again"
-      })
-    end
-
-    Sequencer.server_write(account_id, "mailboxes", nil, %{
-      secret: nil,
-      pipe_id: nil,
-      pipe_secret: nil,
-      folder: nil,
-      uidvalidity: nil,
-      last_uid: nil
-    })
+    hand_back(
+      account_id,
+      "the mailbox was unlinked before this shot was confirmed; look in Gmail's Sent before firing it again"
+    )
 
     Audit.record(:mailbox_unlinked, %{}, %{account_id: account_id})
     Accounts.notify(account_id, :mailbox_unlinked, %{})
+  end
+
+  # Shots in flight go back to fire ready under their keys; their
+  # Message-IDs stay, so a refire looks in Sent first.
+  defp hand_back(account_id, reason) do
+    for %{id: id} <- in_flight(account_id),
+        do: command(account_id, "failed", id, %{reason: reason})
+
+    :ok
+  end
+
+  @doc """
+  Every unlinked mailbox that still holds a secret is forgotten again: an
+  unlink whose erase never ran (a restart in between, a failure) is
+  finished here, by the keeper.
+  """
+  @spec sweep() :: :ok
+  def sweep do
+    Repo.all(
+      from(m in Mailbox,
+        where: m.status == :unlinked and (not is_nil(m.secret) or not is_nil(m.pipe_secret)),
+        select: m.account_id
+      ),
+      skip_account: true
+    )
+    |> Enum.each(&forget/1)
   end
 
   defp in_flight(account_id) do
@@ -359,44 +400,58 @@ defmodule Hireme.Gmail do
       _ ->
         item = Email.inbound(inbound(mail, pipe, meta))
         item = if meta[:direction] == :outbound, do: %{item | direction: :outbound}, else: item
-        put_new(account_id, item, senders(mail), 4)
+        put_new(account_id, item, senders(mail))
     end
   end
 
-  # The kernel holds an inbound mail's addresses to the type's shape; one
-  # it refuses costs that field, never the mail: To, Cc or Reply-To go
-  # empty (the text keeps what was said), From falls back to Sender,
-  # Reply-To or Return-Path.
-  defp put_new(account_id, item, senders, left) do
+  # The kernel holds a mail's addresses to the type's shape; one it refuses
+  # costs that field, never the mail. A list keeps first the addresses
+  # plainly shaped, else goes empty (an outbound mail needs its To, so it
+  # keeps the plain ones or nothing); Reply-To goes; From falls back to
+  # Sender, Reply-To, Return-Path, and at last a sender marked unknown.
+  # Each round drops something, so it ends. A refusal that is the account's
+  # state, not the mail's (its cap, the kernel failing), waits.
+  defp put_new(account_id, item, senders) do
     case run(account_id, Outreach.op(item)) do
-      {:ok, _} ->
-        {:ok, :stored}
-
-      {:refused, :type, data} when left > 0 ->
-        case {column(data), item, senders} do
-          {"from_addr", _, [next | rest]} ->
-            put_new(account_id, %{item | from: next}, rest, left - 1)
-
-          {"to_addr", %{direction: :inbound}, _} ->
-            put_new(account_id, %{item | to: []}, senders, left - 1)
-
-          {"cc_addr", _, _} ->
-            put_new(account_id, %{item | cc: []}, senders, left - 1)
-
-          {"reply_to", _, _} ->
-            put_new(account_id, %{item | reply_to: nil}, senders, left - 1)
-
-          _ ->
-            {:error, :type}
-        end
-
-      {:refused, code, _} ->
-        {:error, code}
-
-      {:error, _} = e ->
-        e
+      {:ok, _} -> {:ok, :stored}
+      {:refused, :type, data} -> narrowed(account_id, item, senders, column(data))
+      {:refused, code, _} when code in [:cap, :internal] -> {:error, :unavailable}
+      {:refused, code, _} -> {:error, code}
+      {:error, _} = e -> e
     end
   end
+
+  defp narrowed(account_id, item, [next | rest], "from_addr"),
+    do: put_new(account_id, %{item | from: next}, rest)
+
+  defp narrowed(_account_id, %{from: @unknown}, [], "from_addr"), do: {:error, :type}
+
+  defp narrowed(account_id, item, [], "from_addr"),
+    do: put_new(account_id, %{item | from: @unknown}, [])
+
+  defp narrowed(account_id, item, senders, "reply_to") when item.reply_to != nil,
+    do: put_new(account_id, %{item | reply_to: nil}, senders)
+
+  defp narrowed(account_id, item, senders, col) when col in ["to_addr", "cc_addr"] do
+    field = if col == "to_addr", do: :to, else: :cc
+    now = Map.fetch!(item, field)
+    plain = Enum.filter(now, &plain?/1)
+
+    cond do
+      plain != now and plain != [] ->
+        put_new(account_id, Map.put(item, field, plain), senders)
+
+      now != [] and (field == :cc or item.direction == :inbound) ->
+        put_new(account_id, Map.put(item, field, []), senders)
+
+      true ->
+        {:error, :type}
+    end
+  end
+
+  defp narrowed(_account_id, _item, _senders, _col), do: {:error, :type}
+
+  defp plain?(addr), do: addr =~ ~r/\A[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)+\z/
 
   defp column(data) when is_binary(data),
     do: data |> JSON.decode() |> then(&with({:ok, m} <- &1, do: column(m)))
@@ -419,8 +474,9 @@ defmodule Hireme.Gmail do
     |> Enum.uniq()
   end
 
-  # The row a Message-ID names, however its brackets were written.
-  defp held(account_id, key) do
+  @doc "The outreach row a Message-ID names, however its brackets were written, or nil."
+  @spec held(pos_integer, String.t()) :: map | nil
+  def held(account_id, key) do
     where = %{"message_id" => %{"in" => [key, "<#{key}>"]}}
 
     case query(account_id, "find", %{"table" => "outreach", "where" => where, "limit" => 1}) do
@@ -593,28 +649,39 @@ defmodule Hireme.Gmail.Keeper do
   @moduledoc """
   Keeps a session running for every linked mailbox: at start, and every
   ten minutes after, so one lost to a crash (or to its supervisor giving
-  up on a burst of them) comes back.
+  up on a burst of them) comes back; and finishes any unlink whose erase
+  never ran (`Hireme.Gmail.sweep/0`).
   """
 
   use GenServer
+  require Logger
 
   @every :timer.minutes(10)
+  # After a start (the node's, or this tree's after a burst of crashes), a
+  # pause before the sessions come back: a crash loop is slowed to one
+  # burst a pause, never a cascade up the supervisors.
+  @pause :timer.seconds(10)
 
   @doc false
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @impl GenServer
-  def init(nil), do: {:ok, nil, {:continue, :resume}}
+  def init(nil) do
+    Process.send_after(self(), :resume, @pause)
+    {:ok, nil}
+  end
 
   @impl GenServer
-  def handle_continue(:resume, state), do: resume(state)
-
-  @impl GenServer
-  def handle_info(:resume, state), do: resume(state)
-
-  defp resume(state) do
-    Hireme.Gmail.resume()
+  def handle_info(:resume, state) do
     Process.send_after(self(), :resume, @every)
+
+    try do
+      Hireme.Gmail.sweep()
+      Hireme.Gmail.resume()
+    rescue
+      e -> Logger.error("gmail keeper: #{inspect(e.__struct__)}")
+    end
+
     {:noreply, state}
   end
 end

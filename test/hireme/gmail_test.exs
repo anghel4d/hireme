@@ -676,4 +676,75 @@ defmodule Hireme.GmailSessionTest do
     assert row.cc_addr in [nil, ""]
     assert row.mission_id == mission.id
   end
+
+  test "a cycle that raises costs the mailbox a backoff, never its supervisors, and it comes back",
+       %{account: a} do
+    {:ok, _} = Gmail.link(a.id, @user, @password)
+    assert eventually(fn -> read_box(a).status == :live end)
+    [{pid, _}] = Registry.lookup(Hireme.Gmail.Registry, a.id)
+    good = Application.get_env(:hireme, Gmail)
+
+    # An endpoint nothing can read makes the next connect raise.
+    Application.put_env(:hireme, Gmail, Keyword.put(good, :imap, :unreadable))
+    send(pid, {:ssl_closed, :sys.get_state(pid).imap.socket})
+    assert eventually(fn -> read_box(a).status == :error end)
+    # Retried at once, the connect raises: counted as trouble, the session alive.
+    send(pid, :retry)
+    assert eventually(fn -> :sys.get_state(pid).tries >= 2 end)
+    assert Process.alive?(pid) and Process.alive?(Process.whereis(Hireme.Gmail.Sessions))
+
+    Application.put_env(:hireme, Gmail, good)
+    send(pid, :retry)
+    assert eventually(fn -> read_box(a).status == :live end)
+  end
+
+  test "an unlink whose erase never ran is finished by the sweep", %{account: a} do
+    {:ok, _} = Gmail.link(a.id, @user, @password)
+    assert eventually(fn -> read_box(a).status == :live end)
+    {:ok, _} = Gmail.command(a.id, "mailbox_state", 0, %{status: :unlinked, last_error: nil})
+    assert eventually(fn -> read_box(a).secret == nil end)
+
+    # A secret left behind, as by an erase that never ran.
+    :ok =
+      Sequencer.server_write(a.id, "mailboxes", nil, %{secret: "sealed", pipe_secret: "sealed"})
+
+    Gmail.sweep()
+    assert read_box(a).secret == nil and read_box(a).pipe_secret == nil
+  end
+
+  test "an id too long for one header line hands the shot back with the reason, sending nothing",
+       %{account: a, fake: fake, operator: operator} do
+    {:ok, _} = Gmail.link(a.id, @user, @password)
+    assert eventually(fn -> read_box(a).status == :live end)
+    {_app, m, _key} = armed(a, operator)
+    long = String.duplicate("a", 950) <> "@acme.example"
+    {[_], []} = run(a.id, op(:put, :missions, %{in_reply_to: long}, target: m))
+
+    {:ok, review} = Gmail.query(a.id, "fire_review", %{"missions" => "#{m}"})
+
+    {[%{id: key}], []} =
+      run(
+        a.id,
+        op(:command, :create_fire_key, %{missions: review["scope"], digest: review["digest"]}),
+        operator
+      )
+
+    {[_], []} = run(a.id, op(:command, :fire, %{key: key}, target: m), operator)
+    assert eventually(fn -> mission(m).state == :fire_ready and mission(m).last_error != nil end)
+    assert mission(m).last_error =~ "900 bytes"
+    assert FakeGmail.sent(fake) == []
+  end
+
+  test "an inbound mail whose every sender address the type refuses is kept, its sender unknown",
+       %{account: a, fake: fake, operator: operator} do
+    {mission, _fake} = fired(a, fake, operator)
+
+    raw =
+      "From: hr@host.example.\r\nTo: #{@user}\r\nSubject: Re: Staff Engineer\r\n" <>
+        "Message-ID: <r8@acme.example>\r\nIn-Reply-To: <#{mission.message_id}>\r\n\r\nHello.\r\n"
+
+    assert {:ok, :stored} = Gmail.ingest(a.id, raw, :domain)
+    row = Enum.find(items(a), &id?(&1, "r8@acme.example"))
+    assert row.from_addr == "unknown@unknown.invalid" and row.mission_id == mission.id
+  end
 end

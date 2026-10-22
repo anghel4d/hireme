@@ -72,6 +72,9 @@ defmodule Hireme.Gmail.Session do
     # Spam's UIDs read this session: Gmail empties Spam after 30 days, so
     # it is read whole once a session and then only what is new.
     junk_seen: MapSet.new(),
+    junk_errors: 0,
+    junk_off: false,
+    uidvalidity: nil,
     tries: 0,
     # Per mission: the sends Gmail answered with a no (or that never reached
     # it whole), and the time of an attempt that may have reached Gmail,
@@ -114,26 +117,27 @@ defmodule Hireme.Gmail.Session do
 
   # --------------------------------------------------------------- server
 
+  # Nothing in init can fail: what reads the database runs in the first
+  # cycle, inside its crash boundary.
   @impl GenServer
   def init(account_id) do
     Repo.put_account(account_id)
-    s = %__MODULE__{account_id: account_id, started: now()}
-
-    # A password Gmail refused waits its hour, across restarts too.
-    s =
-      case Gmail.mailbox(account_id) do
-        %{status: :auth_failed} ->
-          %{s | status: :auth_failed, locked: now() + Security.mail_credential_retry_ms()}
-
-        _ ->
-          s
-      end
-
-    {:ok, s, {:continue, :cycle}}
+    {:ok, %__MODULE__{account_id: account_id, started: now()}, {:continue, :boot}}
   end
 
+  # A password Gmail refused waits its hour, across restarts too.
   @impl GenServer
-  def handle_continue(:cycle, s), do: cycle(s)
+  def handle_continue(:boot, s) do
+    guarded(s, fn ->
+      case Gmail.mailbox(s.account_id) do
+        %{status: :auth_failed} ->
+          cycle(%{s | status: :auth_failed, locked: now() + Security.mail_credential_retry_ms()})
+
+        _ ->
+          cycle(s)
+      end
+    end)
+  end
 
   @impl GenServer
   def handle_cast({:fire, _mission_id}, s), do: wake(s)
@@ -142,7 +146,31 @@ defmodule Hireme.Gmail.Session do
   def handle_info(tick, s) when tick in [:wake, :renew, :retry], do: wake(s)
 
   def handle_info({:ssl, socket, data}, %{imap: %Imap{socket: socket, idle: tag}} = s)
-      when tag != nil do
+      when tag != nil,
+      do: guarded(s, fn -> pushed(s, data) end)
+
+  def handle_info({:ssl_closed, socket}, %{imap: %Imap{socket: socket}} = s),
+    do: trouble(drop(s), {:network, :closed})
+
+  def handle_info({:ssl_error, socket, why}, %{imap: %Imap{socket: socket}} = s),
+    do: trouble(drop(s), {:network, why})
+
+  def handle_info(_, s), do: {:noreply, s}
+
+  @impl GenServer
+  def terminate(_reason, %{imap: %Imap{} = imap}), do: Imap.close(imap)
+  def terminate(_reason, _s), do: :ok
+
+  # A crash report holds where the session stood, never its mail or socket.
+  @impl GenServer
+  def format_status(status),
+    do:
+      Map.update(status, :state, nil, fn
+        %__MODULE__{} = s -> Map.take(s, [:account_id, :status, :last_uid, :listed, :tries])
+        other -> other
+      end)
+
+  defp pushed(s, data) do
     case Imap.idle_data(s.imap, data) do
       {:ok, pushed, imap} ->
         s = %{s | imap: imap}
@@ -158,18 +186,6 @@ defmodule Hireme.Gmail.Session do
         trouble(drop(s), why)
     end
   end
-
-  def handle_info({:ssl_closed, socket}, %{imap: %Imap{socket: socket}} = s),
-    do: trouble(drop(s), {:network, :closed})
-
-  def handle_info({:ssl_error, socket, why}, %{imap: %Imap{socket: socket}} = s),
-    do: trouble(drop(s), {:network, why})
-
-  def handle_info(_, s), do: {:noreply, s}
-
-  @impl GenServer
-  def terminate(_reason, %{imap: %Imap{} = imap}), do: Imap.close(imap)
-  def terminate(_reason, _s), do: :ok
 
   defp wake(s) do
     s = %{s | renew: cancel(s.renew), retry: cancel(s.retry)}
@@ -190,16 +206,44 @@ defmodule Hireme.Gmail.Session do
   end
 
   defp cycle(s) do
-    with {:ok, s} <- connected(s),
-         {:ok, s} <- shoot_all(s),
-         {:ok, s} <- sync(s),
-         {:ok, s} <- spam(s),
-         {:ok, s} <- idle(s) do
-      {:noreply, %{s | tries: 0}}
-    else
-      {:stop, s} -> {:stop, :normal, drop(s)}
-      {:error, why, s} -> trouble(s, why)
-    end
+    guarded(s, fn ->
+      with {:ok, s} <- connected(s),
+           {:ok, s} <- shoot_all(s),
+           {:ok, s} <- sync(s),
+           {:ok, s} <- spam(s),
+           {:ok, s} <- idle(s) do
+        {:noreply, %{s | tries: 0}}
+      else
+        {:stop, s} -> {:stop, :normal, drop(s)}
+        {:error, why, s} -> trouble(s, why)
+      end
+    end)
+  end
+
+  # A raise or an exit anywhere in a cycle (the database, a reply nobody
+  # foresaw, a sequencer that timed out) costs this mailbox a backoff, never
+  # its supervisor: logged by its type and place alone, since the values in
+  # play may be someone's mail.
+  defp guarded(s, run) do
+    run.()
+  rescue
+    e -> crashed(s, e.__struct__, __STACKTRACE__)
+  catch
+    :exit, _ -> crashed(s, :exit, __STACKTRACE__)
+  end
+
+  defp crashed(s, kind, stack) do
+    place =
+      case stack do
+        [{m, f, a, info} | _] ->
+          "#{Exception.format_mfa(m, f, if(is_list(a), do: length(a), else: a))} #{info[:file]}:#{info[:line]}"
+
+        _ ->
+          "?"
+      end
+
+    Logger.error("gmail #{s.account_id}: cycle #{inspect(kind)} at #{place}")
+    trouble(drop(s), {:crash, kind})
   end
 
   defp drop(%{imap: %Imap{} = imap} = s) do
@@ -227,7 +271,14 @@ defmodule Hireme.Gmail.Session do
              {:ok, conn} <- Imap.login(conn, box.address, password),
              {:ok, %{all: folder, junk: junk}, conn} <- Imap.folders(conn),
              {:ok, info, conn} <- Imap.select(conn, folder) do
-          s = %{s | imap: conn, folder: folder, junk: junk, address: box.address, status: status}
+          s = %{
+            s
+            | imap: conn,
+              folder: folder,
+              junk: if(s.junk_off, do: nil, else: junk),
+              address: box.address,
+              status: status
+          }
 
           {:ok, cursor(s, box, folder, info)}
         else
@@ -256,10 +307,10 @@ defmodule Hireme.Gmail.Session do
 
   defp cursor(s, box, folder, validity) do
     if box.folder == folder and box.uidvalidity == validity do
-      %{s | last_uid: box.last_uid, listed: box.last_uid}
+      %{s | uidvalidity: validity, last_uid: box.last_uid, listed: box.last_uid}
     else
       server(s, %{folder: folder, uidvalidity: validity, last_uid: nil})
-      %{s | last_uid: nil, listed: nil}
+      %{s | uidvalidity: validity, last_uid: nil, listed: nil}
     end
   end
 
@@ -390,17 +441,41 @@ defmodule Hireme.Gmail.Session do
   # the searches and the IDLE read.
   defp spam(%{junk: nil} = s), do: {:ok, s}
 
+  # Best effort: Spam failing (a NO, a reply the parser cannot read) costs
+  # this cycle's Spam pass and a reconnect, never the mailbox's status or
+  # its sends; after three in a row this session leaves Spam alone.
   defp spam(s) do
     with {:ok, info, imap} <- Imap.select(s.imap, s.junk),
          s = junk_validity(%{s | imap: imap}, info.uidvalidity),
          {:ok, uids, imap} <- Imap.since_uid(s.imap, 1),
          {:ok, s} <-
            spam_walk(%{s | imap: imap}, Enum.reject(uids, &MapSet.member?(s.junk_seen, &1))),
-         {:ok, _info, imap} <- Imap.select(s.imap, s.folder) do
-      {:ok, %{s | imap: imap}}
+         {:ok, info, imap} <- Imap.select(s.imap, s.folder) do
+      {:ok, renumbered(%{s | imap: imap, junk_errors: 0}, info)}
     else
-      {:error, why} -> {:error, why, %{s | imap: nil}}
+      {:error, why} -> spam_failed(%{s | imap: nil}, why)
     end
+  end
+
+  defp spam_failed(s, why) do
+    Logger.error("gmail #{s.account_id}: Spam pass: #{inspect(code(why))}")
+    s = %{s | junk_errors: s.junk_errors + 1}
+    s = if s.junk_errors >= 3, do: %{s | junk_off: true}, else: s
+    connected(s)
+  end
+
+  defp code({status, _text}) when status in [:no, :bad, :bye], do: status
+  defp code({:network, why}), do: {:network, why}
+  defp code(why) when is_atom(why), do: why
+  defp code(_why), do: :other
+
+  # All Mail renumbered while the session held it (its UIDVALIDITY moved at a
+  # re-select): the walk starts afresh, as at connect.
+  defp renumbered(%{uidvalidity: v} = s, %{uidvalidity: v}), do: s
+
+  defp renumbered(s, %{uidvalidity: v}) do
+    server(s, %{uidvalidity: v, last_uid: nil})
+    %{s | uidvalidity: v, last_uid: nil, listed: nil}
   end
 
   defp junk_validity(%{junk_validity: v} = s, v), do: s
@@ -507,7 +582,10 @@ defmodule Hireme.Gmail.Session do
   end
 
   defp shoot(s, m) do
-    case Imap.message_id(s.imap, m.message_id, s.listed || 0) do
+    case look(s, m) do
+      {:held, ids} ->
+        done(s, m, ids)
+
       {:ok, [uid | _], imap} ->
         landed(%{s | imap: imap}, m, uid)
 
@@ -568,7 +646,10 @@ defmodule Hireme.Gmail.Session do
   # cursor show it at once); landed without them otherwise, the next sync's
   # copy filling them in.
   defp located(s, m, n) do
-    case Imap.message_id(s.imap, m.message_id, s.listed || 0) do
+    case look(s, m) do
+      {:held, ids} ->
+        done(s, m, ids)
+
       {:ok, [uid | _], imap} ->
         landed(%{s | imap: imap}, m, uid)
 
@@ -582,6 +663,20 @@ defmodule Hireme.Gmail.Session do
       {:error, why} ->
         {:ok, s} = done(%{s | imap: nil}, m, %{})
         {:error, why, s}
+    end
+  end
+
+  # Where a shot is, if Gmail holds it: the sync's copy of it on the node
+  # (filed with Gmail's ids), else Gmail's search and the headers of its
+  # newest mail, the newest 200 past a cursor that may already have passed
+  # it. Lag-free whichever ran first.
+  defp look(s, m) do
+    case Gmail.held(s.account_id, m.message_id) do
+      %{"gmail_msgid" => msgid, "gmail_thrid" => thrid} when is_integer(msgid) ->
+        {:held, %{gmail_msgid: msgid, gmail_thrid: thrid}}
+
+      _ ->
+        Imap.message_id(s.imap, m.message_id, max((s.listed || 0) - 200, 0))
     end
   end
 
@@ -653,15 +748,16 @@ defmodule Hireme.Gmail.Session do
   defp settle,
     do: Keyword.get(Application.get_env(:hireme, Gmail, []), :settle_ms, @settle_ms)
 
-  # A command the judge refused, logged by mission and refusal code.
+  # A command the judge refused (or that could not run), logged by mission
+  # and refusal code; the shot is looked at again after a backoff.
   defp said(s, m, what, {:refused, code, _data}) do
     Logger.error("gmail #{s.account_id}: mission #{m.id}: #{what} refused #{code}")
-    s
+    later(s, Security.mail_backoff(1))
   end
 
   defp said(s, m, what, other) do
-    Logger.error("gmail #{s.account_id}: mission #{m.id}: #{what}: #{inspect(other)}")
-    s
+    Logger.error("gmail #{s.account_id}: mission #{m.id}: #{what}: #{inspect(code(other))}")
+    later(s, Security.mail_backoff(1))
   end
 
   # The judge counted the shot against the cap when it fired; the node
@@ -694,9 +790,18 @@ defmodule Hireme.Gmail.Session do
     cc = Email.copies(shot)
 
     cond do
-      to == [] -> {:refuse, "no recipient"}
-      length(to) + length(cc) > 10 -> {:refuse, "more than 10 recipients"}
-      true -> with {:ok, files} <- cv(s, m), do: {:ok, to ++ cc, mail(s, shot, files)}
+      to == [] ->
+        {:refuse, "no recipient"}
+
+      length(to) + length(cc) > 10 ->
+        {:refuse, "more than 10 recipients"}
+
+      # One id on one header line, under SMTP's 998.
+      Enum.any?([shot.in_reply_to | shot.refs], &(is_binary(&1) and byte_size(&1) > 900)) ->
+        {:refuse, "an In-Reply-To or References id runs past 900 bytes"}
+
+      true ->
+        with {:ok, files} <- cv(s, m), do: {:ok, to ++ cc, mail(s, shot, files)}
     end
   end
 
@@ -766,7 +871,7 @@ defmodule Hireme.Gmail.Session do
   defp trouble(s, why) do
     s = drop(s)
     tries = s.tries + 1
-    if s.status != :error, do: state(s, :error, "Gmail could not be reached; retrying")
+    if s.status != :error, do: state(s, :error, unreachable(why))
     s = %{s | status: :error, tries: tries}
 
     s =
@@ -776,6 +881,9 @@ defmodule Hireme.Gmail.Session do
 
     {:noreply, later(s, Security.mail_backoff(tries - 1))}
   end
+
+  defp unreachable({:crash, _}), do: "the connector hit an error; retrying"
+  defp unreachable(_why), do: "Gmail could not be reached; retrying"
 
   defp settings(:imap_disabled),
     do: "IMAP is off in Gmail's settings: turn it on (Forwarding and POP/IMAP)"
@@ -794,6 +902,10 @@ defmodule Hireme.Gmail.Session do
   # Mail that came while other commands ran was counted in their answers,
   # never pushed to an IDLE: one look past what the sync listed first.
   defp idle(%{imap: nil} = s), do: {:error, {:network, :closed}, s}
+
+  # A first sync that settled no cursor (no UIDNEXT, nothing in its window)
+  # has nothing to look past.
+  defp idle(%{listed: nil} = s), do: really_idle(s)
 
   defp idle(s) do
     case Imap.since_uid(s.imap, (s.listed || 0) + 1) do

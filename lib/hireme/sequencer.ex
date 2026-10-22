@@ -192,11 +192,13 @@ defmodule Hireme.Sequencer do
   account's one row of a singleton when `id` is nil: `server_only` columns
   only. Neither the wire nor the kernel holds them, so no rev moves and
   no PATCH goes out; the write is still the sequencer's, in turn with the
-  account's others. Answers `:ok`, `{:error, :not_found}` or
+  account's others. `only` (column atoms to values) narrows it to a row
+  that still holds them when the write runs. Answers `:ok`,
+  `{:error, :not_found}` (no such row, or not as `only` says) or
   `{:error, :column}` (a column that is not server_only).
   """
-  def server_write(account_id, table, id, cells) when is_map(cells),
-    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells}, 30_000))
+  def server_write(account_id, table, id, cells, only \\ %{}) when is_map(cells),
+    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells, only}, 30_000))
 
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request) do
@@ -298,8 +300,8 @@ defmodule Hireme.Sequencer do
       {:reply, {:refused, :internal, %{}}, state, @idle_ms}
   end
 
-  def handle_call({:server_write, table, id, cells}, _from, state),
-    do: {:reply, server_cells(Schema.table(table), id, cells), state, @idle_ms}
+  def handle_call({:server_write, table, id, cells, only}, _from, state),
+    do: {:reply, server_cells(Schema.table(table), id, cells, only), state, @idle_ms}
 
   def handle_call({:call, actor, ops}, _from, state) do
     {state, acks, nacks} = run_as(actor, ops, state)
@@ -648,14 +650,15 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp server_cells(nil, _id, _cells), do: {:error, :not_found}
+  defp server_cells(nil, _id, _cells, _only), do: {:error, :not_found}
 
-  defp server_cells(table, id, cells) do
-    only = for c <- table.cols, c.server_only, into: %{}, do: {String.to_atom(c.name), c}
+  defp server_cells(table, id, cells, only) do
+    hidden = for c <- table.cols, c.server_only, into: %{}, do: {String.to_atom(c.name), c}
 
-    if cells != %{} and Enum.all?(Map.keys(cells), &Map.has_key?(only, &1)) do
+    if cells != %{} and Enum.all?(Map.keys(cells), &Map.has_key?(hidden, &1)) do
       q = from(r in Schema.row(table.name))
       q = if id, do: where(q, [r], r.id == ^id), else: q
+      q = Enum.reduce(only, q, fn {k, v}, q -> where(q, [r], field(r, ^k) == ^v) end)
 
       case Store.write(fn -> Repo.update_all(q, set: Enum.to_list(cells)) end) do
         {0, _} -> {:error, :not_found}

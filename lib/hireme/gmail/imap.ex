@@ -258,7 +258,7 @@ defmodule Hireme.Gmail.Imap do
   def message(conn, uid) do
     with {:ok, found, conn} <-
            fetch(conn, [uid], "(UID X-GM-MSGID X-GM-THRID X-GM-LABELS BODY.PEEK[])", 120_000),
-         do: {:ok, List.first(found), conn}
+         do: {:ok, Enum.find(found, &Map.has_key?(&1, :raw)), conn}
   end
 
   defp fetch(conn, [], _items, _timeout), do: {:ok, [], conn}
@@ -741,7 +741,7 @@ defmodule Hireme.Gmail.Imap do
     case :binary.at(text, i) do
       c when depth == 0 and c in [?\s, ?(, ?), 0] -> split_at(text, i)
       ?[ when depth > 0 -> atom(text, i + 1, depth + 1)
-      ?[ -> atom(text, i + 1, if(section?(binary_part(text, 0, i)), do: 1, else: 0))
+      ?[ -> atom(text, i + 1, if(section?(text, i), do: 1, else: 0))
       ?] when depth > 0 -> atom(text, i + 1, depth - 1)
       _ -> atom(text, i + 1, depth)
     end
@@ -749,10 +749,19 @@ defmodule Hireme.Gmail.Imap do
 
   defp atom(text, i, _depth), do: split_at(text, i)
 
-  # Only a fetch item's section (BODY[...]) holds spaces and parentheses
-  # inside brackets; a label like [Archive is a plain atom.
-  defp section?(prefix),
-    do: String.upcase(prefix) in ["BODY", "BODY.PEEK", "BINARY", "BINARY.PEEK", "BINARY.SIZE"]
+  # Only a fetch item's section (BODY[...], closed later on the line) holds
+  # spaces and parentheses inside brackets; a label like [Archive, or one
+  # spelled BODY[ with nothing to close it, is a plain atom.
+  defp section?(text, i) do
+    String.upcase(binary_part(text, 0, i)) in [
+      "BODY",
+      "BODY.PEEK",
+      "BINARY",
+      "BINARY.PEEK",
+      "BINARY.SIZE"
+    ] and
+      :binary.match(text, "]", scope: {i, byte_size(text) - i}) != :nomatch
+  end
 
   defp split_at(text, i), do: {binary_part(text, 0, i), binary_part(text, i, byte_size(text) - i)}
 end
