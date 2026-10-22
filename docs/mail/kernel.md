@@ -202,6 +202,10 @@ answer, never an error:
 - `live_keys {}`: `[{id, scope, usable_by, request_id, burned, remaining,
   changed, first_used_at, expires_at, expires_in_s}]`.
 - `mail_quota {}`: `{cap, used, left, resets_at}`.
+- `mail_match {...the envelope}`: the filing, below; the node asks it
+  through the account kernel's read before it stores anything.
+- The application document (`Kernel::application`, the desk card) carries
+  `missions`: the rows `missions {application}` answers.
 - Filing (`unfiled`, threads): over the outreach type, once its interface is
   published.
 
