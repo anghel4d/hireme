@@ -23,9 +23,11 @@ defmodule HiremeWeb.MailInboundTest do
   def pipe(@pipe), do: {:ok, 7, @secret}
   def pipe(_), do: :error
 
+  def ingest(_account, "not ready" <> _, :domain), do: {:error, :not_ready}
+
   def ingest(account, raw, source) do
     send(:persistent_term.get({__MODULE__, :test}), {:ingest, account, raw, source})
-    {:ok, :unfiled}
+    {:ok, :stored}
   end
 
   defp deliver(body, headers, pipe \\ @pipe) do
@@ -53,7 +55,7 @@ defmodule HiremeWeb.MailInboundTest do
   test "a signed message to an enabled pipe is handed to ingestion whole, as that account's domain copy" do
     conn = deliver(@raw, signed(@raw))
     assert conn.status == 200
-    assert %{"ok" => true, "outcome" => "unfiled"} = JSON.decode!(conn.resp_body)
+    assert %{"ok" => true, "outcome" => "stored"} = JSON.decode!(conn.resp_body)
     assert_received {:ingest, 7, @raw, :domain}
   end
 
@@ -79,6 +81,10 @@ defmodule HiremeWeb.MailInboundTest do
     refused?(deliver(@raw, [{"content-type", "text/plain"} | tl(signed(@raw))]), 415)
     big = :binary.copy("a", 25 * 1024 * 1024 + 1)
     refused?(deliver(big, signed(big)), 413)
+  end
+
+  test "while ingestion is not ready the node answers 503, which the Worker retries" do
+    refused?(deliver("not ready\r\n", signed("not ready\r\n")), 503)
   end
 
   test "a GET is not answered" do

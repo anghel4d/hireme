@@ -15,7 +15,8 @@ defmodule HiremeWeb.MailInbound do
   (404), a body over 25 MiB (413, read under that bound before anything
   else), another Content-Type than message/rfc822 (415), a missing or
   wrong signature or one more than 300 s from the node's clock (401), past
-  the pipe's `mail_inbound` limit (429). There is no nonce store: a replay
+  the pipe's `mail_inbound` limit (429), ingestion not ready yet (503, so
+  the Worker retries) or refusing the message (422). There is no nonce store: a replay
   inside the window carries a Message-ID the node already holds, and is a
   duplicate. Nobody is struck or banned: every request comes from
   Cloudflare's Worker egress. The envelope headers are believed only once
@@ -60,9 +61,9 @@ defmodule HiremeWeb.MailInbound do
 
   # The pipe's account and unsealed secret, from the mailbox row that holds it.
   defp pipe(pipe_id) do
-    {mod, fun} = conf(:pipe, {Hireme.Mailboxes, :pipe})
+    {mod, fun} = conf(:pipe, {Hireme.Gmail, :pipe})
 
-    # Until the mailbox row exists (`Hireme.Mailboxes`), every pipe is unknown.
+    # Until the connector has the lookup (`Hireme.Gmail.pipe/1`), every pipe is unknown.
     found? = Code.ensure_loaded?(mod) and function_exported?(mod, fun, 1)
 
     case found? and pipe_id =~ ~r/^[0-9A-Za-z]{12}$/ and apply(mod, fun, [pipe_id]) do
@@ -111,6 +112,9 @@ defmodule HiremeWeb.MailInbound do
     case apply(mod, fun, [account_id, body, :domain]) do
       {:ok, outcome} ->
         reply(conn, 200, %{ok: true, outcome: outcome})
+
+      {:error, :not_ready} ->
+        refuse(conn, 503, "the node cannot take mail yet; the Gmail link's copy still arrives")
 
       {:error, reason} ->
         Logger.warning("mail inbound: ingest refused: #{inspect(reason)}")
