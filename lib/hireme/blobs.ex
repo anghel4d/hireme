@@ -3,8 +3,8 @@ defmodule Hireme.Blobs do
   A CV's files by SHA-256, each account's own, in `blobs` (never on the
   wire; `HiremeWeb.Blobs` serves them over HTTP). `put/3` keeps the bytes
   once and reads their text then, for the rules and the agents: markdown as
-  it is, a docx's paragraphs, a Word 97-2003 doc's pieces, a PDF's shown strings through its fonts'
-  ToUnicode maps (a font without one reads as Latin-1). A file whose text
+  it is, a docx's paragraphs, a Word 97-2003 doc's pieces, a PDF's shown strings, each through its own font's
+  ToUnicode map (a font without one reads as Latin-1). A file whose text
   cannot be read is still kept, with none. Reading runs in its own process
   under a deadline, and nothing it inflates may pass `@inflated`.
   """
@@ -282,46 +282,194 @@ defmodule Hireme.Blobs do
 
   # ------------------------------------------------------------------- pdf
 
+  # The pages in order, each content stream read through the fonts its page
+  # names: subsets number their glyphs from the same codes, so one map merged
+  # over every font reads one font's text through another's (a Skia CV had
+  # every g an i). A file whose pages cannot be found has every text stream
+  # read through the maps merged.
   defp pdf(<<"%PDF-", _::binary>> = data) do
-    streams = streams(data)
-    cmap = for s <- streams, String.contains?(s, "begincmap"), reduce: %{}, do: (m -> cmap(s, m))
-    for(s <- streams, String.contains?(s, "BT"), do: shown(s, cmap)) |> Enum.join("\n")
+    objs = data |> objects(0, 0, %{}) |> unpack()
+
+    fonts =
+      for {n, {d, _}} <- objs,
+          {_, s} <- [objs[ref(d, "ToUnicode")]],
+          is_binary(s),
+          into: %{},
+          do: {n, cmap(s, %{})}
+
+    ctx = {objs, fonts, fonts |> Map.values() |> Enum.reduce(%{}, &Map.merge/2)}
+
+    pages =
+      for {_, {d, _}} <- objs,
+          d =~ ~r{/Type\s*/Catalog},
+          page <- pages(objs, ref(d, "Pages"), nil, 0),
+          do: page
+
+    texts =
+      if pages == [],
+        do:
+          for({_, {_, s}} <- Enum.sort(objs), is_binary(s), s =~ "BT", do: shown(s, "", ctx, 0)),
+        else: for({d, res} <- pages, do: shown(Enum.join(contents(objs, d), "\n"), res, ctx, 0))
+
+    Enum.join(texts, "\n")
   end
 
   defp pdf(_), do: nil
 
-  # Every stream's bytes, inflated when its dictionary says FlateDecode;
-  # images and other filters are left out.
-  defp streams(data) do
-    {_, out} =
-      data
-      |> :binary.matches(["stream\r\n", "stream\n"])
-      |> Enum.reduce({0, []}, fn {at, len}, {budget, acc} ->
-        dict = binary_part(data, max(at - 512, 0), min(at, 512))
-        dict = dict |> :binary.split("obj") |> List.last()
-        body = binary_part(data, at + len, byte_size(data) - at - len)
-        [body | _] = :binary.split(body, "endstream")
+  # Every object by number, a later one over an earlier (incremental updates):
+  # its dictionary and its stream, inflated when its dictionary says
+  # FlateDecode (nil under any other filter).
+  defp objects(data, pos, budget, objs) do
+    case Regex.run(~r/(\d+)\s+\d+\s+obj\b/, data, return: :index, offset: pos) do
+      [{at, len}, {na, nl}] ->
+        {obj, stop, budget} = object(data, at + len, budget)
 
-        cond do
-          budget > @inflated or String.ends_with?(binary_part(data, 0, at), "end") ->
-            {budget, acc}
+        objects(
+          data,
+          stop,
+          budget,
+          Map.put(objs, String.to_integer(binary_part(data, na, nl)), obj)
+        )
 
-          dict =~ "/FlateDecode" ->
-            s = Security.inflate(body, @inflated - budget) || ""
-            {budget + byte_size(s), [s | acc]}
-
-          dict =~ "/Filter" ->
-            {budget, acc}
-
-          true ->
-            {budget + byte_size(body), [body | acc]}
-        end
-      end)
-
-    Enum.reverse(out)
+      nil ->
+        objs
+    end
   end
 
-  # A ToUnicode map's codes, merged over every font: bfchar pairs and bfranges.
+  defp object(data, start, budget) do
+    size = byte_size(data)
+
+    case :binary.match(data, ["endobj", "stream\r\n", "stream\n"], scope: {start, size - start}) do
+      {at, 6} ->
+        {{binary_part(data, start, at - start), nil}, at + 6, budget}
+
+      {at, len} ->
+        dict = binary_part(data, start, at - start)
+        from = at + len
+
+        {stop, raw} =
+          case :binary.match(data, "endstream", scope: {from, size - from}) do
+            {e, _} -> {e + 9, binary_part(data, from, e - from)}
+            nil -> {size, binary_part(data, from, size - from)}
+          end
+
+        cond do
+          budget > @inflated ->
+            {{dict, nil}, stop, budget}
+
+          dict =~ "/FlateDecode" ->
+            s = Security.inflate(raw, @inflated - budget) || ""
+            {{dict, s}, stop, budget + byte_size(s)}
+
+          dict =~ "/Filter" ->
+            {{dict, nil}, stop, budget}
+
+          true ->
+            {{dict, raw}, stop, budget + byte_size(raw)}
+        end
+
+      nil ->
+        {{binary_part(data, start, size - start), nil}, size, budget}
+    end
+  end
+
+  # The objects an object stream holds, each as its own.
+  defp unpack(objs) do
+    Enum.reduce(objs, objs, fn
+      {_, {d, s}}, acc when is_binary(s) ->
+        with true <- d =~ ~r{/Type\s*/ObjStm},
+             [_, first] <- Regex.run(~r{/First\s+(\d+)}, d),
+             first when first <= byte_size(s) <- String.to_integer(first),
+             [_ | _] = heads <- Regex.scan(~r/\d+/, binary_part(s, 0, first)) do
+          heads =
+            heads
+            |> Enum.map(fn [x] -> String.to_integer(x) end)
+            |> Enum.chunk_every(2, 2, :discard)
+
+          stops = Enum.map(Enum.drop(heads, 1), &List.last/1) ++ [byte_size(s) - first]
+
+          for {[n, off], stop} <- Enum.zip(heads, stops),
+              off <= stop,
+              first + stop <= byte_size(s),
+              into: acc,
+              do: {n, {binary_part(s, first + off, stop - off), nil}}
+        else
+          _ -> acc
+        end
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  # The page tree's leaves in order, each with the resources it has or inherits.
+  defp pages(objs, n, res, depth) do
+    case objs[n] do
+      {d, _} when depth < 32 ->
+        res = if d =~ "/Resources", do: entry(objs, d, "Resources"), else: res
+
+        if d =~ ~r{/Type\s*/Pages\b} do
+          kids = for [_, k] <- [Regex.run(~r{/Kids\s*\[([^\]]*)\]}, d)], n <- refs(k), do: n
+
+          Enum.flat_map(kids, &pages(objs, &1, res, depth + 1))
+        else
+          [{d, res || ""}]
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp contents(objs, page) do
+    for [_, c] <- [Regex.run(~r{/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)}, page)],
+        n <- refs(c),
+        {_, s} <- [objs[n]],
+        is_binary(s),
+        do: s
+  end
+
+  # A dictionary's entry that is a dictionary, written in place or referenced.
+  defp entry(objs, dict, key) do
+    case Regex.run(~r{/#{key}\s*(<<|(\d+)\s+\d+\s+R)}, dict, return: :index) do
+      [_, {at, _}] ->
+        inner(dict, at + 2, at + 2, 1)
+
+      [_, _, {na, nl}] ->
+        case objs[String.to_integer(binary_part(dict, na, nl))] do
+          {d, _} -> d
+          nil -> ""
+        end
+
+      nil ->
+        ""
+    end
+  end
+
+  defp inner(d, from, at, depth) do
+    case :binary.match(d, ["<<", ">>"], scope: {at, byte_size(d) - at}) do
+      {i, 2} when binary_part(d, i, 2) == "<<" -> inner(d, from, i + 2, depth + 1)
+      {i, 2} when depth == 1 -> binary_part(d, from, i - from)
+      {i, 2} -> inner(d, from, i + 2, depth - 1)
+      nil -> binary_part(d, from, byte_size(d) - from)
+    end
+  end
+
+  defp ref(dict, key) do
+    with [_, n] <- Regex.run(~r{/#{key}\s+(\d+)\s+\d+\s+R}, dict), do: String.to_integer(n)
+  end
+
+  defp refs(text),
+    do: for([_, n] <- Regex.scan(~r/(\d+)\s+\d+\s+R\b/, text), do: String.to_integer(n))
+
+  defp names(text),
+    do:
+      for(
+        [_, k, n] <- Regex.scan(~r{/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R}, text),
+        do: {k, String.to_integer(n)}
+      )
+
+  # A ToUnicode map's codes: bfchar pairs and bfranges.
   defp cmap(s, map) do
     map =
       for [_, block] <- Regex.scan(~r/beginbfchar(.*?)endbfchar/s, s),
@@ -374,15 +522,25 @@ defmodule Hireme.Blobs do
 
   # The strings a content stream shows, a line break where text moves down
   # (a move along the line adds nothing: producers place glyph by glyph, and
-  # a space is a glyph or a TJ gap).
-  defp shown(s, cmap) do
-    {_, _, out} =
-      Enum.reduce(tokens(s, []), {[], nil, []}, fn
-        {:op, op}, {args, y, out} when op in ["Tj", "'", "\""] ->
-          {[], y, [out | for({:str, b} <- Enum.take(args, 1), do: decode(b, cmap))]}
+  # a space is a glyph or a TJ gap), each string through its font's map and a
+  # form's strings where the form is drawn.
+  defp shown(s, res, {objs, fonts, merged} = ctx, depth) do
+    named = for {k, n} <- names(entry(objs, res, "Font")), into: %{}, do: {k, fonts[n] || %{}}
+    forms = Map.new(names(entry(objs, res, "XObject")))
 
-        {:op, "TJ"}, {[{:array, items} | _], y, out} ->
-          {[], y,
+    {_, _, _, out} =
+      Enum.reduce(tokens(s, []), {[], nil, merged, []}, fn
+        {:op, "Tf"}, {[_, {:name, f} | _], y, _, out} ->
+          {[], y, Map.get(named, f, merged), out}
+
+        {:op, "Do"}, {[{:name, x} | _], y, cmap, out} ->
+          {[], y, cmap, [out | form(objs[forms[x]], res, ctx, depth)]}
+
+        {:op, op}, {args, y, cmap, out} when op in ["Tj", "'", "\""] ->
+          {[], y, cmap, [out | for({:str, b} <- Enum.take(args, 1), do: decode(b, cmap))]}
+
+        {:op, "TJ"}, {[{:array, items} | _], y, cmap, out} ->
+          {[], y, cmap,
            [
              out
              | Enum.map(items, fn
@@ -392,24 +550,34 @@ defmodule Hireme.Blobs do
                end)
            ]}
 
-        {:op, op}, {[ty, _ | _], y, out} when op in ["Td", "TD"] and is_number(ty) ->
-          {[], y, [out | if(ty != 0, do: "\n", else: "")]}
+        {:op, op}, {[ty, _ | _], y, cmap, out} when op in ["Td", "TD"] and is_number(ty) ->
+          {[], y, cmap, [out | if(ty != 0, do: "\n", else: "")]}
 
-        {:op, "Tm"}, {[ty | _], y, out} when is_number(ty) ->
-          {[], ty, [out | if(y != nil and abs(ty - y) > 1, do: "\n", else: "")]}
+        {:op, "Tm"}, {[ty | _], y, cmap, out} when is_number(ty) ->
+          {[], ty, cmap, [out | if(y != nil and abs(ty - y) > 1, do: "\n", else: "")]}
 
-        {:op, "T*"}, {_, y, out} ->
-          {[], y, [out | "\n"]}
+        {:op, "T*"}, {_, y, cmap, out} ->
+          {[], y, cmap, [out | "\n"]}
 
-        {:op, _}, {_, y, out} ->
-          {[], y, out}
+        {:op, _}, {_, y, cmap, out} ->
+          {[], y, cmap, out}
 
-        arg, {args, y, out} ->
-          {[arg | args], y, out}
+        arg, {args, y, cmap, out} ->
+          {[arg | args], y, cmap, out}
       end)
 
     IO.iodata_to_binary(out)
   end
+
+  defp form({d, s}, res, {objs, _, _} = ctx, depth) when is_binary(s) and depth < 8 do
+    cond do
+      not (d =~ ~r{/Subtype\s*/Form}) -> ""
+      d =~ "/Resources" -> shown(s, entry(objs, d, "Resources"), ctx, depth + 1)
+      true -> shown(s, res, ctx, depth + 1)
+    end
+  end
+
+  defp form(_, _, _, _), do: ""
 
   defp decode(b, cmap) do
     two = for <<c::binary-2 <- b>>, do: Map.get(cmap, c)
@@ -427,7 +595,7 @@ defmodule Hireme.Blobs do
     end
   end
 
-  # Operands and operators; dictionaries, names and comments pass by.
+  # Operands, names and operators; dictionaries and comments pass by.
   defp tokens(<<>>, acc), do: Enum.reverse(acc)
   defp tokens(<<c, r::binary>>, acc) when c in ~c" \t\r\n\f\0", do: tokens(r, acc)
   defp tokens(<<"%", r::binary>>, acc), do: tokens(r |> :binary.split("\n") |> List.last(), acc)
@@ -449,7 +617,10 @@ defmodule Hireme.Blobs do
     tokens(r, [{:array, tokens(inner, [])} | acc])
   end
 
-  defp tokens(<<"/", r::binary>>, acc), do: tokens(skip_word(r), acc)
+  defp tokens(<<"/", r::binary>>, acc) do
+    [name] = Regex.run(~r/^[^\s\/\[\]()<>{}%]*/, r)
+    tokens(binary_part(r, byte_size(name), byte_size(r) - byte_size(name)), [{:name, name} | acc])
+  end
 
   defp tokens(<<c, _::binary>> = s, acc) when c in ~c"+-.0123456789" do
     [n | _] = Regex.run(~r/^[+-]?(\d+\.?\d*|\.\d+)/, s) || [<<c>>]
@@ -466,8 +637,6 @@ defmodule Hireme.Blobs do
         tokens(binary_part(s, 1, byte_size(s) - 1), acc)
     end
   end
-
-  defp skip_word(s), do: Regex.replace(~r/^[^\s\/\[\]()<>{}%]*/, s, "")
 
   defp number(n) do
     case Float.parse(n) do

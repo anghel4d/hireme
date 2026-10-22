@@ -7,35 +7,53 @@ defmodule HiremeWeb.BlobsTest do
   @pdf "application/pdf"
   @docx "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-  # A PDF as producers write one for a CID font: glyph ids in hex strings,
-  # a ToUnicode map, glyphs placed one by one along each line, deflated.
+  # A PDF as Skia writes one for CID fonts: each line in a font of its own,
+  # subset from the same glyph ids (so one font's codes are another's
+  # letters), a ToUnicode map per font, glyphs placed one by one, deflated.
   defp pdf(lines) do
-    glyphs = lines |> Enum.join() |> String.codepoints() |> Enum.uniq()
-    gid = glyphs |> Enum.with_index(3) |> Map.new(fn {g, i} -> {g, hex16(i)} end)
+    n = length(lines)
 
-    pairs =
-      Enum.map_join(glyphs, "\n", fn g ->
-        "<#{gid[g]}> <#{Base.encode16(:unicode.characters_to_binary(g, :utf8, {:utf16, :big}))}>"
+    gids =
+      Enum.map(lines, fn l ->
+        l
+        |> String.codepoints()
+        |> Enum.uniq()
+        |> Enum.with_index(3)
+        |> Map.new(fn {g, i} -> {g, hex16(i)} end)
       end)
 
-    cmap = "begincmap\n#{length(glyphs)} beginbfchar\n#{pairs}\nendbfchar\nendcmap"
+    cmap = fn gid ->
+      pairs =
+        Enum.map_join(gid, "\n", fn {g, c} ->
+          "<#{c}> <#{Base.encode16(:unicode.characters_to_binary(g, :utf8, {:utf16, :big}))}>"
+        end)
+
+      "begincmap\n#{map_size(gid)} beginbfchar\n#{pairs}\nendbfchar\nendcmap"
+    end
 
     content =
       lines
+      |> Enum.zip(gids)
       |> Enum.with_index()
-      |> Enum.map_join("\n", fn {l, i} ->
+      |> Enum.map_join("\n", fn {{l, gid}, i} ->
         shown = l |> String.codepoints() |> Enum.map_join(" 7.5 0 Td ", &"<#{gid[&1]}> Tj")
-        "BT /F1 12 Tf 1 0 0 -1 40 #{60 + 16 * i} Tm #{shown} ET"
+        "BT /F#{i} 12 Tf 1 0 0 -1 40 #{60 + 16 * i} Tm #{shown} ET"
       end)
 
-    objects = [
-      "<< /Type /Catalog /Pages 2 0 R >>",
-      "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-      "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
-      stream(content),
-      "<< /Type /Font /Subtype /Type0 /BaseFont /CV /Encoding /Identity-H /ToUnicode 6 0 R >>",
-      stream(cmap)
-    ]
+    names = Enum.map_join(0..(n - 1), " ", &"/F#{&1} #{5 + &1} 0 R")
+
+    objects =
+      [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << #{names} >> >> >>",
+        stream(content)
+      ] ++
+        Enum.map(
+          0..(n - 1),
+          &"<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode #{5 + n + &1} 0 R >>"
+        ) ++
+        Enum.map(gids, &stream(cmap.(&1)))
 
     body =
       objects
