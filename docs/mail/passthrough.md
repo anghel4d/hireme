@@ -60,15 +60,27 @@ Brief for the team, 2026-10-22. The operator's words, verbatim, in order:
 - anghel4d.com as a second pipe: its mail already forwards to Gmail; a Cloudflare Email Worker also posts each message to the node, signed; the node dedupes by Message-ID.
 - A daily send cap (25 to start) binds every send. Inbound text is someone else's: untrusted data for agents and the page.
 
+## Rules the operator agreed after review
+
+The operator, verbatim: "Yeah agreed. Now see the task through end to end. And by the way, it is VERY important that the polymorphic outreach TYPE definition and its pattern-matchers and guards be handled by JUST opus-turing."
+
+1. **A key fires exactly what was approved.** Creating a fire key freezes each named mission's target and draft (a hash of both, stored with the key). A mission edited after that leaves the key's scope; firing checks the hash. An agent, prompt-injected or not, cannot redirect or rewrite a shot.
+2. **A shot burns on success.** A failed send or a failed submission (bounce, SMTP error, a form that refuses) records the error and returns the mission to fire ready, still covered by the key.
+3. **Self-reported missions are provisional until corroborated.** A careers-page or other untracked mission counts as submitted on its report, provisionally; the job board's confirmation mail, filed against it by the lexical filer, makes it confirmed.
+4. **The review is a real read.** The predialed page shows every mission's draft and target in full, not just ids, before the operator creates the key.
+5. **No double applications.** Missions for the 137 applications whose prior send is unresolved (the crucible ledger's `sync.applied_on`) cannot be fired until the operator settles them.
+6. **Delivery order.** Email missions end to end first (Gmail link, drafts, the key, fire, reply filing, the desk card); reports and the other channels build on that core.
+7. **Line budget.** The per-commit net-zero bound is suspended for this feature, by the operator's agreement; each commit still states its net.
+
 ## Lanes
 
 Subdivide further as you see fit, talk to each other directly (herdr prompt), and settle interfaces between you. Claim files in the team log before writing them; never write another lane's file.
 
-- **opus-lovelace — schema and kernel.** The OutreachItem sum type and its variants, missions and their states, fire keys (range scopes, one shot per mission, the one-week and 24-hour windows, burned and remaining sets, the commander's answer as data), the stage moves (fire → submitted), mailboxes, and the unified lexer/correlator with the email specialization: the one judge for the page, the daemon and the node.
-- **opus-hopper — the node.** The Gmail connector (IMAP, SMTP, MIME, per-account supervision, ingestion as OutreachEmail), firing an email mission under a key, the Elixir side of the outreach types with pattern matching, and the sequencer's part in all of it. Test against a local IMAP/SMTP server.
+- **opus-turing — the OutreachItem type, alone.** The polymorphic outreach type definition, its variants, and its pattern matchers and guards, in the Rust kernel and in Elixir, are opus-turing's and nobody else's. Other lanes consume them; anything they need from the type, they ask turing for. turing also keeps the threat model (only a human session creates keys; a predialed link never creates one by itself; server-side scope and hash checks; credentials; the inbound endpoint; untrusted mail and reports) and the app-password handover.
+- **opus-lovelace — schema and kernel.** Missions and their states, fire keys (range scopes, one shot per mission, the one-week and 24-hour windows, burned and remaining sets, the commander's answer as data), the stage moves (fire → submitted), mailboxes, and the unified lexer/correlator with the email specialization, over turing's outreach type: the one judge for the page, the daemon and the node. Fire keys freeze each mission's target and draft by hash (rule 1).
+- **opus-hopper — the node.** The Gmail connector (IMAP, SMTP, MIME, per-account supervision, ingestion as OutreachEmail), firing an email mission under a key, and the sequencer's part in all of it, over turing's outreach type. Test against a local IMAP/SMTP server.
 - **opus-eliza — the MCP surface and the domain pipe.** The tools on both the node's /mcp and the hireme-mcp daemon: missions, drafts and reports; request-a-key (the predialed link); fire; the dense agent-facing answers (send without a key, the commander); the mission brief an agent gets (type, outreach produced, what to report and track). Plus the anghel4d.com Email Worker and its signed endpoint (your checkpoint in wt-mail).
 - **opus-noether — the page.** The desk card end to end; the outreach hub (polymorphic collapsible rows, grouping by any field, manual items, links out); creating a fire key from a predialed link (review, create, step-up), live keys with burned and remaining missions and their countdowns, revoke; Send greyed for an AI operator; linking Gmail in the account lens; the unfiled tray.
-- **opus-turing — security and production.** The threat model (only a human session creates keys; a predialed link never creates one by itself; server-side scope checks; credentials; the inbound endpoint; untrusted inbound text and prompt injection through mail and reports), SECURITY.md, the nix module and secrets, a `checks.dev` scenario, the app-password handover, and the deploy once the gates pass.
-- **opus-shannon** coordinates, answers design questions, runs the end-to-end check and reports to the operator.
+- **opus-shannon** coordinates, answers design questions, takes production (the nix module and secrets, a `checks.dev` scenario, SECURITY.md from turing's threat model, the deploy), runs the end-to-end check and reports to the operator.
 
 Usual rules: the clean-HEAD gates in BRIEF.md, explicit-pathspec commits, no amend / revert / stash in the shared tree, fix bugs on sight, report progress and each landing in /home/pyrus/workspace/hireme-team.log as `<name> mail: ...`. fable-review is not to be messaged.
