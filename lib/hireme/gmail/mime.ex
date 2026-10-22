@@ -846,24 +846,14 @@ defmodule Hireme.Gmail.Mime do
     end
   end
 
-  defp quoted(s, acc) do
-    case :binary.match(s, ["\"", "\\"]) do
-      :nomatch ->
-        {IO.iodata_to_binary(Enum.reverse([s | acc])), ""}
+  defp quoted(s, acc), do: delimited(s, ?", ?", 1, acc)
+  defp comment(s, depth, acc), do: delimited(s, ?(, ?), depth, acc)
 
-      {p, 1} ->
-        before = binary_part(s, 0, p)
-
-        case binary_part(s, p, byte_size(s) - p) do
-          <<?\\, c, rest::binary>> -> quoted(rest, [<<c>>, before | acc])
-          <<?", rest::binary>> -> {IO.iodata_to_binary(Enum.reverse([before | acc])), rest}
-          _ -> {IO.iodata_to_binary(Enum.reverse([before | acc])), ""}
-        end
-    end
-  end
-
-  defp comment(s, depth, acc) do
-    case :binary.match(s, ["(", ")", "\\"]) do
+  # Text up to the `close` that closes depth 1, backslash escapes read, an
+  # `open` nesting one deeper and kept as written: {text, rest}; an
+  # unterminated one runs to the end.
+  defp delimited(s, open, close, depth, acc) do
+    case :binary.match(s, Enum.uniq([<<close>>, "\\", <<open>>])) do
       :nomatch ->
         {IO.iodata_to_binary(Enum.reverse([s | acc])), ""}
 
@@ -872,16 +862,16 @@ defmodule Hireme.Gmail.Mime do
 
         case binary_part(s, p, byte_size(s) - p) do
           <<?\\, c, rest::binary>> ->
-            comment(rest, depth, [<<c>>, before | acc])
+            delimited(rest, open, close, depth, [<<c>>, before | acc])
 
-          <<?(, rest::binary>> ->
-            comment(rest, depth + 1, ["(", before | acc])
-
-          <<?), rest::binary>> when depth == 1 ->
+          <<^close, rest::binary>> when depth == 1 ->
             {IO.iodata_to_binary(Enum.reverse([before | acc])), rest}
 
-          <<?), rest::binary>> ->
-            comment(rest, depth - 1, [")", before | acc])
+          <<^close, rest::binary>> ->
+            delimited(rest, open, close, depth - 1, [<<close>>, before | acc])
+
+          <<^open, rest::binary>> ->
+            delimited(rest, open, close, depth + 1, [<<open>>, before | acc])
 
           _ ->
             {IO.iodata_to_binary(Enum.reverse([before | acc])), ""}
@@ -1332,24 +1322,10 @@ defmodule Hireme.Gmail.Mime do
           {_, rest} = comment(rest, 1, [])
           uncomment(rest, [" ", before | acc])
         else
-          n = quoted_len(rest, 0)
-
-          uncomment(binary_part(rest, n, byte_size(rest) - n), [
-            binary_part(rest, 0, n),
-            "\"",
-            before | acc
-          ])
+          {_, more} = quoted(rest, [])
+          n = byte_size(rest) - byte_size(more)
+          uncomment(more, [binary_part(rest, 0, n), "\"", before | acc])
         end
-    end
-  end
-
-  defp quoted_len(s, from) do
-    case :binary.match(s, ["\"", "\\"], scope: {from, byte_size(s) - from}) do
-      :nomatch ->
-        byte_size(s)
-
-      {p, 1} ->
-        if :binary.at(s, p) == ?\\, do: quoted_len(s, min(p + 2, byte_size(s))), else: p + 1
     end
   end
 
