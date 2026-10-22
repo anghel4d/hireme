@@ -286,12 +286,15 @@ Gone with no successor: `claims`, squads, `scoreboard_snapshots`,
 ## Wire v2
 
 Header: `u32 len | u8 kind | u8 flags | u16 wire_hash | u64 rev`, 16
-bytes, bodies 8-aligned. Flags: `ZSTD 0x01`, `END 0x02`.
+bytes, bodies 8-aligned. Flags: `ZSTD 0x01`, `END 0x02`, `ATOMIC 0x04` (up
+OPS frames of one atomic burst, judged as one transaction once the frame
+also flagged `END` lands; it needs a bulk contract, as a burst over /mcp
+does, and is sent only to a node whose WELCOME `features` say it takes them).
 
 | Frame | Id | Direction | Body |
 | --- | --- | --- | --- |
 | `HELLO` | 1 | up | credential kind (ticket, key), credential, `snapshot_rev`, `schema_rev`, client label |
-| `WELCOME` | 2 | down | account id, session id, session label, `read_mask`, `write_mask`, `may_delete`, `schema_rev`, lease state |
+| `WELCOME` | 2 | down | account id, session id, session label, `read_mask`, `write_mask`, `may_delete`, `schema_rev`, lease state, `features` (bit 0: atomic OPS bursts) |
 | `BOOT` | 3 | down | every resident table the read mask allows, plus `catalog`, `leases`, `clock` |
 | `PATCH` | 4 | down | changed rows (id + moved columns) and `gone` |
 | `OPS` | 8 | up | a batch of ops (below) |

@@ -35,6 +35,8 @@ defmodule HiremeWeb.Session do
   alias HiremeWeb.Wire.Codec
 
   @hello_ms 10_000
+  # An atomic burst is at most this many bytes of ops, as /mcp bounds one request's body.
+  @burst_bytes 64 * 1024 * 1024
   @tick_ms 60_000
 
   # --------------------------------------------------- carrier-neutral
@@ -60,7 +62,9 @@ defmodule HiremeWeb.Session do
        session: nil,
        rev: 0,
        sequencer: nil,
-       touched: now_ms()
+       touched: now_ms(),
+       # An atomic burst arriving over several OPS frames: its ops so far (newest frame first) and bytes.
+       burst: {[], 0}
      }}
   end
 
@@ -92,8 +96,11 @@ defmodule HiremeWeb.Session do
     state = %{state | last_in: now_ms()}
 
     case Codec.decode(bin, :up) do
-      {:ok, kind, _flags, _rev, body} when kind in [:OPS, :RPC] and state.phase == :live ->
-        on_frame(kind, body, active(state, state.last_in))
+      {:ok, :OPS, flags, _rev, body} when state.phase == :live ->
+        on_ops(body, Codec.burst(flags), active(state, state.last_in))
+
+      {:ok, :RPC, _flags, _rev, body} when state.phase == :live ->
+        on_frame(:RPC, body, active(state, state.last_in))
 
       {:ok, kind, _flags, _rev, body} ->
         on_frame(kind, body, state)
@@ -188,20 +195,6 @@ defmodule HiremeWeb.Session do
   defp on_frame(_kind, _body, %{phase: :hello} = state),
     do: {:stop, {:protocol, :hello_first}, [], state}
 
-  defp on_frame(:OPS, body, state) do
-    case Codec.ops(body) do
-      {:ok, []} ->
-        {:ok, state}
-
-      {:ok, ops} ->
-        Sequencer.submit(state.account_id, ops)
-        {:ok, state}
-
-      {:error, reason} ->
-        {:stop, {:protocol, reason}, [], state}
-    end
-  end
-
   defp on_frame(:PING, body, state) do
     case Codec.nonce(body) do
       {:ok, n} -> {:push, [Codec.ping(:PONG, n)], state}
@@ -229,6 +222,37 @@ defmodule HiremeWeb.Session do
 
   # Down frames sent up, or a kind with no meaning up.
   defp on_frame(kind, _body, state), do: {:stop, {:protocol, kind}, [], state}
+
+  # OPS: each op judged alone, or (flagged ATOMIC) gathered frame by frame until the frame also
+  # flagged END, then one transaction: every op or none, as a bulk contract's put over /mcp.
+  defp on_ops(body, {atomic, last}, %{burst: {held, bytes}} = state) do
+    bytes = bytes + byte_size(body)
+
+    case Codec.ops(body) do
+      {:error, reason} ->
+        {:stop, {:protocol, reason}, [], state}
+
+      _ when bytes > @burst_bytes ->
+        {:stop, {:protocol, :burst_too_large}, [], state}
+
+      {:ok, ops} when atomic and not last ->
+        {:ok, %{state | burst: {[ops | held], bytes}}}
+
+      {:ok, ops} when atomic ->
+        Sequencer.submit_atomic(state.account_id, Enum.concat(Enum.reverse([ops | held])))
+        {:ok, %{state | burst: {[], 0}}}
+
+      {:ok, _ops} when held != [] ->
+        {:stop, {:protocol, :burst_unfinished}, [], state}
+
+      {:ok, []} ->
+        {:ok, state}
+
+      {:ok, ops} ->
+        Sequencer.submit(state.account_id, ops)
+        {:ok, state}
+    end
+  end
 
   # Real activity from a browser (ops, RPC) counts against its idle limit,
   # touched at most once a minute.

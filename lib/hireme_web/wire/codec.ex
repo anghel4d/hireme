@@ -24,6 +24,10 @@ defmodule HiremeWeb.Wire.Codec do
   @nan <<0, 0, 0, 0, 0, 0, 0xF8, 0x7F>>
   @zstd 0x01
   @end_flag 0x02
+  # An up OPS frame that is part of one atomic burst; the burst's last frame is also END.
+  @atomic 0x04
+  # WELCOME's features: bit 0, this node takes atomic OPS bursts.
+  @features 0x0001
   @max_up 16 <<< 20
   @max_ops 256
   @max_inflated 256 <<< 20
@@ -131,8 +135,13 @@ defmodule HiremeWeb.Wire.Codec do
     with :ok <- if(hash == Schema.wire_hash(), do: :ok, else: {:error, :hash}),
          {:ok, name} <- Map.fetch(@frame_names, kind),
          # Bits tested without bnot, which Dialyzer types as never zero.
-         :ok <- if((flags &&& (@zstd ||| @end_flag)) == flags, do: :ok, else: {:error, :body}),
+         :ok <-
+           if((flags &&& (@zstd ||| @end_flag ||| @atomic)) == flags,
+             do: :ok,
+             else: {:error, :body}
+           ),
          :ok <- if(dir == :up and (flags &&& @zstd) != 0, do: {:error, :body}, else: :ok),
+         :ok <- if(dir == :down and (flags &&& @atomic) != 0, do: {:error, :body}, else: :ok),
          {:ok, body} <- unpack(f, flags, body, @max_inflated) do
       {:ok, name, flags, rev, body}
     else
@@ -142,6 +151,9 @@ defmodule HiremeWeb.Wire.Codec do
   end
 
   def decode(_, _), do: {:error, :len}
+
+  @doc "Whether an up frame's flags mark it part of an atomic burst, and whether it ends one."
+  def burst(flags), do: {(flags &&& @atomic) != 0, (flags &&& @end_flag) != 0}
 
   defp unpack(_frame, flags, body, _max) when (flags &&& @zstd) == 0, do: {:ok, body}
 
@@ -273,7 +285,7 @@ defmodule HiremeWeb.Wire.Codec do
     frame(:WELCOME, rev, [
       <<w.account_id::little-64, w.session_id::little-64, w.schema_rev::little-64,
         w.read_mask::little-16, w.write_mask::little-16, bool(w.may_delete)::8, bool(w.lease)::8,
-        0::16>>,
+        @features::little-16>>,
       put_field(w.label)
     ])
   end

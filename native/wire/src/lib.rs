@@ -15,7 +15,10 @@
 //! `u32 raw_len | u32 packed_len | one zstd frame | pad`, the frame against
 //! the frame dictionary with its content size stated; unpacked it is the
 //! plain body, shuffled when it is table runs, see below), `END 0x02` (the
-//! last frame of a burst). `rev` is the
+//! last frame of a burst), `ATOMIC 0x04` (an up OPS frame of one atomic
+//! burst, gathered until the one also flagged END, then judged as one
+//! transaction: every op or none; sent only to a node whose WELCOME
+//! features hold `FEATURE_ATOMIC`). `rev` is the
 //! account's rev as of the frame, 0 where it means nothing (up frames).
 //!
 //! A *field* is `u32 len | bytes | zero pad to 8`. Fixed parts are
@@ -26,7 +29,7 @@
 //! HELLO   1 up    u8 cred (1 ticket, 2 key) | 7×0 | u64 snapshot_rev | u64 schema_rev
 //!                 | field credential | field client_label
 //! WELCOME 2 down  u64 account_id | u64 session_id | u64 schema_rev | u16 read_mask
-//!                 | u16 write_mask | u8 may_delete | u8 lease (0 none, 1 held) | u16 0
+//!                 | u16 write_mask | u8 may_delete | u8 lease (0 none, 1 held) | u16 features
 //!                 | field session_label
 //! BOOT    3 down  table runs (below), replacing every table they name
 //! PATCH   4 down  table runs: changed rows (id + moved columns) and gone blocks
@@ -169,6 +172,10 @@ const KINDS: [u8; 13] = [HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING
 /// Header flags.
 pub const ZSTD: u8 = 0x01;
 pub const END: u8 = 0x02;
+pub const ATOMIC: u8 = 0x04;
+
+/// WELCOME feature bits: what this node takes beyond the base wire.
+pub const FEATURE_ATOMIC: u16 = 0x0001;
 
 /// HELLO credential kinds.
 pub const CRED_TICKET: u8 = 1;
@@ -779,6 +786,8 @@ pub struct Welcome<'a> {
     pub write_mask: u16,
     pub may_delete: bool,
     pub lease: bool,
+    /// `FEATURE_*` bits; 0 from a node older than them.
+    pub features: u16,
     pub label: &'a str,
 }
 
@@ -786,7 +795,7 @@ impl<'a> Welcome<'a> {
     pub fn encode(&self, hash: u16, rev: u64) -> Vec<u8> {
         let mut w = Writer::new(WELCOME, hash, rev);
         w.u64(self.account_id).u64(self.session_id).u64(self.schema_rev).u16(self.read_mask).u16(self.write_mask);
-        w.u8(self.may_delete as u8).u8(self.lease as u8).u16(0).field(self.label.as_bytes());
+        w.u8(self.may_delete as u8).u8(self.lease as u8).u16(self.features).field(self.label.as_bytes());
         w.finish()
     }
 
@@ -795,12 +804,12 @@ impl<'a> Welcome<'a> {
             let (account_id, session_id, schema_rev) = (r.u64()?, r.u64()?, r.u64()?);
             let (read_mask, write_mask) = (r.u16()?, r.u16()?);
             let (may_delete, lease) = (r.u8()?, r.u8()?);
-            r.zeros(2)?;
+            let features = r.u16()?;
             if may_delete > 1 || lease > 1 {
                 return Err(Error::Body);
             }
             let label = r.str_field()?;
-            Ok(Welcome { account_id, session_id, schema_rev, read_mask, write_mask, may_delete: may_delete == 1, lease: lease == 1, label })
+            Ok(Welcome { account_id, session_id, schema_rev, read_mask, write_mask, may_delete: may_delete == 1, lease: lease == 1, features, label })
         })
     }
 }

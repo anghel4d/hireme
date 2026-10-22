@@ -164,7 +164,7 @@ proptest! {
         rt!(Hello::decode, h.encode(HASH), h);
 
         let (read_mask, write_mask, may_delete, lease) = masks;
-        let wl = Welcome { account_id: snap, session_id: srev, schema_rev: srev, read_mask, write_mask, may_delete, lease, label: &label };
+        let wl = Welcome { account_id: snap, session_id: srev, schema_rev: srev, read_mask, write_mask, may_delete, lease, features: 1, label: &label };
         rt!(Welcome::decode, wl.encode(HASH, 9), wl);
 
         let a: Vec<Ack> = acks.iter().map(|&(op_id, rev, id)| Ack { op_id, rev, id }).collect();

@@ -175,6 +175,7 @@ fn small_frames_are_the_documented_bytes() {
         write_mask: 3,
         may_delete: true,
         lease: false,
+        features: 0,
         label: "tab",
     };
     assert_eq!(hex(&w.encode(HASH, 9)), hex(&frame(WELCOME, 0, 9, &body)));
@@ -509,7 +510,8 @@ fn small_frame_refusals() {
     assert!(Welcome::decode(&welcome(1, 0, 0, &[])).is_ok());
     assert!(Welcome::decode(&welcome(2, 0, 0, &[])).is_err());
     assert!(Welcome::decode(&welcome(0, 2, 0, &[])).is_err());
-    assert!(Welcome::decode(&welcome(0, 0, 1, &[])).is_err());
+    // The u16 after lease is the node's feature bits, read as they are.
+    assert_eq!(Welcome::decode(&welcome(0, 0, FEATURE_ATOMIC, &[])).map(|w| w.features), Ok(FEATURE_ATOMIC));
     assert!(Welcome::decode(&welcome(0, 0, 0, &[0; 8])).is_err());
 
     let reply = |ok: u8| cat(&[le32(1), vec![ok, 0, 0, 0], field(b"{}")]);

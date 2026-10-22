@@ -191,6 +191,45 @@ defmodule HiremeWeb.SessionTest do
     assert <<0, 0::56, _::binary>> = decode(bye).body
   end
 
+  test "a key's OPS flagged ATOMIC gather until the frame also flagged END and land as one transaction: one refused op writes none; WELCOME says the node takes them" do
+    %{session: s} = sign_in()
+    {_key, secret} = key(s)
+    {:push, frames, state} = Session.frame(Codec.encode_hello(:key, secret, "test"), open())
+    welcome = frames |> Enum.map(&decode/1) |> Enum.find(&(&1.kind == :WELCOME))
+    assert <<_::binary-30, 1::little-16, _::binary>> = welcome.body
+    # As over /mcp, an atomic burst needs a bulk contract that covers it.
+    assert {1, %{"bulk" => %{"writes" => 10}}} = reply(state, "lease.claim", %{"bulk" => 10})
+
+    # One op per frame, flagged by hand: 0x04 ATOMIC, 0x02 END.
+    sent = fn op, flags, state ->
+      <<head::binary-5, _::8, rest::binary>> =
+        Codec.frame(:OPS, 0, [<<1::little-32, 0::32>>, op.raw])
+
+      Session.frame(<<head::binary, flags::8, rest::binary>>, state)
+    end
+
+    corp = &op(:put, :corporations, %{domain: &1, name: &1})
+    missing = op(:put, :corporations, %{name: "nowhere"}, target: 999_999)
+
+    {:ok, state} = sent.(corp.("burst-a.example"), 0x04, state)
+    refute_receive {:sequencer, :verdicts, _, _, _}, 100
+    {:ok, state} = sent.(missing, 0x06, state)
+    assert_receive {:sequencer, :verdicts, _, [], nacks}
+    assert Enum.map(nacks, &Hireme.Schema.refusal_name(&1.code)) == [:burst, :not_found]
+    refute Repo.exists?(from(c in Hireme.Rows.Corporation, where: c.domain == "burst-a.example"))
+
+    {:ok, state} = sent.(corp.("burst-b.example"), 0x04, state)
+    {:ok, _state} = sent.(corp.("burst-c.example"), 0x06, state)
+    assert_receive {:sequencer, :verdicts, _, [_, _], []}
+
+    assert Repo.aggregate(
+             from(c in Hireme.Rows.Corporation,
+               where: c.domain in ["burst-b.example", "burst-c.example"]
+             ),
+             :count
+           ) == 2
+  end
+
   test "malformed lease.claim params are refused type and the sequencer lives; a dead sequencer is BYE restart",
        %{session: s, account: a} do
     {_, state} = keyed(s)
