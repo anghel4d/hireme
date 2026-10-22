@@ -84,7 +84,7 @@ pub fn companies(rows: &Rows, company: &str, url: Option<&str>) -> Vec<Candidate
     let mine = words(company);
     let host = url.and_then(crate::write::host);
     let ats = url.map(crate::ats::parse).filter(|a| a.vendor != crate::ats::Vendor::Unknown);
-    let mut out: Vec<Candidate> = t
+    let out: Vec<Candidate> = t
         .ids()
         .iter()
         .filter_map(|&id| {
@@ -104,6 +104,11 @@ pub fn companies(rows: &Rows, company: &str, url: Option<&str>) -> Vec<Candidate
             (score >= FLOOR).then(|| Candidate { id, name: s(col::corporations::NAME).into(), key: domain.into(), score, why })
         })
         .collect();
+    best(out)
+}
+
+/// The best `SHOWN` candidates, by score then id.
+fn best(mut out: Vec<Candidate>) -> Vec<Candidate> {
     out.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
     out.truncate(SHOWN);
     out
@@ -117,7 +122,7 @@ pub fn places(rows: &Rows, location: &str) -> Vec<Candidate> {
         let own = t.str(id, col::places::ISO2).unwrap_or("");
         if own.is_empty() { t.u32(id, col::places::COUNTRY_ID).and_then(|c| t.str(c, col::places::ISO2)).unwrap_or("").into() } else { own.into() }
     };
-    let mut out: Vec<Candidate> = t
+    let out: Vec<Candidate> = t
         .ids()
         .iter()
         .filter_map(|&id| {
@@ -133,9 +138,7 @@ pub fn places(rows: &Rows, location: &str) -> Vec<Candidate> {
             (score >= FLOOR).then(|| Candidate { id, name: t.str(id, col::places::NAME).unwrap_or("").into(), key: iso(id), score, why: "its name is in the location" })
         })
         .collect();
-    out.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
-    out.truncate(SHOWN);
-    out
+    best(out)
 }
 
 /// Whether an application is short of a link (`missing` is not empty), without building the list.
@@ -178,11 +181,10 @@ pub fn diagnosis(rows: &Rows, id: u32, need: &[&str], company: &str, location: &
         tries.push(look("places", "name", q));
     }
     let mut set = serde_json::Map::new();
-    if need.contains(&"corporation_id") {
-        set.insert("corporation_id".into(), corps.first().map_or_else(|| json!("<the id find answered>"), |c| json!(c.id)));
-    }
-    if need.contains(&"place_id") {
-        set.insert("place_id".into(), spots.first().map_or_else(|| json!("<the id find answered>"), |c| json!(c.id)));
+    for (link, found) in [("corporation_id", &corps), ("place_id", &spots)] {
+        if need.contains(&link) {
+            set.insert(link.into(), found.first().map_or_else(|| json!("<the id find answered>"), |c| json!(c.id)));
+        }
     }
     let redo = if id == 0 {
         json!({"tool": "put", "note": "your put again, with these cells added", "args": {"table": "applications", "set": set}})
@@ -221,9 +223,9 @@ fn s(t: &Table, id: u32, c: u16) -> &str {
 /// it (a corporation, or a place a non-remote one is in), with the relink
 /// that comes first. None when nothing names it.
 pub fn named_by(rows: &Rows, table: u16, id: u32) -> Option<Json> {
-    let (c, name) = match table {
-        table::CORPORATIONS => (A::CORPORATION_ID, "corporations"),
-        table::PLACES => (A::PLACE_ID, "places"),
+    let (c, name, col) = match table {
+        table::CORPORATIONS => (A::CORPORATION_ID, "corporations", "corporation_id"),
+        table::PLACES => (A::PLACE_ID, "places", "place_id"),
         _ => return None,
     };
     let t = rows.table(table::APPLICATIONS)?;
@@ -237,7 +239,6 @@ pub fn named_by(rows: &Rows, table: u16, id: u32) -> Option<Json> {
     if nos.is_empty() {
         return None;
     }
-    let col = if table == table::CORPORATIONS { "corporation_id" } else { "place_id" };
     Some(json!({
         "table": name, "id": id, "applications": nos,
         "try": [

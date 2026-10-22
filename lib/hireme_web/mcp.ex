@@ -111,13 +111,14 @@ defmodule HiremeWeb.Mcp do
       {:ok, _} ->
         rpc_error(
           conn,
+          400,
           nil,
           -32600,
           "one JSON-RPC 2.0 message per request; batches are not answered"
         )
 
       _ ->
-        rpc_error(conn, nil, -32700, "the body is not JSON")
+        rpc_error(conn, 400, nil, -32700, "the body is not JSON")
     end
   end
 
@@ -175,6 +176,7 @@ defmodule HiremeWeb.Mcp do
        do:
          rpc_error(
            conn,
+           400,
            id,
            -32600,
            "a message with an id is a request (method) or a response (result, error)"
@@ -195,16 +197,16 @@ defmodule HiremeWeb.Mcp do
 
   # A request the session could not finish: if it was a write, some of it
   # may have landed, so the agent reads before sending it again.
-  defp failure(id, code, why) do
-    %{
-      jsonrpc: "2.0",
-      id: id,
-      error: %{
-        code: code,
-        message: why <> "; it may still have written: find or get before calling it again"
-      }
-    }
-  end
+  defp failure(id, code, why),
+    do:
+      rpc_failure(
+        id,
+        code,
+        why <> "; it may still have written: find or get before calling it again"
+      )
+
+  defp rpc_failure(id, code, message),
+    do: %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}}
 
   # No session for a valid key: why, when to retry, and a line in the log.
   defp unavailable(conn, msg, why) do
@@ -217,35 +219,16 @@ defmodule HiremeWeb.Mcp do
       end
 
     if status != 404, do: Logger.warning("mcp: no session for a key: #{inspect(why)}")
-    error = %{code: -32_000, message: text}
-
-    conn
-    |> put_resp_header("retry-after", "5")
-    |> put_resp_content_type("application/json")
-    |> send_resp(status, JSON.encode_to_iodata!(%{jsonrpc: "2.0", id: msg["id"], error: error}))
+    conn |> put_resp_header("retry-after", "5") |> rpc_error(status, msg["id"], -32_000, text)
   end
 
   # Every refusal carries what went wrong, as a JSON-RPC error.
-  defp refuse(conn, status, message) do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(
-      status,
-      JSON.encode_to_iodata!(%{
-        jsonrpc: "2.0",
-        id: nil,
-        error: %{code: -32_000, message: message}
-      })
-    )
-  end
+  defp refuse(conn, status, message), do: rpc_error(conn, status, nil, -32_000, message)
 
-  defp rpc_error(conn, id, code, message) do
+  defp rpc_error(conn, status, id, code, message) do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(
-      400,
-      JSON.encode_to_iodata!(%{jsonrpc: "2.0", id: id, error: %{code: code, message: message}})
-    )
+    |> send_resp(status, JSON.encode_to_iodata!(rpc_failure(id, code, message)))
   end
 
   # The session a request names (resumed under its id when the node no

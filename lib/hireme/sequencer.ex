@@ -389,29 +389,14 @@ defmodule Hireme.Sequencer do
   def handle_info({Hireme.Audit, kind}, state) when kind in [:changed, :factors],
     do: {:noreply, refresh_views(state), @idle_ms}
 
-  def handle_info(:backfill, state) do
-    {:noreply, backfill(state), @idle_ms}
-  rescue
-    e ->
-      Logger.error("sequencer #{state.account_id}: keywords backfill: #{Exception.message(e)}")
-      {:noreply, state, @idle_ms}
-  end
-
-  def handle_info(:canonical, state) do
-    {:noreply, canonical(state), @idle_ms}
-  rescue
-    e ->
-      Logger.error("sequencer #{state.account_id}: canonical backfill: #{Exception.message(e)}")
-      {:noreply, state, @idle_ms}
-  end
+  def handle_info(:backfill, state), do: chore(state, "keywords backfill", &backfill/1)
+  def handle_info(:canonical, state), do: chore(state, "canonical backfill", &canonical/1)
 
   def handle_info({:audit_channels, before, after_}, state) do
-    audit_channels(before, after_, state.account_id)
-    {:noreply, state, @idle_ms}
-  rescue
-    e ->
-      Logger.error("sequencer #{state.account_id}: lease audit: #{Exception.message(e)}")
-      {:noreply, state, @idle_ms}
+    chore(state, "lease audit", fn s ->
+      audit_channels(before, after_, s.account_id)
+      s
+    end)
   end
 
   def handle_info(:purge, state) do
@@ -432,6 +417,15 @@ defmodule Hireme.Sequencer do
 
   def handle_info(:timeout, state), do: {:noreply, state, @idle_ms}
   def handle_info(_, state), do: {:noreply, state, @idle_ms}
+
+  # A chore that raises is logged and leaves the state as it was.
+  defp chore(state, what, run) do
+    {:noreply, run.(state), @idle_ms}
+  rescue
+    e ->
+      Logger.error("sequencer #{state.account_id}: #{what}: #{Exception.message(e)}")
+      {:noreply, state, @idle_ms}
+  end
 
   defp subscribe_session(pid, session, snapshot_rev, state) do
     now = Store.now()

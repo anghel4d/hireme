@@ -384,19 +384,20 @@ impl Parser<'_, '_> {
     }
 
     fn or(&mut self) -> Result<Node, Error> {
-        let mut xs = alloc::vec![self.and()?];
-        while self.eat("|")? {
-            xs.push(self.and()?);
-        }
-        Ok(if xs.len() == 1 { xs.pop().unwrap_or(Node::All(Vec::new())) } else { Node::Any(xs) })
+        self.chain("|", Self::and, Node::Any)
     }
 
     fn and(&mut self) -> Result<Node, Error> {
-        let mut xs = alloc::vec![self.not()?];
-        while self.eat("&")? {
-            xs.push(self.not()?);
+        self.chain("&", Self::not, Node::All)
+    }
+
+    /// `next` terms joined by `sep`, as one node or `wrap`ped together.
+    fn chain(&mut self, sep: &str, next: fn(&mut Self) -> Result<Node, Error>, wrap: fn(Vec<Node>) -> Node) -> Result<Node, Error> {
+        let mut xs = alloc::vec![next(self)?];
+        while self.eat(sep)? {
+            xs.push(next(self)?);
         }
-        Ok(if xs.len() == 1 { xs.pop().unwrap_or(Node::All(Vec::new())) } else { Node::All(xs) })
+        Ok(joined(xs, wrap))
     }
 
     fn not(&mut self) -> Result<Node, Error> {
@@ -428,7 +429,7 @@ impl Parser<'_, '_> {
                     return Err(self.err("expected , or ] in a [ ] pattern"));
                 }
             }
-            return Ok(if xs.len() == 1 { xs.pop().unwrap_or(Node::All(Vec::new())) } else { Node::All(xs) });
+            return Ok(joined(xs, Node::All));
         }
         if let Tok::Name(name) = &self.tok
             && field(name).is_none()
@@ -748,6 +749,11 @@ fn same(a: &Val<'_>, b: &Val<'_>) -> bool {
         (Val::Num(x), Val::Num(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// One node stands alone; several are `wrap`ped together.
+fn joined(mut xs: Vec<Node>, wrap: fn(Vec<Node>) -> Node) -> Node {
+    if xs.len() == 1 { xs.pop().unwrap_or(Node::All(Vec::new())) } else { wrap(xs) }
 }
 
 fn order(a: &Val<'_>, b: &Val<'_>) -> Option<core::cmp::Ordering> {

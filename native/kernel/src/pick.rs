@@ -63,11 +63,12 @@ pub fn masks(rows: &Rows) -> Vec<(&str, Cow<'_, str>)> {
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
     Pinned,
     Matched,
     Default,
+    #[default]
     None,
     Stale,
     Empty,
@@ -79,7 +80,7 @@ impl State {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pick {
     pub state: State,
     pub root: Option<u32>,
@@ -101,7 +102,7 @@ impl Pick {
 
 /// Application `id`'s pick.
 pub fn pick(rows: &Rows, arms: &[Arm], counts: &Counts, id: u32) -> Pick {
-    let Some(t) = rows.table(table::APPLICATIONS) else { return none() };
+    let Some(t) = rows.table(table::APPLICATIONS) else { return Pick::default() };
     let roots = rows.table(table::CV_ROOTS);
     let alive = |r: u32| roots.is_some_and(|rt| rt.has(r));
     let facts = AppFacts::new(rows, t, id, counts);
@@ -120,10 +121,6 @@ pub fn pick(rows: &Rows, arms: &[Arm], counts: &Counts, id: u32) -> Pick {
     let state = if matches!(state, State::Pinned | State::Matched | State::Default) && version.is_none() && !composed { State::Empty } else { state };
     let also = hits.iter().map(|a| a.id).filter(|a| Some(*a) != arm).collect();
     Pick { state, root, arm, by, also, version }
-}
-
-fn none() -> Pick {
-    Pick { state: State::None, root: None, arm: None, by: None, also: Vec::new(), version: None }
 }
 
 /// Per arm, whether application `id` matches it, else the test that failed.

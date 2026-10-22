@@ -42,7 +42,6 @@ enum Archetype {
 
 fn archetype(path: &str) -> Archetype {
     use schema::col::applications as A;
-    let id = |c: u16| move |t: &crate::rows::Table, id: u32| u64::from(t.u32(id, c).unwrap_or(u32::MAX));
     if path.starts_with("company.") {
         Archetype::Key(|t, id| id_of(t, id, A::CORPORATION_ID))
     } else if matches!(path, "place" | "country" | "city" | "region" | "subregion" | "country.applications") {
@@ -52,7 +51,6 @@ fn archetype(path: &str) -> Archetype {
     } else if path.starts_with("me.") {
         Archetype::Key(|_, _| 0)
     } else if matches!(path, "field" | "subfield" | "seniority") {
-        let _ = id;
         Archetype::Title
     } else {
         Archetype::Row
@@ -107,21 +105,10 @@ pub fn build(rows: &Rows, f: usize) -> Col {
     let shape = archetype(mask::FIELDS[f].path);
     let read = |id: u32| AppFacts::new(rows, t, id, &counts).read(f).map(Val::into_owned);
     // The slot's archetype key; None reads the row itself.
-    let key = |id: u32| -> Option<u64> {
-        match &shape {
-            Archetype::Key(k) => Some(k(t, id)),
-            Archetype::Title => None,
-            Archetype::Row => None,
-        }
-    };
+    let key = |id: u32| -> Option<u64> { if let Archetype::Key(k) = &shape { Some(k(t, id)) } else { None } };
     match ty {
         Ty::Num | Ty::Day | Ty::Bool => {
-            let num = |id: u32| match read(id) {
-                Some(Val::Num(n)) => n,
-                Some(Val::Day(d)) => d as f64,
-                Some(Val::Bool(b)) => f64::from(u8::from(b)),
-                _ => f64::NAN,
-            };
+            let num = |id: u32| number(read(id));
             let mut memo: crate::fx::Map<u64, f64> = crate::fx::Map::default();
             Col::Num(t.ids().iter().map(|&id| key(id).map_or_else(|| num(id), |k| *memo.entry(k).or_insert_with(|| num(id)))).collect())
         }
@@ -174,16 +161,35 @@ pub fn build(rows: &Rows, f: usize) -> Col {
                     None => text(id, &mut names),
                 })
                 .collect();
-            let dict = names.dict;
-            let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-            order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
-            let mut rank = alloc::vec![0; dict.len()];
-            for (r, s) in order.into_iter().enumerate() {
-                rank[s as usize] = r as u32;
-            }
-            Col::Sym { ids, dict, rank }
+            symbols(ids, names.dict)
         }
     }
+}
+
+/// A number, day or flag as a number; anything else absent.
+fn number(v: Option<Val<'_>>) -> f64 {
+    match v {
+        Some(Val::Num(n)) => n,
+        Some(Val::Day(d)) => d as f64,
+        Some(Val::Bool(b)) => f64::from(u8::from(b)),
+        _ => f64::NAN,
+    }
+}
+
+/// A symbol column: each symbol ranked in reading order (`collate`).
+fn symbols(ids: Vec<u32>, dict: Vec<String>) -> Col {
+    let rank = ranked(&dict);
+    Col::Sym { ids, dict, rank }
+}
+
+fn ranked(dict: &[String]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+    order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
+    let mut rank = alloc::vec![0; dict.len()];
+    for (r, s) in order.into_iter().enumerate() {
+        rank[s as usize] = r as u32;
+    }
+    rank
 }
 
 /// Text as people order it: case aside, runs of digits by their value.
@@ -335,14 +341,7 @@ fn named_codes(rows: &Rows, col: Col) -> Col {
             names.entry(code.to_ascii_uppercase()).or_insert(name);
         }
     }
-    let dict: Vec<String> = dict.into_iter().map(|c| names.get(&c.to_ascii_uppercase()).map_or(c.clone(), |n| alloc::format!("{n} ({c})"))).collect();
-    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-    order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
-    let mut rank = alloc::vec![0; dict.len()];
-    for (r, s) in order.into_iter().enumerate() {
-        rank[s as usize] = r as u32;
-    }
-    Col::Sym { ids, dict, rank }
+    symbols(ids, dict.into_iter().map(|c| names.get(&c.to_ascii_uppercase()).map_or(c.clone(), |n| alloc::format!("{n} ({c})"))).collect())
 }
 
 /// How to arrange: a sort column and direction (1 rising, -1 falling; none
@@ -503,14 +502,7 @@ pub fn groups_json(groups: &[Group]) -> Json {
 fn texts(per_slot: impl Iterator<Item = Option<String>>) -> Col {
     let mut names = Interner::new();
     let ids = per_slot.map(|t| t.map_or(NONE, |t| names.sym(&t))).collect();
-    let dict = names.dict;
-    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-    order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
-    let mut rank = alloc::vec![0; dict.len()];
-    for (r, s) in order.into_iter().enumerate() {
-        rank[s as usize] = r as u32;
-    }
-    Col::Sym { ids, dict, rank }
+    symbols(ids, names.dict)
 }
 
 /// Symbols from a fixed list in its order (an enum read as the desk reads it).
@@ -631,14 +623,7 @@ pub fn mend(rows: &Rows, key: &str, column: &mut Column, ids: &[u32]) -> bool {
         let Some(slot) = t.slot(id) else { return false };
         let v = AppFacts::new(rows, t, id, &counts).read(f).map(Val::into_owned);
         match &mut column.col {
-            Col::Num(nums) => {
-                nums[slot] = match v {
-                    Some(Val::Num(n)) => n,
-                    Some(Val::Day(d)) => d as f64,
-                    Some(Val::Bool(b)) => f64::from(u8::from(b)),
-                    _ => f64::NAN,
-                }
-            }
+            Col::Num(nums) => nums[slot] = number(v),
             Col::Sym { ids: syms, dict, .. } => {
                 syms[slot] = match v {
                     Some(Val::Enum(i)) => i,
@@ -659,12 +644,7 @@ pub fn mend(rows: &Rows, key: &str, column: &mut Column, ids: &[u32]) -> bool {
         }
     }
     if grew && let Col::Sym { dict, rank, .. } = &mut column.col {
-        let mut order: Vec<u32> = (0..dict.len() as u32).collect();
-        order.sort_by(|a, b| collate(&dict[*a as usize], &dict[*b as usize]));
-        *rank = alloc::vec![0; dict.len()];
-        for (r, s) in order.into_iter().enumerate() {
-            rank[s as usize] = r as u32;
-        }
+        *rank = ranked(dict);
     }
     true
 }

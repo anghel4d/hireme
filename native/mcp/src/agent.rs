@@ -154,7 +154,7 @@ impl Agent {
         }
         Some(match answer {
             Ok(r) => json!({"jsonrpc":"2.0","id":id,"result":if modern { complete(r) } else { r }}),
-            Err(e) => json!({"jsonrpc":"2.0","id":id,"error":e}),
+            Err(e) => failed(&id, e),
         })
     }
 
@@ -854,6 +854,10 @@ fn error(id: &Json, code: i64, message: &str, data: Option<Json>) -> Json {
     if let Some(d) = data {
         e["data"] = d;
     }
+    failed(id, e)
+}
+
+fn failed(id: &Json, e: Json) -> Json {
     json!({"jsonrpc":"2.0","id":id,"error":e})
 }
 
