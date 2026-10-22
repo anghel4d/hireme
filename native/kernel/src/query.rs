@@ -709,7 +709,9 @@ pub(crate) fn key_doc(k: &KeyDef) -> Json {
 }
 
 /// The declared key made of exactly these columns, and its where: a
-/// natural key, a unique, or a unique column.
+/// natural key, a unique, or a unique column. A key under `col = 'v'` may
+/// also be named with `col` beside its columns, as a put names it
+/// ({iso2, kind: 'country'}); the value is then one more filter.
 fn key_of_names<'a>(tm: &TableModel, names: impl Iterator<Item = &'a String>) -> Result<(Vec<&'static str>, Option<&'static Cond>), Refusal> {
     let mut wanted: Vec<&str> = names.map(String::as_str).collect();
     wanted.sort_unstable();
@@ -720,7 +722,10 @@ fn key_of_names<'a>(tm: &TableModel, names: impl Iterator<Item = &'a String>) ->
         .find(|k| {
             let mut c = k.0.clone();
             c.sort_unstable();
-            c == wanted
+            let mut with = c.clone();
+            with.extend(k.1.and_then(|w| if let Cond::Eq(col, _) = w { Some(*col) } else { None }));
+            with.sort_unstable();
+            c == wanted || with == wanted
         })
         .cloned()
         .ok_or_else(|| {

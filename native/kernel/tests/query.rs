@@ -19,6 +19,7 @@ fn kernel() -> Kernel {
     b.u32s(P::ID, 1..=N)
         .u32s(P::KIND, (1..=N).map(|i| if i.is_multiple_of(3) { enums::place_kind::COUNTRY } else { enums::place_kind::CITY } as u32))
         .strs(P::ISO2, (1..=N).map(|i| if i.is_multiple_of(3) { ["PT", "DE", "JP"][(i as usize / 3) % 3] } else { "" }))
+        .u32s(P::GEONAMES_ID, (1..=N).map(|i| if i.is_multiple_of(3) { wire::NONE } else { 1000 + i }))
         .strs(P::NAME, (1..=N).map(|i| ["Lisbon", "lisboa", "Porto", "Berlin", "Tōkyō"][i as usize % 5]))
         .strs(P::REGION, (1..=N).map(|i| REGIONS[i as usize % 4]))
         .u32s(P::POPULATION, (1..=N).map(|i| if i.is_multiple_of(7) { wire::NONE } else { (i * 7919) % 1000 }));
@@ -174,6 +175,10 @@ fn get_by_key_text_history_and_grants_read_as_world() {
     let mut k = kernel();
     // A natural key holds only where its where does: iso2 is a country's.
     assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE"}}))["row"]["id"], 3);
+    // Named as a put names it, the key's where column is one more filter.
+    assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "country"}}))["row"]["id"], 3);
+    assert_eq!(q(&k, json!({"op": "get", "table": "places", "key": {"geonames_id": 1001, "kind": "city"}}))["row"]["id"], 1);
+    assert_eq!(refused(&k, json!({"op": "get", "table": "places", "key": {"iso2": "DE", "kind": "city"}})), schema::refusal::NOT_FOUND);
     assert_eq!(refused(&k, json!({"op": "get", "table": "places", "key": {"name": "Porto"}})), schema::refusal::NATURAL_KEY);
     assert_eq!(refused(&k, json!({"op": "get", "table": "places", "id": 9999})), schema::refusal::NOT_FOUND);
     // A dropped source is passed over, and history still names it.
