@@ -576,6 +576,9 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 ],
             }])
         }
+        command::PICK_CV | command::UNPIN_CV if crate::fire::in_flight(rows, op.target) => {
+            refuse(refusal::STAGE, json!({"table": "applications", "id": op.target, "rule": "in_flight", "need": "the shot in flight carries the CV as it was fired"}))
+        }
         command::PICK_CV => {
             app(rows, op.target)?;
             let Val::U32(root) = param_val(op, param::pick_cv::CV_ROOT_ID) else { return refuse(refusal::TYPE, json!({"param": "cv_root_id"})) };

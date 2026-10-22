@@ -699,6 +699,11 @@ pub fn failed(rows: &Rows, mission: u32, reason: &str) -> Vec<Row> {
     out
 }
 
+/// Whether any of an application's missions is in flight.
+pub fn in_flight(rows: &Rows, app: u32) -> bool {
+    missions(rows).is_some_and(|t| t.ids().iter().any(|&m| t.u32(m, M::APPLICATION_ID) == Some(app) && state(t, m) == enums::mission_state::IN_FLIGHT))
+}
+
 /// The application a mission belongs to.
 pub fn application(rows: &Rows, mission: u32) -> Option<u32> {
     missions(rows).and_then(|t| t.u32(mission, M::APPLICATION_ID))

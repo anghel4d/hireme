@@ -253,6 +253,9 @@ fn a_key_fires_exactly_what_was_reviewed() {
     }), &agent(3, NOON))
     .unwrap();
     k.predict(&fire(10, Some(key)), &agent(3, NOON)).unwrap();
+    // Nor does its application change the CV it carries.
+    let pick = op(wire::COMMAND, command::UNPIN_CV, 1, |_| {});
+    assert_eq!(k.predict(&pick, &agent(3, NOON)).expect_err("in flight").code, refusal::STAGE);
     // In flight, the mission takes no edit at all, but its note.
     let r = k.predict(&edit("## Name\nLate"), &agent(3, NOON)).expect_err("in flight");
     assert_eq!(r.code, refusal::STAGE);
