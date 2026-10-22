@@ -267,7 +267,9 @@ await step("a reload from the snapshot paints the desk restoring before its card
   const [fcp, restoring, cards_] = [first("first-contentful-paint"), first("restoring"), first("cards")];
   if (restoring === undefined) throw new Error(`never painted "Restoring the desk…": ${JSON.stringify(order.slice(0, 8))}`);
   if (!(cards_ > restoring)) throw new Error(`restoring at ${restoring} is not before the cards at ${cards_}`);
-  if (!(fcp < cards_)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards_}`);
+  // The first paint waits for the rows at most 100 ms from navigation (136ae37): a fast
+  // restore paints its cards in it; a slow one paints "Restoring the desk…" first.
+  if (!(fcp < cards_ || fcp <= 100)) throw new Error(`first contentful paint at ${fcp} waited for the cards at ${cards_}`);
   if (errors.length) throw new Error(errors.join(" | "));
   return `restoring ${restoring.toFixed(1)} ms, first contentful paint ${fcp.toFixed(1)} ms, cards ${cards_.toFixed(1)} ms`;
 });
@@ -307,7 +309,8 @@ const notices = (p) => p.locator(".notices").innerText();
 const noticeCount = (p, text) => p.locator(".notices .notice", { hasText: text }).count();
 
 await step("a view that throws after a restore shows its error line and one notice, never restoring", pages, async () => {
-  const p = await faulted("view");
+  // The desk draws through the kernel's arrange (fa1be36), so that is where its view fails.
+  const p = await faulted("arrange");
   try {
     const t = await until(async () => { const x = await lensText(p); return /failed to draw/.test(x) ? x : ""; }, "the lens's error line");
     await sleep(1500);
@@ -353,7 +356,7 @@ await step("a trap in ingest while loading says the kernel did not load, never r
 });
 
 await step("a view throwing a new long message each time raises one clipped notice and one console error, no repaint loop", pages, async () => {
-  const p = await faulted("view", { changing: true });
+  const p = await faulted("arrange", { changing: true });
   try {
     await until(async () => /failed to draw/.test(await notices(p)), "the notice");
     const count = () => p.evaluate(() => document.querySelectorAll(".notices .notice").length);
