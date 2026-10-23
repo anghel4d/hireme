@@ -63,8 +63,7 @@ defmodule HiremeWeb.Endpoint do
       else: %{id: __MODULE__, start: {Function, :identity, [:ignore]}}
   end
 
-  @doc "This endpoint's setting `key`."
-  def config(key), do: Application.get_env(:hireme, __MODULE__, [])[key]
+  defp config(key), do: Application.get_env(:hireme, __MODULE__, [])[key]
 
   @doc "The URL this node is reached at, from `url:` (the port falls back to the listener's)."
   @spec url() :: String.t()
@@ -79,17 +78,8 @@ defmodule HiremeWeb.Endpoint do
   @doc "Origins a browser's wire session may come from: this endpoint's own URL, plus `check_origin` in dev."
   @spec origins() :: [String.t()]
   def origins do
-    own = url()
-
-    case config(:check_origin) do
-      list when is_list(list) ->
-        port = config(:url)[:port]
-        others = for o <- list, do: "http:" <> o <> if(port, do: ":#{port}", else: "")
-        Enum.uniq([own | others])
-
-      _ ->
-        [own]
-    end
+    port = if p = config(:url)[:port], do: ":#{p}", else: ""
+    Enum.uniq([url() | for(o <- config(:check_origin) || [], do: "http:" <> o <> port)])
   end
 
   @doc "A static file's path; in a release its digested name (`mix hireme.digest`), which browsers keep for good."
@@ -120,10 +110,7 @@ defmodule HiremeWeb.Endpoint do
   plug Plug.Static, at: "/", from: :hireme, gzip: true, only: HiremeWeb.static_paths()
   plug Plug.RequestId
   plug Plug.Logger
-  plug :wire
-  plug :mcp
-  plug :mail_inbound
-  plug :blobs
+  plug :direct
 
   # Pages post forms (urlencoded, carrying `_csrf_token`); scripts post JSON.
   plug Plug.Parsers,
@@ -161,33 +148,6 @@ defmodule HiremeWeb.Endpoint do
     end
   end
 
-  # MCP over HTTP (`HiremeWeb.Mcp`), ahead of the cookie and the body
-  # parsers: an API key is its only credential, checked before the body
-  # is read.
-  defp mcp(%Plug.Conn{path_info: ["mcp"]} = conn, _opts),
-    do: conn |> HiremeWeb.Mcp.call() |> halt()
-
-  defp mcp(conn, _opts), do: conn
-
-  # The domain pipe's signed copies of inbound mail (`HiremeWeb.MailInbound`),
-  # ahead of the cookie and the body parsers: the signature is the only
-  # credential, and the body is the raw message.
-  defp mail_inbound(%Plug.Conn{path_info: ["mail", "inbound" | _]} = conn, _opts),
-    do: conn |> HiremeWeb.MailInbound.call() |> halt()
-
-  defp mail_inbound(conn, _opts), do: conn
-
-  # A CV file asked for with a key, like /mcp ahead of the cookie and the
-  # body parsers; a browser's goes on to the router.
-  defp blobs(%Plug.Conn{path_info: ["blobs" | _]} = conn, _opts) do
-    case Plug.Conn.get_req_header(conn, "authorization") do
-      ["Bearer " <> _ | _] -> conn |> HiremeWeb.Blobs.keyed() |> halt()
-      _ -> conn
-    end
-  end
-
-  defp blobs(conn, _opts), do: conn
-
   # A v4 client a dual-stack socket reports as ::ffff:a.b.c.d is that v4
   # address, to the limits and on the trail.
   defp canonical({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
@@ -207,7 +167,7 @@ defmodule HiremeWeb.Endpoint do
   # A connection may buffer a whole frame before HELLO, so upgrades are
   # metered per peer (`wire_peer`); the session caps how many a peer holds
   # open (`Hireme.Security.wire_sessions_per_peer/0`).
-  defp wire(%Plug.Conn{path_info: ["wire"], method: "GET"} = conn, _opts) do
+  defp direct(%Plug.Conn{path_info: ["wire"], method: "GET"} = conn, _opts) do
     peer = conn.remote_ip |> :inet.ntoa() |> to_string()
 
     case Hireme.Security.limit(:wire_peer, peer) do
@@ -230,7 +190,28 @@ defmodule HiremeWeb.Endpoint do
     end
   end
 
-  defp wire(conn, _opts), do: conn
+  # MCP over HTTP (`HiremeWeb.Mcp`), ahead of the cookie and the body
+  # parsers: an API key is its only credential, checked before the body
+  # is read.
+  defp direct(%Plug.Conn{path_info: ["mcp"]} = conn, _opts),
+    do: conn |> HiremeWeb.Mcp.call() |> halt()
+
+  # The domain pipe's signed copies of inbound mail (`HiremeWeb.MailInbound`),
+  # ahead of the cookie and the body parsers: the signature is the only
+  # credential, and the body is the raw message.
+  defp direct(%Plug.Conn{path_info: ["mail", "inbound" | _]} = conn, _opts),
+    do: conn |> HiremeWeb.MailInbound.call() |> halt()
+
+  # A CV file asked for with a key, like /mcp ahead of the cookie and the
+  # body parsers; a browser's goes on to the router.
+  defp direct(%Plug.Conn{path_info: ["blobs" | _]} = conn, _opts) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      ["Bearer " <> _ | _] -> conn |> HiremeWeb.Blobs.keyed() |> halt()
+      _ -> conn
+    end
+  end
+
+  defp direct(conn, _opts), do: conn
 
   defp header(conn, name), do: conn |> Plug.Conn.get_req_header(name) |> List.first()
 end

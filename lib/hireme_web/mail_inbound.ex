@@ -32,7 +32,7 @@ defmodule HiremeWeb.MailInbound do
   @doc "Answers one request to `/mail/inbound/<pipe id>`."
   def call(%{method: "POST", path_info: ["mail", "inbound", pipe_id]} = conn) do
     with {:ok, account_id, secret} <- pipe(pipe_id),
-         :ok <- limited(pipe_id),
+         :ok <- Hireme.Security.limit(:mail_inbound, pipe_id),
          {:ok, body, conn} <- body(conn),
          :ok <- rfc822(conn),
          :ok <- signed(conn, body, secret) do
@@ -40,6 +40,7 @@ defmodule HiremeWeb.MailInbound do
     else
       {:refused, status, why} -> refuse(conn, status, why)
       {:refused, conn, status, why} -> refuse(conn, status, why)
+      {:error, :rate_limited} -> refuse(conn, 429, "this pipe is past 600 messages in 10 minutes")
     end
   end
 
@@ -63,19 +64,9 @@ defmodule HiremeWeb.MailInbound do
   defp pipe(pipe_id) do
     {mod, fun} = conf(:pipe, {Hireme.Gmail, :pipe})
 
-    # Until the connector has the lookup (`Hireme.Gmail.pipe/1`), every pipe is unknown.
-    found? = Code.ensure_loaded?(mod) and function_exported?(mod, fun, 1)
-
-    case found? and pipe_id =~ ~r/^[0-9A-Za-z]{12}$/ and apply(mod, fun, [pipe_id]) do
+    case pipe_id =~ ~r/^[0-9A-Za-z]{12}$/ and apply(mod, fun, [pipe_id]) do
       {:ok, account_id, secret} when is_binary(secret) -> {:ok, account_id, secret}
       _ -> {:refused, 404, "no enabled pipe has this id"}
-    end
-  end
-
-  defp limited(pipe_id) do
-    case Hireme.Security.limit(:mail_inbound, pipe_id) do
-      :ok -> :ok
-      {:error, :rate_limited} -> {:refused, 429, "this pipe is past 600 messages in 10 minutes"}
     end
   end
 
@@ -129,9 +120,5 @@ defmodule HiremeWeb.MailInbound do
 
   defp refuse(conn, status, why), do: reply(conn, status, %{ok: false, error: why})
 
-  defp reply(conn, status, map) do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(status, JSON.encode_to_iodata!(map))
-  end
+  defp reply(conn, status, map), do: conn |> put_status(status) |> HiremeWeb.json(map)
 end

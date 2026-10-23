@@ -211,17 +211,6 @@ defmodule Hireme.Security do
     end
   end
 
-  @doc """
-  Whether `key` is already over the named limit, without counting. With
-  `failed/2` this throttles failures only, so callers that succeed behind
-  one address (agents behind a NAT) never spend the budget.
-  """
-  @spec blocked?(atom(), term()) :: boolean()
-  def blocked?(name, key) when is_map_key(@limits, name) do
-    {scale_ms, max} = Map.fetch!(@limits, name)
-    Hireme.RateLimit.get(bucket(name, key), scale_ms) >= max
-  end
-
   @doc "Give back one count taken under the named limit for `key` (a call that wrote nothing)."
   @spec refund(atom(), term()) :: :ok
   def refund(name, key) when is_map_key(@limits, name) do
@@ -234,14 +223,6 @@ defmodule Hireme.Security do
     :ok
   rescue
     ArgumentError -> :ok
-  end
-
-  @doc "Count one failure under the named limit for `key`."
-  @spec failed(atom(), term()) :: :ok
-  def failed(name, key) when is_map_key(@limits, name) do
-    {scale_ms, _} = Map.fetch!(@limits, name)
-    Hireme.RateLimit.inc(bucket(name, key), scale_ms)
-    :ok
   end
 
   # A `*_peer` limit counts an IPv6 peer by its /64: one host holds a whole
@@ -404,12 +385,7 @@ defmodule Hireme.Security do
 
   @doc "`clip/2` with nothing, nil or blank, as nil: no column holds an empty string."
   @spec text(term(), pos_integer()) :: String.t() | nil
-  def text(value, max) do
-    case clip(value, max) do
-      "" -> nil
-      text -> text
-    end
-  end
+  def text(value, max), do: with("" <- clip(value, max), do: nil)
 
   defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)
 end

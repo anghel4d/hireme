@@ -156,12 +156,7 @@ defmodule HiremeWeb.PageController do
     end
   end
 
-  defp wire_hash,
-    do:
-      Hireme.Schema.wire_hash()
-      |> Integer.to_string(16)
-      |> String.pad_leading(4, "0")
-      |> String.downcase()
+  defp wire_hash, do: Base.encode16(<<Hireme.Schema.wire_hash()::16>>, case: :lower)
 end
 
 defmodule HiremeWeb.Blobs do
@@ -181,10 +176,9 @@ defmodule HiremeWeb.Blobs do
 
   @doc "A request carrying a key, answered before the cookie and the body parsers."
   def keyed(conn) do
-    ip = conn.remote_ip |> :inet.ntoa() |> to_string()
     ["Bearer " <> secret | _] = get_req_header(conn, "authorization")
 
-    case Hireme.Keys.authenticate(String.trim(secret), ip) do
+    case Hireme.Keys.authenticate(String.trim(secret), HiremeWeb.Auth.meta(conn).ip) do
       {:ok, key} ->
         Hireme.Repo.put_account(key.account_id)
         grants = Grants.key(key)
@@ -218,7 +212,7 @@ defmodule HiremeWeb.Blobs do
         conn |> put_status(413) |> json(%{error: "too_large"})
 
       {:error, e} when e in [:type, :too_large, :cap] ->
-        conn |> put_status(status(e)) |> json(%{error: e})
+        conn |> put_status(%{type: 415, too_large: 413, cap: 409}[e]) |> json(%{error: e})
 
       {:error, _} ->
         send_resp(conn, 400, "")
@@ -252,8 +246,4 @@ defmodule HiremeWeb.Blobs do
   end
 
   defp answer(conn, _account_id), do: send_resp(conn, 404, "")
-
-  defp status(:type), do: 415
-  defp status(:too_large), do: 413
-  defp status(:cap), do: 409
 end

@@ -45,7 +45,6 @@ defmodule Hireme.Grants do
   @doc "A key's grants, from `Hireme.Keys.authenticate/2`."
   def key(%{id: id, read_mask: r, write_mask: w, may_delete: d}),
     do: %__MODULE__{
-      actor: :key,
       key_id: id,
       read_mask: r &&& @all,
       write_mask: w &&& @all,

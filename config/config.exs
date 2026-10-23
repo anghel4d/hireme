@@ -2,8 +2,6 @@
 # environment's own file at the bottom overrides it.
 import Config
 
-config :hireme, HiremeWeb.Endpoint, url: [host: "localhost"]
-
 # Set by the Nix build, which compiles the kernel NIF itself and puts it at
 # priv/native/nif.so; everywhere else Rustler builds native/nif.
 config :hireme, :nif_prebuilt, System.get_env("HIREME_NIF_PREBUILT") == "1"

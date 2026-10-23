@@ -80,17 +80,13 @@ defmodule HiremeWeb.FactorController do
   defp proved(conn, {:ok, _session}), do: redirect(conn, to: "/")
   defp proved(conn, {:error, reason}), do: redirect(conn, to: "/sign-in/factor?error=#{reason}")
 
-  defp message(reason) when is_binary(reason) do
-    Enum.find_value(
-      ~w(code rate_limited challenge assertion clone)a,
-      "That did not work. Try again.",
-      &(Atom.to_string(&1) == reason && message(&1))
-    )
-  end
+  @messages %{
+    "code" => "That code did not match.",
+    "rate_limited" => "Too many attempts. Wait a few minutes.",
+    "challenge" => "Start again: the challenge expired.",
+    "assertion" => "That passkey was not accepted.",
+    "clone" => "That credential's counter went backwards; it has been disabled."
+  }
 
-  defp message(:code), do: "That code did not match."
-  defp message(:rate_limited), do: "Too many attempts. Wait a few minutes."
-  defp message(:challenge), do: "Start again: the challenge expired."
-  defp message(:assertion), do: "That passkey was not accepted."
-  defp message(:clone), do: "That credential's counter went backwards; it has been disabled."
+  defp message(reason), do: Map.get(@messages, to_string(reason), "That did not work. Try again.")
 end

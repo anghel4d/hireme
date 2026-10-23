@@ -99,10 +99,7 @@ defmodule Hireme.Import do
     actor = %{label: "import", grants: Grants.operator(), key_id: nil}
     initial = %{rev: 0, groups: [], refusals: []}
 
-    report =
-      Enum.reduce(pack.tables, initial, fn group, report ->
-        run_group(account_id, actor, pack, group, report)
-      end)
+    report = Enum.reduce(pack.tables, initial, &run_group(account_id, actor, pack, &1, &2))
 
     # A bulk load moves the planner's statistics; refresh what it reads.
     Hireme.Store.write(fn -> Hireme.Repo.query!("PRAGMA optimize", [], skip_account: true) end)
@@ -116,18 +113,13 @@ defmodule Hireme.Import do
   defp parse(body, :json) do
     case Jason.decode(String.trim_leading(body, "\uFEFF")) do
       {:ok, %{"tables" => tables} = pack} when is_list(tables) ->
-        groups =
-          Enum.map(tables, fn
-            %{"table" => t, "rows" => rows} when is_binary(t) and is_list(rows) ->
-              {t, rows, :json}
+        case Enum.reject(tables, &group?/1) do
+          [] ->
+            groups = for %{"table" => t, "rows" => rows} <- tables, do: {t, rows, :json}
+            {:ok, %{as_of: pack["as_of"], source: pack["source"], tables: groups}}
 
-            other ->
-              {:bad, other}
-          end)
-
-        case Enum.find(groups, &match?({:bad, _}, &1)) do
-          nil -> {:ok, %{as_of: pack["as_of"], source: pack["source"], tables: groups}}
-          {:bad, g} -> {:error, {:group, brief(g)}}
+          [bad | _] ->
+            {:error, {:group, brief(bad)}}
         end
 
       {:ok, _} ->
@@ -155,29 +147,22 @@ defmodule Hireme.Import do
           into: %{},
           do: {k, String.trim(v)}
 
+    sections = Enum.chunk_while(rest, [], &section/2, &{:cont, Enum.reverse(&1), []})
+
     groups =
-      rest
-      |> Enum.chunk_while(
-        nil,
-        fn
-          "## " <> table, nil -> {:cont, {String.trim(table), []}}
-          "## " <> table, acc -> {:cont, finish(acc), {String.trim(table), []}}
-          line, {t, ls} -> {:cont, {t, [line | ls]}}
-        end,
-        fn
-          nil -> {:cont, nil}
-          acc -> {:cont, finish(acc), nil}
-        end
-      )
+      for ["## " <> table | lines] <- sections, do: {String.trim(table), table_rows(lines), :text}
 
     if groups == [],
       do: {:error, :no_tables},
       else: {:ok, %{as_of: defaults["as_of"], source: defaults["source"], tables: groups}}
   end
 
-  defp finish({table, lines}) do
-    {table, lines |> Enum.reverse() |> table_rows(), :text}
-  end
+  # A section: a `## ` heading and the lines up to the next one.
+  defp section("## " <> _ = heading, lines), do: {:cont, Enum.reverse(lines), [heading]}
+  defp section(line, lines), do: {:cont, [line | lines]}
+
+  defp group?(group),
+    do: match?(%{"table" => t, "rows" => rows} when is_binary(t) and is_list(rows), group)
 
   # GFM tables: a header line, a delimiter row of `---` cells, then the rows
   # up to the first line without a pipe; a section may hold several. The
@@ -225,17 +210,8 @@ defmodule Hireme.Import do
 
   # One leading and one trailing pipe frame the row; `\\|` is a pipe in a cell.
   defp cells(line) do
-    line = String.trim(line)
-
-    line =
-      if String.starts_with?(line, "|"), do: binary_part(line, 1, byte_size(line) - 1), else: line
-
-    line =
-      if String.ends_with?(line, "|") and not String.ends_with?(line, "\\|"),
-        do: binary_part(line, 0, byte_size(line) - 1),
-        else: line
-
     line
+    |> String.replace(~r/^\||(?<!\\)\|$/, "")
     |> String.split(~r/(?<!\\)\|/)
     |> Enum.map(&(&1 |> String.replace("\\|", "|") |> String.trim()))
   end
@@ -245,20 +221,14 @@ defmodule Hireme.Import do
   defp run_group(account_id, actor, pack, {name, rows, mode}, report) do
     case Schema.table(name) do
       %{residency: r} = table when r in [:resident, :server] and table.domain != "system" ->
-        {ops, refused} =
-          rows
-          |> Enum.with_index()
-          |> Enum.reduce({[], []}, fn {row, i}, {ops, refused} ->
-            case lower(account_id, table, pack, row, mode) do
-              {:ok, op} ->
-                {[{i, op} | ops], refused}
+        lowered = Enum.with_index(rows, &{&2, lower(account_id, table, pack, &1, mode)})
+        ops = for {i, {:ok, op}} <- lowered, do: {i, op}
 
-              {:refused, code, data} ->
-                {ops, [%{table: name, row: i, code: code, data: data} | refused]}
-            end
-          end)
+        refused =
+          for {i, {:refused, code, data}} <- lowered,
+              do: %{table: name, row: i, code: code, data: data}
 
-        {rev, written, nacked} = submit(account_id, actor, name, Enum.reverse(ops))
+        {rev, written, nacked} = submit(account_id, actor, name, ops)
 
         %{
           report
@@ -267,7 +237,7 @@ defmodule Hireme.Import do
               %{table: name, written: written, refused: length(refused) + length(nacked)}
               | report.groups
             ],
-            refusals: Enum.reverse(nacked) ++ refused ++ report.refusals
+            refusals: Enum.reverse(refused ++ nacked, report.refusals)
         }
 
       _ ->
@@ -288,11 +258,9 @@ defmodule Hireme.Import do
     |> Enum.reduce({0, 0, []}, fn chunk, {rev, written, nacked} ->
       by_op = Map.new(chunk, fn {i, op} -> {op.op_id, i} end)
 
-      {new_rev, acks, nacks} =
-        case Sequencer.call(account_id, actor, Enum.map(chunk, &elem(&1, 1))) do
-          {:ok, new_rev, acks, nacks} -> {new_rev, acks, nacks}
-          {:error, reason} -> throw({:import, reason})
-        end
+      {:ok, new_rev, acks, nacks} =
+        with {:error, reason} <- Sequencer.call(account_id, actor, Enum.map(chunk, &elem(&1, 1))),
+             do: throw({:import, reason})
 
       refused =
         for n <- nacks do
@@ -382,10 +350,7 @@ defmodule Hireme.Import do
   end
 
   defp cast(%{type: :json} = col, value, :text) do
-    case Jason.decode(value) do
-      {:ok, v} -> {:ok, v}
-      _ -> unfit(col, value)
-    end
+    with {:error, _} <- Jason.decode(value), do: unfit(col, value)
   end
 
   defp cast(%{type: :bool} = col, value, :text) when is_binary(value) do
@@ -441,39 +406,28 @@ defmodule Hireme.Import do
 
   defp resolve_ref(account_id, target, value, mode) do
     table = Schema.table(target)
+    one = Enum.find(table.naturals, &(length(&1.cols) == 1))
 
-    key =
-      cond do
-        is_map(value) ->
-          value
+    cond do
+      is_map(value) -> ref_row(account_id, table, value, mode)
+      mode == :text and value =~ ~r/^\d+$/ -> ref_id(String.to_integer(value))
+      one -> ref_row(account_id, table, %{hd(one.cols) => value}, mode)
+      true -> :error
+    end
+  end
 
-        mode == :text and value =~ ~r/^\d+$/ ->
-          String.to_integer(value) |> then(&if(&1 in 1..4_294_967_294, do: {:id, &1}, else: nil))
+  defp ref_id(id), do: if(id in 1..4_294_967_294, do: {:ok, id}, else: :error)
 
-        true ->
-          case Enum.find(table.naturals, &(length(&1.cols) == 1)) do
-            %{cols: [col]} -> %{col => value}
-            nil -> nil
-          end
-      end
-
-    case key do
-      {:id, id} ->
-        {:ok, id}
-
-      nil ->
-        :error
-
-      key ->
-        with {:ok, cells} <- cells(account_id, table, key, mode),
-             natural when natural != nil <- ref_key(table, key),
-             {:ok, %{id: id}} <- existing(account_id, table, natural, cells) do
-          {:ok, id}
-        else
-          {:ok, nil} -> :none
-          nil -> :none
-          _ -> :error
-        end
+  # The row a key names: its id, :none when no row holds it.
+  defp ref_row(account_id, table, key, mode) do
+    with {:ok, cells} <- cells(account_id, table, key, mode),
+         natural when natural != nil <- ref_key(table, key),
+         {:ok, %{id: id}} <- existing(account_id, table, natural, cells) do
+      {:ok, id}
+    else
+      {:ok, nil} -> :none
+      nil -> :none
+      _ -> :error
     end
   end
 
@@ -575,9 +529,10 @@ defmodule Hireme.Import do
   # unassigned one: the mix task prints the name to a terminal), and a
   # backslash so that an escape reads only one way, is written as \\u{hex}.
   # Past 64 bytes it is cut and its size named; non-UTF-8 is inspected.
-  defp named(name) when is_binary(name) do
-    if String.valid?(name) do
-      head = clip(name, 64)
+  defp named(name) do
+    if is_binary(name) and String.valid?(name) do
+      # The longest whole-codepoint prefix of at most 64 bytes.
+      head = String.replace_invalid(binary_part(name, 0, min(byte_size(name), 64)), "")
 
       escaped =
         Regex.replace(~r/[^\p{L}\p{N}\p{M}\p{P}\p{S} ]|\\/u, head, fn c ->
@@ -589,14 +544,4 @@ defmodule Hireme.Import do
       brief(name)
     end
   end
-
-  defp named(name), do: brief(name)
-
-  # The longest whole-codepoint prefix of at most n bytes.
-  defp clip(<<c::utf8, rest::binary>>, n) do
-    size = byte_size(<<c::utf8>>)
-    if size <= n, do: <<c::utf8>> <> clip(rest, n - size), else: ""
-  end
-
-  defp clip(_, _), do: ""
 end

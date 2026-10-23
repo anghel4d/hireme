@@ -84,13 +84,11 @@ defmodule Hireme.Provenance do
   def trust(host_or_url, note, meta) do
     host = host(host_or_url) || normalize(host_or_url)
 
-    cap = Hireme.Schema.table(:trusted_hosts).cap
-
     cond do
       host == nil ->
         {:error, :host}
 
-      Repo.aggregate(TrustedHost, :count) >= cap and
+      Repo.aggregate(TrustedHost, :count) >= Hireme.Schema.table(:trusted_hosts).cap and
           not Repo.exists?(from t in TrustedHost, where: t.host == ^host) ->
         {:error, :cap}
 
@@ -125,11 +123,9 @@ defmodule Hireme.Provenance do
 
   @doc "Stops trusting a host."
   def distrust(id, meta) do
-    Store.write(fn -> Repo.delete_all(from t in TrustedHost, where: t.id == ^id) end)
-    |> case do
-      {1, _} -> Audit.record(:host_distrusted, %{id: id}, audit_ctx(meta))
-      _ -> :ok
-    end
+    with {1, _} <-
+           Store.write(fn -> Repo.delete_all(from t in TrustedHost, where: t.id == ^id) end),
+         do: Audit.record(:host_distrusted, %{id: id}, audit_ctx(meta))
 
     :ok
   end

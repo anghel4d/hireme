@@ -37,6 +37,7 @@ defmodule HiremeWeb.Session do
   # An atomic burst is at most this many bytes of ops, as /mcp bounds one request's body.
   @burst_bytes 64 * 1024 * 1024
   @tick_ms 60_000
+  @claim_shape "{count, stage?} | {ids} | {}, each with bulk? (1..1000000)"
 
   # --------------------------------------------------- carrier-neutral
 
@@ -80,18 +81,6 @@ defmodule HiremeWeb.Session do
   # Whatever goes wrong inside a frame ends this session and nothing else,
   # and the log never holds the frame: a HELLO carries an API key.
   def frame(bin, state) do
-    handle_frame(bin, state)
-  rescue
-    e ->
-      Logger.error("wire session: a #{inspect(e.__struct__)} handling a frame")
-      {:stop, :internal, [], state}
-  catch
-    :exit, _reason ->
-      Logger.error("wire session: an exit handling a frame")
-      {:stop, :internal, [], state}
-  end
-
-  defp handle_frame(bin, state) do
     state = %{state | last_in: now_ms()}
 
     case Codec.decode(bin, :up) do
@@ -110,6 +99,14 @@ defmodule HiremeWeb.Session do
       {:error, reason} ->
         {:stop, {:protocol, reason}, [], state}
     end
+  rescue
+    e ->
+      Logger.error("wire session: a #{inspect(e.__struct__)} handling a frame")
+      {:stop, :internal, [], state}
+  catch
+    :exit, _reason ->
+      Logger.error("wire session: an exit handling a frame")
+      {:stop, :internal, [], state}
   end
 
   @doc "Any other message the hosting process received."
@@ -255,23 +252,17 @@ defmodule HiremeWeb.Session do
 
   # Real activity from a browser (ops, RPC) counts against its idle limit,
   # touched at most once a minute.
-  defp active(%{session: %{key_id: nil, session_id: id}} = state, now) when is_integer(id) do
-    if now - state.touched > 60_000 do
-      Hireme.Accounts.live_session(id)
-      %{state | touched: now}
-    else
-      state
-    end
+  defp active(%{session: %{key_id: nil, session_id: id}, touched: t} = state, now)
+       when is_integer(id) and now - t > 60_000 do
+    Hireme.Accounts.live_session(id)
+    %{state | touched: now}
   end
 
   defp active(state, _now), do: state
 
   # A key's lease requests are metered like its writes.
-  defp metered(method, %{session: %{key_id: key_id}}) when key_id != nil do
-    if String.starts_with?(method, "lease."),
-      do: Security.hit(:agent_read, key_id, 1),
-      else: :ok
-  end
+  defp metered("lease." <> _, %{session: %{key_id: key_id}}) when key_id != nil,
+    do: Security.hit(:agent_read, key_id, 1)
 
   defp metered(_method, _state), do: :ok
 
@@ -288,45 +279,26 @@ defmodule HiremeWeb.Session do
 
   defp authenticate(%{cred: :ticket, credential: ticket, label: label}, peer) do
     with true <- allowed_origin?(peer[:origin]),
-         {:ok, %{account_id: account_id, session_id: session_id}} <-
-           Hireme.Accounts.redeem_ticket(ticket) do
+         {:ok, who} <- Hireme.Accounts.redeem_ticket(ticket) do
       {:ok,
-       %{
-         account_id: account_id,
-         session_id: session_id,
-         key_id: nil,
-         grants: Grants.operator(),
-         label: label(label, "browser")
-       }}
-    else
-      _ -> :error
+       Map.merge(who, %{key_id: nil, grants: Grants.operator(), label: label(label, "browser")})}
     end
   end
 
   defp authenticate(%{cred: :key, credential: secret, label: label}, peer) do
     ip = to_string(peer[:peer_ip] || "")
+    from = %{ip: ip, user_agent: peer[:user_agent]}
 
     case Hireme.Keys.authenticate(secret, ip) do
       # Each HELLO is a trail row; the trail coalesces a connect loop's
       # (`Hireme.Audit`, the `hellos` budget), so none is refused for it.
       {:ok, key} ->
         meta = %{key: key.key_id, label: label(label, key.name), carrier: peer[:carrier]}
-
-        Hireme.Audit.record(:wire_key, meta, %{
-          account_id: key.account_id,
-          key_id: key.id,
-          ip: ip,
-          user_agent: peer[:user_agent]
-        })
+        who = %{account_id: key.account_id, key_id: key.id}
+        Hireme.Audit.record(:wire_key, meta, Map.merge(from, who))
 
         {:ok,
-         %{
-           account_id: key.account_id,
-           session_id: nil,
-           key_id: key.id,
-           grants: Grants.key(key),
-           label: label(label, key.name)
-         }}
+         Map.merge(who, %{session_id: nil, grants: Grants.key(key), label: label(label, key.name)})}
 
       # A failed key is audited with its peer; how many is bounded by the
       # api_key_peer limit, past which the answer is rate_limited, not audited.
@@ -334,11 +306,7 @@ defmodule HiremeWeb.Session do
         # Past the global refusal budget a refused key is still refused,
         # only no longer recorded.
         if Security.limit(:refusal_global, :all) == :ok,
-          do:
-            Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, %{
-              ip: ip,
-              user_agent: peer[:user_agent]
-            })
+          do: Hireme.Audit.record(:wire_key_refused, %{carrier: peer[:carrier]}, from)
 
         :error
 
@@ -356,10 +324,8 @@ defmodule HiremeWeb.Session do
   defp credential_live?(%{key_id: key_id, account_id: account_id}),
     do: Hireme.Keys.usable?(key_id, account_id)
 
-  defp allowed_origin?(nil), do: false
-
   defp allowed_origin?(origin),
-    do: String.trim_trailing(origin, "/") in HiremeWeb.Endpoint.origins()
+    do: is_binary(origin) and String.trim_trailing(origin, "/") in HiremeWeb.Endpoint.origins()
 
   # A label is shown to the operator and to other agents (leases, refusals):
   # control characters (newlines, escapes) are dropped so it cannot pose as
@@ -437,10 +403,9 @@ defmodule HiremeWeb.Session do
 
   # The grants a claim needs are the sequencer's to check (it holds them).
   defp rpc(id, "lease.claim", params, state) do
-    case claim_shape(params) do
-      :ok -> answer(id, Lease.claim(state.account_id, state.session.id, params), state)
-      {:refused, refusal, data} -> refuse(id, refusal, data, state)
-    end
+    if claim_shape?(params),
+      do: answer(id, Lease.claim(state.account_id, state.session.id, params), state),
+      else: refuse(id, :type, %{expected: @claim_shape}, state)
   end
 
   defp rpc(id, "lease.release", params, state) do
@@ -460,39 +425,30 @@ defmodule HiremeWeb.Session do
       user_agent: state.peer[:user_agent]
     }
 
-    case HiremeWeb.Account.call(method, params, ctx) do
-      {:ok, result} -> {:push, [reply(id, true, result, state)], state}
-      {:error, err} -> {:push, [reply(id, false, err, state)], state}
-    end
+    {status, result} = HiremeWeb.Account.call(method, params, ctx)
+    {:push, [reply(id, status == :ok, result, state)], state}
   end
 
   defp rpc(id, method, _params, state), do: refuse(id, :not_found, %{method: method}, state)
 
   # `{count, stage?}`, `{ids}` or `{}`, each of its type.
-  defp claim_shape(params) do
-    ok =
-      Enum.all?(params, fn
-        {"count", n} ->
-          is_integer(n) and n >= 0
+  defp claim_shape?(params) do
+    Enum.all?(params, fn
+      {"count", n} ->
+        is_integer(n) and n >= 0
 
-        {"ids", ids} ->
-          is_list(ids) and length(ids) <= 1_000 and Enum.all?(ids, &(is_integer(&1) and &1 > 0))
+      {"ids", ids} ->
+        is_list(ids) and length(ids) <= 1_000 and Enum.all?(ids, &(is_integer(&1) and &1 > 0))
 
-        {"stage", st} ->
-          is_binary(st) and Codec.enum_code("stage", st) != nil
+      {"stage", st} ->
+        is_binary(st) and Codec.enum_code("stage", st) != nil
 
-        {"bulk", n} ->
-          is_integer(n) and n in 1..1_000_000
+      {"bulk", n} ->
+        is_integer(n) and n in 1..1_000_000
 
-        _ ->
-          false
-      end)
-
-    if ok,
-      do: :ok,
-      else:
-        {:refused, :type,
-         %{expected: "{count, stage?} | {ids} | {}, each with bulk? (1..1000000)"}}
+      _ ->
+        false
+    end)
   end
 
   defp answer(id, {:ok, result}, state), do: {:push, [reply(id, true, result, state)], state}
@@ -526,9 +482,6 @@ defmodule HiremeWeb.Session do
   @impl WebSock
   def handle_info(msg, state), do: msg |> info(state) |> ws()
 
-  @impl WebSock
-  def terminate(_reason, _state), do: :ok
-
   defp ws({:ok, state}), do: {:ok, state}
   defp ws({:push, [], state}), do: {:ok, state}
   defp ws({:push, frames, state}), do: {:push, Enum.map(frames, &{:binary, &1}), state}
@@ -547,9 +500,8 @@ defmodule HiremeWeb.Session.Drain do
   go; then shutdown continues.
   """
 
-  use GenServer
-
   @grace_ms 5_000
+  use GenServer, shutdown: @grace_ms + 1_000
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -575,7 +527,4 @@ defmodule HiremeWeb.Session.Drain do
 
     :ok
   end
-
-  def child_spec(arg),
-    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [arg]}, shutdown: @grace_ms + 1_000}
 end

@@ -55,13 +55,9 @@ defmodule Hireme.Release do
     dir = Application.app_dir(:hireme, "priv/db")
 
     additive =
-      dir
-      |> File.ls!()
-      |> Enum.filter(
-        &(&1 =~ ~r/^\d{4}_[a-z0-9_]+\.sql$/ and not String.starts_with?(&1, "0000_"))
-      )
-      |> Enum.sort()
-      |> Enum.map(&{Path.rootname(&1), Path.join(dir, &1)})
+      for f <- Enum.sort(File.ls!(dir)),
+          f =~ ~r/^(?!0000_)\d{4}_[a-z0-9_]+\.sql$/,
+          do: {Path.rootname(f), Path.join(dir, f)}
 
     [{@baseline, Path.join(dir, "baseline.sql")} | additive]
   end
@@ -162,29 +158,25 @@ defmodule Hireme.Release do
   end
 
   defp locked(path, fun) do
-    {:ok, lock} = Sqlite3.open(lock_path(path))
-
-    try do
-      :ok = Sqlite3.set_busy_timeout(lock, :timer.minutes(5))
+    with_conn(lock_path(path), :timer.minutes(5), fn lock ->
       :ok = Sqlite3.execute(lock, "BEGIN EXCLUSIVE")
       fun.()
-    after
-      Sqlite3.close(lock)
-    end
+    end)
   end
 
-  defp with_conn(path, fun) do
+  defp with_conn(path, timeout \\ 30_000, fun) do
     {:ok, conn} = Sqlite3.open(path)
 
     try do
-      :ok = Sqlite3.set_busy_timeout(conn, 30_000)
+      :ok = Sqlite3.set_busy_timeout(conn, timeout)
       fun.(conn)
     after
       Sqlite3.close(conn)
     end
   end
 
-  defp rows(conn, sql, args \\ []) do
+  @doc false
+  def rows(conn, sql, args \\ []) do
     {:ok, st} = Sqlite3.prepare(conn, sql)
 
     try do
@@ -233,14 +225,8 @@ defmodule Hireme.Release.Purge do
               )
             ),
           # A revoked key a month on: it counts toward the table's cap until then.
-          api_keys:
-            delete(from(k in ApiKey, where: not is_nil(k.revoked_at) and k.revoked_at < ^month)),
-          outbox:
-            delete(
-              from(n in Outbox,
-                where: (not is_nil(n.sent_at) and n.sent_at < ^month) or n.next_at < ^month
-              )
-            )
+          api_keys: delete(from(k in ApiKey, where: k.revoked_at < ^month)),
+          outbox: delete(from(n in Outbox, where: n.sent_at < ^month or n.next_at < ^month))
         }
       end)
 
@@ -312,8 +298,7 @@ defmodule Hireme.Release.Backup do
 
   @impl true
   def init(opts) do
-    db = Hireme.Repo.config()[:database]
-    dir = opts[:dir] || Path.join(Path.dirname(db), "backups")
+    dir = opts[:dir] || Path.join(Path.dirname(Hireme.Repo.config()[:database]), "backups")
 
     age =
       case backups(dir) do
@@ -371,8 +356,7 @@ defmodule Hireme.Release.Backup do
   # Copies past their 13 days, and any copy a stop cut short. A removal that
   # fails fails the backup.
   defp prune(dir) do
-    names = backups(dir)
-    old = Enum.drop(names, -@keep)
+    old = Enum.drop(backups(dir), -@keep)
     cut = for name <- File.ls!(dir), name =~ @cut, do: name
 
     for name <- old ++ cut,

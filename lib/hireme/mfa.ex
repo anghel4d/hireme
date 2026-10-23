@@ -36,6 +36,7 @@ defmodule Hireme.Mfa do
   """
 
   import Ecto.Query
+  import Hireme.Audit, only: [ctx: 2]
   alias Hireme.Accounts
   alias Hireme.Audit
   alias Hireme.Mfa.WebAuthn
@@ -115,13 +116,8 @@ defmodule Hireme.Mfa do
         secret = NimbleTOTP.secret()
         challenge!(session, :totp_enroll, secret)
         uri = otpauth(label, secret)
-
-        {:ok,
-         %{
-           uri: uri,
-           secret: Base.encode32(secret, padding: false),
-           svg: uri |> EQRCode.encode() |> EQRCode.svg(viewbox: true) |> without_styles()
-         }}
+        svg = uri |> EQRCode.encode() |> EQRCode.svg(viewbox: true) |> without_styles()
+        {:ok, %{uri: uri, secret: Base.encode32(secret, padding: false), svg: svg}}
       end
     end)
   end
@@ -160,16 +156,8 @@ defmodule Hireme.Mfa do
            step when is_integer(step) <-
              totp_step(secret, normalize(code), System.os_time(:second), 0) || {:error, :code},
            :ok <- spend_challenge(challenge) do
-        bind(
-          session,
-          %{
-            kind: :totp,
-            name: name,
-            totp_secret: Security.seal(secret, @totp_seal),
-            totp_last_step: step
-          },
-          meta
-        )
+        sealed = Security.seal(secret, @totp_seal)
+        bind(session, :totp, name, %{totp_secret: sealed, totp_last_step: step}, meta)
       end
     end)
   end
@@ -188,12 +176,9 @@ defmodule Hireme.Mfa do
           Enum.find_value(apps, fn f ->
             # A seed that does not unseal (the application secret changed,
             # the row was damaged) matches no code: never the empty key's.
-            with {:ok, secret} <- unseal_totp(f),
-                 step when is_integer(step) <- totp_step(secret, code, now, f.totp_last_step || 0) do
-              {f, step}
-            else
-              _ -> nil
-            end
+            secret = unseal_totp(f)
+            step = secret && totp_step(secret, code, now, f.totp_last_step || 0)
+            step && {f, step}
           end)
 
         with {factor, step} <- found,
@@ -252,7 +237,7 @@ defmodule Hireme.Mfa do
            {:ok, attrs} <- WebAuthn.register(challenge, params),
            :ok <- unused_credential(attrs.credential_id) do
         name = if is_binary(params["name"]), do: params["name"], else: ""
-        bind(session, Map.merge(attrs, %{kind: :webauthn, name: name}), meta)
+        bind(session, :webauthn, name, attrs, meta)
       end
     end)
   end
@@ -263,12 +248,7 @@ defmodule Hireme.Mfa do
     as(session, fn ->
       with :ok <- begun(session) do
         keys = passkeys()
-
-        challenge =
-          WebAuthn.authentication_challenge(
-            Enum.map(keys, &WebAuthn.credential({&1.credential_id, &1.public_key}))
-          )
-
+        challenge = WebAuthn.authentication_challenge(keys)
         challenge!(session, :webauthn_assert, challenge)
         {:ok, WebAuthn.assertion_options(challenge, keys)}
       end
@@ -288,11 +268,8 @@ defmodule Hireme.Mfa do
            %Factor{} = factor <-
              Enum.find(keys, &(&1.credential_id == credential_id)) || {:error, :assertion},
            :ok <- counter_advanced(factor, data.sign_count, meta, session) do
-        Store.update!(factor,
-          sign_count: data.sign_count,
-          last_used_at: Store.now(),
-          consecutive_failures: 0
-        )
+        used = [sign_count: data.sign_count, last_used_at: Store.now(), consecutive_failures: 0]
+        Store.update!(factor, used)
 
         proved(session, factor, meta)
       else
@@ -333,19 +310,12 @@ defmodule Hireme.Mfa do
   defp recovery_codes!(%Session{} = session, meta) do
     codes = for _ <- 1..@recovery_count, do: random_code()
     now = Store.now()
+    row = %{account_id: session.account_id, rev: 1, inserted_at: now, updated_at: now}
 
     rows =
       for code <- codes do
         salt = Security.token(16)
-
-        %{
-          account_id: session.account_id,
-          salt: salt,
-          code_hash: Security.hash(salt <> code),
-          rev: 1,
-          inserted_at: now,
-          updated_at: now
-        }
+        Map.merge(row, %{salt: salt, code_hash: Security.hash(salt <> code)})
       end
 
     Store.transaction(fn ->
@@ -429,11 +399,10 @@ defmodule Hireme.Mfa do
     end)
   end
 
-  defp spend_code(%RecoveryCode{id: id}),
-    do:
-      Store.bump(from(c in RecoveryCode, where: c.id == ^id and is_nil(c.used_at)),
-        used_at: Store.now()
-      )
+  defp spend_code(%RecoveryCode{id: id}) do
+    unspent = from(c in RecoveryCode, where: c.id == ^id and is_nil(c.used_at))
+    Store.bump(unspent, used_at: Store.now())
+  end
 
   ## Changing the set
 
@@ -471,43 +440,31 @@ defmodule Hireme.Mfa do
   # is not good again when its own step arrives) and two presentations of
   # one code record the same value, which the compare-and-set lets pass once.
   defp totp_step(secret, code, now, since) do
-    case Enum.find(
-           [now, now - 30, now + 30],
-           &NimbleTOTP.valid?(secret, code, time: &1, since: since)
-         ) do
-      nil -> nil
-      t -> t - rem(t, 30)
-    end
+    valid? = &NimbleTOTP.valid?(secret, code, time: &1, since: since)
+    t = Enum.find([now, now - 30, now + 30], valid?)
+    t && t - rem(t, 30)
   end
 
   defp unseal_totp(%Factor{totp_secret: sealed}) when is_binary(sealed) do
     case Security.unseal(sealed, @totp_seal) do
-      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 -> {:ok, secret}
-      _ -> :error
+      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 -> secret
+      _ -> nil
     end
   end
 
-  defp unseal_totp(_), do: :error
-
-  defp counter_advanced(%Factor{sign_count: nil} = f, new, meta, session),
-    do: counter_advanced(%{f | sign_count: 0}, new, meta, session)
-
-  defp counter_advanced(%Factor{sign_count: 0}, 0, _meta, _session), do: :ok
-  defp counter_advanced(%Factor{sign_count: old}, new, _meta, _session) when new > old, do: :ok
+  defp unseal_totp(_), do: nil
 
   defp counter_advanced(%Factor{} = factor, new, meta, session) do
-    Store.update!(factor, disabled_at: Store.now())
+    old = factor.sign_count || 0
 
-    disabled(
-      factor,
-      :factor_clone_suspected,
-      %{stored: factor.sign_count, presented: new},
-      :clone,
-      meta,
-      session
-    )
-
-    {:error, :clone}
+    if new > old or (new == 0 and old == 0) do
+      :ok
+    else
+      Store.update!(factor, disabled_at: Store.now())
+      about = %{stored: old, presented: new}
+      disabled(factor, :factor_clone_suspected, about, :clone, meta, session)
+      {:error, :clone}
+    end
   end
 
   # A factor just disabled: the trail row, and the owner told.
@@ -542,24 +499,15 @@ defmodule Hireme.Mfa do
   # parallel wrong codes all count; at the limit the factor is disabled.
   defp failed(kind, factors, meta, session) do
     now = Store.now()
+    lockout = Security.lockout_failures()
 
     for factor <- factors do
-      Store.write(fn ->
-        Repo.update_all(from(f in Factor, where: f.id == ^factor.id),
-          inc: [consecutive_failures: 1, rev: 1]
-        )
-      end)
+      one = from(f in Factor, where: f.id == ^factor.id)
+      Store.write(fn -> Repo.update_all(one, inc: [consecutive_failures: 1, rev: 1]) end)
 
       # Locking a factor disables it: a domain write, so its rev moves.
-      {n, _} =
-        Store.bump(
-          from(f in Factor,
-            where:
-              f.id == ^factor.id and is_nil(f.disabled_at) and
-                f.consecutive_failures >= ^Security.lockout_failures()
-          ),
-          disabled_at: now
-        )
+      due = where(one, [f], is_nil(f.disabled_at) and f.consecutive_failures >= ^lockout)
+      {n, _} = Store.bump(due, disabled_at: now)
 
       if n == 1,
         do: disabled(factor, :factor_locked, %{kind: factor.kind}, :failures, meta, session)
@@ -574,51 +522,29 @@ defmodule Hireme.Mfa do
     {:ok, session}
   end
 
-  defp bind(%Session{} = session, attrs, meta) do
+  defp bind(%Session{} = session, kind, name, attrs, meta) do
     first? = not enrolled?()
-    name = attrs |> Map.get(:name, "") |> Security.clip(100)
-
-    factor =
-      Store.write(fn ->
-        Repo.insert!(
-          struct(
-            Factor,
-            Map.merge(attrs, %{
-              name: name,
-              account_id: session.account_id,
-              verified_at: Store.now(),
-              rev: 1
-            })
-          )
-        )
-      end)
+    about = %{kind: kind, name: Security.clip(name, 100)}
+    row = Map.merge(attrs, %{account_id: session.account_id, verified_at: Store.now(), rev: 1})
+    factor = Store.write(fn -> Repo.insert!(struct(Factor, Map.merge(row, about))) end)
 
     Accounts.mark_mfa(session)
     Audit.factors(session.account_id)
-
-    Audit.record(
-      :factor_added,
-      %{factor_id: factor.id, kind: factor.kind, name: name},
-      ctx(meta, session)
-    )
-
-    Accounts.notify(session.account_id, :authenticator_added, %{kind: factor.kind, name: name})
+    Audit.record(:factor_added, Map.put(about, :factor_id, factor.id), ctx(meta, session))
+    Accounts.notify(session.account_id, :authenticator_added, about)
     {:ok, factor, if(first?, do: recovery_codes!(session, meta), else: [])}
   end
 
   # A credential id is global: one authenticator cannot enrol on two accounts.
   defp unused_credential(credential_id) do
-    case Repo.get_by(Factor, [credential_id: credential_id], skip_account: true) do
-      nil -> :ok
-      %Factor{} -> {:error, :duplicate}
-    end
+    if Repo.get_by(Factor, [credential_id: credential_id], skip_account: true),
+      do: {:error, :duplicate},
+      else: :ok
   end
 
   defp challenge!(%Session{} = session, kind, term) do
     Store.transaction(fn ->
-      Repo.delete_all(
-        from(c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
-      )
+      Repo.delete_all(challenges(session, kind))
 
       Repo.insert!(%Challenge{
         account_id: session.account_id,
@@ -633,12 +559,7 @@ defmodule Hireme.Mfa do
 
   # The live challenge of `kind` for the session, without spending it.
   defp peek_challenge(%Session{} = session, kind) do
-    query =
-      from(c in Challenge,
-        where: c.session_id == ^session.id and c.kind == ^kind,
-        order_by: [desc: c.id],
-        limit: 1
-      )
+    query = from(c in challenges(session, kind), order_by: [desc: c.id], limit: 1)
 
     with %Challenge{} = challenge <- Repo.one(query),
          :lt <- DateTime.compare(Store.now(), challenge.expires_at),
@@ -648,6 +569,9 @@ defmodule Hireme.Mfa do
       _ -> {:error, :challenge}
     end
   end
+
+  defp challenges(session, kind),
+    do: from(c in Challenge, where: c.session_id == ^session.id and c.kind == ^kind)
 
   # A challenge answers once: it is deleted by the statement that spends it,
   # so two racing answers cannot both take it.
@@ -680,7 +604,4 @@ defmodule Hireme.Mfa do
     do: code |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
 
   defp normalize(_), do: ""
-
-  defp ctx(meta, %Session{} = s),
-    do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
 end

@@ -46,6 +46,7 @@ defmodule HiremeWeb.Account do
   """
 
   require Logger
+  import Hireme.Audit, only: [ctx: 2]
   alias Hireme.Accounts
   alias Hireme.Audit
   alias Hireme.Keys
@@ -63,8 +64,16 @@ defmodule HiremeWeb.Account do
 
   @doc "Run one method for the browser session in `ctx`."
   @spec call(String.t(), map(), ctx()) :: {:ok, map()} | {:error, map()}
+  # Whatever raises in a call (a malformed param, the database) answers
+  # `invalid` and the wire session lives on. Logged with the stack only:
+  # the params may carry codes, names or a key's secret, and the context
+  # the session.
   def call(method, params, ctx) when is_binary(method) and is_map(params) do
-    guarded(method, fn -> checked(method, params, ctx) end)
+    checked(method, params, ctx)
+  rescue
+    e ->
+      Logger.error("account.* #{method} raised " <> Hireme.Security.trace(e, __STACKTRACE__))
+      {:error, %{error: "invalid"}}
   end
 
   # The browser session's own lifetime, idle limit, revocation and the
@@ -125,19 +134,6 @@ defmodule HiremeWeb.Account do
   defp safely(method, params, session, ctx),
     do: method |> run(params, session, Map.take(ctx, [:ip, :user_agent])) |> answer()
 
-  # Whatever raises in a call (a malformed param, the database) answers
-  # `invalid` and the wire session lives on. Logged with the stack only:
-  # the params may carry codes, names or a key's secret, and the context
-  # the session.
-  defp guarded(method, fun) do
-    fun.()
-  rescue
-    e ->
-      Logger.error("account.* #{method} raised " <> Hireme.Security.trace(e, __STACKTRACE__))
-
-      {:error, %{error: "invalid"}}
-  end
-
   defp answer({:ok, %{} = result}), do: {:ok, result}
   defp answer(:ok), do: {:ok, %{ok: true}}
 
@@ -190,34 +186,22 @@ defmodule HiremeWeb.Account do
   end
 
   defp run("account.key.change", %{"id" => id} = p, s, meta) when is_integer(id) do
-    with %{} = key <- Keys.get(id) || {:error, :not_found},
-         {:ok, masks} <- masks(p),
-         {:ok, key} <- Keys.change(s, key, masks, ctx(meta, s)) do
-      {:ok, %{key: key(key)}}
-    end
+    keyed(id, fn key ->
+      with {:ok, masks} <- masks(p), do: Keys.change(s, key, masks, ctx(meta, s))
+    end)
   end
 
   defp run("account.key.rename", %{"id" => id, "name" => name}, s, meta)
-       when is_integer(id) and is_binary(name) do
-    with %{} = key <- Keys.get(id) || {:error, :not_found},
-         {:ok, key} <- Keys.rename(key, name, ctx(meta, s)) do
-      {:ok, %{key: key(key)}}
-    end
-  end
+       when is_integer(id) and is_binary(name),
+       do: keyed(id, &Keys.rename(&1, name, ctx(meta, s)))
 
   # An operator lease revoke paused the key; this lifts it.
   defp run("account.key.resume", %{"id" => id}, s, meta) when is_integer(id) do
-    with true <- Mfa.fresh?(s) || {:error, :step_up},
-         %{} = key <- Keys.get(id) || {:error, :not_found},
-         {:ok, key} <- Keys.resume(key, ctx(meta, s)) do
-      {:ok, %{key: key(key)}}
-    end
+    if Mfa.fresh?(s), do: keyed(id, &Keys.resume(&1, ctx(meta, s))), else: {:error, :step_up}
   end
 
-  defp run("account.key.revoke", %{"id" => id}, s, meta) when is_integer(id) do
-    with %{} = key <- Keys.get(id) || {:error, :not_found},
-         do: {:ok, %{key: key(Keys.revoke(key, ctx(meta, s)))}}
-  end
+  defp run("account.key.revoke", %{"id" => id}, s, meta) when is_integer(id),
+    do: keyed(id, &{:ok, Keys.revoke(&1, ctx(meta, s))})
 
   ## Leases
 
@@ -234,18 +218,13 @@ defmodule HiremeWeb.Account do
 
   defp run("account.totp.begin", p, s, _meta), do: Mfa.begin_totp(s, label(p["label"], s))
 
-  defp run("account.totp.confirm", %{"code" => code} = p, s, meta) when is_binary(code) do
-    with {:ok, factor, codes} <-
-           Mfa.confirm_totp(s, code, text(p["name"]), ctx(meta, s)),
-         do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
-  end
+  defp run("account.totp.confirm", %{"code" => code} = p, s, meta) when is_binary(code),
+    do: bound(Mfa.confirm_totp(s, code, text(p["name"]), ctx(meta, s)))
 
   defp run("account.passkey.begin", p, s, _meta), do: Mfa.begin_webauthn(s, label(p["name"], s))
 
-  defp run("account.passkey.finish", p, s, meta) do
-    with {:ok, factor, codes} <- Mfa.confirm_webauthn(s, p, ctx(meta, s)),
-         do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
-  end
+  defp run("account.passkey.finish", p, s, meta),
+    do: bound(Mfa.confirm_webauthn(s, p, ctx(meta, s)))
 
   defp run("account.factor.remove", %{"id" => id}, s, meta) when is_integer(id),
     do: Mfa.remove(s, id, ctx(meta, s))
@@ -314,11 +293,7 @@ defmodule HiremeWeb.Account do
     if Mfa.fresh?(s), do: Hireme.Gmail.enable_pipe(s.account_id), else: {:error, :step_up}
   end
 
-  defp run(method, _params, _s, _meta) do
-    if String.starts_with?(method, "account."),
-      do: {:error, :unknown_method},
-      else: {:error, :invalid}
-  end
+  defp run(_method, _params, _s, _meta), do: {:error, :unknown_method}
 
   # The host as Provenance stores it, whether given bare or as a URL.
   defp trusted(host, note) do
@@ -328,8 +303,18 @@ defmodule HiremeWeb.Account do
       Enum.find(Hireme.Provenance.trusted_hosts(), &(&1.host == norm and (&1.note || "") == note))
   end
 
+  # The key `id` names, changed by `fun`, as the lens shows it.
+  defp keyed(id, fun) do
+    with %{} = key <- Keys.get(id) || {:error, :not_found},
+         {:ok, key} <- fun.(key),
+         do: {:ok, %{key: key(key)}}
+  end
+
   defp stepped({:ok, s}), do: {:ok, %{fresh_for: fresh_for(s)}}
   defp stepped(error), do: error
+
+  defp bound({:ok, factor, codes}), do: {:ok, %{factor: factor(factor), recovery_codes: codes}}
+  defp bound(error), do: error
 
   defp host_answer({:ok, row}), do: {:ok, %{trusted_host: Map.take(row, [:id, :host, :note])}}
   defp host_answer(other), do: other
@@ -389,7 +374,4 @@ defmodule HiremeWeb.Account do
 
     if Hireme.Security.name?(name, 100, 200), do: name, else: "Hireme account"
   end
-
-  defp ctx(meta, %Session{} = s),
-    do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
 end

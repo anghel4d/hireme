@@ -52,6 +52,7 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   use Mix.Task
 
+  alias Hireme.Release
   alias Mix.Tasks.Compile.Schema, as: Build
 
   @schema Build.schema()
@@ -96,33 +97,27 @@ defmodule Mix.Tasks.Hireme.Schema do
         Mix.raise(Enum.join(moved, "\n") <> "\nappend new entries at the end, or pass --renumber")
     end
 
-    case {Build.locked(), opts[:migration]} do
-      {nil, nil} ->
+    locked = Build.locked()
+
+    cond do
+      name = opts[:migration] ->
+        migration!(name)
+        if locked, do: Build.put!(@lock, Build.lock_text(sql))
+
+      problem = Build.lock_problem(sql) ->
+        Mix.raise("#{problem}: deployed databases hold it; ship it as --migration NAME")
+
+      true ->
         :ok
-
-      {nil, name} ->
-        migration!(name)
-
-      {_, nil} ->
-        if problem = Build.lock_problem(sql),
-          do: Mix.raise("#{problem}: deployed databases hold it; ship it as --migration NAME")
-
-      {_, name} ->
-        migration!(name)
-        Build.put!(@lock, Build.lock_text(sql))
     end
 
     Build.generate!()
   end
 
   defp check!(sql, json, opts) do
-    problems =
-      Enum.reject(
-        [Build.apply_problem(sql), Build.lock_problem(sql) | id_problems(json, opts)],
-        &is_nil/1
-      )
+    problems = [Build.apply_problem(sql), Build.lock_problem(sql) | id_problems(json, opts)]
 
-    case problems do
+    case Enum.reject(problems, &is_nil/1) do
       [] ->
         Mix.shell().info(
           "schema: the outputs of #{@schema} apply, match #{@lock} and keep every id"
@@ -152,30 +147,15 @@ defmodule Mix.Tasks.Hireme.Schema do
       Build.with_db(fn db ->
         :ok = Exqlite.Sqlite3.execute(db, previous)
 
-        for step <- steps do
-          case Exqlite.Sqlite3.execute(db, step) do
-            :ok ->
-              :ok
-
-            {:error, e} ->
-              Mix.raise("#{hd(written)} does not apply to the previous baseline: #{inspect(e)}")
-          end
-        end
+        for step <- steps,
+            {:error, e} <- [Exqlite.Sqlite3.execute(db, step)],
+            do: Mix.raise("#{hd(written)} does not apply to the previous baseline: #{inspect(e)}")
 
         shape(db)
       end)
 
-    shape_file =
-      Path.join(System.tmp_dir!(), "hireme-shape-#{System.unique_integer([:positive])}")
-
-    File.write!(shape_file, shape)
-
-    {out, status} =
-      try do
-        Build.run_emitter(["diff", shape_file])
-      after
-        File.rm(shape_file)
-      end
+    name = "hireme-shape-#{System.unique_integer([:positive])}"
+    {out, status} = with_tmp(name, shape, &Build.run_emitter(["diff", &1]))
 
     case {status, written} do
       {0, [path]} when out == "" ->
@@ -238,13 +218,17 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   # An output emitted from the declaration as committed at `rev`.
   defp emit_at!(rev, kind) do
-    tmp =
-      Path.join(System.tmp_dir!(), "hireme-schema-#{System.unique_integer([:positive])}.schema")
+    name = "hireme-schema-#{System.unique_integer([:positive])}.schema"
+    with_tmp(name, git!(["show", "#{rev}:#{@schema}"]), &Build.emit!([kind], schema: &1))
+  end
 
-    File.write!(tmp, git!(["show", "#{rev}:#{@schema}"]))
+  # `fun` on a file `name` in the temporary directory holding `content`, removed after.
+  defp with_tmp(name, content, fun) do
+    tmp = Path.join(System.tmp_dir!(), name)
+    File.write!(tmp, content)
 
     try do
-      Build.emit!([kind], schema: tmp)
+      fun.(tmp)
     after
       File.rm(tmp)
     end
@@ -269,7 +253,7 @@ defmodule Mix.Tasks.Hireme.Schema do
 
   defp shape(db) do
     cols =
-      query(
+      Release.rows(
         db,
         "SELECT m.name, p.name, p.type, p.\"notnull\", coalesce(p.dflt_value, '-') " <>
           "FROM sqlite_master m JOIN pragma_table_info(m.name) p " <>
@@ -278,22 +262,23 @@ defmodule Mix.Tasks.Hireme.Schema do
       )
 
     indexes =
-      query(
+      Release.rows(
         db,
         "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY name"
       )
 
-    triggers = query(db, "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+    triggers =
+      Release.rows(db, "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
 
     # Definitions too, so a changed index, trigger or ON DELETE is a change.
     sqls =
-      query(
+      Release.rows(
         db,
         "SELECT name, sql FROM sqlite_master WHERE type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name"
       )
 
     fks =
-      query(
+      Release.rows(
         db,
         "SELECT m.name, f.\"from\", f.on_delete FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f " <>
           "WHERE m.type = 'table' ORDER BY m.name, f.\"from\""
@@ -307,17 +292,6 @@ defmodule Mix.Tasks.Hireme.Schema do
       Enum.map_join(triggers, "", fn [i] -> "trigger #{i}\n" end) <>
       Enum.map_join(sqls, "", fn [n, sql] -> "sql #{n} #{String.replace(sql, ~r/\s+/, " ")}\n" end) <>
       Enum.map_join(fks, "", fn [t, c, action] -> "fk #{t} #{c} #{action}\n" end)
-  end
-
-  defp query(db, sql) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, sql)
-
-    try do
-      {:ok, rows} = Exqlite.Sqlite3.fetch_all(db, stmt)
-      rows
-    after
-      Exqlite.Sqlite3.release(db, stmt)
-    end
   end
 
   # ------------------------------------------------------------ id stability
@@ -343,22 +317,15 @@ defmodule Mix.Tasks.Hireme.Schema do
   # domain with its bit (stored in every key's masks).
   defp ids(json) do
     m = Jason.decode!(json)
+    domains = for d <- m["domains"], do: {"domain #{d["name"]}", d["bit"]}
+    tables = for t <- m["tables"], do: {"table #{t["name"]}", t["id"]}
+    cols = for t <- m["tables"], c <- t["cols"], do: {"column #{t["name"]}.#{c["name"]}", c["id"]}
+    commands = for c <- m["commands"], do: {"command #{c["name"]}", c["id"]}
 
-    Map.new(
-      Enum.map(m["domains"], &{"domain #{&1["name"]}", &1["bit"]}) ++
-        Enum.flat_map(m["tables"], fn t ->
-          [
-            {"table #{t["name"]}", t["id"]}
-            | Enum.map(t["cols"], &{"column #{t["name"]}.#{&1["name"]}", &1["id"]})
-          ]
-        end) ++
-        Enum.flat_map(m["commands"], fn c ->
-          [
-            {"command #{c["name"]}", c["id"]}
-            | Enum.map(c["params"], &{"param #{c["name"]}.#{&1["name"]}", &1["id"]})
-          ]
-        end)
-    )
+    params =
+      for c <- m["commands"], p <- c["params"], do: {"param #{c["name"]}.#{p["name"]}", p["id"]}
+
+    Map.new(domains ++ tables ++ cols ++ commands ++ params)
   end
 end
 

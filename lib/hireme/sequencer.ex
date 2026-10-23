@@ -66,14 +66,6 @@ defmodule Hireme.Sequencer do
   # ---------------------------------------------------------------- API
 
   @doc false
-  def child_spec(account_id),
-    do: %{
-      id: {__MODULE__, account_id},
-      start: {__MODULE__, :start_link, [account_id]},
-      restart: :temporary
-    }
-
-  @doc false
   def start_link(account_id),
     do: GenServer.start_link(__MODULE__, account_id, name: via(account_id))
 
@@ -103,19 +95,19 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp with_pid(account_id, fun, retry? \\ true) do
+  defp ask(account_id, msg, timeout \\ 30_000, retry? \\ true) do
     case whereis(account_id) do
       nil ->
         {:error, :unavailable}
 
       pid ->
         try do
-          fun.(pid)
+          GenServer.call(pid, msg, timeout)
         catch
           # The sequencer stopped idle between the lookup and the call: it
           # stops only with an empty mailbox, so the call never ran.
           :exit, {reason, {GenServer, :call, _}} when retry? and reason in [:noproc, :normal] ->
-            with_pid(account_id, fun, false)
+            ask(account_id, msg, timeout, false)
         end
     end
   end
@@ -129,14 +121,10 @@ defmodule Hireme.Sequencer do
   `{:sequencer, :verdicts, rev, acks, nacks}`.
   """
   def subscribe(account_id, session, snapshot_rev),
-    do:
-      with_pid(
-        account_id,
-        &GenServer.call(&1, {:subscribe, self(), session, snapshot_rev}, 30_000)
-      )
+    do: ask(account_id, {:subscribe, self(), session, snapshot_rev})
 
   @doc "The operator's BOOT as of now, for the page to carry (its HELLO then resumes from it)."
-  def boot(account_id), do: with_pid(account_id, &GenServer.call(&1, :boot, 30_000))
+  def boot(account_id), do: ask(account_id, :boot)
 
   @doc """
   Submits decoded ops (`HiremeWeb.Wire.Codec.ops/1`) for the calling
@@ -149,8 +137,7 @@ defmodule Hireme.Sequencer do
   read sees every write acknowledged before it: `{:ok, result}`, or
   `{:error, :unavailable}` when the account cannot run.
   """
-  def read(account_id, fun) when is_function(fun, 2),
-    do: with_pid(account_id, &GenServer.call(&1, {:read, fun}, 30_000))
+  def read(account_id, fun) when is_function(fun, 2), do: ask(account_id, {:read, fun})
 
   @doc """
   Submits a burst of ops for the calling session that lands whole or not at
@@ -176,8 +163,7 @@ defmodule Hireme.Sequencer do
   `actor` (`%{label, grants, key_id}`), and answers their verdicts:
   `{:ok, rev, acks, nacks}`. Subscribers get the PATCH as usual.
   """
-  def call(account_id, actor, ops),
-    do: with_pid(account_id, &GenServer.call(&1, {:call, actor, ops}, :infinity))
+  def call(account_id, actor, ops), do: ask(account_id, {:call, actor, ops}, :infinity)
 
   @doc """
   Writes `cells` (column atoms to values) into `table`'s row `id`, or the
@@ -190,14 +176,12 @@ defmodule Hireme.Sequencer do
   `{:error, :column}` (a column that is not server_only).
   """
   def server_write(account_id, table, id, cells, only \\ %{}) when is_map(cells),
-    do: with_pid(account_id, &GenServer.call(&1, {:server_write, table, id, cells, only}, 30_000))
+    do: ask(account_id, {:server_write, table, id, cells, only})
 
   @doc "A lease request; see `Hireme.Lease`."
   def lease(account_id, request) do
-    case with_pid(account_id, &GenServer.call(&1, {:lease, self(), request})) do
-      {:error, :unavailable} -> {:refused, :internal, %{}}
-      reply -> reply
-    end
+    with {:error, :unavailable} <- ask(account_id, {:lease, self(), request}, 5_000),
+         do: {:refused, :internal, %{}}
   end
 
   @doc "Whether the account's sequencer is running (it is not started)."
@@ -211,19 +195,11 @@ defmodule Hireme.Sequencer do
   @impl GenServer
   def init(account_id) do
     Repo.put_account(account_id)
-
-    {rev, text_bytes} =
-      Repo.one!(
-        from(a in Hireme.Rows.Account,
-          where: a.id == ^account_id,
-          select: {a.desk_rev, a.text_bytes}
-        ),
-        skip_account: true
-      )
+    account = Repo.get!(Hireme.Rows.Account, account_id, skip_account: true)
 
     state = %{
       account_id: account_id,
-      rev: rev,
+      rev: account.desk_rev,
       lease: %Lease{},
       lease_rows: [],
       account: nil,
@@ -233,7 +209,7 @@ defmodule Hireme.Sequencer do
       rows: nil,
       blocks: nil,
       backfill_after: 0,
-      text_bytes: text_bytes,
+      text_bytes: account.text_bytes,
       # Bulk contracts by session pid: writes left and when it lapses (monotonic ms).
       bulk: %{}
     }
@@ -332,26 +308,15 @@ defmodule Hireme.Sequencer do
   defp within_rate({pid, ops} = sub, state) do
     n = length(ops)
 
-    case state.subs[pid] do
-      %{key_id: key_id} when key_id != nil ->
-        case contract(state, pid, n) do
-          {:ok, state} ->
-            {[sub], state}
-
-          :none ->
-            case Security.hit(:agent_write, key_id, max(n, 1)) do
-              :ok ->
-                {[sub], state}
-
-              {:error, retry_ms} ->
-                nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
-                send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
-                {[], state}
-            end
-        end
-
-      _ ->
-        {[sub], state}
+    with %{key_id: key_id} when key_id != nil <- state.subs[pid],
+         :none <- contract(state, pid, n),
+         {:error, retry_ms} <- Security.hit(:agent_write, key_id, max(n, 1)) do
+      nacks = Enum.map(ops, &nack(&1, :rate, %{retry_ms: retry_ms}))
+      send(pid, {:sequencer, :verdicts, state.rev, [], nacks})
+      {[], state}
+    else
+      {:ok, state} -> {[sub], state}
+      _ -> {[sub], state}
     end
   end
 
@@ -400,12 +365,8 @@ defmodule Hireme.Sequencer do
   def handle_info(:backfill, state), do: chore(state, "keywords backfill", &backfill/1)
   def handle_info(:canonical, state), do: chore(state, "canonical backfill", &canonical/1)
 
-  def handle_info({:audit_channels, before, after_}, state) do
-    chore(state, "lease audit", fn s ->
-      audit_channels(before, after_, s.account_id)
-      s
-    end)
-  end
+  def handle_info({:audit_channels, before, after_}, state),
+    do: chore(state, "lease audit", &audit_channels(before, after_, &1))
 
   def handle_info(:purge, state) do
     Process.send_after(self(), :purge, @purge_ms)
@@ -423,7 +384,6 @@ defmodule Hireme.Sequencer do
   def handle_info(:timeout, %{subs: subs} = state) when map_size(subs) == 0,
     do: {:stop, :normal, state}
 
-  def handle_info(:timeout, state), do: {:noreply, state, @idle_ms}
   def handle_info(_, state), do: {:noreply, state, @idle_ms}
 
   # A chore that raises is logged and leaves the state as it was.
@@ -437,14 +397,7 @@ defmodule Hireme.Sequencer do
 
   defp subscribe_session(pid, session, snapshot_rev, state) do
     now = Store.now()
-    ref = Process.monitor(pid)
-    sub = Map.merge(session, %{ref: ref, pid: pid})
-
-    state = %{
-      state
-      | subs: Map.put(state.subs, pid, sub),
-        lease: Lease.join(state.lease, session, now)
-    }
+    state = admit(state, pid, session, Process.monitor(pid), now)
 
     # A key's masks may have changed since its snapshot, so only the
     # operator's session resumes; a key always gets a BOOT.
@@ -455,17 +408,31 @@ defmodule Hireme.Sequencer do
         do: {:PATCH, resumed(session.grants, state, now)},
         else: {:BOOT, snapshot(session.grants, state, now)}
 
-    frames = [Codec.frame(kind, state.rev, body, end: true, compress: true)]
     state = broadcast_leases(state, except: pid)
 
     reply = %{
       rev: state.rev,
       lease: Lease.channel?(state.lease, session.id),
-      frames: frames,
+      frames: [Codec.frame(kind, state.rev, body, end: true, compress: true)],
       pid: self()
     }
 
     {:reply, {:ok, reply}, state, @idle_ms}
+  end
+
+  # A session joins as `key`: a wire session's pid, or a passing caller's ref.
+  defp admit(state, key, session, ref, now) do
+    sub = Map.merge(session, %{ref: ref, pid: key})
+    %{state | subs: Map.put(state.subs, key, sub), lease: Lease.join(state.lease, session, now)}
+  end
+
+  defp dismiss(state, key, id) do
+    %{
+      state
+      | subs: Map.delete(state.subs, key),
+        lease: Lease.leave(state.lease, id),
+        bulk: Map.delete(state.bulk, key)
+    }
   end
 
   defp ends?({:key, id}, %{key_id: id}) when id != nil, do: true
@@ -480,13 +447,7 @@ defmodule Hireme.Sequencer do
     after_ =
       Enum.reduce(gone, state, fn {pid, sub}, st ->
         if sub.ref, do: Process.demonitor(sub.ref, [:flush])
-
-        %{
-          st
-          | subs: Map.delete(st.subs, pid),
-            lease: Lease.leave(st.lease, sub.id),
-            bulk: Map.delete(st.bulk, pid)
-        }
+        dismiss(st, pid, sub.id)
       end)
 
     if gone != [], do: send(self(), {:audit_channels, state.lease, after_.lease})
@@ -498,22 +459,8 @@ defmodule Hireme.Sequencer do
   defp run_as(actor, ops, state) do
     key = {:call, make_ref()}
     session = Map.merge(%{id: System.unique_integer([:positive]), session_id: nil}, actor)
-    sub = Map.merge(session, %{ref: nil, pid: key})
-
-    state = %{
-      state
-      | subs: Map.put(state.subs, key, sub),
-        lease: Lease.join(state.lease, session, Store.now())
-    }
-
-    {state, verdicts} = run([{key, ops}], state)
-
-    state = %{
-      state
-      | subs: Map.delete(state.subs, key),
-        lease: Lease.leave(state.lease, session.id)
-    }
-
+    {state, verdicts} = run([{key, ops}], admit(state, key, session, nil, Store.now()))
+    state = dismiss(state, key, session.id)
     acks = for {^key, {:ack, a}} <- verdicts, do: a
     nacks = for {^key, {:nack, n}} <- verdicts, do: n
     {state, acks, nacks}
@@ -528,13 +475,11 @@ defmodule Hireme.Sequencer do
 
     # Held applications wait for their holder to let go; a text that is not
     # UTF-8 (only a hand-edited database has one) is left alone.
-    after_id = state.backfill_after
-
     stale =
       Repo.all(
         from(r in Hireme.Rows.Application,
           where:
-            r.id > ^after_id and not is_nil(r.listing_raw) and
+            r.id > ^state.backfill_after and not is_nil(r.listing_raw) and
               (is_nil(r.keywords_version) or r.keywords_version != ^version),
           select: {r.id, r.listing_raw},
           order_by: r.id,
@@ -651,30 +596,13 @@ defmodule Hireme.Sequencer do
 
   defp run(submissions, state) do
     flat = for {pid, ops} <- submissions, op <- ops, do: {pid, op}
-
-    {state, all} =
-      flat
-      |> Enum.chunk_every(@batch)
-      |> Enum.reduce({state, []}, fn chunk, {state, all} ->
-        {state, verdicts} = batch(chunk, state)
-        {state, all ++ verdicts}
-      end)
-
+    {all, state} = flat |> Enum.chunk_every(@batch) |> Enum.flat_map_reduce(state, &batch/2)
     state = broadcast_leases(state, [])
     tallies = Enum.reduce(all, %{}, &tally/2)
 
     for {pid, {acks, nacks}} <- tallies, sub = state.subs[pid], sub.key_id do
-      Hireme.Audit.record(
-        :agent_ops,
-        %{count: acks + nacks, acks: acks, nacks: nacks},
-        %{
-          account_id: state.account_id,
-          key_id: sub.key_id,
-          session_id: nil,
-          ip: sub[:ip],
-          user_agent: sub[:user_agent]
-        }
-      )
+      counts = %{count: acks + nacks, acks: acks, nacks: nacks}
+      Hireme.Audit.record(:agent_ops, counts, audit_context(state, sub))
     end
 
     {state, all}
@@ -688,13 +616,13 @@ defmodule Hireme.Sequencer do
       {:ok, {state, turn, verdicts}} ->
         state = publish(turn.deltas, forget_gone(settled(state, turn), turn.deltas))
         deliver(verdicts, state.rev)
-        {state, verdicts}
+        {verdicts, state}
 
       {:error, reason} ->
         Logger.error("sequencer #{state.account_id}: batch rolled back: #{inspect(reason)}")
         verdicts = for {pid, op} <- chunk, do: {pid, {:nack, nack(op, :internal, %{})}}
         deliver(verdicts, state.rev)
-        {rebuild(state), verdicts}
+        {verdicts, rebuild(state)}
     end
   end
 
@@ -709,12 +637,8 @@ defmodule Hireme.Sequencer do
 
       {:error, {:refused, verdicts}} ->
         refused =
-          for {{p, v}, op} <- Enum.zip(verdicts, ops) do
-            case v do
-              {:nack, _} -> {p, v}
-              {:ack, _} -> {p, {:nack, nack(op, :burst, %{})}}
-            end
-          end
+          for {{p, v}, op} <- Enum.zip(verdicts, ops),
+              do: {p, if(match?({:ack, _}, v), do: {:nack, nack(op, :burst, %{})}, else: v)}
 
         deliver(refused, state.rev)
         # The kernel saw the rolled-back rows as they were judged: it is read again.
@@ -870,19 +794,15 @@ defmodule Hireme.Sequencer do
     end
   end
 
-  defp nack(op, refusal, {:json, data}),
-    do: %{
-      op_id: op.op_id,
-      code: Schema.refusal(refusal),
-      data: data |> JSON.decode!() |> reasoned(refusal) |> JSON.encode!()
-    }
+  defp nack(op, refusal, data) do
+    data =
+      case data do
+        {:json, json} -> json |> JSON.decode!() |> reasoned(refusal)
+        data -> data |> reasoned(refusal) |> Map.put(:refusal, refusal)
+      end
 
-  defp nack(op, refusal, data),
-    do: %{
-      op_id: op.op_id,
-      code: Schema.refusal(refusal),
-      data: JSON.encode!(data |> reasoned(refusal) |> Map.put(:refusal, refusal))
-    }
+    %{op_id: op.op_id, code: Schema.refusal(refusal), data: JSON.encode!(data)}
+  end
 
   # docs/rebuild.md, 'The sequencer's checks': "A refusal's `reason` names
   # the cause in the server's words" (every refusal, by shannon's ruling).
@@ -1259,12 +1179,7 @@ defmodule Hireme.Sequencer do
         []
 
       c ->
-        cell =
-          Enum.find_value(op.cells, fn
-            {id, 1, v} when id == c.id -> v
-            _ -> nil
-          end)
-
+        cell = Enum.find_value(op.cells, fn {id, ty, v} -> if id == c.id and ty == 1, do: v end)
         Enum.uniq(Enum.reject([row && row.application_id, cell], &is_nil/1))
     end
   end
@@ -1396,16 +1311,13 @@ defmodule Hireme.Sequencer do
   # Check 6 (`too_large` is taken right after shape, before the kernel spends
   # time on a text it would refuse; `rate` as ops arrive).
   defp too_large(op) do
-    text = text_of(op)
+    # The text bytes an op carries: its str cells.
+    text = Enum.sum_by(op.cells, fn {_, ty, v} -> if(ty == 2, do: byte_size(v), else: 0) end)
 
     if text > @max_op_text,
       do: {:refused, :too_large, %{bytes: text, max: @max_op_text}},
       else: :ok
   end
-
-  # The text bytes an op carries: its str cells.
-  defp text_of(op),
-    do: Enum.sum_by(op.cells, fn {_, ty, v} -> if(ty == 2, do: byte_size(v), else: 0) end)
 
   # A capped table's row count, read from SQLite once and then moved with
   # every insert and delete (count_deltas). A tombstone is gone (its drop
@@ -1437,34 +1349,30 @@ defmodule Hireme.Sequencer do
 
   defp write(plan, op, sub, effects, state, turn) do
     ctx = %{sub: sub, op: op, turn: turn, plan: plan}
+    written = Enum.reduce_while(effects, {:ok, [], [], nil}, &effect_step(&1, &2, plan, op, ctx))
 
-    effects
-    |> Enum.reduce_while({:ok, [], [], nil}, fn {table_id, row_id, cells},
-                                                {:ok, deltas, inserted, ack} ->
-      table = Schema.table(table_id)
-      before = if row_id == 0, do: 0, else: text_bytes(table, row_id)
+    # Claims follow only a write that lands: a refusal in finish rolls
+    # the insert back, and its id must not stay leased.
+    with {:ok, deltas, _inserted, ack} <- written,
+         {:ok, state, turn, ack} <- finish(state, turn, deltas, ack || command_ack(plan, op)),
+         do: {:ok, adopt(state, sub, deltas), turn, ack}
+  end
 
-      case effect(table, row_id, cells, inserted, ctx) do
-        {:ok, row, changed} ->
-          moved = {:text, text_bytes(table, row.id) - before}
-          own = own?(plan, op, table_id, row_id, ack)
-          inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
-          ack = if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
-          {:cont, {:ok, deltas ++ [{:put, table, row, changed}, moved], inserted, ack}}
+  # One effect written: its row, the text it moved, and the op's ack once its own row lands.
+  defp effect_step({table_id, row_id, cells}, {:ok, deltas, inserted, ack}, plan, op, ctx) do
+    table = Schema.table(table_id)
+    before = if row_id == 0, do: 0, else: text_bytes(table, row_id)
 
-        refused ->
-          {:halt, refused}
-      end
-    end)
-    |> case do
-      {:ok, deltas, _inserted, ack} ->
-        # Claims follow only a write that lands: a refusal in finish rolls
-        # the insert back, and its id must not stay leased.
-        with {:ok, state, turn, ack} <- finish(state, turn, deltas, ack || command_ack(plan, op)),
-             do: {:ok, adopt(state, sub, deltas), turn, ack}
+    case effect(table, row_id, cells, inserted, ctx) do
+      {:ok, row, changed} ->
+        moved = {:text, text_bytes(table, row.id) - before}
+        own = own?(plan, op, table_id, row_id, ack)
+        inserted = if row_id == 0, do: inserted ++ [row.id], else: inserted
+        ack = if own and ack == nil, do: %{op_id: op.op_id, rev: row.rev, id: row.id}, else: ack
+        {:cont, {:ok, deltas ++ [{:put, table, row, changed}, moved], inserted, ack}}
 
       refused ->
-        refused
+        {:halt, refused}
     end
   end
 
@@ -1530,11 +1438,7 @@ defmodule Hireme.Sequencer do
 
   # The op's rows go to the kernel now, so the next op is judged on them.
   defp finish(state, turn, deltas, ack) do
-    text =
-      Enum.reduce(deltas, 0, fn
-        {:text, n}, acc -> acc + n
-        _, acc -> acc
-      end)
+    text = Enum.sum(for {:text, n} <- deltas, do: n)
 
     # The account's text budget weighs what the op changed, after minus
     # before, so rewriting a long text shorter always lands; the refusal
@@ -1544,27 +1448,23 @@ defmodule Hireme.Sequencer do
     if text > 0 and state.text_bytes + turn.text + text > budget do
       {:refused, :cap, %{table: "account", reason: "text", cap: budget}, state}
     else
-      kernel_takes(state, turn, deltas, ack, text)
+      body = IO.iodata_to_binary(patch(deltas, nil))
+
+      # The kernel refusing its own rows is a bug; it is rebuilt from what the
+      # transaction now holds rather than left behind SQLite.
+      state =
+        case body != "" and Kernel.apply(state.kernel, body) do
+          {:error, reason} ->
+            Logger.error("sequencer #{state.account_id}: kernel apply: #{inspect(reason)}")
+            rebuild(state)
+
+          _ ->
+            state
+        end
+
+      {:ok, count_deltas(state, deltas),
+       %{turn | deltas: turn.deltas ++ deltas, text: turn.text + text}, ack}
     end
-  end
-
-  defp kernel_takes(state, turn, deltas, ack, text) do
-    body = IO.iodata_to_binary(patch(deltas, nil))
-
-    # The kernel refusing its own rows is a bug; it is rebuilt from what the
-    # transaction now holds rather than left behind SQLite.
-    state =
-      case body != "" and Kernel.apply(state.kernel, body) do
-        {:error, reason} ->
-          Logger.error("sequencer #{state.account_id}: kernel apply: #{inspect(reason)}")
-          rebuild(state)
-
-        _ ->
-          state
-      end
-
-    {:ok, count_deltas(state, deltas),
-     %{turn | deltas: turn.deltas ++ deltas, text: turn.text + text}, ack}
   end
 
   defp effect(table, row_id, cells, inserted, ctx) do
@@ -1672,32 +1572,21 @@ defmodule Hireme.Sequencer do
   defp derive(%{canonical_url: url} = values, "applications", _row, _ctx),
     do: Map.put(values, :canonical_url, Kernel.canonical(url))
 
-  defp derive(values, "sources", _row, _ctx) do
-    case values do
-      %{url: url} -> Map.put(values, :host, Provenance.host(url) || "")
-      _ -> values
-    end
-  end
+  defp derive(%{url: url} = values, "sources", _row, _ctx),
+    do: Map.put(values, :host, Provenance.host(url) || "")
 
-  defp derive(values, "events", nil, ctx) do
-    values
-    |> Map.put(:actor, actor(ctx.sub))
-    |> Map.put(:key_id, ctx.sub.key_id)
-    |> Map.put(:op_id, signed(ctx.op.op_id))
-  end
+  defp derive(values, "events", nil, ctx),
+    do: values |> authored(ctx.sub) |> Map.put(:op_id, signed(ctx.op.op_id))
 
   # A version is its root's next, by whom.
   defp derive(%{root_id: root} = values, "cv_versions", nil, ctx) do
     n = Repo.one(from(v in Hireme.Rows.CvVersion, where: v.root_id == ^root, select: max(v.n)))
-
-    Map.merge(values, %{
-      n: (n || 0) + 1,
-      actor: actor(ctx.sub),
-      key_id: ctx.sub.key_id
-    })
+    values |> authored(ctx.sub) |> Map.put(:n, (n || 0) + 1)
   end
 
   defp derive(values, _table, _row, _ctx), do: values
+
+  defp authored(values, sub), do: Map.merge(values, %{actor: actor(sub), key_id: sub.key_id})
 
   defp actor(%{grants: %{actor: :mail}}), do: :mail
   defp actor(%{key_id: key_id}) when key_id != nil, do: :agent
@@ -1916,12 +1805,10 @@ defmodule Hireme.Sequencer do
   end
 
   defp wire_tables(state, grants, now) do
-    [
-      catalog(grants),
-      Codec.clock(now)
-      | if(Grants.read?(grants, Schema.table(:leases)), do: [leases_block(state)], else: [])
-    ] ++
-      if(Grants.read?(grants, Schema.table(:acct_info)), do: [acct_info_block(state)], else: [])
+    t = Schema.table(:leases)
+    leases = if Grants.read?(grants, t), do: Codec.rows_block(t, t.cols, Lease.rows(state.lease))
+    info = if Grants.read?(grants, Schema.table(:acct_info)), do: acct_info_block(state)
+    [catalog(grants), Codec.clock(now), leases || [], info || []]
   end
 
   # ------------------------------------------------------- account views
@@ -1963,12 +1850,7 @@ defmodule Hireme.Sequencer do
 
   defp acct_info_block(state) do
     t = Schema.table(:acct_info)
-
-    a =
-      Repo.one!(from(x in Hireme.Rows.Account, where: x.id == ^state.account_id),
-        skip_account: true
-      )
-
+    a = Repo.get!(Hireme.Rows.Account, state.account_id, skip_account: true)
     row = %{name: a.name, status: a.status, recovery_codes_left: Hireme.Mfa.recovery_codes_left()}
     Codec.rows_block(t, t.cols, [row])
   end
@@ -2006,11 +1888,6 @@ defmodule Hireme.Sequencer do
 
   # The wire sessions subscribed (not a passing caller of `call/3`).
   defp live_subs(state), do: for({pid, sub} <- state.subs, is_pid(pid), do: sub)
-
-  defp leases_block(state) do
-    t = Schema.table(:leases)
-    Codec.rows_block(t, t.cols, Lease.rows(state.lease))
-  end
 
   # The resolved declaration as the grants see it: every table they read or
   # write, the wire tables, every enum and frame, the commands they may run.
@@ -2133,15 +2010,7 @@ defmodule Hireme.Sequencer do
         Codec.rows_block(t, cols, Enum.map(group, &elem(&1, 1)))
       end)
 
-    gone =
-      deltas
-      |> Enum.flat_map(fn
-        {:gone, %{residency: :resident} = t, id} -> [{t, id}]
-        _ -> []
-      end)
-      |> Enum.filter(fn {t, _} -> visible.(t) end)
-      |> Enum.map(fn {t, id} -> {t.id, id} end)
-
+    gone = for {:gone, %{residency: :resident} = t, id} <- deltas, visible.(t), do: {t.id, id}
     [puts, Codec.gone_block(gone)]
   end
 
@@ -2215,12 +2084,8 @@ defmodule Hireme.Sequencer do
     with :ok <- if(key_id, do: Security.hit(:agent_bulk, key_id, n), else: :ok),
          {{:ok, reply}, state} <-
            lease_request({:claim, sid, Map.delete(params, "bulk")}, pid, state) do
-      until = System.monotonic_time(:millisecond) + @bulk_ms
-
-      lapses =
-        DateTime.add(DateTime.utc_now(), @bulk_ms, :millisecond) |> DateTime.truncate(:second)
-
-      state = put_in(state.bulk[pid], {n, until})
+      state = put_in(state.bulk[pid], {n, System.monotonic_time(:millisecond) + @bulk_ms})
+      lapses = DateTime.add(Store.now(), div(@bulk_ms, 1_000))
 
       {{:ok, Map.put(reply, "bulk", %{"writes" => n, "until" => DateTime.to_iso8601(lapses)})},
        state}
@@ -2237,9 +2102,7 @@ defmodule Hireme.Sequencer do
       {{:refused, :type, %{column: "stage"}}, state}
     else
       ranked = Kernel.board_ids(state.kernel, stage)
-
-      all =
-        if stage, do: MapSet.new(Kernel.board_ids(state.kernel, nil)), else: MapSet.new(ranked)
+      all = MapSet.new(if stage, do: Kernel.board_ids(state.kernel, nil), else: ranked)
 
       case Lease.claim(state.lease, sid, params, ranked, all, Store.now()) do
         {:ok, lease, reply} -> {{:ok, reply}, broadcast_leases(%{state | lease: lease}, [])}
@@ -2262,15 +2125,13 @@ defmodule Hireme.Sequencer do
     now = Store.now()
 
     {n, _} =
-      Store.write(fn ->
-        Repo.update_all(
-          from(k in Hireme.Rows.ApiKey,
-            where: k.id == ^key_id and is_nil(k.paused_at) and is_nil(k.revoked_at)
-          ),
-          set: [paused_at: now, updated_at: now],
-          inc: [rev: 1]
-        )
-      end)
+      Store.bump(
+        from(k in Hireme.Rows.ApiKey,
+          where: k.id == ^key_id and is_nil(k.paused_at) and is_nil(k.revoked_at)
+        ),
+        paused_at: now,
+        updated_at: now
+      )
 
     since = Repo.one(from(k in Hireme.Rows.ApiKey, where: k.id == ^key_id, select: k.paused_at))
     # A revoked key is never held (its row is not paused).
@@ -2300,50 +2161,43 @@ defmodule Hireme.Sequencer do
   # wakes the account lens's parked watch: the operator sees agents come and go.
   # `before` and `after_` are the leases around one request, captured then:
   # another session's change in between is its own request's to audit.
-  defp audit_channels(before, after_, account_id) do
+  defp audit_channels(before, after_, state) do
     for {sid, s} <- before.sessions,
         s.key_id != nil,
         s.channel != Lease.channel?(after_, sid) do
       kind = if s.channel, do: :lease_released, else: :lease_opened
       held = MapSet.size(Lease.held(if(s.channel, do: before, else: after_), sid))
-
-      Hireme.Audit.record(kind, %{lease_id: sid, label: s.label, count: held}, %{
-        account_id: account_id,
-        ip: s[:ip],
-        user_agent: s[:user_agent],
-        key_id: s.key_id
-      })
+      meta = %{lease_id: sid, label: s.label, count: held}
+      Hireme.Audit.record(kind, meta, audit_context(state, s))
     end
 
-    :ok
+    state
   end
 
+  # A key's session as the trail records who acted.
+  defp audit_context(state, s),
+    do: %{account_id: state.account_id, key_id: s.key_id, ip: s[:ip], user_agent: s[:user_agent]}
+
   # Only when the rows moved: a browser joining changes nothing anyone sees.
+  # The current rows go, and a gone block for the leases that ended.
   defp broadcast_leases(state, opts) do
     rows = Lease.rows(state.lease)
 
-    if rows == state.lease_rows,
-      do: state,
-      else: send_leases(%{state | lease_rows: rows}, state.lease_rows, opts)
-  end
+    if rows == state.lease_rows do
+      state
+    else
+      t = Schema.table(:leases)
+      ended = MapSet.difference(MapSet.new(state.lease_rows, & &1.id), MapSet.new(rows, & &1.id))
+      gone = Codec.gone_block(for id <- ended, do: {t.id, id})
+      body = IO.iodata_to_binary([Codec.rows_block(t, t.cols, rows), gone])
 
-  # The current rows, and a gone block for the leases that ended.
-  defp send_leases(state, before, opts) do
-    t = Schema.table(:leases)
-    ended = MapSet.difference(MapSet.new(before, & &1.id), MapSet.new(state.lease_rows, & &1.id))
+      for %{pid: pid, grants: g} <- live_subs(state),
+          pid != opts[:except],
+          Grants.read?(g, t),
+          do: send(pid, {:sequencer, :patch, state.rev, body})
 
-    body =
-      IO.iodata_to_binary([
-        leases_block(state),
-        Codec.gone_block(for id <- ended, do: {t.id, id})
-      ])
-
-    for %{pid: pid, grants: g} <- live_subs(state),
-        pid != opts[:except],
-        Grants.read?(g, t),
-        do: send(pid, {:sequencer, :patch, state.rev, body})
-
-    state
+      %{state | lease_rows: rows}
+    end
   end
 end
 

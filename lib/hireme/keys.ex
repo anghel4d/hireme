@@ -35,13 +35,13 @@ defmodule Hireme.Keys do
   alias Hireme.Audit
   alias Hireme.Mfa
   alias Hireme.Repo
-  alias Hireme.Rows.Account
   alias Hireme.Rows.ApiKey, as: Key
   alias Hireme.Rows.Session
   alias Hireme.Security
   alias Hireme.Store
 
   @prefix "hm_"
+  @presets [:read_only, :write_only, :read_write]
   @shape ~r/\Ahm_([0-9A-Za-z]{12})_([0-9A-Za-z]{43})([0-9A-Za-z]{6})\z/
 
   @type masks :: %{read_mask: 0..15, write_mask: 0..15, may_delete: boolean()}
@@ -64,19 +64,10 @@ defmodule Hireme.Keys do
 
   @doc "The preset these masks are, or `:custom`."
   @spec preset_of(masks() | Key.t()) :: :read_only | :write_only | :read_write | :custom
-  def preset_of(%{read_mask: r, write_mask: w, may_delete: false}) do
-    Enum.find(
-      [:read_only, :write_only, :read_write],
-      :custom,
-      &match?(%{read_mask: ^r, write_mask: ^w}, preset(&1))
-    )
-  end
+  def preset_of(%{read_mask: r, write_mask: w, may_delete: false}),
+    do: Enum.find(@presets, :custom, &match?(%{read_mask: ^r, write_mask: ^w}, preset(&1)))
 
   def preset_of(_), do: :custom
-
-  @doc "Keys for the account on the process, newest first, revoked ones included."
-  @spec list() :: [Key.t()]
-  def list, do: Repo.all(from(k in Key, order_by: [desc: k.id]))
 
   @spec get(pos_integer()) :: Key.t() | nil
   def get(id) when is_integer(id), do: Repo.get(Key, id)
@@ -109,7 +100,7 @@ defmodule Hireme.Keys do
         })
 
       with {:ok, key} <- insert_under_cap(session.account_id, row) do
-        trail(:api_key_created, key, %{preset: preset_of(key)}, ctx(meta, session))
+        trail(:api_key_created, key, %{preset: preset_of(key)}, Audit.ctx(meta, session))
         Accounts.notify(session.account_id, :api_key_created, %{name: name})
         {:ok, %{key: key, secret: body <> Security.checksum(body)}}
       end
@@ -120,29 +111,17 @@ defmodule Hireme.Keys do
   # a racing mint sees this one; an expired key no longer counts.
   defp insert_under_cap(account_id, row) do
     now = Store.now()
+    mine = from(k in Key, where: k.account_id == ^account_id)
+    unrevoked = where(mine, [k], is_nil(k.revoked_at))
+    live = where(unrevoked, [k], is_nil(k.expires_at) or k.expires_at > ^now)
+    count = &Repo.aggregate(&1, :count, skip_account: true)
 
     Store.transaction(fn ->
-      live =
-        Repo.aggregate(
-          from(k in Key,
-            where:
-              k.account_id == ^account_id and is_nil(k.revoked_at) and
-                (is_nil(k.expires_at) or k.expires_at > ^now)
-          ),
-          :count,
-          skip_account: true
-        )
-
-      if live >= Security.api_keys_per_account(), do: Repo.rollback(:limit)
+      if count.(live) >= Security.api_keys_per_account(), do: Repo.rollback(:limit)
 
       # Revoked keys count toward the table's cap until the purge removes
       # them, a month after their revoke.
-      all =
-        Repo.aggregate(from(k in Key, where: k.account_id == ^account_id), :count,
-          skip_account: true
-        )
-
-      if all >= Hireme.Schema.table(:api_keys).cap, do: Repo.rollback(:limit)
+      if count.(mine) >= Hireme.Schema.table(:api_keys).cap, do: Repo.rollback(:limit)
       Repo.insert!(struct(Key, Map.put(row, :rev, 1)), skip_account: true)
     end)
   end
@@ -164,13 +143,8 @@ defmodule Hireme.Keys do
          widened = widens?(key, masks),
          :ok <- if(widened, do: fresh(session), else: :ok) do
       key = Store.update!(key, Map.to_list(masks))
-
-      trail(
-        :api_key_changed,
-        key,
-        %{preset: preset_of(key), may_delete: key.may_delete},
-        ctx(meta, session)
-      )
+      about = %{preset: preset_of(key), may_delete: key.may_delete}
+      trail(:api_key_changed, key, about, Audit.ctx(meta, session))
 
       if widened, do: Accounts.notify(key.account_id, :api_key_widened, %{name: key.name})
       Audit.bye(key.account_id, {{:key, key.id}, :grants})
@@ -195,19 +169,13 @@ defmodule Hireme.Keys do
   def rename(%Key{} = key, name, meta \\ %{}) do
     name = name |> to_string() |> String.trim()
 
-    cond do
-      not name?(name) -> {:error, :name}
-      name == key.name -> {:ok, key}
-      # A cond's literal-true tail after a boolean clause reads to Dialyzer
-      # as an unreachable false branch; the limit's own answer decides here.
-      :else -> with :ok <- Security.limit(:renames, key.account_id), do: rename!(key, name, meta)
+    with true <- name?(name) || {:error, :name},
+         true <- name != key.name || {:ok, key},
+         :ok <- Security.limit(:renames, key.account_id) do
+      key = Store.update!(key, name: name)
+      trail(:api_key_renamed, key, %{}, Audit.ctx(meta, key.account_id))
+      {:ok, key}
     end
-  end
-
-  defp rename!(key, name, meta) do
-    key = Store.update!(key, name: name)
-    trail(:api_key_renamed, key, %{}, Map.put(meta, :account_id, key.account_id))
-    {:ok, key}
   end
 
   @doc """
@@ -217,29 +185,23 @@ defmodule Hireme.Keys do
   """
   @spec resume(Key.t(), map()) :: {:ok, Key.t()} | {:error, :not_found}
   def resume(%Key{} = key, meta \\ %{}) do
-    cond do
-      not live?(key) ->
-        {:error, :not_found}
+    with true <- live?(key) || {:error, :not_found},
+         true <- key.paused_at != nil || {:ok, key} do
+      {n, _} =
+        Store.bump(
+          from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
+          [paused_at: nil, updated_at: Store.now()],
+          skip_account: true
+        )
 
-      is_nil(key.paused_at) ->
-        {:ok, key}
+      if n == 1 do
+        trail(:key_resumed, key, %{}, Audit.ctx(meta, key.account_id))
 
-      :else ->
-        {n, _} =
-          Store.bump(
-            from(k in Key, where: k.id == ^key.id and not is_nil(k.paused_at)),
-            [paused_at: nil, updated_at: Store.now()],
-            skip_account: true
-          )
+        # The sequencer holds paused keys in memory; this lifts its hold.
+        Hireme.PubSub.broadcast(Audit.topic(key.account_id), {:resume, {:key, key.id}})
+      end
 
-        if n == 1 do
-          trail(:key_resumed, key, %{}, Map.put(meta, :account_id, key.account_id))
-
-          # The sequencer holds paused keys in memory; this lifts its hold.
-          Hireme.PubSub.broadcast(Audit.topic(key.account_id), {:resume, {:key, key.id}})
-        end
-
-        {:ok, Repo.get(Key, key.id, skip_account: true)}
+      {:ok, Repo.get(Key, key.id, skip_account: true)}
     end
   end
 
@@ -258,7 +220,7 @@ defmodule Hireme.Keys do
       )
 
     if n == 1 do
-      trail(:api_key_revoked, key, %{}, Map.put(meta, :account_id, key.account_id))
+      trail(:api_key_revoked, key, %{}, Audit.ctx(meta, key.account_id))
 
       Accounts.notify(key.account_id, :api_key_revoked, %{name: key.name})
       Audit.bye(key.account_id, {{:key, key.id}, :revoked})
@@ -270,7 +232,7 @@ defmodule Hireme.Keys do
   @doc "Whether key `id` is still one `account_id` may use: live, on an active account."
   @spec usable?(pos_integer(), pos_integer()) :: boolean()
   def usable?(id, account_id) when is_integer(id) do
-    case with_account(dynamic([k], k.id == ^id)) do
+    case Accounts.joined(Key, dynamic([k], k.id == ^id)) do
       {%Key{account_id: ^account_id} = key, account} -> live?(key) and Accounts.active?(account)
       _ -> false
     end
@@ -288,18 +250,14 @@ defmodule Hireme.Keys do
   def authenticate(presented, peer \\ "")
 
   def authenticate(presented, peer) when is_binary(presented) do
-    with :error <- check(presented) do
-      throttled = Security.blocked?(:api_key_peer, peer)
-      Security.failed(:api_key_peer, peer)
-      if throttled, do: {:error, :rate_limited}, else: :error
-    end
+    with :error <- check(presented), :ok <- Security.limit(:api_key_peer, peer), do: :error
   end
 
   def authenticate(_, _), do: :error
 
   defp check(presented) do
     with {:ok, key_id, secret} <- parse(presented),
-         {%Key{} = key, account} <- with_account(dynamic([k], k.key_id == ^key_id)),
+         {%Key{} = key, account} <- Accounts.joined(Key, dynamic([k], k.key_id == ^key_id)),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
          true <- live?(key) and Accounts.active?(account) do
       used(key)
@@ -333,13 +291,6 @@ defmodule Hireme.Keys do
 
   defp fresh(session), do: if(Mfa.fresh?(session), do: :ok, else: {:error, :step_up})
 
-  defp with_account(where) do
-    Repo.one(
-      from(k in Key, join: a in Account, on: a.id == k.account_id, where: ^where, select: {k, a}),
-      skip_account: true
-    )
-  end
-
   defp parse(presented) do
     with [_, key_id, secret, check] <- Regex.run(@shape, presented),
          true <- Security.equal?(check, Security.checksum(@prefix <> key_id <> "_" <> secret)) do
@@ -352,18 +303,11 @@ defmodule Hireme.Keys do
   # last_used_at at most once a minute per key.
   defp used(%Key{} = key) do
     if is_nil(key.last_used_at) or DateTime.diff(Store.now(), key.last_used_at) >= 60 do
-      Store.write(fn ->
-        Repo.update_all(
-          from(k in Key, where: k.id == ^key.id),
-          [set: [last_used_at: Store.now()]],
-          skip_account: true
-        )
-      end)
+      set = [last_used_at: Store.now()]
+      query = from(k in Key, where: k.id == ^key.id)
+      Store.write(fn -> Repo.update_all(query, [set: set], skip_account: true) end)
     end
   end
-
-  defp ctx(meta, %Session{} = s),
-    do: meta |> Map.put(:account_id, s.account_id) |> Map.put(:session_id, s.id)
 
   # A key's own lifecycle row names that key (its id and name in the meta,
   # its id as the row's key tag).

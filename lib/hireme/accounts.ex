@@ -59,9 +59,7 @@ defmodule Hireme.Accounts do
   """
   @spec scope(pos_integer()) :: String.t()
   def scope(account_id) when is_integer(account_id) do
-    key = Application.fetch_env!(:hireme, :secret_key_base)
-
-    :crypto.mac(:hmac, :sha256, key, "scope:#{account_id}")
+    :crypto.mac(:hmac, :sha256, key_base(), "scope:#{account_id}")
     |> binary_part(0, 16)
     |> Base.encode16(case: :lower)
   end
@@ -75,7 +73,7 @@ defmodule Hireme.Accounts do
       skip_account: true
     )
 
-    Audit.record(:"account_#{status}", %{}, Map.put(meta, :account_id, account_id))
+    Audit.record(:"account_#{status}", %{}, Audit.ctx(meta, account_id))
     if status == :suspended, do: Audit.bye(account_id, {:account, :suspended})
     :ok
   end
@@ -151,7 +149,7 @@ defmodule Hireme.Accounts do
         })
       end)
 
-    Audit.record(:session_started, %{}, context(meta, account.id, session.id))
+    Audit.record(:session_started, %{}, Audit.ctx(meta, session))
     {Security.encode(token), session}
   end
 
@@ -175,16 +173,17 @@ defmodule Hireme.Accounts do
     end
   end
 
-  defp by_token(hash), do: pair(dynamic([s], s.token_hash == ^hash))
+  defp by_token(hash), do: joined(Session, dynamic([s], s.token_hash == ^hash))
 
-  # A session with its account.
-  defp pair(where) do
+  @doc false
+  # A row (a session, or a key for `Hireme.Keys`) with its account, read together.
+  def joined(schema, where) do
     Repo.one(
-      from(s in Session,
+      from(r in schema,
         join: a in Account,
-        on: a.id == s.account_id,
+        on: a.id == r.account_id,
         where: ^where,
-        select: {s, a}
+        select: {r, a}
       ),
       skip_account: true
     )
@@ -204,8 +203,7 @@ defmodule Hireme.Accounts do
   @spec keeps_desk?(term()) :: boolean()
   def keeps_desk?(token) do
     with {:ok, raw} <- Security.decode(token),
-         {%Session{remember: true, revoked_at: nil}, %Account{} = account} <-
-           by_token(Security.hash(raw)) do
+         {%Session{remember: true, revoked_at: nil}, account} <- by_token(Security.hash(raw)) do
       active?(account)
     else
       _ -> false
@@ -222,21 +220,6 @@ defmodule Hireme.Accounts do
   @spec mark_mfa(Session.t()) :: Session.t()
   def mark_mfa(%Session{} = s), do: Store.update!(s, [mfa_at: Store.now()], skip_account: true)
 
-  @doc "The account's open sessions, most recently seen first."
-  @spec sessions(pos_integer()) :: [Session.t()]
-  def sessions(account_id) do
-    now = Store.now()
-
-    Repo.all(
-      from(s in Session,
-        where: s.account_id == ^account_id and is_nil(s.revoked_at) and s.expires_at > ^now,
-        order_by: [desc: s.last_seen_at]
-      ),
-      skip_account: true
-    )
-    |> Enum.filter(&live?(&1, now))
-  end
-
   @doc "Revoke one of the account's sessions (this one, or another from the account lens)."
   @spec revoke_session(pos_integer(), pos_integer(), meta()) :: :ok | {:error, :not_found}
   def revoke_session(account_id, session_id, meta \\ %{}) do
@@ -250,12 +233,7 @@ defmodule Hireme.Accounts do
       )
 
     if n == 1 do
-      Audit.record(
-        :session_revoked,
-        %{session_id: session_id},
-        Map.put(meta, :account_id, account_id)
-      )
-
+      Audit.record(:session_revoked, %{session_id: session_id}, Audit.ctx(meta, account_id))
       Audit.bye(account_id, {{:session, session_id}, :revoked})
       :ok
     else
@@ -286,11 +264,8 @@ defmodule Hireme.Accounts do
     # Eight bytes of the session's own token hash: a ticket is good only for
     # the session row that minted it, not for anything the application
     # secret alone could sign.
-    Plug.Crypto.encrypt(
-      Application.fetch_env!(:hireme, :secret_key_base),
-      @ticket_salt,
-      {account_id, id, binary_part(hash, 0, 8), Security.token(12)}
-    )
+    bound = binary_part(hash, 0, 8)
+    Plug.Crypto.encrypt(key_base(), @ticket_salt, {account_id, id, bound, Security.token(12)})
   end
 
   @doc """
@@ -303,12 +278,7 @@ defmodule Hireme.Accounts do
     now = Store.now()
 
     with {:ok, {account_id, session_id, bound, nonce}} <-
-           Plug.Crypto.decrypt(
-             Application.fetch_env!(:hireme, :secret_key_base),
-             @ticket_salt,
-             ticket,
-             max_age: Security.ticket_ttl()
-           ),
+           Plug.Crypto.decrypt(key_base(), @ticket_salt, ticket, max_age: Security.ticket_ttl()),
          :ok <- __MODULE__.Tickets.spend(nonce),
          %Session{account_id: ^account_id} = session <-
            Repo.get(Session, session_id, skip_account: true),
@@ -328,8 +298,7 @@ defmodule Hireme.Accounts do
   Whether browser session `session_id` may still act, counting this as its
   activity: what a page's request does, for a wire session's own requests
   (an `account.*` call, an OPS frame). A wire session thus obeys the same
-  lifetime, idle limit, revocation and suspension as a page. With
-  `activity?` false it only checks, for what a client does by itself.
+  lifetime, idle limit, revocation and suspension as a page.
   """
   @spec live_session(pos_integer()) :: {:ok, Session.t()} | :error
   def live_session(session_id) when is_integer(session_id),
@@ -347,7 +316,7 @@ defmodule Hireme.Accounts do
   defp read_live(session_id) do
     now = Store.now()
 
-    with {%Session{} = s, %Account{} = a} <- pair(dynamic([s], s.id == ^session_id)),
+    with {%Session{} = s, %Account{} = a} <- joined(Session, dynamic([s], s.id == ^session_id)),
          true <- live?(s, now) and active?(a),
          # A session that owes its second factor (one was enrolled since it
          # signed in) may hold no wire, as it may mint no ticket.
@@ -360,12 +329,9 @@ defmodule Hireme.Accounts do
 
   ## Sign-in methods
 
-  @doc """
-  Whether a new person may make an account; `HIREME_SIGNUPS=off` (read at
-  boot) says no. Existing accounts sign in either way.
-  """
-  @spec signups?() :: boolean()
-  def signups?, do: Application.get_env(:hireme, :signups, true)
+  # Whether a new person may make an account; `HIREME_SIGNUPS=off` (read at
+  # boot) says no. Existing accounts sign in either way.
+  defp signups?, do: Application.get_env(:hireme, :signups, true)
 
   @doc """
   `request_link/3` for a visitor: while sign-ups are closed, an address no
@@ -400,13 +366,12 @@ defmodule Hireme.Accounts do
          :ok <- Security.limit(:link_address, email),
          :ok <- Security.limit(:link_global, :all) do
       token = Security.token(32)
-      now = Store.now()
 
       Store.write(fn ->
         Repo.insert!(%MagicLink{
           email: email,
           token_hash: Security.hash(token),
-          expires_at: DateTime.add(now, Security.magic_link_ttl()),
+          expires_at: DateTime.add(Store.now(), Security.magic_link_ttl()),
           ip: Security.text(meta[:ip], 64),
           user_agent: Security.text(meta[:user_agent], 200),
           rev: 1
@@ -454,11 +419,8 @@ defmodule Hireme.Accounts do
   # handle to correlate by and the domain to read, not the address.
   defp trace(email) do
     [_, domain] = String.split(email, "@", parts: 2)
-
-    %{
-      email_hash: email |> Security.hash() |> Base.encode16(case: :lower) |> binary_part(0, 16),
-      domain: domain
-    }
+    hash = email |> Security.hash() |> Base.encode16(case: :lower) |> binary_part(0, 16)
+    %{email_hash: hash, domain: domain}
   end
 
   defp live_link(token, now) do
@@ -498,6 +460,8 @@ defmodule Hireme.Accounts do
 
   defp enter(provider, identity, claim, meta) do
     account = get(identity.account_id)
+    about = %{provider: provider, identity_id: identity.id}
+    meta = Audit.ctx(meta, identity.account_id)
 
     if active?(account) do
       Repo.put_account(account.id)
@@ -506,35 +470,24 @@ defmodule Hireme.Accounts do
       # anything says it signed in.
       case start_session(account, meta) do
         {:error, :cap} ->
-          refused(provider, identity, :cap, meta)
-          {:error, :cap}
+          refused(about, :cap, meta)
 
         {token, session} ->
           touch_identity(identity, claim)
-
-          Audit.record(
-            :signed_in,
-            %{provider: provider, identity_id: identity.id},
-            Map.put(meta, :account_id, account.id)
-          )
-
+          Audit.record(:signed_in, about, meta)
           {:ok, token, session}
       end
     else
-      refused(provider, identity, :suspended, meta)
-      {:error, :suspended}
+      refused(about, :suspended, meta)
     end
   end
 
   # A refusal anyone can cause is recorded under the refusal budget.
-  defp refused(provider, identity, reason, meta) do
-    if Security.limit(:refusal_peer, Map.get(meta, :ip, "")) == :ok do
-      Audit.record(
-        :sign_in_refused,
-        %{provider: provider, identity_id: identity.id, reason: reason},
-        Map.put(meta, :account_id, identity.account_id)
-      )
-    end
+  defp refused(about, reason, meta) do
+    if Security.limit(:refusal_peer, Map.get(meta, :ip, "")) == :ok,
+      do: Audit.record(:sign_in_refused, Map.put(about, :reason, reason), meta)
+
+    {:error, reason}
   end
 
   @doc """
@@ -671,12 +624,7 @@ defmodule Hireme.Accounts do
 
       case insert_identity(account.id, provider, claim) do
         {:ok, identity} ->
-          Audit.record(
-            :account_created,
-            %{provider: provider},
-            Map.put(meta, :account_id, account.id)
-          )
-
+          Audit.record(:account_created, %{provider: provider}, Audit.ctx(meta, account.id))
           identity
 
         {:error, _} ->
@@ -703,19 +651,12 @@ defmodule Hireme.Accounts do
     |> then(&Store.write(fn -> Repo.insert(&1) end))
   end
 
-  defp touch_identity(%Identity{} = identity, claim),
-    do:
-      Store.update!(
-        identity,
-        [
-          display: Security.clip(Map.get(claim, :display, identity.display)),
-          verified_at: Store.now()
-        ],
-        skip_account: true
-      )
+  defp touch_identity(%Identity{} = identity, claim) do
+    display = Security.clip(Map.get(claim, :display, identity.display))
+    Store.update!(identity, [display: display, verified_at: Store.now()], skip_account: true)
+  end
 
-  defp context(meta, account_id, session_id),
-    do: meta |> Map.put(:account_id, account_id) |> Map.put(:session_id, session_id)
+  defp key_base, do: Application.fetch_env!(:hireme, :secret_key_base)
 end
 
 defmodule Hireme.Accounts.Tickets do

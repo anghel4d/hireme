@@ -51,36 +51,22 @@ defmodule HiremeWeb.Auth do
     end
   end
 
-  # Read once per node: the script and its hash are a release's constants.
+  # Read once per node: the script and its hash are a release's constants; nothing is kept
+  # before the first asset build.
   defp early do
-    memo(:early, fn ->
-      case File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
-        {:ok, js} ->
-          js = String.trim_trailing(js)
-          {js, Base.encode64(:crypto.hash(:sha256, js))}
-
-        _ ->
-          nil
-      end
-    end)
-  end
-
-  # A release constant read from priv once; nothing is kept before the first asset build.
-  defp memo(key, read) do
-    case :persistent_term.get({__MODULE__, key}, :unread) do
-      :unread ->
-        value = read.()
-        if value, do: :persistent_term.put({__MODULE__, key}, value)
-        value
-
-      value ->
-        value
+    with :unread <- :persistent_term.get({__MODULE__, :early}, :unread),
+         {:ok, js} <- File.read(Application.app_dir(:hireme, "priv/static/assets/early.js")) do
+      js = String.trim_trailing(js)
+      early = {js, Base.encode64(:crypto.hash(:sha256, js))}
+      :persistent_term.put({__MODULE__, :early}, early)
+      early
+    else
+      {:error, _} -> nil
+      early -> early
     end
   end
 
-  @doc "The Content-Security-Policy header value."
-  @spec csp() :: String.t()
-  def csp do
+  defp csp do
     script = [
       "'self'",
       "'wasm-unsafe-eval'" | for({_, hash} <- List.wrap(early()), do: "'sha256-#{hash}'")
@@ -117,25 +103,14 @@ defmodule HiremeWeb.Auth do
 
   def fetch_account(conn, _opts) do
     token = get_session(conn, @session_key)
+    {session, account} = Accounts.session(token) || {nil, nil}
+    Repo.put_account(account && account.id)
+    conn = if account, do: conn, else: ended(conn, token)
 
-    case Accounts.session(token) do
-      {session, account} ->
-        Repo.put_account(account.id)
-
-        conn
-        |> assign(:account, account)
-        |> assign(:session, session)
-        |> assign(:pending, Hireme.Mfa.required?(session))
-
-      nil ->
-        Repo.put_account(nil)
-
-        conn
-        |> ended(token)
-        |> assign(:account, nil)
-        |> assign(:session, nil)
-        |> assign(:pending, false)
-    end
+    conn
+    |> assign(:account, account)
+    |> assign(:session, session)
+    |> assign(:pending, account != nil and Hireme.Mfa.required?(session))
   end
 
   # A cookie whose session ended elsewhere (revoked, expired, idle, the

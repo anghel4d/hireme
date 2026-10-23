@@ -33,17 +33,12 @@ defmodule HiremeWeb.SignIn do
 
   @doc "An offered provider named in a path or a param, or `:error`."
   @spec parse(term()) :: {:ok, provider()} | :error
-  def parse(name) do
-    case Enum.find(providers(), &(Atom.to_string(&1) == name)) do
-      nil -> :error
-      provider -> {:ok, provider}
-    end
-  end
+  def parse(name),
+    do: Enum.find_value(providers(), :error, &(Atom.to_string(&1) == name && {:ok, &1}))
 
-  @spec label(provider() | :email) :: String.t()
+  @spec label(provider()) :: String.t()
   def label(:github), do: "GitHub"
   def label(:x), do: "X"
-  def label(:email), do: "Email"
 
   @doc "The URL a mailed link carries; the token rides in the query."
   @spec link_url(String.t()) :: String.t()
@@ -167,7 +162,7 @@ defmodule HiremeWeb.SignIn do
            client_secret: secret,
            redirect_uri: HiremeWeb.Endpoint.url() <> "/auth/#{provider}/callback",
            code_verifier: true
-         ] ++ Keyword.take(opts, [:http_adapter])}
+         ]}
 
       _ ->
         {:error, :not_configured}
@@ -321,11 +316,7 @@ defmodule HiremeWeb.SignInController do
   def redeem_email(conn, %{"token" => token} = params) when is_binary(token) do
     with {:ok, email} <- Accounts.peek_link(token),
          {:ok, mode} <- mode(conn, email),
-         :ok <-
-           if(mode == :sign_in and not Accounts.room?(:email, email),
-             do: {:error, :cap},
-             else: :ok
-           ),
+         true <- (mode == :add or Accounts.room?(:email, email)) || {:error, :cap},
          {:ok, ^email} <- Accounts.redeem_link(token, meta(conn)) do
       claim = %{subject: email, display: email}
 
@@ -371,37 +362,29 @@ defmodule HiremeWeb.SignInController do
   end
 
   def callback(conn, %{"provider" => name} = params) do
-    ip = meta(conn).ip
-
     # A callback calls the provider and may sign someone in, write a session
     # and the trail: bounded per peer and in all, like the mailed link.
-    with :ok <- Hireme.Security.limit(:oauth_peer, ip),
-         :ok <- Hireme.Security.limit(:oauth_global, :all) do
-      oauth_callback(conn, name, params)
+    with :ok <- Hireme.Security.limit(:oauth_peer, meta(conn).ip),
+         :ok <- Hireme.Security.limit(:oauth_global, :all),
+         {:ok, provider} <- SignIn.parse(name) do
+      case SignIn.finish(conn, provider, params) do
+        {conn, {:ok, %{mode: :link, account_id: id}, claim}} ->
+          if here?(conn, id),
+            do: add(conn, provider, claim),
+            else: refuse(conn, provider, :state)
+
+        {conn, {:ok, %{mode: :sign_in}, _claim}} when conn.assigns.account != nil ->
+          redirect(conn, to: "/")
+
+        {conn, {:ok, %{mode: :sign_in} = trip, claim}} ->
+          enter(conn, provider, claim, trip[:remember] == true)
+
+        {conn, {:error, reason}} ->
+          refuse(conn, provider, reason)
+      end
     else
       {:error, :rate_limited} ->
         methods(conn, 429, "Too many sign-ins. Wait a few minutes, then try again.")
-    end
-  end
-
-  defp oauth_callback(conn, name, params) do
-    case SignIn.parse(name) do
-      {:ok, provider} ->
-        case SignIn.finish(conn, provider, params) do
-          {conn, {:ok, %{mode: :link, account_id: id}, claim}} ->
-            if here?(conn, id),
-              do: add(conn, provider, claim),
-              else: refuse(conn, provider, :state)
-
-          {conn, {:ok, %{mode: :sign_in}, _claim}} when conn.assigns.account != nil ->
-            redirect(conn, to: "/")
-
-          {conn, {:ok, %{mode: :sign_in} = trip, claim}} ->
-            enter(conn, provider, claim, trip[:remember] == true)
-
-          {conn, {:error, reason}} ->
-            refuse(conn, provider, reason)
-        end
 
       :error ->
         send_resp(conn, 404, "Not Found")
@@ -424,16 +407,14 @@ defmodule HiremeWeb.SignInController do
     end
   end
 
-  def start_link(conn, %{"provider" => name}) do
-    with {:ok, provider} <- SignIn.parse(name),
+  def start_link(conn, params) do
+    with {:ok, provider} <- SignIn.parse(params["provider"]),
          {:ok, conn, url} <- SignIn.begin(conn, provider, :link) do
       json(conn, %{url: url})
     else
       _ -> conn |> put_status(422) |> json(%{error: "provider"})
     end
   end
-
-  def start_link(conn, _), do: conn |> put_status(422) |> json(%{error: "provider"})
 
   def sign_out(conn, _), do: conn |> Auth.sign_out() |> redirect(to: "/sign-in")
 

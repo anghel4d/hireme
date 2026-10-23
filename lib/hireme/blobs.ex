@@ -115,8 +115,9 @@ defmodule Hireme.Blobs do
 
   defp read(:markdown, data), do: if(String.valid?(data), do: data)
   defp read(:docx, data), do: docx(data)
-  defp read(:pdf, data), do: pdf(data)
-  defp read(:doc, data), do: doc(data)
+  defp read(:pdf, <<"%PDF-", _::binary>> = data), do: pdf(data)
+  defp read(:doc, <<0xD0CF11E0A1B11AE1::64, _::binary>> = data), do: doc(data)
+  defp read(_kind, _data), do: nil
 
   defp clip(text) do
     text =
@@ -151,16 +152,13 @@ defmodule Hireme.Blobs do
     end
   end
 
+  @entities %{"&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&apos;" => "'"}
+
   defp unescape(s) do
     s
     |> String.replace(~r/&#x([0-9a-fA-F]+);/, fn m -> codepoint(m, 16) end)
     |> String.replace(~r/&#([0-9]+);/, fn m -> codepoint(m, 10) end)
-    |> String.replace(["&lt;", "&gt;", "&quot;", "&apos;"], fn
-      "&lt;" -> "<"
-      "&gt;" -> ">"
-      "&quot;" -> "\""
-      "&apos;" -> "'"
-    end)
+    |> String.replace(Map.keys(@entities), &Map.fetch!(@entities, &1))
     |> String.replace("&amp;", "&")
   end
 
@@ -176,7 +174,7 @@ defmodule Hireme.Blobs do
   # the text and whose table stream (0Table or 1Table, by the FIB's flags)
   # holds the piece table mapping the characters onto that stream, each piece
   # 8-bit cp1252 or UTF-16LE. A field keeps its shown result, not its code.
-  defp doc(<<0xD0CF11E0A1B11AE1::64, _::binary>> = data) do
+  defp doc(data) do
     files = cfb(data)
     word = files["WordDocument"]
     <<_::binary-size(10), flags::little-16, _::binary>> = word
@@ -198,8 +196,6 @@ defmodule Hireme.Blobs do
   rescue
     _ -> nil
   end
-
-  defp doc(_), do: nil
 
   # The Clx: property runs (0x01) skipped, then the piece table (0x02):
   # n + 1 character positions and n descriptors of 8 bytes.
@@ -287,7 +283,7 @@ defmodule Hireme.Blobs do
   # over every font reads one font's text through another's (a Skia CV had
   # every g an i). A file whose pages cannot be found has every text stream
   # read through the maps merged.
-  defp pdf(<<"%PDF-", _::binary>> = data) do
+  defp pdf(data) do
     objs = data |> objects(0, 0, %{}) |> unpack()
 
     fonts =
@@ -314,8 +310,6 @@ defmodule Hireme.Blobs do
     Enum.join(texts, "\n")
   end
 
-  defp pdf(_), do: nil
-
   # Every object by number, a later one over an earlier (incremental updates):
   # its dictionary and its stream, inflated when its dictionary says
   # FlateDecode (nil under any other filter).
@@ -323,13 +317,8 @@ defmodule Hireme.Blobs do
     case Regex.run(~r/(\d+)\s+\d+\s+obj\b/, data, return: :index, offset: pos) do
       [{at, len}, {na, nl}] ->
         {obj, stop, budget} = object(data, at + len, budget)
-
-        objects(
-          data,
-          stop,
-          budget,
-          Map.put(objs, String.to_integer(binary_part(data, na, nl)), obj)
-        )
+        objs = Map.put(objs, String.to_integer(binary_part(data, na, nl)), obj)
+        objects(data, stop, budget, objs)
 
       nil ->
         objs
@@ -436,10 +425,7 @@ defmodule Hireme.Blobs do
         inner(dict, at + 2, at + 2, 1)
 
       [_, _, {na, nl}] ->
-        case objs[String.to_integer(binary_part(dict, na, nl))] do
-          {d, _} -> d
-          nil -> ""
-        end
+        objs |> Map.get(String.to_integer(binary_part(dict, na, nl)), {""}) |> elem(0)
 
       nil ->
         ""
@@ -540,15 +526,7 @@ defmodule Hireme.Blobs do
           {[], y, cmap, [out | for({:str, b} <- Enum.take(args, 1), do: decode(b, cmap))]}
 
         {:op, "TJ"}, {[{:array, items} | _], y, cmap, out} ->
-          {[], y, cmap,
-           [
-             out
-             | Enum.map(items, fn
-                 {:str, b} -> decode(b, cmap)
-                 n when n < -250 -> " "
-                 _ -> ""
-               end)
-           ]}
+          {[], y, cmap, [out | Enum.map(items, &spaced(&1, cmap))]}
 
         {:op, op}, {[ty, _ | _], y, cmap, out} when op in ["Td", "TD"] and is_number(ty) ->
           {[], y, cmap, [out | if(ty != 0, do: "\n", else: "")]}
@@ -578,6 +556,11 @@ defmodule Hireme.Blobs do
   end
 
   defp form(_, _, _, _), do: ""
+
+  # A TJ array's item: a string through the map, a wide gap a space.
+  defp spaced({:str, b}, cmap), do: decode(b, cmap)
+  defp spaced(n, _cmap) when n < -250, do: " "
+  defp spaced(_, _cmap), do: ""
 
   defp decode(b, cmap) do
     two = for <<c::binary-2 <- b>>, do: Map.get(cmap, c)
@@ -619,22 +602,18 @@ defmodule Hireme.Blobs do
 
   defp tokens(<<"/", r::binary>>, acc) do
     [name] = Regex.run(~r/^[^\s\/\[\]()<>{}%]*/, r)
-    tokens(binary_part(r, byte_size(name), byte_size(r) - byte_size(name)), [{:name, name} | acc])
+    tokens(binary_slice(r, byte_size(name)..-1//1), [{:name, name} | acc])
   end
 
   defp tokens(<<c, _::binary>> = s, acc) when c in ~c"+-.0123456789" do
     [n | _] = Regex.run(~r/^[+-]?(\d+\.?\d*|\.\d+)/, s) || [<<c>>]
-    r = binary_part(s, byte_size(n), byte_size(s) - byte_size(n))
-    tokens(r, [number(n) | acc])
+    tokens(binary_slice(s, byte_size(n)..-1//1), [number(n) | acc])
   end
 
   defp tokens(s, acc) do
     case Regex.run(~r/^[A-Za-z'"*]+/, s) do
-      [op] ->
-        tokens(binary_part(s, byte_size(op), byte_size(s) - byte_size(op)), [{:op, op} | acc])
-
-      nil ->
-        tokens(binary_part(s, 1, byte_size(s) - 1), acc)
+      [op] -> tokens(binary_slice(s, byte_size(op)..-1//1), [{:op, op} | acc])
+      nil -> tokens(binary_slice(s, 1..-1//1), acc)
     end
   end
 
@@ -668,7 +647,6 @@ defmodule Hireme.Blobs do
 
   defp octal(s, d, acc) do
     [o] = Regex.run(~r/^[0-7]{1,3}/, s)
-    r = binary_part(s, byte_size(o), byte_size(s) - byte_size(o))
-    literal(r, d, [acc, String.to_integer(o, 8) &&& 0xFF])
+    literal(binary_slice(s, byte_size(o)..-1//1), d, [acc, String.to_integer(o, 8) &&& 0xFF])
   end
 end

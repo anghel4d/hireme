@@ -65,16 +65,9 @@ defmodule Hireme.Mail do
   end
 
   defp retrying(to, subject, body, backoff) do
-    case {post(to, subject, body), backoff} do
-      {{:ok, _}, _} ->
-        :ok
-
-      {{:error, _}, [wait | rest]} ->
-        Process.sleep(wait)
-        retrying(to, subject, body, rest)
-
-      {{:error, _}, []} ->
-        :error
+    with {:error, _} <- post(to, subject, body), [wait | rest] <- backoff do
+      Process.sleep(wait)
+      retrying(to, subject, body, rest)
     end
   end
 
@@ -95,8 +88,6 @@ defmodule Hireme.Mail do
 
   @doc "Send one notice now; the outbox worker is the caller."
   @spec notice(String.t(), atom(), map()) :: {:ok, term()} | {:error, term()}
-  def notice(to, kind, meta \\ %{})
-
   # Not a change someone made: what happened, and what to do about it.
   def notice(to, :mailbox_auth_failed = kind, meta) do
     post(to, "Hireme: #{line(kind, meta)}", """
@@ -191,20 +182,15 @@ defmodule Hireme.Mail do
   # One event is one charge, however many addresses hear of it. A change
   # the owner must see as itself spends its class's own small budget first,
   # so a flood of key changes never turns a factor's notice into a digest.
-  @critical %{
-    authenticator_removed: :factor_notices,
-    authenticator_disabled: :factor_notices,
-    authenticator_added: :factor_notices,
-    identity_linked: :factor_notices,
-    identity_unlinked: :factor_notices,
-    mailbox_linked: :factor_notices,
-    mailbox_unlinked: :factor_notices,
-    mailbox_auth_failed: :factor_notices,
-    recovery_codes_issued: :factor_notices,
-    recovery_code_used: :factor_notices,
-    api_key_widened: :key_notices,
-    api_key_created: :key_notices
-  }
+  @critical Map.merge(
+              Map.from_keys(
+                ~w(authenticator_removed authenticator_disabled authenticator_added identity_linked
+                   identity_unlinked mailbox_linked mailbox_unlinked mailbox_auth_failed
+                   recovery_codes_issued recovery_code_used)a,
+                :factor_notices
+              ),
+              Map.from_keys(~w(api_key_widened api_key_created)a, :key_notices)
+            )
 
   # A revoke's notice: bounded by what there is to revoke, and the owner's
   # emergency tool must not spend the budget a later change needs.
@@ -290,13 +276,9 @@ defmodule Hireme.Mail do
     email =
       new() |> to(to) |> from({name, address}) |> subject(header_safe(subject)) |> text_body(body)
 
-    case deliver(email) do
-      {:ok, _} = ok ->
-        ok
-
-      {:error, reason} = error ->
-        Logger.error("outbound mail failed: #{Security.clip(inspect(reason))}")
-        error
+    with {:error, reason} = error <- deliver(email) do
+      Logger.error("outbound mail failed: #{Security.clip(inspect(reason))}")
+      error
     end
   end
 
@@ -334,9 +316,8 @@ defmodule Hireme.Mail.Outbox do
   use GenServer
   require Logger
   import Ecto.Query
-  alias Hireme.Repo
+  alias Hireme.{Mail, Repo, Security, Store}
   alias Hireme.Rows.Outbox, as: Notice
-  alias Hireme.Store
 
   # Seconds to wait after each failure; past the last, the notice is given up.
   @backoff [30, 120, 480, 1_800, 7_200, 21_600, 43_200, 86_400]
@@ -350,7 +331,7 @@ defmodule Hireme.Mail.Outbox do
   def drain(now \\ Store.now()) do
     # A notice's kind and fields are atoms of Hireme.Mail's lines; in a
     # release modules load on first use, so load it before matching rows.
-    Code.ensure_loaded(Hireme.Mail)
+    Code.ensure_loaded(Mail)
 
     # Round-robin across accounts: every account's oldest due notice goes
     # before any account's second, so one account's backlog never holds
@@ -391,7 +372,7 @@ defmodule Hireme.Mail.Outbox do
     try do
       drain()
     rescue
-      e -> Logger.error("outbox drain failed: #{Hireme.Security.clip(Exception.message(e))}")
+      e -> Logger.error("outbox drain failed: #{Security.clip(Exception.message(e))}")
     end
 
     if timer, do: Process.cancel_timer(timer)
@@ -409,11 +390,7 @@ defmodule Hireme.Mail.Outbox do
   defp deliver(%Notice{} = notice) do
     result =
       try do
-        Hireme.Mail.notice(
-          notice.address,
-          String.to_existing_atom(notice.kind),
-          fields(notice.meta || %{})
-        )
+        Mail.notice(notice.address, String.to_existing_atom(notice.kind), fields(notice.meta))
       rescue
         e -> {:error, e}
       end
@@ -438,10 +415,8 @@ defmodule Hireme.Mail.Outbox do
   # JSON gave the keys back as strings. A key no line reads may not exist
   # as an atom; it is dropped, never created.
   defp fields(meta) do
-    for {key, value} <- meta, atom = existing_atom(key), into: %{}, do: {atom, value}
+    for {key, value} <- meta || %{}, atom = existing_atom(key), into: %{}, do: {atom, value}
   end
-
-  defp existing_atom(key) when is_atom(key), do: key
 
   defp existing_atom(key) do
     String.to_existing_atom(key)
@@ -449,8 +424,8 @@ defmodule Hireme.Mail.Outbox do
     ArgumentError -> nil
   end
 
-  defp error(%{__exception__: true} = e), do: Hireme.Security.clip(Exception.message(e))
-  defp error(reason), do: Hireme.Security.clip(inspect(reason))
+  defp error(%{__exception__: true} = e), do: Security.clip(Exception.message(e))
+  defp error(reason), do: Security.clip(inspect(reason))
 end
 
 defmodule Hireme.Mail.Cloudflare do

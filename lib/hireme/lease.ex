@@ -81,12 +81,7 @@ defmodule Hireme.Lease do
       # nothing and records nothing; the session is revoked all the same.
       # Whose lease it was, as lease_opened names it, and what it held.
       if released,
-        do:
-          Hireme.Audit.record(
-            :lease_revoked,
-            %{lease_id: lease_id, label: released.label, count: released.count},
-            meta
-          )
+        do: Hireme.Audit.record(:lease_revoked, Map.put(released, :lease_id, lease_id), meta)
 
       :ok
     end
@@ -241,14 +236,8 @@ defmodule Hireme.Lease do
   end
 
   @doc "Applications that no longer exist leave every claim."
-  def forget(%__MODULE__{} = l, app_ids) do
-    Enum.reduce(app_ids, l, fn app, l ->
-      case l.holder[app] do
-        nil -> l
-        sid -> l |> drop_claims(sid, [app]) |> elem(0)
-      end
-    end)
-  end
+  def forget(%__MODULE__{} = l, app_ids),
+    do: Enum.reduce(app_ids, l, fn app, l -> elem(drop_claims(l, l.holder[app], [app]), 0) end)
 
   @doc "The account lens's view of every lease (`leases/1`)."
   def list(%__MODULE__{sessions: sessions}) do

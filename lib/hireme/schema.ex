@@ -2,7 +2,7 @@ defmodule Hireme.Schema.Load do
   @moduledoc false
   # `priv/schema.json`, as `native/schema` emits it, in the shapes every
   # reader of `Hireme.Schema.model/0` takes: atom keys, atoms for types and
-  # residency, tuples for where terms and index columns.
+  # residency, tuples for where terms.
 
   def model(json) do
     m = atoms(json)
@@ -16,19 +16,11 @@ defmodule Hireme.Schema.Load do
         cols: Enum.map(t.cols, &typed/1),
         naturals: Enum.map(t.naturals, &key/1),
         uniques: Enum.map(t.uniques, &key/1),
-        indexes: Enum.map(t.indexes, &index/1),
         source_term: term(t.source_term)
     }
   end
 
   defp key(k), do: %{k | where_term: term(k.where_term)}
-
-  defp index(i),
-    do: %{
-      i
-      | cols: Enum.map(i.cols, fn [c, desc] -> {c, desc} end),
-        where_term: term(i.where_term)
-    }
 
   defp command(c), do: %{c | params: Enum.map(c.params, &typed/1)}
   defp typed(c), do: %{c | type: String.to_atom(c.type)}
@@ -107,10 +99,7 @@ defmodule Hireme.Schema do
   defp with_domain(c), do: Map.put(c, :domain, table(c.table).domain)
 
   @doc "An enum's values in code order, as atoms."
-  def enum(name), do: Enum.map(enum_names(name), &String.to_atom/1)
-
-  @doc "An enum's values in code order, as strings."
-  def enum_names(name), do: Map.fetch!(@enums, to_string(name)).values
+  def enum(name), do: Enum.map(Map.fetch!(@enums, to_string(name)).values, &String.to_atom/1)
 
   @doc "The u16 NACK code of a refusal (atom or string)."
   def refusal(name), do: Map.fetch!(@refusals, to_string(name))

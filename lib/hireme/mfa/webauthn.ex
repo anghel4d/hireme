@@ -63,9 +63,12 @@ defmodule Hireme.Mfa.WebAuthn do
     end
   end
 
-  def authentication_challenge(credentials) when is_list(credentials) do
+  @doc "A challenge whose allow list is each factor's stored COSE key."
+  def authentication_challenge(factors) when is_list(factors) do
+    keys = for f <- factors, do: {f.credential_id, :erlang.binary_to_term(f.public_key, [:safe])}
+
     Wax.new_authentication_challenge(
-      allow_credentials: credentials,
+      allow_credentials: keys,
       user_verification: "required",
       timeout: Security.challenge_ttl()
     )
@@ -104,11 +107,6 @@ defmodule Hireme.Mfa.WebAuthn do
     else
       _ -> {:error, :assertion}
     end
-  end
-
-  @doc "The stored COSE key of a factor, for the allow list."
-  def credential({credential_id, public_key}) when is_binary(public_key) do
-    {credential_id, :erlang.binary_to_term(public_key, [:safe])}
   end
 
   defp decode(value) when is_binary(value), do: Base.url_decode64(value, padding: false)

@@ -14,6 +14,7 @@ defmodule Hireme.Audit do
   end wire sessions (`bye/2`).
   """
 
+  alias Hireme.Audit.Coalescer
   alias Hireme.Repo
   alias Hireme.Rows.Audit, as: Event
   alias Hireme.Store
@@ -40,8 +41,7 @@ defmodule Hireme.Audit do
 
   @doc "The kinds that are activity, not security events: what the account lens's activity view shows."
   @spec activity_kinds() :: [String.t()]
-  def activity_kinds,
-    do: Enum.uniq(@expiring ++ (Map.keys(@budgeted) -- ["lease_revoked"]))
+  def activity_kinds, do: @expiring
 
   @doc """
   Announce that the account's factors changed (bound, removed, disabled):
@@ -66,6 +66,13 @@ defmodule Hireme.Audit do
           | {{:session, pos_integer()}, :revoked}
           | {:account, :suspended}
 
+  @doc "`meta` as the trail's context of an act on `account_id`, or by a session: its account and itself."
+  @spec ctx(map(), pos_integer() | Hireme.Rows.Session.t()) :: context()
+  def ctx(meta, %Hireme.Rows.Session{account_id: account_id, id: id}),
+    do: Map.merge(meta, %{account_id: account_id, session_id: id})
+
+  def ctx(meta, account_id), do: Map.put(meta, :account_id, account_id)
+
   @doc """
   Record `kind` for the account in `context`, else the one on the
   process, else none (an event before sign-in). `meta` holds display
@@ -80,7 +87,7 @@ defmodule Hireme.Audit do
     budget = account_id && @budgeted[name]
 
     if budget && not within?(budget, name, account_id, context),
-      do: __MODULE__.Coalescer.count(account_id, budget, name, context),
+      do: Coalescer.count(account_id, budget, name, context),
       else: write(kind, meta, context, account_id)
   end
 
@@ -94,23 +101,12 @@ defmodule Hireme.Audit do
            Hireme.Security.hit(:activity_node, :node, 1) == :ok or
            Hireme.Security.hit(:activity_floor, account_id, 1) == :ok)
 
-    cond do
-      admitted? ->
-        # A HELLO written under the budget is its address's first, too.
-        if name == "wire_key",
-          do: __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
-
-        true
-
-      # Past the budget, a key's first HELLO from an address in the window
-      # is still a row (up to `Coalescer.first?/3`'s cap of addresses), so
-      # which addresses held a key is never only a count.
-      name == "wire_key" ->
-        __MODULE__.Coalescer.first?(account_id, context[:key_id], context[:ip])
-
-      true ->
-        false
-    end
+    # A HELLO written under the budget is its address's first, too; past the
+    # budget, a key's first HELLO from an address in the window is still a row
+    # (up to `Coalescer.first?/3`'s cap of addresses), so which addresses held
+    # a key is never only a count.
+    first? = name == "wire_key" and Coalescer.first?(account_id, context[:key_id], context[:ip])
+    admitted? or first?
   end
 
   @doc false
@@ -128,30 +124,23 @@ defmodule Hireme.Audit do
   @doc false
   def commit(kind, meta, context, account_id) do
     now = Store.now()
+    kind = Atom.to_string(kind)
 
-    {1, _} =
-      Store.write(fn ->
-        Repo.insert_all(
-          Event,
-          [
-            %{
-              account_id: account_id,
-              kind: Atom.to_string(kind),
-              ip: Hireme.Security.text(context[:ip], 64),
-              user_agent: Hireme.Security.text(context[:user_agent], 200),
-              meta: meta,
-              key_id: Map.get(context, :key_id),
-              session_id: Map.get(context, :session_id),
-              security: Atom.to_string(kind) not in activity_kinds(),
-              rev: 1,
-              inserted_at: now,
-              updated_at: now
-            }
-          ],
-          skip_account: true
-        )
-      end)
+    row = %{
+      account_id: account_id,
+      kind: kind,
+      ip: Hireme.Security.text(context[:ip], 64),
+      user_agent: Hireme.Security.text(context[:user_agent], 200),
+      meta: meta,
+      key_id: Map.get(context, :key_id),
+      session_id: Map.get(context, :session_id),
+      security: kind not in activity_kinds(),
+      rev: 1,
+      inserted_at: now,
+      updated_at: now
+    }
 
+    {1, _} = Store.write(fn -> Repo.insert_all(Event, [row], skip_account: true) end)
     :ok
   end
 
@@ -297,9 +286,7 @@ defmodule Hireme.Audit.Coalescer do
   @spec first?(pos_integer(), pos_integer() | nil, String.t() | nil) :: boolean()
   def first?(account_id, key_id, ip) do
     w = window(:hellos, System.os_time(:millisecond))
-    peer = Hireme.Security.peer(ip)
-
-    mark = {:first, account_id, w, key_id, peer}
+    mark = {:first, account_id, w, key_id, Hireme.Security.peer(ip)}
 
     # A peer past the key's first ones leaves no mark: the table stays bounded.
     not :ets.member(@table, mark) and
@@ -342,18 +329,9 @@ defmodule Hireme.Audit.Coalescer do
       try do
         write_taken(group, taken)
       rescue
-        e ->
-          Logger.error(
-            "trail coalescing for account #{account_id} failed: #{inspect(e.__struct__)}"
-          )
-
-          put_back(taken)
-          nil
+        e -> lost(account_id, taken, inspect(e.__struct__))
       catch
-        :exit, _ ->
-          Logger.error("trail coalescing for account #{account_id} failed: the write exited")
-          put_back(taken)
-          nil
+        :exit, _ -> lost(account_id, taken, "the write exited")
       end
 
     # Committed: what follows never puts back, so the row is never written twice.
@@ -366,6 +344,12 @@ defmodule Hireme.Audit.Coalescer do
     end
 
     written != nil
+  end
+
+  defp lost(account_id, taken, why) do
+    Logger.error("trail coalescing for account #{account_id} failed: #{why}")
+    put_back(taken)
+    nil
   end
 
   defp write_taken({account_id, budget, w}, entries) do
@@ -422,12 +406,7 @@ defmodule Hireme.Audit.Coalescer do
     {Enum.map(named, &elem(&1, 0)), length(values)}
   end
 
-  defp iso(ms),
-    do:
-      ms
-      |> DateTime.from_unix!(:millisecond)
-      |> DateTime.truncate(:second)
-      |> DateTime.to_iso8601()
+  defp iso(ms), do: ms |> div(1000) |> DateTime.from_unix!() |> DateTime.to_iso8601()
 
   defp window(budget, now_ms) do
     {scale, _} = Hireme.Security.limits()[budget]
