@@ -1,43 +1,22 @@
 defmodule HiremeWeb.Wire.CodecTest do
-  # The same bytes native/wire's golden test pins (native/wire/tests/codec.rs):
-  # the two codecs agree on table runs and gone blocks byte for byte. The day
-  # cell's range is pinned end to end by Hireme.DayTest.
+  # The bytes are native/wire's, through the NIF: its own tests pin them
+  # (tests/codec.rs the golden bytes, tests/vectors.rs the refusals). Pinned
+  # here is what the node adds: its packing, which native/wire must read
+  # back, and the Elixir types of cells. The day's range is pinned end to
+  # end by Hireme.DayTest.
   use ExUnit.Case, async: true
   import Bitwise
   alias Hireme.Schema
   alias HiremeWeb.Wire.Codec
 
-  defp hex(iodata), do: iodata |> IO.iodata_to_binary() |> Base.encode16(case: :lower)
-
-  test "a table run and a gone block match the Rust crate's golden bytes" do
-    block = Codec.block(3, 2, [{1, 1, [7, nil]}, {2, 2, ["ab", nil]}])
-
-    assert hex(block) ==
-             "0300020002000000010001000800000007000000ffffffff020002000e00000000000000020000000200000061620000"
-
-    assert hex(Codec.gone_block([{9, 4}, {9, 5}])) ==
-             "0900010002000000feff0100080000000400000005000000"
-  end
-
-  test "an OPS frame round-trips its cells; a sentinel, a day past the last or a value past its type is refused, never wrapped; a body holds at most 256 ops" do
-    cells = [{8, 1, 5}, {9, 2, "x"}, {10, 3, -2}, {11, 4, 1.5}, {12, 0, nil}]
-    assert {:ok, %{cells: ^cells}, ""} = Codec.op(Codec.encode_op({7, :put, 0, 3, 0, nil, cells}))
+  test "a cell is its column's value or refused: a sentinel or another type is refused type; a value past its wire type is refused at encode, never wrapped" do
     assert {:error, :type} = Codec.cell_to_value(%{type: :u32, wire: 1}, {8, 1, 0xFFFF_FFFF})
-
-    assert {:error, :type} =
-             Codec.cell_to_value(%{type: :day, wire: 1}, {8, 1, Schema.day_max() + 1})
-
+    assert {:error, :type} = Codec.cell_to_value(%{type: :str, wire: 2}, {8, 1, 5})
     assert {:ok, nil} = Codec.cell_to_value(%{type: :str, wire: 2}, {8, 2, ""})
 
     for cell <- [{8, 1, 5_000_000_000}, {8, 1, -1}, {8, 3, 1 <<< 63}],
         do:
           assert_raise(ArgumentError, fn -> Codec.encode_op({1, :put, 0, 3, 0, nil, [cell]}) end)
-
-    op = Codec.encode_op({7, :put, 0, 3, 0, nil, [{8, 1, 5}]})
-    body = fn n -> IO.iodata_to_binary([<<n::little-32, 0::32>> | List.duplicate(op, n)]) end
-    assert {:ok, ops} = Codec.ops(body.(256))
-    assert length(ops) == 256
-    assert {:error, :body} = Codec.ops(body.(257))
   end
 
   test "a ZSTD table run unpacks to itself; a cut, relabelled or peer-sent one is refused" do

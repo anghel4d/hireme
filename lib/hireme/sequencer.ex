@@ -142,17 +142,7 @@ defmodule Hireme.Sequencer do
   Submits decoded ops (`HiremeWeb.Wire.Codec.ops/1`) for the calling
   session. When the sequencer cannot run, every op is answered `internal`.
   """
-  def submit(account_id, ops) do
-    case whereis(account_id) do
-      nil ->
-        send(self(), {:sequencer, :verdicts, 0, [], Enum.map(ops, &nack(&1, :internal, %{}))})
-
-      pid ->
-        GenServer.cast(pid, {:ops, self(), ops})
-    end
-
-    :ok
-  end
+  def submit(account_id, ops), do: cast(account_id, :ops, ops)
 
   @doc """
   Runs `fun` on the account's kernel and lease inside the sequencer, so a
@@ -167,13 +157,15 @@ defmodule Hireme.Sequencer do
   all, drawn on its bulk contract (lease `bulk`); verdicts arrive as for
   `submit/2`.
   """
-  def submit_atomic(account_id, ops) do
+  def submit_atomic(account_id, ops), do: cast(account_id, :atomic, ops)
+
+  defp cast(account_id, kind, ops) do
     case whereis(account_id) do
       nil ->
         send(self(), {:sequencer, :verdicts, 0, [], Enum.map(ops, &nack(&1, :internal, %{}))})
 
       pid ->
-        GenServer.cast(pid, {:atomic, self(), ops})
+        GenServer.cast(pid, {kind, self(), ops})
     end
 
     :ok
@@ -556,28 +548,9 @@ defmodule Hireme.Sequencer do
       # The scan reached the end; a release starts it again from the top.
       %{state | backfill_after: 0}
     else
-      t = Schema.table(:applications)
-      listing = col(t, "listing_raw")
-
-      ops =
-        for {id, text} <- stale do
-          raw = Codec.encode_op({Codec.op_id(), :put, 0, t.id, id, nil, [{listing.id, 2, text}]})
-          {:ok, op, ""} = Codec.op(raw)
-          op
-        end
-
-      {state, _acks, nacks} =
-        run_as(%{label: "keywords", grants: Grants.operator(), key_id: nil}, ops, state)
-
+      state = server_puts(state, "keywords", "listing_raw", stale)
       # The cursor walks past refused rows, so they cannot stall the scan.
       send(self(), :backfill)
-
-      if nacks != [],
-        do:
-          Logger.warning(
-            "sequencer #{state.account_id}: keywords backfill refused #{length(nacks)}"
-          )
-
       %{state | backfill_after: stale |> List.last() |> elem(0)}
     end
   end
@@ -612,31 +585,36 @@ defmodule Hireme.Sequencer do
           else: {[{id, want} | puts], MapSet.put(taken, want)}
       end)
 
-    t = Schema.table(:applications)
-    url = col(t, "canonical_url")
-
     puts
     |> Enum.reverse()
     |> Enum.chunk_every(@batch)
-    |> Enum.reduce(state, fn chunk, state ->
-      ops =
-        for {id, want} <- chunk do
-          raw = Codec.encode_op({Codec.op_id(), :put, 0, t.id, id, nil, [{url.id, 2, want}]})
-          {:ok, op, ""} = Codec.op(raw)
-          op
-        end
+    |> Enum.reduce(state, &server_puts(&2, "canonical", "canonical_url", &1))
+  end
 
-      {state, _acks, nacks} =
-        run_as(%{label: "canonical", grants: Grants.operator(), key_id: nil}, ops, state)
+  # Puts each `{id, text}` into an application's `column` as the operator's
+  # own writer `label`; a refusal is logged, and not tried again.
+  defp server_puts(state, label, column, puts) do
+    t = Schema.table(:applications)
+    c = col(t, column)
 
-      if nacks != [],
-        do:
-          Logger.warning(
-            "sequencer #{state.account_id}: canonical backfill refused #{length(nacks)}"
-          )
+    ops =
+      for {id, text} <- puts do
+        {:ok, op, ""} =
+          Codec.op(Codec.encode_op({Codec.op_id(), :put, 0, t.id, id, nil, [{c.id, 2, text}]}))
 
-      state
-    end)
+        op
+      end
+
+    {state, _acks, nacks} =
+      run_as(%{label: label, grants: Grants.operator(), key_id: nil}, ops, state)
+
+    if nacks != [],
+      do:
+        Logger.warning(
+          "sequencer #{state.account_id}: #{label} backfill refused #{length(nacks)}"
+        )
+
+    state
   end
 
   # Ops already waiting join this turn's batches, in arrival order.
@@ -1294,12 +1272,7 @@ defmodule Hireme.Sequencer do
   defp held_by_none_other(lease, sid, apps),
     do: Enum.find_value(apps, :ok, &lease_refusal(lease, sid, &1))
 
-  defp lease_refusal(lease, sid, app) do
-    case Lease.check(lease, sid, app) do
-      :ok -> nil
-      refused -> refused
-    end
-  end
+  defp lease_refusal(lease, sid, app), do: with(:ok <- Lease.check(lease, sid, app), do: nil)
 
   # Check 3: every cell names a writable column (or a param) of its type.
   defp shape(%{table: table} = plan, %{verb: :drop} = op, _sub) do
@@ -1823,10 +1796,14 @@ defmodule Hireme.Sequencer do
     tables =
       for t <- Schema.tables(), t.residency in [:resident, :projection] do
         cond do
-          grants != nil and not Grants.read?(grants, t) -> Codec.block(t.id, 0, [{1, 1, []}])
-          account?(t) and grants == nil -> Codec.block(t.id, 0, [{1, 1, []}])
-          live?(t) -> Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
-          true -> Map.fetch!(blocks, t.id)
+          if(grants, do: not Grants.read?(grants, t), else: account?(t)) ->
+            Codec.block(t.id, 0, [{1, 1, []}])
+
+          live?(t) ->
+            Codec.rows_block(t, wire_cols(t, grants), Map.fetch!(views, t.id))
+
+          true ->
+            Map.fetch!(blocks, t.id)
         end
       end
 

@@ -21,9 +21,12 @@
 //! - `board_ids(res, stage_code | nil)` → application ids in board order
 //!   (none for a code that is no stage).
 //! - `keywords_version()`.
-//! - `unpack(frame, max)` → a ZSTD frame's plain body (at most `max`
-//!   bytes) or `nil`, and `text(cell)` → a zstr cell's string or `nil`:
-//!   native/wire's reading, the one every client does.
+//! - The wire's bytes for `HiremeWeb.Wire.Codec`, which keeps only the
+//!   node's packing (OTP's zstd) and the Elixir types of cells: frames,
+//!   small frames, ops and table-run blocks are native/wire's, the one
+//!   implementation every client reads. Each is a normal scheduler's
+//!   microseconds; `unpack` and `block_dirty`, whose cost grows with a
+//!   desk, run on a dirty CPU scheduler.
 //!
 //! A panic in the kernel is caught here and answered `{:error, :panic}`;
 //! the sequencer then rebuilds the resource from SQLite.
@@ -47,7 +50,8 @@ use rustler::{Atom, Binary, Encoder, Env, NifResult, ResourceArc, Term};
 use serde_json::Value as Json;
 
 mod atoms {
-    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids, answer, pending, wait, submit, claim, release, blob, lost, none }
+    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids, answer, pending, wait, submit, claim, release, blob, lost, none,
+    len, hash, kind, ticket, nan, put, drop, command }
 }
 
 pub struct Res(Mutex<Kernel>);
@@ -192,21 +196,273 @@ fn message_id(id: &str) -> String {
     kernel::outreach::message_id_form(id)
 }
 
+// ------------------------------------------------------------------ wire
+
+fn bin<'a>(env: Env<'a>, bytes: &[u8]) -> NifResult<Binary<'a>> {
+    let mut out = rustler::OwnedBinary::new(bytes.len()).ok_or(rustler::Error::BadArg)?;
+    out.as_mut_slice().copy_from_slice(bytes);
+    Ok(out.release(env))
+}
+
+/// `part`, a slice of `whole`, as a sub-binary of it: nothing copied.
+fn sub<'a>(whole: &Binary<'a>, part: &[u8]) -> NifResult<Binary<'a>> {
+    whole.make_subbinary(part.as_ptr() as usize - whole.as_slice().as_ptr() as usize, part.len())
+}
+
+/// A whole frame of `body`: the header with `flags`, the body, zero pad to 8. `packed`, the body as one zstd
+/// frame, travels instead when it is the shorter, flagged ZSTD, after `u32 raw_len | u32 packed_len`.
+#[rustler::nif]
+fn frame<'a>(env: Env<'a>, kind: u8, flags: u8, rev: u64, body: Binary, packed: Option<Binary>) -> NifResult<Binary<'a>> {
+    let mut w = wire::Writer::new(kind, schema::WIRE_HASH, rev);
+    let packed = packed.filter(|z| wire::pad8(8 + z.len()) < body.len());
+    match &packed {
+        Some(z) => w.u32(body.len() as u32).u32(z.len() as u32).bytes(z.as_slice()),
+        None => w.bytes(body.as_slice()),
+    };
+    let mut frame = w.finish();
+    frame[5] = flags | if packed.is_some() { wire::ZSTD } else { 0 };
+    bin(env, &frame)
+}
+
+/// A whole frame's header, checked as `Frame::parse` checks one but by direction: a peer's (`up`) may
+/// flag ATOMIC and never ZSTD, the node's never ATOMIC. `{kind, flags, rev, body as sent}` or `{:error, why}`.
+#[rustler::nif]
+fn open<'a>(env: Env<'a>, frame: Binary<'a>, up: bool) -> NifResult<Term<'a>> {
+    let b = frame.as_slice();
+    let allowed = if up { wire::END | wire::ATOMIC } else { wire::ZSTD | wire::END };
+    let why = match wire::Header::peek(b) {
+        Ok(h) if h.len as usize != b.len() => atoms::len(),
+        Ok(h) if h.hash != schema::WIRE_HASH => atoms::hash(),
+        Ok(h) if !wire::KINDS.contains(&h.kind) => atoms::kind(),
+        Ok(h) if h.flags & !allowed != 0 => atoms::body(),
+        Ok(h) => return Ok((h.kind, h.flags, h.rev, sub(&frame, &b[wire::HEADER..])?).encode(env)),
+        Err(_) => atoms::len(),
+    };
+    Ok((atoms::error(), why).encode(env))
+}
+
+/// A ZSTD frame's plain body, at most `max` bytes, or nil.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn unpack<'a>(env: Env<'a>, frame: Binary<'a>, max: usize) -> Option<Binary<'a>> {
-    let body = wire::Frame::parse(frame.as_slice(), schema::WIRE_HASH).ok()?.body_max(max).ok()?;
-    let mut out = rustler::OwnedBinary::new(body.len())?;
-    out.as_mut_slice().copy_from_slice(&body);
-    Some(out.release(env))
+    bin(env, &wire::Frame::parse(frame.as_slice(), schema::WIRE_HASH).ok()?.body_max(max).ok()?).ok()
+}
+
+#[derive(rustler::NifMap)]
+struct HelloMap<'a> {
+    cred: Atom,
+    snapshot_rev: u64,
+    schema_rev: u64,
+    credential: Binary<'a>,
+    label: &'a str,
+}
+
+/// HELLO's body: `{:ok, %{cred: :ticket | :key, snapshot_rev, schema_rev, credential, label}}` or `{:error, :body}`.
+#[rustler::nif]
+fn hello<'a>(env: Env<'a>, body: Binary<'a>) -> NifResult<Term<'a>> {
+    let Ok(h) = wire::Hello::decode(body.as_slice()) else { return Ok((atoms::error(), atoms::body()).encode(env)) };
+    let cred = if h.cred == wire::CRED_TICKET { atoms::ticket() } else { atoms::key() };
+    let hello = HelloMap { cred, snapshot_rev: h.snapshot_rev, schema_rev: h.schema_rev, credential: sub(&body, h.credential)?, label: h.label };
+    Ok((atoms::ok(), hello).encode(env))
+}
+
+/// RPC's body: `{:ok, id, method, params_json}` or `{:error, :body}`.
+#[rustler::nif]
+fn rpc<'a>(env: Env<'a>, body: Binary<'a>) -> NifResult<Term<'a>> {
+    Ok(match wire::Rpc::decode(body.as_slice()) {
+        Ok(r) => (atoms::ok(), r.id, r.method, sub(&body, r.params)?).encode(env),
+        Err(_) => (atoms::error(), atoms::body()).encode(env),
+    })
+}
+
+/// PING's or PONG's body: `{:ok, nonce}` or `{:error, :body}`.
+#[rustler::nif]
+fn nonce<'a>(env: Env<'a>, body: Binary) -> Term<'a> {
+    wire::decode_ping(body.as_slice()).map_or_else(|_| (atoms::error(), atoms::body()).encode(env), |n| (atoms::ok(), n).encode(env))
+}
+
+/// A small frame (`kind`) of its fields, a tuple in the layout's order (ACK's and NACK's a list of them,
+/// PING's and PONG's the nonce); WELCOME's features are this node's (it takes atomic bursts), BYE is flagged END.
+#[rustler::nif]
+fn small<'a>(env: Env<'a>, kind: u8, rev: u64, f: Term<'a>) -> NifResult<Binary<'a>> {
+    let h = schema::WIRE_HASH;
+    let mut frame = match kind {
+        wire::HELLO => {
+            let (cred, credential, label, snapshot_rev, schema_rev): (u8, Binary, &str, u64, u64) = f.decode()?;
+            wire::Hello { cred, snapshot_rev, schema_rev, credential: credential.as_slice(), label }.encode(h)
+        }
+        wire::WELCOME => {
+            let ((account_id, session_id, schema_rev), (read_mask, write_mask, may_delete, lease), label) = f.decode()?;
+            wire::Welcome { account_id, session_id, schema_rev, read_mask, write_mask, may_delete, lease, features: wire::FEATURE_ATOMIC, label }.encode(h, rev)
+        }
+        wire::ACK => {
+            let acks: Vec<(u64, u64, u32)> = f.decode()?;
+            wire::encode_acks(h, rev, &acks.into_iter().map(|(op_id, rev, id)| wire::Ack { op_id, rev, id }).collect::<Vec<_>>())
+        }
+        wire::NACK => {
+            let nacks: Vec<(u64, u16, Binary)> = f.decode()?;
+            wire::encode_nacks(h, rev, &nacks.iter().map(|(op_id, code, data)| wire::Nack { op_id: *op_id, code: *code, data: data.as_slice() }).collect::<Vec<_>>())
+        }
+        wire::PING | wire::PONG => wire::encode_ping(kind, h, f.decode()?),
+        wire::BYE => {
+            let (reason, message) = f.decode()?;
+            wire::Bye { reason, message }.encode(h, rev)
+        }
+        wire::RPC => {
+            let (id, method, params): (u32, &str, Binary) = f.decode()?;
+            wire::Rpc { id, method, params: params.as_slice() }.encode(h)
+        }
+        wire::REPLY => {
+            let (id, ok, json): (u32, bool, Binary) = f.decode()?;
+            wire::Reply { id, ok, json: json.as_slice() }.encode(h, rev)
+        }
+        _ => return Err(rustler::Error::BadArg),
+    };
+    if kind == wire::BYE {
+        frame[5] = wire::END;
+    }
+    bin(env, &frame)
+}
+
+/// Op cells and table-run columns as Elixir gives and takes them: `[{col_id, type, value(s)}]`.
+type Cells<'a> = Vec<(u16, u8, Term<'a>)>;
+
+#[derive(rustler::NifMap)]
+struct OpMap<'a> {
+    op_id: u64,
+    verb: Atom,
+    keyed: bool,
+    create_only: bool,
+    expect_rev: Option<u32>,
+    subject: u16,
+    target: u32,
+    cells: Cells<'a>,
+    raw: Binary<'a>,
+}
+
+/// An op as the sequencer takes it, its `raw` bytes and str cells sub-binaries of `whole`; a cell's value
+/// is an integer, a float (`:nan` for one not finite), its UTF-8 (`""` writes NULL), or nil for a null cell.
+fn op_map<'a>(env: Env<'a>, whole: &Binary<'a>, op: &wire::Op) -> NifResult<OpMap<'a>> {
+    let verb = match op.verb {
+        wire::PUT => atoms::put(),
+        wire::DROP => atoms::drop(),
+        _ => atoms::command(),
+    };
+    let cells = op
+        .cells()
+        .map(|c| {
+            let v = match c.value() {
+                _ if c.ty == wire::STR => sub(whole, c.bytes)?.encode(env),
+                wire::Value::U32(v) => v.encode(env),
+                wire::Value::I64(v) => v.encode(env),
+                wire::Value::F64(v) if v.is_finite() => v.encode(env),
+                wire::Value::F64(_) => atoms::nan().encode(env),
+                _ => rustler::types::atom::nil().encode(env),
+            };
+            Ok((c.col, c.ty, v))
+        })
+        .collect::<NifResult<_>>()?;
+    let (op_id, subject, target, raw) = (op.op_id, op.table, op.target, sub(whole, op.raw)?);
+    let (keyed, create_only, expect_rev) = (op.has(wire::KEYED), op.has(wire::CREATE_ONLY), op.has(wire::EXPECT_REV).then_some(op.expect_rev));
+    Ok(OpMap { op_id, verb, keyed, create_only, expect_rev, subject, target, cells, raw })
+}
+
+/// An OPS body, validated whole before any op is taken: `{:ok, [op]}` or `{:error, :body}`.
+#[rustler::nif]
+fn ops<'a>(env: Env<'a>, body: Binary<'a>) -> NifResult<Term<'a>> {
+    let Ok(ops) = wire::Ops::new(body.as_slice()) else { return Ok((atoms::error(), atoms::body()).encode(env)) };
+    Ok((atoms::ok(), ops.iter().map(|op| op_map(env, &body, &op)).collect::<NifResult<Vec<_>>>()?).encode(env))
+}
+
+/// One op from the start of `bin`: `{:ok, op, rest}`, or `:error` (for a `bin` that is no binary too).
+#[rustler::nif]
+fn op<'a>(env: Env<'a>, bin: Term<'a>) -> NifResult<Term<'a>> {
+    Ok(match bin.decode::<Binary>().map(|b| (wire::Op::parse(b.as_slice()), b)) {
+        Ok((Ok((op, rest)), b)) => (atoms::ok(), op_map(env, &b, &op)?, sub(&b, rest)?).encode(env),
+        _ => atoms::error().encode(env),
+    })
+}
+
+/// A float, an integer as one, or `:nan` (nil too: a column's no value).
+fn float(t: Term) -> NifResult<f64> {
+    match t.decode::<Atom>() {
+        Ok(a) if a == atoms::nan() || a == rustler::types::atom::nil() => Ok(f64::NAN),
+        _ => t.decode::<f64>().or_else(|_| t.decode::<i64>().map(|i| i as f64)),
+    }
+}
+
+/// One op's bytes from `{op_id, verb, flags, subject, target, expect_rev | nil, [{col, type, value}]}`: a value
+/// past its type is badarg, never wrapped, and a str cell that is not UTF-8 answers nil (which `op` refuses).
+#[rustler::nif]
+fn encode_op<'a>(env: Env<'a>, op: (u64, Atom, u8, u16, u32, Option<u32>, Cells<'a>)) -> NifResult<Term<'a>> {
+    let (op_id, verb, flags, subject, target, expect_rev, cells) = op;
+    let verbs = [(atoms::put(), wire::PUT), (atoms::drop(), wire::DROP), (atoms::command(), wire::COMMAND)];
+    let verb = verbs.into_iter().find(|(a, _)| *a == verb).ok_or(rustler::Error::BadArg)?.1;
+    let mut ops = wire::OpsWriter::new();
+    let mut w = ops.op(op_id, verb, flags, subject, target, expect_rev);
+    for (col, ty, v) in cells {
+        match ty {
+            wire::NULL => w.null(col),
+            wire::U32 => w.u32(col, v.decode()?),
+            wire::I64 => w.i64(col, v.decode()?),
+            wire::F64 => w.f64(col, float(v)?),
+            wire::STR => match std::str::from_utf8(v.decode::<Binary>()?.as_slice()) {
+                Ok(s) => w.str(col, s),
+                Err(_) => return Ok(rustler::types::atom::nil().encode(env)),
+            },
+            _ => return Err(rustler::Error::BadArg),
+        };
+    }
+    w.done();
+    Ok(bin(env, &ops.finish()[8..])?.encode(env))
+}
+
+/// One table-run block of `cols`, `[{col_id, type, values}]`, every `values` `nrows` long with nil for
+/// none: a u32 value its low 32 bits, as a binary segment takes it; a zstr's are cells as they travel.
+fn block_any<'a>(env: Env<'a>, table: u16, nrows: usize, cols: Cells<'a>) -> NifResult<Binary<'a>> {
+    let mut body = wire::BodyWriter::new();
+    let mut b = body.block(table, nrows);
+    for (id, ty, vals) in cols {
+        match ty {
+            wire::U32 => b.u32s(id, vals.decode::<Vec<Option<i64>>>()?.into_iter().map(|v| v.map_or(wire::NONE, |v| v as u32))),
+            wire::I64 => b.i64s(id, vals.decode::<Vec<Option<i64>>>()?.into_iter().map(|v| v.unwrap_or(wire::NONE64))),
+            wire::F64 => b.f64s(id, vals.decode::<Vec<Term>>()?.into_iter().map(float).collect::<NifResult<Vec<_>>>()?.into_iter()),
+            wire::STR => b.strs(id, vals.decode::<Vec<Option<&str>>>()?.into_iter().map(|s| s.unwrap_or(""))),
+            wire::ZSTR => b.zstrs(id, vals.decode::<Vec<Binary>>()?.iter().map(|c| c.as_slice())),
+            _ => return Err(rustler::Error::BadArg),
+        };
+    }
+    b.done();
+    bin(env, &body.finish())
+}
+
+#[rustler::nif]
+fn block<'a>(env: Env<'a>, table: u16, nrows: usize, cols: Cells<'a>) -> NifResult<Binary<'a>> {
+    block_any(env, table, nrows, cols)
+}
+
+/// `block` for a desk's table, on a dirty CPU scheduler.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn block_dirty<'a>(env: Env<'a>, table: u16, nrows: usize, cols: Cells<'a>) -> NifResult<Binary<'a>> {
+    block_any(env, table, nrows, cols)
 }
 
 /// A table-run body shuffled for packing (wire::shuffle); None when it does not walk.
-#[rustler::nif]
-fn shuffle<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
+fn shuffled<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
     let mut out = rustler::OwnedBinary::new(body.len())?;
     out.as_mut_slice().copy_from_slice(body.as_slice());
     wire::shuffle(out.as_mut_slice()).ok()?;
     Some(out.release(env))
+}
+
+#[rustler::nif]
+fn shuffle<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
+    shuffled(env, body)
+}
+
+/// `shuffle` for a desk's BOOT, on a dirty CPU scheduler (a 3 MB body is 2 ms of work).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn shuffle_dirty<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
+    shuffled(env, body)
 }
 
 #[rustler::nif]
@@ -352,23 +608,18 @@ fn mcp_step<'a>(env: Env<'a>, m: &Mcp, res: &Res, facts: &str, f: impl FnOnce(&m
 /// `{:submit, [{op_id, label, op_bytes}], atomic}`, `{:claim, label, args_json}`,
 /// `{:release, ids | nil}` or `{:blob, type, bytes}`.
 fn step_term<'a>(env: Env<'a>, step: Step) -> NifResult<Term<'a>> {
-    let bin = |bytes: &[u8]| -> NifResult<Term<'a>> {
-        let mut b = rustler::OwnedBinary::new(bytes.len()).ok_or(rustler::Error::BadArg)?;
-        b.as_mut_slice().copy_from_slice(bytes);
-        Ok(b.release(env).encode(env))
-    };
     Ok(match step {
         Step::Answer(a) => (atoms::answer(), a.map(|j| j.to_string())).encode(env),
         Step::Pending(t, effect) => {
             let e = match effect {
                 Effect::Wait(_) => atoms::wait().encode(env),
                 Effect::Submit { ops, atomic } => {
-                    let ops = ops.iter().map(|(id, label, bytes)| Ok((*id, label.as_str(), bin(bytes)?).encode(env))).collect::<NifResult<Vec<Term>>>()?;
+                    let ops = ops.iter().map(|(id, label, bytes)| Ok((*id, label.as_str(), bin(env, bytes)?).encode(env))).collect::<NifResult<Vec<Term>>>()?;
                     (atoms::submit(), ops, atomic).encode(env)
                 }
                 Effect::Claim { label, args } => (atoms::claim(), label, args.to_string()).encode(env),
                 Effect::Release(ids) => (atoms::release(), ids).encode(env),
-                Effect::Blob { ty, bytes } => (atoms::blob(), ty, bin(&bytes)?).encode(env),
+                Effect::Blob { ty, bytes } => (atoms::blob(), ty, bin(env, &bytes)?).encode(env),
             };
             (atoms::pending(), t, e).encode(env)
         }

@@ -167,7 +167,7 @@ const _: () = {
     assert!(BYE_SCHEMA == bye::SCHEMA && BYE_SUSPENDED == bye::SUSPENDED);
 };
 
-const KINDS: [u8; 13] = [HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY];
+pub const KINDS: [u8; 13] = [HELLO, WELCOME, BOOT, PATCH, OPS, ACK, NACK, TICK, PING, PONG, BYE, RPC, REPLY];
 
 /// Header flags.
 pub const ZSTD: u8 = 0x01;
