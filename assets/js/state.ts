@@ -70,8 +70,6 @@ export interface Model {
   world: WorldView
   outreach: OutreachView
   focus: FocusView
-  /** How many board cards are drawn; grows with "more" and with keyboard movement past the end. */
-  deskLimit: number
   /** The phone's menu (the lenses and sign-out) is open. */
   menu: boolean
 }
@@ -163,7 +161,6 @@ export function parse(path: string, search: string): Address {
   const take = (k: string): string => [q.get(k) ?? "", q.delete(k)][0] as string
   if (parts[0] === "focus") parts = ["desk", ...parts.slice(1, 2)]
   else if (parts[0] === "atlas") parts = ["world", "atlas"]
-  else if (parts[0] === "lanes") parts = ["desk"]
   if (parts[0] === "desk" && (q.has("view") || q.has("card"))) {
     const dense = take("view") === "dense"
     const card = take("card")
@@ -200,7 +197,6 @@ export const model: Model = {
   rows: 0,
   account: { reveal: null, totp: null, stepUp: null, open: "", error: "", audit: null, masks: null, minting: false },
   world: { limit: 100, edit: "", editRev: 0, cites: null, text: null },
-  deskLimit: 30,
   focus: { id: 0, listing: false, fireArmed: 0, edit: "", editRev: 0, editText: "" },
   outreach: { limit: 100, items: 100, edit: "" },
 }

@@ -74,7 +74,7 @@ button, .button {
   cursor: pointer;
 }
 button:hover { border-color: var(--muted); }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary, .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 button.danger { background: var(--bad); border-color: var(--bad); color: var(--panel); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.ghost, a.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 3px 6px; }
@@ -104,7 +104,7 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .stack > label { width: min(100%, 420px); }
 .muted { color: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; }
-.error { color: var(--bad); }
+.error, #factor-error, .heat-blocked { color: var(--bad); }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .tag {
   display: inline-block;
@@ -194,9 +194,9 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .grid tr.dead { color: var(--muted); }
 .grid td.actions { white-space: nowrap; text-align: right; }
 
-.tag.ok { color: var(--ok); border-color: var(--ok); }
-/* .paused: a key the operator paused by revoking its lease. */
-.tag.warn, .tag.paused { color: var(--warn); border-color: var(--warn); }
+/* The atlas's routes read as these tags; .paused is a key the operator paused by revoking its lease. */
+.tag.ok, .atlas .tag.route-citizen, .atlas .tag.route-permit_held { color: var(--ok); border-color: var(--ok); }
+.tag.warn, .tag.paused, .atlas .tag.route-needs_permit, .term.warn { color: var(--warn); border-color: var(--warn); }
 .tag.bad { color: var(--bad); border-color: var(--bad); font-weight: 600; }
 /* A table wider than a phone scrolls inside its card, never the page. */
 .table-scroll { overflow-x: auto; max-width: 100%; }
@@ -329,7 +329,6 @@ main.auth-card .ghost.method:hover { background: var(--sunk); text-decoration: n
 main.auth-card p.or { text-align: center; color: var(--muted); font-size: 12px; margin: 12px 0; }
 main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); background: var(--sunk); border-left: 3px solid var(--warn); }
 #factor-error:empty { display: none; }
-#factor-error { color: var(--bad); }
 
 /* ---------------------------------------------------------------- desk */
 
@@ -342,7 +341,6 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .chips-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; min-width: 46px; align-self: center; }
 .chip { font-size: 12px; padding: 2px 9px; border-radius: 12px; background: var(--panel); }
 .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
-.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip.on .n { color: inherit; opacity: 0.8; }
 .inline { flex-direction: row; align-items: center; gap: 6px; }
 .narrow { width: 72px; }
@@ -374,7 +372,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 /* A group-by's band across the board: the group, its count, and for duplicates the one click that cleans up. */
 .group-head { position: absolute; top: 0; left: 0; height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .group-head button { margin-left: auto; font-size: 12px; color: var(--warn); border-color: var(--warn); }
-.dupes-link { color: var(--warn); }
+
 .toolbar .dir { font-size: 15px; line-height: 1; padding: 4px 8px; margin-left: -6px; }
 /* Which agent's lease claims the card; empty when none does. */
 .app-card .lease { margin: 2px 0 0; font-size: 12px; }
@@ -442,8 +440,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; }
 .facts > p { flex-basis: 100%; }
 .heat-hot { color: var(--hot); }
-.heat-warm { color: var(--warn); }
-.heat-blocked { color: var(--bad); }
+.heat-warm, .dupes-link { color: var(--warn); }
 .terms { display: flex; flex-wrap: wrap; gap: 4px; }
 .term { font-size: 12px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--line); }
 .term.hit { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); border-color: var(--ok); }
@@ -460,8 +457,7 @@ main.auth-card p.notice { padding: 8px 10px; border-radius: var(--radius); backg
 
 .weights { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; margin-bottom: 8px; }
 .atlas tr.avoided { color: var(--muted); }
-.atlas .tag.route-citizen, .atlas .tag.route-permit_held { color: var(--ok); border-color: var(--ok); }
-.atlas .tag.route-needs_permit { color: var(--warn); border-color: var(--warn); }
+
 
 .mask-picker { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .mask-picker fieldset[disabled] { opacity: 0.75; }
@@ -500,7 +496,7 @@ tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 .me .understood dt { color: var(--muted); font-size: 12px; padding-top: 2px; }
 .me .understood dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .term.bad { color: var(--bad); border-color: var(--bad); border-style: dashed; }
-.term.warn { color: var(--warn); border-color: var(--warn); }
+
 @media (width <= 980px) { .me .you-grid { grid-template-columns: 1fr; } .me .understood { position: static; } }
 .me .rules { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
 .me label.grow { flex: 1 1 22em; display: flex; flex-direction: column; }

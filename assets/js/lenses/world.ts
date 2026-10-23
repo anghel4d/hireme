@@ -10,8 +10,8 @@
 import type { View } from "../app.ts"
 import { DOMAIN, TABLES, type ColumnDef, type TableDef, type TableName } from "../gen/schema.ts"
 import { Refused, failed, page, put, query as read, row, today, values, type Input, type Row } from "../kernel.ts"
-import { EMPTY, flag, href, html, unicodeHost, type Html } from "../morph.ts"
-import { go, item, itemNo, model, query, set, type WorldView } from "../state.ts"
+import { EMPTY, fields, flag, href, html, unicodeHost, type Html } from "../morph.ts"
+import { go, item, itemNo, model, set, type WorldView } from "../state.ts"
 
 const TABLES_SHOWN = ["corporations", "places", "offices", "sources"] as const satisfies readonly TableName[]
 type Shown = (typeof TABLES_SHOWN)[number]
@@ -89,13 +89,11 @@ function order(t: TableDef): [string, string] | null {
 
 /** The first `limit` rows of the grid's table, sort and search, from the replica (pages of find's 500). */
 function rows(t: TableDef, cs: ColumnDef[], limit: number): { rows: Row[]; more: boolean } {
-  const params: Record<string, unknown> = { table: t.name, cols: cols(cs), sizes: cs.filter((c) => c.type === "text").map((c) => c.name) }
   const o = order(t)
-  if (o) params.order = o
   const q = model.address.q.get("q") ?? ""
   const search = SEARCH[t.name as Shown]
-  if (q !== "" && search) params.where = { [search]: { prefix: q } }
-  return page(params, limit)
+  const where = q !== "" && search ? { where: { [search]: { prefix: q } } } : {}
+  return page({ table: t.name, cols: cols(cs), sizes: cs.filter((c) => c.type === "text").map((c) => c.name), ...(o ? { order: o } : {}), ...where }, limit)
 }
 
 // ------------------------------------------------------------------ cells
@@ -170,18 +168,15 @@ export function cited(c: ColumnDef, r: Row, x: unknown): Html {
 
 const cellOf = (c: ColumnDef, r: Row): Html => html`<td data-key="${c.name}" class="${c.metric ? "metric" : ""}">${cited(c, r, r[c.name])}</td>`
 
-/** A column's header: a button that sorts by it (the address's `sort`, `-` for falling) when it can, its declared name in the title. */
+/**
+ * A column's header: a button that sorts by it when it can (the address's `sort`, `-` for falling; a click
+ * sorts rising, then falling, then not), its declared name in the title.
+ */
 export function head(c: ColumnDef, anchor = false): Html {
   const s = model.address.q.get("sort") ?? ""
   const dir = s === c.name ? "asc" : s === `-${c.name}` ? "desc" : ""
   return html`<th scope="col" data-key="${c.name}"${anchor ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
-    ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
-}
-
-/** A header's click: sorted rising, then falling, then not. */
-export function resort(col: string): void {
-  const s = model.address.q.get("sort") ?? ""
-  query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
+    ${sortable(c) ? html`<button type="button" class="ghost" data-act="q" data-q="sort" data-v="${dir === "asc" ? `-${c.name}` : dir === "desc" ? "" : c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
 }
 
 const blankValue = (x: unknown): boolean => x === null || x === undefined || x === ""
@@ -285,11 +280,11 @@ function view(): Html {
   return html`<div class="world">
     <div class="toolbar" data-key="toolbar">
       ${views()}
-      ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
+      ${search ? html`<input type="search" class="search" placeholder="${search} starts with…" value="${model.address.q.get("q") ?? ""}" data-act="q" data-q="q" data-on="input" data-bound aria-label="Search ${t.name}">` : EMPTY}
       <span class="muted">${got.rows.length}${got.more ? "+" : ""} row${got.rows.length === 1 && !got.more ? "" : "s"}</span>
     </div>
-    ${g.length < 2 && blank.length === 0 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${g.length < 2 ? EMPTY : [...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}
-      ${blank.length === 0 ? EMPTY : html`<button type="button" class="ghost" data-act="empty" data-key="empty" title="${blank.map((c) => label(c.name)).join(", ")}">${showEmpty ? `Hide the ${blank.length} empty column${blank.length === 1 ? "" : "s"}` : `${blank.length} empty column${blank.length === 1 ? "" : "s"} hidden · show`}</button>`}</div>`}
+    ${g.length < 2 && blank.length === 0 ? EMPTY : html`<div class="chips" role="group" aria-label="Which columns" data-key="groups">${g.length < 2 ? EMPTY : [...g, "all"].map((x) => html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="q" data-q="cols" data-v="${x}" data-key="${x}">${x === "all" ? "All columns" : x.charAt(0).toUpperCase() + x.slice(1)}</button>`)}
+      ${blank.length === 0 ? EMPTY : html`<button type="button" class="ghost" data-act="q" data-q="empty" data-v="${showEmpty ? "" : "show"}" data-key="empty" title="${blank.map((c) => label(c.name)).join(", ")}">${showEmpty ? `Hide the ${blank.length} empty column${blank.length === 1 ? "" : "s"}` : `${blank.length} empty column${blank.length === 1 ? "" : "s"} hidden · show`}</button>`}</div>`}
     ${adder(t)}${record(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
@@ -310,15 +305,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
   const id = Number(el.dataset.id ?? el.closest<HTMLElement>("tr")?.dataset.key?.slice(1))
   const col = el.dataset.col ?? ""
   switch (name) {
-    case "cols":
-      return query("cols", el.dataset.v ?? "")
-    case "empty":
-      return query("empty", model.address.q.get("empty") === "show" ? "" : "show")
-    case "sort":
-      return resort(col)
-    case "search":
-      // The replica answers in the keystroke's frame: no wait before asking.
-      return query("q", (el as HTMLInputElement).value)
+
     case "more":
       return patch({ limit: v().limit + PAGE })
     case "open": {
@@ -328,25 +315,20 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     }
     case "close-record":
       return go({ item: "" })
-    case "edit": {
-      const c = t.cols.find((x) => x.name === col)
-      if (!c) return
+    case "edit":
+      if (!t.cols.some((x) => x.name === col)) return
       // A text cell (prose or a source's doc) opens on its whole text, read in the editor: a save replaces all of it.
       return patch({ edit: `${id}:${col}`, editRev: Number(row(t.name, id)?.rev ?? 0) })
-    }
     case "cancel":
       return patch({ edit: "" })
     case "save": {
-      const form = el as HTMLFormElement
       const c = t.cols.find((x) => x.name === col)
       if (!c || !row(t.name, id)) return
-      const data = new FormData(form)
-      const raw = String(data.get("value") ?? "")
-      const source = String(data.get("source") ?? "")
-      void put(t.name as TableName, { [col]: raw === "" ? null : (raw as Input) }, {
+      const f = fields(el as HTMLFormElement)
+      void put(t.name as TableName, { [col]: f.value || null }, {
         id,
-        ...(c.metric ? { asOf: String(data.get("as_of") ?? today()) } : {}),
-        ...(source !== "" ? { source } : {}),
+        ...(c.metric ? { asOf: f.as_of ?? today() } : {}),
+        ...(f.source ? { source: f.source } : {}),
         // The rev the editor opened on, not the row's rev now: a re-read since must not let this save overwrite it.
         ...(c.prose ? { expectRev: v().editRev } : {}),
       })
@@ -358,18 +340,12 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "new":
       return patch({ edit: "new" })
     case "create": {
-      const data = new FormData(el as HTMLFormElement)
-      const keyCols = new Set(t.natural.flatMap((k) => k.cols))
+      // A table with one natural key upserts by it (refused if the row exists); one with several keys none.
+      const one = new Set(t.natural.length === 1 ? t.natural[0]!.cols : [])
       const key: Record<string, Input> = {}
       const rest: Record<string, Input> = {}
-      for (const [k, x] of data) {
-        const s = String(x)
-        if (s === "") continue
-        if (keyCols.has(k) && t.natural.length === 1) key[k] = s
-        else rest[k] = s
-      }
-      const keyed = Object.keys(key).length > 0
-      void put(t.name as TableName, rest, keyed ? { key, createOnly: true } : {}).catch(failed)
+      for (const [k, s] of Object.entries(fields(el as HTMLFormElement))) if (s !== "") (one.has(k) ? key : rest)[k] = s
+      void put(t.name as TableName, rest, Object.keys(key).length > 0 ? { key, createOnly: true } : {}).catch(failed)
       return patch({ edit: "" })
     }
     case "cites":

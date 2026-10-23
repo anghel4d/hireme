@@ -37,17 +37,12 @@ function binary(o: Json, list: string): Json {
   return out
 }
 
-const creation = (o: Json): PublicKeyCredentialCreationOptions =>
-  PKC.parseCreationOptionsFromJSON?.(o) ?? (binary(o, "excludeCredentials") as unknown as PublicKeyCredentialCreationOptions)
-
-const request = (o: Json): PublicKeyCredentialRequestOptions =>
-  PKC.parseRequestOptionsFromJSON?.(o) ?? (binary(o, "allowCredentials") as unknown as PublicKeyCredentialRequestOptions)
-
 export const supported = (): boolean => typeof PublicKeyCredential !== "undefined" && !!navigator.credentials
 
 /** Enrollment: the attestation fields account.passkey.finish takes. */
 export async function create(options: Json): Promise<{ attestationObject: string; clientDataJSON: string; transports: string[] }> {
-  const cred = (await navigator.credentials.create({ publicKey: creation(options) })) as PublicKeyCredential | null
+  const publicKey = PKC.parseCreationOptionsFromJSON?.(options) ?? (binary(options, "excludeCredentials") as unknown as PublicKeyCredentialCreationOptions)
+  const cred = (await navigator.credentials.create({ publicKey })) as PublicKeyCredential | null
   if (!cred) throw new Error("No passkey was created.")
   const r = cred.response as AuthenticatorAttestationResponse
   return {
@@ -59,7 +54,8 @@ export async function create(options: Json): Promise<{ attestationObject: string
 
 /** Assertion: the fields the factor page's verify endpoint takes. */
 export async function get(options: Json): Promise<Record<string, string | null>> {
-  const cred = (await navigator.credentials.get({ publicKey: request(options) })) as PublicKeyCredential | null
+  const publicKey = PKC.parseRequestOptionsFromJSON?.(options) ?? (binary(options, "allowCredentials") as unknown as PublicKeyCredentialRequestOptions)
+  const cred = (await navigator.credentials.get({ publicKey })) as PublicKeyCredential | null
   if (!cred) throw new Error("No passkey was used.")
   const r = cred.response as AuthenticatorAssertionResponse
   return {

@@ -21,7 +21,7 @@ import type { View } from "../app.ts"
 import { BAND, ENUMS, STAGE } from "../gen/schema.ts"
 import { arrange, ask, card, drop, failed, ids, lookup, query as read, scoreboard, value, type Arranged, type Filter, type Row } from "../kernel.ts"
 import { EMPTY, attempt, html, str, type Html } from "../morph.ts"
-import { format, go, itemNo, model, query, set } from "../state.ts"
+import { format, go, itemNo, model, set } from "../state.ts"
 import { act as focusAct, appItem, body } from "./focus.ts"
 
 /** The pro view: the board beside the selected card's whole application. */
@@ -44,17 +44,14 @@ function filter(): Filter {
   return f
 }
 
-function toggle(key: string, v: string): void {
-  const now = list(key)
-  query(key, (now.includes(v) ? now.filter((x) => x !== v) : [...now, v]).join(","))
-}
-
+/** A filter's chips; each names the list it leaves in the address when clicked: its own value added or taken out. */
 function chips(key: string, all: readonly string[], counts: readonly number[] | undefined, label: string): Html {
   const on = list(key)
+  const flip = (x: string): string => (on.includes(x) ? on.filter((y) => y !== x) : [...on, x]).join(",")
   const shown = all.flatMap((x, i) => ((counts?.[i] ?? 0) > 0 || on.includes(x) ? [[x, i] as const] : []))
   if (shown.length === 0) return EMPTY
   return html`<div class="chips" role="group" aria-label="${label}" data-key="chips-${key}"><span class="chips-label">${label}</span>${shown.map(([x, i]) => html`<button type="button"
-      class="chip${on.includes(x) ? " on" : ""} chip-${x}" aria-pressed="${String(on.includes(x))}" data-act="toggle" data-k="${key}" data-v="${x}" data-key="${x}">
+      class="chip${on.includes(x) ? " on" : ""} chip-${x}" aria-pressed="${String(on.includes(x))}" data-act="q" data-q="${key}" data-v="${flip(x)}" data-key="${x}">
       ${x.replace(/_/g, " ")}${counts ? html` <span class="n">${counts[i] ?? 0}</span>` : EMPTY}</button>`)}</div>`
 }
 
@@ -198,16 +195,16 @@ function view(): Html {
   const sets = L.sets
   // The selects are owned: their options are written once in after(), so the markup redrawn on every
   // keystroke stays short (parsing it is most of a redraw).
-  const pick = (k: string, label: string): Html => html`<label class="inline" data-key="pick-${k}">${label} <select data-act="${k}" data-on="change" data-morph="own" aria-label="${label}"></select></label>`
+  const pick = (k: string, label: string, act = "q"): Html => html`<label class="inline" data-key="pick-${k}">${label} <select data-act="${act}" data-q="${k}" data-on="change" data-morph="own" aria-label="${label}"></select></label>`
   return html`<div class="desk${dense() ? " pro" : ""}">
     <div class="desk-top" data-key="top">
     <div class="toolbar" data-key="toolbar">
       <input type="search" class="search" placeholder="Search company, role, place or #no"
-        data-act="search" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
-      <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
-      ${pick("sort", "Sort by")}<button type="button" class="ghost dir" data-act="dir" data-key="dir" aria-label="Sort direction" title="${sortDir() > 0 ? "Rising; click for falling" : "Falling; click for rising"}">${sortDir() > 0 ? "↑" : "↓"}</button>${pick("group", "Group by")}${L.grouped ? html`<button type="button" class="ghost${model.address.q.get("gsize") === "1" ? " on" : ""}" data-act="gsize" data-key="gsize" aria-pressed="${String(model.address.q.get("gsize") === "1")}" title="Order the groups by how many they hold">largest first</button>` : EMPTY}
+        data-act="q" data-q="q" data-on="input" data-morph="own" aria-label="Search the board" id="desk-search">
+      <label class="inline">Score at least <input type="number" min="0" max="100" step="5" value="${model.address.q.get("min") ?? ""}" data-act="q" data-q="min" data-on="change" data-bound class="narrow" placeholder="0"></label>
+      ${pick("sort", "Sort by", "sort")}<button type="button" class="ghost dir" data-act="q" data-q="dir" data-v="${-sortDir() === firstDir(sortKey()) ? "" : sortDir() < 0 ? "asc" : "desc"}" data-key="dir" aria-label="Sort direction" title="${sortDir() > 0 ? "Rising; click for falling" : "Falling; click for rising"}">${sortDir() > 0 ? "↑" : "↓"}</button>${pick("group", "Group by")}${L.grouped ? html`<button type="button" class="ghost${model.address.q.get("gsize") === "1" ? " on" : ""}" data-act="q" data-q="gsize" data-v="${model.address.q.get("gsize") === "1" ? "" : "1"}" data-key="gsize" aria-pressed="${String(model.address.q.get("gsize") === "1")}" title="Order the groups by how many they hold">largest first</button>` : EMPTY}
       <span class="muted">${ids.length} shown</span>
-      ${sets > 0 && model.address.q.get("group") !== "dupes" ? html`<button type="button" class="ghost dupes-link" data-act="group-dupes">${sets} possible duplicate${sets === 1 ? "" : "s"}</button>` : EMPTY}
+      ${sets > 0 && model.address.q.get("group") !== "dupes" ? html`<button type="button" class="ghost dupes-link" data-act="q" data-q="group" data-v="dupes">${sets} possible duplicate${sets === 1 ? "" : "s"}</button>` : EMPTY}
       <span class="toolbar-end" data-key="end"><nav class="subtabs views" aria-label="Desk view">${["", "pro"].map((k) => html`<a href="${viewHref(k, model.address.q)}" data-nav data-key="v${k}" class="${model.address.sub === k ? "on" : ""}${k === "pro" ? " pro" : ""}">${k || "noob"}</a>`)}</nav>
       ${any ? html`<a href="${viewHref(model.address.sub, new Map())}" data-nav class="ghost">clear filters</a>` : EMPTY}</span>
     </div>
@@ -289,7 +286,7 @@ function after(root: HTMLElement): void {
     }
   }
   for (const [k, opts] of [["sort", sorts], ["group", groups]] as const) {
-    const sel = root.querySelector<HTMLSelectElement>(`select[data-act="${k}"]`)
+    const sel = root.querySelector<HTMLSelectElement>(`select[data-q="${k}"]`)
     if (!sel) continue
     if (!lazy.has(sel)) {
       lazy.add(sel)
@@ -630,13 +627,6 @@ const desk: View = {
         return back()
       case "open-app":
         return open(Number(el.dataset.id))
-      case "toggle":
-        return toggle(el.dataset.k ?? "", el.dataset.v ?? "")
-      case "search":
-        // The board is the kernel's, so the answer is drawn in the keystroke's frame (no debounce).
-        return query("q", (el as HTMLInputElement).value)
-      case "min":
-        return query("min", (el as HTMLInputElement).value)
       case "sort": {
         // Another key reads its own way first: the direction asked for the last one goes.
         const q = new Map(model.address.q)
@@ -646,16 +636,9 @@ const desk: View = {
         q.delete("dir")
         return go({ q }, true)
       }
-      case "dir": {
-        const next = -sortDir()
-        return query("dir", next === firstDir(sortKey()) ? "" : next > 0 ? "asc" : "desc")
-      }
-      case "group":
-        return query(name, (el as HTMLSelectElement).value)
-      case "group-dupes":
-        return query("group", "dupes")
-      case "gsize":
-        return query("gsize", model.address.q.get("gsize") === "1" ? "" : "1")
+
+
+
       case "dedupe": {
         const keep = Number(el.dataset.keep)
         const gone = (el.dataset.drop ?? "").split(",").map(Number).filter((x) => x > 0)

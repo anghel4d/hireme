@@ -11,7 +11,7 @@ import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
 import { guard } from "./guard.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
-import { LENSES, dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
+import { LENSES, dismiss, format, go, model, notice, onRender, parse, query, schedule, set, type Lens } from "./state.ts"
 import { SCHEMA_REV } from "./gen/schema.ts"
 import { KIND, Wire, bye, welcome, type Bytes, type Header } from "./wire.ts"
 import account from "./lenses/account.ts"
@@ -41,13 +41,8 @@ const VIEWS: Record<Lens, View> = { desk, world, outreach, me, account, fire }
 /** The current view of a lens: the atlas is the world's view of its places. */
 const viewOf = (lens: Lens): View => (lens === "world" && model.address.sub === "atlas" ? atlas : VIEWS[lens])
 
-const NAV: { lens: Lens; label: string; key: string }[] = [
-  { lens: "desk", label: "Desk", key: "1" },
-  { lens: "world", label: "World", key: "2" },
-  { lens: "outreach", label: "Outreach", key: "3" },
-  { lens: "me", label: "Me", key: "4" },
-  { lens: "account", label: "Account", key: "5" },
-]
+/** The lenses' tabs, each named for its lens and on its number key. */
+const NAV = (["desk", "world", "outreach", "me", "account"] as const).map((lens, i) => ({ lens, label: lens.charAt(0).toUpperCase() + lens.slice(1), key: String(i + 1) }))
 
 const root = document.getElementById("app")
 let enteredLens = ""
@@ -181,6 +176,9 @@ function actOn(ev: Event): void {
   if (ev.type === "submit" || el instanceof HTMLAnchorElement) ev.preventDefault()
   if (name === "dismiss") return dismiss(Number(el.dataset.id))
   if (name === "menu") return set({ menu: !model.menu })
+  // A filter writes its value (a field's, or a button's data-v) into the address parameter its data-q names, in
+  // the input's frame: every lens's rows are the replica's, so there is nothing to wait for.
+  if (name === "q") return query(el.dataset.q ?? "", el.dataset.v ?? (el as HTMLInputElement).value)
   // Signing out takes the desk's snapshot out of this browser before the form goes.
   if (name === "sign-out") {
     kernel.forget()
@@ -205,20 +203,13 @@ const typing = (t: EventTarget | null) =>
 addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && model.menu) return set({ menu: false })
   // Escape leaves a field (a search box clears itself first), so the lens's keys work again at once.
-  if (ev.key === "Escape" && typing(ev.target) && ev.target instanceof HTMLElement) {
-    ev.target.blur()
-    return
-  }
+  if (ev.key === "Escape" && typing(ev.target) && ev.target instanceof HTMLElement) return ev.target.blur()
   if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || typing(ev.target)) return
   // Enter and Space on a focused button or link are that control's own.
   if ((ev.key === "Enter" || ev.key === " ") && ev.target instanceof Element && ev.target.closest("button, a, summary, [role=button]")) return
   const n = NAV.find((x) => x.key === ev.key)
-  if (n) {
-    ev.preventDefault()
-    go({ lens: n.lens, sub: "", item: "" })
-    return
-  }
-  if (viewOf(model.address.lens).key?.(ev) || rowKey(ev.key)) ev.preventDefault()
+  if (n) go({ lens: n.lens, sub: "", item: "" })
+  if (n || viewOf(model.address.lens).key?.(ev) || rowKey(ev.key)) ev.preventDefault()
 })
 
 // ------------------------------------------------------------------ rows
@@ -230,15 +221,12 @@ addEventListener("keydown", (ev) => {
 // lens, so it survives a redraw.
 const ROWS = "tbody tr, ul.rows > li, ol.rows > li"
 const cursor = new Map<Lens, string>()
-/** Lenses whose j/k are their own (the desk's grid, an opened application's next): no row cursor there. */
-const OWN_ROWS: ReadonlySet<Lens> = new Set<Lens>(["desk"])
 
 // Rows in view, read without layout (offsetParent would flush it on every draw): a row inside
-// something hidden or a folded <details> is not one.
-function rows(lens: HTMLElement): HTMLElement[] {
-  if (OWN_ROWS.has(model.address.lens)) return []
-  return [...lens.querySelectorAll<HTMLElement>(ROWS)].filter((r) => r.closest("[hidden], details:not([open])") === null)
-}
+// something hidden or a folded <details> is not one. The desk's j/k are its own (its grid, an opened
+// application's next): no row cursor there.
+const rows = (lens: HTMLElement): HTMLElement[] =>
+  model.address.lens === "desk" ? [] : [...lens.querySelectorAll<HTMLElement>(ROWS)].filter((r) => r.closest("[hidden], details:not([open])") === null)
 
 const keyOf = (r: HTMLElement, i: number): string => r.dataset.key ?? `#${i}`
 
@@ -260,8 +248,7 @@ function rowKey(k: string): boolean {
     const tabs = [...lens.querySelectorAll<HTMLAnchorElement>(".subtabs a")]
     if (tabs.length < 2) return false
     const at = Math.max(0, tabs.findIndex((t) => t.classList.contains("on")))
-    const next = tabs[(at + (k === "h" || k === "ArrowLeft" ? tabs.length - 1 : 1)) % tabs.length]
-    next?.click()
+    tabs[(at + (k === "h" || k === "ArrowLeft" ? tabs.length - 1 : 1)) % tabs.length]?.click()
     return true
   }
   const all = rows(lens)

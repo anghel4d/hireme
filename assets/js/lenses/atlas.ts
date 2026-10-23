@@ -12,7 +12,7 @@ import { atlas, ids, meId, page, row, value } from "../kernel.ts"
 import { EMPTY, html, type Html } from "../morph.ts"
 import { model, query } from "../state.ts"
 import { FIGURES, figureName, list } from "./me.ts"
-import { cited, cites, head, resort, rowHref, views } from "./world.ts"
+import { cited, cites, head, rowHref, views } from "./world.ts"
 
 type Fit = { id: number; kind: string; name: string; iso2: string | null; country: string | null; languages: string | null; route: string; speaks: boolean | null; preferred: boolean; avoided: boolean; fit: number | null }
 type Doc = { known: boolean; recipe: { key: string; weight: number }[]; unknown: string[]; places: Fit[] }
@@ -84,11 +84,11 @@ function view(): Html {
     ${you(d)}${recipe(d)}
     <div class="toolbar" data-key="toolbar">
       <nav class="kinds" aria-label="Which places">${tab("", "all")}${tab("country", "countries")}${tab("city", "cities")}</nav>
-      <input type="search" class="search" placeholder="name starts with…" value="${q.get("q") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search places">
+      <input type="search" class="search" placeholder="name starts with…" value="${q.get("q") ?? ""}" data-act="q" data-q="q" data-on="input" data-bound aria-label="Search places">
       <span class="muted">${kept.length} place${kept.length === 1 ? "" : "s"}</span>
     </div>
     <div class="chips" role="group" aria-label="Which figures" data-key="groups">${[["weighted", "Weighted"], ...groups.map((g) => [g, g.charAt(0).toUpperCase() + g.slice(1)]), ["all", "All figures"]].map(([x, text]) =>
-      html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="cols" data-v="${x}" data-key="${x}">${text}</button>`)}</div>
+      html`<button type="button" class="chip${x === pick ? " on" : ""}" aria-pressed="${String(x === pick)}" data-act="q" data-q="cols" data-v="${x}" data-key="${x}">${text}</button>`)}</div>
     ${c.length === 2 ? cites(PLACES, { id: Number(c[0]), column: c[1]! }) : EMPTY}
     ${d.places.length === 0 ? html`<p class="empty">No places yet. Agents add countries and cities through the MCP (<code>put places</code>); you can add one in World.</p>` : html`<div class="grid-wrap" data-key="grid">
       <table class="grid sparse">
@@ -108,7 +108,7 @@ function view(): Html {
         })}</tbody>
       </table>
     </div>
-    ${kept.length > shown.length ? html`<button type="button" data-act="more">Show ${PAGE} more</button>` : EMPTY}`}
+    ${kept.length > shown.length ? html`<button type="button" data-act="q" data-q="more" data-v="${Number(q.get("more") ?? 1) + 1}">Show ${PAGE} more</button>` : EMPTY}`}
   </div>`
 }
 
@@ -117,14 +117,6 @@ const lens: View = {
   view,
   act(name, el, ev) {
     switch (name) {
-      case "cols":
-        return query("cols", el.dataset.v ?? "")
-      case "sort":
-        return resort(el.dataset.col ?? "")
-      case "search":
-        return query("q", (el as HTMLInputElement).value)
-      case "more":
-        return query("more", String(Number(model.address.q.get("more") ?? 1) + 1))
       case "cites":
         ev.stopPropagation()
         return query("cites", `${el.dataset.id ?? ""}:${el.dataset.col ?? ""}`)

@@ -19,7 +19,7 @@ import { DOMAIN } from "../gen/schema.ts"
 import { Refused, ask, ids, page, rpc, value, type Row } from "../kernel.ts"
 import { EMPTY, attempt, entries, fields, flag, html, resetIfUnchanged, str, trusted, type Html } from "../morph.ts"
 import { detail } from "./trail.ts"
-import { model, notice, query, set, type AccountView } from "../state.ts"
+import { go, model, notice, set, type AccountView } from "../state.ts"
 
 const DOMAINS = ["world", "desk", "mail", "corpus"] as const
 const PRESETS = [
@@ -88,7 +88,6 @@ function overview(): Row | null {
       const preset = k.may_delete === true ? undefined : Object.keys(PRESET_MASKS).find((p) => PRESET_MASKS[p]!.read === num(k.read_mask) && PRESET_MASKS[p]!.write === num(k.write_mask))
       return { ...k, display: `hm_${str(k.prefix)}…`, preset: preset ?? "custom", live: str(k.revoked_at) === "" && (str(k.expires_at) === "" || later(k.expires_at)), paused: str(k.paused_at) !== "" }
     })
-    const leases = rowsOf("leases").map((l) => ({ ...l, ids: str(l.held).split("\u001f").filter((x) => x !== "") }))
     return {
       name: value("acct_info", at, "name"),
       fresh_for: Number.isNaN(proof) ? 0 : Math.min(STEP_UP_S, Math.max(0, STEP_UP_S - (Date.now() - proof) / 1000)),
@@ -97,7 +96,7 @@ function overview(): Row | null {
       factors,
       sessions,
       keys,
-      leases,
+      leases: rowsOf("leases"),
       trusted_hosts: rowsOf("trusted"),
     }
   }, null)
@@ -244,10 +243,12 @@ type Draft = NonNullable<AccountView["masks"]>
 
 const presetMasks = (preset: string): { read: number; write: number } => PRESET_MASKS[preset] ?? { read: 0, write: 0 }
 
-/** The form's access: what was chosen in it, or what it opened with. */
-function draft(form: string, read: number, write: number, preset: string, mayDelete: boolean): Draft {
+/** The access in the key form `form` ("mint" or "k<id>"): what was chosen in it, else its key's own, else read only. */
+function draft(form: string): Draft {
   const d = v().masks
-  return d && d.form === form ? d : { form, preset, read, write, mayDelete }
+  if (d && d.form === form) return d
+  const k = list("keys").find((x) => `k${num(x.id)}` === form)
+  return { form, preset: k ? str(k.preset) || "custom" : "read_only", read: num(k?.read_mask), write: num(k?.write_mask), mayDelete: k?.may_delete === true }
 }
 
 /** The masks a draft grants: a preset's own, or the custom checkboxes. */
@@ -294,8 +295,8 @@ async function link(provider: string, email?: string): Promise<void> {
  * grants (editable only for custom), and a sentence of what the key will do,
  * all drawn from the form's draft before anything is minted.
  */
-function maskPicker(prefix: string, read: number, write: number, preset: string, mayDelete: boolean): Html {
-  const d = draft(prefix, read, write, preset, mayDelete)
+function maskPicker(prefix: string): Html {
+  const d = draft(prefix)
   const g = grants(d)
   const custom = d.preset === "custom"
   return html`<div class="mask-picker" data-act="masks" data-on="change" data-form="${prefix}" data-key="${prefix}-picker">
@@ -433,14 +434,14 @@ function keys(): Html {
         ${open === `change:${id}` ? html`<tr data-key="k${id}-change"><td colspan="6">
           <form class="stack" data-submit="key-change" data-act="key-change" data-id="${id}">
             <label>Name <input name="name" value="${str(k.name)}" maxlength="100" required></label>
-            ${maskPicker(`k${id}`, num(k.read_mask), num(k.write_mask), str(k.preset) || "custom", k.may_delete === true)}
+            ${maskPicker(`k${id}`)}
             <p class="hint">Widening a key or allowing deletes needs a fresh factor. The agent's session restarts with the new masks.</p>
             <div class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="close">Cancel</button></div>
           </form></td></tr>` : EMPTY}`
     })}</tbody></table></div>
     ${open === "mint" ? html`<form class="stack" data-submit="mint" data-act="mint" data-key="mint">
         <label>Name <input name="name" required maxlength="100" placeholder="research agent"></label>
-        ${maskPicker("mint", 0, 0, "read_only", false)}
+        ${maskPicker("mint")}
         <label>Expires after <select name="expires_in_days"><option value="">never</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">a year</option></select></label>
         <div class="row"><button class="primary"${flag("disabled", v().minting)}>${v().minting ? "Minting…" : "Mint key"}</button><button type="button" class="ghost" data-act="close">Cancel</button></div>
       </form>` : html`<button type="button" class="primary" data-act="open" data-form="mint">Mint a key</button>`}
@@ -452,7 +453,7 @@ function leases(): Html {
   return html`<section class="card" data-key="leases"><h2>Live leases</h2>
     ${rows.length === 0 ? html`<p class="hint">No agent holds the write channel.</p>` : html`<p class="hint">Revoking an agent's lease pauses its key: it keeps reading but writes nothing until you resume it under API keys. Revoking the key stops it for good.</p>`}
     <ul class="rows">${rows.map((l) => {
-      const ids = Array.isArray(l.ids) ? l.ids.length : 0
+      const ids = str(l.held).split("\u001f").filter((x) => x !== "").length
       return html`<li data-key="l${num(l.id)}"><b>${str(l.label)}</b>
         <span class="muted">${l.key_id === null || l.key_id === undefined ? "browser" : `key ${num(l.key_id)}`} · ${ids} application${ids === 1 ? "" : "s"} · since ${time(l.since)}</span>
         ${l.key_id === null || l.key_id === undefined ? EMPTY : confirmButton(`l${num(l.id)}`, "Revoke", "lease-revoke", { id: num(l.id) })}</li>`
@@ -556,10 +557,7 @@ function act(name: string, el: HTMLElement): void {
     case "masks": {
       const f2 = el.closest("form")
       if (!f2) return
-      const id2 = el.dataset.form ?? ""
-      const key = list("keys").find((x) => `k${num(x.id)}` === id2)
-      const prev = draft(id2, num(key?.read_mask), num(key?.write_mask), key ? str(key.preset) || "custom" : "read_only", key?.may_delete === true)
-      return patch({ masks: redraft(f2, prev) })
+      return patch({ masks: redraft(f2, draft(el.dataset.form ?? "")) })
     }
     case "rename":
       return void call("account.rename", { name: f.name ?? "" }, () => patch({ open: "" }))
@@ -588,7 +586,7 @@ function act(name: string, el: HTMLElement): void {
     case "mint": {
       if (!form || v().minting) return
       const days = Number(f.expires_in_days)
-      const params = { name: f.name ?? "", ...masksFrom(draft("mint", 0, 0, "read_only", false)), ...(days > 0 ? { expires_in_days: days } : {}) }
+      const params = { name: f.name ?? "", ...masksFrom(draft("mint")), ...(days > 0 ? { expires_in_days: days } : {}) }
       patch({ minting: true })
       return void call("account.key.mint", params, (r) => {
         patch({ masks: null })
@@ -599,7 +597,7 @@ function act(name: string, el: HTMLElement): void {
       if (!form) return
       const key = list("keys").find((k) => num(k.id) === id)
       const rename = key && str(key.name) !== f.name ? call("account.key.rename", { id, name: f.name ?? "" }) : Promise.resolve()
-      const d = draft(`k${id}`, num(key?.read_mask), num(key?.write_mask), key ? str(key.preset) || "custom" : "custom", key?.may_delete === true)
+      const d = draft(`k${id}`)
       const g = grants(d)
       // Changing masks ends the agent's session (BYE grants) and its lease: only a real change does that.
       const changed = !key || g.read !== num(key.read_mask) || g.write !== num(key.write_mask) || d.mayDelete !== (key.may_delete === true)
@@ -693,10 +691,7 @@ const view_: View = {
     const failed = q.get("link_error")
     if (linked) notice("ok", `${linked} is linked.`)
     if (failed) notice("error", failed === "taken" ? MESSAGES.taken ?? "" : failed === "cap" ? "This account already has the most ways in it may hold (100)." : failed === "denied" ? "Linking was cancelled." : "Linking failed.")
-    if (linked || failed) {
-      query("linked", "")
-      query("link_error", "")
-    }
+    if (linked || failed) go({ q: new Map([...q].filter(([k]) => k !== "linked" && k !== "link_error")) }, true)
   },
   act,
 }

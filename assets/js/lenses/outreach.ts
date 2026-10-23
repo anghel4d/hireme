@@ -12,7 +12,7 @@ import type { View } from "../app.ts"
 import { DOMAIN, ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
 import { ask, command, failed, page, put, row, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, str, type Html } from "../morph.ts"
-import { go, item, itemNo, model, query, set, type OutreachView } from "../state.ts"
+import { go, item, itemNo, model, set, type OutreachView } from "../state.ts"
 import { control } from "./world.ts"
 
 const PAGE = 100
@@ -28,9 +28,7 @@ const CONTACT: ColumnDef[] = TABLES.contacts.cols.filter((c) => !c.implied && !c
 function contacts(limit: number): { rows: Row[]; more: boolean } {
   const q = model.address.q.get("who") ?? ""
   const corp = Number(model.address.q.get("corporation") ?? 0)
-  const where: Record<string, unknown> = {}
-  if (q !== "") where.name = { prefix: q }
-  if (corp > 0) where.corporation_id = corp
+  const where = { ...(q !== "" ? { name: { prefix: q } } : {}), ...(corp > 0 ? { corporation_id: corp } : {}) }
   return page({ table: "contacts", order: ["last_touch_on", "desc"], where }, limit)
 }
 /** A corporation by its name in the replica, or by number when it is not there. */
@@ -74,12 +72,9 @@ const shown = (url: string | null): Html => (url ? html`<a href="${href(url)}" r
 /** The variant's own fields, under the body. */
 function own(i: Item): Html {
   const e = i.email
-  if (e) return html`<dl class="mail">
-    <dt>From</dt><dd><code>${e.from ?? ""}</code></dd>${e.to.length ? html`<dt>To</dt><dd><code>${e.to.join(", ")}</code></dd>` : EMPTY}
-    ${e.cc.length ? html`<dt>Cc</dt><dd><code>${e.cc.join(", ")}</code></dd>` : EMPTY}
-    ${e.reply_to ? html`<dt>Reply-To</dt><dd><code>${e.reply_to}</code></dd>` : EMPTY}
-    ${e.message_id ? html`<dt>Message-ID</dt><dd><code>${e.message_id}</code></dd>` : EMPTY}
-    ${e.pipe ? html`<dt>Came by</dt><dd>${e.pipe}</dd>` : EMPTY}</dl>`
+  // From always; the other headers when they are there.
+  const heads = [["From", e?.from ?? ""], ["To", e?.to.join(", ")], ["Cc", e?.cc.join(", ")], ["Reply-To", e?.reply_to], ["Message-ID", e?.message_id]] as const
+  if (e) return html`<dl class="mail">${heads.map(([k, x], i) => (i === 0 || x ? html`<dt>${k}</dt><dd><code>${x}</code></dd>` : EMPTY))}${e.pipe ? html`<dt>Came by</dt><dd>${e.pipe}</dd>` : EMPTY}</dl>`
   if (i.careers_page) return html`${i.careers_page.reference ? html`<p>Reference <code>${i.careers_page.reference}</code></p>` : EMPTY}
     ${i.careers_page.fields ? text(JSON.stringify(i.careers_page.fields, null, 2)) : EMPTY}`
   if (i.other) return html`<p class="muted">${i.other.channel ?? ""}${i.other.handle ? ` · ${i.other.handle}` : ""}</p>`
@@ -180,11 +175,11 @@ function hub(where: Record<string, unknown>, tray_: boolean): Html {
   const a = outreachQuery({ where: w, search: q.get("q") ?? "", sort: ["at", "desc"], group, after: 0, limit: Math.min(500, v().items) })
   if (!a) return html`<p class="empty">Outreach is loading, or this account cannot read mail.</p>`
   return html`<div class="toolbar" data-key="hub-bar">
-      <input type="search" class="search" placeholder="Search what was said…" value="${q.get("q") ?? ""}" data-act="find" data-on="input" data-bound aria-label="Search outreach">
-      <select data-act="kind" data-on="change" data-bound aria-label="Kind"><option value="">every kind</option>${(ENUMS.outreach_kind ?? []).map((k) => html`<option value="${k}"${flag("selected", k === kind)}>${KIND[k] ?? k}</option>`)}</select>
-      <select data-act="group" data-on="change" data-bound aria-label="Group by">${GROUPS.map((g) => html`<option value="${g}"${flag("selected", g === group)}>${g === "" ? "no grouping" : `by ${g}`}</option>`)}</select>
-      <label>from <input type="date" data-act="from" data-on="change" data-bound value="${from}"></label>
-      <label>to <input type="date" data-act="to" data-on="change" data-bound value="${to}"></label>
+      <input type="search" class="search" placeholder="Search what was said…" value="${q.get("q") ?? ""}" data-act="q" data-q="q" data-on="input" data-bound aria-label="Search outreach">
+      <select data-act="q" data-q="kind" data-on="change" data-bound aria-label="Kind"><option value="">every kind</option>${(ENUMS.outreach_kind ?? []).map((k) => html`<option value="${k}"${flag("selected", k === kind)}>${KIND[k] ?? k}</option>`)}</select>
+      <select data-act="q" data-q="group" data-on="change" data-bound aria-label="Group by">${GROUPS.map((g) => html`<option value="${g}"${flag("selected", g === group)}>${g === "" ? "no grouping" : `by ${g}`}</option>`)}</select>
+      <label>from <input type="date" data-act="q" data-q="from" data-on="change" data-bound value="${from}"></label>
+      <label>to <input type="date" data-act="q" data-q="to" data-on="change" data-bound value="${to}"></label>
     </div>
     <p class="muted" data-key="hub-count">${a.total} item${a.total === 1 ? "" : "s"}${a.counts.unseen ? html` · <b>${a.counts.unseen} unread</b>` : EMPTY}
       · <a href="/outreach/unfiled" data-nav>unfiled tray (${a.counts.unfiled})</a>${tray_ ? html` · <a href="/outreach" data-nav>everything</a>` : EMPTY}</p>
@@ -222,9 +217,9 @@ function view(): Html {
   const list = contacts(v().limit)
   return html`<div class="outreach split">
     <aside class="list" data-key="list">
-      <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("who") ?? ""}" data-act="search" data-on="input" data-bound aria-label="Search contacts">
+      <div class="toolbar"><input type="search" class="search" placeholder="Name starts with…" value="${model.address.q.get("who") ?? ""}" data-act="q" data-q="who" data-on="input" data-bound aria-label="Search contacts">
         ${writable() ? html`<button type="button" data-act="new-contact">New</button>` : EMPTY}</div>
-      ${corp ? html`<p class="muted">At ${corpLink(corp)} <button type="button" class="ghost" data-act="all">show all</button></p>` : EMPTY}
+      ${corp ? html`<p class="muted">At ${corpLink(corp)} <button type="button" class="ghost" data-act="q" data-q="corporation" data-v="">show all</button></p>` : EMPTY}
       ${v().edit === "new" ? html`<form class="stack card" data-submit="create-contact" data-act="create-contact" data-key="new">
           ${CONTACT.filter((x) => x.required || x.name === "email" || x.name === "title" || x.name === "corporation_id").map((x) => field(x, x.name === "corporation_id" ? corp : null))}
           <span class="row"><button class="primary">Add</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>` : EMPTY}
@@ -250,11 +245,6 @@ const form = (el: HTMLElement): Record<string, Input> => Object.fromEntries(Obje
 function act(name: string, el: HTMLElement): void {
   const id = selected()
   switch (name) {
-    case "search":
-      // The replica answers in the keystroke's frame: no wait before asking.
-      return query("who", (el as HTMLInputElement).value)
-    case "all":
-      return query("corporation", "")
     case "more":
       return patch({ limit: v().limit + PAGE })
     case "cancel":
@@ -300,13 +290,6 @@ function act(name: string, el: HTMLElement): void {
     }
     case "new-record":
       return patch({ edit: "record" })
-    case "find":
-      return query("q", (el as HTMLInputElement).value)
-    case "kind":
-    case "group":
-    case "from":
-    case "to":
-      return query(name, (el as HTMLInputElement | HTMLSelectElement).value)
     case "more-items":
       return patch({ items: v().items + PAGE })
     default:

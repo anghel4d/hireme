@@ -195,8 +195,7 @@ const catalog = (): Field[] => ask<{ fields: Field[] }>("mask_fields")?.fields ?
 
 const rootName = (id: number | null): string => (id ? str(value("cv_roots", id, "name")) || `#${id}` : "none")
 const roots = (): number[] => [...ids("cv_roots")].sort((a, b) => rootName(a).localeCompare(rootName(b)))
-const rootOptions = (pick: number | null, none = false): Html =>
-  html`${none ? html`<option value="">none</option>` : EMPTY}${roots().map((id) => html`<option value="${id}"${flag("selected", id === pick)}>${rootName(id)}</option>`)}`
+const rootOptions = (pick: number | null): Html => html`${roots().map((id) => html`<option value="${id}"${flag("selected", id === pick)}>${rootName(id)}</option>`)}`
 
 /** The text with the byte span [pos, pos+len) marked (positions are UTF-8 bytes). */
 function marked(text: string, pos: number, len: number): Html {
@@ -259,7 +258,7 @@ function card(id: number, isDefault: boolean, apps: number): Html {
   const v = (c: string): string => (head ? str(value("cv_versions", head, c)) : "")
   const open = opened().includes(id)
   return html`<article class="cv-card${open ? " open" : ""}${over === id ? " over" : ""}" data-key="c${id}" data-root="${id}">
-    <header data-act="toggle" data-click data-id="${id}" aria-expanded="${String(open)}">
+    <header data-act="q" data-q="open" data-v="${(open ? opened().filter((x) => x !== id) : [...opened(), id]).join(",")}" data-click aria-expanded="${String(open)}">
       <span class="chev" aria-hidden="true"></span>
       <input class="cv-name" value="${rootName(id)}" data-act="meta" data-col="name" data-on="change" data-id="${id}" aria-label="Name" spellcheck="false" autocomplete="off">
       <span class="tag">${format}</span>
@@ -561,10 +560,7 @@ const meLens: View = {
         return void put("languages", { level: (el as HTMLSelectElement).value }, { id }).catch(failed)
       case "unlang":
         return void drop("languages", id).catch(failed)
-      case "toggle": {
-        const open = opened().includes(id) ? opened().filter((x) => x !== id) : [...opened(), id]
-        return setQuery("open", open.join(","))
-      }
+
       case "meta": {
         const col = el.dataset.col ?? ""
         const x = (el as HTMLInputElement).value.trim()
