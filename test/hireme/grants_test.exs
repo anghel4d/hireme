@@ -10,33 +10,24 @@ defmodule Hireme.GrantsTest do
 
   defp key(r, w, d \\ false), do: Grants.key(%{id: 7, read_mask: r, write_mask: w, may_delete: d})
 
-  property "a mask reads and writes exactly the tables of its domains, never system or trusted hosts" do
-    check all(r <- integer(0..15), w <- integer(0..15), max_runs: 64) do
-      g = key(r, w)
-
-      for t <- @stored do
-        bit =
-          if t.domain in @domains,
-            do: Bitwise.bsl(1, Enum.find_index(@domains, &(&1 == t.domain))),
-            else: 0
-
-        bit = if t.name in @outside, do: 0, else: bit
-        assert Grants.read?(g, t) == (Bitwise.band(r, bit) != 0), "read #{t.name} with #{r}"
-        assert Grants.write?(g, t) == (Bitwise.band(w, bit) != 0), "write #{t.name} with #{w}"
-      end
-    end
-  end
-
-  test "the presets are what their names say" do
-    assert Grants.preset(:read_only) == {15, 0}
-    assert Grants.preset(:write_only) == {0, 15}
-    assert Grants.preset(:read_write) == {15, 15}
+  property "a mask reads and writes exactly the tables of its domains, never system or trusted hosts; the operator reads every other table" do
     op = Grants.operator()
 
     assert Enum.all?(
              @stored,
              &(Grants.read?(op, &1) == (&1.domain != "system" and &1.name not in @outside))
            )
+
+    check all(r <- integer(0..15), w <- integer(0..15), max_runs: 64) do
+      g = key(r, w)
+
+      for t <- @stored do
+        i = Enum.find_index(@domains, &(&1 == t.domain))
+        bit = if i && t.name not in @outside, do: Bitwise.bsl(1, i), else: 0
+        assert Grants.read?(g, t) == (Bitwise.band(r, bit) != 0), "read #{t.name} with #{r}"
+        assert Grants.write?(g, t) == (Bitwise.band(w, bit) != 0), "write #{t.name} with #{w}"
+      end
+    end
   end
 
   test "a key never sees a server_only or private column; the operator sees private ones" do
@@ -48,8 +39,10 @@ defmodule Hireme.GrantsTest do
       refute Enum.any?(Grants.columns(op, t), & &1.server_only)
     end
 
-    profiles = Schema.table(:profiles)
-    assert Enum.any?(Grants.columns(op, profiles), &(&1.name == "narrative_private"))
+    assert Enum.any?(
+             Grants.columns(op, Schema.table(:profiles)),
+             &(&1.name == "narrative_private")
+           )
   end
 
   test "the grant check: scope by domain, may_delete for a drop, human_only for a key" do

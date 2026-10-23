@@ -1,12 +1,12 @@
 defmodule Hireme.WireCase do
   @moduledoc """
-  Tests of the write path: a signed-in account, ops built the way a client
-  builds them (named, typed cells), and the account's sequencer stopped at
-  the end so the next test's account (ids repeat across sandboxes) starts
-  clean.
+  Tests of the write path: a signed-in account holding a world corporation
+  (every application links one, and `app/2` links this one), and ops built
+  the way a client builds them (named, typed cells).
   """
 
   use ExUnit.CaseTemplate
+  import Ecto.Query
   alias Hireme.Kernel.Nif
   alias Hireme.Schema
   alias HiremeWeb.Wire.Codec
@@ -23,57 +23,24 @@ defmodule Hireme.WireCase do
   setup tags do
     Hireme.DataCase.setup_sandbox(tags)
     signed = Hireme.DataCase.sign_in()
-    Hireme.Repo.put_account(signed.account.id)
-    corp = corporation(signed.account.id)
-
-    on_exit(fn ->
-      case Registry.lookup(Hireme.Sequencer.Registry, signed.account.id) do
-        [{pid, _}] -> DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
-        [] -> :ok
-      end
-    end)
-
-    {:ok, Map.put(signed, :corp, corp)}
-  end
-
-  @doc """
-  A world corporation for `account_id`, as the database holds one before
-  its sequencer starts (its text counted in the account's, as the
-  sequencer counts it): every application links one. `app/2` links the
-  test account's.
-  """
-  def corporation(account_id, domain \\ "test-corp.example") do
-    import Ecto.Query
+    a = signed.account.id
+    Hireme.Repo.put_account(a)
+    # As the database holds one before the sequencer starts, its text
+    # counted in the account's as the sequencer counts it.
     now = Hireme.Store.now()
-    name = "Test Corp"
+    corp = %Hireme.Rows.Corporation{account_id: a, domain: "test-corp.example", name: "Test Corp"}
 
     corp =
-      Hireme.Repo.insert!(
-        %Hireme.Rows.Corporation{
-          account_id: account_id,
-          domain: domain,
-          name: name,
-          rev: 1,
-          inserted_at: now,
-          updated_at: now
-        },
-        skip_account: true
-      )
+      Hireme.Repo.insert!(%{corp | rev: 1, inserted_at: now, updated_at: now}, skip_account: true)
 
-    from(a in Hireme.Rows.Account, where: a.id == ^account_id)
-    |> Hireme.Repo.update_all([inc: [text_bytes: byte_size(domain) + byte_size(name)]],
-      skip_account: true
-    )
-
-    if Hireme.Repo.account_id() == account_id, do: Process.put({__MODULE__, :corp}, corp.id)
-    corp.id
+    bytes = byte_size(corp.domain <> corp.name)
+    where = from(x in Hireme.Rows.Account, where: x.id == ^a)
+    Hireme.Repo.update_all(where, [inc: [text_bytes: bytes]], skip_account: true)
+    Process.put({__MODULE__, :corp}, corp.id)
+    {:ok, Map.put(signed, :corp, corp.id)}
   end
 
-  @doc """
-  A new application, linked as every application is: to the test
-  account's corporation, and remote, so it needs no place. `cells` add to
-  or override that.
-  """
+  @doc "A new application, linked to the test account's corporation and remote, so it needs no place; `cells` add to or override that."
   def app(cells \\ %{}, opts \\ []) do
     linked = %{corporation_id: Process.get({__MODULE__, :corp}), work_mode: :remote}
     op(:put, :applications, Map.merge(linked, Map.new(cells)), opts)
@@ -84,7 +51,8 @@ defmodule Hireme.WireCase do
   `:as_of` (a Date) and `:source` (a URL or source id) ride the reserved cells.
   """
   def op(verb, subject, cells \\ %{}, opts \\ []) do
-    {owner, cols} = owner(verb, subject)
+    owner = if verb == :command, do: Schema.command(subject), else: Schema.table(subject)
+    cols = Map.new(owner[:params] || owner.cols, &{&1.name, &1})
 
     encoded =
       Enum.map(cells, fn
@@ -97,29 +65,15 @@ defmodule Hireme.WireCase do
 
     flags = if(opts[:keyed], do: 1, else: 0) + if(opts[:create_only], do: 2, else: 0)
     op_id = opts[:op_id] || System.unique_integer([:positive])
-
-    raw =
-      Codec.encode_op({op_id, verb, flags, owner, opts[:target] || 0, opts[:expect_rev], encoded})
-
-    {:ok, op, ""} = Codec.op(raw)
+    op = {op_id, verb, flags, owner.id, opts[:target] || 0, opts[:expect_rev], encoded}
+    {:ok, op, ""} = Codec.op(Codec.encode_op(op))
     op
-  end
-
-  defp owner(:command, name) do
-    c = Schema.command(name)
-    {c.id, Map.new(c.params, &{&1.name, &1})}
-  end
-
-  defp owner(_verb, table) do
-    t = Schema.table(table)
-    {t.id, Map.new(t.cols, &{&1.name, &1})}
   end
 
   defp cell(col, v) do
     ty = Codec.cell_type(col)
     v = Codec.to_wire(col, v)
-    v = if ty == 4, do: v * 1.0, else: v
-    {col.id, ty, v}
+    {col.id, ty, if(ty == 4, do: v * 1.0, else: v)}
   end
 
   @doc "Runs ops as the operator (or `actor`): `{acks, nacks}`, NACK codes as refusal atoms."
@@ -127,8 +81,22 @@ defmodule Hireme.WireCase do
     {:ok, _rev, acks, nacks} =
       Hireme.Sequencer.call(account_id, actor || operator(), List.wrap(ops))
 
-    {acks, Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))}
+    {acks, refusals(nacks)}
   end
+
+  @doc "Runs one op that must land: its ACK."
+  def ack!(account_id, op, actor \\ nil) do
+    {[ack], []} = run(account_id, op, actor)
+    ack
+  end
+
+  @doc "Runs one op that must be refused: its refusal atom."
+  def nack!(account_id, op, actor \\ nil) do
+    {[], [nack]} = run(account_id, op, actor)
+    nack.refusal
+  end
+
+  defp refusals(nacks), do: Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))
 
   defp operator, do: %{label: "test", grants: Hireme.Grants.operator(), key_id: nil}
 
@@ -175,18 +143,11 @@ defmodule Hireme.WireCase do
   """
   def key_session(account_id, key, sid, claims \\ %{}) do
     me = self()
+    info = %{id: sid, label: "agent#{sid}", grants: Hireme.Grants.key(key), key_id: key.id}
 
     pid =
       spawn_link(fn ->
-        info = %{
-          id: sid,
-          label: "agent#{sid}",
-          grants: Hireme.Grants.key(key),
-          key_id: key.id,
-          session_id: nil
-        }
-
-        {:ok, _} = Hireme.Sequencer.subscribe(account_id, info, 0)
+        {:ok, _} = Hireme.Sequencer.subscribe(account_id, Map.put(info, :session_id, nil), 0)
         {:ok, reply} = Hireme.Lease.claim(account_id, sid, claims)
         send(me, {:agent_ready, self(), reply})
         agent_loop(account_id)
@@ -202,13 +163,11 @@ defmodule Hireme.WireCase do
       {:ops, from, ops} ->
         Hireme.Sequencer.submit(account_id, ops)
 
-        verdicts =
-          receive do
-            {:sequencer, :verdicts, _, acks, nacks} ->
-              {acks, Enum.map(nacks, &Map.put(&1, :refusal, Schema.refusal_name(&1.code)))}
-          end
+        receive do
+          {:sequencer, :verdicts, _, acks, nacks} ->
+            send(from, {:verdicts, self(), {acks, refusals(nacks)}})
+        end
 
-        send(from, {:verdicts, self(), verdicts})
         agent_loop(account_id)
 
       _ ->
@@ -226,19 +185,8 @@ defmodule Hireme.WireCase do
     end
   end
 
-  @doc "The table ids and row counts of a table-run body (BOOT, PATCH)."
-  def tables(<<>>), do: []
-
-  def tables(<<table::little-16, ncols::little-16, nrows::little-32, rest::binary>>) do
-    rest =
-      Enum.reduce(1..ncols//1, rest, fn _, <<_::32, len::little-32, r::binary>> ->
-        skip(r, len + rem(8 - rem(len, 8), 8))
-      end)
-
-    [{Schema.table(table).name, nrows} | tables(rest)]
-  end
-
-  defp skip(bin, n), do: binary_part(bin, n, byte_size(bin) - n)
+  @doc "The table names and row counts of a table-run body (BOOT, PATCH)."
+  def tables(body), do: for({t, rows} <- blocks(body), do: {t, length(rows)})
 
   @doc """
   A client's model of the resident tables: `%{table_name => %{id => %{col_id
@@ -272,7 +220,8 @@ defmodule Hireme.WireCase do
       Enum.map_reduce(1..ncols//1, rest, fn _,
                                             <<id::little-16, ty, 0, len::little-32, r::binary>> ->
         <<data::binary-size(^len), r::binary>> = r
-        {{id, values(ty, nrows, data)}, skip(r, rem(8 - rem(len, 8), 8))}
+        pad = rem(8 - rem(len, 8), 8)
+        {{id, values(ty, nrows, data)}, binary_part(r, pad, byte_size(r) - pad)}
       end)
 
     rows = for i <- 0..(nrows - 1)//1, do: Map.new(cols, fn {id, vs} -> {id, Enum.at(vs, i)} end)

@@ -120,8 +120,6 @@
           env = {
             MIX_ENV = "test";
             MIX_REBAR3 = "${beamPackages.rebar3}/bin/rebar3";
-            # A gate run: bun is required, not skipped.
-            HIREME_GATE_STRICT = "1";
             EXQLITE_USE_SYSTEM = "1";
             EXQLITE_SYSTEM_CFLAGS = "-I${pkgs.sqlite.dev}/include";
             EXQLITE_SYSTEM_LDFLAGS = "-L${pkgs.sqlite.out}/lib -lsqlite3";

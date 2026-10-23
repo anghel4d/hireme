@@ -6,10 +6,10 @@ defmodule Hireme.ProvenanceTest do
   alias Hireme.Provenance
   alias Hireme.Rows.{Citation, Corporation, Source}
 
-  defp corp(a, domain) do
-    {[ack], []} = run(a.id, op(:put, :corporations, %{domain: domain, name: domain}))
-    ack.id
-  end
+  defp corp(a, domain),
+    do: ack!(a.id, op(:put, :corporations, %{domain: domain, name: domain})).id
+
+  defp put(id, cells, opts \\ []), do: op(:put, :corporations, cells, [target: id] ++ opts)
 
   defp cites(id, column),
     do:
@@ -28,7 +28,7 @@ defmodule Hireme.ProvenanceTest do
       id = corp(a, "m#{tag}.example")
       url = fn s -> "https://m#{tag}.example/#{s}" end
       # Both sources exist before the sequence, so a new source never decides.
-      for s <- ~w(a b), do: {[_], []} = run(a.id, op(:put, :sources, %{url: url.(s)}))
+      for s <- ~w(a b), do: ack!(a.id, op(:put, :sources, %{url: url.(s)}))
 
       model =
         Enum.reduce(steps, %{last: %{}, rev: 1, cites: %{}}, fn {which, v1, v2, s, d}, m ->
@@ -36,7 +36,7 @@ defmodule Hireme.ProvenanceTest do
           cols = if which == :both, do: [:headcount, :revenue_usd], else: [which]
           cells = Map.take(%{headcount: v1, revenue_usd: v2 * 1.0e6}, cols)
           reserved = if s, do: %{as_of: on, source: url.(s)}, else: %{as_of: on}
-          verdict = run(a.id, op(:put, :corporations, Map.merge(cells, reserved), target: id))
+          verdict = run(a.id, put(id, Map.merge(cells, reserved)))
 
           stale =
             Enum.any?(cols, fn c ->
@@ -87,23 +87,17 @@ defmodule Hireme.ProvenanceTest do
     hc = Enum.find(t.cols, &(&1.name == "headcount"))
     cells = [{hc.id, 1, 5}, {Codec.as_of_col(), 1, 4_000_000_000}]
     {:ok, huge, ""} = Codec.op(Codec.encode_op({1, :put, 0, t.id, id, nil, cells}))
-
-    prose = fn cells, opts ->
-      op(:put, :corporations, Map.put(cells, :about, "x"), [target: id] ++ opts)
-    end
+    prose = &put(id, Map.put(&1, :about, "x"), &2)
 
     for {o, code} <- [
-          {op(:put, :corporations, %{revenue_usd: 1.0e6}, target: id), :freshness},
-          {op(:put, :corporations, %{headcount: 5, as_of: Date.add(Date.utc_today(), 30)},
-             target: id
-           ), :freshness},
+          {put(id, %{revenue_usd: 1.0e6}), :freshness},
+          {put(id, %{headcount: 5, as_of: Date.add(Date.utc_today(), 30)}), :freshness},
           {huge, :type},
           {prose.(%{source: "https://p.example/"}, []), :rev},
           {prose.(%{}, expect_rev: 1), :source_missing},
           {prose.(%{source: 424_242}, expect_rev: 1), :source_missing}
-        ] do
-      assert {[], [%{refusal: ^code}]} = run(a.id, o), inspect(code)
-    end
+        ],
+        do: assert(nack!(a.id, o) == code, inspect(code))
 
     assert %{headcount: nil, about: nil} = Repo.get!(Corporation, id)
   end
@@ -111,50 +105,34 @@ defmodule Hireme.ProvenanceTest do
   test "a source's host is derived by the server, never taken from the writer", %{account: a} do
     id = corp(a, "h.example")
     cells = %{headcount: 5, as_of: ~D[2026-10-01], source: "https://News.Example.ORG./story?x=1"}
-    {[_], []} = run(a.id, op(:put, :corporations, cells, target: id))
+    ack!(a.id, put(id, cells))
     assert [%{host: "news.example.org"}] = Repo.all(Source)
-
-    assert {[], [%{refusal: :column}]} =
-             run(a.id, op(:put, :sources, %{url: "https://a.example/", host: "evil.example"}))
-
-    {[s], []} = run(a.id, op(:put, :sources, %{url: "https://b.example/page"}))
+    forged = %{url: "https://a.example/", host: "evil.example"}
+    assert nack!(a.id, op(:put, :sources, forged)) == :column
+    s = ack!(a.id, op(:put, :sources, %{url: "https://b.example/page"}))
     assert Repo.get!(Source, s.id).host == "b.example"
   end
 
   test "a cited source outlives its citations: the operator's drop is a tombstone they keep naming, a key's is refused; an uncited one goes",
        %{account: a, session: s} do
     id = corp(a, "l.example")
-
-    {[_], []} =
-      run(
-        a.id,
-        op(:put, :corporations, %{about: "x", source: "https://l.example/about"},
-          target: id,
-          expect_rev: 1
-        )
-      )
-
+    ack!(a.id, put(id, %{about: "x", source: "https://l.example/about"}, expect_rev: 1))
     [c] = Repo.all(from(c in Citation, where: c.row_id == ^id and c.column == "about"))
     assert c.source_id
-
-    {:ok, %{key: key}} =
-      Hireme.Keys.mint(s, "deleter", %{read_mask: 15, write_mask: 15, may_delete: true})
-
+    masks = %{read_mask: 15, write_mask: 15, may_delete: true}
+    {:ok, %{key: key}} = Hireme.Keys.mint(s, "deleter", masks)
     {agent, _} = key_session(a.id, key, 997)
-
-    assert {[], [%{refusal: :scope} = nack]} =
-             key_session_ops(agent, op(:drop, :sources, %{}, target: c.source_id))
-
+    drop = &op(:drop, :sources, %{}, target: &1)
+    assert {[], [%{refusal: :scope} = nack]} = key_session_ops(agent, drop.(c.source_id))
     assert JSON.decode!(nack.data)["reason"] =~ "provenance"
 
-    assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: c.source_id))
+    ack!(a.id, drop.(c.source_id))
     assert Repo.get!(Citation, c.id).source_id == c.source_id
+    tombstone = Repo.get!(Source, c.source_id)
+    assert %{deleted_at: %DateTime{}, url: "https://l.example/about"} = tombstone
 
-    assert %{deleted_at: %DateTime{}, url: "https://l.example/about"} =
-             Repo.get!(Source, c.source_id)
-
-    {[uncited], []} = run(a.id, op(:put, :sources, %{url: "https://l.example/other"}))
-    assert {[_], []} = key_session_ops(agent, op(:drop, :sources, %{}, target: uncited.id))
+    uncited = ack!(a.id, op(:put, :sources, %{url: "https://l.example/other"}))
+    assert {[_], []} = key_session_ops(agent, drop.(uncited.id))
     refute Repo.get(Source, uncited.id)
   end
 
@@ -163,64 +141,46 @@ defmodule Hireme.ProvenanceTest do
     id = corp(a, "pr.example")
 
     put = fn cells, rev ->
-      cells = Map.merge(%{about: "Old", source: "https://pr.example/x"}, cells)
-      op(:put, :corporations, cells, target: id, expect_rev: rev)
+      put(id, Map.merge(%{about: "Old", source: "https://pr.example/x"}, cells), expect_rev: rev)
     end
 
-    {[r1], []} = run(a.id, put.(%{}, 1))
-    {[r2], []} = run(a.id, put.(%{source: "https://pr.example/y"}, r1.rev))
-    {[same], []} = run(a.id, put.(%{source: "https://pr.example/y"}, r2.rev))
+    r1 = ack!(a.id, put.(%{}, 1))
+    r2 = ack!(a.id, put.(%{source: "https://pr.example/y"}, r1.rev))
+    same = ack!(a.id, put.(%{source: "https://pr.example/y"}, r2.rev))
     assert same.rev == r2.rev and cites(id, "about") == 2
-    {[r3], []} = run(a.id, put.(%{}, r2.rev))
+    r3 = ack!(a.id, put.(%{}, r2.rev))
     assert r3.rev == r2.rev + 1 and cites(id, "about") == 3
-    assert {[], [%{refusal: :rev}]} = run(a.id, put.(%{}, r2.rev))
+    assert nack!(a.id, put.(%{}, r2.rev)) == :rev
 
-    {[r4], []} = run(a.id, put.(%{as_of: ~D[2026-09-01]}, r3.rev))
-    {[same], []} = run(a.id, put.(%{as_of: ~D[2026-09-01]}, r4.rev))
+    r4 = ack!(a.id, put.(%{as_of: ~D[2026-09-01]}, r3.rev))
+    same = ack!(a.id, put.(%{as_of: ~D[2026-09-01]}, r4.rev))
     assert same.rev == r4.rev and cites(id, "about") == 4
-    {[r5], []} = run(a.id, put.(%{as_of: ~D[2026-09-15]}, r4.rev))
+    r5 = ack!(a.id, put.(%{as_of: ~D[2026-09-15]}, r4.rev))
     assert r5.rev == r4.rev + 1 and cites(id, "about") == 5
     assert Repo.get!(Corporation, id).rev == r5.rev
   end
 
-  test "culture and ratings need a trusted host; trusting a host covers its subdomains, until distrusted",
+  test "culture and ratings need a trusted host; trusting a host covers its subdomains, until distrusted; the trusted hosts stop at their declared cap",
        %{account: a} do
     id = corp(a, "t.example")
     rating = %{rating: 4.1, as_of: ~D[2026-10-01], source: "https://www.ratings.example/c"}
-
-    assert {[], [%{refusal: :source_trust}]} =
-             run(a.id, op(:put, :corporations, rating, target: id))
-
-    assert {[], [%{refusal: :source_missing}]} =
-             run(a.id, op(:put, :corporations, Map.delete(rating, :source), target: id))
-
+    assert nack!(a.id, put(id, rating)) == :source_trust
+    assert nack!(a.id, put(id, Map.delete(rating, :source))) == :source_missing
     {:ok, _} = Provenance.trust("ratings.example", "reviews", %{})
-    assert [%{host: "ratings.example", note: "reviews"}] = Provenance.trusted_hosts()
-    {[_], []} = run(a.id, op(:put, :corporations, rating, target: id))
-
+    assert [%{id: host_id, host: "ratings.example", note: "reviews"}] = Provenance.trusted_hosts()
+    ack!(a.id, put(id, rating))
     culture = %{culture: "Calm.", source: "https://www.levels.fyi/x"}
-
-    assert {[], [%{refusal: :source_trust}]} =
-             run(a.id, op(:put, :corporations, culture, target: id, expect_rev: 2))
-
-    [%{id: host_id}] = Provenance.trusted_hosts()
+    assert nack!(a.id, put(id, culture, expect_rev: 2)) == :source_trust
     :ok = Provenance.distrust(host_id, %{})
     cells = %{rating_count: 9, as_of: ~D[2026-10-02], source: "https://ratings.example/"}
+    assert nack!(a.id, put(id, cells)) == :source_trust
 
-    assert {[], [%{refusal: :source_trust}]} =
-             run(a.id, op(:put, :corporations, cells, target: id))
-  end
-
-  test "the operator's trusted hosts stop at their declared cap", %{account: a} do
-    cap = Schema.table(:trusted_hosts).cap
     now = DateTime.utc_now() |> DateTime.truncate(:second)
+    host = &%{account_id: a.id, host: "h#{&1}.example", rev: 1, inserted_at: now, updated_at: now}
 
     Repo.insert_all(
       Hireme.Rows.TrustedHost,
-      for(
-        i <- 1..(cap - 1),
-        do: %{account_id: a.id, host: "h#{i}.example", rev: 1, inserted_at: now, updated_at: now}
-      )
+      for(i <- 2..Schema.table(:trusted_hosts).cap, do: host.(i))
     )
 
     assert {:ok, _} = Provenance.trust("last.example", nil, %{})
@@ -246,14 +206,12 @@ defmodule Hireme.ProvenanceTest do
           "ftp://a.example/",
           "https://evil.example\\@levels.fyi/",
           too_long
-        ] do
-      assert {[], [%{refusal: :type}]} = run(a.id, op(:put, :sources, %{url: url})), url
-    end
+        ],
+        do: assert(nack!(a.id, op(:put, :sources, %{url: url})) == :type, url)
 
-    cells = %{headcount: 1, as_of: ~D[2026-09-01], source: too_long}
-    assert {[], [nack]} = run(a.id, op(:put, :corporations, cells, target: id))
+    {[], [nack]} = run(a.id, put(id, %{headcount: 1, as_of: ~D[2026-09-01], source: too_long}))
     assert nack.refusal == :type and JSON.decode!(nack.data)["reason"] =~ "2048 bytes"
-    assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
+    ack!(a.id, op(:put, :sources, %{url: "https://xn--mnchen-3ya.example/a"}))
   end
 
   property "host/1 lowercases, drops the port and a trailing dot, and refuses what is not a web URL" do

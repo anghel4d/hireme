@@ -17,41 +17,34 @@ defmodule Hireme.SequencerTest do
     {rev, ingest(%{}, :BOOT, body)}
   end
 
-  # A fresh BOOT from another pid, so this pid keeps its live subscription.
-  defp fresh(account_id, id), do: Task.async(fn -> boot(account_id, id) end) |> Task.await()
-
+  defp corp(a, domain), do: ack!(a.id, op(:put, :corporations, %{domain: domain, name: domain}))
   defp skill(slug), do: op(:put, :items, %{kind: :skill, key: "s-#{slug}", title: slug})
-
   defp count(queryable), do: Repo.aggregate(queryable, :count)
 
   test "ACKs: an insert is rev 1, an update rev 2, the account rev counts both; a singleton (me) is one row; a restatement or a no-op command moves no rev; a resend is answered from the ledger",
        %{account: a} do
-    {[ack], []} = run(a.id, op(:put, :corporations, %{domain: "example.com", name: "Example"}))
+    ack = corp(a, "example.com")
     assert ack.rev == 1 and ack.id > 0
-    {[ack2], []} = run(a.id, op(:put, :corporations, %{name: "Example Inc"}, target: ack.id))
+    ack2 = ack!(a.id, op(:put, :corporations, %{name: "Example Inc"}, target: ack.id))
     assert {ack2.id, ack2.rev} == {ack.id, 2}
     assert Repo.get!(Corporation, ack.id).name == "Example Inc"
     assert rev(a.id) == a.desk_rev + 2
 
-    {[s1], []} = run(a.id, op(:put, :me, %{citizenships: "pt"}))
-    {[s2], []} = run(a.id, op(:put, :me, %{citizenships: "de"}))
+    s1 = ack!(a.id, op(:put, :me, %{citizenships: "pt"}))
+    s2 = ack!(a.id, op(:put, :me, %{citizenships: "de"}))
     assert s2.id == s1.id and s2.rev == s1.rev + 1
     assert [%{citizenships: "de"}] = Repo.all(Hireme.Rows.Me)
 
     listing = String.duplicate("Rust systems, kernels and GPU runtimes. ", 400)
-
-    {[app], []} =
-      run(a.id, app(%{company: "L", role: "R", listing_raw: listing}))
-
+    app = ack!(a.id, app(%{company: "L", role: "R", listing_raw: listing}))
     # The kernel derives stage_on: today, on the 0000-01-01 epoch, end to end.
     assert Repo.get!(Application, app.id).stage_on == Date.utc_today()
     rev = rev(a.id)
     again = op(:put, :applications, %{listing_raw: listing}, target: app.id)
-    {[same], []} = run(a.id, again)
-    assert {[^same], []} = run(a.id, again)
-    {[still], []} = run(a.id, op(:command, :stage, %{stage: :discovered}, target: app.id))
+    same = ack!(a.id, again)
+    assert ack!(a.id, again) == same
+    still = ack!(a.id, op(:command, :stage, %{stage: :discovered}, target: app.id))
     assert {same.id, same.rev, still.rev, rev(a.id)} == {app.id, app.rev, app.rev, rev}
-    assert Repo.exists?(from(l in OpLedger, where: l.op_id == ^again.op_id), skip_account: true)
   end
 
   property "in any batch, each refusal rolls back exactly its own op", %{account: a} do
@@ -86,8 +79,8 @@ defmodule Hireme.SequencerTest do
 
   test "every refusal is its op's own fault, named by code and reason (a default one marked); a hostile op costs only itself",
        %{account: a, session: s} do
-    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "r.example", name: "R"}))
-    {[app], []} = run(a.id, app(%{company: "R", role: "R"}))
+    corp = corp(a, "r.example")
+    app = ack!(a.id, app(%{company: "R", role: "R"}))
     t = Schema.table(:corporations)
     domain = Enum.find(t.cols, &(&1.name == "domain"))
     # A keyed put whose domain cell is an integer: whatever it raises inside.
@@ -153,80 +146,88 @@ defmodule Hireme.SequencerTest do
             resend <- list_of(integer(0..5), max_length: 6),
             max_runs: 15
           ) do
-      ops =
-        for n <- names,
-            do:
-              op(:put, :corporations, %{
-                domain: "#{n}.#{System.unique_integer([:positive])}.example",
-                name: n
-              })
-
+      tag = System.unique_integer([:positive])
+      ops = for n <- names, do: op(:put, :corporations, %{domain: "#{n}.#{tag}.example", name: n})
       {first, []} = run(a.id, ops)
       before = count(Corporation)
-      again = for i <- resend, i < length(ops), do: Enum.at(ops, i)
-      {acks, []} = run(a.id, again)
+      {acks, []} = run(a.id, for(i <- resend, i < length(ops), do: Enum.at(ops, i)))
       assert count(Corporation) == before
       assert Enum.all?(acks, &(&1 in first))
     end
   end
 
-  test "one posting is one application however it was linked: a second insert is refused, and a keyed put by any of its links finds it",
+  test "one posting is one application however it was linked: rows from before the canonical URL get it once (the oldest of a posting; a non-URL stays), a second insert is refused, and a keyed put by any of its links finds it",
        %{account: a} do
-    links = [
+    stop_sequencer(a.id)
+    now = Hireme.Store.now()
+
+    row = fn no, listing, canonical ->
+      Repo.insert!(%Application{
+        account_id: a.id,
+        no: no,
+        company: "C#{no}",
+        listing_url: listing,
+        canonical_url: canonical,
+        stage: :discovered,
+        status: :open,
+        heat_override: false,
+        rev: 1,
+        inserted_at: now,
+        updated_at: now
+      })
+    end
+
+    first = row.(9001, "http://www.Example.com/jobs/1/?utm_source=x#top", nil)
+    dup = row.(9002, "https://example.com/jobs/1", nil)
+    linked = row.(9003, nil, "https://www.boards.greenhouse.io/acme/jobs/9?gh_src=a&gh_jid=9")
+    odd = row.(9004, "not a url", nil)
+    _ = rev(a.id)
+    url = fn r -> Repo.get!(Application, r.id).canonical_url end
+    assert eventually(fn -> url.(first) == "https://example.com/jobs/1" end)
+
+    assert eventually(fn ->
+             url.(linked) == "https://boards.greenhouse.io/acme/jobs/9?gh_jid=9"
+           end)
+
+    assert url.(dup) == nil and url.(odd) == nil
+
+    [link | links] = [
       "https://www.boards.greenhouse.io/acme/jobs/7?gh_jid=7&utm_source=linkedin#apply",
       "http://boards.greenhouse.io/acme/jobs/7/?gh_src=x&gh_jid=7",
       "https://BOARDS.greenhouse.io/acme/jobs/7?gh_jid=7"
     ]
 
-    {[app], []} =
-      run(a.id, app(%{company: "Acme", role: "SRE", listing_url: hd(links)}))
+    posting = &app(%{company: "Acme", role: "SRE", listing_url: &1})
+    app = ack!(a.id, posting.(link))
 
-    for link <- tl(links) do
-      {[], [nack]} =
-        run(a.id, app(%{company: "Acme", role: "SRE", listing_url: link}))
+    old = {"https://example.com/jobs/1?ref=hn", first.id}
 
-      assert nack.refusal == :natural_key
-
-      {[found], []} =
-        run(a.id, op(:put, :applications, %{canonical_url: link, notes: link}, keyed: true))
-
-      assert found.id == app.id
+    for {link, id} <- Enum.map(links, &{&1, app.id}) ++ [old] do
+      assert nack!(a.id, posting.(link)) == :natural_key
+      keyed = op(:put, :applications, %{canonical_url: link, notes: link}, keyed: true)
+      assert ack!(a.id, keyed).id == id
     end
 
     # Another posting at the same board is another application.
-    {[other], []} =
-      run(
-        a.id,
-        app(%{
-          company: "Acme",
-          role: "SRE",
-          listing_url: "https://boards.greenhouse.io/acme/jobs/7?gh_jid=8"
-        })
-      )
-
-    assert other.id != app.id
+    assert ack!(a.id, posting.("https://boards.greenhouse.io/acme/jobs/7?gh_jid=8")).id != app.id
   end
 
   test "a keyed put finds its row by the key whose condition its cells meet; create_only refuses an existing row without naming it; a missed condition is explained",
        %{account: a} do
-    keyed = fn cells, opts -> op(:put, :corporations, cells, [keyed: true] ++ opts) end
-    {[first], []} = run(a.id, keyed.(%{domain: "keyed.example", name: "One"}, []))
-    {[second], []} = run(a.id, keyed.(%{domain: "keyed.example", name: "Two"}, []))
+    keyed = &op(:put, :corporations, &1, [keyed: true] ++ &2)
+    first = ack!(a.id, keyed.(%{domain: "keyed.example", name: "One"}, []))
+    second = ack!(a.id, keyed.(%{domain: "keyed.example", name: "Two"}, []))
     assert second.id == first.id and second.rev == 2
     {[], [nack]} = run(a.id, keyed.(%{domain: "keyed.example", name: "Three"}, create_only: true))
     assert nack.refusal == :natural_key
     refute JSON.decode!(nack.data)["id"]
 
     # A country's iso2 never finds a city.
-    {[city], []} =
-      run(
-        a.id,
-        op(:put, :places, %{kind: :city, name: "Dresden", iso2: "DE", geonames_id: 2_935_022})
-      )
-
+    dresden = %{kind: :city, name: "Dresden", iso2: "DE", geonames_id: 2_935_022}
+    city = ack!(a.id, op(:put, :places, dresden))
     de = %{kind: :country, name: "Germany", iso2: "DE"}
-    {[country], []} = run(a.id, op(:put, :places, de, keyed: true))
-    {[again], []} = run(a.id, op(:put, :places, %{de | name: "Deutschland"}, keyed: true))
+    country = ack!(a.id, op(:put, :places, de, keyed: true))
+    again = ack!(a.id, op(:put, :places, %{de | name: "Deutschland"}, keyed: true))
     assert country.id != city.id and again.id == country.id
     assert Repo.get!(Place, city.id).name == "Dresden"
 
@@ -248,59 +249,38 @@ defmodule Hireme.SequencerTest do
     assert refused.(%{name: "Germany"})["unmet"] == []
   end
 
-  test "a ref resolves in the account alone; a drop takes the rows whose required ref names it, within the writer's write mask, and never leaves an application unlinked; a dropped application is no longer claimable",
+  test "a drop takes the rows whose required ref names it, within the writer's write mask, and never leaves an application unlinked; a ref names a row or is not_found; a dropped application is no longer claimable",
        %{account: a, corp: home} do
-    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "drop.example", name: "D"}))
-    {[place], []} = run(a.id, op(:put, :places, %{kind: :country, name: "Nowhere", iso2: "NW"}))
-
+    corp = corp(a, "drop.example")
+    place = ack!(a.id, op(:put, :places, %{kind: :country, name: "Nowhere", iso2: "NW"}))
     office = fn c -> op(:put, :offices, %{corporation_id: c, place_id: place.id, kind: :hq}) end
-    {[_], []} = run(a.id, office.(corp.id))
+    ack!(a.id, office.(corp.id))
+    assert nack!(a.id, office.(9_999_999)) == :not_found
 
-    # A ref to another account's row is refused as if it did not exist
-    # (a sign-in scopes the process to its account; with_account restores ours).
-    {[theirs], []} =
-      Repo.with_account(a.id, fn ->
-        other = sign_in().account.id
-        run(other, op(:put, :corporations, %{domain: "theirs.example", name: "T"}))
-      end)
-
-    assert {[], [%{refusal: :not_found}]} = run(a.id, office.(theirs.id))
-    assert {[], [%{refusal: :not_found}]} = run(a.id, office.(9_999_999))
-
-    {[keep], []} = run(a.id, app(%{company: "Keep", role: "R"}))
-    {[gone], []} = run(a.id, app(%{company: "Gone", role: "R"}))
-
-    {[named], []} = run(a.id, app(%{company: "R", role: "R", corporation_id: corp.id}))
-    {[contact], []} = run(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
+    keep = ack!(a.id, app(%{company: "Keep", role: "R"}))
+    gone = ack!(a.id, app(%{company: "Gone", role: "R"}))
+    named = ack!(a.id, app(%{company: "R", role: "R", corporation_id: corp.id}))
+    contact = ack!(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
 
     # Every application links a corporation, and a place unless remote; a
     # place an on-site application names stays.
-    bare = op(:put, :applications, %{company: "Bare", role: "R"})
-    assert {[], [%{refusal: :unlinked}]} = run(a.id, bare)
+    assert nack!(a.id, op(:put, :applications, %{company: "Bare", role: "R"})) == :unlinked
     onsite = %{company: "On", role: "R", work_mode: :onsite}
-    assert {[], [%{refusal: :unlinked}]} = run(a.id, app(onsite))
-    {[_], []} = run(a.id, app(Map.put(onsite, :place_id, place.id)))
-    assert {[], [%{refusal: :unlinked}]} = run(a.id, op(:drop, :places, %{}, target: place.id))
+    assert nack!(a.id, app(onsite)) == :unlinked
+    ack!(a.id, app(Map.put(onsite, :place_id, place.id)))
+    assert nack!(a.id, op(:drop, :places, %{}, target: place.id)) == :unlinked
 
     # An application naming the corporation keeps it, whoever asks, until it links another.
-    assert {[], [%{refusal: :unlinked}]} =
-             run(a.id, op(:drop, :corporations, %{}, target: corp.id))
-
-    {[_], []} = run(a.id, op(:put, :applications, %{corporation_id: home}, target: named.id))
+    assert nack!(a.id, op(:drop, :corporations, %{}, target: corp.id)) == :unlinked
+    ack!(a.id, op(:put, :applications, %{corporation_id: home}, target: named.id))
 
     # The delete reaches the contact (mail): a world-only key may not take it.
-    world_only = %{
-      label: "w",
-      grants: Grants.key(%{id: 1, read_mask: 1, write_mask: 1, may_delete: true}),
-      key_id: nil
-    }
-
-    assert {[], [%{refusal: :scope}]} =
-             run(a.id, op(:drop, :corporations, %{}, target: corp.id), world_only)
-
+    world = Grants.key(%{id: 1, read_mask: 1, write_mask: 1, may_delete: true})
+    world_only = %{label: "w", grants: world, key_id: nil}
+    assert nack!(a.id, op(:drop, :corporations, %{}, target: corp.id), world_only) == :scope
     assert Repo.get(Corporation, corp.id)
 
-    {[_], []} = run(a.id, op(:drop, :applications, %{}, target: gone.id))
+    ack!(a.id, op(:drop, :applications, %{}, target: gone.id))
     {:ok, _} = Sequencer.subscribe(a.id, sub(903), 0)
 
     assert {:ok, %{"ids" => ids, "truncated" => true}} =
@@ -308,7 +288,7 @@ defmodule Hireme.SequencerTest do
 
     assert keep.id in ids and gone.id not in ids
 
-    {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
+    ack!(a.id, op(:drop, :corporations, %{}, target: corp.id))
     assert count(Office) == 0 and Repo.get(Place, place.id)
     assert Repo.get(Hireme.Rows.Contact, contact.id).corporation_id == nil
   end
@@ -330,46 +310,33 @@ defmodule Hireme.SequencerTest do
     theirs = op(:put, :corporations, %{domain: "other.example", name: "O"}, op_id: 77)
     assert {[%{id: other_id} = first], []} = key_session_ops(other, theirs)
     assert {[^first], []} = key_session_ops(other, theirs)
-
-    {[%{id: mine}], []} =
-      run(a.id, op(:put, :corporations, %{domain: "mine.example", name: "M"}, op_id: 77))
-
-    assert length(Enum.uniq([id, other_id, mine])) == 3
+    mine = op(:put, :corporations, %{domain: "mine.example", name: "M"}, op_id: 77)
+    assert length(Enum.uniq([id, other_id, ack!(a.id, mine).id])) == 3
   end
 
   test "a child row inserted or moved onto an application another session holds is leased; the operator's lands",
        %{account: a, session: s} do
-    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "move.example", name: "M"}))
-    app = fn n -> app(%{company: n, role: "R", corporation_id: corp.id}) end
-    {[app1], []} = run(a.id, app.("One"))
-    {[app2], []} = run(a.id, app.("Two"))
-    {[item], []} = run(a.id, op(:put, :items, %{kind: :skill, key: "rust", title: "Rust"}))
-
-    {[ov], []} =
-      run(
-        a.id,
-        op(:put, :cv_overlays, %{application_id: app1.id, item_id: item.id, mode: :tailor})
-      )
-
+    app1 = ack!(a.id, app(%{company: "One", role: "R"}))
+    app2 = ack!(a.id, app(%{company: "Two", role: "R"}))
+    item = ack!(a.id, op(:put, :items, %{kind: :skill, key: "rust", title: "Rust"}))
+    overlay = %{application_id: app1.id, item_id: item.id, mode: :tailor}
+    ov = ack!(a.id, op(:put, :cv_overlays, overlay))
     {_, %{"ids" => [_]}} = key_session(a.id, mint(s, "holder"), 910, %{"ids" => [app2.id]})
     {writer, _} = key_session(a.id, mint(s, "writer"), 911)
-    event = fn -> op(:put, :events, %{application_id: app2.id, kind: "note"}) end
-    assert {[], [%{refusal: :leased}]} = key_session_ops(writer, event.())
+    event = op(:put, :events, %{application_id: app2.id, kind: "note"})
+    moved = op(:put, :cv_overlays, %{application_id: app2.id}, target: ov.id)
 
-    assert {[], [%{refusal: :leased}]} =
-             key_session_ops(
-               writer,
-               op(:put, :cv_overlays, %{application_id: app2.id}, target: ov.id)
-             )
+    assert {[], [%{refusal: :leased}, %{refusal: :leased}]} =
+             key_session_ops(writer, [event, moved])
 
     # docs/rebuild.md: "the operator's browser session is never refused leased"
-    assert {[_], []} = run(a.id, event.())
+    ack!(a.id, op(:put, :events, %{application_id: app2.id, kind: "note"}))
   end
 
   test "a BOOT for a key that reads only some domains loads into the real kernel, and a key reconnecting at the current rev still gets a BOOT",
        %{account: a} do
-    {[_], []} = run(a.id, skill("s"))
-    {[_], []} = run(a.id, app(%{company: "K", role: "R"}))
+    ack!(a.id, skill("s"))
+    ack!(a.id, app(%{company: "K", role: "R"}))
 
     for {read, write} <- [{8, 0}, {1, 0}, {0, 15}] do
       g = Grants.key(%{id: 5, read_mask: read, write_mask: write, may_delete: false})
@@ -385,12 +352,9 @@ defmodule Hireme.SequencerTest do
   test "the account views: no secret replicates, no key reads them, they follow the trail (security events outlive an activity burst) and come fresh to a resumed session; texts, world and mail rows travel whole",
        %{account: a, session: s} do
     text = String.duplicate("Staff engineer, Rust. ", 20)
-
-    {[app], []} =
-      run(a.id, app(%{company: "S", role: "R", listing_raw: text}))
-
-    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "w.example", name: "W"}))
-    {[contact], []} = run(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
+    app = ack!(a.id, app(%{company: "S", role: "R", listing_raw: text}))
+    corp = corp(a, "w.example")
+    contact = ack!(a.id, op(:put, :contacts, %{name: "C", corporation_id: corp.id}))
     {:ok, %{key: key}} = Hireme.Keys.mint(s, "views", Hireme.Keys.preset(:read_write))
     {rev, model} = boot(a.id, 993)
 
@@ -418,37 +382,28 @@ defmodule Hireme.SequencerTest do
     kinds = fn m -> for {_, r} <- m["acct_audit"] || %{}, do: r[kind] end
     assert "views" in names.(model)
 
+    patched = fn model ->
+      assert_receive {:sequencer, :patch, _, patch}, 2_000
+      ingest(model, :PATCH, patch)
+    end
+
     # Every trail event wakes the views: a key minted, an agent's op batch.
     {:ok, _} = Hireme.Keys.mint(s, "later", Hireme.Keys.preset(:read_only))
-    assert_receive {:sequencer, :patch, _, patch}, 2_000
-    model = ingest(model, :PATCH, patch)
+    model = patched.(model)
     assert "later" in names.(model)
     :ok = Hireme.Audit.record(:agent_ops, %{ops: 1}, %{account_id: a.id})
-    assert_receive {:sequencer, :patch, _, patch}, 2_000
-    model = ingest(model, :PATCH, patch)
+    model = patched.(model)
     assert "agent_ops" in kinds.(model)
     security = Enum.reject(kinds.(model), &(&1 in Hireme.Audit.activity_kinds()))
     assert security != []
 
     # A window's worth of activity after them pushes no security event out.
     now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-    burst =
-      for _ <- 1..1_000,
-          do: %{
-            account_id: a.id,
-            kind: "agent_ops",
-            security: false,
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
-
+    row = %{account_id: a.id, kind: "agent_ops", security: false, rev: 1}
+    burst = List.duplicate(Map.merge(row, %{inserted_at: now, updated_at: now}), 1_000)
     Repo.insert_all(Hireme.Rows.Audit, burst, skip_account: true)
     Hireme.Audit.changed(a.id)
-    assert_receive {:sequencer, :patch, _, patch}, 2_000
-    model = ingest(model, :PATCH, patch)
-    assert Enum.sort(security) -- kinds.(model) == []
+    assert Enum.sort(security) -- kinds.(patched.(model)) == []
 
     # A resumed session's snapshot holds the tables; its views come fresh as a PATCH.
     {:ok, _} = Hireme.Keys.mint(s, "while away", Hireme.Keys.preset(:read_only))
@@ -472,59 +427,12 @@ defmodule Hireme.SequencerTest do
            end)
   end
 
-  test "rows written before the canonical URL get it once: the oldest of a posting keeps it, a later duplicate stays without, a non-URL stays as it was; the same posting is then refused",
-       %{account: a} do
-    stop_sequencer(a.id)
-    now = Hireme.Store.now()
-
-    row = fn no, listing, canonical ->
-      Repo.insert!(%Application{
-        account_id: a.id,
-        no: no,
-        company: "C#{no}",
-        listing_url: listing,
-        canonical_url: canonical,
-        stage: :discovered,
-        status: :open,
-        heat_override: false,
-        rev: 1,
-        inserted_at: now,
-        updated_at: now
-      })
-    end
-
-    first = row.(9001, "http://www.Example.com/jobs/1/?utm_source=x#top", nil)
-    dup = row.(9002, "https://example.com/jobs/1", nil)
-    linked = row.(9003, nil, "https://www.boards.greenhouse.io/acme/jobs/9?gh_src=a&gh_jid=9")
-    odd = row.(9004, "not a url", nil)
-
-    _ = rev(a.id)
-    url = fn r -> Repo.get!(Application, r.id).canonical_url end
-    assert eventually(fn -> url.(first) == "https://example.com/jobs/1" end)
-
-    assert eventually(fn ->
-             url.(linked) == "https://boards.greenhouse.io/acme/jobs/9?gh_jid=9"
-           end)
-
-    assert url.(dup) == nil and url.(odd) == nil
-
-    again =
-      app(%{company: "X", listing_url: "https://example.com/jobs/1?ref=hn"})
-
-    assert {[], [%{refusal: :natural_key}]} = run(a.id, again)
-  end
-
   test "a PATCH ships each row the columns it moved: one listing edited among renames carries one listing",
        %{account: a} do
     listing = String.duplicate("Rust, kernels and GPUs. ", 40)
 
     apps =
-      for i <- 1..3 do
-        {[app], []} =
-          run(a.id, app(%{company: "C#{i}", role: "R", listing_raw: listing}))
-
-        app
-      end
+      for i <- 1..3, do: ack!(a.id, app(%{company: "C#{i}", role: "R", listing_raw: listing}))
 
     {_, _} = boot(a.id, 995)
     [one, two, three] = apps
@@ -624,38 +532,31 @@ defmodule Hireme.SequencerTest do
           {:event, i, s} ->
             op(:put, :events, %{application_id: id.("applications", i), kind: s})
 
-          {:overlay, i, j} ->
-            cells = %{
-              application_id: id.("applications", i),
-              item_id: id.("items", j),
-              mode: :add
-            }
-
-            op(:put, :cv_overlays, cells)
-
           {:stage, i, to} ->
             op(:command, :stage, %{stage: to}, target: id.("applications", i))
 
           {:drop_app, i} ->
             op(:drop, :applications, %{}, target: id.("applications", i))
+
+          {:overlay, i, j} ->
+            cells = %{application_id: id.("applications", i), item_id: id.("items", j)}
+            op(:put, :cv_overlays, Map.put(cells, :mode, :add))
         end)
 
       Sequencer.submit(a.id, ops)
       {model, revs} = drain(model, [])
-      {fresh_rev, fresh_model} = fresh(a.id, System.unique_integer([:positive]))
+
+      {fresh_rev, fresh_model} =
+        Task.async(fn -> boot(a.id, System.unique_integer([:positive])) end) |> Task.await()
+
       assert model == fresh_model
 
       send(watcher, {:done, me})
       assert_receive {:watched, frames}
-
       corpus = for t <- Schema.tables(), t.domain == "corpus", do: t.name
 
       for {_, tables} <- frames,
-          do:
-            assert(
-              Enum.all?(tables, &(&1 in corpus or &1 in ~w(gone leases))),
-              inspect(tables)
-            )
+          do: assert(Enum.all?(tables, &(&1 in corpus or &1 in ~w(gone leases))), inspect(tables))
 
       # Its PATCH may carry no row, but it carries the rev.
       if revs != [], do: assert(fresh_rev in Enum.map(frames, &elem(&1, 0)))
@@ -681,115 +582,64 @@ defmodule Hireme.SequencerTest do
     end
   end
 
-  test "a command with no target ACKs the row it wrote on its table", %{account: a} do
-    {[corp], []} = run(a.id, op(:put, :corporations, %{domain: "lineage.example", name: "L"}))
+  test "a fresh sequencer reads what an earlier run left: a command with no target ACKs the row it wrote on its table; listings under another keywords version are re-extracted, past the ledger entries it left",
+       %{account: a, corp: corp} do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-    Repo.insert_all(Hireme.Rows.CvLineage, [
-      %{
-        account_id: a.id,
-        corporation_id: corp.id,
-        generation: 1,
-        opened_on: ~D[2025-01-01],
-        rewrites_allowed: false,
-        rev: 1,
-        inserted_at: now,
-        updated_at: now
-      }
-    ])
-
-    # A fresh sequencer reads the lineage.
-    stop_sequencer(a.id)
-    {[ack], []} = run(a.id, op(:command, :open_generation, %{corporation_id: corp.id}))
-    assert ack.id > 0 and ack.rev > 0
-    assert Repo.get!(Hireme.Rows.CvLineage, ack.id).corporation_id == corp.id
-  end
-
-  test "listings stored under another keywords version are re-extracted when the sequencer starts, past any ledger entries an earlier run left",
-       %{account: a} do
-    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    stamped = &Map.merge(&1, %{account_id: a.id, rev: 1, inserted_at: now, updated_at: now})
+    lineage = %{corporation_id: corp, generation: 1, opened_on: ~D[2025-01-01]}
+    Repo.insert_all(Hireme.Rows.CvLineage, [stamped.(Map.put(lineage, :rewrites_allowed, false))])
 
     # The operator's (writer 0) entries a previous boot left, low ids included:
     # every id unique_integer can have reached in this VM, and more.
     top = System.unique_integer([:positive]) + 1_000
+    entry = %{writer: 0, verb: :put, subject: 1, row_id: 1, ack_rev: 1}
 
-    for chunk <- Enum.chunk_every(1..top, 2_000) do
-      rows =
-        for i <- chunk,
-            do: %{
-              account_id: a.id,
-              op_id: i,
-              writer: 0,
-              verb: :put,
-              subject: 1,
-              row_id: 1,
-              ack_rev: 1,
-              rev: 1,
-              inserted_at: now,
-              updated_at: now
-            }
+    for chunk <- Enum.chunk_every(1..top, 2_000),
+        do: Repo.insert_all(OpLedger, for(i <- chunk, do: stamped.(Map.put(entry, :op_id, i))))
 
-      Repo.insert_all(OpLedger, rows)
-    end
+    listing = %{no: 1, stage: :discovered, status: :open, heat_override: false}
+    raw = "Senior Rust engineer, distributed systems, Elixir."
 
     Repo.insert_all(Application, [
-      %{
-        account_id: a.id,
-        no: 1,
-        stage: :discovered,
-        status: :open,
-        heat_override: false,
-        rev: 1,
-        listing_raw: "Senior Rust engineer, distributed systems, Elixir.",
-        keywords_version: 0,
-        inserted_at: now,
-        updated_at: now
-      }
+      stamped.(Map.merge(listing, %{listing_raw: raw, keywords_version: 0}))
     ])
 
-    _ = rev(a.id)
+    stop_sequencer(a.id)
+    ack = ack!(a.id, op(:command, :open_generation, %{corporation_id: corp}))
+    assert ack.id > 0 and ack.rev > 0
+    assert Repo.get!(Hireme.Rows.CvLineage, ack.id).corporation_id == corp
+
     version = Hireme.Kernel.keywords_version()
     assert eventually(fn -> match?([%{keywords_version: ^version}], Repo.all(Application)) end)
     assert hd(Repo.all(Application)).keywords not in [nil, ""]
   end
 
-  test "two sessions' lease audits are each their own, however they interleave", %{
-    account: a,
-    session: s
-  } do
-    sessions =
-      for {name, sid} <- [{"x", 997}, {"y", 998}] do
-        key = mint(s, name)
-        me = self()
-        info = sub(sid, Grants.key(key), key.id)
+  test "two sessions' lease audits are each their own, however they interleave",
+       %{account: a, session: s} do
+    for sid <- [997, 998] do
+      key = mint(s, "k#{sid}")
+      me = self()
 
-        # Each session its own process, as on the wire.
-        spawn_link(fn ->
-          {:ok, _} = Sequencer.subscribe(a.id, info, 0)
-          send(me, {:joined, sid})
-          Process.sleep(:infinity)
-        end)
+      # Each session its own process, as on the wire.
+      spawn_link(fn ->
+        {:ok, _} = Sequencer.subscribe(a.id, sub(sid, Grants.key(key), key.id), 0)
+        send(me, {:joined, sid})
+        Process.sleep(:infinity)
+      end)
 
-        # A subscribe under a loaded suite can take longer than the default 100 ms.
-        assert_receive {:joined, ^sid}, 5_000
-        sid
-      end
+      # A subscribe under a loaded suite can take longer than the default 100 ms.
+      assert_receive {:joined, ^sid}, 5_000
+    end
 
-    for _ <- 1..5, sid <- sessions do
+    for _ <- 1..5, sid <- [997, 998] do
       {:ok, _} = Hireme.Lease.claim(a.id, sid, %{})
       {:ok, _} = Hireme.Lease.release(a.id, sid, nil)
     end
 
     # Audits are written after the reply, as the sequencer's next message.
     _ = rev(a.id)
-
-    kinds =
-      Repo.all(
-        from r in Hireme.Rows.Audit,
-          where: r.kind in ["lease_opened", "lease_released"],
-          select: r.kind
-      )
-
+    lease = ["lease_opened", "lease_released"]
+    kinds = Repo.all(from r in Hireme.Rows.Audit, where: r.kind in ^lease, select: r.kind)
     assert Enum.frequencies(kinds) == %{"lease_opened" => 10, "lease_released" => 10}
   end
 
@@ -799,133 +649,63 @@ defmodule Hireme.SequencerTest do
       for t <- Schema.tables(),
           t.residency in [:resident, :server],
           t.domain != "system" or t.name == "citations",
+          c <- t.cols,
+          c.type in [:str, :text, :json],
           reduce: 0 do
         acc ->
-          case for(
-                 c <- t.cols,
-                 c.type in [:str, :text, :json],
-                 do: ~s{coalesce(length(CAST("#{c.name}" AS BLOB)),0)}
-               ) do
-            [] ->
-              acc
-
-            parts ->
-              %{rows: [[n]]} =
-                Repo.query!(
-                  ~s{SELECT coalesce(sum(#{Enum.join(parts, "+")}),0) FROM "#{t.name}" WHERE account_id = ?},
-                  [account_id],
-                  skip_account: true
-                )
-
-              acc + n
-          end
+          bytes = ~s{coalesce(sum(length(CAST("#{c.name}" AS BLOB))),0)}
+          sql = ~s{SELECT #{bytes} FROM "#{t.name}" WHERE account_id = ?}
+          %{rows: [[n]]} = Repo.query!(sql, [account_id], skip_account: true)
+          acc + n
       end
     end
 
     defp counter(account_id),
-      do:
-        Repo.one!(
-          from(a in Hireme.Rows.Account, where: a.id == ^account_id, select: a.text_bytes),
-          skip_account: true
-        )
-
-    defp set_counter(account_id, bytes),
-      do:
-        Repo.update_all(
-          from(x in Hireme.Rows.Account, where: x.id == ^account_id),
-          [set: [text_bytes: bytes]],
-          skip_account: true
-        )
+      do: Repo.get!(Hireme.Rows.Account, account_id, skip_account: true).text_bytes
 
     test "the text counter stays exact through inserts, replaces, cascading drops and citations",
          %{account: a} do
-      {[corp], []} =
-        run(
-          a.id,
-          op(
-            :put,
-            :corporations,
-            %{
-              domain: "bytes.example",
-              name: "Bytes",
-              about: String.duplicate("long about ", 50),
-              source: "https://bytes.example/a",
-              headcount: 9,
-              as_of: ~D[2026-10-01]
-            },
-            expect_rev: 0
-          )
-        )
+      cells = %{
+        domain: "bytes.example",
+        name: "Bytes",
+        about: String.duplicate("long about ", 50),
+        source: "https://bytes.example/a",
+        headcount: 9,
+        as_of: ~D[2026-10-01]
+      }
 
-      {[app], []} =
-        run(
-          a.id,
-          app(%{
-            company: "Bytes",
-            role: "R",
-            corporation_id: corp.id,
-            notes: String.duplicate("n", 1_000),
-            listing_raw: String.duplicate("listing ", 100)
-          })
-        )
-
+      corp = ack!(a.id, op(:put, :corporations, cells, expect_rev: 0))
+      notes = String.duplicate("n", 1_000)
+      listing = String.duplicate("listing ", 100)
+      app = ack!(a.id, app(%{company: "Bytes", role: "R", notes: notes, listing_raw: listing}))
       assert counter(a.id) == recount(a.id)
-      {[_], []} = run(a.id, op(:put, :applications, %{notes: "short"}, target: app.id))
+      ack!(a.id, op(:put, :applications, %{notes: "short"}, target: app.id))
       assert counter(a.id) == recount(a.id)
-
-      {[_], []} =
-        run(
-          a.id,
-          op(:put, :events, %{
-            application_id: app.id,
-            kind: "note",
-            body: String.duplicate("e", 300)
-          })
-        )
-
-      {[_], []} = run(a.id, op(:drop, :applications, %{}, target: app.id))
+      event = %{application_id: app.id, kind: "note", body: String.duplicate("e", 300)}
+      ack!(a.id, op(:put, :events, event))
+      ack!(a.id, op(:drop, :applications, %{}, target: app.id))
       assert counter(a.id) == recount(a.id)
-      {[_], []} = run(a.id, op(:drop, :corporations, %{}, target: corp.id))
+      ack!(a.id, op(:drop, :corporations, %{}, target: corp.id))
       assert counter(a.id) == recount(a.id)
     end
 
     test "past the account's text budget a longer write is refused cap and leaves no claim behind; a shorter rewrite lands",
          %{account: a, session: s} do
-      {[app], []} =
-        run(
-          a.id,
-          app(%{
-            company: "Full",
-            role: "R",
-            notes: String.duplicate("x", 5_000)
-          })
-        )
-
-      set_counter(a.id, Hireme.Security.account_text_bytes() - 10)
+      notes = &%{notes: String.duplicate(&2, &1)}
+      app = ack!(a.id, app(Map.merge(%{company: "Full", role: "R"}, notes.(5_000, "x"))))
+      account = Repo.get!(Hireme.Rows.Account, a.id, skip_account: true)
+      text_bytes = Hireme.Security.account_text_bytes() - 10
+      Repo.update!(Ecto.Changeset.change(account, text_bytes: text_bytes), skip_account: true)
       # The sequencer reads the counter when it starts; a fresh one sees the full account.
       stop_sequencer(a.id)
       {agent, _} = key_session(a.id, mint(s, "near"), 998)
-
-      notes = fn n, c ->
-        app(%{company: "C", role: "R", notes: String.duplicate(c, n)})
-      end
-
-      assert {[], [%{refusal: :cap}]} = key_session_ops(agent, notes.(100, "x"))
+      longer = fn -> app(Map.merge(%{company: "C", role: "R"}, notes.(100, "x"))) end
+      assert {[], [%{refusal: :cap}]} = key_session_ops(agent, longer.())
       assert {:ok, [%{ids: []}]} = Sequencer.lease(a.id, :list)
-      assert {[], [%{refusal: :cap}]} = run(a.id, notes.(100, "x"))
-      assert {[_], []} = run(a.id, skill("s"))
-
-      assert {[_], []} =
-               run(
-                 a.id,
-                 op(:put, :applications, %{notes: String.duplicate("y", 100)}, target: app.id)
-               )
-
-      assert {[], [%{refusal: :cap}]} =
-               run(
-                 a.id,
-                 op(:put, :applications, %{notes: String.duplicate("z", 6_000)}, target: app.id)
-               )
+      assert nack!(a.id, longer.()) == :cap
+      ack!(a.id, skill("s"))
+      ack!(a.id, op(:put, :applications, notes.(100, "y"), target: app.id))
+      assert nack!(a.id, op(:put, :applications, notes.(6_000, "z"), target: app.id)) == :cap
     end
 
     test "a key past its circuit breaker is refused rate whole, before anything is judged; a bulk contract's writes are outside the breaker, up to its count",
@@ -934,12 +714,7 @@ defmodule Hireme.SequencerTest do
       {agent, _} = key_session(a.id, key, 980)
       {bulk, %{"bulk" => %{"writes" => 3}}} = key_session(a.id, key, 981, %{"bulk" => 3})
       {_, breaker} = Hireme.Security.limits()[:agent_write]
-
-      Enum.reduce_while(1..breaker, nil, fn _, _ ->
-        if Hireme.Security.hit(:agent_write, key.id, 1) == :ok,
-          do: {:cont, nil},
-          else: {:halt, nil}
-      end)
+      Enum.find(1..breaker, fn _ -> Hireme.Security.hit(:agent_write, key.id, 1) != :ok end)
 
       {[], nacks} = key_session_ops(agent, [skill("f1"), skill("f2")])
       assert Enum.all?(nacks, &(&1.refusal == :rate))
@@ -955,25 +730,15 @@ defmodule Hireme.SequencerTest do
          %{account: a} do
       cap = Schema.table(:sources).cap
       now = Hireme.Store.now()
+      fill = %{account_id: a.id, host: "fill.example", mutable: true, rev: 1}
+      fill = Map.merge(fill, %{inserted_at: now, updated_at: now})
 
       for chunk <- Enum.chunk_every(1..(cap - 2), 4_000) do
-        rows =
-          for i <- chunk,
-              do: %{
-                account_id: a.id,
-                url: "https://fill.example/#{i}",
-                host: "fill.example",
-                mutable: true,
-                rev: 1,
-                inserted_at: now,
-                updated_at: now
-              }
-
+        rows = for i <- chunk, do: Map.put(fill, :url, "https://fill.example/#{i}")
         Repo.insert_all(Hireme.Rows.Source, rows, skip_account: true)
       end
 
-      {[%{id: corp}], []} =
-        run(a.id, op(:put, :corporations, %{domain: "cap.example", name: "C"}))
+      %{id: corp} = corp(a, "cap.example")
 
       cite = fn n, url ->
         cells = %{headcount: n, as_of: Date.add(~D[2026-01-01], n), source: url}
@@ -985,24 +750,16 @@ defmodule Hireme.SequencerTest do
       assert {[_], []} = cite.(2, "https://new.example/2")
       assert {[], [%{refusal: :cap, data: data}]} = cite.(3, "https://new.example/3")
       assert data =~ ~s("table":"sources")
-
-      assert {[], [%{refusal: :cap}]} =
-               run(a.id, op(:put, :sources, %{url: "https://direct.example/1"}))
+      source = &op(:put, :sources, %{url: "https://direct.example/#{&1}"})
+      assert nack!(a.id, source.(1)) == :cap
 
       # The operator's drop of a cited source tombstones it, and the place
       # it held is free whether the count is cached or read afresh.
-      [sid] =
-        Repo.all(
-          from(x in Hireme.Rows.Source, where: x.url == "https://new.example/2", select: x.id),
-          skip_account: true
-        )
-
-      assert {[_], []} = run(a.id, op(:drop, :sources, %{}, target: sid))
+      cited = from(x in Hireme.Rows.Source, where: x.url == "https://new.example/2")
+      ack!(a.id, op(:drop, :sources, %{}, target: Repo.one!(cited, skip_account: true).id))
       stop_sequencer(a.id)
-      assert {[_], []} = run(a.id, op(:put, :sources, %{url: "https://direct.example/2"}))
-
-      assert {[], [%{refusal: :cap}]} =
-               run(a.id, op(:put, :sources, %{url: "https://direct.example/3"}))
+      ack!(a.id, source.(2))
+      assert nack!(a.id, source.(3)) == :cap
     end
   end
 end

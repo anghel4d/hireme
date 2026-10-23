@@ -1,8 +1,8 @@
 defmodule Hireme.WireClient do
   @moduledoc """
-  A wire client over a real `/wire` WebSocket, as an agent or a browser
-  tab speaks to the node: it sends frames and delivers every frame it
-  receives to its owner as `{:wire, client, %{kind, flags, rev, body}}`.
+  A wire client over a real `/wire` WebSocket, as an agent speaks to the
+  node: it sends frames and delivers every frame it receives to its owner
+  as `{:wire, client, %{kind, flags, rev, body}}`.
   """
 
   use GenServer
@@ -10,8 +10,8 @@ defmodule Hireme.WireClient do
   # Dialyzer reads Mint.WebSocket.new/4 (1.0.6) as never returning :ok.
   @dialyzer {:nowarn_function, init: 1}
 
-  def connect(port, origin \\ nil) do
-    {:ok, pid} = GenServer.start_link(__MODULE__, {self(), port, origin})
+  def connect(port) do
+    {:ok, pid} = GenServer.start_link(__MODULE__, {self(), port})
     pid
   end
 
@@ -79,10 +79,9 @@ defmodule Hireme.WireClient do
   end
 
   @impl GenServer
-  def init({owner, port, origin}) do
+  def init({owner, port}) do
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
-    headers = if origin, do: [{"origin", origin}], else: []
-    {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/wire", headers)
+    {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/wire", [])
     {conn, status, resp_headers, early} = upgrade_response(conn, ref, nil, [], [])
     {:ok, conn, ws} = Mint.WebSocket.new(conn, ref, status, resp_headers)
     s = %{owner: owner, conn: conn, ref: ref, ws: ws}

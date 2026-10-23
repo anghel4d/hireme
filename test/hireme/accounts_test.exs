@@ -9,7 +9,6 @@ defmodule Hireme.AccountsTest do
 
   defp mailed_token(email) do
     :ok = Accounts.request_link(email, &url_for/1, %{ip: "10.0.0.1"})
-
     # The link leaves from a task; its mail arrives when that task has run.
     assert_receive {:email, mail}, 1_000
     {:ok, address} = Accounts.normalize_email(email)
@@ -23,26 +22,17 @@ defmodule Hireme.AccountsTest do
   # `n` more sessions of the account, as rows, each last seen at `seen`.
   defp fill_sessions(account_id, n, seen) do
     salt = System.unique_integer([:positive])
-
-    rows =
-      for i <- 1..n,
-          do: %{
-            account_id: account_id,
-            token_hash: :crypto.hash(:sha256, "#{salt}-#{i}"),
-            authenticated_at: seen,
-            last_seen_at: seen,
-            expires_at: DateTime.add(Hireme.Store.now(), 3600),
-            rev: 1,
-            inserted_at: seen,
-            updated_at: seen
-          }
+    expires = DateTime.add(Hireme.Store.now(), 3600)
+    row = %{account_id: account_id, authenticated_at: seen, last_seen_at: seen, rev: 1}
+    row = Map.merge(row, %{expires_at: expires, inserted_at: seen, updated_at: seen})
+    rows = for i <- 1..n, do: Map.put(row, :token_hash, :crypto.hash(:sha256, "#{salt}-#{i}"))
 
     for chunk <- Enum.chunk_every(rows, 500),
         do: Repo.insert_all(Hireme.Rows.Session, chunk, skip_account: true)
   end
 
   describe "sign-in by mailed link" do
-    test "proves the address once; a visitor becomes an account, and comes back to it" do
+    test "proves the address once; a visitor becomes an account, and comes back to it; only address-shaped text passes, normalized, and the answer never says whether an account exists" do
       token = mailed_token("Visitor@Example.com ")
       assert {:ok, "visitor@example.com"} = Accounts.peek_link(token)
       assert {:ok, "visitor@example.com"} = Accounts.peek_link(token), "peeking spends nothing"
@@ -52,11 +42,19 @@ defmodule Hireme.AccountsTest do
 
       {:ok, cookie, session} = Accounts.sign_in_with(:email, claim(email))
       assert {%{id: id}, account} = Accounts.session(cookie)
-      assert id == session.id
-      assert account.id == session.account_id
-
+      assert {id, account.id} == {session.id, session.account_id}
       {:ok, _, again} = Accounts.sign_in_with(:email, claim(email))
       assert again.account_id == session.account_id
+
+      assert {:ok, "a@b.co"} = Accounts.normalize_email("  A@B.co ")
+      long = String.duplicate("a", 250) <> "@b.co"
+
+      for bad <- ["", "a", "a@b", "@b.co", "a b@c.de", long, nil, 7],
+          do: assert({:error, :invalid} = Accounts.normalize_email(bad))
+
+      assert {:error, :invalid} = Accounts.request_link("not an address", &url_for/1)
+      assert :ok = Accounts.request_link("nobody@example.com", &url_for/1)
+      assert :ok = Accounts.request_link(email, &url_for/1)
     end
 
     test "with sign-ups closed every account still signs in and nobody new gets one; a stranger's address is answered alike and mailed nothing" do
@@ -72,14 +70,12 @@ defmodule Hireme.AccountsTest do
       assert {:error, :closed} = Accounts.sign_in_with(:github, %{subject: "42", display: "o"})
       assert accounts.() == before
 
-      meta = %{ip: "10.0.0.3"}
-      assert :ok = Accounts.request_visitor_link("new@example.com", &url_for/1, meta)
+      visitor = &Accounts.request_visitor_link(&1, fn t -> url_for(t) end, %{ip: "10.0.0.3"})
+      assert :ok = visitor.("new@example.com")
       refute_receive {:email, _}, 300
-      assert :ok = Accounts.request_visitor_link("Known@Example.com", &url_for/1, meta)
+      assert :ok = visitor.("Known@Example.com")
       assert_receive {:email, %{to: [{_, "known@example.com"}]}}, 1_000
-
-      assert {:error, :invalid} =
-               Accounts.request_visitor_link("not an address", &url_for/1, meta)
+      assert {:error, :invalid} = visitor.("not an address")
     end
 
     test "a link raced by many redeemers is spent by exactly one" do
@@ -87,38 +83,21 @@ defmodule Hireme.AccountsTest do
       parent = self()
 
       results =
-        1..8
-        |> Enum.map(fn _ ->
+        for _ <- 1..8 do
           Task.async(fn ->
             Sandbox.allow(Hireme.Repo, parent, self())
             Accounts.redeem_link(token)
           end)
-        end)
-        |> Enum.map(&Task.await/1)
+        end
 
-      assert Enum.count(results, &match?({:ok, _}, &1)) == 1
-    end
-
-    test "a malformed address is refused and the answer never says whether an account exists" do
-      assert {:error, :invalid} = Accounts.request_link("not an address", &url_for/1)
-      assert :ok = Accounts.request_link("nobody@example.com", &url_for/1)
-      %{email: known} = sign_in()
-      assert :ok = Accounts.request_link(known, &url_for/1)
+      assert Enum.count(Task.await_many(results), &match?({:ok, _}, &1)) == 1
     end
 
     @tag window: [:link_address, :link_peer]
     test "five links per address in the window, then a refusal" do
-      for _ <- 1..5,
-          do:
-            assert(
-              :ok =
-                Accounts.request_link("busy@example.com", &url_for/1, %{
-                  ip: "10.9.9.#{:rand.uniform(200)}"
-                })
-            )
-
-      assert {:error, :rate_limited} =
-               Accounts.request_link("busy@example.com", &url_for/1, %{ip: "10.8.8.8"})
+      ask = &Accounts.request_link("busy@example.com", fn t -> url_for(t) end, %{ip: &1})
+      for _ <- 1..5, do: assert(:ok = ask.("10.9.9.#{:rand.uniform(200)}"))
+      assert {:error, :rate_limited} = ask.("10.8.8.8")
     end
   end
 
@@ -136,11 +115,8 @@ defmodule Hireme.AccountsTest do
       assert Accounts.session(t2) == nil
 
       %{session: s3, token: t3} = sign_in()
-
-      s3
-      |> Ecto.Changeset.change(expires_at: DateTime.add(Hireme.Store.now(), -1))
-      |> Repo.update!(skip_account: true)
-
+      expired = DateTime.add(Hireme.Store.now(), -1)
+      Repo.update!(Ecto.Changeset.change(s3, expires_at: expired), skip_account: true)
       assert Accounts.session(t3) == nil
       assert Accounts.session("garbage") == nil
       assert Accounts.session(nil) == nil
@@ -173,7 +149,6 @@ defmodule Hireme.AccountsTest do
       {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(owner, "me")
       code = secret |> Base.decode32!(padding: false) |> NimbleTOTP.verification_code()
       {:ok, _, _} = Hireme.Mfa.confirm_totp(owner, code, "phone")
-
       refute Accounts.session_live?(old.id)
       assert :error = Accounts.live_session(old.id)
       assert Accounts.session_live?(owner.id)
@@ -181,16 +156,13 @@ defmodule Hireme.AccountsTest do
 
     test "at the session cap the oldest ended sessions make room; only all-live sessions refuse, by eviction's arithmetic, before a link is spent; the refusal is on the trail" do
       %{account: a, session: first, email: email} = sign_in()
-      cap = Hireme.Schema.table(:sessions).cap
       now = Hireme.Store.now()
-      fill_sessions(a.id, cap - 1, now)
-
+      fill_sessions(a.id, Hireme.Schema.table(:sessions).cap - 1, now)
       refute Accounts.room?(:email, email)
       assert Accounts.room?(:email, "stranger@example.com")
       assert {:error, :cap} = Accounts.sign_in_with(:email, claim(email))
       Repo.put_account(a.id)
-      [last | _] = recent(5)
-      assert last.kind == "sign_in_refused" and last.meta["reason"] == "cap"
+      assert [%{kind: "sign_in_refused", meta: %{"reason" => "cap"}} | _] = recent(5)
       Repo.put_account(nil)
 
       :ok = Accounts.revoke_session(a.id, first.id)
@@ -214,49 +186,25 @@ defmodule Hireme.AccountsTest do
 
     ticket = Accounts.ticket(s)
     :ok = Accounts.revoke_session(s.account_id, s.id)
-    assert :error = Accounts.redeem_ticket(ticket)
-    assert :error = Accounts.redeem_ticket(ticket <> "x")
-    assert :error = Accounts.redeem_ticket(nil)
+    for t <- [ticket, ticket <> "x", nil], do: assert(:error = Accounts.redeem_ticket(t))
   end
 
   test "linking binds a new identity, refuses one bound elsewhere, stops at the declared cap, and the last cannot be unlinked" do
     %{account: a, email: email} = sign_in()
     %{email: other} = sign_in()
     Repo.put_account(a.id)
-
-    assert {:ok, gh} = Accounts.link(:github, %{subject: "4242", display: "octo"})
+    assert {:ok, _} = Accounts.link(:github, %{subject: "4242", display: "octo"})
     assert {:error, :taken} = Accounts.link(:email, %{subject: other, display: other})
     assert length(identities()) == 2
-
     cap = Hireme.Schema.table(:identities).cap
     for i <- 3..cap, do: {:ok, _} = Accounts.link(:github, %{subject: "s#{i}", display: "s#{i}"})
     assert {:error, :cap} = Accounts.link(:github, %{subject: "one-more", display: "x"})
-
-    [mail] =
-      Enum.filter(identities(), &(&1.provider == :email and &1.subject == email))
-
+    [mail] = Enum.filter(identities(), &(&1.provider == :email and &1.subject == email))
     assert :ok = Accounts.unlink(mail.id)
     for i <- Enum.drop(identities(), 1), do: :ok = Accounts.unlink(i.id)
     assert [%{id: last}] = identities()
     assert {:error, :last} = Accounts.unlink(last)
     assert {:error, :not_found} = Accounts.unlink(mail.id)
-    _ = gh
-  end
-
-  test "addresses normalize to one spelling and only address-shaped text passes" do
-    assert {:ok, "a@b.co"} = Accounts.normalize_email("  A@B.co ")
-
-    for bad <- [
-          "",
-          "a",
-          "a@b",
-          "@b.co",
-          "a b@c.de",
-          String.duplicate("a", 250) <> "@b.co",
-          nil,
-          7
-        ],
-        do: assert({:error, :invalid} = Accounts.normalize_email(bad))
   end
 
   test "the scope a browser keys its snapshot by is stable per account and differs between accounts" do

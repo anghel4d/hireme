@@ -19,14 +19,6 @@ defmodule HiremeWeb.ConnCase do
 
   setup tags do
     Hireme.DataCase.setup_sandbox(tags)
-    # A page load boots its account's sequencer, which outlives the test; the
-    # next test's account takes the same id, so each goes before its sandbox.
-    ExUnit.Callbacks.on_exit(fn ->
-      for {_, pid, _, _} <- DynamicSupervisor.which_children(Hireme.Sequencer.Dynamic),
-          do: DynamicSupervisor.terminate_child(Hireme.Sequencer.Dynamic, pid)
-    end)
-
-    Hireme.DataCase.fresh_window(tags[:window])
     {:ok, conn: build_conn()}
   end
 

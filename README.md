@@ -201,7 +201,7 @@ mix test                                  # every contract suite; a database per
 cargo test --manifest-path native/Cargo.toml --workspace
 bun native/kernel/vectors.mjs priv/static/wasm/kernel.wasm   # the kernel's vectors under wasm
 bun check -p assets                       # the client, strict
-bun test ./assets/test/                   # the client's pure modules (mix test runs these too)
+bun test ./assets/test/                   # the client's pure modules
 nix flake check                           # all of it, plus the dev VM
 ```
 

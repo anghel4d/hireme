@@ -13,7 +13,6 @@ defmodule Hireme.KeysTest do
   end
 
   defp stale(session), do: age(session, :authenticated_at, Hireme.Security.step_up_window() + 1)
-
   defp read_only(s, name, days \\ nil), do: Keys.mint(s, name, Keys.preset(:read_only), days)
 
   test "a minted key authenticates with its masks; revoked, expired or on a suspended account it is nothing; another account's is not mine",
@@ -27,11 +26,7 @@ defmodule Hireme.KeysTest do
     refute Keys.usable?(key.id, s.account_id + 1)
 
     {:ok, %{key: short, secret: short_secret}} = read_only(s, "short", 1)
-
-    short
-    |> Ecto.Changeset.change(expires_at: DateTime.add(Hireme.Store.now(), -1))
-    |> Repo.update!()
-
+    Repo.update!(Ecto.Changeset.change(short, expires_at: DateTime.add(Hireme.Store.now(), -1)))
     assert :error = Keys.authenticate(short_secret, "10.0.0.4")
 
     Keys.revoke(key)
@@ -45,15 +40,11 @@ defmodule Hireme.KeysTest do
 
   property "any altered character of a key fails, the same way as a wrong key", %{session: s} do
     {:ok, %{secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_write))
+    alphabet = String.graphemes("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
 
     check all(
             at <- integer(0..(byte_size(secret) - 1)),
-            char <-
-              member_of(
-                String.graphemes(
-                  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
-                )
-              ),
+            char <- member_of(alphabet),
             max_runs: 60
           ) do
       :ets.delete_all_objects(Hireme.RateLimit)
@@ -71,7 +62,6 @@ defmodule Hireme.KeysTest do
     {:ok, %{key: key}} = Keys.mint(s, "agent", Keys.preset(:read_write))
     assert {:ok, _} = Keys.change(s, key, Keys.preset(:read_write))
     refute_receive {:bye, {:key, _}, :grants}, 50
-
     s = stale(s)
     assert {:error, :step_up} = read_only(s, "later")
 
@@ -96,13 +86,14 @@ defmodule Hireme.KeysTest do
     assert Keys.preset_of(%{read_mask: 2, write_mask: 2, may_delete: false}) == :custom
     assert Keys.preset_of(%{Keys.preset(:read_write) | may_delete: true}) == :custom
 
-    for bad <- [
-          %{read_mask: 16, write_mask: 0},
-          %{read_mask: 0, write_mask: 0},
-          %{read_mask: -1, write_mask: 1},
-          %{}
-        ],
-        do: assert({:error, :masks} = Keys.mint(s, "x", bad))
+    bad = [
+      %{read_mask: 16, write_mask: 0},
+      %{read_mask: 0, write_mask: 0},
+      %{read_mask: -1, write_mask: 1},
+      %{}
+    ]
+
+    for masks <- bad, do: assert({:error, :masks} = Keys.mint(s, "x", masks))
   end
 
   @tag window: :api_key_peer
@@ -125,33 +116,36 @@ defmodule Hireme.KeysTest do
     Keys.revoke(key)
     refute_receive {:bye, {:key, _}, :revoked}, 50
 
-    for i <- 1..Hireme.Security.api_keys_per_account(), do: {:ok, _} = read_only(s, "k#{i}")
+    keys =
+      for i <- 1..Hireme.Security.api_keys_per_account(), do: elem(read_only(s, "k#{i}"), 1).key
+
     assert {:error, :limit} = read_only(s, "one more")
-    Keys.revoke(hd(Keys.list()))
+    Keys.revoke(hd(keys))
     assert {:ok, _} = read_only(s, "after a revoke")
   end
 
   test "revoked keys count toward the key table's cap until the purge removes them", %{session: s} do
-    cap = Hireme.Schema.table(:api_keys).cap
     now = Hireme.Store.now()
     old = DateTime.add(now, -31 * 86_400)
 
+    row = %{
+      account_id: s.account_id,
+      prefix: "abcd",
+      read_mask: 15,
+      write_mask: 0,
+      may_delete: false
+    }
+
+    row = Map.merge(row, %{revoked_at: old, rev: 1, inserted_at: old, updated_at: old})
+
     rows =
-      for i <- 1..(cap - 1),
-          do: %{
-            account_id: s.account_id,
-            key_id: "k#{String.pad_leading("#{i}", 11, "0")}",
-            name: "old #{i}",
-            secret_hash: :crypto.hash(:sha256, "#{i}"),
-            prefix: "abcd",
-            read_mask: 15,
-            write_mask: 0,
-            may_delete: false,
-            revoked_at: old,
-            rev: 1,
-            inserted_at: old,
-            updated_at: old
-          }
+      for i <- 1..(Hireme.Schema.table(:api_keys).cap - 1),
+          do:
+            Map.merge(row, %{
+              key_id: "k#{String.pad_leading("#{i}", 11, "0")}",
+              name: "old #{i}",
+              secret_hash: :crypto.hash(:sha256, "#{i}")
+            })
 
     for chunk <- Enum.chunk_every(rows, 500),
         do: Repo.insert_all(Hireme.Rows.ApiKey, chunk, skip_account: true)
@@ -187,7 +181,6 @@ defmodule Hireme.KeysTest do
     before = length(recent(500))
     assert {:ok, _} = Keys.rename(key, "agent")
     assert length(recent(500)) == before
-
     results = for i <- 1..31, do: Keys.rename(key, "agent #{i}")
     assert {:error, :rate_limited} = List.last(results)
   end
