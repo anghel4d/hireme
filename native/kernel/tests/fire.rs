@@ -322,3 +322,14 @@ fn an_email_goes_to_ten_recipients_at_most() {
     k.predict(&put("missions", 11, json!({"cc": list(4, "initech.example")})), &agent(3, NOON)).unwrap();
     assert_eq!(q(&mut k, json!({"op": "fire_review", "missions": "11"}))["missions"][0]["eligible"], true);
 }
+
+/// A session's word on the mailbox (live, an error, a sync) arrives late after the operator's
+/// unlink: it must not revive the mailbox, whose erase waits on the unlinked status. Only a new link moves it.
+#[test]
+fn an_unlinked_mailbox_takes_no_state_but_linking() {
+    let mut k = fixture::kernel(json!({"mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "unlinked", "daily_cap": 20}]}));
+    for status in ["live", "error", "auth_failed"] {
+        assert_eq!(k.predict(&cmd("mailbox_state", 1, json!({"status": status})), &mail(NOON)).expect_err(status).code, refusal::UNLINKED);
+    }
+    k.predict(&cmd("mailbox_state", 1, json!({"status": "linking"})), &mail(NOON)).expect("a new link moves it");
+}

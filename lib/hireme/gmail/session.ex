@@ -121,6 +121,9 @@ defmodule Hireme.Gmail.Session do
   # cycle, inside its crash boundary.
   @impl GenServer
   def init(account_id) do
+    # A stop (an unlink, a shutdown) waits for the cycle in hand: killed inside
+    # a query, the session would take its database connection down with it.
+    Process.flag(:trap_exit, true)
     Repo.put_account(account_id)
     {:ok, %__MODULE__{account_id: account_id, started: now()}, {:continue, :boot}}
   end

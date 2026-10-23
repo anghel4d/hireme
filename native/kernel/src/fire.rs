@@ -919,7 +919,12 @@ pub fn stamp(rows: &Rows, ctx: &Ctx, mission: u32, message_id: &str) -> Result<V
 /// `mailbox_state`: what the connector saw of the mailbox.
 pub fn mailbox_state(rows: &Rows, ctx: &Ctx, status: Val, error: Val, synced: Val) -> Result<Vec<Row>, Refusal> {
     need_mail(ctx, "mailbox_state")?;
-    let Some((_, id)) = rows.first(table::MAILBOXES) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    let Some((t, id)) = rows.first(table::MAILBOXES) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    // An unlinked mailbox moves only to linking (a new link): a session's word on it that lands after
+    // the operator's unlink must not revive it, or the erase that waits on the status never runs.
+    if t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::UNLINKED)) && status != Val::U32(u32::from(enums::mailbox_status::LINKING)) {
+        return Err(no(refusal::UNLINKED, json!({"table": "mailboxes"})));
+    }
     let mut r = row(table::MAILBOXES, id);
     r.set(MB::STATUS, status);
     r.set(MB::LAST_ERROR, error);
