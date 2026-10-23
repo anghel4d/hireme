@@ -3,7 +3,7 @@ defmodule HiremeWeb do
   The web layer: one endpoint, one router, one page, the HTTP-only
   ceremonies (sign-in and the factor page), and the wire's WebSocket
   carrier. Everything else is one wire session per tab or agent
-  (`HiremeWeb.Session`), over WebTransport through the gate or `/wire`.
+  (`HiremeWeb.Session`), over the `/wire` WebSocket.
   A browser is an account's session; an agent is an account's key;
   neither sees another account.
   """
@@ -201,9 +201,9 @@ defmodule HiremeWeb.Endpoint do
   defp loopback?({0, 0, 0, 0, 0, 0xFFFF, hi, _}) when hi >>> 8 == 127, do: true
   defp loopback?(_), do: false
 
-  # The wire's WebSocket carrier, for when UDP (and so the gate) is
-  # blocked. The credential travels in HELLO, never in the upgrade, so no
-  # cookie is read here; the session checks a ticket's origin itself.
+  # The wire's WebSocket carrier. The credential travels in HELLO, never
+  # in the upgrade, so no cookie is read here; the session checks a
+  # ticket's origin itself.
   # A connection may buffer a whole frame before HELLO, so upgrades are
   # metered per peer (`wire_peer`); the session caps how many a peer holds
   # open (`Hireme.Security.wire_sessions_per_peer/0`).

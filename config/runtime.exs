@@ -28,12 +28,6 @@ if config_env() == :dev do
     path -> config :hireme, Hireme.Repo, database: path
   end
 
-  # A Unix socket path holds 107 bytes; a tree checked out deep needs a short one.
-  case System.get_env("GATE_SOCKET", "") do
-    "" -> :ok
-    path -> config :hireme, HiremeWeb.Gate, socket: path
-  end
-
   # A dev node on another port (an e2e run) is its own origin: Origin checks and passkeys follow it.
   port = System.get_env("PORT", "")
 
@@ -42,10 +36,6 @@ if config_env() == :dev do
     config :wax_, origin: "http://localhost:#{port}"
   end
 end
-
-# HIREME_GATE=off runs the wire over the WebSocket carrier alone, with no
-# gate to build (certification runs, a machine without the Rust toolchain).
-if System.get_env("HIREME_GATE") == "off", do: config(:hireme, :gate, false)
 
 # HIREME_SIGNUPS=off: no new accounts. Every existing one still signs in and
 # adds ways in; a mailed link goes only to an address an account has.
@@ -76,17 +66,6 @@ if config_env() == :prod do
     adapter: Hireme.Mail.Cloudflare,
     account_id: System.fetch_env!("CLOUDFLARE_ACCOUNT_ID"),
     api_token: System.fetch_env!("CLOUDFLARE_EMAIL_TOKEN")
-
-  # The gate (GATE_BIN) runs as this node's Port and reads its other
-  # GATE_* settings from the environment. Without it the wire runs over
-  # the WebSocket carrier alone.
-  if socket = System.get_env("GATE_SOCKET") do
-    config :hireme, HiremeWeb.Gate,
-      socket: socket,
-      url: System.fetch_env!("GATE_URL"),
-      cmd: List.wrap(System.get_env("GATE_BIN")),
-      hash_file: System.get_env("GATE_CERT_HASH_FILE")
-  end
 
   # The public HTTPS endpoint is the reverse proxy, not this socket.
   {:ok, ip} =

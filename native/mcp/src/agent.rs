@@ -210,7 +210,7 @@ impl Host for Facts<'_> {
         self.up.rev()
     }
     fn carrier(&self) -> Option<&'static str> {
-        self.up.connected().map(crate::link::Carrier::name)
+        self.up.connected().then_some("websocket")
     }
     fn origin(&self) -> String {
         self.up.origin.clone()

@@ -21,9 +21,6 @@ config :hireme, Hireme.Mail, adapter: Swoosh.Adapters.Test
 
 config :hireme, HiremeWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: 4002]
 
-# No gate: a test that needs the wire speaks to the session directly.
-config :hireme, :gate, false
-
 # Tests drain the outbox themselves; no worker sends behind their back.
 config :hireme, :mail_outbox, false
 

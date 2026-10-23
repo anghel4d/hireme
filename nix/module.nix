@@ -1,7 +1,6 @@
 # Everything Hireme needs from a NixOS host: the user and one sandboxed unit,
 # and with `public.enable` the reverse proxy, the vault's secrets and the
-# profile `nix/deploy.sh` flips; with `gate.address` the gate's forwarding
-# and its wildcard certificate. The importing host names its addresses only.
+# profile `nix/deploy.sh` flips. The importing host names its addresses only.
 { self }:
 {
   config,
@@ -12,9 +11,6 @@
 }:
 let
   cfg = config.services.hireme;
-  gate = cfg.gate;
-  cert = "hireme-gate";
-  gatePort = 4433;
   inherit (lib) mkOption types;
   # Cloudflare's proxy networks (https://www.cloudflare.com/ips-v4/ and /ips-v6/,
   # checked 2026-10-12): only a request from one of them may name the client.
@@ -84,46 +80,6 @@ in
       };
     };
 
-    gate = {
-      enable = lib.mkEnableOption "the WebTransport gate, run by the node as a Port";
-      address = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = ''
-          Floating IPv4 only the gate listens on; UDP 443 there is forwarded
-          to the gate's high port. The host puts the address on its interface.
-        '';
-      };
-      host = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = ''
-          DNS-only name (one label under `domain`, so the wildcard certificate
-          covers it) whose A record points at `address`.
-        '';
-      };
-      listen = mkOption {
-        type = types.str;
-        default = "0.0.0.0:4433";
-        description = "UDP `address:port` the gate binds; the host forwards 443 to it.";
-      };
-      url = mkOption {
-        type = types.str;
-        example = "https://wt.example.org/wt";
-        description = "The gate's public URL, as the page dials it.";
-      };
-      origins = mkOption {
-        type = types.listOf types.str;
-        default = [ "https://${cfg.domain}" ];
-        defaultText = lib.literalExpression "[ \"https://\${config.services.hireme.domain}\" ]";
-        description = "Page origins allowed to open a session; agents send none.";
-      };
-      cert = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = "Directory with `fullchain.pem` and `key.pem`, readable by the `hireme` group and reread on change; null (the dev profile) self-signs a 14-day ECDSA certificate pinned by hash.";
-      };
-    };
   };
 
   config = lib.mkIf cfg.enable (
@@ -157,35 +113,13 @@ in
               ELIXIR_ERL_OPTIONS = "-kernel inet_dist_use_interface {127,0,0,1}";
               RELEASE_DISTRIBUTION = "name";
               RELEASE_NODE = "hireme@127.0.0.1";
-            }
-            // lib.optionalAttrs gate.enable (
-              {
-                GATE_BIN = "${cfg.release}/bin/hireme-gate";
-                GATE_SOCKET = "/run/hireme/gate.sock";
-                GATE_URL = gate.url;
-                GATE_LISTEN = gate.listen;
-                GATE_ORIGINS = lib.concatStringsSep "," gate.origins;
-              }
-              // (
-                if gate.cert == null then
-                  { GATE_CERT_HASH_FILE = "/run/hireme/gate.hash"; }
-                else
-                  {
-                    GATE_CERT = "${gate.cert}/fullchain.pem";
-                    GATE_KEY = "${gate.cert}/key.pem";
-                  }
-              )
-            );
+            };
             serviceConfig = {
               User = "hireme";
               Group = "hireme";
               WorkingDirectory = "/var/lib/hireme";
               ExecStart = "${cfg.release}/bin/hireme start";
               EnvironmentFile = cfg.environmentFile;
-              # SIGTERM reaches the node alone, which drains its sessions through
-              # the gate and then closes the gate's stdin; the rest of the cgroup
-              # is killed only if that outlasts the stop timeout.
-              KillMode = "mixed";
               Restart = "on-failure";
               RestartSec = 5;
               StateDirectory = [
@@ -277,63 +211,6 @@ in
           };
         })
 
-        (lib.mkIf (gate.enable && gate.address != null) {
-          assertions = [
-            {
-              assertion =
-                gate.host != null
-                && lib.hasSuffix ".${cfg.domain}" gate.host
-                && !(lib.hasInfix "." (lib.removeSuffix ".${cfg.domain}" gate.host));
-              message = "services.hireme.gate.host must be one label under ${cfg.domain}, inside the wildcard.";
-            }
-            {
-              assertion = cfg.public.enable;
-              message = "services.hireme.gate.address needs services.hireme.public.enable for its certificate.";
-            }
-          ];
-
-          services.hireme.gate = {
-            listen = "${gate.address}:${toString gatePort}";
-            url = "https://${gate.host}/wt";
-            cert = "/var/lib/acme/${cert}";
-          };
-
-          # UDP 443 on the gate's address only, forwarded to its high port;
-          # the high port takes nothing that was not forwarded.
-          networking.firewall.extraCommands = ''
-            iptables -t nat -N hireme-gate 2>/dev/null || iptables -t nat -F hireme-gate
-            iptables -t nat -A hireme-gate -d ${gate.address}/32 -p udp --dport 443 -j DNAT --to-destination ${gate.address}:${toString gatePort}
-            iptables -t nat -C PREROUTING -j hireme-gate 2>/dev/null || iptables -t nat -A PREROUTING -j hireme-gate
-            iptables -A nixos-fw -d ${gate.address}/32 -p udp --dport ${toString gatePort} -m conntrack --ctstate DNAT -j nixos-fw-accept
-          '';
-          networking.firewall.extraStopCommands = ''
-            iptables -t nat -D PREROUTING -j hireme-gate 2>/dev/null || true
-            iptables -t nat -F hireme-gate 2>/dev/null || true
-            iptables -t nat -X hireme-gate 2>/dev/null || true
-          '';
-
-          # quinn's recommended socket buffers for bursts of QUIC datagrams.
-          boot.kernel.sysctl = {
-            "net.core.rmem_max" = 7500000;
-            "net.core.wmem_max" = 7500000;
-          };
-
-          # Wildcard by DNS-01, so certificate transparency shows
-          # *.${cfg.domain} and not the gate's own name. The gate rereads
-          # the pair when a renewal rewrites it.
-          security.acme.certs.${cert} = {
-            domain = "*.${cfg.domain}";
-            dnsProvider = "cloudflare";
-            dnsResolver = "1.1.1.1:53";
-            # CF_DNS_API_TOKEN: Zone DNS Edit on the domain's zone only.
-            environmentFile = config.age.secrets.hireme-acme.path;
-            group = "hireme";
-          };
-          systemd.services.hireme = {
-            wants = [ "acme-${cert}.service" ];
-            after = [ "acme-${cert}.service" ];
-          };
-        })
       ]
       # The vault (secrets/master), rekeyed to the host by agenix-rekey; only
       # where the host imports it, so the dev profile needs none.
@@ -347,12 +224,6 @@ in
                 mode = "0400";
               };
             }
-            (lib.mkIf (gate.enable && gate.address != null) {
-              age.secrets.hireme-acme = {
-                rekeyFile = "${self}/secrets/master/hireme-acme.age";
-                mode = "0400";
-              };
-            })
           ]
         )
       )

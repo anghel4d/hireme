@@ -26,7 +26,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::agent::Agent;
-use crate::link::Dial;
 use crate::upstream::{Upstream, lock};
 
 /// A burst of puts is one request: room for a big one, never unbounded.
@@ -38,7 +37,8 @@ const KEEPALIVE: Duration = Duration::from_secs(15);
 type Body = BoxBody<Bytes, Infallible>;
 
 pub struct Config {
-    pub dial: Dial,
+    /// The node's `/wire` socket URL.
+    pub wire: String,
     pub origin: String,
     pub label: String,
     /// The daemon's own key, for agents that present the local token; none: every agent brings its own.
@@ -65,7 +65,7 @@ impl Daemon {
     pub fn upstream(&self, key: &str) -> Arc<Upstream> {
         lock(&self.upstreams)
             .entry(key.to_owned())
-            .or_insert_with(|| Upstream::start(key.to_owned(), self.cfg.label.clone(), self.cfg.dial.clone(), self.cfg.origin.clone(), self.cfg.replicas))
+            .or_insert_with(|| Upstream::start(key.to_owned(), self.cfg.label.clone(), self.cfg.wire.clone(), self.cfg.origin.clone(), self.cfg.replicas))
             .clone()
     }
 

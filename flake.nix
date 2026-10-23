@@ -145,9 +145,9 @@
           installPhase = "touch $out";
         };
 
-        # The dev profile: the module on a VM with generated secrets and a
-        # self-signed gate; the node applies its schema at boot, backs up,
-        # supervises the gate, and keeps its data across a restart. Behind
+        # The dev profile: the module on a VM with generated secrets; the node
+        # applies its schema at boot, backs up, and keeps its data across a
+        # restart. Behind
         # the public host's nginx (plain HTTP here), /mcp outlives the
         # morning that took it down on 2026-10-20 (nix/mcp-replay.py).
         dev = pkgs.testers.runNixOSTest {
@@ -203,12 +203,6 @@
                 acmeEmail = "hireme@localhost";
               };
               environmentFile = "/var/lib/hireme-dev/env";
-              gate = {
-                enable = true;
-                listen = "127.0.0.1:4433";
-                url = "https://127.0.0.1:4433/wt";
-                origins = [ "http://localhost:4000" ];
-              };
             };
             systemd.services.hireme-dev-secrets = {
               wantedBy = [ "hireme.service" ];
@@ -261,30 +255,12 @@
               # The page ships the kernel the release was built with.
               machine.succeed("curl -sf -o /dev/null http://127.0.0.1:4000/wasm/kernel.wasm")
 
-              # The gate is the node's child, on a high port, as the node's user,
-              # with no capability, pinned by hash.
-              machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
-              gate = machine.succeed("ps -o user= -p $(pgrep hireme-gate)").split()
-              node = machine.succeed("systemctl show -P MainPID hireme").strip()
-              assert gate[0] == "hireme", f"the gate runs as {gate[0]}"
-              caps = machine.succeed("grep CapEff /proc/$(pgrep hireme-gate)/status").split()[1]
-              assert int(caps, 16) == 0, f"the gate holds capabilities {caps}"
-              machine.succeed(f"pstree -p {node} | grep -q hireme-gate")
-              machine.succeed("grep -Eq '^[0-9a-f]{64}$' /run/hireme/gate.hash")
 
-              # A gate that dies is started again by the node.
-              old = machine.succeed("pgrep hireme-gate").strip()
-              machine.succeed(f"kill -9 {old}")
-              machine.wait_until_succeeds(f"pgrep hireme-gate | grep -vx {old}")
-
-              # Stopping the node stops the gate; restarting keeps the data and
-              # applies nothing twice.
+              # A restart keeps the data and applies nothing twice.
               machine.succeed("systemctl stop hireme")
-              machine.fail("pgrep hireme-gate")
               machine.succeed("systemctl start hireme")
               machine.wait_for_open_port(4000)
               machine.wait_until_succeeds("sqlite3 /var/lib/hireme/hireme.db \"select count(*) from schema_files where name = '0000_baseline'\" | grep -qx 1")
-              machine.wait_until_succeeds("ss -Hulpn 'sport = :4433' | grep -q hireme-gate")
 
               # The public host's location, as fsn1-2 runs it: a CV file's body
               # (the node reads 64 MiB), answers under Cloudflare's 100 s (the

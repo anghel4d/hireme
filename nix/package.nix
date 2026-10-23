@@ -1,5 +1,5 @@
 # What Hireme ships, from one source tree and one Cargo lock: the OTP
-# release (with the kernel NIF and the gate inside it; MCP is served by the
+# release (with the kernel NIF inside it; MCP is served by the
 # node), kernel.wasm, and hireme-mcp, the local daemon an operator's agents
 # reach the node through. Nothing they build is committed to the repository,
 # nor are the declaration's outputs (schema/build.exs emits them in the
@@ -59,21 +59,14 @@ let
     '';
   };
 
-  # The gate, the NIF (with the MCP surface inside it) and the schema
-  # emitter share one dependency build.
+  # The NIF (with the MCP surface inside it) and the schema emitter share
+  # one dependency build.
   native = rustPlatform.buildRustPackage (
     cargo
     // {
       pname = "hireme-native";
       inherit version;
-      # The gate's fixes to the latest wtransport: 0.5-RTT SETTINGS, and
-      # closing handshakes a client abandons.
-      postPatch = ''
-        patch -d "$cargoDepsCopy"/wtransport-0.7.2 -p1 < native/gate/wtransport.patch
-      '';
       cargoBuildFlags = [
-        "-p"
-        "gate"
         "-p"
         "nif"
         "-p"
@@ -84,8 +77,7 @@ let
         runHook preInstall
         # buildRustPackage builds into target/<triple>/release under its own
         # target dir, wherever that is; find the binaries rather than guess.
-        release=$(dirname "$(find . -path '*/release/hireme-gate' -type f -not -path '*/deps/*' | head -1)")
-        install -Dm755 "$release/hireme-gate" $out/bin/hireme-gate
+        release=$(dirname "$(find . -path '*/release/hireme-schema' -type f -not -path '*/deps/*' | head -1)")
         install -Dm755 "$release/hireme-schema" $out/bin/hireme-schema
         install -Dm644 "$release/libnif.so" $out/lib/libnif.so
         runHook postInstall
@@ -198,11 +190,6 @@ let
     # without a migration; then the bundle, from the generated schema.ts.
     postBuild = ''
       mix do deps.loadpaths --no-deps-check + hireme.schema --check + assets.deploy
-    '';
-
-    # One profile carries the node and its gate, so a deploy flips both.
-    postInstall = ''
-      install -Dm755 ${native}/bin/hireme-gate $out/bin/hireme-gate
     '';
 
     # RELEASE_COOKIE comes at runtime, outside the public store.

@@ -83,8 +83,7 @@ defmodule Hireme.Security do
   @spec api_keys_per_account() :: pos_integer()
   def api_keys_per_account, do: 100
 
-  # Wire sessions one peer holds open at once, authenticated or not, as the
-  # gate's GATE_PER_IP bounds its carrier.
+  # Wire sessions one peer holds open at once, authenticated or not.
   @spec wire_sessions_per_peer() :: pos_integer()
   def wire_sessions_per_peer, do: 16
 

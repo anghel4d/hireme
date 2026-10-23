@@ -11,7 +11,7 @@
 // queue. It imports only frame builders, which the bundler tree-shakes down.
 
 import { SCHEMA_REV } from "./gen/schema.ts"
-import { CRED, header, hello, meta, transport, webSocket, type Bytes, type Early } from "./wire.ts"
+import { CRED, header, hello, meta, webSocket, type Bytes, type Early } from "./wire.ts"
 
 /** What the bundle finds on `window.__hw`. */
 export interface Boot extends Early {
@@ -129,36 +129,7 @@ function bytes(b64: string): Bytes {
       ws.onclose = settle
       hw.ws = ws
     }
-    if (m.gate !== "" && "WebTransport" in window) {
-      // Once HELLO is written the page's ticket is spent: a failure after that goes to the
-      // bundle, which fetches a fresh ticket, never to the socket with the spent one.
-      let spent = false
-      let wt: WebTransport | null = null
-      void (async () => {
-        const t = await transport(m.gate, m.hashes)
-        wt = t.wt
-        const writer = t.stream.writable.getWriter()
-        const f = await first()
-        spent = true
-        await writer.write(f)
-        // The bundle drains the streams; until then, nothing reads them, and the transport buffers.
-        hw.wt = t.wt
-        hw.writer = writer
-        hw.control = t.stream.readable
-        hw.helloSent = true
-        settle()
-      })().catch(() => {
-        try {
-          wt?.close()
-        } catch {
-          // Already closed.
-        }
-        if (spent) settle()
-        else socket()
-      })
-    } else {
-      socket()
-    }
+    socket()
   } else {
     settle()
   }

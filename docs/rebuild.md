@@ -363,7 +363,6 @@ One Cargo workspace, `native/Cargo.toml`, one lockfile:
 | `native/wire` | frame codec |
 | `native/kernel` | rows, derivations, judging; core is embeddable, `wasm32` and native targets |
 | `native/nif` | Rustler wrapper of `kernel` for the sequencer |
-| `native/gate` | WebTransport front door |
 | `native/mcp` | the MCP surface, linked into the NIF and served at `/mcp` |
 
 Kernel modules, one owner each:
@@ -431,7 +430,6 @@ lib/hireme/
 lib/hireme_web/
   endpoint.ex router.ex auth.ex sign_in.ex factor.ex
   session.ex       one wire session per tab or agent: HELLO, masks, BOOT filter, OPS, RPC, BYE
-  gate.ex          the BEAM end of the gate
   account.ex       account.* RPC methods (a projection, never raw system rows)
   wire/codec.ex    frame codec, layouts from the schema file
 lib/mix/tasks/hireme.ex   schema, import
@@ -549,7 +547,7 @@ assets/
   js/
     early.ts      inline in <head>: connect, compile wasm, read snapshot
     app.ts        boot
-    wire.ts       carriers (WebTransport, WebSocket), framer
+    wire.ts       the WebSocket carrier, framer
     kernel.ts     wasm bindings over gen/schema.ts
     state.ts      model: address, lens, selection, notices
     morph.ts      escaping templates and keyed DOM morph
@@ -576,10 +574,9 @@ assets/
 
 ## Release, edge, nix
 
-- `flake.nix`: packages `hireme` (OTP release with the NIF and
-  `hireme-gate`), `kernel-wasm`; `nixosModules.hireme`
-  (proxy and its query-free log format, vault, gate forwarding, deploy
-  script);
+- `flake.nix`: packages `hireme` (OTP release with the NIF),
+  `kernel-wasm`; `nixosModules.hireme`
+  (proxy and its query-free log format, vault, deploy script);
   `checks.dev` (the VM) and `checks.unit` (mix test, cargo test, bun check).
 - Baseline: `Hireme.Release` applies `priv/db/baseline.sql` to an empty
   database and records every additive file present as contained; an

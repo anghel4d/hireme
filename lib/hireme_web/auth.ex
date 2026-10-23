@@ -16,15 +16,14 @@ defmodule HiremeWeb.Auth do
 
   The CSP: scripts are this origin's plus the inlined early script by its
   hash, and WebAssembly may compile (`wasm-unsafe-eval`), never `eval`;
-  styles are this origin's only; fetch and sockets stay on this origin
-  plus the gate when one runs; nothing frames the page (ASVS 3.4).
+  styles are this origin's only; fetch and sockets stay on this origin;
+  nothing frames the page (ASVS 3.4).
   """
 
   import Plug.Conn
   import HiremeWeb, only: [json: 2, redirect: 2]
 
   alias Hireme.{Accounts, Repo}
-  alias HiremeWeb.Gate
 
   @session_key "hireme_session"
 
@@ -38,17 +37,6 @@ defmodule HiremeWeb.Auth do
     "object-src 'none'",
     "form-action 'self'"
   ]
-
-  @doc "The WebTransport URL a page connects to, or nil when no gate runs."
-  @spec wire_gate() :: String.t() | nil
-  def wire_gate, do: if(gate?(), do: Gate.url())
-
-  @doc "The development gate's self-signed certificate hashes, hex, space-separated."
-  @spec wire_hashes() :: String.t()
-  def wire_hashes, do: (gate?() && Gate.cert_hash()) || ""
-
-  defp gate?,
-    do: Application.get_env(:hireme, :gate, true) and Code.ensure_loaded?(Gate)
 
   @doc "A static path through the digest manifest in production."
   @spec static(String.t()) :: String.t()
@@ -98,17 +86,11 @@ defmodule HiremeWeb.Auth do
       "'wasm-unsafe-eval'" | for({_, hash} <- List.wrap(early()), do: "'sha256-#{hash}'")
     ]
 
-    gate =
-      case wire_gate() && URI.parse(wire_gate()) do
-        %URI{scheme: "https", host: host, port: port} -> ["https://#{host}:#{port}"]
-        _ -> []
-      end
-
     Enum.join(
       [
         "default-src 'self'",
         "script-src " <> Enum.join(script, " "),
-        "connect-src " <> Enum.join(["'self'" | gate], " ")
+        "connect-src 'self'"
       ] ++
         @csp_rest,
       "; "

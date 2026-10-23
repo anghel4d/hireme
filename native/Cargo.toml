@@ -3,7 +3,7 @@
 [workspace]
 resolver = "3"
 # A crate joins when its Cargo.toml lands: nif, gate and mcp add themselves.
-members = ["schema", "wire", "kernel", "nif", "mcp", "gate"]
+members = ["schema", "wire", "kernel", "nif", "mcp"]
 
 [workspace.package]
 edition = "2024"

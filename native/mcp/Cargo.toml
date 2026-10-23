@@ -3,7 +3,7 @@ name = "mcp"
 version = "2.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "hireme's MCP surface: served by the node over HTTP through the NIF, and (feature `client`) hireme-mcp, the local daemon whose agents share one wire session per key over WebTransport or WebSocket"
+description = "hireme's MCP surface: served by the node over HTTP through the NIF, and (feature `client`) hireme-mcp, the local daemon whose agents share one wire session per key over a WebSocket"
 
 [lib]
 path = "src/lib.rs"
@@ -16,7 +16,7 @@ required-features = ["client"]
 
 [features]
 client = [
-    "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:wtransport",
+    "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls",
     "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:hyper-rustls",
 ]
 
@@ -25,14 +25,12 @@ kernel = { path = "../kernel" }
 schema = { path = "../schema" }
 wire = { path = "../wire" }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-# The daemon (feature `client`): an async runtime, both carriers, and a local HTTP front.
+# The daemon (feature `client`): an async runtime, the socket carrier, and a local HTTP front.
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time", "signal", "fs"], optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"], optional = true }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"], optional = true }
 # TLS needs a crypto provider chosen once; ring builds without cmake.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
-# The gate's own WebTransport stack, its client half.
-wtransport = { version = "0.7.2", features = ["quinn"], optional = true }
 hyper = { version = "1", features = ["server", "client", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"], optional = true }
 http-body-util = { version = "0.1", optional = true }

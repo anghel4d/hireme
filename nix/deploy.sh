@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ship Hireme to fsn1-2: the release (the node + the WebTransport gate) and,
+# Ship Hireme to fsn1-2: the release and,
 # with --switch, the host configuration that runs it.
 #
 # The workstation builds the release from this flake at a pushed revision,
@@ -10,8 +10,8 @@
 # rollback), copies the closures over the YubiKey SSH master, and on
 # the host: takes an online SQLite backup, flips
 # /nix/var/nix/profiles/hireme, switches the system when asked, and restarts
-# hireme (the node migrates at boot, drains its sessions on the way down and
-# runs the gate itself), then proves the result from outside. An exit status
+# hireme (the node migrates at boot and drains its sessions on the way
+# down), then proves the result from outside. An exit status
 # of zero means the public names serve this revision.
 #
 # The host is nixos-server's fsn1-2 (NIXOS_SERVER, default
@@ -34,7 +34,6 @@ ref=${REF:-main}
 outLink=${HIREME_OUT_LINK:-$HOME/tmp/hireme-release}
 hostAttr=hetzner-fsn1-2
 domain=hireme.anghel4d.com
-gateUrl=https://wt.hireme.anghel4d.com/wt
 profile=/nix/var/nix/profiles/hireme
 lockFile=${TMPDIR:-/tmp}/hireme-deploy.lock
 switch=0
@@ -77,7 +76,7 @@ flake="git+file://$repo?rev=$rev"
 # 2. Build the release here, and the host when switching; check the revision.
 nix build -o "$outLink" "$flake#hireme"
 release=$(readlink -f "$outLink")
-test -x "$release/bin/hireme" -a -x "$release/bin/hireme-gate" || die "$release lacks bin/hireme or bin/hireme-gate"
+test -x "$release/bin/hireme" || die "$release lacks bin/hireme"
 say "release $release"
 if ((switch)); then
   system=$(nix build --no-link --print-out-paths --override-input hireme "$flake" "$server#nixosConfigurations.$hostAttr.config.system.build.toplevel")
@@ -130,9 +129,4 @@ done
 [ "$code" = 200 ] || die "https://$domain/sign-in answered $code"
 say "https://$domain answers 200"
 
-# The checkout's probe (build output, kept between deploys).
-probe="$repo/native/target/release/examples/probe"
-[ -x "$probe" ] || cargo build --quiet --release -p gate --example probe --manifest-path "$repo/native/Cargo.toml"
-"$probe" handshake "$gateUrl" --n 3 | sed 's/^/[hireme] gate: /' || die "the gate did not accept a WebTransport session"
-
-say "done: $short live on https://$domain and $gateUrl"
+say "done: $short live on https://$domain"

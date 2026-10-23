@@ -54,7 +54,7 @@ let enteredLens = ""
 let entered = ""
 
 function link(): Html {
-  const label = { connecting: "connecting", open: model.carrier === "webtransport" ? "live (WT)" : "live", lost: "reconnecting", ended: "offline" }[model.link]
+  const label = { connecting: "connecting", open: "live", lost: "reconnecting", ended: "offline" }[model.link]
   return html`<span class="link link-${model.link}" role="status" title="account rev ${model.rev.toString()} at connect">${label}${model.pending > 0 ? html` · ${model.pending} pending` : EMPTY}</span>`
 }
 
@@ -330,7 +330,7 @@ function frame(f: Bytes, h: Header): void {
 const wire = new Wire({
   frame,
   // The early socket's queued frames (WELCOME among them) reach the kernel before the carrier is up: an open link stays open.
-  open: (carrier) => set({ carrier, link: model.link === "open" ? "open" : "connecting" }),
+  open: () => set({ link: model.link === "open" ? "open" : "connecting" }),
   lost: (why, retry) => {
     set({ link: retry === 0 ? "ended" : "lost" })
     // The ticket's refusal came through the server's sign-in check, which clears this browser's storage

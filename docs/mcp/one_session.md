@@ -25,7 +25,7 @@ protocol crate:
  │ agent.rs    THE MCP SESSION            │   │ Session GenServer: THE MCP SESSION           │
  │ upstream.rs one wire session per key,  │   │ reads:  Sequencer.read → kernel (NIF)        │
  │             a pool of kernel replicas  │   │ writes: Sequencer.call (ops from the NIF)    │
- │ link.rs     WebTransport | WebSocket   │   └────────────────┬──────────────────────────────┘
+ │ link.rs     the WebSocket              │   └────────────────┬──────────────────────────────┘
  └──────────────┬─────────────────────────┘                    │ NIF
                 ▼                                              ▼
          the node's wire session ──────────────▶ ┌─ native/mcp, shared (Rust, 1,862) ─────┐

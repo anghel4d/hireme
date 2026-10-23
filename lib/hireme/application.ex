@@ -34,18 +34,11 @@ defmodule Hireme.Application do
       ] ++
         McpSession.children() ++
         [
-          HiremeWeb.Endpoint
-        ] ++
-        gate() ++
-        [HiremeWeb.Session.Drain]
+          HiremeWeb.Endpoint,
+          HiremeWeb.Session.Drain
+        ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Hireme.Supervisor)
-  end
-
-  defp gate do
-    if Application.get_env(:hireme, :gate, true),
-      do: [{HiremeWeb.Gate, Application.get_env(:hireme, HiremeWeb.Gate, [])}],
-      else: []
   end
 end
 

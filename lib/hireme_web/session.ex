@@ -4,8 +4,7 @@ defmodule HiremeWeb.Session do
   train, OPS, RPC, liveness and BYE (`docs/rebuild.md`, "Wire v2").
 
   A session is carrier-neutral. The process hosting it (the `/wire`
-  WebSocket through `WebSock`, or a WebTransport connection from the
-  gate) calls `open/1` once, `frame/2` with every whole frame the peer
+  WebSocket through `WebSock`, or an MCP session) calls `open/1` once, `frame/2` with every whole frame the peer
   sends, and `info/2` with every other message it receives; each answers
   `{:ok, state}`, `{:push, frames, state}` or `{:stop, reason, frames,
   state}` (send the frames, then close). The hosting process is the
@@ -545,7 +544,7 @@ defmodule HiremeWeb.Session.Drain do
   @moduledoc """
   The last child of the node: on shutdown, before anything under it
   stops, every wire session is told `BYE restart` and given up to 5 s to
-  go; then shutdown continues and the gate stops after it.
+  go; then shutdown continues.
   """
 
   use GenServer

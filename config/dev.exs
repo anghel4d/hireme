@@ -12,15 +12,6 @@ config :hireme,
 
 config :wax_, origin: "http://localhost:4000"
 
-# The WebTransport gate on UDP 4433, run by the node as a Port with a
-# fresh self-signed certificate each start; the page passes its hash.
-config :hireme, HiremeWeb.Gate,
-  socket: Path.expand("../_build/gate.sock", __DIR__),
-  url: "https://127.0.0.1:4433/wt",
-  hash_file: Path.expand("../_build/gate.hash", __DIR__),
-  cmd: ~w(cargo run --quiet --release --manifest-path native/Cargo.toml -p gate),
-  env: [{"GATE_ORIGINS", "http://localhost:4000,http://127.0.0.1:4000"}]
-
 # Loopback only; `ip: {0, 0, 0, 0}` opens the desk to the network.
 config :hireme, HiremeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}],

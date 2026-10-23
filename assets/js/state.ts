@@ -53,7 +53,6 @@ export interface Model {
   /** The selected row of the current lens (an application id on the desk). */
   selected: number
   link: Link
-  carrier: "webtransport" | "websocket" | null
   /** The account's rev as of this session's WELCOME. */
   rev: bigint
   /** From WELCOME: the domains this session may write. */
@@ -196,7 +195,6 @@ export const model: Model = {
   menu: false,
   selected: 0,
   link: "connecting",
-  carrier: null,
   rev: 0n,
   writeMask: 0,
   sessionId: 0,

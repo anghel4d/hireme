@@ -384,9 +384,7 @@ defmodule Mix.Tasks.Hireme.Import do
     account = opts[:account] || Mix.raise("--account ID is required")
     if paths == [], do: Mix.raise("name at least one pack")
 
-    # An import needs the database and the sequencer, not the gate; and it
-    # is for a node that is stopped (a running one imports over its RPC).
-    Application.put_env(:hireme, :gate, false)
+    # An import is for a node that is stopped (a running one imports over its RPC).
     Mix.Task.run("app.start")
 
     refused =

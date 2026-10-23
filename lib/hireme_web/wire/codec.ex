@@ -103,23 +103,6 @@ defmodule HiremeWeb.Wire.Codec do
   end
 
   @doc """
-  Splits the first whole frame off a byte stream.
-  `{:ok, frame, rest}`, `:more`, or `{:error, :len}` for a stream that is not frames.
-  """
-  def split(buf, max \\ @max_up)
-
-  def split(<<len::little-32, _::binary>> = buf, max) when byte_size(buf) >= @header do
-    cond do
-      len < @header or rem(len, 8) != 0 or len > max -> {:error, :len}
-      byte_size(buf) < len -> :more
-      # Not `true ->`: Dialyzer reads a literal-true tail as a false branch it cannot match.
-      :else -> {:ok, binary_part(buf, 0, len), binary_part(buf, len, byte_size(buf) - len)}
-    end
-  end
-
-  def split(_buf, _max), do: :more
-
-  @doc """
   Parses one whole frame: `{:ok, kind_atom, flags, rev, plain_body}`. A
   peer's frame (`:up`) never comes packed (no client compresses), so a
   ZSTD flag on one is refused unread; a `:down` body unpacks to at most

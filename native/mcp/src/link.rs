@@ -1,12 +1,6 @@
-//! A carrier to the node: WebTransport through the gate, or a WebSocket to
-//! `/wire`. Either way the session above sees one inbox of whole frames and
-//! one outbox; dropping the [`Link`] ends the connection and its tasks.
-//!
-//! WebTransport is the gate's: a control stream the client opens, carrying
-//! every frame both ways in order, plus server uni streams that each carry
-//! one whole payload (the BOOT). Those race the control stream, so the
-//! inbox says which stream a frame came on and the session orders the train
-//! (`upstream.rs`), as the browser's wire does.
+//! The carrier to the node: a WebSocket to `/wire`. The session above sees
+//! one inbox of whole frames and one outbox; dropping the [`Link`] ends the
+//! connection and its tasks.
 
 use std::time::Duration;
 
@@ -19,52 +13,16 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// The largest frame the node sends (a packed BOOT is far under it).
 const MAX_FRAME: usize = 256 << 20;
-/// A dial that hangs (UDP dropped on the way, a dead gate) gives up and lets the other carrier try.
+/// A dial that hangs gives up; the next attempt follows the session's backoff.
 const DIAL_WAIT: Duration = Duration::from_secs(8);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Carrier {
-    WebTransport,
-    WebSocket,
-}
-
-impl Carrier {
-    pub fn name(self) -> &'static str {
-        match self {
-            Carrier::WebTransport => "webtransport",
-            Carrier::WebSocket => "websocket",
-        }
-    }
-}
-
-/// Which carrier to dial: WebTransport first and the socket if it fails (the browser's order), or one only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Prefer {
-    Auto,
-    WebTransport,
-    WebSocket,
-}
-
-/// Where the node is: its `/wire` socket URL, and its gate's URL when it runs one.
-#[derive(Clone, Debug)]
-pub struct Dial {
-    pub wire: String,
-    pub gate: Option<String>,
-    /// SHA-256 of a self-signed gate's certificate (a dev node); empty trusts the system's roots.
-    pub cert_hashes: Vec<[u8; 32]>,
-    pub prefer: Prefer,
-}
-
 pub enum Inbound {
-    /// A frame off the control stream (or the socket): in order with every other one there.
-    Control(Vec<u8>),
-    /// A frame off one of the gate's uni streams: whole, but racing the control stream.
-    Bulk(Vec<u8>),
+    /// One frame, in order with every other.
+    Frame(Vec<u8>),
     Closed(String),
 }
 
 pub struct Link {
-    pub carrier: Carrier,
     pub out: mpsc::UnboundedSender<Vec<u8>>,
     pub inbox: mpsc::UnboundedReceiver<Inbound>,
     tasks: Vec<JoinHandle<()>>,
@@ -78,104 +36,20 @@ impl Drop for Link {
     }
 }
 
-/// Dials the node as `d` prefers. `wt_broken` (WebTransport failed before in this process) goes straight to the socket.
-pub async fn connect(d: &Dial, wt_broken: bool) -> Result<Link, String> {
-    let try_wt = d.gate.is_some() && d.prefer != Prefer::WebSocket && !(wt_broken && d.prefer == Prefer::Auto);
-    if try_wt {
-        match tokio::time::timeout(DIAL_WAIT, webtransport(d)).await {
-            Ok(Ok(link)) => return Ok(link),
-            Ok(Err(e)) if d.prefer == Prefer::WebTransport => return Err(e),
-            Err(_) if d.prefer == Prefer::WebTransport => return Err(format!("no WebTransport session within {} s", DIAL_WAIT.as_secs())),
-            _ => {}
-        }
-    }
-    match tokio::time::timeout(DIAL_WAIT, websocket(d)).await {
+/// Dials the node's `/wire` socket at `wire`.
+pub async fn connect(wire: &str) -> Result<Link, String> {
+    match tokio::time::timeout(DIAL_WAIT, websocket(wire)).await {
         Ok(r) => r,
         Err(_) => Err(format!("no WebSocket within {} s", DIAL_WAIT.as_secs())),
     }
 }
 
-async fn webtransport(d: &Dial) -> Result<Link, String> {
-    let gate = d.gate.as_deref().ok_or("no gate")?;
-    let config = wtransport::ClientConfig::builder().with_bind_default();
-    let config = if d.cert_hashes.is_empty() {
-        config.with_native_certs()
-    } else {
-        config.with_server_certificate_hashes(d.cert_hashes.iter().map(|h| wtransport::tls::Sha256Digest::new(*h)))
-    };
-    // QUIC keeps the path warm under the wire's own 15 s PING.
-    let config = config.keep_alive_interval(Some(Duration::from_secs(10))).build();
-    let endpoint = wtransport::Endpoint::client(config).map_err(|e| format!("gate: {e}"))?;
-    let connection = endpoint.connect(gate).await.map_err(|e| format!("gate {gate}: {e}"))?;
-    let (mut send, mut recv) = connection.open_bi().await.map_err(|e| format!("gate: {e}"))?.await.map_err(|e| format!("gate: {e}"))?;
-    let (out, mut outq) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (tx, inbox) = mpsc::unbounded_channel();
-    let writer = tokio::spawn(async move {
-        while let Some(f) = outq.recv().await {
-            if send.write_all(&f).await.is_err() {
-                break;
-            }
-        }
-    });
-    let control = {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::with_capacity(64 << 10);
-            let mut chunk = vec![0u8; 64 << 10];
-            loop {
-                match recv.read(&mut chunk).await {
-                    Ok(Some(n)) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        if let Err(why) = drain(&mut buf, |f| tx.send(Inbound::Control(f)).is_ok()) {
-                            let _ = tx.send(Inbound::Closed(why));
-                            return;
-                        }
-                    }
-                    Ok(None) => return drop(tx.send(Inbound::Closed("the gate closed the control stream".into()))),
-                    Err(e) => return drop(tx.send(Inbound::Closed(format!("control stream: {e}")))),
-                }
-            }
-        })
-    };
-    let bulk = {
-        let tx = tx.clone();
-        let connection = connection.clone();
-        tokio::spawn(async move {
-            while let Ok(mut uni) = connection.accept_uni().await {
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = vec![0u8; 256 << 10];
-                    while let Ok(Some(n)) = uni.read(&mut chunk).await {
-                        if buf.len() + n > MAX_FRAME {
-                            let _ = tx.send(Inbound::Closed("a bulk stream over the frame limit".into()));
-                            return;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                    if let Err(why) = drain(&mut buf, |f| tx.send(Inbound::Bulk(f)).is_ok()) {
-                        let _ = tx.send(Inbound::Closed(why));
-                    } else if !buf.is_empty() {
-                        let _ = tx.send(Inbound::Closed("a bulk stream ended mid-frame".into()));
-                    }
-                });
-            }
-        })
-    };
-    let closed = tokio::spawn(async move {
-        let e = connection.closed().await;
-        let _ = tx.send(Inbound::Closed(format!("the gate closed the session: {e}")));
-        drop(endpoint);
-    });
-    Ok(Link { carrier: Carrier::WebTransport, out, inbox, tasks: vec![writer, control, bulk, closed] })
-}
-
-async fn websocket(d: &Dial) -> Result<Link, String> {
-    let request = d.wire.as_str().into_client_request().map_err(|e| format!("{}: {e}", d.wire))?;
+async fn websocket(wire: &str) -> Result<Link, String> {
+    let request = wire.into_client_request().map_err(|e| format!("{wire}: {e}"))?;
     let mut config = WebSocketConfig::default();
     config.max_message_size = Some(MAX_FRAME);
     config.max_frame_size = Some(MAX_FRAME);
-    let (ws, _) = tokio_tungstenite::connect_async_with_config(request, Some(config), true).await.map_err(|e| format!("{}: {e}", d.wire))?;
+    let (ws, _) = tokio_tungstenite::connect_async_with_config(request, Some(config), true).await.map_err(|e| format!("{wire}: {e}"))?;
     let (mut sink, mut stream) = ws.split();
     let (out, mut outq) = mpsc::unbounded_channel::<Vec<u8>>();
     let (tx, inbox) = mpsc::unbounded_channel();
@@ -192,7 +66,7 @@ async fn websocket(d: &Dial) -> Result<Link, String> {
         let why = loop {
             match stream.next().await {
                 Some(Ok(Message::Binary(b))) => {
-                    if tx.send(Inbound::Control(b.into())).is_err() {
+                    if tx.send(Inbound::Frame(b.into())).is_err() {
                         return;
                     }
                 }
@@ -204,19 +78,5 @@ async fn websocket(d: &Dial) -> Result<Link, String> {
         };
         let _ = tx.send(Inbound::Closed(why));
     });
-    Ok(Link { carrier: Carrier::WebSocket, out, inbox, tasks: vec![writer, reader] })
-}
-
-/// Hands every whole frame at the front of `buf` to `each` and keeps the rest; a byte stream that is not frames is an error.
-fn drain(buf: &mut Vec<u8>, mut each: impl FnMut(Vec<u8>) -> bool) -> Result<(), String> {
-    let mut at = 0;
-    while let Some((_, frame, _)) = wire::split(&buf[at..], MAX_FRAME).map_err(|e| format!("the stream is not frames: {e}"))? {
-        let n = frame.len();
-        if !each(frame.to_vec()) {
-            break;
-        }
-        at += n;
-    }
-    buf.drain(..at);
-    Ok(())
+    Ok(Link { out, inbox, tasks: vec![writer, reader] })
 }

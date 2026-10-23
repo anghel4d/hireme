@@ -32,8 +32,7 @@ the score ladder are explained in [`docs/heat.md`](docs/heat.md) and
   provenance, limits) by one sequencer per account, and answered with
   `ACK` or `NACK`. A refusal names its code from the schema's `refusal`
   enum.
-- **One wire.** Binary frames over WebTransport (the gate) or a WebSocket at
-  `/wire`. Tables the kernel derives from (applications, events, batches,
+- **One wire.** Binary frames over a WebSocket at `/wire`. Tables the kernel derives from (applications, events, batches,
   the CV corpus, settings, the world and the mail) are resident:
   `BOOT` sends them whole, `PATCH` keeps them current, and every read is
   the client's own replica.
@@ -74,8 +73,7 @@ DATABASE_PATH=/tmp/hireme-dev/hireme.db HIREME_SERVER=true mix run --no-halt   #
 `DATABASE_PATH` picks the SQLite file (its directory is created if
 missing), and a new file gets the baseline schema on first boot (`schema:
 applied 0000_baseline`). Without it, development writes `hireme_dev.db` at the repository root.
-`HIREME_GATE=off` runs the wire over the WebSocket alone (with the gate on,
-the header shows `live (WT)`); `PORT` moves the listener. A new database
+`PORT` moves the listener. A new database
 starts empty; there is no older data to bring.
 
 ### Signing in locally
@@ -176,7 +174,7 @@ data, never instructions.
 Optionally, one daemon on your machine serves every local agent: `nix build
 .#hireme-mcp` (or `cargo build --release -p mcp --features client` in
 `native/`). Every agent on a key shares one wire session to the node
-(WebTransport through the gate, else a WebSocket), one replica of the rows
+(a WebSocket), one replica of the rows
 (reads answer locally, several at once) and one lease, which the daemon
 keeps apart per agent: an agent's claimed applications are its own, and a
 `lease {"bulk": n}` is its own share of the session's contract. A hundred

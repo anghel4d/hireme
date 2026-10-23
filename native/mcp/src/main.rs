@@ -4,8 +4,8 @@
 //!     hireme-mcp stdio                             one agent, MCP on stdin and stdout
 //!     hireme-mcp token                             the daemon's local token, for an agent's config
 //!
-//! Every agent of a key shares one wire session to the node (WebTransport
-//! through the gate, or a WebSocket to `/wire`), one replica of the
+//! Every agent of a key shares one wire session to the node (a WebSocket
+//! to `/wire`), one replica of the
 //! account's rows and one lease, kept apart per agent (`upstream.rs`).
 //! A key is read from `HIREME_KEY`, `HIREME_KEY_FILE` or `--key-file`,
 //! never from argv, where every process on the host could read it; an
@@ -20,8 +20,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use link::{Dial, Prefer};
-
 const HELP: &str = "hireme-mcp: hireme's MCP for local agents.
 
   hireme-mcp serve   one daemon for every local agent: MCP over HTTP on loopback
@@ -29,9 +27,6 @@ const HELP: &str = "hireme-mcp: hireme's MCP for local agents.
   hireme-mcp token   print the daemon's local token (an agent sends it as Bearer)
 
   --node URL         the node, https://... (HIREME_URL); plain http only for localhost
-  --gate URL         its WebTransport gate (HIREME_GATE); default https://wt.<node host>/wt, `none` for the socket only
-  --carrier C        auto (WebTransport, then the socket), webtransport or websocket (HIREME_CARRIER)
-  --cert-hash HEX    a self-signed gate's certificate SHA-256 (a dev node); may repeat
   --key-file PATH    the API key (or HIREME_KEY / HIREME_KEY_FILE); serve runs without one, each agent bringing its own
   --label NAME       how the node names this session's lease (HIREME_LABEL)
   --listen ADDR      serve: the loopback address (HIREME_MCP_LISTEN, default 127.0.0.1:7341)
@@ -61,7 +56,7 @@ async fn main() {
             Err(e) => fail(&e),
         },
         "serve" | "stdio" => {
-            let (dial, origin) = match opts.dial() {
+            let (wire, origin) = match opts.dial() {
                 Ok(d) => d,
                 Err(e) => return fail(&e),
             };
@@ -72,7 +67,7 @@ async fn main() {
             let label = opts.label.clone().unwrap_or_else(|| concat!("hireme-mcp/", env!("CARGO_PKG_VERSION")).into());
             if command == "stdio" {
                 let Some(key) = key else { return fail("stdio needs a key: HIREME_KEY, HIREME_KEY_FILE or --key-file") };
-                return front::stdio(upstream::Upstream::start(key, label, dial, origin, 1)).await;
+                return front::stdio(upstream::Upstream::start(key, label, wire, origin, 1)).await;
             }
             let token = match token(&opts.token_file()) {
                 Ok(t) => t,
@@ -91,7 +86,7 @@ async fn main() {
                 Some(Ok(n)) if (1..=64).contains(&n) => n,
                 Some(_) => return fail("--replicas is 1 to 64"),
             };
-            let daemon = front::Daemon::new(front::Config { dial, origin, label, key, token, replicas });
+            let daemon = front::Daemon::new(front::Config { wire, origin, label, key, token, replicas });
             let serving = Arc::clone(&daemon);
             tokio::select! {
                 r = serving.serve(addr) => if let Err(e) = r { fail(&format!("{addr}: {e}")) },
@@ -121,9 +116,6 @@ fn fail(e: &str) {
 #[derive(Default)]
 struct Opts {
     node: Option<String>,
-    gate: Option<String>,
-    carrier: Option<String>,
-    cert_hashes: Vec<String>,
     key_file: Option<String>,
     label: Option<String>,
     listen: Option<String>,
@@ -136,8 +128,6 @@ impl Opts {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let mut o = Opts {
             node: env("HIREME_URL"),
-            gate: env("HIREME_GATE"),
-            carrier: env("HIREME_CARRIER"),
             label: env("HIREME_LABEL"),
             listen: env("HIREME_MCP_LISTEN"),
             ..Opts::default()
@@ -150,9 +140,6 @@ impl Opts {
             let value = it.next().cloned().ok_or_else(|| format!("{flag} needs a value"))?;
             match flag.as_str() {
                 "--node" => o.node = Some(value),
-                "--gate" => o.gate = Some(value),
-                "--carrier" => o.carrier = Some(value),
-                "--cert-hash" => o.cert_hashes.push(value),
                 "--key-file" => o.key_file = Some(value),
                 "--label" => o.label = Some(value),
                 "--listen" => o.listen = Some(value),
@@ -175,8 +162,8 @@ impl Opts {
         if key.is_empty() { Err("the key is empty".into()) } else { Ok(Some(key)) }
     }
 
-    /// The carrier's addresses: the node's `/wire` socket, its gate, and its https origin (the blob store).
-    fn dial(&self) -> Result<(Dial, String), String> {
+    /// The node's `/wire` socket URL and its https origin (the blob store).
+    fn dial(&self) -> Result<(String, String), String> {
         let node = self.node.as_deref().ok_or("set the node: --node https://... or HIREME_URL")?;
         let (scheme, rest) = node.split_once("://").unwrap_or(("https", node));
         let host = rest.split('/').next().unwrap_or(rest);
@@ -192,22 +179,9 @@ impl Opts {
         if plain && !matches!(name, "localhost" | "127.0.0.1" | "::1") {
             return Err(format!("{node}: the key would cross the network unencrypted; use https:// (plain http only for localhost)"));
         }
-        let gate = match self.gate.as_deref() {
-            Some("none") => None,
-            Some(g) => Some(g.to_owned()),
-            None if !plain => Some(format!("https://wt.{name}/wt")),
-            None => None,
-        };
-        let prefer = match self.carrier.as_deref() {
-            None | Some("auto") => Prefer::Auto,
-            Some("webtransport" | "wt") => Prefer::WebTransport,
-            Some("websocket" | "ws") => Prefer::WebSocket,
-            Some(other) => return Err(format!("--carrier {other}: auto, webtransport or websocket")),
-        };
-        let cert_hashes = self.cert_hashes.iter().map(|h| hex32(h).ok_or_else(|| format!("--cert-hash {h}: 64 hex digits"))).collect::<Result<_, _>>()?;
         let origin = format!("{}://{host}", if plain { "http" } else { "https" });
         let wire = format!("{}://{host}/wire", if plain { "ws" } else { "wss" });
-        Ok((Dial { wire, gate, cert_hashes, prefer }, origin))
+        Ok((wire, origin))
     }
 
     fn token_file(&self) -> PathBuf {
@@ -237,18 +211,6 @@ fn token(path: &PathBuf) -> Result<String, String> {
     Ok(t)
 }
 
-fn hex32(s: &str) -> Option<[u8; 32]> {
-    let s: String = s.chars().filter(|c| *c != ':').collect();
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,10 +221,8 @@ mod tests {
 
     #[test]
     fn the_key_never_crosses_the_network_in_plain_text() {
-        let (d, origin) = opts("http://localhost:4000").dial().unwrap();
-        assert_eq!((d.wire.as_str(), d.gate, origin.as_str()), ("ws://localhost:4000/wire", None, "http://localhost:4000"));
-        let (d, origin) = opts("https://node.example").dial().unwrap();
-        assert_eq!((d.wire.as_str(), d.gate.as_deref(), origin.as_str()), ("wss://node.example/wire", Some("https://wt.node.example/wt"), "https://node.example"));
+        assert_eq!(opts("http://localhost:4000").dial().unwrap(), ("ws://localhost:4000/wire".to_owned(), "http://localhost:4000".to_owned()));
+        assert_eq!(opts("https://node.example").dial().unwrap(), ("wss://node.example/wire".to_owned(), "https://node.example".to_owned()));
         for bad in ["http://node.example", "ws://10.0.0.1:4000", "http://localhost:4000@evil.example", "https://u:p@node.example"] {
             assert!(opts(bad).dial().is_err(), "{bad}");
         }
@@ -272,12 +232,5 @@ mod tests {
     fn a_key_in_argv_is_refused() {
         assert!(Opts::parse(&["--key".into(), "hm_x".into()]).is_err());
         assert!(Opts::parse(&["--bogus".into(), "x".into()]).is_err());
-    }
-
-    #[test]
-    fn a_cert_hash_is_64_hex_digits_colons_allowed() {
-        assert!(hex32(&"ab".repeat(32)).is_some());
-        assert!(hex32(&["ab"; 32].join(":")).is_some());
-        assert!(hex32("abc").is_none());
     }
 }

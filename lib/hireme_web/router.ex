@@ -121,12 +121,9 @@ defmodule HiremeWeb.PageController do
 
   def shell(conn, _params) do
     %{account: account, session: session} = conn.assigns
-    gate = Auth.wire_gate()
 
     head = """
     <meta name="hireme-ticket" content="#{Hireme.Accounts.ticket(session)}" />
-    <meta name="hireme-gate" content="#{Auth.esc(gate || "")}" />
-    <meta name="hireme-gate-hashes" content="#{Auth.esc(Auth.wire_hashes())}" />
     <meta name="hireme-wire" content="#{wire_hash()}" />
     <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
     <link rel="preload" href="#{Auth.static("/wasm/kernel.wasm")}" as="fetch" crossorigin />
@@ -144,7 +141,7 @@ defmodule HiremeWeb.PageController do
   def ticket(conn, _params) do
     case Hireme.Security.limit(:ticket_peer, Auth.meta(conn).ip) do
       :ok ->
-        json(conn, %{ticket: Hireme.Accounts.ticket(conn.assigns.session), gate: Auth.wire_gate()})
+        json(conn, %{ticket: Hireme.Accounts.ticket(conn.assigns.session)})
 
       {:error, :rate_limited} ->
         conn |> put_status(429) |> json(%{error: "rate_limited"})

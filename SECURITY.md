@@ -188,8 +188,7 @@ Resuming a key needs a step-up. A key revoke stops it for good.
 
 Liveness is the carrier. Each side sends PING every **15 seconds**; a
 session that hears no frame for **45 seconds** ends, and its lease with it.
-The same holds over WebTransport through the gate and over the `/wire`
-WebSocket. Frames are length-prefixed and bounded: one frame is at most
+Frames are length-prefixed and bounded: one frame is at most
 16 MiB (larger closes the carrier), one OPS frame at most 256 ops, and one
 op at most 1 MiB of text (`too_large`); a client fills frames by bytes as
 well as by count. An MCP request body is at most 64 MiB (inflated, when
@@ -356,8 +355,7 @@ an IPv6 peer by its /64, since one host holds a whole /64.
 Every state-changing browser request carries the page's CSRF token. Pages
 are served with a Content Security Policy: scripts from the origin plus
 the inlined early script by its hash, WebAssembly compilation but never
-`eval`, styles from the origin only, connections to the origin and the
-gate, no framing, no objects, `base-uri 'none'`, forms to the origin.
+`eval`, styles from the origin only, connections to the origin, no framing, no objects, `base-uri 'none'`, forms to the origin.
 Alongside it a Permissions-Policy denying camera, microphone,
 geolocation, payment and USB, same-origin opener and resource policies,
 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and no

@@ -24,7 +24,7 @@ use kernel::abi::Kernel;
 use serde_json::{Value as Json, json};
 use tokio::sync::{Notify, Semaphore, broadcast, oneshot};
 
-use crate::link::{self, Carrier, Dial, Inbound};
+use crate::link::{self, Inbound};
 use mcp::tools::Masks;
 pub use mcp::session::{Event, Submitted, Verdict};
 
@@ -112,7 +112,6 @@ impl Book {
 
 struct Live {
     out: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    carrier: Carrier,
     rpcs: HashMap<u32, oneshot::Sender<Answer>>,
     ops: HashMap<u64, oneshot::Sender<Verdict>>,
 }
@@ -123,7 +122,7 @@ struct State {
     /// The masks the replica was booted under: rows a narrower mask no longer covers must not outlive it.
     built: Option<(u16, u16, bool)>,
     dead: Option<String>,
-    connected: Option<Carrier>,
+    connected: bool,
     last_end: String,
 }
 
@@ -169,7 +168,8 @@ impl Replicas {
 pub struct Upstream {
     key: String,
     label: String,
-    dial: Dial,
+    /// The node's `/wire` socket URL.
+    wire: String,
     /// The node's https origin, for the blob store.
     pub origin: String,
     replicas: Replicas,
@@ -185,17 +185,16 @@ pub struct Upstream {
     events: broadcast::Sender<Event>,
     next_rpc: AtomicU32,
     next_op: AtomicU64,
-    wt_broken: AtomicBool,
     pub started: Instant,
 }
 
 impl Upstream {
     /// Starts the session; it keeps reconnecting until it ends for good.
-    pub fn start(key: String, label: String, dial: Dial, origin: String, replicas: usize) -> Arc<Upstream> {
+    pub fn start(key: String, label: String, wire: String, origin: String, replicas: usize) -> Arc<Upstream> {
         let up = Arc::new(Upstream {
             key,
             label,
-            dial,
+            wire,
             origin,
             replicas: Replicas::new(replicas),
             trained: AtomicBool::new(false),
@@ -211,7 +210,6 @@ impl Upstream {
             next_rpc: AtomicU32::new(1),
             // Op ids are unique per key for the ledger's 24 h: a random base, then counted.
             next_op: AtomicU64::new(random() & 0x3FFF_FFFF_FFFF_FFFF),
-            wt_broken: AtomicBool::new(false),
             started: Instant::now(),
         });
         let run = up.clone();
@@ -231,7 +229,7 @@ impl Upstream {
         lock(&self.state).dead.clone()
     }
 
-    pub fn connected(&self) -> Option<Carrier> {
+    pub fn connected(&self) -> bool {
         lock(&self.state).connected
     }
 
@@ -584,18 +582,13 @@ impl Upstream {
         let mut previous = String::new();
         loop {
             let started = Instant::now();
-            let (reason, message, again) = match link::connect(&self.dial, self.wt_broken.load(Ordering::Relaxed)).await {
+            let (reason, message, again) = match link::connect(&self.wire).await {
                 Ok(link) => self.clone().session(link).await,
-                Err(e) => {
-                    if self.dial.gate.is_some() {
-                        self.wt_broken.store(true, Ordering::Relaxed);
-                    }
-                    ("connect".to_owned(), e, true)
-                }
+                Err(e) => ("connect".to_owned(), e, true),
             };
             {
                 let mut s = lock(&self.state);
-                s.connected = None;
+                s.connected = false;
                 s.last_end = format!("{reason}{}{message}", if message.is_empty() { "" } else { ": " });
             }
             // Calls in flight fail now (dropping their senders), not at their timeouts.
@@ -640,8 +633,8 @@ impl Upstream {
         if link.out.send(hello).is_err() {
             return ("connect".into(), "the carrier closed before HELLO".into(), true);
         }
-        *lock(&self.live) = Some(Live { out: link.out.clone(), carrier: link.carrier, rpcs: HashMap::new(), ops: HashMap::new() });
-        let mut train = Train::new(link.carrier);
+        *lock(&self.live) = Some(Live { out: link.out.clone(), rpcs: HashMap::new(), ops: HashMap::new() });
+        let mut train = Train::default();
         let mut heard = Instant::now();
         let mut tick = tokio::time::interval(PING);
         tick.tick().await;
@@ -651,12 +644,11 @@ impl Upstream {
                 msg = link.inbox.recv() => {
                     heard = Instant::now();
                     let frame = match msg {
-                        Some(Inbound::Control(f)) => (f, false),
-                        Some(Inbound::Bulk(f)) => (f, true),
+                        Some(Inbound::Frame(f)) => f,
                         Some(Inbound::Closed(why)) => return ("closed".into(), why, true),
                         None => return ("closed".into(), String::new(), true),
                     };
-                    match self.deliver(frame.0, &mut train, &link.out) {
+                    match self.deliver(frame, &mut train, &link.out) {
                         Ok(None) => {}
                         Ok(Some(end)) => return end,
                         Err(e) => return ("frame".into(), e, true),
@@ -677,9 +669,8 @@ impl Upstream {
         }
     }
 
-    /// One frame from the node. Train frames (a BOOT, or the resume's PATCHes up to WELCOME's rev) pass
-    /// at once; on WebTransport every other frame waits for the train's END, since the BOOT rides a stream
-    /// of its own (the browser's wire, `assets/js/wire.ts`).
+    /// One frame from the node: the socket is one ordered stream, so each is applied as it comes, and the
+    /// train (a BOOT, or the resume's PATCHes up to WELCOME's rev) ends at its END flag.
     fn deliver(self: &Arc<Self>, f: Vec<u8>, train: &mut Train, out: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>) -> Result<Option<(String, String, bool)>, String> {
         let h = wire::Header::peek(&f).map_err(|e| format!("{e:?}"))?;
         if h.kind == wire::BYE && h.hash != schema::WIRE_HASH {
@@ -705,17 +696,6 @@ impl Upstream {
             wire::WELCOME => {
                 train.welcome_rev = Some(h.rev);
                 self.welcomed(&f, h.rev)?;
-                // A resume PATCH that beat WELCOME was held as live; it is the train after all.
-                if let Some(held) = train.held.as_mut().map(std::mem::take) {
-                    for g in held {
-                        if let Some(end) = self.pass(g, train)? {
-                            return Ok(Some(end));
-                        }
-                    }
-                }
-                if train.end_early && !train.trained {
-                    return self.train_done(train);
-                }
                 Ok(None)
             }
             _ => self.pass(f, train),
@@ -724,41 +704,16 @@ impl Upstream {
 
     fn pass(self: &Arc<Self>, f: Vec<u8>, train: &mut Train) -> Result<Option<(String, String, bool)>, String> {
         let h = wire::Header::peek(&f).map_err(|e| format!("{e:?}"))?;
-        let is_train = h.kind == wire::BOOT || (h.kind == wire::PATCH && train.welcome_rev.is_some_and(|w| h.rev <= w));
-        if let Some(held) = train.held.as_mut()
-            && !is_train
-            && h.kind != wire::BYE
-            && h.kind != wire::PONG
-        {
-            held.push(f);
-            return Ok(None);
-        }
         if let Some(end) = self.apply(&f, h)? {
             return Ok(Some(end));
         }
-        if train.trained || h.flags & wire::END == 0 || !(is_train || train.held.is_none()) {
+        // The train's END (WELCOME always precedes it on the socket): the session is established.
+        if train.trained || h.flags & wire::END == 0 || train.welcome_rev.is_none() {
             return Ok(None);
         }
-        if train.welcome_rev.is_some() {
-            self.train_done(train)
-        } else {
-            if h.kind == wire::BOOT {
-                train.end_early = true;
-            }
-            Ok(None)
-        }
-    }
-
-    fn train_done(self: &Arc<Self>, train: &mut Train) -> Result<Option<(String, String, bool)>, String> {
         train.trained = true;
         self.trained.store(true, Ordering::Release);
         self.ready.notify_waiters();
-        for g in train.held.take().unwrap_or_default() {
-            let h = wire::Header::peek(&g).map_err(|e| format!("{e:?}"))?;
-            if let Some(end) = self.apply(&g, h)? {
-                return Ok(Some(end));
-            }
-        }
         // A session past its train holds no lease yet: the agents' claims are asked for again.
         let up = self.clone();
         tokio::spawn(async move { up.reclaim().await });
@@ -839,12 +794,11 @@ impl Upstream {
         };
         self.features.store(w.features, Ordering::Relaxed);
         let masks = (w.read_mask, w.write_mask, w.may_delete);
-        let carrier = lock(&self.live).as_ref().map(|l| l.carrier);
         let (changed, stale) = {
             let mut s = lock(&self.state);
             let before = s.welcome.as_ref().map(|w| (w.read_mask, w.write_mask, w.may_delete));
             s.welcome = Some(welcome);
-            s.connected = carrier;
+            s.connected = true;
             (before.map_or(Some(true), |b| (b != masks).then_some(false)), s.built.is_some_and(|b| b != masks))
         };
         let grants = kernel::query::Grants { human: false, read_mask: w.read_mask as u8, write_mask: w.write_mask as u8, may_delete: w.may_delete };
@@ -872,7 +826,7 @@ impl Upstream {
             "label": self.label,
             "up_s": self.started.elapsed().as_secs(),
             "account": s.welcome.as_ref().map(|w| w.account_id),
-            "carrier": s.connected.map(Carrier::name),
+            "carrier": s.connected.then_some("websocket"),
             "trained": self.is_trained(),
             "replicas": self.replicas.all.len(),
             "rev": self.rev(),
@@ -886,20 +840,11 @@ impl Upstream {
     }
 }
 
-/// The ordering state of one session's train.
+/// Where one session's train stands: WELCOME's rev, and whether the train has ended.
+#[derive(Default)]
 struct Train {
-    /// Frames that wait for the train's END (WebTransport only; a socket is one ordered stream).
-    held: Option<Vec<Vec<u8>>>,
     welcome_rev: Option<u64>,
     trained: bool,
-    /// A BOOT flagged END came before WELCOME (it rides its own stream).
-    end_early: bool,
-}
-
-impl Train {
-    fn new(carrier: Carrier) -> Train {
-        Train { held: (carrier == Carrier::WebTransport).then(Vec::new), welcome_rev: None, trained: false, end_early: false }
-    }
 }
 
 /// Ops grouped into OPS frames under the node's frame limit and the 256-op cap.
