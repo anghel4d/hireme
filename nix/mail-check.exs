@@ -30,6 +30,11 @@ defmodule MailCheck do
 
     {[_], []} = run(a, put(:applications, %{stage_notes: %{"sync" => %{"applied_on" => "2026-10-12"}}}, target: other), op)
 
+    # The threads the follow-ups answer: mail from the company, taken in as
+    # the domain pipe takes it. A reply counts as one only when its
+    # in_reply_to names a message the account holds (5adc7ce7).
+    for id <- ~w(m0 m1 m2), do: {:ok, :stored} = Gmail.ingest(a, inbound(id), :domain)
+
     reply = mission(a, app, "jobs@acme.example", "Re: Staff Engineer", "Thank you, Thursday works.\n\nBest", "m0@acme.example", op)
     changed = mission(a, app, "hiring@acme.example", "Re: Staff Engineer", "Following up on Thursday.", "m1@acme.example", op)
     unsettled = mission(a, other, "jobs@acme.example", "Re: Principal Engineer", "Thank you.", "m2@acme.example", op)
@@ -104,6 +109,11 @@ defmodule MailCheck do
 
   defp mission(a, app, to, subject, body, in_reply_to, op) do
     id!(a, put(:missions, %{application_id: app, kind: :email, target: to, subject: subject, draft: body, in_reply_to: in_reply_to, state: :fire_ready}), op)
+  end
+
+  defp inbound(id) do
+    "From: Acme Jobs <jobs@acme.example>\r\nTo: check@gmail.com\r\nSubject: Staff Engineer at Acme\r\n" <>
+      "Message-ID: <#{id}@acme.example>\r\nDate: Thu, 22 Oct 2026 09:00:00 +0000\r\n\r\nCould you do Thursday?\r\n"
   end
 
   defp operator(%{id: id}), do: operator(id)

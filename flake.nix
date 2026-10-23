@@ -344,8 +344,9 @@
                   rows = op("state()")["outreach"]
                   return any(r["direction"] == "inbound" and r["filing"] == "filed" and r["application_id"] == seed["app"] for r in rows)
               retry(filed, timeout_seconds=60)
-              labels = agent("labels", key)
-              assert any("hireme" in m["labels"] and "\\Inbox" in m["labels"] for m in labels), labels
+              def labelled(_):
+                  return any("hireme" in m["labels"] and "\\Inbox" in m["labels"] for m in agent("labels", key))
+              retry(labelled, timeout_seconds=60)
 
               # The domain pipe: a forged post refused, a signed one taken once.
               pipe = op("pipe()")
