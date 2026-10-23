@@ -2,9 +2,9 @@
 //! narrowed, sorted on any key and grouped on another, the order, the
 //! groups' bounds and the chips' counts coming back together.
 
+mod fixture;
+
 use kernel::abi::Kernel;
-use schema::col::applications as A;
-use schema::{col, enums, table};
 use serde_json::{Value as Json, json};
 
 /// Applications 1-6 written "Company 10", "Company 2", "Company 1",
@@ -13,37 +13,19 @@ use serde_json::{Value as Json, json};
 /// 6; scores 50, 70, 60, -, 90, 40; 3 and 5 the same posting (5 further
 /// along); 1 and 2 remote.
 fn kernel() -> Kernel {
-    let none = wire::NONE;
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::PLACES, 2);
-    b.u32s(col::places::ID, [1, 2].into_iter())
-        .u32s(col::places::KIND, [enums::place_kind::COUNTRY, enums::place_kind::CITY].map(u32::from).into_iter())
-        .u32s(col::places::COUNTRY_ID, [none, 1].into_iter())
-        .strs(col::places::ISO2, ["DE", ""].into_iter())
-        .strs(col::places::NAME, ["Germany", "Berlin"].into_iter());
-    b.done();
-    let mut b = w.block(table::CORPORATIONS, 2);
-    b.u32s(col::corporations::ID, [10, 11].into_iter())
-        .strs(col::corporations::DOMAIN, ["stripe.com", "helsing.ai"].into_iter())
-        .strs(col::corporations::NAME, ["Stripe", "Helsing"].into_iter());
-    b.done();
-    let remote = enums::work_mode::REMOTE as u32;
-    let mut b = w.block(table::APPLICATIONS, 6);
-    b.u32s(A::ID, 1..=6)
-        .u32s(A::NO, 1..=6)
-        .u32s(A::STAGE, [enums::stage::GATED, enums::stage::GATED, enums::stage::DISCOVERED, enums::stage::GATED, enums::stage::IN_BATCH, enums::stage::GATED].map(u32::from).into_iter())
-        .strs(A::COMPANY, ["Company 10", "Company 2", "Company 1", "company 2", "Company 30", "Company 3"].into_iter())
-        .strs(A::CANONICAL_URL, ["", "", "https://stripe.com/jobs/7", "", "https://stripe.com/jobs/7", ""].into_iter())
-        .u32s(A::CORPORATION_ID, [10, 11, 10, none, 10, 11].into_iter())
-        .u32s(A::PLACE_ID, [2, 2, 2, none, 2, none].into_iter())
-        .u32s(A::WORK_MODE, [remote, remote, none, none, none, none].into_iter())
-        .u32s(A::SCORE_100, [50, 70, 60, none, 90, 40].into_iter())
-        .u32s(A::HEAT_OVERRIDE, (1..=6).map(|_| 0));
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(739_528);
-    k.boot(&w.finish(), 1).unwrap();
-    k
+    let stripe7 = "https://stripe.com/jobs/7";
+    fixture::kernel(json!({
+        "places": fixture::europe(),
+        "corporations": [{"id": 10, "domain": "stripe.com", "name": "Stripe"}, {"id": 11, "domain": "helsing.ai", "name": "Helsing"}],
+        "applications": [
+            {"id": 1, "no": 1, "stage": "gated", "company": "Company 10", "corporation_id": 10, "place_id": 2, "work_mode": "remote", "score_100": 50},
+            {"id": 2, "no": 2, "stage": "gated", "company": "Company 2", "corporation_id": 11, "place_id": 2, "work_mode": "remote", "score_100": 70},
+            {"id": 3, "no": 3, "stage": "discovered", "company": "Company 1", "canonical_url": stripe7, "corporation_id": 10, "place_id": 2, "score_100": 60},
+            {"id": 4, "no": 4, "stage": "gated", "company": "company 2"},
+            {"id": 5, "no": 5, "stage": "in_batch", "company": "Company 30", "canonical_url": stripe7, "corporation_id": 10, "place_id": 2, "score_100": 90},
+            {"id": 6, "no": 6, "stage": "gated", "company": "Company 3", "corporation_id": 11, "score_100": 40},
+        ],
+    }))
 }
 
 fn arrange(k: &mut Kernel, req: Json) -> (Vec<u32>, Json) {
@@ -107,58 +89,6 @@ fn filters_narrow_and_the_chips_count_the_modes_and_the_unlinked() {
     let (ids, _) = arrange(&mut k, json!({"filter": {"search": "company 2"}, "sort": ["no", "asc"]}));
     assert_eq!(ids, [2, 4]);
     assert!(k.arrange(&json!({"sort": ["nope", "asc"]})).is_err());
-}
-
-#[test]
-fn a_mended_column_arranges_as_one_built_from_the_rows() {
-    // Seeded writes in place (company text, a link, a score, a role), each
-    // arranged by the mended kernel and by a fresh one restored from its rows.
-    let mut k = kernel();
-    let asks = [
-        json!({"sort": ["company.name", "asc"], "group": "field"}),
-        json!({"sort": ["no", "desc"], "group": "company.name", "largest": true}),
-        json!({"sort": ["role", "asc"], "group": "seniority"}),
-        json!({"group": "work_mode"}),
-    ];
-    for a in &asks {
-        arrange(&mut k, a.clone());
-    }
-    let mut seed = 0x2545_f491_u32;
-    let mut next = |n: u32| {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        seed % n
-    };
-    let roles = ["Staff Engineer", "Research Scientist", "Intern, ML", "senior sre"];
-    for step in 0..40 {
-        let id = 1 + next(6);
-        let mut w = wire::BodyWriter::new();
-        let mut b = w.block(table::APPLICATIONS, 1);
-        b.u32s(A::ID, [id].into_iter());
-        match next(4) {
-            0 => {
-                b.strs(A::ROLE, [roles[next(4) as usize]].into_iter());
-            }
-            1 => {
-                b.u32s(A::CORPORATION_ID, [[10, 11, wire::NONE][next(3) as usize]].into_iter());
-            }
-            2 => {
-                b.u32s(A::SCORE_100, [next(101)].into_iter());
-            }
-            _ => {
-                b.u32s(A::WORK_MODE, [[enums::work_mode::REMOTE as u32, enums::work_mode::ONSITE as u32, wire::NONE][next(3) as usize]].into_iter());
-            }
-        }
-        b.done();
-        k.patch(&w.finish(), 2 + step).unwrap();
-        let mut fresh = Kernel::new();
-        fresh.set_today(739_528);
-        fresh.restore(&k.snapshot()).unwrap();
-        for a in &asks {
-            assert_eq!(arrange(&mut k, a.clone()), arrange(&mut fresh, a.clone()), "step {step}: {a}");
-        }
-    }
 }
 
 /// `find` on applications is the desk's query: the board grouped by company

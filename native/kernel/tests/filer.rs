@@ -3,12 +3,11 @@
 //! corporation's clear lead, else unfiled with its candidates; a bounce and
 //! a confirmation named; mail that reaches no part of the desk irrelevant.
 
+mod fixture;
+
 use kernel::abi::Kernel;
 use kernel::filer::{self, Input, NoStore};
-use schema::col::{applications as A, missions as M};
-use schema::{col, enums, table};
-
-const TODAY: i32 = 739_528;
+use serde_json::json;
 
 /// Acme (acme.example, Greenhouse tenant `acme`) with applications 1
 /// (Staff Engineer, submitted) and 2 (Platform Engineer, submitted), whose
@@ -18,46 +17,19 @@ const TODAY: i32 = 739_528;
 /// Globex (no applications); application 1's posting at
 /// https://job-boards.greenhouse.io/acme/jobs/4012.
 fn rows() -> Kernel {
-    let mut w = wire::BodyWriter::new();
-    let none = wire::NONE;
-    let mut b = w.block(table::CORPORATIONS, 3);
-    b.u32s(col::corporations::ID, [1, 2, 3].into_iter())
-        .strs(col::corporations::DOMAIN, ["acme.example", "initech.example", "globex.example"].into_iter())
-        .strs(col::corporations::NAME, ["Acme", "Initech", "Globex"].into_iter())
-        .strs(col::corporations::ATS, ["greenhouse", "", ""].into_iter())
-        .strs(col::corporations::ATS_TENANT, ["acme", "", ""].into_iter());
-    b.done();
-    let submitted = enums::stage::SUBMITTED as u32;
-    let mut b = w.block(table::APPLICATIONS, 3);
-    b.u32s(A::ID, [1, 2, 3].into_iter())
-        .u32s(A::NO, [1, 2, 3].into_iter())
-        .u32s(A::STAGE, [submitted, submitted, enums::stage::DISCOVERED as u32].into_iter())
-        .strs(A::COMPANY, ["Acme", "Acme", "Initech"].into_iter())
-        .strs(A::ROLE, ["Staff Engineer, Search Infrastructure", "Platform Engineer, Data", "Data Engineer"].into_iter())
-        .u32s(A::CORPORATION_ID, [1, 1, 2].into_iter())
-        .strs(A::CANONICAL_URL, ["https://job-boards.greenhouse.io/acme/jobs/4012", "", ""].into_iter())
-        .u32s(A::BATCH_ID, [none, none, none].into_iter())
-        .u32s(A::HEAT_OVERRIDE, [0, 0, 0].into_iter());
-    b.done();
-    let mut b = w.block(table::MISSIONS, 2);
-    b.u32s(M::ID, [20, 21].into_iter())
-        .u32s(M::APPLICATION_ID, [1, 2].into_iter())
-        .u32s(M::KIND, [enums::outreach_kind::CAREERS_PAGE as u32, enums::outreach_kind::EMAIL as u32].into_iter())
-        .u32s(M::STATE, [enums::mission_state::FIRED as u32; 2].into_iter())
-        .u32s(M::CONFIRMATION, [enums::confirmation::PROVISIONAL as u32, none].into_iter())
-        .strs(M::MESSAGE_ID, ["", "hm.Sent1@example.com"].into_iter())
-        .i64s(M::GMAIL_THRID, [i64::MIN, 900].into_iter());
-    b.done();
-    let mut b = w.block(table::CONTACTS, 1);
-    b.u32s(col::contacts::ID, [7].into_iter())
-        .u32s(col::contacts::CORPORATION_ID, [3].into_iter())
-        .strs(col::contacts::NAME, ["Dana"].into_iter())
-        .strs(col::contacts::EMAIL, ["Dana@Globex.example"].into_iter());
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.boot(&w.finish(), 1).unwrap();
-    k
+    fixture::kernel(json!({
+        "corporations": [{"id": 1, "domain": "acme.example", "name": "Acme", "ats": "greenhouse", "ats_tenant": "acme"}, {"id": 2, "domain": "initech.example", "name": "Initech"}, {"id": 3, "domain": "globex.example", "name": "Globex"}],
+        "applications": [
+            {"id": 1, "no": 1, "stage": "submitted", "company": "Acme", "role": "Staff Engineer, Search Infrastructure", "corporation_id": 1, "canonical_url": "https://job-boards.greenhouse.io/acme/jobs/4012"},
+            {"id": 2, "no": 2, "stage": "submitted", "company": "Acme", "role": "Platform Engineer, Data", "corporation_id": 1},
+            {"id": 3, "no": 3, "stage": "discovered", "company": "Initech", "role": "Data Engineer", "corporation_id": 2},
+        ],
+        "missions": [
+            {"id": 20, "application_id": 1, "kind": "careers_page", "state": "fired", "confirmation": "provisional"},
+            {"id": 21, "application_id": 2, "kind": "email", "state": "fired", "message_id": "hm.Sent1@example.com", "gmail_thrid": 900},
+        ],
+        "contacts": [{"id": 7, "corporation_id": 3, "name": "Dana", "email": "Dana@Globex.example"}],
+    }))
 }
 
 fn mail<'a>(from: &'a str, subject: &'a str, body: &'a str) -> Input<'a> {
@@ -134,7 +106,7 @@ fn a_bounce_names_the_mission_it_returns() {
     assert_eq!(f.bounce.map(|b| b.0), Some(21));
     assert!(f.filed && f.confirms.is_none());
     // The node's parsed report names it without the wording.
-    let report = serde_json::json!({"report": {"kind": "bounce", "original_message_id": "<hm.sent1@example.com>", "status": "5.1.1"}});
+    let report = json!({"report": {"kind": "bounce", "original_message_id": "<hm.sent1@example.com>", "status": "5.1.1"}});
     let f = filer::file(k.rows(), &NoStore, &Input { headers: Some(&report), ..mail("postmaster@acme.example", "Undelivered", "") });
     assert_eq!(f.bounce.map(|b| b.0), Some(21));
     // A mailer-daemon quoting a mail hireme never sent returns nothing.
@@ -145,7 +117,7 @@ fn a_bounce_names_the_mission_it_returns() {
 #[test]
 fn a_forged_sender_files_nothing() {
     let k = rows();
-    let auth = serde_json::json!({"authentication-results": "mx.google.com; spf=fail smtp.mailfrom=acme.example; dmarc=fail (p=REJECT) header.from=acme.example"});
+    let auth = json!({"authentication-results": "mx.google.com; spf=fail smtp.mailfrom=acme.example; dmarc=fail (p=REJECT) header.from=acme.example"});
     let input = Input { headers: Some(&auth), in_reply_to: "<hm.sent1@example.com>", ..mail("riley@acme.example", "Staff Engineer, Search: offer", "Sign here: https://evil.example") };
     let f = filer::file(k.rows(), &NoStore, &input);
     assert!(f.relevant && !f.filed && f.bounce.is_none() && f.confirms.is_none());
@@ -181,7 +153,7 @@ fn certain_evidence_that_disagrees_files_nothing() {
 #[test]
 fn the_node_asks_with_the_envelope_as_json() {
     let k = rows();
-    let req = serde_json::json!({"op": "mail_match", "from": "Acme Hiring <no-reply@us.greenhouse-mail.io>", "to": ["ana@example.com"],
+    let req = json!({"op": "mail_match", "from": "Acme Hiring <no-reply@us.greenhouse-mail.io>", "to": ["ana@example.com"],
         "subject": "Your application", "text": "thanks for applying: https://job-boards.greenhouse.io/acme/jobs/4012"});
     let a = filer::match_json(k.rows(), &NoStore, &req);
     assert_eq!((a["relevant"].as_bool(), a["filing"].as_str(), a["application_id"].as_u64(), a["confirms"].as_u64()), (Some(true), Some("filed"), Some(1), Some(20)));

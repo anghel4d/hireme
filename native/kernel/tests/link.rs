@@ -2,10 +2,10 @@
 //! suggests for an unlinked one, the list of those, and the desk's
 //! columns of any field, joins included.
 
+mod fixture;
+
+use fixture::q;
 use kernel::abi::Kernel;
-use kernel::query::Grants;
-use schema::col::applications as A;
-use schema::{col, enums, table};
 use serde_json::{Value as Json, json};
 
 /// Germany (1) with Berlin (2), France (3); Stripe (10, stripe.com, careers
@@ -14,50 +14,17 @@ use serde_json::{Value as Json, json};
 /// linked (1); "Stripe Inc" on Lever, unlinked (2); "Helsng GmbH" in
 /// "Berlin, Germany", unlinked (3); a remote one with a company only (4).
 fn kernel() -> Kernel {
-    let none = wire::NONE;
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::PLACES, 3);
-    b.u32s(col::places::ID, [1, 2, 3].into_iter())
-        .u32s(col::places::KIND, [enums::place_kind::COUNTRY, enums::place_kind::CITY, enums::place_kind::COUNTRY].map(u32::from).into_iter())
-        .u32s(col::places::COUNTRY_ID, [none, 1, none].into_iter())
-        .strs(col::places::ISO2, ["DE", "", "FR"].into_iter())
-        .strs(col::places::NAME, ["Germany", "Berlin", "France"].into_iter())
-        .strs(col::places::REGION, ["Europe", "", "Europe"].into_iter());
-    b.done();
-    let mut b = w.block(table::CORPORATIONS, 3);
-    b.u32s(col::corporations::ID, [10, 11, 12].into_iter())
-        .strs(col::corporations::DOMAIN, ["stripe.com", "helsing.ai", "abc.xyz"].into_iter())
-        .strs(col::corporations::NAME, ["Stripe", "Helsing", "Alphabet"].into_iter())
-        .strs(col::corporations::ATS_TENANT, ["stripe", "", ""].into_iter())
-        .u32s(col::corporations::PARENT_ID, [12, none, none].into_iter());
-    b.done();
-    let mut b = w.block(table::OFFICES, 1);
-    b.u32s(col::offices::ID, [7].into_iter())
-        .u32s(col::offices::CORPORATION_ID, [11].into_iter())
-        .u32s(col::offices::PLACE_ID, [2].into_iter())
-        .u32s(col::offices::KIND, [enums::office_kind::ENGINEERING as u32].into_iter());
-    b.done();
-    let mut b = w.block(table::APPLICATIONS, 4);
-    b.u32s(A::ID, 1..=4)
-        .u32s(A::NO, 1..=4)
-        .u32s(A::STAGE, (1..=4).map(|_| enums::stage::GATED as u32))
-        .strs(A::COMPANY, ["Stripe", "Stripe Inc", "Helsng GmbH", "Helsing"].into_iter())
-        .strs(A::LOCATION, ["Berlin", "", "Berlin, Germany", "Remote"].into_iter())
-        .strs(A::LISTING_URL, ["", "https://jobs.lever.co/stripe/123", "", ""].into_iter())
-        .u32s(A::CORPORATION_ID, [10, none, none, 11].into_iter())
-        .u32s(A::PLACE_ID, [2, none, none, none].into_iter())
-        .u32s(A::WORK_MODE, [none, none, none, enums::work_mode::REMOTE as u32].into_iter())
-        .u32s(A::HEAT_OVERRIDE, (1..=4).map(|_| 0));
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(739_528);
-    k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
-    k.boot(&w.finish(), 1).unwrap();
-    k
-}
-
-fn q(k: &mut Kernel, req: Json) -> Json {
-    k.query(&req).unwrap_or_else(|r| panic!("{req}: {r:?}"))
+    fixture::kernel(json!({
+        "places": fixture::europe(),
+        "corporations": [{"id": 10, "domain": "stripe.com", "name": "Stripe", "ats_tenant": "stripe", "parent_id": 12}, {"id": 11, "domain": "helsing.ai", "name": "Helsing"}, {"id": 12, "domain": "abc.xyz", "name": "Alphabet"}],
+        "offices": [{"id": 7, "corporation_id": 11, "place_id": 2, "kind": "engineering"}],
+        "applications": [
+            {"id": 1, "no": 1, "stage": "gated", "company": "Stripe", "location": "Berlin", "corporation_id": 10, "place_id": 2},
+            {"id": 2, "no": 2, "stage": "gated", "company": "Stripe Inc", "listing_url": "https://jobs.lever.co/stripe/123"},
+            {"id": 3, "no": 3, "stage": "gated", "company": "Helsng GmbH", "location": "Berlin, Germany"},
+            {"id": 4, "no": 4, "stage": "gated", "company": "Helsing", "location": "Remote", "corporation_id": 11, "work_mode": "remote"},
+        ],
+    }))
 }
 
 #[test]
@@ -103,50 +70,30 @@ fn column(k: &Kernel, path: &str) -> Json {
     })
 }
 
+/// Every field reads over every application, joins included; a company,
+/// country or group carries how many applications name it.
 #[test]
 fn the_desk_reads_any_field_of_every_application_joins_included() {
     let mut k = kernel();
-    assert_eq!(column(&k, "company.name"), json!(["Stripe", null, null, "Helsing"]));
-    assert_eq!(column(&k, "company.parent"), json!(["Alphabet", null, null, null]));
-    assert_eq!(column(&k, "country"), json!(["DE", null, null, null]));
-    assert_eq!(column(&k, "region"), json!(["Europe", null, null, null]));
-    assert_eq!(column(&k, "place"), json!(["Berlin", null, null, null]));
-    assert_eq!(column(&k, "office"), json!([null, null, null, null]));
-    assert_eq!(column(&k, "no"), json!([1.0, 2.0, 3.0, 4.0]));
-    // No role written: the department is "other".
-    assert_eq!(column(&k, "field"), json!(["other", "other", "other", "other"]));
+    for (path, want) in [
+        ("company.name", json!(["Stripe", null, null, "Helsing"])),
+        ("company.parent", json!(["Alphabet", null, null, null])),
+        ("country", json!(["DE", null, null, null])),
+        ("region", json!(["Europe", null, null, null])),
+        ("place", json!(["Berlin", null, null, null])),
+        ("office", json!([null, null, null, null])),
+        ("no", json!([1.0, 2.0, 3.0, 4.0])),
+        // No role written: the department is "other".
+        ("field", json!(["other", "other", "other", "other"])),
+        // Stripe (under Alphabet) has one linked application, Helsing one; Germany one (Berlin).
+        ("company.applications", json!([1.0, null, null, 1.0])),
+        ("company.parent.applications", json!([1.0, null, null, 1.0])),
+        ("country.applications", json!([1.0, null, null, null])),
+    ] {
+        assert_eq!(column(&k, path), want, "{path}");
+    }
     assert!(kernel::mask::field("nope").is_none());
-
-    let fields: Vec<Json> = serde_json::from_value(q(&mut k, json!({"op": "mask_fields"}))["fields"].clone()).unwrap();
-    let office = fields.iter().find(|f| f["path"] == "office").unwrap();
-    assert_eq!((&office["label"], &office["type"]), (&json!("office"), &json!("enum")));
-}
-
-/// The kernel keeps a column it arranged on until a table it reads moves.
-#[test]
-fn an_arranged_column_follows_the_rows_it_reads() {
-    let mut k = kernel();
-    let offices = |k: &mut Kernel| -> Vec<String> {
-        k.arrange(&json!({"group": "office"})).unwrap().1["groups"].as_array().unwrap().iter().map(|g| g["label"].as_str().unwrap().to_string()).collect()
-    };
-    assert_eq!(offices(&mut k), ["(none)"]);
-    // Helsing's application 4 moves to Berlin, where Helsing has an engineering office.
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::APPLICATIONS, 1);
-    b.u32s(A::ID, [4].into_iter()).u32s(A::PLACE_ID, [2].into_iter());
-    b.done();
-    k.patch(&w.finish(), 2).unwrap();
-    assert_eq!(offices(&mut k), ["engineering", "(none)"]);
-}
-
-#[test]
-fn a_company_country_or_group_carries_how_many_applications_name_it() {
-    let mut k = kernel();
-    // Stripe (under Alphabet) has one linked application, Helsing one; Germany one (Berlin).
-    assert_eq!(column(&k, "company.applications"), json!([1.0, null, null, 1.0]));
-    assert_eq!(column(&k, "company.parent.applications"), json!([1.0, null, null, 1.0]));
-    assert_eq!(column(&k, "country.applications"), json!([1.0, null, null, null]));
     let fields = q(&mut k, json!({"op": "mask_fields"}))["fields"].clone();
-    let count = fields.as_array().unwrap().iter().find(|f| f["path"] == "company.applications").unwrap();
-    assert_eq!(count["desc"], true);
+    let field = |p: &str| fields.as_array().unwrap().iter().find(|f| f["path"] == p).unwrap().clone();
+    assert_eq!((field("office")["label"].clone(), field("office")["type"].clone(), field("company.applications")["desc"].clone()), (json!("office"), json!("enum"), json!(true)));
 }

@@ -2,19 +2,13 @@
 //! ordered match over the rules, pins, the default, the reads the lens
 //! and the MCP draw from, and the judge's rules on CV writes.
 
-use kernel::abi::Kernel;
-use kernel::judge::{Ctx, EVal, Row};
+mod fixture;
+
+use fixture::{DAWN, agent, cells, cmd, del, gone, operator, packed, put, q, refused};
+use kernel::abi::{self, Kernel};
 use kernel::query::Grants;
-use kernel::rows::Val;
-use schema::col::applications as A;
-use schema::{col, command, enums, param, refusal, table};
+use schema::{col, refusal, table};
 use serde_json::{Value as Json, json};
-
-const TODAY: i32 = 739_528;
-
-fn ctx(human: bool) -> Ctx<'static> {
-    Ctx { today: TODAY, now: (TODAY - kernel::UNIX_EPOCH_DAY) as i64 * 86_400, human, key_id: (!human).then_some(3), held: &[] }
-}
 
 /// Germany (1) with Berlin (2), France (3); Stripe (10) and Acme (11);
 /// roots DACH (20, markdown, version 30), Stripe (21, pdf, version 31),
@@ -24,94 +18,33 @@ fn ctx(human: bool) -> Ctx<'static> {
 /// in Berlin (2), Acme in France (3), Acme nowhere (4), Acme in Berlin
 /// pinned to Stripe by an agent (5), all in an open batch and open_fire.
 fn kernel() -> Kernel {
-    let mut w = wire::BodyWriter::new();
-    let none = wire::NONE;
-    let mut b = w.block(table::PLACES, 3);
-    b.u32s(col::places::ID, [1, 2, 3].into_iter())
-        .u32s(col::places::KIND, [enums::place_kind::COUNTRY, enums::place_kind::CITY, enums::place_kind::COUNTRY].map(u32::from).into_iter())
-        .u32s(col::places::COUNTRY_ID, [none, 1, none].into_iter())
-        .strs(col::places::ISO2, ["DE", "", "FR"].into_iter())
-        .strs(col::places::NAME, ["Germany", "Berlin", "France"].into_iter());
-    b.done();
-    let mut b = w.block(table::CORPORATIONS, 2);
-    b.u32s(col::corporations::ID, [10, 11].into_iter())
-        .strs(col::corporations::DOMAIN, ["stripe.com", "acme.com"].into_iter())
-        .strs(col::corporations::NAME, ["Stripe", "Acme"].into_iter());
-    b.done();
-    let fmt = |f: u8| f as u32;
-    let mut b = w.block(table::CV_ROOTS, 4);
-    b.u32s(col::cv_roots::ID, [20, 21, 22, 23].into_iter())
-        .strs(col::cv_roots::SLUG, ["dach", "stripe", "default", "france"].into_iter())
-        .strs(col::cv_roots::NAME, ["DACH", "Stripe", "Default", "France"].into_iter())
-        .u32s(col::cv_roots::FORMAT, [enums::cv_format::MARKDOWN, enums::cv_format::PDF, enums::cv_format::COMPOSED, enums::cv_format::MARKDOWN].map(fmt).into_iter())
-        .u32s(col::cv_roots::VERSION_ID, [30, 31, none, none].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_VERSIONS, 2);
-    b.u32s(col::cv_versions::ID, [30, 31].into_iter())
-        .u32s(col::cv_versions::ROOT_ID, [20, 21].into_iter())
-        .u32s(col::cv_versions::N, [1, 1].into_iter())
-        .strs(col::cv_versions::TEXT, ["# Ana\nRust, inference kernels.", "Payments infrastructure."].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_MASKS, 1);
-    b.u32s(col::cv_masks::ID, [50].into_iter()).strs(col::cv_masks::NAME, ["dach"].into_iter()).strs(col::cv_masks::PATTERN, ["[country in [DE, AT, CH]]"].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_RULES, 4);
-    b.u32s(col::cv_rules::ID, [43, 40, 41, 42].into_iter())
-        .u32s(col::cv_rules::POSITION, [0, 1, 2, 3].into_iter())
-        .u32s(col::cv_rules::ROOT_ID, [21, 21, 20, 23].into_iter())
-        .u32s(col::cv_rules::ENABLED, [0, 1, 1, 1].into_iter())
-        .strs(col::cv_rules::PATTERN, ["[country _]", "[company.domain = \"stripe.com\"]", "dach", "country = FR"].into_iter());
-    b.done();
-    let mut b = w.block(table::ME, 1);
-    b.u32s(col::me::ID, [1].into_iter()).u32s(col::me::CV_DEFAULT_ROOT_ID, [22].into_iter()).strs(col::me::CITIZENSHIPS, ["DE"].into_iter());
-    b.done();
-    let mut b = w.block(table::BATCHES, 1);
-    b.u32s(col::batches::ID, [1].into_iter()).u32s(col::batches::FIRE, [enums::fire::OPEN_FIRE as u32].into_iter());
-    b.done();
-    let mut b = w.block(table::APPLICATIONS, 5);
-    b.u32s(A::ID, 1..=5)
-        .u32s(A::NO, 1..=5)
-        .u32s(A::STAGE, (1..=5).map(|_| enums::stage::OPEN_FIRE as u32))
-        .u32s(A::BATCH_ID, (1..=5).map(|_| 1))
-        .strs(A::COMPANY, ["Stripe", "Acme", "Acme", "Acme", "Acme"].into_iter())
-        .strs(A::ROLE, (1..=5).map(|_| "Research Engineer"))
-        .u32s(A::CORPORATION_ID, [10, 11, 11, 11, 11].into_iter())
-        .u32s(A::PLACE_ID, [2, 2, 3, none, 2].into_iter())
-        .u32s(A::CV_ROOT_ID, [none, none, none, none, 21].into_iter())
-        .u32s(A::CV_PINNED_BY, [none, none, none, none, enums::actor::AGENT as u32].into_iter())
-        .u32s(A::HEAT_OVERRIDE, (1..=5).map(|_| 0));
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
-    k.boot(&w.finish(), 1).unwrap();
-    k
-}
-
-fn q(k: &mut Kernel, req: Json) -> Json {
-    k.query(&req).unwrap_or_else(|r| panic!("{req}: {r:?}"))
+    let app = |id: u32, corporation: u32, place: Json| {
+        json!({"id": id, "no": id, "stage": "open_fire", "batch_id": 1, "company": if corporation == 10 { "Stripe" } else { "Acme" }, "role": "Research Engineer", "corporation_id": corporation, "place_id": place, "heat_override": false})
+    };
+    let mut pinned = app(5, 11, json!(2));
+    pinned["cv_root_id"] = json!(21);
+    pinned["cv_pinned_by"] = json!("agent");
+    let root = |id: u32, slug: &str, name: &str, format: &str, version: Json| json!({"id": id, "slug": slug, "name": name, "format": format, "version_id": version});
+    let rule = |id: u32, position: u32, root: u32, enabled: bool, pattern: &str| json!({"id": id, "position": position, "root_id": root, "enabled": enabled, "pattern": pattern});
+    fixture::kernel(json!({
+        "places": fixture::europe(),
+        "corporations": [{"id": 10, "domain": "stripe.com", "name": "Stripe"}, {"id": 11, "domain": "acme.com", "name": "Acme"}],
+        "cv_roots": [root(20, "dach", "DACH", "markdown", json!(30)), root(21, "stripe", "Stripe", "pdf", json!(31)), root(22, "default", "Default", "composed", Json::Null), root(23, "france", "France", "markdown", Json::Null)],
+        "cv_versions": [{"id": 30, "root_id": 20, "n": 1, "text": "# Ana\nRust, inference kernels."}, {"id": 31, "root_id": 21, "n": 1, "text": "Payments infrastructure."}],
+        "cv_masks": [{"id": 50, "name": "dach", "pattern": "[country in [DE, AT, CH]]"}],
+        "cv_rules": [rule(43, 0, 21, false, "[country _]"), rule(40, 1, 21, true, "[company.domain = \"stripe.com\"]"), rule(41, 2, 20, true, "dach"), rule(42, 3, 23, true, "country = FR")],
+        "me": [{"id": 1, "cv_default_root_id": 22, "citizenships": "DE"}],
+        "batches": [{"id": 1, "fire": "open_fire"}],
+        "applications": [app(1, 10, json!(2)), app(2, 11, json!(2)), app(3, 11, json!(3)), app(4, 11, Json::Null), pinned],
+    }))
 }
 
 fn picks(k: &mut Kernel) -> Vec<Json> {
     q(k, json!({"op": "cv_picks"}))["picks"].as_array().unwrap().clone()
 }
 
-fn op(verb: u8, table: u16, target: u32, cells: impl FnOnce(&mut wire::OpWriter)) -> Vec<u8> {
-    let mut w = wire::OpsWriter::new();
-    let mut o = w.op(77, verb, 0, table, target, None);
-    cells(&mut o);
-    o.done();
-    w.finish()[8..].to_vec()
-}
-
 fn pick_cv(app: u32, root: u32) -> Vec<u8> {
-    op(wire::COMMAND, command::PICK_CV, app, |o| {
-        o.u32(param::pick_cv::CV_ROOT_ID, root);
-    })
-}
-
-fn refusal_of(r: Result<Vec<Row>, kernel::judge::Refusal>) -> kernel::judge::Refusal {
-    r.expect_err("expected a refusal")
+    cmd("pick_cv", app, json!({"cv_root_id": root}))
 }
 
 #[test]
@@ -136,24 +69,22 @@ fn the_first_enabled_arm_wins_a_pin_wins_over_it_and_the_default_takes_the_rest(
 #[test]
 fn a_pin_by_the_operator_or_an_agent_moves_the_pick_and_unpinning_gives_it_back() {
     let mut k = kernel();
-    k.predict(&pick_cv(2, 23), &ctx(true)).unwrap();
+    k.predict(&pick_cv(2, 23), &operator(DAWN)).unwrap();
     let p = q(&mut k, json!({"op": "cv_pick", "application": 2}));
     assert_eq!((&p["state"], &p["root"], &p["by"]), (&json!("empty"), &json!(23), &json!("operator")));
 
-    k.predict(&op(wire::COMMAND, command::UNPIN_CV, 2, |_| {}), &ctx(false)).unwrap();
+    k.predict(&cmd("unpin_cv", 2, json!({})), &agent(3, DAWN)).unwrap();
     assert_eq!(q(&mut k, json!({"op": "cv_pick", "application": 2}))["state"], "matched");
 
-    assert_eq!(refusal_of(k.judge(&pick_cv(2, 99), &ctx(false))).code, refusal::NOT_FOUND);
-    let fx = k.judge(&pick_cv(2, 21), &ctx(false)).unwrap();
+    assert_eq!(refused(k.judge(&pick_cv(2, 99), &agent(3, DAWN))).0, refusal::NOT_FOUND);
+    let fx = k.judge(&pick_cv(2, 21), &agent(3, DAWN)).unwrap();
     assert!(fx.iter().any(|r| r.table == table::EVENTS), "a pin is on the application's trail");
 }
 
 #[test]
 fn a_dropped_root_turns_its_pin_stale() {
     let mut k = kernel();
-    let mut w = wire::BodyWriter::new();
-    w.gone(table::CV_ROOTS, &[21]);
-    k.patch(&w.finish(), 2).unwrap();
+    k.patch(&gone(table::CV_ROOTS, &[21]), 2).unwrap();
     let p = picks(&mut k);
     assert_eq!((&p[4]["state"], &p[4]["root"]), (&json!("stale"), &json!(21)));
     // Its arm is gone with it: Stripe falls through to dach.
@@ -163,83 +94,44 @@ fn a_dropped_root_turns_its_pin_stale() {
 #[test]
 fn going_out_freezes_the_version_the_pick_sends() {
     let mut k = kernel();
-    let out = |k: &mut Kernel, app: u32| {
-        let fx = k.judge(&op(wire::COMMAND, command::STAGE, app, |o| {
-            o.u32(param::stage::STAGE, enums::stage::SUBMITTED as u32);
-        }), &ctx(true));
-        fx.unwrap().into_iter().find(|r| r.table == table::APPLICATIONS).and_then(|r| r.cells.into_iter().find(|c| c.0 == A::CV_VERSION_ID)).map(|c| c.1)
-    };
-    assert_eq!(out(&mut k, 1), Some(EVal::Val(Val::U32(31))));
-    assert_eq!(out(&mut k, 4), Some(EVal::Val(Val::None)));
+    let out = |k: &mut Kernel, app: u32| cells(&k.judge(&cmd("stage", app, json!({"stage": "submitted"})), &operator(DAWN)).unwrap(), "applications").get("cv_version_id").cloned();
+    assert_eq!(out(&mut k, 1), Some(json!(31)));
+    assert_eq!(out(&mut k, 4), Some(Json::Null));
 }
 
 #[test]
 fn a_rule_or_mask_that_does_not_compile_is_refused_where_it_breaks() {
     let mut k = kernel();
-    let put_rule = |text: &str| {
-        let text = text.to_string();
-        op(wire::PUT, table::CV_RULES, 40, move |o| {
-            o.str(col::cv_rules::PATTERN, &text);
-        })
-    };
-    let r = refusal_of(k.judge(&put_rule("country = :de"), &ctx(true)));
-    assert_eq!((r.code, &r.data["at"], &r.data["rule"]), (refusal::RULE, &json!(10), &json!(40)));
-    assert!(k.judge(&put_rule("dach & company.size = :mega"), &ctx(true)).is_ok());
-
+    let mut judge = |op: Vec<u8>| refused(k.judge(&op, &operator(DAWN)));
+    let (code, data) = judge(put("cv_rules", 40, json!({"pattern": "country = :de"})));
+    assert_eq!((code, &data["at"], &data["rule"]), (refusal::RULE, &json!(10), &json!(40)));
     // Renaming dach breaks the rule that names it; dropping it too.
-    let rename = op(wire::PUT, table::CV_MASKS, 50, |o| {
-        o.str(col::cv_masks::NAME, "dacha");
-    });
-    let r = refusal_of(k.judge(&rename, &ctx(true)));
-    assert_eq!((r.code, &r.data["rule"]), (refusal::RULE, &json!(41)));
-    let r = refusal_of(k.judge(&op(wire::DROP, table::CV_MASKS, 50, |_| {}), &ctx(true)));
-    assert_eq!((r.code, &r.data["rule"]), (refusal::RULE, &json!(41)));
+    for breaks in [put("cv_masks", 50, json!({"name": "dacha"})), del("cv_masks", 50)] {
+        let (code, data) = judge(breaks);
+        assert_eq!((code, &data["rule"]), (refusal::RULE, &json!(41)));
+    }
     for bad in ["country", "Dach", "in"] {
-        let named = op(wire::PUT, table::CV_MASKS, 0, |o| {
-            o.str(col::cv_masks::NAME, bad).str(col::cv_masks::PATTERN, "country = DE");
-        });
-        assert_eq!(refusal_of(k.judge(&named, &ctx(true))).code, refusal::RULE, "{bad}");
+        assert_eq!(judge(put("cv_masks", 0, json!({"name": bad, "pattern": "country = DE"}))).0, refusal::RULE, "{bad}");
     }
     // A mask naming itself through another is a cycle.
-    let cycle = op(wire::PUT, table::CV_MASKS, 50, |o| {
-        o.str(col::cv_masks::PATTERN, "dach | country = FR");
-    });
-    assert!(refusal_of(k.judge(&cycle, &ctx(true))).data["error"].as_str().unwrap().contains("names itself"));
+    assert!(judge(put("cv_masks", 50, json!({"pattern": "dach | country = FR"}))).1["error"].as_str().unwrap().contains("names itself"));
+    assert!(k.judge(&put("cv_rules", 40, json!({"pattern": "dach & company.size = :mega"})), &operator(DAWN)).is_ok());
 }
 
 #[test]
 fn a_version_carries_what_its_root_format_takes_and_becomes_the_root_head() {
     let mut k = kernel();
-    let version = |root: u32, body: Option<&'static str>, blob: Option<&'static str>| {
-        op(wire::PUT, table::CV_VERSIONS, 0, move |o| {
-            o.u32(col::cv_versions::ROOT_ID, root);
-            if let Some(b) = body {
-                o.str(col::cv_versions::BODY, b);
-            }
-            if let Some(s) = blob {
-                o.str(col::cv_versions::BLOB_SHA, s);
-            }
-        })
-    };
-    assert_eq!(refusal_of(k.judge(&version(23, None, Some("ab12")), &ctx(true))).code, refusal::TYPE);
-    assert_eq!(refusal_of(k.judge(&version(21, Some("# CV"), None), &ctx(true))).code, refusal::TYPE);
+    let version = |cells: Json| put("cv_versions", 0, cells);
+    assert_eq!(refused(k.judge(&version(json!({"root_id": 23, "blob_sha": "ab12"})), &operator(DAWN))).0, refusal::TYPE);
+    assert_eq!(refused(k.judge(&version(json!({"root_id": 21, "body": "# CV"})), &operator(DAWN))).0, refusal::TYPE);
     // A file keeps its blob when the operator edits its text.
-    assert!(k.judge(&version(21, Some("Payments infra, edited"), Some("ab12")), &ctx(true)).is_ok());
-    assert_eq!(refusal_of(k.judge(&version(99, Some("# CV"), None), &ctx(true))).code, refusal::NOT_FOUND);
-    let fx = k.judge(&version(23, Some("# Ana\nRust, kernels"), None), &ctx(true)).unwrap();
-    let head = fx.iter().find(|r| r.table == table::CV_ROOTS).expect("the root moves");
-    assert_eq!((head.id, &head.cells), (23, &vec![(col::cv_roots::VERSION_ID, EVal::New(0))]));
+    assert!(k.judge(&version(json!({"root_id": 21, "body": "Payments infra, edited", "blob_sha": "ab12"})), &operator(DAWN)).is_ok());
+    assert_eq!(refused(k.judge(&version(json!({"root_id": 99, "body": "# CV"})), &operator(DAWN))).0, refusal::NOT_FOUND);
+    let fx = k.judge(&version(json!({"root_id": 23, "body": "# Ana\nRust, kernels"})), &operator(DAWN)).unwrap();
+    assert!(abi::effects_json(&fx).as_array().unwrap().contains(&json!({"table": "cv_roots", "id": 23, "cells": {"version_id": {"new": 0}}})), "the root moves");
 
-    k.predict(&version(23, Some("# Ana"), None), &ctx(true)).unwrap();
+    k.predict(&version(json!({"root_id": 23, "body": "# Ana"})), &operator(DAWN)).unwrap();
     assert_eq!(q(&mut k, json!({"op": "cv_pick", "application": 3}))["state"], "matched");
-}
-
-/// A cell as the node sends a long text: zstd against the text dictionary.
-fn packed(text: &str) -> Vec<u8> {
-    let mut z = zstd::bulk::Compressor::with_dictionary(19, wire::TEXT_DICT).unwrap();
-    z.include_checksum(false).unwrap();
-    z.include_contentsize(true).unwrap();
-    [&[1u8][..], &z.compress(text.as_bytes()).unwrap()].concat()
 }
 
 /// A rule and a mask long enough to arrive packed are the rule and mask
@@ -249,55 +141,24 @@ fn packed(text: &str) -> Vec<u8> {
 fn a_long_rule_or_mask_arrives_packed_and_reads_as_its_text() {
     let pad = (0..40).map(|i| format!("location ~ \"Nowhere {i}\"")).collect::<Vec<_>>().join(" | ");
     let (mask, rule) = (packed(&format!("[country in [DE, AT, CH]] | {pad}")), packed(&format!("dach | {pad}")));
-    let none = wire::NONE;
+    let mut k = fixture::kernel(json!({
+        "places": fixture::europe(),
+        "cv_roots": [{"id": 20, "slug": "dach", "name": "DACH", "format": "composed"}],
+        "applications": [{"id": 1, "no": 1, "company": "Acme", "role": "Engineer", "place_id": 2}, {"id": 2, "no": 2, "company": "Acme", "role": "Engineer"}],
+    }));
     let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::PLACES, 2);
-    b.u32s(col::places::ID, [1, 2].into_iter())
-        .u32s(col::places::KIND, [enums::place_kind::COUNTRY, enums::place_kind::CITY].map(u32::from).into_iter())
-        .u32s(col::places::COUNTRY_ID, [none, 1].into_iter())
-        .strs(col::places::ISO2, ["DE", ""].into_iter())
-        .strs(col::places::NAME, ["Germany", "Berlin"].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_ROOTS, 1);
-    b.u32s(col::cv_roots::ID, [20].into_iter())
-        .strs(col::cv_roots::SLUG, ["dach"].into_iter())
-        .strs(col::cv_roots::NAME, ["DACH"].into_iter())
-        .u32s(col::cv_roots::FORMAT, [enums::cv_format::COMPOSED as u32].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_MASKS, 1);
-    b.u32s(col::cv_masks::ID, [50].into_iter()).strs(col::cv_masks::NAME, ["dach"].into_iter()).zstrs(col::cv_masks::PATTERN, [&mask[..]].into_iter());
-    b.done();
+    w.block(table::CV_MASKS, 1).u32s(col::cv_masks::ID, [50].into_iter()).strs(col::cv_masks::NAME, ["dach"].into_iter()).zstrs(col::cv_masks::PATTERN, [&mask[..]].into_iter());
     let mut b = w.block(table::CV_RULES, 1);
-    b.u32s(col::cv_rules::ID, [40].into_iter())
-        .u32s(col::cv_rules::POSITION, [0].into_iter())
-        .u32s(col::cv_rules::ROOT_ID, [20].into_iter())
-        .u32s(col::cv_rules::ENABLED, [0].into_iter())
-        .zstrs(col::cv_rules::PATTERN, [&rule[..]].into_iter());
-    b.done();
-    let mut b = w.block(table::APPLICATIONS, 2);
-    b.u32s(A::ID, 1..=2)
-        .u32s(A::NO, 1..=2)
-        .strs(A::COMPANY, ["Acme", "Acme"].into_iter())
-        .strs(A::ROLE, ["Engineer", "Engineer"].into_iter())
-        .u32s(A::PLACE_ID, [2, none].into_iter());
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
-    k.boot(&w.finish(), 1).unwrap();
+    b.u32s(col::cv_rules::ID, [40].into_iter()).u32s(col::cv_rules::POSITION, [0].into_iter()).u32s(col::cv_rules::ROOT_ID, [20].into_iter()).u32s(col::cv_rules::ENABLED, [0].into_iter());
+    b.zstrs(col::cv_rules::PATTERN, [&rule[..]].into_iter());
+    k.patch(&w.finish(), 2).unwrap();
 
     let matched = |k: &mut Kernel, app: u32| q(k, json!({"op": "cv_explain", "application": app}))[0]["matched"].clone();
     assert_eq!((matched(&mut k, 1), matched(&mut k, 2)), (json!(true), json!(false)));
-    let enable = op(wire::PUT, table::CV_RULES, 40, |o| {
-        o.u32(col::cv_rules::ENABLED, 1);
-    });
-    k.predict(&enable, &ctx(true)).unwrap();
+    k.predict(&put("cv_rules", 40, json!({"enabled": true})), &operator(DAWN)).unwrap();
     let p = q(&mut k, json!({"op": "cv_pick", "application": 1}));
     assert_eq!((&p["state"], &p["root"], &p["arm"]), (&json!("matched"), &json!(20), &json!(40)));
-    let nordics = op(wire::PUT, table::CV_MASKS, 0, |o| {
-        o.str(col::cv_masks::NAME, "nordics").str(col::cv_masks::PATTERN, "country in [SE, NO]");
-    });
-    assert!(k.judge(&nordics, &ctx(true)).is_ok());
+    assert!(k.judge(&put("cv_masks", 0, json!({"name": "nordics", "pattern": "country in [SE, NO]"})), &operator(DAWN)).is_ok());
 }
 
 #[test]
@@ -316,17 +177,11 @@ fn a_rule_text_is_checked_explained_and_its_fields_listed() {
     assert_eq!((&bad["ok"], &bad["error"]["pos"]), (&json!(false), &json!(10)));
 
     let why = q(&mut k, json!({"op": "cv_explain", "application": 3}));
-    let arm40 = why.as_array().unwrap().iter().find(|a| a["arm"] == 40).unwrap();
-    assert_eq!((&arm40["matched"], &arm40["failed"]["read"]), (&json!(false), &json!("\"acme.com\"")));
-    assert_eq!(why.as_array().unwrap().iter().find(|a| a["arm"] == 42).unwrap()["matched"], true);
+    let arm = |n: u32| why.as_array().unwrap().iter().find(|a| a["arm"] == n).unwrap().clone();
+    assert_eq!((&arm(40)["matched"], &arm(40)["failed"]["read"], &arm(42)["matched"]), (&json!(false), &json!("\"acme.com\""), &json!(true)));
 
-    let fields = q(&mut k, json!({"op": "mask_fields"}))["fields"].as_array().unwrap().len();
-    assert_eq!(fields, kernel::mask::FIELDS.len());
-}
-
-#[test]
-fn a_key_without_the_cv_tables_in_its_mask_reads_no_picks() {
-    let mut k = kernel();
+    assert_eq!(q(&mut k, json!({"op": "mask_fields"}))["fields"].as_array().unwrap().len(), kernel::mask::FIELDS.len());
+    // A key without the CV tables in its mask reads no picks.
     k.set_grants(Grants { human: false, read_mask: 0, write_mask: 0, may_delete: false });
     assert_eq!(k.query(&json!({"op": "cv_picks"})).unwrap_err().code, refusal::SCOPE);
 }
@@ -336,49 +191,11 @@ fn the_application_shows_the_picked_file_version_and_reads_its_words() {
     let mut k = kernel();
     let doc = k.application(2).unwrap();
     let file = &doc["cv"]["file"];
-    assert_eq!((&file["format"], &file["version_id"], &file["n"]), (&json!("markdown"), &json!(30), &json!(1)));
-    assert_eq!(file["text"], "# Ana\nRust, inference kernels.");
+    assert_eq!((&file["format"], &file["version_id"], &file["n"], &file["text"]), (&json!("markdown"), &json!(30), &json!(1), &json!("# Ana\nRust, inference kernels.")));
     assert_eq!(doc["cv_pick"]["root"], 20);
     // Pinned elsewhere, it shows that root's version instead.
-    k.predict(&pick_cv(2, 21), &ctx(true)).unwrap();
+    k.predict(&pick_cv(2, 21), &operator(DAWN)).unwrap();
     assert_eq!(k.application(2).unwrap()["cv"]["file"]["text"], "Payments infrastructure.");
     // The default, a composition, has no file.
     assert_eq!(k.application(4).unwrap()["cv"]["file"], Json::Null);
-}
-
-#[test]
-fn mended_picks_are_the_picks_of_the_rows() {
-    let mut k = kernel();
-    picks(&mut k);
-    let mut seed = 0x9e37_79b9_u32;
-    let mut next = |n: u32| {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        seed % n
-    };
-    for step in 0..40 {
-        let id = 1 + next(5);
-        let mut w = wire::BodyWriter::new();
-        let mut b = w.block(table::APPLICATIONS, 1);
-        b.u32s(A::ID, [id].into_iter());
-        match next(3) {
-            0 => {
-                b.u32s(A::CORPORATION_ID, [[10, 11, wire::NONE][next(3) as usize]].into_iter());
-            }
-            1 => {
-                b.u32s(A::PLACE_ID, [[2, 3, wire::NONE][next(3) as usize]].into_iter());
-            }
-            _ => {
-                b.u32s(A::CV_ROOT_ID, [[20, 21, wire::NONE][next(3) as usize]].into_iter());
-            }
-        }
-        b.done();
-        k.patch(&w.finish(), 2 + step).unwrap();
-        let mut fresh = Kernel::new();
-        fresh.set_today(TODAY);
-        fresh.set_grants(Grants { human: true, read_mask: 0b1111, write_mask: 0b1111, may_delete: true });
-        fresh.restore(&k.snapshot()).unwrap();
-        assert_eq!(picks(&mut k), picks(&mut fresh), "step {step}");
-    }
 }

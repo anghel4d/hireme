@@ -1,18 +1,23 @@
 //! A kernel kept current must equal a fresh one: after any run of PATCHes
 //! (applications, settings, me, places, lineages, gone rows), BOOTs, predicted
 //! ops, their ACKs and NACKs, TICKs and day pins, a kernel booted from the
-//! same rows derives the same board, documents and verdicts. The board's cache
-//! and the governor's index are maintained incrementally; this is their law.
+//! same rows derives the same board, documents, CV picks, arranged desk and
+//! verdicts. The board's cache, the governor's index, the picks and the
+//! arranged columns are maintained incrementally; this is their law.
 
+mod fixture;
+
+use fixture::{OPERATOR, TODAY, body, gone, q};
 use kernel::abi::Kernel;
 use kernel::board;
 use kernel::judge::Ctx;
 use kernel::pipeline::{self, Stage};
 use schema::col::applications as A;
-use schema::{col, command, enums, param, table};
+use schema::{col, command, param, table};
+use serde_json::{Value as Json, json};
 
-const TODAY: i32 = 739_528;
 const N: u32 = 24;
+const COMPANIES: [&str; 4] = ["Acme", "Google", "Stripe", "Zed"];
 
 struct Rng(u64);
 
@@ -49,45 +54,34 @@ fn pips(stage: u32, moved: bool) -> String {
     String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
 }
 
+/// A desk of N applications at four companies (one with an engineering
+/// office) in three countries, in batches, on lineages, picking among two
+/// CV roots by rule, pin and default.
 fn desk(r: &mut Rng) -> Vec<u8> {
-    let n = N as usize;
-    let stages: Vec<u32> = (0..n).map(|_| r.below(10) as u32).collect();
-    let rails: Vec<String> = stages.iter().map(|&s| pips(s, r.below(2) == 0)).collect();
-    let company: Vec<String> = (0..n).map(|i| format!("{}{}", ["Acme", "Google", "Stripe", "Zed"][i % 4], i / 8)).collect();
-    let urls: Vec<String> = (0..n).map(|i| format!("https://boards.greenhouse.io/t{}/jobs/{i}", i % 3)).collect();
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::APPLICATIONS, n);
-    b.u32s(A::ID, 1..=N)
-        .u32s(A::NO, 1..=N)
-        .u32s(A::CORPORATION_ID, (0..n).map(|i| 1 + (i % 4) as u32))
-        .u32s(A::BATCH_ID, stages.iter().enumerate().map(|(i, &s)| if (3..=7).contains(&s) { 1 + (i % 3) as u32 } else { wire::NONE }))
-        .u32s(A::CHANNEL, (0..n).map(|i| if i % 5 == 0 { enums::app_channel::REFERRAL } else { enums::app_channel::LISTING } as u32))
-        .u32s(A::STAGE, stages.iter().copied())
-        .strs(A::PIPS, rails.iter().map(String::as_str))
-        .u32s(A::STAGE_ON, (0..n).map(|i| (TODAY - (i as i32 % 30)) as u32))
-        .u32s(A::APPLIED_ON, stages.iter().enumerate().map(|(i, &s)| if s >= 7 { (TODAY - i as i32 * 3) as u32 } else { wire::NONE }))
-        .u32s(A::REPLIED_ON, stages.iter().enumerate().map(|(i, &s)| if s == 8 { (TODAY - i as i32) as u32 } else { wire::NONE }))
-        .strs(A::COMPANY, company.iter().map(String::as_str))
-        .strs(A::ROLE, (0..n).map(|i| ["Software Engineer", "SRE", "Research Engineer"][i % 3]))
-        .strs(A::LISTING_URL, urls.iter().map(String::as_str));
-    b.done();
-    let mut b = w.block(table::BATCHES, 3);
-    b.u32s(col::batches::ID, 1..=3).strs(col::batches::CODE, ["A", "B", "C"].into_iter());
-    b.done();
-    let mut b = w.block(table::CV_LINEAGES, 2);
-    b.u32s(col::cv_lineages::ID, 1..=2)
-        .u32s(col::cv_lineages::CORPORATION_ID, [1, 2].into_iter())
-        .u32s(col::cv_lineages::GENERATION, [1, 2].into_iter())
-        .u32s(col::cv_lineages::OPENED_ON, [(TODAY - 10) as u32, (TODAY - 100) as u32].into_iter())
-        .u32s(col::cv_lineages::REWRITES_ALLOWED, [1, 0].into_iter());
-    b.done();
-    let mut b = w.block(table::ITEMS, 6);
-    b.u32s(col::items::ID, 1..=6).strs(col::items::TITLE, (0..6).map(|_| "Item")).strs(col::items::KEY, (0..6).map(|_| "k"));
-    b.done();
-    let mut b = w.block(table::ME, 1);
-    b.u32s(col::me::ID, [1].into_iter()).strs(col::me::CITIZENSHIPS, ["pt"].into_iter());
-    b.done();
-    w.finish()
+    let applications: Vec<Json> = (0..N)
+        .map(|i| {
+            let (stage, n) = (r.below(10) as u32, i as i32);
+            json!({"id": i + 1, "no": i + 1, "corporation_id": 1 + i % 4, "batch_id": if (3..=7).contains(&stage) { json!(1 + i % 3) } else { Json::Null },
+                "channel": if i % 5 == 0 { "referral" } else { "listing" }, "stage": stage, "pips": pips(stage, r.below(2) == 0), "stage_on": TODAY - n % 30,
+                "applied_on": if stage >= 7 { json!(TODAY - n * 3) } else { Json::Null }, "replied_on": if stage == 8 { json!(TODAY - n) } else { Json::Null },
+                "company": format!("{}{}", COMPANIES[i as usize % 4], i / 8), "role": (["Software Engineer", "SRE", "Research Engineer"][i as usize % 3]),
+                "listing_url": format!("https://boards.greenhouse.io/t{}/jobs/{i}", i % 3), "place_id": if i % 3 == 2 { Json::Null } else { json!(1 + i % 3) },
+                "cv_root_id": if i % 6 == 0 { json!(1 + i % 2) } else { Json::Null }})
+        })
+        .collect();
+    body(&json!({
+        "applications": applications,
+        "corporations": (1..=4).map(|i| json!({"id": i, "domain": format!("c{i}.example"), "name": COMPANIES[i - 1]})).collect::<Json>(),
+        "places": [{"id": 1, "kind": "country", "iso2": "PT"}, {"id": 2, "kind": "country", "iso2": "US"}, {"id": 3, "kind": "country", "iso2": "DE"}],
+        "offices": [{"id": 1, "corporation_id": 2, "place_id": 1, "kind": "engineering"}],
+        "batches": [{"id": 1, "code": "A"}, {"id": 2, "code": "B"}, {"id": 3, "code": "C"}],
+        "cv_lineages": [{"id": 1, "corporation_id": 1, "generation": 1, "opened_on": TODAY - 10, "rewrites_allowed": true}, {"id": 2, "corporation_id": 2, "generation": 2, "opened_on": TODAY - 100, "rewrites_allowed": false}],
+        "items": (1..=6).map(|i| json!({"id": i, "title": "Item", "key": "k"})).collect::<Json>(),
+        "cv_roots": [{"id": 1, "slug": "composed", "name": "Composed", "format": "composed"}, {"id": 2, "slug": "rust", "name": "Rust", "format": "markdown", "version_id": 1}],
+        "cv_versions": [{"id": 1, "root_id": 2, "n": 1, "text": "Rust"}],
+        "cv_rules": [{"id": 1, "position": 0, "root_id": 2, "enabled": true, "pattern": "country = PT"}, {"id": 2, "position": 1, "root_id": 1, "enabled": true, "pattern": "company.domain = \"c3.example\""}],
+        "me": [{"id": 1, "citizenships": "pt", "cv_default_root_id": 1}],
+    }))
 }
 
 /// An op an agent or the operator might send, often refused.
@@ -136,61 +130,29 @@ fn op(r: &mut Rng, op_id: u64) -> Vec<u8> {
 /// A server PATCH: application cells, or the settings, me, places or
 /// lineages the derivations read, sometimes with gone rows.
 fn patch(r: &mut Rng) -> Vec<u8> {
-    let mut w = wire::BodyWriter::new();
-    match r.below(6) {
+    let rows = match r.below(6) {
         0..=2 => {
-            let id = 1 + r.below(N as u64 + 2) as u32;
-            let stage = r.below(10) as u32;
-            let mut b = w.block(table::APPLICATIONS, 1);
-            b.u32s(A::ID, [id].into_iter());
-            match r.below(6) {
-                0 => b.u32s(A::STAGE, [stage].into_iter()).strs(A::PIPS, [pips(stage, r.below(2) == 0).as_str()].into_iter()),
-                1 => b
-                    .strs(A::COMPANY, [*r.pick(TEXTS)].into_iter())
-                    .strs(A::ROLE, [*r.pick(TEXTS)].into_iter())
-                    .strs(A::LOCATION, [*r.pick(TEXTS)].into_iter()),
-                2 => b.strs(A::COMP_RAW, [*r.pick(TEXTS)].into_iter()).u32s(A::SCORE_100, [r.below(101) as u32].into_iter()),
-                3 => b.u32s(A::APPLIED_ON, [r.day(200)].into_iter()).u32s(A::STAGE_ON, [r.day(100)].into_iter()),
-                4 => b.u32s(A::PLACE_ID, [1 + r.below(3) as u32].into_iter()).u32s(A::WORK_MODE, [r.below(3) as u32].into_iter()),
-                _ => b.u32s(A::CORPORATION_ID, [1 + r.below(4) as u32].into_iter()).u32s(A::BATCH_ID, [1 + r.below(3) as u32].into_iter()),
+            let (id, stage) = (1 + r.below(N as u64 + 2), r.below(10) as u32);
+            let mut row = match r.below(6) {
+                0 => json!({"stage": stage, "pips": pips(stage, r.below(2) == 0)}),
+                1 => json!({"company": r.pick(TEXTS), "role": r.pick(TEXTS), "location": r.pick(TEXTS)}),
+                2 => json!({"comp_raw": r.pick(TEXTS), "score_100": r.below(101)}),
+                3 => json!({"applied_on": r.day(200), "stage_on": r.day(100)}),
+                4 => json!({"place_id": 1 + r.below(3), "work_mode": r.below(3), "cv_root_id": ([json!(1), json!(2), json!(9), Json::Null][r.below(4) as usize])}),
+                _ => json!({"corporation_id": 1 + r.below(4), "batch_id": 1 + r.below(3)}),
             };
-            b.done();
+            row["id"] = json!(id);
             if r.below(8) == 0 {
-                w.gone(table::APPLICATIONS, &[1 + r.below(N as u64) as u32]);
+                return [body(&json!({"applications": [row]})), gone(table::APPLICATIONS, &[1 + r.below(N as u64) as u32])].concat();
             }
+            json!({"applications": [row]})
         }
-        3 => {
-            if r.below(2) == 0 {
-                let mut b = w.block(table::SETTINGS, 1);
-                b.u32s(col::settings::ID, [1].into_iter());
-                b.strs(col::settings::HEAT_CONFIG, [*r.pick(&["", "{\"small_cap\": 2}", "{\"company_half_life\": 5}", "garbage"])].into_iter());
-                b.done();
-            } else {
-                let mut b = w.block(table::ME, 1);
-                b.u32s(col::me::ID, [1].into_iter());
-                b.strs(col::me::CITIZENSHIPS, [*r.pick(&["", "pt", "us", "pt\u{1f}us"])].into_iter());
-                b.done();
-            }
-        }
-        4 => {
-            let id = 1 + r.below(3) as u32;
-            let mut b = w.block(table::PLACES, 1);
-            b.u32s(col::places::ID, [id].into_iter())
-                .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
-                .strs(col::places::ISO2, [*r.pick(&["pt", "us", "de"])].into_iter());
-            b.done();
-        }
-        _ => {
-            let id = 1 + r.below(3) as u32;
-            let mut b = w.block(table::CV_LINEAGES, 1);
-            b.u32s(col::cv_lineages::ID, [id].into_iter())
-                .u32s(col::cv_lineages::CORPORATION_ID, [1 + r.below(4) as u32].into_iter())
-                .u32s(col::cv_lineages::OPENED_ON, [r.day(150)].into_iter())
-                .u32s(col::cv_lineages::REWRITES_ALLOWED, [r.below(2) as u32].into_iter());
-            b.done();
-        }
-    }
-    w.finish()
+        3 if r.below(2) == 0 => json!({"settings": [{"id": 1, "heat_config": r.pick(&["", "{\"small_cap\": 2}", "{\"company_half_life\": 5}", "garbage"])}]}),
+        3 => json!({"me": [{"id": 1, "citizenships": r.pick(&["", "pt", "us", "pt\u{1f}us"])}]}),
+        4 => json!({"places": [{"id": 1 + r.below(3), "kind": "country", "iso2": r.pick(&["pt", "us", "de"])}]}),
+        _ => json!({"cv_lineages": [{"id": 1 + r.below(3), "corporation_id": 1 + r.below(4), "opened_on": r.day(150), "rewrites_allowed": r.below(2) == 1}]}),
+    };
+    body(&rows)
 }
 
 /// A BOOT of the rows a kernel holds now, pending effects included.
@@ -204,7 +166,15 @@ fn boot_of(k: &Kernel) -> Vec<u8> {
 
 /// Everything derived that a reader sees, and the verdicts on `probes`.
 fn derived(k: &mut Kernel, probes: &[Vec<u8>], ctx: &Ctx) -> Vec<String> {
-    let mut out = vec![format!("{:?}", k.board_ids(None)), k.overview(100).to_string(), k.atlas().to_string()];
+    let mut out = vec![format!("{:?}", k.board_ids(None)), k.overview(100).to_string(), k.atlas().to_string(), q(k, json!({"op": "cv_picks"})).to_string()];
+    let asks = [
+        json!({"sort": ["company.name", "asc"], "group": "field"}),
+        json!({"sort": ["no", "desc"], "group": "company.name", "largest": true}),
+        json!({"sort": ["role", "asc"], "group": "seniority"}),
+        json!({"group": "work_mode"}),
+        json!({"group": "office"}),
+    ];
+    out.extend(asks.iter().map(|a| format!("{a}: {:?}", k.arrange(a))));
     out.extend((1..=N + 2).map(|id| format!("{id}: {:?}", k.application(id))));
     out.extend(probes.iter().map(|p| format!("{:?}", k.judge(p, ctx))));
     out
@@ -217,8 +187,7 @@ fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
     let human = Ctx { today: TODAY, now: 0, human: true, key_id: None, held: &[] };
     for seed in 1..=seeds {
         let mut r = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
-        let mut a = Kernel::new();
-        a.set_today(TODAY);
+        let mut a = fixture::kernel(json!({}));
         a.boot(&desk(&mut r), 1).unwrap();
         let (mut pending, mut op_id, mut log) = (Vec::new(), 5000u64, Vec::new());
         for step in 0..steps {
@@ -252,11 +221,7 @@ fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
                 // The server's TICK moving the day (unless a day is pinned),
                 // or a BOOT replacing the desk whole.
                 _ if r.below(2) == 0 => {
-                    let mut w = wire::BodyWriter::new();
-                    let mut b = w.block(table::CLOCK, 1);
-                    b.u32s(col::clock::TODAY, [TODAY as u32 + r.below(60) as u32].into_iter());
-                    b.done();
-                    let _ = a.patch(&w.finish(), 2 + step);
+                    let _ = a.patch(&body(&json!({"clock": [{"today": TODAY as u64 + r.below(60)}]})), 2 + step);
                     log.push("tick");
                 }
                 _ if pending.is_empty() => {
@@ -267,6 +232,7 @@ fn a_kernel_kept_current_derives_what_a_fresh_one_does() {
             }
             let mut b = Kernel::new();
             b.set_today(TODAY);
+            b.set_grants(OPERATOR);
             b.pin_today(a.today());
             b.boot(&boot_of(&a), 1).unwrap();
             let mut pr = Rng(seed * 7919 + step);

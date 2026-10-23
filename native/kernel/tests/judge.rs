@@ -1,359 +1,118 @@
 //! The domain check through the kernel's facade: an op in the OPS layout
 //! against resident rows, answered with a refusal or the effects the
 //! sequencer persists. Rules from docs/rebuild.md "The sequencer's
-//! checks", step 4: pipeline moves, fire hold, heat caps without an
-//! override, lineage and cooldown; and "Keywords at write time".
+//! checks", step 4: lineage and cooldown, the day a move writes, natural
+//! keys and links. The moves, the fire hold, heat and keywords at write
+//! time are tests/vectors.json's.
 
+mod fixture;
+
+use fixture::{DAWN, TODAY, agent, body, cells, cmd, del, gone, keyed, put, refused};
 use kernel::abi::Kernel;
-use kernel::judge::{Ctx, EVal, Row};
-use kernel::rows::Val;
+use kernel::judge::Ctx;
 use schema::col::applications as A;
-use schema::{col, command, enums, param, refusal, table};
-
-const TODAY: i32 = 739_528;
+use schema::{col, refusal, table};
+use serde_json::{Value as Json, json};
 
 fn ctx() -> Ctx<'static> {
-    Ctx { today: TODAY, now: (TODAY - kernel::UNIX_EPOCH_DAY) as i64 * 86_400, human: false, key_id: Some(3), held: &[] }
+    agent(3, DAWN)
 }
 
-struct App {
-    id: u32,
-    stage: u8,
-    company: &'static str,
-    role: &'static str,
-    batch: Option<u32>,
-    corp: Option<u32>,
-    stage_on: i32,
+fn app(id: u32, stage: &str, company: &str, corporation: Json) -> Json {
+    json!({"id": id, "no": id, "stage": stage, "company": company, "role": "Software Engineer", "corporation_id": corporation, "stage_on": TODAY, "heat_override": false})
 }
 
-fn app(id: u32, stage: u8, company: &'static str) -> App {
-    App { id, stage, company, role: "Software Engineer", batch: None, corp: None, stage_on: TODAY }
+/// A kernel with `rows` beside the company and place a new application
+/// must name (corporation 1, place 1) and the items an overlay names (5, 6).
+fn kernel(mut rows: Json) -> Kernel {
+    rows["corporations"] = json!([{"id": 1, "domain": "acme.example", "name": "Acme"}]);
+    rows["places"] = json!([{"id": 1, "kind": "country", "iso2": "DE", "name": "Germany"}]);
+    rows["items"] = json!([{"id": 5, "key": "k", "title": "Kernel work"}, {"id": 6, "key": "j", "title": "Wire work"}]);
+    fixture::kernel(rows)
 }
 
-impl App {
-    fn batch(self, b: u32) -> App {
-        App { batch: Some(b), ..self }
-    }
-
-    fn corp(self, c: u32) -> App {
-        App { corp: Some(c), ..self }
-    }
+fn overlay(app: u32, target: u32) -> Vec<u8> {
+    put("cv_overlays", target, json!({"application_id": app, "item_id": 5, "mode": 0}))
 }
-
-/// A kernel booted with these applications, batches `(id, fire)` and
-/// lineages `(id, corporation, opened_on, rewrites)`.
-fn kernel(apps: &[App], batches: &[(u32, u8)], lineages: &[(u32, u32, i32, bool)]) -> Kernel {
-    let mut w = wire::BodyWriter::new();
-    let opt = |o: Option<u32>| o.unwrap_or(wire::NONE);
-    let mut b = w.block(table::APPLICATIONS, apps.len());
-    b.u32s(A::ID, apps.iter().map(|a| a.id))
-        .u32s(A::NO, apps.iter().map(|a| a.id))
-        .u32s(A::STAGE, apps.iter().map(|a| a.stage as u32))
-        .strs(A::COMPANY, apps.iter().map(|a| a.company))
-        .strs(A::ROLE, apps.iter().map(|a| a.role))
-        .u32s(A::BATCH_ID, apps.iter().map(|a| opt(a.batch)))
-        .u32s(A::CORPORATION_ID, apps.iter().map(|a| opt(a.corp)))
-        .u32s(A::STAGE_ON, apps.iter().map(|a| a.stage_on as u32))
-        .u32s(A::HEAT_OVERRIDE, apps.iter().map(|_| 0));
-    b.done();
-    let mut b = w.block(table::BATCHES, batches.len());
-    b.u32s(col::batches::ID, batches.iter().map(|x| x.0)).u32s(col::batches::FIRE, batches.iter().map(|x| x.1 as u32));
-    b.done();
-    let mut b = w.block(table::CV_LINEAGES, lineages.len());
-    b.u32s(col::cv_lineages::ID, lineages.iter().map(|x| x.0))
-        .u32s(col::cv_lineages::CORPORATION_ID, lineages.iter().map(|x| x.1))
-        .u32s(col::cv_lineages::OPENED_ON, lineages.iter().map(|x| x.2 as u32))
-        .u32s(col::cv_lineages::GENERATION, lineages.iter().map(|_| 1))
-        .u32s(col::cv_lineages::REWRITES_ALLOWED, lineages.iter().map(|x| x.3 as u32));
-    b.done();
-    // The company and place a new application must name.
-    let mut b = w.block(table::CORPORATIONS, 1);
-    b.u32s(col::corporations::ID, [1].into_iter()).strs(col::corporations::DOMAIN, ["acme.example"].into_iter()).strs(col::corporations::NAME, ["Acme"].into_iter());
-    b.done();
-    let mut b = w.block(table::PLACES, 1);
-    b.u32s(col::places::ID, [1].into_iter())
-        .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
-        .strs(col::places::ISO2, ["DE"].into_iter())
-        .strs(col::places::NAME, ["Germany"].into_iter());
-    b.done();
-    // The item the overlays name: a ref must name a row.
-    let mut b = w.block(table::ITEMS, 2);
-    b.u32s(col::items::ID, [5, 6].into_iter()).strs(col::items::KEY, ["k", "j"].into_iter()).strs(col::items::TITLE, ["Kernel work", "Wire work"].into_iter());
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.boot(&w.finish(), 1).unwrap();
-    k
-}
-
-/// One op's bytes.
-fn op(verb: u8, table: u16, target: u32, cells: impl FnOnce(&mut wire::OpWriter)) -> Vec<u8> {
-    let mut w = wire::OpsWriter::new();
-    let mut o = w.op(77, verb, 0, table, target, None);
-    cells(&mut o);
-    o.done();
-    w.finish()[8..].to_vec()
-}
-
-fn stage_cmd(target: u32, to: u8) -> Vec<u8> {
-    op(wire::COMMAND, command::STAGE, target, |o| {
-        o.u32(param::stage::STAGE, to as u32);
-    })
-}
-
-fn cell(rows: &[Row], table: u16, col: u16) -> Option<&EVal> {
-    rows.iter().find(|r| r.table == table)?.cells.iter().find(|c| c.0 == col).map(|c| &c.1)
-}
-
-fn code(r: Result<Vec<Row>, kernel::judge::Refusal>) -> u16 {
-    r.expect_err("expected a refusal").code
-}
-
-use enums::stage as S;
 
 /// The day a move is judged on, through the facade: a pinned day, else the
 /// server's clock row, else `set_today`'s; never the ctx's own.
 #[test]
 fn the_day_a_move_writes_is_pinned_then_clock_then_set_today() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
-    let stage_on = |k: &mut Kernel| {
-        let ctx = Ctx { today: TODAY + 50, ..ctx() };
-        cell(&k.judge(&stage_cmd(1, S::CLOSED), &ctx).unwrap(), table::APPLICATIONS, A::STAGE_ON).cloned()
-    };
-    let day = |d: i32| Some(EVal::Val(Val::U32(d as u32)));
-    assert_eq!(stage_on(&mut k), day(TODAY));
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::CLOCK, 1);
-    b.u32s(col::clock::TODAY, [(TODAY + 1) as u32].into_iter());
-    b.done();
-    k.patch(&w.finish(), 2).unwrap();
-    assert_eq!(stage_on(&mut k), day(TODAY + 1));
+    let mut k = kernel(json!({"applications": [app(1, "gated", "Acme", Json::Null)]}));
+    let late = Ctx { today: TODAY + 50, ..ctx() };
+    let stage_on = |k: &mut Kernel| cells(&k.judge(&cmd("stage", 1, json!({"stage": "closed"})), &late).unwrap(), "applications")["stage_on"].clone();
+    assert_eq!(stage_on(&mut k), TODAY);
+    k.patch(&body(&json!({"clock": [{"today": TODAY + 1}]})), 2).unwrap();
+    assert_eq!(stage_on(&mut k), TODAY + 1);
     k.pin_today(TODAY + 2);
-    assert_eq!(stage_on(&mut k), day(TODAY + 2));
+    assert_eq!(stage_on(&mut k), TODAY + 2);
 }
 
+/// A corporation's first overlay opens its lineage and a closed window waits
+/// for the next generation (tests/vectors.json). No corporation, no lineage;
+/// the prediction links the two rows. With rewrites off an overlay is added,
+/// never rewritten or dropped, nor is the line taken again by another
+/// application; the next generation waits out its cooldown, and past the
+/// window a drop waits for it as a write does.
 #[test]
-fn a_move_writes_stage_pips_day_and_an_event() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
-    let fx = k.judge(&stage_cmd(1, S::CLOSED), &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::STAGE), Some(&EVal::Val(Val::U32(S::CLOSED as u32))));
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::PIPS), Some(&EVal::Val(Val::Str("DDDSSSSSSA".into()))));
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::STAGE_ON), Some(&EVal::Val(Val::U32(TODAY as u32))));
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::CLOSED_ON), Some(&EVal::Val(Val::U32(TODAY as u32))));
-    assert_eq!(cell(&fx, table::EVENTS, col::events::APPLICATION_ID), Some(&EVal::Val(Val::U32(1))));
-    assert_eq!(cell(&fx, table::EVENTS, col::events::ACTOR), Some(&EVal::Val(Val::U32(enums::actor::AGENT as u32))));
-    assert_eq!(cell(&fx, table::EVENTS, col::events::OP_ID), Some(&EVal::Val(Val::I64(77))));
-}
-
-#[test]
-fn batches_and_fire_hold() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme"), app(2, S::FIRE_READY, "Acme").batch(9)], &[(9, enums::fire::HOLD)], &[]);
-    assert_eq!(code(k.judge(&stage_cmd(1, S::IN_BATCH), &ctx())), refusal::STAGE);
-    assert_eq!(code(k.judge(&stage_cmd(2, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
-    // open_fire is named only by its own command.
-    assert_eq!(code(k.judge(&stage_cmd(2, S::OPEN_FIRE), &ctx())), refusal::STAGE);
-    let fire = op(wire::COMMAND, command::OPEN_FIRE, 2, |_| {});
-    let fx = k.judge(&fire, &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::STAGE), Some(&EVal::Val(Val::U32(S::OPEN_FIRE as u32))));
-    assert_eq!(code(k.judge(&op(wire::COMMAND, command::OPEN_FIRE, 1, |_| {}), &ctx())), refusal::STAGE);
-
-    // A batch the operator already fired opens nothing for an application
-    // an agent moves into it: submitted only follows open_fire.
-    let mut opened = kernel(&[app(2, S::FIRE_READY, "Acme").batch(9), app(3, S::DISCOVERED, "Acme")], &[(9, enums::fire::OPEN_FIRE)], &[]);
-    assert_eq!(code(opened.judge(&stage_cmd(2, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
-    let join = op(wire::PUT, table::APPLICATIONS, 3, |o| {
-        o.u32(A::BATCH_ID, 9);
-    });
-    opened.predict(&join, &ctx()).unwrap();
-    assert_eq!(code(opened.judge(&stage_cmd(3, S::SUBMITTED), &ctx())), refusal::FIRE_HOLD);
-}
-
-#[test]
-fn heat_defers_a_second_seat_until_overridden() {
-    let mut k = kernel(&[app(1, S::SUBMITTED, "Acme").batch(9), app(2, S::DRAFT_READY, "ACME").batch(9)], &[(9, enums::fire::HOLD)], &[]);
-    let r = k.judge(&stage_cmd(2, S::FIRE_READY), &ctx()).unwrap_err();
-    assert_eq!(r.code, refusal::HEAT);
-    assert_eq!(r.data["reason"], "company_cap");
-    assert_eq!(r.data["to"], "fire_ready");
-
-    let blank = op(wire::COMMAND, command::HEAT_OVERRIDE, 2, |o| {
-        o.str(param::heat_override::REASON, "  ");
-    });
-    assert_eq!(code(k.judge(&blank, &ctx())), refusal::HEAT);
-    // No reason at all is the sequencer's shape refusal, answered alike.
-    let none = op(wire::COMMAND, command::HEAT_OVERRIDE, 2, |o| {
-        o.str(param::heat_override::REASON, "");
-    });
-    let r = k.judge(&none, &ctx()).unwrap_err();
-    assert_eq!((r.code, r.data["missing"][0].as_str()), (refusal::COLUMN, Some("reason")));
-    let reason = op(wire::COMMAND, command::HEAT_OVERRIDE, 2, |o| {
-        o.str(param::heat_override::REASON, "different org entirely");
-    });
-    let fx = k.judge(&reason, &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::HEAT_OVERRIDE), Some(&EVal::Val(Val::U32(1))));
-    // Applied (as the server would), the move passes.
-    k.predict(&reason, &ctx()).unwrap();
-    assert!(k.judge(&stage_cmd(2, S::FIRE_READY), &ctx()).is_ok());
-    // A different, unloaded company is never held.
-    let mut other = kernel(&[app(1, S::SUBMITTED, "Acme"), app(3, S::DRAFT_READY, "Other").batch(9)], &[(9, 0)], &[]);
-    assert!(other.judge(&stage_cmd(3, S::FIRE_READY), &ctx()).is_ok());
-}
-
-#[test]
-fn listing_text_is_read_once_at_write_time() {
-    let mut k = kernel(&[app(1, S::DISCOVERED, "Acme")], &[], &[]);
-    let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
-        o.str(A::LISTING_RAW, "Rust rust RUST kernels and GPU kernels");
-    });
-    let fx = k.judge(&put, &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::KEYWORDS), Some(&EVal::Val(Val::Str("rust\u{1f}kernels\u{1f}gpu".into()))));
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::KEYWORDS_VERSION), Some(&EVal::Val(Val::U32(kernel::keywords::VERSION))));
-    // A new application starts discovered, on today.
-    let new = op(wire::PUT, table::APPLICATIONS, 0, |o| {
-        o.str(A::COMPANY, "Acme").u32(A::CORPORATION_ID, 1).u32(A::PLACE_ID, 1);
-    });
-    let fx = k.judge(&new, &ctx()).unwrap();
-    assert_eq!(fx[0].id, 0);
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::STAGE), Some(&EVal::Val(Val::U32(S::DISCOVERED as u32))));
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::PIPS), Some(&EVal::Val(Val::Str("APPPPPPPPP".into()))));
-}
-
-fn overlay(app: u32, target: u32) -> Vec<u8> {
-    op(wire::PUT, table::CV_OVERLAYS, target, |o| {
-        o.u32(col::cv_overlays::APPLICATION_ID, app).u32(col::cv_overlays::ITEM_ID, 5).u32(col::cv_overlays::MODE, 0);
-    })
-}
-
-#[test]
-fn a_first_overlay_opens_the_corporations_lineage() {
-    let mut k = kernel(&[app(1, S::DRAFT_READY, "Acme").corp(40), app(2, S::GATED, "Nobody")], &[], &[]);
-    let fx = k.judge(&overlay(1, 0), &ctx()).unwrap();
-    assert_eq!(fx[0].table, table::CV_LINEAGES);
-    assert_eq!(fx[0].id, 0);
-    assert_eq!(cell(&fx, table::CV_OVERLAYS, col::cv_overlays::LINEAGE_ID), Some(&EVal::New(0)));
-    // No corporation, no lineage to tell the story under.
-    assert_eq!(code(k.judge(&overlay(2, 0), &ctx())), refusal::NOT_FOUND);
-    // The prediction applies both rows and links them.
+fn a_lineage_is_one_story_per_corporation_and_waits_out_its_windows() {
+    let lineage = |rewrites: bool| json!([{"id": 7, "corporation_id": 40, "opened_on": TODAY - 10, "generation": 1, "rewrites_allowed": rewrites}]);
+    let mut k = kernel(json!({"applications": [app(1, "draft_ready", "Acme", json!(40)), app(2, "gated", "Nobody", Json::Null)]}));
+    assert_eq!(refused(k.judge(&overlay(2, 0), &ctx())).0, refusal::NOT_FOUND);
     k.predict(&overlay(1, 0), &ctx()).unwrap();
-    let lineages = k.rows().table(table::CV_LINEAGES).unwrap();
-    assert_eq!(lineages.len(), 1);
-    let lid = lineages.ids()[0];
-    let ov = k.rows().table(table::CV_OVERLAYS).unwrap();
-    assert_eq!(ov.u32(ov.ids()[0], col::cv_overlays::LINEAGE_ID), Some(lid));
-}
+    let (lineages, ov) = (k.rows().table(table::CV_LINEAGES).unwrap(), k.rows().table(table::CV_OVERLAYS).unwrap());
+    assert_eq!((lineages.len(), ov.u32(ov.ids()[0], col::cv_overlays::LINEAGE_ID)), (1, Some(lineages.ids()[0])));
 
-#[test]
-fn lineage_windows() {
-    let acme = || app(1, S::DRAFT_READY, "Acme").corp(40);
-    // Rewrites off: adding is fine, rewriting an existing overlay is not.
-    let mut k = kernel(&[acme()], &[], &[(7, 40, TODAY - 10, false)]);
-    assert!(k.judge(&overlay(1, 0), &ctx()).is_ok());
+    let mut k = kernel(json!({"applications": [app(1, "draft_ready", "Acme", json!(40)), app(2, "draft_ready", "Acme", json!(40))], "cv_lineages": lineage(false)}));
     k.predict(&overlay(1, 0), &ctx()).unwrap();
     let existing = k.rows().table(table::CV_OVERLAYS).unwrap().ids()[0];
-    assert_eq!(code(k.judge(&overlay(1, existing), &ctx())), refusal::LINEAGE_BUSY);
-    assert_eq!(code(k.judge(&op(wire::DROP, table::CV_OVERLAYS, existing, |_| {}), &ctx())), refusal::LINEAGE_BUSY);
-    // Another application of the same company may not overlay that line again.
-    let mut k2 = kernel(&[acme(), app(2, S::DRAFT_READY, "Acme").corp(40)], &[], &[(7, 40, TODAY - 10, false)]);
-    k2.predict(&overlay(1, 0), &ctx()).unwrap();
-    assert_eq!(code(k2.judge(&overlay(2, 0), &ctx())), refusal::LINEAGE_BUSY);
-    // Too early for the next generation.
-    let open = op(wire::COMMAND, command::OPEN_GENERATION, 0, |o| {
-        o.u32(param::open_generation::CORPORATION_ID, 40);
-    });
-    let r = k.judge(&open, &ctx()).unwrap_err();
-    assert_eq!((r.code, r.data["days_left"].as_i64(), r.data["opened_on"].as_str()), (refusal::COOLDOWN, Some(80), Some("2024-09-24")));
+    for busy in [overlay(1, existing), del("cv_overlays", existing), overlay(2, 0)] {
+        assert_eq!(refused(k.judge(&busy, &ctx())).0, refusal::LINEAGE_BUSY);
+    }
+    let (code, data) = refused(k.judge(&cmd("open_generation", 0, json!({"corporation_id": 40})), &ctx()));
+    assert_eq!((code, data["days_left"].as_i64(), data["opened_on"].as_str()), (refusal::COOLDOWN, Some(80), Some("2024-09-24")));
 
-    // Past the window: writes wait, the next generation opens additive.
-    let mut late = kernel(&[acme()], &[], &[(7, 40, TODAY - 90, true)]);
-    let r = late.judge(&overlay(1, 0), &ctx()).unwrap_err();
-    assert_eq!((r.code, r.data["opened_on"].as_str(), r.data["need"].as_str()), (refusal::COOLDOWN, Some("2024-07-06"), Some("open_generation")));
-    // Dropping an overlay once the window has passed waits too.
-    let mut aged = kernel(&[acme()], &[], &[(7, 40, TODAY - 10, true)]);
+    let mut aged = kernel(json!({"applications": [app(1, "draft_ready", "Acme", json!(40))], "cv_lineages": lineage(true)}));
     aged.predict(&overlay(1, 0), &ctx()).unwrap();
     let existing = aged.rows().table(table::CV_OVERLAYS).unwrap().ids()[0];
     aged.pin_today(TODAY + 80);
-    let r = aged.judge(&op(wire::DROP, table::CV_OVERLAYS, existing, |_| {}), &ctx()).unwrap_err();
-    assert_eq!((r.code, r.data["opened_on"].as_str(), r.data["need"].as_str()), (refusal::COOLDOWN, Some("2024-09-24"), Some("open_generation")));
-    let fx = late.judge(&open, &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::GENERATION), Some(&EVal::Val(Val::U32(2))));
-    assert_eq!(cell(&fx, table::CV_LINEAGES, col::cv_lineages::REWRITES_ALLOWED), Some(&EVal::Val(Val::U32(0))));
-}
-
-#[test]
-fn a_keyed_put_is_predicted_where_the_server_puts_it() {
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::APPLICATIONS, 1);
-    b.u32s(A::ID, [4].into_iter()).u32s(A::STAGE, [S::GATED as u32].into_iter()).strs(A::CANONICAL_URL, ["https://acme.example/1"].into_iter());
-    b.done();
-    let mut k = Kernel::new();
-    k.boot(&w.finish(), 1).unwrap();
-    let mut ow = wire::OpsWriter::new();
-    ow.op(9, wire::PUT, wire::KEYED, table::APPLICATIONS, 0, None).str(A::CANONICAL_URL, "https://acme.example/1").u32(A::SCORE_100, 77);
-    let raw = ow.finish()[8..].to_vec();
-    k.predict(&raw, &ctx()).unwrap();
-    let t = k.rows().table(table::APPLICATIONS).unwrap();
-    assert_eq!(t.len(), 1);
-    assert_eq!(t.u32(4, A::SCORE_100), Some(77));
+    let (code, data) = refused(aged.judge(&del("cv_overlays", existing), &ctx()));
+    assert_eq!((code, data["opened_on"].as_str(), data["need"].as_str()), (refusal::COOLDOWN, Some("2024-09-24"), Some("open_generation")));
 }
 
 #[test]
 fn a_frame_that_fails_part_way_leaves_nothing_stale() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme"), app(2, S::GATED, "Bolt")], &[], &[]);
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::APPLICATIONS, 1);
-    b.u32s(A::ID, [1].into_iter()).u32s(A::SCORE_100, [99].into_iter());
-    b.done();
+    let mut k = kernel(json!({"applications": [app(1, "gated", "Acme", Json::Null), app(2, "gated", "Bolt", Json::Null)]}));
     // A keyed table's block with no id column: the body fails after the first block.
-    let mut b = w.block(table::EVENTS, 1);
-    b.u32s(col::events::APPLICATION_ID, [1].into_iter());
-    b.done();
-    assert!(k.patch(&w.finish(), 2).is_err());
+    assert!(k.patch(&body(&json!({"applications": [{"id": 1, "score_100": 99}], "events": [{"application_id": 1}]})), 2).is_err());
     assert_eq!(k.board_ids(None)[0], 1);
 }
 
 #[test]
 fn a_sentinel_cell_is_refused_as_the_server_refuses_it() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
-    let put = op(wire::PUT, table::APPLICATIONS, 1, |o| {
+    let mut k = kernel(json!({"applications": [app(1, "gated", "Acme", Json::Null)]}));
+    let none = fixture::raw(wire::PUT, 0, table::APPLICATIONS, 1, None, |o| {
         o.u32(A::SCORE_100, wire::NONE);
     });
-    assert_eq!(code(k.judge(&put, &ctx())), refusal::TYPE);
-    let clear = op(wire::PUT, table::APPLICATIONS, 1, |o| {
-        o.null(A::SCORE_100);
-    });
-    assert!(k.judge(&clear, &ctx()).is_ok());
+    assert_eq!(refused(k.judge(&none, &ctx())).0, refusal::TYPE);
+    assert!(k.judge(&put("applications", 1, json!({"score_100": null})), &ctx()).is_ok());
 }
 
 #[test]
 fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() {
-    let mut k = kernel(&[app(1, S::DRAFT_READY, "Acme").corp(40)], &[], &[]);
+    let mut k = kernel(json!({"applications": [app(1, "draft_ready", "Acme", json!(40))]}));
     // A note's event is the events table's first row, inserted by the client.
-    let note = op(wire::COMMAND, command::NOTE, 1, |o| {
-        o.u32(param::note::STAGE, S::GATED as u32).str(param::note::BODY, "called");
-    });
-    k.predict(&note, &ctx()).unwrap();
+    k.predict(&cmd("note", 1, json!({"stage": "gated", "body": "called"})), &ctx()).unwrap();
     let ev = k.rows().table(table::EVENTS).unwrap();
-    let id = ev.ids()[0];
-    assert_eq!(ev.u32(id, col::events::ID), Some(id));
+    assert_eq!(ev.u32(ev.ids()[0], col::events::ID), Some(ev.ids()[0]));
     // A predicted overlay opens a lineage for corporation 40; the server's
     // own arrives, then goes: the predicted one still tells the story.
     k.predict(&overlay(1, 0), &ctx()).unwrap();
-    let mut w = wire::BodyWriter::new();
-    let mut b = w.block(table::CV_LINEAGES, 1);
-    b.u32s(col::cv_lineages::ID, [3].into_iter())
-        .u32s(col::cv_lineages::CORPORATION_ID, [40].into_iter())
-        .u32s(col::cv_lineages::OPENED_ON, [TODAY as u32].into_iter())
-        .u32s(col::cv_lineages::REWRITES_ALLOWED, [1].into_iter());
-    b.done();
-    k.patch(&w.finish(), 2).unwrap();
-    let mut w = wire::BodyWriter::new();
-    w.gone(table::CV_LINEAGES, &[3]);
-    k.patch(&w.finish(), 3).unwrap();
+    k.patch(&body(&json!({"cv_lineages": [{"id": 3, "corporation_id": 40, "opened_on": TODAY, "rewrites_allowed": true}]})), 2).unwrap();
+    k.patch(&gone(table::CV_LINEAGES, &[3]), 3).unwrap();
     // Another item on the same line (the same item twice is a unique clash).
-    let other = op(wire::PUT, table::CV_OVERLAYS, 0, |o| {
-        o.u32(col::cv_overlays::APPLICATION_ID, 1).u32(col::cv_overlays::ITEM_ID, 6).u32(col::cv_overlays::MODE, 0);
-    });
-    let fx = k.judge(&other, &ctx()).unwrap();
+    let fx = k.judge(&put("cv_overlays", 0, json!({"application_id": 1, "item_id": 6, "mode": 0})), &ctx()).unwrap();
     assert!(fx.iter().all(|r| r.table != table::CV_LINEAGES), "no second lineage: {fx:?}");
 }
 
@@ -362,30 +121,10 @@ fn a_predicted_row_carries_its_id_and_a_corporation_keeps_a_surviving_lineage() 
 /// pips that agree with its stage, a reply or close counts by `applied_on`.
 #[test]
 fn scoreboard_counts_only_submissions() {
-    let mut w = wire::BodyWriter::new();
-    let rows: [(u32, u8, &str); 5] = [
-        (1, enums::stage::SUBMITTED, "DDDDDDDAPP"),
-        (2, enums::stage::REPLY, "DDSSSSSSAP"),
-        (3, enums::stage::REPLY, "DDDDDDDDAP"),
-        (4, enums::stage::CLOSED, ""),
-        (5, enums::stage::REPLY, "DDDDDDDAPP"),
-    ];
-    let mut b = w.block(table::APPLICATIONS, rows.len());
-    b.u32s(A::ID, rows.iter().map(|r| r.0))
-        .u32s(A::NO, rows.iter().map(|r| r.0))
-        .u32s(A::STAGE, rows.iter().map(|r| r.1 as u32))
-        .strs(A::PIPS, rows.iter().map(|r| r.2))
-        .strs(A::COMPANY, rows.iter().map(|_| "Co"))
-        .strs(A::ROLE, rows.iter().map(|_| "R"))
-        .u32s(A::APPLIED_ON, rows.iter().map(|r| if matches!(r.0, 2 | 4) { wire::NONE } else { TODAY as u32 }))
-        .u32s(A::HEAT_OVERRIDE, rows.iter().map(|_| 0));
-    b.done();
-    let mut k = Kernel::new();
-    k.set_today(TODAY);
-    k.boot(&w.finish(), 1).unwrap();
+    let row = |id: u32, stage: &str, pips: &str, applied: bool| json!({"id": id, "no": id, "stage": stage, "pips": pips, "company": "Co", "role": "R", "applied_on": if applied { json!(TODAY) } else { Json::Null }, "heat_override": false});
+    let mut k = fixture::kernel(json!({"applications": [row(1, "submitted", "DDDDDDDAPP", true), row(2, "reply", "DDSSSSSSAP", false), row(3, "reply", "DDDDDDDDAP", true), row(4, "closed", "", false), row(5, "reply", "DDDDDDDAPP", true)]}));
     let board = k.overview(0);
-    assert_eq!(board["scoreboard"]["submitted"], 3, "{board}");
-    assert_eq!(board["scoreboard"]["submitted_today"], 3);
+    assert_eq!((board["scoreboard"]["submitted"].as_u64(), board["scoreboard"]["submitted_today"].as_u64()), (Some(3), Some(3)), "{board}");
 }
 
 #[test]
@@ -406,44 +145,35 @@ fn one_posting_is_one_application_however_it_was_linked() {
         assert_eq!(canon(not_one), None, "{not_one}");
     }
 
-    let mut k = kernel(&[app(1, S::GATED, "Acme")], &[], &[]);
-    let put = |url: &'static str| {
-        op(wire::PUT, table::APPLICATIONS, 0, move |o| {
-            o.str(A::COMPANY, "Acme").str(A::LISTING_URL, url).u32(A::CORPORATION_ID, 1).u32(A::PLACE_ID, 1);
-        })
-    };
-    let fx = k.judge(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
-    assert_eq!(cell(&fx, table::APPLICATIONS, A::CANONICAL_URL), Some(&EVal::Val(Val::Str("https://jobs.lever.co/acme/1234".into()))));
-    k.predict(&put("https://jobs.lever.co/acme/1234?utm_medium=x"), &ctx()).unwrap();
-    assert_eq!(code(k.judge(&put("http://www.jobs.lever.co/acme/1234/#top"), &ctx())), refusal::NATURAL_KEY);
-    assert!(k.judge(&put("https://jobs.lever.co/acme/5678"), &ctx()).is_ok());
-
-    // A keyed put names the posting any way it was linked and lands on its row.
-    let mut w = wire::OpsWriter::new();
-    let mut o = w.op(78, wire::PUT, wire::KEYED, table::APPLICATIONS, 0, None);
-    o.str(A::CANONICAL_URL, "http://www.jobs.lever.co/acme/1234/?gh_src=feed").str(A::ROLE, "Kernel Engineer");
-    o.done();
-    let fx = k.judge(&w.finish()[8..], &ctx()).unwrap();
-    let own = fx.iter().find(|r| r.table == table::APPLICATIONS).unwrap();
-    assert_ne!(own.id, 0, "found the posting, not a new row");
+    // Posting 1234 is application 4's; 5678 is predicted here. A link to either is refused, another posting is not.
+    let mut k = kernel(json!({"applications": [{"id": 4, "no": 4, "stage": "gated", "company": "Acme", "canonical_url": "https://jobs.lever.co/acme/1234"}]}));
+    let new = |url: &str| put("applications", 0, json!({"company": "Acme", "listing_url": url, "corporation_id": 1, "place_id": 1}));
+    let fx = k.judge(&new("https://jobs.lever.co/acme/5678?utm_medium=x"), &ctx()).unwrap();
+    assert_eq!(cells(&fx, "applications")["canonical_url"], "https://jobs.lever.co/acme/5678");
+    k.predict(&new("https://jobs.lever.co/acme/5678?utm_medium=x"), &ctx()).unwrap();
+    for dup in ["http://www.jobs.lever.co/acme/1234/#top", "http://www.jobs.lever.co/acme/5678/#top"] {
+        assert_eq!(refused(k.judge(&new(dup), &ctx())).0, refusal::NATURAL_KEY, "{dup}");
+    }
+    assert!(k.judge(&new("https://jobs.lever.co/acme/9999"), &ctx()).is_ok());
+    // A keyed put names the posting any way it was linked and is predicted onto its row, as the server puts it.
+    k.predict(&keyed("applications", json!({"canonical_url": "http://www.jobs.lever.co/acme/1234/?gh_src=feed", "score_100": 77})), &ctx()).unwrap();
+    let t = k.rows().table(table::APPLICATIONS).unwrap();
+    assert_eq!((t.len(), t.u32(4, A::SCORE_100)), (2, Some(77)));
 }
 
 #[test]
 fn an_application_names_its_company_and_place_or_is_told_which_it_means() {
-    let mut k = kernel(&[app(1, S::GATED, "Acme").corp(1)], &[], &[]);
-    let put = |cells: fn(&mut wire::OpWriter)| op(wire::PUT, table::APPLICATIONS, 0, cells);
-    let r = k.judge(&put(|o| { o.str(A::COMPANY, "ACME Inc").str(A::LOCATION, "Germany"); }), &ctx()).unwrap_err();
-    assert_eq!(r.code, refusal::UNLINKED);
-    assert_eq!(r.data["need"], serde_json::json!(["corporation_id", "place_id"]));
-    assert_eq!((&r.data["did_you_mean"][0]["table"], &r.data["did_you_mean"][0]["id"]), (&serde_json::json!("corporations"), &serde_json::json!(1)));
-    assert_eq!(r.data["did_you_mean"][1]["table"], "places");
+    let mut k = kernel(json!({"applications": [app(1, "gated", "Acme", json!(1))]}));
+    let (code, data) = refused(k.judge(&put("applications", 0, json!({"company": "ACME Inc", "location": "Germany"})), &ctx()));
+    assert_eq!((code, &data["need"]), (refusal::UNLINKED, &json!(["corporation_id", "place_id"])));
+    let meant = &data["did_you_mean"];
+    assert_eq!((&meant[0]["table"], &meant[0]["id"], &meant[1]["table"]), (&json!("corporations"), &json!(1), &json!("places")));
     // Remote work needs no place; a company it still needs.
-    let remote = |o: &mut wire::OpWriter| { o.str(A::COMPANY, "Acme").u32(A::CORPORATION_ID, 1).u32(A::WORK_MODE, enums::work_mode::REMOTE as u32); };
-    assert!(k.judge(&put(remote), &ctx()).is_ok());
+    assert!(k.judge(&put("applications", 0, json!({"company": "Acme", "corporation_id": 1, "work_mode": "remote"})), &ctx()).is_ok());
     // An application already short of a link may still be worked on; clearing a link may not.
-    assert!(k.judge(&op(wire::PUT, table::APPLICATIONS, 1, |o| { o.str(A::ROLE, "Kernel Engineer"); }), &ctx()).is_ok());
-    assert_eq!(code(k.judge(&op(wire::PUT, table::APPLICATIONS, 1, |o| { o.null(A::CORPORATION_ID); }), &ctx())), refusal::UNLINKED);
+    assert!(k.judge(&put("applications", 1, json!({"role": "Kernel Engineer"})), &ctx()).is_ok());
+    assert_eq!(refused(k.judge(&put("applications", 1, json!({"corporation_id": null})), &ctx())).0, refusal::UNLINKED);
     // The company an application names is not dropped from under it.
-    let r = k.judge(&op(wire::DROP, table::CORPORATIONS, 1, |_| {}), &ctx()).unwrap_err();
-    assert_eq!((r.code, &r.data["applications"]), (refusal::UNLINKED, &serde_json::json!([1])));
+    let (code, data) = refused(k.judge(&del("corporations", 1), &ctx()));
+    assert_eq!((code, &data["applications"]), (refusal::UNLINKED, &json!([1])));
 }
