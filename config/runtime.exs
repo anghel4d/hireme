@@ -23,10 +23,8 @@ end
 
 # A throwaway database for a certification run; dev defaults to ../hireme_dev.db.
 if config_env() == :dev do
-  case System.get_env("DATABASE_PATH", "") do
-    "" -> :ok
-    path -> config :hireme, Hireme.Repo, database: path
-  end
+  path = System.get_env("DATABASE_PATH", "")
+  if path != "", do: config(:hireme, Hireme.Repo, database: path)
 
   # A dev node on another port (an e2e run) is its own origin: Origin checks and passkeys follow it.
   port = System.get_env("PORT", "")

@@ -139,9 +139,8 @@ defmodule Hireme.Lease do
   @doc "Claims an application the session just created."
   def adopt(%__MODULE__{} = l, id, app_id) do
     case l.sessions[id] do
-      %{key_id: nil} -> l
-      nil -> l
-      s -> put_claims(l, s, [app_id])
+      %{key_id: k} = s when k != nil -> put_claims(l, s, [app_id])
+      _ -> l
     end
   end
 

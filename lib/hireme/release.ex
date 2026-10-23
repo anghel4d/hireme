@@ -27,6 +27,7 @@ defmodule Hireme.Release do
 
   @baseline "0000_baseline"
   @bookkeeping "CREATE TABLE IF NOT EXISTS schema_files (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+  @user_tables "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT IN ('schema_files') AND name NOT LIKE 'sqlite_%'"
 
   def start_link(opts \\ []) do
     if Hireme.Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
@@ -81,15 +82,8 @@ defmodule Hireme.Release do
   end
 
   defp empty!(conn, path) do
-    case rows(
-           conn,
-           "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT IN ('schema_files') AND name NOT LIKE 'sqlite_%'"
-         ) do
-      [] ->
-        :ok
-
-      tables ->
-        raise "#{path} is not empty and has no baseline (#{length(tables)} tables); a database starts empty"
+    with [_ | _] = tables <- rows(conn, @user_tables) do
+      raise "#{path} is not empty and has no baseline (#{length(tables)} tables); a database starts empty"
     end
   end
 

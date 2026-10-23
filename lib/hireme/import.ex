@@ -182,12 +182,7 @@ defmodule Hireme.Import do
           |> Enum.reject(&delimiter?/1)
           |> Enum.map(&row(header, &1))
         else
-          [
-            %{
-              "$shape" =>
-                "a #{length(marks)}-cell delimiter under a #{length(header)}-column header"
-            }
-          ]
+          [shape("a #{length(marks)}-cell delimiter", header)]
         end
 
       rows ++ table_rows(after_table)
@@ -205,8 +200,9 @@ defmodule Hireme.Import do
   defp row(header, cells) when length(header) == length(cells),
     do: Map.new(Enum.zip(header, cells))
 
-  defp row(header, cells),
-    do: %{"$shape" => "#{length(cells)} cells under a #{length(header)}-column header"}
+  defp row(header, cells), do: shape("#{length(cells)} cells", header)
+
+  defp shape(what, header), do: %{"$shape" => "#{what} under a #{length(header)}-column header"}
 
   # One leading and one trailing pipe frame the row; `\\|` is a pipe in a cell.
   defp cells(line) do
@@ -295,12 +291,11 @@ defmodule Hireme.Import do
          key = natural(table, values),
          unique = if(key, do: nil, else: unique(table, values)),
          {:ok, existing} <- existing(account_id, table, key || unique, cells),
-         {:ok, extra, expect_rev} <- provenance(table, pack, directives, cells, existing) do
+         {:ok, cells, expect_rev} <- provenance(table, pack, directives, cells, existing) do
       # A natural key is the sequencer's (a keyed put); a row named by a
       # unique key alone updates the row that holds it.
       flags = if key, do: @keyed, else: 0
       target = if(unique && existing, do: existing.id, else: 0)
-      cells = cells ++ extra
       raw = Codec.encode_op({Codec.op_id(), :put, flags, table.id, target, expect_rev, cells})
 
       case Codec.op(raw) do
@@ -344,8 +339,7 @@ defmodule Hireme.Import do
 
   defp cell(_account_id, col, value, mode) do
     with {:ok, v} <- cast(col, value, mode) do
-      wire = Codec.to_wire(col, v)
-      {:ok, {col.id, Codec.cell_type(col), wire}}
+      {:ok, {col.id, Codec.cell_type(col), Codec.to_wire(col, v)}}
     end
   end
 
@@ -485,7 +479,7 @@ defmodule Hireme.Import do
     {:refused, _, _} = refusal -> refusal
   end
 
-  # Metric cells carry as_of; prose cells a source and the row's rev.
+  # The cells and their provenance: a metric's as_of; prose's source and the row's rev.
   defp provenance(table, pack, directives, cells, existing) do
     ids = MapSet.new(cells, &elem(&1, 0))
     named = Enum.filter(table.cols, &MapSet.member?(ids, &1.id))
@@ -502,23 +496,21 @@ defmodule Hireme.Import do
           else: []
 
       expect_rev = if prose?, do: (existing && existing.rev) || 0
-      {:ok, as_of_cell ++ source_cell, expect_rev}
+      {:ok, cells ++ as_of_cell ++ source_cell, expect_rev}
     end
   end
 
-  defp as_of_cell(false, _), do: {:ok, []}
-  defp as_of_cell(true, nil), do: {:ok, []}
+  defp as_of_cell(metric?, as_of) when not metric? or is_nil(as_of), do: {:ok, []}
 
-  defp as_of_cell(true, as_of) when is_binary(as_of) do
-    with {:ok, d} <- Date.from_iso8601(as_of),
+  defp as_of_cell(true, as_of) do
+    with true <- is_binary(as_of),
+         {:ok, d} <- Date.from_iso8601(as_of),
          days when days != nil <- Codec.day_to_wire(d) do
       {:ok, [{Codec.as_of_col(), 1, days}]}
     else
       _ -> {:refused, :type, %{column: "as_of", value: brief(as_of)}}
     end
   end
-
-  defp as_of_cell(true, as_of), do: {:refused, :type, %{column: "as_of", value: brief(as_of)}}
 
   # A refusal names the value it refused, bounded.
   defp brief(value), do: inspect(value, limit: 8, printable_limit: 64)

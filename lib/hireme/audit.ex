@@ -408,10 +408,7 @@ defmodule Hireme.Audit.Coalescer do
 
   defp iso(ms), do: ms |> div(1000) |> DateTime.from_unix!() |> DateTime.to_iso8601()
 
-  defp window(budget, now_ms) do
-    {scale, _} = Hireme.Security.limits()[budget]
-    div(now_ms, scale)
-  end
+  defp window(budget, now_ms), do: div(now_ms, elem(Hireme.Security.limits()[budget], 0))
 
   @impl true
   def init(:ok) do

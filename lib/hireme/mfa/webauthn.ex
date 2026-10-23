@@ -39,7 +39,7 @@ defmodule Hireme.Mfa.WebAuthn do
     with {:ok, attestation} <- decode(params["attestationObject"]),
          {:ok, client_data} <- decode(params["clientDataJSON"]),
          {:ok, {auth_data, _attestation}} <-
-           quietly(fn -> Wax.register(attestation, client_data, challenge) end),
+           quietly(&Wax.register/3, [attestation, client_data, challenge]),
          %Wax.AttestedCredentialData{} = credential <- auth_data.attested_credential_data do
       {:ok,
        %{
@@ -100,9 +100,7 @@ defmodule Hireme.Mfa.WebAuthn do
          {:ok, signature} <- decode(params["signature"]),
          {:ok, client_data} <- decode(params["clientDataJSON"]),
          {:ok, data} <-
-           quietly(fn ->
-             Wax.authenticate(raw_id, auth_data, signature, client_data, challenge)
-           end) do
+           quietly(&Wax.authenticate/5, [raw_id, auth_data, signature, client_data, challenge]) do
       {:ok, raw_id, data}
     else
       _ -> {:error, :assertion}
@@ -115,8 +113,8 @@ defmodule Hireme.Mfa.WebAuthn do
   defp b64(binary), do: Base.url_encode64(binary, padding: false)
 
   # Wax parses the browser's bytes with bang functions; a forged response raises in there.
-  defp quietly(verify) do
-    verify.()
+  defp quietly(verify, args) do
+    apply(verify, args)
   rescue
     _ -> {:error, :malformed}
   end

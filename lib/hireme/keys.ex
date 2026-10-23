@@ -84,26 +84,22 @@ defmodule Hireme.Keys do
 
     with :ok <- fresh(session),
          :ok <- if(name?(name), do: :ok, else: {:error, :name}),
-         {:ok, masks} <- masks(masks) do
-      key_id = Security.base62(12)
-      secret = Security.base62(43)
+         {:ok, masks} <- masks(masks),
+         key_id = Security.base62(12),
+         secret = Security.base62(43),
+         row = %{
+           account_id: session.account_id,
+           key_id: key_id,
+           name: name,
+           secret_hash: Security.hash(secret),
+           prefix: String.slice(secret, 0, 4),
+           expires_at: expires_in_days && DateTime.add(Store.now(), expires_in_days * 86_400)
+         },
+         {:ok, key} <- insert_under_cap(session.account_id, Map.merge(masks, row)) do
       body = @prefix <> key_id <> "_" <> secret
-
-      row =
-        Map.merge(masks, %{
-          account_id: session.account_id,
-          key_id: key_id,
-          name: name,
-          secret_hash: Security.hash(secret),
-          prefix: String.slice(secret, 0, 4),
-          expires_at: expires_in_days && DateTime.add(Store.now(), expires_in_days * 86_400)
-        })
-
-      with {:ok, key} <- insert_under_cap(session.account_id, row) do
-        trail(:api_key_created, key, %{preset: preset_of(key)}, Audit.ctx(meta, session))
-        Accounts.notify(session.account_id, :api_key_created, %{name: name})
-        {:ok, %{key: key, secret: body <> Security.checksum(body)}}
-      end
+      trail(:api_key_created, key, %{preset: preset_of(key)}, Audit.ctx(meta, session))
+      Accounts.notify(session.account_id, :api_key_created, %{name: name})
+      {:ok, %{key: key, secret: body <> Security.checksum(body)}}
     end
   end
 
@@ -256,7 +252,8 @@ defmodule Hireme.Keys do
   def authenticate(_, _), do: :error
 
   defp check(presented) do
-    with {:ok, key_id, secret} <- parse(presented),
+    with [_, key_id, secret, sum] <- Regex.run(@shape, presented),
+         true <- Security.equal?(sum, Security.checksum(@prefix <> key_id <> "_" <> secret)),
          {%Key{} = key, account} <- Accounts.joined(Key, dynamic([k], k.key_id == ^key_id)),
          true <- Security.equal?(Security.hash(secret), key.secret_hash),
          true <- live?(key) and Accounts.active?(account) do
@@ -290,15 +287,6 @@ defmodule Hireme.Keys do
   defp masks(_), do: {:error, :masks}
 
   defp fresh(session), do: if(Mfa.fresh?(session), do: :ok, else: {:error, :step_up})
-
-  defp parse(presented) do
-    with [_, key_id, secret, check] <- Regex.run(@shape, presented),
-         true <- Security.equal?(check, Security.checksum(@prefix <> key_id <> "_" <> secret)) do
-      {:ok, key_id, secret}
-    else
-      _ -> :error
-    end
-  end
 
   # last_used_at at most once a minute per key.
   defp used(%Key{} = key) do

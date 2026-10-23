@@ -124,7 +124,7 @@ defmodule HiremeWeb.PageController do
 
     head = """
     <meta name="hireme-ticket" content="#{Hireme.Accounts.ticket(session)}" />
-    <meta name="hireme-wire" content="#{wire_hash()}" />
+    <meta name="hireme-wire" content="#{Base.encode16(<<Hireme.Schema.wire_hash()::16>>, case: :lower)}" />
     <meta name="hireme-scope" content="#{Hireme.Accounts.scope(account.id)}" />
     <link rel="preload" href="#{Auth.static("/wasm/kernel.wasm")}" as="fetch" crossorigin />
     <link rel="modulepreload" href="#{Auth.static("/assets/app.js")}" />
@@ -155,8 +155,6 @@ defmodule HiremeWeb.PageController do
       _ -> ""
     end
   end
-
-  defp wire_hash, do: Base.encode16(<<Hireme.Schema.wire_hash()::16>>, case: :lower)
 end
 
 defmodule HiremeWeb.Blobs do

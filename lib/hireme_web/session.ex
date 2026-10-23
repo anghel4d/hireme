@@ -384,19 +384,17 @@ defmodule HiremeWeb.Session do
 
     Process.send_after(self(), {__MODULE__, :ping}, Security.ping_interval())
     Process.send_after(self(), {__MODULE__, :tick}, @tick_ms)
-    # A restarted sequencer has forgotten this session; the client reconnects.
-    ref = Process.monitor(sequencer)
 
-    state = %{
-      state
-      | phase: :live,
-        account_id: who.account_id,
-        session: session,
-        rev: rev,
-        sequencer: ref
-    }
-
-    {:push, [welcome | train], state}
+    {:push, [welcome | train],
+     %{
+       state
+       | phase: :live,
+         account_id: who.account_id,
+         session: session,
+         rev: rev,
+         # A restarted sequencer has forgotten this session; the client reconnects.
+         sequencer: Process.monitor(sequencer)
+     }}
   end
 
   # --------------------------------------------------------------- RPC

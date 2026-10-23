@@ -472,11 +472,8 @@ defmodule Hireme.Mfa do
     Audit.factors(factor.account_id)
     Audit.record(event, Map.put(about, :factor_id, factor.id), ctx(meta, session))
 
-    Accounts.notify(factor.account_id, :authenticator_disabled, %{
-      kind: factor.kind,
-      name: factor.name,
-      reason: reason
-    })
+    notice = %{kind: factor.kind, name: factor.name, reason: reason}
+    Accounts.notify(factor.account_id, :authenticator_disabled, notice)
   end
 
   # The declared most factors an account holds, disabled ones included.

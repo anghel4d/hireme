@@ -27,7 +27,8 @@ defmodule HiremeWeb.Auth do
 
   @session_key "hireme_session"
 
-  @csp_rest [
+  @csp [
+    "connect-src 'self'",
     "style-src 'self'",
     "img-src 'self' data:",
     "font-src 'self'",
@@ -44,12 +45,7 @@ defmodule HiremeWeb.Auth do
 
   @doc "The inlined early script, or nothing before the first asset build."
   @spec early_script() :: String.t()
-  def early_script do
-    case early() do
-      {js, _hash} -> "<script>#{js}</script>"
-      nil -> ""
-    end
-  end
+  def early_script, do: with({js, _hash} <- early(), do: "<script>#{js}</script>") || ""
 
   # Read once per node: the script and its hash are a release's constants; nothing is kept
   # before the first asset build.
@@ -67,20 +63,8 @@ defmodule HiremeWeb.Auth do
   end
 
   defp csp do
-    script = [
-      "'self'",
-      "'wasm-unsafe-eval'" | for({_, hash} <- List.wrap(early()), do: "'sha256-#{hash}'")
-    ]
-
-    Enum.join(
-      [
-        "default-src 'self'",
-        "script-src " <> Enum.join(script, " "),
-        "connect-src 'self'"
-      ] ++
-        @csp_rest,
-      "; "
-    )
+    h = with {_js, hash} <- early(), do: " 'sha256-#{hash}'"
+    Enum.join(["default-src 'self'", "script-src 'self' 'wasm-unsafe-eval'#{h}" | @csp], "; ")
   end
 
   def security_headers(conn, _opts) do

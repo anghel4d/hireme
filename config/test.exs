@@ -19,7 +19,7 @@ config :hireme,
 config :wax_, origin: "http://www.example.com"
 config :hireme, Hireme.Mail, adapter: Swoosh.Adapters.Test
 
-config :hireme, HiremeWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: 4002]
+config :hireme, HiremeWeb.Endpoint, http: [ip: {127, 0, 0, 1}]
 
 # Tests drain the outbox themselves; no worker sends behind their back.
 config :hireme, :mail_outbox, false

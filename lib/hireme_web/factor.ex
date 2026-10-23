@@ -23,38 +23,34 @@ defmodule HiremeWeb.FactorController do
     apps? = Enum.any?(factors, &(&1.kind == :totp))
     error = if is_binary(params["error"]), do: message(params["error"])
 
-    page(
-      conn,
-      200,
-      "Second factor",
-      """
-      <p class="lede">One more step: this account has a second factor.</p>
-      <p class="notice" id="factor-error" role="alert"#{if error, do: "", else: " hidden"}>#{esc(error || "")}</p>
-      #{if passkeys?, do: ~s(<button type="button" id="use-passkey" class="primary method">Use a passkey or security key</button>)}
-      #{if passkeys? and apps?, do: ~s(<p class="or">or</p>)}
-      #{if apps?, do: """
-        <form method="post" action="/sign-in/factor/totp" class="method">
-          #{csrf_field()}
-          <label for="code">Code from your authenticator app</label>
-          <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" required />
-          <button type="submit" class="primary">Continue</button>
-        </form>
-        """}
-      <details class="method">
-        <summary>Use a recovery code</summary>
-        <form method="post" action="/sign-in/factor/recovery">
-          #{csrf_field()}
-          <input name="code" autocomplete="off" placeholder="xxxx-xxxx-xxxx-xxxx" required />
-          <button type="submit" class="ghost">Continue</button>
-        </form>
-      </details>
-      <form method="post" action="/sign-out" class="method">
+    body = """
+    <p class="lede">One more step: this account has a second factor.</p>
+    <p class="notice" id="factor-error" role="alert"#{if error, do: "", else: " hidden"}>#{esc(error || "")}</p>
+    #{if passkeys?, do: ~s(<button type="button" id="use-passkey" class="primary method">Use a passkey or security key</button>)}
+    #{if passkeys? and apps?, do: ~s(<p class="or">or</p>)}
+    #{if apps?, do: """
+      <form method="post" action="/sign-in/factor/totp" class="method">
         #{csrf_field()}
-        <button type="submit" class="ghost">Sign out</button>
+        <label for="code">Code from your authenticator app</label>
+        <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" required />
+        <button type="submit" class="primary">Continue</button>
       </form>
-      """,
-      script: if(passkeys?, do: "/assets/factor.js")
-    )
+      """}
+    <details class="method">
+      <summary>Use a recovery code</summary>
+      <form method="post" action="/sign-in/factor/recovery">
+        #{csrf_field()}
+        <input name="code" autocomplete="off" placeholder="xxxx-xxxx-xxxx-xxxx" required />
+        <button type="submit" class="ghost">Continue</button>
+      </form>
+    </details>
+    <form method="post" action="/sign-out" class="method">
+      #{csrf_field()}
+      <button type="submit" class="ghost">Sign out</button>
+    </form>
+    """
+
+    page(conn, 200, "Second factor", body, script: if(passkeys?, do: "/assets/factor.js"))
   end
 
   def totp(conn, params),

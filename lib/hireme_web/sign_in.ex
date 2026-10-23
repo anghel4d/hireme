@@ -54,13 +54,11 @@ defmodule HiremeWeb.SignIn do
   def begin(conn, provider, mode, remember \\ false) do
     with {:ok, config} <- config(provider),
          {:ok, %{url: url, session_params: params}} <- @strategies[provider].authorize_url(config) do
-      account = conn.assigns[:account]
-
       trip = %{
         provider: provider,
         params: params,
         mode: mode,
-        account_id: account && account.id,
+        account_id: conn.assigns[:account] && conn.assigns.account.id,
         remember: remember,
         at: System.system_time(:second)
       }
@@ -269,10 +267,9 @@ defmodule HiremeWeb.SignInController do
     case Accounts.request_visitor_link(email, &SignIn.link_url/1, meta(conn)) do
       :ok ->
         {:ok, address} = Accounts.normalize_email(email)
-        minutes = div(Hireme.Security.magic_link_ttl(), 60)
 
         page(conn, 200, "Check your email", """
-        <p class="lede">A sign-in link is on its way to <strong>#{esc(address)}</strong>. It works once, for #{minutes} minutes.</p>
+        <p class="lede">A sign-in link is on its way to <strong>#{esc(address)}</strong>. It works once, for #{div(Hireme.Security.magic_link_ttl(), 60)} minutes.</p>
         <p class="lede">Nothing there? Look in spam, or <a href="/sign-in">ask for another</a>.</p>
         """)
 
@@ -468,11 +465,8 @@ defmodule HiremeWeb.SignInController do
     if Hireme.Security.limit(:refusal_peer, m.ip) == :ok,
       do: Audit.record(:sign_in_refused, %{provider: provider, reason: reason}, m)
 
-    code = if reason == :denied, do: "denied", else: "failed"
-
-    if conn.assigns.account,
-      do: redirect(conn, to: "/account?link_error=" <> code),
-      else: redirect(conn, to: "/sign-in?error=" <> code)
+    to = if conn.assigns.account, do: "/account?link_error=", else: "/sign-in?error="
+    redirect(conn, to: to <> if(reason == :denied, do: "denied", else: "failed"))
   end
 
   defp signed_in(conn) do

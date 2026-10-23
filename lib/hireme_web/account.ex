@@ -179,10 +179,8 @@ defmodule HiremeWeb.Account do
   defp run("account.key.mint", p, s, meta) do
     with {:ok, masks} <- masks(p),
          {:ok, days} <- days(p["expires_in_days"]),
-         {:ok, %{key: key, secret: secret}} <-
-           Keys.mint(s, text(p["name"]), masks, days, ctx(meta, s)) do
-      {:ok, %{key: key(key), secret: secret}}
-    end
+         {:ok, minted} <- Keys.mint(s, text(p["name"]), masks, days, ctx(meta, s)),
+         do: {:ok, %{minted | key: key(minted.key)}}
   end
 
   defp run("account.key.change", %{"id" => id} = p, s, meta) when is_integer(id) do

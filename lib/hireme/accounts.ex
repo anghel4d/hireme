@@ -94,22 +94,15 @@ defmodule Hireme.Accounts do
   # go to make room; only an account whose every session is live is refused.
   defp room_for_session(account_id, now) do
     {need, ended} = need(account_id, now)
+    oldest = from(s in ended, order_by: [asc: s.last_seen_at], limit: ^need, select: s.id)
+    ids = if need > 0, do: Repo.all(oldest, skip_account: true), else: []
 
-    if need <= 0 do
+    if length(ids) == max(need, 0) do
+      # In batches: one IN list past SQLite's variable limit would raise.
+      for ids <- Enum.chunk_every(ids, 500),
+          do: Repo.delete_all(from(s in Session, where: s.id in ^ids), skip_account: true)
+
       true
-    else
-      ids =
-        Repo.all(from(s in ended, order_by: [asc: s.last_seen_at], limit: ^need, select: s.id),
-          skip_account: true
-        )
-
-      if length(ids) == need do
-        # In batches: one IN list past SQLite's variable limit would raise.
-        for ids <- Enum.chunk_every(ids, 500),
-            do: Repo.delete_all(from(s in Session, where: s.id in ^ids), skip_account: true)
-
-        true
-      end
     end
   end
 
@@ -275,17 +268,11 @@ defmodule Hireme.Accounts do
   @spec redeem_ticket(term()) ::
           {:ok, %{account_id: pos_integer(), session_id: pos_integer()}} | :error
   def redeem_ticket(ticket) when is_binary(ticket) do
-    now = Store.now()
-
     with {:ok, {account_id, session_id, bound, nonce}} <-
            Plug.Crypto.decrypt(key_base(), @ticket_salt, ticket, max_age: Security.ticket_ttl()),
          :ok <- __MODULE__.Tickets.spend(nonce),
-         %Session{account_id: ^account_id} = session <-
-           Repo.get(Session, session_id, skip_account: true),
-         true <- Security.equal?(bound, binary_part(session.token_hash, 0, 8)),
-         %Account{} = account <- get(account_id),
-         true <- live?(session, now) and active?(account),
-         false <- Hireme.Mfa.required?(session) do
+         {:ok, %Session{account_id: ^account_id} = session, _} <- read_live(session_id),
+         true <- Security.equal?(bound, binary_part(session.token_hash, 0, 8)) do
       {:ok, %{account_id: account_id, session_id: session_id}}
     else
       _ -> :error

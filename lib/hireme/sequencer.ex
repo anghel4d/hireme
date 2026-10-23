@@ -196,11 +196,16 @@ defmodule Hireme.Sequencer do
   def init(account_id) do
     Repo.put_account(account_id)
     account = Repo.get!(Hireme.Rows.Account, account_id, skip_account: true)
+    # A revoked or changed key, a revoked browser session or a suspension is
+    # heard here too: its sessions stop writing the moment the sequencer
+    # knows, not when their carrier closes.
+    Hireme.PubSub.subscribe(Hireme.Audit.topic(account_id))
 
     state = %{
       account_id: account_id,
       rev: account.desk_rev,
-      lease: %Lease{},
+      # Read after subscribing, so a resume in between is not lost.
+      lease: paused_keys(account_id),
       lease_rows: [],
       account: nil,
       subs: %{},
@@ -214,12 +219,6 @@ defmodule Hireme.Sequencer do
       bulk: %{}
     }
 
-    # A revoked or changed key, a revoked browser session or a suspension is
-    # heard here too: its sessions stop writing the moment the sequencer
-    # knows, not when their carrier closes.
-    Hireme.PubSub.subscribe(Hireme.Audit.topic(account_id))
-    # Read after subscribing, so a resume in between is not lost.
-    state = %{state | lease: paused_keys(account_id)}
     # The first purge, and every hour's, runs as messages between batches;
     # the first of them, and the backfills, after the call that woke the
     # account (a browser's or an agent's subscribe) has its answer.
@@ -1200,10 +1199,11 @@ defmodule Hireme.Sequencer do
 
   defp shape(%{command: command, params: params} = plan, %{verb: :command} = op, _sub) do
     with {:ok, values} <-
-           reduce_cells(op.cells, fn {id, _, _} = cell ->
-             case params[id] do
-               nil -> {:refused, :column, %{command: command.name, param: id}}
-               p -> typed(p, cell, command.name)
+           Enum.reduce_while(op.cells, {:ok, %{}}, fn {id, _, _} = cell, {:ok, acc} ->
+             case params[id] && typed(params[id], cell, command.name) do
+               nil -> {:halt, {:refused, :column, %{command: command.name, param: id}}}
+               {:ok, name, value} -> {:cont, {:ok, Map.put(acc, name, value)}}
+               refused -> {:halt, refused}
              end
            end),
          [] <- for(p <- command.params, p.required, not Map.has_key?(values, p.name), do: p.name),
@@ -1240,15 +1240,6 @@ defmodule Hireme.Sequencer do
 
       if is_integer(id) and not Repo.exists?(from(r in Schema.row(c.ref), where: r.id == ^id)),
         do: {:refused, :not_found, %{column: c.name, id: id}}
-    end)
-  end
-
-  defp reduce_cells(cells, fun) do
-    Enum.reduce_while(cells, {:ok, %{}}, fn cell, {:ok, acc} ->
-      case fun.(cell) do
-        {:ok, name, value} -> {:cont, {:ok, Map.put(acc, name, value)}}
-        refused -> {:halt, refused}
-      end
     end)
   end
 
@@ -1743,13 +1734,7 @@ defmodule Hireme.Sequencer do
   defp resident_rows(%{rows: {rev, rows}, rev: rev} = state), do: {state, rows}
 
   defp resident_rows(state) do
-    rows =
-      for t <- Schema.tables(),
-          t.residency in [:resident, :projection],
-          not live?(t),
-          into: %{},
-          do: {t.id, columns(t)}
-
+    rows = for t <- Schema.tables(), t.residency == :resident, into: %{}, do: {t.id, columns(t)}
     {%{state | rows: {state.rev, rows}}, rows}
   end
 
@@ -1762,17 +1747,7 @@ defmodule Hireme.Sequencer do
 
   # A resident table read straight from SQLite as columns (no row structs,
   # no loaders), each already the wire's, ordered by id: `{rows, %{col_id
-  # => values}}`. A projection is read as rows, then turned.
-  defp columns(%{residency: :projection} = t) do
-    rs = rows(t)
-
-    {length(rs),
-     Map.new(wire_cols(t, nil), fn c ->
-       key = String.to_atom(c.name)
-       {c.id, Enum.map(rs, &Codec.to_wire(c, Map.get(&1, key)))}
-     end)}
-  end
-
+  # => values}}`.
   defp columns(t) do
     cols = wire_cols(t, nil)
     names = Enum.map_join(cols, ", ", &~s{"#{&1.name}"})
@@ -1788,21 +1763,6 @@ defmodule Hireme.Sequencer do
   # Most columns are already the wire's and are taken as they are.
   defp column(values, nil), do: values
   defp column(values, wire), do: Enum.map(values, wire)
-
-  defp rows(%{residency: :projection, source: source, source_term: term}) do
-    from(r in Schema.row(source), order_by: r.id)
-    |> restrict(Schema.table(source), term)
-    |> Repo.all()
-  end
-
-  # Rows as maps of their wire columns, texts whole.
-  defp rows(t) do
-    fields = for c <- t.cols, c.wire != nil, do: String.to_atom(c.name)
-
-    from(r in Schema.row(t.name), order_by: r.id, select: map(r, ^fields))
-    |> alive(t)
-    |> Repo.all()
-  end
 
   defp wire_tables(state, grants, now) do
     t = Schema.table(:leases)
@@ -1846,7 +1806,11 @@ defmodule Hireme.Sequencer do
         do: %{e | meta: Hireme.Audit.visible(e.meta || %{}, e.kind)}
   end
 
-  defp view_rows(t), do: rows(t)
+  defp view_rows(%{source: source, source_term: term}) do
+    from(r in Schema.row(source), order_by: r.id)
+    |> restrict(Schema.table(source), term)
+    |> Repo.all()
+  end
 
   defp acct_info_block(state) do
     t = Schema.table(:acct_info)
@@ -1906,34 +1870,29 @@ defmodule Hireme.Sequencer do
   defp entry(values), do: Map.new(Enum.zip(@entry, values))
 
   defp build_catalog(grants) do
-    seen = fn t ->
-      (t.residency == :wire and not account?(t)) or Grants.read?(grants, t) or
-        Grants.write?(grants, t)
-    end
-
     rows =
-      Enum.flat_map(Enum.filter(Schema.tables(), seen), fn t ->
-        [entry([1, 0, t.id, t.name, @residency[t.residency], Grants.bit(t), t.domain])] ++
-          for c <- Grants.columns(grants, t),
-              do: entry([2, t.id, c.id, c.name, c.type_code, c.flags, c.target])
-      end) ++
-        Enum.flat_map(Enum.with_index(Schema.model().enums, 1), fn {e, eid} ->
-          for {v, code} <- Enum.with_index(e.values),
-              do: entry([3, eid, code, v, nil, nil, e.name])
-        end) ++
-        Enum.flat_map(Schema.commands(), fn c ->
-          t = Schema.table(c.table)
-
-          if Grants.write?(grants, t) and (not c.human_only or grants.actor == :operator) do
-            [entry([4, t.id, c.id, c.name, nil, if(c.human_only, do: 16, else: 0), c.table])] ++
-              for p <- c.params,
-                  required = if(p.required, do: 1, else: 0),
-                  do: entry([5, c.id, p.id, p.name, p.type_code, required, p.target])
-          else
-            []
-          end
-        end) ++
-        for f <- Schema.frames(), do: entry([6, 0, f.id, f.name, nil, nil, nil])
+      List.flatten([
+        for t <- Schema.tables(),
+            (t.residency == :wire and not account?(t)) or Grants.read?(grants, t) or
+              Grants.write?(grants, t) do
+          [entry([1, 0, t.id, t.name, @residency[t.residency], Grants.bit(t), t.domain])] ++
+            for c <- Grants.columns(grants, t),
+                do: entry([2, t.id, c.id, c.name, c.type_code, c.flags, c.target])
+        end,
+        for {e, eid} <- Enum.with_index(Schema.model().enums, 1),
+            {v, code} <- Enum.with_index(e.values) do
+          entry([3, eid, code, v, nil, nil, e.name])
+        end,
+        for c <- Schema.commands(),
+            t = Schema.table(c.table),
+            Grants.write?(grants, t) and (not c.human_only or grants.actor == :operator) do
+          [entry([4, t.id, c.id, c.name, nil, if(c.human_only, do: 16, else: 0), c.table])] ++
+            for p <- c.params,
+                required = if(p.required, do: 1, else: 0),
+                do: entry([5, c.id, p.id, p.name, p.type_code, required, p.target])
+        end,
+        for(f <- Schema.frames(), do: entry([6, 0, f.id, f.name, nil, nil, nil]))
+      ])
 
     t = Schema.table(:catalog)
     Codec.rows_block(t, t.cols, rows)

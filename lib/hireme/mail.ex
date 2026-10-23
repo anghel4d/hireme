@@ -247,12 +247,8 @@ defmodule Hireme.Mail do
         )
 
       %Notice{meta: meta} = row ->
-        meta = meta || %{}
-        count = Map.get(meta, "count", 0) + 1
-
-        Store.update!(row, [meta: Map.put(meta, "count", count), updated_at: now],
-          skip_account: true
-        )
+        meta = Map.update(meta || %{}, "count", 1, &(&1 + 1))
+        Store.update!(row, [meta: meta, updated_at: now], skip_account: true)
     end
   end
 
@@ -290,19 +286,16 @@ defmodule Hireme.Mail do
   end
 
   defp encoded_words(text) do
-    {chunks, last} =
-      text
-      |> String.graphemes()
-      |> Enum.reduce({[], ""}, fn g, {chunks, buf} ->
-        if buf != "" and byte_size(buf <> g) > 45,
-          do: {[buf | chunks], g},
-          else: {chunks, buf <> g}
-      end)
-
-    [last | chunks]
+    text
+    |> String.graphemes()
+    |> Enum.chunk_while("", &word/2, &{:cont, &1, ""})
     |> Enum.reject(&(&1 == ""))
-    |> Enum.reverse()
     |> Enum.map_join(" ", &"=?utf-8?B?#{Base.encode64(&1)}?=")
+  end
+
+  # Whole graphemes per encoded-word, at most 45 bytes (60 of base64) unless one is longer.
+  defp word(g, buf) do
+    if buf != "" and byte_size(buf <> g) > 45, do: {:cont, buf, g}, else: {:cont, buf <> g}
   end
 end
 
@@ -395,21 +388,16 @@ defmodule Hireme.Mail.Outbox do
         e -> {:error, e}
       end
 
-    changes =
-      case result do
-        {:ok, _} ->
-          [sent_at: Store.now()]
+    next_at = DateTime.add(Store.now(), Enum.at(@backoff, notice.attempts))
 
-        {:error, reason} ->
-          [
-            next_at: DateTime.add(Store.now(), Enum.at(@backoff, notice.attempts)),
-            last_error: error(reason)
-          ]
+    {changes, verdict} =
+      case result do
+        {:ok, _} -> {[sent_at: Store.now()], :sent}
+        {:error, reason} -> {[next_at: next_at, last_error: error(reason)], :failed}
       end
 
     Store.update!(notice, [attempts: notice.attempts + 1] ++ changes, skip_account: true)
-
-    if match?({:ok, _}, result), do: :sent, else: :failed
+    verdict
   end
 
   # JSON gave the keys back as strings. A key no line reads may not exist

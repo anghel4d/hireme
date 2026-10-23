@@ -156,14 +156,13 @@ defmodule Hireme.Blobs do
 
   defp unescape(s) do
     s
-    |> String.replace(~r/&#x([0-9a-fA-F]+);/, fn m -> codepoint(m, 16) end)
-    |> String.replace(~r/&#([0-9]+);/, fn m -> codepoint(m, 10) end)
+    |> String.replace(~r/&#x[0-9a-fA-F]+;/, &codepoint(binary_slice(&1, 3..-2//1), 16))
+    |> String.replace(~r/&#[0-9]+;/, &codepoint(binary_slice(&1, 2..-2//1), 10))
     |> String.replace(Map.keys(@entities), &Map.fetch!(@entities, &1))
     |> String.replace("&amp;", "&")
   end
 
-  defp codepoint(m, base) do
-    [_, n] = Regex.run(~r/&#x?([0-9a-fA-F]+);/, m)
+  defp codepoint(n, base) do
     c = String.to_integer(n, base)
     if c in 0..0x10FFFF and c not in 0xD800..0xDFFF, do: <<c::utf8>>, else: ""
   end
@@ -301,13 +300,12 @@ defmodule Hireme.Blobs do
           page <- pages(objs, ref(d, "Pages"), nil, 0),
           do: page
 
-    texts =
+    streams =
       if pages == [],
-        do:
-          for({_, {_, s}} <- Enum.sort(objs), is_binary(s), s =~ "BT", do: shown(s, "", ctx, 0)),
-        else: for({d, res} <- pages, do: shown(Enum.join(contents(objs, d), "\n"), res, ctx, 0))
+        do: for({_, {_, s}} <- Enum.sort(objs), is_binary(s), s =~ "BT", do: {s, ""}),
+        else: for({d, res} <- pages, do: {Enum.join(contents(objs, d), "\n"), res})
 
-    Enum.join(texts, "\n")
+    Enum.map_join(streams, "\n", fn {s, res} -> shown(s, res, ctx, 0) end)
   end
 
   # Every object by number, a later one over an earlier (incremental updates):
