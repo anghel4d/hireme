@@ -219,13 +219,6 @@ impl Read {
     }
 }
 
-/// The hard kill a seat falls under, if any.
-fn kill_read(seat: &Seat, r: &Read) -> Option<Kill> {
-    let t = r.company.join(r.role);
-    let by_text = [(Facts::STAFFING, Kill::Staffing), (Facts::INTERN, Kill::Intern), (Facts::THEATER, Kill::Theater), (Facts::NOT_ENGINEERING, Kill::NotEngineering)];
-    by_text.into_iter().find(|(f, _)| t.has(*f)).map(|(_, k)| k).or_else(|| onsite_away(seat, r.location).then_some(Kill::OnsiteAway))
-}
-
 /// Onsite-only and known to be away: the place is outside home, not just
 /// unknown, and nothing says remote.
 fn onsite_away(seat: &Seat, loc: Facts) -> bool {
@@ -503,14 +496,15 @@ pub fn suggest(seat: &Seat) -> Suggestion {
 /// [`suggest`] with the seat's text already read (`r` must be
 /// `Read::of(seat)`; the board reads each distinct name and title once).
 pub fn suggest_read(seat: &Seat, r: &Read) -> Suggestion {
-    let high = high_comp(seat.comp_raw);
-    if let Some(k) = kill_read(seat, r) {
+    let (high, t) = (high_comp(seat.comp_raw), r.company.join(r.role));
+    // The hard kill the seat falls under, if any.
+    let by_text = [(Facts::STAFFING, Kill::Staffing), (Facts::INTERN, Kill::Intern), (Facts::THEATER, Kill::Theater), (Facts::NOT_ENGINEERING, Kill::NotEngineering)];
+    if let Some(k) = by_text.into_iter().find(|(f, _)| t.has(*f)).map(|(_, k)| k).or_else(|| onsite_away(seat, r.location).then_some(Kill::OnsiteAway)) {
         return Suggestion { score: k.score(), band: Band::Kill, kill: Some(k), anchored: false };
     }
     if let Some(a) = r.tier.anchor(high) {
         return Suggestion { score: a, band: Band::of(a), kill: None, anchored: true };
     }
-    let t = r.company.join(r.role);
     let facts = [(Facts::SYSTEMS, 22), (Facts::AGENTIC, 10), (Facts::LOW_LEVEL, 8), (Facts::MID_CURVE, -16)];
     let s: i32 = 48
         + facts.iter().filter(|(f, _)| t.has(*f)).map(|(_, d)| d).sum::<i32>()

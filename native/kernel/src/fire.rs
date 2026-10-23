@@ -1074,13 +1074,6 @@ pub fn drop(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32) -> Result<(), Re
 
 // ------------------------------------------------------------------ queries
 
-/// The clock the queries read: the server's `now` when the replica holds
-/// it, else the caller's, else the start of the kernel's day.
-fn now_of(rows: &Rows, req: &Json, today: crate::Day) -> i64 {
-    let clock = rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, schema::col::clock::NOW));
-    clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400)
-}
-
 /// What a page of missions reads once rather than per mission: the live
 /// keys covering each (unburned shots) and the missions an outreach item
 /// names.
@@ -1121,7 +1114,10 @@ fn mission_json(rows: &Rows, cvs: &Cvs, seen: &Seen, t: &Table, id: u32) -> Json
 /// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
 /// `fire_review`, `live_keys`, `mail_quota`.
 pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Json, Refusal> {
-    let now = now_of(rows, req, today);
+    // The clock: the server's `now` when the replica holds it, else the
+    // caller's, else the start of the kernel's day.
+    let clock = rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, schema::col::clock::NOW));
+    let now = clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400);
     match op {
         "ranges" => {
             let r = match (req.get("text").and_then(Json::as_str), req.get("ids").and_then(Json::as_array)) {

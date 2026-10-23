@@ -77,7 +77,9 @@ fn prose(listing: &str, format: Format) -> String {
             Some(rest.find("-->").map_or(rest.len(), |j| j + 3))
         } else if html && (tag(rest, "<style") || tag(rest, "<script")) {
             let close = if tag(rest, "<style") { "</style" } else { "</script" };
-            Some(find_ci(rest, close).map_or(rest.len(), |j| j + close.len()))
+            let (b, n) = (rest.as_bytes(), close.as_bytes());
+            let at = b.len().checked_sub(n.len()).and_then(|last| (0..=last).find(|&i| b[i..i + n.len()].eq_ignore_ascii_case(n)));
+            Some(at.map_or(rest.len(), |j| j + close.len()))
         } else if html && c == '<' {
             Some(through('>'))
         } else if c == '&' && entity(rest).is_some() {
@@ -194,11 +196,6 @@ const ENTITIES: &[(&[u8], u32)] = &[
     (b"upsilon", 965), (b"uuml", 252), (b"weierp", 8472), (b"xi", 958), (b"yacute", 253), (b"yen", 165),
     (b"yuml", 255), (b"zeta", 950), (b"zwj", 8205), (b"zwnj", 8204),
 ];
-
-fn find_ci(s: &str, p: &str) -> Option<usize> {
-    let (b, n) = (s.as_bytes(), p.as_bytes());
-    (0..=b.len().checked_sub(n.len())?).find(|&i| b[i..i + n.len()].eq_ignore_ascii_case(n))
-}
 
 fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '+' || c == '#' || c == '.'

@@ -387,8 +387,13 @@ impl Kernel {
                     wire::decode_nacks(&body).map_err(|_| Error::Frame)?.into_iter().map(|n| n.op_id).collect()
                 };
                 let mut all = Moved::default();
-                for op in ops {
-                    merge(&mut all, self.rows.resolve(op));
+                for m in ops.into_iter().map(|op| self.rows.resolve(op)) {
+                    for (t, (w, g)) in m.tables {
+                        let e = all.tables.entry(t).or_default();
+                        e.0.extend(w);
+                        e.1.extend(g);
+                    }
+                    all.replaced.extend(m.replaced);
                 }
                 self.moved(&all, self.today());
                 Ok(all)
@@ -510,15 +515,6 @@ impl Kernel {
         self.boot(&snap[16..], rev).map_err(|_| Error::Snapshot)?;
         Ok(rev)
     }
-}
-
-fn merge(into: &mut Moved, m: Moved) {
-    for (t, (w, g)) in m.tables {
-        let e = into.tables.entry(t).or_default();
-        e.0.extend(w);
-        e.1.extend(g);
-    }
-    into.replaced.extend(m.replaced);
 }
 
 /// An op's effects as row writes, inserts given ids by `fresh`.
