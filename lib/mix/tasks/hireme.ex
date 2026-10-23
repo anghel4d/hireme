@@ -154,8 +154,8 @@ defmodule Mix.Tasks.Hireme.Schema do
         shape(db)
       end)
 
-    name = "hireme-shape-#{System.unique_integer([:positive])}"
-    {out, status} = with_tmp(name, shape, &Build.run_emitter(["diff", &1]))
+    tmp = "hireme-shape-#{System.unique_integer([:positive])}"
+    {out, status} = with_tmp(tmp, shape, &Build.run_emitter(["diff", &1]))
 
     case {status, written} do
       {0, [path]} when out == "" ->
