@@ -194,21 +194,16 @@ defmodule Hireme.WireCase do
   id, and a gone block (its one column 0xFFFE) deletes. Wire tables are left out.
   """
   def ingest(model, kind, body) do
-    Enum.reduce(blocks(body), model, fn {table, rows}, model ->
-      case {kind, table, rows} do
-        {_, t, _} when t in ~w(clock catalog leases) ->
-          model
+    Enum.reduce(blocks(body), model, fn {t, rows}, model ->
+      byid = Map.new(rows, &{&1[1], &1})
+      merged = &Map.merge(&1, byid, fn _, old, new -> Map.merge(old, new) end)
+      gone = Enum.map(rows, & &1[0xFFFE])
 
-        {_, t, [%{0xFFFE => _} | _]} ->
-          Map.update(model, t, %{}, &Map.drop(&1, Enum.map(rows, fn r -> r[0xFFFE] end)))
-
-        {:BOOT, t, _} ->
-          Map.put(model, t, Map.new(rows, &{&1[1], &1}))
-
-        {:PATCH, t, _} ->
-          Map.update(model, t, Map.new(rows, &{&1[1], &1}), fn old ->
-            Enum.reduce(rows, old, fn r, acc -> Map.update(acc, r[1], r, &Map.merge(&1, r)) end)
-          end)
+      case {kind, rows} do
+        _ when t in ~w(clock catalog leases) -> model
+        {_, [%{0xFFFE => _} | _]} -> Map.update(model, t, %{}, &Map.drop(&1, gone))
+        {:BOOT, _} -> Map.put(model, t, byid)
+        {:PATCH, _} -> Map.update(model, t, byid, merged)
       end
     end)
   end

@@ -489,53 +489,26 @@ defmodule Hireme.SequencerTest do
       {_, model} = boot(a.id, System.unique_integer([:positive]))
       id = fn table, i -> Enum.at(Map.keys(Map.get(model, table, %{})), i, 999_999) end
 
+      app_id = &id.("applications", &1)
+      overlay = &op(:put, :cv_overlays, %{application_id: app_id.(&1), item_id: &2, mode: :add})
+
       ops =
         Enum.map(actions, fn
-          {:rep, slug} ->
-            op(:put, :items, %{kind: :skill, key: "r-#{slug}", title: slug})
-
-          {:app, role} ->
-            app(%{company: "Co", role: role})
-
-          {:note, i, text} ->
-            op(:put, :items, %{body: text}, target: id.("items", i))
-
-          {:drop, i} ->
-            op(:drop, :items, %{}, target: id.("items", i))
-
-          {:profile, s} ->
-            op(:put, :profiles, %{slug: "p-#{s}", name: s})
-
-          {:item, s} ->
-            op(:put, :items, %{kind: :skill, key: "k-#{s}", title: s})
-
-          {:batch, s} ->
-            op(:put, :batches, %{code: "b-#{s}", ordinal: 1})
-
-          {:me, c} ->
-            op(:put, :me, %{citizenships: c})
-
-          {:place, s} ->
-            op(:put, :places, %{kind: :city, name: s})
-
-          {:rename, i, s} ->
-            op(:put, :places, %{name: s}, target: id.("places", i))
-
-          {:drop_place, i} ->
-            op(:drop, :places, %{}, target: id.("places", i))
-
-          {:event, i, s} ->
-            op(:put, :events, %{application_id: id.("applications", i), kind: s})
-
-          {:stage, i, to} ->
-            op(:command, :stage, %{stage: to}, target: id.("applications", i))
-
-          {:drop_app, i} ->
-            op(:drop, :applications, %{}, target: id.("applications", i))
-
-          {:overlay, i, j} ->
-            cells = %{application_id: id.("applications", i), item_id: id.("items", j)}
-            op(:put, :cv_overlays, Map.put(cells, :mode, :add))
+          {:rep, slug} -> op(:put, :items, %{kind: :skill, key: "r-#{slug}", title: slug})
+          {:app, role} -> app(%{company: "Co", role: role})
+          {:note, i, text} -> op(:put, :items, %{body: text}, target: id.("items", i))
+          {:drop, i} -> op(:drop, :items, %{}, target: id.("items", i))
+          {:profile, s} -> op(:put, :profiles, %{slug: "p-#{s}", name: s})
+          {:item, s} -> op(:put, :items, %{kind: :skill, key: "k-#{s}", title: s})
+          {:batch, s} -> op(:put, :batches, %{code: "b-#{s}", ordinal: 1})
+          {:me, c} -> op(:put, :me, %{citizenships: c})
+          {:place, s} -> op(:put, :places, %{kind: :city, name: s})
+          {:rename, i, s} -> op(:put, :places, %{name: s}, target: id.("places", i))
+          {:drop_place, i} -> op(:drop, :places, %{}, target: id.("places", i))
+          {:event, i, s} -> op(:put, :events, %{application_id: app_id.(i), kind: s})
+          {:overlay, i, j} -> overlay.(i, id.("items", j))
+          {:stage, i, to} -> op(:command, :stage, %{stage: to}, target: app_id.(i))
+          {:drop_app, i} -> op(:drop, :applications, %{}, target: app_id.(i))
         end)
 
       Sequencer.submit(a.id, ops)
