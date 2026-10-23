@@ -200,10 +200,6 @@ impl Data {
         }
     }
 
-    fn same_kind(&self, o: &Data) -> bool {
-        core::mem::discriminant(self) == core::mem::discriminant(o)
-    }
-
     fn push_none(&mut self) {
         match self {
             Data::U32(v) => v.push(wire::NONE),
@@ -300,10 +296,6 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn new(id: u16) -> Table {
-        Table { id, ..Table::default() }
-    }
-
     pub fn len(&self) -> usize {
         self.ids.len()
     }
@@ -352,7 +344,7 @@ impl Table {
         let n = self.ids.len();
         let i = match self.cols.binary_search_by_key(&col, |c| c.id) {
             Ok(i) => {
-                if !self.cols[i].data.same_kind(kind) {
+                if core::mem::discriminant(&self.cols[i].data) != core::mem::discriminant(kind) {
                     if !replace {
                         return None;
                     }
@@ -650,7 +642,7 @@ impl Rows {
     }
 
     fn table_mut(&mut self, id: u16) -> &mut Table {
-        self.tables.entry(id).or_insert_with(|| Table::new(id))
+        self.tables.entry(id).or_insert_with(|| Table { id, ..Table::default() })
     }
 
     /// A BOOT or TICK body: every table it names is replaced.

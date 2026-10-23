@@ -116,13 +116,9 @@ fn prose(listing: &str, format: Format) -> String {
     out
 }
 
-fn starts_ci(s: &str, p: &str) -> bool {
-    s.len() >= p.len() && s.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-}
-
 /// `s` opens the tag `p` ("<style"), not a longer name ("<styles").
 fn tag(s: &str, p: &str) -> bool {
-    starts_ci(s, p) && s.as_bytes().get(p.len()).is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+    s.len() >= p.len() && s.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes()) && s.as_bytes().get(p.len()).is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
 }
 
 /// The length of an HTML entity at the start of `s` ("&amp;", "&#38;",

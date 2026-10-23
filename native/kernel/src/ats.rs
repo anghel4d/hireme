@@ -115,6 +115,7 @@ pub fn parse(url: &str) -> Ats {
     let Some(&(vendor, roots)) = HOSTS.iter().find(|(_, roots)| roots.iter().any(|r| matches(&host, r))) else {
         return Ats::UNKNOWN;
     };
+    let (Exact(root) | Sub(root)) = roots[0];
     let tenant = match vendor {
         // The embed form names the board in its query: /embed/job_app?for=acme.
         Vendor::Greenhouse => {
@@ -122,19 +123,11 @@ pub fn parse(url: &str) -> Ats {
         }
             .or_else(|| subdomain(&host, "greenhouse.io"))
             .or_else(|| subdomain(&host, "greenhouse.net")),
-        Vendor::Lever | Vendor::Ashby => {
-            let Exact(r) = roots[0] else { unreachable!() };
-            first_segment(path).or_else(|| subdomain(&host, r))
-        }
+        Vendor::Lever | Vendor::Ashby => first_segment(path).or_else(|| subdomain(&host, root)),
         // acme.workable.com/jobs/123, or apply.workable.com/acme/j/123.
         Vendor::Workable => subdomain(&host, "workable.com").or_else(|| first_segment(path)),
         Vendor::SmartRecruiters | Vendor::Jobvite | Vendor::Rippling | Vendor::Gem => first_segment(path),
-        Vendor::Taleo | Vendor::BambooHr | Vendor::Eightfold => {
-            let r = match roots[0] {
-                Exact(r) | Sub(r) => r,
-            };
-            subdomain(&host, r)
-        }
+        Vendor::Taleo | Vendor::BambooHr | Vendor::Eightfold => subdomain(&host, root),
         // acme.wd5.myworkdayjobs.com and acme.myworkdayjobs.com name it in
         // the host; wd3.myworkdaysite.com/en-US/recruiting/acme/x and
         // wd5.myworkday.com/acme/x put a data center there and the tenant
@@ -142,7 +135,9 @@ pub fn parse(url: &str) -> Ats {
         Vendor::Workday => {
             let first = host.split('.').next().unwrap_or("");
             let data_center = first.len() > 2 && first.starts_with("wd") && first[2..].bytes().all(|b| b.is_ascii_digit());
-            (!data_center && first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(|| workday_segment(path))
+            // Past an optional locale ("en-US") and `recruiting`.
+            let tenant = || segment(path, |s| !(s.len() == 5 && s.as_bytes()[2] == b'-') && !s.eq_ignore_ascii_case("recruiting"));
+            (!data_center && first != "www" && !first.is_empty()).then(|| String::from(first)).or_else(tenant)
         }
         // careers-acme.icims.com
         Vendor::Icims => {
@@ -206,13 +201,6 @@ fn param(query: &str, key: &str) -> Option<String> {
 /// digits).
 fn first_segment(path: &str) -> Option<String> {
     segment(path, |s| !["job", "jobs", "career", "careers", "apply", "embed", "job_app", "j"].iter().any(|g| s.eq_ignore_ascii_case(g)))
-}
-
-/// Workday's path tenant, after an optional locale ("en-US") and
-/// `recruiting`.
-fn workday_segment(path: &str) -> Option<String> {
-    let locale = |s: &str| s.len() == 5 && s.as_bytes()[2] == b'-';
-    segment(path, |s| !locale(s) && !s.eq_ignore_ascii_case("recruiting"))
 }
 
 fn segment(path: &str, keep: impl Fn(&str) -> bool) -> Option<String> {

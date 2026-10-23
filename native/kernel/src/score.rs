@@ -164,8 +164,7 @@ impl Facts {
 
     /// The facts from a text's [`Hits`].
     pub fn of_hits(h: Hits) -> Facts {
-        let mut f = 0;
-        for (bit, g) in [
+        let f = [
             (Facts::STAFFING, lexicon::STAFFING),
             (Facts::INTERN, lexicon::INTERN),
             (Facts::THEATER, lexicon::THEATER),
@@ -174,12 +173,8 @@ impl Facts {
             (Facts::AGENTIC, lexicon::AGENTIC),
             (Facts::LOW_LEVEL, lexicon::LOW_LEVEL),
             (Facts::MID_CURVE, lexicon::MID_CURVE),
-        ] {
-            if h.has(g) {
-                f |= bit;
-            }
-        }
-        Facts(f | Facts::of_place_hits(h).0)
+        ];
+        Facts(f.into_iter().filter(|(_, g)| h.has(*g)).fold(Facts::of_place_hits(h).0, |f, (bit, _)| f | bit))
     }
 
     /// The facts of an already normalized location: only remote and
@@ -190,14 +185,7 @@ impl Facts {
 
     fn of_place_hits(h: Hits) -> Facts {
         let no_remote = h.has(lexicon::NO_REMOTE);
-        let mut f = 0;
-        if h.has(lexicon::REMOTE) && !no_remote {
-            f |= Facts::REMOTE;
-        }
-        if no_remote || h.has(lexicon::ONSITE_ONLY) {
-            f |= Facts::ONSITE_ONLY;
-        }
-        Facts(f)
+        Facts((u16::from(h.has(lexicon::REMOTE) && !no_remote) * Facts::REMOTE) | (u16::from(no_remote || h.has(lexicon::ONSITE_ONLY)) * Facts::ONSITE_ONLY))
     }
 
     fn has(self, bit: u16) -> bool {

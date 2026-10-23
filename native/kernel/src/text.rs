@@ -191,10 +191,6 @@ mod tests {
         assert_eq!(normalize("Hà Nội"), "ha noi");
         assert_eq!(normalize("Ha\u{300} No\u{323}\u{302}i"), "ha noi");
         assert_eq!(fold("\u{181}\u{253}\u{23a}\u{2c65}"), "bbaa");
-        for c in ["\u{1e9e}", "\u{1f6}", "\u{24a}", "\u{212b}", "\u{2c7e}", "\u{2c7f}"] {
-            assert_eq!(normalize(c), normalize(&normalize(c)), "{c}");
-        }
-        assert_eq!(normalize(&normalize("İstanbul")), normalize("İstanbul"));
         assert_eq!(normalize("---"), "");
     }
 

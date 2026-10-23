@@ -281,12 +281,6 @@ fn replies(rows: &Rows, t: &Table, id: u32) -> bool {
     t.str(id, M::IN_REPLY_TO).is_some_and(|irt| answers(rows, irt))
 }
 
-/// A first-contact email goes with the application's CV as a file; a reply
-/// inside a thread the account holds needs none.
-fn cv_missing(rows: &Rows, cvs: &Cvs, t: &Table, id: u32) -> bool {
-    is_email(t, id) && !replies(rows, t, id) && !t.u32(id, M::APPLICATION_ID).is_some_and(|a| cvs.file(rows, a))
-}
-
 /// The SHA-256 (hex) of everything mission `id` sends: its kind, target,
 /// draft, cc, subject, in_reply_to and refs, its application, and the CV
 /// version that application's pick sends. Each field is length-prefixed,
@@ -356,7 +350,9 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
         if !to.is_ok_and(|a| !a.is_empty()) || cc.is_err() || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
             return Some("incomplete");
         }
-        if cv_missing(rows, cvs, t, id) {
+        // A first contact goes with the application's CV as a file; a reply
+        // inside a thread the account holds needs none.
+        if !replies(rows, t, id) && !t.u32(id, M::APPLICATION_ID).is_some_and(|a| cvs.file(rows, a)) {
             return Some("cv_file");
         }
     }
@@ -397,7 +393,7 @@ pub fn key(rows: &Rows, id: u32) -> Option<Key<'_>> {
         scope: t.str(id, K::SCOPE).unwrap_or(""),
         usable_by: t.u32(id, K::USABLE_BY),
         request: t.u32(id, K::REQUEST_ID),
-        created: t.u32(id, 4),
+        created: t.u32(id, K::INSERTED_AT),
         first_used: t.u32(id, K::FIRST_USED_AT),
         expires: t.u32(id, K::EXPIRES_AT).unwrap_or(0),
         revoked: t.u32(id, K::REVOKED_AT),
@@ -721,11 +717,6 @@ pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result
     }
     out.extend(record);
     Ok(out)
-}
-
-/// The CV version a landed shot carried: the one recorded as it was fired.
-pub fn carried_cv(rows: &Rows, mission: u32) -> Option<u32> {
-    missions(rows).and_then(|t| t.u32(mission, M::CV_VERSION_ID))
 }
 
 /// A failed shot: the mission back to fire_ready with the reason, its shot
@@ -1086,12 +1077,8 @@ pub fn drop(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32) -> Result<(), Re
 /// The clock the queries read: the server's `now` when the replica holds
 /// it, else the caller's, else the start of the kernel's day.
 fn now_of(rows: &Rows, req: &Json, today: crate::Day) -> i64 {
-    let clock = rows.table(table::CLOCK).and_then(|t| t.ids().first().and_then(|&id| t.u32(id, schema::col::clock::NOW)));
+    let clock = rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, schema::col::clock::NOW));
     clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400)
-}
-
-fn id_arg(req: &Json, name: &str) -> Result<u32, Refusal> {
-    req.get(name).and_then(Json::as_u64).and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0).ok_or_else(|| no(refusal::TYPE, json!({"param": name})))
 }
 
 /// What a page of missions reads once rather than per mission: the live
@@ -1163,7 +1150,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
             Ok(json!({"missions": list}))
         }
         "mission_brief" => {
-            let id = id_arg(req, "mission")?;
+            let id = req["mission"].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0).ok_or_else(|| no(refusal::TYPE, json!({"param": "mission"})))?;
             let t = mission_of(rows, id)?;
             let cvs = Cvs::of(rows);
             let email = is_email(t, id);

@@ -482,19 +482,15 @@ impl Parser<'_, '_> {
         self.bump()?;
         let rhs_start = self.span;
         let rhs = self.rhs(ty, op)?;
-        let end = Span { at: rhs_start.at, len: (self.lex_prev_end() - rhs_start.at as usize) as u32 };
+        // Where the token before the current one ended.
+        let src = self.lex.src.as_bytes();
+        let mut prev_end = self.span.at as usize;
+        while prev_end > 0 && src[prev_end - 1].is_ascii_whitespace() {
+            prev_end -= 1;
+        }
+        let end = Span { at: rhs_start.at, len: (prev_end - rhs_start.at as usize) as u32 };
         check(ty, op, &rhs).map_err(|msg| Error { span: Span { at: op_span.at, len: end.at + end.len - op_span.at }, msg })?;
         Ok(Node::Test(whole(end), Test::Cmp(f, op, rhs)))
-    }
-
-    /// Where the token before the current one ended.
-    fn lex_prev_end(&self) -> usize {
-        let src = self.lex.src.as_bytes();
-        let mut end = self.span.at as usize;
-        while end > 0 && src[end - 1].is_ascii_whitespace() {
-            end -= 1;
-        }
-        end
     }
 
     fn rhs(&mut self, ty: Ty, op: Op) -> Result<Rhs, Error> {
@@ -629,14 +625,8 @@ impl Node {
     fn explain(&self, facts: &dyn Facts) -> Option<Fail> {
         match self {
             Node::All(xs) => xs.iter().find_map(|x| x.explain(facts)),
-            Node::Any(xs) => {
-                let mut first = None;
-                for x in xs {
-                    let f = x.explain(facts)?;
-                    first = first.or(Some(f));
-                }
-                first
-            }
+            // No branch holding: the first branch's miss.
+            Node::Any(xs) => xs.iter().map(|x| x.explain(facts)).collect::<Option<Vec<_>>>()?.into_iter().next(),
             Node::Not(span, x) => match x.explain(facts) {
                 Some(_) => None,
                 None => Some(Fail { span: *span, read: "matched".into() }),

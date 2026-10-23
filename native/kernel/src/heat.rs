@@ -144,21 +144,14 @@ impl Config {
         c
     }
 
-    /// A size tier's capacity.
-    pub fn tier_cap(&self, size: Size) -> f64 {
-        match size {
-            Size::Mega => self.mega_cap,
-            Size::Large => self.large_cap,
-            Size::Mid => self.mid_cap,
-            Size::Small => self.small_cap,
-        }
-    }
-
     /// A company's capacity: from its headcount when known, else its tier.
     pub fn cap(&self, seat: &Seat) -> f64 {
-        match seat.headcount.filter(|h| *h > 0) {
-            Some(h) => (1.0 + libm::log2(h as f64 / self.headcount_base)).clamp(self.cap_min, self.cap_max),
-            None => self.tier_cap(seat.size),
+        match (seat.headcount.filter(|h| *h > 0), seat.size) {
+            (Some(h), _) => (1.0 + libm::log2(h as f64 / self.headcount_base)).clamp(self.cap_min, self.cap_max),
+            (None, Size::Mega) => self.mega_cap,
+            (None, Size::Large) => self.large_cap,
+            (None, Size::Mid) => self.mid_cap,
+            (None, Size::Small) => self.small_cap,
         }
     }
 
@@ -413,10 +406,6 @@ impl Class {
 /// largest weight (16).
 const SCALE: f64 = 17_592_186_044_416.0;
 
-fn fp(x: f64) -> u64 {
-    libm::round(x * SCALE) as u64
-}
-
 fn real(x: u64) -> f64 {
     x as f64 / SCALE
 }
@@ -436,7 +425,7 @@ fn load_of(s: &Seat, age: i64, k: usize, cfg: &Config) -> u64 {
     let (w, company) = s.weight(cfg);
     let half = [company, cfg.ats_vendor_half_life, cfg.ats_tenant_half_life][k];
     let l = decay(w, age, half);
-    if l >= cfg.load_floor { fp(l) } else { 0 }
+    if l >= cfg.load_floor { libm::round(l * SCALE) as u64 } else { 0 }
 }
 
 /// The hot seats of an account on one day, each seat's decayed loads

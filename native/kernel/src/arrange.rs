@@ -582,8 +582,7 @@ pub fn desk(rows: &Rows, board: &crate::board::Board, key: &str) -> Option<Colum
             // One symbol per duplicate set, labelled by its first member.
             let mut set: crate::keyed::Map<&str, String> = crate::keyed::Map::default();
             let per = ids.iter().zip(&keys).map(|(&id, k)| (seen[k.as_str()] > 1).then(|| set.entry(k.as_str()).or_insert_with(|| label(id)).clone()));
-            let per: Vec<Option<String>> = per.collect();
-            Column { drop_absent: true, ..Column::of(texts(per.into_iter()), Bucket::Sym) }
+            Column { drop_absent: true, ..Column::of(texts(per), Bucket::Sym) }
         }
         "company" => Column::of(linked(A::CORPORATION_ID, schema::table::CORPORATIONS, schema::col::corporations::NAME, A::COMPANY), Bucket::Sym),
         "place" => Column::of(linked(A::PLACE_ID, schema::table::PLACES, schema::col::places::NAME, A::LOCATION), Bucket::Sym),

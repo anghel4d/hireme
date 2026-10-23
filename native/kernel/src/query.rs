@@ -43,20 +43,14 @@ pub(crate) fn ty(c: &Column) -> Type {
 }
 
 /// What the session reading the replica may read: the operator reads
-/// every domain and every private column; a key its read mask.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// every domain and every private column; a key its read mask. The
+/// default is nothing, until the session's WELCOME says otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Grants {
     pub human: bool,
     pub read_mask: u8,
     pub write_mask: u8,
     pub may_delete: bool,
-}
-
-impl Default for Grants {
-    /// Nothing, until the session's WELCOME says otherwise.
-    fn default() -> Self {
-        Grants { human: false, read_mask: 0, write_mask: 0, may_delete: false }
-    }
 }
 
 impl Grants {
@@ -353,14 +347,7 @@ pub(crate) fn value_json(c: &Column, v: &Val) -> Json {
 }
 
 pub(crate) fn row_out(t: &Table, id: u32, cols: &[&Column], drop_nulls: bool) -> Json {
-    let mut m = Map::new();
-    for c in cols {
-        let v = out(t, id, c);
-        if !(drop_nulls && v.is_null()) {
-            m.insert(c.name.into(), v);
-        }
-    }
-    Json::Object(m)
+    Json::Object(cols.iter().map(|c| (String::from(c.name), out(t, id, c))).filter(|(_, v)| !(drop_nulls && v.is_null())).collect())
 }
 
 /// A row as `find` and `get` answer it: its `updated_at` (the last write)

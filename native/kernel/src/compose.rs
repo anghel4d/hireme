@@ -104,11 +104,6 @@ pub fn cv_key(t: &Table, id: u32, root: Option<u32>) -> CvKey {
     (root, t.u32(id, A::CORPORATION_ID), alloc::format!("{}\u{1f}{}", text(A::CV_THEME), text(A::KEYWORDS)))
 }
 
-/// The profile a picked root composes, when it is a live composition.
-pub fn cv_profile(rows: &Rows, root: Option<u32>) -> Option<u32> {
-    rows.table(table::CV_ROOTS)?.u32(root?, col::cv_roots::PROFILE_ID)
-}
-
 /// One application's keyword coverage and composed CV (theme and lines).
 pub fn cv_part(rows: &Rows, index: &board::Lines, t: &Table, id: u32, root: Option<u32>) -> (Json, Json) {
     let (lines, theme) = cv_of(rows, index, t, id, root);
@@ -148,7 +143,8 @@ pub fn cv_part(rows: &Rows, index: &board::Lines, t: &Table, id: u32, root: Opti
 /// The CV lines and theme for one application.
 pub fn cv_of<'r>(rows: &'r Rows, index: &board::Lines, t: &'r Table, id: u32, root: Option<u32>) -> (Vec<cv::Line<'r>>, Theme) {
     use col::items as I;
-    let profile = cv_profile(rows, root);
+    // The profile a picked root composes, when it is a live composition.
+    let profile = root.and_then(|r| rows.table(table::CV_ROOTS)?.u32(r, col::cv_roots::PROFILE_ID));
     let items: Vec<Item> = rows
         .each(table::ITEMS)
         .map(|(it, x)| Item {

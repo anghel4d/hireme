@@ -21,7 +21,7 @@ use wire::{Op, Value};
 
 use crate::judge::{cell_val, no, Ctx, EVal, Refusal, Row};
 use crate::query::{cond_holds, enum_values, has, key_doc, live, ty, value_json};
-use crate::rows::{Rows, Table, Val};
+use crate::rows::{Rows, Table, Val, REV};
 use crate::Day;
 
 /// Past this a source URL is refused before any parsing.
@@ -80,7 +80,7 @@ pub(crate) fn put_plan(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<Plan, Refusal>
     if td.append_only && !insert {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "append_only"})));
     }
-    expect_rev(op, td, if insert { 0 } else { t.and_then(|t| t.i64(target, 3)).unwrap_or(0) })?;
+    expect_rev(op, td, if insert { 0 } else { t.and_then(|t| t.i64(target, REV)).unwrap_or(0) })?;
     for cell in op.cells().filter(|c| c.col != schema::AS_OF && c.col != schema::SOURCE_CELL) {
         writable(td, td.col(cell.col), cell.col, &cell, ctx)?;
     }
@@ -383,7 +383,7 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
         Some(Err((_, h))) => Some(h.clone()),
         None => None,
     };
-    let rev = t.and_then(|t| t.i64(plan.target, 3)).unwrap_or(0);
+    let rev = t.and_then(|t| t.i64(plan.target, REV)).unwrap_or(0);
     for c in &cited {
         if has(c, flag::METRIC) {
             let Some(on) = as_of else { return Err(no(refusal::FRESHNESS, json!({"table": td.name, "column": c.name}))) };
@@ -444,9 +444,7 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
     };
     let cd = schema::table_def(table::CITATIONS).unwrap_or_else(|| unreachable!());
     let actor = schema::enums::actor::NAMES.iter().position(|n| *n == if ctx.human { "operator" } else { "agent" }).unwrap_or(0) as u32;
-    let mut citations = Vec::new();
-    for (c, v) in fresh.iter().filter(|(c, _)| td.col(*c).is_some_and(|c| has(c, flag::METRIC | flag::PROSE))) {
-        let Some(col) = td.col(*c) else { continue };
+    for (col, v) in fresh.iter().filter_map(|(c, v)| td.col(*c).filter(|c| has(c, flag::METRIC | flag::PROSE)).map(|c| (c, v))) {
         let value = match v {
             EVal::Val(v) => value_json(col, v),
             EVal::New(_) => Json::Null,
@@ -464,9 +462,8 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
             set("key_id", EVal::Val(ctx.key_id.map_or(Val::None, Val::U32))),
             set("op_id", EVal::Val(Val::I64(op.op_id as i64))),
         ];
-        citations.push(Row { table: table::CITATIONS, id: 0, cells: cells.into_iter().flatten().collect() });
+        effects.push(Row { table: table::CITATIONS, id: 0, cells: cells.into_iter().flatten().collect() });
     }
-    effects.extend(citations);
     Ok(())
 }
 
@@ -569,7 +566,7 @@ pub(crate) fn drop_checks(rows: &Rows, op: &Op, ctx: &Ctx) -> Result<(), Refusal
     let Some(t) = rows.table(op.table).filter(|t| live(t, td, op.target)) else {
         return Err(no(refusal::NOT_FOUND, json!({"table": td.name, "id": op.target})));
     };
-    expect_rev(op, td, t.i64(op.target, 3).unwrap_or(0))?;
+    expect_rev(op, td, t.i64(op.target, REV).unwrap_or(0))?;
     if td.append_only {
         return Err(no(refusal::COLUMN, json!({"table": td.name, "reason": "append_only"})));
     }

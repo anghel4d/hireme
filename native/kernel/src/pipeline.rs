@@ -120,10 +120,6 @@ const PIPS: [(Pip, u8, &str); 5] =
     [(Pip::Done, b'D', "done"), (Pip::Active, b'A', "active"), (Pip::Pending, b'P', "pending"), (Pip::Skipped, b'S', "skipped"), (Pip::Blocked, b'B', "blocked")];
 
 impl Pip {
-    pub fn from_char(c: u8) -> Option<Pip> {
-        PIPS.iter().find(|p| p.1 == c).map(|p| p.0)
-    }
-
     pub fn name(self) -> &'static str {
         PIPS[self as usize].2
     }
@@ -185,7 +181,7 @@ pub fn decode(pips: &str) -> Option<Rail> {
     let b: [u8; 10] = pips.as_bytes().try_into().ok()?;
     let mut rail = [Pip::Pending; 10];
     for (slot, c) in rail.iter_mut().zip(b) {
-        *slot = Pip::from_char(c)?;
+        *slot = PIPS.iter().find(|p| p.1 == c)?.0;
     }
     Some(rail)
 }

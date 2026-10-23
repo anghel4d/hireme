@@ -163,12 +163,8 @@ impl Kernel {
         use schema::col::applications as A;
         let modes = schema::enums::work_mode::NAMES;
         // The columns read straight, by slot: no lookup per row.
-        let column = |c: u16| match t.column(c).map(|c| &c.data) {
-            Some(crate::rows::Data::U32(v)) => Some(v.as_slice()),
-            _ => None,
-        };
         let some = |v: u32| (v != wire::NONE).then_some(v);
-        let (wm, corp, place) = (column(A::WORK_MODE), column(A::CORPORATION_ID), column(A::PLACE_ID));
+        let (wm, corp, place) = (t.u32s(A::WORK_MODE), t.u32s(A::CORPORATION_ID), t.u32s(A::PLACE_ID));
         let at = |v: Option<&[u32]>, slot: usize| v.and_then(|v| some(v[slot]));
         let mode = |slot: usize| at(wm, slot).map_or(modes.len(), |m| (m as usize).min(modes.len()));
         let short = |slot: usize| crate::link::short(at(corp, slot), at(place, slot), at(wm, slot));
@@ -193,10 +189,7 @@ impl Kernel {
         let group = key(&req["group"])?;
         let mut cols = self.cols.borrow_mut();
         for k in sort.iter().chain(group.iter()) {
-            if !cols.contains_key(k) {
-                let c = crate::arrange::desk(rows, &self.board, k).unwrap_or_else(|| crate::arrange::field(rows, crate::mask::field(k).unwrap_or(0)));
-                cols.insert(k.clone(), c);
-            }
+            cols.entry(k.clone()).or_insert_with(|| crate::arrange::desk(rows, &self.board, k).unwrap_or_else(|| crate::arrange::field(rows, crate::mask::field(k).unwrap_or(0))));
         }
         let dir = match req["sort"][1].as_str() {
             Some("desc") => -1,
@@ -207,10 +200,7 @@ impl Kernel {
         // A duplicate set keeps its furthest along, then its lowest number.
         let keep = |id: u32| (t.u32(id, A::STAGE).unwrap_or(0), -i64::from(t.u32(id, A::NO).unwrap_or(u32::MAX)));
         let (order, groups) = crate::arrange::arrange(t, &ids, &ask, &keep);
-        let mut by_mode = serde_json::Map::new();
-        for (i, n) in counts.iter().enumerate() {
-            by_mode.insert(modes.get(i).copied().unwrap_or("none").into(), json!(n));
-        }
+        let by_mode: serde_json::Map<String, Json> = counts.iter().enumerate().map(|(i, n)| (modes.get(i).copied().unwrap_or("none").into(), json!(n))).collect();
         Ok((order, json!({"groups": crate::arrange::groups_json(&groups), "modes": by_mode, "unlinked": unlinked})))
     }
 
@@ -295,7 +285,7 @@ impl Kernel {
     /// server's `clock`, so a client never predicts on a day the server
     /// has not reached; else the caller's.
     pub fn today(&self) -> Day {
-        let clock = self.rows.table(table::CLOCK).and_then(|t| t.ids().first().and_then(|&id| t.u32(id, col::clock::TODAY)));
+        let clock = self.rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, col::clock::TODAY));
         self.pinned.or(clock.map(|d| d as Day)).unwrap_or(self.today)
     }
 

@@ -639,7 +639,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 if from < Stage::Submitted {
                     let mut went = moved(t, app, from, Stage::Submitted, None, op, ctx);
                     if let Some(row) = went.first_mut() {
-                        let version = crate::fire::carried_cv(rows, id).or_else(|| pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), app).version);
+                        let version = rows.table(table::MISSIONS).and_then(|t| t.u32(id, col::missions::CV_VERSION_ID)).or_else(|| pick::pick(rows, &pick::arms(rows), &pick::Counts::of(rows), app).version);
                         row.set(A::CV_VERSION_ID, version.map_or(Val::None, u));
                     }
                     out.extend(went);

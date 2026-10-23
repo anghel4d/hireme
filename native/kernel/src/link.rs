@@ -144,14 +144,8 @@ pub fn short(corporation: Option<u32>, place: Option<u32>, work_mode: Option<u32
 /// What an application must still link: `corporation_id`, then `place_id`
 /// unless it is remote.
 pub fn missing(corporation: Option<u32>, place: Option<u32>, work_mode: Option<u32>) -> Vec<&'static str> {
-    let mut need = Vec::new();
-    if corporation.is_none() {
-        need.push("corporation_id");
-    }
-    if place.is_none() && work_mode != Some(enums::work_mode::REMOTE as u32) {
-        need.push("place_id");
-    }
-    need
+    let remote = work_mode == Some(enums::work_mode::REMOTE as u32);
+    [("corporation_id", corporation.is_none()), ("place_id", place.is_none() && !remote)].into_iter().filter(|n| n.1).map(|n| n.0).collect()
 }
 
 /// The refusal's data for an application (`id`, 0 for a new one) naming
@@ -175,12 +169,11 @@ pub fn diagnosis(rows: &Rows, id: u32, need: &[&str], company: &str, location: &
         let q = location.split(',').next().map(str::trim).unwrap_or("");
         tries.push(look("places", "name", q));
     }
-    let mut set = serde_json::Map::new();
-    for (link, found) in [("corporation_id", &corps), ("place_id", &spots)] {
-        if need.contains(&link) {
-            set.insert(link.into(), found.first().map_or_else(|| json!("<the id find answered>"), |c| json!(c.id)));
-        }
-    }
+    let set: serde_json::Map<String, Json> = [("corporation_id", &corps), ("place_id", &spots)]
+        .into_iter()
+        .filter(|(link, _)| need.contains(link))
+        .map(|(link, found)| (link.into(), found.first().map_or_else(|| json!("<the id find answered>"), |c| json!(c.id))))
+        .collect();
     let redo = if id == 0 {
         json!({"tool": "put", "note": "your put again, with these cells added", "args": {"table": "applications", "set": set}})
     } else {

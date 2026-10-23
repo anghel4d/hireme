@@ -56,11 +56,6 @@ fn wordy(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c >= 0x80
 }
 
-/// Trailing characters a sentence puts after a URL or an address.
-fn trail(c: u8) -> bool {
-    b".,;:!?)]'>".contains(&c)
-}
-
 /// A host name: dotted labels of letters, digits and hyphens (not at a
 /// label's ends), the last one letters only, two labels at least.
 fn host(s: &str) -> bool {
@@ -143,7 +138,7 @@ fn classify(text: &str, start: usize, end: usize, out: &mut Vec<Token>) {
     while s < e && b"<([".contains(&b[s]) {
         s += 1;
     }
-    while e > s && trail(b[e - 1]) {
+    while e > s && b".,;:!?)]'>".contains(&b[e - 1]) {
         e -= 1;
     }
     if s == e {
@@ -427,10 +422,6 @@ fn mission_by_message_id(rows: &Rows, id: &str) -> Option<u32> {
     rows.each(table::MISSIONS).find(|(t, m)| t.str(*m, M::MESSAGE_ID).is_some_and(|x| canonical_id(x) == want)).map(|(_, m)| m)
 }
 
-fn mission_by_thread(rows: &Rows, thrid: i64) -> Option<u32> {
-    rows.each(table::MISSIONS).find(|(t, m)| t.i64(*m, M::GMAIL_THRID) == Some(thrid)).map(|(_, m)| m)
-}
-
 /// An application in play: it went out, or one of its missions is in
 /// flight or fired.
 fn live(rows: &Rows, apps: &Table, app: u32) -> bool {
@@ -446,12 +437,6 @@ fn live(rows: &Rows, apps: &Table, app: u32) -> bool {
 
 fn app_label(apps: &Table, app: u32) -> String {
     alloc::format!("{} · {}", apps.str(app, A::COMPANY).unwrap_or(""), apps.str(app, A::ROLE).unwrap_or(""))
-}
-
-/// How many of an application's role words the item's words hold.
-fn role_overlap(apps: &Table, app: u32, words_line: &str) -> u32 {
-    let role = words(apps.str(app, A::ROLE).unwrap_or(""));
-    role.split(' ').filter(|w| w.len() > 2 && has_phrase(words_line, w)).count() as u32
 }
 
 /// Files one item: the lexer's tokens of every text, looked up against the
@@ -507,7 +492,7 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
         }
     }
     if let Some(thrid) = input.gmail_thrid {
-        if let Some(m) = mission_by_thread(rows, thrid) {
+        if let Some((_, m)) = rows.each(table::MISSIONS).find(|(t, m)| t.i64(*m, M::GMAIL_THRID) == Some(thrid)) {
             f.evidence.push(Evidence { kind: "gmail_thread", token: alloc::format!("{thrid}"), weight: GMAIL_THREAD, table: "missions", id: m });
             certain.push(mission_target(rows, m));
         } else if let Some(k) = store.by_thread(thrid).filter(|k| k.application_id.is_some() || k.corporation_id.is_some()) {
@@ -672,7 +657,9 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
         if let (Some((c, _)), Some(at)) = (top, apps) {
             let mine: Vec<u32> = at.ids().iter().copied().filter(|&a| at.u32(a, A::CORPORATION_ID) == Some(c)).collect();
             let in_play: Vec<u32> = mine.iter().copied().filter(|&a| live(rows, at, a)).collect();
-            let mut ranked: Vec<(u32, u32)> = mine.iter().map(|&a| (a, role_overlap(at, a, &line))).collect();
+            // Each application by how many of its role words the item's words hold.
+            let overlap = |a: u32| words(at.str(a, A::ROLE).unwrap_or("")).split(' ').filter(|w| w.len() > 2 && has_phrase(&line, w)).count() as u32;
+            let mut ranked: Vec<(u32, u32)> = mine.iter().map(|&a| (a, overlap(a))).collect();
             ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             let by_role = ranked.first().filter(|r| r.1 >= 2 && ranked.get(1).is_none_or(|s| s.1 < r.1)).map(|r| r.0);
             let chosen = if in_play.len() == 1 { Some(in_play[0]) } else { by_role.filter(|a| in_play.is_empty() || in_play.contains(a)) };
