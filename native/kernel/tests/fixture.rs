@@ -107,6 +107,22 @@ pub fn kernel(rows: Json) -> Kernel {
     k
 }
 
+/// A seeded xorshift; a failure names its seed, so it replays.
+pub struct Rng(pub u64);
+
+impl Rng {
+    pub fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n.max(1)
+    }
+
+    pub fn pick<'a, T>(&mut self, v: &'a [T]) -> &'a T {
+        &v[self.below(v.len() as u64) as usize]
+    }
+}
+
 static OP_ID: AtomicU64 = AtomicU64::new(100);
 
 /// One op as the judge takes it, under an op id of its own.

@@ -7,13 +7,13 @@
 
 use std::time::{Duration, Instant};
 
+mod fixture;
+
+use fixture::{Rng, TODAY, agent, cmd, put};
 use kernel::abi::{self, Kernel};
-use kernel::judge::Ctx;
 use kernel::pipeline::{self, Stage};
 use kernel::{ats, atlas, cv, keywords, org, score, text};
-use schema::{col, enums, table};
-
-const TODAY: i32 = 739_528;
+use serde_json::{Value as Json, json};
 
 /// Pieces that have broken text code before, or could.
 const PIECES: &[&str] = &[
@@ -25,28 +25,13 @@ const PIECES: &[&str] = &[
     "Google", "Anthropic", "staffing", "intern", "onsite only", "remote", "greenhouse.io", "jobs.lever.co", "wd5.myworkdayjobs.com",
 ];
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
+/// A string of up to `max` pieces; one in sixteen is a long run of one
+/// piece instead.
+fn any(r: &mut Rng, max: u64) -> String {
+    if r.below(16) == 0 {
+        return r.pick(PIECES).repeat(1 + r.below(20_000) as usize);
     }
-
-    fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-
-    /// A string of up to `max` pieces; one in sixteen is a long run of one
-    /// piece instead.
-    fn text(&mut self, max: usize) -> String {
-        if self.below(16) == 0 {
-            return PIECES[self.below(PIECES.len())].repeat(1 + self.below(20_000));
-        }
-        (0..self.below(max + 1)).map(|_| PIECES[self.below(PIECES.len())]).collect()
-    }
+    (0..r.below(max + 1)).map(|_| *r.pick(PIECES)).collect()
 }
 
 /// Runs `f`, failing past `limit` or on a panic; either way the message
@@ -72,7 +57,7 @@ fn every_text_reader_survives_any_text() {
     let seeds: u64 = if cfg!(debug_assertions) { 100 } else { 400 };
     for seed in 1..=seeds {
         let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let (a, b, c, d) = (r.text(30), r.text(30), r.text(30), r.text(30));
+        let (a, b, c, d) = (any(&mut r, 30), any(&mut r, 30), any(&mut r, 30), any(&mut r, 30));
         bounded("text", seed, limit, || {
             let n = text::normalize(&a);
             assert_eq!(text::normalize(&n), n, "normalize is idempotent (seed {seed})");
@@ -112,113 +97,47 @@ fn every_text_reader_survives_any_text() {
 /// the NIF use.
 #[test]
 fn a_desk_of_any_text_derives_judges_and_composes() {
-    use col::applications as A;
     let limit = Duration::from_millis(if cfg!(debug_assertions) { 20_000 } else { 2_000 });
     let seeds: u64 = if cfg!(debug_assertions) { 6 } else { 40 };
     for seed in 1..=seeds {
         let mut r = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
         let n = 40;
-        let texts: Vec<[String; 13]> = (0..n).map(|_| core::array::from_fn(|_| r.text(12))).collect();
-        let mut w = wire::BodyWriter::new();
-        let mut b = w.block(table::APPLICATIONS, n);
-        let col = |i: usize| texts.iter().map(move |t| t[i].as_str());
+        let t: Vec<[String; 13]> = (0..n).map(|_| core::array::from_fn(|_| any(&mut r, 12))).collect();
         // Most rails are real ones, so the paths reading a rail run; the
         // rest are arbitrary text, which falls back to the stage.
-        let rails: Vec<String> = (0..n)
-            .map(|i| match i % 3 {
-                0 => texts[i][8].clone(),
-                k => {
-                    let s = Stage::from_u32((i % 10) as u32).unwrap();
-                    let rail = if k == 1 { pipeline::initial(s) } else { pipeline::move_to(&pipeline::initial(Stage::Discovered), s) };
-                    String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
-                }
-            })
-            .collect();
-        b.u32s(A::ID, 1..=n as u32)
-            .u32s(A::NO, 1..=n as u32)
-            .u32s(A::STAGE, (0..n).map(|i| (i % 10) as u32))
-            .u32s(A::CORPORATION_ID, (0..n).map(|i| 1 + (i % 3) as u32))
-            .u32s(A::PLACE_ID, (0..n).map(|_| 1))
-            .u32s(A::STAGE_ON, (0..n).map(|_| TODAY as u32))
-            .strs(A::COMPANY, col(0))
-            .strs(A::ROLE, col(1))
-            .strs(A::LOCATION, col(2))
-            .strs(A::COMP_RAW, col(3))
-            .strs(A::LISTING_URL, col(4))
-            .strs(A::KEYWORDS, col(5))
-            .strs(A::STAGE_NOTES, col(6))
-            .strs(A::CV_THEME, col(7))
-            .strs(A::PIPS, rails.iter().map(String::as_str))
-            .strs(A::CANONICAL_URL, col(9));
-        b.done();
-        let mut b = w.block(table::CV_OVERLAYS, n);
-        b.u32s(col::cv_overlays::ID, 1..=n as u32)
-            .u32s(col::cv_overlays::APPLICATION_ID, 1..=n as u32)
-            .u32s(col::cv_overlays::ITEM_ID, (0..n).map(|i| 1 + (i % 7) as u32))
-            .u32s(col::cv_overlays::MODE, (0..n).map(|i| (i % 3) as u32))
-            .u32s(col::cv_overlays::LINEAGE_ID, (0..n).map(|i| if i % 4 == 0 { wire::NONE } else { 1 + (i % 2) as u32 }))
-            .strs(col::cv_overlays::TITLE, col(10))
-            .strs(col::cv_overlays::BODY, col(11))
-            .strs(col::cv_overlays::REASON, col(12));
-        b.done();
-        let mut b = w.block(table::CV_LINEAGES, 2);
-        b.u32s(col::cv_lineages::ID, 1..=2)
-            .u32s(col::cv_lineages::CORPORATION_ID, [1, 2].into_iter())
-            .u32s(col::cv_lineages::GENERATION, [1, 2].into_iter())
-            .u32s(col::cv_lineages::OPENED_ON, [(TODAY - 10) as u32, (TODAY - 100) as u32].into_iter())
-            .u32s(col::cv_lineages::REWRITES_ALLOWED, [1, 0].into_iter());
-        b.done();
-        let mut b = w.block(table::EVENTS, n);
-        b.u32s(col::events::ID, 1..=n as u32)
-            .u32s(col::events::APPLICATION_ID, (0..n).map(|i| 1 + (i % 5) as u32))
-            .strs(col::events::KIND, col(11))
-            .strs(col::events::BODY, col(12));
-        b.done();
-        let mut b = w.block(table::ITEMS, n);
-        b.u32s(col::items::ID, 1..=n as u32).strs(col::items::TITLE, col(1)).strs(col::items::BODY, col(5)).strs(col::items::KEY, col(0));
-        b.done();
-        let mut b = w.block(table::SETTINGS, 1);
-        b.u32s(col::settings::ID, [1].into_iter()).strs(col::settings::HEAT_CONFIG, [texts[2][6].as_str()].into_iter());
-        b.done();
-        let mut b = w.block(table::ME, 1);
-        b.u32s(col::me::ID, [1].into_iter()).strs(col::me::CITIZENSHIPS, [texts[0][2].as_str()].into_iter());
-        b.done();
-        let mut b = w.block(table::LANGUAGES, 1);
-        b.u32s(col::languages::ID, [1].into_iter()).strs(col::languages::CODE, [texts[1][2].as_str()].into_iter());
-        b.done();
-        let mut b = w.block(table::PLACES, 1);
-        b.u32s(col::places::ID, [1].into_iter())
-            .u32s(col::places::KIND, [enums::place_kind::COUNTRY as u32].into_iter())
-            .strs(col::places::ISO2, [texts[3][0].as_str()].into_iter())
-            .strs(col::places::NAME, [texts[3][1].as_str()].into_iter())
-            .strs(col::places::LANGUAGE, [texts[3][2].as_str()].into_iter())
-            .strs(col::places::WORK_PERMIT, [texts[3][3].as_str()].into_iter());
-        b.done();
+        let rail = |i: usize| match i % 3 {
+            0 => t[i][8].clone(),
+            k => {
+                let s = Stage::from_u32((i % 10) as u32).unwrap();
+                let rail = if k == 1 { pipeline::initial(s) } else { pipeline::move_to(&pipeline::initial(Stage::Discovered), s) };
+                String::from_utf8(pipeline::encode(&rail).to_vec()).unwrap()
+            }
+        };
+        let rows = json!({
+            "applications": (0..n).map(|i| json!({"id": i + 1, "no": i + 1, "stage": i % 10, "corporation_id": 1 + i % 3, "place_id": 1, "stage_on": TODAY, "company": t[i][0], "role": t[i][1],
+                "location": t[i][2], "comp_raw": t[i][3], "listing_url": t[i][4], "keywords": t[i][5], "stage_notes": t[i][6], "cv_theme": t[i][7], "pips": rail(i), "canonical_url": t[i][9]})).collect::<Json>(),
+            "cv_overlays": (0..n).map(|i| json!({"id": i + 1, "application_id": i + 1, "item_id": 1 + i % 7, "mode": i % 3, "lineage_id": if i % 4 == 0 { Json::Null } else { json!(1 + i % 2) },
+                "title": t[i][10], "body": t[i][11], "reason": t[i][12]})).collect::<Json>(),
+            "cv_lineages": [{"id": 1, "corporation_id": 1, "generation": 1, "opened_on": TODAY - 10, "rewrites_allowed": true}, {"id": 2, "corporation_id": 2, "generation": 2, "opened_on": TODAY - 100, "rewrites_allowed": false}],
+            "events": (0..n).map(|i| json!({"id": i + 1, "application_id": 1 + i % 5, "kind": t[i][11], "body": t[i][12]})).collect::<Json>(),
+            "items": (0..n).map(|i| json!({"id": i + 1, "title": t[i][1], "body": t[i][5], "key": t[i][0]})).collect::<Json>(),
+            "settings": [{"id": 1, "heat_config": t[2][6]}],
+            "me": [{"id": 1, "citizenships": t[0][2]}],
+            "languages": [{"id": 1, "code": t[1][2]}],
+            "places": [{"id": 1, "kind": "country", "iso2": t[3][0], "name": t[3][1], "language": t[3][2], "work_permit": t[3][3]}],
+        });
         bounded("desk", seed, limit, || {
-            let mut k = Kernel::new();
-            k.set_today(TODAY);
-            k.boot(&w.finish(), 1).unwrap();
-            let search = r.text(4);
-            let _ = k.view(&abi::filter(&serde_json::json!({"search": search}).to_string()));
+            let mut k = fixture::kernel(rows);
+            let _ = k.view(&abi::filter(&json!({"search": any(&mut r, 4)}).to_string()));
             for id in 1..=n as u32 {
                 let _ = k.application(id);
             }
             let _ = (k.overview(10), k.atlas(), k.board_ids(None));
-            let ctx = Ctx { today: TODAY, now: 0, human: false, key_id: Some(1), held: &[] };
             for id in 1..=4u32 {
-                let mut ow = wire::OpsWriter::new();
-                ow.op(id as u64, wire::PUT, 0, table::APPLICATIONS, id, None)
-                    .str(A::LISTING_RAW, &r.text(40))
-                    .str(A::COMP_RAW, &r.text(6))
-                    .str(A::COMPANY, &r.text(6));
-                let op = ow.finish()[8..].to_vec();
-                let _ = k.judge(&op, &ctx);
-                let _ = k.predict(&op, &ctx);
-                let mut ow = wire::OpsWriter::new();
-                ow.op(100 + id as u64, wire::COMMAND, 0, schema::command::NOTE, id, None)
-                    .u32(schema::param::note::STAGE, 0)
-                    .str(schema::param::note::BODY, &r.text(8));
-                let _ = k.predict(&ow.finish()[8..], &ctx);
+                let op = put("applications", id, json!({"listing_raw": any(&mut r, 40), "comp_raw": any(&mut r, 6), "company": any(&mut r, 6)}));
+                let _ = k.judge(&op, &agent(1, 0));
+                let _ = k.predict(&op, &agent(1, 0));
+                let _ = k.predict(&cmd("note", id, json!({"stage": 0, "body": any(&mut r, 8)})), &agent(1, 0));
             }
             let _ = (k.overview(10), k.application(1));
             let mut restored = Kernel::new();

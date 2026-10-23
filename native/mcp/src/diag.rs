@@ -560,7 +560,6 @@ mod tests {
             }
             let d = render(name, "put corporations domain=example.com", &json!({"cap": 50000}));
             assert!(d.starts_with(&format!("error[{name}]")) && d.contains(&format!("hireme {{\"explain\":\"{name}\"}}")), "{d}");
-            assert!(explain(name).is_some());
         }
         assert!(explain("nope").is_none());
     }

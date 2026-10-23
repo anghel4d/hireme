@@ -28,16 +28,10 @@ serde_json = { version = "1.0.154", default-features = false, features = ["alloc
 # second draft with the approved one's hash.
 sha2 = { version = "0.11.1", default-features = false }
 
-# `cargo bench -p kernel --bench judge`: judge's bound at a 10k desk.
+# `cargo bench -p kernel --bench desk`: the derive at a 10k desk, for
+# profiling, and judge's bound.
 [[bench]]
-name = "judge"
-harness = false
-
-# `cargo bench -p kernel --bench board`: the board derive at a 10k desk,
-# natively, for profiling; the bound itself is measured under wasm by
-# bench/kernel.mjs.
-[[bench]]
-name = "board"
+name = "desk"
 harness = false
 
 [dev-dependencies]

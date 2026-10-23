@@ -889,35 +889,30 @@ fn an_ops_text_is_its_str_cells() {
 // --------------------------------------------------------------------- writers
 
 #[test]
-#[should_panic(expected = "values in a block")]
-fn a_short_column_is_a_bug_u32() {
-    let mut w = BodyWriter::new();
-    w.block(1, 3).u32s(1, [1u32, 2].into_iter());
+fn a_column_of_another_length_than_its_block_is_a_bug() {
+    let writes: [(&str, fn()); 4] = [
+        ("short u32s", || {
+            BodyWriter::new().block(1, 3).u32s(1, [1u32, 2].into_iter());
+        }),
+        ("long strs", || {
+            BodyWriter::new().block(1, 1).strs(1, ["a", "b"].into_iter());
+        }),
+        ("short syms", || {
+            BodyWriter::new().block(1, 2).syms(1, ["a"].into_iter());
+        }),
+        ("long lists", || {
+            BodyWriter::new().block(1, 0).lists(1, [&[1u32][..]].into_iter());
+        }),
+    ];
+    for (what, write) in writes {
+        let e = std::panic::catch_unwind(write).expect_err(what);
+        let msg = e.downcast_ref::<String>().map(String::as_str).or_else(|| e.downcast_ref::<&str>().copied()).unwrap_or("");
+        assert!(msg.contains("values in a block"), "{what}: {msg}");
+    }
 }
 
 #[test]
-#[should_panic(expected = "values in a block")]
-fn a_long_column_is_a_bug_strs() {
-    let mut w = BodyWriter::new();
-    w.block(1, 1).strs(1, ["a", "b"].into_iter());
-}
-
-#[test]
-#[should_panic(expected = "values in a block")]
-fn a_short_column_is_a_bug_syms() {
-    let mut w = BodyWriter::new();
-    w.block(1, 2).syms(1, ["a"].into_iter());
-}
-
-#[test]
-#[should_panic(expected = "values in a block")]
-fn a_long_column_is_a_bug_lists() {
-    let mut w = BodyWriter::new();
-    w.block(1, 0).lists(1, [&[1u32][..]].into_iter());
-}
-
-#[test]
-fn ops_writer_knows_when_a_frame_is_full() {
+fn an_ops_writer_knows_when_a_frame_is_full_and_a_full_one_is_a_valid_frame() {
     let mut w = OpsWriter::new();
     for i in 0..255u64 {
         w.op(i, DROP, 0, 1, 1, None);
@@ -926,23 +921,15 @@ fn ops_writer_knows_when_a_frame_is_full() {
     assert_eq!(w.len(), 255);
     w.op(255, DROP, 0, 1, 1, None);
     assert!(w.is_full(0), "256 ops is a full frame");
+    let f = w.frame(HASH);
+    let fr = Frame::parse(&f, HASH).unwrap();
+    assert_eq!(fr.kind(), OPS);
+    assert_eq!(Ops::new(&fr.body().unwrap()).map(|o| o.len()), Ok(256));
 
     let w = OpsWriter::new();
     let room = MAX_UP - HEADER - 8;
     assert!(!w.is_full(room), "exactly MAX_UP fits");
     assert!(w.is_full(room + 1), "one byte more does not");
-}
-
-#[test]
-fn frame_wrapper_of_a_full_ops_writer_is_a_valid_frame() {
-    let mut w = OpsWriter::new();
-    for i in 0..256u64 {
-        w.op(i, DROP, 0, 1, 1, None);
-    }
-    let f = w.frame(HASH);
-    let fr = Frame::parse(&f, HASH).unwrap();
-    assert_eq!(fr.kind(), OPS);
-    assert_eq!(Ops::new(&fr.body().unwrap()).map(|o| o.len()), Ok(256));
 }
 
 // ------------------------------------------------------- mangled OPS and frames

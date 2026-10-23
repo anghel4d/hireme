@@ -3,8 +3,11 @@
 //! the same rows; pending writes sit on top of any base and leave nothing
 //! behind once rolled back; a snapshot restores the base.
 
+mod fixture;
+
 use std::collections::BTreeMap;
 
+use fixture::Rng;
 use kernel::rows::{Rows, Val, Write};
 
 const TABLES: [u16; 2] = [5, 9];
@@ -13,31 +16,16 @@ const S: u16 = 9;
 const F: u16 = 10;
 const I: u16 = 11;
 
-/// A seeded xorshift; the failing seed is in every assertion message.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
+/// A random cell of column `col`, null one time in five.
+fn val(r: &mut Rng, col: u16) -> Val {
+    if r.below(5) == 0 {
+        return Val::None;
     }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-
-    fn val(&mut self, col: u16) -> Val {
-        if self.below(5) == 0 {
-            return Val::None;
-        }
-        match col {
-            U => Val::U32(self.below(1000) as u32),
-            S => Val::Str(["a", "bb", "ünï", "x\u{1f}y", "long string here"][self.below(5) as usize].into()),
-            F => Val::F64(self.below(1000) as f64 / 7.0),
-            _ => Val::I64(self.below(1 << 40) as i64 - (1 << 39)),
-        }
+    match col {
+        U => Val::U32(r.below(1000) as u32),
+        S => Val::Str((*r.pick(&["a", "bb", "ünï", "x\u{1f}y", "long string here"])).into()),
+        F => Val::F64(r.below(1000) as f64 / 7.0),
+        _ => Val::I64(r.below(1 << 40) as i64 - (1 << 39)),
     }
 }
 
@@ -107,7 +95,7 @@ fn random_patch(rng: &mut Rng, model: &mut Model) -> Vec<u8> {
             if rows.iter().any(|r: &(u32, Vec<(u16, Val)>)| r.0 == id) {
                 continue;
             }
-            let cells: Vec<(u16, Val)> = cols.iter().map(|&c| (c, rng.val(c))).collect();
+            let cells: Vec<(u16, Val)> = cols.iter().map(|&c| (c, val(rng, c))).collect();
             let entry = m.entry(id).or_default();
             for (c, v) in &cells {
                 if v.is_none() {
@@ -142,12 +130,12 @@ fn random_writes(rng: &mut Rng, rows: &mut Rows) -> Vec<Write> {
         1 => {
             let id = rows.temp_id();
             ws.push(Write::Insert { table: t, id });
-            ws.push(Write::Set { table: t, id, col: S, val: rng.val(S) });
+            ws.push(Write::Set { table: t, id, col: S, val: val(rng, S) });
         }
         _ if !ids.is_empty() => {
             let id = ids[rng.below(ids.len() as u64) as usize];
             let col = [U, S, F, I][rng.below(4) as usize];
-            ws.push(Write::Set { table: t, id, col, val: rng.val(col) });
+            ws.push(Write::Set { table: t, id, col, val: val(rng, col) });
         }
         _ => {}
     }
