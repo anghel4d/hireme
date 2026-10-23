@@ -71,7 +71,7 @@ fn an_inbound_mail_is_received_from_the_mail_actor_and_goes_to_the_tray_unfiled(
     // The sender stored bare; the thread by its own headers.
     assert_eq!((c["to_addr"].as_str(), c["thread_key"].as_str()), (Some("matei3d@gmail.com"), Some("<hm.1@gmail.com>")));
     let read = Item::read(k.rows().table(table::OUTREACH).unwrap(), 100).unwrap();
-    assert_eq!((read.kind(), read.status(), read.core.filing), (Kind::Email, Some(Status::Received), Filing::Unfiled));
+    assert_eq!((read.core.kind, read.status(), read.core.filing), (Kind::Email, Some(Status::Received), Filing::Unfiled));
     // The item as the hub reads it.
     let j = k.query(&json!({"op": "outreach"})).unwrap();
     assert_eq!((&j["total"], &j["counts"]), (&json!(1), &json!({"unfiled": 1, "unseen": 1})));

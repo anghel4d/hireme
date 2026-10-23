@@ -67,9 +67,6 @@ defmodule Hireme.Outreach do
   def module(kind) when is_atom(kind), do: Map.fetch!(@modules, kind)
   def module(kind) when is_binary(kind), do: module(String.to_existing_atom(kind))
 
-  @doc "An item's kind."
-  def kind(%{kind: k}) when k in @kinds, do: k
-
   @doc """
   A row (`%Hireme.Rows.Outreach{}`, or a map from a find, atom or string
   keys) as the struct of its kind.

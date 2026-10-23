@@ -4,13 +4,14 @@
 //! An item is `Core × Body`: the core every item has, and a body that is
 //! one of the kinds (`Kind`). `Item<Email>` is the OutreachEmail, a strong
 //! derivation of the base `Item<Body>`: the whole core plus the mail's own
-//! fields, widened for free and narrowed by a guard (`narrow`). Nothing
-//! else in the kernel reads an outreach cell by column id: a row is decoded
-//! here (`Item::read`), a put is judged here (`put`: what each kind
-//! requires, what is fixed once written, what is derived, and the filing of
-//! an inbound item by the filer, which reads the item as its `Input` and
-//! the stored mail through `Stored`), and the hub's query (`query`) sorts
-//! and groups the items on any key.
+//! fields, widened for free and narrowed by a guard (`narrow`), which is
+//! how the judge applies the rules only a mail has (`mail_rules`) to a mail
+//! and to nothing else. Nothing else in the kernel reads an outreach cell
+//! by column id: a row is decoded here (`Item::read`), a put is judged here
+//! (`put`: what each kind requires, what is fixed once written, what is
+//! derived, and the filing of an inbound item by the filer, which reads the
+//! item as its `Input` and the stored mail through `Stored`), and the hub's
+//! query (`query`) sorts and groups the items on any key.
 //!
 //! An item is the record of what happened. A draft is its mission's, and a
 //! mission of kind `k` produces outreach of kind `k`, so a mission's type,
@@ -55,10 +56,6 @@ macro_rules! coded {
                 Self::ALL.get(c as usize).copied()
             }
 
-            pub fn from_name(n: &str) -> Option<$name> {
-                $names.iter().position(|x| *x == n).and_then(|i| Self::from_code(i as u32))
-            }
-
             /// The declaration's code: the variant's position.
             pub fn code(self) -> u32 {
                 Self::ALL.iter().position(|x| *x == self).unwrap_or(0) as u32
@@ -98,26 +95,9 @@ impl Status {
 }
 
 impl Kind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Email => "Email",
-            Kind::CareersPage => "Careers page",
-            Kind::LinkedIn => "LinkedIn",
-            Kind::XDm => "X DM",
-            Kind::Discord => "Discord",
-            Kind::Other => "Other",
-            Kind::Note => "Note",
-        }
-    }
-
     /// A mission may have this kind: every one but a note.
     pub fn fireable(self) -> bool {
         self != Kind::Note
-    }
-
-    /// hireme records what goes out and files the replies: a mail.
-    pub fn tracked(self) -> bool {
-        self == Kind::Email
     }
 
     /// An agent's outbound item on this kind carries its report.
@@ -147,11 +127,11 @@ impl Kind {
     pub fn brief(self) -> &'static str {
         match self {
             Kind::Email => "An email mission. Its draft is the mission row itself: target is the To (up to 10 addresses), cc, subject, draft the body, in_reply_to and refs for a follow-up. Stage it to fire_ready and request a fire key. Firing sends it through the linked Gmail; hireme records the sent mail as an OutreachEmail (outbound) on the mission and files every reply to it by its headers, so there is nothing to report. Read the thread with the outreach query (where mission_id) and put seen: true on replies you have read.",
-            Kind::CareersPage => "A careers-page mission. Scout the form (browser, computer use, visual inspection), put the form's URL in target and every field's text in draft as markdown; submit nothing while staging. Firing under a key is you filling and submitting the form once. Then put one OutreachCareersPage: kind careers_page, mission_id, link (the form), fields (what you submitted, as JSON), reference (the confirmation or application number the page showed), at (when), report (your write-up, markdown). The mission counts as submitted on that item, provisionally, until the board's confirmation mail is filed to it.",
-            Kind::LinkedIn => "A LinkedIn message mission. target is the profile URL, draft the message. Firing under a key is you sending it once. Then put one OutreachLinkedIn: kind linkedin, direction outbound, mission_id, handle (the profile's vanity name), link (the conversation), body (the text you sent), at, report. A reply you see is another OutreachLinkedIn with direction inbound, the same handle and link, body the reply, contact_id when you know the person.",
-            Kind::XDm => "An X DM mission. target is the handle, draft the message. Firing under a key is you sending it once. Then put one OutreachTwitterDm: kind x_dm, direction outbound, mission_id, handle (without the @), link (the conversation), body (the text you sent), at, report. A reply you see is another item with direction inbound, the same handle and link, body the reply.",
-            Kind::Discord => "A Discord message mission. target is the user or server/#channel, draft the message. Firing under a key is you sending it once. Then put one OutreachDiscord: kind discord, direction outbound, mission_id, handle (user, or server/#channel), link (the message), body, at, report. A reply you see is another item with direction inbound.",
-            Kind::Other => "A mission on a channel hireme does not model (a call, Slack, a meetup). target names the route, draft what you will say. Firing under a key is you doing it once. Then put one OutreachOther: kind other, direction outbound, mission_id, channel (the channel's name), handle, link, body, at, report. What came back is another item with direction inbound.",
+            Kind::CareersPage => "A careers-page mission. Scout the form (browser, computer use, visual inspection), put the form's URL in target and every field's text in draft as markdown; submit nothing while staging. Firing under a key is you filling and submitting the form once. Then call report {mission, report, link, fields, reference, at}: it lands the shot and records this OutreachCareersPage (kind careers_page, outbound, naming the mission) with link (the form), fields (what you submitted, as JSON), reference (the confirmation or application number the page showed), at (when) and your report (markdown). The mission counts as submitted once landed, provisionally, until the board's confirmation mail is filed to it.",
+            Kind::LinkedIn => "A LinkedIn message mission. target is the profile URL, draft the message. Firing under a key is you sending it once. Then call report {mission, report, handle, link, body, at}: it lands the shot and records this OutreachLinkedIn (kind linkedin, outbound, naming the mission) with handle (the profile's vanity name), link (the conversation), body (the text you sent), at and your report. A reply you see is a put of another OutreachLinkedIn with direction inbound, the same handle and link, body the reply, contact_id when you know the person.",
+            Kind::XDm => "An X DM mission. target is the handle, draft the message. Firing under a key is you sending it once. Then call report {mission, report, handle, link, body, at}: it lands the shot and records this OutreachTwitterDm (kind x_dm, outbound, naming the mission) with handle (without the @), link (the conversation), body (the text you sent), at and your report. A reply you see is a put of another item with direction inbound, the same handle and link, body the reply.",
+            Kind::Discord => "A Discord message mission. target is the user or server/#channel, draft the message. Firing under a key is you sending it once. Then call report {mission, report, handle, link, body, at}: it lands the shot and records this OutreachDiscord (kind discord, outbound, naming the mission) with handle (user, or server/#channel), link (the message), body, at and your report. A reply you see is a put of another item with direction inbound.",
+            Kind::Other => "A mission on a channel hireme does not model (a call, Slack, a meetup). target names the route, draft what you will say. Firing under a key is you doing it once. Then call report {mission, report, channel, handle, link, body, at}: it lands the shot and records this OutreachOther (kind other, outbound, naming the mission) with channel (the channel's name), handle, link, body, at and your report. What came back is a put of another item with direction inbound.",
             Kind::Note => "Not a mission: a note. Put an OutreachNote (kind note, no direction) with subject, body in markdown and the refs it is about (application_id, corporation_id, contact_id, mission_id) to record anything seen on any channel that is not itself a message.",
         }
     }
@@ -334,7 +314,6 @@ impl View<'_> {
 
 /// Each variant: read from a row, written as cells, lexed as facets, shown as JSON.
 pub trait Variant: Sized {
-    const KIND: Kind;
     fn into_body(self) -> Body;
     /// The variant out of a body, or the body back untouched when it is another kind.
     #[allow(clippy::result_large_err)]
@@ -344,8 +323,6 @@ pub trait Variant: Sized {
 macro_rules! variant {
     ($t:ident, $k:ident) => {
         impl Variant for $t {
-            const KIND: Kind = Kind::$k;
-
             fn into_body(self) -> Body {
                 Body::$k(self)
             }
@@ -361,8 +338,6 @@ macro_rules! variant {
 }
 
 impl Variant for Email {
-    const KIND: Kind = Kind::Email;
-
     fn into_body(self) -> Body {
         Body::Email(Box::new(self))
     }
@@ -383,18 +358,6 @@ variant!(Other, Other);
 variant!(Note, Note);
 
 impl Body {
-    pub fn kind(&self) -> Kind {
-        match self {
-            Body::Email(_) => Kind::Email,
-            Body::CareersPage(_) => Kind::CareersPage,
-            Body::LinkedIn(_) => Kind::LinkedIn,
-            Body::XDm(_) => Kind::XDm,
-            Body::Discord(_) => Kind::Discord,
-            Body::Other(_) => Kind::Other,
-            Body::Note(_) => Kind::Note,
-        }
-    }
-
     fn read(kind: Kind, v: &View<'_>) -> Body {
         match kind {
             Kind::Email => Body::Email(Box::new(Email {
@@ -419,36 +382,6 @@ impl Body {
             Kind::Discord => Body::Discord(Discord { handle: v.str(O::HANDLE) }),
             Kind::Other => Body::Other(Other { channel: v.str(O::CHANNEL), handle: v.str(O::HANDLE) }),
             Kind::Note => Body::Note(Note),
-        }
-    }
-
-    /// The variant's own writable cells.
-    fn write(&self, out: &mut Vec<(u16, Val)>) {
-        match self {
-            Body::Email(e) => {
-                out.push((O::FROM_ADDR, s(e.from.clone())));
-                out.push((O::TO_ADDR, s(join(&e.to))));
-                out.push((O::CC_ADDR, s(join(&e.cc))));
-                out.push((O::REPLY_TO, s(e.reply_to.clone())));
-                out.push((O::MESSAGE_ID, s(e.message_id.clone())));
-                out.push((O::IN_REPLY_TO, s(e.in_reply_to.clone())));
-                out.push((O::REFS, s(Some(e.refs.join(" ")))));
-                out.push((O::GMAIL_MSGID, e.gmail_msgid.map_or(Val::None, Val::I64)));
-                out.push((O::GMAIL_THRID, e.gmail_thrid.map_or(Val::None, Val::I64)));
-                out.push((O::LABELS, s(join(&e.labels))));
-                out.push((O::HEADERS, s(e.headers.as_ref().map(Json::to_string))));
-                out.push((O::PIPE, e.pipe.map_or(Val::None, |p| Val::U32(p.code()))));
-            }
-            Body::CareersPage(c) => {
-                out.push((O::FIELDS, s(c.fields.as_ref().map(Json::to_string))));
-                out.push((O::REFERENCE, s(c.reference.clone())));
-            }
-            Body::LinkedIn(LinkedIn { handle }) | Body::XDm(XDm { handle }) | Body::Discord(Discord { handle }) => out.push((O::HANDLE, s(handle.clone()))),
-            Body::Other(o) => {
-                out.push((O::CHANNEL, s(o.channel.clone())));
-                out.push((O::HANDLE, s(o.handle.clone())));
-            }
-            Body::Note(_) => {}
         }
     }
 
@@ -551,10 +484,6 @@ impl Item<Body> {
         Item::of(&View { base: Some((t, id)), over: &[] }, id)
     }
 
-    pub fn kind(&self) -> Kind {
-        self.body.kind()
-    }
-
     /// The guard: this item as the derivation `B`, or itself, untouched,
     /// when it is another kind.
     #[allow(clippy::result_large_err)]
@@ -573,21 +502,6 @@ impl<B: Variant> From<Item<B>> for Item<Body> {
     }
 }
 
-impl<B: Variant + Clone> Item<B> {
-    /// The whole item, for what reads any kind.
-    pub fn widen(&self) -> Item<Body> {
-        Item { core: self.core.clone(), body: self.body.clone().into_body() }
-    }
-
-    pub fn status(&self) -> Option<Status> {
-        self.widen().status()
-    }
-
-    pub fn cells(&self) -> Vec<(u16, Val)> {
-        self.widen().cells()
-    }
-}
-
 impl Item<Body> {
     pub fn status(&self) -> Option<Status> {
         match (self.core.direction, &self.body) {
@@ -596,26 +510,6 @@ impl Item<Body> {
             (Some(Direction::Outbound), Body::Email(e)) if e.bounced_at.is_some() => Some(Status::Bounced),
             (Some(Direction::Outbound), _) => Some(Status::Sent),
         }
-    }
-
-    /// The writable cells of this item, as a put carries them (nothing
-    /// derived or readonly: no actor, filing, thread key, evidence or bounce).
-    pub fn cells(&self) -> Vec<(u16, Val)> {
-        let c = &self.core;
-        let mut out = alloc::vec![
-            (O::KIND, Val::U32(c.kind.code())),
-            (O::DIRECTION, c.direction.map_or(Val::None, |d| Val::U32(d.code()))),
-            (O::AT, if c.at > 0 { Val::U32(c.at as u32) } else { Val::None }),
-            (O::SUBJECT, s(c.subject.clone())),
-            (O::BODY, s(c.body.clone())),
-            (O::LINK, s(c.link.clone())),
-            (O::REPORT, s(c.report.clone())),
-            (O::SEEN, Val::U32(u32::from(c.seen))),
-        ];
-        out.extend(c.refs.cells().into_iter().map(|(col, v)| (col, v.map_or(Val::None, Val::U32))));
-        self.body.write(&mut out);
-        out.retain(|(_, v)| !v.is_none());
-        out
     }
 
     /// The item as the filer's lexer reads it (`filer::Input`): its texts
@@ -920,37 +814,16 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
     // The item as it stands now, after what was set above.
     let snapshot = row.cells.clone();
     let view = View { base, over: &snapshot };
-    let Some(mut item) = Item::of(&view, op.target) else { return Err(bad("kind", "one of the outreach kinds").refusal()) };
+    let Some(item) = Item::of(&view, op.target) else { return Err(bad("kind", "one of the outreach kinds").refusal()) };
     check(&item, actor).map_err(Invariant::refusal)?;
-    if let Body::Email(e) = &mut item.body {
-        // The Message-ID in its one stored form.
-        if view.given(O::MESSAGE_ID)
-            && let Some(m) = e.message_id.as_deref()
-        {
-            let form = message_id_form(m);
-            row.set(O::MESSAGE_ID, s(Some(form.clone())));
-            e.message_id = Some(form);
+    // The rules only a mail has, on the OutreachEmail the guard narrows to.
+    let mut item = match item.narrow::<Email>() {
+        Ok(mut mail) => {
+            mail_rules(&view, row, &mut mail)?;
+            mail.into()
         }
-        // Addresses stored bare: `Name <a@b>` reads as `a@b`.
-        for (c, one) in [(O::FROM_ADDR, &mut e.from), (O::REPLY_TO, &mut e.reply_to)] {
-            if view.given(c)
-                && let Some(given) = one.as_deref()
-            {
-                let bare = addr(given).ok_or_else(|| bad(if c == O::REPLY_TO { "reply_to" } else { "from_addr" }, "an address").refusal())?;
-                row.set(c, s(Some(bare.clone())));
-                *one = Some(bare);
-            }
-        }
-        for (c, list) in [(O::TO_ADDR, &mut e.to), (O::CC_ADDR, &mut e.cc)] {
-            if view.given(c) {
-                *list = addrs(&view.str(c).unwrap_or_default()).map_err(|i| Invariant { column: if c == O::CC_ADDR { "cc_addr" } else { "to_addr" }, ..i }.refusal())?;
-                row.set(c, s(join(list)));
-            }
-        }
-        if direction == Some(Direction::Outbound) && e.to.is_empty() {
-            return Err(bad("to_addr", "an outbound mail names its recipients").refusal());
-        }
-    }
+        Err(item) => item,
+    };
     if let Body::XDm(x) = &mut item.body
         && let Some(h) = x.handle.as_deref().and_then(|h| h.strip_prefix('@'))
     {
@@ -987,12 +860,12 @@ pub fn put(rows: &Rows, op: &Op, ctx: &Ctx, row: &mut Row, extra: &mut Vec<Row>)
             if f.thread_key.is_some() {
                 thread_key = f.thread_key;
             }
-            // A bounce: the mail it returns is bounced, and its mission failed (rule 2).
+            // A bounce: the mail it returns is bounced, and its mission, if fired, failed (rule 2).
             if let Some((mission, returned)) = f.bounce {
                 if let Some(b) = returned.filter(|&b| t.is_some_and(|t| t.has(b))) {
                     extra.push(Row { table: table::OUTREACH, id: b, cells: alloc::vec![(O::BOUNCED_AT, EVal::Val(Val::U32(now as u32)))] });
                 }
-                extra.extend(crate::fire::failed(rows, mission, "bounced"));
+                extra.extend(crate::fire::bounced(rows, mission));
             }
             // A confirmation mail: a provisional mission is confirmed (rule 3).
             if let Some(m) = f.confirms
@@ -1044,8 +917,9 @@ const FOREIGN: [(u16, &str); 18] = [
     (O::CHANNEL, "channel"),
 ];
 
-/// The invariants of an item as it stands, by its kind and who wrote it.
-fn check(item: &Item<Body>, actor: Actor) -> Result<(), Invariant> {
+/// The invariants every item has as it stands, by its kind and who wrote
+/// it; a mail's own are `mail_rules`.
+fn check(item: &OutreachItem, actor: Actor) -> Result<(), Invariant> {
     let c = &item.core;
     if let Some(l) = c.link.as_deref()
         && crate::write::host(l).is_none()
@@ -1057,14 +931,6 @@ fn check(item: &Item<Body>, actor: Actor) -> Result<(), Invariant> {
     }
     let empty = |v: &Option<String>| v.as_deref().is_none_or(|x| x.trim().is_empty());
     match &item.body {
-        Body::Email(e) => {
-            if c.direction == Some(Direction::Inbound) && empty(&e.from) {
-                return Err(bad("from_addr", "an inbound mail names its sender"));
-            }
-            if e.message_id.as_deref().is_some_and(|m| m.len() > 998 || canon(m).is_empty()) {
-                return Err(bad("message_id", "a Message-ID"));
-            }
-        }
         Body::CareersPage(_) => {
             if empty(&c.link) {
                 return Err(bad("link", "the form's URL"));
@@ -1080,10 +946,50 @@ fn check(item: &Item<Body>, actor: Actor) -> Result<(), Invariant> {
                 return Err(bad("body", "a note says something"));
             }
         }
-        Body::LinkedIn(_) | Body::XDm(_) | Body::Discord(_) => {}
+        Body::Email(_) | Body::LinkedIn(_) | Body::XDm(_) | Body::Discord(_) => {}
     }
     if actor == Actor::Agent && c.direction == Some(Direction::Outbound) && c.kind.reports() && empty(&c.report) {
         return Err(bad("report", "an agent reports what it did on an untracked channel"));
+    }
+    Ok(())
+}
+
+/// The rules only a mail has (the OutreachEmail's): an inbound mail names
+/// its sender, an outbound its recipients; the Message-ID in its one stored
+/// form; every address bare (`addr`, `addrs`).
+fn mail_rules(view: &View<'_>, row: &mut Row, mail: &mut OutreachEmail) -> Result<(), Refusal> {
+    let inbound = mail.core.direction == Some(Direction::Inbound);
+    let e = &mut mail.body;
+    if inbound && e.from.as_deref().is_none_or(|x| x.trim().is_empty()) {
+        return Err(bad("from_addr", "an inbound mail names its sender").refusal());
+    }
+    if e.message_id.as_deref().is_some_and(|m| m.len() > 998 || canon(m).is_empty()) {
+        return Err(bad("message_id", "a Message-ID").refusal());
+    }
+    if view.given(O::MESSAGE_ID)
+        && let Some(m) = e.message_id.as_deref()
+    {
+        let form = message_id_form(m);
+        row.set(O::MESSAGE_ID, s(Some(form.clone())));
+        e.message_id = Some(form);
+    }
+    for (c, name, field) in [(O::FROM_ADDR, "from_addr", &mut e.from), (O::REPLY_TO, "reply_to", &mut e.reply_to)] {
+        if view.given(c)
+            && let Some(given) = field.as_deref()
+        {
+            let bare = addr(given).ok_or_else(|| bad(name, "an address").refusal())?;
+            row.set(c, s(Some(bare.clone())));
+            *field = Some(bare);
+        }
+    }
+    for (c, name, list) in [(O::TO_ADDR, "to_addr", &mut e.to), (O::CC_ADDR, "cc_addr", &mut e.cc)] {
+        if view.given(c) {
+            *list = addrs(&view.str(c).unwrap_or_default()).map_err(|i| Invariant { column: name, ..i }.refusal())?;
+            row.set(c, s(join(list)));
+        }
+    }
+    if !inbound && e.to.is_empty() {
+        return Err(bad("to_addr", "an outbound mail names its recipients").refusal());
     }
     Ok(())
 }
@@ -1251,7 +1157,7 @@ fn column(rows: &Rows, t: &Table, items: &[Option<Item<Body>>], key: &str) -> Op
             per(&|i| {
                 let m = i.core.refs.mission_id?;
                 let mt = rows.table(table::MISSIONS)?;
-                let kind = mt.u32(m, col::missions::KIND).and_then(|k| enums::mission_kind::NAMES.get(k as usize)).copied().unwrap_or("");
+                let kind = mt.u32(m, col::missions::KIND).and_then(|k| enums::outreach_kind::NAMES.get(k as usize)).copied().unwrap_or("");
                 Some(alloc::format!("#{m} {kind} · {}", mt.str(m, col::missions::TARGET).unwrap_or("")))
             }),
             Bucket::Sym,
@@ -1406,10 +1312,6 @@ mod tests {
             assert_eq!(enums::outreach_kind::NAMES[k.code() as usize], k.name());
         }
         assert_eq!(Kind::ALL.len(), enums::outreach_kind::NAMES.len());
-        assert_eq!(Kind::from_name("x_dm"), Some(Kind::XDm));
-        for (n, k) in enums::mission_kind::NAMES.iter().zip(Kind::ALL) {
-            assert_eq!(n, &k.name(), "a mission's kind is an outreach kind");
-        }
         assert_eq!(Direction::ALL.len(), enums::direction::NAMES.len());
         assert_eq!(Filing::ALL.len(), enums::filing::NAMES.len());
         assert_eq!(FiledBy::ALL.len(), enums::filer::NAMES.len());

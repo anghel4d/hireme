@@ -147,8 +147,9 @@ judge runs the filer (kernel.md's `filer::file`, reading the item as its
 `Input` and the stored mail through the type's `Stored`): `filed` with
 `filed_by: matcher`, or `unfiled`, either way with `evidence` holding
 `{"evidence": [...], "candidates": [...]}`. A bounce the filer recognizes
-marks the returned mail `bounced_at` and fails its mission (`fire::failed`,
-rule 2); a confirmation mail confirms a provisional mission (rule 3). A put
+marks the returned mail `bounced_at` and fails its mission if it is fired
+(`fire::bounced`, rule 2); a confirmation mail confirms a provisional
+mission (rule 3). A put
 that sets a ref files the item by the op's writer (`filed_by: operator |
 agent | mail`); the `file` command is the same write under a name and must
 name at least one ref. A filed item stays filed until `ignore` or a put
@@ -254,10 +255,8 @@ pub enum Kind { Email, CareersPage, LinkedIn, XDm, Discord, Other, Note }
 impl Kind {
     pub const NAMES: [&str; 7];
     pub fn from_code(u32) -> Option<Kind>; pub fn code(self) -> u32; pub fn name(self) -> &'static str;
-    pub fn label(self) -> &'static str;          // "Email", "Careers page", "LinkedIn", "X DM", "Discord", "Other", "Note"
     pub fn fireable(self) -> bool;               // every kind but Note: a mission may have it
-    pub fn tracked(self) -> bool;                // Email: hireme records what went out and files the replies
-    pub fn reports(self) -> bool;                // the untracked kinds: an agent's item needs a report
+    pub fn reports(self) -> bool;                // every kind but Email and Note: an agent's outbound item needs a report
     pub fn body_format(self) -> &'static str;    // "markdown" for Note, "text" otherwise
     pub fn brief(self) -> &'static str;          // the agent-facing text: what a mission of this kind produces and what to report
 }
@@ -288,16 +287,14 @@ pub struct Item<B = Body> { pub core: Core, pub body: B }
 pub type OutreachItem = Item<Body>;
 pub type OutreachEmail = Item<Email>;          // and OutreachCareersPage, OutreachLinkedIn, OutreachTwitterDm (= Item<XDm>), OutreachDiscord, OutreachOther, OutreachNote
 
-pub trait Variant: Sized { const KIND: Kind; /* read from a row, write cells, facets, json */ }
+pub trait Variant: Sized { fn into_body(self) -> Body; fn from_body(b: Body) -> Result<Self, Body>; }
 
 impl Item<Body> {
     pub fn read(t: &Table, id: u32) -> Option<Item>;                 // decode a row of the replica
-    pub fn kind(&self) -> Kind;
-    pub fn narrow<B: Variant>(self) -> Result<Item<B>, Item<Body>>;  // the guard: OutreachEmail from an OutreachItem
+    pub fn narrow<B: Variant>(self) -> Result<Item<B>, Item<Body>>;  // the guard: OutreachEmail from an OutreachItem; the judge's way to a mail's own rules
     pub fn status(&self) -> Option<Status>;
     pub fn input(&self) -> filer::Input<'_>;                         // what the filer's lexer reads: texts and headers, never the type
     pub fn json(&self, rows: &Rows) -> Json;                         // the item as JSON above
-    pub fn cells(&self) -> Vec<(u16, Val)>;                          // the writable cells of a put
 }
 impl<B: Variant> From<Item<B>> for Item<Body>;                       // widening, free
 
@@ -342,7 +339,6 @@ Hireme.Outreach.module(:email)               # Hireme.Outreach.Email
 Hireme.Outreach.from_row(row)                # %Hireme.Rows.Outreach{} or a find's map -> the variant struct
 Hireme.Outreach.cells(item)                  # the writable columns as a put's cells (%{"kind" => "email", ...}), lists joined
 Hireme.Outreach.op(item, opts)               # the decoded op Hireme.Sequencer.call/3 takes (keyed by message_id when it has one; target: for an update)
-Hireme.Outreach.kind(item)                   # :email
 Hireme.Outreach.status(item)                 # :sent | :received | :bounced | nil
 Hireme.Outreach.refs(item)                   # %{corporation_id: _, application_id: _, contact_id: _, mission_id: _}
 
@@ -372,8 +368,8 @@ construction is refused there, never checked twice.
 outreach_kind`; `Kind::fireable` says which values a mission may take. The
 filer reads an item as its `Input` (`Item::input`) and the stored mail
 through `outreach::Stored` (its `Store`), and never matches on the type;
-the judge applies its `Filing` to the row, fails the mission a bounce
-returns (`fire::failed`) and confirms the mission a confirmation names.
+the judge applies its `Filing` to the row, fails the fired mission a bounce
+returns (`fire::bounced`) and confirms the mission a confirmation names.
 `landed` on an email mission appends `outreach::sent_record(rows, &shot,
 now)` to its effects (an insert, or an update of the row Gmail's Sent copy
 made first). `outreach::addrs` is the one reading of a mission's `target`
