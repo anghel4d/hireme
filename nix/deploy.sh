@@ -118,7 +118,6 @@ done
 remote 'systemctl is-active hireme' | sed 's/^/[hireme] unit /'
 [ "$(remote "readlink -f $profile")" = "$release" ] || die "the profile does not resolve to $release"
 remote "journalctl -u hireme --since '-2 min' -p err --no-pager -q" | head -20 | sed 's/^/[hireme] error: /'
-remote "ss -Hulpn 'sport = :4433'" | sed 's/^/[hireme] udp: /'
 
 code=""
 for _ in $(seq 1 30); do

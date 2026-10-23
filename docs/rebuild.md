@@ -410,7 +410,7 @@ clients never need the raw listing to derive.
 
 ```
 lib/hireme/
-  application.ex   supervision: Repo, Store, PubSub, rate limits, tickets, the audit coalescer, Registry, Sequencer.Supervisor, Release, Mail, Gate, Endpoint, Drain
+  application.ex   supervision: Repo, Store, PubSub, rate limits, tickets, the audit coalescer, Registry, Sequencer.Supervisor, Release, Mail, Endpoint, Drain
   repo.ex          tenancy: put_account/1, every read scoped, skip_account explicit; SQLite pragmas
   schema.ex        compile-time reader and row macros
   store.ex         the writer lock (granted in order), savepoints, VACUUM INTO
@@ -582,8 +582,7 @@ assets/
   database and records every additive file present as contained; an
   existing database runs only the files it has not recorded, in order,
   under the sidecar lock. Backups daily by `VACUUM INTO`, the newest 13 of
-  v2's own prefix kept (v1's backups are never pruned automatically). SIGTERM drains with BYE `restart`, 5 s,
-  then the node stops the gate.
+  v2's own prefix kept (v1's backups are never pruned automatically). SIGTERM drains with BYE `restart`, 5 s.
 - Nix builds the wasm, the NIF and the release; no build output is
   committed. `nix build --rebuild` proves reproducibility.
 
@@ -609,7 +608,7 @@ timeout written down.
 
 - One behavioral suite per public contract, through that contract only:
   `test/hireme/{sequencer,grants,lease,world,provenance,import,accounts,keys,mfa,mail,release}_test.exs`,
-  `test/hireme_web/{session,sign_in,account,gate}_test.exs`,
+  `test/hireme_web/{session,sign_in,account}_test.exs`,
   `native/kernel/tests/*.rs`, and the wasm vectors.
 - Seeded property tests where a law exists: base ⊕ deltas = fresh read; a
   resent op writes nothing; `stale` is monotonic; masks never leak a row;
@@ -644,7 +643,7 @@ behind. A v2 file may carry text quarried from v1, as the operator allowed:
 | `lib/hireme_web/*` (all) | same roles, rewritten |
 | `lib/mix/tasks/hireme.ex` | `mix hireme.schema`, `mix hireme.import` |
 | `test/**/*.exs` | new suites, one per contract; oracle and parity deleted |
-| `native/{wire,kernel,mcp,gate}` sources (16 files) and 4 lockfiles | `native/` workspace, 6 crates, 1 lockfile |
+| `native/{wire,kernel,mcp,gate}` sources (16 files) and 4 lockfiles | `native/` workspace, 5 crates, 1 lockfile |
 | `priv/wire/schema.txt` | `schema/hireme.schema` |
 | `priv/repo/migrations/*.exs` | `priv/db/baseline.sql` + additive files |
 | `priv/static/*` (v1's `priv/static/wasm/kernel.wasm`) | built artifacts, not committed |

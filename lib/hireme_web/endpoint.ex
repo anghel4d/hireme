@@ -79,7 +79,10 @@ defmodule HiremeWeb.Endpoint do
   @spec origins() :: [String.t()]
   def origins do
     port = if p = config(:url)[:port], do: ":#{p}", else: ""
-    Enum.uniq([url() | for(o <- config(:check_origin) || [], do: "http:" <> o <> port)])
+    # check_origin is a list of origins here; anything else (nil, a boolean) names none.
+    Enum.uniq([
+      url() | for(o <- List.wrap(config(:check_origin)), is_binary(o), do: "http:" <> o <> port)
+    ])
   end
 
   @doc "A static file's path; in a release its digested name (`mix hireme.digest`), which browsers keep for good."

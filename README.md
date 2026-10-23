@@ -211,7 +211,7 @@ nix flake check                           # all of it, plus the dev VM
 schema/hireme.schema   the declaration
 lib/hireme/            the node: sequencer, kernel NIF, grants, lease, world, provenance, import, accounts, keys, mfa, mail, release
 lib/hireme_web/        endpoint, router, sign-in, factor page, the wire session, MCP over HTTP, account RPC, codec
-native/                one Cargo workspace: schema, wire, kernel, nif, gate, mcp (the MCP surface the NIF serves, and the hireme-mcp daemon)
+native/                one Cargo workspace: schema, wire, kernel, nif, mcp (the MCP surface the NIF serves, and the hireme-mcp daemon)
 assets/js/             early (inline), app, wire, kernel bindings, state, morph, lenses/, auth/, gen/schema.ts
 priv/db/               the baseline and additive migrations
 nix/                   the package and the NixOS module

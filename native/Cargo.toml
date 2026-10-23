@@ -2,7 +2,7 @@
 # dependency versions, so the wasm kernel and the NIF (with the MCP surface) agree.
 [workspace]
 resolver = "3"
-# A crate joins when its Cargo.toml lands: nif, gate and mcp add themselves.
+# A crate joins when its Cargo.toml lands: nif and mcp add themselves.
 members = ["schema", "wire", "kernel", "nif", "mcp"]
 
 [workspace.package]
