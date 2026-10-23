@@ -186,7 +186,7 @@ defmodule Hireme.WireCase do
   end
 
   @doc "The table names and row counts of a table-run body (BOOT, PATCH)."
-  def tables(body), do: for({t, rows} <- blocks(body), do: {t, length(rows)})
+  def tables(body), do: for({t, n, _} <- Nif.blocks(body), do: {Schema.table(t).name, n})
 
   @doc """
   A client's model of the resident tables: `%{table_name => %{id => %{col_id
@@ -213,43 +213,13 @@ defmodule Hireme.WireCase do
     end)
   end
 
-  defp blocks(<<>>), do: []
+  # The blocks of a body as rows, read by native/wire as every client reads them.
+  defp blocks(body) do
+    for {table, nrows, cols} <- Nif.blocks(body) do
+      rows =
+        for i <- 0..(nrows - 1)//1, do: Map.new(cols, fn {id, vs} -> {id, Enum.at(vs, i)} end)
 
-  defp blocks(<<table::little-16, ncols::little-16, nrows::little-32, rest::binary>>) do
-    {cols, rest} =
-      Enum.map_reduce(1..ncols//1, rest, fn _,
-                                            <<id::little-16, ty, 0, len::little-32, r::binary>> ->
-        <<data::binary-size(^len), r::binary>> = r
-        pad = rem(8 - rem(len, 8), 8)
-        {{id, values(ty, nrows, data)}, binary_part(r, pad, byte_size(r) - pad)}
-      end)
-
-    rows = for i <- 0..(nrows - 1)//1, do: Map.new(cols, fn {id, vs} -> {id, Enum.at(vs, i)} end)
-    [{Schema.table(table).name, rows} | blocks(rest)]
+      {Schema.table(table).name, rows}
+    end
   end
-
-  defp values(1, _n, data),
-    do: for(<<v::little-32 <- data>>, do: if(v == 0xFFFFFFFF, do: nil, else: v))
-
-  defp values(3, _n, data),
-    do: for(<<v::little-signed-64 <- data>>, do: if(v == -0x8000000000000000, do: nil, else: v))
-
-  defp values(4, _n, data), do: for(<<v::binary-8 <- data>>, do: float(v))
-
-  defp values(2, n, data) do
-    size = (n + 1) * 4
-    <<offsets::binary-size(^size), bytes::binary>> = data
-    offs = for <<o::little-32 <- offsets>>, do: o
-
-    for [a, b] <- Enum.chunk_every(offs, 2, 1, :discard),
-        do: if(a == b, do: nil, else: binary_part(bytes, a, b - a))
-  end
-
-  defp values(5, n, data) do
-    # native/wire reads a packed cell, as every client does.
-    for cell <- values(2, n, data), do: cell && Nif.text(cell)
-  end
-
-  defp float(<<v::little-float-64>>), do: v
-  defp float(_nan), do: nil
 end

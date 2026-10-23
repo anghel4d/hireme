@@ -465,9 +465,24 @@ fn shuffle_dirty<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Binary<'a>> {
     shuffled(env, body)
 }
 
-#[rustler::nif]
-fn text(cell: Binary) -> Option<String> {
-    wire::text_cell(cell.as_slice()).ok().map(|s| s.into_owned())
+/// A table-run body as a client reads it (the tests play one): `[{table, nrows, [{col, values}]}]` in body
+/// order, a value an integer, a float, a string (a zstr's unpacked; nil when it does not unpack), a list of
+/// ids, or nil for none; nil for a body that does not walk.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn blocks<'a>(env: Env<'a>, body: Binary<'a>) -> Option<Term<'a>> {
+    let mut texts = wire::Texts::default();
+    let mut value = |v: wire::Value| match v {
+        wire::Value::U32(x) => x.encode(env),
+        wire::Value::I64(x) => x.encode(env),
+        wire::Value::F64(x) => x.encode(env),
+        wire::Value::Str(s) => s.encode(env),
+        wire::Value::ZStr(z) => texts.cell(z).ok().map(|s| s.into_owned()).encode(env),
+        wire::Value::List(l) => l.iter().collect::<Vec<u32>>().encode(env),
+        wire::Value::None => rustler::types::atom::nil().encode(env),
+    };
+    let blocks = wire::Blocks::new(body.as_slice()).ok()?.iter();
+    let out: Vec<_> = blocks.map(|b| (b.table, b.nrows, b.cols().map(|c| (c.id, (0..c.nrows()).map(|i| value(c.value(i))).collect::<Vec<_>>())).collect::<Vec<_>>())).collect();
+    Some(out.encode(env))
 }
 
 rustler::init!("Elixir.Hireme.Kernel.Nif");

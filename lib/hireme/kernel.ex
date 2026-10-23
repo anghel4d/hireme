@@ -94,7 +94,7 @@ defmodule Hireme.Kernel.Nif do
   def frame(_kind, _flags, _rev, _body, _packed), do: :erlang.nif_error(:nif_not_loaded)
   def open(_frame, _up), do: :erlang.nif_error(:nif_not_loaded)
   def unpack(_frame, _max), do: :erlang.nif_error(:nif_not_loaded)
-  def text(_cell), do: :erlang.nif_error(:nif_not_loaded)
+  def blocks(_body), do: :erlang.nif_error(:nif_not_loaded)
   def shuffle(_body), do: :erlang.nif_error(:nif_not_loaded)
   def shuffle_dirty(_body), do: :erlang.nif_error(:nif_not_loaded)
   def hello(_body), do: :erlang.nif_error(:nif_not_loaded)
