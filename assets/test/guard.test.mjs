@@ -25,28 +25,21 @@ test("a hook's value passes through, a throwing one gives its fallback, and the 
   expect(notes[2]).toMatch(/The focus lens failed to draw/)
 })
 
-test("a message that changes on every throw still raises one notice and one log; a hook that works again lifts its latch", () => {
+test("a message that changes on every throw still raises one notice, clipped to 200 characters with its whitespace folded, and one log; a hook that works again lifts its latch", () => {
   const { g, notes, logs } = setup()
-  for (let n = 0; n < 50; n++) g.run("desk", "view", boom(`boom ${n}`), null)
+  for (let n = 0; n < 50; n++) g.run("desk", "view", boom(`start ${n}\n\n  ${"x".repeat(5000)}`), null)
   expect(notes.length).toBe(1)
   expect(logs.length).toBe(1)
+  const inside = notes[0].match(/\((.*)\)\. Reload/)[1]
+  expect(inside.length === CLIP && inside.startsWith("start 0 x") && notes[0].length < 300).toBeTruthy()
   expect(logs[0][0]).toBe("the desk lens failed to draw")
-  expect(logs[0][1] instanceof Error && logs[0][1].message === "boom 0").toBeTruthy()
+  expect(logs[0][1] instanceof Error && logs[0][1].message.startsWith("start 0\n")).toBeTruthy()
   g.run("desk", "view", () => "ok", undefined)
   expect(!g.failing("desk", "view")).toBeTruthy()
   g.run("desk", "view", boom("down again"), undefined)
   expect(notes.length).toBe(2)
   expect(logs.length).toBe(2)
   expect(notes[1]).toMatch(/down again/)
-})
-
-test("the notice clips the message to 200 characters and folds its whitespace", () => {
-  const { g, notes } = setup()
-  g.run("world", "after", boom(`start\n\n  ${"x".repeat(5000)}`), undefined)
-  const inside = notes[0].match(/\((.*)\)\. Reload/)[1]
-  expect(inside.length).toBe(CLIP)
-  expect(inside.startsWith("start x")).toBeTruthy()
-  expect(notes[0].length < 300).toBeTruthy()
 })
 
 test("odd thrown values are told, never thrown again from the catch", () => {

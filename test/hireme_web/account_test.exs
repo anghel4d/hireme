@@ -10,50 +10,44 @@ defmodule HiremeWeb.AccountTest do
 
   # The account's trail rows, their meta as the trail view shows it.
   defp rows(account_id) do
-    Repo.all(from(e in Hireme.Rows.Audit, where: e.account_id == ^account_id, order_by: e.id),
-      skip_account: true
-    )
-    |> Enum.map(&%{&1 | meta: Hireme.Audit.visible(&1.meta || %{}, &1.kind)})
+    q = from(e in Hireme.Rows.Audit, where: e.account_id == ^account_id, order_by: e.id)
+
+    for e <- Repo.all(q, skip_account: true),
+        do: %{e | meta: Hireme.Audit.visible(e.meta || %{}, e.kind)}
   end
 
   setup do
     %{session: s} = signed = sign_in()
-
-    Map.put(signed, :ctx, %{
-      account_id: s.account_id,
-      session_id: s.id,
-      ip: "127.0.0.1",
-      user_agent: "test"
-    })
+    ctx = %{account_id: s.account_id, session_id: s.id, ip: "127.0.0.1", user_agent: "test"}
+    Map.put(signed, :ctx, ctx)
   end
 
-  defp mint(ctx, p \\ %{}) do
-    Account.call("account.key.mint", Map.merge(%{"name" => "k", "preset" => "read_only"}, p), ctx)
-  end
+  defp call(ctx, method, params \\ %{}), do: Account.call("account." <> method, params, ctx)
 
-  defp pause(key_id) do
-    ApiKey
-    |> Repo.get(key_id, skip_account: true)
-    |> Ecto.Changeset.change(paused_at: Hireme.Store.now())
-    |> Repo.update!(skip_account: true)
-  end
+  defp mint(ctx, p \\ %{}),
+    do: call(ctx, "key.mint", Map.merge(%{"name" => "k", "preset" => "read_only"}, p))
 
-  defp paused?(key_id), do: Repo.get(ApiKey, key_id, skip_account: true).paused_at != nil
+  defp key(id), do: Repo.get(ApiKey, id, skip_account: true)
+
+  defp pause(id),
+    do:
+      Repo.update!(Ecto.Changeset.change(key(id), paused_at: Hireme.Store.now()),
+        skip_account: true
+      )
 
   test "a key's session, another account's session and a lapsed session are refused; a stale one must step up to unlink a way in or resume a key; a secret is shown once",
        %{session: s, ctx: ctx} do
     key_ctx = %{ctx | session_id: nil} |> Map.put(:key, %{id: 1})
 
-    for m <- ~w(account.overview account.watch account.key.mint account.session.revoke_others),
-        do: assert({:error, %{error: "scope"}} = Account.call(m, %{}, key_ctx))
+    for m <- ~w(overview watch key.mint session.revoke_others),
+        do: assert({:error, %{error: "scope"}} = call(key_ctx, m))
 
     %{session: other} = sign_in()
 
     assert {:error, %{error: "scope"}} =
-             Account.call("account.rename", %{"name" => "x"}, %{ctx | session_id: other.id})
+             call(%{ctx | session_id: other.id}, "rename", %{"name" => "x"})
 
-    assert {:error, %{error: "unknown_method"}} = Account.call("account.nope", %{}, ctx)
-
+    assert {:error, %{error: "unknown_method"}} = call(ctx, "nope")
     assert {:ok, %{key: key, secret: "hm_" <> _}} = mint(ctx, %{"preset" => "write_only"})
     assert key.preset == :write_only
     refute inspect(key) =~ ~r/secret_hash|token_hash|totp_secret|public_key|code_hash|salt/
@@ -61,26 +55,19 @@ defmodule HiremeWeb.AccountTest do
     pause(key.id)
     [identity] = Repo.with_account(s.account_id, fn -> Repo.all(Hireme.Rows.Identity) end)
     age(s, :authenticated_at, Hireme.Security.step_up_window() + 1)
-
-    assert {:error, %{error: "step_up"}} =
-             Account.call("account.identity.unlink", %{"id" => identity.id}, ctx)
-
-    assert {:error, %{error: "step_up"}} =
-             Account.call("account.key.resume", %{"id" => key.id}, ctx)
-
-    assert paused?(key.id)
-
+    assert {:error, %{error: "step_up"}} = call(ctx, "identity.unlink", %{"id" => identity.id})
+    assert {:error, %{error: "step_up"}} = call(ctx, "key.resume", %{"id" => key.id})
+    assert key(key.id).paused_at
     age(s, :last_seen_at, Hireme.Security.session_idle() + 1)
-    assert {:error, %{error: "session"}} = Account.call("account.rename", %{"name" => "x"}, ctx)
+    assert {:error, %{error: "session"}} = call(ctx, "rename", %{"name" => "x"})
   end
 
   property "no call on junk params raises; a malformed one answers an error; an expiry outside 1..3650 days or an id past 64 bits is refused, and refusals cost nothing",
            %{ctx: ctx} do
     methods =
-      ~w(account.rename account.key.mint account.key.change account.key.rename account.key.resume
-         account.key.revoke account.session.revoke account.identity.unlink account.totp.confirm
-         account.step_up.totp account.step_up.mail_code account.trusted_host.add account.trusted_host.remove
-         account.lease.revoke account.factor.remove)
+      ~w(rename key.mint key.change key.rename key.resume key.revoke session.revoke identity.unlink
+         totp.confirm step_up.totp step_up.mail_code trusted_host.add trusted_host.remove
+         lease.revoke factor.remove)
 
     junk =
       one_of([
@@ -100,20 +87,20 @@ defmodule HiremeWeb.AccountTest do
             max_runs: 60
           ) do
       # A well-typed id that names nothing may be an idempotent ok (a remove).
-      case Account.call(method, params, ctx) do
+      case call(ctx, method, params) do
         {:error, %{error: code}} -> assert is_binary(code)
         other -> assert {:ok, _} = other
       end
     end
 
     for {m, p} <- [
-          {"account.key.mint", %{"name" => %{"x" => 1}, "preset" => "read_only"}},
-          {"account.key.rename", %{"id" => 1, "name" => [1]}},
-          {"account.step_up.totp", %{"code" => %{}}},
-          {"account.totp.confirm", %{"code" => 5}},
-          {"account.session.revoke", %{"id" => "x"}}
+          {"key.mint", %{"name" => %{"x" => 1}, "preset" => "read_only"}},
+          {"key.rename", %{"id" => 1, "name" => [1]}},
+          {"step_up.totp", %{"code" => %{}}},
+          {"totp.confirm", %{"code" => 5}},
+          {"session.revoke", %{"id" => "x"}}
         ] do
-      assert {:error, %{error: code}} = Account.call(m, p, ctx)
+      assert {:error, %{error: code}} = call(ctx, m, p)
       assert is_binary(code)
     end
 
@@ -122,20 +109,17 @@ defmodule HiremeWeb.AccountTest do
 
     assert {:ok, %{key: %{expires_at: %DateTime{}}}} = mint(ctx, %{"expires_in_days" => 30})
     huge = %{"id" => 1_000_000_000_000_000_000_000_000_000, "preset" => "read_only"}
-
-    for _ <- 1..100,
-        do: assert({:error, %{error: "invalid"}} = Account.call("account.key.change", huge, ctx))
-
+    for _ <- 1..100, do: assert({:error, %{error: "invalid"}} = call(ctx, "key.change", huge))
     assert {:ok, _} = mint(ctx)
   end
 
   test "a write that changes nothing records nothing: a rename to the same name, a host already trusted however it is spelled; a name or note is bounded",
        %{session: s, ctx: ctx} do
-    add = &Account.call("account.trusted_host.add", %{"host" => &1, "note" => &2}, ctx)
-    {:ok, _} = Account.call("account.rename", %{"name" => "First"}, ctx)
+    add = &call(ctx, "trusted_host.add", %{"host" => &1, "note" => &2})
+    {:ok, _} = call(ctx, "rename", %{"name" => "First"})
     {:ok, %{trusted_host: %{id: id}}} = add.("levels.fyi", "n")
     cursor = length(rows(s.account_id))
-    {:ok, _} = Account.call("account.rename", %{"name" => "First"}, ctx)
+    {:ok, _} = call(ctx, "rename", %{"name" => "First"})
 
     for host <- ["levels.fyi", "LEVELS.FYI", "levels.fyi.", "https://levels.fyi/x"],
         do: assert({:ok, %{trusted_host: %{id: ^id}}} = add.(host, "n"))
@@ -143,7 +127,7 @@ defmodule HiremeWeb.AccountTest do
     assert length(rows(s.account_id)) == cursor
 
     assert {:error, %{error: "invalid"}} =
-             Account.call("account.rename", %{"name" => String.duplicate("é", 250)}, ctx)
+             call(ctx, "rename", %{"name" => String.duplicate("é", 250)})
 
     assert {:error, %{error: "invalid"}} = add.("example.org", String.duplicate("n", 501))
   end
@@ -153,34 +137,27 @@ defmodule HiremeWeb.AccountTest do
        %{ctx: ctx} do
     # Refused calls cost nothing; one trusted host is written, the 29 repeats given back.
     bad = %{"name" => "k", "read_mask" => 99, "write_mask" => 0}
-    for _ <- 1..70, do: {:error, _} = Account.call("account.key.mint", bad, ctx)
-
-    for _ <- 1..30,
-        do:
-          {:ok, _} =
-            Account.call("account.trusted_host.add", %{"host" => "levels.fyi", "note" => ""}, ctx)
-
+    for _ <- 1..70, do: {:error, _} = call(ctx, "key.mint", bad)
+    host = %{"host" => "levels.fyi", "note" => ""}
+    for _ <- 1..30, do: {:ok, _} = call(ctx, "trusted_host.add", host)
     parent = self()
 
-    results =
-      1..90
-      |> Enum.map(fn _ ->
+    minted =
+      for _ <- 1..90 do
         Task.async(fn ->
           Sandbox.allow(Repo, parent, self())
           mint(ctx)
         end)
-      end)
-      |> Enum.map(&Task.await(&1, 30_000))
+      end
 
+    results = Task.await_many(minted, 30_000)
     assert Enum.count(results, &match?({:ok, _}, &1)) == 59
     assert {:error, %{error: "rate_limited"}} = mint(ctx)
-
     # The budget spent, the owner still revokes.
     {:ok, %{key: %{id: id}}} = Enum.find(results, &match?({:ok, _}, &1))
-    assert {:ok, %{key: %{live: false}}} = Account.call("account.key.revoke", %{"id" => id}, ctx)
-    assert {:ok, _} = Account.call("account.session.revoke_others", %{}, ctx)
-
-    begun = for _ <- 1..31, do: Account.call("account.totp.begin", %{}, ctx)
+    assert {:ok, %{key: %{live: false}}} = call(ctx, "key.revoke", %{"id" => id})
+    assert {:ok, _} = call(ctx, "session.revoke_others")
+    begun = for _ <- 1..31, do: call(ctx, "totp.begin")
     assert Enum.count(begun, &match?({:ok, _}, &1)) == 30
     assert {:error, %{error: "rate_limited"}} = List.last(begun)
   end
@@ -205,10 +182,8 @@ defmodule HiremeWeb.AccountTest do
     record.(:revokes_coalesced, %{"counts" => %{"link_token" => %{"none" => 4}}, "token" => "t"})
     # An ordinary row's counts are data like any other, even in a counts shape.
     record.(:host_trusted, %{counts: %{token: 1, link_token: %{a: 1}}, host: "h"})
-
-    record.(:activity_coalesced, %{
-      "counts" => %{"agent_ops" => %{"7" => 3, "x" => "secret", "y" => %{"z" => 1}}, "k" => 5}
-    })
+    agent_ops = %{"7" => 3, "x" => "secret", "y" => %{"z" => 1}}
+    record.(:activity_coalesced, %{"counts" => %{"agent_ops" => agent_ops, "k" => 5}})
 
     # The lens's own list (assets/js/lenses/trail.ts, SHOWN), so a field the
     # strip would hide cannot vanish from the lens unnoticed. Every [field,
@@ -222,15 +197,9 @@ defmodule HiremeWeb.AccountTest do
     fields = named |> Enum.map(fn [_, f] -> f end) |> Enum.uniq()
     assert "left" in fields
     record.(:host_distrusted, Map.new(fields, &{&1, 1}))
-
     meta = for e <- rows(s.account_id), into: %{}, do: {e.kind, e.meta}
-
-    assert meta["link_redeemed"] == %{
-             "domain" => "example.com",
-             "nested" => %{"ok" => 1},
-             "list" => [%{"n" => 2}]
-           }
-
+    redeemed = %{"domain" => "example.com", "nested" => %{"ok" => 1}, "list" => [%{"n" => 2}]}
+    assert meta["link_redeemed"] == redeemed
     assert meta["revokes_coalesced"] == %{"counts" => %{"link_token" => %{"none" => 4}}}
     assert meta["host_trusted"] == %{"counts" => %{}, "host" => "h"}
     assert meta["activity_coalesced"] == %{"counts" => %{"agent_ops" => %{"7" => 3}}}
@@ -244,34 +213,23 @@ defmodule HiremeWeb.AccountTest do
   test "a key's lifecycle rows name the key; a pause outlives a mask change, lifts once on resume (recorded, the account told), and a revoked key cannot be resumed",
        %{session: s, ctx: ctx} do
     {:ok, %{key: key}} = mint(ctx)
-    {:ok, _} = Account.call("account.key.rename", %{"id" => key.id, "name" => "k2"}, ctx)
+    id = %{"id" => key.id}
+    {:ok, _} = call(ctx, "key.rename", Map.put(id, "name", "k2"))
     pause(key.id)
-
-    {:ok, _} =
-      Account.call("account.key.change", %{"id" => key.id, "preset" => "read_write"}, ctx)
-
-    assert paused?(key.id)
+    {:ok, _} = call(ctx, "key.change", Map.put(id, "preset", "read_write"))
+    assert key(key.id).paused_at
     Hireme.PubSub.subscribe(Hireme.Audit.topic(s.account_id))
-
-    assert {:ok, %{key: %{paused: false, paused_at: nil}}} =
-             Account.call("account.key.resume", %{"id" => key.id}, ctx)
-
-    assert_receive {:resume, {:key, id}} when id == key.id
+    assert {:ok, %{key: %{paused: false, paused_at: nil}}} = call(ctx, "key.resume", id)
+    assert_receive {:resume, {:key, resumed}} when resumed == key.id
     # Resuming a key that is not paused records nothing.
     before = length(rows(ctx.account_id))
-
-    assert {:ok, %{key: %{paused: false}}} =
-             Account.call("account.key.resume", %{"id" => key.id}, ctx)
-
+    assert {:ok, %{key: %{paused: false}}} = call(ctx, "key.resume", id)
     assert length(rows(ctx.account_id)) == before
     # A revoke clears the pause, and a revoked key cannot be resumed.
     pause(key.id)
-    {:ok, _} = Account.call("account.key.revoke", %{"id" => key.id}, ctx)
-    refute paused?(key.id)
-
-    assert {:error, %{error: "not_found"}} =
-             Account.call("account.key.resume", %{"id" => key.id}, ctx)
-
+    {:ok, _} = call(ctx, "key.revoke", id)
+    refute key(key.id).paused_at
+    assert {:error, %{error: "not_found"}} = call(ctx, "key.resume", id)
     lifecycle = ~w(api_key_created api_key_renamed api_key_changed key_resumed api_key_revoked)
     named = for e <- rows(ctx.account_id), e.kind in lifecycle, do: {e.kind, e.key_id}
     assert Enum.sort(named) == Enum.sort(Enum.map(lifecycle, &{&1, key.id}))

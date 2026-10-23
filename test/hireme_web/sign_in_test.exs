@@ -1,31 +1,14 @@
 defmodule HiremeWeb.SignInTest do
   use HiremeWeb.ConnCase, async: false
 
-  # A signed-in account with an authenticator app enrolled; a new sign-in to
-  # it is pending the factor. Answers `{pending token, totp seed, a recovery code}`.
-  defp owing_factor do
-    %{session: s, email: email} = sign_in()
-    Hireme.Repo.put_account(s.account_id)
-    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(s, "me")
-    raw = Base.decode32!(secret, padding: false)
-
-    {:ok, _, [recovery | _]} =
-      Hireme.Mfa.confirm_totp(s, NimbleTOTP.verification_code(raw), "phone")
-
-    {:ok, pending, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
-    {pending, raw, recovery, email}
-  end
-
   test "the sign-in page is plain HTML under a strict policy; an unknown page is a plain 404", %{
     conn: conn
   } do
     conn = get(conn, "/sign-in")
     assert html_response(conn, 200) =~ ~s(action="/sign-in/email")
     [csp] = get_resp_header(conn, "content-security-policy")
-    assert csp =~ "frame-ancestors 'none'"
-    assert csp =~ "script-src 'self' 'wasm-unsafe-eval'"
-    refute csp =~ "unsafe-inline"
-    refute csp =~ "'unsafe-eval'"
+    assert csp =~ "frame-ancestors 'none'" and csp =~ "script-src 'self' 'wasm-unsafe-eval'"
+    refute csp =~ "unsafe-inline" or csp =~ "'unsafe-eval'"
     assert %{status: 404, resp_body: "Not Found"} = get(build_conn(), "/nope")
   end
 
@@ -33,7 +16,8 @@ defmodule HiremeWeb.SignInTest do
        %{conn: conn} do
     {signed, token} = email_sign_in(conn, "web@example.com")
     assert html_response(get(build_conn(), "/sign-in/email", %{"token" => token}), 410)
-    {ticket, html} = ticket(signed)
+    html = signed |> recycle() |> get("/desk") |> html_response(200)
+    [_, ticket] = Regex.run(~r/name="hireme-ticket" content="([^"]+)"/, html)
     assert {:ok, _} = Hireme.Accounts.redeem_ticket(ticket)
     assert html =~ ~s(<div id="app"></div>)
   end
@@ -44,24 +28,24 @@ defmodule HiremeWeb.SignInTest do
       Enum.max_by(Hireme.Repo.all(Hireme.Rows.Session, skip_account: true), & &1.id)
     end
 
+    desk = &(&1 |> recycle() |> get("/desk"))
     cleared? = &(get_resp_header(&1, "clear-site-data") != [])
-
     {kept, _} = email_sign_in(conn, "kept@example.com", %{"remember" => "1"})
     s = age(newest.(), :last_seen_at, Hireme.Security.session_idle() + 60)
-    assert html_response(kept |> recycle() |> get("/desk"), 200)
+    assert html_response(desk.(kept), 200)
     age(s, :last_seen_at, Hireme.Security.session_idle(true) + 60)
-    out = kept |> recycle() |> get("/desk")
+    out = desk.(kept)
     assert redirected_to(out) == "/sign-in" and not cleared?.(out)
 
     {plain, _} = email_sign_in(build_conn(), "plain@example.com")
     age(newest.(), :last_seen_at, Hireme.Security.session_idle() + 60)
-    out = plain |> recycle() |> get("/desk")
+    out = desk.(plain)
     assert redirected_to(out) == "/sign-in" and cleared?.(out)
 
     {revoked, _} = email_sign_in(build_conn(), "revoked@example.com", %{"remember" => "1"})
     s = newest.()
     :ok = Hireme.Accounts.revoke_session(s.account_id, s.id)
-    assert cleared?.(revoked |> recycle() |> get("/desk"))
+    assert cleared?.(desk.(revoked))
   end
 
   test "every lens address serves the page to a signed-in browser and sends a visitor to sign in; the ticket endpoint wants the CSRF token; signing out ends the session on the server",
@@ -91,29 +75,40 @@ defmodule HiremeWeb.SignInTest do
   @tag window: :ceremony_session
   test "a session that owes its factor reaches only the factor page, which takes an app code or a recovery code, refuses a wrong one, and bounds its passkey options",
        %{conn: conn} do
-    {pending, raw, recovery, email} = owing_factor()
-    as = fn token -> signed_in(conn, token) end
+    # An account with an authenticator app enrolled; a new sign-in to it is pending the factor.
+    %{session: s, email: email} = sign_in()
+    Hireme.Repo.put_account(s.account_id)
+    {:ok, %{secret: secret}} = Hireme.Mfa.begin_totp(s, "me")
+    raw = Base.decode32!(secret, padding: false)
 
-    assert redirected_to(as.(pending) |> get("/desk")) == "/sign-in/factor"
-    assert html_response(as.(pending) |> get("/sign-in/factor"), 200) =~ "authenticator app"
+    {:ok, _, [recovery | _]} =
+      Hireme.Mfa.confirm_totp(s, NimbleTOTP.verification_code(raw), "phone")
+
+    pending = fn ->
+      elem(Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email}), 1)
+    end
+
+    as = &signed_in(conn, &1)
+    owing = pending.()
+    assert redirected_to(as.(owing) |> get("/desk")) == "/sign-in/factor"
+    assert html_response(as.(owing) |> get("/sign-in/factor"), 200) =~ "authenticator app"
 
     refused =
-      as.(pending) |> put_req_header("accept", "application/json") |> post("/api/wire/ticket")
+      as.(owing) |> put_req_header("accept", "application/json") |> post("/api/wire/ticket")
 
     assert refused.status in [401, 403]
-
-    wrong = as.(pending) |> post("/sign-in/factor/totp", %{"code" => "000000"})
+    wrong = as.(owing) |> post("/sign-in/factor/totp", %{"code" => "000000"})
     assert redirected_to(wrong) =~ "/sign-in/factor?error="
     code = NimbleTOTP.verification_code(raw, time: System.os_time(:second) + 30)
-    assert redirected_to(as.(pending) |> post("/sign-in/factor/totp", %{"code" => code})) == "/"
-    assert html_response(as.(pending) |> get("/desk"), 200)
+    assert redirected_to(as.(owing) |> post("/sign-in/factor/totp", %{"code" => code})) == "/"
+    assert html_response(as.(owing) |> get("/desk"), 200)
 
-    {:ok, other, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+    assert redirected_to(
+             as.(pending.())
+             |> post("/sign-in/factor/recovery", %{"code" => recovery})
+           ) == "/"
 
-    assert redirected_to(as.(other) |> post("/sign-in/factor/recovery", %{"code" => recovery})) ==
-             "/"
-
-    {:ok, third, _} = Hireme.Accounts.sign_in_with(:email, %{subject: email, display: email})
+    third = pending.()
     answers = for _ <- 1..31, do: as.(third) |> post("/sign-in/factor/webauthn")
     assert Enum.count(answers, &(&1.status == 200)) == 30
 
@@ -125,26 +120,19 @@ defmodule HiremeWeb.SignInTest do
   @tag window: [:link_peer, :oauth_peer]
   test "behind the local proxy the client is X-Real-IP (a ::ffff: v4 is that v4 peer); from elsewhere it is the peer; links and OAuth callbacks are bounded per peer; a user agent of invalid UTF-8 is no failure",
        %{conn: conn} do
-    ask = fn conn, ip, email ->
-      conn |> put_req_header("x-real-ip", ip) |> post("/sign-in/email", %{"email" => email})
-    end
-
+    ask = &(&1 |> put_req_header("x-real-ip", &2) |> post("/sign-in/email", %{"email" => &3}))
     for i <- 1..20, do: ask.(conn, "203.0.113.#{i}", "a#{i}@example.com")
     # Twenty distinct clients through one proxy are twenty peers, not one.
     assert ask.(conn, "203.0.113.99", "b@example.com").status == 200
-
     for _ <- 1..20, do: ask.(conn, "::ffff:198.51.100.1", "mapped@example.com")
     assert ask.(conn, "::ffff:198.51.100.2", "other@example.com").status == 200
     assert ask.(conn, "198.51.100.1", "again@example.com").status == 429
-
     spoofed = %{conn | remote_ip: {198, 51, 100, 7}}
     for _ <- 1..20, do: ask.(spoofed, "203.0.113.99", "c@example.com")
     assert ask.(spoofed, "203.0.113.99", "d@example.com").status == 429
-
     bad_ua = build_conn() |> put_req_header("user-agent", <<0xFF, 0xFE, "probe">>)
     assert get(bad_ua, "/sign-in").status == 200
     assert post(bad_ua, "/sign-in/email", %{"email" => "ua@example.com"}).status == 200
-
     old = Application.get_env(:hireme, :oauth)
     Application.put_env(:hireme, :oauth, github: [client_id: "id", client_secret: "secret"])
     on_exit(fn -> Application.put_env(:hireme, :oauth, old) end)

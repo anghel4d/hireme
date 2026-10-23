@@ -9,10 +9,10 @@ defmodule HiremeWeb.SessionTest do
 
   @peer %{peer_ip: "127.0.0.1", origin: nil, carrier: :ws}
 
-  defp open(peer \\ @peer) do
-    {:ok, state} = Session.open(peer)
-    state
-  end
+  defp open(peer \\ @peer), do: elem(Session.open(peer), 1)
+
+  defp hello(secret, peer \\ @peer),
+    do: Session.frame(Codec.encode_hello(:key, secret, "x"), open(peer))
 
   defp browser(s, snapshot \\ 0, schema_rev \\ 0) do
     hello = Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "b", snapshot, schema_rev)
@@ -38,92 +38,78 @@ defmodule HiremeWeb.SessionTest do
     end
   end
 
-  defp key(session, preset \\ :read_write) do
-    {:ok, %{key: key, secret: secret}} = Keys.mint(session, "agent", Keys.preset(preset))
-    {key, secret}
-  end
-
-  # A key's session past its HELLO: `{key, state}`.
+  # A key and its secret, and a session of it past its HELLO.
   defp keyed(s) do
-    {key, secret} = key(s)
-    {:push, _, state} = Session.frame(Codec.encode_hello(:key, secret, "test"), open())
-    {key, state}
+    {:ok, %{key: key, secret: secret}} = Keys.mint(s, "agent", Keys.preset(:read_write))
+    {:push, frames, state} = hello(secret)
+    {key, secret, frames, state}
   end
 
   defp reply(state, method, params) do
     {:push, [frame], _} = Session.frame(Codec.encode_rpc(1, method, JSON.encode!(params)), state)
 
-    %{
-      kind: :REPLY,
-      body: <<1::little-32, ok, 0::24, n::little-32, json::binary-size(n), _::binary>>
-    } = decode(frame)
+    <<1::little-32, ok, 0::24, n::little-32, json::binary-size(n), _::binary>> =
+      decode(frame).body
 
     {ok, JSON.decode!(json)}
   end
 
   test "a key's HELLO, taken or refused, is audited with the peer's address and user agent",
        %{session: s, account: a} do
-    {key, rw} = key(s)
+    {:ok, %{key: key, secret: rw}} = Keys.mint(s, "agent", Keys.preset(:read_write))
     peer = %{@peer | peer_ip: "198.51.100.9"} |> Map.put(:user_agent, "agent-under-test/1.0")
-    {:push, _, _} = Session.frame(Codec.encode_hello(:key, rw, "x"), open(peer))
-    {:stop, _, _, _} = Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open(peer))
+    {:push, _, _} = hello(rw, peer)
+    {:stop, _, _, _} = hello("hm_nope", peer)
+    kinds = ["wire_key", "wire_key_refused"]
+    fields = [:kind, :key_id, :account_id, :ip, :user_agent]
 
-    rows =
-      Repo.all(
-        from(r in Hireme.Rows.Audit,
-          where: r.kind in ["wire_key", "wire_key_refused"],
-          order_by: r.id,
-          select: {r.kind, r.key_id, r.account_id, r.ip, r.user_agent}
-        ),
-        skip_account: true
+    q =
+      from(r in Hireme.Rows.Audit,
+        where: r.kind in ^kinds,
+        order_by: r.id,
+        select: map(r, ^fields)
       )
 
+    ua = "agent-under-test/1.0"
+
     assert [
-             {"wire_key", kid, aid, "198.51.100.9", "agent-under-test/1.0"},
-             {"wire_key_refused", nil, _, "198.51.100.9", "agent-under-test/1.0"}
-           ] = rows
+             %{
+               kind: "wire_key",
+               key_id: kid,
+               account_id: aid,
+               ip: "198.51.100.9",
+               user_agent: ^ua
+             },
+             %{kind: "wire_key_refused", key_id: nil, ip: "198.51.100.9", user_agent: ^ua}
+           ] = Repo.all(q, skip_account: true)
 
     assert {kid, aid} == {key.id, a.id}
   end
 
   test "an exception while handling a HELLO ends the session and logs neither the frame nor the key",
        %{session: s} do
-    {_, rw} = key(s)
+    {:ok, %{secret: rw}} = Keys.mint(s, "agent", Keys.preset(:read_write))
 
-    Hireme.Repo.query!(
+    Repo.query!(
       "CREATE TRIGGER boom BEFORE INSERT ON audit WHEN NEW.kind = 'wire_key' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
       [],
       skip_account: true
     )
 
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        assert {:stop, :internal, [], _} =
-                 Session.frame(Codec.encode_hello(:key, rw, "x"), open())
-      end)
-
+    log = ExUnit.CaptureLog.capture_log(fn -> assert {:stop, :internal, [], _} = hello(rw) end)
     [_, public, secret_part] = Regex.run(~r/^hm_([^_]+)_(.+)$/, rw)
-    refute log =~ secret_part
-    refute log =~ public
+    refute log =~ secret_part or log =~ public
   end
 
   test "a refused HELLO says why: BYE revoked for a bad credential or a foreign origin, BYE restart for one past its address's failures, while a valid key from it is welcomed; a frame before HELLO is a protocol error",
        %{session: s} do
     assert {:stop, {:protocol, :hello_first}, [], _} = Session.frame(Codec.ping(:PING, 1), open())
-
-    assert {:stop, {:bye, :revoked}, [bye], _} =
-             Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
-
+    assert {:stop, {:bye, :revoked}, [bye], _} = hello("hm_nope")
     assert decode(bye).kind == :BYE
-    ticket = Hireme.Accounts.ticket(s)
-
-    assert {:stop, {:bye, :revoked}, _, _} =
-             Session.frame(
-               Codec.encode_hello(:ticket, ticket, "x"),
-               open(%{@peer | origin: "https://evil.example"})
-             )
-
-    {_, rw} = key(s)
+    ticket = Codec.encode_hello(:ticket, Hireme.Accounts.ticket(s), "x")
+    evil = open(%{@peer | origin: "https://evil.example"})
+    assert {:stop, {:bye, :revoked}, _, _} = Session.frame(ticket, evil)
+    {:ok, %{secret: rw}} = Keys.mint(s, "agent", Keys.preset(:read_write))
     :ets.delete_all_objects(Hireme.RateLimit)
     # The limiter's window is a fixed wall-clock minute: start with seconds
     # to spare, so the HELLOs that fill it and the one after share it.
@@ -131,22 +117,17 @@ defmodule HiremeWeb.SessionTest do
     if ms > 50_000, do: Process.sleep(60_000 - ms + 100)
 
     bad = fn ->
-      {:stop, {:bye, reason}, _, _} =
-        Session.frame(Codec.encode_hello(:key, "hm_nope", "x"), open())
-
+      {:stop, {:bye, reason}, _, _} = hello("hm_nope")
       reason
     end
 
     assert Enum.any?(1..200, fn _ -> bad.() == :restart end)
-
-    assert {:push, _, %{phase: :live}} = Session.frame(Codec.encode_hello(:key, rw, "x"), open())
+    assert {:push, _, %{phase: :live}} = hello(rw)
   end
 
   test "a browser's ticket makes the operator's session, holding the channel; a snapshot at the current rev resumes with a PATCH flagged END, one under another schema_rev gets a BOOT",
        %{session: s, account: a} do
-    {[_], []} =
-      run(a.id, op(:put, :items, %{kind: :skill, key: "s", title: "s"}))
-
+    ack!(a.id, op(:put, :items, %{kind: :skill, key: "s", title: "s"}))
     {:push, [welcome, boot], _} = browser(s)
     welcome = decode(welcome)
 
@@ -155,7 +136,6 @@ defmodule HiremeWeb.SessionTest do
 
     assert {sid, r, w, d, lease} == {s.id, 15, 15, 1, 1}
     assert decode(boot).kind == :BOOT
-
     {:push, [_, resumed], _} = browser(s, welcome.rev, Hireme.Schema.schema_rev())
     assert %{kind: :PATCH, flags: flags} = decode(resumed)
     assert Bitwise.band(flags, 2) == 2
@@ -167,34 +147,25 @@ defmodule HiremeWeb.SessionTest do
        %{session: s} do
     {:push, _, state} = browser(s)
     # The session row lapses without a broadcast: only a re-check would see it.
-    s
-    |> Ecto.Changeset.change(revoked_at: DateTime.utc_now() |> DateTime.truncate(:second))
-    |> Repo.update!(skip_account: true)
-
+    revoked = DateTime.utc_now() |> DateTime.truncate(:second)
+    Repo.update!(Ecto.Changeset.change(s, revoked_at: revoked), skip_account: true)
     assert {:ok, _} = Session.info({Hireme.Audit, :changed}, state)
     assert {:stop, {:bye, :revoked}, _, _} = Session.info({Hireme.Audit, :factors}, state)
   end
 
   test "each tick re-checks the key: one that expired mid-connection ends the session with BYE revoked",
        %{session: s} do
-    {key, state} = keyed(s)
+    {key, _, _, state} = keyed(s)
     assert {:push, [tick], state} = Session.info({Session, :tick}, state)
     assert decode(tick).kind == :TICK
-
-    key
-    |> Ecto.Changeset.change(
-      expires_at: DateTime.add(DateTime.utc_now(), -60) |> DateTime.truncate(:second)
-    )
-    |> Repo.update!(skip_account: true)
-
+    expired = DateTime.add(DateTime.utc_now(), -60) |> DateTime.truncate(:second)
+    Repo.update!(Ecto.Changeset.change(key, expires_at: expired), skip_account: true)
     assert {:stop, {:bye, :revoked}, [bye], _} = Session.info({Session, :tick}, state)
     assert <<0, 0::56, _::binary>> = decode(bye).body
   end
 
   test "a key's OPS flagged ATOMIC gather until the frame also flagged END and land as one transaction: one refused op writes none; WELCOME says the node takes them" do
-    %{session: s} = sign_in()
-    {_key, secret} = key(s)
-    {:push, frames, state} = Session.frame(Codec.encode_hello(:key, secret, "test"), open())
+    {_, _, frames, state} = keyed(sign_in().session)
     welcome = frames |> Enum.map(&decode/1) |> Enum.find(&(&1.kind == :WELCOME))
     assert <<_::binary-30, 1::little-16, _::binary>> = welcome.body
     # As over /mcp, an atomic burst needs a bulk contract that covers it.
@@ -210,29 +181,22 @@ defmodule HiremeWeb.SessionTest do
 
     corp = &op(:put, :corporations, %{domain: &1, name: &1})
     missing = op(:put, :corporations, %{name: "nowhere"}, target: 999_999)
-
+    landed = &Repo.aggregate(from(c in Hireme.Rows.Corporation, where: c.domain in ^&1), :count)
     {:ok, state} = sent.(corp.("burst-a.example"), 0x04, state)
     refute_receive {:sequencer, :verdicts, _, _, _}, 100
     {:ok, state} = sent.(missing, 0x06, state)
     assert_receive {:sequencer, :verdicts, _, [], nacks}
     assert Enum.map(nacks, &Hireme.Schema.refusal_name(&1.code)) == [:burst, :not_found]
-    refute Repo.exists?(from(c in Hireme.Rows.Corporation, where: c.domain == "burst-a.example"))
-
+    assert landed.(["burst-a.example"]) == 0
     {:ok, state} = sent.(corp.("burst-b.example"), 0x04, state)
     {:ok, _state} = sent.(corp.("burst-c.example"), 0x06, state)
     assert_receive {:sequencer, :verdicts, _, [_, _], []}
-
-    assert Repo.aggregate(
-             from(c in Hireme.Rows.Corporation,
-               where: c.domain in ["burst-b.example", "burst-c.example"]
-             ),
-             :count
-           ) == 2
+    assert landed.(["burst-b.example", "burst-c.example"]) == 2
   end
 
   test "malformed lease.claim params are refused type and the sequencer lives; a dead sequencer is BYE restart",
        %{session: s, account: a} do
-    {_, state} = keyed(s)
+    {_, _, _, state} = keyed(s)
     [{pid, _}] = Registry.lookup(Hireme.Sequencer.Registry, a.id)
 
     for params <- [

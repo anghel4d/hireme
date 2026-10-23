@@ -2,8 +2,8 @@ defmodule Hireme.McpCase do
   @moduledoc """
   Tests of MCP over HTTP (`HiremeWeb.Mcp`): requests to a running
   endpoint's `/mcp` under a fresh key, as an agent and as an attacker. A
-  client is `%{url, secret, sid}`; its session's event stream is read by a
-  linked process that forwards resource updates to the test.
+  client is `%{url, secret, sid, peer}`; its session's event stream is read
+  by a linked process that forwards resource updates to the test.
   """
 
   use ExUnit.CaseTemplate
@@ -33,18 +33,9 @@ defmodule Hireme.McpCase do
     {:ok, %{secret: secret}} = Keys.mint(s, "mcp", masks)
     p = %{url: url, secret: secret, sid: nil, peer: nil}
 
-    {200, headers, _} =
-      post(p, %{
-        jsonrpc: "2.0",
-        id: 0,
-        method: "initialize",
-        params: %{
-          protocolVersion: "2025-06-18",
-          capabilities: %{},
-          clientInfo: %{name: "test", version: "0"}
-        }
-      })
-
+    client = %{name: "test", version: "0"}
+    params = %{protocolVersion: "2025-06-18", capabilities: %{}, clientInfo: client}
+    {200, headers, _} = post(p, %{jsonrpc: "2.0", id: 0, method: "initialize", params: params})
     p = %{p | sid: header(headers, "mcp-session-id")}
     {202, _, _} = post(p, %{jsonrpc: "2.0", method: "notifications/initialized"})
     listen(p)
@@ -52,8 +43,8 @@ defmodule Hireme.McpCase do
   end
 
   @doc "One message POSTed: `{status, headers, body}`."
-  def post(p, msg, extra \\ []) do
-    request = {to_charlist(p.url), headers(p) ++ extra, ~c"application/json", JSON.encode!(msg)}
+  def post(p, msg) do
+    request = {to_charlist(p.url), headers(p), ~c"application/json", JSON.encode!(msg)}
 
     {:ok, {{_, status, _}, headers, body}} =
       :httpc.request(:post, request, [timeout: 120_000], body_format: :binary)
@@ -79,25 +70,17 @@ defmodule Hireme.McpCase do
     JSON.decode!(body)
   end
 
-  # The session's event stream, read by a linked process; it says when it is
-  # open, so nothing written after `mcp/2` returns goes unheard.
+  # The session's event stream, read by a linked process in its own httpc
+  # profile (so no request queues behind it on one connection); it says when
+  # it is open, so nothing written after `mcp/2` returns goes unheard.
   defp listen(p) do
     me = self()
 
     spawn_link(fn ->
-      # Its own profile, so no request queues behind the open stream on one connection.
       profile = :"mcp_stream_#{System.unique_integer([:positive])}"
       {:ok, _} = :inets.start(:httpc, profile: profile)
-
-      {:ok, ref} =
-        :httpc.request(
-          :get,
-          {to_charlist(p.url), headers(p)},
-          [],
-          [sync: false, stream: :self],
-          profile
-        )
-
+      request = {to_charlist(p.url), headers(p)}
+      {:ok, ref} = :httpc.request(:get, request, [], [sync: false, stream: :self], profile)
       sse(ref, me, "")
     end)
 
@@ -152,7 +135,5 @@ defmodule Hireme.McpCase do
     r
   end
 
-  def error?(%{"result" => %{"isError" => true}}), do: true
-  def error?(%{"error" => _}), do: true
-  def error?(_), do: false
+  def error?(r), do: match?(%{"result" => %{"isError" => true}}, r) or Map.has_key?(r, "error")
 end

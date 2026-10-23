@@ -11,28 +11,19 @@ defmodule Hireme.KernelTest do
   alias HiremeWeb.Wire.Codec
 
   setup do
-    apps = Schema.table(:applications)
     col = &Schema.column(:applications, &1).id
-
-    boot =
-      IO.iodata_to_binary(
-        Codec.block(apps.id, 2, [
-          {1, 1, [1, 2]},
-          {col.("no"), 1, [1, 2]},
-          {col.("stage"), 1, [2, 8]},
-          {col.("company"), 2, ["Acme", "Zed"]},
-          {col.("role"), 2, ["Engineer", "Engineer"]}
-        ])
-      )
-
+    names = [{col.("company"), 2, ["Acme", "Zed"]}, {col.("role"), 2, ["Engineer", "Engineer"]}]
+    cols = [{1, 1, [1, 2]}, {col.("no"), 1, [1, 2]}, {col.("stage"), 1, [2, 8]} | names]
+    boot = IO.iodata_to_binary(Codec.block(Schema.table(:applications).id, 2, cols))
     op = Hireme.WireCase.op(:command, :stage, %{stage: :closed}, target: 1).raw
-
     # As Hireme.Sequencer's domain check builds it.
+    now_s = (739_528 - 719_528) * 86_400
+
     ctx = %{
       actor: :key,
       key_id: 7,
       now_day: 739_528,
-      now_s: (739_528 - 719_528) * 86_400,
+      now_s: now_s,
       session_label: "agent",
       held_ids: [1, 2],
       target: 1
@@ -43,7 +34,7 @@ defmodule Hireme.KernelTest do
 
   defp judged(k, op, ctx), do: elem(Kernel.judge(k, op, ctx), 0)
 
-  test "the sequencer's ctx judges, as the agent for a key and as the operator for a human",
+  test "the sequencer's ctx judges, as the agent for a key and as the operator for a human; any other ctx is badarg",
        %{k: k, op: op, ctx: ctx} do
     events = Schema.table(:events).id
     actor = Schema.column(:events, "actor").id
@@ -57,9 +48,7 @@ defmodule Hireme.KernelTest do
     assert actor_of.(%{ctx | actor: :human, key_id: nil}) == [Codec.enum_code("actor", :operator)]
     # The last day a date holds, 9999-12-31.
     assert {:ok, _} = judged(k, op, %{ctx | now_day: 3_652_424})
-  end
 
-  test "any other ctx is badarg", %{k: k, op: op, ctx: ctx} do
     bad =
       Enum.map(~w(actor key_id now_day now_s held_ids)a, &Map.delete(ctx, &1)) ++
         [

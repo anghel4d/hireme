@@ -42,6 +42,9 @@ async function step(name, pages, fn) {
   }
 }
 
+/** `fn(p)`, with `p` (a page or a context) closed however it ends. */
+const closing = async (p, fn) => { try { return await fn(p) } finally { await p.close() } };
+
 /** An MCP client over HTTP (the node's /mcp): `call(tool, args)` answers the tool's text. */
 function mcp(key) {
   let sid = null, next = 1;
@@ -308,108 +311,87 @@ const lensText = async (p) => (await p.locator("#lens").innerText()).replace(/\s
 const notices = (p) => p.locator(".notices").innerText();
 const noticeCount = (p, text) => p.locator(".notices .notice", { hasText: text }).count();
 
-await step("a view that throws after a restore shows its error line and one notice, never restoring", pages, async () => {
-  // The desk draws through the kernel's arrange (fa1be36), so that is where its view fails.
-  const p = await faulted("arrange");
-  try {
-    const t = await until(async () => { const x = await lensText(p); return /failed to draw/.test(x) ? x : ""; }, "the lens's error line");
-    await sleep(1500);
-    if (/Restoring the desk/.test(await lensText(p))) throw new Error("still restoring");
-    const n = await noticeCount(p, "failed to draw");
-    if (n !== 1) throw new Error(`${n} "failed to draw" notices, not one`);
-    if ((await p.locator('nav a[href="/world/corporations"]').count()) !== 1) throw new Error("the nav did not paint");
-    return `lens "${t.trim().slice(0, 60)}", one notice, nav painted`;
-  } finally { await p.close() }
-});
+// The desk draws through the kernel's arrange (fa1be36), so that is where its view fails.
+await step("a view that throws after a restore shows its error line and one notice, never restoring", pages, async () => closing(await faulted("arrange"), async (p) => {
+  const t = await until(async () => { const x = await lensText(p); return /failed to draw/.test(x) ? x : ""; }, "the lens's error line");
+  await sleep(1500);
+  if (/Restoring the desk/.test(await lensText(p))) throw new Error("still restoring");
+  const n = await noticeCount(p, "failed to draw");
+  if (n !== 1) throw new Error(`${n} "failed to draw" notices, not one`);
+  if ((await p.locator('nav a[href="/world/corporations"]').count()) !== 1) throw new Error("the nav did not paint");
+  return `lens "${t.trim().slice(0, 60)}", one notice, nav painted`;
+}));
 
-await step("an opened application's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => {
-  // Its own signed-in context and snapshot, so nothing the other pages did is in it.
-  const own = await browser.newContext(VIEW);
-  try {
-    const p0 = await own.newPage();
-    await signIn(p0);
-    await p0.goto(`${BASE}/desk`);
-    await until(async () => (await cards(p0)) >= 20, "20 article.app-card");
-    await sleep(6000); // the snapshot is saved
-    const no = (await p0.locator("#lens article.app-card .no").first().textContent()).replace("#", "").trim();
-    const p = await faulted("application", { context: own, path: `/desk/${no}` });
-    await until(async () => /desk lens failed to (load|draw)/.test(await notices(p)), "the desk lens's failure notice");
-    await sleep(1500);
-    const t = await lensText(p);
-    if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
-    const n = await noticeCount(p, "desk lens failed");
-    if (n !== 1) throw new Error(`${n} desk failure notices, not one`);
-    if (!p.consoleErrors.some((x) => x.includes("desk lens failed"))) throw new Error("not logged to the console");
-    return `one notice, logged, lens "${t.trim().slice(0, 60)}"`;
-  } finally { await own.close() }
-});
+// Its own signed-in context and snapshot, so nothing the other pages did is in it.
+await step("an opened application's derive trapping after a restore paints its failure with one notice, logged, never restoring", pages, async () => closing(await browser.newContext(VIEW), async (own) => {
+  const p0 = await own.newPage();
+  await signIn(p0);
+  await p0.goto(`${BASE}/desk`);
+  await until(async () => (await cards(p0)) >= 20, "20 article.app-card");
+  await sleep(6000); // the snapshot is saved
+  const no = (await p0.locator("#lens article.app-card .no").first().textContent()).replace("#", "").trim();
+  const p = await faulted("application", { context: own, path: `/desk/${no}` });
+  await until(async () => /desk lens failed to (load|draw)/.test(await notices(p)), "the desk lens's failure notice");
+  await sleep(1500);
+  const t = await lensText(p);
+  if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
+  const n = await noticeCount(p, "desk lens failed");
+  if (n !== 1) throw new Error(`${n} desk failure notices, not one`);
+  if (!p.consoleErrors.some((x) => x.includes("desk lens failed"))) throw new Error("not logged to the console");
+  return `one notice, logged, lens "${t.trim().slice(0, 60)}"`;
+}));
 
-await step("a trap in ingest while loading says the kernel did not load, never restoring", pages, async () => {
-  const p = await faulted("ingest");
-  try {
-    await until(async () => /did not load/.test(await notices(p)), '"The kernel did not load" notice');
-    await sleep(1500);
-    const t = await lensText(p);
-    if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
-    return `lens "${t.trim().slice(0, 60)}"`;
-  } finally { await p.close() }
-});
+await step("a trap in ingest while loading says the kernel did not load, never restoring", pages, async () => closing(await faulted("ingest"), async (p) => {
+  await until(async () => /did not load/.test(await notices(p)), '"The kernel did not load" notice');
+  await sleep(1500);
+  const t = await lensText(p);
+  if (/Restoring the desk/.test(t)) throw new Error(`lens: ${t.slice(0, 80)}`);
+  return `lens "${t.trim().slice(0, 60)}"`;
+}));
 
-await step("a view throwing a new long message each time raises one clipped notice and one console error, no repaint loop", pages, async () => {
-  const p = await faulted("arrange", { changing: true });
-  try {
-    await until(async () => /failed to draw/.test(await notices(p)), "the notice");
-    const count = () => p.evaluate(() => document.querySelectorAll(".notices .notice").length);
-    const before = await count();
-    await sleep(3000);
-    const after = await count();
-    const shown = await p.locator(".notices .notice", { hasText: "failed to draw" }).allInnerTexts();
-    if (shown.length !== 1 || after !== before) throw new Error(`${shown.length} draw notices; notices ${before} -> ${after}`);
-    if (shown[0].length >= 400) throw new Error(`a notice of ${shown[0].length} characters`);
-    const logged = p.consoleErrors.filter((x) => x.includes("failed to draw")).length;
-    if (logged !== 1) throw new Error(`${logged} console errors, not one`);
-    return `1 notice (${shown[0].length} chars), steady at ${after}, 1 console error`;
-  } finally { await p.close() }
-});
+await step("a view throwing a new long message each time raises one clipped notice and one console error, no repaint loop", pages, async () => closing(await faulted("arrange", { changing: true }), async (p) => {
+  await until(async () => /failed to draw/.test(await notices(p)), "the notice");
+  const count = () => p.evaluate(() => document.querySelectorAll(".notices .notice").length);
+  const before = await count();
+  await sleep(3000);
+  const after = await count();
+  const shown = await p.locator(".notices .notice", { hasText: "failed to draw" }).allInnerTexts();
+  if (shown.length !== 1 || after !== before) throw new Error(`${shown.length} draw notices; notices ${before} -> ${after}`);
+  if (shown[0].length >= 400) throw new Error(`a notice of ${shown[0].length} characters`);
+  const logged = p.consoleErrors.filter((x) => x.includes("failed to draw")).length;
+  if (logged !== 1) throw new Error(`${logged} console errors, not one`);
+  return `1 notice (${shown[0].length} chars), steady at ${after}, 1 console error`;
+}));
 
 // Each lens hook (enter, view, after) that runs a trapping export must fail
 // into its notice, not out of the frame. The desk's enter resolves an opened
 // application by number in the replica (kernel lookup, over the ids_ptr
 // export), so that is the export its enter runs: trapped once the desk is drawn.
-await step("enter: from a drawn desk to an opened application with the replica's ids trapping, it shows its failure and the load notice", pages, async () => {
-  const p = await faulted("ids_ptr", { gated: true });
-  try {
-    await until(async () => (await cards(p)) >= 20, "the desk drawn");
-    const no = (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
-    await p.evaluate(() => { window.__trap = true });
-    await p.evaluate((no) => { history.pushState(null, "", `/desk/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
-    await until(async () => /desk lens failed to load/.test(await notices(p)), '"desk lens failed to load" notice');
-    const t = await lensText(p);
-    if (!/failed to draw/.test(t) || (await cards(p)) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
-    return `lens "${t.trim().slice(0, 40)}", load notice`;
-  } finally { await p.close() }
-});
+await step("enter: from a drawn desk to an opened application with the replica's ids trapping, it shows its failure and the load notice", pages, async () => closing(await faulted("ids_ptr", { gated: true }), async (p) => {
+  await until(async () => (await cards(p)) >= 20, "the desk drawn");
+  const no = (await desk.locator(`#lens article.app-card[data-id="${cardId}"] .no`).textContent()).replace("#", "").trim();
+  await p.evaluate(() => { window.__trap = true });
+  await p.evaluate((no) => { history.pushState(null, "", `/desk/${no}`); dispatchEvent(new PopStateEvent("popstate")) }, no);
+  await until(async () => /desk lens failed to load/.test(await notices(p)), '"desk lens failed to load" notice');
+  const t = await lensText(p);
+  if (!/failed to draw/.test(t) || (await cards(p)) !== 0) throw new Error(`lens: ${t.slice(0, 80)}`);
+  return `lens "${t.trim().slice(0, 40)}", load notice`;
+}));
 
 // No lens has a refresh hook since every read is the replica's (the PATCH redraws what it moved), so
 // the refresh step that trapped one is retired with the hook.
-await step("after: the desk's cards failing to fill (card traps) raises the update notice, the board drawn", pages, async () => {
-  const p = await faulted("card");
-  try {
-    await until(async () => /desk lens failed to update/.test(await notices(p)), '"desk lens failed to update" notice');
-    const n = await cards(p);
-    if (n < 20) throw new Error(`${n} card shells`);
-    return `${n} card shells, update notice`;
-  } finally { await p.close() }
-});
+await step("after: the desk's cards failing to fill (card traps) raises the update notice, the board drawn", pages, async () => closing(await faulted("card"), async (p) => {
+  await until(async () => /desk lens failed to update/.test(await notices(p)), '"desk lens failed to update" notice');
+  const n = await cards(p);
+  if (n < 20) throw new Error(`${n} card shells`);
+  return `${n} card shells, update notice`;
+}));
 
-await step("the same page, unwrapped, restores and shows its cards", pages, async () => {
-  const p = await ctx.newPage();
-  try {
-    await p.goto(`${BASE}/desk`);
-    await until(async () => (await cards(p)) >= 20, "20 article.app-card");
-    return "20 cards";
-  } finally { await p.close() }
-});
+await step("the same page, unwrapped, restores and shows its cards", pages, async () => closing(await ctx.newPage(), async (p) => {
+  await p.goto(`${BASE}/desk`);
+  await until(async () => (await cards(p)) >= 20, "20 article.app-card");
+  return "20 cards";
+}));
 
 // RFC 6238 (SHA-1, 30 s, 6 digits) from a base32 secret, for a step not yet spent (the server refuses
 // a replayed one): it waits for the next step when the last code used this one.
@@ -428,41 +410,38 @@ async function totp(secret) {
 // The account page's live views take deltas: a factor added or removed elsewhere in the list leaves the
 // others shown (they once vanished: the kernel replaced the view with the PATCH's one row). Last, as it
 // enrolls the account's first factor.
-await step("the account page keeps its factors through live changes: an app, a passkey added, then removed", pages, async () => {
-  const p = await ctx.newPage();
-  try {
-    const cdp = await ctx.newCDPSession(p);
-    await cdp.send("WebAuthn.enable");
-    await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
-    await p.goto(`${BASE}/account`);
-    await p.waitForSelector('#lens [data-act="totp-begin"]');
-    await p.click('#lens [data-act="totp-begin"]');
-    const secret = (await p.locator("#lens .totp code.secret").textContent()).trim();
-    await p.fill('#lens .totp input[name="code"]', await totp(secret));
-    await p.locator("#lens .totp button.primary").click();
-    await p.waitForSelector(".reveal");
-    await p.click('[data-act="reveal-done"]');
-    const listed = async () => (await p.locator('#lens [data-key="factors"] li').allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim()).join(" | ");
-    // A factor change may ask for a fresh factor first: the app's next code answers.
-    const stepUp = async () => {
-      await sleep(800);
-      if (await p.locator("#lens .step-up").count()) {
-        await p.fill('#lens form[data-act="step-totp"] input[name="code"]', await totp(secret));
-        await p.locator('#lens form[data-act="step-totp"] button').click();
-      }
-    };
-    await p.fill('#lens form[data-act="passkey"] input[name="name"]', "Key A");
-    await p.locator('#lens form[data-act="passkey"] button').click();
-    await stepUp();
-    await until(async () => /Authenticator/.test(await listed()) && /Key A/.test(await listed()), "the app and the passkey both listed");
-    const both = await listed();
-    await p.locator('#lens [data-key="factors"] li', { hasText: "Key A" }).locator('[data-act="open"]').click();
-    await p.locator('#lens [data-act="factor-remove"]').click();
-    await stepUp();
-    await until(async () => { const l = await listed(); return /Authenticator/.test(l) && !/Key A/.test(l); }, "only the app listed");
-    return `${both} -> ${await listed()}`;
-  } finally { await p.close() }
-});
+await step("the account page keeps its factors through live changes: an app, a passkey added, then removed", pages, async () => closing(await ctx.newPage(), async (p) => {
+  const cdp = await ctx.newCDPSession(p);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
+  await p.goto(`${BASE}/account`);
+  await p.waitForSelector('#lens [data-act="totp-begin"]');
+  await p.click('#lens [data-act="totp-begin"]');
+  const secret = (await p.locator("#lens .totp code.secret").textContent()).trim();
+  await p.fill('#lens .totp input[name="code"]', await totp(secret));
+  await p.locator("#lens .totp button.primary").click();
+  await p.waitForSelector(".reveal");
+  await p.click('[data-act="reveal-done"]');
+  const listed = async () => (await p.locator('#lens [data-key="factors"] li').allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim()).join(" | ");
+  // A factor change may ask for a fresh factor first: the app's next code answers.
+  const stepUp = async () => {
+    await sleep(800);
+    if (await p.locator("#lens .step-up").count()) {
+      await p.fill('#lens form[data-act="step-totp"] input[name="code"]', await totp(secret));
+      await p.locator('#lens form[data-act="step-totp"] button').click();
+    }
+  };
+  await p.fill('#lens form[data-act="passkey"] input[name="name"]', "Key A");
+  await p.locator('#lens form[data-act="passkey"] button').click();
+  await stepUp();
+  await until(async () => /Authenticator/.test(await listed()) && /Key A/.test(await listed()), "the app and the passkey both listed");
+  const both = await listed();
+  await p.locator('#lens [data-key="factors"] li', { hasText: "Key A" }).locator('[data-act="open"]').click();
+  await p.locator('#lens [data-act="factor-remove"]').click();
+  await stepUp();
+  await until(async () => { const l = await listed(); return /Authenticator/.test(l) && !/Key A/.test(l); }, "only the app listed");
+  return `${both} -> ${await listed()}`;
+}));
 
 agent?.stop();
 await browser.close();

@@ -12,48 +12,38 @@ defmodule HiremeWeb.BlobsTest do
   # letters), a ToUnicode map per font, glyphs placed one by one, deflated.
   defp pdf(lines) do
     n = length(lines)
+    hex16 = &(&1 |> Integer.to_string(16) |> String.pad_leading(4, "0"))
 
     gids =
-      Enum.map(lines, fn l ->
-        l
-        |> String.codepoints()
-        |> Enum.uniq()
-        |> Enum.with_index(3)
-        |> Map.new(fn {g, i} -> {g, hex16(i)} end)
-      end)
+      for l <- lines,
+          do: l |> String.codepoints() |> Enum.uniq() |> Enum.with_index(3) |> Map.new()
 
     cmap = fn gid ->
-      pairs =
-        Enum.map_join(gid, "\n", fn {g, c} ->
-          "<#{c}> <#{Base.encode16(:unicode.characters_to_binary(g, :utf8, {:utf16, :big}))}>"
-        end)
-
+      utf16 = &Base.encode16(:unicode.characters_to_binary(&1, :utf8, {:utf16, :big}))
+      pairs = Enum.map_join(gid, "\n", fn {g, c} -> "<#{hex16.(c)}> <#{utf16.(g)}>" end)
       "begincmap\n#{map_size(gid)} beginbfchar\n#{pairs}\nendbfchar\nendcmap"
     end
 
     content =
-      lines
-      |> Enum.zip(gids)
+      Enum.zip(lines, gids)
       |> Enum.with_index()
       |> Enum.map_join("\n", fn {{l, gid}, i} ->
-        shown = l |> String.codepoints() |> Enum.map_join(" 7.5 0 Td ", &"<#{gid[&1]}> Tj")
+        shown =
+          l |> String.codepoints() |> Enum.map_join(" 7.5 0 Td ", &"<#{hex16.(gid[&1])}> Tj")
+
         "BT /F#{i} 12 Tf 1 0 0 -1 40 #{60 + 16 * i} Tm #{shown} ET"
       end)
 
-    names = Enum.map_join(0..(n - 1), " ", &"/F#{&1} #{5 + &1} 0 R")
+    fonts = Enum.map_join(0..(n - 1), " ", &"/F#{&1} #{5 + &1} 0 R")
+    font = &"<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode #{5 + n + &1} 0 R >>"
 
     objects =
       [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << #{names} >> >> >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << #{fonts} >> >> >>",
         stream(content)
-      ] ++
-        Enum.map(
-          0..(n - 1),
-          &"<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode #{5 + n + &1} 0 R >>"
-        ) ++
-        Enum.map(gids, &stream(cmap.(&1)))
+      ] ++ Enum.map(0..(n - 1), font) ++ Enum.map(gids, &stream(cmap.(&1)))
 
     body =
       objects
@@ -67,8 +57,6 @@ defmodule HiremeWeb.BlobsTest do
     z = :zlib.compress(text)
     "<< /Length #{byte_size(z)} /Filter /FlateDecode >>\nstream\n" <> z <> "\nendstream"
   end
-
-  defp hex16(n), do: n |> Integer.to_string(16) |> String.pad_leading(4, "0")
 
   defp docx(paragraphs) do
     ps = Enum.map_join(paragraphs, &"<w:p><w:r><w:t>#{&1}</w:t></w:r></w:p>")
@@ -93,32 +81,32 @@ defmodule HiremeWeb.BlobsTest do
   end
 
   defp sha(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
-  defp body(conn), do: JSON.decode!(conn.resp_body)
 
   test "a key with the corpus bit keeps a file once and reads it back named; without the bit, or another account's, it is refused" do
     %{session: s} = sign_in()
     {:ok, %{secret: rw}} = Keys.mint(s, "rw", Keys.preset(:read_write))
-    corpus = Grants.bit(Schema.table(:blobs))
-    others = Grants.all() - corpus
+    others = Grants.all() - Grants.bit(Schema.table(:blobs))
 
     {:ok, %{secret: blind}} =
       Keys.mint(s, "blind", %{read_mask: others, write_mask: others, may_delete: false})
 
-    %{session: s2} = sign_in()
-    {:ok, %{secret: stranger}} = Keys.mint(s2, "other", Keys.preset(:read_write))
-
+    {:ok, %{secret: stranger}} = Keys.mint(sign_in().session, "other", Keys.preset(:read_write))
     file = pdf(["Ana Pereira"])
     put = request(:put, "/blobs", {:key, rw}, file, @pdf)
     assert put.status == 201
-    assert body(put) == %{"sha" => sha(file), "bytes" => byte_size(file), "type" => @pdf}
-    assert request(:put, "/blobs", {:key, rw}, file, @pdf).status == 200
 
+    assert JSON.decode!(put.resp_body) == %{
+             "sha" => sha(file),
+             "bytes" => byte_size(file),
+             "type" => @pdf
+           }
+
+    assert request(:put, "/blobs", {:key, rw}, file, @pdf).status == 200
     got = request(:get, "/blobs/#{sha(file)}?name=Ana%20CV.pdf", {:key, rw})
     assert got.status == 200 and got.resp_body == file
     assert get_resp_header(got, "content-type") == [@pdf]
     assert [disposition] = get_resp_header(got, "content-disposition")
     assert disposition =~ ~r/^inline; / and disposition =~ "filename*=UTF-8''Ana%20CV.pdf"
-
     assert request(:put, "/blobs", {:key, blind}, file, @pdf).status == 403
     assert request(:get, "/blobs/#{sha(file)}", {:key, blind}).status == 403
     assert request(:get, "/blobs/#{sha(file)}", {:key, stranger}).status == 404
@@ -127,7 +115,6 @@ defmodule HiremeWeb.BlobsTest do
 
   test "a browser keeps a file under its session and CSRF token; a version of it carries the file's text, and a markdown version its body" do
     %{account: a, token: token} = sign_in()
-
     unsigned = Plug.Test.conn(:put, "https://www.example.com/blobs", "x") |> signed_in(token)
 
     assert_raise Plug.CSRFProtection.InvalidCSRFTokenError, fn ->
@@ -135,18 +122,16 @@ defmodule HiremeWeb.BlobsTest do
     end
 
     file = pdf(["Ana Pereira", "Rust engineer — Zürich"])
-    assert request(:put, "/blobs", {:session, token}, file, @pdf).status == 201
     word = docx(["Kernels &amp; GPUs", "Lisbon"])
-    assert request(:put, "/blobs", {:session, token}, word, @docx).status == 201
     broken = "%PDF-1.4\nnot a page in sight"
-    assert request(:put, "/blobs", {:session, token}, broken, @pdf).status == 201
+
+    for {bytes, type} <- [{file, @pdf}, {word, @docx}, {broken, @pdf}],
+        do: assert(request(:put, "/blobs", {:session, token}, bytes, type).status == 201)
+
+    root = &op(:put, :cv_roots, %{slug: &1, name: &1, format: &2})
 
     {[pdf_root, docx_root, md_root], []} =
-      run(a.id, [
-        op(:put, :cv_roots, %{slug: "pdf", name: "PDF", format: :pdf}),
-        op(:put, :cv_roots, %{slug: "docx", name: "Word", format: :docx}),
-        op(:put, :cv_roots, %{slug: "md", name: "Markdown", format: :markdown})
-      ])
+      run(a.id, [root.("pdf", :pdf), root.("docx", :docx), root.("md", :markdown)])
 
     version = &op(:put, :cv_versions, Map.put(&2, :root_id, &1.id))
 
@@ -160,9 +145,7 @@ defmodule HiremeWeb.BlobsTest do
       ])
 
     rows =
-      Repo.with_account(a.id, fn ->
-        Repo.all(from(v in Hireme.Rows.CvVersion, order_by: v.id))
-      end)
+      Repo.with_account(a.id, fn -> Repo.all(from(v in Hireme.Rows.CvVersion, order_by: v.id)) end)
 
     assert [p1, d1, p2, m1, m2] = rows
 
@@ -172,7 +155,6 @@ defmodule HiremeWeb.BlobsTest do
     assert {d1.n, d1.text, d1.blob_type} == {1, "Kernels & GPUs\nLisbon", @docx}
     assert {p2.n, p2.text} == {2, nil}
     assert {m1.n, m1.text, m2.n, m2.text} == {1, "# Ana\n\nRust", 2, "# Ana Pereira"}
-
     {[], [nack]} = run(a.id, version.(pdf_root, %{blob_sha: String.duplicate("0", 64)}))
     assert nack.refusal == :blob_missing
   end

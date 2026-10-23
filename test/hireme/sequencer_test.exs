@@ -87,20 +87,21 @@ defmodule Hireme.SequencerTest do
     {:ok, hostile, ""} =
       Codec.op(Codec.encode_op({41, :put, 1, t.id, 0, nil, [{domain.id, 1, 7}]}))
 
+    c = &op(:put, :corporations, &1, &2)
+    huge = String.duplicate("x", 1_048_577)
+
     cases = [
-      {op(:put, :corporations, %{domain: "r2.example"}), :column},
-      {op(:put, :corporations, %{name: "X"}, target: 999_999_999), :not_found},
-      {op(:put, :corporations, %{domain: "r.example", name: "R"}, keyed: true, create_only: true),
-       :natural_key},
-      {op(:put, :corporations, %{name: "Y"}, target: corp.id, expect_rev: 7), :rev},
+      {c.(%{domain: "r2.example"}, []), :column},
+      {c.(%{name: "X"}, target: 999_999_999), :not_found},
+      {c.(%{domain: "r.example", name: "R"}, keyed: true, create_only: true), :natural_key},
+      {c.(%{name: "Y"}, target: corp.id, expect_rev: 7), :rev},
       {op(:drop, :applications, %{}, target: app.id, expect_rev: 99), :rev},
       {op(:command, :note, %{stage: :discovered, body: "n"}, target: app.id, expect_rev: 99),
        :rev},
-      {op(:put, :corporations, %{headcount: 5}, target: corp.id), :freshness},
-      {op(:put, :corporations, %{about: "x"}, target: corp.id, expect_rev: 1), :source_missing},
+      {c.(%{headcount: 5}, target: corp.id), :freshness},
+      {c.(%{about: "x"}, target: corp.id, expect_rev: 1), :source_missing},
       {op(:command, :stage, %{stage: :reply}, target: app.id), :stage},
-      {op(:put, :applications, %{notes: String.duplicate("x", 1_048_577)}, target: app.id),
-       :too_large},
+      {op(:put, :applications, %{notes: huge}, target: app.id), :too_large},
       # An event's author is the server's, whatever the cells say; a command's
       # required param, absent or empty, is missing.
       {op(:put, :events, %{application_id: app.id, kind: "note", actor: :operator}), :column},
@@ -366,10 +367,7 @@ defmodule Hireme.SequencerTest do
     secret =
       ~w(token_hash secret_hash totp_secret totp_last_step credential_id public_key sign_count aaguid subject)
 
-    refute Enum.any?(
-             Map.keys(model),
-             &(&1 in ~w(sessions api_keys factors recovery_codes audit op_ledger))
-           )
+    assert Map.take(model, ~w(sessions api_keys factors recovery_codes audit op_ledger)) == %{}
 
     for {t, rows} <- model,
         {_, row} <- rows,
@@ -421,10 +419,7 @@ defmodule Hireme.SequencerTest do
 
     # Last: a pid holds one subscription, and this one becomes the key's.
     {_, as_key} = boot(a.id, 992, Grants.key(key))
-
-    assert Enum.all?(as_key, fn {t, rows} ->
-             not String.starts_with?(t, "acct_") or rows == %{}
-           end)
+    assert for({"acct_" <> _ = t, rows} <- as_key, rows != %{}, do: t) == []
   end
 
   test "a PATCH ships each row the columns it moved: one listing edited among renames carries one listing",

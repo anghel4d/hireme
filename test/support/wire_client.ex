@@ -84,18 +84,9 @@ defmodule Hireme.WireClient do
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/wire", [])
     {conn, status, resp_headers, early} = upgrade_response(conn, ref, nil, [], [])
     {:ok, conn, ws} = Mint.WebSocket.new(conn, ref, status, resp_headers)
-    s = %{owner: owner, conn: conn, ref: ref, ws: ws}
-
     # Frames the node sent at once (a BYE to a session past a cap) can ride
     # the same read as the 101; they are decoded now, not dropped.
-    ws =
-      Enum.reduce(early, ws, fn data, ws ->
-        {:ok, ws, messages} = Mint.WebSocket.decode(ws, data)
-        Enum.each(messages, &deliver(&1, s))
-        ws
-      end)
-
-    {:ok, %{s | ws: ws}}
+    {:ok, Enum.reduce(early, %{owner: owner, conn: conn, ref: ref, ws: ws}, &received(&2, &1))}
   end
 
   defp upgrade_response(conn, ref, status, headers, early) do
@@ -130,33 +121,27 @@ defmodule Hireme.WireClient do
 
       # The node already closed this carrier: that is the answer.
       {:error, conn, _reason} ->
-        send(s.owner, {:wire, self(), %{kind: :CLOSE, flags: 0, rev: 0, body: ""}})
+        deliver({:close, 0, ""}, s)
         {:reply, {:error, :closed}, %{s | ws: ws, conn: conn}}
     end
   end
 
   @impl GenServer
-  def handle_info(msg, s) do
+  def handle_info(msg, %{ref: ref} = s) do
     case Mint.WebSocket.stream(s.conn, msg) do
       {:ok, conn, responses} ->
-        s = %{s | conn: conn}
-
-        s =
-          Enum.reduce(responses, s, fn
-            {:data, ref, data}, s when ref == s.ref ->
-              {:ok, ws, messages} = Mint.WebSocket.decode(s.ws, data)
-              Enum.each(messages, &deliver(&1, s))
-              %{s | ws: ws}
-
-            _, s ->
-              s
-          end)
-
-        {:noreply, s}
+        data = for {:data, ^ref, data} <- responses, do: data
+        {:noreply, Enum.reduce(data, %{s | conn: conn}, &received(&2, &1))}
 
       _ ->
         {:noreply, s}
     end
+  end
+
+  defp received(s, data) do
+    {:ok, ws, messages} = Mint.WebSocket.decode(s.ws, data)
+    Enum.each(messages, &deliver(&1, s))
+    %{s | ws: ws}
   end
 
   defp deliver({:binary, frame}, s) do

@@ -48,15 +48,10 @@ defmodule HiremeWeb.ConnCase do
     |> Map.update!(:req_headers, &(kept ++ &1))
   end
 
-  @doc "The CSRF token a page answered with, as its hidden input or its meta tag; a conn not yet sent fetches /sign-in."
-  def csrf(conn) do
-    conn = if conn.state == :unset, do: get(conn, "/sign-in"), else: conn
-
-    [_, token] =
-      ~r/name="_csrf_token" value="([^"]+)"|name="csrf-token" content="([^"]+)"/
-      |> Regex.run(html_response(conn, 200))
-      |> Enum.reject(&(&1 == ""))
-
+  # The CSRF token a page answered with, as its hidden input or its meta tag.
+  defp csrf(conn) do
+    re = ~r/name="_csrf_token" value="([^"]+)"|name="csrf-token" content="([^"]+)"/
+    [_, token] = re |> Regex.run(html_response(conn, 200)) |> Enum.reject(&(&1 == ""))
     token
   end
 
@@ -78,13 +73,6 @@ defmodule HiremeWeb.ConnCase do
     signed = shown |> recycle() |> post("/sign-in/email/confirm", confirm)
     assert redirected_to(signed) == "/"
     {signed, token}
-  end
-
-  @doc "The wire ticket the desk serves the browser of `conn`, with the page."
-  def ticket(conn) do
-    html = conn |> recycle() |> get("/desk") |> html_response(200)
-    [_, ticket] = Regex.run(~r/name="hireme-ticket" content="([^"]+)"/, html)
-    {ticket, html}
   end
 
   def html_response(conn, status), do: body(conn, status, "text/html")
