@@ -147,8 +147,8 @@ defmodule Hireme.SequencerTest do
             resend <- list_of(integer(0..5), max_length: 6),
             max_runs: 15
           ) do
-      tag = System.unique_integer([:positive])
-      ops = for n <- names, do: op(:put, :corporations, %{domain: "#{n}.#{tag}.example", name: n})
+      domain = &"#{&1}.#{System.unique_integer([:positive])}.example"
+      ops = for n <- names, do: op(:put, :corporations, %{domain: domain.(n), name: n})
       {first, []} = run(a.id, ops)
       before = count(Corporation)
       {acks, []} = run(a.id, for(i <- resend, i < length(ops), do: Enum.at(ops, i)))
