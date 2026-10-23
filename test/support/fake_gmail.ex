@@ -626,44 +626,27 @@ defmodule Hireme.FakeGmail do
       else: reply(tag, {:bad, "Could not parse command", c})
   end
 
-  defp imap_line(line, c), do: command(lex(line, []), c)
+  defp imap_line(line, c), do: command(lex(line), c)
 
-  defp lex(<<>>, acc), do: Enum.reverse(acc)
-  defp lex(<<?\s, rest::binary>>, acc), do: lex(rest, acc)
-  defp lex(<<?(, rest::binary>>, acc), do: lex(rest, [:lp | acc])
-  defp lex(<<?), rest::binary>>, acc), do: lex(rest, [:rp | acc])
+  # Quoted strings (escapes undone), parentheses and words; a [section] is
+  # read whole: BODY.PEEK[HEADER.FIELDS (FROM TO)] is one word.
+  defp lex(line) do
+    for [tok] <- Regex.scan(~r/"(?:[^"\\]|\\.)*"|[()]|(?:[^\s()\[]|\[[^\]]*\])+/, line) do
+      case tok do
+        "(" ->
+          :lp
 
-  defp lex(<<?", rest::binary>>, acc) do
-    case quoted(rest, <<>>) do
-      {s, rest} -> lex(rest, [{:str, s} | acc])
-      :error -> Enum.reverse([:error | acc])
+        ")" ->
+          :rp
+
+        "\"" <> _ ->
+          {:str, Regex.replace(~r/\\(.)/s, binary_part(tok, 1, byte_size(tok) - 2), "\\1")}
+
+        word ->
+          {:atom, word}
+      end
     end
   end
-
-  defp lex(bin, acc) do
-    case word(bin, <<>>) do
-      {w, rest} -> lex(rest, [{:atom, w} | acc])
-      :error -> Enum.reverse([:error | acc])
-    end
-  end
-
-  defp quoted(<<?\\, ch, rest::binary>>, acc), do: quoted(rest, <<acc::binary, ch>>)
-  defp quoted(<<?", rest::binary>>, acc), do: {acc, rest}
-  defp quoted(<<ch, rest::binary>>, acc), do: quoted(rest, <<acc::binary, ch>>)
-  defp quoted(<<>>, _acc), do: :error
-
-  # A [section] is read whole: BODY.PEEK[HEADER.FIELDS (FROM TO)] is one word.
-  defp word(<<ch, _::binary>> = rest, acc) when ch in [?\s, ?(, ?)], do: {acc, rest}
-
-  defp word(<<?[, rest::binary>>, acc) do
-    case :binary.split(rest, "]") do
-      [inside, rest] -> word(rest, <<acc::binary, ?[, inside::binary, ?]>>)
-      [_] -> :error
-    end
-  end
-
-  defp word(<<ch, rest::binary>>, acc), do: word(rest, <<acc::binary, ch>>)
-  defp word(<<>>, acc), do: {acc, <<>>}
 
   defp command([], c), do: {:ok, c}
 

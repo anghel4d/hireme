@@ -13,6 +13,13 @@ defmodule Hireme.MailTest do
     )
   end
 
+  # An outbox row as the drain leaves it, for backlogs written directly.
+  defp row(account_id, address, cells) do
+    now = Hireme.Store.now()
+    base = %{account_id: account_id, address: address, meta: %{}, attempts: 0, next_at: now}
+    Map.merge(base, Map.merge(%{rev: 1, inserted_at: now, updated_at: now}, cells))
+  end
+
   test "a queued notice is sent once by a drain, one per linked address; an account is told about changes on its linked addresses" do
     %{account: a, email: email} = sign_in()
     :ok = Mail.enqueue(a.id, [email, "second@example.com"], :api_key_created, %{name: "ci"})
@@ -46,23 +53,8 @@ defmodule Hireme.MailTest do
     %{account: busy, email: busy_email} = sign_in()
     %{account: other, email: other_email} = sign_in()
     # A backlog from earlier windows, as rows: the budget bounds each window.
-    now = Hireme.Store.now()
-
-    rows =
-      for _ <- 1..120,
-          do: %{
-            account_id: busy.id,
-            address: busy_email,
-            kind: "api_key_created",
-            meta: %{name: "x"},
-            attempts: 0,
-            next_at: now,
-            rev: 1,
-            inserted_at: now,
-            updated_at: now
-          }
-
-    Repo.insert_all(Outbox, rows, skip_account: true)
+    backlog = row(busy.id, busy_email, %{kind: "api_key_created", meta: %{name: "x"}})
+    Repo.insert_all(Outbox, List.duplicate(backlog, 120), skip_account: true)
     :ok = Mail.enqueue(other.id, [other_email], :api_key_created, %{name: "y"})
     assert Mail.Outbox.drain() == 121
 
@@ -99,7 +91,7 @@ defmodule Hireme.MailTest do
   end
 
   @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
-  test "one event is one charge however many addresses hear of it; a key's revoke and a factor's notices reach the owner as themselves past the general budget" do
+  test "one event is one charge however many addresses hear of it; past the general budget a flood of key notices spends its own, and a revoke and a factor's notices reach the owner as themselves" do
     %{account: a, email: email} = sign_in()
     many = for i <- 1..40, do: "addr#{i}@example.com"
     :ok = Mail.enqueue(a.id, many, :api_key_renamed, %{name: "k"})
@@ -107,6 +99,8 @@ defmodule Hireme.MailTest do
     for i <- 1..29, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
     :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "past"})
     assert count(a.id, "digest") == 1
+    for i <- 1..15, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "n#{i}"})
+    assert count(a.id, "api_key_created") == 10
 
     :ok = Mail.enqueue(a.id, [email], :api_key_revoked, %{name: "leaked"})
     :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
@@ -116,39 +110,15 @@ defmodule Hireme.MailTest do
         do: assert(count(a.id, kind) == 1, kind)
   end
 
-  @tag window: [:notices, :factor_notices, :key_notices, :notice_rows]
-  test "a flood of key notices never turns a factor's notice into a digest" do
-    %{account: a, email: email} = sign_in()
-    for i <- 1..30, do: :ok = Mail.enqueue(a.id, [email], :api_key_renamed, %{name: "k#{i}"})
-    for i <- 1..15, do: :ok = Mail.enqueue(a.id, [email], :api_key_created, %{name: "n#{i}"})
-    :ok = Mail.enqueue(a.id, [email], :authenticator_added, %{kind: :totp})
-    assert count(a.id, "api_key_created") == 10
-    assert count(a.id, "authenticator_added") == 1
-  end
-
   @tag window: [:notices, :notice_rows]
   test "an account's outbox holds no more than its declared cap" do
     %{account: a} = sign_in()
     cap = Hireme.Schema.table("outbox").cap
     now = Hireme.Store.now()
-
-    sent = fn _ ->
-      %{
-        account_id: a.id,
-        address: "old@example.com",
-        kind: "api_key_renamed",
-        meta: %{},
-        attempts: 1,
-        next_at: now,
-        sent_at: now,
-        rev: 1,
-        inserted_at: now,
-        updated_at: now
-      }
-    end
+    sent = row(a.id, "old@example.com", %{kind: "api_key_renamed", attempts: 1, sent_at: now})
 
     for chunk <- Enum.chunk_every(1..(cap - 2), 3_000),
-        do: Repo.insert_all(Outbox, Enum.map(chunk, sent), skip_account: true)
+        do: Repo.insert_all(Outbox, List.duplicate(sent, length(chunk)), skip_account: true)
 
     # One digest already pending for a@, which leaves room for one row.
     :ok = Mail.enqueue(a.id, ["a@example.com"], :api_key_renamed, %{name: "k"})

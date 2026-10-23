@@ -31,7 +31,7 @@ defmodule Hireme.Gmail.MimeTest do
     end
   end
 
-  test "any bytes read to a well-formed answer and nothing raises: random bytes, broken mail, absurd nesting, 10,000 parts; a cut anywhere in the body keeps the header fields" do
+  test "any bytes read to a well-formed answer and nothing raises: random bytes, broken mail, absurd nesting, 10,000 parts; the header alone (as IMAP envelopes are fetched) or cut anywhere after reads its fields" do
     log =
       capture_log(fn ->
         for i <- 1..200 do
@@ -41,12 +41,15 @@ defmodule Hireme.Gmail.MimeTest do
           for input <- mutants(raw), do: well_formed!(input, seed)
 
           {at, n} = :binary.match(raw, ["\n\n", "\n\r\n"])
+          head = parse!(binary_part(raw, 0, at + 1))
+          assert {head.text, head.attachments, head.truncated} == {"", [], false}, inspect(seed)
 
           cut =
             parse!(binary_part(raw, 0, at + n + :rand.uniform(byte_size(raw) - at - n + 1) - 1))
 
           for field <- ~w(message_id in_reply_to refs from to cc reply_to subject date headers)a,
-              do: assert(cut[field] == want[field], "seed #{inspect(seed)}, #{field}")
+              m <- [head, cut],
+              do: assert(m[field] == want[field], "seed #{inspect(seed)}, #{field}")
         end
 
         well_formed!(nested(60), :nested)
@@ -56,23 +59,15 @@ defmodule Hireme.Gmail.MimeTest do
     refute log =~ "opaque"
   end
 
-  test "address lists: quoted names with commas, escapes, comments, groups, routes, encoded names, obsolete spacing; junk dropped, repeats once" do
+  test "address lists past what the builder writes: comments, a mailbox after a group, routes, an encoded comma, obsolete spacing; junk dropped, repeats once, the first of two senders" do
     for {value, want} <- [
-          {~s("Doe, Jane" <Jane.Doe@Example.COM>, bob@example.org),
-           [{"Doe, Jane", "jane.doe@example.com"}, {nil, "bob@example.org"}]},
-          {~s("Smith \\"Ace\\" John" <ace@example.com>),
-           [{~s(Smith "Ace" John), "ace@example.com"}]},
           {"carl@example.net (Carl Example), Dana Example <dana@example.net> (Recruiting)",
            [{"Carl Example", "carl@example.net"}, {"Dana Example", "dana@example.net"}]},
-          {"undisclosed-recipients:;", []},
           {"Hiring Team: a@example.com, B@example.org;, c@example.net",
            [{nil, "a@example.com"}, {nil, "b@example.org"}, {nil, "c@example.net"}]},
           {"<@relay.example.net,@hop.example.org:route@example.com>",
            [{nil, "route@example.com"}]},
-          {"=?utf-8?Q?Jos=C3=A9_P=C3=A9rez?= <jose@example.com>",
-           [{"José Pérez", "jose@example.com"}]},
           {"=?utf-8?Q?Doe,_Jane?= <jane@example.com>", [{"Doe, Jane", "jane@example.com"}]},
-          {~s("Zoë" <zoe@example.com>), [{"Zoë", "zoe@example.com"}]},
           {"john . doe @ example . com", [{nil, "john.doe@example.com"}]},
           {"no address, @example.com, user@, <>, ;", []},
           {"a@example.com, A@EXAMPLE.COM", [{nil, "a@example.com"}]}
@@ -89,16 +84,9 @@ defmodule Hireme.Gmail.MimeTest do
     assert Enum.map(m.to, & &1.addr) == ["x@example.com", "y@example.org"]
   end
 
-  test "dates in RFC 5322 and its obsolete forms read as unix seconds" do
+  test "dates in the obsolete forms the builder does not write read as unix seconds, and none outside 1970..2200" do
     for {value, want} <- [
-          {"Wed, 21 Oct 2026 10:00:00 +0000", ~U[2026-10-21 10:00:00Z]},
-          {"21 Oct 2026 10:00 -0700", ~U[2026-10-21 17:00:00Z]},
-          {"Thu, 1 Oct 26 10:00:00 GMT", ~U[2026-10-01 10:00:00Z]},
-          {"Thu, 21 Oct 99 10:00:00 EST", ~U[1999-10-21 15:00:00Z]},
-          {"Wed, 21 Oct 2026 10:00:00 PDT (Pacific)", ~U[2026-10-21 17:00:00Z]},
           {"Wed,21 Oct 2026 10:00:00 +0530", ~U[2026-10-21 04:30:00Z]},
-          {"Wed, 21 Oct 2026 10:00:00 UT", ~U[2026-10-21 10:00:00Z]},
-          {"Wed, 21 Oct 2026 10:00:00 Z", ~U[2026-10-21 10:00:00Z]},
           {"Wed, 21 Oct 2026 10:00:00 Q", ~U[2026-10-21 10:00:00Z]},
           {"(sent) Mon, 21 Oct 085 10:00:00 +0000", ~U[1985-10-21 10:00:00Z]},
           {"31 Feb 2026 10:00:00 +0000", nil},
@@ -138,12 +126,8 @@ defmodule Hireme.Gmail.MimeTest do
     assert first == hd(ids) and newest == Enum.take(ids, -length(newest)) and m.truncated
     assert size <= 8192 and size + byte_size(Enum.at(ids, -length(newest) - 1)) > 8192
 
-    <<cut::binary-size(2), rest::binary>> = "日本"
-
     for {raw, want} <- [
-          {"=?utf-8?Q?a?= =?UTF-8?q?b?=\r\n\t=?utf-8?B?Yw==?=", "abc"},
           {"=?utf-8?Q?a?= x =?utf-8?Q?b?=", "a x b"},
-          {"=?utf-8?B?#{Base.encode64(cut)}?= =?utf-8?B?#{Base.encode64(rest)}?=", "日本"},
           {"=?utf-8*en?Q?hello_world?=", "hello world"},
           {"=?ISO-8859-1?Q?caf=E9?= =?windows-1252?Q?=93ok=94?=", "café“ok”"},
           {"Re: =?utf-8?Q?broken", "Re: =?utf-8?Q?broken"},
@@ -158,10 +142,7 @@ defmodule Hireme.Gmail.MimeTest do
     assert head.([
              "List-Id: =?utf-8?Q?Careers_=C3=A9quipe?= <careers.example.com>",
              "List-Unsubscribe: <mailto:leave@example.com>,\r\n <https://example.com/leave>",
-             "Auto-Submitted: auto-replied",
-             "Precedence: bulk",
              "Return-Path: <bounce@example.org>",
-             "X-Autoreply: yes",
              "X-Auto-Response-Suppress: All",
              "X-Failed-Recipients: nobody@example.org",
              ~s(Content-Type: multipart/mixed;\r\n\tboundary="=?utf-8?Q?raw?="),
@@ -169,10 +150,7 @@ defmodule Hireme.Gmail.MimeTest do
            ]).headers == %{
              "list-id" => "Careers équipe <careers.example.com>",
              "list-unsubscribe" => "<mailto:leave@example.com>, <https://example.com/leave>",
-             "auto-submitted" => "auto-replied",
-             "precedence" => "bulk",
              "return-path" => "<bounce@example.org>",
-             "x-autoreply" => "yes",
              "x-auto-response-suppress" => "All",
              "x-failed-recipients" => "nobody@example.org",
              "content-type" => ~s(multipart/mixed; boundary="=?utf-8?Q?raw?=")
@@ -194,7 +172,6 @@ defmodule Hireme.Gmail.MimeTest do
           {type.("utf-16"), <<0, "h", 0xD8, 0, 0, "i">>, "h#{@bad}i"},
           {type.("utf-8"), <<"a", 0xFF, "b">>, "a#{@bad}b"},
           {type.("ISO-8859-15"), <<0xA4, "5">>, "€5"},
-          {type.(~s("windows-1252")), <<0x93, "hi", 0x94, " ", 0x80>>, "“hi” €"},
           {type.("latin1"), <<"caf", 0xE9>>, "café"},
           {type.("iso-8859-1"), <<0x93, "q", 0x94>>, "“q”"},
           {type.("us-ascii"), <<"caf", 0xE9>>, "café"},
@@ -224,8 +201,6 @@ defmodule Hireme.Gmail.MimeTest do
   end
 
   test "inline plain and HTML parts become the text in order; every other part is an attachment, listed by name, type and size and never decoded" do
-    pdf = :binary.copy(<<0, 1, 2, 3>>, 300)
-    calendar = "BEGIN:VCALENDAR\r\nEND:VCALENDAR"
     forwarded = "From: a@example.com\r\nSubject: inner\r\n\r\nforwarded body"
 
     parts = [
@@ -233,14 +208,8 @@ defmodule Hireme.Gmail.MimeTest do
       {~s(Content-Type: text/plain\r\nContent-Disposition: attachment; filename="notes.txt"),
        "not text"},
       {"Content-Type: text/html", "<p>Second.</p>"},
-      {"Content-Type: text/calendar; method=REQUEST", calendar},
-      {"Content-Type: application/pdf\r\nContent-Disposition: attachment;\r\n filename*0*=utf-8''r%C3%A9sum;\r\n filename*1*=%C3%A9.pdf\r\nContent-Transfer-Encoding: base64",
-       Base.encode64(pdf)},
-      {~s(Content-Type: image/png; name="=?utf-8?B?#{Base.encode64("日程.png")}?="\r\nContent-Transfer-Encoding: base64),
-       Base.encode64("png!")},
       {"Content-Type: message/rfc822", forwarded},
       {~s(Content-Type: text/plain; name="log.txt"), "also not text"},
-      {~s(Content-Type: application/octet-stream; name="a;b.bin"), "xyz"},
       {"Content-Type: text/plain", "Third."}
     ]
 
@@ -262,18 +231,13 @@ defmodule Hireme.Gmail.MimeTest do
 
     assert m.attachments == [
              %{name: "notes.txt", type: "text/plain", size: 8},
-             %{name: nil, type: "text/calendar", size: byte_size(calendar)},
-             %{name: "résumé.pdf", type: "application/pdf", size: byte_size(pdf)},
-             %{name: "日程.png", type: "image/png", size: 4},
              %{name: nil, type: "message/rfc822", size: byte_size(forwarded)},
-             %{name: "log.txt", type: "text/plain", size: 13},
-             %{name: "a;b.bin", type: "application/octet-stream", size: 3}
+             %{name: "log.txt", type: "text/plain", size: 13}
            ]
   end
 
   test "HTML reads as its visible text: block tags break lines, li items, cells, references, hidden elements dropped, links shown" do
     for {html, want} <- [
-          {"<p>One</p><p>Two</p>", "One\n\nTwo"},
           {"a<br>b<br/><br>c", "a\nb\n\nc"},
           {"<ul><li>x</li><li>y</li></ul>after", "- x\n- y\n\nafter"},
           {"<table><tr><td>Role</td><td>Engineer</td></tr><tr><td>Place</td><td>Remote</td></tr></table>",
@@ -292,51 +256,12 @@ defmodule Hireme.Gmail.MimeTest do
           {"unclosed <b>bold <i>and <a href='https://example.com/x'>link",
            "unclosed bold and link (https://example.com/x)"},
           {"a < b && c > d", "a < b && c > d"},
-          {"Sen<b>ior</b> &nbsp; Engineer", "Senior Engineer"}
+          {"Sen<b>ior</b> &nbsp; Engineer", "Senior Engineer"},
+          {~s(<a href="https://example.com/j?id=4&amp;utm=email" style="color:#1a73e8">Job</a> &middot; x),
+           "Job (https://example.com/j?id=4&utm=email) · x"}
         ] do
       assert text("Content-Type: text/html", html) == want, html
     end
-  end
-
-  test "an HTML-only ATS mail reads as its visible words, with the links its text hides" do
-    html = """
-    <!DOCTYPE html>
-    <html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Application received</title>
-    <style type="text/css">body { font-family: Helvetica; } .footer { color: #999999; }</style></head>
-    <body><table role="presentation" width="100%"><tr><td>
-    <p>Hi Ada,</p>
-    <p>Thank you for your interest in Example Corp! We wanted to let you know we received your application for <strong>Senior Backend Engineer</strong>, and we are delighted that you would consider joining our team.</p>
-    <p><a href="https://boards.greenhouse.example.com/examplecorp/jobs/4012345?gh_jid=4012345&amp;utm_source=email" style="color:#1a73e8">View the job post</a></p>
-    <p>Regards,<br>Example Corp Recruiting</p>
-    <img src="https://track.example.com/open.gif" width="1" height="1" alt="">
-    </td></tr></table>
-    <div class="footer">&copy; 2026 Example Corp &middot; <a href="https://example.com/privacy">Privacy</a></div>
-    </body></html>
-    """
-
-    m =
-      parse!(
-        "From: Example Corp Recruiting <no-reply@us.greenhouse-mail.example.com>\r\nTo: Ada Example <ada@example.com>\r\nSubject: Thank you for applying to Example Corp\r\nMessage-ID: <app.4012345@greenhouse.example.com>\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" <>
-          qp(html, "\r\n")
-      )
-
-    assert m.text =~
-             "Hi Ada,\n\nThank you for your interest in Example Corp! We wanted to let you know we received your application for Senior Backend Engineer, and we are delighted"
-
-    assert m.text =~
-             "View the job post (https://boards.greenhouse.example.com/examplecorp/jobs/4012345?gh_jid=4012345&utm_source=email)"
-
-    assert m.text =~ "Regards,\nExample Corp Recruiting"
-    assert m.text =~ "© 2026 Example Corp · Privacy (https://example.com/privacy)"
-
-    for hidden <- ["font-family", "Application received", "open.gif", "<", "&copy;"],
-        do: refute(m.text =~ hidden)
-
-    assert m.from == %{
-             name: "Example Corp Recruiting",
-             addr: "no-reply@us.greenhouse-mail.example.com"
-           }
   end
 
   test "a Gmail-style bounce reads as a report: failed, 5.1.1, the original Message-ID and the recipient" do
@@ -385,7 +310,6 @@ defmodule Hireme.Gmail.MimeTest do
         Content-Type: image/png; name="icon.png"
         Content-Disposition: attachment; filename="icon.png"
         Content-Transfer-Encoding: base64
-        Content-ID: <icon.png>
 
         #{png}
         --000000000000d4e5f6--
@@ -393,16 +317,12 @@ defmodule Hireme.Gmail.MimeTest do
         Content-Type: message/delivery-status
 
         Reporting-MTA: dns; googlemail.example.com
-        Received-From-MTA: dns; ada@example.com
-        Arrival-Date: Wed, 21 Oct 2026 09:00:00 -0700 (PDT)
 
         Final-Recipient: rfc822; Nobody@Example.org
         Action: failed
         Status: 5.1.1
-        Remote-MTA: dns; mx.example.org. (192.0.2.10, the server for the domain example.org.)
         Diagnostic-Code: smtp; 550-5.1.1 The email account that you tried to reach does not exist.
          Please try 550-5.1.1 double-checking the recipient's email address for typos.
-        Last-Attempt-Date: Wed, 21 Oct 2026 09:00:01 -0700 (PDT)
 
         --000000000000a1b2c3
         Content-Type: message/rfc822
@@ -443,43 +363,6 @@ defmodule Hireme.Gmail.MimeTest do
              {"nobody@example.org", "auto-replied"}
 
     assert m.in_reply_to == "CAOrig123@mail.gmail.example.com"
-  end
-
-  test "without a Message-ID the key is a hash both pipes compute alike, whatever transport headers or line endings a copy carries; the subject changes it" do
-    mail =
-      "From: Ada Example <Ada@Example.com>\r\nTo: hr@example.org\r\nSubject: Application\r\nDate: Wed, 21 Oct 2026 09:00:00 -0700\r\nContent-Type: text/plain\r\n\r\nHello, my application.\r\n"
-
-    gmail =
-      "Delivered-To: ada@example.com\r\nReceived: by 2001:db8::1 with SMTP id x; Wed, 21 Oct 2026 09:00:02 -0700\r\nX-Gm-Message-State: AOJu0Yx\r\nX-Google-Smtp-Source: AGHT+I\r\nARC-Seal: i=1; a=rsa-sha256; t=1792598402; cv=none\r\n" <>
-        mail
-
-    domain = "Received: from mx.example.net by node.example.com\r\n" <> mail
-
-    keys =
-      for raw <- [mail, gmail, domain, String.replace(domain, "\r\n", "\n")], do: parse!(raw).key
-
-    assert [key] = Enum.uniq(keys)
-    assert key =~ ~r/^sha256-[0-9a-f]{64}@hireme\.invalid$/
-
-    refute parse!(String.replace(mail, "Subject: Application", "Subject: Application (2)")).key ==
-             key
-
-    assert parse!("Message-ID: <Some.Id@Example.COM>\r\n" <> mail).key == "Some.Id@Example.COM"
-  end
-
-  test "a header block alone, as the IMAP envelope pass fetches it, parses with no text" do
-    envelope =
-      "From: Ada Example <ada@example.com>\r\nSubject: Re: Your application\r\nDate: Wed, 21 Oct 2026 10:00:00 +0000\r\nMessage-ID: <reply.1@example.org>\r\nIn-Reply-To: <sent.1@example.com>\r\n"
-
-    for raw <- [envelope <> "\r\n", envelope] do
-      m = parse!(raw)
-
-      assert {m.subject, m.message_id, m.in_reply_to, m.text, m.attachments, m.truncated} ==
-               {"Re: Your application", "reply.1@example.org", "sent.1@example.com", "", [],
-                false}
-
-      assert m.date == DateTime.to_unix(~U[2026-10-21 10:00:00Z])
-    end
   end
 
   test "bounds: 25 MiB; a 20 MiB attachment in well under a second; the text, a header and the header lines cut; nesting past 10 opaque; at most 200 parts" do
@@ -679,18 +562,18 @@ defmodule Hireme.Gmail.MimeTest do
       if chance(0.5),
         do: [
           "Received: from mx.example.net by mx.example.org; Wed, 21 Oct 2026 10:00:00 +0000",
-          "Delivered-To: ada@example.com"
+          "Delivered-To: ada@example.com",
+          "X-Gm-Message-State: AOJu0Yx",
+          "ARC-Seal: i=1; a=rsa-sha256; t=1792598402; cv=none"
         ],
         else: []
 
+    heads = [transport, from_lines, to_lines, cc_lines, reply_lines, subject_lines, date_lines]
+
     lines =
-      transport ++
-        from_lines ++
-        to_lines ++
-        cc_lines ++
-        reply_lines ++
-        subject_lines ++
-        date_lines ++ id_lines ++ thread_lines ++ kept_lines ++ ["MIME-Version: 1.0" | body_lines]
+      Enum.concat(
+        heads ++ [id_lines, thread_lines, kept_lines, ["MIME-Version: 1.0" | body_lines]]
+      )
 
     "Content-Type: " <> type = Enum.find(body_lines, &String.starts_with?(&1, "Content-Type: "))
 
@@ -1082,14 +965,10 @@ defmodule Hireme.Gmail.MimeTest do
     end
   end
 
-  defp wrap(s, nl) do
-    full = div(byte_size(s), 76) * 76
-    lines = for <<line::binary-size(76) <- binary_part(s, 0, full)>>, do: line
-    rest = binary_part(s, full, byte_size(s) - full)
-    Enum.join(if(rest == "", do: lines, else: lines ++ [rest]), nl)
-  end
+  defp wrap(s, nl), do: Regex.scan(~r/.{1,76}/s, s) |> Enum.map_join(nl, &hd/1)
 
-  # Quoted-printable, soft-broken under 76 characters.
+  # Quoted-printable, soft-broken under 76 characters: a token is at most
+  # three bytes, so 24 to a line.
   defp qp(bytes, nl) do
     bytes
     |> :binary.split("\n", [:global])
@@ -1104,18 +983,7 @@ defmodule Hireme.Gmail.MimeTest do
         end
 
       tokens = if List.last(tokens) == " ", do: List.replace_at(tokens, -1, "=20"), else: tokens
-
-      tokens
-      |> Enum.chunk_while(
-        {[], 0},
-        fn t, {acc, n} ->
-          if n + byte_size(t) > 72,
-            do: {:cont, Enum.reverse(acc), {[t], byte_size(t)}},
-            else: {:cont, {[t | acc], n + byte_size(t)}}
-        end,
-        fn {acc, _} -> {:cont, Enum.reverse(acc), {[], 0}} end
-      )
-      |> Enum.map_join("=" <> nl, &Enum.join/1)
+      tokens |> Enum.chunk_every(24) |> Enum.map_join("=" <> nl, &Enum.join/1)
     end)
   end
 end

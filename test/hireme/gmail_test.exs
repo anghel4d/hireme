@@ -97,6 +97,20 @@ defmodule Hireme.GmailTest do
     assert {:error, {:network, _}} = Imap.connect("localhost", fake.imap_port, :system)
   end
 
+  test "IDLE hears new mail at once, and DONE gives the connection back", %{fake: fake} do
+    {conn, _folder, _info} = imap(fake)
+    assert {:ok, [], conn} = Imap.idle(conn)
+
+    uid = FakeGmail.deliver(fake, mail(4))
+    socket = conn.socket
+    assert_receive {:ssl, ^socket, data}, 5_000
+    {:ok, pushed, conn} = Imap.idle_data(conn, data)
+    assert {:exists, 1} in pushed
+
+    assert {:ok, _, conn} = Imap.done(conn)
+    assert {:ok, [^uid], _} = Imap.since_uid(conn, uid)
+  end
+
   test "what is composed and delivered reads back the same from Gmail's Sent", %{fake: fake} do
     seed = String.to_integer(System.get_env("GMAIL_SEED") || "#{:rand.uniform(1_000_000)}")
     :rand.seed(:exsss, {seed, 7, 11})
@@ -336,19 +350,34 @@ defmodule Hireme.GmailSessionTest do
       "In-Reply-To: <#{to_id}>\r\nReferences: <m0@acme.example> <#{to_id}>\r\n\r\nThursday at ten, then.\r\n"
   end
 
+  defp notified?(kind), do: Enum.any?(Repo.all(Hireme.Rows.Outbox), &(&1.kind == kind))
+
   defp labels(%{labels: nil}), do: []
   defp labels(%{labels: l}), do: String.split(l, <<0x1F>>)
 
-  test "linking checks the password with one login, seals it, and the first sync makes the mailbox live",
+  test "linking checks the password with one login, seals it, and the first sync makes the mailbox live, reading back the backfill's window and no further",
        %{account: a, fake: fake} do
     assert {:error, :address} = Gmail.link(a.id, "someone@example.com", @password)
     assert {:error, :auth} = Gmail.link(a.id, @user, "wrong password here")
     assert box() == nil
 
+    # Two mails from the domain of a corporation the desk works with, which
+    # makes them the account's; one is older than the window.
+    {[_], []} = run(a.id, app(%{company: "Test Corp", role: "Staff Engineer"}))
+
+    mail =
+      &"From: jobs@test-corp.example\r\nSubject: Hi\r\nMessage-ID: <#{&1}@acme.example>\r\n\r\nHi\r\n"
+
+    old = DateTime.add(DateTime.utc_now(), -181 * 86_400)
+    FakeGmail.deliver(fake, mail.("old"), ["\\Inbox"], date: old)
+    FakeGmail.deliver(fake, mail.("new"))
+
     linked(a)
     assert box().address == @user and is_binary(box().secret)
     refute box().secret =~ "abcdefghijklmnop"
     assert [%{ok: false}, %{ok: true}, %{ok: true} | _] = FakeGmail.logins(fake)
+    assert item("new@acme.example")
+    refute item("old@acme.example")
   end
 
   test "a first contact under a key goes out once from the linked address with its CV and lands; a follow-up in its thread goes without",
@@ -477,7 +506,7 @@ defmodule Hireme.GmailSessionTest do
     assert is_integer(mission(m).gmail_msgid) and sent_in_gmail(fake) == 1
   end
 
-  test "unlinking hands the shots in flight back, their Message-IDs kept",
+  test "unlinking hands the shots in flight back, their Message-IDs kept; a secret its erase left behind goes at the sweep",
        %{account: a, fake: fake, operator: operator} do
     linked(a)
     {m, key} = armed(a, operator)
@@ -489,8 +518,18 @@ defmodule Hireme.GmailSessionTest do
     :ok = Gmail.unlink(a.id)
     assert eventually(fn -> mission(m).state == :fire_ready end)
     assert mission(m).last_error =~ "unlinked" and mission(m).message_id != nil
-    assert eventually(fn -> box().secret == nil end)
+    # The erase runs in the background, and the owner's notice is its last
+    # step: waited for, nothing of it outlives the test into the next one's
+    # database.
+    assert eventually(fn -> box().secret == nil and notified?("mailbox_unlinked") end)
     assert FakeGmail.sent(fake) == []
+
+    # A secret left behind, as by an erase that never ran.
+    :ok =
+      Sequencer.server_write(a.id, "mailboxes", nil, %{secret: "sealed", pipe_secret: "sealed"})
+
+    Gmail.sweep()
+    assert box().secret == nil and box().pipe_secret == nil
   end
 
   test "an inbound mail keeps what the type can hold: ten of each list, a refused address dropped, a refused sender replaced, or unknown",
@@ -536,19 +575,6 @@ defmodule Hireme.GmailSessionTest do
     Application.put_env(:hireme, Gmail, good)
     send(pid, :retry)
     assert eventually(fn -> box().status == :live end)
-  end
-
-  test "an unlink whose erase never ran is finished by the sweep", %{account: a} do
-    linked(a)
-    {:ok, _} = Gmail.command(a.id, "mailbox_state", 0, %{status: :unlinked, last_error: nil})
-    assert eventually(fn -> box().secret == nil end)
-
-    # A secret left behind, as by an erase that never ran.
-    :ok =
-      Sequencer.server_write(a.id, "mailboxes", nil, %{secret: "sealed", pipe_secret: "sealed"})
-
-    Gmail.sweep()
-    assert box().secret == nil and box().pipe_secret == nil
   end
 
   test "an id too long for one header line hands the shot back with the reason, sending nothing",

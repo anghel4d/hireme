@@ -76,24 +76,15 @@ defmodule HiremeWeb.MailInboundTest do
         do: refused?(deliver(@raw, headers), 401)
   end
 
-  test "an unknown pipe, a malformed pipe id, another Content-Type and a body over 25 MiB are refused" do
+  test "an unknown or malformed pipe, another Content-Type, a body over 25 MiB and a GET are refused; while ingestion is not ready or the account unavailable, 503, which the Worker retries" do
     refused?(deliver(@raw, signed(@raw), "ZZZZZZZZZZZZ"), 404)
     refused?(deliver(@raw, signed(@raw), "../etc"), 404)
     refused?(deliver(@raw, [{"content-type", "text/plain"} | tl(signed(@raw))]), 415)
     big = :binary.copy("a", 25 * 1024 * 1024 + 1)
     refused?(deliver(big, signed(big)), 413)
-  end
-
-  test "while ingestion is not ready or the account is unavailable the node answers 503, which the Worker retries" do
+    get = Plug.Test.conn(:get, "https://www.example.com/mail/inbound/#{@pipe}")
+    refused?(HiremeWeb.Endpoint.call(get, []), 405)
     for raw <- ["not ready\r\n", "unavailable\r\n"], do: refused?(deliver(raw, signed(raw)), 503)
-  end
-
-  test "a GET is not answered" do
-    conn =
-      Plug.Test.conn(:get, "https://www.example.com/mail/inbound/#{@pipe}")
-      |> HiremeWeb.Endpoint.call([])
-
-    refused?(conn, 405)
   end
 
   # The same vector is asserted by the Worker's test (workers/mail/test/sign.test.ts).

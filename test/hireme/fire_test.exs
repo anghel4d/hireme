@@ -3,7 +3,6 @@ defmodule Hireme.FireTest do
   # persisted by the sequencer as they are judged (docs/mail/kernel.md).
   use Hireme.WireCase, async: false
 
-  alias Hireme.Kernel.Nif
   alias Hireme.Rows
 
   # A key writes under a lease: a subscribed agent session holding the
@@ -12,16 +11,6 @@ defmodule Hireme.FireTest do
     {:ok, %{key: key}} = Hireme.Keys.mint(session, "agent", Hireme.Keys.preset(:read_write))
     {pid, _} = key_session(account_id, key, 950, %{"ids" => [app_id]})
     {pid, key.id}
-  end
-
-  # A read of the account's kernel, as the MCP makes one, with every domain.
-  defp read(account_id, op, args) do
-    req = JSON.encode!(Map.put(args, "op", op))
-
-    {:ok, {:ok, json}} =
-      Hireme.Sequencer.read(account_id, fn k, _ -> Nif.query(k.res, req, 0xFF, 0xFF, true) end)
-
-    JSON.decode!(json)
   end
 
   test "the operator's key fires a mission once: the shot lands, burns and submits its application, and a second is answered",
@@ -51,7 +40,7 @@ defmodule Hireme.FireTest do
     assert ask == "#{m.id}"
 
     # The operator makes the key over exactly what the review showed.
-    review = read(a.id, "fire_review", %{"missions" => ask})
+    {:ok, review} = Hireme.Gmail.query(a.id, "fire_review", %{"missions" => ask})
     assert [%{"eligible" => true, "hash" => hash}] = review["missions"]
 
     # Only the operator's browser session, stepped up, creates one.
