@@ -65,6 +65,15 @@ export function resetAfter<T>(form: HTMLFormElement, write: () => Promise<T>): P
 /** A form's fields by name, as text. */
 export const fields = (form: HTMLFormElement): Record<string, string> => Object.fromEntries([...new FormData(form)].map(([k, x]) => [k, String(x)]))
 
+/** `fn`'s value, or `or` when it throws (blocked storage, a malformed escape, a kernel still loading). */
+export function attempt<T>(fn: () => T, or: T): T {
+  try {
+    return fn()
+  } catch {
+    return or
+  }
+}
+
 /** A value as text: "" for null and undefined, a Date as its day. */
 export const str = (x: unknown): string => (x === null || x === undefined ? "" : x instanceof Date ? x.toISOString().slice(0, 10) : String(x))
 
@@ -80,11 +89,7 @@ export const flag = (name: string, on: boolean): Html => new Html(on ? ` ${name}
 export function unicodeHost(host: string): string {
   const u = host.split(".").map((l) => (l.startsWith("xn--") ? punyDecode(l.slice(4)) ?? l : l)).join(".")
   // In doubt (a decode the browser's own URL parser would not give back as this host), the xn-- form stands.
-  try {
-    return u === host || new URL(`http://${u}/`).hostname === host.toLowerCase() ? u : host
-  } catch {
-    return host
-  }
+  return attempt(() => (u === host || new URL(`http://${u}/`).hostname === host.toLowerCase() ? u : host), host)
 }
 /** One punycode label's Unicode (RFC 3492 decode, its xn-- prefix already off), or null when it is not punycode. */
 export function punyDecode(s: string): string | null {
@@ -123,12 +128,8 @@ export function href(url: string | null | undefined): string {
   // A backslash or a control character lets a browser read "/\\host" or "/<tab>/host" as another origin.
   if (/[\\\u0000-\u001f\u007f]/.test(url)) return "#"
   if (url.startsWith("/") && !url.startsWith("//")) return url
-  try {
-    const u = new URL(url)
-    return u.protocol === "https:" || u.protocol === "http:" || u.protocol === "mailto:" ? u.href : "#"
-  } catch {
-    return "#"
-  }
+  const u = attempt(() => new URL(url), null)
+  return u?.protocol === "https:" || u?.protocol === "http:" || u?.protocol === "mailto:" ? u.href : "#"
 }
 
 const KEY = "data-key"
@@ -165,13 +166,8 @@ export function morph(target: Element, next: Html): void {
   focused = null
   if (active instanceof HTMLElement && active !== document.activeElement && active.isConnected) {
     active.focus({ preventScroll: true })
-    if (field && caret) {
-      try {
-        field.setSelectionRange(caret[0], caret[1], caret[2] ?? undefined)
-      } catch {
-        // Not every input type has a selection (number, email).
-      }
-    }
+    // Not every input type has a selection (number, email).
+    if (field && caret) attempt(() => field.setSelectionRange(caret[0], caret[1], caret[2] ?? undefined), undefined)
   }
 }
 

@@ -9,7 +9,7 @@
 
 import type { Boot } from "./early.ts"
 import * as kernel from "./kernel.ts"
-import { guard, type Part } from "./guard.ts"
+import { guard } from "./guard.ts"
 import { EMPTY, html, morph, type Html } from "./morph.ts"
 import { LENSES, dismiss, format, go, model, notice, onRender, parse, schedule, set, type Lens } from "./state.ts"
 import { SCHEMA_REV } from "./gen/schema.ts"
@@ -62,9 +62,7 @@ function link(): Html {
  * The lenses that read the board derive wait for it after a snapshot restore, one paint later; every
  * lens that reads the replica waits for the kernel to load.
  */
-const DERIVES: readonly Lens[] = ["desk"]
-const REPLICA: readonly Lens[] = ["desk", "world", "outreach", "me", "account", "fire"]
-const waiting = (lens: Lens): boolean => (DERIVES.includes(lens) && kernel.warming()) || (REPLICA.includes(lens) && !rowsIn())
+const waiting = (lens: Lens): boolean => (lens === "desk" && kernel.warming()) || !rowsIn()
 
 /** Rows are in: a BOOT or PATCH reached the kernel, or it restored a snapshot. A loaded kernel with neither holds nothing to draw. */
 let framed = false
@@ -85,9 +83,6 @@ const hooks = guard(
   (text) => notice("error", text),
   (what, e) => console.error(`hireme: ${what}`, e),
 )
-const guarded = <T>(lens: Lens, part: Part, fn: () => T, fallback: T): T => hooks.run(lens, part, fn, fallback)
-
-const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
 
 // Every lens, once drawn, stays in the page when another is current, parked under
 // content-visibility: hidden, which keeps its style and layout: going back to it uncovers a
@@ -95,7 +90,7 @@ const lensView = (lens: Lens, v: View): Html => guarded(lens, "view", () => v.vi
 const parked = new Set<Lens>()
 
 const active = (lens: Lens, v: View | undefined): Html => html`<main id="lens" class="lens lens-${lens}" data-key="lens-${lens}">${
-  v ? lensView(lens, v)
+  v ? hooks.run(lens, "view", () => v.view(), html`<p class="error" role="alert">This view failed to draw.</p>`)
   : kernel.broken() ? html`<div class="empty"><p class="error" role="alert">This page could not load its data: the kernel did not load.</p>
       <p><a class="button" href="${format(model.address)}">Reload</a> If it keeps failing, sign out and sign in again.</p></div>`
   : html`<p class="empty">Restoring the desk…</p>`}</main>`
@@ -134,7 +129,7 @@ function render(): void {
     const fresh = model.address.lens !== enteredLens
     enteredLens = model.address.lens
     // A lens whose enter throws (focus derives there) still reaches morph, its failure told once.
-    guarded(model.address.lens, "enter", () => v?.enter?.(fresh), undefined)
+    hooks.run(model.address.lens, "enter", () => v?.enter?.(fresh), undefined)
     document.title = `${v?.title ?? "hireme"} · hireme`
   }
   // Markup is a function of the model, so the same markup as the last morph is the same page: skipped.
@@ -145,7 +140,7 @@ function render(): void {
   }
   const lens = document.getElementById("lens")
   // A lens whose view failed has nothing of its own on the page to keep current.
-  if (lens && !hooks.failing(model.address.lens, "view")) guarded(model.address.lens, "after", () => v?.after?.(lens), undefined)
+  if (lens && !hooks.failing(model.address.lens, "view")) hooks.run(model.address.lens, "after", () => v?.after?.(lens), undefined)
   // A control a lens just opened for editing takes focus once (autofocus does not fire for morphed-in markup).
   if (lens) mark(lens)
   const want = lens?.querySelector<HTMLElement>("[data-autofocus]")
@@ -171,9 +166,7 @@ function actOn(ev: Event): void {
     if (me.button !== 0 || me.metaKey || me.ctrlKey || me.shiftKey || me.altKey) return
     ev.preventDefault()
     const url = new URL(nav.href)
-    const next = parse(url.pathname, url.search)
-    go(next)
-    return
+    return go(parse(url.pathname, url.search))
   }
   const el = ev.type === "submit" ? (target as HTMLElement) : target.closest<HTMLElement>("[data-act]")
   if (!el) return
@@ -344,7 +337,6 @@ const wire = new Wire({
   },
 })
 kernel.attach(wire)
-
 
 void (async () => {
   await hw?.ready

@@ -10,7 +10,7 @@
 // echoing the review's digest so the key fires exactly what was read. Nothing on this page sends.
 
 import type { View } from "../app.ts"
-import { command, failed, page, query, Refused, row, type Row } from "../kernel.ts"
+import { ask, command, failed, page, Refused, row, type Row } from "../kernel.ts"
 import { EMPTY, flag, html, str, type Html } from "../morph.ts"
 import { go, model, notice, schedule } from "../state.ts"
 import { askStepUp, stepAct, stepUpPanel } from "./account.ts"
@@ -22,13 +22,6 @@ type Draft = { to?: string; cc?: string | null; subject?: string; body?: string;
 type Mission = { id: number; kind: string; target: string; state: string; application: { id: number; no: number; company: string; role: string; stage: string }; draft: Draft | null; cv_version_id: number | null; hash: string; eligible: boolean; why: string | null }
 type Review = { request: { id: number; missions: string; reason: string; requested_by: number | null; status: string } | null; missions: Mission[]; scope: string; count: number; digest: string }
 
-const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
-  try {
-    return query<T>(op as Parameters<typeof query>[0], params)
-  } catch {
-    return null
-  }
-}
 
 /** HH:MM:SS left until `at`, from the page's clock; "expired" once it passes. */
 function left(at: string): string {
@@ -59,7 +52,7 @@ function tick(): void {
 const ranges = (r: string): Html => (r === "" ? html`<span class="muted">none</span>` : html`<code>${r}</code>`)
 
 function liveKeys(): Html {
-  const keys = ask<{ keys: Key[] }>("live_keys", {})?.keys ?? []
+  const keys = ask<{ keys: Key[] }>("live_keys")?.keys ?? []
   return html`<section class="card" data-key="keys"><h2>Live fire keys</h2>
     ${keys.length === 0 ? html`<p class="empty">No live key: agents draft and prepare, and nothing they hold can fire.</p>` : html`<table class="grid compact"><thead><tr>
       <th scope="col">Key</th><th scope="col">Missions</th><th scope="col">Burned</th><th scope="col">Remaining</th><th scope="col">Left</th><th scope="col"></th></tr></thead>
@@ -96,7 +89,7 @@ export const WHY: Record<string, string> = {
   mailbox: "no live Gmail link to send from",
   cv_file: "a first email carries the CV as a file: pick a PDF or DOCX version for its application",
 }
-const KIND: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
+export const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
 
 /** The review being read: missions the operator unticked, and which key may use it, kept across redraws. */
 let reading = ""
@@ -139,7 +132,7 @@ function mission(m: Mission): Html {
   const on = m.eligible && !unticked.has(m.id)
   return html`<article class="card mission${m.eligible ? "" : " held"}" data-key="m${m.id}">
     <header><label class="check"><input type="checkbox" data-act="tick" data-on="change" data-id="${m.id}"${flag("checked", on)}${flag("disabled", !m.eligible)}>
-      <strong>#${m.id} ${KIND[m.kind] ?? m.kind}</strong></label>
+      <strong>#${m.id} ${ROUTE[m.kind] ?? m.kind}</strong></label>
       <a href="/desk/${m.application.no}" data-nav>${m.application.company}: ${m.application.role}</a>
 </header>
     <p>Target: <code>${m.target}</code></p>
@@ -202,7 +195,7 @@ async function create(): Promise<void> {
     notice("ok", `Fire key #${id} created over ${scope}.`)
     go({ lens: "fire", sub: "", q: new Map() })
   } catch (e) {
-    if (e instanceof Refused && e.code === "step_up") askStepUp("fire-create", () => void create())
+    if (e instanceof Refused && e.code === "step_up") askStepUp(create)
     else if (e instanceof Refused && e.code === "fire") {
       notice("error", "A mission changed since this review was drawn: read it again.")
     } else failed(e)
@@ -225,8 +218,8 @@ function view(): Html {
 const fire: View = {
   title: "Fire",
   view,
-  act(name, el, ev) {
-    if (stepAct(name, el, ev)) return
+  act(name, el) {
+    if (stepAct(name, el)) return
     const id = Number(el.dataset.id ?? 0)
     switch (name) {
       case "tick":

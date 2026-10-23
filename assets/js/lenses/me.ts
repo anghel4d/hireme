@@ -12,8 +12,8 @@
 
 import type { View } from "../app.ts"
 import { ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { command, drop, failed, ids, meId, page, put, putMe, query, value, type Input, type Row } from "../kernel.ts"
-import { EMPTY, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
+import { ask, command, drop, failed, ids, meId, page, put, putMe, value, type Input, type Row } from "../kernel.ts"
+import { EMPTY, attempt, esc, fields, flag, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, model, notice, query as setQuery, schedule, slug } from "../state.ts"
 import { appItem } from "./focus.ts"
 import { label } from "./world.ts"
@@ -32,12 +32,8 @@ const PARTS: [string, string][] = [["route", "Citizen or permit held 1, no permi
 export const figureName = (key: string): string => (key === "route" ? "Route" : key === "language" ? "Speaks your language" : label(key))
 /** The weights as saved: `{"<places metric>": w, "route": w, "language": w}`. */
 const weights = (): Record<string, unknown> => {
-  try {
-    const w: unknown = JSON.parse(mine("weights") || "{}")
-    return typeof w === "object" && w !== null ? (w as Record<string, unknown>) : {}
-  } catch {
-    return {}
-  }
+  const w: unknown = attempt(() => JSON.parse(mine("weights") || "{}"), {})
+  return typeof w === "object" && w !== null ? (w as Record<string, unknown>) : {}
 }
 
 /** The saved values are normalised ("de, fr" becomes "DE FR"): resetting the form lets its fields follow them. */
@@ -193,15 +189,9 @@ type Pick = { application: number; state: "default" | "matched" | "pinned" | "st
 type Check = { ok: boolean; error: { pos: number; len: number; msg: string } | null; shadowed: number[]; never_matches?: boolean }
 type Field = { path: string; type: "bool" | "text" | "num" | "day" | "code" | "enum" | "list"; values?: string[]; list_of?: string }
 
-/** A kernel answer, or null while the kernel cannot give it (still loading, or an older kernel). */
-function ask<T>(op: Parameters<typeof query>[0], params: Record<string, unknown>): T | null {
-  try {
-    return query<T>(op, params)
-  } catch {
-    return null
-  }
-}
-const picks = (): Pick[] => ask<{ picks: Pick[] }>("cv_picks", {})?.picks ?? []
+const picks = (): Pick[] => ask<{ picks: Pick[] }>("cv_picks")?.picks ?? []
+/** The fields a mask may test (the kernel's catalog). */
+const catalog = (): Field[] => ask<{ fields: Field[] }>("mask_fields")?.fields ?? []
 
 const rootName = (id: number | null): string => (id ? str(value("cv_roots", id, "name")) || `#${id}` : "none")
 const roots = (): number[] => [...ids("cv_roots")].sort((a, b) => rootName(a).localeCompare(rootName(b)))
@@ -430,7 +420,7 @@ function test(f: Field | undefined, op: string, raw: string): string {
 }
 
 function rulesView(): Html {
-  const fs = ask<{ fields: Field[] }>("mask_fields", {})?.fields ?? []
+  const fs = catalog()
   const rs = rules()
   const all = picks()
   const multi = all.filter((p) => p.state === "matched" && p.also.length > 0)
@@ -525,6 +515,7 @@ const meLens: View = {
   act(name, el, ev) {
     const id = Number(el.dataset.id ?? 0)
     const form = el as HTMLFormElement
+    const x = el instanceof HTMLFormElement ? fields(el) : {}
     switch (name) {
       case "me-draft":
         draft = fromForm(form)
@@ -538,7 +529,6 @@ const meLens: View = {
         return void requestAnimationFrame(() => el.closest("form")?.reset())
       case "me": {
         const d = fromForm(form)
-        const x = d.text
         const iso = countriesIn(x.residence ?? "").codes[0] ?? ""
         const place = iso === "" ? null : ask<{ rows: Row[] }>("find", { table: "places", where: { iso2: iso, kind: "country" }, cols: ["id"], limit: 1 })?.rows[0]
         if (iso !== "" && !place) return notice("warn", `No country ${iso} in the world tables yet.`)
@@ -546,10 +536,7 @@ const meLens: View = {
         drafts.drop("me")
         const codes = (k: string, regions = false): string | null => joined(countriesIn(x[k] ?? "", regions).codes)
         return save({
-          citizenships: codes("citizenships"),
-          work_permits: codes("work_permits"),
-          prefer: codes("prefer"),
-          avoid: codes("avoid"),
+          ...Object.fromEntries(["citizenships", "work_permits", "prefer", "avoid"].map((k) => [k, codes(k)])),
           notes: x.notes || null,
           residence_id: place ? Number(place.id) : null,
           regions: codes("regions", true),
@@ -565,17 +552,11 @@ const meLens: View = {
         }, form)
       }
       case "weights": {
-        const w: Record<string, number> = {}
-        for (const [k, x] of new FormData(form)) {
-          const n = Number(x)
-          if (x !== "" && Number.isFinite(n) && n !== 0) w[k] = n
-        }
-        return save({ weights: Object.keys(w).length === 0 ? null : JSON.stringify(w) })
+        const w = Object.entries(x).flatMap(([k, s]) => (s !== "" && Number.isFinite(Number(s)) && Number(s) !== 0 ? [[k, Number(s)]] : []))
+        return save({ weights: w.length === 0 ? null : JSON.stringify(Object.fromEntries(w)) })
       }
-      case "lang": {
-        const x = fields(form)
+      case "lang":
         return void resetAfter(form, () => put("languages", { level: x.level ?? "b2" }, { key: { code: (x.code ?? "").toLowerCase() } })).catch(failed)
-      }
       case "level":
         return void put("languages", { level: (el as HTMLSelectElement).value }, { id }).catch(failed)
       case "unlang":
@@ -627,16 +608,13 @@ const meLens: View = {
         return
       }
       case "bfield": {
-        const s = el as HTMLSelectElement
-        const fs = ask<{ fields: Field[] }>("mask_fields", {})?.fields ?? []
-        const f = fs.find((x) => x.path === s.value)
+        const f = catalog().find((x) => x.path === (el as HTMLSelectElement).value)
         const dl = document.getElementById("mask-values")
         if (dl) dl.innerHTML = (f?.values ?? []).map((x) => `<option value=":${esc(x)}">`).join("")
         return
       }
       case "build": {
-        const x = fields(form)
-        const f = (ask<{ fields: Field[] }>("mask_fields", {})?.fields ?? []).find((y) => y.path === x.path)
+        const f = catalog().find((y) => y.path === x.path)
         const t = test(f, x.op ?? "=", x.value ?? "")
         const sel = x.into === "new" ? '[data-key="newrule"] input[name=pattern]' : x.into === "mask" ? '[data-key="newmask"] input[name=pattern]' : `[data-key="u${(x.into ?? "").slice(1)}"] input[name=pattern]`
         const input = document.querySelector<HTMLInputElement>(`.me ${sel}`)
@@ -647,13 +625,9 @@ const meLens: View = {
         input.focus()
         return
       }
-      case "rule": {
-        const f = new FormData(form)
-        const x = fields(form)
-        return void put("cv_rules", { name: x.name || null, pattern: x.pattern ?? "", root_id: Number(x.root_id), enabled: f.has("enabled") }, { id }).catch(failed)
-      }
+      case "rule":
+        return void put("cv_rules", { name: x.name || null, pattern: x.pattern ?? "", root_id: Number(x.root_id), enabled: "enabled" in x }, { id }).catch(failed)
       case "newrule": {
-        const x = fields(form)
         const last = rules().at(-1)
         const position = last === undefined ? 10 : Number(value("cv_rules", last, "position") ?? 0) + 10
         return void resetAfter(form, () => put("cv_rules", { name: x.name || null, pattern: x.pattern ?? "", root_id: Number(x.root_id), position, enabled: true })).catch(failed)
@@ -662,14 +636,10 @@ const meLens: View = {
         return move(id, Number(el.dataset.by ?? 0))
       case "unrule":
         return void drop("cv_rules", id).catch(failed)
-      case "mask": {
-        const x = fields(form)
+      case "mask":
         return void put("cv_masks", { pattern: x.pattern ?? "", note: x.note || null }, { id }).catch(failed)
-      }
-      case "newmask": {
-        const x = fields(form)
+      case "newmask":
         return void resetAfter(form, () => put("cv_masks", { name: x.name ?? "", pattern: x.pattern ?? "", note: x.note || null })).catch(failed)
-      }
       case "unmask":
         return void drop("cv_masks", id).catch(failed)
       case "pin":

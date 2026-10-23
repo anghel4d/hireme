@@ -19,8 +19,8 @@
 
 import type { View } from "../app.ts"
 import { BAND, ENUMS, STAGE } from "../gen/schema.ts"
-import { arrange, board, card, drop, failed, ids, lookup, query as read, scoreboard, value, type Arranged, type Filter, type Row } from "../kernel.ts"
-import { EMPTY, html, str, type Html } from "../morph.ts"
+import { arrange, ask, card, drop, failed, ids, lookup, query as read, scoreboard, value, type Arranged, type Filter, type Row } from "../kernel.ts"
+import { EMPTY, attempt, html, str, type Html } from "../morph.ts"
 import { format, go, itemNo, model, query, set } from "../state.ts"
 import { act as focusAct, appItem, body } from "./focus.ts"
 
@@ -36,14 +36,9 @@ const list = (k: string): string[] => (model.address.q.get(k) ?? "").split(",").
 
 function filter(): Filter {
   const f: Filter = {}
-  const bands = list("band")
-  const stages = list("stage")
-  const classes = list("heat")
+  for (const [k, key] of [["bands", "band"], ["stages", "stage"], ["classes", "heat"]] as const) if (list(key).length > 0) f[k] = list(key)
   const q = model.address.q.get("q") ?? ""
   const min = Number(model.address.q.get("min") ?? 0)
-  if (bands.length > 0) f.bands = bands
-  if (stages.length > 0) f.stages = stages
-  if (classes.length > 0) f.classes = classes
   if (q !== "") f.search = q
   if (min > 0) f.min_score = Math.min(100, min)
   return f
@@ -96,17 +91,8 @@ const HAND: [string, string, string, 1 | -1][] = [
 type Field = { path: string; label: string; type: string; values?: string[]; desc?: boolean }
 // The person's own fields (me.*) read the same on every card, lists have no one order, and the hand keys read these their own way.
 const OWN = new Set(["no", "score", "band", "company", "location", "place", "keywords"])
-let catalog: Field[] | null = null
-function catalogFields(): Field[] {
-  if (catalog === null) {
-    try {
-      catalog = read<{ fields: Field[] }>("mask_fields", {}).fields.filter((f) => !f.path.startsWith("me.") && f.type !== "list" && !OWN.has(f.path))
-    } catch {
-      return []
-    }
-  }
-  return catalog
-}
+let catalog: Field[] | undefined
+const catalogFields = (): Field[] => catalog ?? (catalog = ask<{ fields: Field[] }>("mask_fields")?.fields.filter((f) => !f.path.startsWith("me.") && f.type !== "list" && !OWN.has(f.path))) ?? []
 // A field the catalog marks desc (the counts: how many applications name the same company) reads high first, as days do.
 const allKeys = (): [string, string, string, 1 | -1][] => [...HAND, ...catalogFields().map((f): [string, string, string, 1 | -1] => [f.path, f.label, f.label, f.desc || f.type === "day" ? -1 : 1])]
 const sorts = (): [string, string][] => allKeys().map(([k, l]) => [k, l])
@@ -121,23 +107,16 @@ const sortDir = (): number => ({ asc: 1, desc: -1 })[model.address.q.get("dir") 
  * URL, else the same company, role and place by link), for the ×N on each card and the toolbar's count.
  */
 let twins: { rows: number; of: Map<number, number[]>; sets: number } | null = null
-function duplicates(): { of: Map<number, number[]>; sets: number } {
-  if (twins?.rows !== model.rows) {
-    const of = new Map<number, number[]>()
-    let sets = 0
-    try {
-      const a = arrange({ filter: {}, group: "dupes" })
-      for (const g of a.groups) {
-        const set = [...a.ids.subarray(g.start, g.start + g.count)]
-        sets++
-        for (const id of set) of.set(id, set)
-      }
-    } catch {
-      // A kernel still loading answers no duplicates.
-    }
-    twins = { rows: model.rows, of, sets }
+function duplicates(): { rows: number; of: Map<number, number[]>; sets: number } {
+  if (twins?.rows === model.rows) return twins
+  // A kernel still loading answers no duplicates.
+  const a = attempt(() => arrange({ filter: {}, group: "dupes" }), null)
+  const of = new Map<number, number[]>()
+  for (const g of a?.groups ?? []) {
+    const set = [...a!.ids.subarray(g.start, g.start + g.count)]
+    for (const id of set) of.set(id, set)
   }
-  return twins
+  return (twins = { rows: model.rows, of, sets: a?.groups.length ?? 0 })
 }
 
 /** A linked row's name: the application's corporation or place, null while it links none. */
@@ -447,35 +426,14 @@ function headers(el: HTMLElement, want: Set<string>, w: number): void {
   for (const p of placed) {
     if (!want.has(p.g.key)) continue
     let h = heads.get(p.g.key)
-    if (!h) {
-      h = document.createElement("div")
-      h.className = "group-head"
-      h.setAttribute("role", "heading")
-      h.setAttribute("aria-level", "3")
-      heads.set(p.g.key, h)
-      el.append(h)
-    }
-    const sig_ = `${p.g.label}|${p.g.ids.length}|${p.g.keep ?? ""}|${model.rows}`
+    if (!h) heads.set(p.g.key, (h = el.appendChild(Object.assign(document.createElement("div"), { className: "group-head", role: "heading", ariaLevel: "3" }))))
+    const keep = p.g.keep
+    const sig_ = `${p.g.label}|${p.g.ids.length}|${keep ?? ""}|${model.rows}`
     if (h.dataset.sig !== sig_) {
       h.dataset.sig = sig_
-      const b = document.createElement("b")
-      b.textContent = p.g.label
-      const n = document.createElement("span")
-      n.className = "muted"
-      n.textContent = String(p.g.ids.length)
-      h.replaceChildren(b, n)
-      if (p.g.keep !== undefined) {
-        const keep = p.g.keep
-        const others = [...p.g.ids].filter((x) => x !== keep)
-        const btn = document.createElement("button")
-        btn.type = "button"
-        btn.className = "ghost"
-        btn.dataset.act = "dedupe"
-        btn.dataset.keep = String(keep)
-        btn.dataset.drop = others.join(",")
-        btn.textContent = `Keep #${str(value("applications", keep, "no"))}, delete the other ${others.length}`
-        h.append(btn)
-      }
+      const others = [...p.g.ids].filter((x) => x !== keep)
+      h.innerHTML = html`<b>${p.g.label}</b><span class="muted">${p.g.ids.length}</span>${keep === undefined ? EMPTY
+        : html`<button type="button" class="ghost" data-act="dedupe" data-keep="${keep}" data-drop="${others.join(",")}">Keep #${str(value("applications", keep, "no"))}, delete the other ${others.length}</button>`}`.text
     }
     const t = `translate(0px, ${p.top}px)`
     if (h.style.transform !== t) h.style.transform = t
@@ -642,7 +600,7 @@ function back(): void {
 
 /** The next or previous application in board order, opened in the same place. */
 function next(dir: 1 | -1): void {
-  const order = board({})
+  const order = arrange({ filter: {} }).ids
   const at = order.indexOf(openedId())
   const id = order[at < 0 ? 0 : at + dir]
   if (id === undefined) return
@@ -674,10 +632,9 @@ const desk: View = {
         return open(Number(el.dataset.id))
       case "toggle":
         return toggle(el.dataset.k ?? "", el.dataset.v ?? "")
-      case "search": {
+      case "search":
         // The board is the kernel's, so the answer is drawn in the keystroke's frame (no debounce).
         return query("q", (el as HTMLInputElement).value)
-      }
       case "min":
         return query("min", (el as HTMLInputElement).value)
       case "sort": {

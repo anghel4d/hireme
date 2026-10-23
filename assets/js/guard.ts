@@ -15,9 +15,7 @@ export const CLIP = 200
  * toString throws, still reads as something, and describing it never throws. */
 export function describe(e: unknown): string {
   try {
-    if (e instanceof Error) return String(e.message)
-    if (typeof e === "string") return e
-    return String(e)
+    return e instanceof Error ? String(e.message) : String(e)
   } catch {
     try {
       return Object.prototype.toString.call(e)
@@ -27,21 +25,11 @@ export function describe(e: unknown): string {
   }
 }
 
-export interface Guard {
-  /** `fn`'s value, or `fallback` when it throws. */
-  run<T>(scope: string, part: Part, fn: () => T, fallback: T): T
-  /** Whether `scope`'s `part` is failing now. */
-  failing(scope: string, part: Part): boolean
-}
-
-export function guard(
-  notify: (text: string) => void,
-  log: (what: string, e: unknown) => void,
-  defer: (fn: () => void) => void = queueMicrotask,
-): Guard {
+/** `run` gives `fn`'s value, or `fallback` when it throws; `failing` says whether `scope`'s `part` is failing now. */
+export function guard(notify: (text: string) => void, log: (what: string, e: unknown) => void, defer: (fn: () => void) => void = queueMicrotask) {
   const broken = new Set<string>()
   return {
-    run(scope, part, fn, fallback) {
+    run<T>(scope: string, part: Part, fn: () => T, fallback: T): T {
       const key = `${scope}:${part}`
       try {
         const r = fn()
@@ -63,6 +51,6 @@ export function guard(
         return fallback
       }
     },
-    failing: (scope, part) => broken.has(`${scope}:${part}`),
+    failing: (scope: string, part: Part): boolean => broken.has(`${scope}:${part}`),
   }
 }

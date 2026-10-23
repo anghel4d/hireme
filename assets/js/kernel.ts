@@ -11,7 +11,8 @@ import type { Wire } from "./wire.ts"
 import { AS_OF, COMMANDS, DAY_MAX, ENUMS, REFUSAL, SCHEMA_REV, SOURCE, TABLES, WIRE_HASH, type ColumnDef, type CommandName, type TableDef, type TableName } from "./gen/schema.ts"
 import { describe } from "./guard.ts"
 import { CELL, KIND, OPS_MAX, OP_FLAG, OP_TEXT_MAX, VERB, acks, encodeOp, header, nackFrame, nacks, opText, opsFrame, type Bytes, type Cell, type Header, type Op } from "./wire.ts"
-import { DRAFT, notice, set } from "./state.ts"
+import { attempt } from "./morph.ts"
+import { DRAFT, SCOPE, notice, set } from "./state.ts"
 
 /** A row as the kernel answers it: a column name to its value. */
 export type Row = Record<string, unknown>
@@ -78,10 +79,8 @@ export interface Exports {
   ingest(ptr: number, len: number): number
   predict(op: number, opLen: number, ctx: number, ctxLen: number): number
   judge(op: number, opLen: number, ctx: number, ctxLen: number): number
-  view(ptr: number, len: number): number
   arrange(ptr: number, len: number): number
   arrange_groups(): number
-  step(ptr: number, len: number, selected: number, dir: number, columns: number): number
   card(id: number): number
   scoreboard(): number
   application(id: number): number
@@ -297,11 +296,13 @@ function indexed<K, V>(store: Map<K, { version: number; at: V }>, key: K, build:
   return s.at
 }
 
+type Read = "find" | "get" | "history" | "cv_picks" | "mask_check" | "mask_fields" | "outreach" | "mail_quota" | "live_keys" | "fire_review"
+
 /**
- * A read of the replica, in the input's frame: World's find, get, text and history, answered by the
- * kernel from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
+ * A read of the replica, in the input's frame: World's find, get and history and the kernel's own
+ * documents, answered from the rows it holds (op and params as World's RPC took them). A refusal is a `Refused`.
  */
-export function query<T = Row>(op: "find" | "get" | "text" | "history" | "cv_pick" | "cv_picks" | "cv_explain" | "mask_check" | "mask_fields" | "unlinked", params: Record<string, unknown>): T {
+export function query<T = Row>(op: Read, params: Record<string, unknown>): T {
   if (!k) throw new Error("the desk is still loading")
   const req = JSON.stringify({ op, ...params })
   return memo(req, () => {
@@ -311,15 +312,11 @@ export function query<T = Row>(op: "find" | "get" | "text" | "history" | "cv_pic
   })
 }
 
+/** A read's answer, or null while the kernel cannot give it (still loading, or refused). */
+export const ask = <T = Row>(op: Read, params: Record<string, unknown> = {}): T | null => attempt(() => query<T>(op, params), null)
+
 /** A row of the replica by id, or null when there is none (or no id). */
-export function row(table: string, id: number): Row | null {
-  if (!id) return null
-  try {
-    return query<{ row: Row }>("get", { table, id }).row
-  } catch {
-    return null
-  }
-}
+export const row = (table: string, id: number): Row | null => (id ? ask<{ row: Row }>("get", { table, id })?.row ?? null : null)
 
 /** The first `limit` rows a find names (its table, cols, where, order), in pages of find's 500; `more` when the table goes on. */
 export function page(params: Record<string, unknown>, limit: number): { rows: Row[]; more: boolean } {
@@ -368,19 +365,7 @@ export function value(name: TableName, id: number, col: string): string | number
   const ptr = k.col_ptr(t.id, c.id)
   if (kind === 1) {
     const x = new Uint32Array(k.memory.buffer, ptr, i + 1)[i]!
-    if (x === 0xffff_ffff) return null
-    switch (c.type) {
-      case "enum":
-        return values(c.enum)[x] ?? null
-      case "bool":
-        return x === 1
-      case "day":
-        return dayText(x)
-      case "time":
-        return new Date(x * 1000)
-      default:
-        return x
-    }
+    return x === 0xffff_ffff ? null : c.type === "enum" ? values(c.enum)[x] ?? null : c.type === "bool" ? x === 1 : c.type === "day" ? dayText(x) : c.type === "time" ? new Date(x * 1000) : x
   }
   if (kind === 3) {
     const x = new BigInt64Array(k.memory.buffer, ptr, i + 1)[i]!
@@ -426,16 +411,6 @@ export interface Filter {
   search?: string
 }
 
-/** Application ids the filter keeps, in board order (score, then heat). */
-export function board(f: Filter): Uint32Array {
-  if (!k) return new Uint32Array(0)
-  const key = JSON.stringify(f)
-  return memo(`board:${key}`, () => {
-    const len = withBytes(ENC.encode(key), (p, n) => k!.view(p, n))
-    return len <= 0 ? new Uint32Array(0) : new Uint32Array(result(len).slice().buffer)
-  })
-}
-
 /** One group of an arranged board: its slice of the order, and for duplicates the one to keep. */
 export type Band = { key: string; label: string; start: number; count: number; keep?: number }
 export type Arranged = { ids: Uint32Array; groups: Band[]; modes: Record<string, number>; unlinked: number }
@@ -454,15 +429,6 @@ export function arrange(req: { filter: Filter; modes?: string[]; unlinked?: bool
     const g = resultJson<Omit<Arranged, "ids">>(k!.arrange_groups())
     return { ids, groups: g?.groups ?? [], modes: g?.modes ?? {}, unlinked: g?.unlinked ?? 0 }
   })
-}
-
-export const DIR = { next: 0, prev: 1, up: 2, down: 3, first: 4, last: 5 } as const
-
-/** The card after `selected` in a direction, over the filtered board; 0 for none. */
-export function step(f: Filter, selected: number, dir: number, columns: number): number {
-  if (!k) return 0
-  // An id comes back through an i32: read it unsigned, or a temp id past 2^31 turns negative.
-  return withBytes(ENC.encode(JSON.stringify(f)), (p, n) => k!.step(p, n, selected, dir, columns)) >>> 0
 }
 
 export interface Card {
@@ -511,30 +477,23 @@ let savedRev = -1n
 export function forget(): void {
   clearTimeout(saving)
   savedRev = -2n
-  try {
+  // Storage is blocked: there is nothing stored to delete.
+  attempt(() => {
     indexedDB.deleteDatabase("hireme")
     for (const key of Object.keys(localStorage)) if (key.startsWith(SNAP_FLAG) || key.startsWith(DRAFT)) localStorage.removeItem(key)
-  } catch {
-    // Storage is blocked: there is nothing stored to delete.
-  }
+  }, undefined)
 }
 /** early.ts reads it before HELLO, synchronously: a snapshot is stored for this scope (set once one is written). */
 const SNAP_FLAG = "hireme-snap:"
 
 function save(): void {
-  const scope = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
   // A TICK moves no row: the snapshot is written only when the rows' rev has.
-  if (!k || scope === "" || !("indexedDB" in window) || pending.size > 0 || rowsRev === savedRev || rowsRev === 0n || savedRev === -2n) return
+  if (!k || SCOPE === "" || !("indexedDB" in window) || pending.size > 0 || rowsRev === savedRev || rowsRev === 0n || savedRev === -2n) return
   const len = k.snapshot()
   if (len <= 0) return
-  const bytes = result(len).slice()
-  const record = { rev: rowsRev, schemaRev: BigInt(SCHEMA_REV), wireHash: WIRE_HASH, bytes }
-  let open: IDBOpenDBRequest
-  try {
-    open = indexedDB.open("hireme", 1)
-  } catch {
-    return
-  }
+  const record = { rev: rowsRev, schemaRev: BigInt(SCHEMA_REV), wireHash: WIRE_HASH, bytes: result(len).slice() }
+  const open = attempt(() => indexedDB.open("hireme", 1), null)
+  if (!open) return
   savedRev = rowsRev
   open.onerror = () => {}
   open.onupgradeneeded = () => open.result.createObjectStore("snap")
@@ -547,13 +506,10 @@ function save(): void {
       tx.onerror = tx.onabort = () => db.close()
       tx.oncomplete = () => {
         db.close()
-        try {
-          localStorage.setItem(SNAP_FLAG + scope, "1")
-        } catch {
-          // Without the flag the next load simply asks the server for a whole BOOT.
-        }
+        // Without the flag the next load simply asks the server for a whole BOOT.
+        attempt(() => localStorage.setItem(SNAP_FLAG + SCOPE, "1"), undefined)
       }
-      tx.objectStore("snap").put(record, scope)
+      tx.objectStore("snap").put(record, SCOPE)
     } catch {
       db.close()
       // A private window or a full disk: the next BOOT is whole, nothing else changes.

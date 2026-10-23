@@ -136,29 +136,22 @@ const select = (c: ColumnDef, name: string, value: string, attrs: Html): Html =>
   c.type === "bool" ? html`<option value="true"${flag("selected", value === "true")}>yes</option><option value="false"${flag("selected", value === "false")}>no</option>`
   : values(c.enum).map((e) => html`<option${flag("selected", e === value)}>${e}</option>`)}</select>`
 
+/** A column's form control: a select for an enum or bool, a date, a textarea for text, else an input (a number in decimals, an email as one). */
+export function control(c: ColumnDef, name: string, value: string, attrs: Html = EMPTY, rows = 8): Html {
+  if (c.type === "enum" || c.type === "bool") return select(c, name, value, attrs)
+  if (c.type === "day") return html`<input type="date" name="${name}" value="${value}"${attrs}>`
+  // HTML drops a textarea's first newline, so a text that begins with one gets a second.
+  if (c.type === "text") return html`<textarea name="${name}" rows="${rows}"${attrs}>${value.startsWith("\n") ? `\n${value}` : value}</textarea>`
+  const kind = c.type === "f64" || c.type === "u32" || c.type === "u8" || c.type === "i64" ? html` inputmode="decimal"` : c.name === "email" ? html` type="email"` : EMPTY
+  return html`<input name="${name}" value="${value}"${attrs}${flag("required", c.required)}${kind}>`
+}
+
 function editor(t: TableDef, c: ColumnDef, r: Row): Html {
   const id = Number(r.id)
   const x = c.type === "text" ? row(t.name, id)?.[c.name] : r[c.name]
   const value = x === null || x === undefined ? "" : typeof x === "object" ? "" : String(x)
-  let field: Html
-  switch (c.type) {
-    case "enum":
-    case "bool":
-      field = select(c, "value", value, html` data-autofocus`)
-      break
-    case "day":
-      field = html`<input type="date" name="value" value="${value}" data-autofocus>`
-      break
-    case "text":
-      // HTML drops a textarea's first newline, so a text that begins with one gets a second.
-      field = html`<textarea name="value" rows="8" data-autofocus>${value.startsWith("\n") ? `\n${value}` : value}</textarea>`
-      break
-    default:
-      field = html`<input name="value" value="${value}" data-autofocus${flag("required", c.required)}
-        ${c.type === "f64" || c.type === "u32" || c.type === "u8" || c.type === "i64" ? html` inputmode="decimal"` : EMPTY}>`
-  }
   return html`<form class="cell-edit" data-submit="save" data-act="save" data-id="${id}" data-col="${c.name}">
-    <label class="sr">${t.name}.${c.name}</label>${field}
+    <label class="sr">${t.name}.${c.name}</label>${control(c, "value", value, html` data-autofocus`)}
     ${c.metric ? html`<label>as of <input type="date" name="as_of" value="${today()}" required></label>` : EMPTY}
     ${c.metric || c.prose ? html`<label>source <input type="url" name="source" placeholder="https://"${flag("required", c.prose)}></label>` : EMPTY}
     <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span>
@@ -176,6 +169,20 @@ export function cited(c: ColumnDef, r: Row, x: unknown): Html {
 }
 
 const cellOf = (c: ColumnDef, r: Row): Html => html`<td data-key="${c.name}" class="${c.metric ? "metric" : ""}">${cited(c, r, r[c.name])}</td>`
+
+/** A column's header: a button that sorts by it (the address's `sort`, `-` for falling) when it can, its declared name in the title. */
+export function head(c: ColumnDef, anchor = false): Html {
+  const s = model.address.q.get("sort") ?? ""
+  const dir = s === c.name ? "asc" : s === `-${c.name}` ? "desc" : ""
+  return html`<th scope="col" data-key="${c.name}"${anchor ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
+    ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
+}
+
+/** A header's click: sorted rising, then falling, then not. */
+export function resort(col: string): void {
+  const s = model.address.q.get("sort") ?? ""
+  query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
+}
 
 const blankValue = (x: unknown): boolean => x === null || x === undefined || x === ""
 
@@ -269,7 +276,6 @@ function view(): Html {
   const all = drawn(t)
   const g = groups(t)
   const pick = model.address.q.get("cols") ?? g[0]
-  const sort = model.address.q.get("sort") ?? ""
   const search = SEARCH[t.name as Shown]
   const got = rows(t, all, v().limit)
   // A column empty on every row drawn is left out, said and undoable: the grid shows what there is.
@@ -287,11 +293,7 @@ function view(): Html {
     ${adder(t)}${record(t)}${cites(t)}${reader(t)}
     <div class="grid-wrap" data-key="grid-${t.name}">
       <table class="grid sparse">
-        <thead><tr><th scope="col" class="id">#</th>${cols.map((c, n) => {
-          const dir = sort === c.name ? "asc" : sort === `-${c.name}` ? "desc" : ""
-          return html`<th scope="col" data-key="${c.name}"${n === 0 && search ? html` class="anchor"` : EMPTY}${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
-            ${sortable(c) ? html`<button type="button" class="ghost" data-act="sort" data-col="${c.name}" title="${c.name}: sort">${label(c.name)}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button>` : html`<span title="${c.name}">${label(c.name)}</span>`}</th>`
-        })}</tr></thead>
+        <thead><tr><th scope="col" class="id">#</th>${cols.map((c, n) => head(c, n === 0 && search !== null))}</tr></thead>
         <tbody>${got.rows.map((r) => html`<tr data-key="r${String(r.id)}" data-id="${String(r.id)}" class="${Number(r.id) === itemNo() ? "open" : ""}"
           data-act="open" data-click data-on="keydown" tabindex="0"><th scope="row" class="id">${String(r.id)}</th>${cols.map((c) => cellOf(c, r))}</tr>`)}</tbody>
       </table>
@@ -312,10 +314,8 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return query("cols", el.dataset.v ?? "")
     case "empty":
       return query("empty", model.address.q.get("empty") === "show" ? "" : "show")
-    case "sort": {
-      const s = model.address.q.get("sort") ?? ""
-      return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
-    }
+    case "sort":
+      return resort(col)
     case "search":
       // The replica answers in the keystroke's frame: no wait before asking.
       return query("q", (el as HTMLInputElement).value)

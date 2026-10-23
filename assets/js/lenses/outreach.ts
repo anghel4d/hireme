@@ -10,9 +10,10 @@
 
 import type { View } from "../app.ts"
 import { DOMAIN, ENUMS, TABLES, type ColumnDef } from "../gen/schema.ts"
-import { command, failed, page, put, query as read, row, values, type Input, type Row } from "../kernel.ts"
+import { ask, command, failed, page, put, row, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, str, type Html } from "../morph.ts"
 import { go, item, itemNo, model, query, set, type OutreachView } from "../state.ts"
+import { control } from "./world.ts"
 
 const PAGE = 100
 const v = (): OutreachView => model.outreach
@@ -55,13 +56,7 @@ export type Item = {
 type Answer = { rows: Item[]; groups: { key: string; label: string; start: number; count: number }[]; total: number; next: number | null; counts: { unfiled: number; unseen: number } }
 
 /** The hub's one read: the kernel's `outreach` op; null while the desk loads or when the account cannot read mail. */
-export function outreachQuery(params: Record<string, unknown>): Answer | null {
-  try {
-    return read<Answer>("outreach" as Parameters<typeof read>[0], params)
-  } catch {
-    return null
-  }
-}
+export const outreachQuery = (params: Record<string, unknown>): Answer | null => ask<Answer>("outreach", params)
 
 export const KIND: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X DM", discord: "Discord", other: "Other", note: "Note" }
 const when = (at: string | null): string => (at ? new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "")
@@ -200,16 +195,7 @@ function hub(where: Record<string, unknown>, tray_: boolean): Html {
 
 // ------------------------------------------------------------------ view
 
-function field(c: ColumnDef, value: unknown): Html {
-  const x = str(value)
-  const label = c.name.replace(/_/g, " ")
-  if (c.type === "enum")
-    return html`<label>${label}<select name="${c.name}"><option value=""></option>${values(c.enum).map((e) => html`<option${flag("selected", e === x)}>${e}</option>`)}</select></label>`
-  // HTML drops a textarea's first newline, so a text that begins with one gets a second.
-  if (c.type === "text") return html`<label>${label}<textarea name="${c.name}" rows="4">${x.startsWith("\n") ? `\n${x}` : x}</textarea></label>`
-  if (c.type === "day") return html`<label>${label}<input type="date" name="${c.name}" value="${x}"></label>`
-  return html`<label>${label}<input name="${c.name}" value="${x}"${flag("required", c.required)}${c.name === "email" ? html` type="email"` : EMPTY}></label>`
-}
+const field = (c: ColumnDef, value: unknown): Html => html`<label>${c.name.replace(/_/g, " ")}${control(c, c.name, str(value), EMPTY, 4)}</label>`
 
 function contactCard(c: Row): Html {
   if (v().edit === "contact")

@@ -7,10 +7,10 @@
 // command, judged by the kernel here before the sequencer judges it again.
 
 import { ENUMS } from "../gen/schema.ts"
-import { failed, application, command, ids, put, query as read, Refused, row, value, type Input, type Row } from "../kernel.ts"
+import { application, ask, command, failed, ids, put, Refused, row, value, type Input, type Row } from "../kernel.ts"
 import { EMPTY, fields, flag, href, html, resetAfter, str, type Html } from "../morph.ts"
 import { drafts, item, model, notice, set, type FocusView } from "../state.ts"
-import { WHY as HOLD } from "./fire.ts"
+import { ROUTE, WHY as HOLD } from "./fire.ts"
 import { inSpam, itemAct, itemList, outreachQuery, SPAM } from "./outreach.ts"
 import { rowHref } from "./world.ts"
 
@@ -201,14 +201,6 @@ const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 // ------------------------------------------------------------------ missions: the routes it goes out by
 
 type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; cv_version_id: number | null; covered_by: number[]; hold: string | null }
-const ROUTE: Record<string, string> = { email: "Email", careers_page: "Careers page", linkedin: "LinkedIn", x_dm: "X message", discord: "Discord", other: "Other" }
-const ask = <T>(op: string, params: Record<string, unknown>): T | null => {
-  try {
-    return read<T>(op as Parameters<typeof read>[0], params)
-  } catch {
-    return null
-  }
-}
 
 /** The commander's answer to a refused shot, as a sentence: why, and what the key still holds. */
 export function commander(d: Row): string {
@@ -246,7 +238,7 @@ function compose(m: Mission, appId: number): Html {
 function missions(d: Doc, appId: number): Html {
   const cv = d.cv.file
   const ms = d.missions ?? []
-  const quota = ask<{ cap: number; left: number }>("mail_quota", {})
+  const quota = ask<{ cap: number; left: number }>("mail_quota")
   return html`<section class="card" data-key="missions"><h2>Missions</h2>
     ${ms.length === 0 ? html`<p class="hint">No route yet: add one below (the hiring address, the careers page, a message).</p>` : EMPTY}
     <ul class="rows">${ms.map((m) => {

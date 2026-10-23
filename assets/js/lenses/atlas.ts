@@ -12,7 +12,7 @@ import { atlas, ids, meId, page, row, value } from "../kernel.ts"
 import { EMPTY, html, type Html } from "../morph.ts"
 import { model, query } from "../state.ts"
 import { FIGURES, figureName, list } from "./me.ts"
-import { cited, cites, label, rowHref, views } from "./world.ts"
+import { cited, cites, head, resort, rowHref, views } from "./world.ts"
 
 type Fit = { id: number; kind: string; name: string; iso2: string | null; country: string | null; languages: string | null; route: string; speaks: boolean | null; preferred: boolean; avoided: boolean; fit: number | null }
 type Doc = { known: boolean; recipe: { key: string; weight: number }[]; unknown: string[]; places: Fit[] }
@@ -78,11 +78,7 @@ function view(): Html {
   const c = (q.get("cites") ?? "").split(":")
   const tab = (k: string, text: string): Html =>
     html`<a href="/world/atlas${k === "" ? "" : `?kind=${k}`}" data-nav data-key="k${k}" class="${kind === k ? "on" : ""}"${kind === k ? html` aria-current="page"` : EMPTY}>${text}</a>`
-  const header = (col: string, text: string, title: string): Html => {
-    const dir = sort === col ? "asc" : sort === `-${col}` ? "desc" : ""
-    return html`<th scope="col" data-key="${col}"${dir ? html` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : EMPTY}>
-      <button type="button" class="ghost" data-act="sort" data-col="${col}" title="${title}">${text}${dir === "asc" ? " ↑" : dir === "desc" ? " ↓" : ""}</button></th>`
-  }
+
   return html`<div class="atlas">
     <div class="toolbar" data-key="views">${views()}</div>
     ${you(d)}${recipe(d)}
@@ -99,7 +95,7 @@ function view(): Html {
         <thead><tr><th scope="col" class="id" title="Your order: wanted first, never last, then by what matters">#</th><th scope="col" class="anchor" data-key="name"><span title="name">Place</span></th>
           <th scope="col" data-key="route"><span title="From your citizenships and permits and the place's no-permit list">Route</span></th>
           <th scope="col" data-key="language"><span title="What the place speaks (a city, its country's); ✓ when one of them is yours">Languages</span></th>
-          ${figures.map((f) => header(f.name, label(f.name), `${f.name}: sort`))}</tr></thead>
+          ${figures.map((f) => head(f))}</tr></thead>
         <tbody>${shown.map((f) => {
           const r = rows.get(f.id)
           return html`<tr data-key="p${f.id}" data-id="${f.id}" class="${f.avoided ? "avoided" : ""}">
@@ -123,11 +119,8 @@ const lens: View = {
     switch (name) {
       case "cols":
         return query("cols", el.dataset.v ?? "")
-      case "sort": {
-        const col = el.dataset.col ?? ""
-        const s = model.address.q.get("sort") ?? ""
-        return query("sort", s === col ? `-${col}` : s === `-${col}` ? "" : col)
-      }
+      case "sort":
+        return resort(el.dataset.col ?? "")
       case "search":
         return query("q", (el as HTMLInputElement).value)
       case "more":

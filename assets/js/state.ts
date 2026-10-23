@@ -21,6 +21,8 @@
 //     /me/<rules|cv>
 //     /account
 
+import { attempt } from "./morph.ts"
+
 export const LENSES = ["desk", "world", "outreach", "me", "account", "fire"] as const
 export type Lens = (typeof LENSES)[number]
 
@@ -121,7 +123,7 @@ export interface AccountView {
   /** TOTP enrollment between begin and confirm. */
   totp: { uri: string; secret: string; svg: string } | null
   /** The action waiting on a step-up, retried once the session is fresh. */
-  stepUp: { method: string; params: Record<string, unknown>; mailed?: boolean } | null
+  stepUp: { mailed?: boolean } | null
   /** Which form is open: "mint", "rename", "trust", "change:<key id>". */
   open: string
   error: string
@@ -154,13 +156,8 @@ export const itemNo = (segment: string = model.address.item): number => Number(/
 const isItem = (s: string): boolean => /^\d/.test(s)
 
 export function parse(path: string, search: string): Address {
-  let parts: string[]
-  try {
-    parts = path.split("/").filter((s) => s !== "").map(decodeURIComponent)
-  } catch {
-    // A malformed escape is no address at all.
-    parts = []
-  }
+  // A malformed escape is no address at all.
+  let parts = attempt(() => path.split("/").filter((s) => s !== "").map(decodeURIComponent), [] as string[])
   const q = new Map(new URLSearchParams(search))
   // The addresses before the desk opened applications in place: each is the address it became.
   const take = (k: string): string => [q.get(k) ?? "", q.delete(k)][0] as string
@@ -287,37 +284,20 @@ export function query(key: string, value: string): void {
 }
 
 /** This browser's per-account key prefix: the shell's opaque account scope (the snapshot's too). */
-const SCOPE = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
+export const SCOPE = document.querySelector<HTMLMetaElement>('meta[name="hireme-scope"]')?.content ?? ""
 export const DRAFT = "hireme-draft:"
+
+/** `fn` on a draft's storage key, or `or` when there is no scope or storage is blocked or full: then there is simply no draft. */
+const stored = <T>(key: string, or: T, fn: (k: string) => T): T => attempt(() => (SCOPE === "" ? or : fn(`${DRAFT}${SCOPE}:${key}`)), or)
 
 /**
  * Unsaved edits, kept in this browser until saved or discarded, so a reload, a deploy or a fresh
- * sign-in finds them where they were; a sign-out or a revoke takes them (kernel.forget). Storage
- * may be blocked or full: then there is simply no draft.
+ * sign-in finds them where they were; a sign-out or a revoke takes them (kernel.forget).
  */
 export const drafts = {
-  get<T>(key: string): T | null {
-    try {
-      const s = SCOPE === "" ? null : localStorage.getItem(`${DRAFT}${SCOPE}:${key}`)
-      return s === null ? null : (JSON.parse(s) as T)
-    } catch {
-      return null
-    }
-  },
-  set(key: string, value: unknown): void {
-    try {
-      if (SCOPE !== "") localStorage.setItem(`${DRAFT}${SCOPE}:${key}`, JSON.stringify(value))
-    } catch {
-      // Blocked or full: the edit stays on the page only.
-    }
-  },
-  drop(key: string): void {
-    try {
-      localStorage.removeItem(`${DRAFT}${SCOPE}:${key}`)
-    } catch {
-      // Blocked: nothing was kept.
-    }
-  },
+  get: <T>(key: string): T | null => stored(key, null, (k) => JSON.parse(localStorage.getItem(k) ?? "null") as T | null),
+  set: (key: string, value: unknown): void => stored(key, undefined, (k) => localStorage.setItem(k, JSON.stringify(value))),
+  drop: (key: string): void => stored(key, undefined, (k) => localStorage.removeItem(k)),
 }
 
 let nextNotice = 1

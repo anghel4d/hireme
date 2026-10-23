@@ -194,10 +194,9 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .grid tr.dead { color: var(--muted); }
 .grid td.actions { white-space: nowrap; text-align: right; }
 
-/* A key the operator paused by revoking its lease. */
-.tag.paused { color: var(--warn); border-color: var(--warn); }
 .tag.ok { color: var(--ok); border-color: var(--ok); }
-.tag.warn { color: var(--warn); border-color: var(--warn); }
+/* .paused: a key the operator paused by revoking its lease. */
+.tag.warn, .tag.paused { color: var(--warn); border-color: var(--warn); }
 .tag.bad { color: var(--bad); border-color: var(--bad); font-weight: 600; }
 /* A table wider than a phone scrolls inside its card, never the page. */
 .table-scroll { overflow-x: auto; max-width: 100%; }
@@ -218,7 +217,6 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .record dt { color: var(--muted); }
 .record dd { margin: 0; }
 .grid.sparse td.metric { text-align: right; }
-.grid.sparse td.editing { white-space: normal; max-width: none; background: var(--sunk); }
 .grid button.on { font-size: 10px; color: var(--muted); padding: 0 3px; margin-left: 4px; vertical-align: super; background: transparent; border: 0; }
 .grid button.on.cite { font-size: 15px; line-height: 1; vertical-align: middle; color: var(--accent); }
 .grid button.on:hover { color: var(--accent); }
@@ -264,12 +262,6 @@ pre.secret { border-left-color: var(--ok); user-select: all; }
 .pick a { display: block; width: 100%; padding: 2px 6px; border-radius: var(--radius); color: var(--ink); }
 .pick a.on { background: var(--sunk); }
 .pick a:hover { text-decoration: none; background: var(--sunk); }
-.messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.msg { padding: 8px 10px; border-radius: var(--radius); background: var(--sunk); max-width: 88%; }
-.msg.outbound { align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
-.msg .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 4px; font-size: 12px; }
-/* A message's first lines, as written (line breaks kept), before "Show all". */
-.msg .opening { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .notes { white-space: pre-wrap; }
 
 /* Compact (observer's 980): no room beside the board, so the pane goes and a second tap or Enter opens the application. */
@@ -518,15 +510,14 @@ tr.cursor > :first-child, li.cursor { box-shadow: inset 3px 0 0 var(--focus); }
 .me output.verdict .warn { color: var(--warn); }
 .me output.verdict .ok { color: var(--ok); }
 .me output.verdict mark { background: var(--bad); color: var(--panel); border-radius: 2px; }
-.me tr[aria-selected] th { font-weight: 700; }
-.me pre.prose { white-space: pre-wrap; max-height: 40vh; overflow: auto; font-size: 13px; }
 
 /* Fire: a review is read in full; a mission that cannot fire stays visible, dimmed. */
 .fire .mission header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
 .fire .mission.held { opacity: 0.75; }
-.fire dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
-.fire dl.mail dt { color: var(--muted); }
-.fire dl.mail dd { margin: 0; word-break: break-word; }
+/* A mail's headers, in a review and in an outreach item. */
+dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
+dl.mail dt { color: var(--muted); }
+dl.mail dd { margin: 0; overflow-wrap: anywhere; }
 
 /* Outreach items: one collapsible row each, drawn by kind; an unread reply stands out. */
 .items { display: flex; flex-direction: column; gap: 4px; }
@@ -537,6 +528,3 @@ details.item summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: ba
 details.item summary .subject { flex: 1 1 12rem; overflow-wrap: anywhere; }
 details.item summary time { margin-left: auto; font-size: 12px; }
 details.item[open] summary { margin-bottom: 8px; }
-details.item dl.mail { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
-details.item dl.mail dt { color: var(--muted); }
-details.item dl.mail dd { margin: 0; overflow-wrap: anywhere; }

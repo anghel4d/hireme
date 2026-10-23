@@ -16,8 +16,8 @@
 import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
 import { DOMAIN } from "../gen/schema.ts"
-import { Refused, ids, page, rpc, value, type Row } from "../kernel.ts"
-import { EMPTY, entries, fields, flag, html, resetIfUnchanged, str, trusted, type Html } from "../morph.ts"
+import { Refused, ask, ids, page, rpc, value, type Row } from "../kernel.ts"
+import { EMPTY, attempt, entries, fields, flag, html, resetIfUnchanged, str, trusted, type Html } from "../morph.ts"
 import { detail } from "./trail.ts"
 import { model, notice, query, set, type AccountView } from "../state.ts"
 
@@ -72,11 +72,9 @@ const later = (x: unknown): boolean => str(x) !== "" && Date.parse(str(x)) > Dat
  * PATCH. Null until the replica answers.
  */
 function overview(): Row | null {
-  try {
-    // acct_info is one wire row with no id column (find orders by id): read its first row's cells.
-    const at = ids("acct_info")[0]
-    if (at === undefined) return null
-    const info: Row = { name: value("acct_info", at, "name"), status: value("acct_info", at, "status"), recovery_codes_left: value("acct_info", at, "recovery_codes_left") }
+  // acct_info is one wire row with no id column (find orders by id): read its first row's cells.
+  const at = ids("acct_info")[0]
+  return at === undefined ? null : attempt(() => {
     const factors = rowsOf("acct_factors")
     // The view keeps every unrevoked session; the page lists the live ones, the latest seen first.
     const sessions: Row[] = rowsOf("acct_sessions")
@@ -92,9 +90,9 @@ function overview(): Row | null {
     })
     const leases = rowsOf("leases").map((l) => ({ ...l, ids: str(l.held).split("\u001f").filter((x) => x !== "") }))
     return {
-      account: { name: info.name, status: info.status },
+      name: value("acct_info", at, "name"),
       fresh_for: Number.isNaN(proof) ? 0 : Math.min(STEP_UP_S, Math.max(0, STEP_UP_S - (Date.now() - proof) / 1000)),
-      recovery_codes_left: info.recovery_codes_left,
+      recovery_codes_left: value("acct_info", at, "recovery_codes_left"),
       identities: rowsOf("acct_identities"),
       factors,
       sessions,
@@ -102,9 +100,7 @@ function overview(): Row | null {
       leases,
       trusted_hosts: rowsOf("trusted"),
     }
-  } catch {
-    return null
-  }
+  }, null)
 }
 
 const MESSAGES: Record<string, string> = {
@@ -132,56 +128,42 @@ const MESSAGES: Record<string, string> = {
 /** What a failed call says to the operator: a refusal by its code, a ceremony by why(). */
 const said = (e: unknown): string => (e instanceof Refused ? MESSAGES[e.code] ?? e.message : e instanceof Error ? why(e) : String(e))
 
-/** What the call parked behind a step-up does with its answer (closing its form, revealing a secret),
- * so its retry finishes the same way. Kept beside the parked call, not in the model: it is a function. */
-let parked: ((r: Row) => void) | undefined
+/**
+ * What a change refused `step_up` does once the session is fresh: the call again, finishing the same
+ * way (closing its form, revealing a secret); a ceremony or a link as itself, since its answer (a QR
+ * code, passkey options) is what the next step needs; another lens's action (a fire key) there. Kept
+ * beside the dialog, not in the model: it is a function.
+ */
+let resume: (() => void | Promise<void>) | undefined
 
-/** Run an account method; a `step_up` refusal parks it until the session is fresh. */
-async function call<T = Row>(method: string, params: Record<string, unknown> = {}, done?: (r: T) => void): Promise<void> {
+/** Ask for a fresh factor before an action, and run `then` once it is given. */
+export function askStepUp(then: () => void | Promise<void>, more: Partial<AccountView> = {}): void {
+  resume = then
+  patch({ stepUp: {}, error: "", ...more })
+}
+
+/** Run an account method, its answer to `done` (by default, the secret it shows once); a `step_up` refusal parks it until the session is fresh. */
+async function call(method: string, params: Record<string, unknown> = {}, done = (r: Row): void => reveal(method, r)): Promise<void> {
   try {
-    const r = await rpc<T>(method, params)
+    const r = await rpc(method, params)
     patch({ error: "" })
-    done?.(r)
+    done(r)
   } catch (e) {
-    if (e instanceof Refused && e.code === "step_up") {
-      parked = done as ((r: Row) => void) | undefined
-      patch({ stepUp: { method, params }, error: "" })
-      return
-    }
+    if (e instanceof Refused && e.code === "step_up") return askStepUp(() => call(method, params, done))
     patch({ error: said(e) })
   }
 }
 
 async function stepped(method: string, params: Record<string, unknown>): Promise<void> {
-  const waiting = v().stepUp
   try {
     await rpc(method, params)
   } catch (e) {
-    patch({ error: said(e) })
-    return
+    return patch({ error: said(e) })
   }
+  const then = resume
+  resume = undefined
   patch({ stepUp: null })
-  // Linking a way in is HTTP, not an account.* method: it is retried as itself.
-  if (waiting?.method === "link") await link(String(waiting.params.provider ?? ""), typeof waiting.params.email === "string" ? waiting.params.email : undefined)
-  // Ceremonies retry as themselves: their answers (a QR code, passkey options) are what the next step needs.
-  else if (waiting?.method === "account.totp.begin") totpBegin()
-  else if (waiting?.method === "account.passkey.begin") await enroll(String(waiting.params.name ?? ""))
-  // Another lens's action parked behind the factor (creating a fire key) resumes there.
-  else if (waiting && resumes.has(waiting.method)) {
-    const go = resumes.get(waiting.method)!
-    resumes.delete(waiting.method)
-    go()
-  }
-  // Linking mail parked only its address: the password is typed again, never kept while a factor is asked for.
-  else if (waiting?.method === "mail-link") {
-    patch({ open: "mail" })
-    notice("info", "Verified. Enter the app password again to link.")
-  }
-  else if (waiting) {
-    const then = parked
-    parked = undefined
-    await call(waiting.method, waiting.params, then ?? ((r) => reveal(waiting.method, r)))
-  }
+  await then?.()
 }
 
 // ------------------------------------------------------------------ mail: the linked Gmail
@@ -199,13 +181,7 @@ const MAIL_ERR: Record<string, string> = {
 let mailAddress = ""
 
 /** The account's one mailbox row, null before any link. */
-function mailbox(): Row | null {
-  try {
-    return page({ table: "mailboxes" }, 1).rows[0] ?? null
-  } catch {
-    return null
-  }
-}
+const mailbox = (): Row | null => ask<{ rows: Row[] }>("find", { table: "mailboxes", limit: 1 })?.rows[0] ?? null
 
 function mail(): Html {
   const m = mailbox()
@@ -235,10 +211,10 @@ async function linkMail(address: string, password: string): Promise<void> {
     patch({ open: "", error: "" })
     notice("ok", `Gmail linked: ${address}.`)
   } catch (e) {
-    // A step-up parks the address only; the password is asked for again once the session is fresh.
+    // A step-up parks the address only: the password is typed again, never kept while a factor is asked for.
     if (e instanceof Refused && e.code === "step_up") {
       mailAddress = address
-      return patch({ stepUp: { method: "mail-link", params: {} }, error: "", open: "" })
+      return askStepUp(() => (patch({ open: "mail" }), notice("info", "Verified. Enter the app password again to link.")), { open: "" })
     }
     patch({ error: e instanceof Refused && MAIL_ERR[e.code] !== undefined ? MAIL_ERR[e.code]! : said(e) })
   }
@@ -246,20 +222,10 @@ async function linkMail(address: string, password: string): Promise<void> {
 
 // ------------------------------------------------------------------ the step-up, for other lenses
 
-const resumes = new Map<string, () => void>()
-/** Ask for a fresh factor before `method` (a name of the caller's), and run `resume` once it is given. */
-export function askStepUp(method: string, resume: () => void): void {
-  resumes.set(method, resume)
-  patch({ stepUp: { method, params: {} }, error: "" })
-}
 /** The factor dialog and the last error, as the account lens draws them, for a lens that asked. */
 export const stepUpPanel = (): Html => html`${v().error !== "" ? html`<p class="error" role="alert" data-key="step-err">${v().error}</p>` : EMPTY}${stepUp()}`
 /** The dialog's own actions (passkey, codes, cancel), run for a lens that drew it; false for any other. */
-export function stepAct(name: string, el: HTMLElement, ev: Event): boolean {
-  if (!name.startsWith("step-")) return false
-  act(name, el, ev)
-  return true
-}
+export const stepAct = (name: string, el: HTMLElement): boolean => name.startsWith("step-") && (act(name, el), true)
 
 /** What a call returned that is shown once: a key's secret, recovery codes. */
 function reveal(method: string, r: Row): void {
@@ -315,7 +281,7 @@ async function link(provider: string, email?: string): Promise<void> {
     body: JSON.stringify(email === undefined ? { provider } : { provider, email }),
   })
   const body = (await res.json().catch(() => ({}))) as { url?: string; sent?: boolean; error?: string }
-  if (body.error === "step_up") return patch({ stepUp: { method: "link", params: { provider, ...(email ? { email } : {}) } } })
+  if (body.error === "step_up") return askStepUp(() => link(provider, email))
   if (body.url) return location.assign(body.url)
   if (body.sent) return notice("ok", "A link is on its way; open it to add that address.")
   patch({ error: MESSAGES[body.error ?? ""] ?? body.error ?? "Linking failed." })
@@ -357,25 +323,20 @@ function stepUp(): Html {
   const passkey = factors.some((f) => f.kind === "webauthn") && supported()
   const totp = factors.some((f) => f.kind === "totp")
   // No factor: a code mailed to the account's addresses renews the sign-in.
-  if (factors.length === 0)
-    return html`<section class="card step-up" role="dialog" aria-labelledby="step-up-h" data-key="step-up">
+  return html`<section class="card step-up" role="dialog" aria-labelledby="step-up-h" data-key="step-up">
     <h2 id="step-up-h">Confirm it is you</h2>
-    ${s.mailed
+    ${factors.length === 0 ? (s.mailed
       ? html`<form data-submit="step-mail-code" data-act="step-mail-code" class="row"><label>The code we emailed you
       <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" required></label>
       <button class="primary">Confirm</button></form>`
-      : html`<p class="lede">We'll email you a code.</p><button type="button" class="primary" data-act="step-mail">Email me a code</button>`}
-    <button type="button" class="ghost" data-act="step-cancel">Cancel</button>
-  </section>`
-  return html`<section class="card step-up" role="dialog" aria-labelledby="step-up-h" data-key="step-up">
-    <h2 id="step-up-h">Confirm it is you</h2>
+      : html`<p class="lede">We'll email you a code.</p><button type="button" class="primary" data-act="step-mail">Email me a code</button>`) : html`
     <p class="lede">That change needs a factor from the last few minutes.</p>
     ${passkey ? html`<button type="button" class="primary" data-act="step-passkey">Use a passkey</button>` : EMPTY}
     ${totp ? html`<form data-submit="step-totp" data-act="step-totp" class="row"><label>Authenticator code
       <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,8}" required></label>
       <button class="primary">Confirm</button></form>` : EMPTY}
     ${num(overview()?.recovery_codes_left) > 0 ? html`<form data-submit="step-recovery" data-act="step-recovery" class="row"><label>Or a recovery code
-      <input name="code" autocomplete="off" required></label><button>Use code</button></form>` : EMPTY}
+      <input name="code" autocomplete="off" required></label><button>Use code</button></form>` : EMPTY}`}
     <button type="button" class="ghost" data-act="step-cancel">Cancel</button>
   </section>`
 }
@@ -568,13 +529,12 @@ function audit(): Html {
 function view(): Html {
   const o = overview()
   if (!o) return html`<p class="empty">Loading the account…</p>`
-  const account = (o.account ?? {}) as Row
   const fresh = num(o.fresh_for)
   return html`<div class="account">
     <section class="card head" data-key="head">
-      ${v().open === "rename" ? html`<form class="row" data-submit="rename" data-act="rename"><input name="name" value="${str(account.name)}" required maxlength="200" aria-label="Account name">
+      ${v().open === "rename" ? html`<form class="row" data-submit="rename" data-act="rename"><input name="name" value="${str(o.name)}" required maxlength="200" aria-label="Account name">
           <button class="primary">Save</button><button type="button" class="ghost" data-act="close">Cancel</button></form>`
-        : html`<h1>${str(account.name) || "Account"} <button type="button" class="ghost" data-act="open" data-form="rename">Rename</button></h1>`}
+        : html`<h1>${str(o.name) || "Account"} <button type="button" class="ghost" data-act="open" data-form="rename">Rename</button></h1>`}
       <p class="muted">${fresh > 0 ? `Recently verified: sensitive changes go through for ${Math.ceil(fresh / 60)} more min.` : "Sensitive changes will ask for a second factor first."}</p>
     </section>
     <div class="alerts" data-key="alerts">${v().error !== "" ? html`<p class="error" role="alert" data-key="err">${v().error}</p>` : EMPTY}${stepUp()}</div>
@@ -584,7 +544,7 @@ function view(): Html {
 
 // ------------------------------------------------------------------ actions
 
-function act(name: string, el: HTMLElement, ev: Event): void {
+function act(name: string, el: HTMLElement): void {
   const form = el instanceof HTMLFormElement ? el : null
   const f = form ? fields(form) : {}
   const id = Number(el.dataset.id)
@@ -618,7 +578,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       return void linkMail((f.address ?? "").trim(), password)
     }
     case "mail-pipe":
-      return void call("account.mail.pipe", {}, (r) => reveal("account.mail.pipe", r))
+      return void call("account.mail.pipe")
     case "mail-unlink":
       return void call("account.mail.unlink", {}, () => notice("ok", "Gmail unlinked: hireme stopped reading it and forgot the password."))
     case "session-revoke":
@@ -655,7 +615,7 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "factor-remove":
       return void call("account.factor.remove", { id }, () => patch({ open: "" }))
     case "recovery":
-      return void call("account.recovery.regenerate", {}, (r) => reveal("account.recovery.regenerate", r))
+      return void call("account.recovery.regenerate")
     case "totp-begin":
       return totpBegin()
     case "totp-cancel":
@@ -667,11 +627,10 @@ function act(name: string, el: HTMLElement, ev: Event): void {
       })
     case "passkey":
       return void enroll(f.name ?? "")
-    case "host-add":
-      {
-        const before = form ? entries(form) : ""
-        return void call("account.trusted_host.add", { host: (f.host ?? "").trim().toLowerCase(), ...(f.note ? { note: f.note } : {}) }, () => form && resetIfUnchanged(form, before))
-      }
+    case "host-add": {
+      const before = form ? entries(form) : ""
+      return void call("account.trusted_host.add", { host: (f.host ?? "").trim().toLowerCase(), ...(f.note ? { note: f.note } : {}) }, () => form && resetIfUnchanged(form, before))
+    }
     case "host-remove":
       return void call("account.trusted_host.remove", { id })
     case "audit":
@@ -699,30 +658,28 @@ function act(name: string, el: HTMLElement, ev: Event): void {
     case "step-mail-code":
       return void stepped("account.step_up.mail_code", { code: (f.code ?? "").replace(/\s/g, "") })
     case "step-cancel":
-      parked = undefined
-      if (v().stepUp) resumes.delete(v().stepUp!.method)
+      resume = undefined
       return patch({ stepUp: null })
     case "copy":
       return void navigator.clipboard?.writeText(v().reveal?.lines.join("\n") ?? "").then(() => notice("ok", "Copied."))
     case "reveal-done":
       return patch({ reveal: null })
   }
-  void ev
 }
 
 function totpBegin(): void {
   void rpc<{ uri: string; secret: string; svg: string }>("account.totp.begin", {})
     .then((t) => patch({ totp: t, error: "" }))
-    .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? patch({ stepUp: { method: "account.totp.begin", params: {} } }) : patch({ error: said(e) })))
+    .catch((e: unknown) => (e instanceof Refused && e.code === "step_up" ? askStepUp(totpBegin) : patch({ error: said(e) })))
 }
 
 async function enroll(name: string): Promise<void> {
   try {
     const { publicKey } = await rpc<{ publicKey: Record<string, unknown> }>("account.passkey.begin", { name })
     const att = await create(publicKey)
-    await call("account.passkey.finish", { name, ...att }, (r) => reveal("account.passkey.finish", r))
+    await call("account.passkey.finish", { name, ...att })
   } catch (e) {
-    if (e instanceof Refused && e.code === "step_up") return patch({ stepUp: { method: "account.passkey.begin", params: { name } } })
+    if (e instanceof Refused && e.code === "step_up") return askStepUp(() => enroll(name))
     patch({ error: said(e) })
   }
 }
