@@ -78,13 +78,11 @@ export interface Exports {
   set_today(day: number): void
   ingest(ptr: number, len: number): number
   predict(op: number, opLen: number, ctx: number, ctxLen: number): number
-  judge(op: number, opLen: number, ctx: number, ctxLen: number): number
   arrange(ptr: number, len: number): number
   arrange_groups(): number
   card(id: number): number
   scoreboard(): number
   application(id: number): number
-  overview(top: number): number
   atlas(): number
   snapshot(): number
   restore(ptr: number, len: number): bigint
