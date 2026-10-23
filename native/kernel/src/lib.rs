@@ -58,10 +58,6 @@ pub(crate) mod fx {
             }
         }
 
-        fn write_u8(&mut self, n: u8) {
-            self.write_u64(n as u64);
-        }
-
         fn write_u32(&mut self, n: u32) {
             self.write_u64(n as u64);
         }

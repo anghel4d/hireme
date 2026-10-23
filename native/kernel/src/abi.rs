@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use schema::{col, refusal, table};
 use serde_json::{json, Value as Json};
 
-use crate::board::{Board, Dir, Filter};
+use crate::board::{Board, Filter};
 use crate::judge::{self, Ctx, EVal, Refusal};
 use crate::pipeline::Stage;
 use crate::rows::{Moved, Rows, Val, Write};
@@ -460,7 +460,7 @@ impl Kernel {
         let cv = match self.cvs.get(&id) {
             Some((k, cv)) if *k == key => cv.clone(),
             _ => {
-                let cv = compose::cv_part(&self.rows, &self.board, t, id, root);
+                let cv = compose::cv_part(&self.rows, self.board.lines(&self.rows), t, id, root);
                 if self.cvs.len() >= 64 {
                     self.cvs.clear();
                 }
@@ -500,13 +500,7 @@ impl Kernel {
     /// The base rows for a cold start: `u64 rev | u32 schema_rev | u16
     /// wire_hash | u16 0 | BOOT body`.
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&self.rows.rev.to_le_bytes());
-        out.extend_from_slice(&schema::SCHEMA_REV.to_le_bytes());
-        out.extend_from_slice(&schema::WIRE_HASH.to_le_bytes());
-        out.extend_from_slice(&[0, 0]);
-        out.extend_from_slice(&self.rows.snapshot());
-        out
+        [&self.rows.rev.to_le_bytes()[..], &schema::SCHEMA_REV.to_le_bytes(), &schema::WIRE_HASH.to_le_bytes(), &[0, 0], &self.rows.snapshot()].concat()
     }
 
     /// A snapshot back into an empty kernel; the rev it was taken at.
@@ -677,12 +671,6 @@ pub fn refusal_json(r: &Refusal) -> Json {
     json!({"code": r.code, "refusal": name, "data": r.data})
 }
 
-/// A keyboard direction by its code (0 next, 1 prev, 2 up, 3 down, 4
-/// first, else last).
-pub fn dir(code: u32) -> Dir {
-    [Dir::Next, Dir::Prev, Dir::Up, Dir::Down, Dir::First].get(code as usize).copied().unwrap_or(Dir::Last)
-}
-
 /// The browser's exports. One kernel per module instance.
 #[cfg(target_arch = "wasm32")]
 mod exports {
@@ -768,11 +756,6 @@ mod exports {
     #[unsafe(no_mangle)]
     pub extern "C" fn wire_hash() -> u32 {
         schema::WIRE_HASH as u32
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn schema_rev() -> u32 {
-        schema::SCHEMA_REV
     }
 
     /// The catalog JSON (`catalog_json`).
@@ -873,17 +856,6 @@ mod exports {
     pub unsafe extern "C" fn view(ptr: *const u8, len: usize) -> i32 {
         let f = filter(core::str::from_utf8(unsafe { input(ptr, len) }).unwrap_or("{}"));
         K.with(|k| put_ids(&k.borrow_mut().view(&f)))
-    }
-
-    /// The card after `selected` (0 = none) in `dir` (0 next, 1 prev, 2
-    /// up, 3 down, 4 first, 5 last) over the filtered view; 0 for none.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn step(ptr: *const u8, len: usize, selected: u32, d: u32, columns: u32) -> u32 {
-        let f = filter(core::str::from_utf8(unsafe { input(ptr, len) }).unwrap_or("{}"));
-        K.with(|k| {
-            let v = k.borrow_mut().view(&f);
-            crate::board::step(&v, (selected != 0).then_some(selected), dir(d), columns as usize).unwrap_or(0)
-        })
     }
 
     /// One card as JSON `{score_100, stored, band, class, stage, ratio, reason}`.
@@ -1012,11 +984,5 @@ mod exports {
                 text.as_ref().map(|(_, s)| f(s))
             })
         })
-    }
-
-    /// The slot of a row id in its table's column views; `u32::MAX` if absent.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn slot(t: u32, id: u32) -> u32 {
-        table(t, |t| t.and_then(|t| t.slot(id)).map_or(u32::MAX, |s| s as u32))
     }
 }

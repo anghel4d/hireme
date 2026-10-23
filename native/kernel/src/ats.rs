@@ -26,11 +26,13 @@ pub enum Vendor {
 }
 
 impl Vendor {
+    pub const NAMES: &[&str] = &[
+        "greenhouse", "lever", "ashby", "workday", "icims", "smartrecruiters", "workable", "jobvite", "taleo", "successfactors", "bamboohr",
+        "rippling", "eightfold", "gem", "unknown",
+    ];
+
     pub fn name(self) -> &'static str {
-        [
-            "greenhouse", "lever", "ashby", "workday", "icims", "smartrecruiters", "workable", "jobvite", "taleo", "successfactors",
-            "bamboohr", "rippling", "eightfold", "gem", "unknown",
-        ][self as usize]
+        Self::NAMES[self as usize]
     }
 }
 
@@ -70,14 +72,20 @@ const HOSTS: &[(Vendor, &[Root])] = &[
     (Vendor::Gem, &[Exact("gem.com")]),
 ];
 
-fn under(host: &str, root: &str) -> bool {
+/// `host` is a subdomain of `root`.
+fn sub(host: &str, root: &str) -> bool {
     host.len() > root.len() && host.ends_with(root) && host.as_bytes()[host.len() - root.len() - 1] == b'.'
+}
+
+/// `host` is `root` or a subdomain of it: "jobs.stripe.com" under "stripe.com".
+pub(crate) fn under(host: &str, root: &str) -> bool {
+    !root.is_empty() && (host == root || sub(host, root))
 }
 
 fn matches(host: &str, root: &Root) -> bool {
     match root {
-        Exact(r) => host == *r || under(host, r),
-        Sub(r) => under(host, r),
+        Exact(r) => under(host, r),
+        Sub(r) => sub(host, r),
     }
 }
 

@@ -19,8 +19,10 @@ pub enum Size {
 }
 
 impl Size {
+    pub const NAMES: &[&str] = &["mega", "large", "mid", "small"];
+
     pub fn name(self) -> &'static str {
-        ["mega", "large", "mid", "small"][self as usize]
+        Self::NAMES[self as usize]
     }
 
     /// The size tier from a name's [`Hits`], the largest first.
@@ -42,8 +44,10 @@ pub enum Department {
 }
 
 impl Department {
+    pub const NAMES: &[&str] = &["infra", "research", "security", "data", "product", "eng", "other"];
+
     pub fn name(self) -> &'static str {
-        ["infra", "research", "security", "data", "product", "eng", "other"][self as usize]
+        Self::NAMES[self as usize]
     }
 
     /// The department from a title's [`Hits`], first match wins.
@@ -106,8 +110,10 @@ pub enum Family {
 }
 
 impl Family {
+    pub const NAMES: &[&str] = &["software_engineer", "research_engineer", "research_scientist", "sre", "data_engineer", "security_engineer", "other"];
+
     pub fn name(self) -> &'static str {
-        ["software_engineer", "research_engineer", "research_scientist", "sre", "data_engineer", "security_engineer", "other"][self as usize]
+        Self::NAMES[self as usize]
     }
 
     /// The family from a title's family [`Hits`], first match wins.

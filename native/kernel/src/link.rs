@@ -73,11 +73,6 @@ fn distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// A host and the domain it sits under: "jobs.stripe.com" under "stripe.com".
-fn under(host: &str, domain: &str) -> bool {
-    !domain.is_empty() && (host == domain || host.ends_with(&alloc::format!(".{domain}")))
-}
-
 /// The corporations an application naming `company` at `url` most likely means, best first.
 pub fn companies(rows: &Rows, company: &str, url: Option<&str>) -> Vec<Candidate> {
     let Some(t) = rows.table(table::CORPORATIONS) else { return Vec::new() };
@@ -92,7 +87,7 @@ pub fn companies(rows: &Rows, company: &str, url: Option<&str>) -> Vec<Candidate
             let domain = s(col::corporations::DOMAIN);
             let careers = crate::write::host(s(col::corporations::CAREERS_URL));
             let tenant = s(col::corporations::ATS_TENANT);
-            let (score, why) = if host.as_deref().is_some_and(|h| under(h, domain)) {
+            let (score, why) = if host.as_deref().is_some_and(|h| crate::ats::under(h, domain)) {
                 (1.0, "the listing is on its domain")
             } else if ats.as_ref().is_some_and(|a| !tenant.is_empty() && a.tenant.as_deref() == Some(&tenant.to_ascii_lowercase())) {
                 (0.95, "the listing is on its ATS board")

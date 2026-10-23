@@ -66,16 +66,6 @@ pub struct Filter {
     pub search: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dir {
-    Next,
-    Prev,
-    Up,
-    Down,
-    First,
-    Last,
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scoreboard {
     pub total: u32,
@@ -227,23 +217,19 @@ impl Lines {
     }
 
     fn set_overlay(&mut self, id: u32, line: Option<(u32, u32)>) {
-        if let Some(old) = self.line_of_overlay.get(&id)
-            && let Some(set) = self.overlays_of_lineage.get_mut(&old.0)
-        {
-            set.remove(&id);
-        }
-        if let Some(l) = line {
-            self.overlays_of_lineage.entry(l.0).or_default().insert(id);
-        }
-        if let Some(old) = self.line_of_overlay.remove(&id)
-            && let Some(n) = self.overlays_on_line.get_mut(&old)
-        {
-            *n -= 1;
-            if *n == 0 {
-                self.overlays_on_line.remove(&old);
+        if let Some(old) = self.line_of_overlay.remove(&id) {
+            if let Some(set) = self.overlays_of_lineage.get_mut(&old.0) {
+                set.remove(&id);
+            }
+            if let Some(n) = self.overlays_on_line.get_mut(&old) {
+                *n -= 1;
+                if *n == 0 {
+                    self.overlays_on_line.remove(&old);
+                }
             }
         }
         if let Some(l) = line {
+            self.overlays_of_lineage.entry(l.0).or_default().insert(id);
             self.line_of_overlay.insert(id, l);
             *self.overlays_on_line.entry(l).or_insert(0) += 1;
         }
@@ -289,12 +275,6 @@ fn line(t: &Table, id: u32) -> Option<(u32, u32)> {
 
 fn day(t: &Table, id: u32, c: u16) -> Option<Day> {
     t.u32(id, c).map(|d| d as Day)
-}
-
-/// The settings row (one per account), if any.
-pub fn settings(rows: &Rows) -> Option<(&Table, u32)> {
-    let t = rows.table(table::SETTINGS)?;
-    t.ids().first().map(|id| (t, *id))
 }
 
 /// Whether a place is "home": in a country the operator is a citizen of
@@ -368,15 +348,9 @@ fn seat_of_row<'r>(rows: &Rows, r: Row<'r>, id: u32) -> Option<SeatIn<'r>> {
     })
 }
 
-/// The one `me` row: the person the desk is for.
-pub fn me(rows: &Rows) -> Option<(&Table, u32)> {
-    let t = rows.table(table::ME)?;
-    t.ids().first().map(|id| (t, *id))
-}
-
 /// The operator's citizenships from the `me` row, read once.
 pub fn citizenships(rows: &Rows) -> Vec<String> {
-    text::codes(me(rows).and_then(|(m, id)| m.str(id, col::me::CITIZENSHIPS)).unwrap_or(""))
+    text::codes(rows.first(table::ME).and_then(|(m, id)| m.str(id, col::me::CITIZENSHIPS)).unwrap_or(""))
 }
 
 /// The languages the operator speaks, U+001F-joined ISO 639-1 codes.
@@ -414,7 +388,7 @@ fn score_seat_of_row<'t>(rows: &Rows, citizenships: &[String], r: Row<'t>) -> sc
 
 /// The heat config of the account: the defaults under `settings.heat_config`.
 pub fn config(rows: &Rows) -> heat::Config {
-    heat::Config::from_json(settings(rows).and_then(|(t, id)| t.str(id, col::settings::HEAT_CONFIG)))
+    heat::Config::from_json(rows.first(table::SETTINGS).and_then(|(t, id)| t.str(id, col::settings::HEAT_CONFIG)))
 }
 
 impl Board {
@@ -506,7 +480,7 @@ impl Board {
                 Title { department: Department::of_hits(h), family: Family::of_hits(fam), facts: score::Facts::of_hits(h) }
             });
             let place = *self.places.get_or(location, || score::Facts::of_place(&text::normalize(location)));
-            let seat = Seat::from_normalized(&f, &name.normalized, name.size, title.department, title.family);
+            let mut seat = Seat::from_normalized(&f, &name.normalized, name.size, title.department, title.family);
             let read = score::Read { company: name.facts, tier: name.tier, role: title.facts, location: place };
             let mut search = String::with_capacity(f.company.len() + f.role.len() + location.len() + 16);
             for c in [A::COMPANY, A::ROLE, A::LOCATION] {
@@ -516,23 +490,12 @@ impl Board {
                 }
             }
             let no = row.u32(A::NO).unwrap_or(0);
-            {
-                use core::fmt::Write;
-                let _ = write!(search, "#{no}");
-            }
+            search.push_str(&alloc::format!("#{no}"));
             let citizens = self.citizens.get_or_insert_with(|| citizenships(rows));
             let suggestion = score::suggest_read(&score_seat_of_row(rows, citizens, row), &read);
             let stored = row.u32(A::SCORE_100).map(|s| s.min(100) as u8);
-            let mut seat = seat;
             seat.score = stored.unwrap_or(suggestion.score);
-            let c = Cached {
-                suggestion,
-                stored,
-                no,
-                search,
-                seat,
-            };
-            self.cache.insert(id, c);
+            self.cache.insert(id, Cached { suggestion, stored, no, search, seat });
         }
         self.cache.get(&id)
     }
@@ -557,7 +520,7 @@ impl Board {
         let Some((_, _, ix)) = self.governor.as_ref() else { return };
         let live: Vec<&Cached> = ids.iter().filter_map(|id| self.cache.get(id)).collect();
         for c in &live {
-            let verdict = heat::verdict(ix, &c.seat, &[]);
+            let verdict = heat::verdict(ix, &c.seat);
             let class = Class::of(&verdict, &self.config);
             let score = c.stored.unwrap_or(c.suggestion.score);
             self.cards.push(Card {
@@ -610,16 +573,11 @@ impl Board {
         self.lines.get_or_insert_with(|| Lines::build(rows))
     }
 
-    /// The lineage index as of the last derive, if built.
-    pub fn lines_built(&self) -> Option<&Lines> {
-        self.lines.as_ref()
-    }
-
     /// Days until a blocked card's move would fit (`heat::cooldown`), as
     /// of the last derive; `Some(0)` when it fits now.
     pub fn cooldown(&self, id: u32) -> Option<u32> {
         let (_, _, ix) = self.governor.as_ref()?;
-        heat::cooldown(ix, &self.cache.get(&id)?.seat, &[])
+        heat::cooldown(ix, &self.cache.get(&id)?.seat)
     }
 
     /// A card's governor seat, as of the last derive.
@@ -674,7 +632,7 @@ impl Board {
                 }
             }
         }
-        if let Some((st, id)) = settings(rows) {
+        if let Some((st, id)) = rows.first(table::SETTINGS) {
             s.goal_total = st.u32(id, col::settings::GOAL_TOTAL);
             s.goal_daily = st.u32(id, col::settings::GOAL_DAILY);
             s.goal_days_left = day(st, id, col::settings::GOAL_ON).map(|d| d.saturating_sub(today));
@@ -694,29 +652,6 @@ fn key_of(score: u8, class: Class, ratio: f64, no: u32) -> u128 {
     // f64::total_cmp's order as an unsigned integer.
     let ratio = if bits >> 63 == 1 { !bits } else { bits | 1 << 63 };
     ((255 - score as u128) << 104) | ((class as u128) << 96) | ((ratio as u128) << 32) | no as u128
-}
-
-/// The card after `selected` in direction `dir` over `view` laid out in
-/// rows of `columns`. No selection starts at the first card; moves stop at
-/// the edges rather than wrap.
-pub fn step(view: &[u32], selected: Option<u32>, dir: Dir, columns: usize) -> Option<u32> {
-    let n = view.len();
-    if n == 0 {
-        return None;
-    }
-    let cols = columns.max(1);
-    let Some(at) = selected.and_then(|s| view.iter().position(|v| *v == s)) else {
-        return Some(view[if dir == Dir::Last { n - 1 } else { 0 }]);
-    };
-    let to = match dir {
-        Dir::Next => (at + 1).min(n - 1),
-        Dir::Prev => at.saturating_sub(1),
-        Dir::Down => if at + cols < n { at + cols } else { at },
-        Dir::Up => at.checked_sub(cols).unwrap_or(at),
-        Dir::First => 0,
-        Dir::Last => n - 1,
-    };
-    Some(view[to])
 }
 
 #[cfg(test)]
@@ -740,20 +675,5 @@ mod tests {
             let fields = core::cmp::Reverse(a.0).cmp(&core::cmp::Reverse(b.0)).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)).then(a.3.cmp(&b.3));
             assert_eq!(key_of(a.0, a.1, a.2, a.3).cmp(&key_of(b.0, b.1, b.2, b.3)), fields, "{a:?} {b:?}");
         }
-    }
-
-    #[test]
-    fn keyboard_stops_at_edges() {
-        let v = [10, 11, 12, 13, 14];
-        assert_eq!(step(&v, None, Dir::Down, 2), Some(10));
-        assert_eq!(step(&v, None, Dir::Last, 2), Some(14));
-        assert_eq!(step(&v, Some(10), Dir::Down, 2), Some(12));
-        assert_eq!(step(&v, Some(13), Dir::Down, 2), Some(13));
-        assert_eq!(step(&v, Some(12), Dir::Up, 2), Some(10));
-        assert_eq!(step(&v, Some(11), Dir::Up, 2), Some(11));
-        assert_eq!(step(&v, Some(14), Dir::Next, 2), Some(14));
-        assert_eq!(step(&v, Some(10), Dir::Prev, 0), Some(10));
-        assert_eq!(step(&v, Some(99), Dir::Next, 2), Some(10));
-        assert_eq!(step(&[], Some(1), Dir::Next, 2), None);
     }
 }

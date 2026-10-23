@@ -12,7 +12,6 @@
 //! The rules that read these hits live with their kinds: `score::Facts`,
 //! `score::Tier`, `org::Size`, `org::Department`, `org::Family`.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use std::sync::OnceLock;
 
@@ -257,10 +256,7 @@ impl Hits {
     /// The family groups of a normalized title, read with its seniority
     /// words removed.
     pub fn family(n: &str) -> Hits {
-        if !text::words(n).any(|w| SENIORITY.contains(&w)) {
-            return Hits(trie().scan(n.as_bytes()) & FAMILY);
-        }
-        Hits::family_core(n)
+        Hits::title(n).1
     }
 
     /// [`Hits::of`] and [`Hits::family`] of a title, sharing the scan when
@@ -273,14 +269,8 @@ impl Hits {
     }
 
     fn family_core(n: &str) -> Hits {
-        let mut core = String::with_capacity(n.len());
-        for w in text::words(n).filter(|w| !SENIORITY.contains(w)) {
-            if !core.is_empty() {
-                core.push(' ');
-            }
-            core.push_str(w);
-        }
-        Hits(trie().scan(core.as_bytes()) & FAMILY)
+        let core: Vec<&str> = text::words(n).filter(|w| !SENIORITY.contains(w)).collect();
+        Hits(trie().scan(core.join(" ").as_bytes()) & FAMILY)
     }
 
     pub fn has(self, g: Group) -> bool {

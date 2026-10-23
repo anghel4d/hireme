@@ -222,6 +222,7 @@ use schema::col::{applications as A, contacts as C, corporations as CO, missions
 use schema::{enums, table};
 use serde_json::{json, Value as Json};
 
+use crate::ats::under;
 use crate::pipeline::Stage;
 use crate::rows::{Rows, Table};
 
@@ -392,10 +393,6 @@ const CONFIRMATIONS: [&str; 9] = [
 
 /// A delivery failure's wording, beside a mailer-daemon sender.
 const BOUNCES: [&str; 6] = ["undeliverable", "delivery status notification", "mail delivery failed", "returned mail", "delivery failure", "failure notice"];
-
-fn under(host: &str, root: &str) -> bool {
-    host == root || host.strip_suffix(root).is_some_and(|h| h.ends_with('.'))
-}
 
 /// The bare address of `Name <addr>` or `addr`, lowercased.
 pub fn address(from: &str) -> Option<String> {
@@ -705,9 +702,6 @@ pub fn file(rows: &Rows, store: &dyn Store, input: &Input) -> Filing {
                 }
             }
         }
-        if !f.filed && f.contact_id.is_none() {
-            f.contact_id = None;
-        }
     }
     f.candidates.sort_by(|a, b| b.score.cmp(&a.score).then(a.id.cmp(&b.id)));
     f.candidates.truncate(8);
@@ -753,7 +747,7 @@ pub fn match_json(rows: &Rows, store: &dyn Store, req: &Json) -> Json {
         in_reply_to: s("in_reply_to"),
         refs: &refs,
         gmail_thrid: req.get("gmail_thrid").and_then(Json::as_i64),
-        headers: req.get("headers").filter(|h| h.is_object()).or(None),
+        headers: req.get("headers").filter(|h| h.is_object()),
         link: "",
         handle: "",
     };

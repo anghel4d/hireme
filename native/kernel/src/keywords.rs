@@ -238,14 +238,7 @@ pub fn extract(listing: &str, format: Format) -> Vec<String> {
 
 /// The stored form: U+001F-joined.
 pub fn join(words: &[String]) -> String {
-    let mut out = String::new();
-    for (i, w) in words.iter().enumerate() {
-        if i > 0 {
-            out.push('\u{1f}');
-        }
-        out.push_str(w);
-    }
-    out
+    words.join("\u{1f}")
 }
 
 /// A CV's visible text, folded as keywords are, for whole-term lookups.

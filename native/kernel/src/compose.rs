@@ -110,8 +110,8 @@ pub fn cv_profile(rows: &Rows, root: Option<u32>) -> Option<u32> {
 }
 
 /// One application's keyword coverage and composed CV (theme and lines).
-pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32, root: Option<u32>) -> (Json, Json) {
-    let (lines, theme) = cv_of(rows, board.lines_built(), t, id, root);
+pub fn cv_part(rows: &Rows, index: &board::Lines, t: &Table, id: u32, root: Option<u32>) -> (Json, Json) {
+    let (lines, theme) = cv_of(rows, index, t, id, root);
     // A file root (markdown, pdf, docx) goes out as its newest version: its
     // text is what the listing's words are found in.
     let file = root.and_then(|r| {
@@ -146,7 +146,7 @@ pub fn cv_part(rows: &Rows, board: &Board, t: &Table, id: u32, root: Option<u32>
 }
 
 /// The CV lines and theme for one application.
-pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Table, id: u32, root: Option<u32>) -> (Vec<cv::Line<'r>>, Theme) {
+pub fn cv_of<'r>(rows: &'r Rows, index: &board::Lines, t: &'r Table, id: u32, root: Option<u32>) -> (Vec<cv::Line<'r>>, Theme) {
     use col::items as I;
     let profile = cv_profile(rows, root);
     let items: Vec<Item> = rows
@@ -171,23 +171,10 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
         .table(table::CV_OVERLAYS)
         .map(|o| {
             use col::cv_overlays as O;
-            // The lineage's overlays from the index when there is one; an
-            // application with no lineage reads its own by a scan.
-            // The lineage's and the application's own, as the scan below.
-            let ids: Vec<u32> = match (lines, lineage) {
-                (Some(l), Some(lid)) => {
-                    let mut ids: Vec<u32> = l.overlays(lid).chain(l.overlays_of(id)).collect();
-                    ids.sort_unstable();
-                    ids.dedup();
-                    ids
-                }
-                _ => o
-                    .ids()
-                    .iter()
-                    .copied()
-                    .filter(|&x| o.u32(x, O::APPLICATION_ID) == Some(id) || (lineage.is_some() && o.u32(x, O::LINEAGE_ID) == lineage))
-                    .collect(),
-            };
+            // The lineage's overlays and the application's own, from the index.
+            let mut ids: Vec<u32> = lineage.into_iter().flat_map(|l| index.overlays(l)).chain(index.overlays_of(id)).collect();
+            ids.sort_unstable();
+            ids.dedup();
             ids.iter()
                 .filter(|&&x| o.has(x))
                 .filter_map(|&x| {
@@ -216,7 +203,7 @@ pub fn cv_of<'r>(rows: &'r Rows, lines: Option<&crate::board::Lines>, t: &'r Tab
 /// figure of places.
 pub fn recipe(rows: &Rows) -> (Me<'_>, Vec<u16>, Vec<String>) {
     use col::me as M;
-    let p = board::me(rows);
+    let p = rows.first(table::ME);
     let get = |c: u16| p.and_then(|(t, id)| t.str(id, c)).unwrap_or("");
     let mut me = Me { citizenships: get(M::CITIZENSHIPS), work_permits: get(M::WORK_PERMITS), languages: board::languages(rows).into(), prefer: get(M::PREFER), avoid: get(M::AVOID), ..Me::default() };
     let (mut cols, mut unknown) = (Vec::new(), Vec::new());

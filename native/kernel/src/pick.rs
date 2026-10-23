@@ -22,7 +22,7 @@ use crate::mask::{self, Expr, Facts, Val};
 use crate::org::{Department, Family, Seniority, Size};
 use crate::rows::{Rows, Table};
 use crate::score::{self, Tier};
-use crate::{ats, board, lexicon, text};
+use crate::{ats, lexicon, text};
 
 /// One arm of the match: a rule row, compiled.
 pub struct Arm {
@@ -111,7 +111,7 @@ pub fn pick(rows: &Rows, arms: &[Arm], counts: &Counts, id: u32) -> Pick {
         (if alive(r) { State::Pinned } else { State::Stale }, Some(r), None, t.u32(id, A::CV_PINNED_BY))
     } else if let Some(a) = hits.first() {
         (State::Matched, Some(a.root), Some(a.id), None)
-    } else if let Some(r) = board::me(rows).and_then(|(m, mid)| m.u32(mid, col::me::CV_DEFAULT_ROOT_ID)).filter(|r| alive(*r)) {
+    } else if let Some(r) = rows.first(table::ME).and_then(|(m, mid)| m.u32(mid, col::me::CV_DEFAULT_ROOT_ID)).filter(|r| alive(*r)) {
         (State::Default, Some(r), None, None)
     } else {
         (State::None, None, None, None)
@@ -197,19 +197,12 @@ impl<'r> AppFacts<'r> {
     /// The application's country: its place, or the place's country.
     fn country(&self) -> Option<(&'r Table, u32)> {
         let (pt, p) = self.place()?;
-        if pt.u32(p, col::places::KIND) == Some(enums::place_kind::COUNTRY as u32) {
-            return Some((pt, p));
-        }
-        pt.u32(p, col::places::COUNTRY_ID).filter(|c| pt.has(*c)).map(|c| (pt, c))
+        country_of(pt, p).map(|c| (pt, c))
     }
 
     fn corp(&self) -> Option<(&'r Table, u32)> {
         let c = self.t.u32(self.id, A::CORPORATION_ID)?;
         self.rows.table(table::CORPORATIONS).filter(|ct| ct.has(c)).map(|ct| (ct, c))
-    }
-
-    fn me(&self) -> Option<(&'r Table, u32)> {
-        board::me(self.rows)
     }
 
     fn iso2(&self, place: Option<u32>) -> Option<Val<'r>> {
@@ -251,8 +244,9 @@ impl Facts for AppFacts<'_> {
         let s = |c: u16| t.str(id, c).map(|v| Val::Text(Cow::Borrowed(v)));
         let e = |c: u16| t.u32(id, c).map(Val::Enum);
         let corp_s = |c: u16| self.corp().and_then(|(ct, x)| ct.str(x, c)).map(|v| Val::Text(Cow::Borrowed(v)));
-        let me_s = |c: u16| self.me().and_then(|(m, x)| m.str(x, c));
-        let me_u = |c: u16| self.me().and_then(|(m, x)| m.u32(x, c));
+        let me = self.rows.first(table::ME);
+        let me_s = |c: u16| me.and_then(|(m, x)| m.str(x, c));
+        let me_u = |c: u16| me.and_then(|(m, x)| m.u32(x, c));
         match mask::FIELDS.get(field)?.path {
             "id" => Some(Val::Num(id as f64)),
             "no" => t.u32(id, A::NO).map(|v| Val::Num(v as f64)),
@@ -348,7 +342,12 @@ impl Picks {
         }
         let counts = Counts::default();
         for &id in ids {
-            self.by.insert(id, pick(rows, &self.arms, &counts, id));
+            // A written row may be gone (a rolled-back write that had brought it back).
+            if rows.table(table::APPLICATIONS).is_some_and(|t| t.slot(id).is_some()) {
+                self.by.insert(id, pick(rows, &self.arms, &counts, id));
+            } else {
+                self.by.remove(&id);
+            }
         }
         true
     }

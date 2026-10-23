@@ -587,14 +587,6 @@ impl Moved {
     }
 }
 
-/// One pending write's undo record.
-#[derive(Clone, Debug, PartialEq)]
-enum Undo {
-    Set { table: u16, id: u32, col: u16, old: Val },
-    Inserted { table: u16, id: u32 },
-    Removed { table: u16, id: u32, row: Vec<(u16, Val)> },
-}
-
 /// A write the kernel applies: a cell, an insert or a delete.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Write {
@@ -607,7 +599,8 @@ pub enum Write {
 struct Pending {
     op_id: u64,
     writes: Vec<Write>,
-    undo: Vec<Undo>,
+    /// The writes that undo `writes`, applied newest first.
+    undo: Vec<Write>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -649,6 +642,11 @@ impl Rows {
     /// table is absent.
     pub fn each(&self, id: u16) -> impl Iterator<Item = (&Table, u32)> {
         self.table(id).into_iter().flat_map(|t| t.ids().iter().map(move |&id| (t, id)))
+    }
+
+    /// A one-row table's row (the settings, me, the mailbox, the clock).
+    pub fn first(&self, id: u16) -> Option<(&Table, u32)> {
+        self.each(id).next()
     }
 
     fn table_mut(&mut self, id: u16) -> &mut Table {
@@ -730,41 +728,26 @@ impl Rows {
         Ok(())
     }
 
-    fn apply_write(&mut self, w: &Write, undo: &mut Vec<Undo>) {
-        match w {
-            Write::Set { table, id, col, val } => {
-                if let Some(old) = self.table_mut(*table).set(*id, *col, val) {
-                    undo.push(Undo::Set { table: *table, id: *id, col: *col, old });
+    /// Applies one write, recording the writes that undo it.
+    fn apply_write(&mut self, w: &Write, undo: &mut Vec<Write>) {
+        match *w {
+            Write::Set { table, id, col, ref val } => {
+                if let Some(old) = self.table_mut(table).set(id, col, val) {
+                    undo.push(Write::Set { table, id, col, val: old });
                 }
             }
             Write::Insert { table, id } => {
-                let t = self.table_mut(*table);
-                if !t.has(*id) {
-                    t.insert(*id);
-                    undo.push(Undo::Inserted { table: *table, id: *id });
+                let t = self.table_mut(table);
+                if !t.has(id) {
+                    t.insert(id);
+                    undo.push(Write::Remove { table, id });
                 }
             }
             Write::Remove { table, id } => {
-                if let Some(row) = self.table_mut(*table).remove(*id) {
-                    undo.push(Undo::Removed { table: *table, id: *id, row });
-                }
-            }
-        }
-    }
-
-    fn undo(&mut self, u: &Undo) {
-        match u {
-            Undo::Set { table, id, col, old } => {
-                self.table_mut(*table).set(*id, *col, old);
-            }
-            Undo::Inserted { table, id } => {
-                self.table_mut(*table).remove(*id);
-            }
-            Undo::Removed { table, id, row } => {
-                let t = self.table_mut(*table);
-                t.insert(*id);
-                for (c, v) in row {
-                    t.set(*id, *c, v);
+                if let Some(row) = self.table_mut(table).remove(id) {
+                    // Undone newest first: the row comes back, then its cells.
+                    undo.extend(row.into_iter().map(|(col, val)| Write::Set { table, id, col, val }));
+                    undo.push(Write::Insert { table, id });
                 }
             }
         }
@@ -772,9 +755,10 @@ impl Rows {
 
     /// Undoes every pending write, newest first.
     fn unwind(&mut self, pending: &[Pending]) {
+        let mut redo = Vec::new();
         for p in pending.iter().rev() {
             for u in p.undo.iter().rev() {
-                self.undo(u);
+                self.apply_write(u, &mut redo);
             }
         }
     }

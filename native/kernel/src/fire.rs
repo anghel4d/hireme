@@ -37,7 +37,6 @@ pub const REASON_MAX: usize = 280;
 /// An email's recipients, To and Cc together: what the connector sends to.
 pub const RECIPIENTS_MAX: usize = 10;
 
-const STATE: [&str; 6] = ["draft", "draft_ready", "fire_ready", "in_flight", "fired", "cancelled"];
 /// The states a put moves a mission among.
 const STAGED: [u8; 4] = [enums::mission_state::DRAFT, enums::mission_state::DRAFT_READY, enums::mission_state::FIRE_READY, enums::mission_state::CANCELLED];
 
@@ -166,18 +165,8 @@ impl Ranges {
 
     /// The canonical text: runs joined by commas, a run of one as its id.
     pub fn text(&self) -> String {
-        let mut s = String::new();
-        for (i, (lo, hi)) in self.0.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            if lo == hi {
-                s.push_str(&alloc::format!("{lo}"));
-            } else {
-                s.push_str(&alloc::format!("{lo}-{hi}"));
-            }
-        }
-        s
+        let run = |&(lo, hi): &(u32, u32)| if lo == hi { alloc::format!("{lo}") } else { alloc::format!("{lo}-{hi}") };
+        self.0.iter().map(run).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -200,7 +189,7 @@ fn row(table: u16, id: u32) -> Row {
 }
 
 fn state_name(s: u32) -> &'static str {
-    STATE.get(s as usize).copied().unwrap_or("draft")
+    enums::mission_state::NAMES.get(s as usize).copied().unwrap_or("draft")
 }
 
 fn missions(rows: &Rows) -> Option<&Table> {
@@ -221,6 +210,16 @@ fn open_request(rows: &Rows, id: u32) -> Result<&Table, Refusal> {
     Ok(t)
 }
 
+/// An open request, which only the key that asked for it (or the operator)
+/// changes or drops.
+fn own_request(rows: &Rows, ctx: &Ctx, id: u32) -> Result<(), Refusal> {
+    let t = open_request(rows, id)?;
+    if !ctx.human && t.u32(id, R::REQUESTED_BY) != ctx.key_id {
+        return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": id})));
+    }
+    Ok(())
+}
+
 /// An application as a mission's review and brief show it.
 fn app_json(a: &Table, app: u32) -> Json {
     json!({
@@ -238,14 +237,8 @@ fn is_email(t: &Table, id: u32) -> bool {
     t.u32(id, M::KIND) == Some(u32::from(enums::outreach_kind::EMAIL))
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    const D: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push(D[(b >> 4) as usize] as char);
-        s.push(D[(b & 15) as usize] as char);
-    }
-    s
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()
 }
 
 // ------------------------------------------------------------------ the hash
@@ -360,9 +353,7 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
         if to.as_ref().map_or(0, Vec::len) + cc.as_ref().map_or(0, Vec::len) > RECIPIENTS_MAX {
             return Some("recipients");
         }
-        let to_ok = to.is_ok_and(|a| !a.is_empty());
-        let cc_ok = cc.is_ok();
-        if !to_ok || !cc_ok || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
+        if !to.is_ok_and(|a| !a.is_empty()) || cc.is_err() || text(t, id, M::SUBJECT).trim().is_empty() || text(t, id, M::DRAFT).trim().is_empty() {
             return Some("incomplete");
         }
         if cv_missing(rows, cvs, t, id) {
@@ -371,7 +362,7 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
     }
     let Some(apps) = rows.table(table::APPLICATIONS) else { return Some("unlinked") };
     let Some(app) = t.u32(id, M::APPLICATION_ID).filter(|a| apps.has(*a)) else { return Some("unlinked") };
-    if !crate::link::missing(apps.u32(app, A::CORPORATION_ID), apps.u32(app, A::PLACE_ID), apps.u32(app, A::WORK_MODE)).is_empty() {
+    if crate::link::short(apps.u32(app, A::CORPORATION_ID), apps.u32(app, A::PLACE_ID), apps.u32(app, A::WORK_MODE)) {
         return Some("unlinked");
     }
     let stage = apps.u32(app, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered);
@@ -589,10 +580,6 @@ pub fn authority(rows: &Rows, ctx: &Ctx, mission: u32, named: Option<u32>) -> Re
 
 // ------------------------------------------------------------------ the mailbox and the cap
 
-fn mailbox(rows: &Rows) -> Option<(&Table, u32)> {
-    rows.table(table::MAILBOXES).and_then(|t| t.ids().first().map(|&id| (t, id)))
-}
-
 /// The UTC day of unix seconds.
 fn day_of(secs: i64) -> i64 {
     secs.div_euclid(86_400)
@@ -601,7 +588,7 @@ fn day_of(secs: i64) -> i64 {
 /// The day's send cap, how many email shots went or are going today (UTC),
 /// and when the count resets.
 pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
-    let cap = mailbox(rows).and_then(|(t, id)| t.u32(id, MB::DAILY_CAP)).unwrap_or(25);
+    let cap = rows.first(table::MAILBOXES).and_then(|(t, id)| t.u32(id, MB::DAILY_CAP)).unwrap_or(25);
     let today = day_of(now);
     let used = missions(rows).map_or(0, |t| {
         t.ids()
@@ -619,7 +606,7 @@ pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
 
 /// An email shot's own gates: a live mailbox and room under the cap.
 pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<(), Refusal> {
-    let live = mailbox(rows).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)));
+    let live = rows.first(table::MAILBOXES).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)));
     if !live {
         return Err(answer(rows, ctx, "mailbox", mission, Some(key_id)));
     }
@@ -702,7 +689,7 @@ pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result
         let cc = crate::outreach::addrs(&text(t, mission, M::CC)).unwrap_or_default();
         let refs: Vec<String> = text(t, mission, M::REFS).split_whitespace().map(String::from).collect();
         let body = text(t, mission, M::DRAFT).into_owned();
-        let from = mailbox(rows).and_then(|(mb, id)| mb.str(id, MB::ADDRESS)).unwrap_or("");
+        let from = rows.first(table::MAILBOXES).and_then(|(mb, id)| mb.str(id, MB::ADDRESS)).unwrap_or("");
         let shot = crate::outreach::Shot {
             mission_id: mission,
             application_id: app,
@@ -932,7 +919,7 @@ pub fn stamp(rows: &Rows, ctx: &Ctx, mission: u32, message_id: &str) -> Result<V
 /// `mailbox_state`: what the connector saw of the mailbox.
 pub fn mailbox_state(rows: &Rows, ctx: &Ctx, status: Val, error: Val, synced: Val) -> Result<Vec<Row>, Refusal> {
     need_mail(ctx, "mailbox_state")?;
-    let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    let Some((_, id)) = rows.first(table::MAILBOXES) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
     let mut r = row(table::MAILBOXES, id);
     r.set(MB::STATUS, status);
     r.set(MB::LAST_ERROR, error);
@@ -946,7 +933,7 @@ pub fn mailbox_state(rows: &Rows, ctx: &Ctx, status: Val, error: Val, synced: Va
 /// secrets and the cursor when it reads the status).
 pub fn unlink(rows: &Rows, ctx: &Ctx) -> Result<Vec<Row>, Refusal> {
     need_human(ctx, "unlink_mail")?;
-    let Some((_, id)) = mailbox(rows) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
+    let Some((_, id)) = rows.first(table::MAILBOXES) else { return Err(no(refusal::NOT_FOUND, json!({"table": "mailboxes"}))) };
     let mut r = row(table::MAILBOXES, id);
     r.set(MB::STATUS, Val::U32(u32::from(enums::mailbox_status::UNLINKED)));
     Ok(alloc::vec![r])
@@ -981,10 +968,7 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             {
                 return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "from": from.map(|f| state_name(u32::from(f))), "to": state_name(to), "rule": "by_command"})));
             }
-            let kind = match given(row, M::KIND) {
-                Some(EVal::Val(Val::U32(k))) => Some(k),
-                _ => t.and_then(|t| t.u32(target, M::KIND)),
-            };
+            let kind = row.number(M::KIND, t, target);
             // A first-contact email reaches fire_ready only with a CV file to
             // carry (the pick's version a PDF or DOCX upload).
             let to_ready = matches!(given(row, M::STATE), Some(EVal::Val(Val::U32(s))) if s == u32::from(enums::mission_state::FIRE_READY));
@@ -994,11 +978,7 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
                     Some(_) => false,
                     None => t.and_then(|t| t.str(target, M::IN_REPLY_TO)).is_some_and(|v| answers(rows, v)),
                 };
-                let app = match given(row, M::APPLICATION_ID) {
-                    Some(EVal::Val(Val::U32(a))) => Some(a),
-                    _ => t.and_then(|t| t.u32(target, M::APPLICATION_ID)),
-                };
-                if !reply && !app.is_some_and(|a| Cvs::of(rows).file(rows, a)) {
+                if !reply && !row.number(M::APPLICATION_ID, t, target).is_some_and(|a| Cvs::of(rows).file(rows, a)) {
                     return Err(no(refusal::STAGE, json!({"table": "missions", "id": target, "to": "fire_ready", "rule": "cv_file", "need": "the application's CV as a PDF or DOCX version: pick one (pick_cv) or upload one"})));
                 }
             }
@@ -1032,11 +1012,8 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             if mail {
                 return Err(no(refusal::SCOPE, json!({"need": "operator or agent", "table": "fire_requests"})));
             }
-            if let Some(t) = rows.table(table::FIRE_REQUESTS).filter(|t| target > 0 && t.has(target)) {
-                open_request(rows, target)?;
-                if !ctx.human && t.u32(target, R::REQUESTED_BY) != ctx.key_id {
-                    return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": target})));
-                }
+            if rows.table(table::FIRE_REQUESTS).is_some_and(|t| target > 0 && t.has(target)) {
+                own_request(rows, ctx, target)?;
             } else {
                 row.set(R::REQUESTED_BY, opt(ctx.key_id));
                 // The default, written as the database will, so a prediction
@@ -1081,16 +1058,8 @@ pub fn drop(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32) -> Result<(), Re
             }
             _ => Ok(()),
         },
-        table::FIRE_REQUESTS => {
-            let t = rows.table(table::FIRE_REQUESTS);
-            if t.is_some_and(|t| t.u32(target, R::STATUS) != Some(u32::from(enums::request_status::OPEN))) {
-                return Err(no(refusal::STAGE, json!({"table": "fire_requests", "id": target, "rule": "not_open"})));
-            }
-            if !ctx.human && t.and_then(|t| t.u32(target, R::REQUESTED_BY)) != ctx.key_id {
-                return Err(no(refusal::SCOPE, json!({"need": "the key that asked", "table": "fire_requests", "id": target})));
-            }
-            Ok(())
-        }
+        // write::drop_checks found the row.
+        table::FIRE_REQUESTS => own_request(rows, ctx, target),
         table::MAILBOXES if !ctx.human => Err(no(refusal::SCOPE, json!({"need": "operator", "table": "mailboxes"}))),
         // Its missions would go with it: one in flight (a mail mid-SMTP) or
         // fired (the record of a send) keeps the application.

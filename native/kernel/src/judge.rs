@@ -100,6 +100,16 @@ impl Row {
     pub(crate) fn get(&self, col: u16) -> Option<&EVal> {
         self.cells.iter().find(|c| c.0 == col).map(|c| &c.1)
     }
+
+    /// A number cell as the row will stand: the one this row sets (none
+    /// for a null it sets), else `base`'s row `id`'s.
+    pub(crate) fn number(&self, col: u16, base: Option<&Table>, id: u32) -> Option<u32> {
+        match self.get(col) {
+            Some(EVal::Val(Val::U32(v))) => Some(*v),
+            Some(_) => None,
+            None => base.and_then(|t| t.u32(id, col)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,11 +168,15 @@ fn param_str(op: &Op, id: u16) -> Option<String> {
     }
 }
 
-fn param_stage(op: &Op, id: u16) -> Option<Stage> {
+fn param_u32(op: &Op, id: u16) -> Option<u32> {
     match param_val(op, id) {
-        Val::U32(v) => Stage::from_u32(v),
+        Val::U32(v) => Some(v),
         _ => None,
     }
+}
+
+fn param_stage(op: &Op, id: u16) -> Option<Stage> {
+    param_u32(op, id).and_then(Stage::from_u32)
 }
 
 /// Judges one op. `board` supplies the cached governor seats; it must
@@ -246,11 +260,7 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             // Every application names its company and, unless remote, its
             // place in the world: a write that leaves one out is refused with
             // what it most likely meant (link.rs), never linked on its own.
-            let after = |c: u16| match row.get(c) {
-                Some(EVal::Val(Val::U32(v))) => Some(*v),
-                Some(_) => None,
-                None => apps.and_then(|t| t.u32(op.target, c)),
-            };
+            let after = |c: u16| row.number(c, apps, op.target);
             let need = crate::link::missing(after(A::CORPORATION_ID), after(A::PLACE_ID), after(A::WORK_MODE));
             let touched = [A::CORPORATION_ID, A::PLACE_ID, A::WORK_MODE].iter().any(|c| row.get(*c).is_some());
             if !need.is_empty() && (op.target == 0 || touched) {
@@ -277,10 +287,7 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 match v {
                     Val::Str(text) => {
                         // The format the op sets, else the row's.
-                        let format = match row.get(A::LISTING_FORMAT) {
-                            Some(EVal::Val(Val::U32(f))) => Some(*f),
-                            _ => apps.and_then(|t| t.u32(op.target, A::LISTING_FORMAT)),
-                        };
+                        let format = row.number(A::LISTING_FORMAT, apps, op.target);
                         let words = keywords::extract(&text, keywords::Format::from_code(format));
                         row.set(A::KEYWORDS, s(keywords::join(&words)));
                         row.set(A::KEYWORDS_VERSION, u(keywords::VERSION));
@@ -337,10 +344,7 @@ fn overlay(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx, row: &mut Row, ex
         return Err(no(refusal::NOT_FOUND, json!({"table": "cv_overlays", "id": op.target})));
     }
     // A cell the op sets, else the row's.
-    let given = |c: u16| match row.get(c) {
-        Some(EVal::Val(Val::U32(v))) => Some(*v),
-        _ => existing.and_then(|t| t.u32(op.target, c)),
-    };
+    let given = |c: u16| row.number(c, existing, op.target);
     let Some(app) = given(O::APPLICATION_ID) else {
         return Err(no(refusal::NOT_FOUND, json!({"need": "application_id"})));
     };
@@ -551,10 +555,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             Ok(moved(t, op.target, from, Stage::OpenFire, None, op, ctx))
         }
         command::OPEN_GENERATION => {
-            let corp = match param_val(op, param::open_generation::CORPORATION_ID) {
-                Val::U32(c) => Some(c),
-                _ => None,
-            };
+            let corp = param_u32(op, param::open_generation::CORPORATION_ID);
             let found = match corp {
                 Some(c) => lineage_of(rows, board, c),
                 None => rows.table(table::CV_LINEAGES).filter(|t| t.has(op.target)).map(|t| (t, op.target)),
@@ -583,7 +584,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
         }
         command::PICK_CV => {
             app(rows, op.target)?;
-            let Val::U32(root) = param_val(op, param::pick_cv::CV_ROOT_ID) else { return refuse(refusal::TYPE, json!({"param": "cv_root_id"})) };
+            let Some(root) = param_u32(op, param::pick_cv::CV_ROOT_ID) else { return refuse(refusal::TYPE, json!({"param": "cv_root_id"})) };
             let Some(name) = rows.table(table::CV_ROOTS).filter(|t| t.has(root)).map(|t| t.str(root, col::cv_roots::NAME).unwrap_or("")) else {
                 return refuse(refusal::NOT_FOUND, json!({"table": "cv_roots", "id": root}));
             };
@@ -598,10 +599,7 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
         }
         command::FIRE => {
             let id = op.target;
-            let named = match param_val(op, param::fire::KEY) {
-                Val::U32(k) => Some(k),
-                _ => None,
-            };
+            let named = param_u32(op, param::fire::KEY);
             // A mission that cannot go whoever asks is answered under the key
             // named, else the one it last went under.
             if let Some(why) = crate::fire::hold(rows, &crate::fire::Cvs::of(rows), id) {
@@ -660,13 +658,9 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
             Ok(out)
         }
         command::CREATE_FIRE_KEY => {
-            let id = |p: u16| match param_val(op, p) {
-                Val::U32(v) => Some(v),
-                _ => None,
-            };
-            let missions = param_str(op, param::create_fire_key::MISSIONS).unwrap_or_default();
-            let digest = param_str(op, param::create_fire_key::DIGEST).unwrap_or_default();
-            crate::fire::create(rows, ctx, &missions, &digest, id(param::create_fire_key::USABLE_BY), id(param::create_fire_key::REQUEST))
+            use param::create_fire_key as P;
+            let (missions, digest) = (param_str(op, P::MISSIONS).unwrap_or_default(), param_str(op, P::DIGEST).unwrap_or_default());
+            crate::fire::create(rows, ctx, &missions, &digest, param_u32(op, P::USABLE_BY), param_u32(op, P::REQUEST))
         }
         command::REVOKE_FIRE_KEY => crate::fire::revoke(rows, ctx, op.target),
         command::DECLINE => crate::fire::decline(rows, ctx, op.target),
@@ -763,11 +757,11 @@ fn governor(rows: &Rows, board: &mut Board, id: u32, to: Stage, ctx: &Ctx) -> Re
     let Some(t) = rows.table(table::APPLICATIONS) else { return Ok(()) };
     let Some(seat) = board::seat(rows, t, id) else { return Ok(()) };
     let (ix, _) = board.governor(rows, ctx.today);
-    let mut v = heat::verdict(ix, &seat, &[]);
+    let mut v = heat::verdict(ix, &seat);
     if v.allow {
         return Ok(());
     }
-    v.cooldown_days = heat::cooldown(ix, &seat, &[]);
+    v.cooldown_days = heat::cooldown(ix, &seat);
     let mut data = v.to_json(&seat);
     data["to"] = Json::String(to.name().into());
     Err(no(refusal::HEAT, data))

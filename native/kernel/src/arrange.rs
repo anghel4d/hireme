@@ -114,19 +114,17 @@ pub fn build(rows: &Rows, f: usize) -> Col {
         }
         Ty::Enum(e) => {
             let names = mask::values(e);
-            let code = |id: u32| if let Some(Val::Enum(i)) = read(id) { i } else { NONE };
-            let mut memo: crate::fx::Map<u64, u32> = crate::fx::Map::default();
-            let mut titles: crate::keyed::Map<&str, u32> = crate::keyed::Map::default();
-            let ids = t
-                .ids()
-                .iter()
-                .map(|&id| match (&shape, key(id)) {
+            let code = |id: u32| if let Some(Val::Enum(i)) = read(id) { Some(i as usize) } else { None };
+            let mut memo: crate::fx::Map<u64, Option<usize>> = crate::fx::Map::default();
+            let mut titles: crate::keyed::Map<&str, Option<usize>> = crate::keyed::Map::default();
+            listed(
+                names,
+                t.ids().iter().map(|&id| match (&shape, key(id)) {
                     (_, Some(k)) => *memo.entry(k).or_insert_with(|| code(id)),
                     (Archetype::Title, None) => *titles.entry(t.str(id, schema::col::applications::ROLE).unwrap_or("")).or_insert_with(|| code(id)),
                     _ => code(id),
-                })
-                .collect();
-            Col::Sym { ids, dict: names.iter().map(|s| String::from(*s)).collect(), rank: (0..names.len() as u32).collect() }
+                }),
+            )
         }
         _ => {
             let mut names = Interner::new();
@@ -150,14 +148,7 @@ pub fn build(rows: &Rows, f: usize) -> Col {
                 .ids()
                 .iter()
                 .map(|&id| match key(id) {
-                    Some(k) => match memo.get(&k) {
-                        Some(&s) => s,
-                        None => {
-                            let s = text(id, &mut names);
-                            memo.insert(k, s);
-                            s
-                        }
-                    },
+                    Some(k) => *memo.entry(k).or_insert_with(|| text(id, &mut names)),
                     None => text(id, &mut names),
                 })
                 .collect();

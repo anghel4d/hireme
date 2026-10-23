@@ -74,24 +74,16 @@ pub struct Field {
     pub ty: Ty,
 }
 
-const SIZES: &[&str] = &["mega", "large", "mid", "small"];
-const TIERS: &[&str] = &["none", "frontier", "labs", "big_tech"];
-const DEPARTMENTS: &[&str] = &["infra", "research", "security", "data", "product", "eng", "other"];
-const FAMILIES: &[&str] = &["software_engineer", "research_engineer", "research_scientist", "sre", "data_engineer", "security_engineer", "other"];
-const VENDORS: &[&str] = &[
-    "greenhouse", "lever", "ashby", "workday", "icims", "smartrecruiters", "workable", "jobvite", "taleo", "successfactors", "bamboohr",
-    "rippling", "eightfold", "gem", "unknown",
-];
-
 /// An enum type's values in order: the kernel's own, else the schema's.
 pub fn values(name: &str) -> &'static [&'static str] {
+    use crate::org::{Department, Family, Seniority, Size};
     match name {
-        "size" => SIZES,
-        "tier" => TIERS,
-        "department" => DEPARTMENTS,
-        "family" => FAMILIES,
-        "seniority" => crate::org::Seniority::NAMES,
-        "vendor" => VENDORS,
+        "size" => Size::NAMES,
+        "tier" => &["none", "frontier", "labs", "big_tech"],
+        "department" => Department::NAMES,
+        "family" => Family::NAMES,
+        "seniority" => Seniority::NAMES,
+        "vendor" => crate::ats::Vendor::NAMES,
         other => schema::enum_names(other).unwrap_or(&[]),
     }
 }
@@ -419,16 +411,7 @@ impl Parser<'_, '_> {
             return Ok(e);
         }
         if self.eat("[")? {
-            let mut xs = Vec::new();
-            loop {
-                xs.push(self.not()?);
-                if self.eat("]")? {
-                    break;
-                }
-                if !self.eat(",")? {
-                    return Err(self.err("expected , or ] in a [ ] pattern"));
-                }
-            }
+            let xs = self.list(Self::not, "expected , or ] in a [ ] pattern")?;
             return Ok(joined(xs, Node::All));
         }
         if let Tok::Name(name) = &self.tok
@@ -438,6 +421,18 @@ impl Parser<'_, '_> {
             return self.mask(&name, span);
         }
         self.test()
+    }
+
+    /// Items up to the `]` that closes a `[`, separated by commas.
+    fn list<T>(&mut self, item: impl Fn(&mut Self) -> Result<T, Error>, missing: &str) -> Result<Vec<T>, Error> {
+        let mut xs = alloc::vec![item(self)?];
+        while !self.eat("]")? {
+            if !self.eat(",")? {
+                return Err(self.err(missing));
+            }
+            xs.push(item(self)?);
+        }
+        Ok(xs)
     }
 
     fn mask(&mut self, name: &str, span: Span) -> Result<Node, Error> {
@@ -511,17 +506,7 @@ impl Parser<'_, '_> {
         }
         let elem = ty.elem().unwrap_or(ty);
         if self.eat("[")? {
-            let mut xs = Vec::new();
-            loop {
-                xs.push(self.lit(elem)?);
-                if self.eat("]")? {
-                    break;
-                }
-                if !self.eat(",")? {
-                    return Err(self.err("expected , or ] in a list"));
-                }
-            }
-            return Ok(Rhs::Lits(xs));
+            return Ok(Rhs::Lits(self.list(|p| p.lit(elem), "expected , or ] in a list")?));
         }
         if op == Op::In {
             return Err(self.err("in takes a list on the right, like [DE, AT], or a list field"));
@@ -559,22 +544,16 @@ fn code(c: &str) -> bool {
     country.len() == 2 && country.bytes().all(|b| b.is_ascii_uppercase()) && (sub.is_empty() && !c.contains('-') || (1..=3).contains(&sub.len()))
 }
 
-fn lit_ty(l: &Lit) -> &'static str {
+/// The type a literal is of; any enum's.
+fn lit_ty(l: &Lit) -> Ty {
     match l {
-        Lit::Bool(_) => "bool",
-        Lit::Text(_) => "text",
-        Lit::Num(_) => "num",
-        Lit::Day(_) => "day",
-        Lit::Code(_) => "code",
-        Lit::Enum(_) => "enum",
+        Lit::Bool(_) => Ty::Bool,
+        Lit::Text(_) => Ty::Text,
+        Lit::Num(_) => Ty::Num,
+        Lit::Day(_) => Ty::Day,
+        Lit::Code(_) => Ty::Code,
+        Lit::Enum(_) => Ty::Enum(""),
     }
-}
-
-fn fits(ty: Ty, l: &Lit) -> bool {
-    matches!(
-        (ty, l),
-        (Ty::Bool, Lit::Bool(_)) | (Ty::Text, Lit::Text(_)) | (Ty::Num, Lit::Num(_)) | (Ty::Day, Lit::Day(_)) | (Ty::Code, Lit::Code(_)) | (Ty::Enum(_), Lit::Enum(_))
-    )
 }
 
 /// Whether `op` applies to a field of type `ty` with this value.
@@ -594,8 +573,8 @@ fn check(ty: Ty, op: Op, rhs: &Rhs) -> Result<(), String> {
         }
         Rhs::Lits(lits) => {
             let elem = ty.elem().unwrap_or(ty);
-            if let Some(bad) = lits.iter().find(|l| !fits(elem, l)) {
-                return Err(format!("this field holds {}, not {}", elem.name(), lit_ty(bad)));
+            if let Some(bad) = lits.iter().map(lit_ty).find(|l| core::mem::discriminant(l) != core::mem::discriminant(&elem)) {
+                return Err(format!("this field holds {}, not {}", elem.name(), bad.name()));
             }
             let one = lits.len() == 1;
             let ok = match op {
