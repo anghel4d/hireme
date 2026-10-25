@@ -3,7 +3,7 @@
 //! The catalog is this build's declaration, the schema crate's statics; a
 //! node of another schema refuses this build's HELLO (the wire hash folds
 //! the schema in), so it is never out of date. The key's masks from WELCOME
-//! filter it. Tools: the fixed ones (`hireme`, `schema`, `find`, `get`,
+//! filter it. Tools: the fixed ones (`hireme`, `man`, `schema`, `find`, `get`,
 //! `text`, `history`, `put`, `drop`, `lease`, `release`) and one per
 //! declared command. A tool the masks forbid is not listed, and a
 //! `human_only` command never is.
@@ -117,7 +117,13 @@ impl Masks {
 
 // ---------------------------------------------------------------- tool list
 
-fn tool(name: &str, title: &str, description: String, input: Json, read_only: bool, destructive: bool) -> Json {
+fn tool(name: &str, title: &str, description: String, mut input: Json, read_only: bool, destructive: bool) -> Json {
+    // Every tool takes -h (and help), in its schema so strict clients pass it: man's short page.
+    if let Some(p) = input.get_mut("properties").and_then(Json::as_object_mut) {
+        let h = json!({"type":"boolean","description":"true: this tool's usage instead of a call (man <tool> has the whole page)"});
+        p.insert("help".into(), h.clone());
+        p.insert("-h".into(), h);
+    }
     json!({
         "name": name,
         "title": title,
@@ -138,10 +144,18 @@ pub fn list(m: Masks) -> Vec<Json> {
         "hireme",
         "hireme: overview",
         "Start here. The account, this key's read and write masks, the lease, and the next step. {\"explain\":\"<refusal>\"} explains a refusal code.".into(),
-        json!({"type":"object","properties":{"explain":{"type":"string","description":"a refusal code from a diagnostic"}},"additionalProperties":false}),
+        json!({"type":"object","properties":{"explain":{"type":"string","description":"a refusal code from a diagnostic (man <code> says the same)"},"color":{"type":"boolean","description":"false: answers without ANSI colour from now on (NO_COLOR does the same)"}},"additionalProperties":false}),
         true,
         false,
     )];
+    out.push(tool(
+        "man",
+        "Manual pages",
+        "The manual, as on any Unix box: {} lists the sections, {\"page\":\"put\"} a tool (1), {\"page\":\"5 missions\"} a table, {\"page\":\"apply\"} a campaign or concept (7), {\"page\":\"unlinked\"} a refusal code (7), {\"k\":\"word\"} searches every page's name and line (man -k). Every tool also takes -h.".into(),
+        json!({"type":"object","properties":{"page":{"type":"string","description":"a page, optionally with its section first: \"7 apply\""},"k":{"type":"string","description":"apropos: a word to look for"}},"additionalProperties":false}),
+        true,
+        false,
+    ));
     out.push(tool(
         "schema",
         "Tables and columns",

@@ -147,7 +147,7 @@ defmodule HiremeWeb.McpTest do
         })
       )
 
-    assert text_of(reported) =~ "ok:"
+    assert text_of(reported) =~ "Wrote"
     assert text_of(tool(p, "get", %{table: "missions", id: m.id})) =~ ~s("state": "fired")
 
     items = text_of(tool(p, "outreach", %{where: %{mission_id: m.id}}))

@@ -42,6 +42,65 @@ const REFUSALS: &[(&str, &str, &str, &str)] = &[
     ("step_up", "grant", "this needs the operator's fresh step-up", "Only the operator's browser, within minutes of a second-factor check, may do this (linking Gmail, creating a fire key). No key can; leave it for the operator."),
 ];
 
+/// The verbs a success line leads with, cargo style: right-aligned to twelve columns.
+const DONE: &[&str] = &[
+    "Wrote", "Dropped", "Leased", "Released", "Uploaded", "Reported", "Requested", "Picked", "Routed", "Batched", "Staged", "Granted", "Landed",
+    "Filed", "Closed", "Linked", "Qualified", "Drafted", "Waiting", "Done",
+];
+
+/// A success line: the verb right-aligned to twelve columns, then what changed.
+pub fn ok(verb: &str, what: &str) -> String {
+    format!("{verb:>12} {what}\n")
+}
+
+/// An answer as the agent reads it. Escape bytes already in it came from rows (a listing, a
+/// mail) and are shown as ␛, so no data can pass for a line of ours; then, when `color`, each
+/// line the grammar knows (docs/mcp/campaigns.md: man hints) is painted: a success verb green,
+/// next and help cyan, a warning yellow, an error red.
+pub fn paint(text: &str, color: bool) -> String {
+    let text = text.replace('\x1b', "␛");
+    if !color {
+        return text;
+    }
+    const G: &str = "\x1b[1;32m";
+    const C: &str = "\x1b[1;36m";
+    const CT: &str = "\x1b[36m";
+    const Y: &str = "\x1b[1;33m";
+    const R: &str = "\x1b[1;31m";
+    const B: &str = "\x1b[1m";
+    const D: &str = "\x1b[2m";
+    const X: &str = "\x1b[0m";
+    let label = |line: &str, prefix: &str| line.starts_with(prefix).then(|| line.find("]:").map(|i| i + 2)).flatten();
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.split_inclusive('\n') {
+        let (body, nl) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
+        let lead = body.len() - body.trim_start().len();
+        let word = body.trim_start().split(' ').next().unwrap_or("");
+        let painted = if let Some(i) = label(body, "error[") {
+            format!("{R}{}{X}{B}{}{X}", &body[..i], &body[i..])
+        } else if let Some(i) = label(body, "warning[") {
+            format!("{Y}{}{X}{B}{}{X}", &body[..i], &body[i..])
+        } else if let Some(i) = label(body, "next[") {
+            format!("{C}{}{X}{CT}{}{X}", &body[..i], &body[i..])
+        } else if let Some(rest) = body.strip_prefix("help:") {
+            format!("{C}help:{X}{rest}")
+        } else if let Some(rest) = body.strip_prefix("   = help:") {
+            format!("   {D}={X} {C}help:{X}{rest}")
+        } else if let Some(rest) = body.strip_prefix("  --> ") {
+            format!("  {D}-->{X} {rest}")
+        } else if let Some(rest) = body.strip_prefix("pending:") {
+            format!("{Y}pending:{X}{rest}")
+        } else if lead + word.len() == 12 && DONE.contains(&word) {
+            format!("{}{G}{word}{X}{}", &body[..lead], &body[12..])
+        } else {
+            body.to_owned()
+        };
+        out.push_str(&painted);
+        out.push_str(nl);
+    }
+    out
+}
+
 pub fn names() -> impl Iterator<Item = &'static str> {
     REFUSALS.iter().map(|r| r.0)
 }
@@ -173,7 +232,7 @@ pub fn render(code: &str, what: &str, data: &Json) -> String {
     if !todo.is_empty() {
         out.push_str(&format!("   = help: {todo}\n"));
     }
-    out.push_str(&format!("   = explain: hireme {{\"explain\":\"{code}\"}}\n"));
+    out.push_str(&crate::man::footer(code));
     out
 }
 
@@ -544,6 +603,44 @@ pub fn commander(data: &Json) -> String {
 mod tests {
     use super::*;
 
+    /// The words an agent reads never depend on colour, and no escape survives from the text itself:
+    /// strip our SGR codes from a painted answer and the plain answer is what is left.
+    #[test]
+    fn painting_adds_colour_and_never_changes_the_words() {
+        let strip = |s: &str| {
+            let mut out = String::new();
+            let mut rest = s;
+            while let Some(i) = rest.find('\x1b') {
+                out.push_str(&rest[..i]);
+                rest = &rest[i..];
+                let end = rest.find('m').expect("an SGR sequence ends with m");
+                assert!(rest[2..end].chars().all(|c| c.is_ascii_digit() || c == ';'), "only SGR codes: {rest:?}");
+                rest = &rest[end + 1..];
+            }
+            out + rest
+        };
+        let mut seed = 0x9e37_79b9_u64;
+        let pick = |seed: &mut u64, n: usize| {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            (*seed % n as u64) as usize
+        };
+        let landed = ok("Landed", "mission:3");
+        let parts = ["error[stage]: refused", "warning[thin]: old", "next[route]: put {}", "help: man x", "   = help: do it", "  --> applications 4", landed.trim_end(), "pending: put", "plain words", "data \x1b[32mforged\x1b[0m", "", "      Wrote", "Wrote at the start"];
+        for case in 0..200 {
+            let text: String = (0..pick(&mut seed, 6) + 1).map(|_| format!("{}\n", parts[pick(&mut seed, parts.len())])).collect();
+            let plain = paint(&text, false);
+            assert!(!plain.contains('\x1b'), "case {case}: {text:?}");
+            assert_eq!(strip(&paint(&text, true)), plain, "case {case}: {text:?}");
+        }
+        let staged = ok("Staged", "mission:3");
+        for (line, code) in [("error[x]: y", "31"), ("warning[x]: y", "33"), ("next[x]: y", "36"), ("help: y", "36"), (staged.trim_end(), "32")] {
+            assert!(paint(line, true).contains(&format!("\x1b[1;{code}m")), "{line}");
+        }
+        assert!(!paint("data \x1b[32mforged", true).contains("\x1b[32m"), "a row's escape is shown, not obeyed");
+    }
+
     /// Every (code, reason) and (code, need) the diagnostics describe.
     fn described() -> impl Iterator<Item = (&'static str, &'static str)> {
         let special = [("natural_key", "no declared key is made of exactly these columns")];
@@ -559,7 +656,7 @@ mod tests {
                 continue; // the commander's answer, never an error (its own test below)
             }
             let d = render(name, "put corporations domain=example.com", &json!({"cap": 50000}));
-            assert!(d.starts_with(&format!("error[{name}]")) && d.contains(&format!("hireme {{\"explain\":\"{name}\"}}")), "{d}");
+            assert!(d.starts_with(&format!("error[{name}]")) && d.ends_with(&crate::man::footer(name)), "{d}");
         }
         assert!(explain("nope").is_none());
     }
@@ -716,7 +813,7 @@ mod tests {
         assert!(d.contains("\"corporation_id\":12"), "{d}");
         // Shown once, in the body, never again as raw data.
         assert!(!d.contains("= need:") && !d.contains("= given:") && !d.contains("= did_you_mean:"), "{d}");
-        assert!(d.contains("   = help: Confirm a candidate") && d.ends_with("   = explain: hireme {\"explain\":\"unlinked\"}\n"), "{d}");
+        assert!(d.contains("   = help: Confirm a candidate") && d.ends_with("help: man unlinked\n"), "{d}");
     }
 
     #[test]
