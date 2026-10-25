@@ -298,6 +298,10 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                     }
                 }
             }
+            // An outcome put is judged as a close's is.
+            if let Some(EVal::Val(Val::U32(o))) = row.get(A::OUTCOME) {
+                closing(*o, op.target != 0 && apps.is_some_and(|t| board::sent(t, op.target)))?;
+            }
         }
         table::MISSIONS | table::FIRE_REQUESTS | table::MAILBOXES => crate::fire::put(rows, ctx, op.table, op.target, &mut row)?,
         table::CV_OVERLAYS => overlay(rows, board, op, ctx, &mut row, &mut extra)?,
@@ -424,6 +428,20 @@ fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
     Ok(Vec::new())
 }
 
+/// What an application may close as, by whether anything went out
+/// (docs/mcp/campaigns.md, decision 6). Nothing did: expired, skipped or
+/// withdrawn. Something did: offer, rejected, ghosted, withdrawn or declined.
+fn closing(outcome: u32, sent: bool) -> Result<(), Refusal> {
+    use enums::outcome as O;
+    let allowed: &[u8] = if sent { &[O::OFFER, O::REJECTED, O::GHOSTED, O::WITHDRAWN, O::DECLINED] } else { &[O::EXPIRED, O::SKIPPED, O::WITHDRAWN] };
+    if allowed.iter().any(|a| u32::from(*a) == outcome) {
+        return Ok(());
+    }
+    let names: Vec<&str> = allowed.iter().map(|a| O::NAMES[usize::from(*a)]).collect();
+    let reason = if sent { "something went out: it closes as offer, rejected, ghosted, withdrawn or declined" } else { "nothing went out: it closes as expired, skipped or withdrawn" };
+    Err(no(refusal::TYPE, json!({"table": "applications", "column": "outcome", "reason": reason, "got": O::NAMES.get(outcome as usize), "allowed": names})))
+}
+
 fn app_stage(t: &Table, id: u32) -> Stage {
     t.u32(id, A::STAGE).and_then(Stage::from_u32).unwrap_or(Stage::Discovered)
 }
@@ -505,12 +523,27 @@ fn run(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                 let code = if r == pipeline::Refusal::FireHold { refusal::FIRE_HOLD } else { refusal::STAGE };
                 return refuse(code, json!({"from": from.name(), "to": to.name(), "rule": r.name()}));
             }
+            // An outcome goes with a close, and says what became of the
+            // application by whether anything went out (`closing`).
+            let outcome = param_u32(op, param::stage::OUTCOME);
+            if let Some(o) = outcome {
+                if to != Stage::Closed {
+                    return refuse(refusal::TYPE, json!({"param": "outcome", "reason": "an outcome goes with a close", "stage": to.name()}));
+                }
+                closing(o, facts.sent)?;
+            }
             // On entering the queue, and again on going out: drafts carry no
             // heat, so two queued at one company are each judged as they send.
             if (!from.queued() && to.queued()) || (to == Stage::Submitted && from != Stage::Submitted) {
                 governor(rows, board, id, to, ctx)?;
             }
             let mut out = moved(t, id, from, to, param_str(op, param::stage::NOTE), op, ctx);
+            if let Some(o) = outcome {
+                match out.first_mut() {
+                    Some(row) => row.set(A::OUTCOME, u(o)),
+                    None => out.push(Row { table: table::APPLICATIONS, id, cells: alloc::vec![(A::OUTCOME, u(o).into())] }),
+                }
+            }
             // Going out freezes the CV version that went: the pick's.
             if to == Stage::Submitted && from != Stage::Submitted
                 && let Some(row) = out.first_mut()

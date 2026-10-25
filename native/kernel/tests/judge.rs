@@ -11,7 +11,7 @@ use fixture::{DAWN, TODAY, agent, body, cells, cmd, del, gone, keyed, put, refus
 use kernel::abi::Kernel;
 use kernel::judge::Ctx;
 use schema::col::applications as A;
-use schema::{col, refusal, table};
+use schema::{col, enums, refusal, table};
 use serde_json::{Value as Json, json};
 
 fn ctx() -> Ctx<'static> {
@@ -176,4 +176,24 @@ fn an_application_names_its_company_and_place_or_is_told_which_it_means() {
     // The company an application names is not dropped from under it.
     let (code, data) = refused(k.judge(&del("corporations", 1), &ctx()));
     assert_eq!((code, &data["applications"]), (refusal::UNLINKED, &json!([1])));
+}
+
+/// Decision 6 (docs/mcp/campaigns.md): a close says what became of the application, by whether
+/// anything went out. Nothing did: expired, skipped or withdrawn. Something did: offer,
+/// rejected, ghosted, withdrawn or declined. An outcome goes only with a close, and a put of
+/// one is judged the same way.
+#[test]
+fn a_close_names_its_outcome_by_whether_anything_went_out() {
+    let mut k = kernel(json!({"applications": [app(1, "gated", "Acme", Json::Null), app(2, "submitted", "Bolt", Json::Null)]}));
+    let close = |id: u32, outcome: &str| cmd("stage", id, json!({"stage": "closed", "outcome": outcome}));
+    for (id, bad) in [(1, "rejected"), (1, "ghosted"), (1, "offer"), (2, "expired"), (2, "skipped")] {
+        let (code, data) = refused(k.judge(&close(id, bad), &ctx()));
+        assert_eq!((code, data["column"].as_str()), (refusal::TYPE, Some("outcome")), "{id} {bad}");
+    }
+    let c = cells(&k.judge(&close(1, "expired"), &ctx()).unwrap(), "applications");
+    assert_eq!((&c["stage"], &c["outcome"]), (&json!(enums::stage::CLOSED), &json!(enums::outcome::EXPIRED)));
+    assert_eq!(cells(&k.judge(&close(2, "ghosted"), &ctx()).unwrap(), "applications")["outcome"], enums::outcome::GHOSTED);
+    assert_eq!(refused(k.judge(&cmd("stage", 1, json!({"stage": "gated", "outcome": "withdrawn"})), &ctx())).0, refusal::TYPE);
+    assert_eq!(refused(k.judge(&put("applications", 1, json!({"outcome": "rejected"})), &ctx())).0, refusal::TYPE);
+    assert!(k.judge(&put("applications", 1, json!({"outcome": "withdrawn"})), &ctx()).is_ok());
 }

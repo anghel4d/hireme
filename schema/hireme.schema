@@ -130,7 +130,7 @@ enum app_status open paused hired closed
 enum freshness open thin closed blocked
 enum gate pursue maybe skip
 enum band frontier labs big_tech systems craft mid thin kill
-enum outcome offer rejected ghosted withdrawn declined
+enum outcome offer rejected ghosted withdrawn declined expired skipped
 enum work_mode onsite hybrid remote
 enum employment full_time part_time contract internship freelance
 enum app_channel listing referral recruiter cold other inbound
@@ -408,7 +408,7 @@ table applications desk resident
   col battleplan text ?
   col letter_raw text ?
   col cv_theme json ?
-  command stage stage note:text?
+  command stage stage note:text? outcome?
   command note stage body:text
   command heat_override reason:str
   command open_fire human_only
