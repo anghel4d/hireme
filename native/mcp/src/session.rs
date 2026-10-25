@@ -699,7 +699,8 @@ fn steps(v: &Json, full: bool, origin: &str) -> String {
     let (a, phase) = (&v["application"], &v["phase"]);
     let mut out = String::new();
     if full {
-        out.push_str(&format!("app:{} {} · {}  [{} · phase {}/13 {}]\n", a["no"], s(a, "company"), s(a, "role"), s(a, "stage"), phase["n"], s(phase, "name")));
+        let app = kernel::refs::app(&a["no"]);
+        out.push_str(&format!("{app} {} · {}  [{} · phase {}/{} {}]\n", s(a, "company"), s(a, "role"), s(a, "stage"), phase["n"], kernel::campaign::Phase::ALL.len(), s(phase, "name")));
     }
     for line in v["said"].as_array().into_iter().flatten() {
         match line["level"].as_str() {

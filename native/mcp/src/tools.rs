@@ -341,7 +341,7 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "report",
             "Close a shot you performed",
-            "After firing a mission hireme cannot watch (careers_page, linkedin, x_dm, discord, other), records what you did in the two writes it takes: landed on the mission (skipped if it already landed), then the outreach item its brief describes (its kind, outbound, naming the mission) with your report (markdown) and the item's fields. outcome failed records failed with the reason instead, and no item: the shot returns unburned. Hold the application's lease first. An email mission reports itself.".into(),
+            format!("After firing a mission hireme cannot watch ({}), records what you did in the two writes it takes: landed on the mission (skipped if it already landed), then the outreach item its brief describes (its kind, outbound, naming the mission) with your report (markdown) and the item's fields. outcome failed records failed with the reason instead, and no item: the shot returns unburned. Hold the application's lease first. An email mission reports itself.", schema::enum_names("outreach_kind").unwrap_or(&[]).iter().filter(|k| !matches!(**k, "email" | "note")).copied().collect::<Vec<_>>().join(", ")),
             json!({"type":"object","required":["mission"],"properties":{
                 "mission":{"type":"integer","minimum":1},
                 "outcome":{"type":"string","enum":["landed","failed"],"description":"landed unless told"},
@@ -365,10 +365,10 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "request_fire_key",
             "Ask the operator for a fire key",
-            "Asks the operator to authorize missions to fire: missions as id ranges (\"1-44,56-213,444\"), with a reason of at most 280 characters. Answers a link to give the operator: their review page, predialed, with every draft and target in full. Opening it creates nothing; the operator creates the key there, under step-up.".into(),
+            format!("Asks the operator to authorize missions to fire: missions as id ranges (\"1-44,56-213,444\"), with a reason of at most {} characters. Answers a link to give the operator: their review page, predialed, with every draft and target in full. Opening it creates nothing; the operator creates the key there, under step-up.", kernel::fire::REASON_MAX),
             json!({"type":"object","required":["missions","reason"],"properties":{
                 "missions":{"type":"string","description":"mission ids as ranges, e.g. 1-44,56-213,444"},
-                "reason":{"type":"string","maxLength":280}
+                "reason":{"type":"string","maxLength":kernel::fire::REASON_MAX}
             },"additionalProperties":false}),
             false,
             false,

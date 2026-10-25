@@ -11,7 +11,7 @@ use kernel::campaign::Phase;
 use crate::tools::{self, Masks};
 
 /// The section 7 pages `generated` builds.
-const GENERATED: [&str; 2] = ["apply", "stage-rail"];
+const GENERATED: [&str; 4] = ["apply", "stage-rail", "fire-keys", "refs"];
 
 /// What `hireme`, `initialize` and every `-h` open with.
 pub const CAMPAIGNS: &str = "CAMPAIGNS  start here; every answer ends with the next call\n  apply      one application from listing to outcome   campaign {\"run\":\"apply\"}\n";
@@ -32,16 +32,6 @@ const CONCEPTS: &[(&str, &str, &str)] = &[
         "hints",
         "how an answer reads",
         "Every answer is its payload, then at most two lines:\n  green    a success, cargo style:           Landed mission:34 careers_page · ref GH-4410\n  cyan     next[phase]: the next call, or help: where to read more\n  yellow   warning[code]: something is off, the work can go on\n  red      error[code]: refused, then --> where, = notes, and help: man <code>\nColour is ANSI; NO_COLOR in the daemon's environment or hireme {\"color\":false} turns it off. The words are the same either way.",
-    ),
-    (
-        "refs",
-        "naming a row",
-        "A row is named by its kind and key: app:412 (an application's no), mission:34, contact:9, corp:example.com, place:3, outreach:1291, batch:96, fire_key:51, fire_request:88. {\"ref\":\"app:412\"} names the row for get, put, drop and commands. A ref of the wrong kind is refused: a mission field takes mission:…, never app:….",
-    ),
-    (
-        "fire-keys",
-        "the operator's authority to send",
-        "Nothing leaves without a fire key, and only the operator creates one, with a fresh second factor. Stage a mission to fire_ready (its hash freezes), ask with request_fire_key {\"missions\":\"34-35\",\"reason\":\"...\"}, then ask the user to grant it at the review link the answer gives. A key covers each named mission once, lives a week unused and 24 hours from its first shot, and refuses a mission whose target or draft changed since approval.\n\nSEE ALSO\n  man fire, man apply",
     ),
 ];
 
@@ -82,8 +72,24 @@ fn generated(name: &str) -> Option<(&'static str, String)> {
                 batched.join(", ")
             ))
         }
+        "fire-keys" => ("the operator's authority to send", format!(
+            "Nothing leaves without a fire key, and only the operator creates one, with a fresh second factor. Stage a mission to fire_ready (its hash freezes), ask with request_fire_key {{\"missions\":\"34-35\",\"reason\":\"...\"}}, then ask the user to grant it at the review link the answer gives. A key covers each named mission once, lives {}, and refuses a mission whose target or draft changed since approval.\n\nSEE ALSO\n  man fire, man apply",
+            key_life()
+        )),
+        "refs" => {
+            let kinds: String = kernel::refs::KINDS.iter().map(|(k, _, t, _)| format!("  {:<34} a row of {}\n", k.form(), schema::table_def(*t).map_or("?", |d| d.name))).collect();
+            ("naming a row", format!(
+                "{kinds}\n  {{\"ref\":\"app:412\"}} names the row for get, put, drop and the commands; <kind>:new is a row to insert (put only). A field takes a ref of its column's kind, and a ref of another kind is refused.\n\nSEE ALSO\n  man apply"
+            ))
+        }
         _ => return None,
     })
+}
+
+/// A fire key's windows, from the kernel's.
+pub fn key_life() -> String {
+    use kernel::fire::{UNUSED_LIFE, USED_LIFE};
+    format!("{} days unused, {} h from its first shot", UNUSED_LIFE / 86_400, USED_LIFE / 3_600)
 }
 
 /// One page by its name, optionally prefixed by its section (`7 apply`, `5 missions`).

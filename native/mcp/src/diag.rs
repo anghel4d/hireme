@@ -568,7 +568,7 @@ pub fn commander(data: &Json) -> String {
         "no_key" => format!("HOLD. Mission {m} is staged; firing it takes a fire key, and none of yours covers it. Nothing was sent."),
         "burned" => format!("ALREADY FIRED. Mission {m}'s one shot{under} is spent. Nothing was sent again."),
         "out_of_scope" => format!("NOT COVERED. Key {} does not name mission {m}. Nothing was sent.", key.clone().unwrap_or_else(|| "?".into())),
-        "expired" => format!("EXPIRED. The key{under} lapsed (a key lives 7 days unused, 24 h from its first shot). Nothing was sent."),
+        "expired" => format!("EXPIRED. The key{under} lapsed ({}). Nothing was sent.", crate::man::key_life()),
         "revoked" => format!("REVOKED. The operator revoked the key{under}. Nothing was sent."),
         "not_yours" => format!("NOT YOURS. The key{under} is bound to another API key. Nothing was sent. Fire only under your own keys (`fire_keys`), or ask for one with request_fire_key."),
         "changed" => format!("CHANGED SINCE APPROVAL. Mission {m}'s target or draft is not what the operator approved{under} (the key froze its hash); putting the approved text back makes it fire again. Nothing was sent."),

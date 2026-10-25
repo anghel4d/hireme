@@ -93,7 +93,7 @@ pub fn keys(data: &Json) -> String {
 pub fn requested(data: &Json) -> String {
     let n = data["count"].as_u64().unwrap_or(0);
     let link = format!("{}/fire/{}", data["origin"].as_str().unwrap_or("").trim_end_matches('/'), data["id"]);
-    crate::diag::ok("Requested", &format!("fire_request:{} for missions {} ({n} mission{}) · {link}", data["id"], data["missions"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" }))
+    crate::diag::ok("Requested", &format!("{} for missions {} ({n} mission{}) · {link}", kernel::refs::request(&data["id"]), data["missions"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" }))
 }
 
 /// The item fields `report` copies onto the outreach row, as given.
