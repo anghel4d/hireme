@@ -13,7 +13,7 @@ pub const CAMPAIGNS: &str = "CAMPAIGNS  start here; every answer ends with the n
 
 /// The footer every refusal ends with.
 pub fn footer(code: &str) -> String {
-    format!("help: man {code}\n")
+    format!("help: man {code} · campaign apply -h\n")
 }
 
 /// Section 7, written by hand: (name, one line, body).

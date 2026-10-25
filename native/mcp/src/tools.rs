@@ -119,10 +119,37 @@ impl Masks {
 
 fn tool(name: &str, title: &str, description: String, mut input: Json, read_only: bool, destructive: bool) -> Json {
     // Every tool takes -h (and help), in its schema so strict clients pass it: man's short page.
+    // And refs (refs.rs, man refs) everywhere a row is named: {"ref":"app:412"} in place of table and
+    // id, a ref in an id field, a mission put in the union's keys. The schema here admits them;
+    // refs.rs judges them exactly at the door.
     if let Some(p) = input.get_mut("properties").and_then(Json::as_object_mut) {
         let h = json!({"type":"boolean","description":"true: this tool's usage instead of a call (man <tool> has the whole page)"});
         p.insert("help".into(), h.clone());
         p.insert("-h".into(), h);
+        let rowed = p.contains_key("table") || p.contains_key("id");
+        for k in ["id", "application", "mission"] {
+            if let Some(t) = p.get_mut(k).filter(|v| v["type"] == "integer") {
+                t["type"] = json!(["integer", "string"]);
+            }
+        }
+        if let Some(items) = p.get_mut("ids").and_then(|v| v.get_mut("items")) {
+            items["type"] = json!(["integer", "string"]);
+        }
+        if rowed {
+            p.insert("ref".into(), json!({"type":"string","description":"the row as kind:key (app:412, mission:34, corp:example.com; man refs), in place of table and id; mission:new with the union's keys puts a mission"}));
+        }
+        if name == "put" {
+            for branch in crate::refs::mission_schema()["oneOf"].as_array().into_iter().flatten() {
+                for (k, v) in branch["properties"].as_object().into_iter().flatten() {
+                    if !p.contains_key(k) {
+                        p.insert(k.clone(), if k == "kind" { json!({"type":"string","enum":["email","careers_page","linkedin","x_dm","discord","other"]}) } else { v.clone() });
+                    }
+                }
+            }
+        }
+        if rowed && let Some(r) = input.get_mut("required").and_then(Json::as_array_mut) {
+            r.retain(|k| !matches!(k.as_str(), Some("table" | "id" | "set")));
+        }
     }
     json!({
         "name": name,
@@ -156,6 +183,20 @@ pub fn list(m: Masks) -> Vec<Json> {
         true,
         false,
     ));
+    if table_named("applications").is_some_and(|t| m.reads(t)) {
+        out.push(tool(
+            "campaign",
+            "Campaigns: the next call",
+            "Golden routes. {\"run\":\"apply\"} picks the open application closest to done and says its one next call; {\"application\":\"app:412\"} says it for that application. Thirteen phases from listing to outcome (man apply), read from the rows on every call, branching where the rows branch: the route, the follow-ups, a reply. At the fire key it says what to ask the user. Every write on an application in play also ends with its next step.".into(),
+            json!({"type":"object","properties":{
+                "run":{"type":"string","enum":["apply"],"description":"the campaign to run"},
+                "application":{"type":["integer","string"],"description":"an application id, or its ref app:<no>"},
+                "app":{"type":["integer","string"],"description":"the same as application"}
+            },"additionalProperties":false}),
+            true,
+            false,
+        ));
+    }
     out.push(tool(
         "schema",
         "Tables and columns",
@@ -354,7 +395,8 @@ pub fn list(m: Masks) -> Vec<Json> {
             json!({"type":"object","properties":{
                 "count":{"type":"integer","minimum":1},
                 "ids":{"type":"array","items":{"type":"integer"}},
-                "stage":{"type":"string","enum":schema::enum_names("stage").unwrap_or(&[])}
+                "stage":{"type":"string","enum":schema::enum_names("stage").unwrap_or(&[])},
+                "bulk":{"type":"integer","minimum":1,"description":"also a contract for this many writes: a put under it is one atomic burst"}
             },"additionalProperties":false}),
             false,
             false,
@@ -465,7 +507,8 @@ pub fn list(m: Masks) -> Vec<Json> {
 /// A column's value as JSON Schema.
 pub fn value_schema(c: &impl Field) -> Json {
     let mut s = match c.ty() {
-        "id" | "ref" | "u8" | "u32" | "i64" => json!({"type":"integer"}),
+        "id" | "u8" | "u32" | "i64" => json!({"type":"integer"}),
+        "ref" => json!({"type":["integer","string"],"description":"an id, or a ref of the column's kind (man refs)"}),
         "f64" => json!({"type":"number"}),
         "bool" => json!({"type":"boolean"}),
         "day" => json!({"type":"string","format":"date"}),
@@ -474,10 +517,13 @@ pub fn value_schema(c: &impl Field) -> Json {
         "json" => json!({}),
         _ => json!({"type":"string"}),
     };
-    if !c.required()
-        && let Some(t) = s.get("type").cloned() {
-            s["type"] = json!([t, "null"]);
+    if !c.required() {
+        match s.get_mut("type") {
+            Some(Json::Array(ts)) => ts.push(json!("null")),
+            Some(t) => *t = json!([t.clone(), "null"]),
+            None => {}
         }
+    }
     s
 }
 

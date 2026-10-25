@@ -8,6 +8,7 @@
 pub mod diag;
 pub mod man;
 pub mod mission;
+pub mod refs;
 pub mod session;
 pub mod tools;
 
@@ -35,6 +36,7 @@ pub fn shape(tool: &str) -> Option<String> {
         "report" => r#"{"mission":34,"report":"<what you did, markdown>","link":"https://...","reference":"APP-4012","fields":{...}}  or  {"mission":34,"outcome":"failed","reason":"<why>"}"#.into(),
         "request_fire_key" => r#"{"missions":"33-34,56","reason":"<why these shots, at most 280 chars>"}"#.into(),
         "cv_upload" => r#"{"root_id":<cv_roots id>,"name":"cv.pdf","base64":"<the file>","note":"<what changed>"}"#.into(),
+        "campaign" => r#"{}  or  {"run":"apply"}  or  {"application":"app:412"}"#.into(),
         "man" => r#"{}  or  {"page":"put"}  or  {"page":"7 apply"}  or  {"k":"<word>"}"#.into(),
         other => return tools::command_named(other).map(command_shape),
     })
@@ -242,6 +244,7 @@ pub fn templates(m: Masks) -> Json {
             out.push(json!({"uriTemplate": format!("hireme://{table}/{{{key}}}"), "name": table, "title": title, "mimeType": "application/json"}));
         }
     }
+    out.push(json!({"uriTemplate": "man://{section}/{page}", "name": "man", "title": "A manual page (man 1 tools, 5 tables, 7 campaigns and concepts, 8 the operator's)", "mimeType": "text/plain"}));
     json!({"resourceTemplates": out})
 }
 

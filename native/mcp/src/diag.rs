@@ -101,14 +101,27 @@ pub fn paint(text: &str, color: bool) -> String {
     out
 }
 
+/// The refusals the MCP makes itself, before anything reaches the node (refs.rs): same layout as
+/// REFUSALS, not in the schema's enum.
+const LOCAL: &[(&str, &str, &str, &str)] = &[
+    ("ref", "boundary", "a ref names the wrong kind of row, or is not a ref", "Name a row as kind:key, of the kind the field takes: app:412, mission:34, contact:9, corp:example.com (man refs)."),
+    ("shape", "boundary", "no such key for this tool", "The data's did_you_mean is the key you most likely meant and known lists them all; man <tool> has each with its type."),
+];
+
 pub fn names() -> impl Iterator<Item = &'static str> {
     REFUSALS.iter().map(|r| r.0)
 }
 
 /// The long text for `hireme {"explain":code}`; None for an unknown code.
 pub fn explain(code: &str) -> Option<String> {
-    REFUSALS.iter().find(|r| r.0 == code).map(|(name, check, line, todo)| {
-        format!("{name} ({check} check): {line}.\n\n{todo}\n\nThe sequencer checks every op in order: grant, lease, shape, domain, provenance, limits; the first that fails is the refusal, and nothing of the op is written.")
+    let local = LOCAL.iter().any(|r| r.0 == code);
+    REFUSALS.iter().chain(LOCAL).find(|r| r.0 == code).map(|(name, check, line, todo)| {
+        let order = if local {
+            "The MCP refuses it at its boundary, before anything is sent: nothing reached the node."
+        } else {
+            "The sequencer checks every op in order: grant, lease, shape, domain, provenance, limits; the first that fails is the refusal, and nothing of the op is written."
+        };
+        format!("{name} ({check} check): {line}.\n\n{todo}\n\n{order}")
     })
 }
 
@@ -242,6 +255,7 @@ fn advice(code: &str, data: &Json) -> (String, String) {
     let need = data.get("need").and_then(Json::as_str);
     let (line, todo) = REFUSALS
         .iter()
+        .chain(LOCAL)
         .find(|r| r.0 == code)
         .map(|r| (r.2.to_owned(), first_sentence(r.3)))
         .unwrap_or(("refused".to_owned(), String::new()));
@@ -813,7 +827,7 @@ mod tests {
         assert!(d.contains("\"corporation_id\":12"), "{d}");
         // Shown once, in the body, never again as raw data.
         assert!(!d.contains("= need:") && !d.contains("= given:") && !d.contains("= did_you_mean:"), "{d}");
-        assert!(d.contains("   = help: Confirm a candidate") && d.ends_with("help: man unlinked\n"), "{d}");
+        assert!(d.contains("   = help: Confirm a candidate") && d.ends_with("help: man unlinked · campaign apply -h\n"), "{d}");
     }
 
     #[test]
