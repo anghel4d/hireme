@@ -450,18 +450,32 @@ fn drop(rows: &Rows, op: &Op, ctx: &Ctx) -> Verdict {
     Ok(Vec::new())
 }
 
-/// What an application may close as, by whether anything went out
-/// (docs/mcp/campaigns.md, decision 6). Nothing did: expired, skipped or
-/// withdrawn. Something did: offer, rejected, ghosted, withdrawn or declined.
+// What an application may close as, by whether anything went out (docs/mcp/campaigns.md,
+// decision 6): the two lists below, read by the check, its reason and the man page.
+
+/// The outcomes an application nothing went out of may close with.
+pub const UNSENT: [u8; 3] = [enums::outcome::EXPIRED, enums::outcome::SKIPPED, enums::outcome::WITHDRAWN];
+/// The outcomes an application something went out of may close with.
+pub const SENT: [u8; 5] = [enums::outcome::OFFER, enums::outcome::REJECTED, enums::outcome::GHOSTED, enums::outcome::WITHDRAWN, enums::outcome::DECLINED];
+
+/// Outcome names as a sentence lists them: "a, b or c".
+pub fn outcomes(codes: &[u8]) -> String {
+    let names: Vec<&str> = codes.iter().map(|c| enums::outcome::NAMES[usize::from(*c)]).collect();
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => alloc::format!("{} or {last}", rest.join(", ")),
+        Some((last, _)) => String::from(*last),
+        None => String::new(),
+    }
+}
+
 fn closing(outcome: u32, sent: bool) -> Result<(), Refusal> {
-    use enums::outcome as O;
-    let allowed: &[u8] = if sent { &[O::OFFER, O::REJECTED, O::GHOSTED, O::WITHDRAWN, O::DECLINED] } else { &[O::EXPIRED, O::SKIPPED, O::WITHDRAWN] };
+    let allowed: &[u8] = if sent { &SENT } else { &UNSENT };
     if allowed.iter().any(|a| u32::from(*a) == outcome) {
         return Ok(());
     }
-    let names: Vec<&str> = allowed.iter().map(|a| O::NAMES[usize::from(*a)]).collect();
-    let reason = if sent { "something went out: it closes as offer, rejected, ghosted, withdrawn or declined" } else { "nothing went out: it closes as expired, skipped or withdrawn" };
-    Err(no(refusal::TYPE, json!({"table": "applications", "column": "outcome", "reason": reason, "got": O::NAMES.get(outcome as usize), "allowed": names})))
+    let names: Vec<&str> = allowed.iter().map(|a| enums::outcome::NAMES[usize::from(*a)]).collect();
+    let reason = alloc::format!("{} went out: it closes as {}", if sent { "something" } else { "nothing" }, outcomes(allowed));
+    Err(no(refusal::TYPE, json!({"table": "applications", "column": "outcome", "reason": reason, "got": enums::outcome::NAMES.get(outcome as usize), "allowed": names})))
 }
 
 fn app_stage(t: &Table, id: u32) -> Stage {

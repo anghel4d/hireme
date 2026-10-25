@@ -86,3 +86,8 @@ pub fn outreach(id: impl Display) -> String {
 pub fn request(id: impl Display) -> String {
     of(Kind::FireRequest, id)
 }
+
+/// A corporation's ref is its domain, lowercased.
+pub fn corp(domain: &str) -> String {
+    of(Kind::Corp, domain.trim().to_ascii_lowercase())
+}

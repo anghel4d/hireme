@@ -81,21 +81,6 @@ fn ref_like(s: &str) -> bool {
     s.split_once(':').is_some_and(|(p, _)| Kind::of_prefix(p.trim()).is_some())
 }
 
-/// The text of a row's ref, for answers.
-pub fn app(no: u32) -> String {
-    format!("app:{no}")
-}
-
-pub fn corp(domain: &str) -> String {
-    format!("corp:{}", domain.trim().to_ascii_lowercase())
-}
-
-/// An id-keyed kind's ref; none for applications (by number) and
-/// corporations (by domain), which [`app`] and [`corp`] write.
-pub fn of(table: &str, id: u32) -> Option<String> {
-    kind_of_table(table).filter(|k| !matches!(k, Kind::App | Kind::Corp)).map(|k| kernel::refs::of(k, id))
-}
-
 // ------------------------------------------------------------ the replica
 
 /// What resolution reads: the daemon's replica, under the key's grants.
@@ -597,7 +582,9 @@ fn mission_union(a: &mut Map<String, Json>, inserting: bool, look: &mut dyn Look
         return Ok(());
     };
     let Some(k) = kind_named(&kind).filter(|k| k.fireable()) else {
-        return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "got": kind, "reason": "a mission is email, careers_page, linkedin, x_dm, discord or other"})));
+        let kinds: Vec<&str> = schema::enum_names("outreach_kind").unwrap_or(&[]).iter().copied().filter(|k| *k != "note").collect();
+        let (last, rest) = kinds.split_last().map_or(("", &kinds[..]), |(l, r)| (*l, r));
+        return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "got": kind, "reason": format!("a mission is {} or {last}", rest.join(", "))})));
     };
     let own: &[&str] = OWN.iter().find(|o| o.0 == kind).map_or(&[], |o| o.1);
     let takes: Vec<&str> = COMMON.iter().copied().chain(["contact_id", "target"]).chain(own.iter().copied()).collect();
@@ -744,7 +731,6 @@ mod tests {
         for bad in ["412", "app:0", "app:12a", "application:412", "corp:acme", "mission:-1", "app"] {
             assert!(parse(bad).is_err(), "{bad}");
         }
-        assert_eq!((app(412), corp("Acme.com"), of("missions", 34), of("applications", 120)), ("app:412".into(), "corp:acme.com".into(), Some("mission:34".into()), None));
         assert_eq!(nearest("frm", ["form", "to", "draft"]), Some("form"));
         assert_eq!(nearest("aplication", ["application", "app"]), Some("application"));
         assert_eq!(nearest("app", ["application", "ids"]), Some("application"));
