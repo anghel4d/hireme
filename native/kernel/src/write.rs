@@ -387,7 +387,7 @@ pub(crate) fn provenance(rows: &Rows, op: &Op, ctx: &Ctx, plan: &Plan, effects: 
     for c in &cited {
         if has(c, flag::METRIC) {
             let Some(on) = as_of else { return Err(no(refusal::FRESHNESS, json!({"table": td.name, "column": c.name}))) };
-            if let Some(Val::U32(was)) = twin(td, c).map(&stored)
+            if let Some(Val::U32(was)) = twin(td, c).map(stored)
                 && on < was as Day
             {
                 return Err(no(refusal::STALE, json!({"table": td.name, "column": c.name, "on": crate::day_iso(was as Day)})));
