@@ -6,7 +6,12 @@
 
 use serde_json::Value as Json;
 
+use kernel::campaign::Phase;
+
 use crate::tools::{self, Masks};
+
+/// The section 7 pages `generated` builds.
+const GENERATED: [&str; 2] = ["apply", "stage-rail"];
 
 /// What `hireme`, `initialize` and every `-h` open with.
 pub const CAMPAIGNS: &str = "CAMPAIGNS  start here; every answer ends with the next call\n  apply      one application from listing to outcome   campaign {\"run\":\"apply\"}\n";
@@ -24,11 +29,6 @@ const CONCEPTS: &[(&str, &str, &str)] = &[
         "A campaign walks one piece of work to its end, reading hireme's state on every call and naming the one next step. Nothing about a campaign is stored: the step is worked out from the rows, so it never drifts from them. Every surgical tool still works on its own; a campaign only says which to call next.\n\nCAMPAIGNS\n  apply   one application from listing to outcome (man apply)\n\nSEE ALSO\n  man apply, man hints, man refs",
     ),
     (
-        "apply",
-        "one application from listing to outcome",
-        "SYNOPSIS\n  campaign {\"run\":\"apply\"}          pick the application closest to done and say its next step\n  campaign {\"app\":\"app:412\"}         the step of one application\n\nDESCRIPTION\n  Thirteen phases, each derived from the rows:\n   1 acquire    the listing is a row (canonical_url keys it; a second copy updates the first)\n   2 link       corporation_id, and place_id unless remote (man unlinked)\n   3 qualify    freshness, gate, heat, a prior send to settle\n   4 route      one primary route (careers page, email, referral, reply to a recruiter, cold email) and follow-ups\n   5 batch      today's day_pack: the stage rail needs a batch\n   6 documents  the CV pick, the letter when the route carries one, the battleplan\n   7 stage      one mission per route, typed by kind, to fire_ready\n   8 fire key   ask the user for the key: request_fire_key, then give the operator the review link and stop\n   9 fire       lease, fire under the key, report (an email reports itself)\n  10 confirm    a confirmation mail confirms a careers-page shot; a bounce routes again without that route\n  11 follow-up  linkedin note day 0-1, email nudges day 7 and 14, ghosted at day 30; a reply stops every timer\n  12 reply      read it; interview or question: reply; rejection: close; offer or assessment: the operator\n  13 close      an outcome: unsent (expired, skipped, withdrawn) or sent (offer, rejected, ghosted, withdrawn, declined)\n\n  Where the state leaves one way forward the campaign railroads; where it branches, the rows pick the branch.\n  Waits name their date; operator steps name what to ask the user.\n\nSEE ALSO\n  man campaigns, man hints, man fire-keys, man stage-rail",
-    ),
-    (
         "hints",
         "how an answer reads",
         "Every answer is its payload, then at most two lines:\n  green    a success, cargo style:           Landed mission:34 careers_page · ref GH-4410\n  cyan     next[phase]: the next call, or help: where to read more\n  yellow   warning[code]: something is off, the work can go on\n  red      error[code]: refused, then --> where, = notes, and help: man <code>\nColour is ANSI; NO_COLOR in the daemon's environment or hireme {\"color\":false} turns it off. The words are the same either way.",
@@ -43,12 +43,48 @@ const CONCEPTS: &[(&str, &str, &str)] = &[
         "the operator's authority to send",
         "Nothing leaves without a fire key, and only the operator creates one, with a fresh second factor. Stage a mission to fire_ready (its hash freezes), ask with request_fire_key {\"missions\":\"34-35\",\"reason\":\"...\"}, then ask the user to grant it at the review link the answer gives. A key covers each named mission once, lives a week unused and 24 hours from its first shot, and refuses a mission whose target or draft changed since approval.\n\nSEE ALSO\n  man fire, man apply",
     ),
-    (
-        "stage-rail",
-        "an application's stages",
-        "discovered, freshness, gated, in_batch, draft_ready, fire_ready, open_fire, submitted, reply, closed. in_batch onward needs a batch. A landed mission moves its application to submitted; nothing returns to a stage before submitted once it went out. The stage command moves it; a refusal names the rule (needs_batch, sent, not_sent, fire_hold).",
-    ),
 ];
+
+/// What each phase of the apply campaign does, one line each, in `Phase::ALL` order: the phase's
+/// name and number are the kernel's.
+const PHASES: [&str; Phase::ALL.len()] = [
+    "the listing is a row (canonical_url keys it; a second copy updates the first)",
+    "corporation_id, and place_id unless remote (man unlinked)",
+    "freshness, gate, heat, a prior send to settle",
+    "one primary route (careers page, email, referral, reply to a recruiter, cold email) and follow-ups",
+    "today's day_pack: the stage rail needs a batch",
+    "the CV pick, the letter when the route carries one",
+    "one mission per route, typed by kind, to fire_ready",
+    "ask the user for the key: request_fire_key, then give the operator the review link and stop",
+    "lease, fire under the key, report (an email reports itself)",
+    "a confirmation mail confirms a careers-page shot; a bounce routes again without that route",
+    "the LinkedIn note, then the email nudges, then ghosted; a reply stops every timer",
+    "read it; interview or question: reply; rejection: close; offer or assessment: the operator",
+    "an outcome: unsent (expired, skipped, withdrawn) or sent (offer, rejected, ghosted, withdrawn, declined)",
+];
+
+/// The section 7 pages built from the kernel's own tables, so they never restate it.
+fn generated(name: &str) -> Option<(&'static str, String)> {
+    use kernel::campaign::{CONFIRM_HOURS, GHOSTED, NOTE_MAX, NUDGES};
+    Some(match name {
+        "apply" => {
+            let phases: String = Phase::ALL.iter().zip(PHASES).map(|(p, what)| format!("  {:>2} {:<10} {what}\n", p.n(), p.name())).collect();
+            ("one application from listing to outcome", format!(
+                "SYNOPSIS\n  campaign {{\"run\":\"apply\"}}          the application closest to done, and its next call\n  campaign {{\"application\":\"app:412\"}} the next call for that application\n\nDESCRIPTION\n  Thirteen phases, read from the rows on every call:\n{phases}\n  Follow-ups: the LinkedIn note on day 0-1, email nudges on days {} and {} after the last exchange, ghosted at day {GHOSTED}.\n  A LinkedIn note over {NOTE_MAX} characters, and a careers-page landing unconfirmed after {CONFIRM_HOURS} h, are warnings.\n  Where the rows leave one way forward the campaign railroads; where they branch, the rows pick the branch.\n  Waits name their day; operator steps name what to ask the user.\n\nSEE ALSO\n  man campaigns, man hints, man fire-keys, man stage-rail",
+                NUDGES[0], NUDGES[1]
+            ))
+        }
+        "stage-rail" => {
+            let rail: String = kernel::pipeline::STAGES.iter().map(|s| format!("  {:<12} {}: {}\n", s.name(), s.label(), s.hint())).collect();
+            let batched: Vec<&str> = kernel::pipeline::STAGES.iter().filter(|s| s.batched()).map(|s| s.name()).collect();
+            ("an application's stages", format!(
+                "{rail}\n  A batch is needed at {}. A landed mission moves its application to submitted; once it went out it never returns to a stage before submitted. The stage command moves it; a refusal names the rule.\n\nSEE ALSO\n  man apply",
+                batched.join(", ")
+            ))
+        }
+        _ => return None,
+    })
+}
 
 /// One page by its name, optionally prefixed by its section (`7 apply`, `5 missions`).
 pub fn page(m: Masks, query: &str) -> Option<String> {
@@ -59,9 +95,9 @@ pub fn page(m: Masks, query: &str) -> Option<String> {
     };
     let want = |s: u8| section.is_none_or(|x| x == s);
     if want(7)
-        && let Some((n, line, body)) = CONCEPTS.iter().find(|c| c.0 == name)
+        && let Some((line, body)) = CONCEPTS.iter().find(|c| c.0 == name).map(|c| (c.1, c.2.to_owned())).or_else(|| generated(name))
     {
-        return Some(format!("{}(7)  {n} — {line}\n\n{body}\n", n.to_uppercase()));
+        return Some(format!("{}(7)  {name} — {line}\n\n{body}\n", name.to_uppercase()));
     }
     if want(1)
         && let Some(t) = tools::list(m).into_iter().find(|t| t["name"] == name)
@@ -105,6 +141,9 @@ pub fn apropos(m: Masks, word: &str) -> String {
     for (n, line, _) in CONCEPTS {
         hit(7, n, line);
     }
+    for n in GENERATED {
+        hit(7, n, generated(n).map_or("", |g| g.0));
+    }
     for t in tools::list(m) {
         hit(1, t["name"].as_str().unwrap_or(""), &first_sentence(t["description"].as_str().unwrap_or("")));
     }
@@ -125,7 +164,7 @@ pub fn index(m: Masks) -> String {
         "{CAMPAIGNS}\nSECTIONS  man <page>, man {{\"page\":\"7 apply\"}}, man {{\"k\":\"word\"}}\n  1 tools     {}\n  5 tables    {}\n  7 concepts  {}, and every refusal code\n  8 operator  the commands only the operator runs\n",
         tools.join(" "),
         tables.join(" "),
-        CONCEPTS.iter().map(|c| c.0).collect::<Vec<_>>().join(" "),
+        CONCEPTS.iter().map(|c| c.0).chain(GENERATED).collect::<Vec<_>>().join(" "),
     )
 }
 
@@ -210,9 +249,11 @@ mod tests {
         for code in crate::diag::names() {
             assert!(page(ALL, code).is_some_and(|p| p.contains("a refusal")) || tools::list(ALL).iter().any(|t| t["name"] == code), "{code}");
         }
-        for (n, _, _) in CONCEPTS {
-            assert!(page(ALL, &format!("7 {n}")).is_some() && page(ALL, &format!("1 {n}")).is_none_or(|p| p.contains("(1)")));
+        for n in CONCEPTS.iter().map(|c| c.0).chain(GENERATED) {
+            assert!(page(ALL, &format!("7 {n}")).is_some() && apropos(ALL, n).contains(&format!("{n} (7)")), "{n}");
         }
+        let apply = page(ALL, "apply").unwrap();
+        assert!(Phase::ALL.iter().all(|p| apply.contains(p.name())) && apply.contains(&format!("ghosted at day {}", kernel::campaign::GHOSTED)), "{apply}");
         assert!(page(ALL, "5 missions").is_some_and(|p| p.contains("COLUMNS")));
         assert!(page(ALL, "nonesuch").is_none() && apropos(ALL, "nonesuch").contains("nothing appropriate"));
     }

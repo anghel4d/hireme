@@ -140,13 +140,14 @@ fn tool(name: &str, title: &str, description: String, mut input: Json, read_only
             p.insert("ref".into(), json!({"type":"string","description":"the row as kind:key (app:412, mission:34, corp:example.com; man refs), in place of table and id; mission:new with the union's keys puts a mission"}));
         }
         if name == "put" {
-            for branch in crate::refs::mission_schema()["oneOf"].as_array().into_iter().flatten() {
-                for (k, v) in branch["properties"].as_object().into_iter().flatten() {
-                    if !p.contains_key(k) {
-                        p.insert(k.clone(), if k == "kind" { json!({"type":"string","enum":["email","careers_page","linkedin","x_dm","discord","other"]}) } else { v.clone() });
-                    }
+            let union = crate::refs::mission_schema();
+            let branches = union["oneOf"].as_array().cloned().unwrap_or_default();
+            for (k, v) in branches.iter().filter_map(|b| b["properties"].as_object()).flatten() {
+                if !p.contains_key(k) {
+                    p.insert(k.clone(), v.clone());
                 }
             }
+            p.insert("kind".into(), json!({"type":"string","enum":branches.iter().map(|b| b["properties"]["kind"]["const"].clone()).collect::<Vec<_>>()}));
         }
         if rowed && let Some(r) = input.get_mut("required").and_then(Json::as_array_mut) {
             r.retain(|k| !matches!(k.as_str(), Some("table" | "id" | "set")));
