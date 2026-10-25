@@ -1042,7 +1042,7 @@ fn ask_text(f: &Facts, a: &Ask) -> (String, String) {
             return (alloc::format!("no CV file for {app}: upload a PDF or DOCX ({need})"), need.into());
         }
         Ask::Key(r) => (alloc::format!("approve the fire key for {app}: /fire/{r}"), "only the operator makes a fire key; stop here until it is granted"),
-        Ask::Revoked(m) => (alloc::format!("the operator revoked the key for mission:{m}: stand down; ask them whether it goes out at all before requesting another"), "a revoked key is the operator's decision; nothing requests it again on its own"),
+        Ask::Revoked(m) => (alloc::format!("the operator revoked the key for {}: stand down; ask them whether it goes out at all before requesting another", refs::mission(m)), "a revoked key is the operator's decision; nothing requests it again on its own"),
         Ask::Declined(r) => (alloc::format!("{} was declined: revise the drafts, then ask the user before requesting again", refs::request(r)), "the operator said no to these drafts; only they can say what changed"),
         Ask::Mailbox => ("link Gmail (Account → Mail) so the mail can go".into(), "no live mailbox"),
         Ask::ByHand(m) => {

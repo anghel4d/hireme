@@ -525,6 +525,11 @@ const UNION_KEYS: [&str; 17] = ["app", "application", "application_id", "draft",
 /// The put's own keys beside the union's.
 const ENVELOPE: [&str; 9] = ["ref", "table", "id", "key", "set", "expect_rev", "create_only", "as_of", "source"];
 
+/// The kinds a mission can be: enum outreach_kind without note.
+fn kinds() -> Vec<&'static str> {
+    schema::enum_names("outreach_kind").unwrap_or(&[]).iter().copied().filter(|k| *k != "note").collect()
+}
+
 fn kind_named(name: &str) -> Option<kernel::outreach::Kind> {
     schema::enum_names("outreach_kind")?.iter().position(|k| *k == name).and_then(|i| kernel::outreach::Kind::from_code(i as u32))
 }
@@ -570,19 +575,19 @@ fn mission_union(a: &mut Map<String, Json>, inserting: bool, look: &mut dyn Look
     };
     let kind = match a.remove("kind").or_else(|| set.get("kind").cloned()) {
         Some(Json::String(k)) => Some(k),
-        Some(other) => return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "reason": format!("kind is one of {}; got {other}", schema::enum_names("outreach_kind").unwrap_or(&[]).join(", "))}))),
+        Some(other) => return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "reason": format!("kind is one of {}; got {other}", kinds().join(", "))}))),
         None => a.get("id").and_then(Json::as_u64).and_then(|id| look.mission_kind(id as u32)),
     };
     let union_present = a.keys().any(|k| UNION_KEYS.contains(&k.as_str()));
     let Some(kind) = kind else {
         if union_present || inserting {
-            return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "reason": "a mission put names its kind", "known": schema::enum_names("outreach_kind").unwrap_or(&[]).iter().filter(|k| **k != "note").collect::<Vec<_>>()})));
+            return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "reason": "a mission put names its kind", "known": kinds()})));
         }
         a.insert("set".into(), Json::Object(set));
         return Ok(());
     };
     let Some(k) = kind_named(&kind).filter(|k| k.fireable()) else {
-        let kinds: Vec<&str> = schema::enum_names("outreach_kind").unwrap_or(&[]).iter().copied().filter(|k| *k != "note").collect();
+        let kinds = kinds();
         let (last, rest) = kinds.split_last().map_or(("", &kinds[..]), |(l, r)| (*l, r));
         return Err(refuse("shape", json!({"key": "kind", "of": "a mission", "got": kind, "reason": format!("a mission is {} or {last}", rest.join(", "))})));
     };
