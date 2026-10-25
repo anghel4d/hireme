@@ -839,8 +839,8 @@ fn timers(f: &Facts, mut b: Build) -> Step {
     let nudged = f.missions.iter().filter(|m| m.role == Role::Nudge && m.fired.is_some_and(|t| day_of(t) >= since)).count();
     let next = match (f.nudge_to(), NUDGES.get(nudged)) {
         (Some((addr, contact)), Some(&d)) if days >= d => Next::Do(Act::Want(Want { role: Role::Nudge, kind: Kind::Email, to: To::Address { addr, contact, reply: None } })),
-        (Some(_), Some(&d)) => Next::Wait { until: Some(since + d as Day), why: "follow-up" },
-        _ => Next::Wait { until: Some(since + GHOSTED as Day), why: "follow-up" },
+        (Some(_), Some(&d)) => Next::Wait { until: Some(since + d as Day), why: "nudge" },
+        _ => Next::Wait { until: Some(since + GHOSTED as Day), why: "ghosted" },
     };
     b.at(Phase::FollowUp, next)
 }
@@ -1056,6 +1056,12 @@ pub fn json(f: &Facts, s: &Step) -> Json {
                 "heat" => alloc::format!("the company's heat is over its cap; nothing on {} until then, or the operator overrides", app_ref(f)),
                 "cap" => "today's 25 mails are out; the cap resets tomorrow".into(),
                 "sending" => "the node is sending the mail; it reports the outcome itself".into(),
+                // What the follow-up's date is: the next nudge, or the close.
+                "nudge" => match (f.nudge_to(), until) {
+                    (Some((addr, _)), Some(u)) => alloc::format!("the day-{} nudge to {addr} is due", u - last_exchange(f)),
+                    _ => alloc::format!("nothing due on {} today", app_ref(f)),
+                },
+                "ghosted" => alloc::format!("no reply by then closes it as ghosted ({})", if f.nudge_to().is_some() { "both nudges went out" } else { "no address on file to nudge" }),
                 _ => alloc::format!("nothing due on {} today", app_ref(f)),
             };
             json!({"kind": "wait", "until": until.map(iso), "why": text})

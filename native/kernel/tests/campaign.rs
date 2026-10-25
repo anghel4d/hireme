@@ -513,7 +513,7 @@ impl Sim {
                 let id = self.f.missions.iter().find(|m| m.state == MState::InFlight && m.kind == Kind::Email).ok_or("waits on a mail that is not sending")?.id;
                 self.outcome(id)
             }
-            "follow-up" => {
+            "nudge" | "ghosted" => {
                 let day = until.ok_or("a follow-up wait names no day")?;
                 // What arrives before the timer comes first.
                 let first = self.due.iter().map(|r| r.0).chain(self.bounce.map(|b| b.0)).filter(|d| *d < day).min();
@@ -678,6 +678,33 @@ fn an_answer_is_one_call_in_the_tools_grammar() {
     for tool in ["find", "put", "stage", "pick_cv", "request_fire_key", "fire", "report"] {
         assert!(tools.contains(tool), "{tool} never asked: {tools:?}");
     }
+}
+
+#[test]
+fn a_follow_up_wait_says_what_its_day_is() {
+    // The first follow-up wait of a walk, as the answer words it.
+    let first = |w: World| {
+        let mut sim = start(w);
+        for _ in 0..300 {
+            let s = step(&sim.f);
+            if let Next::Wait { until, why: "nudge" | "ghosted" } = s.next {
+                return (json(&sim.f, &s)["next"]["why"].as_str().unwrap().to_string(), until.map(|u| u - sim.f.today));
+            }
+            match &s.next {
+                Next::Do(a) => sim.act(a),
+                Next::Ask(a) => sim.ask(a),
+                Next::Wait { until, why } => sim.wait(*until, why),
+                Next::Done(_) => panic!("closed before any follow-up"),
+            }
+            .unwrap();
+            sim.arrive();
+        }
+        panic!("no follow-up wait");
+    };
+    let routed = World::of(Channel::Listing, Listed::Form, People::Recruiter);
+    assert_eq!(first(routed), ("the day-7 nudge to p9@acme.example is due".into(), Some(7)));
+    let nobody = World::of(Channel::Listing, Listed::Form, People::None);
+    assert_eq!(first(nobody), ("no reply by then closes it as ghosted (no address on file to nudge)".into(), Some(30)));
 }
 
 #[test]
