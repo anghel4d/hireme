@@ -298,9 +298,31 @@ fn put(rows: &Rows, board: &mut Board, op: &Op, ctx: &Ctx) -> Verdict {
                     }
                 }
             }
+            let mut sent = op.target != 0 && apps.is_some_and(|t| board::sent(t, op.target));
+            // The operator's word that the old ledger's send went out is its
+            // record (rule 5): submitted on the ledger's day, as a landed shot
+            // submits, and no governor (a send in the past is a fact, not a
+            // decision).
+            let applied = row.get(A::PRIOR_SEND) == Some(&EVal::Val(u(u32::from(enums::prior_send::APPLIED))));
+            if let Some(t) = apps.filter(|t| applied && op.target != 0 && t.has(op.target))
+                && app_stage(t, op.target) < Stage::Submitted
+            {
+                let day = crate::fire::ledger_day(t, op.target).unwrap_or(ctx.today);
+                let note = alloc::format!("sent before hireme (the ledger's {})", crate::day_iso(day));
+                let mut went = moved(t, op.target, app_stage(t, op.target), Stage::Submitted, Some(note), op, ctx).into_iter();
+                for (c, v) in went.next().map(|r| r.cells).unwrap_or_default() {
+                    row.set(c, v);
+                }
+                row.set(A::STAGE_ON, day_val(day));
+                if t.u32(op.target, A::APPLIED_ON).is_none() {
+                    row.set(A::APPLIED_ON, day_val(day));
+                }
+                extra.extend(went);
+                sent = true;
+            }
             // An outcome put is judged as a close's is.
             if let Some(EVal::Val(Val::U32(o))) = row.get(A::OUTCOME) {
-                closing(*o, op.target != 0 && apps.is_some_and(|t| board::sent(t, op.target)))?;
+                closing(*o, sent)?;
             }
         }
         table::MISSIONS | table::FIRE_REQUESTS | table::MAILBOXES => crate::fire::put(rows, ctx, op.table, op.target, &mut row)?,

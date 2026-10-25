@@ -254,13 +254,18 @@ impl Cvs {
         Cvs { arms: crate::pick::arms(rows), counts: crate::pick::Counts::of(rows) }
     }
 
-    fn version(&self, rows: &Rows, app: u32) -> Option<u32> {
+    /// The CV pick of an application, from the arms and counts read once.
+    pub(crate) fn pick(&self, rows: &Rows, app: u32) -> crate::pick::Pick {
+        crate::pick::pick(rows, &self.arms, &self.counts, app)
+    }
+
+    pub(crate) fn version(&self, rows: &Rows, app: u32) -> Option<u32> {
         crate::pick::pick(rows, &self.arms, &self.counts, app).version
     }
 
     /// Whether the version an application's pick sends is a file the mail
     /// can carry (a PDF or DOCX upload): a markdown or composed one is not.
-    fn file(&self, rows: &Rows, app: u32) -> bool {
+    pub(crate) fn file(&self, rows: &Rows, app: u32) -> bool {
         let v = self.version(rows, app);
         v.is_some_and(|v| rows.table(table::CV_VERSIONS).and_then(|t| t.str(v, schema::col::cv_versions::BLOB_SHA)).is_some_and(|s| !s.is_empty()))
     }
@@ -353,7 +358,7 @@ fn contact_profile(rows: &Rows, contact: Option<u32>) -> Option<String> {
 
 /// Whether an In-Reply-To names a mail the account holds: an outreach row,
 /// or the Message-ID a mission stamped. Any other value answers nothing.
-fn answers(rows: &Rows, in_reply_to: &str) -> bool {
+pub(crate) fn answers(rows: &Rows, in_reply_to: &str) -> bool {
     let want = crate::filer::canonical_id(in_reply_to);
     !want.is_empty()
         && (crate::outreach::by_message_id(rows, in_reply_to).is_some()
@@ -408,12 +413,19 @@ pub fn digest(shots: &[(u32, String)]) -> String {
 
 /// Whether an application's prior send (the crucible ledger's
 /// `sync.applied_on`) is still unsettled: rule 5's block.
-fn unsettled(apps: &Table, app: u32) -> bool {
+pub(crate) fn unsettled(apps: &Table, app: u32) -> bool {
     if apps.u32(app, A::PRIOR_SEND).is_some() {
         return false;
     }
     let notes = text(apps, app, A::STAGE_NOTES);
     serde_json::from_str::<Json>(&notes).ok().is_some_and(|j| j.pointer("/sync/applied_on").is_some_and(|v| !v.is_null()))
+}
+
+/// The day the crucible ledger says an application went out, when it
+/// names one: the day a settled send is recorded on.
+pub(crate) fn ledger_day(apps: &Table, app: u32) -> Option<crate::Day> {
+    let notes = text(apps, app, A::STAGE_NOTES);
+    serde_json::from_str::<Json>(&notes).ok()?.pointer("/sync/applied_on")?.as_str().and_then(crate::iso_day)
 }
 
 /// Why mission `id` cannot fire whoever asks, before any key: its own state,
@@ -669,6 +681,20 @@ fn day_of(secs: i64) -> i64 {
     secs.div_euclid(86_400)
 }
 
+/// Whether the linked mailbox is live: an email shot can go.
+pub fn mailbox_live(rows: &Rows) -> bool {
+    rows.first(table::MAILBOXES).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)))
+}
+
+/// The first live key (by id) whose unburned shot of `mission` still
+/// matches it: what covers the mission now, for any caller the key serves.
+pub fn covering(rows: &Rows, cvs: &Cvs, mission: u32, now: i64) -> Option<u32> {
+    let now_hash = hash(rows, cvs, mission)?;
+    let mut keys: Vec<u32> = shots(rows).filter(|s| s.mission == mission && s.burned.is_none() && s.hash == now_hash).map(|s| s.key).collect();
+    keys.sort_unstable();
+    keys.into_iter().find(|&k| key(rows, k).is_some_and(|k| k.dead(now).is_none()))
+}
+
 /// The day's send cap, how many email shots went or are going today (UTC),
 /// and when the count resets.
 pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
@@ -690,8 +716,7 @@ pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
 
 /// An email shot's own gates: a live mailbox and room under the cap.
 pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<(), Refusal> {
-    let live = rows.first(table::MAILBOXES).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)));
-    if !live {
+    if !mailbox_live(rows) {
         return Err(answer(rows, ctx, "mailbox", mission, Some(key_id)));
     }
     let (cap, used, resets) = quota(rows, ctx.now);
@@ -1221,13 +1246,17 @@ fn mission_json(rows: &Rows, cvs: &Cvs, seen: &Seen, t: &Table, id: u32) -> Json
     j
 }
 
+/// The clock a read judges by: the server's `now` when the replica holds
+/// it, else the caller's, else the start of the kernel's day.
+pub fn now(rows: &Rows, req: &Json, today: crate::Day) -> i64 {
+    let clock = rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, schema::col::clock::NOW));
+    clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400)
+}
+
 /// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
 /// `fire_review`, `live_keys`, `mail_quota`.
 pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Json, Refusal> {
-    // The clock: the server's `now` when the replica holds it, else the
-    // caller's, else the start of the kernel's day.
-    let clock = rows.first(table::CLOCK).and_then(|(t, id)| t.u32(id, schema::col::clock::NOW));
-    let now = clock.map(i64::from).or_else(|| req.get("now").and_then(Json::as_i64)).unwrap_or((today as i64 - crate::UNIX_EPOCH_DAY as i64) * 86_400);
+    let now = now(rows, req, today);
     match op {
         "ranges" => {
             let r = match (req.get("text").and_then(Json::as_str), req.get("ids").and_then(Json::as_array)) {

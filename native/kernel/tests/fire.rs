@@ -131,6 +131,35 @@ fn a_shot_needs_a_key_goes_once_and_the_commander_answers_the_rest() {
 }
 
 #[test]
+fn a_ledger_send_settled_as_applied_is_recorded_on_its_day() {
+    let ledger = kernel::iso_day("2026-10-12").unwrap();
+    let close = |k: &mut Kernel, outcome: &str| k.predict(&cmd("stage", 2, json!({"stage": "closed", "outcome": outcome})), &operator(NOON));
+    // The operator's word that it went out is the send's record: submitted
+    // on the ledger's day, the ledger's notes kept, and it closes as a sent
+    // application does.
+    let mut k = kernel(20);
+    k.predict(&put("applications", 2, json!({"prior_send": "applied"})), &operator(NOON)).unwrap();
+    let app = row(&mut k, "applications", 2);
+    assert_eq!((app["stage"].as_str(), app["applied_on"].as_str(), app["stage_on"].as_str()), (Some("submitted"), Some("2026-10-12"), Some("2026-10-12")), "{app}");
+    let notes = if app["stage_notes"].is_string() { serde_json::from_str(app["stage_notes"].as_str().unwrap()).unwrap() } else { app["stage_notes"].clone() };
+    assert_eq!(notes["sync"]["applied_on"], "2026-10-12", "{notes}");
+    assert!(notes["submitted"].as_str().is_some_and(|n| n.contains(&kernel::day_iso(ledger))), "{notes}");
+    assert_eq!(close(&mut k, "expired").expect_err("it went out").code, refusal::TYPE);
+    close(&mut k, "ghosted").unwrap();
+    // Its word that nothing went out moves nothing: it closes unsent.
+    let mut k = kernel(20);
+    k.predict(&put("applications", 2, json!({"prior_send": "not_applied"})), &operator(NOON)).unwrap();
+    assert_eq!(row(&mut k, "applications", 2)["stage"], "fire_ready");
+    assert_eq!(close(&mut k, "ghosted").expect_err("nothing went out").code, refusal::TYPE);
+    // The word and an outcome in one put are judged on the send it records.
+    let mut k = kernel(20);
+    k.predict(&put("applications", 2, json!({"prior_send": "applied", "outcome": "ghosted"})), &operator(NOON)).unwrap();
+    let mut k = kernel(20);
+    let r = k.predict(&put("applications", 2, json!({"prior_send": "not_applied", "outcome": "ghosted"})), &operator(NOON));
+    assert_eq!(r.expect_err("nothing went out").code, refusal::TYPE);
+}
+
+#[test]
 fn a_key_fires_exactly_what_was_reviewed() {
     let mut k = kernel(25);
     let key = create(&mut k, "10", None, NOON);

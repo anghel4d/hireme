@@ -18,6 +18,7 @@ pub mod arrange;
 pub mod atlas;
 pub mod ats;
 pub mod board;
+pub mod campaign;
 pub mod compose;
 pub mod cv;
 pub mod filer;

@@ -101,6 +101,13 @@ impl Kernel {
                 }
                 Ok(crate::filer::match_json(&self.rows, &crate::outreach::Stored(&self.rows), req))
             }
+            // The apply campaign: one application's step, or the one to move next.
+            Some("campaign") => {
+                for t in ["applications", "missions"] {
+                    query::readable(grants, Some(&json!(t)))?;
+                }
+                self.campaign(req)
+            }
             Some(op) if crate::fire::OPS.contains(&op) => {
                 for t in crate::fire::reads(op) {
                     query::readable(grants, Some(&json!(t)))?;
@@ -111,6 +118,25 @@ impl Kernel {
             Some("find") if req["table"] == "applications" && req["order"].is_null() => self.desk(grants, req),
             _ => query::query(&self.rows, grants, &mut self.indexes.borrow_mut(), req, self.today()),
         }
+    }
+
+    /// The campaign read, with each application's heat as the governor
+    /// judges it today: over the cap, the day the cooldown ends.
+    fn campaign(&mut self, req: &Json) -> Result<Json, Refusal> {
+        self.derive();
+        let today = self.today();
+        let now = crate::fire::now(&self.rows, req, today);
+        let rows = &self.rows;
+        let (ix, _) = self.board.governor(rows, today);
+        let apps = rows.table(table::APPLICATIONS);
+        let heat = |id: u32| -> Option<Day> {
+            let seat = crate::board::seat(rows, apps?, id)?;
+            if crate::heat::verdict(ix, &seat).allow {
+                return None;
+            }
+            Some(today + crate::heat::cooldown(ix, &seat).unwrap_or(1).max(1) as Day)
+        };
+        crate::campaign::query(rows, req, today, now, &heat)
     }
 
     /// The CV reads: picks, a rule's check and explanation, the field
