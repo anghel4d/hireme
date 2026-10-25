@@ -266,6 +266,91 @@ impl Cvs {
     }
 }
 
+/// A host name: dotted labels of letters, digits and hyphens, a letter TLD.
+fn host_ok(h: &str) -> bool {
+    let labels: Vec<&str> = h.split('.').collect();
+    labels.len() >= 2
+        && h.len() <= 253
+        && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') && !l.starts_with('-') && !l.ends_with('-'))
+        && labels.last().is_some_and(|t| t.len() >= 2 && t.bytes().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// A LinkedIn profile URL as one form, `https://www.linkedin.com/in/<name>`.
+pub fn linkedin_profile(text: &str) -> Option<String> {
+    let t = text.trim();
+    let lower = t.to_ascii_lowercase();
+    let rest = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://"))?;
+    let (h, path) = rest.split_once('/')?;
+    if !(h == "linkedin.com" || h.ends_with(".linkedin.com")) {
+        return None;
+    }
+    let name = path.strip_prefix("in/")?.split(['/', '?', '#']).next()?;
+    let ok = !name.is_empty() && name.len() <= 100 && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'%');
+    ok.then(|| alloc::format!("https://www.linkedin.com/in/{name}"))
+}
+
+/// A mission's target as its kind reads it, in the one form stored; the
+/// one-line need when it is not one. The MCP's door and the missions put
+/// call it alike: an email's To as `outreach::addrs` reads it, a form's
+/// https URL, a LinkedIn profile, an X or Discord handle; `other` names
+/// any route.
+pub fn target(kind: crate::outreach::Kind, text: &str) -> Result<String, &'static str> {
+    use crate::outreach::Kind;
+    let t = text.trim();
+    match kind {
+        Kind::Email => crate::outreach::addrs(t).ok().filter(|a| !a.is_empty()).map(|a| a.join(", ")).ok_or("1 to 10 addresses, comma-separated"),
+        Kind::CareersPage => {
+            let lower = t.to_ascii_lowercase();
+            let rest = lower.strip_prefix("https://").ok_or("the form's https URL")?;
+            let h = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let h = h.rsplit('@').next().unwrap_or(h).split(':').next().unwrap_or("");
+            if host_ok(h) && t.len() <= 2048 && !t.bytes().any(|c| c.is_ascii_whitespace()) { Ok(t.into()) } else { Err("the form's https URL") }
+        }
+        Kind::LinkedIn => linkedin_profile(t).ok_or("a linkedin.com/in/ profile URL (or no target, and a contact_id whose linkedin_url is one)"),
+        Kind::XDm => {
+            let lower = t.to_ascii_lowercase();
+            let handle = ["https://x.com/", "https://twitter.com/", "https://www.x.com/", "https://www.twitter.com/"]
+                .iter()
+                .find_map(|p| lower.strip_prefix(p).map(|_| &t[p.len()..]))
+                .map_or(t, |rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
+            let handle = handle.trim_start_matches('@');
+            let ok = !handle.is_empty() && handle.len() <= 15 && handle.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_');
+            if ok { Ok(handle.into()) } else { Err("an X handle: 1 to 15 letters, digits or _ (an @ or x.com/ link is read too)") }
+        }
+        Kind::Discord => {
+            let user = |u: &str| (2..=32).contains(&u.len()) && u.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'.');
+            let channel = |c: &str| !c.is_empty() && c.len() <= 100 && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+            let ok = match t.split_once("/#") {
+                Some((server, ch)) => !server.trim().is_empty() && server.len() <= 100 && !server.contains('/') && channel(ch),
+                None => user(&t.trim_start_matches('@').to_ascii_lowercase()),
+            };
+            if !ok {
+                return Err("a Discord user (2 to 32 of a-z 0-9 _ .) or server/#channel");
+            }
+            Ok(if t.contains("/#") { t.into() } else { t.trim_start_matches('@').to_ascii_lowercase() })
+        }
+        Kind::Other => if t.is_empty() || t.len() > 500 { Err("the route, at most 500 bytes") } else { Ok(t.into()) },
+        Kind::Note => Err("a note is no mission"),
+    }
+}
+
+/// Whether a mission's route is one its kind can take: its target, or for
+/// LinkedIn its contact's profile.
+fn routed(rows: &Rows, t: &Table, id: u32) -> bool {
+    let Some(kind) = t.u32(id, M::KIND).and_then(crate::outreach::Kind::from_code) else { return false };
+    let given = text(t, id, M::TARGET);
+    if !given.trim().is_empty() {
+        return target(kind, &given).is_ok();
+    }
+    kind == crate::outreach::Kind::LinkedIn && contact_profile(rows, t.u32(id, M::CONTACT_ID)).is_some()
+}
+
+/// A contact's LinkedIn profile, when its row holds one.
+fn contact_profile(rows: &Rows, contact: Option<u32>) -> Option<String> {
+    let c = contact?;
+    rows.table(table::CONTACTS).and_then(|t| t.str(c, schema::col::contacts::LINKEDIN_URL)).and_then(linkedin_profile)
+}
+
 /// Whether an In-Reply-To names a mail the account holds: an outreach row,
 /// or the Message-ID a mission stamped. Any other value answers nothing.
 fn answers(rows: &Rows, in_reply_to: &str) -> bool {
@@ -340,6 +425,9 @@ pub fn hold(rows: &Rows, cvs: &Cvs, id: u32) -> Option<&'static str> {
         enums::mission_state::IN_FLIGHT => return Some("in_flight"),
         enums::mission_state::FIRED => return Some("fired"),
         _ => return Some("not_ready"),
+    }
+    if !is_email(t, id) && (!routed(rows, t, id) || text(t, id, M::DRAFT).trim().is_empty()) {
+        return Some("incomplete");
     }
     if is_email(t, id) {
         let to = crate::outreach::addrs(&text(t, id, M::TARGET));
@@ -980,6 +1068,28 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
             }
             if kind.and_then(crate::outreach::Kind::from_code).is_some_and(|k| !k.fireable()) {
                 return Err(no(refusal::TYPE, json!({"table": "missions", "column": "kind", "reason": "a mission is never a note"})));
+            }
+            if let Some(k) = kind.and_then(crate::outreach::Kind::from_code).filter(|k| *k != crate::outreach::Kind::Email) {
+                // The target as its kind reads it, stored in one form: a form's
+                // https URL, a LinkedIn profile, an X or Discord handle.
+                let given_target = match given(row, M::TARGET) {
+                    Some(EVal::Val(Val::Str(v))) => Some(v),
+                    _ => None,
+                };
+                let text_now = given_target.clone().or_else(|| t.and_then(|t| t.str(target, M::TARGET)).map(String::from)).unwrap_or_default();
+                if (given_target.is_some() || given(row, M::KIND).is_some()) && !text_now.trim().is_empty() {
+                    let read = self::target(k, &text_now).map_err(|need| no(refusal::TYPE, json!({"table": "missions", "column": "target", "need": need})))?;
+                    if given_target.is_some() {
+                        row.set(M::TARGET, Val::Str(read));
+                    }
+                }
+                if to_ready && text_now.trim().is_empty() {
+                    let by_contact = k == crate::outreach::Kind::LinkedIn && contact_profile(rows, row.number(M::CONTACT_ID, t, target)).is_some();
+                    if !by_contact {
+                        let need = self::target(k, "").err().unwrap_or("a target");
+                        return Err(no(refusal::TYPE, json!({"table": "missions", "column": "target", "need": need})));
+                    }
+                }
             }
             if kind == Some(u32::from(enums::outreach_kind::EMAIL)) {
                 // An email's To and cc as the outreach type reads them, stored

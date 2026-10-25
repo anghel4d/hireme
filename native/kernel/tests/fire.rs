@@ -333,3 +333,45 @@ fn an_unlinked_mailbox_takes_no_state_but_linking() {
     }
     k.predict(&cmd("mailbox_state", 1, json!({"status": "linking"})), &mail(NOON)).expect("a new link moves it");
 }
+
+#[test]
+fn a_route_is_what_its_kind_reads() {
+    use kernel::fire::target;
+    use kernel::outreach::Kind;
+    // Each kind's target, read into one stored form or refused with its need.
+    for (kind, given, want) in [
+        (Kind::CareersPage, " https://job-boards.greenhouse.io/acme/jobs/1 ", Some("https://job-boards.greenhouse.io/acme/jobs/1")),
+        (Kind::CareersPage, "http://acme.example/apply", None),
+        (Kind::CareersPage, "https://localhost/apply", None),
+        (Kind::LinkedIn, "https://de.linkedin.com/in/lena-vogt-123/?trk=x", Some("https://www.linkedin.com/in/lena-vogt-123")),
+        (Kind::LinkedIn, "https://www.linkedin.com/company/acme", None),
+        (Kind::XDm, "@ana_dev", Some("ana_dev")),
+        (Kind::XDm, "https://x.com/ana_dev/status/1", Some("ana_dev")),
+        (Kind::XDm, "a_handle_far_too_long", None),
+        (Kind::Discord, "@Ana.dev", Some("ana.dev")),
+        (Kind::Discord, "Rust Community/#jobs", Some("Rust Community/#jobs")),
+        (Kind::Discord, "Ana Dev", None),
+        (Kind::Email, "Jobs <Jobs@ACME.example>, cto@acme.example", Some("Jobs@acme.example, cto@acme.example")),
+        (Kind::Email, "the hiring team", None),
+        (Kind::Note, "anything", None),
+    ] {
+        assert_eq!(target(kind, given).ok().as_deref(), want, "{kind:?} {given:?}");
+    }
+    // Through the put: a given target is stored as read, a bad one refused.
+    let mut k = kernel(25);
+    k.predict(&put("missions", 10, json!({"target": "https://job-boards.greenhouse.io/acme/jobs/9 "})), &agent(3, NOON)).unwrap();
+    assert_eq!(row(&mut k, "missions", 10)["target"], "https://job-boards.greenhouse.io/acme/jobs/9");
+    assert_eq!(k.predict(&put("missions", 10, json!({"target": "acme.example/apply"})), &agent(3, NOON)).expect_err("not an https form").code, refusal::TYPE);
+    // A LinkedIn note goes to a profile: its own target, or its contact's.
+    k.predict(&put("contacts", 0, json!({"name": "Lena Vogt", "corporation_id": 1, "linkedin_url": "https://www.linkedin.com/in/lenavogt"})), &agent(3, NOON)).unwrap();
+    let lena = q(&mut k, json!({"op": "find", "table": "contacts"}))["rows"][0]["id"].as_u64().unwrap();
+    let note = |contact: Option<u64>| {
+        let mut cells = json!({"application_id": 1, "kind": "linkedin", "draft": "Hey Lena! Just applied to Staff Engineer at Acme.", "state": "fire_ready"});
+        if let Some(c) = contact {
+            cells["contact_id"] = json!(c);
+        }
+        put("missions", 0, cells)
+    };
+    assert_eq!(k.predict(&note(None), &agent(3, NOON)).expect_err("no profile").code, refusal::TYPE);
+    k.predict(&note(Some(lena)), &agent(3, NOON)).unwrap();
+}
