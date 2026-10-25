@@ -130,6 +130,11 @@ pub fn report(args: &Json, mission: &Json) -> Result<Json, String> {
                     set[k] = v.clone();
                 }
             }
+            // A careers-page item names its form: the URL the mission was staged with, unless the
+            // agent names the page it actually submitted on.
+            if kind == "careers_page" && set.get("link").is_none() {
+                set["link"] = mission.get("target").cloned().unwrap_or(Json::Null);
+            }
             let item = json!(["put", {"table": "outreach", "set": set}]);
             Ok(json!({"writes": if mission.get("state").and_then(Json::as_str) == Some("fired") { json!([item]) } else { json!([["landed", {"id": id}], item]) }}))
         }

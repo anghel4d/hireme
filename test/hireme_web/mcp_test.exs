@@ -382,4 +382,125 @@ defmodule HiremeWeb.McpTest do
     refute updated(pa, corp_uri, 1_500)
     assert error?(tool(pa, "get", %{table: "corporations", id: String.to_integer(id)}))
   end
+
+  # The campaign's contract (docs/mcp/campaigns.md): an agent that does exactly what each answer's
+  # next says, writing only the text a placeholder asks for, takes a fresh listing to the fire-key
+  # question, and after the operator's key to submitted, with no refused call on the way.
+  test "an agent that only follows the campaign's next calls takes a listing to the fire-key ask, and with the operator's key to submitted",
+       ctx do
+    id = ctx.account.id
+
+    {[corp], []} =
+      run(id, op(:put, :corporations, %{domain: "nordlicht.test", name: "Nordlicht"}))
+
+    {:ok, %{sha: sha}} =
+      Hireme.Blobs.put(id, "%PDF-1.4\n" <> String.duplicate("cv ", 200), "application/pdf")
+
+    {[root], []} = run(id, op(:put, :cv_roots, %{slug: "main", name: "Main", format: :pdf}))
+
+    {[_], []} =
+      run(id, op(:put, :cv_versions, %{root_id: root.id, blob_sha: sha, blob_name: "cv.pdf"}))
+
+    {[a], []} =
+      run(
+        id,
+        app(%{
+          company: "Nordlicht",
+          role: "Senior Rust Engineer",
+          corporation_id: corp.id,
+          work_mode: :remote,
+          channel: :listing,
+          listing_url: "https://boards.greenhouse.io/nordlicht/jobs/4410",
+          listing_raw: "Senior Rust Engineer. Apply on our careers page."
+        })
+      )
+
+    p = mcp(ctx)
+    ok!(tool(p, "lease", %{ids: [a.id]}))
+
+    step = fn -> ok!(tool(p, "campaign", %{application: a.id}))["result"]["structuredContent"] end
+
+    follow = fn follow, n, seen ->
+      s = step.()
+      next = s["next"]
+      assert n < 40, "no progress: #{inspect(Enum.take(seen, 5))}"
+
+      case next["kind"] do
+        "do" ->
+          answer = tool(p, next["tool"], fill(next["args"]))
+
+          refute error?(answer),
+                 "#{next["tool"]} #{inspect(next["args"])} refused:\n#{text_of(answer)}"
+
+          follow.(follow, n + 1, [{s["phase"]["name"], next["tool"]} | seen])
+
+        _ ->
+          {s, seen}
+      end
+    end
+
+    {asked, walked} = follow.(follow, 0, [])
+    assert asked["phase"]["name"] == "fire-key" and asked["next"]["kind"] == "ask", inspect(asked)
+    assert asked["next"]["ask"] =~ "/fire/"
+    phases = walked |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+    assert Enum.all?(~w(qualify batch documents stage), &(&1 in phases)), inspect(walked)
+
+    # The operator grants the request the campaign asked for, as the review page does.
+    [_, request] = Regex.run(~r{/fire/(\d+)}, asked["next"]["ask"])
+
+    {:ok, {:ok, review}} =
+      Hireme.Sequencer.read(id, fn k, _ ->
+        Nif.query(
+          k.res,
+          JSON.encode!(%{op: "fire_review", request: String.to_integer(request)}),
+          15,
+          15,
+          true
+        )
+      end)
+
+    %{"scope" => scope, "digest" => digest} = JSON.decode!(review)
+
+    page = %{
+      label: "page",
+      grants: Hireme.Grants.operator(),
+      key_id: nil,
+      session_id: ctx.session.id
+    }
+
+    {[_key], []} =
+      run(
+        id,
+        op(:command, :create_fire_key, %{
+          missions: scope,
+          digest: digest,
+          request: String.to_integer(request)
+        }),
+        page
+      )
+
+    {after_key, _} = follow.(follow, 0, [])
+    assert after_key["application"]["stage"] == "submitted", inspect(after_key)
+
+    assert after_key["next"]["kind"] in ["wait", "ask"] or
+             after_key["phase"]["name"] == "follow-up"
+
+    painted = text_of(tool(p, "campaign", %{application: a.id}))
+    assert painted =~ "\e[1;36mnext[" and painted =~ "app:#{after_key["application"]["no"]}"
+  end
+
+  # The text a placeholder asks for: the first of its choices, else a line of plausible prose.
+  defp fill(args) when is_map(args), do: Map.new(args, fn {k, v} -> {k, fill(v)} end)
+  defp fill(args) when is_list(args), do: Enum.map(args, &fill/1)
+
+  defp fill("<" <> _ = v) do
+    inner = String.trim_trailing(String.trim_leading(v, "<"), ">")
+
+    case String.split(inner, "|") do
+      [one, _ | _] -> one
+      _ -> "Text the agent wrote: #{inner}"
+    end
+  end
+
+  defp fill(v), do: v
 end
