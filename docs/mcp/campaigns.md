@@ -89,3 +89,27 @@ Shared-tree rules stand:
 - stage and commit atomically with explicit pathspecs;
 - no amend, revert, checkout or stash;
 - a change to another lane's file goes to its owner as a patch.
+
+## Landed
+
+| Commit | Lane | What |
+|---|---|---|
+| 21f7a666 | shannon | `man` (sections 1, 5, 7, 8, `man -k`); `-h` on every tool; every answer painted by the hint grammar; refusals end `help: man <code>` |
+| fface21c | turing | refs at the door (`refs.rs`, `docs/mcp/refs.md`), the mission union, unknown keys refused with a did-you-mean, the sent/unsent outcome split in the judge |
+| a60cd5fb | lovelace | `fire::target(kind, text)`: a mission's target is what its kind reads, at the door and in the put |
+| ef13ce60, e1077912 | lovelace | `campaign.rs`: the thirteen phases, the picker, query op `campaign`, and the route graph walked whole (5,400 model walks, plus the route followed through the real judge to ghosted) |
+| 1c48bafd | shannon | the `campaign` tool, its next line after every write, the resolver live, schemas that admit refs and the union, `man://` resources |
+| e647b31f | shannon | the contract test: an agent that only follows the next calls takes a listing to the fire-key ask, then with the operator's key to submitted, with no call refused |
+
+The end-to-end walk, as the agent reads it:
+
+```
+next[qualify]:   stage {"ref":"app:1","stage":"freshness"}
+next[batch]:     put {"table":"batches","set":{"code":"D-2026-10-25",...}}
+next[documents]: pick_cv {"ref":"app:1","cv_root_id":1}  · the form takes the CV as a file
+next[stage]:     put {"ref":"mission:new","kind":"careers_page","app":"app:1","form":"https://...","draft":"<every field's text, markdown>"}
+next[fire-key]:  request_fire_key {"missions":"1","reason":"Nordlicht · Senior Rust Engineer: careers_page"}
+next[ask the user]: approve the fire key for app:1: https://<node>/fire/1  · stop here until it is granted
+next[fire]:      report {"mission":"mission:1","reference":"<the page's confirmation number>",...}
+next[wait until 2026-11-24]: ...
+```

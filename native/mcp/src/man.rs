@@ -170,6 +170,15 @@ fn first_sentence(s: &str) -> String {
     s.split_once(". ").map_or(s, |(a, _)| a).trim_end_matches('.').to_owned()
 }
 
+/// Whether a call's arguments ask for the build's version: `--version` set, or the bare string.
+pub fn wants_version(args: &Json) -> bool {
+    match args {
+        Json::String(s) => s.trim() == "--version",
+        Json::Object(o) => o.get("--version").is_some_and(|v| v != &Json::Bool(false) && !v.is_null()),
+        _ => false,
+    }
+}
+
 /// Whether a call's arguments ask for its manual: `-h`, `--help`, `help` or `h` set, or the bare string.
 pub fn wants_help(args: &Json) -> bool {
     match args {
@@ -216,5 +225,6 @@ mod tests {
         for no in [serde_json::json!({}), serde_json::json!({"help":false}), serde_json::json!({"table":"help"}), serde_json::json!("help me")] {
             assert!(!wants_help(&no), "{no}");
         }
+        assert!(wants_version(&serde_json::json!("--version")) && wants_version(&serde_json::json!({"--version": true})) && !wants_version(&serde_json::json!({"-h": true})));
     }
 }

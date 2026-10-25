@@ -566,6 +566,10 @@ async fn tool(name: &str, args: Json) -> Result<Json, Json> {
 }
 
 async fn answer(name: &str, args: Json) -> Result<Json, Json> {
+    if crate::man::wants_version(&args) {
+        let (server, version) = host(|h| h.server());
+        return Ok(text(format!("{server} {version} · schema rev {}\n", schema::SCHEMA_REV), None, false));
+    }
     if crate::man::wants_help(&args) {
         let m = masks().await.unwrap_or_default();
         return Ok(text(crate::man::short(m, name), None, false));

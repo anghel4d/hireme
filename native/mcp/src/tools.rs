@@ -126,6 +126,7 @@ fn tool(name: &str, title: &str, description: String, mut input: Json, read_only
         let h = json!({"type":"boolean","description":"true: this tool's usage instead of a call (man <tool> has the whole page)"});
         p.insert("help".into(), h.clone());
         p.insert("-h".into(), h);
+        p.insert("--version".into(), json!({"type":"boolean","description":"true: the build's version and schema revision instead of a call"}));
         let rowed = p.contains_key("table") || p.contains_key("id");
         for k in ["id", "application", "mission"] {
             if let Some(t) = p.get_mut(k).filter(|v| v["type"] == "integer") {
