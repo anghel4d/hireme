@@ -94,11 +94,10 @@ pub fn keys(data: &Json) -> String {
 
 /// `request_fire_key`, once the request is written: the operator's review link, predialed.
 pub fn requested(data: &Json) -> String {
+    let n = data["count"].as_u64().unwrap_or(0);
     format!(
-        "Requested: fire key for missions {} ({} missions), request {}.\nGive the operator this link: {}/fire/{}\nIt opens the review with every draft and target in full; only the operator creates the key there, under step-up. Nothing fires until then: keep staging, and `fire_keys` shows the key once it exists.\n",
-        data["missions"].as_str().unwrap_or("?"),
-        data["count"],
-        data["id"],
+        "{}Ask the user to grant it: {}/fire/{} (the review shows every draft and target in full; only the operator creates the key, under step-up). Nothing fires until then; `fire_keys` shows the key once it exists.\n",
+        crate::diag::ok("Requested", &format!("fire_request:{} for missions {} ({n} mission{})", data["id"], data["missions"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" })),
         data["origin"].as_str().unwrap_or("").trim_end_matches('/'),
         data["id"]
     )
@@ -194,7 +193,7 @@ mod tests {
         assert!(k.contains("key 7: scope 1-44  remaining 1-32  burned 33  in flight -") && k.contains("API key 4 only") && k.contains("mail today: 3 of 25 sent, 22 left"), "{k}");
         assert!(keys(&json!({"live": {"keys": []}})).contains("request_fire_key"));
         let r = requested(&json!({"id": 17, "missions": "33-34", "count": 2, "origin": "https://hireme.example/"}));
-        assert!(r.contains("Give the operator this link: https://hireme.example/fire/17\n") && r.contains("missions 33-34 (2 missions)"), "{r}");
+        assert!(r.contains("grant it: https://hireme.example/fire/17 ") && r.contains("   Requested fire_request:17 for missions 33-34 (2 missions)"), "{r}");
         assert!(view("brief", &json!({"mission": {"id": 1}})).is_some() && view("nope", &json!({})).is_none());
     }
 }
