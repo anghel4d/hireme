@@ -50,7 +50,7 @@ const PHASES: [&str; Phase::ALL.len()] = [
     "a confirmation mail confirms a careers-page shot; a bounce routes again without that route",
     "the LinkedIn note, then the email nudges, then ghosted; a reply stops every timer",
     "read it; interview or question: reply; rejection: close; offer or assessment: the operator",
-    "an outcome: unsent (expired, skipped, withdrawn) or sent (offer, rejected, ghosted, withdrawn, declined)",
+    "an outcome, by whether anything went out (below)",
 ];
 
 /// The section 7 pages built from the kernel's own tables, so they never restate it.
@@ -60,8 +60,8 @@ fn generated(name: &str) -> Option<(&'static str, String)> {
         "apply" => {
             let phases: String = Phase::ALL.iter().zip(PHASES).map(|(p, what)| format!("  {:>2} {:<10} {what}\n", p.n(), p.name())).collect();
             ("one application from listing to outcome", format!(
-                "SYNOPSIS\n  campaign {{\"run\":\"apply\"}}          the application closest to done, and its next call\n  campaign {{\"application\":\"app:412\"}} the next call for that application\n\nDESCRIPTION\n  Thirteen phases, read from the rows on every call:\n{phases}\n  Follow-ups: the LinkedIn note on day 0-1, email nudges on days {} and {} after the last exchange, ghosted at day {GHOSTED}.\n  A LinkedIn note over {NOTE_MAX} characters, and a careers-page landing unconfirmed after {CONFIRM_HOURS} h, are warnings.\n  Where the rows leave one way forward the campaign railroads; where they branch, the rows pick the branch.\n  Waits name their day; operator steps name what to ask the user.\n\nSEE ALSO\n  man campaigns, man hints, man fire-keys, man stage-rail",
-                NUDGES[0], NUDGES[1]
+                "SYNOPSIS\n  campaign {{\"run\":\"apply\"}}          the application closest to done, and its next call\n  campaign {{\"application\":\"app:412\"}} the next call for that application\n\nDESCRIPTION\n  Thirteen phases, read from the rows on every call:\n{phases}\n  Follow-ups: the LinkedIn note on day 0-1, email nudges on days {} and {} after the last exchange, ghosted at day {GHOSTED}.\n  Outcomes: nothing went out closes as {}; something did, as {}.\n  A LinkedIn note over {NOTE_MAX} characters, and a careers-page landing unconfirmed after {CONFIRM_HOURS} h, are warnings.\n  Where the rows leave one way forward the campaign railroads; where they branch, the rows pick the branch.\n  Waits name their day; operator steps name what to ask the user.\n\nSEE ALSO\n  man campaigns, man hints, man fire-keys, man stage-rail",
+                NUDGES[0], NUDGES[1], kernel::judge::outcomes(&kernel::judge::UNSENT), kernel::judge::outcomes(&kernel::judge::SENT)
             ))
         }
         "stage-rail" => {
