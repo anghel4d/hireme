@@ -196,6 +196,8 @@ pub struct Mission {
     pub hold: Option<&'static str>,
     /// The live key covering it.
     pub covered: Option<u32>,
+    /// A key that covered it was revoked by the operator (fire::revoked_cover).
+    pub revoked: bool,
     pub last_error: Option<String>,
     pub provisional: bool,
     /// Unix seconds.
@@ -364,6 +366,10 @@ pub enum Ask {
     Route,
     Cv,
     Key(u32),
+    /// The operator revoked the key that covered the mission: theirs to lift.
+    Revoked(u32),
+    /// The operator declined the request: theirs to lift, once the drafts are revised.
+    Declined(u32),
     Mailbox,
     /// A shot the agent could not get through: the operator sends it by hand.
     ByHand(u32),
@@ -595,8 +601,9 @@ pub fn step(f: &Facts) -> Step {
     if f.status != "open" {
         return b.at(Phase::Qualify, Next::Ask(Ask::Held));
     }
-    // 1: the listing captured.
-    if !f.listing && matches!(f.channel, Channel::Listing | Channel::Other) {
+    // 1: the listing captured, while the application is at its discovery; one imported or
+    // staged by hand past that has none to capture.
+    if f.stage == Stage::Discovered && !f.listing && matches!(f.channel, Channel::Listing | Channel::Other) {
         return b.at(Phase::Acquire, Next::Do(Act::Capture));
     }
     // 2: linked to its company and, unless remote, its place.
@@ -646,6 +653,11 @@ pub fn step(f: &Facts) -> Step {
 /// heat; each judgement moved onto the rail as it is made.
 fn qualify(f: &Facts, b: &mut Build) -> Option<(Phase, Next)> {
     let q = |next: Next| Some((Phase::Qualify, next));
+    // Past the gate (judged, or imported and staged by hand) only the heat wait is left, until
+    // the application is in the queue: the governor judges the queue's entry and the first shot.
+    if f.stage >= Stage::Gated {
+        return f.heat.filter(|_| f.stage < Stage::InBatch).and_then(|until| q(Next::Wait { until: Some(until), why: "heat" }));
+    }
     if f.listing {
         match f.freshness {
             None => return q(Next::Do(Act::Freshness)),
@@ -664,10 +676,7 @@ fn qualify(f: &Facts, b: &mut Build) -> Option<(Phase, Next)> {
         Some(Gate::Maybe) => return q(Next::Ask(Ask::Gate)),
         Some(Gate::Pursue) => {}
     }
-    if f.stage < Stage::Gated {
-        return q(Next::Do(Act::Stage(Stage::Gated)));
-    }
-    f.heat.and_then(|until| q(Next::Wait { until: Some(until), why: "heat" }))
+    q(Next::Do(Act::Stage(Stage::Gated)))
 }
 
 /// 5 and 6: the rail up to draft_ready while nothing went out: today's day
@@ -753,8 +762,13 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
         if let Some(r) = asked().filter(|r| r.open).max_by_key(|r| r.id) {
             return (P::FireKey, Next::Ask(Ask::Key(r.id)));
         }
+        // The operator's no, a revoked key or a declined request, is theirs to lift: nothing
+        // requests again on its own (the agent cannot see what they would want changed).
+        if m.revoked {
+            return (P::FireKey, Next::Ask(Ask::Revoked(m.id)));
+        }
         if let Some(r) = asked().max_by_key(|r| r.id).filter(|r| r.declined) {
-            b.warn("declined", alloc::format!("fire_request:{} was declined: revise the drafts, then ask again", r.id));
+            return (P::FireKey, Next::Ask(Ask::Declined(r.id)));
         }
         return (P::FireKey, Next::Do(Act::Request(uncovered(f))));
     };
@@ -765,6 +779,10 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
     }
     if let Some(e) = &m.last_error {
         b.warn("failed", alloc::format!("mission:{} failed last time ({e}); the key still covers it: fire it again", m.id));
+    }
+    // The heat governor judges an application's first shot as it judges going out: the wait comes first.
+    if let Some(until) = f.heat.filter(|_| !f.out()) {
+        return (P::Fire, Next::Wait { until: Some(until), why: "heat" });
     }
     if m.kind == Kind::Email && !f.mailbox {
         (P::Fire, Next::Ask(Ask::Mailbox))
@@ -1023,6 +1041,8 @@ fn ask_text(f: &Facts, a: &Ask) -> (String, String) {
             return (alloc::format!("no CV file for {app}: upload a PDF or DOCX ({need})"), need.into());
         }
         Ask::Key(r) => (alloc::format!("approve the fire key for {app}: /fire/{r}"), "only the operator makes a fire key; stop here until it is granted"),
+        Ask::Revoked(m) => (alloc::format!("the operator revoked the key for mission:{m}: stand down; ask them whether it goes out at all before requesting another"), "a revoked key is the operator's decision; nothing requests it again on its own"),
+        Ask::Declined(r) => (alloc::format!("fire_request:{r} was declined: revise the drafts, then ask the user before requesting again"), "the operator said no to these drafts; only they can say what changed"),
         Ask::Mailbox => ("link Gmail (Account → Mail) so the mail can go".into(), "no live mailbox"),
         Ask::ByHand(m) => {
             let m = f.missions.iter().find(|x| x.id == *m);
@@ -1370,6 +1390,7 @@ impl<'r> Index<'r> {
                     draft_len: t.text(id, M::DRAFT).map_or(0, |d| d.chars().count()),
                     hold: (state == MState::FireReady).then(|| fire::hold(rows, &self.cvs, id)).flatten(),
                     covered: (state == MState::FireReady).then(|| fire::covering(rows, &self.cvs, id, self.now)).flatten(),
+                    revoked: state == MState::FireReady && fire::revoked_cover(rows, id),
                     last_error: t.text(id, M::LAST_ERROR).map(|e| e.into_owned()),
                     provisional: t.u32(id, M::CONFIRMATION) == Some(u32::from(enums::confirmation::PROVISIONAL)),
                     fired: t.u32(id, M::FIRED_AT).map(i64::from),

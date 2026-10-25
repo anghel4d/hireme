@@ -695,6 +695,11 @@ pub fn covering(rows: &Rows, cvs: &Cvs, mission: u32, now: i64) -> Option<u32> {
     keys.into_iter().find(|&k| key(rows, k).is_some_and(|k| k.dead(now).is_none()))
 }
 
+/// Whether a key that covered `mission` was revoked by the operator: one of its shots sits under a revoked key.
+pub fn revoked_cover(rows: &Rows, mission: u32) -> bool {
+    shots(rows).any(|s| s.mission == mission && key(rows, s.key).is_some_and(|k| k.revoked.is_some()))
+}
+
 /// The day's send cap, how many email shots went or are going today (UTC),
 /// and when the count resets.
 pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {

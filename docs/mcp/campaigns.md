@@ -25,6 +25,12 @@ Then: "When ready, begin and implement in full, end to end, with the help of opu
 3. **Colour is on by default.** Green success, cyan next and help, yellow warning, red error. `NO_COLOR` (no-color.org) in the daemon's environment, or `{"color":false}` on `hireme`, turns it off. The words are the same either way, and every answer stays short.
 4. **Which application `campaign {"run":"apply"}` picks:** the open one closest to done that the agent can move now (no wait, no operator ask). Ties go to the higher score.
 5. **The LinkedIn intro** is written per application, from the `me` row and the corpus items that best match the listing's keywords. A note over 300 characters is a warning (LinkedIn's connection-note limit), not a refusal: a message to an existing connection may be longer.
+7. **The operator's no is theirs to lift.** A revoked key or a declined request makes the
+   campaign ask the operator; it never requests a key again on its own (the agent cannot see
+   what they would want changed). Heat waits before a first shot, as the governor judges it.
+8. **A phase gates only what is not past it.** An application imported or staged by hand past
+   its listing (no listing text, freshness and gate unset) is not sent back to capture or
+   qualify; the route picks up at its stage, and a mission already staged stands for its role.
 6. **Closed outcomes split by whether anything went out.** Add `expired` and `skipped` to `enum outcome`. A close of an unsent application takes expired, skipped or withdrawn. A sent one takes offer, rejected, ghosted, withdrawn or declined. The kernel refuses the rest.
 
 ## The route (campaign `apply`)

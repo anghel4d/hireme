@@ -99,6 +99,10 @@ struct World {
     cv: Cvs,
     /// The operator declines the first key request.
     decline: bool,
+    /// The operator revokes the first key before its shot goes.
+    revoke: bool,
+    /// The company runs hot once the shot is staged, until the key is in hand.
+    hot_late: bool,
     /// The first shot fails (a form that walls, a mail the server defers).
     fail: bool,
     script: Script,
@@ -106,7 +110,7 @@ struct World {
 
 impl World {
     fn of(channel: Channel, listed: Listed, people: People) -> World {
-        World { channel, listed, people, fresh: Fresh::Open, gate: Gate::Pursue, pursue: true, ledger: Ledger::Silent, hot: false, cv: Cvs::File, decline: false, fail: false, script: Script::Silence }
+        World { channel, listed, people, fresh: Fresh::Open, gate: Gate::Pursue, pursue: true, ledger: Ledger::Silent, hot: false, cv: Cvs::File, decline: false, revoke: false, hot_late: false, fail: false, script: Script::Silence }
     }
 
     fn qual(self, q: Qual) -> World {
@@ -127,6 +131,8 @@ struct Sim {
     f: Facts,
     ids: u32,
     declined: bool,
+    revoked: bool,
+    heated: bool,
     failed: bool,
     bounced: bool,
     /// Replies on their way, by the day they arrive.
@@ -198,7 +204,7 @@ fn start(w: World) -> Sim {
     if w.channel == Channel::Inbound {
         f.replies.push(Reply { id: 500, email: true, from: Some("talent@acme.example".into()), contact: None, subject: "Your profile".into(), reads: Reads::Question, seen: false, at: f.now - DAY });
     }
-    Sim { w, f, ids: 30, declined: false, failed: false, bounced: false, due: vec![], bounce: None, uploaded: false }
+    Sim { w, f, ids: 30, declined: false, revoked: false, heated: false, failed: false, bounced: false, due: vec![], bounce: None, uploaded: false }
 }
 
 impl Sim {
@@ -348,7 +354,7 @@ impl Sim {
         });
         let threaded = answers.is_some() || (role == Role::Nudge && primary_id.is_some());
         let id = self.id();
-        self.f.missions.push(Mission { id, kind, state: MState::Draft, role, target, contact, draft_len: 200, hold: None, covered: None, last_error: None, provisional: false, fired: None, message_id: None, answers, threaded });
+        self.f.missions.push(Mission { id, kind, state: MState::Draft, role, target, contact, draft_len: 200, hold: None, covered: None, revoked: false, last_error: None, provisional: false, fired: None, message_id: None, answers, threaded });
         Ok(())
     }
 
@@ -402,6 +408,10 @@ impl Sim {
                 }
                 let id = self.id();
                 self.f.requests.push(Request { id, open: true, declined: false, covers: ids.clone() });
+                if self.w.hot_late && !self.heated {
+                    self.heated = true;
+                    self.f.heat = Some(self.f.today + 2);
+                }
             }
             Act::Fire { mission, key } => {
                 if self.f.stage < Stage::FireReady {
@@ -481,10 +491,29 @@ impl Sim {
                     self.declined = true;
                 } else {
                     let covers = req.covers.clone();
+                    let revoke = self.w.revoke && !self.revoked;
+                    self.revoked |= revoke;
                     for m in self.f.missions.iter_mut().filter(|m| covers.contains(&m.id)) {
-                        m.covered = Some(KEY);
+                        // Granted, then revoked before the shot went: the key is dead, the shot's row remembers it.
+                        if revoke { m.revoked = true } else { m.covered = Some(KEY) }
                     }
                 }
+            }
+            // The operator's no, lifted by the operator: they have the agent ask again.
+            Ask::Revoked(m) => {
+                if self.f.missions.iter().any(|x| x.id == *m && x.covered.is_some()) || self.f.requests.iter().any(|r| r.open) {
+                    return Err(format!("revoked asked for mission:{m} while a key covers it or a request is open"));
+                }
+                let id = self.id();
+                self.f.requests.push(Request { id, open: true, declined: false, covers: vec![*m] });
+            }
+            Ask::Declined(r) => {
+                let covers = self.f.requests.iter().find(|x| x.id == *r && x.declined).map(|x| x.covers.clone());
+                let Some(covers) = covers.filter(|_| !self.f.requests.iter().any(|x| x.open)) else {
+                    return Err(format!("declined asked for fire_request:{r} that is not the declined one, or while one is open"));
+                };
+                let id = self.id();
+                self.f.requests.push(Request { id, open: true, declined: false, covers });
             }
             Ask::ByHand(id) => {
                 // Sent by hand; the agent records it: fired under its key, reported landed.
@@ -554,7 +583,7 @@ fn walk(w: World) -> Result<(Vec<String>, Option<&'static str>), String> {
     let mut sim = start(w);
     let mut trail: Vec<String> = Vec::new();
     let mut taken = Vec::new();
-    let mut seen: Vec<(Facts, bool, bool, bool, usize)> = Vec::new();
+    let mut seen: Vec<(Facts, bool, bool, bool, bool, bool, usize)> = Vec::new();
     let tail = |t: &[String]| t[t.len().saturating_sub(12)..].join("\n  ");
     for _ in 0..300 {
         let s = step(&sim.f);
@@ -565,7 +594,7 @@ fn walk(w: World) -> Result<(Vec<String>, Option<&'static str>), String> {
         grammar(&json(&sim.f, &s))?;
         trail.push(format!("day {} {} {:?}", sim.f.today - D0, s.phase.name(), s.next));
         taken.push(variant(&s.next));
-        let state = (sim.f.clone(), sim.declined, sim.failed, sim.bounced, sim.due.len());
+        let state = (sim.f.clone(), sim.declined, sim.revoked, sim.heated, sim.failed, sim.bounced, sim.due.len());
         if seen.contains(&state) {
             return Err(format!("a state came back:\n  {}", tail(&trail)));
         }
@@ -609,10 +638,10 @@ fn every_route_ends_closed() {
                 run(World { gate: Gate::Skip, ..base }, &mut walks);
                 run(World { gate: Gate::Maybe, pursue: false, ..base }, &mut walks);
                 for cv in [Cvs::File, Cvs::Text, Cvs::Missing, Cvs::Unpicked] {
-                    for (decline, fail) in [(false, false), (true, true)] {
+                    for (decline, fail, revoke, hot_late) in [(false, false, false, false), (true, true, false, false), (false, false, true, true)] {
                         for script in scripts {
                             for ledger in [Ledger::Silent, Ledger::WentOut] {
-                                let w = World { cv, decline, fail, script, ledger, ..base }.qual(quals[walks % quals.len()]);
+                                let w = World { cv, decline, fail, revoke, hot_late, script, ledger, ..base }.qual(quals[walks % quals.len()]);
                                 run(w, &mut walks);
                             }
                         }
@@ -621,7 +650,7 @@ fn every_route_ends_closed() {
             }
         }
     }
-    assert_eq!(walks, 6 * 3 * 4 * (3 + 4 * 2 * scripts.len() * 2));
+    assert_eq!(walks, 6 * 3 * 4 * (3 + 4 * 3 * scripts.len() * 2));
     for outcome in ["expired", "skipped", "rejected", "ghosted", "offer"] {
         assert!(closes.contains_key(outcome), "no walk closed {outcome}: {closes:?}");
     }
@@ -629,7 +658,7 @@ fn every_route_ends_closed() {
     for v in ["Capture", "Link", "Freshness", "Gate", "Stage", "Close", "MakeBatch", "JoinBatch", "Pin", "Letter", "Research", "Want", "Ready", "Request", "Fire", "Report", "Cancel", "Ignore"] {
         assert!(nexts.contains(&format!("Do {v}")), "no walk did {v}: {nexts:?}");
     }
-    for v in ["Gate", "Prior", "Route", "Cv", "Key", "ByHand", "Assessment", "Offer"] {
+    for v in ["Gate", "Prior", "Route", "Cv", "Key", "Revoked", "Declined", "ByHand", "Assessment", "Offer"] {
         assert!(nexts.contains(&format!("Ask {v}")), "no walk asked {v}: {nexts:?}");
     }
 }
@@ -742,12 +771,18 @@ fn desk(apps: Json) -> Kernel {
 /// The desk with one CV root: a PDF (`pdf`) or a text CV, the default or
 /// picked by nothing (`default`).
 fn desk_cv(apps: Json, pdf: bool, default: bool) -> Kernel {
+    desk_rows(apps, serde_json::json!([]), pdf, default)
+}
+
+/// The desk with `missions` already staged on its applications.
+fn desk_rows(apps: Json, missions: Json, pdf: bool, default: bool) -> Kernel {
     let mut all = vec![json_app(7, 412, "discovered", 80)];
     all.extend(apps.as_array().cloned().unwrap_or_default());
     fixture::kernel(serde_json::json!({
         "corporations": [{"id": 1, "domain": "acme.example", "name": "Acme"}],
         "places": [{"id": 1, "kind": "country", "iso2": "DE", "name": "Germany"}],
         "applications": all,
+        "missions": missions,
         "contacts": [{"id": 9, "corporation_id": 1, "name": "Rita", "relation": "recruiter", "email": "rita@acme.example", "linkedin_url": "https://www.linkedin.com/in/rita-acme"}],
         "cv_roots": [{"id": 1, "slug": "main", "name": "Main", "format": if pdf { "pdf" } else { "markdown" }, "version_id": 5}],
         "cv_versions": [{"id": 5, "root_id": 1, "n": 1, "blob_sha": if pdf { "5f1e9b" } else { "" }, "actor": "operator"}],
@@ -947,6 +982,22 @@ fn the_old_ledgers_send_is_settled_then_followed_to_its_close() {
     let mut k = desk(serde_json::json!([sent]));
     let answers = follow(&mut k, (8, 413), TODAY, "not_applied");
     assert!(answers.iter().any(|a| a["next"]["args"]["kind"] == "careers_page"));
+}
+
+/// An application imported or staged by hand past its listing (no listing text, freshness and
+/// gate unset, its form already at fire_ready) picks its route up where its stage is: the rest
+/// of the route (here the recruiter's LinkedIn note), never capture or qualify again
+/// (opus-shannon's finding on the self-reported shot).
+#[test]
+fn an_application_staged_past_its_listing_picks_up_where_its_stage_is() {
+    let mut app = json_app(8, 413, "fire_ready", 70);
+    for col in ["listing_url", "listing_raw"] {
+        app.as_object_mut().unwrap().remove(col);
+    }
+    let form = serde_json::json!([{"id": 20, "application_id": 8, "kind": "careers_page", "target": FORM, "draft": "Name: Ana", "state": "fire_ready"}]);
+    let mut k = desk_rows(serde_json::json!([app]), form, true, true);
+    let a = q(&mut k, serde_json::json!({"op": "campaign", "application": 8}));
+    assert_eq!((a["phase"]["name"].as_str(), a["next"]["args"]["ref"].as_str(), a["next"]["args"]["kind"].as_str()), (Some("stage"), Some("mission:new"), Some("linkedin")), "{a}");
 }
 
 #[test]
